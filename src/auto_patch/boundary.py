@@ -1106,48 +1106,65 @@ def _emit_boundary_dem_bridge(
                                   else o_alts[kk])
                 return i_pts, i_alts
 
-            # When no pavement is available, fall back to a 100m-
-            # inward synthesised inner edge.
-            if pav_ring_line is None or not pav_ring_coords:
-                # Build an inward-perpendicular polyline at
-                # ``bridge_depth_m`` for the inner edge.
-                # (Same logic as previous v1 fallback.)
+            def _fallback_inner_edge():
+                """Inner edge for runs that have no usable pavement
+                walk (no pavement at all, or run endpoints too far
+                from any pavement-ring vertex).
+
+                Offsets each outer vertex inward by ``bridge_depth_m``
+                toward the boundary centroid — the cheap heuristic
+                that keeps the inner edge clear of nearby junctions
+                where it is valid.  But the centroid direction is only
+                inward for convex boundaries; on a concave lobe (e.g.
+                CYXY's NW finger, whose north edge faces the interior
+                while the global centroid sits far south) it points
+                OUTWARD and lands the whole bridge outside the
+                perimeter.  Detect that case via the sign of the
+                centroid direction against the per-vertex inward
+                normal (``outer_perps``, disambiguated by
+                ``boundary_poly.contains()``) and fall back to the
+                rigorous local-perpendicular offset there.
+                Altitudes come from ``_bridge_alt`` either way (never
+                below surrounding pavement per
+                ``feedback_boundary_clamp_asymmetric``).
+                Returns ``(inner_pts, inner_alts)``.
+                """
                 ctr = boundary_poly.centroid
-                inner_pts: List[Tuple[float, float]] = []
-                inner_alts: List[float] = []
+                dot_sum = 0.0
+                for (bx, by), (px, py) in zip(outer_pts, outer_perps):
+                    cdx, cdy = ctr.x - bx, ctr.y - by
+                    cm = math.hypot(cdx, cdy)
+                    if cm > 1e-6:
+                        dot_sum += (cdx / cm) * px + (cdy / cm) * py
+                if dot_sum < 0.0:
+                    # Centroid points outward here — use the local
+                    # inward perpendicular instead.
+                    return _synth_inner_edge(
+                        outer_pts, outer_perps, outer_alts)
+                i_pts: List[Tuple[float, float]] = []
+                i_alts: List[float] = []
                 for k_pt, (bx, by) in enumerate(outer_pts):
-                    perp_x = ctr.x - bx
-                    perp_y = ctr.y - by
-                    pmag = math.hypot(perp_x, perp_y)
+                    cdx, cdy = ctr.x - bx, ctr.y - by
+                    pmag = math.hypot(cdx, cdy)
                     if pmag < 1e-6:
-                        # Degenerate (point coincides with centroid).
-                        # Inherit the outer-edge altitude rather than
-                        # fabricating 0 m (sea level cliff at any
-                        # non-coastal airport).
-                        inner_pts.append((bx, by))
-                        inner_alts.append(outer_alts[k_pt])
+                        # Vertex coincides with centroid — inherit the
+                        # outer altitude rather than fabricating 0 m.
+                        i_pts.append((bx, by))
+                        i_alts.append(outer_alts[k_pt])
                         continue
-                    perp_x /= pmag
-                    perp_y /= pmag
-                    sx = bx + perp_x * bridge_depth_m
-                    sy = by + perp_y * bridge_depth_m
-                    # Use nearest-pavement altitude (per
-                    # ``feedback_boundary_clamp_asymmetric``) instead
-                    # of raw DEM — raw DEM samples valley terrain at
-                    # plateau airports (e.g. MMOX 1520 m) and dropped
-                    # the bridge inner edge by ~1000 m.
-                    near = _nearest_pav_alt(sx, sy, max_d_m=2000.0)
-                    if near is not None:
-                        ia = round(near[0], 1)
-                    else:
-                        clamped = _clamped_alt(sx, sy)
-                        if clamped is None:
-                            # Last resort: inherit outer-edge alt.
-                            ia = outer_alts[k_pt]
-                        else:
-                            ia = round(float(clamped), 1)
-                    inner_pts.append((sx, sy))
-                    inner_alts.append(ia)
+                    sx = bx + cdx / pmag * bridge_depth_m
+                    sy = by + cdy / pmag * bridge_depth_m
+                    ba = _bridge_alt(sx, sy)
+                    i_pts.append((sx, sy))
+                    i_alts.append(round(ba, 1) if ba is not None
+                                  else outer_alts[k_pt])
+                return i_pts, i_alts
+
+            # When no pavement is available, fall back to an inward
+            # offset (centroid where valid, local perpendicular on
+            # concave lobes — see ``_fallback_inner_edge``).
+            if pav_ring_line is None or not pav_ring_coords:
+                inner_pts, inner_alts = _fallback_inner_edge()
                 ring_pts = list(outer_pts) + list(reversed(inner_pts))
                 ring_alts = list(outer_alts) + list(reversed(inner_alts))
             else:
@@ -1172,36 +1189,16 @@ def _emit_boundary_dem_bridge(
                 end_i, end_d = _nearest_pav_vertex(*end_b)
                 # Reject runs with no nearby pavement vertex on
                 # either end — pav_ring_coords can be sparse
-                # (corners only) in cross-tile builds.  Fall back
-                # to a centroid-perpendicular synthesised inner
-                # edge with ``_bridge_alt`` altitudes (NOT raw
-                # DEM — per ``feedback_boundary_clamp_asymmetric``
-                # the bridge must never dip below surrounding
-                # pavement).
+                # (corners only) in cross-tile builds.  Fall back to
+                # an inward offset (centroid where valid, local
+                # perpendicular on concave lobes — see
+                # ``_fallback_inner_edge``).  The earlier
+                # always-centroid version emitted a bridge entirely
+                # outside the perimeter on CYXY's concave NW finger.
                 if (start_i < 0 or end_i < 0
                         or start_d > bridge_depth_m * 2
                         or end_d > bridge_depth_m * 2):
-                    ctr = boundary_poly.centroid
-                    inner_pts = []
-                    inner_alts = []
-                    for k_pt, (bx, by) in enumerate(outer_pts):
-                        perp_x = ctr.x - bx
-                        perp_y = ctr.y - by
-                        pmag = math.hypot(perp_x, perp_y)
-                        if pmag < 1e-6:
-                            inner_pts.append((bx, by))
-                            inner_alts.append(outer_alts[k_pt])
-                            continue
-                        perp_x /= pmag
-                        perp_y /= pmag
-                        sx = bx + perp_x * bridge_depth_m
-                        sy = by + perp_y * bridge_depth_m
-                        ba = _bridge_alt(sx, sy)
-                        inner_pts.append((sx, sy))
-                        if ba is None:
-                            inner_alts.append(outer_alts[k_pt])
-                        else:
-                            inner_alts.append(round(ba, 1))
+                    inner_pts, inner_alts = _fallback_inner_edge()
                     ring_pts = list(outer_pts) + list(reversed(inner_pts))
                     ring_alts = list(outer_alts) + list(reversed(inner_alts))
                 else:
@@ -1363,6 +1360,28 @@ def _emit_boundary_dem_bridge(
                 continue
             if bridge_poly.area < 100.0:
                 continue
+            # Containment guard (scope invariant): the bridge feature
+            # is defined ONLY for the interior side of the perimeter
+            # ("OUTSIDE the airport boundary X-Plane keeps falling
+            # directly to DEM").  Clip to ``boundary_poly`` so no
+            # emitted bridge can ever spill outside the perimeter —
+            # belt-and-braces against any inner-edge construction
+            # path (or buffer(0) heal) that overshoots a thin /
+            # concave lobe.  If the clip leaves nothing of substance
+            # inside, the run is dropped rather than emitted outside.
+            try:
+                contained = bridge_poly.intersection(boundary_poly)
+            except _GEOM_EXC:
+                contained = None
+            if contained is None or contained.is_empty:
+                continue
+            if contained.geom_type == "MultiPolygon":
+                contained = max(contained.geoms, key=lambda g: g.area)
+            if contained.geom_type != "Polygon" or contained.is_empty:
+                continue
+            if contained.area < 100.0:
+                continue
+            bridge_poly = contained
             # Resample altitudes for the (possibly reshaped) ring.
             new_coords = list(bridge_poly.exterior.coords)
             if new_coords and new_coords[0] == new_coords[-1]:
