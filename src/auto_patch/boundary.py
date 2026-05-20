@@ -1042,6 +1042,7 @@ def _emit_boundary_dem_bridge(
             # disambiguated by ``boundary_poly.contains()`` on a
             # short probe.
             outer_pts = []
+            outer_perps: List[Tuple[float, float]] = []
             outer_alts = list(raw_outer_alts)
             n_raw = len(raw_outer_pts)
             for k, (bx, by) in enumerate(raw_outer_pts):
@@ -1060,6 +1061,7 @@ def _emit_boundary_dem_bridge(
                 tmag = math.hypot(tx, ty)
                 if tmag < 1e-6:
                     outer_pts.append((bx, by))
+                    outer_perps.append((0.0, 0.0))
                     continue
                 ux = tx / tmag
                 uy = ty / tmag
@@ -1072,8 +1074,37 @@ def _emit_boundary_dem_bridge(
                     perp_y = -ux
                 outer_pts.append((bx + perp_x * STRIP_HALF_WIDTH_M,
                                    by + perp_y * STRIP_HALF_WIDTH_M))
+                outer_perps.append((perp_x, perp_y))
             if len(outer_pts) < 2:
                 continue
+
+            def _synth_inner_edge(o_pts, o_perps, o_alts):
+                """Build an inner edge by offsetting each outer vertex
+                inward along its boundary perpendicular by
+                ``bridge_depth_m``.  A parallel-offset ribbon that
+                works for runs of any length (unlike the pavement
+                walk, whose closure check fails for long runs).
+                Inner-edge altitudes come from ``_bridge_alt``
+                (nearest-pavement floor, never below surrounding
+                pavement per ``feedback_boundary_clamp_asymmetric``).
+                Returns ``(inner_pts, inner_alts)``.
+                """
+                i_pts: List[Tuple[float, float]] = []
+                i_alts: List[float] = []
+                for kk, (ox, oy) in enumerate(o_pts):
+                    px, py = o_perps[kk]
+                    if px == 0.0 and py == 0.0:
+                        # Degenerate perpendicular — inherit outer.
+                        i_pts.append((ox, oy))
+                        i_alts.append(o_alts[kk])
+                        continue
+                    sx = ox + px * bridge_depth_m
+                    sy = oy + py * bridge_depth_m
+                    ba = _bridge_alt(sx, sy)
+                    i_pts.append((sx, sy))
+                    i_alts.append(round(ba, 1) if ba is not None
+                                  else o_alts[kk])
+                return i_pts, i_alts
 
             # When no pavement is available, fall back to a 100m-
             # inward synthesised inner edge.
@@ -1208,9 +1239,26 @@ def _emit_boundary_dem_bridge(
                         idx = (idx + step) % n_ring
                         visited += 1
                     if len(inner_pts) < 2:
-                        continue
-                    ring_pts = list(outer_pts) + list(inner_pts)
-                    ring_alts = list(outer_alts) + list(inner_alts)
+                        # Pavement walk failed to span the run.  This
+                        # happens for LONG runs (e.g. CYXY's 120-vertex
+                        # ~3 km stretch): the closure check measures
+                        # each pavement vertex's distance to the run
+                        # START, so the pavement vertex nearest the run
+                        # END is inherently > CLOSURE_DIST_M from the
+                        # start and the walk breaks on iteration 0.
+                        # Don't drop the run — fall back to a
+                        # perpendicular inward-offset inner edge (works
+                        # for any run length, same construction as the
+                        # no-pavement / endpoints-far fallbacks).
+                        inner_pts, inner_alts = _synth_inner_edge(
+                            outer_pts, outer_perps, outer_alts)
+                        ring_pts = (list(outer_pts)
+                                    + list(reversed(inner_pts)))
+                        ring_alts = (list(outer_alts)
+                                     + list(reversed(inner_alts)))
+                    else:
+                        ring_pts = list(outer_pts) + list(inner_pts)
+                        ring_alts = list(outer_alts) + list(inner_alts)
 
             if len(ring_pts) < 4:
                 continue
@@ -1218,13 +1266,25 @@ def _emit_boundary_dem_bridge(
                 bridge_poly = _Polygon(ring_pts)
                 if not bridge_poly.is_valid:
                     fixed = bridge_poly.buffer(0)
-                    if (fixed.is_empty
-                            or fixed.geom_type != "Polygon"):
+                    if fixed.is_empty:
                         continue
-                    fc = list(fixed.exterior.coords)
-                    if fc and fc[0] == fc[-1]:
-                        fc = fc[:-1]
-                    if len(fc) != len(ring_pts):
+                    # ``buffer(0)`` heals a self-intersecting ring.
+                    # The parallel-offset inner edge used for long
+                    # curved runs (CYXY's 3 km west-side run) can
+                    # self-overlap on concave boundary sections; the
+                    # heal removes the overlapping lobe and may CHANGE
+                    # the vertex count or split into a MultiPolygon.
+                    # Both are fine — altitudes are assigned by
+                    # POSITION downstream (0.1 m bucket +
+                    # nearest-pavement fallback), not by index, so we
+                    # don't require the ring to keep its original
+                    # vertex count.  (Previously a strict
+                    # ``len(fc) != len(ring_pts)`` check dropped the
+                    # entire run here — the root cause of CYXY only
+                    # bridging 2 of its 3 gap runs.)
+                    if fixed.geom_type == "MultiPolygon":
+                        fixed = max(fixed.geoms, key=lambda g: g.area)
+                    if fixed.geom_type != "Polygon" or fixed.is_empty:
                         continue
                     bridge_poly = fixed
                 if bridge_poly.is_empty:
