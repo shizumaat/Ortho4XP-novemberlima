@@ -2449,6 +2449,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
             layout,
             current_tile_lat=current_tile_lat,
             current_tile_lon=current_tile_lon,
+            dem=dem,
         )
 
         # Final per-surface solver pass against the FULLY-SETTLED

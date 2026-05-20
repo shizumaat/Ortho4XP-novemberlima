@@ -25,11 +25,26 @@ import math
 from typing import Callable, List, Optional
 
 from shapely.errors import GEOSException, TopologicalError
-from shapely.geometry import LineString, Polygon
+from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 
-from .layout import BuiltShape, PavementLayout, R_EARTH
+from .layout import (
+    BuiltShape, PavementLayout, R_EARTH,
+    ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
+    ROLE_STUB, ROLE_CROSS_CONNECTOR, vertex_bucket,
+)
 
+
+# Taxi rects whose elevation slopes ALONG ``source_axis`` only — their
+# cross-section is flat (enforced by the solver, but only while they
+# stay 4-corner ``altitude_high``/``altitude_low`` rects).  When the
+# tile slice crosses one we clip it back to a clean perpendicular end
+# so the bulk keeps that flat-cross-section invariant; see
+# ``_clip_sloping_rect_piece``.
+_SLOPING_RECT_ROLES = frozenset({
+    ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
+    ROLE_STUB, ROLE_CROSS_CONNECTOR,
+})
 
 # Same narrow exception set used in ``boundary.py`` — covers real
 # shapely degeneracy without masking programming errors.
@@ -45,7 +60,8 @@ def cut_layout_at_tile_boundaries(
         half_width_m: float = 5.0,
         min_piece_area_m2: float = 1.0,
         current_tile_lat: Optional[int] = None,
-        current_tile_lon: Optional[int] = None) -> int:
+        current_tile_lon: Optional[int] = None,
+        dem=None) -> int:
     """Cut every shape crossing an integer lat or lon tile boundary,
     leaving a ``2 * half_width_m`` wide gap (default 10 m).
 
@@ -209,9 +225,40 @@ def cut_layout_at_tile_boundaries(
         pieces = [p for p in pieces if _in_current_tile(p)]
 
         slope_sampler = _make_slope_sampler(s)
+        is_sloping_rect = (
+            s.role in _SLOPING_RECT_ROLES
+            and slope_sampler is not None)
         for piece in pieces:
+            # Sloping taxi rect crossed by the slice: keep the bulk as a
+            # clean 4-corner sloped rect (so the solver's flat-cross-
+            # section constraint survives) and fill the slice-side gap
+            # with a small node_altitudes piece.  Converting the WHOLE
+            # oblique cut piece to node_altitudes (the default below)
+            # drops that constraint and lets the taxiway tilt
+            # perpendicular to its axis (user 2026-05-20).
+            if is_sloping_rect:
+                clipped = _clip_sloping_rect_piece(
+                    s, piece, cut_union, slope_sampler,
+                    layout, dem, cur_tile_lat, cur_tile_lon)
+                if clipped is not None:
+                    new_shapes.extend(clipped)
+                    continue
+                # Clip-back wasn't applicable (e.g. the slice grazes a
+                # short/oblique stub and would yield a degenerate clean
+                # rect).  Fall through to the default node_altitudes
+                # piece; its slice nodes are pinned to the seam DEM below
+                # like every other cut piece.
             new_s = _build_piece_shape(s, piece, slope_sampler)
             if new_s is not None:
+                # Seam DEM is the top-priority anchor: pin this piece's
+                # slice-edge vertices to the (Ortho4XP-smoothed) terrain
+                # so the solver grades the surface down to the seam
+                # (user 2026-05-20).  Taxi rects only for now — junctions
+                # /aprons are graded soft against the smoothed DEM seed.
+                if s.role in _SLOPING_RECT_ROLES:
+                    _terrain_pin_slice_nodes(
+                        new_s, cut_union, (), layout, dem,
+                        cur_tile_lat, cur_tile_lon)
                 new_shapes.append(new_s)
     layout.shapes = new_shapes
     return len(layout.shapes) - n_before
@@ -256,6 +303,270 @@ def _make_slope_sampler(
             t = 1.0
         return H + t * (L - H)
     return sample
+
+
+def _clip_sloping_rect_piece(
+        orig: BuiltShape,
+        piece: Polygon,
+        cut_union,
+        slope_sampler: Optional[Callable[[float, float], float]],
+        layout=None,
+        dem=None,
+        tile_lat: int = 0,
+        tile_lon: int = 0,
+) -> Optional[List[BuiltShape]]:
+    """Split a sliced sloping taxi rect into a clean 4-corner sloped
+    rect (the bulk) plus a small ``node_altitudes`` filler at the slice.
+
+    A taxi rect slopes only along its ``source_axis`` and is flat across
+    its width — an invariant the solver enforces, but ONLY for 4-corner
+    ``altitude_high``/``altitude_low`` rects.  When the tile slice crosses
+    such a rect (especially obliquely, e.g. SPLP taxiway A at a shallow
+    angle to lon=-77) the default cut converts the whole non-rectangular
+    piece to ``node_altitudes``, dropping the constraint and letting the
+    surface tilt sideways.
+
+    Instead, clip the rect back along its axis to a clean perpendicular
+    end positioned just clear of the slice, keep that bulk as a 4-corner
+    sloped rect, and emit the remaining wedge (between the clean end and
+    the slice) as a ``node_altitudes`` filler so there's no gap.  The
+    filler is bounded by the rect's flat clean end and the (separately
+    flattened) seam edge, so it stays effectively flat across too.
+
+    Returns ``[clean_rect, filler...]`` or ``None`` to fall back to the
+    default per-vertex conversion (non-trivial geometry: far end also
+    cut, multi-crossing, degenerate clip, etc.).
+    """
+    if orig.altitude_high is None or orig.altitude_low is None:
+        return None
+    try:
+        oc = list(orig.polygon.exterior.coords)
+    except _GEOM_EXC:
+        return None
+    if oc and oc[0] == oc[-1]:
+        oc = oc[:-1]
+    if len(oc) != 4:
+        return None
+    c0, c1, c2, c3 = oc  # [H, L, L, H] convention
+    H = float(orig.altitude_high)
+    L = float(orig.altitude_low)
+    # Axis = high-edge midpoint → low-edge midpoint.
+    hx, hy = 0.5 * (c0[0] + c3[0]), 0.5 * (c0[1] + c3[1])
+    lx, ly = 0.5 * (c1[0] + c2[0]), 0.5 * (c1[1] + c2[1])
+    avx, avy = lx - hx, ly - hy
+    axis_len2 = avx * avx + avy * avy
+    if axis_len2 < 1.0:
+        return None
+
+    def _t(px: float, py: float) -> float:
+        """Axis projection: 0 at the high-edge midpoint, 1 at the low."""
+        return ((px - hx) * avx + (py - hy) * avy) / axis_len2
+
+    t0, t1, t2, t3 = (_t(*c0), _t(*c1), _t(*c2), _t(*c3))
+    t_min, t_max = min(t0, t1, t2, t3), max(t0, t1, t2, t3)
+
+    # Axis-projections of the piece's vertices that sit on the cut edge.
+    try:
+        cut_boundary = cut_union.boundary
+        pc = list(piece.exterior.coords)
+    except _GEOM_EXC:
+        return None
+    if pc and pc[0] == pc[-1]:
+        pc = pc[:-1]
+    cut_ts: List[float] = []
+    for px, py in pc:
+        try:
+            if Point(px, py).distance(cut_boundary) < 0.75:
+                cut_ts.append(_t(px, py))
+        except _GEOM_EXC:
+            continue
+    if not cut_ts:
+        return None
+    mean_cut = sum(cut_ts) / len(cut_ts)
+    margin_t = 2.0 / math.sqrt(axis_len2)
+
+    def _pt_at_proj(pa, ta, pb, tb, s):
+        """Point on segment ``pa``→``pb`` at axis-projection ``s``.
+
+        Solving for the projection (not the raw edge parameter) is what
+        makes the clipped edge truly PERPENDICULAR to the axis even when
+        the input rect has an oblique seam edge (from the upstream
+        seam-split), so the two long edges don't share a parameter scale.
+        """
+        denom = tb - ta
+        if abs(denom) < 1e-9:
+            return None
+        u = (s - ta) / denom
+        if u < -0.05 or u > 1.05:
+            return None
+        u = min(1.0, max(0.0, u))
+        return (pa[0] + u * (pb[0] - pa[0]),
+                pa[1] + u * (pb[1] - pa[1]))
+
+    # The two long edges (parallel to the axis): c0→c1 and c3→c2.
+    if mean_cut > 0.5 * (t_min + t_max):
+        # Cut at the HIGH-t (low) end; keep the LOW-t (high) side.
+        s_clip = min(cut_ts) - margin_t
+        if s_clip <= t_min + 1e-3:
+            return None
+        far0, far3 = c0, c3
+    else:
+        # Cut at the LOW-t (high) end; keep the HIGH-t (low) side.
+        s_clip = max(cut_ts) + margin_t
+        if s_clip >= t_max - 1e-3:
+            return None
+        far0, far3 = c1, c2
+    P1 = _pt_at_proj(c0, t0, c1, t1, s_clip)  # on long edge c0→c1
+    P2 = _pt_at_proj(c3, t3, c2, t2, s_clip)  # on long edge c3→c2
+    if P1 is None or P2 is None:
+        return None
+
+    # Degeneracy guard: the clean rect's two long edges (far0→P1 and
+    # far3→P2) should be roughly parallel and similar in length — that's
+    # what makes it a clean sloped rect.  When the slice grazes a short
+    # or oblique stub the clip produces a lop-sided trapezoid (e.g. SPLP
+    # taxiway-stub: 11 m vs 3 m long edges → the H→L drop falls over just
+    # 3 m = a ~16 % grade the solver can't honour).  Bail so the caller
+    # falls back to a single node_altitudes piece the solver can grade.
+    e1 = math.hypot(P1[0] - far0[0], P1[1] - far0[1])
+    e2 = math.hypot(P2[0] - far3[0], P2[1] - far3[1])
+    if min(e1, e2) < 5.0 or max(e1, e2) > 2.0 * max(min(e1, e2), 1e-6):
+        return None
+
+    # Clean rect ring: the far short edge (far0,far3) + the new
+    # perpendicular edge (P1,P2).  Order [far0, P1, P2, far3] keeps the
+    # two long edges intact (far0–P1 and far3–P2) and the new edge P1–P2
+    # perpendicular to the axis.
+    clean_ring = [far0, P1, P2, far3]
+    e_far = 0.5 * (slope_sampler(*far0) + slope_sampler(*far3))
+    e_clip = 0.5 * (slope_sampler(*P1) + slope_sampler(*P2))
+    # [H, L, L, H] needs the higher pair at ring positions 0 & 3.
+    if e_far >= e_clip:
+        alt_hi, alt_lo = e_far, e_clip
+    else:
+        clean_ring = [P1, far0, far3, P2]
+        alt_hi, alt_lo = e_clip, e_far
+
+    try:
+        clean_poly = Polygon(clean_ring)
+        if not clean_poly.is_valid or clean_poly.is_empty:
+            return None
+        # Must be clear of the slice and stay within the kept piece
+        # (the latter fails when the far end was also cut → fall back).
+        if clean_poly.intersection(cut_union).area > 1.0:
+            return None
+        if clean_poly.difference(piece).area > 1.0:
+            return None
+    except _GEOM_EXC:
+        return None
+
+    clean_s = copy.copy(orig)
+    clean_s.polygon = clean_poly
+    clean_s.altitude_high = round(alt_hi, 1)
+    clean_s.altitude_low = round(alt_lo, 1)
+    clean_s.altitude = None
+    clean_s.node_altitudes = None
+    out: List[BuiltShape] = [clean_s]
+
+    # Filler = the slice-side remainder of the kept piece — the wedge
+    # between the perpendicular clip edge and the actual (oblique) slice.
+    # Built by intersecting ``piece`` with the NEAR half-plane of the
+    # clip line (toward the cut), NOT ``piece.difference(clean_poly)``:
+    # the explicit clean ring's far edge need not bit-match ``piece``'s
+    # boundary, and the boolean difference then wraps around the far end
+    # into a ring instead of yielding the small wedge.
+    ax_norm = math.sqrt(axis_len2)
+    ux, uy = avx / ax_norm, avy / ax_norm           # unit axis (t↑)
+    nx, ny = -uy, ux                                 # unit perpendicular
+    qx, qy = hx + s_clip * avx, hy + s_clip * avy    # point on clip line
+    # Near (cut-ward) axis direction: +u when the cut is at high t,
+    # else -u.
+    if mean_cut > 0.5 * (t_min + t_max):
+        ndx, ndy = ux, uy
+    else:
+        ndx, ndy = -ux, -uy
+    big = 100000.0
+    try:
+        near_hp = Polygon([
+            (qx - nx * big, qy - ny * big),
+            (qx + nx * big, qy + ny * big),
+            (qx + nx * big + ndx * big, qy + ny * big + ndy * big),
+            (qx - nx * big + ndx * big, qy - ny * big + ndy * big),
+        ])
+        fdiff = piece.intersection(near_hp)
+    except _GEOM_EXC:
+        fdiff = None
+    if fdiff is not None and not fdiff.is_empty:
+        if fdiff.geom_type == "Polygon":
+            fpieces = [fdiff]
+        elif fdiff.geom_type == "MultiPolygon":
+            fpieces = [g for g in fdiff.geoms
+                       if g.geom_type == "Polygon" and not g.is_empty]
+        else:
+            fpieces = []
+        for fp in fpieces:
+            if fp.area < 0.5:
+                continue
+            fs = _build_piece_shape(orig, fp, slope_sampler)
+            if fs is None:
+                continue
+            # The filler's nodes on the slice edge follow TERRAIN, not
+            # the rect's (clamped) slope: at a steep crossing the slice
+            # spans tilted terrain, so these must differ from one another
+            # rather than collapse to the rect's flat end value.  Nodes
+            # shared with the clean rect's perpendicular edge (P1/P2)
+            # keep that flat value so the rect↔filler join stays seamless.
+            _terrain_pin_slice_nodes(
+                fs, cut_union, (P1, P2), layout, dem, tile_lat, tile_lon)
+            out.append(fs)
+    return out
+
+
+def _terrain_pin_slice_nodes(fs, cut_union, clip_pts, layout,
+                             dem, tile_lat, tile_lon) -> None:
+    """Overwrite a filler's slice-edge ``node_altitudes`` with the DEM
+    terrain altitude (so they follow the tilted terrain at a steep
+    crossing instead of the rect's flat end value), leaving nodes shared
+    with the clean rect's perpendicular clip edge (``clip_pts``)
+    untouched.  The pinned buckets are recorded on
+    ``layout._seam_anchor_keys`` so the per-surface solver HARD-anchors
+    them to these terrain altitudes (otherwise the final solve grades
+    them back toward the flat rect)."""
+    if (dem is None or layout is None or not fs.node_altitudes
+            or fs.polygon is None or fs.polygon.is_empty):
+        return
+    try:
+        cut_boundary = cut_union.boundary
+        coords = list(fs.polygon.exterior.coords)
+    except _GEOM_EXC:
+        return
+    nodata = getattr(dem, "nodata", -32768)
+    alts = list(fs.node_altitudes)
+    if len(alts) < len(coords):
+        return
+    seam_keys = getattr(layout, "_seam_anchor_keys", None)
+    if seam_keys is None:
+        seam_keys = set()
+        layout._seam_anchor_keys = seam_keys  # type: ignore[attr-defined]
+    changed = False
+    for i, (x, y) in enumerate(coords):
+        # Skip the corners shared with the clean rect (the flat join).
+        if any(math.hypot(x - cp[0], y - cp[1]) < 0.5 for cp in clip_pts):
+            continue
+        try:
+            if Point(x, y).distance(cut_boundary) >= 0.75:
+                continue  # not a slice-edge node
+            lat, lon = layout.m_to_ll(x, y)
+            v = float(dem.alt((lon - tile_lon, lat - tile_lat)))
+        except _GEOM_EXC:
+            continue
+        if v != v or v == nodata:  # NaN / no-data
+            continue
+        alts[i] = round(v, 1)
+        seam_keys.add(vertex_bucket(float(x), float(y)))
+        changed = True
+    if changed:
+        fs.node_altitudes = alts
 
 
 def _build_piece_shape(

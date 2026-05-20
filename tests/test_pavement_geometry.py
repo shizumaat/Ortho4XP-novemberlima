@@ -566,6 +566,24 @@ def test_rect_short_edges_connect(icao):
     layout = _build_layout(icao)
     rect_roles = {"primary_parallel", "secondary_parallel",
                   "stub", "cross_connector"}
+
+    # A short edge that lies on a tile-cut boundary (the integer
+    # lat/lon line the tile slice runs along, ~``half_width`` m away)
+    # legitimately connects to nothing on this side — the neighbour
+    # tile's geometry + X-Plane's terrain mesh bridge it.  The tile-cut
+    # clip-back (``tile_cut._clip_sloping_rect_piece``) ends a clipped
+    # taxiway rect / its node_altitudes filler on exactly such an edge,
+    # so exclude edges whose both corners sit within ``TILE_EDGE_TOL_M``
+    # of an integer lat or lon line.
+    TILE_EDGE_TOL_M = 8.0
+    lat0, lon0 = layout.anchor
+
+    def _on_tile_edge(x, y):
+        lat, lon = layout.m_to_ll(x, y)
+        dlat_m = abs(lat - round(lat)) * 111195.0
+        dlon_m = (abs(lon - round(lon)) * 111195.0
+                  * math.cos(math.radians(lat)))
+        return dlat_m < TILE_EDGE_TOL_M or dlon_m < TILE_EDGE_TOL_M
     # Collect every vertex from every shape with its source shape
     # id, then for each rect check both short-edge corners against
     # all OTHER shapes' vertices.
@@ -617,6 +635,10 @@ def test_rect_short_edges_connect(icao):
                 if shared_a and shared_b:
                     break
             if not shared_a and not shared_b:
+                # Tile-cut boundary edge — connects via the neighbour
+                # tile, not within this layout.
+                if _on_tile_edge(ax, ay) and _on_tile_edge(bx, by):
+                    continue
                 failures.append({
                     "ref": r.ref or "?",
                     "role": r.role,

@@ -278,6 +278,28 @@ def _load_airport_dem(lat0: float, lon0: float, override_dem=None):
             f"{fname}: {exc}")
         _DEM_CACHE[key] = None
         return None
+    # Standalone path only (tests, tools/build_target_osm): Ortho4XP's
+    # ``smooth_raster_over_airports`` never ran on this freshly-loaded
+    # raw .hgt, so the airport-area altitudes are the noisy raw HGT
+    # pixels.  In production auto_patch instead receives ``tile.dem``
+    # via ``override_dem`` AFTER that smoothing (O4_Vector_Map runs it
+    # before generate_auto_patches), so this branch must replicate it
+    # to match — otherwise seam / cut-edge anchors pick raw-pixel spikes
+    # that the production smoothed surface doesn't have.  ``override_dem``
+    # (production) returns above and never reaches here, so there's no
+    # double-smoothing.
+    try:
+        import numpy as _np  # noqa: F401
+        from PIL import Image as _Image
+        pix = 8  # O4_Cfg_Vars apt_smoothing_pix default
+        ny, nx = dem.alt_dem.shape
+        mask = _Image.new("L", (nx, ny), 255)
+        dem.alt_dem = _DEM.smoothen(
+            dem.alt_dem, pix, mask, preserve_boundary=True
+        ).astype(dem.alt_dem.dtype)
+    except _GEOM_EXC as exc:
+        UI.vprint(1, f"  [pav-builder] WARN: apt DEM smoothing skipped "
+                      f"for {fname}: {exc}")
     _DEM_CACHE[key] = dem
     return dem
 
