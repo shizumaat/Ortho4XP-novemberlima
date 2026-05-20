@@ -428,6 +428,63 @@ def test_to_osm_lat_lon_precision_is_11_decimals():
 
 
 # ──────────────────────────────────────────────────────────────────────
+# to_osm: must not mutate input shapes (emitter is pure)
+# ──────────────────────────────────────────────────────────────────────
+def test_to_osm_does_not_mutate_shape_on_invalid_polygon():
+    """to_osm repairs an invalid polygon via buffer(0) internally,
+    but must NOT write the degraded altitude representation back onto
+    the input BuiltShape.  A self-intersecting (bowtie) ring with
+    node_altitudes exercises the repair path that previously mutated
+    s.altitude / s.node_altitudes."""
+    layout = _make_layout()
+    # Bowtie: self-intersecting → poly.is_valid is False.
+    bowtie = Polygon([(0, 0), (10, 10), (10, 0), (0, 10)])
+    assert not bowtie.is_valid
+    elevs = [10.0, 11.0, 12.0, 13.0, 10.0]
+    shape = BuiltShape(
+        polygon=bowtie, role=ROLE_JUNCTION, node_altitudes=list(elevs))
+    layout.shapes.append(shape)
+
+    _emit_and_parse(layout)
+
+    # The emitter must have left the shape untouched.
+    assert shape.node_altitudes == elevs, (
+        "to_osm mutated node_altitudes on the input shape")
+    assert shape.altitude is None, (
+        "to_osm mutated altitude on the input shape")
+
+
+def test_to_osm_is_idempotent():
+    """Calling to_osm twice produces byte-identical output — proves
+    no input shape was degraded by the first call."""
+    layout = _make_layout()
+    # Mix of valid + invalid-with-altitudes shapes.
+    layout.shapes.append(BuiltShape(
+        polygon=_square(0, 0, 10), role=ROLE_RUNWAY, ref="A",
+        altitude_high=100.0, altitude_low=99.0))
+    bowtie = Polygon([(50, 0), (60, 10), (60, 0), (50, 10)])
+    layout.shapes.append(BuiltShape(
+        polygon=bowtie, role=ROLE_JUNCTION,
+        node_altitudes=[10.0, 11.0, 12.0, 13.0, 10.0]))
+
+    def _emit_text():
+        with tempfile.NamedTemporaryFile(
+                mode="r", suffix=".osm", delete=False) as f:
+            path = f.name
+        try:
+            layout.to_osm(path)
+            return Path(path).read_text()
+        finally:
+            Path(path).unlink()
+
+    first = _emit_text()
+    second = _emit_text()
+    assert first == second, (
+        "to_osm is not idempotent — the first call mutated layout "
+        "state that the second call then emitted differently")
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Sanity: AEROWAY_FOR_ROLE is complete
 # ──────────────────────────────────────────────────────────────────────
 def test_aeroway_for_role_covers_all_roles():

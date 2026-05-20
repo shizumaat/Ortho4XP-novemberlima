@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from math import cos, pi, sqrt
 
+from shapely.errors import GEOSException, TopologicalError
+
 import O4_UI_Utils as UI
 
 from .runway_geometry import (
@@ -26,6 +28,14 @@ from .runway_geometry import (
     extend_point,
     runway_corners,
 )
+
+# Narrow exception tuple for geometry/arithmetic operations.  Lets
+# programming errors (NameError, AttributeError, etc.) propagate so
+# bugs surface immediately rather than being swallowed as a "skip".
+# ZeroDivisionError covers LineString.length == 0 in projection
+# ratios; ValueError covers degenerate LineString construction.
+_GEOM_EXC = (ValueError, TypeError, IndexError, ZeroDivisionError,
+             GEOSException, TopologicalError)
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -297,7 +307,7 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
                     pt = cl_t.intersection(cl_r)
                     if pt.geom_type == "Point":
                         crossing_pairs.add((ti, ri))
-            except Exception:
+            except _GEOM_EXC:
                 continue
 
     for ti, (da_t, dat_a_t, db_t, dat_b_t) in enumerate(paired_list):
@@ -393,14 +403,14 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
                 if not cl_t.intersects(cl_r):
                     continue
                 pt = cl_t.intersection(cl_r)
-            except Exception:
+            except _GEOM_EXC:
                 continue
             if pt.is_empty or pt.geom_type != "Point":
                 continue
             try:
                 t_t = cl_t.project(pt) / cl_t.length
                 t_r = cl_r.project(pt) / cl_r.length
-            except (ZeroDivisionError, Exception):
+            except _GEOM_EXC:
                 continue
             # Skip endpoints — they're already anchored at CIFP
             # threshold elevations.  Only interior crossings need
