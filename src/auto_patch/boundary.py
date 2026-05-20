@@ -1026,11 +1026,25 @@ def _emit_boundary_dem_bridge(
             for ii_in_run, i_dense in enumerate(run):
                 vx, vy = per_vert[i_dense][0], per_vert[i_dense][1]
                 raw_outer_pts.append((vx, vy))
-                # Use _bridge_alt (nearest-pavement floor) rather than
-                # per_vert's _clamped_alt directly — the latter falls
-                # back to raw DEM beyond runway_clamp_radius_m, which
-                # is the source of the MMOX 1000 m drop.
-                ba = _bridge_alt(vx, vy)
+                # OUTER edge sits on the airport perimeter at the
+                # boundary's CLAMPED altitude (per this function's
+                # docstring) — the SAME value the airport_boundary
+                # ribbon assigns at the co-located vertex (both use
+                # the asymmetric runway clamp with identical params).
+                # Using ``_bridge_alt`` (nearest-pavement) here
+                # instead made the outer edge sit several metres above
+                # the DEM-following ribbon at the same XY, so
+                # ``_intern`` rendered a vertical wall between them —
+                # the CYXY perimeter spike/trench artifact (138 such
+                # walls, up to 13.6 m).  ``_clamped_alt`` keeps the
+                # bridge flush with the ribbon; the MMOX 1000 m drop
+                # it was meant to guard was actually fixed by the
+                # cross-tile DEM reuse (MMOX emits no bridge at all
+                # after that fix, so the outer-edge source is moot
+                # there).  The INNER edge keeps its pavement floor.
+                ba = _clamped_alt(vx, vy)
+                if ba is None:
+                    ba = _bridge_alt(vx, vy)
                 if ba is None:
                     raise RuntimeError(
                         f'boundary_dem_bridge outer: no altitude '

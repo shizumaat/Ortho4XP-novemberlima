@@ -602,8 +602,38 @@ class PavementLayout:
                 open_alts = corner_elevs[:n_open]
                 all_min = min(open_alts)
                 all_max = max(open_alts)
+                # Boundary STRIP rects are planar by construction:
+                # flat across the strip width, sloped (or flat) only
+                # along the perimeter.  Per-node consensus can pull
+                # the two ends of a cross-edge to slightly different
+                # altitudes where the wide strip's offset corners
+                # merge (within SHARED_VERTEX_TOL_M) with a corner at
+                # a neighbouring perimeter position — tight bends and
+                # concave lobes, e.g. CYXY.  That tilts the quad out
+                # of plane and demotes it to node_altitudes, the
+                # "jagged boundary slope" artifact.  Collapse each
+                # cross-edge corner pair (0&3 at one perimeter
+                # vertex, 1&2 at the other) to its mean to restore
+                # the flat cross-edges while keeping the consensus-
+                # informed along-perimeter profile.  This covers both
+                # sloped strips (altitude_high/low) AND flat-emitted
+                # strips (altitude) — the latter get tilted too.
+                # Bridges (node_altitudes) are genuinely non-planar
+                # and are excluded.
+                if (s.role == ROLE_BOUNDARY
+                        and not s.node_altitudes
+                        and n_open == 4):
+                    eh = (open_alts[0] + open_alts[3]) / 2.0
+                    el = (open_alts[1] + open_alts[2]) / 2.0
+                    if abs(eh - el) <= _CANON_EQ_TOL:
+                        tags["altitude"] = f"{(eh + el) / 2.0:.1f}"
+                    else:
+                        tags["altitude_high"] = f"{eh:.1f}"
+                        tags["altitude_low"] = f"{el:.1f}"
+                        tags["cell_size"] = "2"
+                        tags["profile"] = "spline"
                 # Try flat first.
-                if all_max - all_min <= _CANON_EQ_TOL:
+                elif all_max - all_min <= _CANON_EQ_TOL:
                     tags["altitude"] = (
                         f"{sum(open_alts) / n_open:.1f}")
                 # Then 4-corner [H, L, L, H] sloping rect.
