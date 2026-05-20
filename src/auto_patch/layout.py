@@ -47,6 +47,7 @@ __all__ = [
     "PavementLayout",
     "R_EARTH",
     "SHARED_VERTEX_TOL_M",
+    "vertex_bucket",
     "ROLE_RUNWAY",
     "ROLE_PRIMARY_PARALLEL",
     "ROLE_SECONDARY_PARALLEL",
@@ -80,6 +81,26 @@ SHARED_VERTEX_TOL_M = 0.5    # snap vertices closer than this together
 # average); larger differences represent a real wall / cliff and
 # must stay as distinct vertices so X-Plane renders the step.
 VERTEX_ALT_MERGE_TOL_M = 1.0
+
+
+def vertex_bucket(x: float, y: float,
+                  tol: float = SHARED_VERTEX_TOL_M) -> "Tuple[int, int]":
+    """Quantize a meter-space point to a discrete vertex-bucket key.
+
+    Two coordinates within ``tol`` metres of each other hash to the
+    same bucket — used to treat vertices on adjacent shapes that
+    should share a node as a single logical point.
+
+    THE single source of truth for discrete vertex bucketing.  This
+    same formula was previously duplicated as
+    ``elevation._corner_elevation_bucket``,
+    ``seam_anchors._bucket_key``, and inline ``round(x * 2.0)`` in
+    ``junction_rules`` — all now delegate here so the scheme can
+    never silently diverge.  (``round(x / 0.5)`` ≡ ``round(x * 2.0)``
+    exactly in IEEE-754, so this consolidation is bit-for-bit
+    behaviour-preserving.)
+    """
+    return (int(round(x / tol)), int(round(y / tol)))
 
 
 # ──────────────────────────────────────────────────────────────────
