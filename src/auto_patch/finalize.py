@@ -283,18 +283,33 @@ def run_phase2(layout, icao, xplane_root, apt, *,
             # Run BEFORE _emit_tunnel_portals so the latter can
             # skip OSM ways already depressed here.
             _depressed_way_ids: set = set()
+            _depressed_ok = False
             try:
                 n_dep, _depressed_way_ids = (
                     _emit_through_airport_depressed_roads(
                         layout, _dem, _tile_lat, _tile_lon,
                         xplane_root=xplane_root, icao=icao))
+                _depressed_ok = True
                 if n_dep:
                     UI.vprint(1,
                         f"  [pav-builder] emitted "
                         f"{n_dep} through-airport depressed "
                         f"road segment(s).")
-            except _GEOM_EXC:
+            except _GEOM_EXC as exc:
+                # The depressed-road emit may have already created
+                # depressed segments for SOME OSM ways before
+                # raising, but we no longer know which (the returned
+                # excluded set is lost).  Running _emit_tunnel_portals
+                # with an empty exclusion set would double-emit ramps
+                # on those partially-handled ways.  Skip the tunnel
+                # portals rather than corrupt geometry; log loudly so
+                # the failure is visible (was a silent `pass`).
                 _depressed_way_ids = set()
+                UI.vprint(1,
+                    f"  [pav-builder] WARN: {icao}: through-airport "
+                    f"depressed-road emit failed mid-pass ({exc}); "
+                    f"skipping tunnel-portal emit to avoid double-"
+                    f"emitting ramps on partially-handled OSM ways.")
             # Per user 2026-04-29: re-enable tunnel-portal
             # emission.  For each big-roads tunnel crossing the
             # airport boundary, emit a sloped ramp + 3
@@ -305,18 +320,21 @@ def run_phase2(layout, icao, xplane_root, apt, *,
             # they don't overlap.  OSM way ids handled by the
             # through-airport depressed-road emit are excluded
             # so we don't double-emit on Sky-Harbor-style
-            # multi-bridge crossings.
-            try:
-                n_tun = _emit_tunnel_portals(
-                    layout, _dem, _tile_lat, _tile_lon,
-                    excluded_way_ids=_depressed_way_ids)
-                if n_tun:
-                    UI.vprint(1,
-                        f"  [pav-builder] emitted "
-                        f"{n_tun} tunnel-portal cluster(s) "
-                        f"(ramp + walls along approach).")
-            except _GEOM_EXC:
-                pass
+            # multi-bridge crossings.  Only runs when the
+            # depressed-road emit completed cleanly, so the
+            # exclusion set is trustworthy.
+            if _depressed_ok:
+                try:
+                    n_tun = _emit_tunnel_portals(
+                        layout, _dem, _tile_lat, _tile_lon,
+                        excluded_way_ids=_depressed_way_ids)
+                    if n_tun:
+                        UI.vprint(1,
+                            f"  [pav-builder] emitted "
+                            f"{n_tun} tunnel-portal cluster(s) "
+                            f"(ramp + walls along approach).")
+                except _GEOM_EXC:
+                    pass
             # Per user 2026-04-29: emit retaining walls along
             # taxi bridges (KBNA Taxiway A, KPHX taxis over
             # Sky Harbor Blvd) and road-following approach

@@ -34,7 +34,6 @@ _GEOM_EXC = (ValueError, TypeError,
 
 
 __all__ = [
-    "_add_stub_to_runway_bridges",
     "_clip_residue_at_stub_sloping_edges",
     "_emit_primary_parallel_runway_stubs",
 ]
@@ -766,102 +765,4 @@ def _clip_residue_at_stub_sloping_edges(
                     residue = residue.difference(strip)
             except _GEOM_EXC:
                 continue
-    return residue
-
-
-def _add_stub_to_runway_bridges(
-        residue: "Polygon",
-        taxi_rects: "List[Tuple[Polygon, LineString, str, str]]",
-        runway_union: Optional["Polygon"],
-        max_bridge_m: float = 100.0,
-        ) -> "Polygon":
-    """For each STUB rect whose runway-facing short edge has a
-    pavement GAP to the runway, ADD a synthetic quadrilateral from
-    the stub's runway-facing edge straight to the runway boundary.
-
-    Per user 2026-04-27: airport apt.dat data is sometimes
-    inconsistent with OSM (construction-era discrepancies); when
-    we see a stub that should connect to a runway but the apt.dat
-    pavement doesn't bridge the gap, project a straight line over
-    so the connecting junction has continuous coverage instead of
-    a "weird shape with a big gap".
-
-    The runway-facing short edge is identified as whichever of the
-    stub's two short edges (corners [0,3] or [1,2]) has its
-    midpoint nearest the runway boundary.  If that midpoint sits
-    > ``max_bridge_m`` from the runway, we don't bridge (probably
-    not a runway-side stub).
-    """
-    if residue is None or residue.is_empty:
-        return residue
-    if runway_union is None or runway_union.is_empty:
-        return residue
-    rwy_boundary = runway_union.boundary
-    additions: List[Polygon] = []
-    for rect, axis, role, ref in taxi_rects:
-        if role != ROLE_STUB:
-            continue
-        try:
-            rc = list(rect.exterior.coords)
-        except _GEOM_EXC:
-            continue
-        if rc and rc[0] == rc[-1]:
-            rc = rc[:-1]
-        if len(rc) != 4:
-            continue
-        # Two short edges per ``_rect_from_axis_extended``
-        # convention: [3,0] and [1,2].
-        short_edges = [(rc[3], rc[0]), (rc[1], rc[2])]
-        # Pick the one closer to the runway.
-        best_edge = None
-        best_d = max_bridge_m
-        for (e0, e1) in short_edges:
-            mid = Point(0.5 * (e0[0] + e1[0]),
-                        0.5 * (e0[1] + e1[1]))
-            try:
-                d = mid.distance(rwy_boundary)
-            except _GEOM_EXC:
-                continue
-            if d < best_d:
-                best_d = d
-                best_edge = (e0, e1)
-        if best_edge is None or best_d <= 1.0:
-            # No runway-side short edge in range, OR the stub
-            # already touches the runway — nothing to bridge.
-            continue
-        # Project each short-edge endpoint to the nearest runway-
-        # boundary point.
-        from shapely.ops import nearest_points
-        e0, e1 = best_edge
-        try:
-            n0, _ = nearest_points(rwy_boundary, Point(e0))
-            n1, _ = nearest_points(rwy_boundary, Point(e1))
-        except _GEOM_EXC:
-            continue
-        # Build the bridge quadrilateral: stub edge → runway edge.
-        # Order: e0, e1, n1, n0 so the bridge closes properly.
-        try:
-            bridge = Polygon([e0, e1,
-                              (n1.x, n1.y), (n0.x, n0.y)])
-            if not bridge.is_valid:
-                bridge = bridge.buffer(0)
-            if (bridge.is_empty
-                    or bridge.geom_type != "Polygon"):
-                continue
-            # Don't overlap with the rect itself or the runway.
-            bridge = bridge.difference(rect)
-            if (not bridge.is_empty
-                    and bridge.geom_type == "Polygon"):
-                bridge = bridge.difference(runway_union)
-            if (not bridge.is_empty
-                    and bridge.geom_type == "Polygon"
-                    and bridge.area >= 1.0):
-                additions.append(bridge)
-        except _GEOM_EXC:
-            continue
-    if additions:
-        try:
-            residue = unary_union([residue] + additions)
-        except _GEOM_EXC:
-            pass
     return residue
