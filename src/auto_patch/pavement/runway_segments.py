@@ -17,7 +17,7 @@ Public API:
 """
 from __future__ import annotations
 
-from math import cos, pi, sqrt
+from math import cos, pi, sin, sqrt
 
 from shapely.errors import GEOSException, TopologicalError
 
@@ -507,6 +507,63 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
             return tile.dem.alt((lon - tile.lon, lat - tile.lat))
         except (IndexError, ValueError, TypeError, ZeroDivisionError):
             return None
+
+    def _threshold_dem_elev(lat, lon, radius_m):
+        """Mean DEM elevation within ``radius_m`` of (lat, lon).
+
+        Samples the centre plus two concentric rings of 8 compass
+        points (at radius_m/2 and radius_m) and averages the valid
+        samples, so a single noisy pixel doesn't dominate.  Returns
+        None when no DEM sample is available.
+        """
+        cl = cos(lat * pi / 180.0)
+        if cl < 1e-6:
+            cl = 1e-6
+        offsets = [(0.0, 0.0)]
+        for r in (radius_m * 0.5, radius_m):
+            for k in range(8):
+                ang = k * pi / 4.0
+                offsets.append((r * cos(ang), r * sin(ang)))
+        vals = []
+        for d_north, d_east in offsets:
+            s = _sample_dem(lat + d_north / DEG_TO_M,
+                            lon + d_east / (DEG_TO_M * cl))
+            if s is not None:
+                vals.append(s)
+        if not vals:
+            return None
+        return sum(vals) / len(vals)
+
+    # ── Threshold elevation DEM reconciliation ─────────────────
+    # Per user 2026-05-20: cross-check each CIFP threshold elevation
+    # against the local DEM in a 75 m radius around the threshold
+    # centreline endpoint, then choose:
+    #   DEM lower than CIFP          → keep CIFP (don't bury the end)
+    #   DEM 0–5 m higher than CIFP   → use DEM  (terrain is the real
+    #                                   ground; CIFP is slightly low)
+    #   DEM ≥ 5 m higher than CIFP   → keep CIFP (treat as obstacle /
+    #                                   DEM noise, not the runway end)
+    # Mutates ``elevation_m`` in place once per unique threshold so
+    # every downstream consumer (cross-runway anchors, centerline-
+    # crossing reconciliation, per-segment elevation seeds) reads the
+    # reconciled value from the same field.
+    THRESHOLD_DEM_RADIUS_M = 75.0
+    THRESHOLD_DEM_MAX_RISE_M = 5.0
+    _seen_thresh = set()
+    for _da, _data_a, _db, _data_b in runway_pairs:
+        for _data in (_data_a, _data_b):
+            if _data is None or id(_data) in _seen_thresh:
+                continue
+            _seen_thresh.add(id(_data))
+            cifp_e = _data.get("elevation_m")
+            if cifp_e is None:
+                continue
+            dem_e = _threshold_dem_elev(
+                _data["lat"], _data["lon"], THRESHOLD_DEM_RADIUS_M)
+            if dem_e is None:
+                continue
+            if cifp_e <= dem_e < cifp_e + THRESHOLD_DEM_MAX_RISE_M:
+                _data["elevation_m"] = dem_e
 
     # ── Auto cross-runway anchor pre-pass ──────────────────────
     # Per user 2026-04-28: project every paired runway's threshold
