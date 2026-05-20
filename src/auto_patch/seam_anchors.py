@@ -34,7 +34,7 @@ from .layout import (
     ROLE_APRON, ROLE_BOUNDARY, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL, ROLE_RUNWAY, ROLE_SECONDARY_PARALLEL,
     ROLE_STUB, ROLE_TERMINAL, ROLE_TUNNEL_RAMP, ROLE_RETAINING_WALL,
-    ROLE_GROUNDSIDE_PAVEMENT,
+    ROLE_GROUNDSIDE_PAVEMENT, vertex_bucket,
 )
 
 __all__ = ["split_pavement_at_seams", "apply_seam_dem_anchors"]
@@ -70,9 +70,9 @@ _EDGE_T_TOL = 1e-4
 def _bucket_key(x: float, y: float) -> Tuple[int, int]:
     """Bucket key matching ``elevation._corner_elevation_bucket`` so
     Phase-2 can look up seam anchors directly against the solver's
-    vertex graph."""
-    s = 1.0 / SHARED_VERTEX_TOL_M  # 2.0
-    return (int(round(x * s)), int(round(y * s)))
+    vertex graph.  Delegates to ``layout.vertex_bucket`` (the single
+    source of truth) so the scheme can't diverge."""
+    return vertex_bucket(x, y)
 
 
 def _split_ring_at_seam(ring, seam_line):

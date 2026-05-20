@@ -47,6 +47,7 @@ __all__ = [
     "PavementLayout",
     "R_EARTH",
     "SHARED_VERTEX_TOL_M",
+    "vertex_bucket",
     "ROLE_RUNWAY",
     "ROLE_PRIMARY_PARALLEL",
     "ROLE_SECONDARY_PARALLEL",
@@ -80,6 +81,26 @@ SHARED_VERTEX_TOL_M = 0.5    # snap vertices closer than this together
 # average); larger differences represent a real wall / cliff and
 # must stay as distinct vertices so X-Plane renders the step.
 VERTEX_ALT_MERGE_TOL_M = 1.0
+
+
+def vertex_bucket(x: float, y: float,
+                  tol: float = SHARED_VERTEX_TOL_M) -> "Tuple[int, int]":
+    """Quantize a meter-space point to a discrete vertex-bucket key.
+
+    Two coordinates within ``tol`` metres of each other hash to the
+    same bucket — used to treat vertices on adjacent shapes that
+    should share a node as a single logical point.
+
+    THE single source of truth for discrete vertex bucketing.  This
+    same formula was previously duplicated as
+    ``elevation._corner_elevation_bucket``,
+    ``seam_anchors._bucket_key``, and inline ``round(x * 2.0)`` in
+    ``junction_rules`` — all now delegate here so the scheme can
+    never silently diverge.  (``round(x / 0.5)`` ≡ ``round(x * 2.0)``
+    exactly in IEEE-754, so this consolidation is bit-for-bit
+    behaviour-preserving.)
+    """
+    return (int(round(x / tol)), int(round(y / tol)))
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -404,6 +425,16 @@ class PavementLayout:
             poly = s.polygon
             if poly is None or poly.is_empty:
                 continue
+            # Local copies of the altitude representation.  to_osm is
+            # a pure emitter — it must NOT mutate the input shapes
+            # (a second to_osm call, or a caller that inspects
+            # layout.shapes afterward, would otherwise see degraded
+            # data).  The buffer(0) repair below degrades these
+            # LOCAL copies only.
+            shape_altitude = s.altitude
+            shape_node_altitudes = s.node_altitudes
+            shape_altitude_high = s.altitude_high
+            shape_altitude_low = s.altitude_low
             if not poly.is_valid:
                 try:
                     repaired = poly.buffer(0)
@@ -420,15 +451,16 @@ class PavementLayout:
                     # node_altitudes from the original ring no longer
                     # aligns with the repaired ring; degrade to a
                     # flat polygon at the mean of the original
-                    # vertex elevations to preserve emission.
-                    if s.node_altitudes:
+                    # vertex elevations to preserve emission.  Mutate
+                    # only the local copies, never ``s``.
+                    if shape_node_altitudes:
                         valid_elevs = [
-                            e for e in s.node_altitudes[:-1]]
+                            e for e in shape_node_altitudes[:-1]]
                         if valid_elevs:
-                            s.altitude = round(
+                            shape_altitude = round(
                                 sum(valid_elevs) / len(valid_elevs),
                                 1)
-                        s.node_altitudes = None
+                        shape_node_altitudes = None
                     poly = repaired
                 except _GEOM_EXC:
                     continue
@@ -444,22 +476,22 @@ class PavementLayout:
             # ``poly.exterior.coords`` (including the closing
             # repeat).  Without per-corner altitudes the emitter
             # can't enforce the same-XY → same-altitude invariant.
-            ring_elevs_input = s.node_altitudes
+            ring_elevs_input = shape_node_altitudes
             if ring_elevs_input is None:
                 ext_coords_open = list(poly.exterior.coords)
                 if (ext_coords_open
                         and ext_coords_open[0] == ext_coords_open[-1]):
                     ext_coords_open = ext_coords_open[:-1]
                 n_open = len(ext_coords_open)
-                if s.altitude is not None:
+                if shape_altitude is not None:
                     ring_elevs_input = (
-                        [float(s.altitude)] * n_open
-                        + [float(s.altitude)])
-                elif (s.altitude_high is not None
-                      and s.altitude_low is not None
+                        [float(shape_altitude)] * n_open
+                        + [float(shape_altitude)])
+                elif (shape_altitude_high is not None
+                      and shape_altitude_low is not None
                       and n_open == 4):
-                    eh = float(s.altitude_high)
-                    el = float(s.altitude_low)
+                    eh = float(shape_altitude_high)
+                    el = float(shape_altitude_low)
                     ring_elevs_input = [eh, el, el, eh, eh]
             ext_nids, ext_elevs = _ring_to_nids(
                 poly.exterior.coords,

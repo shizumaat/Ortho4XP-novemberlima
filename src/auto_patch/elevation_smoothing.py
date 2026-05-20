@@ -16,10 +16,10 @@ Public API:
 from __future__ import annotations
 
 import math
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from shapely.errors import GEOSException, TopologicalError
-from shapely.geometry import Polygon
+from shapely.geometry import Point, Polygon
 
 from .elevation import (
     ELEVATION_GRID_STEP_M,

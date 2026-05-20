@@ -51,6 +51,7 @@ from .layout import (
     ROLE_RUNWAY,
     ROLE_TERMINAL,
     SHARED_VERTEX_TOL_M,
+    vertex_bucket,
 )
 
 
@@ -688,7 +689,7 @@ def _build_runway_union_chain(
         if coords and coords[0] == coords[-1]:
             coords = coords[:-1]
         for c in coords:
-            key = (round(c[0] * 2.0), round(c[1] * 2.0))
+            key = vertex_bucket(c[0], c[1])
             corner_index[key] = len(chain)
             chain.append((float(c[0]), float(c[1])))
     return chain, corner_index
@@ -733,7 +734,7 @@ def _build_runway_corner_altitudes(
         else:
             continue
         for c, alt in corner_alts:
-            key = (round(c[0] * 2.0), round(c[1] * 2.0))
+            key = vertex_bucket(c[0], c[1])
             # Take the FIRST encounter; matching with the second
             # encounter is asserted via the elevation pipeline's
             # continuity check.
@@ -816,7 +817,7 @@ def _do_widen(
     vertex_tol = SHARED_VERTEX_TOL_M
 
     def _key(p):
-        return (round(p[0] * 2.0), round(p[1] * 2.0))
+        return vertex_bucket(p[0], p[1])
 
     for shape in layout.shapes:
         if shape.role != ROLE_JUNCTION:
@@ -1585,7 +1586,7 @@ def _rewrite_runway_runs(
         unique: List[Tuple[float, float]] = []
         seen_keys: set = set()
         for t in seen_targets:
-            key = (round(t[0] * 2.0), round(t[1] * 2.0))  # ~0.5 m bucket
+            key = vertex_bucket(t[0], t[1])  # ~0.5 m bucket
             if key in seen_keys:
                 continue
             seen_keys.add(key)

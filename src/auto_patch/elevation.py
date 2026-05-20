@@ -103,6 +103,7 @@ from .layout import (
     ROLE_TERMINAL,
     ROLE_RETAINING_WALL,
     SHARED_VERTEX_TOL_M,
+    vertex_bucket,
 )
 from .pavement.vertices import (
     _drop_spike_vertices,
@@ -2590,13 +2591,11 @@ def _corner_elevation_bucket(x: float, y: float,
                              ) -> Tuple[int, int]:
     """Quantize a meter-space point to a vertex-bucket key.
 
-    Two coordinates within ``tol`` metres of each other (default
-    ``SHARED_VERTEX_TOL_M``) hash to the same bucket — used to
-    treat vertices on adjacent shapes that should share a node id
-    as a single logical point even when their floating-point
-    coordinates differ slightly.
+    Thin wrapper over ``layout.vertex_bucket`` (the single source of
+    truth for discrete vertex bucketing).  Kept as a named alias so
+    the ~20 existing call sites don't churn.
     """
-    return (int(round(x / tol)), int(round(y / tol)))
+    return vertex_bucket(x, y, tol)
 
 
 def _corner_elev_map(layout: "PavementLayout"

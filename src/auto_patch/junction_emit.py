@@ -35,7 +35,6 @@ from .pavement.junctions import (
     _rect_end_corners,
 )
 from .pavement.stubs import (
-    _add_stub_to_runway_bridges,
     _clip_residue_at_stub_sloping_edges,
 )
 from .canonical_points import snap_polygon_through_registry
