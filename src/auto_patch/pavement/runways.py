@@ -302,6 +302,15 @@ def _resolve_runway_crossings(
     # geometric overlap of two non-crossing runways is the overlap-
     # clip pass's job; ``_resolve_runway_crossings`` only fires
     # when there's an actual centerline meeting point.
+    # ── Pass 1: identify crossing runway-REF PAIRS ──────────────
+    # Two runways cross when any of their sub-rect CENTERLINES
+    # intersect (+ a non-trivial rect overlap so a stray tip-touch
+    # doesn't count).  Centerline crossing is the discriminator
+    # that separates a real crossing from a close-pass: at CYXY
+    # 02/20's rect corner intrudes ~3-15 m into 14R/32L's width
+    # without the centerlines meeting — that's the overlap-clip
+    # pass's job, not a crossing.
+    crossing_ref_pairs: set = set()
     for ai in range(n):
         pa = rwy_polys[ai]
         ca = rwy_centerlines[ai]
@@ -313,10 +322,6 @@ def _resolve_runway_crossings(
             bi = int(ci)
             if bi <= ai:
                 continue
-            # Same-runway segments are sequential parts of one
-            # runway profile, not a crossing — skip the pairwise
-            # check.  (Transitive union via a third runway can still
-            # group them if both cross a common third runway.)
             if rwy_refs[ai] and rwy_refs[ai] == rwy_refs[bi]:
                 continue
             cb = rwy_centerlines[bi]
@@ -325,9 +330,45 @@ def _resolve_runway_crossings(
             try:
                 if not ca.intersects(cb):
                     continue
-                # Belt-and-braces: still require a non-trivial
-                # rect-overlap so a stray micro-touch at the very
-                # tip of two centerlines doesn't trigger a crossing.
+                inter = rwy_polys[ai].intersection(rwy_polys[bi])
+                if inter.is_empty or inter.area < min_overlap_m2:
+                    continue
+            except _GEOM_EXC:
+                continue
+            crossing_ref_pairs.add(
+                frozenset((rwy_refs[ai], rwy_refs[bi])))
+
+    # ── Pass 2: merge ALL overlapping sub-rect pairs of a crossing
+    # runway-ref pair ──────────────────────────────────────────────
+    # Once two runways are known to cross, the crossing junction must
+    # cover the FULL geometric overlap of their two footprints — not
+    # just the single sub-rect pair whose centerlines happen to meet.
+    # A runway crossing at an angle spans ~100 m of one runway's axis,
+    # which overlaps 1-2 sub-rects of the OTHER runway (segmented every
+    # 100 m).  Merging only the centerline-crossing pair left the
+    # adjacent overlapping sub-rect to be clipped away by the
+    # overlap-clip pass while the junction didn't extend to replace it
+    # — producing an uncovered gap at the crossing (CYXY 14R/32L:
+    # ~3300 m² hole that X-Plane fills with terrain DEM, creating a
+    # ridge across the runway).  Restricting to known crossing
+    # ref-pairs keeps close-pass non-crossing runways out (their
+    # ref-pair never enters ``crossing_ref_pairs``).
+    for ai in range(n):
+        pa = rwy_polys[ai]
+        try:
+            cands = tree.query(pa)
+        except _GEOM_EXC:
+            continue
+        for ci in cands:
+            bi = int(ci)
+            if bi <= ai:
+                continue
+            if rwy_refs[ai] and rwy_refs[ai] == rwy_refs[bi]:
+                continue
+            if (frozenset((rwy_refs[ai], rwy_refs[bi]))
+                    not in crossing_ref_pairs):
+                continue
+            try:
                 inter = rwy_polys[ai].intersection(rwy_polys[bi])
                 if inter.is_empty or inter.area < min_overlap_m2:
                     continue
