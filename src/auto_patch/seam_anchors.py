@@ -40,8 +40,7 @@ from .layout import (
 
 __all__ = ["split_pavement_at_seams", "apply_seam_dem_anchors"]
 
-_GEOM_EXC = (ValueError, TypeError, GEOSException,
-             TopologicalError, IndexError)
+_GEOM_EXC = (ValueError, GEOSException, TopologicalError)
 
 # Shape roles whose polygons participate in seam-splitting.
 # Tile-cut bridges are intentionally excluded — they're emitted later

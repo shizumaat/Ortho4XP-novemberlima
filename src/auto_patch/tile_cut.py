@@ -47,10 +47,9 @@ _SLOPING_RECT_ROLES = frozenset({
     ROLE_STUB, ROLE_CROSS_CONNECTOR,
 })
 
-# Same narrow exception set used in ``boundary.py`` — covers real
-# shapely degeneracy without masking programming errors.
-_GEOM_EXC = (ValueError, TypeError, GEOSException,
-             TopologicalError, IndexError)
+# Narrow exception set — covers real shapely degeneracy without
+# masking programming errors (KeyError/TypeError/IndexError propagate).
+_GEOM_EXC = (ValueError, GEOSException, TopologicalError)
 
 
 __all__ = ["cut_layout_at_tile_boundaries",

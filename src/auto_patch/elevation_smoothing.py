@@ -32,8 +32,7 @@ from .layout import R_EARTH
 
 # Narrow exception tuple for shapely / numeric-geometry failure
 # modes.  Programming errors propagate so they surface immediately.
-_GEOM_EXC = (ValueError, TypeError,
-             GEOSException, TopologicalError, IndexError)
+_GEOM_EXC = (ValueError, GEOSException, TopologicalError)
 
 
 __all__ = ["_smooth_polygon_grid"]

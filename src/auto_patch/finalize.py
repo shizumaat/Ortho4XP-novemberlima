@@ -29,8 +29,7 @@ from shapely.errors import GEOSException, TopologicalError
 # Narrow exception tuple for feature-emit failures (shapely +
 # OSM/DEM file I/O).  Programming errors propagate so they surface
 # immediately rather than being silently masked at runtime.
-_GEOM_EXC = (OSError, ValueError, TypeError, KeyError,
-             IndexError, RuntimeError,
+_GEOM_EXC = (OSError, ValueError,
              GEOSException, TopologicalError)
 
 from .boundary import (
