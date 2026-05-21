@@ -47,6 +47,14 @@ def test_get_reciprocal_wraparound():
     assert get_reciprocal("RW19") == "RW01"
 
 
+def test_get_reciprocal_eighteen_maps_to_thirty_six():
+    """Boundary case: 18 + 18 = 36 exactly — stays RW36, does NOT
+    wrap to RW00 (the wrap only applies for headings strictly > 36)."""
+    assert get_reciprocal("RW18") == "RW36"
+    assert get_reciprocal("RW18L") == "RW36R"
+    assert get_reciprocal("RW18C") == "RW36C"
+
+
 def test_get_reciprocal_invalid_designator():
     """Malformed designators return None instead of raising."""
     assert get_reciprocal("not-a-runway") is None
@@ -169,6 +177,23 @@ def test_runway_corners_width_perpendicular_to_axis():
     dlon_m = (c0[1] - c3[1]) * cos_lat * DEG_TO_M
     sep_m = math.hypot(dlat_m, dlon_m)
     assert abs(sep_m - width_m) < 0.5
+
+
+def test_runway_corners_left_right_side_assignment():
+    """The perpendicular offset direction must place the corners on the
+    correct sides (fixes the [H,L,L,H] winding, not just the width).
+    For a runway pointing north (lat1 → lat2 northward), the "left"
+    corners c0/c1 sit to the WEST (smaller longitude) and the "right"
+    corners c3/c2 to the EAST.  A flipped perpendicular would reverse
+    the ring winding while keeping width/lat unchanged.
+    """
+    corners = runway_corners(0.0, 0.0, 0.027, 0.0, width_m=45.0)
+    c0, c1, c2, c3 = corners
+    # West side (smaller lon) for the left corners; east for the right.
+    assert c0[1] < c3[1]
+    assert c1[1] < c2[1]
+    # Same-end corners straddle the centerline symmetrically.
+    assert c0[1] == pytest.approx(-c3[1])
 
 
 # ──────────────────────────────────────────────────────────────────────
