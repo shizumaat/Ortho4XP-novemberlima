@@ -2498,6 +2498,14 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 f"  [pav-builder] {icao}: tile-boundary cut "
                 f"adjusted shape count by {n_tile_delta:+d}.")
 
+        # Drop small floating-orphan junctions left by
+        # pav_union.difference(rects) — a wedge past a rect's edge that
+        # shares no vertex with any shape (so no merge/sliver pass can
+        # absorb it) and whose corners are all orphans.  Runs at the
+        # very end on the fully-settled geometry (SPLP #33, 2026-05-20).
+        from .junction_repair import _drop_floating_orphan_junctions
+        _drop_floating_orphan_junctions(layout, icao=icao)
+
         # Final within-shape grade WARN reflects the absolute
         # final state — junction / apron / terminal Euclidean caps
         # post-final-solver.  Per user 2026-05-03 the WARN was

@@ -1156,6 +1156,94 @@ def _drop_thin_orphan_slivers(
     return len(to_drop)
 
 
+def _drop_floating_orphan_junctions(
+        layout: "PavementLayout",
+        icao: str = "",
+        max_area_m2: float = 50.0,
+        shared_vertex_tol_m: float = 0.5,
+        ) -> int:
+    """Drop small junction polygons that are FLOATING residue: they
+    share NO vertex with any other shape (user 2026-05-20).
+
+    ``pav_union.difference(rects)`` can leave a small wedge just past
+    the end of a rect's edge, offset ~1 m by buffer/difference
+    rounding.  Such a polygon shares no vertex with its near rect (too
+    far) and no vertex with any junction, so neither
+    ``_merge_sliver_junctions_into_neighbours`` (needs a shared
+    JUNCTION edge) nor ``_drop_thin_orphan_slivers`` (needs a shared
+    rect edge AND a thin >4 aspect) can absorb it — and its corners are
+    all orphans (no source within tol), so it fails
+    ``test_junction_vertices_have_source`` and (when it sits inside the
+    pavement) ``test_junction_vertices_outside_pavement``.  SPLP #33 is
+    the canonical case: a 19 m² triangle 1 m past taxiway B.
+
+    Tight criterion so only genuine floating residue is dropped:
+      * role == junction, 0 < area < ``max_area_m2`` (small);
+      * shares 0 vertices (within ``shared_vertex_tol_m``) with ANY
+        other shape — a legitimate junction always inherits boundary /
+        rect-corner vertices from its neighbours.
+
+    Returns count dropped.
+    """
+    tol2 = shared_vertex_tol_m * shared_vertex_tol_m
+    rings: Dict[int, List[Tuple[float, float]]] = {}
+    for k, s in enumerate(layout.shapes):
+        if s.polygon is None or s.polygon.is_empty:
+            rings[k] = []
+            continue
+        try:
+            c = list(s.polygon.exterior.coords)
+        except _GEOM_EXC:
+            rings[k] = []
+            continue
+        if c and c[0] == c[-1]:
+            c = c[:-1]
+        rings[k] = c
+
+    to_drop: List[int] = []
+    for i, s in enumerate(layout.shapes):
+        if s.role != ROLE_JUNCTION or s.polygon is None or s.polygon.is_empty:
+            continue
+        try:
+            area = s.polygon.area
+        except _GEOM_EXC:
+            continue
+        if area <= 0 or area >= max_area_m2:
+            continue
+        vi = rings[i]
+        if not vi:
+            continue
+        shares = False
+        for j, vj in rings.items():
+            if j == i or not vj:
+                continue
+            for vx, vy in vi:
+                for ux, uy in vj:
+                    if (vx - ux) ** 2 + (vy - uy) ** 2 <= tol2:
+                        shares = True
+                        break
+                if shares:
+                    break
+            if shares:
+                break
+        if not shares:
+            to_drop.append(i)
+
+    if not to_drop:
+        return 0
+    drop_set = set(to_drop)
+    layout.shapes = [
+        s for k, s in enumerate(layout.shapes) if k not in drop_set]
+    try:
+        UI.vprint(1,
+            f"  [pav-builder] {icao}: dropped {len(to_drop)} floating "
+            f"orphan junction(s) (no shared vertex, area < "
+            f"{max_area_m2:.0f} m²).")
+    except _GEOM_EXC:
+        pass
+    return len(to_drop)
+
+
 def _split_sloped_rects_at_violations(
         layout: "PavementLayout",
         icao: str = "",
