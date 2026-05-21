@@ -22,7 +22,7 @@ Rule 3.  Stubs raise ``NotImplementedError`` until landed.
 from __future__ import annotations
 
 import math
-from typing import List, Optional, Sequence, Tuple
+from collections.abc import Sequence
 
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, Point, Polygon
@@ -146,13 +146,13 @@ def apply_junction_rules(layout: PavementLayout) -> None:
 # ── Runway-axis helper ───────────────────────────────────────────
 
 
-def longest_runway_axis_deg(layout: PavementLayout) -> Optional[float]:
+def longest_runway_axis_deg(layout: PavementLayout) -> float | None:
     """Return the bearing (degrees mod 180) of the longest runway
     polygon's MRR long axis.  ``None`` if no runway shape is present.
     0° = +Y (north), 90° = +X (east), per the rest of the codebase
     (see ``pavement/strips.py::_linestring_bearing_axis``).
     """
-    longest_poly: Optional[Polygon] = None
+    longest_poly: Polygon | None = None
     longest_len = 0.0
     for s in layout.shapes:
         if s.role != ROLE_RUNWAY:
@@ -197,9 +197,9 @@ def longest_runway_axis_deg(layout: PavementLayout) -> Optional[float]:
 
 def _rect_sloping_edges(
     rect: Polygon,
-    source_axis: Optional[LineString] = None,
-) -> List[Tuple[Tuple[float, float], Tuple[float, float],
-                Tuple[float, float], Tuple[float, float]]]:
+    source_axis: LineString | None = None,
+) -> list[tuple[tuple[float, float], tuple[float, float],
+                tuple[float, float], tuple[float, float]]]:
     """Return the rect's two SLOPING edges — the edges parallel to
     its source_axis (where altitude varies linearly).  These are
     the edges junctions must NOT have nodes along (other than at
@@ -262,7 +262,7 @@ def _rect_sloping_edges(
 def _point_segment_distance(
     px: float, py: float,
     ax: float, ay: float, bx: float, by: float,
-) -> Tuple[float, float, float]:
+) -> tuple[float, float, float]:
     """Distance from point (px, py) to segment (a, b).  Returns
     ``(distance, foot_x, foot_y)`` where (foot_x, foot_y) is the
     closest point on the segment.
@@ -285,7 +285,7 @@ def _point_segment_distance(
 def _point_perp_dist_within_segment(
     px: float, py: float,
     ax: float, ay: float, bx: float, by: float,
-) -> Optional[float]:
+) -> float | None:
     """Perpendicular distance from (px, py) to the line through (a, b),
     BUT only when the foot of perpendicular falls strictly within the
     segment (0 < t < 1).  Returns ``None`` if the projection lies at
@@ -337,7 +337,7 @@ def _snap_junction_vertices_to_rect_flat_edge_corners(
     ``_snap_to_sloping_edge_corners`` reverting commit 5a50d00's
     indiscriminate cross-edge snapping).
     """
-    flat_edges: List[Tuple[float, float, float, float]] = []
+    flat_edges: list[tuple[float, float, float, float]] = []
     rect_corner_set: set = set()
     bucket = SHARED_VERTEX_TOL_M
     for s in layout.shapes:
@@ -387,8 +387,8 @@ def _snap_junction_vertices_to_rect_flat_edge_corners(
                 node_alts = list(node_alts[:-1])
         if len(coords) < 3:
             continue
-        new_coords: List[Tuple[float, float]] = []
-        new_alts: Optional[List[float]] = (
+        new_coords: list[tuple[float, float]] = []
+        new_alts: list[float] | None = (
             [] if node_alts is not None else None)
         changed = False
         for i, (vx, vy) in enumerate(coords):
@@ -399,7 +399,7 @@ def _snap_junction_vertices_to_rect_flat_edge_corners(
                 if new_alts is not None:
                     new_alts.append(node_alts[i])
                 continue
-            best_corner: Optional[Tuple[float, float]] = None
+            best_corner: tuple[float, float] | None = None
             best_dc = corner_max_m
             for ax, ay, bx, by in flat_edges:
                 d_perp = _point_perp_dist_within_segment(
@@ -425,8 +425,8 @@ def _snap_junction_vertices_to_rect_flat_edge_corners(
         if not changed:
             continue
         # Dedup consecutive identical vertices.
-        deduped: List[Tuple[float, float]] = []
-        deduped_alts: Optional[List[float]] = (
+        deduped: list[tuple[float, float]] = []
+        deduped_alts: list[float] | None = (
             [] if new_alts is not None else None)
         for j, (cx, cy) in enumerate(new_coords):
             if deduped:
@@ -491,8 +491,8 @@ def _snap_to_sloping_edge_corners(layout: PavementLayout) -> None:
     # shared-vertex collapse).  The rect_idx + corner_idx tuple is
     # carried for downstream adjacency-aware processing (e.g. dedup-
     # consecutive that crosses through identical-corner snap targets).
-    rect_corners_per_rect: List[List[Tuple[float, float]]] = []
-    rect_edges: List[Tuple[float, float, float, float, int, int, int]] = []
+    rect_corners_per_rect: list[list[tuple[float, float]]] = []
+    rect_edges: list[tuple[float, float, float, float, int, int, int]] = []
     for shape in layout.shapes:
         if shape.role not in SLOPING_RECT_ROLES:
             continue
@@ -530,7 +530,7 @@ def _snap_to_sloping_edge_corners(layout: PavementLayout) -> None:
     corner_tol = SHARED_VERTEX_TOL_M
 
     def _corner_id_for(vx: float, vy: float
-                        ) -> Optional[Tuple[int, int]]:
+                        ) -> tuple[int, int] | None:
         """If (vx, vy) coincides with a rect corner (within
         ``corner_tol``), return ``(rect_idx, corner_idx)``; else None.
         Used for adjacency detection on already-snapped vertices."""
@@ -563,12 +563,12 @@ def _snap_to_sloping_edge_corners(layout: PavementLayout) -> None:
             if node_alts is not None:
                 node_alts = list(node_alts[:-1])
         # snapped[i] = (new_xy, original_alt_or_None, corner_id_or_None).
-        snapped: List[Tuple[Tuple[float, float], Optional[float],
-                              Optional[Tuple[int, int]]]] = []
+        snapped: list[tuple[tuple[float, float], float | None,
+                              tuple[int, int] | None]] = []
         changed = False
         for i, (vx, vy) in enumerate(coords):
-            best_corner: Optional[Tuple[float, float]] = None
-            best_corner_id: Optional[Tuple[int, int]] = None
+            best_corner: tuple[float, float] | None = None
+            best_corner_id: tuple[int, int] | None = None
             best_dist = snap_tol
             for ax, ay, bx, by, r_idx, ci_a, ci_b in rect_edges:
                 # Perpendicular distance, only within the edge's
@@ -614,8 +614,8 @@ def _snap_to_sloping_edge_corners(layout: PavementLayout) -> None:
                 continue
         # Dedupe consecutive identical vertices, dropping the matching
         # altitude entry.
-        deduped: List[Tuple[Tuple[float, float], Optional[float],
-                              Optional[Tuple[int, int]]]] = []
+        deduped: list[tuple[tuple[float, float], float | None,
+                              tuple[int, int] | None]] = []
         for entry in snapped:
             (cx, cy), _alt, _cid = entry
             if deduped:
@@ -653,7 +653,7 @@ def _snap_to_sloping_edge_corners(layout: PavementLayout) -> None:
 
 def _build_runway_union_chain(
     runway_shapes: Sequence[BuiltShape],
-) -> Tuple[List[Tuple[float, float]],
+) -> tuple[list[tuple[float, float]],
            dict]:
     """Walk the runway-union boundary (one continuous loop per
     contiguous runway component) and return:
@@ -674,14 +674,14 @@ def _build_runway_union_chain(
         union = unary_union(polys)
     except _GEOM_EXC:
         return [], {}
-    components: List[Polygon] = []
+    components: list[Polygon] = []
     if union.geom_type == "Polygon":
         components.append(union)
     else:
         for g in getattr(union, "geoms", []):
             if g.geom_type == "Polygon" and not g.is_empty:
                 components.append(g)
-    chain: List[Tuple[float, float]] = []
+    chain: list[tuple[float, float]] = []
     corner_index: dict = {}
     for poly in components:
         coords = list(poly.exterior.coords)
@@ -770,7 +770,7 @@ def widen_junctions_to_runway_corners(
 
 def _widen_runway_shared_corners(
     layout: PavementLayout,
-    chain: Sequence[Tuple[float, float]],
+    chain: Sequence[tuple[float, float]],
     corner_index: dict,
     corner_alt: dict,
 ) -> None:
@@ -794,7 +794,7 @@ def _widen_runway_shared_corners(
 
 def _do_widen(
     layout: PavementLayout,
-    chain: Sequence[Tuple[float, float]],
+    chain: Sequence[tuple[float, float]],
     corner_index: dict,
     corner_alt: dict,
     runway_union,
@@ -866,7 +866,7 @@ def _do_widen(
         # Identify runway-shared vertices in the polygon.
         # shared_in_poly: list of (poly_idx, chain_corner_position)
         existing_keys = set(_key(v) for v in coords)
-        shared_in_poly: List[Tuple[int, Tuple[float, float]]] = []
+        shared_in_poly: list[tuple[int, tuple[float, float]]] = []
         for i, v in enumerate(coords):
             k = _key(v)
             if k in corner_index:
@@ -902,7 +902,7 @@ def _do_widen(
         # the legitimate north-side widening was getting thrown out
         # alongside it.
         current_coords = list(coords)
-        current_alts: Optional[List[float]] = (
+        current_alts: list[float] | None = (
             list(node_alts) if node_alts is not None else None)
         n_committed = 0
 
@@ -1061,7 +1061,7 @@ def _do_widen(
         # the post-widen interior-vert prune below knows which
         # adjacent non-anchor verts to consider redundant.
         newly_inserted_keys: set = set()
-        widen_queue: List[Tuple[Tuple[float, float], int]] = [
+        widen_queue: list[tuple[tuple[float, float], int]] = [
             (c, 0) for _, c in shared_in_poly]
 
         while widen_queue and n_committed < max_inserts:
@@ -1227,8 +1227,8 @@ def _do_widen(
             except _GEOM_EXC:
                 on_pav_boundary_obj = None
         if on_pav_boundary_obj is not None and newly_inserted_keys:
-            pruned_coords: List[Tuple[float, float]] = []
-            pruned_alts: Optional[List[float]] = (
+            pruned_coords: list[tuple[float, float]] = []
+            pruned_alts: list[float] | None = (
                 [] if current_alts is not None else None)
             n_cur_pre = len(current_coords)
             for i, v in enumerate(current_coords):
@@ -1338,8 +1338,8 @@ def _enforce_runway_1to1_sharing(layout: PavementLayout) -> None:
     # Build runway segment edges, each paired with its 2 endpoints
     # (= runway corners).  Snap targets are always one of these
     # endpoints — never a runway vertex from a different segment.
-    rwy_segs: List[Tuple[float, float, float, float,
-                         Tuple[float, float], Tuple[float, float]]] = []
+    rwy_segs: list[tuple[float, float, float, float,
+                         tuple[float, float], tuple[float, float]]] = []
     for s in runway_shapes:
         coords = list(s.polygon.exterior.coords)
         if coords and coords[0] == coords[-1]:
@@ -1395,7 +1395,7 @@ def _enforce_runway_1to1_sharing(layout: PavementLayout) -> None:
     # ORDER matters; we sort junctions by their nearest runway
     # boundary distance ASCENDING so junctions touching the runway
     # most directly snap first.
-    claimed_corners: List[Tuple[float, float]] = []
+    claimed_corners: list[tuple[float, float]] = []
 
     # Order junctions by min distance to runway boundary (closest
     # first) so confident snaps commit before borderline cases.
@@ -1443,8 +1443,8 @@ def _enforce_runway_1to1_sharing(layout: PavementLayout) -> None:
         # Pass 1: classify each vertex (runway-adjacent? closest segment?).
         # A vertex already at a sloping-rect corner stays put — the
         # rect-corner share is a legitimate anchor.
-        nearest_seg: List[
-            Optional[Tuple[Tuple[float, float], Tuple[float, float]]]
+        nearest_seg: list[
+            tuple[tuple[float, float], tuple[float, float]] | None
         ] = [None] * n
         for i, (vx, vy) in enumerate(coords):
             bk = (round(vx / bucket_size), round(vy / bucket_size))
@@ -1523,14 +1523,14 @@ def _enforce_runway_1to1_sharing(layout: PavementLayout) -> None:
 
 
 def _rewrite_runway_runs(
-    coords: List[Tuple[float, float]],
-    node_alts: Optional[List[float]],
-    runs: List[List[int]],
-    nearest_seg: List[
-        Optional[Tuple[Tuple[float, float], Tuple[float, float]]]],
+    coords: list[tuple[float, float]],
+    node_alts: list[float] | None,
+    runs: list[list[int]],
+    nearest_seg: list[
+        tuple[tuple[float, float], tuple[float, float]] | None],
     shrink_collision_tol: float,
-    claimed_corners: Optional[List[Tuple[float, float]]] = None,
-) -> Optional[Tuple[List[Tuple[float, float]], Optional[List[float]]]]:
+    claimed_corners: list[tuple[float, float]] | None = None,
+) -> tuple[list[tuple[float, float]], list[float] | None] | None:
     """Surgically replace each runway-near vertex run with the
     ordered sequence of runway corners.  Returns the new (open)
     coord list and (optional) per-vertex altitude list, or None if
@@ -1547,13 +1547,13 @@ def _rewrite_runway_runs(
 
     # Build per-run replacement.  Returns list of (run_set,
     # replacement_corners, replacement_alts).
-    replacements: List[
-        Tuple[set, List[Tuple[float, float]],
-              Optional[List[float]]]
+    replacements: list[
+        tuple[set, list[tuple[float, float]],
+              list[float] | None]
     ] = []
     for run_indices in runs:
         # 1) Compute snap target per vertex (shrink-fallback).
-        seen_targets: List[Tuple[float, float]] = []
+        seen_targets: list[tuple[float, float]] = []
         for idx in run_indices:
             seg_endpoints = nearest_seg[idx]
             if seg_endpoints is None:
@@ -1582,7 +1582,7 @@ def _rewrite_runway_runs(
                 target = primary
             seen_targets.append(target)
         # 2) Dedupe targets (preserve order of first appearance).
-        unique: List[Tuple[float, float]] = []
+        unique: list[tuple[float, float]] = []
         seen_keys: set = set()
         for t in seen_targets:
             key = vertex_bucket(t[0], t[1])  # ~0.5 m bucket
@@ -1613,14 +1613,14 @@ def _rewrite_runway_runs(
         # produces an invalid polygon, so we no longer drop
         # backtracking targets here — sharing claimed corners with
         # adjacent junctions is per user 2026-05-02 explicitly OK.
-        kept: List[Tuple[float, float]] = list(unique)
+        kept: list[tuple[float, float]] = list(unique)
         if not kept:
             continue
         # 6) Compose replacement sequence; per-vertex altitudes are
         # inherited from the run's first/last existing entries when
         # available (just to avoid Nones — elevation pipeline will
         # re-interpolate).
-        rep_alts: Optional[List[float]] = None
+        rep_alts: list[float] | None = None
         if node_alts is not None:
             run_alt_avg = (sum(node_alts[i] for i in run_indices)
                            / max(1, len(run_indices)))
@@ -1632,8 +1632,8 @@ def _rewrite_runway_runs(
 
     # Build new coord list: walk original polygon, dropping in-run
     # vertices and inserting replacement at the END of each run.
-    out_pts: List[Tuple[float, float]] = []
-    out_alts: Optional[List[float]] = (
+    out_pts: list[tuple[float, float]] = []
+    out_alts: list[float] | None = (
         [] if node_alts is not None else None)
     # Index runs by their first index for quick lookup.
     run_by_first: dict = {r[0][0]: r for r in
@@ -1663,7 +1663,7 @@ def _rewrite_runway_runs(
     return out_pts, out_alts
 
 
-def _find_circular_runs(flags: Sequence[bool], n: int) -> List[List[int]]:
+def _find_circular_runs(flags: Sequence[bool], n: int) -> list[list[int]]:
     """Find contiguous runs of True values in a circular list of
     length n.  Returns each run as a list of indices in walk order.
     Handles wrap-around (a run that crosses the seam between
@@ -1679,8 +1679,8 @@ def _find_circular_runs(flags: Sequence[bool], n: int) -> List[List[int]]:
             start = (i + 1) % n
             break
     # Walk from start, collecting runs.
-    runs: List[List[int]] = []
-    cur: List[int] = []
+    runs: list[list[int]] = []
+    cur: list[int] = []
     for offset in range(n):
         idx = (start + offset) % n
         if flags[idx]:
@@ -1699,7 +1699,7 @@ def _find_circular_runs(flags: Sequence[bool], n: int) -> List[List[int]]:
 
 def _polygon_neck_metrics(
     poly: Polygon,
-) -> Tuple[float, float, Tuple[float, float, float, float]]:
+) -> tuple[float, float, tuple[float, float, float, float]]:
     """Return ``(min_thickness_m, mrr_long_m, (long_a_x, long_a_y,
     long_b_x, long_b_y))`` for the polygon's minimum-rotated-rectangle.
 
@@ -1717,7 +1717,7 @@ def _polygon_neck_metrics(
     coords = list(mrr.exterior.coords)
     if len(coords) < 5:
         return 0.0, 0.0, (0.0, 0.0, 0.0, 0.0)
-    sides: List[Tuple[float, Tuple[float, float], Tuple[float, float]]] = []
+    sides: list[tuple[float, tuple[float, float], tuple[float, float]]] = []
     for i in range(4):
         ax, ay = coords[i]
         bx, by = coords[i + 1]
@@ -1731,7 +1731,7 @@ def _polygon_neck_metrics(
 
 def _split_narrow_necks(
     layout: PavementLayout,
-    runway_axis_deg: Optional[float],
+    runway_axis_deg: float | None,
 ) -> None:
     """Rule 4 (user 2026-05-01): when a junction polygon has a narrow
     neck (MRR short-side < ``NECK_ABSOLUTE_M`` OR MRR short/long
@@ -1756,8 +1756,8 @@ def _split_narrow_necks(
     # Mirror ``junction_emit.MIN_JUNCTION_AREA_M2`` (kept local there
     # for legacy; harmonise once both files reference one constant).
     MIN_JUNCTION_AREA_M2 = 50.0
-    new_shapes: List[BuiltShape] = []
-    drop_indices: List[int] = []
+    new_shapes: list[BuiltShape] = []
+    drop_indices: list[int] = []
     for idx, shape in enumerate(layout.shapes):
         if shape.role != ROLE_JUNCTION:
             continue
@@ -1792,7 +1792,7 @@ def _split_narrow_necks(
             result = _shp_split(poly, cut)
         except _GEOM_EXC:
             continue
-        pieces: List[Polygon] = []
+        pieces: list[Polygon] = []
         if result.geom_type == "Polygon":
             pieces.append(result)
         else:
@@ -1897,7 +1897,7 @@ def stitch_pavement_to_terminals(
 
         node_alts = pav.node_altitudes
         # Mirror the closed/open form for altitudes if present.
-        alts_open: Optional[List[float]] = None
+        alts_open: list[float] | None = None
         if node_alts is not None:
             alts = list(node_alts)
             alts_open = alts[:-1] if (
@@ -1905,8 +1905,8 @@ def stitch_pavement_to_terminals(
             if len(alts_open) != len(coords_open):
                 alts_open = None
 
-        new_coords: List[Tuple[float, float]] = []
-        new_alts: Optional[List[float]] = (
+        new_coords: list[tuple[float, float]] = []
+        new_alts: list[float] | None = (
             [] if alts_open is not None else None)
         mutated = False
         for vi, (vx, vy) in enumerate(coords_open):
@@ -1984,8 +1984,8 @@ def stitch_pavement_to_terminals(
         if not mutated:
             continue
         # Drop consecutive duplicates introduced by snap-to-corner.
-        deduped: List[Tuple[float, float]] = []
-        deduped_alts: Optional[List[float]] = (
+        deduped: list[tuple[float, float]] = []
+        deduped_alts: list[float] | None = (
             [] if new_alts is not None else None)
         for k, p in enumerate(new_coords):
             if (deduped
@@ -2020,7 +2020,7 @@ def stitch_pavement_to_terminals(
             len(tcoords) > 1 and tcoords[0] == tcoords[-1])
         tcoords_open = tcoords[:-1] if ring_closed else list(tcoords)
         m = len(tcoords_open)
-        out: List[Tuple[float, float]] = []
+        out: list[tuple[float, float]] = []
         for ei in range(m):
             out.append(tcoords_open[ei])
             if ei in inserts:
@@ -2125,16 +2125,16 @@ def stitch_pavement_to_flat_runways(
             node_alts is not None
             and len(node_alts) == n_pav + 1
             and node_alts[0] == node_alts[-1])
-        pav_alts: Optional[List[float]] = None
+        pav_alts: list[float] | None = None
         if node_alts is not None and (
                 len(node_alts) == n_pav or ring_closed_alts):
             pav_alts = list(node_alts[:-1] if ring_closed_alts
                              else node_alts)
         snapped = [False] * n_pav
-        new_coords: List[Tuple[float, float]] = list(pav_coords)
+        new_coords: list[tuple[float, float]] = list(pav_coords)
         for vi, (vx, vy) in enumerate(pav_coords):
             best_d2 = near_snap2
-            best: Optional[Tuple[object, int, float, float, float]] = None
+            best: tuple[object, int, float, float, float] | None = None
             for rwy in flat_runways:
                 try:
                     rcoords = _open_ring(list(
@@ -2234,12 +2234,12 @@ def stitch_pavement_to_flat_runways(
         # collapse near-duplicate insertions so the runway gets ONE
         # corner per chart-level transition.
         DEDUP_INSERT_M = 3.0
-        out: List[Tuple[float, float]] = []
+        out: list[tuple[float, float]] = []
         for ei in range(m):
             out.append(rcoords_open[ei])
             if ei in inserts:
                 pts = sorted(inserts[ei], key=lambda x: x[0])
-                last_xy: Optional[Tuple[float, float]] = None
+                last_xy: tuple[float, float] | None = None
                 for t, cx, cy in pts:
                     if last_xy is not None:
                         ddx = cx - last_xy[0]
@@ -2315,8 +2315,7 @@ def stitch_pavement_polygons(
     snap_tol2 = snap_corner_m * snap_corner_m
 
     # Cache per-shape open-ring + altitude views.
-    cache: Dict[int, Tuple[
-        List[Tuple[float, float]], List[float]]] = {}
+    cache: dict[int, tuple[list, list[float]]] = {}
     for idx, s in pavements:
         coords = list(s.polygon.exterior.coords)
         ring_closed = (
@@ -2330,8 +2329,8 @@ def stitch_pavement_polygons(
         cache[idx] = (coords_open, alts_open)
 
     # Pending inserts per polygon: {b_idx: {edge_idx: [(t, x, y, z), ...]}}
-    pending: Dict[int, Dict[int, List[
-        Tuple[float, float, float, float]]]] = {}
+    pending: dict[int, dict[int, list[
+        tuple[float, float, float, float]]]] = {}
 
     for a_idx, A in pavements:
         if a_idx not in cache:
@@ -2393,8 +2392,8 @@ def stitch_pavement_polygons(
         B = layout.shapes[b_idx]
         b_coords, b_alts = cache[b_idx]
         m = len(b_coords)
-        new_coords: List[Tuple[float, float]] = []
-        new_alts: List[float] = []
+        new_coords: list[tuple[float, float]] = []
+        new_alts: list[float] = []
         for ei in range(m):
             new_coords.append(b_coords[ei])
             new_alts.append(b_alts[ei])
@@ -2426,7 +2425,7 @@ def stitch_pavement_polygons(
 
 def _vertex_on_any_anchor_edge(
     vx: float, vy: float,
-    anchor_edges: Sequence[Tuple[float, float, float, float]],
+    anchor_edges: Sequence[tuple[float, float, float, float]],
     tol: float,
 ) -> bool:
     tol2 = tol * tol

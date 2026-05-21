@@ -16,7 +16,6 @@ Public API:
 from __future__ import annotations
 
 import math
-from typing import List, Optional, Tuple
 
 import O4_UI_Utils as UI
 from shapely.errors import GEOSException, TopologicalError
@@ -77,7 +76,7 @@ def _drop_orphan_strips(pieces, fixed_shape_polys, min_other_perim_m=10.0):
         if p.geom_type != "Polygon" or p.is_empty:
             out.append(p)
             continue
-        shared_lens: List[float] = []
+        shared_lens: list[float] = []
         total_shared = 0.0
         for fs in fixed_shape_polys:
             try:

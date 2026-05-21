@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import math
 import os
-from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import O4_UI_Utils as UI
 from shapely.errors import GEOSException, TopologicalError
@@ -88,7 +87,7 @@ def _runway_clamped_alt_at(
         x: float, y: float, *,
         dem, tile_lat: int, tile_lon: int,
         runway_shapes, m_to_ll,
-        clamp_radius_m: float, clamp_grade: float) -> Optional[float]:
+        clamp_radius_m: float, clamp_grade: float) -> float | None:
     """DEM at (x, y) clamped UP toward the nearest runway when within
     ``clamp_radius_m`` and the DEM dips below ``runway_e − grade·d``;
     else raw DEM; else None.
@@ -195,7 +194,7 @@ def _clip_boundary_bridges_against_pavement(
         return 0
 
     n_modified = 0
-    new_shapes: List[BuiltShape] = []
+    new_shapes: list[BuiltShape] = []
     for s in layout.shapes:
         if (s.role != ROLE_BOUNDARY
                 or s.ref != "boundary_dem_bridge"
@@ -328,14 +327,14 @@ def _emit_airport_boundary_shape(
     lat0, lon0 = layout.anchor
     cos0 = math.cos(math.radians(lat0))
     R = R_EARTH
-    def m_to_ll(x: float, y: float) -> Tuple[float, float]:
+    def m_to_ll(x: float, y: float) -> tuple[float, float]:
         lat = lat0 + math.degrees(y / R)
         lon = lon0 + math.degrees(x / (R * cos0))
         return lat, lon
 
     # Pre-collect runway polygons + their elevation samplers for
     # the per-vertex distance / clamp lookup.
-    runway_shapes: List[BuiltShape] = [
+    runway_shapes: list[BuiltShape] = [
         s for s in layout.shapes
         if s.role == ROLE_RUNWAY
         and s.polygon is not None
@@ -343,7 +342,7 @@ def _emit_airport_boundary_shape(
     if not runway_shapes:
         return 0
 
-    def _runway_clamped_alt(x: float, y: float) -> Optional[float]:
+    def _runway_clamped_alt(x: float, y: float) -> float | None:
         # Delegates to the module-level single source of truth so the
         # ribbon and the DEM bridge share identical clamp altitudes.
         return _runway_clamped_alt_at(
@@ -352,15 +351,15 @@ def _emit_airport_boundary_shape(
             clamp_radius_m=runway_clamp_radius_m,
             clamp_grade=runway_clamp_grade)
 
-    def _densify_ring(coords: List[Tuple[float, float]]
-                      ) -> List[Tuple[float, float]]:
+    def _densify_ring(coords: list[tuple[float, float]]
+                      ) -> list[tuple[float, float]]:
         """Insert intermediate points so consecutive vertices are
         ≤ ``densify_step_m`` apart.  Closes the ring at the end."""
         if not coords:
             return coords
         if coords[0] == coords[-1]:
             coords = coords[:-1]
-        out: List[Tuple[float, float]] = []
+        out: list[tuple[float, float]] = []
         n = len(coords)
         for i in range(n):
             a = coords[i]
@@ -395,7 +394,7 @@ def _emit_airport_boundary_shape(
         if s.polygon is not None
         and not s.polygon.is_empty
         and s.role != ROLE_BOUNDARY]
-    emitted_pav_union: Optional[Polygon] = None
+    emitted_pav_union: Polygon | None = None
     if pavement_polys:
         try:
             emitted_pav_union = unary_union(pavement_polys)
@@ -403,12 +402,12 @@ def _emit_airport_boundary_shape(
             emitted_pav_union = None
 
     def _rect_for_segment(
-            p0: Tuple[float, float],
-            p1: Tuple[float, float],
+            p0: tuple[float, float],
+            p1: tuple[float, float],
             alt0: float, alt1: float,
-            perp0: Tuple[float, float],
-            perp1: Tuple[float, float],
-            ) -> Optional[Tuple[Polygon, Optional[float], float]]:
+            perp0: tuple[float, float],
+            perp1: tuple[float, float],
+            ) -> tuple[Polygon, float | None, float] | None:
         """Build a 4-corner rect spanning the boundary segment
         p0 → p1.  ``perp0`` / ``perp1`` are PER-VERTEX perpendicular
         offsets (already scaled by half-width) so the rect uses the
@@ -425,7 +424,7 @@ def _emit_airport_boundary_shape(
         # swap the perpendiculars too so each corner gets its
         # vertex's perp.
         if abs(alt0 - alt1) < 0.1:
-            eh: Optional[float] = None
+            eh: float | None = None
             el = round((alt0 + alt1) / 2.0, 1)
         elif alt0 >= alt1:
             eh = round(alt0, 1)
@@ -480,7 +479,7 @@ def _emit_airport_boundary_shape(
         # bevel join (no overlap, no gap between adjacent rects).
         dense_open = dense[:-1] if (dense and dense[0] == dense[-1]) else dense
         N_open = len(dense_open)
-        vertex_perp: List[Tuple[float, float]] = []
+        vertex_perp: list[tuple[float, float]] = []
         for k in range(N_open):
             p_prev = dense_open[(k - 1) % N_open]
             p_cur = dense_open[k]
@@ -638,12 +637,12 @@ def _emit_boundary_dem_bridge(
     cos0 = math.cos(math.radians(lat0))
     R = R_EARTH
 
-    def m_to_ll(x: float, y: float) -> Tuple[float, float]:
+    def m_to_ll(x: float, y: float) -> tuple[float, float]:
         lat = lat0 + math.degrees(y / R)
         lon = lon0 + math.degrees(x / (R * cos0))
         return lat, lon
 
-    runway_shapes: List[BuiltShape] = [
+    runway_shapes: list[BuiltShape] = [
         s for s in layout.shapes
         if s.role == ROLE_RUNWAY
         and s.polygon is not None
@@ -651,7 +650,7 @@ def _emit_boundary_dem_bridge(
     if not runway_shapes:
         return 0
 
-    def _clamped_alt(x: float, y: float) -> Optional[float]:
+    def _clamped_alt(x: float, y: float) -> float | None:
         # Delegates to the module-level single source of truth — the
         # SAME clamp the airport-boundary ribbon uses, so the bridge's
         # outer edge meets the ribbon's inner edge flush.
@@ -661,7 +660,7 @@ def _emit_boundary_dem_bridge(
             clamp_radius_m=runway_clamp_radius_m,
             clamp_grade=runway_clamp_grade)
 
-    def _dem_alt(x: float, y: float) -> Optional[float]:
+    def _dem_alt(x: float, y: float) -> float | None:
         try:
             lat, lon = m_to_ll(x, y)
             return _sample_dem(dem, tile_lat, tile_lon, lat, lon)
@@ -688,7 +687,7 @@ def _emit_boundary_dem_bridge(
         if s.role != ROLE_BOUNDARY
         and s.polygon is not None
         and not s.polygon.is_empty]
-    emitted_pav_union: Optional[Polygon] = None
+    emitted_pav_union: Polygon | None = None
     if pavement_polys:
         try:
             emitted_pav_union = unary_union(pavement_polys)
@@ -705,7 +704,7 @@ def _emit_boundary_dem_bridge(
         and s.ref == "airport_boundary"
         and s.polygon is not None
         and not s.polygon.is_empty]
-    ribbon_union: Optional[Polygon] = None
+    ribbon_union: Polygon | None = None
     if ribbon_polys:
         try:
             ribbon_union = unary_union(ribbon_polys)
@@ -718,7 +717,7 @@ def _emit_boundary_dem_bridge(
     # adjacent to pavement must match the pavement's altitude (not
     # raw DEM) so the bridge actually FILLS the gap between
     # boundary and pavement instead of creating its own valley.
-    pav_edge_pts: List[Tuple[float, float, float]] = []
+    pav_edge_pts: list[tuple[float, float, float]] = []
     for s in layout.shapes:
         if s.role == ROLE_BOUNDARY:
             continue
@@ -775,12 +774,12 @@ def _emit_boundary_dem_bridge(
 
     def _nearest_pav_alt(x: float, y: float,
                          max_d_m: float = 500.0
-                         ) -> Optional[Tuple[float, float]]:
+                         ) -> tuple[float, float] | None:
         """Return ``(alt, distance_m)`` for the nearest pavement
         edge point within ``max_d_m`` of ``(x, y)``, or None when
         no pavement is in range."""
         best_d2 = max_d_m * max_d_m
-        best_alt: Optional[float] = None
+        best_alt: float | None = None
         for px, py, pa in pav_edge_pts:
             d2 = (x - px) * (x - px) + (y - py) * (y - py)
             if d2 < best_d2:
@@ -790,7 +789,7 @@ def _emit_boundary_dem_bridge(
             return None
         return (best_alt, math.sqrt(best_d2))
 
-    def _bridge_alt(x: float, y: float) -> Optional[float]:
+    def _bridge_alt(x: float, y: float) -> float | None:
         """Altitude for a bridge vertex.  Per
         ``feedback_boundary_clamp_asymmetric``: never let the bridge
         dip below the surrounding pavement.
@@ -831,7 +830,7 @@ def _emit_boundary_dem_bridge(
         # Densify the boundary line.
         if ext_coords[0] == ext_coords[-1]:
             ext_coords = ext_coords[:-1]
-        dense: List[Tuple[float, float]] = []
+        dense: list[tuple[float, float]] = []
         n = len(ext_coords)
         for i in range(n):
             ax, ay = ext_coords[i]
@@ -847,7 +846,7 @@ def _emit_boundary_dem_bridge(
         if len(dense) < 4:
             continue
         # Per-vertex clamped + DEM + gap.
-        per_vert: List[Tuple[float, float, float, float]] = []
+        per_vert: list[tuple[float, float, float, float]] = []
         for x, y in dense:
             ca = _clamped_alt(x, y)
             da = _dem_alt(x, y)
@@ -886,7 +885,7 @@ def _emit_boundary_dem_bridge(
         # boundary as cyclic; allow 1-vertex unmarked slack).
         marked_idx = sorted(set(m[0] for m in marked))
         N = len(per_vert)
-        runs: List[List[int]] = []
+        runs: list[list[int]] = []
         if marked_idx:
             cur = [marked_idx[0]]
             for idx in marked_idx[1:]:
@@ -934,9 +933,9 @@ def _emit_boundary_dem_bridge(
             if s.role != ROLE_BOUNDARY
             and s.polygon is not None
             and not s.polygon.is_empty]
-        pav_union_local: Optional[Polygon] = None
-        pav_ring_coords: List[Tuple[float, float]] = []
-        pav_ring_line: Optional[LineString] = None
+        pav_union_local: Polygon | None = None
+        pav_ring_coords: list[tuple[float, float]] = []
+        pav_ring_line: LineString | None = None
         if pav_for_inner:
             try:
                 pav_union_local = unary_union(pav_for_inner)
@@ -967,7 +966,7 @@ def _emit_boundary_dem_bridge(
                 pav_ring_line = None
 
         # Altitude lookup for pav_ring nodes (round to 0.1 m).
-        pav_alt_lookup: Dict[Tuple[int, int], float] = {}
+        pav_alt_lookup: dict[tuple[int, int], float] = {}
         for (px, py, pa) in pav_edge_pts:
             k = (int(round(px * 10)), int(round(py * 10)))
             pav_alt_lookup[k] = float(pa)
@@ -1008,8 +1007,8 @@ def _emit_boundary_dem_bridge(
             # produce.  MUST use the same constant as the ribbon's
             # ``strip_half_width_m`` default so the two meet flush.
             STRIP_HALF_WIDTH_M = BOUNDARY_STRIP_HALF_WIDTH_M
-            raw_outer_pts: List[Tuple[float, float]] = []
-            raw_outer_alts: List[float] = []
+            raw_outer_pts: list[tuple[float, float]] = []
+            raw_outer_alts: list[float] = []
             for ii_in_run, i_dense in enumerate(run):
                 vx, vy = per_vert[i_dense][0], per_vert[i_dense][1]
                 raw_outer_pts.append((vx, vy))
@@ -1043,7 +1042,7 @@ def _emit_boundary_dem_bridge(
             # disambiguated by ``boundary_poly.contains()`` on a
             # short probe.
             outer_pts = []
-            outer_perps: List[Tuple[float, float]] = []
+            outer_perps: list[tuple[float, float]] = []
             outer_alts = list(raw_outer_alts)
             n_raw = len(raw_outer_pts)
             for k, (bx, by) in enumerate(raw_outer_pts):
@@ -1090,8 +1089,8 @@ def _emit_boundary_dem_bridge(
                 pavement per ``feedback_boundary_clamp_asymmetric``).
                 Returns ``(inner_pts, inner_alts)``.
                 """
-                i_pts: List[Tuple[float, float]] = []
-                i_alts: List[float] = []
+                i_pts: list[tuple[float, float]] = []
+                i_alts: list[float] = []
                 for kk, (ox, oy) in enumerate(o_pts):
                     px, py = o_perps[kk]
                     if px == 0.0 and py == 0.0:
@@ -1142,8 +1141,8 @@ def _emit_boundary_dem_bridge(
                     # inward perpendicular instead.
                     return _synth_inner_edge(
                         outer_pts, outer_perps, outer_alts)
-                i_pts: List[Tuple[float, float]] = []
-                i_alts: List[float] = []
+                i_pts: list[tuple[float, float]] = []
+                i_alts: list[float] = []
                 for k_pt, (bx, by) in enumerate(outer_pts):
                     cdx, cdy = ctr.x - bx, ctr.y - by
                     pmag = math.hypot(cdx, cdy)
@@ -1177,7 +1176,7 @@ def _emit_boundary_dem_bridge(
                 # coincide with junction corners, preserving the
                 # shared-vertex invariant).
                 def _nearest_pav_vertex(x: float, y: float
-                                          ) -> Tuple[int, float]:
+                                          ) -> tuple[int, float]:
                     best_i = -1
                     best_d = float('inf')
                     for ii, (px, py) in enumerate(pav_ring_coords):
@@ -1304,7 +1303,7 @@ def _emit_boundary_dem_bridge(
             # catches).  Runway-vs-bridge overlap is small after
             # the canonical-node construction and stays under the
             # overlap-baseline cap on its own.
-            cleanup_subs: List[Polygon] = []
+            cleanup_subs: list[Polygon] = []
             non_runway_pav = [
                 s.polygon for s in layout.shapes
                 if s.role not in (ROLE_BOUNDARY, ROLE_RUNWAY)
@@ -1391,7 +1390,7 @@ def _emit_boundary_dem_bridge(
                 new_coords_open = new_coords
             if len(new_coords_open) < 3:
                 continue
-            canon_alt: Dict[Tuple[int, int], float] = {}
+            canon_alt: dict[tuple[int, int], float] = {}
             for (cx, cy), ca in zip(
                     list(outer_pts) + list(inner_pts),
                     list(outer_alts) + list(inner_alts)):

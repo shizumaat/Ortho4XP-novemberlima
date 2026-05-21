@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import copy
 import math
-from typing import Callable, List, Optional
+from collections.abc import Callable
 
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, Point, Polygon
@@ -72,8 +72,8 @@ def cut_layout_at_tile_boundaries(
         layout: PavementLayout,
         half_width_m: float = 5.0,
         min_piece_area_m2: float = 1.0,
-        current_tile_lat: Optional[int] = None,
-        current_tile_lon: Optional[int] = None,
+        current_tile_lat: int | None = None,
+        current_tile_lon: int | None = None,
         dem=None) -> int:
     """Cut every shape crossing an integer lat or lon tile boundary,
     leaving a ``2 * half_width_m`` wide gap (default 10 m).
@@ -118,7 +118,7 @@ def cut_layout_at_tile_boundaries(
     max_lon = lon0 + math.degrees(maxx / (R_EARTH * cos0))
 
     # Integer lat lines strictly inside the airport's lat range.
-    cut_lines: List[LineString] = []
+    cut_lines: list[LineString] = []
     for lat_int in range(
             int(math.ceil(min_lat)), int(math.floor(max_lat)) + 1):
         if min_lat < lat_int < max_lat:
@@ -204,7 +204,7 @@ def cut_layout_at_tile_boundaries(
                 layout.airport_boundary = None
 
     n_before = len(layout.shapes)
-    new_shapes: List[BuiltShape] = []
+    new_shapes: list[BuiltShape] = []
     for s in layout.shapes:
         if s.polygon is None or s.polygon.is_empty:
             new_shapes.append(s)
@@ -222,7 +222,7 @@ def cut_layout_at_tile_boundaries(
         if diff.is_empty:
             # Source polygon entirely inside the cut buffer.  No
             # pavement pieces but a bridge will be emitted below.
-            pieces: List[Polygon] = []
+            pieces: list[Polygon] = []
         elif diff.geom_type == "Polygon":
             pieces = [diff]
         elif diff.geom_type == "MultiPolygon":
@@ -445,7 +445,7 @@ def nudge_runway_corners_at_seam_junctions(layout: PavementLayout) -> int:
 
 
 def _make_slope_sampler(
-        s: BuiltShape) -> Optional[Callable[[float, float], float]]:
+        s: BuiltShape) -> Callable[[float, float], float] | None:
     """Build a closure that samples a sloped 4-corner rect's
     elevation at any (x, y) by projecting onto the high-mid → low-mid
     axis.  Returns None when ``s`` isn't a 4-corner sloped rect.
@@ -489,12 +489,12 @@ def _clip_sloping_rect_piece(
         orig: BuiltShape,
         piece: Polygon,
         cut_union,
-        slope_sampler: Optional[Callable[[float, float], float]],
+        slope_sampler: Callable[[float, float], float] | None,
         layout=None,
         dem=None,
         tile_lat: int = 0,
         tile_lon: int = 0,
-) -> Optional[List[BuiltShape]]:
+) -> list[BuiltShape] | None:
     """Split a sliced sloping taxi rect into a clean 4-corner sloped
     rect (the bulk) plus a small ``node_altitudes`` filler at the slice.
 
@@ -553,7 +553,7 @@ def _clip_sloping_rect_piece(
         return None
     if pc and pc[0] == pc[-1]:
         pc = pc[:-1]
-    cut_ts: List[float] = []
+    cut_ts: list[float] = []
     for px, py in pc:
         try:
             if Point(px, py).distance(cut_boundary) < 0.75:
@@ -646,7 +646,7 @@ def _clip_sloping_rect_piece(
     clean_s.altitude_low = round(alt_lo, 1)
     clean_s.altitude = None
     clean_s.node_altitudes = None
-    out: List[BuiltShape] = [clean_s]
+    out: list[BuiltShape] = [clean_s]
 
     # Filler = the slice-side remainder of the kept piece — the wedge
     # between the perpendicular clip edge and the actual (oblique) slice.
@@ -752,8 +752,8 @@ def _terrain_pin_slice_nodes(fs, cut_union, clip_pts, layout,
 def _build_piece_shape(
         orig: BuiltShape,
         piece: Polygon,
-        slope_sampler: Optional[Callable[[float, float], float]],
-) -> Optional[BuiltShape]:
+        slope_sampler: Callable[[float, float], float] | None,
+) -> BuiltShape | None:
     """Construct a BuiltShape for one cut piece, copying tags from
     ``orig`` and resampling altitudes for the new polygon vertices.
 

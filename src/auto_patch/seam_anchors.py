@@ -23,7 +23,6 @@ shape pieces falling in the current tile.
 from __future__ import annotations
 
 import math
-from typing import List, Optional, Set, Tuple
 
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, Polygon
@@ -67,7 +66,7 @@ _TAXI_RECT_ROLES = {
 _EDGE_T_TOL = 1e-4
 
 
-def _bucket_key(x: float, y: float) -> Tuple[int, int]:
+def _bucket_key(x: float, y: float) -> tuple[int, int]:
     """Bucket key matching ``elevation._corner_elevation_bucket`` so
     Phase-2 can look up seam anchors directly against the solver's
     vertex graph.  Delegates to ``layout.vertex_bucket`` (the single
@@ -86,7 +85,7 @@ def _split_ring_at_seam(ring, seam_line):
     n = len(ring)
     if n != 4:
         return None
-    intersections: List[Tuple[int, float, Tuple[float, float]]] = []
+    intersections: list[tuple[int, float, tuple[float, float]]] = []
     for i in range(n):
         ax, ay = ring[i]
         bx, by = ring[(i + 1) % n]
@@ -117,7 +116,7 @@ def _split_ring_at_seam(ring, seam_line):
     if (eb - ea) % n != 2:
         return None
     # Build sub-rect A: ring[0..ea], pa, pb, ring[eb+1..n-1]
-    ring_a: List[Tuple[float, float]] = []
+    ring_a: list[tuple[float, float]] = []
     for i in range(ea + 1):
         ring_a.append(ring[i])
     ring_a.append(pa)
@@ -125,7 +124,7 @@ def _split_ring_at_seam(ring, seam_line):
     for i in range(eb + 1, n):
         ring_a.append(ring[i])
     # Build sub-rect B: pa, ring[ea+1..eb], pb
-    ring_b: List[Tuple[float, float]] = [pa]
+    ring_b: list[tuple[float, float]] = [pa]
     for i in range(ea + 1, eb + 1):
         ring_b.append(ring[i])
     ring_b.append(pb)
@@ -136,10 +135,10 @@ def _split_ring_at_seam(ring, seam_line):
 
 def _split_taxi_rect_at_seams(
         shape: BuiltShape,
-        cut_lines: List[LineString],
-        anchor_keys: Set[Tuple[int, int]],
+        cut_lines: list[LineString],
+        anchor_keys: set[tuple[int, int]],
         layout: PavementLayout,
-) -> Optional[List[BuiltShape]]:
+) -> list[BuiltShape] | None:
     """Replace a 4-corner taxi rect with sub-rects produced by
     splitting at each seam crossing, preserving 4-corner geometry.
 
@@ -172,12 +171,12 @@ def _split_taxi_rect_at_seams(
     if len(ring) != 4:
         return None
 
-    rings: List[List[Tuple[float, float]]] = [
+    rings: list[list[tuple[float, float]]] = [
         [(float(x), float(y)) for x, y in ring]]
-    new_corner_pts: List[Tuple[float, float]] = []
+    new_corner_pts: list[tuple[float, float]] = []
     original_pt_keys = {_bucket_key(x, y) for x, y in ring}
     for seam_line in cut_lines:
-        next_rings: List[List[Tuple[float, float]]] = []
+        next_rings: list[list[tuple[float, float]]] = []
         for r in rings:
             poly_r = Polygon(r)
             try:
@@ -208,7 +207,7 @@ def _split_taxi_rect_at_seams(
     # keys for the solver's HARD-anchor pass.
     registry = getattr(layout, "canonical_points", None)
 
-    def _canon(x: float, y: float) -> Tuple[float, float]:
+    def _canon(x: float, y: float) -> tuple[float, float]:
         if registry is None:
             return (x, y)
         return registry.get_or_add(float(x), float(y))
@@ -217,12 +216,12 @@ def _split_taxi_rect_at_seams(
         cx, cy = _canon(x, y)
         anchor_keys.add(_bucket_key(cx, cy))
 
-    out: List[BuiltShape] = []
+    out: list[BuiltShape] = []
     import copy
     for r in rings:
         canon_ring = [_canon(x, y) for x, y in r]
         # Drop degenerate rings (sub-tol vertices).
-        canon_ring_dedup: List[Tuple[float, float]] = []
+        canon_ring_dedup: list[tuple[float, float]] = []
         for pt in canon_ring:
             if not canon_ring_dedup or canon_ring_dedup[-1] != pt:
                 canon_ring_dedup.append(pt)
@@ -275,7 +274,7 @@ def split_pavement_at_seams(layout: PavementLayout) -> int:
     min_lon = lon0 + math.degrees(minx / (R_EARTH * cos0))
     max_lon = lon0 + math.degrees(maxx / (R_EARTH * cos0))
 
-    cut_lines: List[LineString] = []
+    cut_lines: list[LineString] = []
     for lat_int in range(int(math.ceil(min_lat)),
                           int(math.floor(max_lat)) + 1):
         if min_lat < lat_int < max_lat:
@@ -291,7 +290,7 @@ def split_pavement_at_seams(layout: PavementLayout) -> int:
     if not cut_lines:
         return 0
 
-    anchor_keys: Set[Tuple[int, int]] = set()
+    anchor_keys: set[tuple[int, int]] = set()
     # Per user 2026-05-19: don't add vertices to a sloping taxi rect
     # — every downstream pass (absorption, junction-rule tests,
     # _collect_junction_axes) assumes a canonical 4-corner ring and
@@ -302,8 +301,8 @@ def split_pavement_at_seams(layout: PavementLayout) -> int:
     # solver fills them after seeding seam corners from DEM (the
     # seam keys recorded here drive ``_seed_elevations``' HARD-anchor
     # pass).
-    new_shapes_extra: List[BuiltShape] = []
-    indices_to_drop: List[int] = []
+    new_shapes_extra: list[BuiltShape] = []
+    indices_to_drop: list[int] = []
     for i, shape in enumerate(layout.shapes):
         if shape.role not in _SEAM_SPLIT_ROLES:
             continue
@@ -341,7 +340,7 @@ def split_pavement_at_seams(layout: PavementLayout) -> int:
     # the neighbour sub-rect has its L corner at CIFP).  Convert the
     # entire runway chain to node_altitudes so each corner carries
     # its own altitude through the solver.
-    seam_runway_refs: Set[str] = set()
+    seam_runway_refs: set[str] = set()
     for shape in layout.shapes:
         if (shape.role == ROLE_RUNWAY
                 and shape.node_altitudes
@@ -379,8 +378,8 @@ def split_pavement_at_seams(layout: PavementLayout) -> int:
 
 def _insert_seam_vertices(
         shape: BuiltShape,
-        cut_lines: List[LineString],
-        anchor_keys: Set[Tuple[int, int]]) -> Optional[BuiltShape]:
+        cut_lines: list[LineString],
+        anchor_keys: set[tuple[int, int]]) -> BuiltShape | None:
     """Insert intersection points of cut_lines with the shape's
     exterior ring, return a new BuiltShape with seam vertices added.
 
@@ -415,7 +414,7 @@ def _insert_seam_vertices(
     # altitudes (the previous ``[0.0] * n_orig`` placeholder produced
     # silent sea-level cliffs whenever Phase 2 didn't cover the
     # affected vertices — e.g. the MMOX boundary-bridge 1000 m drop).
-    old_alts: Optional[List[float]]
+    old_alts: list[float] | None
     if shape.node_altitudes:
         old_alts = list(shape.node_altitudes[:n_orig])
         if len(old_alts) < n_orig:
@@ -433,10 +432,10 @@ def _insert_seam_vertices(
     # Walk each edge, find intersections with each cut line, insert in
     # parametric order.  Track which inserted vertices are seam-anchored
     # AND which existing vertices sit on a seam.
-    new_ring: List[Tuple[float, float]] = []
-    new_alts: Optional[List[float]] = [] if old_alts is not None else None
-    inserted_idxs: List[int] = []
-    existing_on_seam: List[int] = []  # indices in new_ring of original
+    new_ring: list[tuple[float, float]] = []
+    new_alts: list[float] | None = [] if old_alts is not None else None
+    inserted_idxs: list[int] = []
+    existing_on_seam: list[int] = []  # indices in new_ring of original
                                        # ring vertices that lie on a seam
 
     for i in range(n_orig):
@@ -449,7 +448,7 @@ def _insert_seam_vertices(
         edge_len = edge.length
         if edge_len < 1e-6:
             continue
-        ips: List[Tuple[float, Tuple[float, float]]] = []
+        ips: list[tuple[float, tuple[float, float]]] = []
         for cl in cut_lines:
             try:
                 inter = edge.intersection(cl)
@@ -505,7 +504,7 @@ def _insert_seam_vertices(
     # leave node_altitudes=None so the solver assigns; the geometric
     # vertices and anchor keys recorded above are still enough for
     # cross-tile parity and HARD-anchoring.
-    closed_alts: Optional[List[float]]
+    closed_alts: list[float] | None
     if new_alts is not None:
         closed_alts = new_alts + [new_alts[0]]
     else:

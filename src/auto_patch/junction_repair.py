@@ -26,7 +26,6 @@ Public API:
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Tuple
 
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, Point, Polygon
@@ -73,7 +72,7 @@ __all__ = [
 
 def _build_clamp_geom_state(
         layout: "PavementLayout"
-        ) -> "Optional[Tuple[List, List, Dict, set]]":
+        ) -> tuple[list, list, dict, set] | None:
     """Build the GEOMETRY-ONLY state used by
     :func:`_clamp_junction_free_vertices`.
 
@@ -102,11 +101,11 @@ def _build_clamp_geom_state(
     if layout.anchor is None:
         return None
 
-    edge_geom: List[Tuple[int, int, int,
+    edge_geom: list[tuple[int, int, int,
                           float, float, float, float]] = []
-    edge_endpoints: List[Tuple[Tuple[int, int],
-                                Tuple[int, int]]] = []
-    bucket_count: Dict[Tuple[int, int], int] = {}
+    edge_endpoints: list[tuple[tuple[int, int],
+                                tuple[int, int]]] = []
+    bucket_count: dict[tuple[int, int], int] = {}
     for si, s in enumerate(layout.shapes):
         if s.polygon is None or s.polygon.is_empty:
             continue
@@ -133,7 +132,7 @@ def _build_clamp_geom_state(
 
     shared_buckets = {b for b, c in bucket_count.items() if c >= 2}
 
-    grid: Dict[Tuple[int, int], List[int]] = {}
+    grid: dict[tuple[int, int], list[int]] = {}
     cell = NEIGHBOUR_CLAMP_RADIUS_M
     for ei, (_, _, _, ax, ay, bx, by) in enumerate(edge_geom):
         x0, x1 = (ax, bx) if ax <= bx else (bx, ax)
@@ -151,7 +150,7 @@ def _build_clamp_geom_state(
 
 def _clamp_junction_free_vertices(
         layout: "PavementLayout",
-        geom_state: "Optional[Tuple[List, List, Dict, set]]" = None,
+        geom_state: tuple[list, list, dict, set] | None = None,
         ) -> int:
     """Per-junction free-vertex clamp using every nearby shape
     boundary as a soft anchor (Layer 2).
@@ -178,7 +177,7 @@ def _clamp_junction_free_vertices(
     # Read current per-shape elevation arrays once per call so the
     # inner clamp loop can look up edge endpoint elevations by
     # (shape_idx, vertex_idx) without re-parsing shapes per edge.
-    shape_elevs: Dict[int, List[float]] = {}
+    shape_elevs: dict[int, list[float]] = {}
     for si, s in enumerate(layout.shapes):
         if s.polygon is None or s.polygon.is_empty:
             continue
@@ -209,7 +208,7 @@ def _clamp_junction_free_vertices(
 
     # Reconstruct the boundary_edges layout used downstream
     # ``(shape_idx, ax, ay, bx, by, ea, eb)`` with current elevs.
-    boundary_edges: List[Tuple[int, float, float, float, float,
+    boundary_edges: list[tuple[int, float, float, float, float,
                                 float, float]] = []
     boundary_edges_append = boundary_edges.append
     for (si, vi_a, vi_b, ax, ay, bx, by) in edge_geom:
@@ -426,7 +425,7 @@ def _subdivide_violating_junctions(layout: "PavementLayout") -> int:
     from shapely.geometry import LineString
     from shapely.ops import split as _shapely_split
     n_subdivided = 0
-    new_shapes: List[BuiltShape] = []
+    new_shapes: list[BuiltShape] = []
     for s in layout.shapes:
         if s.role != ROLE_JUNCTION:
             new_shapes.append(s)
@@ -459,9 +458,9 @@ def _subdivide_violating_junctions(layout: "PavementLayout") -> int:
             new_shapes.append(s)
             continue
 
-        def _worst_grade(pts: List[Tuple[float, float]],
-                         es: List[float]) -> Tuple[float,
-                                                    Optional[Tuple[int, int]]]:
+        def _worst_grade(pts: list[tuple[float, float]],
+                         es: list[float]) -> tuple[float,
+                                                    tuple[int, int] | None]:
             """Worst all-pair Euclidean grade within the polygon.
             Per user 2026-05-18: junction grade applies across the
             entire interior surface, not just along centerlines —
@@ -523,7 +522,7 @@ def _subdivide_violating_junctions(layout: "PavementLayout") -> int:
         except _GEOM_EXC:
             new_shapes.append(s)
             continue
-        sub_polys: List[Polygon] = []
+        sub_polys: list[Polygon] = []
         try:
             for g in getattr(parts, "geoms", [parts]):
                 if (g is None or g.is_empty
@@ -543,7 +542,7 @@ def _subdivide_violating_junctions(layout: "PavementLayout") -> int:
         snap_r2 = SUBDIVIDE_SNAP_RADIUS_M ** 2
 
         def _snap_to_ring(qx: float, qy: float
-                          ) -> Tuple[float, float, int]:
+                          ) -> tuple[float, float, int]:
             """Return the closest ring vertex within snap radius
             and its index, or ``(qx, qy, -1)`` if no ring vertex
             is close enough.
@@ -602,15 +601,15 @@ def _subdivide_violating_junctions(layout: "PavementLayout") -> int:
         # technically separate the worst pair but introduce new
         # cut-line-vertex pairs of similar magnitude (the bug
         # that made the relaxed version worse than the strict).
-        validated_subs: List[Tuple[Polygon, List[Tuple[float, float]],
-                                    List[float]]] = []
+        validated_subs: list[tuple[Polygon, list[tuple[float, float]],
+                                    list[float]]] = []
         cut_was_useful = True
         for sp in sub_polys:
             sub_ring_raw = list(sp.exterior.coords)
             if sub_ring_raw and sub_ring_raw[0] == sub_ring_raw[-1]:
                 sub_ring_raw = sub_ring_raw[:-1]
-            snapped_pts: List[Tuple[float, float]] = []
-            snapped_hints: List[int] = []
+            snapped_pts: list[tuple[float, float]] = []
+            snapped_hints: list[int] = []
             for (qx, qy) in sub_ring_raw:
                 sx, sy, hint = _snap_to_ring(qx, qy)
                 if (snapped_pts and abs(snapped_pts[-1][0] - sx) < 1e-9
@@ -699,11 +698,11 @@ def _subdivide_violating_junctions(layout: "PavementLayout") -> int:
 
 def _try_iso_elevation_cut(  # noqa: C901 (long helper, see body)
     s: "BuiltShape",
-    ring: List[Tuple[float, float]],
-    elevs: List[float],
+    ring: list[tuple[float, float]],
+    elevs: list[float],
     parent_worst_grade: float,
-) -> Optional[List[Tuple["Polygon", List[Tuple[float, float]],
-                         List[float]]]]:
+) -> list[tuple["Polygon", list[tuple[float, float]],
+                         list[float]]] | None:
     """Cut a junction polygon along its median-elevation contour.
 
     Returns a list of validated sub-polygons (each
@@ -726,7 +725,7 @@ def _try_iso_elevation_cut(  # noqa: C901 (long helper, see body)
     if z_max - z_min < 0.5:
         return None
     median = 0.5 * (z_min + z_max)
-    crossings: List[Tuple[float, float, int]] = []
+    crossings: list[tuple[float, float, int]] = []
     for k in range(n):
         z_a = elevs[k]
         z_b = elevs[(k + 1) % n]
@@ -753,7 +752,7 @@ def _try_iso_elevation_cut(  # noqa: C901 (long helper, see body)
         parts = _shapely_split(s.polygon, cut)
     except _GEOM_EXC:
         return None
-    sub_polys: List[Polygon] = []
+    sub_polys: list[Polygon] = []
     for g in getattr(parts, "geoms", [parts]):
         if (g is None or g.is_empty
                 or g.geom_type != "Polygon"
@@ -765,7 +764,7 @@ def _try_iso_elevation_cut(  # noqa: C901 (long helper, see body)
     snap_r2 = SUBDIVIDE_SNAP_RADIUS_M ** 2
 
     def _snap_to_ring(qx: float, qy: float
-                      ) -> Tuple[float, float, int]:
+                      ) -> tuple[float, float, int]:
         best_k = -1
         best_d2 = snap_r2
         for k in range(n):
@@ -807,14 +806,14 @@ def _try_iso_elevation_cut(  # noqa: C901 (long helper, see body)
                 best_e = ea + t * (eb - ea)
         return round(float(best_e), 1)
 
-    validated_subs: List[Tuple[Polygon, List[Tuple[float, float]],
-                                List[float]]] = []
+    validated_subs: list[tuple[Polygon, list[tuple[float, float]],
+                                list[float]]] = []
     for sp in sub_polys:
         sub_ring_raw = list(sp.exterior.coords)
         if sub_ring_raw and sub_ring_raw[0] == sub_ring_raw[-1]:
             sub_ring_raw = sub_ring_raw[:-1]
-        snapped_pts: List[Tuple[float, float]] = []
-        snapped_hints: List[int] = []
+        snapped_pts: list[tuple[float, float]] = []
+        snapped_hints: list[int] = []
         for (qx, qy) in sub_ring_raw:
             sx, sy, hint = _snap_to_ring(qx, qy)
             if (snapped_pts
@@ -903,7 +902,7 @@ def _merge_sliver_junctions_into_neighbours(
     if len(junction_idxs) < 2:
         return 0
     # Cache per-shape vertex sets in meter coords for fast tests.
-    j_verts: Dict[int, List[Tuple[float, float]]] = {}
+    j_verts: dict[int, list[tuple[float, float]]] = {}
     for i in junction_idxs:
         try:
             coords = list(layout.shapes[i].polygon.exterior.coords)
@@ -914,12 +913,12 @@ def _merge_sliver_junctions_into_neighbours(
             coords = coords[:-1]
         j_verts[i] = coords
     tol2 = shared_vertex_tol_m * shared_vertex_tol_m
-    merge_into: Dict[int, int] = {}
+    merge_into: dict[int, int] = {}
     for i in junction_idxs:
         ai = layout.shapes[i].polygon.area
         if ai >= sliver_area_m2:
             continue
-        best_idx: Optional[int] = None
+        best_idx: int | None = None
         best_area = 0.0
         for j in junction_idxs:
             if j == i:
@@ -963,7 +962,7 @@ def _merge_sliver_junctions_into_neighbours(
                 # makes X-Plane interpolate from neighbour shapes
                 # and produces the "terrain all over the place"
                 # apron the user saw.
-                lookup: List[Tuple[float, float, float]] = []
+                lookup: list[tuple[float, float, float]] = []
                 for src_shape in (target_shape, sliver_shape):
                     if not src_shape.node_altitudes:
                         # Sloped or flat alternatives.
@@ -1011,7 +1010,7 @@ def _merge_sliver_junctions_into_neighbours(
                     merged_coords_open = merged_coords[:-1]
                 else:
                     merged_coords_open = merged_coords
-                new_alts: List[float] = []
+                new_alts: list[float] = []
                 for mx, my in merged_coords_open:
                     best_d2 = float("inf")
                     best_alt = 0.0
@@ -1093,7 +1092,7 @@ def _drop_thin_orphan_slivers(
         return 0
 
     # Cache per-shape open-ring vertices in meter coords.
-    verts: Dict[int, List[Tuple[float, float]]] = {}
+    verts: dict[int, list[tuple[float, float]]] = {}
     for i in junction_idxs + rect_idxs:
         try:
             c = list(layout.shapes[i].polygon.exterior.coords)
@@ -1105,7 +1104,7 @@ def _drop_thin_orphan_slivers(
         verts[i] = c
 
     tol2 = shared_vertex_tol_m * shared_vertex_tol_m
-    to_drop: List[int] = []
+    to_drop: list[int] = []
     for i in junction_idxs:
         p = layout.shapes[i].polygon
         try:
@@ -1184,7 +1183,7 @@ def _drop_floating_orphan_junctions(
     Returns count dropped.
     """
     tol2 = shared_vertex_tol_m * shared_vertex_tol_m
-    rings: Dict[int, List[Tuple[float, float]]] = {}
+    rings: dict[int, list[tuple[float, float]]] = {}
     for k, s in enumerate(layout.shapes):
         if s.polygon is None or s.polygon.is_empty:
             rings[k] = []
@@ -1198,7 +1197,7 @@ def _drop_floating_orphan_junctions(
             c = c[:-1]
         rings[k] = c
 
-    to_drop: List[int] = []
+    to_drop: list[int] = []
     for i, s in enumerate(layout.shapes):
         if s.role != ROLE_JUNCTION or s.polygon is None or s.polygon.is_empty:
             continue
@@ -1287,7 +1286,7 @@ def _split_sloped_rects_at_violations(
     on_edge_tol2 = on_edge_tol_m * on_edge_tol_m
 
     # Collect candidate sloped rects.
-    candidates: List[int] = []
+    candidates: list[int] = []
     for i, s in enumerate(layout.shapes):
         if s.role not in SLOPED_ROLES:
             continue
@@ -1314,7 +1313,7 @@ def _split_sloped_rects_at_violations(
     # rect's long edge, but the junction vertex itself stays put
     # ~ ``on_edge_tol_m`` perpendicular off the new sub-rect's edge
     # (Tests 2 & 3 then flag the same geometry from two sides).
-    j_verts: List[Tuple[float, float, int, int]] = []
+    j_verts: list[tuple[float, float, int, int]] = []
     for s_idx, s in enumerate(layout.shapes):
         if s.role != ROLE_JUNCTION:
             continue
@@ -1344,8 +1343,8 @@ def _split_sloped_rects_at_violations(
 
     n_splits = 0
     # shape_idx -> [(cluster_t, [(j_idx, v_idx, jx, jy), ...]), ...]
-    splits: Dict[int, List[Tuple[float,
-                                  List[Tuple[int, int, float, float]]]]] = {}
+    splits: dict[int, list[tuple[float,
+                                  list[tuple[int, int, float, float]]]]] = {}
     for idx in candidates:
         s = layout.shapes[idx]
         coords = list(s.polygon.exterior.coords)
@@ -1359,7 +1358,7 @@ def _split_sloped_rects_at_violations(
         # so we can move the originating vertex to the new sub-rect
         # corner after splitting.
         rect_corner_set = {(c[0], c[1]) for c in coords}
-        ts: List[Tuple[float, int, int, float, float]] = []
+        ts: list[tuple[float, int, int, float, float]] = []
         for jx, jy, j_idx, v_idx in j_verts:
             if (jx, jy) in rect_corner_set:
                 continue
@@ -1378,8 +1377,8 @@ def _split_sloped_rects_at_violations(
             # vertex inside a cluster snaps to the same new sub-rect
             # corner (representative t of the cluster).
             ts.sort(key=lambda e: e[0])
-            clusters: List[Tuple[float,
-                                  List[Tuple[int, int, float, float]]]] = []
+            clusters: list[tuple[float,
+                                  list[tuple[int, int, float, float]]]] = []
             for (t, j_idx, v_idx, jx, jy) in ts:
                 if clusters and t - clusters[-1][0] <= 0.05:
                     clusters[-1][1].append((j_idx, v_idx, jx, jy))
@@ -1395,10 +1394,10 @@ def _split_sloped_rects_at_violations(
     # the new sub-rect corner at its cluster's t.  ``junction_moves``
     # collects per-junction vertex updates and is applied once per
     # junction shape so node_altitudes alignment is preserved.
-    new_shapes: List["BuiltShape"] = []
+    new_shapes: list["BuiltShape"] = []
     drop_idxs: set = set()
     # junction_shape_idx -> {vertex_idx -> new_xy}
-    junction_moves: Dict[int, Dict[int, Tuple[float, float]]] = {}
+    junction_moves: dict[int, dict[int, tuple[float, float]]] = {}
     for idx, clusters in splits.items():
         s = layout.shapes[idx]
         coords = list(s.polygon.exterior.coords)
@@ -1826,10 +1825,10 @@ def _absorb_rects_at_junction_perimeters(
         return 0
 
     drop_indices: set = set()
-    new_rect_shapes: List["BuiltShape"] = []
+    new_rect_shapes: list["BuiltShape"] = []
     n_dropped = 0
     n_clipped = 0
-    junction_extensions: Dict[int, List[Polygon]] = {}
+    junction_extensions: dict[int, list[Polygon]] = {}
 
     for r_idx, r in enumerate(layout.shapes):
         if r.role not in SLOPING_ROLES:
@@ -1870,7 +1869,7 @@ def _absorb_rects_at_junction_perimeters(
             LineString([rc[0], rc[1]]),
             LineString([rc[2], rc[3]]),
         ]
-        absorbed: List[Tuple[float, float, int, int]] = []
+        absorbed: list[tuple[float, float, int, int]] = []
         for edge_idx, edge_ls in enumerate(sloping_edges):
             edge_len = edge_ls.length
             if edge_len < 1.0:
@@ -1929,14 +1928,14 @@ def _absorb_rects_at_junction_perimeters(
         if not absorbed:
             continue
         intervals = sorted([(s, e) for s, e, _j, _ei in absorbed])
-        merged: List[Tuple[float, float]] = [intervals[0]]
+        merged: list[tuple[float, float]] = [intervals[0]]
         for s, e in intervals[1:]:
             if s <= merged[-1][1]:
                 merged[-1] = (merged[-1][0],
                                 max(merged[-1][1], e))
             else:
                 merged.append((s, e))
-        kept: List[Tuple[float, float]] = []
+        kept: list[tuple[float, float]] = []
         prev_end = 0.0
         for s, e in merged:
             if s > prev_end:
@@ -2091,7 +2090,7 @@ def _absorb_rects_at_junction_perimeters(
         if j.polygon is None or j.polygon.is_empty:
             continue
         # Build altitude lookup BEFORE replacing polygon.
-        alt_lookup: Dict[Tuple[int, int], float] = {}
+        alt_lookup: dict[tuple[int, int], float] = {}
         def _bkey(x, y):
             return (round(x / bucket), round(y / bucket))
         try:

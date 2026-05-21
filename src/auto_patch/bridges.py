@@ -32,10 +32,10 @@ from __future__ import annotations
 import math
 import os
 import re
-from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, Polygon
+from shapely.geometry.base import BaseGeometry
 from shapely.ops import linemerge, nearest_points, unary_union
 
 # Narrow exception tuple for shapely / numeric-geometry failure
@@ -98,7 +98,7 @@ HIGHWAY_CARRIAGEWAY_WIDTH_M = {
 }
 
 
-def _carriageway_width_for(highway_type: Optional[str],
+def _carriageway_width_for(highway_type: str | None,
                             default_m: float) -> float:
     """Return the carriageway width in metres for an OSM highway
     type, falling back to ``default_m`` for unknown types.
@@ -140,7 +140,7 @@ def _emit_tunnel_portals(
         # don't affect X-Plane's airport mesh and were generating
         # spurious ramps along distant urban roads.
         max_boundary_dist_m: float = 1000.0,
-        excluded_way_ids: Optional[set] = None,
+        excluded_way_ids: set | None = None,
         ) -> int:
     """For each tunnel portal (each end of an OSM ``aeroway=*``
     ``tunnel=yes|building_passage`` way), emit the visible road-
@@ -204,14 +204,14 @@ def _emit_tunnel_portals(
     cos0 = math.cos(math.radians(lat0))
     R = R_EARTH
 
-    def _to_m(lon: float, lat: float) -> Tuple[float, float]:
+    def _to_m(lon: float, lat: float) -> tuple[float, float]:
         return (math.radians(lon - lon0) * R * cos0,
                 math.radians(lat - lat0) * R)
 
-    def _m_to_ll(x: float, y: float) -> Tuple[float, float]:
+    def _m_to_ll(x: float, y: float) -> tuple[float, float]:
         return (lat0 + math.degrees(y / R),
                 lon0 + math.degrees(x / (R * cos0)))
-    nodes_m: Dict[str, Tuple[float, float]] = {}
+    nodes_m: dict[str, tuple[float, float]] = {}
     for nid, (lat, lon) in nodes_r.items():
         nodes_m[nid] = _to_m(lon, lat)
     HW_TUNNEL_TYPES = {
@@ -221,8 +221,8 @@ def _emit_tunnel_portals(
     }
     TUNNEL_VALUES = {"yes", "building_passage"}
     # Build node-to-way and way-by-id indices for surface-road walking.
-    way_by_id: Dict[str, Tuple[List[str], Dict[str, str]]] = {}
-    node_to_ways: Dict[str, List[str]] = {}
+    way_by_id: dict[str, tuple[list[str], dict[str, str]]] = {}
+    node_to_ways: dict[str, list[str]] = {}
     for wid, nrefs, tags in ways_r:
         way_by_id[wid] = (nrefs, tags)
         for n in nrefs:
@@ -243,9 +243,9 @@ def _emit_tunnel_portals(
     # Helper: airport surface elevation at (cx, cy).  Use the
     # boundary-ribbon ``node_altitudes`` (CIFP-anchored, grade-
     # clamped) when a vertex is nearby, else fall back to DEM.
-    def _airport_elevation_at(cx: float, cy: float) -> Optional[float]:
+    def _airport_elevation_at(cx: float, cy: float) -> float | None:
         best_d = float('inf')
-        best_alt: Optional[float] = None
+        best_alt: float | None = None
         for s in layout.shapes:
             if s.role != ROLE_BOUNDARY:
                 continue
@@ -277,8 +277,8 @@ def _emit_tunnel_portals(
     # Helper: orient ``o_nrefs`` so it starts at ``anchor_nid`` and
     # walks AWAY from ``anchor_nid``.  When the anchor is mid-way,
     # picks the longer side.  Returns None if anchor isn't on the way.
-    def _orient_away(o_nrefs: List[str],
-                      anchor_nid: str) -> Optional[List[str]]:
+    def _orient_away(o_nrefs: list[str],
+                      anchor_nid: str) -> list[str] | None:
         try:
             idx = o_nrefs.index(anchor_nid)
         except ValueError:
@@ -290,7 +290,7 @@ def _emit_tunnel_portals(
         if idx == len(o_nrefs) - 1:
             return backward
         # Mid-way: pick the longer leg.
-        def _leg_len(refs: List[str]) -> float:
+        def _leg_len(refs: list[str]) -> float:
             return sum(
                 math.hypot(
                     nodes_m[refs[i + 1]][0] - nodes_m[refs[i]][0],
@@ -313,7 +313,7 @@ def _emit_tunnel_portals(
     def _walk_surface(portal_nid: str,
                       tunnel_wid: str,
                       length_m: float
-                      ) -> Optional[List[Tuple[float, float]]]:
+                      ) -> list[tuple[float, float]] | None:
         if portal_nid not in nodes_m:
             return None
         # Pick the FIRST surface highway way leaving the portal.
@@ -332,15 +332,15 @@ def _emit_tunnel_portals(
                 tlen = math.hypot(tdx, tdy) or 1.0
                 # Tunnel direction points INTO the tunnel; the
                 # surface walk goes the OPPOSITE way.
-                tunnel_outward_dir: Optional[Tuple[float, float]] = (
+                tunnel_outward_dir: tuple[float, float] | None = (
                     -tdx / tlen, -tdy / tlen)
             else:
                 tunnel_outward_dir = None
         else:
             tunnel_outward_dir = None
 
-        first_way: Optional[str] = None
-        first_refs: Optional[List[str]] = None
+        first_way: str | None = None
+        first_refs: list[str] | None = None
         best_align: float = -2.0
         for other_wid in node_to_ways.get(portal_nid, []):
             if other_wid == tunnel_wid:
@@ -371,13 +371,13 @@ def _emit_tunnel_portals(
         if first_refs is None or first_way is None:
             return None
 
-        pts: List[Tuple[float, float]] = []
+        pts: list[tuple[float, float]] = []
         cum = 0.0
         visited_ways = {tunnel_wid, first_way}
         current_refs = first_refs
         current_hw = way_by_id[first_way][1].get("highway")
 
-        def _append_node(p: Tuple[float, float]) -> bool:
+        def _append_node(p: tuple[float, float]) -> bool:
             """Append ``p`` to ``pts``; truncate at ``length_m``.
             Returns True if walk should stop (length reached)."""
             nonlocal cum
@@ -420,8 +420,8 @@ def _emit_tunnel_portals(
             ed_len = math.hypot(end_dir_x, end_dir_y) or 1.0
             end_dir = (end_dir_x / ed_len, end_dir_y / ed_len)
             best_score = -2.0
-            best_wid: Optional[str] = None
-            best_refs: Optional[List[str]] = None
+            best_wid: str | None = None
+            best_refs: list[str] | None = None
             for cand_wid in node_to_ways.get(last_nid, []):
                 if cand_wid in visited_ways:
                     continue
@@ -490,7 +490,7 @@ def _emit_tunnel_portals(
 
     # Collect portal data: (portal_node_id, tunnel_wid, walk_pts,
     # hw_type, apt_elev_at_portal, dem_at_far_end).
-    portal_data: List[Tuple[str, str, List[Tuple[float, float]],
+    portal_data: list[tuple[str, str, list[tuple[float, float]],
                               str, float, float]] = []
     excluded = excluded_way_ids or set()
     for tw_id, t_nrefs, t_tags in ways_r:
@@ -526,7 +526,7 @@ def _emit_tunnel_portals(
             # above ``max_ramp_grade``.  At a 0.05 m worst-case
             # round-up, a 15 m segment rounds to ≤ 0.33 %/error.
             min_segment_m = 15.0
-            merged: List[Tuple[float, float]] = [walk[0]]
+            merged: list[tuple[float, float]] = [walk[0]]
             for k in range(1, len(walk)):
                 d = math.hypot(walk[k][0] - merged[-1][0],
                                walk[k][1] - merged[-1][1])
@@ -548,7 +548,7 @@ def _emit_tunnel_portals(
             # (round(72/50) == 1) and the user noticed those single-
             # segment ramps don't track the road's grade closely.
             target_seg_m = 50.0
-            densified: List[Tuple[float, float]] = [walk[0]]
+            densified: list[tuple[float, float]] = [walk[0]]
             for k in range(1, len(walk)):
                 px, py = densified[-1]
                 qx, qy = walk[k]
@@ -572,7 +572,7 @@ def _emit_tunnel_portals(
             # length matches or exceeds that requirement (i.e. the
             # grade from portal to here is ≤ max_ramp_grade).
             cum = 0.0
-            kept_pts: List[Tuple[float, float]] = [walk[0]]
+            kept_pts: list[tuple[float, float]] = [walk[0]]
             grade_ok_at: float = 0.0  # cum dist where grade is OK
             for i in range(1, len(walk)):
                 seg_len = math.hypot(
@@ -633,7 +633,7 @@ def _emit_tunnel_portals(
     # OPPOSITE ends of the same tunnel — emitting only one cluster
     # would skip one tunnel mouth, which is what was happening on
     # the small 33 m secondary tunnel south of Terminal 2).
-    clusters: List[List[int]] = []
+    clusters: list[list[int]] = []
     used: set = set()
     for i in range(len(portal_data)):
         if i in used:
@@ -657,7 +657,7 @@ def _emit_tunnel_portals(
                 used.add(j)
         clusters.append(cl)
     # Per-cluster: build cap + arm walls + ramp chain.
-    exclusion_zones: List[Polygon] = []
+    exclusion_zones: list[Polygon] = []
     n_emitted = 0
     half_wall_w = retaining_wall_width_m / 2.0
     for cl in clusters:
@@ -726,10 +726,10 @@ def _emit_tunnel_portals(
             walk_pts = [(p[0] + shift_x, p[1] + shift_y)
                         for p in walk_pts]
 
-        def _build_wall_segment(p_a: Tuple[float, float],
-                                 p_b: Tuple[float, float],
+        def _build_wall_segment(p_a: tuple[float, float],
+                                 p_b: tuple[float, float],
                                  perp_off: float
-                                 ) -> Optional[Polygon]:
+                                 ) -> Polygon | None:
             """4-corner wall polygon parallel to segment ``a-b``,
             offset by ``perp_off`` from the segment's centre line,
             ``retaining_wall_width_m`` thick."""
@@ -813,8 +813,8 @@ def _emit_tunnel_portals(
         arm_off = combined_half + wall_gap_m + half_wall_w
         n_w = len(walk_pts)
         # Per-vertex perpendicular direction (unit vector).
-        verts_perp: List[Tuple[float, float]] = []
-        verts_scale: List[float] = []  # extension scale (1/cos(θ/2))
+        verts_perp: list[tuple[float, float]] = []
+        verts_scale: list[float] = []  # extension scale (1/cos(θ/2))
         for i in range(n_w):
             if i == 0:
                 s = (walk_pts[1][0] - walk_pts[0][0],
@@ -857,7 +857,7 @@ def _emit_tunnel_portals(
                 verts_scale.append(1.0 / cos_half)
 
         def _vertex_offset(idx: int, off: float
-                           ) -> Tuple[float, float]:
+                           ) -> tuple[float, float]:
             px, py = walk_pts[idx]
             nx, ny = verts_perp[idx]
             scaled = off * verts_scale[idx]
@@ -1030,7 +1030,7 @@ def _emit_tunnel_portals(
         if tunnel_union is None or tunnel_union.is_empty:
             return n_emitted
         excl_union = tunnel_union.buffer(boundary_clearance_m)
-        kept_shapes: List[BuiltShape] = []
+        kept_shapes: list[BuiltShape] = []
         for s in layout.shapes:
             if s.role != ROLE_BOUNDARY:
                 kept_shapes.append(s)
@@ -1155,7 +1155,7 @@ def _scenery_has_bridge_objects(
         r"(?i)sign|signage|trafficsign|truss|crane")
     bridge_def_idx: set = set()
     object_def_count = 0
-    placements: List[Tuple[int, float, float]] = []
+    placements: list[tuple[int, float, float]] = []
     try:
         with open(text_path, "r", encoding="utf-8",
                   errors="replace") as f:
@@ -1189,7 +1189,7 @@ def _scenery_has_bridge_objects(
     cos0 = math.cos(math.radians(lat0))
     R = R_EARTH
 
-    def _to_m(lon_v: float, lat_v: float) -> Tuple[float, float]:
+    def _to_m(lon_v: float, lat_v: float) -> tuple[float, float]:
         return (math.radians(lon_v - lon0) * R * cos0,
                 math.radians(lat_v - lat0) * R)
     try:
@@ -1258,7 +1258,7 @@ def _emit_taxi_bridges(
         # mesh is handled by the road-approach helper.
         return 0
     n_emitted = 0
-    exclusion_zones: List[Polygon] = []
+    exclusion_zones: list[Polygon] = []
     for s in bridge_shapes:
         rc = list(s.polygon.exterior.coords)
         if rc and rc[0] == rc[-1]:
@@ -1342,7 +1342,7 @@ def _emit_taxi_bridges(
         if bridge_union is not None and not bridge_union.is_empty:
             try:
                 excl = bridge_union.buffer(boundary_clearance_m)
-                kept_shapes: List[BuiltShape] = []
+                kept_shapes: list[BuiltShape] = []
                 for s in layout.shapes:
                     if s.role != ROLE_BOUNDARY:
                         kept_shapes.append(s)
@@ -1453,13 +1453,13 @@ def _emit_underpass_road_approaches(
     lat0, lon0 = layout.anchor
     cos0 = math.cos(math.radians(lat0))
     R = R_EARTH
-    def _to_m(lon: float, lat: float) -> Tuple[float, float]:
+    def _to_m(lon: float, lat: float) -> tuple[float, float]:
         return (math.radians(lon - lon0) * R * cos0,
                 math.radians(lat - lat0) * R)
-    def _m_to_ll(x: float, y: float) -> Tuple[float, float]:
+    def _m_to_ll(x: float, y: float) -> tuple[float, float]:
         return (lat0 + math.degrees(y / R),
                 lon0 + math.degrees(x / (R * cos0)))
-    nodes_m: Dict[str, Tuple[float, float]] = {}
+    nodes_m: dict[str, tuple[float, float]] = {}
     for nid, (lat, lon) in nodes_r.items():
         nodes_m[nid] = _to_m(lon, lat)
     HW_TYPES = {
@@ -1474,7 +1474,7 @@ def _emit_underpass_road_approaches(
     # itself bridges over something else IS tagged bridge=yes;
     # we skip those because we don't want to emit road shapes
     # for road-on-road bridges.
-    road_lines: List[LineString] = []
+    road_lines: list[LineString] = []
     for _wid, nrefs, tags in ways_r:
         if tags.get("highway") not in HW_TYPES:
             continue
@@ -1682,7 +1682,7 @@ def _emit_through_airport_depressed_roads(
         retaining_wall_width_m: float = 1.0,
         wall_gap_m: float = 0.5,
         boundary_clearance_m: float = 1.0,
-        ) -> Tuple[int, set]:
+        ) -> tuple[int, set]:
     """For each public road that ENTERS the airport boundary
     AND passes under a tagged ``aeroway=*, bridge=yes`` way (or
     is connected via OSM-graph node-sharing to a road that does)
@@ -1775,20 +1775,20 @@ def _emit_through_airport_depressed_roads(
     cos0 = math.cos(math.radians(lat0))
     R = R_EARTH
 
-    def _to_m(lon: float, lat: float) -> Tuple[float, float]:
+    def _to_m(lon: float, lat: float) -> tuple[float, float]:
         return (math.radians(lon - lon0) * R * cos0,
                 math.radians(lat - lat0) * R)
 
-    def _m_to_ll(x: float, y: float) -> Tuple[float, float]:
+    def _m_to_ll(x: float, y: float) -> tuple[float, float]:
         return (lat0 + math.degrees(y / R),
                 lon0 + math.degrees(x / (R * cos0)))
 
-    def _airport_elevation_at(cx: float, cy: float) -> Optional[float]:
+    def _airport_elevation_at(cx: float, cy: float) -> float | None:
         # Reuse pattern from _emit_tunnel_portals: prefer the
         # boundary-ribbon's per-vertex altitude near the point,
         # fall back to DEM.
         best_d = float('inf')
-        best_alt: Optional[float] = None
+        best_alt: float | None = None
         for s in layout.shapes:
             if s.role != ROLE_BOUNDARY:
                 continue
@@ -1818,8 +1818,8 @@ def _emit_through_airport_depressed_roads(
             return None
 
     # ── Bridge LineStrings (airport-layer OSM) ─────────────────
-    bridge_lines: List[LineString] = []
-    nodes_a_m: Dict[str, Tuple[float, float]] = {}
+    bridge_lines: list[LineString] = []
+    nodes_a_m: dict[str, tuple[float, float]] = {}
     for nid, (lat, lon) in nodes_a.items():
         nodes_a_m[nid] = _to_m(lon, lat)
     for wid, nrefs, tags in ways_a:
@@ -1847,10 +1847,10 @@ def _emit_through_airport_depressed_roads(
         "primary_link", "secondary_link", "tertiary_link",
         "residential", "service", "unclassified",
     }
-    nodes_r_m: Dict[str, Tuple[float, float]] = {}
+    nodes_r_m: dict[str, tuple[float, float]] = {}
     for nid, (lat, lon) in nodes_r.items():
         nodes_r_m[nid] = _to_m(lon, lat)
-    way_data: List[Tuple[str, LineString, List[str]]] = []
+    way_data: list[tuple[str, LineString, list[str]]] = []
     for wid, nrefs, tags in ways_r:
         if tags.get("highway") not in HW_TYPES:
             continue
@@ -1876,7 +1876,7 @@ def _emit_through_airport_depressed_roads(
     # ── Seed: ways whose inside-boundary section crosses a bridge ──
     BRIDGE_PROXIMITY_M = 5.0
     seed_depressed: set = set()
-    inside_geom_by_wid: Dict[str, "BaseGeometry"] = {}
+    inside_geom_by_wid: dict[str, BaseGeometry] = {}
     for wid, ls, _nrefs in way_data:
         try:
             inside = ls.intersection(boundary)
@@ -1912,14 +1912,14 @@ def _emit_through_airport_depressed_roads(
     # INSIDE the boundary, they must be depressed too (otherwise
     # the seed and the connecting way disagree on altitude at
     # their shared node and X-Plane renders a cliff).
-    node_to_ways: Dict[str, List[str]] = {}
-    way_lookup: Dict[str, Tuple[LineString, List[str]]] = {}
+    node_to_ways: dict[str, list[str]] = {}
+    way_lookup: dict[str, tuple[LineString, list[str]]] = {}
     for wid, ls, nrefs in way_data:
         way_lookup[wid] = (ls, nrefs)
         for n in nrefs:
             node_to_ways.setdefault(n, []).append(wid)
     depressed_set: set = set(seed_depressed)
-    queue: List[str] = list(seed_depressed)
+    queue: list[str] = list(seed_depressed)
     while queue:
         wid = queue.pop()
         ls, nrefs = way_lookup[wid]
@@ -1949,18 +1949,18 @@ def _emit_through_airport_depressed_roads(
 
     # ── Emit one set of polygons per depressed way ─────────────
     n_emitted = 0
-    exclusion_zones: List[Polygon] = []
+    exclusion_zones: list[Polygon] = []
     half_w = road_width_m / 2.0
 
-    def _smooth_walk(pts: List[Tuple[float, float]],
+    def _smooth_walk(pts: list[tuple[float, float]],
                       min_segment_m: float = 15.0
-                      ) -> List[Tuple[float, float]]:
+                      ) -> list[tuple[float, float]]:
         """Drop near-colinear / closely-spaced intermediate
         vertices so altitude rounding can't push per-segment
         grade above the design limit."""
         if len(pts) < 3:
             return list(pts)
-        merged: List[Tuple[float, float]] = [pts[0]]
+        merged: list[tuple[float, float]] = [pts[0]]
         for k in range(1, len(pts)):
             d = math.hypot(pts[k][0] - merged[-1][0],
                            pts[k][1] - merged[-1][1])
@@ -2056,7 +2056,7 @@ def _emit_through_airport_depressed_roads(
                 continue
             elev_low = apt_elev - depression_depth_m
             cum = 0.0
-            kept_pts: List[Tuple[float, float]] = [walk[0]]
+            kept_pts: list[tuple[float, float]] = [walk[0]]
             grade_ok_at: float = 0.0
             for i in range(1, len(walk)):
                 seg_len = math.hypot(
@@ -2108,8 +2108,8 @@ def _emit_through_airport_depressed_roads(
             # Per-vertex bisector perpendicular for shared corners
             # at bends (same pattern as _emit_tunnel_portals).
             n_w = len(walk)
-            verts_perp: List[Tuple[float, float]] = []
-            verts_scale: List[float] = []
+            verts_perp: list[tuple[float, float]] = []
+            verts_scale: list[float] = []
             for i in range(n_w):
                 if i == 0:
                     s = (walk[1][0] - walk[0][0],
@@ -2148,7 +2148,7 @@ def _emit_through_airport_depressed_roads(
                     verts_scale.append(1.0 / cos_half)
 
             def _vertex_offset(idx: int, off: float
-                               ) -> Tuple[float, float]:
+                               ) -> tuple[float, float]:
                 px, py = walk[idx]
                 nx, ny = verts_perp[idx]
                 scaled = off * verts_scale[idx]
@@ -2210,7 +2210,7 @@ def _emit_through_airport_depressed_roads(
                 or depressed_union.is_empty):
             return (n_emitted, depressed_set)
         excl_union = depressed_union.buffer(boundary_clearance_m)
-        kept_shapes: List[BuiltShape] = []
+        kept_shapes: list[BuiltShape] = []
         for s in layout.shapes:
             if s.role != ROLE_BOUNDARY:
                 kept_shapes.append(s)
