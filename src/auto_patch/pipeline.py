@@ -605,6 +605,18 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # legitimate DSF pavement polygons are within 2.2× apt.dat's
     # largest, well under the 3× cap.
     DSF_MAX_AREA_VS_APT_DAT_RATIO = 3.0
+    # Boundary gate: the apt.dat row-130 boundary is authoritative for
+    # what belongs to this airport — we must not pull in any pavement
+    # outside it.  Foreign DSF/OSM pavement is CLIPPED to the boundary
+    # (only the buffer below, a small tile-/projection-alignment slop,
+    # is tolerated past the drawn line).  The bbox distance gate
+    # (DSF_AIRPORT_RADIUS_M, 5 km) is far too coarse to separate
+    # closely-spaced airports: HEAZ (Almaza) and HECA (Cairo Intl) sit
+    # ~1 km apart in tile +30+031, so HEAZ's 5 km bbox swallowed HECA's
+    # entire DSF apron/terminal pavement.  Both airports then emitted
+    # overlapping polygons at conflicting elevations into the same tile
+    # DSF — corrupting the mesh and crashing X-Plane on load.
+    DSF_AIRPORT_BOUNDARY_BUFFER_M = 50.0
     apt_pav_union: Optional[Polygon] = None
     apt_pav_largest_area: float = 0.0
     if pav_polys:
@@ -614,6 +626,21 @@ def build_airport_pavement(icao: str, xplane_root: str,
             apt_pav_union = None
         apt_pav_largest_area = max(
             (p.area for p in pav_polys), default=0.0)
+
+    # Buffered row-130 boundary in meter space, used to gate DSF and
+    # OSM pavement to this airport's own footprint.  None when the
+    # airport has no usable boundary → falls back to the bbox-only
+    # distance gate below (unchanged behaviour for sparse-apt.dat
+    # airports like CYXY).
+    boundary_gate_m: Optional[Polygon] = None
+    _ab = getattr(layout, "airport_boundary", None)
+    if _ab is not None and not _ab.is_empty:
+        try:
+            _bg = _ab.buffer(DSF_AIRPORT_BOUNDARY_BUFFER_M)
+            if not _bg.is_empty:
+                boundary_gate_m = _bg
+        except _GEOM_EXC:
+            boundary_gate_m = None
 
     # ── OSM-aeroway-footprint vs apt.dat coverage check ───────────
     # Per user 2026-04-29: prioritize apt.dat as the pavement
@@ -635,6 +662,20 @@ def build_airport_pavement(icao: str, xplane_root: str,
         xplane_root, icao, anchor[0], anchor[1])
     osm_aeroway_footprint = _build_osm_aeroway_footprint(
         nodes, ways, to_m)
+    # Scope the OSM aeroway footprint to this airport's boundary so a
+    # neighbouring airport's OSM aprons/taxiways don't count as this
+    # airport's pavement (which would inflate the OSM-vs-apt.dat gap
+    # and re-admit the neighbour's DSF pavement through the gap clip).
+    if (boundary_gate_m is not None
+            and osm_aeroway_footprint is not None
+            and not osm_aeroway_footprint.is_empty):
+        try:
+            _clipped_fp = osm_aeroway_footprint.intersection(
+                boundary_gate_m)
+            if not _clipped_fp.is_empty:
+                osm_aeroway_footprint = _clipped_fp
+        except _GEOM_EXC:
+            pass
     # Gap = OSM-known pavement that apt.dat doesn't cover.  When
     # this is a small fraction, apt.dat is sufficient; skip DSF
     # entirely.
@@ -737,6 +778,28 @@ def build_airport_pavement(icao: str, xplane_root: str,
                                 or px_min > apt_bbox_m[2]
                                 or py_max < apt_bbox_m[1]
                                 or py_min > apt_bbox_m[3]):
+                            n_dsf_dropped_far += 1
+                            continue
+                    # Boundary gate: clip the DSF polygon to this
+                    # airport's row-130 boundary so nothing outside it
+                    # (a neighbouring airport's pavement) is pulled in.
+                    # A polygon entirely outside clips to empty → drop;
+                    # one straddling the boundary keeps only its inside
+                    # part.
+                    if boundary_gate_m is not None:
+                        try:
+                            clipped_b = pm.intersection(boundary_gate_m)
+                            if (clipped_b.geom_type == "MultiPolygon"
+                                    and not clipped_b.is_empty):
+                                clipped_b = max(clipped_b.geoms,
+                                                key=lambda g: g.area)
+                            if (clipped_b.is_empty
+                                    or clipped_b.geom_type != "Polygon"
+                                    or clipped_b.area < 5.0):
+                                n_dsf_dropped_far += 1
+                                continue
+                            pm = clipped_b
+                        except _GEOM_EXC:
                             n_dsf_dropped_far += 1
                             continue
                     # apt.dat-priority gate (user 2026-04-29):
@@ -1278,6 +1341,17 @@ def build_airport_pavement(icao: str, xplane_root: str,
     MIN_VERTEX_SPACING_M = 2.0
     terminal_polys: List[Polygon] = []
     for otp in osm_terminal_polys:
+        # Boundary gate: OSM aeroway=terminal buildings are loaded
+        # from a wide region and include neighbouring airports'
+        # terminals.  A terminal belongs wholly to one airport, so
+        # keep it only when its centroid lies within this airport's
+        # row-130 boundary.
+        if boundary_gate_m is not None:
+            try:
+                if not boundary_gate_m.contains(otp.centroid):
+                    continue
+            except _GEOM_EXC:
+                pass
         # Apt.dat-only candidates — DSF polygons (overlays, gap
         # fills) shouldn't compete for terminal-pad selection.
         pad = _terminal_pad_from_building(otp, apt_only_pav_polys)
