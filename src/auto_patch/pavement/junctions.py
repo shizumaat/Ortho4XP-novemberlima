@@ -34,6 +34,8 @@ with internal callers in ``O4_Airport_Pavement_Builder``):
 from __future__ import annotations
 
 import math
+
+from ..geom_safe import min_rotated_rect
 from collections.abc import Sequence
 
 from shapely.errors import GEOSException, TopologicalError
@@ -310,7 +312,7 @@ def _polygon_min_thickness(poly: "Polygon") -> float:
     the polygon's minimum-rotated-rectangle and return the shorter
     side length."""
     try:
-        mrr = poly.minimum_rotated_rectangle
+        mrr = min_rotated_rect(poly)
         if mrr.is_empty or mrr.geom_type != "Polygon":
             return 0.0
         coords = list(mrr.exterior.coords)

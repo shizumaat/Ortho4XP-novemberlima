@@ -32,6 +32,7 @@ from shapely.ops import unary_union
 # modes.  Programming errors propagate so they surface immediately.
 _GEOM_EXC = (ValueError, GEOSException, TopologicalError)
 
+from .geom_safe import min_rotated_rect
 from .config import (
     AXIS_ALIGN_TOL_DEG,
     SLIVER_ANGLE_THRESHOLD_DEG,
@@ -174,7 +175,7 @@ def longest_runway_axis_deg(layout: PavementLayout) -> float | None:
         # MRR long-side gives the runway's main axis even when its
         # polygon is a long thin segment.
         try:
-            mrr = p.minimum_rotated_rectangle
+            mrr = min_rotated_rect(p)
         except _GEOM_EXC:
             continue
         if mrr.is_empty or mrr.geom_type != "Polygon":
@@ -1735,7 +1736,7 @@ def _polygon_neck_metrics(
     long axis when a neck split fires).
     """
     try:
-        mrr = poly.minimum_rotated_rectangle
+        mrr = min_rotated_rect(poly)
     except _GEOM_EXC:
         return 0.0, 0.0, (0.0, 0.0, 0.0, 0.0)
     if mrr.is_empty or mrr.geom_type != "Polygon":

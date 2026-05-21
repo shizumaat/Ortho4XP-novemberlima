@@ -55,6 +55,8 @@ from dataclasses import dataclass
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import Polygon
 
+from ..geom_safe import min_rotated_rect
+
 # Narrow exception tuple for shapely / numeric-geometry failure
 # modes.  Programming errors propagate so they surface immediately.
 _GEOM_EXC = (ValueError, GEOSException, TopologicalError)
@@ -152,7 +154,7 @@ def _long_axis(polygon: Polygon
     if polygon is None or polygon.is_empty:
         return None
     try:
-        mrr = polygon.minimum_rotated_rectangle
+        mrr = min_rotated_rect(polygon)
     except _GEOM_EXC:
         return None
     if mrr is None or mrr.is_empty or not hasattr(mrr, "exterior"):
@@ -405,7 +407,7 @@ def build_taxiway_rects(
         return None
 
     try:
-        mrr = polygon.minimum_rotated_rectangle
+        mrr = min_rotated_rect(polygon)
     except _GEOM_EXC:
         return None
     if mrr is None or mrr.is_empty:

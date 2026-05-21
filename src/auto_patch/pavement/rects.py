@@ -34,6 +34,7 @@ from shapely.ops import nearest_points, unary_union
 
 from ..canonical_points import CanonicalPointRegistry
 from ..config import MIN_SEGMENT_LEN_M
+from ..geom_safe import min_rotated_rect
 from ..layout import (
     ROLE_CROSS_CONNECTOR,
     ROLE_PRIMARY_PARALLEL,
@@ -593,7 +594,7 @@ def _merge_collinear_rects_principled(
                     continue
                 # Each rect's own half-width (MRR short side / 2).
                 def _rect_hw(p):
-                    mrr = p.minimum_rotated_rectangle
+                    mrr = min_rotated_rect(p)
                     c = list(mrr.exterior.coords)
                     if len(c) < 5:
                         return 0.0
@@ -696,7 +697,7 @@ def _merge_collinear_rects(
                 # Width similarity: compare rect widths (from their
                 # polygons' minimum-rotated-rect short-side).
                 def _rect_width(p):
-                    mrr = p.minimum_rotated_rectangle
+                    mrr = min_rotated_rect(p)
                     coords = list(mrr.exterior.coords)
                     if len(coords) < 5:
                         return 0.0

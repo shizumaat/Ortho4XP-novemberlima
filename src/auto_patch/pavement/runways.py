@@ -43,6 +43,7 @@ from ..layout import (
     ROLE_STUB,
     corner_alts_from_high_low,
 )
+from ..geom_safe import min_rotated_rect
 from .vertices import _snap_polygon_vertices_to_rect_corners
 
 # Narrow exception tuple for shapely / numeric-geometry failure
@@ -198,7 +199,7 @@ def _runway_segment_centerline(poly):
     # via the oriented bounding box and project polygon vertices to
     # find each axis-end's midpoint.
     try:
-        obb = poly.minimum_rotated_rectangle
+        obb = min_rotated_rect(poly)
         obb_coords = list(obb.exterior.coords)
         if obb_coords and obb_coords[0] == obb_coords[-1]:
             obb_coords = obb_coords[:-1]

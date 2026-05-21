@@ -41,6 +41,7 @@ from shapely.ops import substring, unary_union
 from shapely.validation import make_valid
 
 from . import taxiway_skeleton as TS
+from ..geom_safe import min_rotated_rect
 
 # Narrow exception tuple for shapely / numeric-geometry failure
 # modes.  Programming errors propagate so they surface immediately.
@@ -188,7 +189,7 @@ def _mrr_midline_and_width(polygon: Polygon) -> tuple[LineString | None,
     if polygon is None or polygon.is_empty:
         return (None, 0.0)
     try:
-        mrr = polygon.minimum_rotated_rectangle
+        mrr = min_rotated_rect(polygon)
     except _GEOM_EXC:
         return (None, 0.0)
     if mrr is None or mrr.is_empty or not hasattr(mrr, "exterior"):
@@ -222,7 +223,7 @@ def _mrr_aspect_short(polygon: Polygon) -> tuple[float, float]:
     if polygon is None or polygon.is_empty:
         return (0.0, 0.0)
     try:
-        mrr = polygon.minimum_rotated_rectangle
+        mrr = min_rotated_rect(polygon)
     except _GEOM_EXC:
         return (0.0, 0.0)
     if mrr is None or mrr.is_empty or not hasattr(mrr, "exterior"):
