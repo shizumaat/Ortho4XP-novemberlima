@@ -2444,13 +2444,29 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # separately).  Cut a 10 m gap along every tile boundary
         # line that passes through the airport's pavement footprint;
         # Ortho4XP + X-Plane stitch the seam at render time.
-        from .tile_cut import cut_layout_at_tile_boundaries
+        from .tile_cut import (
+            cut_layout_at_tile_boundaries,
+            nudge_runway_corners_at_seam_junctions,
+        )
         n_tile_delta = cut_layout_at_tile_boundaries(
             layout,
             current_tile_lat=current_tile_lat,
             current_tile_lon=current_tile_lon,
             dem=dem,
         )
+
+        # Tile_cut can leave a junction bridging a runway corner and a
+        # terrain-pinned seam stub at an ungradeable step (the runway
+        # follows its FAA profile while the stub is pinned to the
+        # immutable seam DEM).  Nudge the abutting runway corner toward
+        # the seam (user 2026-05-20) so the final solver below can grade
+        # the junction.  Detectable only here — the stub is created by
+        # tile_cut, after runway-profile redistribution.
+        n_rwy_nudged = nudge_runway_corners_at_seam_junctions(layout)
+        if n_rwy_nudged:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: nudged {n_rwy_nudged} runway "
+                f"sub-rect(s) toward seam pavement at junction bridges.")
 
         # Final per-surface solver pass against the FULLY-SETTLED
         # geometry — runs AFTER tile_cut.  Every mutation since the

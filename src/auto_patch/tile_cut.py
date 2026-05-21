@@ -31,7 +31,8 @@ from shapely.ops import unary_union
 from .layout import (
     BuiltShape, PavementLayout, R_EARTH,
     ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
-    ROLE_STUB, ROLE_CROSS_CONNECTOR, vertex_bucket,
+    ROLE_STUB, ROLE_CROSS_CONNECTOR, ROLE_RUNWAY, ROLE_JUNCTION,
+    ROLE_APRON, ROLE_TERMINAL, vertex_bucket,
 )
 
 
@@ -52,7 +53,20 @@ _GEOM_EXC = (ValueError, TypeError, GEOSException,
              TopologicalError, IndexError)
 
 
-__all__ = ["cut_layout_at_tile_boundaries"]
+__all__ = ["cut_layout_at_tile_boundaries",
+           "nudge_runway_corners_at_seam_junctions"]
+
+# A vertex this close (m) to an integer tile line is a tile-cut seam
+# boundary vertex (tile_cut offsets them ``half_width_m`` = 5 m off the
+# line) — terrain-pinned and effectively immutable.
+_SEAM_LINE_TOL_M = 6.0
+# Within-junction grade cap (matches ROLE_GRADE_LIMITS[junction] = 1.5%).
+_RUNWAY_SEAM_GRADE_CAP = 0.015
+# Pavement roles that can be a tile-cut seam stub abutting a junction.
+_SEAM_PIECE_ROLES = frozenset({
+    ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
+    ROLE_STUB, ROLE_CROSS_CONNECTOR, ROLE_APRON, ROLE_TERMINAL,
+})
 
 
 def cut_layout_at_tile_boundaries(
@@ -262,6 +276,173 @@ def cut_layout_at_tile_boundaries(
                 new_shapes.append(new_s)
     layout.shapes = new_shapes
     return len(layout.shapes) - n_before
+
+
+def _shape_corner_alts(s: BuiltShape):
+    """Return ``(open_coords, open_alts)`` — the shape's exterior ring
+    (closing repeat dropped) and a per-vertex elevation list, or
+    ``(open_coords, None)`` when no elevation is known."""
+    if s.polygon is None or s.polygon.is_empty:
+        return [], None
+    try:
+        coords = list(s.polygon.exterior.coords)
+    except _GEOM_EXC:
+        return [], None
+    if coords and coords[0] == coords[-1]:
+        coords = coords[:-1]
+    n = len(coords)
+    if n == 0:
+        return coords, None
+    if s.node_altitudes and len(s.node_altitudes) >= n:
+        return coords, [float(s.node_altitudes[k]) for k in range(n)]
+    if s.altitude_high is not None and s.altitude_low is not None:
+        sampler = _make_slope_sampler(s)
+        if sampler is not None:
+            return coords, [sampler(x, y) for x, y in coords]
+    if s.altitude is not None:
+        return coords, [float(s.altitude)] * n
+    return coords, None
+
+
+def nudge_runway_corners_at_seam_junctions(layout: PavementLayout) -> int:
+    """Nudge runway corners that abut a terrain-pinned tile-seam stub
+    through a junction so the junction can hold grade (user 2026-05-20).
+
+    Runs AFTER ``cut_layout_at_tile_boundaries`` (which creates the seam
+    stubs) and BEFORE the final per-surface solve.  By this point a
+    junction that bridges the runway and a seam stub contains BOTH the
+    runway corner and the seam vertex, so the bridge is detectable here
+    (it is NOT at runway-redistribute time — the stub doesn't exist
+    yet).
+
+    For each junction holding both a runway corner and a seam vertex,
+    if the runway corner is more than the grade cap × (corner-to-seam
+    distance) from the seam's immutable altitude, the runway corner is
+    moved (UP or DOWN) just into grade.  The change is written to every
+    runway sub-rect AND junction sharing that corner (canonical sloped
+    rects convert to ``node_altitudes``); the final solver then grades
+    the junction body against the adjusted, hard-anchored runway corner.
+
+    Returns the number of runway sub-rects modified.
+    """
+    if not layout.shapes or layout.anchor is None:
+        return 0
+
+    # 1. Terrain-pinned seam vertices.  A pavement piece is a tile-cut
+    #    seam stub when one of its vertices sits within _SEAM_LINE_TOL_M
+    #    of an integer tile line (tile_cut offsets the cut edge 5 m off
+    #    the line).  That whole piece is pinned to the immutable seam
+    #    DEM, so ALL its vertices count — including the interface
+    #    vertices it shares with an abutting junction (those sit further
+    #    than 5 m from the line but carry the pinned elevation).
+    #    bucket -> (x, y, elev).
+    #    The pinned elevation lives on the cut-EDGE vertices (≤ 5 m off
+    #    the line); a piece's interface vertices (shared with a
+    #    junction, further from the line) have not yet been pulled to
+    #    that value at this point in the pipeline — the final solver
+    #    does that.  So each non-edge vertex is assigned the nearest
+    #    cut-edge vertex's pinned elevation, i.e. the value it WILL
+    #    take, so the runway corner is graded against it correctly.
+    seam_pts: dict = {}
+    for s in layout.shapes:
+        if s.role not in _SEAM_PIECE_ROLES:
+            continue
+        coords, alts = _shape_corner_alts(s)
+        if alts is None:
+            continue
+        edge_vs = []
+        for k, (x, y) in enumerate(coords):
+            lat, lon = layout.m_to_ll(x, y)
+            cos0 = math.cos(math.radians(lat))
+            m_lat = abs(lat - round(lat)) * R_EARTH * math.pi / 180.0
+            m_lon = abs(lon - round(lon)) * R_EARTH * cos0 * math.pi / 180.0
+            if min(m_lat, m_lon) <= _SEAM_LINE_TOL_M:
+                edge_vs.append((x, y, alts[k]))
+        if not edge_vs:
+            continue  # not a tile-cut seam piece
+        for x, y in coords:
+            ex, ey, ee = min(
+                edge_vs, key=lambda e: (e[0] - x) ** 2 + (e[1] - y) ** 2)
+            seam_pts[vertex_bucket(x, y)] = (x, y, ee)
+    if not seam_pts:
+        return 0
+
+    # 2. Runway corners: bucket -> (x, y, elev).
+    runway_corner: dict = {}
+    for s in layout.shapes:
+        if s.role != ROLE_RUNWAY:
+            continue
+        coords, alts = _shape_corner_alts(s)
+        if alts is None:
+            continue
+        for k, (x, y) in enumerate(coords):
+            runway_corner[vertex_bucket(x, y)] = (x, y, alts[k])
+    if not runway_corner:
+        return 0
+
+    # 3. Junctions bridging a runway corner and a seam vertex → target.
+    targets: dict = {}  # runway corner bucket -> target elevation
+    for s in layout.shapes:
+        if s.role != ROLE_JUNCTION:
+            continue
+        coords, _ = _shape_corner_alts(s)
+        buckets = [vertex_bucket(x, y) for x, y in coords]
+        rw = [(b, runway_corner[b]) for b in buckets if b in runway_corner]
+        sm = [seam_pts[b] for b in buckets if b in seam_pts]
+        if not rw or not sm:
+            continue
+        for rb, (rx, ry, relev) in rw:
+            # The runway corner must stay within grade of EVERY seam
+            # vertex in this junction — intersect their feasible bands.
+            lo = -float("inf")
+            hi = float("inf")
+            for sx, sy, selev in sm:
+                d = math.hypot(sx - rx, sy - ry)
+                if d < 1.0:
+                    continue
+                budget = _RUNWAY_SEAM_GRADE_CAP * d
+                lo = max(lo, selev - budget)
+                hi = min(hi, selev + budget)
+            if lo > hi:
+                continue  # seam vertices conflict — can't satisfy both
+            if relev < lo:
+                tgt = lo
+            elif relev > hi:
+                tgt = hi
+            else:
+                continue  # already within grade of every seam vertex
+            # If several junctions touch the same corner, keep the most
+            # restrictive (largest required move).
+            prev = targets.get(rb)
+            if prev is None or abs(tgt - relev) > abs(prev - relev):
+                targets[rb] = round(tgt, 1)
+    if not targets:
+        return 0
+
+    # 4. Apply: rewrite every runway sub-rect and junction sharing a
+    #    target bucket (canonical rects → node_altitudes).
+    n_runway = 0
+    for s in layout.shapes:
+        if s.role not in (ROLE_RUNWAY, ROLE_JUNCTION):
+            continue
+        coords, alts = _shape_corner_alts(s)
+        if alts is None:
+            continue
+        new_alts = list(alts)
+        touched = False
+        for k, (x, y) in enumerate(coords):
+            b = vertex_bucket(x, y)
+            if b in targets and abs(new_alts[k] - targets[b]) > 1e-6:
+                new_alts[k] = targets[b]
+                touched = True
+        if touched:
+            s.node_altitudes = new_alts + [new_alts[0]]
+            s.altitude = None
+            s.altitude_high = None
+            s.altitude_low = None
+            if s.role == ROLE_RUNWAY:
+                n_runway += 1
+    return n_runway
 
 
 def _make_slope_sampler(
