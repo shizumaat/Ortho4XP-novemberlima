@@ -8,6 +8,7 @@ default polynomial-fit altitude model with authoritative aeronautical data.
 Auto-generated patches are named {ICAO}_auto.patch.osm and are given lower
 priority than user-provided manual patches.
 """
+from __future__ import annotations
 
 import os
 import re
@@ -103,9 +104,12 @@ from .pavement.runway_segments import (
 # ──────────────────────────────────────────────────────────────────────────────
 # Main Entry Point
 # ──────────────────────────────────────────────────────────────────────────────
-def generate_auto_patches(tile, cifp_path, taxiway_data=None,
-                          building_data=None, dico_airports=None,
-                          road_data=None, mode="ICAO"):
+def generate_auto_patches(tile, cifp_path: str,
+                          taxiway_data: dict | None = None,
+                          building_data: dict | None = None,
+                          dico_airports: dict | None = None,
+                          road_data: dict | None = None,
+                          mode: str = "ICAO") -> list[str]:
     """Generate auto-patch files for all CIFP airports within a tile.
 
     Scans the CIFP directory for airport data files, parses runway threshold
@@ -170,7 +174,7 @@ def generate_auto_patches(tile, cifp_path, taxiway_data=None,
 
     # Scan all CIFP airports
     cifp_airports = discover_cifp_airports(cifp_path)
-    auto_patched = []
+    auto_patched: list[str] = []
 
     for icao, filepath in sorted(cifp_airports.items()):
         # In ICAO mode, only patch airports with a real 4-letter ICAO code

@@ -22,6 +22,8 @@ Public API:
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import O4_UI_Utils as UI
 from shapely.errors import GEOSException, TopologicalError
@@ -66,14 +68,25 @@ from .pavement.vertices import (
     _push_junction_vertices_off_taxi_rect_edges,
 )
 
+if TYPE_CHECKING:
+    import O4_DEM_Utils
+    from shapely.geometry import Polygon
+    from .apt_dat_reader import Airport
+    from .layout import PavementLayout
+
 
 __all__ = ["run_phase2"]
 
 
-def run_phase2(layout, icao, xplane_root, apt, *,
-               nodes, ways, to_m, apron_candidates,
-               tile_dem=None,
-               current_tile_lat=None, current_tile_lon=None):
+def run_phase2(layout: PavementLayout, icao: str, xplane_root: str,
+               apt: Airport, *,
+               nodes: dict[str, tuple[float, float]],
+               ways: list[tuple[str, list[str], dict[str, str]]],
+               to_m: Callable[[float, float], tuple[float, float]],
+               apron_candidates: list[Polygon],
+               tile_dem: O4_DEM_Utils.DEM | None = None,
+               current_tile_lat: int | None = None,
+               current_tile_lon: int | None = None) -> None:
     """Phase-2 elevation solve + feature emit.  Mutates layout.
 
     ``tile_dem`` (when supplied by the tile-pipeline driver) is the

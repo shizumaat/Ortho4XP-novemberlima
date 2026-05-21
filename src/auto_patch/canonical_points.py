@@ -60,7 +60,7 @@ class CanonicalPointRegistry:
         # Cell size = tol so neighbours-of-neighbours covers the
         # full lookup radius.
         self._cell = max(tol_m, 0.1)
-        self._points: List[Tuple[float, float]] = []
+        self._points: list[tuple[float, float]] = []
         # cell key (ix, iy) → list of indices into self._points
         self._index: dict = {}
 
@@ -78,7 +78,7 @@ class CanonicalPointRegistry:
         return len(self._points) - before
 
     def get_or_add(self, x: float, y: float
-                    ) -> Tuple[float, float]:
+                    ) -> tuple[float, float]:
         """Return the canonical (x, y) for the given input point.
 
         If an existing canonical point sits within ``tol_m`` of
@@ -91,7 +91,7 @@ class CanonicalPointRegistry:
         return self._add(x, y)
 
     def find_nearest(self, x: float, y: float,
-                      max_d: float) -> Optional[Tuple[float, float]]:
+                      max_d: float) -> tuple[float, float] | None:
         """Find the nearest canonical point within ``max_d`` of
         (x, y).  Does NOT add.  Returns None if no entry qualifies.
         """
@@ -101,18 +101,18 @@ class CanonicalPointRegistry:
     def size(self) -> int:
         return len(self._points)
 
-    def points(self) -> List[Tuple[float, float]]:
+    def points(self) -> list[tuple[float, float]]:
         """Return a snapshot of every canonical point (insertion
         order).  Caller-owned list."""
         return list(self._points)
 
     # ── internals ─────────────────────────────────────────────────
 
-    def _cell_key(self, x: float, y: float) -> Tuple[int, int]:
+    def _cell_key(self, x: float, y: float) -> tuple[int, int]:
         return (int(math.floor(x / self._cell)),
                 int(math.floor(y / self._cell)))
 
-    def _add(self, x: float, y: float) -> Tuple[float, float]:
+    def _add(self, x: float, y: float) -> tuple[float, float]:
         idx = len(self._points)
         coords = (float(x), float(y))
         self._points.append(coords)
@@ -121,12 +121,12 @@ class CanonicalPointRegistry:
         return coords
 
     def _find_nearest(self, x: float, y: float,
-                       max_d: float) -> Optional[Tuple[float, float]]:
+                       max_d: float) -> tuple[float, float] | None:
         # Number of cells in each direction we have to scan to cover
         # the lookup radius.  +1 to be safe at cell boundaries.
         n_cells = int(math.ceil(max_d / self._cell)) + 1
         cx, cy = self._cell_key(x, y)
-        best: Optional[Tuple[float, float]] = None
+        best: tuple[float, float] | None = None
         best_d = max_d
         for dx in range(-n_cells, n_cells + 1):
             for dy in range(-n_cells, n_cells + 1):
@@ -144,9 +144,9 @@ class CanonicalPointRegistry:
 
 
 def snap_polygon_through_registry(
-        poly: Optional[Polygon],
-        registry: Optional[CanonicalPointRegistry],
-) -> Optional[Polygon]:
+        poly: Polygon | None,
+        registry: CanonicalPointRegistry | None,
+) -> Polygon | None:
     """Route every vertex of ``poly``'s exterior + interior rings
     through ``registry.get_or_add`` so drift introduced by
     ``buffer(0)`` / ``unary_union`` / ``simplify`` resolves to

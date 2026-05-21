@@ -25,17 +25,21 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, overload
 
 import O4_UI_Utils as UI
 
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, Polygon
+from shapely.geometry.base import BaseGeometry
 
 from . import apt_dat_reader as APR
 from .pavement import strips as PS
 
 from .config import SLIVER_ANGLE_THRESHOLD_DEG
+
+if TYPE_CHECKING:
+    from .canonical_points import CanonicalPointRegistry
 
 # Narrow exception tuple for shapely / numeric-geometry failure
 # modes.  Programming errors propagate so they surface immediately.
@@ -86,7 +90,7 @@ VERTEX_ALT_MERGE_TOL_M = 1.0
 
 
 def vertex_bucket(x: float, y: float,
-                  tol: float = SHARED_VERTEX_TOL_M) -> "Tuple[int, int]":
+                  tol: float = SHARED_VERTEX_TOL_M) -> "tuple[int, int]":
     """Quantize a meter-space point to a discrete vertex-bucket key.
 
     Two coordinates within ``tol`` metres of each other hash to the
@@ -105,7 +109,7 @@ def vertex_bucket(x: float, y: float,
     return (int(round(x / tol)), int(round(y / tol)))
 
 
-def corner_alts_from_high_low(eh: float, el: float) -> "List[float]":
+def corner_alts_from_high_low(eh: float, el: float) -> "list[float]":
     """Per-corner altitudes for a 4-corner sloped rect, in the
     canonical ``[high, low, low, high]`` corner order (corners 0,3 at
     the high end; 1,2 at the low end).
@@ -120,7 +124,7 @@ def corner_alts_from_high_low(eh: float, el: float) -> "List[float]":
     return [float(eh), float(el), float(el), float(eh)]
 
 
-def high_low_from_corner_alts(corner_alts) -> "Tuple[float, float]":
+def high_low_from_corner_alts(corner_alts) -> "tuple[float, float]":
     """Inverse of :func:`corner_alts_from_high_low`: recover
     ``(high, low)`` from a 4-corner ``[H, L, L, H]`` altitude list by
     averaging each end's corner pair (tolerant of small per-corner
@@ -210,11 +214,11 @@ class BuiltShape:
     polygon: Polygon
     role: str
     ref: str = ""
-    source_axis: Optional[LineString] = None
-    altitude: Optional[float] = None
-    altitude_high: Optional[float] = None
-    altitude_low: Optional[float] = None
-    node_altitudes: Optional[List[float]] = None
+    source_axis: LineString | None = None
+    altitude: float | None = None
+    altitude_high: float | None = None
+    altitude_low: float | None = None
+    node_altitudes: list[float] | None = None
     # OSM ``bridge=yes`` flag.  Set on taxi rects whose source
     # OSM way is tagged as a bridge — see ``_emit_taxi_bridges``.
     is_bridge: bool = False
@@ -224,15 +228,15 @@ class BuiltShape:
 @dataclass
 class PavementLayout:
     icao: str
-    anchor: Tuple[float, float]          # (lat0, lon0)
-    shapes: List[BuiltShape] = field(default_factory=list)
+    anchor: tuple[float, float]          # (lat0, lon0)
+    shapes: list[BuiltShape] = field(default_factory=list)
     # ancillary:
-    airport_boundary: Optional[Polygon] = None
-    runway_union: Optional[Polygon] = None
+    airport_boundary: Polygon | None = None
+    runway_union: Polygon | None = None
     # Path to the apt.dat file the layout was built from.  Used by
     # the bridge-detection step to walk the same scenery pack's
     # DSF and check for taxi-bridge OBJ placements.
-    apt_dat_path: Optional[str] = None
+    apt_dat_path: str | None = None
     # Full apt.dat taxi-network centerline set (preserved before
     # rect / junction emission consumes some into absorbed
     # polygons).  Used by the apron-reclassification pass to
@@ -243,7 +247,7 @@ class PavementLayout:
     # would otherwise misflag legitimate junctions as aprons.
     # Stored as ``(LineString, name)`` tuples per
     # ``apt_dat_reader.taxi_centerlines``.
-    apt_taxi_centerlines: List[Tuple[LineString, str]] = field(
+    apt_taxi_centerlines: list[tuple[LineString, str]] = field(
         default_factory=list)
     # apt.dat row-110 pavement polygon vertices, in meter space.
     # Junction polygons are built as
@@ -252,7 +256,7 @@ class PavementLayout:
     # and from rect corners (where it abuts a rect).  Captured
     # here so the source-attribution test can recognise them as
     # legitimate vertex sources rather than densification orphans.
-    apt_pavement_vertices: List[Tuple[float, float]] = field(
+    apt_pavement_vertices: list[tuple[float, float]] = field(
         default_factory=list)
     # Union of apt.dat row-110 pavement polygons' boundaries in
     # meter space.  Junction perimeters that follow the row-110
@@ -262,8 +266,7 @@ class PavementLayout:
     # source-attribution test can recognise mid-edge points as
     # legitimate inheritances from row-110 rather than orphan
     # densification.
-    apt_pavement_boundary: Optional[
-        "shapely.geometry.base.BaseGeometry"] = None
+    apt_pavement_boundary: BaseGeometry | None = None
     # Canonical-point registry shared across every pass that creates
     # or modifies a polygon vertex.  Per user 2026-05-18: each
     # shared corner across multiple shapes must resolve to ONE
@@ -272,8 +275,7 @@ class PavementLayout:
     # bucketing produce a single node ID per real-world meeting
     # point.  See ``canonical_points.CanonicalPointRegistry`` and
     # the rect-builder seeding in ``pipeline.py``.
-    canonical_points: Optional[
-        "CanonicalPointRegistry"] = None
+    canonical_points: CanonicalPointRegistry | None = None
 
     # ---- coordinate helpers ------------------------------------------
     # COORDINATE-ORDER CONVENTION (read before editing geometry code):
@@ -289,14 +291,14 @@ class PavementLayout:
     # The order flips at each ll<->shapely boundary; keep ll tuples
     # named ``(lat, lon)`` and metre tuples ``(x, y)`` so the flip is
     # always visible at the call site.
-    def m_to_ll(self, x: float, y: float) -> Tuple[float, float]:
+    def m_to_ll(self, x: float, y: float) -> tuple[float, float]:
         lat0, lon0 = self.anchor
         cos0 = math.cos(math.radians(lat0))
         lon = lon0 + math.degrees(x / (R_EARTH * cos0))
         lat = lat0 + math.degrees(y / R_EARTH)
         return lat, lon
 
-    def ll_to_m(self, lat: float, lon: float) -> Tuple[float, float]:
+    def ll_to_m(self, lat: float, lon: float) -> tuple[float, float]:
         lat0, lon0 = self.anchor
         cos0 = math.cos(math.radians(lat0))
         x = math.radians(lon - lon0) * R_EARTH * cos0
@@ -346,16 +348,16 @@ class PavementLayout:
             from .canonical_points import CanonicalPointRegistry
             registry = CanonicalPointRegistry(
                 tol_m=SHARED_VERTEX_TOL_M)
-        xy_to_nodes: Dict[Tuple[float, float],
-                          List[Tuple[int, Optional[float]]]] = {}
-        node_id_to_ll: Dict[int, Tuple[float, float]] = {}
+        xy_to_nodes: dict[tuple[float, float],
+                          list[tuple[int, float | None]]] = {}
+        node_id_to_ll: dict[int, tuple[float, float]] = {}
         # Accumulate every altitude contributed to each node so the
         # post-intern consensus pass can average them.
-        node_id_to_alts: Dict[int, List[float]] = {}
+        node_id_to_alts: dict[int, list[float]] = {}
         next_nid = [-1]
 
         def _intern(x: float, y: float,
-                    alt: Optional[float] = None) -> int:
+                    alt: float | None = None) -> int:
             key = registry.get_or_add(float(x), float(y))
             existing = xy_to_nodes.get(key)
             if existing:
@@ -420,8 +422,8 @@ class PavementLayout:
                 nids = [_intern(x, y) for (x, y) in coords]
             # Dedup any duplicate nid (consecutive OR not).
             seen: set = set()
-            deduped_nids: List[int] = []
-            deduped_elevs: List[float] = []
+            deduped_nids: list[int] = []
+            deduped_elevs: list[float] = []
             for k, nid in enumerate(nids):
                 if nid in seen:
                     continue
@@ -449,11 +451,11 @@ class PavementLayout:
         # triangulator handles the overlap by seed-region
         # processing; the rects' altitude_high/low tags prevail
         # where they cover.
-        way_blocks: List[Tuple[int, List[int], Dict[str, str]]] = []
+        way_blocks: list[tuple[int, list[int], dict[str, str]]] = []
         # Pass-1 holding pen: each entry survives validation +
         # interning and waits for the consensus pass to write its
         # altitude tags from the per-node mean.
-        pending: List[Tuple["BuiltShape", List[int]]] = []
+        pending: list[tuple["BuiltShape", list[int]]] = []
         next_wid = [-10001]
         for s in self.shapes:
             # Validate the polygon's geometry before emission.
@@ -607,13 +609,13 @@ class PavementLayout:
         # contributed.  The consensus altitude is the mean — used
         # by the tag-writing pass below to enforce that every shape
         # touching a node agrees on the corner's altitude.
-        node_id_to_consensus: Dict[int, Optional[float]] = {}
+        node_id_to_consensus: dict[int, float | None] = {}
         for nid, alts in node_id_to_alts.items():
             if alts:
                 node_id_to_consensus[nid] = (
                     sum(alts) / float(len(alts)))
 
-        def _corner_alt(nid: int) -> Optional[float]:
+        def _corner_alt(nid: int) -> float | None:
             return node_id_to_consensus.get(nid)
 
         # ── Tag-writing pass ────────────────────────────────────
@@ -639,7 +641,11 @@ class PavementLayout:
                         and all(e is not None
                                 for e in corner_elevs[:n_open]))
             if have_all:
-                open_alts = corner_elevs[:n_open]
+                # have_all guarantees the open portion is None-free;
+                # the filter is a no-op that lets the checker narrow
+                # ``open_alts`` to list[float].
+                open_alts: list[float] = [
+                    e for e in corner_elevs[:n_open] if e is not None]
                 all_min = min(open_alts)
                 all_max = max(open_alts)
                 # Boundary STRIP rects are planar by construction:
@@ -707,8 +713,8 @@ class PavementLayout:
                     tags["altitude"] = f"{s.altitude:.1f}"
             way_blocks.append((next_wid[0], ext_nids, tags))
             next_wid[0] -= 1
-        rel_blocks: List[Tuple[int, List[Tuple[int, str]],
-                               Dict[str, str]]] = []
+        rel_blocks: list[tuple[int, list[tuple[int, str]],
+                               dict[str, str]]] = []
 
         # Determine which interned nodes are actually referenced by
         # any emitted way (via ``way_blocks`` or ``rel_blocks``
@@ -773,11 +779,18 @@ class PavementLayout:
 # Projection helpers
 # ──────────────────────────────────────────────────────────────────
 
-def _projection(anchor: Tuple[float, float]):
+def _projection(anchor: tuple[float, float]):
     lat0, lon0 = anchor
     cos0 = math.cos(math.radians(lat0))
 
-    def to_m(lon: float, lat: float, z=None):
+    @overload
+    def to_m(lon: float, lat: float) -> tuple[float, float]: ...
+    @overload
+    def to_m(lon: float, lat: float, z: float | None
+             ) -> tuple[float, float] | tuple[float, float, float]: ...
+
+    def to_m(lon: float, lat: float, z: float | None = None
+             ) -> tuple[float, float] | tuple[float, float, float]:
         x = math.radians(lon - lon0) * R_EARTH * cos0
         y = math.radians(lat - lat0) * R_EARTH
         return (x, y) if z is None else (x, y, z)
@@ -785,7 +798,7 @@ def _projection(anchor: Tuple[float, float]):
     return to_m
 
 
-def _airport_anchor(apt: APR.Airport) -> Tuple[float, float]:
+def _airport_anchor(apt: APR.Airport) -> tuple[float, float]:
     if apt.runways:
         r = apt.runways[0]
         return ((r.lat_a + r.lat_b) / 2.0,
