@@ -787,7 +787,7 @@ def _widen_runway_shared_corners(
         runway_union = unary_union(runway_polys) if runway_polys else None
     except _GEOM_EXC:
         runway_union = None
-    pav_union = getattr(layout, "_apt_pav_union", None)
+    pav_union = getattr(layout, "_source_pav_union", None)
     return _do_widen(
         layout, chain, corner_index, corner_alt,
         runway_union, pav_union)

@@ -240,14 +240,14 @@ def _build_taxi_rects(
         # corners are well INSIDE the pavement, the centerline runs
         # through an apron and shouldn't emit a separate rect — the
         # apron stays as one continuous junction.
-        BOUNDARY_TOL_M = 2.0
+        CORNER_OFF_BOUNDARY_TOL_M = 2.0
         rect_coords = list(rect.exterior.coords)
         if rect_coords and rect_coords[0] == rect_coords[-1]:
             rect_coords = rect_coords[:-1]
         boundary = pav_union.boundary
         n_off_boundary = sum(
             1 for (cx, cy) in rect_coords
-            if Point(cx, cy).distance(boundary) > BOUNDARY_TOL_M)
+            if Point(cx, cy).distance(boundary) > CORNER_OFF_BOUNDARY_TOL_M)
         if n_off_boundary >= 2:
             # ≥ 2 corners away from any pavement edge — the rect
             # sits inside an apron.  Skip it; the apron pavement
@@ -1707,7 +1707,7 @@ def _snap_rect_sloping_edges_to_holes(
     pav.boundary, which produces a long thin sliver between the
     rect's straight edge and pav.boundary along the rect's full
     length.  After alignment, this function ensures **all 4 corners
-    sit on pav_union.boundary** (within ``BOUNDARY_TOL_M``):
+    sit on pav_union.boundary** (within ``CORNER_ON_BOUNDARY_TOL_M``):
 
       * Corner already on boundary: keep.
       * Corner not on boundary, within ``NODE_SNAP_RADIUS_M`` of an
@@ -1747,7 +1747,7 @@ def _snap_rect_sloping_edges_to_holes(
     )
 
     # Corner-validation tolerances.
-    BOUNDARY_TOL_M = 0.5      # corner is "on boundary" if within this
+    CORNER_ON_BOUNDARY_TOL_M = 0.5  # corner is "on boundary" if within this
     NODE_SNAP_RADIUS_M = 5.0  # snap off-boundary corner to nearest node
     AXIS_SHORTEN_M = 5.0      # shorten by this when no node within range
     MAX_SHORTEN_RETRIES = 5
@@ -1849,7 +1849,7 @@ def _snap_rect_sloping_edges_to_holes(
             unfixable = False
             for i, c in enumerate(cc):
                 d = Point(c).distance(pav_union.boundary)
-                if d <= BOUNDARY_TOL_M:
+                if d <= CORNER_ON_BOUNDARY_TOL_M:
                     continue
                 # Snap to nearest pav node within radius.
                 best_node = None

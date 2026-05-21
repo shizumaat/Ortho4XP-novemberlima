@@ -606,9 +606,9 @@ def test_junction_vertices_outside_pavement(icao):
     from shapely.geometry import Point as _Point
 
     layout = _build_layout(icao)
-    pav_union = getattr(layout, "_apt_pav_union", None)
+    pav_union = getattr(layout, "_source_pav_union", None)
     if pav_union is None or pav_union.is_empty:
-        pytest.skip(f"{icao}: layout has no _apt_pav_union")
+        pytest.skip(f"{icao}: layout has no _source_pav_union")
 
     # Anchor edges for exemption.
     anchor_segs: List[Tuple[float, float, float, float]] = []

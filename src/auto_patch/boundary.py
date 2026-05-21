@@ -76,6 +76,15 @@ __all__ = [
 ]
 
 
+# Half-width (m) of the airport-boundary ribbon strip.  Single source
+# of truth: the ribbon (``_emit_airport_boundary_shape``) offsets its
+# corners by this, and the DEM bridge (``_emit_boundary_dem_bridge``)
+# places its OUTER edge on the ribbon's inner edge at the SAME offset
+# so the two meet flush (no vertical wall — see the bridge outer-edge
+# clamp).  These two MUST agree; do not duplicate the literal.
+BOUNDARY_STRIP_HALF_WIDTH_M = 2.5
+
+
 def _clip_boundary_bridges_against_pavement(
         layout: "PavementLayout",
         min_area_m2: float = 25.0) -> int:
@@ -210,7 +219,7 @@ def _emit_airport_boundary_shape(
         dem,
         tile_lat: int,
         tile_lon: int,
-        strip_half_width_m: float = 2.5,
+        strip_half_width_m: float = BOUNDARY_STRIP_HALF_WIDTH_M,
         runway_clamp_radius_m: float = 400.0,
         runway_clamp_grade: float = 0.03,
         densify_step_m: float = 25.0,
@@ -1015,12 +1024,13 @@ def _emit_boundary_dem_bridge(
                 continue
             # Outer side of the bridge sits at the airport_boundary
             # ribbon's INNER edge — offset inward by
-            # ``strip_half_width_m`` (2.5m) from the boundary line.
+            # ``BOUNDARY_STRIP_HALF_WIDTH_M`` from the boundary line.
             # This places the bridge's outer vertices on the same
             # locus as the ribbon's interior-side nodes, eliminating
-            # the 2.5m ribbon overlap that walking the raw boundary
-            # would produce.
-            STRIP_HALF_WIDTH_M = 2.5
+            # the ribbon overlap that walking the raw boundary would
+            # produce.  MUST use the same constant as the ribbon's
+            # ``strip_half_width_m`` default so the two meet flush.
+            STRIP_HALF_WIDTH_M = BOUNDARY_STRIP_HALF_WIDTH_M
             raw_outer_pts: List[Tuple[float, float]] = []
             raw_outer_alts: List[float] = []
             for ii_in_run, i_dense in enumerate(run):

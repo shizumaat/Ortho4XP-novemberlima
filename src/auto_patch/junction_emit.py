@@ -132,7 +132,10 @@ def emit_junctions_and_finalize(layout, *, pav_union, emitted_taxi_rects,
 
     Mutates layout in place.
     """
-    layout._apt_pav_union = pav_union
+    # NOTE: this is the FULL source pavement union (apt.dat + DSF),
+    # not apt-only — named accordingly. (Pipeline keeps a separate
+    # apt-only ``apt_pav_union`` for the DSF-overlay gate.)
+    layout._source_pav_union = pav_union
     # ── Junction emission (minimal): residue = pav_union − rects −
     # terminals − runway.  Each connected piece becomes one
     # junction.  Holes inside a piece are decomposed via
