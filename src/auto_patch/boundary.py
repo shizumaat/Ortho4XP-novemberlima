@@ -471,6 +471,44 @@ def _insert_bridge_contacts_into_junctions(
     return n_inserted
 
 
+def _node_altitudes_from_segment_slope(
+        open_ring: List[Tuple[float, float]],
+        seg_high: Tuple[float, float],
+        seg_low: Tuple[float, float],
+        eh: float,
+        el: float) -> List[float]:
+    """Per-vertex altitudes for a boundary strip whose 4-corner sloped
+    quad was reshaped into a non-quad (e.g. trimmed against pavement,
+    or repaired by ``buffer(0)``).
+
+    A boundary strip slopes ALONG the perimeter segment — altitude
+    ``eh`` at the high end ``seg_high`` down to ``el`` at the low end
+    ``seg_low`` — and is flat across its width.  Each vertex altitude is
+    therefore the linear ``eh``->``el`` interpolation of the vertex's
+    projection onto the high->low axis (clamped to the segment ends).
+    Vertices that survive a pavement trim land on shared pavement nodes,
+    so the consensus pass in ``to_osm`` reconciles them with the
+    abutting shapes' altitudes automatically.
+
+    The returned list is aligned with the CLOSED ring (the closing
+    repeat is appended), matching the ``node_altitudes`` contract.
+    """
+    if not open_ring:
+        return []
+    ax = seg_low[0] - seg_high[0]
+    ay = seg_low[1] - seg_high[1]
+    L2 = ax * ax + ay * ay
+    alts: List[float] = []
+    for x, y in open_ring:
+        if L2 < 1e-9:
+            t = 0.0
+        else:
+            t = ((x - seg_high[0]) * ax + (y - seg_high[1]) * ay) / L2
+            t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+        alts.append(round(eh + t * (el - eh), 1))
+    return alts + [alts[0]]
+
+
 def _emit_airport_boundary_shape(
         layout: "PavementLayout",
         dem,
@@ -610,8 +648,12 @@ def _emit_airport_boundary_shape(
 
         Convention: corners 0, 3 at the HIGH-altitude end, corners
         1, 2 at the LOW end (matches runway segment emit).
-        Returns ``(polygon, altitude_high, altitude_low)`` with
-        ``altitude_high=None`` for flat segments.
+        Returns ``(polygon, altitude_high, altitude_low, seg_high,
+        seg_low)`` where ``seg_high``/``seg_low`` are the segment
+        endpoints (after any high/low swap) defining the slope axis —
+        used to re-derive per-vertex altitudes if the rect is later
+        reshaped into a non-quad.  ``altitude_high=None`` for flat
+        segments.
         """
         # Order so p0 is the HIGH end (alt0 >= alt1).  When swapping,
         # swap the perpendiculars too so each corner gets its
@@ -647,7 +689,7 @@ def _emit_airport_boundary_shape(
                 return None
         except _GEOM_EXC:
             return None
-        return poly, eh, el
+        return poly, eh, el, p0, p1
 
     n_emitted = 0
     for ring in ext_rings:
@@ -730,7 +772,7 @@ def _emit_airport_boundary_shape(
                                        perp0, perp1)
             if built is None:
                 continue
-            poly, eh, el = built
+            poly, eh, el, seg_high, seg_low = built
             # Skip rects entirely buried inside pavement — they
             # would just shadow runway / taxi / apron geometry and
             # fail the no-self-overlap test.  Partial overlaps are
@@ -764,8 +806,26 @@ def _emit_airport_boundary_shape(
             if eh is None:
                 shape.altitude = el
             else:
-                shape.altitude_high = eh
-                shape.altitude_low = el
+                # The pavement trim above (or a buffer(0) repair in
+                # ``_rect_for_segment``) can turn the 4-corner sloped
+                # quad into a non-quad.  ``altitude_high``/
+                # ``altitude_low`` is only valid on a closed 4-corner
+                # quad — Ortho4XP rejects anything else ("Wrong number
+                # of nodes ... altitude_high/altitude_low polygon,
+                # skipped").  For a non-quad, preserve the
+                # along-perimeter slope as per-vertex ``node_altitudes``
+                # (linear eh->el interpolation along the high->low
+                # segment axis) rather than dropping it or flattening.
+                ring = list(poly.exterior.coords)
+                open_ring = (ring[:-1]
+                             if (ring and ring[0] == ring[-1]) else ring)
+                if len(open_ring) == 4:
+                    shape.altitude_high = eh
+                    shape.altitude_low = el
+                else:
+                    shape.node_altitudes = (
+                        _node_altitudes_from_segment_slope(
+                            open_ring, seg_high, seg_low, eh, el))
             layout.shapes.append(shape)
             n_emitted += 1
     return n_emitted

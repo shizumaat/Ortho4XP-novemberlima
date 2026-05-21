@@ -29,7 +29,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 
-pytestmark = pytest.mark.skipif(
+_requires_xplane = pytest.mark.skipif(
     not xplane_available(),
     reason="X-Plane install not found (set XPLANE_ROOT to override)")
 
@@ -88,6 +88,7 @@ def _per_vertex_alts(shape):
     return coords, None
 
 
+@_requires_xplane
 def test_boundary_bridge_flush_with_ribbon_at_shared_vertices():
     """No vertical wall between a boundary DEM bridge and the airport
     boundary ribbon: every bridge vertex co-located with a ribbon
@@ -152,3 +153,51 @@ def test_boundary_bridge_flush_with_ribbon_at_shared_vertices():
         f"ribbon_alt={worst_xy[3]:.2f} at "
         f"({worst_xy[0]:.1f}, {worst_xy[1]:.1f}).  "
         f"Matched {n_pairs} shared vertices.")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# _node_altitudes_from_segment_slope — pure helper (no X-Plane build)
+# ──────────────────────────────────────────────────────────────────────
+# A boundary ribbon strip is built as a 4-corner sloped quad
+# (altitude_high/low).  When it partially overlaps pavement it gets
+# trimmed (poly.difference) into a NON-quad — which is invalid for
+# Ortho4XP's altitude_high/low encoder.  The emitter converts such a
+# strip to per-vertex node_altitudes, preserving the along-perimeter
+# slope by linear eh->el interpolation.  These tests pin that helper.
+import auto_patch.elevation  # noqa: F401  (resolves boundary import order)
+from auto_patch.boundary import _node_altitudes_from_segment_slope
+
+
+def test_segment_slope_interpolates_along_high_low_axis():
+    # Slope from (0,0) at 60 m down to (100,0) at 50 m; flat across width.
+    open_ring = [(0.0, 0.0), (100.0, 0.0), (100.0, 10.0),
+                 (50.0, 10.0), (0.0, 10.0)]
+    alts = _node_altitudes_from_segment_slope(
+        open_ring, (0.0, 0.0), (100.0, 0.0), 60.0, 50.0)
+    # One value per vertex + closing repeat.
+    assert alts == [60.0, 50.0, 50.0, 55.0, 60.0, 60.0]
+    # It actually slopes (not flattened).
+    assert max(alts) - min(alts) == pytest.approx(10.0)
+
+
+def test_segment_slope_clamps_past_segment_ends():
+    # Projections beyond the segment clamp to the end altitudes.
+    open_ring = [(-50.0, 0.0), (150.0, 0.0), (50.0, 5.0)]
+    alts = _node_altitudes_from_segment_slope(
+        open_ring, (0.0, 0.0), (100.0, 0.0), 60.0, 50.0)
+    assert alts[0] == 60.0   # before high end → eh
+    assert alts[1] == 50.0   # past low end → el
+    assert alts[2] == 55.0   # midpoint
+
+
+def test_segment_slope_degenerate_axis_uses_high():
+    # Zero-length axis (high == low) → every vertex gets eh.
+    open_ring = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)]
+    alts = _node_altitudes_from_segment_slope(
+        open_ring, (5.0, 5.0), (5.0, 5.0), 42.0, 41.0)
+    assert alts == [42.0, 42.0, 42.0, 42.0]
+
+
+def test_segment_slope_empty_ring():
+    assert _node_altitudes_from_segment_slope(
+        [], (0.0, 0.0), (1.0, 0.0), 1.0, 0.0) == []
