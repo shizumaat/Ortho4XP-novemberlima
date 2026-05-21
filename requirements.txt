@@ -11,3 +11,4 @@ gdal==3.9.0; platform_system == 'Linux'
 
 # Dev / test
 pytest>=8.0
+hypothesis>=6.0
