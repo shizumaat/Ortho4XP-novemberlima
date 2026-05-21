@@ -50,8 +50,7 @@ from ..config import (
 # modes.  Programming errors (``NameError``, ``AttributeError``-on-
 # typo, ``ImportError``) propagate so they surface immediately
 # during testing rather than being silently masked at runtime.
-_GEOM_EXC = (ValueError, TypeError,
-             GEOSException, TopologicalError, IndexError)
+_GEOM_EXC = (ValueError, GEOSException, TopologicalError)
 
 
 

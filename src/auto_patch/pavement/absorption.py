@@ -76,8 +76,7 @@ TaxiRect = tuple[Polygon, LineString, str, str]
 
 # Narrow exception tuple for shapely / numeric-geometry failure
 # modes.  Programming errors propagate so they surface immediately.
-_GEOM_EXC = (ValueError, TypeError,
-             GEOSException, TopologicalError, IndexError)
+_GEOM_EXC = (ValueError, GEOSException, TopologicalError)
 
 __all__ = [
     "_drop_primary_parallels_embedded_in_pavement",

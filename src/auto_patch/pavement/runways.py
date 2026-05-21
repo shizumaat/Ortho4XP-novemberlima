@@ -47,8 +47,7 @@ from .vertices import _snap_polygon_vertices_to_rect_corners
 
 # Narrow exception tuple for shapely / numeric-geometry failure
 # modes.  Programming errors propagate so they surface immediately.
-_GEOM_EXC = (ValueError, TypeError,
-             GEOSException, TopologicalError, IndexError)
+_GEOM_EXC = (ValueError, GEOSException, TopologicalError)
 
 
 __all__ = [

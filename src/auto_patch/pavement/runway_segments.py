@@ -30,11 +30,12 @@ from .runway_geometry import (
 )
 
 # Narrow exception tuple for geometry/arithmetic operations.  Lets
-# programming errors (NameError, AttributeError, etc.) propagate so
-# bugs surface immediately rather than being swallowed as a "skip".
-# ZeroDivisionError covers LineString.length == 0 in projection
-# ratios; ValueError covers degenerate LineString construction.
-_GEOM_EXC = (ValueError, TypeError, IndexError, ZeroDivisionError,
+# programming errors (NameError, AttributeError, TypeError,
+# IndexError, etc.) propagate so bugs surface immediately rather than
+# being swallowed as a "skip".  ZeroDivisionError covers
+# LineString.length == 0 in projection ratios; ValueError covers
+# degenerate LineString construction.
+_GEOM_EXC = (ValueError, ZeroDivisionError,
              GEOSException, TopologicalError)
 
 
@@ -505,7 +506,7 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
             return None
         try:
             return tile.dem.alt((lon - tile.lon, lat - tile.lat))
-        except (IndexError, ValueError, TypeError, ZeroDivisionError):
+        except (IndexError, ValueError, ZeroDivisionError):
             return None
 
     def _threshold_dem_elev(lat, lon, radius_m):

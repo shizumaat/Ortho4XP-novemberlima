@@ -44,8 +44,7 @@ from . import taxiway_skeleton as TS
 
 # Narrow exception tuple for shapely / numeric-geometry failure
 # modes.  Programming errors propagate so they surface immediately.
-_GEOM_EXC = (ValueError, TypeError,
-             GEOSException, TopologicalError, IndexError)
+_GEOM_EXC = (ValueError, GEOSException, TopologicalError)
 
 
 # ──────────────────────────────────────────────────────────────────
