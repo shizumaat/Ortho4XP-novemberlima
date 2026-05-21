@@ -276,6 +276,19 @@ class PavementLayout:
         "CanonicalPointRegistry"] = None
 
     # ---- coordinate helpers ------------------------------------------
+    # COORDINATE-ORDER CONVENTION (read before editing geometry code):
+    #   * "xy"  = local METRES from ``anchor``, order (x=east, y=north).
+    #            All shape ``polygon`` coords and per-vertex work are xy.
+    #   * "ll"  = geographic, order (lat, lon) — what m_to_ll RETURNS
+    #            and ll_to_m TAKES.
+    #   * shapely geometries built from lat/lon use (x=lon, y=lat) —
+    #            the OPPOSITE order — e.g. ``Polygon([(lon, lat), ...])``
+    #            and ``_projection.to_m(lon, lat)``.  ``_sample_dem``
+    #            also takes (lat, lon) but indexes the DEM as
+    #            (lon-tile_lon, lat-tile_lat).
+    # The order flips at each ll<->shapely boundary; keep ll tuples
+    # named ``(lat, lon)`` and metre tuples ``(x, y)`` so the flip is
+    # always visible at the call site.
     def m_to_ll(self, x: float, y: float) -> Tuple[float, float]:
         lat0, lon0 = self.anchor
         cos0 = math.cos(math.radians(lat0))

@@ -499,7 +499,7 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
         tags = {"altitude": "{:.1f}".format(round(float(elev), 1))}
         add_way(node_ids, tags)
 
-    def _sample_dem(lat, lon):
+    def _sample_dem_ll(lat, lon):
         """Sample DEM elevation at a lat/lon, returning 0 on failure."""
         if tile is None or not hasattr(tile, "dem") or tile.dem is None:
             return None
@@ -526,7 +526,7 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
                 offsets.append((r * cos(ang), r * sin(ang)))
         vals = []
         for d_north, d_east in offsets:
-            s = _sample_dem(lat + d_north / DEG_TO_M,
+            s = _sample_dem_ll(lat + d_north / DEG_TO_M,
                             lon + d_east / (DEG_TO_M * cl))
             if s is not None:
                 vals.append(s)
@@ -664,7 +664,7 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
                 band = perp * MAX_TAXI_GRADE_FOR_CROSS
                 lo_band = src_elev - band
                 hi_band = src_elev + band
-                dem_e = _sample_dem(p_lat, p_lon)
+                dem_e = _sample_dem_ll(p_lat, p_lon)
                 if dem_e is None:
                     # No DEM available → midpoint of the band as a
                     # safe seed (equivalent to "as close to source
@@ -1044,7 +1044,7 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
                     continue
 
                 # Interior point: use DEM if available, else interpolate
-                dem_val = _sample_dem(s_lat, s_lon)
+                dem_val = _sample_dem_ll(s_lat, s_lon)
                 if dem_val is not None:
                     sample_pts.append((s_lat, s_lon, dem_val, False))
                 else:

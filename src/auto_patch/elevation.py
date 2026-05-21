@@ -308,7 +308,18 @@ def _load_airport_dem(lat0: float, lon0: float, override_dem=None):
 def _sample_dem(dem, tile_lat: int, tile_lon: int,
                 lat: float, lon: float) -> Optional[float]:
     """Sample DEM elevation at (lat, lon).  Returns None if DEM is
-    unavailable or out-of-tile."""
+    unavailable or out-of-tile.
+
+    IMPORTANT: ``tile_lat``/``tile_lon`` MUST be the integer tile that
+    ``dem`` actually covers — the offset ``(lon-tile_lon, lat-tile_lat)``
+    is interpreted in that tile's frame.  For a cross-tile airport the
+    anchor tile (``floor(layout.anchor)``) and the current build tile
+    (``current_tile_lat/lon``) differ; passing the anchor-tile coords
+    with the current-tile DEM (or vice-versa) silently reads elevations
+    ~1° (≈100 km) away.  That was the MMOX +17 bug (bridge inner edge
+    sampling the +16 valley → ~1000 m drop).  Callers must pass the
+    tile that matches the DEM object in hand.
+    """
     if dem is None:
         return None
     try:

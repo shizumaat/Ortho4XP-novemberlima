@@ -2342,6 +2342,14 @@ def _reclassify_apron_junctions(
                 if max_d > cap_m:
                     break
         if max_d > cap_m:
+            # CONCEPT NOTE: "junction" is the STRUCTURAL kind (a
+            # residue-decomposition polygon); ``role`` is the FINAL
+            # tag.  An apron is just a junction reclassified here
+            # because its interior strays > _APRON_RECLASSIFY_MAX_
+            # DISTANCE_M from any centerline.  So a shape is a
+            # ROLE_JUNCTION through most of the pipeline and only
+            # becomes ROLE_APRON at this late pass — code that filters
+            # `role == ROLE_JUNCTION` earlier still sees these.
             # Role-only change.  Per user 2026-05-18: aprons keep
             # per-corner ``node_altitudes`` (NOT a flat single
             # altitude); the solver already constrained the field

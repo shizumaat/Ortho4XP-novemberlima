@@ -67,12 +67,44 @@ SPIKE_VERTEX_TOL_M = 0.005
 
 __all__ = [
     "SPIKE_VERTEX_TOL_M",
+    "open_ring",
+    "close_ring",
     "_drop_spike_vertices",
     "_enforce_shared_vertices",
     "_push_junction_vertices_off_taxi_rect_edges",
     "_snap_polygon_vertices_to_rect_corners",
     "_validate_shared_vertex_invariant",
 ]
+
+
+def open_ring(coords: "List[Tuple[float, float]]"
+              ) -> "List[Tuple[float, float]]":
+    """Return ``coords`` without a duplicated closing vertex (the OPEN
+    form).  If the ring is already open it is returned unchanged.
+
+    A polygon ring travels through this codebase in two forms: CLOSED
+    (first vertex repeated as last, as shapely's ``exterior.coords``
+    yields) and OPEN (no repeat).  Which form a ``coords``/``ring``
+    variable holds is not encoded in its name or type, so ~75 sites
+    re-test ``coords[0] == coords[-1]`` by hand — an off-by-one
+    hazard, especially where a parallel ``node_altitudes`` list must
+    be sliced in lockstep.  Use these helpers instead of open-coding
+    the test.  (Callers that also carry per-vertex altitudes must
+    still slice those in parallel — these helpers only touch coords.)
+    """
+    if coords and coords[0] == coords[-1]:
+        return coords[:-1]
+    return coords
+
+
+def close_ring(coords: "List[Tuple[float, float]]"
+               ) -> "List[Tuple[float, float]]":
+    """Return ``coords`` with a duplicated closing vertex (the CLOSED
+    form).  If already closed it is returned unchanged.  Inverse of
+    :func:`open_ring`."""
+    if coords and coords[0] != coords[-1]:
+        return list(coords) + [coords[0]]
+    return coords
 
 
 
@@ -107,11 +139,9 @@ def _snap_polygon_vertices_to_rect_corners(
     fewer than 3 distinct vertices or produce an invalid polygon.
     """
     try:
-        coords = list(poly.exterior.coords)
+        coords = open_ring(list(poly.exterior.coords))
     except _GEOM_EXC:
         return poly
-    if coords and coords[0] == coords[-1]:
-        coords = coords[:-1]
     if len(coords) < 3:
         return poly
 
@@ -224,9 +254,7 @@ def _push_junction_vertices_off_taxi_rect_edges(
         if s.polygon is None or s.polygon.is_empty:
             continue
         try:
-            coords = list(s.polygon.exterior.coords)
-            if coords and coords[0] == coords[-1]:
-                coords = coords[:-1]
+            coords = open_ring(list(s.polygon.exterior.coords))
         except _GEOM_EXC:
             continue
         if len(coords) != 4:
