@@ -34,7 +34,7 @@ with internal callers in ``O4_Airport_Pavement_Builder``):
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
 
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, Point, Polygon
@@ -80,11 +80,10 @@ __all__ = [
 def _decompose_polygon_with_holes(polygon: Polygon,
                                   min_area_m2: float = 50.0,
                                   max_depth: int = 8,
-                                  runway_axis_deg: Optional[float] = None,
-                                  corner_snap_pts: Optional[
-                                      List[Tuple[float, float]]] = None,
+                                  runway_axis_deg: float | None = None,
+                                  corner_snap_pts: list[tuple[float, float]] | None = None,
                                   corner_snap_tol_m: float = 5.0,
-                                  ) -> List[Polygon]:
+                                  ) -> list[Polygon]:
     """Return a list of simple (no-hole) polygons that tile the same
     area as ``polygon``.
 
@@ -166,7 +165,7 @@ def _decompose_polygon_with_holes(polygon: Polygon,
         # Fallback: emit the exterior with holes dropped.  Should
         # not occur for valid simple geometries.
         return [Polygon(polygon.exterior.coords)]
-    pieces: List[Polygon] = []
+    pieces: list[Polygon] = []
     geoms = (list(getattr(result, "geoms", []))
              if result.geom_type != "Polygon" else [result])
 
@@ -188,7 +187,7 @@ def _decompose_polygon_with_holes(polygon: Polygon,
         natural_inter = polygon.exterior.intersection(cut)
     except _GEOM_EXC:
         natural_inter = None
-    natural_pts: List[Tuple[float, float]] = []
+    natural_pts: list[tuple[float, float]] = []
     if natural_inter is not None and not natural_inter.is_empty:
         if natural_inter.geom_type == "Point":
             natural_pts = [(natural_inter.x, natural_inter.y)]
@@ -200,7 +199,7 @@ def _decompose_polygon_with_holes(polygon: Polygon,
                     natural_pts.append((g.x, g.y))
     # Existing polygon boundary verts (exterior + interiors) — these
     # are the candidates for snapping.
-    pre_cut_verts: List[Tuple[float, float]] = []
+    pre_cut_verts: list[tuple[float, float]] = []
     pe = list(polygon.exterior.coords)
     if pe and pe[0] == pe[-1]:
         pe = pe[:-1]
@@ -240,7 +239,7 @@ def _decompose_polygon_with_holes(polygon: Polygon,
             # that's also on-axis.  Skip candidates farther from the
             # cut line than ON_AXIS_TOL_M — those would degrade
             # alignment.
-            best_v: Optional[Tuple[float, float]] = None
+            best_v: tuple[float, float] | None = None
             best_d = SNAP_RADIUS_M
             for px, py in pre_cut_verts:
                 if abs(px - vx) > SNAP_RADIUS_M or abs(py - vy) > SNAP_RADIUS_M:
@@ -260,7 +259,7 @@ def _decompose_polygon_with_holes(polygon: Polygon,
         if not modified:
             return piece
         # Reconstruct the polygon, dedupe consecutive duplicates.
-        deduped: List[Tuple[float, float]] = []
+        deduped: list[tuple[float, float]] = []
         for c in coords:
             if deduped and (math.hypot(c[0] - deduped[-1][0],
                                         c[1] - deduped[-1][1]) < 0.01):
@@ -329,10 +328,10 @@ def _polygon_min_thickness(poly: "Polygon") -> float:
 
 
 def _merge_thin_decomposed_pieces(
-        pieces: "List[Polygon]",
+        pieces: "list[Polygon]",
         min_thickness_m: float = 4.0,
         max_iters: int = 50,
-        ) -> "List[Polygon]":
+        ) -> "list[Polygon]":
     """Merge any piece in ``pieces`` whose minimum-rotated-rectangle
     thickness is less than ``min_thickness_m`` into the neighbouring
     piece sharing the longest boundary.  Used by
@@ -345,7 +344,7 @@ def _merge_thin_decomposed_pieces(
     work = list(pieces)
     for _it in range(max_iters):
         # Find the thinnest piece below threshold.
-        thin_idx: Optional[int] = None
+        thin_idx: int | None = None
         thin_thick = float('inf')
         for i, p in enumerate(work):
             if p is None or p.is_empty:
@@ -358,7 +357,7 @@ def _merge_thin_decomposed_pieces(
             break
         thin = work[thin_idx]
         # Find the neighbour with the longest shared boundary.
-        best_j: Optional[int] = None
+        best_j: int | None = None
         best_share = 0.0
         thin_boundary = thin.boundary
         for j, p in enumerate(work):
@@ -406,7 +405,7 @@ def _merge_thin_decomposed_pieces(
 # are filtered downstream by the area threshold.
 
 
-def _splice_holes(polygon: Polygon) -> List[Tuple[float, float]]:
+def _splice_holes(polygon: Polygon) -> list[tuple[float, float]]:
     """Return the vertex list of the spliced single-ring polygon
     (without closing repeat).  Holes are inserted one at a time by
     finding the closest exterior vertex / hole vertex pair and
@@ -415,7 +414,7 @@ def _splice_holes(polygon: Polygon) -> List[Tuple[float, float]]:
     ext = list(polygon.exterior.coords)
     if ext and ext[0] == ext[-1]:
         ext = ext[:-1]
-    holes_list: List[List[Tuple[float, float]]] = []
+    holes_list: list[list[tuple[float, float]]] = []
     for h in polygon.interiors:
         h_coords = list(h.coords)
         if h_coords and h_coords[0] == h_coords[-1]:
@@ -434,7 +433,7 @@ def _splice_holes(polygon: Polygon) -> List[Tuple[float, float]]:
     return ring
 
 
-def _polygon_area(coords: Sequence[Tuple[float, float]]) -> float:
+def _polygon_area(coords: Sequence[tuple[float, float]]) -> float:
     s = 0.0
     n = len(coords)
     for i in range(n):
@@ -444,9 +443,9 @@ def _polygon_area(coords: Sequence[Tuple[float, float]]) -> float:
     return abs(s) * 0.5
 
 
-def _splice_one_hole(ring: List[Tuple[float, float]],
-                     hole: List[Tuple[float, float]]
-                     ) -> List[Tuple[float, float]]:
+def _splice_one_hole(ring: list[tuple[float, float]],
+                     hole: list[tuple[float, float]]
+                     ) -> list[tuple[float, float]]:
     """Find the closest (ring_vertex, hole_vertex) pair and splice
     the hole into the ring at that bridge.  Hole is walked in its
     native (CW relative to a CCW exterior) direction so the spliced
@@ -464,7 +463,7 @@ def _splice_one_hole(ring: List[Tuple[float, float]],
     #   + ring[best_i..end]
     # The boundary touches ring[best_i] and hole[best_j] twice —
     # this is the bridge corridor.
-    spliced: List[Tuple[float, float]] = []
+    spliced: list[tuple[float, float]] = []
     spliced.extend(ring[: best_i + 1])
     spliced.extend(hole[best_j:])
     spliced.extend(hole[: best_j + 1])
@@ -473,8 +472,8 @@ def _splice_one_hole(ring: List[Tuple[float, float]],
 
 
 def _drop_sliver_corners(
-    ring: List[Tuple[float, float]],
-) -> List[Tuple[float, float]]:
+    ring: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
     """Drop ring vertices whose interior angle is below
     ``SLIVER_ANGLE_THRESHOLD_DEG``.
 
@@ -528,11 +527,11 @@ def _drop_sliver_corners(
 
 
 def _find_junction_points(
-    nodes: Dict[str, Tuple[float, float]],
-    ways: List[Tuple[str, List[str], Dict[str, str]]],
+    nodes: dict[str, tuple[float, float]],
+    ways: list[tuple[str, list[str], dict[str, str]]],
     to_m,
-    osm_centerlines: Optional[List[Tuple[LineString, str]]] = None,
-) -> List[Tuple[float, float]]:
+    osm_centerlines: list[tuple[LineString, str]] | None = None,
+) -> list[tuple[float, float]]:
     """Identify junction POINTS — OSM nodes shared by ≥ 2 DIFFERENT refs.
 
     Per user rule: pure bends within one taxi (two same-ref ways
@@ -546,7 +545,7 @@ def _find_junction_points(
     junction point.
     """
     from collections import defaultdict
-    refs_at_node: Dict[str, set] = defaultdict(set)
+    refs_at_node: dict[str, set] = defaultdict(set)
     refed_taxi_nodes: set = set()
     for wid, nds, tags in ways:
         if tags.get("aeroway") != "taxiway":
@@ -577,7 +576,7 @@ def _find_junction_points(
             if n in refed_taxi_nodes:
                 refs_at_node[n].add("_conn")
 
-    candidates: List[Tuple[float, float]] = []
+    candidates: list[tuple[float, float]] = []
     for nid, refs in refs_at_node.items():
         if len(refs) < 2:
             continue
@@ -612,7 +611,7 @@ def _find_junction_points(
                     candidates.append(inter.centroid.coords[0])
 
     # Cluster within JUNCTION_CLUSTER_DIST_M (greedy single-link)
-    clusters: List[List[Tuple[float, float]]] = []
+    clusters: list[list[tuple[float, float]]] = []
     for pt in candidates:
         placed = False
         for cl in clusters:
@@ -629,11 +628,11 @@ def _find_junction_points(
 
 
 def _build_junctions_from_rect_endpoints(
-    taxi_rects: List[Tuple[Polygon, LineString, str, str]],
+    taxi_rects: list[tuple[Polygon, LineString, str, str]],
     merge_dist: float,
-    pav_union: Optional[Polygon],
-    terminal_union: Optional[Polygon] = None,
-) -> List[Polygon]:
+    pav_union: Polygon | None,
+    terminal_union: Polygon | None = None,
+) -> list[Polygon]:
     """Build junctions from rect endpoint clusters (user's approach).
 
     Algorithm:
@@ -686,12 +685,12 @@ def _build_junctions_from_rect_endpoints(
             if math.hypot(ax[0]-bx[0], ax[1]-bx[1]) <= merge_dist:
                 union(i, j)
 
-    clusters: Dict[int, List[int]] = {}
+    clusters: dict[int, list[int]] = {}
     for i in range(n):
         r = find(i)
         clusters.setdefault(r, []).append(i)
 
-    out: List[Polygon] = []
+    out: list[Polygon] = []
     for cl in clusters.values():
         if len(cl) < 2:
             continue
@@ -711,7 +710,7 @@ def _build_junctions_from_rect_endpoints(
         if len(all_corners) < 3:
             continue
         # Deduplicate near-identical corners
-        uniq: List[Tuple[float, float]] = []
+        uniq: list[tuple[float, float]] = []
         for c in all_corners:
             if not any(math.hypot(c[0]-u[0], c[1]-u[1]) < 0.1 for u in uniq):
                 uniq.append(c)
@@ -747,7 +746,7 @@ def _build_junctions_from_rect_endpoints(
 
 
 def _rect_end_corners(rect: Polygon, axis: LineString
-                      ) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
+                      ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
     """Return the 2 pairs of corners at the rect's 2 short ends.
 
     For a 4-corner rect built as [p1+h*perp, p2+h*perp, p2-h*perp,
@@ -766,13 +765,13 @@ def _rect_end_corners(rect: Polygon, axis: LineString
 
 
 def _build_junction_constructive(
-    cluster_centroid: Tuple[float, float],
-    taxi_rects: List[Tuple[Polygon, LineString, str, str]],
+    cluster_centroid: tuple[float, float],
+    taxi_rects: list[tuple[Polygon, LineString, str, str]],
     pav_union,
     terminal_union,
     max_corner_dist_m: float = 80.0,
     local_disc_radius_m: float = 120.0,
-) -> Optional[Polygon]:
+) -> Polygon | None:
     """Constructive junction-polygon build per the user's
     authoritative shape rule
     (memory: feedback_shape_rules):
@@ -806,7 +805,7 @@ def _build_junction_constructive(
             pass
 
     # Gather rect ends near the cluster centroid.
-    rect_ends: List[Tuple[int, Tuple[float, float], Tuple[float, float]]] = []
+    rect_ends: list[tuple[int, tuple[float, float], tuple[float, float]]] = []
     for i, (rect, axis, role, ref) in enumerate(taxi_rects):
         coords_ax = list(axis.coords)
         if len(coords_ax) < 2:
@@ -863,7 +862,7 @@ def _build_junction_constructive(
         return None
 
     # Project each rect outer corner onto the exterior ring.
-    corner_data: List[Tuple[float, Tuple[float, float], int]] = []
+    corner_data: list[tuple[float, tuple[float, float], int]] = []
     for rect_idx, c1, c2 in rect_ends:
         for c in (c1, c2):
             try:
@@ -890,7 +889,7 @@ def _build_junction_constructive(
 
     # Collect all exterior-ring vertices with their params for arc walks.
     ext_verts = ext_coords[:-1] if ext_coords[0] == ext_coords[-1] else ext_coords
-    ext_vert_params: List[Tuple[float, Tuple[float, float]]] = []
+    ext_vert_params: list[tuple[float, tuple[float, float]]] = []
     acc = 0.0
     for i, v in enumerate(ext_verts):
         if i > 0:
@@ -903,7 +902,7 @@ def _build_junction_constructive(
     # whose params lie between the 2 corner params (forward direction,
     # with wrap-around from last to first).
     n = len(corner_data)
-    poly_coords: List[Tuple[float, float]] = []
+    poly_coords: list[tuple[float, float]] = []
     for i in range(n):
         cur_param, cur_xy, cur_rect = corner_data[i]
         nxt_param, nxt_xy, nxt_rect = corner_data[(i + 1) % n]
@@ -965,12 +964,12 @@ def _build_junction_constructive(
 
 
 def _build_junction_polys_from_corners(
-    junction_points: List[Tuple[float, float]],
-    taxi_rects: List[Tuple[Polygon, LineString, str, str]],
-    pav: Optional[Polygon],
-    terminal_union: Optional[Polygon] = None,
+    junction_points: list[tuple[float, float]],
+    taxi_rects: list[tuple[Polygon, LineString, str, str]],
+    pav: Polygon | None,
+    terminal_union: Polygon | None = None,
     max_corner_dist_m: float = 100.0,
-) -> List[Polygon]:
+) -> list[Polygon]:
     """Build each junction polygon from the CORNER VERTICES of the
     adjacent rects, per the user's rule:
 
@@ -995,14 +994,14 @@ def _build_junction_polys_from_corners(
     if pav is None or not junction_points:
         return []
 
-    polys: List[Polygon] = []
+    polys: list[Polygon] = []
     for (cx, cy) in junction_points:
         jpt = Point(cx, cy)
         # Avoid emitting into a terminal
         if terminal_union is not None and terminal_union.contains(jpt):
             continue
 
-        corner_pts: List[Tuple[float, float]] = []
+        corner_pts: list[tuple[float, float]] = []
         for rect, axis, role, ref in taxi_rects:
             coords_ax = list(axis.coords)
             if len(coords_ax) < 2:

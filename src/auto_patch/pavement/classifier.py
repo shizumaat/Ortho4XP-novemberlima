@@ -33,7 +33,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Literal
 
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import Polygon
@@ -87,18 +87,18 @@ _APRON_NAME_PATS = [
 @dataclass(frozen=True)
 class PavementKind:
     """Result of classifying one pavement polygon."""
-    kind: str          # "taxiway" or "apron"
+    kind: Literal["taxiway", "apron"]
     long_m: float      # long side of the min-rotated-rect
     short_m: float     # short side of the min-rotated-rect
     aspect: float      # long_m / short_m (0 if short_m == 0)
-    reason: str        # "name:twy" | "name:apron" |
-                       # "shape:taxiway" | "shape:apron"
+    reason: Literal["name:twy", "name:apron",
+                    "shape:taxiway", "shape:apron"]
 
 
 # ──────────────────────────────────────────────────────────────────────
 # Public API
 # ──────────────────────────────────────────────────────────────────────
-def name_hint(name: str) -> Optional[str]:
+def name_hint(name: str) -> Literal["taxiway", "apron"] | None:
     """Return ``"taxiway"``, ``"apron"``, or ``None`` from the free-
     form pavement label.  Case-insensitive, word-boundaried.
 
@@ -109,7 +109,7 @@ def name_hint(name: str) -> Optional[str]:
     """
     if not name:
         return None
-    earliest_kind = None
+    earliest_kind: Literal["taxiway", "apron"] | None = None
     earliest_pos = len(name) + 1
     for pat in _TWY_NAME_PATS:
         m = pat.search(name)
@@ -124,7 +124,7 @@ def name_hint(name: str) -> Optional[str]:
     return earliest_kind
 
 
-def min_rotated_bbox_dims(polygon: Polygon) -> Tuple[float, float]:
+def min_rotated_bbox_dims(polygon: Polygon) -> tuple[float, float]:
     """Return ``(long_side, short_side)`` of the minimum-area rotated
     bounding rectangle of ``polygon``, in the polygon's own coordinate
     units.

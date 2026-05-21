@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import math
 import sys
-from typing import Dict, List, Optional, Set, Tuple
 
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, Point, Polygon
@@ -77,8 +76,8 @@ __all__ = [
 ]
 
 
-def open_ring(coords: "List[Tuple[float, float]]"
-              ) -> "List[Tuple[float, float]]":
+def open_ring(coords: "list[tuple[float, float]]"
+              ) -> "list[tuple[float, float]]":
     """Return ``coords`` without a duplicated closing vertex (the OPEN
     form).  If the ring is already open it is returned unchanged.
 
@@ -97,8 +96,8 @@ def open_ring(coords: "List[Tuple[float, float]]"
     return coords
 
 
-def close_ring(coords: "List[Tuple[float, float]]"
-               ) -> "List[Tuple[float, float]]":
+def close_ring(coords: "list[tuple[float, float]]"
+               ) -> "list[tuple[float, float]]":
     """Return ``coords`` with a duplicated closing vertex (the CLOSED
     form).  If already closed it is returned unchanged.  Inverse of
     :func:`open_ring`."""
@@ -111,7 +110,7 @@ def close_ring(coords: "List[Tuple[float, float]]"
 
 def _snap_polygon_vertices_to_rect_corners(
         poly: "Polygon",
-        sloping_rect_polys: "List[Polygon]",
+        sloping_rect_polys: "list[Polygon]",
         snap_tol_m: float = 5.0,
         ) -> "Polygon":
     """Snap every vertex of ``poly`` that lies within ``snap_tol_m``
@@ -145,7 +144,7 @@ def _snap_polygon_vertices_to_rect_corners(
     if len(coords) < 3:
         return poly
 
-    corners: List[Tuple[float, float]] = []
+    corners: list[tuple[float, float]] = []
     for r in sloping_rect_polys:
         if r is None or r.is_empty:
             continue
@@ -160,9 +159,9 @@ def _snap_polygon_vertices_to_rect_corners(
         return poly
 
     snap_tol2 = snap_tol_m * snap_tol_m
-    snapped: List[Tuple[float, float]] = []
+    snapped: list[tuple[float, float]] = []
     for vx, vy in coords:
-        best_corner: Optional[Tuple[float, float]] = None
+        best_corner: tuple[float, float] | None = None
         best_d2 = snap_tol2
         for cx, cy in corners:
             d2 = (vx - cx) ** 2 + (vy - cy) ** 2
@@ -175,7 +174,7 @@ def _snap_polygon_vertices_to_rect_corners(
             snapped.append((float(vx), float(vy)))
 
     # Dedupe consecutive duplicates (within 1 cm).
-    deduped: List[Tuple[float, float]] = []
+    deduped: list[tuple[float, float]] = []
     for v in snapped:
         if (not deduped
                 or (v[0] - deduped[-1][0]) ** 2
@@ -247,7 +246,7 @@ def _push_junction_vertices_off_taxi_rect_edges(
     rect_roles = {
         ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
         ROLE_STUB, ROLE_CROSS_CONNECTOR, ROLE_RUNWAY}
-    rects: List[Tuple[Polygon, List[Tuple[float, float]]]] = []
+    rects: list[tuple[Polygon, list[tuple[float, float]]]] = []
     for s in layout.shapes:
         if s.role not in rect_roles:
             continue
@@ -267,8 +266,8 @@ def _push_junction_vertices_off_taxi_rect_edges(
 
     def _on_edge_between_corners(
             x: float, y: float,
-            corners: List[Tuple[float, float]],
-            ) -> Optional[int]:
+            corners: list[tuple[float, float]],
+            ) -> int | None:
         """Return the edge index (0-3) the point lies on (within
         ``edge_tol_m`` of an edge interior, t ∈ (ε, 1-ε)), or
         None if the point isn't on any rect edge interior."""
@@ -293,8 +292,8 @@ def _push_junction_vertices_off_taxi_rect_edges(
 
     def _at_corner_index(
             x: float, y: float,
-            corners: List[Tuple[float, float]],
-            ) -> Optional[int]:
+            corners: list[tuple[float, float]],
+            ) -> int | None:
         """Return the corner index (0-3) the point lies at
         (within ``corner_tol_m``), or None."""
         for ci, (cx, cy) in enumerate(corners):
@@ -305,9 +304,9 @@ def _push_junction_vertices_off_taxi_rect_edges(
     def _push_off(
             x: float, y: float,
             rect_poly: Polygon,
-            corners: List[Tuple[float, float]],
+            corners: list[tuple[float, float]],
             edge_idx: int,
-            ) -> Tuple[float, float]:
+            ) -> tuple[float, float]:
         """Push the point ``edge_gap_m`` perpendicular to the
         rect edge ``edge_idx``, toward the OUTSIDE of the rect."""
         ax, ay = corners[edge_idx]
@@ -394,7 +393,7 @@ def _push_junction_vertices_off_taxi_rect_edges(
         n_collapsed = n_v - len(ring_after_collapse)
 
         # Stage 2: corner-snap / edge-push the survivors.
-        new_ring: List[Tuple[float, float]] = []
+        new_ring: list[tuple[float, float]] = []
         n_snapped = 0
         n_pushed = 0
         for vx, vy in ring_after_collapse:
@@ -493,7 +492,7 @@ def _push_junction_vertices_off_taxi_rect_edges(
                 new_open = list(new_poly.exterior.coords)
                 if new_open and new_open[0] == new_open[-1]:
                     new_open = new_open[:-1]
-                new_alts: List[float] = []
+                new_alts: list[float] = []
                 for nx, ny in new_open:
                     best_d2 = float("inf")
                     best_a = src_alts_open[0]
@@ -515,8 +514,8 @@ def _push_junction_vertices_off_taxi_rect_edges(
 
 
 def _drop_spike_vertices(
-    ring: List[Tuple[float, float]],
-) -> List[Tuple[float, float]]:
+    ring: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
     """Drop any ring vertex that lies within ``SPIKE_VERTEX_TOL_M``
     of a NON-adjacent edge of the same ring.
 
@@ -577,7 +576,7 @@ def _enforce_shared_vertices(layout: "PavementLayout",
     """
     # Gather every vertex with a (shape_idx, is_interior, ring_idx,
     # vert_idx) handle so we can rewrite them in place.
-    handles: List[Tuple[int, int, int, int, Tuple[float, float]]] = []
+    handles: list[tuple[int, int, int, int, tuple[float, float]]] = []
     for si, shape in enumerate(layout.shapes):
         poly = shape.polygon
         if poly is None or poly.is_empty or poly.geom_type != "Polygon":
@@ -628,18 +627,18 @@ def _enforce_shared_vertices(layout: "PavementLayout",
                 _union(i, j)
 
     # Compute cluster centroids (mean of member coords).
-    cluster_members: Dict[int, List[int]] = defaultdict(list)
+    cluster_members: dict[int, list[int]] = defaultdict(list)
     for i in range(len(handles)):
         cluster_members[_find(i)].append(i)
-    canonical: Dict[int, Tuple[float, float]] = {}
+    canonical: dict[int, tuple[float, float]] = {}
     for root, members in cluster_members.items():
         sx = sum(handles[m][4][0] for m in members) / len(members)
         sy = sum(handles[m][4][1] for m in members) / len(members)
         canonical[root] = (sx, sy)
 
     # Rewrite each shape's rings with the canonical coords.
-    new_coords_by_shape: Dict[int, Dict[Tuple[int, int, int],
-                                        Tuple[float, float]]] = defaultdict(dict)
+    new_coords_by_shape: dict[int, dict[tuple[int, int, int],
+                                        tuple[float, float]]] = defaultdict(dict)
     for i, h in enumerate(handles):
         si, is_int, ri, vi, _orig = h
         new_coords_by_shape[si][(is_int, ri, vi)] = canonical[_find(i)]
@@ -657,7 +656,7 @@ def _enforce_shared_vertices(layout: "PavementLayout",
         new_ext = [new_coords_by_shape[si].get((0, 0, vi), ext[vi])
                    for vi in range(len(ext))]
         # Drop consecutive duplicates that arose from clustering.
-        dedup_ext: List[Tuple[float, float]] = []
+        dedup_ext: list[tuple[float, float]] = []
         for c in new_ext:
             if not dedup_ext or math.hypot(
                     c[0] - dedup_ext[-1][0],
@@ -677,14 +676,14 @@ def _enforce_shared_vertices(layout: "PavementLayout",
             shape.polygon = Polygon()
             continue
         # Rebuild interiors.
-        new_interiors: List[List[Tuple[float, float]]] = []
+        new_interiors: list[list[tuple[float, float]]] = []
         for ri, ring in enumerate(poly.interiors):
             rc = list(ring.coords)
             if rc and rc[0] == rc[-1]:
                 rc = rc[:-1]
             new_ring = [new_coords_by_shape[si].get((1, ri, vi), rc[vi])
                         for vi in range(len(rc))]
-            dedup_ring: List[Tuple[float, float]] = []
+            dedup_ring: list[tuple[float, float]] = []
             for c in new_ring:
                 if not dedup_ring or math.hypot(
                         c[0] - dedup_ring[-1][0],
@@ -732,7 +731,7 @@ def _validate_shared_vertex_invariant(layout: "PavementLayout",
     "close but not equal" pair violates rule 16 and signals a
     clustering bug.  Raises RuntimeError on violation.
     """
-    verts: List[Tuple[int, Tuple[float, float]]] = []
+    verts: list[tuple[int, tuple[float, float]]] = []
     for si, shape in enumerate(layout.shapes):
         poly = shape.polygon
         if poly is None or poly.is_empty or poly.geom_type != "Polygon":
@@ -747,11 +746,11 @@ def _validate_shared_vertex_invariant(layout: "PavementLayout",
     # Grid-bucket check: every pair within tol must be within 0.01.
     from collections import defaultdict
     cell = tol * 2.0
-    buckets: Dict[Tuple[int, int], List[int]] = defaultdict(list)
+    buckets: dict[tuple[int, int], list[int]] = defaultdict(list)
     for i, (_, (x, y)) in enumerate(verts):
         buckets[(int(x // cell), int(y // cell))].append(i)
     for (gx, gy), idxs in buckets.items():
-        neigh: List[int] = []
+        neigh: list[int] = []
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
                 neigh.extend(buckets.get((gx + dx, gy + dy), []))

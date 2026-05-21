@@ -26,7 +26,6 @@ with internal callers in ``O4_Airport_Pavement_Builder``):
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Tuple
 
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, Point, Polygon
@@ -93,7 +92,7 @@ def _runway_rect_m(runway, to_m) -> Polygon:
 def _sample_runway_segment_elev(
         shape: "BuiltShape",
         x: float,
-        y: float) -> "Optional[float]":
+        y: float) -> "float | None":
     """Linearly interpolate a runway segment's elevation at point
     ``(x, y)`` from its ``altitude_high`` / ``altitude_low``
     (sloped 4-corner rect) or ``altitude`` (flat).
@@ -120,7 +119,7 @@ def _sample_runway_segment_elev(
         n = min(len(coords), len(shape.node_altitudes))
         if n >= 1:
             best_d2 = float("inf")
-            best_alt: Optional[float] = None
+            best_alt: float | None = None
             for i in range(n):
                 cx, cy = coords[i]
                 d2 = (x - cx) ** 2 + (y - cy) ** 2
@@ -378,7 +377,7 @@ def _resolve_runway_crossings(
                 continue
 
     # Group by root; ignore singleton groups.
-    groups: Dict[int, List[int]] = {}
+    groups: dict[int, list[int]] = {}
     for i in range(n):
         r = find(i)
         groups.setdefault(r, []).append(i)
@@ -396,7 +395,7 @@ def _resolve_runway_crossings(
                             and not s.polygon.is_empty]
 
     drop_set: set = set()
-    new_shapes: List[BuiltShape] = []
+    new_shapes: list[BuiltShape] = []
     n_resolved = 0
     for members in groups.values():
         if len(members) <= 1:
@@ -470,7 +469,7 @@ def _resolve_runway_crossings(
         # weight from that segment (d→0 ⇒ w→∞), while a vertex
         # equidistant between two runways gets a 50/50 average,
         # and the transition between the two regimes is smooth.
-        ring_alts: List[Optional[float]] = []
+        ring_alts: list[float | None] = []
         for (cx, cy) in coords:
             pt = Point(cx, cy)
             weighted_sum = 0.0
@@ -497,7 +496,7 @@ def _resolve_runway_crossings(
         if any(a is None for a in ring_alts):
             continue
         # node_altitudes spans the closed ring.
-        closed_alts: List[float] = list(ring_alts) + [ring_alts[0]]
+        closed_alts: list[float] = list(ring_alts) + [ring_alts[0]]
         ref_combined = "+".join(
             s.ref for s in seg_shapes if s.ref)
         new_shape = BuiltShape(
@@ -546,7 +545,7 @@ def _absorb_crossing_vertices_into_adjacent_rects(
 
     Returns the number of rects converted.
     """
-    rwy_shapes: List[Tuple[int, "BuiltShape"]] = []
+    rwy_shapes: list[tuple[int, "BuiltShape"]] = []
     for i, s in enumerate(layout.shapes):
         if s.role != ROLE_RUNWAY:
             continue
@@ -565,7 +564,7 @@ def _absorb_crossing_vertices_into_adjacent_rects(
         if len(coords) != 4:
             continue
         rwy_shapes.append((i, s))
-    rc_vertices: List[Tuple[float, float]] = []
+    rc_vertices: list[tuple[float, float]] = []
     for s in layout.shapes:
         if s.role != ROLE_RUNWAY_CROSSING:
             continue
@@ -596,8 +595,8 @@ def _absorb_crossing_vertices_into_adjacent_rects(
         eh = float(r.altitude_high)
         el = float(r.altitude_low)
         corner_alts = corner_alts_from_high_low(eh, el)
-        new_ring: List[Tuple[float, float]] = []
-        new_alts: List[float] = []
+        new_ring: list[tuple[float, float]] = []
+        new_alts: list[float] = []
         any_insert = False
         for k in range(4):
             new_ring.append((float(coords[k][0]), float(coords[k][1])))
@@ -614,7 +613,7 @@ def _absorb_crossing_vertices_into_adjacent_rects(
             # interior to land on.
             if edge_L < 2.0 * corner_tol_m:
                 continue
-            edge_inserts: List[Tuple[float, float, float]] = []
+            edge_inserts: list[tuple[float, float, float]] = []
             for fx, fy in rc_vertices:
                 t = ((fx - ax) * dx + (fy - ay) * dy) / edge_L2
                 if t * edge_L <= corner_tol_m:
@@ -710,7 +709,7 @@ def _insert_runway_chain_bridges(
     if len(rwy_shapes) < 2:
         return 0
     # Group by ref.
-    by_ref: Dict[str, List[BuiltShape]] = {}
+    by_ref: dict[str, list[BuiltShape]] = {}
     for s in rwy_shapes:
         by_ref.setdefault(s.ref, []).append(s)
     n_inserted = 0
@@ -720,7 +719,7 @@ def _insert_runway_chain_bridges(
         rwy_tree = _STRtree(other_rwy_polys)
     except _GEOM_EXC:
         rwy_tree = None
-    new_shapes: List[BuiltShape] = []
+    new_shapes: list[BuiltShape] = []
     for ref, segs in by_ref.items():
         if len(segs) < 2:
             continue
@@ -892,13 +891,13 @@ def _insert_runway_chain_bridges(
 def _detect_runway_shoulders(
         runway,
         to_m,
-        pav_polys: "List[Polygon]",
+        pav_polys: "list[Polygon]",
         max_lat_gap_m: float = 1.0,
         min_self_inside_frac: float = 0.80,
         min_runway_overlap_frac: float = 0.40,
         min_axial_aspect: float = 2.5,
         min_strip_length_m: float = 50.0,
-        ) -> "Tuple[float, float, List[int]]":
+        ) -> "tuple[float, float, list[int]]":
     """Scan ``pav_polys`` for polygons that are runway pavement
     (shoulders or the runway's own envelope polygon often labelled
     as a "taxiway" by apt.dat) and return the perpendicular extent
@@ -968,7 +967,7 @@ def _detect_runway_shoulders(
     runway_width = 2.0 * runway_half
     new_left = -runway_half
     new_right = runway_half
-    absorbed: List[int] = []
+    absorbed: list[int] = []
     for idx, pav in enumerate(pav_polys):
         if pav is None or pav.is_empty:
             continue

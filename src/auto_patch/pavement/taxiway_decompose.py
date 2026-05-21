@@ -52,7 +52,6 @@ Returns :class:`Decomposition` with three lists:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
 
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import Polygon
@@ -88,8 +87,8 @@ BRANCH_JUNCTION_OVERLAP_M = 0.0
 @dataclass
 class Decomposition:
     """Result of :func:`decompose_multi_taxiway`."""
-    strip_polygons: List[Polygon] = field(default_factory=list)
-    junction_polygons: List[Polygon] = field(default_factory=list)
+    strip_polygons: list[Polygon] = field(default_factory=list)
+    junction_polygons: list[Polygon] = field(default_factory=list)
     used_decomposition: bool = False
 
 
@@ -156,7 +155,7 @@ def decompose_multi_taxiway(
     # the caller's emitted-parts accumulator (the apron path
     # subtracts the rects before triangulating the hub, so the
     # overlap becomes a shared edge).
-    trimmed_branches: List[Polygon] = []
+    trimmed_branches: list[Polygon] = []
     for b in branch_list:
         try:
             expanded = b.buffer(BRANCH_JUNCTION_OVERLAP_M).intersection(
@@ -175,7 +174,7 @@ def decompose_multi_taxiway(
             trimmed_branches.append(expanded)
 
     # Hub = polygon minus the unioned (trimmed) branches.
-    hub_polys: List[Polygon] = []
+    hub_polys: list[Polygon] = []
     if trimmed_branches:
         try:
             branch_union = unary_union(trimmed_branches)

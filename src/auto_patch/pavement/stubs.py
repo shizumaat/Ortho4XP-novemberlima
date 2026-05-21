@@ -14,13 +14,16 @@ from __future__ import annotations
 
 import math
 from collections import Counter
-from typing import Dict, List, Optional, Sequence, Tuple
+from collections.abc import Callable
 
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 
 from ..layout import ROLE_STUB
+
+# A taxi rect entry: (footprint polygon, centerline axis, role, ref).
+TaxiRect = tuple[Polygon, LineString, str, str]
 from .rects import (
     _extend_rect_corners_perpendicular,
     _natural_half_width,
@@ -40,17 +43,16 @@ __all__ = [
 
 
 def _emit_primary_parallel_runway_stubs(
-    nodes: Dict[str, Tuple[float, float]],
-    ways: List[Tuple[str, List[str], Dict[str, str]]],
-    to_m,
-    runway_union: Optional[Polygon],
-    pav_union: Optional[Polygon],
-    apt_vertices: Optional[List[Tuple[float, float]]],
-    existing_taxi_rects: List[Tuple[Polygon, LineString, str, str]],
-    apt_centerlines: Optional[
-        List[Tuple[LineString, str]]] = None,
-    rwy_centerlines: Optional[List[LineString]] = None,
-) -> List[Tuple[Polygon, LineString, str, str]]:
+    nodes: dict[str, tuple[float, float]],
+    ways: list[tuple[str, list[str], dict[str, str]]],
+    to_m: Callable[[float, float], tuple[float, float]],
+    runway_union: Polygon | None,
+    pav_union: Polygon | None,
+    apt_vertices: list[tuple[float, float]] | None,
+    existing_taxi_rects: list[TaxiRect],
+    apt_centerlines: list[tuple[LineString, str]] | None = None,
+    rwy_centerlines: list[LineString] | None = None,
+) -> list[TaxiRect]:
     """Emit an extra STUB rect at each primary parallel OSM path
     endpoint that terminates INSIDE the runway polygon.
 
@@ -116,7 +118,7 @@ def _emit_primary_parallel_runway_stubs(
     # (29 'A'-named edges) has the proper ref.  Using apt.dat
     # gives the stub its correct ref while inheriting all the
     # downstream centering / clearance logic.
-    by_ref: Dict[str, List[LineString]] = {}
+    by_ref: dict[str, list[LineString]] = {}
     if apt_centerlines:
         for ls, name in apt_centerlines:
             # Sub-refs (letter+digit) are short connector spurs —
@@ -158,9 +160,9 @@ def _emit_primary_parallel_runway_stubs(
         except _GEOM_EXC:
             existing_rects_union = None
 
-    new_stubs: List[Tuple[Polygon, LineString, str, str]] = []
+    new_stubs: list[TaxiRect] = []
     rwy_boundary = runway_union.boundary
-    emitted_centers: List[Tuple[float, float]] = []
+    emitted_centers: list[tuple[float, float]] = []
     DEDUP_DIST_M = 50.0  # de-dup stub centers within 50 m
     for ref, lines in by_ref.items():
         # Process INDIVIDUAL OSM ways (not merged).  Shared
@@ -451,7 +453,7 @@ def _emit_primary_parallel_runway_stubs(
                     ref and width < NARROW_PAV_M
                     and (endpoint_inside or endpoint_outside_near))
                 if apply_pullback:
-                    pull_path: List[Tuple[float, float]] = []
+                    pull_path: list[tuple[float, float]] = []
                     s = 1 if end_idx == 0 else -1
                     if endpoint_inside:
                         # Find runway-boundary crossing (last
@@ -703,10 +705,10 @@ def _emit_primary_parallel_runway_stubs(
 
 
 def _clip_residue_at_stub_sloping_edges(
-        residue: "Polygon",
-        taxi_rects: "List[Tuple[Polygon, LineString, str, str]]",
+        residue: Polygon,
+        taxi_rects: list[TaxiRect],
         outer_buffer_m: float = 30.0,
-        ) -> "Polygon":
+        ) -> Polygon:
     """Subtract a thin strip just OUTSIDE each STUB rect's sloping
     edges from the residue.  Per user 2026-04-27 invariant: a
     junction polygon must never run along a sloping rect's

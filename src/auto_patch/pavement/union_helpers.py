@@ -10,8 +10,6 @@ Public API:
 """
 from __future__ import annotations
 
-from typing import Optional
-
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import Polygon
 
@@ -133,9 +131,9 @@ def _simplify_pavement_polygon(geom, tol: float = 1.0):
 _drop_close_nonadjacent_pairs = _simplify_pavement_polygon
 
 
-def _merge_near_touching(geom: Optional[Polygon],
+def _merge_near_touching(geom: Polygon | None,
                          eps: float = PAVEMENT_BRIDGE_GAP_M
-                         ) -> Optional[Polygon]:
+                         ) -> Polygon | None:
     """Force-merge near-touching components of ``geom`` (a possibly
     MultiPolygon) by a buffer-then-shrink.  Returns the same kind
     of geometry (Polygon if single, MultiPolygon if truly disjoint).

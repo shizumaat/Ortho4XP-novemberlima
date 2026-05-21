@@ -49,8 +49,8 @@ This module is pure: no I/O, no shared state.  Tests in
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple
 
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import Polygon
@@ -112,13 +112,13 @@ class TaxiwayRect:
     ordering is still consistent (corners 0-1 at one end, 2-3 at
     the other).
     """
-    corners_m: Tuple[Tuple[float, float], ...]   # 4 corners
+    corners_m: tuple[tuple[float, float], ...]   # 4 corners
     elev_low: float
     elev_high: float
     # Centerline endpoints at the high and low ends, for
     # convenient re-projection to lat/lon by the caller.
-    center_high: Tuple[float, float]
-    center_low: Tuple[float, float]
+    center_high: tuple[float, float]
+    center_low: tuple[float, float]
     width_m: float
 
     @property
@@ -134,10 +134,10 @@ class TaxiwayRect:
 # Internal helpers
 # ──────────────────────────────────────────────────────────────────────
 def _long_axis(polygon: Polygon
-               ) -> Optional[Tuple[Tuple[float, float],
-                                   Tuple[float, float],
+               ) -> tuple[tuple[float, float],
+                                   tuple[float, float],
                                    float, float,
-                                   float, float]]:
+                                   float, float] | None:
     """Return the long-axis geometry of the polygon's min-rotated rect.
 
     Result is ``(m_a, m_b, ux, uy, long_len, short_len)`` where:
@@ -185,7 +185,7 @@ def _long_axis(polygon: Polygon
     return (m_a, m_b, ux, uy, long_len, short_len)
 
 
-def _clamp_profile(zs: List[float],
+def _clamp_profile(zs: list[float],
                    seg_len: float,
                    max_grade: float,
                    max_dg_per_m: float) -> None:
@@ -261,8 +261,8 @@ def _clamp_profile(zs: List[float],
             break
 
 
-def _clamp_profile_with_anchors(zs: List[float],
-                                anchored: List[bool],
+def _clamp_profile_with_anchors(zs: list[float],
+                                anchored: list[bool],
                                 seg_len: float,
                                 max_grade: float,
                                 max_dg_per_m: float) -> None:
@@ -328,8 +328,8 @@ def _clamp_profile_with_anchors(zs: List[float],
             break
 
 
-def _rdp_simplify_indices(zs: List[float],
-                          tolerance: float) -> List[int]:
+def _rdp_simplify_indices(zs: list[float],
+                          tolerance: float) -> list[int]:
     """Ramer-Douglas-Peucker on a 1D z profile sampled at uniform
     intervals.  Returns the sorted list of kept indices.
 
@@ -372,17 +372,17 @@ def _rdp_simplify_indices(zs: List[float],
 # ──────────────────────────────────────────────────────────────────────
 def build_taxiway_rects(
     polygon: Polygon,
-    sample_dem: Callable[[float, float], Optional[float]],
+    sample_dem: Callable[[float, float], float | None],
     max_grade: float = 0.015,
     sample_spacing: float = DEFAULT_SAMPLE_SPACING_M,
     fidelity_tol: float = DEFAULT_FIDELITY_TOL_M,
     min_fit_ratio: float = DEFAULT_MIN_FIT_RATIO,
     max_dg_per_m: float = DEFAULT_MAX_DG_PER_M,
     max_rect_length_m: float = 0.0,
-    runway_polygon: Optional[Polygon] = None,
-    runway_elev_lookup: Optional[Callable[[float, float],
-                                          Optional[float]]] = None,
-) -> Optional[List[TaxiwayRect]]:
+    runway_polygon: Polygon | None = None,
+    runway_elev_lookup: Callable[[float, float],
+                                          float | None] | None = None,
+) -> list[TaxiwayRect] | None:
     """Build the rect chain for one taxiway polygon.
 
     Args:
@@ -463,9 +463,9 @@ def build_taxiway_rects(
     n_samples = max(2, int(round(long_len / sample_spacing)) + 1)
     seg_len = long_len / (n_samples - 1)
 
-    zs: List[float] = []
-    xs_center: List[Tuple[float, float]] = []
-    anchored: List[bool] = []
+    zs: list[float] = []
+    xs_center: list[tuple[float, float]] = []
+    anchored: list[bool] = []
     for i in range(n_samples):
         t = i * seg_len
         cx = m_a[0] + ux * t
@@ -543,7 +543,7 @@ def build_taxiway_rects(
     # taxi emits a chain of rects that follows the curve rather
     # than one giant rect whose axis drifts off the polygon.
     if max_rect_length_m > 0:
-        capped: List[int] = [keep_indices[0]]
+        capped: list[int] = [keep_indices[0]]
         for k in range(len(keep_indices) - 1):
             i_a = keep_indices[k]
             i_b = keep_indices[k + 1]
@@ -562,7 +562,7 @@ def build_taxiway_rects(
 
     half_w = short_len / 2.0
 
-    rects: List[TaxiwayRect] = []
+    rects: list[TaxiwayRect] = []
     for k in range(len(keep_indices) - 1):
         i_a = keep_indices[k]
         i_b = keep_indices[k + 1]
@@ -603,7 +603,7 @@ def build_taxiway_rects(
 def build_rects_along_centerline(
     centerline,
     polygon: Polygon,
-    sample_dem: Callable[[float, float], Optional[float]],
+    sample_dem: Callable[[float, float], float | None],
     max_grade: float = 0.015,
     seg_length: float = 30.0,
     fidelity_tol: float = DEFAULT_FIDELITY_TOL_M,
@@ -611,10 +611,10 @@ def build_rects_along_centerline(
     min_width_m: float = 8.0,
     max_width_m: float = 50.0,
     max_rect_length_m: float = 0.0,
-    runway_polygon: Optional[Polygon] = None,
-    runway_elev_lookup: Optional[Callable[[float, float],
-                                          Optional[float]]] = None,
-) -> Optional[List[TaxiwayRect]]:
+    runway_polygon: Polygon | None = None,
+    runway_elev_lookup: Callable[[float, float],
+                                          float | None] | None = None,
+) -> list[TaxiwayRect] | None:
     """Build one sloping rect per STRAIGHT segment of a centerline.
 
     The centerline is typically a Ramer-Douglas-Peucker simplified
@@ -717,7 +717,7 @@ def build_rects_along_centerline(
     # 3. For each vertex-to-vertex segment: sample DEM along the
     # segment, grade-clamp the profile, RDP-simplify, and split
     # into 1+ sub-rects if the elevation profile demands.
-    rects: List[TaxiwayRect] = []
+    rects: list[TaxiwayRect] = []
     for seg_idx in range(len(base_coords) - 1):
         a = base_coords[seg_idx]
         b = base_coords[seg_idx + 1]
@@ -733,9 +733,9 @@ def build_rects_along_centerline(
         # DEM samples along the segment.
         n_samples = max(2, int(round(seg_len / seg_length)) + 1)
         step = seg_len / (n_samples - 1)
-        seg_centers: List[Tuple[float, float]] = []
-        seg_zs: List[float] = []
-        seg_anchored: List[bool] = []
+        seg_centers: list[tuple[float, float]] = []
+        seg_zs: list[float] = []
+        seg_anchored: list[bool] = []
         for k in range(n_samples):
             t = k * step
             cx = a[0] + ux * t
@@ -795,7 +795,7 @@ def build_rects_along_centerline(
         # that come from RDP splits share this width because the
         # segment is straight — uniform direction = uniform
         # perpendicular = uniform local width range.
-        widths: List[float] = []
+        widths: list[float] = []
         for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
             mid_x = a[0] + ux * seg_len * frac
             mid_y = a[1] + uy * seg_len * frac

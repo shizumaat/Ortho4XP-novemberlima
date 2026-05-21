@@ -53,8 +53,6 @@ consumable by the rect-chain builder.
 """
 from __future__ import annotations
 
-from typing import List, Optional
-
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import (
     LineString, MultiLineString, MultiPoint, Point, Polygon,
@@ -80,12 +78,12 @@ DEFAULT_SIMPLIFY_TOL_M = 20.0  # Skeleton centerline simplification
 _INTERIOR_SHRINK_M = 0.05
 
 
-def _iter_voronoi_edges(vd) -> List[LineString]:
+def _iter_voronoi_edges(vd) -> list[LineString]:
     """Walk the GeometryCollection returned by
     ``voronoi_diagram(..., edges=True)`` and yield the
     individual LineString edges.
     """
-    edges: List[LineString] = []
+    edges: list[LineString] = []
     if vd is None or vd.is_empty:
         return edges
     containers = (list(vd.geoms) if hasattr(vd, "geoms") else [vd])
@@ -101,11 +99,11 @@ def _iter_voronoi_edges(vd) -> List[LineString]:
     return edges
 
 
-def _densify_boundary(polygon: Polygon, step: float) -> List[tuple]:
+def _densify_boundary(polygon: Polygon, step: float) -> list[tuple[float, float]]:
     """Sample the polygon's exterior ring and every interior ring
     at uniform spacing.  Returns a flat list of ``(x, y)`` tuples.
     """
-    pts: List[tuple] = []
+    pts: list[tuple[float, float]] = []
 
     def _walk(ring):
         length = ring.length
@@ -127,7 +125,7 @@ def extract_centerlines(
     densify_step: float = DEFAULT_DENSIFY_STEP_M,
     min_path_length: float = DEFAULT_MIN_PATH_LENGTH_M,
     simplify_tol: float = DEFAULT_SIMPLIFY_TOL_M,
-) -> List[LineString]:
+) -> list[LineString]:
     """Return the taxiway centerlines inside ``polygon``.
 
     Args:
@@ -177,7 +175,7 @@ def extract_centerlines(
     if interior_test.is_empty or not hasattr(interior_test, "contains"):
         interior_test = polygon
 
-    interior_edges: List[LineString] = []
+    interior_edges: list[LineString] = []
     for e in edges:
         cc = list(e.coords)
         if len(cc) < 2:
@@ -209,7 +207,7 @@ def extract_centerlines(
     else:
         return []
 
-    out: List[LineString] = []
+    out: list[LineString] = []
     for p in paths:
         if p.length < min_path_length:
             continue
@@ -228,7 +226,7 @@ def extract_centerlines(
 def local_half_width(
     polygon: Polygon,
     center: Point,
-    tangent: "tuple[float, float]",
+    tangent: tuple[float, float],
     max_reach: float = 60.0,
 ) -> float:
     """Return the distance from ``center`` to the nearest polygon

@@ -32,8 +32,8 @@ The module is pure: no file I/O, no global state.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
 
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, Polygon
@@ -152,7 +152,7 @@ class Shape:
     """
     polygon: Polygon
     kind: str
-    axis: Optional[LineString]
+    axis: LineString | None
     width_m: float
 
 
@@ -180,7 +180,7 @@ class Adjacency:
 # ──────────────────────────────────────────────────────────────────
 # MRR helpers
 # ──────────────────────────────────────────────────────────────────
-def _mrr_midline_and_width(polygon: Polygon) -> Tuple[Optional[LineString],
+def _mrr_midline_and_width(polygon: Polygon) -> tuple[LineString | None,
                                                       float]:
     """Return ``(midline, short_side_m)`` for the min-area rotated
     rectangle of ``polygon``.  Midline connects the two short-side
@@ -216,7 +216,7 @@ def _mrr_midline_and_width(polygon: Polygon) -> Tuple[Optional[LineString],
     return (LineString([m1, m2]), float(short_s))
 
 
-def _mrr_aspect_short(polygon: Polygon) -> Tuple[float, float]:
+def _mrr_aspect_short(polygon: Polygon) -> tuple[float, float]:
     """Return ``(aspect, short_side_m)``.  Aspect is long/short;
     returns ``(0, 0)`` for degenerate inputs.
     """
@@ -307,7 +307,7 @@ def _extend_axis_to_polygon_boundary(
 
 def _local_widths_along_axis(
     polygon: Polygon, axis: LineString, n_samples: int = 7,
-) -> List[float]:
+) -> list[float]:
     """Return the perpendicular width of ``polygon`` sampled at
     ``n_samples`` equally-spaced interior points of ``axis``.  Rays
     that hit nothing inside ``WIDTH_PROBE_MAX_REACH_M`` are dropped.
@@ -317,7 +317,7 @@ def _local_widths_along_axis(
     length = axis.length
     if length <= 0:
         return []
-    widths: List[float] = []
+    widths: list[float] = []
     for i in range(n_samples):
         t = (i + 0.5) / n_samples
         c = axis.interpolate(t * length)
@@ -364,7 +364,7 @@ def _is_simple_strip(polygon: Polygon,
             and aspect >= simple_strip_aspect)
 
 
-def _largest_polygon_part(geom) -> Optional[Polygon]:
+def _largest_polygon_part(geom) -> Polygon | None:
     """From a Polygon or MultiPolygon, return the largest Polygon
     part; None for empty / non-polygonal inputs."""
     if geom is None or geom.is_empty:
@@ -381,7 +381,7 @@ def _largest_polygon_part(geom) -> Optional[Polygon]:
     return None
 
 
-def _validate_polygon(polygon: Polygon) -> Optional[Polygon]:
+def _validate_polygon(polygon: Polygon) -> Polygon | None:
     """Return a valid Polygon.  Runs ``make_valid`` and falls back to
     a zero-width buffer for self-intersecting boundaries.  Returns
     ``None`` when no polygonal part survives cleanup."""
@@ -402,15 +402,15 @@ def _validate_polygon(polygon: Polygon) -> Optional[Polygon]:
 # ──────────────────────────────────────────────────────────────────
 # Trunk extraction
 # ──────────────────────────────────────────────────────────────────
-def _node_key(pt: Tuple[float, float]) -> Tuple[int, int]:
+def _node_key(pt: tuple[float, float]) -> tuple[int, int]:
     """Round a 2D coordinate to the skeleton-node grid.  Two
     coordinates with the same key are treated as the same node."""
     tol = SKELETON_NODE_TOL_M
     return (int(round(pt[0] / tol)), int(round(pt[1] / tol)))
 
 
-def _unit_tangent(p_from: Tuple[float, float],
-                  p_to: Tuple[float, float]) -> Tuple[float, float]:
+def _unit_tangent(p_from: tuple[float, float],
+                  p_to: tuple[float, float]) -> tuple[float, float]:
     """Unit vector pointing from ``p_from`` to ``p_to``.  Returns
     ``(0, 0)`` for coincident points."""
     dx = p_to[0] - p_from[0]
@@ -426,9 +426,9 @@ def _extract_trunks(
     *,
     min_trunk_length_m: float,
     collinear_angle_deg: float = TRUNK_COLLINEAR_ANGLE_DEG,
-    preferred_bearings: Optional[Sequence[float]] = None,
+    preferred_bearings: Sequence[float] | None = None,
     bearing_tol_deg: float = 15.0,
-) -> List[LineString]:
+) -> list[LineString]:
     """Merge skeleton LineStrings into trunks by iteratively
     joining the most-collinear edge pair at each junction.
 
@@ -483,7 +483,7 @@ def _extract_trunks(
                                          coords[i+1][1] - coords[i][1])
                               for i in range(len(coords) - 1))
 
-    active: List[_Edge] = []
+    active: list[_Edge] = []
     for ls in centerlines:
         if ls is None or ls.is_empty:
             continue
@@ -505,7 +505,7 @@ def _extract_trunks(
 
     # Normalise preferred bearings (compass degrees → unit vectors
     # along both directions since a taxi has no inherent forward).
-    pref_vecs: List[Tuple[float, float]] = []
+    pref_vecs: list[tuple[float, float]] = []
     if preferred_bearings:
         for b in preferred_bearings:
             rad = math.radians(b)
@@ -607,7 +607,7 @@ def _extract_trunks(
         active.append(new_edge)
 
     # Filter by minimum length and return as LineStrings.
-    trunks: List[LineString] = []
+    trunks: list[LineString] = []
     for e in active:
         if e.length < min_trunk_length_m:
             continue
@@ -625,7 +625,7 @@ def _split_trunk_by_local_width(
     narrow_width_m: float,
     step_m: float = 5.0,
     min_run_length_m: float = 50.0,
-) -> List[Tuple[LineString, float]]:
+) -> list[tuple[LineString, float]]:
     """Walk the trunk, sampling perpendicular polygon width at
     ``step_m`` intervals.  Group consecutive samples by whether
     local width is ≤ ``narrow_width_m``.  Return each contiguous
@@ -641,7 +641,7 @@ def _split_trunk_by_local_width(
     if length < min_run_length_m:
         return []
     n_samples = max(3, int(length / step_m) + 1)
-    samples: List[Tuple[float, float]] = []
+    samples: list[tuple[float, float]] = []
     for i in range(n_samples):
         t = min(length, i * step_m)
         pt = trunk.interpolate(t)
@@ -660,10 +660,10 @@ def _split_trunk_by_local_width(
     if not samples:
         return []
 
-    runs: List[Tuple[float, float, List[float]]] = []
-    run_start: Optional[float] = None
+    runs: list[tuple[float, float, list[float]]] = []
+    run_start: float | None = None
     run_end = 0.0
-    run_ws: List[float] = []
+    run_ws: list[float] = []
     for (t, w) in samples:
         is_narrow = 0 < w <= narrow_width_m
         if is_narrow:
@@ -686,7 +686,7 @@ def _split_trunk_by_local_width(
     # fragment it into pieces on either side of every intersection;
     # we instead treat wide gaps under ``narrow_width_m`` as still
     # belonging to the same trunk.
-    merged_runs: List[Tuple[float, float, List[float]]] = []
+    merged_runs: list[tuple[float, float, list[float]]] = []
     for run in runs:
         if not merged_runs:
             merged_runs.append(run)
@@ -698,7 +698,7 @@ def _split_trunk_by_local_width(
         else:
             merged_runs.append(run)
 
-    out: List[Tuple[LineString, float]] = []
+    out: list[tuple[LineString, float]] = []
     for (t0, t1, ws) in merged_runs:
         if t1 - t0 < min_run_length_m:
             continue
@@ -718,8 +718,8 @@ def _decompose_mega_polygon(
     narrow_width_m: float,
     skeleton_min_branch_m: float,
     min_taxi_area_m2: float,
-    preferred_bearings: Optional[Sequence[float]] = None,
-) -> Tuple[List[Shape], List[Polygon]]:
+    preferred_bearings: Sequence[float] | None = None,
+) -> tuple[list[Shape], list[Polygon]]:
     """Split a non-simple-strip polygon into narrow-arm taxi shapes
     plus apron residuals.
 
@@ -738,8 +738,8 @@ def _decompose_mega_polygon(
     Returns ``(taxi_shapes, apron_parts)``.  Empty lists when the
     polygon is too small or has no skeleton.
     """
-    taxi_shapes: List[Shape] = []
-    apron_parts: List[Polygon] = []
+    taxi_shapes: list[Shape] = []
+    apron_parts: list[Polygon] = []
 
     try:
         # Skeleton with a permissive branch-length filter, so
@@ -787,7 +787,7 @@ def _decompose_mega_polygon(
     #                                     (apron territory).
     accept_median_factor = 1.0
     mix_median_factor = 1.5
-    candidates: List[Tuple[LineString, float]] = []
+    candidates: list[tuple[LineString, float]] = []
     for cl in trunks:
         if cl is None or cl.is_empty or cl.length < skeleton_min_branch_m:
             continue
@@ -907,8 +907,8 @@ def decompose_pavement(
     min_apron_area_m2: float = MIN_APRON_AREA_M2,
     skeleton_min_branch_m: float = SKELETON_MIN_BRANCH_M,
     min_taxi_area_m2: float = MIN_TAXI_AREA_M2,
-    preferred_bearings: Optional[Sequence[float]] = None,
-) -> Tuple[Shape, ...]:
+    preferred_bearings: Sequence[float] | None = None,
+) -> tuple[Shape, ...]:
     """Classify apt.dat pavement polygons into taxi and apron Shapes.
 
     Classification is geometric, not semantic.  Caller's
@@ -983,8 +983,8 @@ def decompose_pavement(
     taxi_components = _poly_components(taxi_union_geom)
     apron_components = _poly_components(apron_union_geom)
 
-    taxi_shapes: List[Shape] = []
-    apron_sources: List[Polygon] = list(apron_components)
+    taxi_shapes: list[Shape] = []
+    apron_sources: list[Polygon] = list(apron_components)
 
     for poly in taxi_components:
         if _is_simple_strip(poly, narrow_width_m, simple_strip_aspect):
@@ -1014,7 +1014,7 @@ def decompose_pavement(
     # (apt.dat sometimes has cross-class overlap).  Subtract the
     # taxi union from the apron pool so every emitted shape is
     # interior-disjoint.
-    apron_shapes: List[Shape] = []
+    apron_shapes: list[Shape] = []
     if apron_sources:
         if taxi_shapes:
             try:
@@ -1062,7 +1062,7 @@ def decompose_pavement(
 # ──────────────────────────────────────────────────────────────────
 # Adjacency graph
 # ──────────────────────────────────────────────────────────────────
-def _boundary_line_parts(geom) -> List[LineString]:
+def _boundary_line_parts(geom) -> list[LineString]:
     """Flatten a boundary-intersection geometry to its 1D
     LineString components only.  Point-only contacts are dropped.
     """
@@ -1071,7 +1071,7 @@ def _boundary_line_parts(geom) -> List[LineString]:
     if geom.geom_type == "LineString":
         return [geom]
     if hasattr(geom, "geoms"):
-        parts: List[LineString] = []
+        parts: list[LineString] = []
         for g in geom.geoms:
             parts.extend(_boundary_line_parts(g))
         return parts
@@ -1083,7 +1083,7 @@ def build_adjacency_graph(
     *,
     min_shared_length_m: float = MIN_SHARED_LENGTH_M,
     tolerance_m: float = BOUNDARY_TOLERANCE_M,
-) -> Tuple[Adjacency, ...]:
+) -> tuple[Adjacency, ...]:
     """Return all pairwise Shape-to-Shape adjacencies.
 
     Two shapes are adjacent when the portion of shape A's boundary
@@ -1100,7 +1100,7 @@ def build_adjacency_graph(
     The returned tuple is canonicalised: each pair appears once,
     with ``shape_a < shape_b``.
     """
-    out: List[Adjacency] = []
+    out: list[Adjacency] = []
     n = len(shapes)
     if n < 2:
         return tuple()
@@ -1176,7 +1176,7 @@ def classify_shape_roles(
     primary_max_distance_m: float = PRIMARY_MAX_DISTANCE_M,
     bearing_tol_deg: float = BEARING_TOL_DEG,
     stub_max_length_m: float = STUB_MAX_LENGTH_M,
-) -> List[str]:
+) -> list[str]:
     """Classify each shape into a role for the emission pipeline.
 
     Roles, in processing order:
@@ -1203,7 +1203,7 @@ def classify_shape_roles(
     ``shapes``.
     """
     n = len(shapes)
-    roles: List[str] = [ROLE_APRON] * n
+    roles: list[str] = [ROLE_APRON] * n
 
     runway_bearings = [_linestring_bearing_axis(rw)
                        for rw in runway_centerlines]
@@ -1296,7 +1296,7 @@ def perimeter_coverage(
     shape_idx: int,
     shapes: Sequence[Shape],
     adjacencies: Sequence[Adjacency],
-) -> Tuple[float, float]:
+) -> tuple[float, float]:
     """Return ``(covered_m, total_perimeter_m)`` for a given shape.
 
     ``covered_m`` is the sum of shared-boundary lengths the shape

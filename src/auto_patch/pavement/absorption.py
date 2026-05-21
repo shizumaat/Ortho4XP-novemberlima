@@ -55,7 +55,6 @@ from __future__ import annotations
 
 import math
 import sys
-from typing import List, Optional, Tuple
 
 import O4_UI_Utils as UI
 
@@ -69,6 +68,11 @@ from ..layout import (
     ROLE_SECONDARY_PARALLEL,
     ROLE_STUB,
 )
+
+# A taxi rect entry: (footprint polygon, centerline axis, role, ref).
+# ``role`` is one of the ROLE_* constants; ``ref`` is the apt.dat
+# taxiway label (or "?" when unknown).
+TaxiRect = tuple[Polygon, LineString, str, str]
 
 # Narrow exception tuple for shapely / numeric-geometry failure
 # modes.  Programming errors propagate so they surface immediately.
@@ -84,14 +88,14 @@ __all__ = [
 
 
 def _drop_primary_parallels_embedded_in_pavement(
-        taxi_rects: "List[Tuple[Polygon, LineString, str, str]]",
-        apt_pav_union: "Optional[Polygon]",
-        runway_polys: "Optional[List[Polygon]]" = None,
+        taxi_rects: list[TaxiRect],
+        apt_pav_union: Polygon | None,
+        runway_polys: list[Polygon] | None = None,
         adjacency_frac: float = 0.10,
         proximity_m: float = 1.0,
         embed_frac: float = 0.95,         # legacy param, unused
         long_edge_buffer_m: float = 5.0,  # legacy param, unused
-        ) -> "List[Tuple[Polygon, LineString, str, str]]":
+        ) -> list[TaxiRect]:
     """Drop ``primary_parallel`` rects whose long edges sit entirely
     inside apt.dat row-110 pavement.
 
@@ -284,8 +288,8 @@ def _drop_primary_parallels_embedded_in_pavement(
     # within range of the 5 m probe).
     OUTER_PROBE_M = 5.0
 
-    kept: List[Tuple[Polygon, LineString, str, str]] = []
-    abs_refs: List[str] = []
+    kept: list[TaxiRect] = []
+    abs_refs: list[str] = []
     n_full = 0
     n_split = 0
     n_clipped = 0
@@ -361,7 +365,7 @@ def _drop_primary_parallels_embedded_in_pavement(
 
         # Find contiguous "either-side adjacent" runs ≥ 10 % of axis.
         min_run_steps = max(1, int(adjacency_frac * n_steps))
-        absorbed_intervals: List[Tuple[float, float]] = []
+        absorbed_intervals: list[tuple[float, float]] = []
         i = 0
         while i < n_steps:
             if not either_adj[i]:
@@ -381,7 +385,7 @@ def _drop_primary_parallels_embedded_in_pavement(
             continue
 
         # Compute kept intervals = [0, L] minus absorbed.
-        kept_intervals: List[Tuple[float, float]] = []
+        kept_intervals: list[tuple[float, float]] = []
         prev_end = 0.0
         for s, e in absorbed_intervals:
             if s > prev_end:
@@ -419,7 +423,7 @@ def _drop_primary_parallels_embedded_in_pavement(
         except _GEOM_EXC:
             pav_boundary = None
         n_dropped_interior = 0
-        new_rects: List[Tuple[Polygon, LineString, str, str]] = []
+        new_rects: list[TaxiRect] = []
         from .rects import _snap_corners_to_pavement
         for u_lo, u_hi in kept_intervals:
             new_a_mid = (a_mid[0] + u_lo * ux,
@@ -508,12 +512,12 @@ def _drop_primary_parallels_embedded_in_pavement(
 
 
 def _split_primary_parallels_at_pavement_boundary(
-        taxi_rects: "List[Tuple[Polygon, LineString, str, str]]",
-        pav_union: "Optional[Polygon]",
+        taxi_rects: list[TaxiRect],
+        pav_union: Polygon | None,
         step_m: float = 10.0,
         min_dropped_m: float = 100.0,
         min_kept_m: float = 50.0,
-        ) -> "List[Tuple[Polygon, LineString, str, str]]":
+        ) -> list[TaxiRect]:
     """Clip primary_parallel rects whose long edge has a contiguous
     embedded sub-range at one end of the rect's axis.
 
@@ -550,7 +554,7 @@ def _split_primary_parallels_at_pavement_boundary(
     """
     if pav_union is None or pav_union.is_empty:
         return taxi_rects
-    out: List[Tuple[Polygon, LineString, str, str]] = []
+    out: list[TaxiRect] = []
     n_clipped = 0
     for entry in taxi_rects:
         rect, axis, role, ref = entry
@@ -588,7 +592,7 @@ def _split_primary_parallels_at_pavement_boundary(
             out.append(entry)
             continue
         n_steps = max(2, int(math.floor(L / step_m)) + 1)
-        embedded: List[bool] = []
+        embedded: list[bool] = []
         try:
             for i in range(n_steps):
                 u = min(L, i * step_m)

@@ -24,7 +24,6 @@ with internal callers in ``O4_Airport_Pavement_Builder``):
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Tuple
 
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, MultiLineString, Point, Polygon
@@ -68,8 +67,8 @@ __all__ = [
 ]
 
 
-def _bridge_same_ref_polylines(lines: List[LineString]
-                               ) -> List[LineString]:
+def _bridge_same_ref_polylines(lines: list[LineString]
+                               ) -> list[LineString]:
     """Greedily connect endpoints of same-ref polylines within
     ``GAP_BRIDGE_MAX_M`` by concatenation.  Produces fewer, longer
     polylines covering the ref's full extent.
@@ -78,7 +77,7 @@ def _bridge_same_ref_polylines(lines: List[LineString]
         return lines
 
     remaining = list(lines)
-    merged_lines: List[LineString] = []
+    merged_lines: list[LineString] = []
     while remaining:
         cur = remaining.pop(0)
         while True:
@@ -122,8 +121,8 @@ def _bridge_same_ref_polylines(lines: List[LineString]
 def split_merged_centerline(
         ls: LineString,
         ref: str,
-        rwy_centerlines: Optional[List[LineString]] = None,
-) -> List[Tuple[LineString, str]]:
+        rwy_centerlines: list[LineString] | None = None,
+) -> list[tuple[LineString, str]]:
     """Split a single merged taxi-name polyline into rect-axis
     segments via RDP simplification + bend-split.
 
@@ -138,7 +137,7 @@ def split_merged_centerline(
     1-N pieces depending on how many significant bends survive
     RDP simplification.
     """
-    out: List[Tuple[LineString, str]] = []
+    out: list[tuple[LineString, str]] = []
     try:
         simp = ls.simplify(RDP_SIMPLIFY_TOL_M,
                            preserve_topology=False)
@@ -234,7 +233,7 @@ def split_merged_centerline(
     # as ONE break point at its midpoint — matching
     # how the target treats a curve as a single logical
     # transition between rects.
-    candidate_bends: List[int] = []
+    candidate_bends: list[int] = []
     for i in range(1, len(scoords) - 1):
         a = scoords[i - 1]
         b = scoords[i]
@@ -272,7 +271,7 @@ def split_merged_centerline(
     cluster_m = BEND_CLUSTER_M
     if ref and any(c.isdigit() for c in ref):
         cluster_m = 30.0
-    clusters: List[List[int]] = []
+    clusters: list[list[int]] = []
     for bi in candidate_bends:
         if clusters and (scoords[bi][0] - scoords[clusters[-1][-1]][0])**2 + \
                 (scoords[bi][1] - scoords[clusters[-1][-1]][1])**2 \
@@ -283,7 +282,7 @@ def split_merged_centerline(
     # Build an ordered list of (break_index, kind) where
     # kind='point' (single bend) or 'interval_start' /
     # 'interval_end' (curve boundaries).
-    events: List[Tuple[int, str]] = [(0, "point")]
+    events: list[tuple[int, str]] = [(0, "point")]
     for cl in clusters:
         if len(cl) == 1:
             events.append((cl[0], "point"))
@@ -360,11 +359,11 @@ def split_merged_centerline(
 
 
 def _extract_osm_taxi_centerlines(
-    nodes: Dict[str, Tuple[float, float]],
-    ways: List[Tuple[str, List[str], Dict[str, str]]],
+    nodes: dict[str, tuple[float, float]],
+    ways: list[tuple[str, list[str], dict[str, str]]],
     to_m,
-    rwy_centerlines: Optional[List[LineString]] = None,
-) -> List[Tuple[LineString, str]]:
+    rwy_centerlines: list[LineString] | None = None,
+) -> list[tuple[LineString, str]]:
     """Extract one polyline segment per (ref, straight-run).
 
     Algorithm:
@@ -388,7 +387,7 @@ def _extract_osm_taxi_centerlines(
     share corner vertices at the bend.
     """
     from .rects import _natural_half_width
-    by_ref: Dict[str, List[LineString]] = {}
+    by_ref: dict[str, list[LineString]] = {}
     for wid, nds, tags in ways:
         # Per user 2026-05-04: treat aeroway=parking_position as
         # taxiway.  At SPJC and similar airports, parking_position
@@ -416,7 +415,7 @@ def _extract_osm_taxi_centerlines(
             continue
         by_ref.setdefault(ref, []).append(ls)
 
-    out: List[Tuple[LineString, str]] = []
+    out: list[tuple[LineString, str]] = []
     for ref, lines in by_ref.items():
         # Stage 1: contiguous-endpoint linemerge.
         if len(lines) > 1:
@@ -480,10 +479,10 @@ def _extract_osm_taxi_centerlines(
 
 
 def _insert_points_on_ring(
-    ring_coords: List[Tuple[float, float]],
-    pts: List[Tuple[float, float]],
+    ring_coords: list[tuple[float, float]],
+    pts: list[tuple[float, float]],
     tol: float,
-) -> List[Tuple[float, float]]:
+) -> list[tuple[float, float]]:
     """Insert each point in ``pts`` as a vertex at its projected
     position on the closed ring (list of coords, first == last),
     if within ``tol``.  Returns the new ring coords (closed).
@@ -492,7 +491,7 @@ def _insert_points_on_ring(
     if not pts or len(ring_coords) < 4:
         return ring_coords
     ring = LineString(ring_coords)
-    inserts: List[Tuple[float, Tuple[float, float]]] = []
+    inserts: list[tuple[float, tuple[float, float]]] = []
     for (x, y) in pts:
         p = Point(x, y)
         if p.distance(ring) > tol:
@@ -509,7 +508,7 @@ def _insert_points_on_ring(
     coords = list(ring_coords)
     if coords and coords[0] == coords[-1]:
         coords = coords[:-1]
-    new_coords: List[Tuple[float, float]] = []
+    new_coords: list[tuple[float, float]] = []
     cur_param = 0.0
     insert_i = 0
     for i in range(len(coords)):
@@ -531,7 +530,7 @@ def _insert_points_on_ring(
 
 def _insert_points_on_boundary(
     poly: Polygon,
-    pts: List[Tuple[float, float]],
+    pts: list[tuple[float, float]],
     tol: float = 2.0,
 ) -> Polygon:
     """Insert each point in ``pts`` as a vertex on the polygon's
@@ -564,12 +563,12 @@ def _insert_points_on_boundary(
 
 
 def _split_by_width_profile(
-    centerlines: List[Tuple[LineString, str]],
+    centerlines: list[tuple[LineString, str]],
     pav_union: Polygon,
     probe_step_m: float = 5.0,
     wide_factor: float = 1.20,
     min_rect_len_m: float = 30.0,
-) -> List[Tuple[LineString, str]]:
+) -> list[tuple[LineString, str]]:
     """Split each centerline into NARROW-CORRIDOR intervals per
     user rule 4 (2026-04-20): rects cover only the narrowest
     straight sections; any widening (around intersections or
@@ -586,14 +585,14 @@ def _split_by_width_profile(
     from shapely.ops import substring
     pav_boundary = pav_union.boundary
 
-    result: List[Tuple[LineString, str]] = []
+    result: list[tuple[LineString, str]] = []
     for ls, ref in centerlines:
         if ls.length < min_rect_len_m:
             result.append((ls, ref))
             continue
         n_probes = max(10, int(ls.length / probe_step_m))
         # sample (param, hw) pairs along the line
-        samples: List[Tuple[float, float]] = []
+        samples: list[tuple[float, float]] = []
         for i in range(n_probes + 1):
             t = i / n_probes * ls.length
             pt = ls.interpolate(t)
@@ -609,7 +608,7 @@ def _split_by_width_profile(
         # Flag each sample narrow or wide
         is_narrow = [h > 0 and h <= wide_thresh for (_, h) in samples]
         # Find contiguous narrow intervals
-        intervals: List[Tuple[float, float]] = []
+        intervals: list[tuple[float, float]] = []
         i = 0
         while i < len(samples):
             if not is_narrow[i]:
@@ -642,12 +641,12 @@ def _split_by_width_profile(
 
 
 def _sub_ref_narrow_corridor(
-    centerlines: List[Tuple[LineString, str]],
+    centerlines: list[tuple[LineString, str]],
     pav_union: Polygon,
     probe_step_m: float = 4.0,
     wide_factor: float = 1.30,
     narrow_margin_frac: float = 0.15,
-) -> List[Tuple[LineString, str]]:
+) -> list[tuple[LineString, str]]:
     """For each sub-ref (ref like V1/V3/A1/L3 — letter+digit),
     replace its centerline(s) with the 70% middle slice of the
     LONGEST narrow-corridor interval.
@@ -701,7 +700,7 @@ def _sub_ref_narrow_corridor(
     # beyond that we're in a widening (intersection or apron).
     NARROW_TAXI_HW_M = 16.0
 
-    def _narrow_slice(ls: LineString) -> Optional[Tuple[LineString, float]]:
+    def _narrow_slice(ls: LineString) -> tuple[LineString, float] | None:
         """Return (slice, avg_hw_in_narrow) for the 70% middle of
         the longest narrow-corridor interval along ls.  Uses a
         FIXED narrow-width threshold (NARROW_TAXI_HW_M) based on
@@ -710,7 +709,7 @@ def _sub_ref_narrow_corridor(
         if ls.length < MIN_SEGMENT_LEN_M:
             return None
         n = max(10, int(ls.length / probe_step_m))
-        samples: List[Tuple[float, float]] = []
+        samples: list[tuple[float, float]] = []
         for i in range(n + 1):
             t = i / n * ls.length
             hw = _perp_hw(ls, t)
@@ -760,8 +759,8 @@ def _sub_ref_narrow_corridor(
 
     # Group sub-ref lines; keep all other lines as-is.
     from collections import defaultdict
-    sub_ref_lines: Dict[str, List[LineString]] = defaultdict(list)
-    result: List[Tuple[LineString, str]] = []
+    sub_ref_lines: dict[str, list[LineString]] = defaultdict(list)
+    result: list[tuple[LineString, str]] = []
     for ls, ref in centerlines:
         if ref and any(c.isdigit() for c in ref):
             sub_ref_lines[ref].append(ls)
@@ -770,7 +769,7 @@ def _sub_ref_narrow_corridor(
 
     # For each sub-ref, pick the best slice.
     for ref, lines in sub_ref_lines.items():
-        slices: List[Tuple[LineString, float]] = []
+        slices: list[tuple[LineString, float]] = []
         for l in lines:
             r = _narrow_slice(l)
             if r is not None:
@@ -793,13 +792,13 @@ def _sub_ref_narrow_corridor(
 
 
 def _find_width_transition_breakpoints(
-    centerlines: List[Tuple[LineString, str]],
+    centerlines: list[tuple[LineString, str]],
     pav_union: Polygon,
     widen_factor: float = 1.5,
     n_probes_per_100m: float = 0.5,
     min_probes: int = 12,
     max_probes: int = 60,
-) -> List[Tuple[float, float]]:
+) -> list[tuple[float, float]]:
     """Find axial positions along each centerline where the
     perpendicular half-width transitions between "narrow" and
     "wide" zones.  Each transition is added to the global
@@ -849,7 +848,7 @@ def _find_width_transition_breakpoints(
         nx, ny = -uy, ux
         pt = ls.interpolate(t)
         ox, oy = pt.x, pt.y
-        sides: List[float] = []
+        sides: list[float] = []
         for sign in (-1, 1):
             side = RAY_CAP_M
             d = 0.0
@@ -863,14 +862,14 @@ def _find_width_transition_breakpoints(
             sides.append(side)
         return sum(sides) / 2.0 if sides else 0.0
 
-    breakpoints: List[Tuple[float, float]] = []
+    breakpoints: list[tuple[float, float]] = []
     for ls, _ref in centerlines:
         if ls.length < 60.0:
             continue
         n_probes = max(min_probes, min(max_probes,
                                         int(ls.length * n_probes_per_100m
                                             / 100.0)))
-        probes: List[Tuple[float, float]] = []  # (t, hw)
+        probes: list[tuple[float, float]] = []  # (t, hw)
         for k in range(n_probes):
             t = (k + 0.5) / n_probes * ls.length
             hw = _perp_hw_at(ls, t)
@@ -902,14 +901,14 @@ def _find_width_transition_breakpoints(
 
 
 def _split_centerlines_at_points(
-    centerlines: List[Tuple[LineString, str]],
-    split_points: List[Tuple[float, float]],
+    centerlines: list[tuple[LineString, str]],
+    split_points: list[tuple[float, float]],
     approach_tol_m: float = 25.0,
     endpoint_guard_m: float = 5.0,
-    pav_union: Optional[Polygon] = None,
-    rwy_union: Optional[Polygon] = None,
-    rwy_centerlines: Optional[List[LineString]] = None,
-) -> List[Tuple[LineString, str]]:
+    pav_union: Polygon | None = None,
+    rwy_union: Polygon | None = None,
+    rwy_centerlines: list[LineString] | None = None,
+) -> list[tuple[LineString, str]]:
     """Split each centerline at intersection points; emit between-
     break rects (15 % margin normally, 30 % for non-perpendicular
     taxis).
@@ -976,8 +975,8 @@ def _split_centerlines_at_points(
     BEND_SHARED_TOL_M = 25.0
     bend_share_tol2 = BEND_SHARED_TOL_M * BEND_SHARED_TOL_M
     chart_junction_tol2 = BEND_SHARED_TOL_M * BEND_SHARED_TOL_M
-    centerline_endpoints: List[Tuple[Tuple[float, float],
-                                     Tuple[float, float]]] = []
+    centerline_endpoints: list[tuple[tuple[float, float],
+                                     tuple[float, float]]] = []
     for ls, _ref in centerlines:
         try:
             cs = list(ls.coords)
@@ -985,7 +984,7 @@ def _split_centerlines_at_points(
         except _GEOM_EXC:
             centerline_endpoints.append(((0.0, 0.0), (0.0, 0.0)))
 
-    def _is_bend_shared(idx: int, endpoint: Tuple[float, float]) -> bool:
+    def _is_bend_shared(idx: int, endpoint: tuple[float, float]) -> bool:
         """True iff ``endpoint`` of centerline ``idx`` lies within
         ``BEND_SHARED_TOL_M`` of any other centerline's endpoint —
         signalling that the two centerlines were bend-split apart
@@ -999,7 +998,7 @@ def _split_centerlines_at_points(
                     return True
         return False
 
-    def _is_chart_junction(endpoint: Tuple[float, float]) -> bool:
+    def _is_chart_junction(endpoint: tuple[float, float]) -> bool:
         """True iff ``endpoint`` is within ``BEND_SHARED_TOL_M`` of
         any chart-level junction position (passed in via
         ``split_points`` — apt.dat nodes referenced by ≥ 2 distinct
@@ -1034,7 +1033,7 @@ def _split_centerlines_at_points(
         ux, uy = tx / mag, ty / mag
         nx, ny = -uy, ux
         pt = ls.interpolate(t)
-        sides: List[float] = []
+        sides: list[float] = []
         for sign in (-1, 1):
             side = RAY_CAP_M
             d = 0.0
@@ -1168,7 +1167,7 @@ def _split_centerlines_at_points(
     # ``approach_tol_m`` (treating unnamed connectors as a distinct
     # sentinel ref so a named taxi + connector counts), or where a
     # runway centerline passes within the same tolerance.
-    validated_split_points: List[Tuple[float, float]] = []
+    validated_split_points: list[tuple[float, float]] = []
     if split_points:
         _CONN_SENTINEL = "_conn"
         for (sx, sy) in split_points:
@@ -1197,7 +1196,7 @@ def _split_centerlines_at_points(
                 if near_runway:
                     validated_split_points.append((sx, sy))
 
-    result: List[Tuple[LineString, str]] = []
+    result: list[tuple[LineString, str]] = []
     for ls_idx, (ls, ref) in enumerate(centerlines):
         gap_margin_frac = _rect_margin_frac_for(ls, ref)
         # Detect whether the centerline's start / end is a bend-shared
@@ -1219,7 +1218,7 @@ def _split_centerlines_at_points(
             narrow_hw = 0.0
 
         # Collect cut params for intersections that lie on this line.
-        cut_params: List[float] = []
+        cut_params: list[float] = []
         for (sx, sy) in validated_split_points or ():
             sp = Point(sx, sy)
             if ls.distance(sp) > approach_tol_m:
@@ -1239,7 +1238,7 @@ def _split_centerlines_at_points(
         # merge when the midpoint half-width > narrow_hw × 1.2.
         # Always merge when they're within 25 m (same-crossing
         # multi-node noise).  Never merge past 400 m apart.
-        clusters: List[List[float]] = []
+        clusters: list[list[float]] = []
         WIDEN_FACTOR = 1.2
         MIN_ALWAYS_MERGE = 25.0
         MAX_CLUSTER_SPAN_M = 400.0
@@ -1266,7 +1265,7 @@ def _split_centerlines_at_points(
             else:
                 clusters.append([p])
 
-        breaks: List[float] = [0.0]
+        breaks: list[float] = [0.0]
         for cl in clusters:
             breaks.append(cl[0])
             breaks.append(cl[-1])
@@ -1287,7 +1286,7 @@ def _split_centerlines_at_points(
         # post-emit filter below.  Use smallest possible retained
         # fraction (35 % for diagonal, 40 % for cross-connector
         # ends) to test.
-        candidates: List[Tuple[float, float]] = []
+        candidates: list[tuple[float, float]] = []
         for i in range(0, n_breaks - 1, 2):
             p0, p1 = breaks[i], breaks[i + 1]
             gap = p1 - p0

@@ -19,11 +19,19 @@ Used by:
     * O4_Airport_Pavement_Builder (runway construction)
     * O4_Pavement_Runway_Segments (in slice 3)
 """
+from __future__ import annotations
+
 import os
 import re
 from math import cos, sin, pi, sqrt, atan2, acos
+from typing import TypeVar
 
 import O4_UI_Utils as UI
+
+# Opaque per-runway record (e.g. a CIFP threshold dict). ``pair_runways``
+# only passes these values through, so the exact shape is irrelevant —
+# the TypeVar preserves whatever the caller's mapping holds.
+_RunwayData = TypeVar("_RunwayData")
 
 __all__ = [
     "get_reciprocal",
@@ -41,7 +49,7 @@ DEFAULT_RUNWAY_WIDTH = 45.0  # meters - typical for major runways
 # ──────────────────────────────────────────────────────────────────────
 # Apt.dat Runway Width Parsing
 # ──────────────────────────────────────────────────────────────────────
-def parse_aptdat_runway_widths(aptdat_path, icao):
+def parse_aptdat_runway_widths(aptdat_path: str, icao: str) -> dict[str, float]:
     """Extract runway widths from an X-Plane apt.dat file for a given airport.
 
     Apt.dat row code 100 format:
@@ -59,7 +67,7 @@ def parse_aptdat_runway_widths(aptdat_path, icao):
         dict: {designator: width_m} e.g. {'RW16R': 45.0, 'RW34L': 45.0}
               Empty dict if airport not found or on error.
     """
-    widths = {}
+    widths: dict[str, float] = {}
     if not aptdat_path or not os.path.isfile(aptdat_path):
         return widths
     try:
@@ -120,7 +128,7 @@ def parse_aptdat_runway_widths(aptdat_path, icao):
 # ──────────────────────────────────────────────────────────────────────
 # Runway Pairing
 # ──────────────────────────────────────────────────────────────────────
-def get_reciprocal(designator):
+def get_reciprocal(designator: str) -> str | None:
     """Get the reciprocal runway designator. RW16L → RW34R, RW09 → RW27."""
     match = re.match(r"RW(\d{2})([LRC]?)", designator)
     if not match:
@@ -134,7 +142,9 @@ def get_reciprocal(designator):
     return "RW{:02d}{}".format(recip_num, recip_suffix)
 
 
-def pair_runways(runways):
+def pair_runways(
+    runways: dict[str, _RunwayData],
+) -> list[tuple[str, _RunwayData, str | None, _RunwayData | None]]:
     """Match runway thresholds into pairs.
 
     Returns list of tuples:
@@ -142,8 +152,8 @@ def pair_runways(runways):
     where a is the higher-numbered threshold (higher heading number) by
     convention, and b is the reciprocal. If unpaired, desig_b/data_b are None.
     """
-    paired = set()
-    pairs = []
+    paired: set[str] = set()
+    pairs: list[tuple[str, _RunwayData, str | None, _RunwayData | None]] = []
     for desig in sorted(runways.keys()):
         if desig in paired:
             continue
@@ -162,7 +172,9 @@ def pair_runways(runways):
 # ──────────────────────────────────────────────────────────────────────
 # Runway Corner Geometry
 # ──────────────────────────────────────────────────────────────────────
-def runway_corners(lat1, lon1, lat2, lon2, width_m):
+def runway_corners(
+    lat1: float, lon1: float, lat2: float, lon2: float, width_m: float,
+) -> list[tuple[float, float]] | None:
     """Compute the 4 corners of a runway rectangle.
 
     The corners are ordered for the altitude_high/altitude_low patch convention:
@@ -206,7 +218,10 @@ def runway_corners(lat1, lon1, lat2, lon2, width_m):
     return [c0, c1, c2, c3]
 
 
-def extend_point(lat_from, lon_from, lat_to, lon_to, distance_m):
+def extend_point(
+    lat_from: float, lon_from: float, lat_to: float, lon_to: float,
+    distance_m: float,
+) -> tuple[float, float]:
     """Extend a point beyond lat_to/lon_to by distance_m meters
     along the direction from lat_from/lon_from to lat_to/lon_to.
 

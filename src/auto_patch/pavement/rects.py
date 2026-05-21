@@ -27,7 +27,6 @@ with internal callers in ``O4_Airport_Pavement_Builder``):
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Sequence, Tuple
 
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, MultiLineString, Point, Polygon
@@ -70,14 +69,14 @@ __all__ = [
 
 
 def _build_taxi_rects(
-    centerlines: List[Tuple[LineString, str]],
-    pav_union: Optional[Polygon],
-    rwy_union: Optional[Polygon],
-    rwy_centerlines: List[LineString],
-    apt_vertices: Optional[List[Tuple[float, float]]] = None,
-    ref_overall_bearings: Optional[Dict[str, float]] = None,
-    registry: Optional[CanonicalPointRegistry] = None,
-) -> List[Tuple[Polygon, LineString, str, str]]:
+    centerlines: list[tuple[LineString, str]],
+    pav_union: Polygon | None,
+    rwy_union: Polygon | None,
+    rwy_centerlines: list[LineString],
+    apt_vertices: list[tuple[float, float]] | None = None,
+    ref_overall_bearings: dict[str, float] | None = None,
+    registry: CanonicalPointRegistry | None = None,
+) -> list[tuple[Polygon, LineString, str, str]]:
     """Convert each usable centerline into a 4-vertex rect.
 
     For each centerline we:
@@ -137,8 +136,8 @@ def _build_taxi_rects(
 
     centerlines = sorted(centerlines, key=lambda x: -x[0].length)
 
-    emitted: List[Tuple[Polygon, LineString, str, str]] = []
-    emitted_union: Optional[Polygon] = None
+    emitted: list[tuple[Polygon, LineString, str, str]] = []
+    emitted_union: Polygon | None = None
 
     for axis, ref in centerlines:
         # Clip to the full pavement (including runway).  The rect may
@@ -334,7 +333,7 @@ def _build_taxi_rects(
     # parts of the corridor) coexist — only OSM fragmentation that
     # produces actual duplicates gets deduped.
     OVERLAP_PROX_M = 5.0
-    by_ref: Dict[str, List[int]] = {}
+    by_ref: dict[str, list[int]] = {}
     for i, (_r, _a, role, ref) in enumerate(emitted):
         if not _should_dedup(ref, role):
             continue
@@ -362,7 +361,7 @@ def _build_taxi_rects(
                     pa, pb = find(a), find(b)
                     if pa != pb:
                         parent[pa] = pb
-        clusters: Dict[int, List[int]] = {}
+        clusters: dict[int, list[int]] = {}
         for k in range(n):
             clusters.setdefault(find(k), []).append(idxs[k])
         # Within each cluster, keep only the longest axis.
@@ -393,7 +392,7 @@ def _build_taxi_rects(
         except _GEOM_EXC:
             _rwy0_b = None
         if _rwy0_b is not None:
-            diag_stubs: Dict[str, List[int]] = {}
+            diag_stubs: dict[str, list[int]] = {}
             for i, (_r, _a, role, ref) in enumerate(emitted):
                 if i in drop:
                     continue
@@ -415,7 +414,7 @@ def _build_taxi_rects(
                 for m in idxs[1:]:
                     drop.add(m)
 
-    keep: List[Tuple[Polygon, LineString, str, str]] = [
+    keep: list[tuple[Polygon, LineString, str, str]] = [
         item for i, item in enumerate(emitted) if i not in drop]
     return keep
 
@@ -531,13 +530,13 @@ def _rect_long_edges_at_pavement_boundary(
 
 
 def _merge_collinear_rects_principled(
-    emitted: List[Tuple[Polygon, LineString, str, str]],
+    emitted: list[tuple[Polygon, LineString, str, str]],
     pav: Polygon,
-    apt_vertices: Optional[List[Tuple[float, float]]] = None,
+    apt_vertices: list[tuple[float, float]] | None = None,
     angle_tol_deg: float = 4.0,
     gap_tol_m: float = 12.0,
     width_uniformity_tol: float = 1.10,
-) -> List[Tuple[Polygon, LineString, str, str]]:
+) -> list[tuple[Polygon, LineString, str, str]]:
     """Merge adjacent same-ref rects whose joining point shows
     NO widening — the pavement runs straight at uniform narrow
     width through the joint.  This is the only case where "single
@@ -638,13 +637,13 @@ def _merge_collinear_rects_principled(
 
 
 def _merge_collinear_rects(
-    emitted: List[Tuple[Polygon, LineString, str, str]],
+    emitted: list[tuple[Polygon, LineString, str, str]],
     pav: Polygon,
-    apt_vertices: Optional[List[Tuple[float, float]]] = None,
+    apt_vertices: list[tuple[float, float]] | None = None,
     angle_tol_deg: float = 4.0,
     gap_tol_m: float = 8.0,
     width_ratio_tol: float = 1.15,
-) -> List[Tuple[Polygon, LineString, str, str]]:
+) -> list[tuple[Polygon, LineString, str, str]]:
     """Merge adjacent same-ref rects whose axes are nearly
     collinear and whose meeting point sits in the narrow corridor
     (no widening).  Produces one rect per straight pavement
@@ -738,7 +737,7 @@ def _merge_collinear_rects(
 
 
 def _natural_half_width(axis: LineString, pav: Polygon,
-                        n_probes: int = 15) -> Tuple[float, float, float]:
+                        n_probes: int = 15) -> tuple[float, float, float]:
     """Return (natural_hw, max_hw, narrow_hw) LOCAL half-width probes
     along the axis.
 
@@ -785,7 +784,7 @@ def _natural_half_width(axis: LineString, pav: Polygon,
         nx, ny = -uy, ux  # left-perp
         pt = axis.interpolate(t)
         ox, oy = pt.x, pt.y
-        sides: List[float] = []
+        sides: list[float] = []
         for sign in (-1, 1):
             side = RAY_CAP_M
             d = 0.0
@@ -799,7 +798,7 @@ def _natural_half_width(axis: LineString, pav: Polygon,
             sides.append(side)
         return sum(sides) / 2.0 if sides else RAY_CAP_M
 
-    dists: List[float] = []
+    dists: list[float] = []
     for k in range(n_probes):
         t = (k + 1) / (n_probes + 1) * axis.length
         hw = _perpendicular_half_at(t)
@@ -822,7 +821,7 @@ def _natural_half_width(axis: LineString, pav: Polygon,
 
 
 def _trim_to_narrow(axis: LineString, pav: Polygon, natural_hw: float,
-                    widen_factor: float = 1.3) -> Optional[LineString]:
+                    widen_factor: float = 1.3) -> LineString | None:
     """Trim the axis inward from each end until the PERPENDICULAR
     half-width at the endpoint drops below ``widen_factor × natural_hw``.
 
@@ -1000,7 +999,7 @@ def _extend_rect_corners_perpendicular(
             d = d_test
         return 0.0
 
-    new_corners: List[Tuple[float, float]] = []
+    new_corners: list[tuple[float, float]] = []
     pav_nodes = _pav_boundary_nodes(pav)
     for cx, cy in coords:
         # For each corner: project onto axis to determine which
@@ -1038,12 +1037,10 @@ def _extend_rect_corners_perpendicular(
 
 def _rect_from_axis_extended(axis: LineString, width: float,
                             pav: Polygon,
-                            apt_vertices: Optional[
-                                List[Tuple[float, float]]] = None,
+                            apt_vertices: list[tuple[float, float]] | None = None,
                             accept_asymmetric: bool = False,
-                            registry: Optional[
-                                CanonicalPointRegistry] = None,
-                            ) -> Optional[Polygon]:
+                            registry: CanonicalPointRegistry | None = None,
+                            ) -> Polygon | None:
     """Build a rect around the axis at its first-to-last direction.
 
     The 4 corners are placed at axis endpoints ± perpendicular half-
@@ -1094,7 +1091,7 @@ def _rect_from_axis_extended(axis: LineString, width: float,
     MAX_ASYM_RETRIES = 15          # 15 * 5 % = up to 75 % shrink
 
     cur_axis = axis
-    best_snapped: Optional[List[Tuple[float, float]]] = None
+    best_snapped: list[tuple[float, float]] | None = None
     best_asym_score = float("inf")
     for attempt in range(MAX_ASYM_RETRIES + 1):
         coords = list(cur_axis.coords)
@@ -1185,9 +1182,9 @@ APRON_INTERIOR_DEPTH_M = 15.0   # if 2+ natural corners are deeper
 PAV_NODE_PREFER_RADIUS_M = 5.0
 
 
-def _pav_boundary_nodes(pav: Polygon) -> List[Tuple[float, float]]:
+def _pav_boundary_nodes(pav: Polygon) -> list[tuple[float, float]]:
     """Return all pav_union ring vertices (exterior + interiors)."""
-    out: List[Tuple[float, float]] = []
+    out: list[tuple[float, float]] = []
     parts = (list(pav.geoms)
              if pav.geom_type == "MultiPolygon" else [pav])
     for poly in parts:
@@ -1205,10 +1202,10 @@ def _pav_boundary_nodes(pav: Polygon) -> List[Tuple[float, float]]:
     return out
 
 
-def _prefer_pav_node(snapped: Tuple[float, float],
-                     pav_nodes: List[Tuple[float, float]],
+def _prefer_pav_node(snapped: tuple[float, float],
+                     pav_nodes: list[tuple[float, float]],
                      radius: float = PAV_NODE_PREFER_RADIUS_M
-                     ) -> Tuple[float, float]:
+                     ) -> tuple[float, float]:
     """If a pav-boundary vertex sits within ``radius`` of the
     boundary-snapped point, return that vertex.  Otherwise return
     ``snapped`` unchanged.
@@ -1233,11 +1230,11 @@ def _prefer_pav_node(snapped: Tuple[float, float],
 
 
 def _snap_corners_to_pavement(
-    corners: List[Tuple[float, float]],
+    corners: list[tuple[float, float]],
     pav: Polygon,
-    apt_vertices: Optional[List[Tuple[float, float]]] = None,
-    registry: Optional[CanonicalPointRegistry] = None,
-) -> Optional[List[Tuple[float, float]]]:
+    apt_vertices: list[tuple[float, float]] | None = None,
+    registry: CanonicalPointRegistry | None = None,
+) -> list[tuple[float, float]] | None:
     """Snap each rect corner to ``pav.boundary`` and resolve
     through the canonical-point registry.
 
@@ -1270,7 +1267,7 @@ def _snap_corners_to_pavement(
     """
     boundary = pav.boundary
     pav_nodes = _pav_boundary_nodes(pav)
-    snapped: List[Tuple[float, float]] = []
+    snapped: list[tuple[float, float]] = []
     for (cx, cy) in corners:
         p = Point(cx, cy)
         near, _ = nearest_points(boundary, p)
@@ -1300,11 +1297,11 @@ def _snap_corners_to_pavement(
 
 
 def _cap_rect_length_to_width(
-    taxi_rects: List[Tuple[Polygon, LineString, str, str]],
-    rwy_centerlines: List[LineString],
+    taxi_rects: list[tuple[Polygon, LineString, str, str]],
+    rwy_centerlines: list[LineString],
     pav: Polygon,
-    apt_vertices: Optional[List[Tuple[float, float]]],
-) -> List[Tuple[Polygon, LineString, str, str]]:
+    apt_vertices: list[tuple[float, float]] | None,
+) -> list[tuple[Polygon, LineString, str, str]]:
     """Cap each rect's length-to-width ratio per the user's
     2026-04-27 spec: rects should be roughly square (length ≈
     width) so the long edges sit on the pavement-narrowing
@@ -1332,7 +1329,7 @@ def _cap_rect_length_to_width(
     PERP_CAP_RATIO = 1.3
     DIAG_CAP_RATIO = 1.0
     from shapely.ops import substring
-    out: List[Tuple[Polygon, LineString, str, str]] = []
+    out: list[tuple[Polygon, LineString, str, str]] = []
     for rect, axis, role, ref in taxi_rects:
         try:
             coords = list(rect.exterior.coords)
@@ -1396,10 +1393,10 @@ def _cap_rect_length_to_width(
 
 
 def _classify_role(axis: LineString, width: float,
-                   rwy_centerlines: List[LineString],
-                   rwy_union: Optional[Polygon],
+                   rwy_centerlines: list[LineString],
+                   rwy_union: Polygon | None,
                    ref: str = "",
-                   ref_overall_bearings: Optional[Dict[str, float]]
+                   ref_overall_bearings: dict[str, float] | None
                    = None) -> str:
     """Classify a taxi rect by axis geometry alone.
 
@@ -1514,8 +1511,8 @@ def _classify_role(axis: LineString, width: float,
 
 
 def _axis_to_nearest_rwy_db(axis: LineString,
-                            rwy_centerlines: List[LineString]
-                            ) -> Optional[float]:
+                            rwy_centerlines: list[LineString]
+                            ) -> float | None:
     """Return the bearing difference from ``axis`` to the nearest
     runway centerline, modulo 180°."""
     if not rwy_centerlines:
@@ -1557,12 +1554,12 @@ def _refine_roles(emitted, rwy_centerlines):
 
 def _try_align_sloping_to_hole(
     rect: Polygon,
-    axis: Optional[LineString],
-    hole_segs: List[Tuple[float, float, float, float]],
+    axis: LineString | None,
+    hole_segs: list[tuple[float, float, float, float]],
     perp_tol_m: float,
     length_overlap_frac: float,
     max_corner_shift_m: float,
-) -> Tuple[Optional[Polygon], Optional[LineString]]:
+) -> tuple[Polygon | None, LineString | None]:
     """Try to align one of ``rect``'s sloping (long) edges with the
     nearest matching apt.dat hole-boundary segment.
 
@@ -1582,8 +1579,8 @@ def _try_align_sloping_to_hole(
         (2, 3, rc[2], rc[3]),
     ]
 
-    best: Optional[Tuple[int, int, Tuple[float, float],
-                          Tuple[float, float]]] = None
+    best: tuple[int, int, tuple[float, float],
+                          tuple[float, float]] | None = None
     best_score = float("inf")
     for ca_idx, cb_idx, ca, cb in sloping_edges:
         edge_len = math.hypot(cb[0] - ca[0], cb[1] - ca[1])
@@ -1687,13 +1684,13 @@ def _try_align_sloping_to_hole(
 
 
 def _snap_rect_sloping_edges_to_holes(
-    taxi_rects: List[Tuple[Polygon, LineString, str, str]],
-    pav_union: Optional[Polygon],
+    taxi_rects: list[tuple[Polygon, LineString, str, str]],
+    pav_union: Polygon | None,
     perp_tol_m: float = 3.0,
     length_overlap_frac: float = 0.30,
     min_hole_area_m2: float = 100.0,
     max_corner_shift_m: float = 8.0,
-) -> List[Tuple[Polygon, LineString, str, str]]:
+) -> list[tuple[Polygon, LineString, str, str]]:
     """Per user 2026-05-04 (apron-boundary rule): when a sloping rect's
     long edge runs near and parallel to an apt.dat row-110 hole's
     boundary, snap the rect so its sloping edge LIES ON the hole
@@ -1754,7 +1751,7 @@ def _snap_rect_sloping_edges_to_holes(
     MIN_AXIS_LENGTH_M = 30.0  # don't shorten below this
 
     # Collect big holes from pav_union as polygons + boundary segments.
-    holes: List[Polygon] = []
+    holes: list[Polygon] = []
     parts = (list(pav_union.geoms)
              if pav_union.geom_type == "MultiPolygon" else [pav_union])
     for p in parts:
@@ -1764,7 +1761,7 @@ def _snap_rect_sloping_edges_to_holes(
             hp = Polygon(h)
             if hp.area > min_hole_area_m2:
                 holes.append(hp)
-    hole_segs: List[Tuple[float, float, float, float]] = []
+    hole_segs: list[tuple[float, float, float, float]] = []
     for H in holes:
         coords = list(H.exterior.coords)
         if coords and coords[0] == coords[-1]:
@@ -1778,7 +1775,7 @@ def _snap_rect_sloping_edges_to_holes(
     # Collect ALL pav_union boundary nodes (exterior + holes) for
     # the corner-validation node snap.  Used regardless of whether
     # holes exist — corners may need to snap to exterior verts.
-    pav_nodes: List[Tuple[float, float]] = []
+    pav_nodes: list[tuple[float, float]] = []
     for p in parts:
         if p.geom_type != "Polygon":
             continue
@@ -1794,7 +1791,7 @@ def _snap_rect_sloping_edges_to_holes(
 
     from shapely.ops import substring
 
-    out: List[Tuple[Polygon, LineString, str, str]] = []
+    out: list[tuple[Polygon, LineString, str, str]] = []
     for rect, axis, role, ref in taxi_rects:
         if role not in SLOPING_RECT_ROLES_LOCAL:
             out.append((rect, axis, role, ref))

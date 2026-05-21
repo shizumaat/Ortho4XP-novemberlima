@@ -395,9 +395,9 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
     #   (desig_a, desig_b) → {
     #     phys_end_a_ll, phys_end_b_ll, phys_dist_m,
     #     blast_a_m, blast_b_m,
-    #     fractions: List[float],  # t in [0, 1] along phys-end-to-phys-end
-    #     elevs:     List[float],  # FAA-compliant altitudes
-    #     anchored:  List[bool],   # True for thresholds + extras
+    #     fractions: list[float],  # t in [0, 1] along phys-end-to-phys-end
+    #     elevs:     list[float],  # FAA-compliant altitudes
+    #     anchored:  list[bool],   # True for thresholds + extras
     #   }
     profile_state: dict = {}
     # Chain of emitted runway segments, captured for downstream
@@ -489,7 +489,7 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
         perp_dlat = bcorners[0][0] - lat_a
         perp_dlon = bcorners[0][1] - lon_a
         # Build ring: A→B on left side, then B→A on right side.
-        ring: List[Tuple[float, float]] = []
+        ring: list[tuple[float, float]] = []
         for s_lat, s_lon in samples_ll:
             ring.append((s_lat + perp_dlat, s_lon + perp_dlon))
         for s_lat, s_lon in reversed(samples_ll):
@@ -912,7 +912,7 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
             # tracks t-values that MUST stay (physical ends and
             # CIFP threshold positions) so the pav_intersection
             # dedup below can distinguish them from uniform seams.
-            anchored_t: List[float] = [0.0, 1.0]
+            anchored_t: list[float] = [0.0, 1.0]
             if phys_dist > 0:
                 t_a = (displaced_a / phys_dist) if displaced_a > 0 else 0.0
                 t_b = 1.0 - (displaced_b / phys_dist) if displaced_b > 0 else 1.0
@@ -932,7 +932,7 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
             # intermediate corners when consecutive flat segments are
             # consolidated into a single multi-node flat polygon
             # (user 2026-05-09).
-            pav_int_t_vals: List[float] = []
+            pav_int_t_vals: list[float] = []
             # Per user 2026-05-05: inject pav_intersection breakpoints
             # so segment seam corners align with apt.dat-pavement
             # boundary points where the apron / taxiway meets the
@@ -1330,7 +1330,7 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
                     # every sample as a corner preserves the
                     # per-segment granularity inside a single
                     # polygon.
-                    intermediate: List[Tuple[float, float, float, bool]] = [
+                    intermediate: list[tuple[float, float, float, bool]] = [
                         sample_pts[k] for k in range(idx + 1, end_idx)
                     ]
                     flat_pts = [sample_pts[idx]] + intermediate \
