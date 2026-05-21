@@ -42,6 +42,7 @@ from ..layout import (
     ROLE_RUNWAY_CROSSING,
     ROLE_SECONDARY_PARALLEL,
     ROLE_STUB,
+    corner_alts_from_high_low,
 )
 from .vertices import _snap_polygon_vertices_to_rect_corners
 
@@ -594,7 +595,7 @@ def _absorb_crossing_vertices_into_adjacent_rects(
         # lat_B, lon_B, width)`` with the HIGH end first).
         eh = float(r.altitude_high)
         el = float(r.altitude_low)
-        corner_alts = [eh, el, el, eh]
+        corner_alts = corner_alts_from_high_low(eh, el)
         new_ring: List[Tuple[float, float]] = []
         new_alts: List[float] = []
         any_insert = False

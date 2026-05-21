@@ -61,7 +61,8 @@ import math
 from collections import defaultdict
 from typing import Dict, List, Tuple
 
-from .layout import ROLE_RUNWAY, SHARED_VERTEX_TOL_M
+from .layout import (
+    ROLE_RUNWAY, SHARED_VERTEX_TOL_M, high_low_from_corner_alts)
 from .pavement.runway_segments import (
     MAX_RUNWAY_GRADE, MAX_RUNWAY_GRADE_CHANGE_PER_M, faa_joint_solve,
 )
@@ -432,8 +433,7 @@ def redistribute_runway_profile(
                     and not s.node_altitudes):
                 if (abs(new_alts[0] - new_alts[3]) < 0.05
                         and abs(new_alts[1] - new_alts[2]) < 0.05):
-                    new_hi = (new_alts[0] + new_alts[3]) / 2.0
-                    new_lo = (new_alts[1] + new_alts[2]) / 2.0
+                    new_hi, new_lo = high_low_from_corner_alts(new_alts)
                     # Ensure ``hi`` is actually the higher pair (preserve
                     # the canonical convention).
                     if new_hi < new_lo:

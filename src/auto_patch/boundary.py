@@ -85,6 +85,72 @@ __all__ = [
 BOUNDARY_STRIP_HALF_WIDTH_M = 2.5
 
 
+def _runway_clamped_alt_at(
+        x: float, y: float, *,
+        dem, tile_lat: int, tile_lon: int,
+        runway_shapes, m_to_ll,
+        clamp_radius_m: float, clamp_grade: float) -> Optional[float]:
+    """DEM at (x, y) clamped UP toward the nearest runway when within
+    ``clamp_radius_m`` and the DEM dips below ``runway_e − grade·d``;
+    else raw DEM; else None.
+
+    Per user 2026-05-11 the clamp is ASYMMETRIC — only ever pull the
+    boundary UP toward the runway, never DOWN.  If surrounding terrain
+    is higher than the runway band the boundary follows DEM so
+    Ortho4XP's ``smooth_raster_over_airports`` doesn't drag the
+    rendered terrain into a canyon around the perimeter.
+
+    Single source of truth: both the airport-boundary ribbon
+    (``_emit_airport_boundary_shape``) and the DEM bridge
+    (``_emit_boundary_dem_bridge``) call this so their shared edge gets
+    identical altitudes (they used to be two byte-identical copies
+    under two names, ``_runway_clamped_alt`` / ``_clamped_alt``).
+    """
+    try:
+        lat, lon = m_to_ll(x, y)
+        dem_e = _sample_dem(dem, tile_lat, tile_lon, lat, lon)
+    except _GEOM_EXC:
+        dem_e = None
+    # Find nearest runway and its elevation at the nearest point.
+    best_d = float('inf')
+    best_e = None
+    pt = Point(x, y)
+    for s in runway_shapes:
+        try:
+            d = s.polygon.distance(pt)
+        except _GEOM_EXC:
+            continue
+        if d >= best_d:
+            continue
+        try:
+            if d == 0.0:
+                np_x, np_y = x, y
+            else:
+                np = nearest_points(s.polygon, pt)[0]
+                np_x, np_y = np.x, np.y
+            e = _sample_runway_segment_elev(s, np_x, np_y)
+        except _GEOM_EXC:
+            e = None
+        if e is None:
+            continue
+        best_d = d
+        best_e = e
+    if best_e is None:
+        return dem_e
+    if best_d > clamp_radius_m:
+        return dem_e
+    band = best_d * clamp_grade
+    lo = best_e - band
+    if dem_e is None:
+        # No DEM — fall back to the floor (closest to the runway at
+        # this distance without violating the grade cap).
+        return lo
+    # Asymmetric: only pull UP toward runway; otherwise follow DEM.
+    if dem_e < lo:
+        return lo
+    return dem_e
+
+
 def _clip_boundary_bridges_against_pavement(
         layout: "PavementLayout",
         min_area_m2: float = 25.0) -> int:
@@ -279,65 +345,13 @@ def _emit_airport_boundary_shape(
         return 0
 
     def _runway_clamped_alt(x: float, y: float) -> Optional[float]:
-        """Return DEM at (x, y) clamped UP toward the nearest runway
-        when within ``runway_clamp_radius_m`` and DEM dips below
-        ``runway_e - g·d``, else raw DEM, else None.
-
-        Per user 2026-05-11: the clamp is ASYMMETRIC.  We only ever
-        pull the boundary UP toward the runway (the original
-        "graded up to runway elevation" rule for low terrain near
-        the runway).  We never pull the boundary DOWN — if the
-        surrounding terrain is higher than the runway-band, the
-        boundary follows DEM so Ortho4XP's
-        ``smooth_raster_over_airports`` doesn't drag the rendered
-        terrain down into a 20 m canyon around the airport
-        perimeter.
-        """
-        try:
-            lat, lon = m_to_ll(x, y)
-            dem_e = _sample_dem(dem, tile_lat, tile_lon, lat, lon)
-        except _GEOM_EXC:
-            dem_e = None
-        # Find nearest runway and its elevation at the nearest point.
-        best_d = float('inf')
-        best_e = None
-        pt = _Point(x, y)
-        for s in runway_shapes:
-            try:
-                d = s.polygon.distance(pt)
-            except _GEOM_EXC:
-                continue
-            if d >= best_d:
-                continue
-            try:
-                if d == 0.0:
-                    np_x, np_y = x, y
-                else:
-                    np = _nearest_points(s.polygon, pt)[0]
-                    np_x, np_y = np.x, np.y
-                e = _sample_runway_segment_elev(s, np_x, np_y)
-            except _GEOM_EXC:
-                e = None
-            if e is None:
-                continue
-            best_d = d
-            best_e = e
-        if best_e is None:
-            return dem_e
-        if best_d > runway_clamp_radius_m:
-            return dem_e
-        band = best_d * runway_clamp_grade
-        lo = best_e - band
-        if dem_e is None:
-            # No DEM available — fall back to the floor (the
-            # closest the boundary can be to the runway at this
-            # distance without violating the grade cap).
-            return lo
-        # Asymmetric clamp: only pull UP toward runway.  If DEM is
-        # below the floor, lift it; otherwise follow DEM.
-        if dem_e < lo:
-            return lo
-        return dem_e
+        # Delegates to the module-level single source of truth so the
+        # ribbon and the DEM bridge share identical clamp altitudes.
+        return _runway_clamped_alt_at(
+            x, y, dem=dem, tile_lat=tile_lat, tile_lon=tile_lon,
+            runway_shapes=runway_shapes, m_to_ll=m_to_ll,
+            clamp_radius_m=runway_clamp_radius_m,
+            clamp_grade=runway_clamp_grade)
 
     def _densify_ring(coords: List[Tuple[float, float]]
                       ) -> List[Tuple[float, float]]:
@@ -639,50 +653,14 @@ def _emit_boundary_dem_bridge(
         return 0
 
     def _clamped_alt(x: float, y: float) -> Optional[float]:
-        try:
-            lat, lon = m_to_ll(x, y)
-            dem_e = _sample_dem(dem, tile_lat, tile_lon, lat, lon)
-        except _GEOM_EXC:
-            dem_e = None
-        best_d = float('inf')
-        best_e = None
-        from shapely.ops import nearest_points as _np
-        pt = _Point(x, y)
-        for s in runway_shapes:
-            try:
-                d = s.polygon.distance(pt)
-            except _GEOM_EXC:
-                continue
-            if d >= best_d:
-                continue
-            try:
-                if d == 0.0:
-                    np_x, np_y = x, y
-                else:
-                    np = _np(s.polygon, pt)[0]
-                    np_x, np_y = np.x, np.y
-                e = _sample_runway_segment_elev(s, np_x, np_y)
-            except _GEOM_EXC:
-                e = None
-            if e is None:
-                continue
-            best_d = d
-            best_e = e
-        if best_e is None:
-            return dem_e
-        if best_d > runway_clamp_radius_m:
-            return dem_e
-        band = best_d * runway_clamp_grade
-        lo = best_e - band
-        if dem_e is None:
-            return lo
-        # Asymmetric clamp (user 2026-05-11): only pull UP toward
-        # runway when DEM is below the floor; never pull DOWN.
-        # See ``_runway_clamped_alt`` in ``_emit_airport_boundary_shape``
-        # for the full rationale.
-        if dem_e < lo:
-            return lo
-        return dem_e
+        # Delegates to the module-level single source of truth — the
+        # SAME clamp the airport-boundary ribbon uses, so the bridge's
+        # outer edge meets the ribbon's inner edge flush.
+        return _runway_clamped_alt_at(
+            x, y, dem=dem, tile_lat=tile_lat, tile_lon=tile_lon,
+            runway_shapes=runway_shapes, m_to_ll=m_to_ll,
+            clamp_radius_m=runway_clamp_radius_m,
+            clamp_grade=runway_clamp_grade)
 
     def _dem_alt(x: float, y: float) -> Optional[float]:
         try:

@@ -104,6 +104,7 @@ from .layout import (
     ROLE_RETAINING_WALL,
     SHARED_VERTEX_TOL_M,
     vertex_bucket,
+    corner_alts_from_high_low,
 )
 from .pavement.vertices import (
     _drop_spike_vertices,
@@ -2766,8 +2767,8 @@ def _report_within_shape_violations(
             elevs = [float(e) for e in na]
         elif (s.altitude_high is not None and s.altitude_low is not None
               and n == 4):
-            elevs = [float(s.altitude_high), float(s.altitude_low),
-                     float(s.altitude_low), float(s.altitude_high)]
+            elevs = corner_alts_from_high_low(
+                s.altitude_high, s.altitude_low)
         else:
             continue
         coords_m = []

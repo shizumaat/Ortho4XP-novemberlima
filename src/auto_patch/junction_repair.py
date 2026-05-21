@@ -56,6 +56,7 @@ from .layout import (
     ROLE_SECONDARY_PARALLEL,
     ROLE_STUB,
     ROLE_TERMINAL,
+    corner_alts_from_high_low,
 )
 
 
@@ -198,10 +199,8 @@ def _clamp_junction_free_vertices(
         elif (s.altitude_high is not None
               and s.altitude_low is not None
               and coords_n == 4):
-            shape_elevs[si] = [float(s.altitude_high),
-                                float(s.altitude_low),
-                                float(s.altitude_low),
-                                float(s.altitude_high)]
+            shape_elevs[si] = corner_alts_from_high_low(
+                s.altitude_high, s.altitude_low)
         elif s.node_altitudes is not None:
             na = list(s.node_altitudes)
             if len(na) == coords_n + 1:

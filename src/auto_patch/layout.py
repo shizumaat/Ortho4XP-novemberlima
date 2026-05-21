@@ -48,6 +48,8 @@ __all__ = [
     "R_EARTH",
     "SHARED_VERTEX_TOL_M",
     "vertex_bucket",
+    "corner_alts_from_high_low",
+    "high_low_from_corner_alts",
     "ROLE_RUNWAY",
     "ROLE_PRIMARY_PARALLEL",
     "ROLE_SECONDARY_PARALLEL",
@@ -101,6 +103,30 @@ def vertex_bucket(x: float, y: float,
     behaviour-preserving.)
     """
     return (int(round(x / tol)), int(round(y / tol)))
+
+
+def corner_alts_from_high_low(eh: float, el: float) -> "List[float]":
+    """Per-corner altitudes for a 4-corner sloped rect, in the
+    canonical ``[high, low, low, high]`` corner order (corners 0,3 at
+    the high end; 1,2 at the low end).
+
+    THE single source of truth for the ``[H, L, L, H]`` convention
+    shared by rect emission, seam-anchor conversion, the OSM
+    tag-writer, and the runway/junction altitude packers — previously
+    open-coded as ``[eh, el, el, eh]`` in ~half a dozen places.
+    Returns the OPEN (4-element) ring; callers append the closing
+    repeat themselves where they need the 5-element closed form.
+    """
+    return [float(eh), float(el), float(el), float(eh)]
+
+
+def high_low_from_corner_alts(corner_alts) -> "Tuple[float, float]":
+    """Inverse of :func:`corner_alts_from_high_low`: recover
+    ``(high, low)`` from a 4-corner ``[H, L, L, H]`` altitude list by
+    averaging each end's corner pair (tolerant of small per-corner
+    drift introduced by the per-node consensus / solver)."""
+    a = list(corner_alts)
+    return ((a[0] + a[3]) / 2.0, (a[1] + a[2]) / 2.0)
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -492,7 +518,8 @@ class PavementLayout:
                       and n_open == 4):
                     eh = float(shape_altitude_high)
                     el = float(shape_altitude_low)
-                    ring_elevs_input = [eh, el, el, eh, eh]
+                    _open = corner_alts_from_high_low(eh, el)
+                    ring_elevs_input = _open + [_open[0]]
             ext_nids, ext_elevs = _ring_to_nids(
                 poly.exterior.coords,
                 ring_elevs_input)
@@ -623,8 +650,7 @@ class PavementLayout:
                 if (s.role == ROLE_BOUNDARY
                         and not s.node_altitudes
                         and n_open == 4):
-                    eh = (open_alts[0] + open_alts[3]) / 2.0
-                    el = (open_alts[1] + open_alts[2]) / 2.0
+                    eh, el = high_low_from_corner_alts(open_alts)
                     if abs(eh - el) <= _CANON_EQ_TOL:
                         tags["altitude"] = f"{(eh + el) / 2.0:.1f}"
                     else:
@@ -643,8 +669,7 @@ class PavementLayout:
                       and abs(open_alts[1] - open_alts[2])
                               <= _CANON_EQ_TOL
                       and abs(open_alts[0] - open_alts[1]) > _CANON_EQ_TOL):
-                    eh = (open_alts[0] + open_alts[3]) / 2.0
-                    el = (open_alts[1] + open_alts[2]) / 2.0
+                    eh, el = high_low_from_corner_alts(open_alts)
                     tags["altitude_high"] = f"{eh:.1f}"
                     tags["altitude_low"] = f"{el:.1f}"
                     tags["cell_size"] = "2"

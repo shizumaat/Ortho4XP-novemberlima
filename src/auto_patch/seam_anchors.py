@@ -35,6 +35,7 @@ from .layout import (
     ROLE_PRIMARY_PARALLEL, ROLE_RUNWAY, ROLE_SECONDARY_PARALLEL,
     ROLE_STUB, ROLE_TERMINAL, ROLE_TUNNEL_RAMP, ROLE_RETAINING_WALL,
     ROLE_GROUNDSIDE_PAVEMENT, vertex_bucket,
+    corner_alts_from_high_low,
 )
 
 __all__ = ["split_pavement_at_seams", "apply_seam_dem_anchors"]
@@ -363,12 +364,8 @@ def split_pavement_at_seams(layout: PavementLayout) -> int:
             if (len(ring) == 4
                     and shape.altitude_high is not None
                     and shape.altitude_low is not None):
-                alts = [
-                    float(shape.altitude_high),
-                    float(shape.altitude_low),
-                    float(shape.altitude_low),
-                    float(shape.altitude_high),
-                ]
+                alts = corner_alts_from_high_low(
+                    shape.altitude_high, shape.altitude_low)
                 shape.node_altitudes = alts + [alts[0]]
                 shape.altitude_high = None
                 shape.altitude_low = None
@@ -427,12 +424,8 @@ def _insert_seam_vertices(
     elif (shape.altitude_high is not None
             and shape.altitude_low is not None
             and n_orig == 4):
-        old_alts = [
-            float(shape.altitude_high),
-            float(shape.altitude_low),
-            float(shape.altitude_low),
-            float(shape.altitude_high),
-        ]
+        old_alts = corner_alts_from_high_low(
+            shape.altitude_high, shape.altitude_low)
     elif shape.altitude is not None:
         old_alts = [float(shape.altitude)] * n_orig
     else:
