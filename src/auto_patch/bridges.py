@@ -41,8 +41,7 @@ from shapely.ops import linemerge, nearest_points, unary_union
 # Narrow exception tuple for shapely / numeric-geometry failure
 # modes + file I/O.  Programming errors propagate so they surface
 # immediately rather than being silently masked at runtime.
-_GEOM_EXC = (OSError, ValueError, TypeError, KeyError,
-             IndexError, RuntimeError,
+_GEOM_EXC = (OSError, ValueError,
              GEOSException, TopologicalError)
 
 from .layout import (

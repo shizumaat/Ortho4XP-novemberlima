@@ -39,10 +39,9 @@ from shapely.ops import linemerge, nearest_points, unary_union
 # propagate so they surface immediately during testing rather than
 # being silently masked at runtime.  Real shapely degeneracy
 # surfaces as ``GEOSException`` / ``TopologicalError`` /
-# ``ValueError``; out-of-bounds DEM indexing surfaces as
-# ``IndexError``.
-_GEOM_EXC = (ValueError, TypeError,
-             GEOSException, TopologicalError, IndexError)
+# ``ValueError``.  (DEM sampling clamps out-of-bounds to the tile
+# edge rather than raising, so no ``IndexError`` is expected.)
+_GEOM_EXC = (ValueError, GEOSException, TopologicalError)
 
 
 from .layout import (

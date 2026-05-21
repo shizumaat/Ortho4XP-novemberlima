@@ -38,8 +38,7 @@ from shapely.ops import (
 # Narrow exception tuple for shapely / numeric-geometry failure
 # modes + file I/O.  Programming errors propagate so they surface
 # immediately rather than being silently masked at runtime.
-_GEOM_EXC = (OSError, ValueError, TypeError, KeyError,
-             IndexError, RuntimeError,
+_GEOM_EXC = (OSError, ValueError,
              GEOSException, TopologicalError)
 
 import O4_File_Names as FNAMES
