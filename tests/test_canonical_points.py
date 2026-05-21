@@ -18,7 +18,12 @@ from strategies import (
     well_separated_points,
 )
 
-from auto_patch.canonical_points import CanonicalPointRegistry
+from shapely.geometry import Polygon
+
+from auto_patch.canonical_points import (
+    CanonicalPointRegistry,
+    snap_polygon_through_registry,
+)
 
 
 class TestGetOrAdd:
@@ -115,3 +120,86 @@ class TestSeed:
         added = r.seed([base, second])
         assert added == 1
         assert r.size == 1
+
+    def test_seed_into_non_empty_returns_only_new_count(self):
+        # seed reports NEW points added, not the total — a second seed
+        # batch with one duplicate (near a prior entry) and one fresh
+        # point must report 1, with size growing by exactly 1.
+        r = CanonicalPointRegistry(tol_m=0.5)
+        r.seed([(0.0, 0.0), (100.0, 100.0)])
+        added = r.seed([(0.1, 0.0), (200.0, 200.0)])
+        assert added == 1
+        assert r.size == 3
+
+
+class TestFindNearest:
+    """Properties of CanonicalPointRegistry.find_nearest (no-add lookup)."""
+
+    def test_returns_nearest_within_max_d(self):
+        r = CanonicalPointRegistry(tol_m=0.5)
+        r.seed([(0.0, 0.0), (10.0, 10.0)])
+        assert r.find_nearest(0.2, 0.1, 0.5) == (0.0, 0.0)
+
+    def test_returns_none_beyond_max_d(self):
+        r = CanonicalPointRegistry(tol_m=0.5)
+        r.seed([(0.0, 0.0), (10.0, 10.0)])
+        assert r.find_nearest(5.0, 5.0, 1.0) is None
+
+    def test_does_not_add(self):
+        r = CanonicalPointRegistry(tol_m=0.5)
+        r.seed([(0.0, 0.0)])
+        r.find_nearest(0.2, 0.1, 0.5)
+        r.find_nearest(50.0, 50.0, 0.5)
+        assert r.size == 1
+
+    def test_finds_point_several_cells_away(self):
+        # A match well beyond one cell width (max_d > tol) must still be
+        # found — exercises the multi-cell scan radius.
+        r = CanonicalPointRegistry(tol_m=0.5)
+        r.seed([(0.0, 0.0)])
+        assert r.find_nearest(1.8, 0.0, 2.0) == (0.0, 0.0)
+
+
+class TestSnapPolygonThroughRegistry:
+    """``snap_polygon_through_registry`` routes ring vertices through the
+    registry so neighbouring shapes share exact coordinates."""
+
+    def test_vertices_snap_to_seeded_canonical_points(self):
+        r = CanonicalPointRegistry(tol_m=0.5)
+        r.seed([(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)])
+        # Slightly-off vertices (each within tol of a seeded corner).
+        poly = Polygon([(0.1, 0.1), (10.1, -0.1),
+                        (9.9, 10.1), (-0.1, 9.9)])
+        snapped = snap_polygon_through_registry(poly, r)
+        ring = set(list(snapped.exterior.coords)[:-1])
+        assert ring == {(0.0, 0.0), (10.0, 0.0),
+                        (10.0, 10.0), (0.0, 10.0)}
+        # No new canonical points created — all resolved to seeds.
+        assert r.size == 4
+
+    def test_adjacent_polygons_share_canonical_corner(self):
+        # Two polygons whose near-corners are within tol must end up with
+        # the IDENTICAL coordinate there (the registry's whole purpose).
+        r = CanonicalPointRegistry(tol_m=0.5)
+        poly_a = Polygon([(0.0, 0.0), (5.0, 0.0), (5.0, 5.0), (0.0, 5.0)])
+        poly_b = Polygon([(5.2, 5.1), (10.0, 5.0),
+                          (10.0, 10.0), (5.0, 10.0)])
+        snap_polygon_through_registry(poly_a, r)   # registers (5.0, 5.0)
+        snapped_b = snap_polygon_through_registry(poly_b, r)
+        b_ring = set(list(snapped_b.exterior.coords)[:-1])
+        assert (5.0, 5.0) in b_ring
+        assert (5.2, 5.1) not in b_ring
+
+    def test_degenerate_ring_returns_none(self):
+        # All three corners collapse to one canonical point → < 3 unique
+        # vertices → the snap yields a degenerate ring → None.
+        r = CanonicalPointRegistry(tol_m=0.5)
+        poly = Polygon([(0.0, 0.0), (0.1, 0.0), (0.0, 0.1)])
+        assert snap_polygon_through_registry(poly, r) is None
+
+    def test_none_inputs_pass_through(self):
+        r = CanonicalPointRegistry(tol_m=0.5)
+        assert snap_polygon_through_registry(None, r) is None
+        poly = Polygon([(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)])
+        # No registry → returned unchanged.
+        assert snap_polygon_through_registry(poly, None) is poly
