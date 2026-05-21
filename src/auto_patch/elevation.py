@@ -64,7 +64,7 @@ from __future__ import annotations
 import math
 import os
 import sys
-from typing import Dict, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
 
 import O4_UI_Utils as UI
 
@@ -223,7 +223,7 @@ USE_PER_SURFACE_SOLVER = (
 NEIGHBOUR_CLAMP_RADIUS_M = 5.0
 
 DEM_SUFFIX = ".hgt"
-_DEM_CACHE: Dict[Tuple[int, int], object] = {}
+_DEM_CACHE: dict[tuple[int, int], object] = {}
 
 def _load_airport_dem(lat0: float, lon0: float, override_dem=None):
     """Return an ``O4_DEM_Utils.DEM`` covering the 1° tile that
@@ -305,7 +305,7 @@ def _load_airport_dem(lat0: float, lon0: float, override_dem=None):
 
 
 def _sample_dem(dem, tile_lat: int, tile_lon: int,
-                lat: float, lon: float) -> Optional[float]:
+                lat: float, lon: float) -> float | None:
     """Sample DEM elevation at (lat, lon).  Returns None if DEM is
     unavailable or out-of-tile.
 
@@ -327,7 +327,7 @@ def _sample_dem(dem, tile_lat: int, tile_lon: int,
         return None
 
 
-def _find_cifp_path(xplane_root: str, icao: str) -> Optional[str]:
+def _find_cifp_path(xplane_root: str, icao: str) -> str | None:
     """Locate the CIFP .dat file for an ICAO under the X-Plane
     root.  Returns None if not found."""
     cifp_dir = os.path.join(xplane_root, "Custom Data", "CIFP")
@@ -341,11 +341,10 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
                         xplane_root: str, apt,
                         osm_nodes=None, osm_ways=None,
                         to_m=None,
-                        apron_candidates_m: Optional[
-                            List[Polygon]] = None,
+                        apron_candidates_m: list[Polygon] | None = None,
                         tile_dem=None,
-                        current_tile_lat: Optional[int] = None,
-                        current_tile_lon: Optional[int] = None) -> None:
+                        current_tile_lat: int | None = None,
+                        current_tile_lon: int | None = None) -> None:
     """Phase-2: add altitude tags to runways (segmented), taxi
     rects, and terminal pads.  Junctions / aprons / buildings are
     left un-elevated this iteration.
@@ -421,7 +420,9 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
                     runway_widths[r.desig_b] = r.width_m
 
                 class _TileStub:
-                    pass
+                    lat: int
+                    lon: int | None
+                    dem: object
                 tile = _TileStub()
                 tile.lat = tile_lat
                 tile.lon = tile_lon
@@ -449,7 +450,7 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
     # into the same profile (see ``runway_redistribute``).
     layout._runway_profile_state = runway_profile_state
 
-    new_runway_polys: List[Polygon] = []
+    new_runway_polys: list[Polygon] = []
     if runway_segment_chain:
         # Drop the single-rect runway shapes; replace with segments.
         old_runways = [s for s in layout.shapes if s.role == ROLE_RUNWAY]
@@ -623,19 +624,19 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
                 index = STRtree(apron_candidates_m)
             except _GEOM_EXC:
                 index = None
-            kept_shapes: List[BuiltShape] = []
-            kept_polys: List[Polygon] = []
+            kept_shapes: list[BuiltShape] = []
+            kept_polys: list[Polygon] = []
             # Track each dropped segment alongside the apron
             # candidate that contained it — used below to clip the
             # hole-fill merge so it can't bleed outside the apron.
-            dropped_with_apron: List[Tuple[Polygon, Polygon]] = []
+            dropped_with_apron: list[tuple[Polygon, Polygon]] = []
             n_dropped = 0
             for sh in layout.shapes:
                 if sh.role != ROLE_RUNWAY:
                     kept_shapes.append(sh)
                     continue
                 drop = False
-                drop_apron: Optional[Polygon] = None
+                drop_apron: Polygon | None = None
                 if (sh.polygon is not None
                         and not sh.polygon.is_empty):
                     seg_area = sh.polygon.area
@@ -789,7 +790,7 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
                 # pavement is lost (fixes the missing F/RW34R
                 # gap junction, user 2026-04-24).
                 from dataclasses import replace as _dc_replace
-                new_shapes: List[BuiltShape] = []
+                new_shapes: list[BuiltShape] = []
                 for shape in layout.shapes:
                     if shape.role in (ROLE_RUNWAY, ROLE_TERMINAL):
                         new_shapes.append(shape)
@@ -899,7 +900,7 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
     #   * Ceiling at the DEM-median (don't raise above natural
     #     ground).
     #   * Fall back to DEM-median if no anchors are available.
-    runway_corner_pts: List[Tuple[float, float, float]] = []
+    runway_corner_pts: list[tuple[float, float, float]] = []
     if USE_PER_SURFACE_SOLVER:
         # Skip the entire legacy terminal pre-pin block.  The
         # per-surface solver treats terminals as SOFT nodes and
@@ -946,7 +947,7 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
         if shape.polygon is None or shape.polygon.is_empty:
             continue
         # DEM-median ceiling (legacy rule).
-        dem_samples: List[float] = []
+        dem_samples: list[float] = []
         try:
             t_corners = list(shape.polygon.exterior.coords)
             if t_corners and t_corners[0] == t_corners[-1]:
@@ -965,9 +966,9 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
         else:
             dem_median = None
         # Anchor-based max-allowable rule.
-        new_alt: Optional[float] = None
+        new_alt: float | None = None
         if runway_corner_pts and t_corners:
-            per_corner_max: List[float] = []
+            per_corner_max: list[float] = []
             for cx, cy in t_corners:
                 corner_max = INF
                 hits = 0
@@ -1052,9 +1053,9 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
 
 def _resample_node_altitudes_nn(
         new_poly: Polygon,
-        old_open: List[Tuple[float, float]],
-        old_alts_closed: Optional[List[float]],
-        ) -> Optional[List[float]]:
+        old_open: list[tuple[float, float]],
+        old_alts_closed: list[float] | None,
+        ) -> list[float] | None:
     """Given a new polygon (post geometry edit) and the OLD ring's
     open-form coords + closed-form altitudes, return a fresh
     ``node_altitudes`` list (closed) for ``new_poly``.
@@ -1111,11 +1112,11 @@ def _resample_node_altitudes_nn(
     EDGE_TOL_M = 0.5  # perpendicular distance for "on edge"
     EDGE_TOL_M2 = EDGE_TOL_M * EDGE_TOL_M
 
-    new_alts: List[float] = []
+    new_alts: list[float] = []
     for nx, ny in new_open:
         # Pass 1: edge interpolation.
         best_edge_d2 = float("inf")
-        best_edge_alt: Optional[float] = None
+        best_edge_alt: float | None = None
         for k in range(n_old):
             sx, sy = old_open[k]
             tx, ty = old_open[(k + 1) % n_old]
@@ -1319,8 +1320,8 @@ def _solve_pavement_elevations_unified(
         ROLE_SECONDARY_PARALLEL, ROLE_STUB,
         ROLE_CROSS_CONNECTOR, ROLE_TERMINAL, ROLE_JUNCTION,
     }
-    bucket_to_idx: Dict[Tuple[int, int], int] = {}
-    nodes: List[Tuple[float, float]] = []
+    bucket_to_idx: dict[tuple[int, int], int] = {}
+    nodes: list[tuple[float, float]] = []
     for s in layout.shapes:
         if s.role not in pavement_roles:
             continue
@@ -1342,9 +1343,9 @@ def _solve_pavement_elevations_unified(
         return
 
     # ── Initial elevations + HARD anchor flags ──────────────────
-    elev: List[float] = [0.0] * n
-    is_hard: List[bool] = [False] * n
-    have_initial: List[bool] = [False] * n
+    elev: list[float] = [0.0] * n
+    is_hard: list[bool] = [False] * n
+    have_initial: list[bool] = [False] * n
 
     # CIFP runway corners ⇒ HARD.
     for s in layout.shapes:
@@ -1423,7 +1424,7 @@ def _solve_pavement_elevations_unified(
     # Backfill any node still without an initial value via nearest
     # hard anchor's elevation (cheap pass).
     if any(not h for h in have_initial):
-        hard_pts: List[Tuple[float, float, float]] = [
+        hard_pts: list[tuple[float, float, float]] = [
             (nodes[i][0], nodes[i][1], elev[i])
             for i in range(n) if is_hard[i]]
         for i in range(n):
@@ -1443,8 +1444,8 @@ def _solve_pavement_elevations_unified(
     # ── Build edge list with per-edge max grade ────────────────
     # Edge identified by sorted (u, v); max_grade = min over
     # contributing shapes' role caps.
-    edge_grade: Dict[Tuple[int, int], float] = {}
-    edge_length: Dict[Tuple[int, int], float] = {}
+    edge_grade: dict[tuple[int, int], float] = {}
+    edge_length: dict[tuple[int, int], float] = {}
 
     def _role_grade(role: str) -> float:
         if role == ROLE_RUNWAY:
@@ -1486,7 +1487,7 @@ def _solve_pavement_elevations_unified(
         m = len(coords)
         # Pre-compute this shape's vertex node indices so we can
         # cheaply emit ring + spatial pairs.
-        node_idx: List[Optional[int]] = []
+        node_idx: list[int | None] = []
         for x, y in coords:
             b = _corner_elevation_bucket(x, y)
             node_idx.append(bucket_to_idx.get(b))
@@ -1543,7 +1544,7 @@ def _solve_pavement_elevations_unified(
                 edge_length[key] = min(cur_l, length)
 
     # Adjacency for Jacobi step.
-    adj: List[List[Tuple[int, float, float]]] = [[] for _ in range(n)]
+    adj: list[list[tuple[int, float, float]]] = [[] for _ in range(n)]
     for (u, v), gr in edge_grade.items():
         L = edge_length[(u, v)]
         adj[u].append((v, L, gr))
@@ -1551,7 +1552,7 @@ def _solve_pavement_elevations_unified(
 
     # ── Per-shape constraint groups ────────────────────────────
     # Terminal corners — flat constraint (all share the same value).
-    terminal_groups: List[List[int]] = []
+    terminal_groups: list[list[int]] = []
     for s in layout.shapes:
         if s.role != ROLE_TERMINAL:
             continue
@@ -1563,7 +1564,7 @@ def _solve_pavement_elevations_unified(
             continue
         if coords and coords[0] == coords[-1]:
             coords = coords[:-1]
-        idxs: List[int] = []
+        idxs: list[int] = []
         for x, y in coords:
             b = _corner_elevation_bucket(x, y)
             if b in bucket_to_idx:
@@ -1671,7 +1672,7 @@ def _solve_pavement_elevations_unified(
             continue
         ring_closed = (coords and coords[0] == coords[-1])
         coords_open = coords[:-1] if ring_closed else coords
-        corner_elevs: List[float] = []
+        corner_elevs: list[float] = []
         for x, y in coords_open:
             b = _corner_elevation_bucket(x, y)
             if b in bucket_to_idx:
@@ -1821,7 +1822,7 @@ def _smooth_within_junction_adjacent_pair_grade(
         # distance — distant pairs in the same polygon don't have
         # a meaningful grade constraint at airport scale.
         pair_radius2 = pair_radius_m * pair_radius_m
-        pairs: List[Tuple[int, int, float]] = []
+        pairs: list[tuple[int, int, float]] = []
         for i in range(n):
             for j in range(i + 1, n):
                 ax, ay = coords[i]
@@ -1939,7 +1940,7 @@ def _rederive_terminal_altitude_from_apron_neighbours(
         ROLE_SECONDARY_PARALLEL, ROLE_STUB,
         ROLE_CROSS_CONNECTOR,
     }
-    hard_pts: List[Tuple[float, float, float]] = []
+    hard_pts: list[tuple[float, float, float]] = []
     for s in layout.shapes:
         if s.role not in sloping_rect_roles:
             continue
@@ -1978,7 +1979,7 @@ def _rederive_terminal_altitude_from_apron_neighbours(
         except _GEOM_EXC:
             t_boundary = None
         from shapely.geometry import Point as _P
-        nearby: List[Tuple[float, float]] = []  # (distance, elev)
+        nearby: list[tuple[float, float]] = []  # (distance, elev)
         for px, py, pa in hard_pts:
             try:
                 if t_boundary is not None:
@@ -2046,8 +2047,8 @@ def _enforce_shared_vertex_altitudes(
     """
     # Gather per-bucket altitude votes from junction polygons only.
     # (Sloped rect altitudes are tag-level; junctions emit per-vertex.)
-    bucket_to_entries: Dict[Tuple[int, int],
-                            List[Tuple[int, int, float]]] = {}
+    bucket_to_entries: dict[tuple[int, int],
+                            list[tuple[int, int, float]]] = {}
     for si, s in enumerate(layout.shapes):
         if s.role != ROLE_JUNCTION:
             continue
@@ -2120,7 +2121,7 @@ def _snap_junction_altitudes_to_rect_corners(
     # 0.002 m apart land in adjacent buckets and miss each other.
     # The shared registry's proximity lookup matches by physical
     # distance, identical to the solver's vertex matching.
-    rwy_corner_alt: Dict[Tuple[float, float], float] = {}
+    rwy_corner_alt: dict[tuple[float, float], float] = {}
     _reg = layout.canonical_points
     sloping_rect_roles_for_snap = {
         ROLE_RUNWAY, ROLE_PRIMARY_PARALLEL,
@@ -2135,7 +2136,7 @@ def _snap_junction_altitudes_to_rect_corners(
     }
     # Also collect the FULL sloping-rect shapes for interior-
     # snap (point-in-polygon + interpolated altitude).
-    rect_shapes_for_interior: List[BuiltShape] = []
+    rect_shapes_for_interior: list[BuiltShape] = []
     for s in layout.shapes:
         if s.role not in sloping_rect_roles_for_snap:
             continue
@@ -2224,7 +2225,7 @@ def _snap_junction_altitudes_to_rect_corners(
                 cands = interior_tree.query(pt)
             except _GEOM_EXC:
                 cands = []
-            best_e: Optional[float] = None
+            best_e: float | None = None
             best_d2 = float("inf")
             for hit in cands:
                 ri = int(hit) if hasattr(hit, "__int__") else hit
@@ -2382,15 +2383,15 @@ def _re_emit_apron_merged_runway_segments(
 
 def _latlon_to_m_local(lat: float, lon: float,
                        lat0: float, lon0: float, cos0: float
-                       ) -> Tuple[float, float]:
+                       ) -> tuple[float, float]:
     x = math.radians(lon - lon0) * R_EARTH * cos0
     y = math.radians(lat - lat0) * R_EARTH
     return x, y
 
 
 def _orient_rect_for_altitude(shape: "BuiltShape",
-                              p1: Tuple[float, float],
-                              p2: Tuple[float, float],
+                              p1: tuple[float, float],
+                              p2: tuple[float, float],
                               e1: float, e2: float) -> None:
     """Rewrite a 4-corner rect polygon's ring in the X-Plane
     patch convention:
@@ -2421,8 +2422,8 @@ def _orient_rect_for_altitude(shape: "BuiltShape",
     if len(coords) != 4:
         return
     # Classify each corner by nearest axis endpoint.
-    p1_corners: List[Tuple[float, float]] = []
-    p2_corners: List[Tuple[float, float]] = []
+    p1_corners: list[tuple[float, float]] = []
+    p2_corners: list[tuple[float, float]] = []
     for c in coords:
         d1 = (c[0] - p1[0]) ** 2 + (c[1] - p1[1]) ** 2
         d2 = (c[0] - p2[0]) ** 2 + (c[1] - p2[1]) ** 2
@@ -2482,9 +2483,9 @@ from .pavement.junctions import (
 
 
 
-def _planar_fit(ring: List[Tuple[float, float]],
-                elev: List[float]
-                ) -> Optional[Tuple[float, float, float, List[float]]]:
+def _planar_fit(ring: list[tuple[float, float]],
+                elev: list[float]
+                ) -> tuple[float, float, float, list[float]] | None:
     """Fit a plane ``z = a*x + b*y + c`` to (x, y, z) by least
     squares and return ``(a, b, c, per-vertex residuals)``.  The
     slope magnitude is ``sqrt(a² + b²)`` (rise per metre of horizontal
@@ -2528,17 +2529,17 @@ def _planar_fit(ring: List[Tuple[float, float]],
     return (a, b, c, residuals)
 
 
-def _planar_fit_residuals(ring: List[Tuple[float, float]],
-                          elev: List[float]
-                          ) -> Optional[List[float]]:
+def _planar_fit_residuals(ring: list[tuple[float, float]],
+                          elev: list[float]
+                          ) -> list[float] | None:
     """Backwards-compat wrapper: residuals only."""
     f = _planar_fit(ring, elev)
     return None if f is None else f[3]
 
 
 def _match_elev(rx: float, ry: float,
-                ring: List[Tuple[float, float]],
-                elev: List[float]) -> float:
+                ring: list[tuple[float, float]],
+                elev: list[float]) -> float:
     """Find the elevation in ``elev`` whose corresponding ring
     vertex is closest to (rx, ry).  Used to map shapely-emitted
     closed-ring coords back to our smoothed elevation array."""
@@ -2579,9 +2580,9 @@ def _match_elev(rx: float, ry: float,
 from .elevation_smoothing import _smooth_polygon_grid
 
 def _short_end_pairs_by_axis(
-        coords_open: Sequence[Tuple[float, float]],
+        coords_open: Sequence[tuple[float, float]],
         source_axis,
-) -> Tuple[Optional[Tuple[int, int]], Optional[Tuple[int, int]]]:
+) -> tuple[tuple[int, int] | None, tuple[int, int] | None]:
     """Group a 4-corner rect ring into its two short-end vertex pairs
     by projecting each corner onto ``source_axis``.
 
@@ -2621,7 +2622,7 @@ def _short_end_pairs_by_axis(
 
 def _corner_elevation_bucket(x: float, y: float,
                              tol: float = SHARED_VERTEX_TOL_M
-                             ) -> Tuple[int, int]:
+                             ) -> tuple[int, int]:
     """Quantize a meter-space point to a vertex-bucket key.
 
     Thin wrapper over ``layout.vertex_bucket`` (the single source of
@@ -2632,7 +2633,7 @@ def _corner_elevation_bucket(x: float, y: float,
 
 
 def _corner_elev_map(layout: "PavementLayout"
-                     ) -> Dict[Tuple[float, float], float]:
+                     ) -> dict[tuple[float, float], float]:
     """Return a canonical-point-keyed elevation lookup for every
     corner of every elevation-bearing non-junction shape.  Per
     user 2026-05-18: route through ``layout.canonical_points`` so
@@ -2648,7 +2649,7 @@ def _corner_elev_map(layout: "PavementLayout"
     rect_like_roles = {ROLE_RUNWAY, ROLE_PRIMARY_PARALLEL,
                        ROLE_SECONDARY_PARALLEL,
                        ROLE_STUB, ROLE_CROSS_CONNECTOR}
-    out: Dict[Tuple[float, float], float] = {}
+    out: dict[tuple[float, float], float] = {}
     reg = layout.canonical_points
     for s in layout.shapes:
         if s.role == ROLE_JUNCTION:
@@ -2738,7 +2739,7 @@ def _report_within_shape_violations(
     cos0 = math.cos(math.radians(layout.anchor[0]))
     n_viol = 0
     worst_pct = 0.0
-    worst_info: Optional[Tuple[str, str, float, float, float, float]] = None
+    worst_info: tuple[str, str, float, float, float, float] | None = None
     # Audit ONLY multi-directional surfaces.  Per-axis surfaces
     # (rects, runway segments, boundary ribbon, tunnel ramp,
     # retaining wall) have grade enforced along their own axis, not
@@ -2876,7 +2877,7 @@ def _drop_overlap_against_fixed_shapes(
     # so shapely.intersection returns truly empty afterwards.
     NOISE_OVERLAP_M2 = 0.0
 
-    def _valid_poly(p: Optional[Polygon]) -> Optional[Polygon]:
+    def _valid_poly(p: Polygon | None) -> Polygon | None:
         if p is None or p.is_empty:
             return None
         if p.geom_type != "Polygon":
@@ -2891,7 +2892,7 @@ def _drop_overlap_against_fixed_shapes(
         return p
 
     def _clip_keep_largest(p: Polygon, c: Polygon
-                           ) -> Optional[Polygon]:
+                           ) -> Polygon | None:
         """Return ``p.difference(c)``, picking the largest piece if
         the difference is a MultiPolygon.  Returns None if the
         result is empty / below MIN_KEEP_AREA_M2."""
@@ -2935,7 +2936,7 @@ def _drop_overlap_against_fixed_shapes(
         # Iterate to a fixed point in case clipping creates new
         # adjacencies that need further clipping.
         for _ in range(4):
-            candidates: List[int] = [
+            candidates: list[int] = [
                 i for i, s in enumerate(layout.shapes)
                 if s.role in role_set
                 and _valid_poly(s.polygon) is not None]
@@ -3000,7 +3001,7 @@ def _drop_overlap_against_fixed_shapes(
     # produces multiple disjoint fragments.  Same-priority shapes
     # of the JUNCTION class additionally yield to LARGER junctions
     # so two junctions can't both claim the same residue area.
-    priority: List[set] = [
+    priority: list[set] = [
         # ROLE_RUNWAY_CROSSING is runway-derived geometry that
         # replaced its source runway segments — same tier as
         # ROLE_RUNWAY so adjacent rects/junctions/aprons clip
@@ -3018,7 +3019,7 @@ def _drop_overlap_against_fixed_shapes(
         # all higher-priority shapes.
         for tier_idx in range(1, len(priority)):
             tier_roles = priority[tier_idx]
-            higher_polys: List[Polygon] = []
+            higher_polys: list[Polygon] = []
             for s in layout.shapes:
                 if s.polygon is None:
                     continue
@@ -3035,7 +3036,7 @@ def _drop_overlap_against_fixed_shapes(
             # — within the JUNCTION tier this lets smaller junctions
             # later be clipped against the already-finalised
             # larger ones).
-            target_idx: List[int] = [
+            target_idx: list[int] = [
                 i for i, s in enumerate(layout.shapes)
                 if s.role in tier_roles
                 and _valid_poly(s.polygon) is not None]
@@ -3045,7 +3046,7 @@ def _drop_overlap_against_fixed_shapes(
                 tp = layout.shapes[i].polygon
                 if tp is None:
                     continue
-                new_p: Optional[Polygon] = tp
+                new_p: Polygon | None = tp
                 # Clip against higher-priority shapes.
                 if higher_tree is not None:
                     for hit in higher_tree.query(new_p):

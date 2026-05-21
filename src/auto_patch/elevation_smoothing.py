@@ -16,7 +16,6 @@ Public API:
 from __future__ import annotations
 
 import math
-from typing import List, Optional, Tuple
 
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import Point, Polygon
@@ -40,11 +39,11 @@ __all__ = ["_smooth_polygon_grid"]
 
 def _smooth_polygon_grid(
         polygon: Polygon,
-        hard_anchors: List[Tuple[float, float, float]],
+        hard_anchors: list[tuple[float, float, float]],
         dem,
         tile_lat: int,
         tile_lon: int,
-        layout_anchor: Tuple[float, float],
+        layout_anchor: tuple[float, float],
         grid_step_m: float = ELEVATION_GRID_STEP_M,
         max_iters: int = ELEVATION_SMOOTH_MAX_ITERS,
         convergence_tol_m: float = ELEVATION_SMOOTH_CONVERGE_M):
@@ -124,7 +123,7 @@ def _smooth_polygon_grid(
     pinned = np.zeros((nx, ny), dtype=bool)
     pinned_elev = np.zeros((nx, ny), dtype=float)
     pinned_count = np.zeros((nx, ny), dtype=int)
-    eff_anchors: List[Tuple[float, float, float]] = []
+    eff_anchors: list[tuple[float, float, float]] = []
     for (ax, ay, az) in hard_anchors:
         i = int(round((ax - minx) / grid_step_m))
         j = int(round((ay - miny) / grid_step_m))
@@ -305,7 +304,7 @@ def _smooth_polygon_grid(
             break
 
     # ── Bilinear sampler closure ────────────────────────────────
-    def sampler(x: float, y: float) -> Optional[float]:
+    def sampler(x: float, y: float) -> float | None:
         fi = (x - minx) / grid_step_m
         fj = (y - miny) / grid_step_m
         i0 = int(math.floor(fi))
@@ -342,7 +341,7 @@ def _smooth_polygon_grid(
             return float(e0 * (1 - v) + e1 * v)
         # Fallback: nearest INSIDE cell within a 2-cell radius.
         best_d2 = float("inf")
-        best_e: Optional[float] = None
+        best_e: float | None = None
         for di in range(-2, 4):
             for dj in range(-2, 4):
                 ii = i0 + di

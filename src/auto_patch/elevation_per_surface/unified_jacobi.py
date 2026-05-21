@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import math
 import time as _time
-from typing import Dict, List, Optional, Tuple
 
 from shapely.errors import GEOSException, TopologicalError
 
@@ -94,7 +93,7 @@ def _role_grade(role: str) -> float:
     return APRON_MAX_GRADE
 
 
-def _open_ring(coords) -> List[Tuple[float, float]]:
+def _open_ring(coords) -> list[tuple[float, float]]:
     if coords and coords[0] == coords[-1]:
         return list(coords[:-1])
     return list(coords)
@@ -158,8 +157,8 @@ def _build_node_list(layout):
     but keys are canonical (x, y) tuples when the layout has a
     registry, else legacy discrete buckets.
     """
-    bucket_to_idx: Dict = {}
-    nodes: List[Tuple[float, float]] = []
+    bucket_to_idx: dict[tuple[float, float], int] = {}
+    nodes: list[tuple[float, float]] = []
     for s in layout.shapes:
         if s.role not in PAVEMENT_ROLES:
             continue
@@ -201,9 +200,9 @@ def _seed_elevations(layout, nodes, bucket_to_idx,
     """
     from auto_patch.elevation import _sample_dem
     n = len(nodes)
-    elev: List[float] = [0.0] * n
-    is_hard: List[bool] = [False] * n
-    have_initial: List[bool] = [False] * n
+    elev: list[float] = [0.0] * n
+    is_hard: list[bool] = [False] * n
+    have_initial: list[bool] = [False] * n
 
     # Runway corners — HARD-anchor every runway segment, sloped or
     # flat.  The runway's elevation profile is authoritative truth
@@ -418,8 +417,8 @@ def _collect_junction_axes(layout, polygon):
 
 
 def _build_edges(layout, bucket_to_idx
-                  ) -> Tuple[Dict[Tuple[int, int], float],
-                             Dict[Tuple[int, int], float]]:
+                  ) -> tuple[dict[tuple[int, int], float],
+                             dict[tuple[int, int], float]]:
     """Build the unified graph's edge list with role-aware geometry.
 
     For RECT roles (taxi rects, runway segments): ring edges only.
@@ -446,8 +445,8 @@ def _build_edges(layout, bucket_to_idx
     wins.
     """
     from shapely.geometry import Point
-    edge_grade: Dict[Tuple[int, int], float] = {}
-    edge_length: Dict[Tuple[int, int], float] = {}
+    edge_grade: dict[tuple[int, int], float] = {}
+    edge_length: dict[tuple[int, int], float] = {}
 
     def _add_edge(ui, uj, length, gr):
         if ui is None or uj is None or ui == uj:
@@ -506,7 +505,7 @@ def _build_edges(layout, bucket_to_idx
 
 
 def _build_adjacency(n, edge_grade, edge_length):
-    adj: List[List[Tuple[int, float, float]]] = [[] for _ in range(n)]
+    adj: list[list[tuple[int, float, float]]] = [[] for _ in range(n)]
     for (u, v), gr in edge_grade.items():
         L = edge_length[(u, v)]
         adj[u].append((v, L, gr))
@@ -536,7 +535,7 @@ def _build_rect_cross_section_groups(layout, bucket_to_idx):
     from auto_patch.elevation import (
         _corner_elevation_bucket, _short_end_pairs_by_axis,
     )
-    groups: List[List[int]] = []
+    groups: list[list[int]] = []
     for s in layout.shapes:
         if s.role not in SLOPING_RECT_ROLES:
             continue
@@ -566,7 +565,7 @@ def _build_terminal_groups(layout, bucket_to_idx):
     """Each terminal contributes one group of node indices that
     must share a single elevation (the flatness constraint).
     """
-    groups: List[List[int]] = []
+    groups: list[list[int]] = []
     for s in layout.shapes:
         if s.role != ROLE_TERMINAL:
             continue
