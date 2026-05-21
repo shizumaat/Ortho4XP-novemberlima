@@ -41,8 +41,8 @@ from .pavement.runways import _runway_rect_m
 # modes.  Programming errors propagate so they surface immediately.
 # Includes ``OSError`` because osm_load mixes shapely ops with file
 # I/O (apt.dat / OSM cache reads, Overpass downloads).
-_GEOM_EXC = (OSError, ValueError, TypeError, KeyError,
-             GEOSException, TopologicalError, IndexError)
+_GEOM_EXC = (OSError, ValueError,
+             GEOSException, TopologicalError)
 
 
 __all__ = [

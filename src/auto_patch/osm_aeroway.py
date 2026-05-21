@@ -19,8 +19,7 @@ import O4_UI_Utils as UI
 
 # Narrow exception tuple for shapely / numeric-geometry failure
 # modes.  Programming errors propagate so they surface immediately.
-_GEOM_EXC = (ValueError, TypeError, KeyError,
-             GEOSException, TopologicalError, IndexError)
+_GEOM_EXC = (ValueError, GEOSException, TopologicalError)
 
 __all__ = [
     "extract_taxiway_info",
