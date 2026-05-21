@@ -536,35 +536,73 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
         return sum(vals) / len(vals)
 
     # ── Threshold elevation DEM reconciliation ─────────────────
-    # Per user 2026-05-20: cross-check each CIFP threshold elevation
-    # against the local DEM in a 75 m radius around the threshold
-    # centreline endpoint, then choose:
-    #   DEM lower than CIFP          → keep CIFP (don't bury the end)
-    #   DEM 0–5 m higher than CIFP   → use DEM  (terrain is the real
-    #                                   ground; CIFP is slightly low)
-    #   DEM ≥ 5 m higher than CIFP   → keep CIFP (treat as obstacle /
-    #                                   DEM noise, not the runway end)
+    # Per user 2026-05-20/-21: cross-check each CIFP threshold
+    # elevation against the local DEM in a 75 m radius around the
+    # threshold centreline endpoint.  Per threshold the difference
+    # ``dem - cifp`` is classified:
+    #   < 0           → DEM lower than CIFP: keep CIFP (don't bury the
+    #                   end); excluded from the offset.
+    #   0 .. MAX_RISE → in-band: the published end sits below the
+    #                   surrounding terrain by a plausible amount
+    #                   (real ground, not an obstacle).
+    #   >= MAX_RISE   → treat as obstacle / DEM noise; excluded.
+    #
+    # UNIFORM-LIFT rule (user 2026-05-21): do NOT snap each end to its
+    # own DEM value — that distorts the runway's longitudinal grade
+    # (at CYXY raising RW02 alone to DEM pushed the RW02/RW20 profile
+    # to 1.8% > 1.5%).  Instead take the MEAN ``dem - cifp`` difference
+    # across the airport's CREDIBLE thresholds and add that single
+    # offset to EVERY threshold, so each inter-threshold grade is
+    # preserved exactly while the whole airport is lifted onto the
+    # terrain.
+    #   * "credible" = |dem - cifp| < MAX_RISE.  This drops BOTH
+    #     obstacle-high DEM (a building/tree over the threshold) AND
+    #     valley-low DEM (a runway end perched on an embankment over a
+    #     cliff/water) — both are DEM noise, not the runway surface.
+    #   * Only lift when the credible mean is POSITIVE: a net-positive
+    #     mean means the airport genuinely sits below the surrounding
+    #     terrain (MMOX: {+6.7, +3.9} → +5.3, lift both ends; RW01
+    #     un-buried, grade unchanged).  A net-zero/negative mean means
+    #     the field is at or above terrain and must NOT be raised
+    #     (CYXY: {+6.18, -8.70, +1.06} → -0.49, no lift — only RW02 is
+    #     below terrain; lifting the whole airport would step the
+    #     terminal/apron interfaces).
     # Mutates ``elevation_m`` in place once per unique threshold so
     # every downstream consumer (cross-runway anchors, centerline-
     # crossing reconciliation, per-segment elevation seeds) reads the
     # reconciled value from the same field.
     THRESHOLD_DEM_RADIUS_M = 75.0
-    THRESHOLD_DEM_MAX_RISE_M = 5.0
+    THRESHOLD_DEM_MAX_RISE_M = 10.0
+    # Unique thresholds (dedup by identity across pairs).
     _seen_thresh = set()
+    _unique_thresh = []
     for _da, _data_a, _db, _data_b in runway_pairs:
         for _data in (_data_a, _data_b):
             if _data is None or id(_data) in _seen_thresh:
                 continue
             _seen_thresh.add(id(_data))
-            cifp_e = _data.get("elevation_m")
-            if cifp_e is None:
-                continue
-            dem_e = _threshold_dem_elev(
-                _data["lat"], _data["lon"], THRESHOLD_DEM_RADIUS_M)
-            if dem_e is None:
-                continue
-            if cifp_e <= dem_e < cifp_e + THRESHOLD_DEM_MAX_RISE_M:
-                _data["elevation_m"] = dem_e
+            _unique_thresh.append(_data)
+    # Pass 1: collect credible (|dem-cifp| < MAX_RISE) differences.
+    _credible_diffs = []
+    for _data in _unique_thresh:
+        cifp_e = _data.get("elevation_m")
+        if cifp_e is None:
+            continue
+        dem_e = _threshold_dem_elev(
+            _data["lat"], _data["lon"], THRESHOLD_DEM_RADIUS_M)
+        if dem_e is None:
+            continue
+        diff = dem_e - cifp_e
+        if abs(diff) < THRESHOLD_DEM_MAX_RISE_M:
+            _credible_diffs.append(diff)
+    # Pass 2: lift EVERY threshold by the mean credible offset, but
+    # only when that mean is positive (airport sits below terrain).
+    if _credible_diffs:
+        _offset = sum(_credible_diffs) / len(_credible_diffs)
+        if _offset > 0.0:
+            for _data in _unique_thresh:
+                if _data.get("elevation_m") is not None:
+                    _data["elevation_m"] += _offset
 
     # ── Auto cross-runway anchor pre-pass ──────────────────────
     # Per user 2026-04-28: project every paired runway's threshold

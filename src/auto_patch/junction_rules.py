@@ -74,6 +74,17 @@ SLOPING_RECT_ROLES = (
 
 SLOPING_RECT_FLAT_THRESHOLD_M = 0.05
 
+# Absolute area (m²) a single ``_enforce_runway_1to1_sharing`` runway-
+# corner rewrite may remove from a junction before it is rejected.  The
+# pass straightens a junction's runway-adjacent vertex run to the runway
+# corner line; legitimate straightenings across the baseline airports
+# lose ≤ ~730 m² (SPJC), while a chord across a connector wedge can
+# delete several thousand (CYXY runway-20 connector: 6,973 m²).  2,000 m²
+# sits comfortably above the legitimate maximum and well below the
+# connector loss.  Complements the relative 50%-loss guard, which is
+# blind to a small-fraction amputation of a very large junction.
+RUNWAY_REWRITE_MAX_ABS_LOSS = 2000.0
+
 
 def _align_rect_slope_to_axis(layout: PavementLayout) -> None:
     """Per user 2026-05-02: a sloping rect with a negligible high/low
@@ -1499,6 +1510,21 @@ def _enforce_runway_1to1_sharing(layout: PavementLayout) -> None:
         if not new_poly.is_valid or not new_poly.is_simple:
             continue
         if new_poly.area < 0.5 * poly.area:
+            continue
+        # Absolute area-loss cap (user 2026-05-21).  The relative
+        # 50%-loss guard above is meant to reject only a catastrophic
+        # rewrite, but it can't see a small-FRACTION amputation of a
+        # LARGE junction: at CYXY the ~102k m² junction wrapping the
+        # runway-20 end has a connector wedge extending past the
+        # threshold over to 14L/32R, and the runway-corner chord slices
+        # it off — 6,973 m² (6.8%), well under 50%, so the old guard
+        # committed it and the connector pavement vanished (never
+        # graded).  This pass is meant to STRAIGHTEN a runway-adjacent
+        # vertex run, not amputate thousands of m²; legitimate rewrites
+        # across the baseline airports lose ≤ ~730 m² (SPJC).  Reject
+        # any rewrite that removes more than RUNWAY_REWRITE_MAX_ABS_LOSS
+        # so the connector survives as a junction.
+        if poly.area - new_poly.area > RUNWAY_REWRITE_MAX_ABS_LOSS:
             continue
         shape.polygon = new_poly
         if new_alts_out is not None:
