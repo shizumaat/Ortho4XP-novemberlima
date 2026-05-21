@@ -260,6 +260,61 @@ def test_to_osm_sloped_rect_emits_high_low_cell_profile():
     assert "altitude" not in tags
 
 
+def _pentagon(cx=0.0, cy=0.0):
+    """A 5-corner convex polygon in meter space (NOT a quad)."""
+    return Polygon([
+        (cx + 0.0, cy + 0.0),
+        (cx + 50.0, cy + 0.0),
+        (cx + 50.0, cy + 20.0),
+        (cx + 25.0, cy + 30.0),
+        (cx + 0.0, cy + 20.0),
+    ])
+
+
+def test_to_osm_never_emits_altitude_high_on_non_quad():
+    """Ortho4XP's encoder rejects any altitude_high/altitude_low way
+    that isn't exactly a closed 4-corner quad (5 node refs) — it logs
+    "Wrong number of nodes or non closed way for a
+    altitude_high/altitude_low polygon, skipped" and drops the shape.
+
+    A sloped shape (altitude_high/low set) whose ring was reshaped to a
+    non-quad by some upstream pass must therefore NEVER reach the OSM
+    with altitude_high/low tags.  The emitter is the single chokepoint
+    that must enforce this regardless of which pass produced the bad
+    geometry.  Here a pentagon sloped shape with no neighbour (so the
+    consensus path can't help) exercises the fallback tag-writer.
+    """
+    layout = _make_layout()
+    layout.shapes.append(BuiltShape(
+        polygon=_pentagon(), role=ROLE_PRIMARY_PARALLEL,
+        altitude_high=60.0, altitude_low=55.0))
+    _, ways = _emit_and_parse(layout)
+    for wid, nds, tags in ways:
+        if "altitude_high" in tags or "altitude_low" in tags:
+            assert len(nds) == 5, (
+                f"way {wid} has altitude_high/low with {len(nds)} node "
+                f"refs (Ortho4XP requires exactly 5 = 4 corners + "
+                f"closing repeat); X-Plane would reject the way")
+            assert nds[0] == nds[-1], (
+                f"way {wid} has altitude_high/low but is not a closed "
+                f"ring; X-Plane would reject the way")
+
+
+def test_to_osm_non_quad_sloped_shape_still_emits_some_altitude():
+    """The non-quad sloped shape must still carry SOME valid elevation
+    (flat or per-node) rather than being silently dropped — losing its
+    altitude entirely would float it on the DEM."""
+    layout = _make_layout()
+    layout.shapes.append(BuiltShape(
+        polygon=_pentagon(), role=ROLE_PRIMARY_PARALLEL,
+        altitude_high=60.0, altitude_low=55.0))
+    _, ways = _emit_and_parse(layout)
+    assert len(ways) == 1
+    tags = ways[0][2]
+    assert ("altitude" in tags or "node_altitudes" in tags), (
+        "non-quad sloped shape lost all elevation tags")
+
+
 def test_to_osm_flat_altitude_emits_single_tag():
     """A polygon with only ``altitude`` set emits a single
     altitude= tag."""

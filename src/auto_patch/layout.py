@@ -705,10 +705,26 @@ class PavementLayout:
                 # back to the source shape's own tags.
                 if (s.altitude_high is not None
                         and s.altitude_low is not None):
-                    tags["altitude_high"] = f"{s.altitude_high:.1f}"
-                    tags["altitude_low"] = f"{s.altitude_low:.1f}"
-                    tags["cell_size"] = "2"
-                    tags["profile"] = "spline"
+                    # ``altitude_high``/``altitude_low`` is ONLY valid on
+                    # a 4-corner quad: Ortho4XP's encoder requires the
+                    # way to be exactly 5 node refs (4 corners + closing
+                    # repeat) and rejects anything else ("Wrong number
+                    # of nodes or non closed way for a altitude_high/
+                    # altitude_low polygon, skipped"), dropping the whole
+                    # shape.  If an upstream pass reshaped this sloped
+                    # rect into a non-quad without converting it to
+                    # ``node_altitudes``, emitting the slope tags here
+                    # would crash/skip the way in X-Plane.  Flatten to
+                    # the mean altitude instead — a valid, renderable
+                    # approximation that keeps the surface anchored.
+                    if n_open == 4:
+                        tags["altitude_high"] = f"{s.altitude_high:.1f}"
+                        tags["altitude_low"] = f"{s.altitude_low:.1f}"
+                        tags["cell_size"] = "2"
+                        tags["profile"] = "spline"
+                    else:
+                        tags["altitude"] = (
+                            f"{(float(s.altitude_high) + float(s.altitude_low)) / 2.0:.1f}")
                 elif s.altitude is not None:
                     tags["altitude"] = f"{s.altitude:.1f}"
             way_blocks.append((next_wid[0], ext_nids, tags))
