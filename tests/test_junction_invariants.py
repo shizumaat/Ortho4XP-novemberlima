@@ -119,17 +119,13 @@ JUNCTION_BOUNDARY_DISTANCE_REGRESSION_BASELINE: Dict[str, dict] = {}
 # no airport-specific exemptions.  A sloping rect's sloping edge
 # must never be shared by a junction/apron polygon's perimeter.
 
-ORPHAN_NEIGHBOUR_VERTEX_REGRESSION_BASELINE = {
-    # SPJC: 5 vertex orphans:
-    # * 1 rect corner shifted off its co-located junction vertex by
-    #   Rule 5 (push-outside-pavement) -- pending tighter Rule 5
-    #   anchor exemption.
-    # * 4 boundary-polygon vertices near junction perimeters that
-    #   don't snap to junction vertices (boundary traces airport
-    #   outline; vertices come from apt.dat row-130 / OSM).  Pending
-    #   boundary-vertex snap to nearest junction corner.
-    "SPJC": 5,
-}
+# Per user 2026-05-21: no airport-specific orphan allowances.  The
+# bridge corner-snap (_snap_bridge_vertices_to_runway_corners) +
+# junction-contact-insert (_insert_bridge_contacts_into_junctions)
+# passes drove SPJC's former 5 boundary-vs-junction orphans (and CYXY's
+# runway-corner-arc orphans) to zero, so this baseline is empty — every
+# airport is enforced at the hard cap (MAX_ORPHAN_NEIGHBOUR_VERTICES = 0).
+ORPHAN_NEIGHBOUR_VERTEX_REGRESSION_BASELINE: Dict[str, int] = {}
 
 
 # A neighbour vertex within this distance of a junction's perimeter

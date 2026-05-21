@@ -71,6 +71,8 @@ __all__ = [
     "_emit_airport_boundary_shape",
     "_emit_boundary_dem_bridge",
     "_clip_boundary_bridges_against_pavement",
+    "_snap_bridge_vertices_to_runway_corners",
+    "_insert_bridge_contacts_into_junctions",
 ]
 
 
@@ -276,6 +278,197 @@ def _clip_boundary_bridges_against_pavement(
 
     layout.shapes = new_shapes
     return n_modified
+
+
+def _snap_bridge_vertices_to_runway_corners(
+        layout: "PavementLayout", snap_tol_m: float = 1.5) -> int:
+    """Snap ``boundary_dem_bridge`` vertices that sit within
+    ``snap_tol_m`` of a sloping-rect (runway / parallel / stub /
+    cross-connector) CORNER onto that corner; resample per-vertex
+    altitudes.  Returns the number of bridges modified.
+
+    The bridge clears sloping rects by ~1 m (``sr_union.buffer(1.0)``
+    in ``_emit_boundary_dem_bridge``) to keep its vertices off rect
+    EDGES (``test_no_vertex_on_sloping_rect_edge``).  The round buffer
+    leaves a ~1 m densified arc around each rect CORNER; where a
+    junction shares that corner (runway 1:1 sharing), the arc vertices
+    land ~1 m off the junction's corner vertex and trip
+    ``test_junction_neighbour_corners_shared``.  A vertex coincident
+    with a rect corner is explicitly ALLOWED by the no-vertex invariant
+    (only edge-interior coincidence is forbidden), so collapsing the
+    arc onto the actual corner node lets the bridge SHARE the
+    runway/junction corner — satisfying both invariants.  Edge-clearance
+    vertices (>``snap_tol_m`` from any corner) are untouched, so the 1 m
+    edge clearance — and the no-mid-edge-vertex guarantee — is preserved.
+    """
+    sloping = [s.polygon for s in layout.shapes
+               if s.role in (ROLE_RUNWAY, ROLE_PRIMARY_PARALLEL,
+                             ROLE_SECONDARY_PARALLEL, ROLE_STUB,
+                             ROLE_CROSS_CONNECTOR)
+               and s.polygon is not None
+               and not s.polygon.is_empty]
+    if not sloping:
+        return 0
+    n_modified = 0
+    for s in layout.shapes:
+        if (s.role != ROLE_BOUNDARY
+                or s.ref != "boundary_dem_bridge"
+                or s.polygon is None
+                or s.polygon.is_empty):
+            continue
+        old_open = list(s.polygon.exterior.coords)
+        if old_open and old_open[0] == old_open[-1]:
+            old_open = old_open[:-1]
+        try:
+            snapped = _snap_polygon_vertices_to_rect_corners(
+                s.polygon, sloping, snap_tol_m=snap_tol_m)
+        except _GEOM_EXC:
+            continue
+        if (snapped is None or snapped.is_empty
+                or snapped.geom_type != "Polygon"):
+            continue
+        # ``_snap_polygon_vertices_to_rect_corners`` returns the input
+        # unchanged when nothing snapped — cheap identity skip.
+        if snapped is s.polygon:
+            continue
+        old_alts = s.node_altitudes
+        s.polygon = snapped
+        if old_alts is not None and old_open:
+            new_alts = _resample_node_altitudes_nn(
+                snapped, old_open, old_alts)
+            s.node_altitudes = new_alts if new_alts is not None else None
+        n_modified += 1
+    return n_modified
+
+
+def _insert_bridge_contacts_into_junctions(
+        layout: "PavementLayout",
+        edge_tol_m: float = 0.10,
+        vertex_tol_m: float = 0.10,
+        sloping_guard_m: float = 0.5) -> int:
+    """Insert each ``boundary_dem_bridge`` vertex that lies ON a
+    junction edge (but is not already a junction vertex) into that
+    junction's ring so the two SHARE the node.  Returns the number of
+    vertices inserted.
+
+    Complements ``_snap_bridge_vertices_to_runway_corners``: that pass
+    handles bridge vertices near a runway CORNER; this one handles
+    bridge vertices that land mid-edge on a junction's NON-runway
+    boundary (where the bridge abuts the junction directly).  Both
+    target ``test_junction_neighbour_corners_shared`` — a bridge vertex
+    within 1 m of a junction perimeter must coincide with a junction
+    vertex.
+
+    The inserted point is collinear on the junction edge, so the
+    junction's footprint and per-vertex grade are unchanged (the new
+    altitude is the linear interpolation along the edge).  Points within
+    ``sloping_guard_m`` of a sloping-rect edge are skipped so the
+    insertion can't create a ``test_no_vertex_on_sloping_rect_edge``
+    violation on the junction side.
+    """
+    bridges = [s for s in layout.shapes
+               if s.role == ROLE_BOUNDARY
+               and s.ref == "boundary_dem_bridge"
+               and s.polygon is not None
+               and not s.polygon.is_empty]
+    junctions = [s for s in layout.shapes
+                 if s.role == ROLE_JUNCTION
+                 and s.polygon is not None
+                 and not s.polygon.is_empty]
+    if not bridges or not junctions:
+        return 0
+    sloping_edges = []
+    for s in layout.shapes:
+        if s.role in (ROLE_RUNWAY, ROLE_PRIMARY_PARALLEL,
+                      ROLE_SECONDARY_PARALLEL, ROLE_STUB,
+                      ROLE_CROSS_CONNECTOR) and s.polygon is not None \
+                and not s.polygon.is_empty:
+            sloping_edges.append(s.polygon.boundary)
+
+    bridge_pts = []
+    for b in bridges:
+        for x, y in list(b.polygon.exterior.coords)[:-1]:
+            bridge_pts.append((x, y))
+    if not bridge_pts:
+        return 0
+
+    n_inserted = 0
+    for j in junctions:
+        ring = list(j.polygon.exterior.coords)
+        if ring and ring[0] == ring[-1]:
+            ring = ring[:-1]
+        n = len(ring)
+        if n < 3:
+            continue
+        alts = j.node_altitudes
+        # alts is closed-ring length (n+1); use the open part.
+        open_alts = (alts[:n] if alts is not None and len(alts) >= n
+                     else None)
+        # For each edge collect bridge points lying on it.
+        new_ring: list[tuple[float, float]] = []
+        new_alts: list[float] = []
+        changed = False
+        added_here = 0
+        for i in range(n):
+            ax, ay = ring[i]
+            bx, by = ring[(i + 1) % n]
+            new_ring.append((ax, ay))
+            if open_alts is not None:
+                new_alts.append(open_alts[i])
+            dx, dy = bx - ax, by - ay
+            seg_l2 = dx * dx + dy * dy
+            if seg_l2 <= 1e-9:
+                continue
+            on_edge = []
+            for px, py in bridge_pts:
+                t = ((px - ax) * dx + (py - ay) * dy) / seg_l2
+                if t <= 0.01 or t >= 0.99:
+                    continue
+                projx, projy = ax + t * dx, ay + t * dy
+                if math.hypot(px - projx, py - projy) > edge_tol_m:
+                    continue
+                # Skip if already (nearly) a junction vertex.
+                if (math.hypot(px - ax, py - ay) <= vertex_tol_m
+                        or math.hypot(px - bx, py - by) <= vertex_tol_m):
+                    continue
+                # Skip if near a sloping-rect edge (would move the
+                # no_vertex violation to the junction).
+                pt = Point(px, py)
+                if any(se.distance(pt) < sloping_guard_m
+                       for se in sloping_edges):
+                    continue
+                on_edge.append((t, px, py))
+            if not on_edge:
+                continue
+            on_edge.sort(key=lambda e: e[0])
+            seen_t = set()
+            for t, px, py in on_edge:
+                key = round(t, 4)
+                if key in seen_t:
+                    continue
+                seen_t.add(key)
+                new_ring.append((px, py))
+                if open_alts is not None:
+                    new_alts.append(
+                        open_alts[i] * (1.0 - t)
+                        + open_alts[(i + 1) % n] * t)
+                changed = True
+                added_here += 1
+        if not changed:
+            continue
+        try:
+            new_poly = Polygon(new_ring)
+            if not new_poly.is_valid:
+                new_poly = new_poly.buffer(0)
+        except _GEOM_EXC:
+            continue  # leave this junction unchanged
+        if new_poly.geom_type != "Polygon" or new_poly.is_empty:
+            continue
+        n_inserted += added_here
+        j.polygon = new_poly
+        if open_alts is not None and len(new_alts) == len(new_ring):
+            j.node_altitudes = new_alts + [new_alts[0]]
+    return n_inserted
 
 
 def _emit_airport_boundary_shape(

@@ -2447,6 +2447,22 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 UI.vprint(1,
                     f"  [pav-builder] {icao}: re-emitted "
                     f"{n_br2} canonical-node bridge(s).")
+            # Collapse the bridge's ~1 m runway-clearance arc onto the
+            # shared runway/junction CORNER nodes so the bridge SHARES
+            # those nodes (a corner coincidence is allowed by the
+            # no-vertex-on-sloping-edge invariant) instead of floating
+            # densified arc vertices ~1 m off an adjacent junction
+            # corner — the CYXY runway-20 / 14R-32L
+            # neighbour_corners pinch.
+            from .boundary import (
+                _snap_bridge_vertices_to_runway_corners as _snap_br)
+            _snap_br(layout)
+            # And where a bridge vertex lands mid-edge on a junction's
+            # NON-runway boundary, insert it into the junction ring so
+            # the two share the node (collinear → no shape/grade change).
+            from .boundary import (
+                _insert_bridge_contacts_into_junctions as _ins_br)
+            _ins_br(layout)
         except _GEOM_EXC:
             pass
 
