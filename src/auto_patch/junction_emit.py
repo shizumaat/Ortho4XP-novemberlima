@@ -171,7 +171,7 @@ def emit_junctions_and_finalize(layout, *, pav_union, emitted_taxi_rects,
         from .pavement.union_helpers import _simplify_pavement_polygon
         cleaned_term_union = _simplify_pavement_polygon(
             cleaned_term_union, tol=1.0)
-    _eff_rwy = getattr(layout, "_effective_runway_union",
+    effective_runway_union = getattr(layout, "_effective_runway_union",
                        layout.runway_union)
 
     residue = pav_union
@@ -179,8 +179,8 @@ def emit_junctions_and_finalize(layout, *, pav_union, emitted_taxi_rects,
         residue = residue.difference(taxi_rect_union)
     if cleaned_term_union is not None and not cleaned_term_union.is_empty:
         residue = residue.difference(cleaned_term_union)
-    if _eff_rwy is not None and not _eff_rwy.is_empty:
-        residue = residue.difference(_eff_rwy)
+    if effective_runway_union is not None and not effective_runway_union.is_empty:
+        residue = residue.difference(effective_runway_union)
 
     # Per user 2026-05-13 (CYXY missing-junctions bug): shapely's
     # difference can return a GeometryCollection when residue
@@ -210,11 +210,11 @@ def emit_junctions_and_finalize(layout, *, pav_union, emitted_taxi_rects,
             fixed_polys.extend(cleaned_term_union.geoms)
         else:
             fixed_polys.append(cleaned_term_union)
-    if _eff_rwy is not None and not _eff_rwy.is_empty:
-        if _eff_rwy.geom_type == "MultiPolygon":
-            fixed_polys.extend(_eff_rwy.geoms)
+    if effective_runway_union is not None and not effective_runway_union.is_empty:
+        if effective_runway_union.geom_type == "MultiPolygon":
+            fixed_polys.extend(effective_runway_union.geoms)
         else:
-            fixed_polys.append(_eff_rwy)
+            fixed_polys.append(effective_runway_union)
     pieces = _drop_orphan_strips(pieces, fixed_polys)
 
     if EMIT_JUNCTIONS:

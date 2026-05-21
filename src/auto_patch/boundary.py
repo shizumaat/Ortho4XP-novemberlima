@@ -396,12 +396,12 @@ def _emit_airport_boundary_shape(
         if s.polygon is not None
         and not s.polygon.is_empty
         and s.role != ROLE_BOUNDARY]
-    pavement_union: Optional[Polygon] = None
+    emitted_pav_union: Optional[Polygon] = None
     if pavement_polys:
         try:
-            pavement_union = unary_union(pavement_polys)
+            emitted_pav_union = unary_union(pavement_polys)
         except _GEOM_EXC:
-            pavement_union = None
+            emitted_pav_union = None
 
     def _rect_for_segment(
             p0: Tuple[float, float],
@@ -545,21 +545,21 @@ def _emit_airport_boundary_shape(
             # fail the no-self-overlap test.  Partial overlaps are
             # OK; X-Plane resolves at render time and the rect
             # still labels its segment.
-            if (pavement_union is not None
-                    and not pavement_union.is_empty):
+            if (emitted_pav_union is not None
+                    and not emitted_pav_union.is_empty):
                 try:
-                    if pavement_union.contains(poly):
+                    if emitted_pav_union.contains(poly):
                         continue
                     # If pavement covers >80 % of the rect, skip too
                     # — keeps the chain coherent with what's
                     # actually visible.
-                    inter = pavement_union.intersection(poly)
+                    inter = emitted_pav_union.intersection(poly)
                     if (not inter.is_empty
                             and inter.area > 0.8 * poly.area):
                         continue
                     # Otherwise trim against pavement; if the
                     # trimmed result is still a Polygon, replace.
-                    trimmed = poly.difference(pavement_union)
+                    trimmed = poly.difference(emitted_pav_union)
                     if (not trimmed.is_empty
                             and trimmed.geom_type == "Polygon"):
                         poly = trimmed
@@ -689,12 +689,12 @@ def _emit_boundary_dem_bridge(
         if s.role != ROLE_BOUNDARY
         and s.polygon is not None
         and not s.polygon.is_empty]
-    pavement_union: Optional[Polygon] = None
+    emitted_pav_union: Optional[Polygon] = None
     if pavement_polys:
         try:
-            pavement_union = unary_union(pavement_polys)
+            emitted_pav_union = unary_union(pavement_polys)
         except _GEOM_EXC:
-            pavement_union = None
+            emitted_pav_union = None
     # Separately track the boundary ribbon — its centerline matches
     # the boundary line, so the bridge polygon overlaps the ribbon
     # in its inner 2.5 m by construction.  The bridge must be
@@ -873,9 +873,9 @@ def _emit_boundary_dem_bridge(
                 continue
             if abs(v[2] - v[3]) <= gap_threshold_m:
                 continue
-            if pavement_union is not None and not pavement_union.is_empty:
+            if emitted_pav_union is not None and not emitted_pav_union.is_empty:
                 try:
-                    if pavement_union.distance(
+                    if emitted_pav_union.distance(
                             _P2(v[0], v[1])) < 5.0:
                         continue
                 except _GEOM_EXC:
@@ -915,8 +915,8 @@ def _emit_boundary_dem_bridge(
         # 2. Each maximal contiguous "marked" stretch is a bridge
         #    run: the bridge's outer edge walks those vertices.
         # 3. For each run, snap from the run's end-vertex across to
-        #    the nearest pavement_union outer-ring vertex; then walk
-        #    pavement_union BACK toward the run start, collecting
+        #    the nearest emitted_pav_union outer-ring vertex; then walk
+        #    emitted_pav_union BACK toward the run start, collecting
         #    canonical pavement vertices along the way.  Close the
         #    polygon by snapping from the last pavement-walk vertex
         #    to the run start.  By construction every bridge node
@@ -927,7 +927,7 @@ def _emit_boundary_dem_bridge(
         #    perimeters.
         from shapely.ops import nearest_points
 
-        # Pre-build pavement_union outer ring (canonical nodes).
+        # Pre-build emitted_pav_union outer ring (canonical nodes).
         # Include runways so the bridge inner edge wraps around them
         # (touching, not overlapping).
         pav_for_inner = [

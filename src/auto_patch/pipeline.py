@@ -2437,14 +2437,13 @@ def build_airport_pavement(icao: str, xplane_root: str,
             # elevations from ~1° away (100 km).  Manifested as
             # MMOX +17 tile bridge inner-edge altitudes sampling
             # canyon DEM in the +16 tile.
-            _dem_pp = dem
             _tl = (current_tile_lat
                    if current_tile_lat is not None
                    else math.floor(layout.anchor[0]))
             _tn = (current_tile_lon
                    if current_tile_lon is not None
                    else math.floor(layout.anchor[1]))
-            n_br2 = _emit_br(layout, _dem_pp, _tl, _tn)
+            n_br2 = _emit_br(layout, dem, _tl, _tn)
             if n_br2:
                 UI.vprint(1,
                     f"  [pav-builder] {icao}: re-emitted "
