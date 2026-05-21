@@ -35,11 +35,11 @@ from __future__ import annotations
 import math
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Dict, Iterator, List, Optional, Tuple
 
 from shapely.errors import GEOSException, TopologicalError
-from shapely.geometry import Polygon
+from shapely.geometry import LineString, Polygon
 from shapely.ops import unary_union
 
 # Narrow exception tuple for shapely / numeric-geometry failure
@@ -161,11 +161,11 @@ class Airport:
     icao: str
     name: str
     reference_elev_ft: int      # row 1 elevation, in feet (0 if absent)
-    runways: List[Runway] = field(default_factory=list)
-    pavements: List[Pavement] = field(default_factory=list)
-    taxi_nodes: "Dict[int, TaxiNode]" = field(default_factory=dict)
-    taxi_edges: List[TaxiEdge] = field(default_factory=list)
-    boundary: Optional[Polygon] = None
+    runways: list[Runway] = field(default_factory=list)
+    pavements: list[Pavement] = field(default_factory=list)
+    taxi_nodes: "dict[int, TaxiNode]" = field(default_factory=dict)
+    taxi_edges: list[TaxiEdge] = field(default_factory=list)
+    boundary: Polygon | None = None
     source_path: str = ""
 
     @property
@@ -176,7 +176,7 @@ class Airport:
 # ──────────────────────────────────────────────────────────────────────
 # Public API: locating the right apt.dat
 # ──────────────────────────────────────────────────────────────────────
-def find_airport_apt_dat(xplane_root: str, icao: str) -> Optional[str]:
+def find_airport_apt_dat(xplane_root: str, icao: str) -> str | None:
     """Locate the most-specific ``apt.dat`` containing the given ICAO.
 
     Search priority:
@@ -226,7 +226,7 @@ def find_airport_apt_dat(xplane_root: str, icao: str) -> Optional[str]:
     # KBNA Custom Scenery pack which uses row-120 linear features but
     # no row-110 pavements — the Global pack is the right source for
     # pavement geometry there.
-    custom_packs: List[str] = []
+    custom_packs: list[str] = []
     if os.path.isdir(custom_scenery):
         for entry in sorted(os.listdir(custom_scenery)):
             if entry == "Global Airports":
@@ -236,7 +236,7 @@ def find_airport_apt_dat(xplane_root: str, icao: str) -> Optional[str]:
             if os.path.isfile(pack_apt) and _file_has_airport(pack_apt, icao):
                 custom_packs.append(pack_apt)
 
-    candidates: List[str] = list(custom_packs)
+    candidates: list[str] = list(custom_packs)
     for cand in (global_pack_v11, global_pack_v12):
         if os.path.isfile(cand) and _file_has_airport(cand, icao):
             candidates.append(cand)
@@ -261,7 +261,7 @@ def load_airport(
     aptdat_path: str,
     icao: str,
     bezier_segments: int = DEFAULT_BEZIER_SEGMENTS,
-) -> Optional[Airport]:
+) -> Airport | None:
     """Parse the airport block for ``icao`` out of ``aptdat_path``.
 
     Args:
@@ -299,8 +299,8 @@ def load_airport(
         source_path=aptdat_path,
     )
 
-    pavement_rows: List[List[str]] = []
-    boundary_rows: List[List[str]] = []
+    pavement_rows: list[list[str]] = []
+    boundary_rows: list[list[str]] = []
     in_pavement = False
     in_boundary = False
 
@@ -433,7 +433,7 @@ def load_airport(
 # Internal: file scanning
 # ──────────────────────────────────────────────────────────────────────
 def find_all_airport_apt_dats(xplane_root: str,
-                              icao: str) -> List[str]:
+                              icao: str) -> list[str]:
     """Return EVERY apt.dat path under ``xplane_root`` that contains
     a row-1 header for ``icao`` (any pack — Custom Scenery,
     Global Airports, default).
@@ -449,7 +449,7 @@ def find_all_airport_apt_dats(xplane_root: str,
     icao = icao.strip().upper()
     if not icao:
         return []
-    out: List[str] = []
+    out: list[str] = []
     custom_scenery = os.path.join(xplane_root, "Custom Scenery")
     if os.path.isdir(custom_scenery):
         for entry in sorted(os.listdir(custom_scenery)):
@@ -498,7 +498,7 @@ def find_all_airport_apt_dats(xplane_root: str,
 _APT_DAT_INDEX_CACHE: dict = {}
 
 
-def _index_apt_dat(aptdat_path: str) -> Tuple[frozenset, frozenset]:
+def _index_apt_dat(aptdat_path: str) -> tuple[frozenset, frozenset]:
     """Return ``(icaos_present, icaos_with_pavement)`` for the file.
 
     Both sets are uppercase ICAO codes.  An entry in
@@ -521,7 +521,7 @@ def _index_apt_dat(aptdat_path: str) -> Tuple[frozenset, frozenset]:
 
     icaos = set()
     with_pavement = set()
-    current: Optional[str] = None
+    current: str | None = None
     saw_pavement_in_current = False
     try:
         with open(aptdat_path, "r", encoding="utf-8",
@@ -584,12 +584,12 @@ def _file_has_airport_with_pavement(aptdat_path: str, icao: str) -> bool:
     return icao.upper() in with_pavement
 
 
-def _read_airport_block(aptdat_path: str, icao: str) -> Optional[List[str]]:
+def _read_airport_block(aptdat_path: str, icao: str) -> list[str] | None:
     """Return all lines from the row-1 header for `icao` up to (but
     not including) the next row-1 header.  None if not found.
     """
     icao = icao.upper()
-    block: List[str] = []
+    block: list[str] = []
     in_block = False
     try:
         with open(aptdat_path, "r", encoding="utf-8",
@@ -615,7 +615,7 @@ def _read_airport_block(aptdat_path: str, icao: str) -> Optional[List[str]]:
 # ──────────────────────────────────────────────────────────────────────
 # Internal: row parsers
 # ──────────────────────────────────────────────────────────────────────
-def _parse_runway(toks: List[str]) -> Optional[Runway]:
+def _parse_runway(toks: list[str]) -> Runway | None:
     """Parse an apt.dat row 100 into a Runway.  Format:
 
     ``100 width surface shoulder smoothness centerline edge_lights distance_signs
@@ -659,7 +659,7 @@ def _parse_runway(toks: List[str]) -> Optional[Runway]:
     )
 
 
-def _parse_taxi_node(toks: List[str]) -> Optional[TaxiNode]:
+def _parse_taxi_node(toks: list[str]) -> TaxiNode | None:
     """Parse an apt.dat row 1201 into a TaxiNode.
 
     Format: ``1201 lat lon usage id [label]``
@@ -680,7 +680,7 @@ def _parse_taxi_node(toks: List[str]) -> Optional[TaxiNode]:
     return TaxiNode(id=nid, lat=lat, lon=lon, usage=usage, label=label)
 
 
-def _parse_taxi_edge(toks: List[str]) -> Optional[TaxiEdge]:
+def _parse_taxi_edge(toks: list[str]) -> TaxiEdge | None:
     """Parse an apt.dat row 1202 into a TaxiEdge.
 
     Format: ``1202 node_from node_to direction kind [name]``
@@ -703,8 +703,8 @@ def _parse_taxi_edge(toks: List[str]) -> Optional[TaxiEdge]:
                     direction=direction, kind=kind, name=name)
 
 
-def _parse_pavement(rows: List[List[str]],
-                    bezier_segments: int) -> Optional[Pavement]:
+def _parse_pavement(rows: list[list[str]],
+                    bezier_segments: int) -> Pavement | None:
     """Parse a row-110 header + node rows into a Pavement.
 
     The first contour (terminated by 113/114) is the exterior; any
@@ -769,8 +769,8 @@ def _parse_pavement(rows: List[List[str]],
     )
 
 
-def _parse_boundary(rows: List[List[str]],
-                    bezier_segments: int) -> Optional[Polygon]:
+def _parse_boundary(rows: list[list[str]],
+                    bezier_segments: int) -> Polygon | None:
     """Parse a row-130 header + node rows into a boundary Polygon.
 
     Boundaries follow the same node row format as pavements.  We
@@ -802,7 +802,7 @@ def _parse_boundary(rows: List[List[str]],
     return poly
 
 
-def _split_contours(node_rows: List[List[str]]) -> List[List[List[str]]]:
+def _split_contours(node_rows: list[list[str]]) -> list[list[list[str]]]:
     """Walk a list of 111/112/113/114 rows and split into contours.
 
     A contour starts at the first row after the header (or after the
@@ -810,8 +810,8 @@ def _split_contours(node_rows: List[List[str]]) -> List[List[List[str]]]:
     closing row.  Each returned contour is a list of node rows
     INCLUDING its closing 113/114 row.
     """
-    contours: List[List[List[str]]] = []
-    current: List[List[str]] = []
+    contours: list[list[list[str]]] = []
+    current: list[list[str]] = []
     for row in node_rows:
         if not row:
             continue
@@ -833,13 +833,13 @@ def _split_contours(node_rows: List[List[str]]) -> List[List[List[str]]]:
 # ──────────────────────────────────────────────────────────────────────
 # Internal: Bezier interpolation
 # ──────────────────────────────────────────────────────────────────────
-def _node_xy(row: List[str]) -> Tuple[float, float]:
+def _node_xy(row: list[str]) -> tuple[float, float]:
     """Return (lon, lat) for a node row (we use lon-first internally
     so shapely Polygons get the standard (x, y) order)."""
     return (float(row[2]), float(row[1]))
 
 
-def _node_ctrl(row: List[str]) -> Optional[Tuple[float, float]]:
+def _node_ctrl(row: list[str]) -> tuple[float, float] | None:
     """Return the Bezier control point for a 112/114 node, or None
     for a plain 111/113 node.
     """
@@ -893,8 +893,8 @@ def _mirror(point, anchor):
     return (2 * anchor[0] - point[0], 2 * anchor[1] - point[1])
 
 
-def _interpolate_contour(contour: List[List[str]],
-                         bezier_segments: int) -> List[Tuple[float, float]]:
+def _interpolate_contour(contour: list[list[str]],
+                         bezier_segments: int) -> list[tuple[float, float]]:
     """Convert a contour (list of 111/112 rows ending in 113/114)
     into a flat list of (x, y) polygon vertices, sampling Bezier
     curves into straight-line segments.
@@ -920,7 +920,7 @@ def _interpolate_contour(contour: List[List[str]],
     # contour).
     ring_nodes = list(contour)
 
-    out: List[Tuple[float, float]] = []
+    out: list[tuple[float, float]] = []
     for i in range(n):
         a_row = ring_nodes[i]
         b_row = ring_nodes[(i + 1) % n]
@@ -1012,8 +1012,8 @@ def airport_pavement_summary(airport: Airport) -> str:
 
 def taxi_junction_points(
         airport: Airport,
-        to_m,
-) -> List[Tuple[float, float]]:
+        to_m: Callable[[float, float], tuple[float, float]],
+) -> list[tuple[float, float]]:
     """Return apt.dat taxi-network junction node positions.
 
     A node is a "junction" when at least one of these holds:
@@ -1036,8 +1036,8 @@ def taxi_junction_points(
     if not airport.taxi_nodes or not airport.taxi_edges:
         return []
 
-    names_at_node: Dict[int, set] = defaultdict(set)
-    degree_per_name: Dict[Tuple[int, str], int] = defaultdict(int)
+    names_at_node: dict[int, set] = defaultdict(set)
+    degree_per_name: dict[tuple[int, str], int] = defaultdict(int)
     runway_touch: set = set()
     for edge in airport.taxi_edges:
         if edge.kind == "runway":
@@ -1050,7 +1050,7 @@ def taxi_junction_points(
         degree_per_name[(edge.node_from, key)] += 1
         degree_per_name[(edge.node_to, key)] += 1
 
-    out: List[Tuple[float, float]] = []
+    out: list[tuple[float, float]] = []
     for nid, names in names_at_node.items():
         is_junction = (
             len(names) >= 2
@@ -1067,9 +1067,9 @@ def taxi_junction_points(
 
 def taxi_centerlines(
         airport: Airport,
-        to_m,
-        rwy_centerlines: "Optional[List]" = None,
-) -> List[Tuple["LineString", str]]:
+        to_m: Callable[[float, float], tuple[float, float]],
+        rwy_centerlines: list[LineString] | None = None,
+) -> list[tuple[LineString, str]]:
     """Build taxi centerlines from apt.dat 1201/1202 rows.
 
     Returns a list of ``(LineString_in_meter_space, taxiway_name)``
@@ -1124,9 +1124,9 @@ def taxi_centerlines(
         return []
 
     # ── Step 1: group taxi edges by name + identify junction nodes ──
-    by_name: Dict[str, List[LineString]] = {}
-    node_names: Dict[str, set] = {}
-    runway_endpoint_node_ids: set = set()
+    by_name: dict[str, list[LineString]] = {}
+    node_names: dict[int, set[str]] = {}
+    runway_endpoint_node_ids: set[int] = set()
     for edge in edges:
         if edge.kind == "runway":
             # Runway-typed edges don't contribute pavement (the
@@ -1167,10 +1167,10 @@ def taxi_centerlines(
             | runway_endpoint_node_ids)
         if nid in nodes)
 
-    out: List[Tuple[LineString, str]] = []
+    out: list[tuple[LineString, str]] = []
     for name, segments in by_name.items():
         # ── Step 2: linemerge per-name into connected polyline(s) ──
-        merged_lines: List[LineString] = []
+        merged_lines: list[LineString] = []
         if len(segments) == 1:
             merged_lines = [segments[0]]
         else:
@@ -1217,7 +1217,7 @@ def _split_polyline_at_junction_vertices(
     ls: "LineString",
     junction_pts_m: "set",
     tol: float = 0.5,
-) -> "List[LineString]":
+) -> "list[LineString]":
     """Split ``ls`` at every INTERIOR vertex that coincides (within
     ``tol`` m) with a chart-level junction position.  Returns a list
     of sub-polylines.  The polyline's own endpoints are not used as
@@ -1234,7 +1234,7 @@ def _split_polyline_at_junction_vertices(
     if len(coords) < 3 or not junction_pts_m:
         return [ls]
     tol2 = tol * tol
-    split_indices: List[int] = []
+    split_indices: list[int] = []
     for i in range(1, len(coords) - 1):
         x, y = coords[i]
         rx, ry = round(x, 1), round(y, 1)
@@ -1250,7 +1250,7 @@ def _split_polyline_at_junction_vertices(
                 break
     if not split_indices:
         return [ls]
-    sub_lines: List[LineString] = []
+    sub_lines: list[LineString] = []
     start_idx = 0
     for split_idx in split_indices:
         sub_coords = coords[start_idx:split_idx + 1]

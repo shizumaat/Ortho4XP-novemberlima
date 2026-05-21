@@ -29,7 +29,6 @@ import platform
 import subprocess
 import sys
 import tempfile
-from typing import List, Optional, Tuple
 
 import O4_File_Names as FNAMES
 import O4_UI_Utils as UI
@@ -71,7 +70,7 @@ _PAVEMENT_SKIP = (
 )
 
 
-def _dsftool_path() -> Optional[str]:
+def _dsftool_path() -> str | None:
     """Return the platform's bundled DSFTool binary, or None."""
     # Mirror the layout O4_Mesh_Utils uses for Triangle4XP.
     base = FNAMES.Utils_dir
@@ -107,8 +106,8 @@ def _is_pavement_def(path: str) -> bool:
 
 def read_dsf_pavements(
     dsf_path: str,
-    cache_dir: Optional[str] = None,
-) -> List[List[Tuple[float, float]]]:
+    cache_dir: str | None = None,
+) -> list[list[tuple[float, float]]]:
     """Extract draped pavement polygons from a DSF file.
 
     Args:
@@ -195,10 +194,10 @@ def read_dsf_pavements(
     # only emit the OUTER (first) winding here; holes are rare for
     # pavement and the caller's polygon-builder treats each ring
     # as its own outer.
-    polys: List[List[Tuple[float, float]]] = []
+    polys: list[list[tuple[float, float]]] = []
     in_pavement = False
     in_winding = False
-    current_outer: Optional[List[Tuple[float, float]]] = None
+    current_outer: list[tuple[float, float]] | None = None
     pushed_this_polygon = False
     for line in lines:
         if line.startswith("BEGIN_POLYGON"):
@@ -249,7 +248,7 @@ def read_dsf_pavements(
 
 def find_associated_dsf(apt_dat_path: str,
                         apt_lat: float,
-                        apt_lon: float) -> Optional[str]:
+                        apt_lon: float) -> str | None:
     """Locate the DSF file in the same scenery pack as ``apt_dat_path``
     that covers ``(apt_lat, apt_lon)``.
 

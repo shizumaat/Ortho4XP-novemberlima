@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import math
 import os
-from typing import Dict, List, Optional, Tuple
 
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, MultiPolygon, Polygon
@@ -55,9 +54,9 @@ __all__ = [
 ]
 
 
-def _load_osm_tile(path: str) -> Tuple[Dict[str, Tuple[float, float]],
-                                       List[Tuple[str, List[str], Dict[str, str]]],
-                                       List[Tuple[str, List[str], Dict[str, str]]]]:
+def _load_osm_tile(path: str) -> tuple[dict[str, tuple[float, float]],
+                                       list[tuple[str, list[str], dict[str, str]]],
+                                       list[tuple[str, list[str], dict[str, str]]]]:
     """Parse an Ortho4XP-cached OSM tile (.osm.bz2 or .osm).
 
     Delegates to ``O4_OSM_Utils.OSM_layer.update_dicosm`` for the
@@ -81,17 +80,17 @@ def _load_osm_tile(path: str) -> Tuple[Dict[str, Tuple[float, float]],
     if not layer.update_dicosm(path):
         return {}, [], []
 
-    nodes: Dict[str, Tuple[float, float]] = {
+    nodes: dict[str, tuple[float, float]] = {
         str(nid): (lat, lon)
         for nid, (lon, lat) in layer.dicosmn.items()
     }
     way_tags = layer.dicosmtags.get("w", {})
-    ways: List[Tuple[str, List[str], Dict[str, str]]] = [
+    ways: list[tuple[str, list[str], dict[str, str]]] = [
         (str(wid), [str(nid) for nid in nds], way_tags.get(wid, {}))
         for wid, nds in layer.dicosmw.items()
     ]
     rel_tags = layer.dicosmtags.get("r", {})
-    relations: List[Tuple[str, List[str], Dict[str, str]]] = []
+    relations: list[tuple[str, list[str], dict[str, str]]] = []
     for rid, role_dict in layer.dicosmrorig.items():
         outer = role_dict.get("outer", []) if isinstance(role_dict, dict) else []
         relations.append(
@@ -107,9 +106,9 @@ def _load_osm_tile(path: str) -> Tuple[Dict[str, Tuple[float, float]],
 def _load_osm_airports(xplane_root: str, icao: str,
                        apt_lat: float, apt_lon: float,
                        radius_deg: float = 0.05
-                       ) -> Tuple[Dict[str, Tuple[float, float]],
-                                  List[Tuple[str, List[str], Dict[str, str]]],
-                                  List[Tuple[str, List[str], Dict[str, str]]]]:
+                       ) -> tuple[dict[str, tuple[float, float]],
+                                  list[tuple[str, list[str], dict[str, str]]],
+                                  list[tuple[str, list[str], dict[str, str]]]]:
     """Load the airports-layer OSM cache covering the given lat/lon.
 
     Returns nodes + ways filtered to a bbox around the airport.
@@ -171,9 +170,9 @@ def _load_osm_airports(xplane_root: str, icao: str,
     # collision is possible — and the previous "centroid in
     # bbox" filter alone is sufficient (no need for the cross-
     # tile-span guard since corrupted ways no longer exist).
-    nodes: Dict[str, Tuple[float, float]] = {}
-    ways: List[Tuple[str, List[str], Dict[str, str]]] = []
-    relations: List[Tuple[str, List[str], Dict[str, str]]] = []
+    nodes: dict[str, tuple[float, float]] = {}
+    ways: list[tuple[str, list[str], dict[str, str]]] = []
+    relations: list[tuple[str, list[str], dict[str, str]]] = []
     seen_paths = set()
     for dlat in (0, -1, 1):
         for dlon in (0, -1, 1):
@@ -231,7 +230,7 @@ def _load_osm_airports(xplane_root: str, icao: str,
         return True
 
     kept_ways = []
-    way_by_id: Dict[str, Tuple[str, List[str], Dict[str, str]]] = {}
+    way_by_id: dict[str, tuple[str, list[str], dict[str, str]]] = {}
     for wid, nds, tags in ways:
         way_by_id[wid] = (wid, nds, tags)
         if _way_passes_filters(nds):
@@ -252,10 +251,10 @@ def _load_osm_airports(xplane_root: str, icao: str,
 def _score_apt_dat_against_osm(
         apt_path: str,
         icao: str,
-        nodes: Dict[str, Tuple[float, float]],
-        ways: List[Tuple[str, List[str], Dict[str, str]]],
+        nodes: dict[str, tuple[float, float]],
+        ways: list[tuple[str, list[str], dict[str, str]]],
         taxi_buffer_m: float = 5.0,
-        ) -> Tuple[float, float]:
+        ) -> tuple[float, float]:
     """Score how well ``apt_path`` covers OSM-known features at
     this airport.
 
@@ -297,14 +296,14 @@ def _score_apt_dat_against_osm(
     cos0 = math.cos(math.radians(lat0))
     R = R_EARTH
 
-    def to_m(lon: float, lat: float) -> Tuple[float, float]:
+    def to_m(lon: float, lat: float) -> tuple[float, float]:
         return (math.radians(lon - lon0) * R * cos0,
                 math.radians(lat - lat0) * R)
     # Build apt.dat pavement union in meter space.  apt.dat
     # polygons are stored in lat/lon — project to meters for
     # consistent area / distance math.
     from shapely.ops import transform as shp_transform
-    pav_polys_m: List[Polygon] = []
+    pav_polys_m: list[Polygon] = []
     for pav in apt.pavements:
         if pav.polygon is None or pav.polygon.is_empty:
             continue
@@ -413,7 +412,7 @@ def _pick_best_apt_dat_against_osm(
         icao: str,
         apron_threshold: float = 0.7,
         taxi_threshold: float = 0.7,
-        ) -> Optional[str]:
+        ) -> str | None:
     """Find the best apt.dat for ``icao``, falling back from a
     sparse custom-scenery pack to the global apt.dat when the
     custom one is missing too much OSM-known geometry.
@@ -460,14 +459,14 @@ def _pick_best_apt_dat_against_osm(
         return APR.find_airport_apt_dat(xplane_root, icao)
     if not ways_o:
         return APR.find_airport_apt_dat(xplane_root, icao)
-    scores: List[Tuple[str, float, float]] = []
+    scores: list[tuple[str, float, float]] = []
     for cand in candidates:
         ac, tc = _score_apt_dat_against_osm(
             cand, icao, nodes_o, ways_o)
         scores.append((cand, ac, tc))
     # Walk in priority order; pick the first that clears both
     # thresholds.  Log every candidate's score.
-    chosen: Optional[str] = None
+    chosen: str | None = None
     for cand, ac, tc in scores:
         passed = ac >= apron_threshold and tc >= taxi_threshold
         if passed and chosen is None:
@@ -497,8 +496,8 @@ def _pick_best_apt_dat_against_osm(
 
 def _load_osm_big_roads(apt_lat: float, apt_lon: float,
                         radius_deg: float = 0.05
-                        ) -> Tuple[Dict[str, Tuple[float, float]],
-                                   List[Tuple[str, List[str], Dict[str, str]]]]:
+                        ) -> tuple[dict[str, tuple[float, float]],
+                                   list[tuple[str, list[str], dict[str, str]]]]:
     """Load the ``big_roads`` OSM cache (motorway / trunk / primary /
     secondary / railway ways with ``tunnel`` and ``bridge`` tag
     annotations).  Same multi-tile namespace + bbox-filter logic as
@@ -512,8 +511,8 @@ def _load_osm_big_roads(apt_lat: float, apt_lon: float,
     """
     base_lat = int(math.floor(apt_lat))
     base_lon = int(math.floor(apt_lon))
-    nodes: Dict[str, Tuple[float, float]] = {}
-    ways: List[Tuple[str, List[str], Dict[str, str]]] = []
+    nodes: dict[str, tuple[float, float]] = {}
+    ways: list[tuple[str, list[str], dict[str, str]]] = []
     seen_paths = set()
     for dlat in (0, -1, 1):
         for dlon in (0, -1, 1):

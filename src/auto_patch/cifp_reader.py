@@ -19,12 +19,24 @@ Used by:
     * O4_Airport_Pavement_Builder (Phase-2 elevation anchoring)
     * tests/conftest.py (test airport discovery)
 """
+from __future__ import annotations
+
 import os
 import re
 
 from math import floor
+from typing import TypedDict
 
 import O4_UI_Utils as UI
+
+
+class CifpRunway(TypedDict):
+    """One runway threshold parsed from a CIFP RWY record."""
+    lat: float
+    lon: float
+    elevation_m: float
+    displaced_m: float
+
 
 __all__ = [
     "parse_cifp_lat",
@@ -43,7 +55,7 @@ FT_TO_M = 0.3048
 # ──────────────────────────────────────────────────────────────────────
 # CIFP Coordinate Parsing
 # ──────────────────────────────────────────────────────────────────────
-def parse_cifp_lat(s):
+def parse_cifp_lat(s: str) -> float:
     """Parse ARINC 424 latitude: 'S12002744' → -12.00762222 degrees."""
     hem = s[0]
     deg = int(s[1:3])
@@ -55,7 +67,7 @@ def parse_cifp_lat(s):
     return decimal
 
 
-def parse_cifp_lon(s):
+def parse_cifp_lon(s: str) -> float:
     """Parse ARINC 424 longitude: 'W077071686' → -77.12135 degrees."""
     hem = s[0]
     deg = int(s[1:4])
@@ -71,7 +83,7 @@ def parse_cifp_lon(s):
 # ──────────────────────────────────────────────────────────────────────
 # CIFP Runway Data
 # ──────────────────────────────────────────────────────────────────────
-def parse_cifp_file(filepath):
+def parse_cifp_file(filepath: str) -> dict[str, CifpRunway]:
     """Parse a CIFP .dat file and extract runway threshold data.
 
     CIFP RWY record format:
@@ -96,7 +108,7 @@ def parse_cifp_file(filepath):
         dict: {designator: {lat, lon, elevation_m, displaced_m}} e.g.
               {'RW16L': {'lat': -12.0076, 'lon': -77.1214, 'elevation_m': 13.41, ...}}
     """
-    runways = {}
+    runways: dict[str, CifpRunway] = {}
     try:
         with open(filepath, "r", errors="replace") as f:
             for line in f:
@@ -166,7 +178,7 @@ def parse_cifp_file(filepath):
 # ──────────────────────────────────────────────────────────────────────
 # CIFP File / X-Plane Install Layout Helpers
 # ──────────────────────────────────────────────────────────────────────
-def find_aptdat(cifp_path):
+def find_aptdat(cifp_path: str) -> str | None:
     """Attempt to locate apt.dat relative to the CIFP directory.
 
     X-Plane directory structure:
@@ -213,7 +225,7 @@ def find_aptdat(cifp_path):
     return None
 
 
-def xplane_root_from_cifp_path(cifp_path):
+def xplane_root_from_cifp_path(cifp_path: str) -> str | None:
     """Derive the X-Plane installation root from a CIFP directory path.
 
     cifp_path is typically ``<X-Plane>/Custom Data/CIFP`` (or the
@@ -240,13 +252,13 @@ def xplane_root_from_cifp_path(cifp_path):
 # ──────────────────────────────────────────────────────────────────────
 # Tile-level Airport Discovery
 # ──────────────────────────────────────────────────────────────────────
-def discover_cifp_airports(cifp_path):
+def discover_cifp_airports(cifp_path: str) -> dict[str, str]:
     """Scan a CIFP directory for airport .dat files.
 
     Returns:
         dict: {icao_code: filepath} for all discovered airports.
     """
-    airports = {}
+    airports: dict[str, str] = {}
     if not cifp_path or not os.path.isdir(cifp_path):
         return airports
     for fname in os.listdir(cifp_path):
@@ -258,7 +270,8 @@ def discover_cifp_airports(cifp_path):
     return airports
 
 
-def airport_in_tile(runways, tile_lat, tile_lon):
+def airport_in_tile(runways: dict[str, CifpRunway],
+                    tile_lat: int, tile_lon: int) -> bool:
     """Check if any runway threshold falls within a 1°×1° tile.
 
     Args:
