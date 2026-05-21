@@ -2390,16 +2390,8 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # geometry: clipped sub-rects from absorption may have new
         # corners that don't yet align with adjacent junction
         # vertices (junction vertex sitting on the new sub-rect's
-        # sloping edge interior).  The Rule-2 sloping-edge snap must
-        # also re-run here: ``_absorb_rects_at_junction_perimeters``
-        # extends junction perimeters along absorbed-rect edges, which
-        # can leave a junction vertex within SLOPING_EDGE_SNAP_M of a
-        # NEIGHBOURING sloped rect's long edge (SPJC junction#154 near
-        # stub G, #174 near parallel U — both at edge t≈0.95).  The
-        # early snap at emit time ran before absorption, so without
-        # this re-run those vertices stay mid-edge (user 2026-05-20).
+        # sloping edge interior).
         _split_sloped_rects_at_violations(layout, icao=icao)
-        _snap_to_sloping_edge_corners(layout)
         _snap_junction_vertices_to_rect_flat_edge_corners(layout)
 
         # Apron reclassification (user 2026-05-18): a junction whose
@@ -2409,6 +2401,19 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # not area-based — a 6-way mega-intersection stays a junction.
         from .junction_repair import _reclassify_apron_junctions
         _reclassify_apron_junctions(layout, icao=icao)
+
+        # Rule-2 sloping-edge snap, re-run on the FINAL junction set.
+        # ``_absorb_rects_at_junction_perimeters`` extends junction
+        # perimeters along absorbed-rect edges, which can leave a
+        # junction vertex within SLOPING_EDGE_SNAP_M of a NEIGHBOURING
+        # sloped rect's long edge (SPJC junction#154 near stub G, #174
+        # near parallel U).  It MUST run AFTER apron reclassification:
+        # a junction destined to become an apron (Rule 2 doesn't apply
+        # to aprons) would otherwise have a boundary vertex yanked
+        # across grass to a far rect corner (SPJC apron #189 → M's
+        # corner, ~28 m).  Running post-reclassification snaps only
+        # genuine final junctions (user 2026-05-20).
+        _snap_to_sloping_edge_corners(layout)
 
         # Re-emit bridges instead of difference-clipping (user
         # 2026-05-16 canonical-node rewrite).  Drop stale bridges
