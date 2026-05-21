@@ -84,6 +84,15 @@ class TestRunwayParsing:
         assert rwy.displaced_a_m == 0.0
         assert rwy.displaced_b_m == 0.0
 
+    def test_runway_blast_pad_fields(self):
+        """Blast-pad lengths (end-block index 4, distinct from the
+        displaced threshold at index 3) feed the runway elevation
+        profile downstream, so parsing the right token matters."""
+        apt = APR.load_airport(_FIXTURE, "ZZZZ")
+        rwy = apt.runways[0]
+        assert rwy.blast_a_m == 60.0
+        assert rwy.blast_b_m == 60.0
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Pavement parsing
@@ -111,6 +120,20 @@ class TestPavementParsing:
         # The polygon is small but should have non-zero area.
         assert pav.polygon.area > 0
         assert pav.surface_code == 1
+
+    def test_pavement_vertices_are_lon_lat_ordered(self):
+        """Node rows are ``111 lat lon`` but shapely needs (x, y) =
+        (lon, lat).  Verify the SQUARE polygon's coordinates carry
+        longitude in x and latitude in y — a lon/lat swap would
+        silently transpose every airport's geometry."""
+        apt = APR.load_airport(_FIXTURE, "ZZZZ")
+        pav = next(p for p in apt.pavements if p.name == "SQUARE")
+        minx, miny, maxx, maxy = pav.polygon.bounds
+        # x = longitude ∈ [-77.101, -77.099]; y = latitude ∈ [-12.001, -11.999].
+        assert minx == pytest.approx(-77.101)
+        assert maxx == pytest.approx(-77.099)
+        assert miny == pytest.approx(-12.001)
+        assert maxy == pytest.approx(-11.999)
 
     def test_bezier_pavement_has_extra_vertices(self):
         apt = APR.load_airport(_FIXTURE, "ZZZZ")
