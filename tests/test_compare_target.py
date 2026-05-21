@@ -23,6 +23,11 @@ Baseline reset 2026-05-13 after:
     (cut-edge vertices use linear gradient of the underlying old
     edge instead of nearest-neighbour).
 
+Baseline re-cut 2026-05-20 (SPJC + SPLP) after: grade[SPLP]
+runway-corner nudge, floating-orphan junction drop, and the Rule-2
+sloping-edge re-snap.  Per-role floors set ~5 % below the new target
+counts.
+
 Add new airport baselines as ``tests/fixtures/<ICAO>_target.osm``
 files come online.
 """
@@ -54,39 +59,44 @@ pytestmark = pytest.mark.skipif(
 # ordering.  A regression that drops more than ~5 % of any role's
 # shapes vs target trips the gate.
 SPJC_BASELINE: Dict[str, int] = {
-    "boundary":          595,   # of 603 target
-    "cross_connector":     8,   # of   9 target
-    "junction":           38,   # of  40 target
-    "primary_parallel":   26,   # of  28 target
-    "retaining_wall":     63,   # of  66 target
-    "runway":             86,   # of  91 target
-    "secondary_parallel":  1,   # of   1 target
-    "stub":               19,   # of  20 target
+    "apron":              15,   # of  16 target
+    "boundary":          573,   # of 603 target
+    "cross_connector":     9,   # of   9 target
+    "junction":           29,   # of  31 target
+    "primary_parallel":   25,   # of  26 target
+    "retaining_wall":     65,   # of  68 target
+    "runway":             88,   # of  93 target
+    "secondary_parallel":  3,   # of   3 target
+    "stub":               16,   # of  17 target
     "terminal":            2,   # of   2 target
     "tunnel_ramp":        34,   # of  36 target
 }
-SPJC_BASELINE_TOTAL = 872  # of 896 target
+SPJC_BASELINE_TOTAL = 859  # of 904 target
 
 # SPLP is cross-tile (spans -13/-77 and -13/-78).  Each tile-half has
 # its own baseline; a regression in either half trips the gate.
 SPLP_BASELINE_TILE_M77: Dict[str, int] = {
+    "apron":               4,   # of   4 target
     "boundary":          117,   # of 123 target
-    "junction":            6,   # of   7 target
-    "primary_parallel":    2,   # of   2 target
-    "runway":             22,   # of  23 target
-    "stub":                3,   # of   3 target
+    "cross_connector":     1,   # of   1 target
+    "junction":            3,   # of   3 target
+    "primary_parallel":    5,   # of   5 target
+    "runway":             25,   # of  26 target
+    "stub":                2,   # of   2 target
 }
-SPLP_BASELINE_TILE_M77_TOTAL = 150  # of 158 target
+SPLP_BASELINE_TILE_M77_TOTAL = 156  # of 164 target
 
 SPLP_BASELINE_TILE_M78: Dict[str, int] = {
+    "apron":               1,   # of   1 target
     "boundary":          167,   # of 176 target
-    "junction":            6,   # of   7 target
-    "primary_parallel":    4,   # of   4 target
-    "runway":             14,   # of  15 target
+    "cross_connector":     1,   # of   1 target
+    "junction":            8,   # of   8 target
+    "primary_parallel":    5,   # of   5 target
+    "runway":             16,   # of  17 target
     "stub":                4,   # of   4 target
     "terminal":            1,   # of   1 target
 }
-SPLP_BASELINE_TILE_M78_TOTAL = 196  # of 207 target
+SPLP_BASELINE_TILE_M78_TOTAL = 202  # of 213 target
 
 
 def _build_layout(icao: str, tile_lat=None, tile_lon=None):
