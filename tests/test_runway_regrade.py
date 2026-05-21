@@ -5,7 +5,7 @@ import os, sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
-from auto_patch.runway_regrade import regrade_runway
+from auto_patch.runway_regrade import DEFAULT_ARC_K_M, regrade_runway
 
 
 def test_no_seams_returns_cifp():
@@ -93,3 +93,30 @@ def test_threshold_shift_warning_format():
     # Should warn about threshold A and B shifts.
     assert any("threshold A shifted" in w for w in r.warnings)
     assert any("threshold B shifted" in w for w in r.warnings)
+
+
+def test_single_seam_kfactor_constraint_is_satisfied():
+    """When the K-factor (not the grade cap) is the binding constraint,
+    the single-seam joint projection must bring the threshold profile's
+    grade change down to the K-factor limit |Δg| ≤ 2·min(d_A,d_B)/K.
+
+    An asymmetric seam — short first segment (d_A=4 m), long second
+    (d_B=996 m) with a steep downhill to threshold B — makes the
+    K-factor bind while both longitudinal grades stay within the 1.5 %
+    cap.  The other K-factor tests only check the grade cap, so they
+    leave the projection's ``2·min(d_A,d_B)`` term unverified; here we
+    assert the curve actually fits.
+    """
+    r = regrade_runway(50.0, 35.0, 1000.0, [(4.0, 50.06)])
+    d_A, d_B = 4.0, 996.0
+    seam_alt = 50.06
+    g0 = (seam_alt - r.threshold_A) / d_A
+    g1 = (r.threshold_B - seam_alt) / d_B
+    # Both longitudinal grades stay within the 1.5 % cap (cap is slack
+    # here, so it is NOT what limits the profile).
+    assert abs(g0) <= 0.015 + 1e-6
+    assert abs(g1) <= 0.015 + 1e-6
+    # K-factor is the active constraint: the vertical curve must fit in
+    # the available length, i.e. |Δg| ≤ 2·min(d_A,d_B)/K.
+    dg_max = 2.0 * min(d_A, d_B) / DEFAULT_ARC_K_M
+    assert abs(g1 - g0) <= dg_max + 1e-4

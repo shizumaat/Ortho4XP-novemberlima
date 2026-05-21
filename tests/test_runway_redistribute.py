@@ -13,7 +13,10 @@ from hypothesis import given
 
 from strategies import profile, profile_t
 
-from auto_patch.runway_redistribute import _interp_profile
+from auto_patch.runway_redistribute import (
+    _insert_seam_anchors,
+    _interp_profile,
+)
 
 
 class TestInterpProfile:
@@ -60,3 +63,41 @@ class TestInterpProfile:
             v = _interp_profile(fractions, elevs, t_mid)
             lo, hi = sorted((elevs[i], elevs[i + 1]))
             assert lo - 1e-6 <= v <= hi + 1e-6
+
+
+class TestInsertSeamAnchors:
+    """``_insert_seam_anchors`` folds seam (t, elev) samples into the
+    parallel fractions/elevs/anchored arrays.  A seam in (0, 1) is
+    inserted (or overrides a coincident sample) as an ANCHORED point;
+    seams outside [0, 1] are ignored.
+    """
+
+    def test_inserts_in_sorted_position(self):
+        fractions = [0.0, 0.5, 1.0]
+        elevs = [10.0, 12.0, 14.0]
+        anchored = [True, False, True]
+        _insert_seam_anchors(fractions, elevs, anchored, [(0.25, 11.5)])
+        assert fractions == [0.0, 0.25, 0.5, 1.0]
+        assert elevs == [10.0, 11.5, 12.0, 14.0]
+        assert anchored == [True, True, False, True]
+
+    def test_override_coincident_sample(self):
+        # A seam coinciding (within 1e-3) with an existing sample takes
+        # it over: no new entry, anchored set, elevation replaced.
+        fractions = [0.0, 0.5, 1.0]
+        elevs = [10.0, 12.0, 14.0]
+        anchored = [True, False, True]
+        _insert_seam_anchors(fractions, elevs, anchored, [(0.5, 99.0)])
+        assert fractions == [0.0, 0.5, 1.0]
+        assert elevs == [10.0, 99.0, 14.0]
+        assert anchored == [True, True, True]
+
+    def test_out_of_range_seams_ignored(self):
+        fractions = [0.0, 1.0]
+        elevs = [10.0, 14.0]
+        anchored = [True, True]
+        _insert_seam_anchors(
+            fractions, elevs, anchored, [(-0.1, 5.0), (1.5, 20.0)])
+        assert fractions == [0.0, 1.0]
+        assert elevs == [10.0, 14.0]
+        assert anchored == [True, True]
