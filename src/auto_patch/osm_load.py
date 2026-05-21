@@ -12,8 +12,9 @@ per-airport build (``pipeline.build_airport_pavement``):
   the natural tile on first use if not cached.
 * ``_score_apt_dat_against_osm``: rate how well an apt.dat covers
   the OSM-known apron / taxiway features at a given airport.
-* ``_pick_best_apt_dat_against_osm``: choose the highest-scoring
-  apt.dat candidate (custom-pack vs global) for an airport.
+* ``_pick_best_apt_dat_against_osm``: choose the apt.dat for an
+  airport — currently a Custom Scenery pack if present, else Global
+  Airports / default (no pavement / OSM coverage analysis).
 * ``_load_osm_big_roads``: load the highway-layer OSM tile for the
   airport's bbox (used by groundside / boundary / bridges).
 
@@ -413,85 +414,43 @@ def _pick_best_apt_dat_against_osm(
         apron_threshold: float = 0.7,
         taxi_threshold: float = 0.7,
         ) -> str | None:
-    """Find the best apt.dat for ``icao``, falling back from a
-    sparse custom-scenery pack to the global apt.dat when the
-    custom one is missing too much OSM-known geometry.
+    """Select the apt.dat for ``icao``.
 
-    Per user 2026-04-30: when a custom apt.dat is missing a lot
-    of pavement vs OSM, the X-Plane global definition often has
-    more complete row-110 polygons.  This selector evaluates
-    every candidate apt.dat (custom packs in priority order,
-    then global, then default) by computing apron + taxi
-    coverage against OSM, and picks the first candidate whose
-    coverage clears both thresholds.  Falls back to the
-    legacy first-with-pavement selection if no candidate
-    qualifies.
+    TEMPORARY policy (user 2026-05-21): always use a Custom Scenery
+    pack that contains the airport if one is present; only fall back
+    to Global Airports (then default scenery) when NO Custom Scenery
+    pack has it.  No pavement / OSM coverage analysis is performed.
 
-    Thresholds:
-      ``apron_threshold`` = 0.7 — apron polygons should be 70 %
-        covered by apt.dat row-110 pavement.
-      ``taxi_threshold`` = 0.7 — OSM taxi centerlines should be
-        70 % covered by apt.dat row-110 pavement (buffered 5 m).
+    This replaces the earlier coverage-scoring selector (preserved in
+    git history) that scored every candidate's apron + taxi coverage
+    against OSM and skipped a custom pack whose coverage fell below
+    ``apron_threshold`` / ``taxi_threshold``.  That surprised users
+    whose hand-built scenery was silently ignored in favour of the
+    Global definition (e.g. KPHX, whose custom pack scored 0 % apron
+    against OSM and was skipped).  The ``*_threshold`` parameters are
+    retained for signature compatibility but are now unused.
+
+    ``find_all_airport_apt_dats`` returns header matches in priority
+    order — Custom Scenery packs first, then Global Airports, then
+    default scenery — using a header-only check (no pavement scan).
     """
     candidates = APR.find_all_airport_apt_dats(xplane_root, icao)
     if not candidates:
         return APR.find_airport_apt_dat(xplane_root, icao)
-    if len(candidates) == 1:
-        return candidates[0]
-    # Load OSM data once (use first candidate's airport as the
-    # anchor — OSM tile loading needs a lat/lon hint).
-    anchor_apt = None
+    # Prefer the first genuine Custom Scenery pack.  The Global
+    # Airports pack lives under Custom Scenery on X-Plane 11, so
+    # exclude it (and the default-scenery pack) by path before
+    # falling back to whichever candidate is first.
     for cand in candidates:
-        try:
-            anchor_apt = APR.load_airport(cand, icao)
-            if (anchor_apt is not None
-                    and anchor_apt.runways):
-                break
-        except _GEOM_EXC:
-            continue
-    if anchor_apt is None or not anchor_apt.runways:
-        return APR.find_airport_apt_dat(xplane_root, icao)
-    r0 = anchor_apt.runways[0]
-    try:
-        nodes_o, ways_o, _ = _load_osm_airports(
-            xplane_root, icao, r0.lat_a, r0.lon_a)
-    except _GEOM_EXC:
-        return APR.find_airport_apt_dat(xplane_root, icao)
-    if not ways_o:
-        return APR.find_airport_apt_dat(xplane_root, icao)
-    scores: list[tuple[str, float, float]] = []
-    for cand in candidates:
-        ac, tc = _score_apt_dat_against_osm(
-            cand, icao, nodes_o, ways_o)
-        scores.append((cand, ac, tc))
-    # Walk in priority order; pick the first that clears both
-    # thresholds.  Log every candidate's score.
-    chosen: str | None = None
-    for cand, ac, tc in scores:
-        passed = ac >= apron_threshold and tc >= taxi_threshold
-        if passed and chosen is None:
-            chosen = cand
-        import sys as _sys
-        label = "PICK" if (passed and cand == chosen) else (
-            "ok" if passed else "skip")
-        UI.vprint(1,
-            f"  [pav-builder] {icao}: apt.dat candidate "
-            f"[{label}] apron={ac:.0%} taxi={tc:.0%}  "
-            f"{cand}")
-    if chosen is not None:
-        return chosen
-    # Nothing qualified — pick whichever has the highest
-    # combined coverage to avoid emitting nothing.
-    if scores:
-        scores.sort(key=lambda s: -(s[1] + s[2]))
-        UI.vprint(1,
-            f"  [pav-builder] {icao}: no apt.dat met "
-            f"thresholds (apron≥{apron_threshold:.0%}, "
-            f"taxi≥{taxi_threshold:.0%}); falling back to "
-            f"highest combined coverage: "
-            f"apron={scores[0][1]:.0%} taxi={scores[0][2]:.0%}.")
-        return scores[0][0]
-    return APR.find_airport_apt_dat(xplane_root, icao)
+        if "Global Airports" not in cand and "default scenery" not in cand:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: using Custom Scenery "
+                f"apt.dat (no pavement analysis): {cand}")
+            return cand
+    UI.vprint(1,
+        f"  [pav-builder] {icao}: no Custom Scenery pack; using "
+        f"{candidates[0]}")
+    return candidates[0]
 
 
 def _load_osm_big_roads(apt_lat: float, apt_lon: float,
