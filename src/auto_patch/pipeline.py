@@ -2390,8 +2390,16 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # geometry: clipped sub-rects from absorption may have new
         # corners that don't yet align with adjacent junction
         # vertices (junction vertex sitting on the new sub-rect's
-        # sloping edge interior).
+        # sloping edge interior).  The Rule-2 sloping-edge snap must
+        # also re-run here: ``_absorb_rects_at_junction_perimeters``
+        # extends junction perimeters along absorbed-rect edges, which
+        # can leave a junction vertex within SLOPING_EDGE_SNAP_M of a
+        # NEIGHBOURING sloped rect's long edge (SPJC junction#154 near
+        # stub G, #174 near parallel U — both at edge t≈0.95).  The
+        # early snap at emit time ran before absorption, so without
+        # this re-run those vertices stay mid-edge (user 2026-05-20).
         _split_sloped_rects_at_violations(layout, icao=icao)
+        _snap_to_sloping_edge_corners(layout)
         _snap_junction_vertices_to_rect_flat_edge_corners(layout)
 
         # Apron reclassification (user 2026-05-18): a junction whose
