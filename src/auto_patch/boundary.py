@@ -86,18 +86,52 @@ __all__ = [
 BOUNDARY_STRIP_HALF_WIDTH_M = 2.5
 
 
+# Airside-pavement roles that anchor the boundary-ribbon altitude clamp
+# (user 2026-05-22).  The clamp pulls the perimeter ribbon UP toward the
+# nearest such surface within ``clamp_radius_m`` so the ribbon never falls
+# below ``surface_edge − grade·distance``.  It used to consider RUNWAYS
+# only, which left the ribbon at raw DEM next to large aprons / taxiways
+# that sit >400 m from any runway (CYXY east apron: ribbon dropped ~39 m
+# below the 694.7 m apron edge).  Groundside and terminal pavement are
+# EXCLUDED: groundside is DEM-level by design, and terminals were not part
+# of the request.
+_CLAMP_PAVEMENT_ROLES = {
+    ROLE_RUNWAY,
+    ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL, ROLE_STUB,
+    ROLE_CROSS_CONNECTOR,
+    ROLE_JUNCTION,
+    ROLE_APRON,
+}
+
+
+def _collect_clamp_pavement(layout: "PavementLayout") -> list[BuiltShape]:
+    """Airside-pavement shapes (runway / taxiway / junction / apron) with a
+    usable polygon that anchor the boundary-ribbon altitude clamp."""
+    return [s for s in layout.shapes
+            if s.role in _CLAMP_PAVEMENT_ROLES
+            and s.polygon is not None
+            and not s.polygon.is_empty]
+
+
 def _runway_clamped_alt_at(
         x: float, y: float, *,
         dem, tile_lat: int, tile_lon: int,
-        runway_shapes, m_to_ll,
+        pavement_shapes, m_to_ll,
         clamp_radius_m: float, clamp_grade: float) -> float | None:
-    """DEM at (x, y) clamped UP toward the nearest runway when within
-    ``clamp_radius_m`` and the DEM dips below ``runway_e − grade·d``;
-    else raw DEM; else None.
+    """DEM at (x, y) clamped UP toward the nearest airside pavement when
+    within ``clamp_radius_m`` and the DEM dips below ``surface_e −
+    grade·d``; else raw DEM; else None.
+
+    ``pavement_shapes`` is the set of clamp anchors — runways, taxiways,
+    junctions and aprons (see ``_collect_clamp_pavement``).  Originally
+    runways only; widened (user 2026-05-22) so the ribbon is also held up
+    next to large aprons / taxiways that lie beyond the 400 m radius of any
+    runway (CYXY: a perimeter section ~440 m from the runway but only ~65 m
+    from the 694.7 m east apron was dropping to ~655 m raw DEM).
 
     Per user 2026-05-11 the clamp is ASYMMETRIC — only ever pull the
-    boundary UP toward the runway, never DOWN.  If surrounding terrain
-    is higher than the runway band the boundary follows DEM so
+    boundary UP toward the pavement, never DOWN.  If surrounding terrain
+    is higher than the pavement band the boundary follows DEM so
     Ortho4XP's ``smooth_raster_over_airports`` doesn't drag the
     rendered terrain into a canyon around the perimeter.
 
@@ -112,11 +146,15 @@ def _runway_clamped_alt_at(
         dem_e = _sample_dem(dem, tile_lat, tile_lon, lat, lon)
     except _GEOM_EXC:
         dem_e = None
-    # Find nearest runway and its elevation at the nearest point.
+    # Find nearest airside pavement (runway/taxiway/junction/apron) and
+    # its elevation at the nearest point.  ``_sample_runway_segment_elev``
+    # is general: it reads ``altitude`` (flat apron/junction), per-vertex
+    # ``node_altitudes``, or the sloped ``altitude_high``/``low`` quad
+    # convention shared by runway and taxiway rects.
     best_d = float('inf')
     best_e = None
     pt = Point(x, y)
-    for s in runway_shapes:
+    for s in pavement_shapes:
         try:
             d = s.polygon.distance(pt)
         except _GEOM_EXC:
@@ -564,14 +602,11 @@ def _emit_airport_boundary_shape(
         lon = lon0 + math.degrees(x / (R * cos0))
         return lat, lon
 
-    # Pre-collect runway polygons + their elevation samplers for
-    # the per-vertex distance / clamp lookup.
-    runway_shapes: list[BuiltShape] = [
-        s for s in layout.shapes
-        if s.role == ROLE_RUNWAY
-        and s.polygon is not None
-        and not s.polygon.is_empty]
-    if not runway_shapes:
+    # Pre-collect airside-pavement polygons (runway/taxiway/junction/
+    # apron) + their elevation samplers for the per-vertex distance /
+    # clamp lookup.
+    pavement_shapes: list[BuiltShape] = _collect_clamp_pavement(layout)
+    if not pavement_shapes:
         return 0
 
     def _runway_clamped_alt(x: float, y: float) -> float | None:
@@ -579,7 +614,7 @@ def _emit_airport_boundary_shape(
         # ribbon and the DEM bridge share identical clamp altitudes.
         return _runway_clamped_alt_at(
             x, y, dem=dem, tile_lat=tile_lat, tile_lon=tile_lon,
-            runway_shapes=runway_shapes, m_to_ll=m_to_ll,
+            pavement_shapes=pavement_shapes, m_to_ll=m_to_ll,
             clamp_radius_m=runway_clamp_radius_m,
             clamp_grade=runway_clamp_grade)
 
@@ -1190,12 +1225,8 @@ def _emit_boundary_dem_bridge(
         lon = lon0 + math.degrees(x / (R * cos0))
         return lat, lon
 
-    runway_shapes: list[BuiltShape] = [
-        s for s in layout.shapes
-        if s.role == ROLE_RUNWAY
-        and s.polygon is not None
-        and not s.polygon.is_empty]
-    if not runway_shapes:
+    pavement_shapes: list[BuiltShape] = _collect_clamp_pavement(layout)
+    if not pavement_shapes:
         return 0
 
     def _clamped_alt(x: float, y: float) -> float | None:
@@ -1204,7 +1235,7 @@ def _emit_boundary_dem_bridge(
         # outer edge meets the ribbon's inner edge flush.
         return _runway_clamped_alt_at(
             x, y, dem=dem, tile_lat=tile_lat, tile_lon=tile_lon,
-            runway_shapes=runway_shapes, m_to_ll=m_to_ll,
+            pavement_shapes=pavement_shapes, m_to_ll=m_to_ll,
             clamp_radius_m=runway_clamp_radius_m,
             clamp_grade=runway_clamp_grade)
 
