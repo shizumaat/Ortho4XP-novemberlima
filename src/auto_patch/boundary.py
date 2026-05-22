@@ -518,7 +518,7 @@ def _emit_airport_boundary_shape(
         strip_half_width_m: float = BOUNDARY_STRIP_HALF_WIDTH_M,
         runway_clamp_radius_m: float = 400.0,
         runway_clamp_grade: float = 0.03,
-        densify_step_m: float = 25.0,
+        densify_step_m: float = 15.0,
         ) -> int:
     """Emit a node_altitudes polygon tracing the airport boundary
     (apt.dat row-130) at ``2 × strip_half_width_m`` width.
@@ -1135,7 +1135,7 @@ def _emit_boundary_dem_bridge(
         tile_lon: int,
         gap_threshold_m: float = 5.0,
         bridge_depth_m: float = 100.0,
-        densify_step_m: float = 25.0,
+        densify_step_m: float = 15.0,
         runway_clamp_radius_m: float = 400.0,
         runway_clamp_grade: float = 0.03,
         ) -> int:
