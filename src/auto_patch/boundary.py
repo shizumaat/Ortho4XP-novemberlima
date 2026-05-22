@@ -55,6 +55,7 @@ from .layout import (
     ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL,
     ROLE_RUNWAY,
+    ROLE_RUNWAY_CROSSING,
     ROLE_SECONDARY_PARALLEL,
     ROLE_STUB,
     ROLE_TERMINAL,
@@ -89,14 +90,21 @@ BOUNDARY_STRIP_HALF_WIDTH_M = 2.5
 # Airside-pavement roles that anchor the boundary-ribbon altitude clamp
 # (user 2026-05-22).  The clamp pulls the perimeter ribbon UP toward the
 # nearest such surface within ``clamp_radius_m`` so the ribbon never falls
-# below ``surface_edge − grade·distance``.  It used to consider RUNWAYS
-# only, which left the ribbon at raw DEM next to large aprons / taxiways
-# that sit >400 m from any runway (CYXY east apron: ribbon dropped ~39 m
-# below the 694.7 m apron edge).  Groundside and terminal pavement are
-# EXCLUDED: groundside is DEM-level by design, and terminals were not part
-# of the request.
+# below ``surface_edge − grade·distance``.  It used to consider plain
+# ROLE_RUNWAY only, which had TWO blind spots at CYXY:
+#   * Large aprons / taxiways >400 m from any runway (east apron: ribbon
+#     dropped ~39 m below the 694.7 m apron edge).
+#   * RUNWAY pavement that survives only as ``runway_crossing`` polygons.
+#     Where runways intersect (CYXY's 02/20 crosses 14L/32R + 14R/32L) the
+#     overlap is emitted as ROLE_RUNWAY_CROSSING, NOT ROLE_RUNWAY, and the
+#     plain runway segments around it have gaps.  So a node 385 m from the
+#     14L/32R centerline read its nearest ROLE_RUNWAY shape at 484 m
+#     (>radius) and dropped to DEM, even though runway-elevation crossing
+#     pavement sat only 330 m away.  ROLE_RUNWAY_CROSSING is runway
+#     pavement (it maps to the "runway" surface type) and MUST be included.
+# Groundside (DEM-level by design) and terminal pavement are EXCLUDED.
 _CLAMP_PAVEMENT_ROLES = {
-    ROLE_RUNWAY,
+    ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
     ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL, ROLE_STUB,
     ROLE_CROSS_CONNECTOR,
     ROLE_JUNCTION,
