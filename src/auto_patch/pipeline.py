@@ -2489,22 +2489,25 @@ def build_airport_pavement(icao: str, xplane_root: str,
         _report_within_shape_violations(layout, icao)
 
     # ── Boundary-interior clip (user 2026-05-22) ──────────────────────
-    # No emitted shape may cross the airport boundary.  The boundary
+    # No emitted shape may CROSS the airport boundary.  The boundary
     # ribbon now lies entirely INSIDE the row-130 line and owns the
-    # outer strip band; clip every other shape back to the ribbon's
-    # inner edge so pavement and ribbon tile conformingly (shared
-    # inner-edge nodes), instead of the ribbon overlaying pavement
+    # outer strip band; clip every shape that STRADDLES the boundary back
+    # to the ribbon's inner edge so pavement and ribbon tile conformingly
+    # (shared inner-edge nodes), instead of the ribbon overlaying pavement
     # non-conformingly → Triangle4XP slivers (HEAZ 1.48M-triangle
-    # hotspot).  Runs before the conformance pass below.
+    # hotspot).  Shapes entirely outside the boundary (tunnel entrance
+    # ramps + their retaining walls) are left untouched, not dropped.
+    # Runs before the conformance pass below.
     from .boundary import (
         _clip_pavement_to_boundary_interior,
         _conform_ribbon_to_pavement_seam,
     )
-    n_clip, n_drop = _clip_pavement_to_boundary_interior(layout, icao=icao)
-    if n_clip or n_drop:
+    n_clip, n_outside = _clip_pavement_to_boundary_interior(layout, icao=icao)
+    if n_clip or n_outside:
         UI.vprint(1,
             f"  [pav-builder] {icao}: boundary-interior clip — "
-            f"clipped {n_clip} shape(s), dropped {n_drop}.")
+            f"clipped {n_clip} straddling shape(s), "
+            f"left {n_outside} external shape(s) untouched.")
 
     # ── Boundary-conformance invariant (user 2026-05-22) ──────────────
     # RUNTIME requirement for EVERY airport: the emitted shapes must be a

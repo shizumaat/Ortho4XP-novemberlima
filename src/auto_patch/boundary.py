@@ -826,15 +826,22 @@ _BOUNDARY_CLIP_EXEMPT_ROLES = {ROLE_BOUNDARY}
 def find_boundary_crossings(
         layout: "PavementLayout",
         tol_area_m2: float = 1.0) -> list[BuiltShape]:
-    """Return the non-boundary shapes whose footprint extends OUTSIDE the
-    airport boundary (apt.dat row-130) by more than ``tol_area_m2``.
+    """Return the non-boundary shapes that STRADDLE the airport boundary
+    (apt.dat row-130) — more than ``tol_area_m2`` of footprint on BOTH
+    sides of the line.
 
-    The invariant (user 2026-05-22): no emitted pavement shape may cross
-    the airport boundary.  ``_clip_pavement_to_boundary_interior``
-    enforces it (clipping pavement back to the ribbon's inner edge, which
-    is itself inside row-130); this is the check.  An empty result means
-    the invariant holds.  The boundary ribbon / DEM bridge are exempt —
-    they are the perimeter band itself.
+    The invariant (user 2026-05-22): no emitted shape may cross the
+    airport boundary — a shape must be either entirely inside row-130 or
+    entirely outside it.  ``_clip_pavement_to_boundary_interior`` enforces
+    it for crossing shapes (clipping them back to the ribbon's inner edge,
+    which is itself inside row-130); this is the check.  An empty result
+    means the invariant holds.
+
+    Shapes lying ENTIRELY outside row-130 are NOT crossings: modeled
+    external features (tunnel entrance ramps and their retaining walls)
+    legitimately live beyond the boundary and are kept untouched.  The
+    boundary ribbon / DEM bridge are exempt — they are the perimeter band
+    itself.
     """
     ab = getattr(layout, "airport_boundary", None)
     if ab is None or ab.is_empty:
@@ -847,7 +854,8 @@ def find_boundary_crossings(
         if p is None or p.is_empty or p.geom_type != "Polygon":
             continue
         try:
-            if p.difference(ab).area > tol_area_m2:
+            if (p.difference(ab).area > tol_area_m2
+                    and p.intersection(ab).area > tol_area_m2):
                 out.append(s)
         except _GEOM_EXC:
             continue
@@ -892,17 +900,29 @@ def _shape_open_alts(s: BuiltShape, n: int) -> list[float] | None:
 
 def _clip_pavement_to_boundary_interior(
         layout: "PavementLayout", *, icao: str = "") -> tuple[int, int]:
-    """Clip every non-boundary pavement shape to the airport-interior
-    region bounded by the boundary ribbon's INNER edge (user 2026-05-22:
-    "no shape may cross the airport boundary").
+    """Clip pavement shapes that STRADDLE the airport boundary back to the
+    airport-interior region bounded by the boundary ribbon's INNER edge
+    (user 2026-05-22: only shapes that touch/cross the boundary are
+    reshaped; nothing is dropped).
 
     The relocated ribbon (entirely inside row-130, see
     ``_emit_airport_boundary_shape``) owns the outer ``strip_width_m``
-    band; pavement is clipped back to the ribbon's inner edge.  The clip
-    uses ``intersection(interior)`` where ``interior = airport_boundary −
-    ribbon_union``, so the clipped pavement edge follows the ribbon inner
-    edge and inherits its vertices EXACTLY — a conforming seam, no
-    T-junction slivers (the dominant Triangle4XP load-time cost).
+    band; a shape that crosses into that band is clipped back to the
+    ribbon's inner edge.  The clip uses ``intersection(interior)`` where
+    ``interior = airport_boundary − ribbon_union``, so the clipped edge
+    follows the ribbon inner edge and inherits its vertices EXACTLY — a
+    conforming seam, no T-junction slivers (the dominant Triangle4XP
+    load-time cost).
+
+    A shape that lies ENTIRELY OUTSIDE the interior is left UNTOUCHED, not
+    dropped: modeled features that legitimately live beyond the airport
+    boundary — tunnel entrance/portal ramp chains (which descend under and
+    past the boundary) and their retaining walls — must survive (SPJC: 15
+    tunnel-ramp + 30 retaining-wall polygons).  They sit beyond the ribbon
+    so they neither abut the perimeter seam nor reintroduce its slivers.
+    (Foreign-airport pavement in closely-spaced tiles is already removed
+    upstream at collection time, not here — see the DSF/OSM boundary gate
+    in ``pipeline``.)
 
     Altitudes are re-derived for each clipped ring via
     ``_resample_node_altitudes_nn`` (edge-interpolation along the old
@@ -911,7 +931,7 @@ def _clip_pavement_to_boundary_interior(
     Flat ``altitude=`` shapes keep their constant altitude (valid for any
     node count).
 
-    Returns ``(shapes_clipped, shapes_dropped)``.
+    Returns ``(shapes_clipped, shapes_left_outside)``.
     """
     ab = getattr(layout, "airport_boundary", None)
     if ab is None or ab.is_empty:
@@ -929,7 +949,7 @@ def _clip_pavement_to_boundary_interior(
 
     AREA_EPS = 0.5  # m^2 — ignore sub-tolerance differences
     clipped = 0
-    dropped: list[BuiltShape] = []
+    left_outside = 0
     for s in layout.shapes:
         if s.role in _BOUNDARY_CLIP_EXEMPT_ROLES:
             continue
@@ -948,7 +968,9 @@ def _clip_pavement_to_boundary_interior(
             continue
         new_poly = _largest_polygon(inter)
         if new_poly is None or new_poly.area < AREA_EPS:
-            dropped.append(s)
+            # Entirely outside the boundary — a modeled external feature
+            # (tunnel ramp / retaining wall).  Keep it as-is.
+            left_outside += 1
             continue
         old_open = list(p.exterior.coords)
         if old_open and old_open[0] == old_open[-1]:
@@ -970,11 +992,7 @@ def _clip_pavement_to_boundary_interior(
                 s.altitude_high = None
                 s.altitude_low = None
         clipped += 1
-    if dropped:
-        drop_ids = {id(d) for d in dropped}
-        layout.shapes = [s for s in layout.shapes
-                         if id(s) not in drop_ids]
-    return clipped, len(dropped)
+    return clipped, left_outside
 
 
 def _collect_shape_nodes(layout, predicate
