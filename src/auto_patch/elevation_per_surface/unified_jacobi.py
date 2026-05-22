@@ -535,12 +535,26 @@ def _build_edges(layout, bucket_to_idx
         if (s.role in SLOPING_RECT_ROLES
                 or s.role in (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING)):
             continue
-        # Junction / apron / terminal: all-pair Euclidean within
-        # the polygon.  Per user 2026-05-18: "a junction should not
-        # exceed 1.5 % across ANY portion, not just along its
-        # edge."  Same all-pair rule as aprons — junction grade
-        # holds across the entire interior surface, not only along
-        # converging centerlines.
+        # Junction / apron / terminal: all-pair within the polygon.
+        # Per user 2026-05-18: "a junction should not exceed 1.5 %
+        # across ANY portion, not just along its edge" → all-pair
+        # Euclidean cap.
+        #
+        # Hybrid centerline budget (user 2026-05-22): grade along a
+        # taxi centerline is cumulative ALONG the centerline path, not
+        # the straight-line chord — a junction can legitimately descend
+        # a curved taxi route faster (per chord metre) than 1.5 % while
+        # staying ≤ 1.5 % per metre TRAVELLED.  For a JUNCTION pair that
+        # both lie within ``JUNCTION_AXIS_PERP_TOL_M`` of a common
+        # centerline, use the longer ALONG-CENTERLINE arc distance as
+        # the edge length (looser cap in the taxi direction) so the
+        # junction can grade down the route toward its stubs.  Cross-
+        # axis pairs (no shared centerline) keep the Euclidean chord →
+        # the all-pair cliff guard still holds off-route.  Aprons /
+        # terminals are true multi-directional surfaces and keep pure
+        # Euclidean.
+        axes = (_collect_junction_axes(layout, s.polygon)
+                if s.role == ROLE_JUNCTION else [])
         for i in range(m):
             xi, yi = coords[i]
             for j in range(i + 2, m):
@@ -548,7 +562,62 @@ def _build_edges(layout, bucket_to_idx
                     continue  # ring-wrap pair already added
                 xj, yj = coords[j]
                 length = math.hypot(xj - xi, yj - yi)
+                if axes:
+                    pi = Point(xi, yi)
+                    pj = Point(xj, yj)
+                    for ax in axes:
+                        if (ax.distance(pi) <= JUNCTION_AXIS_PERP_TOL_M
+                                and ax.distance(pj)
+                                <= JUNCTION_AXIS_PERP_TOL_M):
+                            arc = abs(ax.project(pi) - ax.project(pj))
+                            if arc > length:
+                                length = arc
                 _add_edge(node_idx[i], node_idx[j], length, gr)
+
+    # ── Taxi → runway anchor (user 2026-05-22, revives the dormant
+    # TAXI_ANCHOR_DIST_M).  A taxi connector approaching a runway must
+    # grade FROM the runway elevation down its centerline path, not
+    # float at terrain.  Connect each near-runway taxi/junction vertex
+    # to the nearest runway CORNER node within TAXI_ANCHOR_DIST_M so cap
+    # projection propagates the runway HARD anchor along the connector
+    # (HECA stub T4 sat 2.75 m below runway 05C/23C with no anchor).
+    from auto_patch.elevation import TAXI_ANCHOR_DIST_M
+    rwy_corners: list[tuple[int, float, float]] = []
+    for s in layout.shapes:
+        if s.role != ROLE_RUNWAY:
+            continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        for x, y in _open_ring(list(s.polygon.exterior.coords)):
+            k = layout.canonical_points.get_or_add(float(x), float(y))
+            ri = bucket_to_idx.get(k)
+            if ri is not None:
+                rwy_corners.append((ri, float(x), float(y)))
+    if rwy_corners:
+        anchor2 = TAXI_ANCHOR_DIST_M * TAXI_ANCHOR_DIST_M
+        for s in layout.shapes:
+            if s.role not in SLOPING_RECT_ROLES and s.role != ROLE_JUNCTION:
+                continue
+            if s.polygon is None or s.polygon.is_empty:
+                continue
+            for x, y in _open_ring(list(s.polygon.exterior.coords)):
+                k = layout.canonical_points.get_or_add(float(x), float(y))
+                vi = bucket_to_idx.get(k)
+                if vi is None:
+                    continue
+                best_idx = None
+                best_d2 = anchor2
+                for ri, rx, ry in rwy_corners:
+                    if ri == vi:
+                        best_idx = None  # vertex IS a runway corner
+                        break
+                    d2 = (rx - x) * (rx - x) + (ry - y) * (ry - y)
+                    if d2 < best_d2:
+                        best_d2 = d2
+                        best_idx = ri
+                if best_idx is not None:
+                    _add_edge(vi, best_idx, math.sqrt(best_d2),
+                              TAXI_MAX_GRADE)
 
     return edge_grade, edge_length
 
