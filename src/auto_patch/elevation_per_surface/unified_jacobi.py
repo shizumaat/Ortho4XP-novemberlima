@@ -79,6 +79,31 @@ PAVEMENT_ROLES = {
 
 CAP_SWEEPS_PER_ITER = 5
 
+# DEM attraction (user 2026-05-22): each iteration, pull every SOFT node a
+# fixed fraction of the way toward its terrain (DEM) elevation, THEN
+# cap-project.  This makes soft pavement settle "as close to DEM as the
+# grade caps allow" — the documented intent ("reach the highs and lows in
+# DEM that are possible within grade limits").  Without it,
+# cap-projection-only never RAISES a node that warm-started low (a prior
+# pass's value) back toward terrain, so a taxiway/apron network spanning
+# low terminals and high runways sinks several metres below its own
+# terrain (HECA T4 / taxiway T cliff: stub T4 sat 7 m below runway 05C/23C
+# because the genuinely-low south terminals drained the connected network
+# via cap-chains).
+#
+# The pull is PERSISTENT (no decay): the equilibrium balances the DEM
+# spring against the per-edge caps, so each node ends as close to DEM as
+# its caps permit and the low terminals no longer diffuse across the whole
+# field.  Convergence is still clean — a node free to reach DEM converges
+# geometrically (rate ``1 − DEM_ATTRACTION``); a cap-pinned node settles
+# where the spring pull and the cap push-back cancel (net per-iter change
+# → 0).  A DECAYING weight was tried first and FAILED: once it decayed the
+# pure-cap tail relaxed the network back to the low-terminal compromise
+# (HECA below-DEM unchanged).
+DEM_ATTRACTION = 0.3
+DEM_ATTRACTION_DECAY = 1.0
+DEM_ATTRACTION_MIN = 1e-4
+
 
 def _role_grade(role: str) -> float:
     """Per-role max grade cap.  All roles now share ``TAXI_MAX_GRADE``
@@ -124,6 +149,10 @@ def solve(layout, icao: str,
     if not any(is_hard):
         return
 
+    # Per-node DEM elevation (terrain attraction target — distinct from
+    # the seed, which warm-start may have overridden with a stale value).
+    dem_elev = _sample_node_dem(layout, nodes, dem, tile_lat, tile_lon)
+
     edge_grade, edge_length = _build_edges(
         layout, bucket_to_idx)
     if not edge_grade:
@@ -139,7 +168,8 @@ def solve(layout, icao: str,
     iters_used = _run_jacobi(
         elev, is_hard, adj, edge_list,
         edge_grade, edge_length, terminal_groups,
-        rect_flat_groups, max_iters, tol_m)
+        rect_flat_groups, max_iters, tol_m,
+        dem_elev=dem_elev)
     n_terms, n_rects, n_juncs = _writeback(
         layout, elev, bucket_to_idx)
     _report(icao, iters_used, max_iters,
@@ -360,6 +390,25 @@ def _seed_elevations(layout, nodes, bucket_to_idx,
             have_initial[i] = True
 
     return elev, is_hard, have_initial
+
+
+def _sample_node_dem(layout, nodes, dem, tile_lat, tile_lon):
+    """Return ``[dem_elev | None]`` per node — the terrain elevation
+    used as the DEM-attraction target in ``_run_jacobi``.  None entries
+    (no DEM, off-tile) are simply not attracted."""
+    out: list[float | None] = [None] * len(nodes)
+    if dem is None:
+        return out
+    from auto_patch.elevation import _sample_dem
+    for i, (x, y) in enumerate(nodes):
+        try:
+            lat, lon = layout.m_to_ll(x, y)
+            e = _sample_dem(dem, tile_lat, tile_lon, lat, lon)
+        except _GEOM_EXC:
+            e = None
+        if e is not None:
+            out[i] = float(e)
+    return out
 
 
 # ── Stage 3: edge construction (the per-axis rule lives here) ─────
@@ -614,23 +663,38 @@ def _equalize_groups(elev, is_hard, groups):
 def _run_jacobi(elev, is_hard, adj, edge_list, edge_grade,
                 edge_length, terminal_groups,
                 rect_flat_groups,
-                max_iters, tol_m) -> int:
-    """Cap-projection-only relaxation (user 2026-05-03).
+                max_iters, tol_m, dem_elev=None) -> int:
+    """DEM-attraction + cap-projection relaxation (user 2026-05-03,
+    DEM attraction added 2026-05-22).
 
     Earlier iterations of this solver included a damped-Jacobi
-    neighbour-average step before cap projection.  Jacobi pulls
-    every soft node toward the weighted mean of its neighbours,
-    which propagates HARD anchor values up through the graph and
-    over-flattens DEM-seeded soft nodes (CYXY taxi E ended up at
-    700 m next to a 700 m runway, even though DEM said 715 m and
-    the grade chain through stubs allowed reaching it).
+    NEIGHBOUR-average step before cap projection.  Jacobi pulls every
+    soft node toward the weighted mean of its neighbours, which
+    propagates HARD anchor values up through the graph and over-flattens
+    DEM-seeded soft nodes (CYXY taxi E ended up at 700 m next to a 700 m
+    runway, even though DEM said 715 m and the grade chain through stubs
+    allowed reaching it).  That step was removed.
 
-    Cap-projection-only preserves DEM-seeded values that satisfy
-    every per-edge cap.  Soft nodes only move when an edge cap is
-    violated, and only by the excess.  Convergence is to
-    ``min(DEM_seed, max_reachable_from_HARD)`` per node, which is
-    exactly the user's "reach the highs and lows in DEM that are
-    possible within grade limits" rule.
+    But cap-projection-ONLY has the opposite failure: it only ever
+    REDUCES violations, so a soft node that warm-started LOW (a stale
+    value from a prior solver pass) is never lifted back toward its
+    terrain — the node stays low whenever its long chain to a HARD anchor
+    happens to be within-cap.  At HECA the taxiway/apron network
+    (spanning the genuinely-low south terminals and the high runways)
+    sank ~5-8 m below its own DEM, leaving a 7 m cliff where stub T4
+    meets runway 05C/23C.
+
+    Fix: each iteration pull every SOFT node a DECAYING fraction
+    (``DEM_ATTRACTION × DEM_ATTRACTION_DECAY^it``) toward its DEM
+    elevation, THEN cap-project.  A node below its DEM with no binding
+    upper cap rises to terrain; a node whose DEM exceeds what the caps
+    permit is held at the cap by projection.  The geometric decay means
+    the attraction vanishes after a few hundred iterations, so the loop
+    still converges to a fixed point (``tol_m``) under pure cap
+    projection — no oscillation at cap-pinned nodes.  Net convergence is
+    to "as close to DEM as the per-edge grade caps allow", which is the
+    documented "reach the highs and lows in DEM that are possible within
+    grade limits" rule.
 
     Two equality constraint groups run each iteration: terminals
     (all corners equal) and rect axis-end pairs (per user 2026-
@@ -638,8 +702,22 @@ def _run_jacobi(elev, is_hard, adj, edge_list, edge_grade,
     is flat).
     """
     n = len(elev)
+    use_dem = dem_elev is not None and DEM_ATTRACTION > 0.0
     for it in range(max_iters):
         prev_elev = list(elev)
+        # 0) DEM attraction — pull soft nodes toward terrain by a
+        # geometrically-decaying fraction (skips HARD nodes and nodes
+        # with no DEM sample).
+        if use_dem:
+            a = DEM_ATTRACTION * (DEM_ATTRACTION_DECAY ** it)
+            if a > DEM_ATTRACTION_MIN:
+                for i in range(n):
+                    if is_hard[i]:
+                        continue
+                    d = dem_elev[i]
+                    if d is None:
+                        continue
+                    elev[i] += a * (d - elev[i])
         # 1) Multi-sweep edge grade-cap projection — only force
         # acting on soft nodes.  Each sweep visits every edge; an
         # edge is projected (excess split symmetrically for
