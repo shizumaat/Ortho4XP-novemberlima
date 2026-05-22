@@ -586,25 +586,6 @@ def build_airport_pavement(icao: str, xplane_root: str,
     #      contribute substantially NEW coverage are appended.
     DSF_OVERLAY_FRAC = 0.80
     DSF_AIRPORT_RADIUS_M = 5_000.0
-    # Per user 2026-04-29: drop DSF pavement polygons whose area
-    # exceeds the largest apt.dat pavement polygon by more than
-    # DSF_MAX_AREA_VS_APT_DAT_RATIO×.  Real airport pavement
-    # polygons (taxiways, aprons, runway aprons) are bounded in
-    # scale by the largest features apt.dat already represents at
-    # the airport.  A DSF polygon dramatically larger than apt.dat's
-    # biggest is a coarse "ground tile" — pavement-textured
-    # decorative geometry painted across the whole airport surface
-    # rather than a real pavement feature.  Confirmed at HECA
-    # (Tai Models scenery), where ``lib/airport/ground/pavement/
-    # asphalt/patched.pol`` instances of 3.5 M m² (with only 22
-    # vertices, perimeter ~8 km) and 1.25 M m² (36 verts) overlay
-    # the entire airport, dwarfing apt.dat's largest pavement
-    # polygon at 378 k m² and inflating the rect-detection's
-    # half-width probes to 100 m+ across what should be a 30 m
-    # taxi corridor.  Safe at SPJC / CYXY / SPLP: their largest
-    # legitimate DSF pavement polygons are within 2.2× apt.dat's
-    # largest, well under the 3× cap.
-    DSF_MAX_AREA_VS_APT_DAT_RATIO = 3.0
     # Boundary gate: the apt.dat row-130 boundary is authoritative for
     # what belongs to this airport — we must not pull in any pavement
     # outside it.  Foreign DSF/OSM pavement is CLIPPED to the boundary
@@ -618,14 +599,11 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # DSF — corrupting the mesh and crashing X-Plane on load.
     DSF_AIRPORT_BOUNDARY_BUFFER_M = 50.0
     apt_pav_union: Optional[Polygon] = None
-    apt_pav_largest_area: float = 0.0
     if pav_polys:
         try:
             apt_pav_union = unary_union(pav_polys)
         except _GEOM_EXC:
             apt_pav_union = None
-        apt_pav_largest_area = max(
-            (p.area for p in pav_polys), default=0.0)
 
     # Buffered row-130 boundary in meter space, used to gate DSF and
     # OSM pavement to this airport's own footprint.  None when the
@@ -642,89 +620,12 @@ def build_airport_pavement(icao: str, xplane_root: str,
         except _GEOM_EXC:
             boundary_gate_m = None
 
-    # ── OSM-aeroway-footprint vs apt.dat coverage check ───────────
-    # Per user 2026-04-29: prioritize apt.dat as the pavement
-    # source.  Only fall back to DSF when there's a meaningful
-    # discrepancy between apt.dat and what OSM aeroway data tells
-    # us the airport actually has.  The OSM aeroway tags
-    # (aeroway=apron, taxiway, taxi_lane, stand) are the user-
-    # mapped truth about the airport's pavement extent.  If
-    # apt.dat already covers that extent, DSF additions are at
-    # best decorative overlays and at worst inflated ground tiles
-    # filling non-pavement areas (HECA, where DSF added pavement
-    # between runways and taxiways).  When apt.dat is missing
-    # significant OSM-known pavement, DSF is admitted only inside
-    # the gap.
-    #
-    # Load OSM here (early) so the DSF loop below can use the
-    # aeroway footprint to gate DSF additions.
+    # Load OSM airport data.  ``nodes``/``ways``/``relations`` are
+    # reused by terminal extraction further below.  (DSF pavement is
+    # no longer gated against an OSM-aeroway footprint — see the
+    # resource-type note in the DSF loop.)
     nodes, ways, relations = _load_osm_airports(
         xplane_root, icao, anchor[0], anchor[1])
-    osm_aeroway_footprint = _build_osm_aeroway_footprint(
-        nodes, ways, to_m)
-    # Scope the OSM aeroway footprint to this airport's boundary so a
-    # neighbouring airport's OSM aprons/taxiways don't count as this
-    # airport's pavement (which would inflate the OSM-vs-apt.dat gap
-    # and re-admit the neighbour's DSF pavement through the gap clip).
-    if (boundary_gate_m is not None
-            and osm_aeroway_footprint is not None
-            and not osm_aeroway_footprint.is_empty):
-        try:
-            _clipped_fp = osm_aeroway_footprint.intersection(
-                boundary_gate_m)
-            if not _clipped_fp.is_empty:
-                osm_aeroway_footprint = _clipped_fp
-        except _GEOM_EXC:
-            pass
-    # Gap = OSM-known pavement that apt.dat doesn't cover.  When
-    # this is a small fraction, apt.dat is sufficient; skip DSF
-    # entirely.
-    osm_gap: Optional[Polygon] = None
-    DSF_OSM_GAP_BUFFER_M = 1.0          # widen gap by 1 m for
-                                         # tile-alignment slop.
-                                         # User 2026-04-29 (HECA R
-                                         # absorption): 5 m was too
-                                         # generous; DSF clipped
-                                         # with a 5 m fringe
-                                         # extends ~3 m past the
-                                         # OSM-tagged taxi corridor
-                                         # and trips the long-edge-
-                                         # adjacent absorption probe
-                                         # (which fires at 2 m
-                                         # outside the rect edge).
-                                         # 1 m fringe matches the
-                                         # apt.dat / DSF tile
-                                         # alignment precision
-                                         # without spilling enough
-                                         # to look like apron-
-                                         # adjacency.
-    # Coverage threshold: above this, the airport's apt.dat is
-    # considered "comprehensive" — apt.dat captures most of what
-    # OSM thinks the airport has, so DSF is restricted to filling
-    # the small remaining gap (typically a couple of taxi corridors
-    # apt.dat happens to miss).  Below this threshold, apt.dat is
-    # sparse (e.g. CYXY where apt.dat has ~52% of OSM) and OSM is
-    # also incomplete; DSF is the primary pavement source there
-    # and we trust it broadly (drop overlays only).
-    APT_COMPREHENSIVE_OSM_FRAC = 0.80
-    apt_is_comprehensive = False
-    if (osm_aeroway_footprint is not None
-            and not osm_aeroway_footprint.is_empty
-            and apt_pav_union is not None
-            and not apt_pav_union.is_empty):
-        try:
-            apt_in_osm = apt_pav_union.intersection(
-                osm_aeroway_footprint).area
-            osm_area = osm_aeroway_footprint.area
-            if osm_area > 1.0:
-                apt_is_comprehensive = (
-                    apt_in_osm / osm_area
-                    >= APT_COMPREHENSIVE_OSM_FRAC)
-            gap = osm_aeroway_footprint.difference(apt_pav_union)
-            if not gap.is_empty:
-                osm_gap = gap.buffer(DSF_OSM_GAP_BUFFER_M)
-        except _GEOM_EXC:
-            pass
     # Compute the airport's bounding box from runway corners +
     # apt.dat pavement.  DSF polygons farther than
     # DSF_AIRPORT_RADIUS_M from this bbox are not this airport's.
@@ -750,18 +651,23 @@ def build_airport_pavement(icao: str, xplane_root: str,
         n_dsf_kept = 0
         n_dsf_dropped_overlay = 0
         n_dsf_dropped_far = 0
-        n_dsf_dropped_oversized = 0
-        n_dsf_dropped_outside_osm_gap = 0
         for ad in all_apt_dats:
             dsf = _DSFR.find_associated_dsf(ad, anchor[0], anchor[1])
             if dsf is None or dsf in seen_dsf:
                 continue
             seen_dsf.add(dsf)
-            for ring in _DSFR.read_dsf_pavements(dsf):
-                if len(ring) < 3:
+            for outer, holes in _DSFR.read_dsf_pavements(dsf):
+                if len(outer) < 3:
                     continue
                 try:
-                    poly_ll = Polygon([(lon, lat) for (lon, lat) in ring])
+                    # Honour interior windings as holes — a perforated
+                    # pavement ring (big outer + infield/building holes)
+                    # must NOT be filled into a solid blob.
+                    poly_ll = Polygon(
+                        [(lon, lat) for (lon, lat) in outer],
+                        [[(lon, lat) for (lon, lat) in h]
+                         for h in holes if len(h) >= 3],
+                    )
                     if not poly_ll.is_valid:
                         poly_ll = poly_ll.buffer(0)
                     if (poly_ll.is_empty
@@ -802,67 +708,25 @@ def build_airport_pavement(icao: str, xplane_root: str,
                         except _GEOM_EXC:
                             n_dsf_dropped_far += 1
                             continue
-                    # apt.dat-priority gate (user 2026-04-29):
-                    # when apt.dat is comprehensive (covers ≥ 80%
-                    # of the OSM-aeroway footprint), CLIP each DSF
-                    # polygon to the buffered OSM-vs-apt.dat gap.
-                    # An intersect-test alone is too lax: a wide
-                    # DSF polygon that grazes the gap by 1 m² gets
-                    # kept entirely, and its 50–80 m extension
-                    # past the gap drags non-pavement coverage
-                    # into pav_union (HECA F case where the DSF
-                    # along F's corridor extends 80 m onto the
-                    # adjacent ramp, inflating ``_natural_half_
-                    # width`` to ~50 m and triggering the apron-
-                    # interior corner check on every F segment).
-                    # Clipping keeps only the part of the DSF
-                    # polygon that's actually filling an OSM-
-                    # tagged corridor apt.dat happens to miss.
-                    # When apt.dat is SPARSE (< 80 % of OSM), we
-                    # skip the clip — apt.dat alone is too thin
-                    # and OSM is also incomplete, so DSF is the
-                    # primary source and we trust it broadly
-                    # (CYXY, SPLP).
-                    if (apt_is_comprehensive
-                            and osm_gap is not None
-                            and not osm_gap.is_empty):
-                        try:
-                            clipped_pm = pm.intersection(osm_gap)
-                            if clipped_pm.is_empty:
-                                n_dsf_dropped_outside_osm_gap += 1
-                                continue
-                            # Take the largest Polygon piece if
-                            # the clip produced a MultiPolygon —
-                            # narrow slivers from a wide DSF
-                            # polygon grazing the gap aren't
-                            # useful pavement either.
-                            if (clipped_pm.geom_type
-                                    == "MultiPolygon"):
-                                clipped_pm = max(
-                                    clipped_pm.geoms,
-                                    key=lambda g: g.area)
-                            if (clipped_pm.geom_type != "Polygon"
-                                    or clipped_pm.is_empty
-                                    or clipped_pm.area < 5.0):
-                                n_dsf_dropped_outside_osm_gap += 1
-                                continue
-                            pm = clipped_pm
-                        except _GEOM_EXC:
-                            pass
-                    # Oversized-vs-apt.dat gate: a DSF polygon
-                    # dramatically larger than the airport's
-                    # biggest apt.dat pavement polygon is a coarse
-                    # "ground tile" overlay, not real pavement —
-                    # drop it.  Only meaningful when apt.dat has
-                    # ANY pavement; airports with no apt.dat
-                    # pavement (CYXY-style sparse data) are
-                    # unaffected.
-                    if (apt_pav_largest_area > 0
-                            and pm.area
-                            > (apt_pav_largest_area
-                               * DSF_MAX_AREA_VS_APT_DAT_RATIO)):
-                        n_dsf_dropped_oversized += 1
-                        continue
+                    # NOTE: DSF pavement is filtered by RESOURCE TYPE
+                    # at read time — ``dsf_reader._is_pavement_def``
+                    # admits only ``lib/airport/pavement/`` and
+                    # ``lib/airport/ground/pavement/`` defs (real
+                    # asphalt/concrete surface) and rejects
+                    # ``ground/terrain/`` (grass/lawn), lines,
+                    # markings, facades, etc.  Per user 2026-05-21 we
+                    # TRUST that classification: every reader-admitted
+                    # pavement polygon inside the airport boundary is
+                    # kept.  The earlier OSM-aeroway-gap clip and the
+                    # oversized-vs-apt.dat RATIO gate were dropped —
+                    # they discarded real aprons and runway/taxiway
+                    # shoulders (which aren't OSM-tagged and can be
+                    # large single polygons) along with decoration.
+                    # NOTE: the apparent "whole-airport" pavement tiles
+                    # are perforated rings (a big outer winding with
+                    # holes); their HOLES are honoured by the reader,
+                    # so ``pm`` is already the true net surface — no
+                    # area cap is needed.
                     # Overlay check: drop the polygon if most of its
                     # area lies inside the existing apt.dat pavement
                     # union (it's a decorative overlay rather than
@@ -883,20 +747,12 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 except _GEOM_EXC:
                     continue
         if (n_dsf_kept or n_dsf_dropped_overlay
-                or n_dsf_dropped_far or n_dsf_dropped_oversized
-                or n_dsf_dropped_outside_osm_gap):
+                or n_dsf_dropped_far):
             try:
-                import sys as _sys
                 msg = (f"  [pav-builder] {icao}: DSF pavement: "
                        f"{n_dsf_kept} kept, "
                        f"{n_dsf_dropped_overlay} dropped as overlay, "
                        f"{n_dsf_dropped_far} dropped as off-airport")
-                if n_dsf_dropped_oversized:
-                    msg += (f", {n_dsf_dropped_oversized} dropped "
-                            f"as oversized-vs-apt.dat")
-                if n_dsf_dropped_outside_osm_gap:
-                    msg += (f", {n_dsf_dropped_outside_osm_gap} "
-                            f"dropped: outside OSM-aeroway gap")
                 UI.vprint(1, msg + ".")
             except _GEOM_EXC:
                 pass
@@ -922,8 +778,26 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # into the residue.  Rect corners snap to this simplified
     # boundary, so subtracting rects from pav_union should align
     # perfectly.
-    from .pavement.union_helpers import _simplify_pavement_polygon
-    pav_union = _simplify_pavement_polygon(pav_union, tol=1.0)
+    from .pavement.union_helpers import (
+        _close_open_clean,
+        _simplify_pavement_polygon,
+    )
+    # Seam cleanup (user 2026-05-21): where apt.dat and DSF pavement
+    # share a boundary, their slightly-different vertices leave BOTH thin
+    # interior holes (gaps) AND thin exterior lips (spurs).  A single
+    # mitre-join close-then-open removes both — narrower than the
+    # effective-width threshold — with no net area change, replacing the
+    # old separate ``_drop_sliver_holes`` (+ never-wired
+    # ``_trim_sliver_spurs``).  Real grass infields and smooth bezier
+    # curves (mitre-preserved) are untouched.  Run BEFORE the simplify so
+    # the final boundary is clean for the downstream rect snap / junction
+    # emit.
+    pav_union = _close_open_clean(pav_union)
+    # Simplify to a clean ~2 m-resolution coverage polygon: drop apt.dat
+    # over-resolution (sub-meter curve steps) and doubled-vertex needles
+    # so rect corners snap to a stable boundary and subtracting rects
+    # aligns.  (User-approved tol=2.0 to match the reviewed union.)
+    pav_union = _simplify_pavement_polygon(pav_union, tol=2.0)
     # Stash the pre-runway-subtraction pavement polygon list for
     # the apron-merged-runway detection in _compute_elevations.
     # A runway segment is "apron-merged" when the apt.dat polygon
@@ -2614,6 +2488,29 @@ def build_airport_pavement(icao: str, xplane_root: str,
         from .elevation import _report_within_shape_violations
         _report_within_shape_violations(layout, icao)
 
+    # ── Boundary-conformance invariant (user 2026-05-22) ──────────────
+    # RUNTIME requirement for EVERY airport: the emitted shapes must be a
+    # CONFORMING partition — adjacent shapes share identical vertices
+    # along common edges, no edge crossings.  Non-conformance (T-junctions
+    # / crossings) makes Triangle4XP node the arrangement into degenerate
+    # sub-cm² slivers (HECA: 119k→2.36M airport triangles, 9m40s load).
+    # "No area overlap" (test_no_self_overlap) is necessary but blind to
+    # zero-area T-junctions, which is how this slipped through.  Enforce
+    # here (last geometry step), then assert the invariant holds.
+    from .conformance import (
+        enforce_conformance, find_conformance_violations)
+    n_shapes, n_verts = enforce_conformance(layout)
+    if n_verts:
+        UI.vprint(1,
+            f"  [pav-builder] {icao}: conformance — inserted {n_verts} "
+            f"shared-boundary vertex(es) into {n_shapes} shape(s).")
+    tjs, crossings = find_conformance_violations(layout.shapes)
+    if tjs or crossings:
+        UI.vprint(1,
+            f"  [pav-builder] WARN: {icao}: conformance invariant NOT "
+            f"met — {len(tjs)} residual T-junction(s), {len(crossings)} "
+            f"edge crossing(s) (→ Triangle4XP mesh slivers).")
+
     return layout
 
 
@@ -2677,7 +2574,6 @@ from .boundary import _emit_boundary_dem_bridge
 # OSM terminal pad extraction (re-exported from O4_Pavement_Terminals)
 # ──────────────────────────────────────────────────────────────────
 from .terminals import (
-    _build_osm_aeroway_footprint,
     _extract_osm_terminals,
     _terminal_groundside_zone,
     _terminal_pad_from_building,

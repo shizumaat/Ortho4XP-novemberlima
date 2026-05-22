@@ -36,7 +36,12 @@ from shapely.geometry.base import BaseGeometry
 from . import apt_dat_reader as APR
 from .pavement import strips as PS
 
-from .config import SLIVER_ANGLE_THRESHOLD_DEG
+from .config import (
+    SLIVER_ANGLE_THRESHOLD_DEG,
+    PATCH_SLOPE_CELL_SIZE_M,
+    RUNWAY_CELL_SIZE_M,
+    PATCH_SLOPE_PROFILE,
+)
 
 if TYPE_CHECKING:
     from .canonical_points import CanonicalPointRegistry
@@ -675,8 +680,10 @@ class PavementLayout:
                     else:
                         tags["altitude_high"] = f"{eh:.1f}"
                         tags["altitude_low"] = f"{el:.1f}"
-                        tags["cell_size"] = "2"
-                        tags["profile"] = "spline"
+                        tags["cell_size"] = str(
+    RUNWAY_CELL_SIZE_M if s.role == ROLE_RUNWAY
+    else PATCH_SLOPE_CELL_SIZE_M)
+                        tags["profile"] = PATCH_SLOPE_PROFILE
                 # Try flat first.
                 elif all_max - all_min <= _CANON_EQ_TOL:
                     tags["altitude"] = (
@@ -691,8 +698,10 @@ class PavementLayout:
                     eh, el = high_low_from_corner_alts(open_alts)
                     tags["altitude_high"] = f"{eh:.1f}"
                     tags["altitude_low"] = f"{el:.1f}"
-                    tags["cell_size"] = "2"
-                    tags["profile"] = "spline"
+                    tags["cell_size"] = str(
+    RUNWAY_CELL_SIZE_M if s.role == ROLE_RUNWAY
+    else PATCH_SLOPE_CELL_SIZE_M)
+                    tags["profile"] = PATCH_SLOPE_PROFILE
                 else:
                     # Per-corner values — including the closing
                     # repeat — matching X-Plane's mesh builder
@@ -720,8 +729,10 @@ class PavementLayout:
                     if n_open == 4:
                         tags["altitude_high"] = f"{s.altitude_high:.1f}"
                         tags["altitude_low"] = f"{s.altitude_low:.1f}"
-                        tags["cell_size"] = "2"
-                        tags["profile"] = "spline"
+                        tags["cell_size"] = str(
+    RUNWAY_CELL_SIZE_M if s.role == ROLE_RUNWAY
+    else PATCH_SLOPE_CELL_SIZE_M)
+                        tags["profile"] = PATCH_SLOPE_PROFILE
                     else:
                         tags["altitude"] = (
                             f"{(float(s.altitude_high) + float(s.altitude_low)) / 2.0:.1f}")

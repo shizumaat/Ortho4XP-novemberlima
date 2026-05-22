@@ -57,8 +57,14 @@ MAX_RUNWAY_GRADE_CHANGE_PER_M = 1.0 / 30000.0
 # curve).
 GRADE_RELAX_ITERATIONS = 80
 RUNWAY_MARGIN = 3.0  # meters added to each side of the runway
-DEFAULT_CELL_SIZE = 2.0  # meters between interpolation points (KBNA finding)
-DEFAULT_PROFILE = "spline"  # spline profile for natural terrain transitions
+# Runway interpolation-cell size + profile.  Centralized in config so the
+# whole patch's mesh density is tunable in one place (X-Plane load-time
+# optimization, user 2026-05-22).  Runways carry a real FAA vertical
+# profile, so they have their own knob (``RUNWAY_CELL_SIZE_M``) separate
+# from planar taxiway/apron rects.  Historical default 2 m = "KBNA finding".
+from ..config import RUNWAY_CELL_SIZE_M, PATCH_SLOPE_PROFILE
+DEFAULT_CELL_SIZE = float(RUNWAY_CELL_SIZE_M)  # meters between interp points
+DEFAULT_PROFILE = PATCH_SLOPE_PROFILE
 # How far beyond the physical runway end to extend as a flat apron.
 OVERRUN_EXTENSION = 30.0
 RUNWAY_SEGMENT_LENGTH = 100.0  # meters — length of each runway segment
@@ -942,10 +948,18 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
 
             # ── Build segment sample points along centerline ─────────────
             # Always include: physical end A, threshold A, threshold B,
-            # physical end B.  Add DEM sample points in between.
-            n_segs = max(1, int(phys_dist / RUNWAY_SEGMENT_LENGTH))
-            # Sample points as fraction of phys_dist (0 = end A, 1 = end B)
-            fractions = [float(i) / n_segs for i in range(n_segs + 1)]
+            # physical end B.
+            #
+            # Per user 2026-05-22 (HECA loads slowly in X-Plane — reduce
+            # node density): DO NOT add uniform RUNWAY_SEGMENT_LENGTH
+            # interval breaks.  The only segment seams are the physical
+            # ends, the CIFP thresholds (anchored, added below), and the
+            # pavement-join breakpoints where taxiways/aprons meet the
+            # runway (``pav_intersections``, added below).  The FAA
+            # grade-cap profile + redistribute still produce a smooth
+            # slope between these sparse samples; the old 100 m sampling
+            # only captured terrain bumps the grade cap smoothed away.
+            fractions = [0.0, 1.0]
 
             # Ensure thresholds are in the list.  ``anchored_t``
             # tracks t-values that MUST stay (physical ends and

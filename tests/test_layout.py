@@ -254,8 +254,13 @@ def test_to_osm_sloped_rect_emits_high_low_cell_profile():
     tags = ways[0][2]
     assert tags["altitude_high"] == "100.5"
     assert tags["altitude_low"] == "99.0"
-    assert tags["cell_size"] == "2"
-    assert tags["profile"] == "spline"
+    # cell_size / profile are now configurable knobs (mesh-density
+    # tuning), so assert against the config constants rather than the
+    # historical hardcoded "2"/"spline".
+    from auto_patch.config import (
+        PATCH_SLOPE_CELL_SIZE_M, PATCH_SLOPE_PROFILE)
+    assert tags["cell_size"] == str(PATCH_SLOPE_CELL_SIZE_M)
+    assert tags["profile"] == PATCH_SLOPE_PROFILE
     # Flat altitude tag must NOT also be emitted.
     assert "altitude" not in tags
 

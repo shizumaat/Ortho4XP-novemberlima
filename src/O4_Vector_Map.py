@@ -733,6 +733,18 @@ def include_patches(vector_map, tile):
         base = f[:-10]  # strip .patch.osm
         icao_prefix = base.split("_")[0].upper()
         manual_icao_codes.add(icao_prefix)
+    # Honor the auto_patch mode when LOADING, not just when generating
+    # (user 2026-05-22): the setting governs which auto-patches are
+    # APPLIED, so changing it takes effect even when auto-patch files
+    # already exist from a previous run (e.g. set to "None" → no auto
+    # patches loaded, even if the .osm files are still on disk).  Manual
+    # patches are always applied — the setting only governs auto-patches.
+    # Backward compat: legacy bool True/False map to "All"/"None".
+    auto_patch_mode = tile.auto_patch
+    if auto_patch_mode is True:
+        auto_patch_mode = "All"
+    elif auto_patch_mode is False:
+        auto_patch_mode = "None"
     # Process manual patches first, then auto patches
     ordered_patch_files = manual_patches + auto_patches
     for pfile_name in ordered_patch_files:
@@ -740,6 +752,20 @@ def include_patches(vector_map, tile):
         is_auto = "_auto.patch.osm" in pfile_name
         if is_auto:
             auto_icao = pfile_name.replace("_auto.patch.osm", "").upper()
+            # Apply the auto_patch mode filter (mirrors generation in
+            # driver.generate_auto_patches): None loads nothing; ICAO
+            # loads only real 4-letter-alpha ICAO codes; All loads every.
+            if auto_patch_mode == "None":
+                UI.vprint(
+                    1, "   Skipping auto-patch", pfile_name,
+                    "(auto_patch=None).")
+                continue
+            if auto_patch_mode == "ICAO" and not (
+                    len(auto_icao) == 4 and auto_icao.isalpha()):
+                UI.vprint(
+                    1, "   Skipping auto-patch", pfile_name,
+                    "(non-ICAO code, auto_patch=ICAO).")
+                continue
             if auto_icao in manual_icao_codes:
                 UI.vprint(
                     1,
@@ -879,7 +905,15 @@ def include_patches(vector_map, tile):
                         )
                         * 111120
                     )
-                    cuts_long = int(rnw_length / cell_size)
+                    # Floor at 1 cut: a large ``cell_size`` (the patch
+                    # node-density knob) can drive ``int(rnw_length /
+                    # cell_size)`` to 0, which skipped the graded-altitude
+                    # path and left ``alti_way`` unbound (UnboundLocalError
+                    # below).  One cut is negligible for triangle count and
+                    # keeps the graded ``altitude_high/low`` profile (the
+                    # alt fallback samples the raw DEM, which would drop a
+                    # sloped pavement onto terrain).
+                    cuts_long = max(1, int(rnw_length / cell_size))
                     if cuts_long:
                         cuts_long += 1
                         way = numpy.array(

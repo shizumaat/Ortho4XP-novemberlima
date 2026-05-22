@@ -75,16 +75,28 @@ SLOPING_RECT_ROLES = (
 
 SLOPING_RECT_FLAT_THRESHOLD_M = 0.05
 
-# Absolute area (m²) a single ``_enforce_runway_1to1_sharing`` runway-
-# corner rewrite may remove from a junction before it is rejected.  The
-# pass straightens a junction's runway-adjacent vertex run to the runway
-# corner line; legitimate straightenings across the baseline airports
-# lose ≤ ~730 m² (SPJC), while a chord across a connector wedge can
-# delete several thousand (CYXY runway-20 connector: 6,973 m²).  2,000 m²
-# sits comfortably above the legitimate maximum and well below the
-# connector loss.  Complements the relative 50%-loss guard, which is
-# blind to a small-fraction amputation of a very large junction.
+# Absolute area (m²) of REAL PAVEMENT (pav_union) a single
+# ``_enforce_runway_1to1_sharing`` runway-corner rewrite may abandon
+# before it is rejected.  The pass straightens a junction's runway-
+# adjacent vertex run to the runway corner line; legitimate straightenings
+# across the baseline airports abandon ≤ ~730 m² of pav_union (SPJC),
+# while a chord across a stub↔runway connection wedge abandons several
+# thousand (CYXY runway-20 connector: 6,973 m²; HECA SW stubs: 2–8k each).
+# 2,000 m² sits comfortably above the legitimate maximum and well below
+# the wedge loss.  Measured against ``pav_union`` (the source of truth)
+# rather than NET area, because a rewrite that grows the junction into the
+# runway can net-gain area while still abandoning a real-pavement wedge.
 RUNWAY_REWRITE_MAX_ABS_LOSS = 2000.0
+
+# Max real pavement (pav_union) a single ``widen_junctions_to_runway_
+# corners`` insertion may abandon before it is rejected.  Widening must
+# GROW a junction toward the runway corners, never carve pavement away —
+# but inserting a runway corner can re-route the ring so it excludes part
+# of the original body (HECA: a ~2.8k m² sliver opened between a widened
+# junction and the runway).  Legitimate widenings abandon ~0 m² of
+# pav_union (they only add area), so a small floor cleanly separates the
+# two; 50 m² matches the MIN_JUNCTION_AREA sliver floor used elsewhere.
+WIDEN_MAX_ABANDONED_PAVEMENT_M2 = 50.0
 
 
 def _align_rect_slope_to_axis(layout: PavementLayout) -> None:
@@ -991,6 +1003,22 @@ def _do_widen(
                             return False
             except _GEOM_EXC:
                 pass
+            # Coverage guard (user 2026-05-21): widening must GROW the
+            # junction toward runway corners, never abandon real pavement.
+            # Inserting a corner can re-route the ring so it excludes part
+            # of the original body; if that excluded region is pav_union
+            # pavement, the insert opens an uncovered gap (HECA: ~2.8k m²
+            # sliver between a widened junction and the runway).  Reject
+            # any insert that abandons more than a sliver of pav_union.
+            if pav_union is not None and not getattr(
+                    pav_union, "is_empty", True):
+                try:
+                    abandoned = original_body.difference(trial_poly)
+                    if (abandoned.intersection(pav_union).area
+                            > WIDEN_MAX_ABANDONED_PAVEMENT_M2):
+                        return False
+                except _GEOM_EXC:
+                    pass
             # Commit
             current_coords = trial
             if current_alts is not None:
@@ -1512,20 +1540,34 @@ def _enforce_runway_1to1_sharing(layout: PavementLayout) -> None:
             continue
         if new_poly.area < 0.5 * poly.area:
             continue
-        # Absolute area-loss cap (user 2026-05-21).  The relative
-        # 50%-loss guard above is meant to reject only a catastrophic
-        # rewrite, but it can't see a small-FRACTION amputation of a
-        # LARGE junction: at CYXY the ~102k m² junction wrapping the
-        # runway-20 end has a connector wedge extending past the
-        # threshold over to 14L/32R, and the runway-corner chord slices
-        # it off — 6,973 m² (6.8%), well under 50%, so the old guard
-        # committed it and the connector pavement vanished (never
-        # graded).  This pass is meant to STRAIGHTEN a runway-adjacent
-        # vertex run, not amputate thousands of m²; legitimate rewrites
-        # across the baseline airports lose ≤ ~730 m² (SPJC).  Reject
-        # any rewrite that removes more than RUNWAY_REWRITE_MAX_ABS_LOSS
-        # so the connector survives as a junction.
-        if poly.area - new_poly.area > RUNWAY_REWRITE_MAX_ABS_LOSS:
+        # Coverage-protecting cap (user 2026-05-21).  pav_union is the
+        # SOURCE OF TRUTH: abandoning area OUTSIDE it is harmless
+        # over-coverage, but abandoning real pavement (inside pav_union)
+        # erases a junction that should be covering it.  This pass
+        # straightens a junction's runway-adjacent vertex run onto the
+        # runway-corner line; when the junction GROWS into the runway it
+        # net-GAINS area, so the old net cap (poly.area - new_poly.area)
+        # went NEGATIVE and let the rewrite through — even though the
+        # straightening chords across a stub↔runway connection wedge and
+        # abandons it (HECA: ~26.6k m² of stub/junction pavement lost this
+        # way; CYXY runway-20 connector: 6,973 m²).  So measure the
+        # geometrically-abandoned region that lands on REAL pavement and
+        # reject if it exceeds the cap.  Legitimate straightenings across
+        # the baseline airports abandon ≤ ~730 m² of pav_union (SPJC), so
+        # the 1:1 runway-corner sharing they enforce is preserved.
+        try:
+            abandoned = poly.difference(new_poly)
+        except _GEOM_EXC:
+            continue
+        pav = getattr(layout, "_pav_union_for_rects", None)
+        if pav is not None and not pav.is_empty:
+            try:
+                lost_pavement = abandoned.intersection(pav).area
+            except _GEOM_EXC:
+                lost_pavement = abandoned.area
+        else:
+            lost_pavement = abandoned.area
+        if lost_pavement > RUNWAY_REWRITE_MAX_ABS_LOSS:
             continue
         shape.polygon = new_poly
         if new_alts_out is not None:

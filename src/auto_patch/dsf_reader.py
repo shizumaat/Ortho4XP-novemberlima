@@ -24,6 +24,7 @@ projecting to its local meter coordinate system.
 """
 from __future__ import annotations
 
+import math
 import os
 import platform
 import subprocess
@@ -32,6 +33,20 @@ import tempfile
 
 import O4_File_Names as FNAMES
 import O4_UI_Utils as UI
+
+# Reuse the X-Plane bezier convention + flattening from the apt.dat
+# reader so DSF curves are sampled IDENTICALLY to apt.dat curves.
+# When the same WED-authored curve is exported to both apt.dat and the
+# DSF, sampling both with the same control-point math + segment count
+# makes their shared boundaries land on the same vertices — so the
+# union dissolves cleanly instead of leaving lens-shaped residue.
+from .apt_dat_reader import (
+    BEZIER_FLATTEN_DEV_DEG,
+    DEFAULT_BEZIER_SEGMENTS,
+    _cubic_bezier,
+    _mirror,
+    _quadratic_bezier,
+)
 
 
 # Pavement-detector patterns: a POLYGON_DEF must START with one of
@@ -59,14 +74,15 @@ _PAVEMENT_PREFIXES = (
 )
 # Skip patterns inside the accepted prefixes — line markings,
 # direction signs, etc. that share path namespace with bulk
-# pavement.
+# pavement.  NOTE: "shoulder" is intentionally NOT skipped — runway
+# / taxiway shoulders are real paved surface the patch should keep
+# (user 2026-05-21); only paint / signage / decals are excluded.
 _PAVEMENT_SKIP = (
     "/lines/",
     "/markings/",
     "/lights/",
     "/decals/",
     "DirSigns",
-    "shoulder",
 )
 
 
@@ -104,9 +120,86 @@ def _is_pavement_def(path: str) -> bool:
     return True
 
 
+def _interpolate_dsf_ring(
+    nodes: list[tuple[tuple[float, float], tuple[float, float] | None]],
+    bezier_segments: int,
+) -> list[tuple[float, float]]:
+    """Flatten a DSF polygon winding into (lon, lat) vertices,
+    sampling bezier curves the SAME way the apt.dat reader does.
+
+    ``nodes`` is the closed ring as ``[(anchor_xy, ctrl_xy_or_None),
+    ...]`` (not repeating the first vertex).  Each node's control
+    point is its bezier handle (absolute coords); ``None`` means a
+    plain corner.  Convention matches ``apt_dat_reader
+    ._interpolate_contour``: for A→B, cubic with ``ctrl_a`` and
+    ``mirror(ctrl_b, B)`` when both have handles, quadratic when one
+    does, straight otherwise; sub-``BEZIER_FLATTEN_DEV_DEG`` curves
+    collapse to a straight edge.
+
+    SPLIT bezier handles: WED supports SPLIT handles (independent in/out
+    length & direction), which the DSF encodes as a RUN of same-anchor
+    points — the point BEFORE the zero-length break carries the INCOMING
+    handle, the point AFTER carries the OUTGOING handle (either may be a
+    plain corner-marker, ``ctrl == anchor``).  We do NOT merge the run:
+    the per-segment convention below (C1 = ``a_ctrl`` used directly, C2 =
+    ``mirror(b_ctrl)``) already routes each duplicate's handle to the
+    correct side — the incoming segment mirrors the leading point's
+    handle as its end control, the outgoing segment uses the trailing
+    point's handle directly as its start control.  The zero-length span
+    between the duplicates is skipped so it cannot form a self-intersecting
+    spike.  Empirically this makes every HECA bezier ring valid (vs the
+    old merge-into-one-mirrored-handle approximation, which left ~7 rings
+    self-intersecting and bowed split-handle tips the wrong way — the
+    source of the phantom notch near HECA 30.11735/31.41601).  The only
+    remaining invalid rings are PLAIN (depth-2) polygons that are
+    self-intersecting in the authored DSF itself (repaired downstream).
+    """
+    n = len(nodes)
+    if n < 2:
+        return [a for a, _ in nodes]
+    out: list[tuple[float, float]] = []
+    for i in range(n):
+        a_xy, a_ctrl = nodes[i]
+        b_xy, b_ctrl = nodes[(i + 1) % n]
+        if not out or out[-1] != a_xy:
+            out.append(a_xy)
+        # Zero-length span between split-handle duplicates: no curve to
+        # draw (the duplicates' handles serve the adjacent real segments).
+        if a_xy == b_xy:
+            continue
+        if a_ctrl is None and b_ctrl is None:
+            continue
+        if a_ctrl is not None and b_ctrl is None:
+            ctrl_eff = a_ctrl
+        elif a_ctrl is None and b_ctrl is not None:
+            ctrl_eff = _mirror(b_ctrl, b_xy)
+        else:
+            mirrored = _mirror(b_ctrl, b_xy)
+            mid = (0.5 * (a_xy[0] + b_xy[0]), 0.5 * (a_xy[1] + b_xy[1]))
+            d1 = math.hypot(a_ctrl[0] - mid[0], a_ctrl[1] - mid[1])
+            d2 = math.hypot(mirrored[0] - mid[0], mirrored[1] - mid[1])
+            if 0.5 * max(d1, d2) < BEZIER_FLATTEN_DEV_DEG:
+                continue
+            for pt in _cubic_bezier(a_xy, a_ctrl, mirrored, b_xy,
+                                    bezier_segments)[1:-1]:
+                if not out or out[-1] != pt:
+                    out.append(pt)
+            continue
+        mid = (0.5 * (a_xy[0] + b_xy[0]), 0.5 * (a_xy[1] + b_xy[1]))
+        if 0.5 * math.hypot(ctrl_eff[0] - mid[0],
+                            ctrl_eff[1] - mid[1]) < BEZIER_FLATTEN_DEV_DEG:
+            continue
+        for pt in _quadratic_bezier(a_xy, ctrl_eff, b_xy,
+                                    bezier_segments)[1:-1]:
+            if not out or out[-1] != pt:
+                out.append(pt)
+    return out
+
+
 def read_dsf_pavements(
     dsf_path: str,
     cache_dir: str | None = None,
+    bezier_segments: int = DEFAULT_BEZIER_SEGMENTS,
 ) -> list[list[tuple[float, float]]]:
     """Extract draped pavement polygons from a DSF file.
 
@@ -117,8 +210,10 @@ def read_dsf_pavements(
             Defaults to a per-DSF temp file alongside the source.
 
     Returns:
-        A list of pavement polygon rings.  Each ring is a list of
-        ``(lon, lat)`` tuples (NOT closed — the first vertex isn't
+        A list of pavement polygons, each as ``(outer_ring, holes)``
+        where ``outer_ring`` is a list of ``(lon, lat)`` tuples and
+        ``holes`` is a list of inner rings (each also a list of
+        ``(lon, lat)``).  Rings are NOT closed (first vertex isn't
         repeated).  Returns ``[]`` on any failure (DSFTool missing,
         DSF unreadable, no pavement defs, etc.).
     """
@@ -190,15 +285,35 @@ def read_dsf_pavements(
 
     # Pass 2: walk BEGIN_POLYGON / END_POLYGON / BEGIN_WINDING /
     # END_WINDING / POLYGON_POINT to build per-instance rings.
-    # A polygon may have multiple windings (outer + holes) — we
-    # only emit the OUTER (first) winding here; holes are rare for
-    # pavement and the caller's polygon-builder treats each ring
-    # as its own outer.
-    polys: list[list[tuple[float, float]]] = []
+    # A polygon may have multiple windings: the FIRST is the outer
+    # ring, any SUBSEQUENT windings are HOLES.  Holes MUST be kept —
+    # ignoring them turns a perforated pavement ring into a solid
+    # blob covering the whole airport (HECA's ground/pavement
+    # patched.pol / damaged.pol instances have a 3.5 M / 1.25 M m²
+    # outer winding but only ~75 k / ~60 k m² of actual pavement once
+    # their holes are subtracted).
+    # The BEGIN_POLYGON header's 3rd field is the coordinate depth:
+    # 2 = plain (lon, lat); 4 = BEZIER (lon, lat, ctrl_lon, ctrl_lat).
+    # X-Plane stock pavement (e.g. asphalt/patched.pol) is authored as
+    # bezier polygons; reading only the anchor (lon, lat) collapses
+    # smooth curves into coarse straight segments ("pentagrams"),
+    # which then leave residue against the apt.dat bezier curves on
+    # union.  Capture the control points and tessellate.
+    polys: list[tuple[list[tuple[float, float]],
+                      list[list[tuple[float, float]]]]] = []
     in_pavement = False
     in_winding = False
-    current_outer: list[tuple[float, float]] | None = None
-    pushed_this_polygon = False
+    cur_depth = 2
+    # Each winding node is (anchor_xy, ctrl_xy_or_None).
+    current_ring: list[tuple[tuple[float, float],
+                             tuple[float, float] | None]] | None = None
+    cur_outer: list[tuple[float, float]] | None = None
+    cur_holes: list[list[tuple[float, float]]] = []
+
+    def _finish_ring(ring_nodes):
+        flat = _interpolate_dsf_ring(ring_nodes, bezier_segments)
+        return flat if len(flat) >= 3 else None
+
     for line in lines:
         if line.startswith("BEGIN_POLYGON"):
             tok = line.split()
@@ -206,34 +321,42 @@ def read_dsf_pavements(
                 idx = int(tok[1])
             except (ValueError, IndexError):
                 idx = -1
+            try:
+                cur_depth = int(tok[3])
+            except (ValueError, IndexError):
+                cur_depth = 2
             in_pavement = idx in pav_def_idx
-            current_outer = None
-            pushed_this_polygon = False
+            in_winding = False
+            current_ring = None
+            cur_outer = None
+            cur_holes = []
             continue
         if line.startswith("END_POLYGON"):
+            if in_pavement and cur_outer and len(cur_outer) >= 3:
+                polys.append((cur_outer, cur_holes))
             in_pavement = False
             in_winding = False
-            current_outer = None
-            pushed_this_polygon = False
+            current_ring = None
+            cur_outer = None
+            cur_holes = []
             continue
         if not in_pavement:
             continue
         if line.startswith("BEGIN_WINDING"):
-            if pushed_this_polygon:
-                # Subsequent winding = inner ring (hole); we ignore
-                # it for pavement extraction.
-                in_winding = False
-            else:
-                in_winding = True
-                current_outer = []
+            in_winding = True
+            current_ring = []
             continue
         if line.startswith("END_WINDING"):
-            if (in_winding and current_outer
-                    and len(current_outer) >= 3):
-                polys.append(current_outer)
-                pushed_this_polygon = True
+            if (in_winding and current_ring
+                    and len(current_ring) >= 3):
+                flat = _finish_ring(current_ring)
+                if flat is not None:
+                    if cur_outer is None:
+                        cur_outer = flat
+                    else:
+                        cur_holes.append(flat)
             in_winding = False
-            current_outer = None
+            current_ring = None
             continue
         if in_winding and line.startswith("POLYGON_POINT"):
             tok = line.split()
@@ -242,7 +365,17 @@ def read_dsf_pavements(
                 lat = float(tok[2])
             except (ValueError, IndexError):
                 continue
-            current_outer.append((lon, lat))
+            ctrl = None
+            if cur_depth >= 4:
+                try:
+                    cx = float(tok[3])
+                    cy = float(tok[4])
+                    # A control == anchor means "no handle" (corner).
+                    if cx != lon or cy != lat:
+                        ctrl = (cx, cy)
+                except (ValueError, IndexError):
+                    ctrl = None
+            current_ring.append(((lon, lat), ctrl))
     return polys
 
 

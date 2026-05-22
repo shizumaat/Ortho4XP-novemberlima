@@ -60,7 +60,8 @@ from .elevation import (
     _split_sloped_rects_at_violations,
 )
 from .groundside import (
-    _drop_groundside_orphan_junctions,
+    _reclassify_groundside_orphan_junctions,
+    _separate_groundside_from_airside,
     _emit_groundside_pavement_dem,
 )
 from .pavement.vertices import (
@@ -246,25 +247,37 @@ def run_phase2(layout: PavementLayout, icao: str, xplane_root: str,
                     f"polygon(s) with DEM altitudes.")
         except _GEOM_EXC:
             pass
-        # Per user 2026-04-29 (CYXY -10111 / -10115): drop
-        # junction polygons that are connected ONLY to non-
-        # airside pavement (groundside polygons or each
-        # other), with no shared vertices on any airside
-        # rect/terminal/runway.  These slivers got assigned
-        # the airside-flat altitude during the Laplacian
-        # solver but visually they're not airside — they
-        # share an edge with the DEM-following groundside
-        # at a different elevation, creating "valleys" that
-        # X-Plane renders as cliffs.  Eliminating them lets
-        # the boundary ribbon and the groundside polygon
-        # define the surface in that area.
+        # Per user 2026-04-29 / 2026-05-21 (CYXY -10111 / -10115;
+        # HECA terminal aprons): junction polygons connected ONLY to
+        # non-airside pavement (groundside polygons or each other), with
+        # no shared vertices on any airside rect/terminal/runway, got the
+        # airside-flat altitude from the solver but abut the DEM-following
+        # groundside at a different elevation → X-Plane cliffs.  These
+        # cover REAL pavement (at HECA the DSF adds large no-centerline
+        # terminal aprons), so we RECLASSIFY them as DEM-following
+        # groundside pavement rather than dropping them — keep the
+        # coverage, lose the cliff.
         try:
-            n_orph = _drop_groundside_orphan_junctions(layout)
+            n_orph = _reclassify_groundside_orphan_junctions(
+                layout, _dem, _tile_lat, _tile_lon)
             if n_orph:
                 UI.vprint(1,
-                    f"  [pav-builder] dropped {n_orph} "
-                    f"junction(s) sharing vertices with "
-                    f"groundside pavement.")
+                    f"  [pav-builder] reclassified {n_orph} "
+                    f"groundside-orphan junction(s) as DEM pavement.")
+        except _GEOM_EXC:
+            pass
+        # Enforce groundside separation (user 2026-05-22): clip every
+        # groundside polygon to a clearance gap from all terminal /
+        # airside pavement so it shares no node or edge with them
+        # (groundside = car/building pavement at DEM elevation, distinct
+        # from the graded airside).
+        try:
+            n_sep = _separate_groundside_from_airside(
+                layout, _dem, _tile_lat, _tile_lon)
+            if n_sep:
+                UI.vprint(1,
+                    f"  [pav-builder] separated {n_sep} groundside "
+                    f"polygon(s) from terminal/airside (clearance gap).")
         except _GEOM_EXC:
             pass
         # Then emit DEM-bridge polygons inside the boundary

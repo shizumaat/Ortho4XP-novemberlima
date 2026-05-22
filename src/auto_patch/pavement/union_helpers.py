@@ -10,8 +10,11 @@ Public API:
 """
 from __future__ import annotations
 
+import math
+
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import Polygon
+from shapely.ops import unary_union
 
 # Narrow exception tuple for shapely / numeric-geometry failure
 # modes.  Programming errors propagate so they surface immediately.
@@ -22,9 +25,171 @@ __all__ = [
     "PAVEMENT_BRIDGE_GAP_M",
     "_merge_near_touching",
     "_simplify_pavement_polygon",
+    "_drop_sliver_holes",
+    "_trim_sliver_spurs",
+    "_close_open_clean",
     # Backwards-compat alias.
     "_drop_close_nonadjacent_pairs",
 ]
+
+
+# Sliver-hole removal threshold.  When apt.dat and DSF pavement share a
+# boundary, their slightly-different vertex placements leave hairline
+# gaps that ``unary_union`` records as thin interior rings.  These are
+# seam residue, not real non-pavement.  The discriminator is the
+# polygon's EFFECTIVE WIDTH ``2·area / perimeter`` (mean strip width),
+# NOT area, elongation, or the bounding-rectangle short side: seam
+# slivers are often tapering/slanted wedges whose min-rotated-rectangle
+# over-reports the width (e.g. a HECA sliver measured 2.1 m by MRR but
+# is really ~1 m of mean width).  Measured at HECA, the metric is bimodal
+# with a clean empty band at 1.5–2.0 m: every seam sliver is ≤ 1.21 m,
+# every genuine grass infield is ≥ 2.08 m.  ``2A/P`` also naturally
+# catches LONG thin slivers (big area, hairline width).
+SLIVER_HOLE_MAX_WIDTH_M = 1.5
+
+
+def _hole_width_m(ring) -> float:
+    """Effective (mean) width of a ring in meters, ``2·area /
+    perimeter``.  For a long strip this is its width; for a tapering
+    wedge it is the mean width.  Returns ``inf`` if it can't be
+    measured, so callers treat it as "not a sliver"."""
+    try:
+        rp = Polygon(ring)
+        per = rp.length
+        if per <= 0:
+            return float("inf")
+        return 2.0 * rp.area / per
+    except _GEOM_EXC:
+        return float("inf")
+
+
+def _drop_sliver_holes(geom, max_width: float = SLIVER_HOLE_MAX_WIDTH_M):
+    """Drop hairline seam-residue interior rings — those whose
+    effective width ``2·area/perimeter`` is below ``max_width``.  Real
+    grass infields (mean width ≥ ~2 m) are always kept, regardless of
+    how small or elongated.  Returns the same kind of geometry; falls
+    back to the input on any failure.
+    """
+    if geom is None or geom.is_empty:
+        return geom
+    if geom.geom_type == "MultiPolygon":
+        return type(geom)([
+            _drop_sliver_holes(g, max_width) for g in geom.geoms])
+    if geom.geom_type != "Polygon" or not geom.interiors:
+        return geom
+    try:
+        keep = [ring for ring in geom.interiors
+                if _hole_width_m(ring) >= max_width]
+        if len(keep) == len(geom.interiors):
+            return geom
+        out = Polygon(geom.exterior, keep)
+        if not out.is_valid:
+            out = out.buffer(0)
+            if out.geom_type == "MultiPolygon":
+                out = max(out.geoms, key=lambda g: g.area)
+        if (out.is_valid and not out.is_empty
+                and out.geom_type == "Polygon"):
+            return out
+    except _GEOM_EXC:
+        pass
+    return geom
+
+
+# Max effective width of an EXTERIOR seam spur to trim.  The seam
+# between apt.dat and DSF pavement leaves not only thin interior gaps
+# (handled by ``_drop_sliver_holes``) but also thin exterior LIPS
+# where one source's boundary pokes a fraction of a metre past the
+# other's.  Same metric and threshold as the hole filter.
+SLIVER_SPUR_MAX_WIDTH_M = 1.5
+
+
+def _trim_sliver_spurs(geom, max_width: float = SLIVER_SPUR_MAX_WIDTH_M):
+    """Trim thin exterior protrusions ("seam lips") from the outer
+    boundary — the exterior analogue of ``_drop_sliver_holes``.
+
+    A mitre-join morphological OPEN (erode then dilate by
+    ``max_width/2``) removes protrusions narrower than ``max_width``
+    while PRESERVING real corners (mitre doesn't round them, so convex
+    corners don't become spurious protrusion pieces).  The difference
+    ``geom − opened`` is the set of protrusions; only the genuinely
+    thin ones (effective width ``2·area/perimeter`` < ``max_width``)
+    are subtracted, so real boundary detail and smooth bezier curves
+    are untouched.  Returns the same kind of geometry; falls back to
+    the input on any failure.
+    """
+    if geom is None or geom.is_empty:
+        return geom
+    if geom.geom_type not in ("Polygon", "MultiPolygon"):
+        return geom
+    try:
+        probe = max_width / 2.0
+        opened = geom.buffer(-probe, join_style=2).buffer(
+            probe, join_style=2)
+        if (opened.is_empty
+                or opened.geom_type not in ("Polygon", "MultiPolygon")):
+            return geom
+        protrusions = geom.difference(opened)
+        if protrusions.is_empty:
+            return geom
+        parts = ([protrusions] if protrusions.geom_type == "Polygon"
+                 else list(getattr(protrusions, "geoms", [])))
+        thin = []
+        for g in parts:
+            if g.geom_type != "Polygon" or g.is_empty:
+                continue
+            per = g.length
+            if per > 0 and (2.0 * g.area / per) < max_width:
+                thin.append(g)
+        if not thin:
+            return geom
+        out = geom.difference(unary_union(thin))
+        if (not out.is_empty
+                and out.geom_type in ("Polygon", "MultiPolygon")):
+            return out
+    except _GEOM_EXC:
+        pass
+    return geom
+
+
+# Effective width below which a morphological close-then-open removes
+# seam residue.  Same threshold as the (now-superseded) hole/spur
+# filters: HECA's metric is bimodal with a clean gap at 1.5–2.0 m.
+SLIVER_CLOSE_OPEN_M = 1.5
+
+
+def _close_open_clean(geom, width: float = SLIVER_CLOSE_OPEN_M):
+    """Mitre-join morphological CLOSE-then-OPEN: in one fused buffer
+    sequence, fill thin interior holes / seam gaps AND trim thin
+    exterior spurs ("seam lips") narrower than ``width`` — with zero
+    net displacement.
+
+    ``buffer(+w)`` closes (dilate: bridges gaps, swallows < ``w`` holes);
+    the fused ``buffer(-2w)`` finishes the close (erode back to size) and
+    begins the open (erode away < ``w`` protrusions); ``buffer(+w)``
+    restores the original size.  Net effect is the union of a
+    morphological close and open.  Mitre joins (``join_style=2``)
+    preserve sharp real corners and smooth bezier curves instead of
+    rounding them, so only sub-``w`` seam residue is affected.
+
+    This REPLACES the separate ``_drop_sliver_holes`` + ``_trim_sliver_
+    spurs`` seam cleanup (user 2026-05-21): one op handles both sides of
+    the apt.dat ⁄ DSF seam, no net area change.  Returns the same kind of
+    geometry; falls back to the input on any failure.
+    """
+    if geom is None or geom.is_empty:
+        return geom
+    if geom.geom_type not in ("Polygon", "MultiPolygon"):
+        return geom
+    try:
+        out = (geom.buffer(width, join_style=2)
+                   .buffer(-2.0 * width, join_style=2)
+                   .buffer(width, join_style=2))
+        if (not out.is_empty
+                and out.geom_type in ("Polygon", "MultiPolygon")):
+            return out
+    except _GEOM_EXC:
+        return geom
+    return geom
 
 
 # Tolerance for bridging numerical / sub-meter gaps between near-

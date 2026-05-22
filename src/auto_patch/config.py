@@ -29,6 +29,9 @@ __all__ = [
     "RUNWAY_INSIDE_APRON_FRAC",
     "RUNWAY_APRON_AREA_RATIO",
     "SLIVER_ANGLE_THRESHOLD_DEG",
+    "PATCH_SLOPE_CELL_SIZE_M",
+    "RUNWAY_CELL_SIZE_M",
+    "PATCH_SLOPE_PROFILE",
 ]
 
 
@@ -179,13 +182,37 @@ ROLE_GRADE_LIMITS = {
     # by design.  Grade between the high and low corners is the
     # full step over a sub-metre run.
     "retaining_wall":     None,
-    # Groundside terminal pavement is per-vertex DEM-altitude (it
-    # follows local terrain at curbside / drop-off / parking) so
-    # ring grade exposes terrain, not a pavement-builder defect.
-    "groundside_pavement": None,
+    # Groundside pavement (cars / buildings, curbside / drop-off /
+    # parking) follows the DEM but is graded like a ramp to ≤ 4 % slope
+    # (user 2026-05-22) — same cap as tunnel ramps — so steep terrain is
+    # smoothed to a navigable surface rather than tracing raw terrain.
+    "groundside_pavement": 0.040,
 }
 
 # Phase-1 emit-suppression toggles (kept from the pre-refactor
 # baseline; iteration aids that remain useful).
 EMIT_JUNCTIONS = True
 EMIT_APRONS = False
+
+
+# ── Patch mesh-density tuning (X-Plane load-time optimization) ─────────
+# Ortho4XP cuts each SLOPED pavement way into ``cell_size``-metre cells
+# (``cuts_long = way_length / cell_size``) and interpolates altitude with
+# ``profile`` ("spline" or "plane").  This INTERNAL CUT GRID — not the
+# patch's vertex count — drives the airport mesh's triangle count, and
+# thus X-Plane load time (HECA measured: cell_size=2 m → +2.24 M
+# triangles, 75% of the whole tile, 9m40s load vs 39s without the patch).
+#
+# A 4-corner sloping rect is a flat tilted PLANE, so a cell_size ≥ the
+# way length yields ZERO internal cuts and renders the identical surface
+# with a fraction of the triangles.  Runways differ: they carry a real
+# FAA vertical profile (crests/sags), so coarsening them too far flattens
+# that curve — hence a separate knob.
+#
+# To find the optimal compromise, sweep these and measure each build with
+# ``tools/mesh_region_tris.py`` (triangle count) + the X-Plane load time.
+# Historical default 2 m carried a "KBNA finding" note (smooth runway
+# vertical transitions) — raise the runway value cautiously.
+PATCH_SLOPE_CELL_SIZE_M = 10      # taxiway / apron / boundary sloped rects
+RUNWAY_CELL_SIZE_M = 10           # runway segments (real vertical profile)
+PATCH_SLOPE_PROFILE = "spline"   # "spline" | "plane" (only matters if cut)
