@@ -30,7 +30,6 @@ from shapely.strtree import STRtree
 from .layout import (
     BuiltShape,
     PavementLayout,
-    ROLE_BOUNDARY,
     SHARED_VERTEX_TOL_M,
     corner_alts_from_high_low,
 )
@@ -47,11 +46,19 @@ __all__ = [
 # treated consistently here.
 CONFORMANCE_TOL_M = SHARED_VERTEX_TOL_M
 
-# Roles whose footprints intentionally OVERLAY other pavement rather than
-# tiling with it, so they are exempt from the conformance partition (they
-# are not part of the airside constraint mesh in the same way).  The
-# airport-boundary ribbon traces over everything by design.
-_OVERLAY_ROLES = {ROLE_BOUNDARY}
+# Refs whose footprints intentionally OVERLAY other pavement rather than
+# tiling with it, so they are exempt from the conformance partition.  The
+# DEM bridge is a wide transition strip laid alongside/over the perimeter
+# band; it is trimmed against pavement (no area overlap) but is not part
+# of the airside constraint partition in the same way.
+#
+# NOTE (user 2026-05-22): the airport-boundary RIBBON (``ref ==
+# "airport_boundary"``) is NO LONGER exempt.  It now lies entirely inside
+# row-130 and pavement is clipped back to its inner edge
+# (``_clip_pavement_to_boundary_interior``), so the ribbon and pavement
+# must form a conforming partition — sharing seam nodes bidirectionally —
+# or Triangle4XP nodes the seam into slivers.
+_OVERLAY_REFS = {"boundary_dem_bridge"}
 
 
 def _open_ring(poly):
@@ -92,7 +99,7 @@ def _eligible(shape):
     p = getattr(shape, "polygon", None)
     if p is None or p.is_empty or p.geom_type != "Polygon":
         return False
-    return shape.role not in _OVERLAY_ROLES
+    return getattr(shape, "ref", None) not in _OVERLAY_REFS
 
 
 def _build_vertex_index(shapes):

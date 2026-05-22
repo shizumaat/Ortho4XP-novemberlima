@@ -2488,6 +2488,24 @@ def build_airport_pavement(icao: str, xplane_root: str,
         from .elevation import _report_within_shape_violations
         _report_within_shape_violations(layout, icao)
 
+    # ── Boundary-interior clip (user 2026-05-22) ──────────────────────
+    # No emitted shape may cross the airport boundary.  The boundary
+    # ribbon now lies entirely INSIDE the row-130 line and owns the
+    # outer strip band; clip every other shape back to the ribbon's
+    # inner edge so pavement and ribbon tile conformingly (shared
+    # inner-edge nodes), instead of the ribbon overlaying pavement
+    # non-conformingly → Triangle4XP slivers (HEAZ 1.48M-triangle
+    # hotspot).  Runs before the conformance pass below.
+    from .boundary import (
+        _clip_pavement_to_boundary_interior,
+        _conform_ribbon_to_pavement_seam,
+    )
+    n_clip, n_drop = _clip_pavement_to_boundary_interior(layout, icao=icao)
+    if n_clip or n_drop:
+        UI.vprint(1,
+            f"  [pav-builder] {icao}: boundary-interior clip — "
+            f"clipped {n_clip} shape(s), dropped {n_drop}.")
+
     # ── Boundary-conformance invariant (user 2026-05-22) ──────────────
     # RUNTIME requirement for EVERY airport: the emitted shapes must be a
     # CONFORMING partition — adjacent shapes share identical vertices
@@ -2496,7 +2514,9 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # sub-cm² slivers (HECA: 119k→2.36M airport triangles, 9m40s load).
     # "No area overlap" (test_no_self_overlap) is necessary but blind to
     # zero-area T-junctions, which is how this slipped through.  Enforce
-    # here (last geometry step), then assert the invariant holds.
+    # here (last geometry step), then assert the invariant holds.  The
+    # boundary ribbon now participates (it tiles with pavement); only the
+    # DEM bridge stays exempt (see conformance._OVERLAY_REFS).
     from .conformance import (
         enforce_conformance, find_conformance_violations)
     n_shapes, n_verts = enforce_conformance(layout)
@@ -2504,6 +2524,17 @@ def build_airport_pavement(icao: str, xplane_root: str,
         UI.vprint(1,
             f"  [pav-builder] {icao}: conformance — inserted {n_verts} "
             f"shared-boundary vertex(es) into {n_shapes} shape(s).")
+
+    # Ribbon YIELDS its elevation to abutting pavement at every shared
+    # seam node (incl. the ones conformance just inserted), so there is
+    # no vertical wall between pavement and the ribbon.  Altitude-only —
+    # does not change geometry, so the conformance invariant still holds.
+    n_seam = _conform_ribbon_to_pavement_seam(layout)
+    if n_seam:
+        UI.vprint(1,
+            f"  [pav-builder] {icao}: ribbon seam — adopted pavement "
+            f"altitude on {n_seam} ribbon rect(s).")
+
     tjs, crossings = find_conformance_violations(layout.shapes)
     if tjs or crossings:
         UI.vprint(1,

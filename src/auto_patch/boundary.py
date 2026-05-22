@@ -60,6 +60,7 @@ from .layout import (
     ROLE_TERMINAL,
     ROLE_RETAINING_WALL,
     SHARED_VERTEX_TOL_M,
+    corner_alts_from_high_low,
 )
 from .pavement.vertices import _snap_polygon_vertices_to_rect_corners
 from .pavement.junctions import _decompose_polygon_with_holes
@@ -620,17 +621,6 @@ def _emit_airport_boundary_shape(
         ext_rings = [g.exterior for g in boundary_geom.geoms]
     else:
         return 0
-    pavement_polys = [
-        s.polygon for s in layout.shapes
-        if s.polygon is not None
-        and not s.polygon.is_empty
-        and s.role != ROLE_BOUNDARY]
-    emitted_pav_union: Polygon | None = None
-    if pavement_polys:
-        try:
-            emitted_pav_union = unary_union(pavement_polys)
-        except _GEOM_EXC:
-            emitted_pav_union = None
 
     def _rect_for_segment(
             p0: tuple[float, float],
@@ -675,11 +665,15 @@ def _emit_airport_boundary_shape(
         L = math.hypot(dx, dy)
         if L < 0.5:
             return None
+        # The ribbon lies ENTIRELY INSIDE row-130 (user 2026-05-22): the
+        # OUTER long edge sits ON the boundary line (offset 0), the INNER
+        # long edge is offset inward by the full strip width.  ``perp0`` /
+        # ``perp1`` are the inward (interior-pointing) per-vertex offsets.
         corners = [
-            (p0[0] + perp0[0], p0[1] + perp0[1]),  # 0 high-left
-            (p1[0] + perp1[0], p1[1] + perp1[1]),  # 1 low-left
-            (p1[0] - perp1[0], p1[1] - perp1[1]),  # 2 low-right
-            (p0[0] - perp0[0], p0[1] - perp0[1]),  # 3 high-right
+            (p0[0], p0[1]),                          # 0 high-outer (on line)
+            (p1[0], p1[1]),                          # 1 low-outer  (on line)
+            (p1[0] + perp1[0], p1[1] + perp1[1]),    # 2 low-inner
+            (p0[0] + perp0[0], p0[1] + perp0[1]),    # 3 high-inner
         ]
         try:
             poly = _Polygon(corners)
@@ -714,6 +708,19 @@ def _emit_airport_boundary_shape(
         # bevel join (no overlap, no gap between adjacent rects).
         dense_open = dense[:-1] if (dense and dense[0] == dense[-1]) else dense
         N_open = len(dense_open)
+        # The per-vertex normal computed below is the LEFT normal
+        # (-dy, dx); it points into the airport INTERIOR iff the ring is
+        # CCW (positive shoelace area).  ``inward_sign`` flips it for a CW
+        # ring so the ribbon always offsets inward (entirely inside the
+        # row-130 line).
+        _sa = 0.0
+        for k in range(N_open):
+            x0, y0 = dense_open[k]
+            x1, y1 = dense_open[(k + 1) % N_open]
+            _sa += x0 * y1 - x1 * y0
+        inward_sign = 1.0 if _sa > 0.0 else -1.0
+        # Full strip width, offset inward only (was ±half-width straddle).
+        strip_width_m = 2.0 * strip_half_width_m
         vertex_perp: list[tuple[float, float]] = []
         for k in range(N_open):
             p_prev = dense_open[(k - 1) % N_open]
@@ -742,8 +749,8 @@ def _emit_airport_boundary_shape(
                 avg_x = px_in if Lin > 0 else px_out
                 avg_y = py_in if Lin > 0 else py_out
             vertex_perp.append(
-                (avg_x * strip_half_width_m,
-                 avg_y * strip_half_width_m))
+                (avg_x * strip_width_m * inward_sign,
+                 avg_y * strip_width_m * inward_sign))
         # Walk consecutive pairs; emit a rect per pair.  Use the
         # per-vertex perp at each pair endpoint so adjacent rects
         # share the flat (cross) edge nodes exactly.
@@ -773,31 +780,11 @@ def _emit_airport_boundary_shape(
             if built is None:
                 continue
             poly, eh, el, seg_high, seg_low = built
-            # Skip rects entirely buried inside pavement — they
-            # would just shadow runway / taxi / apron geometry and
-            # fail the no-self-overlap test.  Partial overlaps are
-            # OK; X-Plane resolves at render time and the rect
-            # still labels its segment.
-            if (emitted_pav_union is not None
-                    and not emitted_pav_union.is_empty):
-                try:
-                    if emitted_pav_union.contains(poly):
-                        continue
-                    # If pavement covers >80 % of the rect, skip too
-                    # — keeps the chain coherent with what's
-                    # actually visible.
-                    inter = emitted_pav_union.intersection(poly)
-                    if (not inter.is_empty
-                            and inter.area > 0.8 * poly.area):
-                        continue
-                    # Otherwise trim against pavement; if the
-                    # trimmed result is still a Polygon, replace.
-                    trimmed = poly.difference(emitted_pav_union)
-                    if (not trimmed.is_empty
-                            and trimmed.geom_type == "Polygon"):
-                        poly = trimmed
-                except _GEOM_EXC:
-                    pass
+            # No pavement self-trim here: the ribbon now owns the outer
+            # ``strip_width_m`` band exclusively, and pavement is clipped
+            # back to the ribbon's inner edge by
+            # ``_clip_pavement_to_boundary_interior`` so the two tile
+            # conformingly (shared inner-edge nodes, no slivers).
             shape = BuiltShape(
                 polygon=poly,
                 role=ROLE_BOUNDARY,
@@ -806,9 +793,8 @@ def _emit_airport_boundary_shape(
             if eh is None:
                 shape.altitude = el
             else:
-                # The pavement trim above (or a buffer(0) repair in
-                # ``_rect_for_segment``) can turn the 4-corner sloped
-                # quad into a non-quad.  ``altitude_high``/
+                # A buffer(0) repair in ``_rect_for_segment`` can turn the
+                # 4-corner sloped quad into a non-quad.  ``altitude_high``/
                 # ``altitude_low`` is only valid on a closed 4-corner
                 # quad — Ortho4XP rejects anything else ("Wrong number
                 # of nodes ... altitude_high/altitude_low polygon,
@@ -831,6 +817,297 @@ def _emit_airport_boundary_shape(
     return n_emitted
 
 
+# Roles exempt from the boundary-interior clip: they ARE the perimeter
+# band (the ribbon) or its DEM transition (the bridge) and legitimately
+# reach the row-130 line / lie within the ribbon band by design.
+_BOUNDARY_CLIP_EXEMPT_ROLES = {ROLE_BOUNDARY}
+
+
+def find_boundary_crossings(
+        layout: "PavementLayout",
+        tol_area_m2: float = 1.0) -> list[BuiltShape]:
+    """Return the non-boundary shapes whose footprint extends OUTSIDE the
+    airport boundary (apt.dat row-130) by more than ``tol_area_m2``.
+
+    The invariant (user 2026-05-22): no emitted pavement shape may cross
+    the airport boundary.  ``_clip_pavement_to_boundary_interior``
+    enforces it (clipping pavement back to the ribbon's inner edge, which
+    is itself inside row-130); this is the check.  An empty result means
+    the invariant holds.  The boundary ribbon / DEM bridge are exempt —
+    they are the perimeter band itself.
+    """
+    ab = getattr(layout, "airport_boundary", None)
+    if ab is None or ab.is_empty:
+        return []
+    out: list[BuiltShape] = []
+    for s in layout.shapes:
+        if s.role in _BOUNDARY_CLIP_EXEMPT_ROLES:
+            continue
+        p = s.polygon
+        if p is None or p.is_empty or p.geom_type != "Polygon":
+            continue
+        try:
+            if p.difference(ab).area > tol_area_m2:
+                out.append(s)
+        except _GEOM_EXC:
+            continue
+    return out
+
+
+def _largest_polygon(geom):
+    """Return the largest-area ``Polygon`` member of ``geom`` (which may
+    be a Polygon / MultiPolygon / GeometryCollection), or None."""
+    if geom is None or geom.is_empty:
+        return None
+    if geom.geom_type == "Polygon":
+        return geom
+    best = None
+    best_a = 0.0
+    for g in getattr(geom, "geoms", ()):
+        if g.geom_type == "Polygon" and not g.is_empty and g.area > best_a:
+            best, best_a = g, g.area
+    return best
+
+
+def _shape_open_alts(s: BuiltShape, n: int) -> list[float] | None:
+    """Per-(open-ring-)vertex altitudes for ``s`` (length ``n``), or None.
+
+    Mirrors ``conformance._vertex_alts`` so a reshaped shape can be
+    re-emitted as ``node_altitudes`` preserving its altitude field."""
+    na = s.node_altitudes
+    if na is not None:
+        a = list(na)
+        if len(a) == n + 1 and a[0] == a[-1]:
+            a = a[:-1]
+        if len(a) == n:
+            return a
+        return None
+    if (s.altitude_high is not None
+            and s.altitude_low is not None and n == 4):
+        return corner_alts_from_high_low(s.altitude_high, s.altitude_low)
+    if s.altitude is not None:
+        return [float(s.altitude)] * n
+    return None
+
+
+def _clip_pavement_to_boundary_interior(
+        layout: "PavementLayout", *, icao: str = "") -> tuple[int, int]:
+    """Clip every non-boundary pavement shape to the airport-interior
+    region bounded by the boundary ribbon's INNER edge (user 2026-05-22:
+    "no shape may cross the airport boundary").
+
+    The relocated ribbon (entirely inside row-130, see
+    ``_emit_airport_boundary_shape``) owns the outer ``strip_width_m``
+    band; pavement is clipped back to the ribbon's inner edge.  The clip
+    uses ``intersection(interior)`` where ``interior = airport_boundary −
+    ribbon_union``, so the clipped pavement edge follows the ribbon inner
+    edge and inherits its vertices EXACTLY — a conforming seam, no
+    T-junction slivers (the dominant Triangle4XP load-time cost).
+
+    Altitudes are re-derived for each clipped ring via
+    ``_resample_node_altitudes_nn`` (edge-interpolation along the old
+    ring), so pavement keeps its own graded altitude field at the seam
+    (the ribbon yields to it — see ``_conform_ribbon_to_pavement_seam``).
+    Flat ``altitude=`` shapes keep their constant altitude (valid for any
+    node count).
+
+    Returns ``(shapes_clipped, shapes_dropped)``.
+    """
+    ab = getattr(layout, "airport_boundary", None)
+    if ab is None or ab.is_empty:
+        return 0, 0
+    ribbon = [s.polygon for s in layout.shapes
+              if s.role == ROLE_BOUNDARY and s.ref == "airport_boundary"
+              and s.polygon is not None and not s.polygon.is_empty]
+    try:
+        ribbon_u = unary_union(ribbon) if ribbon else None
+        interior = ab.difference(ribbon_u) if ribbon_u is not None else ab
+    except _GEOM_EXC:
+        return 0, 0
+    if interior is None or interior.is_empty:
+        return 0, 0
+
+    AREA_EPS = 0.5  # m^2 — ignore sub-tolerance differences
+    clipped = 0
+    dropped: list[BuiltShape] = []
+    for s in layout.shapes:
+        if s.role in _BOUNDARY_CLIP_EXEMPT_ROLES:
+            continue
+        p = s.polygon
+        if p is None or p.is_empty or p.geom_type != "Polygon":
+            continue
+        try:
+            outside = p.difference(interior)
+        except _GEOM_EXC:
+            continue
+        if outside.is_empty or outside.area < AREA_EPS:
+            continue  # already inside the seam; no clip needed
+        try:
+            inter = p.intersection(interior)
+        except _GEOM_EXC:
+            continue
+        new_poly = _largest_polygon(inter)
+        if new_poly is None or new_poly.area < AREA_EPS:
+            dropped.append(s)
+            continue
+        old_open = list(p.exterior.coords)
+        if old_open and old_open[0] == old_open[-1]:
+            old_open = old_open[:-1]
+        if (s.altitude is not None and s.node_altitudes is None
+                and s.altitude_high is None):
+            # Flat shape: a constant ``altitude=`` is valid for any node
+            # count, so just replace the geometry.
+            s.polygon = new_poly
+        else:
+            alts_open = _shape_open_alts(s, len(old_open))
+            old_closed = (alts_open + [alts_open[0]]
+                          if alts_open else None)
+            new_alts = _resample_node_altitudes_nn(
+                new_poly, old_open, old_closed)
+            s.polygon = new_poly
+            if new_alts is not None:
+                s.node_altitudes = new_alts
+                s.altitude_high = None
+                s.altitude_low = None
+        clipped += 1
+    if dropped:
+        drop_ids = {id(d) for d in dropped}
+        layout.shapes = [s for s in layout.shapes
+                         if id(s) not in drop_ids]
+    return clipped, len(dropped)
+
+
+def _collect_shape_nodes(layout, predicate
+                         ) -> list[tuple[float, float, float]]:
+    """Collect ``(x, y, alt)`` for every exterior vertex of each shape
+    matching ``predicate`` that carries a usable altitude model."""
+    out: list[tuple[float, float, float]] = []
+    for s in layout.shapes:
+        if not predicate(s):
+            continue
+        p = s.polygon
+        if p is None or p.is_empty or p.geom_type != "Polygon":
+            continue
+        ring = list(p.exterior.coords)
+        if ring and ring[0] == ring[-1]:
+            ring = ring[:-1]
+        alts = _shape_open_alts(s, len(ring))
+        if alts is None:
+            continue
+        for (x, y), a in zip(ring, alts):
+            out.append((x, y, float(a)))
+    return out
+
+
+def _yield_seam_altitude(layout, taker_pred,
+                         giver_nodes: list[tuple[float, float, float]],
+                         tol: float) -> int:
+    """For each ``taker`` shape (matching ``taker_pred``), adopt the
+    altitude of the coincident ``giver`` node (within ``tol``) at every
+    vertex, leaving non-coincident vertices untouched.  A taker that
+    changes is re-emitted as ``node_altitudes``.  Returns the number of
+    taker shapes adjusted.
+
+    This is the per-node "yield" used to keep the perimeter seam flush:
+    the ribbon yields to pavement, then the DEM bridge yields to the
+    (already-yielded) ribbon — a one-way altitude cascade pavement →
+    ribbon → bridge so there is no vertical wall anywhere along it.
+    """
+    if not giver_nodes:
+        return 0
+    from collections import defaultdict
+    cell = 5.0
+    grid: dict = defaultdict(list)
+    for x, y, a in giver_nodes:
+        grid[(int(x / cell), int(y / cell))].append((x, y, a))
+    tol2 = tol * tol
+
+    def _nearest(x: float, y: float) -> float | None:
+        bi, bj = int(x / cell), int(y / cell)
+        best_a: float | None = None
+        best_d2 = tol2
+        for i in (bi - 1, bi, bi + 1):
+            for j in (bj - 1, bj, bj + 1):
+                for px, py, pa in grid.get((i, j), ()):
+                    d2 = (px - x) * (px - x) + (py - y) * (py - y)
+                    if d2 < best_d2:
+                        best_d2 = d2
+                        best_a = pa
+        return best_a
+
+    n = 0
+    for s in layout.shapes:
+        if not taker_pred(s):
+            continue
+        p = s.polygon
+        if p is None or p.is_empty or p.geom_type != "Polygon":
+            continue
+        ring = list(p.exterior.coords)
+        if ring and ring[0] == ring[-1]:
+            ring = ring[:-1]
+        base = _shape_open_alts(s, len(ring))
+        if base is None:
+            continue
+        new = list(base)
+        changed = False
+        for idx, (x, y) in enumerate(ring):
+            ga = _nearest(x, y)
+            if ga is not None and abs(ga - new[idx]) > 0.05:
+                new[idx] = ga
+                changed = True
+        if not changed:
+            continue
+        s.node_altitudes = new + [new[0]]
+        s.altitude_high = None
+        s.altitude_low = None
+        s.altitude = None
+        n += 1
+    return n
+
+
+def _conform_ribbon_to_pavement_seam(
+        layout: "PavementLayout",
+        tol: float = SHARED_VERTEX_TOL_M) -> int:
+    """Make the perimeter seam flush by a one-way altitude cascade
+    pavement → ribbon → DEM bridge (user 2026-05-22: pavement and ribbon
+    must match node AND elevation 1:1; the ribbon is the transition
+    strip, so it bends to the pavement — and the bridge in turn bends to
+    the ribbon, since its trimmed outer edge sits on the ribbon's inner
+    edge).
+
+    After ``_clip_pavement_to_boundary_interior`` + ``enforce_conformance``
+    the pavement edge runs along the ribbon's inner edge sharing its
+    nodes bidirectionally; the bridge's outer edge (trimmed against the
+    ribbon) shares the ribbon's inner-edge nodes too.  So:
+      1. ribbon vertices coincident with a pavement node adopt the
+         pavement altitude (vertices on the row-130 line / facing open
+         terrain keep their clamped/DEM value);
+      2. bridge vertices coincident with a (now-yielded) ribbon node
+         adopt the ribbon altitude (the bridge's inner DEM edge, which
+         shares no ribbon node, is untouched and still transitions to
+         DEM).
+
+    MUST run AFTER ``enforce_conformance`` so it covers the seam vertices
+    that pass inserts (those would otherwise carry an interpolated
+    altitude, not the neighbour's → a wall).
+
+    Returns the number of boundary shapes (ribbon + bridge) adjusted.
+    """
+    pav_nodes = _collect_shape_nodes(
+        layout, lambda s: s.role != ROLE_BOUNDARY)
+    n_rib = _yield_seam_altitude(
+        layout,
+        lambda s: s.role == ROLE_BOUNDARY and s.ref == "airport_boundary",
+        pav_nodes, tol)
+    # Cascade: the bridge yields to the (now-final) ribbon inner edge.
+    rib_nodes = _collect_shape_nodes(
+        layout,
+        lambda s: s.role == ROLE_BOUNDARY and s.ref == "airport_boundary")
+    n_br = _yield_seam_altitude(
+        layout,
+        lambda s: s.role == ROLE_BOUNDARY and s.ref == "boundary_dem_bridge",
+        rib_nodes, tol)
+    return n_rib + n_br
 
 
 def _emit_boundary_dem_bridge(

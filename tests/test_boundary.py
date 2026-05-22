@@ -155,6 +155,84 @@ def test_boundary_bridge_flush_with_ribbon_at_shared_vertices():
         f"Matched {n_pairs} shared vertices.")
 
 
+@_requires_xplane
+def test_no_shape_crosses_airport_boundary():
+    """Invariant (user 2026-05-22): no emitted pavement shape may cross
+    the airport boundary (apt.dat row-130).  The boundary ribbon lies
+    entirely inside the line and pavement is clipped back to the ribbon's
+    inner edge, so every non-boundary shape stays within row-130."""
+    from auto_patch.boundary import find_boundary_crossings
+    from auto_patch.pipeline import build_airport_pavement
+
+    layout = build_airport_pavement(
+        "CYXY", xplane_root(), compute_elevations=True)
+    if layout.airport_boundary is None or layout.airport_boundary.is_empty:
+        pytest.skip("CYXY has no usable row-130 boundary to gate against")
+    crossings = find_boundary_crossings(layout)
+    assert not crossings, (
+        f"{len(crossings)} shape(s) cross the airport boundary: "
+        + ", ".join(
+            f"{s.role}/{s.ref} "
+            f"({s.polygon.difference(layout.airport_boundary).area:.1f} m²)"
+            for s in crossings[:8]))
+
+
+@_requires_xplane
+def test_ribbon_flush_with_pavement_at_shared_vertices():
+    """No vertical wall between the boundary ribbon and the pavement it
+    abuts: the ribbon yields its elevation to pavement at every shared
+    seam vertex (``_conform_ribbon_to_pavement_seam``), so co-located
+    ribbon/pavement vertices agree in altitude within ``_WALL_TOL_M``."""
+    from auto_patch.layout import ROLE_BOUNDARY
+    from auto_patch.pipeline import build_airport_pavement
+
+    layout = build_airport_pavement(
+        "CYXY", xplane_root(), compute_elevations=True)
+
+    rib_pts, pav_pts = [], []
+    for s in layout.shapes:
+        coords, alts = _per_vertex_alts(s)
+        if alts is None:
+            continue
+        if s.role == ROLE_BOUNDARY:
+            if s.ref == "airport_boundary":
+                rib_pts.extend(zip(coords, alts))
+        else:
+            pav_pts.extend(zip(coords, alts))
+    if not rib_pts or not pav_pts:
+        pytest.skip("CYXY emitted no ribbon / pavement to compare")
+
+    tol2 = _SHARED_XY_TOL_M * _SHARED_XY_TOL_M
+    worst = 0.0
+    worst_xy = None
+    n_pairs = 0
+    for (x, y), a in rib_pts:
+        best_d2 = tol2
+        best_pav_alt = None
+        for (px, py), pa in pav_pts:
+            d2 = (x - px) ** 2 + (y - py) ** 2
+            if d2 <= best_d2:
+                best_d2 = d2
+                best_pav_alt = pa
+        if best_pav_alt is None:
+            continue
+        n_pairs += 1
+        dz = abs(a - best_pav_alt)
+        if dz > worst:
+            worst = dz
+            worst_xy = (x, y, a, best_pav_alt)
+
+    if n_pairs < 10:
+        pytest.skip(
+            f"too few shared ribbon/pavement vertices ({n_pairs}) at CYXY")
+    assert worst <= _WALL_TOL_M, (
+        f"ribbon floats {worst:.2f} m off abutting pavement at a shared "
+        f"vertex (cap {_WALL_TOL_M:.1f} m) — seam-wall regression.  "
+        f"Worst: ribbon_alt={worst_xy[2]:.2f} vs pav_alt={worst_xy[3]:.2f} "
+        f"at ({worst_xy[0]:.1f}, {worst_xy[1]:.1f}).  "
+        f"Matched {n_pairs} shared vertices.")
+
+
 # ──────────────────────────────────────────────────────────────────────
 # _node_altitudes_from_segment_slope — pure helper (no X-Plane build)
 # ──────────────────────────────────────────────────────────────────────
