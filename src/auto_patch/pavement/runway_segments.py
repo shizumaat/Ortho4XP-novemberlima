@@ -47,6 +47,14 @@ DEG_TO_M = 111120.0  # approximate meters per degree of latitude
 # FAA AC 150/5300-13B grade limits for Approach Category C-E airports.
 MAX_RUNWAY_GRADE = 0.015      # 1.5% max longitudinal grade for runways
 
+# EASA CS-ADR-DSN / ICAO Annex 14 tighten the longitudinal grade in the
+# first and last quarter of the runway length (code 3/4) to 0.8%.  This
+# is applied as an opt-in per-segment cap layered on top of the 1.5%
+# mid-runway cap (which stays the project default); see
+# ``runway_segment_grade_cap``.
+RUNWAY_END_GRADE = 0.008        # 0.8% max grade in first/last quarter
+RUNWAY_END_FRACTION = 0.25      # extent of each end zone (fraction of length)
+
 # FAA vertical-curve rules: L >= 1000 ft x |delta-G| for runways
 # (Design Group III+) means a 1% grade change requires a 305 m
 # vertical curve, i.e. ~0.0033% grade change per metre of pavement.
@@ -78,6 +86,8 @@ __all__ = [
     "MAX_RUNWAY_GRADE",
     "MAX_RUNWAY_GRADE_CHANGE_PER_M",
     "OVERRUN_EXTENSION",
+    "RUNWAY_END_FRACTION",
+    "RUNWAY_END_GRADE",
     "RUNWAY_MARGIN",
     "RUNWAY_SEGMENT_LENGTH",
     "faa_envelope_clamp",
@@ -85,6 +95,8 @@ __all__ = [
     "faa_rate_of_change_pass",
     "faa_joint_solve",
     "generate_patch_osm",
+    "runway_grade_cap_at",
+    "runway_segment_grade_cap",
 ]
 
 
@@ -100,6 +112,39 @@ __all__ = [
 # centerline crossings, seam DEMs).  ``phys_dist`` is the runway
 # physical length in metres.
 # ──────────────────────────────────────────────────────────────────
+
+
+def runway_grade_cap_at(frac, grade_cap=MAX_RUNWAY_GRADE,
+                        end_grade_cap=None,
+                        end_fraction=RUNWAY_END_FRACTION):
+    """Longitudinal grade cap at fractional position ``frac`` ∈ [0, 1].
+
+    Returns ``end_grade_cap`` inside the first/last ``end_fraction`` of
+    the runway length (EASA/ICAO 0.8% rule) and ``grade_cap`` elsewhere.
+    When ``end_grade_cap`` is None the cap is uniform — identical to the
+    historical single-cap behaviour.
+    """
+    if end_grade_cap is None:
+        return grade_cap
+    if frac < end_fraction or frac > 1.0 - end_fraction:
+        return end_grade_cap
+    return grade_cap
+
+
+def runway_segment_grade_cap(frac_i, frac_j, grade_cap=MAX_RUNWAY_GRADE,
+                             end_grade_cap=None,
+                             end_fraction=RUNWAY_END_FRACTION):
+    """Grade cap binding on the segment between two samples.
+
+    Uses the tighter of the two endpoints' caps so any segment touching
+    an end zone is held to ``end_grade_cap``.
+    """
+    if end_grade_cap is None:
+        return grade_cap
+    return min(
+        runway_grade_cap_at(frac_i, grade_cap, end_grade_cap, end_fraction),
+        runway_grade_cap_at(frac_j, grade_cap, end_grade_cap, end_fraction),
+    )
 
 
 def faa_envelope_clamp(fractions, elevs, anchored, phys_dist,
@@ -179,12 +224,21 @@ def faa_envelope_clamp(fractions, elevs, anchored, phys_dist,
 
 def faa_hard_cap_pass(fractions, elevs, anchored, phys_dist,
                        grade_cap=MAX_RUNWAY_GRADE,
-                       max_iters=GRADE_RELAX_ITERATIONS):
+                       max_iters=GRADE_RELAX_ITERATIONS,
+                       end_grade_cap=None,
+                       end_fraction=RUNWAY_END_FRACTION):
     """Iterative per-edge grade-cap projection.
 
     For each non-anchored sample, restrict its elevation to the band
-    reachable from its two neighbours within ±(grade_cap × segment
-    length).  Iterates until no further change.
+    reachable from its two neighbours within ±(cap × segment length),
+    where ``cap`` is the per-segment cap from ``runway_segment_grade_cap``
+    — ``end_grade_cap`` for segments touching the first/last
+    ``end_fraction`` of the runway, otherwise ``grade_cap``.  Iterates
+    until no further change.
+
+    This pass is the binding longitudinal-grade enforcer; the upstream
+    ``faa_envelope_clamp`` deliberately stays on the looser ``grade_cap``
+    (it only sets a feasible band that this pass then tightens).
     """
     n = len(elevs)
     for _it in range(max_iters):
@@ -200,7 +254,10 @@ def faa_hard_cap_pass(fractions, elevs, anchored, phys_dist,
                 seg = abs(fractions[nidx] - fractions[idx]) * phys_dist
                 if seg < 0.1:
                     continue
-                max_rise = seg * grade_cap
+                cap = runway_segment_grade_cap(
+                    fractions[idx], fractions[nidx], grade_cap,
+                    end_grade_cap, end_fraction)
+                max_rise = seg * cap
                 lo = max(lo, elevs[nidx] - max_rise)
                 hi = min(hi, elevs[nidx] + max_rise)
             if lo == float("-inf") and hi == float("inf"):
@@ -310,9 +367,15 @@ def faa_joint_solve(fractions, elevs, anchored, phys_dist,
                      blast_a=0.0, blast_b=0.0,
                      grade_cap=MAX_RUNWAY_GRADE,
                      max_dg_per_m=MAX_RUNWAY_GRADE_CHANGE_PER_M,
-                     n_outer=8, tol_m=0.005):
+                     n_outer=8, tol_m=0.005,
+                     end_grade_cap=None,
+                     end_fraction=RUNWAY_END_FRACTION):
     """Run envelope clamp + alternating hard-cap and rate-of-change
     passes until joint convergence.  Mutates ``elevs`` in place.
+
+    When ``end_grade_cap`` is given, the hard-cap pass tightens the
+    longitudinal grade to it within the first/last ``end_fraction`` of
+    the runway (EASA/ICAO end-zone rule); otherwise the cap is uniform.
     """
     faa_envelope_clamp(fractions, elevs, anchored, phys_dist,
                         grade_cap=grade_cap,
@@ -320,7 +383,9 @@ def faa_joint_solve(fractions, elevs, anchored, phys_dist,
     for _outer in range(n_outer):
         prev = list(elevs)
         faa_hard_cap_pass(fractions, elevs, anchored, phys_dist,
-                           grade_cap=grade_cap)
+                           grade_cap=grade_cap,
+                           end_grade_cap=end_grade_cap,
+                           end_fraction=end_fraction)
         faa_rate_of_change_pass(fractions, elevs, anchored, phys_dist,
                                   blast_a=blast_a, blast_b=blast_b,
                                   max_dg_per_m=max_dg_per_m)
@@ -1320,6 +1385,7 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
                 fractions, elevs, anchored, phys_dist,
                 blast_a=blast_a, blast_b=blast_b,
                 grade_cap=MAX_RUNWAY_GRADE,
+                end_grade_cap=RUNWAY_END_GRADE,
                 max_dg_per_m=MAX_RUNWAY_GRADE_CHANGE_PER_M)
 
             # Capture the per-pair FAA-compliant profile state so a

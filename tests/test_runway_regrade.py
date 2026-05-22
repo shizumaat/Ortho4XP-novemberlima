@@ -6,6 +6,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "src"))
 
 from auto_patch.runway_regrade import DEFAULT_ARC_K_M, regrade_runway
+from auto_patch.pavement.runway_segments import (
+    MAX_RUNWAY_GRADE, RUNWAY_END_GRADE, faa_joint_solve,
+    runway_grade_cap_at, runway_segment_grade_cap)
 
 
 def test_no_seams_returns_cifp():
@@ -120,3 +123,71 @@ def test_single_seam_kfactor_constraint_is_satisfied():
     # the available length, i.e. |Δg| ≤ 2·min(d_A,d_B)/K.
     dg_max = 2.0 * min(d_A, d_B) / DEFAULT_ARC_K_M
     assert abs(g1 - g0) <= dg_max + 1e-4
+
+
+# ── First/last-quarter end-zone cap (EASA/ICAO 0.8%) ────────────────
+
+
+def test_grade_cap_at_uniform_when_no_end_cap():
+    """With end_grade_cap=None the cap is uniform everywhere (the
+    historical single-cap behaviour)."""
+    for f in (0.0, 0.1, 0.25, 0.5, 0.9, 1.0):
+        assert runway_grade_cap_at(f) == MAX_RUNWAY_GRADE
+
+
+def test_grade_cap_at_tightens_in_end_zones():
+    g = lambda f: runway_grade_cap_at(f, MAX_RUNWAY_GRADE, RUNWAY_END_GRADE)
+    # First/last quarter → tight cap.
+    assert g(0.0) == RUNWAY_END_GRADE
+    assert g(0.1) == RUNWAY_END_GRADE
+    assert g(0.9) == RUNWAY_END_GRADE
+    assert g(1.0) == RUNWAY_END_GRADE
+    # Middle half → main cap (quarter boundary is exclusive).
+    assert g(0.25) == MAX_RUNWAY_GRADE
+    assert g(0.5) == MAX_RUNWAY_GRADE
+    assert g(0.75) == MAX_RUNWAY_GRADE
+
+
+def test_segment_grade_cap_uses_tighter_endpoint():
+    """A segment touching an end zone is held to the tight cap."""
+    assert runway_segment_grade_cap(
+        0.2, 0.3, MAX_RUNWAY_GRADE, RUNWAY_END_GRADE) == RUNWAY_END_GRADE
+    assert runway_segment_grade_cap(
+        0.4, 0.6, MAX_RUNWAY_GRADE, RUNWAY_END_GRADE) == MAX_RUNWAY_GRADE
+
+
+def test_regrade_end_cap_clips_threshold_tighter():
+    """A single seam at 250 m on a 1000 m runway, CIFP threshold below
+    the seam.  Under the 1.5% cap the threshold can sit within 3.75 m of
+    the seam; under the 0.8% end cap only within 2.0 m — so the end cap
+    pulls the threshold UP closer to the seam.
+    """
+    seam = (250.0, 5.0)
+    r_main = regrade_runway(0.0, 5.0, 1000.0, [seam],
+                            grade_cap=MAX_RUNWAY_GRADE)
+    r_end = regrade_runway(0.0, 5.0, 1000.0, [seam],
+                           grade_cap=MAX_RUNWAY_GRADE,
+                           end_grade_cap=RUNWAY_END_GRADE)
+    assert abs(r_main.threshold_A - 1.25) < 0.05   # 5 - 0.015*250
+    assert abs(r_end.threshold_A - 3.00) < 0.05    # 5 - 0.008*250
+    # Resulting end-segment grade respects the tighter cap.
+    g_end = (seam[1] - r_end.threshold_A) / seam[0]
+    assert abs(g_end) <= RUNWAY_END_GRADE + 1e-4
+
+
+def test_joint_solve_holds_end_zone_grade_when_feasible():
+    """A feasible profile (gentle interior bump, both ends anchored at a
+    reachable elevation) has every first/last-quarter segment held to
+    0.8% once the end cap is supplied."""
+    fr = [i / 10 for i in range(11)]
+    phys = 1000.0
+    elevs = [0.0, 3, 3, 3, 3, 3, 3, 3, 3, 3, 5.0]
+    anchored = [False] * 11
+    anchored[0] = anchored[10] = True
+    faa_joint_solve(fr, elevs, anchored, phys,
+                    grade_cap=MAX_RUNWAY_GRADE,
+                    end_grade_cap=RUNWAY_END_GRADE)
+    for i in range(10):
+        if fr[i] < 0.25 or fr[i + 1] > 0.75:
+            g = (elevs[i + 1] - elevs[i]) / ((fr[i + 1] - fr[i]) * phys)
+            assert abs(g) <= RUNWAY_END_GRADE + 1e-4

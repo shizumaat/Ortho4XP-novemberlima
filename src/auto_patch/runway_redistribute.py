@@ -64,7 +64,8 @@ from typing import Dict, List, Tuple
 from .layout import (
     ROLE_RUNWAY, SHARED_VERTEX_TOL_M, high_low_from_corner_alts)
 from .pavement.runway_segments import (
-    MAX_RUNWAY_GRADE, MAX_RUNWAY_GRADE_CHANGE_PER_M, faa_joint_solve,
+    MAX_RUNWAY_GRADE, MAX_RUNWAY_GRADE_CHANGE_PER_M, RUNWAY_END_GRADE,
+    faa_joint_solve,
 )
 from .runway_regrade import regrade_runway, DEFAULT_ARC_K_M
 
@@ -175,6 +176,7 @@ def _shift_thresholds_for_seams(
     result = regrade_runway(
         cifp_a, cifp_b, axis_len, interior,
         grade_cap=MAX_RUNWAY_GRADE,
+        end_grade_cap=RUNWAY_END_GRADE,
         arc_K_m=DEFAULT_ARC_K_M)
     elevs[first_i] = result.threshold_A
     elevs[last_i] = result.threshold_B
@@ -403,6 +405,7 @@ def redistribute_runway_profile(
             blast_a=state['blast_a_m'],
             blast_b=state['blast_b_m'],
             grade_cap=MAX_RUNWAY_GRADE,
+            end_grade_cap=RUNWAY_END_GRADE,
             max_dg_per_m=MAX_RUNWAY_GRADE_CHANGE_PER_M)
 
         # Evaluate the new profile at every runway sub-rect's vertex.

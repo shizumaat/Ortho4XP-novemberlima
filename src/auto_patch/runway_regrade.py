@@ -58,6 +58,7 @@ def regrade_runway(
     seam_anchors: List[Tuple[float, float]],
     *,
     grade_cap: float = DEFAULT_GRADE_CAP,
+    end_grade_cap: float | None = None,
     arc_K_m: float = DEFAULT_ARC_K_M,
 ) -> RegradeResult:
     """Re-grade a runway against fixed seam altitudes.
@@ -92,6 +93,11 @@ def regrade_runway(
             threshold_B=threshold_B_cifp,
             warnings=warnings,
             seam_altitudes=[])
+
+    # The two threshold-adjacent segments (A→seam[0], seam[-1]→B) sit in
+    # the runway's first/last quarter, so they are held to the tighter
+    # EASA/ICAO end-zone cap when one is supplied (else the main cap).
+    end_cap = end_grade_cap if end_grade_cap is not None else grade_cap
 
     n = len(seams)
     # Segment distances along the runway: d[0] = A→seam[0],
@@ -131,9 +137,9 @@ def regrade_runway(
     # ── Threshold A regrade ─────────────────────────────────────────
     d_A = dists[0]
     seam_alt_0 = alts[0]
-    # Grade-cap bound: |g_0| ≤ grade_cap where g_0 = (seam_alt_0 - alt_A) / d_A
-    a_lo_grade = seam_alt_0 - grade_cap * d_A
-    a_hi_grade = seam_alt_0 + grade_cap * d_A
+    # Grade-cap bound: |g_0| ≤ end_cap where g_0 = (seam_alt_0 - alt_A) / d_A
+    a_lo_grade = seam_alt_0 - end_cap * d_A
+    a_hi_grade = seam_alt_0 + end_cap * d_A
     # K-factor bound at PVI 0:
     if n >= 2:
         # g_1 is fixed (seam-to-seam), so g_0 bounds are linear in alt_A.
@@ -159,9 +165,9 @@ def regrade_runway(
     # ── Threshold B regrade ─────────────────────────────────────────
     d_B = dists[-1]
     seam_alt_last = alts[-1]
-    # g_N = (alt_B - seam_alt_last) / d_B; |g_N| ≤ grade_cap
-    b_lo_grade = seam_alt_last - grade_cap * d_B
-    b_hi_grade = seam_alt_last + grade_cap * d_B
+    # g_N = (alt_B - seam_alt_last) / d_B; |g_N| ≤ end_cap
+    b_lo_grade = seam_alt_last - end_cap * d_B
+    b_hi_grade = seam_alt_last + end_cap * d_B
     if n >= 2:
         g_Nm1_fixed = ((alts[-1] - alts[-2]) / dists[-2]
                        if dists[-2] > 1e-6 else 0.0)
