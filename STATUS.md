@@ -1,262 +1,165 @@
-# Auto-Patch Status — X-Plane load-time / mesh-triangle session (handover)
+# Auto-Patch Status — taxi-centerline grade compliance (handover)
 
 ## TL;DR
 
-This session chased **why HECA's auto-patch takes 9m40s to load in X-Plane**
-and turned into: (1) a coverage/quality pass on the DSF-enriched pavement,
-(2) the discovery that the load time is **degenerate Triangle4XP
-micro-triangulation caused by non-conforming patch boundaries**, (3) a new
-**runtime boundary-conformance invariant**, and (4) fixing **groundside
-polygon construction** (separation + 4 % grading) per two design
-requirements.
+This session's through-line: **make taxi pavement follow terrain (DEM) while
+keeping every taxi route within FAA/EASA grade**, and chase the last grade
+violations toward GREEN baselines.
 
-**Nothing is committed.** HEAD is still `57ea7b3`. All work is in the
-working tree (11 modified source files + `conformance.py` + 7 new tools).
+**THE GOAL (still open):** *along-taxi-centerline grade ≤ the code-letter limit
+EVERYWHERE* (longitudinal 1.5% code C-F / 3% A-B; transverse 1.5% / 2%), while
+pavement otherwise hugs the DEM. We are NOT there yet — see "The remaining
+challenge."
 
-**Suite: 9 failed / 310 passed / 1 skipped.** All 9 are PRE-EXISTING and
-NOT caused by this session's changes:
-- 5 × SPJC (`compare_target_spjc`, `vertices_have_source`,
-  `neighbour_corners`, `taxi_rects_not_alongside_apron`, `grade`) — the
-  gate-removal regressions from the prior session (item below).
-- 2 × SPLP `compare_target[-13--77 / -78]` — fixture drift from the
-  runway-segmentation change this session (intentionally held; re-cut).
-- 1 × CYXY `grade` — pre-existing (fails with or without any change here).
+**Everything is committed.** HEAD = `052370d`. Working tree clean.
+This session's commits (interleaved with the user's parallel boundary/clearance work):
+- `7218926` Elevation: **persistent DEM attraction** — taxiways/aprons follow terrain.
+- `c6146d0` Elevation: **taxi→runway anchor + hybrid centerline junction grade**.
+- `e88f605` Elevation: **asymmetric DEM floor** — undo spurious below-terrain drag.
+(Plus the prior `956fe4f` boundary-interior invariant — VERIFIED in X-Plane: tile
++30+031 went 2.6M→**930k triangles, 9m40s→30s load**.)
 
-**The user is now evaluating the output** (rebuilding the tile mesh +
-measuring triangles/load time). Do not assume the conformance fix worked
-until that measurement is in.
+**Suite: 9 pre-existing failures** (see `memory/suite_baseline_dev_head.md`):
+3× compare_target (SPJC, SPLP×2 — fixture drift, READY TO RECUT), 3× SPJC junction
+invariants, 3× grade (SPJC/SPLP/CYXY). This session **improved every grade test's
+worst case** but did not zero them.
 
 ---
 
-## THE KEY FINDING (read this first)
+## THE ACTIVE ELEVATION SOLVER (read this first)
 
-X-Plane load time tracks **Triangle4XP mesh triangle count**, NOT patch
-node count. Measured on tile `+30+031` (HECA):
+`src/auto_patch/elevation_per_surface/unified_jacobi.py::solve` is the LIVE solver
+(`USE_PER_SURFACE_SOLVER=1`). The fallback `elevation._solve_pavement_elevations_unified`
+is dead — don't edit it. Per iteration it does:
 
-| build | triangles | load |
-|---|---|---|
-| patch OFF | 913,215 | 39 s |
-| patch ON | 3,148,377 | 9m40s |
+1. **Asymmetric DEM attraction** (this session): pull each SOFT node toward its DEM —
+   STRONGLY up if below terrain (`DEM_FLOOR_ATTRACTION=0.85`), gently down
+   (`DEM_ATTRACTION=0.3`). Persistent (no decay).
+2. **Cap projection** (5 sweeps): enforce per-edge grade ≤ cap. Runs AFTER attraction,
+   so **grade wins** (a node that must sit below DEM to grade toward a HARD anchor is
+   pushed back down).
+3. **Equality groups**: terminal flatness + rect axis-end (cross-section) flatness.
 
-**The airport region holds 2.38 M of the 3.15 M tile triangles, and 94 %
-of them are sub-1 m² (median ≈ 0.00 m²) — degenerate slivers.** This is NOT
-honest curvature refinement; it's the constrained triangulation (Ortho4XP
-`O4_Vector_Utils.insert_edge`, `check=True`) **noding non-conforming patch
-boundaries** into a sliver storm.
+HARD anchors = CIFP runway corners + tile-seam DEM vertices only. Everything else is SOFT.
 
-Things that DO NOT change the triangle count (all ruled out by code +
-user rebuilds): `cell_size`/internal cuts, patch node count, `apt_curv_tol`
-(saturates `CURV_LIMITER=8` in `Triangle4XP.c`), `curvature_tol` (the
-curvature raster is DEM-only / patch-independent; patch pavement tris with
-attribute ≥ 8 are EXCLUDED from refinement at `Triangle4XP.c:7234`).
+Junction edges currently = **ring + all-pair Euclidean** (with a hybrid centerline-arc
+budget for along-centerline pairs, `c6146d0`). Rects = ring-only + cross-section flatness.
 
-So the lever is **patch boundary CONFORMANCE**: adjacent shapes must share
-identical vertices along common edges, with no crossings. "No area
-overlap" (`test_no_self_overlap`) is necessary but blind to zero-area
-T-junctions — which is how this slipped through (and HECA was never in the
-tested baseline anyway).
-
-### UPDATE after the conformance fix + user's rebuild (2026-05-22)
-
-Tile went **3,148,377 → 2,602,361** triangles (−546k). Measured with
-`mesh_triangle_quality.py`:
-- **HECA airport bbox: 2.36 M → ~140k triangles, 94 % → 6 % sub-1 m².**
-  The conformance fix WORKED — the HECA terminal/groundside sliver storm
-  is gone.
-- **BUT the tile still has 1.68 M sub-1 m² triangles, 88 % of them
-  (1,476,990) in ONE 100 m cell at 30.091, 31.366 — that is HEAZ
-  (Almaza), the OTHER airport in this tile.** Tile +30+031 contains both
-  HECA and HEAZ; the tile build patches BOTH; my standalone builds only
-  did HECA.
-- **HEAZ root cause:** that hotspot is a 166,705 m² apron with ~12 thin
-  **boundary-ribbon** strips overlaying it. The boundary ribbon "traces
-  over everything by design" and is EXCLUDED from the conformance pass
-  (`conformance._OVERLAY_ROLES`), so its strips overlap pavement
-  non-conformingly → Triangle4XP nodes them into the sliver storm.
-  `build_airport_pavement("HEAZ")` confirms: 0 T-junctions, 11 crossings,
-  360 boundary pieces, 0 invalid shapes — the airside partition is clean;
-  the boundary overlay is the culprit.
-
-**So the NEXT lever is the boundary ribbon overlapping pavement** — clip
-the boundary ribbon out of (or conform it to) the pavement it overlays,
-or rethink the overlay so Triangle4XP doesn't node it. Expect another
-~1.5 M drop once HEAZ's boundary is handled. (HECA's boundary doesn't
-overlap a big apron the same way, which is why HECA came out clean.)
+The grade AUDIT (the test gate) is `tools/check_grade.py` — all-pair Euclidean within-shape
++ a triangle plane-gradient check + cross-shape proximity + mid-edge steps.
 
 ---
 
-## What changed this session (all UNCOMMITTED)
+## WHAT THIS SESSION FIXED (committed, verified)
 
-**Coverage / quality of the DSF-enriched pavement union:**
-- `dsf_reader.py` — faithful **split-handle bezier decode** (no-merge +
-  zero-length-skip): 207/207 HECA bezier rings valid (was 7 invalid).
-- `union_helpers.py` + `pipeline.py` — `_close_open_clean` (mitre
-  close-then-open) replaces `_drop_sliver_holes` at the union step +
-  `simplify(2.0)`. HECA grade violations 1484→923, gaps 96k→62k m².
-  **NOTE: this regresses SPLP within-shape grade (seam junction -10042,
-  1.91 %) — user's "review union first" decision still pending.**
-- `junction_rules.py` — `_enforce_runway_1to1_sharing` guard now rejects
-  by **abandoned pav_union area** (`abandoned ∩ _pav_union_for_rects`)
-  not net area (recovered ~23k m² of stub↔runway wedges); same
-  abandoned-pavement guard added to `widen_junctions_to_runway_corners`
-  (`WIDEN_MAX_ABANDONED_PAVEMENT_M2`).
-- `groundside.py` + `finalize.py` — the old `_drop_groundside_orphan_
-  junctions` is now `_reclassify_groundside_orphan_junctions` (recovered
-  ~44k m² that was being DROPPED). **Superseded in part — see Groundside
-  section below.**
-
-Net HECA pav_union coverage reached **99.94 %** (target 100 %, no tile
-seam) — but that's pav_union COVERAGE, a separate axis from mesh triangles.
-
-**Mesh-density knobs (config-tunable, but per the KEY FINDING they don't
-move the triangle count — left for completeness):**
-- `config.py`: `PATCH_SLOPE_CELL_SIZE_M`, `RUNWAY_CELL_SIZE_M`,
-  `PATCH_SLOPE_PROFILE`. **Currently set to 10 / 10 / spline** (user's
-  sweep values — reset to taste; they don't affect triangles).
-- `layout.py` — sloped-rect emit reads those constants (runway-role rects
-  use `RUNWAY_CELL_SIZE_M`).
-- `pavement/runway_segments.py` — runway segmentation: **pavement-join-
-  only** (no uniform 100 m interval breaks); `O4_Vector_Map.py` floors
-  `cuts_long` at 1 (fixes an `UnboundLocalError` when `cell_size` ≥ way
-  length).
-- `O4_Vector_Map.py` — `include_patches` now **honors the `auto_patch`
-  mode on LOAD** (None / ICAO / All), not just generation, so changing
-  the setting takes effect even when patch files already exist.
-
-**Boundary-conformance invariant (the real lever) — NEW:**
-- `auto_patch/conformance.py`: `enforce_conformance(layout)` inserts each
-  neighbour vertex lying on a shape's edge so shared boundaries become
-  vertex-identical (preserves elevation by interpolation; converts a
-  vertexed sloped-quad to `node_altitudes`). `find_conformance_violations`
-  is the invariant check (T-junctions + crossings).
-- `pipeline.py` — runs `enforce_conformance` as the **final geometry step
-  for EVERY airport** (runtime, not just a test) + a runtime WARN if
-  violations remain.
-- Result: HECA T-junctions ~1600 → **11**; **SPLP fully clean (0/0)**.
-  Residual on HECA: **11 T-junctions + 18 crossings**. The crossings are
-  GENUINE edge crossings = real (tiny) geometric overlaps that vertex
-  insertion cannot fix — a distinct upstream-overlap bug the area-overlap
-  test misses.
-
-**Groundside polygons — two design requirements enforced (user
-2026-05-22):**
-1. *Must not share any node/edge with terminal/airside.*
-   - APRON added to `AIRSIDE_SEED_ROLES` in the reclassify (terminal
-     AIRCRAFT aprons stay airside; only true car/building pavement is
-     groundside).
-   - New `_separate_groundside_from_airside(layout, ...)` (finalize):
-     clips every groundside polygon to a **1 m clearance gap** from all
-     terminal/airside pavement (mitre-join buffer for clean clip edges;
-     re-derives altitudes with NO re-simplify so the gap is preserved).
-   - **Verified HECA: 0 shared points / 0 shared edges / 0 area-overlaps**
-     (was 422 / 32 / 7).
-2. *DEM elevation but graded like ramps to ≤ 4 %.*
-   - `ROLE_GRADE_LIMITS["groundside_pavement"] = 0.040` (was `None`).
-   - `_grade_limit_ring` in `_dem_follow_polygon` relaxes per-vertex DEM
-     altitudes to ≤ 4 % (iterations scale with ring size).
-   - Surface is graded to ≤ 4 %. Residual metric artifact (worst 9.82 %
-     on a ~1 m curb edge) is purely **0.1 m altitude emit precision**
-     (`to_osm` formats `node_altitudes` as `%.1f`). For exact ≤4 %: emit
-     groundside at finer precision OR enforce ≥2.5 m min edge.
-
-**Test fix:** `tests/test_layout.py::test_to_osm_sloped_rect_emits_high_
-low_cell_profile` now asserts against the config constants (was hardcoded
-`"2"`/`"spline"`).
+- **HECA stub T4 cliff: 7.25 m → ~1 m.** Root: the solver hard-anchored only runways and
+  relaxed everything else by cap-projection-ONLY, so the taxiway/apron network — strung
+  between HECA's genuinely-low south terminals (~60 m) and high runways (110 m) — sank 5-8 m
+  below its own terrain via cap-chains. Fixes: persistent DEM attraction (`7218926`) +
+  taxi→runway anchor reviving `TAXI_ANCHOR_DIST_M` (`c6146d0`) + asymmetric floor (`e88f605`).
+  T4 runway-side 103.3→**109.5 m** (DEM 109.3).
+- **SPLP stub A: 3.88% → cleared.** The asymmetric floor holds its corners at the FLAT
+  ~72 m terrain (they were dragged 1.2 m below by a descending taxiway). SPLP within-shape
+  6 → **2**.
+- Grade worst-cases all improved: SPJC cross 1.30→0.20 m; SPLP 6.31→ (stub A cleared);
+  CYXY worst step 5.15→2.85 m.
 
 ---
 
-## New diagnostic tools (in `tools/`, persistent — use these)
+## THE REMAINING CHALLENGE — SPLP −10025 / −10026 (the GOAL blocker)
 
-All use `tools/_diag.py` (shared: build helpers, `build_capturing_union`,
-`geom_to_osm`, `seam_swath`, the pipeline-pass registry, `patch_pass`
-which also patches by-value imports in finalize/pipeline).
+Two SPLP junction violations remain: −10025 (**2.87%**) and −10026 (1.98%). These are
+**GENUINE along-route terrain transitions**, NOT solver artifacts and NOT cross-axis
+diagonals: the taxi route descends from the flat ~72 m apron region to a taxiway that
+descends to ~64 m, over ~59 m = **3.04% measured ALONG the centerline**.
 
-- **`mesh_region_tris.py`** — count Triangle4XP triangles overall + inside
-  an airport bbox from a built `.mesh`. THE load-cost metric.
-- **`mesh_triangle_quality.py`** — triangle-size histogram + degenerate-
-  micro-triangle hotspot localization from a `.mesh`. (This cracked the
-  case: 94 % sub-1 m², 76 % in 12 cells at the terminal/groundside.)
-- **`find_missing_pavement.py`** — pav_union vs emitted-shape coverage gap,
-  with exact per-airport coverage TARGET (100 % minus tile-seam swath) +
-  per-gap enclosed%/nearest-role.
-- **`monitor_coverage.py`** — pav_union coverage timeline through every
-  pipeline mutation pass (catches which pass drops coverage).
-- **`trace_shape_drops.py`** — per-pass lost-coverage by role.
-- **`dump_pav_union.py`** — dump the source-of-truth union to OSM.
+**The core tension:** the DEM-floor holds the upstream (flat) pavement AT terrain; to make
+the descent ≤1.5% the upstream pavement must dip BELOW terrain to start descending earlier
+("spread the descent"). But these are **opposing GLOBAL forces** — and cap-projection's
+fixed point is the low-dragged equilibrium regardless of start, so any *global* spread pass
+re-sinks the WHOLE field (undoes the floor). There is no global knob that says "spread THIS
+one route below terrain but hold everything else at terrain."
 
----
-
-## HOW TO TEST / VERIFY (what the user is doing now)
-
-1. In Ortho4XP config set `auto_patch` back to `ICAO` (or `All`) — it was
-   set to `None` to build the patch-off baseline.
-2. **Restart the Ortho4XP GUI** (it caches `auto_patch.*`/`config` imports;
-   a config or code change does NOT take effect otherwise — this caused
-   several false "no change" results this session).
-3. Rebuild tile `+30+031` (Step 1 vector/poly AND Step 2 mesh — ensure it
-   actually recomputes; an exact-identical triangle count means it didn't).
-4. Measure:
-   ```
-   venv/bin/python tools/mesh_triangle_quality.py \
-     --mesh "/Users/noah/X-Plane 12/Custom Scenery/zOrtho4XP_+30+031/Data+30+031.mesh" \
-     --patch-osm /tmp/HECA_auto.patch.osm
-   ```
-   **Expectation:** if conformance fixed the slivers, the airport sub-1 m²
-   fraction drops sharply from 94 % and the total falls toward the
-   patch-off ballpark (~0.9–1.5 M), with a correspondingly faster load.
-5. Standalone patch rebuild for tooling: `venv/bin/python
-   /tmp/build_final.py HECA` (writes `/tmp/HECA_auto.patch.osm`), or the
-   tools above (each does its own build). HECA build ≈ 90–120 s.
-
-Build a layout in a script: sys.path needs `src/`, repo root, `tests/`;
-`from conftest import xplane_root`;
-`from auto_patch.pipeline import build_airport_pavement`.
+### Everything tried for SPLP (all in `memory/splp_stub_a_grade.md`)
+1. **Runway-flex** (drop the runway at the threshold to ease the junction): RULED OUT — the
+   SPLP runway near here is already at ~1.9% (no grade headroom; boxed by CIFP/seam anchors).
+2. **Per-axis junction grading** (along-centerline edges only + code-letter caps; exempt the
+   inter-centerline diagonal): architecturally CORRECT and matches FAA/EASA, but does NOT
+   clear −10025 (its violation is along-route 3.04%, not the diagonal) and the per-axis solver
+   made it WORSE (2.87→3.04%, follows terrain more). REVERTED.
+3. **Weaken junction DEM-attraction**: REGRESSED stub A to 5.34%. Wrong direction. REVERTED.
+4. **Asymmetric DEM floor**: BEST result (stub A cleared, SPLP 6→2). KEPT (`e88f605`).
+5. **Two-phase global spread** (floor phase then pure-cap phase): re-sinks the field
+   (stub A 2.43→6.31%). Confirms floor-vs-spread can't be separated globally. REVERTED.
 
 ---
 
-## OPEN ITEMS / NEXT STEPS (priority order)
+## THE GOAL & RECOMMENDED PATH (for the next agent)
 
-1. **PRIMARY: the boundary ribbon overlapping pavement → HEAZ's 1.48 M
-   sliver hotspot** (see KEY FINDING update). The conformance pass
-   excludes boundary (`_OVERLAY_ROLES`); the boundary ribbon strips
-   overlay aprons and Triangle4XP nodes them into slivers. Fix: clip the
-   boundary ribbon out of pavement it overlays, OR include boundary in
-   the conformance partition, OR change the overlay approach. Validate
-   with `build_airport_pavement("HEAZ")` + a tile rebuild +
-   `mesh_triangle_quality.py` (whole-tile `--bbox 30,31,31,32`). Expect
-   ~1.5 M further triangle drop. This is now the dominant load-time lever.
-2. **Residual edge crossings** (HEAZ 11, HECA 18, SPJC 5, CYXY 9): real
-   tiny geometric overlaps vertex-insertion can't fix; the area-overlap
-   test misses them (zero-tolerance AREA only). Find/remove the
-   overlapping shapes upstream.
-2. **Drive conformance residual to 0**: 11 HECA T-junctions are
-   enforcement bail-outs (inserting the vertex would self-intersect);
-   make the insertion robust. SPLP=0/0, SPJC=1/5, CYXY=12/9.
-3. **Add a conformance TEST + put HECA/KBNA in `_BASELINE_AIRPORTS`**
-   (`tests/conftest.py:69`). HECA is NOT baseline-ready yet (other
-   invariants would fail), so this is gated on cleaning HECA up.
-4. **SPLP `compare_target` re-cut** (2 tests) — from the pavement-join
-   runway segmentation. Re-cut with `tools/build_target_osm.py` once the
-   geometry is final. Held intentionally.
-5. **SPLP / close+open grade tradeoff** — close+open helps HECA but
-   regresses SPLP seam-junction grade (-10042). User's "review union
-   first" decision still open.
-6. **SPJC item #2** (the 5 SPJC failures) — taxi/junction shoulder
-   absorption + access-road spur split. Not started.
-7. **Groundside exact ≤4 %** (emit-precision artifact) — optional.
-8. **Boundary node-density** — doubling the ribbon densify (25→50 m)
-   reopens a CYXY bridge↔ribbon 6 m wall (they must share vertices);
-   needs a bridge-rework. Deferred. (Per the KEY FINDING this is a
-   node-count win, NOT a triangle/load-time win.)
+**Goal: along-taxi-centerline grade within compliance everywhere, terrain-following elsewhere.**
 
-## Gotchas
-- **GUI import cache**: restart Ortho4XP after editing `auto_patch.*` or
-  `config.py`. Exact-identical mesh triangle count = the rebuild used
-  cached code/data, not your change.
-- `auto_patch.pipeline` must be imported BEFORE `auto_patch.junction_repair`
-  (circular import via elevation).
-- The user edits files in parallel; re-check `git status`/`git log` before
-  committing and commit only your own files.
-- `_diag.patch_pass` exists because `finalize` imports several passes BY
-  VALUE — patching only the defining module misses them (this is why
-  `monitor_coverage` originally couldn't see the groundside drop).
+The clean way to honour BOTH (terrain-following AND a localised, gradual descent on a route
+that must reach a low connection) is a **per-route TAXI-CENTERLINE PROFILE pass** — analogous
+to the runway FAA-profile redistribution (`runway_redistribute.py` / `runway_regrade.py`),
+but for taxi routes:
+  - Walk each apt.dat taxi centerline as a 1-D chain between its anchored ends.
+  - Fit a grade-compliant longitudinal profile (≤ code-letter cap) that stays as close to
+    DEM as the caps allow — letting it dip below terrain ONLY along that route where a
+    descent to a low connection requires it.
+  - Write those profile elevations as soft targets the per-surface solver respects, so the
+    descent is localised to the route instead of diffusing across the field.
+  This is a substantial new feature, not a solver-tuning tweak.
+
+**Per-axis + A/B code-letter grading** is a SEPARATE, architecturally-correct feature (fixes
+the cross-junction case — a cross-junction tilted 1.5% each way reads 2.12% on the diagonal,
+which all-pair wrongly forbids; and enables A/B taxiways' 3%/2% caps). It does NOT clear SPLP.
+Helpers already exist: `apt_dat_reader.taxi_size_letters()` → `layout.apt_taxi_letters`
+(name→letter from apt.dat row-1202 `TaxiEdge.kind`); config grade-by-letter helpers were
+prototyped then reverted with the solver change — re-add when pursuing this. The audit
+(`check_grade`) would also need a per-axis junction mode (within-shape + plane-gradient),
+threading centerlines (pass them as lat/lon so frames match — check_grade is mean-centred).
+
+**Pragmatic GREEN now (if profiles are deferred):** recut the SPLP grade baseline at the
+floor state (2 violations) and document −10025/−10026 as accepted genuine terrain transitions
+via a per-junction allowance in `tests/test_pavement_grade.py` (like the existing per-airport
+`MID_EDGE_CAP`). Real taxiways do exceed 1.5% at some intersections on sloped terrain.
+
+---
+
+## FAA/EASA grade basis (confirmed this session)
+
+Taxiway grade is regulated PER-AXIS, not "max slope in any direction":
+- LONGITUDINAL (along the centre line): ≤1.5% code C-F, ≤3% code A-B (ICAO Annex 14 §3.9 /
+  EASA CS-ADR-DSN.D.265).
+- TRANSVERSE (across): ≤1.5% C-F, ≤2% A-B (EASA CS-ADR-DSN.D.280).
+- Junctions/intersections: geometric guidance only (fillets, sight distance) — NO special
+  diagonal-slope rule. The inter-centerline diagonal is an UNREGULATED direction.
+So the all-pair Euclidean junction cap is stricter than the regulations require; per-axis is
+the correct model.
+
+---
+
+## HOW TO TEST / KEY FILES / GOTCHAS
+
+- Build one airport: `from auto_patch.pipeline import build_airport_pavement;
+  layout = build_airport_pavement("SPLP", xplane_root(), compute_elevations=True)`
+  (sys.path += `src/`, repo root, `tests/`; `from conftest import xplane_root`).
+  Grade check: `import check_grade; check_grade.run_checks(Path(osm), max_grade_pct=1.5,
+  proximity_m=1.0, edge_search_m=5.0, edge_step_m=0.5)`.
+- Full suite: `venv/bin/python -m pytest tests/ -q` (~2-3.5 min). Baseline = 9 failures.
+- Key files: `elevation_per_surface/unified_jacobi.py` (active solver),
+  `tools/check_grade.py` (grade audit / test gate), `runway_redistribute.py` +
+  `runway_regrade.py` (runway profiles — the model for a taxi-route profile),
+  `apt_dat_reader.py` (`taxi_size_letters`, `taxi_centerlines`), `config.py` (grade caps).
+- Diagnostics this session left in `/tmp` (regenerate as needed): they build SPLP/HECA and
+  dump per-vertex solved-vs-DEM, junction neighbours, along-centerline grade.
+- **GOTCHAS:** Ortho4XP GUI caches `auto_patch.*` imports — restart it after editing source.
+  The user EDITS FILES IN PARALLEL — re-check `git status`/`git log` before committing and
+  commit ONLY your own files. `check_grade` uses a mean-centred meter frame (translation vs
+  the layout's anchor frame) — pass centerlines as lat/lon if threading them in.
+
+## Memory pointers (read these)
+- `splp_stub_a_grade.md` — full SPLP analysis + every lever tried (THE key handover note).
+- `done_dem_attraction_solver.md` — the DEM-attraction fix + active-solver facts.
+- `done_boundary_interior_invariant.md` — the X-Plane load-time fix.
+- `suite_baseline_dev_head.md` — the 9-failure baseline.
