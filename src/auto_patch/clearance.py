@@ -1,0 +1,866 @@
+"""Wingtip / RESA terrain-clearance cuts.
+
+Aircraft wingspans exceed the paved width of taxiways and runways, so
+the design standards (FAA AC 150/5300-13 Taxiway Object Free Area;
+ICAO Annex 14 graded runway strip + Runway End Safety Area) reserve a
+clear, gently-graded band on each side of a surface and a graded area
+off each runway end.  Natural terrain that rises into that band — a
+hillock, a cut-bank, a berm — is a wingtip obstruction.
+
+This module samples the DEM inside those bands and emits CUT polygons
+that lower offending terrain to a ramped ceiling:
+
+  ceiling(d) = edge_alt + threshold · min(1, d / band_width)
+
+where ``d`` is distance outward from the pavement edge and ``edge_alt``
+is the adjacent surface's edge altitude.  Per-vertex altitudes are
+``min(DEM, ceiling)`` — so we only ever CUT terrain that rises above
+the surface and never FILL terrain that sits below it (matching the
+user directive: "doesn't matter if the terrain goes below the
+taxiway, just above").  The cut daylights back to natural ground where
+the ceiling meets the DEM, capped at a max reach so steep slopes don't
+generate runaway earthwork.
+
+Three passes share one strip builder:
+  * taxiway lateral strips   (ROLE_TAXIWAY_CLEARANCE)
+  * runway lateral strips    (ROLE_RUNWAY_CLEARANCE)
+  * runway-end RESA areas     (ROLE_RUNWAY_CLEARANCE)
+
+Public API:
+    emit_surface_clearance_cuts(layout, dem, tile_lat, tile_lon)
+"""
+from __future__ import annotations
+
+import math
+from collections import defaultdict
+
+import O4_UI_Utils as UI
+from shapely.errors import GEOSException, TopologicalError
+from shapely.geometry import LineString, Point, Polygon
+from shapely.ops import unary_union
+from shapely.prepared import prep
+
+# Narrow exception tuple — shapely degeneracy / DEM I/O.  Programming
+# errors propagate (see boundary.py for the rationale).
+_GEOM_EXC = (ValueError, GEOSException, TopologicalError)
+
+from .config import (
+    CLEARANCE_MAX_REACH_M,
+    CLEARANCE_OBSTRUCTION_THRESHOLD_M,
+    CLEARANCE_STATION_STEP_M,
+    runway_end_clearance_length_m,
+    runway_strip_half_width_m,
+    taxiway_clearance_half_width_for_letter,
+    taxiway_clearance_half_width_m,
+)
+from .layout import (
+    BuiltShape,
+    PavementLayout,
+    R_EARTH,
+    ROLE_APRON,
+    ROLE_CROSS_CONNECTOR,
+    ROLE_JUNCTION,
+    ROLE_PRIMARY_PARALLEL,
+    ROLE_RUNWAY,
+    ROLE_RUNWAY_CLEARANCE,
+    ROLE_RUNWAY_CROSSING,
+    ROLE_SECONDARY_PARALLEL,
+    ROLE_STUB,
+    ROLE_TAXIWAY_CLEARANCE,
+)
+from .elevation import _resample_node_altitudes_nn, _sample_dem
+from .pavement.junctions import _decompose_polygon_with_holes
+from .pavement.runways import _sample_runway_segment_elev
+
+__all__ = ["emit_surface_clearance_cuts"]
+
+
+_TAXIWAY_ROLES = (
+    ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
+    ROLE_STUB, ROLE_CROSS_CONNECTOR,
+)
+# Minimum emitted cut area; smaller residue is dropped as noise.
+_MIN_CUT_AREA_M2 = 25.0
+# Keep every emitted cut vertex this far OUTSIDE pavement so it never
+# lands on a sloping rect's edge (``test_no_vertex_on_sloping_rect_-
+# edge`` flags non-rect vertices within 1 m of a rect edge interior).
+_PAVEMENT_GAP_M = 1.5
+# Only build lateral strips for shapes that are genuinely elongated
+# (a taxiway / runway).  Chunky absorbed pieces (aspect < this) are
+# blob-like — "edge clearance" is ill-defined and they'd otherwise
+# infer a huge code letter from their large short edge.
+_MIN_LATERAL_ASPECT = 2.0
+# Cap the pavement width used to infer the code letter, so a
+# mis-shaped wide piece can't push the band beyond code F.
+_MAX_TAXIWAY_WIDTH_M = 45.0
+# Decimation tolerances: drop a ring vertex when it is within this
+# perpendicular distance of the chord through its neighbours AND its
+# altitude is within this much of the linear interpolation along that
+# chord.  Collapses the redundant nodes along straight, planar runs
+# (≈ all of them) while keeping nodes where the daylight contour bends
+# or the cut surface curves with the terrain.
+_DECIMATE_GEOM_TOL_M = 0.3
+_DECIMATE_ALT_TOL_M = 0.15
+# Airside pavement a taxi centerline can run over — used to find the
+# pavement edge (raycast) and the edge altitude, regardless of whether
+# that pavement was emitted as a rect, junction, or apron.
+_AIRSIDE_PAVEMENT_ROLES = (
+    ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
+    ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
+    ROLE_STUB, ROLE_CROSS_CONNECTOR,
+    ROLE_JUNCTION, ROLE_APRON,
+)
+# Raycasting a centerline outward to its pavement edge: step size and
+# the max half-width we'll search.  Beyond this the centerline is in
+# the interior of a large apron (no nearby edge) and that station-side
+# is skipped — no wingtip-obstruction risk in the middle of pavement.
+_RAY_STEP_M = 2.0
+_RAY_MAX_HALF_WIDTH_M = 35.0
+
+
+# ──────────────────────────────────────────────────────────────────
+# Small geometry helpers
+# ──────────────────────────────────────────────────────────────────
+def _open_coords(poly: Polygon) -> list[tuple[float, float]]:
+    """Exterior ring as an OPEN coord list (closing repeat dropped)."""
+    try:
+        coords = list(poly.exterior.coords)
+    except _GEOM_EXC:
+        return []
+    if coords and coords[0] == coords[-1]:
+        coords = coords[:-1]
+    return [(float(x), float(y)) for x, y in coords]
+
+
+def _unit(dx: float, dy: float) -> tuple[float, float] | None:
+    d = math.hypot(dx, dy)
+    if d < 1e-9:
+        return None
+    return (dx / d, dy / d)
+
+
+def _outward_normal(poly: Polygon, a: tuple[float, float],
+                    b: tuple[float, float]) -> tuple[float, float] | None:
+    """Unit normal of edge ``a→b`` pointing AWAY from the polygon
+    interior (so marching along it leaves the surface)."""
+    u = _unit(b[0] - a[0], b[1] - a[1])
+    if u is None:
+        return None
+    nx, ny = -u[1], u[0]
+    mx, my = 0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1])
+    try:
+        c = poly.centroid
+    except _GEOM_EXC:
+        return (nx, ny)
+    # Flip so the normal points away from the centroid.
+    if (mx - c.x) * nx + (my - c.y) * ny < 0.0:
+        nx, ny = -nx, -ny
+    return (nx, ny)
+
+
+def _stations(a: tuple[float, float], b: tuple[float, float],
+              step: float) -> list[tuple[float, float]]:
+    """Sample ``a→b`` (inclusive of both ends) at ≤ ``step`` spacing."""
+    d = math.hypot(b[0] - a[0], b[1] - a[1])
+    n = max(1, int(math.ceil(d / step)))
+    return [(a[0] + (b[0] - a[0]) * k / n,
+             a[1] + (b[1] - a[1]) * k / n) for k in range(n + 1)]
+
+
+def _decimate(coords: list[tuple[float, float]], alts: list[float]):
+    """Collapse ring vertices that are redundant in BOTH geometry
+    (collinear with their neighbours) AND altitude (on the linear
+    interpolation between them).  Returns ``(coords, alts)`` open-form.
+
+    Removes at most every other vertex per pass (so a gently-curving
+    arc isn't collapsed to its chord in one sweep) and repeats until
+    stable, keeping detail only where the daylight contour bends or the
+    cut surface follows curving terrain.
+    """
+    coords = [(float(x), float(y)) for x, y in coords]
+    alts = [float(a) for a in alts]
+    n = min(len(coords), len(alts))
+    coords, alts = coords[:n], alts[:n]
+    changed = True
+    while changed and len(coords) > 3:
+        changed = False
+        n = len(coords)
+        keep = [True] * n
+        i = 0
+        while i < n:
+            p0 = coords[(i - 1) % n]
+            p1 = coords[i]
+            p2 = coords[(i + 1) % n]
+            dx, dy = p2[0] - p0[0], p2[1] - p0[1]
+            seg2 = dx * dx + dy * dy
+            if seg2 > 1e-9:
+                t = ((p1[0] - p0[0]) * dx + (p1[1] - p0[1]) * dy) / seg2
+                perp = math.hypot(p1[0] - (p0[0] + t * dx),
+                                  p1[1] - (p0[1] + t * dy))
+                a_lin = alts[(i - 1) % n] + t * (
+                    alts[(i + 1) % n] - alts[(i - 1) % n])
+                if (perp < _DECIMATE_GEOM_TOL_M
+                        and abs(alts[i] - a_lin) < _DECIMATE_ALT_TOL_M):
+                    keep[i] = False
+                    changed = True
+                    i += 2     # skip neighbour: no two adjacent removals
+                    continue
+            i += 1
+        if changed:
+            coords = [c for c, k in zip(coords, keep) if k]
+            alts = [a for a, k in zip(alts, keep) if k]
+    return coords, alts
+
+
+def _largest_poly(geom):
+    """Largest Polygon member of ``geom`` (Polygon / MultiPolygon /
+    GeometryCollection), or None."""
+    if geom is None or geom.is_empty:
+        return None
+    if geom.geom_type == "Polygon":
+        return geom
+    polys = [g for g in getattr(geom, "geoms", [])
+             if g.geom_type == "Polygon" and not g.is_empty]
+    if not polys:
+        return None
+    return max(polys, key=lambda g: g.area)
+
+
+def _drop_sharp_corners(coords: list[tuple[float, float]],
+                        min_deg: float = 3.0) -> list[tuple[float, float]]:
+    """Remove ring vertices whose interior angle is below ``min_deg``.
+
+    Decimation / daylight-contour clipping can leave needle-tip corners
+    that to_osm would reject (sub-2° → X-Plane mesh-builder crash),
+    dropping the whole cut.  Trim the sharpest offending vertex and
+    repeat so the shape survives emission."""
+    coords = [(float(x), float(y)) for x, y in coords]
+    while len(coords) > 3:
+        n = len(coords)
+        worst_i, worst_ang = -1, min_deg
+        for i in range(n):
+            a, b, c = coords[(i - 1) % n], coords[i], coords[(i + 1) % n]
+            v1 = (a[0] - b[0], a[1] - b[1])
+            v2 = (c[0] - b[0], c[1] - b[1])
+            n1, n2 = math.hypot(*v1), math.hypot(*v2)
+            if n1 < 1e-6 or n2 < 1e-6:
+                worst_i = i
+                break
+            cosang = max(-1.0, min(1.0,
+                                   (v1[0] * v2[0] + v1[1] * v2[1]) / (n1 * n2)))
+            ang = math.degrees(math.acos(cosang))
+            if ang < worst_ang:
+                worst_ang, worst_i = ang, i
+        if worst_i < 0:
+            break
+        del coords[worst_i]
+    return coords
+
+
+def _rect_long_short_edges(coords: list[tuple[float, float]]):
+    """For a 4-corner ring, return ``(long_edges, short_len)`` where
+    ``long_edges`` is the two longest edges as ``((a, b), ...)`` corner
+    pairs and ``short_len`` is the mean of the two shortest edges."""
+    if len(coords) != 4:
+        return None
+    edges = []
+    for i in range(4):
+        a = coords[i]
+        b = coords[(i + 1) % 4]
+        edges.append((math.hypot(b[0] - a[0], b[1] - a[1]), a, b))
+    edges.sort(key=lambda e: e[0])
+    short_len = 0.5 * (edges[0][0] + edges[1][0])
+    long_edges = [(edges[2][1], edges[2][2]), (edges[3][1], edges[3][2])]
+    long_len = 0.5 * (edges[2][0] + edges[3][0])
+    return long_edges, short_len, long_len
+
+
+# ──────────────────────────────────────────────────────────────────
+# Core: build cut strips off one edge
+# ──────────────────────────────────────────────────────────────────
+def _build_strips(edge_stations, edge_alts, outwards,
+                  band_ws, trigger, max_reach, step, sample_dem):
+    """Build clearance cut-strip rings off an edge / pavement-edge
+    polyline, as a smooth BLEND from the pavement edge to the natural
+    DEM at the far edge.
+
+    For each station the surface ramps linearly from the surface edge
+    altitude (inner) to the DEM at the band's far edge (outer):
+
+        blend(d) = edge_alt + (DEM_far − edge_alt) · d / band_w
+
+    The patch overrides terrain to this ramp, so terrain rising above
+    the ramp is cut down to it while the outer edge meets the DEM
+    exactly (no cliff, auto-daylight).  A station only contributes a
+    strip when the terrain rises more than ``trigger`` metres above the
+    blend ramp somewhere in the band (otherwise the natural slope is
+    already smooth — nothing to grade).  ``band_ws[i]`` is capped at
+    ``max_reach`` to bound earthwork.
+
+    ``edge_stations`` / ``edge_alts`` / ``outwards`` / ``band_ws`` are
+    matched per-station lists.  Returns ``(ring_open, alts_open)`` pairs.
+    """
+    n = len(edge_stations)
+    dem_far: list[float | None] = [None] * n
+    obstructed: list[bool] = [False] * n
+    for i, (sx, sy) in enumerate(edge_stations):
+        ref = edge_alts[i]
+        if ref is None:
+            continue
+        nx, ny = outwards[i]
+        bw = min(band_ws[i], max_reach)
+        if bw <= _PAVEMENT_GAP_M:
+            continue
+        do = sample_dem(sx + nx * bw, sy + ny * bw)
+        if do is None:
+            do = ref
+        dem_far[i] = do
+        # Probe for terrain rising above the blend ramp inside the band.
+        kk = max(2, int(math.ceil(bw / step)))
+        for k in range(1, kk):
+            d = bw * k / kk
+            ramp = ref + (do - ref) * (d / bw)
+            dd = sample_dem(sx + nx * d, sy + ny * d)
+            if dd is not None and dd > ramp + trigger:
+                obstructed[i] = True
+                break
+    # Group consecutive obstructed stations into runs (1-station slack).
+    idx = [i for i in range(n) if obstructed[i]]
+    if not idx:
+        return []
+    runs: list[list[int]] = []
+    cur = [idx[0]]
+    for j in idx[1:]:
+        if j - cur[-1] <= 2:
+            cur.append(j)
+        else:
+            runs.append(cur)
+            cur = [j]
+    runs.append(cur)
+
+    out: list[tuple[list, list]] = []
+    for run in runs:
+        i0, i1 = run[0], run[-1]
+        # Widen the run by one station each side so the cut tapers
+        # longitudinally to its neighbours instead of ending in a wall.
+        lo = max(0, i0 - 1)
+        hi = min(n - 1, i1 + 1)
+        inner_pts, inner_alts = [], []
+        outer_pts, outer_alts = [], []
+        for i in range(lo, hi + 1):
+            ref = edge_alts[i]
+            if ref is None:
+                continue
+            nx, ny = outwards[i]
+            bw = min(band_ws[i], max_reach)
+            if bw <= _PAVEMENT_GAP_M:
+                continue
+            do = dem_far[i] if dem_far[i] is not None else ref
+            sx, sy = edge_stations[i]
+            # Inner edge: a small gap outside the pavement, at the blend
+            # value there (≈ pavement edge altitude → clean shoulder).
+            ix, iy = sx + nx * _PAVEMENT_GAP_M, sy + ny * _PAVEMENT_GAP_M
+            inner_alts.append(round(float(
+                ref + (do - ref) * (_PAVEMENT_GAP_M / bw)), 1))
+            inner_pts.append((ix, iy))
+            # Outer edge: at the band's far side, AT the DEM — the blend
+            # meets natural terrain so there is no cliff.
+            ox, oy = sx + nx * bw, sy + ny * bw
+            outer_pts.append((ox, oy))
+            outer_alts.append(round(float(do), 1))
+        if len(inner_pts) < 2:
+            continue
+        ring = inner_pts + outer_pts[::-1]
+        alts = inner_alts + outer_alts[::-1]
+        out.append((ring, alts))
+    return out
+
+
+# ──────────────────────────────────────────────────────────────────
+# Runway-end (RESA) edge detection
+# ──────────────────────────────────────────────────────────────────
+def _runway_end_edges(runway_shapes):
+    """Return the two true extremities of each runway designation as
+    ``(shape, end_a, end_b, full_len)``.
+
+    A runway is usually split into many segments (crossings, FAA
+    profile redistribution, tile cuts), so an internal-seam test is
+    fragile — when segments don't abut cleanly every seam looks like an
+    "end".  Instead we collect every segment's two short edges per ref
+    and pick the PAIR of short-edge midpoints that are FARTHEST apart:
+    those are the runway's two thresholds; everything between them is
+    interior.  ``full_len`` is that farthest-pair distance (the whole
+    runway length), used for the ICAO code number.
+    """
+    by_ref: dict[str, list] = defaultdict(list)
+    for s in runway_shapes:
+        coords = _open_coords(s.polygon)
+        info = _rect_long_short_edges(coords)
+        if info is None:
+            continue
+        long_edges, _short_len, _long_len = info
+        long_set = set()
+        for (a, b) in long_edges:
+            long_set.add((a, b))
+            long_set.add((b, a))
+        for i in range(4):
+            a = coords[i]
+            b = coords[(i + 1) % 4]
+            if (a, b) in long_set:
+                continue
+            mid = (0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]))
+            by_ref[s.ref].append((s, a, b, mid))
+
+    ends = []
+    for ref, ses in by_ref.items():
+        if len(ses) <= 2:
+            # Single segment: both short edges are thresholds.
+            full = (math.hypot(ses[0][3][0] - ses[1][3][0],
+                               ses[0][3][1] - ses[1][3][1])
+                    if len(ses) == 2 else 0.0)
+            for s, a, b, _mid in ses:
+                ends.append((s, a, b, full))
+            continue
+        # Farthest-apart short-edge midpoints = the two thresholds.
+        best = (-1.0, 0, 1)
+        for i in range(len(ses)):
+            for j in range(i + 1, len(ses)):
+                d = math.hypot(ses[i][3][0] - ses[j][3][0],
+                               ses[i][3][1] - ses[j][3][1])
+                if d > best[0]:
+                    best = (d, i, j)
+        full = best[0]
+        for k in (best[1], best[2]):
+            s, a, b, _mid = ses[k]
+            ends.append((s, a, b, full))
+    return ends
+
+
+# ──────────────────────────────────────────────────────────────────
+# Taxi-centerline edge tracing (covers junction/apron taxiways)
+# ──────────────────────────────────────────────────────────────────
+def _ray_edge(prep_pav, sx, sy, dx, dy) -> float | None:
+    """Distance from ``(sx, sy)`` along unit ``(dx, dy)`` to the
+    pavement edge (where the ray leaves the prepared pavement union).
+    ``None`` if it never exits within ``_RAY_MAX_HALF_WIDTH_M`` (the
+    centerline is in the interior of a large apron — no nearby edge)."""
+    last = 0.0
+    d = _RAY_STEP_M
+    while d <= _RAY_MAX_HALF_WIDTH_M:
+        if prep_pav.contains(Point(sx + dx * d, sy + dy * d)):
+            last = d
+            d += _RAY_STEP_M
+        else:
+            return last + 0.5 * _RAY_STEP_M  # edge ~ midway to exit
+    return None
+
+
+def _pav_alt(pav_shapes, x, y) -> float | None:
+    """Altitude of the airside pavement at ``(x, y)`` — the shape
+    containing the point (rect/junction/apron all handled by
+    ``_sample_runway_segment_elev``)."""
+    pt = Point(x, y)
+    for s in pav_shapes:
+        try:
+            if s.polygon.contains(pt):
+                e = _sample_runway_segment_elev(s, x, y)
+                if e is not None:
+                    return e
+        except _GEOM_EXC:
+            continue
+    return None
+
+
+def _centerline_edge_runs(line, prep_pav, pav_shapes, step, letter=None):
+    """Walk a taxi centerline and, for each side, yield maximal
+    contiguous runs of pavement-edge stations as
+    ``(edge_pts, edge_alts, outwards, band_ws)`` ready for
+    :func:`_build_strips`.
+
+    At each densified centerline point we raycast perpendicular to the
+    local tangent to find the pavement EDGE on that side (where the cut
+    begins and the edge altitude is sampled).  The clearance half-width
+    comes from the apt.dat ICAO size ``letter`` when known (authoritative
+    width class); otherwise it is inferred from the measured pavement
+    width (both half-widths) as a fallback.  Stations whose centerline
+    point is off pavement, or in the interior of a large apron, break the
+    run.
+    """
+    clear_half_fixed = (taxiway_clearance_half_width_for_letter(letter)
+                        if letter else None)
+    try:
+        coords = list(line.coords)
+    except _GEOM_EXC:
+        return []
+    if len(coords) < 2:
+        return []
+    # Densify the centerline.
+    pts: list[tuple[float, float]] = []
+    for i in range(len(coords) - 1):
+        ax, ay = coords[i]
+        bx, by = coords[i + 1]
+        pts.append((ax, ay))
+        d = math.hypot(bx - ax, by - ay)
+        if d > step:
+            k = int(math.ceil(d / step))
+            for j in range(1, k):
+                t = j / k
+                pts.append((ax + t * (bx - ax), ay + t * (by - ay)))
+    pts.append(coords[-1])
+    n = len(pts)
+    runs = []  # (edge_pts, edge_alts, outwards, band_ws)
+    for side in (1.0, -1.0):
+        cur_pts, cur_alts, cur_out, cur_bw = [], [], [], []
+
+        def _flush():
+            if len(cur_pts) >= 2:
+                runs.append((list(cur_pts), list(cur_alts),
+                             list(cur_out), list(cur_bw)))
+            cur_pts.clear()
+            cur_alts.clear()
+            cur_out.clear()
+            cur_bw.clear()
+
+        for i in range(n):
+            sx, sy = pts[i]
+            ax, ay = pts[max(0, i - 1)]
+            bx, by = pts[min(n - 1, i + 1)]
+            tan = _unit(bx - ax, by - ay)
+            if tan is None or not prep_pav.contains(Point(sx, sy)):
+                _flush()
+                continue
+            perp = (-tan[1] * side, tan[0] * side)
+            half = _ray_edge(prep_pav, sx, sy, perp[0], perp[1])
+            if half is None:
+                _flush()
+                continue
+            if clear_half_fixed is not None:
+                clear_half = clear_half_fixed
+            else:
+                # Fallback (OSM / no size class): infer from measured
+                # full width (this side + opposite side).
+                half_o = _ray_edge(prep_pav, sx, sy, -perp[0], -perp[1])
+                width = half + (half_o if half_o is not None else half)
+                clear_half = taxiway_clearance_half_width_m(
+                    min(width, _MAX_TAXIWAY_WIDTH_M))
+            band = clear_half - half
+            if band <= _PAVEMENT_GAP_M + 1.0:
+                _flush()
+                continue
+            ex, ey = sx + perp[0] * half, sy + perp[1] * half
+            # Sample the edge altitude just INSIDE the pavement.
+            inq = max(0.0, half - 1.0)
+            ref = _pav_alt(pav_shapes, sx + perp[0] * inq, sy + perp[1] * inq)
+            if ref is None:
+                ref = _pav_alt(pav_shapes, sx, sy)
+            if ref is None:
+                _flush()
+                continue
+            cur_pts.append((ex, ey))
+            cur_alts.append(ref)
+            cur_out.append(perp)
+            cur_bw.append(band)
+        _flush()
+    return runs
+
+
+# ──────────────────────────────────────────────────────────────────
+# Public entry point
+# ──────────────────────────────────────────────────────────────────
+def emit_surface_clearance_cuts(layout: PavementLayout, dem,
+                                tile_lat: int, tile_lon: int) -> int:
+    """Emit wingtip/RESA terrain-clearance cut polygons.  Mutates
+    ``layout.shapes``.  Returns the number of cut shapes emitted."""
+    if dem is None:
+        return 0
+    lat0, lon0 = layout.anchor
+    cos0 = math.cos(math.radians(lat0))
+    R = R_EARTH
+    step = CLEARANCE_STATION_STEP_M
+
+    def sample_dem(x: float, y: float) -> float | None:
+        try:
+            lat = lat0 + math.degrees(y / R)
+            lon = lon0 + math.degrees(x / (R * cos0))
+            return _sample_dem(dem, tile_lat, tile_lon, lat, lon)
+        except _GEOM_EXC:
+            return None
+
+    # Surfaces we build clearance off of (4-corner sloping/flat rects).
+    def _usable(s) -> bool:
+        if s.polygon is None or s.polygon.is_empty:
+            return False
+        if len(_open_coords(s.polygon)) != 4:
+            return False
+        return (s.altitude is not None
+                or (s.altitude_high is not None
+                    and s.altitude_low is not None))
+
+    runway_shapes = [s for s in layout.shapes
+                     if s.role == ROLE_RUNWAY and _usable(s)]
+    taxi_shapes = [s for s in layout.shapes
+                   if s.role in _TAXIWAY_ROLES and _usable(s)]
+
+    # FULL runway length per designation (the ICAO code number comes
+    # from the whole runway, not a single segment — runways are split
+    # into segments at crossings/seams).  Approximated as the longest
+    # distance between any two corners of all segments sharing a ref.
+    _ref_pts: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    for s in runway_shapes:
+        _ref_pts[s.ref].extend(_open_coords(s.polygon))
+    runway_len_by_ref: dict[str, float] = {}
+    for ref, pts in _ref_pts.items():
+        mx = 0.0
+        for i in range(len(pts)):
+            for j in range(i + 1, len(pts)):
+                d = math.hypot(pts[i][0] - pts[j][0], pts[i][1] - pts[j][1])
+                if d > mx:
+                    mx = d
+        runway_len_by_ref[ref] = mx
+
+    def _runway_full_len(s, fallback) -> float:
+        return runway_len_by_ref.get(s.ref, fallback) or fallback
+
+    # Existing geometry the cut must not overlap.  Buffer it so emitted
+    # vertices stay clear of any pavement edge (sloping-rect-edge test).
+    static_polys = [s.polygon for s in layout.shapes
+                    if s.polygon is not None and not s.polygon.is_empty]
+    static_block = None
+    if static_polys:
+        try:
+            static_block = unary_union(static_polys).buffer(_PAVEMENT_GAP_M)
+        except _GEOM_EXC:
+            static_block = None
+
+    emitted: list[Polygon] = []
+
+    def _commit(ring, alts, role) -> int:
+        """Clip a raw strip against pavement + prior cuts, then emit the
+        surviving simple polygons with resampled per-vertex altitudes."""
+        try:
+            raw = Polygon(ring)
+            if not raw.is_valid:
+                raw = raw.buffer(0)
+        except _GEOM_EXC:
+            return 0
+        if raw.is_empty or raw.area < _MIN_CUT_AREA_M2:
+            return 0
+        old_open = list(ring)
+        old_alts_closed = list(alts) + [alts[0]]
+        geom = raw
+        try:
+            if static_block is not None and not static_block.is_empty:
+                geom = geom.difference(static_block)
+            if emitted:
+                geom = geom.difference(unary_union(emitted).buffer(_PAVEMENT_GAP_M))
+        except _GEOM_EXC:
+            return 0
+        if geom.is_empty:
+            return 0
+        parts = (list(geom.geoms) if geom.geom_type == "MultiPolygon"
+                 else [geom] if geom.geom_type == "Polygon" else [])
+        n = 0
+        for part in parts:
+            for simple in _decompose_polygon_with_holes(
+                    part, min_area_m2=_MIN_CUT_AREA_M2):
+                if simple.is_empty or simple.area < _MIN_CUT_AREA_M2:
+                    continue
+                # Morphological open removes hairline slivers / near-
+                # collinear spikes that would trip to_osm's sub-2°
+                # corner guard (X-Plane mesh-builder crash) and get the
+                # whole shape dropped.
+                try:
+                    opened = simple.buffer(-0.1).buffer(0.1)
+                except _GEOM_EXC:
+                    opened = simple
+                if (opened is not None and not opened.is_empty
+                        and opened.geom_type == "Polygon"
+                        and opened.area >= _MIN_CUT_AREA_M2):
+                    simple = opened
+                ring = _open_coords(simple)
+                if len(ring) < 3:
+                    continue
+                try:
+                    poly = Polygon(ring)
+                    if not poly.is_valid:
+                        poly = poly.buffer(0)
+                except _GEOM_EXC:
+                    continue
+                if poly.is_empty or poly.geom_type != "Polygon":
+                    continue
+                node_alts = _resample_node_altitudes_nn(
+                    poly, old_open, old_alts_closed)
+                if not node_alts:
+                    continue
+                # Collapse the redundant nodes along straight, planar
+                # runs (the inner edge + uniform daylight stretches);
+                # to_osm then emits the compact shape (a flat or sloped
+                # quad where it fits, else few-node node_altitudes).
+                open_ring = _open_coords(poly)
+                dec_xy, _dec_a = _decimate(open_ring,
+                                           node_alts[:len(open_ring)])
+                dec_xy = _drop_sharp_corners(dec_xy)
+                if len(dec_xy) < 3:
+                    continue
+                try:
+                    poly = Polygon(dec_xy)
+                    if not poly.is_valid:
+                        poly = poly.buffer(0)
+                except _GEOM_EXC:
+                    continue
+                if (poly.is_empty or poly.geom_type != "Polygon"
+                        or poly.area < _MIN_CUT_AREA_M2):
+                    continue
+                # Re-clip the DECIMATED polygon against prior cuts:
+                # decimation can bulge a concave daylight contour (which
+                # faces AWAY from pavement, toward neighbouring cuts)
+                # outward past the clearance gap, re-introducing a small
+                # cut↔cut overlap.  This is the final geometry op, so the
+                # emitted shape is guaranteed overlap-free.  (No need to
+                # re-clip against pavement: the inner edge is straight, so
+                # decimation can't bulge it toward pavement.)
+                try:
+                    if emitted:
+                        poly = poly.difference(
+                            unary_union(emitted).buffer(_PAVEMENT_GAP_M))
+                except _GEOM_EXC:
+                    continue
+                poly = _largest_poly(poly)
+                if (poly is None or poly.geom_type != "Polygon"
+                        or poly.area < _MIN_CUT_AREA_M2):
+                    continue
+                # Re-resample against the ORIGINAL strip so node_altitudes
+                # always matches the final ring length (robust to the
+                # decimation + re-clip).  Kept/inserted vertices lie on old
+                # strip edges, so edge interpolation reproduces altitudes.
+                node_alts = _resample_node_altitudes_nn(
+                    poly, old_open, old_alts_closed)
+                if not node_alts:
+                    continue
+                layout.shapes.append(BuiltShape(
+                    polygon=poly, role=role,
+                    ref="surface_clearance",
+                    node_altitudes=node_alts))
+                emitted.append(poly)
+                n += 1
+        return n
+
+    n_emitted = 0
+
+    # ── Pass A: taxiway lateral strips, traced from the taxi CENTERLINE
+    # network.  This follows the centerline and raycasts out to whatever
+    # pavement edge actually borders it — so it covers taxiways no matter
+    # whether they were emitted as rects, junctions, or aprons (the
+    # rect-only approach missed the junction/apron portions).  Falls back
+    # to taxiway rect long-edges when no centerline network is present.
+    tx_threshold = CLEARANCE_OBSTRUCTION_THRESHOLD_M["taxiway"]
+    tx_max_reach = CLEARANCE_MAX_REACH_M["taxiway"]
+    centerlines = getattr(layout, "apt_taxi_centerlines", None) or []
+    # Authoritative ICAO size letter per taxiway name (apt.dat row 1202).
+    letters = getattr(layout, "apt_taxi_letters", None) or {}
+    airside = [s for s in layout.shapes
+               if s.role in _AIRSIDE_PAVEMENT_ROLES
+               and s.polygon is not None and not s.polygon.is_empty]
+    if centerlines and airside:
+        try:
+            pav_union = unary_union([s.polygon for s in airside])
+            prep_pav = prep(pav_union)
+        except _GEOM_EXC:
+            prep_pav = None
+        if prep_pav is not None:
+            for entry in centerlines:
+                line = entry[0] if isinstance(entry, tuple) else entry
+                ref = entry[1] if (isinstance(entry, tuple)
+                                   and len(entry) > 1) else ""
+                if not isinstance(line, LineString) or line.is_empty:
+                    continue
+                letter = letters.get(ref)
+                for e_pts, e_alts, e_out, e_bw in _centerline_edge_runs(
+                        line, prep_pav, airside, step, letter=letter):
+                    for ring, ralts in _build_strips(
+                            e_pts, e_alts, e_out, e_bw, tx_threshold,
+                            tx_max_reach, step, sample_dem):
+                        n_emitted += _commit(ring, ralts,
+                                             ROLE_TAXIWAY_CLEARANCE)
+    else:
+        # Fallback: taxiway rect long-edges (wingtip basis).
+        for s in taxi_shapes:
+            coords = _open_coords(s.polygon)
+            info = _rect_long_short_edges(coords)
+            if info is None:
+                continue
+            long_edges, short_len, long_len = info
+            if short_len <= 0 or long_len / short_len < _MIN_LATERAL_ASPECT:
+                continue
+            clear_half = taxiway_clearance_half_width_m(
+                min(short_len, _MAX_TAXIWAY_WIDTH_M))
+            band_w = clear_half - 0.5 * short_len
+            if band_w <= _PAVEMENT_GAP_M + 1.0:
+                continue
+            for (a, b) in long_edges:
+                outward = _outward_normal(s.polygon, a, b)
+                if outward is None:
+                    continue
+                pts = _stations(a, b, step)
+                m = len(pts)
+                alts = [_sample_runway_segment_elev(s, px, py)
+                        for px, py in pts]
+                for ring, ralts in _build_strips(
+                        pts, alts, [outward] * m, [band_w] * m,
+                        tx_threshold, tx_max_reach, step, sample_dem):
+                    n_emitted += _commit(ring, ralts, ROLE_TAXIWAY_CLEARANCE)
+
+    # ── Pass B: runway lateral graded-strip cuts (rect long-edges) ──
+    rw_threshold = CLEARANCE_OBSTRUCTION_THRESHOLD_M["runway"]
+    rw_max_reach = CLEARANCE_MAX_REACH_M["runway"]
+    for s in runway_shapes:
+        coords = _open_coords(s.polygon)
+        info = _rect_long_short_edges(coords)
+        if info is None:
+            continue
+        long_edges, short_len, long_len = info
+        if short_len <= 0 or long_len / short_len < _MIN_LATERAL_ASPECT:
+            continue
+        clear_half = runway_strip_half_width_m(_runway_full_len(s, long_len))
+        band_w = clear_half - 0.5 * short_len
+        if band_w <= _PAVEMENT_GAP_M + 1.0:
+            continue
+        for (a, b) in long_edges:
+            outward = _outward_normal(s.polygon, a, b)
+            if outward is None:
+                continue
+            pts = _stations(a, b, step)
+            m = len(pts)
+            alts = [_sample_runway_segment_elev(s, px, py) for px, py in pts]
+            for ring, ralts in _build_strips(
+                    pts, alts, [outward] * m, [band_w] * m,
+                    rw_threshold, rw_max_reach, step, sample_dem):
+                n_emitted += _commit(ring, ralts, ROLE_RUNWAY_CLEARANCE)
+
+    # ── Pass C: runway-end RESA areas ──
+    for s, a, b, long_len in _runway_end_edges(runway_shapes):
+        outward = _outward_normal(s.polygon, a, b)
+        if outward is None:
+            continue
+        full_len = _runway_full_len(s, long_len)
+        band_w = runway_end_clearance_length_m(full_len)
+        if band_w <= _PAVEMENT_GAP_M + 1.0:
+            continue
+        # Widen the end edge to the graded-strip width so the RESA is at
+        # least as wide as the side strips and meets them at the corners.
+        strip_half = runway_strip_half_width_m(full_len)
+        edge_dir = _unit(b[0] - a[0], b[1] - a[1])
+        half_len = 0.5 * math.hypot(b[0] - a[0], b[1] - a[1])
+        extra = max(0.0, strip_half - half_len)
+        if edge_dir is not None and extra > 0.0:
+            a = (a[0] - edge_dir[0] * extra, a[1] - edge_dir[1] * extra)
+            b = (b[0] + edge_dir[0] * extra, b[1] + edge_dir[1] * extra)
+        pts = _stations(a, b, step)
+        m = len(pts)
+        alts = [_sample_runway_segment_elev(s, px, py) for px, py in pts]
+        for ring, ralts in _build_strips(
+                pts, alts, [outward] * m, [band_w] * m,
+                rw_threshold, rw_max_reach, step, sample_dem):
+            n_emitted += _commit(ring, ralts, ROLE_RUNWAY_CLEARANCE)
+
+    return n_emitted

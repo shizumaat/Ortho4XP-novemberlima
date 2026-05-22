@@ -58,7 +58,11 @@ CONFORMANCE_TOL_M = SHARED_VERTEX_TOL_M
 # (``_clip_pavement_to_boundary_interior``), so the ribbon and pavement
 # must form a conforming partition — sharing seam nodes bidirectionally —
 # or Triangle4XP nodes the seam into slivers.
-_OVERLAY_REFS = {"boundary_dem_bridge"}
+# Wingtip / RESA clearance cuts (``ref == "surface_clearance"``) are
+# terrain-grading overlays laid alongside pavement with a built-in gap
+# (they share no edge with pavement), so — like the DEM bridge — they
+# are not part of the airside conforming partition.
+_OVERLAY_REFS = {"boundary_dem_bridge", "surface_clearance"}
 
 
 def _open_ring(poly):

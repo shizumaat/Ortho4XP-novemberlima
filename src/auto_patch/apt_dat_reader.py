@@ -1064,6 +1064,34 @@ def taxi_junction_points(
     return out
 
 
+def taxi_size_letters(airport: Airport) -> dict[str, str]:
+    """Map each taxiway NAME to its ICAO design code LETTER ("A".."F").
+
+    Read from the apt.dat row-1202 taxi-edge "size" field
+    (``TaxiEdge.kind`` == ``"taxiway_C"`` → ``"C"``).  This is the
+    authoritative aircraft-size / width class for a taxiway and is
+    intended to be shared by any feature that needs it (wingtip
+    clearance, shoulder widths, fillet sizing, etc.) rather than
+    re-derived from measured pavement geometry.
+
+    When a taxiway's edges disagree (rare), the WIDEST letter seen is
+    kept.  ``kind == "runway"`` edges and unnamed connectors are
+    skipped.  Returns an empty dict for airports with no taxi network
+    (e.g. when the graph came from OSM).
+    """
+    letters: dict[str, str] = {}
+    for e in airport.taxi_edges:
+        if not e.name or not e.kind.startswith("taxiway_"):
+            continue
+        lt = e.kind.split("_")[-1].upper()
+        if lt not in ("A", "B", "C", "D", "E", "F"):
+            continue
+        prev = letters.get(e.name)
+        if prev is None or lt > prev:
+            letters[e.name] = lt
+    return letters
+
+
 def taxi_centerlines(
         airport: Airport,
         to_m: Callable[[float, float], tuple[float, float]],

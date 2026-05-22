@@ -32,6 +32,19 @@ __all__ = [
     "PATCH_SLOPE_CELL_SIZE_M",
     "RUNWAY_CELL_SIZE_M",
     "PATCH_SLOPE_PROFILE",
+    "CLEARANCE_OBSTRUCTION_THRESHOLD_M",
+    "CLEARANCE_MAX_REACH_M",
+    "CLEARANCE_STATION_STEP_M",
+    "RUNWAY_END_CLEARANCE_LENGTH_BY_CODE",
+    "RUNWAY_STRIP_HALF_WIDTH_BY_CODE",
+    "WINGSPAN_BY_CODE_LETTER",
+    "TAXIWAY_WINGTIP_MARGIN_M",
+    "runway_code_number",
+    "runway_strip_half_width_m",
+    "runway_end_clearance_length_m",
+    "taxiway_code_letter",
+    "taxiway_clearance_half_width_m",
+    "taxiway_clearance_half_width_for_letter",
 ]
 
 
@@ -187,6 +200,12 @@ ROLE_GRADE_LIMITS = {
     # (user 2026-05-22) — same cap as tunnel ramps — so steep terrain is
     # smoothed to a navigable surface rather than tracing raw terrain.
     "groundside_pavement": 0.040,
+    # Wingtip / RESA clearance cuts trace the cut terrain surface
+    # (per-vertex node_altitudes computed directly against the DEM
+    # and a ramped ceiling); like the boundary they carry no
+    # within-shape grade rule.
+    "taxiway_clearance":  None,
+    "runway_clearance":   None,
 }
 
 # Phase-1 emit-suppression toggles (kept from the pre-refactor
@@ -216,3 +235,115 @@ EMIT_APRONS = False
 PATCH_SLOPE_CELL_SIZE_M = 10      # taxiway / apron / boundary sloped rects
 RUNWAY_CELL_SIZE_M = 10           # runway segments (real vertical profile)
 PATCH_SLOPE_PROFILE = "spline"   # "spline" | "plane" (only matters if cut)
+
+
+# ── Surface lateral / end clearance (wingtip + RESA) ──────────────
+# Aircraft wingspans exceed the paved width of taxiways/runways, and
+# the standards (FAA AC 150/5300-13 TOFA, ICAO Annex 14 graded
+# strip / RESA) reserve a clear lateral band on each side and a
+# graded area off each runway end.  The clearance pass
+# (``clearance.emit_surface_clearance_cuts``) samples the DEM inside
+# those bands and CUTS terrain that rises more than the threshold
+# above the adjacent surface EDGE altitude down to a ramped ceiling,
+# so a wingtip overhanging the pavement clears it.  Terrain BELOW
+# the surface is left untouched (cut-only — we never fill).
+#
+# A terrain point is an "obstruction" when it rises more than this
+# many metres above the adjacent surface edge altitude.  Keyed by
+# surface family ("taxiway" | "runway").
+CLEARANCE_OBSTRUCTION_THRESHOLD_M = {
+    "taxiway": 1.0,
+    "runway":  1.0,
+}
+
+# Safety cap (m) on how far a clearance band reaches outward from the
+# pavement edge, bounding earthwork.  Must be >= the largest band we
+# actually want: a code-4 runway-end RESA is 240 m, so the runway cap
+# sits above that; taxiway wingtip bands are <= ~43 m.
+CLEARANCE_MAX_REACH_M = {
+    "taxiway": 100.0,
+    "runway":  300.0,
+}
+
+# Vertex spacing (m) along a surface edge when sampling/building the
+# clearance band.  Matches ``ELEVATION_GRID_STEP_M`` (5 m) so the cut
+# resolves the same terrain detail the elevation solver does.
+CLEARANCE_STATION_STEP_M = 5.0
+
+# RESA / runway-end graded distance (m) beyond the runway end, by
+# ICAO Annex 14 code number (derived from runway length).  ICAO RESA
+# min is 90 m (240 m recommended for code 3/4); these defaults fold
+# the strip-end portion in and stay conservative-but-tunable.
+RUNWAY_END_CLEARANCE_LENGTH_BY_CODE = {1: 60.0, 2: 90.0, 3: 150.0, 4: 240.0}
+
+# Lateral graded-strip half-width (m) from the runway centerline, by
+# ICAO code number (Annex 14 graded portion of the runway strip).
+RUNWAY_STRIP_HALF_WIDTH_BY_CODE = {1: 30.0, 2: 40.0, 3: 75.0, 4: 75.0}
+
+# Maximum aircraft wingspan (m) per ICAO code letter (Annex 14).  The
+# taxiway clearance band is based on the WINGTIP REACH — half the
+# wingspan from the centerline plus a small margin — i.e. how far a
+# wingtip overhangs, which is the terrain a wingtip could actually
+# strike.  (The Table-3-1 "centre-line → object" distances — A 16.25 …
+# F 57.5 — are far larger; they protect against objects/buildings and
+# include lateral-deviation allowances, which over-grade terrain.)
+WINGSPAN_BY_CODE_LETTER = {
+    "A": 15.0, "B": 24.0, "C": 36.0, "D": 52.0, "E": 65.0, "F": 80.0,
+}
+# Margin (m) added beyond the wingtip (FAA-style wingtip clearance).
+TAXIWAY_WINGTIP_MARGIN_M = 3.0
+
+
+def runway_code_number(length_m: float) -> int:
+    """ICAO Annex 14 aerodrome reference code NUMBER from runway
+    length: 1 (<800 m), 2 (800–1199), 3 (1200–1799), 4 (≥1800)."""
+    if length_m >= 1800.0:
+        return 4
+    if length_m >= 1200.0:
+        return 3
+    if length_m >= 800.0:
+        return 2
+    return 1
+
+
+def runway_strip_half_width_m(length_m: float) -> float:
+    """Graded runway-strip half-width (m) from the centerline."""
+    return RUNWAY_STRIP_HALF_WIDTH_BY_CODE[runway_code_number(length_m)]
+
+
+def runway_end_clearance_length_m(length_m: float) -> float:
+    """RESA / runway-end graded distance (m) beyond the runway end."""
+    return RUNWAY_END_CLEARANCE_LENGTH_BY_CODE[runway_code_number(length_m)]
+
+
+def taxiway_code_letter(width_m: float) -> str:
+    """ICAO code LETTER inferred from taxiway pavement width (m).
+    Widths: A 7.5, B 10.5, C 15/18, D 18/23, E 23, F 25 m."""
+    if width_m >= 25.0:
+        return "F"
+    if width_m >= 23.0:
+        return "E"
+    if width_m >= 18.0:
+        return "D"
+    if width_m >= 15.0:
+        return "C"
+    if width_m >= 10.5:
+        return "B"
+    return "A"
+
+
+def taxiway_clearance_half_width_for_letter(letter: str) -> float:
+    """Taxiway clearance half-width (m) from the centerline for a given
+    ICAO code LETTER = wingtip reach (½ max wingspan) + margin."""
+    return (0.5 * WINGSPAN_BY_CODE_LETTER[letter.upper()]
+            + TAXIWAY_WINGTIP_MARGIN_M)
+
+
+def taxiway_clearance_half_width_m(width_m: float) -> float:
+    """Taxiway clearance half-width (m) from the centerline = wingtip
+    reach (½ max wingspan for the width-inferred code letter) + margin.
+
+    Fallback for taxiways with no apt.dat size class (OSM networks);
+    prefer :func:`taxiway_clearance_half_width_for_letter`."""
+    return taxiway_clearance_half_width_for_letter(
+        taxiway_code_letter(width_m))

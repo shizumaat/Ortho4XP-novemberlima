@@ -910,6 +910,12 @@ def build_airport_pavement(icao: str, xplane_root: str,
             f"apt.dat taxi-network centerline(s) "
             f"({len(apt.taxi_nodes)} nodes, "
             f"{len(apt.taxi_edges)} edges).")
+        # Map taxiway name -> ICAO design code LETTER from the row-1202
+        # edge "size" field (the authoritative width class).  Exposed on
+        # the layout for any feature that needs taxiway sizing (wingtip
+        # clearance, shoulders, fillets, …) — see
+        # ``apt_dat_reader.taxi_size_letters``.
+        layout.apt_taxi_letters = APR.taxi_size_letters(apt)
     else:
         osm_centerlines = _extract_osm_taxi_centerlines(
             nodes, ways, to_m, rwy_centerlines=rwy_centerlines)
@@ -2487,6 +2493,30 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # previously firing mid-pipeline with stale numbers.
         from .elevation import _report_within_shape_violations
         _report_within_shape_violations(layout, icao)
+
+        # Wingtip / RESA terrain-clearance cuts (user 2026-05-22).  Cut
+        # terrain that rises into a surface's lateral clearance band
+        # (taxiway TOFA / runway graded strip) or runway-end safety area
+        # down to a ramped ceiling so an overhanging wingtip clears it;
+        # terrain below the surface is left alone (cut-only).  Runs LAST
+        # in the elevation block — after tile_cut, the final solver, and
+        # all junction/apron reshaping — so the cuts are subtracted
+        # against FULLY-SETTLED pavement and never overlap it
+        # (test_no_self_overlap).  The boundary-interior clip + conformance
+        # passes below then trim them to the airport interior.
+        try:
+            from .clearance import emit_surface_clearance_cuts
+            _cl_tl = (current_tile_lat if current_tile_lat is not None
+                      else math.floor(layout.anchor[0]))
+            _cl_tn = (current_tile_lon if current_tile_lon is not None
+                      else math.floor(layout.anchor[1]))
+            n_cl = emit_surface_clearance_cuts(layout, dem, _cl_tl, _cl_tn)
+            if n_cl:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: emitted {n_cl} "
+                    f"surface-clearance cut polygon(s).")
+        except _GEOM_EXC:
+            pass
 
     # ── Boundary-interior clip (user 2026-05-22) ──────────────────────
     # No emitted shape may CROSS the airport boundary.  The boundary

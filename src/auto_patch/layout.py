@@ -171,6 +171,15 @@ ROLE_RETAINING_WALL = "retaining_wall"
 # terminal building so it follows local terrain instead of being
 # flattened to airside-apron elevation.
 ROLE_GROUNDSIDE_PAVEMENT = "groundside_pavement"
+# Wingtip / RESA clearance cuts: terrain-following node_altitudes
+# polygons emitted alongside taxiways and runways (and off runway
+# ends) by ``clearance.emit_surface_clearance_cuts``.  They CUT
+# terrain that rises above the adjacent surface edge within the
+# lateral clearance band / runway-end safety area down to a ramped
+# ceiling.  Like ROLE_BOUNDARY they trace/override terrain, so they
+# carry no within-shape grade rule.
+ROLE_TAXIWAY_CLEARANCE = "taxiway_clearance"
+ROLE_RUNWAY_CLEARANCE = "runway_clearance"
 
 AEROWAY_FOR_ROLE = {
     ROLE_RUNWAY: "runway",
@@ -186,6 +195,8 @@ AEROWAY_FOR_ROLE = {
     ROLE_TUNNEL_RAMP: "taxiway",
     ROLE_RETAINING_WALL: "building",
     ROLE_GROUNDSIDE_PAVEMENT: "apron",
+    ROLE_TAXIWAY_CLEARANCE: "aerodrome",
+    ROLE_RUNWAY_CLEARANCE: "aerodrome",
 }
 
 
@@ -254,6 +265,12 @@ class PavementLayout:
     # ``apt_dat_reader.taxi_centerlines``.
     apt_taxi_centerlines: list[tuple[LineString, str]] = field(
         default_factory=list)
+    # Map of taxiway name -> ICAO design code LETTER ("A".."F"), read
+    # from the apt.dat row-1202 taxi-edge ``kind`` ("taxiway_C" → "C").
+    # The authoritative width class for wingtip-clearance sizing — used
+    # by the clearance pass instead of measuring pavement width.  Empty
+    # when the taxi network came from OSM (no width class available).
+    apt_taxi_letters: dict[str, str] = field(default_factory=dict)
     # apt.dat row-110 pavement polygon vertices, in meter space.
     # Junction polygons are built as
     # ``pav_union.difference(rects)`` and inherit their perimeter

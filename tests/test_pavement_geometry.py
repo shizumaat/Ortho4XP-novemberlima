@@ -670,14 +670,17 @@ def test_coverage_within_source_envelope(icao):
     """
     layout = _build_layout(icao)
     # Boundary shapes (ROLE_BOUNDARY: airport-perimeter ribbon and
-    # boundary→DEM bridge polygons) are elevation control surfaces,
-    # not pavement.  Excluding them — this test checks that the
-    # PAVEMENT footprint stays close to its sources, which boundary
-    # shapes don't contribute to.
+    # boundary→DEM bridge polygons) and wingtip/RESA clearance cuts
+    # (taxiway_clearance / runway_clearance) are elevation/terrain
+    # control surfaces, not pavement.  Excluding them — this test
+    # checks that the PAVEMENT footprint stays close to its sources,
+    # which these terrain-grading shapes don't contribute to.
+    _NON_PAVEMENT_ROLES = {
+        "boundary", "taxiway_clearance", "runway_clearance"}
     emitted_polys = [s.polygon for s in layout.shapes
                      if s.polygon is not None
                      and not s.polygon.is_empty
-                     and getattr(s, "role", None) != "boundary"]
+                     and getattr(s, "role", None) not in _NON_PAVEMENT_ROLES]
     if not emitted_polys:
         return
     try:
