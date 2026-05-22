@@ -104,6 +104,20 @@ DEM_ATTRACTION = 0.3
 DEM_ATTRACTION_DECAY = 1.0
 DEM_ATTRACTION_MIN = 1e-4
 
+# Asymmetric DEM attraction (user 2026-05-22): grade > DEM, and a soft
+# node must NOT be dragged BELOW its terrain unless grade toward a HARD
+# anchor genuinely requires it.  A node sitting below its DEM was almost
+# always pulled there by a cap-chain to a low connected shape (SPLP
+# junction (4,503): every vertex 0.5-1.4 m below terrain, dragged by a
+# taxiway descending to 64 m — even though the local terrain is flat ~72
+# and a flat junction/stub would be grade-compliant).  So pull UP toward
+# terrain STRONGLY (restore it); pull DOWN gently.  Grade still wins: the
+# cap-projection runs AFTER this each iteration, so a node that truly
+# must sit below DEM to stay within grade of a lower HARD anchor is
+# pushed back down (the spring just sets the target, the cap has the last
+# word).
+DEM_FLOOR_ATTRACTION = 0.85
+
 
 def _role_grade(role: str) -> float:
     """Per-role max grade cap.  All roles now share ``TAXI_MAX_GRADE``
@@ -778,14 +792,19 @@ def _run_jacobi(elev, is_hard, adj, edge_list, edge_grade,
         # geometrically-decaying fraction (skips HARD nodes and nodes
         # with no DEM sample).
         if use_dem:
-            a = DEM_ATTRACTION * (DEM_ATTRACTION_DECAY ** it)
-            if a > DEM_ATTRACTION_MIN:
-                for i in range(n):
-                    if is_hard[i]:
-                        continue
-                    d = dem_elev[i]
-                    if d is None:
-                        continue
+            decay = DEM_ATTRACTION_DECAY ** it
+            for i in range(n):
+                if is_hard[i]:
+                    continue
+                d = dem_elev[i]
+                if d is None:
+                    continue
+                # Asymmetric: strong pull UP toward terrain (undo
+                # spurious below-DEM drag), gentle pull DOWN.  Grade
+                # wins via the cap-projection that runs next.
+                w = DEM_FLOOR_ATTRACTION if elev[i] < d else DEM_ATTRACTION
+                a = w * decay
+                if a > DEM_ATTRACTION_MIN:
                     elev[i] += a * (d - elev[i])
         # 1) Multi-sweep edge grade-cap projection — only force
         # acting on soft nodes.  Each sweep visits every edge; an
