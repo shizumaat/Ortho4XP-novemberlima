@@ -36,6 +36,7 @@ __all__ = [
     "CLEARANCE_MAX_REACH_M",
     "CLEARANCE_STATION_STEP_M",
     "RUNWAY_END_CLEARANCE_LENGTH_BY_CODE",
+    "RUNWAY_END_RESA_MAX_SLOPE",
     "RUNWAY_STRIP_HALF_WIDTH_BY_CODE",
     "WINGSPAN_BY_CODE_LETTER",
     "TAXIWAY_WINGTIP_MARGIN_M",
@@ -275,6 +276,13 @@ CLEARANCE_STATION_STEP_M = 5.0
 # min is 90 m (240 m recommended for code 3/4); these defaults fold
 # the strip-end portion in and stay conservative-but-tunable.
 RUNWAY_END_CLEARANCE_LENGTH_BY_CODE = {1: 60.0, 2: 90.0, 3: 150.0, 4: 240.0}
+
+# Maximum longitudinal slope (rise/run) of the graded runway-end safety
+# area.  ICAO Annex 14 caps RESA longitudinal slopes at 5%; the RESA
+# ramp rises from the runway-end pavement elevation at this slope and
+# daylights where it meets natural ground, so an undershooting /
+# overrunning aircraft meets a gentle slope rather than a wall.
+RUNWAY_END_RESA_MAX_SLOPE = 0.05
 
 # Lateral graded-strip half-width (m) from the runway centerline, by
 # ICAO code number (Annex 14 graded portion of the runway strip).

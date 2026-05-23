@@ -1,25 +1,26 @@
-"""Wingtip / RESA terrain-clearance cuts.
+"""Wingtip / RESA terrain-clearance grading.
 
 Aircraft wingspans exceed the paved width of taxiways and runways, so
 the design standards (FAA AC 150/5300-13 Taxiway Object Free Area;
 ICAO Annex 14 graded runway strip + Runway End Safety Area) reserve a
 clear, gently-graded band on each side of a surface and a graded area
-off each runway end.  Natural terrain that rises into that band — a
-hillock, a cut-bank, a berm — is a wingtip obstruction.
+off each runway end.  A hill that rises into that band — into the
+wingtip envelope alongside, or into the approach off the end — must be
+graded DOWN so it transitions smoothly to the pavement edge.
 
-This module samples the DEM inside those bands and emits CUT polygons
-that lower offending terrain to a ramped ceiling:
+This module samples the DEM along each surface edge and emits grading
+polygons that BLEND linearly from the pavement edge altitude to the
+natural DEM at the band's far edge:
 
-  ceiling(d) = edge_alt + threshold · min(1, d / band_width)
+  blend(d) = edge_alt + (DEM_far − edge_alt) · d / band_width
 
-where ``d`` is distance outward from the pavement edge and ``edge_alt``
-is the adjacent surface's edge altitude.  Per-vertex altitudes are
-``min(DEM, ceiling)`` — so we only ever CUT terrain that rises above
-the surface and never FILL terrain that sits below it (matching the
-user directive: "doesn't matter if the terrain goes below the
-taxiway, just above").  The cut daylights back to natural ground where
-the ceiling meets the DEM, capped at a max reach so steep slopes don't
-generate runaway earthwork.
+where ``d`` is distance outward from the pavement edge.  The patch
+overrides terrain to this ramp, cutting terrain that rises above it
+while the outer edge sits at the DEM (no cliff, auto-daylight).  This
+is cut-only: terrain that falls away BELOW the surface is left alone
+(the wingtip clears it).  A strip is emitted only where terrain rises
+more than a small trigger above the blend; the band is capped at a max
+reach to bound earthwork.
 
 Three passes share one strip builder:
   * taxiway lateral strips   (ROLE_TAXIWAY_CLEARANCE)
@@ -48,7 +49,7 @@ from .config import (
     CLEARANCE_MAX_REACH_M,
     CLEARANCE_OBSTRUCTION_THRESHOLD_M,
     CLEARANCE_STATION_STEP_M,
-    runway_end_clearance_length_m,
+    RUNWAY_END_RESA_MAX_SLOPE,
     runway_strip_half_width_m,
     taxiway_clearance_half_width_for_letter,
     taxiway_clearance_half_width_m,
@@ -116,6 +117,9 @@ _AIRSIDE_PAVEMENT_ROLES = (
 # is skipped — no wingtip-obstruction risk in the middle of pavement.
 _RAY_STEP_M = 2.0
 _RAY_MAX_HALF_WIDTH_M = 35.0
+# How far past the runway end to search for the outer pavement edge
+# (blast-pad / stopway / apron) the RESA should anchor on.
+_RESA_PAVEMENT_PROBE_MAX_M = 300.0
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -290,12 +294,14 @@ def _build_strips(edge_stations, edge_alts, outwards,
         blend(d) = edge_alt + (DEM_far − edge_alt) · d / band_w
 
     The patch overrides terrain to this ramp, so terrain rising above
-    the ramp is cut down to it while the outer edge meets the DEM
-    exactly (no cliff, auto-daylight).  A station only contributes a
-    strip when the terrain rises more than ``trigger`` metres above the
-    blend ramp somewhere in the band (otherwise the natural slope is
-    already smooth — nothing to grade).  ``band_ws[i]`` is capped at
-    ``max_reach`` to bound earthwork.
+    the ramp is CUT down to it (wingtip / approach clearance) while the
+    outer edge meets the DEM exactly (no cliff, auto-daylight).  This is
+    cut-only: a hill that rises above the surface is graded down for a
+    smooth DEM→pavement transition; terrain that falls away below the
+    surface is left alone.  A station contributes a strip only where the
+    terrain rises more than ``trigger`` metres above the blend ramp
+    inside the band.  ``band_ws[i]`` is capped at ``max_reach`` to bound
+    earthwork.
 
     ``edge_stations`` / ``edge_alts`` / ``outwards`` / ``band_ws`` are
     matched per-station lists.  Returns ``(ring_open, alts_open)`` pairs.
@@ -315,7 +321,9 @@ def _build_strips(edge_stations, edge_alts, outwards,
         if do is None:
             do = ref
         dem_far[i] = do
-        # Probe for terrain rising above the blend ramp inside the band.
+        # Probe for terrain rising above the blend ramp inside the band
+        # (cut-only: a hill above the surface is graded down; terrain
+        # falling away below the surface is left alone).
         kk = max(2, int(math.ceil(bw / step)))
         for k in range(1, kk):
             d = bw * k / kk
@@ -434,6 +442,90 @@ def _runway_end_edges(runway_shapes):
             s, a, b, _mid = ses[k]
             ends.append((s, a, b, full))
     return ends
+
+
+def _pavement_exit_along(prep_pav, mx, my, dx, dy, max_d, step) -> float:
+    """Distance from ``(mx, my)`` (a point ON pavement) along unit
+    ``(dx, dy)`` to where the ray leaves the pavement union — i.e. the
+    OUTER pavement edge (a blast-pad / stopway / apron end).  ``0.0`` if
+    the start isn't on pavement; ``max_d`` if it never exits."""
+    if prep_pav is None or not prep_pav.contains(Point(mx, my)):
+        return 0.0
+    d = step
+    while d <= max_d:
+        if not prep_pav.contains(Point(mx + dx * d, my + dy * d)):
+            return d - 0.5 * step
+        d += step
+    return max_d
+
+
+def _build_resa_strips(stations, ref, outward, slope, trigger,
+                       max_reach, step, sample_dem):
+    """Grade a Runway-End Safety Area off the runway-end pavement edge.
+
+    From each start-edge station (a point on the blast-pad / stopway
+    edge, spread across the RESA width) march outward along the runway
+    axis holding a gentle ceiling that rises from the pavement-end
+    elevation ``ref`` at ``slope`` (≤5%):
+
+        ceiling(d) = ref + slope · d
+
+    Terrain rising above the ceiling is cut down to it, and the cut
+    daylights where the ceiling meets the DEM — so an undershooting /
+    overrunning aircraft meets a smooth ≤5% slope instead of a wall.
+    Cut-only.  Returns ``(ring_open, alts_open)`` pairs.
+    """
+    nx, ny = outward
+    n = len(stations)
+    outer: list[float] = [0.0] * n
+    obstructed: list[bool] = [False] * n
+    nst = max(1, int(math.ceil(max_reach / step)))
+    for i, (sx, sy) in enumerate(stations):
+        last = 0.0
+        for k in range(1, nst + 1):
+            d = min(max_reach, k * step)
+            ceil = ref + slope * d
+            dem = sample_dem(sx + nx * d, sy + ny * d)
+            if dem is not None and dem > ceil + trigger:
+                last = d
+        if last > 0.0:
+            obstructed[i] = True
+            outer[i] = min(max_reach, last + step)
+    idx = [i for i in range(n) if obstructed[i]]
+    if not idx:
+        return []
+    runs: list[list[int]] = []
+    cur = [idx[0]]
+    for j in idx[1:]:
+        if j - cur[-1] <= 2:
+            cur.append(j)
+        else:
+            runs.append(cur)
+            cur = [j]
+    runs.append(cur)
+
+    out: list[tuple[list, list]] = []
+    for run in runs:
+        lo = max(0, run[0] - 1)
+        hi = min(n - 1, run[-1] + 1)
+        inner_pts, inner_alts, outer_pts, outer_alts = [], [], [], []
+        for i in range(lo, hi + 1):
+            sx, sy = stations[i]
+            off = outer[i] if outer[i] > 0.0 else step
+            # Inner edge: at the pavement edge, at the pavement-end
+            # elevation (clean tie-in to the blast-pad / stopway).
+            inner_pts.append((sx + nx * _PAVEMENT_GAP_M,
+                              sy + ny * _PAVEMENT_GAP_M))
+            inner_alts.append(round(float(ref + slope * _PAVEMENT_GAP_M), 1))
+            # Outer edge: at the daylight point, at the ceiling (= DEM
+            # there) so the ramp meets natural ground with no cliff.
+            outer_pts.append((sx + nx * off, sy + ny * off))
+            outer_alts.append(round(float(ref + slope * off), 1))
+        if len(inner_pts) < 2:
+            continue
+        out.append((inner_pts + outer_pts[::-1],
+                    inner_alts + outer_alts[::-1]))
+    return out
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -747,6 +839,18 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
 
     n_emitted = 0
 
+    # Airside pavement union (shared by the taxiway-centerline trace and
+    # the RESA pavement-edge anchor).
+    airside = [s for s in layout.shapes
+               if s.role in _AIRSIDE_PAVEMENT_ROLES
+               and s.polygon is not None and not s.polygon.is_empty]
+    prep_pav = None
+    if airside:
+        try:
+            prep_pav = prep(unary_union([s.polygon for s in airside]))
+        except _GEOM_EXC:
+            prep_pav = None
+
     # ── Pass A: taxiway lateral strips, traced from the taxi CENTERLINE
     # network.  This follows the centerline and raycasts out to whatever
     # pavement edge actually borders it — so it covers taxiways no matter
@@ -758,30 +862,21 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
     centerlines = getattr(layout, "apt_taxi_centerlines", None) or []
     # Authoritative ICAO size letter per taxiway name (apt.dat row 1202).
     letters = getattr(layout, "apt_taxi_letters", None) or {}
-    airside = [s for s in layout.shapes
-               if s.role in _AIRSIDE_PAVEMENT_ROLES
-               and s.polygon is not None and not s.polygon.is_empty]
-    if centerlines and airside:
-        try:
-            pav_union = unary_union([s.polygon for s in airside])
-            prep_pav = prep(pav_union)
-        except _GEOM_EXC:
-            prep_pav = None
-        if prep_pav is not None:
-            for entry in centerlines:
-                line = entry[0] if isinstance(entry, tuple) else entry
-                ref = entry[1] if (isinstance(entry, tuple)
-                                   and len(entry) > 1) else ""
-                if not isinstance(line, LineString) or line.is_empty:
-                    continue
-                letter = letters.get(ref)
-                for e_pts, e_alts, e_out, e_bw in _centerline_edge_runs(
-                        line, prep_pav, airside, step, letter=letter):
-                    for ring, ralts in _build_strips(
-                            e_pts, e_alts, e_out, e_bw, tx_threshold,
-                            tx_max_reach, step, sample_dem):
-                        n_emitted += _commit(ring, ralts,
-                                             ROLE_TAXIWAY_CLEARANCE)
+    if centerlines and prep_pav is not None:
+        for entry in centerlines:
+            line = entry[0] if isinstance(entry, tuple) else entry
+            ref = entry[1] if (isinstance(entry, tuple)
+                               and len(entry) > 1) else ""
+            if not isinstance(line, LineString) or line.is_empty:
+                continue
+            letter = letters.get(ref)
+            for e_pts, e_alts, e_out, e_bw in _centerline_edge_runs(
+                    line, prep_pav, airside, step, letter=letter):
+                for ring, ralts in _build_strips(
+                        e_pts, e_alts, e_out, e_bw, tx_threshold,
+                        tx_max_reach, step, sample_dem):
+                    n_emitted += _commit(ring, ralts,
+                                         ROLE_TAXIWAY_CLEARANCE)
     else:
         # Fallback: taxiway rect long-edges (wingtip basis).
         for s in taxi_shapes:
@@ -837,29 +932,42 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                     rw_threshold, rw_max_reach, step, sample_dem):
                 n_emitted += _commit(ring, ralts, ROLE_RUNWAY_CLEARANCE)
 
-    # ── Pass C: runway-end RESA areas ──
-    for s, a, b, long_len in _runway_end_edges(runway_shapes):
+    # ── Pass C: runway-end safety area (RESA) ──
+    # A graded rectangle off each runway end, symmetric about the
+    # extended centreline and anchored at the OUTER pavement edge (the
+    # blast-pad / stopway end, found by marching the centreline out
+    # through the pavement union).  Width ≥ 2× runway width / graded-
+    # strip width; the surface is a gentle ramp (≤ RESA_MAX_SLOPE) rising
+    # from the pavement-end elevation, cutting terrain above it and
+    # daylighting where it meets the DEM — so an undershoot/overrun meets
+    # a smooth slope, not a wall.
+    for s, a, b, full_len in _runway_end_edges(runway_shapes):
         outward = _outward_normal(s.polygon, a, b)
         if outward is None:
             continue
-        full_len = _runway_full_len(s, long_len)
-        band_w = runway_end_clearance_length_m(full_len)
-        if band_w <= _PAVEMENT_GAP_M + 1.0:
+        nx, ny = outward
+        mid = (0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]))
+        info = _rect_long_short_edges(_open_coords(s.polygon))
+        runway_width = info[1] if info else math.hypot(b[0] - a[0], b[1] - a[1])
+        # Anchor at the outer pavement edge along the extended centreline.
+        start = _pavement_exit_along(prep_pav, mid[0], mid[1], nx, ny,
+                                     _RESA_PAVEMENT_PROBE_MAX_M, step)
+        p0 = (mid[0] + nx * start, mid[1] + ny * start)
+        # Pavement-end elevation (just inside the edge), else runway end.
+        ref = _pav_alt(airside, mid[0] + nx * max(0.0, start - 1.0),
+                       mid[1] + ny * max(0.0, start - 1.0))
+        if ref is None:
+            ref = _sample_runway_segment_elev(s, mid[0], mid[1])
+        if ref is None:
             continue
-        # Widen the end edge to the graded-strip width so the RESA is at
-        # least as wide as the side strips and meets them at the corners.
-        strip_half = runway_strip_half_width_m(full_len)
-        edge_dir = _unit(b[0] - a[0], b[1] - a[1])
-        half_len = 0.5 * math.hypot(b[0] - a[0], b[1] - a[1])
-        extra = max(0.0, strip_half - half_len)
-        if edge_dir is not None and extra > 0.0:
-            a = (a[0] - edge_dir[0] * extra, a[1] - edge_dir[1] * extra)
-            b = (b[0] + edge_dir[0] * extra, b[1] + edge_dir[1] * extra)
-        pts = _stations(a, b, step)
-        m = len(pts)
-        alts = [_sample_runway_segment_elev(s, px, py) for px, py in pts]
-        for ring, ralts in _build_strips(
-                pts, alts, [outward] * m, [band_w] * m,
+        # RESA half-width: ≥ runway width and ≥ graded-strip half-width.
+        half = max(runway_width, runway_strip_half_width_m(full_len))
+        perp = (-ny, nx)
+        ea = (p0[0] - perp[0] * half, p0[1] - perp[1] * half)
+        eb = (p0[0] + perp[0] * half, p0[1] + perp[1] * half)
+        stations = _stations(ea, eb, step)
+        for ring, ralts in _build_resa_strips(
+                stations, ref, outward, RUNWAY_END_RESA_MAX_SLOPE,
                 rw_threshold, rw_max_reach, step, sample_dem):
             n_emitted += _commit(ring, ralts, ROLE_RUNWAY_CLEARANCE)
 
