@@ -479,7 +479,7 @@ class PavementLayout:
         # altitude tags from the per-node mean.
         pending: list[tuple["BuiltShape", list[int]]] = []
         next_wid = [-10001]
-        for s in self.shapes:
+        for s_idx, s in enumerate(self.shapes):
             # Validate the polygon's geometry before emission.
             # Upstream pipeline stages (decomposition, seam-point
             # injection, shared-vertex enforcement) can occasionally
@@ -624,7 +624,7 @@ class PavementLayout:
                     continue
             except _GEOM_EXC:
                 continue
-            pending.append((s, ext_nids))
+            pending.append((s_idx, s, ext_nids))
 
         # ── Consensus pass ──────────────────────────────────────
         # For each node id we now have every altitude any shape
@@ -648,10 +648,27 @@ class PavementLayout:
         # matching [H, L, L, H] → ``altitude_high/low``; otherwise
         # ``node_altitudes``.
         _CANON_EQ_TOL = 0.05  # 5 cm — pattern-fit tolerance
-        for s, ext_nids in pending:
+        # Rect-role shapes (taxi/runway/boundary) are planar by design;
+        # collapse their [H,L,L,H] axis-end pairs to a clean rect when BOTH
+        # the high-end pair (corners 0&3) and the low-end pair (corners 1&2)
+        # are within this tolerance (covers solver/consensus drift).  Per
+        # user 2026-05-23: 0.5 m — keep near-planar rects as rects (more
+        # rects) rather than demoting them to node_altitudes.
+        _RECT_COLLAPSE_TOL_M = 0.5
+        _RECT_PLANAR_ROLES = (
+            ROLE_BOUNDARY, ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
+            ROLE_STUB, ROLE_CROSS_CONNECTOR, ROLE_RUNWAY,
+            ROLE_RUNWAY_CROSSING)
+        for s_idx, s, ext_nids in pending:
             tags = {
                 "aeroway": AEROWAY_FOR_ROLE.get(s.role, "taxiway"),
                 "role": s.role,
+                # Stable identifier = index in ``layout.shapes`` (the
+                # same ``#N`` numbering used in test-failure messages
+                # and debugging).  OSM way IDs are reassigned per-file
+                # by JOSM, so this tag is the reliable cross-file
+                # handle for locating a specific shape.
+                "shapeID": str(s_idx),
             }
             if s.ref:
                 tags["ref"] = s.ref
@@ -688,9 +705,42 @@ class PavementLayout:
                 # strips (altitude) — the latter get tilted too.
                 # Bridges (node_altitudes) are genuinely non-planar
                 # and are excluded.
-                if (s.role == ROLE_BOUNDARY
-                        and not s.node_altitudes
-                        and n_open == 4):
+                # Any FLAT shape stays a single flat plane (user
+                # 2026-05-23): "terminals — and any flat shape — use
+                # altitude= with a single value; node_altitudes is only
+                # for compound sloping polygons."  If the layout settled
+                # this shape on one floor altitude, per-corner consensus
+                # must NOT tilt it: a drifting welded-neighbour corner
+                # would otherwise average the plane out of flat and
+                # demote it to a sloped node_altitudes surface (the SPJC
+                # "terminal not flat" bug).  Emit the solver's flat floor;
+                # welded neighbours share those nodes 1:1 and match it by
+                # construction.  ROLE_BOUNDARY is excluded — strip rects
+                # have their own planar (cross-edge-collapse) handling
+                # just below.
+                if (s.role != ROLE_BOUNDARY
+                        and shape_node_altitudes is None
+                        and shape_altitude is not None):
+                    tags["altitude"] = f"{float(shape_altitude):.1f}"
+                elif (n_open == 4
+                        and s.role in _RECT_PLANAR_ROLES
+                        and abs(open_alts[0] - open_alts[3])
+                                <= _RECT_COLLAPSE_TOL_M
+                        and abs(open_alts[1] - open_alts[2])
+                                <= _RECT_COLLAPSE_TOL_M):
+                    # A 4-corner RECT-role shape (boundary / taxi / runway)
+                    # stays a rect (user 2026-05-23: "rects stay rects;
+                    # node_altitudes only for compound sloping polygons").
+                    # The solver / per-node consensus can leave the
+                    # [H,L,L,H] axis-end pairs a few cm unequal (e.g. CYXY
+                    # taxiway G: high corners 713.3 vs 713.2) — which demotes
+                    # the planar rect to node_altitudes whether it was stored
+                    # as altitude_high/low OR already as node_altitudes.
+                    # When the corners still match [H,L,L,H] within
+                    # _RECT_COLLAPSE_TOL_M, collapse each axis-end pair (0&3
+                    # high, 1&2 low) to its mean and emit altitude_high/low
+                    # (or flat).  Genuinely twisted quads (0≉3 or 1≉2) fall
+                    # through to node_altitudes.
                     eh, el = high_low_from_corner_alts(open_alts)
                     if abs(eh - el) <= _CANON_EQ_TOL:
                         tags["altitude"] = f"{(eh + el) / 2.0:.1f}"

@@ -592,13 +592,24 @@ def _split_primary_parallels_at_pavement_boundary(
             continue
         n_steps = max(2, int(math.floor(L / step_m)) + 1)
         embedded: list[bool] = []
+        # Probe BEYOND the rect's long edge, not on it (user 2026-05-23).
+        # ``pav_union`` includes the taxiway's OWN row-110 pavement, and the
+        # rect corners sit slightly inside that pavement edge — so testing
+        # AT ``half_w`` reads "embedded" even when there is no apron beside
+        # the taxiway, wrongly clipping a real taxiway suffix (SPLP taxi A
+        # near the lon=-77 seam → its 160 m suffix dropped → junction
+        # residue).  "Embedded in apron" means pavement extends a real
+        # margin PAST the taxiway's own width, so probe at
+        # ``half_w + EMBED_MARGIN_M``.
+        EMBED_MARGIN_M = 4.0
+        probe_w = half_w + EMBED_MARGIN_M
         try:
             for i in range(n_steps):
                 u = min(L, i * step_m)
                 cx = a_mid[0] + u * ux
                 cy = a_mid[1] + u * uy
-                left = Point(cx + nx * half_w, cy + ny * half_w)
-                right = Point(cx - nx * half_w, cy - ny * half_w)
+                left = Point(cx + nx * probe_w, cy + ny * probe_w)
+                right = Point(cx - nx * probe_w, cy - ny * probe_w)
                 emb = (pav_union.contains(left)
                        or pav_union.contains(right))
                 embedded.append(emb)

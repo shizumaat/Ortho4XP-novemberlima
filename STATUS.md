@@ -1,111 +1,106 @@
-# Auto-Patch Status — geometry rework done; corridor-aware invariant cluster next
+# Auto-Patch Status — solver inverted + bounce-back ON; grade residuals are mostly DATA
 
 ## TL;DR / current state
 
-**HEAD = `04561aa`. Working tree CLEAN.** Suite = **15 failures**
-(`venv/bin/python -m pytest tests/ -q`, ~4 min): the **9 pre-existing baseline**
-(compare_target ×3, grade ×3, SPJC junction-invariants ×3) **+ 6 introduced by
-this session's corridor-aware rect lengthening** (the open item below).
+Suite = **10 failures** (`venv/bin/python -m pytest tests/ -q`, ~5 min):
+down from **15** at the start of this session. The remaining 10 are
+compare_target ×3 (re-cut), the SPJC junction-drift cluster ×4, and
+grade ×3 (now mostly sub-metre data-mismatch spots, not solver
+infeasibility).
 
-This session (`04561aa`) was a big **GEOMETRY rework** of the SPLP B-connector /
-central-junction bug and the whole runway-segmentation path. The elevation
-cascade (gated, `unified_jacobi`) is UNTOUCHED — still off, resume after geometry.
+This session **inverted the elevation cascade** (terminal→apron→taxi)
+and **enabled the bounce-back** (`_USE_L2_FIT`), which together fixed the
+terminal-flatness problem and made previously-"infeasible" grade
+holdouts (SPLP stub/A) compliant by consuming network slack — exactly
+the user's design. Big realisation: the leftover CYXY grade violations
+were **bad apt.dat data** (a ~2 m runway-vs-DEM mismatch the user fixed
+live), not a solver limitation — so **Step 2 (runway-yield) may not be
+needed at all**; fix the data instead.
 
-**The single best handover note is the memory file
-`splp_b_connector_junction_rootcause.md`** — it has every fix, mechanism, and
-dead-end from this session in detail. Read it first.
-
----
-
-## DONE this session (commit `04561aa`) — the old STATUS geometry issues are FIXED
-
-- **#1 B cross-connector + missing central junction (SPLP)** — FIXED. Root cause
-  was NOT the diagonal-stub margin (old hypothesis) but the rect being built
-  SYMMETRIC about an off-centre centerline. Fix: place taxi rects by the
-  PAVEMENT — `rects._natural_half_widths_lr` + `half_left/half_right` in
-  `_rect_from_axis_extended`. Plus corridor-aware chart-junction margin in
-  `centerlines.py` (extend to the real widening; `CHART_JUNCTION_MARGIN_M` is now
-  **15 m**, committed — the old "don't touch it globally" warning is superseded:
-  it's safe now that rects are placed against the pavement).
-- **#0 runway segmentation (CYXY + SPLP)** — REWORKED. Runway now splits at each
-  pavement CONTACT's near/far edges (boundary-vs-runway-band arcs, proximity-based,
-  one sub-rect per contact — SPLP 11→8, no tiny rects); splits BOTH runways at
-  runway-runway crossings (CYXY `02/20+14R/32L`, `02/20+14L/32R`); cuts at profile
-  PEAKS/VALLEYS for vertical-curve support (CYXY 14R/32L crest). Blast pads /
-  displaced thresholds are part of the runway (contacts there cut; the threshold
-  CUT itself comes from the segmenter's CIFP `anchored_t`). All in `pipeline.py` +
-  `runway_segments.py`.
-- **#2 tile-slice seam wedges** — FIXED. `tile_cut._absorb_seam_slivers` merges
-  tiny seam wedges into the adjacent shape; rects STAY rects
-  (`_extend_rect_over_sliver`); node_altitudes neighbours unioned with seam-pinned
-  altitudes. Also `seam_anchors`: a taxi rect that only grazes/ends at a seam stays
-  a 4-corner rect (defer to the slice) instead of becoming whole-rect node_altitudes
-  (the "long taxiway A → node_altitudes" bug).
-- **Conformance slivers** — `canonical_points.weld_layout_vertices` (fresh-registry
-  weld before conformance) drove SPLP/SPJC crossings → 0.
-- **stub↔junction triangular gap (SPLP node 20)** — FIXED in `junction_rules.py`:
-  the Rule-2 sloping-edge snap no longer yanks a junction vertex that is already a
-  shared rect corner.
+**Read `solver_inversion_and_bounceback.md` first** — it has every
+mechanism + tunable from this session.
 
 ---
 
-## OPEN — the 6 corridor-aware invariant failures (NEXT TARGET)
+## DONE this session (all in the uncommitted commit below)
 
-The corridor-aware rect lengthening (it makes rects reach to the real pavement
-widening) extends some rects into apron/junction-adjacent zones, tripping 6 tests:
-
-| airport | failing tests |
-|---|---|
-| CYXY (stub G, ~57 m alongside apron #40) | `taxi_rects_not_alongside_apron`, `sloping_rect_slopes_only_along_axis`, `no_vertex_on_sloping_rect_flat_edge` |
-| SPLP | `junction_vertices_have_source`, `junction_vertices_outside_pavement` |
-| SPJC | `no_vertex_on_sloping_rect_flat_edge` |
-
-Common thread: a longer/asymmetric rect has its sloping edge running alongside a
-junction/apron (CYXY stub G is the clearest — a thin 75 m stub down the apron
-flank). **Lever:** scope the corridor-aware extension so it stops where EITHER
-side opens into apron/junction (don't run a rect alongside an apron — esp. stubs,
-which inherently hug aprons), OR have the absorption pass trim such rects (note:
-the long-edge-adjacent absorption EXEMPTS runway-corridor rects within 160 m of a
-runway, so stub G slips through). The asymmetric-placement change alone was only
-+1 failure; the corridor-aware lengthening added the other ~5.
-
-The 9 PRE-EXISTING baseline failures are unrelated (compare_target fixtures need
-re-cutting; grade is groundside/terminal-separation + the apron-side stub-A
-holdout; SPJC junction drift) — see `suite_baseline_dev_head.md`.
+1. **Cascade INVERTED** (`unified_jacobi.py`): tiers flipped to
+   `_TIER_TERMINAL=3 > _TIER_APRON=2 > _TIER_TAXI=1`; cascade solves
+   terminal→apron→taxi (seam/runway still base-HARD). Terminal is now a
+   flat anchor at the DEM-mean of its footprint; a terminal↔apron shared
+   node is terminal-owned, so the apron yields to the flat floor →
+   whole-flat terminals + 1:1 aprons fall out natively (the old
+   final-flatten hack was removed).
+2. **Bounce-back ENABLED**: `_USE_L2_FIT=True`, `_L2_MAX_ITERS` 40000→**2000**
+   (40000 was the suite-hang cause; 2000 converges fine, builds 4–6 s).
+   `_compliant_spread_fit` = the user's "flow apron→runway capping at
+   grade, bounce back to consume slack" — it already stops on full
+   compliance (line ~394); when it can't, the residual marks a genuinely
+   stuck (usually DATA) edge. SPLP stub/A: 4.07% → **1.43%**.
+3. **Terminal weld + emit guards** (committed via pipeline weld at
+   pipeline.py:2733 + `layout.to_osm`): `ROLE_TERMINAL` in `_weld_roles`;
+   flat shapes emit `altitude=`; **rect-role 4-corner shapes whose
+   `[H,L,L,H]` pairs are within `_RECT_COLLAPSE_TOL_M=0.5 m` collapse to
+   `altitude_high/low`** instead of demoting to node_altitudes (fixed
+   CYXY taxiway G + the two CYXY sloping-rect invariants). node_altitudes
+   is now reserved for genuinely compound sloping polygons.
+4. **`shapeID` OSM tag** = index in `layout.shapes` (= the `#N` in
+   test/debug messages). Stable cross-file handle for JOSM; `check_grade`
+   labels now show it. Ortho4XP's patch parser ignores unknown tags.
+5. **Per-tile grade audit** (`test_pavement_grade.py`): builds **each
+   tile** the airport spans with the **smoothed** DEM (`_load_airport_dem`),
+   not the pre-cut whole-airport superset — so it grades what ships. New
+   helper `tests/conftest.is_tile_seam_vertex` exempts tile-seam vertices
+   in the junction invariants (cleared 2 SPLP failures).
+6. **SPLP seam geometry**: `#325` seam-wedge now absorbed
+   (`tile_cut._extend_rect_over_sliver` flat-end tol got a `+1e-6` float
+   guard, and now extends to the wedge's **cut edge** not the cut LINE, so
+   it stays a sloping rect; a varying-seam wedge falls back to
+   node_altitudes via union rather than orphaning). `absorption.py`
+   embed-test now probes `half_w + 4 m` PAST the edge so it only clips a
+   taxiway bounded by a real **apron**, not by the taxiway's own pavement
+   (un-clipped SPLP taxi A's seam suffix).
 
 ---
 
-## THE ELEVATION/GRADE WORK (done, GATED OFF; resume AFTER geometry)
+## OPEN / next
 
-Unchanged this session. `elevation_per_surface/unified_jacobi.py::solve` has the
-priority cascade (seam/runway HARD → taxi → apron → terminal) + two flags, both
-default `False`: `_PER_AXIS_JUNCTIONS` (pairs with `check_grade.run_checks(
-taxi_axes_ll=…)` from `layout.apt_taxi_centerlines`) and `_USE_L2_FIT`
-(`_compliant_spread_fit`). Flags ON clear SPLP −10025/−10026; holdout = apron-side
-stub A (infeasible as anchored). Full design + dead-ends in
-`project_solver_priority_cascade.md`.
+- **compare_target ×3 (re-cut)** — gated on the suite being otherwise
+  green; everything else is close. Re-cut tool: `tools/build_target_osm.py`.
+- **SPJC junction-drift cluster ×4** — `have_source`, `neighbour_corners`,
+  `taxi_rects_not_alongside_apron`, `no_vertex_on_sloping_rect_flat_edge`
+  (all SPJC). Pre-existing; CYXY equivalents already cleared this session.
+- **grade ×3** — now mostly **sub-metre data spots** (CYXY apron/junction
+  micro-relief; SPLP/SPJC). After the #67 apt.dat fix the worst CYXY
+  dropped 13%→~8% (0.4 m). Treat these as DATA first (stale/over-smoothed
+  DEM, mis-anchored thresholds) — inspect with `shapeID` in JOSM.
+- **CYXY #49 missing taxi rects (DEFERRED, needs user read)** — junction
+  #49 sits inside large aprons (#50 ≈ 60k m², #64 ≈ 14k m²) that swallow
+  G's east arm + the E centerline, so they never emit as taxi rects. Real
+  apron extent or another data error?
+- **SPLP `#20` seam-arm (DEFERRED)** — centerline-less seam pavement →
+  junction residue; needs cross-tile centerline extension. Cosmetic.
+- **#9 seam-crossing terminal (DEFERRED)** — KPHX has a seam through a
+  terminal; lock V to a deterministic seam-DEM mean so both tile builds
+  agree. No baseline coverage yet.
+- **Step 2 runway-yield** — likely **unnecessary**: the stuck cases are
+  data, and the bounce-back consumes real network slack. Revisit only if a
+  genuinely-infeasible (clean-data) spot appears.
 
----
+## Tunables (all in `unified_jacobi.py` / `layout.py`)
+- `_USE_L2_FIT=True` (bounce-back), `_L2_MAX_ITERS=2000`.
+- `_RECT_COLLAPSE_TOL_M=0.5` (rect-vs-node_altitudes at emit).
+- `_PER_AXIS_JUNCTIONS=False` (still gated; pairs with
+  `check_grade.run_checks(taxi_axes_ll=…)`).
+- DEM attraction UNCHANGED (`DEM_ATTRACTION=0.3`, `DECAY=1.0`, `FLOOR=0.85`).
 
-## HOW TO TEST / GOTCHAS
-- Build one airport: `from auto_patch.pipeline import build_airport_pavement;
-  build_airport_pavement("SPLP", xplane_root(), compute_elevations=True)`
-  (sys.path += `src/`, repo root, `tests/`; `from conftest import xplane_root`).
-  **compute_elevations=True is REQUIRED** to exercise the runway segmenter +
-  seam/tile_cut pipeline — `False` skips them (runways stay single rects).
-- Full suite: `venv/bin/python -m pytest tests/ -q`. **Baseline now = 15.**
-- **Circular import:** import `auto_patch.pipeline` BEFORE `auto_patch.junction_repair`
-  (or monkeypatching it) — junction_repair ↔ elevation cycle.
-- The user EDITS apt.dat + source files in parallel — re-check `git status`/`git log`
-  before committing; commit ONLY your own files.
-- Per-tile builds: SPLP is cut at the lon=−77 seam (x≈−137 in local m); shapes
-  west of it are dropped (other tile) — the big "uncovered raw pavement" number is
-  that, not a gap.
-
-## Memory pointers
-- `splp_b_connector_junction_rootcause.md` — **THE key note for this area**: every
-  session-44 fix (asymmetric placement, weld, runway contact-arc split, peak/valley
-  cuts, seam-wedge absorption, taxiway-A-rect, stub-gap) with mechanisms.
-- `project_solver_priority_cascade.md` — the gated elevation cascade.
-- `suite_baseline_dev_head.md` — the pre-existing failure set (now stale count: it
-  says 9; current baseline incl. corridor-aware is 15).
+## GOTCHAS
+- Per-tile build = production: `_load_airport_dem(tlat+.5,tlon+.5)` for the
+  SMOOTHED DEM + `current_tile_lat/lon`; a raw `O4DEM` adds spurious grade
+  noise. `_sample_dem(dem, tile_lat, tile_lon, lat, lon)` — args in THAT
+  order (easy to reverse → reads ~100 km away → None).
+- `timeout` binary is NOT on macOS (use the Bash tool's own timeout).
+- Ortho4XP GUI caches `auto_patch` modules — restart it to pick up edits.
+- User edits runway-shoulder code in parallel (`runways.py`,
+  `apt_dat_reader.py`, `pipeline.py`, `clearance.py`, `tools/*heca*`) —
+  commit ONLY your own files; re-check `git status`/`git log` first.

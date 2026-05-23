@@ -21,7 +21,7 @@ import pytest
 
 from conftest import (
     airports_under_test, baseline_airports,
-    xplane_available, xplane_root,
+    is_tile_seam_vertex, xplane_available, xplane_root,
 )
 
 
@@ -647,6 +647,12 @@ def test_junction_vertices_outside_pavement(icao):
                     on_anchor = True
                     break
             if on_anchor:
+                continue
+            # Tile-cut seam vertex: its position is fixed by the
+            # slice (~half_width off the integer tile line), not free
+            # to push outside the pavement.  See
+            # conftest.is_tile_seam_vertex.
+            if is_tile_seam_vertex(layout, vx, vy):
                 continue
             # Vertex must be OUTSIDE pavement by ≥ offset (or AT
             # boundary within PAVEMENT_INSIDE_TOL_M).

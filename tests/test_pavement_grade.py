@@ -79,43 +79,103 @@ WITHIN_SHAPE_CAP = {"SPJC": 0, "SPLP": 0, "CYXY": 0}
 MID_EDGE_CAP = {"SPJC": 10, "SPLP": 20, "CYXY": 5}
 
 
+def _airport_tiles(icao: str, root: str):
+    """Integer ``(lat, lon)`` tiles the airport's pavement occupies.
+
+    A cheap geometry-only build (``compute_elevations=False`` skips the
+    elevation / runway-segmenter / seam / tile_cut pipeline) gives the
+    footprint without paying for the full build.  The grade audit then
+    builds each of these tiles the way Ortho4XP SHIPS them — per-tile,
+    with that tile's DEM and ``current_tile_lat/lon`` — so we grade the
+    final cut-and-adjusted geometry, not the pre-cut whole-airport
+    superset (user 2026-05-23).
+    """
+    import math
+    from auto_patch.pipeline import build_airport_pavement
+    layout = build_airport_pavement(icao, root, compute_elevations=False)
+    lats: list = []
+    lons: list = []
+    for s in layout.shapes:
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        for (x, y) in s.polygon.exterior.coords:
+            lat, lon = layout.m_to_ll(x, y)
+            lats.append(lat)
+            lons.append(lon)
+    if not lats:
+        return []
+    tiles = []
+    for la in range(int(math.floor(min(lats))),
+                    int(math.floor(max(lats))) + 1):
+        for lo in range(int(math.floor(min(lons))),
+                        int(math.floor(max(lons))) + 1):
+            tiles.append((la, lo))
+    return tiles
+
+
 @pytest.mark.parametrize("icao", list(baseline_airports()))
 def test_pavement_grade(tmp_path, icao):
     from auto_patch.pipeline import build_airport_pavement
+    from auto_patch.elevation_per_surface import unified_jacobi as _uj
+    from auto_patch.elevation import _load_airport_dem
     import check_grade
 
-    layout = build_airport_pavement(
-        icao, _xplane_root(), compute_elevations=True)
-    out = tmp_path / f"{icao}_test.osm"
-    layout.to_osm(str(out))
+    tiles = _airport_tiles(icao, _xplane_root())
+    assert tiles, f"{icao}: no pavement footprint tiles discovered"
 
-    # When the solver grades junctions PER-AXIS, the audit must match — using
-    # the SAME apt.dat centerlines the build used (layout.apt_taxi_centerlines,
-    # filled by apt_dat_reader.taxi_centerlines), passed as lat/lon so the
-    # audit's mean-centred meter frame lines up.  NEVER re-derive from the OSM.
-    from auto_patch.elevation_per_surface import unified_jacobi as _uj
-    taxi_axes_ll = None
-    if getattr(_uj, "_PER_AXIS_JUNCTIONS", False):
-        letters = getattr(layout, "apt_taxi_letters", {}) or {}
-        taxi_axes_ll = []
-        for ln, name in (getattr(layout, "apt_taxi_centerlines", []) or []):
-            if ln is None or ln.is_empty:
-                continue
-            letter = letters.get(name)
-            cL = 0.03 if letter in ("A", "B") else 0.015
-            cT = 0.02 if letter in ("A", "B") else 0.015
-            pts = [layout.m_to_ll(x, y) for (x, y) in ln.coords]
-            taxi_axes_ll.append((pts, cL, cT))
+    # Audit each shipped per-tile patch; aggregate violations.
+    within: list = []
+    cross: list = []
+    steps: list = []
+    for (tlat, tlon) in tiles:
+        # Smoothed DEM (apt_smoothing_pix=8) — the SAME surface
+        # production ships (Ortho4XP passes tile.dem post-smoothing
+        # via override_dem; _load_airport_dem replicates it).  A raw
+        # O4DEM would add per-pixel roughness the shipped patch never
+        # has, producing spurious grade noise.
+        dem = _load_airport_dem(tlat + 0.5, tlon + 0.5)
+        if dem is None:
+            continue  # DEM tile unavailable
+        layout = build_airport_pavement(
+            icao, _xplane_root(), compute_elevations=True,
+            tile_dem=dem, current_tile_lat=tlat, current_tile_lon=tlon)
+        if not layout.shapes:
+            continue  # airport doesn't reach this corner tile
+        out = tmp_path / f"{icao}_tile{tlat:+d}{tlon:+d}.osm"
+        layout.to_osm(str(out))
 
-    within, cross, steps = check_grade.run_checks(
-        out,
-        max_grade_pct=1.5,
-        proximity_m=1.0,
-        edge_search_m=5.0,
-        edge_step_m=0.5,
-        top_n=5,
-        taxi_axes_ll=taxi_axes_ll,
-    )
+        # When the solver grades junctions PER-AXIS, the audit must
+        # match — using the SAME apt.dat centerlines the build used
+        # (layout.apt_taxi_centerlines), passed as lat/lon so the
+        # audit's mean-centred meter frame lines up.  NEVER re-derive
+        # from the OSM.
+        taxi_axes_ll = None
+        if getattr(_uj, "_PER_AXIS_JUNCTIONS", False):
+            letters = getattr(layout, "apt_taxi_letters", {}) or {}
+            taxi_axes_ll = []
+            for ln, name in (
+                    getattr(layout, "apt_taxi_centerlines", []) or []):
+                if ln is None or ln.is_empty:
+                    continue
+                letter = letters.get(name)
+                cL = 0.03 if letter in ("A", "B") else 0.015
+                cT = 0.02 if letter in ("A", "B") else 0.015
+                pts = [layout.m_to_ll(x, y) for (x, y) in ln.coords]
+                taxi_axes_ll.append((pts, cL, cT))
+
+        w, c, s = check_grade.run_checks(
+            out,
+            max_grade_pct=1.5,
+            proximity_m=1.0,
+            edge_search_m=5.0,
+            edge_step_m=0.5,
+            top_n=5,
+            taxi_axes_ll=taxi_axes_ll,
+        )
+        within += w
+        cross += c
+        steps += s
+
     # Hard fails — cross-shape continuity must be perfect.
     assert not cross, (
         f"{icao}: {len(cross)} cross-shape proximity violations "
@@ -134,7 +194,13 @@ def test_pavement_grade(tmp_path, icao):
     # infeasible elevation field; fix the solver / geometry, not
     # the threshold.
     cap = WITHIN_SHAPE_CAP[icao]
-    assert len(within) <= cap, (
-        f"{icao}: {len(within)} within-shape grade/plane violations "
-        f"(cap {cap}).  Worst: {within[0].grade_pct:.2f}% over "
-        f"{within[0].distance_m:.1f} m at {within[0].pt_a}.")
+    if len(within) > cap:
+        within.sort(key=lambda v: -v.grade_pct)
+        worst = "\n  ".join(
+            f"{check_grade._label(v.way_a)} -> "
+            f"{check_grade._label(v.way_b)}: {v.grade_pct:.2f}% over "
+            f"{v.distance_m:.1f} m ({v.elev_a:.1f} -> {v.elev_b:.1f})"
+            for v in within[:5])
+        pytest.fail(
+            f"{icao}: {len(within)} within-shape grade/plane "
+            f"violations (cap {cap}).  Worst:\n  {worst}")

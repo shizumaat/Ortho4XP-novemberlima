@@ -929,7 +929,9 @@ def _check_edge_midpoint_step(
 # ── Reporting ───────────────────────────────────────────────────
 
 def _label(w: Way) -> str:
-    return f"{w.role or '?'}/{w.ref or w.wid}"
+    base = f"{w.role or '?'}/{w.ref or w.wid}"
+    sid = w.tags.get("shapeID")
+    return f"{base} [#{sid}]" if sid else base
 
 
 def _print_violations(title: str, vios: List[Violation], top_n: int):

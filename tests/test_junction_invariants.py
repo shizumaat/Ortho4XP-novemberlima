@@ -35,7 +35,7 @@ from shapely.ops import unary_union
 
 from conftest import (
     airports_under_test, baseline_airports,
-    xplane_available, xplane_root,
+    is_tile_seam_vertex, xplane_available, xplane_root,
 )
 
 
@@ -334,6 +334,11 @@ def test_junction_vertices_have_source(icao):
                 (cx - vx) ** 2 + (cy - vy) ** 2
                 for cx, cy in source_corners)
             if best_d_sq <= tol_sq:
+                continue
+            # Tile-cut seam vertex: sourced by the slice, not an
+            # apt.dat corner (tile_cut places it ~half_width off the
+            # integer tile line).  See conftest.is_tile_seam_vertex.
+            if is_tile_seam_vertex(layout, vx, vy):
                 continue
             # Fall back to row-110 boundary distance.
             d = math.sqrt(best_d_sq)

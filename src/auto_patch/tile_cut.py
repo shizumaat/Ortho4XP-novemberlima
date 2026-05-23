@@ -384,14 +384,16 @@ def _absorb_seam_slivers(layout: PavementLayout,
                     best = nb
             if best is None or best_share < SHARE_MIN_M:
                 continue
-            # A sloping rect (4-corner altitude_high/low) must NEVER be
-            # turned into a node_altitudes polygon by the merge (it would
-            # lose the flat-cross-section guarantee and could tilt).
-            # Instead EXTEND the rect's seam end out to the slice, which
-            # only works when the two seam-end corners can share one
-            # elevation (a perpendicular / flat seam end); an oblique
-            # seam needing two different end elevations is left unmerged
-            # (user 2026-05-23).
+            # PREFER a sloping rect at a seam: EXTEND the rect's seam end
+            # out to the wedge's seam edge, keeping a clean 4-corner
+            # altitude_high/low rect.  That only works when the two
+            # seam-end corners can share one elevation (a perpendicular /
+            # flat seam end).  When the SEAM genuinely needs two DIFFERENT
+            # corner elevations (an oblique / varying-DEM seam), the shape
+            # cannot be a planar rect there, so fall back to node_altitudes
+            # via the union path rather than orphaning the wedge (user
+            # 2026-05-23: "if the seam requires different elevations at the
+            # corners we switch to node_altitudes").
             nb_is_rect = (best.node_altitudes is None
                           and best.altitude_high is not None
                           and best.altitude_low is not None
@@ -400,6 +402,10 @@ def _absorb_seam_slivers(layout: PavementLayout,
                           and len(best.polygon.exterior.coords) - 1 == 4)
             if nb_is_rect:
                 ok = _extend_rect_over_sliver(best, sv, cut_lines)
+                if not ok:
+                    # Seam needs per-corner elevations → can't stay a rect;
+                    # merge as node_altitudes instead of leaving an orphan.
+                    ok = _absorb_one_sliver(sv, best)
             else:
                 ok = _absorb_one_sliver(sv, best)
             if ok:
@@ -514,12 +520,32 @@ def _extend_rect_over_sliver(nb: BuiltShape, sv: BuiltShape,
     # 1,2 = end2 (altitude_low).  Long edges pair 0-1 and 3-2.
     c0, c1, c2, c3 = ring
 
-    # Nearest slice line to the wedge, and its orientation/coordinate.
+    # Nearest slice line to the wedge, and its orientation.
     svc = sv.polygon.centroid
     line = min(cut_lines, key=lambda L: L.distance(svc))
     lc = list(line.coords)
     vertical = abs(lc[0][0] - lc[-1][0]) <= abs(lc[0][1] - lc[-1][1])
-    seam_coord = lc[0][0] if vertical else lc[0][1]
+    # Extend to the WEDGE's seam edge (the cut EDGE = ``half_width`` off the
+    # cut LINE), NOT the line itself.  The current-tile geometry stops at
+    # the cut edge; extending all the way to the line overshoots into the
+    # removed cut strip, and a later re-clip then converts the rect back to
+    # node_altitudes (SPLP stub/A #324 lost its slope this way).  Use the
+    # wedge vertices closest to the cut line as the target coordinate.
+    try:
+        sv_ring = list(sv.polygon.exterior.coords)
+        if sv_ring and sv_ring[0] == sv_ring[-1]:
+            sv_ring = sv_ring[:-1]
+    except _GEOM_EXC:
+        sv_ring = []
+    line_coord = lc[0][0] if vertical else lc[0][1]
+    if sv_ring:
+        idx = 0 if vertical else 1
+        d_min = min(line.distance(Point(px, py)) for (px, py) in sv_ring)
+        edge_pts = [p for p in sv_ring
+                    if line.distance(Point(p[0], p[1])) <= d_min + 0.5]
+        seam_coord = sum(p[idx] for p in edge_pts) / len(edge_pts)
+    else:
+        seam_coord = line_coord
 
     def _extend(pfar, pnear):
         dx, dy = pnear[0] - pfar[0], pnear[1] - pfar[1]
@@ -581,7 +607,10 @@ def _extend_rect_over_sliver(nb: BuiltShape, sv: BuiltShape,
     e_b = _seam_elev(n_b)
     if e_a is None or e_b is None:
         return False
-    if abs(e_a - e_b) > ELEV_SAME_TOL_M:
+    # +1e-6 absorbs float noise: 1-decimal elevations 62.6-62.3 compute to
+    # 0.30000000000000004, which a bare ``> 0.30`` would wrongly reject as
+    # an oblique seam, orphaning a flat seam wedge (SPLP stub/A #325).
+    if abs(e_a - e_b) > ELEV_SAME_TOL_M + 1e-6:
         return False  # oblique seam → cannot keep a flat-end rect
 
     try:

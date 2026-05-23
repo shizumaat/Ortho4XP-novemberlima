@@ -105,15 +105,24 @@ CAP_SWEEPS_PER_ITER = 5
 # forcing the taxiway over-grade (SPLP junction -10025).  Freezing the
 # higher tier and letting the lower tier yield removes that conflict.
 #
+# Priority cascade INVERTED (user 2026-05-23): solve from the TERMINAL
+# outward to the runway, not the runway inward.  Aircraft park at the
+# terminal (which must stay flat) and must be able to taxi to every
+# runway within grade, so the terminal is the anchor and the runway
+# yields last.  Order of authority (solved first, frozen for the rest):
+#   seam / runway-CIFP (HARD) > TERMINAL (flat, DEM-mean) > APRON > TAXI.
 # A node's OWNER tier = the highest-priority role among the shapes that
-# use it (TAXI > APRON > TERMINAL); a node shared by a taxiway and an
-# apron is taxi-owned, so the apron yields to it.  Lower tiers couple to
-# frozen higher tiers through these shared nodes (which are HARD in the
-# lower tier's phase), NOT through cross-tier edges — so each phase uses
-# only its own tier's edges.
-_TIER_TAXI = 3
+# use it (TERMINAL > APRON > TAXI); a node shared by a terminal and an
+# apron is terminal-owned, so the apron yields to the flat terminal floor
+# (this is what keeps the terminal whole-flat with aprons matching 1:1 —
+# no separate post-flatten needed).  A taxiway/apron node is apron-owned.
+# Lower tiers couple to frozen higher tiers through these shared HARD
+# nodes, NOT through cross-tier edges — so each phase uses only its own
+# tier's edges.  (Runway is still base-HARD here; making it yield as the
+# last resort is a separate step.)
+_TIER_TERMINAL = 3
 _TIER_APRON = 2
-_TIER_TERMINAL = 1
+_TIER_TAXI = 1
 
 _TAXI_TIER_ROLES = frozenset((*SLOPING_RECT_ROLES, ROLE_JUNCTION))
 
@@ -121,7 +130,7 @@ _TAXI_TIER_ROLES = frozenset((*SLOPING_RECT_ROLES, ROLE_JUNCTION))
 # over-grade slope is corrected by anchor information propagating inward one
 # node per sweep, so convergence scales with the longest anchor-free run —
 # generous here, but each sweep is cheap and convergence stops early via tol.
-_L2_MAX_ITERS = 40000
+_L2_MAX_ITERS = 2000
 
 # Per-cascade-phase grade-fit selector.  ``False`` (default) = the proven
 # DEM-attraction + cap-projection relaxation (holds flat pavement on terrain
@@ -131,7 +140,7 @@ _L2_MAX_ITERS = 40000
 # fully PER-AXIS (the all-pair Euclidean cap otherwise drives genuinely-steep
 # junctions infeasible and the L2 fit smears the residual onto short stubs).
 # Flip to True together with the per-axis solver/audit work.
-_USE_L2_FIT = False
+_USE_L2_FIT = True
 
 # Per-axis junction grading (user 2026-05-22).  When True, junction grade
 # constraints are LONGITUDINAL (along each converging centerline) + ring only;
@@ -288,16 +297,24 @@ def solve(layout, icao: str,
                 eg, el, term_grps, rect_grps, max_iters, tol_m,
                 dem_elev=dem_elev, use_attraction=True)
 
-    # Tier 1 — TAXI network (rects + junctions), anchored at runway/seam.
-    _run_phase(_TIER_TAXI, taxi_eg, taxi_el,
-               _eq_pairs_from_groups(rect_flat_groups),
-               rect_flat_groups, [])
-    # Tier 2 — APRONS yield to the frozen taxi network.
-    _run_phase(_TIER_APRON, apron_eg, apron_el, [], [], [])
-    # Tier 3 — TERMINALS (flat) yield to the frozen aprons.
+    # INVERTED cascade (user 2026-05-23): terminal → apron → taxi.
+    # Tier 3 — TERMINALS first: flat plane anchored at the DEM-mean of the
+    # footprint (the flat-equality group averages the per-vertex DEM seed),
+    # yielding only to any seam/runway HARD node it touches.  Because a
+    # terminal↔apron boundary node is now terminal-owned, the terminal
+    # flattens it here and the apron (next) inherits the flat floor —
+    # whole-flat terminal + 1:1 aprons fall out natively (no post-flatten).
     _run_phase(_TIER_TERMINAL, term_eg, term_el,
                _eq_pairs_from_groups(terminal_groups),
                [], terminal_groups)
+    # Tier 2 — APRONS grade outward from the frozen terminal, following the
+    # DEM up to max grade.
+    _run_phase(_TIER_APRON, apron_eg, apron_el, [], [], [])
+    # Tier 1 — TAXI network grades from the frozen aprons to the runway /
+    # seam HARD anchors (rect cross-sections stay flat).
+    _run_phase(_TIER_TAXI, taxi_eg, taxi_el,
+               _eq_pairs_from_groups(rect_flat_groups),
+               rect_flat_groups, [])
 
     n_terms, n_rects, n_juncs = _writeback(
         layout, elev, bucket_to_idx)

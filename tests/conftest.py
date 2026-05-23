@@ -47,6 +47,31 @@ def xplane_available() -> bool:
             and os.path.isdir(os.path.join(root, "Custom Data", "CIFP")))
 
 
+def is_tile_seam_vertex(layout, x: float, y: float,
+                        tol_m: Optional[float] = None) -> bool:
+    """True if local-metre point ``(x, y)`` lies on a tile-cut seam.
+
+    ``tile_cut`` slices every shape crossing an integer lat/lon tile
+    boundary, buffering each integer line by ``half_width_m`` so the
+    surviving (current-tile) shape edges land ~that far off the line
+    (``_SEAM_LINE_TOL_M`` covers the offset).  Such a vertex is
+    sourced by the tile cut — NOT by an apt.dat corner or pavement
+    edge — so the junction-vertex source / push-outside invariants
+    exempt it (the seam position is fixed by the cut and the seam
+    altitude is terrain-pinned for cross-tile stitching).
+    """
+    import math
+    from auto_patch.layout import R_EARTH
+    from auto_patch.tile_cut import _SEAM_LINE_TOL_M
+    if tol_m is None:
+        tol_m = _SEAM_LINE_TOL_M
+    lat, lon = layout.m_to_ll(x, y)
+    d_lat_m = math.radians(abs(lat - round(lat))) * R_EARTH
+    d_lon_m = (math.radians(abs(lon - round(lon)))
+               * R_EARTH * math.cos(math.radians(lat)))
+    return min(d_lat_m, d_lon_m) <= tol_m
+
+
 # Baseline airports (user 2026-05-16): these run unconditionally on
 # every invariant / grade / overlap test, providing CI coverage for
 # the canonical geometry classes we need to support:
