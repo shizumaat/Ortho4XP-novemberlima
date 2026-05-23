@@ -2506,6 +2506,34 @@ def build_airport_pavement(icao: str, xplane_root: str,
         except _GEOM_EXC:
             pass
 
+        # Wingtip / RESA terrain-clearance cuts (user 2026-05-22).  Cut
+        # terrain that rises into a surface's lateral clearance band
+        # (taxiway TOFA / runway graded strip) or runway-end safety area
+        # down to a ramped ceiling so an overhanging wingtip clears it;
+        # terrain below the surface is left alone (cut-only).  Runs just
+        # BEFORE tile_cut (user 2026-05-23): a runway end near a seam can
+        # throw a RESA up to 300 m across the integer line, and a band
+        # alongside a seam-parallel surface can cross it too, so the cuts
+        # must be sliced like every other shape — tile_cut below splits
+        # them at the seam and drops neighbour-tile pieces.  Subtracts
+        # against the (still-continuous, pre-cut) settled pavement union,
+        # so it never overlaps pavement (test_no_self_overlap); the final
+        # solver after tile_cut skips clearance roles, leaving their
+        # node_altitudes intact.
+        try:
+            from .clearance import emit_surface_clearance_cuts
+            _cl_tl = (current_tile_lat if current_tile_lat is not None
+                      else math.floor(layout.anchor[0]))
+            _cl_tn = (current_tile_lon if current_tile_lon is not None
+                      else math.floor(layout.anchor[1]))
+            n_cl = emit_surface_clearance_cuts(layout, dem, _cl_tl, _cl_tn)
+            if n_cl:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: emitted {n_cl} "
+                    f"surface-clearance cut polygon(s).")
+        except _GEOM_EXC:
+            pass
+
         # Per user 2026-05-10: shapes cannot cross integer lat/lon
         # tile boundaries (X-Plane / Ortho4XP render each 1°x1° tile
         # separately).  Cut a 10 m gap along every tile boundary
@@ -2580,30 +2608,6 @@ def build_airport_pavement(icao: str, xplane_root: str,
         from .elevation import _report_within_shape_violations
         _report_within_shape_violations(layout, icao)
 
-        # Wingtip / RESA terrain-clearance cuts (user 2026-05-22).  Cut
-        # terrain that rises into a surface's lateral clearance band
-        # (taxiway TOFA / runway graded strip) or runway-end safety area
-        # down to a ramped ceiling so an overhanging wingtip clears it;
-        # terrain below the surface is left alone (cut-only).  Runs LAST
-        # in the elevation block — after tile_cut, the final solver, and
-        # all junction/apron reshaping — so the cuts are subtracted
-        # against FULLY-SETTLED pavement and never overlap it
-        # (test_no_self_overlap).  The boundary-interior clip + conformance
-        # passes below then trim them to the airport interior.
-        try:
-            from .clearance import emit_surface_clearance_cuts
-            _cl_tl = (current_tile_lat if current_tile_lat is not None
-                      else math.floor(layout.anchor[0]))
-            _cl_tn = (current_tile_lon if current_tile_lon is not None
-                      else math.floor(layout.anchor[1]))
-            n_cl = emit_surface_clearance_cuts(layout, dem, _cl_tl, _cl_tn)
-            if n_cl:
-                UI.vprint(1,
-                    f"  [pav-builder] {icao}: emitted {n_cl} "
-                    f"surface-clearance cut polygon(s).")
-        except _GEOM_EXC:
-            pass
-
     # ── Boundary-interior clip (user 2026-05-22) ──────────────────────
     # No emitted shape may CROSS the airport boundary.  The boundary
     # ribbon now lies entirely INSIDE the row-130 line and owns the
@@ -2650,13 +2654,23 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # in this function — re-importing them here would make them locals
     # (UnboundLocalError at their earlier use), so reference those from
     # module scope and only locally import the rest.
+    # NB: ROLE_TERMINAL (like ROLE_RUNWAY / ROLE_STUB) is a module-level
+    # import used EARLIER in this function — re-importing it locally would
+    # make it a function local (UnboundLocalError at its earlier use), so
+    # reference it from module scope and only locally import the rest.
     from .layout import (
         ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
         ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
         ROLE_RUNWAY_CROSSING, ROLE_APRON)
+    # ROLE_TERMINAL included (user 2026-05-23): a terminal's boundary
+    # vertices must weld 1:1 with the surrounding apron's so they become
+    # ONE solver node — otherwise the apron's coincident-but-separate copy
+    # gets DEM-attracted to terrain while the terminal stays flat, and emit
+    # collides them into tilts (<1 m) / vertical walls (>1 m).
     _weld_roles = {ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
                    ROLE_STUB, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
-                   ROLE_RUNWAY, ROLE_RUNWAY_CROSSING, ROLE_APRON}
+                   ROLE_RUNWAY, ROLE_RUNWAY_CROSSING, ROLE_APRON,
+                   ROLE_TERMINAL}
     n_welded = weld_layout_vertices(layout, _weld_roles)
     if n_welded:
         UI.vprint(1,
