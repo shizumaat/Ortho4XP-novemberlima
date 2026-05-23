@@ -441,18 +441,20 @@ def _rect_flat_edges_from_shape(shape):
 
 @pytest.mark.parametrize("icao", _test_airports())
 def test_sloping_rect_slopes_only_along_axis(icao):
-    """A taxi rect may slope ONLY along its centerline (``source_axis``).
+    """A canonical sloping taxi rect may slope ONLY along its centerline
+    (``source_axis``): its two AXIS-END edges (perpendicular to ``source_axis``)
+    must each be FLAT — both endpoints at the same elevation.  A non-flat
+    axis-end means the rect slopes ACROSS its centerline (X-Plane renders a
+    perpendicular tilt).  Per user 2026-05-22: "taxi rects can only slope along
+    the axis of their taxi centerline."
 
-    Per user 2026-05-22: "taxi rects can only slope along the axis of their
-    taxi centerline."  Concretely, the two AXIS-END edges (perpendicular to
-    ``source_axis``) must each be FLAT — both endpoints at the same elevation.
-    A non-flat axis-end means the rect slopes ACROSS its centerline, which
-    X-Plane renders as a perpendicular tilt / non-coplanar fold.
-
-    Hi/lo rects satisfy this by construction (``[H, L, L, H]``); the failure
-    mode is a ``node_altitudes`` rect whose cross-section ended up tilted
-    (e.g. a degenerate sliver from a clip/seam pass, or a solver that graded
-    a rect off-axis).  Tolerance 0.3 m absorbs 1-decimal rounding.
+    Scope: ONLY canonical sloping rects (``altitude_high``/``altitude_low``
+    set).  ``node_altitudes`` shapes are EXEMPT — a tile/seam slice legitimately
+    produces irregular per-vertex node_altitudes polygons whose edges are not
+    expected to be flat (user 2026-05-22: a sliced node_altitudes shape "is a
+    reasonable shape given the slice").  Hi/lo rects satisfy the invariant by
+    the ``[H, L, L, H]`` convention; the guard catches a future path that sets
+    altitude_high/low on a non-canonically-ordered ring.  Tolerance 0.3 m.
     """
     from auto_patch.layout import corner_alts_from_high_low
     layout = _build_layout(icao)
@@ -467,17 +469,17 @@ def test_sloping_rect_slopes_only_along_axis(icao):
             continue
         if s.polygon is None or s.polygon.is_empty:
             continue
+        # node_altitudes shapes are slice-conforming and exempt.
+        if s.node_altitudes:
+            continue
+        if s.altitude_high is None or s.altitude_low is None:
+            continue
         coords = list(s.polygon.exterior.coords)
         if coords and coords[0] == coords[-1]:
             coords = coords[:-1]
         if len(coords) != 4:
             continue
-        if s.node_altitudes:
-            alts = list(s.node_altitudes)[:4]
-        elif s.altitude_high is not None and s.altitude_low is not None:
-            alts = corner_alts_from_high_low(s.altitude_high, s.altitude_low)
-        else:
-            continue
+        alts = corner_alts_from_high_low(s.altitude_high, s.altitude_low)
         cmap = {(round(c[0], 3), round(c[1], 3)): alts[i]
                 for i, c in enumerate(coords)}
         for a, b in _rect_flat_edges_from_shape(s):
