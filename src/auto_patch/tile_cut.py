@@ -274,7 +274,339 @@ def cut_layout_at_tile_boundaries(
                         cur_tile_lat, cur_tile_lon)
                 new_shapes.append(new_s)
     layout.shapes = new_shapes
+
+    # Absorb the tiny wedges the slice leaves on either side back into
+    # their adjacent shape, so the cut doesn't leave an extra sliver
+    # (user 2026-05-23).  The wedge's seam-edge vertices carry the
+    # terrain-pinned (critical) seam altitude into the merged shape.
+    _absorb_seam_slivers(layout, cut_lines, half_width_m)
+
     return len(layout.shapes) - n_before
+
+
+# Roles that participate in the airside pavement partition — only these
+# absorb / are absorbed by the seam-sliver pass (boundary ribbon, DEM
+# bridge, runway and groundside have their own seam handling).
+_ABSORB_ROLES = frozenset({
+    ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL, ROLE_STUB,
+    ROLE_CROSS_CONNECTOR, ROLE_JUNCTION, ROLE_APRON, ROLE_TERMINAL,
+})
+
+
+def _absorb_seam_slivers(layout: PavementLayout,
+                         cut_lines: list,
+                         half_width_m: float) -> int:
+    """Merge each tiny slice-created seam wedge into its adjacent
+    (larger) shape so the tile cut leaves no extra sliver on either
+    side of the slice.
+
+    A wedge is a SMALL piece that (a) has ≥ 2 vertices on a cut line
+    (a seam edge) and (b) hugs ONE larger neighbour — it shares ≥ 40 %
+    of its own perimeter with that neighbour (i.e. it is a fragment of,
+    or flush against, that shape).  It is unioned into the neighbour and
+    dropped.
+
+    Elevation is reconciled per-vertex from BOTH shapes' existing
+    altitudes (the wedge's terrain-pinned seam-edge altitudes win for
+    the seam vertices, which is the whole point — the slice-edge
+    altitude is what X-Plane stitches neighbouring tiles against).  The
+    merged shape becomes ``node_altitudes`` (it is no longer a clean
+    4-corner rect).  Returns the number of wedges absorbed.
+    """
+    if not cut_lines or not layout.shapes:
+        return 0
+    SLIVER_MAX_AREA_M2 = 150.0
+    NEIGHBOUR_MIN_RATIO = 1.5
+    SHARE_TOL_M = 0.5            # near-adjacency band for shared length
+    SHARE_MIN_M = 3.0           # min real contact with the neighbour
+    SEAM_VERTEX_TOL_M = half_width_m + 2.0
+
+    def _near_seam(x: float, y: float) -> bool:
+        p = Point(x, y)
+        return any(line.distance(p) <= SEAM_VERTEX_TOL_M
+                   for line in cut_lines)
+
+    def _seam_vertex_count(poly: Polygon) -> int:
+        ring = list(poly.exterior.coords)
+        if ring and ring[0] == ring[-1]:
+            ring = ring[:-1]
+        return sum(1 for (x, y) in ring if _near_seam(x, y))
+
+    def _near_shared_len(a: Polygon, b: Polygon) -> float:
+        # Length of a's boundary lying within SHARE_TOL_M of b — robust
+        # to the small float offsets the slice leaves between touching
+        # pieces (exact boundary∩boundary reads ~0 there).
+        try:
+            return a.exterior.intersection(
+                b.buffer(SHARE_TOL_M)).length
+        except _GEOM_EXC:
+            return 0.0
+
+    absorbed = 0
+    dropped: set = set()
+    # Iterate: absorbing one wedge can make an adjacent wedge flush with
+    # the now-larger neighbour (e.g. a junction triangle beside a
+    # connector slice that itself merges into the connector bulk).
+    for _pass in range(6):
+        changed = False
+        shapes = layout.shapes
+        for sv in list(shapes):
+            if id(sv) in dropped:
+                continue
+            if (sv.role not in _ABSORB_ROLES
+                    or sv.polygon is None or sv.polygon.is_empty
+                    or sv.polygon.geom_type != "Polygon"):
+                continue
+            try:
+                sv_area = sv.polygon.area
+            except _GEOM_EXC:
+                continue
+            if sv_area >= SLIVER_MAX_AREA_M2:
+                continue
+            if _seam_vertex_count(sv.polygon) < 2:
+                continue
+            # Neighbour sharing the most boundary (near-adjacency), at
+            # least NEIGHBOUR_MIN_RATIO larger than the wedge.
+            best = None
+            best_share = 0.0
+            for nb in shapes:
+                if nb is sv or id(nb) in dropped:
+                    continue
+                if (nb.role not in _ABSORB_ROLES
+                        or nb.polygon is None or nb.polygon.is_empty
+                        or nb.polygon.geom_type != "Polygon"):
+                    continue
+                if nb.polygon.area < NEIGHBOUR_MIN_RATIO * sv_area:
+                    continue
+                shlen = _near_shared_len(sv.polygon, nb.polygon)
+                if shlen > best_share:
+                    best_share = shlen
+                    best = nb
+            if best is None or best_share < SHARE_MIN_M:
+                continue
+            # A sloping rect (4-corner altitude_high/low) must NEVER be
+            # turned into a node_altitudes polygon by the merge (it would
+            # lose the flat-cross-section guarantee and could tilt).
+            # Instead EXTEND the rect's seam end out to the slice, which
+            # only works when the two seam-end corners can share one
+            # elevation (a perpendicular / flat seam end); an oblique
+            # seam needing two different end elevations is left unmerged
+            # (user 2026-05-23).
+            nb_is_rect = (best.node_altitudes is None
+                          and best.altitude_high is not None
+                          and best.altitude_low is not None
+                          and best.role in _SLOPING_RECT_ROLES
+                          and best.polygon.geom_type == "Polygon"
+                          and len(best.polygon.exterior.coords) - 1 == 4)
+            if nb_is_rect:
+                ok = _extend_rect_over_sliver(best, sv, cut_lines)
+            else:
+                ok = _absorb_one_sliver(sv, best)
+            if ok:
+                dropped.add(id(sv))
+                absorbed += 1
+                changed = True
+        if not changed:
+            break
+
+    if dropped:
+        layout.shapes = [s for s in layout.shapes if id(s) not in dropped]
+    if absorbed:
+        try:
+            import O4_UI_Utils as UI
+            UI.vprint(1,
+                f"  [pav-builder] absorbed {absorbed} tile-slice seam "
+                f"wedge(s) into adjacent shape(s).")
+        except Exception:
+            pass
+    return absorbed
+
+
+def _absorb_one_sliver(sv: BuiltShape, nb: BuiltShape) -> bool:
+    """Union wedge ``sv`` into neighbour ``nb`` in place, reconciling
+    per-vertex altitudes (the wedge's terrain-pinned seam-edge altitudes
+    are carried in).  ``nb`` becomes a ``node_altitudes`` shape.  Returns
+    True on success (caller drops ``sv``)."""
+    try:
+        merged = unary_union([nb.polygon, sv.polygon])
+        if merged.geom_type == "MultiPolygon":
+            # Tiny float gap between touching pieces — bridge it.
+            merged = merged.buffer(0.05).buffer(-0.05)
+    except _GEOM_EXC:
+        return False
+    if (merged.is_empty or merged.geom_type != "Polygon"
+            or not merged.is_valid):
+        return False
+    # Altitude lookup from BOTH source shapes (seam-pinned wedge
+    # vertices included — they win for the seam edge).
+    src: dict = {}
+    for sh in (nb, sv):
+        coords, alts = _shape_corner_alts(sh)
+        if alts is None:
+            continue
+        for (x, y), a in zip(coords, alts):
+            if a is not None:
+                src[vertex_bucket(x, y)] = float(a)
+    if not src:
+        return False
+    ring = list(merged.exterior.coords)
+    if ring and ring[0] == ring[-1]:
+        ring = ring[:-1]
+    if len(ring) < 3:
+        return False
+    merged_alts: list = []
+    for (x, y) in ring:
+        b = vertex_bucket(x, y)
+        if b in src:
+            merged_alts.append(src[b])
+            continue
+        # Vertex introduced by the union (rare) — nearest source alt.
+        best_a = None
+        best_d2 = 4.0  # within 2 m
+        for sh in (nb, sv):
+            coords, alts = _shape_corner_alts(sh)
+            if alts is None:
+                continue
+            for (cx, cy), a in zip(coords, alts):
+                if a is None:
+                    continue
+                d2 = (cx - x) ** 2 + (cy - y) ** 2
+                if d2 < best_d2:
+                    best_d2 = d2
+                    best_a = float(a)
+        if best_a is None:
+            return False
+        merged_alts.append(best_a)
+    if len(merged_alts) != len(ring):
+        return False
+    nb.polygon = merged
+    nb.node_altitudes = merged_alts + [merged_alts[0]]
+    nb.altitude_high = None
+    nb.altitude_low = None
+    return True
+
+
+def _extend_rect_over_sliver(nb: BuiltShape, sv: BuiltShape,
+                             cut_lines: list) -> bool:
+    """Extend sloping-rect ``nb``'s seam-end short edge out to the slice
+    line so it covers wedge ``sv``, KEEPING ``nb`` a 4-corner
+    ``altitude_high``/``altitude_low`` rect (never node_altitudes).
+
+    The new seam-end edge follows the slice (may be an oblique trapezoid
+    end).  This is only valid when the two new seam-end corners can share
+    ONE elevation — i.e. the slice DEM is ~flat across the rect there.
+    When the two corners would need different elevations (an oblique seam
+    through a sloping rect) the rect cannot represent it, so we return
+    False and leave the wedge unmerged (user 2026-05-23).
+    """
+    ELEV_SAME_TOL_M = 0.30
+    MAX_EXTEND_M = 20.0
+    SEAM_VTX_TOL_M = 8.0
+    try:
+        ring = list(nb.polygon.exterior.coords)
+    except _GEOM_EXC:
+        return False
+    if ring and ring[0] == ring[-1]:
+        ring = ring[:-1]
+    if len(ring) != 4:
+        return False
+    # _rect_from_axis_extended corner order: 0,3 = end1 (altitude_high);
+    # 1,2 = end2 (altitude_low).  Long edges pair 0-1 and 3-2.
+    c0, c1, c2, c3 = ring
+
+    # Nearest slice line to the wedge, and its orientation/coordinate.
+    svc = sv.polygon.centroid
+    line = min(cut_lines, key=lambda L: L.distance(svc))
+    lc = list(line.coords)
+    vertical = abs(lc[0][0] - lc[-1][0]) <= abs(lc[0][1] - lc[-1][1])
+    seam_coord = lc[0][0] if vertical else lc[0][1]
+
+    def _extend(pfar, pnear):
+        dx, dy = pnear[0] - pfar[0], pnear[1] - pfar[1]
+        denom = dx if vertical else dy
+        if abs(denom) < 1e-9:
+            return None
+        s = ((seam_coord - pfar[0]) / dx if vertical
+             else (seam_coord - pfar[1]) / dy)
+        # Seam must be just BEYOND the near corner (s > 1) by a little.
+        if s <= 1.0:
+            return None
+        np = (pfar[0] + s * dx, pfar[1] + s * dy)
+        if math.hypot(np[0] - pnear[0], np[1] - pnear[1]) > MAX_EXTEND_M:
+            return None
+        return np
+
+    # Which short edge is the seam end?
+    mid1 = Point((c0[0] + c3[0]) / 2, (c0[1] + c3[1]) / 2)
+    mid2 = Point((c1[0] + c2[0]) / 2, (c1[1] + c2[1]) / 2)
+    if line.distance(mid1) <= line.distance(mid2):
+        # end1 (high) is the seam end: extend c0 (via c1) and c3 (via c2)
+        n_a = _extend(c1, c0)
+        n_b = _extend(c2, c3)
+        if n_a is None or n_b is None:
+            return False
+        new_quad = [n_a, c1, c2, n_b]
+        set_high = True
+    else:
+        # end2 (low) is the seam end: extend c1 (via c0) and c2 (via c3)
+        n_a = _extend(c0, c1)
+        n_b = _extend(c3, c2)
+        if n_a is None or n_b is None:
+            return False
+        new_quad = [c0, n_a, n_b, c3]
+        set_high = False
+
+    # Slice DEM elevation at the two new corners — from the wedge's
+    # terrain-pinned seam vertices.
+    sv_coords, sv_alts = _shape_corner_alts(sv)
+    if sv_alts is None:
+        return False
+    seam_pts = [(x, y, a) for (x, y), a in zip(sv_coords, sv_alts)
+                if a is not None
+                and line.distance(Point(x, y)) <= SEAM_VTX_TOL_M]
+    if not seam_pts:
+        return False
+
+    def _seam_elev(pt):
+        best_a = None
+        best_d2 = float("inf")
+        for (x, y, a) in seam_pts:
+            d2 = (x - pt[0]) ** 2 + (y - pt[1]) ** 2
+            if d2 < best_d2:
+                best_d2 = d2
+                best_a = a
+        return best_a
+
+    e_a = _seam_elev(n_a)
+    e_b = _seam_elev(n_b)
+    if e_a is None or e_b is None:
+        return False
+    if abs(e_a - e_b) > ELEV_SAME_TOL_M:
+        return False  # oblique seam → cannot keep a flat-end rect
+
+    try:
+        new_poly = Polygon(new_quad)
+        if not new_poly.is_valid:
+            new_poly = new_poly.buffer(0)
+    except _GEOM_EXC:
+        return False
+    if (new_poly.is_empty or new_poly.geom_type != "Polygon"
+            or new_poly.area < nb.polygon.area):
+        return False
+    # The extended rect should cover (most of) the wedge.
+    try:
+        if new_poly.intersection(sv.polygon).area < 0.5 * sv.polygon.area:
+            return False
+    except _GEOM_EXC:
+        return False
+
+    e_seam = 0.5 * (e_a + e_b)
+    nb.polygon = new_poly
+    if set_high:
+        nb.altitude_high = e_seam
+    else:
+        nb.altitude_low = e_seam
+    return True
 
 
 def _shape_corner_alts(s: BuiltShape):

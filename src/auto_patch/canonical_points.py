@@ -36,7 +36,8 @@ from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import Polygon
 
 
-__all__ = ["CanonicalPointRegistry", "snap_polygon_through_registry"]
+__all__ = ["CanonicalPointRegistry", "snap_polygon_through_registry",
+           "weld_layout_vertices"]
 
 
 _GEOM_EXC = (ValueError, TypeError,
@@ -190,3 +191,66 @@ def snap_polygon_through_registry(
         return snapped_poly
     except _GEOM_EXC:
         return None
+
+
+def weld_layout_vertices(layout, roles, tol_m: float = 0.5) -> int:
+    """Weld near-coincident vertices across the given shape ``roles`` to
+    a single shared coordinate.
+
+    Adjacent shapes (a taxi rect and the junction carved beside it) are
+    snapped to ``pav.boundary`` at different pipeline stages, and
+    post-emit passes (conformance T-junction insertion, absorption clips)
+    add fresh vertices that were never routed through the build-time
+    registry.  Two such "same point" vertices then sit up to ``tol_m``
+    apart, and their edges cross by a sub-tol sliver — the residue model
+    is seamless as a set operation, but the per-shape vertex coordinates
+    drift.  This pass re-welds them.
+
+    A FRESH registry is built (so it can't carry stale near-duplicate
+    canonical points from earlier stages): pass 1 registers every
+    target-shape vertex — the first occurrence within ``tol_m`` wins, so
+    a rect corner and the junction vertex beside it collapse to ONE
+    canonical coordinate.  Pass 2 snaps each shape's vertices to those
+    welded points.
+
+    Only snaps that PRESERVE a shape's vertex count are applied, so any
+    ``node_altitudes`` list stays index-aligned with the ring (snapping
+    moves coordinates in place; it never reorders or drops a vertex).
+
+    Returns the number of shapes modified.
+    """
+    reg = CanonicalPointRegistry(tol_m=tol_m)
+    targets = [s for s in layout.shapes
+               if s.role in roles and s.polygon is not None
+               and not s.polygon.is_empty
+               and s.polygon.geom_type == "Polygon"]
+    # Pass 1: register every vertex (welds near-coincident to first seen).
+    for s in targets:
+        try:
+            for (x, y) in s.polygon.exterior.coords:
+                reg.get_or_add(float(x), float(y))
+            for ring in s.polygon.interiors:
+                for (x, y) in ring.coords:
+                    reg.get_or_add(float(x), float(y))
+        except _GEOM_EXC:
+            continue
+    # Pass 2: snap each shape's vertices to the welded canonical points.
+    modified = 0
+    for s in targets:
+        try:
+            n_before = len(s.polygon.exterior.coords)
+            snapped = snap_polygon_through_registry(s.polygon, reg)
+        except _GEOM_EXC:
+            continue
+        if (snapped is None or snapped.is_empty
+                or snapped.geom_type != "Polygon"):
+            continue
+        # Vertex collapsed (two ring points welded together) — skip so
+        # node_altitudes alignment is preserved.
+        if len(snapped.exterior.coords) != n_before:
+            continue
+        if snapped.equals(s.polygon):
+            continue
+        s.polygon = snapped
+        modified += 1
+    return modified

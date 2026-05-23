@@ -970,7 +970,11 @@ def _split_centerlines_at_points(
     # (the chart geometry, not the angle change, is what bounds
     # the rect here).
     BEND_ENDPOINT_MARGIN_M = 5.0
-    CHART_JUNCTION_MARGIN_M = 25.0
+    # Per user (session 44): reduced 25 → 15 m so rects run a little
+    # longer toward chart junctions (now safe to do because rects are
+    # placed against the actual pavement edges via the asymmetric
+    # half-width logic, not centred on a possibly-off-centre axis).
+    CHART_JUNCTION_MARGIN_M = 15.0
     BEND_SHARED_TOL_M = 25.0
     bend_share_tol2 = BEND_SHARED_TOL_M * BEND_SHARED_TOL_M
     chart_junction_tol2 = BEND_SHARED_TOL_M * BEND_SHARED_TOL_M
@@ -1461,14 +1465,19 @@ def _split_centerlines_at_points(
             # the centerline's end probing the half-width; stop
             # where the corridor is back to within 1.3 × narrow_hw.
             CORRIDOR_WIDTH_FACTOR = 1.3
-            def _bend_margin_at(end_param: float, sign: int) -> float:
+            def _bend_margin_at(end_param: float, sign: int,
+                                base: float = BEND_ENDPOINT_MARGIN_M
+                                ) -> float:
                 """``end_param`` = 0 (start) or ls.length (end);
                 ``sign`` = +1 (walk forward into the line) or -1
-                (walk backward).  Returns a margin in metres at
-                least ``BEND_ENDPOINT_MARGIN_M`` and at most the
-                point where the corridor narrows back to
-                ``CORRIDOR_WIDTH_FACTOR × narrow_hw``."""
-                base = BEND_ENDPOINT_MARGIN_M
+                (walk backward).  Returns the margin (≥ ``base``) at
+                which the corridor first narrows back to
+                ``CORRIDOR_WIDTH_FACTOR × narrow_hw`` walking inward
+                from the endpoint, or ``inf`` if it never narrows
+                within half the gap.  ``base`` is the minimum margin
+                kept regardless (5 m at a same-ref bend; the larger
+                ``CHART_JUNCTION_MARGIN_M`` at a chart junction, which
+                still needs room for its polygon)."""
                 if narrow_hw <= 0:
                     return base
                 target_hw = narrow_hw * CORRIDOR_WIDTH_FACTOR
@@ -1507,14 +1516,30 @@ def _split_centerlines_at_points(
             #     in m_start / m_end above).
             if abs(p0) < 0.5:
                 if _is_chart_junction(_start_endpoint):
-                    m_start = max(CHART_JUNCTION_MARGIN_M, m_start)
+                    # Corridor-aware (session 44): extend the rect up
+                    # to where the pavement actually widens into the
+                    # junction, floored at CHART_JUNCTION_MARGIN_M, so
+                    # a connector running between two distant junctions
+                    # isn't trimmed by a blind percentage of the long
+                    # inter-junction gap (SPLP taxiway B: 0.15·gap was
+                    # ~72 m of trim where the corridor stays narrow to
+                    # within ~40 m of the junction).  Fall back to the
+                    # percentage margin only if the corridor never
+                    # narrows (rect would otherwise reach into apron).
+                    cm = _bend_margin_at(0.0, +1,
+                                         base=CHART_JUNCTION_MARGIN_M)
+                    m_start = (cm if cm != float('inf')
+                               else max(CHART_JUNCTION_MARGIN_M, m_start))
                 elif start_is_bend:
                     bm = _bend_margin_at(0.0, +1)
                     if bm != float('inf'):
                         m_start = min(m_start, bm)
             if abs(p1 - ls.length) < 0.5:
                 if _is_chart_junction(_end_endpoint):
-                    m_end = max(CHART_JUNCTION_MARGIN_M, m_end)
+                    cm = _bend_margin_at(ls.length, -1,
+                                         base=CHART_JUNCTION_MARGIN_M)
+                    m_end = (cm if cm != float('inf')
+                             else max(CHART_JUNCTION_MARGIN_M, m_end))
                 elif end_is_bend:
                     bm = _bend_margin_at(ls.length, -1)
                     if bm != float('inf'):

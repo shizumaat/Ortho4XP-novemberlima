@@ -321,8 +321,19 @@ def split_pavement_at_seams(layout: PavementLayout) -> int:
             if sub_rects is not None and len(sub_rects) >= 2:
                 indices_to_drop.append(i)
                 new_shapes_extra.extend(sub_rects)
-                continue
-            # Fall through to insert-in-place if split didn't apply.
+            # Per user 2026-05-23: when the clean 2×4-corner split is NOT
+            # available (the rect only grazes / ENDS at the seam — e.g.
+            # SPLP taxiway A, whose oblique end short-edge straddles
+            # lon=-77 so the seam clips a single corner), do NOT fall
+            # back to inserting seam vertices in place: that converts the
+            # whole sloping rect to node_altitudes and loses the
+            # flat-cross-section guarantee (a long taxiway turns into a
+            # tilted node_altitudes polygon).  Leave it a 4-corner rect;
+            # the tile-cut slice (``_clip_sloping_rect_piece``) clips the
+            # end to a clean perpendicular edge clear of the seam and
+            # emits a small terrain-pinned wedge there, keeping the bulk
+            # a rect.
+            continue
         new_shape = _insert_seam_vertices(shape, cut_lines, anchor_keys)
         if new_shape is not None:
             layout.shapes[i] = new_shape

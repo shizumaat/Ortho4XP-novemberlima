@@ -591,6 +591,17 @@ def _snap_to_sloping_edge_corners(layout: PavementLayout) -> None:
                               tuple[int, int] | None]] = []
         changed = False
         for i, (vx, vy) in enumerate(coords):
+            # Already coincident with a rect corner → this vertex is a
+            # legitimate SHARED corner (e.g. the junction sits exactly on
+            # an adjacent stub's short-edge corner).  Snapping it to a
+            # DIFFERENT rect's sloping-edge corner would break that shared
+            # edge and leave a triangular gap (SPLP stub A vs the node-20
+            # junction, user 2026-05-23).  Leave it put.
+            existing_cid = _corner_id_for(vx, vy)
+            if existing_cid is not None:
+                alt = node_alts[i] if node_alts is not None else None
+                snapped.append(((vx, vy), alt, existing_cid))
+                continue
             best_corner: tuple[float, float] | None = None
             best_corner_id: tuple[int, int] | None = None
             best_dist = snap_tol

@@ -187,8 +187,21 @@ def _build_taxi_rects(
                 pass
 
         width = 2.0 * trim_narrow_hw
+        # Off-centre axis: place the two long edges on the ACTUAL
+        # left/right pavement edges (location from the centerline,
+        # lateral extent from the pavement) so a centerline that runs
+        # near one edge doesn't push a symmetric rect's long edge past
+        # the boundary (→ absorption clip).  Below OFFCENTER_ASYM_TOL_M
+        # the axis is effectively centred → symmetric path unchanged.
+        half_left = half_right = None
+        _hl, _hr = _natural_half_widths_lr(trimmed, pav_non_rwy)
+        if (_hl is not None and _hr is not None
+                and abs(_hl - _hr) > OFFCENTER_ASYM_TOL_M):
+            half_left, half_right = _hl, _hr
         rect = _rect_from_axis_extended(trimmed, width, pav_non_rwy,
                                         apt_vertices=apt_vertices,
+                                        half_left=half_left,
+                                        half_right=half_right,
                                         registry=registry)
         # Diagonal-stub fallback (user 2026-05-12): when the strict
         # symmetric-rect builder rejects a digit-ref centerline whose
@@ -211,6 +224,8 @@ def _build_taxi_rects(
                     trimmed, width, pav_non_rwy,
                     apt_vertices=apt_vertices,
                     accept_asymmetric=True,
+                    half_left=half_left,
+                    half_right=half_right,
                     registry=registry)
         if rect is None or rect.is_empty:
             continue
@@ -820,6 +835,87 @@ def _natural_half_width(axis: LineString, pav: Polygon,
     return median, p90, narrow
 
 
+# When the centerline is off-centre within its pavement strip, the two
+# perpendicular half-widths differ.  A rect built symmetric about such
+# an axis pokes its long edge past the pavement boundary on the narrow
+# side and leaves uncovered pavement on the wide side — the long edge
+# then runs along the pavement boundary and gets clipped by the
+# long-edge-adjacent absorption pass (SPLP taxiway B: ~2.7 m off-centre
+# toward its right edge → connector clipped short → node-20 junction
+# dropped).  Above this asymmetry we place the two long edges on the
+# ACTUAL left/right pavement edges instead (see
+# ``_natural_half_widths_lr`` + ``_rect_from_axis_extended`` half_left/
+# half_right).  Below it the axis is effectively centred and the
+# symmetric path is used unchanged.
+OFFCENTER_ASYM_TOL_M = 1.5
+
+
+def _natural_half_widths_lr(
+        axis: LineString, pav: Polygon, n_probes: int = 15,
+) -> tuple[float | None, float | None]:
+    """Return (half_left, half_right) — the taxiway strip's own pavement
+    half-widths on each side of the axis, by perpendicular ray cast.
+
+    "Left" is the ``+(-uy, ux)`` side of the axis's first→last
+    direction (matching ``_rect_from_axis_extended``'s ``px``); "right"
+    is the opposite side.  Use these to place a rect's two long edges on
+    the actual pavement edges when the centerline is off-centre, so the
+    rect's lateral position is determined by the PAVEMENT rather than by
+    a centerline that happens to run near one edge.
+
+    Per-side value reflects the NARROWEST cross-section (the taxiway's
+    own strip) — only probes whose BOTH sides are bounded (``< RAY_CAP``)
+    count, so junction / apron widenings (one side opens out and
+    saturates) are excluded.  Among the bounded probes we average the
+    L and R of those within 3 m of the narrowest total width.
+
+    Returns ``(None, None)`` when the corridor can't be measured on both
+    sides at any probe — the caller falls back to the symmetric width.
+    """
+    RAY_CAP_M = 40.0
+    RAY_STEP_M = 0.5
+    if axis.length < 1e-3:
+        return None, None
+    probes: list[tuple[float, float, float]] = []  # (total, left, right)
+    for k in range(n_probes):
+        t = (k + 1) / (n_probes + 1) * axis.length
+        dt = min(2.0, axis.length * 0.05)
+        a = axis.interpolate(max(0.0, t - dt))
+        b = axis.interpolate(min(axis.length, t + dt))
+        tx, ty = b.x - a.x, b.y - a.y
+        mag = math.hypot(tx, ty)
+        if mag < 1e-6:
+            continue
+        ux, uy = tx / mag, ty / mag
+        nx, ny = -uy, ux  # left-perp (matches _rect_from_axis_extended px)
+        pt = axis.interpolate(t)
+        sides: dict[str, float] = {}
+        bounded = True
+        for sign, key in ((1.0, "L"), (-1.0, "R")):
+            d = 0.0
+            hit = RAY_CAP_M
+            while d <= RAY_CAP_M:
+                if not pav.contains(Point(pt.x + sign * nx * d,
+                                          pt.y + sign * ny * d)):
+                    hit = d
+                    break
+                d += RAY_STEP_M
+            if hit >= RAY_CAP_M:
+                bounded = False
+                break
+            sides[key] = hit
+        if not bounded:
+            continue
+        probes.append((sides["L"] + sides["R"], sides["L"], sides["R"]))
+    if not probes:
+        return None, None
+    min_total = min(p[0] for p in probes)
+    narrow = [p for p in probes if p[0] <= min_total + 3.0]
+    hl = sum(p[1] for p in narrow) / len(narrow)
+    hr = sum(p[2] for p in narrow) / len(narrow)
+    return max(1.5, hl), max(1.5, hr)
+
+
 def _trim_to_narrow(axis: LineString, pav: Polygon, natural_hw: float,
                     widen_factor: float = 1.3) -> LineString | None:
     """Trim the axis inward from each end until the PERPENDICULAR
@@ -1040,6 +1136,8 @@ def _rect_from_axis_extended(axis: LineString, width: float,
                             apt_vertices: list[tuple[float, float]] | None = None,
                             accept_asymmetric: bool = False,
                             registry: CanonicalPointRegistry | None = None,
+                            half_left: float | None = None,
+                            half_right: float | None = None,
                             ) -> Polygon | None:
     """Build a rect around the axis at its first-to-last direction.
 
@@ -1049,6 +1147,17 @@ def _rect_from_axis_extended(axis: LineString, width: float,
     nearest pavement edge point within ``EDGE_SNAP_RADIUS_M``.
     This matches the snapped target convention where every non-
     runway vertex sits on an apt.dat pavement vertex.
+
+    ``half_left`` / ``half_right``: when both are given, the rect's
+    long edges are offset asymmetrically — ``half_left`` on the
+    ``+(-uy, ux)`` side, ``half_right`` on the opposite side — instead
+    of ``width / 2`` each.  Use this (with ``_natural_half_widths_lr``)
+    to place the two long edges on the ACTUAL left/right pavement edges
+    when the centerline is off-centre, so the rect fits the pavement
+    rather than poking past one edge.  When either is ``None`` the rect
+    is symmetric about the axis (``width / 2`` each) — unchanged
+    behaviour.  The longitudinal asymmetric-trim retry below is
+    orthogonal (it trims the rect's LENGTH, not its lateral offsets).
 
     Asymmetric-snap trim: when the two snapped end-widths differ
     by more than ``ASYM_WIDTH_TOL_M``, the rect has extended into
@@ -1105,12 +1214,15 @@ def _rect_from_axis_extended(axis: LineString, width: float,
             break
         ux, uy = dx / mag, dy / mag
         px, py = -uy, ux
-        half = width / 2.0
+        if half_left is not None and half_right is not None:
+            hl, hr = half_left, half_right
+        else:
+            hl = hr = width / 2.0
         corners = [
-            (p1[0] + px * half, p1[1] + py * half),   # 0: end1 side1
-            (p2[0] + px * half, p2[1] + py * half),   # 1: end2 side1
-            (p2[0] - px * half, p2[1] - py * half),   # 2: end2 side2
-            (p1[0] - px * half, p1[1] - py * half),   # 3: end1 side2
+            (p1[0] + px * hl, p1[1] + py * hl),   # 0: end1 side1 (left)
+            (p2[0] + px * hl, p2[1] + py * hl),   # 1: end2 side1 (left)
+            (p2[0] - px * hr, p2[1] - py * hr),   # 2: end2 side2 (right)
+            (p1[0] - px * hr, p1[1] - py * hr),   # 3: end1 side2 (right)
         ]
         snapped = _snap_corners_to_pavement(
             corners, pav, apt_vertices, registry=registry)

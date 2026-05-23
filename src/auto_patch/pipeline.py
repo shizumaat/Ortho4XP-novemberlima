@@ -481,22 +481,108 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # spurious end-zone seams.
         end_skirt_t = 5.0 / phys_dist
         intersections: List[Tuple[float, float]] = []
-        for pav_poly in apt_only_pav_polys:
+        # Split the runway at each adjacent pavement shape's CONTACT with
+        # it — the NEAR and FAR edges of where the shape's boundary runs
+        # along / abuts / crosses the runway — NOT at every intermediate
+        # node (user 2026-05-23).  Intersect each pavement polygon's
+        # boundary with a narrow band around the runway boundary: each
+        # contiguous arc within the band is ONE contact (one abutting
+        # shape's run along the runway edge), so we cut only at the arc's
+        # two along-runway extremes and skip its interior nodes.  This
+        # makes a junction whose straight edge runs 100 m along the runway
+        # with no intermediate vertices ONE contact → ONE runway sub-rect,
+        # and — being PROXIMITY-based, not crossing-based — also catches a
+        # shape that comes right up to the runway edge without crossing
+        # it.  Blast pads / displaced thresholds are part of the runway
+        # rect and treated the same (contacts there cut too); only the
+        # CIFP threshold cut itself comes from the segmenter's anchored
+        # fractions.
+        try:
+            prox_band = rect_boundary.buffer(INTERSECTION_PROX_M)
+        except _GEOM_EXC:
+            prox_band = None
+        if prox_band is not None:
+            for pav_poly in apt_only_pav_polys:
+                try:
+                    near = pav_poly.boundary.intersection(prox_band)
+                except _GEOM_EXC:
+                    continue
+                if near.is_empty:
+                    continue
+                arcs = (list(near.geoms)
+                        if near.geom_type in ("MultiLineString",
+                                              "GeometryCollection",
+                                              "MultiPoint")
+                        else [near])
+                for arc in arcs:
+                    if arc.is_empty:
+                        continue
+                    if arc.geom_type == "Point":
+                        acoords = [(arc.x, arc.y)]
+                    elif arc.geom_type == "LineString":
+                        acoords = list(arc.coords)
+                    else:
+                        continue
+                    a_ts = [((px - cl_ax) * cl_dx
+                             + (py - cl_ay) * cl_dy) / cl_L2
+                            for px, py in acoords]
+                    # Cut at the contact arc's near + far edges only.
+                    for t in (min(a_ts), max(a_ts)):
+                        if t <= end_skirt_t or t >= 1.0 - end_skirt_t:
+                            continue
+                        intersections.append((t, cl_ax + t * cl_dx,
+                                              cl_ay + t * cl_dy))
+        # Per user (session 44): also break EVERY runway at its RUNWAY
+        # CROSSINGS — where another runway's pavement overlaps this
+        # one.  Without a seam there, a runway with no pavement-vertex
+        # breakpoints emits as ONE rect that runs un-split across the
+        # other runway, so ``_resolve_runway_crossings`` has no sub-rect
+        # boundary to isolate and the crossing never becomes a clean
+        # junction (CYXY 02/20).  Use RECT-OVERLAP, not centerline×
+        # centerline: at CYXY the short 02/20 crosses 14L/32R's pavement
+        # but 02/20's centerline ends before reaching 14L/32R's
+        # centerline, so a centerline-intersection test misses that
+        # crossing entirely.  Clip on BOTH sides of each crossing:
+        # project the overlap REGION onto this runway's centerline and
+        # add a seam at its ENTRY (t_lo) and EXIT (t_hi), so the crossing
+        # region becomes its own segment (the segmenter splits there, the
+        # two runways' crossing sub-rects overlap exactly, and
+        # ``_resolve_runway_crossings`` merges them into one clean
+        # crossing-junction; the apron can absorb a freed runway end —
+        # CYXY runway-02 end).  ``rect`` includes blast pads / displaced-
+        # threshold pavement, so crossings in those paved zones split too.
+        for r2idx in range(len(apt.runways)):
+            if r2idx == ridx or r2idx >= len(runway_polys):
+                continue
+            r2_rect = runway_polys[r2idx]
+            if r2_rect is None or r2_rect.is_empty:
+                continue
             try:
-                ring = pav_poly.exterior
+                ov = rect.intersection(r2_rect)
             except _GEOM_EXC:
                 continue
-            coords = list(ring.coords)
-            if coords and coords[0] == coords[-1]:
-                coords = coords[:-1]
-            for px, py in coords:
-                if rect_boundary.distance(Point(px, py)) > INTERSECTION_PROX_M:
+            if ov.is_empty or ov.area < 1.0:
+                continue
+            # Project every vertex of the overlap region onto this
+            # runway's centerline → t-range [t_lo, t_hi].
+            ov_polys = (list(ov.geoms)
+                        if ov.geom_type == "MultiPolygon" else [ov])
+            ov_ts: List[float] = []
+            for op in ov_polys:
+                if op.geom_type != "Polygon" or op.is_empty:
                     continue
-                t = ((px - cl_ax) * cl_dx
-                     + (py - cl_ay) * cl_dy) / cl_L2
+                for ox, oy in op.exterior.coords:
+                    ov_ts.append(
+                        ((ox - cl_ax) * cl_dx
+                         + (oy - cl_ay) * cl_dy) / cl_L2)
+            if not ov_ts:
+                continue
+            for t in (min(ov_ts), max(ov_ts)):
                 if t <= end_skirt_t or t >= 1.0 - end_skirt_t:
                     continue
-                intersections.append((t, px, py))
+                # Seam point ON this runway's centerline at parameter t.
+                intersections.append((t, cl_ax + t * cl_dx,
+                                      cl_ay + t * cl_dy))
         if not intersections:
             continue
         # Sort by centerline t and dedup.  Per user 2026-05-11: dedup
@@ -2550,6 +2636,33 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # here (last geometry step), then assert the invariant holds.  The
     # boundary ribbon now participates (it tiles with pavement); only the
     # DEM bridge stays exempt (see conformance._OVERLAY_REFS).
+    # Weld near-coincident vertices across the airside pavement
+    # partition (taxi rects + junctions) to shared coordinates BEFORE
+    # the conformance pass.  Adjacent shapes are snapped to pav.boundary
+    # at different stages and post-emit passes add un-welded vertices, so
+    # a rect corner and the junction vertex beside it can sit ≤ tol apart
+    # and their edges cross by a sub-tol sliver.  Welding to one fresh
+    # registry collapses each such pair to a single coordinate; the
+    # conformance pass below then only has genuine T-junctions left to
+    # insert (user 2026-05-23: "snap all shapes through one registry").
+    from .canonical_points import weld_layout_vertices
+    # NB: ROLE_RUNWAY / ROLE_STUB are module-level imports used earlier
+    # in this function — re-importing them here would make them locals
+    # (UnboundLocalError at their earlier use), so reference those from
+    # module scope and only locally import the rest.
+    from .layout import (
+        ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
+        ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
+        ROLE_RUNWAY_CROSSING, ROLE_APRON)
+    _weld_roles = {ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
+                   ROLE_STUB, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
+                   ROLE_RUNWAY, ROLE_RUNWAY_CROSSING, ROLE_APRON}
+    n_welded = weld_layout_vertices(layout, _weld_roles)
+    if n_welded:
+        UI.vprint(1,
+            f"  [pav-builder] {icao}: welded shared vertices in "
+            f"{n_welded} airside shape(s).")
+
     from .conformance import (
         enforce_conformance, find_conformance_violations)
     n_shapes, n_verts = enforce_conformance(layout)
