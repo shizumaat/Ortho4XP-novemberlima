@@ -79,6 +79,60 @@ PAVEMENT_ROLES = {
 
 CAP_SWEEPS_PER_ITER = 5
 
+# ── Priority cascade (user 2026-05-22) ───────────────────────────
+# The solver runs as an ordered cascade rather than one simultaneous
+# relaxation: seam + runway corners are the immutable HARD anchors,
+# then each lower tier is solved against the FROZEN tier above it.
+# Grade is sacred at every tier; the cascade order decides who yields
+# to preserve it.
+#
+#   seam / runway  (HARD)
+#     → TAXI network (rects + junctions): graded between the runway /
+#       seam intersections it touches, closest to DEM within the
+#       taxiway grade cap.  This is the "grade the taxi network like
+#       the runway" step — its anchors are the shared runway/seam
+#       nodes (already HARD-seeded); everything between follows terrain
+#       clamped to grade, dipping below / rising above only as needed
+#       to span the anchors.
+#     → APRONS: the taxi network is now frozen; each apron adjusts (as
+#       a whole, within apron grade) to meet its taxiways at the
+#       shared boundary nodes.
+#     → TERMINALS: aprons frozen; the flat terminal floor adjusts to
+#       connect to its aprons within grade.
+#
+# Why phased (not simultaneous): a single relaxation is a tug-of-war —
+# an apron held at DEM by its own attraction pins a taxiway it borders,
+# forcing the taxiway over-grade (SPLP junction -10025).  Freezing the
+# higher tier and letting the lower tier yield removes that conflict.
+#
+# A node's OWNER tier = the highest-priority role among the shapes that
+# use it (TAXI > APRON > TERMINAL); a node shared by a taxiway and an
+# apron is taxi-owned, so the apron yields to it.  Lower tiers couple to
+# frozen higher tiers through these shared nodes (which are HARD in the
+# lower tier's phase), NOT through cross-tier edges — so each phase uses
+# only its own tier's edges.
+_TIER_TAXI = 3
+_TIER_APRON = 2
+_TIER_TERMINAL = 1
+
+_TAXI_TIER_ROLES = frozenset((*SLOPING_RECT_ROLES, ROLE_JUNCTION))
+
+# Dykstra L2 projection iteration cap (per cascade phase).  A uniform
+# over-grade slope is corrected by anchor information propagating inward one
+# node per sweep, so convergence scales with the longest anchor-free run —
+# generous here, but each sweep is cheap and convergence stops early via tol.
+_L2_MAX_ITERS = 40000
+
+# Per-cascade-phase grade-fit selector.  ``False`` (default) = the proven
+# DEM-attraction + cap-projection relaxation (holds flat pavement on terrain
+# via the asymmetric floor; non-regressing).  ``True`` = the L2-closest-to-DEM
+# Dykstra projection (``_l2_compliant_fit``) — the architecturally-correct
+# "follow DEM clamped to grade" fit, but only useful once junction grading is
+# fully PER-AXIS (the all-pair Euclidean cap otherwise drives genuinely-steep
+# junctions infeasible and the L2 fit smears the residual onto short stubs).
+# Flip to True together with the per-axis solver/audit work.
+_USE_L2_FIT = False
+
 # DEM attraction (user 2026-05-22): each iteration, pull every SOFT node a
 # fixed fraction of the way toward its terrain (DEM) elevation, THEN
 # cap-project.  This makes soft pavement settle "as close to DEM as the
@@ -157,38 +211,159 @@ def solve(layout, icao: str,
         return
     n = len(nodes)
 
-    elev, is_hard, _have_initial = _seed_elevations(
+    elev, base_hard, _have_initial = _seed_elevations(
         layout, nodes, bucket_to_idx,
         dem=dem, tile_lat=tile_lat, tile_lon=tile_lon)
-    if not any(is_hard):
+    if not any(base_hard):
         return
 
-    # Per-node DEM elevation (terrain attraction target — distinct from
-    # the seed, which warm-start may have overridden with a stale value).
+    # Per-node DEM elevation — the terrain target each tier is fit toward
+    # (closest-to-DEM within grade).  Distinct from the seed (warm-start may
+    # carry a stale value).
     dem_elev = _sample_node_dem(layout, nodes, dem, tile_lat, tile_lon)
 
-    edge_grade, edge_length = _build_edges(
-        layout, bucket_to_idx)
-    if not edge_grade:
-        return
+    tiers = _node_tiers(layout, bucket_to_idx, n)
 
-    adj = _build_adjacency(n, edge_grade, edge_length)
-    terminal_groups = _build_terminal_groups(
-        layout, bucket_to_idx)
+    # Per-tier edge sets.  Each phase grades a tier against the FROZEN tier
+    # above it via shared HARD nodes, so a phase only needs its own tier's
+    # edges — cross-tier coupling is carried by the shared node, not an edge.
+    taxi_eg, taxi_el = _build_edges(
+        layout, bucket_to_idx, roles=_TAXI_TIER_ROLES,
+        add_runway_anchor=True)
+    apron_eg, apron_el = _build_edges(
+        layout, bucket_to_idx, roles=frozenset((ROLE_APRON,)),
+        add_runway_anchor=False)
+    term_eg, term_el = _build_edges(
+        layout, bucket_to_idx, roles=frozenset((ROLE_TERMINAL,)),
+        add_runway_anchor=False)
+
     rect_flat_groups = _build_rect_cross_section_groups(
         layout, bucket_to_idx)
-    edge_list = list(edge_grade.keys())
+    terminal_groups = _build_terminal_groups(
+        layout, bucket_to_idx)
 
-    iters_used = _run_jacobi(
-        elev, is_hard, adj, edge_list,
-        edge_grade, edge_length, terminal_groups,
-        rect_flat_groups, max_iters, tol_m,
-        dem_elev=dem_elev)
+    total_iters = 0
+
+    def _eq_pairs_from_groups(groups):
+        """Flatten flatness groups into equality (cap-0) constraint pairs:
+        a group ``[a, b, c, …]`` becomes the chain ``(a,b),(b,c),…`` which
+        forces all members equal."""
+        pairs = []
+        for grp in groups:
+            for k in range(len(grp) - 1):
+                if grp[k] != grp[k + 1]:
+                    pairs.append((grp[k], grp[k + 1]))
+        return pairs
+
+    def _run_phase(phase_tier, eg, el, eq_pairs, rect_grps, term_grps):
+        """Solve one cascade tier: freeze all other tiers (+ base HARD), then
+        fit a grade-compliant surface for this tier's soft nodes against the
+        frozen anchors.  Two fits are available (see ``_USE_L2_FIT``): the
+        proven DEM-attraction relaxation, or the L2-closest-to-DEM Dykstra
+        projection."""
+        nonlocal total_iters
+        if not eg and not eq_pairs:
+            return
+        is_hard_p = [base_hard[i] or tiers[i] != phase_tier
+                     for i in range(n)]
+        if all(is_hard_p):
+            return
+        if _USE_L2_FIT:
+            total_iters += _l2_compliant_fit(
+                n, elev, is_hard_p, dem_elev, eg, el, eq_pairs,
+                _L2_MAX_ITERS, tol_m)
+        else:
+            adj_p = _build_adjacency(n, eg, el)
+            total_iters += _run_jacobi(
+                elev, is_hard_p, adj_p, list(eg.keys()),
+                eg, el, term_grps, rect_grps, max_iters, tol_m,
+                dem_elev=dem_elev, use_attraction=True)
+
+    # Tier 1 — TAXI network (rects + junctions), anchored at runway/seam.
+    _run_phase(_TIER_TAXI, taxi_eg, taxi_el,
+               _eq_pairs_from_groups(rect_flat_groups),
+               rect_flat_groups, [])
+    # Tier 2 — APRONS yield to the frozen taxi network.
+    _run_phase(_TIER_APRON, apron_eg, apron_el, [], [], [])
+    # Tier 3 — TERMINALS (flat) yield to the frozen aprons.
+    _run_phase(_TIER_TERMINAL, term_eg, term_el,
+               _eq_pairs_from_groups(terminal_groups),
+               [], terminal_groups)
+
     n_terms, n_rects, n_juncs = _writeback(
         layout, elev, bucket_to_idx)
-    _report(icao, iters_used, max_iters,
+    _report(icao, total_iters, max_iters,
              _time.time() - t_start,
              n_terms, n_rects, n_juncs)
+
+
+def _l2_compliant_fit(n, elev, is_hard, dem_elev, edge_grade, edge_length,
+                      eq_pairs, max_iters, tol_m) -> int:
+    """Fit the L2-CLOSEST grade-compliant elevation field to the DEM via
+    Dykstra's cyclic projection.
+
+    The feasible set is the polytope ``{ |e_u - e_v| ≤ grade·length } ∩
+    { e_a = e_b (flatness) }``; the point projected is the DEM (soft nodes
+    seeded there, HARD nodes fixed).  Plain cyclic cap-projection converges to
+    *some* feasible point and drags flat pavement off terrain (symmetric
+    splitting sinks a plateau toward a lower neighbour); Dykstra's
+    per-constraint correction terms make it converge to the *closest* feasible
+    point — terrain-following where terrain already complies, deviating only
+    where it must.  Mutates ``elev`` in place; returns iterations used.
+    """
+    # Seed soft nodes at the DEM target (the point being projected); keep the
+    # backfilled seed where no DEM sample exists.
+    for i in range(n):
+        if not is_hard[i] and dem_elev[i] is not None:
+            elev[i] = float(dem_elev[i])
+    cons: list[tuple[int, int, float]] = []
+    for (u, v), gr in edge_grade.items():
+        cons.append((u, v, edge_length[(u, v)] * gr))
+    for (a, b) in eq_pairs:
+        cons.append((a, b, 0.0))
+    if not cons:
+        return 0
+    corr = [[0.0, 0.0] for _ in cons]
+    for it in range(max_iters):
+        max_change = 0.0
+        for ci, (u, v, cap) in enumerate(cons):
+            hu = is_hard[u]
+            hv = is_hard[v]
+            if hu and hv:
+                continue  # both fixed — constraint can't be enforced
+            c = corr[ci]
+            yu = elev[u] + (0.0 if hu else c[0])
+            yv = elev[v] + (0.0 if hv else c[1])
+            d = yu - yv
+            excess = abs(d) - cap
+            if excess <= 0.0:
+                pu, pv = yu, yv
+            else:
+                s = 1.0 if d > 0 else -1.0
+                if hu:
+                    pu = yu
+                    pv = yu - s * cap
+                elif hv:
+                    pv = yv
+                    pu = yv + s * cap
+                else:
+                    pu = yu - 0.5 * s * excess
+                    pv = yv + 0.5 * s * excess
+            if not hu:
+                c[0] = yu - pu
+                ch = abs(elev[u] - pu)
+                if ch > max_change:
+                    max_change = ch
+                elev[u] = pu
+            if not hv:
+                c[1] = yv - pv
+                ch = abs(elev[v] - pv)
+                if ch > max_change:
+                    max_change = ch
+                elev[v] = pv
+        if max_change < tol_m:
+            return it + 1
+    return max_iters
 
 
 # ── Stage 1: build node list ──────────────────────────────────────
@@ -218,6 +393,38 @@ def _build_node_list(layout):
                 bucket_to_idx[k] = len(nodes)
                 nodes.append((float(x), float(y)))
     return nodes, bucket_to_idx
+
+
+def _node_tiers(layout, bucket_to_idx, n):
+    """Return ``[tier]`` per node — the OWNER tier used by the priority
+    cascade.  A node's owner is the highest-priority role among the shapes
+    that use it: ``_TIER_TAXI`` (sloping rects + junctions) >
+    ``_TIER_APRON`` > ``_TIER_TERMINAL``.  Runway / runway-crossing nodes
+    are HARD (seeded immutable) and keep tier 0 — they are never a phase's
+    soft set.  Nodes used only by non-pavement shapes also stay 0.
+    """
+    tiers = [0] * n
+    for s in layout.shapes:
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        if s.role in _TAXI_TIER_ROLES:
+            t = _TIER_TAXI
+        elif s.role == ROLE_APRON:
+            t = _TIER_APRON
+        elif s.role == ROLE_TERMINAL:
+            t = _TIER_TERMINAL
+        else:
+            continue
+        try:
+            coords = _open_ring(list(s.polygon.exterior.coords))
+        except _GEOM_EXC:
+            continue
+        for x, y in coords:
+            k = layout.canonical_points.get_or_add(float(x), float(y))
+            idx = bucket_to_idx.get(k)
+            if idx is not None and t > tiers[idx]:
+                tiers[idx] = t
+    return tiers
 
 
 # ── Stage 2: seed initial elevations + HARD anchor flags ─────────
@@ -479,10 +686,16 @@ def _collect_junction_axes(layout, polygon):
     return axes
 
 
-def _build_edges(layout, bucket_to_idx
+def _build_edges(layout, bucket_to_idx, roles=None, add_runway_anchor=True
                   ) -> tuple[dict[tuple[int, int], float],
                              dict[tuple[int, int], float]]:
     """Build the unified graph's edge list with role-aware geometry.
+
+    ``roles`` (cascade): when given, only shapes whose role is in the set
+    contribute edges — so each cascade phase builds just its own tier's
+    edges (lower tiers couple to frozen higher tiers via shared HARD nodes,
+    not cross-tier edges).  ``add_runway_anchor`` gates the taxi→runway
+    anchor edges (only the taxi phase wants them).
 
     For RECT roles (taxi rects, runway segments): ring edges only.
     The within-rect constraint is axial; cross-section flatness
@@ -525,6 +738,8 @@ def _build_edges(layout, bucket_to_idx
 
     for s in layout.shapes:
         if s.role not in PAVEMENT_ROLES:
+            continue
+        if roles is not None and s.role not in roles:
             continue
         if s.polygon is None or s.polygon.is_empty:
             continue
@@ -595,6 +810,8 @@ def _build_edges(layout, bucket_to_idx
     # to the nearest runway CORNER node within TAXI_ANCHOR_DIST_M so cap
     # projection propagates the runway HARD anchor along the connector
     # (HECA stub T4 sat 2.75 m below runway 05C/23C with no anchor).
+    if not add_runway_anchor:
+        return edge_grade, edge_length
     from auto_patch.elevation import TAXI_ANCHOR_DIST_M
     rwy_corners: list[tuple[int, float, float]] = []
     for s in layout.shapes:
@@ -746,7 +963,8 @@ def _equalize_groups(elev, is_hard, groups):
 def _run_jacobi(elev, is_hard, adj, edge_list, edge_grade,
                 edge_length, terminal_groups,
                 rect_flat_groups,
-                max_iters, tol_m, dem_elev=None) -> int:
+                max_iters, tol_m, dem_elev=None,
+                use_attraction=True) -> int:
     """DEM-attraction + cap-projection relaxation (user 2026-05-03,
     DEM attraction added 2026-05-22).
 
@@ -785,7 +1003,8 @@ def _run_jacobi(elev, is_hard, adj, edge_list, edge_grade,
     is flat).
     """
     n = len(elev)
-    use_dem = dem_elev is not None and DEM_ATTRACTION > 0.0
+    use_dem = (use_attraction and dem_elev is not None
+               and DEM_ATTRACTION > 0.0)
     for it in range(max_iters):
         prev_elev = list(elev)
         # 0) DEM attraction — pull soft nodes toward terrain by a
