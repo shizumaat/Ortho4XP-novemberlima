@@ -440,6 +440,64 @@ def _rect_flat_edges_from_shape(shape):
 
 
 @pytest.mark.parametrize("icao", _test_airports())
+def test_sloping_rect_slopes_only_along_axis(icao):
+    """A taxi rect may slope ONLY along its centerline (``source_axis``).
+
+    Per user 2026-05-22: "taxi rects can only slope along the axis of their
+    taxi centerline."  Concretely, the two AXIS-END edges (perpendicular to
+    ``source_axis``) must each be FLAT — both endpoints at the same elevation.
+    A non-flat axis-end means the rect slopes ACROSS its centerline, which
+    X-Plane renders as a perpendicular tilt / non-coplanar fold.
+
+    Hi/lo rects satisfy this by construction (``[H, L, L, H]``); the failure
+    mode is a ``node_altitudes`` rect whose cross-section ended up tilted
+    (e.g. a degenerate sliver from a clip/seam pass, or a solver that graded
+    a rect off-axis).  Tolerance 0.3 m absorbs 1-decimal rounding.
+    """
+    from auto_patch.layout import corner_alts_from_high_low
+    layout = _build_layout(icao)
+    sloping_roles = {
+        "primary_parallel", "secondary_parallel", "stub",
+        "cross_connector",
+    }
+    TOL = 0.3
+    violations = []
+    for s in layout.shapes:
+        if s.role not in sloping_roles:
+            continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        coords = list(s.polygon.exterior.coords)
+        if coords and coords[0] == coords[-1]:
+            coords = coords[:-1]
+        if len(coords) != 4:
+            continue
+        if s.node_altitudes:
+            alts = list(s.node_altitudes)[:4]
+        elif s.altitude_high is not None and s.altitude_low is not None:
+            alts = corner_alts_from_high_low(s.altitude_high, s.altitude_low)
+        else:
+            continue
+        cmap = {(round(c[0], 3), round(c[1], 3)): alts[i]
+                for i, c in enumerate(coords)}
+        for a, b in _rect_flat_edges_from_shape(s):
+            za = cmap.get((round(a[0], 3), round(a[1], 3)))
+            zb = cmap.get((round(b[0], 3), round(b[1], 3)))
+            if za is None or zb is None:
+                continue
+            if abs(za - zb) > TOL:
+                c = s.polygon.centroid
+                violations.append((s.ref, c.x, c.y, abs(za - zb)))
+                break
+    assert not violations, (
+        f"{icao}: {len(violations)} taxi rect(s) slope ACROSS their "
+        f"centerline (axis-end edge not flat — perpendicular tilt). "
+        f"Worst: " + ", ".join(
+            f"{r}@({x:.0f},{y:.0f}) Δ{d:.2f}m"
+            for r, x, y, d in sorted(violations, key=lambda v: -v[3])[:5]))
+
+
+@pytest.mark.parametrize("icao", _test_airports())
 def test_no_vertex_on_sloping_rect_flat_edge(icao):
     """A sloping rect's FLAT (cross/short) edge — the side
     perpendicular to ``source_axis`` — is where the rect meets a
