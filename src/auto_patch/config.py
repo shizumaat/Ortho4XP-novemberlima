@@ -37,6 +37,7 @@ __all__ = [
     "CLEARANCE_STATION_STEP_M",
     "RUNWAY_END_CLEARANCE_LENGTH_BY_CODE",
     "RUNWAY_END_RESA_MAX_SLOPE",
+    "CLEARANCE_LATERAL_MAX_SLOPE",
     "RUNWAY_STRIP_HALF_WIDTH_BY_CODE",
     "WINGSPAN_BY_CODE_LETTER",
     "TAXIWAY_WINGTIP_MARGIN_M",
@@ -283,6 +284,13 @@ RUNWAY_END_CLEARANCE_LENGTH_BY_CODE = {1: 60.0, 2: 90.0, 3: 150.0, 4: 240.0}
 # daylights where it meets natural ground, so an undershooting /
 # overrunning aircraft meets a gentle slope rather than a wall.
 RUNWAY_END_RESA_MAX_SLOPE = 0.05
+
+# Maximum transverse slope (rise/run) of the graded LATERAL clearance
+# strip alongside a runway/taxiway.  Terrain rising into the wingtip
+# band is cut down to a ramp rising at this slope from the pavement
+# edge, daylighting where it meets the DEM — so the smoothed strip is
+# only as wide as needed (up to the code-letter wingtip width).
+CLEARANCE_LATERAL_MAX_SLOPE = 0.05
 
 # Lateral graded-strip half-width (m) from the runway centerline, by
 # ICAO code number (Annex 14 graded portion of the runway strip).
