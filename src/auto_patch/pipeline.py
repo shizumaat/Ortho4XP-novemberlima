@@ -101,6 +101,7 @@ from . import finalize, junction_emit
 from .pavement.runways import (
     _detect_runway_shoulders,
     _runway_rect_m,
+    _widen_runway_rect,
 )
 
 
@@ -295,6 +296,9 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # centerline by the shoulder offset (typically < 20 m, well
     # within DEM noise tolerance).
     absorbed_pav_indices: set = set()
+    # Runways the whole-polygon pass widened — the later extent-based
+    # shoulder pass skips these so the two don't compound.
+    _shoulder_widened_refs: set = set()
     for ridx, r in enumerate(apt.runways):
         new_left, new_right, absorbed = _detect_runway_shoulders(
             r, to_m, pav_polys)
@@ -341,6 +345,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
             continue
         runway_polys[ridx] = new_rect
         ref = f"{r.desig_a}/{r.desig_b}"
+        _shoulder_widened_refs.add(ref)
         for s in layout.shapes:
             if s.role == ROLE_RUNWAY and s.ref == ref:
                 s.polygon = new_rect
@@ -884,6 +889,61 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # so rect corners snap to a stable boundary and subtracting rects
     # aligns.  (User-approved tol=2.0 to match the reviewed union.)
     pav_union = _simplify_pavement_polygon(pav_union, tol=2.0)
+
+    # ── Runway shoulder widening (user 2026-05-23) ──────────────────
+    # apt.dat row 100 field 4 encodes the runway shoulder as
+    # ``100 * shoulder_width_m + surface_code`` (X-Plane 12 spec): when
+    # the value is > 100 the 100s/1000s digits give the shoulder width in
+    # whole metres per side (e.g. HECA's 701 = surface 1 + 7 m, 724 =
+    # surface 24 + 7 m); a value < 100 is a bare surface code with no
+    # explicit width (X-Plane's own 3-5 m default scaling — we leave
+    # those runways unwidened, e.g. SPJC 27/28, CYXY 1).  The shoulder
+    # strip isn't in the row-100 width, so without accounting for it it
+    # falls into the junction/apron residue as thin "wings" running along
+    # the runway.  For each runway with an explicit shoulder width, widen
+    # its rect symmetrically by that width per side (spec-driven, no
+    # pavement analysis), keeping it a clean 4-corner rect.  Done here,
+    # BEFORE the runway is subtracted from the pavement union below, so
+    # the strip becomes runway and the junctions come out clean; Phase-2
+    # segmentation (reads ``width_m``) builds sub-rects at the widened
+    # width.  Skip runways already widened by the pre-DSF whole-polygon
+    # shoulder pass so the two don't compound.
+    if runway_polys:
+        _widened_any = False
+        for ridx, r in enumerate(apt.runways):
+            if ridx >= len(runway_polys):
+                continue
+            shoulder_w_m = r.shoulder_code // 100   # encoded width (m)/side
+            if shoulder_w_m < 1:
+                continue
+            ref = f"{r.desig_a}/{r.desig_b}"
+            if ref in _shoulder_widened_refs:
+                continue
+            rect = runway_polys[ridx]
+            if rect is None or rect.is_empty:
+                continue
+            half = r.width_m / 2.0
+            old_w = r.width_m
+            new_rect = _widen_runway_rect(
+                r, layout.anchor,
+                -(half + shoulder_w_m), half + shoulder_w_m, to_m)
+            if new_rect is None or new_rect.is_empty:
+                continue
+            runway_polys[ridx] = new_rect
+            for s in layout.shapes:
+                if s.role == ROLE_RUNWAY and s.ref == ref:
+                    s.polygon = new_rect
+                    break
+            _widened_any = True
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: shoulder-widened runway "
+                f"{ref}: {old_w:.1f}m → {r.width_m:.1f}m "
+                f"(+{shoulder_w_m}m/side, apt.dat shoulder code "
+                f"{r.shoulder_code}).")
+        if _widened_any:
+            layout.runway_union = (unary_union(runway_polys)
+                                   if runway_polys else None)
+
     # Stash the pre-runway-subtraction pavement polygon list for
     # the apron-merged-runway detection in _compute_elevations.
     # A runway segment is "apron-merged" when the apt.dat polygon

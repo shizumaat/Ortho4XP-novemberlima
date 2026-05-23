@@ -104,6 +104,11 @@ class Runway:
     displaced_b_m: float
     blast_a_m: float = 0.0   # blast pad / overrun length beyond end a
     blast_b_m: float = 0.0   # blast pad / overrun length beyond end b
+    # row-100 shoulder field, encoded ``100 * width_m + surface_code``
+    # (X-Plane 12 spec): > 100 ⇒ the 100s/1000s digits are the shoulder
+    # width in whole metres per side; < 100 ⇒ bare surface code (no
+    # explicit width); 0 ⇒ no shoulder.
+    shoulder_code: int = 0
 
 
 @dataclass
@@ -634,6 +639,10 @@ def _parse_runway(toks: list[str]) -> Runway | None:
         surface_code = int(toks[2])
         # toks[3] = shoulder, toks[4] = smoothness, toks[5] = centerline,
         # toks[6] = edge_lights, toks[7] = distance_signs
+        try:
+            shoulder_code = int(float(toks[3]))
+        except (ValueError, IndexError):
+            shoulder_code = 0
         end_a = toks[8:17]   # 9 fields
         end_b = toks[17:26]
         desig_a = end_a[0]
@@ -655,6 +664,7 @@ def _parse_runway(toks: list[str]) -> Runway | None:
         width_m=width_m, surface_code=surface_code,
         displaced_a_m=displaced_a_m, displaced_b_m=displaced_b_m,
         blast_a_m=blast_a_m, blast_b_m=blast_b_m,
+        shoulder_code=shoulder_code,
     )
 
 

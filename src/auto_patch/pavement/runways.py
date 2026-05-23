@@ -34,6 +34,7 @@ from shapely.ops import unary_union
 from ..layout import (
     BuiltShape,
     PavementLayout,
+    R_EARTH,
     ROLE_CROSS_CONNECTOR,
     ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL,
@@ -57,6 +58,7 @@ __all__ = [
     "_resolve_runway_crossings",
     "_insert_runway_chain_bridges",
     "_detect_runway_shoulders",
+    "_widen_runway_rect",
 ]
 
 
@@ -1021,3 +1023,54 @@ def _detect_runway_shoulders(
         if n_max > new_right:
             new_right = n_max
     return (new_left, new_right, absorbed)
+
+
+def _widen_runway_rect(
+        runway,
+        anchor: "tuple[float, float]",
+        new_left: float,
+        new_right: float,
+        to_m,
+        ) -> "Polygon | None":
+    """Widen (and, when asymmetric, recentre) a runway's apt.dat record
+    so its rect spans perpendicular offsets ``[new_left, new_right]``
+    from the current centerline.
+
+    Mutates ``runway.lat_a/lon_a/lat_b/lon_b/width_m`` in place and
+    returns the rebuilt 4-corner rect, so downstream CIFP segmenting
+    (which reads ``width_m``) picks up the new width.  Returns ``None``
+    and leaves the record untouched when the rebuild degenerates.
+
+    The perpendicular recentre offset is applied back through the
+    inverse of the meter projection (anchored at ``anchor`` =
+    ``(lat0, lon0)`` with ``cos(lat0)``), matching ``layout._projection``.
+    """
+    new_width = new_right - new_left
+    offset = 0.5 * (new_left + new_right)
+    ax, ay = to_m(runway.lon_a, runway.lat_a)
+    bx, by = to_m(runway.lon_b, runway.lat_b)
+    udx, udy = bx - ax, by - ay
+    L = math.hypot(udx, udy)
+    if L < 1.0:
+        return None
+    ux, uy = udx / L, udy / L
+    nx, ny = -uy, ux
+    lat0, _lon0 = anchor
+    cos0 = math.cos(math.radians(lat0))
+    d_lat = math.degrees(ny * offset / R_EARTH)
+    d_lon = (math.degrees(nx * offset / (R_EARTH * cos0))
+             if cos0 > 1e-9 else 0.0)
+    saved = (runway.lat_a, runway.lon_a, runway.lat_b,
+             runway.lon_b, runway.width_m)
+    if abs(offset) > 0.05:
+        runway.lat_a += d_lat
+        runway.lon_a += d_lon
+        runway.lat_b += d_lat
+        runway.lon_b += d_lon
+    runway.width_m = new_width
+    rect = _runway_rect_m(runway, to_m)
+    if rect.is_empty:
+        (runway.lat_a, runway.lon_a, runway.lat_b,
+         runway.lon_b, runway.width_m) = saved
+        return None
+    return rect
