@@ -50,6 +50,18 @@ continuous (user confirmed in WED), so it's an emit-side gap.
   get the normal margin.** Fix should generalise (user: "so it doesn't happen
   somewhere else").
 
+### 0. CYXY runway segmentation (user flagged — the main CYXY issue)
+User reports the main CYXY problem is runway SEGMENTATION. This is upstream
+GEOMETRY (`runway_segments.py` / `runway_redistribute.py`), run BEFORE the solver.
+**NOT from this session's elevation work** (cascade/per-axis/spread are gated off;
+runways are HARD anchors unchanged). So it's either PRE-EXISTING (baseline already
+fails `grade[CYXY]` + `neighbour_corners[CYXY]`, tied in memory to runway
+threshold-vs-DEM reconciliation, commit dd04d8e) OR from the parallel clearance/RESA
+work (`474af1d`/`8087ff1`, "RESA builder off the runway-end pavement edge" — touches
+runway-end geometry). NEXT: build CYXY, inspect runway sub-rects (count/shape/elev),
+diff against pre-clearance-commit behaviour to localise.  [SYMPTOM: to be filled in
+by user — too many segments? gaps between sub-rects? wrong elevations? at the ends?]
+
 ### 2. Southern stub A = two rects that should be merged after the slice (SPLP)
 The tile slice (lon=−77 seam) splits the southern stub A into a hi/lo body
 (ctr ≈ (−124,−126), 62.4/62.2) + a thin `node_altitudes` boundary strip
