@@ -1,180 +1,128 @@
-# Auto-Patch Status — solver priority cascade + per-axis junction grading (handover)
+# Auto-Patch Status — solver cascade + per-axis grading (GATED); geometry-first next
 
-## TL;DR
+## TL;DR / current state
 
-This session **rebuilt the elevation solver as a priority cascade** and added
-**per-axis junction grading** + a **fast closest-to-DEM spread fit**, all to
-clear the last SPLP taxi-grade violations (junctions −10025 / −10026). With the
-new machinery enabled, **−10025 and −10026 clear**. It is committed **GATED OFF**
-(two flags, both default `False`) because one holdout remains — `stub/A` — and
-enabling it today is a lateral move (trades −10025/−10026 for stub/A). The path
-to finish is well-scoped below.
+**HEAD = `3e2e967`. Working tree CLEAN.** This is the known-good baseline:
+the new solver (priority cascade + per-axis junction grading + closest-to-DEM
+spread fit) is committed but **GATED OFF** — both flags default `False`, so the
+solver behaves as the proven DEM-attraction relaxation. **Suite = 9 pre-existing
+failures** (the cascade is non-regressing, verified twice).
 
-**HEAD = `68bed11`. Working tree clean.** This session's commits (interleaved
-with the user's parallel `clearance.py` work `474af1d` + `8087ff1`):
-- `a4e0bed` Elevation: **priority cascade** (seam>runway>taxi>apron>terminal).
-- `2585844` Elevation: **per-axis junction grading** (solver + audit), gated off.
-- `e2cc12d` Elevation: **fast spread fit** (over-relaxed cap-projection to
-  compliance, replaces the too-slow Dykstra), gated off.
-- `68bed11` Test: **rects slope only along axis** invariant (catches a real bug).
+**If CYXY (or anything) looks bad: it was the uncommitted
+`CHART_JUNCTION_MARGIN_M` experiment, now REVERTED.** That value (25 m) is
+GLOBAL and was tuned for CYXY's junction sizing; dropping it to 10/15 m shrank
+junctions everywhere and produced bad CYXY elevations. It's back to 25 m. Don't
+change it globally again (and note: it doesn't even affect cross-connectors —
+see the geometry bug below).
 
-**Suite: now 10 failures** (was 9). The +1 is the NEW invariant test
-(`68bed11`) catching a genuine malformed rect — see "New invariant" below. The
-elevation cascade itself is **non-regressing** (verified 9/324 with flags off,
-twice).
+**Next session: LOCK DOWN THE GEOMETRY before touching elevation/grading.** The
+elevation work is done & gated; the remaining blockers are geometry
+(rect↔junction connectivity), and they likely also gate the grade fix (a 1-node
+join can't carry the grade spread across it).
 
-Full design notes + every dead-end are in `memory/project_solver_priority_cascade.md`.
+This session's commits (all gated off / test-only / clearance is the user's):
+- `a4e0bed` priority cascade; `2585844` per-axis grading (solver+audit);
+  `e2cc12d` closest-to-DEM spread fit; `68bed11`+`3e2e967` rect-slope invariant test.
 
 ---
 
-## THE NEW SOLVER (read this first)
+## GEOMETRY ISSUES TO FIX FIRST (this is the next session's job)
 
-`elevation_per_surface/unified_jacobi.py::solve` is now an **ordered priority
-cascade** (user directive 2026-05-22: *"grade is sacred; the cascade order
-decides who yields to preserve it"*):
+### 1. B cross-connector dead-ends with a gap to the junction (SPLP)
+The B `cross_connector` shares only ~1 node (sometimes a several-metre GAP) with
+its junction instead of sharing its full end edge (2 corners). Source pavement is
+continuous (user confirmed in WED), so it's an emit-side gap.
+- **Root cause (per user 2026-05-22): the cross-connector is getting the ~30 m
+  DIAGONAL-STUB end margin, which only diagonals should get.** It ends ~30 m short
+  of the junction node while the junction sits ≤ the chart margin from it → a gap
+  the rect↔junction snap (`junction_rules._snap_junction_vertices_to_rect_flat_edge_corners`)
+  can't close (no junction vertex near the connector's far end corner to snap to).
+- Evidence: the connector's corners are IDENTICAL at `CHART_JUNCTION_MARGIN_M`
+  10 vs 15 → its length is governed by the diagonal margin, not the chart margin.
+- **Where:** `pavement/centerlines.py::_rect_margin_frac_for` (line ~1049). The
+  `20° < perp_diff < 75°` branch returns 0.30 (the 30 m-ish diagonal margin) when
+  an endpoint is within `STUB_ENDPOINT_RUNWAY_M = 80 m` of a runway. The B
+  connector's ends are ~195 m from the runway, so it SHOULD fall through to the
+  0.15 default — but it behaves like it gets the big margin. **NEXT STEP: instrument
+  `_rect_margin_frac_for` for the B centerline (print `perp_diff`, the branch
+  taken, `ep0_near`/`ep1_near`, the returned frac) to see exactly why it gets the
+  large margin, then ensure cross-connectors (taxiway↔taxiway, no runway endpoint)
+  get the normal margin.** Fix should generalise (user: "so it doesn't happen
+  somewhere else").
 
-```
-seam / runway corners  (HARD anchors, immutable)
-  → TAXI network (rects + junctions)   solved against the frozen anchors
-  → APRONS                              solved against the frozen taxi network
-  → TERMINALS (flat)                    solved against the frozen aprons
-```
+### 2. Southern stub A = two rects that should be merged after the slice (SPLP)
+The tile slice (lon=−77 seam) splits the southern stub A into a hi/lo body
+(ctr ≈ (−124,−126), 62.4/62.2) + a thin `node_altitudes` boundary strip
+(ctr ≈ (−130,−124)) that share an edge. They should merge into one rect.
+A tile_cut post-merge issue.
 
-Each tier is solved with all higher tiers FROZEN as hard anchors. A node's
-OWNER tier = the highest-priority role using it (`_TIER_TAXI` > `_TIER_APRON`
-> `_TIER_TERMINAL`); a node shared by a taxiway and an apron is taxi-owned, so
-the apron yields. Lower tiers couple to frozen higher tiers **through the shared
-HARD node, not via cross-tier edges** — so each phase builds only its own tier's
-edges (`_build_edges(roles=…, add_runway_anchor=…)`). Helpers: `_node_tiers`,
-`_run_phase`, `_TIER_*`, `_TAXI_TIER_ROLES`.
+### NOTE: the slope direction was NEVER a bug
+The apron-side stub A (way `-10005` in the per-tile patch; hi/lo 72.0/71.6; bbox
+ll −12.1560322,−76.9980678 .. −12.1557541,−76.998327) was thought to "slope
+perpendicular/parallel to the runway." It does NOT — it slopes ~perpendicular to
+the runway, ALONG its centerline (correct). The "49°" I reported was a measurement
+bug (computed runway direction from a skewed runway SUB-RECT; use the runway's full
+south↔north long axis ≈ azimuth 18°). It's a wide pad (28.4 m across × 22.8 m along
+its centerline), which is allowed. Don't chase the slope.
 
-**Why phased, not simultaneous:** the old single Jacobi was a tug-of-war — an
-apron held at DEM by its own attraction pinned a taxiway it bordered, forcing
-the taxiway over-grade. Freezing the higher tier removes that conflict.
+### NOTE: determinism is fine
+Cross-run geometry differences I saw were the user editing the apt.dat between
+builds, NOT non-determinism (two builds in one process are byte-identical). The
+apt.dat WAS edited during this session (junction count dropped ~18 → 2 in late
+builds) — the new session should rebuild fresh and not assume my mid-session
+coordinates.
 
-### Two flags gate the new behaviour (both default False = non-regressing)
-- `_USE_L2_FIT` — taxi/apron phases use `_compliant_spread_fit` (below) instead
-  of the proven DEM-attraction relaxation (`_run_jacobi`, asymmetric floor).
+---
+
+## THE ELEVATION/GRADE WORK (done, gated; resume AFTER geometry)
+
+### The cascade (`elevation_per_surface/unified_jacobi.py::solve`)
+Ordered priority cascade (user: "grade is sacred; the cascade order decides who
+yields"): seam/runway (HARD) → TAXI (rects+junctions) → APRON → TERMINAL. Each tier
+solved against the frozen tier above; node OWNER tier = highest-priority role using
+it; tiers couple via shared HARD nodes, not cross-tier edges. Helpers `_node_tiers`,
+`_run_phase`, `_TIER_*`.
+
+### Two gating flags (both default False)
 - `_PER_AXIS_JUNCTIONS` — junction edges = ring + along-centerline only; the
-  unregulated inter-centerline DIAGONAL is dropped. PAIRS WITH the audit (see
-  below) — flip them together.
+  unregulated inter-centerline diagonal is dropped. **PAIRS with the audit**:
+  `check_grade.run_checks(taxi_axes_ll=…)` grades junctions per-axis using the
+  build's APT.DAT centerlines (`layout.apt_taxi_centerlines`, passed lat/lon —
+  NEVER re-derived from OSM). The grade test feeds `taxi_axes_ll` only when this
+  flag is on, so solver+audit flip together.
+- `_USE_L2_FIT` — taxi/apron phases use `_compliant_spread_fit` (over-relaxed cap
+  projection to FULL grade compliance, `_SPREAD_OMEGA=1.0`; SOR ω>1 diverges) —
+  the "follow DEM, clamp to grade, propagate to smooth" fit. The DEM is a
+  PREFERENCE, not a constraint.
 
-### The spread fit (`_compliant_spread_fit`, commit e2cc12d)
-The DEM is a **preference, not a constraint** (user). Soft nodes seed at terrain,
-then every over-grade edge is cap-projected and the excess PROPAGATES into the
-network until nothing exceeds grade (the descent dips below / rises above terrain
-and smooths out). Stops on **max VIOLATION < tol** (true compliance), not per-iter
-change. `_SPREAD_OMEGA = 1.0` — **SOR ω>1 DIVERGES** here (tested 1.5→5.9%,
-1.9→23%). Converges in ~100 iters on a FEASIBLE region; on an INFEASIBLE span
-(bounding hard anchors >1.5% apart in elevation) it stalls at the min achievable
-grade — that is correct behaviour, the region genuinely has no compliant profile.
-(The earlier Dykstra `_l2_compliant_fit` was L2-exact but never finished
-propagating — 400k iters == 40k. Replaced.)
-
-### Per-axis AUDIT (`tools/check_grade.py`, commit 2585844)
-`run_checks(..., taxi_axes_ll=…)` grades JUNCTION within-shape pairs per-axis
-(`_per_axis_allowance` + `_project_to_polyline`, pure-math): a pair is graded only
-if both ends are within 15 m of a COMMON centerline (allowance = cL·long + cT·trans);
-cross-axis diagonals are skipped (unregulated). **CRITICAL:** the centerlines MUST
-come from `layout.apt_taxi_centerlines` (apt.dat — what the build used), passed as
-lat/lon. **Never re-derive from the OSM** (the patch OSM has no centerlines, only
-`aeroway=taxiway` polygon footprints; raw OSM diverges from apt.dat). The grade
-test (`tests/test_pavement_grade.py`) builds `taxi_axes_ll` ONLY when
-`unified_jacobi._PER_AXIS_JUNCTIONS` is True, so solver + audit flip together.
-Default off → audit unchanged.
+### Validated result (flags ON)
+Per-axis + spread CLEARS SPLP −10025/−10026. Lone holdout = the apron-side stub A
+(infeasible as currently anchored, ~2.0%). **Likely gated by the GEOMETRY bug**:
+the 1-node connector joins fragment the network, so the spread can't propagate the
+descent down the available southern-distance-to-the-seam. Fix geometry (#1/#2),
+then re-test — the grade may follow. If still short, the elongation lever (give the
+descent more clean rect-length) needs a TARGETED mechanism (cross-connector margin
+fix, NOT the global `CHART_JUNCTION_MARGIN_M`).
 
 ---
 
-## VALIDATED RESULT (flags on)
-
-`_PER_AXIS_JUNCTIONS=True` + `_USE_L2_FIT=True` on SPLP → **−10025 and −10026
-CLEAR**, cross-shape 0, no new diagonal violations. The architecture works.
-Net trade today: clears −10025/−10026 (2.87% / 1.98%) but `stub/A` then reads
-2.43% — same violation COUNT, plus slower — so **not yet worth enabling by
-default** until stub/A is closed.
-
----
-
-## THE HOLDOUT — stub/A (the next focus)
-
-Two SPLP locations carry the name; keep them straight:
-- **Apron-side stub/A, local ≈ (60, 471)** = ll `-12.1560,-76.9982`. THIS is the
-  one the user inspected. Under flags-on it reads 2.43% (0.5 m over 20.6 m).
-  Its **OSM data is actually clean**: coplanar (plane-dev 0.02 m) and slopes
-  ALONG its centerline (slope-dir · source_axis = 1.00; source_axis (0.91,−0.42)
-  matches the apt.dat A-leg). So the X-Plane "perpendicular slope" the user saw
-  is **not reproducible from the data** — likely the near-square irregular quad
-  (sides 21.6/21.7/20.6/28.6) or a rendering nuance; UNRECONCILED, worth a look.
-  It bridges two junctions sitting 0.5 m apart (HIGH-side junction ll
-  `-12.1559931,-76.9977909`, area 3729, toward the runway ~71–73; LOW-side
-  junction ll `-12.1555924,-76.9987070`, area 7489, the −10025 descent down to
-  68.7). A 20.6 m stub can't span 0.5 m at ≤1.5%.
-- It is **NOT runway-pinned directly** (55 m from the runway, > the 30 m taxi-
-  anchor distance) — pinned via the JUNCTION chain. At 200k spread-fit iters it
-  is identical to 40k ⇒ **genuinely infeasible as currently anchored**, not slow.
-
-**User's key insight for the fix (2026-05-22):** in X-Plane the LOW-side junction
-"appears nearly flat between the B taxiway and stub/A — it could easily slope up
-more toward the runway to ease the climb." That is the lever: if the low junction
-graded UP toward the runway (deviating ABOVE terrain — allowed, DEM is a
-preference), stub/A's low end rises and the stub eases to ≤1.5%. The spread fit
-keeps it near-DEM (flat there) instead of using available grade to climb. Two
-ways to realise it:
-  1. **Mid-runway connection flex** (task #9): let the runway corner that is a
-     taxi connection (not a threshold) flex within runway grade so the junction
-     can grade away from it. Limited headroom (runway ~1.7–1.9% there).
-  2. **Bias the junction grade toward easing connected stubs** (climb toward the
-     higher anchor rather than sit at DEM) — closer to what the user described.
-Also flagged by the user: the LOW-side junction joins taxiway **B with only one
-node** — possibly a separate connectivity bug worth checking.
-
-If neither pans out: accept stub/A's ~2.4% as a genuine threshold transition and
-recut the SPLP grade baseline (the main targets −10025/−10026 are cleared).
-
----
-
-## NEW INVARIANT (commit 68bed11) — caught a real bug
-
-`test_sloping_rect_slopes_only_along_axis` (in `tests/test_pavement_geometry.py`):
-a taxi rect may slope only along `source_axis`, so its two axis-end edges
-(perpendicular to the centerline) must be FLAT. Catches **1 genuine malformed
-rect at SPLP: ref A @ local (−123, 98)** — a degenerate ~2 m-wide sliver
-(sides 2.0/28.1/89.8/92.2) with altitudes [65.2, 64.2, 64.2, 61.9] → a 3.30 m
-axis-end delta (47 m plane-dev). This is a **geometry bug at the source** (a
-clip/seam pass emitting a degenerate sliver), NOT an elevation-solver issue —
-fix the rect builder / clip so it never emits a 2 m sliver. (This is a DIFFERENT
-shape from the apron-side stub/A the user inspected.) Baseline is now 10 failures
-because of this deliberate new catch.
-
----
-
-## HOW TO TEST / KEY FILES / GOTCHAS
-
+## HOW TO TEST / GOTCHAS
 - Build one airport: `from auto_patch.pipeline import build_airport_pavement;
-  layout = build_airport_pavement("SPLP", xplane_root(), compute_elevations=True)`
+  build_airport_pavement("CYXY", xplane_root(), compute_elevations=True)`
   (sys.path += `src/`, repo root, `tests/`; `from conftest import xplane_root`).
-- Flip the flags for an experiment (do NOT commit them on):
-  `from auto_patch.elevation_per_surface import unified_jacobi as uj;
-   uj._PER_AXIS_JUNCTIONS = True; uj._USE_L2_FIT = True` BEFORE building. To audit
-  per-axis, pass `taxi_axes_ll` to `check_grade.run_checks` built from
-  `layout.apt_taxi_centerlines` + `apt_taxi_letters` (see test_pavement_grade.py).
-- Full suite: `venv/bin/python -m pytest tests/ -q` (~3–5 min). Baseline = **10
-  failures** (the 9 prior + the new sloping-rect invariant).
-- Diagnostics left in `tools/` (regenerate freely): `diag_splp_centerlines.py`,
-  `diag_splp_junction.py`, `diag_splp_corridor.py` (1-D profile prototype),
-  `diag_splp_stubA.py`, `diag_splp_runway.py`, `diag_coplanar.py` (rect plane-dev
-  scan), `verify_splp_grade.py` (build + check_grade). `/tmp/exp*.py`,
-  `/tmp/diag_*.py` were scratch (gone on reboot; reconstruct from the tools).
-- **GOTCHAS:** the user EDITS FILES IN PARALLEL — re-check `git status`/`git log`
-  before committing and commit ONLY your own files (this session: only
-  `unified_jacobi.py`, `check_grade.py`, the two test files; `clearance.py` +
-  `config.py` are the user's). The runway DOES cross the tile seam at 02/20's
-  south end (lon −77.0, ~56 m) — but −10025 is ~1 km NORTH of it (mid-runway
-  region ~71 m), so the seam is not what binds −10025/stub/A.
+- Flip flags for an experiment (do NOT commit on): `from
+  auto_patch.elevation_per_surface import unified_jacobi as uj;
+  uj._PER_AXIS_JUNCTIONS=True; uj._USE_L2_FIT=True` BEFORE building; pass
+  `taxi_axes_ll` to `check_grade.run_checks` (built from `layout.apt_taxi_centerlines`
+  + `apt_taxi_letters`, see `tests/test_pavement_grade.py`).
+- Full suite: `venv/bin/python -m pytest tests/ -q` (~3-5 min). Baseline = 9.
+- The user EDITS apt.dat + source files in parallel — re-check `git status`/`git log`
+  before committing; commit ONLY your own files (this session: only unified_jacobi.py,
+  check_grade.py, the two test files; clearance.py + config.py are the user's).
+- Diagnostics in `tools/`: `diag_splp_*.py`, `verify_splp_grade.py`. `/tmp/*.py` were
+  scratch (gone on reboot).
 
-## Memory pointers (read these)
-- `project_solver_priority_cascade.md` — the full cascade + per-axis + spread-fit
-  design, every dead-end (soft-targets, Dykstra, plain-cap, SOR), and the stub/A
-  diagnosis. THE key handover note this session.
-- `splp_stub_a_grade.md` — prior SPLP analysis (pre-cascade; some superseded).
-- `suite_baseline_dev_head.md` — the pre-existing 9-failure set (now +1 = 10).
+## Memory pointers
+- `project_solver_priority_cascade.md` — full cascade/per-axis/spread design, every
+  dead-end, the stub-A + connectivity analysis. THE key note.
+- `suite_baseline_dev_head.md` — the 9-failure set.
