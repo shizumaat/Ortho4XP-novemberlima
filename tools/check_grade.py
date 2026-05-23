@@ -452,6 +452,73 @@ WITHIN_SHAPE_MAX_PAIR_DIST_M = 60.0   # max distance between two
                                         # a typical taxi rect's diagonal
                                         # plus margin.
 
+# Per-axis junction grading (user 2026-05-22).  A junction may legitimately
+# slope along each converging taxi centerline (LONGITUDINAL ≤ code-letter cap)
+# and across it (TRANSVERSE), per ICAO Annex 14 §3.9 / EASA CS-ADR-DSN.D.265/
+# .280; the inter-centerline DIAGONAL is unregulated.  When ``taxi_axes`` is
+# supplied (from the builder's APT.DAT centerlines — NOT re-derived from the
+# OSM, which would diverge from what the build used), junction within-shape
+# pairs are checked per-axis: a pair is graded only if both endpoints lie
+# within this perp tolerance of a COMMON centerline (= a longitudinal/
+# transverse pair); cross-axis diagonal pairs are unregulated and skipped.
+# Matches the solver's ``_PER_AXIS_JUNCTIONS`` edge rule.
+_PER_AXIS_PERP_TOL_M = 15.0
+
+
+def _project_to_polyline(poly, px, py):
+    """Project point ``(px, py)`` onto polyline ``poly`` (list of (x, y)).
+
+    Returns ``(arc, perp, (qx, qy))`` — cumulative arc-length to the nearest
+    point on the polyline, the perpendicular distance, and that nearest point.
+    Pure-math (no shapely) to keep the audit dependency-light.
+    """
+    best = None  # (perp2, arc, qx, qy)
+    arc_acc = 0.0
+    for k in range(len(poly) - 1):
+        ax, ay = poly[k]
+        bx, by = poly[k + 1]
+        dx, dy = bx - ax, by - ay
+        seg2 = dx * dx + dy * dy
+        if seg2 < 1e-12:
+            continue
+        t = ((px - ax) * dx + (py - ay) * dy) / seg2
+        t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+        qx, qy = ax + t * dx, ay + t * dy
+        perp2 = (px - qx) ** 2 + (py - qy) ** 2
+        arc = arc_acc + t * math.sqrt(seg2)
+        if best is None or perp2 < best[0]:
+            best = (perp2, arc, qx, qy)
+        arc_acc += math.sqrt(seg2)
+    if best is None:
+        return 0.0, float("inf"), (px, py)
+    return best[1], math.sqrt(best[0]), (best[2], best[3])
+
+
+def _per_axis_allowance(pi, pj, taxi_axes, noise):
+    """Per-axis grade allowance for a junction vertex pair.
+
+    Returns the max |de| a per-axis-compliant surface could exhibit between
+    ``pi`` and ``pj`` (decomposing their separation into LONGITUDINAL and
+    TRANSVERSE w.r.t. a common centerline), or ``None`` if the pair lies along
+    NO common centerline — an unregulated diagonal that should NOT be flagged.
+    """
+    best = None
+    sep = math.hypot(pi[0] - pj[0], pi[1] - pj[1])
+    for poly, cL, cT in taxi_axes:
+        ai, di, qi = _project_to_polyline(poly, pi[0], pi[1])
+        if di > _PER_AXIS_PERP_TOL_M:
+            continue
+        aj, dj, qj = _project_to_polyline(poly, pj[0], pj[1])
+        if dj > _PER_AXIS_PERP_TOL_M:
+            continue
+        long_arc = abs(aj - ai)
+        long_chord = math.hypot(qi[0] - qj[0], qi[1] - qj[1])
+        trans = math.sqrt(max(0.0, sep * sep - long_chord * long_chord))
+        allow = cL * long_arc + cT * trans + noise
+        if best is None or allow > best:
+            best = allow
+    return best
+
 
 def _role_grade_limit(way: "Way",
                       default_grade: float) -> Optional[float]:
@@ -506,6 +573,7 @@ def _check_within_shape(ways: List[Way],
                         ll_to_m,
                         max_grade: float,
                         seam_nids: Optional[set] = None,
+                        taxi_axes: Optional[list] = None,
                         ) -> List[Violation]:
     """Grade check between vertex pairs on the same way.
 
@@ -573,6 +641,10 @@ def _check_within_shape(ways: List[Way],
                             <= WITHIN_SHAPE_MAX_PAIR_DIST_M
                             * WITHIN_SHAPE_MAX_PAIR_DIST_M):
                         pairs.append((i, j))
+        # Per-axis junctions: when taxi_axes are supplied, a junction's pairs
+        # are graded per-axis (longitudinal along a common centerline +
+        # transverse), and unregulated cross-axis diagonals are skipped.
+        per_axis = bool(taxi_axes) and w.tags.get("role") == "junction"
         for i, j in pairs:
             xi, yi, ei, si = pts[i]
             xj, yj, ej, sj = pts[j]
@@ -582,7 +654,13 @@ def _check_within_shape(ways: List[Way],
             if d < 0.5:
                 continue
             de = abs(ei - ej)
-            allowance = grade_cap * d + ELEV_ROUNDING_NOISE_M
+            if per_axis:
+                allowance = _per_axis_allowance(
+                    (xi, yi), (xj, yj), taxi_axes, ELEV_ROUNDING_NOISE_M)
+                if allowance is None:
+                    continue  # unregulated inter-centerline diagonal
+            else:
+                allowance = grade_cap * d + ELEV_ROUNDING_NOISE_M
             if de <= allowance:
                 continue
             grade = de / d
@@ -907,12 +985,32 @@ def run_checks(
     edge_search_m: float = 5.0,
     edge_step_m: float = 0.5,
     top_n: int = 10,
+    taxi_axes_ll: Optional[list] = None,
 ) -> Tuple[List[Violation], List[Violation], List[EdgeStep]]:
+    """``taxi_axes_ll`` (per-axis junction grading): the builder's APT.DAT taxi
+    centerlines as ``[(latlon_points, cL, cT), …]`` — ``latlon_points`` a list
+    of ``(lat, lon)``, ``cL``/``cT`` the longitudinal/transverse grade caps
+    (decimals).  Sourced from ``layout.apt_taxi_centerlines`` (apt.dat, the same
+    centerlines the build used) and passed as lat/lon so the audit's mean-centred
+    meter frame matches.  When supplied, junction within-shape pairs are graded
+    per-axis (see ``_per_axis_allowance``); when None, the legacy all-pair
+    Euclidean cap applies.  Re-deriving centerlines from the OSM would diverge
+    from the apt.dat geometry the builder actually used — do not.
+    """
     nodes, ways = _parse_osm(osm_path)
     ll_to_m = _ll_to_m_factory(nodes)
     vertices, edges = _build_vertex_edge_tables(nodes, ways, ll_to_m)
     max_grade = max_grade_pct / 100.0
     seam_nids = _seam_nids(nodes)
+
+    # Convert apt.dat centerlines (lat/lon) into the audit's meter frame.
+    taxi_axes = None
+    if taxi_axes_ll:
+        taxi_axes = []
+        for latlon_pts, cL, cT in taxi_axes_ll:
+            poly = [ll_to_m(lat, lon) for (lat, lon) in latlon_pts]
+            if len(poly) >= 2:
+                taxi_axes.append((poly, cL, cT))
 
     print(f"=== Grade validation: {osm_path} ===")
     n_with_elev = sum(1 for v in vertices if v.elev is not None)
@@ -921,7 +1019,8 @@ def run_checks(
           f"| seam vertices: {len(seam_nids)}")
 
     within = _check_within_shape(
-        ways, nodes, ll_to_m, max_grade, seam_nids=seam_nids)
+        ways, nodes, ll_to_m, max_grade, seam_nids=seam_nids,
+        taxi_axes=taxi_axes)
     _print_violations(
         f"WITHIN-SHAPE vertex-pair grade > {max_grade_pct}%",
         within, top_n)

@@ -133,6 +133,15 @@ _L2_MAX_ITERS = 40000
 # Flip to True together with the per-axis solver/audit work.
 _USE_L2_FIT = False
 
+# Per-axis junction grading (user 2026-05-22).  When True, junction grade
+# constraints are LONGITUDINAL (along each converging centerline) + ring only;
+# the unregulated inter-centerline DIAGONAL is dropped (the all-pair Euclidean
+# cap is stricter than ICAO/EASA require and forbids junctions that
+# legitimately slope along routes over real terrain, e.g. SPLP -10025).  Pairs
+# with the audit (check_grade) which must also go per-axis or it will flag the
+# diagonals this allows.  Default False until that audit change lands together.
+_PER_AXIS_JUNCTIONS = False
+
 # DEM attraction (user 2026-05-22): each iteration, pull every SOFT node a
 # fixed fraction of the way toward its terrain (DEM) elevation, THEN
 # cap-project.  This makes soft pavement settle "as close to DEM as the
@@ -791,6 +800,7 @@ def _build_edges(layout, bucket_to_idx, roles=None, add_runway_anchor=True
                     continue  # ring-wrap pair already added
                 xj, yj = coords[j]
                 length = math.hypot(xj - xi, yj - yi)
+                along_axis = False
                 if axes:
                     pi = Point(xi, yi)
                     pj = Point(xj, yj)
@@ -801,6 +811,18 @@ def _build_edges(layout, bucket_to_idx, roles=None, add_runway_anchor=True
                             arc = abs(ax.project(pi) - ax.project(pj))
                             if arc > length:
                                 length = arc
+                            along_axis = True
+                # Per-axis junctions (user 2026-05-22): the inter-centerline
+                # DIAGONAL is an unregulated direction (ICAO Annex 14 §3.9 /
+                # EASA CS-ADR-DSN.D.265/.280 regulate LONGITUDINAL along the
+                # route + TRANSVERSE, not the diagonal).  Drop cross-axis
+                # junction pairs so the all-pair Euclidean cap stops forbidding
+                # a junction that legitimately slopes along converging routes
+                # over real terrain (SPLP -10025).  Ring + along-centerline
+                # pairs still constrain it.  Aprons/terminals (axes==[]) are
+                # true multi-directional surfaces — keep their all-pair cap.
+                if _PER_AXIS_JUNCTIONS and axes and not along_axis:
+                    continue
                 _add_edge(node_idx[i], node_idx[j], length, gr)
 
     # ── Taxi → runway anchor (user 2026-05-22, revives the dormant

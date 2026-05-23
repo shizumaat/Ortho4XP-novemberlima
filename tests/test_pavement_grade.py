@@ -89,6 +89,24 @@ def test_pavement_grade(tmp_path, icao):
     out = tmp_path / f"{icao}_test.osm"
     layout.to_osm(str(out))
 
+    # When the solver grades junctions PER-AXIS, the audit must match — using
+    # the SAME apt.dat centerlines the build used (layout.apt_taxi_centerlines,
+    # filled by apt_dat_reader.taxi_centerlines), passed as lat/lon so the
+    # audit's mean-centred meter frame lines up.  NEVER re-derive from the OSM.
+    from auto_patch.elevation_per_surface import unified_jacobi as _uj
+    taxi_axes_ll = None
+    if getattr(_uj, "_PER_AXIS_JUNCTIONS", False):
+        letters = getattr(layout, "apt_taxi_letters", {}) or {}
+        taxi_axes_ll = []
+        for ln, name in (getattr(layout, "apt_taxi_centerlines", []) or []):
+            if ln is None or ln.is_empty:
+                continue
+            letter = letters.get(name)
+            cL = 0.03 if letter in ("A", "B") else 0.015
+            cT = 0.02 if letter in ("A", "B") else 0.015
+            pts = [layout.m_to_ll(x, y) for (x, y) in ln.coords]
+            taxi_axes_ll.append((pts, cL, cT))
+
     within, cross, steps = check_grade.run_checks(
         out,
         max_grade_pct=1.5,
@@ -96,6 +114,7 @@ def test_pavement_grade(tmp_path, icao):
         edge_search_m=5.0,
         edge_step_m=0.5,
         top_n=5,
+        taxi_axes_ll=taxi_axes_ll,
     )
     # Hard fails — cross-shape continuity must be perfect.
     assert not cross, (
