@@ -65,6 +65,7 @@ __all__ = [
     "_snap_corners_to_pavement",
     "_snap_rect_sloping_edges_to_holes",
     "_trim_to_narrow",
+    "split_long_rects_along_terrain",
 ]
 
 
@@ -2032,4 +2033,145 @@ def _snap_rect_sloping_edges_to_holes(
         # remains the original (set before the loop).
         out.append((final_rect, final_axis, role, ref))
 
+    return out
+
+
+def _interp_at(ts: list[float], vals: list[float], t: float) -> float:
+    """Linear-interpolate ``vals`` (sampled at the monotone fractions
+    ``ts`` in [0, 1]) at fraction ``t``."""
+    if t <= ts[0]:
+        return vals[0]
+    if t >= ts[-1]:
+        return vals[-1]
+    for i in range(1, len(ts)):
+        if ts[i] >= t:
+            f = (t - ts[i - 1]) / (ts[i] - ts[i - 1])
+            return vals[i - 1] + f * (vals[i] - vals[i - 1])
+    return vals[-1]
+
+
+def _find_terrain_splits(ts, e, t_lo, t_hi, axis_len_m,
+                          min_seg_m, dev_thresh_m):
+    """Recursively locate split fractions along a rect's axis where the
+    terrain bulges from the straight chord between the sub-range
+    endpoints by more than ``dev_thresh_m``.  Splits at the worst
+    deviation, then recurses on each side; never splits closer than
+    ``min_seg_m`` to a sub-range end."""
+    if (t_hi - t_lo) * axis_len_m < 2.0 * min_seg_m:
+        return []
+    e_lo = _interp_at(ts, e, t_lo)
+    e_hi = _interp_at(ts, e, t_hi)
+    margin = min_seg_m / axis_len_m
+    best_t = None
+    best_dev = 0.0
+    for i, t in enumerate(ts):
+        if t <= t_lo + margin or t >= t_hi - margin:
+            continue
+        chord = e_lo + (e_hi - e_lo) * ((t - t_lo) / (t_hi - t_lo))
+        dev = abs(e[i] - chord)
+        if dev > best_dev:
+            best_dev = dev
+            best_t = t
+    if best_t is None or best_dev < dev_thresh_m:
+        return []
+    return ([best_t]
+            + _find_terrain_splits(ts, e, t_lo, best_t, axis_len_m,
+                                   min_seg_m, dev_thresh_m)
+            + _find_terrain_splits(ts, e, best_t, t_hi, axis_len_m,
+                                   min_seg_m, dev_thresh_m))
+
+
+def _split_one_rect_along_terrain(rect, sample_dem, min_len_m,
+                                   min_seg_m, dev_thresh_m, step_m):
+    """Return a list of (sub_poly, sub_axis) splitting ``rect`` at
+    interior terrain extrema, or None to keep the rect unsplit."""
+    try:
+        coords = list(rect.exterior.coords)
+    except (GEOSException, TopologicalError):
+        return None
+    if coords and coords[0] == coords[-1]:
+        coords = coords[:-1]
+    if len(coords) != 4:
+        return None
+    c0, c1, c2, c3 = coords           # [H, L, L, H] along the axis
+    hi_mid = (0.5 * (c0[0] + c3[0]), 0.5 * (c0[1] + c3[1]))
+    lo_mid = (0.5 * (c1[0] + c2[0]), 0.5 * (c1[1] + c2[1]))
+    axis_len = math.hypot(lo_mid[0] - hi_mid[0], lo_mid[1] - hi_mid[1])
+    if axis_len < min_len_m:
+        return None
+    n = max(2, int(axis_len / step_m))
+    ts = [i / n for i in range(n + 1)]
+    e: list[float] = []
+    for t in ts:
+        x = hi_mid[0] + t * (lo_mid[0] - hi_mid[0])
+        y = hi_mid[1] + t * (lo_mid[1] - hi_mid[1])
+        v = sample_dem(x, y)
+        if v is None:
+            return None               # can't sample → leave unsplit
+        e.append(float(v))
+    fracs = sorted(set(_find_terrain_splits(
+        ts, e, 0.0, 1.0, axis_len, min_seg_m, dev_thresh_m)))
+    if not fracs:
+        return None
+
+    def _a(t):                        # along edge c0->c1 (one side)
+        return (c0[0] + t * (c1[0] - c0[0]), c0[1] + t * (c1[1] - c0[1]))
+
+    def _b(t):                        # along edge c3->c2 (other side)
+        return (c3[0] + t * (c2[0] - c3[0]), c3[1] + t * (c2[1] - c3[1]))
+
+    bounds = [0.0] + fracs + [1.0]
+    pieces = []
+    for ta, tb in zip(bounds, bounds[1:]):
+        a_hi, a_lo = _a(ta), _a(tb)
+        b_hi, b_lo = _b(ta), _b(tb)
+        try:
+            poly = Polygon([a_hi, a_lo, b_lo, b_hi])   # [H, L, L, H]
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            if poly.is_empty or poly.geom_type != "Polygon":
+                return None
+        except (GEOSException, TopologicalError):
+            return None
+        m_hi = (0.5 * (a_hi[0] + b_hi[0]), 0.5 * (a_hi[1] + b_hi[1]))
+        m_lo = (0.5 * (a_lo[0] + b_lo[0]), 0.5 * (a_lo[1] + b_lo[1]))
+        pieces.append((poly, LineString([m_hi, m_lo])))
+    return pieces
+
+
+def split_long_rects_along_terrain(
+        taxi_rects,
+        sample_dem,
+        *,
+        min_len_m: float = 200.0,
+        min_seg_m: float = 50.0,
+        dev_thresh_m: float = 1.0,
+        step_m: float = 5.0):
+    """Split taxi rects longer than ``min_len_m`` at interior terrain
+    extrema so the elevation solver can place control points where the
+    ground curves — instead of grading one straight plane across a hill
+    and floating meters above/below it.
+
+    ``sample_dem(x, y) -> float | None`` returns the (smoothed) terrain
+    elevation at a local-meter point; the caller wires it to the same
+    DEM the solver uses.  A rect is split only where the terrain bulges
+    from the endpoint chord by more than ``dev_thresh_m`` and never into
+    pieces shorter than ``min_seg_m``.  The seam between two adjacent
+    pieces is graded within the per-axis grade cap by the solver, so it
+    stays a <3% (typically <1%) fold, not a visible bump.
+
+    Takes/returns the ``(polygon, axis, role, ref)`` tuple list used by
+    ``_build_taxi_rects``.  Runways are not in this list, so this is
+    inherently taxiway-only.
+    """
+    out = []
+    for entry in taxi_rects:
+        rect, axis, role, ref = entry
+        pieces = _split_one_rect_along_terrain(
+            rect, sample_dem, min_len_m, min_seg_m, dev_thresh_m, step_m)
+        if pieces is None:
+            out.append(entry)
+        else:
+            for sub_poly, sub_axis in pieces:
+                out.append((sub_poly, sub_axis, role, ref))
     return out
