@@ -72,6 +72,8 @@ from .layout import (
     ROLE_SECONDARY_PARALLEL,
     ROLE_STUB,
     ROLE_TAXIWAY_CLEARANCE,
+    SHARED_VERTEX_TOL_M,
+    vertex_bucket,
 )
 from .elevation import _resample_node_altitudes_nn, _sample_dem
 from .pavement.junctions import _decompose_polygon_with_holes
@@ -659,6 +661,30 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
             static_block = None
 
     emitted: list[Polygon] = []
+    # Per-vertex altitude of every already-emitted cut, keyed by the
+    # shared-vertex bucket (same scheme ``to_osm`` interns with).  A new
+    # cut that abuts an existing one ADOPTS the neighbour's altitude at
+    # the shared vertex so the two meet 1:1 — identical node AND
+    # elevation, no consensus step / wall along the seam.
+    emitted_alts: dict[tuple[int, int], tuple[float, float, float]] = {}
+
+    def _shared_alt(x: float, y: float) -> float | None:
+        """Altitude of the nearest already-emitted cut vertex within
+        ``SHARED_VERTEX_TOL_M`` of ``(x, y)``; ``None`` if none."""
+        bx, by = vertex_bucket(x, y)
+        best: float | None = None
+        best_d2 = SHARED_VERTEX_TOL_M * SHARED_VERTEX_TOL_M
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                rec = emitted_alts.get((bx + dx, by + dy))
+                if rec is None:
+                    continue
+                ex, ey, ea = rec
+                d2 = (ex - x) ** 2 + (ey - y) ** 2
+                if d2 <= best_d2:
+                    best_d2 = d2
+                    best = ea
+        return best
 
     def _commit(ring, alts, role) -> int:
         """Clip a raw strip against pavement + prior cuts, then emit the
@@ -678,7 +704,10 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
             if static_block is not None and not static_block.is_empty:
                 geom = geom.difference(static_block)
             if emitted:
-                geom = geom.difference(unary_union(emitted).buffer(_PAVEMENT_GAP_M))
+                # No gap between cuts: clip against the BARE union so a
+                # new cut abuts its neighbours exactly (GEOS noding gives
+                # coincident vertices along the shared edge).
+                geom = geom.difference(unary_union(emitted))
         except _GEOM_EXC:
             return 0
         if geom.is_empty:
@@ -740,15 +769,14 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                 # Re-clip the DECIMATED polygon against prior cuts:
                 # decimation can bulge a concave daylight contour (which
                 # faces AWAY from pavement, toward neighbouring cuts)
-                # outward past the clearance gap, re-introducing a small
-                # cut↔cut overlap.  This is the final geometry op, so the
-                # emitted shape is guaranteed overlap-free.  (No need to
-                # re-clip against pavement: the inner edge is straight, so
-                # decimation can't bulge it toward pavement.)
+                # outward, re-introducing a small cut↔cut overlap.  This
+                # is the final geometry op, so the emitted shape is
+                # guaranteed overlap-free while still abutting (no gap).
+                # (No need to re-clip against pavement: the inner edge is
+                # straight, so decimation can't bulge it toward pavement.)
                 try:
                     if emitted:
-                        poly = poly.difference(
-                            unary_union(emitted).buffer(_PAVEMENT_GAP_M))
+                        poly = poly.difference(unary_union(emitted))
                 except _GEOM_EXC:
                     continue
                 poly = _largest_poly(poly)
@@ -763,6 +791,21 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                     poly, old_open, old_alts_closed)
                 if not node_alts:
                     continue
+                # Seam continuity: at every vertex shared with an
+                # already-emitted cut, adopt the neighbour's altitude so
+                # the two cuts meet 1:1 (same node, same elevation) with
+                # no consensus-averaged step.  Then register this cut's
+                # vertices so later cuts tie into it the same way.
+                open_ring = _open_coords(poly)
+                adopted = list(node_alts[:len(open_ring)])
+                for vi, (vx, vy) in enumerate(open_ring):
+                    shared = _shared_alt(vx, vy)
+                    if shared is not None:
+                        adopted[vi] = shared
+                node_alts = adopted + [adopted[0]]
+                for (vx, vy), a in zip(open_ring, adopted):
+                    emitted_alts.setdefault(vertex_bucket(vx, vy),
+                                            (vx, vy, a))
                 layout.shapes.append(BuiltShape(
                     polygon=poly, role=role,
                     ref="surface_clearance",
