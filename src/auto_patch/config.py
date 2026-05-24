@@ -24,6 +24,15 @@ __all__ = [
     "NECK_ABSORB_FRAC",
     "NECK_RELATIVE",
     "ROLE_GRADE_LIMITS",
+    "TAXI_MAX_GRADE",
+    "APRON_MAX_GRADE",
+    "RUNWAY_MAX_GRADE",
+    "RUNWAY_END_GRADE",
+    "RUNWAY_END_FRACTION",
+    "TUNNEL_RAMP_MAX_GRADE",
+    "GROUNDSIDE_MAX_GRADE",
+    "RUNWAY_VERTICAL_CURVE_K_M",
+    "RUNWAY_MAX_GRADE_CHANGE_PER_M",
     "RUNWAY_ADJACENCY_TOL_M",
     "RUNWAY_BOUNDARY_TOL_M",
     "RUNWAY_INSIDE_APRON_FRAC",
@@ -156,37 +165,57 @@ EMIT_BRIDGES_AND_TUNNELS = True
 LOAD_DSF_PAVEMENT = True
 
 
-# Per-role within-shape grade limits (rise / run, decimal — i.e.
-# 0.015 = 1.5%).  The validator in tools/check_grade.py uses this
-# table to decide whether a vertex pair on a polygon's ring is in
-# violation.  ``None`` means "skip the within-shape grade check
-# for this role" — used for shapes that intentionally trace
-# terrain (boundary outline, groundside curbside) or that are
-# vertical structures (retaining walls).
+# ── Aerodrome longitudinal grade standards (single source of truth) ──
+# Every grade / vertical-curve rule VALUE lives here so the whole tuning
+# surface is auditable in one place; other modules import these rather
+# than redefining literals.  See docs/STANDARDS.md for the citations.
+# Values are rise/run (decimal: 0.015 = 1.5%).
 #
-# Keep this aligned with the solver caps in ``elevation.py``
-# (``TAXI_MAX_GRADE``, ``APRON_MAX_GRADE``).  Per user 2026-05-07
-# apron and junction get the same 1.5% all-directions cap as
-# taxiways; per user 2026-05-08 tunnel ramps get 4.0%.
+# These stay separate named constants even where the value currently
+# coincides (taxiway, apron and runway are all 1.5% today) because they
+# trace to different standards and may diverge — e.g. EASA could tighten
+# the runway cap without touching taxiways.
+TAXI_MAX_GRADE = 0.015          # FAA AC 150/5300-13 taxiway-family
+APRON_MAX_GRADE = 0.015         # apron / junction, all directions (user 2026-05-07)
+RUNWAY_MAX_GRADE = 0.015        # FAA AC 150/5300-13B runway longitudinal (ARC C-E)
+RUNWAY_END_GRADE = 0.008        # EASA CS-ADR-DSN / ICAO Annex 14, first/last quarter (code 3/4)
+RUNWAY_END_FRACTION = 0.25      # extent of each runway end zone (fraction of length)
+TUNNEL_RAMP_MAX_GRADE = 0.040   # navigable ramp grade for tunnel portals (user 2026-05-08)
+GROUNDSIDE_MAX_GRADE = 0.040    # groundside pavement ramp grade (user 2026-05-22)
+# FAA vertical-curve rule L = K × |Δg|.  K = 305 m for ARC C/D (lighter
+# A/B ≈ 76 m, heavy E ≈ 610 m).  ``RUNWAY_MAX_GRADE_CHANGE_PER_M`` is the
+# segment-smoother's equivalent: a 1% grade change needs ~305 m of curve,
+# i.e. ~1/30000 grade change per metre of pavement.
+RUNWAY_VERTICAL_CURVE_K_M = 305.0
+RUNWAY_MAX_GRADE_CHANGE_PER_M = 1.0 / 30000.0
+
+
+# Per-role within-shape grade limits (rise / run).  The validator in
+# tools/check_grade.py uses this table to decide whether a vertex pair on
+# a polygon's ring is in violation.  ``None`` means "skip the within-shape
+# grade check for this role" — used for shapes that intentionally trace
+# terrain (boundary outline, groundside curbside) or that are vertical
+# structures (retaining walls).  Values reference the named caps above so
+# there is a single source.
 ROLE_GRADE_LIMITS = {
     # Taxiway-like surfaces — 1.5% along centerline (axis), tested
     # here as 1.5% between any pair of ring vertices since the
     # ring follows the axis closely.
-    "runway":             0.015,
-    "primary_parallel":   0.015,
-    "secondary_parallel": 0.015,
-    "stub":               0.015,
-    "cross_connector":    0.015,
+    "runway":             RUNWAY_MAX_GRADE,
+    "primary_parallel":   TAXI_MAX_GRADE,
+    "secondary_parallel": TAXI_MAX_GRADE,
+    "stub":               TAXI_MAX_GRADE,
+    "cross_connector":    TAXI_MAX_GRADE,
     # Apron / junction — 1.5% all directions within the polygon
     # (per user 2026-05-07).
-    "apron":              0.015,
-    "junction":           0.015,
+    "apron":              APRON_MAX_GRADE,
+    "junction":           APRON_MAX_GRADE,
     # Terminals are typically flat polygons; the value rarely fires.
-    "terminal":           0.015,
+    "terminal":           TAXI_MAX_GRADE,
     # Tunnel ramps descend from pavement elevation to the tunnel
     # floor; 4% is the navigable taxi grade for ramped portals
     # (per user 2026-05-08).
-    "tunnel_ramp":        0.040,
+    "tunnel_ramp":        TUNNEL_RAMP_MAX_GRADE,
     # ── Skip-list (no grade enforcement) ─────────────────────────
     # Airport boundary is a footprint outline that traces real
     # terrain at 5 m vertex spacing.  No taxiable surface, no
@@ -201,7 +230,7 @@ ROLE_GRADE_LIMITS = {
     # parking) follows the DEM but is graded like a ramp to ≤ 4 % slope
     # (user 2026-05-22) — same cap as tunnel ramps — so steep terrain is
     # smoothed to a navigable surface rather than tracing raw terrain.
-    "groundside_pavement": 0.040,
+    "groundside_pavement": GROUNDSIDE_MAX_GRADE,
     # Wingtip / RESA clearance cuts trace the cut terrain surface
     # (per-vertex node_altitudes computed directly against the DEM
     # and a ramped ceiling); like the boundary they carry no

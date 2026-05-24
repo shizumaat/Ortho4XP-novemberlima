@@ -30,6 +30,14 @@ import math
 from dataclasses import dataclass
 from typing import List, Tuple
 
+# FAA vertical-curve K-factor (ARC C/D; lighter A/B ≈ 76 m, heavy E ≈
+# 610 m) and the 1.5% longitudinal cap come from ``config`` (single
+# source of truth), re-exported here under this module's existing names.
+from .config import (
+    RUNWAY_MAX_GRADE as DEFAULT_GRADE_CAP,
+    RUNWAY_VERTICAL_CURVE_K_M as DEFAULT_ARC_K_M,
+)
+
 
 __all__ = ["regrade_runway", "RegradeResult", "regrade_runways_in_layout"]
 
@@ -43,12 +51,6 @@ class RegradeResult:
     # input; included for convenience so callers don't shuttle the
     # seam list separately).
     seam_altitudes: List[Tuple[float, float]]
-
-
-# FAA Approach Category C/D K-factor for vertical curves.  Smaller K
-# applies to lighter ARCs (A/B: K ≈ 76 m); larger to heavy (E: 610 m).
-DEFAULT_ARC_K_M = 305.0   # ARC C/D (most jet airports)
-DEFAULT_GRADE_CAP = 0.015  # 1.5% longitudinal
 
 
 def regrade_runway(

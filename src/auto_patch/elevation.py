@@ -81,8 +81,10 @@ _GEOM_EXC = (OSError, ValueError,
 from . import apt_dat_reader as APR
 
 from .config import (
+    APRON_MAX_GRADE,
     RUNWAY_APRON_AREA_RATIO,
     RUNWAY_INSIDE_APRON_FRAC,
+    TAXI_MAX_GRADE,
 )
 from .layout import (
     AEROWAY_FOR_ROLE,
@@ -164,14 +166,13 @@ __all__ = [
 ]
 
 
-# Grade caps used by the per-surface elevation solver and the
-# audit / check_grade pass.  Aligned with the taxiway cap at 1.5 %
-# (user 2026-05-18): the apron-reclassification pass now folds
-# apron-territory pavement that the old solver was treating as
-# junction (1.5 %) into ROLE_APRON; matching the cap keeps the
-# reclassified shapes feasible without re-solving their elevation.
-TAXI_MAX_GRADE = 0.015
-APRON_MAX_GRADE = 0.015
+# Grade caps used by the per-surface elevation solver and the audit /
+# check_grade pass.  Sourced from ``config`` (single source of truth);
+# re-exported here for the many internal callers that import them from
+# this module.  Apron == taxiway at 1.5 % (user 2026-05-18): the
+# apron-reclassification pass folds apron-territory pavement the old
+# solver treated as junction (1.5 %) into ROLE_APRON; the matching cap
+# keeps the reclassified shapes feasible without re-solving elevation.
 TAXI_ANCHOR_DIST_M = 30.0   # snap taxi rect end to runway segment
                              # elevation when within this distance
 

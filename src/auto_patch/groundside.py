@@ -43,6 +43,10 @@ from .layout import (
 )
 from .pavement.vertices import _snap_polygon_vertices_to_rect_corners
 from .elevation import _sample_dem, _resample_node_altitudes_nn
+# Groundside ramp-grade cap (rise/run, user 2026-05-22) — single source of
+# truth in ``config``; groundside follows the DEM but is graded to this
+# cap so steep terrain becomes a navigable car/parking surface.
+from .config import GROUNDSIDE_MAX_GRADE
 
 # Narrow exception tuple for shapely / numeric-geometry failure
 # modes.  Programming errors propagate so they surface immediately.
@@ -78,12 +82,6 @@ def _dem_sampler(layout, dem, tile_lat, tile_lon):
 # DSF curve steps) before the densify+per-vertex-DEM emit, so groundside
 # polygons don't carry needless node density into the patch.
 GROUNDSIDE_SIMPLIFY_TOL_M = 2.0
-
-# Max slope (rise/run) of emitted groundside pavement (user 2026-05-22).
-# Groundside follows the DEM but is graded like a ramp to this cap, so
-# steep terrain becomes a navigable car/parking surface rather than
-# tracing raw terrain.  Mirrors ROLE_GRADE_LIMITS["groundside_pavement"].
-GROUNDSIDE_MAX_GRADE = 0.040
 
 
 def _grade_limit_ring(coords, alts, max_grade, iters=None):

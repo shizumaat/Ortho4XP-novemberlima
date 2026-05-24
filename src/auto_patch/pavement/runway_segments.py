@@ -44,21 +44,12 @@ _GEOM_EXC = (ValueError, ZeroDivisionError,
 # ──────────────────────────────────────────────────────────────────
 DEG_TO_M = 111120.0  # approximate meters per degree of latitude
 
-# FAA AC 150/5300-13B grade limits for Approach Category C-E airports.
-MAX_RUNWAY_GRADE = 0.015      # 1.5% max longitudinal grade for runways
-
-# EASA CS-ADR-DSN / ICAO Annex 14 tighten the longitudinal grade in the
-# first and last quarter of the runway length (code 3/4) to 0.8%.  This
-# is applied as an opt-in per-segment cap layered on top of the 1.5%
-# mid-runway cap (which stays the project default); see
-# ``runway_segment_grade_cap``.
-RUNWAY_END_GRADE = 0.008        # 0.8% max grade in first/last quarter
-RUNWAY_END_FRACTION = 0.25      # extent of each end zone (fraction of length)
-
-# FAA vertical-curve rules: L >= 1000 ft x |delta-G| for runways
-# (Design Group III+) means a 1% grade change requires a 305 m
-# vertical curve, i.e. ~0.0033% grade change per metre of pavement.
-MAX_RUNWAY_GRADE_CHANGE_PER_M = 1.0 / 30000.0
+# Runway grade / vertical-curve caps come from ``config`` (single source
+# of truth) — imported below and re-exported under the names this
+# module's callers already use (MAX_RUNWAY_GRADE = 1.5% mid-runway, FAA
+# AC 150/5300-13B; RUNWAY_END_GRADE = 0.8% first/last quarter, EASA
+# CS-ADR-DSN / ICAO Annex 14; MAX_RUNWAY_GRADE_CHANGE_PER_M = FAA
+# vertical-curve cap).
 
 # Iteration cap for the runway-segment grade-relaxation passes
 # inside ``generate_patch_osm`` (one for hard-cap, one for vertical
@@ -70,7 +61,14 @@ RUNWAY_MARGIN = 3.0  # meters added to each side of the runway
 # optimization, user 2026-05-22).  Runways carry a real FAA vertical
 # profile, so they have their own knob (``RUNWAY_CELL_SIZE_M``) separate
 # from planar taxiway/apron rects.  Historical default 2 m = "KBNA finding".
-from ..config import RUNWAY_CELL_SIZE_M, PATCH_SLOPE_PROFILE
+from ..config import (
+    PATCH_SLOPE_PROFILE,
+    RUNWAY_CELL_SIZE_M,
+    RUNWAY_END_FRACTION,
+    RUNWAY_END_GRADE,
+    RUNWAY_MAX_GRADE as MAX_RUNWAY_GRADE,
+    RUNWAY_MAX_GRADE_CHANGE_PER_M as MAX_RUNWAY_GRADE_CHANGE_PER_M,
+)
 DEFAULT_CELL_SIZE = float(RUNWAY_CELL_SIZE_M)  # meters between interp points
 DEFAULT_PROFILE = PATCH_SLOPE_PROFILE
 # How far beyond the physical runway end to extend as a flat apron.

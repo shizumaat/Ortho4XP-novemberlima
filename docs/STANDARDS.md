@@ -72,11 +72,14 @@ The clearance pass is `clearance.emit_surface_clearance_cuts`: it samples the DE
 protected band and cuts terrain that rises above the adjacent surface-edge altitude down to a
 ramped ceiling. Terrain at or below the surface is left untouched (cut-only — we never fill).
 
-## Known duplication to watch (until consolidated into `config.py`)
-The same rule value is currently defined in more than one place. Until these import from
-`config.py`, they must be kept in sync by hand:
-- **1.5%** — `config.py` `ROLE_GRADE_LIMITS`, `elevation.py` `TAXI_MAX_GRADE` /
-  `APRON_MAX_GRADE`, `runway_segments.py` `MAX_RUNWAY_GRADE`, `runway_regrade.py`
-  `DEFAULT_GRADE_CAP`.
-- **4.0%** — `config.py` `ROLE_GRADE_LIMITS["groundside_pavement"]` vs `groundside.py`
-  `GROUNDSIDE_MAX_GRADE`.
+## Single source of truth
+Every grade / vertical-curve rule value is defined once in `config.py` (the named caps
+above, which `ROLE_GRADE_LIMITS` also references). The solver modules import those values
+and re-export them under their existing local names — there is no second copy:
+- `elevation.py` `TAXI_MAX_GRADE` / `APRON_MAX_GRADE` ← `config.py`.
+- `pavement/runway_segments.py` `MAX_RUNWAY_GRADE` / `RUNWAY_END_GRADE` /
+  `RUNWAY_END_FRACTION` / `MAX_RUNWAY_GRADE_CHANGE_PER_M` ← `config.py`.
+- `runway_regrade.py` `DEFAULT_GRADE_CAP` / `DEFAULT_ARC_K_M` ← `config.py`.
+- `groundside.py` `GROUNDSIDE_MAX_GRADE` ← `config.py`.
+
+To change a rule value, edit the constant in `config.py` only.

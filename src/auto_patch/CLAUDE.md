@@ -45,9 +45,10 @@ junction 1.5%, tunnel/groundside 4%, boundary/wall/clearance = none); runway pro
 wingtip clearance → `config.py` (`*_BY_CODE` tables, `WINGSPAN_BY_CODE_LETTER`). The
 within-shape grade *validator* is `tools/check_grade.py`, which reads `ROLE_GRADE_LIMITS`.
 
-**Note:** a few rule values are currently duplicated outside `config.py` (1.5% also in
-`elevation.py`/`runway_segments.py`/`runway_regrade.py`; 4% also in `groundside.py`) and
-must be kept in sync by hand until consolidated — see the bottom of `docs/STANDARDS.md`.
+**Note:** every grade / vertical-curve rule value is defined once in `config.py`; the
+solver modules (`elevation.py`, `pavement/runway_segments.py`, `runway_regrade.py`,
+`groundside.py`) import those values and re-export them under their existing local names,
+so there is no second copy to keep in sync. Change the number in `config.py` only.
 
 ## Key modules
 - `pipeline.py` — orchestration; start here to follow the build end-to-end.
