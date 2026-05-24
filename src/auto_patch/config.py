@@ -265,7 +265,18 @@ EMIT_APRONS = False
 # vertical transitions) — raise the runway value cautiously.
 PATCH_SLOPE_CELL_SIZE_M = 10      # taxiway / apron / boundary sloped rects
 RUNWAY_CELL_SIZE_M = 10           # runway segments (real vertical profile)
-PATCH_SLOPE_PROFILE = "spline"   # "spline" | "plane" (only matters if cut)
+# Longitudinal interpolation curve for altitude_high/low rects in the
+# X-Plane mesh builder.  "plane" = constant grade (linear); "spline" =
+# 3x^2-2x^3 smoothstep (flat-tangent at both ends).  Per user 2026-05-23
+# (multi-airport DEM analysis): spline is the best fit on only ~6/27
+# runways and 3/41 taxiways and never by >0.1 m, and its flat-steep-flat
+# shape adds a washboard to constant-grade segments (the taxiway-A2 sag).
+# A real surface is a constant grade per segment, so "plane" is the
+# correct default; long segments crossing a hill are SPLIT at terrain
+# extrema instead (the solver grades each piece within the 1.5% cap, so
+# the seam between two plane segments is a <3% — typically <1% — fold,
+# not a visible bump).  Lateral clearance inherits this so it tracks.
+PATCH_SLOPE_PROFILE = "plane"   # "plane" | "spline"
 
 
 # ── Surface lateral / end clearance (wingtip + RESA) ──────────────
