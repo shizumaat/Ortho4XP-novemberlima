@@ -69,6 +69,24 @@ Fix = spread the relief across three prongs so no one surface absorbs it:
   the giant apron #41 blob, so it isn't a thin arm in our geometry — the
   apron needs de-blobbing for the access-road case to show.
 
+## NEXT-SESSION RESEARCH (user 2026-05-23) — apron grade standards
+Before refining the width-model (#3), nail down what the standards ACTUALLY
+require for aprons — our current model may be wrong on two counts:
+- **Is apron grade truly "all-pair in every direction"?** We enforce
+  `APRON_MAX_GRADE` between every vertex pair (Euclidean). Confirm against
+  FAA AC 150/5300-13 / EASA CS-ADR-DSN / ICAO Annex 14 §3.13 (apron grades).
+- **Value:** the apron max may be **1.0%**, not the 1.5% we currently allow
+  (`APRON_MAX_GRADE = 0.015`). Check the citation.
+- **Distance component / curvature:** grade is inherently per-distance and
+  naturally FLUCTUATES (0 in places, up to max elsewhere) — it is NOT a
+  single flat 1.5% plane end-to-end. Do aprons get a vertical-curve / K-factor
+  treatment like runways, or just a max local grade? A "flat 1.5% plane from
+  one end to the other" is probably the WRONG model — the real rule is a
+  *local* max grade that can vary across the surface (which connects to the
+  width-model: wide = low local grade everywhere, narrow arm = can ramp).
+This reframes #3: the apron rule itself may be local-max-grade (not all-pair
+flat), which is closer to the torsion model than today's all-pair cap.
+
 ## OPEN / next
 - **Junction clearance consolidation** — clearance near junctions emits
   many short node_altitudes runs with gaps → visible elevation variation
