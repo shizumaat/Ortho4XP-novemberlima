@@ -285,12 +285,19 @@ RUNWAY_END_CLEARANCE_LENGTH_BY_CODE = {1: 60.0, 2: 90.0, 3: 150.0, 4: 240.0}
 # overrunning aircraft meets a gentle slope rather than a wall.
 RUNWAY_END_RESA_MAX_SLOPE = 0.05
 
-# Maximum transverse slope (rise/run) of the graded LATERAL clearance
-# strip alongside a runway/taxiway.  Terrain rising into the wingtip
-# band is cut down to a ramp rising at this slope from the pavement
-# edge, daylighting where it meets the DEM — so the smoothed strip is
-# only as wide as needed (up to the code-letter wingtip width).
-CLEARANCE_LATERAL_MAX_SLOPE = 0.05
+# Transverse slope (rise/run) of the LATERAL clearance strip alongside
+# a runway/taxiway.  These strips are FLAT shadows of the surface they
+# protect: at each station the strip sits at the local pavement-edge
+# altitude (so it follows the surface's longitudinal profile) and
+# extends out level — an extension of the pavement, not a ramp.  Terrain
+# is cut down to this surface level ONLY where the DEM rises above it
+# within the protected (code-letter wingtip) width; everything at or
+# below the surface is left untouched (cut-only).  This is intentionally
+# 0: a non-zero lateral slope grades the band down to a SUB-surface ramp,
+# which carves canyons wherever the pavement sits below its surroundings
+# (cut into a hillside / solver-sunk).  RESA end-caps still ramp — see
+# RUNWAY_END_RESA_MAX_SLOPE.
+CLEARANCE_LATERAL_MAX_SLOPE = 0.0
 
 # Lateral graded-strip half-width (m) from the runway centerline, by
 # ICAO code number (Annex 14 graded portion of the runway strip).

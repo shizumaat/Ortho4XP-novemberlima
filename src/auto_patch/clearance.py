@@ -8,24 +8,27 @@ off each runway end.  A hill that rises into that band — into the
 wingtip envelope alongside, or into the approach off the end — must be
 graded DOWN so it transitions smoothly to the pavement edge.
 
-This module samples the DEM along each surface edge and emits grading
-polygons that BLEND linearly from the pavement edge altitude to the
-natural DEM at the band's far edge:
+This module samples the DEM along each surface edge/centerline and
+emits grading polygons.  The LATERAL strips are FLAT shadows of the
+surface they protect: at each station the strip sits at the local
+pavement-edge altitude and extends out level, so it follows the
+surface's longitudinal profile like an extension of the pavement.
+Terrain is cut down to that surface level ONLY where the DEM rises
+above it within the protected (code-letter wingtip) width; terrain at
+or below the surface is left alone (the wingtip clears it).  Because
+the cut floor IS the surface level, a lateral strip can never push
+terrain below the pavement it protects — so a pavement that sits below
+its surroundings (cut into a hillside, or sunk by the elevation solver)
+no longer carves a canyon.
 
-  blend(d) = edge_alt + (DEM_far − edge_alt) · d / band_width
-
-where ``d`` is distance outward from the pavement edge.  The patch
-overrides terrain to this ramp, cutting terrain that rises above it
-while the outer edge sits at the DEM (no cliff, auto-daylight).  This
-is cut-only: terrain that falls away BELOW the surface is left alone
-(the wingtip clears it).  A strip is emitted only where terrain rises
-more than a small trigger above the blend; the band is capped at a max
-reach to bound earthwork.
+The runway-end RESA is the exception: it RAMPS from the runway-end
+elevation at a gentle slope and daylights where it meets the DEM, so an
+over-run/undershoot meets a slope rather than a wall.
 
 Three passes share one strip builder:
-  * taxiway lateral strips   (ROLE_TAXIWAY_CLEARANCE)
-  * runway lateral strips    (ROLE_RUNWAY_CLEARANCE)
-  * runway-end RESA areas     (ROLE_RUNWAY_CLEARANCE)
+  * taxiway lateral strips   (ROLE_TAXIWAY_CLEARANCE) — flat shadow
+  * runway lateral strips    (ROLE_RUNWAY_CLEARANCE)  — flat shadow
+  * runway-end RESA areas     (ROLE_RUNWAY_CLEARANCE)  — ramp
 
 Public API:
     emit_surface_clearance_cuts(layout, dem, tile_lat, tile_lon)
@@ -286,21 +289,29 @@ def _rect_long_short_edges(coords: list[tuple[float, float]]):
 def _build_graded_strips(edge_stations, edge_alts, outwards,
                          band_caps, slope, trigger, step, sample_dem):
     """Build clearance cut-strip rings off an edge / pavement-edge
-    polyline, grading any terrain that rises into the band down to a
-    GENTLE RAMP — the same model as the RESA, applied laterally.
-
-    From each station the ceiling rises from the pavement edge altitude
-    at ``slope`` (rise/run):
+    polyline.  At each station the ceiling rises from the pavement edge
+    altitude at ``slope`` (rise/run):
 
         ceiling(d) = edge_alt + slope · d
 
+    Two regimes share this code:
+      * ``slope == 0`` (LATERAL strips) — the ceiling is FLAT at the
+        pavement-edge altitude, so the strip is a level extension of the
+        surface following its longitudinal profile (each station carries
+        its own ``edge_alt``).  Terrain is cut to surface level only
+        where it rises above it; the strip daylights where the DEM drops
+        back to the surface.  Never produces a sub-surface floor, so it
+        can't carve a canyon beside a pavement that sits below grade.
+      * ``slope > 0`` (RESA end-caps) — the ceiling is a gentle ramp, so
+        an over-run meets a slope rather than a wall.
+
     Terrain above the ceiling is cut down to it, and the cut DAYLIGHTS
     where the ceiling meets the DEM — so the graded patch is only as wide
-    as it needs to be to grade the hill at the gentle slope, capped at
-    ``band_caps[i]`` (the code-letter wingtip width minus the pavement
-    half-width).  Cut-only: a station contributes a strip ONLY where the
-    terrain rises more than ``trigger`` m above the ceiling; flat or
-    falling terrain is left untouched.
+    as it needs to be, capped at ``band_caps[i]`` (the code-letter
+    wingtip width minus the pavement half-width).  Cut-only: a station
+    contributes a strip ONLY where the terrain rises more than
+    ``trigger`` m above the ceiling; flat or falling terrain is left
+    untouched.
 
     ``edge_stations`` / ``edge_alts`` / ``outwards`` / ``band_caps`` are
     matched per-station lists (so the edge may curve, e.g. a centerline).

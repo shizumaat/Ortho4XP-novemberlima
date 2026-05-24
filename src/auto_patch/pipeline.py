@@ -738,7 +738,16 @@ def build_airport_pavement(icao: str, xplane_root: str,
             raise StopIteration  # skip the DSF block entirely
         from . import dsf_reader as _DSFR
         seen_dsf: set = set()
-        all_apt_dats = APR.find_all_airport_apt_dats(xplane_root, icao)
+        # Read DSF pavement ONLY from the pack that supplied the chosen
+        # apt.dat (``apt_path``).  Pulling in every pack's DSF re-imports
+        # a foreign copy of the airport: when a Custom Scenery pack
+        # overrides CYXY but the stock Global Airports pack still carries
+        # the original geometry, its DSF re-introduces shapes the user
+        # deleted from the custom pack (the overlay gate can't suppress a
+        # polygon once the custom apt.dat union no longer covers it).
+        # X-Plane itself shadows Global with the custom pack, so mirror
+        # that: same-pack DSF only.
+        all_apt_dats = [apt_path]
         n_dsf_kept = 0
         n_dsf_dropped_overlay = 0
         n_dsf_dropped_far = 0
@@ -2566,34 +2575,6 @@ def build_airport_pavement(icao: str, xplane_root: str,
         except _GEOM_EXC:
             pass
 
-        # Wingtip / RESA terrain-clearance cuts (user 2026-05-22).  Cut
-        # terrain that rises into a surface's lateral clearance band
-        # (taxiway TOFA / runway graded strip) or runway-end safety area
-        # down to a ramped ceiling so an overhanging wingtip clears it;
-        # terrain below the surface is left alone (cut-only).  Runs just
-        # BEFORE tile_cut (user 2026-05-23): a runway end near a seam can
-        # throw a RESA up to 300 m across the integer line, and a band
-        # alongside a seam-parallel surface can cross it too, so the cuts
-        # must be sliced like every other shape — tile_cut below splits
-        # them at the seam and drops neighbour-tile pieces.  Subtracts
-        # against the (still-continuous, pre-cut) settled pavement union,
-        # so it never overlaps pavement (test_no_self_overlap); the final
-        # solver after tile_cut skips clearance roles, leaving their
-        # node_altitudes intact.
-        try:
-            from .clearance import emit_surface_clearance_cuts
-            _cl_tl = (current_tile_lat if current_tile_lat is not None
-                      else math.floor(layout.anchor[0]))
-            _cl_tn = (current_tile_lon if current_tile_lon is not None
-                      else math.floor(layout.anchor[1]))
-            n_cl = emit_surface_clearance_cuts(layout, dem, _cl_tl, _cl_tn)
-            if n_cl:
-                UI.vprint(1,
-                    f"  [pav-builder] {icao}: emitted {n_cl} "
-                    f"surface-clearance cut polygon(s).")
-        except _GEOM_EXC:
-            pass
-
         # Per user 2026-05-10: shapes cannot cross integer lat/lon
         # tile boundaries (X-Plane / Ortho4XP render each 1°x1° tile
         # separately).  Cut a 10 m gap along every tile boundary
@@ -2667,6 +2648,47 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # previously firing mid-pipeline with stale numbers.
         from .elevation import _report_within_shape_violations
         _report_within_shape_violations(layout, icao)
+
+        # Wingtip / RESA terrain-clearance cuts (user 2026-05-22).  Cut
+        # terrain that rises into a surface's lateral clearance band
+        # (taxiway TOFA / runway graded strip) or runway-end safety area;
+        # terrain at or below the surface is left alone (cut-only).
+        #
+        # Runs LAST, AFTER every elevation pass (user 2026-05-23): the
+        # solver, runway redistribution, tile_cut resampling and the final
+        # per-surface solve all change taxiway/runway profiles, and a
+        # lateral clearance strip must MIRROR the FINAL profile of the
+        # surface it shadows.  Emitting earlier sampled a stale profile and
+        # left the cut floating below the settled surface (CYXY taxiway E:
+        # clearance pinned ~6 m under the post-solve taxiway → a trench).
+        # Because clearance is emitted here, no later solver touches it —
+        # its node_altitudes are final by construction.
+        try:
+            from .clearance import emit_surface_clearance_cuts
+            _cl_tl = (current_tile_lat if current_tile_lat is not None
+                      else math.floor(layout.anchor[0]))
+            _cl_tn = (current_tile_lon if current_tile_lon is not None
+                      else math.floor(layout.anchor[1]))
+            n_cl = emit_surface_clearance_cuts(layout, dem, _cl_tl, _cl_tn)
+            if n_cl:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: emitted {n_cl} "
+                    f"surface-clearance cut polygon(s).")
+                # A clearance strip alongside a seam-parallel surface, or a
+                # RESA thrown up to 300 m off a runway end near a seam, can
+                # cross an integer tile line — slice it like every other
+                # shape.  Pavement was already cut above (10 m gap), so it
+                # no longer crosses; only the new clearance pieces are cut,
+                # and neighbour-tile pieces dropped.  No-op for single-tile
+                # airports (no integer line in the footprint).
+                cut_layout_at_tile_boundaries(
+                    layout,
+                    current_tile_lat=current_tile_lat,
+                    current_tile_lon=current_tile_lon,
+                    dem=dem,
+                )
+        except _GEOM_EXC:
+            pass
 
     # ── Boundary-interior clip (user 2026-05-22) ──────────────────────
     # No emitted shape may CROSS the airport boundary.  The boundary

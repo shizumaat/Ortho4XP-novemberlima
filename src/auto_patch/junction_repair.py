@@ -2002,12 +2002,25 @@ def _absorb_rects_at_junction_perimeters(
             strip = _strip_polygon(t_s, t_e)
             if strip is None or strip.is_empty:
                 continue
-            assigned = False
+            # Assign the strip to a SINGLE junction — the one whose
+            # original claim overlaps this range the most.  Per user
+            # 2026-05-23: a rect has TWO sloping edges, and when a
+            # different junction borders each (a corridor between two
+            # aprons), the old code appended the FULL-WIDTH strip to
+            # BOTH, so both grew to cover the rect and overlapped each
+            # other (SPJC: a 318k blob + 35k apron overlapping 3,344 m²
+            # along an absorbed taxiway).  Giving the rect to one and
+            # letting the other tile along its edge keeps them disjoint.
+            best_j = None
+            best_ov = 0.0
             for orig_s, orig_e, j_idx, _ei in absorbed:
-                if orig_s < t_e and orig_e > t_s:
-                    junction_extensions.setdefault(
-                        j_idx, []).append(strip)
-                    assigned = True
+                ov = min(orig_e, t_e) - max(orig_s, t_s)
+                if ov > best_ov:
+                    best_ov = ov
+                    best_j = j_idx
+            assigned = best_j is not None
+            if assigned:
+                junction_extensions.setdefault(best_j, []).append(strip)
             if not assigned:
                 strip_c = strip.centroid
                 best = None
