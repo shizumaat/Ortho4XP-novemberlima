@@ -31,6 +31,43 @@ clearance, and long-rect terrain-following**. **Read
    where terrain curves and each piece follows it (seam between plane
    pieces is a <3% grade-capped fold — invisible). CYXY +1, SPJC +2,
    HECA +13.
+4. **`6a7bb3a`** — **prong #2 grade-relief: terminal-free aprons yield.**
+   The inverted cascade froze every apron before solving taxi, so a
+   taxiway bridging a low runway and a high terminal-free apron over-
+   graded with no recourse. New relief phase in `unified_jacobi.solve`:
+   after the cascade, terminal-free apron nodes go SOFT with the taxi
+   network (terminals / terminal-anchored aprons / runway-seam stay
+   HARD); cap projection lets the apron yield within its all-pair grade
+   (no steep-middle apron). Grade-driven + unbounded (DEM unreliable at
+   excavated terraces — confirmed by ground truth: real terrace 705 m
+   while DEM reads it via the cut-face). **CYXY taxiway E#2 3.92% → 1.48%
+   (compliant), E#1 → 0.57%.** Suite unchanged. `_runway_nodes` + the
+   `node_bounds` clamp are PARKED in the file for the last-resort
+   runway-yield (prong #1), currently unused.
+
+## Grade-relief 3-prong plan (user 2026-05-23) — status
+The CYXY E grade was a real infeasibility: ~20 m rise from the runway
+valley (693) to the upper hillside aprons (705–715) over short taxiways.
+Fix = spread the relief across three prongs so no one surface absorbs it:
+- **#2 terminal-free apron yield — DONE (`6a7bb3a`)**, fixes E#2.
+- **#1 runway-threshold yield — PARKED, last resort.** Only engage when
+  the taxi network can't meet grade after #2/#3 (NOT always-on — perturbing
+  published runways is a last resort). Helper + node_bounds clamp already
+  in `unified_jacobi`.
+- **#3 width-dependent apron grade — ATTEMPTED + REVERTED.** Model (user):
+  grade stiffness ∝ local width — a WIDE area is all-pair (flat, free
+  maneuvering, can't terrace); a NARROW arm (access road / taxiway neck)
+  flexes ALONG its axis like a taxiway. Correct model, but the
+  implementation (morphological-opening classification, `buffer(-W/2).
+  buffer(+W/2)` + contains) **misclassified wide-apron PERIMETER vertices
+  as narrow** → solver ramped wide aprons → 1608 grade violations, 14.7%
+  apron steps. **Fix for next time:** classify by distance to the eroded
+  core — `wide[v] = poly.buffer(-W/2).distance(v) <= W/2 + tol` (a wide
+  perimeter vertex is ~W/2 from the eroded core; a narrow-arm vertex is
+  far). Needs the SAME gate in `tools/check_grade` (else it flags what the
+  solver builds). SEPARATE blocker: CYXY's access road is swallowed into
+  the giant apron #41 blob, so it isn't a thin arm in our geometry — the
+  apron needs de-blobbing for the access-road case to show.
 
 ## OPEN / next
 - **Junction clearance consolidation** — clearance near junctions emits
