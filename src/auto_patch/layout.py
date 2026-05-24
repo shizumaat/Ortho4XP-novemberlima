@@ -72,6 +72,9 @@ __all__ = [
     "ROLE_TUNNEL_RAMP",
     "ROLE_RETAINING_WALL",
     "ROLE_GROUNDSIDE_PAVEMENT",
+    "ROLE_STAND",
+    "ROLE_SERVICE_ROAD",
+    "ROLE_SERVICE_JUNCTION",
     "AEROWAY_FOR_ROLE",
     "_airport_anchor",
     "_projection",
@@ -171,6 +174,23 @@ ROLE_RETAINING_WALL = "retaining_wall"
 # terminal building so it follows local terrain instead of being
 # flattened to airside-apron elevation.
 ROLE_GROUNDSIDE_PAVEMENT = "groundside_pavement"
+# Ground-vehicle service road (apt.dat 1206 truck route OR OSM small
+# road) that runs as a DEDICATED strip outside aircraft pavement.  A
+# sloped 4-corner rect graded along its axis at 4% (cars handle steeper
+# terrain than aircraft); helps ramp between apron and DEM elevations.
+# Where a 1206 / OSM road instead crosses an aircraft movement area
+# (apron / taxiway) it is NOT emitted as a service_road — the stricter
+# aircraft grade rules of that surface apply (session 47).
+# Aircraft stand / parking pad: a sub-polygon carved out of an apron at
+# a ramp-start (apt.dat 1300/1301) location.  Graded all-direction at the
+# stricter 1.0% stand cap (config.STAND_MAX_GRADE).  Distinct from the
+# surrounding apron BODY (1.5%) so the cap binds to real geometry.
+ROLE_STAND = "stand"
+ROLE_SERVICE_ROAD = "service_road"
+# Junction polygon of the ground-vehicle service-road network (fills the
+# bends / intersections between service_road rects, same way ROLE_JUNCTION
+# fills the taxi network).  Graded all-direction at 4% (car logic).
+ROLE_SERVICE_JUNCTION = "service_junction"
 # Wingtip / RESA clearance cuts: terrain-following node_altitudes
 # polygons emitted alongside taxiways and runways (and off runway
 # ends) by ``clearance.emit_surface_clearance_cuts``.  They CUT
@@ -195,6 +215,9 @@ AEROWAY_FOR_ROLE = {
     ROLE_TUNNEL_RAMP: "taxiway",
     ROLE_RETAINING_WALL: "building",
     ROLE_GROUNDSIDE_PAVEMENT: "apron",
+    ROLE_STAND: "apron",
+    ROLE_SERVICE_ROAD: "taxiway",
+    ROLE_SERVICE_JUNCTION: "taxiway",
     ROLE_TAXIWAY_CLEARANCE: "aerodrome",
     ROLE_RUNWAY_CLEARANCE: "aerodrome",
 }
@@ -271,6 +294,22 @@ class PavementLayout:
     # by the clearance pass instead of measuring pavement width.  Empty
     # when the taxi network came from OSM (no width class available).
     apt_taxi_letters: dict[str, str] = field(default_factory=dict)
+    # Aircraft startup / parking locations (apt.dat rows 1300+1301) —
+    # stands.  Used to scope the stricter all-direction 1.0 % apron grade
+    # cap to real aircraft stands.  ``list[apt_dat_reader.RampStart]``.
+    apt_ramp_starts: list = field(default_factory=list)
+    # Ground-vehicle (service-road) centerlines from apt.dat row 1206,
+    # as ``(LineString, route_name)`` in meter space — drive the 4 %-grade
+    # ``service_road`` rects.  Empty when the block has no 1206 network.
+    apt_service_centerlines: list[tuple[LineString, str]] = field(
+        default_factory=list)
+    # Aircraft-stand rectangles in meter space (oriented Polygons) —
+    # derived from apt.dat ramp starts (rows 1300/1301): sized length ×
+    # wingspan from the stand's ICAO size code, oriented to the parking
+    # heading.  ``apron_split.decompose_aprons`` carves these out of
+    # aprons into ROLE_STAND pads (1.0% all-direction).  Empty when the
+    # block has no ramp starts.
+    apt_stand_zones: list[Polygon] = field(default_factory=list)
     # apt.dat row-110 pavement polygon vertices, in meter space.
     # Junction polygons are built as
     # ``pav_union.difference(rects)`` and inherit their perimeter

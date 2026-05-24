@@ -55,6 +55,14 @@ from .config import (
     MIN_SEGMENT_LEN_M,
     LOAD_DSF_PAVEMENT,
     RUNWAY_APRON_AREA_RATIO,
+    WINGSPAN_BY_CODE_LETTER,
+    AIRCRAFT_LENGTH_BY_CODE_LETTER,
+    OSM_SMALL_ROAD_HIGHWAY_TYPES,
+    SERVICE_ROAD_WIDTH_M,
+    MIN_SERVICE_STRIP_LEN_M,
+    SERVICE_ROAD_PAVEMENT_NEAR_M,
+    ENABLE_AIRCRAFT_STANDS,
+    ENABLE_SERVICE_ROADS,
 )
 from .layout import (
     BuiltShape,
@@ -84,8 +92,10 @@ from .layout import (
 from .osm_load import (
     _load_osm_airports,
     _load_osm_big_roads,
+    _load_osm_small_roads,
     _pick_best_apt_dat_against_osm,
 )
+from .pavement.service_roads import build_service_road_network
 from . import finalize, junction_emit
 
 
@@ -1085,6 +1095,47 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # junction polygons or dropped during decomposition are no
     # longer reachable from layout.shapes.
     layout.apt_taxi_centerlines = list(osm_centerlines)
+
+    # apt.dat ramp starts (stands) + ground-vehicle service roads.
+    # Exposed for the per-zone apron grade model: ramp starts scope the
+    # stricter 1.0 % all-direction stand cap; 1206 service roads become
+    # 4 %-grade ``service_road`` rects.  Both empty when the block (or an
+    # OSM-only taxi network) lacks rows 1300/1301/1206.
+    layout.apt_ramp_starts = list(apt.ramp_starts)
+    layout.apt_service_centerlines = APR.service_road_centerlines(apt, to_m)
+    # Stand zones: a RECTANGLE per ramp start sized to the aircraft —
+    # length (along the parking heading) × wingspan (across) from the
+    # stand's ICAO size code.  Unknown / blank size codes default to code
+    # C.  Aprons are split at these rectangles into ROLE_STAND pads
+    # (graded all-direction at 1.0%).
+    stand_zones: list[Polygon] = []
+    for rs in (apt.ramp_starts if ENABLE_AIRCRAFT_STANDS else []):
+        letter = rs.size_code if rs.size_code in WINGSPAN_BY_CODE_LETTER else "C"
+        span = WINGSPAN_BY_CODE_LETTER[letter]
+        length = AIRCRAFT_LENGTH_BY_CODE_LETTER.get(letter,
+                                                    AIRCRAFT_LENGTH_BY_CODE_LETTER["C"])
+        cx, cy = to_m(rs.lon, rs.lat)
+        hdg = math.radians(rs.heading)
+        dx, dy = math.sin(hdg), math.cos(hdg)     # along parking heading (E, N)
+        px, py = math.cos(hdg), -math.sin(hdg)    # across (perpendicular)
+        hl, hw = length / 2.0, span / 2.0
+        try:
+            poly = Polygon([
+                (cx + dx * hl + px * hw, cy + dy * hl + py * hw),
+                (cx + dx * hl - px * hw, cy + dy * hl - py * hw),
+                (cx - dx * hl - px * hw, cy - dy * hl - py * hw),
+                (cx - dx * hl + px * hw, cy - dy * hl + py * hw),
+            ])
+        except _GEOM_EXC:
+            continue
+        if poly.is_valid and not poly.is_empty:
+            stand_zones.append(poly)
+    layout.apt_stand_zones = stand_zones
+    if apt.ramp_starts or apt.truck_edges:
+        UI.vprint(1,
+            f"  [pav-builder] {icao}: {len(apt.ramp_starts)} ramp start(s), "
+            f"{len(layout.apt_service_centerlines)} service-road "
+            f"centerline(s) ({len(apt.truck_edges)} truck edges).")
 
     # ── Terminal groundside-pavement subtraction (user 2026-04-29):
     # remove curbside / drop-off / parking pavement from pav_union
@@ -2132,23 +2183,40 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # Including DSF is essential — at SPJC's SE apron, F's long
     # edges are 0 % / 24 % inside row-110 alone but ≈100 % inside
     # apt.dat ∪ DSF.
-    taxi_rects = _drop_primary_parallels_embedded_in_pavement(
-        taxi_rects, pav_union, runway_polys=runway_polys)
-
-    # ── Partial-absorption: clip primary-parallel prefix/suffix that
-    # is fully embedded in apron pavement, keeping the unbounded
-    # middle as a (shorter) rect.  Per user 2026-05-16: the
-    # absorption pattern is "rect emitted; apron absorbs only the
-    # portion sharing its sloping edge; remainder stays as a rect."
-    # _drop above handles FULL embedding (both long edges 100%
-    # inside); this helper handles PARTIAL embedding (one end of
-    # the rect's axis is inside, the rest is bounded).  Canonical
-    # case: CYXY taxi E NW-SE — NW half is embedded in SW apron,
-    # SE half extends free toward runway 02.
-    from .pavement.absorption import (
-        _split_primary_parallels_at_pavement_boundary)
-    taxi_rects = _split_primary_parallels_at_pavement_boundary(
-        taxi_rects, pav_union)
+    # Embedded-parallel removal (full drop + partial clip) is part of the
+    # old absorption model: a taxilane rect whose footprint lies inside
+    # apron pavement was dropped/clipped so the apron covered it.  In the
+    # no-absorption model (ABSORB_RECTS_ALONGSIDE_APRONS=False) we KEEP the
+    # rect so the taxilane through the apron stays a directionally-graded
+    # rect; it's subtracted from the apron (apron = pav_union − rects), so
+    # the apron simply wraps it — no overlap, perfect node parity.
+    from .config import ABSORB_RECTS_ALONGSIDE_APRONS as _ABSORB
+    if _ABSORB:
+        taxi_rects = _drop_primary_parallels_embedded_in_pavement(
+            taxi_rects, pav_union, runway_polys=runway_polys)
+        # Partial-absorption: clip primary-parallel prefix/suffix fully
+        # embedded in apron pavement, keeping the unbounded middle.
+        # Canonical case: CYXY taxi E NW-SE — NW half embedded in SW
+        # apron, SE half extends free toward runway 02.
+        from .pavement.absorption import (
+            _split_primary_parallels_at_pavement_boundary)
+        taxi_rects = _split_primary_parallels_at_pavement_boundary(
+            taxi_rects, pav_union)
+    else:
+        # No-absorption model: a taxi centerline crossing the OPEN middle
+        # of a wide apron yields no rect above (no bounded width).  Build
+        # fixed code-letter-width lane rects for those uncovered portions
+        # and add them to the rect set BEFORE the apron = pav_union − rects
+        # difference, so the apron wraps each lane (automatic node parity).
+        from .pavement.rects import build_apron_lane_rects
+        _lane_rects = build_apron_lane_rects(
+            osm_centerlines, pav_union, taxi_rects,
+            getattr(layout, "apt_taxi_letters", {}))
+        if _lane_rects:
+            taxi_rects = taxi_rects + _lane_rects
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: built {len(_lane_rects)} "
+                f"apron-interior taxilane rect(s).")
 
     # ── Detect bridge taxi rects from OSM (user 2026-04-29) ───────
     # Per OSM convention, bridge taxiways carry ``bridge=yes`` (or
@@ -2268,6 +2336,83 @@ def build_airport_pavement(icao: str, xplane_root: str,
         terminal_union=terminal_union,
         taxi_rects=taxi_rects,
         icao=icao)
+
+    # ── Ground-vehicle service_road rects (4 %) ──────────────────
+    # Combine apt.dat 1206 truck routes with OSM small roads inside the
+    # boundary (+ a small outside buffer), and emit 4 %-grade rects ONLY
+    # where a route is a dedicated strip OUTSIDE aircraft pavement (the
+    # builder drops the on-apron portions; aircraft rules apply there).
+    # These also act as apron↔DEM transition ramps.
+    _service_lines: List[Tuple[LineString, str]] = (
+        list(getattr(layout, "apt_service_centerlines", []) or [])
+        if ENABLE_SERVICE_ROADS else [])
+    if ENABLE_SERVICE_ROADS and pav_union is not None and not pav_union.is_empty:
+        # Keep-region = within SERVICE_ROAD_PAVEMENT_NEAR_M (25 m) of any
+        # apt.dat/DSF pavement.  Keeps only the apron-access / crossing
+        # roads that join the airfield; drops the deep-interior road grid
+        # of large airports (HECA ~852 → a handful).  apt.dat 1206 truck
+        # routes are added unconstrained above.
+        try:
+            _bound_buf = pav_union.buffer(SERVICE_ROAD_PAVEMENT_NEAR_M)
+        except _GEOM_EXC:
+            _bound_buf = None
+        if _bound_buf is not None and not _bound_buf.is_empty:
+            sn_nodes, sn_ways = _load_osm_small_roads(anchor[0], anchor[1])
+            # Dense cities (HECA: ~9k small roads) make a full
+            # intersection() per road prohibitive.  Cheap bbox reject +
+            # prepared-geometry intersects() pre-check skip the roads that
+            # don't touch the keep-region before paying for the exact clip.
+            from shapely.prepared import prep as _prep
+            _bb_minx, _bb_miny, _bb_maxx, _bb_maxy = _bound_buf.bounds
+            _bound_prep = _prep(_bound_buf)
+            for _wid, _nds, _tags in sn_ways:
+                if _tags.get("highway") not in OSM_SMALL_ROAD_HIGHWAY_TYPES:
+                    continue
+                _pts = []
+                for _n in _nds:
+                    if _n in sn_nodes:
+                        _la, _lo = sn_nodes[_n]
+                        _pts.append(to_m(_lo, _la))
+                if len(_pts) < 2:
+                    continue
+                # Bounding-box reject (cheap): road entirely outside the
+                # boundary-buffer bbox can't contribute.
+                _xs = [p[0] for p in _pts]
+                _ys = [p[1] for p in _pts]
+                if (max(_xs) < _bb_minx or min(_xs) > _bb_maxx
+                        or max(_ys) < _bb_miny or min(_ys) > _bb_maxy):
+                    continue
+                try:
+                    _ls = LineString(_pts)
+                    if not _bound_prep.intersects(_ls):
+                        continue
+                    _clip = _ls.intersection(_bound_buf)
+                except _GEOM_EXC:
+                    continue
+                if _clip.is_empty:
+                    continue
+                _nm = _tags.get("name", "") or _tags.get("highway", "road")
+                if _clip.geom_type == "LineString":
+                    _service_lines.append((_clip, _nm))
+                elif _clip.geom_type == "MultiLineString":
+                    for _g in _clip.geoms:
+                        if not _g.is_empty:
+                            _service_lines.append((_g, _nm))
+    if _service_lines:
+        _svc_rects, _svc_junctions = build_service_road_network(
+            _service_lines, pav_union,
+            width=SERVICE_ROAD_WIDTH_M, min_len=MIN_SERVICE_STRIP_LEN_M)
+        for _rect, _axis, _role, _ref in _svc_rects:
+            layout.shapes.append(BuiltShape(
+                polygon=_rect, role=_role, ref=_ref, source_axis=_axis))
+        for _jpoly, _jrole, _jref in _svc_junctions:
+            layout.shapes.append(BuiltShape(
+                polygon=_jpoly, role=_jrole, ref=_jref))
+        if _svc_rects or _svc_junctions:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: {len(_svc_rects)} service_road "
+                f"rect(s) + {len(_svc_junctions)} service_junction(s) "
+                f"(4% ground-vehicle network off aircraft pavement).")
 
 
     # ── Phase-2 elevations + feature emit ────────────────────────
@@ -2526,16 +2671,24 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # inside the south apron, etc.).  Replaces the earlier
         # _drop_rects_with_shared_sloping_edge_and_absorb pass
         # which only handled the consecutive-corner case.
-        from .junction_repair import (
-            _absorb_rects_at_junction_perimeters)
-        _absorb_rects_at_junction_perimeters(layout, icao=icao)
-        # Re-run sloping-edge / flat-edge cleanup against the new
-        # geometry: clipped sub-rects from absorption may have new
-        # corners that don't yet align with adjacent junction
-        # vertices (junction vertex sitting on the new sub-rect's
-        # sloping edge interior).
-        _split_sloped_rects_at_violations(layout, icao=icao)
-        _snap_junction_vertices_to_rect_flat_edge_corners(layout)
+        # Absorption (session 47, default OFF): only KEEP rects that share
+        # a sloping edge with an apron/junction — a taxilane through an
+        # apron should stay a directionally-graded rect, not dissolve into
+        # the all-pair apron.  Node parity is automatic (apron = union −
+        # rects), so the apron adopts the rect's sloping-edge altitudes
+        # with no cliff.  Flip ABSORB_RECTS_ALONGSIDE_APRONS to restore.
+        from .config import ABSORB_RECTS_ALONGSIDE_APRONS
+        if ABSORB_RECTS_ALONGSIDE_APRONS:
+            from .junction_repair import (
+                _absorb_rects_at_junction_perimeters)
+            _absorb_rects_at_junction_perimeters(layout, icao=icao)
+            # Re-run sloping-edge / flat-edge cleanup against the new
+            # geometry: clipped sub-rects from absorption may have new
+            # corners that don't yet align with adjacent junction
+            # vertices (junction vertex sitting on the new sub-rect's
+            # sloping edge interior).
+            _split_sloped_rects_at_violations(layout, icao=icao)
+            _snap_junction_vertices_to_rect_flat_edge_corners(layout)
 
         # Apron reclassification (user 2026-05-18): a junction whose
         # boundary strays > 55 m from any taxi/runway centerline
@@ -2544,6 +2697,14 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # not area-based — a 6-way mega-intersection stays a junction.
         from .junction_repair import _reclassify_apron_junctions
         _reclassify_apron_junctions(layout, icao=icao)
+
+        # NOTE (session 47): apron decomposition (pavement/apron_split.py)
+        # is intentionally NOT called.  With absorption off, taxilanes
+        # through aprons already persist as directionally-graded rects
+        # with perfect node parity, so carving lane corridors out of the
+        # apron is unnecessary (it re-created — with non-parity geometry
+        # and cross-shape cliffs — what absorption used to dissolve).
+        # The module is kept for the (gated-off) stand-pad use case.
 
         # Rule-2 sloping-edge snap, re-run on the FINAL junction set.
         # ``_absorb_rects_at_junction_perimeters`` extends junction

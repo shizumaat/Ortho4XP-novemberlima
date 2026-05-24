@@ -1,17 +1,40 @@
-# Auto-Patch Status — clearance matches surface profile; long taxiways follow terrain
+# Auto-Patch Status — session 47: taxilanes-through-aprons (no-absorption model, EXPERIMENTAL)
 
-## TL;DR / current state
+## TL;DR / current state (session 47)
+**Read memory `apron_grade_standards.md` FIRST** — it has the full session-47
+model, the config FLAGS, and the deferred route-graph work.
 
-Suite = **9 failures** (`venv/bin/python -m pytest tests/ -q`, ~4.5 min),
-down from the **10** baseline at session start. Remaining 9 are all
-pre-existing: compare_target ×3 (need re-cut), the SPJC cluster ×3
-(`have_source`, `taxi_rects_not_alongside_apron`,
-`no_vertex_on_sloping_rect_flat_edge`), and grade ×3 (CYXY/SPLP/SPJC,
-mostly sub-metre data spots). `neighbour_corners` was FIXED this session.
+Suite (excl. compare_target) = **9 failed / 328 passed / 5 skipped**
+(`venv/bin/python -m pytest tests/ -q -k "not compare_target"`, ~6 min).
+Of the 9: **5 are baseline-comparable** (grade ×3 CYXY/SPLP/SPJC, plus
+`have_source[SPJC]`, `no_vertex_on_sloping_rect_flat_edge[SPJC]`), and
+**4 are NEW SPJC regressions from this experimental apron-lane work**:
+`neighbour_corners_shared[SPJC]`, `no_long_edge_proximity[SPJC]`,
+`runway_node_sharing[SPJC]`, `no_vertex_on_sloping_rect_edge[SPJC]` — the
+apron-lane chains + junction gaps collide with SPJC's denser junction/rect
+geometry. KNOWN; committed as an experimental checkpoint (all flag-gated,
+revertible). `test_taxi_rects_not_alongside_apron` is SKIPPED (marked for
+deletion — its absorption premise is reversed by the no-absorption model).
 
-This session reworked **DSF sourcing, profile rendering, lateral
-clearance, and long-rect terrain-following**. **Read
-`clearance_profile_dsf_session46.md` (memory) first.**
+**Session-47 model (taxilanes through aprons):** stop absorbing taxi rects
+that share a sloping edge with an apron → they persist as directionally-
+graded rects; apron = `pav_union − rects` (automatic node parity).  Lane
+rects for centerlines crossing OPEN apron (no bounded width from
+`_build_taxi_rects`) are built as continuous code-letter-width RIBBON chains
+(`pavement/rects.build_apron_lane_rects`), trimmed at BRANCH routing nodes to
+leave bounded gaps → residue junctions, run-through at collinear
+continuations.  Grade-rule research (stand 1.0% / taxilane 1.5% / 4% car) +
+the stand & service-road features are GATED OFF (see flags).
+
+**Config flags (all OFF = experiment / feature gated):**
+`ABSORB_RECTS_ALONGSIDE_APRONS=False` (drives the no-absorption + apron-lane
+model), `ENABLE_AIRCRAFT_STANDS=False`, `ENABLE_SERVICE_ROADS=False`,
+`_PER_AXIS_JUNCTIONS=False` (unified_jacobi).
+
+**DEFERRED (user-accepted "junction connectivity for now"):** direct lane→E/F
+*continuation* chains need full ROUTE-GRAPH TRAVERSAL (follow each centerline's
+apt.dat node-path to its terminating taxiway rect).  Today apron lanes connect
+to the E/F network THROUGH junctions (topologically correct).
 
 ## DONE this session (committed on `dev`)
 1. **`98f8ad0`** — (a) **same-pack DSF**: read DSF only from the chosen
@@ -69,23 +92,27 @@ Fix = spread the relief across three prongs so no one surface absorbs it:
   the giant apron #41 blob, so it isn't a thin arm in our geometry — the
   apron needs de-blobbing for the access-road case to show.
 
-## NEXT-SESSION RESEARCH (user 2026-05-23) — apron grade standards
-Before refining the width-model (#3), nail down what the standards ACTUALLY
-require for aprons — our current model may be wrong on two counts:
-- **Is apron grade truly "all-pair in every direction"?** We enforce
-  `APRON_MAX_GRADE` between every vertex pair (Euclidean). Confirm against
-  FAA AC 150/5300-13 / EASA CS-ADR-DSN / ICAO Annex 14 §3.13 (apron grades).
-- **Value:** the apron max may be **1.0%**, not the 1.5% we currently allow
-  (`APRON_MAX_GRADE = 0.015`). Check the citation.
-- **Distance component / curvature:** grade is inherently per-distance and
-  naturally FLUCTUATES (0 in places, up to max elsewhere) — it is NOT a
-  single flat 1.5% plane end-to-end. Do aprons get a vertical-curve / K-factor
-  treatment like runways, or just a max local grade? A "flat 1.5% plane from
-  one end to the other" is probably the WRONG model — the real rule is a
-  *local* max grade that can vary across the surface (which connects to the
-  width-model: wide = low local grade everywhere, narrow arm = can ramp).
-This reframes #3: the apron rule itself may be local-max-grade (not all-pair
-flat), which is closer to the torsion model than today's all-pair cap.
+## APRON GRADE STANDARDS — RESEARCHED (session 47, 2026-05-24) ✓
+Verbatim-sourced from FAA AC 150/5300-13B §5.9, EASA CS ADR-DSN.E.360, ICAO
+Annex 14 §3.13. Full writeup in memory `apron_grade_standards.md`. The standards
+distinguish **parking positions (aircraft stands)** from **apron taxilanes** —
+our single all-pair `APRON_MAX_GRADE=0.015` conflates them. Answers:
+- **All-pair vs local?** BOTH, by FUNCTION. Stand bodies = **all-pair**
+  (EASA/ICAO: "max 1% in any direction") — our Euclidean all-pair cap is RIGHT
+  there. Apron **taxilanes = directional/along-axis** travel paths (flex like a
+  taxiway), NOT all-pair. = the width/torsion model, keyed on function.
+- **1.0% vs 1.5%?** Both: **stands/parking = 1.0%** (our 0.015 is TOO LOOSE);
+  **heavy apron taxilane = 1.5%** (0.015 correct); light (<30,000 lb) = 2.0%.
+- **Curvature?** Yes, simplified: FAA **max grade CHANGE = 2%** (not a runway
+  K-curve) + smooth longitudinal changes >1% on taxilanes; 0.5% drainage floor.
+  Grade is a LOCAL max that fluctuates — NOT a flat plane end-to-end (user right).
+
+**Reframes prong #3:** key the cap on stand-vs-taxilane function (width as proxy
+when apt.dat doesn't say). Wide stand → all-pair 1.0%; narrow taxilane → along-
+axis 1.5%; add a ~2% apron grade-change cap (new, currently unmodeled). The prior
+#3 classification bug + CYXY access-road-in-blob#41 still apply (memory note).
+**Implementation gated on user green-light** (real compare_target/grade impact;
+`tools/check_grade` needs the SAME gate).
 
 ## OPEN / next
 - **Junction clearance consolidation** — clearance near junctions emits

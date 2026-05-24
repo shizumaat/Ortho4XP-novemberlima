@@ -24,6 +24,7 @@ via ``from .osm_load import ...``.
 """
 from __future__ import annotations
 
+import functools
 import math
 import os
 
@@ -49,6 +50,7 @@ _GEOM_EXC = (OSError, ValueError,
 __all__ = [
     "_load_osm_airports",
     "_load_osm_big_roads",
+    "_load_osm_small_roads",
     "_load_osm_tile",
     "_pick_best_apt_dat_against_osm",
     "_score_apt_dat_against_osm",
@@ -468,6 +470,38 @@ def _load_osm_big_roads(apt_lat: float, apt_lon: float,
     big_roads.osm.bz2 was never generated — silently skip tunnel
     emission).
     """
+    return _load_osm_road_layer("big_roads", apt_lat, apt_lon, radius_deg)
+
+
+def _load_osm_small_roads(apt_lat: float, apt_lon: float,
+                          radius_deg: float = 0.05
+                          ) -> tuple[dict[str, tuple[float, float]],
+                                     list[tuple[str, list[str], dict[str, str]]]]:
+    """Load the ``small_roads`` OSM cache (minor drivable highways:
+    service / residential / unclassified / track / tertiary / …).
+
+    Used by the ground-vehicle ``service_road`` grading (session 47):
+    small roads inside (or just outside) the airport boundary are graded
+    with car logic (≤ 4 %).  Same multi-tile + bbox logic as the big-road
+    loader; returns empty containers when no cache exists for the tile.
+    """
+    return _load_osm_road_layer("small_roads", apt_lat, apt_lon, radius_deg)
+
+
+@functools.lru_cache(maxsize=16)
+def _load_osm_road_layer(layer: str, apt_lat: float, apt_lon: float,
+                         radius_deg: float = 0.05
+                         ) -> tuple[dict[str, tuple[float, float]],
+                                    list[tuple[str, list[str], dict[str, str]]]]:
+    """Shared loader for a road OSM cache ``layer`` (``big_roads`` /
+    ``small_roads``): merge the 3×3 tile neighbourhood, namespace node /
+    way IDs per tile, and keep ways whose centroid OR any vertex lies
+    within ``radius_deg`` of the airport.
+
+    Cached (``lru_cache``): a process that builds the same airport
+    repeatedly (the test suite builds CYXY/HECA/… many times) parses each
+    tile's road bz2 only once.  Callers must treat the returned nodes/ways
+    as READ-ONLY (they are shared across calls)."""
     base_lat = int(math.floor(apt_lat))
     base_lon = int(math.floor(apt_lon))
     nodes: dict[str, tuple[float, float]] = {}
@@ -478,7 +512,7 @@ def _load_osm_big_roads(apt_lat: float, apt_lon: float,
             tile_lat_n = base_lat + dlat
             tile_lon_n = base_lon + dlon
             osm_path = FNAMES.osm_cached(
-                tile_lat_n, tile_lon_n, "big_roads")
+                tile_lat_n, tile_lon_n, layer)
             if osm_path in seen_paths or not os.path.isfile(osm_path):
                 continue
             seen_paths.add(osm_path)

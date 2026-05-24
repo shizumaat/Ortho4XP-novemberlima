@@ -292,7 +292,7 @@ def test_no_vertex_on_sloping_rect_edge(icao):
     layout = _build_layout(icao)
     sloping_roles = {
         "runway", "primary_parallel", "secondary_parallel",
-        "stub", "cross_connector"}
+        "stub", "cross_connector", "service_road"}
     # Per user 2026-05-09: shapes carrying a single ``altitude=``
     # tag (flat, no altitude_high/low) legitimately have variable
     # node count — their elevation is constant, so extra ring
@@ -460,7 +460,7 @@ def test_sloping_rect_slopes_only_along_axis(icao):
     layout = _build_layout(icao)
     sloping_roles = {
         "primary_parallel", "secondary_parallel", "stub",
-        "cross_connector",
+        "cross_connector", "service_road",
     }
     TOL = 0.3
     violations = []
@@ -522,7 +522,7 @@ def test_no_vertex_on_sloping_rect_flat_edge(icao):
     layout = _build_layout(icao)
     sloping_roles = {
         "primary_parallel", "secondary_parallel",
-        "stub", "cross_connector"}
+        "stub", "cross_connector", "service_road"}
     sloping = []
     for s in layout.shapes:
         if s.role not in sloping_roles:

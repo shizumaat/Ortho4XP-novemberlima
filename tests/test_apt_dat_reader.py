@@ -284,3 +284,114 @@ class TestFindAirportAptDat:
         xp = tmp_path / "X-Plane 12"
         (xp / "Custom Scenery").mkdir(parents=True)
         assert APR.find_airport_apt_dat(str(xp), "ZZZZ") is None
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Ramp starts (rows 1300/1301) and ground-vehicle routes (row 1206)
+# ──────────────────────────────────────────────────────────────────────
+# Real-format rows modeled on CYXY Whitehorse (our reference airport):
+# gate ramp starts with ICAO size codes, oneway fuel-truck service roads.
+_RAMP_TRUCK_BLOCK = (
+    "A\n"
+    "1    700 0 0 ZRMP Ramp Test\n"
+    "100 45.00 1 0 0.25 1 1 0 09 60.7100000 -135.0800000 0 60 0 0 0 0"
+    " 27 60.7100000 -135.0700000 0 60 0 0 0 0\n"
+    # Two gate ramp starts, each followed by its 1301 metadata.
+    "1300 60.71398647 -135.07523025 -52.5 gate jets Gate 1\n"
+    "1301 C airline \n"
+    "1300 60.71426307 -135.07493699 -88.0 gate turboprops|props Gate 2\n"
+    "1301 B airline baw afr\n"
+    # A 1300 with NO following 1301 (size_code must stay empty).
+    "1300 60.71459517 -135.07548657 12.0 tie_down props GA Tie 3\n"
+    # Shared 1201 routing nodes used by both taxi (1202) and truck (1206).
+    "1201 60.7140000 -135.0750000 both 0 node0\n"
+    "1201 60.7142000 -135.0752000 both 1 node1\n"
+    "1201 60.7144000 -135.0754000 both 2 node2\n"
+    # One aircraft taxi edge (must NOT land in truck_edges).
+    "1202 0 1 twoway taxiway_C A\n"
+    # Two oneway ground-vehicle (fuel truck) route edges, named.
+    "1206 0 1 oneway Terminal fuel truck\n"
+    "1206 1 2 oneway Terminal fuel truck\n"
+)
+
+
+def _load_ramp_truck(tmp_path):
+    p = tmp_path / "apt.dat"
+    p.write_text(_RAMP_TRUCK_BLOCK, encoding="utf-8")
+    return APR.load_airport(str(p), "ZRMP")
+
+
+class TestRampStartParsing:
+    def test_ramp_starts_emitted(self, tmp_path):
+        apt = _load_ramp_truck(tmp_path)
+        assert apt is not None
+        assert len(apt.ramp_starts) == 3
+
+    def test_ramp_start_fields_and_size_code(self, tmp_path):
+        apt = _load_ramp_truck(tmp_path)
+        g1 = apt.ramp_starts[0]
+        assert g1.lat == pytest.approx(60.71398647)
+        assert g1.lon == pytest.approx(-135.07523025)
+        assert g1.heading == pytest.approx(-52.5)
+        assert g1.misc_type == "gate"
+        assert g1.airplane_types == ("jets",)
+        assert g1.name == "Gate 1"
+        assert g1.size_code == "C"          # from the 1301 row
+        assert g1.operation_type == "airline"
+
+    def test_multi_type_airplane_list(self, tmp_path):
+        apt = _load_ramp_truck(tmp_path)
+        g2 = apt.ramp_starts[1]
+        assert g2.airplane_types == ("turboprops", "props")
+        assert g2.size_code == "B"
+
+    def test_ramp_start_without_metadata_has_empty_size(self, tmp_path):
+        apt = _load_ramp_truck(tmp_path)
+        g3 = apt.ramp_starts[2]
+        assert g3.name == "GA Tie 3"
+        assert g3.misc_type == "tie_down"
+        assert g3.size_code == ""           # no 1301 row followed
+        assert g3.operation_type == ""
+
+
+class TestTruckEdgeParsing:
+    def test_truck_edges_separate_from_taxi(self, tmp_path):
+        apt = _load_ramp_truck(tmp_path)
+        assert len(apt.truck_edges) == 2
+        # The single 1202 aircraft edge stays in taxi_edges, not trucks.
+        assert len(apt.taxi_edges) == 1
+
+    def test_truck_edge_fields(self, tmp_path):
+        apt = _load_ramp_truck(tmp_path)
+        te = apt.truck_edges[0]
+        assert te.node_from == 0 and te.node_to == 1
+        assert te.direction == "oneway"
+        assert te.kind == "truck"
+        assert te.name == "Terminal fuel truck"
+
+    def test_service_road_centerlines(self, tmp_path):
+        apt = _load_ramp_truck(tmp_path)
+        # Identity meter projection (lon, lat) -> (x, y) scaled up so the
+        # two ~consecutive segments are well over the 0.1 m collapse floor.
+        def to_m(lon, lat):
+            return (lon * 1e5, lat * 1e5)
+        cls = APR.service_road_centerlines(apt, to_m)
+        assert len(cls) == 1                 # both edges share one name
+        line, name = cls[0]
+        assert name == "Terminal fuel truck"
+        # Merged across the two edges -> 3 vertices (nodes 0,1,2).
+        assert len(line.coords) == 3
+
+    def test_service_road_centerlines_empty_without_trucks(self, tmp_path):
+        # Reuse the runway-only ZZZZ-style block: no 1206 rows.
+        p = tmp_path / "apt2.dat"
+        p.write_text(
+            "A\n"
+            "1    100 0 0 ZNOP No Trucks\n"
+            "100 45.00 1 0 0.25 1 1 0 09 -12 -77 0 60 0 0 0 0"
+            " 27 -12 -77.01 0 60 0 0 0 0\n",
+            encoding="utf-8")
+        apt = APR.load_airport(str(p), "ZNOP")
+        assert apt.truck_edges == []
+        assert apt.ramp_starts == []
+        assert APR.service_road_centerlines(apt, lambda lon, lat: (lon, lat)) == []

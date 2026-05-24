@@ -163,6 +163,9 @@ def test_pavement_grade(tmp_path, icao):
                 pts = [layout.m_to_ll(x, y) for (x, y) in ln.coords]
                 taxi_axes_ll.append((pts, cL, cT))
 
+        # Aircraft stands are emitted as ROLE_STAND shapes (apron
+        # decomposition), so check_grade enforces their 1.0% cap by role
+        # via ROLE_GRADE_LIMITS — no separate stand-zone plumbing needed.
         w, c, s = check_grade.run_checks(
             out,
             max_grade_pct=1.5,

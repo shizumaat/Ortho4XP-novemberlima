@@ -48,11 +48,13 @@ import time as _time
 
 from shapely.errors import GEOSException, TopologicalError
 
-from auto_patch.elevation import APRON_MAX_GRADE, TAXI_MAX_GRADE
+from auto_patch.elevation import (
+    APRON_MAX_GRADE, SERVICE_ROAD_MAX_GRADE, STAND_MAX_GRADE, TAXI_MAX_GRADE)
 from auto_patch.layout import (
     ROLE_APRON, ROLE_BOUNDARY, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL, ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
-    ROLE_SECONDARY_PARALLEL, ROLE_STUB, ROLE_TERMINAL,
+    ROLE_SECONDARY_PARALLEL, ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION,
+    ROLE_STAND, ROLE_STUB, ROLE_TERMINAL,
 )
 
 # Narrow exception tuple for shapely / numeric-geometry failure
@@ -63,11 +65,20 @@ _GEOM_EXC = (ValueError, GEOSException, TopologicalError)
 SLOPING_RECT_ROLES = (
     ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
     ROLE_STUB, ROLE_CROSS_CONNECTOR,
+    # Ground-vehicle service roads grade along their axis like a taxiway
+    # (ring-only + flat cross-section), but at 4% — see _role_grade.
+    ROLE_SERVICE_ROAD,
 )
 
 PAVEMENT_ROLES = {
     ROLE_RUNWAY, *SLOPING_RECT_ROLES,
     ROLE_APRON, ROLE_TERMINAL, ROLE_JUNCTION,
+    # Aircraft stand pad (carved from an apron): all-pair grading branch
+    # at the stricter 1.0% cap (see _role_grade).
+    ROLE_STAND,
+    # Service-road network junction: all-pair grading branch at 4%
+    # (not a sloping rect — irregular fill polygon at bends/intersections).
+    ROLE_SERVICE_JUNCTION,
     # Per user 2026-05-18: runway-crossing junctions carry runway-
     # interpolated ``node_altitudes`` from
     # ``_resolve_runway_crossings``.  Treat them as HARD-anchored
@@ -124,7 +135,8 @@ _TIER_TERMINAL = 3
 _TIER_APRON = 2
 _TIER_TAXI = 1
 
-_TAXI_TIER_ROLES = frozenset((*SLOPING_RECT_ROLES, ROLE_JUNCTION))
+_TAXI_TIER_ROLES = frozenset((*SLOPING_RECT_ROLES, ROLE_JUNCTION,
+                              ROLE_SERVICE_JUNCTION))
 
 # Dykstra L2 projection iteration cap (per cascade phase).  A uniform
 # over-grade slope is corrected by anchor information propagating inward one
@@ -148,7 +160,12 @@ _USE_L2_FIT = True
 # cap is stricter than ICAO/EASA require and forbids junctions that
 # legitimately slope along routes over real terrain, e.g. SPLP -10025).  Pairs
 # with the audit (check_grade) which must also go per-axis or it will flag the
-# diagonals this allows.  Default False until that audit change lands together.
+# diagonals this allows.  The audit goes per-axis whenever this flag is True
+# (the grade test passes ``taxi_axes_ll`` gated on this flag), so they stay
+# coupled.  ALSO drives the apron taxilane model (session 47): when True,
+# aprons collect the apt.dat taxilane axes crossing them so along-lane pairs
+# grade along the (looser) arc — directional relief inside aprons — while the
+# general apron BODY (pairs off any lane) keeps its all-pair Euclidean cap.
 _PER_AXIS_JUNCTIONS = False
 
 # DEM attraction (user 2026-05-22): each iteration, pull every SOFT node a
@@ -192,13 +209,17 @@ DEM_FLOOR_ATTRACTION = 0.85
 
 
 def _role_grade(role: str) -> float:
-    """Per-role max grade cap.  All roles now share ``TAXI_MAX_GRADE``
-    (1.5 %, user 2026-05-18): the apron-reclassification pipeline
-    pass folds true apron-territory pavement into ``ROLE_APRON``,
-    and the cap was relaxed from the FAA-1.0 % parking-surface limit
-    to match the taxiway cap so reclassified shapes don't trip the
-    solver / audit at every other vertex pair.
+    """Per-role max grade cap.  Taxiway-family + runway + junction share
+    ``TAXI_MAX_GRADE`` (1.5 %); ground-vehicle service roads get the
+    looser 4 % (cars handle steeper terrain); apron / terminal use
+    ``APRON_MAX_GRADE`` (1.5 %, with stricter stand zones applied per-pair
+    in ``_build_edges``).  Checked before the sloping-rect branch because
+    service_road is itself a sloping rect but must NOT inherit 1.5 %.
     """
+    if role in (ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION):
+        return SERVICE_ROAD_MAX_GRADE
+    if role == ROLE_STAND:
+        return STAND_MAX_GRADE
     if role in (ROLE_RUNWAY, *SLOPING_RECT_ROLES, ROLE_JUNCTION):
         return TAXI_MAX_GRADE
     return APRON_MAX_GRADE
@@ -489,7 +510,7 @@ def _node_tiers(layout, bucket_to_idx, n):
             continue
         if s.role in _TAXI_TIER_ROLES:
             t = _TIER_TAXI
-        elif s.role == ROLE_APRON:
+        elif s.role in (ROLE_APRON, ROLE_STAND):
             t = _TIER_APRON
         elif s.role == ROLE_TERMINAL:
             t = _TIER_TERMINAL
@@ -848,9 +869,12 @@ def _build_edges(layout, bucket_to_idx, roles=None, add_runway_anchor=True
     converging centerlines and 1.5 % is enforced ALONG each axis,
     NOT cross-axially.
 
-    For APRON / TERMINAL: ring edges + all-pair Euclidean spatial
-    edges.  Aprons must satisfy 1.5 % across the entire interior
-    surface (every-direction cap).
+    For APRON: ring edges + all-pair Euclidean over the body, but
+    pairs lying along a crossing apt.dat taxilane axis use the looser
+    along-axis arc length (directional relief along the lane) when the
+    per-axis model is active.  The body / stand area keeps the
+    all-direction cap (a free-maneuvering surface).  For TERMINAL: ring
+    edges + all-pair Euclidean (every-direction cap, no axes).
 
     Per-edge cap = role's max grade × edge length.  When two
     shapes contribute to the same vertex pair, the tighter cap
@@ -918,8 +942,21 @@ def _build_edges(layout, bucket_to_idx, roles=None, add_runway_anchor=True
         # the all-pair cliff guard still holds off-route.  Aprons /
         # terminals are true multi-directional surfaces and keep pure
         # Euclidean.
-        axes = (_collect_junction_axes(layout, s.polygon)
-                if s.role == ROLE_JUNCTION else [])
+        # Junctions always collect their converging axes (arc-lengthening
+        # + diagonal-drop below).  Aprons collect taxilane axes only when
+        # the per-axis model is active (session 47): along-lane pairs get
+        # the looser arc length so an apron can grade along a taxilane,
+        # while the apron BODY (no shared lane) keeps its all-pair cap.
+        if s.role == ROLE_JUNCTION:
+            axes = _collect_junction_axes(layout, s.polygon)
+        elif s.role == ROLE_APRON and _PER_AXIS_JUNCTIONS:
+            axes = _collect_junction_axes(layout, s.polygon)
+        else:
+            axes = []
+        # Stand grading is handled by ROLE_STAND sub-shapes (apron
+        # decomposition carves the parking pads out as their own 1.0%
+        # shapes — see pavement.apron_split), so no per-pair stand cap
+        # here; this branch grades the apron BODY + lane corridors.
         for i in range(m):
             xi, yi = coords[i]
             for j in range(i + 2, m):
@@ -948,7 +985,14 @@ def _build_edges(layout, bucket_to_idx, roles=None, add_runway_anchor=True
                 # over real terrain (SPLP -10025).  Ring + along-centerline
                 # pairs still constrain it.  Aprons/terminals (axes==[]) are
                 # true multi-directional surfaces — keep their all-pair cap.
-                if _PER_AXIS_JUNCTIONS and axes and not along_axis:
+                # Drop the unregulated cross-axis diagonal for JUNCTIONS
+                # only.  Aprons keep every non-lane pair as an all-pair
+                # Euclidean edge — the general apron body / stand area is a
+                # free-maneuvering surface that must stay flat-capped (the
+                # stricter stand cap arrives with the ramp-start zones in a
+                # later phase); only its along-lane pairs were loosened above.
+                if (_PER_AXIS_JUNCTIONS and s.role == ROLE_JUNCTION
+                        and axes and not along_axis):
                     continue
                 _add_edge(node_idx[i], node_idx[j], length, gr)
 
@@ -1292,7 +1336,7 @@ def _writeback(layout, elev, bucket_to_idx):
             s.altitude_low = None
             s.node_altitudes = None
             n_terms += 1
-        elif s.role == ROLE_APRON:
+        elif s.role in (ROLE_APRON, ROLE_STAND):
             # Per user 2026-05-18: aprons are NOT 100 % flat — they
             # satisfy 1.5 % across their surface, NOT zero gradient.
             # Keep the solver's per-corner altitudes (which it
@@ -1300,6 +1344,8 @@ def _writeback(layout, elev, bucket_to_idx):
             # adjacent aprons that share corners don't end up at
             # 4-8 m cliff steps (each apron previously averaged to
             # its own single altitude → adjacent aprons diverged).
+            # Stand pads (ROLE_STAND, session 47) are all-pair shapes
+            # like aprons but at the stricter 1.0 % cap — same encoding.
             alts = [round(float(e), 1) for e in corner_elevs]
             if ring_closed:
                 alts.append(alts[0])
@@ -1340,7 +1386,9 @@ def _writeback(layout, elev, bucket_to_idx):
                 s.altitude_low = None
                 s.altitude = None
                 n_rects += 1
-        elif s.role == ROLE_JUNCTION:
+        elif s.role in (ROLE_JUNCTION, ROLE_SERVICE_JUNCTION):
+            # Junction + service-road-network junction: per-corner
+            # node_altitudes (all-pair shapes, irregular polygons).
             alts = [round(float(e), 1) for e in corner_elevs]
             if ring_closed:
                 alts.append(alts[0])

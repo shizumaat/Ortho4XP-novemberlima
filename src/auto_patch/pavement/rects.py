@@ -435,6 +435,249 @@ def _build_taxi_rects(
     return keep
 
 
+# ── Apron-interior taxilane rects (session 47) ───────────────────────
+# A taxi centerline crossing the OPEN middle of a wide apron yields no
+# rect from ``_build_taxi_rects`` (its half-width probe reaches the far
+# apron boundary → over-wide → rejected/dropped).  This builds a rect of
+# the taxiway's ICAO code-letter width for those uncovered portions, so
+# the taxilane through the apron is a directionally-graded rect.  Added
+# to ``taxi_rects`` BEFORE ``apron = pav_union − rects``, so the apron
+# wraps each lane with automatic node parity (no post-hoc carve).
+_APRON_LANE_WIDTH_BY_LETTER = {
+    "A": 7.5, "B": 10.5, "C": 15.0, "D": 18.0, "E": 23.0, "F": 25.0,
+}
+_APRON_LANE_DEFAULT_WIDTH_M = 18.0
+_APRON_LANE_MIN_LEN_M = 40.0
+# Node classification: two routes meeting at a node count as a straight
+# CONTINUATION (run through, no junction) when their direction vectors are
+# at least this anti-parallel (dot ≤ -this ⇒ angle ≥ ~134°); otherwise the
+# node is a BRANCH and the chain is trimmed back to leave a junction gap.
+_APRON_LANE_COLLINEAR_DOT = 0.7
+
+
+def _unit_vec(dx: float, dy: float) -> tuple[float, float] | None:
+    d = math.hypot(dx, dy)
+    if d < 1e-9:
+        return None
+    return (dx / d, dy / d)
+
+
+def _apron_lane_width(letter) -> float:
+    if letter and letter.upper() in _APRON_LANE_WIDTH_BY_LETTER:
+        return _APRON_LANE_WIDTH_BY_LETTER[letter.upper()]
+    return _APRON_LANE_DEFAULT_WIDTH_M
+
+
+_APRON_LANE_DENSIFY_M = 50.0
+
+
+def _densify_line(coords: list[tuple[float, float]], step: float
+                  ) -> list[tuple[float, float]]:
+    """Insert points so consecutive vertices are ≤ ``step`` apart."""
+    if len(coords) < 2:
+        return coords
+    out: list[tuple[float, float]] = [coords[0]]
+    for i in range(len(coords) - 1):
+        a = coords[i]
+        b = coords[i + 1]
+        d = math.hypot(b[0] - a[0], b[1] - a[1])
+        if d > step:
+            n = int(d / step)
+            for k in range(1, n + 1):
+                t = k / (n + 1)
+                out.append((a[0] + t * (b[0] - a[0]),
+                            a[1] + t * (b[1] - a[1])))
+        out.append(b)
+    return out
+
+
+def _vertex_perps(coords: list[tuple[float, float]], half: float
+                  ) -> list[tuple[float, float]]:
+    """Per-vertex perpendicular offset (scaled by ``half``).  Interior
+    vertices use the bisector of the two adjacent segment normals so
+    consecutive ribbon quads share the SAME offset points (continuous
+    chain, no miter gap)."""
+    n = len(coords)
+    perps: list[tuple[float, float]] = []
+    for i in range(n):
+        # Tangent at vertex i.
+        if i == 0:
+            tx, ty = coords[1][0] - coords[0][0], coords[1][1] - coords[0][1]
+        elif i == n - 1:
+            tx, ty = coords[-1][0] - coords[-2][0], coords[-1][1] - coords[-2][1]
+        else:
+            ax, ay = coords[i][0] - coords[i - 1][0], coords[i][1] - coords[i - 1][1]
+            bx, by = coords[i + 1][0] - coords[i][0], coords[i + 1][1] - coords[i][1]
+            la = math.hypot(ax, ay) or 1.0
+            lb = math.hypot(bx, by) or 1.0
+            tx, ty = ax / la + bx / lb, ay / la + by / lb
+        tl = math.hypot(tx, ty) or 1.0
+        # Normal = perpendicular to tangent.
+        nx, ny = -ty / tl, tx / tl
+        perps.append((nx * half, ny * half))
+    return perps
+
+
+def build_apron_lane_rects(
+        centerlines: list[tuple[LineString, str]],
+        pav_union: Polygon | None,
+        existing_rects: list[tuple[Polygon, LineString, str, str]],
+        letters: dict[str, str] | None = None,
+        *,
+        min_len: float = _APRON_LANE_MIN_LEN_M,
+) -> list[tuple[Polygon, LineString, str, str]]:
+    """Build CONTINUOUS ribbon chains of quads for taxi-centerline
+    portions that cross open apron pavement and were NOT covered by
+    ``existing_rects``.
+
+    Each route portion becomes a chain of 4-corner quads (one per
+    densified centerline segment) that SHARE their cross-edge nodes via
+    per-vertex perpendiculars — a continuous chain end-to-end, like the
+    boundary ribbon, rather than a tangle of independent segment rects.
+    Returns ``[(quad, axis, ROLE_PRIMARY_PARALLEL, ref)]``; the apron is
+    ``pav_union − rects`` so it wraps each chain with node parity."""
+    out: list[tuple[Polygon, LineString, str, str]] = []
+    if pav_union is None or pav_union.is_empty:
+        return out
+    letters = letters or {}
+    ex = [r for (r, _a, _ro, _rf) in existing_rects
+          if r is not None and not r.is_empty]
+    ex_union = None
+    if ex:
+        try:
+            ex_union = unary_union(ex)
+        except _GEOM_EXC:
+            ex_union = None
+
+    # Routing topology: the apt.dat centerlines are pre-split at routing
+    # nodes, so a shared endpoint = a node where ≥2 routes meet.  At each
+    # node we record the direction FROM the node INTO each incident
+    # centerline, then classify:
+    #   * BRANCH node (≥3 incident routes, OR 2 meeting at an angle) → the
+    #     chain end is TRIMMED back, leaving a bounded gap that the normal
+    #     pav_union−rects residue turns into a JUNCTION (stub A, crossings).
+    #   * CONTINUATION node (exactly 2 incident routes, roughly collinear) →
+    #     NOT trimmed → the chain runs straight through and abuts the
+    #     adjacent rect (E, F) directly via the clip to ``pav − rects``.
+    def _nk(p):
+        return (round(p[0]), round(p[1]))
+    node_dirs: dict = {}
+    for ln, _rf in centerlines:
+        if ln is None or ln.is_empty:
+            continue
+        cs = list(ln.coords)
+        if len(cs) < 2:
+            continue
+        for end, nxt in ((cs[0], cs[1]), (cs[-1], cs[-2])):
+            u = _unit_vec(nxt[0] - end[0], nxt[1] - end[1])
+            if u is not None:
+                node_dirs.setdefault(_nk(end), []).append(u)
+
+    def _is_branch_node(nk) -> bool:
+        dirs = node_dirs.get(nk, [])
+        if len(dirs) < 2:
+            return False          # dead-end — not a junction
+        if len(dirs) >= 3:
+            return True           # 3+ routes meet → junction
+        # Exactly 2: continuation iff roughly collinear (dirs nearly
+        # opposite, i.e. angle between routes ≈ 180°); else a branch.
+        d = dirs[0][0] * dirs[1][0] + dirs[0][1] * dirs[1][1]
+        return d > -_APRON_LANE_COLLINEAR_DOT
+
+    for axis, ref in centerlines:
+        if axis is None or axis.is_empty:
+            continue
+        try:
+            on_pav = axis.intersection(pav_union)
+        except _GEOM_EXC:
+            continue
+        if on_pav.is_empty:
+            continue
+        pieces = ([on_pav] if on_pav.geom_type == "LineString"
+                  else (list(on_pav.geoms)
+                        if on_pav.geom_type == "MultiLineString" else []))
+        half = _apron_lane_width(letters.get(ref)) / 2.0
+        # Which of THIS centerline's ends are BRANCH nodes (→ trim → gap →
+        # junction) vs continuations (→ run through, abut the rect)?
+        acs = list(axis.coords)
+        branch_start = _is_branch_node(_nk(acs[0]))
+        branch_end = _is_branch_node(_nk(acs[-1]))
+        for piece in pieces:
+            coords = list(piece.coords)
+            if len(coords) < 2:
+                continue
+            # Trim back from a BRANCH routing node (bounded gap → junction);
+            # leave continuations untrimmed so they abut E/F directly.
+            if branch_start and _nk(coords[0]) == _nk(acs[0]):
+                coords = _trim_end(coords, half, at_start=True)
+            if branch_end and _nk(coords[-1]) == _nk(acs[-1]):
+                coords = _trim_end(coords, half, at_start=False)
+            if len(coords) < 2:
+                continue
+            line = LineString(coords)
+            if line.length < _APRON_LANE_DENSIFY_M * 0.5:
+                continue
+            coords = _densify_line(coords, _APRON_LANE_DENSIFY_M)
+            perps = _vertex_perps(coords, half)
+            for i in range(len(coords) - 1):
+                p0, p1 = coords[i], coords[i + 1]
+                d0, d1 = perps[i], perps[i + 1]
+                l0 = (p0[0] + d0[0], p0[1] + d0[1])
+                r0 = (p0[0] - d0[0], p0[1] - d0[1])
+                l1 = (p1[0] + d1[0], p1[1] + d1[1])
+                r1 = (p1[0] - d1[0], p1[1] - d1[1])
+                try:
+                    quad = Polygon([l0, l1, r1, r0])
+                    if quad.is_empty or not quad.is_valid:
+                        continue
+                    # Clip to pavement and abut existing rects (no overlap):
+                    # the quad's portion over E/F/stubA is removed so the
+                    # chain meets their edge exactly (continuation), while
+                    # the trim above leaves a junction gap at shared nodes.
+                    q = quad.intersection(pav_union)
+                    if ex_union is not None:
+                        q = q.difference(ex_union)
+                    if q.is_empty:
+                        continue
+                    cand = ([q] if q.geom_type == "Polygon"
+                            else (list(q.geoms)
+                                  if q.geom_type == "MultiPolygon" else []))
+                    axis_ls = LineString([p0, p1])
+                except _GEOM_EXC:
+                    continue
+                for qp in cand:
+                    if (not qp.is_empty and qp.is_valid
+                            and qp.area >= 0.4 * quad.area):
+                        out.append((qp, axis_ls, ROLE_PRIMARY_PARALLEL,
+                                    ref or "apron_lane"))
+    return out
+
+
+def _trim_end(coords: list[tuple[float, float]], back: float,
+              at_start: bool) -> list[tuple[float, float]]:
+    """Trim ``back`` metres off the start (or end) of a polyline, leaving
+    a bounded gap at a shared routing node so a junction can form there."""
+    pts = coords if at_start else coords[::-1]
+    if len(pts) < 2:
+        return coords
+    remaining = back
+    out = list(pts)
+    while len(out) >= 2 and remaining > 0:
+        ax, ay = out[0]
+        bx, by = out[1]
+        seg = math.hypot(bx - ax, by - ay)
+        if seg <= remaining:
+            out = out[1:]
+            remaining -= seg
+        else:
+            t = remaining / seg
+            out[0] = (ax + t * (bx - ax), ay + t * (by - ay))
+            remaining = 0
+    if len(out) < 2:
+        return coords
+    return out if at_start else out[::-1]
+
+
 def _rect_long_edges_at_pavement_boundary(
     rect: Polygon,
     axis: LineString,

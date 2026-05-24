@@ -641,10 +641,24 @@ def _check_within_shape(ways: List[Way],
                             <= WITHIN_SHAPE_MAX_PAIR_DIST_M
                             * WITHIN_SHAPE_MAX_PAIR_DIST_M):
                         pairs.append((i, j))
-        # Per-axis junctions: when taxi_axes are supplied, a junction's pairs
+        # Per-axis grading (when taxi_axes are supplied): a JUNCTION's pairs
         # are graded per-axis (longitudinal along a common centerline +
-        # transverse), and unregulated cross-axis diagonals are skipped.
-        per_axis = bool(taxi_axes) and w.tags.get("role") == "junction"
+        # transverse) and unregulated cross-axis diagonals are skipped.  An
+        # APRON's along-lane pairs likewise use the per-axis allowance, but a
+        # pair off every lane (the apron body / stand area) keeps the all-pair
+        # Euclidean cap — it does NOT get the diagonal skip.  Matches the
+        # solver's ``_build_edges`` (apron body all-pair, lanes arc-lengthened).
+        # Per-axis grading (when taxi_axes are supplied): a JUNCTION's pairs
+        # are graded per-axis (longitudinal along a common centerline +
+        # transverse) and unregulated cross-axis diagonals are skipped.  An
+        # APRON's along-lane pairs likewise use the per-axis allowance, but a
+        # pair off every lane (the apron body) keeps the all-pair Euclidean
+        # cap — it does NOT get the diagonal skip.  Aircraft stands are their
+        # own ROLE_STAND shapes (graded at 1.0% via ROLE_GRADE_LIMITS), so
+        # there is no per-pair stand handling here.  Matches the solver's
+        # ``_build_edges``.
+        role = w.tags.get("role")
+        per_axis = bool(taxi_axes) and role in ("junction", "apron")
         for i, j in pairs:
             xi, yi, ei, si = pts[i]
             xj, yj, ej, sj = pts[j]
@@ -657,16 +671,21 @@ def _check_within_shape(ways: List[Way],
             if per_axis:
                 allowance = _per_axis_allowance(
                     (xi, yi), (xj, yj), taxi_axes, ELEV_ROUNDING_NOISE_M)
+                grade_cap_pair = grade_cap
                 if allowance is None:
-                    continue  # unregulated inter-centerline diagonal
+                    if role == "junction":
+                        continue  # unregulated inter-centerline diagonal
+                    # Apron body pair (no shared lane): all-pair cap.
+                    allowance = grade_cap * d + ELEV_ROUNDING_NOISE_M
             else:
                 allowance = grade_cap * d + ELEV_ROUNDING_NOISE_M
+                grade_cap_pair = grade_cap
             if de <= allowance:
                 continue
             grade = de / d
             out.append(Violation(
                 grade_pct=grade * 100,
-                excess_pct=(grade - grade_cap) * 100,
+                excess_pct=(grade - grade_cap_pair) * 100,
                 distance_m=d,
                 de_m=de,
                 way_a=w, way_b=w,

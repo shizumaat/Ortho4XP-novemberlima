@@ -32,7 +32,7 @@ from .layout import (
     BuiltShape, PavementLayout, R_EARTH,
     ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
     ROLE_STUB, ROLE_CROSS_CONNECTOR, ROLE_RUNWAY, ROLE_JUNCTION,
-    ROLE_APRON, ROLE_TERMINAL, vertex_bucket,
+    ROLE_APRON, ROLE_TERMINAL, ROLE_SERVICE_ROAD, vertex_bucket,
 )
 
 
@@ -44,7 +44,7 @@ from .layout import (
 # ``_clip_sloping_rect_piece``.
 _SLOPING_RECT_ROLES = frozenset({
     ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
-    ROLE_STUB, ROLE_CROSS_CONNECTOR,
+    ROLE_STUB, ROLE_CROSS_CONNECTOR, ROLE_SERVICE_ROAD,
 })
 
 # Narrow exception set — covers real shapely degeneracy without
