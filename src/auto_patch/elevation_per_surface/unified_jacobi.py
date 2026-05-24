@@ -316,6 +316,39 @@ def solve(layout, icao: str,
                _eq_pairs_from_groups(rect_flat_groups),
                rect_flat_groups, [])
 
+    # Relief phase (prong #2, user 2026-05-23) — terminal-free aprons
+    # YIELD with the taxi network.  The cascade froze every apron before
+    # the taxi solved, so a taxiway bridging a low runway and a high
+    # terminal-free apron (CYXY E -> apron #45) is forced over grade with
+    # no recourse.  Here the terminal-free apron nodes go SOFT alongside
+    # the taxi nodes (terminals, terminal-anchored aprons, runway/seam
+    # stay HARD), and the cap projection lets the apron drop only as far
+    # as relieving the over-grade requires.  The DEM seed keeps it near
+    # terrain; it descends below only where grade demands (and the edge-
+    # blur caution applies — it never chases edge DEM, only yields to grade).
+    if _USE_L2_FIT:
+        yieldable = _terminal_free_apron_nodes(layout, bucket_to_idx, tiers, n)
+        if any(yieldable):
+            # Terminal-free aprons go soft with the taxi network; the
+            # runway stays HARD (its yield is a LAST RESORT, not here —
+            # user 2026-05-23).  The yield is grade-driven and UNBOUNDED:
+            # the DEM is unreliable at excavated terraces (CYXY apron #45's
+            # DEM reads ~714 m but the real terrace is 705 m), so the cap
+            # projection — not a DEM-relative bound — finds the right
+            # level.  It drops only as far as relieving the over-grade
+            # requires, which lands at the true terrace.
+            relief_hard = [base_hard[i] or not (
+                tiers[i] == _TIER_TAXI or yieldable[i]) for i in range(n)]
+            if not all(relief_hard):
+                relief_eg = dict(taxi_eg)
+                relief_eg.update(apron_eg)
+                relief_el = dict(taxi_el)
+                relief_el.update(apron_el)
+                total_iters += _compliant_spread_fit(
+                    n, elev, relief_hard, dem_elev, relief_eg, relief_el,
+                    _eq_pairs_from_groups(rect_flat_groups),
+                    _L2_MAX_ITERS, tol_m)
+
     n_terms, n_rects, n_juncs = _writeback(
         layout, elev, bucket_to_idx)
     _report(icao, total_iters, max_iters,
@@ -328,7 +361,7 @@ _SPREAD_COMPLY_TOL_M = 0.02  # iterate until every edge is within this of cap
 
 
 def _compliant_spread_fit(n, elev, is_hard, dem_elev, edge_grade, edge_length,
-                          eq_pairs, max_iters, tol_m) -> int:
+                          eq_pairs, max_iters, tol_m, node_bounds=None) -> int:
     """Spread soft nodes to a grade-compliant surface near the DEM, by
     over-relaxed cap projection iterated to FULL grade compliance.
 
@@ -348,7 +381,11 @@ def _compliant_spread_fit(n, elev, is_hard, dem_elev, edge_grade, edge_length,
     """
     for i in range(n):
         if not is_hard[i] and dem_elev[i] is not None:
-            elev[i] = float(dem_elev[i])
+            # Bounded nodes keep their current value as the center (e.g. a
+            # runway-yield node centered on its CIFP profile); only
+            # unbounded soft nodes re-seed at terrain.
+            if node_bounds is None or node_bounds[i] is None:
+                elev[i] = float(dem_elev[i])
     ineq = [(u, v, edge_length[(u, v)] * gr)
             for (u, v), gr in edge_grade.items()]
     eqs = [(a, b) for (a, b) in eq_pairs]
@@ -391,6 +428,19 @@ def _compliant_spread_fit(n, elev, is_hard, dem_elev, edge_grade, edge_length,
                 move = w * 0.5 * excess
                 elev[u] -= s * move
                 elev[v] += s * move
+        # Clamp bounded soft nodes to their per-node deviation window so
+        # no single surface absorbs the whole relief (user 2026-05-23:
+        # spread the descent across runway-yield + apron-yield).  A node
+        # held at a bound leaves a residual violation on its edges, which
+        # propagates to the other soft nodes — exactly the spreading.
+        if node_bounds is not None:
+            for i in range(n):
+                b = node_bounds[i]
+                if b is not None:
+                    if elev[i] < b[0]:
+                        elev[i] = b[0]
+                    elif elev[i] > b[1]:
+                        elev[i] = b[1]
         if max_viol < comply:
             return it + 1
     return max_iters
@@ -455,6 +505,62 @@ def _node_tiers(layout, bucket_to_idx, n):
             if idx is not None and t > tiers[idx]:
                 tiers[idx] = t
     return tiers
+
+
+def _terminal_free_apron_nodes(layout, bucket_to_idx, tiers, n):
+    """Return ``[bool]`` per node: True when the node belongs ONLY to
+    apron(s) that DON'T touch a terminal.  Such aprons have no flat
+    terminal floor pinning them, so they may YIELD (prong #2, user
+    2026-05-23): in the relief phase they go soft alongside the taxi
+    network and the cap projection lets them drop to relieve a
+    connecting taxiway's over-grade — instead of being frozen by the
+    cascade and forcing the taxiway over grade (CYXY apron #45 vs E)."""
+    term_nodes = {i for i in range(n) if tiers[i] == _TIER_TERMINAL}
+    node_is_apron = [False] * n
+    node_pinned = [False] * n          # used by a terminal-touching apron
+    for s in layout.shapes:
+        if (s.role != ROLE_APRON or s.polygon is None
+                or s.polygon.is_empty):
+            continue
+        try:
+            coords = _open_ring(list(s.polygon.exterior.coords))
+        except _GEOM_EXC:
+            continue
+        idxs = []
+        for x, y in coords:
+            k = layout.canonical_points.get_or_add(float(x), float(y))
+            idx = bucket_to_idx.get(k)
+            if idx is not None:
+                idxs.append(idx)
+        touches_term = any(i in term_nodes for i in idxs)
+        for i in idxs:
+            node_is_apron[i] = True
+            if touches_term:
+                node_pinned[i] = True
+    return [node_is_apron[i] and tiers[i] == _TIER_APRON
+            and not node_pinned[i] for i in range(n)]
+
+
+def _runway_nodes(layout, bucket_to_idx, n):
+    """Return ``[bool]`` per node: belongs to a runway / runway-crossing
+    shape.  Used by the relief phase to let the runway yield a BOUNDED
+    amount (prong #1, user 2026-05-23) so it shares the grade relief
+    instead of an apron absorbing it all."""
+    out = [False] * n
+    for s in layout.shapes:
+        if (s.role not in (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING)
+                or s.polygon is None or s.polygon.is_empty):
+            continue
+        try:
+            coords = _open_ring(list(s.polygon.exterior.coords))
+        except _GEOM_EXC:
+            continue
+        for x, y in coords:
+            k = layout.canonical_points.get_or_add(float(x), float(y))
+            idx = bucket_to_idx.get(k)
+            if idx is not None:
+                out[idx] = True
+    return out
 
 
 # ── Stage 2: seed initial elevations + HARD anchor flags ─────────
