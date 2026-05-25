@@ -1,62 +1,95 @@
-# Auto-Patch Status — session 49: per-tier relief stiffness (taxi<apron<terminal)
+# Auto-Patch Status — session 49 END: directional shape-cascade relief; CYXY terrace = holdout
 
-## TL;DR / current state (session 49)
-**Read `docs/elevation_solver.md` FIRST** — it documents THE core
-component (the elevation solver/relief), the user's model, the final design,
-and every approach tried+rejected. Do not re-enter that rabbit hole blind.
+## TL;DR / current state (session 49 end)
+**Read `docs/elevation_solver.md` FIRST** — THE core component (elevation
+solver/relief), the user's model, every approach tried+rejected.
 
-**Session-49 change:** aprons are now a STIFF soft anchor too —
-`_RELIEF_APRON_STIFFNESS=15` (between taxi 1.0 and terminal 20) in
-`unified_jacobi.py`.  So in the relief the TAXI network yields as far as it
-can FIRST, then aprons, then the terminal last.  Stiffness is a per-edge
-SPLIT (`fu=kv/(ku+kv)`), not a phase order: stiff nodes still move a little
-each sweep but settle having moved least, yielding only the residual the
-softer side couldn't absorb within grade.  Within-tier edges (apron↔apron)
-stay symmetric, so apron self-compliance is unchanged.  Zero new test
-failures.  **NOTE:** this canNOT manufacture elevation past the grade
-budget — CYXY taxiway E still tops out ~708 (DEM crest 715–718) because the
-network is grade-limited by the LOW main apron (~695, pinned by the 693–694
-main runways) over the climb distance; the E taxiways already climb at a
-steady 1.49% (max) where elevation is available (verified end-to-end along
-the apt.dat E centerline).  The only lever to go higher is prong #1 (runway
-yield), deliberately parked.
+**Relief is now a DIRECTIONAL SHAPE-CASCADE** (commit `81c76a0`,
+`unified_jacobi._directional_relief`) — it REPLACES the session-48 symmetric
+stiffness cap-projection (now superseded; the `_RELIEF_APRON_STIFFNESS`/
+stiffness machinery is gone).
+- **Phase 1** = the inverted cascade (terminal→apron→taxi→runway, DEM-
+  following, cap to grade) — the warm start.
+- **Phase 2** = propagate compliance OUTWARD from the runway/seam HARD
+  anchors, building ON phase 1 (**NO reseed** — never throw the DEM-following
+  surface away). Shapes are processed by network distance from the runway;
+  each is solved as a UNIT (`_project_shape`) holding the vertices already set
+  by inward shapes, so a violation is pushed OUT to the free terminal/apron
+  end. Terminals translate as a rigid flat plane; aprons/junctions flex as
+  compliant all-pair surfaces (slope-to-cap-then-drag), never sheared.
 
-**Session-48 win (still current):** the relief "bounce" uses a
-**stiffness-weighted cap projection**. Every pavement node is soft
-(runway/seam HARD), but the
-**terminal is a STIFF soft anchor** (`_RELIEF_TERMINAL_STIFFNESS=20`,
-`_RELIEF_MAX_ITERS=12000` in `unified_jacobi.py`): it holds its DEM-centroid
-and yields only the MINIMUM, only where no grade-compliant path exists. The
-flexible aprons/taxi absorb the grade and the cap **overwrites the false-low
-DEM** (CYXY runways sit ~693 m on the plateau while the raw DEM reads the
-~670–688 m valley). This is the user's model made literal: anchor the truth,
-grade away from it, overwrite DEM where the slope rule requires.
+**Why the rewrite:** the symmetric relief reseeded to DEM and over-dropped
+compliant nodes to the LOWEST feasible surface — at SPLP it dropped junction
+21 to 70.7 (~1 m below its feasible band [71.65, 71.97], verified by Dijkstra
+band check), breaking stub A that phase 1 had already solved (0.43%). The
+directional cascade keeps phase 1's surface and only pushes residual outward.
 
-**CYXY result:** terminal sits near its DEM-centroid (**~703 m** under the
-restored absorption model; was a wrongly-dragged 692 before the stiffness
-fix), **within-shape grade = 0** (fully compliant).  The terminal yields only
-the minimum for a compliant path — the exact value depends on the surrounding
-apron geometry (the relief mechanism is the constant).  South aprons sit at
-their highest-compliant level (their ~722 DEM is genuinely infeasible — well
-above the SE runway ends they connect to — NOT an over-drop).
+**Result:**
+- **SPLP — SOLVED.** Tile −13/−77 within-shape = 0 (stub A relieved with NO
+  runway move — it was never infeasible, just over-dropped by the old relief).
+  Tile −13/−78: 16.3% primary-A sliver GONE (one marginal 1.9% apron + three
+  cross-shape 0.2 m shared-vertex hits remain — the latter a separate
+  emit-rounding issue, not the relief).
+- **CYXY — KNOWN REGRESSION (within-shape ~77), the holdout.** The excavated-
+  terrace cluster (big "leaf" apron #48 + sub-leaf junctions/aprons
+  #49/#51/#50, the 705–715 m hillside) SHEARS — the cascade's strict
+  inward-held ordering can't reconcile a densely-interconnected non-convex
+  2-D cluster the way the old symmetric relief (global reconciliation) did.
+  apron #51 sheared 119% (two ADJACENT verts 4.6 m apart, chord INSIDE — a
+  real cliff, not a phantom). Measured facts: apron #48 convexity **0.32**
+  (super-convoluted); its taxi connections are TIGHT (702.4–704.4, worst
+  1.67%) — so CYXY is a flatten/ordering problem, **NOT** global infeasibility.
 
-**Net change set (small + clean):**
-1. **Stiffness-weighted relief** — `_compliant_spread_fit(..., stiffness=)` +
-   the relief block in `solve()` (terminal stiff, all pavement soft).
-2. **SPJC degenerate sloping-rect guard** — `_rect_short_ends_perpendicular`
-   in `_writeback`: a tapering-wedge sub-rect falls back to `node_altitudes`
-   instead of a bogus `altitude_high/low` that tilts across a perpendicular
-   edge. Fixes `test_sloping_rect_slopes_only_along_axis[SPJC]`.
+**STEP 3 (runway-threshold yield) is PARKED** (commit `849265e`,
+`runway_redistribute.relieve_grade_via_runway_thresholds`,
+`ENABLE_RUNWAY_THRESHOLD_RELIEF=False`): the last-resort for a GENUINE
+multi-runway infeasibility (SPJC competing-terminal). Functional but
+UNVALIDATED on that target, and it can't tell a fixable residual from an
+unfixable one — so it's off by default. Enable + validate when a real
+multi-runway squeeze is hit (NOT needed for SPLP/CYXY).
 
-**Suite (excl. compare_target):** **7 failed / 278 passed / 5 skipped**
-(session 49 re-measured; the session-48 "5" UNDERCOUNTED — `have_source`
-[CYXY] + `outside_pavement`[CYXY] also fail and are PRE-EXISTING, confirmed
-by stashing the session-49 change and re-running clean.  Consistent with
-the documented CYXY/SPJC junction-invariant flakiness).  The 7 = junction
-`have_source`[SPJC]+[CYXY] + `outside_pavement`[CYXY] +
-`no_vertex_on_sloping_rect_flat_edge`[SPJC] + grade ×3 (CYXY/SPLP/SPJC).
-CYXY grade fails ONLY on the step cap; CYXY **within-shape grade = 0**.
-Re-run: `venv/bin/python -m pytest tests/ -q -k "not compare_target"` (~20 min).
+## PLAN for next session — fix CYXY's terrace (the holdout)
+1. **Cut non-convex transition aprons** (the non-convex all-pair problem).
+   apron #48 is a BLOB (convexity 0.32). The directional cascade works on
+   CHAINS (SPLP ✓) and chokes on BLOBS. Detect big LOW-CONVEXITY shapes that
+   also span grade, and CUT them PERPENDICULAR to their taxi routes into
+   CONVEX pieces — turning the terrace blob into a chain the cascade grades
+   smoothly (each piece compliant, joined at shared edges, grade following the
+   real pavement path, not Euclidean chords through non-pavement). CAVEAT:
+   apron *grid* subdivision was tried+rejected (`docs/elevation_solver.md`) —
+   pieces shared nodes (still one network) + added slivers; the new cut must
+   yield genuinely convex, non-sliver pieces.
+2. **Force-hierarchy "leaf network"** for the cascade's parent/held logic:
+   trunk (runway) → branches (taxiways, largest→smallest) → leaves (aprons
+   touching a taxiway) → sub-leaves (aprons touching only aprons). Give each
+   shape ONE parent (highest-priority inward neighbour); a sub-leaf is held
+   only by its parent, never by a same/lower-tier sibling — so it can drag its
+   siblings/children down instead of being clamped at incompatible levels (the
+   #51 119% shear was being held at both a #48-side 707 and a #50-side 713).
+3. Re-check SPJC; if a genuine multi-runway/terminal squeeze remains, enable +
+   validate STEP 3.
+
+## Session-49 commits on `dev`
+- `fb0cf43` clearance edge-interp (fix phantom apron-edge bumps — was
+  nearest-node Voronoi sampling; now matches Triangle4XP linear render).
+- `c4aa796` relief step-2 framing (terminals rigid, aprons/taxi flex).
+- `81c76a0` directional shape-cascade relief (replaces symmetric).
+- `849265e` parked step-3 runway-threshold relief (gated off).
+- (session-48 base) `6c6726e`/`5cb2e0a`/`60db68d`/`1f2ba5a`/`8f2b0e9` —
+  module/stands cleanup, docs, and the stiffness relief (now SUPERSEDED).
+
+**Suite (excl. compare_target):** **UNMEASURED after the directional cascade
+(`81c76a0`)** — committed as a checkpoint without a full re-run.  Known from
+per-tile probes: **CYXY grade REGRESSED** (within-shape ~77 — the terrace
+shear above; was within=0 / step-cap-only under the prior symmetric relief),
+**SPLP grade improved** (−13/−77 within=0).  SPJC unmeasured.  **First action
+next session: run `venv/bin/python -m pytest tests/ -q -k "not compare_target"`
+(~20 min)** to get the true count before touching anything.  Pre-directional
+baseline (`c4aa796`) was **6 failed / 279 passed / 5 skipped** = junction
+`have_source`[SPJC]+[CYXY] + `outside_pavement`[CYXY] (the last is FLAKY) +
+`no_vertex_on_sloping_rect_flat_edge`[SPJC] + grade ×3 (CYXY/SPLP/SPJC); the
+session-48 "5"-fail count UNDERCOUNTED the two CYXY junction-invariant fails
+(pre-existing / flaky).
 
 **Session-47 model REVERTED (user 2026-05-24):** `ABSORB_RECTS_ALONGSIDE_APRONS
 =True` — the no-absorption + apron-lane-chain model is gone; taxilanes through
