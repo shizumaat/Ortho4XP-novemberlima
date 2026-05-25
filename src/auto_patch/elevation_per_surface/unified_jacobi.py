@@ -43,6 +43,7 @@ shared corners automatic.
 """
 from __future__ import annotations
 
+import heapq
 import math
 import time as _time
 
@@ -331,28 +332,28 @@ def solve(layout, icao: str,
                _eq_pairs_from_groups(rect_flat_groups),
                rect_flat_groups, [])
 
-    # Relief "bounce" — STEP 2 of the directional grade-relief algorithm
-    # (user 2026-05-25; step 1 is the cascade above: seed DEM, spread
-    # terminal -> apron -> taxi -> runway, cap to grade).  Pull slack back from
-    # the runways: re-solve the whole pavement with grade enforced against the
-    # runway/seam CIFP anchors.
+    # Relief — STEP 2 of the directional grade-relief algorithm (user
+    # 2026-05-25).  STEP 1 is the cascade above (seed DEM, spread terminal ->
+    # apron -> taxi -> runway, cap to grade); where it already reaches the
+    # runway within grade, we are done and step 2 leaves it untouched.  Where
+    # it does NOT, step 2 FLIPS the direction: it propagates grade compliance
+    # OUTWARD from the runway/seam HARD anchors, building ON the cascade
+    # (no reseed — we never throw the DEM-following surface away).  For each
+    # over-grade edge it HOLDS the inward (runway-ward) node and moves ONLY the
+    # outward node to the nearest compliant value, so the violation is pushed
+    # OUT to the free terminal/apron end, which absorbs it — the compliant
+    # interior is never disturbed.  Terminals translate as a RIGID flat unit
+    # (their whole flat group shifts together); aprons/taxi flex per-node.
+    #
+    # This replaces the old SYMMETRIC relief, which reseeded to DEM and
+    # relaxed every edge both ways — converging to the LOWEST feasible surface
+    # and over-dropping compliant nodes (e.g. SPLP junction 21 → 70.7, ~1 m
+    # below its feasible band, breaking stub A that the cascade had solved).
+    #
+    # STEP 3 (shift runway thresholds + re-profile) stays the last resort, for
+    # a genuine multi-runway squeeze where no outward move can satisfy all
+    # runway connections (SPJC) — see pipeline / runway_redistribute.
     if _USE_L2_FIT:
-        # Every pavement node is SOFT (only runway/seam HARD).  Only TERMINALS
-        # must be flat: a high stiffness holds the terminal at its DEM-centroid
-        # and lets the whole flat plane translate as a UNIT, only as far as the
-        # grade back from the runway requires.  APRONS + TAXI flex FREELY
-        # within grade (stiffness 1.0) — they absorb as much of the grade as
-        # they can before the terminal moves.  The grade cap overwrites a
-        # false-low DEM (a surface can't descend faster than its cap from the
-        # rigid terminal, so it stays near terrain instead of sinking to a
-        # valley reading).
-        #
-        # STEP 3 (shift runway thresholds + re-profile, looped back through
-        # step 2 — the last resort when steps 1-2 can't reach grade with the
-        # runways locked) is NOT yet implemented: the runway must move as a
-        # coherent FAA profile (lateral-flat, <=1.5%/0.8%, K-curve), which is
-        # owned by the runway profiler at pipeline level.  Until it lands an
-        # infeasible-as-anchored case (SPLP stub A) still shows a residual.
         relief_hard = [base_hard[i] or tiers[i] == 0 for i in range(n)]
         if not all(relief_hard):
             relief_eg = dict(taxi_eg)
@@ -361,18 +362,11 @@ def solve(layout, icao: str,
             relief_el = dict(taxi_el)
             relief_el.update(apron_el)
             relief_el.update(term_el)
-            relief_groups = rect_flat_groups + terminal_groups
-            relief_pairs = _eq_pairs_from_groups(relief_groups)
-            # Only terminals are held rigid (stiff → flat plane translates as a
-            # unit, yielding minimally); aprons + taxi are free (1.0).
-            stiffness = [
-                (_RELIEF_TERMINAL_STIFFNESS if tiers[i] == _TIER_TERMINAL
-                 else 1.0)
-                for i in range(n)]
-            total_iters += _compliant_spread_fit(
-                n, elev, relief_hard, dem_elev, relief_eg, relief_el,
-                relief_pairs, _RELIEF_MAX_ITERS, tol_m, reseed=True,
-                stiffness=stiffness)
+            shape_constraints = _build_shape_constraints(
+                layout, bucket_to_idx)
+            total_iters += _directional_relief(
+                n, elev, relief_hard, relief_eg, relief_el,
+                shape_constraints, _RELIEF_MAX_ITERS, tol_m)
 
     n_terms, n_rects, n_juncs = _writeback(
         layout, elev, bucket_to_idx)
@@ -383,13 +377,8 @@ def solve(layout, icao: str,
 
 _SPREAD_OMEGA = 1.0          # cap-projection relaxation (>1 SOR diverges here)
 _SPREAD_COMPLY_TOL_M = 0.02  # iterate until every edge is within this of cap
-# Relief cap-projection stiffness: how much LESS a terminal node moves than a
-# flexible apron/taxi node when an over-grade edge between them is corrected.
-# High → the terminal holds its DEM-centroid and the apron absorbs the grade;
-# the terminal still yields a little where compliance is otherwise impossible.
-_RELIEF_TERMINAL_STIFFNESS = 20.0
-# A stiff terminal yields ~1/stiffness per sweep, so the relief needs a larger
-# iteration budget than the cascade tiers to fully converge to compliance.
+# Relief iteration budget (the directional shape-cascade caps its own outer
+# sweeps at ``_RELIEF_OUTER_SWEEPS``; this is the umbrella ceiling).
 _RELIEF_MAX_ITERS = 12000
 
 
@@ -495,6 +484,172 @@ def _compliant_spread_fit(n, elev, is_hard, dem_elev, edge_grade, edge_length,
         if max_viol < comply:
             return it + 1
     return max_iters
+
+
+_RELIEF_OUTER_SWEEPS = 60       # global shape-cascade passes (graph cycles)
+
+
+def _project_shape(elev, nodes, held, edges, flat) -> None:
+    """Make ONE shape internally grade-compliant, holding ``held`` (node idxs
+    already settled by inward shapes / HARD anchors); free nodes move the
+    minimum needed.  This is the per-shape realisation of "a node_altitudes
+    polygon stays compliant as a whole": it may slope up to its cap, but the
+    moment a pair would exceed the cap the rest of the shape is dragged along.
+
+    ``flat`` (terminal): every free node takes the held level (or the shape
+    mean if nothing is held) — the whole plane translates as a rigid unit.
+    Otherwise: a cap projection on the shape's OWN edges (rect = flat-cross +
+    axial; apron/junction = all-pair), so the surface flexes but never shears.
+    """
+    free = [i for i in nodes if i not in held]
+    if not free:
+        return
+    if flat:
+        src = [i for i in nodes if i in held]
+        lvl = (sum(elev[i] for i in src) / len(src) if src
+               else sum(elev[i] for i in nodes) / len(nodes))
+        for i in free:
+            elev[i] = lvl
+        return
+    for _ in range(400):
+        mx = 0.0
+        for (i, j, cap) in edges:
+            d = elev[i] - elev[j]
+            ex = abs(d) - cap
+            if ex <= 0.0:
+                continue
+            if ex > mx:
+                mx = ex
+            s = 1.0 if d > 0 else -1.0
+            hi = i in held
+            hj = j in held
+            if hi and hj:
+                continue
+            if hi:
+                elev[j] += s * ex
+            elif hj:
+                elev[i] -= s * ex
+            else:
+                elev[i] -= 0.5 * s * ex
+                elev[j] += 0.5 * s * ex
+        if mx < 0.01:
+            break
+
+
+def _directional_relief(n, elev, is_hard, edge_grade, edge_length,
+                        shape_constraints, max_iters, tol_m) -> int:
+    """Phase 2: a SHAPE-LEVEL cascade that propagates grade compliance OUTWARD
+    from the HARD anchors (runway/seam), building on the cascade in ``elev``
+    (NO reseed — the DEM-following surface is never discarded).
+
+    Shapes are processed in order of network distance from the nearest HARD
+    anchor.  Each shape is solved as a UNIT (:func:`_project_shape`): the
+    vertices it shares with already-settled inward shapes are HELD, and the
+    rest move the minimum to keep the WHOLE shape grade-compliant.  So a
+    violation is pushed OUTWARD shape by shape until the free terminal/apron
+    end absorbs it, and an all-pair surface (apron/junction) flexes as a
+    compliant unit instead of shearing.  Outer sweeps reconcile graph cycles.
+
+    Replaces the old symmetric cap projection (which reseeded to DEM and
+    over-dropped compliant nodes to the lowest feasible surface).
+    """
+    if not edge_grade or not shape_constraints:
+        return 0
+    # BFS rank: network distance from the nearest HARD anchor.
+    adj: dict[int, list[tuple[int, float]]] = {}
+    for (u, v), _g in edge_grade.items():
+        ln = edge_length[(u, v)]
+        adj.setdefault(u, []).append((v, ln))
+        adj.setdefault(v, []).append((u, ln))
+    INF = float("inf")
+    rank = [INF] * n
+    pq: list[tuple[float, int]] = [(0.0, i) for i in range(n) if is_hard[i]]
+    for _d, i in pq:
+        rank[i] = 0.0
+    heapq.heapify(pq)
+    while pq:
+        d, u = heapq.heappop(pq)
+        if d > rank[u]:
+            continue
+        for v, ln in adj.get(u, ()):  # type: ignore[arg-type]
+            nd = d + ln
+            if nd < rank[v]:
+                rank[v] = nd
+                heapq.heappush(pq, (nd, v))
+    # Process shapes nearest-the-runway first.
+    order = sorted(shape_constraints,
+                   key=lambda sc: min((rank[i] for i in sc["nodes"]),
+                                      default=INF))
+    ineq = [((u, v), edge_length[(u, v)] * gr)
+            for (u, v), gr in edge_grade.items()]
+    comply = max(tol_m, _SPREAD_COMPLY_TOL_M)
+    sweep = 0
+    for sweep in range(min(max_iters, _RELIEF_OUTER_SWEEPS)):
+        settled = list(is_hard)
+        for sc in order:
+            held = {i for i in sc["nodes"] if settled[i]}
+            _project_shape(elev, sc["nodes"], held, sc["edges"], sc["flat"])
+            for i in sc["nodes"]:
+                settled[i] = True
+        max_viol = max((abs(elev[u] - elev[v]) - cap
+                        for (u, v), cap in ineq), default=0.0)
+        if max_viol < comply:
+            break
+    return sweep + 1
+
+
+def _build_shape_constraints(layout, bucket_to_idx):
+    """Per-shape grade constraints for the directional relief: one entry per
+    soft pavement shape with ``{nodes, edges, flat}`` — its node indices, its
+    OWN internal grade edges ``(i, j, cap_m)``, and whether it must stay flat
+    (terminal).  Rects use flat-cross (cap≈0) + axial edges; apron/junction
+    use all-pair; terminal is flat.  Runway/seam are HARD, not included."""
+    out = []
+    for s in layout.shapes:
+        if s.role not in PAVEMENT_ROLES or s.role == ROLE_RUNWAY:
+            continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        coords = _open_ring(list(s.polygon.exterior.coords))
+        if len(coords) < 2:
+            continue
+        idx = [bucket_to_idx.get(
+            layout.canonical_points.get_or_add(float(x), float(y)))
+            for x, y in coords]
+        nodes = [i for i in idx if i is not None]
+        if len(nodes) < 2:
+            continue
+        flat = (s.role == ROLE_TERMINAL)
+        cap = _role_grade(s.role)
+        edges: list[tuple[int, int, float]] = []
+        is_rect = s.role in SLOPING_RECT_ROLES and len(coords) == 4 \
+            and all(i is not None for i in idx)
+        if flat:
+            pass                                  # handled by _project_shape
+        elif is_rect:
+            # [H, L, L, H]: flat-cross pairs (0,3) (1,2); axial (0,1) (3,2).
+            for a, b, flat_edge in ((0, 3, True), (1, 2, True),
+                                    (0, 1, False), (3, 2, False)):
+                if idx[a] is None or idx[b] is None or idx[a] == idx[b]:
+                    continue
+                d = math.hypot(coords[a][0] - coords[b][0],
+                               coords[a][1] - coords[b][1])
+                edges.append((idx[a], idx[b], 0.0 if flat_edge else cap * d))
+        else:
+            # All-pair (apron / junction / seam-cut rect).
+            m = len(idx)
+            for a in range(m):
+                if idx[a] is None:
+                    continue
+                for b in range(a + 1, m):
+                    if idx[b] is None or idx[a] == idx[b]:
+                        continue
+                    d = math.hypot(coords[a][0] - coords[b][0],
+                                   coords[a][1] - coords[b][1])
+                    if d >= 0.5:
+                        edges.append((idx[a], idx[b], cap * d))
+        out.append({"nodes": nodes, "edges": edges, "flat": flat})
+    return out
 
 
 # ── Stage 1: build node list ──────────────────────────────────────
