@@ -85,8 +85,6 @@ ROW_BOUNDARY_HEADER = 130
 ROW_TAXI_NODE = 1201
 ROW_TAXI_EDGE = 1202
 ROW_TRUCK_EDGE = 1206          # ground-vehicle (service-road) route edge
-ROW_RAMP_START = 1300          # aircraft startup / parking location
-ROW_RAMP_START_META = 1301     # ramp-start metadata (ICAO size code, op type)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -163,37 +161,6 @@ class TaxiEdge:
 
 
 @dataclass
-class RampStart:
-    """One aircraft startup / parking location (apt.dat rows 1300 + 1301).
-
-    Row 1300: ``1300 lat lon heading misc_type airplane_types name``
-      * ``misc_type`` ∈ {``misc``, ``gate``, ``tie_down``, ``hangar``}.
-      * ``airplane_types`` is a ``|``-separated list
-        (``jets|turboprops|props|helos|fighters``).
-      * ``name`` is the stand label (may contain spaces, e.g. ``"Gate 1"``).
-
-    Row 1301 (optional, immediately follows its 1300):
-    ``1301 size_code operation_type [airlines…]``
-      * ``size_code`` is the ICAO design code LETTER ``"A"``..``"F"`` — the
-        authoritative max-aircraft size for the stand (maps to wingspan via
-        ``config.WINGSPAN_BY_CODE_LETTER``).  Empty when no 1301 row.
-      * ``operation_type`` ∈ {``none``, ``general_aviation``, ``airline``,
-        ``cargo``, ``military``}.
-
-    Marks an aircraft STAND, which gets the stricter all-direction apron
-    grade cap (1.0 %, FAA AC 150/5300-13B §5.9 / ICAO Annex 14 §3.13).
-    """
-    lat: float
-    lon: float
-    heading: float
-    misc_type: str = ""
-    airplane_types: tuple[str, ...] = ()
-    name: str = ""
-    size_code: str = ""          # ICAO letter A..F (row 1301), "" if absent
-    operation_type: str = ""     # row 1301
-
-
-@dataclass
 class Airport:
     """Parsed airport geometry from one apt.dat block."""
     icao: str
@@ -207,8 +174,6 @@ class Airport:
     # ``TaxiEdge`` shape with ``kind == "truck"``; share the 1201 nodes
     # in ``taxi_nodes``.  Drive the 4 %-grade ``service_road`` rects.
     truck_edges: list[TaxiEdge] = field(default_factory=list)
-    # Aircraft startup / parking locations (rows 1300 + 1301) — stands.
-    ramp_starts: list[RampStart] = field(default_factory=list)
     boundary: Polygon | None = None
     source_path: str = ""
 
@@ -427,16 +392,6 @@ def load_airport(
             tk = _parse_truck_edge(toks)
             if tk is not None:
                 airport.truck_edges.append(tk)
-        elif row_type == ROW_RAMP_START:
-            rs = _parse_ramp_start(toks)
-            if rs is not None:
-                airport.ramp_starts.append(rs)
-        elif row_type == ROW_RAMP_START_META:
-            # 1301 metadata attaches to the most recent 1300 ramp start.
-            if airport.ramp_starts and len(toks) >= 2:
-                airport.ramp_starts[-1].size_code = toks[1].upper()
-                if len(toks) >= 3:
-                    airport.ramp_starts[-1].operation_type = toks[2]
 
     # Final flush in case the block ends mid-pavement.
     flush_pavement()
@@ -787,28 +742,6 @@ def _parse_truck_edge(toks: list[str]) -> TaxiEdge | None:
     name = " ".join(toks[4:]) if len(toks) > 4 else ""
     return TaxiEdge(node_from=nf, node_to=nt,
                     direction=direction, kind="truck", name=name)
-
-
-def _parse_ramp_start(toks: list[str]) -> "RampStart | None":
-    """Parse an apt.dat row 1300 into a RampStart (1301 metadata is
-    attached separately by the caller).
-
-    Format: ``1300 lat lon heading misc_type airplane_types name``
-    """
-    if len(toks) < 6:
-        return None
-    try:
-        lat = float(toks[1])
-        lon = float(toks[2])
-        heading = float(toks[3])
-    except (ValueError, IndexError):
-        return None
-    misc_type = toks[4]
-    airplane_types = tuple(t for t in toks[5].split("|") if t)
-    name = " ".join(toks[6:]) if len(toks) > 6 else ""
-    return RampStart(lat=lat, lon=lon, heading=heading,
-                     misc_type=misc_type, airplane_types=airplane_types,
-                     name=name)
 
 
 def _parse_pavement(rows: list[list[str]],

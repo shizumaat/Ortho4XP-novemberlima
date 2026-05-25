@@ -85,7 +85,6 @@ from .config import (
     RUNWAY_APRON_AREA_RATIO,
     RUNWAY_INSIDE_APRON_FRAC,
     SERVICE_ROAD_MAX_GRADE,
-    STAND_MAX_GRADE,
     TAXI_MAX_GRADE,
 )
 from .layout import (
@@ -133,7 +132,6 @@ __all__ = [
     "SHARED_VERTEX_CLUSTER_TOL_M",
     "SUBDIVIDE_MAX_PAIR_DIST_M",
     "SERVICE_ROAD_MAX_GRADE",
-    "STAND_MAX_GRADE",
     "SUBDIVIDE_SNAP_RADIUS_M",
     "TAXI_ANCHOR_DIST_M",
     "TAXI_MAX_GRADE",
@@ -215,7 +213,7 @@ USE_PER_POLYGON_ELEVATION_FIELD = False
 # unified Jacobi solver in ``elevation_per_surface`` that enforces the
 # per-axis grade rule (rect axial only; junction multi-directional;
 # rect cross-section flatness).  See
-# ``docs/elevation_per_surface_redesign.md``.  Default ON now that
+# ``docs/elevation_solver.md``.  Default ON now that
 # SPJC is the validated baseline; set ``O4_PER_SURFACE_SOLVER=0``
 # in the environment to fall back to the legacy unified solver.
 USE_PER_SURFACE_SOLVER = (

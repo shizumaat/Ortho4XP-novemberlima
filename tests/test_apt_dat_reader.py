@@ -321,39 +321,6 @@ def _load_ramp_truck(tmp_path):
     return APR.load_airport(str(p), "ZRMP")
 
 
-class TestRampStartParsing:
-    def test_ramp_starts_emitted(self, tmp_path):
-        apt = _load_ramp_truck(tmp_path)
-        assert apt is not None
-        assert len(apt.ramp_starts) == 3
-
-    def test_ramp_start_fields_and_size_code(self, tmp_path):
-        apt = _load_ramp_truck(tmp_path)
-        g1 = apt.ramp_starts[0]
-        assert g1.lat == pytest.approx(60.71398647)
-        assert g1.lon == pytest.approx(-135.07523025)
-        assert g1.heading == pytest.approx(-52.5)
-        assert g1.misc_type == "gate"
-        assert g1.airplane_types == ("jets",)
-        assert g1.name == "Gate 1"
-        assert g1.size_code == "C"          # from the 1301 row
-        assert g1.operation_type == "airline"
-
-    def test_multi_type_airplane_list(self, tmp_path):
-        apt = _load_ramp_truck(tmp_path)
-        g2 = apt.ramp_starts[1]
-        assert g2.airplane_types == ("turboprops", "props")
-        assert g2.size_code == "B"
-
-    def test_ramp_start_without_metadata_has_empty_size(self, tmp_path):
-        apt = _load_ramp_truck(tmp_path)
-        g3 = apt.ramp_starts[2]
-        assert g3.name == "GA Tie 3"
-        assert g3.misc_type == "tie_down"
-        assert g3.size_code == ""           # no 1301 row followed
-        assert g3.operation_type == ""
-
-
 class TestTruckEdgeParsing:
     def test_truck_edges_separate_from_taxi(self, tmp_path):
         apt = _load_ramp_truck(tmp_path)
@@ -393,5 +360,4 @@ class TestTruckEdgeParsing:
             encoding="utf-8")
         apt = APR.load_airport(str(p), "ZNOP")
         assert apt.truck_edges == []
-        assert apt.ramp_starts == []
         assert APR.service_road_centerlines(apt, lambda lon, lat: (lon, lat)) == []

@@ -16,7 +16,6 @@ __all__ = [
     "SLOPING_EDGE_SNAP_M",
     "EMIT_JUNCTIONS",
     "EMIT_APRONS",
-    "ENABLE_AIRCRAFT_STANDS",
     "ENABLE_SERVICE_ROADS",
     "ABSORB_RECTS_ALONGSIDE_APRONS",
     "EMIT_BRIDGES_AND_TUNNELS",
@@ -29,7 +28,6 @@ __all__ = [
     "ROLE_GRADE_LIMITS",
     "TAXI_MAX_GRADE",
     "APRON_MAX_GRADE",
-    "STAND_MAX_GRADE",
     "SERVICE_ROAD_MAX_GRADE",
     "SERVICE_ROAD_WIDTH_M",
     "MIN_SERVICE_STRIP_LEN_M",
@@ -58,7 +56,6 @@ __all__ = [
     "CLEARANCE_LATERAL_MAX_SLOPE",
     "RUNWAY_STRIP_HALF_WIDTH_BY_CODE",
     "WINGSPAN_BY_CODE_LETTER",
-    "AIRCRAFT_LENGTH_BY_CODE_LETTER",
     "TAXIWAY_WINGTIP_MARGIN_M",
     "runway_code_number",
     "runway_strip_half_width_m",
@@ -187,8 +184,6 @@ LOAD_DSF_PAVEMENT = True
 # the runway cap without touching taxiways.
 TAXI_MAX_GRADE = 0.015          # FAA AC 150/5300-13 taxiway-family
 APRON_MAX_GRADE = 0.015         # apron / junction body, all directions (user 2026-05-07)
-STAND_MAX_GRADE = 0.010         # aircraft stand, all directions — FAA AC 150/5300-13B §5.9
-                                # / EASA CS ADR-DSN.E.360 / ICAO Annex 14 §3.13 (1% any dir)
 SERVICE_ROAD_MAX_GRADE = 0.040  # ground-vehicle route (apt.dat 1206 + OSM small roads) — cars handle 4%
 # Ground-vehicle 4%-grade ``service_road`` rect geometry (session 47).
 SERVICE_ROAD_WIDTH_M = 6.0          # corridor width for a service-road rect
@@ -238,13 +233,9 @@ ROLE_GRADE_LIMITS = {
     "stub":               TAXI_MAX_GRADE,
     "cross_connector":    TAXI_MAX_GRADE,
     # Apron / junction — 1.5% all directions within the polygon
-    # (per user 2026-05-07).  Apron BODY; aircraft stands carved out of
-    # it are the stricter ``stand`` role below.
+    # (per user 2026-05-07).
     "apron":              APRON_MAX_GRADE,
     "junction":           APRON_MAX_GRADE,
-    # Aircraft stand / parking pad (sub-polygon of an apron at a ramp
-    # start) — 1.0% all directions (FAA §5.9 / EASA E.360 / ICAO §3.13).
-    "stand":              STAND_MAX_GRADE,
     # Terminals are typically flat polygons; the value rarely fires.
     "terminal":           TAXI_MAX_GRADE,
     # Tunnel ramps descend from pavement elevation to the tunnel
@@ -286,21 +277,17 @@ ROLE_GRADE_LIMITS = {
 EMIT_JUNCTIONS = True
 EMIT_APRONS = False
 
-# Session-47 feature flags.  The apron taxi-network decomposition (lane
-# corridors + body) is ON; aircraft stand pads and the ground-vehicle
-# service-road network are gated OFF for now (stands' value is unproven;
-# service roads are deferred to a future feature).  All the role/solver/
-# emit machinery stays in place — flip these to re-enable.
-ENABLE_AIRCRAFT_STANDS = False
+# Ground-vehicle service-road network — gated OFF (deferred feature).  The
+# service_roads.py machinery stays in place, but the OSM small-road lookup
+# and the apt.dat 1206 truck-edge parse are skipped while disabled so we
+# don't waste cycles loading roads we won't use.  Flip to re-enable.
 ENABLE_SERVICE_ROADS = False
 # Absorb taxi rects that share a sloping edge with an apron/junction into
-# that apron (the old "junctions don't live on sloping rect edges" rule).
-# OFF (session 47): we now KEEP such rects so a taxilane through an apron
-# stays a directionally-graded rect.  Node/seam parity is automatic —
-# the apron is ``pav_union − rects``, so it shares the rect's exact edge
-# nodes and adopts their per-corner altitudes (no cliff).  This makes the
-# apron decomposition workaround unnecessary.
-ABSORB_RECTS_ALONGSIDE_APRONS = False
+# that apron (the "junctions don't live on sloping rect edges" rule).  ON
+# (user 2026-05-24): the session-47 no-absorption + apron-lane-chain model
+# was reverted — taxilanes through aprons dissolve into the apron rather
+# than emitting tilting fixed-width ribbon chains.
+ABSORB_RECTS_ALONGSIDE_APRONS = True
 
 
 # ── Patch mesh-density tuning (X-Plane load-time optimization) ─────────
@@ -412,13 +399,6 @@ WINGSPAN_BY_CODE_LETTER = {
     "A": 15.0, "B": 24.0, "C": 36.0, "D": 52.0, "E": 65.0, "F": 80.0,
 }
 
-# Representative aircraft LENGTH (m) by ICAO code letter — used to size a
-# rectangular aircraft stand (the stand box = length along the parking
-# heading × wingspan across).  Approximate, from a typical type in each
-# class (B = Dash-8, C = A320/737, D = 767, E = 777/787, F = A380/747-8).
-AIRCRAFT_LENGTH_BY_CODE_LETTER = {
-    "A": 15.0, "B": 26.0, "C": 44.0, "D": 54.0, "E": 74.0, "F": 76.0,
-}
 # Margin (m) added beyond the wingtip (FAA-style wingtip clearance).
 TAXIWAY_WINGTIP_MARGIN_M = 3.0
 

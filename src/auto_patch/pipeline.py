@@ -55,13 +55,10 @@ from .config import (
     MIN_SEGMENT_LEN_M,
     LOAD_DSF_PAVEMENT,
     RUNWAY_APRON_AREA_RATIO,
-    WINGSPAN_BY_CODE_LETTER,
-    AIRCRAFT_LENGTH_BY_CODE_LETTER,
     OSM_SMALL_ROAD_HIGHWAY_TYPES,
     SERVICE_ROAD_WIDTH_M,
     MIN_SERVICE_STRIP_LEN_M,
     SERVICE_ROAD_PAVEMENT_NEAR_M,
-    ENABLE_AIRCRAFT_STANDS,
     ENABLE_SERVICE_ROADS,
 )
 from .layout import (
@@ -1097,45 +1094,16 @@ def build_airport_pavement(icao: str, xplane_root: str,
     layout.apt_taxi_centerlines = list(osm_centerlines)
 
     # apt.dat ramp starts (stands) + ground-vehicle service roads.
-    # Exposed for the per-zone apron grade model: ramp starts scope the
-    # stricter 1.0 % all-direction stand cap; 1206 service roads become
-    # 4 %-grade ``service_road`` rects.  Both empty when the block (or an
-    # OSM-only taxi network) lacks rows 1300/1301/1206.
-    layout.apt_ramp_starts = list(apt.ramp_starts)
-    layout.apt_service_centerlines = APR.service_road_centerlines(apt, to_m)
-    # Stand zones: a RECTANGLE per ramp start sized to the aircraft —
-    # length (along the parking heading) × wingspan (across) from the
-    # stand's ICAO size code.  Unknown / blank size codes default to code
-    # C.  Aprons are split at these rectangles into ROLE_STAND pads
-    # (graded all-direction at 1.0%).
-    stand_zones: list[Polygon] = []
-    for rs in (apt.ramp_starts if ENABLE_AIRCRAFT_STANDS else []):
-        letter = rs.size_code if rs.size_code in WINGSPAN_BY_CODE_LETTER else "C"
-        span = WINGSPAN_BY_CODE_LETTER[letter]
-        length = AIRCRAFT_LENGTH_BY_CODE_LETTER.get(letter,
-                                                    AIRCRAFT_LENGTH_BY_CODE_LETTER["C"])
-        cx, cy = to_m(rs.lon, rs.lat)
-        hdg = math.radians(rs.heading)
-        dx, dy = math.sin(hdg), math.cos(hdg)     # along parking heading (E, N)
-        px, py = math.cos(hdg), -math.sin(hdg)    # across (perpendicular)
-        hl, hw = length / 2.0, span / 2.0
-        try:
-            poly = Polygon([
-                (cx + dx * hl + px * hw, cy + dy * hl + py * hw),
-                (cx + dx * hl - px * hw, cy + dy * hl - py * hw),
-                (cx - dx * hl - px * hw, cy - dy * hl - py * hw),
-                (cx - dx * hl + px * hw, cy - dy * hl + py * hw),
-            ])
-        except _GEOM_EXC:
-            continue
-        if poly.is_valid and not poly.is_empty:
-            stand_zones.append(poly)
-    layout.apt_stand_zones = stand_zones
-    if apt.ramp_starts or apt.truck_edges:
-        UI.vprint(1,
-            f"  [pav-builder] {icao}: {len(apt.ramp_starts)} ramp start(s), "
-            f"{len(layout.apt_service_centerlines)} service-road "
-            f"centerline(s) ({len(apt.truck_edges)} truck edges).")
+    # 1206 service roads become 4 %-grade ``service_road`` rects when the
+    # feature is enabled.  Parsing the apt.dat 1206 centerlines is skipped
+    # while service roads are disabled (don't derive routes we won't use).
+    if ENABLE_SERVICE_ROADS:
+        layout.apt_service_centerlines = APR.service_road_centerlines(apt, to_m)
+        if layout.apt_service_centerlines:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: "
+                f"{len(layout.apt_service_centerlines)} service-road "
+                f"centerline(s) ({len(apt.truck_edges)} truck edges).")
 
     # ── Terminal groundside-pavement subtraction (user 2026-04-29):
     # remove curbside / drop-off / parking pavement from pav_union
@@ -2697,14 +2665,6 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # not area-based — a 6-way mega-intersection stays a junction.
         from .junction_repair import _reclassify_apron_junctions
         _reclassify_apron_junctions(layout, icao=icao)
-
-        # NOTE (session 47): apron decomposition (pavement/apron_split.py)
-        # is intentionally NOT called.  With absorption off, taxilanes
-        # through aprons already persist as directionally-graded rects
-        # with perfect node parity, so carving lane corridors out of the
-        # apron is unnecessary (it re-created — with non-parity geometry
-        # and cross-shape cliffs — what absorption used to dissolve).
-        # The module is kept for the (gated-off) stand-pad use case.
 
         # Rule-2 sloping-edge snap, re-run on the FINAL junction set.
         # ``_absorb_rects_at_junction_perimeters`` extends junction
