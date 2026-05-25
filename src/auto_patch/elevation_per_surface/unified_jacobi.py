@@ -331,24 +331,28 @@ def solve(layout, icao: str,
                _eq_pairs_from_groups(rect_flat_groups),
                rect_flat_groups, [])
 
-    # Relief "bounce" (user 2026-05-24) — re-solve the whole pavement with
-    # grade enforced, anchored at the runway/seam CIFP truth.  The cascade
-    # solves OUTWARD (terminal -> apron -> taxi -> runway), freezing each tier;
-    # that leaves taxiways/aprons forced over grade with no recourse.  Coming
-    # back, EVERY pavement node (taxi + ALL aprons + terminals) goes SOFT (only
-    # runway/seam stay HARD) and the cap projection is STIFFNESS-WEIGHTED.  See
-    # docs/elevation_solver.md for the full design + the approaches rejected.
+    # Relief "bounce" — STEP 2 of the directional grade-relief algorithm
+    # (user 2026-05-25; step 1 is the cascade above: seed DEM, spread
+    # terminal -> apron -> taxi -> runway, cap to grade).  Pull slack back from
+    # the runways: re-solve the whole pavement with grade enforced against the
+    # runway/seam CIFP anchors.
     if _USE_L2_FIT:
-        # Every pavement node is SOFT (only runway/seam stay HARD), but with
-        # per-node STIFFNESS (user 2026-05-24).  The terminal is a STIFF soft
-        # anchor — seeded at its DEM-centroid and held there, yielding only the
-        # MINIMUM where the network genuinely can't reach grade compliance
-        # otherwise ("the terminal is allowed to adjust, but ONLY if the solver
-        # can't make a grade-compliant path back from the runway").  Aprons and
-        # taxi are flexible, so they absorb the grade and the false-low DEM is
-        # overwritten by the cap (an apron can't descend faster than 1.5% from
-        # the stiff terminal, so it stays high instead of sinking to a valley
-        # DEM reading), rather than dragging the terminal down to a low level.
+        # Every pavement node is SOFT (only runway/seam HARD).  Only TERMINALS
+        # must be flat: a high stiffness holds the terminal at its DEM-centroid
+        # and lets the whole flat plane translate as a UNIT, only as far as the
+        # grade back from the runway requires.  APRONS + TAXI flex FREELY
+        # within grade (stiffness 1.0) — they absorb as much of the grade as
+        # they can before the terminal moves.  The grade cap overwrites a
+        # false-low DEM (a surface can't descend faster than its cap from the
+        # rigid terminal, so it stays near terrain instead of sinking to a
+        # valley reading).
+        #
+        # STEP 3 (shift runway thresholds + re-profile, looped back through
+        # step 2 — the last resort when steps 1-2 can't reach grade with the
+        # runways locked) is NOT yet implemented: the runway must move as a
+        # coherent FAA profile (lateral-flat, <=1.5%/0.8%, K-curve), which is
+        # owned by the runway profiler at pipeline level.  Until it lands an
+        # infeasible-as-anchored case (SPLP stub A) still shows a residual.
         relief_hard = [base_hard[i] or tiers[i] == 0 for i in range(n)]
         if not all(relief_hard):
             relief_eg = dict(taxi_eg)
@@ -359,16 +363,10 @@ def solve(layout, icao: str,
             relief_el.update(term_el)
             relief_groups = rect_flat_groups + terminal_groups
             relief_pairs = _eq_pairs_from_groups(relief_groups)
-            # Per-tier stiffness (user 2026-05-24): terminals stiffest,
-            # aprons a bit softer, taxi fully flexible.  So at an over-grade
-            # edge the TAXI side yields as far as it can first, then the
-            # apron, and the terminal moves last/least.  Within-tier edges
-            # (apron↔apron, taxi↔taxi) stay symmetric, so each surface's own
-            # all-pair compliance is unaffected — stiffness only shifts where
-            # the cross-tier boundary compromise lands.
+            # Only terminals are held rigid (stiff → flat plane translates as a
+            # unit, yielding minimally); aprons + taxi are free (1.0).
             stiffness = [
                 (_RELIEF_TERMINAL_STIFFNESS if tiers[i] == _TIER_TERMINAL
-                 else _RELIEF_APRON_STIFFNESS if tiers[i] == _TIER_APRON
                  else 1.0)
                 for i in range(n)]
             total_iters += _compliant_spread_fit(
@@ -390,11 +388,6 @@ _SPREAD_COMPLY_TOL_M = 0.02  # iterate until every edge is within this of cap
 # High → the terminal holds its DEM-centroid and the apron absorbs the grade;
 # the terminal still yields a little where compliance is otherwise impossible.
 _RELIEF_TERMINAL_STIFFNESS = 20.0
-# Aprons are a STIFF soft anchor too — a bit softer than the terminal (user
-# 2026-05-24): the taxi network (stiffness 1.0) yields as far as it can first,
-# then the apron, then the terminal last.  Holds aprons closer to their DEM
-# seed instead of letting them sink with the taxi network toward a low runway.
-_RELIEF_APRON_STIFFNESS = 15.0
 # A stiff terminal yields ~1/stiffness per sweep, so the relief needs a larger
 # iteration budget than the cascade tiers to fully converge to compliance.
 _RELIEF_MAX_ITERS = 12000
