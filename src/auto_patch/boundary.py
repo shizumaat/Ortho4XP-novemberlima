@@ -112,6 +112,24 @@ _CLAMP_PAVEMENT_ROLES = {
 }
 
 
+# Width (m) of the "release band" just inside ``clamp_radius_m`` over which
+# the clamp's UP-lift is tapered to zero, so the ribbon meets the DEM
+# CONTINUOUSLY at the radius instead of stepping.
+#
+# Why (user 2026-05-25, CYXY far-north tear): the clamp lifts the ribbon to
+# a floor ``best_e − grade·d`` only within ``clamp_radius_m``; one step
+# beyond it returned raw DEM.  Where the perimeter runs far (>400 m) from
+# pavement AND the terrain sits well below that floor (CYXY's north
+# peninsula: 694 m runway, 670 m terrain), the floor at the radius edge was
+# still ~12 m above the DEM — so a single ribbon rect straddling the radius
+# dropped 11.6 m (≈59 % grade), a near-vertical wall that read as mesh
+# tearing.  Tapering the lift to 0 over the last ``release band`` metres
+# removes the discontinuity (lift→0 ⇒ ribbon→DEM at the radius) while
+# leaving the near-pavement clamp (d ≤ radius − band) untouched.  Beyond the
+# radius the ribbon still follows DEM exactly as before.
+_CLAMP_RELEASE_BAND_M = 120.0
+
+
 def _collect_clamp_pavement(layout: "PavementLayout") -> list[BuiltShape]:
     """Airside-pavement shapes (runway / taxiway / junction / apron) with a
     usable polygon that anchor the boundary-ribbon altitude clamp."""
@@ -192,10 +210,20 @@ def _runway_clamped_alt_at(
         # No DEM — fall back to the floor (closest to the runway at
         # this distance without violating the grade cap).
         return lo
-    # Asymmetric: only pull UP toward runway; otherwise follow DEM.
-    if dem_e < lo:
-        return lo
-    return dem_e
+    # Asymmetric: only pull UP toward pavement; otherwise follow DEM.
+    lift = lo - dem_e
+    if lift <= 0.0:
+        return dem_e
+    # Taper the lift to 0 over the last ``_CLAMP_RELEASE_BAND_M`` metres
+    # before the radius so the ribbon meets the DEM continuously at the
+    # radius edge (no step).  ``taper`` is 1 for d ≤ radius − band (full
+    # clamp, unchanged) and ramps linearly to 0 at d = radius.
+    release_start = clamp_radius_m - _CLAMP_RELEASE_BAND_M
+    if best_d <= release_start:
+        taper = 1.0
+    else:
+        taper = (clamp_radius_m - best_d) / _CLAMP_RELEASE_BAND_M
+    return dem_e + lift * taper
 
 
 def _clip_boundary_bridges_against_pavement(
