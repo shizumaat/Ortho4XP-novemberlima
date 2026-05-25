@@ -70,7 +70,9 @@ from .pavement.runway_segments import (
 from .runway_regrade import regrade_runway, DEFAULT_ARC_K_M
 
 
-__all__ = ["redistribute_runway_profile"]
+__all__ = ["redistribute_runway_profile",
+           "relieve_grade_via_runway_thresholds",
+           "ENABLE_RUNWAY_THRESHOLD_RELIEF"]
 
 
 def _bucket_key(x: float, y: float) -> Tuple[int, int]:
@@ -463,3 +465,177 @@ def redistribute_runway_profile(
             n_touched += 1
 
     return n_touched
+
+
+# ══════════════════════════════════════════════════════════════════
+# STEP 3 of the directional grade-relief algorithm — bounded runway-
+# threshold yield, the LAST resort (user 2026-05-25).
+#
+# PARKED / UNVALIDATED (``ENABLE_RUNWAY_THRESHOLD_RELIEF = False``).  When
+# the cascade + the directional shape-relief (unified_jacobi) cannot reach
+# grade with the runways locked, this shifts the runway THRESHOLD that binds
+# the worst residual, re-derives the FAA profile (grade + K-curve, seam
+# anchors fixed), re-solves, and hill-climbs until compliant or no movable
+# threshold helps.  Intended for a GENUINE multi-runway infeasibility (e.g.
+# SPJC: a flat terminal squeezed between two runways at different elevations)
+# — NOT for SPLP (the directional cascade solves it with no runway move) nor
+# CYXY (apron shear is a mid-runway, non-threshold problem).  Kept for that
+# future edge case; enable + validate when one is hit.  Caveats: it cannot
+# tell a fixable residual from an unfixable one (so always-on it wastes
+# re-solves reverting), and it ranks residuals by excess-in-metres while
+# check_grade ranks by grade-%.
+# ══════════════════════════════════════════════════════════════════
+
+ENABLE_RUNWAY_THRESHOLD_RELIEF = False   # parked; flip to engage + validate
+_RELIEF_TOL_M = 0.03            # residual below this (m of grade-excess) = done
+_THRESHOLD_STEP_M = 0.25        # per-iteration threshold nudge
+
+
+def _relief_role_caps():
+    from .layout import (
+        ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL, ROLE_STUB,
+        ROLE_CROSS_CONNECTOR, ROLE_JUNCTION, ROLE_APRON)
+    from .config import TAXI_MAX_GRADE, APRON_MAX_GRADE
+    return {
+        ROLE_PRIMARY_PARALLEL: TAXI_MAX_GRADE,
+        ROLE_SECONDARY_PARALLEL: TAXI_MAX_GRADE,
+        ROLE_STUB: TAXI_MAX_GRADE,
+        ROLE_CROSS_CONNECTOR: TAXI_MAX_GRADE,
+        ROLE_JUNCTION: APRON_MAX_GRADE,
+        ROLE_APRON: APRON_MAX_GRADE,
+    }
+
+
+def _shape_vertex_elevs(s):
+    """Open-ring coords + per-vertex elevations for a shape, or
+    ``(coords, None)`` when it carries no elevation."""
+    try:
+        coords = list(s.polygon.exterior.coords)
+    except Exception:
+        return [], None
+    if coords and coords[0] == coords[-1]:
+        coords = coords[:-1]
+    if s.altitude_high is not None and s.altitude_low is not None \
+            and len(coords) == 4:
+        return coords, [s.altitude_high, s.altitude_low,
+                        s.altitude_low, s.altitude_high]
+    if s.node_altitudes:
+        per = [float(a) for a in s.node_altitudes[:len(coords)]]
+        if len(per) < len(coords) and per:
+            per += [per[-1]] * (len(coords) - len(per))
+        return coords, per
+    if s.altitude is not None:
+        return coords, [float(s.altitude)] * len(coords)
+    return coords, None
+
+
+def _worst_within_shape_residual(layout):
+    """Worst within-shape grade-excess (m over the compliant amount) among
+    taxi/junction/apron shapes, with its endpoints — or ``None`` if compliant."""
+    caps = _relief_role_caps()
+    worst = None
+    for s in layout.shapes:
+        cap = caps.get(s.role)
+        if cap is None or s.polygon is None or s.polygon.is_empty:
+            continue
+        coords, per = _shape_vertex_elevs(s)
+        if per is None or len(per) < 2:
+            continue
+        m = min(len(coords), len(per))
+        for i in range(m):
+            xi, yi = coords[i]
+            for j in range(i + 1, m):
+                xj, yj = coords[j]
+                d = math.hypot(xi - xj, yi - yj)
+                if d < 0.5:
+                    continue
+                excess = abs(per[i] - per[j]) - cap * d
+                if excess <= 0.0:
+                    continue
+                if worst is None or excess > worst["excess"]:
+                    hi_i = i if per[i] >= per[j] else j
+                    lo_i = j if hi_i == i else i
+                    worst = {
+                        "excess": excess, "shape": s,
+                        "hi_xy": coords[hi_i], "hi_e": per[hi_i],
+                        "lo_xy": coords[lo_i], "lo_e": per[lo_i],
+                        "mid_e": 0.5 * (per[i] + per[j]),
+                        "mid_xy": (0.5 * (xi + xj), 0.5 * (yi + yj))}
+    return worst
+
+
+def _seam_node_coords(layout):
+    """Seam-anchor node buckets — thresholds on these never move."""
+    return set(getattr(layout, "_seam_anchor_keys", None) or set())
+
+
+def _pick_movable_threshold(layout, state, residual, seam_keys):
+    """Runway-pair threshold nearest the residual (skipping seam-anchored
+    ones) + direction toward the residual's mean elevation.  Returns
+    ``(pair_key, elev_index, direction)`` or ``None``."""
+    bk_s = 1.0 / SHARED_VERTEX_TOL_M
+    mx, my = residual["mid_xy"]
+    best = None
+    for pair_key, st in state.items():
+        anchored = st.get("anchored") or []
+        elevs = st.get("elevs") or []
+        first_i = next((i for i, a in enumerate(anchored) if a), None)
+        last_i = next((i for i in range(len(anchored) - 1, -1, -1)
+                       if anchored[i]), None)
+        if first_i is None or last_i is None or first_i == last_i:
+            continue
+        try:
+            ax, ay = layout.ll_to_m(*st["phys_end_a_ll"])
+            bx, by = layout.ll_to_m(*st["phys_end_b_ll"])
+        except Exception:
+            continue
+        for (px, py), e_idx in (((ax, ay), first_i), ((bx, by), last_i)):
+            if (int(round(px * bk_s)), int(round(py * bk_s))) in seam_keys:
+                continue
+            d = math.hypot(px - mx, py - my)
+            if best is None or d < best[0]:
+                best = (d, pair_key, e_idx, elevs[e_idx])
+    if best is None:
+        return None
+    _d, pair_key, e_idx, thr_elev = best
+    direction = -1.0 if thr_elev > residual["mid_e"] else 1.0
+    return pair_key, e_idx, direction
+
+
+def relieve_grade_via_runway_thresholds(
+        layout, dem, tile_lat, tile_lon, resolve,
+        max_iters: int = 12, step_m: float = _THRESHOLD_STEP_M,
+        tol_m: float = _RELIEF_TOL_M) -> int:
+    """STEP 3 loop (PARKED).  ``resolve()`` re-runs the per-surface solver.
+    Nudge the binding runway threshold, re-profile + re-solve, keep the move
+    only if the worst residual shrank (trying the opposite direction once);
+    stop when compliant or no direction improves.  Returns the nudge count."""
+    state = getattr(layout, "_runway_profile_state", None)
+    if not state:
+        return 0
+    seam_keys = _seam_node_coords(layout)
+    n_moves = 0
+    for _it in range(max_iters):
+        r = _worst_within_shape_residual(layout)
+        if r is None or r["excess"] <= tol_m:
+            break
+        pick = _pick_movable_threshold(layout, state, r, seam_keys)
+        if pick is None:
+            break
+        pair_key, e_idx, direction = pick
+        improved = False
+        for dvec in (direction, -direction):
+            state[pair_key]["elevs"][e_idx] += dvec * step_m
+            redistribute_runway_profile(layout, dem, tile_lat, tile_lon)
+            resolve()
+            r2 = _worst_within_shape_residual(layout)
+            if (r2["excess"] if r2 else 0.0) < r["excess"] - 1e-3:
+                n_moves += 1
+                improved = True
+                break
+            state[pair_key]["elevs"][e_idx] -= dvec * step_m
+        if not improved:
+            redistribute_runway_profile(layout, dem, tile_lat, tile_lon)
+            resolve()
+            break
+    return n_moves

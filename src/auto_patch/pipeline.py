@@ -2785,6 +2785,25 @@ def build_airport_pavement(icao: str, xplane_root: str,
                                dem=dem,
                                tile_lat=tile_lat, tile_lon=tile_lon)
 
+            # STEP 3 (PARKED, ENABLE_RUNWAY_THRESHOLD_RELIEF=False): the
+            # last-resort runway-threshold yield, for a genuine multi-runway
+            # infeasibility the directional relief can't reach with runways
+            # locked.  Off by default — unvalidated; flip the flag in
+            # runway_redistribute to engage + validate.  See STATUS.
+            from .runway_redistribute import (
+                ENABLE_RUNWAY_THRESHOLD_RELIEF,
+                relieve_grade_via_runway_thresholds)
+            if ENABLE_RUNWAY_THRESHOLD_RELIEF:
+                def _resolve():
+                    per_surface_solve(layout, icao, dem=dem,
+                                      tile_lat=tile_lat, tile_lon=tile_lon)
+                n_thr = relieve_grade_via_runway_thresholds(
+                    layout, dem, tile_lat, tile_lon, _resolve)
+                if n_thr:
+                    UI.vprint(1,
+                        f"  [pav-builder] {icao}: step-3 grade relief — "
+                        f"shifted runway threshold(s) {n_thr} time(s).")
+
         if n_tile_delta != 0:
             UI.vprint(1,
                 f"  [pav-builder] {icao}: tile-boundary cut "
