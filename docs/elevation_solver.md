@@ -1,5 +1,16 @@
 # Elevation solver — auto_patch's core component
 
+> **⚠ CURRENT (session 49): the RELIEF changed.** Phase 2 is now a **directional
+> shape-cascade** (`_directional_relief`), NOT the stiffness-weighted cap projection
+> described below — that symmetric relief over-dropped compliant nodes to the lowest
+> feasible surface and is **superseded**. The new relief propagates compliance OUTWARD
+> from the runway/seam anchors, building on phase 1 (no reseed), solving each shape as a
+> unit (terminals rigid, aprons/junctions flex as compliant all-pair surfaces). It SOLVES
+> SPLP but CYXY's non-convex excavated-terrace apron cluster still shears — next steps are
+> cutting non-convex transition aprons + a force-hierarchy leaf network. **See `STATUS.md`
+> for the live state + plan.** The cascade (phase 1) + model + rejected-approaches below
+> are still accurate; only the phase-2 "Relief bounce" mechanism is replaced.
+
 This is the authoritative reference for how auto_patch grades pavement elevations.
 It supersedes and merges the two earlier design docs (`ELEVATION_FIELD_PLAN.md`,
 `docs/elevation_per_surface_redesign.md`), both of which described designs that were
