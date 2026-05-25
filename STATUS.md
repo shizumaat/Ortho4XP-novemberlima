@@ -1,40 +1,69 @@
-# Auto-Patch Status — session 47: taxilanes-through-aprons (no-absorption model, EXPERIMENTAL)
+# Auto-Patch Status — session 48: elevation relief = stiffness-weighted cap projection
 
-## TL;DR / current state (session 47)
-**Read memory `apron_grade_standards.md` FIRST** — it has the full session-47
-model, the config FLAGS, and the deferred route-graph work.
+## TL;DR / current state (session 48)
+**Read `docs/elevation_solver.md` FIRST** — it documents THE core
+component (the elevation solver/relief), the user's model, the final design,
+and every approach tried+rejected. Do not re-enter that rabbit hole blind.
 
-Suite (excl. compare_target) = **9 failed / 328 passed / 5 skipped**
-(`venv/bin/python -m pytest tests/ -q -k "not compare_target"`, ~6 min).
-Of the 9: **5 are baseline-comparable** (grade ×3 CYXY/SPLP/SPJC, plus
-`have_source[SPJC]`, `no_vertex_on_sloping_rect_flat_edge[SPJC]`), and
-**4 are NEW SPJC regressions from this experimental apron-lane work**:
-`neighbour_corners_shared[SPJC]`, `no_long_edge_proximity[SPJC]`,
-`runway_node_sharing[SPJC]`, `no_vertex_on_sloping_rect_edge[SPJC]` — the
-apron-lane chains + junction gaps collide with SPJC's denser junction/rect
-geometry. KNOWN; committed as an experimental checkpoint (all flag-gated,
-revertible). `test_taxi_rects_not_alongside_apron` is SKIPPED (marked for
-deletion — its absorption premise is reversed by the no-absorption model).
+**The win:** the relief "bounce" now uses a **stiffness-weighted cap
+projection**. Every pavement node is soft (runway/seam HARD), but the
+**terminal is a STIFF soft anchor** (`_RELIEF_TERMINAL_STIFFNESS=20`,
+`_RELIEF_MAX_ITERS=12000` in `unified_jacobi.py`): it holds its DEM-centroid
+and yields only the MINIMUM, only where no grade-compliant path exists. The
+flexible aprons/taxi absorb the grade and the cap **overwrites the false-low
+DEM** (CYXY runways sit ~693 m on the plateau while the raw DEM reads the
+~670–688 m valley). This is the user's model made literal: anchor the truth,
+grade away from it, overwrite DEM where the slope rule requires.
 
-**Session-47 model (taxilanes through aprons):** stop absorbing taxi rects
-that share a sloping edge with an apron → they persist as directionally-
-graded rects; apron = `pav_union − rects` (automatic node parity).  Lane
-rects for centerlines crossing OPEN apron (no bounded width from
-`_build_taxi_rects`) are built as continuous code-letter-width RIBBON chains
-(`pavement/rects.build_apron_lane_rects`), trimmed at BRANCH routing nodes to
-leave bounded gaps → residue junctions, run-through at collinear
-continuations.  Grade-rule research (stand 1.0% / taxilane 1.5% / 4% car) +
-the stand & service-road features are GATED OFF (see flags).
+**CYXY result:** terminal sits near its DEM-centroid (**~703 m** under the
+restored absorption model; was a wrongly-dragged 692 before the stiffness
+fix), **within-shape grade = 0** (fully compliant).  The terminal yields only
+the minimum for a compliant path — the exact value depends on the surrounding
+apron geometry (the relief mechanism is the constant).  South aprons sit at
+their highest-compliant level (their ~722 DEM is genuinely infeasible — well
+above the SE runway ends they connect to — NOT an over-drop).
 
-**Config flags (all OFF = experiment / feature gated):**
-`ABSORB_RECTS_ALONGSIDE_APRONS=False` (drives the no-absorption + apron-lane
-model), `ENABLE_AIRCRAFT_STANDS=False`, `ENABLE_SERVICE_ROADS=False`,
-`_PER_AXIS_JUNCTIONS=False` (unified_jacobi).
+**Net change set (small + clean):**
+1. **Stiffness-weighted relief** — `_compliant_spread_fit(..., stiffness=)` +
+   the relief block in `solve()` (terminal stiff, all pavement soft).
+2. **SPJC degenerate sloping-rect guard** — `_rect_short_ends_perpendicular`
+   in `_writeback`: a tapering-wedge sub-rect falls back to `node_altitudes`
+   instead of a bogus `altitude_high/low` that tilts across a perpendicular
+   edge. Fixes `test_sloping_rect_slopes_only_along_axis[SPJC]`.
 
-**DEFERRED (user-accepted "junction connectivity for now"):** direct lane→E/F
-*continuation* chains need full ROUTE-GRAPH TRAVERSAL (follow each centerline's
-apt.dat node-path to its terminating taxiway rect).  Today apron lanes connect
-to the E/F network THROUGH junctions (topologically correct).
+**Suite (excl. compare_target):** **5 failed / 280 passed / 5 skipped** —
+the genuine PRE-session-47 baseline (restoring absorption removed the 4 NEW
+SPJC apron-lane regressions session 47 had introduced).  The 5 = `have_source`
+[SPJC] + `no_vertex_on_sloping_rect_flat_edge`[SPJC] + grade ×3 (CYXY/SPLP/
+SPJC).  CYXY grade fails ONLY on the step cap — worst steps are the real
+~10 m excavated terrace (apron #60 ↔ #50); CYXY **within-shape grade = 0**.
+(280 vs the old 328 passed = the deleted dead-module/stands/ramp tests.)
+Re-run: `venv/bin/python -m pytest tests/ -q -k "not compare_target"` (~9 min).
+
+**Session-47 model REVERTED (user 2026-05-24):** `ABSORB_RECTS_ALONGSIDE_APRONS
+=True` — the no-absorption + apron-lane-chain model is gone; taxilanes through
+aprons dissolve into the apron again (no tilting fixed-width ribbon chains).
+CYXY now emits **0 apron-lane shapes**.
+
+**Removed dead/abandoned code (this session):**
+- Solver experiments: `pavement/apron_subdivide.py` (150 m grid — didn't fix
+  the over-drop, pieces share nodes; added slivers), `_ceiling_spread` +
+  `floor_tol`, the `largest_rwy_bearing` block.
+- Old superseded modules + their tests: `pavement/{taxiway_rects,classifier,
+  taxiway_decompose}.py` (replaced by `rects.py`) + `apron_split.py`.
+- **Aircraft stands** end-to-end: `ENABLE_AIRCRAFT_STANDS`, `STAND_MAX_GRADE`,
+  `ROLE_STAND`, `apt_stand_zones`, the `RampStart` apt.dat parser (+ tests),
+  `AIRCRAFT_LENGTH_BY_CODE_LETTER`.  (`WINGSPAN_BY_CODE_LETTER` kept — wingtip
+  clearance.)
+- **Service roads** (`ENABLE_SERVICE_ROADS=False`): code kept, but the OSM
+  small-roads lookup (already gated) + apt.dat 1206 centerline parse are now
+  both skipped while disabled — no wasted load cycles.
+See `docs/elevation_solver.md` for why the solver experiments were rejected.
+
+**Remaining flags:** `ABSORB_RECTS_ALONGSIDE_APRONS=True` (reverted),
+`ENABLE_SERVICE_ROADS=False` (gated, code kept), `_PER_AXIS_JUNCTIONS=False`.
+The session-47 details below are history (its apron-lane / stands experiments
+have been reverted/removed per the above).
 
 ## DONE this session (committed on `dev`)
 1. **`98f8ad0`** — (a) **same-pack DSF**: read DSF only from the chosen

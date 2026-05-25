@@ -18,7 +18,7 @@ every connected vertex.  This violates the per-axis FAA grade rule:
 The implementation lives in ``unified_jacobi`` as a single damped
 Jacobi solver with role-aware edge generation (rects ring-only;
 junctions / aprons / terminals ring + all-pair Euclidean).  See
-``docs/elevation_per_surface_redesign.md`` for the full design.
+``docs/elevation_solver.md`` for the full design.
 """
 from .solver import solve
 

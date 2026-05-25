@@ -10,7 +10,7 @@ These tests assert the elevation pipeline produces taxi/apron
 elevations within striking distance of the local DEM, not collapsed
 toward the runway.
 
-See ``docs/elevation_per_surface_redesign.md`` for the redesign plan.
+See ``docs/elevation_solver.md`` for the redesign plan.
 """
 from __future__ import annotations
 
@@ -93,7 +93,7 @@ def test_cyxy_taxi_e_south_apron_follows_terrain():
     runway elevation across surfaces via Euclidean / graph-distance
     constraints rather than per-axis grade compliance).
 
-    Reference: ``docs/elevation_per_surface_redesign.md``.
+    Reference: ``docs/elevation_solver.md``.
     """
     if "CYXY" not in {"CYXY"}:
         pytest.skip("CYXY-specific regression")

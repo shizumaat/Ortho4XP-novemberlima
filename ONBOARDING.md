@@ -87,8 +87,8 @@ green; check `STATUS.md` for the currently-expected failures before assuming you
 ## Where to look next
 - `src/auto_patch/CLAUDE.md` — module map, build/test, gotchas (the reference card).
 - `docs/STANDARDS.md` — every FAA/EASA/ICAO rule → citation → code constant.
-- `docs/auto_patch_design_requirements.docx`, `docs/auto_patch_tier2_plan.md`,
-  `docs/elevation_per_surface_redesign.md`, `ELEVATION_FIELD_PLAN.md` — design docs.
+- `docs/elevation_solver.md` — the elevation solver reference (core component).
+- `docs/auto_patch_design_requirements.docx`, `docs/auto_patch_tier2_plan.md` — design docs.
 - `STATUS.md` — what's currently being worked on and known-failing tests.
 - `tools/` — `check_grade.py` (grade validator), `build_target_osm.py` (re-cut test
   fixtures), `mesh_region_tris.py` (mesh/load-time measurement).

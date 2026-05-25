@@ -55,7 +55,7 @@ so there is no second copy to keep in sync. Change the number in `config.py` onl
 - `config.py` — all standards constants + tuning knobs (read first when touching rules).
 - `osm_load.py`, `apt_dat_reader.py`, `dsf_reader.py`, `cifp_reader.py` — inputs.
 - `pavement/` — phase-1 geometry: `runway_segments.py`, `runway_geometry.py`,
-  `centerlines.py`, `taxiway_rects.py`, `classifier.py`.
+  `centerlines.py`, `rects.py` (taxi-rect builder), `strips.py`.
 - `junction_emit.py`, `junction_rules.py`, `junction_repair.py` — junction build/repair.
 - `terminals.py`, `groundside.py`, `boundary.py`, `bridges.py`, `clearance.py` — features.
 - `elevation_per_surface/` — **the active elevation solver is
@@ -103,6 +103,7 @@ so there is no second copy to keep in sync. Change the number in `config.py` onl
 - `ONBOARDING.md` (repo root) — walkthrough-style onboarding for new engineers.
 - `STATUS.md` (repo root) — current handover / in-flight work (ephemeral).
 - `docs/auto_patch_design_requirements.docx` — original design requirements.
-- `docs/auto_patch_tier2_plan.md`, `docs/elevation_per_surface_redesign.md`,
-  `ELEVATION_FIELD_PLAN.md` — design/architecture notes for the elevation solver.
+- `docs/elevation_solver.md` — **the elevation solver reference** (cascade +
+  stiffness-weighted relief; the model, the rules, and the approaches rejected).
+- `docs/auto_patch_tier2_plan.md` — tier-2 design/architecture notes.
 - `docs/TEST_PLAN_SPJC.md` — test plan for the SPJC fixture airport.
