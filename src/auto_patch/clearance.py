@@ -75,7 +75,7 @@ from .layout import (
     SHARED_VERTEX_TOL_M,
     vertex_bucket,
 )
-from .elevation import _resample_node_altitudes_nn, _sample_dem
+from .elevation import _sample_dem
 from .pavement.junctions import _decompose_polygon_with_holes
 from .pavement.runways import _sample_runway_segment_elev
 
@@ -265,6 +265,52 @@ def _drop_sharp_corners(coords: list[tuple[float, float]],
             break
         del coords[worst_i]
     return coords
+
+
+def _resample_alts_over_strips(ring_open, strips):
+    """Per-vertex altitude for ``ring_open`` sampled from the set of raw
+    graded ``strips`` (each ``(open_ring, open_alts)``).
+
+    For each vertex: the altitude interpolated along the NEAREST strip
+    edge within ``EDGE_TOL_M`` (where strips overlap, the nearest edge
+    wins — i.e. the closest pavement-edge profile governs), else the
+    altitude of the nearest strip vertex.  Lets a single polygon unioned
+    from many strips carry a faithful per-vertex elevation."""
+    EDGE_TOL_M = 0.5
+    EDGE_TOL2 = EDGE_TOL_M * EDGE_TOL_M
+    out: list[float] = []
+    for (nx, ny) in ring_open:
+        best_d2 = EDGE_TOL2
+        best_alt: float | None = None
+        for ring, alts in strips:
+            m = min(len(ring), len(alts))
+            for k in range(m):
+                sx, sy = ring[k]
+                tx, ty = ring[(k + 1) % m]
+                dx, dy = tx - sx, ty - sy
+                seg2 = dx * dx + dy * dy
+                if seg2 < 1e-9:
+                    continue
+                t = ((nx - sx) * dx + (ny - sy) * dy) / seg2
+                if t < -1e-3 or t > 1.0 + 1e-3:
+                    continue
+                t = max(0.0, min(1.0, t))
+                px, py = sx + t * dx, sy + t * dy
+                d2 = (nx - px) ** 2 + (ny - py) ** 2
+                if d2 < best_d2:
+                    best_d2 = d2
+                    best_alt = alts[k] + t * (alts[(k + 1) % m] - alts[k])
+        if best_alt is None:
+            bd = float("inf")
+            for ring, alts in strips:
+                for k in range(min(len(ring), len(alts))):
+                    sx, sy = ring[k]
+                    d2 = (nx - sx) ** 2 + (ny - sy) ** 2
+                    if d2 < bd:
+                        bd = d2
+                        best_alt = alts[k]
+        out.append(round(float(best_alt if best_alt is not None else 0.0), 1))
+    return out
 
 
 def _rect_long_short_edges(coords: list[tuple[float, float]]):
@@ -660,70 +706,89 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
         except _GEOM_EXC:
             static_block = None
 
-    emitted: list[Polygon] = []
-    # Per-vertex altitude of every already-emitted cut, keyed by the
-    # shared-vertex bucket (same scheme ``to_osm`` interns with).  A new
-    # cut that abuts an existing one ADOPTS the neighbour's altitude at
-    # the shared vertex so the two meet 1:1 — identical node AND
-    # elevation, no consensus step / wall along the seam.
-    emitted_alts: dict[tuple[int, int], tuple[float, float, float]] = {}
+    # Collect every raw graded strip across all three passes, then
+    # resolve them ONCE into minimal geometry.  Building per-strip and
+    # clipping each new strip against the previously-emitted cuts (the
+    # old approach) carved overlapping runway/taxiway bands into slivers
+    # at junctions; unioning the raw strips up front and emitting one
+    # shape per connected region yields a single clean cut wherever the
+    # area is contiguous.
+    raw_strips: list[tuple[Polygon, list, list, str]] = []
 
-    def _shared_alt(x: float, y: float) -> float | None:
-        """Altitude of the nearest already-emitted cut vertex within
-        ``SHARED_VERTEX_TOL_M`` of ``(x, y)``; ``None`` if none."""
-        bx, by = vertex_bucket(x, y)
-        best: float | None = None
-        best_d2 = SHARED_VERTEX_TOL_M * SHARED_VERTEX_TOL_M
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
-                rec = emitted_alts.get((bx + dx, by + dy))
-                if rec is None:
-                    continue
-                ex, ey, ea = rec
-                d2 = (ex - x) ** 2 + (ey - y) ** 2
-                if d2 <= best_d2:
-                    best_d2 = d2
-                    best = ea
-        return best
-
-    def _commit(ring, alts, role) -> int:
-        """Clip a raw strip against pavement + prior cuts, then emit the
-        surviving simple polygons with resampled per-vertex altitudes."""
+    def _collect(ring, alts, role) -> None:
+        """Validate a raw strip ring and stash it for the finalize pass."""
         try:
             raw = Polygon(ring)
             if not raw.is_valid:
                 raw = raw.buffer(0)
         except _GEOM_EXC:
+            return
+        if (raw.is_empty or raw.geom_type != "Polygon"
+                or raw.area < _MIN_CUT_AREA_M2):
+            return
+        raw_strips.append((raw, list(ring), list(alts), role))
+
+    def _finalize() -> int:
+        """Union all collected strips, subtract pavement once, and emit
+        one ``node_altitudes`` shape per connected region — decomposed
+        into simple polygons only where a real pavement hole forces a
+        split.  Per-vertex altitudes are sampled from the nearest source
+        strip edge, so overlapping bands resolve to a single surface
+        instead of abutting slivers."""
+        if not raw_strips:
             return 0
-        if raw.is_empty or raw.area < _MIN_CUT_AREA_M2:
-            return 0
-        old_open = list(ring)
-        old_alts_closed = list(alts) + [alts[0]]
-        geom = raw
+        strips = [(ring, alts) for _p, ring, alts, _r in raw_strips]
         try:
+            region = unary_union([p for p, _r, _a, _ro in raw_strips])
             if static_block is not None and not static_block.is_empty:
-                geom = geom.difference(static_block)
-            if emitted:
-                # No gap between cuts: clip against the BARE union so a
-                # new cut abuts its neighbours exactly (GEOS noding gives
-                # coincident vertices along the shared edge).
-                geom = geom.difference(unary_union(emitted))
+                region = region.difference(static_block)
         except _GEOM_EXC:
             return 0
-        if geom.is_empty:
+        if region.is_empty:
             return 0
-        parts = (list(geom.geoms) if geom.geom_type == "MultiPolygon"
-                 else [geom] if geom.geom_type == "Polygon" else [])
+        try:
+            runway_block = unary_union(
+                [p for p, _r, _a, role in raw_strips
+                 if role == ROLE_RUNWAY_CLEARANCE])
+        except _GEOM_EXC:
+            runway_block = None
+
+        if region.geom_type == "Polygon":
+            components = [region]
+        elif region.geom_type in ("MultiPolygon", "GeometryCollection"):
+            components = [g for g in region.geoms if g.geom_type == "Polygon"]
+        else:
+            components = []
+
+        # Cross-piece 1:1 seams: where a pavement hole splits a region
+        # into sibling pieces, a coincident vertex adopts the altitude
+        # the first sibling already wrote (no consensus step).
+        adopt: dict[tuple[int, int], tuple[float, float, float]] = {}
+
+        def _adopt_alt(x: float, y: float) -> float | None:
+            bx, by = vertex_bucket(x, y)
+            best: float | None = None
+            best_d2 = SHARED_VERTEX_TOL_M * SHARED_VERTEX_TOL_M
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    rec = adopt.get((bx + dx, by + dy))
+                    if rec is None:
+                        continue
+                    ex, ey, ea = rec
+                    d2 = (ex - x) ** 2 + (ey - y) ** 2
+                    if d2 <= best_d2:
+                        best_d2 = d2
+                        best = ea
+            return best
+
         n = 0
-        for part in parts:
+        for comp in components:
             for simple in _decompose_polygon_with_holes(
-                    part, min_area_m2=_MIN_CUT_AREA_M2):
+                    comp, min_area_m2=_MIN_CUT_AREA_M2):
                 if simple.is_empty or simple.area < _MIN_CUT_AREA_M2:
                     continue
-                # Morphological open removes hairline slivers / near-
-                # collinear spikes that would trip to_osm's sub-2°
-                # corner guard (X-Plane mesh-builder crash) and get the
-                # whole shape dropped.
+                # Morphological open removes hairline slivers / spikes
+                # that would trip to_osm's sub-2° corner guard.
                 try:
                     opened = simple.buffer(-0.1).buffer(0.1)
                 except _GEOM_EXC:
@@ -735,25 +800,10 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                 ring = _open_coords(simple)
                 if len(ring) < 3:
                     continue
-                try:
-                    poly = Polygon(ring)
-                    if not poly.is_valid:
-                        poly = poly.buffer(0)
-                except _GEOM_EXC:
-                    continue
-                if poly.is_empty or poly.geom_type != "Polygon":
-                    continue
-                node_alts = _resample_node_altitudes_nn(
-                    poly, old_open, old_alts_closed)
-                if not node_alts:
-                    continue
-                # Collapse the redundant nodes along straight, planar
-                # runs (the inner edge + uniform daylight stretches);
-                # to_osm then emits the compact shape (a flat or sloped
-                # quad where it fits, else few-node node_altitudes).
-                open_ring = _open_coords(poly)
-                dec_xy, _dec_a = _decimate(open_ring,
-                                           node_alts[:len(open_ring)])
+                # Collapse redundant collinear+planar nodes, trim sharp
+                # corners, then sample the final ring's altitudes.
+                alts0 = _resample_alts_over_strips(ring, strips)
+                dec_xy, _dec_a = _decimate(ring, alts0)
                 dec_xy = _drop_sharp_corners(dec_xy)
                 if len(dec_xy) < 3:
                     continue
@@ -761,56 +811,33 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                     poly = Polygon(dec_xy)
                     if not poly.is_valid:
                         poly = poly.buffer(0)
+                    poly = _largest_poly(poly)
                 except _GEOM_EXC:
                     continue
-                if (poly.is_empty or poly.geom_type != "Polygon"
-                        or poly.area < _MIN_CUT_AREA_M2):
-                    continue
-                # Re-clip the DECIMATED polygon against prior cuts:
-                # decimation can bulge a concave daylight contour (which
-                # faces AWAY from pavement, toward neighbouring cuts)
-                # outward, re-introducing a small cut↔cut overlap.  This
-                # is the final geometry op, so the emitted shape is
-                # guaranteed overlap-free while still abutting (no gap).
-                # (No need to re-clip against pavement: the inner edge is
-                # straight, so decimation can't bulge it toward pavement.)
-                try:
-                    if emitted:
-                        poly = poly.difference(unary_union(emitted))
-                except _GEOM_EXC:
-                    continue
-                poly = _largest_poly(poly)
                 if (poly is None or poly.geom_type != "Polygon"
-                        or poly.area < _MIN_CUT_AREA_M2):
+                        or poly.is_empty or poly.area < _MIN_CUT_AREA_M2):
                     continue
-                # Re-resample against the ORIGINAL strip so node_altitudes
-                # always matches the final ring length (robust to the
-                # decimation + re-clip).  Kept/inserted vertices lie on old
-                # strip edges, so edge interpolation reproduces altitudes.
-                node_alts = _resample_node_altitudes_nn(
-                    poly, old_open, old_alts_closed)
-                if not node_alts:
-                    continue
-                # Seam continuity: at every vertex shared with an
-                # already-emitted cut, adopt the neighbour's altitude so
-                # the two cuts meet 1:1 (same node, same elevation) with
-                # no consensus-averaged step.  Then register this cut's
-                # vertices so later cuts tie into it the same way.
-                open_ring = _open_coords(poly)
-                adopted = list(node_alts[:len(open_ring)])
-                for vi, (vx, vy) in enumerate(open_ring):
-                    shared = _shared_alt(vx, vy)
-                    if shared is not None:
-                        adopted[vi] = shared
-                node_alts = adopted + [adopted[0]]
-                for (vx, vy), a in zip(open_ring, adopted):
-                    emitted_alts.setdefault(vertex_bucket(vx, vy),
-                                            (vx, vy, a))
+                final_ring = _open_coords(poly)
+                node_open = _resample_alts_over_strips(final_ring, strips)
+                for vi, (vx, vy) in enumerate(final_ring):
+                    a = _adopt_alt(vx, vy)
+                    if a is not None:
+                        node_open[vi] = a
+                for (vx, vy), a in zip(final_ring, node_open):
+                    adopt.setdefault(vertex_bucket(vx, vy), (vx, vy, a))
+                node_alts = node_open + [node_open[0]]
+                # Classify by the band that covers most of the piece.
+                role = ROLE_TAXIWAY_CLEARANCE
+                if runway_block is not None and not runway_block.is_empty:
+                    try:
+                        if (poly.intersection(runway_block).area
+                                > 0.5 * poly.area):
+                            role = ROLE_RUNWAY_CLEARANCE
+                    except _GEOM_EXC:
+                        pass
                 layout.shapes.append(BuiltShape(
-                    polygon=poly, role=role,
-                    ref="surface_clearance",
+                    polygon=poly, role=role, ref="surface_clearance",
                     node_altitudes=node_alts))
-                emitted.append(poly)
                 n += 1
         return n
 
@@ -852,8 +879,7 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                 for ring, ralts in _build_graded_strips(
                         e_pts, e_alts, e_out, e_bw, tx_slope,
                         tx_threshold, step, sample_dem):
-                    n_emitted += _commit(ring, ralts,
-                                         ROLE_TAXIWAY_CLEARANCE)
+                    _collect(ring, ralts, ROLE_TAXIWAY_CLEARANCE)
     else:
         # Fallback: taxiway rect long-edges (wingtip basis).
         for s in taxi_shapes:
@@ -880,7 +906,7 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                 for ring, ralts in _build_graded_strips(
                         pts, alts, [outward] * m, [band_w] * m,
                         tx_slope, tx_threshold, step, sample_dem):
-                    n_emitted += _commit(ring, ralts, ROLE_TAXIWAY_CLEARANCE)
+                    _collect(ring, ralts, ROLE_TAXIWAY_CLEARANCE)
 
     # ── Pass B: runway lateral graded-strip cuts (rect long-edges) ──
     rw_threshold = CLEARANCE_OBSTRUCTION_THRESHOLD_M["runway"]
@@ -908,7 +934,7 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
             for ring, ralts in _build_graded_strips(
                     pts, alts, [outward] * m, [band_w] * m,
                     rw_slope, rw_threshold, step, sample_dem):
-                n_emitted += _commit(ring, ralts, ROLE_RUNWAY_CLEARANCE)
+                _collect(ring, ralts, ROLE_RUNWAY_CLEARANCE)
 
     # ── Pass C: runway-end safety area (RESA) ──
     # A graded rectangle off each runway end, symmetric about the
@@ -948,6 +974,8 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
         for ring, ralts in _build_graded_strips(
                 stations, [ref] * m, [outward] * m, [rw_max_reach] * m,
                 RUNWAY_END_RESA_MAX_SLOPE, rw_threshold, step, sample_dem):
-            n_emitted += _commit(ring, ralts, ROLE_RUNWAY_CLEARANCE)
+            _collect(ring, ralts, ROLE_RUNWAY_CLEARANCE)
 
+    # Resolve all collected strips into minimal geometry in one pass.
+    n_emitted = _finalize()
     return n_emitted
