@@ -529,15 +529,58 @@ def _ray_edge(prep_pav, sx, sy, dx, dy) -> float | None:
     return None
 
 
+def _edge_interp_alt(shape, x, y) -> float | None:
+    """Pavement-surface altitude near ``(x, y)``, interpolated the way
+    Triangle4XP renders it: linearly along the boundary EDGE between the two
+    endpoint node altitudes.
+
+    For a ``node_altitudes`` shape (apron / junction / tile-cut piece),
+    ``_sample_runway_segment_elev`` returns the NEAREST-NODE value — a
+    piecewise-constant Voronoi field that STEPS at cell boundaries.  When the
+    clearance shadow samples a pavement edge that way, a point near the edge
+    can pick up a distant node's altitude (a 2 m phantom step the apron never
+    renders).  Projecting to the nearest boundary edge and interpolating its
+    endpoint altitudes mirrors the rendered surface, so the shadow stays
+    smooth.  Flat / ``altitude_high``-``low`` shapes fall through to the
+    existing sampler (no node_altitudes to interpolate)."""
+    na = shape.node_altitudes
+    if not na or shape.polygon is None:
+        return _sample_runway_segment_elev(shape, x, y)
+    try:
+        coords = list(shape.polygon.exterior.coords)
+    except _GEOM_EXC:
+        return _sample_runway_segment_elev(shape, x, y)
+    n = min(len(coords), len(na))
+    if n < 2:
+        return _sample_runway_segment_elev(shape, x, y)
+    best_d2 = float("inf")
+    best: float | None = None
+    for i in range(n - 1):
+        sx, sy = coords[i]
+        tx, ty = coords[i + 1]
+        dx, dy = tx - sx, ty - sy
+        seg2 = dx * dx + dy * dy
+        if seg2 < 1e-9:
+            continue
+        t = max(0.0, min(1.0, ((x - sx) * dx + (y - sy) * dy) / seg2))
+        px, py = sx + t * dx, sy + t * dy
+        d2 = (x - px) ** 2 + (y - py) ** 2
+        if d2 < best_d2:
+            best_d2 = d2
+            best = na[i] + t * (na[i + 1] - na[i])
+    return best if best is not None else _sample_runway_segment_elev(shape, x, y)
+
+
 def _pav_alt(pav_shapes, x, y) -> float | None:
     """Altitude of the airside pavement at ``(x, y)`` — the shape
-    containing the point (rect/junction/apron all handled by
-    ``_sample_runway_segment_elev``)."""
+    containing the point, edge-interpolated (see :func:`_edge_interp_alt`)
+    so a ``node_altitudes`` apron/junction is shadowed at its RENDERED
+    altitude, not a stepped nearest-node sample."""
     pt = Point(x, y)
     for s in pav_shapes:
         try:
             if s.polygon.contains(pt):
-                e = _sample_runway_segment_elev(s, x, y)
+                e = _edge_interp_alt(s, x, y)
                 if e is not None:
                     return e
         except _GEOM_EXC:
