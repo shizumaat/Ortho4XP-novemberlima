@@ -49,12 +49,12 @@ import time as _time
 from shapely.errors import GEOSException, TopologicalError
 
 from auto_patch.elevation import (
-    APRON_MAX_GRADE, SERVICE_ROAD_MAX_GRADE, STAND_MAX_GRADE, TAXI_MAX_GRADE)
+    APRON_MAX_GRADE, SERVICE_ROAD_MAX_GRADE, TAXI_MAX_GRADE)
 from auto_patch.layout import (
     ROLE_APRON, ROLE_BOUNDARY, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL, ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
     ROLE_SECONDARY_PARALLEL, ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION,
-    ROLE_STAND, ROLE_STUB, ROLE_TERMINAL,
+    ROLE_STUB, ROLE_TERMINAL,
 )
 
 # Narrow exception tuple for shapely / numeric-geometry failure
@@ -73,9 +73,6 @@ SLOPING_RECT_ROLES = (
 PAVEMENT_ROLES = {
     ROLE_RUNWAY, *SLOPING_RECT_ROLES,
     ROLE_APRON, ROLE_TERMINAL, ROLE_JUNCTION,
-    # Aircraft stand pad (carved from an apron): all-pair grading branch
-    # at the stricter 1.0% cap (see _role_grade).
-    ROLE_STAND,
     # Service-road network junction: all-pair grading branch at 4%
     # (not a sloping rect — irregular fill polygon at bends/intersections).
     ROLE_SERVICE_JUNCTION,
@@ -212,14 +209,11 @@ def _role_grade(role: str) -> float:
     """Per-role max grade cap.  Taxiway-family + runway + junction share
     ``TAXI_MAX_GRADE`` (1.5 %); ground-vehicle service roads get the
     looser 4 % (cars handle steeper terrain); apron / terminal use
-    ``APRON_MAX_GRADE`` (1.5 %, with stricter stand zones applied per-pair
-    in ``_build_edges``).  Checked before the sloping-rect branch because
-    service_road is itself a sloping rect but must NOT inherit 1.5 %.
+    ``APRON_MAX_GRADE`` (1.5 %).  Checked before the sloping-rect branch
+    because service_road is itself a sloping rect but must NOT inherit 1.5 %.
     """
     if role in (ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION):
         return SERVICE_ROAD_MAX_GRADE
-    if role == ROLE_STAND:
-        return STAND_MAX_GRADE
     if role in (ROLE_RUNWAY, *SLOPING_RECT_ROLES, ROLE_JUNCTION):
         return TAXI_MAX_GRADE
     return APRON_MAX_GRADE
@@ -337,38 +331,41 @@ def solve(layout, icao: str,
                _eq_pairs_from_groups(rect_flat_groups),
                rect_flat_groups, [])
 
-    # Relief phase (prong #2, user 2026-05-23) — terminal-free aprons
-    # YIELD with the taxi network.  The cascade froze every apron before
-    # the taxi solved, so a taxiway bridging a low runway and a high
-    # terminal-free apron (CYXY E -> apron #45) is forced over grade with
-    # no recourse.  Here the terminal-free apron nodes go SOFT alongside
-    # the taxi nodes (terminals, terminal-anchored aprons, runway/seam
-    # stay HARD), and the cap projection lets the apron drop only as far
-    # as relieving the over-grade requires.  The DEM seed keeps it near
-    # terrain; it descends below only where grade demands (and the edge-
-    # blur caution applies — it never chases edge DEM, only yields to grade).
+    # Relief "bounce" (user 2026-05-24) — re-solve the whole pavement with
+    # grade enforced, anchored at the runway/seam CIFP truth.  The cascade
+    # solves OUTWARD (terminal -> apron -> taxi -> runway), freezing each tier;
+    # that leaves taxiways/aprons forced over grade with no recourse.  Coming
+    # back, EVERY pavement node (taxi + ALL aprons + terminals) goes SOFT (only
+    # runway/seam stay HARD) and the cap projection is STIFFNESS-WEIGHTED.  See
+    # docs/elevation_solver.md for the full design + the approaches rejected.
     if _USE_L2_FIT:
-        yieldable = _terminal_free_apron_nodes(layout, bucket_to_idx, tiers, n)
-        if any(yieldable):
-            # Terminal-free aprons go soft with the taxi network; the
-            # runway stays HARD (its yield is a LAST RESORT, not here —
-            # user 2026-05-23).  The yield is grade-driven and UNBOUNDED:
-            # the DEM is unreliable at excavated terraces (CYXY apron #45's
-            # DEM reads ~714 m but the real terrace is 705 m), so the cap
-            # projection — not a DEM-relative bound — finds the right
-            # level.  It drops only as far as relieving the over-grade
-            # requires, which lands at the true terrace.
-            relief_hard = [base_hard[i] or not (
-                tiers[i] == _TIER_TAXI or yieldable[i]) for i in range(n)]
-            if not all(relief_hard):
-                relief_eg = dict(taxi_eg)
-                relief_eg.update(apron_eg)
-                relief_el = dict(taxi_el)
-                relief_el.update(apron_el)
-                total_iters += _compliant_spread_fit(
-                    n, elev, relief_hard, dem_elev, relief_eg, relief_el,
-                    _eq_pairs_from_groups(rect_flat_groups),
-                    _L2_MAX_ITERS, tol_m)
+        # Every pavement node is SOFT (only runway/seam stay HARD), but with
+        # per-node STIFFNESS (user 2026-05-24).  The terminal is a STIFF soft
+        # anchor — seeded at its DEM-centroid and held there, yielding only the
+        # MINIMUM where the network genuinely can't reach grade compliance
+        # otherwise ("the terminal is allowed to adjust, but ONLY if the solver
+        # can't make a grade-compliant path back from the runway").  Aprons and
+        # taxi are flexible, so they absorb the grade and the false-low DEM is
+        # overwritten by the cap (an apron can't descend faster than 1.5% from
+        # the stiff terminal, so it stays high instead of sinking to a valley
+        # DEM reading), rather than dragging the terminal down to a low level.
+        relief_hard = [base_hard[i] or tiers[i] == 0 for i in range(n)]
+        if not all(relief_hard):
+            relief_eg = dict(taxi_eg)
+            relief_eg.update(apron_eg)
+            relief_eg.update(term_eg)
+            relief_el = dict(taxi_el)
+            relief_el.update(apron_el)
+            relief_el.update(term_el)
+            relief_groups = rect_flat_groups + terminal_groups
+            relief_pairs = _eq_pairs_from_groups(relief_groups)
+            stiffness = [(_RELIEF_TERMINAL_STIFFNESS
+                          if tiers[i] == _TIER_TERMINAL else 1.0)
+                         for i in range(n)]
+            total_iters += _compliant_spread_fit(
+                n, elev, relief_hard, dem_elev, relief_eg, relief_el,
+                relief_pairs, _RELIEF_MAX_ITERS, tol_m, reseed=True,
+                stiffness=stiffness)
 
     n_terms, n_rects, n_juncs = _writeback(
         layout, elev, bucket_to_idx)
@@ -379,10 +376,19 @@ def solve(layout, icao: str,
 
 _SPREAD_OMEGA = 1.0          # cap-projection relaxation (>1 SOR diverges here)
 _SPREAD_COMPLY_TOL_M = 0.02  # iterate until every edge is within this of cap
+# Relief cap-projection stiffness: how much LESS a terminal node moves than a
+# flexible apron/taxi node when an over-grade edge between them is corrected.
+# High → the terminal holds its DEM-centroid and the apron absorbs the grade;
+# the terminal still yields a little where compliance is otherwise impossible.
+_RELIEF_TERMINAL_STIFFNESS = 20.0
+# A stiff terminal yields ~1/stiffness per sweep, so the relief needs a larger
+# iteration budget than the cascade tiers to fully converge to compliance.
+_RELIEF_MAX_ITERS = 12000
 
 
 def _compliant_spread_fit(n, elev, is_hard, dem_elev, edge_grade, edge_length,
-                          eq_pairs, max_iters, tol_m, node_bounds=None) -> int:
+                          eq_pairs, max_iters, tol_m, node_bounds=None,
+                          reseed: bool = True, stiffness=None) -> int:
     """Spread soft nodes to a grade-compliant surface near the DEM, by
     over-relaxed cap projection iterated to FULL grade compliance.
 
@@ -399,14 +405,21 @@ def _compliant_spread_fit(n, elev, is_hard, dem_elev, edge_grade, edge_length,
     unsmoothed).  SOR (omega>1) collapses that to ~O(chain), and stopping on
     the actual max violation (not the per-iter change) guarantees the output is
     fully compliant.  Mutates ``elev`` in place; returns iterations used.
+
+    ``reseed`` (user 2026-05-24): when False, soft nodes keep their CURRENT
+    elevation as the start — used by the relief "bounce" so it adjusts the
+    MINIMUM amount from the cascade's outward solve, rather than discarding it
+    by resetting to DEM (which made terminal-free aprons absorb the whole
+    relief and sink ~12 m below terrain).
     """
-    for i in range(n):
-        if not is_hard[i] and dem_elev[i] is not None:
-            # Bounded nodes keep their current value as the center (e.g. a
-            # runway-yield node centered on its CIFP profile); only
-            # unbounded soft nodes re-seed at terrain.
-            if node_bounds is None or node_bounds[i] is None:
-                elev[i] = float(dem_elev[i])
+    if reseed:
+        for i in range(n):
+            if not is_hard[i] and dem_elev[i] is not None:
+                # Bounded nodes keep their current value as the center (e.g. a
+                # runway-yield node centered on its CIFP profile); only
+                # unbounded soft nodes re-seed at terrain.
+                if node_bounds is None or node_bounds[i] is None:
+                    elev[i] = float(dem_elev[i])
     ineq = [(u, v, edge_length[(u, v)] * gr)
             for (u, v), gr in edge_grade.items()]
     eqs = [(a, b) for (a, b) in eq_pairs]
@@ -446,9 +459,19 @@ def _compliant_spread_fit(n, elev, is_hard, dem_elev, edge_grade, edge_length,
             elif hv:
                 elev[u] -= s * excess
             else:
-                move = w * 0.5 * excess
-                elev[u] -= s * move
-                elev[v] += s * move
+                # Distribute the correction by STIFFNESS: the stiffer node
+                # moves less (user 2026-05-24).  A terminal is a stiff soft
+                # anchor — it holds its DEM-centroid and yields only the
+                # MINIMUM when no compliant path exists, so the flexible apron/
+                # taxi side absorbs the grade and the terminal barely moves.
+                # Default (no stiffness) = symmetric 50/50.
+                if stiffness is not None:
+                    ku, kv = stiffness[u], stiffness[v]
+                    fu = kv / (ku + kv)   # u's share — large when v is stiffer
+                else:
+                    fu = 0.5
+                elev[u] -= s * w * excess * fu
+                elev[v] += s * w * excess * (1.0 - fu)
         # Clamp bounded soft nodes to their per-node deviation window so
         # no single surface absorbs the whole relief (user 2026-05-23:
         # spread the descent across runway-yield + apron-yield).  A node
@@ -510,7 +533,7 @@ def _node_tiers(layout, bucket_to_idx, n):
             continue
         if s.role in _TAXI_TIER_ROLES:
             t = _TIER_TAXI
-        elif s.role in (ROLE_APRON, ROLE_STAND):
+        elif s.role == ROLE_APRON:
             t = _TIER_APRON
         elif s.role == ROLE_TERMINAL:
             t = _TIER_TERMINAL
@@ -953,10 +976,6 @@ def _build_edges(layout, bucket_to_idx, roles=None, add_runway_anchor=True
             axes = _collect_junction_axes(layout, s.polygon)
         else:
             axes = []
-        # Stand grading is handled by ROLE_STAND sub-shapes (apron
-        # decomposition carves the parking pads out as their own 1.0%
-        # shapes — see pavement.apron_split), so no per-pair stand cap
-        # here; this branch grades the apron BODY + lane corridors.
         for i in range(m):
             xi, yi = coords[i]
             for j in range(i + 2, m):
@@ -1336,7 +1355,7 @@ def _writeback(layout, elev, bucket_to_idx):
             s.altitude_low = None
             s.node_altitudes = None
             n_terms += 1
-        elif s.role in (ROLE_APRON, ROLE_STAND):
+        elif s.role == ROLE_APRON:
             # Per user 2026-05-18: aprons are NOT 100 % flat — they
             # satisfy 1.5 % across their surface, NOT zero gradient.
             # Keep the solver's per-corner altitudes (which it
@@ -1344,8 +1363,6 @@ def _writeback(layout, elev, bucket_to_idx):
             # adjacent aprons that share corners don't end up at
             # 4-8 m cliff steps (each apron previously averaged to
             # its own single altitude → adjacent aprons diverged).
-            # Stand pads (ROLE_STAND, session 47) are all-pair shapes
-            # like aprons but at the stricter 1.0 % cap — same encoding.
             alts = [round(float(e), 1) for e in corner_elevs]
             if ring_closed:
                 alts.append(alts[0])
@@ -1364,7 +1381,9 @@ def _writeback(layout, elev, bucket_to_idx):
             # (which assumes a planar surface) would average and
             # introduce a > 1 m step at the shared boundary.
             had_node_alts = s.node_altitudes is not None
-            if len(coords_open) == 4 and not had_node_alts:
+            if (len(coords_open) == 4 and not had_node_alts
+                    and _rect_short_ends_perpendicular(
+                        coords_open, s.source_axis)):
                 new_coords, hi, lo = _canonicalise_rect(
                     coords_open, corner_elevs, s.source_axis,
                     _short_end_pairs_by_axis)
@@ -1419,6 +1438,50 @@ def _read_corner_elevs(coords_open, elev, bucket_to_idx, layout=None):
             return None
         out.append(elev[idx])
     return out
+
+
+_RECT_SHORT_END_MAX_AXIS_DOT = 0.7  # |edge·axis|/|edge| above this = the
+                                     # "short end" is really axis-parallel
+                                     # (degenerate non-rect quad, e.g. a
+                                     # tapering wedge from junction-splitting)
+
+
+def _rect_short_ends_perpendicular(coords_open, source_axis) -> bool:
+    """True when a 4-corner ring is a genuine sloping rect: its two
+    axis-end (short) edges — as paired by ``_short_end_pairs_by_axis`` —
+    are roughly PERPENDICULAR to ``source_axis``.
+
+    Projection-based pairing breaks on distorted quads (opposite sides
+    not parallel): it can group two corners whose connecting edge runs
+    ALONG the axis, so collapsing to ``altitude_high``/``altitude_low``
+    produces a surface that slopes ACROSS a perpendicular edge.  Such a
+    shape is not a canonical rect and must stay ``node_altitudes`` (user
+    2026-05-24).  A clean rect's short ends have |edge·axis| ≈ 0.
+    """
+    from auto_patch.elevation import _short_end_pairs_by_axis
+    if source_axis is None or source_axis.is_empty:
+        return False
+    ax = list(source_axis.coords)
+    if len(ax) < 2:
+        return False
+    axdx, axdy = ax[-1][0] - ax[0][0], ax[-1][1] - ax[0][1]
+    axlen = math.hypot(axdx, axdy)
+    if axlen < 1e-6:
+        return False
+    aux, auy = axdx / axlen, axdy / axlen
+    sp, ep = _short_end_pairs_by_axis(coords_open, source_axis)
+    if sp is None:
+        return False
+    for pair in (sp, ep):
+        ax0, ay0 = coords_open[pair[0]]
+        ax1, ay1 = coords_open[pair[1]]
+        ex, ey = ax1 - ax0, ay1 - ay0
+        elen = math.hypot(ex, ey)
+        if elen < 1e-6:
+            return False
+        if abs(ex * aux + ey * auy) / elen > _RECT_SHORT_END_MAX_AXIS_DOT:
+            return False
+    return True
 
 
 def _canonicalise_rect(coords_open, corner_elevs, source_axis,
