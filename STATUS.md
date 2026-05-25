@@ -1,12 +1,29 @@
-# Auto-Patch Status — session 48: elevation relief = stiffness-weighted cap projection
+# Auto-Patch Status — session 49: per-tier relief stiffness (taxi<apron<terminal)
 
-## TL;DR / current state (session 48)
+## TL;DR / current state (session 49)
 **Read `docs/elevation_solver.md` FIRST** — it documents THE core
 component (the elevation solver/relief), the user's model, the final design,
 and every approach tried+rejected. Do not re-enter that rabbit hole blind.
 
-**The win:** the relief "bounce" now uses a **stiffness-weighted cap
-projection**. Every pavement node is soft (runway/seam HARD), but the
+**Session-49 change:** aprons are now a STIFF soft anchor too —
+`_RELIEF_APRON_STIFFNESS=15` (between taxi 1.0 and terminal 20) in
+`unified_jacobi.py`.  So in the relief the TAXI network yields as far as it
+can FIRST, then aprons, then the terminal last.  Stiffness is a per-edge
+SPLIT (`fu=kv/(ku+kv)`), not a phase order: stiff nodes still move a little
+each sweep but settle having moved least, yielding only the residual the
+softer side couldn't absorb within grade.  Within-tier edges (apron↔apron)
+stay symmetric, so apron self-compliance is unchanged.  Zero new test
+failures.  **NOTE:** this canNOT manufacture elevation past the grade
+budget — CYXY taxiway E still tops out ~708 (DEM crest 715–718) because the
+network is grade-limited by the LOW main apron (~695, pinned by the 693–694
+main runways) over the climb distance; the E taxiways already climb at a
+steady 1.49% (max) where elevation is available (verified end-to-end along
+the apt.dat E centerline).  The only lever to go higher is prong #1 (runway
+yield), deliberately parked.
+
+**Session-48 win (still current):** the relief "bounce" uses a
+**stiffness-weighted cap projection**. Every pavement node is soft
+(runway/seam HARD), but the
 **terminal is a STIFF soft anchor** (`_RELIEF_TERMINAL_STIFFNESS=20`,
 `_RELIEF_MAX_ITERS=12000` in `unified_jacobi.py`): it holds its DEM-centroid
 and yields only the MINIMUM, only where no grade-compliant path exists. The
@@ -31,14 +48,15 @@ above the SE runway ends they connect to — NOT an over-drop).
    instead of a bogus `altitude_high/low` that tilts across a perpendicular
    edge. Fixes `test_sloping_rect_slopes_only_along_axis[SPJC]`.
 
-**Suite (excl. compare_target):** **5 failed / 280 passed / 5 skipped** —
-the genuine PRE-session-47 baseline (restoring absorption removed the 4 NEW
-SPJC apron-lane regressions session 47 had introduced).  The 5 = `have_source`
-[SPJC] + `no_vertex_on_sloping_rect_flat_edge`[SPJC] + grade ×3 (CYXY/SPLP/
-SPJC).  CYXY grade fails ONLY on the step cap — worst steps are the real
-~10 m excavated terrace (apron #60 ↔ #50); CYXY **within-shape grade = 0**.
-(280 vs the old 328 passed = the deleted dead-module/stands/ramp tests.)
-Re-run: `venv/bin/python -m pytest tests/ -q -k "not compare_target"` (~9 min).
+**Suite (excl. compare_target):** **7 failed / 278 passed / 5 skipped**
+(session 49 re-measured; the session-48 "5" UNDERCOUNTED — `have_source`
+[CYXY] + `outside_pavement`[CYXY] also fail and are PRE-EXISTING, confirmed
+by stashing the session-49 change and re-running clean.  Consistent with
+the documented CYXY/SPJC junction-invariant flakiness).  The 7 = junction
+`have_source`[SPJC]+[CYXY] + `outside_pavement`[CYXY] +
+`no_vertex_on_sloping_rect_flat_edge`[SPJC] + grade ×3 (CYXY/SPLP/SPJC).
+CYXY grade fails ONLY on the step cap; CYXY **within-shape grade = 0**.
+Re-run: `venv/bin/python -m pytest tests/ -q -k "not compare_target"` (~20 min).
 
 **Session-47 model REVERTED (user 2026-05-24):** `ABSORB_RECTS_ALONGSIDE_APRONS
 =True` — the no-absorption + apron-lane-chain model is gone; taxilanes through
@@ -144,10 +162,13 @@ axis 1.5%; add a ~2% apron grade-change cap (new, currently unmodeled). The prio
 `tools/check_grade` needs the SAME gate).
 
 ## OPEN / next
-- **Junction clearance consolidation** — clearance near junctions emits
-  many short node_altitudes runs with gaps → visible elevation variation
-  in X-Plane. The centerline-trace fragments it. Contained to
-  `clearance.py`. **The user's remaining requested item.**
+- ~~**Junction clearance consolidation**~~ — DONE (commits `509648d` +
+  `f027912`): `clearance._finalize` unions all raw strips, subtracts
+  pavement once, and emits ONE `node_altitudes` shape per connected
+  region (1:1 shared-vertex adoption across pavement-hole splits). CYXY
+  emits 45 clearance shapes; near-pairs are pavement-separated (correct —
+  no cut over pavement), not fragments. The old stale OPEN bullet was
+  carried forward unstruck from the session-46 handover.
 - **compare_target ×3** — re-cut (gated on suite being otherwise green).
 - **SPJC cluster ×3** + **grade ×3** — pre-existing; grade mostly data.
 - Profile dynamic per-rect FIT: evaluated + DROPPED (marginal vs plane).

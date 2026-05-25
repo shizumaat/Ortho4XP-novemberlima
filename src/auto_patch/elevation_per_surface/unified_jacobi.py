@@ -359,9 +359,18 @@ def solve(layout, icao: str,
             relief_el.update(term_el)
             relief_groups = rect_flat_groups + terminal_groups
             relief_pairs = _eq_pairs_from_groups(relief_groups)
-            stiffness = [(_RELIEF_TERMINAL_STIFFNESS
-                          if tiers[i] == _TIER_TERMINAL else 1.0)
-                         for i in range(n)]
+            # Per-tier stiffness (user 2026-05-24): terminals stiffest,
+            # aprons a bit softer, taxi fully flexible.  So at an over-grade
+            # edge the TAXI side yields as far as it can first, then the
+            # apron, and the terminal moves last/least.  Within-tier edges
+            # (apron↔apron, taxi↔taxi) stay symmetric, so each surface's own
+            # all-pair compliance is unaffected — stiffness only shifts where
+            # the cross-tier boundary compromise lands.
+            stiffness = [
+                (_RELIEF_TERMINAL_STIFFNESS if tiers[i] == _TIER_TERMINAL
+                 else _RELIEF_APRON_STIFFNESS if tiers[i] == _TIER_APRON
+                 else 1.0)
+                for i in range(n)]
             total_iters += _compliant_spread_fit(
                 n, elev, relief_hard, dem_elev, relief_eg, relief_el,
                 relief_pairs, _RELIEF_MAX_ITERS, tol_m, reseed=True,
@@ -381,6 +390,11 @@ _SPREAD_COMPLY_TOL_M = 0.02  # iterate until every edge is within this of cap
 # High → the terminal holds its DEM-centroid and the apron absorbs the grade;
 # the terminal still yields a little where compliance is otherwise impossible.
 _RELIEF_TERMINAL_STIFFNESS = 20.0
+# Aprons are a STIFF soft anchor too — a bit softer than the terminal (user
+# 2026-05-24): the taxi network (stiffness 1.0) yields as far as it can first,
+# then the apron, then the terminal last.  Holds aprons closer to their DEM
+# seed instead of letting them sink with the taxi network toward a low runway.
+_RELIEF_APRON_STIFFNESS = 15.0
 # A stiff terminal yields ~1/stiffness per sweep, so the relief needs a larger
 # iteration budget than the cascade tiers to fully converge to compliance.
 _RELIEF_MAX_ITERS = 12000
