@@ -1,9 +1,81 @@
-# Auto-Patch Status — session 50 END: discovery + apron-neck-split + leaf-hierarchy DONE; elevation single-solve REFACTOR planned (handover)
+# Auto-Patch Status — session 51 IN PROGRESS: single-solve refactor DONE (builds 4x faster), DEBUGGING 6 new regressions (tile_cut elevation-coupling + snap over-reach)
 
 > **Read `docs/elevation_solver.md` FIRST** — the core component (cascade +
-> directional relief). This session added three new geometry/solver pieces and
-> evaluated a pipeline-ordering refactor that is **planned but NOT yet started**
-> (the next agent's main job — see "THE PLANNED REFACTOR" below).
+> directional relief). Session 51 is executing THE single-solve refactor that
+> session 50 planned. See "SESSION 51 PROGRESS" immediately below, then "THE
+> PLANNED REFACTOR" for the full target order.
+
+## SESSION 51 PROGRESS (single-solve refactor)
+Session-50 work was committed first as checkpoint `b187dd6` (baseline 6 failed /
+279 passed / 5 skipped, excl compare_target). Then:
+
+**DONE (de-coupling + prep, all behavior-preserving unless noted):**
+- `_split_sloped_rects_at_violations` (junction_repair.py): detect sloped rects
+  by ROLE not altitude tags; interpolate sub-rect alts only when present, else
+  set None. Works pre- or post-solve.
+- `_snap_to_sloping_edge_corners` + `_snap_junction_vertices_to_rect_flat_edge_corners`
+  (junction_rules.py): removed the `altitude_high/low is None` gate → role-based.
+  NOTE: this also makes them process would-be-FLAT rects at their current
+  post-solve call sites (a real behavior change — validate). Sloping-EDGE
+  detection still uses the `_rect_from_axis_extended` corner-order convention,
+  which is a RELIABLE CONTRACT (corner order is an Ortho4XP downstream
+  requirement, maintained by `_split`/absorb). `_rect_sloping_edges` (axis-based)
+  exists but is DEAD CODE — intentionally NOT wired in (redundant given the
+  corner-order contract).
+- `finalize.py`: `run_phase2` → renamed `compute_elevations_and_repair_geometry`;
+  extracted the feature-emit block into new `emit_terrain_transition_features`
+  (boundary ribbon / groundside / bridges / tunnels). Currently still called at
+  the OLD pre-solve position (behavior-preserving extract).
+- Renamed for clarity per user: no vague phase/step names.
+
+**KEY FINDINGS (correct the session-50 plan):**
+- `_compute_elevations` does NOT call the solver under `USE_PER_SURFACE_SOLVER`
+  (gated `if not USE_PER_SURFACE_SOLVER`, elevation.py:1214). The "2× solve" is
+  exactly the two `per_surface_solve` calls in pipeline.py. ✓ premise holds.
+- The solver SAMPLES DEM per-vertex for soft nodes (`_seed_elevations`,
+  unified_jacobi.py:988) → soft shapes need NO pre-seeded altitudes; only HARD
+  anchors (runway via `redistribute_runway_profile`, seam via
+  `apply_seam_dem_anchors`) must be set pre-solve, and they already are.
+- `_absorb_rects_at_junction_perimeters` already de-couples cleanly pre-solve
+  (None alts → `_alt_at_t` None → no node_altitudes written). No edit needed.
+
+**DECISIONS (user, session 51):**
+- Feature emit (`emit_terrain_transition_features`) moves POST-solve (cleaner;
+  needs a post-emit `cut_layout_at_tile_boundaries` for cross-tile features).
+- DROP `_align_rect_slope_to_axis` entirely (reactive-to-solve); verify the
+  cascade never produces perpendicular-sloped rects. Restore if regressions.
+
+**REORDER DONE (pipeline.py, this session):** removed solve#1 + both
+`_subdivide_violating_junctions` loops + the altitude-reconciliation chain
+(`_snap_junction_altitudes_to_rect_corners` / `_enforce_shared_vertex_altitudes`)
++ dropped `_align_rect_slope_to_axis`. ALL geometry now finalizes pre-solve
+(stitches + `_split`/absorb/reclassify/Rule-2 + tile_cut + nudge); ONE
+`per_surface_solve`; then `emit_terrain_transition_features` + a feature tile_cut
++ clearance, all POST-solve.
+- **WIN CONFIRMED:** CYXY build 60-90s → **~15s** (one ~0.1s solve, no subdivide
+  loops). The single-solve premise holds: build runs clean, altitudes populated.
+
+**VALIDATION: 12 failed / 269 passed / 9 skipped (was 6).** 6 NEW failures, two
+root causes (committed as WIP — debug next):
+- **tile_cut elevation coupling (KEY, user-flagged):** `tile_cut` is NOT purely
+  geometric — `_terrain_pin_slice_nodes` DEM-pins SLOPING-RECT slice edges (HARD,
+  fine pre-solve) but junction/apron near-cut vertices are left SOFT, and
+  `_build_piece_shape`/`_make_slope_sampler` derive cut-piece altitudes from the
+  SOURCE shape's field (None pre-solve). Old order ran tile_cut AFTER solve#1, so
+  near-cut verts warm-started from a cross-tile-consistent field; now each tile's
+  single solve grades them against its own post-drop network → diverge.
+  `test_cross_tile_cut_edge_elevations_consistent`: SPLP near-cut 71.0 vs 61.6
+  (9.4m > 2.5m tol); also `no_self_overlap[SPLP]`. FIX: terrain-pin near-cut
+  vertices to DEM (HARD) for ALL roles, not just sloping rects.
+- **snap over-reach:** role-based snaps (`_snap_to_sloping_edge_corners`,
+  `_snap_junction_vertices_to_rect_flat_edge_corners`) now fire on would-be-FLAT
+  rects pre-solve (the altitude gate used to skip them), moving vertices →
+  `large_junction_axis_aligned_borders[SPJC/SPLP]`, `neighbour_corners[SPJC]`,
+  `have_source[CYXY/SPJC]`, `outside_pavement[CYXY/SPLP]`. FIX TBD: scope the
+  snaps so they don't over-move (the flat-rect case needs a non-altitude guard,
+  or restrict the snap to genuine sloping geometry).
+- grade[CYXY], grade[SPJC], grade[SPLP] = pre-existing (grade[SPLP] now passing?
+  re-check — SPLP showed only 7 within-shape 1.8% warns, may have improved).
 
 ## TL;DR / current state
 **Suite (excl. compare_target): 6 failed / 279 passed / 5 skipped** — run with

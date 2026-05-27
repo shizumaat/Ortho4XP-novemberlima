@@ -365,9 +365,13 @@ def _snap_junction_vertices_to_rect_flat_edge_corners(
     rect_corner_set: set = set()
     bucket = SHARED_VERTEX_TOL_M
     for s in layout.shapes:
+        # Detect sloping rects by ROLE, not altitude tags: this runs in
+        # the geometry phase before the single elevation solve (session
+        # 51), so altitudes are None then.  Sloped-ness is a role
+        # property; snapping a junction vertex to a rect corner is
+        # harmless even if the rect later solves flat (corner and
+        # mid-edge sit at the same height).
         if s.role not in SLOPING_RECT_ROLES:
-            continue
-        if (s.altitude_high is None or s.altitude_low is None):
             continue
         rect = s.polygon
         if rect is None or rect.is_empty \
@@ -518,15 +522,12 @@ def _snap_to_sloping_edge_corners(layout: PavementLayout) -> None:
     rect_corners_per_rect: list[list[tuple[float, float]]] = []
     rect_edges: list[tuple[float, float, float, float, int, int, int]] = []
     for shape in layout.shapes:
+        # Detect sloping rects by ROLE, not altitude tags (session 51
+        # single-solve): this runs before the solve, when altitudes are
+        # None.  Rule 2 (no junction vertex on a sloping edge) is keyed
+        # to the rect's role/geometry; snapping is harmless if the rect
+        # later solves flat.
         if shape.role not in SLOPING_RECT_ROLES:
-            continue
-        # Flat-rect exemption (restored from best-elevation-model).
-        # Without an altitude pair, the rect either hasn't been
-        # elevated yet or is intentionally flat — in both cases
-        # junctions can connect anywhere on its boundary without
-        # breaking the linear-slope rendering invariant.
-        if (shape.altitude_high is None
-                or shape.altitude_low is None):
             continue
         rect = shape.polygon
         if rect is None or rect.is_empty or rect.geom_type != "Polygon":

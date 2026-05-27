@@ -2419,7 +2419,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
 
     # ── Phase-2 elevations + feature emit ────────────────────────
     if compute_elevations:
-        finalize.run_phase2(
+        finalize.compute_elevations_and_repair_geometry(
             layout, icao, xplane_root, apt,
             nodes=nodes, ways=ways, to_m=to_m,
             apron_candidates=apron_candidates,
@@ -2437,18 +2437,18 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # taxi-grade ≤ 1.5 % shifts elevation by ≤ 15 cm — well
         # within the within-shape grade tolerance).
         from .junction_rules import (
-            _align_rect_slope_to_axis,
             _enforce_runway_1to1_sharing,
             _snap_junction_vertices_to_rect_flat_edge_corners,
             _snap_to_sloping_edge_corners,
             stitch_pavement_to_flat_runways,
             widen_junctions_to_runway_corners,
         )
-        # Slope alignment runs FIRST post-elevation: rects whose
-        # slope is purely perpendicular to source_axis become flat
-        # (single altitude) so subsequent rules treat them as
-        # multi-connection-allowed (per user 2026-05-02).
-        _align_rect_slope_to_axis(layout)
+        # (session 51) `_align_rect_slope_to_axis` was DROPPED: it
+        # reacted to the SOLVED slope (flattening rects whose solved
+        # slope came out perpendicular to source_axis), which has no
+        # place in a single pre-finalized-geometry solve — the cascade
+        # grades each rect along its own source_axis, so a
+        # perpendicular-slope rect should not arise.
         _snap_to_sloping_edge_corners(layout)
         _snap_junction_vertices_to_rect_flat_edge_corners(layout)
         _enforce_runway_1to1_sharing(layout)
@@ -2541,37 +2541,16 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     f"{n_seam} DEM-anchored, "
                     f"{n_redistributed} runway shape(s) redistributed.")
 
-            # First solver pass — gives every shape coherent
-            # altitudes so the downstream geometric passes (snap,
-            # subdivide, stitch) can make altitude-dependent
-            # decisions and so that the writeback's canonical-point
-            # routing ensures adjacent shapes share altitudes at
-            # would-be-shared corners.  Removing this pass produces
-            # cross-shape steps at adjacent-apron corners that the
-            # final solver pass alone can't fully reconcile.
-            per_surface_solve(layout, icao,
-                               dem=dem,
-                               tile_lat=tile_lat, tile_lon=tile_lon)
-
-            # Grade-based subdivide (``_subdivide_violating_junctions``,
-            # threshold 2 %) — catches residual within-shape grade
-            # violations the solver alone can't relax.  Iterates up
-            # to 4 rounds to settle.  Re-solving here is redundant —
-            # the final solver pass at the end of the pipeline (after
-            # tile_cut) integrates every post-subdivision geometry
-            # change.
-            from .junction_repair import _subdivide_violating_junctions
-            n_grade = 0
-            for _ in range(4):
-                n = _subdivide_violating_junctions(layout)
-                if n == 0:
-                    break
-                n_grade += n
-            # The final solver pass at the end of the pipeline
-            # (after tile_cut) integrates every post-subdivision
-            # geometry change, so the historic post-subdivide rerun
-            # here is redundant — its only customers downstream are
-            # the snap passes, which the final solver also covers.
+            # (session 51 single-solve) The first solver pass + the
+            # grade-based `_subdivide_violating_junctions` loop were
+            # REMOVED here.  The pipeline now finalizes ALL geometry
+            # before a SINGLE solve at the end, so there is no
+            # geometry↔altitude loop to bootstrap: downstream geometry
+            # passes (stitch / split / absorb) are de-coupled from
+            # altitudes (role-based detection), and grade relief is
+            # handled inside the solver (directional + hop-hierarchy)
+            # plus the pre-solve apron neck-split, not by post-solve
+            # subdivision.
 
         # Stitch pavement to terminal pads (user 2026-05-04): make
         # the two share an identical vertex sequence on every shared
@@ -2595,66 +2574,23 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # bucket altitudes the stitch makes coincident.
         stitch_pavement_polygons(layout)
 
-        # Final cross-shape reconciliation pass (user 2026-05-08):
-        # snap each junction vertex whose bucket coincides with a
-        # rect / runway / terminal corner to that authoritative
-        # shape's altitude tag value, then average junction-to-
-        # junction shared-bucket altitudes so neighbouring junctions
-        # agree at their seam.  The per-surface solver writes one
-        # elevation per bucket but the writeback then averages
-        # terminal corners into a single ``altitude`` tag, losing
-        # per-corner precision; subsequent geometry passes (overlap
-        # clip, sliver merge, stitch) can also drift junction
-        # vertices off the solver's value at shared buckets.
-        # Without these passes, ``test_pavement_grade``'s cross-
-        # shape and step checks find 0.2-7 m gaps at every shared
-        # corner where the junction's per-vertex altitude disagrees
-        # with the terminal's flat tag, the rect's altitude_high/
-        # low, or another junction's value at the same point.
-        from .elevation import (
-            _snap_junction_altitudes_to_rect_corners,
-            _enforce_shared_vertex_altitudes,
-        )
-        _snap_junction_altitudes_to_rect_corners(layout)
-        _enforce_shared_vertex_altitudes(layout)
-        # Re-run the rect-corner snap after the junction-pair
-        # average, since averaging can pull a shared-with-rect
-        # bucket away from the rect's tag value.
-        _snap_junction_altitudes_to_rect_corners(layout)
+        # (session 51 single-solve) The cross-shape ALTITUDE
+        # reconciliation chain (`_snap_junction_altitudes_to_rect_corners`
+        # + `_enforce_shared_vertex_altitudes`) and the second
+        # `_subdivide_violating_junctions` loop were REMOVED here.  They
+        # existed to patch up altitude disagreements introduced by
+        # geometry passes that ran AFTER the first solve.  With all
+        # geometry finalized before a SINGLE solve, the solver's
+        # writeback is lossless — one elevation per shared bucket, so
+        # adjacent shapes agree at shared corners by construction and
+        # there is nothing to reconcile.
 
-        # The corner-snap above can introduce within-junction grade
-        # violations: when one corner of a long junction sits on a
-        # runway (snapped to z=77) while another corner is anchored
-        # to lower-elevation pavement (z=70), the junction's ring
-        # spans 7 m of elevation over ~10 m of distance — 60 %+
-        # grade.  Re-run the grade-based subdivide loop to split
-        # those polygons into shorter pieces with consistent
-        # altitudes, then re-snap so the new sub-polygon corners
-        # adopt their respective rect/runway anchor values.
-        # SPLP junction-10053 is the canonical case (user 2026-05-08).
-        from .junction_repair import _subdivide_violating_junctions
-        n_post_snap = 0
-        for _ in range(4):
-            n = _subdivide_violating_junctions(layout)
-            if n == 0:
-                break
-            n_post_snap += n
-        if n_post_snap > 0:
-            _snap_junction_altitudes_to_rect_corners(
-                layout, interior_proximity_m=3.0)
-            _enforce_shared_vertex_altitudes(layout)
-            _snap_junction_altitudes_to_rect_corners(
-                layout, interior_proximity_m=3.0)
-
-        # Per user 2026-05-12: split sloped 4-corner rects where a
-        # junction vertex lies on a sloping (long) edge.  Runs
-        # AFTER per_surface_solve + subdivide passes have set the
-        # altitude_high/_low tags so the function can detect
-        # sloped rects (the layout shapes have None altitudes
-        # before the solver populates them).  Splitting the rect
-        # at the violating vertex's axial position eliminates the
-        # rule violation (vertex coincides with a sub-rect's
-        # short-edge corner instead of being mid-sloping-edge).
+        # Split sloped 4-corner rects where a junction vertex lies on a
+        # sloping (long) edge (user 2026-05-12).  De-coupled (session
+        # 51): detects sloped rects by ROLE and runs PRE-solve, so the
+        # violating junction vertex coincides with a sub-rect short-edge
+        # corner (a shared node) before the solver assigns altitudes —
+        # the solver then gives both the same value (no step).
         from .junction_repair import _split_sloped_rects_at_violations
         _split_sloped_rects_at_violations(layout, icao=icao)
         # Re-run flat-edge corner snap: the rect split above introduces
@@ -2713,57 +2649,10 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # genuine final junctions (user 2026-05-20).
         _snap_to_sloping_edge_corners(layout)
 
-        # Re-emit bridges instead of difference-clipping (user
-        # 2026-05-16 canonical-node rewrite).  Drop stale bridges
-        # and re-emit against final pavement state — every node
-        # then references a CURRENT pavement_union outer-ring
-        # vertex instead of a stale snapshot.
-        from .layout import ROLE_BOUNDARY as _ROLE_BOUNDARY
-        layout.shapes = [s for s in layout.shapes
-                         if not (s.role == _ROLE_BOUNDARY
-                                 and s.ref == "boundary_dem_bridge")]
-        try:
-            from .boundary import _emit_boundary_dem_bridge as _emit_br
-            # Use the CURRENT-TILE DEM (same as ``finalize.run_phase2``
-            # passes at the first emit), not the anchor-tile DEM.  For
-            # cross-tile airports (e.g. MMOX straddling lat 17), the
-            # anchor sits in one tile while the current build is the
-            # OTHER tile; passing the anchor-tile DEM with
-            # ``current_tile_lat/lon`` causes ``_sample_dem`` to compute
-            # offsets relative to the current tile but apply them to
-            # the anchor tile's coordinate frame — silently reading
-            # elevations from ~1° away (100 km).  Manifested as
-            # MMOX +17 tile bridge inner-edge altitudes sampling
-            # canyon DEM in the +16 tile.
-            _tl = (current_tile_lat
-                   if current_tile_lat is not None
-                   else math.floor(layout.anchor[0]))
-            _tn = (current_tile_lon
-                   if current_tile_lon is not None
-                   else math.floor(layout.anchor[1]))
-            n_br2 = _emit_br(layout, dem, _tl, _tn)
-            if n_br2:
-                UI.vprint(1,
-                    f"  [pav-builder] {icao}: re-emitted "
-                    f"{n_br2} canonical-node bridge(s).")
-            # Collapse the bridge's ~1 m runway-clearance arc onto the
-            # shared runway/junction CORNER nodes so the bridge SHARES
-            # those nodes (a corner coincidence is allowed by the
-            # no-vertex-on-sloping-edge invariant) instead of floating
-            # densified arc vertices ~1 m off an adjacent junction
-            # corner — the CYXY runway-20 / 14R-32L
-            # neighbour_corners pinch.
-            from .boundary import (
-                _snap_bridge_vertices_to_runway_corners as _snap_br)
-            _snap_br(layout)
-            # And where a bridge vertex lands mid-edge on a junction's
-            # NON-runway boundary, insert it into the junction ring so
-            # the two share the node (collinear → no shape/grade change).
-            from .boundary import (
-                _insert_bridge_contacts_into_junctions as _ins_br)
-            _ins_br(layout)
-        except _GEOM_EXC:
-            pass
+        # (session 51) The boundary→DEM bridge re-emit moved POST-solve
+        # into the feature-emit phase below — bridges (like the boundary
+        # ribbon and groundside) now emit ONCE, after the single solve,
+        # against the fully-settled pavement profile.
 
         # Per user 2026-05-10: shapes cannot cross integer lat/lon
         # tile boundaries (X-Plane / Ortho4XP render each 1°x1° tile
@@ -2794,16 +2683,14 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 f"  [pav-builder] {icao}: nudged {n_rwy_nudged} runway "
                 f"sub-rect(s) toward seam pavement at junction bridges.")
 
-        # Final per-surface solver pass against the FULLY-SETTLED
-        # geometry — runs AFTER tile_cut.  Every mutation since the
-        # first/second solver passes above (corner-snap, stitch,
-        # sloped-rect split, junction absorption, apron
-        # reclassification, tile-boundary cut) can introduce
-        # within-shape grade violations the prior solver runs had
-        # resolved.  Tile_cut in particular resamples each post-cut
-        # boundary vertex's altitude via NN against the pre-cut
-        # ring — a 7-m DEM range across a 30-m apron can produce
-        # >1.5 % between two adjacent resampled vertices.
+        # THE single per-surface solver pass (session 51) — runs ONCE,
+        # against the FULLY-FINALIZED geometry (all stitch / split /
+        # absorb / reclassify / Rule-2 / tile_cut passes above have
+        # settled, and every one is de-coupled from altitudes).  The
+        # solver seeds soft nodes from the DEM, HARD-anchors runway +
+        # seam vertices, and writes one elevation per shared bucket, so
+        # the result is grade-compliant AND lossless at shared corners
+        # with nothing left to reconcile afterward.
         #
         # Post-cut tile-edge vertices sit at ``half_width_m`` offset
         # from the integer seam line (5 m by default).  The seam
@@ -2857,6 +2744,42 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # previously firing mid-pipeline with stale numbers.
         from .elevation import _report_within_shape_violations
         _report_within_shape_violations(layout, icao)
+
+        # ── Terrain-transition feature emit (POST-solve, session 51) ──
+        # Boundary ribbon, groundside pavement, boundary→DEM bridges and
+        # taxi/road bridges emit HERE, after the single solve, so each
+        # mirrors the FINAL pavement profile (the boundary ribbon clamps
+        # to settled runway/pavement; bridges span the settled surface).
+        # None of these are pavement roles, so the solver never touched
+        # them — emitting post-solve is purely a matter of sampling the
+        # right (final) altitudes.
+        finalize.emit_terrain_transition_features(
+            layout, icao, xplane_root,
+            tile_dem=tile_dem,
+            current_tile_lat=current_tile_lat,
+            current_tile_lon=current_tile_lon)
+        try:
+            # Bridge vertex post-processing: collapse the bridge's ~1 m
+            # runway-clearance arc onto shared runway/junction corners,
+            # and insert mid-edge bridge contacts into junction rings so
+            # they share the node (collinear → no shape/grade change).
+            from .boundary import (
+                _snap_bridge_vertices_to_runway_corners as _snap_br,
+                _insert_bridge_contacts_into_junctions as _ins_br)
+            _snap_br(layout)
+            _ins_br(layout)
+        except _GEOM_EXC:
+            pass
+        # The boundary ribbon / bridges just emitted may cross an integer
+        # tile line on cross-tile airports — slice them like every other
+        # shape (pavement was already cut pre-solve, so only the new
+        # feature pieces are cut; no-op for single-tile airports).
+        cut_layout_at_tile_boundaries(
+            layout,
+            current_tile_lat=current_tile_lat,
+            current_tile_lon=current_tile_lon,
+            dem=dem,
+        )
 
         # Wingtip / RESA terrain-clearance cuts (user 2026-05-22).  Cut
         # terrain that rises into a surface's lateral clearance band

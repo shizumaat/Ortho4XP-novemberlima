@@ -1,23 +1,24 @@
-"""Post-phase-1 finalisation: phase-2 elevation + feature emit.
+"""Post-phase-1 finalisation: elevation field, geometry repair, and
+terrain-transition feature emit.
 
 Run after ``pipeline.build_airport_pavement`` has emitted the
 phase-1 geometry layout (rects, junctions, terminals, runways).
-Performs:
 
-* Phase-2 elevation solve via ``elevation._compute_elevations``.
-* Geometry repair passes (shared-vertex enforce + overlap clip)
-  to handle subdivisions / decompositions the elevation step may
-  have introduced.
-* Junction-altitude reconciliation (snap-to-rect-corner +
-  shared-vertex average + within-junction adjacent-pair grade
-  smoother).
-* Final WARN summary of within-shape grade violations.
-* Feature emit: airport boundary, groundside pavement, boundary→DEM
-  bridges; bridges + tunnel portals when ``EMIT_BRIDGES_AND_TUNNELS``.
+Two public entry points:
 
-Public API:
-    run_phase2(layout, icao, xplane_root, apt, *, nodes, ways, to_m,
-               apron_candidates)
+``compute_elevations_and_repair_geometry``
+  * Runway FAA-profile elevations via ``elevation._compute_elevations``
+    (under the legacy solver this also solves pavement; under the
+    per-surface solver pavement is solved later in pipeline.py).
+  * Geometry repair passes (shared-vertex enforce + overlap clip)
+    to handle subdivisions / decompositions the elevation step may
+    have introduced.
+  * Junction-altitude reconciliation (legacy solver only).
+
+``emit_terrain_transition_features``
+  * Airport boundary ribbon, groundside pavement, boundary→DEM
+    bridges; taxi/road bridges + tunnel portals when
+    ``EMIT_BRIDGES_AND_TUNNELS``.
 """
 from __future__ import annotations
 
@@ -76,10 +77,10 @@ if TYPE_CHECKING:
     from .layout import PavementLayout
 
 
-__all__ = ["run_phase2"]
+__all__ = ["compute_elevations_and_repair_geometry", "emit_terrain_transition_features"]
 
 
-def run_phase2(layout: PavementLayout, icao: str, xplane_root: str,
+def compute_elevations_and_repair_geometry(layout: PavementLayout, icao: str, xplane_root: str,
                apt: Airport, *,
                nodes: dict[str, tuple[float, float]],
                ways: list[tuple[str, list[str], dict[str, str]]],
@@ -204,6 +205,29 @@ def run_phase2(layout: PavementLayout, icao: str, xplane_root: str,
     # report a stale state because the post-finalize junction-rule
     # passes (widen_junctions_to_runway_corners etc.) and the
     # final solver run after this point.
+    #
+    # Feature emit (airport boundary ribbon, groundside pavement,
+    # boundary→DEM bridges, taxi/road bridges + tunnels) moved OUT of
+    # ``compute_elevations_and_repair_geometry`` into :func:`emit_terrain_transition_features` (session 51 single-solve
+    # refactor).  It now runs in pipeline.py AFTER the single elevation
+    # solve, so the boundary ribbon clamps against the FINAL pavement
+    # profile instead of a pre-solve snapshot.
+
+
+def emit_terrain_transition_features(layout: PavementLayout, icao: str, xplane_root: str, *,
+                  tile_dem: O4_DEM_Utils.DEM | None = None,
+                  current_tile_lat: int | None = None,
+                  current_tile_lon: int | None = None) -> None:
+    """Emit terrain-transition features: airport boundary ribbon,
+    groundside pavement, boundary→DEM bridges, and (when
+    ``EMIT_BRIDGES_AND_TUNNELS``) taxi/road bridges + tunnel portals.
+
+    Session 51 single-solve refactor: this runs AFTER the single
+    elevation solve so each feature mirrors the FINAL pavement
+    altitudes (the boundary ribbon clamps to settled runway/pavement,
+    bridges span the settled surface).  Previously inlined at the end
+    of :func:`compute_elevations_and_repair_geometry`, where it sampled a pre-solve snapshot.
+    """
     # Per user 2026-04-28: emit a 5 m-wide ribbon polygon
     # tracing the airport boundary (apt.dat row-130) with
     # per-vertex altitudes clamped to ≤ 3 % grade from the
@@ -405,9 +429,3 @@ def run_phase2(layout: PavementLayout, icao: str, xplane_root: str,
                 pass
     except _GEOM_EXC:
         pass
-
-    # The per-surface solver final pass moved to pipeline.py — it
-    # must run AFTER pipeline.py's own post-finalize passes
-    # (widen_junctions_to_runway_corners, etc.) which can insert new
-    # vertices into junctions.  See pipeline.py at end of
-    # build_airport_pavement.

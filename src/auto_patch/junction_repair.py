@@ -1288,9 +1288,13 @@ def _split_sloped_rects_at_violations(
     # Collect candidate sloped rects.
     candidates: list[int] = []
     for i, s in enumerate(layout.shapes):
+        # Detect sloped rects by ROLE, not by altitude tags: this pass
+        # runs in the geometry phase BEFORE the single elevation solve
+        # (altitudes are None then), so an altitude gate would skip
+        # every rect.  The split is purely geometric — it moves the
+        # junction vertex onto a sub-rect corner so the two share a
+        # node; the solver fills altitudes afterward (lossless).
         if s.role not in SLOPED_ROLES:
-            continue
-        if s.altitude_high is None or s.altitude_low is None:
             continue
         if s.polygon is None or s.polygon.is_empty:
             continue
@@ -1404,8 +1408,10 @@ def _split_sloped_rects_at_violations(
         if coords and coords[0] == coords[-1]:
             coords = coords[:-1]
         c0, c1, c2, c3 = [tuple(c) for c in coords]
-        alt_h = float(s.altitude_high)
-        alt_l = float(s.altitude_low)
+        has_alt = (s.altitude_high is not None
+                   and s.altitude_low is not None)
+        alt_h = float(s.altitude_high) if has_alt else None
+        alt_l = float(s.altitude_low) if has_alt else None
 
         def _interp_pt(a, b, t):
             return (a[0] + t * (b[0] - a[0]),
@@ -1446,14 +1452,23 @@ def _split_sloped_rects_at_violations(
             import copy
             new_s = copy.copy(s)
             new_s.polygon = poly
-            new_s.altitude_high = round(alt_h + t_a * (alt_l - alt_h), 1)
-            new_s.altitude_low = round(alt_h + t_b * (alt_l - alt_h), 1)
             new_s.node_altitudes = None
-            # If new sub-rect is effectively flat (delta < 0.1m),
-            # convert to flat altitude.
-            if abs(new_s.altitude_high - new_s.altitude_low) < 0.1:
-                avg = 0.5 * (new_s.altitude_high + new_s.altitude_low)
-                new_s.altitude = round(avg, 1)
+            if has_alt:
+                new_s.altitude_high = round(
+                    alt_h + t_a * (alt_l - alt_h), 1)
+                new_s.altitude_low = round(
+                    alt_h + t_b * (alt_l - alt_h), 1)
+                # If new sub-rect is effectively flat (delta < 0.1m),
+                # convert to flat altitude.
+                if abs(new_s.altitude_high - new_s.altitude_low) < 0.1:
+                    avg = 0.5 * (new_s.altitude_high + new_s.altitude_low)
+                    new_s.altitude = round(avg, 1)
+                    new_s.altitude_high = None
+                    new_s.altitude_low = None
+            else:
+                # Geometric-only split (pre-solve): leave altitudes
+                # unset so the single solver derives the sub-rect
+                # planes from DEM + cascade.
                 new_s.altitude_high = None
                 new_s.altitude_low = None
             new_shapes.append(new_s)
