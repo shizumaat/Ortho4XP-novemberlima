@@ -60,6 +60,7 @@ from .config import (
     MIN_SERVICE_STRIP_LEN_M,
     SERVICE_ROAD_PAVEMENT_NEAR_M,
     ENABLE_SERVICE_ROADS,
+    ENABLE_DISCOVERED_TAXIWAYS,
 )
 from .layout import (
     BuiltShape,
@@ -1249,6 +1250,26 @@ def build_airport_pavement(icao: str, xplane_root: str,
     except _GEOM_EXC:
         pass
 
+    # ── Discover unreferenced taxiways (no centerline/ref) ───────
+    # Strip-shaped pavement that carries no apt.dat/OSM centerline (common at
+    # small/remote airports) otherwise dissolves into all-pair junction/apron
+    # residue.  Synthesise a centerline for each such strip on the raw
+    # pav_union and add it to the network, so the SINGLE _build_taxi_rects
+    # pass below turns it into an axial taxi rect like any referenced taxiway.
+    # The builder's long-edge-at-boundary + apron-interior gates ensure only
+    # strips with nothing along their sloping edge survive as rects.
+    if ENABLE_DISCOVERED_TAXIWAYS and pav_union is not None \
+            and not pav_union.is_empty:
+        from .pavement.discovered_taxiways import (
+            discover_unreferenced_centerlines)
+        _discovered = discover_unreferenced_centerlines(
+            pav_union, osm_centerlines, rwy_centerlines)
+        if _discovered:
+            osm_centerlines = list(osm_centerlines) + _discovered
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: discovered "
+                f"{len(_discovered)} unreferenced taxiway centerline(s).")
+
     # ── Per-ref OVERALL chord bearings (pre-split) ───────────────
     # Used by ``_classify_role`` to disambiguate diagonal-overall
     # taxis whose curving ends happen to align near-parallel to
@@ -1909,6 +1930,19 @@ def build_airport_pavement(icao: str, xplane_root: str,
         rwy_centerlines, apt_vertices=apt_pav_vertices,
         ref_overall_bearings=ref_overall_bearings,
         registry=layout.canonical_points)
+
+    # Scope discovery to clean free-strip lanes: drop discovered (TX) rects
+    # the builder left sheared — those are apron-EMBEDDED lanes (snap fit the
+    # rect to the ragged apron boundary).  They stay as residue and are handled
+    # by the Phase-2 apron narrow-neck decomposition, not rammed through here.
+    if ENABLE_DISCOVERED_TAXIWAYS:
+        from .pavement.discovered_taxiways import (
+            reject_curved_discovered_rects)
+        taxi_rects, _n_curved = reject_curved_discovered_rects(taxi_rects)
+        if _n_curved:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: deferred {_n_curved} apron-embedded "
+                f"discovered taxi rect(s) to residue (Phase 2).")
 
     # Filter stubs by user's runway-connection rule: a stub rect is
     # kept only if its OSM centerline reaches a runway.  Stubs whose

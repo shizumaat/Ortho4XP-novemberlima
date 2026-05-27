@@ -46,6 +46,7 @@ from __future__ import annotations
 import heapq
 import math
 import time as _time
+from collections import deque
 
 from shapely.errors import GEOSException, TopologicalError
 
@@ -488,6 +489,13 @@ def _compliant_spread_fit(n, elev, is_hard, dem_elev, edge_grade, edge_length,
 
 _RELIEF_OUTER_SWEEPS = 60       # global shape-cascade passes (graph cycles)
 
+# Phase 3 — leaf hierarchy.  When True, the directional relief holds each shape
+# ONLY at its parent-interface vertices (+ HARD anchors), not at every settled
+# vertex.  Parent = the adjacent shape with the lowest network-rank (most
+# inward).  This lets a shape drag its siblings/children to grade instead of
+# being clamped between two inward neighbours (the excavated-terrace shear).
+_USE_LEAF_HIERARCHY = True
+
 
 def _project_shape(elev, nodes, held, edges, flat) -> None:
     """Make ONE shape internally grade-compliant, holding ``held`` (node idxs
@@ -576,18 +584,74 @@ def _directional_relief(n, elev, is_hard, edge_grade, edge_length,
             if nd < rank[v]:
                 rank[v] = nd
                 heapq.heappush(pq, (nd, v))
-    # Process shapes nearest-the-runway first.
-    order = sorted(shape_constraints,
-                   key=lambda sc: min((rank[i] for i in sc["nodes"]),
-                                      default=INF))
     ineq = [((u, v), edge_length[(u, v)] * gr)
             for (u, v), gr in edge_grade.items()]
     comply = max(tol_m, _SPREAD_COMPLY_TOL_M)
+
+    # Shape-HOP depth: number of pavement PIECES between a shape and the
+    # runway/seam (BFS over the piece-adjacency graph), NOT metres.  A shape
+    # touching a HARD anchor is depth 1; each extra piece in the chain is one
+    # level further out on the tree.  Metres-rank is kept only as a tie-break.
+    node_owners: dict[int, list[int]] = {}
+    for k, sc in enumerate(shape_constraints):
+        for i in sc["nodes"]:
+            node_owners.setdefault(i, []).append(k)
+
+    def _neighbors(k):
+        out = set()
+        for i in shape_constraints[k]["nodes"]:
+            for k2 in node_owners.get(i, ()):
+                if k2 != k:
+                    out.add(k2)
+        return out
+
+    INF_D = 1 << 30
+    depth = [INF_D] * len(shape_constraints)
+    dq: deque[int] = deque()
+    for k, sc in enumerate(shape_constraints):
+        if any(is_hard[i] for i in sc["nodes"]):
+            depth[k] = 1
+            dq.append(k)
+    while dq:
+        k = dq.popleft()
+        for k2 in _neighbors(k):
+            if depth[k2] > depth[k] + 1:
+                depth[k2] = depth[k] + 1
+                dq.append(k2)
+    mrank = [min((rank[i] for i in sc["nodes"]), default=INF)
+             for sc in shape_constraints]
+    # Process shapes by HOP depth (parents before children), tie-break metres.
+    order_idx = sorted(range(len(shape_constraints)),
+                       key=lambda k: (depth[k], mrank[k]))
+    order = [shape_constraints[k] for k in order_idx]
+
+    # Leaf hierarchy: give each shape ONE parent — the adjacent piece one hop
+    # inward (smaller depth; tie-break by widest shared interface then metres)
+    # — and hold it only at the vertices it shares with that parent (+ HARD).
+    parent_held: list[set] | None = None
+    if _USE_LEAF_HIERARCHY:
+        parent_held = []
+        for k in order_idx:
+            cand: dict[int, set] = {}
+            for i in shape_constraints[k]["nodes"]:
+                for k2 in node_owners.get(i, ()):
+                    if k2 != k and depth[k2] < depth[k]:
+                        cand.setdefault(k2, set()).add(i)
+            held = {i for i in shape_constraints[k]["nodes"] if is_hard[i]}
+            if cand:
+                par = min(cand, key=lambda k2: (depth[k2], -len(cand[k2]),
+                                                mrank[k2]))
+                held |= cand[par]
+            parent_held.append(held)
+
     sweep = 0
     for sweep in range(min(max_iters, _RELIEF_OUTER_SWEEPS)):
         settled = list(is_hard)
-        for sc in order:
-            held = {i for i in sc["nodes"] if settled[i]}
+        for k, sc in enumerate(order):
+            if parent_held is not None:
+                held = set(parent_held[k])
+            else:
+                held = {i for i in sc["nodes"] if settled[i]}
             _project_shape(elev, sc["nodes"], held, sc["edges"], sc["flat"])
             for i in sc["nodes"]:
                 settled[i] = True

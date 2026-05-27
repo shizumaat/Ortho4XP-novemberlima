@@ -18,6 +18,8 @@ __all__ = [
     "EMIT_APRONS",
     "ENABLE_SERVICE_ROADS",
     "ABSORB_RECTS_ALONGSIDE_APRONS",
+    "ENABLE_DISCOVERED_TAXIWAYS",
+    "ENABLE_APRON_NECK_SPLIT",
     "EMIT_BRIDGES_AND_TUNNELS",
     "JUNCTION_CLUSTER_DIST_M",
     "MAX_BOUNDARY_EDGE_M",
@@ -288,6 +290,20 @@ ENABLE_SERVICE_ROADS = False
 # was reverted — taxilanes through aprons dissolve into the apron rather
 # than emitting tilting fixed-width ribbon chains.
 ABSORB_RECTS_ALONGSIDE_APRONS = True
+
+# Synthesise taxi-rect centerlines for strip-shaped pavement that carries no
+# apt.dat/OSM centerline (unreferenced taxiways — common at small/remote
+# airports).  Detected on the raw pav_union and fed through the SAME
+# _build_taxi_rects pass; the builder's long-edge-at-boundary + apron-interior
+# gates ensure only strips with nothing along their sloping edge become rects.
+# See pavement/discovered_taxiways.py.
+ENABLE_DISCOVERED_TAXIWAYS = True
+
+# Phase 2: split large apron/junction residue pieces at their narrow NECKS
+# (taxi-width pinches / arm mouths) into convex pads joined by short
+# connectors.  Keeps each apron all-pair surface convex and feeds the
+# directional-solver pad/connector hierarchy.  See pavement/apron_necks.py.
+ENABLE_APRON_NECK_SPLIT = True
 
 
 # ── Patch mesh-density tuning (X-Plane load-time optimization) ─────────

@@ -11,4 +11,5 @@ gdal==3.9.0; platform_system == 'Linux'
 
 # Dev / test
 pytest>=8.0
+pytest-xdist>=3.0   # parallel test execution (-n auto); suite is build-bound
 hypothesis>=6.0

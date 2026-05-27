@@ -1,225 +1,171 @@
-# Auto-Patch Status — session 49 END: directional shape-cascade relief; CYXY terrace = holdout
+# Auto-Patch Status — session 50 END: discovery + apron-neck-split + leaf-hierarchy DONE; elevation single-solve REFACTOR planned (handover)
 
-## TL;DR / current state (session 49 end)
-**Read `docs/elevation_solver.md` FIRST** — THE core component (elevation
-solver/relief), the user's model, every approach tried+rejected.
+> **Read `docs/elevation_solver.md` FIRST** — the core component (cascade +
+> directional relief). This session added three new geometry/solver pieces and
+> evaluated a pipeline-ordering refactor that is **planned but NOT yet started**
+> (the next agent's main job — see "THE PLANNED REFACTOR" below).
 
-**Relief is now a DIRECTIONAL SHAPE-CASCADE** (commit `81c76a0`,
-`unified_jacobi._directional_relief`) — it REPLACES the session-48 symmetric
-stiffness cap-projection (now superseded; the `_RELIEF_APRON_STIFFNESS`/
-stiffness machinery is gone).
-- **Phase 1** = the inverted cascade (terminal→apron→taxi→runway, DEM-
-  following, cap to grade) — the warm start.
-- **Phase 2** = propagate compliance OUTWARD from the runway/seam HARD
-  anchors, building ON phase 1 (**NO reseed** — never throw the DEM-following
-  surface away). Shapes are processed by network distance from the runway;
-  each is solved as a UNIT (`_project_shape`) holding the vertices already set
-  by inward shapes, so a violation is pushed OUT to the free terminal/apron
-  end. Terminals translate as a rigid flat plane; aprons/junctions flex as
-  compliant all-pair surfaces (slope-to-cap-then-drag), never sheared.
+## TL;DR / current state
+**Suite (excl. compare_target): 6 failed / 279 passed / 5 skipped** — run with
+`venv/bin/python -m pytest tests/ -q -k "not compare_target"` (now ~4.5 min,
+parallel; see Perf below). All work is **uncommitted on `dev`**:
+- Modified: `pytest.ini`, `requirements.txt`, `config.py`,
+  `elevation_per_surface/unified_jacobi.py`, `junction_emit.py`, `pipeline.py`
+- New (untracked): `pavement/discovered_taxiways.py`, `pavement/apron_necks.py`
 
-**Why the rewrite:** the symmetric relief reseeded to DEM and over-dropped
-compliant nodes to the LOWEST feasible surface — at SPLP it dropped junction
-21 to 70.7 (~1 m below its feasible band [71.65, 71.97], verified by Dijkstra
-band check), breaking stub A that phase 1 had already solved (0.43%). The
-directional cascade keeps phase 1's surface and only pushes residual outward.
+The 6 failures:
+- **`grade[CYXY]`** — the terrace holdout (see "Grade violations" below).
+- **`grade[SPLP]`, `grade[SPJC]`** — pre-existing.
+- **`have_source[SPJC]`** — pre-existing.
+- **`runway_node_sharing[CYXY]`, `outside_pavement[CYXY]`** — introduced by the
+  discovery feature (task #7; in the SW apron area Phase 2 reworks — may be mooted
+  by the refactor or need scoping).
 
-**Result:**
-- **SPLP — SOLVED.** Tile −13/−77 within-shape = 0 (stub A relieved with NO
-  runway move — it was never infeasible, just over-dropped by the old relief).
-  Tile −13/−78: 16.3% primary-A sliver GONE (one marginal 1.9% apron + three
-  cross-shape 0.2 m shared-vertex hits remain — the latter a separate
-  emit-rounding issue, not the relief).
-- **CYXY — KNOWN REGRESSION (within-shape ~77), the holdout.** The excavated-
-  terrace cluster (big "leaf" apron #48 + sub-leaf junctions/aprons
-  #49/#51/#50, the 705–715 m hillside) SHEARS — the cascade's strict
-  inward-held ordering can't reconcile a densely-interconnected non-convex
-  2-D cluster the way the old symmetric relief (global reconciliation) did.
-  apron #51 sheared 119% (two ADJACENT verts 4.6 m apart, chord INSIDE — a
-  real cliff, not a phantom). Measured facts: apron #48 convexity **0.32**
-  (super-convoluted); its taxi connections are TIGHT (702.4–704.4, worst
-  1.67%) — so CYXY is a flatten/ordering problem, **NOT** global infeasibility.
+Baseline before this session's work was 5 failed (`have_source[SPJC]`,
+`no_vertex_on_sloping_rect_flat_edge[SPJC]` (flaky), grade×3).
 
-**STEP 3 (runway-threshold yield) is PARKED** (commit `849265e`,
-`runway_redistribute.relieve_grade_via_runway_thresholds`,
-`ENABLE_RUNWAY_THRESHOLD_RELIEF=False`): the last-resort for a GENUINE
-multi-runway infeasibility (SPJC competing-terminal). Functional but
-UNVALIDATED on that target, and it can't tell a fixable residual from an
-unfixable one — so it's off by default. Enable + validate when a real
-multi-runway squeeze is hit (NOT needed for SPLP/CYXY).
+## What landed this session (3 features, all flag-gated, all on `dev` uncommitted)
 
-## PLAN for next session — fix CYXY's terrace (the holdout)
-1. **Cut non-convex transition aprons** (the non-convex all-pair problem).
-   apron #48 is a BLOB (convexity 0.32). The directional cascade works on
-   CHAINS (SPLP ✓) and chokes on BLOBS. Detect big LOW-CONVEXITY shapes that
-   also span grade, and CUT them PERPENDICULAR to their taxi routes into
-   CONVEX pieces — turning the terrace blob into a chain the cascade grades
-   smoothly (each piece compliant, joined at shared edges, grade following the
-   real pavement path, not Euclidean chords through non-pavement). CAVEAT:
-   apron *grid* subdivision was tried+rejected (`docs/elevation_solver.md`) —
-   pieces shared nodes (still one network) + added slivers; the new cut must
-   yield genuinely convex, non-sliver pieces.
-2. **Force-hierarchy "leaf network"** for the cascade's parent/held logic:
-   trunk (runway) → branches (taxiways, largest→smallest) → leaves (aprons
-   touching a taxiway) → sub-leaves (aprons touching only aprons). Give each
-   shape ONE parent (highest-priority inward neighbour); a sub-leaf is held
-   only by its parent, never by a same/lower-tier sibling — so it can drag its
-   siblings/children down instead of being clamped at incompatible levels (the
-   #51 119% shear was being held at both a #48-side 707 and a #50-side 713).
-3. Re-check SPJC; if a genuine multi-runway/terminal squeeze remains, enable +
-   validate STEP 3.
+### 1. Discovered unreferenced taxiways — `pavement/discovered_taxiways.py` (NEW)
+Small/remote airports have real taxiways with no apt.dat/OSM centerline; they
+otherwise dissolve into all-pair junction/apron residue. We **extract the medial
+axis** (Voronoi skeleton of `pav_union`, clearance band 6–32 m via
+`_WIDTH_MIN/_WIDTH_MAX`), bend-split each lane through the SHARED
+`pavement.centerlines.split_merged_centerline`, and inject synthetic centerlines
+(`ref="TXn"`) into `osm_centerlines` at **pipeline.py ~L1251** so the SINGLE
+`_build_taxi_rects` pass builds them like any referenced taxiway.
+- Flag `ENABLE_DISCOVERED_TAXIWAYS=True` (config.py).
+- **Scoped to clean free strips:** `reject_curved_discovered_rects` (called in
+  pipeline after `_build_taxi_rects`) drops discovered rects the builder left
+  **sheared** (>10° corner deviation) — those are apron-EMBEDDED lanes the snap
+  distorts; they're deferred to Phase 2 (which separates them so they re-emit
+  clean). CYXY keeps ~6 clean discovered rects.
+- **Why not snap-free / perpendicular construction:** tried + rejected — snap-free
+  rects float off the boundary → `have_source`/`outside_pavement`/`no_self_overlap`
+  fail. The snapping rect-builder is the single code path; discovery just feeds it
+  centerlines. (Long debugging arc — see git/conversation if revisiting.)
+- Residual: adds `runway_node_sharing[CYXY]` + `outside_pavement[CYXY]` (task #7).
 
-## Session-49 commits on `dev`
-- `fb0cf43` clearance edge-interp (fix phantom apron-edge bumps — was
-  nearest-node Voronoi sampling; now matches Triangle4XP linear render).
-- `c4aa796` relief step-2 framing (terminals rigid, aprons/taxi flex).
-- `81c76a0` directional shape-cascade relief (replaces symmetric).
-- `849265e` parked step-3 runway-threshold relief (gated off).
-- (session-48 base) `6c6726e`/`5cb2e0a`/`60db68d`/`1f2ba5a`/`8f2b0e9` —
-  module/stands cleanup, docs, and the stiffness relief (now SUPERSEDED).
+### 2. Phase 2 — apron neck-split — `pavement/apron_necks.py` (NEW)
+Splits large/blobby apron (residue) pieces at their **necks** (taxi-width arm
+mouths) into convex pads. `split_polygon_at_necks` / `neck_cuts`:
+- A **mouth** = two boundary nodes < taxi-width apart, non-adjacent on the ring,
+  with a real boundary excursion between them, chord crossing interior pavement.
+- Validated by eroding the excursion (`buffer(-taxi_hw)`): the cut is real when
+  the excursion is a thin arm (core empty) or a narrow neck then a pad
+  (core ≥ `min_neck_len` from the mouth). (NOTE: still **over-detects** ~dozens of
+  cuts on wiggly outlines; user accepted "extra cuts are not detrimental". The
+  user's two GT cuts on the big CYXY apron ARE captured.)
+- Flag `ENABLE_APRON_NECK_SPLIT=True`. Wired into `junction_emit` on large residue
+  pieces, BEFORE the hole-decompose.
+- **Non-regressing** (same 6 failures). Cut CYXY within-shape grade violations
+  786→253. Aprons 18→25.
+- KEY MODEL (took many iterations): the arm/channel **curves**, so MRR / straight
+  cross-sections read wide (56 m); traced **along the medial centerline** it stays
+  ~taxi width. Phase 1 already produces a centerline for it. The cut is the
+  perpendicular waist at the arm's pad-end where the traced width steps up.
 
-**Suite (excl. compare_target):** **UNMEASURED after the directional cascade
-(`81c76a0`)** — committed as a checkpoint without a full re-run.  Known from
-per-tile probes: **CYXY grade REGRESSED** (within-shape ~77 — the terrace
-shear above; was within=0 / step-cap-only under the prior symmetric relief),
-**SPLP grade improved** (−13/−77 within=0).  SPJC unmeasured.  **First action
-next session: run `venv/bin/python -m pytest tests/ -q -k "not compare_target"`
-(~20 min)** to get the true count before touching anything.  Pre-directional
-baseline (`c4aa796`) was **6 failed / 279 passed / 5 skipped** = junction
-`have_source`[SPJC]+[CYXY] + `outside_pavement`[CYXY] (the last is FLAKY) +
-`no_vertex_on_sloping_rect_flat_edge`[SPJC] + grade ×3 (CYXY/SPLP/SPJC); the
-session-48 "5"-fail count UNDERCOUNTED the two CYXY junction-invariant fails
-(pre-existing / flaky).
+### 3. Phase 3 — leaf hierarchy — `unified_jacobi._directional_relief`
+The directional relief now holds each shape **only at its parent-interface
+vertices (+ HARD anchors)**, not at every settled vertex. Parent = the adjacent
+piece one **HOP** inward (shape-graph BFS depth from HARD anchors, NOT metres —
+user: "the longer the chain the lower the priority"). Tie-break: widest shared
+interface, then metres-rank.
+- Flag `_USE_LEAF_HIERARCHY=True` (unified_jacobi.py).
+- Cut CYXY within-shape grade violations 253→**64**, worst-case **145%→64.5%**
+  (the hop metric — vs metres — fixed the 145% spike).
+- This is STATUS-49's "force-hierarchy leaf network" (task #3).
 
-**Session-47 model REVERTED (user 2026-05-24):** `ABSORB_RECTS_ALONGSIDE_APRONS
-=True` — the no-absorption + apron-lane-chain model is gone; taxilanes through
-aprons dissolve into the apron again (no tilting fixed-width ribbon chains).
-CYXY now emits **0 apron-lane shapes**.
+### Perf (task done): suite was serial → now parallel
+- `pytest-xdist` added to `requirements.txt`; `addopts += -n auto` in `pytest.ini`.
+  Suite 21 min → **4.5 min** (~5×). `-n0` forces serial for debugging.
+- Build profile (cProfile, one CYXY build): the elevation **`solve()` runs 2× per
+  build ≈ 79% of build time (~130 s)** — `_project_shape` 99 s, 8160 calls, 599 M
+  `abs()`. apt.dat index (`_index_apt_dat`) is ALREADY memoized — not a redundancy.
+  The 2× solve is the real cost → the refactor below collapses it.
 
-**Removed dead/abandoned code (this session):**
-- Solver experiments: `pavement/apron_subdivide.py` (150 m grid — didn't fix
-  the over-drop, pieces share nodes; added slivers), `_ceiling_spread` +
-  `floor_tol`, the `largest_rwy_bearing` block.
-- Old superseded modules + their tests: `pavement/{taxiway_rects,classifier,
-  taxiway_decompose}.py` (replaced by `rects.py`) + `apron_split.py`.
-- **Aircraft stands** end-to-end: `ENABLE_AIRCRAFT_STANDS`, `STAND_MAX_GRADE`,
-  `ROLE_STAND`, `apt_stand_zones`, the `RampStart` apt.dat parser (+ tests),
-  `AIRCRAFT_LENGTH_BY_CODE_LETTER`.  (`WINGSPAN_BY_CODE_LETTER` kept — wingtip
-  clearance.)
-- **Service roads** (`ENABLE_SERVICE_ROADS=False`): code kept, but the OSM
-  small-roads lookup (already gated) + apt.dat 1206 centerline parse are now
-  both skipped while disabled — no wasted load cycles.
-See `docs/elevation_solver.md` for why the solver experiments were rejected.
+## Grade violations — diagnosis (CYXY, 6 violating SHAPES; tools to reuse below)
+Two distinct causes (review OSM written to `/tmp/CYXY_grade_viol.osm`):
+- **Cause 1 — genuine competing priorities (1 shape):** apron #62 (47%) is pinned
+  at **703 by junction #63 AND 712 by apron #65** (9.1 m apart over 16 m) — the
+  excavated terrace. No compliant surface exists unless a neighbour yields
+  (retaining/ramp, or the parked STEP-3 runway-threshold relief). Real infeasibility.
+- **Cause 2 — relief output overwritten after the final solve (5 shapes):** #61
+  (64.5%, pinned only at runway 691.4, free verts stuck at 695.5), #78 (23%), #50
+  (15.5%, NO pins at all — should be trivially flat), #86, #53. These have NO
+  competing pins, so the solver SHOULD flatten them — but passes AFTER
+  `per_surface_solve` (conformance vertex-insert, 2nd tile-cut, clearance) edit
+  geometry/altitudes with **no re-solve**, OR they're created by the subdivide
+  between the two solves. **This is exactly what the refactor fixes.**
 
-**Remaining flags:** `ABSORB_RECTS_ALONGSIDE_APRONS=True` (reverted),
-`ENABLE_SERVICE_ROADS=False` (gated, code kept), `_PER_AXIS_JUNCTIONS=False`.
-The session-47 details below are history (its apron-lane / stands experiments
-have been reverted/removed per the above).
+## THE PLANNED REFACTOR (task #8 — next agent's main job, NOT started)
+**Goal:** finalize ALL geometry first, then run the elevation solver **ONCE, last**,
+with nothing editing altitudes after it. Eliminates the 2× solve (~130 s) AND
+Cause 2 (post-final-solve overrides). User confirmed: do it **in one go, then
+test/debug** (don't test mid-refactor).
 
-## DONE this session (committed on `dev`)
-1. **`98f8ad0`** — (a) **same-pack DSF**: read DSF only from the chosen
-   apt.dat's pack, so the stock Global Airports DSF no longer re-imports
-   shapes a custom pack removed (CYXY wide A2); (b) **clearance shadows
-   the FINAL profile**: emit clearance AFTER the last per-surface solve +
-   flat lateral shadow (slope 0) — fixed CYXY taxiway-E trench; (c) **apron
-   absorb**: assign each absorbed rect strip to ONE junction, not every
-   bordering one — fixed the 3344 m² SPJC apron/apron overlap.
-2. **`1d85d86`** — `PATCH_SLOPE_PROFILE = "plane"` (was spline). **Fixed
-   the taxiway-A2 dip**: the mesh rendered the spline curve while the
-   clearance samples the surface LINEARLY, so they diverged; plane =
-   constant grade = matches. Multi-airport DEM fit confirmed spline is
-   never meaningfully the best fit.
-3. **`fbeaa05`** — `split_long_rects_along_terrain`: split taxi rects
-   >200 m at interior DEM extrema so the solver places control points
-   where terrain curves and each piece follows it (seam between plane
-   pieces is a <3% grade-capped fold — invisible). CYXY +1, SPJC +2,
-   HECA +13.
-4. **`6a7bb3a`** — **prong #2 grade-relief: terminal-free aprons yield.**
-   The inverted cascade froze every apron before solving taxi, so a
-   taxiway bridging a low runway and a high terminal-free apron over-
-   graded with no recourse. New relief phase in `unified_jacobi.solve`:
-   after the cascade, terminal-free apron nodes go SOFT with the taxi
-   network (terminals / terminal-anchored aprons / runway-seam stay
-   HARD); cap projection lets the apron yield within its all-pair grade
-   (no steep-middle apron). Grade-driven + unbounded (DEM unreliable at
-   excavated terraces — confirmed by ground truth: real terrace 705 m
-   while DEM reads it via the cut-face). **CYXY taxiway E#2 3.92% → 1.48%
-   (compliant), E#1 → 0.57%.** Suite unchanged. `_runway_nodes` + the
-   `node_bounds` clamp are PARKED in the file for the last-resort
-   runway-yield (prong #1), currently unused.
+**Evaluation (done — why the current order exists):** the 2× solve is an iterative
+geometry↔altitude loop: solve#1 → grade-subdivide (needs grades) + snap/enforce
+reconciliation (needs solved tags) + `_split_sloped_rects`/`_absorb` (detect AND
+**propagate** altitudes) → solve#2. Genuinely elevation-dependent pieces, BUT:
+- Sloped-rect detection is a **role** property (`SLOPING_RECT_ROLES`), not an
+  altitude property — `_split_sloped_rects_at_violations` already role-gates; it
+  just additionally skips when `altitude_high is None` and interpolates sub-rect
+  hi/lo (junction_repair.py:1293, 1449-1450) + updates junction `node_altitudes`
+  (1591-1664). De-couple = geometric split ONLY, set altitudes `None`, let the
+  solver re-derive. Same for `_absorb_rects_at_junction_perimeters` (1766).
+- Grade-subdivide (`_subdivide_violating_junctions`) is **superseded** by Phase 2
+  neck-split (geometric, pre-solve) + the hop-hierarchy relief.
+- snap/enforce reconciliation only patches (a) drift from geometry passes that ran
+  AFTER solve#1 and (b) the lossy terminal-flat / rect-hi-lo tags.
 
-## Grade-relief 3-prong plan (user 2026-05-23) — status
-The CYXY E grade was a real infeasibility: ~20 m rise from the runway
-valley (693) to the upper hillside aprons (705–715) over short taxiways.
-Fix = spread the relief across three prongs so no one surface absorbs it:
-- **#2 terminal-free apron yield — DONE (`6a7bb3a`)**, fixes E#2.
-- **#1 runway-threshold yield — PARKED, last resort.** Only engage when
-  the taxi network can't meet grade after #2/#3 (NOT always-on — perturbing
-  published runways is a last resort). Helper + node_bounds clamp already
-  in `unified_jacobi`.
-- **#3 width-dependent apron grade — ATTEMPTED + REVERTED.** Model (user):
-  grade stiffness ∝ local width — a WIDE area is all-pair (flat, free
-  maneuvering, can't terrace); a NARROW arm (access road / taxiway neck)
-  flexes ALONG its axis like a taxiway. Correct model, but the
-  implementation (morphological-opening classification, `buffer(-W/2).
-  buffer(+W/2)` + contains) **misclassified wide-apron PERIMETER vertices
-  as narrow** → solver ramped wide aprons → 1608 grade violations, 14.7%
-  apron steps. **Fix for next time:** classify by distance to the eroded
-  core — `wide[v] = poly.buffer(-W/2).distance(v) <= W/2 + tol` (a wide
-  perimeter vertex is ~W/2 from the eroded core; a narrow-arm vertex is
-  far). Needs the SAME gate in `tools/check_grade` (else it flags what the
-  solver builds). SEPARATE blocker: CYXY's access road is swallowed into
-  the giant apron #41 blob, so it isn't a thin arm in our geometry — the
-  apron needs de-blobbing for the access-road case to show.
+**KEY INSIGHT — no per-vertex writeback needed:** if ALL geometry is finalized
+before a single solve, the writeback is **lossless** (solver gives one value per
+shared bucket; a flat terminal's corners are all equal; a rect's 4 corners define
+its plane), so shared corners agree by construction → **no reconciliation needed**.
 
-## APRON GRADE STANDARDS — RESEARCHED (session 47, 2026-05-24) ✓
-Verbatim-sourced from FAA AC 150/5300-13B §5.9, EASA CS ADR-DSN.E.360, ICAO
-Annex 14 §3.13. Full writeup in memory `apron_grade_standards.md`. The standards
-distinguish **parking positions (aircraft stands)** from **apron taxilanes** —
-our single all-pair `APRON_MAX_GRADE=0.015` conflates them. Answers:
-- **All-pair vs local?** BOTH, by FUNCTION. Stand bodies = **all-pair**
-  (EASA/ICAO: "max 1% in any direction") — our Euclidean all-pair cap is RIGHT
-  there. Apron **taxilanes = directional/along-axis** travel paths (flex like a
-  taxiway), NOT all-pair. = the width/torsion model, keyed on function.
-- **1.0% vs 1.5%?** Both: **stands/parking = 1.0%** (our 0.015 is TOO LOOSE);
-  **heavy apron taxilane = 1.5%** (0.015 correct); light (<30,000 lb) = 2.0%.
-- **Curvature?** Yes, simplified: FAA **max grade CHANGE = 2%** (not a runway
-  K-curve) + smooth longitudinal changes >1% on taxilanes; 0.5% drainage floor.
-  Grade is a LOCAL max that fluctuates — NOT a flat plane end-to-end (user right).
+**Target order (rewrite pipeline.py elevation phase ~L2286–2900):**
+1. ALL geometry, no elevations: `split_long_rects_along_terrain`,
+   `stitch_pavement_to_flat_runways`/`_to_terminals`/`_polygons`,
+   `_split_sloped_rects_at_violations` + `_absorb_rects_at_junction_perimeters`
+   (DE-COUPLED to geometric-only), `_snap_junction_vertices_to_rect_flat_edge_corners`,
+   `_reclassify_apron_junctions`, Rule-2 sloping-edge snap, seam split,
+   `cut_layout_at_tile_boundaries`, conformance vertex-insertion. (Neck-split
+   already runs in `junction_emit`, pre-elevation.)
+2. Runway profile: `redistribute_runway_profile`, `nudge_runway_corners_at_seam_junctions`,
+   `apply_seam_dem_anchors`.
+3. **SINGLE `per_surface_solve`** (cascade + relief).
+4. `emit_surface_clearance_cuts` (overlay — emits separate shapes, must NOT edit
+   pavement altitudes).
+**REMOVE:** solve#1 (pipeline ~L2552), all `_subdivide_violating_junctions` calls
+(~L2563, ~L2635), the snap/enforce reconciliation loop (~L2614–2647), the 2nd
+`cut_layout_at_tile_boundaries` (~L2893).
 
-**Reframes prong #3:** key the cap on stand-vs-taxilane function (width as proxy
-when apt.dat doesn't say). Wide stand → all-pair 1.0%; narrow taxilane → along-
-axis 1.5%; add a ~2% apron grade-change cap (new, currently unmodeled). The prior
-#3 classification bug + CYXY access-road-in-blob#41 still apply (memory note).
-**Implementation gated on user green-light** (real compare_target/grade impact;
-`tools/check_grade` needs the SAME gate).
+**Risks / watch:** (a) the de-coupling surgery on `_split_sloped_rects` + `_absorb`
+(strip altitude propagation); (b) pass-ordering deps — preserve the documented ones
+(Rule-2 AFTER reclassify; absorb at end; etc.); (c) dropping grade-subdivide may
+leave residual grade — verify; (d) dropping reconciliation must NOT reintroduce
+shared-corner steps (the lossless-writeback argument must hold — check
+`test_pavement_grade` cross-shape/step); (e) compare_target fixtures may shift.
+**Validate:** `pytest -k "not compare_target" -n auto`; target ≤ 6 failures;
+grade[CYXY] within-shape should improve; SPLP/SPJC must not regress.
 
-## OPEN / next
-- ~~**Junction clearance consolidation**~~ — DONE (commits `509648d` +
-  `f027912`): `clearance._finalize` unions all raw strips, subtracts
-  pavement once, and emits ONE `node_altitudes` shape per connected
-  region (1:1 shared-vertex adoption across pavement-hole splits). CYXY
-  emits 45 clearance shapes; near-pairs are pavement-separated (correct —
-  no cut over pavement), not fragments. The old stale OPEN bullet was
-  carried forward unstruck from the session-46 handover.
-- **compare_target ×3** — re-cut (gated on suite being otherwise green).
-- **SPJC cluster ×3** + **grade ×3** — pre-existing; grade mostly data.
-- Profile dynamic per-rect FIT: evaluated + DROPPED (marginal vs plane).
+## Reusable debug probes (this session, in /tmp — regenerate as needed)
+- Enumerate within-shape grade violators + competing pins → `/tmp/CYXY_grade_viol.osm`.
+- Discovered-centerline overlay (apt.dat vs synthetic) → `/tmp/CYXY_cl_overlay.osm`.
+- Apron neck candidates / cuts → `/tmp/CYXY_neck_cuts.osm`.
+(All built via `build_airport_pavement("CYXY", xplane_root())` + the hook on
+`discover_unreferenced_centerlines` to capture `pav_union`.)
 
-## Design facts locked this session
-- O4 profile curves all pin endpoints (`plane/spline/tanh(0)=0,(1)=1`) →
-  per-rect profile choice never creates a seam; only shapes the interior.
-- Grade-capped plane-segment seam crease ≤ ~3% (≈1.7°), <1% typical →
-  splitting at extrema is visually safe (KTEX concern resolved).
-- Profile = graded DESIGN, NOT the DEM (man-made fill: CYXY 02/20, BGGH;
-  ribbon/bridge own the terrain transition).
+## GOTCHAS (unchanged + new)
+- **Ortho4XP caches `auto_patch` modules** — full quit+relaunch after edits.
+- **Import cycle** `junction_repair` ↔ `elevation` — import `auto_patch.pipeline`
+  first (the discover hook / probes do).
+- **Bash CWD persists** — probes that `cd src/auto_patch` then call `venv/bin/python`
+  fail; always run from repo root.
+- **Two `_subdivide_violating_junctions` call sites** + a post-snap loop — remove
+  ALL when refactoring.
+- Temp/debug scripts + OSM dumps go in `/tmp`, never the working tree.
 
-## GOTCHAS
-- **Ortho4XP GUI caches `auto_patch` modules** — after editing source you
-  MUST fully quit + relaunch (kill the python procs); rebuilding in the
-  same GUI reuses stale modules. The user hit this ("global DSF back").
-- Per-tile build = production DEM: `_load_airport_dem(lat0,lon0,
-  override_dem=tile_dem)`; `_sample_dem(dem, tile_lat, tile_lon, lat, lon)`
-  — args in THAT order.
-- User edits files in parallel (config.py consolidation, docs, tools/*heca*)
-  — re-check `git status`/`git log`; commit ONLY your own files.
+See `docs/elevation_solver.md` for the solver model; this session did NOT change the
+cascade or the relief's core mechanism (only added the hop-hierarchy hold rule).
