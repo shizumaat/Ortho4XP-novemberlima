@@ -2192,19 +2192,20 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # rect so the taxilane through the apron stays a directionally-graded
     # rect; it's subtracted from the apron (apron = pav_union − rects), so
     # the apron simply wraps it — no overlap, perfect node parity.
-    # Phase-1 absorption (always-on per user 2026-05-27): drop fully-embedded
-    # primary_parallels (apron covers them) AND partial-clip half-embedded
-    # ones (keep the unbounded portion as a shorter rect, let the apron
-    # wrap the clipped portion).  This is the "build it right at
-    # construction" stage — independent of the elevation-block post-emit
-    # `_absorb_rects_at_junction_perimeters` dissolve (which IS gated by
-    # ABSORB_RECTS_ALONGSIDE_APRONS).  Without these, primary_parallels that
-    # legitimately should be clipped at the apron boundary stay full-length
-    # and the apron has no natural way to express its taxilane subdivision.
-    taxi_rects = _drop_primary_parallels_embedded_in_pavement(
-        taxi_rects, pav_union, runway_polys=runway_polys)
-    # Canonical case: CYXY taxi E NW-SE — NW half embedded in SW
-    # apron, SE half extends free toward runway 02.
+    # (session 51) `_drop_primary_parallels_embedded_in_pavement` was
+    # DISABLED per user 2026-05-27.  Under the clean model every NAMED
+    # taxiway stays as a directionally-graded rect (apron = pav_union − rects
+    # wraps it), even when its long edges sit inside surrounding apron
+    # pavement.  The drop's "long edge ≥95% inside pavement" criterion
+    # over-fired on real named taxiways (e.g. SPJC Taxi A1 segment
+    # 1481→1633 was dropped, leaving its footprint absorbed into the
+    # apron).  If we ever need to drop genuinely apron-only artifacts
+    # those should come from the centerline source (apt.dat / OSM /
+    # discovered) not from this rect-side filter.
+    #
+    # `_split_primary_parallels_at_pavement_boundary` is KEPT — partial-clip
+    # at apron boundary is legitimate (CYXY taxi E NW-SE: NW half in SW
+    # apron clipped, SE half stays as the unbounded rect).
     from .pavement.absorption import (
         _split_primary_parallels_at_pavement_boundary)
     taxi_rects = _split_primary_parallels_at_pavement_boundary(
