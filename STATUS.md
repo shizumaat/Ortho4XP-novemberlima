@@ -1,4 +1,4 @@
-# Auto-Patch Status — session 51 IN PROGRESS: single-solve refactor DONE, INVARIANTS agreed (docs/pipeline_invariants.md), TESTS redefined; 13 real invariant violations remain (task #8)
+# Auto-Patch Status — session 51 IN PROGRESS: clean no-absorption model NOW DEFAULT (absorb=False, commit 0104f00); single-solve + invariants agreed + tests redefined + apron_lane retired + _split_narrow_necks retired; 10 real invariant violations remain
 
 > **Read `docs/pipeline_invariants.md` FIRST** — the agreed working spec for the
 > refactor (8 invariant sections, A1–H28). Then `docs/elevation_solver.md` for the
