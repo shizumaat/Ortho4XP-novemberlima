@@ -167,19 +167,55 @@ def _rect_corner_shear_deg(poly) -> float:
     return worst
 
 
+def _perp_exceeds_axial(rect, axis) -> bool:
+    """True when the rect's extent PERPENDICULAR to its own axis exceeds its
+    extent ALONG the axis — i.e. it's wider than it is long relative to its
+    centerline (user 2026-05-28).  A real taxi lane runs LONG along its axis
+    (discovery requires len >= 40 m, width <= 32 m), so this only fires on a
+    mis-built apron blob: a short/refless centerline whose snap-to-pavement
+    blew the perpendicular width out past the axial length (SPJC #44 = 27 m
+    axial x 122 m perpendicular, source_axis along its short side)."""
+    try:
+        ac = list(axis.coords)
+        rc = list(rect.exterior.coords)
+    except _GEOM_EXC:
+        return False
+    if len(ac) < 2 or len(rc) < 4:
+        return False
+    if rc and rc[0] == rc[-1]:
+        rc = rc[:-1]
+    ax, ay = ac[-1][0] - ac[0][0], ac[-1][1] - ac[0][1]
+    al = math.hypot(ax, ay)
+    if al < 1e-6:
+        return False
+    ux, uy = ax / al, ay / al
+    nx, ny = -uy, ux
+    along = [x * ux + y * uy for x, y in rc]
+    perp = [x * nx + y * ny for x, y in rc]
+    return (max(perp) - min(perp)) > (max(along) - min(along))
+
+
 def reject_curved_discovered_rects(taxi_rects, max_shear_deg=_MAX_SHEAR_DEG):
-    """Drop discovered (ref ``TX…``) rects that the rect builder left sheared —
-    i.e. apron-embedded lanes whose snap distorted the rect.  Those stay as
-    residue (handled by Phase-2 apron decomposition).  Free-strip lanes (clean
-    rects) are kept.  Returns ``(kept_list, n_dropped)``; referenced taxiways
-    are never touched."""
+    """Drop UNREFERENCED rects (discovered ``TX…`` or ``ref=''``) that aren't
+    real lanes — they stay as residue (handled by Phase-2 apron decomposition).
+    Free-strip lanes (clean rects) and any apt.dat-referenced taxiway are kept.
+    Returns ``(kept_list, n_dropped)``.
+
+    Two rejection criteria, both apron-blob signatures:
+      * SHEARED — corner angles deviate > ``max_shear_deg`` from 90° (an
+        apron-embedded lane the rect builder's snap distorted);
+      * WIDER-THAN-LONG — extent perpendicular to the axis exceeds the axial
+        extent (a short/refless centerline snapped into a wide apron rect,
+        e.g. SPJC #44).  Real lanes are long along their axis, never this.
+    """
     kept = []
     dropped = 0
     for entry in taxi_rects:
-        rect, _axis, _role, ref = entry
-        if (ref and ref.startswith("TX") and rect is not None
-                and not rect.is_empty
-                and _rect_corner_shear_deg(rect) > max_shear_deg):
+        rect, axis, _role, ref = entry
+        unref = (not ref) or ref.startswith("TX")
+        if (unref and rect is not None and not rect.is_empty
+                and (_rect_corner_shear_deg(rect) > max_shear_deg
+                     or _perp_exceeds_axial(rect, axis))):
             dropped += 1
             continue
         kept.append(entry)
