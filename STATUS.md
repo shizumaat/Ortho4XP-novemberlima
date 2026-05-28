@@ -5,41 +5,58 @@
 > 2. `docs/elevation_solver.md` — solver model (the directional two-pass + difference-constraint solve below supersede the old cascade/relief framing).
 > 3. This file — what session 52 changed and what's next.
 >
-> **Working tree:** session-52 work committed (HEAD `ae65c7a`). Suite:
-> **8 failed / 273 passed / 2 skipped** (`venv/bin/python -m pytest tests/ -q -k "not compare_target" -n auto` ≈ 1:02).
+> **Working tree:** session-52 work committed (HEAD `1158282`). Suite:
+> **8 failed / 273 passed / 2 skipped** (`venv/bin/python -m pytest tests/ -q -k "not compare_target" -n auto` ≈ 1:00).
 > No regressions vs the session-51 baseline; `test_no_self_overlap[SPLP]` now passes.
 
 ## TL;DR / where to start
-Session 52 built the elevation solver out in three layers and the grade
-violations have collapsed:
+Session 52 built the elevation solver out and cleaned up spurious discovered
+rects; the grade violations have collapsed from dozens to a handful:
 1. **Terminal = rigid flat unit** (conform forward, rigid-shift reverse).
 2. **Sloped-rect flat ends = rigid coupled level** + grade-checker fixes
    (airside↔groundside wall exemption; only-where-shapes-touch).
 3. **Boundary ribbon sliced like every shape** (don't cut `airport_boundary` at
    the seam) — fixed SPLP self-overlap + dropped SPLP grade 20→2.
 4. **★ Direct difference-constraint solve** (`_grade_bands` +
-   `_project_within_bands`) replaced the non-converging relief relaxation.
-   Per-tile within-shape grade: **CYXY 86→5, SPJC 22→2, SPLP 2→4.**
+   `_project_within_bands`, in `unified_jacobi.py`) replaced the non-converging
+   relief relaxation. Grade = a difference-constraint system; multi-source
+   shortest-path bands from the HARD anchors give each node's feasible
+   `[lo,hi]` (multi-path handled natively, infeasible nodes flagged), then a
+   bounded cap-projection over WITHIN-SHAPE edges (terminals held, rect flat
+   ends coupled, both-HARD skipped) settles the rest. Per-tile within-shape:
+   **CYXY 86→5, SPJC 22→2, SPLP 2→4.**
+5. **Drop spurious discovered (TX) rects** (`pavement/discovered_taxiways.py`):
+   (a) wider-than-long apron blobs (SPJC #44); (b) runway-parallel apron/runway-
+   edge medial artifacts within 15°+25m of a runway (SPJC TX24/25/27). Both
+   leave the pavement as a single junction/apron. SPJC cross-shape 6→0.
 
 **Per-tile grade-test status now** (the binding numbers — build per-tile with
 SMOOTHED DEM; whole-airport `build_airport_pavement` MIS-SAMPLES the seam DEM on
 cross-tile airports and fabricates phantom seam violations — always measure
-per-tile via `tools/build_target_osm.py`-style or `grade_detail.py`):
+per-tile via the grade test or `/tmp/grade_detail.py`):
 - SPLP: 4 cross @ 0.2 m (emit rounding) + 4 within (stub) + 2 barely-over junctions (1.6–1.9 %).
-- SPJC: 6 cross (worst 1.8 m = terminal `#0` 30.1 ↔ secondary_parallel `-10045` 31.8, a TERMINAL↔RECT emit-consensus at a shared corner) + 2 within (apron).
-- CYXY: 0 cross + 5 within (stub 4, apron 1).
+- SPJC: **0 cross** + 2 within (apron).
+- CYXY: **0 cross** + 5 within (stub 4, apron 1).
 
-## NEXT ACTION — the small residuals
-All that's left on grade is small and emit/tight-spot, not architectural:
-1. **Cross-shape = emit-consensus at shared corners** (terminal↔rect, rect↔
-   neighbour).  In the SOLVER a shared node has ONE elevation; the disagreement
-   is at EMIT — a flat terminal writes one altitude, a sloped rect writes a 2-
-   value plane (hi/lo collapse), and at the shared corner those differ from the
-   neighbour's per-node value.  Make the rect/terminal emit honour the exact
-   solved node elevation at every shared corner (emit per-node at shared corners,
-   or only collapse when it preserves them).  Probe: `/tmp/diag_rect.py`.
-2. **A few barely-over stubs/aprons** (CYXY 5, SPLP 4): the bands solve leaves
-   tiny residuals at tight spots; re-triage which are real vs emit-rounding.
+## NEXT ACTION — the small residuals (no longer architectural)
+1. **Cross-shape emit-consensus at shared corners** (SPLP 4 @ 0.2 m).  In the
+   SOLVER a shared node has ONE elevation; the disagreement is at EMIT — a flat
+   terminal writes one altitude, a sloped rect writes a 2-value plane (hi/lo
+   collapse), and at the shared corner those differ from the neighbour's per-node
+   value.  Make the rect/terminal emit honour the exact solved node elevation at
+   shared corners (emit per-node there, or only collapse when it preserves them).
+   Probe: `/tmp/diag_rect.py`.  (SPJC's terminal↔rect 1.8 m case was the spurious
+   rect #44 — already gone.)
+2. **A few barely-over stubs/aprons** (CYXY 5, SPLP 4 within): bands-solve
+   residuals at tight spots; re-triage real vs emit-rounding.  `/tmp/grade_detail.py`.
+
+## Solver knobs (unified_jacobi.py)
+`_project_within_bands` cap-projection sweep cap is hard-coded **1000** at the
+call site in `_directional_relief` (fast; grade build ≈ 21 s).  `_grade_bands`
+returns `(-inf,+inf)` for nodes unreachable from a HARD anchor (left at DEM).
+The old `_RELIEF_OUTER_SWEEPS=60` / `_USE_LEAF_HIERARCHY` / Dijkstra-`rank`
+machinery is still present but now only feeds the single reverse pass + the
+bands convergence — candidate dead-code cleanup once stable.
 
 ## The directional two-pass model (user 2026-05-28, CONFIRMED)
 Priorities: if a tile seam crosses the pavement union it is highest priority;
