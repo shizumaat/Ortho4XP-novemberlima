@@ -173,69 +173,33 @@ def _source_pavement_union(icao: str):
         return None
 
 
-@pytest.mark.parametrize("icao", _test_airports())
+def _no_self_overlap_airports():
+    """Union of canonical baseline airports + any env-driven extras
+    (de-duplicated, baseline-first order).  Merges the previously-
+    separate env-gated and baseline variants of this test."""
+    seen, out = set(), []
+    for icao in tuple(baseline_airports()) + tuple(_test_airports()):
+        if icao in seen:
+            continue
+        seen.add(icao)
+        out.append(icao)
+    return out
+
+
+@pytest.mark.parametrize("icao", _no_self_overlap_airports())
 def test_no_self_overlap(icao):
-    """Per user 2026-04-30 hard invariant: NO two emitted pavement
-    shapes may overlap, ever.  No floating-point allowance.
+    """Invariant A1 (single-solve, see docs/pipeline_invariants.md):
+    every paved metre belongs to exactly one shape — NO two emitted
+    pavement shapes may overlap, ever.  No floating-point allowance
+    except where ``SELF_OVERLAP_BASELINE_M2`` documents a known cap.
 
-    Catches: KPHX taxi-bridge regression where bridge polygons
-    overlapped adjacent rect / apron pavement; SPJC DSF visual
-    overlay regression where ``zannespol`` polygons duplicated
-    apt.dat row-110 coverage; any future absorption / clip pass
-    that fails to remove an absorbed sub-rect.
-    """
-    layout = _build_layout(icao)
-    polys = [(s.role, s.polygon) for s in layout.shapes
-             if s.polygon is not None and not s.polygon.is_empty]
-    if len(polys) < 2:
-        return
-    tree = STRtree([p for _, p in polys])
-    overlap_pairs = []
-    overlap_area = 0.0
-    for i, (role_a, pa) in enumerate(polys):
-        for j in tree.query(pa):
-            if j <= i:
-                continue
-            role_b, pb = polys[j]
-            try:
-                inter = pa.intersection(pb)
-            except Exception:
-                continue
-            if inter.is_empty:
-                continue
-            a = inter.area
-            if a <= 0.0:
-                continue
-            overlap_pairs.append((a, role_a, role_b))
-            overlap_area += a
-    overlap_pairs.sort(reverse=True)
-    summary = ", ".join(
-        f"{a:.4f} m² ({ra}/{rb})"
-        for a, ra, rb in overlap_pairs[:10])
-    cap = SELF_OVERLAP_BASELINE_M2.get(icao, SELF_OVERLAP_CAP_M2)
-    assert overlap_area <= cap, (
-        f"{icao}: {len(overlap_pairs)} overlapping shape pair(s), "
-        f"total {overlap_area:,.4f} m² (cap "
-        f"{cap:.0f} m² — "
-        f"{'baselined' if icao in SELF_OVERLAP_BASELINE_M2 else 'zero tolerance'}).  "
-        f"Worst: {summary}.")
+    Catches: KPHX taxi-bridge overlap, SPJC DSF ``zannespol``
+    duplicate coverage, any future absorption / clip pass that fails
+    to remove an absorbed sub-rect.
 
-
-# Baseline airports come from ``conftest.baseline_airports()``
-# (user 2026-05-16): the canonical set every invariant test runs
-# against unconditionally.  Originally just ``("SPJC", "SPLP",
-# "CYXY")`` for the no-self-overlap check; now applied across every
-# invariant test in this file.
-
-
-@pytest.mark.parametrize("icao", baseline_airports())
-def test_no_self_overlap_baseline(icao):
-    """Hard invariant: no two emitted pavement shapes may overlap.
-
-    Runs unconditionally for the canonical baseline airports (no
-    env-var configuration needed) so this gate fires in CI / on
-    every test run.  See ``test_no_self_overlap`` for the env-var-
-    driven variant covering arbitrary airports.
+    (session 51) Merged the env-gated and baseline-only variants of
+    this test into one parametrization over the union of the two
+    airport sets.
     """
     layout = _build_layout(icao)
     polys = [(s.role, s.polygon) for s in layout.shapes

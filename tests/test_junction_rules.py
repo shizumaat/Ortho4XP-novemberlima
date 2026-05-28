@@ -72,19 +72,6 @@ RULE2_REGRESSION_BASELINE: Dict[str, int] = {
     # geometry is otherwise clean.
     "CYXY": 1,
 }
-RULE3_REGRESSION_BASELINE: Dict[str, int] = {
-    # SPJC: 20 non-axis-aligned junction edges remain.  Bumped 14 →
-    # 20 after Rule 1 v5 (cross-junction global shrink check):
-    # additional junctions now have edges to runway corners; some
-    # of those edges run at oblique angles vs the runway axis.
-    # Lower as upstream emission tightens.
-    "SPJC": 20,
-    # CYXY: 88 — same root cause as SPJC.  CYXY's apt.dat-fragmented
-    # pavement leaves more residue boundaries that don't get caught
-    # by the pavement-boundary heuristic.  Track via baseline; lower
-    # as upstream emission tightens.
-    "CYXY": 88,
-}
 RULE4_REGRESSION_BASELINE: Dict[str, int] = {
     # CYXY: 2 narrow-neck junctions where the MRR-based detector
     # fires on small sliver shapes but the splitter can't produce
@@ -97,17 +84,14 @@ RULE4_REGRESSION_BASELINE: Dict[str, int] = {
     # junctions in some places where it previously over-densified.
     "SPJC": 2,
 }
-RULE5_REGRESSION_BASELINE: Dict[str, int] = {
-    # SPJC: 240 junction vertices sit inside the apt.dat pavement
-    # at distances Rule 5's bounded push (max 1 m radius) can't
-    # cover.  Bumped 208 → 240 after Rule 2 long-edge fix surfaced
-    # additional vertices via Rule 1 v6 widening's runway-corner
-    # insertions.  Most are interior cut-line endpoints from
-    # ``_decompose_polygon_with_holes``, densification midpoints
-    # that landed in narrow apron regions, or shared-vertex
-    # cluster-collapse drift artefacts.  Polygon-level rebuild
-    # would address these but is a larger refactor.
-    "SPJC": 249,
+A4_BASELINE: Dict[str, int] = {
+    # Invariant A4: every junction/apron vertex lies INSIDE (or on the
+    # boundary of) pav_union.  Zero per-airport tolerance under the
+    # single-solve / no-halo model.  The OLD test asserted the inverse
+    # (vertices OUTSIDE by `PAVEMENT_OUTWARD_OFFSET_M`, the 2-solve
+    # "elevation-smoothing halo") and carried a 240-vertex SPJC
+    # baseline — that test was sense-inverted vs A4 and has been
+    # rewritten in `test_junction_vertices_outside_pavement` below.
 }
 
 
@@ -429,114 +413,14 @@ def test_junction_runway_node_sharing(icao):
         pytest.fail(msg)
 
 
-@pytest.mark.parametrize("icao", _test_airports())
-def test_large_junction_axis_aligned_borders(icao):
-    """Rule 3: every junction edge that ISN'T on the apt.dat pavement
-    boundary AND ISN'T on a shared anchor edge must run parallel or
-    perpendicular to the longest runway axis within
-    ``AXIS_ALIGN_TOL_DEG``.
-
-    The "pavement boundary" is approximated by the boundary of the
-    union of every paved shape (junctions + rects + runways +
-    terminals).  Edges that don't lie on this union boundary AND
-    don't lie on any anchor's edge are considered cut lines.
-    """
-    from auto_patch.config import AXIS_ALIGN_TOL_DEG
-    from auto_patch.junction_rules import longest_runway_axis_deg
-    from auto_patch.layout import SHARED_VERTEX_TOL_M
-    from shapely.ops import unary_union
-
-    layout = _build_layout(icao)
-    runway_axis = longest_runway_axis_deg(layout)
-    if runway_axis is None:
-        pytest.skip(f"{icao}: no runway shape, axis undefined")
-
-    paved_polys = []
-    anchor_segs: List[Tuple[float, float, float, float]] = []
-    for s in layout.shapes:
-        if s.polygon is None or s.polygon.is_empty:
-            continue
-        if s.role in ("primary_parallel", "secondary_parallel",
-                      "stub", "cross_connector", "runway", "terminal",
-                      "junction"):
-            paved_polys.append(s.polygon)
-        if s.role in ("primary_parallel", "secondary_parallel",
-                      "stub", "cross_connector", "runway", "terminal"):
-            c = list(s.polygon.exterior.coords)
-            if c and c[0] == c[-1]:
-                c = c[:-1]
-            m = len(c)
-            for i in range(m):
-                ax, ay = c[i]
-                bx, by = c[(i + 1) % m]
-                anchor_segs.append((float(ax), float(ay),
-                                    float(bx), float(by)))
-    try:
-        pavement_union = unary_union(paved_polys)
-    except Exception:
-        pytest.skip(f"{icao}: pavement union computation failed")
-    pavement_boundary = pavement_union.boundary
-
-    boundary_tol = SHARED_VERTEX_TOL_M
-    align_tol = AXIS_ALIGN_TOL_DEG
-
-    violations: List[str] = []
-    for s_idx, s in enumerate(layout.shapes):
-        if s.role != "junction":
-            continue
-        if s.polygon is None or s.polygon.is_empty:
-            continue
-        c = list(s.polygon.exterior.coords)
-        if c and c[0] == c[-1]:
-            c = c[:-1]
-        n = len(c)
-        for i in range(n):
-            ax, ay = c[i]
-            bx, by = c[(i + 1) % n]
-            edge_len = math.hypot(bx - ax, by - ay)
-            if edge_len < 0.5:
-                continue
-            mx = 0.5 * (ax + bx)
-            my = 0.5 * (ay + by)
-            from shapely.geometry import Point as _P
-            mp = _P(mx, my)
-            if mp.distance(pavement_boundary) <= boundary_tol:
-                continue  # pavement-boundary edge
-            on_anchor = False
-            for nax, nay, nbx, nby in anchor_segs:
-                d = _point_segment_distance(
-                    mx, my, nax, nay, nbx, nby)
-                if d <= boundary_tol:
-                    on_anchor = True
-                    break
-            if on_anchor:
-                continue  # shared anchor edge
-            # Cut line — must align to runway axis (or perpendicular).
-            edge_bearing = math.degrees(
-                math.atan2(bx - ax, by - ay)) % 180.0
-            diff = abs(edge_bearing - runway_axis) % 180.0
-            diff = min(diff, 180.0 - diff)  # mod 180
-            # Mod 90 (parallel OR perpendicular both OK).
-            if diff > 90.0:
-                diff = 180.0 - diff
-            mod90 = min(diff, 90.0 - diff)
-            if mod90 <= align_tol:
-                continue
-            violations.append(
-                f"junction#{s_idx} edge {i}->{(i + 1) % n} "
-                f"({ax:.1f},{ay:.1f})->({bx:.1f},{by:.1f}) "
-                f"bearing={edge_bearing:.1f}° "
-                f"runway={runway_axis:.1f}° "
-                f"misalignment={mod90:.1f}°")
-
-    baseline = RULE3_REGRESSION_BASELINE.get(icao, 0)
-    if len(violations) > baseline:
-        msg = (f"{icao}: Rule 3 violations = {len(violations)} > "
-               f"baseline {baseline}\nFirst 10:\n  "
-               + "\n  ".join(violations[:10]))
-        if len(violations) > 10:
-            msg += f"\n  ... and {len(violations) - 10} more"
-        pytest.fail(msg)
+# (session 51) `test_large_junction_axis_aligned_borders` was REMOVED:
+# it policed interior cut-line edges from the OLD
+# `_decompose_polygon_with_holes` flow.  Under invariants A1/A2,
+# junctions are defined as the residue `pav_union − rects` and have NO
+# synthetic interior cut lines to align — there is no invariant that
+# requires their interior edges to be runway-parallel-or-perpendicular.
+# The old SPJC=20 / CYXY=88 baselines confirmed it was policing
+# implementation detail, not geometry truth.  See docs/pipeline_invariants.md.
 
 
 @pytest.mark.parametrize("icao", _test_airports())
@@ -592,16 +476,21 @@ def test_no_narrow_neck_junctions(icao):
 
 @pytest.mark.parametrize("icao", _test_airports())
 def test_junction_vertices_outside_pavement(icao):
-    """Rule 5 (user 2026-05-02): every junction vertex must sit
-    OUTSIDE the apt.dat pavement boundary by at least
-    ``PAVEMENT_OUTWARD_OFFSET_M`` (so the elevation-smoothing shape
-    fully encloses the pavement) UNLESS the vertex coincides with a
-    rect / runway / terminal anchor edge (those are anchor-shared
-    vertices and stay interior to the pavement by construction).
+    """Invariant A4 (single-solve model, see docs/pipeline_invariants.md):
+    every junction/apron vertex lies INSIDE (or on the boundary of)
+    ``pav_union`` — it is a VIOLATION for any junction vertex to sit
+    outside the pavement footprint.
+
+    The kept name (``..._outside_pavement``) reflects the violation we
+    test for: junction vertices that ended up OUTSIDE the pavement.  An
+    earlier ``Rule 5`` revision of this test asserted the inverse — that
+    vertices must be outside by ``PAVEMENT_OUTWARD_OFFSET_M`` to form an
+    "elevation-smoothing halo".  That halo is a 2-solve-era artifact
+    superseded by the per-surface solver; under the new invariants A4
+    a vertex outside the footprint has no source shape, breaks node
+    sharing, and risks rendering off-pavement at the seam.
     """
-    from auto_patch.junction_rules import (
-        PAVEMENT_OUTWARD_OFFSET_M, PAVEMENT_INSIDE_TOL_M,
-    )
+    from auto_patch.junction_rules import PAVEMENT_INSIDE_TOL_M
     from auto_patch.layout import SHARED_VERTEX_TOL_M
     from shapely.geometry import Point as _Point
 
@@ -610,7 +499,9 @@ def test_junction_vertices_outside_pavement(icao):
     if pav_union is None or pav_union.is_empty:
         pytest.skip(f"{icao}: layout has no _source_pav_union")
 
-    # Anchor edges for exemption.
+    # Anchor edges for exemption — a junction vertex shared with a
+    # rect/runway/terminal edge is legitimately on the pavement
+    # boundary (it IS the boundary on that segment).
     anchor_segs: List[Tuple[float, float, float, float]] = []
     for s in layout.shapes:
         if s.role not in ("primary_parallel", "secondary_parallel",
@@ -648,31 +539,28 @@ def test_junction_vertices_outside_pavement(icao):
                     break
             if on_anchor:
                 continue
-            # Tile-cut seam vertex: its position is fixed by the
-            # slice (~half_width off the integer tile line), not free
-            # to push outside the pavement.  See
-            # conftest.is_tile_seam_vertex.
+            # Tile-cut seam vertex sits ~half_width off the integer
+            # line and is anchored by tile_cut, not free to push
+            # outside the pavement.
             if is_tile_seam_vertex(layout, vx, vy):
                 continue
-            # Vertex must be OUTSIDE pavement by ≥ offset (or AT
-            # boundary within PAVEMENT_INSIDE_TOL_M).
+            # A4: vertex must be INSIDE the pavement union, OR within
+            # PAVEMENT_INSIDE_TOL_M of its boundary (i.e. ON the
+            # boundary line, modulo float tolerance).
             p = _Point(vx, vy)
-            inside = pav_union.contains(p)
+            if pav_union.contains(p):
+                continue
             d = p.distance(pav_union.boundary)
-            if not inside and d >= PAVEMENT_OUTWARD_OFFSET_M - 0.05:
-                continue
             if d <= PAVEMENT_INSIDE_TOL_M:
-                # On the boundary line; treat as borderline-OK.
                 continue
-            state = "INSIDE" if inside else "outside"
             violations.append(
                 f"junction#{s_idx} vertex#{v_idx} at "
-                f"({vx:.2f},{vy:.2f}) is {state} pavement at "
-                f"distance {d:.2f}m to boundary")
+                f"({vx:.2f},{vy:.2f}) is OUTSIDE pavement at "
+                f"distance {d:.2f}m from boundary")
 
-    baseline = RULE5_REGRESSION_BASELINE.get(icao, 0)
+    baseline = A4_BASELINE.get(icao, 0)
     if len(violations) > baseline:
-        msg = (f"{icao}: Rule 5 violations = {len(violations)} > "
+        msg = (f"{icao}: A4 violations = {len(violations)} > "
                f"baseline {baseline}\nFirst 10:\n  "
                + "\n  ".join(violations[:10]))
         if len(violations) > 10:
