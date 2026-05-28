@@ -2192,25 +2192,28 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # rect so the taxilane through the apron stays a directionally-graded
     # rect; it's subtracted from the apron (apron = pav_union − rects), so
     # the apron simply wraps it — no overlap, perfect node parity.
-    from .config import ABSORB_RECTS_ALONGSIDE_APRONS as _ABSORB
-    if _ABSORB:
-        taxi_rects = _drop_primary_parallels_embedded_in_pavement(
-            taxi_rects, pav_union, runway_polys=runway_polys)
-        # Partial-absorption: clip primary-parallel prefix/suffix fully
-        # embedded in apron pavement, keeping the unbounded middle.
-        # Canonical case: CYXY taxi E NW-SE — NW half embedded in SW
-        # apron, SE half extends free toward runway 02.
-        from .pavement.absorption import (
-            _split_primary_parallels_at_pavement_boundary)
-        taxi_rects = _split_primary_parallels_at_pavement_boundary(
-            taxi_rects, pav_union)
-    # (session 51) The no-absorption branch's `build_apron_lane_rects` (session-
-    # 47 EXPERIMENTAL fixed-code-letter-width lanes for taxi centerlines
-    # through open apron interiors) was REMOVED per user 2026-05-27.  In the
-    # clean no-absorption model, those middle-of-apron centerlines produce no
-    # rect — the apron (= pav_union − rects) wraps the whole footprint as one
-    # polygon.  No directional grading for those lanes; cleaner overall
-    # geometry.  See docs/pipeline_invariants.md.
+    # Phase-1 absorption (always-on per user 2026-05-27): drop fully-embedded
+    # primary_parallels (apron covers them) AND partial-clip half-embedded
+    # ones (keep the unbounded portion as a shorter rect, let the apron
+    # wrap the clipped portion).  This is the "build it right at
+    # construction" stage — independent of the elevation-block post-emit
+    # `_absorb_rects_at_junction_perimeters` dissolve (which IS gated by
+    # ABSORB_RECTS_ALONGSIDE_APRONS).  Without these, primary_parallels that
+    # legitimately should be clipped at the apron boundary stay full-length
+    # and the apron has no natural way to express its taxilane subdivision.
+    taxi_rects = _drop_primary_parallels_embedded_in_pavement(
+        taxi_rects, pav_union, runway_polys=runway_polys)
+    # Canonical case: CYXY taxi E NW-SE — NW half embedded in SW
+    # apron, SE half extends free toward runway 02.
+    from .pavement.absorption import (
+        _split_primary_parallels_at_pavement_boundary)
+    taxi_rects = _split_primary_parallels_at_pavement_boundary(
+        taxi_rects, pav_union)
+    # (session 51) The session-47 `build_apron_lane_rects` (fixed-code-letter-
+    # width lanes for taxi centerlines through OPEN apron interiors) was
+    # REMOVED per user 2026-05-27.  In the clean model, those middle-of-apron
+    # centerlines produce no rect — the apron wraps the whole footprint as
+    # one polygon.  No directional grading for those lanes; cleaner geometry.
 
     # ── Detect bridge taxi rects from OSM (user 2026-04-29) ───────
     # Per OSM convention, bridge taxiways carry ``bridge=yes`` (or
