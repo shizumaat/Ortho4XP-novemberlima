@@ -2195,20 +2195,23 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # rect so the taxilane through the apron stays a directionally-graded
     # rect; it's subtracted from the apron (apron = pav_union − rects), so
     # the apron simply wraps it — no overlap, perfect node parity.
-    # (session 51) `_drop_primary_parallels_embedded_in_pavement` was
-    # DISABLED per user 2026-05-27.  Under the clean model every NAMED
-    # taxiway stays as a directionally-graded rect (apron = pav_union − rects
-    # wraps it), even when its long edges sit inside surrounding apron
-    # pavement.  The drop's "long edge ≥95% inside pavement" criterion
-    # over-fired on real named taxiways (e.g. SPJC Taxi A1 segment
-    # 1481→1633 was dropped, leaving its footprint absorbed into the
-    # apron).  If we ever need to drop genuinely apron-only artifacts
-    # those should come from the centerline source (apt.dat / OSM /
-    # discovered) not from this rect-side filter.
+    # Phase-1 absorption — always-on (session 51 per user 2026-05-27):
+    # drop fully-embedded primary_parallels AND partial-clip half-embedded
+    # ones.  This is the "build it right at construction" stage,
+    # independent of the elevation-block post-emit absorb.  Without the
+    # drop, the rect shape is kept but doesn't fit the surrounding free-
+    # form apt.dat pavement well, leaving the rect's "extra" area as a
+    # residue piece that downstream passes (decompose / sliver merge /
+    # overlap-clip) end up losing — CYXY Taxi E example: rect kept ->
+    # 3626 m^2 adjacent area lost from apron coverage.
     #
-    # `_split_primary_parallels_at_pavement_boundary` is KEPT — partial-clip
-    # at apron boundary is legitimate (CYXY taxi E NW-SE: NW half in SW
-    # apron clipped, SE half stays as the unbounded rect).
+    # Trade-off (accepted by user 2026-05-27): named taxiways whose long
+    # edges are embedded in surrounding apron (SPJC Taxi A1) get dropped
+    # too — their footprint becomes apron rather than a directional rect.
+    # The audit-flagged residue-loss path is a future fix; the drop is the
+    # only thing currently keeping CYXY's coverage intact.
+    taxi_rects = _drop_primary_parallels_embedded_in_pavement(
+        taxi_rects, pav_union, runway_polys=runway_polys)
     from .pavement.absorption import (
         _split_primary_parallels_at_pavement_boundary)
     taxi_rects = _split_primary_parallels_at_pavement_boundary(
