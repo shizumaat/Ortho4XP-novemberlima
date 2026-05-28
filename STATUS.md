@@ -1,23 +1,45 @@
-# Auto-Patch Status — session 52 HANDOVER (terminal rigid-flat-unit model coded + confirmed; sloped-rect shared-vertex consensus is next)
+# Auto-Patch Status — session 52 HANDOVER (DIFFERENCE-CONSTRAINT solve landed; grade violations collapsed; small emit-consensus residuals remain)
 
 > **READ FIRST:**
 > 1. `docs/pipeline_invariants.md` — the agreed working spec (8 invariant sections, A1–H28).
-> 2. `docs/elevation_solver.md` — solver model (the directional two-pass model below supersedes the old cascade/relief framing).
+> 2. `docs/elevation_solver.md` — solver model (the directional two-pass + difference-constraint solve below supersede the old cascade/relief framing).
 > 3. This file — what session 52 changed and what's next.
 >
-> **Working tree:** session-52 work committed. Suite: **9 failed / 272 passed / 2 skipped**
-> (`venv/bin/python -m pytest tests/ -q -k "not compare_target" -n auto` ≈ 2:18). Same 9 as the
-> session-51 baseline — NO regressions.
+> **Working tree:** session-52 work committed (HEAD `ae65c7a`). Suite:
+> **8 failed / 273 passed / 2 skipped** (`venv/bin/python -m pytest tests/ -q -k "not compare_target" -n auto` ≈ 1:02).
+> No regressions vs the session-51 baseline; `test_no_self_overlap[SPLP]` now passes.
 
 ## TL;DR / where to start
-Session 52 nailed down the **directional two-pass elevation model** for the
-TERMINAL layer and coded it correctly, and fixed two genuine FALSE-POSITIVES
-in the grade checker. The terminal↔apron shared-vertex disagreements (the
-binding SPJC grade failure, 64 violations, worst 3.2 m) are **eliminated**.
-The 3 `test_pavement_grade` tests still fail, but now ONLY on the **sloped-rect
-emit consensus** (rect plane disagrees with neighbour junction/apron at shared
-vertices) and **apron/junction internal over-grade** (giant-apron
-decomposition) — the work sequenced next ("terminal first, then sloped rects").
+Session 52 built the elevation solver out in three layers and the grade
+violations have collapsed:
+1. **Terminal = rigid flat unit** (conform forward, rigid-shift reverse).
+2. **Sloped-rect flat ends = rigid coupled level** + grade-checker fixes
+   (airside↔groundside wall exemption; only-where-shapes-touch).
+3. **Boundary ribbon sliced like every shape** (don't cut `airport_boundary` at
+   the seam) — fixed SPLP self-overlap + dropped SPLP grade 20→2.
+4. **★ Direct difference-constraint solve** (`_grade_bands` +
+   `_project_within_bands`) replaced the non-converging relief relaxation.
+   Per-tile within-shape grade: **CYXY 86→5, SPJC 22→2, SPLP 2→4.**
+
+**Per-tile grade-test status now** (the binding numbers — build per-tile with
+SMOOTHED DEM; whole-airport `build_airport_pavement` MIS-SAMPLES the seam DEM on
+cross-tile airports and fabricates phantom seam violations — always measure
+per-tile via `tools/build_target_osm.py`-style or `grade_detail.py`):
+- SPLP: 4 cross @ 0.2 m (emit rounding) + 4 within (stub) + 2 barely-over junctions (1.6–1.9 %).
+- SPJC: 6 cross (worst 1.8 m = terminal `#0` 30.1 ↔ secondary_parallel `-10045` 31.8, a TERMINAL↔RECT emit-consensus at a shared corner) + 2 within (apron).
+- CYXY: 0 cross + 5 within (stub 4, apron 1).
+
+## NEXT ACTION — the small residuals
+All that's left on grade is small and emit/tight-spot, not architectural:
+1. **Cross-shape = emit-consensus at shared corners** (terminal↔rect, rect↔
+   neighbour).  In the SOLVER a shared node has ONE elevation; the disagreement
+   is at EMIT — a flat terminal writes one altitude, a sloped rect writes a 2-
+   value plane (hi/lo collapse), and at the shared corner those differ from the
+   neighbour's per-node value.  Make the rect/terminal emit honour the exact
+   solved node elevation at every shared corner (emit per-node at shared corners,
+   or only collapse when it preserves them).  Probe: `/tmp/diag_rect.py`.
+2. **A few barely-over stubs/aprons** (CYXY 5, SPLP 4): the bands solve leaves
+   tiny residuals at tight spots; re-triage which are real vs emit-rounding.
 
 ## The directional two-pass model (user 2026-05-28, CONFIRMED)
 Priorities: if a tile seam crosses the pavement union it is highest priority;
