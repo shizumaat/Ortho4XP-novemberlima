@@ -2204,21 +2204,13 @@ def build_airport_pavement(icao: str, xplane_root: str,
             _split_primary_parallels_at_pavement_boundary)
         taxi_rects = _split_primary_parallels_at_pavement_boundary(
             taxi_rects, pav_union)
-    else:
-        # No-absorption model: a taxi centerline crossing the OPEN middle
-        # of a wide apron yields no rect above (no bounded width).  Build
-        # fixed code-letter-width lane rects for those uncovered portions
-        # and add them to the rect set BEFORE the apron = pav_union − rects
-        # difference, so the apron wraps each lane (automatic node parity).
-        from .pavement.rects import build_apron_lane_rects
-        _lane_rects = build_apron_lane_rects(
-            osm_centerlines, pav_union, taxi_rects,
-            getattr(layout, "apt_taxi_letters", {}))
-        if _lane_rects:
-            taxi_rects = taxi_rects + _lane_rects
-            UI.vprint(1,
-                f"  [pav-builder] {icao}: built {len(_lane_rects)} "
-                f"apron-interior taxilane rect(s).")
+    # (session 51) The no-absorption branch's `build_apron_lane_rects` (session-
+    # 47 EXPERIMENTAL fixed-code-letter-width lanes for taxi centerlines
+    # through open apron interiors) was REMOVED per user 2026-05-27.  In the
+    # clean no-absorption model, those middle-of-apron centerlines produce no
+    # rect — the apron (= pav_union − rects) wraps the whole footprint as one
+    # polygon.  No directional grading for those lanes; cleaner overall
+    # geometry.  See docs/pipeline_invariants.md.
 
     # ── Detect bridge taxi rects from OSM (user 2026-04-29) ───────
     # Per OSM convention, bridge taxiways carry ``bridge=yes`` (or
