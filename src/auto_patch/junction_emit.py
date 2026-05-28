@@ -213,17 +213,13 @@ def emit_junctions_and_finalize(layout, *, pav_union, emitted_taxi_rects,
     if EMIT_JUNCTIONS:
         from .junction_rules import longest_runway_axis_deg
         from .pavement.junctions import _drop_sliver_corners
-        from .config import ENABLE_APRON_NECK_SPLIT
         _runway_axis_deg = longest_runway_axis_deg(layout)
-        # Phase 2: split large residue blobs at their narrow necks (taxi-width
-        # arm mouths) into convex pads joined by connectors — BEFORE the
-        # hole-decompose.  Keeps aprons convex + feeds the solver hierarchy.
-        if ENABLE_APRON_NECK_SPLIT:
-            from .pavement.apron_necks import split_polygon_at_necks
-            neck_split = []
-            for part in pieces:
-                neck_split.extend(split_polygon_at_necks(part))
-            pieces = neck_split
+        # (session 51) Apron neck-split was MOVED out of junction_emit and
+        # into pipeline.py at the end of the geometry phase (just before the
+        # solve).  Reason: at junction-emit time many of the mouth-pair
+        # vertices that USER-identified necks need haven't been inserted
+        # yet — they come from later stitches/snaps/conformance.  Running
+        # neck-split at geometry-final catches the full vertex set.
         for part in pieces:
             # Decompose pieces with interior holes (shapely.difference
             # leaves them when a hole is fully interior to the residue).

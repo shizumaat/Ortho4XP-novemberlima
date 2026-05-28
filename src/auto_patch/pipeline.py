@@ -2719,6 +2719,39 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # terrain mesh interpolates across the 10-m gap at render
         # time.  So the final solver pass is free to cap-project
         # post-cut boundary vertices toward grade compliance.
+        # (session 51 per user 2026-05-27) Apron neck-split — split large
+        # apron polygons at their narrow necks (taxi-width arm mouths) into
+        # convex pads joined by connectors.  Runs at geometry-FINAL (right
+        # before the single solve) so the mouth-pair vertices added by
+        # stitches / snaps / conformance are all in the ring; running this
+        # earlier (in junction_emit) missed many user-expected mouths
+        # because one endpoint of each pair wasn't yet a ring vertex.
+        from .config import ENABLE_APRON_NECK_SPLIT
+        if ENABLE_APRON_NECK_SPLIT:
+            from .pavement.apron_necks import split_polygon_at_necks
+            from .layout import ROLE_APRON as _R_APRON, BuiltShape as _BS
+            _split_count = 0
+            _new_shapes: list = []
+            for _s in layout.shapes:
+                if (_s.role != _R_APRON or _s.polygon is None
+                        or _s.polygon.is_empty
+                        or _s.polygon.geom_type != "Polygon"):
+                    _new_shapes.append(_s)
+                    continue
+                _pieces = split_polygon_at_necks(_s.polygon)
+                if len(_pieces) <= 1:
+                    _new_shapes.append(_s)
+                    continue
+                _split_count += 1
+                for _p in _pieces:
+                    _ns = _BS(polygon=_p, role=_R_APRON, ref=_s.ref)
+                    _new_shapes.append(_ns)
+            if _split_count:
+                layout.shapes = _new_shapes
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: neck-split "
+                    f"{_split_count} apron(s) at geometry-final.")
+
         if USE_PER_SURFACE_SOLVER and layout.anchor is not None:
             per_surface_solve(layout, icao,
                                dem=dem,
