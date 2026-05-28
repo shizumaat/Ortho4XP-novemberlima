@@ -65,8 +65,36 @@ root causes (committed as WIP — debug next):
   near-cut verts warm-started from a cross-tile-consistent field; now each tile's
   single solve grades them against its own post-drop network → diverge.
   `test_cross_tile_cut_edge_elevations_consistent`: SPLP near-cut 71.0 vs 61.6
-  (9.4m > 2.5m tol); also `no_self_overlap[SPLP]`. FIX: terrain-pin near-cut
-  vertices to DEM (HARD) for ALL roles, not just sloping rects.
+  (9.4m > 2.5m tol); also `no_self_overlap[SPLP]`.
+  - **FIX APPLIED (tile_cut.py):** `_terrain_pin_slice_nodes` now DEM-seeds a
+    cut piece when it has no altitude data (pre-solve) and pins slice-edge
+    vertices; extended via `_PIN_SLICE_ROLES` to junctions/aprons (was sloping
+    rects only). **cross_tile_cut test now PASSES.**
+  - **DECISION (user): keep the pin, let the directional relief absorb the
+    grade.** grade[SPLP] is PRE-EXISTING (one of the baseline 6) — the reorder
+    briefly fixed it, the pin returned it to baseline; NOT a net regression.
+  - Note: original code left junctions/aprons SOFT ("graded soft against the
+    smoothed DEM seed"); soft DEM-seed does NOT give cross-tile consistency
+    (both tiles DEM-sample identically yet still diverge 9.4m — the divergence
+    is each tile's solve pulling against its own post-drop network, so only a
+    HARD pin fixes it). 2-solve got consistency from solve#1's warm-start (gone).
+  - Whether `_clip_sloping_rect_piece` (clean-rect preservation, skipped pre-
+    solve since slope_sampler needs altitudes) must be re-expressed via
+    source_axis is still OPEN (cut taxi rects may tilt without it).
+
+**BASELINE-vs-CURRENT (after tile_cut fix): 12 failed.** Accurate diff vs the
+session-50 baseline 6:
+- Pre-existing, still failing (5): grade[CYXY/SPJC/SPLP], have_source[SPJC],
+  outside_pavement[CYXY].
+- FIXED by refactor (1): runway_node_sharing[CYXY].
+- NEW REGRESSIONS (7) — THE REMAINING WORK:
+  - **snap over-reach (4):** large_junction_axis_aligned_borders[SPJC/SPLP],
+    neighbour_corners[SPJC], have_source[CYXY]. Cause: role-based corner snaps
+    now run PRE-solve on raw (un-refined) junction geometry AND on would-be-flat
+    rects (altitude gate gone). Originally ran post-solve#1 on refined junctions.
+  - **SPLP cut geometry (3):** no_self_overlap[SPLP] + _baseline, outside_
+    pavement[SPLP]. Likely the pre-solve tile_cut DEM-seed conversion / sliver
+    absorb creating overlaps, or the missing clean-rect preservation.
 - **snap over-reach:** role-based snaps (`_snap_to_sloping_edge_corners`,
   `_snap_junction_vertices_to_rect_flat_edge_corners`) now fire on would-be-FLAT
   rects pre-solve (the altitude gate used to skip them), moving vertices →

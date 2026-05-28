@@ -47,6 +47,14 @@ _SLOPING_RECT_ROLES = frozenset({
     ROLE_STUB, ROLE_CROSS_CONNECTOR, ROLE_SERVICE_ROAD,
 })
 
+# Roles whose slice-edge vertices are DEM-pinned at the seam so adjacent
+# tile builds agree there (taxi rects + junctions + aprons).  Runways
+# follow the FAA profile (not terrain) and terminals stay flat, so they
+# are excluded.
+_PIN_SLICE_ROLES = _SLOPING_RECT_ROLES | frozenset({
+    ROLE_JUNCTION, ROLE_APRON,
+})
+
 # Narrow exception set — covers real shapely degeneracy without
 # masking programming errors (KeyError/TypeError/IndexError propagate).
 _GEOM_EXC = (ValueError, GEOSException, TopologicalError)
@@ -266,9 +274,13 @@ def cut_layout_at_tile_boundaries(
                 # Seam DEM is the top-priority anchor: pin this piece's
                 # slice-edge vertices to the (Ortho4XP-smoothed) terrain
                 # so the solver grades the surface down to the seam
-                # (user 2026-05-20).  Taxi rects only for now — junctions
-                # /aprons are graded soft against the smoothed DEM seed.
-                if s.role in _SLOPING_RECT_ROLES:
+                # (user 2026-05-20).  Session 51: extended to junctions
+                # /aprons too (not just sloping rects) — in the single-
+                # solve order their slice-edge vertices would otherwise be
+                # fully soft and diverge between adjacent-tile builds
+                # (test_cross_tile_cut_edge_elevations_consistent).  The
+                # pin makes both tiles compute the same DEM value there.
+                if s.role in _PIN_SLICE_ROLES:
                     _terrain_pin_slice_nodes(
                         new_s, cut_union, (), layout, dem,
                         cur_tile_lat, cur_tile_lon)
@@ -1073,7 +1085,7 @@ def _terrain_pin_slice_nodes(fs, cut_union, clip_pts, layout,
     ``layout._seam_anchor_keys`` so the per-surface solver HARD-anchors
     them to these terrain altitudes (otherwise the final solve grades
     them back toward the flat rect)."""
-    if (dem is None or layout is None or not fs.node_altitudes
+    if (dem is None or layout is None
             or fs.polygon is None or fs.polygon.is_empty):
         return
     try:
@@ -1082,8 +1094,32 @@ def _terrain_pin_slice_nodes(fs, cut_union, clip_pts, layout,
     except _GEOM_EXC:
         return
     nodata = getattr(dem, "nodata", -32768)
-    alts = list(fs.node_altitudes)
-    if len(alts) < len(coords):
+
+    def _dem_at(x: float, y: float) -> float | None:
+        try:
+            lat, lon = layout.m_to_ll(x, y)
+            v = float(dem.alt((lon - tile_lon, lat - tile_lat)))
+        except _GEOM_EXC:
+            return None
+        if v != v or v == nodata:  # NaN / no-data
+            return None
+        return v
+
+    # Single-solve order (session 51): tile_cut runs PRE-solve, so a
+    # cut piece typically has NO altitude data yet (node_altitudes /
+    # altitude / altitude_high all None).  DEM-seed every vertex so the
+    # slice-edge HARD pins below have a backing array and the solver
+    # warm-starts the soft (interior) vertices from terrain.  Guarded on
+    # "no altitude data at all" so it never clobbers a solved flat
+    # ``altitude`` (post-solve feature pieces keep their tags).
+    created_from_dem = False
+    if fs.node_altitudes and len(fs.node_altitudes) >= len(coords):
+        alts = list(fs.node_altitudes)
+    elif (fs.node_altitudes is None and fs.altitude is None
+          and fs.altitude_high is None and fs.altitude_low is None):
+        alts = [round(_dem_at(x, y) or 0.0, 1) for (x, y) in coords]
+        created_from_dem = True
+    else:
         return
     seam_keys = getattr(layout, "_seam_anchor_keys", None)
     if seam_keys is None:
@@ -1097,17 +1133,22 @@ def _terrain_pin_slice_nodes(fs, cut_union, clip_pts, layout,
         try:
             if Point(x, y).distance(cut_boundary) >= 0.75:
                 continue  # not a slice-edge node
-            lat, lon = layout.m_to_ll(x, y)
-            v = float(dem.alt((lon - tile_lon, lat - tile_lat)))
         except _GEOM_EXC:
             continue
-        if v != v or v == nodata:  # NaN / no-data
+        v = _dem_at(x, y)
+        if v is None:
             continue
         alts[i] = round(v, 1)
         seam_keys.add(vertex_bucket(float(x), float(y)))
         changed = True
-    if changed:
+    if changed or created_from_dem:
         fs.node_altitudes = alts
+        if created_from_dem:
+            # The piece is now a DEM-seeded node_altitudes shape; clear
+            # the (None) rect tags so the solver treats it consistently.
+            fs.altitude_high = None
+            fs.altitude_low = None
+            fs.altitude = None
 
 
 def _build_piece_shape(
