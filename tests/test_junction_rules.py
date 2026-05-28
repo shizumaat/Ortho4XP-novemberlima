@@ -520,6 +520,25 @@ def test_junction_vertices_outside_pavement(icao):
             anchor_segs.append((float(ax), float(ay),
                                 float(bx), float(by)))
 
+    # Bridge-shared exemption — boundary_dem_bridge polygons are the
+    # transition strips between the pavement ribbon and DEM terrain;
+    # their OUTER ring legitimately sits outside pav_union, and where a
+    # junction edge meets a bridge those shared vertices follow the
+    # bridge into the outside.  A junction vertex coincident with any
+    # bridge vertex (within SHARED_VERTEX_TOL_M) is therefore
+    # legitimately outside.
+    bridge_pts: List[Tuple[float, float]] = []
+    for s in layout.shapes:
+        if s.role != "boundary" or s.ref != "boundary_dem_bridge":
+            continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        c = list(s.polygon.exterior.coords)
+        if c and c[0] == c[-1]:
+            c = c[:-1]
+        for vx, vy in c:
+            bridge_pts.append((float(vx), float(vy)))
+
     violations: List[str] = []
     for s_idx, s in enumerate(layout.shapes):
         if s.role != "junction":
@@ -543,6 +562,16 @@ def test_junction_vertices_outside_pavement(icao):
             # line and is anchored by tile_cut, not free to push
             # outside the pavement.
             if is_tile_seam_vertex(layout, vx, vy):
+                continue
+            # Bridge-shared vertices may sit outside pav_union — bridges
+            # connect inner ribbon to outer DEM terrain by design.
+            on_bridge = False
+            for bx, by in bridge_pts:
+                if (vx - bx) * (vx - bx) + (vy - by) * (vy - by) \
+                        <= SHARED_VERTEX_TOL_M * SHARED_VERTEX_TOL_M:
+                    on_bridge = True
+                    break
+            if on_bridge:
                 continue
             # A4: vertex must be INSIDE the pavement union, OR within
             # PAVEMENT_INSIDE_TOL_M of its boundary (i.e. ON the

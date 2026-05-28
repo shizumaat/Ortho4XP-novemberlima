@@ -13,7 +13,14 @@ artifacts instead of an invariant here are candidates for redefinition.
    junctions where the boundary deviates > 55 m from any centerline.
 3. No shape crosses an integer lat/lon tile boundary (10 m cut gap).
 4. Every junction / apron vertex lies inside (or on the boundary of)
-   `pav_union`.
+   `pav_union`, EXCEPT:
+   * vertices shared with a runway / taxi rect / terminal edge (those
+     anchors legitimately extend past row-110 — e.g. runway stopways);
+   * tile-cut seam vertices (positioned ~half_width off the integer
+     line by `tile_cut`);
+   * vertices shared with a `boundary_dem_bridge` polygon (bridges are
+     the transition strip from pavement to DEM terrain — they connect
+     ribbon to junction across the boundary by design).
 5. Every junction / apron vertex is shared with at least one neighbouring
    shape vertex.
 
