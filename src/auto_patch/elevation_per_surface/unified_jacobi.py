@@ -314,24 +314,27 @@ def solve(layout, icao: str,
                 eg, el, term_grps, rect_grps, max_iters, tol_m,
                 dem_elev=dem_elev, use_attraction=True)
 
-    # INVERTED cascade (user 2026-05-23): terminal → apron → taxi.
-    # Tier 3 — TERMINALS first: flat plane anchored at the DEM-mean of the
-    # footprint (the flat-equality group averages the per-vertex DEM seed),
-    # yielding only to any seam/runway HARD node it touches.  Because a
-    # terminal↔apron boundary node is now terminal-owned, the terminal
-    # flattens it here and the apron (next) inherits the flat floor —
-    # whole-flat terminal + 1:1 aprons fall out natively (no post-flatten).
-    _run_phase(_TIER_TERMINAL, term_eg, term_el,
-               _eq_pairs_from_groups(terminal_groups),
-               [], terminal_groups)
-    # Tier 2 — APRONS grade outward from the frozen terminal, following the
-    # DEM up to max grade.
-    _run_phase(_TIER_APRON, apron_eg, apron_el, [], [], [])
-    # Tier 1 — TAXI network grades from the frozen aprons to the runway /
-    # seam HARD anchors (rect cross-sections stay flat).
-    _run_phase(_TIER_TAXI, taxi_eg, taxi_el,
-               _eq_pairs_from_groups(rect_flat_groups),
-               rect_flat_groups, [])
+    # (session 51, user 2026-05-28) Phase 1 = HOP-priority forward pass.
+    # REPLACES the role-tier cascade (TERMINAL→APRON→TAXI), which inherited
+    # altitudes via "yield to anchor" and could pull a taxi rect's DEM
+    # 26.5-30.7m down to a flat 25.1m (Taxi L at SPJC).
+    #
+    # Algorithm (per docs/pipeline_invariants.md hierarchy):
+    #   elevation_priority = hop distance from runway (junctions touching
+    #     the runway = 1; each further-out shape +1).  Tie-break larger area
+    #     first.
+    #   Iterate by DESCENDING priority (leaves furthest from runway FIRST).
+    #   Each shape: seed soft nodes at DEM, then `_project_shape` enforces
+    #     the shape's own grade rule, HOLDING HARD + already-settled (leaf-
+    #     ward) vertices.  Result: each shape sits DEM-close clamped to its
+    #     OWN grade rule, instead of inheriting a far-away terminal's flat
+    #     elevation.
+    # If the forward pass reaches the runway grade-compliantly, we are done.
+    # Otherwise Phase 2 relief (below) back-propagates outward.
+    shape_constraints_p1 = _build_shape_constraints(layout, bucket_to_idx)
+    runway_nodes = _runway_node_set(layout, bucket_to_idx)
+    total_iters += _phase1_hop_priority(
+        n, elev, base_hard, dem_elev, shape_constraints_p1, runway_nodes)
 
     # Relief — STEP 2 of the directional grade-relief algorithm (user
     # 2026-05-25).  STEP 1 is the cascade above (seed DEM, spread terminal ->
@@ -544,6 +547,104 @@ def _project_shape(elev, nodes, held, edges, flat) -> None:
             break
 
 
+def _shape_hop_depth(shape_constraints, seed_node_set) -> list[int]:
+    """BFS per-shape hop distance from the seed-node set (typically the
+    runway's nodes).  A shape touching a seed node is depth 1; each
+    additional shape in the chain adds 1.  Shape adjacency = shapes that
+    share at least one vertex (graph edges through ``node_owners``)."""
+    node_owners: dict[int, list[int]] = {}
+    for k, sc in enumerate(shape_constraints):
+        for i in sc["nodes"]:
+            node_owners.setdefault(i, []).append(k)
+    INF_D = 1 << 30
+    depth = [INF_D] * len(shape_constraints)
+    dq: deque[int] = deque()
+    for k, sc in enumerate(shape_constraints):
+        if any(i in seed_node_set for i in sc["nodes"]):
+            depth[k] = 1
+            dq.append(k)
+    while dq:
+        k = dq.popleft()
+        for i in shape_constraints[k]["nodes"]:
+            for k2 in node_owners.get(i, ()):
+                if k2 != k and depth[k2] > depth[k] + 1:
+                    depth[k2] = depth[k] + 1
+                    dq.append(k2)
+    return depth
+
+
+def _runway_node_set(layout, bucket_to_idx) -> set:
+    """Return the set of node indices that belong to a runway / runway-
+    crossing shape.  These are the BFS seeds for ``elevation_priority``
+    (priority 1 = touches a runway).  Seam-anchored apron vertices are
+    HARD but NOT runway, so they are excluded — an apron's priority
+    should be hops from the runway, not from a seam."""
+    out: set = set()
+    for s in layout.shapes:
+        if s.role not in (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING):
+            continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        try:
+            coords = _open_ring(list(s.polygon.exterior.coords))
+        except _GEOM_EXC:
+            continue
+        for x, y in coords:
+            k = layout.canonical_points.get_or_add(float(x), float(y))
+            if k in bucket_to_idx:
+                out.add(bucket_to_idx[k])
+    return out
+
+
+def _phase1_hop_priority(n, elev, base_hard, dem_elev,
+                         shape_constraints, runway_nodes) -> int:
+    """Phase 1 (session 51, user 2026-05-28) — REPLACES the role-tier cascade.
+
+    Algorithm per user spec:
+      1. Every pavement shape gets ``elevation_priority`` = hop distance from
+         the nearest HARD anchor (runway / seam).  Junctions touching the
+         runway = 1; each shape further out = +1.
+      2. Iterate shapes by DESCENDING priority (leaves farthest from the
+         runway FIRST), tie-break by larger AREA first.
+      3. For each shape: seed soft nodes at DEM, then call ``_project_shape``
+         to grade-clamp using ONLY the shape's own grade rule.  HARD anchors
+         AND vertices already-settled by earlier (higher-priority / leaf-ward)
+         shapes are HELD; everything else moves the minimum needed.
+      4. Terminal grade rule = flat (single elevation); sloped rects = linear
+         along source_axis (≤1.5%); junction/apron = ≤1.5% all-pair Euclidean.
+
+    Result: each shape sits as close to DEM as its own grade rule allows.
+    Cross-shape consistency comes from shared-vertex settling: the leaf-ward
+    shape settles its vertices first; the runway-ward shape inherits those
+    settled vertices via shared-node coincidence.  If a shape cannot satisfy
+    its own grade given the held inheritance, Phase 2 relief back-propagates
+    outward to redistribute.
+
+    Returns the number of shapes processed (informational).
+    """
+    if not shape_constraints:
+        return 0
+    depth = _shape_hop_depth(shape_constraints, runway_nodes)
+    # Process by DESCENDING depth (leaves first), tie-break larger area first.
+    order_idx = sorted(range(len(shape_constraints)),
+                       key=lambda k: (-depth[k], -shape_constraints[k]["area"]))
+
+    # Seed every soft node at DEM (replaces the per-tier yield-to-neighbour
+    # seeding).  Held HARD nodes keep their CIFP / DEM-pinned values.
+    for i in range(n):
+        if not base_hard[i]:
+            elev[i] = dem_elev[i]
+
+    settled = list(base_hard)
+    for k in order_idx:
+        sc = shape_constraints[k]
+        held = {i for i in sc["nodes"] if settled[i]}
+        _project_shape(elev, sc["nodes"], held, sc["edges"], sc["flat"])
+        for i in sc["nodes"]:
+            settled[i] = True
+    return len(order_idx)
+
+
 def _directional_relief(n, elev, is_hard, edge_grade, edge_length,
                         shape_constraints, max_iters, tol_m) -> int:
     """Phase 2: a SHAPE-LEVEL cascade that propagates grade compliance OUTWARD
@@ -712,7 +813,10 @@ def _build_shape_constraints(layout, bucket_to_idx):
                                    coords[a][1] - coords[b][1])
                     if d >= 0.5:
                         edges.append((idx[a], idx[b], cap * d))
-        out.append({"nodes": nodes, "edges": edges, "flat": flat})
+        out.append({"nodes": nodes, "edges": edges, "flat": flat,
+                    "area": float(s.polygon.area),
+                    "role": s.role,
+                    "ref": s.ref or ""})
     return out
 
 
