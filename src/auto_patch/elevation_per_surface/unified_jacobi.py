@@ -500,7 +500,7 @@ _RELIEF_OUTER_SWEEPS = 60       # global shape-cascade passes (graph cycles)
 _USE_LEAF_HIERARCHY = True
 
 
-def _project_shape(elev, nodes, held, edges, flat) -> None:
+def _project_shape(elev, nodes, held, edges, flat, coupling=None) -> None:
     """Make ONE shape internally grade-compliant, holding ``held`` (node idxs
     already settled by inward shapes / HARD anchors); free nodes move the
     minimum needed.  This is the per-shape realisation of "a node_altitudes
@@ -511,6 +511,13 @@ def _project_shape(elev, nodes, held, edges, flat) -> None:
     mean if nothing is held) — the whole plane translates as a rigid unit.
     Otherwise: a cap projection on the shape's OWN edges (rect = flat-cross +
     axial; apron/junction = all-pair), so the surface flexes but never shears.
+
+    ``coupling`` (user 2026-05-28): an optional ``node -> (members...)`` map of
+    RIGID LEVEL GROUPS — node sets that must share one elevation (a rect's two
+    flat-end cross-corner pairs; a terminal's nodes).  When the projection moves
+    any node, the WHOLE coupled group moves with it, so a rect's flat end stays
+    flat no matter which neighbour drags it.  A group is "held" iff ANY member
+    is held (an inward neighbour pinned one corner -> the level is pinned).
     """
     free = [i for i in nodes if i not in held]
     if not free:
@@ -522,6 +529,17 @@ def _project_shape(elev, nodes, held, edges, flat) -> None:
         for i in free:
             elev[i] = lvl
         return
+
+    def _members(i):
+        return coupling[i] if (coupling is not None and i in coupling) else (i,)
+
+    def _is_held(i):
+        return any(m in held for m in _members(i))
+
+    def _move(i, d):
+        for m in _members(i):
+            elev[m] += d
+
     for _ in range(400):
         mx = 0.0
         for (i, j, cap) in edges:
@@ -532,17 +550,17 @@ def _project_shape(elev, nodes, held, edges, flat) -> None:
             if ex > mx:
                 mx = ex
             s = 1.0 if d > 0 else -1.0
-            hi = i in held
-            hj = j in held
+            hi = _is_held(i)
+            hj = _is_held(j)
             if hi and hj:
                 continue
             if hi:
-                elev[j] += s * ex
+                _move(j, s * ex)
             elif hj:
-                elev[i] -= s * ex
+                _move(i, -s * ex)
             else:
-                elev[i] -= 0.5 * s * ex
-                elev[j] += 0.5 * s * ex
+                _move(i, -0.5 * s * ex)
+                _move(j, 0.5 * s * ex)
         if mx < 0.01:
             break
 
@@ -597,7 +615,7 @@ def _runway_node_set(layout, bucket_to_idx) -> set:
 
 
 def _phase1_hop_priority(n, elev, base_hard, dem_elev,
-                         shape_constraints, runway_nodes) -> int:
+                         shape_constraints, runway_nodes, coupling=None) -> int:
     """Phase 1 (session 51, user 2026-05-28) — REPLACES the role-tier cascade.
 
     Algorithm per user spec:
@@ -639,7 +657,8 @@ def _phase1_hop_priority(n, elev, base_hard, dem_elev,
     for k in order_idx:
         sc = shape_constraints[k]
         held = {i for i in sc["nodes"] if settled[i]}
-        _project_shape(elev, sc["nodes"], held, sc["edges"], sc["flat"])
+        _project_shape(elev, sc["nodes"], held, sc["edges"], sc["flat"],
+                       coupling)
         for i in sc["nodes"]:
             settled[i] = True
     return len(order_idx)
@@ -794,6 +813,26 @@ def _directional_relief(n, elev, is_hard, edge_grade, edge_length,
         for i in g:
             elev[i] = t
 
+    # Rigid level coupling: a rect's two flat-end cross-corner pairs each move
+    # as ONE level (user 2026-05-28).  DIRECTIONAL, not symmetric: a rect's
+    # flat end anchors and its NEIGHBOURS conform — when projecting any OTHER
+    # shape, that rect's flat-end nodes are HELD (so the apron/junction grades
+    # to match the rect's flat edge instead of dragging the two corners apart).
+    # The rect itself keeps its OWN ends level via the coupling map while it
+    # grades along-axis from its runway-ward parent.  (Symmetric coupling
+    # oscillated where two neighbours pinned the two corners at odds.)
+    coupling = _build_level_coupling(shape_constraints)
+    rect_flat_nodes: set = set()
+    own_flat: list[set] = []
+    for sc in order:
+        of: set = set()
+        for (a, b) in sc.get("flat_pairs", ()):
+            of.add(a)
+            of.add(b)
+        own_flat.append(of)
+        rect_flat_nodes |= of
+    conform_nodes = terminal_nodes | rect_flat_nodes
+
     sweep = 0
     for sweep in range(min(max_iters, _RELIEF_OUTER_SWEEPS)):
         settled = list(is_hard)
@@ -807,7 +846,8 @@ def _directional_relief(n, elev, is_hard, edge_grade, edge_length,
                 else:
                     held = {i for i in sc["nodes"] if settled[i]}
                 held |= terminal_nodes.intersection(sc["nodes"])  # conform
-                _project_shape(elev, sc["nodes"], held, sc["edges"], sc["flat"])
+                _project_shape(elev, sc["nodes"], held, sc["edges"], sc["flat"],
+                               coupling)
             for i in sc["nodes"]:
                 settled[i] = True
         max_viol = max((abs(elev[u] - elev[v]) - cap
@@ -841,19 +881,42 @@ def _build_shape_constraints(layout, bucket_to_idx):
         flat = (s.role == ROLE_TERMINAL)
         cap = _role_grade(s.role)
         edges: list[tuple[int, int, float]] = []
+        flat_pairs: list[tuple[int, int]] = []   # rect flat-end coupled pairs
         is_rect = s.role in SLOPING_RECT_ROLES and len(coords) == 4 \
             and all(i is not None for i in idx)
         if flat:
             pass                                  # handled by _project_shape
         elif is_rect:
-            # [H, L, L, H]: flat-cross pairs (0,3) (1,2); axial (0,1) (3,2).
-            for a, b, flat_edge in ((0, 3, True), (1, 2, True),
-                                    (0, 1, False), (3, 2, False)):
+            # Identify the two AXIS-END (flat-cross, cap 0) edges and the two
+            # AXIAL (sloping, cap = grade·length) edges by projecting each ring
+            # edge onto ``source_axis`` (user 2026-05-28) — NOT by ring index:
+            # absorption / snaps / tile-cut can rotate the ring, and a stale
+            # [H,L,L,H] index assumption mis-labels which edges must stay flat.
+            ring_edges = [(0, 1), (1, 2), (2, 3), (3, 0)]
+            scored = []
+            adx = ady = None
+            ax = getattr(s, "source_axis", None)
+            if ax is not None and not ax.is_empty:
+                acs = list(ax.coords)
+                if len(acs) >= 2:
+                    adx, ady = acs[-1][0] - acs[0][0], acs[-1][1] - acs[0][1]
+                    al = math.hypot(adx, ady) or 1.0
+                    adx, ady = adx / al, ady / al
+            for (a, b) in ring_edges:
+                ex, ey = coords[b][0] - coords[a][0], coords[b][1] - coords[a][1]
+                el = math.hypot(ex, ey) or 1e-9
+                # |edge·axis|/|edge|: 1 = axial (sloping), 0 = perpendicular (flat)
+                par = abs(ex * adx + ey * ady) / el if adx is not None else 0.0
+                scored.append((par, a, b, el))
+            scored.sort()                # ascending: first 2 = flat, last 2 = axial
+            for n, (_par, a, b, el) in enumerate(scored):
                 if idx[a] is None or idx[b] is None or idx[a] == idx[b]:
                     continue
-                d = math.hypot(coords[a][0] - coords[b][0],
-                               coords[a][1] - coords[b][1])
-                edges.append((idx[a], idx[b], 0.0 if flat_edge else cap * d))
+                if n < 2:                # the two most-perpendicular = flat ends
+                    edges.append((idx[a], idx[b], 0.0))
+                    flat_pairs.append((idx[a], idx[b]))
+                else:                    # the two most-parallel = sloping edges
+                    edges.append((idx[a], idx[b], cap * el))
         else:
             # All-pair (apron / junction / seam-cut rect).
             m = len(idx)
@@ -868,10 +931,43 @@ def _build_shape_constraints(layout, bucket_to_idx):
                     if d >= 0.5:
                         edges.append((idx[a], idx[b], cap * d))
         out.append({"nodes": nodes, "edges": edges, "flat": flat,
+                    "flat_pairs": flat_pairs,
                     "area": float(s.polygon.area),
                     "role": s.role,
                     "ref": s.ref or ""})
     return out
+
+
+def _build_level_coupling(shape_constraints) -> dict:
+    """Build the RIGID LEVEL coupling map ``node -> tuple(members)`` (user
+    2026-05-28).  Members of a group must share one elevation and move together
+    under :func:`_project_shape`.  Groups = every rect flat-end cross-corner
+    pair (``flat_pairs``); pairs that share a node (rect meeting rect end-to-end)
+    union into one component so they stay co-levelled."""
+    parent: dict[int, int] = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        parent[find(a)] = find(b)
+
+    for sc in shape_constraints:
+        for (a, b) in sc.get("flat_pairs", ()):  # type: ignore[arg-type]
+            union(a, b)
+    comp: dict[int, list[int]] = {}
+    for x in list(parent):
+        comp.setdefault(find(x), []).append(x)
+    coupling: dict[int, tuple] = {}
+    for members in comp.values():
+        t = tuple(members)
+        for m in members:
+            coupling[m] = t
+    return coupling
 
 
 # ── Stage 1: build node list ──────────────────────────────────────
