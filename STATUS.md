@@ -139,17 +139,32 @@ at 50-100m from any source-shape corner. Same root cause: junction#69's
 zig-zag/self-crossing exterior. Fixing junction construction for non-convex
 residue polygons likely resolves A4 + A5 together at SPJC.
 
+**TWO neck-split implementations exist** (do not conflate, per user 2026-05-27):
+- **KEEP — `split_polygon_at_necks`** (`pavement/apron_necks.py`, session 50):
+  splits large apron residue at taxi-width arm mouths via medial-axis tracing;
+  called from `junction_emit.py:222-225` BEFORE hole-decompose. CYXY within-
+  shape grade viol 786→253 when introduced. Geometric, pre-solve, no
+  altitude coupling.
+- **RETIRE — `_split_narrow_necks`** (`junction_rules.py:1813`, user
+  2026-05-01): Rule 4, MRR-based symmetric axial split at MRR midpoint along
+  runway axis. Called from `apply_junction_rules` (post-emit). Audit verdict
+  **WEAK** ("geometric quality heuristic not in invariants spec"). Tested by
+  `test_no_narrow_neck_junctions` (3 unit tests in `test_junction_unit.py`).
+  Likely culprit for SPJC junction#69's self-crossing zig-zag (cut location +
+  direction can produce non-simple polygons on non-convex residue).
+
 **Recommended next attack (next session, fresh context):**
-1. Investigate `_decompose_polygon_with_holes` + `_split_narrow_necks` on
-   non-convex junctions. Likely overlap with the audit's "WEAK" verdict for
-   `test_no_narrow_neck_junctions`. Consider removing `_split_narrow_necks`
-   per the audit, and inspecting whether decompose can emit MultiPolygon
-   directly instead of cutting.
-2. The 4 sub-1.5m A4 drift cases: probably a snap pass placing a vertex just
+1. Retire `_split_narrow_necks` (the OLD one) + its callers + the unit tests
+   (`test_no_narrow_neck_junctions`, the 3 `test_junction_unit.py` tests
+   referencing it). Re-run; junction#69 may normalize, clearing A5 SPJC
+   orphans + A4 4-8m shared-pair violations + possibly A2/A1/D12/F16.
+2. If junction#69 still self-crosses after retirement, investigate
+   `_decompose_polygon_with_holes` on non-convex residue (next likely
+   culprit — its cut lines can also produce zig-zag exteriors).
+3. The 4 sub-1.5m A4 drift cases: probably a snap pass placing a vertex just
    off pav_union. Trace via per-pass layout snapshot.
-3. After A4/A5 land, re-run full suite; A2 boundary_near_centerline, D12
-   runway_node_sharing, F16 neighbour_corners, A1 SPLP overlap may also clear
-   if junction-construction is fixed.
+4. After geometry-construction lands clean, re-run full suite and re-baseline
+   grade `MID_EDGE_CAP` (2-solve artifacts).
 
 **VALIDATION: 12 failed / 269 passed / 9 skipped (was 6).** 6 NEW failures, two
 root causes (committed as WIP — debug next):
