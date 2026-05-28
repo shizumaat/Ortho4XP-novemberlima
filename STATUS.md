@@ -1,8 +1,13 @@
-# Auto-Patch Status — session 51 IN PROGRESS: single-solve refactor DONE (builds 4x faster), DEBUGGING 6 new regressions (tile_cut elevation-coupling + snap over-reach)
+# Auto-Patch Status — session 51 IN PROGRESS: single-solve refactor DONE, INVARIANTS agreed (docs/pipeline_invariants.md), TESTS redefined; 13 real invariant violations remain (task #8)
 
-> **Read `docs/elevation_solver.md` FIRST** — the core component (cascade +
-> directional relief). Session 51 is executing THE single-solve refactor that
-> session 50 planned. See "SESSION 51 PROGRESS" immediately below, then "THE
+> **Read `docs/pipeline_invariants.md` FIRST** — the agreed working spec for the
+> refactor (8 invariant sections, A1–H28). Then `docs/elevation_solver.md` for the
+> solver model. Session 51 has: collapsed the 2-solve pipeline into one solve
+> (4× faster build), agreed the invariant set with the user, redefined the
+> 2-solve-era tests, and added missing invariant coverage. What remains is
+> fixing the 13 real geometry/grade violations the cleaned-up tests now surface.
+>
+> See "SESSION 51 PROGRESS" immediately below, then "THE
 > PLANNED REFACTOR" for the full target order.
 
 ## PIPELINE PASS AUDIT (session 51 — the refactor's working plan)
