@@ -44,6 +44,21 @@ _SAMPLE = 2.5            # boundary densify spacing
 _PRUNE_LEN = 15.0        # spur removal threshold
 _MAX_BOUNDARY_PTS = 40000   # perf guard for very large airports
 _MIN_POLY_AREA = 500.0      # skip tiny pavement scraps
+# Discovered centerlines that run nearly PARALLEL to and CLOSE TO a runway are
+# medial artifacts along the apron/runway edge, not real lanes (user 2026-05-28,
+# SPJC TX24/25) — drop them so that pavement stays a single junction/apron.
+_RUNWAY_PARALLEL_MAX_DEG = 15.0
+_RUNWAY_NEAR_M = 25.0
+
+
+def _line_bearing_deg(ls) -> float:
+    c = list(ls.coords)
+    return math.degrees(math.atan2(c[-1][1] - c[0][1], c[-1][0] - c[0][0]))
+
+
+def _bearings_aligned(a: float, b: float, tol: float) -> bool:
+    d = abs(a - b) % 180.0
+    return min(d, 180.0 - d) < tol
 
 
 def _flatten_lines(geom) -> list[LineString]:
@@ -227,6 +242,7 @@ def discover_unreferenced_centerlines(
     existing_centerlines: list,
     rwy_centerlines: list | None = None,
     *,
+    runway_union=None,
     width_min: float = _WIDTH_MIN,
     width_max: float = _WIDTH_MAX,
     min_len: float = _MIN_LEN,
@@ -265,6 +281,15 @@ def discover_unreferenced_centerlines(
         except _GEOM_EXC:
             covered = None
 
+    # Runway bearings (for the parallel-to-runway artifact filter below).
+    rwy_bearings: list[float] = []
+    for rc in rwy_centerlines or ():
+        ls = rc[0] if isinstance(rc, tuple) else rc
+        if isinstance(ls, LineString) and len(ls.coords) >= 2:
+            rwy_bearings.append(_line_bearing_deg(ls))
+    rwy_near = (runway_union if (runway_union is not None
+                                 and not runway_union.is_empty) else None)
+
     out: list[tuple[LineString, str]] = []
     n = 0
     for P in parts:
@@ -293,6 +318,21 @@ def discover_unreferenced_centerlines(
             for piece, _r in split_merged_centerline(ln, ref, rwy_centerlines):
                 if piece.is_empty or piece.length < 1.0:
                     continue
+                # Drop runway-parallel apron-edge artifacts: a synthetic lane
+                # within _RUNWAY_PARALLEL_MAX_DEG of a runway's bearing AND
+                # within _RUNWAY_NEAR_M of the runway is the medial path along
+                # the apron/runway edge, not a real lane — leave that pavement
+                # as a single junction/apron (user 2026-05-28).
+                if rwy_near is not None and rwy_bearings:
+                    try:
+                        near = piece.distance(rwy_near) < _RUNWAY_NEAR_M
+                    except _GEOM_EXC:
+                        near = False
+                    if near:
+                        pb = _line_bearing_deg(piece)
+                        if any(_bearings_aligned(pb, rb, _RUNWAY_PARALLEL_MAX_DEG)
+                               for rb in rwy_bearings):
+                            continue
                 if covered is not None:
                     try:
                         if (piece.intersection(covered).length

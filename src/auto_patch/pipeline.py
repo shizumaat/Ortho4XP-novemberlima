@@ -1266,7 +1266,8 @@ def build_airport_pavement(icao: str, xplane_root: str,
         from .pavement.discovered_taxiways import (
             discover_unreferenced_centerlines)
         _discovered = discover_unreferenced_centerlines(
-            pav_union, osm_centerlines, rwy_centerlines)
+            pav_union, osm_centerlines, rwy_centerlines,
+            runway_union=layout.runway_union)
         if _discovered:
             osm_centerlines = list(osm_centerlines) + _discovered
             UI.vprint(1,
