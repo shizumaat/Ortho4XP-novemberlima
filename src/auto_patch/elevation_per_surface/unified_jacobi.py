@@ -745,15 +745,69 @@ def _directional_relief(n, elev, is_hard, edge_grade, edge_length,
                 held |= cand[par]
             parent_held.append(held)
 
+    # Terminal = RIGID FLAT UNIT (user 2026-05-28).  Each terminal's nodes
+    # always share ONE elevation; neighbouring aprons CONFORM to it (hold its
+    # vertices, never flex them).  On this reverse pass the terminal may
+    # rigid-TRANSLATE (the whole unit, staying flat) the MINIMUM needed to keep
+    # its apron connections within grade — anchored at its forward-pass DEM
+    # level so the shift is minimal.  This fixes the shared-vertex consensus
+    # (the terminal is genuinely flat, not emitted-flat over apron-dragged
+    # nodes — the 64 SPJC cross-shape steps) AND lets the runway->terminal
+    # relief pull the terminal up/down as the grade demands.
+    terminal_groups = [set(sc["nodes"]) for sc in shape_constraints
+                       if sc["flat"] and sc["nodes"]]
+    terminal_nodes: set = set().union(*terminal_groups) if terminal_groups \
+        else set()
+    # Per-edge grade-cap adjacency (node -> [(neighbour, cap_m)]) to find the
+    # feasible band for a terminal's rigid level from its settled NON-terminal
+    # neighbours (an apron's all-pair edges out of the shared vertices).
+    cap_adj: dict[int, list[tuple[int, float]]] = {}
+    for (u, v), gr in edge_grade.items():
+        c = edge_length[(u, v)] * gr
+        cap_adj.setdefault(u, []).append((v, c))
+        cap_adj.setdefault(v, []).append((u, c))
+    # Forward-pass (DEM) level each terminal is anchored to — the minimum-shift
+    # reference; Phase 1 already made each terminal flat at its DEM centroid.
+    term_level0 = [sum(elev[i] for i in g) / len(g) for g in terminal_groups]
+    group_of_node: dict[int, int] = {}
+    for gi, g in enumerate(terminal_groups):
+        for i in g:
+            group_of_node[i] = gi
+
+    def _rigid_shift_terminal(gi: int) -> None:
+        """Translate terminal group ``gi`` as one flat unit to the level
+        closest to its forward-pass DEM level that keeps every connection to a
+        settled non-terminal neighbour within grade (minimum shift)."""
+        g = terminal_groups[gi]
+        lo, hi = float("-inf"), float("inf")
+        for i in g:
+            for (j, c) in cap_adj.get(i, ()):  # type: ignore[arg-type]
+                if j in terminal_nodes:
+                    continue          # within/between terminals: no constraint
+                lo = max(lo, elev[j] - c)
+                hi = min(hi, elev[j] + c)
+        t0 = term_level0[gi]
+        if lo <= hi:
+            t = min(max(t0, lo), hi)   # already feasible -> stay; else min move
+        else:
+            t = 0.5 * (lo + hi)        # infeasible band: minimise worst violation
+        for i in g:
+            elev[i] = t
+
     sweep = 0
     for sweep in range(min(max_iters, _RELIEF_OUTER_SWEEPS)):
         settled = list(is_hard)
         for k, sc in enumerate(order):
-            if parent_held is not None:
-                held = set(parent_held[k])
+            gi = group_of_node.get(sc["nodes"][0]) if sc["nodes"] else None
+            if gi is not None and set(sc["nodes"]) <= terminal_groups[gi]:
+                _rigid_shift_terminal(gi)   # this shape IS a terminal
             else:
-                held = {i for i in sc["nodes"] if settled[i]}
-            _project_shape(elev, sc["nodes"], held, sc["edges"], sc["flat"])
+                if parent_held is not None:
+                    held = set(parent_held[k])
+                else:
+                    held = {i for i in sc["nodes"] if settled[i]}
+                held |= terminal_nodes.intersection(sc["nodes"])  # conform
+                _project_shape(elev, sc["nodes"], held, sc["edges"], sc["flat"])
             for i in sc["nodes"]:
                 settled[i] = True
         max_viol = max((abs(elev[u] - elev[v]) - cap

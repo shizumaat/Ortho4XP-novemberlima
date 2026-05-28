@@ -1,399 +1,166 @@
-# Auto-Patch Status — session 51 IN PROGRESS: clean no-absorption model NOW DEFAULT (absorb=False, commit 0104f00); single-solve + invariants agreed + tests redefined + apron_lane retired + _split_narrow_necks retired; 10 real invariant violations remain
+# Auto-Patch Status — session 52 HANDOVER (terminal rigid-flat-unit model coded + confirmed; sloped-rect shared-vertex consensus is next)
 
-> **Read `docs/pipeline_invariants.md` FIRST** — the agreed working spec for the
-> refactor (8 invariant sections, A1–H28). Then `docs/elevation_solver.md` for the
-> solver model. Session 51 has: collapsed the 2-solve pipeline into one solve
-> (4× faster build), agreed the invariant set with the user, redefined the
-> 2-solve-era tests, and added missing invariant coverage. What remains is
-> fixing the 13 real geometry/grade violations the cleaned-up tests now surface.
+> **READ FIRST:**
+> 1. `docs/pipeline_invariants.md` — the agreed working spec (8 invariant sections, A1–H28).
+> 2. `docs/elevation_solver.md` — solver model (the directional two-pass model below supersedes the old cascade/relief framing).
+> 3. This file — what session 52 changed and what's next.
 >
-> See "SESSION 51 PROGRESS" immediately below, then "THE
-> PLANNED REFACTOR" for the full target order.
+> **Working tree:** session-52 work committed. Suite: **9 failed / 272 passed / 2 skipped**
+> (`venv/bin/python -m pytest tests/ -q -k "not compare_target" -n auto` ≈ 2:18). Same 9 as the
+> session-51 baseline — NO regressions.
 
-## PIPELINE PASS AUDIT (session 51 — the refactor's working plan)
-The pipeline accreted ~28 fix-up passes around the OLD 2-solve order. The
-single-solve model is much simpler; the dividing line: **passes whose TRIGGER or
-OUTPUT depends on solved altitudes = 2-solve band-aids; pure-geometry passes =
-fundamental.** Audit verdicts (4 parallel readers, full bodies read):
+## TL;DR / where to start
+Session 52 nailed down the **directional two-pass elevation model** for the
+TERMINAL layer and coded it correctly, and fixed two genuine FALSE-POSITIVES
+in the grade checker. The terminal↔apron shared-vertex disagreements (the
+binding SPJC grade failure, 64 violations, worst 3.2 m) are **eliminated**.
+The 3 `test_pavement_grade` tests still fail, but now ONLY on the **sloped-rect
+emit consensus** (rect plane disagrees with neighbour junction/apron at shared
+vertices) and **apron/junction internal over-grade** (giant-apron
+decomposition) — the work sequenced next ("terminal first, then sloped rects").
 
-**REMOVE (dead/obsolete/harmful under single-solve):**
-- `_snap_junction_altitudes_to_rect_corners`, `_enforce_shared_vertex_altitudes`,
-  `_smooth_within_junction_adjacent_pair_grade` — already gated `if not
-  USE_PER_SURFACE_SOLVER` (DEAD in prod); docs say they re-introduce the
-  violations the solver just fixed.
-- `_subdivide_violating_junctions` — grade-TRIGGERED (needs altitudes); reintroduces
-  the geometry↔elevation loop. (Removed from pipeline.) Confirmed it would fire on
-  0 junctions (CYXY/SPJC) / 1 (SPLP) anyway.
-- `_align_rect_slope_to_axis` — reads solved hi/lo; no-op pre-solve. (Dropped.)
-- `_apply_geometric_finalization` Phase 3/4 chain (elevation.py) — old interleaved
-  solve→clamp→subdivide→solve, behind the dead gate.
+## The directional two-pass model (user 2026-05-28, CONFIRMED)
+Priorities: if a tile seam crosses the pavement union it is highest priority;
+else runway + junctions touching it = priority 1, increasing with hop-distance
+outward. Terminals/leaves are outermost. Ties by area.
 
-**REFINE (keep intent, fix for single-solve):**
-- **`_absorb_rects_at_junction_perimeters`** — the rect-destroyer. TESTED
-  `ABSORB_RECTS_ALONGSIDE_APRONS=False` (no-absorption / clean 5-step model):
-  **20 failed vs 12 ON.** The suite ENCODES absorption — off makes taxi rects sit
-  alongside junctions/aprons, violating no_long_edge_proximity /
-  no_vertex_on_sloping_rect_flat_edge / rect_short_edges_connect /
-  runway_node_sharing / neighbour_corners. So the clean model is viable but needs
-  REDEFINING ~7 invariant tests (a deliberate decision — NOT done). Kept ON.
-  If kept ON: switch sloping-edge ID to `source_axis` (NOT corner-order convention —
-  mis-IDs 1 CYXY/14 SPJC rects) AND only run on fully-refined geometry.
-- `_clip_sloping_rect_piece` (tile_cut) — DEAD now (bails on `altitude_high is
-  None`; `split_pavement_at_seams` nulls taxi alts pre-solve) → cut taxi rects lose
-  clean-rect preservation and may TILT (suspect for SPLP regressions). Re-express
-  via `source_axis` (geometric clean-rect, no altitudes).
-- `stitch_pavement_polygons` — gates on `node_altitudes` present → no-op pre-solve;
-  strip the z-interpolation, keep pure vertex-sharing.
-- `_push_junction_vertices_off_taxi_rect_edges` — keep geometry; drop the now-dead
-  NN altitude-resample limb.
-- `widen_junctions_to_runway_corners` — "POST-ELEVATION," backfills junction alts
-  from solved runway → obsolete intent; keep only geometric vertex-insertion.
-- `_enforce_runway_1to1_sharing` — HIGHEST-RISK: delicate rewrite that amputated
-  real pavement (CYXY 20-end, HECA), wrapped in RUNWAY_REWRITE_MAX_ABS_LOSS guards.
-  Audit whether junctions=union−rects already meet runway 1:1 → likely deletable.
-- The sloping-edge SNAPS (`_snap_to_sloping_edge_corners`,
-  `_snap_junction_vertices_to_rect_flat_edge_corners`) — switch edge-ID to
-  `source_axis` too (same fix as absorb).
+**Forward pass — terminal/leaves → runway** (`_phase1_hop_priority`, descending
+hop-depth): START at the terminal (flat, rigid). Aprons CONFORM to the
+terminal's vertices; each shape inward follows DEM clamped to its grade cap,
+holding the vertices its leaf-ward neighbour settled. NEVER average. The
+accumulated violation is pushed into the final junction→runway connection.
 
-**KEEP (fundamental, pure-geometry):** `_enforce_shared_vertices`,
-`_drop_overlap_against_fixed_shapes`, `_reclassify_apron_junctions` (= clean-model
-step 5), `stitch_pavement_to_terminals`, `stitch_pavement_to_flat_runways`,
-`_merge_sliver_junctions_into_neighbours`, `_drop_thin_orphan_slivers`,
-`_drop_floating_orphan_junctions`, `cut_layout_at_tile_boundaries` +
-`_terrain_pin_slice_nodes`, `apply_seam_dem_anchors`, `weld_layout_vertices`,
-`enforce_conformance`, `_clip_pavement_to_boundary_interior`.
+**Reverse pass — runway → terminal** (`_directional_relief`, ascending depth,
+leaf-hierarchy holds parent-interface): pull the runway-touching junction the
+MINIMUM to reach grade, propagate outward (stub→junction→primary→apron), each
+pulled the minimum; finally RIGID-SHIFT the whole terminal (staying flat) if
+needed. → grade-compliant everywhere.
 
-**STRUCTURAL (bigger refactors, later):**
-- TWO parallel seam pipelines: `split_pavement_at_seams`+`apply_seam_dem_anchors`
-  vs `cut_layout_at_tile_boundaries`+`_terrain_pin_slice_nodes` recompute the same
-  integer cut-lines + both DEM-pin seam nodes. Consolidate.
-- "Single solve last" isn't strict for boundary/conformance: `enforce_conformance`
-  + `_clip_pavement_to_boundary_interior` insert/resample vertices POST-solve that
-  the solver never grades; `_conform_ribbon_to_pavement_seam` papers over the walls.
-  Acceptable (snap to solved neighbours) but the solve doesn't cover those nodes.
+## What session 52 changed (committed)
 
-## SESSION 51 PROGRESS (single-solve refactor)
-Session-50 work was committed first as checkpoint `b187dd6` (baseline 6 failed /
-279 passed / 5 skipped, excl compare_target). Then:
+### 1. Terminal = RIGID FLAT UNIT — `elevation_per_surface/unified_jacobi.py`
+`_directional_relief` (the reverse pass) now treats each terminal as ONE rigid
+flat variable (lines ~748–805):
+- `terminal_groups` = node-sets of each flat (terminal) shape; `terminal_nodes`
+  = their union.
+- Every NON-terminal shape HOLDS its terminal-shared vertices (`held |=
+  terminal_nodes ∩ nodes`) → aprons CONFORM, never flex the terminal boundary.
+- When the terminal shape itself is reached, `_rigid_shift_terminal(gi)`
+  translates the WHOLE group to the level closest to its forward-pass DEM
+  centroid (`term_level0`) that keeps every connection to a settled
+  NON-terminal neighbour within grade (band from `cap_adj` = per-edge grade-cap
+  adjacency over `edge_grade`). Feasible band → clamp to it (minimum shift);
+  infeasible → midpoint (minimise worst violation).
+- **Why this and not the freeze-pin tried first:** freezing all terminal nodes
+  enforced conformance but BROKE the "rigid-shift if needed" half of the model
+  (an apron squeezed between a frozen terminal and the runway couldn't reach
+  grade → spurious within-apron violations). The rigid-shift fixes BOTH the
+  shared-vertex consensus AND lets the relief pull the terminal up/down.
 
-**DONE (de-coupling + prep, all behavior-preserving unless noted):**
-- `_split_sloped_rects_at_violations` (junction_repair.py): detect sloped rects
-  by ROLE not altitude tags; interpolate sub-rect alts only when present, else
-  set None. Works pre- or post-solve.
-- `_snap_to_sloping_edge_corners` + `_snap_junction_vertices_to_rect_flat_edge_corners`
-  (junction_rules.py): removed the `altitude_high/low is None` gate → role-based.
-  NOTE: this also makes them process would-be-FLAT rects at their current
-  post-solve call sites (a real behavior change — validate). Sloping-EDGE
-  detection still uses the `_rect_from_axis_extended` corner-order convention,
-  which is a RELIABLE CONTRACT (corner order is an Ortho4XP downstream
-  requirement, maintained by `_split`/absorb). `_rect_sloping_edges` (axis-based)
-  exists but is DEAD CODE — intentionally NOT wired in (redundant given the
-  corner-order contract).
-- `finalize.py`: `run_phase2` → renamed `compute_elevations_and_repair_geometry`;
-  extracted the feature-emit block into new `emit_terrain_transition_features`
-  (boundary ribbon / groundside / bridges / tunnels). Currently still called at
-  the OLD pre-solve position (behavior-preserving extract).
-- Renamed for clarity per user: no vague phase/step names.
+### 2. Grade-checker false positives — `tools/check_grade.py`
+The two STEP checks (`_check_vertex_to_edge_step`, `_check_edge_midpoint_step`)
+asserted vertical continuity between ANY two shapes within 5 m horizontally.
+Two corrections (user 2026-05-28):
+- **Airside↔groundside skip:** `_is_groundside` / `_airside_groundside_pair`.
+  Groundside pavement (`groundside_pavement`/`service_road`/`service_junction`)
+  is deliberately separated from airside by a clearance gap + retaining/vertical
+  wall, often several metres — NOT meant to be flush. Skip those pairs. (This
+  alone cleared ~161 CYXY false `apron↔groundside` steps.)
+- **Contact tolerance `_STEP_CONTACT_TOL_M = 1.0`:** only flag a step where the
+  two edges actually TOUCH (shared boundary); a gap (no pavement between, 2–5 m
+  apart) may legitimately differ in height. Gate `best_d2 > tol²` in both
+  checks. (`_pair_grade_limit`'s docstring wrongly claimed groundside was already
+  skip-listed — it isn't; `ROLE_GRADE_LIMITS['groundside_pavement']=0.04`.)
 
-**KEY FINDINGS (correct the session-50 plan):**
-- `_compute_elevations` does NOT call the solver under `USE_PER_SURFACE_SOLVER`
-  (gated `if not USE_PER_SURFACE_SOLVER`, elevation.py:1214). The "2× solve" is
-  exactly the two `per_surface_solve` calls in pipeline.py. ✓ premise holds.
-- The solver SAMPLES DEM per-vertex for soft nodes (`_seed_elevations`,
-  unified_jacobi.py:988) → soft shapes need NO pre-seeded altitudes; only HARD
-  anchors (runway via `redistribute_runway_profile`, seam via
-  `apply_seam_dem_anchors`) must be set pre-solve, and they already are.
-- `_absorb_rects_at_junction_perimeters` already de-couples cleanly pre-solve
-  (None alts → `_alt_at_t` None → no node_altitudes written). No edit needed.
+## NEXT ACTION — sloped-rect shared-vertex consensus
+The remaining grade failures are the sloped-rect EMIT gap. In the SOLVER a
+shared vertex is ONE node with ONE elevation (consistent). But a sloped rect is
+EMITTED as a 2-value plane (`altitude_high`/`altitude_low`, collapsed within
+`_RECT_COLLAPSE_TOL_M`); at a shared corner that plane interpolates to a value
+that differs from the adjacent junction/apron's per-node `node_altitudes`. Same
+emit-consensus class just solved for terminals.
 
-**DECISIONS (user, session 51):**
-- Feature emit (`emit_terrain_transition_features`) moves POST-solve (cleaner;
-  needs a post-emit `cut_layout_at_tile_boundaries` for cross-tile features).
-- DROP `_align_rect_slope_to_axis` entirely (reactive-to-solve); verify the
-  cascade never produces perpendicular-sloped rects. Restore if regressions.
+**Confirm the mechanism first** (don't assume): pick a worst SPJC pair, e.g.
+`primary_parallel/-10030 (17.9) ↔ apron/-10112 (16.6)` at d=0.00, and check
+whether they share a canonical node, what the SOLVER value at that node is, and
+why the rect emits 17.9 vs the apron's 16.6. Reusable probe template:
+`/tmp/diag_term_apron.py` (node-sharing + per-vertex emit dump) and
+`/tmp/grade_detail.py` (per-tile build + `check_grade.run_checks`, cross/within
+by role-pair).
 
-**REORDER DONE (pipeline.py, this session):** removed solve#1 + both
-`_subdivide_violating_junctions` loops + the altitude-reconciliation chain
-(`_snap_junction_altitudes_to_rect_corners` / `_enforce_shared_vertex_altitudes`)
-+ dropped `_align_rect_slope_to_axis`. ALL geometry now finalizes pre-solve
-(stitches + `_split`/absorb/reclassify/Rule-2 + tile_cut + nudge); ONE
-`per_surface_solve`; then `emit_terrain_transition_features` + a feature tile_cut
-+ clearance, all POST-solve.
-- **WIN CONFIRMED:** CYXY build 60-90s → **~15s** (one ~0.1s solve, no subdivide
-  loops). The single-solve premise holds: build runs clean, altitudes populated.
+Then make the rect's emitted corner value agree with the shared-node solved
+value — either emit rects with per-node altitudes at shared corners, or make the
+hi/lo collapse honour the exact solved node elevation at every shared vertex.
 
-### Task #8 (real-regression fixes) — in progress, partial wins committed
+After that: CYXY apron/junction INTERNAL over-grade (apron `-10078` spans
+703.8→701.8 over its own width; the giant east apron grades flat far from its
+edge) — needs apron decomposition, a separate piece.
 
-**A4 outside_pavement** — root cause: bridge contact propagation. Fixed by
-exempting bridge-shared junction vertices in the A4 test + invariant doc
-(commit a400ada). Drops the 26.55m/28.11m bridge-shared violations cleanly.
-**Remaining (sub-10m, 9 total):** mix of (a) small snap/densification drift
-(sub-1.5m, 4 cases) and (b) shared-between-two-junctions vertices 4-8m out
-(CYXY 337,-1181; SPJC -466,1330). The big-shared-pair ones traced to
-junction-construction artifacts: e.g. SPJC junction#69 (8687 m², 17 verts) has
-a self-crossing zig-zag boundary suggesting `_decompose_polygon_with_holes`
-or `_split_narrow_necks` cut a non-convex junction wrong.
+## Still deferred (from session 51, re-confirm after sloped rects)
+- **Phase-1 "no averaging"** at the first leaf (`_project_shape` else-branch
+  splits an over-cap edge 50/50). For a rect this only averages the cap-0 CROSS
+  edge, which is forced + correct (a taxiway cross-section must be level), so
+  it's lower priority than STATUS-51 implied. Revisit if a leaf rect still
+  emits flat-at-mean when it should slope along-axis.
+- **Seam-priority BFS seeding** (`_runway_node_set` seeds runway only): for
+  cross-tile airports (SPLP/MMOX) seam-hard-but-not-runway nodes should ALSO
+  seed BFS (`seam ∈ base_hard AND ∉ runway_nodes`). SPJC's seam doesn't cross
+  runway, so runway stays top priority there.
 
-**A5 have_source[SPJC]** — 38 orphan vertices, ~32 of them inside junction#69
-at 50-100m from any source-shape corner. Same root cause: junction#69's
-zig-zag/self-crossing exterior. Fixing junction construction for non-convex
-residue polygons likely resolves A4 + A5 together at SPJC.
+## Current test failures (9, all real geometry/grade, no regressions)
+```
+FAILED tests/test_pavement_geometry.py::test_no_self_overlap[SPLP]
+FAILED tests/test_junction_rules.py::test_junction_vertices_outside_pavement[SPJC]
+FAILED tests/test_junction_invariants.py::test_junction_vertices_have_source[SPJC]
+FAILED tests/test_pavement_geometry.py::test_rect_short_edges_connect[SPJC]
+FAILED tests/test_junction_rules.py::test_junction_runway_node_sharing[CYXY]
+FAILED tests/test_junction_rules.py::test_junction_no_long_edge_proximity[SPJC]
+FAILED tests/test_pavement_grade.py::test_pavement_grade[SPLP]   # 1 cross (rect iface)
+FAILED tests/test_pavement_grade.py::test_pavement_grade[CYXY]   # 60 within (apron/junction internal)
+FAILED tests/test_pavement_grade.py::test_pavement_grade[SPJC]   # 59 cross (sloped-rect ifaces)
+```
+The 3 grade tests should clear once the sloped-rect emit consensus + apron
+internal-grade are fixed. The other 6 are geometry issues (re-triage after).
 
-**TWO neck-split implementations exist** (do not conflate, per user 2026-05-27):
-- **KEEP — `split_polygon_at_necks`** (`pavement/apron_necks.py`, session 50):
-  splits large apron residue at taxi-width arm mouths via medial-axis tracing;
-  called from `junction_emit.py:222-225` BEFORE hole-decompose. CYXY within-
-  shape grade viol 786→253 when introduced. Geometric, pre-solve, no
-  altitude coupling.
-- **RETIRE — `_split_narrow_necks`** (`junction_rules.py:1813`, user
-  2026-05-01): Rule 4, MRR-based symmetric axial split at MRR midpoint along
-  runway axis. Called from `apply_junction_rules` (post-emit). Audit verdict
-  **WEAK** ("geometric quality heuristic not in invariants spec"). Tested by
-  `test_no_narrow_neck_junctions` (3 unit tests in `test_junction_unit.py`).
-  Likely culprit for SPJC junction#69's self-crossing zig-zag (cut location +
-  direction can produce non-simple polygons on non-convex residue).
+## User algorithm spec (verbatim, 2026-05-28) — keep within reach
+> Terminals must be flat, and aprons must conform to their vertices. The
+> terminal should be the starting point of our solver pass which should be
+> grading aprons FROM the terminal inward to the runway, then the reverse pass
+> comes back enforcing grade from runway to terminal and adjusts the whole
+> terminal if needed.
 
-**Recommended next attack (next session, fresh context):**
-1. Retire `_split_narrow_necks` (the OLD one) + its callers + the unit tests
-   (`test_no_narrow_neck_junctions`, the 3 `test_junction_unit.py` tests
-   referencing it). Re-run; junction#69 may normalize, clearing A5 SPJC
-   orphans + A4 4-8m shared-pair violations + possibly A2/A1/D12/F16.
-2. If junction#69 still self-crosses after retirement, investigate
-   `_decompose_polygon_with_holes` on non-convex residue (next likely
-   culprit — its cut lines can also produce zig-zag exteriors).
-3. The 4 sub-1.5m A4 drift cases: probably a snap pass placing a vertex just
-   off pav_union. Trace via per-pass layout snapshot.
-4. After geometry-construction lands clean, re-run full suite and re-baseline
-   grade `MID_EDGE_CAP` (2-solve artifacts).
+> The first pass working from leaves towards the runway should continue
+> following DEM and clamping to grade right up to the runway … push the whole
+> violation into that last connection. Then the reverse pass pulls the runway
+> junction just the minimum required to be within grade, and works it's way
+> back out the leaves … and finally at the very end leaves we force them into
+> grade compliance.
 
-**VALIDATION: 12 failed / 269 passed / 9 skipped (was 6).** 6 NEW failures, two
-root causes (committed as WIP — debug next):
-- **tile_cut elevation coupling (KEY, user-flagged):** `tile_cut` is NOT purely
-  geometric — `_terrain_pin_slice_nodes` DEM-pins SLOPING-RECT slice edges (HARD,
-  fine pre-solve) but junction/apron near-cut vertices are left SOFT, and
-  `_build_piece_shape`/`_make_slope_sampler` derive cut-piece altitudes from the
-  SOURCE shape's field (None pre-solve). Old order ran tile_cut AFTER solve#1, so
-  near-cut verts warm-started from a cross-tile-consistent field; now each tile's
-  single solve grades them against its own post-drop network → diverge.
-  `test_cross_tile_cut_edge_elevations_consistent`: SPLP near-cut 71.0 vs 61.6
-  (9.4m > 2.5m tol); also `no_self_overlap[SPLP]`.
-  - **FIX APPLIED (tile_cut.py):** `_terrain_pin_slice_nodes` now DEM-seeds a
-    cut piece when it has no altitude data (pre-solve) and pins slice-edge
-    vertices; extended via `_PIN_SLICE_ROLES` to junctions/aprons (was sloping
-    rects only). **cross_tile_cut test now PASSES.**
-  - **DECISION (user): keep the pin, let the directional relief absorb the
-    grade.** grade[SPLP] is PRE-EXISTING (one of the baseline 6) — the reorder
-    briefly fixed it, the pin returned it to baseline; NOT a net regression.
-  - Note: original code left junctions/aprons SOFT ("graded soft against the
-    smoothed DEM seed"); soft DEM-seed does NOT give cross-tile consistency
-    (both tiles DEM-sample identically yet still diverge 9.4m — the divergence
-    is each tile's solve pulling against its own post-drop network, so only a
-    HARD pin fixes it). 2-solve got consistency from solve#1's warm-start (gone).
-  - Whether `_clip_sloping_rect_piece` (clean-rect preservation, skipped pre-
-    solve since slope_sampler needs altitudes) must be re-expressed via
-    source_axis is still OPEN (cut taxi rects may tilt without it).
+> If a tile seam crosses airport pavement union, then it's the highest
+> priority, and runway thresholds become second.
 
-**BASELINE-vs-CURRENT (after tile_cut fix): 12 failed.** Accurate diff vs the
-session-50 baseline 6:
-- Pre-existing, still failing (5): grade[CYXY/SPJC/SPLP], have_source[SPJC],
-  outside_pavement[CYXY].
-- FIXED by refactor (1): runway_node_sharing[CYXY].
-- NEW REGRESSIONS (7) — THE REMAINING WORK:
-  - **lost post-solve geometry refinement (CORRECTED diagnosis):**
-    large_junction_axis_aligned_borders[SPJC/SPLP] (Rule 3: 20→40),
-    neighbour_corners[SPJC], have_source[CYXY], outside_pavement[SPLP],
-    no_self_overlap[SPLP]×2.
-    - RULED OUT: the corner-snaps. Removing the (now-active, formerly
-      gate-no-op) early snap calls at the old L2462 changed NOTHING (still 12).
-    - ROOT CAUSE: removing `_subdivide_violating_junctions` (+ the
-      reconciliation chain) removed real GEOMETRY refinement, not just altitude
-      patching. That pass split large junctions (→ fewer/smaller misaligned
-      borders; its absence is the Rule-3 20→40) and its splits + the
-      reconciliation cleaned T-junctions (neighbour_corners) and kept junction
-      vertices on-pavement / sourced (have_source, outside_pavement). It was
-      GRADE-triggered (needs altitudes), so it can't just move pre-solve.
-    - IMPLICATION (refines the single-solve hypothesis): "one solve" is correct
-      for ELEVATIONS, but the old pipeline interleaved GEOMETRY refinement
-      (junction subdivision, T-junction reconciliation) with its solves. That
-      geometry work still needs a home. Options: (A) a PRE-solve geometric
-      junction-subdivider (split large/misaligned junctions by GEOMETRY, not
-      grade — the apron neck-split is a start but doesn't cover SPJC large
-      junctions); (B) allow ALTITUDE-SAFE geometry passes POST-solve (move
-      vertices preserving altitude-by-index; no re-solve needed) — a narrower
-      retreat from "nothing after the solve" that keeps the single solve.
-    - The early-snap removal (harmless cleanup, matches original effective
-      behaviour) is UNCOMMITTED on top of dde0fbf; fold into the next fix.
-- **snap over-reach:** role-based snaps (`_snap_to_sloping_edge_corners`,
-  `_snap_junction_vertices_to_rect_flat_edge_corners`) now fire on would-be-FLAT
-  rects pre-solve (the altitude gate used to skip them), moving vertices →
-  `large_junction_axis_aligned_borders[SPJC/SPLP]`, `neighbour_corners[SPJC]`,
-  `have_source[CYXY/SPJC]`, `outside_pavement[CYXY/SPLP]`. FIX TBD: scope the
-  snaps so they don't over-move (the flat-rect case needs a non-altitude guard,
-  or restrict the snap to genuine sloping geometry).
-- grade[CYXY], grade[SPJC], grade[SPLP] = pre-existing (grade[SPLP] now passing?
-  re-check — SPLP showed only 7 within-shape 1.8% warns, may have improved).
+## Build & test workflow (unchanged)
+- Repo `/Users/noah/Ortho4XP-novemberlima`. Venv `venv/`. **No system Python.**
+- Single airport: `from auto_patch.pipeline import build_airport_pavement;
+  build_airport_pavement("CYXY", xplane_root(), compute_elevations=True)`
+  (needs `src/`, repo root, `tests/` on `sys.path`; `from conftest import
+  xplane_root`). Build ≈ 15 s.
+- Full suite: `venv/bin/python -m pytest tests/ -q -k "not compare_target" -n auto`
+  (~2:18). Skip compare_target during dev; re-cut only when otherwise green
+  (`tools/build_target_osm.py`).
+- Grade audit on an emitted patch: `tools/check_grade.py`. The grade test builds
+  PER-TILE with smoothed DEM (production-like), not the whole-airport build.
 
-## TL;DR / current state
-**Suite (excl. compare_target): 6 failed / 279 passed / 5 skipped** — run with
-`venv/bin/python -m pytest tests/ -q -k "not compare_target"` (now ~4.5 min,
-parallel; see Perf below). All work is **uncommitted on `dev`**:
-- Modified: `pytest.ini`, `requirements.txt`, `config.py`,
-  `elevation_per_surface/unified_jacobi.py`, `junction_emit.py`, `pipeline.py`
-- New (untracked): `pavement/discovered_taxiways.py`, `pavement/apron_necks.py`
-
-The 6 failures:
-- **`grade[CYXY]`** — the terrace holdout (see "Grade violations" below).
-- **`grade[SPLP]`, `grade[SPJC]`** — pre-existing.
-- **`have_source[SPJC]`** — pre-existing.
-- **`runway_node_sharing[CYXY]`, `outside_pavement[CYXY]`** — introduced by the
-  discovery feature (task #7; in the SW apron area Phase 2 reworks — may be mooted
-  by the refactor or need scoping).
-
-Baseline before this session's work was 5 failed (`have_source[SPJC]`,
-`no_vertex_on_sloping_rect_flat_edge[SPJC]` (flaky), grade×3).
-
-## What landed this session (3 features, all flag-gated, all on `dev` uncommitted)
-
-### 1. Discovered unreferenced taxiways — `pavement/discovered_taxiways.py` (NEW)
-Small/remote airports have real taxiways with no apt.dat/OSM centerline; they
-otherwise dissolve into all-pair junction/apron residue. We **extract the medial
-axis** (Voronoi skeleton of `pav_union`, clearance band 6–32 m via
-`_WIDTH_MIN/_WIDTH_MAX`), bend-split each lane through the SHARED
-`pavement.centerlines.split_merged_centerline`, and inject synthetic centerlines
-(`ref="TXn"`) into `osm_centerlines` at **pipeline.py ~L1251** so the SINGLE
-`_build_taxi_rects` pass builds them like any referenced taxiway.
-- Flag `ENABLE_DISCOVERED_TAXIWAYS=True` (config.py).
-- **Scoped to clean free strips:** `reject_curved_discovered_rects` (called in
-  pipeline after `_build_taxi_rects`) drops discovered rects the builder left
-  **sheared** (>10° corner deviation) — those are apron-EMBEDDED lanes the snap
-  distorts; they're deferred to Phase 2 (which separates them so they re-emit
-  clean). CYXY keeps ~6 clean discovered rects.
-- **Why not snap-free / perpendicular construction:** tried + rejected — snap-free
-  rects float off the boundary → `have_source`/`outside_pavement`/`no_self_overlap`
-  fail. The snapping rect-builder is the single code path; discovery just feeds it
-  centerlines. (Long debugging arc — see git/conversation if revisiting.)
-- Residual: adds `runway_node_sharing[CYXY]` + `outside_pavement[CYXY]` (task #7).
-
-### 2. Phase 2 — apron neck-split — `pavement/apron_necks.py` (NEW)
-Splits large/blobby apron (residue) pieces at their **necks** (taxi-width arm
-mouths) into convex pads. `split_polygon_at_necks` / `neck_cuts`:
-- A **mouth** = two boundary nodes < taxi-width apart, non-adjacent on the ring,
-  with a real boundary excursion between them, chord crossing interior pavement.
-- Validated by eroding the excursion (`buffer(-taxi_hw)`): the cut is real when
-  the excursion is a thin arm (core empty) or a narrow neck then a pad
-  (core ≥ `min_neck_len` from the mouth). (NOTE: still **over-detects** ~dozens of
-  cuts on wiggly outlines; user accepted "extra cuts are not detrimental". The
-  user's two GT cuts on the big CYXY apron ARE captured.)
-- Flag `ENABLE_APRON_NECK_SPLIT=True`. Wired into `junction_emit` on large residue
-  pieces, BEFORE the hole-decompose.
-- **Non-regressing** (same 6 failures). Cut CYXY within-shape grade violations
-  786→253. Aprons 18→25.
-- KEY MODEL (took many iterations): the arm/channel **curves**, so MRR / straight
-  cross-sections read wide (56 m); traced **along the medial centerline** it stays
-  ~taxi width. Phase 1 already produces a centerline for it. The cut is the
-  perpendicular waist at the arm's pad-end where the traced width steps up.
-
-### 3. Phase 3 — leaf hierarchy — `unified_jacobi._directional_relief`
-The directional relief now holds each shape **only at its parent-interface
-vertices (+ HARD anchors)**, not at every settled vertex. Parent = the adjacent
-piece one **HOP** inward (shape-graph BFS depth from HARD anchors, NOT metres —
-user: "the longer the chain the lower the priority"). Tie-break: widest shared
-interface, then metres-rank.
-- Flag `_USE_LEAF_HIERARCHY=True` (unified_jacobi.py).
-- Cut CYXY within-shape grade violations 253→**64**, worst-case **145%→64.5%**
-  (the hop metric — vs metres — fixed the 145% spike).
-- This is STATUS-49's "force-hierarchy leaf network" (task #3).
-
-### Perf (task done): suite was serial → now parallel
-- `pytest-xdist` added to `requirements.txt`; `addopts += -n auto` in `pytest.ini`.
-  Suite 21 min → **4.5 min** (~5×). `-n0` forces serial for debugging.
-- Build profile (cProfile, one CYXY build): the elevation **`solve()` runs 2× per
-  build ≈ 79% of build time (~130 s)** — `_project_shape` 99 s, 8160 calls, 599 M
-  `abs()`. apt.dat index (`_index_apt_dat`) is ALREADY memoized — not a redundancy.
-  The 2× solve is the real cost → the refactor below collapses it.
-
-## Grade violations — diagnosis (CYXY, 6 violating SHAPES; tools to reuse below)
-Two distinct causes (review OSM written to `/tmp/CYXY_grade_viol.osm`):
-- **Cause 1 — genuine competing priorities (1 shape):** apron #62 (47%) is pinned
-  at **703 by junction #63 AND 712 by apron #65** (9.1 m apart over 16 m) — the
-  excavated terrace. No compliant surface exists unless a neighbour yields
-  (retaining/ramp, or the parked STEP-3 runway-threshold relief). Real infeasibility.
-- **Cause 2 — relief output overwritten after the final solve (5 shapes):** #61
-  (64.5%, pinned only at runway 691.4, free verts stuck at 695.5), #78 (23%), #50
-  (15.5%, NO pins at all — should be trivially flat), #86, #53. These have NO
-  competing pins, so the solver SHOULD flatten them — but passes AFTER
-  `per_surface_solve` (conformance vertex-insert, 2nd tile-cut, clearance) edit
-  geometry/altitudes with **no re-solve**, OR they're created by the subdivide
-  between the two solves. **This is exactly what the refactor fixes.**
-
-## THE PLANNED REFACTOR (task #8 — next agent's main job, NOT started)
-**Goal:** finalize ALL geometry first, then run the elevation solver **ONCE, last**,
-with nothing editing altitudes after it. Eliminates the 2× solve (~130 s) AND
-Cause 2 (post-final-solve overrides). User confirmed: do it **in one go, then
-test/debug** (don't test mid-refactor).
-
-**Evaluation (done — why the current order exists):** the 2× solve is an iterative
-geometry↔altitude loop: solve#1 → grade-subdivide (needs grades) + snap/enforce
-reconciliation (needs solved tags) + `_split_sloped_rects`/`_absorb` (detect AND
-**propagate** altitudes) → solve#2. Genuinely elevation-dependent pieces, BUT:
-- Sloped-rect detection is a **role** property (`SLOPING_RECT_ROLES`), not an
-  altitude property — `_split_sloped_rects_at_violations` already role-gates; it
-  just additionally skips when `altitude_high is None` and interpolates sub-rect
-  hi/lo (junction_repair.py:1293, 1449-1450) + updates junction `node_altitudes`
-  (1591-1664). De-couple = geometric split ONLY, set altitudes `None`, let the
-  solver re-derive. Same for `_absorb_rects_at_junction_perimeters` (1766).
-- Grade-subdivide (`_subdivide_violating_junctions`) is **superseded** by Phase 2
-  neck-split (geometric, pre-solve) + the hop-hierarchy relief.
-- snap/enforce reconciliation only patches (a) drift from geometry passes that ran
-  AFTER solve#1 and (b) the lossy terminal-flat / rect-hi-lo tags.
-
-**KEY INSIGHT — no per-vertex writeback needed:** if ALL geometry is finalized
-before a single solve, the writeback is **lossless** (solver gives one value per
-shared bucket; a flat terminal's corners are all equal; a rect's 4 corners define
-its plane), so shared corners agree by construction → **no reconciliation needed**.
-
-**Target order (rewrite pipeline.py elevation phase ~L2286–2900):**
-1. ALL geometry, no elevations: `split_long_rects_along_terrain`,
-   `stitch_pavement_to_flat_runways`/`_to_terminals`/`_polygons`,
-   `_split_sloped_rects_at_violations` + `_absorb_rects_at_junction_perimeters`
-   (DE-COUPLED to geometric-only), `_snap_junction_vertices_to_rect_flat_edge_corners`,
-   `_reclassify_apron_junctions`, Rule-2 sloping-edge snap, seam split,
-   `cut_layout_at_tile_boundaries`, conformance vertex-insertion. (Neck-split
-   already runs in `junction_emit`, pre-elevation.)
-2. Runway profile: `redistribute_runway_profile`, `nudge_runway_corners_at_seam_junctions`,
-   `apply_seam_dem_anchors`.
-3. **SINGLE `per_surface_solve`** (cascade + relief).
-4. `emit_surface_clearance_cuts` (overlay — emits separate shapes, must NOT edit
-   pavement altitudes).
-**REMOVE:** solve#1 (pipeline ~L2552), all `_subdivide_violating_junctions` calls
-(~L2563, ~L2635), the snap/enforce reconciliation loop (~L2614–2647), the 2nd
-`cut_layout_at_tile_boundaries` (~L2893).
-
-**Risks / watch:** (a) the de-coupling surgery on `_split_sloped_rects` + `_absorb`
-(strip altitude propagation); (b) pass-ordering deps — preserve the documented ones
-(Rule-2 AFTER reclassify; absorb at end; etc.); (c) dropping grade-subdivide may
-leave residual grade — verify; (d) dropping reconciliation must NOT reintroduce
-shared-corner steps (the lossless-writeback argument must hold — check
-`test_pavement_grade` cross-shape/step); (e) compare_target fixtures may shift.
-**Validate:** `pytest -k "not compare_target" -n auto`; target ≤ 6 failures;
-grade[CYXY] within-shape should improve; SPLP/SPJC must not regress.
-
-## Reusable debug probes (this session, in /tmp — regenerate as needed)
-- Enumerate within-shape grade violators + competing pins → `/tmp/CYXY_grade_viol.osm`.
-- Discovered-centerline overlay (apt.dat vs synthetic) → `/tmp/CYXY_cl_overlay.osm`.
-- Apron neck candidates / cuts → `/tmp/CYXY_neck_cuts.osm`.
-(All built via `build_airport_pavement("CYXY", xplane_root())` + the hook on
-`discover_unreferenced_centerlines` to capture `pav_union`.)
-
-## GOTCHAS (unchanged + new)
-- **Ortho4XP caches `auto_patch` modules** — full quit+relaunch after edits.
-- **Import cycle** `junction_repair` ↔ `elevation` — import `auto_patch.pipeline`
-  first (the discover hook / probes do).
-- **Bash CWD persists** — probes that `cd src/auto_patch` then call `venv/bin/python`
-  fail; always run from repo root.
-- **Two `_subdivide_violating_junctions` call sites** + a post-snap loop — remove
-  ALL when refactoring.
-- Temp/debug scripts + OSM dumps go in `/tmp`, never the working tree.
-
-See `docs/elevation_solver.md` for the solver model; this session did NOT change the
-cascade or the relief's core mechanism (only added the hop-hierarchy hold rule).
+## Gotchas (unchanged but bite every session)
+- **Ortho4XP caches `auto_patch` imports** — full quit+relaunch after edits.
+- **Import cycle:** `junction_repair` ↔ `elevation` — go through
+  `auto_patch.pipeline`, never import `junction_repair` first.
+- **Bash CWD persists** — run probes from repo root, not `src/auto_patch`.
+- **Temp/debug scripts + generated OSMs go in `/tmp`**, never the repo.
+- **DEM smoothing:** production gets Ortho4XP's `apt_smoothing_pix=8`-smoothed
+  `tile.dem` via `override_dem`; the standalone path replicates it. Raw
+  `tile_dem=DEM(...)` probes use UNsmoothed elevations (geometry is
+  DEM-independent; altitudes differ from production).
+- **`git stash` bit me this session:** an interrupted `git stash && … ; git
+  stash pop` left the pop un-run, silently reverting an edit. Prefer an env-gated
+  toggle or a scratch copy over stash for baseline A/B comparisons.

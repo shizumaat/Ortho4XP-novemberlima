@@ -568,6 +568,36 @@ def _pair_grade_limit(way_a: "Way", way_b: "Way",
     return min(a, b)
 
 
+# Groundside pavement (vehicle roads, curbside drop-off, parking) is
+# deliberately SEPARATED from airside pavement by a clearance gap and a
+# retaining / vertical wall (user 2026-05-28): the two surfaces are NOT meant to
+# be flush and can legitimately differ by several metres.  So the cross-shape
+# STEP checks below — which assume neighbouring pavement should be vertically
+# continuous — must NOT fire across the airside <-> groundside boundary.  (Each
+# side's own within-shape grade still applies.)
+_GROUNDSIDE_ROLES = {"groundside_pavement", "service_road", "service_junction"}
+
+
+def _is_groundside(way: "Way") -> bool:
+    return way.tags.get("role") in _GROUNDSIDE_ROLES
+
+
+def _airside_groundside_pair(way_a: "Way", way_b: "Way") -> bool:
+    """True iff exactly one of the two ways is groundside — a wall separates
+    them, so a vertical step between them is by design, not a defect."""
+    return _is_groundside(way_a) != _is_groundside(way_b)
+
+
+# The step checks enforce vertical continuity only where two shapes actually
+# TOUCH (share a boundary).  Beyond this perpendicular contact distance the
+# shapes are separated by a GAP (no pavement between them) and a height
+# difference is allowed (user 2026-05-28) — do not flag it.  Genuinely adjacent
+# pavement shares welded / conformance-inserted vertices (contact ~0); the
+# documented real case (a junction edge ~0.3 m alongside a sloped rect) stays
+# within this tolerance, while gapped neighbours 2-5 m apart are excluded.
+_STEP_CONTACT_TOL_M = 1.0
+
+
 def _check_within_shape(ways: List[Way],
                         nodes: Dict[str, Tuple[float, float]],
                         ll_to_m,
@@ -814,6 +844,8 @@ def _check_vertex_to_edge_step(
                     way_e = ways[e.way_idx]
                     if _role_grade_limit(way_e, 1.0) is None:
                         continue  # edge's role is on the skip-list
+                    if _airside_groundside_pair(way_v, way_e):
+                        continue  # wall-separated boundary — step by design
                     ax, ay = e.a
                     bx, by = e.b
                     dx = bx - ax
@@ -834,6 +866,8 @@ def _check_vertex_to_edge_step(
                         best = (e, t, px, py)
         if best is None:
             continue
+        if best_d2 > _STEP_CONTACT_TOL_M * _STEP_CONTACT_TOL_M:
+            continue  # gap, not a shared edge — height difference allowed
         e, t, px, py = best
         e_proj = e.ea + t * (e.eb - e.ea)
         step = abs(v.elev - e_proj)
@@ -908,6 +942,8 @@ def _check_edge_midpoint_step(
                         way_e2 = ways[e2.way_idx]
                         if _role_grade_limit(way_e2, 1.0) is None:
                             continue  # other edge's role on skip-list
+                        if _airside_groundside_pair(way_e1, way_e2):
+                            continue  # wall-separated boundary — step by design
                         e2ax, e2ay = e2.a
                         e2bx, e2by = e2.b
                         e2dx = e2bx - e2ax
@@ -929,6 +965,8 @@ def _check_edge_midpoint_step(
                             best = (e2, tt, px, py)
             if best is None:
                 continue
+            if best_d2 > _STEP_CONTACT_TOL_M * _STEP_CONTACT_TOL_M:
+                continue  # gap, not a shared edge — height difference allowed
             e2, tt, px, py = best
             e2_elev = e2.ea + tt * (e2.eb - e2.ea)
             step = abs(s_elev - e2_elev)
