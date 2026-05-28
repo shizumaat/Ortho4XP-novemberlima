@@ -122,6 +122,35 @@ Session-50 work was committed first as checkpoint `b187dd6` (baseline 6 failed /
 - **WIN CONFIRMED:** CYXY build 60-90s → **~15s** (one ~0.1s solve, no subdivide
   loops). The single-solve premise holds: build runs clean, altitudes populated.
 
+### Task #8 (real-regression fixes) — in progress, partial wins committed
+
+**A4 outside_pavement** — root cause: bridge contact propagation. Fixed by
+exempting bridge-shared junction vertices in the A4 test + invariant doc
+(commit a400ada). Drops the 26.55m/28.11m bridge-shared violations cleanly.
+**Remaining (sub-10m, 9 total):** mix of (a) small snap/densification drift
+(sub-1.5m, 4 cases) and (b) shared-between-two-junctions vertices 4-8m out
+(CYXY 337,-1181; SPJC -466,1330). The big-shared-pair ones traced to
+junction-construction artifacts: e.g. SPJC junction#69 (8687 m², 17 verts) has
+a self-crossing zig-zag boundary suggesting `_decompose_polygon_with_holes`
+or `_split_narrow_necks` cut a non-convex junction wrong.
+
+**A5 have_source[SPJC]** — 38 orphan vertices, ~32 of them inside junction#69
+at 50-100m from any source-shape corner. Same root cause: junction#69's
+zig-zag/self-crossing exterior. Fixing junction construction for non-convex
+residue polygons likely resolves A4 + A5 together at SPJC.
+
+**Recommended next attack (next session, fresh context):**
+1. Investigate `_decompose_polygon_with_holes` + `_split_narrow_necks` on
+   non-convex junctions. Likely overlap with the audit's "WEAK" verdict for
+   `test_no_narrow_neck_junctions`. Consider removing `_split_narrow_necks`
+   per the audit, and inspecting whether decompose can emit MultiPolygon
+   directly instead of cutting.
+2. The 4 sub-1.5m A4 drift cases: probably a snap pass placing a vertex just
+   off pav_union. Trace via per-pass layout snapshot.
+3. After A4/A5 land, re-run full suite; A2 boundary_near_centerline, D12
+   runway_node_sharing, F16 neighbour_corners, A1 SPLP overlap may also clear
+   if junction-construction is fixed.
+
 **VALIDATION: 12 failed / 269 passed / 9 skipped (was 6).** 6 NEW failures, two
 root causes (committed as WIP — debug next):
 - **tile_cut elevation coupling (KEY, user-flagged):** `tile_cut` is NOT purely
