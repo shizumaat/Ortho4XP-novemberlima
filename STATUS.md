@@ -5,6 +5,68 @@
 > session 50 planned. See "SESSION 51 PROGRESS" immediately below, then "THE
 > PLANNED REFACTOR" for the full target order.
 
+## PIPELINE PASS AUDIT (session 51 — the refactor's working plan)
+The pipeline accreted ~28 fix-up passes around the OLD 2-solve order. The
+single-solve model is much simpler; the dividing line: **passes whose TRIGGER or
+OUTPUT depends on solved altitudes = 2-solve band-aids; pure-geometry passes =
+fundamental.** Audit verdicts (4 parallel readers, full bodies read):
+
+**REMOVE (dead/obsolete/harmful under single-solve):**
+- `_snap_junction_altitudes_to_rect_corners`, `_enforce_shared_vertex_altitudes`,
+  `_smooth_within_junction_adjacent_pair_grade` — already gated `if not
+  USE_PER_SURFACE_SOLVER` (DEAD in prod); docs say they re-introduce the
+  violations the solver just fixed.
+- `_subdivide_violating_junctions` — grade-TRIGGERED (needs altitudes); reintroduces
+  the geometry↔elevation loop. (Removed from pipeline.) Confirmed it would fire on
+  0 junctions (CYXY/SPJC) / 1 (SPLP) anyway.
+- `_align_rect_slope_to_axis` — reads solved hi/lo; no-op pre-solve. (Dropped.)
+- `_apply_geometric_finalization` Phase 3/4 chain (elevation.py) — old interleaved
+  solve→clamp→subdivide→solve, behind the dead gate.
+
+**REFINE (keep intent, fix for single-solve):**
+- **`_absorb_rects_at_junction_perimeters`** — the rect-destroyer. TESTED
+  `ABSORB_RECTS_ALONGSIDE_APRONS=False` (no-absorption / clean 5-step model):
+  **20 failed vs 12 ON.** The suite ENCODES absorption — off makes taxi rects sit
+  alongside junctions/aprons, violating no_long_edge_proximity /
+  no_vertex_on_sloping_rect_flat_edge / rect_short_edges_connect /
+  runway_node_sharing / neighbour_corners. So the clean model is viable but needs
+  REDEFINING ~7 invariant tests (a deliberate decision — NOT done). Kept ON.
+  If kept ON: switch sloping-edge ID to `source_axis` (NOT corner-order convention —
+  mis-IDs 1 CYXY/14 SPJC rects) AND only run on fully-refined geometry.
+- `_clip_sloping_rect_piece` (tile_cut) — DEAD now (bails on `altitude_high is
+  None`; `split_pavement_at_seams` nulls taxi alts pre-solve) → cut taxi rects lose
+  clean-rect preservation and may TILT (suspect for SPLP regressions). Re-express
+  via `source_axis` (geometric clean-rect, no altitudes).
+- `stitch_pavement_polygons` — gates on `node_altitudes` present → no-op pre-solve;
+  strip the z-interpolation, keep pure vertex-sharing.
+- `_push_junction_vertices_off_taxi_rect_edges` — keep geometry; drop the now-dead
+  NN altitude-resample limb.
+- `widen_junctions_to_runway_corners` — "POST-ELEVATION," backfills junction alts
+  from solved runway → obsolete intent; keep only geometric vertex-insertion.
+- `_enforce_runway_1to1_sharing` — HIGHEST-RISK: delicate rewrite that amputated
+  real pavement (CYXY 20-end, HECA), wrapped in RUNWAY_REWRITE_MAX_ABS_LOSS guards.
+  Audit whether junctions=union−rects already meet runway 1:1 → likely deletable.
+- The sloping-edge SNAPS (`_snap_to_sloping_edge_corners`,
+  `_snap_junction_vertices_to_rect_flat_edge_corners`) — switch edge-ID to
+  `source_axis` too (same fix as absorb).
+
+**KEEP (fundamental, pure-geometry):** `_enforce_shared_vertices`,
+`_drop_overlap_against_fixed_shapes`, `_reclassify_apron_junctions` (= clean-model
+step 5), `stitch_pavement_to_terminals`, `stitch_pavement_to_flat_runways`,
+`_merge_sliver_junctions_into_neighbours`, `_drop_thin_orphan_slivers`,
+`_drop_floating_orphan_junctions`, `cut_layout_at_tile_boundaries` +
+`_terrain_pin_slice_nodes`, `apply_seam_dem_anchors`, `weld_layout_vertices`,
+`enforce_conformance`, `_clip_pavement_to_boundary_interior`.
+
+**STRUCTURAL (bigger refactors, later):**
+- TWO parallel seam pipelines: `split_pavement_at_seams`+`apply_seam_dem_anchors`
+  vs `cut_layout_at_tile_boundaries`+`_terrain_pin_slice_nodes` recompute the same
+  integer cut-lines + both DEM-pin seam nodes. Consolidate.
+- "Single solve last" isn't strict for boundary/conformance: `enforce_conformance`
+  + `_clip_pavement_to_boundary_interior` insert/resample vertices POST-solve that
+  the solver never grades; `_conform_ribbon_to_pavement_seam` papers over the walls.
+  Acceptable (snap to solved neighbours) but the solve doesn't cover those nodes.
+
 ## SESSION 51 PROGRESS (single-solve refactor)
 Session-50 work was committed first as checkpoint `b187dd6` (baseline 6 failed /
 279 passed / 5 skipped, excl compare_target). Then:

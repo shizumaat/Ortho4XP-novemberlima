@@ -2620,6 +2620,28 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # the all-pair apron.  Node parity is automatic (apron = union −
         # rects), so the apron adopts the rect's sloping-edge altitudes
         # with no cliff.  Flip ABSORB_RECTS_ALONGSIDE_APRONS to restore.
+        # Apron reclassification (user 2026-05-18): a junction whose
+        # boundary strays > 55 m from any taxi/runway centerline
+        # contains apron-territory pavement (no centerline running
+        # through it) and should be tagged ``role=apron``.  Geometric,
+        # not area-based — a 6-way mega-intersection stays a junction.
+        #
+        # (session 51) Runs BEFORE absorption now: in the single-solve
+        # order absorb runs pre-solve, and if it ran on the raw junction
+        # set it dissolved nearly every rect against transient
+        # apron-territory residue still tagged ``junction`` (CYXY 21->0,
+        # SPJC 74->3).  Reclassifying first converts that residue to
+        # ROLE_APRON so absorb only targets genuine final junctions.
+        from .junction_repair import _reclassify_apron_junctions
+        _reclassify_apron_junctions(layout, icao=icao)
+
+        # Single-pass sloping-edge absorption (user 2026-05-17): dissolve
+        # a sloping rect that shares a sloping edge with a genuine
+        # junction perimeter into that junction.  Only KEEP rects that
+        # share a sloping edge with an apron/junction — a taxilane
+        # through an apron should stay a directionally-graded rect, not
+        # dissolve into the all-pair apron.  Node parity is automatic
+        # (apron = union − rects).  Flip ABSORB_RECTS_ALONGSIDE_APRONS.
         from .config import ABSORB_RECTS_ALONGSIDE_APRONS
         if ABSORB_RECTS_ALONGSIDE_APRONS:
             from .junction_repair import (
@@ -2632,14 +2654,6 @@ def build_airport_pavement(icao: str, xplane_root: str,
             # sloping edge interior).
             _split_sloped_rects_at_violations(layout, icao=icao)
             _snap_junction_vertices_to_rect_flat_edge_corners(layout)
-
-        # Apron reclassification (user 2026-05-18): a junction whose
-        # boundary strays > 55 m from any taxi/runway centerline
-        # contains apron-territory pavement (no centerline running
-        # through it) and should be tagged ``role=apron``.  Geometric,
-        # not area-based — a 6-way mega-intersection stays a junction.
-        from .junction_repair import _reclassify_apron_junctions
-        _reclassify_apron_junctions(layout, icao=icao)
 
         # Rule-2 sloping-edge snap, re-run on the FINAL junction set.
         # ``_absorb_rects_at_junction_perimeters`` extends junction

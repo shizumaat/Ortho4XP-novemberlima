@@ -285,10 +285,18 @@ EMIT_APRONS = False
 # don't waste cycles loading roads we won't use.  Flip to re-enable.
 ENABLE_SERVICE_ROADS = False
 # Absorb taxi rects that share a sloping edge with an apron/junction into
-# that apron (the "junctions don't live on sloping rect edges" rule).  ON
-# (user 2026-05-24): the session-47 no-absorption + apron-lane-chain model
-# was reverted — taxilanes through aprons dissolve into the apron rather
-# than emitting tilting fixed-width ribbon chains.
+# that apron (the "junctions don't live on sloping rect edges" rule).
+# ON.  Session 51 TESTED OFF (no-absorption / clean model = keep the taxilane
+# rect, apron = pav_union − rects wraps it).  Result: 20 failed vs 12 with
+# absorb ON — the suite ENCODES the absorption model.  Turning it off makes
+# taxi rects sit alongside junctions/aprons, which directly violates
+# no_long_edge_proximity / no_vertex_on_sloping_rect_flat_edge /
+# rect_short_edges_connect / runway_node_sharing / neighbour_corners.  The
+# clean no-absorption model is viable but requires REDEFINING those ~7
+# invariant tests (deliberate decision, not done).  Kept ON pending that.
+# NOTE (audit): if kept ON, `_absorb_rects_at_junction_perimeters` should
+# identify sloping edges via `source_axis`, not the corner-order convention
+# (mis-IDs 1 CYXY / 14 SPJC rects).
 ABSORB_RECTS_ALONGSIDE_APRONS = True
 
 # Synthesise taxi-rect centerlines for strip-shaped pavement that carries no
