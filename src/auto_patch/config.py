@@ -297,7 +297,7 @@ ENABLE_SERVICE_ROADS = False
 # NOTE (audit): if kept ON, `_absorb_rects_at_junction_perimeters` should
 # identify sloping edges via `source_axis`, not the corner-order convention
 # (mis-IDs 1 CYXY / 14 SPJC rects).
-ABSORB_RECTS_ALONGSIDE_APRONS = True
+ABSORB_RECTS_ALONGSIDE_APRONS = False  # (session 51 experiment 2026-05-27)
 
 # Synthesise taxi-rect centerlines for strip-shaped pavement that carries no
 # apt.dat/OSM centerline (unreferenced taxiways — common at small/remote
