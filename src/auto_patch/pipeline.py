@@ -2449,8 +2449,13 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # place in a single pre-finalized-geometry solve — the cascade
         # grades each rect along its own source_axis, so a
         # perpendicular-slope rect should not arise.
-        _snap_to_sloping_edge_corners(layout)
-        _snap_junction_vertices_to_rect_flat_edge_corners(layout)
+        #
+        # (session 51) The two corner-snaps that used to run HERE were
+        # removed: with the altitude gate they were no-ops at this
+        # pre-solve point (rects have None altitudes), and they now do
+        # their real work in the post-geometry block below (after
+        # split/absorb/reclassify), on the settled junction set — the
+        # same place the 2-solve order ran them effectively.
         _enforce_runway_1to1_sharing(layout)
         # Rule 1 v6 widening (user 2026-05-02): runs ONLY here,
         # post-elevation, after the runway is segmented.  Inserts

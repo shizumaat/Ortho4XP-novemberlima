@@ -88,13 +88,30 @@ session-50 baseline 6:
   outside_pavement[CYXY].
 - FIXED by refactor (1): runway_node_sharing[CYXY].
 - NEW REGRESSIONS (7) — THE REMAINING WORK:
-  - **snap over-reach (4):** large_junction_axis_aligned_borders[SPJC/SPLP],
-    neighbour_corners[SPJC], have_source[CYXY]. Cause: role-based corner snaps
-    now run PRE-solve on raw (un-refined) junction geometry AND on would-be-flat
-    rects (altitude gate gone). Originally ran post-solve#1 on refined junctions.
-  - **SPLP cut geometry (3):** no_self_overlap[SPLP] + _baseline, outside_
-    pavement[SPLP]. Likely the pre-solve tile_cut DEM-seed conversion / sliver
-    absorb creating overlaps, or the missing clean-rect preservation.
+  - **lost post-solve geometry refinement (CORRECTED diagnosis):**
+    large_junction_axis_aligned_borders[SPJC/SPLP] (Rule 3: 20→40),
+    neighbour_corners[SPJC], have_source[CYXY], outside_pavement[SPLP],
+    no_self_overlap[SPLP]×2.
+    - RULED OUT: the corner-snaps. Removing the (now-active, formerly
+      gate-no-op) early snap calls at the old L2462 changed NOTHING (still 12).
+    - ROOT CAUSE: removing `_subdivide_violating_junctions` (+ the
+      reconciliation chain) removed real GEOMETRY refinement, not just altitude
+      patching. That pass split large junctions (→ fewer/smaller misaligned
+      borders; its absence is the Rule-3 20→40) and its splits + the
+      reconciliation cleaned T-junctions (neighbour_corners) and kept junction
+      vertices on-pavement / sourced (have_source, outside_pavement). It was
+      GRADE-triggered (needs altitudes), so it can't just move pre-solve.
+    - IMPLICATION (refines the single-solve hypothesis): "one solve" is correct
+      for ELEVATIONS, but the old pipeline interleaved GEOMETRY refinement
+      (junction subdivision, T-junction reconciliation) with its solves. That
+      geometry work still needs a home. Options: (A) a PRE-solve geometric
+      junction-subdivider (split large/misaligned junctions by GEOMETRY, not
+      grade — the apron neck-split is a start but doesn't cover SPJC large
+      junctions); (B) allow ALTITUDE-SAFE geometry passes POST-solve (move
+      vertices preserving altitude-by-index; no re-solve needed) — a narrower
+      retreat from "nothing after the solve" that keeps the single solve.
+    - The early-snap removal (harmless cleanup, matches original effective
+      behaviour) is UNCOMMITTED on top of dde0fbf; fold into the next fix.
 - **snap over-reach:** role-based snaps (`_snap_to_sloping_edge_corners`,
   `_snap_junction_vertices_to_rect_flat_edge_corners`) now fire on would-be-FLAT
   rects pre-solve (the altitude gate used to skip them), moving vertices →
