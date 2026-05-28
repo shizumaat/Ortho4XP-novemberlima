@@ -724,3 +724,97 @@ def test_coverage_within_source_envelope(icao):
         f"{overage*100:.1f}% (cap {cap*100:.0f}%).  Likely cause: "
         f"DSF overlay polygons or non-pavement DSF defs admitted "
         f"into the layout.")
+
+
+@pytest.mark.parametrize("icao", _test_airports())
+def test_terminal_strictly_flat(icao):
+    """Invariant H26 (single-solve, see docs/pipeline_invariants.md):
+    terminals move as a WHOLE UNIT — a single ``altitude`` tag, no
+    per-node deviation.  Equivalent: terminal shapes must not carry
+    ``node_altitudes`` or ``altitude_high``/``altitude_low`` (those
+    encode per-vertex / two-end variation that would tilt the pad).
+
+    This is the strictest of the role-specific solver-freedom rules
+    (H26-H28).  Junctions and aprons may carry per-vertex
+    ``node_altitudes``; sloping rects may carry independent
+    ``altitude_high``/``altitude_low``; terminals are flat-only.
+    """
+    from auto_patch.layout import ROLE_TERMINAL
+    layout = _build_layout(icao)
+    violations = []
+    for s_idx, s in enumerate(layout.shapes):
+        if s.role != ROLE_TERMINAL:
+            continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        if s.altitude is None:
+            violations.append(
+                f"terminal#{s_idx} (ref={s.ref}) has no altitude "
+                f"(should carry a single altitude tag)")
+            continue
+        if s.node_altitudes is not None:
+            violations.append(
+                f"terminal#{s_idx} (ref={s.ref}) has node_altitudes "
+                f"({len(s.node_altitudes)} entries) — H26 forbids "
+                f"per-node deviation for terminals")
+        if s.altitude_high is not None or s.altitude_low is not None:
+            violations.append(
+                f"terminal#{s_idx} (ref={s.ref}) has altitude_high/"
+                f"low ({s.altitude_high}/{s.altitude_low}) — H26 "
+                f"forbids two-end variation for terminals")
+    assert not violations, (
+        f"{icao}: {len(violations)} terminal flatness violation(s).  "
+        + "; ".join(violations[:5])
+        + (f"  ...and {len(violations)-5} more"
+           if len(violations) > 5 else ""))
+
+
+@pytest.mark.parametrize("icao", _test_airports())
+def test_boundary_ribbon_inside_row130(icao):
+    """Invariant F18 (single-solve, see docs/pipeline_invariants.md):
+    the airport boundary ribbon lies INSIDE the row-130 line (so the
+    ribbon is the transition strip and pavement clips to its inner
+    edge).  Equivalent: every ribbon-polygon vertex is inside (or on
+    the boundary of) ``layout.airport_boundary``.
+
+    Excludes the ``boundary_dem_bridge`` overlay, which legitimately
+    extends OUTSIDE the airport boundary into surrounding terrain.
+    """
+    from auto_patch.layout import ROLE_BOUNDARY
+    from shapely.geometry import Point as _Point
+    layout = _build_layout(icao)
+    row130 = layout.airport_boundary
+    if row130 is None or row130.is_empty:
+        pytest.skip(f"{icao}: layout has no airport_boundary")
+    # Allow a small float tolerance for vertices that sit ON the
+    # row-130 line itself (the ribbon's outer edge often coincides
+    # with row-130 by design).
+    ON_BOUNDARY_TOL_M = 0.5
+    violations = []
+    for s_idx, s in enumerate(layout.shapes):
+        if s.role != ROLE_BOUNDARY:
+            continue
+        if s.ref == "boundary_dem_bridge":
+            continue  # legitimately outside row-130
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        coords = list(s.polygon.exterior.coords)
+        if coords and coords[0] == coords[-1]:
+            coords = coords[:-1]
+        for v_idx, (vx, vy) in enumerate(coords):
+            p = _Point(vx, vy)
+            if row130.contains(p):
+                continue
+            d = p.distance(row130.boundary)
+            if d <= ON_BOUNDARY_TOL_M:
+                continue
+            violations.append(
+                f"ribbon#{s_idx} (ref={s.ref}) vertex#{v_idx} at "
+                f"({vx:.2f},{vy:.2f}) is OUTSIDE row-130 at "
+                f"distance {d:.2f}m")
+    assert not violations, (
+        f"{icao}: {len(violations)} ribbon vertex(es) outside the "
+        f"row-130 boundary line.  First 5: "
+        + "; ".join(violations[:5])
+        + (f"  ...and {len(violations)-5} more"
+           if len(violations) > 5 else ""))
