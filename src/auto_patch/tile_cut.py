@@ -151,19 +151,15 @@ def cut_layout_at_tile_boundaries(
     except _GEOM_EXC:
         return 0
 
-    # Cut the airport-boundary polygon itself.  Downstream
-    # consumers (Ortho4XP encoder / boundary ribbon emit / DEM
-    # bridge) see the cut MultiPolygon and naturally produce
-    # per-tile geometry instead of spanning-tile artifacts.
-    if (layout.airport_boundary is not None
-            and not layout.airport_boundary.is_empty):
-        try:
-            ab_cut = layout.airport_boundary.difference(cut_union)
-        except _GEOM_EXC:
-            ab_cut = None
-        if ab_cut is not None and not ab_cut.is_empty:
-            if ab_cut.geom_type in ("Polygon", "MultiPolygon"):
-                layout.airport_boundary = ab_cut
+    # NOTE (user 2026-05-28): do NOT cut ``layout.airport_boundary`` here.
+    # Cutting the outline polygon with the seam band inserted a straight
+    # edge ALONG the tile line into the perimeter, and the boundary ribbon
+    # (_emit_airport_boundary_shape traces the perimeter) then ran a ribbon
+    # ALONG the seam.  The boundary must be sliced like every other shape:
+    # the ribbon emits from the FULL outline and its emitted ROLE_BOUNDARY
+    # rects are sliced + neighbour-tile pieces dropped by the post-emit
+    # cut_layout_at_tile_boundaries call — so the ribbon ends AT the seam
+    # instead of following it.
 
     # The CURRENT tile (the one this auto_patch run is generating)
     # is the airport-anchor tile.  Per user 2026-05-12: after the
@@ -192,24 +188,8 @@ def cut_layout_at_tile_boundaries(
         return (cur_tile_lat <= lat < cur_tile_lat + 1
                 and cur_tile_lon <= lon < cur_tile_lon + 1)
 
-    # Also clip ``layout.airport_boundary`` to the current tile.
-    if (layout.airport_boundary is not None
-            and not layout.airport_boundary.is_empty):
-        ab = layout.airport_boundary
-        if ab.geom_type == "MultiPolygon":
-            kept = [g for g in ab.geoms
-                    if g.geom_type == "Polygon" and not g.is_empty
-                    and _in_current_tile(g)]
-            if not kept:
-                layout.airport_boundary = None
-            elif len(kept) == 1:
-                layout.airport_boundary = kept[0]
-            else:
-                from shapely.geometry import MultiPolygon
-                layout.airport_boundary = MultiPolygon(kept)
-        elif ab.geom_type == "Polygon":
-            if not _in_current_tile(ab):
-                layout.airport_boundary = None
+    # (airport_boundary is intentionally left UNCUT — see note above; the
+    # ribbon it generates is sliced as ordinary ROLE_BOUNDARY shapes below.)
 
     n_before = len(layout.shapes)
     new_shapes: list[BuiltShape] = []

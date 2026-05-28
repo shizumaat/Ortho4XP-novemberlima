@@ -814,47 +814,49 @@ def _directional_relief(n, elev, is_hard, edge_grade, edge_length,
             elev[i] = t
 
     # Rigid level coupling: a rect's two flat-end cross-corner pairs each move
-    # as ONE level (user 2026-05-28).  DIRECTIONAL, not symmetric: a rect's
-    # flat end anchors and its NEIGHBOURS conform — when projecting any OTHER
-    # shape, that rect's flat-end nodes are HELD (so the apron/junction grades
-    # to match the rect's flat edge instead of dragging the two corners apart).
-    # The rect itself keeps its OWN ends level via the coupling map while it
-    # grades along-axis from its runway-ward parent.  (Symmetric coupling
-    # oscillated where two neighbours pinned the two corners at odds.)
+    # as ONE level (user 2026-05-28), so whichever neighbour drags an end keeps
+    # the shared edge flat.  The coupling map moves a whole group together
+    # whenever any member moves, and a group is held iff any member is held.
     coupling = _build_level_coupling(shape_constraints)
-    rect_flat_nodes: set = set()
-    own_flat: list[set] = []
-    for sc in order:
-        of: set = set()
-        for (a, b) in sc.get("flat_pairs", ()):
-            of.add(a)
-            of.add(b)
-        own_flat.append(of)
-        rect_flat_nodes |= of
-    conform_nodes = terminal_nodes | rect_flat_nodes
+    # ENFORCE the equality (not merely react to it): the cap projection only
+    # equalises a group WHEN a move is triggered, so a rect end that Phase 1
+    # left un-level (its two corners followed DEM independently) would stay
+    # tilted and the emit collapse would then disagree with the neighbour.
+    # Level every coupled group to its mean ONCE up front — a flat cross-end
+    # MUST be level (mandatory geometry, not grade-smearing).  Skip groups
+    # pinned by a HARD anchor or a terminal (those conform via their own path).
+    for members in {tuple(sorted(v)) for v in coupling.values()}:
+        if any(is_hard[m] for m in members):
+            continue
+        if terminal_nodes.intersection(members):
+            continue
+        lvl = sum(elev[m] for m in members) / len(members)
+        for m in members:
+            elev[m] = lvl
 
-    sweep = 0
-    for sweep in range(min(max_iters, _RELIEF_OUTER_SWEEPS)):
-        settled = list(is_hard)
-        for k, sc in enumerate(order):
-            gi = group_of_node.get(sc["nodes"][0]) if sc["nodes"] else None
-            if gi is not None and set(sc["nodes"]) <= terminal_groups[gi]:
-                _rigid_shift_terminal(gi)   # this shape IS a terminal
-            else:
-                if parent_held is not None:
-                    held = set(parent_held[k])
-                else:
-                    held = {i for i in sc["nodes"] if settled[i]}
-                held |= terminal_nodes.intersection(sc["nodes"])  # conform
-                _project_shape(elev, sc["nodes"], held, sc["edges"], sc["flat"],
-                               coupling)
-            for i in sc["nodes"]:
-                settled[i] = True
-        max_viol = max((abs(elev[u] - elev[v]) - cap
-                        for (u, v), cap in ineq), default=0.0)
-        if max_viol < comply:
-            break
-    return sweep + 1
+    # ONE reverse pass (user 2026-05-28): runway/seam -> leaves, a SINGLE
+    # outward traversal — NOT an iterative relaxation.  Process shapes by
+    # ascending distance from the HARD anchors; HOLD each shape's already-
+    # settled (runway-ward) vertices and FORCE its outward vertices to grade
+    # compliance, so the slack travels strictly OUTWARD and the free leaves /
+    # terminals absorb the final adjustment.  Because a settled shape's
+    # vertices are held by every more-outward shape and never move back, the
+    # violation only propagates outward and is resolved in this one pass — the
+    # forward Phase-1 pass and this reverse pass are the only two the model
+    # needs (the old 60-sweep relaxation fought itself and never converged).
+    settled = list(is_hard)
+    for k, sc in enumerate(order):
+        gi = group_of_node.get(sc["nodes"][0]) if sc["nodes"] else None
+        if gi is not None and set(sc["nodes"]) <= terminal_groups[gi]:
+            _rigid_shift_terminal(gi)         # adjust the whole terminal (flat)
+        else:
+            held = {i for i in sc["nodes"] if settled[i]}
+            held |= terminal_nodes.intersection(sc["nodes"])  # conform to terminals
+            _project_shape(elev, sc["nodes"], held, sc["edges"], sc["flat"],
+                           coupling)
+        for i in sc["nodes"]:
+            settled[i] = True
+    return 1
 
 
 def _build_shape_constraints(layout, bucket_to_idx):
