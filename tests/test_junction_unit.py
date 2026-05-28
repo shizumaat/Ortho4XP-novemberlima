@@ -10,8 +10,6 @@ geometric-invariant failure (or, worse, as a *skipped* test).
 Covered:
   * ``longest_runway_axis_deg`` — picks the LONGEST runway's axis,
     returns ``None`` only when no runway is present.
-  * ``_split_narrow_necks`` — splits a junction that is narrow by a
-    single MRR criterion (short-side OR ratio).
   * ``_merge_sliver_junctions_into_neighbours`` — requires a shared
     EDGE (≥ 2 shared vertices), not a single shared point.
 """
@@ -30,7 +28,6 @@ from auto_patch.junction_repair import (
     _merge_sliver_junctions_into_neighbours,
 )
 from auto_patch.junction_rules import (
-    _split_narrow_necks,
     longest_runway_axis_deg,
 )
 from auto_patch.layout import (
@@ -75,29 +72,9 @@ def test_longest_runway_axis_none_without_runway():
     assert longest_runway_axis_deg(_layout(junction)) is None
 
 
-# ── _split_narrow_necks ───────────────────────────────────────────
-
-
-def test_split_narrow_neck_on_single_criterion():
-    """A junction narrow by RATIO only (short-side ≥ NECK_ABSOLUTE_M
-    but short/long < NECK_RELATIVE) must still be split into two
-    junctions.  The split predicate is "narrow on EITHER criterion",
-    so tightening it to require BOTH (an ``and``→``or`` regression in
-    the skip-guard) would leave this junction unsplit.
-
-    Geometry: a 6 m × 80 m strip (short=6 ≥ 5.0, ratio=0.075 < 0.10).
-    Cut perpendicular to a north-south runway axis (0°) bisects the
-    long dimension into two 6 m × 40 m pieces (240 m² each, well
-    above the 50 m² keep threshold).
-    """
-    neck = BuiltShape(polygon=_rect(0.0, 0.0, 80.0, 6.0),
-                      role=ROLE_JUNCTION)
-    layout = _layout(neck)
-    _split_narrow_necks(layout, runway_axis_deg=0.0)
-    junctions = [s for s in layout.shapes if s.role == ROLE_JUNCTION]
-    assert len(junctions) == 2
-    for s in junctions:
-        assert s.polygon.area >= 50.0
+# (session 51) `_split_narrow_necks` unit tests REMOVED — the function
+# was retired in favour of `pavement/apron_necks.py::split_polygon_at_necks`
+# (session-50 medial-axis traced neck splitter, called pre-decompose).
 
 
 # ── _merge_sliver_junctions_into_neighbours ───────────────────────

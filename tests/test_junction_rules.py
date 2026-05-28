@@ -72,18 +72,9 @@ RULE2_REGRESSION_BASELINE: Dict[str, int] = {
     # geometry is otherwise clean.
     "CYXY": 1,
 }
-RULE4_REGRESSION_BASELINE: Dict[str, int] = {
-    # CYXY: 2 narrow-neck junctions where the MRR-based detector
-    # fires on small sliver shapes but the splitter can't produce
-    # two pieces both above MIN_JUNCTION_AREA_M2.  These are
-    # legacy slivers from CYXY's incomplete apt.dat coverage.
-    "CYXY": 2,
-    # SPJC: 2 narrow-neck junctions surfaced by the Rule 2
-    # long-edge detection fix (user 2026-05-02 issue #4) — densify
-    # now correctly avoids actual long edges, leaving thinner
-    # junctions in some places where it previously over-densified.
-    "SPJC": 2,
-}
+# (session 51) RULE4_REGRESSION_BASELINE removed: paired with the
+# retired `_split_narrow_necks` pass (see test_no_narrow_neck_junctions
+# removal note below + STATUS.md).
 A4_BASELINE: Dict[str, int] = {
     # Invariant A4: every junction/apron vertex lies INSIDE (or on the
     # boundary of) pav_union.  Zero per-airport tolerance under the
@@ -423,55 +414,9 @@ def test_junction_runway_node_sharing(icao):
 # implementation detail, not geometry truth.  See docs/pipeline_invariants.md.
 
 
-@pytest.mark.parametrize("icao", _test_airports())
-def test_no_narrow_neck_junctions(icao):
-    """Rule 4: no junction has an MRR short side below
-    ``NECK_ABSOLUTE_M`` and short/long ratio below ``NECK_RELATIVE``.
-    Junctions that fail this test should have been split by
-    ``_split_narrow_necks``.
-    """
-    from auto_patch.config import NECK_ABSOLUTE_M, NECK_RELATIVE
-
-    layout = _build_layout(icao)
-    violations: List[str] = []
-    for s_idx, s in enumerate(layout.shapes):
-        if s.role != "junction":
-            continue
-        if s.polygon is None or s.polygon.is_empty:
-            continue
-        if s.polygon.area < 50.0:
-            continue
-        try:
-            mrr = s.polygon.minimum_rotated_rectangle
-        except Exception:
-            continue
-        if mrr.is_empty or mrr.geom_type != "Polygon":
-            continue
-        coords = list(mrr.exterior.coords)
-        sides = sorted(
-            math.hypot(coords[i + 1][0] - coords[i][0],
-                       coords[i + 1][1] - coords[i][1])
-            for i in range(4))
-        short_m = sides[0]
-        long_m = sides[-1]
-        if long_m <= 0.0:
-            continue
-        ratio = short_m / long_m
-        if short_m >= NECK_ABSOLUTE_M and ratio >= NECK_RELATIVE:
-            continue
-        violations.append(
-            f"junction#{s_idx}: short={short_m:.2f}m "
-            f"long={long_m:.2f}m ratio={ratio:.3f} "
-            f"area={s.polygon.area:.0f}m²")
-
-    baseline = RULE4_REGRESSION_BASELINE.get(icao, 0)
-    if len(violations) > baseline:
-        msg = (f"{icao}: Rule 4 violations = {len(violations)} > "
-               f"baseline {baseline}\nFirst 10:\n  "
-               + "\n  ".join(violations[:10]))
-        if len(violations) > 10:
-            msg += f"\n  ... and {len(violations) - 10} more"
-        pytest.fail(msg)
+# (session 51) test_no_narrow_neck_junctions REMOVED — paired with the retired
+#  pass.  Neck-splitting is now handled by
+# pavement/apron_necks.py::split_polygon_at_necks (medial-axis traced).
 
 
 @pytest.mark.parametrize("icao", _test_airports())

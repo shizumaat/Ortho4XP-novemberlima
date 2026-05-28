@@ -163,8 +163,14 @@ def apply_junction_rules(layout: PavementLayout) -> None:
     # Phase 2 (landed): Rule 1 — junction-runway 1:1 sharing.
     _enforce_runway_1to1_sharing(layout)
 
-    # Phase 3 (landed): Rule 4 — split narrow necks.
-    _split_narrow_necks(layout, runway_axis_deg)
+    # (session 51) Rule 4 / `_split_narrow_necks` was RETIRED — its
+    # MRR-based symmetric-axial cut produced self-crossing zig-zag
+    # exteriors on non-convex junction residue (SPJC junction#69).  Neck
+    # splitting is handled by `pavement/apron_necks.py::split_polygon_at_necks`
+    # (called from `junction_emit.py` BEFORE hole-decompose) — that one
+    # uses medial-axis tracing on taxi-width arm mouths and produces
+    # clean cuts.  Hole-handling stays with
+    # `pavement/junctions.py::_decompose_polygon_with_holes`.
 
 
 # ── Runway-axis helper ───────────────────────────────────────────
@@ -1808,92 +1814,6 @@ def _polygon_neck_metrics(
     long_side, la, lb = sides[-1]
     return (short_side, long_side,
             (la[0], la[1], lb[0], lb[1]))
-
-
-def _split_narrow_necks(
-    layout: PavementLayout,
-    runway_axis_deg: float | None,
-) -> None:
-    """Rule 4 (user 2026-05-01): when a junction polygon has a narrow
-    neck (MRR short-side < ``NECK_ABSOLUTE_M`` OR MRR short/long
-    ratio < ``NECK_RELATIVE``), split it at the neck.  Cut direction
-    is the runway axis (or perpendicular to MRR long axis if no
-    runway axis is available); cut location is the MRR long-axis
-    midpoint.
-
-    Disposition (v1, simplified):
-      * Both pieces with area ≥ ``MIN_JUNCTION_AREA_M2`` → keep both
-        as separate junctions.
-      * One piece below threshold → discard.
-      * Both below threshold → original polygon kept (no productive
-        split possible).
-
-    Absorption into adjacent rect / junction (per the plan's
-    ``NECK_ABSORB_FRAC`` clause) is NOT implemented in v1 — keeping
-    the simple symmetric split first to avoid disturbing existing
-    geometry; we can add absorption when a real case demands it.
-    """
-    from .config import NECK_ABSOLUTE_M, NECK_RELATIVE
-    # Mirror ``junction_emit.MIN_JUNCTION_AREA_M2`` (kept local there
-    # for legacy; harmonise once both files reference one constant).
-    MIN_JUNCTION_AREA_M2 = 50.0
-    new_shapes: list[BuiltShape] = []
-    drop_indices: list[int] = []
-    for idx, shape in enumerate(layout.shapes):
-        if shape.role != ROLE_JUNCTION:
-            continue
-        poly = shape.polygon
-        if poly is None or poly.is_empty or poly.geom_type != "Polygon":
-            continue
-        short_m, long_m, _ = _polygon_neck_metrics(poly)
-        if long_m <= 0.0:
-            continue
-        if short_m >= NECK_ABSOLUTE_M and (short_m / long_m) >= NECK_RELATIVE:
-            continue
-        # Compute cut: line perpendicular to runway axis (or MRR long
-        # axis as fallback) passing through the polygon's centroid.
-        cx = poly.centroid.x
-        cy = poly.centroid.y
-        if runway_axis_deg is not None:
-            # Cut runs PERPENDICULAR to the runway axis (so the two
-            # pieces sit on either side of the runway-aligned cut).
-            cut_axis_rad = math.radians((runway_axis_deg + 90.0) % 180.0)
-        else:
-            short_a, long_a, mrr_long = _polygon_neck_metrics(poly)
-            ax, ay, bx, by = mrr_long
-            cut_axis_rad = math.atan2(by - ay, bx - ax)
-        span = max(poly.bounds[2] - poly.bounds[0],
-                   poly.bounds[3] - poly.bounds[1]) + 10.0
-        ux = math.cos(cut_axis_rad)
-        uy = math.sin(cut_axis_rad)
-        cut = LineString([(cx - span * ux, cy - span * uy),
-                          (cx + span * ux, cy + span * uy)])
-        try:
-            from shapely.ops import split as _shp_split
-            result = _shp_split(poly, cut)
-        except _GEOM_EXC:
-            continue
-        pieces: list[Polygon] = []
-        if result.geom_type == "Polygon":
-            pieces.append(result)
-        else:
-            for g in getattr(result, "geoms", []):
-                if g.geom_type == "Polygon" and not g.is_empty:
-                    pieces.append(g)
-        if len(pieces) < 2:
-            continue
-        big_pieces = [p for p in pieces if p.area >= MIN_JUNCTION_AREA_M2]
-        if len(big_pieces) < 2:
-            continue
-        # Replace original with the first piece; queue the rest as
-        # new shapes.  Drop node_altitudes (per-vertex altitudes don't
-        # transfer through a polygon split).
-        shape.polygon = big_pieces[0]
-        shape.node_altitudes = None
-        for p in big_pieces[1:]:
-            new_shapes.append(BuiltShape(polygon=p, role=ROLE_JUNCTION))
-    if new_shapes:
-        layout.shapes.extend(new_shapes)
 
 
 # Junction-vertex-outside-pavement thresholds.  Used by the
