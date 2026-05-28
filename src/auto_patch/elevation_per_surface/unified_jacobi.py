@@ -565,6 +565,140 @@ def _project_shape(elev, nodes, held, edges, flat, coupling=None) -> None:
             break
 
 
+def _project_within_bands(elev, edges, is_hard, lo, hi, coupling,
+                          held_extra, max_sweeps, tol) -> tuple[int, float]:
+    """Cap-project all within-shape grade edges to convergence, CLAMPED to the
+    per-node feasible bands ``[lo, hi]`` (user 2026-05-28).
+
+    The directional two-pass leaves residual at cycle-closing edges; relaxing
+    all edges fixes them, but unbounded relaxation on the dense all-pair apron
+    edges was slow / SOR-divergent.  Clamping every node back into its
+    difference-constraint band each sweep keeps it ANCHOR-feasible and bounded,
+    so the iteration can't run away and converges.  HARD anchors + ``held_extra``
+    (terminals, kept flat by the reverse pass) never move; both-held edges are
+    skipped (infeasible seam cross-slopes — terrain-dictated).  Rigid groups
+    (rect flat ends) move and clamp TOGETHER via ``coupling`` so flat ends stay
+    flat.  Returns (sweeps, max_fixable_viol).
+    """
+    held_extra = held_extra or set()
+    INF = float("inf")
+
+    def _members(i):
+        return coupling[i] if (coupling is not None and i in coupling) else (i,)
+
+    def _is_held(i):
+        return any(is_hard[m] or m in held_extra for m in _members(i))
+
+    def _move(i, d):
+        for m in _members(i):
+            elev[m] += d
+
+    # ONE-TIME clamp: seed every soft node into its anchor-feasible band — this
+    # is the difference-constraint surface, the bulk of the correction (e.g.
+    # CYXY 7.9 m -> 1.2 m).  Move a coupled group together to the intersection
+    # of its members' bands.  INFEASIBLE nodes (lo>hi: the terrain-dictated seam
+    # cross-slope) are left at their directional value — clamping them to a
+    # midpoint each sweep destabilised the relaxation.
+    seen_g: set = set()
+    for i in range(len(elev)):
+        if _is_held(i):
+            continue
+        grp = _members(i)
+        if len(grp) > 1:
+            key = tuple(sorted(grp))
+            if key in seen_g:
+                continue
+            seen_g.add(key)
+            glo = max((lo[m] for m in grp), default=-INF)
+            ghi = min((hi[m] for m in grp), default=INF)
+        else:
+            glo, ghi = lo[i], hi[i]
+        if glo == -INF and ghi == INF:
+            continue
+        if glo > ghi:
+            continue                       # infeasible — leave as is
+        v = min(max(elev[i], glo), ghi)
+        for m in grp:
+            elev[m] = v
+
+    # Plain cap projection from that seed (terminals held, both-HARD seam edges
+    # skipped) — bounded by the good start; no per-move re-clamp.
+    mx = 0.0
+    sweep = 0
+    for sweep in range(max_sweeps):
+        mx = 0.0
+        for (i, j, cap) in edges:
+            d = elev[i] - elev[j]
+            ex = abs(d) - cap
+            if ex <= 0.0:
+                continue
+            hi_i = _is_held(i)
+            hj = _is_held(j)
+            if hi_i and hj:
+                continue            # both immovable: infeasible seam edge, skip
+            if ex > mx:
+                mx = ex
+            s = 1.0 if d > 0 else -1.0
+            if hi_i:
+                _move(j, s * ex)
+            elif hj:
+                _move(i, -s * ex)
+            else:
+                _move(i, -0.5 * s * ex)
+                _move(j, 0.5 * s * ex)
+        if mx < tol:
+            break
+    return sweep + 1, mx
+
+
+def _grade_bands(n, elev, is_hard, edges):
+    """Feasible elevation band ``[lo[v], hi[v]]`` for every node under the
+    within-shape grade edges, by two multi-source Dijkstras from the HARD
+    anchors over the cap-weighted constraint graph (user 2026-05-28, the direct
+    difference-constraint solve).
+
+    A grade limit ``|elev_i - elev_j| <= cap`` is a difference constraint, so
+    the tightest UPPER bound is ``hi[v] = min over HARD anchors a of
+    (elev[a] + shortest cap-weighted path a->v)`` and the lower bound is
+    symmetric.  Crucially the ALL-``hi`` (and all-``lo``) assignment is itself
+    feasible — every edge satisfies ``|hi[u]-hi[v]| <= cap`` by the triangle
+    inequality — so a feasible surface always exists (no negative cycle, since
+    caps >= 0).  Multiple paths are handled automatically: a node simply takes
+    the tightest reaching anchor; we never enumerate routes.  ``lo[v] > hi[v]``
+    flags a genuinely infeasible node (two HARD anchors closer in the graph than
+    their elevation gap allows — e.g. a seam-pinned flat end).  Unreachable
+    nodes get ``(-inf, +inf)`` (no anchor constraint).
+    """
+    adj: dict[int, list[tuple[int, float]]] = {}
+    for (i, j, c) in edges:
+        adj.setdefault(i, []).append((j, c))
+        adj.setdefault(j, []).append((i, c))
+    INF = float("inf")
+
+    def _dijkstra(seed_sign):
+        dist = [INF] * n
+        pq: list[tuple[float, int]] = []
+        for a in range(n):
+            if is_hard[a]:
+                dist[a] = seed_sign * elev[a]
+                heapq.heappush(pq, (dist[a], a))
+        while pq:
+            d, u = heapq.heappop(pq)
+            if d > dist[u]:
+                continue
+            for v, c in adj.get(u, ()):  # type: ignore[arg-type]
+                nd = d + c
+                if nd < dist[v]:
+                    dist[v] = nd
+                    heapq.heappush(pq, (nd, v))
+        return dist
+
+    hi = _dijkstra(+1.0)                       # hi[v] = min_a(elev[a] + d)
+    nlo = _dijkstra(-1.0)                       # nlo[v] = min_a(-elev[a] + d)
+    lo = [(-x if x != INF else -INF) for x in nlo]
+    return lo, hi
+
+
 def _shape_hop_depth(shape_constraints, seed_node_set) -> list[int]:
     """BFS per-shape hop distance from the seed-node set (typically the
     runway's nodes).  A shape touching a seed node is depth 1; each
@@ -856,7 +990,25 @@ def _directional_relief(n, elev, is_hard, edge_grade, edge_length,
                            coupling)
         for i in sc["nodes"]:
             settled[i] = True
-    return 1
+
+    # Direct difference-constraint convergence (user 2026-05-28): the
+    # directional passes leave residual at cycle-closing edges (two runway-paths
+    # converging on a shape at incompatible elevations).  Compute each node's
+    # feasible band from the HARD anchors via shortest cap-paths, then
+    # cap-project all within-shape edges CLAMPED to those bands until grade-
+    # compliant.  Bands handle the multi-path structure natively and bound the
+    # iteration so it converges; genuinely infeasible seam nodes (lo>hi, the
+    # terrain-dictated seam cross-slope) are left at their band midpoint and
+    # their both-HARD edges are skipped.
+    n = len(elev)
+    all_edges = [e for sc in shape_constraints for e in sc["edges"]]
+    lo, hi = _grade_bands(n, elev, is_hard, all_edges)
+    n_sweeps, _viol = _project_within_bands(
+        elev, all_edges, is_hard, lo, hi, coupling,
+        held_extra=terminal_nodes,
+        max_sweeps=1000,
+        tol=max(tol_m, _SPREAD_COMPLY_TOL_M))
+    return 1 + n_sweeps
 
 
 def _build_shape_constraints(layout, bucket_to_idx):
@@ -884,8 +1036,15 @@ def _build_shape_constraints(layout, bucket_to_idx):
         cap = _role_grade(s.role)
         edges: list[tuple[int, int, float]] = []
         flat_pairs: list[tuple[int, int]] = []   # rect flat-end coupled pairs
+        # A clean PLANAR rect (altitude_high/low) gets the flat-cross + axial
+        # constraints.  A per-vertex ``node_altitudes`` piece is NOT planar —
+        # e.g. the tile-cut seam WEDGE that follows the seam terrain's cross-
+        # slope and blends back to the rect (user 2026-05-28) — so it must use
+        # the all-pair rule, NOT a cap-0 flat end (which would force its two
+        # seam-pinned corners equal and read as a spurious 3.3 m violation).
         is_rect = s.role in SLOPING_RECT_ROLES and len(coords) == 4 \
-            and all(i is not None for i in idx)
+            and all(i is not None for i in idx) \
+            and s.node_altitudes is None
         if flat:
             pass                                  # handled by _project_shape
         elif is_rect:
