@@ -1064,10 +1064,16 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # "taxiways turning into big junctions" report).  Fall back to
     # OSM only when the apt.dat block has no taxi-network at all
     # (some custom packs omit rows 1201/1202).
+    # (session 51 per user 2026-05-27) Taxi centerlines come ONLY from
+    # apt.dat (rows 1201/1202).  The OSM fallback was REMOVED: OSM
+    # geometry didn't align with apt.dat pavement boundaries and produced
+    # mis-clipped centerlines.  If apt.dat is missing a taxi network the
+    # build will have no taxiway rects — fix the apt.dat input, don't
+    # synthesise from OSM.
     apt_centerlines = APR.taxi_centerlines(
         apt, to_m, rwy_centerlines=rwy_centerlines)
+    osm_centerlines = apt_centerlines  # legacy name retained; see below
     if apt_centerlines:
-        osm_centerlines = apt_centerlines
         UI.vprint(1,
             f"  [pav-builder] {icao}: using {len(apt_centerlines)} "
             f"apt.dat taxi-network centerline(s) "
@@ -1080,12 +1086,9 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # ``apt_dat_reader.taxi_size_letters``.
         layout.apt_taxi_letters = APR.taxi_size_letters(apt)
     else:
-        osm_centerlines = _extract_osm_taxi_centerlines(
-            nodes, ways, to_m, rwy_centerlines=rwy_centerlines)
         UI.vprint(1,
-            f"  [pav-builder] {icao}: apt.dat has no taxi network; "
-            f"using {len(osm_centerlines)} OSM aeroway-taxiway "
-            f"centerline(s).")
+            f"  [pav-builder] {icao}: apt.dat has no taxi network — no "
+            f"taxi rects will be emitted (fix the apt.dat input).")
     # Preserve the full input centerline set for the apron-
     # reclassification pass (junction_repair).  Surviving rect
     # ``source_axis`` lines cover only the part of the network
