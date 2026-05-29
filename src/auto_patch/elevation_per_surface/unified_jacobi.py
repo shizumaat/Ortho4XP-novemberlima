@@ -1268,55 +1268,90 @@ def _max_within_excess(elev, edges) -> float:
     return mx
 
 
+def _within_excess_stats(elev, edges, comply) -> tuple[float, int, float]:
+    """``(worst, count, total)`` grade excess over ``edges`` counting only edges
+    over ``comply``.  A runway/threshold yield is accepted when it reduces the
+    violation COUNT/TOTAL without worsening the worst — a single stubborn
+    violation elsewhere (an unrelated junction) must not veto a real fix that
+    clears a different edge."""
+    worst = 0.0
+    count = 0
+    total = 0.0
+    for (i, j, cap) in edges:
+        ex = abs(elev[i] - elev[j]) - cap
+        if ex > comply:
+            count += 1
+            total += ex
+            if ex > worst:
+                worst = ex
+    return worst, count, total
+
+
+def _seam_pinned_runway_nodes(layout, bucket_to_idx) -> set:
+    """Runway / runway-crossing node idxs that coincide with a tile-boundary
+    seam anchor.  The seam is the TOP truth (terrain mesh is pinned to raw HGT
+    at the boundary), so these stay HARD even when the rest of the runway is
+    released to yield to a seam (user 2026-05-28)."""
+    seam_keys = getattr(layout, "_seam_anchor_keys", None) or set()
+    if not seam_keys:
+        return set()
+    from ..layout import SHARED_VERTEX_TOL_M
+    bk_s = 1.0 / SHARED_VERTEX_TOL_M
+    out: set = set()
+    for s in layout.shapes:
+        if s.role not in (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING):
+            continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        for (x, y) in _open_ring(list(s.polygon.exterior.coords)):
+            if (int(round(x * bk_s)), int(round(y * bk_s))) not in seam_keys:
+                continue
+            idx = bucket_to_idx.get(
+                layout.canonical_points.get_or_add(float(x), float(y)))
+            if idx is not None:
+                out.add(idx)
+    return out
+
+
 def _relax_runway_and_resolve(n, elev, layout, bucket_to_idx, base_hard,
                               shape_constraints, tol_m) -> int:
     """Third pass (user 2026-05-28): if a within-shape grade violation remains
-    after the reverse pass, soften the runway INTERIOR (CIFP thresholds stay
-    hard) and re-run the difference-constraint band solve over the combined
-    pavement + runway grade graph, so an impossible apron<->runway connection
-    spreads over the runway's length instead of concentrating on a short
-    connector.  Commits ONLY if it strictly reduces the worst violation;
+    after the reverse pass, free part of the runway and re-run the difference-
+    constraint band solve over the combined pavement + runway grade graph so an
+    impossible apron<->runway connection spreads over the runway's length
+    instead of concentrating on a short connector.
+
+    Two escalation levels, tried in order, taking the FIRST that strictly
+    reduces the worst within-shape violation:
+      1. Free the runway INTERIOR only — CIFP thresholds stay hard.  Fixes a
+         DEM-dipped runway interior dragging an adjacent junction (CYXY 14R/32L).
+      2. (last resort, only when a tile-boundary SEAM exists) ALSO release the
+         CIFP THRESHOLD endpoints.  Per the priority ``seam > runway-CIFP``: when
+         the seam terrain makes the runway<->seam connection physically
+         infeasible (band lo > hi, e.g. SPLP runway 73 m vs a seam node 62 m too
+         close to grade), the runway yields — the whole runway shifts/tilts the
+         minimum (seeded at CIFP, so feasible ends stay put) to restore grade.
+    Seam-pinned runway nodes NEVER move.  Commits only if a level improves;
     otherwise reverts (no regression).  Returns sweeps used."""
     if not _RUNWAY_FLEX:
         return 0
     pav_edges = [e for sc in shape_constraints for e in sc["edges"]]
     comply = max(tol_m, _SPREAD_COMPLY_TOL_M)
-    before = _max_within_excess(elev, pav_edges)
-    if before <= comply:
+    w0, c0, t0 = _within_excess_stats(elev, pav_edges, comply)
+    if c0 == 0:
         return 0                                  # already grade-compliant
 
     rwy_constraints = _build_runway_constraints(layout, bucket_to_idx)
     if not rwy_constraints:
         return 0
     thresh = _runway_threshold_nodes(layout, bucket_to_idx)
+    seam_pinned = _seam_pinned_runway_nodes(layout, bucket_to_idx)
     rwy_nodes: set = set()
     for sc in rwy_constraints:
         rwy_nodes.update(sc["nodes"])
-    soft = rwy_nodes - thresh
-    # Seam-pinned runway nodes stay HARD (seam terrain wins over CIFP).
-    seam_keys = getattr(layout, "_seam_anchor_keys", None) or set()
-    if seam_keys:
-        from ..layout import SHARED_VERTEX_TOL_M
-        bk_s = 1.0 / SHARED_VERTEX_TOL_M
-        for s in layout.shapes:
-            if s.role not in (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING):
-                continue
-            if s.polygon is None or s.polygon.is_empty:
-                continue
-            for (x, y) in _open_ring(list(s.polygon.exterior.coords)):
-                seam_bk = (int(round(x * bk_s)), int(round(y * bk_s)))
-                if seam_bk not in seam_keys:
-                    continue
-                idx = bucket_to_idx.get(
-                    layout.canonical_points.get_or_add(float(x), float(y)))
-                if idx is not None:
-                    soft.discard(idx)
-    if not soft:
+    interior = rwy_nodes - thresh - seam_pinned
+    if not interior:
         return 0                                  # nothing to free
-
-    is_hard2 = list(base_hard)
-    for i in soft:
-        is_hard2[i] = False
 
     all_edges = pav_edges + [e for sc in rwy_constraints for e in sc["edges"]]
     coupling = _build_level_coupling(list(shape_constraints) + rwy_constraints)
@@ -1325,23 +1360,47 @@ def _relax_runway_and_resolve(n, elev, layout, bucket_to_idx, base_hard,
         if sc["flat"]:
             terminal_nodes.update(sc["nodes"])
 
-    snapshot = list(elev)
-    lo, hi = _grade_bands(n, elev, is_hard2, all_edges)
-    sweeps, _viol = _project_within_bands(
-        elev, all_edges, is_hard2, lo, hi, coupling,
-        held_extra=terminal_nodes, max_sweeps=1000, tol=comply)
-    after = _max_within_excess(elev, pav_edges)
-    if after >= before - comply:
-        elev[:] = snapshot                        # no real gain -> revert
-        return sweeps
+    # Escalating free-sets.  Thresholds are released ONLY as a last resort and
+    # ONLY when a seam exists to yield to (seam > CIFP).
+    levels = [interior]
+    if seam_pinned or getattr(layout, "_seam_anchor_keys", None):
+        levels.append(interior | (thresh - seam_pinned))
+
+    snapshot0 = list(elev)
+    sweeps_total = 0
+    committed_soft: set | None = None
+    for soft in levels:
+        if not soft:
+            continue
+        is_hard2 = list(base_hard)
+        for i in soft:
+            is_hard2[i] = False
+        elev[:] = snapshot0                       # each level restarts clean
+        lo, hi = _grade_bands(n, elev, is_hard2, all_edges)
+        sweeps, _viol = _project_within_bands(
+            elev, all_edges, is_hard2, lo, hi, coupling,
+            held_extra=terminal_nodes, max_sweeps=1000, tol=comply)
+        sweeps_total += sweeps
+        w1, c1, t1 = _within_excess_stats(elev, pav_edges, comply)
+        # Accept iff it clears at least one violation (or shrinks total excess)
+        # WITHOUT worsening the worst — so a runway/threshold yield that fixes
+        # one connector can't be vetoed by an unrelated stubborn violation, and
+        # can't trade a small violation for a bigger one.
+        improved = (w1 <= w0 + comply
+                    and (c1 < c0 or t1 < t0 - comply))
+        if improved:
+            committed_soft = soft                 # this level helped — keep it
+            break
+    if committed_soft is None:
+        elev[:] = snapshot0                       # no level helped -> revert
+        return sweeps_total
 
     # Commit: write the moved runway profile back.  ``_writeback`` skips clean
     # 4-corner runway rects (keeps CIFP altitude_high/low) and never touches
     # ROLE_RUNWAY_CROSSING at all, so a runway/crossing shape with a moved
-    # interior node must be converted to per-vertex ``node_altitudes`` here or
-    # its shared corner with the (written-back) junction would mismatch.  Only
-    # convert shapes that actually moved; threshold-end rects that didn't move
-    # keep their CIFP altitude_high/low.
+    # node must be converted to per-vertex ``node_altitudes`` here or its shared
+    # corner with the (written-back) junction would mismatch.  Only convert
+    # shapes that actually moved; unmoved threshold-end rects keep CIFP hi/lo.
     for s in layout.shapes:
         if s.role not in (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING):
             continue
@@ -1359,7 +1418,7 @@ def _relax_runway_and_resolve(n, elev, layout, bucket_to_idx, base_hard,
                 alts = None
                 break
             alts.append(round(float(elev[idx]), 1))
-            if idx in soft and abs(elev[idx] - snapshot[idx]) > comply:
+            if idx in committed_soft and abs(elev[idx] - snapshot0[idx]) > comply:
                 moved = True
         if not moved or alts is None:
             continue
@@ -1369,7 +1428,7 @@ def _relax_runway_and_resolve(n, elev, layout, bucket_to_idx, base_hard,
         s.altitude_high = None
         s.altitude_low = None
         s.altitude = None
-    return sweeps
+    return sweeps_total
 
 
 def _build_level_coupling(shape_constraints) -> dict:
