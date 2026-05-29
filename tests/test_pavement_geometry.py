@@ -122,8 +122,20 @@ def _build_layout(icao: str):
 
 
 def _source_pavement_union(icao: str):
-    """Return the apt.dat row-110 + runway-corner pavement union in
-    meter space (anchored at the layout's first-vertex projection).
+    """Return the legitimate-source pavement union in meter space
+    (anchored at the layout's first-vertex projection): apt.dat
+    row-110 + runway corners + the airport's own DSF pavement
+    (boundary-clipped, the same gate ``build_airport_pavement``
+    applies).
+
+    DSF pavement is a first-class source — apt.dat and DSF "contain
+    different things, often overlap, but neither is authoritative"
+    (user 2026-05-21), so the builder unions both.  Counting only
+    apt.dat here understates the source for DSF-heavy airports (HECA,
+    CYXY) and inflates the apparent overage.  The DSF is clipped to the
+    row-130 boundary so the test still catches a boundary-gate
+    regression (a neighbouring airport's pavement leaking in would NOT
+    be in this boundary-clipped source → overage would spike).
     """
     import math
     from shapely.ops import transform as shp_transform
@@ -131,9 +143,11 @@ def _source_pavement_union(icao: str):
 
     apt_dats = APR.find_all_airport_apt_dats(_xplane_root(), icao)
     apt = None
+    apt_path = None
     for ad in apt_dats:
         apt = APR.load_airport(ad, icao)
         if apt is not None and apt.runways:
+            apt_path = ad
             break
     if apt is None or not apt.runways:
         pytest.skip(f"{icao}: no apt.dat with runways found")
@@ -165,6 +179,56 @@ def _source_pavement_union(icao: str):
         rp = _runway_rect_m(r, to_m)
         if rp is not None and not rp.is_empty:
             polys.append(rp)
+
+    # Add the airport's own DSF pavement, boundary-clipped — mirrors
+    # the DSF ingestion in ``build_airport_pavement`` (same pack, same
+    # row-130 boundary gate buffered 50 m, holes honoured).
+    DSF_AIRPORT_BOUNDARY_BUFFER_M = 50.0
+    gate_m = None
+    if apt.boundary is not None and not apt.boundary.is_empty:
+        try:
+            gate_m = shp_transform(to_m, apt.boundary).buffer(
+                DSF_AIRPORT_BOUNDARY_BUFFER_M)
+            if gate_m.is_empty:
+                gate_m = None
+        except Exception:
+            gate_m = None
+    if apt_path is not None:
+        try:
+            from auto_patch import dsf_reader as DSFR
+            from shapely.geometry import Polygon as _Poly
+            dsf = DSFR.find_associated_dsf(apt_path, lat0, lon0)
+            if dsf is not None:
+                for outer, holes in DSFR.read_dsf_pavements(dsf):
+                    if len(outer) < 3:
+                        continue
+                    try:
+                        p = _Poly(
+                            [(x, y) for (x, y) in outer],
+                            [[(x, y) for (x, y) in h]
+                             for h in holes if len(h) >= 3])
+                        if not p.is_valid:
+                            p = p.buffer(0)
+                        if p.is_empty or p.geom_type != "Polygon":
+                            continue
+                        pm = shp_transform(to_m, p)
+                        if pm.is_empty or pm.geom_type != "Polygon":
+                            continue
+                        if gate_m is not None:
+                            c = pm.intersection(gate_m)
+                            if (c.geom_type == "MultiPolygon"
+                                    and not c.is_empty):
+                                c = max(c.geoms, key=lambda g: g.area)
+                            if (c.is_empty or c.geom_type != "Polygon"
+                                    or c.area < 5.0):
+                                continue
+                            pm = c
+                        polys.append(pm)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
     if not polys:
         return None
     try:
