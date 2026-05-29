@@ -24,6 +24,19 @@ output-identical (no behaviour change); suite stays 284/0/2.
   layout for SINGLE-TILE airports (per-tile build is bit-identical when no
   integer line crosses the footprint). Saves a redundant ~55s build per
   single-tile airport. Multi-tile (SPLP) still builds per tile.
+- **#5 smoothed migration + SPLP dedup (049a7d3):** compare_target +
+  tile_cut_parity built per-tile with a RAW `O4DEM(fill_nodata='to zero')`;
+  grade + production use the SMOOTHED `_load_airport_dem`. Raw≠smoothed
+  (SPLP tile-77 259 vs 250 shapes; primary_parallel 5→7) — so
+  compare_target was gating NON-SHIPPED geometry (correctness gap, not just
+  perf). Unified all per-tile builds on smoothed via
+  `cached_airport_layout` (tile path raw→`_load_airport_dem`); grade +
+  tile_cut now build through the cache; tile_cut tests + compare_target_splp
+  pinned `xdist_group("SPLP")`. Re-cut SPLP_target_tile fixtures + floors
+  (primary_parallel 5→7/4→7, secondary 3→4, totals 236→238/317→325).
+  **SPLP builds 10→4, total suite builds 14→8, default suite ~104s→~73s.**
+  Note: with only 3 baseline airports + loadgroup, serial `-n0` (~63s) is
+  competitive with parallel (~73s); parallelism wins on larger airport sets.
 - **Test infra (bd728b5):** one shared session layout cache in
   `conftest.cached_airport_layout` (lru, keyed icao+compute_elevations+tile)
   replaces the per-module/per-test rebuilds; `pytest.ini` adds
