@@ -408,8 +408,7 @@ def solve(layout, icao: str,
 
 _SPREAD_OMEGA = 1.0          # cap-projection relaxation (>1 SOR diverges here)
 _SPREAD_COMPLY_TOL_M = 0.02  # iterate until every edge is within this of cap
-# Relief iteration budget (the directional shape-cascade caps its own outer
-# sweeps at ``_RELIEF_OUTER_SWEEPS``; this is the umbrella ceiling).
+# Relief iteration budget — umbrella ceiling for the within-bands convergence.
 _RELIEF_MAX_ITERS = 12000
 
 
@@ -515,16 +514,6 @@ def _compliant_spread_fit(n, elev, is_hard, dem_elev, edge_grade, edge_length,
         if max_viol < comply:
             return it + 1
     return max_iters
-
-
-_RELIEF_OUTER_SWEEPS = 60       # global shape-cascade passes (graph cycles)
-
-# Phase 3 — leaf hierarchy.  When True, the directional relief holds each shape
-# ONLY at its parent-interface vertices (+ HARD anchors), not at every settled
-# vertex.  Parent = the adjacent shape with the lowest network-rank (most
-# inward).  This lets a shape drag its siblings/children to grade instead of
-# being clamped between two inward neighbours (the excavated-terrace shear).
-_USE_LEAF_HIERARCHY = True
 
 
 def _project_shape(elev, nodes, held, edges, flat, coupling=None) -> None:
@@ -905,25 +894,6 @@ def _directional_relief(n, elev, is_hard, edge_grade, edge_length,
     order_idx = sorted(range(len(shape_constraints)),
                        key=lambda k: (depth[k], mrank[k]))
     order = [shape_constraints[k] for k in order_idx]
-
-    # Leaf hierarchy: give each shape ONE parent — the adjacent piece one hop
-    # inward (smaller depth; tie-break by widest shared interface then metres)
-    # — and hold it only at the vertices it shares with that parent (+ HARD).
-    parent_held: list[set] | None = None
-    if _USE_LEAF_HIERARCHY:
-        parent_held = []
-        for k in order_idx:
-            cand: dict[int, set] = {}
-            for i in shape_constraints[k]["nodes"]:
-                for k2 in node_owners.get(i, ()):
-                    if k2 != k and depth[k2] < depth[k]:
-                        cand.setdefault(k2, set()).add(i)
-            held = {i for i in shape_constraints[k]["nodes"] if is_hard[i]}
-            if cand:
-                par = min(cand, key=lambda k2: (depth[k2], -len(cand[k2]),
-                                                mrank[k2]))
-                held |= cand[par]
-            parent_held.append(held)
 
     # Terminal = RIGID FLAT UNIT (user 2026-05-28).  Each terminal's nodes
     # always share ONE elevation; neighbouring aprons CONFORM to it (hold its
