@@ -251,6 +251,17 @@ def enforce_conformance(layout: "PavementLayout",
         n = len(ring)
         ownset = set(ring)
         alts = _vertex_alts(s, n)
+        # A shape emitted with a SINGLE ``altitude`` (no high/low, no
+        # node_altitudes) is flat: every corner sits at that level, so a
+        # vertex inserted on an edge between two equal-altitude corners is
+        # also at that level — the shape stays flat.  Keep the single
+        # ``altitude`` instead of converting to ``node_altitudes`` (which
+        # for a TERMINAL would violate H26's flat-only rule — the HECA
+        # terminal10 case — and is redundant for any other flat shape).
+        flat_single_alt = (s.node_altitudes is None
+                           and s.altitude_high is None
+                           and s.altitude_low is None
+                           and s.altitude is not None)
         # Build the new ring edge by edge, inserting T-junction points.
         new_ring = []
         new_alts = [] if alts is not None else None
@@ -282,11 +293,13 @@ def enforce_conformance(layout: "PavementLayout",
         except Exception:
             continue
         s.polygon = new_poly
-        if new_alts is not None:
+        if new_alts is not None and not flat_single_alt:
             # node_altitudes carries the closing repeat.
             s.node_altitudes = new_alts + [new_alts[0]]
             s.altitude_high = None
             s.altitude_low = None
+        # flat_single_alt: leave s.altitude as-is (the new vertex inherits
+        # it); the shape stays flat and keeps the single-altitude model.
         shapes_modified += 1
         vertices_inserted += inserted_here
     return shapes_modified, vertices_inserted
