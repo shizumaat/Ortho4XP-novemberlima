@@ -2918,6 +2918,19 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # registry collapses each such pair to a single coordinate; the
     # conformance pass below then only has genuine T-junctions left to
     # insert (user 2026-05-23: "snap all shapes through one registry").
+    # Re-connect discovered (TX) lane dead-ends that a post-solve reshaping
+    # pass pulled away from the residue junction, leaving an uncovered notch
+    # (SPJC TX15 ends 9.9 m from junction #132 — connected pre-solve, severed
+    # after).  Extend the nearby junction back onto the lane's end corners;
+    # the following weld + conformance share the vertices and the emit consensus
+    # reconciles altitudes.  Isolated dead-ends (SPJC TX20, ~74 m from anything)
+    # have no junction within range and are left alone.  Runs here, AFTER all
+    # geometry reshaping and BEFORE the weld/conformance that finalise sharing.
+    if ENABLE_DISCOVERED_TAXIWAYS:
+        from .junction_repair import (
+            _connect_discovered_lane_dead_ends_to_junctions)
+        _connect_discovered_lane_dead_ends_to_junctions(layout, icao=icao)
+
     from .canonical_points import weld_layout_vertices
     # NB: ROLE_RUNWAY / ROLE_STUB are module-level imports used earlier
     # in this function — re-importing them here would make them locals

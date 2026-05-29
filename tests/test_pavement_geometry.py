@@ -663,6 +663,43 @@ def test_rect_short_edges_connect(icao):
                 # tile, not within this layout.
                 if _on_tile_edge(ax, ay) and _on_tile_edge(bx, by):
                     continue
+                # Discovered (medial-axis) lanes may legitimately DEAD-END at
+                # the pavement boundary (user 2026-05-28, SPJC TX20): unlike a
+                # referenced taxiway, a "TX" lane carved from unreferenced
+                # pavement can terminate at a real pavement tip with nothing to
+                # connect to.  Exempt such an end ONLY when (a) the rect is a
+                # discovered lane, (b) it connects at its OTHER short edge (so
+                # it's a dead-end lane, not a fully-floating sliver), and (c)
+                # the dangling end is GENUINELY ISOLATED — both corners far
+                # (> ``DEAD_END_ISOLATION_M``) from any other shape's vertex.
+                # A near-miss gap (something close, e.g. SPJC TX15 ~10 m from a
+                # junction) is a MISSING CONNECTION, not a dead-end, so it stays
+                # flagged.
+                DEAD_END_ISOLATION_M = 25.0
+                if (r.ref or "").startswith("TX"):
+                    # other short edge of this rect
+                    o_a, o_b = ((1, 2) if end_label == "end_A" else (0, 3))
+                    oax, oay = rc[o_a]
+                    obx, oby = rc[o_b]
+                    other_shared = False
+                    near_iso2 = DEAD_END_ISOLATION_M ** 2
+                    min_a2 = min_b2 = float("inf")
+                    for vx, vy, vsi in all_vertices:
+                        if vsi == ri:
+                            continue
+                        if not other_shared and (
+                                (vx - oax) ** 2 + (vy - oay) ** 2 <= tol2
+                                or (vx - obx) ** 2 + (vy - oby) ** 2 <= tol2):
+                            other_shared = True
+                        da2 = (vx - ax) ** 2 + (vy - ay) ** 2
+                        db2 = (vx - bx) ** 2 + (vy - by) ** 2
+                        if da2 < min_a2:
+                            min_a2 = da2
+                        if db2 < min_b2:
+                            min_b2 = db2
+                    if (other_shared
+                            and min_a2 > near_iso2 and min_b2 > near_iso2):
+                        continue        # genuine isolated discovered dead-end
                 failures.append({
                     "ref": r.ref or "?",
                     "role": r.role,

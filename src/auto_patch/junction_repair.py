@@ -2397,3 +2397,161 @@ def _reclassify_apron_junctions(
         except _GEOM_EXC:
             pass
     return n_reclassified
+
+
+def _connect_discovered_lane_dead_ends_to_junctions(
+        layout: "PavementLayout",
+        icao: str = "",
+        max_gap_m: float = 12.0,
+        share_tol_m: float = 0.5,
+        ) -> int:
+    """Connect a DISCOVERED (``TX``) lane's dangling short edge to a nearby
+    junction by extending the junction to share the lane's end corners (user
+    2026-05-28).
+
+    A discovered medial-axis lane's centerline can terminate a few metres SHORT
+    of the residue junction at the blob's core, leaving the lane's end edge
+    un-shared and an uncovered notch of real pavement between them (SPJC TX15
+    ends 9.9 m short of junction #132).  This differs from a genuine isolated
+    dead-end (SPJC TX20, ~74 m from anything), which is left alone.
+
+    For each ``TX`` sloping rect with a short edge whose BOTH corners are
+    unshared, if the NEAREST junction is within ``max_gap_m`` of that edge,
+    union a bridge quad (the lane's two end corners + their nearest points on
+    the junction boundary) into the junction.  The lane's end corners become
+    junction vertices, so the two share an edge and the notch is filled.
+    Returns the number of lanes connected.
+    """
+    rect_roles = (ROLE_STUB, ROLE_PRIMARY_PARALLEL,
+                  ROLE_SECONDARY_PARALLEL, ROLE_CROSS_CONNECTOR)
+    junctions = [(i, s) for i, s in enumerate(layout.shapes)
+                 if s.role == ROLE_JUNCTION
+                 and s.polygon is not None and not s.polygon.is_empty]
+    if not junctions:
+        return 0
+
+    all_verts: list[tuple[float, float, int]] = []
+    for si, s in enumerate(layout.shapes):
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        try:
+            c = list(s.polygon.exterior.coords)
+        except _GEOM_EXC:
+            continue
+        if c and c[0] == c[-1]:
+            c = c[:-1]
+        for x, y in c:
+            all_verts.append((float(x), float(y), si))
+
+    tol2 = share_tol_m * share_tol_m
+
+    def _unshared(px, py, self_i):
+        for vx, vy, vsi in all_verts:
+            if vsi == self_i:
+                continue
+            if (vx - px) ** 2 + (vy - py) ** 2 <= tol2:
+                return False
+        return True
+
+    n_connected = 0
+    for ri, r in enumerate(layout.shapes):
+        if r.role not in rect_roles or not (r.ref or "").startswith("TX"):
+            continue
+        if r.polygon is None or r.polygon.is_empty:
+            continue
+        try:
+            rc = list(r.polygon.exterior.coords)
+        except _GEOM_EXC:
+            continue
+        if rc and rc[0] == rc[-1]:
+            rc = rc[:-1]
+        if len(rc) != 4:
+            continue
+        for i_a, i_b in ((0, 3), (1, 2)):
+            ax, ay = rc[i_a]
+            bx, by = rc[i_b]
+            if not (_unshared(ax, ay, ri) and _unshared(bx, by, ri)):
+                continue                       # this end already connects
+            edge = LineString([(ax, ay), (bx, by)])
+            best = None
+            for ji, js in junctions:
+                if ji == ri:
+                    continue
+                try:
+                    d = js.polygon.distance(edge)
+                except _GEOM_EXC:
+                    continue
+                if d <= max_gap_m and (best is None or d < best[0]):
+                    best = (d, ji, js)
+            if best is None:
+                continue                       # isolated dead-end — leave it
+            _d, ji, js = best
+            try:
+                # Bridge to the junction's nearest EXISTING EDGE (a consecutive
+                # vertex pair), NOT to arbitrary boundary points: the merged
+                # polygon then has only SOURCED vertices — the lane's end
+                # corners (a secondary_parallel/stub corner) plus the junction's
+                # own vertices — so it satisfies ``test_junction_vertices_have_
+                # source``.  Sharing the full edge also makes ``unary_union``
+                # dissolve into ONE polygon (vs a point-touch MultiPolygon).
+                jr = list(js.polygon.exterior.coords)
+                if jr and jr[0] == jr[-1]:
+                    jr = jr[:-1]
+                emid = ((ax + bx) * 0.5, (ay + by) * 0.5)
+                best_edge = None
+                for k in range(len(jr)):
+                    va = jr[k]
+                    vb = jr[(k + 1) % len(jr)]
+                    d = LineString([va, vb]).distance(Point(emid))
+                    if best_edge is None or d < best_edge[0]:
+                        best_edge = (d, va, vb)
+                if best_edge is None:
+                    continue
+                _ed, va, vb = best_edge
+                # Orient so the bridge ring [ca, cb, vb, va] doesn't self-cross:
+                # ca pairs with the nearer of {va, vb}.
+                if (math.hypot(ax - va[0], ay - va[1])
+                        + math.hypot(bx - vb[0], by - vb[1])
+                        > math.hypot(ax - vb[0], ay - vb[1])
+                        + math.hypot(bx - va[0], by - va[1])):
+                    va, vb = vb, va
+                bridge = Polygon([(ax, ay), (bx, by), vb, va])
+                if not bridge.is_valid:
+                    bridge = bridge.buffer(0)
+                if bridge.is_empty or bridge.area < 1.0:
+                    continue
+                merged = unary_union([js.polygon, bridge])
+                if not isinstance(merged, Polygon) or merged.is_empty:
+                    continue
+                old_open = [(float(c[0]), float(c[1]))
+                            for c in js.polygon.exterior.coords]
+                if old_open and old_open[0] == old_open[-1]:
+                    old_open = old_open[:-1]
+                old_alts = js.node_altitudes
+                js.polygon = merged
+                # Runs post-solve: the junction already carries solved
+                # ``node_altitudes`` — resample to the extended ring so the
+                # new corners inherit the junction's field (the shared corners
+                # then reconcile with the lane via weld + emit consensus).
+                if old_alts is not None:
+                    from .elevation import _resample_node_altitudes_nn
+                    na = _resample_node_altitudes_nn(
+                        merged, old_open, old_alts)
+                    js.node_altitudes = na if na is not None else None
+            except _GEOM_EXC:
+                continue
+            # refresh this junction's cached vertices for later edges
+            all_verts = [v for v in all_verts if v[2] != ji]
+            jc = list(js.polygon.exterior.coords)
+            if jc and jc[0] == jc[-1]:
+                jc = jc[:-1]
+            all_verts.extend((float(x), float(y), ji) for x, y in jc)
+            n_connected += 1
+    if n_connected:
+        try:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: connected {n_connected} discovered "
+                f"lane dead-end(s) to a nearby junction.")
+        except _GEOM_EXC:
+            pass
+    return n_connected
