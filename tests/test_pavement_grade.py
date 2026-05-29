@@ -128,18 +128,30 @@ def test_pavement_grade(tmp_path, icao):
     within: list = []
     cross: list = []
     steps: list = []
+    # Single-tile airport: no integer lat/lon line crosses the footprint,
+    # so tile_cut is a no-op and _load_airport_dem(tile_center) floors to
+    # the same tile (hence same smoothed DEM) as the whole-airport build.
+    # The per-tile build is therefore BIT-IDENTICAL to the shared cached
+    # layout (verified: HECA fingerprint sha unchanged) — reuse it instead
+    # of paying a second full build on this worker.  Multi-tile airports
+    # (e.g. SPLP) genuinely differ per tile and still build per tile.
+    single_tile = len(tiles) == 1
     for (tlat, tlon) in tiles:
-        # Smoothed DEM (apt_smoothing_pix=8) — the SAME surface
-        # production ships (Ortho4XP passes tile.dem post-smoothing
-        # via override_dem; _load_airport_dem replicates it).  A raw
-        # O4DEM would add per-pixel roughness the shipped patch never
-        # has, producing spurious grade noise.
-        dem = _load_airport_dem(tlat + 0.5, tlon + 0.5)
-        if dem is None:
-            continue  # DEM tile unavailable
-        layout = build_airport_pavement(
-            icao, _xplane_root(), compute_elevations=True,
-            tile_dem=dem, current_tile_lat=tlat, current_tile_lon=tlon)
+        if single_tile:
+            from conftest import cached_airport_layout
+            layout = cached_airport_layout(icao)
+        else:
+            # Smoothed DEM (apt_smoothing_pix=8) — the SAME surface
+            # production ships (Ortho4XP passes tile.dem post-smoothing
+            # via override_dem; _load_airport_dem replicates it).  A raw
+            # O4DEM would add per-pixel roughness the shipped patch never
+            # has, producing spurious grade noise.
+            dem = _load_airport_dem(tlat + 0.5, tlon + 0.5)
+            if dem is None:
+                continue  # DEM tile unavailable
+            layout = build_airport_pavement(
+                icao, _xplane_root(), compute_elevations=True,
+                tile_dem=dem, current_tile_lat=tlat, current_tile_lon=tlon)
         if not layout.shapes:
             continue  # airport doesn't reach this corner tile
         out = tmp_path / f"{icao}_tile{tlat:+d}{tlon:+d}.osm"
