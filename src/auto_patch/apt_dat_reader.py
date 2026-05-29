@@ -32,9 +32,11 @@ per-airport Custom Scenery pack over the global one.
 """
 from __future__ import annotations
 
+import atexit
 import math
 import os
-import re
+import pickle
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -510,16 +512,84 @@ def find_all_airport_apt_dats(xplane_root: str,
 # per process.
 _APT_DAT_INDEX_CACHE: dict = {}
 
+# Persistent (cross-process) backing store for the index above.  The
+# first scan of every apt.dat in an X-Plane install costs ~2.7 s (the
+# Global Airports file alone is hundreds of MB); that cost is otherwise
+# paid afresh by every cold process — each ``build_airport_pavement``
+# run from a tool/dev loop AND every pytest-xdist worker.  Persisting the
+# index to a temp file lets all of them skip the rescan after the first
+# warm run.  Keys embed ``(path, mtime_ns, size)`` so a rewritten or
+# moved file simply misses and is rescanned — a stale or partial cache
+# file is always SAFE (mismatched keys are ignored), so loads/saves are
+# wrapped to never raise.
+_APT_DAT_PERSIST_PATH = os.path.join(
+    tempfile.gettempdir(), "auto_patch_apt_index_v1.pkl")
+_APT_DAT_PERSIST_LOADED = False
+_APT_DAT_PERSIST_DIRTY = False
+
+
+def _load_persistent_apt_index() -> None:
+    """Merge the on-disk index into the in-memory cache (lazy, once)."""
+    global _APT_DAT_PERSIST_LOADED
+    if _APT_DAT_PERSIST_LOADED:
+        return
+    _APT_DAT_PERSIST_LOADED = True
+    try:
+        with open(_APT_DAT_PERSIST_PATH, "rb") as f:
+            disk = pickle.load(f)
+        if isinstance(disk, dict):
+            for k, v in disk.items():
+                _APT_DAT_INDEX_CACHE.setdefault(k, v)
+    except (OSError, pickle.UnpicklingError, EOFError, ValueError,
+            AttributeError):
+        pass
+
+
+@atexit.register
+def _save_persistent_apt_index() -> None:
+    """Atomically write the in-memory index to disk at process exit
+    (only when new entries were added this run)."""
+    if not _APT_DAT_PERSIST_DIRTY or not _APT_DAT_INDEX_CACHE:
+        return
+    try:
+        # Merge with whatever a sibling worker may have written so we
+        # don't shrink the shared cache, then atomic-rename into place.
+        merged = dict(_APT_DAT_INDEX_CACHE)
+        try:
+            with open(_APT_DAT_PERSIST_PATH, "rb") as f:
+                disk = pickle.load(f)
+            if isinstance(disk, dict):
+                for k, v in disk.items():
+                    merged.setdefault(k, v)
+        except (OSError, pickle.UnpicklingError, EOFError, ValueError,
+                AttributeError):
+            pass
+        fd, tmp = tempfile.mkstemp(
+            dir=os.path.dirname(_APT_DAT_PERSIST_PATH),
+            prefix=".apt_index_", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                pickle.dump(merged, f, protocol=pickle.HIGHEST_PROTOCOL)
+            os.replace(tmp, _APT_DAT_PERSIST_PATH)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+    except OSError:
+        pass
+
 
 def _index_apt_dat(aptdat_path: str) -> tuple[frozenset, frozenset]:
     """Return ``(icaos_present, icaos_with_pavement)`` for the file.
 
     Both sets are uppercase ICAO codes.  An entry in
     ``icaos_with_pavement`` means the airport block has at least one
-    row 110 (pavement header).  Result is cached process-wide; if the
+    row 110 (pavement header).  Result is cached process-wide AND in a
+    persistent temp file (see :data:`_APT_DAT_PERSIST_PATH`); if the
     file is rewritten (mtime / size changes) the cache entry is
     invalidated and the file is rescanned.
     """
+    global _APT_DAT_PERSIST_DIRTY
+    _load_persistent_apt_index()
     try:
         st = os.stat(aptdat_path)
     except OSError:
@@ -563,10 +633,12 @@ def _index_apt_dat(aptdat_path: str) -> tuple[frozenset, frozenset]:
         # Cache an empty result so we don't re-attempt every call.
         result = (frozenset(), frozenset())
         _APT_DAT_INDEX_CACHE[key] = result
+        _APT_DAT_PERSIST_DIRTY = True
         return result
 
     result = (frozenset(icaos), frozenset(with_pavement))
     _APT_DAT_INDEX_CACHE[key] = result
+    _APT_DAT_PERSIST_DIRTY = True
     return result
 
 
