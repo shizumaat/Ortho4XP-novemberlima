@@ -167,6 +167,24 @@ _USE_L2_FIT = True
 # general apron BODY (pairs off any lane) keeps its all-pair Euclidean cap.
 _PER_AXIS_JUNCTIONS = False
 
+# Runway-flex third pass (user 2026-05-28).  The runway's elevation profile is
+# DERIVED from the DEM (interpolated between CIFP threshold anchors); the DEM is
+# the least-accurate part of the equation.  When a junction/stub cannot reach
+# grade because it is wedged between a soft apron and a runway-anchored node
+# that the DEM dipped/bulged (CYXY 14R/32L dips ~3 m to 691.4 around the 02/20
+# intersection, forcing stub A to 8.9 %), the impossible connection has nowhere
+# to go because EVERY runway node is HARD.  This pass keeps the real-world CIFP
+# THRESHOLD endpoints hard but lets the runway's INTERIOR nodes flex within the
+# runway grade cap, so the dip can rise toward the junction and the gap spreads
+# over the runway's length instead of concentrating on the short connector.
+# Only fires when a residual within-shape violation remains after the reverse
+# pass (the impossible-connection signature) AND only commits if it strictly
+# reduces the worst violation — so airports whose runway anchor is correct are
+# untouched.  Makes the surface MORE faithful: CIFP thresholds are ground
+# truth, pavement is known to exist and be gradeable, the DEM is the guess.
+_RUNWAY_FLEX = True
+_RUNWAY_FLEX_THRESHOLD_TOL_M = 2.0  # axial proximity to a runway END = threshold
+
 # DEM attraction (user 2026-05-22): each iteration, pull every SOFT node a
 # fixed fraction of the way toward its terrain (DEM) elevation, THEN
 # cap-project.  This makes soft pavement settle "as close to DEM as the
@@ -371,6 +389,15 @@ def solve(layout, icao: str,
             total_iters += _directional_relief(
                 n, elev, relief_hard, relief_eg, relief_el,
                 shape_constraints, _RELIEF_MAX_ITERS, tol_m)
+            # STEP 3 (user 2026-05-28): an impossible apron<->runway connection
+            # (a junction/stub wedged between soft apron and a DEM-dipped
+            # runway-anchored node) has nowhere to go while every runway node
+            # is HARD.  Free the runway INTERIOR (CIFP thresholds stay hard)
+            # and re-solve the bands so the dip rises and the gap spreads over
+            # the runway's length.  No-op unless a residual violation remains.
+            total_iters += _relax_runway_and_resolve(
+                n, elev, layout, bucket_to_idx, base_hard,
+                shape_constraints, tol_m)
 
     n_terms, n_rects, n_juncs = _writeback(
         layout, elev, bucket_to_idx)
@@ -1097,6 +1124,252 @@ def _build_shape_constraints(layout, bucket_to_idx):
                     "role": s.role,
                     "ref": s.ref or ""})
     return out
+
+
+def _principal_axis(pts):
+    """Unit direction of a point set's longest extent (the farthest-apart
+    pair).  Runways are long & thin, so the extreme pair defines the axis.
+    ``pts`` is small (runway corners), so the O(n^2) scan is fine."""
+    best_d2 = -1.0
+    best = None
+    for i in range(len(pts)):
+        xi, yi = pts[i]
+        for j in range(i + 1, len(pts)):
+            dx = pts[j][0] - xi
+            dy = pts[j][1] - yi
+            d2 = dx * dx + dy * dy
+            if d2 > best_d2:
+                best_d2 = d2
+                best = (dx, dy)
+    if best is None:
+        return None
+    dx, dy = best
+    ln = math.hypot(dx, dy) or 1.0
+    return (dx / ln, dy / ln)
+
+
+def _runway_threshold_nodes(layout, bucket_to_idx) -> set:
+    """Node idxs at the extreme axial ENDS of each runway — the CIFP
+    thresholds (user 2026-05-28, runway-flex pass).  Group ROLE_RUNWAY
+    sub-rects by designator, fit the runway axis, and return the corner nodes
+    whose axial projection is within ``_RUNWAY_FLEX_THRESHOLD_TOL_M`` of either
+    extreme.  Both corners of a runway-end cross-edge share the extreme
+    projection (the end edge is perpendicular to the axis), and the next
+    cross-section is a full sub-rect inward, so a tight tolerance captures the
+    end pair and nothing else.  These stay HARD when the interior softens."""
+    by_ref: dict[str, list] = {}
+    for s in layout.shapes:
+        if s.role != ROLE_RUNWAY:
+            continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        by_ref.setdefault(s.ref or "", []).append(s)
+    out: set = set()
+    for shapes in by_ref.values():
+        pts: list[tuple[float, float, int]] = []
+        for s in shapes:
+            for (x, y) in _open_ring(list(s.polygon.exterior.coords)):
+                k = layout.canonical_points.get_or_add(float(x), float(y))
+                idx = bucket_to_idx.get(k)
+                if idx is not None:
+                    pts.append((x, y, idx))
+        if len(pts) < 2:
+            continue
+        ax = _principal_axis([(x, y) for (x, y, _) in pts])
+        if ax is None:
+            continue
+        adx, ady = ax
+        proj = [(x * adx + y * ady, idx) for (x, y, idx) in pts]
+        pmin = min(p for p, _ in proj)
+        pmax = max(p for p, _ in proj)
+        tol = _RUNWAY_FLEX_THRESHOLD_TOL_M
+        for p, idx in proj:
+            if p - pmin <= tol or pmax - p <= tol:
+                out.add(idx)
+    return out
+
+
+def _build_runway_constraints(layout, bucket_to_idx):
+    """Per-shape grade constraints for the RUNWAY chain (user 2026-05-28,
+    runway-flex pass) — one entry per ROLE_RUNWAY / ROLE_RUNWAY_CROSSING shape,
+    mirroring :func:`_build_shape_constraints` but for runways (which are
+    otherwise excluded as pure HARD anchors).  Runway rects have NO
+    ``source_axis``, so the two SHORT ring edges are the flat cross-ends (cap 0,
+    coupled so the cross-section can't tilt) and the two LONG edges are axial
+    (cap = runway grade x length).  Runway crossings are irregular
+    ``node_altitudes`` polygons -> all-pair, like a junction.  Consecutive
+    sub-rects share their cross-edge corners, so these entries form one
+    connected threshold->interior->threshold grade chain."""
+    out = []
+    for s in layout.shapes:
+        if s.role not in (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING):
+            continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        coords = _open_ring(list(s.polygon.exterior.coords))
+        if len(coords) < 2:
+            continue
+        idx = [bucket_to_idx.get(
+            layout.canonical_points.get_or_add(float(x), float(y)))
+            for x, y in coords]
+        nodes = [i for i in idx if i is not None]
+        if len(nodes) < 2:
+            continue
+        cap = _role_grade(s.role)
+        edges: list[tuple[int, int, float]] = []
+        flat_pairs: list[tuple[int, int]] = []
+        is_rect = (s.role == ROLE_RUNWAY and len(coords) == 4
+                   and all(i is not None for i in idx)
+                   and s.node_altitudes is None)
+        if is_rect:
+            ring_edges = [(0, 1), (1, 2), (2, 3), (3, 0)]
+            scored = []
+            for (a, b) in ring_edges:
+                el = math.hypot(coords[b][0] - coords[a][0],
+                                coords[b][1] - coords[a][1]) or 1e-9
+                scored.append((el, a, b))
+            scored.sort()                # ascending: first 2 short, last 2 long
+            for k, (el, a, b) in enumerate(scored):
+                if idx[a] is None or idx[b] is None or idx[a] == idx[b]:
+                    continue
+                if k < 2:                # the two SHORT edges = flat cross-ends
+                    edges.append((idx[a], idx[b], 0.0))
+                    flat_pairs.append((idx[a], idx[b]))
+                else:                    # the two LONG edges = sloping axial
+                    edges.append((idx[a], idx[b], cap * el))
+        else:
+            m = len(idx)
+            for a in range(m):
+                if idx[a] is None:
+                    continue
+                for b in range(a + 1, m):
+                    if idx[b] is None or idx[a] == idx[b]:
+                        continue
+                    d = math.hypot(coords[a][0] - coords[b][0],
+                                   coords[a][1] - coords[b][1])
+                    if d >= 0.5:
+                        edges.append((idx[a], idx[b], cap * d))
+        out.append({"nodes": nodes, "edges": edges, "flat": False,
+                    "flat_pairs": flat_pairs,
+                    "area": float(s.polygon.area),
+                    "role": s.role, "ref": s.ref or ""})
+    return out
+
+
+def _max_within_excess(elev, edges) -> float:
+    """Worst grade excess (|de| - cap, metres) over ``edges`` — the metric the
+    within-shape grade test sees.  No hard/soft skipping: a violation counts
+    wherever it lands."""
+    mx = 0.0
+    for (i, j, cap) in edges:
+        ex = abs(elev[i] - elev[j]) - cap
+        if ex > mx:
+            mx = ex
+    return mx
+
+
+def _relax_runway_and_resolve(n, elev, layout, bucket_to_idx, base_hard,
+                              shape_constraints, tol_m) -> int:
+    """Third pass (user 2026-05-28): if a within-shape grade violation remains
+    after the reverse pass, soften the runway INTERIOR (CIFP thresholds stay
+    hard) and re-run the difference-constraint band solve over the combined
+    pavement + runway grade graph, so an impossible apron<->runway connection
+    spreads over the runway's length instead of concentrating on a short
+    connector.  Commits ONLY if it strictly reduces the worst violation;
+    otherwise reverts (no regression).  Returns sweeps used."""
+    if not _RUNWAY_FLEX:
+        return 0
+    pav_edges = [e for sc in shape_constraints for e in sc["edges"]]
+    comply = max(tol_m, _SPREAD_COMPLY_TOL_M)
+    before = _max_within_excess(elev, pav_edges)
+    if before <= comply:
+        return 0                                  # already grade-compliant
+
+    rwy_constraints = _build_runway_constraints(layout, bucket_to_idx)
+    if not rwy_constraints:
+        return 0
+    thresh = _runway_threshold_nodes(layout, bucket_to_idx)
+    rwy_nodes: set = set()
+    for sc in rwy_constraints:
+        rwy_nodes.update(sc["nodes"])
+    soft = rwy_nodes - thresh
+    # Seam-pinned runway nodes stay HARD (seam terrain wins over CIFP).
+    seam_keys = getattr(layout, "_seam_anchor_keys", None) or set()
+    if seam_keys:
+        from ..layout import SHARED_VERTEX_TOL_M
+        bk_s = 1.0 / SHARED_VERTEX_TOL_M
+        for s in layout.shapes:
+            if s.role not in (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING):
+                continue
+            if s.polygon is None or s.polygon.is_empty:
+                continue
+            for (x, y) in _open_ring(list(s.polygon.exterior.coords)):
+                seam_bk = (int(round(x * bk_s)), int(round(y * bk_s)))
+                if seam_bk not in seam_keys:
+                    continue
+                idx = bucket_to_idx.get(
+                    layout.canonical_points.get_or_add(float(x), float(y)))
+                if idx is not None:
+                    soft.discard(idx)
+    if not soft:
+        return 0                                  # nothing to free
+
+    is_hard2 = list(base_hard)
+    for i in soft:
+        is_hard2[i] = False
+
+    all_edges = pav_edges + [e for sc in rwy_constraints for e in sc["edges"]]
+    coupling = _build_level_coupling(list(shape_constraints) + rwy_constraints)
+    terminal_nodes: set = set()
+    for sc in shape_constraints:
+        if sc["flat"]:
+            terminal_nodes.update(sc["nodes"])
+
+    snapshot = list(elev)
+    lo, hi = _grade_bands(n, elev, is_hard2, all_edges)
+    sweeps, _viol = _project_within_bands(
+        elev, all_edges, is_hard2, lo, hi, coupling,
+        held_extra=terminal_nodes, max_sweeps=1000, tol=comply)
+    after = _max_within_excess(elev, pav_edges)
+    if after >= before - comply:
+        elev[:] = snapshot                        # no real gain -> revert
+        return sweeps
+
+    # Commit: write the moved runway profile back.  ``_writeback`` skips clean
+    # 4-corner runway rects (keeps CIFP altitude_high/low) and never touches
+    # ROLE_RUNWAY_CROSSING at all, so a runway/crossing shape with a moved
+    # interior node must be converted to per-vertex ``node_altitudes`` here or
+    # its shared corner with the (written-back) junction would mismatch.  Only
+    # convert shapes that actually moved; threshold-end rects that didn't move
+    # keep their CIFP altitude_high/low.
+    for s in layout.shapes:
+        if s.role not in (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING):
+            continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        coords = list(s.polygon.exterior.coords)
+        ring_closed = bool(coords) and coords[0] == coords[-1]
+        coords_open = coords[:-1] if ring_closed else coords
+        moved = False
+        alts = []
+        for (x, y) in coords_open:
+            idx = bucket_to_idx.get(
+                layout.canonical_points.get_or_add(float(x), float(y)))
+            if idx is None:
+                alts = None
+                break
+            alts.append(round(float(elev[idx]), 1))
+            if idx in soft and abs(elev[idx] - snapshot[idx]) > comply:
+                moved = True
+        if not moved or alts is None:
+            continue
+        if ring_closed:
+            alts.append(alts[0])
+        s.node_altitudes = alts
+        s.altitude_high = None
+        s.altitude_low = None
+        s.altitude = None
+    return sweeps
 
 
 def _build_level_coupling(shape_constraints) -> dict:
