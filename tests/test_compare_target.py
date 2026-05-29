@@ -77,29 +77,33 @@ SPJC_BASELINE_TOTAL = 1263  # of 1330 target
 
 # SPLP is cross-tile (spans -13/-77 and -13/-78).  Each tile-half has
 # its own baseline; a regression in either half trips the gate.
+# Re-cut 2026-05-29 against the SMOOTHED (apt_smoothing_pix=8) DEM — the
+# surface production ships.  Previously cut with a RAW O4DEM, which adds
+# terrain roughness X-Plane never renders and produced different rect
+# splits (e.g. primary_parallel 5->7 here).  Floors = target - round(5%).
 SPLP_BASELINE_TILE_M77: Dict[str, int] = {
     "apron":              10,   # of  11 target
     "boundary":          200,   # of 211 target
     "cross_connector":     2,   # of   2 target
     "junction":            3,   # of   3 target
-    "primary_parallel":    5,   # of   5 target
+    "primary_parallel":    7,   # of   7 target
     "runway":              8,   # of   8 target
     "stub":                2,   # of   2 target
 }
-SPLP_BASELINE_TILE_M77_TOTAL = 236  # of 248 target
+SPLP_BASELINE_TILE_M77_TOTAL = 238  # of 250 target
 
 SPLP_BASELINE_TILE_M78: Dict[str, int] = {
     "apron":               4,   # of   4 target
     "boundary":          281,   # of 296 target
     "cross_connector":     1,   # of   1 target
     "junction":            9,   # of   9 target
-    "primary_parallel":    4,   # of   4 target
+    "primary_parallel":    7,   # of   7 target
     "runway":              8,   # of   8 target
-    "secondary_parallel":  3,   # of   3 target
+    "secondary_parallel":  4,   # of   4 target
     "stub":                4,   # of   4 target
     "terminal":            1,   # of   1 target
 }
-SPLP_BASELINE_TILE_M78_TOTAL = 317  # of 335 target
+SPLP_BASELINE_TILE_M78_TOTAL = 325  # of 342 target
 
 
 def _build_layout(icao: str, tile_lat=None, tile_lon=None):
@@ -180,6 +184,7 @@ def _run_compare(tmp_path: Path, icao: str,
         f"  per-role detail:\n{summary}")
 
 
+@pytest.mark.xdist_group("SPJC")
 def test_compare_target_spjc(tmp_path):
     """SPJC structural fidelity vs ``tests/fixtures/SPJC_target.osm``.
 
@@ -189,6 +194,7 @@ def test_compare_target_spjc(tmp_path):
                  SPJC_BASELINE, SPJC_BASELINE_TOTAL)
 
 
+@pytest.mark.xdist_group("SPLP")
 @pytest.mark.parametrize("tile_lat,tile_lon,baseline,baseline_total", [
     (-13, -77, SPLP_BASELINE_TILE_M77, SPLP_BASELINE_TILE_M77_TOTAL),
     (-13, -78, SPLP_BASELINE_TILE_M78, SPLP_BASELINE_TILE_M78_TOTAL),

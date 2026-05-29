@@ -65,17 +65,23 @@ def _build_cached(icao: str, compute_elevations: bool,
     ``pytest_collection_modifyitems`` below, all of an airport's tests
     run on one worker → exactly one build per airport per run.
 
-    The DEM object (per-tile builds) is constructed INSIDE so the cache
-    key stays hashable; ``tile_dem`` is fully determined by
-    ``(tile_lat, tile_lon)``.
+    The per-tile DEM is built INSIDE (so the cache key stays hashable) via
+    ``_load_airport_dem(tile_center)`` — the SMOOTHED (apt_smoothing_pix=8)
+    surface that production ships, the SAME one the grade test uses.
+    Previously this used a RAW ``O4DEM(... fill_nodata='to zero')``, which
+    produces a different surface (more terrain-extrema rect splits → e.g.
+    SPLP 259 vs 250 shapes) than what X-Plane renders.  Unifying on the
+    smoothed DEM makes every per-tile build (grade / compare_target /
+    tile_cut) production-accurate AND identical for a given tile, so they
+    all share ONE cached build per tile.
 
     NOTE: callers treat the returned layout as READ-ONLY — it is shared
     across every test for that airport.  Do not mutate it in place.
     """
     from auto_patch.pipeline import build_airport_pavement
     if tile_lat is not None and tile_lon is not None:
-        from O4_DEM_Utils import DEM as _DEM
-        dem = _DEM(tile_lat, tile_lon, fill_nodata="to zero")
+        from auto_patch.elevation import _load_airport_dem
+        dem = _load_airport_dem(tile_lat + 0.5, tile_lon + 0.5)
         return build_airport_pavement(
             icao, xplane_root(), compute_elevations=compute_elevations,
             tile_dem=dem, current_tile_lat=tile_lat,

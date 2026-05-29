@@ -77,33 +77,30 @@ _REQUIRES_FIXTURES = pytest.mark.skipif(
 
 
 @_REQUIRES_FIXTURES
+@pytest.mark.xdist_group("SPLP")
 def test_cross_tile_build_completes_with_sane_elevations():
-    """Build SPLP twice, once with each of its two tiles supplied as
-    the current build tile, with the matching tile_dem.  Both builds
-    must complete and produce elevations in a sensible range for
-    SPLP (sea-level coastal Peru, ~50-200 m).
+    """Build SPLP for each of its two tiles and check elevations are in
+    a sensible range for SPLP (sea-level coastal Peru, ~50-200 m).
 
     Pre-fix, the second build would index the wrong DEM row in
     per_surface_solve, producing garbage altitudes (very large or
     very negative) for shapes whose elevation was solver-derived.
-    """
-    from auto_patch.pipeline import build_airport_pavement
-    from O4_DEM_Utils import DEM
 
-    xp_root = _xplane_root()
+    Builds via the shared cache (conftest.cached_airport_layout) using
+    the SMOOTHED production DEM — the same per-tile layout the grade /
+    compare_target tests use, so the tile is built once per run.  Pinned
+    to the SPLP xdist group so it shares that worker's cache.
+    """
+    from conftest import cached_airport_layout
+
     # SPLP elevation range — Las Palmas sits ~50-200 m above sea
     # level.  Allow a generous +-200 m of slack.  The bug
     # would manifest as altitudes outside this range.
     ELEV_MIN, ELEV_MAX = -200.0, 400.0
 
     for tile_lat, tile_lon in [(-13, -77), (-13, -78)]:
-        dem = DEM(tile_lat, tile_lon, fill_nodata="to zero")
-        layout = build_airport_pavement(
-            "SPLP", xp_root, compute_elevations=True,
-            tile_dem=dem,
-            current_tile_lat=tile_lat,
-            current_tile_lon=tile_lon,
-        )
+        layout = cached_airport_layout(
+            "SPLP", tile_lat=tile_lat, tile_lon=tile_lon)
         assert layout.shapes, (
             f"tile ({tile_lat},{tile_lon}): no shapes emitted")
         for s in layout.shapes:
@@ -126,6 +123,7 @@ def test_cross_tile_build_completes_with_sane_elevations():
 
 
 @_REQUIRES_FIXTURES
+@pytest.mark.xdist_group("SPLP")
 def test_cross_tile_cut_edge_elevations_consistent():
     """SPLP straddles lon=-77.  Build for each tile and compare
     elevations at vertices adjacent to the cut (within 10 m of the
@@ -138,10 +136,6 @@ def test_cross_tile_cut_edge_elevations_consistent():
     DEM-indexing bugs, not subtle smoothing differences.  Tighten if
     a full MultiTileDEM refactor lands later.
     """
-    from auto_patch.pipeline import build_airport_pavement
-    from O4_DEM_Utils import DEM
-
-    xp_root = _xplane_root()
     # Tolerance bumped from 1.0 m to 2.5 m (2026-05-13): with the
     # seam-DEM HARD-anchor architecture, seam vertices themselves
     # match to 0.00 m between tiles (see
@@ -155,16 +149,11 @@ def test_cross_tile_cut_edge_elevations_consistent():
     TOL_M = 2.5  # near-cut altitude agreement tolerance
     NEAR_CUT_M = 15.0  # meters of either side of the boundary
 
+    from conftest import cached_airport_layout
     builds = {}
     for tile_lat, tile_lon in [(-13, -77), (-13, -78)]:
-        dem = DEM(tile_lat, tile_lon, fill_nodata="to zero")
-        layout = build_airport_pavement(
-            "SPLP", xp_root, compute_elevations=True,
-            tile_dem=dem,
-            current_tile_lat=tile_lat,
-            current_tile_lon=tile_lon,
-        )
-        builds[(tile_lat, tile_lon)] = layout
+        builds[(tile_lat, tile_lon)] = cached_airport_layout(
+            "SPLP", tile_lat=tile_lat, tile_lon=tile_lon)
 
     # Boundary at lon = -77.  Use anchor lat for cos(lat).
     lat0 = builds[(-13, -77)].anchor[0]
