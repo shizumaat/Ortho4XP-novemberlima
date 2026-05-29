@@ -1,4 +1,29 @@
-# Auto-Patch Status — session 54 HANDOVER (★ ENTIRE SUITE GREEN: 284 passed / 0 failed / 2 skipped, compare_target INCLUDED)
+# Auto-Patch Status — session 55 HANDOVER (★ ENTIRE SUITE GREEN: 284 passed / 0 failed / 2 skipped, compare_target INCLUDED)
+
+## Session 55 — dead-code prune in unified_jacobi (committed 701a463)
+Suite remained fully green; this session removed superseded solver
+machinery only (behaviour-neutral). Removed from
+`elevation_per_surface/unified_jacobi.py`:
+- `_RELIEF_OUTER_SWEEPS = 60` — referenced ONLY by a comment; the old
+  60-sweep relaxation it bounded is gone (replaced by the single reverse
+  pass + difference-constraint bands solve).
+- `_USE_LEAF_HIERARCHY` + the `parent_held` block in `_directional_relief`
+  — built a per-shape parent-interface hold set that the live reverse pass
+  NEVER consumes. The live pass (the `for k, sc in enumerate(order)` loop)
+  computes `held` inline from `settled` + `terminal_nodes`. `parent_held`
+  was assigned and discarded.
+- **Retained** (still live): `rank`, `mrank`, `depth`, `node_owners` — they
+  feed the `order_idx` hop-depth sort that orders the reverse pass.
+- **Verification:** repo-wide grep confirmed all 3 symbols were confined to
+  this one file; full suite 284 passed / 2 skipped / 0 failed (unchanged).
+
+**Remaining open / nice-to-have (suite green, none blocking):**
+- SPLP -78 taxiway A SW leg trim (geometry quality; LENGTH/TRIM at
+  `_split_centerlines_at_points`; off-center + absorption-guard both ruled
+  out — see MEMORY).
+- Runway seam clip directive 3 (runway-aware, no terrain-pin on slice nodes).
+- HECA over-collection / X-Plane crash (boundary-scope HEAZ surface attach).
+- Runway-flex Level-2 (seam>CIFP) implemented but unexercised by fixtures.
 
 ## Session 54 FINAL — full suite green
 `venv/bin/python -m pytest tests/ -q -n auto` → **284 passed / 2 skipped / 0 failed**
