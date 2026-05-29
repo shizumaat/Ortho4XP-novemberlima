@@ -86,17 +86,10 @@ A4_BASELINE: Dict[str, int] = {
 }
 
 
-_LAYOUT_CACHE: dict = {}
-
-
 def _build_layout(icao: str):
-    if icao in _LAYOUT_CACHE:
-        return _LAYOUT_CACHE[icao]
-    from auto_patch.pipeline import build_airport_pavement
-    layout = build_airport_pavement(
-        icao, xplane_root(), compute_elevations=True)
-    _LAYOUT_CACHE[icao] = layout
-    return layout
+    # Shared session cache (conftest) — built once per airport per run.
+    from conftest import cached_airport_layout
+    return cached_airport_layout(icao)
 
 
 def _rect_sloping_edges_from_shape(shape) -> List[

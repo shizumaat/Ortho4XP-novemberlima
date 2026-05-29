@@ -95,10 +95,10 @@ def test_boundary_bridge_flush_with_ribbon_at_shared_vertices():
     vertex must agree in altitude within ``_WALL_TOL_M``.
     """
     from auto_patch.layout import ROLE_BOUNDARY
-    from auto_patch.pipeline import build_airport_pavement
+    from conftest import cached_airport_layout
 
-    layout = build_airport_pavement(
-        "CYXY", xplane_root(), compute_elevations=True)
+    # Shared session cache — built once per airport per run.
+    layout = cached_airport_layout("CYXY")
 
     ribbons, bridges = [], []
     for s in layout.shapes:
@@ -162,10 +162,10 @@ def test_no_shape_crosses_airport_boundary():
     entirely inside the line and pavement is clipped back to the ribbon's
     inner edge, so every non-boundary shape stays within row-130."""
     from auto_patch.boundary import find_boundary_crossings
-    from auto_patch.pipeline import build_airport_pavement
+    from conftest import cached_airport_layout
 
-    layout = build_airport_pavement(
-        "CYXY", xplane_root(), compute_elevations=True)
+    # Shared session cache — built once per airport per run.
+    layout = cached_airport_layout("CYXY")
     if layout.airport_boundary is None or layout.airport_boundary.is_empty:
         pytest.skip("CYXY has no usable row-130 boundary to gate against")
     crossings = find_boundary_crossings(layout)
@@ -184,10 +184,10 @@ def test_ribbon_flush_with_pavement_at_shared_vertices():
     seam vertex (``_conform_ribbon_to_pavement_seam``), so co-located
     ribbon/pavement vertices agree in altitude within ``_WALL_TOL_M``."""
     from auto_patch.layout import ROLE_BOUNDARY
-    from auto_patch.pipeline import build_airport_pavement
+    from conftest import cached_airport_layout
 
-    layout = build_airport_pavement(
-        "CYXY", xplane_root(), compute_elevations=True)
+    # Shared session cache — built once per airport per run.
+    layout = cached_airport_layout("CYXY")
 
     rib_pts, pav_pts = [], []
     for s in layout.shapes:

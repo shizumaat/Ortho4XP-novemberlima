@@ -35,9 +35,9 @@ _SURFACE_ROLES = {"runway", "runway_crossing", "primary_parallel",
 
 
 def _build(icao):
-    from auto_patch.pipeline import build_airport_pavement
-    return build_airport_pavement(icao, xplane_root(),
-                                  compute_elevations=True)
+    # Shared session cache (conftest) — built once per airport per run.
+    from conftest import cached_airport_layout
+    return cached_airport_layout(icao)
 
 
 def _open(poly):

@@ -47,6 +47,51 @@ def xplane_available() -> bool:
             and os.path.isdir(os.path.join(root, "Custom Data", "CIFP")))
 
 
+import functools
+
+
+@functools.lru_cache(maxsize=None)
+def _build_cached(icao: str, compute_elevations: bool,
+                  tile_lat, tile_lon):
+    """Build one airport layout, memoised for the worker's session.
+
+    A full ``build_airport_pavement`` is the dominant cost of the suite
+    (each airport ~30-60 s of geometry + elevation solve), and many
+    test modules each need the SAME layout.  This single shared cache
+    replaces the per-module ``_LAYOUT_CACHE`` dicts (and the modules
+    that rebuilt per-test) so every (icao, params) combination is built
+    AT MOST ONCE per worker process.  Combined with ``--dist loadgroup``
+    + the per-airport ``xdist_group`` assigned in
+    ``pytest_collection_modifyitems`` below, all of an airport's tests
+    run on one worker → exactly one build per airport per run.
+
+    The DEM object (per-tile builds) is constructed INSIDE so the cache
+    key stays hashable; ``tile_dem`` is fully determined by
+    ``(tile_lat, tile_lon)``.
+
+    NOTE: callers treat the returned layout as READ-ONLY — it is shared
+    across every test for that airport.  Do not mutate it in place.
+    """
+    from auto_patch.pipeline import build_airport_pavement
+    if tile_lat is not None and tile_lon is not None:
+        from O4_DEM_Utils import DEM as _DEM
+        dem = _DEM(tile_lat, tile_lon, fill_nodata="to zero")
+        return build_airport_pavement(
+            icao, xplane_root(), compute_elevations=compute_elevations,
+            tile_dem=dem, current_tile_lat=tile_lat,
+            current_tile_lon=tile_lon)
+    return build_airport_pavement(
+        icao, xplane_root(), compute_elevations=compute_elevations)
+
+
+def cached_airport_layout(icao: str, *, compute_elevations: bool = True,
+                          tile_lat=None, tile_lon=None):
+    """Session-cached ``build_airport_pavement`` shared by all test
+    modules.  See :func:`_build_cached`.  Treat the result as read-only.
+    """
+    return _build_cached(icao, compute_elevations, tile_lat, tile_lon)
+
+
 def is_tile_seam_vertex(layout, x: float, y: float,
                         tol_m: Optional[float] = None) -> bool:
     """True if local-metre point ``(x, y)`` lies on a tile-cut seam.
@@ -161,7 +206,21 @@ def _discover_airports_in_tile(lat: int, lon: int) -> List[str]:
 
 
 def pytest_collection_modifyitems(config, items):
-    """When ``O4_SHIP_MODE=1``, skip every collected test."""
+    """Per-airport xdist grouping + optional ship-mode skip.
+
+    Under ``--dist loadgroup`` (set in ``pytest.ini``), tests sharing an
+    ``xdist_group`` run on the SAME worker.  Assigning every airport-
+    parametrised test the group ``<icao>`` makes all of an airport's
+    tests land on one worker, so the shared :func:`cached_airport_layout`
+    builds each airport exactly once per run (instead of once per worker
+    that happened to pick up one of its tests).
+    """
+    for item in items:
+        icao = item.callspec.params.get("icao") if hasattr(
+            item, "callspec") else None
+        if isinstance(icao, str) and icao:
+            item.add_marker(pytest.mark.xdist_group(icao))
+
     if os.environ.get("O4_SHIP_MODE", "0") == "1":
         skip_marker = pytest.mark.skip(
             reason="O4_SHIP_MODE=1 (tests disabled for shipping)")

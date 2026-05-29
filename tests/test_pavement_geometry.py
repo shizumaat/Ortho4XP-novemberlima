@@ -116,9 +116,9 @@ COVERAGE_OVERAGE_CAP_FRAC = {
 
 
 def _build_layout(icao: str):
-    from auto_patch.pipeline import build_airport_pavement
-    return build_airport_pavement(icao, _xplane_root(),
-                                   compute_elevations=True)
+    # Shared session cache (conftest) — built once per airport per run.
+    from conftest import cached_airport_layout
+    return cached_airport_layout(icao)
 
 
 def _source_pavement_union(icao: str):

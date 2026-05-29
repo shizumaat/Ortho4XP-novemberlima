@@ -91,8 +91,9 @@ def _airport_tiles(icao: str, root: str):
     superset (user 2026-05-23).
     """
     import math
-    from auto_patch.pipeline import build_airport_pavement
-    layout = build_airport_pavement(icao, root, compute_elevations=False)
+    # Shared session cache (conftest) — geometry-only footprint build.
+    from conftest import cached_airport_layout
+    layout = cached_airport_layout(icao, compute_elevations=False)
     lats: list = []
     lons: list = []
     for s in layout.shapes:

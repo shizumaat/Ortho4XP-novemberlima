@@ -103,17 +103,11 @@ SPLP_BASELINE_TILE_M78_TOTAL = 317  # of 335 target
 
 
 def _build_layout(icao: str, tile_lat=None, tile_lon=None):
-    from auto_patch.pipeline import build_airport_pavement
-    if tile_lat is not None and tile_lon is not None:
-        from O4_DEM_Utils import DEM as O4DEM
-        dem = O4DEM(tile_lat, tile_lon, fill_nodata="to zero")
-        return build_airport_pavement(
-            icao, xplane_root(), compute_elevations=True,
-            tile_dem=dem,
-            current_tile_lat=tile_lat,
-            current_tile_lon=tile_lon)
-    return build_airport_pavement(icao, xplane_root(),
-                                   compute_elevations=True)
+    # Shared session cache (conftest) — built once per (airport, tile)
+    # per run; the DEM is constructed inside the cache from tile_lat/lon.
+    from conftest import cached_airport_layout
+    return cached_airport_layout(
+        icao, tile_lat=tile_lat, tile_lon=tile_lon)
 
 
 def _run_compare(tmp_path: Path, icao: str,
