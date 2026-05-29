@@ -1,4 +1,33 @@
-# Auto-Patch Status — session 54 HANDOVER (runway-flex third pass: all 3 grade tests now PASS; suite 5→2; only 2 pre-existing GEOMETRY tests left)
+# Auto-Patch Status — session 54 HANDOVER (runway-flex + 2 geometry fixes: non-compare_target suite FULLY GREEN, 281 passed / 0 failed; compare_target re-cut now unblocked)
+
+## Session 54 — geometry fixes after the runway-flex work (committed a5159ae + 62321ff)
+The two remaining pre-existing GEOMETRY failures are FIXED; the non-compare_target
+suite is now **281 passed / 2 skipped / 0 failed**.
+- **CYXY `test_junction_runway_node_sharing`** (a5159ae): junction#51 had an
+  orphan vertex 1.0 m off the 14L/32R runway edge, 1.89 m from the corner — a
+  `boundary_dem_bridge` edge-clearance vertex (bridge clears rects by
+  `buffer(1.0)`) that `_insert_bridge_contacts_into_junctions` planted on the
+  junction edge. `_snap_bridge_vertices_to_runway_corners`'s `snap_tol_m` was
+  1.5 m < 1.89 m, so it missed it. **Fix = widen `snap_tol_m` to 2.0 m** so the
+  vertex collapses onto the runway corner (satisfies Rule 1 + neighbour_corners).
+- **SPJC `test_rect_short_edges_connect`** (62321ff): two discovered (medial-axis
+  "TX") lanes with a dangling short edge. **TX20** dead-ends ~74 m from anything
+  — a genuine isolated dead-end (user confirmed real pavement); the TEST now
+  EXEMPTS a discovered lane's dangling end when it connects at the other end AND
+  both corners are > 25 m from any vertex. **TX15** ends 9.9 m SHORT of residue
+  junction #132 (medial centerline terminates early; connected pre-solve, severed
+  by a post-solve reshaping pass) — a MISSING CONNECTION. New
+  `junction_repair._connect_discovered_lane_dead_ends_to_junctions` (post-solve,
+  pre-weld) bridges the lane's end corners to the junction's nearest EXISTING
+  edge (sourced vertices only) + resamples node_altitudes; weld/emit reconcile.
+
+## NEXT: re-cut compare_target fixtures (now unblocked)
+With the non-compare_target suite green, re-cut the 3 hand-drawn fixtures that
+drifted (SPJC + SPLP×2) via `tools/build_target_osm.py` (see the COMMITTED
+workflow in the old memory `done_spjc_splp_compare_target`). SPJC geometry shifted
+(V dropped in s53, TX15 connected in s54) so its target needs refreshing.
+
+## (s54 earlier) runway-flex third pass (all 3 grade tests now PASS; suite 5→2)
 
 > **READ FIRST:**
 > 1. `docs/pipeline_invariants.md` — the agreed working spec (8 invariant sections, A1–H28).
@@ -218,16 +247,12 @@ edge) — needs apron decomposition, a separate piece.
   seed BFS (`seam ∈ base_hard AND ∉ runway_nodes`). SPJC's seam doesn't cross
   runway, so runway stays top priority there.
 
-## Current test failures (2, both PRE-EXISTING GEOMETRY — NEXT SESSION)
-```
-FAILED tests/test_pavement_geometry.py::test_rect_short_edges_connect[SPJC]
-FAILED tests/test_junction_rules.py::test_junction_runway_node_sharing[CYXY]
-```
-Both were failing at session-54 start (geometry invariants, NOT grade). All three
-`test_pavement_grade` tests now PASS (session 54). These two are the next target —
-neither is elevation/grade related:
-- `rect_short_edges_connect[SPJC]` — a taxi rect's short edges not connecting cleanly.
-- `runway_node_sharing[CYXY]` — junction vs runway shared-node mismatch.
+## Current test failures: NONE (non-compare_target)
+`venv/bin/python -m pytest tests/ -q -k "not compare_target" -n auto` →
+**281 passed / 2 skipped / 0 failed** (≈3 min). The 2 skips are env-gated
+(`test_elevation_terrain_following` needs O4_TEST_TILE; `test_boundary` CYXY
+ribbon-share). `compare_target` (3 fixtures) is excluded during dev and is the
+only remaining work — re-cut per the section above.
 Build per-tile with smoothed DEM to reproduce grade numbers; whole-airport build
 mis-samples the seam — use the grade test or `/tmp/grade_detail.py`.
 
