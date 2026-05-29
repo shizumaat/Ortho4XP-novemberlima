@@ -1,13 +1,50 @@
-# Auto-Patch Status — session 53 HANDOVER (junction-along-sloping-edge CLIFF fixed; suite 7→5; next = remaining failing tests)
+# Auto-Patch Status — session 54 HANDOVER (runway-flex third pass: all 3 grade tests now PASS; suite 5→2; only 2 pre-existing GEOMETRY tests left)
 
 > **READ FIRST:**
 > 1. `docs/pipeline_invariants.md` — the agreed working spec (8 invariant sections, A1–H28).
 > 2. `docs/elevation_solver.md` — solver model (the directional two-pass + difference-constraint solve below supersede the old cascade/relief framing).
-> 3. This file — what sessions 52–53 changed and what's next.
+> 3. This file — what sessions 52–54 changed and what's next.
 >
-> **Working tree:** session-53 work committed. Suite:
-> **5 failed / 276 passed / 2 skipped** (`venv/bin/python -m pytest tests/ -q -k "not compare_target" -n auto` ≈ 0:50).
-> Down from the 7-fail session-52/53-start baseline — no regressions.
+> **Working tree:** session-54 work committed (15298cb, 89a2b84). Suite:
+> **2 failed / 279 passed / 2 skipped** (`venv/bin/python -m pytest tests/ -q -k "not compare_target" -n auto` ≈ 1:31).
+> The 2 remaining are PRE-EXISTING GEOMETRY tests (no grade test fails anymore).
+
+## Session 54 — runway-flex third pass (committed 89a2b84 + 15298cb)
+The runway profile is DERIVED from the DEM (interpolated between CIFP threshold
+anchors); the DEM is the least-accurate input. When a junction/stub can't reach
+grade because it's wedged between a soft apron and a runway-anchored node the
+DEM dipped (CYXY 14R/32L dips ~3 m to 691.4 at the 02/20 intersection → stub A
+8.9 %), the impossible connection has nowhere to go while EVERY runway node is
+HARD. **Fix = a gated third pass `_relax_runway_and_resolve` in unified_jacobi
+(after the reverse pass):**
+- **Level 1 — free the runway INTERIOR** (CIFP thresholds + seam-pinned nodes
+  stay HARD), add the runway grade-chain (`_build_runway_constraints`: long
+  edges axial @1.5%, short edges flat+coupled; crossings all-pair), re-run the
+  difference-constraint band solve. The DEM dip rises toward the junction and
+  the gap spreads over the runway's length.
+- **Level 2 — seam > CIFP last resort** (user 2026-05-28): ONLY when a
+  tile-boundary seam exists and Level 1 didn't help, ALSO release the CIFP
+  THRESHOLD endpoints so the whole runway yields to the seam terrain when the
+  runway↔seam connection is physically infeasible (band lo>hi). Seam-pinned
+  runway nodes never move. **Currently UNEXERCISED by fixtures** (SPLP solves at
+  Level 1) — it's the defined safety net, low-risk but untested-by-suite.
+- **Commit metric (the SPLP unlock):** accept a level iff it reduces the
+  violation COUNT/TOTAL without worsening the worst (`_within_excess_stats`).
+  The old "worst must improve" guard let an unrelated stubborn junction VETO a
+  real fix. On commit, moved runway/crossing shapes are written back as
+  `node_altitudes` (writeback skips clean runway rects / never touches
+  crossings) so the runway side agrees with the shared junction.
+
+**Results:** CYXY 14R/32L interior 691.4→~694.5 (thresholds 693.8/706.3 pinned);
+SPLP runway interior near stub A 73.3→70.8 (interior, NOT a threshold — Level 1).
+grade[CYXY] + grade[SPJC] + grade[SPLP] all PASS. **Suite 5→2**, no regressions.
+
+**Correction to prior STATUS hypotheses:** CYXY and SPLP stub A were NOT "one
+shared mechanism." CYXY = runway-DEM-dip (Level-1 fix). SPLP = a runway-interior
+node 2.5 m too high vs a seam node (62 m) too close to grade; the blocker was the
+commit METRIC, not threshold pinning. Both the "STEP 3 shift runway thresholds"
+note and the SPLP-emit-consensus NEXT-ACTION are now resolved (SPLP = 0 cross +
+0 within).
 
 ## Session 53 — SPJC junction-along-sloping-edge cliff (committed)
 User report: SPJC `primary_parallel/V` (shape #15) survived as a sloping rect with
@@ -181,23 +218,18 @@ edge) — needs apron decomposition, a separate piece.
   seed BFS (`seam ∈ base_hard AND ∉ runway_nodes`). SPJC's seam doesn't cross
   runway, so runway stays top priority there.
 
-## Current test failures (5, all pre-existing geometry/grade — NEXT SESSION)
+## Current test failures (2, both PRE-EXISTING GEOMETRY — NEXT SESSION)
 ```
 FAILED tests/test_pavement_geometry.py::test_rect_short_edges_connect[SPJC]
 FAILED tests/test_junction_rules.py::test_junction_runway_node_sharing[CYXY]
-FAILED tests/test_pavement_grade.py::test_pavement_grade[SPLP]   # stub/A + 4 cross @0.2m emit-consensus
-FAILED tests/test_pavement_grade.py::test_pavement_grade[CYXY]   # stub/A 8.9% (Δ3.9m) + apron/-10055 3.0%
-FAILED tests/test_pavement_grade.py::test_pavement_grade[SPJC]   # junction/-10122 4.7% (tight)
 ```
-Per-tile binding grade numbers (build per-tile with smoothed DEM; whole-airport build
-mis-samples the seam — use the grade test or `/tmp/grade_detail.py`):
-- **CYXY** stub/A #21 = 8.9% over 43.7 m (Δ3.9 m) — biggest REAL violation; connector
-  absorbing a large apron↔runway gap, reverse pass not spreading it. + apron/-10055 3.0%.
-- **SPLP** stub/A #6 = 6.6% (Δ1.3 m, same stub mechanism) + 4 cross @ 0.20 m (emit-consensus
-  at shared corners — NEXT-ACTION #1 below).
-- **SPJC** junction/-10122 = 4.7% over 8.6 m (Δ0.4 m, tight junction internal).
-The two `stub/A` over-grades (CYXY+SPLP) look like one shared mechanism and are the biggest
-real win. `rect_short_edges_connect[SPJC]` + `runway_node_sharing[CYXY]` are geometry.
+Both were failing at session-54 start (geometry invariants, NOT grade). All three
+`test_pavement_grade` tests now PASS (session 54). These two are the next target —
+neither is elevation/grade related:
+- `rect_short_edges_connect[SPJC]` — a taxi rect's short edges not connecting cleanly.
+- `runway_node_sharing[CYXY]` — junction vs runway shared-node mismatch.
+Build per-tile with smoothed DEM to reproduce grade numbers; whole-airport build
+mis-samples the seam — use the grade test or `/tmp/grade_detail.py`.
 
 ## User algorithm spec (verbatim, 2026-05-28) — keep within reach
 > Terminals must be flat, and aprons must conform to their vertices. The
