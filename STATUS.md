@@ -1,5 +1,66 @@
 # Auto-Patch Status — session 55 HANDOVER (★ ENTIRE SUITE GREEN: 284 passed / 0 failed / 2 skipped, compare_target INCLUDED)
 
+## Session 55 — build/test PERFORMANCE pass (committed 6140f46, 6d8900d, fc53573, f6ad4fb) + shared build cache (bd728b5)
+Profiled the per-airport build (the dominant suite cost; tests themselves
+are ~10s/airport). HECA build 70.7s → 54.6s; full HECA suite 590s (pre-cache)
+→ 285s → 204s; default suite ~104s → ~84s. All changes verified
+output-identical (no behaviour change); suite stays 284/0/2.
+- **Where the build time goes (HECA, real):** elevation solver (Jacobi)
+  ~30s, clearance emit ~26s, terrain-transition ~7s, discover-taxiways ~4s,
+  apt.dat select ~2.5s. DEM load already cached (`_DEM_CACHE`).
+- **#1 clearance vectorize (6140f46):** `clearance._resample_alts_over_strips`
+  was O(V·all-edges) 11.7M shapely ops → STRtree `dwithin` query for the few
+  candidate edges + same projection. Proven identical: 4000 randomized A/B
+  trials, 0 mismatch. 20.9s → 7.9s.
+- **#2 apt index persist (6d8900d):** `apt_dat_reader` now pickles its
+  header index to a temp file (`_APT_DAT_PERSIST_PATH`, keyed by
+  path+mtime+size, self-healing/corruption-tolerant). First scan 2.67s →
+  warm 23ms across processes/workers/sessions. Bump the `_v1` filename if
+  the cached tuple's meaning changes.
+- **#3 solver hoist (fc53573):** `_project_within_bands`/`_project_shape`
+  precompute loop-invariant `held`/`members` once instead of per-edge-
+  per-sweep. Bit-identical (HECA altitude sha unchanged). 59.7s → 54.6s.
+- **#4 grade-reuse (f6ad4fb):** `test_pavement_grade` reuses the cached
+  layout for SINGLE-TILE airports (per-tile build is bit-identical when no
+  integer line crosses the footprint). Saves a redundant ~55s build per
+  single-tile airport. Multi-tile (SPLP) still builds per tile.
+- **Test infra (bd728b5):** one shared session layout cache in
+  `conftest.cached_airport_layout` (lru, keyed icao+compute_elevations+tile)
+  replaces the per-module/per-test rebuilds; `pytest.ini` adds
+  `--dist loadgroup` + a collection hook tagging each airport-parametrised
+  test `xdist_group=<icao>` so an airport builds once per run. NOTE: plain
+  `--dist load` is SLOWER (178s vs 102s) — it duplicates the same build
+  across workers; loadgroup is correct. Remaining full-suite bottleneck =
+  **SPLP's genuinely-distinct per-tile builds** (grade/compare/tile_cut,
+  different DEMs) serialized on one worker; only a cross-worker disk cache
+  would parallelize them (deferred — high risk, uncertain gain).
+
+## Session 55 — HECA issue catalogue + coverage fix (committed 0ffb8f6)
+HECA is NOT in the automated baseline (`_BASELINE_AIRPORTS` = SPJC/SPLP/CYXY);
+it's a manual build/X-Plane target. Built standalone (no crash, 2407 shapes,
+all valid) and ran the invariant suite via `O4_TEST_AIRPORTS=HECA`:
+**8 failures remain** (was 9). The original HEAZ-over-collection X-Plane
+crash appears RESOLVED by the committed boundary gate (build reports 0
+off-airport / 0 overlay dropped). Open HECA failures (tracked tasks 2-5):
+1. **Coverage (#1) — FIXED (0ffb8f6):** `test_coverage_within_source_envelope`
+   measured emitted vs apt.dat+runways ONLY, omitting DSF pavement (a
+   first-class source). HECA emitted +54.9% vs apt-only but only +7.4% vs
+   apt+DSF, 0.3% outside boundary = legitimate DSF, not over-collection.
+   `_source_pavement_union` now adds boundary-clipped DSF. Adding source
+   area only lowers overage → no airport can newly fail.
+2. **Within-shape grade — 74 viol:** giant aprons exceed 1.5% over their
+   whole span (apron#273 632m@1.6%, apron#209 255m@1.9%; junction#241/243).
+   Apron-decomposition piece.
+3. **Junction connectivity cluster (5 tests):** 170 orphan junction vertices
+   (no source within 0.5m/edge 1.0m); Rule-2 proximity (6); vertex-on-
+   sloping-edge (2, t≈0.99); neighbour_corners (1); rect_short_edges (1,
+   primary_parallel TX52 end_B). Suspect 93 junction→apron reclassification +
+   neck-split + discovered-TX rects.
+4. **terminal#9 (terminal10)** carries node_altitudes (9) — H26 wants flat.
+5. **Self-overlap** 3 pairs 1.9 m²; + build warnings (6 T-junctions + 3 edge
+   crossings → mesh slivers; 8 dropped sliver/invalid polygons; DEM extrema
+   −19/425 vs real ~42-165m).
+
 ## Session 55 — dead-code prune in unified_jacobi (committed 701a463)
 Suite remained fully green; this session removed superseded solver
 machinery only (behaviour-neutral). Removed from
