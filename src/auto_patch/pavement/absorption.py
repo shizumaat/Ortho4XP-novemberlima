@@ -212,6 +212,16 @@ def _drop_primary_parallels_embedded_in_pavement(
     # any runway (SPJC E, CYXY E / G — apron-internal parallels
     # with no runway anchor).
     CORRIDOR_TO_RUNWAY_M = 160.0
+    # (user 2026-05-28) Corridor preservation is OVERRIDDEN when a
+    # junction/apron runs flush along this fraction of a long edge:
+    # "if there's a junction along a rect's sloping edge, the rect
+    # should be clipped or dropped to let the junction take that
+    # place" — leaving the rect there makes a downstream pass push the
+    # junction off the edge, opening a bare-pavement cliff (SPJC
+    # taxiway V).  A runway-anchored corridor running alongside a
+    # RUNWAY is unaffected: the runway is subtracted from junction_pav,
+    # so the runway side never reads as adjacent.
+    CORRIDOR_OVERRIDE_FRAC = 0.6
     runway_union_for_corridor = None
     if runway_polys:
         try:
@@ -327,23 +337,10 @@ def _drop_primary_parallels_embedded_in_pavement(
         if half_w < 1.0:
             kept.append(entry)
             continue
-        # Corridor preservation: if at least one short-edge midpoint
-        # is within ``CORRIDOR_TO_RUNWAY_M`` of any runway, this rect
-        # is a runway-anchored corridor.  Skip the absorption probe
-        # — the apron seam along one long edge is the expected
-        # apron-to-corridor transition, not a slope conflict.
-        if runway_union_for_corridor is not None:
-            try:
-                d_a = Point(a_mid[0], a_mid[1]).distance(
-                    runway_union_for_corridor)
-                d_b = Point(b_mid[0], b_mid[1]).distance(
-                    runway_union_for_corridor)
-            except _GEOM_EXC:
-                d_a = d_b = float("inf")
-            if min(d_a, d_b) <= CORRIDOR_TO_RUNWAY_M:
-                kept.append(entry)
-                continue
 
+        # Probe junction-pav adjacency along the rect's axis FIRST so
+        # the corridor heuristic below can see whether a junction runs
+        # flush along a long edge (override case).
         n_steps = max(2, int(L / SAMPLE_STEP_M) + 1)
         either_adj = [False] * n_steps
         outer = half_w + OUTER_PROBE_M
@@ -360,6 +357,37 @@ def _drop_primary_parallels_embedded_in_pavement(
                     bool(junction_pav.contains(left_pt))
                     or bool(junction_pav.contains(right_pt)))
             except _GEOM_EXC:
+                continue
+
+        # Longest contiguous adjacent run (fraction of axis): a long
+        # run means a junction/apron walks most of a long edge.
+        _run = _best_run = 0
+        for adj in either_adj:
+            _run = _run + 1 if adj else 0
+            if _run > _best_run:
+                _best_run = _run
+        long_run_adjacent = _best_run >= CORRIDOR_OVERRIDE_FRAC * n_steps
+
+        # Corridor preservation: if at least one short-edge midpoint
+        # is within ``CORRIDOR_TO_RUNWAY_M`` of any runway, this rect
+        # is a runway-anchored corridor.  Skip the absorption probe
+        # — the apron seam along one long edge is the expected
+        # apron-to-corridor transition, not a slope conflict.  UNLESS
+        # a junction runs flush along most of a long edge
+        # (``long_run_adjacent``): then the user's clip/drop rule wins
+        # over corridor preservation (else the junction gets pushed
+        # off the edge and leaves a cliff — SPJC taxiway V).
+        if (runway_union_for_corridor is not None
+                and not long_run_adjacent):
+            try:
+                d_a = Point(a_mid[0], a_mid[1]).distance(
+                    runway_union_for_corridor)
+                d_b = Point(b_mid[0], b_mid[1]).distance(
+                    runway_union_for_corridor)
+            except _GEOM_EXC:
+                d_a = d_b = float("inf")
+            if min(d_a, d_b) <= CORRIDOR_TO_RUNWAY_M:
+                kept.append(entry)
                 continue
 
         # Find contiguous "either-side adjacent" runs ≥ 10 % of axis.

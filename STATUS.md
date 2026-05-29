@@ -1,13 +1,48 @@
-# Auto-Patch Status — session 52 HANDOVER (DIFFERENCE-CONSTRAINT solve landed; grade violations collapsed; small emit-consensus residuals remain)
+# Auto-Patch Status — session 53 HANDOVER (junction-along-sloping-edge CLIFF fixed; suite 7→5; next = remaining failing tests)
 
 > **READ FIRST:**
 > 1. `docs/pipeline_invariants.md` — the agreed working spec (8 invariant sections, A1–H28).
 > 2. `docs/elevation_solver.md` — solver model (the directional two-pass + difference-constraint solve below supersede the old cascade/relief framing).
-> 3. This file — what session 52 changed and what's next.
+> 3. This file — what sessions 52–53 changed and what's next.
 >
-> **Working tree:** session-52 work committed (HEAD `1158282`). Suite:
-> **8 failed / 273 passed / 2 skipped** (`venv/bin/python -m pytest tests/ -q -k "not compare_target" -n auto` ≈ 1:00).
-> No regressions vs the session-51 baseline; `test_no_self_overlap[SPLP]` now passes.
+> **Working tree:** session-53 work committed. Suite:
+> **5 failed / 276 passed / 2 skipped** (`venv/bin/python -m pytest tests/ -q -k "not compare_target" -n auto` ≈ 0:50).
+> Down from the 7-fail session-52/53-start baseline — no regressions.
+
+## Session 53 — SPJC junction-along-sloping-edge cliff (committed)
+User report: SPJC `primary_parallel/V` (shape #15) survived as a sloping rect with
+junction #146 running its WHOLE long edge, leaving a small bare-pavement cliff ("past
+builds had this as one large junction").
+
+**Root cause (fully traced):** `junction = pav_union − rects` is FLUSH against the rect
+edge (raw residue shares 304/332 m at distance 0.00). The cliff is opened later by
+`_push_junction_vertices_off_taxi_rect_edges` (`pavement/vertices.py:201`, called inside
+`_compute_elevations` ~elevation.py 1198/1229): `edge_gap_m=1.0` shoves each junction
+vertex within 0.5 m of a rect sloping-edge INTERIOR 1.0 m outside → ~0.79 m bare strip.
+The push is correct for a STRAY vertex (would split the rect hi/lo plane) but wrong when a
+junction runs the WHOLE edge. V survived construction-time dropping only because the
+corridor heuristic in `_drop_primary_parallels_embedded_in_pavement` preserves any rect
+within 160 m of a runway (V is runway-anchored).
+
+**Fix (per user directive "clip/drop the rect, don't push the junction"):** ONE focused
+change in `pavement/absorption.py` — added `CORRIDOR_OVERRIDE_FRAC=0.6`; corridor
+preservation is overridden when a junction/apron runs flush along ≥60% of a long edge
+(longest contiguous `either_adj` run). V is then dropped/clipped at CONSTRUCTION and
+`junction = pav − rects` wraps the area cleanly — no merge/bridge/interior-edge artifacts.
+Runway-side corridors are unaffected (runway is subtracted from `junction_pav`, never reads
+adjacent). Result: cliff gone; **suite 7→5** (also cleared baseline
+`vertices_outside_pavement[SPJC]` + `no_long_edge_proximity[SPJC]`); zero new failures.
+
+**Rejected (see memory `junction_along_sloping_edge_cliff.md`):** (1) re-enable
+`ABSORB_RECTS_ALONGSIDE_APRONS` — `source_axis` mis-ID premise is STALE (1 rect now, not
+14); absorb-ON went 7→11, post-absorb-reclassify recovered to 8, rest = strip-corner float.
+(2) post-emit `_absorb_rects_fully_under_junction` merge — fixed cliff but 7→7 (swapped
+failures) from interior-short-edge + bridge artifacts. Construction-time override is
+strictly better.
+
+**compare_target:** still 3 fails (SPJC + SPLP×2) — PRE-EXISTING (identical on clean HEAD),
+but SPJC geometry shifted (V dropped) so they'll need re-cutting once the suite is otherwise
+green (`tools/build_target_osm.py`).
 
 ## TL;DR / where to start
 Session 52 built the elevation solver out and cleaned up spurious discovered
@@ -146,20 +181,23 @@ edge) — needs apron decomposition, a separate piece.
   seed BFS (`seam ∈ base_hard AND ∉ runway_nodes`). SPJC's seam doesn't cross
   runway, so runway stays top priority there.
 
-## Current test failures (9, all real geometry/grade, no regressions)
+## Current test failures (5, all pre-existing geometry/grade — NEXT SESSION)
 ```
-FAILED tests/test_pavement_geometry.py::test_no_self_overlap[SPLP]
-FAILED tests/test_junction_rules.py::test_junction_vertices_outside_pavement[SPJC]
-FAILED tests/test_junction_invariants.py::test_junction_vertices_have_source[SPJC]
 FAILED tests/test_pavement_geometry.py::test_rect_short_edges_connect[SPJC]
 FAILED tests/test_junction_rules.py::test_junction_runway_node_sharing[CYXY]
-FAILED tests/test_junction_rules.py::test_junction_no_long_edge_proximity[SPJC]
-FAILED tests/test_pavement_grade.py::test_pavement_grade[SPLP]   # 1 cross (rect iface)
-FAILED tests/test_pavement_grade.py::test_pavement_grade[CYXY]   # 60 within (apron/junction internal)
-FAILED tests/test_pavement_grade.py::test_pavement_grade[SPJC]   # 59 cross (sloped-rect ifaces)
+FAILED tests/test_pavement_grade.py::test_pavement_grade[SPLP]   # stub/A + 4 cross @0.2m emit-consensus
+FAILED tests/test_pavement_grade.py::test_pavement_grade[CYXY]   # stub/A 8.9% (Δ3.9m) + apron/-10055 3.0%
+FAILED tests/test_pavement_grade.py::test_pavement_grade[SPJC]   # junction/-10122 4.7% (tight)
 ```
-The 3 grade tests should clear once the sloped-rect emit consensus + apron
-internal-grade are fixed. The other 6 are geometry issues (re-triage after).
+Per-tile binding grade numbers (build per-tile with smoothed DEM; whole-airport build
+mis-samples the seam — use the grade test or `/tmp/grade_detail.py`):
+- **CYXY** stub/A #21 = 8.9% over 43.7 m (Δ3.9 m) — biggest REAL violation; connector
+  absorbing a large apron↔runway gap, reverse pass not spreading it. + apron/-10055 3.0%.
+- **SPLP** stub/A #6 = 6.6% (Δ1.3 m, same stub mechanism) + 4 cross @ 0.20 m (emit-consensus
+  at shared corners — NEXT-ACTION #1 below).
+- **SPJC** junction/-10122 = 4.7% over 8.6 m (Δ0.4 m, tight junction internal).
+The two `stub/A` over-grades (CYXY+SPLP) look like one shared mechanism and are the biggest
+real win. `rect_short_edges_connect[SPJC]` + `runway_node_sharing[CYXY]` are geometry.
 
 ## User algorithm spec (verbatim, 2026-05-28) — keep within reach
 > Terminals must be flat, and aprons must conform to their vertices. The
