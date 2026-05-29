@@ -38,7 +38,10 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 
+import numpy as np
+import shapely
 import O4_UI_Utils as UI
+from shapely import STRtree
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
@@ -275,42 +278,111 @@ def _resample_alts_over_strips(ring_open, strips):
     edge within ``EDGE_TOL_M`` (where strips overlap, the nearest edge
     wins — i.e. the closest pavement-edge profile governs), else the
     altitude of the nearest strip vertex.  Lets a single polygon unioned
-    from many strips carry a faithful per-vertex elevation."""
+    from many strips carry a faithful per-vertex elevation.
+
+    Vectorised: an STRtree ``dwithin`` query cuts each vertex's candidate
+    edges to the handful within ``EDGE_TOL_M`` (instead of scanning every
+    strip edge — the previous O(V·E) loop was the dominant build cost on
+    apron-heavy airports), then the EXACT same perpendicular-foot
+    projection + nearest-edge tie-break is applied over those candidates.
+    Points with no in-range edge fall back to the nearest strip vertex."""
     EDGE_TOL_M = 0.5
     EDGE_TOL2 = EDGE_TOL_M * EDGE_TOL_M
-    out: list[float] = []
-    for (nx, ny) in ring_open:
-        best_d2 = EDGE_TOL2
-        best_alt: float | None = None
-        for ring, alts in strips:
-            m = min(len(ring), len(alts))
-            for k in range(m):
-                sx, sy = ring[k]
-                tx, ty = ring[(k + 1) % m]
-                dx, dy = tx - sx, ty - sy
-                seg2 = dx * dx + dy * dy
-                if seg2 < 1e-9:
-                    continue
-                t = ((nx - sx) * dx + (ny - sy) * dy) / seg2
-                if t < -1e-3 or t > 1.0 + 1e-3:
-                    continue
-                t = max(0.0, min(1.0, t))
-                px, py = sx + t * dx, sy + t * dy
-                d2 = (nx - px) ** 2 + (ny - py) ** 2
-                if d2 < best_d2:
-                    best_d2 = d2
-                    best_alt = alts[k] + t * (alts[(k + 1) % m] - alts[k])
-        if best_alt is None:
-            bd = float("inf")
-            for ring, alts in strips:
-                for k in range(min(len(ring), len(alts))):
-                    sx, sy = ring[k]
-                    d2 = (nx - sx) ** 2 + (ny - sy) ** 2
-                    if d2 < bd:
-                        bd = d2
-                        best_alt = alts[k]
-        out.append(round(float(best_alt if best_alt is not None else 0.0), 1))
-    return out
+    if not ring_open:
+        return []
+
+    # Flatten strip segments (edge interpolation) and strip vertices
+    # (nearest-vertex fallback) into parallel arrays.
+    seg_geoms: list = []
+    sxl, syl, dxl, dyl, seg2l, a0l, a1l = [], [], [], [], [], [], []
+    vxl, vyl, vatl = [], [], []
+    for ring, alts in strips:
+        m = min(len(ring), len(alts))
+        for k in range(m):
+            sx, sy = ring[k]
+            vxl.append(sx)
+            vyl.append(sy)
+            vatl.append(alts[k])
+            tx, ty = ring[(k + 1) % m]
+            dx, dy = tx - sx, ty - sy
+            seg2 = dx * dx + dy * dy
+            if seg2 < 1e-9:
+                continue
+            seg_geoms.append(LineString([(sx, sy), (tx, ty)]))
+            sxl.append(sx)
+            syl.append(sy)
+            dxl.append(dx)
+            dyl.append(dy)
+            seg2l.append(seg2)
+            a0l.append(alts[k])
+            a1l.append(alts[(k + 1) % m])
+
+    n = len(ring_open)
+    rx = np.fromiter((p[0] for p in ring_open), dtype=float, count=n)
+    ry = np.fromiter((p[1] for p in ring_open), dtype=float, count=n)
+    best_alt = np.full(n, np.nan)
+
+    if seg_geoms:
+        sx = np.asarray(sxl)
+        sy = np.asarray(syl)
+        dx = np.asarray(dxl)
+        dy = np.asarray(dyl)
+        seg2 = np.asarray(seg2l)
+        a0 = np.asarray(a0l)
+        a1 = np.asarray(a1l)
+        qpts = shapely.points(rx, ry)
+        tree = STRtree(seg_geoms)
+        # pairs[0] = ring-vertex index, pairs[1] = candidate segment index.
+        pairs = tree.query(qpts, predicate="dwithin", distance=EDGE_TOL_M)
+        if pairs.size:
+            pi = pairs[0]
+            si = pairs[1]
+            nx = rx[pi]
+            ny = ry[pi]
+            t = (((nx - sx[si]) * dx[si] + (ny - sy[si]) * dy[si])
+                 / seg2[si])
+            in_range = (t >= -1e-3) & (t <= 1.0 + 1e-3)
+            tc = np.clip(t, 0.0, 1.0)
+            px = sx[si] + tc * dx[si]
+            py = sy[si] + tc * dy[si]
+            d2 = (nx - px) ** 2 + (ny - py) ** 2
+            ok = in_range & (d2 < EDGE_TOL2)
+            if ok.any():
+                pio = pi[ok]
+                d2o = d2[ok]
+                sio = si[ok]
+                alto = a0[si][ok] + tc[ok] * (a1[si][ok] - a0[si][ok])
+                # Per vertex keep the nearest edge; break exact ties by
+                # lowest segment index (= the original's first-in-order
+                # ``if d2 < best_d2``).  lexsort orders by the LAST key
+                # first → primary vertex, then distance, then seg index.
+                order = np.lexsort((sio, d2o, pio))
+                pis = pio[order]
+                first = np.empty(pis.shape, dtype=bool)
+                first[0] = True
+                first[1:] = pis[1:] != pis[:-1]
+                best_alt[pis[first]] = alto[order][first]
+
+    # Fallback: nearest strip vertex for any ring vertex with no in-range
+    # edge match (matches the original unbounded nearest-vertex search,
+    # including its first-in-order tie-break — keep all tied nearest, then
+    # pick the lowest vertex index).
+    missing = np.isnan(best_alt)
+    if missing.any() and vxl:
+        vat = np.asarray(vatl)
+        vtree = STRtree(shapely.points(np.asarray(vxl), np.asarray(vyl)))
+        mi = np.flatnonzero(missing)
+        nn = vtree.query_nearest(shapely.points(rx[mi], ry[mi]),
+                                 all_matches=True)
+        order = np.lexsort((nn[1], nn[0]))   # by input, then vertex index
+        inps = nn[0][order]
+        firstm = np.empty(inps.shape, dtype=bool)
+        firstm[0] = True
+        firstm[1:] = inps[1:] != inps[:-1]
+        best_alt[mi[inps[firstm]]] = vat[nn[1][order][firstm]]
+
+    return [round(float(a), 1) if not np.isnan(a) else 0.0
+            for a in best_alt]
 
 
 def _rect_long_short_edges(coords: list[tuple[float, float]]):
