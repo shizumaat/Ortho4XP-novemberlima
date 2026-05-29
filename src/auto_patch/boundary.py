@@ -356,7 +356,7 @@ def _clip_boundary_bridges_against_pavement(
 
 
 def _snap_bridge_vertices_to_runway_corners(
-        layout: "PavementLayout", snap_tol_m: float = 1.5) -> int:
+        layout: "PavementLayout", snap_tol_m: float = 2.0) -> int:
     """Snap ``boundary_dem_bridge`` vertices that sit within
     ``snap_tol_m`` of a sloping-rect (runway / parallel / stub /
     cross-connector) CORNER onto that corner; resample per-vertex
@@ -375,6 +375,17 @@ def _snap_bridge_vertices_to_runway_corners(
     runway/junction corner — satisfying both invariants.  Edge-clearance
     vertices (>``snap_tol_m`` from any corner) are untouched, so the 1 m
     edge clearance — and the no-mid-edge-vertex guarantee — is preserved.
+
+    ``snap_tol_m`` is 2.0 m (user 2026-05-28): the 1 m edge clearance
+    means a bridge vertex on the straight edge-clearance run NEAR a
+    corner sits ~1 m perpendicular off the edge AND up to ~1.6 m ALONG
+    it, i.e. up to ~1.9 m from the corner — just beyond the old 1.5 m
+    tolerance.  Such a vertex was left un-snapped, then
+    ``_insert_bridge_contacts_into_junctions`` inserted it onto the
+    junction's runway-boundary edge ~1 m off the corner, tripping Rule 1
+    (``test_junction_runway_node_sharing`` — CYXY junction near 14L/32R).
+    2.0 m collapses it onto the corner instead, satisfying both Rule 1
+    and the neighbour-corner share.
     """
     sloping = [s.polygon for s in layout.shapes
                if s.role in (ROLE_RUNWAY, ROLE_PRIMARY_PARALLEL,
