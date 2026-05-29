@@ -1104,6 +1104,47 @@ def _drop_thin_orphan_slivers(
         verts[i] = c
 
     tol2 = shared_vertex_tol_m * shared_vertex_tol_m
+
+    # Relaxed sliver test (user 2026-05-29): a thin residue that forms between
+    # a STRAIGHT rect long edge and a CURVED pavement boundary touches the rect
+    # at only ONE corner (where chord meets arc), so the "≥2 shared corners"
+    # gate misses it (SPJC stub C: junction #142, aspect 4.6, shares 1 corner).
+    # Also drop a thin junction whose EVERY vertex lies within
+    # ``ALONG_EDGE_TOL_M`` perpendicular of ONE rect's long (sloping) edge — it
+    # hugs that edge and is pure residue.
+    ALONG_EDGE_TOL_M = 5.0
+    along_tol2 = ALONG_EDGE_TOL_M * ALONG_EDGE_TOL_M
+
+    def _perp_d2_within(px, py, ax, ay, bx, by):
+        dx, dy = bx - ax, by - ay
+        seg2 = dx * dx + dy * dy
+        if seg2 < 1e-9:
+            return None
+        t = ((px - ax) * dx + (py - ay) * dy) / seg2
+        if t < -0.05 or t > 1.05:
+            return None              # foot of perpendicular outside the edge
+        cx, cy = ax + t * dx, ay + t * dy
+        return (px - cx) ** 2 + (py - cy) ** 2
+
+    def _hugs_long_edge(jv, rv) -> bool:
+        """True iff EVERY vertex of ``jv`` lies within ALONG_EDGE_TOL of one of
+        the rect ``rv``'s two LONGEST (sloping) edges."""
+        if len(rv) != 4 or len(jv) < 3:
+            return False
+        ring = [(rv[k], rv[(k + 1) % 4]) for k in range(4)]
+        ring.sort(key=lambda e: -((e[1][0] - e[0][0]) ** 2
+                                  + (e[1][1] - e[0][1]) ** 2))
+        for (a, b) in ring[:2]:          # the 2 longest = sloping edges
+            ok = True
+            for vx, vy in jv:
+                d2 = _perp_d2_within(vx, vy, a[0], a[1], b[0], b[1])
+                if d2 is None or d2 > along_tol2:
+                    ok = False
+                    break
+            if ok:
+                return True
+        return False
+
     to_drop: list[int] = []
     for i in junction_idxs:
         p = layout.shapes[i].polygon
@@ -1134,6 +1175,13 @@ def _drop_thin_orphan_slivers(
             if shared >= 2:
                 share_with_rect = True
                 break
+        if not share_with_rect:
+            # Relaxed: a sliver hugging a single rect's long edge (chord vs
+            # curved boundary — only 1 shared corner) is still pure residue.
+            for j in rect_idxs:
+                if _hugs_long_edge(verts[i], verts[j]):
+                    share_with_rect = True
+                    break
         if share_with_rect:
             to_drop.append(i)
 

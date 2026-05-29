@@ -1423,9 +1423,15 @@ def _split_centerlines_at_points(
                 # (V3 at SPJC).  Fixed 30 m each side, no bias, is
                 # length-independent and gives junction polygons a
                 # predictable approach corridor on both sides.
+                # Long diagonal segments running into an apron need MORE than
+                # the length-independent 30 m to clear the junction curve (SPJC
+                # stub B, 256 m: 30 m back still straddles the A/A1 apron curve
+                # → two parallel rects).  Use max(30 m, 0.20·gap) so long
+                # diagonals trim back enough; short ones keep the fixed 30 m
+                # (proportional only bites once 0.20·gap > 30, i.e. gap > 150 m).
                 STUB_END_MARGIN_M = 30.0
-                m_start = STUB_END_MARGIN_M
-                m_end = STUB_END_MARGIN_M
+                m_start = max(STUB_END_MARGIN_M, 0.20 * gap)
+                m_end = max(STUB_END_MARGIN_M, 0.20 * gap)
                 # Per user 2026-05-15: when the fixed 30 m margins
                 # would consume too much of a short gap (e.g. a
                 # pre-split sub-polyline between adjacent junctions
