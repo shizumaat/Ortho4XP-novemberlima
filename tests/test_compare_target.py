@@ -58,45 +58,48 @@ pytestmark = pytest.mark.skipif(
 # run-to-run non-determinism in node-ID assignment / sliver-drop
 # ordering.  A regression that drops more than ~5 % of any role's
 # shapes vs target trips the gate.
+# Floors refreshed 2026-05-29 against the re-cut SPJC / SPLP target
+# fixtures (fuller targets — boundary ribbon densified, runways re-cut).
 SPJC_BASELINE: Dict[str, int] = {
-    "apron":              15,   # of  16 target
-    "boundary":          573,   # of 603 target
-    "cross_connector":     9,   # of   9 target
-    "junction":           29,   # of  31 target
-    "primary_parallel":   25,   # of  26 target
+    "apron":              39,   # of  41 target
+    "boundary":          977,   # of 1028 target
+    "cross_connector":     8,   # of   8 target
+    "junction":           32,   # of  34 target
+    "primary_parallel":   32,   # of  34 target
     "retaining_wall":     65,   # of  68 target
-    "runway":             88,   # of  93 target
-    "secondary_parallel":  3,   # of   3 target
-    "stub":               16,   # of  17 target
+    "runway":             29,   # of  31 target
+    "secondary_parallel":  6,   # of   6 target
+    "stub":               18,   # of  19 target
     "terminal":            2,   # of   2 target
     "tunnel_ramp":        34,   # of  36 target
 }
-SPJC_BASELINE_TOTAL = 859  # of 904 target
+SPJC_BASELINE_TOTAL = 1263  # of 1330 target
 
 # SPLP is cross-tile (spans -13/-77 and -13/-78).  Each tile-half has
 # its own baseline; a regression in either half trips the gate.
 SPLP_BASELINE_TILE_M77: Dict[str, int] = {
-    "apron":               4,   # of   4 target
-    "boundary":          117,   # of 123 target
-    "cross_connector":     1,   # of   1 target
+    "apron":              10,   # of  11 target
+    "boundary":          200,   # of 211 target
+    "cross_connector":     2,   # of   2 target
     "junction":            3,   # of   3 target
     "primary_parallel":    5,   # of   5 target
-    "runway":             25,   # of  26 target
+    "runway":              8,   # of   8 target
     "stub":                2,   # of   2 target
 }
-SPLP_BASELINE_TILE_M77_TOTAL = 156  # of 164 target
+SPLP_BASELINE_TILE_M77_TOTAL = 236  # of 248 target
 
 SPLP_BASELINE_TILE_M78: Dict[str, int] = {
-    "apron":               1,   # of   1 target
-    "boundary":          167,   # of 176 target
+    "apron":               4,   # of   4 target
+    "boundary":          281,   # of 296 target
     "cross_connector":     1,   # of   1 target
-    "junction":            8,   # of   8 target
-    "primary_parallel":    5,   # of   5 target
-    "runway":             16,   # of  17 target
+    "junction":            9,   # of   9 target
+    "primary_parallel":    4,   # of   4 target
+    "runway":              8,   # of   8 target
+    "secondary_parallel":  3,   # of   3 target
     "stub":                4,   # of   4 target
     "terminal":            1,   # of   1 target
 }
-SPLP_BASELINE_TILE_M78_TOTAL = 202  # of 213 target
+SPLP_BASELINE_TILE_M78_TOTAL = 317  # of 335 target
 
 
 def _build_layout(icao: str, tile_lat=None, tile_lon=None):

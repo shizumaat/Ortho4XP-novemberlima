@@ -1,4 +1,40 @@
-# Auto-Patch Status — session 54 HANDOVER (runway-flex + 2 geometry fixes: non-compare_target suite FULLY GREEN, 281 passed / 0 failed; compare_target re-cut now unblocked)
+# Auto-Patch Status — session 54 HANDOVER (★ ENTIRE SUITE GREEN: 284 passed / 0 failed / 2 skipped, compare_target INCLUDED)
+
+## Session 54 FINAL — full suite green
+`venv/bin/python -m pytest tests/ -q -n auto` → **284 passed / 2 skipped / 0 failed**
+(~1:45), compare_target included. This session: runway-flex 3rd pass (all 3 grade
+tests), CYXY Rule-1 + SPJC short-edge geometry fixes, SPJC stub-B two-rect fix, and
+the SPJC/SPLP compare_target re-cut.
+
+### SPJC stub B two-rect fix (committed e21cbae)
+B (long ICAO-F diagonal) emitted as TWO parallel rects sharing a long edge. The
+length-independent fixed-30 m diagonal trim left B's apron end in the apron mouth
+(two apron pieces meet at a bend vertex) → `_split_sloped_rects_at_violations`
+split it lengthwise. **Fix (2 parts):**
+- `pavement/centerlines.py`: diagonal-stub end margin `max(30 m, 0.20·gap)` (was flat
+  30 m). Long diagonals (gap>150 m: B/C/E) trim back enough to clear the junction
+  curve; short ones keep 30 m (V3 unaffected). B → one rect.
+- `junction_repair._drop_thin_orphan_slivers`: trimming C left a thin residue hugging
+  C's straight long edge vs the CURVED pavement boundary — touching C at ONLY ONE
+  corner (chord-vs-arc), so the "≥2 shared corners" drop gate missed it. **Relaxed:**
+  also drop a thin junction whose EVERY vertex is within 5 m perpendicular of one
+  rect's long (sloping) edge (`_hugs_long_edge`). General fix for any straight-rect-
+  against-curved-boundary sliver, not just C.
+
+### compare_target re-cut (user re-cut fixtures; floors refreshed this session)
+User replaced `SPJC_target.osm` + `SPLP_target_tile-13-{77,78}.osm` with fuller
+re-cut targets (boundary ribbon densified, runways re-cut), and removed stale
+`CYXY_guide.osm` / `HECA_guide.osm` / `SPJC_target.osm.zip`. The hardcoded per-role
+floors in `test_compare_target.py` were refreshed to `target − round(0.05·target)`
+(SPJC total 904→1330 target / 1263 floor; SPLP-77 164→248/236; SPLP-78 213→335/317).
+All 3 compare_target tests GREEN. **Re-cut workflow reminder:** after
+`tools/build_target_osm.py`, update BOTH the per-role baseline dict AND the
+`*_TOTAL` (run the test, read the printed `target=/out=/matched=` table, set
+floor = target − round(0.05·target)).
+
+(Earlier session-54 sections below — runway-flex, CYXY Rule-1, SPJC TX20/TX15 — remain accurate.)
+
+# (prior header) Auto-Patch Status — session 54 (runway-flex + geometry fixes; non-compare_target was 281/0)
 
 ## Session 54 — geometry fixes after the runway-flex work (committed a5159ae + 62321ff)
 The two remaining pre-existing GEOMETRY failures are FIXED; the non-compare_target
@@ -21,11 +57,13 @@ suite is now **281 passed / 2 skipped / 0 failed**.
   pre-weld) bridges the lane's end corners to the junction's nearest EXISTING
   edge (sourced vertices only) + resamples node_altitudes; weld/emit reconcile.
 
-## NEXT: re-cut compare_target fixtures (now unblocked)
-With the non-compare_target suite green, re-cut the 3 hand-drawn fixtures that
-drifted (SPJC + SPLP×2) via `tools/build_target_osm.py` (see the COMMITTED
-workflow in the old memory `done_spjc_splp_compare_target`). SPJC geometry shifted
-(V dropped in s53, TX15 connected in s54) so its target needs refreshing.
+## NEXT: open / nice-to-have (suite is fully green — no blockers)
+- compare_target re-cut + floor refresh is DONE (see FINAL section at top).
+- Candidate cleanups (none blocking): SPLP stub/A apron-side residual was solved by
+  the runway-flex; the old dead-code in `unified_jacobi` (`_RELIEF_OUTER_SWEEPS`,
+  `_USE_LEAF_HIERARCHY` Dijkstra `rank`) is a candidate prune once stable. The
+  runway-flex Level-2 (seam>CIFP threshold release) is implemented but unexercised
+  by fixtures.
 
 ## (s54 earlier) runway-flex third pass (all 3 grade tests now PASS; suite 5→2)
 
@@ -247,12 +285,11 @@ edge) — needs apron decomposition, a separate piece.
   seed BFS (`seam ∈ base_hard AND ∉ runway_nodes`). SPJC's seam doesn't cross
   runway, so runway stays top priority there.
 
-## Current test failures: NONE (non-compare_target)
-`venv/bin/python -m pytest tests/ -q -k "not compare_target" -n auto` →
-**281 passed / 2 skipped / 0 failed** (≈3 min). The 2 skips are env-gated
+## Current test failures: NONE — FULL suite green
+`venv/bin/python -m pytest tests/ -q -n auto` → **284 passed / 2 skipped / 0
+failed** (~1:45), compare_target INCLUDED. The 2 skips are env-gated
 (`test_elevation_terrain_following` needs O4_TEST_TILE; `test_boundary` CYXY
-ribbon-share). `compare_target` (3 fixtures) is excluded during dev and is the
-only remaining work — re-cut per the section above.
+ribbon-share). First fully-green full suite this session.
 Build per-tile with smoothed DEM to reproduce grade numbers; whole-airport build
 mis-samples the seam — use the grade test or `/tmp/grade_detail.py`.
 
