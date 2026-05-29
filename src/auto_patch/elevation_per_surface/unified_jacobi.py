@@ -546,14 +546,19 @@ def _project_shape(elev, nodes, held, edges, flat, coupling=None) -> None:
             elev[i] = lvl
         return
 
-    def _members(i):
-        return coupling[i] if (coupling is not None and i in coupling) else (i,)
-
-    def _is_held(i):
-        return any(m in held for m in _members(i))
+    # Precompute members + held flags for every edge endpoint ONCE; both
+    # are invariant across the 400-sweep loop (same hoist as
+    # _project_within_bands).  Numerically identical, just no per-edge
+    # ``_members``/``any`` recomputation each sweep.
+    memd: dict = {}
+    heldd: dict = {}
+    for i in nodes:
+        grp = coupling[i] if (coupling is not None and i in coupling) else (i,)
+        memd[i] = grp
+        heldd[i] = any(m in held for m in grp)
 
     def _move(i, d):
-        for m in _members(i):
+        for m in memd[i]:
             elev[m] += d
 
     for _ in range(400):
@@ -566,8 +571,8 @@ def _project_shape(elev, nodes, held, edges, flat, coupling=None) -> None:
             if ex > mx:
                 mx = ex
             s = 1.0 if d > 0 else -1.0
-            hi = _is_held(i)
-            hj = _is_held(j)
+            hi = heldd[i]
+            hj = heldd[j]
             if hi and hj:
                 continue
             if hi:
@@ -599,14 +604,22 @@ def _project_within_bands(elev, edges, is_hard, lo, hi, coupling,
     held_extra = held_extra or set()
     INF = float("inf")
 
-    def _members(i):
-        return coupling[i] if (coupling is not None and i in coupling) else (i,)
-
-    def _is_held(i):
-        return any(is_hard[m] or m in held_extra for m in _members(i))
+    # Precompute per-node members + held flags ONCE.  Both are invariant
+    # across the sweep loop (coupling / is_hard / held_extra never change),
+    # but the old closures recomputed them for every edge endpoint on every
+    # sweep — millions of dict lookups + ``any()`` calls.  Hoisting them out
+    # is numerically identical (same sequential cap-projection order) and is
+    # the bulk of this function's cost on apron-heavy airports.
+    n_nodes = len(elev)
+    mem: list = [None] * n_nodes
+    held: list = [False] * n_nodes
+    for i in range(n_nodes):
+        grp = coupling[i] if (coupling is not None and i in coupling) else (i,)
+        mem[i] = grp
+        held[i] = any(is_hard[m] or m in held_extra for m in grp)
 
     def _move(i, d):
-        for m in _members(i):
+        for m in mem[i]:
             elev[m] += d
 
     # ONE-TIME clamp: seed every soft node into its anchor-feasible band — this
@@ -616,10 +629,10 @@ def _project_within_bands(elev, edges, is_hard, lo, hi, coupling,
     # cross-slope) are left at their directional value — clamping them to a
     # midpoint each sweep destabilised the relaxation.
     seen_g: set = set()
-    for i in range(len(elev)):
-        if _is_held(i):
+    for i in range(n_nodes):
+        if held[i]:
             continue
-        grp = _members(i)
+        grp = mem[i]
         if len(grp) > 1:
             key = tuple(sorted(grp))
             if key in seen_g:
@@ -648,8 +661,8 @@ def _project_within_bands(elev, edges, is_hard, lo, hi, coupling,
             ex = abs(d) - cap
             if ex <= 0.0:
                 continue
-            hi_i = _is_held(i)
-            hj = _is_held(j)
+            hi_i = held[i]
+            hj = held[j]
             if hi_i and hj:
                 continue            # both immovable: infeasible seam edge, skip
             if ex > mx:
