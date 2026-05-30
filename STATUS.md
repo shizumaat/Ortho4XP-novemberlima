@@ -52,8 +52,10 @@ output-identical (no behaviour change); suite stays 284/0/2.
 HECA is NOT in the automated baseline (`_BASELINE_AIRPORTS` = SPJC/SPLP/CYXY);
 it's a manual build/X-Plane target. Built standalone (no crash, 2407 shapes,
 all valid) and ran the invariant suite via `O4_TEST_AIRPORTS=HECA`:
-Started at 9 failures; **5 remain** (fixed: coverage #1, terminal #4, the
-170-orphan part of #3, and rect_short_edges TX52). The original HEAZ-over-collection
+Started at 9 failures; **4 remain** (fixed: coverage #1, terminal #4, the
+170-orphan part of #3, rect_short_edges TX52, and Rule-2 proximity retired).
+Remaining: vertex-on-sloping-edge (2) + neighbour_corners (1) near-misses,
+within-junction grade (#2, 74), self-overlap (#5, 3). The original HEAZ-over-collection
 X-Plane crash appears RESOLVED by the committed boundary gate (build
 reports 0 off-airport / 0 overlay dropped). HECA failures (tasks 2-5):
 1. **Coverage (#1) — FIXED (0ffb8f6):** `test_coverage_within_source_envelope`
@@ -75,22 +77,26 @@ reports 0 off-airport / 0 overlay dropped). HECA failures (tasks 2-5):
      boundary). s54's 25m-isolation exemption missed it (a junction vertex
      18.8m away); added an explicit pavement-tip exemption (dangling edge on
      the boundary). TX15-style interior near-misses still flag.
-   - REMAINING (3 tests, diagnosed 2026-05-29): split by tractability —
-     * **neighbour_corners (1):** junction #369 v4 is 0.50m from stub J3's
-       corner (-1977.4,900.1) — clean near-miss; insert/snap the shared
-       corner. Tractable.
+   - ✓ Rule-2 proximity (6) — TEST RETIRED (32a7718, user design call
+     2026-05-29). `test_junction_no_long_edge_proximity` flagged junction
+     vertices within 20m PERPENDICULAR of a sloping rect edge — a proximity
+     proxy. The REAL invariant is "a node ON the sloping edge breaks the
+     rect; proximity is fine as long as only CORNER nodes are shared," which
+     is tested directly by `test_no_vertex_on_sloping_rect_edge` (geometry)
+     + grade/step (elevation). HECA 213/250/357 were thin connectors
+     (5.8-9.4m wide; 213 is a SERVICE ROAD, not a taxiway) running 2-14m
+     alongside a stub = false positives. Builder snap + SLOPING_EDGE_SNAP_M
+     kept. NOTE: general rule — pavement is a taxiway only with a centerline,
+     else undesignated.
+   - REMAINING (2, genuine near-misses — user's invariant CONFIRMS these are
+     real: a node 0.5m off a corner ON the sloping edge should snap to the
+     corner):
      * **vertex-on-sloping-edge (2):** junction vertex 0.50m off a sub-rect
-       (W2 t=0.987 / A t=0.997) long edge near its END — sub-rect-split
-       residual (`_split_sloped_rects_at_violations` pull left 0.5m).
-       Probably tractable (tighten the pull snap).
-     * **Rule-2 proximity (6: #213 v4, #250 v1/2, #357 v2/3/4):** MID-
-       BOUNDARY junction vertices 6-29m from any rect corner, sitting on the
-       apt+DSF pavement boundary BETWEEN two rect-corner-shared vertices,
-       2-14m perpendicular to a nearby stub long edge. NOT a near-miss —
-       the junction legitimately follows the dense-apron pavement edge past
-       a stub. NO clean snap target. **Needs a DESIGN DECISION:** relax the
-       20m perpendicular rule for dense layouts, or re-cut the junction.
-       Don't snap (distorts the junction). PARKED for a deliberate call.
+       (W2 t=0.987 / A t=0.997) long edge near its END corner — sub-rect-
+       split residual (`_split_sloped_rects_at_violations` pull left 0.5m).
+       Fix = snap the vertex to the rect corner.
+     * **neighbour_corners (1):** junction #369 v4 is 0.50m from stub J3's
+       corner (-1977.4,900.1) — insert/snap the shared corner.
 4. ✓ **terminal#9 (terminal10)** (491ed20): conformance vertex insertion
    converted the flat terminal to uniform node_altitudes (H26 violation).
    Fix: keep single-altitude shapes flat after insertion.
