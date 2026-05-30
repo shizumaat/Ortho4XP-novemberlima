@@ -388,6 +388,31 @@ def _snap_junction_vertices_to_rect_flat_edge_corners(
             rc = rc[:-1]
         if len(rc) != 4:
             continue
+        # Normalize so (c0,c1) is a SLOPING edge (parallel to the
+        # centerline) before reading flat edges by index: a later
+        # geometry pass can rotate the ring so the flat edges land at
+        # (c0,c1)/(c3,c2), and a hardcoded (1,2)/(3,0) read would then
+        # pick the SLOPING edges (missing a genuine near-corner flat-
+        # edge vertex — HECA cross_connector G).
+        sa = getattr(s, "source_axis", None)
+        if sa is not None and not sa.is_empty:
+            ap = list(sa.coords)
+            if len(ap) >= 2:
+                adx, ady = ap[-1][0] - ap[0][0], ap[-1][1] - ap[0][1]
+                al = math.hypot(adx, ady)
+                if al >= 1e-6:
+                    aux, auy = adx / al, ady / al
+                    e01 = math.hypot(rc[1][0] - rc[0][0],
+                                     rc[1][1] - rc[0][1])
+                    e12 = math.hypot(rc[2][0] - rc[1][0],
+                                     rc[2][1] - rc[1][1])
+                    if e01 >= 1e-9 and e12 >= 1e-9:
+                        a01 = abs((rc[1][0] - rc[0][0]) * aux
+                                  + (rc[1][1] - rc[0][1]) * auy) / e01
+                        a12 = abs((rc[2][0] - rc[1][0]) * aux
+                                  + (rc[2][1] - rc[1][1]) * auy) / e12
+                        if a01 + 1e-9 < a12:
+                            rc = rc[1:] + rc[:1]
         # Flat edges: corners (1,2) and (3,0) per
         # _rect_from_axis_extended convention.
         for ci_a, ci_b in ((1, 2), (3, 0)):

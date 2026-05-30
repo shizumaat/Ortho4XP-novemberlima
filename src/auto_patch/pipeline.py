@@ -2623,6 +2623,14 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # the solver then gives both the same value (no step).
         from .junction_repair import _split_sloped_rects_at_violations
         _split_sloped_rects_at_violations(layout, icao=icao)
+        # A foreign (junction/apron) vertex sitting on a rect's FLAT
+        # end-edge no longer triggers a (wrong) lengthwise split — the
+        # sloping-edge detection is now source_axis-aware.  Resolve such
+        # vertices the intended way instead: trim the rect's flat end a
+        # little and let the neighbour fill the wedge (user 2026-05-29).
+        from .junction_repair import (
+            _trim_rect_flat_ends_at_foreign_vertices)
+        _trim_rect_flat_ends_at_foreign_vertices(layout, icao=icao)
         # Re-run flat-edge corner snap: the rect split above introduces
         # new sub-rect corners that may not align with adjacent junction
         # vertices.  Snap "almost-at-the-corner" junction vertices
