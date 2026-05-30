@@ -738,8 +738,16 @@ def test_rect_short_edges_connect(icao):
                 # (> ``DEAD_END_ISOLATION_M``) from any other shape's vertex.
                 # A near-miss gap (something close, e.g. SPJC TX15 ~10 m from a
                 # junction) is a MISSING CONNECTION, not a dead-end, so it stays
-                # flagged.
+                # flagged.  Two signatures of a legitimate dead-end:
+                #   * GENUINELY ISOLATED — both corners far (> DEAD_END_
+                #     ISOLATION_M) from any other vertex (SPJC TX20); OR
+                #   * PAVEMENT TIP — the dangling short edge lies ON the apt+DSF
+                #     pavement boundary, i.e. the lane reaches the physical edge
+                #     of the pavement and stops (HECA TX52).  The near-miss case
+                #     (TX15) terminates in the pavement INTERIOR short of a
+                #     junction, so it is not on the boundary and stays flagged.
                 DEAD_END_ISOLATION_M = 25.0
+                TIP_BOUNDARY_TOL_M = 1.0
                 if (r.ref or "").startswith("TX"):
                     # other short edge of this rect
                     o_a, o_b = ((1, 2) if end_label == "end_A" else (0, 3))
@@ -761,9 +769,20 @@ def test_rect_short_edges_connect(icao):
                             min_a2 = da2
                         if db2 < min_b2:
                             min_b2 = db2
-                    if (other_shared
-                            and min_a2 > near_iso2 and min_b2 > near_iso2):
-                        continue        # genuine isolated discovered dead-end
+                    isolated = (min_a2 > near_iso2 and min_b2 > near_iso2)
+                    on_tip = False
+                    pav_b = getattr(layout, "apt_pavement_boundary", None)
+                    if pav_b is not None:
+                        from shapely.geometry import Point as _P
+                        try:
+                            on_tip = (
+                                pav_b.distance(_P(ax, ay)) <= TIP_BOUNDARY_TOL_M
+                                and pav_b.distance(_P(bx, by))
+                                <= TIP_BOUNDARY_TOL_M)
+                        except Exception:
+                            on_tip = False
+                    if other_shared and (isolated or on_tip):
+                        continue        # genuine discovered dead-end
                 failures.append({
                     "ref": r.ref or "?",
                     "role": r.role,
