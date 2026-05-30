@@ -245,12 +245,24 @@ def _push_junction_vertices_off_taxi_rect_edges(
     rect_roles = {
         ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
         ROLE_STUB, ROLE_CROSS_CONNECTOR, ROLE_RUNWAY}
+    # Sloped (non-runway) rects used as the no-overlap GUARD: pushing a
+    # junction vertex 1 m off one rect's edge can land it INSIDE a
+    # neighbouring rect, leaving a small junction-into-rect sliver
+    # (HECA stub#107 3 m², secondary_parallel#136 6 m²).  Collect every
+    # such rect (any corner count) so the guard below can reject a push
+    # that grows the junction's overlap with one.
+    guard_roles = {
+        ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
+        ROLE_STUB, ROLE_CROSS_CONNECTOR}
+    guard_rect_polys: list[Polygon] = []
     rects: list[tuple[Polygon, list[tuple[float, float]]]] = []
     for s in layout.shapes:
         if s.role not in rect_roles:
             continue
         if s.polygon is None or s.polygon.is_empty:
             continue
+        if s.role in guard_roles and s.polygon.geom_type == "Polygon":
+            guard_rect_polys.append(s.polygon)
         try:
             coords = open_ring(list(s.polygon.exterior.coords))
         except _GEOM_EXC:
@@ -260,6 +272,7 @@ def _push_junction_vertices_off_taxi_rect_edges(
         rects.append((s.polygon, coords))
     if not rects:
         return 0
+    from ..junction_rules import _snap_grows_rect_overlap
 
     corner_tol2 = corner_tol_m * corner_tol_m
 
@@ -443,7 +456,9 @@ def _push_junction_vertices_off_taxi_rect_edges(
                     new_poly = None
             if (new_poly is not None
                     and new_poly.geom_type == "Polygon"
-                    and not new_poly.is_empty):
+                    and not new_poly.is_empty
+                    and not _snap_grows_rect_overlap(
+                        shape.polygon, new_poly, guard_rect_polys)):
                 # Capture the OLD ring + per-vertex altitudes before
                 # we overwrite the polygon — needed for the nearest-
                 # neighbour fallback below when the new ring's

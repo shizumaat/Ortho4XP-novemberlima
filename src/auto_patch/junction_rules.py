@@ -342,6 +342,38 @@ def _point_perp_dist_within_segment(
     return math.hypot(px - fx, py - fy)
 
 
+def _snap_grows_rect_overlap(old_poly, new_poly, rect_polys,
+                             tol_m2: float = 1.0) -> bool:
+    """True if re-snapping a junction (``old_poly`` → ``new_poly``)
+    makes it overlap some taxi rect by more than it already did.
+
+    The corner-snap passes move a junction vertex onto the *nearest*
+    corner of a sloped rect's edge.  When that corner is on the FAR
+    side of the rect, the move sweeps the junction polygon ACROSS the
+    rect, growing a large overlap (HECA junction#338 grew +251 m² into
+    the adjacent stub; the now-removed wrong parallel-split used to pull
+    those vertices back, masking it).  Callers use this to REJECT such a
+    move (keep the un-snapped polygon) so junctions never overlap rects
+    — the no-overlap invariant is preserved at the source, with no
+    redundant post-pass clip.  Bounding-box prefilter keeps it cheap.
+    """
+    nb = new_poly.bounds
+    for r in rect_polys:
+        rb = r.bounds
+        if nb[2] < rb[0] or nb[0] > rb[2] or nb[3] < rb[1] or nb[1] > rb[3]:
+            continue
+        try:
+            nv = new_poly.intersection(r).area
+            if nv <= tol_m2:
+                continue
+            ov = old_poly.intersection(r).area
+            if nv > ov + tol_m2:
+                return True
+        except _GEOM_EXC:
+            continue
+    return False
+
+
 def _snap_junction_vertices_to_rect_flat_edge_corners(
     layout: PavementLayout,
     perp_tol_m: float = 2.0,
@@ -369,6 +401,7 @@ def _snap_junction_vertices_to_rect_flat_edge_corners(
     """
     flat_edges: list[tuple[float, float, float, float]] = []
     rect_corner_set: set = set()
+    rect_polys: list[Polygon] = []
     bucket = SHARED_VERTEX_TOL_M
     for s in layout.shapes:
         # Detect sloping rects by ROLE, not altitude tags: this runs in
@@ -383,6 +416,10 @@ def _snap_junction_vertices_to_rect_flat_edge_corners(
         if rect is None or rect.is_empty \
                 or rect.geom_type != "Polygon":
             continue
+        # Guard list = EVERY sloped rect (any corner count) so the
+        # overlap guard sees junctions sweeping into 6-corner /
+        # node_altitudes seam shapes too.
+        rect_polys.append(rect)
         rc = list(rect.exterior.coords)
         if rc and rc[0] == rc[-1]:
             rc = rc[:-1]
@@ -511,6 +548,9 @@ def _snap_junction_vertices_to_rect_flat_edge_corners(
         # degenerate / self-intersecting shape).
         if new_poly.area < 0.5 * poly.area:
             continue
+        # Reject a snap that sweeps the junction across a rect.
+        if _snap_grows_rect_overlap(poly, new_poly, rect_polys):
+            continue
         shape.polygon = new_poly
         if deduped_alts is not None:
             shape.node_altitudes = deduped_alts + [deduped_alts[0]]
@@ -551,6 +591,7 @@ def _snap_to_sloping_edge_corners(layout: PavementLayout) -> None:
     # carried for downstream adjacency-aware processing (e.g. dedup-
     # consecutive that crosses through identical-corner snap targets).
     rect_corners_per_rect: list[list[tuple[float, float]]] = []
+    rect_polys: list[Polygon] = []
     rect_edges: list[tuple[float, float, float, float, int, int, int]] = []
     for shape in layout.shapes:
         # Detect sloping rects by ROLE, not altitude tags (session 51
@@ -563,6 +604,10 @@ def _snap_to_sloping_edge_corners(layout: PavementLayout) -> None:
         rect = shape.polygon
         if rect is None or rect.is_empty or rect.geom_type != "Polygon":
             continue
+        # Guard list = EVERY sloped rect (any corner count, incl. the
+        # 6-corner / node_altitudes seam-and-conformance shapes) so the
+        # overlap guard can see a junction sweeping into ANY of them.
+        rect_polys.append(rect)
         rc = list(rect.exterior.coords)
         if rc and rc[0] == rc[-1]:
             rc = rc[:-1]
@@ -708,6 +753,11 @@ def _snap_to_sloping_edge_corners(layout: PavementLayout) -> None:
         if new_poly.geom_type == "MultiPolygon":
             new_poly = max(new_poly.geoms, key=lambda g: g.area)
         if new_poly.geom_type != "Polygon":
+            continue
+        # Reject a re-snap that sweeps the junction across a rect (the
+        # "yanked to a far corner" overshoot) — keep the un-snapped
+        # polygon so junctions never overlap rects.
+        if _snap_grows_rect_overlap(poly, new_poly, rect_polys):
             continue
         shape.polygon = new_poly
         if node_alts is not None:

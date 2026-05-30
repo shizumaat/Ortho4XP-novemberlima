@@ -1621,6 +1621,20 @@ def _split_sloped_rects_at_violations(
 
     # Apply junction-vertex moves before swapping shapes, so we can
     # still index layout.shapes by the original j_idx values.
+    # Guard list = every sloped rect (surviving originals + the new
+    # sub-rects) so a vertex pull that would sweep the junction into a
+    # rect is rejected (same no-overlap guard the snap passes use).
+    from .junction_rules import _snap_grows_rect_overlap
+    _guard_rects = [
+        s.polygon for k, s in enumerate(layout.shapes)
+        if k not in drop_idxs and s.role in SLOPED_ROLES
+        and s.polygon is not None and not s.polygon.is_empty
+        and s.polygon.geom_type == "Polygon"]
+    _guard_rects += [
+        ns.polygon for ns in new_shapes
+        if ns.role in SLOPED_ROLES and ns.polygon is not None
+        and not ns.polygon.is_empty
+        and ns.polygon.geom_type == "Polygon"]
     n_jct_moves = 0
     for j_idx, vert_updates in junction_moves.items():
         if not (0 <= j_idx < len(layout.shapes)):
@@ -1665,6 +1679,9 @@ def _split_sloped_rects_at_violations(
                 continue
         except _GEOM_EXC:
             continue
+        if _snap_grows_rect_overlap(j_shape.polygon, new_poly,
+                                    _guard_rects):
+            continue
         j_shape.polygon = new_poly
         n_jct_moves += len(vert_updates)
 
@@ -1684,224 +1701,6 @@ def _split_sloped_rects_at_violations(
     except _GEOM_EXC:
         pass
     return n_splits
-
-
-def _trim_rect_flat_ends_at_foreign_vertices(
-        layout: "PavementLayout",
-        icao: str = "",
-        perp_tol_m: float = 1.5,
-        corner_guard_m: float = 2.0,
-        clear_m: float = 2.0,
-        min_kept_m: float = 20.0,
-        ) -> int:
-    """Trim a sloped rect's FLAT (end-cap) edge inward when a junction
-    or apron vertex sits on the edge interior, and absorb the trimmed
-    sliver into that neighbour.
-
-    Background (user 2026-05-29): a sloped rect must share its flat
-    end-edge 1:1 — only the two corners are legal shared vertices; a
-    junction/apron vertex on the edge interior constrains the rect's
-    end altitude (an elevation step,
-    ``test_no_vertex_on_sloping_rect_flat_edge``).  The old code
-    "resolved" this by mis-reading the flat edge as a sloping edge and
-    splitting the rect lengthwise into two parallel lanes — which made
-    the foreign vertex a shared corner but produced an ugly two-rect
-    taxiway (HECA taxiway A → 446/447, SPJC TX10).
-    ``_orient_rect_sloping_edge_first`` now stops that wrong split, so
-    the foreign vertex must be resolved here instead: shorten the rect
-    "a little" so its flat end clears the vertex, and grow the
-    neighbour to fill the wedge — exactly the intended geometry.
-
-    For each sloped rect, for each flat end-cap, gather foreign
-    (junction/apron) vertices within ``perp_tol_m`` perpendicular of
-    the edge, interior to it (axial fraction 0.05..0.95) and farther
-    than ``corner_guard_m`` from either corner (near-corner cases are
-    left to the corner-snap pass).  Retreat that end's edge to
-    ``clear_m`` past the worst such vertex, rebuild the (shorter) rect,
-    and union the trimmed sliver into the neighbour owning the closest
-    violating vertex (dropping its ``node_altitudes`` so the emitter
-    re-derives them).  Runs PRE-solve, so altitudes are unset.
-    """
-    SLOPED_ROLES = (
-        ROLE_STUB, ROLE_PRIMARY_PARALLEL,
-        ROLE_SECONDARY_PARALLEL, ROLE_CROSS_CONNECTOR,
-    )
-    perp_tol2 = perp_tol_m * perp_tol_m
-
-    # Foreign vertices: every junction / apron boundary vertex.
-    foreign: list[tuple[float, float, int]] = []
-    for si, s in enumerate(layout.shapes):
-        if s.role not in (ROLE_JUNCTION, ROLE_APRON):
-            continue
-        if s.polygon is None or s.polygon.is_empty \
-                or s.polygon.geom_type != "Polygon":
-            continue
-        try:
-            fc = list(s.polygon.exterior.coords)
-        except _GEOM_EXC:
-            continue
-        if fc and fc[0] == fc[-1]:
-            fc = fc[:-1]
-        for (fx, fy) in fc:
-            foreign.append((float(fx), float(fy), si))
-    if not foreign:
-        return 0
-
-    def _perp_within(px, py, ax, ay, bx, by):
-        """(perp_d2, t) of foot of perpendicular, or None if outside."""
-        dx, dy = bx - ax, by - ay
-        seg2 = dx * dx + dy * dy
-        if seg2 < 1e-9:
-            return None
-        t = ((px - ax) * dx + (py - ay) * dy) / seg2
-        if t < 0.05 or t > 0.95:
-            return None
-        cx, cy = ax + t * dx, ay + t * dy
-        return (px - cx) ** 2 + (py - cy) ** 2
-
-    n_trimmed = 0
-    absorb_into: dict[int, list[Polygon]] = {}
-    for ri, r in enumerate(layout.shapes):
-        if r.role not in SLOPED_ROLES:
-            continue
-        if r.node_altitudes is not None:
-            continue
-        if r.polygon is None or r.polygon.is_empty \
-                or r.polygon.geom_type != "Polygon":
-            continue
-        rc = list(r.polygon.exterior.coords)
-        if rc and rc[0] == rc[-1]:
-            rc = rc[:-1]
-        if len(rc) != 4:
-            continue
-        rc = _orient_rect_sloping_edge_first(
-            rc, getattr(r, "source_axis", None))
-        c0, c1, c2, c3 = [tuple(c) for c in rc]
-        a_mid = (0.5 * (c0[0] + c3[0]), 0.5 * (c0[1] + c3[1]))
-        b_mid = (0.5 * (c1[0] + c2[0]), 0.5 * (c1[1] + c2[1]))
-        adx, ady = b_mid[0] - a_mid[0], b_mid[1] - a_mid[1]
-        L = math.hypot(adx, ady)
-        if L < min_kept_m + 2 * clear_m:
-            continue
-        ux, uy = adx / L, ady / L
-        h0 = (c0[0] - a_mid[0], c0[1] - a_mid[1])    # perp half-vector
-
-        # Flat ends: A = edge (c3,c0) at axial 0; B = edge (c1,c2) at L.
-        ends = (
-            (0.0, c3, c0),    # end A
-            (L, c1, c2),      # end B
-        )
-        u_lo, u_hi = 0.0, L
-        end_pokers: list[tuple[float, int]] = []   # (u_new, poker_idx)
-        for (u_edge, ea, eb) in ends:
-            best_owner = None
-            best_d2 = perp_tol2
-            extreme_u = None
-            for (fx, fy, owner) in foreign:
-                if owner == ri:
-                    continue
-                pw = _perp_within(fx, fy, ea[0], ea[1], eb[0], eb[1])
-                if pw is None or pw > perp_tol2:
-                    continue
-                # far enough from both corners?
-                if (math.hypot(fx - ea[0], fy - ea[1]) <= corner_guard_m
-                        or math.hypot(fx - eb[0], fy - eb[1])
-                        <= corner_guard_m):
-                    continue
-                u_v = (fx - a_mid[0]) * ux + (fy - a_mid[1]) * uy
-                if u_edge == 0.0:
-                    extreme_u = (u_v if extreme_u is None
-                                 else max(extreme_u, u_v))
-                else:
-                    extreme_u = (u_v if extreme_u is None
-                                 else min(extreme_u, u_v))
-                if pw < best_d2:
-                    best_d2 = pw
-                    best_owner = owner
-            if extreme_u is None or best_owner is None:
-                continue
-            if u_edge == 0.0:
-                u_lo = max(u_lo, extreme_u + clear_m)
-                end_pokers.append((u_lo, best_owner))
-            else:
-                u_hi = min(u_hi, extreme_u - clear_m)
-                end_pokers.append((u_hi, best_owner))
-        if not end_pokers or (u_hi - u_lo) < min_kept_m:
-            continue
-
-        def _corner(u, side):
-            return (a_mid[0] + u * ux + side * h0[0],
-                    a_mid[1] + u * uy + side * h0[1])
-
-        nc0 = _corner(u_lo, 1.0)
-        nc1 = _corner(u_hi, 1.0)
-        nc2 = _corner(u_hi, -1.0)
-        nc3 = _corner(u_lo, -1.0)
-        try:
-            new_rect = Polygon([nc0, nc1, nc2, nc3, nc0])
-            if not new_rect.is_valid:
-                new_rect = new_rect.buffer(0)
-            if new_rect.is_empty or new_rect.geom_type != "Polygon":
-                continue
-        except _GEOM_EXC:
-            continue
-
-        # Sliver(s) = original rect minus the trimmed rect; route each
-        # to the poker that owns the violating vertex at that end.
-        for (u_new, poker) in end_pokers:
-            if abs(u_new - 0.0) > 1e-6 and u_new <= u_lo + 1e-6:
-                sliver_pts = [c0, _corner(u_lo, 1.0),
-                              _corner(u_lo, -1.0), c3]
-            elif u_new >= u_hi - 1e-6 and abs(u_new - L) > 1e-6:
-                sliver_pts = [_corner(u_hi, 1.0), c1, c2,
-                              _corner(u_hi, -1.0)]
-            else:
-                continue
-            try:
-                sliver = Polygon(sliver_pts + [sliver_pts[0]])
-                if not sliver.is_valid:
-                    sliver = sliver.buffer(0)
-                if sliver.is_empty or sliver.area < 0.5:
-                    continue
-            except _GEOM_EXC:
-                continue
-            absorb_into.setdefault(poker, []).append(sliver)
-
-        r.polygon = new_rect
-        n_trimmed += 1
-
-    if not n_trimmed:
-        return 0
-
-    # Grow each poker by its sliver(s); drop node_altitudes so the
-    # emitter re-derives them over the new vertex set.
-    for poker_idx, slivers in absorb_into.items():
-        if not (0 <= poker_idx < len(layout.shapes)):
-            continue
-        ps = layout.shapes[poker_idx]
-        if ps.polygon is None or ps.polygon.is_empty:
-            continue
-        try:
-            grown = unary_union([ps.polygon] + slivers)
-            if grown.is_empty:
-                continue
-            if grown.geom_type == "MultiPolygon":
-                grown = max(grown.geoms, key=lambda g: g.area)
-            if grown.geom_type != "Polygon":
-                continue
-        except _GEOM_EXC:
-            continue
-        ps.polygon = grown
-        ps.node_altitudes = None
-
-    try:
-        UI.vprint(1,
-            f"  [pav-builder] {icao}: trimmed {n_trimmed} sloped "
-            f"rect flat-end(s) clear of foreign vertices; absorbed "
-            f"slivers into {len(absorb_into)} neighbour(s).")
-    except _GEOM_EXC:
-        pass
-    return n_trimmed
 
 
 def _snap_near_corner_vertices_to_rect_corners(
