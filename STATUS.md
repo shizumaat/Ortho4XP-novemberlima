@@ -52,10 +52,14 @@ output-identical (no behaviour change); suite stays 284/0/2.
 HECA is NOT in the automated baseline (`_BASELINE_AIRPORTS` = SPJC/SPLP/CYXY);
 it's a manual build/X-Plane target. Built standalone (no crash, 2407 shapes,
 all valid) and ran the invariant suite via `O4_TEST_AIRPORTS=HECA`:
-Started at 9 failures; **3 remain** (fixed: coverage #1, terminal #4, the
-170-orphan part of #3, rect_short_edges TX52, Rule-2 proximity retired,
-vertex-on-sloping-edge snapped). Remaining: neighbour_corners (1, last
-cluster item), within-junction grade (#2, 74), self-overlap (#5, 3). The original HEAZ-over-collection
+Started at 9 failures; **2 remain**. The junction-connectivity cluster
+(#3) is FULLY resolved: coverage #1; terminal #4; 170 orphans (DSF
+boundary as source); Rule-2 proximity retired; rect_short_edges TX52
+(pavement-tip exemption); vertex-on-sloping-edge (post-conformance
+near-corner snap onto rect corners); neighbour_corners (post-conformance
+insert of unshared neighbour corners into junction edges). Remaining:
+within-junction grade (#2, 74 — apron decomposition), self-overlap
+(#5, 3 pairs 1.9 m²). The original HEAZ-over-collection
 X-Plane crash appears RESOLVED by the committed boundary gate (build
 reports 0 off-airport / 0 overlay dropped). HECA failures (tasks 2-5):
 1. **Coverage (#1) — FIXED (0ffb8f6):** `test_coverage_within_source_envelope`
@@ -95,10 +99,14 @@ reports 0 off-airport / 0 overlay dropped). HECA failures (tasks 2-5):
      runs LAST (post-conformance, on emitted geometry): snaps any non-rect
      vertex on a sloped 4-corner rect's edge within 1.5m of a corner ONTO
      that corner (all 4 edges). General — prevents at all airports.
-   - REMAINING (1): **neighbour_corners (1):** junction #369 v4 is 0.50m
-     from stub J3's corner (-1977.4,900.1) but NOT on J3's edge (so the
-     near-corner snap above didn't catch it) — insert/snap the shared
-     corner. Last cluster item.
+   - ✓ neighbour_corners (1) — FIXED (ffd18c4). stub J3's corner sat on
+     junction #369's edge 0.52m from vertex v4; conformance's endpoint
+     guard (0.5m along-edge) skipped it (t*L≈0.4999) though it's >0.10m
+     (test tol) from v4. NEW post-conformance pass
+     `_share_neighbour_corners_into_junctions` INSERTS an unshared
+     neighbour corner on a junction edge into that junction (test's
+     tolerances; junction-scoped; INSERT not snap → +0.49m² vs -20m²).
+     CLUSTER #3 NOW FULLY RESOLVED.
 4. ✓ **terminal#9 (terminal10)** (491ed20): conformance vertex insertion
    converted the flat terminal to uniform node_altitudes (H26 violation).
    Fix: keep single-altitude shapes flat after insertion.
