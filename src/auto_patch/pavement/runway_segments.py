@@ -127,6 +127,34 @@ def runway_profile_extrema_fractions(profile, prominence_m):
     return sorted(set(out))
 
 
+def canonical_runway_desig(desig):
+    """Canonical lookup key for a runway designator, reconciling the
+    CIFP and apt.dat spellings.
+
+    CIFP zero-pads single-digit runway numbers and carries an ``RW``
+    prefix (``RW09``); apt.dat (e.g. the X-Plane Global Airports pack)
+    often writes the same runway bare and unpadded (``9``).  Keying the
+    per-runway lookup dicts (apt geometry, widths, pavement-intersection
+    seams, cross-runway anchors) by the raw string therefore MISSES for
+    any airport with a single-digit runway, so the segmenter falls back
+    to CIFP geometry and inserts no pavement-join seams — the runway
+    emits as a single un-segmented rect (TBPB 09/27).
+
+    Normalise by stripping a leading ``RW`` and any leading zero on the
+    heading number, preserving an ``L``/``R``/``C`` suffix:
+    ``RW09``→``9``, ``09``→``9``, ``9``→``9``, ``RW02L``→``2L``.
+    """
+    if not desig:
+        return desig
+    d = desig[2:] if desig.startswith("RW") else desig
+    suffix = ""
+    if d[-1:] in ("L", "R", "C"):
+        suffix = d[-1]
+        d = d[:-1]
+    d = d.lstrip("0") or "0"
+    return d + suffix
+
+
 __all__ = [
     "DEFAULT_CELL_SIZE",
     "DEFAULT_PROFILE",
@@ -139,6 +167,7 @@ __all__ = [
     "RUNWAY_END_GRADE",
     "RUNWAY_MARGIN",
     "RUNWAY_SEGMENT_LENGTH",
+    "canonical_runway_desig",
     "faa_envelope_clamp",
     "faa_hard_cap_pass",
     "faa_rate_of_change_pass",
@@ -951,8 +980,12 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
             elev_a = data_a["elevation_m"]
             elev_b = data_b["elevation_m"]
 
-            apt_a = apt_runways.get(desig_a)
-            apt_b = apt_runways.get(desig_b)
+            # Reconcile CIFP zero-padding (``RW09``) against apt.dat's
+            # unpadded keys (``9``) — see ``canonical_runway_desig``.
+            apt_a = (apt_runways.get(desig_a)
+                     or apt_runways.get(canonical_runway_desig(desig_a)))
+            apt_b = (apt_runways.get(desig_b)
+                     or apt_runways.get(canonical_runway_desig(desig_b)))
             have_apt_geom = apt_a is not None and apt_b is not None
 
             if have_apt_geom:
@@ -974,9 +1007,12 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
                 displaced_b = data_b["displaced_m"]
                 blast_a = OVERRUN_EXTENSION
                 blast_b = OVERRUN_EXTENSION
-                rwy_width = runway_widths.get(
-                    desig_a,
-                    runway_widths.get(desig_b, DEFAULT_RUNWAY_WIDTH),
+                rwy_width = (
+                    runway_widths.get(desig_a)
+                    or runway_widths.get(canonical_runway_desig(desig_a))
+                    or runway_widths.get(desig_b)
+                    or runway_widths.get(canonical_runway_desig(desig_b))
+                    or DEFAULT_RUNWAY_WIDTH
                 )
             patch_width = rwy_width + 2 * RUNWAY_MARGIN
 
@@ -1121,13 +1157,19 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
             # ``anchor_dedup_m`` of an anchor are dropped.
             if pav_intersections and phys_dist > 0:
                 pav_pts = []
+                ca = canonical_runway_desig(desig_a)
+                cb = canonical_runway_desig(desig_b)
                 for pkey in (
                         (desig_a, desig_b),
                         (desig_b, desig_a),
                         ("RW" + desig_a.lstrip("RW"),
                          "RW" + desig_b.lstrip("RW")),
                         ("RW" + desig_b.lstrip("RW"),
-                         "RW" + desig_a.lstrip("RW"))):
+                         "RW" + desig_a.lstrip("RW")),
+                        # Canonical (zero-padding-reconciled) keys —
+                        # match apt.dat's unpadded ``9`` against CIFP's
+                        # ``RW09`` (see ``canonical_runway_desig``).
+                        (ca, cb), (cb, ca)):
                     if pkey in pav_intersections:
                         pav_pts = pav_intersections[pkey]
                         break

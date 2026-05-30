@@ -643,13 +643,22 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # under both designator orderings so the segmenter lookup
         # finds them regardless of which key it tries.
         ll_pts = [layout.m_to_ll(px, py) for _, px, py in deduped]
+        # Also store under the canonical (zero-padding-reconciled) pair
+        # so the segmenter — which iterates CIFP's zero-padded ``RW09``
+        # designators — matches regardless of whether THIS apt.dat
+        # zero-pads its single-digit runways (see
+        # ``runway_segments.canonical_runway_desig``).
+        from .pavement.runway_segments import canonical_runway_desig
+        ca = canonical_runway_desig(r.desig_a)
+        cb = canonical_runway_desig(r.desig_b)
         for key in (
                 (r.desig_a, r.desig_b),
                 (r.desig_b, r.desig_a),
                 ("RW" + r.desig_a.lstrip("RW"),
                  "RW" + r.desig_b.lstrip("RW")),
                 ("RW" + r.desig_b.lstrip("RW"),
-                 "RW" + r.desig_a.lstrip("RW"))):
+                 "RW" + r.desig_a.lstrip("RW")),
+                (ca, cb), (cb, ca)):
             pav_runway_intersections[key] = list(ll_pts)
     layout._pav_runway_intersections = pav_runway_intersections
 

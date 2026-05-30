@@ -405,22 +405,36 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
 
                 # apt.dat runway geometry (sole source of truth for
                 # footprint lat/lon + width) — per legacy contract.
+                # Key each runway end under its ``RW``-prefixed form AND
+                # its canonical (zero-padding-reconciled) form so the
+                # segmenter — which iterates CIFP's zero-padded ``RW09``
+                # designators — finds apt.dat geometry stored under the
+                # bare ``9`` apt.dat spelling (see
+                # ``runway_segments.canonical_runway_desig``).  Without
+                # this, single-digit runways (TBPB 09/27) fall back to
+                # CIFP geometry and never segment at pavement joins.
+                from .pavement.runway_segments import (
+                    canonical_runway_desig as _canon_desig)
                 apt_runway_geom = {}
                 for r in apt.runways:
-                    key_a = r.desig_a if r.desig_a.startswith("RW") \
-                        else "RW" + r.desig_a
-                    key_b = r.desig_b if r.desig_b.startswith("RW") \
-                        else "RW" + r.desig_b
-                    apt_runway_geom[key_a] = (
-                        r.lat_a, r.lon_a, r.width_m,
-                        r.displaced_a_m, r.blast_a_m)
-                    apt_runway_geom[key_b] = (
-                        r.lat_b, r.lon_b, r.width_m,
-                        r.displaced_b_m, r.blast_b_m)
+                    geom_a = (r.lat_a, r.lon_a, r.width_m,
+                              r.displaced_a_m, r.blast_a_m)
+                    geom_b = (r.lat_b, r.lon_b, r.width_m,
+                              r.displaced_b_m, r.blast_b_m)
+                    for k in (r.desig_a,
+                              "RW" + r.desig_a.lstrip("RW"),
+                              _canon_desig(r.desig_a)):
+                        apt_runway_geom[k] = geom_a
+                    for k in (r.desig_b,
+                              "RW" + r.desig_b.lstrip("RW"),
+                              _canon_desig(r.desig_b)):
+                        apt_runway_geom[k] = geom_b
                 runway_widths = {}
                 for r in apt.runways:
-                    runway_widths[r.desig_a] = r.width_m
-                    runway_widths[r.desig_b] = r.width_m
+                    for k in (r.desig_a, _canon_desig(r.desig_a)):
+                        runway_widths[k] = r.width_m
+                    for k in (r.desig_b, _canon_desig(r.desig_b)):
+                        runway_widths[k] = r.width_m
 
                 class _TileStub:
                     lat: int
