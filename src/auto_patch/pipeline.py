@@ -907,6 +907,28 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # aligns.  (User-approved tol=2.0 to match the reviewed union.)
     pav_union = _simplify_pavement_polygon(pav_union, tol=2.0)
 
+    # Source-attribution boundary for the junction-vertex test: junctions
+    # are cut from THIS union (apt.dat row-110 + DSF pavement), so a
+    # junction perimeter vertex following the union boundary is legitimately
+    # sourced — even where the boundary comes from DSF pavement, which the
+    # row-110-only ``apt_pavement_vertices`` capture above doesn't include.
+    # (Test-only; the builder never reads ``apt_pavement_boundary``.  The
+    # row-110-only ``apt_pavement_vertices`` still feeds canonical_points,
+    # so the snap seed is unchanged.)  UNION with the existing row-110
+    # boundary rather than replacing it: the union is simplified (tol=2.0)
+    # so it can sit ~2 m off an unsimplified row-110 vertex — keeping both
+    # is strictly more permissive and can't regress airports without DSF.
+    if pav_union is not None and not pav_union.is_empty:
+        try:
+            _pub = pav_union.boundary
+            if layout.apt_pavement_boundary is not None:
+                layout.apt_pavement_boundary = unary_union(
+                    [layout.apt_pavement_boundary, _pub])
+            else:
+                layout.apt_pavement_boundary = _pub
+        except _GEOM_EXC:
+            pass
+
     # ── Runway shoulder widening (user 2026-05-23) ──────────────────
     # apt.dat row 100 field 4 encodes the runway shoulder as
     # ``100 * shoulder_width_m + surface_code`` (X-Plane 12 spec): when
