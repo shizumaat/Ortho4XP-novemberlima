@@ -52,9 +52,10 @@ output-identical (no behaviour change); suite stays 284/0/2.
 HECA is NOT in the automated baseline (`_BASELINE_AIRPORTS` = SPJC/SPLP/CYXY);
 it's a manual build/X-Plane target. Built standalone (no crash, 2407 shapes,
 all valid) and ran the invariant suite via `O4_TEST_AIRPORTS=HECA`:
-**8 failures remain** (was 9). The original HEAZ-over-collection X-Plane
-crash appears RESOLVED by the committed boundary gate (build reports 0
-off-airport / 0 overlay dropped). Open HECA failures (tracked tasks 2-5):
+Started at 9 failures; **6 remain** (coverage #1, terminal #4, and the
+170-orphan part of #3 now fixed). The original HEAZ-over-collection
+X-Plane crash appears RESOLVED by the committed boundary gate (build
+reports 0 off-airport / 0 overlay dropped). HECA failures (tasks 2-5):
 1. **Coverage (#1) — FIXED (0ffb8f6):** `test_coverage_within_source_envelope`
    measured emitted vs apt.dat+runways ONLY, omitting DSF pavement (a
    first-class source). HECA emitted +54.9% vs apt-only but only +7.4% vs
@@ -64,12 +65,21 @@ off-airport / 0 overlay dropped). Open HECA failures (tracked tasks 2-5):
 2. **Within-shape grade — 74 viol:** giant aprons exceed 1.5% over their
    whole span (apron#273 632m@1.6%, apron#209 255m@1.9%; junction#241/243).
    Apron-decomposition piece.
-3. **Junction connectivity cluster (5 tests):** 170 orphan junction vertices
-   (no source within 0.5m/edge 1.0m); Rule-2 proximity (6); vertex-on-
-   sloping-edge (2, t≈0.99); neighbour_corners (1); rect_short_edges (1,
-   primary_parallel TX52 end_B). Suspect 93 junction→apron reclassification +
-   neck-split + discovered-TX rects.
-4. **terminal#9 (terminal10)** carries node_altitudes (9) — H26 wants flat.
+3. **Junction connectivity cluster:** 2 of 5 FIXED.
+   - ✓ 170 orphan vertices (d78e6c4): all within 1.5m of the apt+DSF
+     pav_union boundary — junction perimeters following the DSF edge. Test's
+     `apt_pavement_boundary` captured row-110 only (built before the DSF
+     loop). Fix: union the final pav_union boundary into it (test-only).
+   - REMAINING (genuine near-miss geometry, recurring d=0.50m): Rule-2
+     proximity (6: #213 v4, #250 v1/2, #357 v2/3/4); vertex-on-sloping-edge
+     (2: junction on stub W2 t=0.987 / primary_parallel A t=0.997, 0.50m);
+     neighbour_corners (1: #369 vs stub J3, 0.50m miss); rect_short_edges
+     (1: primary_parallel TX52 end_B dangling). Same CLASSES as the
+     SPJC/CYXY fixes in memory (Rule-2 re-snap, neighbour bridge, dangling
+     connect) — HECA now exercises them.
+4. ✓ **terminal#9 (terminal10)** (491ed20): conformance vertex insertion
+   converted the flat terminal to uniform node_altitudes (H26 violation).
+   Fix: keep single-altitude shapes flat after insertion.
 5. **Self-overlap** 3 pairs 1.9 m²; + build warnings (6 T-junctions + 3 edge
    crossings → mesh slivers; 8 dropped sliver/invalid polygons; DEM extrema
    −19/425 vs real ~42-165m).
