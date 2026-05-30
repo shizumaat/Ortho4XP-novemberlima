@@ -1883,25 +1883,44 @@ def build_airport_pavement(icao: str, xplane_root: str,
             # (so e.g. an A1 stub doesn't subtract A's corridor
             # from itself if it was somehow classified as
             # diagonal).
-            current = ls
-            for c_ref, corridor in parallel_corridors:
-                if c_ref == ref:
-                    continue
+            # Subtract the union of every OTHER ref's corridor at once.
+            # Keep ALL SUBSTANTIAL surviving pieces, not just the longest
+            # (user 2026-05-30): a diagonal STUB ends at the apron, so the
+            # subtraction leaves one body piece (+ maybe a short float we
+            # drop).  But a long diagonal THROUGH-taxiway (HECA R, 1.9 km
+            # at db~30°) CROSSES a parallel's corridor in its middle —
+            # subtraction leaves TWO long pieces, and keeping only the
+            # longest DISCARDED ~670 m of R.  Keeping every piece >=
+            # SUBSTANTIAL_PIECE_M preserves the through-taxi (its corridor
+            # crossing becomes a junction at the split) while still
+            # dropping short apron-floats.
+            SUBSTANTIAL_PIECE_M = 150.0
+            others = [corr for c_ref, corr in parallel_corridors
+                      if c_ref != ref]
+            kept_pieces = [ls]
+            if others:
                 try:
-                    diff = current.difference(corridor)
+                    diff = ls.difference(unary_union(others))
                 except _GEOM_EXC:
-                    continue
+                    diff = ls
                 if diff.is_empty:
-                    continue
-                if diff.geom_type == "LineString":
-                    if diff.length >= MIN_SEGMENT_LEN_M:
-                        current = diff
+                    kept_pieces = [ls]
+                elif diff.geom_type == "LineString":
+                    kept_pieces = ([diff]
+                                   if diff.length >= MIN_SEGMENT_LEN_M
+                                   else [ls])
                 elif diff.geom_type == "MultiLineString":
-                    longest = max(diff.geoms,
-                                  key=lambda g: g.length)
-                    if longest.length >= MIN_SEGMENT_LEN_M:
-                        current = longest
-            corridor_trimmed.append((current, ref))
+                    subs = [g for g in diff.geoms
+                            if g.length >= SUBSTANTIAL_PIECE_M]
+                    if subs:
+                        kept_pieces = subs
+                    else:
+                        longest = max(diff.geoms, key=lambda g: g.length)
+                        kept_pieces = ([longest]
+                                       if longest.length >= MIN_SEGMENT_LEN_M
+                                       else [ls])
+            for piece in kept_pieces:
+                corridor_trimmed.append((piece, ref))
         osm_centerlines = corridor_trimmed
 
     # Per user rule (2026-04-18): "Implement splitting at cross ref
