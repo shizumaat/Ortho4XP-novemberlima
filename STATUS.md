@@ -1,4 +1,22 @@
-# Auto-Patch Status — session 55 HANDOVER (★ ENTIRE SUITE GREEN: 284 passed / 0 failed / 2 skipped, compare_target INCLUDED)
+# Auto-Patch Status — session 55 HANDOVER (★ default suite GREEN: 281 passed / 0 failed / 2 skipped, compare_target INCLUDED)
+
+## Session 55 CLOSE (2026-05-29)
+Two threads ran: (A) build/test PERF + (B) HECA correctness. Net:
+- **HECA invariant failures 9 → 2** (`O4_TEST_AIRPORTS=HECA`): fixed coverage,
+  terminal flatness, 170 orphans, rect-short-edge TX52, retired Rule-2
+  proximity, vertex-on-sloping-edge snap, neighbour-corner insert. The
+  junction-connectivity cluster (#3) is fully closed.
+- **Remaining HECA: #2 within-shape grade (~79, DIAGNOSED — needs a solver
+  redesign, SPAWNED as a separate task) and #5 self-overlap (3 pairs).**
+- **Perf:** build 70.7→54.6 s; suite builds 14→8; default suite ~104→~73 s.
+- Default-suite count dropped 284→281 only because the retired Rule-2 test
+  had 3 parametrizations (SPJC/SPLP/CYXY); nothing regressed.
+- ⚠️ ANOTHER AGENT has uncommitted WIP in `junction_repair.py`
+  (`_orient_rect_sloping_edge_first`). LEAVE IT ALONE.
+- The #2 solver work is handed to a fresh session (see the "PLAN for the
+  solver session" under HECA failure #2 below). Do NOT rush it into a
+  mixed session — the naive terminal-lift backfired (169 viol); it needs a
+  coherent-fill redesign with the grade tests as the regression guard.
 
 ## Session 55 — build/test PERFORMANCE pass (committed 6140f46, 6d8900d, fc53573, f6ad4fb) + shared build cache (bd728b5)
 Profiled the per-airport build (the dominant suite cost; tests themselves
@@ -58,8 +76,9 @@ boundary as source); Rule-2 proximity retired; rect_short_edges TX52
 (pavement-tip exemption); vertex-on-sloping-edge (post-conformance
 near-corner snap onto rect corners); neighbour_corners (post-conformance
 insert of unshared neighbour corners into junction edges). Remaining:
-within-junction grade (#2, 74 — apron decomposition), self-overlap
-(#5, 3 pairs 1.9 m²). The original HEAZ-over-collection
+within-junction grade (#2, ~79 — DIAGNOSED; needs a coherent-fill solver
+redesign, deferred to a spawned solver session — see #2 below), self-
+overlap (#5, 3 pairs 1.9 m²). The original HEAZ-over-collection
 X-Plane crash appears RESOLVED by the committed boundary gate (build
 reports 0 off-airport / 0 overlay dropped). HECA failures (tasks 2-5):
 1. **Coverage (#1) — FIXED (0ffb8f6):** `test_coverage_within_source_envelope`
@@ -68,9 +87,46 @@ reports 0 off-airport / 0 overlay dropped). HECA failures (tasks 2-5):
    apt+DSF, 0.3% outside boundary = legitimate DSF, not over-collection.
    `_source_pavement_union` now adds boundary-clipped DSF. Adding source
    area only lowers overage → no airport can newly fail.
-2. **Within-shape grade — 74 viol:** giant aprons exceed 1.5% over their
-   whole span (apron#273 632m@1.6%, apron#209 255m@1.9%; junction#241/243).
-   Apron-decomposition piece.
+2. **Within-shape grade — ~79 viol — DIAGNOSED, NOT FIXED (s55, deferred to
+   a solver session — see spawned task).** NOT apron decomposition, NOT
+   neighbour-holding. Full diagnosis 2026-05-29:
+   - Cap = ≤1.5% between ANY two vertices of a junction/apron (all-pair
+     Euclidean). `_PER_AXIS_JUNCTIONS=False` so aprons use pure Euclidean
+     (matches the test); junctions get arc-length relaxation but the worst
+     pairs are too short for that to matter — so the violations are genuine.
+   - SPLIT (83 pairs / 12 shapes): **31 "below-floor"** (node seeded at the
+     too-low DEM, below its grade-feasible band — FILL fixes) + **52
+     "infeasible" (band lo>hi)**, mostly the ~1 km² apron. ALL infeasibility
+     gaps are SMALL (≤2.60 m; many exactly 2.60 m).
+   - ROOT: `_grade_bands` is seeded ONLY from the 15 CIFP runway THRESHOLDS
+     (the 171 interior runway nodes are NOT hard). HECA's thresholds span
+     58-142 m, so a node squeezed between a CLOSE high threshold (e.g.
+     136.5 m, ~200 m away → forces ≥133.5) and a FAR low one (60.7 m,
+     ~4700 m → ≤131.0) gets an infeasible band — the two extreme runways are
+     ~1.55% apart over their connecting pavement path (~2.6 m over 1.5%).
+   - USER FRAMING (authoritative, 2026-05-29): the DEM is the LEAST-accurate
+     input (low-res + smoothed); CIFP thresholds are CORRECT; real taxiways
+     follow grade; fill/cut are normal. So a ≤1.5% surface ALWAYS exists and
+     "infeasible" just means the DEM is wrong there. The band's all-`lo`
+     assignment IS grade-compliant (triangle ineq) — so the fix is to FILL
+     toward the band, treating DEM as a within-band preference only.
+   - ATTEMPT THAT BACKFIRED (reverted): lifting each terminal group to its
+     band floor in isolation → 169 viol, worst 62.2%. Lifting a terminal's
+     shared edge ~7 m while its far edge stays at terrain makes a cliff
+     INSIDE the shape. LESSON: **fill must be COHERENT across the whole
+     connected sub-network** (terminal + abutting aprons + connecting
+     taxiways lift together), not shape-by-shape.
+   - PLAN for the solver session: a coherent global fill in the final
+     difference-constraint pass (`unified_jacobi._project_within_bands` /
+     `_directional_relief`) — make terminal groups MOVABLE coupled units
+     within the band-projection and alternate cap-projection ∩ band-clamp
+     over ALL soft nodes (incl. terminal units), so below-floor nodes lift
+     to their floor and infeasible nodes resolve to midpoint, with the whole
+     region moving together. Regression-guard: SPJC/SPLP/CYXY grade tests.
+   ⚠️ An OTHER AGENT has uncommitted WIP in `junction_repair.py`
+   (`_orient_rect_sloping_edge_first` — fixes a rotated-rect mis-split,
+   HECA taxiway A #446/447). LEAVE IT ALONE; coordinate before touching
+   `_split_sloped_rects_at_violations`.
 3. **Junction connectivity cluster:** 2 of 5 FIXED.
    - ✓ 170 orphan vertices (d78e6c4): all within 1.5m of the apt+DSF
      pav_union boundary — junction perimeters following the DSF edge. Test's
