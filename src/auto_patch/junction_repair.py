@@ -54,6 +54,7 @@ from .layout import (
     ROLE_SECONDARY_PARALLEL,
     ROLE_STUB,
     ROLE_TERMINAL,
+    SHARED_VERTEX_TOL_M,
     corner_alts_from_high_low,
 )
 
@@ -1620,6 +1621,148 @@ def _split_sloped_rects_at_violations(
     return n_splits
 
 
+def _snap_near_corner_vertices_to_rect_corners(
+        layout: "PavementLayout",
+        icao: str = "",
+        edge_prox_m: float = 0.5,
+        corner_guard_m: float = 0.5,
+        near_corner_snap_m: float = 1.5,
+        ) -> int:
+    """Snap a non-rect (junction / apron / …) vertex that sits on a sloped
+    rect's edge INTERIOR near a corner onto that corner.
+
+    A non-rect vertex on a sloped rect's edge interior breaks the rect's
+    planar high→low slope (the per-vertex solver disagrees with the rect's
+    interpolated altitude there → a step).  ``_split_sloped_rects_at_
+    violations`` resolves MID-edge cases by splitting the rect; a vertex
+    too close to a corner can't be split (it would make a sliver sub-rect),
+    and the later weld / conformance passes can leave such a vertex ~0.5 m
+    off a corner sitting on the edge (e.g. HECA junctions on stub W2 /
+    primary_parallel A, 0.52 m off the corner).
+
+    This runs LAST (after conformance), on the emitted geometry, so it
+    catches the final residual regardless of which pass produced it: for
+    every such near-corner on-edge vertex, snap it onto the EXISTING rect
+    corner (through the canonical registry) so the two SHARE the corner —
+    exactly what ``test_no_vertex_on_sloping_rect_edge`` requires.  Mid-edge
+    vertices (farther than ``near_corner_snap_m`` from any corner) are left
+    for the split pass.  Returns the number of shapes modified.
+    """
+    from shapely.geometry import Polygon
+    sloping_roles = {
+        ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
+        ROLE_STUB, ROLE_CROSS_CONNECTOR, "service_road",
+    }
+    reg = getattr(layout, "canonical_points", None)
+    # Sloped 4-corner rects — match the invariant test's "sloping" set:
+    # a sloped rect (altitude_high/low or untagged), NOT a flat single-
+    # altitude shape, NOT a per-vertex node_altitudes piece.
+    rects: list[list[tuple[float, float]]] = []
+    for s in layout.shapes:
+        if s.role not in sloping_roles:
+            continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        if s.node_altitudes is not None:
+            continue
+        if (s.altitude is not None
+                and s.altitude_high is None
+                and s.altitude_low is None):
+            continue                       # flat single-altitude: exempt
+        try:
+            rc = list(s.polygon.exterior.coords)
+        except _GEOM_EXC:
+            continue
+        if rc and rc[0] == rc[-1]:
+            rc = rc[:-1]
+        if len(rc) != 4:
+            continue
+        rects.append([(float(x), float(y)) for x, y in rc])
+    if not rects:
+        return 0
+
+    edge_prox2 = edge_prox_m * edge_prox_m
+    snap2 = near_corner_snap_m * near_corner_snap_m
+    guard2 = corner_guard_m * corner_guard_m
+    n_changed = 0
+    for s in layout.shapes:
+        if s.role in sloping_roles:
+            continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        try:
+            coords = list(s.polygon.exterior.coords)
+        except _GEOM_EXC:
+            continue
+        had_close = bool(coords) and coords[0] == coords[-1]
+        if had_close:
+            coords = coords[:-1]
+        new_coords = list(coords)
+        changed = False
+        for vi, (px, py) in enumerate(coords):
+            target = None
+            for rc in rects:
+                # Already at a corner of this rect → legitimate, skip it.
+                if any((px - cx) ** 2 + (py - cy) ** 2 <= guard2
+                       for cx, cy in rc):
+                    continue
+                for k in range(4):
+                    ax, ay = rc[k]
+                    bx, by = rc[(k + 1) % 4]
+                    dx = bx - ax
+                    dy = by - ay
+                    L2 = dx * dx + dy * dy
+                    if L2 <= 1e-9:
+                        continue
+                    t = ((px - ax) * dx + (py - ay) * dy) / L2
+                    if t <= 0.001 or t >= 0.999:
+                        continue
+                    cxp = ax + t * dx
+                    cyp = ay + t * dy
+                    if (px - cxp) ** 2 + (py - cyp) ** 2 >= edge_prox2:
+                        continue
+                    near = (ax, ay) if t < 0.5 else (bx, by)
+                    dnc2 = (px - near[0]) ** 2 + (py - near[1]) ** 2
+                    if guard2 < dnc2 <= snap2:
+                        target = near
+                        break
+                if target is not None:
+                    break
+            if target is not None:
+                new_coords[vi] = (
+                    reg.get_or_add(target[0], target[1])
+                    if reg is not None else target)
+                changed = True
+        if not changed:
+            continue
+        ring = (new_coords + [new_coords[0]]) if had_close else new_coords
+        try:
+            poly = Polygon(ring)
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            if poly.is_empty:
+                continue
+            if poly.geom_type == "MultiPolygon":
+                poly = max(poly.geoms, key=lambda g: g.area)
+            if reg is not None:
+                poly = snap_polygon_through_registry(poly, reg)
+                if (poly is None or poly.is_empty
+                        or poly.geom_type != "Polygon"):
+                    continue
+            if poly.geom_type != "Polygon":
+                continue
+        except _GEOM_EXC:
+            continue
+        s.polygon = poly
+        n_changed += 1
+    if n_changed:
+        try:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: snapped near-corner vertex(es) "
+                f"onto rect corners in {n_changed} shape(s).")
+        except _GEOM_EXC:
+            pass
+    return n_changed
 
 
 def _absorb_rect_into_junction(rect_shape, junction_shape):

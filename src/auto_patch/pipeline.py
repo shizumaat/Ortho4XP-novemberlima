@@ -2989,6 +2989,17 @@ def build_airport_pavement(icao: str, xplane_root: str,
             f"  [pav-builder] {icao}: conformance — inserted {n_verts} "
             f"shared-boundary vertex(es) into {n_shapes} shape(s).")
 
+    # FINAL near-corner snap: a non-rect vertex left sitting on a sloped
+    # rect's edge near a corner (un-splittable by
+    # _split_sloped_rects_at_violations — a split there makes a sliver —
+    # and nudged there by the weld/conformance reshaping) is snapped onto
+    # the existing rect corner so the two SHARE it.  Runs LAST, on the
+    # emitted geometry, so it catches the residual regardless of origin
+    # (test_no_vertex_on_sloping_rect_edge).
+    from .junction_repair import (
+        _snap_near_corner_vertices_to_rect_corners)
+    _snap_near_corner_vertices_to_rect_corners(layout, icao=icao)
+
     # Ribbon YIELDS its elevation to abutting pavement at every shared
     # seam node (incl. the ones conformance just inserted), so there is
     # no vertical wall between pavement and the ribbon.  Altitude-only —
