@@ -169,13 +169,18 @@ def _build_taxi_rects(
         if narrow_hw < 3.5 or narrow_hw > 40.0:
             continue
 
-        # Per user (2026-04-20): trimming is now handled by the
-        # upstream _split_centerlines_at_points which emits each
-        # rect axis at 70% of the distance between intersections
-        # (15% margin on each junction-facing end).  Skip the
-        # width-based trim here — the axis is already cut to the
-        # rect's intended length.
-        trimmed = clipped
+        # Width-based endpoint trim (general rule, user 2026-05-30):
+        # the intersection split (_split_centerlines_at_points) cuts at
+        # network nodes, but a centerline still runs full-length THROUGH
+        # apron mouths / widenings that aren't network nodes, so the rect
+        # over-runs into junction territory.  Trim each end inward to
+        # where the pavement narrows back to the strip width — the
+        # widened ends become junction polygons.  This is the dominant
+        # lever closing the ~25% over-length gap vs the hand-verified
+        # centerline target, and it is purely geometric (no per-airport
+        # tuning).
+        trimmed = _trim_axis_to_narrow_corridor(
+            clipped, pav_non_rwy, narrow_hw)
         trim_narrow_hw = narrow_hw
 
         # Dedup against trimmed axis
@@ -870,6 +875,111 @@ def _natural_half_width(axis: LineString, pav: Polygon,
     filtered = [d for d in dists if d >= 3.5]
     narrow = filtered[0] if filtered else dists[0]
     return median, p90, narrow
+
+
+def _axis_half_width_at(axis: LineString, t: float, pav: Polygon,
+                        cap: float = 40.0, step: float = 0.5) -> float:
+    """Average perpendicular half-width of ``pav`` at axis param ``t``
+    (metres along ``axis``).  Mirrors ``_natural_half_width``'s ray
+    cast for a single point; used by the endpoint trim below."""
+    dt = min(2.0, axis.length * 0.05)
+    a = axis.interpolate(max(0.0, t - dt))
+    b = axis.interpolate(min(axis.length, t + dt))
+    tx, ty = b.x - a.x, b.y - a.y
+    mag = math.hypot(tx, ty)
+    if mag < 1e-6:
+        return cap
+    nx, ny = -ty / mag, tx / mag
+    pt = axis.interpolate(t)
+    ox, oy = pt.x, pt.y
+    sides: list[float] = []
+    for sign in (-1, 1):
+        d = 0.0
+        side = cap
+        while d <= cap:
+            if not pav.contains(Point(ox + sign * nx * d,
+                                      oy + sign * ny * d)):
+                side = d
+                break
+            d += step
+        sides.append(side)
+    return sum(sides) / 2.0
+
+
+def _trim_axis_to_narrow_corridor(
+        axis: LineString, pav: Polygon, narrow_hw: float,
+        factor: float = 1.3, step_m: float = 2.0,
+        min_keep_m: float = 20.0) -> LineString:
+    """Trim the axis ENDS inward while the local pavement half-width
+    exceeds ``factor * narrow_hw``.
+
+    A taxi centerline runs the full taxiway, but the rect should cover
+    only the NARROW corridor — where the pavement fans out at an
+    intersection / apron mouth the widened end is junction territory,
+    not taxi rect.  This walks each end inward to the first point where
+    the pavement narrows back to ~the strip width, so the emitted rect
+    (= this trimmed axis, widened) stops at the junction mouth.
+
+    Purely geometric and airport-agnostic: the trigger is the pavement
+    widening past the strip's own narrow half-width, nothing tuned per
+    airport.  Bounded by ``min_keep_m`` so a short taxiway is never
+    trimmed away (removal of whole non-taxi segments is the gates' job,
+    not the trim's).
+    """
+    from shapely.ops import substring
+    L = axis.length
+    if L < min_keep_m:
+        return axis
+    # Strip half-width reference, measured with a HIGH cap.  The passed
+    # ``narrow_hw`` is capped at 40 m (RAY_CAP_M) and SATURATES at wide
+    # airports — then ``factor*narrow_hw`` can exceed the cap and the
+    # trim never fires.  Re-measure the strip with a high cap so the
+    # junction widenings (60-100 m half) are actually visible above the
+    # threshold.
+    HIGH_CAP = 120.0
+    n = 12
+    halves = [_axis_half_width_at(axis, (k + 1) / (n + 1) * L, pav,
+                                  cap=HIGH_CAP, step=1.0)
+              for k in range(n)]
+    halves_f = sorted(h for h in halves if h >= 3.5)
+    if not halves_f:
+        return axis
+    strip = halves_f[min(len(halves_f) - 1, max(0, n // 5))]   # ~p20
+    thresh = factor * strip
+
+    def _wider(t: float) -> bool:
+        """True if pavement extends past ``thresh`` on EITHER side at
+        ``t`` — a one-sided junction widening counts.  Cheap: one
+        containment test per side at the threshold distance."""
+        a = axis.interpolate(max(0.0, t - 1.0))
+        b = axis.interpolate(min(L, t + 1.0))
+        tx, ty = b.x - a.x, b.y - a.y
+        mag = math.hypot(tx, ty)
+        if mag < 1e-6:
+            return False
+        nx, ny = -ty / mag, tx / mag
+        pt = axis.interpolate(t)
+        return (pav.contains(Point(pt.x + nx * thresh, pt.y + ny * thresh))
+                or pav.contains(Point(pt.x - nx * thresh,
+                                      pt.y - ny * thresh)))
+
+    lo = 0.0
+    while lo < L * 0.5 and _wider(lo):
+        lo += step_m
+    hi = L
+    while hi > L * 0.5 and _wider(hi):
+        hi -= step_m
+    if hi - lo < min_keep_m:
+        return axis                       # would over-trim — leave it
+    if lo <= step_m and hi >= L - step_m:
+        return axis                       # nothing to trim
+    try:
+        sub = substring(axis, lo, hi)
+        if sub.is_empty or sub.geom_type != "LineString":
+            return axis
+        return sub
+    except _GEOM_EXC:
+        return axis
 
 
 # When the centerline is off-centre within its pavement strip, the two

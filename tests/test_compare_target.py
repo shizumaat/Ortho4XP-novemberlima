@@ -59,10 +59,10 @@ pytestmark = pytest.mark.skipif(
 # ordering.  A regression that drops more than ~5 % of any role's
 # shapes vs target trips the gate.
 # Floors refreshed 2026-05-30 against the re-cut SPJC / SPLP target
-# fixtures (source_axis-aware sloping-edge split + flat-end trim:
-# taxiways no longer emit as two parallel lanes — SPJC TX10 6->5
-# secondary_parallel; SPLP gains correct cross-cut splits previously
-# missed by the mis-oriented detector).
+# fixtures.  Latest: width-aware centerline endpoint trim
+# (_trim_axis_to_narrow_corridor) pulls taxi rects back out of junction
+# widenings; SPLP-77's short cross_connector trimmed shorter and
+# reclassified to stub (cross_connector 1->0, stub 2->3, junction 3->4).
 SPJC_BASELINE: Dict[str, int] = {
     "apron":              39,   # of  41 target
     "boundary":          977,   # of 1028 target
@@ -76,7 +76,7 @@ SPJC_BASELINE: Dict[str, int] = {
     "terminal":            2,   # of   2 target
     "tunnel_ramp":        34,   # of  36 target
 }
-SPJC_BASELINE_TOTAL = 1265  # of 1332 target
+SPJC_BASELINE_TOTAL = 1266  # of 1333 target
 
 # SPLP is cross-tile (spans -13/-77 and -13/-78).  Each tile-half has
 # its own baseline; a regression in either half trips the gate.
@@ -87,13 +87,12 @@ SPJC_BASELINE_TOTAL = 1265  # of 1332 target
 SPLP_BASELINE_TILE_M77: Dict[str, int] = {
     "apron":              10,   # of  11 target
     "boundary":          200,   # of 211 target
-    "cross_connector":     1,   # of   1 target
-    "junction":            3,   # of   3 target
+    "junction":            4,   # of   4 target
     "primary_parallel":   10,   # of  11 target
     "runway":              8,   # of   8 target
-    "stub":                2,   # of   2 target
+    "stub":                3,   # of   3 target
 }
-SPLP_BASELINE_TILE_M77_TOTAL = 240  # of 253 target
+SPLP_BASELINE_TILE_M77_TOTAL = 241  # of 254 target
 
 SPLP_BASELINE_TILE_M78: Dict[str, int] = {
     "apron":               4,   # of   4 target
