@@ -52,8 +52,8 @@ output-identical (no behaviour change); suite stays 284/0/2.
 HECA is NOT in the automated baseline (`_BASELINE_AIRPORTS` = SPJC/SPLP/CYXY);
 it's a manual build/X-Plane target. Built standalone (no crash, 2407 shapes,
 all valid) and ran the invariant suite via `O4_TEST_AIRPORTS=HECA`:
-Started at 9 failures; **6 remain** (coverage #1, terminal #4, and the
-170-orphan part of #3 now fixed). The original HEAZ-over-collection
+Started at 9 failures; **5 remain** (fixed: coverage #1, terminal #4, the
+170-orphan part of #3, and rect_short_edges TX52). The original HEAZ-over-collection
 X-Plane crash appears RESOLVED by the committed boundary gate (build
 reports 0 off-airport / 0 overlay dropped). HECA failures (tasks 2-5):
 1. **Coverage (#1) — FIXED (0ffb8f6):** `test_coverage_within_source_envelope`
@@ -70,13 +70,27 @@ reports 0 off-airport / 0 overlay dropped). HECA failures (tasks 2-5):
      pav_union boundary — junction perimeters following the DSF edge. Test's
      `apt_pavement_boundary` captured row-110 only (built before the DSF
      loop). Fix: union the final pav_union boundary into it (test-only).
-   - REMAINING (genuine near-miss geometry, recurring d=0.50m): Rule-2
-     proximity (6: #213 v4, #250 v1/2, #357 v2/3/4); vertex-on-sloping-edge
-     (2: junction on stub W2 t=0.987 / primary_parallel A t=0.997, 0.50m);
-     neighbour_corners (1: #369 vs stub J3, 0.50m miss); rect_short_edges
-     (1: primary_parallel TX52 end_B dangling). Same CLASSES as the
-     SPJC/CYXY fixes in memory (Rule-2 re-snap, neighbour bridge, dangling
-     connect) — HECA now exercises them.
+   - ✓ rect_short_edges TX52 (5b0d100): discovered lane dead-ending AT the
+     pavement tip (both dangling corners 0.03/0.06m from the apt+DSF
+     boundary). s54's 25m-isolation exemption missed it (a junction vertex
+     18.8m away); added an explicit pavement-tip exemption (dangling edge on
+     the boundary). TX15-style interior near-misses still flag.
+   - REMAINING (3 tests, diagnosed 2026-05-29): split by tractability —
+     * **neighbour_corners (1):** junction #369 v4 is 0.50m from stub J3's
+       corner (-1977.4,900.1) — clean near-miss; insert/snap the shared
+       corner. Tractable.
+     * **vertex-on-sloping-edge (2):** junction vertex 0.50m off a sub-rect
+       (W2 t=0.987 / A t=0.997) long edge near its END — sub-rect-split
+       residual (`_split_sloped_rects_at_violations` pull left 0.5m).
+       Probably tractable (tighten the pull snap).
+     * **Rule-2 proximity (6: #213 v4, #250 v1/2, #357 v2/3/4):** MID-
+       BOUNDARY junction vertices 6-29m from any rect corner, sitting on the
+       apt+DSF pavement boundary BETWEEN two rect-corner-shared vertices,
+       2-14m perpendicular to a nearby stub long edge. NOT a near-miss —
+       the junction legitimately follows the dense-apron pavement edge past
+       a stub. NO clean snap target. **Needs a DESIGN DECISION:** relax the
+       20m perpendicular rule for dense layouts, or re-cut the junction.
+       Don't snap (distorts the junction). PARKED for a deliberate call.
 4. ✓ **terminal#9 (terminal10)** (491ed20): conformance vertex insertion
    converted the flat terminal to uniform node_altitudes (H26 violation).
    Fix: keep single-altitude shapes flat after insertion.
