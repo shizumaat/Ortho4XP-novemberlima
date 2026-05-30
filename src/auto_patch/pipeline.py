@@ -2997,8 +2997,14 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # emitted geometry, so it catches the residual regardless of origin
     # (test_no_vertex_on_sloping_rect_edge).
     from .junction_repair import (
-        _snap_near_corner_vertices_to_rect_corners)
+        _snap_near_corner_vertices_to_rect_corners,
+        _share_neighbour_corners_into_junctions)
     _snap_near_corner_vertices_to_rect_corners(layout, icao=icao)
+    # Companion: a neighbour corner sitting on a junction's edge 0.10-0.5 m
+    # from a junction vertex is skipped by conformance's endpoint guard but
+    # flagged by test_junction_neighbour_corners_shared — insert it so the
+    # junction shares it.
+    _share_neighbour_corners_into_junctions(layout, icao=icao)
 
     # Ribbon YIELDS its elevation to abutting pavement at every shared
     # seam node (incl. the ones conformance just inserted), so there is

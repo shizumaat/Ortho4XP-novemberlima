@@ -1765,6 +1765,144 @@ def _snap_near_corner_vertices_to_rect_corners(
     return n_changed
 
 
+def _share_neighbour_corners_into_junctions(
+        layout: "PavementLayout",
+        icao: str = "",
+        near_perimeter_m: float = 1.0,
+        same_vertex_tol_m: float = 0.10,
+        insert_perp_tol_m: float = 0.5,
+        ) -> int:
+    """Insert an unshared NEIGHBOUR corner that lies on a junction's edge
+    into that junction's perimeter, so the junction SHARES it.
+
+    ``test_junction_neighbour_corners_shared`` requires every neighbour
+    vertex within ``near_perimeter_m`` of a junction's perimeter to
+    coincide (within ``same_vertex_tol_m``) with a junction vertex.
+    ``enforce_conformance`` inserts such T-junctions, but its endpoint
+    guard skips any candidate within ``CONFORMANCE_TOL_M`` (0.5 m) ALONG an
+    edge of a corner — even a genuinely distinct point 0.10-0.5 m from that
+    corner (HECA: stub J3's corner is 0.52 m from junction #369's vertex
+    v4, sitting on its edge → conformance treats it as "at v4" and skips,
+    but it is 0.52 m > 0.10 m from v4, so the test still flags it).
+
+    This pass closes that gap on the FINAL geometry, JUNCTION-scoped and
+    using the test's own tolerances, so it acts only on the exact orphans
+    the test flags — airports already passing have none, so it can't
+    regress them.  Returns the number of junctions modified.
+    """
+    from shapely.geometry import Point, Polygon
+    reg = getattr(layout, "canonical_points", None)
+    junctions = [(i, s) for i, s in enumerate(layout.shapes)
+                 if s.role == ROLE_JUNCTION
+                 and s.polygon is not None and not s.polygon.is_empty]
+    others = [s for s in layout.shapes
+              if s.role != ROLE_JUNCTION
+              and s.polygon is not None and not s.polygon.is_empty]
+    if not junctions or not others:
+        return 0
+    nbr_pts: list[tuple[float, float]] = []
+    for s in others:
+        try:
+            for ox, oy in list(s.polygon.exterior.coords)[:-1]:
+                nbr_pts.append((float(ox), float(oy)))
+        except _GEOM_EXC:
+            continue
+
+    same2 = same_vertex_tol_m * same_vertex_tol_m
+    perp2_tol = insert_perp_tol_m * insert_perp_tol_m
+    n_changed = 0
+    for j_idx, j_s in junctions:
+        try:
+            coords = list(j_s.polygon.exterior.coords)
+        except _GEOM_EXC:
+            continue
+        had_close = bool(coords) and coords[0] == coords[-1]
+        if had_close:
+            coords = coords[:-1]
+        if len(coords) < 3:
+            continue
+        x_min, y_min, x_max, y_max = j_s.polygon.bounds
+        pad = near_perimeter_m + 0.5
+        bnd = j_s.polygon.boundary
+        # edge_index -> [(t, (x, y)), ...] to insert after that vertex.
+        inserts: dict[int, list[tuple[float, tuple[float, float]]]] = {}
+        for ox, oy in nbr_pts:
+            if (ox < x_min - pad or ox > x_max + pad
+                    or oy < y_min - pad or oy > y_max + pad):
+                continue
+            # already a junction vertex → fine.
+            if any((ox - cx) ** 2 + (oy - cy) ** 2 <= same2
+                   for cx, cy in coords):
+                continue
+            if bnd.distance(Point(ox, oy)) > near_perimeter_m:
+                continue
+            # locate the junction edge it lies on (interior, within perp tol)
+            best = None
+            for k in range(len(coords)):
+                ax, ay = coords[k]
+                bx, by = coords[(k + 1) % len(coords)]
+                dx = bx - ax
+                dy = by - ay
+                L2 = dx * dx + dy * dy
+                if L2 <= 1e-9:
+                    continue
+                t = ((ox - ax) * dx + (oy - ay) * dy) / L2
+                if t <= 0.001 or t >= 0.999:
+                    continue
+                cxp = ax + t * dx
+                cyp = ay + t * dy
+                perp2 = (ox - cxp) ** 2 + (oy - cyp) ** 2
+                if perp2 > perp2_tol:
+                    continue
+                if best is None or perp2 < best[2]:
+                    best = (k, t, perp2)
+            if best is not None:
+                inserts.setdefault(best[0], []).append((best[1], (ox, oy)))
+        if not inserts:
+            continue
+        new_coords: list = []
+        for k in range(len(coords)):
+            new_coords.append(coords[k])
+            if k in inserts:
+                seen_t: set = set()
+                for t, pt in sorted(inserts[k]):
+                    key = round(t, 4)
+                    if key in seen_t:
+                        continue
+                    seen_t.add(key)
+                    new_coords.append(
+                        reg.get_or_add(pt[0], pt[1])
+                        if reg is not None else pt)
+        ring = (new_coords + [new_coords[0]]) if had_close else new_coords
+        try:
+            poly = Polygon(ring)
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            if poly.is_empty:
+                continue
+            if poly.geom_type == "MultiPolygon":
+                poly = max(poly.geoms, key=lambda g: g.area)
+            if reg is not None:
+                poly = snap_polygon_through_registry(poly, reg)
+                if (poly is None or poly.is_empty
+                        or poly.geom_type != "Polygon"):
+                    continue
+            if poly.geom_type != "Polygon":
+                continue
+        except _GEOM_EXC:
+            continue
+        j_s.polygon = poly
+        n_changed += 1
+    if n_changed:
+        try:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: inserted unshared neighbour "
+                f"corner(s) into {n_changed} junction(s).")
+        except _GEOM_EXC:
+            pass
+    return n_changed
+
+
 def _absorb_rect_into_junction(rect_shape, junction_shape):
     """Extend ``junction_shape``'s polygon to include
     ``rect_shape``'s footprint by replacing the shared sloping-edge
