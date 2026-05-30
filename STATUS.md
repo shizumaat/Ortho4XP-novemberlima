@@ -1,3 +1,105 @@
+# Auto-Patch Status — session 56 HANDOVER (★ default suite GREEN: 281 passed / 0 failed / 2 skipped, compare_target INCLUDED)
+
+## ★★ SESSION 56 HANDOVER → NEXT AGENT: collinear-fragment MERGE (the remaining rect-quality lever) ★★
+
+### Where we are
+Session 56 was a taxi-rect QUALITY pass driven by a hand-verified target.
+Guiding model (user): **a taxi rect = its centerline segment, widened** — so
+align the centerline segmentation+extent and the rects follow. Junctions only
+at real curves/intersections. Rules must be GENERAL (geometric, all airports),
+not HECA-tuned.
+
+Committed this session (all suite-green, no regressions):
+- `e9889a4` source_axis-aware sloping-edge split (stop two-parallel-lane rects)
+  + `56fc95e` no-overlap guards on junction-vertex-moving passes (replaced a
+  bad flat-end trim that broke junctions). [memory/two_parallel_rects_rotated_ring.md]
+- `f205856` **width-aware endpoint trim** (`_trim_axis_to_narrow_corridor` in
+  pavement/rects.py): trims a rect's axis back where pavement widens past
+  1.3×strip half-width → rect ends at the junction mouth. CAP GOTCHA: the
+  half-width probe caps at 40m and saturates at wide airports; the trim
+  re-measures the strip with a HIGH cap (120m).
+- `077b17a` apron-blob rejection: drop a rect whose mean width > 1.7×(2*narrow_hw)
+  AND > 50m (corner-snap inflated it into apron — HECA U1 570×162).
+- `674d5e8` corridor trim keeps through-taxi crossings (was discarding R's
+  670m middle section).
+Cumulative HECA vs target: rect IoU 0.704→0.749, matched 98→108/125, ~half
+the over-length gap closed. FULL DETAIL: **memory/rect_centerline_quality.md**.
+
+### THE NEXT PHASE (your task): collinear-fragment MERGE, replacing the stub-dedup
+**Goal:** close the remaining gap. Current centerline-level score (rect axes vs
+target): **153 axes / 29,730 m vs target 125 / 25,375 m** — over-segmented
+(+28) and ~17% too long overall (T/S/G over-fragmented), while R/B are *under*-
+built. One coherent lever fixes BOTH directions.
+
+**Diagnosis (verified, do not re-litigate):**
+- apt.dat is FINE — R = 1918 m (7 edges), B = 883 m (5 edges), full length.
+  `apt_dat_reader.taxi_centerlines` preserves them.
+- The builder `_build_taxi_rects` EMITS all of R's segments (instrumented: 5
+  "R EMITTED" stubs). They are then COLLAPSED to 1 by the **stub-ref dedup**
+  post-pass: `src/auto_patch/pavement/rects.py` ~lines 351-457
+  (`_should_dedup` + the overlap/proximity cluster dedup + the "diagonal-parent
+  → exactly one rect" rule). That logic keeps only the LONGEST fragment per
+  ref, assuming letter-only stubs are single short stubs (correct for SPJC
+  B/C/E/G ≤580 m; WRONG for a long 2-section taxiway like R).
+- R's true shape (user): TWO straight sections + a bend. Its fragments are
+  section-1 (db≈30° to runway: 447+194 m) and section-2 (db≈89°: 271+129+94 m).
+  Correct output ≈ 2 rects (one per section), target has 3.
+
+**The fix to build:** replace the keep-longest stub-dedup with a **MERGE of
+adjacent COLLINEAR same-ref rect axes** into one rect:
+- MERGE when fragments are same-ref + roughly collinear (bearing within ~15°)
+  + adjacent/end-to-end (touching, ~0 area overlap). → R section-1's 447+194
+  merge to ~641 m; section-2's 271+129+94 merge to ~494 m → R = 2 rects.
+- Do NOT merge across a real bend (different bearing → R's 2 sections stay
+  separate).
+- STILL drop genuine DUPLICATES (same footprint, real area overlap — SPJC's
+  fragmented OSM ways / V2's 3 pieces). Keep that behaviour; only stop
+  collapsing distinct collinear-adjacent SECTIONS.
+- This same merge also fixes the over-fragmentation (T 14→11, S 7→4, G 9→7).
+
+### How to measure (scoring harness — reuse it, don't rebuild it)
+- `/tmp/HECA_target_centerlines.osm` — 125 user-verified target spines (one per
+  intended rect). `/tmp/HECA_initial_rects_target.osm` — the 125 target rects.
+- `venv/bin/python /tmp/probes/clscore.py` — builds HECA, captures rect AXES
+  (entry[1] of `_build_taxi_rects` output), reports per-ref count+length vs
+  target + TOTAL. PRIMARY metric (1-D, robust).
+- `/tmp/probes/score.py` — rect IoU vs target (NOISY: target hand-drawn ~approx
+  coords, ~0.7 even when right; secondary trend only).
+- Anchor for /tmp probes: HECA = (30.10895832, 31.43477812).
+- Score per-ref after EACH change; converge cur→target.
+
+### Risks / guardrails
+- **Do NOT regress SPJC's short stubs** (B/C/E/G, V2) — they rely on the dedup.
+  Run the full suite + `O4_TEST_AIRPORTS=SPJC,SPLP,CYXY` checks at each step.
+- Broad geometry shift → **re-cut compare_target fixtures + refresh floors**
+  when done. Workflow: `venv/bin/python /tmp/recut.py` (re-cuts SPJC + both SPLP
+  tiles, prints floors = count−round(5%)); update `tests/test_compare_target.py`
+  baselines + totals. (Done twice this session — see git log.)
+- The `_rect_long_edges_at_pavement_boundary` both-embedded gate (rects.py ~479)
+  currently LIMITS over-fragmentation; the merge interacts with it — measure.
+- Earlier REJECTED dead-end (don't repeat): tightening `split_merged_centerline`
+  bend-split (more splitting) REGRESSED — target wants FEWER rects, not more.
+  The lever is MERGE (post-build), not more centerline bend-splitting.
+
+### ⚠️ Pre-existing WIP in the tree — LEAVE IT ALONE
+`src/auto_patch/elevation_per_surface/unified_jacobi.py` has ~29 lines of
+UNCOMMITTED WIP (a `_directional_relief` terminal grade-band "FILL terminals up
+to their grade-feasible band" block) belonging to ANOTHER agent's HECA #2
+grade work. Do NOT stage/commit it. **Avoid `git stash`** with it in the tree
+(it was accidentally reverted+reconstructed once this session — see
+memory/two_parallel_rects_rotated_ring.md incident note). Use
+`git add <explicit paths>` only.
+
+### Key file map
+- `pavement/rects.py`: `_build_taxi_rects` (gates + the stub-dedup at ~351-457),
+  `_trim_axis_to_narrow_corridor`, `_natural_half_width`, apron-blob gate.
+- `pavement/centerlines.py`: `split_merged_centerline` (bend-split),
+  `_split_centerlines_at_points` (intersection split + margins).
+- `pipeline.py` ~1846: diagonal-stub corridor trim (just fixed). ~1930: split call.
+- `apt_dat_reader.py:1209` `taxi_centerlines` (source — confirmed clean).
+
+---
+
 # Auto-Patch Status — session 55 HANDOVER (★ default suite GREEN: 281 passed / 0 failed / 2 skipped, compare_target INCLUDED)
 
 ## Session 55 CLOSE (2026-05-29)
