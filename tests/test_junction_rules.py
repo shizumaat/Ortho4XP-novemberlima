@@ -64,14 +64,18 @@ RULE1_REGRESSION_BASELINE: Dict[str, int] = {
     # Rule 1's tolerance band.  Pending Rule 1 widening redesign.
     "SPJC": 2,
 }
-RULE2_REGRESSION_BASELINE: Dict[str, int] = {
-    "SPJC": 0,
-    # CYXY: 1 corner-adjacent vertex (2.14 m perp from edge, 2.15 m
-    # from corner) where the snap's segment-projection check
-    # marginally exempts it.  Edge case — junction's own boundary
-    # geometry is otherwise clean.
-    "CYXY": 1,
-}
+# (session 55) Rule 2 / RULE2_REGRESSION_BASELINE removed
+# (test_junction_no_long_edge_proximity): it flagged a junction vertex
+# within SLOPING_EDGE_SNAP_M (20 m) PERPENDICULAR of a sloping rect's long
+# edge — a PROXIMITY proxy.  Per user 2026-05-29: mere proximity is not a
+# problem.  What actually breaks a sloping rect is placing a node ON its
+# edge (adding a vertex / a mid-edge elevation); a junction running close
+# alongside a rect is fine as long as it shares only the rect's CORNER
+# nodes (matching elevations).  That real invariant is tested directly by
+# `test_no_vertex_on_sloping_rect_edge` (vertex on a sloping edge INTERIOR,
+# corners exempt) + the grade/step tests (shared-corner elevation match),
+# so the proximity rule only produced false positives (HECA junctions 213/
+# 250/357 running 2-14 m alongside a stub) and was retired.
 # (session 51) RULE4_REGRESSION_BASELINE removed: paired with the
 # retired `_split_narrow_necks` pass (see test_no_narrow_neck_junctions
 # removal note below + STATUS.md).
@@ -206,107 +210,10 @@ SLOPING_RECT_ROLES = ("primary_parallel", "secondary_parallel",
                       "stub", "cross_connector")
 
 
-@pytest.mark.parametrize("icao", _test_airports())
-def test_junction_no_long_edge_proximity(icao):
-    """Rule 2: no junction vertex sits within ``SLOPING_EDGE_SNAP_M`` of
-    a sloping rect's long edge unless the vertex coincides with one
-    of the rect's 4 corners.  Snap to the corner happens at emit
-    time in ``junction_rules._snap_to_sloping_edge_corners``; this test
-    catches regressions.
-    """
-    from auto_patch.config import SLOPING_EDGE_SNAP_M
-    from auto_patch.layout import SHARED_VERTEX_TOL_M
-
-    layout = _build_layout(icao)
-
-    # Collect all sloping-rect long edges + their corner endpoints.
-    # Per user 2026-05-04: also accept runway corners as a valid
-    # placement — the runway-1:1-snap legitimately puts junction
-    # vertices at runway corners, which can incidentally lie within
-    # SLOPING_EDGE_SNAP_M of a nearby rect's sloping edge.
-    long_edges: List[Tuple[float, float, float, float]] = []
-    rect_corners: List[Tuple[float, float]] = []
-    for s in layout.shapes:
-        if s.role not in SLOPING_RECT_ROLES:
-            continue
-        if s.polygon is None or s.polygon.is_empty:
-            continue
-        # Per user 2026-05-02: flat rects (no altitude_high/low,
-        # only ``altitude``) are exempt from sloping-rect connection
-        # rules — junctions can connect anywhere on their boundary.
-        # Their corners ARE still valid snap targets for junction
-        # vertices (per user 2026-05-09 flat-shape rule: a flat
-        # sub-rect produced by ``_split_sloped_rects_at_violations``
-        # carries a single altitude tag and can absorb junction
-        # vertices at any node).  Long-edge proximity isn't tested
-        # against flat rects, but flat-corner coincidence still
-        # exempts a vertex from violations against neighbouring
-        # sloped rects' long edges.
-        if (s.altitude_high is None
-                or s.altitude_low is None):
-            rect_corners.extend(_rect_corners(s.polygon))
-            continue
-        for (a, b) in _rect_sloping_edges_from_shape(s):
-            long_edges.append((a[0], a[1], b[0], b[1]))
-        rect_corners.extend(_rect_corners(s.polygon))
-    # Add runway corners (Rule 1 1:1 snap targets).
-    from auto_patch.layout import ROLE_RUNWAY
-    for s in layout.shapes:
-        if s.role != ROLE_RUNWAY:
-            continue
-        if s.polygon is None or s.polygon.is_empty:
-            continue
-        rc = list(s.polygon.exterior.coords)
-        if rc and rc[0] == rc[-1]:
-            rc = rc[:-1]
-        rect_corners.extend((float(c[0]), float(c[1])) for c in rc)
-
-    if not long_edges:
-        pytest.skip(f"{icao}: no sloping rects emitted")
-
-    snap_tol = SLOPING_EDGE_SNAP_M
-    corner_tol = SHARED_VERTEX_TOL_M
-
-    violations: List[str] = []
-    for s_idx, s in enumerate(layout.shapes):
-        if s.role != "junction":
-            continue
-        if s.polygon is None or s.polygon.is_empty:
-            continue
-        coords = list(s.polygon.exterior.coords)
-        if coords and coords[0] == coords[-1]:
-            coords = coords[:-1]
-        for v_idx, (vx, vy) in enumerate(coords):
-            min_edge_d = float("inf")
-            for ax, ay, bx, by in long_edges:
-                d = _point_perp_dist_within_segment(
-                    vx, vy, ax, ay, bx, by)
-                if d is None:
-                    continue
-                if d < min_edge_d:
-                    min_edge_d = d
-            if min_edge_d >= snap_tol:
-                continue
-            # Allowed if vertex coincides with any rect corner.
-            min_corner_d = min(
-                math.hypot(vx - cx, vy - cy)
-                for cx, cy in rect_corners)
-            if min_corner_d <= corner_tol:
-                continue
-            violations.append(
-                f"junction#{s_idx} vertex#{v_idx} at "
-                f"({vx:.2f},{vy:.2f}) is {min_edge_d:.2f}m "
-                f"perpendicular to a rect long edge (nearest "
-                f"corner {min_corner_d:.2f}m away)")
-
-    baseline = RULE2_REGRESSION_BASELINE.get(icao, 0)
-    if len(violations) > baseline:
-        msg = (f"{icao}: Rule 2 violations = {len(violations)} > "
-               f"baseline {baseline}\nFirst 10:\n  "
-               + "\n  ".join(violations[:10]))
-        if len(violations) > 10:
-            msg += f"\n  ... and {len(violations) - 10} more"
-        pytest.fail(msg)
+# test_junction_no_long_edge_proximity (Rule 2) removed in session 55 —
+# see the RULE2_REGRESSION_BASELINE removal note above.  The real
+# "no node on a sloping rect's edge" invariant lives in
+# test_pavement_geometry.test_no_vertex_on_sloping_rect_edge.
 
 
 # ── Rule 1, Rule 3, Rule 4 ────────────────────────────────────────
