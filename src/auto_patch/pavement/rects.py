@@ -299,6 +299,23 @@ def _build_taxi_rects(
                 rect, trimmed, pav_non_rwy):
             continue
 
+        # Apron-blob rejection (user 2026-05-30): corner-snapping pulls
+        # the rect's corners onto the pavement boundary, which can
+        # INFLATE it far beyond its strip width when the centerline runs
+        # through a wide apron — the snapped quad then fills the apron
+        # rather than tracing a taxi corridor (HECA U1: narrow_hw 34 →
+        # snapped 570x162 m).  A real taxi rect's mean width stays
+        # ~2*narrow_hw; a mean width well beyond that means the snap
+        # blew it into apron, so leave the pavement as residue/junction.
+        # Guarded by an absolute floor so genuinely-narrow rects (whose
+        # snap legitimately widens a little) are never touched.
+        try:
+            mean_w = rect.area / max(trimmed.length, 1e-6)
+        except _GEOM_EXC:
+            mean_w = width
+        if mean_w > 50.0 and mean_w > 1.7 * width:
+            continue
+
         role = _classify_role(trimmed, width, rwy_centerlines,
                                rwy_union, ref=ref,
                                ref_overall_bearings=ref_overall_bearings)
