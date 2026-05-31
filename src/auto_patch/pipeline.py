@@ -1912,7 +1912,19 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 elif diff.geom_type == "MultiLineString":
                     subs = [g for g in diff.geoms
                             if g.length >= SUBSTANTIAL_PIECE_M]
-                    if subs:
+                    if len(subs) >= 2:
+                        # ≥ 2 substantial pieces survive ⇒ this is a
+                        # through-TAXIWAY crossing other corridors in
+                        # its middle, NOT a stub ending in one apron.
+                        # Subtracting the corridors here leaves a
+                        # permanent GAP at each crossing (HECA R lost
+                        # ~372 m, coverage 100→88.7 %).  Keep the
+                        # centerline WHOLE; the real crossing junctions
+                        # are cut downstream by _split_centerlines_at_
+                        # points with a small junction margin instead
+                        # of a corridor-width hole.
+                        kept_pieces = [ls]
+                    elif subs:
                         kept_pieces = subs
                     else:
                         longest = max(diff.geoms, key=lambda g: g.length)
