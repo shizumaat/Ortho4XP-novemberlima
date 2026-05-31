@@ -921,12 +921,14 @@ _BEND_HOOK_MAX_FRAC = 0.45  # only drop the shorter side if it's < this
 def _trim_short_bend_hooks(
     centerlines: list[tuple[LineString, str]],
 ) -> list[tuple[LineString, str]]:
-    """The target represents taxiways as STRAIGHT pieces; a centerline that
-    has a sharp bend with a SHORT arm is a hook into a junction/apron that
-    the target omits.  Split at the sharpest bend (>= ``_BEND_HOOK_DEG``) and
-    drop the shorter arm when it is < ``_BEND_HOOK_MAX_FRAC`` of the piece,
-    keeping the long straight run; iterate until the kept piece is straight.
-    Genuine L-bends (both arms substantial) are left whole."""
+    """The target represents taxiways as STRAIGHT pieces — a bend is never a
+    single segment, it is a break at the corner into two straights.  So at
+    each bend (>= ``_BEND_HOOK_DEG``) we SPLIT the centerline at the corner:
+      * if one arm is a short hook (< ``_BEND_HOOK_MAX_FRAC`` of the piece) —
+        a stub into a junction/apron the target omits — drop it and keep the
+        long straight run;
+      * otherwise both arms are real taxiway, so keep BOTH straight pieces.
+    Recurse so every emitted piece is straight; no bent piece survives."""
     def _sharpest(coords):
         worst = 0.0
         wi = -1
@@ -940,27 +942,28 @@ def _trim_short_bend_hooks(
                 worst, wi = d, i
         return worst, wi
 
+    def _straighten(ls):
+        """Return a list of straight pieces for ``ls`` (hooks dropped)."""
+        coords = list(ls.coords)
+        if len(coords) < 3:
+            return [ls]
+        ba, bi = _sharpest(coords)
+        if ba < _BEND_HOOK_DEG or bi <= 0:
+            return [ls]  # already straight
+        try:
+            p1 = LineString(coords[:bi + 1])
+            p2 = LineString(coords[bi:])
+        except _GEOM_EXC:
+            return [ls]
+        short, lng = (p1, p2) if p1.length < p2.length else (p2, p1)
+        if ls.length > 0 and short.length < _BEND_HOOK_MAX_FRAC * ls.length:
+            return _straighten(lng)              # short hook — drop it
+        return _straighten(p1) + _straighten(p2)  # real L — keep both straights
+
     out: list[tuple[LineString, str]] = []
     for ls, ref in centerlines:
-        cur = ls
-        while True:
-            coords = list(cur.coords)
-            if len(coords) < 3:
-                break
-            ba, bi = _sharpest(coords)
-            if ba < _BEND_HOOK_DEG or bi <= 0:
-                break
-            try:
-                p1 = LineString(coords[:bi + 1])
-                p2 = LineString(coords[bi:])
-            except _GEOM_EXC:
-                break
-            short, lng = (p1, p2) if p1.length < p2.length else (p2, p1)
-            if (cur.length <= 0
-                    or short.length > _BEND_HOOK_MAX_FRAC * cur.length):
-                break  # genuine bend — keep whole
-            cur = lng
-        out.append((cur, ref))
+        for p in _straighten(ls):
+            out.append((p, ref))
     return out
 
 
