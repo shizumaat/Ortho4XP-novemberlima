@@ -1399,8 +1399,20 @@ def _split_centerlines_at_points(
                 m_start = 0.22 * gap
                 m_end = 0.22 * gap
             elif is_cross and is_end_seg:
-                m_start = 0.30 * gap
-                m_end = 0.30 * gap
+                # The 30 % end margin clears the parallel-taxi widening
+                # zone where a cross-connector meets the parallel taxi.
+                # That zone is a FIXED physical distance (~one taxiway
+                # width + fillet), not a fraction of the connector's
+                # length, so cap it at CROSS_END_MARGIN_MAX_M.  Without
+                # the cap a long segment mis-classified as a cross-
+                # connector (HECA taxiway L: 1165 m, perpendicular-ish
+                # to a runway and > 250 m from it) loses 0.30·1165 =
+                # 349 m off its start — dropping target coverage of L
+                # from 100 % to 71 %.  Short genuine cross-connectors
+                # (gap < ~167 m, where 0.30·gap < 50 m) are unaffected.
+                CROSS_END_MARGIN_MAX_M = 50.0
+                m_start = min(0.30 * gap, CROSS_END_MARGIN_MAX_M)
+                m_end = min(0.30 * gap, CROSS_END_MARGIN_MAX_M)
             elif gap_margin_frac >= 0.25:
                 # Non-perpendicular diagonal stub (V3-like).
                 #
