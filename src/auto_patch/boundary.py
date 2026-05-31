@@ -75,6 +75,7 @@ __all__ = [
     "_clip_boundary_bridges_against_pavement",
     "_snap_bridge_vertices_to_runway_corners",
     "_insert_bridge_contacts_into_junctions",
+    "_flatten_bridge_pinch_necks",
 ]
 
 
@@ -978,6 +979,98 @@ def _shape_open_alts(s: BuiltShape, n: int) -> list[float] | None:
     if s.altitude is not None:
         return [float(s.altitude)] * n
     return None
+
+
+def _flatten_bridge_pinch_necks(
+        layout: "PavementLayout",
+        pinch_tol_m: float = 1.6,
+        min_dalt_m: float = 0.5,
+        *, icao: str = "") -> int:
+    """Flatten torn vertical slivers where a DEM-bridge ribbon necks.
+
+    A ``boundary_dem_bridge`` ribbon spans from the airport perimeter strip
+    (OUTER edge, boundary-clamped altitude) to the abutting pavement (INNER
+    edge, pavement altitude).  Where the pavement crowds right up against
+    the perimeter, the ribbon necks to near-zero width and a bridge-only
+    inner vertex (pavement altitude) ends up within ~1 m of a perimeter-
+    strip vertex (clamped altitude) it does NOT share a node with —
+    different canonical points beyond the emit weld tolerance.  The result
+    is a sub-metre footprint spanning several metres of altitude, which
+    X-Plane renders as a torn vertical sliver that z-fights the flat
+    perimeter strip (KGCD bridges #461/#463/#466: 0.7–1.3 m apart,
+    1.2–4.2 m tall, around the runway near shapeID 9).
+
+    The pinch vertex is introduced AFTER ``_emit_boundary_dem_bridge`` by
+    conformance / contact insertion (an abutting pavement vertex grafted
+    onto the bridge ring at the pavement altitude), so this runs as a FINAL
+    pass.  At a neck the bridge has no appreciable area, so snapping the
+    bridge vertex's altitude to its near-coincident perimeter-strip vertex
+    removes the wall with no visible change.  Altitude-only: geometry (and
+    the conformance invariant) are untouched; the perimeter strip — which
+    owns the shared node by consensus — never moves.
+
+    Returns the number of bridge vertices flattened.
+    """
+    # Spatial index of perimeter-strip vertices (the authoritative,
+    # consensus-shared boundary nodes — NOT other bridges).
+    cell = max(pinch_tol_m, 1.0)
+    grid: dict[tuple[int, int], list[tuple[float, float, float]]] = {}
+    for s in layout.shapes:
+        if (s.role != ROLE_BOUNDARY or s.ref != "airport_boundary"
+                or s.polygon is None or s.polygon.is_empty
+                or not s.polygon.exterior):
+            continue
+        coords = list(s.polygon.exterior.coords)
+        if coords and coords[0] == coords[-1]:
+            coords = coords[:-1]
+        alts = _shape_open_alts(s, len(coords))
+        if alts is None:
+            continue
+        for (x, y), a in zip(coords, alts):
+            grid.setdefault(
+                (int(x // cell), int(y // cell)), []).append(
+                    (float(x), float(y), float(a)))
+    if not grid:
+        return 0
+
+    def _nearest_strip_alt(x: float, y: float) -> float | None:
+        gx, gy = int(x // cell), int(y // cell)
+        best_d2 = pinch_tol_m * pinch_tol_m
+        best_a: float | None = None
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for (sx, sy, sa) in grid.get((gx + dx, gy + dy), ()):  # type: ignore[arg-type]
+                    d2 = (x - sx) ** 2 + (y - sy) ** 2
+                    if d2 <= best_d2:
+                        best_d2 = d2
+                        best_a = sa
+        return best_a
+
+    n_fixed = 0
+    for s in layout.shapes:
+        if (s.role != ROLE_BOUNDARY or s.ref != "boundary_dem_bridge"
+                or not s.node_altitudes or s.polygon is None
+                or s.polygon.is_empty or not s.polygon.exterior):
+            continue
+        coords = list(s.polygon.exterior.coords)
+        if coords and coords[0] == coords[-1]:
+            coords = coords[:-1]
+        na = list(s.node_altitudes)
+        closed = len(na) == len(coords) + 1 and na[0] == na[-1]
+        if len(na) < len(coords):
+            continue
+        changed = False
+        for i, (x, y) in enumerate(coords):
+            sa = _nearest_strip_alt(x, y)
+            if sa is not None and abs(na[i] - sa) > min_dalt_m:
+                na[i] = round(sa, 1)
+                changed = True
+                n_fixed += 1
+        if changed:
+            if closed:
+                na[len(coords)] = na[0]
+            s.node_altitudes = na
+    return n_fixed
 
 
 def _clip_pavement_to_boundary_interior(

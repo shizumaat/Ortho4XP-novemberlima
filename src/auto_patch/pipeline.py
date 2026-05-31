@@ -3056,6 +3056,20 @@ def build_airport_pavement(icao: str, xplane_root: str,
             f"  [pav-builder] {icao}: ribbon seam — adopted pavement "
             f"altitude on {n_seam} ribbon rect(s).")
 
+    # Flatten torn vertical slivers where a DEM-bridge ribbon necks to
+    # near-zero width against the perimeter strip — a bridge inner vertex
+    # (pavement altitude) ends up ~1 m from a perimeter-strip vertex
+    # (clamped altitude) at a several-metre altitude gap, which X-Plane
+    # tears (see ``_flatten_bridge_pinch_necks``).  Runs LAST so it catches
+    # the pinch vertices conformance / contact-insertion grafted onto the
+    # bridge rings.  Altitude-only — conformance invariant preserved.
+    from .boundary import _flatten_bridge_pinch_necks
+    n_pinch = _flatten_bridge_pinch_necks(layout, icao=icao)
+    if n_pinch:
+        UI.vprint(1,
+            f"  [pav-builder] {icao}: flattened {n_pinch} DEM-bridge "
+            f"pinch-neck vertex(es) (anti-tear).")
+
     tjs, crossings = find_conformance_violations(layout.shapes)
     if tjs or crossings:
         UI.vprint(1,

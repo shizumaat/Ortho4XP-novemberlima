@@ -279,3 +279,60 @@ def test_segment_slope_degenerate_axis_uses_high():
 def test_segment_slope_empty_ring():
     assert _node_altitudes_from_segment_slope(
         [], (0.0, 0.0), (1.0, 0.0), 1.0, 0.0) == []
+
+
+# ──────────────────────────────────────────────────────────────────
+# _flatten_bridge_pinch_necks — anti-tear pass (pure, no X-Plane build)
+# ──────────────────────────────────────────────────────────────────
+# Where a boundary_dem_bridge ribbon necks to near-zero width, a bridge
+# inner vertex (pavement altitude) lands within ~1 m of a perimeter-strip
+# vertex (clamped altitude) at a several-metre altitude gap — X-Plane
+# renders the sub-metre footprint as a torn vertical sliver (KGCD). The
+# pass snaps such bridge vertices' altitude to the near-coincident strip.
+from auto_patch.boundary import _flatten_bridge_pinch_necks
+from auto_patch.layout import BuiltShape, ROLE_BOUNDARY
+from shapely.geometry import Polygon as _Poly
+
+
+class _ShapesOnly:
+    def __init__(self, shapes):
+        self.shapes = shapes
+
+
+def test_flatten_bridge_pinch_neck_snaps_to_strip():
+    # Flat perimeter strip at 1116.0 with a corner at (0, 0).
+    strip = BuiltShape(
+        polygon=_Poly([(0.0, 0.0), (10.0, 0.0), (10.0, 2.0), (0.0, 2.0)]),
+        role=ROLE_BOUNDARY, ref="airport_boundary", altitude=1116.0)
+    # Bridge ribbon: vertex 0 sits 0.7 m from the strip corner at a 4 m
+    # higher (pavement) altitude — the pinched tear. Other vertices far.
+    bridge = BuiltShape(
+        polygon=_Poly([(0.0, 0.7), (100.0, 50.0), (100.0, 0.0),
+                       (50.0, -50.0)]),
+        role=ROLE_BOUNDARY, ref="boundary_dem_bridge",
+        node_altitudes=[1120.1, 1119.0, 1117.0, 1116.5, 1120.1])
+    n = _flatten_bridge_pinch_necks(_ShapesOnly([strip, bridge]))
+    assert n == 1
+    # Pinch vertex snapped to the strip altitude; closing repeat synced.
+    assert bridge.node_altitudes[0] == 1116.0
+    assert bridge.node_altitudes[-1] == 1116.0
+    # Far vertices untouched.
+    assert bridge.node_altitudes[1] == 1119.0
+    assert bridge.node_altitudes[2] == 1117.0
+
+
+def test_flatten_bridge_pinch_neck_leaves_wide_ribbon_alone():
+    # No bridge vertex within the pinch tolerance of the strip corner →
+    # nothing is flattened (a healthy, full-width ribbon).
+    strip = BuiltShape(
+        polygon=_Poly([(0.0, 0.0), (10.0, 0.0), (10.0, 2.0), (0.0, 2.0)]),
+        role=ROLE_BOUNDARY, ref="airport_boundary", altitude=1116.0)
+    bridge = BuiltShape(
+        polygon=_Poly([(0.0, 50.0), (100.0, 50.0), (100.0, 30.0),
+                       (0.0, 30.0)]),
+        role=ROLE_BOUNDARY, ref="boundary_dem_bridge",
+        node_altitudes=[1120.1, 1119.0, 1117.0, 1116.5, 1120.1])
+    before = list(bridge.node_altitudes)
+    n = _flatten_bridge_pinch_necks(_ShapesOnly([strip, bridge]))
+    assert n == 0
+    assert bridge.node_altitudes == before

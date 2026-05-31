@@ -164,3 +164,41 @@ def test_clearance_cuts_have_valid_altitudes(icao):
             f"ring length {len(ring)}")
         assert all(math.isfinite(a) for a in c.node_altitudes), (
             f"{icao}: non-finite altitude in clearance cut")
+
+
+# ──────────────────────────────────────────────────────────────────
+# _merge_coincident_ring_vertices — pure helper (no X-Plane build)
+# ──────────────────────────────────────────────────────────────────
+def test_merge_coincident_ring_vertices_collapses_microcliff():
+    """A 2 mm zero-length edge across an altitude step (the torn vertical
+    micro-cliff _decimate preserves) collapses to one vertex at the mean
+    altitude; real-length edges are untouched."""
+    from auto_patch.clearance import _merge_coincident_ring_vertices
+    # Square with a duplicate near-coincident vertex (index 2 ≈ index 1)
+    # carrying a 1.8 m altitude step.
+    coords = [(0.0, 0.0), (10.0, 0.0), (10.002, 0.0), (10.0, 10.0),
+              (0.0, 10.0)]
+    alts = [1122.8, 1124.6, 1122.8, 1122.8, 1122.8]
+    out_xy, out_a = _merge_coincident_ring_vertices(coords, alts)
+    # The coincident pair merged → one fewer vertex.
+    assert len(out_xy) == 4
+    assert len(out_a) == 4
+    # Merged altitude is the mean of the collapsed pair (no vertical wall).
+    assert 1123.7 in out_a
+    # No two consecutive vertices remain within the merge tolerance.
+    n = len(out_xy)
+    for i in range(n):
+        j = (i + 1) % n
+        d = math.hypot(out_xy[i][0] - out_xy[j][0],
+                       out_xy[i][1] - out_xy[j][1])
+        assert d > 0.1
+
+
+def test_merge_coincident_ring_vertices_noop_on_clean_ring():
+    """A ring with only real-length edges is returned unchanged."""
+    from auto_patch.clearance import _merge_coincident_ring_vertices
+    coords = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]
+    alts = [1120.0, 1121.0, 1122.0, 1121.0]
+    out_xy, out_a = _merge_coincident_ring_vertices(coords, alts)
+    assert out_xy == coords
+    assert out_a == alts

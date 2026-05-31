@@ -111,6 +111,15 @@ _MAX_TAXIWAY_WIDTH_M = 45.0
 # or the cut surface curves with the terrain.
 _DECIMATE_GEOM_TOL_M = 0.3
 _DECIMATE_ALT_TOL_M = 0.15
+# Consecutive ring vertices closer than this are a degenerate zero-length
+# edge that ``_decimate`` PRESERVES whenever their altitudes differ (it
+# reads the altitude step as a real feature).  At emit they become two
+# nodes at one spot several metres apart vertically — a torn vertical
+# micro-cliff.  Below this tolerance the edge has no real length, so the
+# pair is collapsed to one vertex at the mean altitude (see
+# ``_merge_coincident_ring_vertices``).  Well under ``_DECIMATE_GEOM_TOL_M``
+# so it never merges vertices ``_decimate`` keeps for genuine geometry.
+_COINCIDENT_MERGE_TOL_M = 0.1
 # Airside pavement a taxi centerline can run over — used to find the
 # pavement edge (raycast) and the edge altitude, regardless of whether
 # that pavement was emitted as a rect, junction, or apron.
@@ -222,6 +231,42 @@ def _decimate(coords: list[tuple[float, float]], alts: list[float]):
         if changed:
             coords = [c for c, k in zip(coords, keep) if k]
             alts = [a for a, k in zip(alts, keep) if k]
+    return coords, alts
+
+
+def _merge_coincident_ring_vertices(
+        coords: list[tuple[float, float]],
+        alts: list[float],
+        tol_m: float = _COINCIDENT_MERGE_TOL_M):
+    """Collapse consecutive near-coincident ring vertices into one.
+
+    ``_decimate`` keeps a vertex sitting a few mm from its neighbour
+    whenever their altitudes differ (it preserves altitude features), so
+    a zero-length edge across an altitude step survives into the emitted
+    polygon — two nodes at one XY metres apart vertically, which X-Plane
+    renders as a torn vertical micro-cliff.  Below ``tol_m`` the edge has
+    no real length, so merge each coincident run to a single vertex at the
+    GROUP-MEAN altitude (open-form ``(coords, alts)`` in, same out).
+    """
+    coords = [(float(x), float(y)) for x, y in coords]
+    alts = [float(a) for a in alts]
+    tol2 = tol_m * tol_m
+    changed = True
+    while changed and len(coords) > 3:
+        changed = False
+        n = len(coords)
+        for i in range(n):
+            j = (i + 1) % n
+            dx = coords[i][0] - coords[j][0]
+            dy = coords[i][1] - coords[j][1]
+            if dx * dx + dy * dy <= tol2:
+                coords[i] = ((coords[i][0] + coords[j][0]) / 2.0,
+                             (coords[i][1] + coords[j][1]) / 2.0)
+                alts[i] = round((alts[i] + alts[j]) / 2.0, 1)
+                del coords[j]
+                del alts[j]
+                changed = True
+                break
     return coords, alts
 
 
@@ -938,6 +983,24 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                     a = _adopt_alt(vx, vy)
                     if a is not None:
                         node_open[vi] = a
+                # Collapse degenerate zero-length edges across an altitude
+                # step (the torn vertical micro-cliff — see
+                # ``_merge_coincident_ring_vertices``).  Only adopt the
+                # collapsed ring if it stays a valid cut of real area.
+                merged_ring, merged_open = _merge_coincident_ring_vertices(
+                    final_ring, node_open)
+                if (len(merged_ring) >= 3
+                        and len(merged_ring) < len(final_ring)):
+                    try:
+                        cand = Polygon(merged_ring)
+                    except _GEOM_EXC:
+                        cand = None
+                    if (cand is not None and cand.is_valid
+                            and not cand.is_empty
+                            and cand.area >= _MIN_CUT_AREA_M2):
+                        poly = cand
+                        final_ring = merged_ring
+                        node_open = merged_open
                 for (vx, vy), a in zip(final_ring, node_open):
                     adopt.setdefault(vertex_bucket(vx, vy), (vx, vy, a))
                 node_alts = node_open + [node_open[0]]
