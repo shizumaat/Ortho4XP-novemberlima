@@ -36,6 +36,7 @@ _RunwayData = TypeVar("_RunwayData")
 __all__ = [
     "get_reciprocal",
     "pair_runways",
+    "match_runway_ends_by_geometry",
     "runway_corners",
     "extend_point",
     "parse_aptdat_runway_widths",
@@ -166,6 +167,67 @@ def pair_runways(
         else:
             pairs.append((desig, data, None, None))
     return pairs
+
+
+def match_runway_ends_by_geometry(
+    cifp_a_lat: float, cifp_a_lon: float,
+    cifp_b_lat: float, cifp_b_lon: float,
+    apt_ends: list[tuple[float, float, float, float]],
+    max_mid_dist_m: float = 350.0,
+) -> tuple[int, bool] | None:
+    """Match a CIFP runway pair to an apt.dat runway by GEOMETRY.
+
+    Designators cannot always reconcile a CIFP runway to its apt.dat
+    footprint: magnetic-variation drift renumbers runways, so the same
+    physical strip is e.g. ``03/21`` in apt.dat but ``RW04/RW22`` in the
+    CIFP (SSUM Umuarama).  ``canonical_runway_desig`` only strips the
+    ``RW`` prefix and zero padding — it cannot bridge a ±1 heading-number
+    change — so the segmenter's designator lookups miss, ``have_apt_geom``
+    is False, and the runway falls back to coarse CIFP geometry instead of
+    segmenting at its apt.dat pavement joins.
+
+    The physical runway is identical regardless of its label, so reconcile
+    by position instead.  Given a CIFP pair's two threshold coordinates and
+    a list of apt.dat runways (each ``(lat_a, lon_a, lat_b, lon_b)`` — the
+    physical ends), return ``(index, swapped)`` of the apt.dat runway whose
+    centre lies closest to the CIFP pair's centre, where ``swapped`` is
+    True when CIFP end-a corresponds to apt end-b (reversed numbering).
+    Returns None if no apt.dat runway centre is within ``max_mid_dist_m``
+    (CIFP thresholds are displaced inward from the physical ends, so the
+    pair centre can sit ~100 m off the apt.dat centre — but always far
+    nearer its own runway than any neighbour).
+    """
+    cifp_mid_lat = (cifp_a_lat + cifp_b_lat) / 2.0
+    cifp_mid_lon = (cifp_a_lon + cifp_b_lon) / 2.0
+    cos_lat = cos(cifp_mid_lat * pi / 180.0)
+    if cos_lat < 1e-6:
+        cos_lat = 1e-6
+
+    def _dist_m(lat1, lon1, lat2, lon2):
+        dx = (lon2 - lon1) * cos_lat * DEG_TO_M
+        dy = (lat2 - lat1) * DEG_TO_M
+        return sqrt(dx * dx + dy * dy)
+
+    best_idx = None
+    best_mid = max_mid_dist_m
+    best_swapped = False
+    for idx, (alat_a, alon_a, alat_b, alon_b) in enumerate(apt_ends):
+        apt_mid_lat = (alat_a + alat_b) / 2.0
+        apt_mid_lon = (alon_a + alon_b) / 2.0
+        mid_d = _dist_m(cifp_mid_lat, cifp_mid_lon, apt_mid_lat, apt_mid_lon)
+        if mid_d >= best_mid:
+            continue
+        # Orientation: does CIFP end-a line up with apt end-a or end-b?
+        straight = (_dist_m(cifp_a_lat, cifp_a_lon, alat_a, alon_a)
+                    + _dist_m(cifp_b_lat, cifp_b_lon, alat_b, alon_b))
+        swapped = (_dist_m(cifp_a_lat, cifp_a_lon, alat_b, alon_b)
+                   + _dist_m(cifp_b_lat, cifp_b_lon, alat_a, alon_a))
+        best_idx = idx
+        best_mid = mid_d
+        best_swapped = swapped < straight
+    if best_idx is None:
+        return None
+    return best_idx, best_swapped
 
 
 

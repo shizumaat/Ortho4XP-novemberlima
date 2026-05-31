@@ -15,6 +15,7 @@ from auto_patch.pavement.runway_geometry import (
     DEG_TO_M,
     extend_point,
     get_reciprocal,
+    match_runway_ends_by_geometry,
     pair_runways,
     parse_aptdat_runway_widths,
     runway_corners,
@@ -125,6 +126,65 @@ def test_pair_runways_no_double_counting():
         if desig_b is not None:
             all_designators.append(desig_b)
     assert len(all_designators) == len(set(all_designators))
+
+
+# ──────────────────────────────────────────────────────────────────────
+# match_runway_ends_by_geometry
+# ──────────────────────────────────────────────────────────────────────
+# SSUM Umuarama physical runway ends (apt.dat row-100 designators 03/21)
+# vs the CIFP thresholds (designators RW04/RW22) — the same strip, but
+# magnetic-variation drift renumbered it, so name reconciliation fails and
+# only geometry can pair them.
+_SSUM_APT_03 = (-23.80522580, -53.31654442)
+_SSUM_APT_21 = (-23.79374517, -53.31171104)
+_SSUM_CIFP_RW04 = (-23.80522500, -53.31655417)  # RWY:RW04 threshold
+_SSUM_CIFP_RW22 = (-23.79373739, -53.31170083)  # RWY:RW22 threshold
+
+
+def test_match_runway_ends_renumbered_runway():
+    """A renumbered runway (apt.dat 03/21, CIFP RW04/RW22) reconciles by
+    position even though the designators differ by one heading number."""
+    apt_ends = [(*_SSUM_APT_03, *_SSUM_APT_21)]
+    m = match_runway_ends_by_geometry(
+        _SSUM_CIFP_RW04[0], _SSUM_CIFP_RW04[1],
+        _SSUM_CIFP_RW22[0], _SSUM_CIFP_RW22[1], apt_ends)
+    assert m is not None
+    idx, swapped = m
+    assert idx == 0
+    # CIFP RW04 sits at apt.dat end-a (03) → not swapped.
+    assert swapped is False
+
+
+def test_match_runway_ends_detects_swapped_orientation():
+    """When CIFP end-a lines up with apt.dat end-b, ``swapped`` is True."""
+    apt_ends = [(*_SSUM_APT_21, *_SSUM_APT_03)]  # apt ends listed reversed
+    m = match_runway_ends_by_geometry(
+        _SSUM_CIFP_RW04[0], _SSUM_CIFP_RW04[1],
+        _SSUM_CIFP_RW22[0], _SSUM_CIFP_RW22[1], apt_ends)
+    assert m is not None
+    idx, swapped = m
+    assert idx == 0
+    assert swapped is True
+
+
+def test_match_runway_ends_picks_nearest_of_several():
+    """With multiple apt.dat runways, the geometrically closest wins."""
+    far = (0.0, 0.0, 0.027, 0.0)  # a runway ~3 km away
+    apt_ends = [far, (*_SSUM_APT_03, *_SSUM_APT_21)]
+    m = match_runway_ends_by_geometry(
+        _SSUM_CIFP_RW04[0], _SSUM_CIFP_RW04[1],
+        _SSUM_CIFP_RW22[0], _SSUM_CIFP_RW22[1], apt_ends)
+    assert m is not None
+    assert m[0] == 1
+
+
+def test_match_runway_ends_no_match_when_far():
+    """No apt.dat runway within the centre-distance gate → None."""
+    apt_ends = [(0.0, 0.0, 0.027, 0.0)]
+    m = match_runway_ends_by_geometry(
+        _SSUM_CIFP_RW04[0], _SSUM_CIFP_RW04[1],
+        _SSUM_CIFP_RW22[0], _SSUM_CIFP_RW22[1], apt_ends)
+    assert m is None
 
 
 # ──────────────────────────────────────────────────────────────────────

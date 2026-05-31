@@ -436,6 +436,48 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
                     for k in (r.desig_b, _canon_desig(r.desig_b)):
                         runway_widths[k] = r.width_m
 
+                # Reconcile CIFP designators to apt.dat runways by
+                # GEOMETRY.  Magnetic-variation drift renumbers runways,
+                # so the same physical strip can be ``03/21`` in apt.dat
+                # but ``RW04/RW22`` in the CIFP (SSUM Umuarama).  A ±1
+                # heading-number change defeats ``canonical_runway_desig``
+                # (it only strips ``RW``/zero-padding), so every
+                # designator lookup above misses, ``have_apt_geom`` is
+                # False, and the runway never segments at its apt.dat
+                # pavement joins.  Match by position instead, then register
+                # the apt.dat geometry/width under the CIFP spellings too.
+                apt_ends = [(r.lat_a, r.lon_a, r.lat_b, r.lon_b)
+                            for r in apt.runways]
+                cifp_to_apt = {}  # (cifp_a, cifp_b) -> (apt_desig_a, apt_desig_b)
+                for desig_a, data_a, desig_b, data_b in pairs:
+                    if (desig_b is None or data_a is None or data_b is None
+                            or not apt_ends):
+                        continue
+                    m = _RWY.match_runway_ends_by_geometry(
+                        data_a["lat"], data_a["lon"],
+                        data_b["lat"], data_b["lon"], apt_ends)
+                    if m is None:
+                        continue
+                    idx, swapped = m
+                    r = apt.runways[idx]
+                    geom_a = (r.lat_a, r.lon_a, r.width_m,
+                              r.displaced_a_m, r.blast_a_m)
+                    geom_b = (r.lat_b, r.lon_b, r.width_m,
+                              r.displaced_b_m, r.blast_b_m)
+                    if swapped:
+                        geom_a, geom_b = geom_b, geom_a
+                    for k in (desig_a, "RW" + desig_a.lstrip("RW"),
+                              _canon_desig(desig_a)):
+                        apt_runway_geom.setdefault(k, geom_a)
+                        runway_widths.setdefault(k, r.width_m)
+                    for k in (desig_b, "RW" + desig_b.lstrip("RW"),
+                              _canon_desig(desig_b)):
+                        apt_runway_geom.setdefault(k, geom_b)
+                        runway_widths.setdefault(k, r.width_m)
+                    apt_a = r.desig_b if swapped else r.desig_a
+                    apt_b = r.desig_a if swapped else r.desig_b
+                    cifp_to_apt[(desig_a, desig_b)] = (apt_a, apt_b)
+
                 class _TileStub:
                     lat: int
                     lon: int | None
@@ -453,6 +495,21 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
                 # to bridge the gap with boundary-trace waypoints.
                 pav_intersections = getattr(
                     layout, "_pav_runway_intersections", None)
+                # When a runway was renumbered (geometry reconciliation
+                # above), the pavement-intersection seams are keyed under
+                # the apt.dat designators; mirror them onto the CIFP
+                # designators the segmenter iterates so the seams still
+                # land (else a geometry-matched runway has correct width
+                # but no pavement-join segmentation).
+                if pav_intersections and cifp_to_apt:
+                    pav_intersections = dict(pav_intersections)
+                    for (cifp_a, cifp_b), (apt_a, apt_b) in cifp_to_apt.items():
+                        pts = (pav_intersections.get((apt_a, apt_b))
+                               or pav_intersections.get((apt_b, apt_a)))
+                        if not pts:
+                            continue
+                        pav_intersections.setdefault((cifp_a, cifp_b), pts)
+                        pav_intersections.setdefault((cifp_b, cifp_a), pts)
                 _xml, runway_segment_chain, runway_profile_state = (
                     _AP.generate_patch_osm(
                         icao, pairs, runway_widths=runway_widths,
