@@ -133,6 +133,16 @@ from .pavement.absorption import (
 
 
 # ──────────────────────────────────────────────────────────────────
+# Tunable runway / parallel-taxiway centerline pull-backs (session 56).
+# Exposed as module globals so the centerline output can be regenerated
+# with different pull-backs for review.  Defaults = historical values.
+# ──────────────────────────────────────────────────────────────────
+_RWY_JUNCTION_BUFFER_M = 25.0   # runway-end pull-back (perpendicular)
+_RWY_DIAG_BUFFER_M = 25.0       # runway-end pull-back (diagonal)
+_PARALLEL_BUFFER_M = 15.0       # parallel-taxiway-end pull-back
+
+
+# ──────────────────────────────────────────────────────────────────
 # Top-level builder
 # ──────────────────────────────────────────────────────────────────
 
@@ -1640,8 +1650,8 @@ def build_airport_pavement(icao: str, xplane_root: str,
     #     near-perpendicular sub-ref and gets the 30 m buffer; the
     #     diagonals get a smaller buffer so they don't over-shrink
     #     while still getting the same kind of pull-back.
-    RWY_JUNCTION_BUFFER_M = 30.0
-    RWY_DIAG_BUFFER_M = 15.0
+    RWY_JUNCTION_BUFFER_M = _RWY_JUNCTION_BUFFER_M
+    RWY_DIAG_BUFFER_M = _RWY_DIAG_BUFFER_M
     PERP_TRIM_MAX_DEG = 25.0
     DIAG_TRIM_MAX_DEG = 70.0
     if (layout.runway_union is not None
@@ -1737,7 +1747,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # this because each sub-ref stub has its own dedicated OSM
     # way — the geometry inherently excludes the primary
     # width.
-    PARALLEL_BUFFER_M = 15.0
+    PARALLEL_BUFFER_M = _PARALLEL_BUFFER_M
     PARALLEL_MIN_LEN_M = 200.0
     if rwy_centerlines:
         parallel_polys = []
@@ -1962,6 +1972,28 @@ def build_airport_pavement(icao: str, xplane_root: str,
         osm_centerlines, junction_points, approach_tol_m=25.0,
         pav_union=pav_union, rwy_union=layout.runway_union,
         rwy_centerlines=rwy_centerlines)
+
+    # ── Trim short bend-hooks (straight-piece target) ────────────
+    # The hand target represents taxiways as straight pieces; a sharp
+    # bend with a short arm is a hook into a junction/apron the target
+    # omits.  Keep the long straight run (user 2026-05-31).
+    from .pavement.centerlines import _trim_short_bend_hooks
+    osm_centerlines = _trim_short_bend_hooks(osm_centerlines)
+
+    # ── Drop runway-crossing + junction-buried centerlines ────────
+    # A taxi centerline whose body lies inside the runway (the runway
+    # emit covers that surface) or buried in the middle of a wide
+    # junction/apron (no narrow corridor) does not correspond to a
+    # taxiway rect — drop it before rect construction (user 2026-05-31).
+    from .pavement.centerlines import _drop_offcorridor_centerlines
+    _n_before = len(osm_centerlines)
+    osm_centerlines, _n_rwy, _n_buried = _drop_offcorridor_centerlines(
+        osm_centerlines, pav_union, layout.runway_union)
+    if _n_rwy or _n_buried:
+        UI.vprint(1,
+            f"  [pav-builder] {icao}: dropped {_n_rwy} runway-crossing + "
+            f"{_n_buried} junction-buried centerline(s) "
+            f"(of {_n_before}).")
 
     # ── Canonical-point registry (user 2026-05-18) ────────────────
     # Build the shared registry now, before any rect / junction

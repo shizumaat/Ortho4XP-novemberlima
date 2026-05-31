@@ -899,6 +899,146 @@ def _find_width_transition_breakpoints(
     return breakpoints
 
 
+# Tunable junction/bend margins (default = historical). Exposed as
+# module globals so the centerline output can be regenerated with
+# different pullbacks for review without editing the call site.
+_CHART_JUNCTION_MARGIN_M = 20.0
+_BEND_ENDPOINT_MARGIN_M = 8.0
+
+
+# Off-corridor centerline drop thresholds (session 56).
+_RWY_CROSS_DROP_M = 5.0       # drop if >this much of the line is inside a runway
+_BURIED_HALFWIDTH_M = 50.0    # drop if the line's MEDIAN perp half-width >=this
+                              # (no real taxiway is this wide; it's apron/junction)
+
+
+_BEND_HOOK_DEG = 12.0       # bend angle that marks a non-straight piece
+_BEND_HOOK_MAX_FRAC = 0.45  # only drop the shorter side if it's < this
+                            # fraction of the piece (a short hook, not a
+                            # genuine L-bend whose two arms are both real)
+
+
+def _trim_short_bend_hooks(
+    centerlines: list[tuple[LineString, str]],
+) -> list[tuple[LineString, str]]:
+    """The target represents taxiways as STRAIGHT pieces; a centerline that
+    has a sharp bend with a SHORT arm is a hook into a junction/apron that
+    the target omits.  Split at the sharpest bend (>= ``_BEND_HOOK_DEG``) and
+    drop the shorter arm when it is < ``_BEND_HOOK_MAX_FRAC`` of the piece,
+    keeping the long straight run; iterate until the kept piece is straight.
+    Genuine L-bends (both arms substantial) are left whole."""
+    def _sharpest(coords):
+        worst = 0.0
+        wi = -1
+        for i in range(1, len(coords) - 1):
+            a, b, c = coords[i - 1], coords[i], coords[i + 1]
+            b1 = math.atan2(b[0] - a[0], b[1] - a[1])
+            b2 = math.atan2(c[0] - b[0], c[1] - b[1])
+            d = abs(math.degrees(b1 - b2)) % 360.0
+            d = min(d, 360.0 - d)
+            if d > worst:
+                worst, wi = d, i
+        return worst, wi
+
+    out: list[tuple[LineString, str]] = []
+    for ls, ref in centerlines:
+        cur = ls
+        while True:
+            coords = list(cur.coords)
+            if len(coords) < 3:
+                break
+            ba, bi = _sharpest(coords)
+            if ba < _BEND_HOOK_DEG or bi <= 0:
+                break
+            try:
+                p1 = LineString(coords[:bi + 1])
+                p2 = LineString(coords[bi:])
+            except _GEOM_EXC:
+                break
+            short, lng = (p1, p2) if p1.length < p2.length else (p2, p1)
+            if (cur.length <= 0
+                    or short.length > _BEND_HOOK_MAX_FRAC * cur.length):
+                break  # genuine bend — keep whole
+            cur = lng
+        out.append((cur, ref))
+    return out
+
+
+def _median_perp_halfwidth(ls: LineString, pav: Polygon,
+                           n: int = 10, cap_m: float = 70.0) -> float:
+    """Median, along ``ls``, of the NEARER pavement edge (min of the left
+    and right perpendicular ray distances, capped at ``cap_m``).
+
+    Using the nearer edge (not the average) is what distinguishes a
+    centerline BURIED in a wide junction/apron — wide on BOTH sides, so a
+    large min — from a taxiway running ALONG the edge of a wide apron —
+    one narrow (taxi-edge) side, so a small min.  An average would flag the
+    edge taxiway as buried (SPJC R1/R2/L)."""
+    if pav is None or pav.is_empty or ls.length < 1.0:
+        return 0.0
+    STEP = 1.0
+    vals: list[float] = []
+    for i in range(n + 1):
+        t = i / n * ls.length
+        dt = min(2.0, ls.length * 0.05)
+        a = ls.interpolate(max(0.0, t - dt))
+        b = ls.interpolate(min(ls.length, t + dt))
+        dx, dy = b.x - a.x, b.y - a.y
+        mag = math.hypot(dx, dy)
+        if mag < 1e-6:
+            continue
+        nx, ny = -dy / mag, dx / mag
+        p = ls.interpolate(t)
+        sides = []
+        for sign in (-1, 1):
+            d = 0.0
+            hit = cap_m
+            while d <= cap_m:
+                if not pav.contains(Point(p.x + sign * nx * d,
+                                          p.y + sign * ny * d)):
+                    hit = d
+                    break
+                d += STEP
+            sides.append(hit)
+        vals.append(min(sides))
+    if not vals:
+        return 0.0
+    vals.sort()
+    return vals[len(vals) // 2]
+
+
+def _drop_offcorridor_centerlines(
+    centerlines: list[tuple[LineString, str]],
+    pav_union: Polygon | None,
+    rwy_union: Polygon | None,
+) -> tuple[list[tuple[LineString, str]], int, int]:
+    """Drop centerlines that do not correspond to a taxiway rect:
+      * runway-crossing — > ``_RWY_CROSS_DROP_M`` of the line lies inside
+        the runway (the runway emit covers that surface); and
+      * junction/apron-buried — the line's median perpendicular pavement
+        half-width is >= ``_BURIED_HALFWIDTH_M`` (it runs through the
+        middle of a wide junction/apron, not a narrow taxi corridor).
+    Returns (kept, n_runway_dropped, n_buried_dropped)."""
+    kept: list[tuple[LineString, str]] = []
+    n_rwy = n_buried = 0
+    for ls, ref in centerlines:
+        if rwy_union is not None and not rwy_union.is_empty:
+            try:
+                inter = ls.intersection(rwy_union)
+                if getattr(inter, "length", 0.0) > _RWY_CROSS_DROP_M:
+                    n_rwy += 1
+                    continue
+            except _GEOM_EXC:
+                pass
+        if (pav_union is not None and not pav_union.is_empty
+                and _median_perp_halfwidth(ls, pav_union)
+                >= _BURIED_HALFWIDTH_M):
+            n_buried += 1
+            continue
+        kept.append((ls, ref))
+    return kept, n_rwy, n_buried
+
+
 def _split_centerlines_at_points(
     centerlines: list[tuple[LineString, str]],
     split_points: list[tuple[float, float]],
@@ -969,12 +1109,12 @@ def _split_centerlines_at_points(
     # 5 m override AND the percentage margin when at chart-junction
     # (the chart geometry, not the angle change, is what bounds
     # the rect here).
-    BEND_ENDPOINT_MARGIN_M = 5.0
+    BEND_ENDPOINT_MARGIN_M = _BEND_ENDPOINT_MARGIN_M
     # Per user (session 44): reduced 25 → 15 m so rects run a little
     # longer toward chart junctions (now safe to do because rects are
     # placed against the actual pavement edges via the asymmetric
     # half-width logic, not centred on a possibly-off-centre axis).
-    CHART_JUNCTION_MARGIN_M = 15.0
+    CHART_JUNCTION_MARGIN_M = _CHART_JUNCTION_MARGIN_M
     BEND_SHARED_TOL_M = 25.0
     bend_share_tol2 = BEND_SHARED_TOL_M * BEND_SHARED_TOL_M
     chart_junction_tol2 = BEND_SHARED_TOL_M * BEND_SHARED_TOL_M
