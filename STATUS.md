@@ -1,3 +1,91 @@
+# Auto-Patch Status — session 57 HANDOVER (★ NEW DIRECTION: line-marking centerlines → drop curves → rects)
+
+## ★★ SESSION 57 HANDOVER → NEXT AGENT: build the line-marking centerline extractor ★★
+
+### THE ALGORITHM TO IMPLEMENT (user's formula, 2026-05-31 — authoritative)
+Replace the *synthesis* of curves (the `r/tan(α/2)` fillet approach — abandoned,
+see below) with **reading the real curves out of the apt.dat line markings**:
+
+1. **Taxi route network → intersections.** A route node with ≥2 distinct taxi
+   names OR degree ≥3 is an INTERSECTION; that point is ALWAYS inside a junction.
+2. **Line markings → the real curved centerlines.** apt.dat **row-120** linear
+   features, type **code 60** ("Single Taxi Wide" = taxiway centerline), carry
+   the actual geometry INCLUDING beziers (the curves). Filter: code 60 (HECA);
+   cross-airport, confirm centerline by ALIGNMENT to the route net (median dist
+   <~6m + parallel). Edges = "Double Solid" (code 53, offset ~21m); holds/broken
+   are codes 52/61/62 — all separable.
+3. **Identify the junction's curves.** Trace the route OUT from each intersection
+   point; the junction is bounded by the **nodes where the bezier curves begin**
+   (where a centerline marking leaves the straight route). JUNCTIONS ARE
+   DIFFERENT SIZES — do NOT use a fixed radius; the curve-start nodes define the
+   extent.
+4. **Drop the straight chords BETWEEN curve ends** (the straight bits *inside* the
+   junction — these wrongly survive an alignment-only filter; see #3 example).
+5. **Drop ALL the bezier curves** (the curved marking segments — a segment is a
+   curve iff an endpoint is a 112/114/116 bezier node; this is the reliable,
+   heuristic-free curve test the user landed on: "can't you just drop all the
+   bezier curves?").
+6. **Remainder = the straight centerlines → feed the rect builder.**
+
+### What's built (probes in /tmp/probes/, NOT committed — exploratory)
+- `linemark_extract.py` — parses row-120 features (samples beziers via the
+  X-Plane mirror convention), filters to code-60 centerlines, route-cross-ref
+  align+parallel, drops curves, writes `/tmp/HECA_linemark_straights.osm`.
+  STATE: code-60 filter is clean (938 centerlines vs 106 edge/hold/broken).
+  Curve-dropping via per-segment alignment got #1 (keep stub middle ✓) and #2
+  (drop curve ✓) right but #3 WRONG (a straight chord that is on+parallel to a
+  junction-internal route edge survives — needs step-4: drop straights between
+  curve ends). **The clean fix per the user = step 5 (drop bezier segments
+  directly) + step 4 (drop straight chords between curve ends near an
+  intersection), NOT the alignment/deflection heuristics.**
+- HECA apt.dat: `/Users/noah/X-Plane 12/Custom Scenery/HECA Cairo/Earth nav
+  data/apt.dat`. Row counts: 1044 row-120 features, beziers present (889×112,
+  272×116). The reader does NOT parse row-120 line markings yet — add it.
+- `/tmp/HECA_target_centerlines.osm` = 125 hand-tuned target spines (validation).
+- Example coords (lat,lon): #1 keep stub-middle 30.1199249,31.4477182 →
+  30.1197105,31.4479466 ; #2 curve-to-drop 30.1201791,31.4467661 ; #3
+  junction-internal straight to drop 30.1190203,31.3825056 → 30.1194462,31.3830776.
+
+### REJECTED this session — the curve SYNTHESIS approach (don't revive)
+Spent a long arc trying to SYNTHESISE curves from the straight route network
+(`/tmp/probes/curve_mask.py`, `junction_bounds.py`): clip each edge back by the
+fillet tangent `t=r/tan(wedge/2)`, r=50 (Code E, ICAO Doc 9157 curve radius),
+high-speed exits R_HS≈370. It half-worked (T2 calibrated to the target) but was
+fundamentally fragile: acute-gore vs real-turn ambiguity, runway-exit transitions
+under/over-masked, multi-vertex curve `arc[j]` bugs, and NO single local signal
+(width / through-angle / convergence) separates off-target from real taxiways
+because HECA pavement is a merged blob and apt.dat over-labels. The line-marking
+data has the REAL curves — use them instead.
+
+### Committed this session (suite GREEN 285/0/2 except compare_target — see below)
+- `d46034e` cap cross-connector end margin 50m (HECA L coverage 71→99.7%).
+- `02677a3` keep through-taxiways whole in the corridor trim (R 70→99%).
+- `c51fa12` off-corridor drop (`_drop_offcorridor_centerlines`: runway-crossing
+  >5m + junction-buried median-nearer-edge-halfwidth ≥50m) + bend-hook trim
+  (`_trim_short_bend_hooks`) + runway-centering margins (perp 30→25, diag 15→25,
+  junction 15→20; tunable module globals `_RWY_JUNCTION_BUFFER_M` etc. in
+  pipeline.py, `_CHART_JUNCTION_MARGIN_M`/`_BEND_ENDPOINT_MARGIN_M` in
+  centerlines.py).
+- `93eab1d` bend trim: split at the corner into two straights, never keep a bent
+  piece (drop short hook <45%, else keep both straights).
+- HECA named-only centerline coverage 95.5 → 98.4%. These are CENTERLINE-quality
+  improvements to the EXISTING route-network path; the line-marking approach
+  above will likely SUPERSEDE much of the off-corridor/bend-hook logic once it
+  lands — keep them until the new extractor proves out.
+
+### ⚠️ STILL OPEN / GOTCHAS
+- **compare_target fixtures (SPJC + SPLP×2) need RE-CUTTING** — the centerline
+  geometry shifted this session; they're the only suite failures. User approved
+  the re-cut (dropping short rects like SPJC R1/R2 is OK). Use `/tmp/recut.py` /
+  `tools/build_target_osm.py`, refresh floors = target−round(5%).
+- **CONCURRENT AGENT** owns the uncommitted `unified_jacobi.py` WIP (HECA #2
+  grade) + committed `803761b` (runway geometry). LEAVE unified_jacobi.py ALONE;
+  `git add` explicit paths only.
+- Named-only is the agreed HECA metric (exclude TX/discovered + refless both
+  sides). Probe anchor (30.10895832, 31.43477812). HECA build ≈55s.
+
+---
+
 # Auto-Patch Status — session 56 HANDOVER (★ default suite GREEN: 281 passed / 0 failed / 2 skipped, compare_target INCLUDED)
 
 ## ★★ SESSION 56 HANDOVER → NEXT AGENT: collinear-fragment MERGE (the remaining rect-quality lever) ★★
