@@ -2912,8 +2912,18 @@ SHARED_VERTEX_CLUSTER_TOL_M = 1.5
 
 def _drop_overlap_against_fixed_shapes(
         layout: "PavementLayout",
-        icao: str = "") -> None:
+        icao: str = "",
+        include_aprons: bool = False) -> None:
     """Enforce the no-overlap invariant on the layout.
+
+    ``include_aprons``: also resolve APRON ∩ apron / apron ∩ junction
+    overlaps (apron joins the junction residue tier).  Off by default so
+    the early call sites (junction_emit / mid-finalize) keep their
+    original behaviour; the post-neck-split call passes it True, since
+    reclassify-to-apron + neck-split run AFTER the mid-finalize clip and
+    can leave aprons overlapping junctions / each other (HECA dense
+    S/T/W/J/R cluster).  The final solver re-derives node_altitudes for
+    the clipped pieces, so this is a pure geometry pass.
 
     Walks every shape and, where it overlaps another shape, modifies
     or drops it so no two shapes overlap.  Order of priority (the
@@ -3002,11 +3012,14 @@ def _drop_overlap_against_fixed_shapes(
     #     the overlap region is removed from the smaller (the
     #     larger is "the more authoritative" footprint).
     #   * If the clip leaves no usable polygon, drop it.
-    for role_set in [
+    same_role_sets = [
             {ROLE_TERMINAL},
             {ROLE_RUNWAY},
             {ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
-             ROLE_STUB, ROLE_CROSS_CONNECTOR}]:
+             ROLE_STUB, ROLE_CROSS_CONNECTOR}]
+    if include_aprons:
+        same_role_sets.append({ROLE_APRON})
+    for role_set in same_role_sets:
         # Iterate to a fixed point in case clipping creates new
         # adjacencies that need further clipping.
         for _ in range(4):
@@ -3075,6 +3088,10 @@ def _drop_overlap_against_fixed_shapes(
     # produces multiple disjoint fragments.  Same-priority shapes
     # of the JUNCTION class additionally yield to LARGER junctions
     # so two junctions can't both claim the same residue area.
+    # The residue tier: junctions always; aprons too when requested (so
+    # an apron clips against a larger apron/junction and vice versa).
+    residue_tier = ({ROLE_JUNCTION, ROLE_APRON} if include_aprons
+                    else {ROLE_JUNCTION})
     priority: list[set] = [
         # ROLE_RUNWAY_CROSSING is runway-derived geometry that
         # replaced its source runway segments — same tier as
@@ -3084,7 +3101,7 @@ def _drop_overlap_against_fixed_shapes(
         {ROLE_TERMINAL},
         {ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
          ROLE_STUB, ROLE_CROSS_CONNECTOR},
-        {ROLE_JUNCTION},
+        residue_tier,
         {ROLE_BOUNDARY},
     ]
     for outer in range(4):
@@ -3143,8 +3160,8 @@ def _drop_overlap_against_fixed_shapes(
                         except _GEOM_EXC:
                             continue
                 if (new_p is not None
-                        and tier_roles == {ROLE_JUNCTION}):
-                    # Also clip against LARGER same-tier junctions.
+                        and ROLE_JUNCTION in tier_roles):
+                    # Also clip against LARGER same-tier junctions/aprons.
                     for k2 in range(k):
                         i2 = target_idx[k2]
                         tp2 = layout.shapes[i2].polygon

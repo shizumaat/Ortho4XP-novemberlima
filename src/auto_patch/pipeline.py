@@ -2856,6 +2856,15 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     f"  [pav-builder] {icao}: neck-split "
                     f"{_split_count} apron(s) at geometry-final.")
 
+        # Reclassify-to-apron + neck-split (above) run AFTER the
+        # mid-finalize overlap-clip, so they can leave aprons overlapping
+        # junctions / each other (HECA dense S/T/W/J/R cluster).  Resolve
+        # those here, BEFORE the final solve, so the solver derives clean
+        # node_altitudes for the clipped pieces (pure geometry pass).
+        from .elevation import _drop_overlap_against_fixed_shapes
+        _drop_overlap_against_fixed_shapes(
+            layout, icao=icao, include_aprons=True)
+
         if USE_PER_SURFACE_SOLVER and layout.anchor is not None:
             per_surface_solve(layout, icao,
                                dem=dem,
