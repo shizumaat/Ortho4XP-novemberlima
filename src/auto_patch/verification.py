@@ -211,6 +211,31 @@ def check_source_adjacency(layout, min_on_source_frac: float = 0.5):
     return out
 
 
+def check_terminal_flat(layout):
+    """Invariant H26: a terminal moves as one rigid flat unit — a single
+    ``altitude`` tag, never per-vertex ``node_altitudes`` or two-end
+    ``altitude_high``/``altitude_low``.  Returns ``[(idx, detail,
+    "lat,lon"), …]``."""
+    out = []
+    for i, s in enumerate(layout.shapes):
+        if (s.role or "") != "terminal":
+            continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        c = s.polygon.representative_point()
+        loc = _ll(layout, c.x, c.y)
+        if s.altitude is None:
+            out.append((i, "no altitude tag (terminal must be flat)", loc))
+            continue
+        if s.node_altitudes is not None:
+            out.append((i, f"has node_altitudes ({len(s.node_altitudes)} "
+                           f"entries) — terminals must be flat", loc))
+        if s.altitude_high is not None or s.altitude_low is not None:
+            out.append((i, "has altitude_high/low — terminals must be flat",
+                        loc))
+    return out
+
+
 # ── Grade invariants (reuse the check_grade engine) ─────────────────
 def taxi_axes_ll(layout):
     """Per-axis taxi grading mirror — the SAME construction the grade
@@ -261,6 +286,11 @@ def verify_and_log(layout, icao: str) -> dict:
         source = check_source_adjacency(layout)
     except Exception:                              # pragma: no cover
         pass
+    flat = []
+    try:
+        flat = check_terminal_flat(layout)
+    except Exception:                              # pragma: no cover
+        pass
     try:
         within, cross, steps = run_grade_checks(layout)
     except Exception as exc:                       # pragma: no cover
@@ -269,8 +299,8 @@ def verify_and_log(layout, icao: str) -> dict:
         within = cross = steps = []
 
     counts = {"overlap": len(overlaps), "source": len(source),
-              "cross": len(cross), "within": len(within),
-              "steps": len(steps)}
+              "terminal_flat": len(flat), "cross": len(cross),
+              "within": len(within), "steps": len(steps)}
     if not sum(counts.values()):
         UI.vprint(1, f"  [verify] {icao}: OK — no overlap / source / "
                      f"grade issues.")
@@ -311,6 +341,13 @@ def verify_and_log(layout, icao: str) -> dict:
                           f"({frac*100:.0f}% on source) @ {loc}: "
                           f"{describe_shape(layout, idx, taxi_index)}")
         UI.lvprint(0, f"  [verify]     ↳ {_HINTS['source']}")
+    if flat:
+        for idx, detail, loc in flat[:5]:
+            UI.lvprint(0, f"  [verify]   TERMINAL-FLAT @ {loc}: "
+                          f"{describe_shape(layout, idx, taxi_index)} {detail}")
+        UI.lvprint(0, f"  [verify]     ↳ a terminal building pad must be a "
+                      f"single flat altitude. Fix: usually a builder issue, "
+                      f"not source data.")
     if cross:
         for v in sorted(cross, key=lambda v: -v.de_m)[:5]:
             loc = f"{v.lat:.5f},{v.lon:.5f}" if v.lat is not None else "?,?"

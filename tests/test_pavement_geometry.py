@@ -672,32 +672,15 @@ def test_terminal_strictly_flat(icao):
     ``node_altitudes``; sloping rects may carry independent
     ``altitude_high``/``altitude_low``; terminals are flat-only.
     """
-    from auto_patch.layout import ROLE_TERMINAL
+    from auto_patch.verification import check_terminal_flat, describe_shape
     layout = _build_layout(icao)
-    violations = []
-    for s_idx, s in enumerate(layout.shapes):
-        if s.role != ROLE_TERMINAL:
-            continue
-        if s.polygon is None or s.polygon.is_empty:
-            continue
-        if s.altitude is None:
-            violations.append(
-                f"terminal#{s_idx} (ref={s.ref}) has no altitude "
-                f"(should carry a single altitude tag)")
-            continue
-        if s.node_altitudes is not None:
-            violations.append(
-                f"terminal#{s_idx} (ref={s.ref}) has node_altitudes "
-                f"({len(s.node_altitudes)} entries) — H26 forbids "
-                f"per-node deviation for terminals")
-        if s.altitude_high is not None or s.altitude_low is not None:
-            violations.append(
-                f"terminal#{s_idx} (ref={s.ref}) has altitude_high/"
-                f"low ({s.altitude_high}/{s.altitude_low}) — H26 "
-                f"forbids two-end variation for terminals")
+    violations = check_terminal_flat(layout)
+    summary = "; ".join(
+        f"{describe_shape(layout, idx)} {detail}"
+        for idx, detail, _loc in violations[:5])
     assert not violations, (
-        f"{icao}: {len(violations)} terminal flatness violation(s).  "
-        + "; ".join(violations[:5])
+        f"{icao}: {len(violations)} terminal flatness violation(s) "
+        f"(H26 — terminals are a single flat altitude).  {summary}"
         + (f"  ...and {len(violations)-5} more"
            if len(violations) > 5 else ""))
 
