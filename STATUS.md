@@ -1,3 +1,88 @@
+# Auto-Patch Status — session 59 CLOSE → session 60 = REMAINING HECA = UNDER-DECOMPOSED APRONS
+
+## ★★ SESSION 59 RESULTS (2026-06-01) — overlap+source CLEARED, cross/steps slashed ★★
+
+HECA issue list, start → end of session 59 (suite stayed **289/0/2** throughout;
+the 5 commits below are GENERAL builder/solver fixes, NOT HECA-tuned):
+
+| check                | s58 | s59 | how |
+|----------------------|----:|----:|-----|
+| overlap              |   4 |   0 | apron-aware overlap-clip + groundside deconflict |
+| off-source           |   2 |   0 | drop off-source residue |
+| vertex_on_flat_edge  |   1 |   1 | (open) |
+| short_edge           |   2 |   2 | (open — likely real apt.dat gaps) |
+| cross-shape          |  37 |  11 | terminal coupling + airside↔groundside skip |
+| within-shape         |  15 |  14 | (terminal coupling; rest = dense-cluster grade) |
+| edge-steps           | 229 |  69 | terminal coupling |
+
+### What landed (commits, dev)
+1. **Couple abutting terminals into ONE rigid flat unit** (unified_jacobi.py).
+   The reverse-pass relief shifted each terminal to its OWN DEM centroid and
+   IGNORED inter-terminal constraints, so HECA's south complex (terminals
+   6/7/10) and north (2/9) — which SHARE EDGES — left 1.4–3.8 m cliffs at those
+   shared edges. Union-find the flat shapes by shared canonical node → an
+   edge-connected cluster is one flat group at one AREA-WEIGHTED level (dominant
+   pad anchors). Singletons = bit-identical to old behaviour (baseline
+   unchanged). **cross 37→18, steps 229→69.** This was the deferred "coherent
+   terminal fill" — the clean half of it; no backfire (within stayed 15).
+2. **Drop off-source residue** + **airside↔groundside skip in cross-shape**:
+   `_drop_off_source_residue` (junction_repair, called in pipeline after the
+   floating-orphan drop) drops small (<2000 m²) apron/junction <50 % on
+   `source_pavement_union` — HECA #258/#228 were thin strips beside
+   shoulder-widened runways. check_grade cross-shape now applies the same
+   airside↔groundside skip the STEP checks use (was an oversight; groundside has
+   a 4 % cap not None). **source 2→0, cross 18→11, within 15→14.**
+3. **Apron-aware overlap-clip** (`_drop_overlap_against_fixed_shapes(...,
+   include_aprons=True)` called in pipeline.py right BEFORE the final solve).
+   The mid-finalize overlap-clip runs BEFORE reclassify-to-apron + neck-split,
+   and aprons weren't in its priority list → the dense S/T/W/J/R cluster left
+   apron∩junction (957/144 m²) + apron∩apron (150 m²) overlaps. New
+   `include_aprons` mode adds apron to the junction residue tier (off by default
+   → early call sites unchanged); final solver re-derives node_altitudes on the
+   clipped pieces. **overlap 4→1.**
+4. **Groundside deconflict** (groundside.py): the groundside emit clipped each
+   poly vs terminals/airside but not vs OTHER groundside → a 0.1 m² self-overlap.
+   Clip each vs the union of already-accepted (largest first). **overlap 1→0.**
+
+### ★ THE REMAINING HECA WORK (session 60) = UNDER-DECOMPOSED GIANT APRONS
+The leftover cross(11)/within(14)/steps(69) are **two dense apron regions**, NOT
+a solver-coupling gap:
+- **Giant apron #287 (A/G/J meet) = 1.4 M m², alt 62.0–87.6 m** with **stub J1
+  [#90]** (978 m², 156 m thin node_altitudes stub) embedded along/through it →
+  **~41 of the 69 steps** + several cross are J1↔#287 (up to 3.4 m), at
+  ~(30.129–132, 31.406–407). J1 shares its near edge w/ #287 (verts coincide,
+  ~68–69 m) but its FAR edge runs alongside the apron at a different graded level.
+- **Dense S/T/W/J cluster**: apron #294 (J,S,T,W) + junction #373 (S,T) hold most
+  of the within violations (2.0–13.5 %). apron #316 (B,C,E,S) 3.0 %.
+- **stub C #149**: a malformed 7-vertex node_altitudes ring with tiny 0.97/2.25/
+  4.36 m hook edges → 20.1 %/1.0 m + 8.1 %/2.5 m within (degenerate sliver, not a
+  real slope). A conformance/absorption hook-cleanup candidate.
+The fix is the long-deferred **giant-apron decomposition / coherent fill**
+(STATUS s55 #2): the 1.4 M m² apron must be split into convex pads (neck-split
+left it whole) so stubs like J1 meet a small apron piece at one level, and the
+all-pair grade is over a smaller span. `pavement/apron_necks.py` is the module.
+Regression-guard: SPJC/SPLP/CYXY grade tests + the HECA verify above.
+
+### Still open (low priority, likely SOURCE not builder)
+- **short_edge (2)**: stub Exit-2 [#94] / Exit-3 [#116] end_A ends ~42 m short of
+  runway 05R/23L (end_B connects to a junction at 0.0 m). Genuine apt.dat
+  network gap at the runway exits OR a missing runway-exit connector.
+- **vertex_on_flat_edge (1)**: an apron vertex on stub C [#103]'s flat cross-edge
+  at t=0.675 (mid-edge, d=1.0 m) — not near-corner, so the existing
+  `_snap_near_corner_vertices_to_rect_corners` can't catch it.
+
+### How to measure (unchanged)
+```
+venv/bin/python -c "import sys; sys.path.insert(0,'src'); sys.path.insert(0,'.'); sys.path.insert(0,'tests')
+from conftest import cached_airport_layout
+from auto_patch.verification import verify_and_log
+verify_and_log(cached_airport_layout('HECA'),'HECA')" 2>&1 | grep '\[verify\]'
+```
+Probes this session: `/tmp/probes/heca_*.py` (cluster, offsource, overlap,
+grade_detail, steps2, j1, stubc). Anchor (30.10895832, 31.43477812).
+
+---
+
 # Auto-Patch Status — session 58 CLOSE → session 59 = DEBUG REMAINING HECA ISSUES
 
 ## ★★ SESSION 59 TASK: fix the remaining HECA patch issues ★★
