@@ -277,89 +277,19 @@ def test_no_vertex_on_sloping_rect_flat_edge(icao):
     rect — at exactly the threshold the original 0.5 m all-edge
     test misses.
     """
-    import math
+    from auto_patch.verification import (
+        check_vertex_on_flat_edge, describe_shape, build_taxi_index)
     layout = _build_layout(icao)
-    sloping_roles = {
-        "primary_parallel", "secondary_parallel",
-        "stub", "cross_connector", "service_road"}
-    sloping = []
-    for s in layout.shapes:
-        if s.role not in sloping_roles:
-            continue
-        if s.polygon is None or s.polygon.is_empty:
-            continue
-        # Per user 2026-05-02: flat (no slope) rects exempt — those
-        # have a single ``altitude`` and tolerate mid-edge nodes.
-        if s.altitude_high is None or s.altitude_low is None:
-            continue
-        sloping.append(s)
-    if not sloping:
-        pytest.skip(f"{icao}: no sloping rects emitted")
-
-    EDGE_PROX_M = 1.0
-    CORNER_GUARD_M = 1.0
-
-    violations = []
-    for s in sloping:
-        coords = list(s.polygon.exterior.coords)
-        if coords and coords[0] == coords[-1]:
-            coords = coords[:-1]
-        if len(coords) != 4:
-            continue
-        flat_edges = _rect_flat_edges_from_shape(s)
-        if not flat_edges:
-            continue
-        for o in layout.shapes:
-            if o is s:
-                continue
-            if o.polygon is None or o.polygon.is_empty:
-                continue
-            # Other sloping rects share corners at junction points;
-            # checking them produces noise without adding signal.
-            # Junctions, terminals, aprons, retaining_walls are the
-            # interesting violators here.
-            if o.role in sloping_roles:
-                continue
-            ocoords = list(o.polygon.exterior.coords)
-            if ocoords and ocoords[0] == ocoords[-1]:
-                ocoords = ocoords[:-1]
-            for px, py in ocoords:
-                if any(math.hypot(px - cx, py - cy) <= CORNER_GUARD_M
-                       for cx, cy in coords):
-                    continue
-                for (ax, ay), (bx, by) in flat_edges:
-                    dx = bx - ax
-                    dy = by - ay
-                    L2 = dx * dx + dy * dy
-                    if L2 <= 0:
-                        continue
-                    t = ((px - ax) * dx + (py - ay) * dy) / L2
-                    if t <= 0.001 or t >= 0.999:
-                        continue
-                    proj_x = ax + t * dx
-                    proj_y = ay + t * dy
-                    d = math.hypot(px - proj_x, py - proj_y)
-                    d_a = math.hypot(px - ax, py - ay)
-                    d_b = math.hypot(px - bx, py - by)
-                    if (d <= EDGE_PROX_M
-                            and d_a > CORNER_GUARD_M
-                            and d_b > CORNER_GUARD_M):
-                        violations.append(
-                            (s.role, s.ref or "?", o.role,
-                             o.ref or "?", t, d))
-                        break
-
-    if violations:
-        def _fmt(v):
-            return (f"{v[2]}({v[3]}) vertex on {v[0]}({v[1]}) "
-                    f"flat edge t={v[4]:.3f} d={v[5]:.2f}m")
-        summary = "; ".join(_fmt(v) for v in violations[:8])
-        msg = (f"{icao}: {len(violations)} sloping-rect flat-edge "
-               f"invariant violation(s).  Sloping rects must share "
-               f"flat (cross) edges 1:1 — only the 2 corners are "
-               f"legal shared vertices.  First "
-               f"{min(8, len(violations))}: {summary}.")
-        assert False, msg
+    violations = check_vertex_on_flat_edge(layout)
+    ti = build_taxi_index(layout)
+    summary = "; ".join(
+        f"{describe_shape(layout, idx, ti)} — {detail} @ {loc}"
+        for idx, detail, loc in violations[:8])
+    assert not violations, (
+        f"{icao}: {len(violations)} sloping-rect flat-edge invariant "
+        f"violation(s).  Sloping rects must share flat (cross) edges 1:1 "
+        f"— only the 2 corners are legal shared vertices.  First "
+        f"{min(8, len(violations))}: {summary}.")
 
 
 @pytest.mark.parametrize("icao", _test_airports())

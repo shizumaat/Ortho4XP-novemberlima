@@ -304,6 +304,104 @@ def check_vertex_on_sloping_edge(layout):
     return out
 
 
+def _rect_flat_edges(shape):
+    """The two FLAT (cross) edges of a 4-corner rect — perpendicular to
+    ``source_axis`` (constant altitude along them).  ``[]`` if not a
+    4-corner rect."""
+    import math
+    poly = shape.polygon
+    coords = list(poly.exterior.coords)
+    if not coords:
+        return []
+    if coords[0] == coords[-1]:
+        coords = coords[:-1]
+    if len(coords) != 4:
+        return []
+    edges = [(coords[i], coords[(i + 1) % 4]) for i in range(4)]
+    sa = getattr(shape, "source_axis", None)
+    if sa is not None and not sa.is_empty:
+        axp = list(sa.coords)
+        if len(axp) >= 2:
+            axdx, axdy = axp[-1][0] - axp[0][0], axp[-1][1] - axp[0][1]
+            axlen = math.hypot(axdx, axdy)
+            if axlen >= 1e-6:
+                aux, auy = axdx / axlen, axdy / axlen
+                dots = []
+                for a, b in edges:
+                    ex, ey = b[0] - a[0], b[1] - a[1]
+                    elen = math.hypot(ex, ey)
+                    dots.append(0.0 if elen < 1e-6
+                                else abs(ex * aux + ey * auy) / elen)
+                flat_idx = sorted(range(4), key=lambda i: dots[i])[:2]
+                return [edges[i] for i in flat_idx]
+    lengths = [math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in edges]
+    short_idx = sorted(range(4), key=lambda i: lengths[i])[:2]
+    return [edges[i] for i in short_idx]
+
+
+def check_vertex_on_flat_edge(layout):
+    """Invariant: a sloping rect's FLAT (cross) edge meets a junction /
+    apron 1:1 — only its 2 corners are legal shared vertices, never a
+    node on the edge interior (a third node there steps the rect's slope
+    away from its linear-corner plane).  Returns ``[(rect_idx, detail,
+    "lat,lon"), …]``."""
+    import math
+    sloping_roles = {"primary_parallel", "secondary_parallel",
+                     "stub", "cross_connector", "service_road"}
+    sloping = [(i, s) for i, s in enumerate(layout.shapes)
+               if s.role in sloping_roles and s.polygon is not None
+               and not s.polygon.is_empty
+               and s.altitude_high is not None
+               and s.altitude_low is not None]
+    if not sloping:
+        return []
+    EDGE_PROX_M = 1.0
+    CORNER_GUARD_M = 1.0
+    out = []
+    for ridx, s in sloping:
+        coords = list(s.polygon.exterior.coords)
+        if coords and coords[0] == coords[-1]:
+            coords = coords[:-1]
+        if len(coords) != 4:
+            continue
+        flat_edges = _rect_flat_edges(s)
+        if not flat_edges:
+            continue
+        for o in layout.shapes:
+            if o is s or o.polygon is None or o.polygon.is_empty:
+                continue
+            if o.role in sloping_roles:
+                continue
+            ocoords = list(o.polygon.exterior.coords)
+            if ocoords and ocoords[0] == ocoords[-1]:
+                ocoords = ocoords[:-1]
+            for px, py in ocoords:
+                if any(math.hypot(px - cx, py - cy) <= CORNER_GUARD_M
+                       for cx, cy in coords):
+                    continue
+                for (ax, ay), (bx, by) in flat_edges:
+                    dx, dy = bx - ax, by - ay
+                    L2 = dx * dx + dy * dy
+                    if L2 <= 0:
+                        continue
+                    t = ((px - ax) * dx + (py - ay) * dy) / L2
+                    if t <= 0.001 or t >= 0.999:
+                        continue
+                    pjx, pjy = ax + t * dx, ay + t * dy
+                    d = math.hypot(px - pjx, py - pjy)
+                    d_a = math.hypot(px - ax, py - ay)
+                    d_b = math.hypot(px - bx, py - by)
+                    if (d <= EDGE_PROX_M and d_a > CORNER_GUARD_M
+                            and d_b > CORNER_GUARD_M):
+                        out.append((
+                            ridx,
+                            f"{o.role}({o.ref or '?'}) vertex on the flat "
+                            f"(cross) edge (t={t:.3f}, d={d:.2f} m)",
+                            _ll(layout, px, py)))
+                        break
+    return out
+
+
 # ── Grade invariants (reuse the check_grade engine) ─────────────────
 def taxi_axes_ll(layout):
     """Per-axis taxi grading mirror — the SAME construction the grade
@@ -354,13 +452,17 @@ def verify_and_log(layout, icao: str) -> dict:
         source = check_source_adjacency(layout)
     except Exception:                              # pragma: no cover
         pass
-    flat = edge_v = []
+    flat = edge_v = flat_v = []
     try:
         flat = check_terminal_flat(layout)
     except Exception:                              # pragma: no cover
         pass
     try:
         edge_v = check_vertex_on_sloping_edge(layout)
+    except Exception:                              # pragma: no cover
+        pass
+    try:
+        flat_v = check_vertex_on_flat_edge(layout)
     except Exception:                              # pragma: no cover
         pass
     try:
@@ -372,8 +474,8 @@ def verify_and_log(layout, icao: str) -> dict:
 
     counts = {"overlap": len(overlaps), "source": len(source),
               "terminal_flat": len(flat), "vertex_on_edge": len(edge_v),
-              "cross": len(cross), "within": len(within),
-              "steps": len(steps)}
+              "vertex_on_flat_edge": len(flat_v), "cross": len(cross),
+              "within": len(within), "steps": len(steps)}
     if not sum(counts.values()):
         UI.vprint(1, f"  [verify] {icao}: OK — no overlap / source / "
                      f"grade issues.")
@@ -428,6 +530,13 @@ def verify_and_log(layout, icao: str) -> dict:
         UI.lvprint(0, f"  [verify]     ↳ a junction/apron vertex sits on a "
                       f"taxi-rect edge interior (should meet only at corners). "
                       f"Fix: usually a builder issue, not source data.")
+    if flat_v:
+        for idx, detail, loc in flat_v[:5]:
+            UI.lvprint(0, f"  [verify]   FLAT-EDGE @ {loc}: "
+                          f"{describe_shape(layout, idx, taxi_index)} — {detail}")
+        UI.lvprint(0, f"  [verify]     ↳ a junction/apron vertex sits on a "
+                      f"taxi-rect FLAT (cross) edge interior (only the 2 corners "
+                      f"may be shared). Fix: usually a builder issue.")
     if cross:
         for v in sorted(cross, key=lambda v: -v.de_m)[:5]:
             loc = f"{v.lat:.5f},{v.lon:.5f}" if v.lat is not None else "?,?"
