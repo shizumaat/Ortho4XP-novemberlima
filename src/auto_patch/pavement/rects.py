@@ -370,7 +370,6 @@ def _build_taxi_rects(
     # of one OSM way that bend-split into rects covering distinct
     # parts of the corridor) coexist — only OSM fragmentation that
     # produces actual duplicates gets deduped.
-    OVERLAP_PROX_M = 5.0
     by_ref: dict[str, list[int]] = {}
     for i, (_r, _a, role, ref) in enumerate(emitted):
         if not _should_dedup(ref, role):
@@ -392,10 +391,18 @@ def _build_taxi_rects(
                 rb = emitted[idxs[b]][0]
                 try:
                     overlap = ra.intersection(rb).area
-                    proximate = ra.distance(rb) < OVERLAP_PROX_M
                 except _GEOM_EXC:
-                    overlap, proximate = 0.0, False
-                if overlap > 1.0 or proximate:
+                    overlap = 0.0
+                # Cluster (→ keep-longest) only on genuine AREA OVERLAP —
+                # i.e. two rects share footprint, so one is a duplicate of
+                # the other (OSM fragmentation of a single short stub:
+                # SPJC F's two pieces overlap 325 m²).  Do NOT cluster on
+                # mere proximity: distinct end-to-end SECTIONS of one long
+                # taxiway (HECA R/B/C, crossed by connectors into 3-5
+                # collinear pieces with junction gaps between them) abut or
+                # sit metres apart with ZERO area overlap — they are real,
+                # separate rects and must all survive (user 2026-05-31).
+                if overlap > 1.0:
                     pa, pb = find(a), find(b)
                     if pa != pb:
                         parent[pa] = pb
@@ -410,47 +417,16 @@ def _build_taxi_rects(
             for m in members[1:]:
                 drop.add(m)
 
-    # Per user 2026-05-12: diagonal-parent stub refs (B/C/D/E/G at
-    # SPJC — single-letter taxis whose OSM parent way is overall
-    # diagonal to the runway) should have EXACTLY ONE rect.  Any
-    # additional rect emitted from a curving sub-segment of the
-    # same taxi is a fragmentation artefact and must be dropped
-    # regardless of geometric proximity.  Cluster-based dedup
-    # above keeps these when the fragments are > OVERLAP_PROX_M
-    # apart (e.g. SPJC -10030 was 35 m from -10017 along the C
-    # taxi); without this single-rect rule, the fragment splits
-    # the runway-side junction into multiple pieces.
-    if rwy_centerlines and ref_overall_bearings:
-        try:
-            _rwy0 = rwy_centerlines[0]
-            _rc0 = list(_rwy0.coords)
-            _rwy0_b = (math.degrees(math.atan2(
-                _rc0[-1][0] - _rc0[0][0],
-                _rc0[-1][1] - _rc0[0][1])) % 180.0)
-        except _GEOM_EXC:
-            _rwy0_b = None
-        if _rwy0_b is not None:
-            diag_stubs: dict[str, list[int]] = {}
-            for i, (_r, _a, role, ref) in enumerate(emitted):
-                if i in drop:
-                    continue
-                if role != ROLE_STUB or not ref:
-                    continue
-                if any(c.isdigit() for c in ref):
-                    continue  # sub-refs handled by cluster dedup
-                if ref not in ref_overall_bearings:
-                    continue
-                _ref_db = abs(
-                    ref_overall_bearings[ref] - _rwy0_b)
-                _ref_db = min(_ref_db, 180.0 - _ref_db)
-                if 20.0 <= _ref_db < 45.0:
-                    diag_stubs.setdefault(ref, []).append(i)
-            for ref, idxs in diag_stubs.items():
-                if len(idxs) <= 1:
-                    continue
-                idxs.sort(key=lambda m: -emitted[m][1].length)
-                for m in idxs[1:]:
-                    drop.add(m)
+    # NOTE (user 2026-05-31): a former "diagonal-parent stub = EXACTLY ONE
+    # rect" rule lived here — it dropped all-but-longest for single-letter
+    # stubs whose bearing was 20-45° off the runway, on the theory that
+    # extra fragments were artefacts.  That was WRONG for long multi-
+    # section taxiways: HECA's R/B/C run diagonally to the runway and are
+    # crossed by connectors into 3-5 real collinear sections (R wraps both
+    # sides of 05C/23C); the rule deleted every section but one, leaving
+    # the taxiway on one side only.  Genuine OSM-fragment duplicates share
+    # footprint and are already removed by the overlap cluster-dedup above,
+    # so this blanket bearing rule is removed entirely.
 
     keep: list[tuple[Polygon, LineString, str, str]] = [
         item for i, item in enumerate(emitted) if i not in drop]
