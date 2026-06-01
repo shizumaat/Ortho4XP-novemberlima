@@ -1290,6 +1290,73 @@ def _drop_floating_orphan_junctions(
     return len(to_drop)
 
 
+def _drop_off_source_residue(
+        layout: "PavementLayout",
+        icao: str = "",
+        max_area_m2: float = 2000.0,
+        min_on_source_frac: float = 0.5,
+        ) -> int:
+    """Drop small apron / junction residue that rests almost entirely OFF
+    the source pavement (apt.dat row-110 ∪ DSF ∪ runway).
+
+    A thin strip wedged between a (shoulder-widened) runway edge and the
+    real pavement — or residue left where a discovered runway-parallel
+    centerline was dropped — gets emitted as an apron/junction even though
+    there is no source pavement beneath it.  ``source_pavement_union`` is
+    the authoritative footprint of real pavement, so an apron/junction
+    sitting mostly off it is spurious (HECA #258 8 m × 133 m along 05R/23L,
+    #228 11 m × 101 m along 05C/23C — both 8 % on source).
+
+    Tight criterion so only genuine residue is dropped (a real apron is
+    large and well on-source):
+      * role ∈ {apron, junction}, 0 < area < ``max_area_m2`` (small);
+      * on-source fraction < ``min_on_source_frac``.
+
+    Returns count dropped.
+    """
+    src = getattr(layout, "source_pavement_union", None)
+    if src is None or src.is_empty:
+        return 0
+    rwy = getattr(layout, "runway_union", None)
+    if rwy is not None and not rwy.is_empty:
+        try:
+            src = src.union(rwy)
+        except _GEOM_EXC:
+            pass
+    to_drop: list[int] = []
+    for i, s in enumerate(layout.shapes):
+        if s.role not in (ROLE_APRON, ROLE_JUNCTION):
+            continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        try:
+            area = s.polygon.area
+        except _GEOM_EXC:
+            continue
+        if area <= 1.0 or area >= max_area_m2:
+            continue
+        try:
+            on = s.polygon.intersection(src).area
+        except _GEOM_EXC:
+            continue
+        if on / area < min_on_source_frac:
+            to_drop.append(i)
+
+    if not to_drop:
+        return 0
+    drop_set = set(to_drop)
+    layout.shapes = [
+        s for k, s in enumerate(layout.shapes) if k not in drop_set]
+    try:
+        UI.vprint(1,
+            f"  [pav-builder] {icao}: dropped {len(to_drop)} off-source "
+            f"residue apron/junction(s) (< {min_on_source_frac*100:.0f}% on "
+            f"source pavement, area < {max_area_m2:.0f} m²).")
+    except _GEOM_EXC:
+        pass
+    return len(to_drop)
+
+
 def _orient_rect_sloping_edge_first(coords: list, source_axis=None) -> list:
     """Rotate a 4-corner rect's vertex ring so edge ``(c0, c1)`` is a
     SLOPING edge (the side parallel to the rect's centerline, along

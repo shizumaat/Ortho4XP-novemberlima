@@ -2893,6 +2893,14 @@ def build_airport_pavement(icao: str, xplane_root: str,
         from .junction_repair import _drop_floating_orphan_junctions
         _drop_floating_orphan_junctions(layout, icao=icao)
 
+        # Drop small apron/junction residue that rests almost entirely OFF
+        # the source pavement union — a thin strip beside a shoulder-widened
+        # runway, or residue from a dropped runway-parallel centerline
+        # (HECA #258/#228).  source_pavement_union is the authoritative real-
+        # pavement footprint, so off-source residue is spurious.
+        from .junction_repair import _drop_off_source_residue
+        _drop_off_source_residue(layout, icao=icao)
+
         # Final within-shape grade WARN reflects the absolute
         # final state — junction / apron / terminal Euclidean caps
         # post-final-solver.  Per user 2026-05-03 the WARN was

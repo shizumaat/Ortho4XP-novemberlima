@@ -776,6 +776,13 @@ def _check_cross_shape_proximity(
                         continue
                     way_v = ways[v.way_idx]
                     way_u = ways[u.way_idx]
+                    # Airside <-> groundside is separated by a clearance gap +
+                    # retaining/vertical wall (user 2026-05-28): the two are NOT
+                    # meant to be flush and may differ by several metres.  The
+                    # STEP checks already skip this boundary; the cross-shape
+                    # proximity check (same continuity assumption) must too.
+                    if _airside_groundside_pair(way_v, way_u):
+                        continue
                     grade_cap = _pair_grade_limit(
                         way_v, way_u, max_grade)
                     if grade_cap is None:
