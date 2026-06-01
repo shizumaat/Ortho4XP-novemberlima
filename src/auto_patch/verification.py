@@ -12,10 +12,16 @@ There is exactly ONE implementation of each check.  Thresholds are
 UNIVERSAL — no per-airport exceptions.
 
 Diagnostics: the user's only fix lever is the source data (apt.dat /
-DSF), so every reported violation says WHAT, WHERE (lat, lon), a likely
-CAUSE, and a suggested FIX.  Once the elevation solver is complete a
-grade violation almost always means a geometry / source problem, so the
-hints lean that way.
+DSF), so every reported violation says WHAT, WHERE — the ``shapeID`` to
+open in the patch, a lat/lon, and (for junctions/aprons) the taxiways
+that meet there, e.g. "junction [#375] where taxiways A, M meet" — a
+likely CAUSE, and a suggested FIX.  Once the elevation solver is
+complete a grade violation almost always means a geometry / source
+problem, so the hints lean that way.
+
+``shapeID`` == the shape's index in ``layout.shapes`` (the same value
+``layout.to_osm`` writes as the ``shapeID`` tag), so a reported id maps
+directly to the way in the emitted patch.
 """
 from __future__ import annotations
 
@@ -26,16 +32,17 @@ from pathlib import Path
 
 import O4_UI_Utils as UI
 
+_TAXI_ROLES = ("primary_parallel", "secondary_parallel",
+               "stub", "cross_connector")
+
 # Roles that are NOT airside pavement built from apt.dat row-110 / DSF —
-# excluded from the source-adjacency check (terrain-control surfaces,
-# walls, ramps, buildings, landside pavement).
+# excluded from the source-adjacency check.
 _NON_SOURCE_PAVEMENT_ROLES = frozenset({
     "boundary", "taxiway_clearance", "runway_clearance",
     "retaining_wall", "tunnel_ramp", "groundside_pavement",
     "service_road", "service_junction", "terminal",
 })
 
-# Per-class cause / fix hints (the user fixes source data, not code).
 _HINTS = {
     "overlap": ("two pavement shapes share footprint — likely a duplicate "
                 "DSF .pol overlay over apt.dat row-110, or two row-110 "
@@ -68,12 +75,71 @@ def _ll(layout, x, y) -> str:
         return "?,?"
 
 
+def build_taxi_index(layout):
+    """STRtree of taxi-rect polygons + parallel ref list, for naming the
+    taxiways adjacent to a junction/apron.  Returns ``(tree, geoms,
+    refs)`` or ``(None, [], [])``."""
+    from shapely.strtree import STRtree
+    geoms, refs = [], []
+    for s in layout.shapes:
+        if (s.role in _TAXI_ROLES and s.polygon is not None
+                and not s.polygon.is_empty and (s.ref or "").strip()):
+            geoms.append(s.polygon)
+            refs.append((s.ref or "").strip())
+    if not geoms:
+        return (None, [], [])
+    return (STRtree(geoms), geoms, refs)
+
+
+def _neighbour_taxi_refs(poly, taxi_index, tol_m: float = 1.0):
+    """Distinct taxiway refs whose rect touches ``poly`` (within
+    ``tol_m``).  Sub-refs are collapsed to their base letter so
+    "A, A3, M" reads "A, M"."""
+    tree, geoms, refs = taxi_index
+    if tree is None or poly is None or poly.is_empty:
+        return []
+    out = set()
+    try:
+        cand = tree.query(poly)
+    except Exception:
+        return []
+    for j in cand:
+        try:
+            if poly.distance(geoms[j]) <= tol_m:
+                r = refs[j]
+                base = r[0] if r and r[0].isalpha() else r
+                out.add(base)
+        except Exception:
+            continue
+    return sorted(out)
+
+
+def describe_shape(layout, idx, taxi_index=None) -> str:
+    """Human description of ``layout.shapes[idx]``: role, ref, the
+    ``shapeID`` to open in the patch, and — for a junction/apron — the
+    taxiways that meet there."""
+    try:
+        s = layout.shapes[idx]
+    except (IndexError, TypeError):
+        return f"shape [#{idx}]"
+    role = s.role or "?"
+    ref = (s.ref or "").strip()
+    head = f"{role} {ref}".strip() if ref else role
+    out = f"{head} [#{idx}]"
+    if role in ("junction", "apron") and taxi_index is not None:
+        nb = _neighbour_taxi_refs(s.polygon, taxi_index)
+        if len(nb) >= 2:
+            out += f" where taxiways {', '.join(nb[:4])} meet"
+        elif len(nb) == 1:
+            out += f" off taxiway {nb[0]}"
+    return out
+
+
 def _import_check_grade():
     """``tools/check_grade.py`` is the canonical grade validator but lives
-    in the repo's ``tools`` dir (not an installed package).  Resolve that
-    dir from this file and import it."""
+    in the repo's ``tools`` dir (not an installed package)."""
     here = os.path.dirname(os.path.abspath(__file__))
-    repo_root = os.path.dirname(os.path.dirname(here))   # src/auto_patch -> repo
+    repo_root = os.path.dirname(os.path.dirname(here))
     tools_dir = os.path.join(repo_root, "tools")
     if tools_dir not in sys.path:
         sys.path.insert(0, tools_dir)
@@ -84,20 +150,19 @@ def _import_check_grade():
 # ── Geometry invariants ─────────────────────────────────────────────
 def check_self_overlap(layout):
     """Invariant A1: no two emitted pavement polygons may overlap.
-    Returns ``[(area_m2, role_a, role_b, "lat,lon"), …]`` largest first
-    (empty = clean).  X-Plane mesh generation cannot handle overlap."""
+    Returns ``[(area_m2, idx_a, idx_b, "lat,lon"), …]`` largest first."""
     from shapely.strtree import STRtree
-    polys = [(s.role, s.polygon) for s in layout.shapes
+    polys = [(i, s.polygon) for i, s in enumerate(layout.shapes)
              if s.polygon is not None and not s.polygon.is_empty]
     if len(polys) < 2:
         return []
     tree = STRtree([p for _, p in polys])
     pairs = []
-    for i, (role_a, pa) in enumerate(polys):
-        for j in tree.query(pa):
-            if j <= i:
+    for k, (idx_a, pa) in enumerate(polys):
+        for q in tree.query(pa):
+            if q <= k:
                 continue
-            role_b, pb = polys[j]
+            idx_b, pb = polys[q]
             try:
                 inter = pa.intersection(pb)
             except Exception:
@@ -105,21 +170,17 @@ def check_self_overlap(layout):
             if inter.is_empty or inter.area <= 0.0:
                 continue
             c = inter.representative_point()
-            pairs.append((inter.area, role_a, role_b, _ll(layout, c.x, c.y)))
+            pairs.append((inter.area, idx_a, idx_b, _ll(layout, c.x, c.y)))
     pairs.sort(key=lambda r: r[0], reverse=True)
     return pairs
 
 
 def check_source_adjacency(layout, min_on_source_frac: float = 0.5):
     """Invariant: every emitted PAVEMENT shape must rest on real source
-    pavement (apt.dat row-110 ∪ DSF ∪ runway).  Flags any pavement shape
-    whose overlap with the source union is below ``min_on_source_frac``
-    of its own area — pavement produced where no source exists.
-
-    Source-RELATIVE and per-shape (no per-airport ratio), so it works on
-    whatever airport a tile contains and points at the exact shape.
-    Returns ``[(role, ref, area_m2, on_frac, "lat,lon"), …]`` largest
-    first.  Returns ``[]`` when no source union was recorded."""
+    pavement (apt.dat row-110 ∪ DSF ∪ runway) by ≥ ``min_on_source_frac``
+    of its own area.  Source-relative, per-shape, no per-airport ratio.
+    Returns ``[(idx, area_m2, on_frac, "lat,lon"), …]`` largest first;
+    ``[]`` when no source union was recorded."""
     src = getattr(layout, "source_pavement_union", None)
     if src is None or src.is_empty:
         return []
@@ -130,7 +191,7 @@ def check_source_adjacency(layout, min_on_source_frac: float = 0.5):
         except Exception:
             pass
     out = []
-    for s in layout.shapes:
+    for i, s in enumerate(layout.shapes):
         if s.polygon is None or s.polygon.is_empty:
             continue
         if (s.role or "") in _NON_SOURCE_PAVEMENT_ROLES:
@@ -145,16 +206,15 @@ def check_source_adjacency(layout, min_on_source_frac: float = 0.5):
         frac = on / area if area > 0 else 1.0
         if frac < min_on_source_frac:
             c = s.polygon.representative_point()
-            out.append((s.role, getattr(s, "ref", "") or "",
-                        area, frac, _ll(layout, c.x, c.y)))
-    out.sort(key=lambda r: r[2], reverse=True)
+            out.append((i, area, frac, _ll(layout, c.x, c.y)))
+    out.sort(key=lambda r: r[1], reverse=True)
     return out
 
 
 # ── Grade invariants (reuse the check_grade engine) ─────────────────
 def taxi_axes_ll(layout):
     """Per-axis taxi grading mirror — the SAME construction the grade
-    test uses, so junctions are graded exactly as the build intended."""
+    test uses."""
     try:
         from .elevation_per_surface import unified_jacobi as _uj
     except Exception:
@@ -176,8 +236,7 @@ def taxi_axes_ll(layout):
 
 def run_grade_checks(layout):
     """Run the grade engine on ``layout``.  Returns ``(within, cross,
-    steps)`` (each item carries ``.grade_pct`` / ``.de_m`` / ``.step_m``
-    + ``.lat`` / ``.lon`` + way labels)."""
+    steps)`` with ``.lat`` / ``.lon`` + way labels populated."""
     check_grade = _import_check_grade()
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "verify.osm"
@@ -191,12 +250,8 @@ def run_grade_checks(layout):
 # ── Build-time entry point ──────────────────────────────────────────
 def verify_and_log(layout, icao: str) -> dict:
     """Run every verification check on a freshly-built layout and LOG a
-    diagnostic summary (never raises — a verification problem must not
-    break a build).  Returns a counts dict.
-
-    Violations log at verbosity 0 (so a quiet release build still tells
-    the user an airport has errors); a clean airport logs at verbosity
-    1."""
+    diagnostic summary (never raises).  Returns a counts dict.  Problems
+    log at verbosity 0; a clean airport at verbosity 1."""
     overlaps = source = within = cross = steps = []
     try:
         overlaps = check_self_overlap(layout)
@@ -216,48 +271,57 @@ def verify_and_log(layout, icao: str) -> dict:
     counts = {"overlap": len(overlaps), "source": len(source),
               "cross": len(cross), "within": len(within),
               "steps": len(steps)}
-    total = sum(counts.values())
-    if not total:
+    if not sum(counts.values()):
         UI.vprint(1, f"  [verify] {icao}: OK — no overlap / source / "
                      f"grade issues.")
         return counts
 
+    taxi_index = build_taxi_index(layout)
     try:
-        check_grade = _import_check_grade()
-        glabel = check_grade._label
+        glabel_id = _import_check_grade()
     except Exception:                              # pragma: no cover
-        glabel = lambda w: "?"
+        glabel_id = None
+
+    def _gdesc(way):
+        """Describe a grade-violation way: prefer the layout shapeID (gives
+        adjacency); fall back to check_grade's label."""
+        sid = way.tags.get("shapeID") if getattr(way, "tags", None) else None
+        if sid is not None:
+            try:
+                return describe_shape(layout, int(sid), taxi_index)
+            except Exception:
+                pass
+        return glabel_id._label(way) if glabel_id else "?"
 
     UI.lvprint(0,
         f"  [verify] {icao}: PATCH ISSUES — overlap={counts['overlap']} "
         f"off-source={counts['source']} cross-shape={counts['cross']} "
         f"within-shape={counts['within']} edge-steps={counts['steps']}. "
-        f"These usually stem from the apt.dat / DSF source — details below.")
+        f"Likely apt.dat / DSF source problems — details below.")
 
     if overlaps:
-        for area, ra, rb, loc in overlaps[:5]:
-            UI.lvprint(0, f"  [verify]   OVERLAP {area:.1f} m²  "
-                          f"{ra} ∩ {rb}  @ {loc}")
+        for area, ia, ib, loc in overlaps[:5]:
+            UI.lvprint(0, f"  [verify]   OVERLAP {area:.1f} m² @ {loc}: "
+                          f"{describe_shape(layout, ia, taxi_index)} ∩ "
+                          f"{describe_shape(layout, ib, taxi_index)}")
         UI.lvprint(0, f"  [verify]     ↳ {_HINTS['overlap']}")
     if source:
-        for role, ref, area, frac, loc in source[:5]:
-            UI.lvprint(0, f"  [verify]   OFF-SOURCE {role}/{ref} "
-                          f"{area:.0f} m² ({frac*100:.0f}% on source)  @ {loc}")
+        for idx, area, frac, loc in source[:5]:
+            UI.lvprint(0, f"  [verify]   OFF-SOURCE {area:.0f} m² "
+                          f"({frac*100:.0f}% on source) @ {loc}: "
+                          f"{describe_shape(layout, idx, taxi_index)}")
         UI.lvprint(0, f"  [verify]     ↳ {_HINTS['source']}")
     if cross:
         for v in sorted(cross, key=lambda v: -v.de_m)[:5]:
-            loc = (f"{v.lat:.5f},{v.lon:.5f}"
-                   if v.lat is not None else "?,?")
-            UI.lvprint(0, f"  [verify]   CROSS-SHAPE {v.de_m:.2f} m  "
-                          f"{glabel(v.way_a)} ↔ {glabel(v.way_b)}  @ {loc}")
+            loc = f"{v.lat:.5f},{v.lon:.5f}" if v.lat is not None else "?,?"
+            UI.lvprint(0, f"  [verify]   CROSS-SHAPE {v.de_m:.2f} m @ {loc}: "
+                          f"{_gdesc(v.way_a)} ↔ {_gdesc(v.way_b)}")
         UI.lvprint(0, f"  [verify]     ↳ {_HINTS['cross']}")
     if within:
         for v in sorted(within, key=lambda v: -v.grade_pct)[:5]:
-            loc = (f"{v.lat:.5f},{v.lon:.5f}"
-                   if v.lat is not None else "?,?")
-            UI.lvprint(0, f"  [verify]   WITHIN-SHAPE {v.grade_pct:.1f}% "
-                          f"over {v.distance_m:.1f} m  {glabel(v.way_a)}  "
-                          f"@ {loc}")
+            loc = f"{v.lat:.5f},{v.lon:.5f}" if v.lat is not None else "?,?"
+            UI.lvprint(0, f"  [verify]   WITHIN-SHAPE {v.grade_pct:.1f}% over "
+                          f"{v.distance_m:.1f} m @ {loc}: {_gdesc(v.way_a)}")
         UI.lvprint(0, f"  [verify]     ↳ {_HINTS['within']}")
     if steps:
         UI.lvprint(0, f"  [verify]   EDGE-STEPS: {len(steps)} vertical "

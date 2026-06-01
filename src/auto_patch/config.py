@@ -75,9 +75,11 @@ __all__ = [
 # verification ALWAYS runs (it's how we surface "this airport has
 # errors") — this only controls how much else is printed.
 #   2 = debug  : every progress / diagnostic message.
-#   1 = normal : per-airport progress + verification summary (default).
-#   0 = critical: only verification problems + errors (quiet release).
-LOG_VERBOSITY = 1
+#   1 = normal : per-airport progress + verification summary.
+#   0 = critical: only verification PROBLEMS + errors — the default, so
+#                 a normal Ortho4XP run's output window stays quiet
+#                 except when an airport patch has issues.
+LOG_VERBOSITY = 0
 
 
 # ── Junction-refinement rule constants (user 2026-05-01) ─────────

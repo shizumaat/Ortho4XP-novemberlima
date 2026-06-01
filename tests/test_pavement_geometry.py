@@ -112,13 +112,15 @@ def test_no_self_overlap(icao):
     this test into one parametrization over the union of the two
     airport sets.
     """
-    from auto_patch.verification import check_self_overlap
+    from auto_patch.verification import check_self_overlap, describe_shape, build_taxi_index
     layout = _build_layout(icao)
     overlap_pairs = check_self_overlap(layout)
     overlap_area = sum(a for a, _, _, _ in overlap_pairs)
-    summary = ", ".join(
-        f"{a:.4f} m² ({ra}/{rb} @ {loc})"
-        for a, ra, rb, loc in overlap_pairs[:10])
+    ti = build_taxi_index(layout)
+    summary = "; ".join(
+        f"{a:.4f} m² @ {loc}: {describe_shape(layout, ia, ti)} ∩ "
+        f"{describe_shape(layout, ib, ti)}"
+        for a, ia, ib, loc in overlap_pairs[:5])
     assert not overlap_pairs, (
         f"{icao}: {len(overlap_pairs)} overlapping shape pair(s), "
         f"total {overlap_area:,.4f} m² (zero tolerance, no per-airport "
@@ -642,12 +644,14 @@ def test_pavement_rests_on_source(icao):
     Shares ``auto_patch.verification.check_source_adjacency`` with the
     Ortho4XP build-time verification.
     """
-    from auto_patch.verification import check_source_adjacency
+    from auto_patch.verification import check_source_adjacency, describe_shape, build_taxi_index
     layout = _build_layout(icao)
     offenders = check_source_adjacency(layout)
+    ti = build_taxi_index(layout)
     summary = "; ".join(
-        f"{role}/{ref} {area:.0f} m² ({frac*100:.0f}% on source @ {loc})"
-        for role, ref, area, frac, loc in offenders[:5])
+        f"{describe_shape(layout, idx, ti)} {area:.0f} m² "
+        f"({frac*100:.0f}% on source @ {loc})"
+        for idx, area, frac, loc in offenders[:5])
     assert not offenders, (
         f"{icao}: {len(offenders)} emitted pavement shape(s) rest on no "
         f"apt.dat/DSF source (zero tolerance).  Likely a spurious "
