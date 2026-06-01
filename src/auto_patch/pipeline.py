@@ -926,6 +926,12 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # aligns.  (User-approved tol=2.0 to match the reviewed union.)
     pav_union = _simplify_pavement_polygon(pav_union, tol=2.0)
 
+    # Record the SOURCE pavement union (apt.dat row-110 ⊕ DSF, before
+    # runway subtraction) for build-time verification: every emitted
+    # pavement shape must rest on this (∪ runway).  Captured here, before
+    # the runway / ground-zone differences below mutate ``pav_union``.
+    layout.source_pavement_union = pav_union
+
     # Source-attribution boundary for the junction-vertex test: junctions
     # are cut from THIS union (apt.dat row-110 + DSF pavement), so a
     # junction perimeter vertex following the union boundary is legitimately

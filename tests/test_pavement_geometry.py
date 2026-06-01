@@ -27,7 +27,6 @@ import sys
 from pathlib import Path
 
 import pytest
-from shapely.ops import unary_union
 
 from conftest import (
     airports_under_test, baseline_airports,
@@ -74,143 +73,15 @@ pytestmark = pytest.mark.skipif(
 # (shared with the Ortho4XP build-time verification); the test below
 # just calls it and asserts zero.
 
-# Coverage envelope: the union of every emitted pavement shape's
-# polygon must not exceed the source pavement's union by more than
-# this fraction.  Source = apt.dat row-110 polygons + runway
-# corners.  DSF polygons are excluded from the source because
-# they're an *input* to the layout — over-coverage we want to flag
-# is "emitted exceeds reasonable inputs".
-COVERAGE_OVERAGE_CAP_FRAC = {
-    "SPJC": 0.30,   # SPJC has tight apt.dat coverage; allow 30 %
-                     # for OSM-synthetic pavement around centerlines
-                     # not captured by row-110.
-    "CYXY": 1.50,   # CYXY has very sparse apt.dat row-110; DSF + OSM
-                     # synthetic pavement legitimately ≈ 2× apt.dat.
-                     # Cap is a sanity ceiling, not a precision target.
-    "SPLP": 0.30,
-}
+# Coverage is now checked per-shape and source-relative
+# (test_pavement_rests_on_source → verification.check_source_adjacency),
+# replacing the old whole-airport area-ratio with its per-airport caps.
 
 
 def _build_layout(icao: str):
     # Shared session cache (conftest) — built once per airport per run.
     from conftest import cached_airport_layout
     return cached_airport_layout(icao)
-
-
-def _source_pavement_union(icao: str):
-    """Return the legitimate-source pavement union in meter space
-    (anchored at the layout's first-vertex projection): apt.dat
-    row-110 + runway corners + the airport's own DSF pavement
-    (boundary-clipped, the same gate ``build_airport_pavement``
-    applies).
-
-    DSF pavement is a first-class source — apt.dat and DSF "contain
-    different things, often overlap, but neither is authoritative"
-    (user 2026-05-21), so the builder unions both.  Counting only
-    apt.dat here understates the source for DSF-heavy airports (HECA,
-    CYXY) and inflates the apparent overage.  The DSF is clipped to the
-    row-130 boundary so the test still catches a boundary-gate
-    regression (a neighbouring airport's pavement leaking in would NOT
-    be in this boundary-clipped source → overage would spike).
-    """
-    import math
-    from shapely.ops import transform as shp_transform
-    from auto_patch import apt_dat_reader as APR
-
-    apt_dats = APR.find_all_airport_apt_dats(_xplane_root(), icao)
-    apt = None
-    apt_path = None
-    for ad in apt_dats:
-        apt = APR.load_airport(ad, icao)
-        if apt is not None and apt.runways:
-            apt_path = ad
-            break
-    if apt is None or not apt.runways:
-        pytest.skip(f"{icao}: no apt.dat with runways found")
-    # Anchor at the first runway end (matches build_airport_pavement).
-    r0 = apt.runways[0]
-    lat0, lon0 = r0.lat_a, r0.lon_a
-    R = 6_378_137.0
-    cos0 = math.cos(math.radians(lat0))
-
-    def to_m(lon, lat, z=None):
-        return (math.radians(lon - lon0) * R * cos0,
-                math.radians(lat - lat0) * R)
-
-    polys = []
-    for pav in apt.pavements:
-        if pav.polygon is None or pav.polygon.is_empty:
-            continue
-        pm = shp_transform(to_m, pav.polygon)
-        if pm.is_empty:
-            continue
-        if pm.geom_type == "Polygon":
-            polys.append(pm)
-        else:
-            polys.extend(g for g in getattr(pm, "geoms", [])
-                          if g.geom_type == "Polygon")
-    # Add runway corners.
-    from auto_patch.pavement.runways import _runway_rect_m
-    for r in apt.runways:
-        rp = _runway_rect_m(r, to_m)
-        if rp is not None and not rp.is_empty:
-            polys.append(rp)
-
-    # Add the airport's own DSF pavement, boundary-clipped — mirrors
-    # the DSF ingestion in ``build_airport_pavement`` (same pack, same
-    # row-130 boundary gate buffered 50 m, holes honoured).
-    DSF_AIRPORT_BOUNDARY_BUFFER_M = 50.0
-    gate_m = None
-    if apt.boundary is not None and not apt.boundary.is_empty:
-        try:
-            gate_m = shp_transform(to_m, apt.boundary).buffer(
-                DSF_AIRPORT_BOUNDARY_BUFFER_M)
-            if gate_m.is_empty:
-                gate_m = None
-        except Exception:
-            gate_m = None
-    if apt_path is not None:
-        try:
-            from auto_patch import dsf_reader as DSFR
-            from shapely.geometry import Polygon as _Poly
-            dsf = DSFR.find_associated_dsf(apt_path, lat0, lon0)
-            if dsf is not None:
-                for outer, holes in DSFR.read_dsf_pavements(dsf):
-                    if len(outer) < 3:
-                        continue
-                    try:
-                        p = _Poly(
-                            [(x, y) for (x, y) in outer],
-                            [[(x, y) for (x, y) in h]
-                             for h in holes if len(h) >= 3])
-                        if not p.is_valid:
-                            p = p.buffer(0)
-                        if p.is_empty or p.geom_type != "Polygon":
-                            continue
-                        pm = shp_transform(to_m, p)
-                        if pm.is_empty or pm.geom_type != "Polygon":
-                            continue
-                        if gate_m is not None:
-                            c = pm.intersection(gate_m)
-                            if (c.geom_type == "MultiPolygon"
-                                    and not c.is_empty):
-                                c = max(c.geoms, key=lambda g: g.area)
-                            if (c.is_empty or c.geom_type != "Polygon"
-                                    or c.area < 5.0):
-                                continue
-                            pm = c
-                        polys.append(pm)
-                    except Exception:
-                        continue
-        except Exception:
-            pass
-
-    if not polys:
-        return None
-    try:
-        return unary_union(polys)
-    except Exception:
-        return None
 
 
 def _no_self_overlap_airports():
@@ -244,10 +115,10 @@ def test_no_self_overlap(icao):
     from auto_patch.verification import check_self_overlap
     layout = _build_layout(icao)
     overlap_pairs = check_self_overlap(layout)
-    overlap_area = sum(a for a, _, _ in overlap_pairs)
+    overlap_area = sum(a for a, _, _, _ in overlap_pairs)
     summary = ", ".join(
-        f"{a:.4f} m² ({ra}/{rb})"
-        for a, ra, rb in overlap_pairs[:10])
+        f"{a:.4f} m² ({ra}/{rb} @ {loc})"
+        for a, ra, rb, loc in overlap_pairs[:10])
     assert not overlap_pairs, (
         f"{icao}: {len(overlap_pairs)} overlapping shape pair(s), "
         f"total {overlap_area:,.4f} m² (zero tolerance, no per-airport "
@@ -758,44 +629,30 @@ def test_rect_short_edges_connect(icao):
 
 
 @pytest.mark.parametrize("icao", _test_airports())
-def test_coverage_within_source_envelope(icao):
-    """Emitted pavement union must not exceed apt.dat + runway
-    coverage by more than the airport's allowed fraction.  Catches
-    spurious DSF overlays / non-pavement geometry inflating the
-    output beyond its sources.
+def test_pavement_rests_on_source(icao):
+    """Every emitted PAVEMENT shape must rest on real source pavement
+    (apt.dat row-110 ∪ DSF ∪ runway) — per-shape and source-relative,
+    no per-airport ratio.  Replaces the old whole-airport coverage-ratio
+    test: that needed a hand-tuned per-airport cap and only fired if a
+    baseline's source data changed.  This catches the same failure
+    (pavement emitted where no source exists — a spurious synthesis or a
+    non-pavement polygon tagged as pavement) on ANY airport, and names
+    the exact offending shape + lat/lon.
+
+    Shares ``auto_patch.verification.check_source_adjacency`` with the
+    Ortho4XP build-time verification.
     """
+    from auto_patch.verification import check_source_adjacency
     layout = _build_layout(icao)
-    # Boundary shapes (ROLE_BOUNDARY: airport-perimeter ribbon and
-    # boundary→DEM bridge polygons) and wingtip/RESA clearance cuts
-    # (taxiway_clearance / runway_clearance) are elevation/terrain
-    # control surfaces, not pavement.  Excluding them — this test
-    # checks that the PAVEMENT footprint stays close to its sources,
-    # which these terrain-grading shapes don't contribute to.
-    _NON_PAVEMENT_ROLES = {
-        "boundary", "taxiway_clearance", "runway_clearance"}
-    emitted_polys = [s.polygon for s in layout.shapes
-                     if s.polygon is not None
-                     and not s.polygon.is_empty
-                     and getattr(s, "role", None) not in _NON_PAVEMENT_ROLES]
-    if not emitted_polys:
-        return
-    try:
-        emitted_union = unary_union(emitted_polys)
-    except Exception:
-        pytest.fail(f"{icao}: emitted polygons fail unary_union")
-    source = _source_pavement_union(icao)
-    if source is None or source.is_empty:
-        return
-    src_area = source.area
-    em_area = emitted_union.area
-    cap = COVERAGE_OVERAGE_CAP_FRAC.get(icao, 0.5)
-    overage = (em_area - src_area) / src_area if src_area > 0 else 0
-    assert overage <= cap, (
-        f"{icao}: emitted pavement {em_area:,.0f} m² exceeds source "
-        f"(apt.dat + runways) {src_area:,.0f} m² by "
-        f"{overage*100:.1f}% (cap {cap*100:.0f}%).  Likely cause: "
-        f"DSF overlay polygons or non-pavement DSF defs admitted "
-        f"into the layout.")
+    offenders = check_source_adjacency(layout)
+    summary = "; ".join(
+        f"{role}/{ref} {area:.0f} m² ({frac*100:.0f}% on source @ {loc})"
+        for role, ref, area, frac, loc in offenders[:5])
+    assert not offenders, (
+        f"{icao}: {len(offenders)} emitted pavement shape(s) rest on no "
+        f"apt.dat/DSF source (zero tolerance).  Likely a spurious "
+        f"synthesis or a non-pavement source polygon tagged as pavement.  "
+        f"First {min(5, len(offenders))}: {summary}.")
 
 
 @pytest.mark.parametrize("icao", _test_airports())

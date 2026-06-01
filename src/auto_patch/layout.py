@@ -265,6 +265,11 @@ class PavementLayout:
     # ancillary:
     airport_boundary: Polygon | None = None
     runway_union: Polygon | None = None
+    # Source pavement union (apt.dat row-110 ⊕ DSF, before runway
+    # subtraction), in this layout's meter frame.  Set by the pipeline;
+    # used by build-time verification's per-shape source-adjacency check
+    # (every emitted pavement shape must rest on real source pavement).
+    source_pavement_union: Polygon | None = None
     # Path to the apt.dat file the layout was built from.  Used by
     # the bridge-detection step to walk the same scenery pack's
     # DSF and check for taxi-bridge OBJ placements.

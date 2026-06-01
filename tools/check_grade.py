@@ -277,6 +277,10 @@ class Violation:
     pt_b: Tuple[float, float]
     elev_a: float
     elev_b: float
+    # Geographic location of the violation (lat, lon), filled in by
+    # run_checks so callers can point a user at the spot.  None until set.
+    lat: Optional[float] = None
+    lon: Optional[float] = None
 
 
 @dataclass
@@ -289,6 +293,8 @@ class EdgeStep:
     proj_pt: Tuple[float, float]
     elev_v: float
     elev_proj: float
+    lat: Optional[float] = None
+    lon: Optional[float] = None
 
 
 ELEV_ROUNDING_NOISE_M = 0.15  # patch elevations are stored at 1
@@ -1116,6 +1122,21 @@ def run_checks(
     _ps(f"MID-EDGE step (sample along each edge, compare to "
         f"nearest other-shape edge)",
         mid_steps, top_n, edge_step_m)
+
+    # Attach a geographic location (lat, lon) to each finding so callers
+    # can point a user at the spot in their apt.dat / DSF.  nodes maps
+    # nid -> (lat, lon); use the centroid of the offending way's ring.
+    def _way_latlon(way):
+        lls = [nodes[n] for n in way.nids if n in nodes]
+        if not lls:
+            return (None, None)
+        return (sum(p[0] for p in lls) / len(lls),
+                sum(p[1] for p in lls) / len(lls))
+
+    for v in within + cross:
+        v.lat, v.lon = _way_latlon(v.way_a)
+    for s in steps + mid_steps:
+        s.lat, s.lon = _way_latlon(s.way_v)
 
     return within, cross, steps + mid_steps
 
