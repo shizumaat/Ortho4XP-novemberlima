@@ -336,6 +336,41 @@ def _emit_groundside_pavement_dem(
             polys = clipped
     if not polys:
         return 0
+    # Two captured groundside polygons can themselves overlap (the cut
+    # above only subtracts terminals / airside, not other groundside) —
+    # leaving a self-overlap (HECA #2222 ∩ #2223, 0.1 m²).  Clip each
+    # against the union of already-accepted polygons (largest first, so
+    # the smaller piece yields) so groundside never overlaps groundside.
+    polys.sort(key=lambda g: -g.area)
+    _emitted_union = None
+    deconflicted: List[Polygon] = []
+    for p in polys:
+        if _emitted_union is not None:
+            try:
+                q = p.difference(_emitted_union)
+            except _GEOM_EXC:
+                q = p
+            if q is None or q.is_empty:
+                continue
+            if q.geom_type == "Polygon":
+                p = q if q.area >= 5.0 else None
+            elif q.geom_type == "MultiPolygon":
+                pieces = [g for g in q.geoms
+                          if g.geom_type == "Polygon" and g.area >= 5.0]
+                p = max(pieces, key=lambda g: g.area) if pieces else None
+            else:
+                p = None
+            if p is None:
+                continue
+        deconflicted.append(p)
+        try:
+            _emitted_union = (p if _emitted_union is None
+                              else unary_union([_emitted_union, p]))
+        except _GEOM_EXC:
+            _emitted_union = p
+    polys = deconflicted
+    if not polys:
+        return 0
     _dem_at = _dem_sampler(layout, dem, tile_lat, tile_lon)
     n_emitted = 0
     for p in polys:
