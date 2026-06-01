@@ -402,6 +402,152 @@ def check_vertex_on_flat_edge(layout):
     return out
 
 
+def check_sloping_rect_axis(layout):
+    """Invariant: a canonical sloping rect may slope ONLY along its
+    centerline — each of its two AXIS-END (flat) edges must be level
+    (both endpoints at the same elevation).  A non-flat axis-end means
+    the rect tilts ACROSS the taxiway.  node_altitudes shapes are exempt
+    (slice-conforming).  Returns ``[(idx, detail, "lat,lon"), …]``."""
+    from .layout import corner_alts_from_high_low
+    sloping_roles = {"primary_parallel", "secondary_parallel", "stub",
+                     "cross_connector", "service_road"}
+    TOL = 0.3
+    out = []
+    for i, s in enumerate(layout.shapes):
+        if s.role not in sloping_roles:
+            continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        if s.node_altitudes:
+            continue
+        if s.altitude_high is None or s.altitude_low is None:
+            continue
+        coords = list(s.polygon.exterior.coords)
+        if coords and coords[0] == coords[-1]:
+            coords = coords[:-1]
+        if len(coords) != 4:
+            continue
+        alts = corner_alts_from_high_low(s.altitude_high, s.altitude_low)
+        cmap = {(round(c[0], 3), round(c[1], 3)): alts[k]
+                for k, c in enumerate(coords)}
+        for a, b in _rect_flat_edges(s):
+            za = cmap.get((round(a[0], 3), round(a[1], 3)))
+            zb = cmap.get((round(b[0], 3), round(b[1], 3)))
+            if za is None or zb is None:
+                continue
+            if abs(za - zb) > TOL:
+                c = s.polygon.representative_point()
+                out.append((i, f"axis-end edge not flat (Δ{abs(za - zb):.2f} "
+                               f"m — rect tilts across the taxiway)",
+                            _ll(layout, c.x, c.y)))
+                break
+    return out
+
+
+def check_rect_short_edges(layout):
+    """Invariant: each of a taxi rect's two SHORT edges must connect to
+    something (junction / runway / terminal / other rect) — at least one
+    corner shared with another shape.  A fully-disconnected short edge =
+    a rect ending in mid-air.  Faithful exemptions: tile-cut boundary
+    edges (bridged by the neighbour tile), and discovered ("TX") lanes
+    that genuinely dead-end (isolated, or at the pavement tip).  Returns
+    ``[(rect_idx, detail, "lat,lon"), …]``."""
+    import math
+    from shapely.geometry import Point as _P
+    CORNER_SHARE_TOL_M = 0.5
+    TILE_EDGE_TOL_M = 8.0
+    DEAD_END_ISOLATION_M = 25.0
+    TIP_BOUNDARY_TOL_M = 1.0
+    rect_roles = {"primary_parallel", "secondary_parallel",
+                  "stub", "cross_connector"}
+
+    def _on_tile_edge(x, y):
+        lat, lon = layout.m_to_ll(x, y)
+        dlat_m = abs(lat - round(lat)) * 111195.0
+        dlon_m = (abs(lon - round(lon)) * 111195.0
+                  * math.cos(math.radians(lat)))
+        return dlat_m < TILE_EDGE_TOL_M or dlon_m < TILE_EDGE_TOL_M
+
+    all_vertices = []
+    for si, s in enumerate(layout.shapes):
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        try:
+            coords = list(s.polygon.exterior.coords)
+        except Exception:
+            continue
+        if coords and coords[0] == coords[-1]:
+            coords = coords[:-1]
+        for x, y in coords:
+            all_vertices.append((x, y, si))
+    tol2 = CORNER_SHARE_TOL_M * CORNER_SHARE_TOL_M
+    pav_b = getattr(layout, "apt_pavement_boundary", None)
+    out = []
+    for ri, r in enumerate(layout.shapes):
+        if r.role not in rect_roles or r.polygon is None or r.polygon.is_empty:
+            continue
+        try:
+            rc = list(r.polygon.exterior.coords)
+        except Exception:
+            continue
+        if rc and rc[0] == rc[-1]:
+            rc = rc[:-1]
+        if len(rc) != 4:
+            continue
+        for end_label, (i_a, i_b) in (("end_A", (0, 3)), ("end_B", (1, 2))):
+            ax, ay = rc[i_a]
+            bx, by = rc[i_b]
+            shared_a = shared_b = False
+            for vx, vy, vsi in all_vertices:
+                if vsi == ri:
+                    continue
+                if not shared_a and (vx - ax) ** 2 + (vy - ay) ** 2 <= tol2:
+                    shared_a = True
+                if not shared_b and (vx - bx) ** 2 + (vy - by) ** 2 <= tol2:
+                    shared_b = True
+                if shared_a and shared_b:
+                    break
+            if shared_a or shared_b:
+                continue
+            if _on_tile_edge(ax, ay) and _on_tile_edge(bx, by):
+                continue
+            if (r.ref or "").startswith("TX"):
+                o_a, o_b = ((1, 2) if end_label == "end_A" else (0, 3))
+                oax, oay = rc[o_a]
+                obx, oby = rc[o_b]
+                other_shared = False
+                near_iso2 = DEAD_END_ISOLATION_M ** 2
+                min_a2 = min_b2 = float("inf")
+                for vx, vy, vsi in all_vertices:
+                    if vsi == ri:
+                        continue
+                    if not other_shared and (
+                            (vx - oax) ** 2 + (vy - oay) ** 2 <= tol2
+                            or (vx - obx) ** 2 + (vy - oby) ** 2 <= tol2):
+                        other_shared = True
+                    da2 = (vx - ax) ** 2 + (vy - ay) ** 2
+                    db2 = (vx - bx) ** 2 + (vy - by) ** 2
+                    if da2 < min_a2:
+                        min_a2 = da2
+                    if db2 < min_b2:
+                        min_b2 = db2
+                isolated = (min_a2 > near_iso2 and min_b2 > near_iso2)
+                on_tip = False
+                if pav_b is not None:
+                    try:
+                        on_tip = (pav_b.distance(_P(ax, ay)) <= TIP_BOUNDARY_TOL_M
+                                  and pav_b.distance(_P(bx, by))
+                                  <= TIP_BOUNDARY_TOL_M)
+                    except Exception:
+                        on_tip = False
+                if other_shared and (isolated or on_tip):
+                    continue
+            mx, my = (ax + bx) / 2.0, (ay + by) / 2.0
+            out.append((ri, f"{end_label} short edge connects to nothing "
+                            f"(rect ends in mid-air)", _ll(layout, mx, my)))
+    return out
+
+
 # ── Grade invariants (reuse the check_grade engine) ─────────────────
 def taxi_axes_ll(layout):
     """Per-axis taxi grading mirror — the SAME construction the grade
@@ -452,7 +598,7 @@ def verify_and_log(layout, icao: str) -> dict:
         source = check_source_adjacency(layout)
     except Exception:                              # pragma: no cover
         pass
-    flat = edge_v = flat_v = []
+    flat = edge_v = flat_v = axis_v = []
     try:
         flat = check_terminal_flat(layout)
     except Exception:                              # pragma: no cover
@@ -466,6 +612,15 @@ def verify_and_log(layout, icao: str) -> dict:
     except Exception:                              # pragma: no cover
         pass
     try:
+        axis_v = check_sloping_rect_axis(layout)
+    except Exception:                              # pragma: no cover
+        pass
+    short_e = []
+    try:
+        short_e = check_rect_short_edges(layout)
+    except Exception:                              # pragma: no cover
+        pass
+    try:
         within, cross, steps = run_grade_checks(layout)
     except Exception as exc:                       # pragma: no cover
         UI.lvprint(0, f"  [verify] {icao}: grade verification "
@@ -474,8 +629,10 @@ def verify_and_log(layout, icao: str) -> dict:
 
     counts = {"overlap": len(overlaps), "source": len(source),
               "terminal_flat": len(flat), "vertex_on_edge": len(edge_v),
-              "vertex_on_flat_edge": len(flat_v), "cross": len(cross),
-              "within": len(within), "steps": len(steps)}
+              "vertex_on_flat_edge": len(flat_v),
+              "axis_tilt": len(axis_v), "short_edge": len(short_e),
+              "cross": len(cross), "within": len(within),
+              "steps": len(steps)}
     if not sum(counts.values()):
         UI.vprint(1, f"  [verify] {icao}: OK — no overlap / source / "
                      f"grade issues.")
@@ -498,10 +655,9 @@ def verify_and_log(layout, icao: str) -> dict:
                 pass
         return glabel_id._label(way) if glabel_id else "?"
 
+    tally = " ".join(f"{k}={v}" for k, v in counts.items() if v)
     UI.lvprint(0,
-        f"  [verify] {icao}: PATCH ISSUES — overlap={counts['overlap']} "
-        f"off-source={counts['source']} cross-shape={counts['cross']} "
-        f"within-shape={counts['within']} edge-steps={counts['steps']}. "
+        f"  [verify] {icao}: PATCH ISSUES — {tally}. "
         f"Likely apt.dat / DSF source problems — details below.")
 
     if overlaps:
@@ -537,6 +693,20 @@ def verify_and_log(layout, icao: str) -> dict:
         UI.lvprint(0, f"  [verify]     ↳ a junction/apron vertex sits on a "
                       f"taxi-rect FLAT (cross) edge interior (only the 2 corners "
                       f"may be shared). Fix: usually a builder issue.")
+    if axis_v:
+        for idx, detail, loc in axis_v[:5]:
+            UI.lvprint(0, f"  [verify]   AXIS-TILT @ {loc}: "
+                          f"{describe_shape(layout, idx, taxi_index)} — {detail}")
+        UI.lvprint(0, f"  [verify]     ↳ a taxi rect tilts across its centerline "
+                      f"instead of sloping only along it. Fix: usually a builder "
+                      f"issue, not source data.")
+    if short_e:
+        for idx, detail, loc in short_e[:5]:
+            UI.lvprint(0, f"  [verify]   SHORT-EDGE @ {loc}: "
+                          f"{describe_shape(layout, idx, taxi_index)} — {detail}")
+        UI.lvprint(0, f"  [verify]     ↳ a taxiway rect ends without meeting a "
+                      f"junction/runway/terminal. Fix: often a gap in the apt.dat "
+                      f"taxi network or a missing connecting pavement.")
     if cross:
         for v in sorted(cross, key=lambda v: -v.de_m)[:5]:
             loc = f"{v.lat:.5f},{v.lon:.5f}" if v.lat is not None else "?,?"

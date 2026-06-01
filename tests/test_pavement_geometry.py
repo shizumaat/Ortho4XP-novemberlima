@@ -156,48 +156,6 @@ def test_no_vertex_on_sloping_rect_edge(icao):
         f"interiors.  First {min(5, len(violations))}: {summary}.")
 
 
-def _rect_flat_edges_from_shape(shape):
-    """The two FLAT edges of a 4-corner rect — perpendicular to
-    ``source_axis`` (where altitude is constant along the edge).
-    Mirror of ``_rect_sloping_edges_from_shape`` (in
-    test_junction_rules.py) but selects the bottom-2-dot-product
-    indices.  Returns [] if shape isn't a 4-corner rect.
-    """
-    import math
-    poly = shape.polygon
-    coords = list(poly.exterior.coords)
-    if not coords:
-        return []
-    if coords[0] == coords[-1]:
-        coords = coords[:-1]
-    if len(coords) != 4:
-        return []
-    edges = [(coords[i], coords[(i + 1) % 4]) for i in range(4)]
-    sa = getattr(shape, "source_axis", None)
-    if sa is not None and not sa.is_empty:
-        ax_pts = list(sa.coords)
-        if len(ax_pts) >= 2:
-            axdx = ax_pts[-1][0] - ax_pts[0][0]
-            axdy = ax_pts[-1][1] - ax_pts[0][1]
-            axlen = math.hypot(axdx, axdy)
-            if axlen >= 1e-6:
-                aux, auy = axdx / axlen, axdy / axlen
-                dots = []
-                for a, b in edges:
-                    ex, ey = b[0] - a[0], b[1] - a[1]
-                    elen = math.hypot(ex, ey)
-                    if elen < 1e-6:
-                        dots.append(0.0)
-                        continue
-                    dots.append(abs(ex * aux + ey * auy) / elen)
-                flat_idx = sorted(range(4), key=lambda i: dots[i])[:2]
-                return [edges[i] for i in flat_idx]
-    lengths = [math.hypot(b[0] - a[0], b[1] - a[1])
-               for a, b in edges]
-    short_idx = sorted(range(4), key=lambda i: lengths[i])[:2]
-    return [edges[i] for i in short_idx]
-
-
 @pytest.mark.parametrize("icao", _test_airports())
 def test_sloping_rect_slopes_only_along_axis(icao):
     """A canonical sloping taxi rect may slope ONLY along its centerline
@@ -215,47 +173,18 @@ def test_sloping_rect_slopes_only_along_axis(icao):
     the ``[H, L, L, H]`` convention; the guard catches a future path that sets
     altitude_high/low on a non-canonically-ordered ring.  Tolerance 0.3 m.
     """
-    from auto_patch.layout import corner_alts_from_high_low
+    from auto_patch.verification import (
+        check_sloping_rect_axis, describe_shape, build_taxi_index)
     layout = _build_layout(icao)
-    sloping_roles = {
-        "primary_parallel", "secondary_parallel", "stub",
-        "cross_connector", "service_road",
-    }
-    TOL = 0.3
-    violations = []
-    for s in layout.shapes:
-        if s.role not in sloping_roles:
-            continue
-        if s.polygon is None or s.polygon.is_empty:
-            continue
-        # node_altitudes shapes are slice-conforming and exempt.
-        if s.node_altitudes:
-            continue
-        if s.altitude_high is None or s.altitude_low is None:
-            continue
-        coords = list(s.polygon.exterior.coords)
-        if coords and coords[0] == coords[-1]:
-            coords = coords[:-1]
-        if len(coords) != 4:
-            continue
-        alts = corner_alts_from_high_low(s.altitude_high, s.altitude_low)
-        cmap = {(round(c[0], 3), round(c[1], 3)): alts[i]
-                for i, c in enumerate(coords)}
-        for a, b in _rect_flat_edges_from_shape(s):
-            za = cmap.get((round(a[0], 3), round(a[1], 3)))
-            zb = cmap.get((round(b[0], 3), round(b[1], 3)))
-            if za is None or zb is None:
-                continue
-            if abs(za - zb) > TOL:
-                c = s.polygon.centroid
-                violations.append((s.ref, c.x, c.y, abs(za - zb)))
-                break
+    violations = check_sloping_rect_axis(layout)
+    ti = build_taxi_index(layout)
+    summary = "; ".join(
+        f"{describe_shape(layout, idx, ti)} — {detail} @ {loc}"
+        for idx, detail, loc in violations[:5])
     assert not violations, (
         f"{icao}: {len(violations)} taxi rect(s) slope ACROSS their "
-        f"centerline (axis-end edge not flat — perpendicular tilt). "
-        f"Worst: " + ", ".join(
-            f"{r}@({x:.0f},{y:.0f}) Δ{d:.2f}m"
-            for r, x, y, d in sorted(violations, key=lambda v: -v[3])[:5]))
+        f"centerline (axis-end edge not flat — perpendicular tilt).  "
+        f"Worst: {summary}")
 
 
 @pytest.mark.parametrize("icao", _test_airports())
@@ -310,160 +239,19 @@ def test_rect_short_edges_connect(icao):
     a non-rect-self vertex.  An entirely-disconnected short edge
     is the failure case.
     """
-    import math
-    CORNER_SHARE_TOL_M = 0.5
+    from auto_patch.verification import (
+        check_rect_short_edges, describe_shape, build_taxi_index)
     layout = _build_layout(icao)
-    rect_roles = {"primary_parallel", "secondary_parallel",
-                  "stub", "cross_connector"}
-
-    # A short edge that lies on a tile-cut boundary (the integer
-    # lat/lon line the tile slice runs along, ~``half_width`` m away)
-    # legitimately connects to nothing on this side — the neighbour
-    # tile's geometry + X-Plane's terrain mesh bridge it.  The tile-cut
-    # clip-back (``tile_cut._clip_sloping_rect_piece``) ends a clipped
-    # taxiway rect / its node_altitudes filler on exactly such an edge,
-    # so exclude edges whose both corners sit within ``TILE_EDGE_TOL_M``
-    # of an integer lat or lon line.
-    TILE_EDGE_TOL_M = 8.0
-    lat0, lon0 = layout.anchor
-
-    def _on_tile_edge(x, y):
-        lat, lon = layout.m_to_ll(x, y)
-        dlat_m = abs(lat - round(lat)) * 111195.0
-        dlon_m = (abs(lon - round(lon)) * 111195.0
-                  * math.cos(math.radians(lat)))
-        return dlat_m < TILE_EDGE_TOL_M or dlon_m < TILE_EDGE_TOL_M
-    # Collect every vertex from every shape with its source shape
-    # id, then for each rect check both short-edge corners against
-    # all OTHER shapes' vertices.
-    all_vertices: list = []  # list of (x, y, shape_index)
-    for si, s in enumerate(layout.shapes):
-        if s.polygon is None or s.polygon.is_empty:
-            continue
-        try:
-            coords = list(s.polygon.exterior.coords)
-        except Exception:
-            continue
-        if coords and coords[0] == coords[-1]:
-            coords = coords[:-1]
-        for x, y in coords:
-            all_vertices.append((x, y, si))
-    failures = []
-    tol2 = CORNER_SHARE_TOL_M * CORNER_SHARE_TOL_M
-    for ri, r in enumerate(layout.shapes):
-        if r.role not in rect_roles:
-            continue
-        if r.polygon is None or r.polygon.is_empty:
-            continue
-        try:
-            rc = list(r.polygon.exterior.coords)
-        except Exception:
-            continue
-        if rc and rc[0] == rc[-1]:
-            rc = rc[:-1]
-        if len(rc) != 4:
-            continue
-        # Short edges per ``_rect_from_axis_extended`` convention:
-        #   short edge A = corners 0 + 3 (one end)
-        #   short edge B = corners 1 + 2 (other end)
-        for end_label, (i_a, i_b) in (("end_A", (0, 3)),
-                                        ("end_B", (1, 2))):
-            ax, ay = rc[i_a]
-            bx, by = rc[i_b]
-            shared_a = False
-            shared_b = False
-            for vx, vy, vsi in all_vertices:
-                if vsi == ri:
-                    continue
-                if (not shared_a
-                        and (vx - ax) ** 2 + (vy - ay) ** 2 <= tol2):
-                    shared_a = True
-                if (not shared_b
-                        and (vx - bx) ** 2 + (vy - by) ** 2 <= tol2):
-                    shared_b = True
-                if shared_a and shared_b:
-                    break
-            if not shared_a and not shared_b:
-                # Tile-cut boundary edge — connects via the neighbour
-                # tile, not within this layout.
-                if _on_tile_edge(ax, ay) and _on_tile_edge(bx, by):
-                    continue
-                # Discovered (medial-axis) lanes may legitimately DEAD-END at
-                # the pavement boundary (user 2026-05-28, SPJC TX20): unlike a
-                # referenced taxiway, a "TX" lane carved from unreferenced
-                # pavement can terminate at a real pavement tip with nothing to
-                # connect to.  Exempt such an end ONLY when (a) the rect is a
-                # discovered lane, (b) it connects at its OTHER short edge (so
-                # it's a dead-end lane, not a fully-floating sliver), and (c)
-                # the dangling end is GENUINELY ISOLATED — both corners far
-                # (> ``DEAD_END_ISOLATION_M``) from any other shape's vertex.
-                # A near-miss gap (something close, e.g. SPJC TX15 ~10 m from a
-                # junction) is a MISSING CONNECTION, not a dead-end, so it stays
-                # flagged.  Two signatures of a legitimate dead-end:
-                #   * GENUINELY ISOLATED — both corners far (> DEAD_END_
-                #     ISOLATION_M) from any other vertex (SPJC TX20); OR
-                #   * PAVEMENT TIP — the dangling short edge lies ON the apt+DSF
-                #     pavement boundary, i.e. the lane reaches the physical edge
-                #     of the pavement and stops (HECA TX52).  The near-miss case
-                #     (TX15) terminates in the pavement INTERIOR short of a
-                #     junction, so it is not on the boundary and stays flagged.
-                DEAD_END_ISOLATION_M = 25.0
-                TIP_BOUNDARY_TOL_M = 1.0
-                if (r.ref or "").startswith("TX"):
-                    # other short edge of this rect
-                    o_a, o_b = ((1, 2) if end_label == "end_A" else (0, 3))
-                    oax, oay = rc[o_a]
-                    obx, oby = rc[o_b]
-                    other_shared = False
-                    near_iso2 = DEAD_END_ISOLATION_M ** 2
-                    min_a2 = min_b2 = float("inf")
-                    for vx, vy, vsi in all_vertices:
-                        if vsi == ri:
-                            continue
-                        if not other_shared and (
-                                (vx - oax) ** 2 + (vy - oay) ** 2 <= tol2
-                                or (vx - obx) ** 2 + (vy - oby) ** 2 <= tol2):
-                            other_shared = True
-                        da2 = (vx - ax) ** 2 + (vy - ay) ** 2
-                        db2 = (vx - bx) ** 2 + (vy - by) ** 2
-                        if da2 < min_a2:
-                            min_a2 = da2
-                        if db2 < min_b2:
-                            min_b2 = db2
-                    isolated = (min_a2 > near_iso2 and min_b2 > near_iso2)
-                    on_tip = False
-                    pav_b = getattr(layout, "apt_pavement_boundary", None)
-                    if pav_b is not None:
-                        from shapely.geometry import Point as _P
-                        try:
-                            on_tip = (
-                                pav_b.distance(_P(ax, ay)) <= TIP_BOUNDARY_TOL_M
-                                and pav_b.distance(_P(bx, by))
-                                <= TIP_BOUNDARY_TOL_M)
-                        except Exception:
-                            on_tip = False
-                    if other_shared and (isolated or on_tip):
-                        continue        # genuine discovered dead-end
-                failures.append({
-                    "ref": r.ref or "?",
-                    "role": r.role,
-                    "end": end_label,
-                    "corner_a": (ax, ay),
-                    "corner_b": (bx, by),
-                })
-    if failures:
-        summary = "; ".join(
-            f"{f['role']}({f['ref']}) {f['end']}: "
-            f"({f['corner_a'][0]:.1f},{f['corner_a'][1]:.1f}) and "
-            f"({f['corner_b'][0]:.1f},{f['corner_b'][1]:.1f}) "
-            f"both unshared"
-            for f in failures[:5])
-        msg = (f"{icao}: {len(failures)} rect short edge(s) with "
-               f"both corners disconnected from any other shape.  "
-               f"A taxi rect's short edge always meets something "
-               f"(junction / runway / terminal / other rect).  "
-               f"First {min(5, len(failures))}: {summary}.")
-        assert False, msg
+    failures = check_rect_short_edges(layout)
+    ti = build_taxi_index(layout)
+    summary = "; ".join(
+        f"{describe_shape(layout, idx, ti)} — {detail} @ {loc}"
+        for idx, detail, loc in failures[:5])
+    assert not failures, (
+        f"{icao}: {len(failures)} rect short edge(s) disconnected from "
+        f"any other shape.  A taxi rect's short edge always meets "
+        f"something (junction / runway / terminal / other rect).  First "
+        f"{min(5, len(failures))}: {summary}.")
 
 
 @pytest.mark.parametrize("icao", _test_airports())
