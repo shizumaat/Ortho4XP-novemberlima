@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import baseline_airports
+from conftest import baseline_airports, airports_under_test
 
 _HERE = Path(__file__).resolve().parent
 _TOOLS = _HERE.parent / "tools"
@@ -44,39 +44,14 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-# Within-shape grade violations are a HARD failure (user 2026-05-18):
-# a vertex pair grading > 1.5 % within the same polygon means the
-# elevation solver produced an infeasible surface.  The fix is in
-# the solver / source geometry, not the test threshold.  Cap = 0
-# on every airport — no per-airport baselines, no soft cap.
-WITHIN_SHAPE_CAP = {"SPJC": 0, "SPLP": 0, "CYXY": 0}
-# Mid-edge step cap: every triangle plane should match its
-# neighbours' surface along shared boundaries.  Samples along each
-# edge and compares to the nearest other-shape edge's interpolation.
-#
-# SPLP exception (user 2026-05-08): runway interior follows DEM
-# within FAA envelope (5 m max deviation) — the design intent per
-# runway_segments.py:589-720.  At SPLP this drops the runway
-# centerline to z~72 in the middle, while CIFP-anchored threshold
-# polygons stay at z=77 and the SW threshold polygon (shape[38])
-# is unusually wide (~168 m × 410 m, ~4× a normal segment),
-# spilling well beyond the runway's nominal footprint.  Adjacent
-# stub / junction pavement is at z=70-71 (anchored to lower
-# surrounding pavement, which the elevation pipeline reads from
-# DEM).  Result: shape[38] at z=77.1 sits 7 m above adjacent
-# junction-10053 at z=70 with no transition pavement between.
-# Geometrically it's a built-up runway threshold pad next to
-# lower-elevation airfield pavement; real airports handle this
-# with a retaining wall, ramp, or narrower threshold pad.  Future
-# work: detect oversized threshold polygons and either narrow them
-# to the runway's nominal width or emit a transition polygon
-# (similar to tunnel_ramp / retaining_wall pattern at SPJC).  Cap
-# raised to the current observed step count to keep the gate
-# enforcing "no NEW regressions."
-#
-# CYXY cap = 5 (post 2026-05-16 geometry fixes — record current
-# state so the test fires on regressions).
-MID_EDGE_CAP = {"SPJC": 10, "SPLP": 20, "CYXY": 5}
+# Grade thresholds are UNIVERSAL and ZERO — no per-airport caps, no
+# baselines, no soft exceptions (user 2026-05-31).  A within-shape
+# vertex pair > 1.5 %, a cross-shape elevation disagreement, or a
+# mid-edge step > 0.5 m means the elevation solver / source geometry
+# produced a non-compliant surface; the fix is there, not in the
+# threshold.  Any airport with residual violations FAILS until fixed.
+WITHIN_SHAPE_CAP = 0
+MID_EDGE_CAP = 0
 
 
 def _airport_tiles(icao: str, root: str):
@@ -114,7 +89,9 @@ def _airport_tiles(icao: str, root: str):
     return tiles
 
 
-@pytest.mark.parametrize("icao", list(baseline_airports()))
+@pytest.mark.parametrize(
+    "icao",
+    sorted(set(baseline_airports()) | set(airports_under_test())))
 def test_pavement_grade(tmp_path, icao):
     from auto_patch.elevation_per_surface import unified_jacobi as _uj
     import check_grade
@@ -188,7 +165,7 @@ def test_pavement_grade(tmp_path, icao):
     # continuity at shared boundaries should be ~perfect; mid-edge
     # discontinuities (sliver triangles whose plane tilts away from
     # neighbouring triangles' surfaces) are the known background.
-    step_cap = MID_EDGE_CAP[icao]
+    step_cap = MID_EDGE_CAP
     assert len(steps) <= step_cap, (
         f"{icao}: {len(steps)} edge/mid-edge steps > 0.5 m exceeds "
         f"cap {step_cap}.  Worst: {max(s.step_m for s in steps):.2f} "
@@ -196,7 +173,7 @@ def test_pavement_grade(tmp_path, icao):
     # Hard fail — within-shape grade violations indicate an
     # infeasible elevation field; fix the solver / geometry, not
     # the threshold.
-    cap = WITHIN_SHAPE_CAP[icao]
+    cap = WITHIN_SHAPE_CAP
     if len(within) > cap:
         within.sort(key=lambda v: -v.grade_pct)
         worst = "\n  ".join(

@@ -56,14 +56,12 @@ pytestmark = pytest.mark.skipif(
 # eliminate violations, lower the baseline.  Airports without an
 # entry use the default zero ceiling.
 
-RULE1_REGRESSION_BASELINE: Dict[str, int] = {
-    # SPJC: 2 vertices remain near the runway boundary that aren't
-    # at runway corners — Rule 5's push pass moves interior junction
-    # vertices toward pavement boundary; in cases where pavement
-    # boundary IS the runway boundary, the pushed vertex lands within
-    # Rule 1's tolerance band.  Pending Rule 1 widening redesign.
-    "SPJC": 2,
-}
+# Universal zero — no per-airport baselines (user 2026-05-31).  Every
+# junction vertex near the runway boundary must sit at a runway corner.
+# (SPJC previously carried a 2-vertex baseline from Rule 5's push pass
+# landing vertices in Rule 1's band — that is now a real failure to fix,
+# not a tolerated exception.)
+RULE1_REGRESSION_BASELINE: Dict[str, int] = {}
 # (session 55) Rule 2 / RULE2_REGRESSION_BASELINE removed
 # (test_junction_no_long_edge_proximity): it flagged a junction vertex
 # within SLOPING_EDGE_SNAP_M (20 m) PERPENDICULAR of a sloping rect's long
