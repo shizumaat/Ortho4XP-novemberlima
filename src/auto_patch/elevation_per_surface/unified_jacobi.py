@@ -917,8 +917,53 @@ def _directional_relief(n, elev, is_hard, edge_grade, edge_length,
     # (the terminal is genuinely flat, not emitted-flat over apron-dragged
     # nodes — the 64 SPJC cross-shape steps) AND lets the runway->terminal
     # relief pull the terminal up/down as the grade demands.
-    terminal_groups = [set(sc["nodes"]) for sc in shape_constraints
-                       if sc["flat"] and sc["nodes"]]
+    # COUPLE abutting terminals into ONE rigid flat unit (user: terminal
+    # groups must lift as movable COUPLED units).  Two flat pads that share a
+    # vertex/edge cannot sit at different levels without a cliff at the shared
+    # edge — HECA's south terminal complex (6/7/10) and north (2/9) abut and
+    # were each shifted to their OWN DEM centroid, leaving 1.4-3.8 m steps at
+    # the shared edges.  Union-find the flat shapes by shared canonical node,
+    # so an edge-connected cluster becomes one flat group at one level.
+    # (Isolated terminals → singleton cluster → identical to the old per-shape
+    # behaviour, so the baseline airports are unchanged.)
+    term_scs = [sc for sc in shape_constraints if sc["flat"] and sc["nodes"]]
+    _tparent = list(range(len(term_scs)))
+
+    def _tfind(a: int) -> int:
+        while _tparent[a] != a:
+            _tparent[a] = _tparent[_tparent[a]]
+            a = _tparent[a]
+        return a
+
+    _node_term: dict[int, int] = {}
+    for _ti, _sc in enumerate(term_scs):
+        for _i in _sc["nodes"]:
+            if _i in _node_term:
+                _ra, _rb = _tfind(_ti), _tfind(_node_term[_i])
+                if _ra != _rb:
+                    _tparent[_ra] = _rb
+            else:
+                _node_term[_i] = _ti
+    _clusters: dict[int, list[int]] = {}
+    for _ti in range(len(term_scs)):
+        _clusters.setdefault(_tfind(_ti), []).append(_ti)
+    terminal_groups: list[set] = []
+    # Forward-pass (DEM) level each terminal cluster is anchored to — the
+    # minimum-shift reference; Phase 1 already made each member flat at its DEM
+    # centroid.  AREA-WEIGHT the cluster level so the dominant (largest) pad
+    # anchors it (else a small many-vertex pad would skew a node-count mean).
+    term_level0: list[float] = []
+    for _members in _clusters.values():
+        _nodes: set = set()
+        for _ti in _members:
+            _nodes |= set(term_scs[_ti]["nodes"])
+        terminal_groups.append(_nodes)
+        _tot_a = sum(term_scs[_ti]["area"] for _ti in _members) or 1.0
+        _lvl = sum(
+            (sum(elev[i] for i in term_scs[_ti]["nodes"])
+             / len(term_scs[_ti]["nodes"])) * term_scs[_ti]["area"]
+            for _ti in _members) / _tot_a
+        term_level0.append(_lvl)
     terminal_nodes: set = set().union(*terminal_groups) if terminal_groups \
         else set()
     # Per-edge grade-cap adjacency (node -> [(neighbour, cap_m)]) to find the
@@ -929,9 +974,6 @@ def _directional_relief(n, elev, is_hard, edge_grade, edge_length,
         c = edge_length[(u, v)] * gr
         cap_adj.setdefault(u, []).append((v, c))
         cap_adj.setdefault(v, []).append((u, c))
-    # Forward-pass (DEM) level each terminal is anchored to — the minimum-shift
-    # reference; Phase 1 already made each terminal flat at its DEM centroid.
-    term_level0 = [sum(elev[i] for i in g) / len(g) for g in terminal_groups]
     group_of_node: dict[int, int] = {}
     for gi, g in enumerate(terminal_groups):
         for i in g:
