@@ -28,7 +28,6 @@ from pathlib import Path
 
 import pytest
 from shapely.ops import unary_union
-from shapely.strtree import STRtree
 
 from conftest import (
     airports_under_test, baseline_airports,
@@ -68,35 +67,12 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-# Per user 2026-04-30: zero overlap, no exceptions, no rounding-
-# error allowance.  An emitted layout where any two shapes overlap
-# is a hard invariant violation — X-Plane mesh generation can't
-# handle overlapping pavement shapes.  Catches the recent KPHX taxi-
-# bridge regression that emitted bridge polygons overlapping the
-# adjacent rect / apron.
-SELF_OVERLAP_CAP_M2 = 0.0
-
-# Per-airport overlap baseline (m²) — known geometric defects to
-# track as a regression ceiling without blocking unrelated work.
-# Add an entry only when the overlap is a documented known issue
-# scheduled for a follow-up fix.
-SELF_OVERLAP_BASELINE_M2 = {
-    # SPJC: tunnel_ramp + retaining_wall polygons cross the airport-
-    # boundary ribbon where road tunnels emerge outside the
-    # perimeter.  The boundary emit doesn't yet carve around them.
-    # Pending follow-up to subtract bridge/tunnel footprints from
-    # the boundary polygon before emit (see config.py
-    # EMIT_BRIDGES_AND_TUNNELS comment).
-    "SPJC": 1700.0,
-    # SPLP / CYXY: tiny boundary/boundary overlaps where the
-    # airport-perimeter ribbon's individual ~25 m chain pieces
-    # overlap each other at tight curves.  Each pair is ≤ 7 m²;
-    # totals are ≤ 60 m² (SPLP) and ≤ 200 m² (CYXY).  These are
-    # ribbon-emit defects predating 2026-05-13 and tracked as a
-    # ceiling — any regression beyond this trips the gate.
-    "SPLP": 60.0,
-    "CYXY": 200.0,
-}
+# Self-overlap: zero, universal, no per-airport exceptions (user
+# 2026-05-31).  Any two emitted pavement shapes overlapping is a hard
+# invariant violation — X-Plane mesh generation can't handle it.  The
+# check itself lives in ``auto_patch.verification.check_self_overlap``
+# (shared with the Ortho4XP build-time verification); the test below
+# just calls it and asserts zero.
 
 # Coverage envelope: the union of every emitted pavement shape's
 # polygon must not exceed the source pavement's union by more than
@@ -265,41 +241,17 @@ def test_no_self_overlap(icao):
     this test into one parametrization over the union of the two
     airport sets.
     """
+    from auto_patch.verification import check_self_overlap
     layout = _build_layout(icao)
-    polys = [(s.role, s.polygon) for s in layout.shapes
-             if s.polygon is not None and not s.polygon.is_empty]
-    if len(polys) < 2:
-        return
-    tree = STRtree([p for _, p in polys])
-    overlap_pairs = []
-    overlap_area = 0.0
-    for i, (role_a, pa) in enumerate(polys):
-        for j in tree.query(pa):
-            if j <= i:
-                continue
-            role_b, pb = polys[j]
-            try:
-                inter = pa.intersection(pb)
-            except Exception:
-                continue
-            if inter.is_empty:
-                continue
-            a = inter.area
-            if a <= 0.0:
-                continue
-            overlap_pairs.append((a, role_a, role_b))
-            overlap_area += a
-    overlap_pairs.sort(reverse=True)
+    overlap_pairs = check_self_overlap(layout)
+    overlap_area = sum(a for a, _, _ in overlap_pairs)
     summary = ", ".join(
         f"{a:.4f} m² ({ra}/{rb})"
         for a, ra, rb in overlap_pairs[:10])
-    cap = SELF_OVERLAP_BASELINE_M2.get(icao, SELF_OVERLAP_CAP_M2)
-    assert overlap_area <= cap, (
+    assert not overlap_pairs, (
         f"{icao}: {len(overlap_pairs)} overlapping shape pair(s), "
-        f"total {overlap_area:,.4f} m² (cap "
-        f"{cap:.0f} m² — "
-        f"{'baselined' if icao in SELF_OVERLAP_BASELINE_M2 else 'zero tolerance'}).  "
-        f"Worst: {summary}.")
+        f"total {overlap_area:,.4f} m² (zero tolerance, no per-airport "
+        f"exceptions).  Worst: {summary}.")
 
 
 @pytest.mark.parametrize("icao", _test_airports())

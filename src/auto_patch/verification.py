@@ -64,6 +64,35 @@ def taxi_axes_ll(layout):
     return axes
 
 
+def check_self_overlap(layout):
+    """Invariant A1: every paved metre belongs to exactly one shape — no
+    two emitted pavement polygons may overlap.  Returns a list of
+    ``(area_m2, role_a, role_b)`` overlap pairs, largest first (empty =
+    clean).  Universal, zero tolerance — X-Plane mesh generation cannot
+    handle overlapping pavement."""
+    from shapely.strtree import STRtree
+    polys = [(s.role, s.polygon) for s in layout.shapes
+             if s.polygon is not None and not s.polygon.is_empty]
+    if len(polys) < 2:
+        return []
+    tree = STRtree([p for _, p in polys])
+    pairs = []
+    for i, (role_a, pa) in enumerate(polys):
+        for j in tree.query(pa):
+            if j <= i:
+                continue
+            role_b, pb = polys[j]
+            try:
+                inter = pa.intersection(pb)
+            except Exception:
+                continue
+            if inter.is_empty or inter.area <= 0.0:
+                continue
+            pairs.append((inter.area, role_a, role_b))
+    pairs.sort(reverse=True)
+    return pairs
+
+
 def run_grade_checks(layout):
     """Run the grade engine on ``layout``.  Returns ``(within, cross,
     steps)`` lists (each item carries ``.grade_pct`` / ``.de_m`` /
@@ -86,30 +115,44 @@ def verify_and_log(layout, icao: str) -> dict:
     Logging levels: the one-line summary is emitted at verbosity 0 when
     there ARE violations (so the user sees errors even in a quiet
     release build) and at verbosity 1 when clean."""
+    # Geometry invariants (cheap; operate on the layout directly).
+    try:
+        overlaps = check_self_overlap(layout)
+    except Exception:                              # pragma: no cover
+        overlaps = []
+
+    # Grade invariants (reuse the check_grade engine).
     try:
         within, cross, steps = run_grade_checks(layout)
     except Exception as exc:                       # pragma: no cover
         UI.lvprint(0, f"  [verify] {icao}: grade verification "
                        f"unavailable ({exc})")
-        return {}
+        within = cross = steps = []
 
     counts = {"cross": len(cross), "within": len(within),
-              "steps": len(steps)}
-    n_problems = len(cross) + len(within)
-    if n_problems or steps:
+              "steps": len(steps), "overlaps": len(overlaps)}
+    problems = len(cross) + len(within) + len(steps) + len(overlaps)
+    if problems:
         UI.lvprint(0,
-            f"  [verify] {icao}: GRADE ISSUES — cross-shape={len(cross)} "
-            f"within-shape={len(within)} edge-steps={len(steps)}")
-        check_grade = _import_check_grade()
-        for v in sorted(cross, key=lambda v: -v.de_m)[:5]:
-            UI.lvprint(0, f"  [verify]     cross {v.de_m:.2f} m  "
-                          f"{check_grade._label(v.way_a)} -> "
-                          f"{check_grade._label(v.way_b)}")
-        for v in sorted(within, key=lambda v: -v.grade_pct)[:5]:
-            UI.lvprint(0, f"  [verify]     within {v.grade_pct:.2f}% over "
-                          f"{v.distance_m:.1f} m  "
-                          f"{check_grade._label(v.way_a)}")
+            f"  [verify] {icao}: ISSUES — overlap={len(overlaps)} "
+            f"cross-shape={len(cross)} within-shape={len(within)} "
+            f"edge-steps={len(steps)}")
+        for area, ra, rb in overlaps[:5]:
+            UI.lvprint(0, f"  [verify]     overlap {area:.1f} m²  "
+                          f"{ra} / {rb}")
+        try:
+            check_grade = _import_check_grade()
+            for v in sorted(cross, key=lambda v: -v.de_m)[:5]:
+                UI.lvprint(0, f"  [verify]     cross {v.de_m:.2f} m  "
+                              f"{check_grade._label(v.way_a)} -> "
+                              f"{check_grade._label(v.way_b)}")
+            for v in sorted(within, key=lambda v: -v.grade_pct)[:5]:
+                UI.lvprint(0, f"  [verify]     within {v.grade_pct:.2f}% "
+                              f"over {v.distance_m:.1f} m  "
+                              f"{check_grade._label(v.way_a)}")
+        except Exception:                          # pragma: no cover
+            pass
     else:
-        UI.vprint(1, f"  [verify] {icao}: grade OK "
-                     f"(0 cross / 0 within / 0 steps)")
+        UI.vprint(1, f"  [verify] {icao}: OK "
+                     f"(0 overlap / 0 cross / 0 within / 0 steps)")
     return counts
