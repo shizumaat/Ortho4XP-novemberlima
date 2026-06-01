@@ -1045,6 +1045,7 @@ def run_checks(
     edge_step_m: float = 0.5,
     top_n: int = 10,
     taxi_axes_ll: Optional[list] = None,
+    quiet: bool = False,
 ) -> Tuple[List[Violation], List[Violation], List[EdgeStep]]:
     """``taxi_axes_ll`` (per-axis junction grading): the builder's APT.DAT taxi
     centerlines as ``[(latlon_points, cL, cT), …]`` — ``latlon_points`` a list
@@ -1071,44 +1072,48 @@ def run_checks(
             if len(poly) >= 2:
                 taxi_axes.append((poly, cL, cT))
 
-    print(f"=== Grade validation: {osm_path} ===")
-    n_with_elev = sum(1 for v in vertices if v.elev is not None)
-    print(f"  ways: {len(ways)} | vertices: {len(vertices)} "
-          f"({n_with_elev} with elevation) | edges: {len(edges)} "
-          f"| seam vertices: {len(seam_nids)}")
+    def _pv(*a, **k):
+        if not quiet:
+            _print_violations(*a, **k)
+
+    def _ps(*a, **k):
+        if not quiet:
+            _print_steps(*a, **k)
+
+    if not quiet:
+        print(f"=== Grade validation: {osm_path} ===")
+        n_with_elev = sum(1 for v in vertices if v.elev is not None)
+        print(f"  ways: {len(ways)} | vertices: {len(vertices)} "
+              f"({n_with_elev} with elevation) | edges: {len(edges)} "
+              f"| seam vertices: {len(seam_nids)}")
 
     within = _check_within_shape(
         ways, nodes, ll_to_m, max_grade, seam_nids=seam_nids,
         taxi_axes=taxi_axes)
-    _print_violations(
-        f"WITHIN-SHAPE vertex-pair grade > {max_grade_pct}%",
+    _pv(f"WITHIN-SHAPE vertex-pair grade > {max_grade_pct}%",
         within, top_n)
 
     plane = _check_plane_gradient(
         ways, nodes, ll_to_m, max_grade, seam_nids=seam_nids)
-    _print_violations(
-        f"PLANE GRADIENT (triangle surface) > {max_grade_pct}%",
+    _pv(f"PLANE GRADIENT (triangle surface) > {max_grade_pct}%",
         plane, top_n)
     within = within + plane
 
     cross = _check_cross_shape_proximity(
         vertices, ways, proximity_m, max_grade)
-    _print_violations(
-        f"CROSS-SHAPE proximity (≤ {proximity_m}m) "
+    _pv(f"CROSS-SHAPE proximity (≤ {proximity_m}m) "
         f"grade > {max_grade_pct}%",
         cross, top_n)
 
     steps = _check_vertex_to_edge_step(
         vertices, edges, ways, edge_search_m, edge_step_m)
-    _print_steps(
-        f"VERTEX-TO-EDGE step (within {edge_search_m}m of "
+    _ps(f"VERTEX-TO-EDGE step (within {edge_search_m}m of "
         f"another shape)",
         steps, top_n, edge_step_m)
 
     mid_steps = _check_edge_midpoint_step(
         edges, ways, edge_search_m, edge_step_m)
-    _print_steps(
-        f"MID-EDGE step (sample along each edge, compare to "
+    _ps(f"MID-EDGE step (sample along each edge, compare to "
         f"nearest other-shape edge)",
         mid_steps, top_n, edge_step_m)
 

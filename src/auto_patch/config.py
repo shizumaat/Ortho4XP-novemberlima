@@ -11,6 +11,7 @@ variable in O4_Cfg_Vars.py instead.
 """
 
 __all__ = [
+    "LOG_VERBOSITY",
     "AXIS_ALIGN_TOL_DEG",
     "LOAD_DSF_PAVEMENT",
     "SLOPING_EDGE_SNAP_M",
@@ -66,6 +67,17 @@ __all__ = [
     "taxiway_clearance_half_width_m",
     "taxiway_clearance_half_width_for_letter",
 ]
+
+
+# ── Build logging verbosity ─────────────────────────────────────
+# Single knob for how chatty an auto-patch build is.  Auto-patch sets
+# ``O4_UI_Utils.verbosity`` to this when it runs.  Build-time
+# verification ALWAYS runs (it's how we surface "this airport has
+# errors") — this only controls how much else is printed.
+#   2 = debug  : every progress / diagnostic message.
+#   1 = normal : per-airport progress + verification summary (default).
+#   0 = critical: only verification problems + errors (quiet release).
+LOG_VERBOSITY = 1
 
 
 # ── Junction-refinement rule constants (user 2026-05-01) ─────────

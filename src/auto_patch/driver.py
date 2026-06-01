@@ -176,6 +176,14 @@ def generate_auto_patches(tile, cifp_path: str,
     cifp_airports = discover_cifp_airports(cifp_path)
     auto_patched: list[str] = []
 
+    # Apply the auto-patch log-verbosity knob for the build (restored
+    # after the loop).  Build-time verification still runs at every
+    # level — only the chatter volume changes.
+    from . import config as _cfg
+    from .verification import verify_and_log
+    _saved_verbosity = UI.verbosity
+    UI.verbosity = _cfg.LOG_VERBOSITY
+
     for icao, filepath in sorted(cifp_airports.items()):
         # In ICAO mode, only patch airports with a real 4-letter ICAO code
         # (skip 3-letter FAA codes and alphanumeric local-use codes like "1A2")
@@ -331,6 +339,14 @@ def generate_auto_patches(tile, cifp_path: str,
                 1, "   Auto-patch: Generated", icao,
                 "(" + summary + ")")
             auto_patched.append(icao)
+            # Build-time verification on THIS airport (the tile's own
+            # airport set — see airport_in_tile filter above).  Surfaces
+            # grade errors to the user; never aborts the build.
+            try:
+                verify_and_log(layout, icao)
+            except _DRIVER_EXC as _ve:
+                UI.lvprint(0, "   Auto-patch: verification error for",
+                           icao, ":", str(_ve))
         except _DRIVER_EXC as e:
             UI.vprint(
                 1,
@@ -339,6 +355,8 @@ def generate_auto_patches(tile, cifp_path: str,
                 ":",
                 str(e),
             )
+
+    UI.verbosity = _saved_verbosity
 
     if auto_patched:
         UI.vprint(
