@@ -141,113 +141,19 @@ def test_no_vertex_on_sloping_rect_edge(icao):
     junction vertices 2–5 m along surviving runway segments' long
     edges (near corners but not at them).
     """
-    import math
+    from auto_patch.verification import (
+        check_vertex_on_sloping_edge, describe_shape, build_taxi_index)
     layout = _build_layout(icao)
-    sloping_roles = {
-        "runway", "primary_parallel", "secondary_parallel",
-        "stub", "cross_connector", "service_road"}
-    # Per user 2026-05-09: shapes carrying a single ``altitude=``
-    # tag (flat, no altitude_high/low) legitimately have variable
-    # node count — their elevation is constant, so extra ring
-    # vertices inserted by neighbouring junctions do not create
-    # kinks.  Only sloped rects (altitude_high+low set) and
-    # untagged residue (no altitude info at all) are subject to
-    # the 4-corner invariant.
-    #
-    # Per user 2026-05-19: shapes with per-vertex ``node_altitudes``
-    # are likewise NOT canonical sloping rects — the seam-anchor
-    # and tile-cut passes convert away from altitude_high/low when
-    # the polygon can't be expressed as a planar 4-corner rect, and
-    # those node_altitudes shapes can carry arbitrary ring vertices
-    # by design.
-    sloping = [s for s in layout.shapes
-               if s.role in sloping_roles
-               and s.polygon is not None
-               and not s.polygon.is_empty
-               and not (s.altitude is not None
-                        and s.altitude_high is None
-                        and s.altitude_low is None)
-               and s.node_altitudes is None]
-    others = [s for s in layout.shapes
-              if s.role not in sloping_roles
-              and s.polygon is not None
-              and not s.polygon.is_empty]
-    if not sloping or not others:
-        return
-
-    # Tolerances: a vertex is ON an edge if it's within 0.5 m of
-    # the edge AND > 0.5 m away from either endpoint (i.e. not at
-    # a corner — corners are allowed).
-    EDGE_PROX_M = 0.5
-    CORNER_GUARD_M = 0.5
-
-    violations = []
-    for s in sloping:
-        coords = list(s.polygon.exterior.coords)
-        if coords and coords[0] == coords[-1]:
-            coords = coords[:-1]
-        if len(coords) != 4:
-            # Sloping rects must be 4-corner — flag anything else.
-            violations.append(
-                (s.role, s.ref or "?", "non-rect", len(coords)))
-            continue
-        edges = [(coords[i], coords[(i + 1) % 4])
-                 for i in range(4)]
-        for o in others:
-            ocoords = list(o.polygon.exterior.coords)
-            if ocoords and ocoords[0] == ocoords[-1]:
-                ocoords = ocoords[:-1]
-            for px, py in ocoords:
-                # Skip vertices that coincide with one of the
-                # rect's corners.
-                if any(math.hypot(px - cx, py - cy) <= CORNER_GUARD_M
-                       for cx, cy in coords):
-                    continue
-                for (ax, ay), (bx, by) in edges:
-                    dx = bx - ax
-                    dy = by - ay
-                    L2 = dx * dx + dy * dy
-                    if L2 <= 0:
-                        continue
-                    t = ((px - ax) * dx + (py - ay) * dy) / L2
-                    if t <= 0.001 or t >= 0.999:
-                        continue
-                    proj_x = ax + t * dx
-                    proj_y = ay + t * dy
-                    d = math.hypot(px - proj_x, py - proj_y)
-                    # Also check distance to endpoints (if very
-                    # close to one, that's a near-corner case
-                    # already excluded above; but the edge
-                    # parametrization t may put the projection in-
-                    # interior even when the vertex is closer to a
-                    # corner than to the midline).
-                    d_a = math.hypot(px - ax, py - ay)
-                    d_b = math.hypot(px - bx, py - by)
-                    if (d < EDGE_PROX_M
-                            and d_a > CORNER_GUARD_M
-                            and d_b > CORNER_GUARD_M):
-                        violations.append(
-                            (s.role, s.ref or "?", o.role,
-                             o.ref or "?", t, d))
-                        break
-    if violations:
-        # Two violation tuple shapes:
-        #   non-rect:       (role, ref, "non-rect", n_corners) — len 4
-        #   edge-interior:  (role, ref, o_role, o_ref, t, d)    — len 6
-        def _fmt(v):
-            if len(v) == 4:
-                return (f"{v[0]}({v[1]}) is non-rect "
-                        f"(n_corners={v[3]})")
-            return (f"{v[2]}({v[3]}) vertex on {v[0]}({v[1]}) "
-                    f"edge t={v[4]:.3f} d={v[5]:.2f}m")
-        summary = "; ".join(_fmt(v) for v in violations[:5])
-        msg = (f"{icao}: {len(violations)} sloping-rect "
-               f"invariant violation(s).  Sloping rects must "
-               f"have exactly 4 corners; junction polygons may "
-               f"share only CORNERS with sloping rects, never "
-               f"edge interiors.  First "
-               f"{min(5, len(violations))}: {summary}.")
-        assert False, msg
+    violations = check_vertex_on_sloping_edge(layout)
+    ti = build_taxi_index(layout)
+    summary = "; ".join(
+        f"{describe_shape(layout, idx, ti)} — {detail} @ {loc}"
+        for idx, detail, loc in violations[:5])
+    assert not violations, (
+        f"{icao}: {len(violations)} sloping-rect invariant violation(s).  "
+        f"Sloping rects must have exactly 4 corners; junction/apron "
+        f"polygons may share only CORNERS with sloping rects, never edge "
+        f"interiors.  First {min(5, len(violations))}: {summary}.")
 
 
 def _rect_flat_edges_from_shape(shape):

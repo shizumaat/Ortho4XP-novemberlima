@@ -236,6 +236,74 @@ def check_terminal_flat(layout):
     return out
 
 
+def check_vertex_on_sloping_edge(layout):
+    """Invariant: a non-rect vertex may touch a sloping rect only at a
+    CORNER, never on an edge interior (an off-corner vertex injects an
+    extra elevation constraint and kinks the rect's plane).  Also flags a
+    "sloping" rect that isn't 4-corner.  Returns ``[(rect_idx, detail,
+    "lat,lon"), …]``."""
+    import math
+    sloping_roles = {"runway", "primary_parallel", "secondary_parallel",
+                     "stub", "cross_connector", "service_road"}
+    # Sloped rects only: skip flat single-altitude shapes (variable node
+    # count is fine when elevation is constant) and node_altitudes shapes
+    # (slice-conforming, may carry arbitrary ring vertices by design).
+    sloping = [(i, s) for i, s in enumerate(layout.shapes)
+               if s.role in sloping_roles and s.polygon is not None
+               and not s.polygon.is_empty
+               and not (s.altitude is not None and s.altitude_high is None
+                        and s.altitude_low is None)
+               and s.node_altitudes is None]
+    others = [s for s in layout.shapes
+              if s.role not in sloping_roles and s.polygon is not None
+              and not s.polygon.is_empty]
+    if not sloping or not others:
+        return []
+    EDGE_PROX_M = 0.5
+    CORNER_GUARD_M = 0.5
+    out = []
+    for ridx, s in sloping:
+        coords = list(s.polygon.exterior.coords)
+        if coords and coords[0] == coords[-1]:
+            coords = coords[:-1]
+        if len(coords) != 4:
+            c = s.polygon.representative_point()
+            out.append((ridx, f"sloping rect is non-rect "
+                              f"({len(coords)} corners)",
+                        _ll(layout, c.x, c.y)))
+            continue
+        edges = [(coords[i], coords[(i + 1) % 4]) for i in range(4)]
+        for o in others:
+            ocoords = list(o.polygon.exterior.coords)
+            if ocoords and ocoords[0] == ocoords[-1]:
+                ocoords = ocoords[:-1]
+            for px, py in ocoords:
+                if any(math.hypot(px - cx, py - cy) <= CORNER_GUARD_M
+                       for cx, cy in coords):
+                    continue
+                for (ax, ay), (bx, by) in edges:
+                    dx, dy = bx - ax, by - ay
+                    L2 = dx * dx + dy * dy
+                    if L2 <= 0:
+                        continue
+                    t = ((px - ax) * dx + (py - ay) * dy) / L2
+                    if t <= 0.001 or t >= 0.999:
+                        continue
+                    pjx, pjy = ax + t * dx, ay + t * dy
+                    d = math.hypot(px - pjx, py - pjy)
+                    d_a = math.hypot(px - ax, py - ay)
+                    d_b = math.hypot(px - bx, py - by)
+                    if (d < EDGE_PROX_M and d_a > CORNER_GUARD_M
+                            and d_b > CORNER_GUARD_M):
+                        out.append((
+                            ridx,
+                            f"{o.role}({o.ref or '?'}) vertex lands on a "
+                            f"sloping edge (t={t:.3f}, d={d:.2f} m)",
+                            _ll(layout, px, py)))
+                        break
+    return out
+
+
 # ── Grade invariants (reuse the check_grade engine) ─────────────────
 def taxi_axes_ll(layout):
     """Per-axis taxi grading mirror — the SAME construction the grade
@@ -286,9 +354,13 @@ def verify_and_log(layout, icao: str) -> dict:
         source = check_source_adjacency(layout)
     except Exception:                              # pragma: no cover
         pass
-    flat = []
+    flat = edge_v = []
     try:
         flat = check_terminal_flat(layout)
+    except Exception:                              # pragma: no cover
+        pass
+    try:
+        edge_v = check_vertex_on_sloping_edge(layout)
     except Exception:                              # pragma: no cover
         pass
     try:
@@ -299,8 +371,9 @@ def verify_and_log(layout, icao: str) -> dict:
         within = cross = steps = []
 
     counts = {"overlap": len(overlaps), "source": len(source),
-              "terminal_flat": len(flat), "cross": len(cross),
-              "within": len(within), "steps": len(steps)}
+              "terminal_flat": len(flat), "vertex_on_edge": len(edge_v),
+              "cross": len(cross), "within": len(within),
+              "steps": len(steps)}
     if not sum(counts.values()):
         UI.vprint(1, f"  [verify] {icao}: OK — no overlap / source / "
                      f"grade issues.")
@@ -348,6 +421,13 @@ def verify_and_log(layout, icao: str) -> dict:
         UI.lvprint(0, f"  [verify]     ↳ a terminal building pad must be a "
                       f"single flat altitude. Fix: usually a builder issue, "
                       f"not source data.")
+    if edge_v:
+        for idx, detail, loc in edge_v[:5]:
+            UI.lvprint(0, f"  [verify]   VERTEX-ON-EDGE @ {loc}: "
+                          f"{describe_shape(layout, idx, taxi_index)} — {detail}")
+        UI.lvprint(0, f"  [verify]     ↳ a junction/apron vertex sits on a "
+                      f"taxi-rect edge interior (should meet only at corners). "
+                      f"Fix: usually a builder issue, not source data.")
     if cross:
         for v in sorted(cross, key=lambda v: -v.de_m)[:5]:
             loc = f"{v.lat:.5f},{v.lon:.5f}" if v.lat is not None else "?,?"
