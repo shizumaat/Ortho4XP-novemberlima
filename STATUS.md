@@ -1,3 +1,85 @@
+# Auto-Patch Status — session 58 CLOSE → session 59 = DEBUG REMAINING HECA ISSUES
+
+## ★★ SESSION 59 TASK: fix the remaining HECA patch issues ★★
+
+The build now SELF-VERIFIES and lists HECA's exact problems with shapeIDs +
+taxiway names + lat/lon. Your job: work that list down to zero. Run:
+
+```
+venv/bin/python -c "
+import sys; sys.path.insert(0,'src'); sys.path.insert(0,'.'); sys.path.insert(0,'tests')
+from conftest import cached_airport_layout
+from auto_patch.verification import verify_and_log
+verify_and_log(cached_airport_layout('HECA'),'HECA')" 2>&1 | grep '\[verify\]'
+```
+(~55s build, cached after the first call.) Or the pytest gate on HECA:
+`O4_TEST_AIRPORTS=HECA venv/bin/python -m pytest tests/test_pavement_geometry.py
+tests/test_pavement_grade.py -o addopts="" -q`. HECA grade is now COVERED (no
+longer a gap). The shipped patch dump is `/tmp/HECA_grade.osm` (probe
+`/tmp/probes/heca_grade.py`). Anchor (30.10895832, 31.43477812). shapeID == the
+`shapeID` tag in the patch OSM == index in `layout.shapes`.
+
+### THE CURRENT HECA ISSUE LIST (2026-05-31; total: overlap 4 / off-source 2 /
+### flat-edge 1 / short-edge 2 / cross-shape 37 / within-shape 15 / edge-steps 229)
+
+**★ DOMINANT ROOT CAUSE = the terminal-cluster coherent-fill (deferred HECA #2
+solver redesign — see session-55 catalogue below + memory).** terminal7 [#6],
+terminal10 [#9], terminal6 [#5], terminal2 are flat pads at DIFFERENT levels
+sharing corners (3.4–3.8 m apart) → drives most of the 37 cross-shape + 229
+edge-steps. The fix is the coherent terminal+apron fill in
+`elevation_per_surface/unified_jacobi`: terminal groups must lift as MOVABLE
+COUPLED units within their grade band (NOT shape-by-shape — that backfired,
+169 viol). Regression-guard: SPJC/SPLP/CYXY grade tests (all green at zero).
+
+1. **OVERLAP (4)** — apron/junction footprint overlaps near the S/T/R/W taxiway
+   cluster: 957 m² apron[#309]∩junction[#310] @30.10571,31.40253; 150 m²
+   apron[#298]∩apron[#302]; 144 m² apron[#298]∩junction[#300]; 0.1 m²
+   groundside∩groundside. Likely junction/apron decomposition over the wide
+   blob (see s56 neck-split / apron-reclassify). Pre-existing (the s55 #5
+   self-overlap, now LOCATED).
+2. **OFF-SOURCE (2)** — apron[#258] 487 m² (8% on source) @30.10723,31.43105;
+   apron[#228] 204 m² (8% on source). Aprons emitted where apt.dat/DSF has
+   almost no pavement → spurious synthesis OR a non-pavement polygon tagged as
+   pavement. NEW finding (the per-shape source-adjacency check located these;
+   the old coverage ratio never could). Investigate the apt.dat/DSF near there.
+3. **FLAT-EDGE (1)** — apron vertex on stub C[#103] flat (cross) edge
+   (t=0.675, d=1.00 m) @30.10482,31.39360. Builder issue (a junction/apron
+   vertex on a rect cross-edge interior).
+4. **SHORT-EDGE (2)** — stub Exit-2[#94] + Exit-3[#116] end_A connect to nothing
+   (rects end mid-air) @ ~30.108,31.433 / 30.110,31.435. Likely a gap in the
+   apt.dat taxi network at the runway exits, OR a missing connecting junction.
+5. **WITHIN-SHAPE (15)** — steep aprons/stub: apron[#308] 17.5%/3.4 m (tiny neck);
+   apron[#296] 13.5%/8.2 m (where J,S,T,W meet); stub S[#126] 6.5%/50 m. Apron
+   decomposition (narrow necks) + the coherent-fill issue.
+6. **EDGE-STEPS (229)** + **CROSS-SHAPE (37)** — mostly the terminal cluster
+   (root cause above).
+
+### Session-58 build-VERIFICATION + diagnostics architecture (use it)
+- `auto_patch/verification.py` = the SINGLE home for every invariant check;
+  `verify_and_log(layout, icao)` runs them and logs WHAT/WHERE(shapeID+taxiways+
+  lat,lon)/CAUSE/FIX. Called per in-tile airport by `driver.generate_auto_patches`
+  (production) AND by the pytest gate (tests delegate to the same functions — no
+  duplication). Grade reuses `tools/check_grade.py` (the engine).
+- Checks shared: grade (cross/within/steps), self-overlap, source-adjacency,
+  terminal-flat, vertex-on-sloping-edge, vertex-on-flat-edge, axis-tilt,
+  short-edge. NOT yet extracted (pytest-only): junction rules
+  (`test_junction_rules.py` / `test_junction_invariants.py`).
+- `config.LOG_VERBOSITY` = 0 (Ortho4XP window quiet unless a patch has issues;
+  set 2 for debug). ALL per-airport test caps/baselines REMOVED → universal zero
+  (they were stale; baselines clean). Commits this session: 024f50b dedup,
+  cbcf344 RESA-from-source, c42a340/136bc1b/dcd872c/44bbeea/6c18da6/bcbb9c4/
+  7b03bb3/f8e8c90/b965775 verification. Plus 3509845 compare_target re-cut.
+
+### Suite state
+Default suite **289 passed / 2 skipped / 0 failed** (SPJC/SPLP/CYXY, compare_target
+incl). HECA is NOT in the default suite; its issues above only show via
+`O4_TEST_AIRPORTS=HECA` or the build verification. Earlier session-58 work: taxi-rect
+dedup keeps R/B sections (commit 024f50b, [[taxi_rect_dedup_sections]]); RESA anchored
+on apt.dat geometry (cbcf344, [[heca_resa_nondeterminism]]). Architecture detail:
+memory [[build_verification_architecture]].
+
+---
+
 # Auto-Patch Status — session 57 HANDOVER (★ NEW DIRECTION: line-marking centerlines → drop curves → rects)
 
 ## ★★ SESSION 57 HANDOVER → NEXT AGENT: build the line-marking centerline extractor ★★
