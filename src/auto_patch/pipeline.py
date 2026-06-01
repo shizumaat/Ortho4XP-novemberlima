@@ -2950,7 +2950,9 @@ def build_airport_pavement(icao: str, xplane_root: str,
                       else math.floor(layout.anchor[0]))
             _cl_tn = (current_tile_lon if current_tile_lon is not None
                       else math.floor(layout.anchor[1]))
-            n_cl = emit_surface_clearance_cuts(layout, dem, _cl_tl, _cl_tn)
+            n_cl = emit_surface_clearance_cuts(
+                layout, dem, _cl_tl, _cl_tn,
+                source_runways=apt.runways)
             if n_cl:
                 UI.vprint(1,
                     f"  [pav-builder] {icao}: emitted {n_cl} "

@@ -138,6 +138,11 @@ _RAY_MAX_HALF_WIDTH_M = 35.0
 # How far past the runway end to search for the outer pavement edge
 # (blast-pad / stopway / apron) the RESA should anchor on.
 _RESA_PAVEMENT_PROBE_MAX_M = 300.0
+# When the RESA end is taken from the authoritative apt.dat row-100
+# centreline endpoint, that point sits ON the runway end edge, not in the
+# interior — seed the outward pavement-exit march this far INSIDE so it
+# starts on pavement.
+_RESA_SEED_INSET_M = 3.0
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -559,14 +564,15 @@ def _runway_end_edges(runway_shapes):
     """Return the two true extremities of each runway designation as
     ``(shape, end_a, end_b, full_len)``.
 
-    A runway is usually split into many segments (crossings, FAA
-    profile redistribution, tile cuts), so an internal-seam test is
-    fragile — when segments don't abut cleanly every seam looks like an
-    "end".  Instead we collect every segment's two short edges per ref
-    and pick the PAIR of short-edge midpoints that are FARTHEST apart:
+    FALLBACK detector — used only when the authoritative apt.dat row-100
+    runway list is unavailable (see ``emit_surface_clearance_cuts``'s
+    ``source_runways``).  A runway is usually split into many segments
+    (crossings, FAA profile redistribution, tile cuts), so an internal-seam
+    test is fragile.  Instead we collect every segment's two short edges per
+    ref and pick the PAIR of short-edge midpoints that are FARTHEST apart:
     those are the runway's two thresholds; everything between them is
-    interior.  ``full_len`` is that farthest-pair distance (the whole
-    runway length), used for the ICAO code number.
+    interior.  ``full_len`` is that farthest-pair distance (the whole runway
+    length), used for the ICAO code number.
     """
     by_ref: dict[str, list] = defaultdict(list)
     for s in runway_shapes:
@@ -802,15 +808,27 @@ def _centerline_edge_runs(line, prep_pav, pav_shapes, step, letter=None):
 # Public entry point
 # ──────────────────────────────────────────────────────────────────
 def emit_surface_clearance_cuts(layout: PavementLayout, dem,
-                                tile_lat: int, tile_lon: int) -> int:
+                                tile_lat: int, tile_lon: int,
+                                source_runways=None) -> int:
     """Emit wingtip/RESA terrain-clearance cut polygons.  Mutates
-    ``layout.shapes``.  Returns the number of cut shapes emitted."""
+    ``layout.shapes``.  Returns the number of cut shapes emitted.
+
+    ``source_runways`` is the apt.dat row-100 ``Runway`` list (centreline
+    endpoints + width).  When supplied, the runway-end RESA anchors on that
+    AUTHORITATIVE geometry — the exact threshold position and runway width —
+    so it is independent of how the runway pavement was segmented/emitted.
+    Without it, the RESA falls back to detecting ends from the emitted
+    runway rects."""
     if dem is None:
         return 0
     lat0, lon0 = layout.anchor
     cos0 = math.cos(math.radians(lat0))
     R = R_EARTH
     step = CLEARANCE_STATION_STEP_M
+
+    def _ll_to_m(lat: float, lon: float) -> tuple[float, float]:
+        return (math.radians(lon - lon0) * R * cos0,
+                math.radians(lat - lat0) * R)
 
     def sample_dem(x: float, y: float) -> float | None:
         try:
@@ -1115,33 +1133,29 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                 _collect(ring, ralts, ROLE_RUNWAY_CLEARANCE)
 
     # ── Pass C: runway-end safety area (RESA) ──
-    # A graded rectangle off each runway end, symmetric about the
-    # extended centreline and anchored at the OUTER pavement edge (the
-    # blast-pad / stopway end, found by marching the centreline out
-    # through the pavement union).  Width ≥ 2× runway width / graded-
-    # strip width; the surface is a gentle ramp (≤ RESA_MAX_SLOPE) rising
-    # from the pavement-end elevation, cutting terrain above it and
-    # daylighting where it meets the DEM — so an undershoot/overrun meets
-    # a smooth slope, not a wall.
-    for s, a, b, full_len in _runway_end_edges(runway_shapes):
-        outward = _outward_normal(s.polygon, a, b)
-        if outward is None:
-            continue
+    # A graded rectangle off each runway end, symmetric about the extended
+    # centreline and anchored at the OUTER pavement edge (the blast-pad /
+    # stopway end, found by marching the centreline out through the
+    # pavement union).  Width ≥ runway width / graded-strip width; the
+    # surface is a gentle ramp (≤ RESA_MAX_SLOPE) rising from the
+    # pavement-end elevation, cutting terrain above it and daylighting
+    # where it meets the DEM — so an undershoot/overrun meets a smooth
+    # slope, not a wall.
+    def _emit_resa(mid, outward, runway_width, full_len, seed, elev_fallback):
+        """Build the RESA ramp off one runway end.  ``mid`` = the runway
+        end point, ``outward`` = unit normal pointing AWAY from the runway,
+        ``seed`` = a point on pavement to start the outer-edge march from."""
         nx, ny = outward
-        mid = (0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]))
-        info = _rect_long_short_edges(_open_coords(s.polygon))
-        runway_width = info[1] if info else math.hypot(b[0] - a[0], b[1] - a[1])
         # Anchor at the outer pavement edge along the extended centreline.
-        start = _pavement_exit_along(prep_pav, mid[0], mid[1], nx, ny,
+        start = _pavement_exit_along(prep_pav, seed[0], seed[1], nx, ny,
                                      _RESA_PAVEMENT_PROBE_MAX_M, step)
-        p0 = (mid[0] + nx * start, mid[1] + ny * start)
-        # Pavement-end elevation (just inside the edge), else runway end.
-        ref = _pav_alt(airside, mid[0] + nx * max(0.0, start - 1.0),
-                       mid[1] + ny * max(0.0, start - 1.0))
+        p0 = (seed[0] + nx * start, seed[1] + ny * start)
+        # Pavement-end elevation (just inside the outer edge), else fallback.
+        ref = _pav_alt(airside, p0[0] - nx * 1.0, p0[1] - ny * 1.0)
+        if ref is None and elev_fallback is not None:
+            ref = elev_fallback()
         if ref is None:
-            ref = _sample_runway_segment_elev(s, mid[0], mid[1])
-        if ref is None:
-            continue
+            return
         # RESA half-width: ≥ runway width and ≥ graded-strip half-width.
         half = max(runway_width, runway_strip_half_width_m(full_len))
         perp = (-ny, nx)
@@ -1153,6 +1167,42 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                 stations, [ref] * m, [outward] * m, [rw_max_reach] * m,
                 RUNWAY_END_RESA_MAX_SLOPE, rw_threshold, step, sample_dem):
             _collect(ring, ralts, ROLE_RUNWAY_CLEARANCE)
+
+    if source_runways:
+        # AUTHORITATIVE: anchor each end at the apt.dat row-100 centreline
+        # endpoint + width, so the RESA position/size never depends on the
+        # emitted runway segmentation (user 2026-05-31).
+        for r in source_runways:
+            try:
+                ax, ay = _ll_to_m(r.lat_a, r.lon_a)
+                bx, by = _ll_to_m(r.lat_b, r.lon_b)
+            except _GEOM_EXC:
+                continue
+            dx, dy = bx - ax, by - ay
+            full_len = math.hypot(dx, dy)
+            width = float(getattr(r, "width_m", 0.0) or 0.0)
+            if full_len < 1.0 or width <= 0.0:
+                continue
+            ux, uy = dx / full_len, dy / full_len
+            for end_pt, outward in (((ax, ay), (-ux, -uy)),
+                                    ((bx, by), (ux, uy))):
+                seed = (end_pt[0] - outward[0] * _RESA_SEED_INSET_M,
+                        end_pt[1] - outward[1] * _RESA_SEED_INSET_M)
+                _emit_resa(end_pt, outward, width, full_len, seed,
+                           lambda s=seed: _pav_alt(airside, s[0], s[1]))
+    else:
+        # FALLBACK: detect ends from the emitted runway rects.
+        for s, a, b, full_len in _runway_end_edges(runway_shapes):
+            outward = _outward_normal(s.polygon, a, b)
+            if outward is None:
+                continue
+            mid = (0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]))
+            info = _rect_long_short_edges(_open_coords(s.polygon))
+            runway_width = (info[1] if info
+                            else math.hypot(b[0] - a[0], b[1] - a[1]))
+            _emit_resa(mid, outward, runway_width, full_len, mid,
+                       lambda s=s, mid=mid:
+                       _sample_runway_segment_elev(s, mid[0], mid[1]))
 
     # Resolve all collected strips into minimal geometry in one pass.
     n_emitted = _finalize()
