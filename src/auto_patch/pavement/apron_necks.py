@@ -66,6 +66,84 @@ def _polys(geom) -> list[Polygon]:
             if g.geom_type == "Polygon" and not g.is_empty]
 
 
+_CUT_BUFFER_M = 0.25    # buffer-difference fallback half-strip (last resort)
+
+
+def _cut_at_mouth(poly: Polygon, A, B,
+                  snap_tol_m: float = _VERT_SNAP_M):
+    """Split ``poly`` along the mouth chord A-B into its two boundary lobes.
+
+    Primary method = a MANUAL RING SPLIT: a neck's mouth vertices A and B are
+    boundary vertices, so the two pieces are simply the two boundary arcs
+    between them, each closed by the SHARED A-B chord edge.  This is robust to
+    wall angle AND leaves a clean shared edge (no gap), so the two pads weld
+    and grade to match.
+
+    Why not just ``shapely.ops.split``: it silently returns ONE face when the
+    straight mouth chord doesn't cleanly exit both walls — the extended chord
+    stays inside the polygon past a non-square wall, so no second face forms.
+    At HECA two obvious 13.5 m apron necks went uncut for exactly this reason.
+    ``split`` and a thin buffer-difference remain as fallbacks for mouths whose
+    endpoints aren't both ring vertices.
+
+    Returns a list of >= 2 pieces, or ``None`` (the caller skips the cut).
+    """
+    try:
+        ring = list(poly.exterior.coords)
+    except _GEOM_EXC:
+        return None
+    if ring and ring[0] == ring[-1]:
+        ring = ring[:-1]
+    n = len(ring)
+
+    def _nearest(pt):
+        bi, bd = -1, float("inf")
+        for k, (x, y) in enumerate(ring):
+            d2 = (x - pt[0]) ** 2 + (y - pt[1]) ** 2
+            if d2 < bd:
+                bd, bi = d2, k
+        return bi, math.sqrt(bd)
+
+    if n >= 4:
+        iA, dA = _nearest(A)
+        iB, dB = _nearest(B)
+        if dA <= snap_tol_m and dB <= snap_tol_m and iA != iB:
+            lo, hi = sorted((iA, iB))
+            # Both arcs must have real length (non-adjacent mouth).
+            if (hi - lo) >= 2 and (n - (hi - lo)) >= 2:
+                try:
+                    p1 = Polygon(ring[lo:hi + 1])
+                    p2 = Polygon(ring[hi:] + ring[:lo + 1])
+                    if not p1.is_valid:
+                        p1 = p1.buffer(0)
+                    if not p2.is_valid:
+                        p2 = p2.buffer(0)
+                    out = _polys(p1) + _polys(p2)
+                    if len(out) >= 2:
+                        return out
+                except _GEOM_EXC:
+                    pass
+
+    # Fallbacks for mouths whose endpoints aren't clean ring vertices.
+    dx, dy = B[0] - A[0], B[1] - A[1]
+    dm = math.hypot(dx, dy) or 1.0
+    ux, uy = dx / dm, dy / dm
+    chord = LineString([(A[0] - ux, A[1] - uy), (B[0] + ux, B[1] + uy)])
+    try:
+        sub = _polys(split(poly, chord))
+        if len(sub) >= 2:
+            return sub
+    except _GEOM_EXC:
+        pass
+    try:
+        sub = _polys(poly.difference(chord.buffer(_CUT_BUFFER_M, cap_style=2)))
+        if len(sub) >= 2:
+            return sub
+    except _GEOM_EXC:
+        pass
+    return None
+
+
 def _waist_chord(center, flow, P: Polygon, hw_max: float,
                  verts: "MultiPoint | None") -> LineString | None:
     """Cross-cut at a waist: a line through ``center`` PERPENDICULAR to the
@@ -171,15 +249,8 @@ def neck_cuts(poly: Polygon,
                for _, _, _, m in out):
             continue                        # dedup: one cut per mouth
         # Cut and validate the excursion neck.
-        dx, dy = B[0] - A[0], B[1] - A[1]
-        dm = math.hypot(dx, dy) or 1.0
-        ux, uy = dx / dm, dy / dm
-        chord = LineString([(A[0] - ux, A[1] - uy), (B[0] + ux, B[1] + uy)])
-        try:
-            sub = _polys(split(poly, chord))
-        except _GEOM_EXC:
-            continue
-        if len(sub) < 2:
+        sub = _cut_at_mouth(poly, A, B)
+        if not sub or len(sub) < 2:
             continue
         excursion = min(sub, key=lambda p: p.area)
         try:
@@ -209,10 +280,6 @@ def split_polygon_at_necks(poly: Polygon,
         return [poly]
     pieces = [poly]
     for A, B in cuts:
-        dx, dy = B[0] - A[0], B[1] - A[1]
-        dm = math.hypot(dx, dy) or 1.0
-        ux, uy = dx / dm, dy / dm
-        chord = LineString([(A[0] - ux, A[1] - uy), (B[0] + ux, B[1] + uy)])
         mid = ((A[0] + B[0]) / 2.0, (A[1] + B[1]) / 2.0)
         mp = Point(mid)
         nxt = []
@@ -220,12 +287,8 @@ def split_polygon_at_necks(poly: Polygon,
             if pc.distance(mp) > 1.0:
                 nxt.append(pc)
                 continue
-            try:
-                sub = _polys(split(pc, chord))
-            except _GEOM_EXC:
-                nxt.append(pc)
-                continue
-            if (len(sub) >= 2
+            sub = _cut_at_mouth(pc, A, B)
+            if (sub and len(sub) >= 2
                     and max(p.area for p in sub) >= min_pad_area
                     and min(p.area for p in sub) >= min_arm_area):
                 nxt.extend(sub)
