@@ -228,12 +228,22 @@ def find_conformance_violations(shapes, tol=CONFORMANCE_TOL_M):
 
 
 def enforce_conformance(layout: "PavementLayout",
-                        tol=CONFORMANCE_TOL_M) -> tuple[int, int]:
+                        tol=CONFORMANCE_TOL_M,
+                        owner_roles: "set[str] | None" = None
+                        ) -> tuple[int, int]:
     """Make the emitted shapes a conforming partition by inserting, into
     each shape's edges, every NEIGHBOUR vertex that lies on that edge
     (a T-junction).  The inserted vertex takes the edge's linearly
     interpolated altitude; a sloped-quad shape that gains a vertex is
     converted to ``node_altitudes`` (it can no longer be a 4-corner quad).
+
+    ``owner_roles``: when given, only shapes whose role is in this set may
+    RECEIVE inserted vertices (every eligible shape still contributes its
+    vertices as candidates).  Used for the PRE-SOLVE pass: conform only
+    apron/junction edges so abutting aprons share a canonical node and the
+    solver grades them to match — WITHOUT inserting vertices into taxi-rect
+    sloping edges (which would break their 4-corner planar form before the
+    solver assigns altitudes).
 
     Returns ``(shapes_modified, vertices_inserted)``.  Idempotent: a second
     call inserts nothing.  Overlay roles (boundary ribbon) are skipped.
@@ -245,6 +255,8 @@ def enforce_conformance(layout: "PavementLayout",
     from shapely.geometry import Polygon
 
     for s in elig:
+        if owner_roles is not None and (s.role or "") not in owner_roles:
+            continue
         ring = _open_ring(s.polygon)
         if ring is None:
             continue

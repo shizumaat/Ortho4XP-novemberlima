@@ -2906,6 +2906,23 @@ def build_airport_pavement(icao: str, xplane_root: str,
         _drop_overlap_against_fixed_shapes(
             layout, icao=icao, include_aprons=True)
 
+        # Conform apron/junction T-junctions BEFORE the solver so abutting
+        # aprons share a canonical node and the solver grades them to match.
+        # The solver couples adjacent shapes ONLY through shared nodes; where
+        # an apron's vertex lies on a neighbour apron's edge INTERIOR (a
+        # T-junction, not a shared corner) they share no node and the solver
+        # grades them independently → a step.  Restrict insertion to
+        # apron/junction edge-owners so taxi-rect sloping edges (still
+        # altitude-less here) keep their 4-corner planar form; the full
+        # conformance still runs post-emit for the rest.
+        from .conformance import enforce_conformance as _enforce_conf
+        from .layout import ROLE_APRON as _RA, ROLE_JUNCTION as _RJ
+        _ncs, _ncv = _enforce_conf(layout, owner_roles={_RA, _RJ})
+        if _ncv:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: pre-solve conformance — inserted "
+                f"{_ncv} shared apron/junction vertex(es) into {_ncs} shape(s).")
+
         if USE_PER_SURFACE_SOLVER and layout.anchor is not None:
             per_surface_solve(layout, icao,
                                dem=dem,
