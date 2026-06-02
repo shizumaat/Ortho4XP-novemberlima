@@ -50,6 +50,7 @@ from collections import deque
 
 from shapely.errors import GEOSException, TopologicalError
 
+from auto_patch.config import RUNWAY_END_FRACTION, RUNWAY_END_GRADE
 from auto_patch.elevation import (
     APRON_MAX_GRADE, SERVICE_ROAD_MAX_GRADE, TAXI_MAX_GRADE)
 from auto_patch.layout import (
@@ -1225,6 +1226,34 @@ def _build_runway_constraints(layout, bucket_to_idx):
     ``node_altitudes`` polygons -> all-pair, like a junction.  Consecutive
     sub-rects share their cross-edge corners, so these entries form one
     connected threshold->interior->threshold grade chain."""
+    # Per-ref runway axis (origin, unit dir, length) so an axial edge in the
+    # first/last RUNWAY_END_FRACTION gets the tighter RUNWAY_END_GRADE (0.8%)
+    # rather than the uniform 1.5%.  Without this, a runway-flex MOVE regrades
+    # the chain at a flat 1.5% and the end zones silently exceed the EASA/ICAO
+    # end-grade rule (HECA 05C/23C: valley flanks pulled to 1.5% inside the
+    # first/last quarter).  The move must keep the WHOLE chain compliant.
+    rwy_axis: dict = {}
+    _by_ref: dict = {}
+    for s in layout.shapes:
+        if (s.role == ROLE_RUNWAY and (s.ref or "")
+                and s.polygon is not None and not s.polygon.is_empty):
+            _by_ref.setdefault(s.ref, []).append(s)
+    for ref, ss in _by_ref.items():
+        pts = [p for s in ss
+               for p in _open_ring(list(s.polygon.exterior.coords))]
+        best = -1.0
+        A = B = None
+        for ai in range(len(pts)):
+            xa, ya = pts[ai]
+            for bi in range(ai + 1, len(pts)):
+                d2 = (pts[bi][0] - xa) ** 2 + (pts[bi][1] - ya) ** 2
+                if d2 > best:
+                    best, A, B = d2, pts[ai], pts[bi]
+        if A is not None and best > 0:
+            ln = math.sqrt(best)
+            rwy_axis[ref] = (A[0], A[1],
+                             (B[0] - A[0]) / ln, (B[1] - A[1]) / ln, ln)
+
     out = []
     for s in layout.shapes:
         if s.role not in (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING):
@@ -1241,6 +1270,21 @@ def _build_runway_constraints(layout, bucket_to_idx):
         if len(nodes) < 2:
             continue
         cap = _role_grade(s.role)
+        _ax = rwy_axis.get(s.ref or "") if s.role == ROLE_RUNWAY else None
+
+        def _axial_cap(a_xy, b_xy):
+            """Grade cap for an axial edge: RUNWAY_END_GRADE inside the
+            first/last quarter, else the uniform runway cap."""
+            if _ax is None:
+                return cap
+            ox, oy, ux, uy, ln = _ax
+            mx = 0.5 * (a_xy[0] + b_xy[0])
+            my = 0.5 * (a_xy[1] + b_xy[1])
+            frac = (((mx - ox) * ux + (my - oy) * uy) / ln) if ln > 0 else 0.5
+            if frac < RUNWAY_END_FRACTION or frac > 1.0 - RUNWAY_END_FRACTION:
+                return RUNWAY_END_GRADE
+            return cap
+
         edges: list[tuple[int, int, float]] = []
         flat_pairs: list[tuple[int, int]] = []
         is_rect = (s.role == ROLE_RUNWAY and len(coords) == 4
@@ -1261,7 +1305,8 @@ def _build_runway_constraints(layout, bucket_to_idx):
                     edges.append((idx[a], idx[b], 0.0))
                     flat_pairs.append((idx[a], idx[b]))
                 else:                    # the two LONG edges = sloping axial
-                    edges.append((idx[a], idx[b], cap * el))
+                    edges.append((idx[a], idx[b],
+                                  _axial_cap(coords[a], coords[b]) * el))
         else:
             m = len(idx)
             for a in range(m):
