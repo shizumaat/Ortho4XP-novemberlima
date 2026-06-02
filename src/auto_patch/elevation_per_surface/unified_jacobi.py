@@ -1436,6 +1436,13 @@ def _relax_runway_and_resolve(n, elev, layout, bucket_to_idx, base_hard,
     if seam_pinned or getattr(layout, "_seam_anchor_keys", None):
         levels.append(interior | (thresh - seam_pinned))
 
+    # The RUNWAY must never be pulled OUT of grade compliance to chase an apron
+    # / taxiway violation (user 2026-06-02): a runway has strict invariants
+    # (1.5 % mid, 0.8 % ends) and is higher priority than the connection.  Only
+    # accept a flex level if the moved runway chain itself stays compliant —
+    # otherwise the connection must yield (or, as a last resort, the thresholds
+    # release, which is the level-2 free-set), not the runway go out of grade.
+    rwy_edges = [e for sc in rwy_constraints for e in sc["edges"]]
     snapshot0 = list(elev)
     sweeps_total = 0
     committed_soft: set | None = None
@@ -1452,12 +1459,15 @@ def _relax_runway_and_resolve(n, elev, layout, bucket_to_idx, base_hard,
             held_extra=terminal_nodes, max_sweeps=1000, tol=comply)
         sweeps_total += sweeps
         w1, c1, t1 = _within_excess_stats(elev, pav_edges, comply)
+        _rw, rwy_c, _rt = _within_excess_stats(elev, rwy_edges, comply)
         # Accept iff it clears at least one violation (or shrinks total excess)
-        # WITHOUT worsening the worst — so a runway/threshold yield that fixes
-        # one connector can't be vetoed by an unrelated stubborn violation, and
-        # can't trade a small violation for a bigger one.
+        # WITHOUT worsening the worst AND without putting the runway itself out
+        # of grade — so a runway/threshold yield that fixes one connector can't
+        # be vetoed by an unrelated stubborn violation, can't trade a small
+        # violation for a bigger one, and can't sacrifice runway compliance.
         improved = (w1 <= w0 + comply
-                    and (c1 < c0 or t1 < t0 - comply))
+                    and (c1 < c0 or t1 < t0 - comply)
+                    and rwy_c == 0)
         if improved:
             committed_soft = soft                 # this level helped — keep it
             break
