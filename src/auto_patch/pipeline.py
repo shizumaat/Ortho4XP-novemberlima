@@ -2035,6 +2035,47 @@ def build_airport_pavement(icao: str, xplane_root: str,
         ref_overall_bearings=ref_overall_bearings,
         registry=layout.canonical_points)
 
+    # Drop DEGENERATE clipped taxi rects (user 2026-06-01).  The rect builder
+    # sizes each rect to the local pavement width and clips it to the pavement
+    # boundary.  Where a centerline segment runs through the tapering EDGE of
+    # an apron, the clip collapses the rect to a TRIANGLE (one short edge
+    # shrinks to a point) — a thin sliver that is not a usable taxi corridor
+    # and, kept, becomes a sloping stub hugging the apron's long edge at a
+    # different level (HECA J1: a 978 m² triangle → a 3.4 m cliff vs the
+    # apron, and ~41 edge-steps).  A valid taxi rect has 4 corners; a clipped
+    # corner yields a pentagon/hexagon (≥ 4, kept).  Only sub-quad shapes are
+    # degenerate.  Dropping loses no coverage — apron = pav_union − rects, so
+    # the footprint simply becomes apron residue.
+    def _distinct_corners(poly, tol_m: float = 0.5) -> int:
+        try:
+            c = list(poly.exterior.coords)
+        except _GEOM_EXC:
+            return 0
+        if c and c[0] == c[-1]:
+            c = c[:-1]
+        # Merge consecutive near-coincident vertices so a collapsed (≈0-length)
+        # edge counts as one corner — a quad with a vanished end edge IS a
+        # triangle.
+        merged: list = []
+        for p in c:
+            if not merged or math.hypot(p[0] - merged[-1][0],
+                                        p[1] - merged[-1][1]) > tol_m:
+                merged.append(p)
+        if (len(merged) > 1
+                and math.hypot(merged[0][0] - merged[-1][0],
+                               merged[0][1] - merged[-1][1]) <= tol_m):
+            merged.pop()
+        return len(merged)
+
+    _n_before = len(taxi_rects)
+    taxi_rects = [e for e in taxi_rects
+                  if e[0] is not None and not e[0].is_empty
+                  and _distinct_corners(e[0]) >= 4]
+    _n_degen = _n_before - len(taxi_rects)
+    if _n_degen:
+        UI.vprint(1, f"  [pav-builder] {icao}: dropped {_n_degen} degenerate "
+                     f"(sub-quad) clipped taxi rect(s) → apron residue.")
+
     # Scope discovery to clean free-strip lanes: drop discovered (TX) rects
     # the builder left sheared — those are apron-EMBEDDED lanes (snap fit the
     # rect to the ragged apron boundary).  They stay as residue and are handled
