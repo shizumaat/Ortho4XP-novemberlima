@@ -1,4 +1,101 @@
-# Auto-Patch Status — session 59 CLOSE → session 60 = REMAINING HECA = UNDER-DECOMPOSED APRONS
+# Auto-Patch Status — session 60 CLOSE → session 61 = APRON COHERENT-FILL + 3 QUEUED TASKS
+
+## ★★ SESSION 60 RESULTS (2026-06-02) — apron-edge coupling, robust neck cut, runway held in grade ★★
+
+Suite stayed **289 passed / 2 skipped / 0** throughout. All commits are GENERAL
+builder/solver fixes (HECA is the manual target; not in the baseline suite).
+
+### What landed (commits, dev — newest first)
+1. **Runway must not be pulled out of grade compliance** (9c87a64). The final
+   per-surface runway-flex (`_relax_runway_and_resolve`, unified_jacobi) accepted
+   a move purely on reducing the *pavement* violation count, so at HECA it pulled
+   05C/23C ~11 m BELOW its own terrain (chasing lower valley aprons), driving the
+   first/last quarter past the 0.8% end-grade. Now gate acceptance on the RUNWAY
+   staying compliant (`rwy_c == 0`). 05C/23C now holds its terrain profile
+   (~111–117 m, ends ≤0.76%, mid ≤0.96%).
+2. **Runway-flex applies the 0.8% end-grade cap** (c77b92a). `_build_runway_
+   constraints` computed a per-ref runway axis and uses `RUNWAY_END_GRADE` for
+   axial edges in the first/last `RUNWAY_END_FRACTION` (was a flat 1.5%, so a
+   moved chain silently went steep at the ends).
+3. **Conform apron/junction T-junctions BEFORE the solver** (e6a3826). The solver
+   couples shapes only via SHARED canonical nodes; T-junction conformance ran
+   AFTER the solve, so abutting aprons that met at a vertex-on-edge-interior
+   shared no node and graded independently → steps. New `enforce_conformance(
+   owner_roles={apron,junction})` runs pre-solve (rects untouched → keep their
+   4-corner planar form). **HECA cross 11→0, steps 41→5.**
+4. **Robust gap-free neck cut** (a3ce6b7). `neck_cuts` found HECA's two obvious
+   13.5 m apron necks but `shapely.ops.split` silently returned 1 face (chord
+   stays inside past a non-square wall). New `_cut_at_mouth` ring-splits the two
+   boundary arcs (shared chord, no gap); split/buffer fallbacks. Giant apron now
+   splits at the user-identified necks.
+5. **Drop degenerate (sub-quad) clipped taxi rects** (1a34fc7). A taxi rect whose
+   clip collapses to a triangle (HECA J1, an apron-embedded ramp) is dropped →
+   apron residue. **steps 69→41, cross 11→8.**
+
+### ★ KEY FINDING — the runway is NOT in a valley; the aprons are in lower terrain
+The smoothed DEM (what the build uses) at 05C/23C's T4-join is **~111–113 m** (the
+runway is mild, ~5 m dip between the 116/114 thresholds). The earlier "16.7 m
+valley dip to 99.7" was the SOLVER wrongly pulling the runway 11 m below its
+terrain to chase the aprons — now blocked. The connecting aprons/taxiways sit at
+their own LOWER terrain (cross_connector U 102.6, J/S/T/W apron 103.1, giant
+A/G/J apron #289 spans **75 m at the south terminals → ~111 m at the runway, a
+36 m range**). So the runway is correct; the aprons must **fill UP** to meet it.
+
+HECA now: overlap 0 / source 0 / cross 0 / steps 5 / **within 89** /
+vertex_on_flat_edge 1 / short_edge 2. The within JUMPED 20→89 because the
+runway-compliance gate stopped the runway masking the apron-fill gap (honest
+state: runway compliant, aprons not yet filled).
+
+## ★★ OPEN ITEMS FOR SESSION 61 ★★
+
+### A. Elevation-solver enhancement — APRON/TAXIWAY COHERENT-FILL (the dominant one)
+The 89 within-violations are aprons/taxiways/connectors that follow the DEM DOWN
+instead of FILLING UP to meet the now-compliant runway (and each other). Root =
+the band-solve (`_project_within_bands`, cyclic 50/50 cap-projection) does NOT
+converge on a large COUPLED all-pair region (HECA's merged apron + the runway
+chain): 4.4 m residual at 15000 sweeps. **Ruled out this session:** clean ≤200 m
+half-plane subdivision (within 20→41, broke CYXY/SPJC — reverted); node-wise
+clamp projection (within→30, risky — reverted); per-node / movable-rigid
+terminals (regressed — reverted). **The terminal coupling DID work** (terminals
+rigid-shift −5.9…+6.6 m as coupled clusters; they are NOT the blocker). Next:
+a CONVERGENT difference-constraint solve for the coupled region so a free apron
+FILLS toward its held runway/terminal edge (DEM = preference only), + the giant
+apron (#289, 36 m span) genuinely decomposed so all-pair is feasible. Also add a
+**runway-axis grade CHECK** (0.8% ends / 1.5% mid, per-segment) to check_grade +
+suite — currently the 60 m pair-gate skips runway diagonals so runway grade is
+never validated (and HECA isn't in the baseline set).
+
+### B. Task — coordinate standardization to (lat, lon) everywhere
+Survey done this session (mostly consistent already). Only real offenders:
+`layout._projection.to_m(lon, lat)` and the four `bridges._to_m(lon, lat)` take
+(lon, lat); `dsf_reader` RETURNS (lon, lat). ~15–25 call sites (osm_load,
+pipeline, terminals, bridges). Mechanical, suite-guarded. Rule to adopt: meters
+never cross a module boundary — only lat/lon does, always (lat, lon). (I hit the
+(lon,lat) trap twice this session.)
+
+### C. Task — neck-split / apron-on-rect-FLAT-EDGE root fix
+HECA apron (#303/#308) is split with a shared vertex landing mid-W2's FLAT (end)
+edge (t=0.32, ~20 m from a corner) — junctions/aprons must meet rects only at
+corners. Post-hoc corner-snapping FAILS (snapping the 20 m pokes the apron into
+taxiway T 6.4 m² + float-noise into terminals; can't re-clip post-emit without
+desyncing node_altitudes). Tried + reverted. Real fix = at the SOURCE: the neck/
+residue cut must not place a vertex on a rect flat edge (cut only at corners /
+free boundary). `_snap_near_corner_vertices_to_rect_corners` + the new
+`_rect_flat_edge_indices` helper were the experiment (reverted).
+
+### D. Task — curved extrema transition for rect terrain-slicing
+Instead of a single slice at a terrain extremum (sharp transition), insert a 20 m
+rect CENTERED on the slice and use the high-point / low-point vertical-curve
+profile for a smooth curved transition. (`split_long_rects_along_terrain`.) Not
+started.
+
+### Probes (this session, /tmp/probes/): heca_rwy_profile, heca_diag2 (terminal
+shifts + within breakdown), heca_w2/heca_w2b (flat-edge), heca_bump_precise,
+compare_builds (standalone == production, +2 shapeID offset). Anchor
+(30.10895832, 31.43477812). Build ≈55 s; cross-check production patch at
+`Patches/+30+030/+30+031/HECA_auto.patch.osm` (shapeID = standalone + 2).
+
+---
 
 ## ★★ SESSION 59 RESULTS (2026-06-01) — overlap+source CLEARED, cross/steps slashed ★★
 
