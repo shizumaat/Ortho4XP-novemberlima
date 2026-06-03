@@ -55,6 +55,7 @@ _GEOM_EXC = (ValueError, GEOSException, TopologicalError)
 
 __all__ = [
     "_absorb_apron_enclosed_groundside",
+    "merge_small_apron_fragments",
     "_reclassify_groundside_orphan_junctions",
     "_emit_groundside_pavement_dem",
     "_separate_groundside_from_airside",
@@ -290,6 +291,218 @@ def _shape_repr_alt(s: "BuiltShape") -> Optional[float]:
 # absorbed piece is still flush with the apron, not 1 m off it).
 _APRON_ISLAND_OPEN_MAX = 0.15    # max road/open frontage to still absorb
 _APRON_ISLAND_APRON_MIN = 0.15   # must touch at least this much apron
+# A qualifying piece whose perimeter is more than this fraction terminal-
+# bordered is absorbed into the TERMINAL (flat building pad), not the apron
+# (user 2026-06-03: "merge any apron inside a terminal with the terminal").
+_APRON_ISLAND_TERM_MAJORITY = 0.5
+
+
+def _best_bordering_shape(piece: "Polygon", shapes, radius_m: float):
+    """The shape in ``shapes`` sharing the most boundary length with ``piece``
+    (``None`` if none shares more than 1 m)."""
+    pb = piece.buffer(radius_m)
+    best = None
+    best_share = 1.0
+    for a in shapes:
+        if a.polygon is None or a.polygon.is_empty:
+            continue
+        try:
+            share = a.polygon.boundary.intersection(pb).length
+        except _GEOM_EXC:
+            continue
+        if share > best_share:
+            best_share = share
+            best = a
+    return best
+
+
+def _clean_merge(merged):
+    """Clean a merged polygon for emit: ``buffer(0)``, keep the largest part,
+    and DROP needle/sliver corners — the thin-gap bridge can leave a near-zero-
+    angle spike at the seam, and a sliver corner makes the X-Plane emit DROP the
+    WHOLE shape (it dropped terminal1 / terminal9 at HECA).  Returns a valid
+    ``Polygon`` whose corners clear ``SLIVER_ANGLE_THRESHOLD_DEG``, or ``None``
+    (caller bails and the piece falls back) if it can't be made clean."""
+    from .pavement.junctions import _drop_sliver_corners
+    if merged is None or merged.is_empty:
+        return None
+    try:
+        if not merged.is_valid:
+            merged = merged.buffer(0)
+        if merged.geom_type == "MultiPolygon":
+            merged = max(merged.geoms, key=lambda g: g.area)
+        if merged.geom_type != "Polygon" or merged.is_empty:
+            return None
+        ring = list(merged.exterior.coords)
+        if ring and ring[0] == ring[-1]:
+            ring = ring[:-1]
+        ring = _drop_sliver_corners(ring)
+        if len(ring) < 3:
+            return None
+        cleaned = Polygon(ring)
+        if not cleaned.is_valid:
+            cleaned = cleaned.buffer(0)
+        if cleaned.geom_type != "Polygon" or cleaned.is_empty:
+            return None
+        return cleaned
+    except _GEOM_EXC:
+        return None
+
+
+
+def _has_interior(g) -> bool:
+    """True if ``g`` (Polygon / MultiPolygon) has any interior ring (hole)."""
+    if g is None or g.is_empty:
+        return False
+    if g.geom_type == "Polygon":
+        return len(list(g.interiors)) > 0
+    if g.geom_type == "MultiPolygon":
+        return any(len(list(p.interiors)) > 0 for p in g.geoms)
+    return False
+
+
+def merge_small_apron_fragments(layout: "PavementLayout",
+                                radius_m: float = 1.5,
+                                max_area_m2: float = 600.0) -> int:
+    """PRE-SOLVE: fold a SMALL apron piece fully enclosed by apron/terminal into
+    its larger neighbour (PURE GEOMETRY — runs before the elevation solver, so
+    the merged shape's edges/elevation simply disappear and the solver grades
+    the one unified apron; no post-solve step to reconcile).
+
+    Only genuine slivers (< ``max_area_m2``) with NO taxi/runway/open frontage
+    qualify, so real aprons (incl. neck-split pads) are left alone.  HOLE-SLICE
+    SAFE: never fuses a union that would enclose a void, so the hole-router's
+    intentional hole-opening cuts are preserved.  Returns the count merged."""
+    aprons = [s for s in layout.shapes if s.role == ROLE_APRON
+              and s.polygon is not None and not s.polygon.is_empty
+              and s.polygon.geom_type == "Polygon"]
+    if len(aprons) < 2:
+        return 0
+    try:
+        other_union = unary_union([
+            s.polygon for s in layout.shapes
+            if s.role not in (ROLE_APRON, ROLE_TERMINAL)
+            and s.polygon is not None and not s.polygon.is_empty
+            and s.polygon.geom_type in ("Polygon", "MultiPolygon")])
+    except _GEOM_EXC:
+        other_union = None
+    n = 0
+    for s in sorted(aprons, key=lambda a: a.polygon.area):   # smallest first
+        p = s.polygon
+        if p is None or p.is_empty or p.area >= max_area_m2:
+            continue
+        if other_union is not None and \
+                _perimeter_frac_near(p, other_union, radius_m) > 0.05:
+            continue                       # touches taxi/runway -> real apron
+        hosts = [a for a in aprons if a is not s and a.polygon is not None
+                 and not a.polygon.is_empty and a.polygon.area > p.area]
+        host = _best_bordering_shape(p, hosts, radius_m)
+        if host is None:
+            continue
+        try:
+            merged = unary_union([host.polygon, p])
+        except _GEOM_EXC:
+            continue
+        if _has_interior(merged):
+            continue                       # would re-bury a void (hole slice)
+        cleaned = _clean_merge(merged)
+        if cleaned is None:
+            continue
+        host.polygon = cleaned             # solver assigns node_altitudes later
+        s.polygon = None
+        n += 1
+    if n:
+        layout.shapes = [s for s in layout.shapes if s.polygon is not None]
+    return n
+
+
+def _merge_piece_into_apron(piece: "Polygon", apron, radius_m: float) -> bool:
+    """Union ``piece`` into ``apron`` as ONE continuous, node-shared polygon and
+    rebuild the apron's per-vertex altitudes: old vertices keep theirs, new
+    (piece) vertices sample the apron's PRE-merge surface (``_edge_interp_alt``).
+    Returns ``False`` (caller falls back) if the union isn't a clean single
+    polygon."""
+    from types import SimpleNamespace
+    from .clearance import _edge_interp_alt
+    before = apron.polygon
+    before_na = list(apron.node_altitudes) if apron.node_altitudes else None
+    try:
+        merged = unary_union([before, piece])
+        if merged is not None and merged.geom_type != "Polygon":
+            # The piece touches the apron only at a POINT / is offset by a
+            # sub-metre gap (near-coincident boundaries, not edge-shared), so
+            # the plain union can't fuse them into one polygon (e.g. HECA
+            # #2169 ↔ #305).  Bridge ONLY the thin gap between them — the
+            # region within ``d`` of BOTH, in NEITHER — so the host apron's
+            # other boundaries are left untouched (no morphological close that
+            # would round corners / fill notches and desync shared edges).
+            d = 0.6
+            gap = (before.buffer(d).intersection(piece.buffer(d))
+                   .difference(before).difference(piece))
+            merged = unary_union([before, piece, gap])
+    except _GEOM_EXC:
+        return False
+    merged = _clean_merge(merged)
+    if merged is None:
+        return False
+    if before_na is None:
+        # Flat apron: the union stays flat at the same altitude, nothing to
+        # rebuild per-vertex.
+        apron.polygon = merged
+        return True
+    old = list(before.exterior.coords)
+    if old and old[0] == old[-1]:
+        old = old[:-1]
+    oldmap = {(round(x, 2), round(y, 2)): before_na[k]
+              for k, (x, y) in enumerate(old) if k < len(before_na)}
+    src = SimpleNamespace(node_altitudes=before_na, polygon=before)
+    mean = sum(before_na) / len(before_na)
+    new_ring = list(merged.exterior.coords)
+    if new_ring and new_ring[0] == new_ring[-1]:
+        new_ring = new_ring[:-1]
+    new_na = []
+    for (x, y) in new_ring:
+        z = oldmap.get((round(x, 2), round(y, 2)))
+        if z is None:
+            try:
+                z = _edge_interp_alt(src, x, y)
+            except _GEOM_EXC:
+                z = None
+        new_na.append(z if z is not None else mean)
+    apron.polygon = merged
+    apron.node_altitudes = new_na
+    apron.altitude = None
+    apron.altitude_high = None
+    apron.altitude_low = None
+    return True
+
+
+def _merge_piece_into_terminal(piece: "Polygon", terminal, radius_m: float) -> bool:
+    """Union ``piece`` into ``terminal`` as one continuous polygon, kept FLAT at
+    the terminal's level (building pads are flat).  Same thin-gap bridge as the
+    apron merge for point-touching pieces.  ``False`` if the union isn't a clean
+    single polygon."""
+    before = terminal.polygon
+    try:
+        merged = unary_union([before, piece])
+        if merged is not None and merged.geom_type != "Polygon":
+            d = 0.6
+            gap = (before.buffer(d).intersection(piece.buffer(d))
+                   .difference(before).difference(piece))
+            merged = unary_union([before, piece, gap])
+    except _GEOM_EXC:
+        return False
+    merged = _clean_merge(merged)
+    if merged is None:
+        return False
+    lvl = _shape_repr_alt(terminal)
+    terminal.polygon = merged
+    if lvl is not None:
+        terminal.altitude = round(lvl, 1)
+        terminal.node_altitudes = None
+        terminal.altitude_high = None
+        terminal.altitude_low = None
+    return True
 
 
 def _absorb_apron_enclosed_groundside(
@@ -324,13 +537,13 @@ def _absorb_apron_enclosed_groundside(
         apron_union = unary_union([s.polygon for s in apron_shapes])
     except _GEOM_EXC:
         return 0
+    terminal_shapes = [s for s in layout.shapes
+                       if s.role == ROLE_TERMINAL
+                       and s.polygon is not None and not s.polygon.is_empty]
     term_union = None
     try:
-        _t = [s.polygon for s in layout.shapes
-              if s.role == ROLE_TERMINAL
-              and s.polygon is not None and not s.polygon.is_empty]
-        if _t:
-            term_union = unary_union(_t)
+        if terminal_shapes:
+            term_union = unary_union([t.polygon for t in terminal_shapes])
     except _GEOM_EXC:
         term_union = None
     absorbed = 0
@@ -339,9 +552,20 @@ def _absorb_apron_enclosed_groundside(
         apron_f = _perimeter_frac_near(p, apron_union, radius_m)
         term_f = _perimeter_frac_near(p, term_union, radius_m)
         open_f = max(0.0, 1.0 - apron_f - term_f)
+        # Enclosed (no open road/terrain frontage) AND touches apron OR is
+        # mostly terminal-surrounded.
         if not (open_f <= _APRON_ISLAND_OPEN_MAX
-                and apron_f >= _APRON_ISLAND_APRON_MIN):
+                and (apron_f >= _APRON_ISLAND_APRON_MIN
+                     or term_f >= _APRON_ISLAND_TERM_MAJORITY)):
             continue
+        # Majority-terminal perimeter -> absorb into the TERMINAL (flat pad).
+        if term_f >= _APRON_ISLAND_TERM_MAJORITY and terminal_shapes:
+            host_t = _best_bordering_shape(p, terminal_shapes, radius_m)
+            if host_t is not None and _merge_piece_into_terminal(
+                    p, host_t, radius_m):
+                s.polygon = None
+                absorbed += 1
+                continue
         # Flush elevation = mean representative altitude of the apron
         # shapes that touch this piece (fall back to all aprons).
         try:
@@ -379,7 +603,16 @@ def _absorb_apron_enclosed_groundside(
             s.polygon = None
             absorbed += 1
             continue
-        # Reclassify the source shape in place into flush apron.
+        # (user 2026-06-03) Genuinely MERGE the piece into the apron it borders
+        # most — one continuous, node-shared polygon — instead of leaving a
+        # standalone flat "apron-island" whose coincident-but-unshared vertices
+        # tear into cliffs when the apron surface moves.  Fall back to the flush
+        # standalone re-tag only when there is no apron to merge into.
+        host = _best_bordering_shape(q, apron_shapes, radius_m)
+        if host is not None and _merge_piece_into_apron(q, host, radius_m):
+            s.polygon = None
+            absorbed += 1
+            continue
         s.polygon = q
         s.role = ROLE_APRON
         s.ref = "apron-island"
@@ -391,6 +624,7 @@ def _absorb_apron_enclosed_groundside(
     if absorbed:
         layout.shapes = [s for s in layout.shapes if s.polygon is not None]
     return absorbed
+
 
 
 def _emit_groundside_pavement_dem(

@@ -286,6 +286,12 @@ def emit_terrain_transition_features(layout: PavementLayout, icao: str, xplane_r
                     f"piece(s) back into apron (not groundside).")
         except _GEOM_EXC:
             pass
+        # NOTE (2026-06-03): apron-fragment consolidation (_consolidate_apron_
+        # fragments) was prototyped here but REGRESSED grade — the flagged
+        # fragments (#375/#376/#377) sit at genuine terrain-driven elevations
+        # (#377 98.5m vs host #295 104.3m), so folding them post-solve just
+        # relocates the ~6m step to their other edges.  Left dormant (not
+        # called) pending a pre-solve approach.  See memory apron_island_merge.
         # Per user 2026-04-29 / 2026-05-21 (CYXY -10111 / -10115;
         # HECA terminal aprons): junction polygons connected ONLY to
         # non-airside pavement (groundside polygons or each other), with

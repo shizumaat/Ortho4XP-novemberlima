@@ -2912,6 +2912,19 @@ def build_airport_pavement(icao: str, xplane_root: str,
         _drop_overlap_against_fixed_shapes(
             layout, icao=icao, include_aprons=True)
 
+        # (user 2026-06-03) Fold small apron fragments fully enclosed by apron/
+        # terminal into their larger neighbour BEFORE the solve — the fragment's
+        # edges/elevation disappear and the solver grades the unified apron, so
+        # there is no post-solve step to reconcile (a post-solve merge just
+        # relocated the cliff).  Runs AFTER the overlap-clip, which itself
+        # creates small clipped apron fragments.  Hole-slice safe.
+        from .groundside import merge_small_apron_fragments
+        _n_frag = merge_small_apron_fragments(layout)
+        if _n_frag:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: merged {_n_frag} small apron "
+                f"fragment(s) into their host apron (pre-solve).")
+
         # Conform apron/junction T-junctions BEFORE the solver so abutting
         # aprons share a canonical node and the solver grades them to match.
         # The solver couples adjacent shapes ONLY through shared nodes; where
