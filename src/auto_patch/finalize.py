@@ -61,6 +61,7 @@ from .elevation import (
     _split_sloped_rects_at_violations,
 )
 from .groundside import (
+    _absorb_apron_enclosed_groundside,
     _reclassify_groundside_orphan_junctions,
     _separate_groundside_from_airside,
     _emit_groundside_pavement_dem,
@@ -269,6 +270,20 @@ def emit_terrain_transition_features(layout: PavementLayout, icao: str, xplane_r
                     f"  [pav-builder] emitted "
                     f"{n_gs} groundside pavement "
                     f"polygon(s) with DEM altitudes.")
+        except _GEOM_EXC:
+            pass
+        # Apron-island absorption (user 2026-06-03): a groundside piece
+        # wedged inside the airside with no open road/terrain frontage (an
+        # apron island, apron-hugging clip residue, or apron/terminal
+        # sandwich sliver) is reclassified back to flush apron.  Runs after
+        # the emit (so the perimeter reflects real apron adjacency) and
+        # before the separation gap is opened (so it stays flush).
+        try:
+            n_abs = _absorb_apron_enclosed_groundside(layout)
+            if n_abs:
+                UI.vprint(1,
+                    f"  [pav-builder] absorbed {n_abs} airside-wedged "
+                    f"piece(s) back into apron (not groundside).")
         except _GEOM_EXC:
             pass
         # Per user 2026-04-29 / 2026-05-21 (CYXY -10111 / -10115;

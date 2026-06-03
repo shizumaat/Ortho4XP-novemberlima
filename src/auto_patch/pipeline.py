@@ -1209,7 +1209,13 @@ def build_airport_pavement(icao: str, xplane_root: str,
                                     and _g.area >= 5.0):
                                 _gs_polys.append(_g)
                 # Stash on the layout so the elevation pass can
-                # find them once DEM is loaded.
+                # find them once DEM is loaded.  (Apron-island
+                # absorption — pieces wrongly carved out of the apron by
+                # the groundside strip — happens later in
+                # ``_emit_groundside_pavement_dem`` where the built apron
+                # shapes exist to measure enclosure against; pav_union is
+                # one undifferentiated blob here so apron vs road can't be
+                # told apart yet.)
                 layout._groundside_polys = _gs_polys
             except _GEOM_EXC:
                 layout._groundside_polys = []

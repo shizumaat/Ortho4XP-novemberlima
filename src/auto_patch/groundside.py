@@ -54,6 +54,7 @@ _GEOM_EXC = (ValueError, GEOSException, TopologicalError)
 
 
 __all__ = [
+    "_absorb_apron_enclosed_groundside",
     "_reclassify_groundside_orphan_junctions",
     "_emit_groundside_pavement_dem",
     "_separate_groundside_from_airside",
@@ -222,6 +223,174 @@ def _dem_follow_polygon(p, _dem_at, densify_step_m: float = 15.0,
     alts = _grade_limit_ring(rebuilt, alts, GROUNDSIDE_MAX_GRADE)
     alts = [round(float(a), 1) for a in alts]
     return new_poly, alts + [alts[0]]
+
+
+def _perimeter_frac_near(poly, region, radius_m: float = 1.5,
+                         step_m: float = 1.5) -> float:
+    """Fraction of ``poly``'s exterior perimeter lying within ``radius_m``
+    of ``region`` (a Polygon/MultiPolygon, or None → 0.0).
+
+    A genuine curbside strip faces a road / open terrain on its outer
+    side (that perimeter is NOT near any apron), so its apron-bounded
+    fraction is low.  An apron island wrongly carved out by a groundside
+    strip is bounded by apron almost all the way around."""
+    if region is None or getattr(region, "is_empty", True):
+        return 0.0
+    try:
+        ring = list(poly.exterior.coords)
+    except _GEOM_EXC:
+        return 0.0
+    near = 0.0
+    total = 0.0
+    for i in range(len(ring) - 1):
+        ax, ay = ring[i]
+        bx, by = ring[i + 1]
+        seg = math.hypot(bx - ax, by - ay)
+        if seg < 1e-6:
+            continue
+        n = max(1, int(seg // step_m))
+        sub = seg / n
+        for k in range(n):
+            t = (k + 0.5) / n
+            try:
+                if region.distance(Point(ax + (bx - ax) * t,
+                                         ay + (by - ay) * t)) <= radius_m:
+                    near += sub
+            except _GEOM_EXC:
+                pass
+            total += sub
+    return (near / total) if total else 0.0
+
+
+def _shape_repr_alt(s: "BuiltShape") -> Optional[float]:
+    """One representative elevation for a shape, whichever altitude
+    convention it carries (flat / sloped / per-vertex)."""
+    if s.altitude is not None:
+        return float(s.altitude)
+    if s.altitude_high is not None and s.altitude_low is not None:
+        return 0.5 * (float(s.altitude_high) + float(s.altitude_low))
+    if s.node_altitudes:
+        vals = [float(a) for a in s.node_altitudes if a is not None]
+        if vals:
+            return sum(vals) / len(vals)
+    return None
+
+
+# Apron-island / airside-wedged absorption (user 2026-06-03).  A piece is
+# reclassified from groundside to flush ``apron`` when it has essentially
+# NO open-terrain / road frontage (it is wedged inside the airside: an
+# apron island, an apron-hugging clip residue, or a sliver between apron
+# and the terminal) AND it touches at least some apron.  Genuine curbside
+# faces a road / open terrain on its outer side, so its open fraction is
+# well above the gate and it stays groundside.
+#
+# Measured on the EMITTED groundside shapes, AFTER ``_emit_..._dem`` has
+# subtracted apron/terminal (so the perimeter reflects true adjacency) but
+# BEFORE ``_separate_..._airside`` opens the 1 m clearance gap (so an
+# absorbed piece is still flush with the apron, not 1 m off it).
+_APRON_ISLAND_OPEN_MAX = 0.15    # max road/open frontage to still absorb
+_APRON_ISLAND_APRON_MIN = 0.15   # must touch at least this much apron
+
+
+def _absorb_apron_enclosed_groundside(
+        layout: "PavementLayout",
+        radius_m: float = 1.5) -> int:
+    """Reclassify emitted groundside shapes that sit wedged inside the
+    airside — apron islands, apron-hugging clip residue, apron/terminal
+    sandwich slivers — back into flush ``apron`` pavement at the
+    neighbouring aprons' elevation, instead of leaving them as
+    DEM-following groundside that would otherwise become a 1 m-gapped
+    sliver after the separation pass.
+
+    A piece qualifies when its perimeter has at most ``_APRON_ISLAND_
+    OPEN_MAX`` open (road / terrain) frontage and touches at least
+    ``_APRON_ISLAND_APRON_MIN`` apron.  Genuine curbside — which faces a
+    road on its outer side — keeps a high open fraction and is left alone.
+
+    Runs AFTER ``_emit_groundside_pavement_dem`` and BEFORE
+    ``_separate_groundside_from_airside``.  Returns the number absorbed.
+    """
+    gs_shapes = [s for s in layout.shapes
+                 if s.role == ROLE_GROUNDSIDE_PAVEMENT
+                 and s.polygon is not None and not s.polygon.is_empty]
+    if not gs_shapes:
+        return 0
+    apron_shapes = [s for s in layout.shapes
+                    if s.role == ROLE_APRON
+                    and s.polygon is not None and not s.polygon.is_empty]
+    if not apron_shapes:
+        return 0
+    try:
+        apron_union = unary_union([s.polygon for s in apron_shapes])
+    except _GEOM_EXC:
+        return 0
+    term_union = None
+    try:
+        _t = [s.polygon for s in layout.shapes
+              if s.role == ROLE_TERMINAL
+              and s.polygon is not None and not s.polygon.is_empty]
+        if _t:
+            term_union = unary_union(_t)
+    except _GEOM_EXC:
+        term_union = None
+    absorbed = 0
+    for s in gs_shapes:
+        p = s.polygon
+        apron_f = _perimeter_frac_near(p, apron_union, radius_m)
+        term_f = _perimeter_frac_near(p, term_union, radius_m)
+        open_f = max(0.0, 1.0 - apron_f - term_f)
+        if not (open_f <= _APRON_ISLAND_OPEN_MAX
+                and apron_f >= _APRON_ISLAND_APRON_MIN):
+            continue
+        # Flush elevation = mean representative altitude of the apron
+        # shapes that touch this piece (fall back to all aprons).
+        try:
+            halo = p.buffer(radius_m + 0.5)
+            neigh = [_shape_repr_alt(a) for a in apron_shapes
+                     if a.polygon.intersects(halo)]
+        except _GEOM_EXC:
+            neigh = []
+        neigh = [a for a in neigh if a is not None]
+        if not neigh:
+            neigh = [a for a in (_shape_repr_alt(a) for a in apron_shapes)
+                     if a is not None]
+        if not neigh:
+            continue                # no usable altitude — leave as gs
+        alt = round(sum(neigh) / len(neigh), 1)
+        # Clip to the terminal footprint so aircraft apron never intrudes
+        # under the building; keep the largest surviving piece.
+        q = p
+        if term_union is not None:
+            try:
+                d = p.difference(term_union)
+            except _GEOM_EXC:
+                d = p
+            if d is None or d.is_empty:
+                q = None
+            elif d.geom_type == "Polygon":
+                q = d
+            elif d.geom_type == "MultiPolygon":
+                parts = [g for g in d.geoms
+                         if g.geom_type == "Polygon" and not g.is_empty]
+                q = max(parts, key=lambda g: g.area) if parts else None
+        if q is None or q.area < _GROUNDSIDE_MIN_AREA_M2:
+            # Entirely under the terminal / too small once clipped — drop
+            # it (mark the source shape empty; it is removed below).
+            s.polygon = None
+            absorbed += 1
+            continue
+        # Reclassify the source shape in place into flush apron.
+        s.polygon = q
+        s.role = ROLE_APRON
+        s.ref = "apron-island"
+        s.altitude = alt
+        s.node_altitudes = None
+        s.altitude_high = None
+        s.altitude_low = None
+        absorbed += 1
+    if absorbed:
+        layout.shapes = [s for s in layout.shapes if s.polygon is not None]
+    return absorbed
 
 
 def _emit_groundside_pavement_dem(
