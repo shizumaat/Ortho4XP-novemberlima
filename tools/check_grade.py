@@ -604,6 +604,40 @@ def _airside_groundside_pair(way_a: "Way", way_b: "Way") -> bool:
 _STEP_CONTACT_TOL_M = 1.0
 
 
+_GRADE_VISIBILITY_BUFFER_M = 1.0  # matches unified_jacobi._GRADE_VISIBILITY_BUFFER_M
+
+
+def _polygon_visibility(pts):
+    """Return a ``vis(xa, ya, xb, yb) -> bool`` predicate: True iff the chord
+    stays inside the polygon defined by ``pts`` (ring order, [(x, y, ...), ...])
+    grown by ``_GRADE_VISIBILITY_BUFFER_M``.  Returns ``None`` if shapely is
+    unavailable or the polygon is degenerate, so callers fall back to plain
+    all-pair (the prior behaviour)."""
+    try:
+        from shapely.geometry import LineString, Polygon
+        from shapely.prepared import prep
+    except ImportError:
+        return None
+    try:
+        poly = Polygon([(p[0], p[1]) for p in pts])
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        poly = poly.buffer(_GRADE_VISIBILITY_BUFFER_M)
+        if poly.is_empty:
+            return None
+        pg = prep(poly)
+    except Exception:
+        return None
+
+    def _vis(xa, ya, xb, yb):
+        try:
+            return pg.contains(LineString(((xa, ya), (xb, yb))))
+        except Exception:
+            return True
+
+    return _vis
+
+
 def _check_within_shape(ways: List[Way],
                         nodes: Dict[str, Tuple[float, float]],
                         ll_to_m,
@@ -667,16 +701,28 @@ def _check_within_shape(ways: List[Way],
         if n == 3:
             pairs = [(0, 1), (1, 2), (2, 0)]  # all 3 triangle edges
         else:
-            # All pairs within WITHIN_SHAPE_MAX_PAIR_DIST_M.
+            # All VISIBLE pairs within WITHIN_SHAPE_MAX_PAIR_DIST_M.  For an
+            # APRON the grade limit applies along the pavement, so a pair whose
+            # straight chord leaves the polygon (cuts across a notch /
+            # non-pavement on a non-convex apron) is NOT a real constraint — the
+            # surface follows the longer in-pavement path between them.  Mirrors
+            # the solver's apron visibility graph (unified_jacobi.
+            # _visible_grade_edges), scoped to aprons for the same reason.
+            _vis = (_polygon_visibility(pts)
+                    if w.tags.get("role") == "apron" else None)
             pairs = []
             for i in range(n):
                 for j in range(i + 1, n):
                     dx = pts[i][0] - pts[j][0]
                     dy = pts[i][1] - pts[j][1]
                     if (dx * dx + dy * dy
-                            <= WITHIN_SHAPE_MAX_PAIR_DIST_M
+                            > WITHIN_SHAPE_MAX_PAIR_DIST_M
                             * WITHIN_SHAPE_MAX_PAIR_DIST_M):
-                        pairs.append((i, j))
+                        continue
+                    if _vis is not None and not _vis(
+                            pts[i][0], pts[i][1], pts[j][0], pts[j][1]):
+                        continue
+                    pairs.append((i, j))
         # Per-axis grading (when taxi_axes are supplied): a JUNCTION's pairs
         # are graded per-axis (longitudinal along a common centerline +
         # transverse) and unregulated cross-axis diagonals are skipped.  An

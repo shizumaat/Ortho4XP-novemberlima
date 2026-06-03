@@ -1064,6 +1064,52 @@ def _directional_relief(n, elev, is_hard, edge_grade, edge_length,
     return 1 + n_sweeps
 
 
+# Tolerance buffer for the in-pavement visibility test: a chord is "visible"
+# (a real grade constraint) if it stays within the polygon grown by this margin.
+# Absorbs polygon-edge-coincident chords + float noise; far smaller than any real
+# apron void, so it never bridges a genuine gap between pavement arms.
+_GRADE_VISIBILITY_BUFFER_M = 1.0
+
+
+def _visible_grade_edges(coords, idx, cap, polygon):
+    """All-pair grade edges restricted to MUTUALLY-VISIBLE vertices — the chord
+    between the two vertices stays inside ``polygon`` (grown by
+    ``_GRADE_VISIBILITY_BUFFER_M``).  This is the in-pavement visibility graph:
+    the band Dijkstra over these edges yields the true geodesic distance, so a
+    non-convex apron's far ends are correctly far apart instead of joined by a
+    Euclidean chord that cuts across non-pavement.  Falls back to plain all-pair
+    if the geometry op fails (degenerate/invalid polygon)."""
+    from shapely.geometry import LineString
+    m = len(idx)
+    try:
+        from shapely.prepared import prep
+        pg = prep(polygon.buffer(_GRADE_VISIBILITY_BUFFER_M))
+        _vis = pg.contains
+    except _GEOM_EXC:
+        pg = None
+        _vis = None
+    out: list[tuple[int, int, float]] = []
+    for a in range(m):
+        if idx[a] is None:
+            continue
+        xa, ya = coords[a]
+        for b in range(a + 1, m):
+            if idx[b] is None or idx[a] == idx[b]:
+                continue
+            xb, yb = coords[b]
+            d = math.hypot(xa - xb, ya - yb)
+            if d < 0.5:
+                continue
+            if _vis is not None:
+                try:
+                    if not _vis(LineString(((xa, ya), (xb, yb)))):
+                        continue
+                except _GEOM_EXC:
+                    pass
+            out.append((idx[a], idx[b], cap * d))
+    return out
+
+
 def _build_shape_constraints(layout, bucket_to_idx):
     """Per-shape grade constraints for the directional relief: one entry per
     soft pavement shape with ``{nodes, edges, flat}`` — its node indices, its
@@ -1131,8 +1177,23 @@ def _build_shape_constraints(layout, bucket_to_idx):
                     flat_pairs.append((idx[a], idx[b]))
                 else:                    # the two most-parallel = sloping edges
                     edges.append((idx[a], idx[b], cap * el))
+        elif s.role == ROLE_APRON:
+            # In-pavement VISIBILITY graph for APRONS.  The within-shape grade
+            # limit applies ALONG the pavement, so a grade edge is added only
+            # between MUTUALLY-VISIBLE vertices (the chord stays inside the
+            # polygon).  On a non-convex apron the Euclidean chord between two
+            # far vertices leaves the polygon and cuts across non-pavement,
+            # fabricating a phantom short grade path; restricting to visible
+            # pairs makes the band Dijkstra compute the true GEODESIC distance
+            # (visibility-graph shortest path = exact geodesic in a simple
+            # polygon — bends at reflex vertices, all of which are nodes here).
+            # Convex aprons: every pair visible, so identical to all-pair.
+            # Scoped to aprons (not junctions/seam-rects): those are small and
+            # near-convex, where the chord problem is negligible but the change
+            # risks marginal regressions.
+            edges.extend(_visible_grade_edges(coords, idx, cap, s.polygon))
         else:
-            # All-pair (apron / junction / seam-cut rect).
+            # All-pair (junction / seam-cut rect): small near-convex shapes.
             m = len(idx)
             for a in range(m):
                 if idx[a] is None:
