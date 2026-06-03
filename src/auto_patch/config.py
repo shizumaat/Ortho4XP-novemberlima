@@ -335,7 +335,7 @@ ENABLE_APRON_NECK_SPLIT = True
 # far corner.  Default OFF while A/B-validating on HECA; flip via env
 # ``O4_HOLE_ROUTER=1`` for a single build.
 import os as _os  # noqa: E402
-HOLE_ROUTER_ENABLED = _os.environ.get("O4_HOLE_ROUTER", "0") == "1"
+HOLE_ROUTER_ENABLED = _os.environ.get("O4_HOLE_ROUTER", "1") == "1"
 
 
 # ── Patch mesh-density tuning (X-Plane load-time optimization) ─────────
