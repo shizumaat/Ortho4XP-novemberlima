@@ -21,6 +21,7 @@ __all__ = [
     "ABSORB_RECTS_ALONGSIDE_APRONS",
     "ENABLE_DISCOVERED_TAXIWAYS",
     "ENABLE_APRON_NECK_SPLIT",
+    "HOLE_ROUTER_ENABLED",
     "EMIT_BRIDGES_AND_TUNNELS",
     "JUNCTION_CLUSTER_DIST_M",
     "MAX_BOUNDARY_EDGE_M",
@@ -326,6 +327,15 @@ ENABLE_DISCOVERED_TAXIWAYS = True
 # connectors.  Keeps each apron all-pair surface convex and feeds the
 # directional-solver pad/connector hierarchy.  See pavement/apron_necks.py.
 ENABLE_APRON_NECK_SPLIT = True
+
+# (session 61) Open residue holes with the in-pavement VISIBILITY-GRAPH router
+# (pavement/hole_router.py) instead of the full-span centroid guillotine in
+# `_decompose_polygon_with_holes`: routed two-bridge SPLIT cuts that bend
+# around rects corner-to-corner, never plant a mid-edge node, and never shear a
+# far corner.  Default OFF while A/B-validating on HECA; flip via env
+# ``O4_HOLE_ROUTER=1`` for a single build.
+import os as _os  # noqa: E402
+HOLE_ROUTER_ENABLED = _os.environ.get("O4_HOLE_ROUTER", "0") == "1"
 
 
 # ── Patch mesh-density tuning (X-Plane load-time optimization) ─────────

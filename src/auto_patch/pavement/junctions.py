@@ -84,6 +84,7 @@ def _decompose_polygon_with_holes(polygon: Polygon,
                                   runway_axis_deg: float | None = None,
                                   corner_snap_pts: list[tuple[float, float]] | None = None,
                                   corner_snap_tol_m: float = 5.0,
+                                  _router: bool = True,
                                   ) -> list[Polygon]:
     """Return a list of simple (no-hole) polygons that tile the same
     area as ``polygon``.
@@ -118,6 +119,15 @@ def _decompose_polygon_with_holes(polygon: Polygon,
             return [Polygon(spliced_coords).buffer(0)]
         except _GEOM_EXC:
             return [Polygon(polygon.exterior.coords)]
+    # (session 61) Prefer the in-pavement VISIBILITY-GRAPH router: routed
+    # two-bridge SPLIT cuts that bend around rects corner-to-corner instead of
+    # the full-span centroid chord (which shears far corners on non-convex
+    # aprons).  Returns None to fall back to the legacy guillotine below.
+    from ..config import HOLE_ROUTER_ENABLED
+    if _router and HOLE_ROUTER_ENABLED:
+        routed = _decompose_via_router(polygon, min_area_m2, runway_axis_deg)
+        if routed is not None:
+            return routed
     big_interiors.sort(key=lambda h: -Polygon(h).area)
     hole = big_interiors[0]
     cx = float(hole.centroid.x)
@@ -291,7 +301,8 @@ def _decompose_polygon_with_holes(polygon: Polygon,
             g, min_area_m2=min_area_m2, max_depth=max_depth - 1,
             runway_axis_deg=runway_axis_deg,
             corner_snap_pts=corner_snap_pts,
-            corner_snap_tol_m=corner_snap_tol_m))
+            corner_snap_tol_m=corner_snap_tol_m,
+            _router=False))
     # Sliver clean-up: smart-cut alignment eliminates the most
     # egregious wide-band strips (5 m × 67 m, 10 m × 119 m) that
     # appeared with horizontal-only cuts, but recursive splits can
@@ -304,6 +315,68 @@ def _decompose_polygon_with_holes(polygon: Polygon,
     pieces = _merge_thin_decomposed_pieces(
         pieces, min_thickness_m=MIN_PIECE_THICKNESS_M)
     return pieces
+
+
+def _decompose_via_router(polygon: "Polygon",
+                          min_area_m2: float,
+                          runway_axis_deg: float | None,
+                          ) -> "list[Polygon] | None":
+    """Open every interior hole with visibility-graph-routed SPLIT cuts
+    (``hole_router.plan_hole_cuts``) and return the resulting simple-polygon
+    pieces, or ``None`` to fall back to the legacy guillotine.
+
+    The graph is built ONCE for ``polygon`` and every hole routed against it.
+    Each cut bends around rects corner-to-corner and ends on existing vertices,
+    so no mid-edge node is planted and no far corner is sheared.  A piece that
+    still carries a big hole (a hole whose two diameter ends had no visible
+    bridge to the exterior) is handed to the legacy guillotine in isolation."""
+    from .hole_router import plan_hole_cuts
+    from shapely.ops import split as _shp_split
+    try:
+        cuts = plan_hole_cuts(polygon, min_hole_area=min_area_m2,
+                              runway_axis_deg=runway_axis_deg)
+    except _GEOM_EXC:
+        return None
+    if not cuts:
+        return None
+    pieces: list[Polygon] = [polygon]
+    for cut in cuts:
+        nxt: list[Polygon] = []
+        for p in pieces:
+            if p.geom_type != "Polygon" or p.is_empty:
+                continue
+            try:
+                if not cut.intersects(p):
+                    nxt.append(p)
+                    continue
+                res = _shp_split(p, cut)
+            except _GEOM_EXC:
+                nxt.append(p)
+                continue
+            geoms = (list(res.geoms) if res.geom_type != "Polygon"
+                     else [res])
+            nxt.extend(g for g in geoms
+                       if g.geom_type == "Polygon" and not g.is_empty)
+        pieces = nxt
+    out: list[Polygon] = []
+    for p in pieces:
+        if p.is_empty or p.geom_type != "Polygon":
+            continue
+        if any(Polygon(h).area >= min_area_m2 for h in p.interiors):
+            # A hole the router could not open — let the guillotine handle
+            # just this piece (no further router attempts: _router=False).
+            out.extend(_decompose_polygon_with_holes(
+                p, min_area_m2=min_area_m2,
+                runway_axis_deg=runway_axis_deg, _router=False))
+            continue
+        if p.interiors:
+            p = Polygon(p.exterior.coords)   # drop sub-threshold holes
+        if p.is_empty or p.area < min_area_m2:
+            continue
+        out.append(p)
+    if not out:
+        return None
+    return _merge_thin_decomposed_pieces(out, min_thickness_m=12.0)
 
 
 def _polygon_min_thickness(poly: "Polygon") -> float:
