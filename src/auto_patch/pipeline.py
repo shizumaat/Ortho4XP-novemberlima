@@ -2474,8 +2474,8 @@ def build_airport_pavement(icao: str, xplane_root: str,
             polygon=rect, role=role, ref=ref, source_axis=axis,
             is_bridge=(ri in bridge_rect_indices)))
 
-    # ── Junction emission + pre-Phase-2 geometry finalize ────────
-    junction_emit.emit_junctions_and_finalize(
+    # ── Junction emission (finalize/repair runs downstream) ──────
+    junction_emit.emit_junctions(
         layout,
         pav_union=pav_union,
         emitted_taxi_rects=emitted_taxi_rects,

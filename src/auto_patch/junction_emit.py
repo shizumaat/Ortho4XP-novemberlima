@@ -9,7 +9,7 @@ with their rect / terminal / runway neighbours, then enforces the
 layout.
 
 Public API:
-    emit_junctions_and_finalize(
+    emit_junctions(
         layout, *, pav_union, emitted_taxi_rects, terminal_union,
         taxi_rects, icao)
 """
@@ -19,29 +19,13 @@ import math
 
 import O4_UI_Utils as UI
 from shapely.errors import GEOSException, TopologicalError
-from shapely.geometry import Point, Polygon
-from shapely.ops import nearest_points, unary_union
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
 
 from .config import EMIT_JUNCTIONS
-from .elevation import (
-    SHARED_VERTEX_CLUSTER_TOL_M,
-    _drop_overlap_against_fixed_shapes,
-)
-from .layout import BuiltShape, ROLE_JUNCTION, ROLE_RUNWAY, ROLE_TERMINAL
-from .pavement.centerlines import _insert_points_on_boundary
-from .pavement.junctions import (
-    _decompose_polygon_with_holes,
-    _rect_end_corners,
-)
-from .pavement.stubs import (
-    _clip_residue_at_stub_sloping_edges,
-)
+from .layout import BuiltShape, ROLE_JUNCTION
+from .pavement.junctions import _decompose_polygon_with_holes
 from .canonical_points import snap_polygon_through_registry
-from .pavement.union_helpers import _merge_near_touching
-from .pavement.vertices import (
-    _enforce_shared_vertices,
-    _validate_shared_vertex_invariant,
-)
 
 
 # Narrow exception tuple for shapely / numeric-geometry failure
@@ -49,7 +33,7 @@ from .pavement.vertices import (
 _GEOM_EXC = (ValueError, GEOSException, TopologicalError)
 
 
-__all__ = ["emit_junctions_and_finalize"]
+__all__ = ["emit_junctions"]
 
 
 def _drop_orphan_strips(pieces, fixed_shape_polys, min_other_perim_m=10.0):
@@ -107,9 +91,14 @@ def _drop_orphan_strips(pieces, fixed_shape_polys, min_other_perim_m=10.0):
     return out
 
 
-def emit_junctions_and_finalize(layout, *, pav_union, emitted_taxi_rects,
-                                terminal_union, taxi_rects, icao):
+def emit_junctions(layout, *, pav_union, emitted_taxi_rects,
+                   terminal_union, taxi_rects, icao):
     """Emit junction polygons via simple residue subtraction.
+
+    (Renamed from ``emit_junctions_and_finalize`` 2026-06-02: this function
+    only EMITS junctions — the finalize/repair passes it once implied now run
+    downstream in ``finalize.compute_elevations_and_repair_geometry``, so the
+    emit↔finalize seam is the gap between the two pipeline calls.)
 
     Per user 2026-05-05 (minimal-emit approach): junctions are simply
     the connected components of ``pav_union − rects − terminals −
