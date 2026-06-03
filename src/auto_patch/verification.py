@@ -355,7 +355,13 @@ def check_vertex_on_flat_edge(layout):
                and s.altitude_low is not None]
     if not sloping:
         return []
-    EDGE_PROX_M = 1.0
+    # Must EXCEED the 1.0 m perpendicular nudge that
+    # ``_push_junction_vertices_off_taxi_rect_edges`` applies (edge_gap_m=1.0):
+    # a vertex pushed to *exactly* 1.0 m off a flat edge straddles a 1.0 m
+    # threshold (float-flaky — caught at 0.999, missed at 1.0001, so the HECA
+    # W2/#303 gap slipped through while stub C was caught).  1.5 m reliably
+    # catches the pushed-off vertex plus minor subsequent weld/conformance drift.
+    EDGE_PROX_M = 1.5
     CORNER_GUARD_M = 1.0
     out = []
     for ridx, s in sloping:
