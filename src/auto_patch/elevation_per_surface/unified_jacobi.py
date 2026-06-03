@@ -138,22 +138,6 @@ _TIER_TAXI = 1
 _TAXI_TIER_ROLES = frozenset((*SLOPING_RECT_ROLES, ROLE_JUNCTION,
                               ROLE_SERVICE_JUNCTION))
 
-# Dykstra L2 projection iteration cap (per cascade phase).  A uniform
-# over-grade slope is corrected by anchor information propagating inward one
-# node per sweep, so convergence scales with the longest anchor-free run —
-# generous here, but each sweep is cheap and convergence stops early via tol.
-_L2_MAX_ITERS = 2000
-
-# Per-cascade-phase grade-fit selector.  ``False`` (default) = the proven
-# DEM-attraction + cap-projection relaxation (holds flat pavement on terrain
-# via the asymmetric floor; non-regressing).  ``True`` = the L2-closest-to-DEM
-# Dykstra projection (``_l2_compliant_fit``) — the architecturally-correct
-# "follow DEM clamped to grade" fit, but only useful once junction grading is
-# fully PER-AXIS (the all-pair Euclidean cap otherwise drives genuinely-steep
-# junctions infeasible and the L2 fit smears the residual onto short stubs).
-# Flip to True together with the per-axis solver/audit work.
-_USE_L2_FIT = True
-
 # Per-axis junction grading (user 2026-05-22).  When True, junction grade
 # constraints are LONGITUDINAL (along each converging centerline) + ring only;
 # the unregulated inter-centerline DIAGONAL is dropped (the all-pair Euclidean
@@ -291,47 +275,7 @@ def solve(layout, icao: str,
         layout, bucket_to_idx, roles=frozenset((ROLE_TERMINAL,)),
         add_runway_anchor=False)
 
-    rect_flat_groups = _build_rect_cross_section_groups(
-        layout, bucket_to_idx)
-    terminal_groups = _build_terminal_groups(
-        layout, bucket_to_idx)
-
     total_iters = 0
-
-    def _eq_pairs_from_groups(groups):
-        """Flatten flatness groups into equality (cap-0) constraint pairs:
-        a group ``[a, b, c, …]`` becomes the chain ``(a,b),(b,c),…`` which
-        forces all members equal."""
-        pairs = []
-        for grp in groups:
-            for k in range(len(grp) - 1):
-                if grp[k] != grp[k + 1]:
-                    pairs.append((grp[k], grp[k + 1]))
-        return pairs
-
-    def _run_phase(phase_tier, eg, el, eq_pairs, rect_grps, term_grps):
-        """Solve one cascade tier: freeze all other tiers (+ base HARD), then
-        fit a grade-compliant surface for this tier's soft nodes against the
-        frozen anchors.  Two fits are available (see ``_USE_L2_FIT``): the
-        proven DEM-attraction relaxation, or the L2-closest-to-DEM Dykstra
-        projection."""
-        nonlocal total_iters
-        if not eg and not eq_pairs:
-            return
-        is_hard_p = [base_hard[i] or tiers[i] != phase_tier
-                     for i in range(n)]
-        if all(is_hard_p):
-            return
-        if _USE_L2_FIT:
-            total_iters += _compliant_spread_fit(
-                n, elev, is_hard_p, dem_elev, eg, el, eq_pairs,
-                _L2_MAX_ITERS, tol_m)
-        else:
-            adj_p = _build_adjacency(n, eg, el)
-            total_iters += _run_jacobi(
-                elev, is_hard_p, adj_p, list(eg.keys()),
-                eg, el, term_grps, rect_grps, max_iters, tol_m,
-                dem_elev=dem_elev, use_attraction=True)
 
     # (session 51, user 2026-05-28) Phase 1 = HOP-priority forward pass.
     # REPLACES the role-tier cascade (TERMINAL→APRON→TAXI), which inherited
@@ -376,29 +320,28 @@ def solve(layout, icao: str,
     # STEP 3 (shift runway thresholds + re-profile) stays the last resort, for
     # a genuine multi-runway squeeze where no outward move can satisfy all
     # runway connections (SPJC) — see pipeline / runway_redistribute.
-    if _USE_L2_FIT:
-        relief_hard = [base_hard[i] or tiers[i] == 0 for i in range(n)]
-        if not all(relief_hard):
-            relief_eg = dict(taxi_eg)
-            relief_eg.update(apron_eg)
-            relief_eg.update(term_eg)
-            relief_el = dict(taxi_el)
-            relief_el.update(apron_el)
-            relief_el.update(term_el)
-            shape_constraints = _build_shape_constraints(
-                layout, bucket_to_idx)
-            total_iters += _directional_relief(
-                n, elev, relief_hard, relief_eg, relief_el,
-                shape_constraints, _RELIEF_MAX_ITERS, tol_m)
-            # STEP 3 (user 2026-05-28): an impossible apron<->runway connection
-            # (a junction/stub wedged between soft apron and a DEM-dipped
-            # runway-anchored node) has nowhere to go while every runway node
-            # is HARD.  Free the runway INTERIOR (CIFP thresholds stay hard)
-            # and re-solve the bands so the dip rises and the gap spreads over
-            # the runway's length.  No-op unless a residual violation remains.
-            total_iters += _relax_runway_and_resolve(
-                n, elev, layout, bucket_to_idx, base_hard,
-                shape_constraints, tol_m)
+    relief_hard = [base_hard[i] or tiers[i] == 0 for i in range(n)]
+    if not all(relief_hard):
+        relief_eg = dict(taxi_eg)
+        relief_eg.update(apron_eg)
+        relief_eg.update(term_eg)
+        relief_el = dict(taxi_el)
+        relief_el.update(apron_el)
+        relief_el.update(term_el)
+        shape_constraints = _build_shape_constraints(
+            layout, bucket_to_idx)
+        total_iters += _directional_relief(
+            n, elev, relief_hard, relief_eg, relief_el,
+            shape_constraints, _RELIEF_MAX_ITERS, tol_m)
+        # STEP 3 (user 2026-05-28): an impossible apron<->runway connection
+        # (a junction/stub wedged between soft apron and a DEM-dipped
+        # runway-anchored node) has nowhere to go while every runway node
+        # is HARD.  Free the runway INTERIOR (CIFP thresholds stay hard)
+        # and re-solve the bands so the dip rises and the gap spreads over
+        # the runway's length.  No-op unless a residual violation remains.
+        total_iters += _relax_runway_and_resolve(
+            n, elev, layout, bucket_to_idx, base_hard,
+            shape_constraints, tol_m)
 
     n_terms, n_rects, n_juncs = _writeback(
         layout, elev, bucket_to_idx)
@@ -407,114 +350,9 @@ def solve(layout, icao: str,
              n_terms, n_rects, n_juncs)
 
 
-_SPREAD_OMEGA = 1.0          # cap-projection relaxation (>1 SOR diverges here)
 _SPREAD_COMPLY_TOL_M = 0.02  # iterate until every edge is within this of cap
 # Relief iteration budget — umbrella ceiling for the within-bands convergence.
 _RELIEF_MAX_ITERS = 12000
-
-
-def _compliant_spread_fit(n, elev, is_hard, dem_elev, edge_grade, edge_length,
-                          eq_pairs, max_iters, tol_m, node_bounds=None,
-                          reseed: bool = True, stiffness=None) -> int:
-    """Spread soft nodes to a grade-compliant surface near the DEM, by
-    over-relaxed cap projection iterated to FULL grade compliance.
-
-    The DEM is a PREFERENCE, not a constraint (user 2026-05-22): soft nodes are
-    seeded at terrain, then every over-grade edge is projected toward its cap
-    — where the terrain already complies the nodes stay on it, where it is too
-    steep the excess is split and PROPAGATES into the neighbouring network
-    until no edge exceeds grade (the descent dips below / rises above terrain
-    as needed and smooths out).  Equality (flatness) pairs are cap-0 edges.
-
-    Why over-relaxed + compliance-stopped: plain cyclic cap projection on a
-    long over-grade run propagates the anchors' influence one node per sweep
-    (O(chain^2) — Dykstra was correct but never finished, leaving stub/A
-    unsmoothed).  SOR (omega>1) collapses that to ~O(chain), and stopping on
-    the actual max violation (not the per-iter change) guarantees the output is
-    fully compliant.  Mutates ``elev`` in place; returns iterations used.
-
-    ``reseed`` (user 2026-05-24): when False, soft nodes keep their CURRENT
-    elevation as the start — used by the relief "bounce" so it adjusts the
-    MINIMUM amount from the cascade's outward solve, rather than discarding it
-    by resetting to DEM (which made terminal-free aprons absorb the whole
-    relief and sink ~12 m below terrain).
-    """
-    if reseed:
-        for i in range(n):
-            if not is_hard[i] and dem_elev[i] is not None:
-                # Bounded nodes keep their current value as the center (e.g. a
-                # runway-yield node centered on its CIFP profile); only
-                # unbounded soft nodes re-seed at terrain.
-                if node_bounds is None or node_bounds[i] is None:
-                    elev[i] = float(dem_elev[i])
-    ineq = [(u, v, edge_length[(u, v)] * gr)
-            for (u, v), gr in edge_grade.items()]
-    eqs = [(a, b) for (a, b) in eq_pairs]
-    if not ineq and not eqs:
-        return 0
-    comply = max(tol_m, _SPREAD_COMPLY_TOL_M)
-    w = _SPREAD_OMEGA
-    for it in range(max_iters):
-        # Flatness equality (exact projection — no over-relax).
-        for a, b in eqs:
-            ha, hb = is_hard[a], is_hard[b]
-            if ha and hb:
-                continue
-            if ha:
-                elev[b] = elev[a]
-            elif hb:
-                elev[a] = elev[b]
-            else:
-                m = 0.5 * (elev[a] + elev[b])
-                elev[a] = m
-                elev[b] = m
-        # Grade inequality (over-relaxed for soft-soft; exact toward a HARD).
-        max_viol = 0.0
-        for u, v, cap in ineq:
-            d = elev[u] - elev[v]
-            excess = abs(d) - cap
-            if excess <= 0.0:
-                continue
-            if excess > max_viol:
-                max_viol = excess
-            hu, hv = is_hard[u], is_hard[v]
-            if hu and hv:
-                continue
-            s = 1.0 if d > 0 else -1.0
-            if hu:
-                elev[v] += s * excess
-            elif hv:
-                elev[u] -= s * excess
-            else:
-                # Distribute the correction by STIFFNESS: the stiffer node
-                # moves less (user 2026-05-24).  A terminal is a stiff soft
-                # anchor — it holds its DEM-centroid and yields only the
-                # MINIMUM when no compliant path exists, so the flexible apron/
-                # taxi side absorbs the grade and the terminal barely moves.
-                # Default (no stiffness) = symmetric 50/50.
-                if stiffness is not None:
-                    ku, kv = stiffness[u], stiffness[v]
-                    fu = kv / (ku + kv)   # u's share — large when v is stiffer
-                else:
-                    fu = 0.5
-                elev[u] -= s * w * excess * fu
-                elev[v] += s * w * excess * (1.0 - fu)
-        # Clamp bounded soft nodes to their per-node deviation window so
-        # no single surface absorbs the whole relief (user 2026-05-23:
-        # spread the descent across runway-yield + apron-yield).  A node
-        # held at a bound leaves a residual violation on its edges, which
-        # propagates to the other soft nodes — exactly the spreading.
-        if node_bounds is not None:
-            for i in range(n):
-                b = node_bounds[i]
-                if b is not None:
-                    if elev[i] < b[0]:
-                        elev[i] = b[0]
-                    elif elev[i] > b[1]:
-                        elev[i] = b[1]
-        if max_viol < comply:
-            return it + 1
-    return max_iters
 
 
 def _project_shape(elev, nodes, held, edges, flat, coupling=None) -> None:
@@ -868,8 +706,6 @@ def _directional_relief(n, elev, is_hard, edge_grade, edge_length,
             if nd < rank[v]:
                 rank[v] = nd
                 heapq.heappush(pq, (nd, v))
-    ineq = [((u, v), edge_length[(u, v)] * gr)
-            for (u, v), gr in edge_grade.items()]
     comply = max(tol_m, _SPREAD_COMPLY_TOL_M)
 
     # Shape-HOP depth: number of pavement PIECES between a shape and the
@@ -1114,8 +950,10 @@ def _build_shape_constraints(layout, bucket_to_idx):
     """Per-shape grade constraints for the directional relief: one entry per
     soft pavement shape with ``{nodes, edges, flat}`` — its node indices, its
     OWN internal grade edges ``(i, j, cap_m)``, and whether it must stay flat
-    (terminal).  Rects use flat-cross (cap≈0) + axial edges; apron/junction
-    use all-pair; terminal is flat.  Runway/seam are HARD, not included."""
+    (terminal).  Rects use flat-cross (cap≈0) + axial edges; aprons use the
+    in-pavement VISIBILITY graph (geodesic, see ``_visible_grade_edges``);
+    junction/seam-rect use all-pair; terminal is flat.  Runway/seam are HARD,
+    not included."""
     out = []
     for s in layout.shapes:
         if s.role not in PAVEMENT_ROLES or s.role == ROLE_RUNWAY:
@@ -1909,7 +1747,8 @@ def _seed_elevations(layout, nodes, bucket_to_idx,
 
 def _sample_node_dem(layout, nodes, dem, tile_lat, tile_lon):
     """Return ``[dem_elev | None]`` per node — the terrain elevation
-    used as the DEM-attraction target in ``_run_jacobi``.  None entries
+    each node is fit toward (closest-to-DEM within grade) by the
+    hop-priority forward pass + directional relief.  None entries
     (no DEM, off-tile) are simply not attracted."""
     out: list[float | None] = [None] * len(nodes)
     if dem is None:
@@ -2177,226 +2016,6 @@ def _build_edges(layout, bucket_to_idx, roles=None, add_runway_anchor=True
                               TAXI_MAX_GRADE)
 
     return edge_grade, edge_length
-
-
-def _build_adjacency(n, edge_grade, edge_length):
-    adj: list[list[tuple[int, float, float]]] = [[] for _ in range(n)]
-    for (u, v), gr in edge_grade.items():
-        L = edge_length[(u, v)]
-        adj[u].append((v, L, gr))
-        adj[v].append((u, L, gr))
-    return adj
-
-
-# ── Stage 4: terminal flatness groups ────────────────────────────
-
-
-def _build_rect_cross_section_groups(layout, bucket_to_idx):
-    """Per user 2026-05-03: a taxi rect slopes along its
-    ``source_axis`` only — never perpendicular to it.  The two
-    corners at each axis-end (the rect's "axis-end edge", or what
-    the legacy code called the "short end") share one elevation;
-    the cross-section is exactly flat.
-
-    Each rect contributes TWO flatness groups, one per axis-end.
-    The solver runs ``_equalize_groups`` on these every iteration,
-    same mechanic as terminal flatness.  ``altitude_high`` /
-    ``altitude_low`` written by the solver thus correspond to one
-    value per axis-end with no perpendicular component.
-
-    Returns ``[[idx_a, idx_b], ...]`` — one group per axis-end (two
-    groups per rect).
-    """
-    from auto_patch.elevation import (
-        _corner_elevation_bucket, _short_end_pairs_by_axis,
-    )
-    groups: list[list[int]] = []
-    for s in layout.shapes:
-        if s.role not in SLOPING_RECT_ROLES:
-            continue
-        if s.polygon is None or s.polygon.is_empty:
-            continue
-        coords = _open_ring(list(s.polygon.exterior.coords))
-        if len(coords) != 4:
-            continue
-        if s.source_axis is None or s.source_axis.is_empty:
-            continue
-        sp, ep = _short_end_pairs_by_axis(coords, s.source_axis)
-        if sp is None:
-            continue
-        for pair in (sp, ep):
-            idxs = []
-            for i in pair:
-                if 0 <= i < len(coords):
-                    k = layout.canonical_points.get_or_add(float(coords[i][0]), float(coords[i][1]))
-                    if k in bucket_to_idx:
-                        idxs.append(bucket_to_idx[k])
-            if len(idxs) >= 2 and idxs[0] != idxs[1]:
-                groups.append(idxs)
-    return groups
-
-
-def _build_terminal_groups(layout, bucket_to_idx):
-    """Each terminal contributes one group of node indices that
-    must share a single elevation (the flatness constraint).
-    """
-    groups: list[list[int]] = []
-    for s in layout.shapes:
-        if s.role != ROLE_TERMINAL:
-            continue
-        if s.polygon is None or s.polygon.is_empty:
-            continue
-        coords = _open_ring(list(s.polygon.exterior.coords))
-        idxs = []
-        for x, y in coords:
-            k = layout.canonical_points.get_or_add(float(x), float(y))
-            if k in bucket_to_idx:
-                idxs.append(bucket_to_idx[k])
-        if len(idxs) >= 2:
-            groups.append(idxs)
-    return groups
-
-
-# ── Stage 5: damped Jacobi + cap projection iteration ────────────
-
-
-def _equalize_groups(elev, is_hard, groups):
-    """Set every member of each group to the group's mean elevation.
-    HARD members are immutable; if a HARD member exists, the group
-    averages the SOFT members and pulls them toward the HARD value
-    (cap projection in subsequent sweeps will pull the rest of the
-    graph back into compliance).
-
-    Used for both terminal flatness (one group per terminal, all
-    corners) and rect cross-section flatness (one group per rect
-    short-end, two corners each).
-    """
-    for grp in groups:
-        if not grp:
-            continue
-        hard_in_grp = [i for i in grp if is_hard[i]]
-        if hard_in_grp:
-            target = elev[hard_in_grp[0]]
-            for i in grp:
-                if not is_hard[i]:
-                    elev[i] = target
-        else:
-            avg = sum(elev[i] for i in grp) / len(grp)
-            for i in grp:
-                elev[i] = avg
-
-
-def _run_jacobi(elev, is_hard, adj, edge_list, edge_grade,
-                edge_length, terminal_groups,
-                rect_flat_groups,
-                max_iters, tol_m, dem_elev=None,
-                use_attraction=True) -> int:
-    """DEM-attraction + cap-projection relaxation (user 2026-05-03,
-    DEM attraction added 2026-05-22).
-
-    Earlier iterations of this solver included a damped-Jacobi
-    NEIGHBOUR-average step before cap projection.  Jacobi pulls every
-    soft node toward the weighted mean of its neighbours, which
-    propagates HARD anchor values up through the graph and over-flattens
-    DEM-seeded soft nodes (CYXY taxi E ended up at 700 m next to a 700 m
-    runway, even though DEM said 715 m and the grade chain through stubs
-    allowed reaching it).  That step was removed.
-
-    But cap-projection-ONLY has the opposite failure: it only ever
-    REDUCES violations, so a soft node that warm-started LOW (a stale
-    value from a prior solver pass) is never lifted back toward its
-    terrain — the node stays low whenever its long chain to a HARD anchor
-    happens to be within-cap.  At HECA the taxiway/apron network
-    (spanning the genuinely-low south terminals and the high runways)
-    sank ~5-8 m below its own DEM, leaving a 7 m cliff where stub T4
-    meets runway 05C/23C.
-
-    Fix: each iteration pull every SOFT node a DECAYING fraction
-    (``DEM_ATTRACTION × DEM_ATTRACTION_DECAY^it``) toward its DEM
-    elevation, THEN cap-project.  A node below its DEM with no binding
-    upper cap rises to terrain; a node whose DEM exceeds what the caps
-    permit is held at the cap by projection.  The geometric decay means
-    the attraction vanishes after a few hundred iterations, so the loop
-    still converges to a fixed point (``tol_m``) under pure cap
-    projection — no oscillation at cap-pinned nodes.  Net convergence is
-    to "as close to DEM as the per-edge grade caps allow", which is the
-    documented "reach the highs and lows in DEM that are possible within
-    grade limits" rule.
-
-    Two equality constraint groups run each iteration: terminals
-    (all corners equal) and rect axis-end pairs (per user 2026-
-    05-03: rects slope along source_axis only, axis-perpendicular
-    is flat).
-    """
-    n = len(elev)
-    use_dem = (use_attraction and dem_elev is not None
-               and DEM_ATTRACTION > 0.0)
-    for it in range(max_iters):
-        prev_elev = list(elev)
-        # 0) DEM attraction — pull soft nodes toward terrain by a
-        # geometrically-decaying fraction (skips HARD nodes and nodes
-        # with no DEM sample).
-        if use_dem:
-            decay = DEM_ATTRACTION_DECAY ** it
-            for i in range(n):
-                if is_hard[i]:
-                    continue
-                d = dem_elev[i]
-                if d is None:
-                    continue
-                # Asymmetric: strong pull UP toward terrain (undo
-                # spurious below-DEM drag), gentle pull DOWN.  Grade
-                # wins via the cap-projection that runs next.
-                w = DEM_FLOOR_ATTRACTION if elev[i] < d else DEM_ATTRACTION
-                a = w * decay
-                if a > DEM_ATTRACTION_MIN:
-                    elev[i] += a * (d - elev[i])
-        # 1) Multi-sweep edge grade-cap projection — only force
-        # acting on soft nodes.  Each sweep visits every edge; an
-        # edge is projected (excess split symmetrically for
-        # soft-soft, asymmetrically toward the soft side for
-        # soft-hard) only when it currently violates its cap.
-        for _sweep in range(CAP_SWEEPS_PER_ITER):
-            any_proj = False
-            for (u, v) in edge_list:
-                L = edge_length[(u, v)]
-                gr = edge_grade[(u, v)]
-                diff = elev[u] - elev[v]
-                cap = L * gr
-                if abs(diff) <= cap:
-                    continue
-                excess = abs(diff) - cap
-                sign = 1 if diff > 0 else -1
-                if is_hard[u] and is_hard[v]:
-                    continue
-                if is_hard[u]:
-                    elev[v] += sign * excess
-                    any_proj = True
-                elif is_hard[v]:
-                    elev[u] -= sign * excess
-                    any_proj = True
-                else:
-                    half = 0.5 * excess * sign
-                    elev[u] -= half
-                    elev[v] += half
-                    any_proj = True
-            if not any_proj:
-                break
-        # 2) Equality constraints — terminal flatness and rect
-        # axis-end (cross-section) flatness.
-        _equalize_groups(elev, is_hard, terminal_groups)
-        _equalize_groups(elev, is_hard, rect_flat_groups)
-        # 3) Convergence.
-        max_change = 0.0
-        for i in range(n):
-            if is_hard[i]:
-                continue
-            d = abs(prev_elev[i] - elev[i])
-            if d > max_change:
-                max_change = d
-        if max_change < tol_m:
-            return it + 1
-    return max_iters
 
 
 # ── Stage 6: write elevations back to layout shapes ──────────────
