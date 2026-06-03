@@ -45,8 +45,18 @@ from __future__ import annotations
 
 import heapq
 import math
+import os as _os
 import time as _time
 from collections import deque
+
+# (session 61 experiment) Let terminal pads move freely in the final band
+# projection instead of being held at their DEM/forward-pass level.  Terminals
+# stay flat (coupled), but the runway->out difference-constraint solve is free
+# to translate a whole pad to whatever level the adjacent aprons' grade demands
+# — so two aprons-bridged terminals at incompatible terrain levels get pulled
+# together instead of dumping the residual onto the apron between them.
+# Default OFF; A/B with env O4_FREE_TERMINALS=1.
+_FREE_TERMINALS = _os.environ.get("O4_FREE_TERMINALS", "0") == "1"
 
 from shapely.errors import GEOSException, TopologicalError
 
@@ -892,9 +902,13 @@ def _directional_relief(n, elev, is_hard, edge_grade, edge_length,
     n = len(elev)
     all_edges = [e for sc in shape_constraints for e in sc["edges"]]
     lo, hi = _grade_bands(n, elev, is_hard, all_edges)
+    # Hold terminals fixed (default) so building pads stay at their DEM level;
+    # the experiment frees them so the difference-constraint solve can translate
+    # a pad (kept flat by ``coupling``) to meet apron grade.
+    _held_extra = set() if _FREE_TERMINALS else terminal_nodes
     n_sweeps, _viol = _project_within_bands(
         elev, all_edges, is_hard, lo, hi, coupling,
-        held_extra=terminal_nodes,
+        held_extra=_held_extra,
         max_sweeps=1000,
         tol=max(tol_m, _SPREAD_COMPLY_TOL_M))
     return 1 + n_sweeps
