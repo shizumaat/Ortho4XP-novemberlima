@@ -143,6 +143,85 @@ _PARALLEL_BUFFER_M = 15.0       # parallel-taxiway-end pull-back
 
 
 # ──────────────────────────────────────────────────────────────────
+# Airside node-unification (refactor Phases 6+7)
+# ──────────────────────────────────────────────────────────────────
+
+# Post-solve-emitted FEATURE roles (terrain transitions / clearance), which
+# conform TO the frozen airside without the airside ever receiving a vertex.
+# (boundary_dem_bridge + surface_clearance are overlay-exempt in conformance.)
+_POSTSOLVE_FEATURE_OWNER_ROLES = frozenset({
+    "boundary", "groundside_pavement", "tunnel_ramp", "retaining_wall",
+})
+
+
+def _unify_airside_geometry(layout, icao: str) -> None:
+    """Settle the airside pavement node-set into a CONFORMING partition:
+    re-connect discovered lane dead-ends, weld near-coincident airside
+    vertices to one canonical coordinate, insert every shared-boundary
+    vertex (full conformance), then the final near-corner / neighbour-corner
+    snaps.  Adjacent airside shapes end up sharing identical vertices along
+    every common edge — no T-junction slivers, no coincident-but-separate
+    vertex pairs.
+
+    Refactor Phases 6+7: this runs PRE-solve so the solver sees the FINAL
+    node-set and writes ONE altitude per shared bucket — eliminating the
+    post-solve coincident-vertex CLIFFS that arose when weld/conformance
+    snapped vertices coincident AFTER the solver graded them to independent
+    elevations (the HECA #291↔#371 class).  Pure geometry — no altitude
+    dependency — so it is safe before any altitude is assigned.
+    """
+    from .canonical_points import weld_layout_vertices
+    from .conformance import enforce_conformance
+    from .junction_repair import (
+        _snap_near_corner_vertices_to_rect_corners,
+        _share_neighbour_corners_into_junctions)
+    from .layout import (
+        ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL, ROLE_STUB,
+        ROLE_CROSS_CONNECTOR, ROLE_JUNCTION, ROLE_RUNWAY,
+        ROLE_RUNWAY_CROSSING, ROLE_APRON, ROLE_TERMINAL)
+
+    # Re-connect discovered (TX) lane dead-ends pulled away from their
+    # residue junction (SPJC TX15), extending the junction back onto the
+    # lane's end corners so the weld + conformance below share the vertices.
+    if ENABLE_DISCOVERED_TAXIWAYS:
+        from .junction_repair import (
+            _connect_discovered_lane_dead_ends_to_junctions)
+        _connect_discovered_lane_dead_ends_to_junctions(layout, icao=icao)
+
+    # Weld near-coincident airside vertices to one fresh canonical
+    # coordinate so a rect corner and the junction vertex beside it become a
+    # single point (the conformance below then has only genuine T-junctions
+    # left).  ROLE_TERMINAL included so a terminal's boundary vertices weld
+    # 1:1 with the surrounding apron's (one solver node, no tilt/wall).
+    _weld_roles = {ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
+                   ROLE_STUB, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
+                   ROLE_RUNWAY, ROLE_RUNWAY_CROSSING, ROLE_APRON,
+                   ROLE_TERMINAL}
+    n_welded = weld_layout_vertices(layout, _weld_roles)
+    if n_welded:
+        UI.vprint(1,
+            f"  [pav-builder] {icao}: pre-solve welded shared vertices in "
+            f"{n_welded} airside shape(s).")
+
+    # Full conformance: insert every neighbour vertex that lies on a shape's
+    # edge so the partition is conforming.  At this point the only non-airside
+    # shapes present are groundside (separated post-solve); the boundary
+    # ribbon / DEM bridge / clearance are emitted post-solve and conformed to
+    # the (now frozen) airside by the one-sided post-solve feature conformance.
+    n_shapes, n_verts = enforce_conformance(layout)
+    if n_verts:
+        UI.vprint(1,
+            f"  [pav-builder] {icao}: pre-solve conformance — inserted "
+            f"{n_verts} shared-boundary vertex(es) into {n_shapes} shape(s).")
+
+    # FINAL near-corner snap: a non-rect vertex left on a sloped rect's edge
+    # near a corner is snapped onto the corner so the two SHARE it; companion
+    # share-neighbour-corners handles the 0.10–0.5 m junction case.
+    _snap_near_corner_vertices_to_rect_corners(layout, icao=icao)
+    _share_neighbour_corners_into_junctions(layout, icao=icao)
+
+
+# ──────────────────────────────────────────────────────────────────
 # Top-level builder
 # ──────────────────────────────────────────────────────────────────
 
@@ -2568,6 +2647,17 @@ def build_airport_pavement(icao: str, xplane_root: str,
 
 
     # ── Phase-2 elevations + feature emit ────────────────────────
+    # Pre-solve geometry guard snapshot handle (assigned right before the
+    # solve inside the block below; default None so the post-solve report
+    # is a no-op when elevations are not computed / guard is disabled).
+    _geom_guard_snap = None
+    # Whether the airside node-unification (weld + full conformance + corner
+    # snaps) already ran PRE-solve (refactor Phases 6+7).  The per-surface
+    # path runs it before the solve; the post-solve block below then conforms
+    # only the post-solve-emitted FEATURES (one-sided) to the frozen airside.
+    # When False (non-per-surface / no-elevation path), the post-solve block
+    # runs the full unification as a fallback.
+    _airside_unified_presolve = False
     if compute_elevations:
         finalize.compute_elevations_and_repair_geometry(
             layout, icao, xplane_root, apt,
@@ -2925,22 +3015,127 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 f"  [pav-builder] {icao}: merged {_n_frag} small apron "
                 f"fragment(s) into their host apron (pre-solve).")
 
-        # Conform apron/junction T-junctions BEFORE the solver so abutting
-        # aprons share a canonical node and the solver grades them to match.
-        # The solver couples adjacent shapes ONLY through shared nodes; where
-        # an apron's vertex lies on a neighbour apron's edge INTERIOR (a
-        # T-junction, not a shared corner) they share no node and the solver
-        # grades them independently → a step.  Restrict insertion to
-        # apron/junction edge-owners so taxi-rect sloping edges (still
-        # altitude-less here) keep their 4-corner planar form; the full
-        # conformance still runs post-emit for the rest.
-        from .conformance import enforce_conformance as _enforce_conf
-        from .layout import ROLE_APRON as _RA, ROLE_JUNCTION as _RJ
-        _ncs, _ncv = _enforce_conf(layout, owner_roles={_RA, _RJ})
-        if _ncv:
-            UI.vprint(1,
-                f"  [pav-builder] {icao}: pre-solve conformance — inserted "
-                f"{_ncv} shared apron/junction vertex(es) into {_ncs} shape(s).")
+        # ── Boundary-interior clip (refactor Phase 3, PRE-solve) ──────
+        # Clip airside pavement that STRADDLES the airport boundary back to
+        # the ribbon's inner edge BEFORE the solve, so the clipped pavement
+        # is graded by the solver (and no airside vertex is moved
+        # post-solve).  The interior is computed geometrically from row-130 +
+        # the ribbon strip offset (``_compute_boundary_ribbon_interior``) —
+        # the ribbon footprint is altitude-independent, so the post-solve
+        # ribbon emit reproduces the identical band and the clipped seam
+        # conforms.  Only airside roles are clipped here; post-solve-emitted
+        # features (clearance, etc.) are clipped by the post-solve call
+        # (which now SKIPS airside).
+        from .boundary import (
+            _compute_boundary_ribbon_interior,
+            _clip_pavement_to_boundary_interior as _clip_boundary_interior)
+        from .geom_guard import _AIRSIDE_ROLES as _AIRSIDE_CLIP_ROLES
+        _pre_interior = _compute_boundary_ribbon_interior(layout)
+        if _pre_interior is not None:
+            _n_clip, _n_out = _clip_boundary_interior(
+                layout, icao=icao, interior=_pre_interior,
+                roles=_AIRSIDE_CLIP_ROLES)
+            if _n_clip or _n_out:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: pre-solve boundary clip — "
+                    f"clipped {_n_clip} straddling airside shape(s), "
+                    f"left {_n_out} external shape(s) untouched.")
+
+        # ── Groundside emit + absorb/reclassify (refactor Phase 4, PRE-solve) ─
+        # Emit groundside pavement (DEM-following, solve-INDEPENDENT — the
+        # per-surface solver only grades PAVEMENT_ROLES and is blind to
+        # groundside), then settle the airside↔groundside role boundary
+        # BEFORE the solve:
+        #   * ``_absorb_apron_enclosed_groundside`` folds apron-enclosed
+        #     groundside back into the bordering apron (node-shared MERGE), so
+        #     the solver grades it as part of the apron — the apron-island
+        #     flat-vs-graded cliff is gone at the source instead of being
+        #     relocated by a post-solve merge.
+        #   * ``_reclassify_groundside_orphan_junctions`` re-tags junctions
+        #     that touch ONLY groundside as DEM groundside (the solver then
+        #     ignores them) — no airside-flat-vs-DEM cliff at their seam.
+        # The groundside DEM-altitude is final here; the post-solve
+        # ``_separate_groundside_from_airside`` still opens the clearance gap
+        # against the FINAL airside geometry.
+        from .groundside import (
+            _emit_groundside_pavement_dem as _emit_gs_dem,
+            _absorb_apron_enclosed_groundside as _absorb_gs,
+            _reclassify_groundside_orphan_junctions as _reclass_gs)
+        try:
+            _n_gs = _emit_gs_dem(layout, dem, tile_lat, tile_lon)
+            if _n_gs:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: emitted {_n_gs} groundside "
+                    f"pavement polygon(s) with DEM altitudes (pre-solve).")
+        except _GEOM_EXC:
+            pass
+        try:
+            _n_abs = _absorb_gs(layout)
+            if _n_abs:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: absorbed {_n_abs} airside-wedged "
+                    f"piece(s) back into apron (pre-solve).")
+        except _GEOM_EXC:
+            pass
+        try:
+            _n_orph = _reclass_gs(layout, dem, tile_lat, tile_lon)
+            if _n_orph:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: reclassified {_n_orph} "
+                    f"groundside-orphan junction(s) as DEM pavement (pre-solve).")
+        except _GEOM_EXC:
+            pass
+
+        # (refactor Phase 5) The boundary ribbon + boundary→DEM bridge emit
+        # and their airside vertex touches (_snap_bridge_vertices_to_runway_
+        # corners, _insert_bridge_contacts_into_junctions) CANNOT move
+        # pre-solve: the ribbon/bridge runway-distance clamp anchors to ALL
+        # airside pavement (incl. aprons/taxiways, whose altitudes are only
+        # known after the solve), so the bridge PLACEMENT is solve-dependent.
+        # They stay post-solve; the bridge-contact insert is altitude-neutral
+        # (collinear) and the post-solve feature conformance (Phase 7) keeps
+        # the partition conforming without moving frozen airside vertices.
+
+        # (refactor Phases 6+7) The partial pre-solve apron/junction
+        # conformance is SUPERSEDED by the full airside node-unification
+        # (_unify_airside_geometry) run below, just before the solve.
+
+        # ── Pre-solve shape-drop passes (refactor Phase 2) ────────────
+        # Drop small floating-orphan junctions left by
+        # pav_union.difference(rects) — a wedge past a rect's edge that
+        # shares no vertex with any shape (so no merge/sliver pass can
+        # absorb it) and whose corners are all orphans (SPLP #33).  Pure
+        # topology (area + shared-vertex test, no altitude dependency), so
+        # it moved PRE-solve: the dropped wedge never enters the solver's
+        # node graph or the weld/conformance node-set.
+        from .junction_repair import _drop_floating_orphan_junctions
+        _drop_floating_orphan_junctions(layout, icao=icao)
+
+        # Drop small apron/junction residue that rests almost entirely OFF
+        # the source pavement union — a thin strip beside a shoulder-widened
+        # runway, or residue from a dropped runway-parallel centerline
+        # (HECA #258/#228).  source_pavement_union is the authoritative real-
+        # pavement footprint, so off-source residue is spurious.  Pure
+        # geometry (area + on-source fraction), also moved PRE-solve.
+        from .junction_repair import _drop_off_source_residue
+        _drop_off_source_residue(layout, icao=icao)
+
+        # ── Airside node-unification (refactor Phases 6+7, PRE-solve) ──
+        # Weld + full conformance + final corner snaps, run HERE so the solver
+        # sees the FINAL node-set and grades every shared vertex to ONE
+        # altitude — the post-solve coincident-vertex cliffs (#291↔#371 class)
+        # are eliminated at the source.  THE cliff fix.
+        _unify_airside_geometry(layout, icao)
+        _airside_unified_presolve = True
+
+        # Pre-solve geometry guard (dev, O4_GEOM_GUARD=1): snapshot every
+        # airside shape's ring geometry HERE, immediately before the solve,
+        # so the comparison at emit can report how many airside shapes had
+        # their geometry changed by a post-solve pass — the metric the
+        # pre-solve-geometry refactor drives to 0 (see
+        # docs/presolve_geometry_refactor.md).  No behaviour change.
+        from .geom_guard import snapshot_airside_geometry
+        _geom_guard_snap = snapshot_airside_geometry(layout)
 
         if USE_PER_SURFACE_SOLVER and layout.anchor is not None:
             per_surface_solve(layout, icao,
@@ -2971,21 +3166,9 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 f"  [pav-builder] {icao}: tile-boundary cut "
                 f"adjusted shape count by {n_tile_delta:+d}.")
 
-        # Drop small floating-orphan junctions left by
-        # pav_union.difference(rects) — a wedge past a rect's edge that
-        # shares no vertex with any shape (so no merge/sliver pass can
-        # absorb it) and whose corners are all orphans.  Runs at the
-        # very end on the fully-settled geometry (SPLP #33, 2026-05-20).
-        from .junction_repair import _drop_floating_orphan_junctions
-        _drop_floating_orphan_junctions(layout, icao=icao)
-
-        # Drop small apron/junction residue that rests almost entirely OFF
-        # the source pavement union — a thin strip beside a shoulder-widened
-        # runway, or residue from a dropped runway-parallel centerline
-        # (HECA #258/#228).  source_pavement_union is the authoritative real-
-        # pavement footprint, so off-source residue is spurious.
-        from .junction_repair import _drop_off_source_residue
-        _drop_off_source_residue(layout, icao=icao)
+        # (refactor Phase 2) The two shape-drop passes
+        # (_drop_floating_orphan_junctions, _drop_off_source_residue) moved
+        # PRE-solve — see above, just before the geometry-guard snapshot.
 
         # Final within-shape grade WARN reflects the absolute
         # final state — junction / apron / terminal Euclidean caps
@@ -2994,24 +3177,24 @@ def build_airport_pavement(icao: str, xplane_root: str,
         from .elevation import _report_within_shape_violations
         _report_within_shape_violations(layout, icao)
 
-        # ── Terrain-transition feature emit (POST-solve, session 51) ──
-        # Boundary ribbon, groundside pavement, boundary→DEM bridges and
-        # taxi/road bridges emit HERE, after the single solve, so each
-        # mirrors the FINAL pavement profile (the boundary ribbon clamps
-        # to settled runway/pavement; bridges span the settled surface).
-        # None of these are pavement roles, so the solver never touched
-        # them — emitting post-solve is purely a matter of sampling the
-        # right (final) altitudes.
+        # ── Terrain-transition feature emit (POST-solve) ──────────────
+        # Boundary ribbon, boundary→DEM bridge and taxi/road bridges emit
+        # HERE, after the single solve, so each mirrors the FINAL pavement
+        # profile (the runway-distance clamp anchors to settled apron/taxi
+        # altitudes — see refactor Phase 5).  None are airside pavement
+        # roles, so the solver never touched them.
         finalize.emit_terrain_transition_features(
             layout, icao, xplane_root,
             tile_dem=tile_dem,
             current_tile_lat=current_tile_lat,
             current_tile_lon=current_tile_lon)
         try:
-            # Bridge vertex post-processing: collapse the bridge's ~1 m
-            # runway-clearance arc onto shared runway/junction corners,
-            # and insert mid-edge bridge contacts into junction rings so
-            # they share the node (collinear → no shape/grade change).
+            # Bridge vertex post-processing (POST-solve, with the bridge): the
+            # boundary→DEM bridge is solve-dependent (Phase 5), so its airside
+            # touches run here.  Collapse the bridge's ~1 m runway-clearance
+            # arc onto shared runway/junction corners, and insert mid-edge
+            # bridge contacts into junction rings so they share the node
+            # (collinear → altitude-neutral, no grade change).
             from .boundary import (
                 _snap_bridge_vertices_to_runway_corners as _snap_br,
                 _insert_bridge_contacts_into_junctions as _ins_br)
@@ -3083,11 +3266,19 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # hotspot).  Shapes entirely outside the boundary (tunnel entrance
     # ramps + their retaining walls) are left untouched, not dropped.
     # Runs before the conformance pass below.
+    #
+    # (refactor Phase 3) AIRSIDE pavement is now clipped PRE-solve (above),
+    # so this post-solve pass SKIPS airside roles and handles only the
+    # post-solve-emitted features (clearance / groundside / etc.) that can
+    # straddle.  Skipping airside keeps the pre-solve-clipped + solver-graded
+    # geometry untouched post-solve (the invariant this refactor enforces).
     from .boundary import (
         _clip_pavement_to_boundary_interior,
         _conform_ribbon_to_pavement_seam,
     )
-    n_clip, n_outside = _clip_pavement_to_boundary_interior(layout, icao=icao)
+    from .geom_guard import _AIRSIDE_ROLES as _AIRSIDE_SKIP_ROLES
+    n_clip, n_outside = _clip_pavement_to_boundary_interior(
+        layout, icao=icao, skip_roles=_AIRSIDE_SKIP_ROLES)
     if n_clip or n_outside:
         UI.vprint(1,
             f"  [pav-builder] {icao}: boundary-interior clip — "
@@ -3105,80 +3296,29 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # here (last geometry step), then assert the invariant holds.  The
     # boundary ribbon now participates (it tiles with pavement); only the
     # DEM bridge stays exempt (see conformance._OVERLAY_REFS).
-    # Weld near-coincident vertices across the airside pavement
-    # partition (taxi rects + junctions) to shared coordinates BEFORE
-    # the conformance pass.  Adjacent shapes are snapped to pav.boundary
-    # at different stages and post-emit passes add un-welded vertices, so
-    # a rect corner and the junction vertex beside it can sit ≤ tol apart
-    # and their edges cross by a sub-tol sliver.  Welding to one fresh
-    # registry collapses each such pair to a single coordinate; the
-    # conformance pass below then only has genuine T-junctions left to
-    # insert (user 2026-05-23: "snap all shapes through one registry").
-    # Re-connect discovered (TX) lane dead-ends that a post-solve reshaping
-    # pass pulled away from the residue junction, leaving an uncovered notch
-    # (SPJC TX15 ends 9.9 m from junction #132 — connected pre-solve, severed
-    # after).  Extend the nearby junction back onto the lane's end corners;
-    # the following weld + conformance share the vertices and the emit consensus
-    # reconciles altitudes.  Isolated dead-ends (SPJC TX20, ~74 m from anything)
-    # have no junction within range and are left alone.  Runs here, AFTER all
-    # geometry reshaping and BEFORE the weld/conformance that finalise sharing.
-    if ENABLE_DISCOVERED_TAXIWAYS:
-        from .junction_repair import (
-            _connect_discovered_lane_dead_ends_to_junctions)
-        _connect_discovered_lane_dead_ends_to_junctions(layout, icao=icao)
-
-    from .canonical_points import weld_layout_vertices
-    # NB: ROLE_RUNWAY / ROLE_STUB are module-level imports used earlier
-    # in this function — re-importing them here would make them locals
-    # (UnboundLocalError at their earlier use), so reference those from
-    # module scope and only locally import the rest.
-    # NB: ROLE_TERMINAL (like ROLE_RUNWAY / ROLE_STUB) is a module-level
-    # import used EARLIER in this function — re-importing it locally would
-    # make it a function local (UnboundLocalError at its earlier use), so
-    # reference it from module scope and only locally import the rest.
-    from .layout import (
-        ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
-        ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
-        ROLE_RUNWAY_CROSSING, ROLE_APRON)
-    # ROLE_TERMINAL included (user 2026-05-23): a terminal's boundary
-    # vertices must weld 1:1 with the surrounding apron's so they become
-    # ONE solver node — otherwise the apron's coincident-but-separate copy
-    # gets DEM-attracted to terrain while the terminal stays flat, and emit
-    # collides them into tilts (<1 m) / vertical walls (>1 m).
-    _weld_roles = {ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
-                   ROLE_STUB, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
-                   ROLE_RUNWAY, ROLE_RUNWAY_CROSSING, ROLE_APRON,
-                   ROLE_TERMINAL}
-    n_welded = weld_layout_vertices(layout, _weld_roles)
-    if n_welded:
-        UI.vprint(1,
-            f"  [pav-builder] {icao}: welded shared vertices in "
-            f"{n_welded} airside shape(s).")
-
+    # ── Airside frozen; conform the post-solve FEATURES to it ─────────
+    # (refactor Phases 6+7) The airside node-unification (re-connect
+    # discovered lane dead-ends + weld + full conformance + near-corner /
+    # neighbour-corner snaps) ran PRE-solve, so the airside partition is
+    # already conforming and is FROZEN here.  Conform only the post-solve-
+    # emitted FEATURES (boundary ribbon, groundside, tunnel ramps / walls) TO
+    # that frozen airside — a ONE-SIDED pass (owner_roles=features) that
+    # inserts vertices ONLY into feature edges, NEVER moving an airside
+    # vertex (so the pre-solve-graded airside altitudes stay intact).  When
+    # the pre-solve unification did NOT run (non-per-surface / no-elevation
+    # path) fall back to the full both-sided unification here.
     from .conformance import (
         enforce_conformance, find_conformance_violations)
-    n_shapes, n_verts = enforce_conformance(layout)
-    if n_verts:
-        UI.vprint(1,
-            f"  [pav-builder] {icao}: conformance — inserted {n_verts} "
-            f"shared-boundary vertex(es) into {n_shapes} shape(s).")
-
-    # FINAL near-corner snap: a non-rect vertex left sitting on a sloped
-    # rect's edge near a corner (un-splittable by
-    # _split_sloped_rects_at_violations — a split there makes a sliver —
-    # and nudged there by the weld/conformance reshaping) is snapped onto
-    # the existing rect corner so the two SHARE it.  Runs LAST, on the
-    # emitted geometry, so it catches the residual regardless of origin
-    # (test_no_vertex_on_sloping_rect_edge).
-    from .junction_repair import (
-        _snap_near_corner_vertices_to_rect_corners,
-        _share_neighbour_corners_into_junctions)
-    _snap_near_corner_vertices_to_rect_corners(layout, icao=icao)
-    # Companion: a neighbour corner sitting on a junction's edge 0.10-0.5 m
-    # from a junction vertex is skipped by conformance's endpoint guard but
-    # flagged by test_junction_neighbour_corners_shared — insert it so the
-    # junction shares it.
-    _share_neighbour_corners_into_junctions(layout, icao=icao)
+    if _airside_unified_presolve:
+        n_shapes, n_verts = enforce_conformance(
+            layout, owner_roles=set(_POSTSOLVE_FEATURE_OWNER_ROLES))
+        if n_verts:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: post-solve feature conformance — "
+                f"inserted {n_verts} vertex(es) into {n_shapes} feature "
+                f"shape(s) (airside frozen).")
+    else:
+        _unify_airside_geometry(layout, icao)
 
     # Ribbon YIELDS its elevation to abutting pavement at every shared
     # seam node (incl. the ones conformance just inserted), so there is
@@ -3210,6 +3350,11 @@ def build_airport_pavement(icao: str, xplane_root: str,
             f"  [pav-builder] WARN: {icao}: conformance invariant NOT "
             f"met — {len(tjs)} residual T-junction(s), {len(crossings)} "
             f"edge crossing(s) (→ Triangle4XP mesh slivers).")
+
+    # Pre-solve geometry guard (dev): report how many airside shapes had
+    # their geometry changed by a post-solve pass (target = 0).
+    from .geom_guard import report_post_solve_changes
+    report_post_solve_changes(layout, _geom_guard_snap, icao)
 
     return layout
 

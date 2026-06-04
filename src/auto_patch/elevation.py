@@ -82,6 +82,8 @@ from . import apt_dat_reader as APR
 
 from .config import (
     APRON_MAX_GRADE,
+    ELEV_ROUNDING_NOISE_M,
+    GRADE_VISIBILITY_BUFFER_M,
     RUNWAY_APRON_AREA_RATIO,
     RUNWAY_INSIDE_APRON_FRAC,
     SERVICE_ROAD_MAX_GRADE,
@@ -2809,7 +2811,10 @@ def _report_within_shape_violations(
     """
     if not layout.shapes:
         return
-    rounding_allowance_m = 0.10
+    # Shared single source of truth with the validator (tools/check_grade.py)
+    # via auto_patch.config — so this runtime WARN reports the SAME count the
+    # test suite would assert, not a different (Euclidean) model.
+    rounding_allowance_m = ELEV_ROUNDING_NOISE_M
     cos0 = math.cos(math.radians(layout.anchor[0]))
     n_viol = 0
     worst_pct = 0.0
@@ -2822,10 +2827,17 @@ def _report_within_shape_violations(
     # diagonal IS more than 1.5 % grade because the axial cap fits
     # exactly along the long edge).
     AUDITED_ROLES = {ROLE_JUNCTION, ROLE_APRON}
-    # Per user 2026-05-18 clarification: junction grade applies
-    # across the ENTIRE interior surface, not just along centerlines.
-    # All-pair Euclidean is the rule for both ROLE_JUNCTION and
-    # ROLE_APRON.
+    # Grade applies across the interior surface between every MUTUALLY-VISIBLE
+    # vertex pair — the straight chord stays inside the polygon — at ANY
+    # distance: the average slope between two visible vertices is a real grade
+    # regardless of separation.  Visibility (not proximity) is the gate; it
+    # excludes chords that cut across a non-convex shape's notch (a phantom
+    # path the surface never follows).  This mirrors the validator
+    # (check_grade._check_within_shape) + the solver's uncapped
+    # ``_visible_grade_edges``, so the WARN count == what the test asserts
+    # (an earlier all-pair-Euclidean model over-reported thousands of phantom
+    # pairs on huge non-convex aprons, e.g. HECA 3569 vs the real count).
+    from shapely.geometry import LineString as _LS
     for s in layout.shapes:
         if s.polygon is None or s.polygon.is_empty:
             continue
@@ -2864,6 +2876,27 @@ def _report_within_shape_violations(
                 x = math.radians(lon - layout.anchor[1]) * R_EARTH * cos0
                 y = math.radians(lat - layout.anchor[0]) * R_EARTH
                 coords_m.append((x, y))
+        # In-pavement visibility predicate (geodesic grade) for APRON +
+        # JUNCTION — both can be non-convex; only pairs whose chord stays
+        # inside the (buffered) polygon are real constraints.
+        _vis = None
+        if s.role in (ROLE_APRON, ROLE_JUNCTION):
+            try:
+                from shapely.geometry import Polygon as _Pg
+                from shapely.prepared import prep as _prep
+                _poly = _Pg(coords_m)
+                if not _poly.is_valid:
+                    _poly = _poly.buffer(0)
+                _poly = _poly.buffer(GRADE_VISIBILITY_BUFFER_M)
+                if not _poly.is_empty:
+                    _pg = _prep(_poly)
+                    def _vis(xa, ya, xb, yb, _pg=_pg):
+                        try:
+                            return _pg.contains(_LS(((xa, ya), (xb, yb))))
+                        except _GEOM_EXC:
+                            return True
+            except _GEOM_EXC:
+                _vis = None
         for i in range(n):
             xi, yi = coords_m[i]
             ei = elevs[i]
@@ -2872,6 +2905,8 @@ def _report_within_shape_violations(
                 d = math.hypot(xi - xj, yi - yj)
                 if d < 0.5:
                     continue
+                if _vis is not None and not _vis(xi, yi, xj, yj):
+                    continue          # chord leaves the polygon — phantom path
                 de = abs(ei - elevs[j])
                 if de <= cap_pct * d + rounding_allowance_m:
                     continue
@@ -2886,8 +2921,9 @@ def _report_within_shape_violations(
         try:
             import sys as _sys
             msg = (f"  [pav-builder] WARN: {icao}: {n_viol} within-shape "
-                   f"grade violations (junction / apron / terminal "
-                   f"≤ 1.5 %, all-pair Euclidean within polygon)")
+                   f"grade violations (junction / apron ≤ 1.5 %, geodesic "
+                   f"visibility graph, any distance — matches "
+                   f"tools/check_grade.py)")
             if worst_info is not None:
                 role, ref, ea, eb, d, de = worst_info
                 rstr = f"/{ref}" if ref else ""
@@ -2900,11 +2936,13 @@ def _report_within_shape_violations(
             pass
 
 
-WITHIN_SHAPE_VIOLATION_RADIUS_M = 60.0   # max pair distance for
-                                          # within-shape violation
-                                          # reporting; matches
-                                          # check_grade.py's
-                                          # WITHIN_SHAPE_MAX_PAIR_DIST_M.
+WITHIN_SHAPE_VIOLATION_RADIUS_M = 60.0   # spatial-pair edge radius for the
+                                          # LEGACY Laplacian solver only
+                                          # (inactive under the per-surface
+                                          # solver).  NOT the within-shape
+                                          # audit, which is now uncapped +
+                                          # visibility-gated (see
+                                          # _report_within_shape_violations).
 
 
 SHARED_VERTEX_CLUSTER_TOL_M = 1.5

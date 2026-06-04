@@ -44,6 +44,8 @@ __all__ = [
     "GROUNDSIDE_MAX_GRADE",
     "RUNWAY_VERTICAL_CURVE_K_M",
     "RUNWAY_MAX_GRADE_CHANGE_PER_M",
+    "GRADE_VISIBILITY_BUFFER_M",
+    "ELEV_ROUNDING_NOISE_M",
     "RUNWAY_ADJACENCY_TOL_M",
     "RUNWAY_BOUNDARY_TOL_M",
     "RUNWAY_INSIDE_APRON_FRAC",
@@ -231,6 +233,22 @@ GROUNDSIDE_MAX_GRADE = 0.040    # groundside pavement ramp grade (user 2026-05-2
 # i.e. ~1/30000 grade change per metre of pavement.
 RUNWAY_VERTICAL_CURVE_K_M = 305.0
 RUNWAY_MAX_GRADE_CHANGE_PER_M = 1.0 / 30000.0
+
+# Within-shape grade-audit geometry — the SINGLE SOURCE OF TRUTH shared by the
+# runtime audit (``elevation._report_within_shape_violations``, the WARN shown
+# in the Ortho4XP window) and the validator (``tools/check_grade.py``, what the
+# test suite asserts), so the two never diverge:
+#   * A within-shape grade constraint exists between any two MUTUALLY-VISIBLE
+#     vertices — a pair whose straight chord stays inside the polygon (grown by
+#     ``GRADE_VISIBILITY_BUFFER_M``) — at ANY distance.  Visibility (not
+#     proximity) is the gate: the average slope between two visible vertices is
+#     a real grade the aircraft experiences however far apart they are, while a
+#     chord that cuts across a non-convex notch is a phantom path and excluded.
+#     There is deliberately NO distance cap — matches the solver's uncapped
+#     ``unified_jacobi._visible_grade_edges``.
+#   * ``ELEV_ROUNDING_NOISE_M`` absorbs single-decimal (0.1 m) altitude rounding.
+GRADE_VISIBILITY_BUFFER_M = 1.0
+ELEV_ROUNDING_NOISE_M = 0.15
 
 
 # Per-role within-shape grade limits (rise / run).  The validator in

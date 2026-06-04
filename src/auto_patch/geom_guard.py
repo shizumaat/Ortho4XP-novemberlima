@@ -1,0 +1,180 @@
+"""Pre-solve geometry guard (dev instrumentation).
+
+Enforces the invariant of the pre-solve-geometry refactor
+(``docs/presolve_geometry_refactor.md``): every geometry change to a
+**solver-graded (airside)** shape must happen BEFORE ``per_surface_solve``.
+After the solve, only *altitude* is assigned (to non-graded terrain
+features) and new *non-airside* shapes are added (clearance).  No airside
+vertex may be moved, inserted, welded, snapped, or clipped post-solve.
+
+Usage (env-gated, no behaviour change):
+
+    from .geom_guard import snapshot_airside_geometry, report_post_solve_changes
+    snap = snapshot_airside_geometry(layout)        # right before the solve
+    ...                                             # solve + post-solve passes
+    report_post_solve_changes(layout, snap, icao)   # at emit
+
+The guard is active only when ``O4_GEOM_GUARD=1``.  ``snapshot_airside_geometry``
+returns ``None`` (and stamps nothing) when disabled, and
+``report_post_solve_changes`` is then a no-op.
+
+Identity tracking: each airside shape is stamped with a unique token at
+snapshot time.  Passes that mutate ``shape.polygon`` in place keep the
+token (so we compare ring hashes); passes that REPLACE shapes with fresh
+``BuiltShape`` objects, drop shapes, or reclassify them out of airside lose
+the token — all of which are reported as post-solve geometry changes.
+"""
+from __future__ import annotations
+
+import os
+from typing import TYPE_CHECKING
+
+import O4_UI_Utils as UI
+
+from .layout import (
+    ROLE_APRON,
+    ROLE_CROSS_CONNECTOR,
+    ROLE_JUNCTION,
+    ROLE_PRIMARY_PARALLEL,
+    ROLE_RUNWAY,
+    ROLE_RUNWAY_CROSSING,
+    ROLE_SECONDARY_PARALLEL,
+    ROLE_SERVICE_JUNCTION,
+    ROLE_STUB,
+    ROLE_TERMINAL,
+)
+
+if TYPE_CHECKING:
+    from .layout import BuiltShape, PavementLayout
+
+
+# Roles the per-surface solver grades — the only shapes whose geometry must
+# be final before the solve.  Matches the refactor doc's invariant list.
+_AIRSIDE_ROLES = frozenset({
+    ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
+    ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
+    ROLE_STUB, ROLE_CROSS_CONNECTOR,
+    ROLE_JUNCTION, ROLE_SERVICE_JUNCTION,
+    ROLE_APRON, ROLE_TERMINAL,
+})
+
+# Round ring coords to this many metres when hashing, so float jitter from
+# re-projecting identical geometry does not register as a change while a
+# genuine weld/snap (≥ 1 mm) or vertex insert does.
+_HASH_ROUND_M = 3
+
+_ENABLED = os.environ.get("O4_GEOM_GUARD", "0") == "1"
+
+
+def _canonical_ring(coords) -> tuple:
+    """Rotation- and reflection-invariant canonical form of a ring's rounded
+    vertices.  A ring's VERTEX SET + cyclic adjacency is the geometry; the
+    starting vertex and winding direction are not — the solver / emit may
+    rotate a rect's ring (e.g. to the [high, low, low, high] convention) when
+    it assigns altitudes, which is NOT a geometry change.  Canonicalising by
+    the lexicographically smallest rotation (over both directions) makes the
+    guard immune to that re-ordering while still detecting a real insert /
+    move / drop (which changes the vertex set or count)."""
+    pts = [(round(x, _HASH_ROUND_M), round(y, _HASH_ROUND_M)) for x, y in coords]
+    if pts and pts[0] == pts[-1]:
+        pts = pts[:-1]
+    n = len(pts)
+    if n == 0:
+        return ()
+    best = None
+    for seq in (pts, pts[::-1]):
+        for i in range(n):
+            rot = tuple(seq[i:] + seq[:i])
+            if best is None or rot < best:
+                best = rot
+    return best
+
+
+def _ring_hash(shape: BuiltShape) -> int:
+    """Hash of a shape's 2-D ring geometry (exterior + holes), ignoring
+    altitude AND ring start/winding (see :func:`_canonical_ring`).  Vertex
+    count, set, and cyclic adjacency all contribute."""
+    poly = shape.polygon
+    if poly is None or poly.is_empty:
+        return 0
+    parts: list = []
+    geoms = poly.geoms if poly.geom_type == "MultiPolygon" else (poly,)
+    for g in geoms:
+        rings = [g.exterior] + list(g.interiors)
+        for ring in rings:
+            parts.append(_canonical_ring(ring.coords))
+        parts.append(None)  # geom separator
+    return hash(tuple(parts))
+
+
+def snapshot_airside_geometry(layout: PavementLayout) -> dict | None:
+    """Stamp every airside shape with a unique token and record its ring
+    hash.  Returns the ``{token: (role, ring_hash)}`` snapshot, or ``None``
+    when the guard is disabled."""
+    if not _ENABLED:
+        return None
+    snap: dict[int, tuple[str, int]] = {}
+    for i, s in enumerate(layout.shapes):
+        if s.role not in _AIRSIDE_ROLES:
+            continue
+        token = i
+        s._geom_guard_token = token  # type: ignore[attr-defined]
+        snap[token] = (s.role, _ring_hash(s))
+    UI.vprint(1,
+        f"  [geom-guard] snapshot: {len(snap)} airside shape(s) "
+        f"recorded pre-solve.")
+    return snap
+
+
+def report_post_solve_changes(layout: PavementLayout, snapshot: dict | None,
+                              icao: str) -> int:
+    """Compare current airside geometry against the pre-solve snapshot and
+    log how many airside shapes changed geometry post-solve (the metric the
+    refactor drives to 0).  Returns that count.  No-op when disabled."""
+    if not _ENABLED or snapshot is None:
+        return 0
+
+    seen: set[int] = set()
+    changed_hash = 0           # same object, ring geometry mutated in place
+    new_airside = 0            # airside shape created/replaced post-solve
+    changed_by_role: dict[str, int] = {}
+
+    def _bump(role: str) -> None:
+        changed_by_role[role] = changed_by_role.get(role, 0) + 1
+
+    for s in layout.shapes:
+        if s.role not in _AIRSIDE_ROLES:
+            continue
+        token = getattr(s, "_geom_guard_token", None)
+        if token is None or token not in snapshot:
+            new_airside += 1
+            _bump(f"{s.role}(new)")
+            continue
+        seen.add(token)
+        old_role, old_hash = snapshot[token]
+        if _ring_hash(s) != old_hash:
+            changed_hash += 1
+            _bump(s.role)
+
+    # Tokens in the snapshot no longer present as airside shapes: dropped or
+    # reclassified out of airside (a geometry/role change either way).
+    removed = 0
+    for token, (old_role, _h) in snapshot.items():
+        if token not in seen:
+            removed += 1
+            _bump(f"{old_role}(removed)")
+
+    total = changed_hash + new_airside + removed
+    if total:
+        detail = ", ".join(
+            f"{role}:{n}" for role, n in sorted(changed_by_role.items()))
+        UI.vprint(1,
+            f"  [geom-guard] {icao}: {total} airside shape(s) changed "
+            f"geometry POST-SOLVE "
+            f"(mutated={changed_hash}, new={new_airside}, removed={removed}) "
+            f"[{detail}]")
+    else:
+        UI.vprint(1,
+            f"  [geom-guard] {icao}: 0 airside shapes changed geometry "
+            f"post-solve — invariant HOLDS.")
+    return total

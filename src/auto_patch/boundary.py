@@ -596,6 +596,168 @@ def _node_altitudes_from_segment_slope(
     return alts + [alts[0]]
 
 
+def _densify_ring_coords(coords: list[tuple[float, float]],
+                         step_m: float) -> list[tuple[float, float]]:
+    """Insert intermediate points so consecutive vertices are ≤ ``step_m``
+    apart; return the CLOSED ring (first == last).  Shared by the boundary
+    ribbon geometry below."""
+    if not coords:
+        return coords
+    if coords[0] == coords[-1]:
+        coords = coords[:-1]
+    out: list[tuple[float, float]] = []
+    n = len(coords)
+    for i in range(n):
+        a = coords[i]
+        b = coords[(i + 1) % n]
+        out.append(a)
+        d = math.hypot(b[0] - a[0], b[1] - a[1])
+        if d > step_m:
+            steps = max(1, int(d / step_m))
+            for k in range(1, steps):
+                t = k / steps
+                out.append((a[0] + t * (b[0] - a[0]),
+                            a[1] + t * (b[1] - a[1])))
+    out.append(out[0])
+    return out
+
+
+def _ribbon_segment_geometry(
+        boundary_geom,
+        strip_half_width_m: float,
+        densify_step_m: float,
+        ) -> list[tuple[tuple[float, float], tuple[float, float],
+                        tuple[float, float], tuple[float, float]]]:
+    """Pure-geometry boundary-ribbon construction shared by the ribbon EMIT
+    (:func:`_emit_airport_boundary_shape`) and the pre-solve interior
+    computation (:func:`_compute_boundary_ribbon_interior`).
+
+    Returns a list of ``(p0, p1, perp0, perp1)`` tuples — one per densified
+    boundary segment.  ``p0``/``p1`` are the segment endpoints ON the
+    row-130 line (the rect's OUTER long edge); ``perp0``/``perp1`` are the
+    inward (interior-pointing) per-vertex offsets already scaled by the full
+    strip width, so a rect spans corners
+    ``[p0, p1, p1+perp1, p0+perp0]``.
+
+    Altitude-INDEPENDENT (altitudes only set the emitted tags), so both
+    callers see identical rect geometry — the pavement clipped to the
+    pre-solve interior therefore shares its seam vertices with the
+    post-solve-emitted ribbon's inner edge (a conforming seam, no slivers).
+    """
+    if boundary_geom is None or boundary_geom.is_empty:
+        return []
+    if boundary_geom.geom_type == "Polygon":
+        ext_rings = [boundary_geom.exterior]
+    elif boundary_geom.geom_type == "MultiPolygon":
+        ext_rings = [g.exterior for g in boundary_geom.geoms]
+    else:
+        return []
+    strip_width_m = 2.0 * strip_half_width_m
+    out: list = []
+    for ring in ext_rings:
+        ring_coords = list(ring.coords)
+        if ring_coords and ring_coords[0] == ring_coords[-1]:
+            ring_coords = ring_coords[:-1]
+        if len(ring_coords) < 3:
+            continue
+        dense = _densify_ring_coords(ring_coords, densify_step_m)
+        if len(dense) < 4:
+            continue
+        dense_open = dense[:-1] if (dense and dense[0] == dense[-1]) else dense
+        N_open = len(dense_open)
+        # LEFT normal (-dy, dx) points into the interior iff the ring is CCW
+        # (positive shoelace); flip for a CW ring so the ribbon offsets inward.
+        _sa = 0.0
+        for k in range(N_open):
+            x0, y0 = dense_open[k]
+            x1, y1 = dense_open[(k + 1) % N_open]
+            _sa += x0 * y1 - x1 * y0
+        inward_sign = 1.0 if _sa > 0.0 else -1.0
+        vertex_perp: list[tuple[float, float]] = []
+        for k in range(N_open):
+            p_prev = dense_open[(k - 1) % N_open]
+            p_cur = dense_open[k]
+            p_next = dense_open[(k + 1) % N_open]
+            dx_in = p_cur[0] - p_prev[0]
+            dy_in = p_cur[1] - p_prev[1]
+            Lin = math.hypot(dx_in, dy_in)
+            if Lin < 1e-9:
+                px_in = py_in = 0.0
+            else:
+                px_in = -dy_in / Lin
+                py_in = dx_in / Lin
+            dx_out = p_next[0] - p_cur[0]
+            dy_out = p_next[1] - p_cur[1]
+            Lout = math.hypot(dx_out, dy_out)
+            if Lout < 1e-9:
+                px_out = py_out = 0.0
+            else:
+                px_out = -dy_out / Lout
+                py_out = dx_out / Lout
+            avg_x = (px_in + px_out) / 2.0
+            avg_y = (py_in + py_out) / 2.0
+            L_avg = math.hypot(avg_x, avg_y)
+            if L_avg < 1e-9:
+                avg_x = px_in if Lin > 0 else px_out
+                avg_y = py_in if Lin > 0 else py_out
+            vertex_perp.append(
+                (avg_x * strip_width_m * inward_sign,
+                 avg_y * strip_width_m * inward_sign))
+        n_pairs = len(dense) - 1
+        for i in range(n_pairs):
+            out.append((dense[i], dense[i + 1],
+                        vertex_perp[i % N_open],
+                        vertex_perp[(i + 1) % N_open]))
+    return out
+
+
+def _compute_boundary_ribbon_interior(
+        layout: "PavementLayout",
+        strip_half_width_m: float = BOUNDARY_STRIP_HALF_WIDTH_M,
+        densify_step_m: float = 15.0):
+    """Airport-interior region (``airport_boundary`` minus the ribbon band),
+    computed PRE-solve without altitudes.
+
+    The ribbon polygon footprint is altitude-independent
+    (see :func:`_ribbon_segment_geometry`), so this reproduces exactly the
+    band the post-solve ribbon emit will occupy.  Used to clip airside
+    pavement to the ribbon inner edge BEFORE the solve (refactor Phase 3)
+    so the clipped pavement is graded by the solver and tiles conformingly
+    with the ribbon emitted later.  Returns the interior ``Polygon`` /
+    ``MultiPolygon``, or ``None`` when there is no boundary."""
+    ab = getattr(layout, "airport_boundary", None)
+    if ab is None or ab.is_empty:
+        return None
+    quads: list[Polygon] = []
+    for p0, p1, perp0, perp1 in _ribbon_segment_geometry(
+            ab, strip_half_width_m, densify_step_m):
+        corners = [
+            (p0[0], p0[1]),
+            (p1[0], p1[1]),
+            (p1[0] + perp1[0], p1[1] + perp1[1]),
+            (p0[0] + perp0[0], p0[1] + perp0[1]),
+        ]
+        try:
+            poly = Polygon(corners)
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            if poly.is_empty or poly.geom_type != "Polygon":
+                continue
+        except _GEOM_EXC:
+            continue
+        quads.append(poly)
+    if not quads:
+        return None
+    try:
+        footprint = unary_union(quads)
+        interior = ab.difference(footprint)
+    except _GEOM_EXC:
+        return None
+    if interior is None or interior.is_empty:
+        return None
+    return interior
+
+
 def _emit_airport_boundary_shape(
         layout: "PavementLayout",
         dem,
@@ -666,30 +828,6 @@ def _emit_airport_boundary_shape(
             clamp_radius_m=runway_clamp_radius_m,
             clamp_grade=runway_clamp_grade)
 
-    def _densify_ring(coords: list[tuple[float, float]]
-                      ) -> list[tuple[float, float]]:
-        """Insert intermediate points so consecutive vertices are
-        ≤ ``densify_step_m`` apart.  Closes the ring at the end."""
-        if not coords:
-            return coords
-        if coords[0] == coords[-1]:
-            coords = coords[:-1]
-        out: list[tuple[float, float]] = []
-        n = len(coords)
-        for i in range(n):
-            a = coords[i]
-            b = coords[(i + 1) % n]
-            out.append(a)
-            d = math.hypot(b[0] - a[0], b[1] - a[1])
-            if d > densify_step_m:
-                steps = max(1, int(d / densify_step_m))
-                for k in range(1, steps):
-                    t = k / steps
-                    out.append((a[0] + t * (b[0] - a[0]),
-                                a[1] + t * (b[1] - a[1])))
-        out.append(out[0])
-        return out
-
     # Per user 2026-05-12: emit the boundary as a CHAIN OF 4-corner
     # rectangles (one per densified boundary segment) instead of a
     # single buffered strip polygon.  Each rect is either flat
@@ -698,12 +836,6 @@ def _emit_airport_boundary_shape(
     # convention), so debug tools like JOSM can read the altitude
     # profile along the perimeter directly off each rect's tags.
     boundary_geom = layout.airport_boundary
-    if boundary_geom.geom_type == "Polygon":
-        ext_rings = [boundary_geom.exterior]
-    elif boundary_geom.geom_type == "MultiPolygon":
-        ext_rings = [g.exterior for g in boundary_geom.geoms]
-    else:
-        return 0
 
     def _rect_for_segment(
             p0: tuple[float, float],
@@ -768,135 +900,66 @@ def _emit_airport_boundary_shape(
             return None
         return poly, eh, el, p0, p1
 
+    # Walk the densified boundary as consecutive segment pairs (geometry
+    # via the shared :func:`_ribbon_segment_geometry`), emitting one rect
+    # per pair.  The per-vertex perpendiculars make adjacent rects share
+    # their flat (cross) edge nodes exactly — and reproduce the SAME band
+    # the pre-solve clip (``_compute_boundary_ribbon_interior``) used.
     n_emitted = 0
-    for ring in ext_rings:
-        ring_coords = list(ring.coords)
-        if ring_coords and ring_coords[0] == ring_coords[-1]:
-            ring_coords = ring_coords[:-1]
-        if len(ring_coords) < 3:
+    for p0, p1, perp0, perp1 in _ribbon_segment_geometry(
+            boundary_geom, strip_half_width_m, densify_step_m):
+        a0 = _runway_clamped_alt(p0[0], p0[1])
+        a1 = _runway_clamped_alt(p1[0], p1[1])
+        if a0 is None or a1 is None:
+            # Both DEM and runway-clamp returned None for at least one
+            # endpoint — we genuinely don't know the altitude here.  Per
+            # ``feedback_boundary_clamp_asymmetric``, the clamp lifts UP
+            # toward the runway only, so missing data cannot be silently
+            # replaced with sea level; that produces a multi-hundred-metre
+            # cliff at any non-coastal airport.  Skip the rect.
+            UI.vprint(1,
+                "  [pav-builder] boundary rect skipped: altitude "
+                f"unresolvable at p0={p0} (a0={a0}) p1={p1} (a1={a1})")
             continue
-        # Densify to ``densify_step_m`` along the ring.  The closing
-        # duplicate is added back at the end of ``_densify_ring``.
-        dense = _densify_ring(ring_coords)
-        if len(dense) < 4:
+        built = _rect_for_segment(p0, p1, float(a0), float(a1),
+                                   perp0, perp1)
+        if built is None:
             continue
-        # Pre-compute PER-VERTEX perpendiculars so adjacent rects
-        # share their inner & outer corners at the shared vertex
-        # (per user 2026-05-16: boundary rects must connect along
-        # the flat cross edges, otherwise the chain has gaps /
-        # overlaps at every bend).  The perp at vertex i is the
-        # half-width offset of the average tangent direction of the
-        # two segments meeting at i.  At straight runs this equals
-        # the per-segment perp; at bends, it produces a clean
-        # bevel join (no overlap, no gap between adjacent rects).
-        dense_open = dense[:-1] if (dense and dense[0] == dense[-1]) else dense
-        N_open = len(dense_open)
-        # The per-vertex normal computed below is the LEFT normal
-        # (-dy, dx); it points into the airport INTERIOR iff the ring is
-        # CCW (positive shoelace area).  ``inward_sign`` flips it for a CW
-        # ring so the ribbon always offsets inward (entirely inside the
-        # row-130 line).
-        _sa = 0.0
-        for k in range(N_open):
-            x0, y0 = dense_open[k]
-            x1, y1 = dense_open[(k + 1) % N_open]
-            _sa += x0 * y1 - x1 * y0
-        inward_sign = 1.0 if _sa > 0.0 else -1.0
-        # Full strip width, offset inward only (was ±half-width straddle).
-        strip_width_m = 2.0 * strip_half_width_m
-        vertex_perp: list[tuple[float, float]] = []
-        for k in range(N_open):
-            p_prev = dense_open[(k - 1) % N_open]
-            p_cur = dense_open[k]
-            p_next = dense_open[(k + 1) % N_open]
-            dx_in = p_cur[0] - p_prev[0]
-            dy_in = p_cur[1] - p_prev[1]
-            Lin = math.hypot(dx_in, dy_in)
-            if Lin < 1e-9:
-                px_in = py_in = 0.0
+        poly, eh, el, seg_high, seg_low = built
+        # No pavement self-trim here: the ribbon now owns the outer
+        # ``strip_width_m`` band exclusively, and pavement is clipped
+        # back to the ribbon's inner edge by
+        # ``_clip_pavement_to_boundary_interior`` so the two tile
+        # conformingly (shared inner-edge nodes, no slivers).
+        shape = BuiltShape(
+            polygon=poly,
+            role=ROLE_BOUNDARY,
+            ref="airport_boundary",
+        )
+        if eh is None:
+            shape.altitude = el
+        else:
+            # A buffer(0) repair in ``_rect_for_segment`` can turn the
+            # 4-corner sloped quad into a non-quad.  ``altitude_high``/
+            # ``altitude_low`` is only valid on a closed 4-corner
+            # quad — Ortho4XP rejects anything else ("Wrong number
+            # of nodes ... altitude_high/altitude_low polygon,
+            # skipped").  For a non-quad, preserve the
+            # along-perimeter slope as per-vertex ``node_altitudes``
+            # (linear eh->el interpolation along the high->low
+            # segment axis) rather than dropping it or flattening.
+            ring = list(poly.exterior.coords)
+            open_ring = (ring[:-1]
+                         if (ring and ring[0] == ring[-1]) else ring)
+            if len(open_ring) == 4:
+                shape.altitude_high = eh
+                shape.altitude_low = el
             else:
-                px_in = -dy_in / Lin
-                py_in = dx_in / Lin
-            dx_out = p_next[0] - p_cur[0]
-            dy_out = p_next[1] - p_cur[1]
-            Lout = math.hypot(dx_out, dy_out)
-            if Lout < 1e-9:
-                px_out = py_out = 0.0
-            else:
-                px_out = -dy_out / Lout
-                py_out = dx_out / Lout
-            avg_x = (px_in + px_out) / 2.0
-            avg_y = (py_in + py_out) / 2.0
-            L_avg = math.hypot(avg_x, avg_y)
-            if L_avg < 1e-9:
-                avg_x = px_in if Lin > 0 else px_out
-                avg_y = py_in if Lin > 0 else py_out
-            vertex_perp.append(
-                (avg_x * strip_width_m * inward_sign,
-                 avg_y * strip_width_m * inward_sign))
-        # Walk consecutive pairs; emit a rect per pair.  Use the
-        # per-vertex perp at each pair endpoint so adjacent rects
-        # share the flat (cross) edge nodes exactly.
-        n_pairs = len(dense) - 1
-        for i in range(n_pairs):
-            p0 = dense[i]
-            p1 = dense[i + 1]
-            perp0 = vertex_perp[i % N_open]
-            perp1 = vertex_perp[(i + 1) % N_open]
-            a0 = _runway_clamped_alt(p0[0], p0[1])
-            a1 = _runway_clamped_alt(p1[0], p1[1])
-            if a0 is None or a1 is None:
-                # Both DEM and runway-clamp returned None for at
-                # least one endpoint — we genuinely don't know the
-                # altitude here.  Per
-                # ``feedback_boundary_clamp_asymmetric``, the clamp
-                # lifts UP toward the runway only, so missing data
-                # cannot be silently replaced with sea level; that
-                # produces a multi-hundred-metre cliff at any non-
-                # coastal airport.  Skip the rect.
-                UI.vprint(1,
-                    "  [pav-builder] boundary rect skipped: altitude "
-                    f"unresolvable at p0={p0} (a0={a0}) p1={p1} (a1={a1})")
-                continue
-            built = _rect_for_segment(p0, p1, float(a0), float(a1),
-                                       perp0, perp1)
-            if built is None:
-                continue
-            poly, eh, el, seg_high, seg_low = built
-            # No pavement self-trim here: the ribbon now owns the outer
-            # ``strip_width_m`` band exclusively, and pavement is clipped
-            # back to the ribbon's inner edge by
-            # ``_clip_pavement_to_boundary_interior`` so the two tile
-            # conformingly (shared inner-edge nodes, no slivers).
-            shape = BuiltShape(
-                polygon=poly,
-                role=ROLE_BOUNDARY,
-                ref="airport_boundary",
-            )
-            if eh is None:
-                shape.altitude = el
-            else:
-                # A buffer(0) repair in ``_rect_for_segment`` can turn the
-                # 4-corner sloped quad into a non-quad.  ``altitude_high``/
-                # ``altitude_low`` is only valid on a closed 4-corner
-                # quad — Ortho4XP rejects anything else ("Wrong number
-                # of nodes ... altitude_high/altitude_low polygon,
-                # skipped").  For a non-quad, preserve the
-                # along-perimeter slope as per-vertex ``node_altitudes``
-                # (linear eh->el interpolation along the high->low
-                # segment axis) rather than dropping it or flattening.
-                ring = list(poly.exterior.coords)
-                open_ring = (ring[:-1]
-                             if (ring and ring[0] == ring[-1]) else ring)
-                if len(open_ring) == 4:
-                    shape.altitude_high = eh
-                    shape.altitude_low = el
-                else:
-                    shape.node_altitudes = (
-                        _node_altitudes_from_segment_slope(
-                            open_ring, seg_high, seg_low, eh, el))
-            layout.shapes.append(shape)
-            n_emitted += 1
+                shape.node_altitudes = (
+                    _node_altitudes_from_segment_slope(
+                        open_ring, seg_high, seg_low, eh, el))
+        layout.shapes.append(shape)
+        n_emitted += 1
     return n_emitted
 
 
@@ -1074,11 +1137,29 @@ def _flatten_bridge_pinch_necks(
 
 
 def _clip_pavement_to_boundary_interior(
-        layout: "PavementLayout", *, icao: str = "") -> tuple[int, int]:
+        layout: "PavementLayout", *, icao: str = "",
+        interior=None,
+        roles: frozenset | set | None = None,
+        skip_roles: frozenset | set | None = None,
+        ) -> tuple[int, int]:
     """Clip pavement shapes that STRADDLE the airport boundary back to the
     airport-interior region bounded by the boundary ribbon's INNER edge
     (user 2026-05-22: only shapes that touch/cross the boundary are
     reshaped; nothing is dropped).
+
+    ``interior`` (refactor Phase 3): when given, clip against this
+    precomputed interior region instead of deriving it from the emitted
+    ribbon shapes.  The pre-solve airside clip passes the geometric interior
+    from :func:`_compute_boundary_ribbon_interior` (the ribbon footprint is
+    altitude-independent), so the clipped pavement is graded by the solver
+    yet still tiles conformingly with the post-solve-emitted ribbon.  When
+    ``None`` (post-solve call), the interior is derived from the emitted
+    ribbon shapes as before.
+
+    ``roles`` / ``skip_roles``: restrict the pass to / exclude these roles.
+    The pre-solve call clips only airside roles; the post-solve call skips
+    airside (already clipped pre-solve) and handles the remaining
+    post-solve-emitted features (clearance, etc.).
 
     The relocated ribbon (entirely inside row-130, see
     ``_emit_airport_boundary_shape``) owns the outer ``strip_width_m``
@@ -1111,14 +1192,15 @@ def _clip_pavement_to_boundary_interior(
     ab = getattr(layout, "airport_boundary", None)
     if ab is None or ab.is_empty:
         return 0, 0
-    ribbon = [s.polygon for s in layout.shapes
-              if s.role == ROLE_BOUNDARY and s.ref == "airport_boundary"
-              and s.polygon is not None and not s.polygon.is_empty]
-    try:
-        ribbon_u = unary_union(ribbon) if ribbon else None
-        interior = ab.difference(ribbon_u) if ribbon_u is not None else ab
-    except _GEOM_EXC:
-        return 0, 0
+    if interior is None:
+        ribbon = [s.polygon for s in layout.shapes
+                  if s.role == ROLE_BOUNDARY and s.ref == "airport_boundary"
+                  and s.polygon is not None and not s.polygon.is_empty]
+        try:
+            ribbon_u = unary_union(ribbon) if ribbon else None
+            interior = ab.difference(ribbon_u) if ribbon_u is not None else ab
+        except _GEOM_EXC:
+            return 0, 0
     if interior is None or interior.is_empty:
         return 0, 0
 
@@ -1126,6 +1208,10 @@ def _clip_pavement_to_boundary_interior(
     clipped = 0
     left_outside = 0
     for s in layout.shapes:
+        if roles is not None and s.role not in roles:
+            continue
+        if skip_roles is not None and s.role in skip_roles:
+            continue
         if s.role in _BOUNDARY_CLIP_EXEMPT_ROLES:
             continue
         p = s.polygon

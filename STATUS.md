@@ -1,3 +1,122 @@
+# Auto-Patch Status — session 62 CLOSE → NEXT = TERMINAL-YIELD coordinated solver fix
+
+## ★★ SESSION 62 RESULTS (2026-06-04) ★★
+
+Two bodies of work landed (commit this session); the third (terminal-yield) is
+**investigated + characterized but NOT implemented** — detailed plan below.
+
+### A. PRE-SOLVE GEOMETRY REFACTOR — COMPLETE (docs/presolve_geometry_refactor.md)
+All airside node-unification now runs BEFORE `per_surface_solve`; post-solve is
+altitude-only + new non-airside shapes. `O4_GEOM_GUARD=1` HECA build reports
+**0 post-solve airside geometry changes — invariant HOLDS**. New `geom_guard.py`
+(env-gated dev guard; rotation/reflection-invariant ring hash — the solver
+reorders rect rings to [high,low,low,high] at altitude assignment, which is NOT a
+geometry change). Moved pre-solve: shape drops, airside boundary clip (against a
+geometric ribbon footprint `boundary._compute_boundary_ribbon_interior` /
+`_ribbon_segment_geometry`), groundside emit + apron-island absorb + orphan-junction
+reclassify, and the new `pipeline._unify_airside_geometry` (discovered-connect +
+weld + FULL conformance + corner snaps). Post-solve conformance is now ONE-SIDED
+(`owner_roles=_POSTSOLVE_FEATURE_OWNER_ROLES`) so features conform TO frozen airside.
+**Surprise: Phase 4 (apron-island absorb pre-solve) was the cliff fix, not Phase 7**
+— the #291↔#371 4.4 m cliff was an apron ISLAND emitted flat post-solve.
+Ribbon + DEM-bridge STAY post-solve (their runway-distance clamp anchors to ALL
+airside pavement incl. solved aprons → placement is solve-dependent). compare_target
+re-cut (all 3 fixtures) + re-enabled.
+
+### B. RUNTIME↔TEST GRADE ALIGNMENT + NO LENGTH CAP (#1, #2)
+- The Ortho4XP-window WARN used all-pair Euclidean → **3569** phantom HECA
+  violations; the test validator uses the visibility geodesic → **8** real. Aligned
+  `elevation._report_within_shape_violations` to the visibility graph; moved
+  `GRADE_VISIBILITY_BUFFER_M` / `ELEV_ROUNDING_NOISE_M` to config.py as the single
+  source of truth (check_grade + runtime audit both import).
+- **Removed the 60 m `WITHIN_SHAPE_MAX_PAIR_DIST_M` cap** from check_grade + the
+  runtime audit (per user: visible pairs at ANY distance must comply; the solver's
+  `_visible_grade_edges` was already uncapped). Visibility now gates apron AND
+  junction. Surfaced real far-pair violations the cap hid (HECA T8 ramp; SPLP
+  runway-parallel taxiway ~1.8%).
+- **Added HECA to the grade-test gate** (`test_pavement_grade`, scoped to the grade
+  test only). HECA + SPLP grade now FAIL by design (real violations); SPJC/CYXY pass.
+
+### Suite state at session close
+**295 passed / 2 failed / 2 skipped.** The 2 failures are INTENTIONAL grade gates:
+`test_pavement_grade[HECA]` (T8 apron ramp + others) and `test_pavement_grade[SPLP]`
+(runway-parallel taxiway ~1.8%). Per the ★★ user principle (below) both are solver
+gaps to close, NOT terrain limits. The 2 skips are the pre-existing environmental
+ones (test_elevation_terrain_following needs O4_TEST_TILE; test_boundary CYXY).
+
+## ★★ USER PRINCIPLE (durable) ★★
+**There is NEVER a legitimately infeasible airport.** We set the elevations, so every
+airport is solvable; the elevation solver must have the tools + fallbacks to grade
+ANY airport. Never accept a grade violation as "terrain-dictated / infeasible" —
+it is a solver GAP. (Supersedes the "genuinely-infeasible mega-apron" framing in
+older notes.) The solver model is 3 steps; NOTHING is "held/hard" except true anchors
+(tile-seam vertices + runway CIFP thresholds):
+  1. **Forward** (terminals→runway): grade connected shapes toward the runway; every
+     piece compliant except runway-connected junctions (violations pushed there).
+  2. **Reverse** (runway→terminals): pull slack out of shapes that didn't reach max
+     grade; push remaining violations INTO the terminals. Aprons graded compliant
+     → terminals MOVE to whatever elevation the apron needs.
+  3. **Final smoothing**: balance connected leaves at the same hierarchy level.
+
+## ★★ NEXT SESSION — TERMINAL-YIELD coordinated solver fix (DETAILED PLAN) ★★
+
+**Problem (HECA, fully diagnosed):** terminal8 solves to 78.2 (its DEM ~79.3, on a
+terrain rise); the 6/7/10 group fuses to 73.2. The apron bridging them ramps
+78.2→73.2 over ~173 m visible = ~2.9% (and a local 78.2→75.6 over 8.8 m = 29.6%).
+The solver allows it because **terminals are pinned at DEM** and never become the
+free leaves step 2 pushes violations into.
+
+**ROOT CAUSE — terminals are erroneously held at THREE independent points** (each
+single-point fix is undone by the other two — verified empirically, all reverted):
+
+| # | Location (unified_jacobi.py) | What it does wrong |
+|---|---|---|
+| 1 | Reverse pass, apron grading (~L887): `held \|= terminal_nodes.intersection(...)` | apron conforms to the DEM-level terminal instead of pushing the violation INTO it |
+| 2 | `_rigid_shift_terminal` (~L829): anchors at `t0=DEM`; `if j in terminal_nodes: continue` skips cross-terminal apron edges; recomputes from local (high-terrain) neighbours | re-flattens the terminal back to ~DEM, OVERWRITING any apron grading |
+| 3 | Band-projection (~L914): `_held_extra = terminal_nodes` (gated by `_FREE_TERMINALS`, default off) | step-3 smoothing can't balance terminal leaves |
+
+**Failed single-point attempts (all reverted — solver is byte-clean baseline):**
+- Remove #1 only → #2 (`_rigid_shift_terminal`) overwrites T8 back to 78.2; net regressed 8→12.
+- Un-skip cross-terminal edges in #2, using `cap_adj` (ALL-PAIR Euclidean) → T8 sees
+  far HIGH terminals (terminal1/2/9 @≈102, ~1.2 km, phantom chords) → band infeasible
+  (lo 83.8 > hi 72.6) → midpoint, no move.
+- Build `cap_adj` from VISIBLE (geodesic) edges instead → T8 drops 78.2→76.8 BUT net
+  8→13, worst 29.6%→31.9% (terminal moved partway; its surrounding apron stayed → new cliff).
+- Free terminals in band-projection (#3) + couple terminal pads → 168 violations
+  (uncontrolled global sloshing, terminals drift +9 m above DEM; no minimal-shift).
+
+**THE COORDINATED FIX (do all of these TOGETHER, not piecemeal):**
+1. **Reverse pass (#1):** do NOT hold terminal nodes when grading an apron — let the
+   apron grade freely from the runway so the violation flows to the terminal leaf.
+2. **`_rigid_shift_terminal` (#2):** set the terminal to the level its GRADED apron
+   boundary needs — (a) honour cross-terminal apron edges, but via the **VISIBILITY
+   (geodesic)** graph, NOT all-pair Euclidean `cap_adj` (build a visible adjacency from
+   `shape_constraints` edges); (b) skip only SAME-group internal edges (`if j in g`);
+   (c) keep the DEM-anchor only as a tie-break (minimal shift) when the band is loose.
+3. **Band-projection (#3):** free terminals, but as **rigid flat COUPLED units**
+   (extend `_build_level_coupling` with `terminal_groups`) AND with a **DEM minimal-shift
+   bias** (pull each freed terminal group toward its DEM-centroid within its feasible
+   band each sweep) so they settle at the closest-to-terrain level the aprons permit —
+   NO global sloshing.
+4. T8 sits on a rise ~5 m above the 73 m network, so its flat level must BALANCE both
+   abutting aprons' lengths (high side needs ~267 m to shed 4 m at 1.5%; low side
+   ~133 m to shed 2 m). The band-projection (global feasible bands from hard anchors)
+   is the right place to make this global decision — once terminals are free+coupled+
+   minimal-shift everywhere.
+
+**Code touchpoints:** `_rigid_shift_terminal` (L829), reverse-pass else-branch (L885-889),
+`_build_level_coupling` (L1427, add `extra_groups`), cap_adj construction (L816-823),
+band-projection call (L909-919). Prototype probes: `/tmp/probe_heca_terminals.py`,
+`/tmp/probe_held.py`, `/tmp/probe_solver_edge.py`. Memory: `runtime_vs_test_grade_gap.md`
+(full attempt log).
+
+**Validation gates:** HECA `test_pavement_grade` must go GREEN (T8 ramp resolved),
+SPJC/SPLP/CYXY terminal handling must NOT regress (the terminal tests + compare_target),
+and `O4_GEOM_GUARD=1` must stay 0. Build HECA + `tools/check_grade.py`; confirm T8 pulls
+to a level where both abutting aprons grade.
+
+---
+
 # Auto-Patch Status — session 60 CLOSE → session 61 = APRON COHERENT-FILL + 3 QUEUED TASKS
 
 ## ★★ SESSION 60 RESULTS (2026-06-02) — apron-edge coupling, robust neck cut, runway held in grade ★★

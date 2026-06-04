@@ -89,9 +89,21 @@ def _airport_tiles(icao: str, root: str):
     return tiles
 
 
-@pytest.mark.parametrize(
-    "icao",
-    sorted(set(baseline_airports()) | set(airports_under_test())))
+# HECA is grade-checked here even though it is NOT in the global
+# ``baseline_airports()`` invariant set (adding it there would pull HECA into
+# every geometry invariant at once).  Scoping it to the GRADE gate makes the
+# real within-shape / cross-shape violations the Ortho4XP-window WARN already
+# reports become CI-visible — closing the runtime-vs-test gap where HECA's
+# grade was never asserted (terminal-8 apron ramp, steep stub/cross_connector
+# rects, a shared-corner step).  This gate is RED until the solver pulls
+# apron-bridged terminals to a grade-compatible level (see the T8 investigation
+# in docs/presolve_geometry_refactor.md / memory); it turns GREEN when the
+# violations are fixed, proving the fix.
+_GRADE_TEST_AIRPORTS = sorted(
+    set(baseline_airports()) | {"HECA"} | set(airports_under_test()))
+
+
+@pytest.mark.parametrize("icao", _GRADE_TEST_AIRPORTS)
 def test_pavement_grade(tmp_path, icao):
     from auto_patch.elevation_per_surface import unified_jacobi as _uj
     import check_grade

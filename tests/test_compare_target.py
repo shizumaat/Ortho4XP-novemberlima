@@ -53,16 +53,6 @@ pytestmark = [
         not xplane_available(),
         reason="X-Plane install not found (set XPLANE_ROOT to override)",
     ),
-    # PAUSED 2026-06-03: the HECA apron-island merge (groundside pieces are now
-    # fused into their host apron instead of left as standalone "apron-island"
-    # shapes) intentionally changes SPJC/SPLP apron geometry + counts, so these
-    # structural-floor gates fail by design.  RE-ENABLE by deleting this mark
-    # and re-cutting SPJC + SPLP targets (tools/build_target_osm.py) once the
-    # HECA geometry work is finalized and every other test passes.
-    pytest.mark.skip(
-        reason="PAUSED while finalizing HECA apron geometry; re-cut SPJC/SPLP "
-        "targets before re-enabling.",
-    ),
 ]
 
 
@@ -70,19 +60,19 @@ pytestmark = [
 # run-to-run non-determinism in node-ID assignment / sliver-drop
 # ordering.  A regression that drops more than ~5 % of any role's
 # shapes vs target trips the gate.
-# Floors refreshed 2026-05-31 against the re-cut SPJC / SPLP target
-# fixtures.  Latest: the session-57 centerline-quality commits
-# (93eab1d bend-trim, c51fa12 off-corridor drop / bend-hook / runway
-# centering, 02677a3 through-taxiway corridor trim, d46034e
-# cross-connector end-margin cap) shifted the centerline segmentation,
-# changing junction/apron/stub decomposition (SPJC apron 41->32,
-# primary_parallel 34->31; SPLP-77 junction 4->3 / stub 3->4; SPLP-78
-# secondary_parallel 7->0 reclassified).  Floors = target - round(5%).
+# Floors RE-CUT 2026-06-03 against fresh SPJC / SPLP target fixtures after the
+# pre-solve-geometry refactor (docs/presolve_geometry_refactor.md): all airside
+# node-unification (weld + full conformance + corner snaps + the groundside
+# apron-island absorb/reclassify) now runs BEFORE the single elevation solve,
+# so the solver sees the FINAL node-set (post-solve airside geometry change = 0).
+# That intentionally consolidates apron islands into host aprons (SPJC apron
+# 32->30; SPLP-77 apron 11->7; SPLP-78 apron 3->4) and slightly shifts the
+# junction/parallel decomposition.  Floors = target - round(5%).
 SPJC_BASELINE: Dict[str, int] = {
-    "apron":              30,   # of  32 target
+    "apron":              28,   # of  30 target
     "boundary":          977,   # of 1028 target
     "cross_connector":     8,   # of   8 target
-    "junction":           31,   # of  33 target
+    "junction":           32,   # of  34 target
     "primary_parallel":   29,   # of  31 target
     "retaining_wall":     65,   # of  68 target
     "runway":             29,   # of  31 target
@@ -91,7 +81,7 @@ SPJC_BASELINE: Dict[str, int] = {
     "terminal":            2,   # of   2 target
     "tunnel_ramp":        34,   # of  36 target
 }
-SPJC_BASELINE_TOTAL = 1250  # of 1316 target
+SPJC_BASELINE_TOTAL = 1251  # of 1317 target (emitted)
 
 # SPLP is cross-tile (spans -13/-77 and -13/-78).  Each tile-half has
 # its own baseline; a regression in either half trips the gate.
@@ -100,17 +90,18 @@ SPJC_BASELINE_TOTAL = 1250  # of 1316 target
 # terrain roughness X-Plane never renders and produced different rect
 # splits (e.g. primary_parallel 5->7 here).  Floors = target - round(5%).
 SPLP_BASELINE_TILE_M77: Dict[str, int] = {
-    "apron":              10,   # of  11 target
+    "apron":               5,   # of   6 target (1 apron is invalid-dropped at
+                                #   emit; allow ±1 for that nondeterminism)
     "boundary":          200,   # of 211 target
     "junction":            3,   # of   3 target
     "primary_parallel":   10,   # of  11 target
     "runway":              8,   # of   8 target
     "stub":                4,   # of   4 target
 }
-SPLP_BASELINE_TILE_M77_TOTAL = 241  # of 254 target
+SPLP_BASELINE_TILE_M77_TOTAL = 237  # of 249 target (emitted)
 
 SPLP_BASELINE_TILE_M78: Dict[str, int] = {
-    "apron":               3,   # of   3 target
+    "apron":               4,   # of   4 target
     "boundary":          281,   # of 296 target
     "cross_connector":     1,   # of   1 target
     "junction":            8,   # of   8 target
@@ -119,7 +110,7 @@ SPLP_BASELINE_TILE_M78: Dict[str, int] = {
     "stub":                4,   # of   4 target
     "terminal":            1,   # of   1 target
 }
-SPLP_BASELINE_TILE_M78_TOTAL = 320  # of 337 target
+SPLP_BASELINE_TILE_M78_TOTAL = 321  # of 338 target
 
 
 def _build_layout(icao: str, tile_lat=None, tile_lon=None):

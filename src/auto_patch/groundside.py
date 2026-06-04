@@ -566,21 +566,6 @@ def _absorb_apron_enclosed_groundside(
                 s.polygon = None
                 absorbed += 1
                 continue
-        # Flush elevation = mean representative altitude of the apron
-        # shapes that touch this piece (fall back to all aprons).
-        try:
-            halo = p.buffer(radius_m + 0.5)
-            neigh = [_shape_repr_alt(a) for a in apron_shapes
-                     if a.polygon.intersects(halo)]
-        except _GEOM_EXC:
-            neigh = []
-        neigh = [a for a in neigh if a is not None]
-        if not neigh:
-            neigh = [a for a in (_shape_repr_alt(a) for a in apron_shapes)
-                     if a is not None]
-        if not neigh:
-            continue                # no usable altitude — leave as gs
-        alt = round(sum(neigh) / len(neigh), 1)
         # Clip to the terminal footprint so aircraft apron never intrudes
         # under the building; keep the largest surviving piece.
         q = p
@@ -606,13 +591,34 @@ def _absorb_apron_enclosed_groundside(
         # (user 2026-06-03) Genuinely MERGE the piece into the apron it borders
         # most — one continuous, node-shared polygon — instead of leaving a
         # standalone flat "apron-island" whose coincident-but-unshared vertices
-        # tear into cliffs when the apron surface moves.  Fall back to the flush
-        # standalone re-tag only when there is no apron to merge into.
+        # tear into cliffs when the apron surface moves.  This MERGE is
+        # geometry-only (no altitude needed) and is the PRE-solve path: the
+        # solver grades the unified apron, so the cliff is gone at the source.
+        # The flush standalone re-tag below is the fallback when there is no
+        # apron to merge into.
         host = _best_bordering_shape(q, apron_shapes, radius_m)
         if host is not None and _merge_piece_into_apron(q, host, radius_m):
             s.polygon = None
             absorbed += 1
             continue
+        # Standalone re-tag fallback (no bordering apron to merge into): the
+        # piece becomes a flush apron-island at the mean representative
+        # altitude of the neighbouring aprons.  PRE-solve the aprons have no
+        # altitude yet → leave the piece as groundside (it gets a DEM altitude
+        # + the separation gap) rather than guessing a flat level.
+        try:
+            halo = p.buffer(radius_m + 0.5)
+            neigh = [_shape_repr_alt(a) for a in apron_shapes
+                     if a.polygon.intersects(halo)]
+        except _GEOM_EXC:
+            neigh = []
+        neigh = [a for a in neigh if a is not None]
+        if not neigh:
+            neigh = [a for a in (_shape_repr_alt(a) for a in apron_shapes)
+                     if a is not None]
+        if not neigh:
+            continue                # no usable altitude — leave as gs
+        alt = round(sum(neigh) / len(neigh), 1)
         s.polygon = q
         s.role = ROLE_APRON
         s.ref = "apron-island"

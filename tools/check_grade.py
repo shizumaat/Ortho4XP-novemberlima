@@ -61,9 +61,17 @@ _SRC_DIR = os.path.join(os.path.dirname(_THIS_DIR), "src")
 if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 try:
-    from auto_patch.config import ROLE_GRADE_LIMITS
+    from auto_patch.config import (
+        ROLE_GRADE_LIMITS,
+        GRADE_VISIBILITY_BUFFER_M as _GRADE_VISIBILITY_BUFFER_M,
+        ELEV_ROUNDING_NOISE_M,
+    )
 except Exception:
     ROLE_GRADE_LIMITS: Dict[str, Optional[float]] = {}
+    # Fallbacks (kept in sync with auto_patch.config) so the standalone
+    # validator still runs if the package import fails.
+    _GRADE_VISIBILITY_BUFFER_M = 1.0
+    ELEV_ROUNDING_NOISE_M = 0.15
 
 
 # ── OSM parsing ─────────────────────────────────────────────────
@@ -297,14 +305,8 @@ class EdgeStep:
     lon: Optional[float] = None
 
 
-ELEV_ROUNDING_NOISE_M = 0.15  # patch elevations are stored at 1
-                               # decimal, contributing up to 0.1 m
-                               # of paired-rounding noise; the per-
-                               # surface solver converges to within
-                               # ~0.05 m of its grade cap before
-                               # writeback.  0.15 m envelopes both
-                               # without masking real (≥ 1.6 %)
-                               # violations.
+# ELEV_ROUNDING_NOISE_M now imported from auto_patch.config (single source of
+# truth shared with the runtime audit) — see the import block above.
 
 
 # X-Plane tile seams run along integer latitude / longitude lines.
@@ -445,18 +447,9 @@ def _check_plane_gradient(ways: List[Way],
     return out
 
 
-WITHIN_SHAPE_MAX_PAIR_DIST_M = 60.0   # max distance between two
-                                        # polygon vertices for the
-                                        # pair to be checked for grade.
-                                        # Triangle4XP will not create a
-                                        # triangle edge between vertices
-                                        # much further apart than this
-                                        # (interior Steiner refinement
-                                        # subdivides any large triangle),
-                                        # so far-pair checks would be
-                                        # false positives.  60 m covers
-                                        # a typical taxi rect's diagonal
-                                        # plus margin.
+# (The old WITHIN_SHAPE_MAX_PAIR_DIST_M distance cap was removed: the
+# within-shape check is now uncapped + visibility-gated — see
+# _check_within_shape.)
 
 # Per-axis junction grading (user 2026-05-22).  A junction may legitimately
 # slope along each converging taxi centerline (LONGITUDINAL ≤ code-letter cap)
@@ -604,7 +597,8 @@ def _airside_groundside_pair(way_a: "Way", way_b: "Way") -> bool:
 _STEP_CONTACT_TOL_M = 1.0
 
 
-_GRADE_VISIBILITY_BUFFER_M = 1.0  # matches unified_jacobi._GRADE_VISIBILITY_BUFFER_M
+# _GRADE_VISIBILITY_BUFFER_M now imported from auto_patch.config (single source
+# of truth) — see the import block above.
 
 
 def _polygon_visibility(pts):
@@ -656,15 +650,14 @@ def _check_within_shape(ways: List[Way],
     For 3-vertex polygons (triangles), every pair IS a triangle
     edge X-Plane will render — check all 3 pairs.
 
-    For 4+-vertex polygons, check every pair within
-    ``WITHIN_SHAPE_MAX_PAIR_DIST_M`` of each other.  Triangle4XP
-    triangulates polygon interiors with Steiner refinement; any
-    boundary vertex pair this close to each other is a plausible
-    triangle edge in the resulting mesh.  Far pairs are skipped —
-    Triangle4XP would interpose Steiner points and never connect
-    them directly.  This catches the dominant within-shape
-    failure mode (free-vertex drift near anchored neighbours)
-    that the prior consecutive-only check missed.
+    For 4+-vertex polygons, check every MUTUALLY-VISIBLE pair (the
+    straight chord stays inside the pavement) at ANY distance — the
+    average slope between two visible vertices is a real grade the
+    aircraft experiences regardless of separation.  There is NO
+    distance limit: visibility (not proximity) is what makes a pair a
+    real constraint, and it excludes chords that cut across a
+    non-convex shape's notch.  Apron + junction polygons are gated by
+    visibility; convex rects have every pair visible.
 
     Pairs that include a seam vertex are skipped — those endpoints
     are HARD-anchored to DEM by the seam pipeline and the solver
@@ -701,24 +694,27 @@ def _check_within_shape(ways: List[Way],
         if n == 3:
             pairs = [(0, 1), (1, 2), (2, 0)]  # all 3 triangle edges
         else:
-            # All VISIBLE pairs within WITHIN_SHAPE_MAX_PAIR_DIST_M.  For an
+            # All MUTUALLY-VISIBLE pairs, at ANY distance.  For an
             # APRON the grade limit applies along the pavement, so a pair whose
             # straight chord leaves the polygon (cuts across a notch /
             # non-pavement on a non-convex apron) is NOT a real constraint — the
             # surface follows the longer in-pavement path between them.  Mirrors
             # the solver's apron visibility graph (unified_jacobi.
             # _visible_grade_edges), scoped to aprons for the same reason.
+            # NO distance limit: if two vertices are MUTUALLY VISIBLE (their
+            # straight chord stays inside the pavement), the surface between
+            # them is a real path and its average slope (Δz / dist) is a grade
+            # the aircraft experiences — no matter how far apart they are (the
+            # 60 m cap was a leftover from the all-pair-Euclidean era;
+            # visibility already excludes chords that cut across non-pavement).
+            # Visibility gates aprons AND junctions (both can be non-convex);
+            # rects are convex 4-corner, so every pair is trivially visible.
+            # Mirrors the solver's uncapped ``_visible_grade_edges``.
             _vis = (_polygon_visibility(pts)
-                    if w.tags.get("role") == "apron" else None)
+                    if w.tags.get("role") in ("apron", "junction") else None)
             pairs = []
             for i in range(n):
                 for j in range(i + 1, n):
-                    dx = pts[i][0] - pts[j][0]
-                    dy = pts[i][1] - pts[j][1]
-                    if (dx * dx + dy * dy
-                            > WITHIN_SHAPE_MAX_PAIR_DIST_M
-                            * WITHIN_SHAPE_MAX_PAIR_DIST_M):
-                        continue
                     if _vis is not None and not _vis(
                             pts[i][0], pts[i][1], pts[j][0], pts[j][1]):
                         continue

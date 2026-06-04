@@ -61,10 +61,7 @@ from .elevation import (
     _split_sloped_rects_at_violations,
 )
 from .groundside import (
-    _absorb_apron_enclosed_groundside,
-    _reclassify_groundside_orphan_junctions,
     _separate_groundside_from_airside,
-    _emit_groundside_pavement_dem,
 )
 from .pavement.vertices import (
     _enforce_shared_vertices,
@@ -255,62 +252,16 @@ def emit_terrain_transition_features(layout: PavementLayout, icao: str, xplane_r
             UI.vprint(1,
                 f"  [pav-builder] emitted "
                 f"{n_b} airport-boundary shape piece(s).")
-        # Per user 2026-04-29: re-emit groundside pavement
-        # captured before the airside-apron subtraction, with
-        # per-vertex DEM altitudes and a 0.1 m gap from the
-        # terminal building.  Lets curbside / drop-off /
-        # parking pavement render at local terrain elevation
-        # (CYXY: terminal cut into hill, ~4 m higher than the
-        # airside apron).
-        try:
-            n_gs = _emit_groundside_pavement_dem(
-                layout, _dem, _tile_lat, _tile_lon)
-            if n_gs:
-                UI.vprint(1,
-                    f"  [pav-builder] emitted "
-                    f"{n_gs} groundside pavement "
-                    f"polygon(s) with DEM altitudes.")
-        except _GEOM_EXC:
-            pass
-        # Apron-island absorption (user 2026-06-03): a groundside piece
-        # wedged inside the airside with no open road/terrain frontage (an
-        # apron island, apron-hugging clip residue, or apron/terminal
-        # sandwich sliver) is reclassified back to flush apron.  Runs after
-        # the emit (so the perimeter reflects real apron adjacency) and
-        # before the separation gap is opened (so it stays flush).
-        try:
-            n_abs = _absorb_apron_enclosed_groundside(layout)
-            if n_abs:
-                UI.vprint(1,
-                    f"  [pav-builder] absorbed {n_abs} airside-wedged "
-                    f"piece(s) back into apron (not groundside).")
-        except _GEOM_EXC:
-            pass
-        # NOTE (2026-06-03): apron-fragment consolidation (_consolidate_apron_
-        # fragments) was prototyped here but REGRESSED grade — the flagged
-        # fragments (#375/#376/#377) sit at genuine terrain-driven elevations
-        # (#377 98.5m vs host #295 104.3m), so folding them post-solve just
-        # relocates the ~6m step to their other edges.  Left dormant (not
-        # called) pending a pre-solve approach.  See memory apron_island_merge.
-        # Per user 2026-04-29 / 2026-05-21 (CYXY -10111 / -10115;
-        # HECA terminal aprons): junction polygons connected ONLY to
-        # non-airside pavement (groundside polygons or each other), with
-        # no shared vertices on any airside rect/terminal/runway, got the
-        # airside-flat altitude from the solver but abut the DEM-following
-        # groundside at a different elevation → X-Plane cliffs.  These
-        # cover REAL pavement (at HECA the DSF adds large no-centerline
-        # terminal aprons), so we RECLASSIFY them as DEM-following
-        # groundside pavement rather than dropping them — keep the
-        # coverage, lose the cliff.
-        try:
-            n_orph = _reclassify_groundside_orphan_junctions(
-                layout, _dem, _tile_lat, _tile_lon)
-            if n_orph:
-                UI.vprint(1,
-                    f"  [pav-builder] reclassified {n_orph} "
-                    f"groundside-orphan junction(s) as DEM pavement.")
-        except _GEOM_EXC:
-            pass
+        # (refactor Phase 4) Groundside pavement EMIT + apron-island
+        # absorption (``_absorb_apron_enclosed_groundside``) + orphan-junction
+        # reclassification (``_reclassify_groundside_orphan_junctions``) moved
+        # PRE-solve (see pipeline.py): groundside is DEM-following and
+        # solve-independent (the per-surface solver only grades PAVEMENT_ROLES),
+        # and folding apron-enclosed groundside into aprons / re-tagging orphan
+        # junctions BEFORE the solve grades the absorbed pieces in place — the
+        # cliff is gone at the source instead of being relocated by a
+        # post-solve merge.  Only the SEPARATION below stays post-solve so it
+        # mirrors the FINAL airside geometry.
         # Enforce groundside separation (user 2026-05-22): clip every
         # groundside polygon to a clearance gap from all terminal /
         # airside pavement so it shares no node or edge with them
@@ -327,7 +278,11 @@ def emit_terrain_transition_features(layout: PavementLayout, icao: str, xplane_r
             pass
         # Then emit DEM-bridge polygons inside the boundary
         # wherever the clamped boundary altitude differs from
-        # raw DEM by > 5 m (per user 2026-04-28).
+        # raw DEM by > 5 m (per user 2026-04-28).  Kept POST-solve:
+        # the runway-distance clamp anchors to ALL airside pavement
+        # (incl. aprons/taxiways, whose altitudes are only known after
+        # the solve), so the bridge PLACEMENT (|clamp − DEM| > 5 m) is
+        # genuinely solve-dependent — see the refactor Phase 5 note.
         try:
             n_br = _emit_boundary_dem_bridge(
                 layout, _dem, _tile_lat, _tile_lon)
