@@ -50,6 +50,54 @@ geometry defect for one grade step → REVERTED; geometry clean again (0/0).
 #303 (the "merged 8 small apron fragments" pass missed it; lower its threshold /
 widen its criteria) so the sliver never exists, instead of moving vertices.
 
+## ★★ DESIGN — smooth vertical curves at taxiway/runway extrema (Task D, READY to build) ★★
+**Problem:** runways AND taxiways now emit as long `profile=plane` sloping rects
+sliced at terrain extrema; a plane meeting a plane at an extremum = a sharp
+hump/valley. Verified on HECA: kinks up to **1.78%** Δg at peaks (primary_parallel
+F/TX41, runway 05R/23L), flanking pieces 100–945 m long, needed vertical-curve
+length `L=K·|Δg|` only ~40–53 m (taxi, K≈30 m) / ~200–400 m (runway, K≈305 m). So
+there's ample room for a short transition zone. Probe: `/tmp/probes/extrema_kink.py`.
+Dormant constants ready: `driver.MAX_TAXIWAY_GRADE_CHANGE_PER_M = 1/3000`,
+`config.RUNWAY_MAX_GRADE_CHANGE_PER_M = 1/30000`.
+
+**Profile mechanism (no Ortho4XP change needed):** `O4_Vector_Map.include_patches`
+densifies each `altitude_high/low` rect every `cell_size` (10 m) and sets each
+interior point to `altitude_high − rnw_profile(x)·(high−low)`. Profiles available:
+`plane(x)=x` (linear/kink), `spline(x)=3x²−2x³` and `tanh` (BOTH symmetric S, flat
+at both ends). Emit (`layout.py` ~779/797/828) currently hardcodes
+`profile=PATCH_SLOPE_PROFILE`="plane" on every rect.
+
+**Two findings that shaped the chosen approach (user: HYBRID):**
+1. tanh/spline are symmetric (flat BOTH ends) → suited to flat→ramp→flat, NOT
+   slope→slope: between two sloped sections they leave residual kinks at both
+   boundaries (end-grade ~0 ≠ approach grade). The discretized PARABOLA (plane
+   micro-cascade) is the only correct shape for all cases w/o a new O4 profile.
+2. Smoothing is NOT just a profile tag NOR just geometry cuts — the transition
+   ALTITUDES must follow the vertical curve, and `L=K·|Δg|` needs the SOLVED
+   approach grades. So the feature is two-part: PRE-solve geometry (carve the
+   transition-zone cuts) + POST-solve altitude (fit the curve). Post-solve part is
+   altitude-only → `O4_GEOM_GUARD` stays 0.
+
+**Chosen build = HYBRID:** monotonic BENDS → single tanh transition rect (fewer
+shapes); PEAK/VALLEY apexes (non-monotonic, the worst kinks) → plane micro-cascade
+(N short rects, grades stepping through the curve length; fully smooth, grade-
+compliant by construction). Shared runway+taxiway helper.
+**Implementation steps:**
+  (a) Emit plumbing: add `Shape.slope_profile`(+`steepness`); emit it instead of
+      the hardcoded `PATCH_SLOPE_PROFILE` (layout.py). Needed only for the tanh path.
+  (b) Pre-solve: in `split_long_rects_along_terrain` (+ a runway sibling, factored
+      to one helper), at a peak/valley slice carve a transition zone of length
+      `L_vc` (use a terrain-grade estimate for L since the solve hasn't run);
+      tag pieces so the post-solve pass can find them.
+  (c) Post-solve altitude pass (altitude-only): for each tagged extremum, read the
+      solved approach grades + apex, fit the parabola; bends → set the tanh rect's
+      endpoints+steepness; peaks/valleys → set the micro-cascade rects' altitudes
+      to the stepping grade. Guard every rect ≤1.5% (taxi)/runway cap.
+  (d) Prototype on a real HECA extremum, dump along-axis grade continuity + view in
+      X-Plane, tune, then generalize. Add a grade-CONTINUITY check to check_grade?
+**Gate:** SPJC/SPLP/CYXY unchanged; `O4_GEOM_GUARD=1` stays 0; HECA extrema visibly
+smooth in X-Plane.
+
 ## ★★ NEXT — remaining HECA/SPLP within-shape grade (pre-existing) ★★
 HECA grade gate is still RED on within-shape (9) + plane (1), now UNRELATED to
 terminal-yield or the corner step. Per the ★★ USER PRINCIPLE (below) all are
