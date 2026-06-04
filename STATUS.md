@@ -37,19 +37,26 @@ meet T8 (stays 78.2), gap 2.6 m = 1.5 % (both splits are valid fixed points).
 Measure harness `/tmp/probes/heca_grade_measure.py`; apron dump
 `/tmp/probes/heca_apron275.py`. Memory: `runtime_vs_test_grade_gap.md` (#3 ✅ SOLVED).
 
-## ★★ NEXT — remaining HECA/SPLP grade (pre-existing, a DIFFERENT class) ★★
-HECA grade gate is still RED on issues UNRELATED to terminal-yield. Per the ★★
-USER PRINCIPLE (below) all are solver gaps to close. HECA: within-shape (9) =
-stub/B 3.04 %, cross_connector/D 3.54 %, stub/S 1.99 %, apron #303 3.61 %,
-primary_parallel/S 1.59 % (runway-parallel); + plane apron #267 1.79 %; + **cross
-#303↔#369 0.3 m shared-corner step** (the cross-shape gate trips on this first — a
-conformance/node-sharing issue between two abutting aprons, likely the quickest
-win). SPLP: stub B / primary_parallel A ~1.8 % (runway-parallel taxiway following
-the ~1.9 % sloped runway). These split into ~3 sub-problems: (a) connector/stub
+## ★★ ALSO DONE — apron flanking-corner step (commit 17abbc7) ★★
+The HECA cross-shape #303↔#369 step (0.3 m at a 0.5 m-apart unshared corner
+flanking a shared one — #369 is a 91 m² apron fragment) is FIXED. New
+`weld_flanking_corners` (canonical_points.py) welds a vertex pair onto one
+coordinate ONLY when both flank a genuinely-shared corner (true conformance
+slivers), so it can't merge the 56 legitimately-distinct sub-metre pairs a
+blanket weld-tolerance bump would. Runs LAST in `_unify_airside_geometry` (after
+conformance + near-corner snaps CREATE the sliver), still pre-solve. **HECA
+cross 1 → 0.** Suite unchanged 295p/2f/2s; geom-guard 0.
+
+## ★★ NEXT — remaining HECA/SPLP within-shape grade (pre-existing) ★★
+HECA grade gate is still RED on within-shape (9) + plane (1), now UNRELATED to
+terminal-yield or the corner step. Per the ★★ USER PRINCIPLE (below) all are
+solver gaps. HECA: stub/B 3.04 %, cross_connector/D 3.54 %, stub/S 1.99 %, apron
+#303 3.61 %, primary_parallel/S 1.59 % (runway-parallel); + plane apron #267
+1.79 %. SPLP: stub B / primary_parallel A ~1.8 % (runway-parallel taxiway
+following the ~1.9 % sloped runway). Two sub-problems remain: (a) connector/stub
 rects grading too steep over short spans, (b) runway-parallel taxiways inheriting
-the runway slope, (c) the apron↔apron shared-corner step. Build ≈55 s;
-`venv/bin/python /tmp/probes/heca_grade_measure.py` reports within/plane/cross +
-terminal levels.
+the runway slope. Build ≈55 s; `venv/bin/python /tmp/probes/heca_grade_measure.py`
+reports within/plane/cross + terminal levels.
 
 ---
 
