@@ -37,7 +37,7 @@ from shapely.geometry import Polygon
 
 
 __all__ = ["CanonicalPointRegistry", "snap_polygon_through_registry",
-           "weld_layout_vertices"]
+           "weld_layout_vertices", "weld_flanking_corners"]
 
 
 _GEOM_EXC = (ValueError, TypeError,
@@ -191,6 +191,118 @@ def snap_polygon_through_registry(
         return snapped_poly
     except _GEOM_EXC:
         return None
+
+
+def weld_flanking_corners(layout, roles, tol_m: float = 1.0) -> int:
+    """Weld near-coincident corners that FLANK a genuinely-shared node.
+
+    After :func:`weld_layout_vertices` two abutting shapes share exact corner
+    coordinates along a common boundary, but at the END of that boundary their
+    rings can DIVERGE: shape A turns to vertex Va and shape B to Vb, where Va
+    and Vb are the SAME physical corner up to ~``tol_m`` apart but were never
+    unified (the proximity weld's strict 0.5 m tolerance just misses them — the
+    gap is a 3-4-5 ≈ 0.50 m).  The sub-metre gap leaves a thin sliver and, after
+    the solve, a CROSS-SHAPE elevation step at the unshared corner (HECA apron
+    #303 / #369: 0.5 m apart, 0.3 m step — the within/cross grade gate trips).
+
+    Unlike a blanket proximity weld (which would also merge legitimately
+    DISTINCT vertices that merely sit < ``tol_m`` apart — 56 such non-flanking
+    pairs at HECA), this welds a pair ONLY when BOTH are ring-neighbours of a
+    common shared corner, so it touches true conformance slivers and nothing
+    else.  Runs PRE-solve (no ``node_altitudes`` yet → index alignment is moot);
+    any snap that would collapse/duplicate a ring vertex is skipped.
+
+    Returns the number of shapes modified.
+    """
+    targets = [s for s in layout.shapes
+               if s.role in roles and s.polygon is not None
+               and not s.polygon.is_empty
+               and s.polygon.geom_type == "Polygon"]
+
+    def key(x, y):
+        return (round(float(x), 3), round(float(y), 3))
+
+    rings: dict = {}                      # id(shape) -> (shape, open ring coords)
+    owners: dict = {}                     # coord key -> [(shape, ring index), ...]
+    for s in targets:
+        try:
+            coords = list(s.polygon.exterior.coords)
+        except _GEOM_EXC:
+            continue
+        ring = (coords[:-1] if len(coords) > 1 and coords[0] == coords[-1]
+                else coords)
+        rings[id(s)] = (s, ring)
+        for i, (x, y) in enumerate(ring):
+            owners.setdefault(key(x, y), []).append((s, i))
+
+    # Union-find over coordinate keys: cluster the flanking neighbours of every
+    # shared corner that lie within ``tol_m`` of each other (cross-shape).
+    parent: dict = {}
+
+    def find(k):
+        parent.setdefault(k, k)
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+
+    for coord, own in owners.items():
+        if len(own) < 2:
+            continue                       # not a shared corner
+        flank = []                         # (id(shape), coord key, (x, y))
+        for (s, i) in own:
+            _, ring = rings[id(s)]
+            n = len(ring)
+            for nb in (ring[i - 1], ring[(i + 1) % n]):
+                flank.append((id(s), key(*nb), (nb[0], nb[1])))
+        for a in range(len(flank)):
+            for b in range(a + 1, len(flank)):
+                ida, ka, pa = flank[a]
+                idb, kb, pb = flank[b]
+                if ida == idb or ka == kb:
+                    continue               # same shape / already-shared corner
+                d = math.hypot(pa[0] - pb[0], pa[1] - pb[1])
+                if 1e-6 < d <= tol_m:
+                    parent[find(ka)] = find(kb)
+
+    if not parent:
+        return 0
+    # Snap every clustered key onto its cluster representative (the min key).
+    snap_to: dict = {}
+    for k in list(parent):
+        r = find(k)
+        if k != r:
+            snap_to[k] = (float(r[0]), float(r[1]))
+    if not snap_to:
+        return 0
+
+    modified = 0
+    for s in targets:
+        _, ring = rings[id(s)]
+        changed = False
+        new_ring = []
+        for (x, y) in ring:
+            k = key(x, y)
+            if k in snap_to:
+                new_ring.append(snap_to[k])
+                changed = True
+            else:
+                new_ring.append((float(x), float(y)))
+        if not changed:
+            continue
+        try:
+            newpoly = Polygon(new_ring)
+        except _GEOM_EXC:
+            continue
+        # Skip if the snap collapsed/duplicated a vertex (ring length changes)
+        # or produced an invalid polygon — keep the original then.
+        if (newpoly.is_empty or not newpoly.is_valid
+                or newpoly.geom_type != "Polygon"
+                or len(newpoly.exterior.coords) != len(ring) + 1):
+            continue
+        s.polygon = newpoly
+        modified += 1
+    return modified
 
 
 def weld_layout_vertices(layout, roles, tol_m: float = 0.5) -> int:

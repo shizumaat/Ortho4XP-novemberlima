@@ -170,7 +170,7 @@ def _unify_airside_geometry(layout, icao: str) -> None:
     elevations (the HECA #291↔#371 class).  Pure geometry — no altitude
     dependency — so it is safe before any altitude is assigned.
     """
-    from .canonical_points import weld_layout_vertices
+    from .canonical_points import weld_layout_vertices, weld_flanking_corners
     from .conformance import enforce_conformance
     from .junction_repair import (
         _snap_near_corner_vertices_to_rect_corners,
@@ -219,6 +219,20 @@ def _unify_airside_geometry(layout, icao: str) -> None:
     # share-neighbour-corners handles the 0.10–0.5 m junction case.
     _snap_near_corner_vertices_to_rect_corners(layout, icao=icao)
     _share_neighbour_corners_into_junctions(layout, icao=icao)
+
+    # FINAL flanking-corner weld: conformance can leave two abutting shapes with
+    # near-coincident corners (~0.50 m) FLANKING a shared corner — the proximity
+    # weld's tight 0.5 m tolerance just misses them (a 3-4-5 ≈ 0.50 m), leaving a
+    # sliver + a post-solve CROSS-SHAPE elevation step (HECA apron #303/#369:
+    # 0.3 m).  Weld each such pair onto one coordinate.  Runs LAST so it sees the
+    # fully-conformed geometry; scoped to flanking-shared-corner pairs so it
+    # never merges the many legitimately-distinct sub-metre vertices a blanket
+    # tolerance bump would (56 such non-flanking pairs at HECA).
+    n_flank = weld_flanking_corners(layout, _weld_roles)
+    if n_flank:
+        UI.vprint(1,
+            f"  [pav-builder] {icao}: pre-solve welded {n_flank} shape(s) at "
+            f"flanking shared corners.")
 
 
 # ──────────────────────────────────────────────────────────────────
