@@ -1,4 +1,57 @@
-# Auto-Patch Status — session 62 CLOSE → NEXT = TERMINAL-YIELD coordinated solver fix
+# Auto-Patch Status — session 63 (terminal-yield DONE) → NEXT = remaining HECA/SPLP grade
+
+## ★★ SESSION 63 RESULT (2026-06-04) — TERMINAL-YIELD SOLVED (commit 118695b, dev) ★★
+
+The session-62 NEXT task is DONE. The HECA T8 apron ramp (T8 at 78.2 ≈ DEM 79.3,
+bridged over the 1.5 M m² mega-apron to the 6/7/10 group at 73.2, a ~2.9 % ramp)
+is fixed. **HECA within-shape grade 12 → 9** (the 3 T8-ramp pairs gone); suite
+unchanged **295 passed / 2 failed (intentional HECA+SPLP grade gates) / 2 skipped**;
+SPJC/SPLP/CYXY grade + geometry + compare_target green; `O4_GEOM_GUARD=1` stays 0.
+
+**The fix** = new post-pass `_yield_terminals_alternating` (unified_jacobi.py,
+called at the END of `_directional_relief`, after the held band-projection). It
+reconciles aprons-bridged terminals by BLOCK-COORDINATE ALTERNATION (NOT the
+joint free-terminal relaxation that sloshed in every prior attempt). Each round:
+(1) yield each terminal the MINIMUM from its current solved level into the
+grade-feasible interval its neighbours allow; (2) re-grade the aprons/junctions
+(`_project_within_bands(held_extra=terminal_nodes)`) to follow. Converges in ONE
+round at HECA.
+
+**Why the coordinated plan in the old session-62 handover (below) did NOT work as
+written, and what actually did** — two findings, each load-bearing:
+  1. **Bound the terminal interval by HELD neighbours ONLY** (`is_hard[j] or
+     j in terminal_nodes`): other terminals + runway/seam. A FREE apron node is
+     NOT a constraint — step 2 regrades it to FOLLOW the terminal (the apron
+     fills/cuts). Counting free apron nodes was the bug behind all the drift the
+     prior attempts hit: the mega-apron's north descent pins a free apron node at
+     79.2 just 24 m from T8, which ratcheted T8 UP to match instead of letting it
+     drop → the whole network slowly inflated toward the high anchors and never
+     converged (seen via `O4_YIELD_DEBUG=1`: every terminal creeping up each round).
+  2. **Clamp toward the CURRENT solved level, NOT the DEM centroid**
+     (`min(max(cur,tlo),thi)`). T8's DEM (79.3) sits ABOVE the compliant zone, so
+     a DEM-anchored clamp (`term_level0`) pulls it back up and resists the drop.
+Visibility (geodesic) adjacency built from the shape-constraint edges, NOT all-pair
+`cap_adj` (which fabricated a phantom 1.2 km chord to far high terminals). Removed
+the superseded `O4_FREE_TERMINALS` flag. Resolution: the GROUP rises 73.2→75.6 to
+meet T8 (stays 78.2), gap 2.6 m = 1.5 % (both splits are valid fixed points).
+Measure harness `/tmp/probes/heca_grade_measure.py`; apron dump
+`/tmp/probes/heca_apron275.py`. Memory: `runtime_vs_test_grade_gap.md` (#3 ✅ SOLVED).
+
+## ★★ NEXT — remaining HECA/SPLP grade (pre-existing, a DIFFERENT class) ★★
+HECA grade gate is still RED on issues UNRELATED to terminal-yield. Per the ★★
+USER PRINCIPLE (below) all are solver gaps to close. HECA: within-shape (9) =
+stub/B 3.04 %, cross_connector/D 3.54 %, stub/S 1.99 %, apron #303 3.61 %,
+primary_parallel/S 1.59 % (runway-parallel); + plane apron #267 1.79 %; + **cross
+#303↔#369 0.3 m shared-corner step** (the cross-shape gate trips on this first — a
+conformance/node-sharing issue between two abutting aprons, likely the quickest
+win). SPLP: stub B / primary_parallel A ~1.8 % (runway-parallel taxiway following
+the ~1.9 % sloped runway). These split into ~3 sub-problems: (a) connector/stub
+rects grading too steep over short spans, (b) runway-parallel taxiways inheriting
+the runway slope, (c) the apron↔apron shared-corner step. Build ≈55 s;
+`venv/bin/python /tmp/probes/heca_grade_measure.py` reports within/plane/cross +
+terminal levels.
+
+---
 
 ## ★★ SESSION 62 RESULTS (2026-06-04) ★★
 
