@@ -49,15 +49,6 @@ import os as _os
 import time as _time
 from collections import deque
 
-# (session 61 experiment) Let terminal pads move freely in the final band
-# projection instead of being held at their DEM/forward-pass level.  Terminals
-# stay flat (coupled), but the runway->out difference-constraint solve is free
-# to translate a whole pad to whatever level the adjacent aprons' grade demands
-# — so two aprons-bridged terminals at incompatible terrain levels get pulled
-# together instead of dumping the residual onto the apron between them.
-# Default OFF; A/B with env O4_FREE_TERMINALS=1.
-_FREE_TERMINALS = _os.environ.get("O4_FREE_TERMINALS", "0") == "1"
-
 from shapely.errors import GEOSException, TopologicalError
 
 from auto_patch.config import RUNWAY_END_FRACTION, RUNWAY_END_GRADE
@@ -902,16 +893,112 @@ def _directional_relief(n, elev, is_hard, edge_grade, edge_length,
     n = len(elev)
     all_edges = [e for sc in shape_constraints for e in sc["edges"]]
     lo, hi = _grade_bands(n, elev, is_hard, all_edges)
-    # Hold terminals fixed (default) so building pads stay at their DEM level;
-    # the experiment frees them so the difference-constraint solve can translate
-    # a pad (kept flat by ``coupling``) to meet apron grade.
-    _held_extra = set() if _FREE_TERMINALS else terminal_nodes
+    # Hold terminals fixed so building pads stay at their DEM level; the
+    # difference-constraint solve grades the aprons/junctions to that level.
     n_sweeps, _viol = _project_within_bands(
         elev, all_edges, is_hard, lo, hi, coupling,
-        held_extra=_held_extra,
+        held_extra=terminal_nodes,
         max_sweeps=1000,
         tol=max(tol_m, _SPREAD_COMPLY_TOL_M))
-    return 1 + n_sweeps
+    # Terminal-yield (session 62): an apron bridging two terminals at
+    # incompatible terrain levels (HECA T8 78.2 -> 6/7/10 group 73.2, a 2.9 %
+    # ramp) cannot comply while BOTH terminals are pinned at DEM.  Free the
+    # terminals as rigid flat units and reconcile by ALTERNATION (stable),
+    # NOT a joint relaxation (which sloshes): each round (1) yields every
+    # terminal the minimum from its current level into the interval its HELD
+    # neighbours (other terminals / hard anchors) allow, then (2) re-grades the
+    # aprons to follow.  A terminal already at a feasible level stays put;
+    # only one wedged off terrain by the bridging apron moves.
+    n_outer = _yield_terminals_alternating(
+        elev, shape_constraints, terminal_groups,
+        terminal_nodes, is_hard, coupling, lo, hi, all_edges,
+        tol=max(tol_m, _SPREAD_COMPLY_TOL_M))
+    return 1 + n_sweeps + n_outer
+
+
+def _yield_terminals_alternating(elev, shape_constraints, terminal_groups,
+                                 terminal_nodes, is_hard, coupling,
+                                 lo, hi, all_edges, tol, max_outer=25) -> int:
+    """Reconcile aprons-bridged terminals at incompatible terrain levels by
+    BLOCK-COORDINATE alternation (terminal-yield, session 62).
+
+    The joint free-terminal band projection sloshes (terminals are large rigid
+    bodies; many edges pull one group different ways, the relaxation oscillates
+    and drifts pads metres off terrain).  Alternation is stable: hold the aprons,
+    move each terminal the MINIMUM from its current (solved, near-DEM) level into
+    the interval its HELD neighbours allow, then hold the terminals and re-grade
+    the aprons to follow.  Repeat to a fixed point.  A terminal already at a
+    feasible level never moves (compliant pads stay home); only one wedged off
+    terrain by an apron bridging it to an incompatible-level terminal — like
+    HECA's T8 over the 1.5 M m² mega-apron to the 6/7/10 group — yields, and only
+    as far as the worst abutting HELD pair demands.  Returns the rounds run.
+    """
+    if not terminal_groups:
+        return 0
+    INF = float("inf")
+    # In-pavement VISIBILITY (geodesic) adjacency from the shape-constraint
+    # edges — NOT all-pair Euclidean: a phantom chord across non-pavement to a
+    # far high terminal would fabricate an infeasible band.
+    vis_adj: dict[int, list[tuple[int, float]]] = {}
+    for sc in shape_constraints:
+        for (i, j, c) in sc["edges"]:
+            vis_adj.setdefault(i, []).append((j, c))
+            vis_adj.setdefault(j, []).append((i, c))
+
+    outer = 0
+    for outer in range(max_outer):
+        moved = 0.0
+        # (1) Yield each terminal to the grade-feasible interval set by its HELD
+        #     visible neighbours ONLY — other terminals (held flat in step 2) and
+        #     hard runway/seam anchors.  A FREE apron/junction node is excluded:
+        #     it is NOT a constraint on the terminal because step 2 regrades it to
+        #     FOLLOW the terminal (the apron fills/cuts to accommodate).  Counting
+        #     free apron nodes was the bug — a free apron node sitting high near a
+        #     terminal (HECA: the giant apron's north descent pins a node at 79.2
+        #     just 24 m from T8) ratcheted the terminal UP to match it instead of
+        #     letting it drop to bridge the low group, so the whole network slowly
+        #     drifted up toward the high anchors and never resolved the ramp.
+        for gi, g in enumerate(terminal_groups):
+            tlo, thi = -INF, INF
+            for i in g:
+                for (j, c) in vis_adj.get(i, ()):  # type: ignore[arg-type]
+                    if j in g:
+                        continue
+                    if not (is_hard[j] or j in terminal_nodes):
+                        continue          # free node — regrades to follow us
+                    if elev[j] - c > tlo:
+                        tlo = elev[j] - c
+                    if elev[j] + c < thi:
+                        thi = elev[j] + c
+            cur = elev[next(iter(g))]
+            if tlo <= thi:
+                # Minimal shift from the CURRENT (solved) level — NOT from the
+                # DEM centroid.  A terminal wedged ABOVE the compliant zone (HECA
+                # T8: DEM 79.3, but the apron can only reach ~76 from the 73 m
+                # group) must DROP; anchoring the clamp to DEM pulls it back UP,
+                # resisting the very yield that fixes the ramp.  Clamping to the
+                # current level instead never moves a terminal away from
+                # compliance, and since the solve seeded it near DEM the result
+                # is still the closest-to-terrain feasible level.
+                t = min(max(cur, tlo), thi)
+            else:
+                t = 0.5 * (tlo + thi)                     # infeasible: midpoint
+            if abs(t - cur) > 1e-9:
+                if abs(t - cur) > moved:
+                    moved = abs(t - cur)
+                for i in g:
+                    elev[i] = t
+        # (2) Re-grade the aprons/junctions to the yielded terminals.
+        _project_within_bands(elev, all_edges, is_hard, lo, hi, coupling,
+                              held_extra=terminal_nodes,
+                              max_sweeps=1000, tol=tol)
+        if _os.environ.get("O4_YIELD_DEBUG"):
+            lv = {gi: round(elev[next(iter(g))], 2)
+                  for gi, g in enumerate(terminal_groups)}
+            print(f"  [yield] round {outer}: moved={moved:.3f} levels={lv}")
+        if moved < 0.01:
+            break
+    return outer + 1
 
 
 # Tolerance buffer for the in-pavement visibility test: a chord is "visible"
