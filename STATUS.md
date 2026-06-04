@@ -37,15 +37,18 @@ meet T8 (stays 78.2), gap 2.6 m = 1.5 % (both splits are valid fixed points).
 Measure harness `/tmp/probes/heca_grade_measure.py`; apron dump
 `/tmp/probes/heca_apron275.py`. Memory: `runtime_vs_test_grade_gap.md` (#3 ✅ SOLVED).
 
-## ★★ ALSO DONE — apron flanking-corner step (commit 17abbc7) ★★
-The HECA cross-shape #303↔#369 step (0.3 m at a 0.5 m-apart unshared corner
-flanking a shared one — #369 is a 91 m² apron fragment) is FIXED. New
-`weld_flanking_corners` (canonical_points.py) welds a vertex pair onto one
-coordinate ONLY when both flank a genuinely-shared corner (true conformance
-slivers), so it can't merge the 56 legitimately-distinct sub-metre pairs a
-blanket weld-tolerance bump would. Runs LAST in `_unify_airside_geometry` (after
-conformance + near-corner snaps CREATE the sliver), still pre-solve. **HECA
-cross 1 → 0.** Suite unchanged 295p/2f/2s; geom-guard 0.
+## ★★ REVERTED — apron flanking-corner weld (commit 17abbc7 → reverted 08699cf) ★★
+The `weld_flanking_corners` attempt (weld the #303↔#369 0.3 m cross-step by
+snapping two ~0.5 m-apart corners flanking a shared corner onto one coordinate)
+FIXED the cross step (cross 1→0) but **introduced 2 T-junctions + 2 edge
+crossings** — moving a vertex in the dense conforming partition lands it on a
+third shape's edge → Triangle4XP mesh slivers (the exact thing conformance
+prevents). Re-running conformance after the weld cleared the T-junctions but left
+1 edge crossing (conformance fixes T-junctions, not crossings). Not worth a
+geometry defect for one grade step → REVERTED; geometry clean again (0/0).
+**Proper fix (deferred):** #369 is a 91 m² apron FRAGMENT — MERGE it into host
+#303 (the "merged 8 small apron fragments" pass missed it; lower its threshold /
+widen its criteria) so the sliver never exists, instead of moving vertices.
 
 ## ★★ NEXT — remaining HECA/SPLP within-shape grade (pre-existing) ★★
 HECA grade gate is still RED on within-shape (9) + plane (1), now UNRELATED to
