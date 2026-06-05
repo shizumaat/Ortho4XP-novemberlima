@@ -355,13 +355,14 @@ ENABLE_APRON_NECK_SPLIT = True
 import os as _os  # noqa: E402
 HOLE_ROUTER_ENABLED = _os.environ.get("O4_HOLE_ROUTER", "1") == "1"
 
-# (session 63) Cut long taxi rects at interior terrain extrema so the solver
-# gets control points where the ground curves (``split_long_rects_along_terrain``).
-# Default ON (the grade tests depend on it).  Set ``O4_SPLIT_LONG_RECTS=0`` to
-# disable the extrema cuts when evaluating the long-rect "spline" slope profile
-# in X-Plane — with the cuts off, more rects exceed the spline length threshold
-# so the eased slope is visible without the extra seams.
-SPLIT_LONG_RECTS_ENABLED = _os.environ.get("O4_SPLIT_LONG_RECTS", "1") == "1"
+# (session 63) Cut long taxi rects AND runway segments at interior terrain
+# extrema (``split_long_rects_along_terrain`` + the runway peak/valley seams in
+# ``pavement/runway_segments.py``).  DEFAULT OFF (user 2026-06-05): the extrema
+# cuts split straight sections into many segments, and verified across
+# HECA/CYXY/SPLP they are NOT needed for runway grade compliance — runways stay
+# within grade (CYXY fully compliant) and the smooth vertical profile handles
+# terrain undulation.  Set ``O4_SPLIT_LONG_RECTS=1`` to restore the cuts.
+SPLIT_LONG_RECTS_ENABLED = _os.environ.get("O4_SPLIT_LONG_RECTS", "0") == "1"
 
 
 # ── Patch mesh-density tuning (X-Plane load-time optimization) ─────────

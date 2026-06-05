@@ -1,36 +1,61 @@
-# Auto-Patch Status — session 63 → NEXT = HOLE-ROUTER REDESIGN (global, min-slit, conforming)
+# Auto-Patch Status — session 63 = RUNWAY GRADE+CURVATURE COMPLIANCE (re-smoothing guard, seam, step-5)
 
-## ★★ ACTIVE (2026-06-04) — HOLE-ROUTER GAP: investigated, redesign locked ★★
-HECA giant-apron radial slices leave a thin uncovered-SOURCE wedge → X-Plane bump.
-**A/B PROVEN the hole router causes it** (`O4_HOLE_ROUTER=1` default ON since commit
-b24975d → gaps; `=0` → 0 gaps). NOT a dropped shape — per-shape cuts don't conform
-(adjacent slices' far corners ~1.6 m apart). Post-hoc gap-patching is FRAGILE (multiple
-reverted attempts; 20 edge crossings when patching post-conformance — same lesson as the
-flanking-corner weld). **Full investigation + the locked redesign plan: memory
-`hole_router_gap_redesign.md`.**
+## ★★ ACTIVE (2026-06-05) — runway grade+curvature through the solver ★★
+Memory: **`runway_curvature_solver_redesign.md`** (full detail + remaining work).
 
-**Redesign (user decisions locked):** GLOBAL node set (all shape verts + hole verts + rect
-corners, canonical → shared) + MINIMUM slits (one per hole, chained/shared — grade is the
-solver's job now) + per-shape cut application. Cut endpoints come ONLY from the shared node
-set so adjacent shapes' cuts conform; route around rects, end only at corners (KEEP the
-router's original benefit: no cut on a rect FLAT END). Reusable primitives in
-`pavement/hole_router.py` (`build_graph` already takes `extra_nodes`+rect obstacles,
-`_visible` forbids flat-end chords, `route_hole_opening` = single-bridge slit).
+**Problem found:** the per-surface solver's runway-flex (`_relax_runway_and_resolve`,
+unified_jacobi) BROKE runways — pulled 05C/23C interior ~8 m down to meet low aprons,
+shattering the vertical-curve rate (1→9 kinks, |Δg| 0.0095→0.0285/m) while keeping grade
+≤1.5%. Its acceptance checked grade only (meter-tolerant), no curvature.
 
-**State of the tree (clean base + 2 kept pieces, UNCOMMITTED):**
-- KEPT `verification.uncovered_interior_source_pieces` + `check_source_coverage` — the
-  INTERIOR-gap detector (source ∖ emitted, enclosed-frac ≥0.70 to exclude perimeter/voids).
-  HECA 11 gaps / SPJC 1 / CYXY 2 / SPLP 0 (baselines have the bug too). This is the basis
-  for the new `test_pavement_covers_source` invariant (add once the router fix lands).
-- KEPT layout.py `_slope_profile_for` — the spline-on-long-rects (>300 m) EXPERIMENT (user
-  evaluating the look). Restart Ortho4XP + regenerate +30+031 to view.
-- REVERTED everything else (the failed reclaim/absorb/debug) → junctions.py, finalize.py,
-  pipeline.py at baseline.
+**Shipped (commits dde52af, ccbc139, + this one):**
+1. **Re-smoothing flex guard** (`_runway_profile_compliance` / `_resmooth_runways_in_elev`
+   / `_runway_centerline_chain`). The flex re-smooths the flexed runway to an FAA
+   grade+vertical-curve compliant profile (full centerline, `faa_joint_solve`), re-grades
+   pavement against it, accepts only if the runway stays compliant. CYXY stub-A flatten
+   survives → CYXY runway fully compliant (test_runway_vertical_curve XPASSES).
+2. **Seam priority** — when a tile seam crosses an airport it is the HARD anchor; thresholds
+   yield to keep the runway compliant WITH the seam (SPLP seam level keeps the band's tilt,
+   ≤1.5% absolute; `_SEAM_CURV_KINK_ALLOWANCE=2` interim for the seam-crossing kink).
+3. **Step 5 = inter-runway threshold split** (`relieve_grade_via_inter_runway_split`, gated
+   `O4_INTER_RUNWAY_SPLIT`). SHAPE-ADJACENCY route graph (`_build_pavement_graph`,
+   `_dijkstra_from`) for accurate taxi-route distances; GEODESIC violation detection
+   (`run_grade_checks`, NOT all-pair); per violation, route to each runway, use the
+   EXIT-POINT elevation (not the far threshold — that was the measurement bug that invented
+   false 05-end gaps), feasible band, split the binding pair. Resets clean pre-solve
+   geometry before each re-solve (solver is NOT idempotent — pipeline snapshots
+   `_presolve_shapes`).
+4. **check_runway_profile invariant** + 2 tests (`test_runway_longitudinal_grade` hard gate
+   green on all; `test_runway_vertical_curve` xfail tracking; CYXY XPASSES). Profile-sample
+   merge widened to 5 m so junction-cut slivers aren't mis-read as grade kinks.
+5. **★ Terrain-extrema cuts OFF by default** (`config.SPLIT_LONG_RECTS_ENABLED` now defaults
+   off; `O4_SPLIT_LONG_RECTS=1` restores). Was splitting straight taxiway/runway sections at
+   terrain peaks/valleys; verified NOT needed for grade (HECA/CYXY/SPLP runways stay ≤1.5%,
+   CYXY fully compliant). Gated BOTH the taxi `split_long_rects_along_terrain` AND the runway
+   peak/valley seams (runway_segments.py, previously always-on). compare_target RE-CUT.
 
-**Still queued (user, this thread):** disable `split_long_rects_along_terrain` extrema cuts
-(see spline look without extra cuts); `test_pavement_covers_source`; runway-profile grade+
-curvature test (solver may pull runways out of compliance); the vertical-curve smoothing
-(memory `vertical_curve_extrema.md`).
+**Current HECA runway state:** uniform grade 0 violations; 3 marginal curvature kinks
+(1.1–1.4× the very tight 1/30000 rate) + 1 end-grade 0.83% — redistribute discretization,
+the "tighten initial profile" follow-up. Pavement within-shape ~46 = LOCAL taxiway/apron +
+the mega-apron coherent-fill problem (a DIFFERENT class than runway/threshold gaps).
+
+**HECA finding (re T4):** with the corrected EXIT-elevation measurement there is NO
+inter-runway threshold gap — taxiways connect to the runway's naturally-low MIDDLE
+(~104–110 m), attainable. The old flex pulled the runway INTERIOR down (not the threshold);
+the guard prevents that. **User to confirm in X-Plane whether T4 truly needs 23C moved.**
+
+**OPEN / NEXT:** step-5 multi-gap convergence (a 23-end split currently reverts); the
+mega-apron coherent-fill (HECA ~46); vertical-curve smoothing of the marginal kinks
+(memory `vertical_curve_extrema.md`); seam-curvature follow-up. UNCOMMITTED: layout.py
+`_slope_profile_for` spline-on-long-rects experiment (user evaluating — now more visible
+with extrema cuts off).
+
+**Deferred (was the session-63 ACTIVE, now parked):** the HOLE-ROUTER GAP redesign
+(global node set + min slits) — memory `hole_router_gap_redesign.md`. Kept
+`verification.check_source_coverage` (interior-gap detector). The single-bridge slit attempt
+was rejected (turned the apron into one polygon with embedded rects — violated "maintain the
+holes"); reverted. **Re-investigation showed the wedge gaps are TERMINAL↔APRON conformance
+strips, NOT router-caused** (present router on AND off; aprons have no holes) — see below.
 
 ---
 

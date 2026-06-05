@@ -690,13 +690,19 @@ def _build_pavement_graph(layout):
 
 
 def _dijkstra_from(adj, srcs):
-    """Min route distance from ANY source node to every node (multi-source)."""
+    """Multi-source Dijkstra.  Returns ``(dist, src_of)``: ``dist[n]`` = min
+    route distance from any source to node ``n``; ``src_of[n]`` = the SOURCE
+    node (the runway shape) the shortest path to ``n`` originates from — i.e.
+    the runway EXIT the violation reaches, whose graded elevation (not the
+    far threshold) is the binding runway level."""
     import heapq
     dist = {n: float("inf") for n in adj}
+    src_of = {n: None for n in adj}
     pq = []
     for s in srcs:
         if s in dist:
             dist[s] = 0.0
+            src_of[s] = s
             pq.append((0.0, s))
     heapq.heapify(pq)
     while pq:
@@ -707,8 +713,21 @@ def _dijkstra_from(adj, srcs):
             nd = d + w
             if nd < dist[v]:
                 dist[v] = nd
+                src_of[v] = src_of[u]
                 heapq.heappush(pq, (nd, v))
-    return dist
+    return dist, src_of
+
+
+def _runway_shape_elev(shape):
+    """Mean graded elevation of a runway sub-rect (the connection level)."""
+    if shape.altitude_high is not None and shape.altitude_low is not None:
+        return 0.5 * (float(shape.altitude_high) + float(shape.altitude_low))
+    if shape.node_altitudes:
+        vals = [float(a) for a in shape.node_altitudes]
+        return sum(vals) / len(vals) if vals else None
+    if shape.altitude is not None:
+        return float(shape.altitude)
+    return None
 
 
 def _ref_state_key(state, ref):
@@ -801,17 +820,27 @@ def relieve_grade_via_inter_runway_split(
             # ``hi`` = runway forcing the floor UP (lower its threshold);
             # ``lo`` = runway forcing the ceiling DOWN (raise its threshold).
             hi = lo = None                  # (state_key, e_idx, bound)
-            for ref in rwy_shapes:
-                d = distmap[ref].get(sidx, float("inf"))
+            for ref, (dist, src_of) in distmap.items():
+                d = dist.get(sidx, float("inf"))
                 if not (d < float("inf")):
                     continue                # this runway unreachable from here
-                thr = _nearest_movable_threshold(
-                    layout, state, ref, mx, my, seam_keys)
-                if thr is None:
+                exit_idx = src_of.get(sidx)
+                if exit_idx is None:
                     continue
-                k, e_idx, e = thr
-                lower = e - TAXI_MAX_GRADE * d
-                upper = e + TAXI_MAX_GRADE * d
+                # Runway level at the EXIT the route reaches (NOT the far
+                # threshold) — a mid-runway connection is at the dipped runway
+                # level, not the end elevation.
+                e_exit = _runway_shape_elev(layout.shapes[exit_idx])
+                if e_exit is None:
+                    continue
+                ex, ey = cent[exit_idx]
+                thr = _nearest_movable_threshold(
+                    layout, state, ref, ex, ey, seam_keys)
+                if thr is None:
+                    continue                # the exit's nearest end is seam-pinned
+                k, e_idx, _e_thr = thr
+                lower = e_exit - TAXI_MAX_GRADE * d
+                upper = e_exit + TAXI_MAX_GRADE * d
                 if hi is None or lower > hi[2]:
                     hi = (k, e_idx, lower)
                 if lo is None or upper < lo[2]:

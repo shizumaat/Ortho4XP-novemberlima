@@ -68,6 +68,7 @@ from ..config import (
     RUNWAY_END_GRADE,
     RUNWAY_MAX_GRADE as MAX_RUNWAY_GRADE,
     RUNWAY_MAX_GRADE_CHANGE_PER_M as MAX_RUNWAY_GRADE_CHANGE_PER_M,
+    SPLIT_LONG_RECTS_ENABLED,
 )
 DEFAULT_CELL_SIZE = float(RUNWAY_CELL_SIZE_M)  # meters between interp points
 DEFAULT_PROFILE = PATCH_SLOPE_PROFILE
@@ -1215,7 +1216,7 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
             # Densely sample the (smoothed) DEM along the centerline,
             # find prominent extrema (little ripples ignored), add their
             # fractions.  No-op when no DEM is available.
-            if phys_dist > 1.0:
+            if phys_dist > 1.0 and SPLIT_LONG_RECTS_ENABLED:
                 n_prof = max(4, int(phys_dist / 15.0))
                 prof: list[tuple[float, float]] = []
                 for k in range(n_prof + 1):
