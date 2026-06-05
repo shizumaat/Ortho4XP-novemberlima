@@ -685,6 +685,27 @@ class PavementLayout:
             ROLE_BOUNDARY, ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
             ROLE_STUB, ROLE_CROSS_CONNECTOR, ROLE_RUNWAY,
             ROLE_RUNWAY_CROSSING)
+
+        # (user 2026-06-04) A long sloping rect rendered with the linear "plane"
+        # profile meets its neighbours at a sharp grade kink.  Use the eased
+        # "spline" profile (3x²−2x³, flat at both ends) on any sloping rect whose
+        # long axis exceeds this length so the slope rounds off; shorter rects
+        # keep the configured default.
+        _LONG_RECT_PROFILE_M = 300.0
+
+        def _slope_profile_for(poly) -> str:
+            try:
+                c = list(poly.exterior.coords)
+            except _GEOM_EXC:
+                return PATCH_SLOPE_PROFILE
+            if len(c) >= 2:
+                longest = max(
+                    math.hypot(c[i + 1][0] - c[i][0], c[i + 1][1] - c[i][1])
+                    for i in range(len(c) - 1))
+                if longest > _LONG_RECT_PROFILE_M:
+                    return "spline"
+            return PATCH_SLOPE_PROFILE
+
         for s_idx, s, ext_nids in pending:
             tags = {
                 "aeroway": AEROWAY_FOR_ROLE.get(s.role, "taxiway"),
@@ -776,7 +797,7 @@ class PavementLayout:
                         tags["cell_size"] = str(
     RUNWAY_CELL_SIZE_M if s.role == ROLE_RUNWAY
     else PATCH_SLOPE_CELL_SIZE_M)
-                        tags["profile"] = PATCH_SLOPE_PROFILE
+                        tags["profile"] = _slope_profile_for(s.polygon)
                 # Try flat first.
                 elif all_max - all_min <= _CANON_EQ_TOL:
                     tags["altitude"] = (
@@ -794,7 +815,7 @@ class PavementLayout:
                     tags["cell_size"] = str(
     RUNWAY_CELL_SIZE_M if s.role == ROLE_RUNWAY
     else PATCH_SLOPE_CELL_SIZE_M)
-                    tags["profile"] = PATCH_SLOPE_PROFILE
+                    tags["profile"] = _slope_profile_for(s.polygon)
                 else:
                     # Per-corner values — including the closing
                     # repeat — matching X-Plane's mesh builder
@@ -825,7 +846,7 @@ class PavementLayout:
                         tags["cell_size"] = str(
     RUNWAY_CELL_SIZE_M if s.role == ROLE_RUNWAY
     else PATCH_SLOPE_CELL_SIZE_M)
-                        tags["profile"] = PATCH_SLOPE_PROFILE
+                        tags["profile"] = _slope_profile_for(s.polygon)
                     else:
                         tags["altitude"] = (
                             f"{(float(s.altitude_high) + float(s.altitude_low)) / 2.0:.1f}")
