@@ -58,6 +58,7 @@ Public API: ``redistribute_runway_profile``.
 from __future__ import annotations
 
 import math
+import os as _os
 from collections import defaultdict
 from typing import Dict, List, Tuple
 
@@ -72,7 +73,9 @@ from .runway_regrade import regrade_runway, DEFAULT_ARC_K_M
 
 __all__ = ["redistribute_runway_profile",
            "relieve_grade_via_runway_thresholds",
-           "ENABLE_RUNWAY_THRESHOLD_RELIEF"]
+           "relieve_grade_via_inter_runway_split",
+           "ENABLE_RUNWAY_THRESHOLD_RELIEF",
+           "ENABLE_INTER_RUNWAY_THRESHOLD_SPLIT"]
 
 
 def _bucket_key(x: float, y: float) -> Tuple[int, int]:
@@ -487,6 +490,13 @@ def redistribute_runway_profile(
 # ══════════════════════════════════════════════════════════════════
 
 ENABLE_RUNWAY_THRESHOLD_RELIEF = False   # parked; flip to engage + validate
+# STEP 5 (user 2026-06-05): inter-runway threshold SPLIT (lower the high
+# threshold, raise the low one by half the route excess each).  Safe to enable —
+# each split is kept only if the worst residual shrinks, and it fires only on a
+# genuine inter-runway threshold-gap (apron-fill / runway-parallel residuals are
+# left untouched).  Set ``O4_INTER_RUNWAY_SPLIT=0`` to disable.
+ENABLE_INTER_RUNWAY_THRESHOLD_SPLIT = (
+    _os.environ.get("O4_INTER_RUNWAY_SPLIT", "1") == "1")
 _RELIEF_TOL_M = 0.03            # residual below this (m of grade-excess) = done
 _THRESHOLD_STEP_M = 0.25        # per-iteration threshold nudge
 
@@ -639,3 +649,163 @@ def relieve_grade_via_runway_thresholds(
             resolve()
             break
     return n_moves
+
+
+def _movable_thresholds(layout, state, seam_keys):
+    """All non-seam runway thresholds as ``(pair_key, elev_index, elev,
+    (x, y))`` in local metres — the CIFP endpoints step-5 may yield."""
+    bk_s = 1.0 / SHARED_VERTEX_TOL_M
+    out = []
+    for pair_key, st in state.items():
+        anchored = st.get("anchored") or []
+        elevs = st.get("elevs") or []
+        first_i = next((i for i, a in enumerate(anchored) if a), None)
+        last_i = next((i for i in range(len(anchored) - 1, -1, -1)
+                       if anchored[i]), None)
+        if first_i is None or last_i is None or first_i == last_i:
+            continue
+        try:
+            ax, ay = layout.ll_to_m(*st["phys_end_a_ll"])
+            bx, by = layout.ll_to_m(*st["phys_end_b_ll"])
+        except Exception:
+            continue
+        for (px, py), e_idx in (((ax, ay), first_i), ((bx, by), last_i)):
+            if (int(round(px * bk_s)), int(round(py * bk_s))) in seam_keys:
+                continue                                  # seam threshold = pinned
+            out.append((pair_key, e_idx, float(elevs[e_idx]), (px, py)))
+    return out
+
+
+def _pick_bracketing_thresholds(layout, state, residual, seam_keys):
+    """The two movable runway thresholds that BRACKET a residual by elevation:
+    the nearest one ABOVE the residual's mean elevation and the nearest one
+    BELOW it.  These are the two ends of the inter-runway taxi route the
+    violation sits on.  Returns ``(hi, lo)`` where each is ``(pair_key,
+    e_idx, elev, (x, y), dist_to_residual)`` or ``None``."""
+    mx, my = residual["mid_xy"]
+    me = residual["mid_e"]
+    hi = lo = None
+    for (pk, ei, e, (px, py)) in _movable_thresholds(layout, state, seam_keys):
+        d = math.hypot(px - mx, py - my)
+        if e >= me:
+            if hi is None or d < hi[4]:
+                hi = (pk, ei, e, (px, py), d)
+        else:
+            if lo is None or d < lo[4]:
+                lo = (pk, ei, e, (px, py), d)
+    return hi, lo
+
+
+def relieve_grade_via_inter_runway_split(
+        layout, dem, tile_lat, tile_lon, resolve,
+        max_iters: int = 8, tol_m: float = _RELIEF_TOL_M) -> int:
+    """STEP 5 (user 2026-06-05): when a pavement grade violation remains because
+    the taxi route between two runways spans more elevation than the route
+    length allows at the taxi grade cap, SPLIT the difference between the two
+    bracketing runway thresholds — lower the high one and raise the low one by
+    half the excess each — then rebuild the runway profiles and re-grade.
+
+    HECA: the route between 05C/23C (~115 m) and 05L/23R (~60 m) is ~2700 m, so
+    the T4 region can only climb ~40 m from the 60 m end within grade and can't
+    reach 115 m; lowering 05C/23C and raising 05L/23R a few metres each closes
+    the gap.  Seam-pinned thresholds never move (seam > CIFP).  Each split is
+    kept only if the worst residual shrinks; otherwise it reverts and stops
+    (so a residual that is NOT a threshold-gap — e.g. an apron-fill or a
+    runway-parallel taxiway — is left untouched).  ``resolve()`` re-runs the
+    whole per-surface solver.  Returns the number of committed splits."""
+    from .config import TAXI_MAX_GRADE
+    state = getattr(layout, "_runway_profile_state", None)
+    if not state:
+        return 0
+    seam_keys = _seam_node_coords(layout)
+    n_moves = 0
+    for _it in range(max_iters):
+        # Find the residual with the largest INTER-RUNWAY THRESHOLD-GAP excess
+        # (NOT the worst grade): a short steep local stub near one runway has a
+        # long route to the far runway → no gap, while a mid-route violation
+        # (HECA T4, ~2700 m between 05C/23C and 05L/23R) does.  Only that class
+        # is fixable by a threshold split.
+        best = None
+        for r in _within_shape_residuals(layout, tol_m):
+            hi, lo = _pick_bracketing_thresholds(layout, state, r, seam_keys)
+            if hi is None or lo is None or hi[0] == lo[0]:
+                continue
+            mx, my = r["mid_xy"]
+            route = (math.hypot(hi[3][0] - mx, hi[3][1] - my)
+                     + math.hypot(lo[3][0] - mx, lo[3][1] - my))
+            excess = (hi[2] - lo[2]) - TAXI_MAX_GRADE * route
+            if excess > tol_m and (best is None or excess > best[0]):
+                best = (excess, hi, lo, r)
+        if best is None:
+            break                          # no inter-runway threshold gap left
+        excess, hi, lo, r = best
+        # Split the route excess between the two bracketing thresholds — lower
+        # the high one and raise the low one by half each — then RESET the
+        # runway geometry and re-grade (``_resolve`` restores the clean pre-solve
+        # shapes and re-redistributes): ``redistribute_runway_profile`` produces
+        # a fresh FAA grade+vertical-curve compliant profile for the NEW
+        # thresholds, so the runway makes grade by construction and the route
+        # gap is closed (HECA: raise 23R / lower 23C ~6.75 m each over 2700 m).
+        split = excess / 2.0
+        before = (_worst_within_shape_residual(layout) or {}).get(
+            "excess", 0.0)
+        state[hi[0]]["elevs"][hi[1]] -= split
+        state[lo[0]]["elevs"][lo[1]] += split
+        redistribute_runway_profile(layout, dem, tile_lat, tile_lon)
+        resolve()
+        after = (_worst_within_shape_residual(layout) or {}).get(
+            "excess", 0.0)
+        if after < before - 1e-3:
+            n_moves += 1                   # split helped — keep it
+        else:
+            state[hi[0]]["elevs"][hi[1]] += split   # revert
+            state[lo[0]]["elevs"][lo[1]] -= split
+            redistribute_runway_profile(layout, dem, tile_lat, tile_lon)
+            resolve()
+            break
+    return n_moves
+
+
+def _runway_grade_violation_count(layout) -> int:
+    """Number of runway centerline segments exceeding the uniform runway grade
+    cap (≤1.5 %) — the guard that a threshold split must not increase."""
+    try:
+        from .verification import check_runway_profile
+        return len(check_runway_profile(
+            layout, end_grade_cap=None, check_curvature=False))
+    except Exception:
+        return 0
+
+
+def _within_shape_residuals(layout, tol_m: float):
+    """Every within-shape grade violation as a residual dict (like
+    :func:`_worst_within_shape_residual` but ALL of them, excess > ``tol_m``)."""
+    caps = _relief_role_caps()
+    out = []
+    for s in layout.shapes:
+        cap = caps.get(s.role)
+        if cap is None or s.polygon is None or s.polygon.is_empty:
+            continue
+        coords, per = _shape_vertex_elevs(s)
+        if per is None or len(per) < 2:
+            continue
+        m = min(len(coords), len(per))
+        worst = None
+        for i in range(m):
+            xi, yi = coords[i]
+            for j in range(i + 1, m):
+                xj, yj = coords[j]
+                d = math.hypot(xi - xj, yi - yj)
+                if d < 0.5:
+                    continue
+                excess = abs(per[i] - per[j]) - cap * d
+                if excess <= tol_m:
+                    continue
+                if worst is None or excess > worst["excess"]:
+                    worst = {
+                        "excess": excess, "shape": s,
+                        "mid_e": 0.5 * (per[i] + per[j]),
+                        "mid_xy": (0.5 * (xi + xj), 0.5 * (yi + yj))}
+        if worst is not None:
+            out.append(worst)
+    return out

@@ -25,6 +25,7 @@ modules) so existing call sites keep working.
 """
 from __future__ import annotations
 
+import copy
 import math
 import os
 import re
@@ -2525,7 +2526,8 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # plane pieces a <3% (typically <1%) fold, not a visible bump.  Uses
     # the SAME smoothed DEM the solver will use.  Runs only when elevating
     # (geometry-only builds have no DEM); runways aren't in taxi_rects.
-    if compute_elevations and layout.anchor is not None:
+    from .config import SPLIT_LONG_RECTS_ENABLED
+    if compute_elevations and layout.anchor is not None and SPLIT_LONG_RECTS_ENABLED:
         try:
             from .elevation import _load_airport_dem, _sample_dem
             from .layout import R_EARTH as _R_E
@@ -3138,6 +3140,32 @@ def build_airport_pavement(icao: str, xplane_root: str,
         _geom_guard_snap = snapshot_airside_geometry(layout)
 
         if USE_PER_SURFACE_SOLVER and layout.anchor is not None:
+            from .runway_redistribute import (
+                ENABLE_RUNWAY_THRESHOLD_RELIEF,
+                ENABLE_INTER_RUNWAY_THRESHOLD_SPLIT,
+                redistribute_runway_profile,
+                relieve_grade_via_runway_thresholds,
+                relieve_grade_via_inter_runway_split)
+            # The per-surface solver MUTATES runway geometry (splits rects,
+            # converts flexed runways to node_altitudes), so it is NOT
+            # idempotent — a second solve on top of a solved layout degrades it.
+            # The threshold-relief loops below must re-solve, so snapshot the
+            # clean PRE-solve geometry and have ``_resolve`` restore it (then
+            # re-redistribute the runway to whatever thresholds the relief set)
+            # before each solve, so every solve starts from clean geometry.
+            _need_resolve_loop = (ENABLE_RUNWAY_THRESHOLD_RELIEF
+                                  or ENABLE_INTER_RUNWAY_THRESHOLD_SPLIT)
+            _presolve_shapes = (copy.deepcopy(layout.shapes)
+                                if _need_resolve_loop else None)
+
+            def _resolve():
+                if _presolve_shapes is not None:
+                    layout.shapes = copy.deepcopy(_presolve_shapes)
+                    redistribute_runway_profile(
+                        layout, dem, tile_lat, tile_lon)
+                per_surface_solve(layout, icao, dem=dem,
+                                  tile_lat=tile_lat, tile_lon=tile_lon)
+
             per_surface_solve(layout, icao,
                                dem=dem,
                                tile_lat=tile_lat, tile_lon=tile_lon)
@@ -3147,19 +3175,25 @@ def build_airport_pavement(icao: str, xplane_root: str,
             # infeasibility the directional relief can't reach with runways
             # locked.  Off by default — unvalidated; flip the flag in
             # runway_redistribute to engage + validate.  See STATUS.
-            from .runway_redistribute import (
-                ENABLE_RUNWAY_THRESHOLD_RELIEF,
-                relieve_grade_via_runway_thresholds)
             if ENABLE_RUNWAY_THRESHOLD_RELIEF:
-                def _resolve():
-                    per_surface_solve(layout, icao, dem=dem,
-                                      tile_lat=tile_lat, tile_lon=tile_lon)
                 n_thr = relieve_grade_via_runway_thresholds(
                     layout, dem, tile_lat, tile_lon, _resolve)
                 if n_thr:
                     UI.vprint(1,
                         f"  [pav-builder] {icao}: step-3 grade relief — "
                         f"shifted runway threshold(s) {n_thr} time(s).")
+            # STEP 5 (user 2026-06-05): inter-runway threshold SPLIT — close a
+            # taxi-route elevation gap between two runways that no apron/runway
+            # flex could (HECA T4 between 05C/23C ~115 m and 05L/23R ~60 m over
+            # ~2700 m).  Lower the high threshold + raise the low one by half the
+            # route excess, rebuild profiles, re-grade; keep only if it helps.
+            if ENABLE_INTER_RUNWAY_THRESHOLD_SPLIT:
+                n_split = relieve_grade_via_inter_runway_split(
+                    layout, dem, tile_lat, tile_lon, _resolve)
+                if n_split:
+                    UI.vprint(1,
+                        f"  [pav-builder] {icao}: step-5 inter-runway "
+                        f"threshold split applied {n_split} time(s).")
 
         if n_tile_delta != 0:
             UI.vprint(1,

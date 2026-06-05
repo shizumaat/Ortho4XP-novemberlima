@@ -211,6 +211,232 @@ def check_source_adjacency(layout, min_on_source_frac: float = 0.5):
     return out
 
 
+_COVERAGE_FEATURE_ROLES = frozenset({
+    "boundary", "taxiway_clearance", "runway_clearance",
+    "retaining_wall", "tunnel_ramp",
+})
+
+
+def uncovered_interior_source_pieces(layout, min_gap_area_m2: float = 5.0,
+                                     min_enclosed_frac: float = 0.70):
+    """The INTERIOR gaps where emitted pavement fails to cover the source: the
+    ``source_pavement_union`` (∪ runway) minus the union of every pavement-
+    occupying shape (all roles except pure FEATURES — boundary, clearance
+    shadows, walls, tunnel ramps), keeping only pieces that are (a) ≥
+    ``min_gap_area_m2`` and (b) ENCLOSED — at least ``min_enclosed_frac`` of the
+    perimeter shared with emitted pavement (so the airport's outer perimeter and
+    real voids touching open ground are excluded).  Returns ``[(Polygon,
+    enclosed_frac), …]`` largest first — the shared geometry source for the
+    ``check_source_coverage`` invariant and the reclaim pass."""
+    src = getattr(layout, "source_pavement_union", None)
+    if src is None or src.is_empty:
+        return []
+    rwy = getattr(layout, "runway_union", None)
+    if rwy is not None and not rwy.is_empty:
+        try:
+            src = src.union(rwy)
+        except Exception:
+            return []
+    from shapely.ops import unary_union
+    emitted = [s.polygon for s in layout.shapes
+               if (s.role or "") not in _COVERAGE_FEATURE_ROLES
+               and s.polygon is not None and not s.polygon.is_empty]
+    if not emitted:
+        return []
+    try:
+        emit_u = unary_union(emitted)
+        leftover = src.difference(emit_u)
+        emit_boundary = emit_u.boundary
+    except Exception:
+        return []
+    pieces = (leftover.geoms if hasattr(leftover, "geoms") else [leftover])
+    out = []
+    for p in pieces:
+        if p.geom_type != "Polygon" or p.is_empty or p.area < min_gap_area_m2:
+            continue
+        try:
+            shared = p.boundary.intersection(emit_boundary).length
+            frac = shared / p.boundary.length if p.boundary.length else 0.0
+        except Exception:
+            continue
+        if frac >= min_enclosed_frac:
+            out.append((p, frac))
+    out.sort(key=lambda r: r[0].area, reverse=True)
+    return out
+
+
+def check_source_coverage(layout, min_gap_area_m2: float = 5.0,
+                          min_enclosed_frac: float = 0.70):
+    """Invariant: the emitted pavement must COVER the source pavement — no
+    INTERIOR gap (a hole surrounded by pavement that uncovers source, so X-Plane
+    interpolates terrain across it as a visible bump).  The dual of
+    ``check_source_adjacency`` (emitted ⊆ source); here source ⊆ emitted for
+    interior regions.  Returns ``[(area_m2, enclosed_frac, "lat,lon"), …]``
+    largest first."""
+    return [(p.area, frac, _ll(layout, *p.representative_point().coords[0]))
+            for p, frac in uncovered_interior_source_pieces(
+                layout, min_gap_area_m2, min_enclosed_frac)]
+
+
+def _longest_pair_axis(pts):
+    """``(ox, oy, ux, uy, length)`` of the longest vertex pair in ``pts`` —
+    the runway centerline axis (origin at one end, unit direction, length).
+    ``None`` if fewer than 2 points or degenerate."""
+    import math
+    best = -1.0
+    A = B = None
+    n = len(pts)
+    for i in range(n):
+        xa, ya = pts[i]
+        for j in range(i + 1, n):
+            d2 = (pts[j][0] - xa) ** 2 + (pts[j][1] - ya) ** 2
+            if d2 > best:
+                best, A, B = d2, pts[i], pts[j]
+    if A is None or best <= 0:
+        return None
+    ln = math.sqrt(best)
+    return (A[0], A[1], (B[0] - A[0]) / ln, (B[1] - A[1]) / ln, ln)
+
+
+def _runway_rect_cross_ends(s, coords):
+    """The two flat cross-end edges of a 4-corner runway rect as
+    ``(mid_x, mid_y, elev)`` tuples.  ``coords`` = the 4 open-ring corners.
+    Corner elevations come from the shape's altitude tags (the solver orders a
+    sloped rect ring ``[high, low, low, high]``); the two SHORT ring edges are
+    the flat cross-ends."""
+    import math
+    if s.node_altitudes and len(s.node_altitudes) >= 4:
+        ce = [float(s.node_altitudes[i]) for i in range(4)]
+    elif s.altitude_high is not None and s.altitude_low is not None:
+        ah, al = float(s.altitude_high), float(s.altitude_low)
+        ce = [ah, al, al, ah]
+    elif s.altitude is not None:
+        a = float(s.altitude)
+        ce = [a, a, a, a]
+    else:
+        return []
+    edges = [(0, 1), (1, 2), (2, 3), (3, 0)]
+    edges.sort(key=lambda ab: math.hypot(
+        coords[ab[1]][0] - coords[ab[0]][0],
+        coords[ab[1]][1] - coords[ab[0]][1]))
+    out = []
+    for (a, b) in edges[:2]:           # the two shortest = cross-ends
+        out.append((0.5 * (coords[a][0] + coords[b][0]),
+                    0.5 * (coords[a][1] + coords[b][1]),
+                    0.5 * (ce[a] + ce[b])))
+    return out
+
+
+def check_runway_profile(layout, end_grade_cap="default",
+                         check_curvature: bool = True, noise_m: float = 0.05):
+    """Invariant: the EMITTED runway longitudinal profile must obey the
+    FAA/EASA grade caps AND the vertical-curve rate-of-grade-change limit — the
+    elevation solver (or a runway-flex MOVE) must never pull a runway out of
+    compliance.
+
+    Each runway emits as a chain of sloped ``ROLE_RUNWAY`` rects sharing their
+    flat cross-end edges.  Reconstruct each runway's centerline profile (one
+    elevation sample per rect cross-end, ordered along the runway axis) and
+    check, per consecutive segment:
+
+      * longitudinal grade ≤ ``end_grade_cap`` inside the first/last
+        ``RUNWAY_END_FRACTION`` of the length, ``RUNWAY_MAX_GRADE`` (1.5%)
+        elsewhere; and (when ``check_curvature``)
+      * grade change between consecutive segments ``|g_right − g_left| ≤
+        RUNWAY_MAX_GRADE_CHANGE_PER_M · (L_left + L_right)/2`` — the FAA
+        vertical-curve K-factor the runway solver's ``faa_rate_of_change_pass``
+        enforces on the sample chain (a runway-flex move uses only the grade-cap
+        constraints, so it can reintroduce a curvature violation — this catches
+        that).
+
+    ``end_grade_cap`` defaults to ``RUNWAY_END_GRADE`` (0.8%); pass ``None`` for
+    a uniform ``RUNWAY_MAX_GRADE`` cap (the only longitudinal limit the default
+    profile currently enforces — the 0.8% end cap is opt-in and the
+    vertical-curve smoothing is STATUS item D, so the strict defaults are RED
+    until those land).  ``noise_m`` absorbs altitude float noise.  Returns
+    ``[(kind, ref, value, cap, "lat,lon"), …]`` worst-excess first; ``kind`` ∈
+    {"grade", "curvature"}; ``value``/``cap`` are decimal grades (grade) or
+    grade-change-per-metre (curvature)."""
+    import math
+    from .config import (
+        RUNWAY_MAX_GRADE, RUNWAY_END_GRADE, RUNWAY_END_FRACTION,
+        RUNWAY_MAX_GRADE_CHANGE_PER_M)
+    if end_grade_cap == "default":
+        end_grade_cap = RUNWAY_END_GRADE
+
+    by_ref: dict = {}
+    for s in layout.shapes:
+        if (s.role or "") != "runway":
+            continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        cs = list(s.polygon.exterior.coords)
+        if len(cs) > 1 and cs[0] == cs[-1]:
+            cs = cs[:-1]
+        if len(cs) != 4:
+            continue              # clipped/irregular rect — no clean cross-ends
+        by_ref.setdefault(s.ref or "", []).append((s, cs))
+
+    out = []
+    for ref, items in by_ref.items():
+        ax = _longest_pair_axis([p for _s, cs in items for p in cs])
+        if ax is None:
+            continue
+        ox, oy, ux, uy, L = ax
+        if L <= 0:
+            continue
+        samples = []              # (dist_along_axis, elev, x, y)
+        for s, cs in items:
+            for (mx, my, e) in _runway_rect_cross_ends(s, cs):
+                samples.append(((mx - ox) * ux + (my - oy) * uy, e, mx, my))
+        if len(samples) < 2:
+            continue
+        samples.sort(key=lambda t: t[0])
+        # Merge the shared cross-edges of adjacent rects (~coincident).
+        merged = []               # (dist, elev, x, y, n)
+        for d, e, mx, my in samples:
+            if merged and abs(d - merged[-1][0]) <= 5.0:
+                pd, pe, px, py, pn = merged[-1]
+                k = pn + 1
+                merged[-1] = ((pd * pn + d) / k, (pe * pn + e) / k,
+                              (px * pn + mx) / k, (py * pn + my) / k, k)
+            else:
+                merged.append((d, e, mx, my, 1))
+        if len(merged) < 2:
+            continue
+        grades = []               # (g, seg_len, mid_x, mid_y)
+        for i in range(len(merged) - 1):
+            d0, e0, x0, y0, _ = merged[i]
+            d1, e1, x1, y1, _ = merged[i + 1]
+            seg = d1 - d0
+            if seg < 0.5:
+                continue
+            fi, fj = d0 / L, d1 / L
+            in_end = (min(fi, fj) < RUNWAY_END_FRACTION
+                      or max(fi, fj) > 1.0 - RUNWAY_END_FRACTION)
+            cap = (end_grade_cap if (in_end and end_grade_cap is not None)
+                   else RUNWAY_MAX_GRADE)
+            if abs(e1 - e0) - cap * seg > noise_m:
+                out.append(("grade", ref, abs(e1 - e0) / seg, cap,
+                            _ll(layout, 0.5 * (x0 + x1), 0.5 * (y0 + y1))))
+            grades.append(((e1 - e0) / seg, seg,
+                           0.5 * (x0 + x1), 0.5 * (y0 + y1)))
+        if not check_curvature:
+            continue
+        for i in range(len(grades) - 1):
+            gl, Ll, _xl, _yl = grades[i]
+            gr, Lr, mx, my = grades[i + 1]
+            max_dg = RUNWAY_MAX_GRADE_CHANGE_PER_M * 0.5 * (Ll + Lr)
+            # Altitude-noise floor on the grade difference (each grade carries
+            # ~noise_m/seg sampling noise).
+            noise_dg = noise_m * (1.0 / Ll + 1.0 / Lr)
+            if abs(gr - gl) - max_dg > noise_dg:
+                out.append(("curvature", ref, abs(gr - gl), max_dg,
+                            _ll(layout, mx, my)))
+    out.sort(key=lambda r: -(r[2] - r[3]))
+    return out
+
+
 def check_terminal_flat(layout):
     """Invariant H26: a terminal moves as one rigid flat unit — a single
     ``altitude`` tag, never per-vertex ``node_altitudes`` or two-end
@@ -632,13 +858,24 @@ def verify_and_log(layout, icao: str) -> dict:
         UI.lvprint(0, f"  [verify] {icao}: grade verification "
                        f"unavailable ({exc})")
         within = cross = steps = []
+    # Runway longitudinal grade at the uniform 1.5% cap — the binding limit the
+    # runway solver enforces today.  (The 0.8% end cap + FAA vertical-curve
+    # rate are deliberately NOT logged here: they are expected RED until the
+    # vertical-curve smoothing lands and would spam every airport — they are
+    # tracked by the test_runway_vertical_curve xfail instead.)
+    rwy_grade = []
+    try:
+        rwy_grade = check_runway_profile(
+            layout, end_grade_cap=None, check_curvature=False)
+    except Exception:                              # pragma: no cover
+        pass
 
     counts = {"overlap": len(overlaps), "source": len(source),
               "terminal_flat": len(flat), "vertex_on_edge": len(edge_v),
               "vertex_on_flat_edge": len(flat_v),
               "axis_tilt": len(axis_v), "short_edge": len(short_e),
               "cross": len(cross), "within": len(within),
-              "steps": len(steps)}
+              "steps": len(steps), "runway_grade": len(rwy_grade)}
     if not sum(counts.values()):
         UI.vprint(1, f"  [verify] {icao}: OK — no overlap / source / "
                      f"grade issues.")
@@ -729,4 +966,11 @@ def verify_and_log(layout, icao: str) -> dict:
         UI.lvprint(0, f"  [verify]   EDGE-STEPS: {len(steps)} vertical "
                       f"step(s) > 0.5 m between adjacent surfaces.")
         UI.lvprint(0, f"  [verify]     ↳ {_HINTS['steps']}")
+    if rwy_grade:
+        for kind, ref, val, cap, loc in rwy_grade[:5]:
+            UI.lvprint(0, f"  [verify]   RUNWAY-GRADE {val*100:.2f}% > "
+                          f"{cap*100:.1f}% @ {loc}: runway {ref}")
+        UI.lvprint(0, f"  [verify]     ↳ the runway longitudinal profile "
+                      f"exceeds the 1.5% grade cap — the solver / runway-flex "
+                      f"pulled it out of compliance. Fix: the runway solver.")
     return counts

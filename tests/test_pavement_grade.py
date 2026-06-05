@@ -196,3 +196,62 @@ def test_pavement_grade(tmp_path, icao):
         pytest.fail(
             f"{icao}: {len(within)} within-shape grade/plane "
             f"violations (cap {cap}).  Worst:\n  {worst}")
+
+
+def _fmt_rwy(vios) -> str:
+    out = []
+    for kind, ref, val, cap, ll in vios[:6]:
+        if kind == "grade":
+            out.append(f"{ref}: {val * 100:.2f}% > {cap * 100:.2f}% @ {ll}")
+        else:
+            out.append(
+                f"{ref}: |Δg|={val:.5f}/m > {cap:.5f}/m @ {ll} (kink)")
+    return "\n  ".join(out)
+
+
+@pytest.mark.parametrize("icao", _GRADE_TEST_AIRPORTS)
+def test_runway_longitudinal_grade(icao):
+    """The emitted runway centerline profile must not exceed the uniform
+    ``RUNWAY_MAX_GRADE`` (1.5%) longitudinal cap anywhere — the binding
+    longitudinal limit the runway solver + runway-flex enforce today.  Guards
+    against a runway-flex MOVE (or any solver change) pulling a runway steeper
+    than 1.5% along its axis.  Reconstructs the profile from the whole-airport
+    layout (a runway is continuous; not per-tile)."""
+    from conftest import cached_airport_layout
+    from auto_patch.verification import check_runway_profile
+
+    layout = cached_airport_layout(icao)
+    if not any((s.role or "") == "runway" for s in layout.shapes):
+        pytest.skip(f"{icao}: no runway shapes")
+    vios = check_runway_profile(
+        layout, end_grade_cap=None, check_curvature=False)
+    assert not vios, (
+        f"{icao}: {len(vios)} runway longitudinal-grade violation(s) "
+        f"> {1.5:.1f}%.  Worst:\n  {_fmt_rwy(vios)}")
+
+
+@pytest.mark.xfail(
+    reason="runway vertical-curve smoothing (STATUS item D) not built + the "
+           "0.8% end-grade cap is opt-in, so runways emit as plane rects with "
+           "sharp kinks at extrema and 1.5% end zones — RED until those land; "
+           "flips to XPASS when a runway becomes fully compliant.",
+    strict=False)
+@pytest.mark.parametrize("icao", _GRADE_TEST_AIRPORTS)
+def test_runway_vertical_curve(icao):
+    """The emitted runway profile must also obey the EASA 0.8% end-grade cap and
+    the FAA vertical-curve rate-of-grade-change limit
+    (``RUNWAY_MAX_GRADE_CHANGE_PER_M``).  This is the runway counterpart of the
+    taxiway vertical-curve smoothing (STATUS item D): currently RED on every
+    airport because plane rects meet at sharp kinks at terrain extrema.  Kept as
+    an ``xfail`` tracking target — it turns XPASS per airport as the smoothing /
+    end-grade enforcement lands."""
+    from conftest import cached_airport_layout
+    from auto_patch.verification import check_runway_profile
+
+    layout = cached_airport_layout(icao)
+    if not any((s.role or "") == "runway" for s in layout.shapes):
+        pytest.skip(f"{icao}: no runway shapes")
+    vios = check_runway_profile(layout)
+    assert not vios, (
+        f"{icao}: {len(vios)} runway end-grade/vertical-curve violation(s).  "
+        f"Worst:\n  {_fmt_rwy(vios)}")

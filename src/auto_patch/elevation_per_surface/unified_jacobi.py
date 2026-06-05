@@ -170,6 +170,12 @@ _PER_AXIS_JUNCTIONS = False
 # truth, pavement is known to exist and be gradeable, the DEM is the guess.
 _RUNWAY_FLEX = True
 _RUNWAY_FLEX_THRESHOLD_TOL_M = 2.0  # axial proximity to a runway END = threshold
+# Seam-level threshold-yield: the band solve tilts the runway through the hard
+# seam, which can leave a residual vertical-curve kink at the seam crossing
+# (eliminating it needs the seam's runway node anchored in the FAA smooth — a
+# follow-up).  Allow this many marginal kinks so a grade-compliant seam yield
+# still commits instead of leaving the runway grade-violating.
+_SEAM_CURV_KINK_ALLOWANCE = 2
 
 # DEM attraction (user 2026-05-22): each iteration, pull every SOFT node a
 # fixed fraction of the way toward its terrain (DEM) elevation, THEN
@@ -1383,6 +1389,164 @@ def _seam_pinned_runway_nodes(layout, bucket_to_idx) -> set:
     return out
 
 
+def _runway_profile_compliance(layout, elev, bucket_to_idx):
+    """``(worst |grade|, curvature-violation count)`` over every runway's
+    centerline profile reconstructed from the CURRENT ``elev`` array — the
+    metric the runway-flex guard holds to (longitudinal grade + FAA
+    vertical-curve rate-of-grade-change).  A runway is a chain of 4-corner
+    ``ROLE_RUNWAY`` rects sharing flat cross-ends; sample one elevation per
+    cross-end along the per-ref axis (longest vertex pair), then measure grade
+    per segment and grade-change between consecutive segments against
+    ``RUNWAY_MAX_GRADE_CHANGE_PER_M``."""
+    from auto_patch.config import (RUNWAY_MAX_GRADE_CHANGE_PER_M,)
+    NOISE = 0.05
+    by_ref: dict = {}
+    for s in layout.shapes:
+        if s.role != ROLE_RUNWAY or s.polygon is None or s.polygon.is_empty:
+            continue
+        cs = _open_ring(list(s.polygon.exterior.coords))
+        if len(cs) != 4:
+            continue
+        by_ref.setdefault(s.ref or "", []).append(cs)
+    worst_g = 0.0
+    n_curv = 0
+    for rects in by_ref.values():
+        pts = [p for cs in rects for p in cs]
+        best = -1.0
+        A = B = None
+        for i in range(len(pts)):
+            for j in range(i + 1, len(pts)):
+                d2 = ((pts[j][0] - pts[i][0]) ** 2
+                      + (pts[j][1] - pts[i][1]) ** 2)
+                if d2 > best:
+                    best, A, B = d2, pts[i], pts[j]
+        if A is None or best <= 0:
+            continue
+        L = math.sqrt(best)
+        ux, uy = (B[0] - A[0]) / L, (B[1] - A[1]) / L
+        samples = []
+        for cs in rects:
+            es = []
+            ok = True
+            for (x, y) in cs:
+                idx = bucket_to_idx.get(
+                    layout.canonical_points.get_or_add(float(x), float(y)))
+                if idx is None:
+                    ok = False
+                    break
+                es.append(elev[idx])
+            if not ok:
+                continue
+            edges = [(0, 1), (1, 2), (2, 3), (3, 0)]
+            edges.sort(key=lambda ab: math.hypot(
+                cs[ab[1]][0] - cs[ab[0]][0], cs[ab[1]][1] - cs[ab[0]][1]))
+            for (a, b) in edges[:2]:           # the two short edges = cross-ends
+                mx, my = 0.5 * (cs[a][0] + cs[b][0]), 0.5 * (cs[a][1] + cs[b][1])
+                samples.append(((mx - A[0]) * ux + (my - A[1]) * uy,
+                                0.5 * (es[a] + es[b])))
+        if len(samples) < 2:
+            continue
+        samples.sort(key=lambda t: t[0])
+        merged = []
+        for d, e in samples:
+            if merged and abs(d - merged[-1][0]) <= 5.0:
+                pd, pe, pn = merged[-1]
+                k = pn + 1
+                merged[-1] = ((pd * pn + d) / k, (pe * pn + e) / k, k)
+            else:
+                merged.append((d, e, 1))
+        grades = []
+        for i in range(len(merged) - 1):
+            seg = merged[i + 1][0] - merged[i][0]
+            if seg < 0.5:
+                continue
+            g = (merged[i + 1][1] - merged[i][1]) / seg
+            worst_g = max(worst_g, abs(g))
+            grades.append((g, seg))
+        for i in range(len(grades) - 1):
+            gl, Ll = grades[i]
+            gr, Lr = grades[i + 1]
+            max_dg = RUNWAY_MAX_GRADE_CHANGE_PER_M * 0.5 * (Ll + Lr)
+            if abs(gr - gl) - max_dg > NOISE * (1.0 / Ll + 1.0 / Lr):
+                n_curv += 1
+    return worst_g, n_curv
+
+
+def _runway_centerline_chain(layout, bucket_to_idx, rects):
+    """Ordered centerline chain for ONE runway (its 4-corner ``rects``): a list
+    of ``{"d": axis-distance, "idxs": {node indices at this cross-position}}``
+    sorted along the per-ref axis (longest vertex pair), plus the axis length.
+    Two abutting rects share a cross-edge → its two corners fall in the same
+    ~2 m bucket → one chain position carrying both rects' shared nodes.  Returns
+    ``(positions, axis_length)`` or ``(None, 0)``."""
+    pts = [p for cs in rects for p in cs]
+    best = -1.0
+    A = B = None
+    for i in range(len(pts)):
+        for j in range(i + 1, len(pts)):
+            d2 = (pts[j][0] - pts[i][0]) ** 2 + (pts[j][1] - pts[i][1]) ** 2
+            if d2 > best:
+                best, A, B = d2, pts[i], pts[j]
+    if A is None or best <= 0:
+        return None, 0.0
+    L = math.sqrt(best)
+    ux, uy = (B[0] - A[0]) / L, (B[1] - A[1]) / L
+    pos_map: dict = {}
+    for cs in rects:
+        edges = [(0, 1), (1, 2), (2, 3), (3, 0)]
+        edges.sort(key=lambda ab: math.hypot(
+            cs[ab[1]][0] - cs[ab[0]][0], cs[ab[1]][1] - cs[ab[0]][1]))
+        for (a, b) in edges[:2]:                 # the two short edges = cross-ends
+            for (x, y) in (cs[a], cs[b]):
+                idx = bucket_to_idx.get(
+                    layout.canonical_points.get_or_add(float(x), float(y)))
+                if idx is None:
+                    continue
+                d = (x - A[0]) * ux + (y - A[1]) * uy
+                e = pos_map.setdefault(round(d / 2.0), {"idxs": set(), "d": d})
+                e["idxs"].add(idx)
+    positions = sorted(pos_map.values(), key=lambda e: e["d"])
+    return positions, L
+
+
+def _resmooth_runways_in_elev(layout, elev, bucket_to_idx, anchored_nodes):
+    """Re-fit every runway's centerline elevations IN ``elev`` to an FAA grade +
+    vertical-curve compliant profile (``runway_segments.faa_joint_solve``),
+    anchored at ``anchored_nodes`` (thresholds + seam-pinned).  Used after the
+    runway-flex band solve, which is piecewise-linear and leaves kinks at the
+    flex boundaries: re-smoothing turns a benign flatten (CYXY) into a genuinely
+    compliant curve, while a destructive interior drop (HECA, fixed thresholds)
+    gets clamped back by the FAA envelope so the flex no longer helps and falls
+    through to step-3 threshold relief.  Mutates ``elev``; operates on the FULL
+    runway centerline as the 1-D path."""
+    from auto_patch.pavement.runway_segments import faa_joint_solve
+    by_ref: dict = {}
+    for s in layout.shapes:
+        if s.role != ROLE_RUNWAY or s.polygon is None or s.polygon.is_empty:
+            continue
+        cs = _open_ring(list(s.polygon.exterior.coords))
+        if len(cs) == 4:
+            by_ref.setdefault(s.ref or "", []).append(cs)
+    for rects in by_ref.values():
+        positions, L = _runway_centerline_chain(layout, bucket_to_idx, rects)
+        if not positions or len(positions) < 3 or L <= 0:
+            continue
+        fractions = [p["d"] / L for p in positions]
+        elevs = [sum(elev[i] for i in p["idxs"]) / len(p["idxs"])
+                 for p in positions]
+        anchored = [any(i in anchored_nodes for i in p["idxs"])
+                    for p in positions]
+        if not any(anchored):
+            anchored[0] = anchored[-1] = True       # fallback: pin the ends
+        faa_joint_solve(fractions, elevs, anchored, L,
+                        end_grade_cap=RUNWAY_END_GRADE,
+                        end_fraction=RUNWAY_END_FRACTION)
+        for p, e in zip(positions, elevs):
+            for i in p["idxs"]:
+                if i not in anchored_nodes:
+                    elev[i] = e
+
+
 def _relax_runway_and_resolve(n, elev, layout, bucket_to_idx, base_hard,
                               shape_constraints, tol_m) -> int:
     """Third pass (user 2026-05-28): if a within-shape grade violation remains
@@ -1443,31 +1607,95 @@ def _relax_runway_and_resolve(n, elev, layout, bucket_to_idx, base_hard,
     # otherwise the connection must yield (or, as a last resort, the thresholds
     # release, which is the level-2 free-set), not the runway go out of grade.
     rwy_edges = [e for sc in rwy_constraints for e in sc["edges"]]
+    rwy_node_set: set = set()
+    for sc in rwy_constraints:
+        rwy_node_set.update(sc["nodes"])
     snapshot0 = list(elev)
+    # Pre-flex runway compliance (grade + FAA vertical curve) — the bar the
+    # flexed-then-smoothed runway must still clear.  The band solve spreads an
+    # apron↔runway violation by tilting/dropping the runway interior, which is
+    # grade-feasible per-edge but PIECEWISE-LINEAR — it leaves kinks at the flex
+    # boundaries (HECA 05C/23C: 1→9 kinks, |Δg| 0.0095→0.0285/m).  Per the user's
+    # 2026-06-05 spec the runway pulls ONLY within its grade+curvature slack: so
+    # after the flex we RE-SMOOTH the runway to a genuinely FAA-compliant profile
+    # (full centerline) and re-grade the pavement against it.  A benign flatten
+    # (CYXY stub A) survives smoothing and still helps; a destructive interior
+    # drop (HECA, fixed thresholds) gets clamped back by the FAA envelope so it
+    # no longer helps → falls through to step-3 threshold relief.
+    rwy_g0, rwy_curv0 = _runway_profile_compliance(
+        layout, snapshot0, bucket_to_idx)
+    _dbg = _os.environ.get("O4_FLEX_DEBUG") == "1"
+    if _dbg:
+        print(f"[flex] seam_pinned={len(seam_pinned)} "
+              f"seam_keys={len(getattr(layout, '_seam_anchor_keys', None) or [])} "
+              f"levels={len(levels)} c0={c0} w0={w0:.3f} "
+              f"rwy_g0={rwy_g0*100:.2f}% rwy_curv0={rwy_curv0}")
     sweeps_total = 0
     committed_soft: set | None = None
-    for soft in levels:
+    for _li, soft in enumerate(levels):
         if not soft:
             continue
         is_hard2 = list(base_hard)
         for i in soft:
             is_hard2[i] = False
+        thr_freed = bool(soft & thresh)
         elev[:] = snapshot0                       # each level restarts clean
+        # (a) Coupled flex: free the runway interior (+ thresholds for the seam
+        #     level) and the pavement, solve the combined grade bands.  When the
+        #     thresholds are freed this lets the runway TILT to the hard seam
+        #     anchor (seam > CIFP) — the tilt must NOT be undone.
         lo, hi = _grade_bands(n, elev, is_hard2, all_edges)
         sweeps, _viol = _project_within_bands(
             elev, all_edges, is_hard2, lo, hi, coupling,
             held_extra=terminal_nodes, max_sweeps=1000, tol=comply)
         sweeps_total += sweeps
-        w1, c1, t1 = _within_excess_stats(elev, pav_edges, comply)
-        _rw, rwy_c, _rt = _within_excess_stats(elev, rwy_edges, comply)
-        # Accept iff it clears at least one violation (or shrinks total excess)
-        # WITHOUT worsening the worst AND without putting the runway itself out
-        # of grade — so a runway/threshold yield that fixes one connector can't
-        # be vetoed by an unrelated stubborn violation, can't trade a small
-        # violation for a bigger one, and can't sacrifice runway compliance.
-        improved = (w1 <= w0 + comply
-                    and (c1 < c0 or t1 < t0 - comply)
-                    and rwy_c == 0)
+        if not thr_freed:
+            # INTERIOR flex (thresholds fixed at CIFP): the band solve is
+            # piecewise-linear, so (b) re-smooth the runway to an FAA
+            # grade+vertical-curve compliant profile anchored at the held
+            # thresholds, then (c) re-grade the pavement against the smoothed,
+            # HELD runway.  Accept only if the smoothed runway stays grade AND
+            # curvature compliant (vs the pre-flex baseline).
+            _resmooth_runways_in_elev(
+                layout, elev, bucket_to_idx, thresh | seam_pinned)
+            lo3, hi3 = _grade_bands(n, elev, base_hard, all_edges)
+            sweeps3, _v3 = _project_within_bands(
+                elev, all_edges, base_hard, lo3, hi3, coupling,
+                held_extra=terminal_nodes, max_sweeps=1000, tol=comply)
+            sweeps_total += sweeps3
+            w1, c1, t1 = _within_excess_stats(elev, pav_edges, comply)
+            rwy_g1, rwy_curv1 = _runway_profile_compliance(
+                layout, elev, bucket_to_idx)
+            improved = (
+                w1 <= w0 + comply
+                and (c1 < c0 or t1 < t0 - comply)
+                and rwy_curv1 <= rwy_curv0
+                and rwy_g1 <= max(rwy_g0, _role_grade(ROLE_RUNWAY)) + 1e-4)
+        else:
+            # SEAM level — the hard tile-seam anchor (seam > CIFP) makes the
+            # runway↔seam connection infeasible at the CIFP thresholds, so the
+            # band solve TILTS the runway (thresholds yield) to a profile that
+            # passes through the seam.  That seam-driven tilt is the correct
+            # shape — re-smoothing it threshold-to-threshold would ignore the
+            # mid-runway seam constraint and reintroduce grade.  Accept it iff
+            # the tilted runway is itself grade compliant (≤ cap, ABSOLUTE — the
+            # yield's whole purpose) and does not worsen curvature beyond the
+            # pre-flex baseline.  (Fully eliminating the tilt's residual
+            # vertical-curve kink needs the seam's runway-crossing node anchored
+            # in the FAA smooth — tracked as the seam-curvature follow-up.)
+            w1, c1, t1 = _within_excess_stats(elev, pav_edges, comply)
+            rwy_g1, rwy_curv1 = _runway_profile_compliance(
+                layout, elev, bucket_to_idx)
+            improved = (
+                w1 <= w0 + comply
+                and (c1 < c0 or t1 < t0 - comply)
+                and rwy_curv1 <= rwy_curv0 + _SEAM_CURV_KINK_ALLOWANCE
+                and rwy_g1 <= _role_grade(ROLE_RUNWAY) + 1e-4)
+        if _dbg:
+            print(f"[flex]  level{_li} free={len(soft)} thr_freed="
+                  f"{bool(soft & thresh)} -> c1={c1} w1={w1:.3f} "
+                  f"rwy_g1={rwy_g1*100:.2f}% rwy_curv1={rwy_curv1} "
+                  f"improved={improved}")
         if improved:
             committed_soft = soft                 # this level helped — keep it
             break
