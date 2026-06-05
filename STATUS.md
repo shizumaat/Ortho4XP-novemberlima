@@ -1,4 +1,38 @@
-# Auto-Patch Status — session 63 (terminal-yield DONE) → NEXT = remaining HECA/SPLP grade
+# Auto-Patch Status — session 63 → NEXT = HOLE-ROUTER REDESIGN (global, min-slit, conforming)
+
+## ★★ ACTIVE (2026-06-04) — HOLE-ROUTER GAP: investigated, redesign locked ★★
+HECA giant-apron radial slices leave a thin uncovered-SOURCE wedge → X-Plane bump.
+**A/B PROVEN the hole router causes it** (`O4_HOLE_ROUTER=1` default ON since commit
+b24975d → gaps; `=0` → 0 gaps). NOT a dropped shape — per-shape cuts don't conform
+(adjacent slices' far corners ~1.6 m apart). Post-hoc gap-patching is FRAGILE (multiple
+reverted attempts; 20 edge crossings when patching post-conformance — same lesson as the
+flanking-corner weld). **Full investigation + the locked redesign plan: memory
+`hole_router_gap_redesign.md`.**
+
+**Redesign (user decisions locked):** GLOBAL node set (all shape verts + hole verts + rect
+corners, canonical → shared) + MINIMUM slits (one per hole, chained/shared — grade is the
+solver's job now) + per-shape cut application. Cut endpoints come ONLY from the shared node
+set so adjacent shapes' cuts conform; route around rects, end only at corners (KEEP the
+router's original benefit: no cut on a rect FLAT END). Reusable primitives in
+`pavement/hole_router.py` (`build_graph` already takes `extra_nodes`+rect obstacles,
+`_visible` forbids flat-end chords, `route_hole_opening` = single-bridge slit).
+
+**State of the tree (clean base + 2 kept pieces, UNCOMMITTED):**
+- KEPT `verification.uncovered_interior_source_pieces` + `check_source_coverage` — the
+  INTERIOR-gap detector (source ∖ emitted, enclosed-frac ≥0.70 to exclude perimeter/voids).
+  HECA 11 gaps / SPJC 1 / CYXY 2 / SPLP 0 (baselines have the bug too). This is the basis
+  for the new `test_pavement_covers_source` invariant (add once the router fix lands).
+- KEPT layout.py `_slope_profile_for` — the spline-on-long-rects (>300 m) EXPERIMENT (user
+  evaluating the look). Restart Ortho4XP + regenerate +30+031 to view.
+- REVERTED everything else (the failed reclaim/absorb/debug) → junctions.py, finalize.py,
+  pipeline.py at baseline.
+
+**Still queued (user, this thread):** disable `split_long_rects_along_terrain` extrema cuts
+(see spline look without extra cuts); `test_pavement_covers_source`; runway-profile grade+
+curvature test (solver may pull runways out of compliance); the vertical-curve smoothing
+(memory `vertical_curve_extrema.md`).
+
+---
 
 ## ★★ SESSION 63 RESULT (2026-06-04) — TERMINAL-YIELD SOLVED (commit 118695b, dev) ★★
 
