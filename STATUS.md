@@ -1,3 +1,48 @@
+# Auto-Patch Status — session 64 = RUNWAY-FLEX DEMAND-ANCHOR (taxiway pulls runway middle down) + curvature-noise + step-5 detection
+
+## ★★ SESSION 64 RESULT (2026-06-05, dev — commits 0d383ba/4a278e7/33bcfeb/b86328d) ★★
+Memory: **`step5_tension_finder_distance_bug.md`** (full detail).
+
+**Trigger:** HECA shape #74 (ref T, a 44 m primary_parallel rect) graded 2.06 %, invisible
+to the build WARN. Root cause was the runway-FLEX re-smooth, NOT a threshold problem.
+
+**What landed:**
+1. **Runway-flex demand-anchor (THE fix, 4a278e7).** The flex band-solve correctly pulls a
+   runway centerline node DOWN where a taxiway connects (05C/23C middle 110→101.8, serving
+   T via the T4 join), but `_resmooth_runways_in_elev` filled the lone dip back up to terrain
+   (104) — `faa_joint_solve` only enforces grade between samples, so it raised the single low
+   node toward its 110 m neighbours. Fix = **`_flex_demand_anchors`**: find the SINGLE worst
+   point a taxiway pulled the runway below terrain and add it to the re-smooth's anchor set
+   (user's tile-seam analogy); the whole-runway regrade then carves ONE smooth FAA profile
+   threshold→low-point→threshold. **HECA within 47→22, #74 FIXED, 05C middle 104.2→101.92,
+   NO threshold change, runway curvature unchanged.** Anchor only the WORST point — a shallow
+   0.6 m dip just past the deep one pins the runway high → 1.85 % grade → reverts.
+2. **Step-5 cap-weighted detection (33bcfeb).** `relieve_grade_via_inter_runway_split` used
+   geometric centroid-route distance → over-estimated grade budget → never fired. Now uses the
+   true difference-constraint band (cap-weighted Dijkstra from runway anchors) to name the
+   binding runway connection points; accepts on the geodesic min-sum metric. **DORMANT at HECA**
+   (the flex resolves the tension first); kept as the last-resort lever. Threshold-lowering is
+   the WRONG lever for a MID-runway connection (proven — `faa_joint_solve` keeps the terrain
+   interior; only the flex lowers the middle), right only for END connections.
+3. **Curvature "kinks" were a TEST artifact (b86328d).** `check_runway_profile` reported 3 HECA
+   kinks (1.06–1.33× the 1/30000 rate) — all within 0.1 m EMIT quantization. Runway altitudes
+   round to 0.1 m; grade-change noise ~0.1·(1/Ll+1/Lr); the check used `noise_m=0.05` (HALF emit
+   precision). Bumped to 0.10 → 0 violations; CYXY/HECA/SPJC `test_runway_vertical_curve` XPASS,
+   SPLP stays XFAIL (genuine 1.83 % seam tilt > noise). The flex's own `_runway_profile_compliance`
+   (same algo, UNROUNDED elev) already saw it compliant.
+4. **Observability (0d383ba).** `_report_within_shape_violations` skipped all rects → WARN 6 vs
+   validator 47. Now audits every role with a non-None `ROLE_GRADE_LIMITS` cap. WARN 6→47.
+
+**Suite: 299 passed / 2 failed (intentional HECA+SPLP grade gates) / 2 skipped / 1 xfailed /
+3 xpassed.** No regression; SPLP not regressed (~8→7).
+
+**OPEN / NEXT:** remaining HECA within (22) = apron/stub/cross_connector classes (stub/B 3.04,
+cross_connector/D 3.54, apron #303 3.61, etc.) — the giant-apron coherent-fill + steep-short-span
+classes, NOT runway-related. SPLP seam-tilt runway (1.83 %, the seam-curvature follow-up). Probes
+`/tmp/probes/s64_*.py`; flex debug `O4_FLEX_DEBUG=1` ([flexanchor] line). Anchor (30.10895832, 31.43477812).
+
+---
+
 # Auto-Patch Status — session 63 = RUNWAY GRADE+CURVATURE COMPLIANCE (re-smoothing guard, seam, step-5)
 
 ## ★★ ACTIVE (2026-06-05) — runway grade+curvature through the solver ★★
