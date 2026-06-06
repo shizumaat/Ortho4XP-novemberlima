@@ -84,6 +84,7 @@ from .config import (
     APRON_MAX_GRADE,
     ELEV_ROUNDING_NOISE_M,
     GRADE_VISIBILITY_BUFFER_M,
+    ROLE_GRADE_LIMITS,
     RUNWAY_APRON_AREA_RATIO,
     RUNWAY_INSIDE_APRON_FRAC,
     SERVICE_ROAD_MAX_GRADE,
@@ -2792,18 +2793,21 @@ def _report_within_shape_violations(
     (1.5 %) for every shape and a 60 m Euclidean radius cap.  Both
     were wrong for the per-surface elevation pipeline:
 
-    * Junctions cap at 1.5 % (multi-directional) but APRONS /
-      TERMINALS cap at 1.0 %.
     * The user's rule is "any direction", not "within 60 m" —
-      drop the radius cap for junction / apron / terminal.
-    * RECTS are flat across their width by construction (cross-
-      section flatness equality in the solver) and slope only
-      along source_axis; pairing arbitrary rect corners via the
-      legacy ``[high, low, low, high]`` convention is ambiguous
-      after the canonicalisation pass and produces misleading
-      WARN noise.  Skip rects entirely — their grade is enforced
-      structurally via altitude_high / altitude_low and the cross-
-      section equality constraint.
+      drop the radius cap.
+    * Audit EVERY role with a non-``None`` ``ROLE_GRADE_LIMITS``
+      cap (taxi / apron / junction / runway-class rects = 1.5 %),
+      not just apron + junction.  RECTS are *supposed* to slope
+      only along their source_axis at ≤ cap, but the solver can
+      assign an ``altitude_high`` / ``altitude_low`` pair whose
+      slope across the rect exceeds the cap (e.g. a short rect
+      shedding the full Δ over its narrow span).  That is a real
+      grade violation the test validator (``tools/check_grade.py``
+      ``_check_within_shape``) counts — so the WARN must count it
+      too, or the runtime self-report silently disagrees with the
+      gate.  A *compliant* rect produces no false positive: the
+      slope-axis pairs sit exactly at the cap and the diagonals
+      come in UNDER it (longer chord, same Δ).
 
     Apply a 0.10 m absolute rounding allowance (altitudes are
     stored to 0.1 m precision; the per-pair noise envelope is
@@ -2819,14 +2823,14 @@ def _report_within_shape_violations(
     n_viol = 0
     worst_pct = 0.0
     worst_info: tuple[str, str, float, float, float, float] | None = None
-    # Audit ONLY multi-directional surfaces.  Per-axis surfaces
-    # (rects, runway segments, boundary ribbon, tunnel ramp,
-    # retaining wall) have grade enforced along their own axis, not
-    # across the polygon — pairing arbitrary corners via Euclidean
-    # produces meaningless WARN noise (a 1.5 %-along-axis rect's
-    # diagonal IS more than 1.5 % grade because the axial cap fits
-    # exactly along the long edge).
-    AUDITED_ROLES = {ROLE_JUNCTION, ROLE_APRON}
+    # Audit every role with a non-None within-shape cap — the single
+    # source of truth shared with the validator (``ROLE_GRADE_LIMITS``):
+    # apron / junction / terminal AND the sloping rects
+    # (primary_parallel / secondary_parallel / stub / cross_connector /
+    # runway).  A rect's grade is NOT structurally guaranteed ≤ cap: the
+    # solver can assign a high/low pair sloping past the cap across the
+    # rect.  Roles mapped to None (boundary, retaining_wall, clearance)
+    # are skipped via the cap lookup below.
     # Grade applies across the interior surface between every MUTUALLY-VISIBLE
     # vertex pair — the straight chord stays inside the polygon — at ANY
     # distance: the average slope between two visible vertices is a real grade
@@ -2841,9 +2845,9 @@ def _report_within_shape_violations(
     for s in layout.shapes:
         if s.polygon is None or s.polygon.is_empty:
             continue
-        if s.role not in AUDITED_ROLES:
-            continue
-        cap_pct = TAXI_MAX_GRADE if s.role == ROLE_JUNCTION else APRON_MAX_GRADE
+        cap_pct = ROLE_GRADE_LIMITS.get(s.role, TAXI_MAX_GRADE)
+        if cap_pct is None:
+            continue  # boundary / wall / clearance — not grade-regulated
         try:
             coords = list(s.polygon.exterior.coords)
         except _GEOM_EXC:
@@ -2921,9 +2925,9 @@ def _report_within_shape_violations(
         try:
             import sys as _sys
             msg = (f"  [pav-builder] WARN: {icao}: {n_viol} within-shape "
-                   f"grade violations (junction / apron ≤ 1.5 %, geodesic "
-                   f"visibility graph, any distance — matches "
-                   f"tools/check_grade.py)")
+                   f"grade violations (taxi / apron / junction / rect ≤ "
+                   f"1.5 %, geodesic visibility graph, any distance — "
+                   f"matches tools/check_grade.py)")
             if worst_info is not None:
                 role, ref, ea, eb, d, de = worst_info
                 rstr = f"/{ref}" if ref else ""
