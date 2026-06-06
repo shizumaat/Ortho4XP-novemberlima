@@ -649,87 +649,6 @@ def relieve_grade_via_runway_thresholds(
             resolve()
             break
     return n_moves
-
-
-def _build_pavement_graph(layout):
-    """Shape-adjacency graph over the airside taxi/apron/runway network: a node
-    per shape index, an edge (weighted by centroid distance) between shapes
-    whose boundaries touch.  Returns ``(adj, runway_shapes_by_ref)`` or
-    ``None``.  Routing on the CONNECTED network gives accurate taxi-route
-    distances — no false straight-line connections between far-apart runway
-    ends, and the real T4 route is found."""
-    from shapely.strtree import STRtree
-    NET = {"runway", "runway_crossing", "junction", "apron",
-           "primary_parallel", "secondary_parallel", "stub", "cross_connector"}
-    idxs = [i for i, s in enumerate(layout.shapes)
-            if (s.role or "") in NET and s.polygon is not None
-            and not s.polygon.is_empty]
-    if len(idxs) < 2:
-        return None
-    geoms = [layout.shapes[i].polygon for i in idxs]
-    cent = {idxs[k]: (g.centroid.x, g.centroid.y) for k, g in enumerate(geoms)}
-    tree = STRtree(geoms)
-    adj = {i: [] for i in idxs}
-    for k, i in enumerate(idxs):
-        g = geoms[k]
-        for hk in tree.query(g.buffer(0.6)):
-            hk = int(hk)
-            if hk <= k:
-                continue
-            if g.distance(geoms[hk]) <= 0.6:           # boundaries touch
-                j = idxs[hk]
-                d = math.hypot(cent[i][0] - cent[j][0], cent[i][1] - cent[j][1])
-                adj[i].append((j, d))
-                adj[j].append((i, d))
-    rwy_shapes = defaultdict(list)
-    for i in idxs:
-        s = layout.shapes[i]
-        if (s.role or "") == "runway" and s.ref:
-            rwy_shapes[s.ref].append(i)
-    return adj, rwy_shapes
-
-
-def _dijkstra_from(adj, srcs):
-    """Multi-source Dijkstra.  Returns ``(dist, src_of)``: ``dist[n]`` = min
-    route distance from any source to node ``n``; ``src_of[n]`` = the SOURCE
-    node (the runway shape) the shortest path to ``n`` originates from — i.e.
-    the runway EXIT the violation reaches, whose graded elevation (not the
-    far threshold) is the binding runway level."""
-    import heapq
-    dist = {n: float("inf") for n in adj}
-    src_of = {n: None for n in adj}
-    pq = []
-    for s in srcs:
-        if s in dist:
-            dist[s] = 0.0
-            src_of[s] = s
-            pq.append((0.0, s))
-    heapq.heapify(pq)
-    while pq:
-        d, u = heapq.heappop(pq)
-        if d > dist[u]:
-            continue
-        for v, w in adj[u]:
-            nd = d + w
-            if nd < dist[v]:
-                dist[v] = nd
-                src_of[v] = src_of[u]
-                heapq.heappush(pq, (nd, v))
-    return dist, src_of
-
-
-def _runway_shape_elev(shape):
-    """Mean graded elevation of a runway sub-rect (the connection level)."""
-    if shape.altitude_high is not None and shape.altitude_low is not None:
-        return 0.5 * (float(shape.altitude_high) + float(shape.altitude_low))
-    if shape.node_altitudes:
-        vals = [float(a) for a in shape.node_altitudes]
-        return sum(vals) / len(vals) if vals else None
-    if shape.altitude is not None:
-        return float(shape.altitude)
-    return None
-
-
 def _ref_state_key(state, ref):
     """Map a runway shape ``ref`` ("05C/23C") to its ``_runway_profile_state``
     key (("RW05C", "RW23C"))."""
@@ -740,34 +659,221 @@ def _ref_state_key(state, ref):
         if ref in (f"{sa}/{sb}", f"{sb}/{sa}"):
             return k
     return None
+_END_FRAC = 0.15                # |frac| within this of 0/1 == a threshold END
 
 
-def _nearest_movable_threshold(layout, state, ref, px, py, seam_keys):
-    """Runway ``ref``'s threshold END nearest ``(px, py)`` as ``(pair_key,
-    e_idx, elev)`` — the end the route connects to — or ``None`` if that end is
-    seam-pinned (seam > CIFP) or unavailable."""
+def _is_runway_end(frac) -> bool:
+    """True if axis-fraction ``frac`` sits at a runway END (within ``_END_FRAC``
+    of 0 or 1) — i.e. the binding connection IS a movable threshold."""
+    return frac is not None and (frac < _END_FRAC or frac > 1.0 - _END_FRAC)
+
+
+def _principal_axis_pts(pts):
+    """Unit axis of a point cloud's longest extent as ``(ax, ay, ux, uy, L)``
+    (origin = one extreme, ``(ux,uy)`` unit direction, ``L`` length).  ``None``
+    if degenerate."""
+    if len(pts) < 2:
+        return None
+    best = None
+    bd = -1.0
+    for i in range(len(pts)):
+        for j in range(i + 1, len(pts)):
+            d = (pts[i][0] - pts[j][0]) ** 2 + (pts[i][1] - pts[j][1]) ** 2
+            if d > bd:
+                bd = d
+                best = (pts[i], pts[j])
+    if best is None:
+        return None
+    (ax, ay), (bx, by) = best
+    L = math.hypot(bx - ax, by - ay)
+    if L < 1.0:
+        return None
+    return (ax, ay, (bx - ax) / L, (by - ay) / L, L)
+
+
+def _runway_node_index(layout, bucket_to_idx):
+    """Map every runway node idx → its runway ref, and every ref → its axis
+    (``_principal_axis_pts``).  Returns ``(node_ref, ref_axis)``."""
+    node_ref: Dict[int, str] = {}
+    pts_by_ref: Dict[str, list] = defaultdict(list)
+    for s in layout.shapes:
+        if (s.role in (ROLE_RUNWAY, "runway_crossing") and s.ref
+                and s.polygon is not None and not s.polygon.is_empty):
+            for (x, y) in list(s.polygon.exterior.coords)[:-1]:
+                k = bucket_to_idx.get(
+                    layout.canonical_points.get_or_add(float(x), float(y)))
+                if k is not None:
+                    node_ref.setdefault(k, s.ref)
+                pts_by_ref[s.ref].append((x, y))
+    ref_axis = {ref: _principal_axis_pts(pts)
+                for ref, pts in pts_by_ref.items()}
+    return node_ref, ref_axis
+
+
+def _axis_frac(ref_axis, ref, xy):
+    """Fraction (0..1) of ``xy`` projected onto runway ``ref``'s axis."""
+    a = ref_axis.get(ref)
+    if not a:
+        return None
+    ax, ay, ux, uy, L = a
+    return ((xy[0] - ax) * ux + (xy[1] - ay) * uy) / L
+
+
+def _anchor_band_dijkstra(n, adj, is_hard, elev, sign):
+    """Multi-source Dijkstra over the cap-weighted graph from the HARD anchors,
+    seeded with ``sign·elev[a]``.  ``sign=+1`` gives ``hi[v]=min(elev[a]+capd)``
+    (tightest upper bound) and tracks the binding LOW-elevation anchor;
+    ``sign=-1`` gives ``-lo[v]=min(-elev[a]+capd)`` and tracks the binding
+    HIGH-elevation anchor.  Returns ``(dist, src)``."""
+    import heapq
+    INF = float("inf")
+    dist = [INF] * n
+    src: List = [None] * n
+    pq: list = []
+    for a in range(n):
+        if is_hard[a]:
+            dist[a] = sign * elev[a]
+            src[a] = a
+            pq.append((dist[a], a))
+    heapq.heapify(pq)
+    while pq:
+        d, u = heapq.heappop(pq)
+        if d > dist[u]:
+            continue
+        for v, c in adj.get(u, ()):  # type: ignore[arg-type]
+            nd = d + c
+            if nd < dist[v]:
+                dist[v] = nd
+                src[v] = src[u]
+                heapq.heappush(pq, (nd, v))
+    return dist, src
+
+
+def _inter_runway_tensions(layout, tol_m: float = _RELIEF_TOL_M) -> list:
+    """Find inter-runway grade tensions via the cap-weighted DIFFERENCE-
+    CONSTRAINT band (NOT geometric route distance — that over-estimates the
+    grade budget and misses real tensions, the s64 bug).
+
+    Grade feasibility is the difference-constraint system ``|e_i − e_j| ≤
+    cap·len``; the binding distance is the cap-weighted shortest path over the
+    solver's own shape-constraint graph (``unified_jacobi``), where flat rect
+    cross-ends cost ZERO budget.  For each within-shape grade violation, the
+    binding HIGH anchor (``max(elev − capd)``, forces the floor UP) and LOW
+    anchor (``min(elev + capd)``, forces the ceiling DOWN) bound its elevation;
+    when floor > ceiling the region is infeasible by that excess — a genuine
+    tension between two runway connection points that no apron/runway flex can
+    resolve.  Returns dicts (worst first):
+      ``{excess, ref_hi, frac_hi, e_hi, ref_lo, frac_lo, e_lo}``
+    — ``ref_hi`` is the HIGH runway whose connection must be LOWERED, ``ref_lo``
+    the LOW runway whose connection must be RAISED, each at axis-fraction
+    ``frac_*`` (used to choose center-vs-end threshold moves).  A tension whose
+    binding anchor is a seam (not a runway) is skipped — seam > CIFP."""
+    from .elevation_per_surface import unified_jacobi as uj
+    from .verification import run_grade_checks
+    nodes, b2i = uj._build_node_list(layout)
+    n = len(nodes)
+    if n == 0:
+        return []
+    elev, base_hard, _ = uj._seed_elevations(layout, nodes, b2i, dem=None)
+    tiers = uj._node_tiers(layout, b2i, n)
+    is_hard = [base_hard[i] or tiers[i] == 0 for i in range(n)]
+    if not any(is_hard):
+        return []
+    adj: Dict[int, list] = {}
+    for sc in uj._build_shape_constraints(layout, b2i):
+        for (i, j, c) in sc["edges"]:
+            adj.setdefault(i, []).append((j, c))
+            adj.setdefault(j, []).append((i, c))
+    INF = float("inf")
+    lo_d, lo_src = _anchor_band_dijkstra(n, adj, is_hard, elev, -1.0)
+    hi_d, hi_src = _anchor_band_dijkstra(n, adj, is_hard, elev, +1.0)
+    node_ref, ref_axis = _runway_node_index(layout, b2i)
+    within, _c, _s = run_grade_checks(layout)
+    out = []
+    seen = set()
+    for v in within:
+        if v.lat is None or v.lon is None:
+            continue
+        mx, my = layout.ll_to_m(v.lat, v.lon)
+        sidx = min(adj, key=lambda i:
+                   (nodes[i][0] - mx) ** 2 + (nodes[i][1] - my) ** 2)
+        if hi_d[sidx] >= INF or lo_d[sidx] >= INF:
+            continue
+        excess = (-lo_d[sidx]) - hi_d[sidx]      # floor − ceiling
+        if excess <= tol_m:
+            continue
+        a_hi = lo_src[sidx]      # high-elev anchor (forces floor up) → LOWER it
+        a_lo = hi_src[sidx]      # low-elev anchor (forces ceiling down) → RAISE
+        ref_hi = node_ref.get(a_hi)
+        ref_lo = node_ref.get(a_lo)
+        if not ref_hi or not ref_lo or ref_hi == ref_lo:
+            continue              # seam anchor, or same runway (intra-runway)
+        frac_hi = _axis_frac(ref_axis, ref_hi, nodes[a_hi])
+        frac_lo = _axis_frac(ref_axis, ref_lo, nodes[a_lo])
+        key = (ref_hi, round(frac_hi or 0.0, 1),
+               ref_lo, round(frac_lo or 0.0, 1))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"excess": excess,
+                    "ref_hi": ref_hi, "frac_hi": frac_hi, "e_hi": elev[a_hi],
+                    "ref_lo": ref_lo, "frac_lo": frac_lo, "e_lo": elev[a_lo]})
+    out.sort(key=lambda t: -t["excess"])
+    return out
+
+
+def _geodesic_grade_metric(layout):
+    """``(total_excess_pct, count)`` over the GEODESIC within-shape grade
+    violations (``verification.run_grade_checks`` = the test validator).  Used
+    as step 5's accept metric: the min-SUM of real grade-excess, which a
+    threshold move can actually shift — unlike the all-pair-Euclidean worst,
+    which a far-corner mega-apron phantom dominates and pins."""
+    from .verification import run_grade_checks
+    within, _c, _s = run_grade_checks(layout)
+    total = sum(max(0.0, v.excess_pct) for v in within)
+    return (total, len(within))
+
+
+def _shift_runway_connection(layout, state, ref, frac, delta, seam_keys) -> list:
+    """Shift runway ``ref``'s profile at axis-fraction ``frac`` by ``delta`` m
+    (negative = lower).  A connection near an END (``frac`` within ``_END_FRAC``
+    of 0/1) moves THAT threshold (≈ 1:1, preferred); a CENTER connection moves
+    BOTH thresholds by ``delta`` (a uniform shift — no added tilt, so the runway
+    keeps its grade+curvature; redistribute then re-fits the FAA profile).
+    Seam-pinned thresholds never move (seam > CIFP).  Returns
+    ``[(pair_key, e_idx, applied_delta), ...]`` for revert (empty if nothing
+    movable)."""
     k = _ref_state_key(state, ref)
     if not k:
-        return None
+        return []
     st = state[k]
     anchored = st.get("anchored") or []
     elevs = st.get("elevs") or []
     fi = next((i for i, a in enumerate(anchored) if a), None)
     li = next((i for i in range(len(anchored) - 1, -1, -1) if anchored[i]), None)
     if fi is None or li is None or fi == li:
-        return None
+        return []
     try:
-        ax, ay = layout.ll_to_m(*st["phys_end_a_ll"])
-        bx, by = layout.ll_to_m(*st["phys_end_b_ll"])
+        ax, ay = layout.ll_to_m(*st["phys_end_a_ll"])   # fi == phys_end_a
+        bx, by = layout.ll_to_m(*st["phys_end_b_ll"])    # li == phys_end_b
     except Exception:
-        return None
-    (ex, ey), e_idx = (((ax, ay), fi)
-                       if math.hypot(ax - px, ay - py)
-                       < math.hypot(bx - px, by - py) else ((bx, by), li))
+        return []
     bk_s = 1.0 / SHARED_VERTEX_TOL_M
-    if (int(round(ex * bk_s)), int(round(ey * bk_s))) in seam_keys:
-        return None                                    # seam-pinned end
-    return (k, e_idx, float(elevs[e_idx]))
+    a_pin = (int(round(ax * bk_s)), int(round(ay * bk_s))) in seam_keys
+    b_pin = (int(round(bx * bk_s)), int(round(by * bk_s))) in seam_keys
+    if frac is not None and frac < _END_FRAC:
+        targets = [(fi, a_pin)]
+    elif frac is not None and frac > 1.0 - _END_FRAC:
+        targets = [(li, b_pin)]
+    else:                                # center → both ends (uniform, no tilt)
+        targets = [(fi, a_pin), (li, b_pin)]
+    applied = []
+    for e_idx, pinned in targets:
+        if pinned:
+            continue
+        elevs[e_idx] += delta
+        applied.append((k, e_idx, delta))
+    return applied
 
 
 def relieve_grade_via_inter_runway_split(
@@ -775,99 +881,71 @@ def relieve_grade_via_inter_runway_split(
         max_iters: int = 8, tol_m: float = _RELIEF_TOL_M) -> int:
     """STEP 5 (user 2026-06-05): a pavement grade violation that no apron/runway
     flex can fix because the taxi route between two runways spans more elevation
-    than the route allows.  Route each violation through the SHAPE-ADJACENCY
-    network to every reachable runway, take its nearest threshold end on each,
-    and form the violation's feasible elevation band ``[max(e_R − cap·d_R),
-    min(e_R + cap·d_R)]``.  When that band is EMPTY the two binding runways are
-    too far apart in elevation for their routes — SPLIT the gap: lower the
-    high-binding threshold and raise the low-binding one by half each, RESET the
-    runway geometry and re-grade (``redistribute_runway_profile`` re-fits an FAA
-    compliant profile for the new thresholds, so the runway makes grade by
-    construction).  HECA: the T4 region routes ~191 m to 23R (60 m) but ~3035 m
-    to 23C (114 m) → lower 23C / raise 23R ~5 m each.  Seam-pinned thresholds
-    never move (seam > CIFP).  Kept only if the worst residual shrinks."""
-    from .config import TAXI_MAX_GRADE
-    from .verification import run_grade_checks
+    than the route allows.  ``_inter_runway_tensions`` finds the binding pair of
+    runway connection points via the cap-weighted difference-constraint band
+    (e.g. HECA: 05C/23C's CENTER ~104 m where T4 joins ↔ 05L/23R's 23R END
+    ~62 m, excess ~2.5 m over the ~2700 m T4→T→G→23R route).  Per tension, lower
+    the HIGH connection and raise the LOW one by half the excess each, choosing
+    threshold moves by where the connection sits on the runway: an END
+    connection moves that threshold, a CENTER one moves both (uniform — keeps the
+    runway's own grade+curvature; ``redistribute_runway_profile`` re-fits an FAA
+    profile by construction).  Re-grade; keep only if the WORST within-shape
+    residual shrinks (min-max, not a count).  Seam-pinned thresholds never move
+    (seam > CIFP)."""
     state = getattr(layout, "_runway_profile_state", None)
     if not state:
         return 0
     seam_keys = _seam_node_coords(layout)
+    debug = _os.environ.get("O4_FLEX_DEBUG") == "1"
     n_moves = 0
+    before_m = _geodesic_grade_metric(layout)
     for _it in range(max_iters):
-        graph = _build_pavement_graph(layout)
-        if graph is None:
+        tensions = _inter_runway_tensions(layout, tol_m=tol_m)
+        if not tensions:
             break
-        adj, rwy_shapes = graph
-        if len(rwy_shapes) < 2:
-            break
-        distmap = {ref: _dijkstra_from(adj, sh)
-                   for ref, sh in rwy_shapes.items()}
-        cent = {i: (layout.shapes[i].polygon.centroid.x,
-                    layout.shapes[i].polygon.centroid.y) for i in adj}
-        node_idxs = list(adj)
-        # Within-shape grade violations from the GEODESIC visibility check (the
-        # current grade model — NOT all-pair Euclidean).
-        within, _cross, _steps = run_grade_checks(layout)
-        if not within:
-            break
-        best = None
-        for v in within:
-            if v.lat is None or v.lon is None:
-                continue
-            mx, my = layout.ll_to_m(v.lat, v.lon)
-            sidx = min(node_idxs, key=lambda i:
-                       (cent[i][0] - mx) ** 2 + (cent[i][1] - my) ** 2)
-            # ``hi`` = runway forcing the floor UP (lower its threshold);
-            # ``lo`` = runway forcing the ceiling DOWN (raise its threshold).
-            hi = lo = None                  # (state_key, e_idx, bound)
-            for ref, (dist, src_of) in distmap.items():
-                d = dist.get(sidx, float("inf"))
-                if not (d < float("inf")):
-                    continue                # this runway unreachable from here
-                exit_idx = src_of.get(sidx)
-                if exit_idx is None:
-                    continue
-                # Runway level at the EXIT the route reaches (NOT the far
-                # threshold) — a mid-runway connection is at the dipped runway
-                # level, not the end elevation.
-                e_exit = _runway_shape_elev(layout.shapes[exit_idx])
-                if e_exit is None:
-                    continue
-                ex, ey = cent[exit_idx]
-                thr = _nearest_movable_threshold(
-                    layout, state, ref, ex, ey, seam_keys)
-                if thr is None:
-                    continue                # the exit's nearest end is seam-pinned
-                k, e_idx, _e_thr = thr
-                lower = e_exit - TAXI_MAX_GRADE * d
-                upper = e_exit + TAXI_MAX_GRADE * d
-                if hi is None or lower > hi[2]:
-                    hi = (k, e_idx, lower)
-                if lo is None or upper < lo[2]:
-                    lo = (k, e_idx, upper)
-            if hi is None or lo is None or hi[0] == lo[0]:
-                continue
-            gap = hi[2] - lo[2]             # max_lower − min_upper
-            if gap > tol_m and (best is None or gap > best[0]):
-                best = (gap, hi, lo)
-        if best is None:
-            break                          # every violation's band is feasible
-        gap, hi, lo = best
-        split = gap / 2.0
-        before_n = len(within)
-        state[hi[0]]["elevs"][hi[1]] -= split     # lower the high binding end
-        state[lo[0]]["elevs"][lo[1]] += split     # raise the low binding end
+        t = tensions[0]
+        E = t["excess"]
+        # LOWER the HIGH-binding runway's thresholds by the full excess (user
+        # 2026-06-05): the thresholds are the hard points; lowering them makes
+        # ROOM so that the next full re-solve's runway-flex can pull the MIDDLE
+        # down (now grade+curvature compliant to the lowered thresholds) to where
+        # the connecting pavement needs it.  A mid-runway connection lowers BOTH
+        # thresholds (uniform shift); an END connection lowers that threshold.
+        # ``redistribute`` keeps the terrain interior; it is the SOLVER (resolve)
+        # that lowers the middle, so a threshold move only "works" after a full
+        # re-solve — which the loop does below.
+        d_hi, d_lo = E, 0.0
+        applied = []
+        applied += _shift_runway_connection(
+            layout, state, t["ref_hi"], t["frac_hi"], -d_hi, seam_keys)
+        if d_lo > 0.0:
+            applied += _shift_runway_connection(
+                layout, state, t["ref_lo"], t["frac_lo"], +d_lo, seam_keys)
+        if not applied:
+            break                          # binding threshold(s) seam-pinned
         redistribute_runway_profile(layout, dem, tile_lat, tile_lon)
         resolve()
-        after_n = len(run_grade_checks(layout)[0])
-        if _os.environ.get("O4_FLEX_DEBUG") == "1":
-            print(f"[step5] gap={gap:.2f} lo {lo[0]}+{split:.2f} / "
-                  f"hi {hi[0]}-{split:.2f}: geodesic viol {before_n}->{after_n}")
-        if after_n < before_n:
-            n_moves += 1                   # split cleared a violation — keep it
+        after_m = _geodesic_grade_metric(layout)
+        if debug:
+            print(f"[step5] tension {t['ref_hi']}@{t['frac_hi']:.2f}(lower "
+                  f"{d_hi:.2f}) <-> {t['ref_lo']}@{t['frac_lo']:.2f}(raise "
+                  f"{d_lo:.2f}) excess={E:.2f}: "
+                  f"geodesic excess {before_m[0]:.3f}->{after_m[0]:.3f} "
+                  f"count {before_m[1]}->{after_m[1]}")
+        # Accept on the GEODESIC grade model (the validator) — total within-
+        # shape grade-excess, the min-sum metric.  NOT the all-pair-Euclidean
+        # ``_worst_within_shape_residual`` (a huge non-convex mega-apron phantom
+        # dominates its "worst" and never moves with a threshold, so it would
+        # reject every real improvement).  Tie-break: drop the violation count.
+        improved = (after_m[0] < before_m[0] - 1e-3
+                    or (abs(after_m[0] - before_m[0]) <= 1e-3
+                        and after_m[1] < before_m[1]))
+        if improved:
+            n_moves += 1                   # split reduced real grade-excess
+            before_m = after_m
         else:
-            state[hi[0]]["elevs"][hi[1]] += split   # revert
-            state[lo[0]]["elevs"][lo[1]] -= split
+            for (k, e_idx, d) in applied:  # revert
+                state[k]["elevs"][e_idx] -= d
             redistribute_runway_profile(layout, dem, tile_lat, tile_lon)
             resolve()
             break
