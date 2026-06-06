@@ -328,7 +328,7 @@ def _runway_rect_cross_ends(s, coords):
 
 
 def check_runway_profile(layout, end_grade_cap="default",
-                         check_curvature: bool = True, noise_m: float = 0.05):
+                         check_curvature: bool = True, noise_m: float = 0.10):
     """Invariant: the EMITTED runway longitudinal profile must obey the
     FAA/EASA grade caps AND the vertical-curve rate-of-grade-change limit — the
     elevation solver (or a runway-flex MOVE) must never pull a runway out of
@@ -353,7 +353,12 @@ def check_runway_profile(layout, end_grade_cap="default",
     a uniform ``RUNWAY_MAX_GRADE`` cap (the only longitudinal limit the default
     profile currently enforces — the 0.8% end cap is opt-in and the
     vertical-curve smoothing is STATUS item D, so the strict defaults are RED
-    until those land).  ``noise_m`` absorbs altitude float noise.  Returns
+    until those land).  ``noise_m`` (0.10 m) absorbs altitude QUANTIZATION noise:
+    runway altitudes EMIT rounded to 0.1 m, so a grade-change reconstructed from
+    three quantized cross-end samples carries worst-case noise ~0.1·(1/Ll+1/Lr);
+    a tighter floor (e.g. 0.05) flags sub-quantization grade-changes as phantom
+    curvature kinks (HECA's 3 "1.1–1.3× kinks" were entirely emit-rounding noise
+    — the unrounded solver profile is compliant).  Returns
     ``[(kind, ref, value, cap, "lat,lon"), …]`` worst-excess first; ``kind`` ∈
     {"grade", "curvature"}; ``value``/``cap`` are decimal grades (grade) or
     grade-change-per-metre (curvature)."""
