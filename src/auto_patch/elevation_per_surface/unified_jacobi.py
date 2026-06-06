@@ -1509,16 +1509,57 @@ def _runway_centerline_chain(layout, bucket_to_idx, rects):
     return positions, L
 
 
+def _flex_demand_anchors(layout, elev, snapshot, bucket_to_idx,
+                         drop_margin=2.0):
+    """The SINGLE runway centerline node a connecting taxiway has pulled DOWN the
+    MOST below terrain (max ``snapshot − elev``, > ``drop_margin``) per runway —
+    the "new low point" the flex created.  It becomes an anchor so the re-smooth
+    grades ONE smooth FAA profile threshold→low-point→threshold (the user's
+    tile-seam analogy); re-grading the whole runway from that single worst point
+    then serves the lesser demands too.  Anchoring every demanded dip instead
+    over-constrains the profile (a shallow 0.6 m dip just past a deep one pins
+    the runway high and forces a steep link)."""
+    out: set = set()
+    by_ref: dict = {}
+    for s in layout.shapes:
+        if s.role != ROLE_RUNWAY or s.polygon is None or s.polygon.is_empty:
+            continue
+        cs = _open_ring(list(s.polygon.exterior.coords))
+        if len(cs) == 4:
+            by_ref.setdefault(s.ref or "", []).append(cs)
+    for ref, rects in by_ref.items():
+        positions, L = _runway_centerline_chain(layout, bucket_to_idx, rects)
+        if not positions or len(positions) < 3 or L <= 0:
+            continue
+        band_e = [sum(elev[i] for i in p["idxs"]) / len(p["idxs"])
+                  for p in positions]
+        snap_e = [sum(snapshot[i] for i in p["idxs"]) / len(p["idxs"])
+                  for p in positions]
+        kworst = max(range(len(positions)),
+                     key=lambda m: snap_e[m] - band_e[m])
+        if snap_e[kworst] - band_e[kworst] <= drop_margin:
+            continue                       # no real pavement-demanded drop
+        out |= positions[kworst]["idxs"]
+        if _os.environ.get("O4_FLEX_DEBUG") == "1":
+            print(f"[flexanchor] {ref}: anchor frac"
+                  f"{positions[kworst]['d'] / L:.2f}@{band_e[kworst]:.1f} "
+                  f"(terr {snap_e[kworst]:.1f}, drop "
+                  f"{snap_e[kworst] - band_e[kworst]:.1f})")
+    return out
+
+
 def _resmooth_runways_in_elev(layout, elev, bucket_to_idx, anchored_nodes):
     """Re-fit every runway's centerline elevations IN ``elev`` to an FAA grade +
     vertical-curve compliant profile (``runway_segments.faa_joint_solve``),
-    anchored at ``anchored_nodes`` (thresholds + seam-pinned).  Used after the
-    runway-flex band solve, which is piecewise-linear and leaves kinks at the
-    flex boundaries: re-smoothing turns a benign flatten (CYXY) into a genuinely
-    compliant curve, while a destructive interior drop (HECA, fixed thresholds)
-    gets clamped back by the FAA envelope so the flex no longer helps and falls
-    through to step-3 threshold relief.  Mutates ``elev``; operates on the FULL
-    runway centerline as the 1-D path."""
+    anchored at ``anchored_nodes`` (thresholds + seam-pinned + flex demand-anchors).
+    Used after the runway-flex band solve, which is piecewise-linear and leaves
+    kinks at the flex boundaries: re-smoothing turns a benign flatten (CYXY) into
+    a genuinely compliant curve, and — with the flex's new low point in
+    ``anchored_nodes`` (see ``_flex_demand_anchors``) — grades ONE smooth profile
+    threshold→low-point→threshold so a connecting taxiway can pull the runway
+    middle down (HECA 05C/23C: 104→~102) WITHOUT lowering the thresholds, instead
+    of filling the lone dip back up to terrain.  Mutates ``elev``; operates on
+    the FULL runway centerline as the 1-D path."""
     from auto_patch.pavement.runway_segments import faa_joint_solve
     by_ref: dict = {}
     for s in layout.shapes:
@@ -1656,8 +1697,16 @@ def _relax_runway_and_resolve(n, elev, layout, bucket_to_idx, base_hard,
             # thresholds, then (c) re-grade the pavement against the smoothed,
             # HELD runway.  Accept only if the smoothed runway stays grade AND
             # curvature compliant (vs the pre-flex baseline).
+            # The band solve has pulled the runway DOWN where a taxiway connects
+            # (HECA 05C/23C middle 110→101.8).  Anchor those new low points (like
+            # a tile-seam crossing) so the re-smooth grades a smooth FAA profile
+            # threshold→low-point→threshold, instead of filling the lone dip back
+            # up to terrain.  ``faa_joint_solve`` rounds the free approaches.
+            flex_anchors = _flex_demand_anchors(
+                layout, elev, snapshot0, bucket_to_idx)
             _resmooth_runways_in_elev(
-                layout, elev, bucket_to_idx, thresh | seam_pinned)
+                layout, elev, bucket_to_idx,
+                thresh | seam_pinned | flex_anchors)
             lo3, hi3 = _grade_bands(n, elev, base_hard, all_edges)
             sweeps3, _v3 = _project_within_bands(
                 elev, all_edges, base_hard, lo3, hi3, coupling,
