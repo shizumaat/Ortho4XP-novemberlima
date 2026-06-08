@@ -27,6 +27,7 @@ from auto_patch.layout import (
     SHARED_VERTEX_TOL_M,
     _airport_anchor,
     _projection,
+    canonicalize_high_low_ring,
 )
 
 
@@ -263,6 +264,70 @@ def test_to_osm_sloped_rect_emits_high_low_cell_profile():
     assert tags["profile"] == PATCH_SLOPE_PROFILE
     # Flat altitude tag must NOT also be emitted.
     assert "altitude" not in tags
+
+
+# ──────────────────────────────────────────────────────────────────────
+# canonicalize_high_low_ring — [H, L, L, H] convention enforcement
+# ──────────────────────────────────────────────────────────────────────
+def _node_alt_map(ring, high, low):
+    """Altitude X-Plane's include_patches assigns to each node id of a
+    closed 4-corner sloped rect, BY POSITION: corners (0, 3) -> high,
+    corners (1, 2) -> low (short_high = way[-2:], short_low = way[1:3])."""
+    return {ring[0]: high, ring[1]: low, ring[2]: low, ring[3]: high}
+
+
+def test_canonicalize_high_low_already_canonical_is_noop():
+    ring = [10, 11, 12, 13, 10]
+    out_ring, hi, lo = canonicalize_high_low_ring(list(ring), 105.0, 100.0)
+    assert out_ring == ring
+    assert (hi, lo) == (105.0, 100.0)
+
+
+def test_canonicalize_high_low_inverted_rotates_and_swaps():
+    """An inverted slope (eh < el — the (0,3) end is the LOWER one, e.g.
+    a runway segment climbing out of a flexed dip) is rotated by two
+    corners and the labels swapped so altitude_high >= altitude_low,
+    WITHOUT changing which physical node sits at which altitude."""
+    ring = [10, 11, 12, 13, 10]
+    eh, el = 100.0, 105.0      # (0,3) is the LOWER end -> inverted
+    out_ring, hi, lo = canonicalize_high_low_ring(list(ring), eh, el)
+    # Canonical ordering restored.
+    assert hi >= lo
+    assert (hi, lo) == (105.0, 100.0)
+    # Same polygon: same node set, still a closed 4-corner quad.
+    assert len(out_ring) == 5 and out_ring[0] == out_ring[-1]
+    assert set(out_ring) == set(ring)
+    # Rotation by exactly two corners.
+    assert out_ring == [12, 13, 10, 11, 12]
+    # Physical surface UNCHANGED: every node keeps its altitude.
+    assert _node_alt_map(out_ring, hi, lo) == _node_alt_map(ring, eh, el)
+
+
+def test_canonicalize_high_low_non_quad_unchanged():
+    """Only a closed 4-corner quad (5 node refs) is X-Plane-valid for
+    altitude_high/low; anything else is returned untouched."""
+    ring = [1, 2, 3, 4, 5, 1]   # 5-corner ring, not a quad
+    out_ring, hi, lo = canonicalize_high_low_ring(list(ring), 100.0, 105.0)
+    assert out_ring == ring
+    assert (hi, lo) == (100.0, 105.0)
+
+
+def test_to_osm_inverted_slope_rect_emits_canonical_high_low():
+    """A sloped rect whose stored slope runs high < low must still emit
+    altitude_high >= altitude_low (the [H, L, L, H] convention) as a
+    valid closed quad — the emitter is the single chokepoint that
+    enforces the convention regardless of the upstream slope direction."""
+    layout = _make_layout()
+    layout.shapes.append(BuiltShape(
+        polygon=_square(0, 0, 10), role=ROLE_PRIMARY_PARALLEL,
+        altitude_high=99.0, altitude_low=100.5))   # inverted on purpose
+    _, ways = _emit_and_parse(layout)
+    wid, nds, tags = ways[0]
+    assert "altitude_high" in tags and "altitude_low" in tags
+    assert float(tags["altitude_high"]) >= float(tags["altitude_low"])
+    assert float(tags["altitude_high"]) == 100.5
+    assert float(tags["altitude_low"]) == 99.0
+    assert len(nds) == 5 and nds[0] == nds[-1]
 
 
 def _pentagon(cx=0.0, cy=0.0):

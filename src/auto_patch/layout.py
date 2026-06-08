@@ -140,6 +140,41 @@ def high_low_from_corner_alts(corner_alts) -> "tuple[float, float]":
     return ((a[0] + a[3]) / 2.0, (a[1] + a[2]) / 2.0)
 
 
+def canonicalize_high_low_ring(
+    ext_nids: "list[int]", eh: float, el: float,
+) -> "tuple[list[int], float, float]":
+    """Return ``(ext_nids, high, low)`` with ``high >= low`` for a
+    4-corner sloped-rect emission, rotating the closed node ring by two
+    corners when the slope runs the "wrong" way.
+
+    The X-Plane patch parser reads ``altitude_high`` at corner pair
+    (0, 3) and ``altitude_low`` at (1, 2) PURELY BY POSITION
+    (``O4_Vector_Map.include_patches``: ``short_high = way[-2:]``,
+    ``short_low = way[1:3]``).  :func:`high_low_from_corner_alts` derives
+    ``(eh, el)`` from those same corners, so a rect whose (0, 3) end is
+    the LOWER one yields ``eh < el``.  That happens whenever a rect keeps
+    a fixed geometric corner order but its profile is non-monotonic —
+    e.g. a runway segment climbing out of an inter-runway-flex dip.  It
+    renders correctly (the interpolation ``high - profile(x)·(high-low)``
+    is sign-symmetric) but violates the documented ``[H, L, L, H]``
+    "high at corners 0,3" convention and is confusing to read.
+
+    Rotating a closed 4-corner ring by two corners
+    (``[n0,n1,n2,n3,n0] -> [n2,n3,n0,n1,n2]``) swaps which cross-edge
+    sits at the (0, 3) position while leaving the polygon — its
+    vertices, winding, area, and shared node ids — completely unchanged.
+    After the rotation the higher cross-edge is at (0, 3); emit the
+    swapped ``(el, eh)`` so ``altitude_high`` lands on it.  No-op when
+    already canonical or when the ring is not a single closed 4-corner
+    quad (the only form X-Plane accepts for ``altitude_high/low``).
+    """
+    if eh >= el or len(ext_nids) != 5:
+        return ext_nids, eh, el
+    corners = list(ext_nids[:4])
+    rotated = corners[2:] + corners[:2]
+    return rotated + [rotated[0]], el, eh
+
+
 # ──────────────────────────────────────────────────────────────────
 # Role-tag vocabulary
 # ──────────────────────────────────────────────────────────────────
@@ -792,6 +827,8 @@ class PavementLayout:
                     if abs(eh - el) <= _CANON_EQ_TOL:
                         tags["altitude"] = f"{(eh + el) / 2.0:.1f}"
                     else:
+                        ext_nids, eh, el = canonicalize_high_low_ring(
+                            ext_nids, eh, el)
                         tags["altitude_high"] = f"{eh:.1f}"
                         tags["altitude_low"] = f"{el:.1f}"
                         tags["cell_size"] = str(
@@ -810,6 +847,8 @@ class PavementLayout:
                               <= _CANON_EQ_TOL
                       and abs(open_alts[0] - open_alts[1]) > _CANON_EQ_TOL):
                     eh, el = high_low_from_corner_alts(open_alts)
+                    ext_nids, eh, el = canonicalize_high_low_ring(
+                        ext_nids, eh, el)
                     tags["altitude_high"] = f"{eh:.1f}"
                     tags["altitude_low"] = f"{el:.1f}"
                     tags["cell_size"] = str(
@@ -841,8 +880,11 @@ class PavementLayout:
                     # the mean altitude instead — a valid, renderable
                     # approximation that keeps the surface anchored.
                     if n_open == 4:
-                        tags["altitude_high"] = f"{s.altitude_high:.1f}"
-                        tags["altitude_low"] = f"{s.altitude_low:.1f}"
+                        ext_nids, eh, el = canonicalize_high_low_ring(
+                            ext_nids,
+                            float(s.altitude_high), float(s.altitude_low))
+                        tags["altitude_high"] = f"{eh:.1f}"
+                        tags["altitude_low"] = f"{el:.1f}"
                         tags["cell_size"] = str(
     RUNWAY_CELL_SIZE_M if s.role == ROLE_RUNWAY
     else PATCH_SLOPE_CELL_SIZE_M)
