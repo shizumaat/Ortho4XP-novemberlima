@@ -44,6 +44,7 @@ __all__ = [
     "GROUNDSIDE_MAX_GRADE",
     "RUNWAY_VERTICAL_CURVE_K_M",
     "RUNWAY_MAX_GRADE_CHANGE_PER_M",
+    "RUNWAY_DEM_FOLLOW_BAND_M",
     "GRADE_VISIBILITY_BUFFER_M",
     "ELEV_ROUNDING_NOISE_M",
     "RUNWAY_ADJACENCY_TOL_M",
@@ -233,6 +234,16 @@ GROUNDSIDE_MAX_GRADE = 0.040    # groundside pavement ramp grade (user 2026-05-2
 # i.e. ~1/30000 grade change per metre of pavement.
 RUNWAY_VERTICAL_CURVE_K_M = 305.0
 RUNWAY_MAX_GRADE_CHANGE_PER_M = 1.0 / 30000.0
+# How far the runway profile may follow the raw DEM away from the linear
+# baseline through its true anchors (CIFP thresholds, seams, runway crossings).
+# 0 = "flat": the runway is the flattest profile its anchors permit and the DEM
+# is ignored for the interior (user 2026-06-06).  The original "max DEM
+# following" value was 5.0 m, which let mid-runway sections free-float up to 5 m
+# off the baseline — e.g. CYXY 14R/32L dipping 4.5 m into a valley between the
+# 14R threshold and the 02/20 crossing, which pulled the connecting junction low
+# and made stub A 7.4%.  ``faa_joint_solve`` still enforces every grade/curvature
+# cap regardless of this value.
+RUNWAY_DEM_FOLLOW_BAND_M = 0.0
 
 # Within-shape grade-audit geometry — the SINGLE SOURCE OF TRUTH shared by the
 # runtime audit (``elevation._report_within_shape_violations``, the WARN shown

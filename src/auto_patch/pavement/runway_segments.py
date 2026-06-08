@@ -68,6 +68,7 @@ from ..config import (
     RUNWAY_END_GRADE,
     RUNWAY_MAX_GRADE as MAX_RUNWAY_GRADE,
     RUNWAY_MAX_GRADE_CHANGE_PER_M as MAX_RUNWAY_GRADE_CHANGE_PER_M,
+    RUNWAY_DEM_FOLLOW_BAND_M,
     SPLIT_LONG_RECTS_ENABLED,
 )
 DEFAULT_CELL_SIZE = float(RUNWAY_CELL_SIZE_M)  # meters between interp points
@@ -812,7 +813,18 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
             except _GEOM_EXC:
                 continue
 
-    for ti, (da_t, dat_a_t, db_t, dat_b_t) in enumerate(paired_list):
+    # Cross-runway THRESHOLD-PROJECTION anchors (one runway's threshold
+    # projected onto a close-pass parallel runway, pinned at the DEM) are
+    # DISABLED (user 2026-06-06).  They bake a DEM-seeded HARD anchor into the
+    # runway profile (e.g. CYXY 14L/32R's thresholds pinning 14R/32L to 691.4 /
+    # 704.3, ~4.5 m below its flat line), which is the very DEM-priority
+    # inversion we're removing: the runway's only hard anchors are its CIFP
+    # thresholds, tile seams, and real runway-runway CROSSINGS (the
+    # reconciliation pass below).  A close-pass inter-runway pin is handled as a
+    # MINIMUM flex by the per-surface solver (route-band), not a hard anchor.
+    _SEED_CROSS_RUNWAY_PROJECTION_ANCHORS = False
+    for ti, (da_t, dat_a_t, db_t, dat_b_t) in enumerate(
+            paired_list if _SEED_CROSS_RUNWAY_PROJECTION_ANCHORS else []):
         for src_desig, src_data in (
                 (da_t, dat_a_t), (db_t, dat_b_t)):
             for ri, (da_r, dat_a_r, db_r, dat_b_r) in enumerate(
@@ -1455,23 +1467,21 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
                 return profile_anchors[-1][1]
 
             # 4. DEM blend with band size tied to FAA absorption capacity.
-            # Per user 2026-04-28: "max DEM following" — let DEM
-            # influence the profile up to whatever the FAA rate-of-
-            # change rule can absorb in a parabolic vertical curve
-            # connecting back to the anchor profile.
+            # The interior seeds at the LINEAR baseline through the profile
+            # anchors (thresholds + cross-runway / crossing anchors + seams);
+            # the DEM may pull it off that baseline by at most ``band``.
+            # ``band`` is the parabolic vertical-curve deviation a PVI at the
+            # nearest anchor can absorb (½·K·d²), capped at
+            # ``RUNWAY_DEM_FOLLOW_BAND_M``.
             #
-            # The maximum deviation of a parabolic vertical curve
-            # from its tangent line at distance d from the curve's
-            # PVI (point of vertical intersection) is
-            #     max_dev = 0.5 × K × d²
-            # where K is the rate-of-change constant
-            # (MAX_RUNWAY_GRADE_CHANGE_PER_M = 1/30,000 for runways).
-            # Treating each anchor as a PVI, the band at sample i
-            # is the tightest such limit imposed by ANY anchor.
-            # Near anchors the band is small (forces the profile to
-            # stay near the linear baseline); far from anchors it
-            # widens enough that DEM character can come through.
-            DEM_BAND_M_MAX = 5.0   # absolute cap (sanity ceiling).
+            # ``RUNWAY_DEM_FOLLOW_BAND_M`` defaults to 0 (user 2026-06-06): DEM
+            # is the LOWEST-priority guide for the runway profile (after
+            # thresholds/seam/crossings), so the interior IS the straight
+            # anchor baseline and the DEM is ignored — the runway is the
+            # flattest profile its anchors permit, and only the per-surface
+            # solver's minimum flex (toward another-runway / seam pins) moves it
+            # off that.  The old "max DEM following" value was 5.0 m.
+            DEM_BAND_M_MAX = RUNWAY_DEM_FOLLOW_BAND_M
             for i in range(n_samples):
                 if anchored[i]:
                     continue

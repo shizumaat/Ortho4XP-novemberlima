@@ -57,6 +57,30 @@ class TaxiRouteGraph:
                 bd, best = d, k
         return best, bd
 
+    def distances_from(self, src_xy: Tuple[float, float]
+                       ) -> Tuple[Dict[Tuple[int, int], float], float]:
+        """One Dijkstra from the graph node nearest ``src_xy``: returns
+        ``(dist_by_node, src_gap)`` where ``dist_by_node[k]`` is the centerline
+        distance from that source node to graph node ``k`` and ``src_gap`` is the
+        straight stub from ``src_xy`` to its nearest node.  Add ``src_gap`` (and
+        the target's own gap) for an edge-to-edge value.  Amortises many queries
+        from one source."""
+        src, sd = self.nearest_key(*src_xy)
+        if src is None:
+            return {}, float("inf")
+        dist: Dict[Tuple[int, int], float] = {src: 0.0}
+        pq: List[Tuple[float, Tuple[int, int]]] = [(0.0, src)]
+        while pq:
+            d, u = heapq.heappop(pq)
+            if d > dist.get(u, float("inf")):
+                continue
+            for v, w in self.adj.get(u, ()):  # type: ignore[union-attr]
+                nd = d + w
+                if nd < dist.get(v, float("inf")):
+                    dist[v] = nd
+                    heapq.heappush(pq, (nd, v))
+        return dist, sd
+
     def distance(self, a_xy: Tuple[float, float],
                  b_xy: Tuple[float, float],
                  include_endpoint_gaps: bool = True

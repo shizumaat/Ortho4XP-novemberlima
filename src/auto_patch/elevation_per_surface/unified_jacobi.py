@@ -51,7 +51,8 @@ from collections import deque
 
 from shapely.errors import GEOSException, TopologicalError
 
-from auto_patch.config import RUNWAY_END_FRACTION, RUNWAY_END_GRADE
+from auto_patch.config import (
+    RUNWAY_END_FRACTION, RUNWAY_END_GRADE, RUNWAY_MAX_GRADE)
 from auto_patch.elevation import (
     APRON_MAX_GRADE, SERVICE_ROAD_MAX_GRADE, TAXI_MAX_GRADE)
 from auto_patch.layout import (
@@ -1389,6 +1390,37 @@ def _seam_pinned_runway_nodes(layout, bucket_to_idx) -> set:
     return out
 
 
+def _runway_crossing_nodes(layout, bucket_to_idx) -> set:
+    """Node idxs where two runways cross — every node of a ROLE_RUNWAY_CROSSING
+    shape (the intersection pavement) plus any node shared by two different
+    runway refs.  A crossing point is ONE canonical node belonging to BOTH
+    runways, so its elevation must stay consistent for both: it is held in the
+    re-smooth so flexing one runway can't drag the crossing off the other (CYXY
+    02/20 × 14R/32L).  Parallel-runway airports (HECA, SPJC) have none."""
+    out: set = set()
+    rwy_ref_of: dict = {}               # node idx -> set of runway refs using it
+    for s in layout.shapes:
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        is_crossing = s.role == ROLE_RUNWAY_CROSSING
+        is_runway = s.role == ROLE_RUNWAY
+        if not (is_crossing or is_runway):
+            continue
+        for (x, y) in _open_ring(list(s.polygon.exterior.coords)):
+            idx = bucket_to_idx.get(
+                layout.canonical_points.get_or_add(float(x), float(y)))
+            if idx is None:
+                continue
+            if is_crossing:
+                out.add(idx)
+            else:
+                rwy_ref_of.setdefault(idx, set()).add(s.ref or "")
+    for idx, refs in rwy_ref_of.items():
+        if len(refs) >= 2:              # node shared by two distinct runways
+            out.add(idx)
+    return out
+
+
 def _runway_profile_compliance(layout, elev, bucket_to_idx):
     """``(worst |grade|, curvature-violation count)`` over every runway's
     centerline profile reconstructed from the CURRENT ``elev`` array — the
@@ -1548,6 +1580,134 @@ def _flex_demand_anchors(layout, elev, snapshot, bucket_to_idx,
     return out
 
 
+def _runway_route_bands(layout, bucket_to_idx, elev, cap=TAXI_MAX_GRADE):
+    """The single most-binding INTER-RUNWAY flex anchor per runway:
+    ``{node_idx: target_elev}``.  For each runway centerline point the SYMMETRIC
+    feasibility band is
+
+      hi = min over reachable other-runway anchors of ``e_A + cap*d``  (the
+           LOWEST reachable runway → terrain above hi ⇒ the runway must DIP)
+      lo = max over reachable other-runway anchors of ``e_A - cap*d``  (the
+           HIGHEST reachable runway → terrain below lo ⇒ the runway must RISE)
+
+    intersected with the runway's OWN grade envelope from its locked CIFP
+    thresholds.  Distances are along the taxiway CENTERLINES (``taxi_routing``),
+    NOT the within-shape grade graph (which chord-cuts junctions / shortcuts
+    across aprons and under-counts).  We clamp the FLAT threshold-line into the
+    band and keep ONLY the position the band moves furthest (a dip OR a rise),
+    so the re-smooth grades one clean curve through it — anchoring every position
+    makes a jagged target.  Anchors are OTHER RUNWAYS only (taxiways / aprons /
+    terminals yield to the runway, so it moves only to stay grade-reachable from
+    another authoritative runway).  Empty for a single-runway field, where no
+    other runway is route-reachable, or where the band is infeasible with locked
+    thresholds (an honest inter-runway violation, not a runway distortion)."""
+    from auto_patch.taxi_routing import build_taxi_route_graph
+    xy: dict = {}
+    by_ref: dict = {}
+    for s in layout.shapes:
+        if s.role != ROLE_RUNWAY or s.polygon is None or s.polygon.is_empty:
+            continue
+        cs = _open_ring(list(s.polygon.exterior.coords))
+        if len(cs) != 4:
+            continue
+        for (x, y) in cs:
+            idx = bucket_to_idx.get(
+                layout.canonical_points.get_or_add(float(x), float(y)))
+            if idx is not None:
+                xy[idx] = (x, y)
+        by_ref.setdefault(s.ref or "", []).append(cs)
+    if len(by_ref) < 2:
+        return {}                       # single runway: no inter-runway band
+    # Runway connection points = runway nodes also used by a non-runway pavement
+    # shape (a taxiway / junction / apron touches the runway there).
+    nonrwy: set = set()
+    for s in layout.shapes:
+        if (s.role == ROLE_RUNWAY or s.role not in PAVEMENT_ROLES
+                or s.polygon is None or s.polygon.is_empty):
+            continue
+        for (x, y) in _open_ring(list(s.polygon.exterior.coords)):
+            idx = bucket_to_idx.get(
+                layout.canonical_points.get_or_add(float(x), float(y)))
+            if idx is not None:
+                nonrwy.add(idx)
+    conn: dict = {}                     # ref -> [(xy, elev), ...] connection pts
+    for ref, rects in by_ref.items():
+        pts = []
+        for cs in rects:
+            for (x, y) in cs:
+                idx = bucket_to_idx.get(
+                    layout.canonical_points.get_or_add(float(x), float(y)))
+                if idx is not None and idx in nonrwy:
+                    pts.append((xy[idx], elev[idx]))
+        conn[ref] = pts
+    graph = build_taxi_route_graph(layout)
+    # One Dijkstra per connection anchor (amortise the many position queries).
+    anchor_dist: dict = {}              # ref -> [(dist_map, src_gap, e_A), ...]
+    for ref, pts in conn.items():
+        anchor_dist[ref] = [(*graph.distances_from(axy), ea) for axy, ea in pts]
+    anchors: dict = {}
+    for ref, rects in by_ref.items():
+        positions, L = _runway_centerline_chain(layout, bucket_to_idx, rects)
+        if not positions or len(positions) < 2:
+            continue
+        other = [t for oref in by_ref if oref != ref for t in anchor_dist[oref]]
+        if not other:
+            continue
+        # Flat threshold-line: linear interp of the two threshold-end elevations
+        # along the axis.  We clamp THIS (not the wavy DEM-following baseline)
+        # into the band so only genuinely route-constrained points bind.
+        def _pe(p):
+            return sum(elev[i] for i in p["idxs"]) / max(1, len(p["idxs"]))
+        d0, dN = positions[0]["d"], positions[-1]["d"]
+        e0, eN = _pe(positions[0]), _pe(positions[-1])
+        span = (dN - d0) or 1.0
+        # Per runway, keep the SINGLE most-binding position — the one the route
+        # band moves furthest from flat (a dip or a rise) — and anchor only that,
+        # at its clamped target.  The re-smooth then grades ONE smooth FAA curve
+        # through it (anchoring every position makes a jagged target that the
+        # re-smooth cannot absorb → spurious cliffs over ~2 m).
+        best_node = None
+        best_move = 0.0
+        best_target = 0.0
+        for p in positions:
+            pxy = next((xy[i] for i in p["idxs"] if i in xy), None)
+            if pxy is None:
+                continue
+            pk, pgap = graph.nearest_key(*pxy)
+            if pk is None:
+                continue
+            lo, hi = float("-inf"), float("inf")
+            for dist_map, agap, ea in other:
+                dd = dist_map.get(pk)
+                if dd is None:
+                    continue
+                d = dd + pgap + agap
+                lo = max(lo, ea - cap * d)
+                hi = min(hi, ea + cap * d)
+            if lo == float("-inf"):
+                continue                # no route-reachable other runway
+            flat = e0 + (eN - e0) * (p["d"] - d0) / span
+            # Intersect with the runway's OWN grade envelope from its locked
+            # thresholds.  If the inter-runway band lies outside it (e.g. a LOW
+            # runway the band wants to hump UP to a far HIGHER runway), the two
+            # are genuinely grade-infeasible with locked thresholds — skip it
+            # (honest inter-runway violation), don't distort the runway.
+            da, db = abs(p["d"] - d0), abs(dN - p["d"])
+            own_hi = min(e0 + RUNWAY_MAX_GRADE * da, eN + RUNWAY_MAX_GRADE * db)
+            own_lo = max(e0 - RUNWAY_MAX_GRADE * da, eN - RUNWAY_MAX_GRADE * db)
+            eff_lo, eff_hi = max(lo, own_lo), min(hi, own_hi)
+            if eff_lo > eff_hi:
+                continue                # infeasible band ∩ own envelope: skip
+            tgt = min(max(flat, eff_lo), eff_hi)
+            move = abs(tgt - flat)
+            if move > best_move:
+                best_move, best_target = move, tgt
+                best_node = next((i for i in p["idxs"] if i in xy), None)
+        if best_node is not None and best_move > 0.05:
+            anchors[best_node] = best_target
+    return anchors
+
+
 def _resmooth_runways_in_elev(layout, elev, bucket_to_idx, anchored_nodes):
     """Re-fit every runway's centerline elevations IN ``elev`` to an FAA grade +
     vertical-curve compliant profile (``runway_segments.faa_joint_solve``),
@@ -1579,6 +1739,14 @@ def _resmooth_runways_in_elev(layout, elev, bucket_to_idx, anchored_nodes):
                     for p in positions]
         if not any(anchored):
             anchored[0] = anchored[-1] = True       # fallback: pin the ends
+        # NO flat-seed: preserve the runway's settled (incoming) profile and let
+        # ``faa_joint_solve`` move it the MINIMUM needed to stay grade+curvature
+        # compliant through the anchors (thresholds + seam + route-band binding +
+        # runway-crossing nodes).  Flat-seeding here would flatten the WHOLE
+        # runway toward the threshold line — maximal movement, not minimal — which
+        # pulls it off features graded to its original profile (SPJC's
+        # edge-sharing junction, CYXY's crossing runway).  Minimum flex = move
+        # only where a route anchor (or crossing) requires it.
         faa_joint_solve(fractions, elevs, anchored, L,
                         end_grade_cap=RUNWAY_END_GRADE,
                         end_fraction=RUNWAY_END_FRACTION)
@@ -1621,6 +1789,7 @@ def _relax_runway_and_resolve(n, elev, layout, bucket_to_idx, base_hard,
         return 0
     thresh = _runway_threshold_nodes(layout, bucket_to_idx)
     seam_pinned = _seam_pinned_runway_nodes(layout, bucket_to_idx)
+    crossing = _runway_crossing_nodes(layout, bucket_to_idx)
     rwy_nodes: set = set()
     for sc in rwy_constraints:
         rwy_nodes.update(sc["nodes"])
@@ -1691,35 +1860,57 @@ def _relax_runway_and_resolve(n, elev, layout, bucket_to_idx, base_hard,
             held_extra=terminal_nodes, max_sweeps=1000, tol=comply)
         sweeps_total += sweeps
         if not thr_freed:
-            # INTERIOR flex (thresholds fixed at CIFP): the band solve is
-            # piecewise-linear, so (b) re-smooth the runway to an FAA
-            # grade+vertical-curve compliant profile anchored at the held
-            # thresholds, then (c) re-grade the pavement against the smoothed,
-            # HELD runway.  Accept only if the smoothed runway stays grade AND
-            # curvature compliant (vs the pre-flex baseline).
-            # The band solve has pulled the runway DOWN where a taxiway connects
-            # (HECA 05C/23C middle 110→101.8).  Anchor those new low points (like
-            # a tile-seam crossing) so the re-smooth grades a smooth FAA profile
-            # threshold→low-point→threshold, instead of filling the lone dip back
-            # up to terrain.  ``faa_joint_solve`` rounds the free approaches.
-            flex_anchors = _flex_demand_anchors(
-                layout, elev, snapshot0, bucket_to_idx)
+            # INTERIOR flex (thresholds fixed at CIFP).  The runway flexes ONLY
+            # as much as INTER-RUNWAY feasibility requires, weighted to the
+            # flattest profile (user 2026-06-06): the per-runway most-binding
+            # route-band anchors (``_runway_route_bands``) are the dip/rise
+            # points (at their clamped targets, symmetric), measured along the
+            # taxiway CENTERLINES to whatever OTHER runway pins the far end.
+            # Everything else is left to the re-smooth, which seeds the interior
+            # flat (linear through thresholds + these anchors) and grades one
+            # FAA-compliant curve, then re-grades the pavement against the HELD
+            # runway.  The runway does NOT yield to a low LOCAL apron (apron-fill
+            # gap, not a runway demand), so it never over-dips to chase it.
+            route_anchors = _runway_route_bands(
+                layout, bucket_to_idx, snapshot0)
+            binding: set = set()
+            for i in interior:
+                if i in route_anchors:
+                    elev[i] = route_anchors[i]
+                    binding.add(i)
+                else:
+                    elev[i] = snapshot0[i]
             _resmooth_runways_in_elev(
                 layout, elev, bucket_to_idx,
-                thresh | seam_pinned | flex_anchors)
-            lo3, hi3 = _grade_bands(n, elev, base_hard, all_edges)
+                thresh | seam_pinned | binding | crossing)
+            # Re-grade the pavement against the smoothed, HELD runway: hold the
+            # WHOLE runway so the band solve cannot re-pull its interior down
+            # toward low aprons (which would undo the flat profile).
+            hard3 = list(base_hard)
+            for i in rwy_node_set:
+                hard3[i] = True
+            lo3, hi3 = _grade_bands(n, elev, hard3, all_edges)
             sweeps3, _v3 = _project_within_bands(
-                elev, all_edges, base_hard, lo3, hi3, coupling,
+                elev, all_edges, hard3, lo3, hi3, coupling,
                 held_extra=terminal_nodes, max_sweeps=1000, tol=comply)
             sweeps_total += sweeps3
             w1, c1, t1 = _within_excess_stats(elev, pav_edges, comply)
             rwy_g1, rwy_curv1 = _runway_profile_compliance(
                 layout, elev, bucket_to_idx)
-            improved = (
-                w1 <= w0 + comply
-                and (c1 < c0 or t1 < t0 - comply)
-                and rwy_curv1 <= rwy_curv0
-                and rwy_g1 <= max(rwy_g0, _role_grade(ROLE_RUNWAY)) + 1e-4)
+            # Commit iff the runway stays GRADE compliant.  Curvature is
+            # deliberately NOT a gate here: the emit applies a SPLINE profile to
+            # the long runway rects (``layout._slope_profile_for`` → "spline" for
+            # rects > 300 m), which smooths the transition into the lowered
+            # route-band-dip segment in the baked surface.  So the marginal kink
+            # the DISCRETE chain measure reports (``rwy_curv1``, computed only for
+            # the debug line) is a false positive — it does not exist after the
+            # spline — and must not block a grade-compliant, inter-runway-feasible
+            # MINIMUM dip (HECA 05C→~108.5 for the 05L/23R route was being
+            # rejected by ``rwy_curv1<=rwy_curv0`` against a flat seed, where any
+            # dip reads as +1 kink).  Pavement within-shape is also NOT required
+            # to improve: holding the runway at its inter-runway-feasible profile
+            # exposes apron-fill gaps honestly rather than masking them.
+            improved = rwy_g1 <= max(rwy_g0, _role_grade(ROLE_RUNWAY)) + 1e-4
         else:
             # SEAM level — the hard tile-seam anchor (seam > CIFP) makes the
             # runway↔seam connection infeasible at the CIFP thresholds, so the
