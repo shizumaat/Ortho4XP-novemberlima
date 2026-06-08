@@ -1,3 +1,76 @@
+# Auto-Patch Status — session 65 = RUNWAY FLAT PROFILE + MINIMUM INTER-RUNWAY FLEX (centerline route-band)
+
+## ★★ SESSION 65 (2026-06-06) — branch `claude/lock-thresholds-centerline-dist` ★★
+Full model + every dead-end + correction: **memory `runway_flat_profile_route_band_flex.md`**
+(indexed top of MEMORY.md). READ IT before touching runway elevation — we
+re-derived this many times.
+
+### THE MODEL (user-authoritative — do not re-derive)
+Runway PROFILE priority: **1. CIFP thresholds + tile seam (HARD). 2. Runway-runway
+CROSSINGS (shared point; closest-threshold runway sets `E_x`, the other bends).
+3. Pavement junctions at MAX grade — the runway flexes the MINIMUM toward a
+junction pinned at its FAR end by ANOTHER runway/seam. 4. DEM = LOWEST** (texture
+only). Initial profile = flattest piecewise-linear through {thresholds, seam,
+crossings}, NO DEM; the solver then flexes the minimum toward another-runway/seam
+pins. **Distance for inter-runway feasibility MUST be the taxiway CENTERLINE
+route** (`auto_patch/taxi_routing.py`), NOT the solver's within-shape grade graph
+(it chord-cuts junctions / shortcuts across aprons → under-counts → over-flexes;
+HECA T4→23R: graph 3014 m vs centerline 3236 m).
+
+### WHAT LANDED (committed: `9cf59ae` thresholds-locked + `24c5290` flat-profile+route-band; rollback = `dev 9ef97ba`)
+- **Thresholds locked**: removed step-3/step-5 threshold-relief re-solve passes
+  (pipeline.py) + pruned dead code (runway_redistribute.py). CIFP thresholds
+  never move.
+- **Flat seed**: `config.RUNWAY_DEM_FOLLOW_BAND_M = 0.0` (was hardcoded 5.0); wired
+  in `runway_segments.generate_patch_osm`. Cross-runway threshold-PROJECTION
+  anchors disabled (`_SEED_CROSS_RUNWAY_PROJECTION_ANCHORS=False`) — they pinned a
+  runway to a parallel runway's DEM (CYXY 14R/32L's 4.5 m dip). Crossing
+  reconciliation kept.
+- **Centerline route-band flex** (`unified_jacobi`): `taxi_routing` (+`distances_from`);
+  `_runway_route_bands` (per-runway most-binding inter-runway anchor, symmetric
+  dip/rise, ∩ own-threshold envelope); `_runway_crossing_nodes` held in re-smooth
+  + pavement re-grade; `_relax_runway_and_resolve` interior branch uses the
+  route-band, NO flat-seed (minimum move), **gate is GRADE-only** (the discrete
+  curvature kink is a FALSE POSITIVE — the long rects emit with the SPLINE profile
+  which smooths the joint; `layout._slope_profile_for` → "spline" >300 m).
+
+### RESULT (NOT in the default suite; measure per-airport)
+- **HECA**: 05C/23C dips to **~108 at T4** (the 05L/23R-route-feasible level), grade
+  0.98% compliant, thresholds intact; within-shape **211→168**. 05L/23R & 05R/23L
+  flat. ✓ the user's intended profile.
+- **CYXY**: 14R/32L now flat 14R→crossing, **stub A compliant**. BUT within 22 /
+  cross 10 / steps 52 — the **02/20+14L/32R crossing tears**: `agreed` E_x reaches
+  02/20 but NOT 14L/32R (second-runway anchor-injection bug, runway_segments
+  ~L973-976; 14L/32R floats to 695.9 vs 02/20's 693.7).
+- **SPJC**: within **0** ✓; 4 residual edge/mid-edge steps (runway-vertex-near-
+  junction-edge geometry).
+- Suite: CYXY/SPJC now FAIL the grade gate (were green) — by-design honest
+  exposure of pavement-side residuals the old DEM-following masked. dev `9ef97ba`
+  is verified-green rollback (299p/2 intentional gates).
+
+### OPEN (priority order)
+1. **CYXY crossing-anchor injection** — make the `agreed` crossing E_x land in
+   BOTH runways' profiles (14L/32R loses its copy). Smallest, clearest bug.
+2. **Apron SOLVER ENFORCEMENT GAP** (the dominant HECA within residual) — ★ NOT
+   "apron-fill", NOT all-pair, NOT the apron's 48 m span. Aprons grade by GEODESIC
+   in-pavement VISIBILITY (`_visible_grade_edges`), which handles big spans. The
+   violations are tiny LOCAL bumps (0.4–1.0 m over 6–18 m) between CLOSE, FREE,
+   apron-only points → the visibility-grade pass leaves a few constrained pairs
+   non-compliant (no final polish / incomplete convergence). See memory
+   `solver_apron_enforcement_gap.md`. Solver-quality, fix in the solver.
+3. **`check_runway_profile` spline-awareness** — the STRICT curvature CHECK (test
+   gate) still flags the 05C dip as a kink (same discrete false positive the flex
+   gate now ignores). Make the check model the spline to green the test.
+4. Connector endpoint tension (cross_connector G 1.66% — ends pinned slightly too
+   far apart) + SPJC junction-edge slivers.
+
+Probes `/tmp/probes/`: heca_runway_waviness, cyxy_stubA, heca_why_within,
+heca_apron_viol_detail, taxi_route_distance, centerline_route, flex_binding.
+USER FEEDBACK (durable): do NOT revert experiments before review; do NOT keep
+proposing "apron-fill"/"all-pair"/"split the apron".
+
+---
+
 # Auto-Patch Status — session 64 = RUNWAY-FLEX DEMAND-ANCHOR (taxiway pulls runway middle down) + curvature-noise + step-5 detection
 
 ## ★★ SESSION 64 RESULT (2026-06-05, dev — commits 0d383ba/4a278e7/33bcfeb/b86328d) ★★
