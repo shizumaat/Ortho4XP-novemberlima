@@ -32,6 +32,7 @@ __all__ = [
     "ROLE_GRADE_LIMITS",
     "TAXI_MAX_GRADE",
     "APRON_MAX_GRADE",
+    "TERMINAL_MAX_GRADE",
     "SERVICE_ROAD_MAX_GRADE",
     "SERVICE_ROAD_WIDTH_M",
     "MIN_SERVICE_STRIP_LEN_M",
@@ -204,6 +205,12 @@ LOAD_DSF_PAVEMENT = True
 # the runway cap without touching taxiways.
 TAXI_MAX_GRADE = 0.015          # FAA AC 150/5300-13 taxiway-family
 APRON_MAX_GRADE = 0.015         # apron / junction body, all directions (user 2026-05-07)
+# Terminal pads.  0.0 = perfectly FLAT (the default — a terminal building sits on
+# one floor altitude); the solver derives its flatness from this cap (cap 0 → the
+# flat / rigid-pad code path).  Raise it (e.g. to APRON_MAX_GRADE) to let terminals
+# GRADE like aprons — they then follow terrain within the cap through the same
+# visibility-graph path as every other surface, no special case.
+TERMINAL_MAX_GRADE = 0.0
 SERVICE_ROAD_MAX_GRADE = 0.040  # ground-vehicle route (apt.dat 1206 + OSM small roads) — cars handle 4%
 # Ground-vehicle 4%-grade ``service_road`` rect geometry (session 47).
 SERVICE_ROAD_WIDTH_M = 6.0          # corridor width for a service-road rect
@@ -282,8 +289,9 @@ ROLE_GRADE_LIMITS = {
     # (per user 2026-05-07).
     "apron":              APRON_MAX_GRADE,
     "junction":           APRON_MAX_GRADE,
-    # Terminals are typically flat polygons; the value rarely fires.
-    "terminal":           TAXI_MAX_GRADE,
+    # Terminals: 0 = flat (default).  Drives the flat-vs-graded code path —
+    # see TERMINAL_MAX_GRADE.
+    "terminal":           TERMINAL_MAX_GRADE,
     # Tunnel ramps descend from pavement elevation to the tunnel
     # floor; 4% is the navigable taxi grade for ramped portals
     # (per user 2026-05-08).

@@ -52,7 +52,8 @@ from collections import deque
 from shapely.errors import GEOSException, TopologicalError
 
 from auto_patch.config import (
-    RUNWAY_END_FRACTION, RUNWAY_END_GRADE, RUNWAY_MAX_GRADE)
+    ROLE_GRADE_LIMITS, RUNWAY_END_FRACTION, RUNWAY_END_GRADE,
+    RUNWAY_MAX_GRADE)
 from auto_patch.elevation import (
     APRON_MAX_GRADE, SERVICE_ROAD_MAX_GRADE, TAXI_MAX_GRADE)
 from auto_patch.layout import (
@@ -219,17 +220,16 @@ DEM_FLOOR_ATTRACTION = 0.85
 
 
 def _role_grade(role: str) -> float:
-    """Per-role max grade cap.  Taxiway-family + runway + junction share
-    ``TAXI_MAX_GRADE`` (1.5 %); ground-vehicle service roads get the
-    looser 4 % (cars handle steeper terrain); apron / terminal use
-    ``APRON_MAX_GRADE`` (1.5 %).  Checked before the sloping-rect branch
-    because service_road is itself a sloping rect but must NOT inherit 1.5 %.
-    """
-    if role in (ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION):
-        return SERVICE_ROAD_MAX_GRADE
-    if role in (ROLE_RUNWAY, *SLOPING_RECT_ROLES, ROLE_JUNCTION):
-        return TAXI_MAX_GRADE
-    return APRON_MAX_GRADE
+    """Per-role max grade cap — the SINGLE source of truth is
+    ``config.ROLE_GRADE_LIMITS`` (taxiway-family + runway + junction 1.5 %;
+    aprons 1.5 %; service roads 4 %; terminals = ``TERMINAL_MAX_GRADE``,
+    0 = flat by default).  A ``None`` entry (boundary / retaining wall — no
+    grade enforcement) maps to ``+inf`` so any pair passes; an unknown role
+    falls back to the taxiway cap.  A cap of 0 is the FLAT signal (terminals
+    by default) — the solver routes a 0-cap shape through the rigid flat-pad
+    path instead of grading it."""
+    cap = ROLE_GRADE_LIMITS.get(role, TAXI_MAX_GRADE)
+    return float("inf") if cap is None else float(cap)
 
 
 def _open_ring(coords) -> list[tuple[float, float]]:
@@ -338,9 +338,18 @@ def solve(layout, icao: str,
         relief_el.update(term_el)
         shape_constraints = _build_shape_constraints(
             layout, bucket_to_idx)
+        _step_dbg = _os.environ.get("O4_STEP_DEBUG") == "1"
+        if _step_dbg:
+            v, w = _count_within_viol(elev, shape_constraints)
+            print(f"[step] {icao} after STEP1 forward cascade: "
+                  f"within-edge viol={v} worst={w:.2f}m")
         total_iters += _directional_relief(
             n, elev, relief_hard, relief_eg, relief_el,
             shape_constraints, _RELIEF_MAX_ITERS, tol_m)
+        if _step_dbg:
+            v, w = _count_within_viol(elev, shape_constraints)
+            print(f"[step] {icao} after STEP2 reverse relief+yield: "
+                  f"within-edge viol={v} worst={w:.2f}m")
         # STEP 3 (user 2026-05-28): an impossible apron<->runway connection
         # (a junction/stub wedged between soft apron and a DEM-dipped
         # runway-anchored node) has nowhere to go while every runway node
@@ -350,6 +359,17 @@ def solve(layout, icao: str,
         total_iters += _relax_runway_and_resolve(
             n, elev, layout, bucket_to_idx, base_hard,
             shape_constraints, tol_m)
+        # FINAL within-shape enforcement (difference-constraint solve): drive
+        # every FEASIBLE within-shape edge to <=cap against the now-settled
+        # runway/seam anchors, and report the band-pinned residual (the only
+        # part a within-shape solve cannot fix — it needs an anchor to flex).
+        if _step_dbg:
+            v, w = _count_within_viol(elev, shape_constraints)
+            print(f"[step] {icao} after STEP3 runway flex: "
+                  f"within-edge viol={v} worst={w:.2f}m")
+        _enforce_within_shape_grade(
+            elev, shape_constraints, base_hard,
+            nodes=nodes, layout=layout, bucket_to_idx=bucket_to_idx, icao=icao)
 
     n_terms, n_rects, n_juncs = _writeback(
         layout, elev, bucket_to_idx)
@@ -573,6 +593,201 @@ def _grade_bands(n, elev, is_hard, edges):
     nlo = _dijkstra(-1.0)                       # nlo[v] = min_a(-elev[a] + d)
     lo = [(-x if x != INF else -INF) for x in nlo]
     return lo, hi
+
+
+# Difference-constraint within-shape enforcement budget.  The Dijkstra bands
+# (``_grade_bands``) do the heavy lifting directly (O(E·log V), ~6 ms — the
+# shortest cap-path IS the fully-propagated hard-anchor constraint, no iteration);
+# the band-clamp then applies it, and the residual soft↔soft projection converges
+# to its floor in ~1–2 k sweeps (it plateaus — more does nothing).  Anything left
+# at the plateau is structural / anchor-pinned and only an anchor flex can fix it.
+_WITHIN_ENFORCE_MAX_SWEEPS = 2000
+
+
+def _runway_reach_bands(nodes, elev, runway_nodes, seam_nodes, all_edges, cap,
+                        layout):
+    """Per-node feasible band ``[lo, hi]`` from the runway/seam HARD anchors,
+    where RUNWAY reachability is measured along the taxiway CENTERLINE route
+    (``taxi_routing``) and SEAM reachability via the within-shape geodesic, then
+    intersected.
+
+    Why: the within-shape VISIBILITY geodesic shortcuts ACROSS a big apron's
+    interior, so propagating a runway's elevation through it under-counts the real
+    distance and FALSELY band-pins pavement caught between two runways at
+    different levels (the recurring HECA "squeeze" — a measurement bug, not
+    infeasibility; the real connection is the perimeter taxi route).  Measuring
+    runway connections along the centerline (the path an aircraft actually takes,
+    and the surface that actually carries the grade between runways) gives the
+    correct, looser band.  The within-apron grade itself stays the visibility
+    geodesic (enforced by the projection's edges); only the runway-REACHABILITY
+    distance switches to the centerline.  Seam anchors stay geodesic (a tile-seam
+    pins its LOCAL pavement directly, not via a taxi route).
+    """
+    from auto_patch.taxi_routing import build_taxi_route_graph
+    n = len(nodes)
+    NEG, POS = float("-inf"), float("inf")
+    lo = [NEG] * n
+    hi = [POS] * n
+    G = build_taxi_route_graph(layout)
+    if G.coord and runway_nodes:
+        # Cache each node's nearest centerline (key, gap) — one O(|coord|) scan
+        # per node, reused for seeds and queries.
+        near: dict[int, tuple] = {}
+
+        def _near(i):
+            r = near.get(i)
+            if r is None:
+                r = G.nearest_key(*nodes[i])
+                near[i] = r
+            return r
+
+        def _propagate(sign):
+            # Multi-source Dijkstra over the centerline graph (edge weight =
+            # cap*length) seeded at each runway anchor's centerline entry.
+            dist: dict = {}
+            pq: list = []
+            for a in runway_nodes:
+                if a >= n:
+                    continue
+                key, gap = _near(a)
+                if key is None:
+                    continue
+                v0 = sign * elev[a] + cap * gap
+                if v0 < dist.get(key, POS):
+                    dist[key] = v0
+                    heapq.heappush(pq, (v0, key))
+            while pq:
+                d, u = heapq.heappop(pq)
+                if d > dist.get(u, POS):
+                    continue
+                for v, w in G.adj.get(u, ()):  # type: ignore[union-attr]
+                    nd = d + cap * w
+                    if nd < dist.get(v, POS):
+                        dist[v] = nd
+                        heapq.heappush(pq, (nd, v))
+            return dist
+        ceil_key = _propagate(1.0)            # elev[a] + cap*(gap+route)
+        floor_key = _propagate(-1.0)          # -elev[a] + cap*(gap+route)
+        for v in range(n):
+            key, gap = _near(v)
+            if key is None:
+                continue
+            c = ceil_key.get(key)
+            if c is not None:
+                hi[v] = c + cap * gap
+            f = floor_key.get(key)
+            if f is not None:
+                lo[v] = -(f + cap * gap)
+    # Seam anchors: keep the geodesic band (local pin), intersect.
+    if seam_nodes:
+        is_seam = [False] * n
+        for i in seam_nodes:
+            if i < n:
+                is_seam[i] = True
+        slo, shi = _grade_bands(n, elev, is_seam, all_edges)
+        for v in range(n):
+            if shi[v] < hi[v]:
+                hi[v] = shi[v]
+            if slo[v] > lo[v]:
+                lo[v] = slo[v]
+    return lo, hi
+
+
+def _count_within_viol(elev, shape_constraints):
+    """(count, worst_excess_m) of within-shape grade edges over cap — the model's
+    own constraint set (NOT the geodesic emit metric), for per-step review."""
+    n_v = 0
+    worst = 0.0
+    for sc in shape_constraints:
+        for (i, j, c) in sc["edges"]:
+            if c <= 0:
+                continue
+            ex = abs(elev[i] - elev[j]) - c
+            if ex > 1e-4:
+                n_v += 1
+                if ex > worst:
+                    worst = ex
+    return n_v, worst
+
+
+def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
+                                nodes=None, layout=None, bucket_to_idx=None,
+                                icao=None) -> int:
+    """FINAL within-shape grade ENFORCEMENT via the difference-constraint solve.
+
+    Every within-shape limit ``|x_i - x_j| <= cap·d`` is a difference
+    constraint.  With the runway/seam HARD anchors fixed, :func:`_grade_bands`
+    gives each node its EXACT feasible band ``[lo, hi]`` by shortest cap-paths
+    (Dijkstra, O(V·E) — no iteration), and the all-lo / all-hi assignments are
+    themselves compliant (triangle inequality), so a feasible compliant surface
+    ALWAYS exists EXCEPT where two hard anchors are closer in the graph than
+    their elevation gap allows: ``lo > hi`` — a BAND-PINNED node, structurally
+    infeasible at the fixed anchors.  Those are the runway-flex's job (an anchor
+    must yield), NOT a within-shape failure, so we HOLD them at their current
+    level and let the rest of the surface comply around them.
+
+    The bulk correction is the one-time band-clamp inside
+    :func:`_project_within_bands`; the remaining soft↔soft residual (apron
+    interiors far from any hard anchor, where bands are loose) is projected to
+    convergence.  Holding the band-pinned nodes out of the relaxation lets the
+    feasible region converge cleanly (they no longer slosh the projection).
+
+    Stays DEM-close: projects the EXISTING near-DEM surface onto the feasible
+    polytope, never reseeds.  Returns the count of band-pinned (infeasible)
+    nodes — the residual that only a runway/anchor flex can resolve.
+    """
+    n = len(elev)
+    all_edges = [e for sc in shape_constraints for e in sc["edges"]]
+    if not all_edges:
+        return 0
+    # Runway/seam HARD set: the whole settled runway (authoritative surface the
+    # pavement grades to) + seam.
+    is_hard = list(base_hard)
+    runway_nodes: set = set()
+    seam_nodes: set = set()
+    if layout is not None and bucket_to_idx is not None:
+        runway_nodes = _runway_node_set(layout, bucket_to_idx)
+        seam_nodes = _seam_pinned_runway_nodes(layout, bucket_to_idx)
+        for i in runway_nodes | seam_nodes:
+            if i < n:
+                is_hard[i] = True
+    # Feasible bands: RUNWAY reachability via the taxiway CENTERLINE route (the
+    # within-shape geodesic shortcuts across big aprons and falsely band-pins
+    # pavement between two runways — the HECA "squeeze" is this measurement bug,
+    # NOT infeasibility).  Falls back to the geodesic band when node coords aren't
+    # available (older callers).
+    if nodes is not None and layout is not None and runway_nodes:
+        lo, hi = _runway_reach_bands(
+            nodes, elev, runway_nodes, seam_nodes, all_edges,
+            TAXI_MAX_GRADE, layout)
+    else:
+        lo, hi = _grade_bands(n, elev, is_hard, all_edges)
+    band_pinned = {i for i in range(n) if lo[i] > hi[i] + 1e-6}
+    # Flat (cap-0 terminal) nodes stay held at their solved floor.  Band-pinned
+    # nodes are NOT held: freezing them at their (infeasible) current value pins
+    # their feasible neighbours off-grade and stalls the projection — instead let
+    # them settle to their band, so the structural violation LOCALISES to the
+    # genuinely-infeasible edges while every feasible edge converges around them.
+    flat_nodes: set = set()
+    for sc in shape_constraints:
+        if sc["flat"]:
+            flat_nodes.update(sc["nodes"])
+    coupling = _build_level_coupling(shape_constraints)
+    _dbg = _os.environ.get("O4_ENFORCE_DEBUG") == "1"
+    if _dbg:
+        v0 = sum(1 for (i, j, c) in all_edges
+                 if c > 0 and abs(elev[i] - elev[j]) > c + 1e-4)
+    sweeps, resid = _project_within_bands(
+        elev, all_edges, is_hard, lo, hi, coupling,
+        held_extra=flat_nodes,
+        max_sweeps=_WITHIN_ENFORCE_MAX_SWEEPS,
+        tol=_SPREAD_COMPLY_TOL_M)
+    if _dbg:
+        v1 = sum(1 for (i, j, c) in all_edges
+                 if c > 0 and abs(elev[i] - elev[j]) > c + 1e-4)
+        print(f"[enforce] {icao}: {sweeps} sweeps, edge-viol {v0}->{v1}, "
+              f"residual {resid:.3f} m, band-pinned = {len(band_pinned)}")
+    return len(band_pinned)
 
 
 def _shape_hop_depth(shape_constraints, seed_node_set) -> list[int]:
@@ -1077,8 +1292,12 @@ def _build_shape_constraints(layout, bucket_to_idx):
         nodes = [i for i in idx if i is not None]
         if len(nodes) < 2:
             continue
-        flat = (s.role == ROLE_TERMINAL)
         cap = _role_grade(s.role)
+        # Flatness is a CONSEQUENCE of a zero grade cap (terminals by default,
+        # config.TERMINAL_MAX_GRADE = 0), NOT a per-role special case: a 0-cap
+        # shape takes the rigid flat-pad path; a >0-cap terminal grades through
+        # the same visibility graph as an apron.
+        flat = (cap <= 0.0)
         edges: list[tuple[int, int, float]] = []
         flat_pairs: list[tuple[int, int]] = []   # rect flat-end coupled pairs
         # A clean PLANAR rect (altitude_high/low) gets the flat-cross + axial
@@ -1123,8 +1342,10 @@ def _build_shape_constraints(layout, bucket_to_idx):
                     flat_pairs.append((idx[a], idx[b]))
                 else:                    # the two most-parallel = sloping edges
                     edges.append((idx[a], idx[b], cap * el))
-        elif s.role == ROLE_APRON:
-            # In-pavement VISIBILITY graph for APRONS.  The within-shape grade
+        elif s.role in (ROLE_APRON, ROLE_TERMINAL):
+            # In-pavement VISIBILITY graph for APRONS (and GRADED terminals when
+            # TERMINAL_MAX_GRADE > 0 — they are large near-flat pads, same as an
+            # apron).  The within-shape grade
             # limit applies ALONG the pavement, so a grade edge is added only
             # between MUTUALLY-VISIBLE vertices (the chord stays inside the
             # polygon).  On a non-convex apron the Euclidean chord between two
@@ -2646,18 +2867,19 @@ def _writeback(layout, elev, bucket_to_idx):
             coords_open, elev, bucket_to_idx, layout)
         if corner_elevs is None:
             continue
-        if s.role == ROLE_TERMINAL:
-            # Terminal is FLAT (per user 2026-05-18: a terminal sits
-            # on one floor altitude).  The terminal-flatness equality
-            # group already enforced this in the solver; average is
-            # just a defensive round.
+        if s.role == ROLE_TERMINAL and _role_grade(ROLE_TERMINAL) <= 0.0:
+            # Terminal is FLAT (the default: TERMINAL_MAX_GRADE = 0, a terminal
+            # sits on one floor altitude — per user 2026-05-18).  The flat
+            # equality group already enforced this in the solver; average is just
+            # a defensive round.  When TERMINAL_MAX_GRADE > 0 the terminal grades
+            # like an apron and falls through to the per-corner branch below.
             avg = sum(corner_elevs) / len(corner_elevs)
             s.altitude = round(float(avg), 1)
             s.altitude_high = None
             s.altitude_low = None
             s.node_altitudes = None
             n_terms += 1
-        elif s.role == ROLE_APRON:
+        elif s.role in (ROLE_APRON, ROLE_TERMINAL):
             # Per user 2026-05-18: aprons are NOT 100 % flat — they
             # satisfy 1.5 % across their surface, NOT zero gradient.
             # Keep the solver's per-corner altitudes (which it

@@ -446,7 +446,14 @@ def check_terminal_flat(layout):
     """Invariant H26: a terminal moves as one rigid flat unit — a single
     ``altitude`` tag, never per-vertex ``node_altitudes`` or two-end
     ``altitude_high``/``altitude_low``.  Returns ``[(idx, detail,
-    "lat,lon"), …]``."""
+    "lat,lon"), …]``.
+
+    Only applies when terminals are configured FLAT (``TERMINAL_MAX_GRADE``
+    == 0).  When terminals are allowed to grade like aprons (cap > 0) they
+    legitimately carry per-vertex altitudes, so the invariant is skipped."""
+    from auto_patch.config import TERMINAL_MAX_GRADE
+    if TERMINAL_MAX_GRADE > 0.0:
+        return []
     out = []
     for i, s in enumerate(layout.shapes):
         if (s.role or "") != "terminal":
