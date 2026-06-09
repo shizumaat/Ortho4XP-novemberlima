@@ -1,3 +1,81 @@
+# Auto-Patch Status — session 66 = WITHIN-SHAPE measurement fix (CENTERLINE bands) + config-driven terminal grade + inverted-hi/lo fix
+
+## ★★ SESSION 66 (2026-06-08) — branch `claude/lock-thresholds-centerline-dist` ★★
+Committed: **`f88b6bc`** (inverted altitude_high/low fix) + **`10b3d8b`** (centerline
+runway bands + config-driven terminal grade). Working tree clean. Suite **301
+passed / 4 pre-existing grade gates fail (CYXY/SPLP/SPJC/HECA — identical on the
+clean branch, NOT a regression) / 2 skip / 2 xfail / 2 xpass.**
+
+### ★ THE BIG CORRECTION (user-authoritative) — the "giant apron" is NOT infeasible
+STOP concluding HECA's mega-apron is infeasible / must be SPLIT. It is a REAL
+airport, thresholds correct, ALL pavement within grade in reality (the real airport
+grades aprons to the STRICTER EASA **1%**). Any runway "squeeze"/band-pinning is a
+**DISTANCE-MEASUREMENT bug**: the within-shape VISIBILITY geodesic shortcuts ACROSS
+a big apron's interior, so propagating a runway's elevation through it under-counts
+distance and FALSELY band-pins pavement between two runways (measured: a node 114 m
+from 05L read only 2554 m geodesic to 05C; its real **centerline** route is 3093 m →
+feasible). Memory fully corrected: `apron_grade_euclidean_vs_geodesic.md`,
+`runway_flat_profile_route_band_flex.md`, 3 MEMORY.md index entries.
+
+### WHAT LANDED
+1. **Inverted altitude_high/low FIXED** (`f88b6bc`): `layout.canonicalize_high_low_ring`
+   rotates a 4-corner ring by 2 when the (0,3) pair is the LOWER end → emit
+   `altitude_high ≥ altitude_low` (X-Plane positional contract; surface bit-
+   identical). +4 tests. (The original session-66 trigger bug.)
+2. **Centerline runway-reachability bands** (`10b3d8b`): `_runway_reach_bands`
+   (unified_jacobi) measures runway connections along the taxiway CENTERLINE route
+   (`taxi_routing`), not the cross-apron geodesic; within-apron grade stays
+   geodesic; seam stays geodesic. **HECA band-pinned 443 → 11** (the rest were
+   false). Used by the final `_enforce_within_shape_grade` pass.
+3. **Config-driven terminal grade**: `_role_grade` reads `config.ROLE_GRADE_LIMITS`
+   (single source of truth); `flat = (cap == 0)`; `config.TERMINAL_MAX_GRADE` (0 =
+   flat default, behaviour-preserving; raise → terminals grade like aprons via the
+   same visibility path, no flag). `_writeback` + `check_terminal_flat` honour it.
+4. Diagnostics (env-gated): `O4_STEP_DEBUG` (per-pass within-edge counts —
+   STEP1 forward 1632 → STEP2 relief 379 → STEP3 flex 296), `O4_ENFORCE_DEBUG`.
+   Perf finding: the difference-constraint Dijkstra band is **6 ms**; the within-
+   shape POCS projection PLATEAUS at ~2000 sweeps (NOT 20000) — perf is a non-issue.
+
+### ★ NEGATIVE RESULT — do NOT retry the Bellman-Ford projection as-is
+Replacing the POCS projection with a difference-constraint (Lipschitz inf/sup-
+convolution) solve REGRESSED (edge-viol 168→824). Root cause (corrects the earlier
+"POCS plateaus above the floor" hypothesis): the residual is a genuine **CONFLICT
+between the per-node centerline bounds and the visibility edges**, not a convergence
+limitation. `_runway_reach_bands` bounds EVERY node by its own nearest-centerline
+distance; two visible-adjacent apron nodes near DIFFERENT taxiways (one→05L, one→05C)
+get bounds ~14 m apart, while the short visibility edge demands ≤cap·d — unsatisfiable
+by ANY solver at ~239 edges. POCS at 2000 sweeps is already near that floor. The
+band MODEL is the issue, not the fixed-point finder. (DC-project code was written +
+reverted; don't resurrect without fixing the band model first.)
+
+### ★★ NEXT TASK — HYBRID band model (centerline-to-connection + geodesic-inward)
+The within-shape COUNT is still 168 (unchanged) — the measurement is now right and
+the false squeeze is gone, but the actual reduction needs this. Make the bounds and
+the visibility edges CONSISTENT: apply the centerline runway-reachability bound at
+the apron's CONNECTION nodes only (where taxiways meet the apron boundary), then let
+the interior grade INWARD from there via the within-apron visibility geodesic. So the
+interior is not independently over-bounded; it follows its boundary. Implement as a
+combined-graph Dijkstra (centerline-route edges between shapes + visibility edges
+within a shape) seeded from runways — OR seed the geodesic band-Dijkstra from the
+connection-node centerline values. Then the band-clamp + a short projection should
+reach the true floor (≈ the 11 genuinely band-pinned), and graded terminals (EASA 1%)
+should make HECA fully compliant.
+
+### ★ IDEA TO EXPLORE (user 2026-06-08) — push residual conflicts to GROUNDSIDE terminal edges
+Where a terminal genuinely must absorb a grade conflict (it sits between
+incompatible levels), bias the terminal's slope so the STEEP part lands on its
+GROUNDSIDE / landside edge (curbside / roads — `ROLE_GROUNDSIDE_PAVEMENT`, already a
+separate 4 % role) and the AIRSIDE (apron-facing) edge stays at the apron-compatible
+level. That pushes any residual grade issue AWAY from where aircraft taxi/park, onto
+the car side where 4 % is fine. Worth testing as the disposal route for the last
+irreducible conflicts: terminals slope toward groundside, airside edge held compliant.
+
+### Probes (`/tmp/probes/`): geodesic_vs_centerline, centerline_dist, accurate_split,
+### conv_centerline, speed_test, apron_feasibility, find_inverted_osm, squeeze_split.
+### Measure: `O4_ENFORCE_DEBUG=1` + grep `[enforce]`; `tools/check_grade.py /tmp/*.osm`.
+
+---
+
 # Auto-Patch Status — session 65 = RUNWAY FLAT PROFILE + MINIMUM INTER-RUNWAY FLEX (centerline route-band)
 
 ## ★★ SESSION 65 (2026-06-06) — branch `claude/lock-thresholds-centerline-dist` ★★
