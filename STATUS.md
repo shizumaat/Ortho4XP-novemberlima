@@ -1,3 +1,73 @@
+# Auto-Patch Status — session 67 = DEMAND-DRIVEN RUNWAY FLEX + TAXI-ROUTE TERMINAL SEED + SLOPING SQUEEZED TERMINALS (HECA 168→28)
+
+## ★★ SESSION 67 (2026-06-09) — branch `dev`, UNCOMMITTED → committing this milestone ★★
+A large session that reworked the runway/terminal elevation model to the user's
+spec. **HECA within-shape 168 → 28**, **CYXY 17→0 (grade test now GREEN)**, SPJC 0,
+SPLP 4. Suite **302 passed / 3 failed** (HECA/SPJC/SPLP pre-existing; CYXY flipped
+red→green; no green→red). Build WARN and `tools/check_grade.py` now AGREE (28=28).
+
+### THE MODEL (user-authoritative, this session)
+1. **Pavement grades to max grade first** (terminals yielded), THEN the runway
+   flexes the MINIMUM — dip OR rise — so every junction meets it. End state = 0
+   violations; any residual = a measurement bug or broken geometry.
+2. **Runway only ever DIPS toward a LOWER neighbour, never RISES toward a higher
+   one** — the higher runway dips toward the lower; the lower stays at its locked
+   threshold and the junctions descend to it ("junctions could be descending — the
+   runway is raised way too high").
+3. **Terminal flatness is LOWER priority than grade.** A pad seeded at its
+   taxi-route grade-feasible level is FLAT where it can be, and SLOPES only when it
+   straddles a low and a high runway and cannot be one level in grade to both.
+4. **Metrics are config-driven**: the validator + runtime WARN read
+   `ROLE_GRADE_LIMITS[role]` per shape, so changing a cap in config updates the test.
+
+### WHAT LANDED (all in `elevation_per_surface/unified_jacobi.py` unless noted)
+1. **Demand-driven runway flex.** `_relax_runway_and_resolve` step (a) already
+   solved the combined runway+pavement band with terminals held — that settled
+   interior IS the minimum demand. The old code threw it away for the inter-runway
+   route-band; now it KEEPS it and just re-smooths for FAA curve/end-grade. Removed
+   the inter-runway `_runway_route_bands` (it was over-flexing 05L/23R +5 m toward a
+   far higher runway). 05L/23R bulge 67 → ~63; A4 descends instead of a 21.8% cliff.
+2. **Taxi-route terminal seed** (`_seed_terminals_from_taxi_routes`, called in
+   `per_surface_solve` after `_seed_elevations`). Each terminal vertex routes (via
+   `taxi_routing`) to each runway; band = ∩ `[E_R ∓ cap·route_R]`. Written into BOTH
+   `elev` and `dem_elev` (so Phase 1's DEM-seed + every fit use it). FLAT clusters
+   (feasible combined band) seed one level; SQUEEZED clusters (infeasible band) seed
+   PER-NODE → slope. HECA 6/7/10: terminal7 ~71.5 (low, near 05L/23R) → terminal6
+   ~76 (high, near 05C), 0.97 % over 318 m.
+3. **Squeezed terminals GRADE, others stay flat.** `_build_shape_constraints`: a
+   terminal in `layout._sloped_terminal_nodes` (marked by the seed) gets the apron
+   visibility-graph cap; every other terminal is rigid flat (cap 0) regardless of
+   the config cap. `config.TERMINAL_MAX_GRADE = APRON_MAX_GRADE` is now the MAX a
+   terminal MAY slope (used by the validator), NOT a mandate to grade every pad.
+4. **Removed the upward-ratcheting terminal yield.** `_yield_terminals_alternating`
+   (raised terminals toward high held neighbours) and the reverse-pass
+   `_rigid_shift_terminal` are GONE — the seed sets the level; the apron grades DOWN
+   to it. (~250 lines of dead code removed: those two + `_runway_route_bands` +
+   `_flex_demand_anchors`.)
+5. **Config-driven WARN + shapeIDs** (`elevation._report_within_shape_violations`):
+   reports the per-role config cap (not hardcoded 1.5 %), lists the top-8 worst
+   shapes with `[#shapeID]` + role/ref + grade (matches `verify_and_log` /
+   check_grade). `verify_and_log` already emits + runs the check_grade engine and
+   reports shapeIDs — that IS the test's metric.
+
+### REMAINING (HECA 28, the geometry/measurement residue)
+- worst = **runway-end GEOMETRY sliver** runway/05L/23R `[#174]` ↔ junction `[#313]`
+  5.8 % (0.8 m / 13.9 m) — a junction-vertex cut at the 23R threshold; NOT a solver
+  gap. The other ~26 are apron/junction marginals (20 of 28 are ≤0.5 % over cap).
+- SPJC fails on 2 runway edge-steps; SPLP on the seam-tilt runway (5). Both
+  pre-existing classes.
+- one xpass→xfail shifted (a runway vertical-curve test — the profile changed with
+  the new flex); worth a look.
+
+### Diagnostics / probes (`/tmp/probes/`)
+`O4_FLEX_DEBUG` (flex commit + combined-band (a) count), `O4_SEED_DEBUG` (per-cluster
+flat/SLOPED seed). Probes: term_seed/term_seed_flat (band per terminal),
+cluster_geom (slope feasibility), saturation, check3, all_grade, check_fix.
+
+### NEXT
+- the runway-end sliver (#174/#313) — junction-cut geometry fix at the 23R threshold.
+- keep driving HECA 28 → 0 (apron/junction marginals); confirm the xfail shift.
+
 # Auto-Patch Status — session 66 = WITHIN-SHAPE measurement fix (CENTERLINE bands) + config-driven terminal grade + inverted-hi/lo fix
 
 ## ★★ SESSION 66 (2026-06-08) — branch `claude/lock-thresholds-centerline-dist` ★★

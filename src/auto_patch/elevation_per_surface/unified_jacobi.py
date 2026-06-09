@@ -268,6 +268,13 @@ def solve(layout, icao: str,
     # carry a stale value).
     dem_elev = _sample_node_dem(layout, nodes, dem, tile_lat, tile_lon)
 
+    # Pre-solve terminal SEED from taxi-route grade feasibility (user 2026-06-09):
+    # replace the too-high DEM seed (which the relief then ratchets further UP)
+    # with the level each terminal can be while staying in grade to every adjacent
+    # runway over its real taxiway route, so the apron can slope DOWN to the runway.
+    _seed_terminals_from_taxi_routes(
+        layout, elev, bucket_to_idx, dem_elev)
+
     tiers = _node_tiers(layout, bucket_to_idx, n)
 
     # Per-tier edge sets.  Each phase grades a tier against the FROZEN tier
@@ -338,6 +345,7 @@ def solve(layout, icao: str,
         relief_el.update(term_el)
         shape_constraints = _build_shape_constraints(
             layout, bucket_to_idx)
+
         _step_dbg = _os.environ.get("O4_STEP_DEBUG") == "1"
         if _step_dbg:
             v, w = _count_within_viol(elev, shape_constraints)
@@ -763,23 +771,26 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
     else:
         lo, hi = _grade_bands(n, elev, is_hard, all_edges)
     band_pinned = {i for i in range(n) if lo[i] > hi[i] + 1e-6}
-    # Flat (cap-0 terminal) nodes stay held at their solved floor.  Band-pinned
-    # nodes are NOT held: freezing them at their (infeasible) current value pins
-    # their feasible neighbours off-grade and stalls the projection — instead let
-    # them settle to their band, so the structural violation LOCALISES to the
-    # genuinely-infeasible edges while every feasible edge converges around them.
-    flat_nodes: set = set()
-    for sc in shape_constraints:
-        if sc["flat"]:
-            flat_nodes.update(sc["nodes"])
-    coupling = _build_level_coupling(shape_constraints)
+    # Terminals YIELD in the final enforce instead of being frozen at their
+    # STEP-2 level (user model phase 1/2: terminals move to the level the
+    # connecting aprons need).  Freezing them held the worst HECA squeeze open —
+    # stub A4 bridges a LOW runway (05L) to an apron pinned high by terminal7;
+    # terminal7 frozen at 76.4 left A4 at 21.8 %.  Letting terminal7 yield down
+    # as a RIGID flat unit (it stays single-level) resolves it.  Each terminal is
+    # a rigid level group (cap-0 flat shapes unioned by shared node — edge-
+    # connected terminals co-level, session 59); the group moves together, so
+    # flatness is preserved, and the runway-reach band clamps its travel (bounded
+    # ~5 m, no slosh — the band-clamp is what the earlier free-terminal attempts
+    # lacked).  A group sharing a hard node is still held (one corner pinned).
+    coupling = _merge_terminal_level_groups(
+        _build_level_coupling(shape_constraints), shape_constraints)
     _dbg = _os.environ.get("O4_ENFORCE_DEBUG") == "1"
     if _dbg:
         v0 = sum(1 for (i, j, c) in all_edges
                  if c > 0 and abs(elev[i] - elev[j]) > c + 1e-4)
     sweeps, resid = _project_within_bands(
         elev, all_edges, is_hard, lo, hi, coupling,
-        held_extra=flat_nodes,
+        held_extra=set(),
         max_sweeps=_WITHIN_ENFORCE_MAX_SWEEPS,
         tol=_SPREAD_COMPLY_TOL_M)
     if _dbg:
@@ -1008,56 +1019,17 @@ def _directional_relief(n, elev, is_hard, edge_grade, edge_length,
     for _ti in range(len(term_scs)):
         _clusters.setdefault(_tfind(_ti), []).append(_ti)
     terminal_groups: list[set] = []
-    # Forward-pass (DEM) level each terminal cluster is anchored to — the
-    # minimum-shift reference; Phase 1 already made each member flat at its DEM
-    # centroid.  AREA-WEIGHT the cluster level so the dominant (largest) pad
-    # anchors it (else a small many-vertex pad would skew a node-count mean).
-    term_level0: list[float] = []
     for _members in _clusters.values():
         _nodes: set = set()
         for _ti in _members:
             _nodes |= set(term_scs[_ti]["nodes"])
         terminal_groups.append(_nodes)
-        _tot_a = sum(term_scs[_ti]["area"] for _ti in _members) or 1.0
-        _lvl = sum(
-            (sum(elev[i] for i in term_scs[_ti]["nodes"])
-             / len(term_scs[_ti]["nodes"])) * term_scs[_ti]["area"]
-            for _ti in _members) / _tot_a
-        term_level0.append(_lvl)
     terminal_nodes: set = set().union(*terminal_groups) if terminal_groups \
         else set()
-    # Per-edge grade-cap adjacency (node -> [(neighbour, cap_m)]) to find the
-    # feasible band for a terminal's rigid level from its settled NON-terminal
-    # neighbours (an apron's all-pair edges out of the shared vertices).
-    cap_adj: dict[int, list[tuple[int, float]]] = {}
-    for (u, v), gr in edge_grade.items():
-        c = edge_length[(u, v)] * gr
-        cap_adj.setdefault(u, []).append((v, c))
-        cap_adj.setdefault(v, []).append((u, c))
     group_of_node: dict[int, int] = {}
     for gi, g in enumerate(terminal_groups):
         for i in g:
             group_of_node[i] = gi
-
-    def _rigid_shift_terminal(gi: int) -> None:
-        """Translate terminal group ``gi`` as one flat unit to the level
-        closest to its forward-pass DEM level that keeps every connection to a
-        settled non-terminal neighbour within grade (minimum shift)."""
-        g = terminal_groups[gi]
-        lo, hi = float("-inf"), float("inf")
-        for i in g:
-            for (j, c) in cap_adj.get(i, ()):  # type: ignore[arg-type]
-                if j in terminal_nodes:
-                    continue          # within/between terminals: no constraint
-                lo = max(lo, elev[j] - c)
-                hi = min(hi, elev[j] + c)
-        t0 = term_level0[gi]
-        if lo <= hi:
-            t = min(max(t0, lo), hi)   # already feasible -> stay; else min move
-        else:
-            t = 0.5 * (lo + hi)        # infeasible band: minimise worst violation
-        for i in g:
-            elev[i] = t
 
     # Rigid level coupling: a rect's two flat-end cross-corner pairs each move
     # as ONE level (user 2026-05-28), so whichever neighbour drags an end keeps
@@ -1094,7 +1066,12 @@ def _directional_relief(n, elev, is_hard, edge_grade, edge_length,
     for k, sc in enumerate(order):
         gi = group_of_node.get(sc["nodes"][0]) if sc["nodes"] else None
         if gi is not None and set(sc["nodes"]) <= terminal_groups[gi]:
-            _rigid_shift_terminal(gi)         # adjust the whole terminal (flat)
+            # Terminal is held at its pre-solve taxi-route SEED (the grade-feasible
+            # level w.r.t. every adjacent runway).  Do NOT rigid-shift it toward
+            # its local apron boundary — that ratchets it UP toward the high side
+            # and under-slopes the apron (user 2026-06-09); the apron must grade
+            # DOWN to the seeded pad, and any residual the runway-flex absorbs.
+            pass
         else:
             held = {i for i in sc["nodes"] if settled[i]}
             held |= terminal_nodes.intersection(sc["nodes"])  # conform to terminals
@@ -1122,105 +1099,15 @@ def _directional_relief(n, elev, is_hard, edge_grade, edge_length,
         held_extra=terminal_nodes,
         max_sweeps=1000,
         tol=max(tol_m, _SPREAD_COMPLY_TOL_M))
-    # Terminal-yield (session 62): an apron bridging two terminals at
-    # incompatible terrain levels (HECA T8 78.2 -> 6/7/10 group 73.2, a 2.9 %
-    # ramp) cannot comply while BOTH terminals are pinned at DEM.  Free the
-    # terminals as rigid flat units and reconcile by ALTERNATION (stable),
-    # NOT a joint relaxation (which sloshes): each round (1) yields every
-    # terminal the minimum from its current level into the interval its HELD
-    # neighbours (other terminals / hard anchors) allow, then (2) re-grades the
-    # aprons to follow.  A terminal already at a feasible level stays put;
-    # only one wedged off terrain by the bridging apron moves.
-    n_outer = _yield_terminals_alternating(
-        elev, shape_constraints, terminal_groups,
-        terminal_nodes, is_hard, coupling, lo, hi, all_edges,
-        tol=max(tol_m, _SPREAD_COMPLY_TOL_M))
-    return 1 + n_sweeps + n_outer
-
-
-def _yield_terminals_alternating(elev, shape_constraints, terminal_groups,
-                                 terminal_nodes, is_hard, coupling,
-                                 lo, hi, all_edges, tol, max_outer=25) -> int:
-    """Reconcile aprons-bridged terminals at incompatible terrain levels by
-    BLOCK-COORDINATE alternation (terminal-yield, session 62).
-
-    The joint free-terminal band projection sloshes (terminals are large rigid
-    bodies; many edges pull one group different ways, the relaxation oscillates
-    and drifts pads metres off terrain).  Alternation is stable: hold the aprons,
-    move each terminal the MINIMUM from its current (solved, near-DEM) level into
-    the interval its HELD neighbours allow, then hold the terminals and re-grade
-    the aprons to follow.  Repeat to a fixed point.  A terminal already at a
-    feasible level never moves (compliant pads stay home); only one wedged off
-    terrain by an apron bridging it to an incompatible-level terminal — like
-    HECA's T8 over the 1.5 M m² mega-apron to the 6/7/10 group — yields, and only
-    as far as the worst abutting HELD pair demands.  Returns the rounds run.
-    """
-    if not terminal_groups:
-        return 0
-    INF = float("inf")
-    # In-pavement VISIBILITY (geodesic) adjacency from the shape-constraint
-    # edges — NOT all-pair Euclidean: a phantom chord across non-pavement to a
-    # far high terminal would fabricate an infeasible band.
-    vis_adj: dict[int, list[tuple[int, float]]] = {}
-    for sc in shape_constraints:
-        for (i, j, c) in sc["edges"]:
-            vis_adj.setdefault(i, []).append((j, c))
-            vis_adj.setdefault(j, []).append((i, c))
-
-    outer = 0
-    for outer in range(max_outer):
-        moved = 0.0
-        # (1) Yield each terminal to the grade-feasible interval set by its HELD
-        #     visible neighbours ONLY — other terminals (held flat in step 2) and
-        #     hard runway/seam anchors.  A FREE apron/junction node is excluded:
-        #     it is NOT a constraint on the terminal because step 2 regrades it to
-        #     FOLLOW the terminal (the apron fills/cuts to accommodate).  Counting
-        #     free apron nodes was the bug — a free apron node sitting high near a
-        #     terminal (HECA: the giant apron's north descent pins a node at 79.2
-        #     just 24 m from T8) ratcheted the terminal UP to match it instead of
-        #     letting it drop to bridge the low group, so the whole network slowly
-        #     drifted up toward the high anchors and never resolved the ramp.
-        for gi, g in enumerate(terminal_groups):
-            tlo, thi = -INF, INF
-            for i in g:
-                for (j, c) in vis_adj.get(i, ()):  # type: ignore[arg-type]
-                    if j in g:
-                        continue
-                    if not (is_hard[j] or j in terminal_nodes):
-                        continue          # free node — regrades to follow us
-                    if elev[j] - c > tlo:
-                        tlo = elev[j] - c
-                    if elev[j] + c < thi:
-                        thi = elev[j] + c
-            cur = elev[next(iter(g))]
-            if tlo <= thi:
-                # Minimal shift from the CURRENT (solved) level — NOT from the
-                # DEM centroid.  A terminal wedged ABOVE the compliant zone (HECA
-                # T8: DEM 79.3, but the apron can only reach ~76 from the 73 m
-                # group) must DROP; anchoring the clamp to DEM pulls it back UP,
-                # resisting the very yield that fixes the ramp.  Clamping to the
-                # current level instead never moves a terminal away from
-                # compliance, and since the solve seeded it near DEM the result
-                # is still the closest-to-terrain feasible level.
-                t = min(max(cur, tlo), thi)
-            else:
-                t = 0.5 * (tlo + thi)                     # infeasible: midpoint
-            if abs(t - cur) > 1e-9:
-                if abs(t - cur) > moved:
-                    moved = abs(t - cur)
-                for i in g:
-                    elev[i] = t
-        # (2) Re-grade the aprons/junctions to the yielded terminals.
-        _project_within_bands(elev, all_edges, is_hard, lo, hi, coupling,
-                              held_extra=terminal_nodes,
-                              max_sweeps=1000, tol=tol)
-        if _os.environ.get("O4_YIELD_DEBUG"):
-            lv = {gi: round(elev[next(iter(g))], 2)
-                  for gi, g in enumerate(terminal_groups)}
-            print(f"  [yield] round {outer}: moved={moved:.3f} levels={lv}")
-        if moved < 0.01:
-            break
-    return outer + 1
+    # Terminal level is now set by the pre-solve taxi-route SEED
+    # (``_seed_terminals_from_taxi_routes``, user 2026-06-09), which places each
+    # coupled pad at its grade-feasible level w.r.t. every adjacent runway so the
+    # apron can slope DOWN to the runway.  The old alternating yield
+    # (``_yield_terminals_alternating``) RATCHETED terminals UP toward high held
+    # neighbours (HECA terminal7 71.9 -> 76.4), under-sloping the apron and
+    # forcing the runway to over-flex up to meet it — so it is REPLACED by the
+    # seed, not run on top of it.
+    return 1 + n_sweeps
 
 
 # Tolerance buffer for the in-pavement visibility test: a chord is "visible"
@@ -1293,10 +1180,18 @@ def _build_shape_constraints(layout, bucket_to_idx):
         if len(nodes) < 2:
             continue
         cap = _role_grade(s.role)
-        # Flatness is a CONSEQUENCE of a zero grade cap (terminals by default,
-        # config.TERMINAL_MAX_GRADE = 0), NOT a per-role special case: a 0-cap
-        # shape takes the rigid flat-pad path; a >0-cap terminal grades through
-        # the same visibility graph as an apron.
+        # Terminals are rigid FLAT pads by DEFAULT (flatness preferred), even
+        # though the terminal cap (``TERMINAL_MAX_GRADE``) is > 0 — that config
+        # value is the MAX a terminal MAY slope, not a mandate that every pad
+        # grade.  Only a pad the taxi-route seed marked SQUEEZED (it straddles a
+        # low and a high runway and cannot be one level in grade to both) grades,
+        # at the terminal cap, through the visibility graph — so it keeps the
+        # minimum cross-pad slope the seed set (user 2026-06-09: flatness yields
+        # to grade, but ONLY where grade demands it).
+        if s.role == ROLE_TERMINAL:
+            _sloped = getattr(layout, "_sloped_terminal_nodes", None)
+            if not (_sloped and any(i in _sloped for i in nodes)):
+                cap = 0.0
         flat = (cap <= 0.0)
         edges: list[tuple[int, int, float]] = []
         flat_pairs: list[tuple[int, int]] = []   # rect flat-end coupled pairs
@@ -1762,173 +1657,6 @@ def _runway_centerline_chain(layout, bucket_to_idx, rects):
     return positions, L
 
 
-def _flex_demand_anchors(layout, elev, snapshot, bucket_to_idx,
-                         drop_margin=2.0):
-    """The SINGLE runway centerline node a connecting taxiway has pulled DOWN the
-    MOST below terrain (max ``snapshot − elev``, > ``drop_margin``) per runway —
-    the "new low point" the flex created.  It becomes an anchor so the re-smooth
-    grades ONE smooth FAA profile threshold→low-point→threshold (the user's
-    tile-seam analogy); re-grading the whole runway from that single worst point
-    then serves the lesser demands too.  Anchoring every demanded dip instead
-    over-constrains the profile (a shallow 0.6 m dip just past a deep one pins
-    the runway high and forces a steep link)."""
-    out: set = set()
-    by_ref: dict = {}
-    for s in layout.shapes:
-        if s.role != ROLE_RUNWAY or s.polygon is None or s.polygon.is_empty:
-            continue
-        cs = _open_ring(list(s.polygon.exterior.coords))
-        if len(cs) == 4:
-            by_ref.setdefault(s.ref or "", []).append(cs)
-    for ref, rects in by_ref.items():
-        positions, L = _runway_centerline_chain(layout, bucket_to_idx, rects)
-        if not positions or len(positions) < 3 or L <= 0:
-            continue
-        band_e = [sum(elev[i] for i in p["idxs"]) / len(p["idxs"])
-                  for p in positions]
-        snap_e = [sum(snapshot[i] for i in p["idxs"]) / len(p["idxs"])
-                  for p in positions]
-        kworst = max(range(len(positions)),
-                     key=lambda m: snap_e[m] - band_e[m])
-        if snap_e[kworst] - band_e[kworst] <= drop_margin:
-            continue                       # no real pavement-demanded drop
-        out |= positions[kworst]["idxs"]
-        if _os.environ.get("O4_FLEX_DEBUG") == "1":
-            print(f"[flexanchor] {ref}: anchor frac"
-                  f"{positions[kworst]['d'] / L:.2f}@{band_e[kworst]:.1f} "
-                  f"(terr {snap_e[kworst]:.1f}, drop "
-                  f"{snap_e[kworst] - band_e[kworst]:.1f})")
-    return out
-
-
-def _runway_route_bands(layout, bucket_to_idx, elev, cap=TAXI_MAX_GRADE):
-    """The single most-binding INTER-RUNWAY flex anchor per runway:
-    ``{node_idx: target_elev}``.  For each runway centerline point the SYMMETRIC
-    feasibility band is
-
-      hi = min over reachable other-runway anchors of ``e_A + cap*d``  (the
-           LOWEST reachable runway → terrain above hi ⇒ the runway must DIP)
-      lo = max over reachable other-runway anchors of ``e_A - cap*d``  (the
-           HIGHEST reachable runway → terrain below lo ⇒ the runway must RISE)
-
-    intersected with the runway's OWN grade envelope from its locked CIFP
-    thresholds.  Distances are along the taxiway CENTERLINES (``taxi_routing``),
-    NOT the within-shape grade graph (which chord-cuts junctions / shortcuts
-    across aprons and under-counts).  We clamp the FLAT threshold-line into the
-    band and keep ONLY the position the band moves furthest (a dip OR a rise),
-    so the re-smooth grades one clean curve through it — anchoring every position
-    makes a jagged target.  Anchors are OTHER RUNWAYS only (taxiways / aprons /
-    terminals yield to the runway, so it moves only to stay grade-reachable from
-    another authoritative runway).  Empty for a single-runway field, where no
-    other runway is route-reachable, or where the band is infeasible with locked
-    thresholds (an honest inter-runway violation, not a runway distortion)."""
-    from auto_patch.taxi_routing import build_taxi_route_graph
-    xy: dict = {}
-    by_ref: dict = {}
-    for s in layout.shapes:
-        if s.role != ROLE_RUNWAY or s.polygon is None or s.polygon.is_empty:
-            continue
-        cs = _open_ring(list(s.polygon.exterior.coords))
-        if len(cs) != 4:
-            continue
-        for (x, y) in cs:
-            idx = bucket_to_idx.get(
-                layout.canonical_points.get_or_add(float(x), float(y)))
-            if idx is not None:
-                xy[idx] = (x, y)
-        by_ref.setdefault(s.ref or "", []).append(cs)
-    if len(by_ref) < 2:
-        return {}                       # single runway: no inter-runway band
-    # Runway connection points = runway nodes also used by a non-runway pavement
-    # shape (a taxiway / junction / apron touches the runway there).
-    nonrwy: set = set()
-    for s in layout.shapes:
-        if (s.role == ROLE_RUNWAY or s.role not in PAVEMENT_ROLES
-                or s.polygon is None or s.polygon.is_empty):
-            continue
-        for (x, y) in _open_ring(list(s.polygon.exterior.coords)):
-            idx = bucket_to_idx.get(
-                layout.canonical_points.get_or_add(float(x), float(y)))
-            if idx is not None:
-                nonrwy.add(idx)
-    conn: dict = {}                     # ref -> [(xy, elev), ...] connection pts
-    for ref, rects in by_ref.items():
-        pts = []
-        for cs in rects:
-            for (x, y) in cs:
-                idx = bucket_to_idx.get(
-                    layout.canonical_points.get_or_add(float(x), float(y)))
-                if idx is not None and idx in nonrwy:
-                    pts.append((xy[idx], elev[idx]))
-        conn[ref] = pts
-    graph = build_taxi_route_graph(layout)
-    # One Dijkstra per connection anchor (amortise the many position queries).
-    anchor_dist: dict = {}              # ref -> [(dist_map, src_gap, e_A), ...]
-    for ref, pts in conn.items():
-        anchor_dist[ref] = [(*graph.distances_from(axy), ea) for axy, ea in pts]
-    anchors: dict = {}
-    for ref, rects in by_ref.items():
-        positions, L = _runway_centerline_chain(layout, bucket_to_idx, rects)
-        if not positions or len(positions) < 2:
-            continue
-        other = [t for oref in by_ref if oref != ref for t in anchor_dist[oref]]
-        if not other:
-            continue
-        # Flat threshold-line: linear interp of the two threshold-end elevations
-        # along the axis.  We clamp THIS (not the wavy DEM-following baseline)
-        # into the band so only genuinely route-constrained points bind.
-        def _pe(p):
-            return sum(elev[i] for i in p["idxs"]) / max(1, len(p["idxs"]))
-        d0, dN = positions[0]["d"], positions[-1]["d"]
-        e0, eN = _pe(positions[0]), _pe(positions[-1])
-        span = (dN - d0) or 1.0
-        # Per runway, keep the SINGLE most-binding position — the one the route
-        # band moves furthest from flat (a dip or a rise) — and anchor only that,
-        # at its clamped target.  The re-smooth then grades ONE smooth FAA curve
-        # through it (anchoring every position makes a jagged target that the
-        # re-smooth cannot absorb → spurious cliffs over ~2 m).
-        best_node = None
-        best_move = 0.0
-        best_target = 0.0
-        for p in positions:
-            pxy = next((xy[i] for i in p["idxs"] if i in xy), None)
-            if pxy is None:
-                continue
-            pk, pgap = graph.nearest_key(*pxy)
-            if pk is None:
-                continue
-            lo, hi = float("-inf"), float("inf")
-            for dist_map, agap, ea in other:
-                dd = dist_map.get(pk)
-                if dd is None:
-                    continue
-                d = dd + pgap + agap
-                lo = max(lo, ea - cap * d)
-                hi = min(hi, ea + cap * d)
-            if lo == float("-inf"):
-                continue                # no route-reachable other runway
-            flat = e0 + (eN - e0) * (p["d"] - d0) / span
-            # Intersect with the runway's OWN grade envelope from its locked
-            # thresholds.  If the inter-runway band lies outside it (e.g. a LOW
-            # runway the band wants to hump UP to a far HIGHER runway), the two
-            # are genuinely grade-infeasible with locked thresholds — skip it
-            # (honest inter-runway violation), don't distort the runway.
-            da, db = abs(p["d"] - d0), abs(dN - p["d"])
-            own_hi = min(e0 + RUNWAY_MAX_GRADE * da, eN + RUNWAY_MAX_GRADE * db)
-            own_lo = max(e0 - RUNWAY_MAX_GRADE * da, eN - RUNWAY_MAX_GRADE * db)
-            eff_lo, eff_hi = max(lo, own_lo), min(hi, own_hi)
-            if eff_lo > eff_hi:
-                continue                # infeasible band ∩ own envelope: skip
-            tgt = min(max(flat, eff_lo), eff_hi)
-            move = abs(tgt - flat)
-            if move > best_move:
-                best_move, best_target = move, tgt
-                best_node = next((i for i in p["idxs"] if i in xy), None)
-        if best_node is not None and best_move > 0.05:
-            anchors[best_node] = best_target
-    return anchors
-
-
 def _resmooth_runways_in_elev(layout, elev, bucket_to_idx, anchored_nodes):
     """Re-fit every runway's centerline elevations IN ``elev`` to an FAA grade +
     vertical-curve compliant profile (``runway_segments.faa_joint_solve``),
@@ -2080,30 +1808,24 @@ def _relax_runway_and_resolve(n, elev, layout, bucket_to_idx, base_hard,
             elev, all_edges, is_hard2, lo, hi, coupling,
             held_extra=terminal_nodes, max_sweeps=1000, tol=comply)
         sweeps_total += sweeps
+        if _os.environ.get("O4_FLEX_DEBUG") == "1":
+            wa, ca, _ta = _within_excess_stats(elev, pav_edges, comply)
+            print(f"[flex]  level{_li} after combined-band (a): "
+                  f"pav within c={ca} worst={wa:.3f}")
         if not thr_freed:
-            # INTERIOR flex (thresholds fixed at CIFP).  The runway flexes ONLY
-            # as much as INTER-RUNWAY feasibility requires, weighted to the
-            # flattest profile (user 2026-06-06): the per-runway most-binding
-            # route-band anchors (``_runway_route_bands``) are the dip/rise
-            # points (at their clamped targets, symmetric), measured along the
-            # taxiway CENTERLINES to whatever OTHER runway pins the far end.
-            # Everything else is left to the re-smooth, which seeds the interior
-            # flat (linear through thresholds + these anchors) and grades one
-            # FAA-compliant curve, then re-grades the pavement against the HELD
-            # runway.  The runway does NOT yield to a low LOCAL apron (apron-fill
-            # gap, not a runway demand), so it never over-dips to chase it.
-            route_anchors = _runway_route_bands(
-                layout, bucket_to_idx, snapshot0)
-            binding: set = set()
-            for i in interior:
-                if i in route_anchors:
-                    elev[i] = route_anchors[i]
-                    binding.add(i)
-                else:
-                    elev[i] = snapshot0[i]
+            # INTERIOR flex (thresholds locked at CIFP), user 2026-06-09: the
+            # runway flex is the LAST phase — the pavement is already graded to
+            # max grade and the terminals have yielded (held above), so the
+            # combined band solve in (a) has settled the runway interior to the
+            # MINIMUM profile that lets EVERY connecting junction meet it within
+            # grade (dipping toward a saturated-low junction, rising toward a
+            # saturated-high one).  That settled interior IS the demand; keep it
+            # and re-smooth only to fold in the FAA vertical-curve / end-grade the
+            # band solve doesn't model, anchored at the locked thresholds (the
+            # interior keeps its demanded levels where FAA-compliant).
             _resmooth_runways_in_elev(
                 layout, elev, bucket_to_idx,
-                thresh | seam_pinned | binding | crossing)
+                thresh | seam_pinned | crossing)
             # Re-grade the pavement against the smoothed, HELD runway: hold the
             # WHOLE runway so the band solve cannot re-pull its interior down
             # toward low aprons (which would undo the flat profile).
@@ -2200,6 +1922,49 @@ def _relax_runway_and_resolve(n, elev, layout, bucket_to_idx, base_hard,
     return sweeps_total
 
 
+def _merge_terminal_level_groups(coupling: dict, shape_constraints) -> dict:
+    """Extend a ``node -> tuple(members)`` coupling with one RIGID LEVEL group per
+    terminal (flat, cap-0 shape), so a terminal moves as a single flat unit in the
+    final enforce projection instead of being frozen.  Flat shapes that share a
+    node union into one group (edge-connected terminals co-level, session 59), and
+    any existing coupling members (rect flat-pairs) that touch a terminal node
+    merge in too.  Returns a fresh merged coupling dict."""
+    parent: dict[int, int] = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        parent[find(a)] = find(b)
+
+    # Seed with the existing coupling components (rect flat-end pairs).
+    for node, members in coupling.items():
+        for m in members:
+            union(node, m)
+    # Union every flat shape's nodes into one component.
+    for sc in shape_constraints:
+        if not sc["flat"]:
+            continue
+        ns = sc["nodes"]
+        for k in ns[1:]:
+            union(ns[0], k)
+    comp: dict[int, list[int]] = {}
+    for x in list(parent):
+        comp.setdefault(find(x), []).append(x)
+    merged: dict[int, tuple] = {}
+    for members in comp.values():
+        if len(members) < 2:
+            continue
+        t = tuple(members)
+        for m in members:
+            merged[m] = t
+    return merged
+
+
 def _build_level_coupling(shape_constraints) -> dict:
     """Build the RIGID LEVEL coupling map ``node -> tuple(members)`` (user
     2026-05-28).  Members of a group must share one elevation and move together
@@ -2259,6 +2024,171 @@ def _build_node_list(layout):
                 bucket_to_idx[k] = len(nodes)
                 nodes.append((float(x), float(y)))
     return nodes, bucket_to_idx
+
+
+def _seed_terminals_from_taxi_routes(layout, elev, bucket_to_idx, dem_elev,
+                                     cap=TAXI_MAX_GRADE) -> int:
+    """Pre-solve terminal SEED from taxi-route grade feasibility (user 2026-06-09).
+
+    A terminal pad must be grade-reachable from the runways it connects to over the
+    actual taxiway ROUTE (not the cross-apron straight line).  Starting it at its
+    raw DEM (typically ABOVE that band) leaves the apron unable to slope down to a
+    lower runway and the relief then ratchets the terminal further UP.  Seeding it
+    instead at the closest-to-DEM level inside
+
+        band = intersect over adjacent runways R of
+                 [ E_R - cap*route_R , E_R + cap*route_R ]
+
+    (``E_R`` = the runway elevation at the NEAREST connection on R — flat here, the
+    seed runs before any runway flex; ``route_R`` = centerline route distance) lets
+    the apron grade DOWN to the runway.  EDGE-COUPLED terminals seed as ONE flat
+    unit at their COMBINED band (its midpoint when the inter-runway squeeze is
+    infeasible — the residual the runway-flex / apron then absorbs).  A terminal
+    not route-reachable from any runway keeps its DEM seed.  Mutates ``elev``;
+    returns the number of terminals/clusters re-seeded.
+
+    When terminals are GRADED (``TERMINAL_MAX_GRADE`` > 0) the seed is PER-NODE
+    (each vertex at its own band), so a pad spanning two runways at different
+    levels SLOPES — its edge near the LOW runway drops, its edge near the HIGH
+    runway rises — at the ≤cap grade the span allows (HECA 6/7/10: 70 near
+    05L/23R → 73 near 05C over 318 m = 0.97 %), instead of a flat pad forcing
+    that tension onto the apron/runway.  When terminals are FLAT (cap 0) the
+    cluster seeds as ONE level (combined band; midpoint if the squeeze is
+    infeasible)."""
+    from auto_patch.taxi_routing import build_taxi_route_graph
+    cps = layout.canonical_points
+    G = build_taxi_route_graph(layout)
+    if not G.coord:
+        return 0
+    # Runway connection points: a runway node also used by a non-runway pavement
+    # shape (a taxiway / junction / apron meets the runway there), with the runway
+    # ref so we can take the nearest connection PER runway.
+    nonrwy: set = set()
+    for s in layout.shapes:
+        if (s.role == ROLE_RUNWAY or s.role not in PAVEMENT_ROLES
+                or s.polygon is None or s.polygon.is_empty):
+            continue
+        for (x, y) in _open_ring(list(s.polygon.exterior.coords)):
+            idx = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+            if idx is not None:
+                nonrwy.add(idx)
+    rconn: list = []                    # (dist_map, src_gap, elev, ref)
+    for s in layout.shapes:
+        if s.role != ROLE_RUNWAY or s.polygon is None or s.polygon.is_empty:
+            continue
+        for (x, y) in _open_ring(list(s.polygon.exterior.coords)):
+            idx = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+            if idx is not None and idx in nonrwy:
+                dm, sg = G.distances_from((x, y))
+                rconn.append((dm, sg, elev[idx], s.ref or ""))
+    if not rconn:
+        return 0
+    # Edge-coupled terminal clusters (flat cap-0 shapes unioned by shared node).
+    parent: dict = {}
+
+    def _find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    # PER-NODE grade-feasible band: every terminal vertex routes from its OWN
+    # position to each runway, so a vertex near the low runway gets a low ceiling
+    # and one near the high runway a high floor (the source of the legitimate
+    # cross-pad slope).  Also union the pad into edge-coupled clusters.
+    node_band: dict = {}                # node_idx -> (lo, hi)
+    node_refs: dict = {}                # cluster-root -> [ref...]  (debug)
+    for s in layout.shapes:
+        if s.role != ROLE_TERMINAL or s.polygon is None or s.polygon.is_empty:
+            continue
+        ring = _open_ring(list(s.polygon.exterior.coords))
+        idxs = [bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+                for (x, y) in ring]
+        if sum(1 for i in idxs if i is not None) < 2:
+            continue
+        first = next(i for i in idxs if i is not None)
+        for (x, y), idx in zip(ring, idxs):
+            if idx is None:
+                continue
+            parent[_find(first)] = _find(idx)
+            if idx in node_band:
+                continue
+            tkey, tgap = G.nearest_key(x, y)
+            lo_n, hi_n = float("-inf"), float("inf")
+            if tkey is not None:
+                best: dict = {}         # ref -> (route, E_R)
+                for dm, sg, eR, ref in rconn:
+                    d = dm.get(tkey)
+                    if d is None:
+                        continue
+                    route = d + sg + tgap
+                    if ref not in best or route < best[ref][0]:
+                        best[ref] = (route, eR)
+                for route, eR in best.values():
+                    lo_n = max(lo_n, eR - cap * route)
+                    hi_n = min(hi_n, eR + cap * route)
+            node_band[idx] = (lo_n, hi_n)
+        node_refs.setdefault(_find(first), []).append(s.ref or "?")
+    n_seeded = 0
+    _dbg = _os.environ.get("O4_SEED_DEBUG") == "1"
+
+    def _apply(i, val):
+        elev[i] = val
+        dem_elev[i] = val               # the vertex TARGET (DEM is only a guess;
+        #                                 the pad goes where grade feasibility puts it)
+
+    # Coupled clusters with their COMBINED band (intersection of member-node
+    # bands).  A cluster is FLAT (one level) when that band is feasible — flatness
+    # is preferred; it SLOPES (per-node) only when the combined band is infeasible
+    # (the pad genuinely cannot be in grade to both a low and a high runway as one
+    # level) AND terminals are allowed to grade.  This keeps a terminal on flat
+    # terrain perfectly flat (no per-node seed noise) while letting a squeezed pad
+    # like HECA 6/7/10 slope the minimum to honour grade (user 2026-06-09:
+    # flatness yields to grade, not the other way round).
+    clusters: dict = {}                 # root -> {nodes, lo, hi}
+    for i, (lo_n, hi_n) in node_band.items():
+        r = _find(i)
+        c = clusters.setdefault(r, {"nodes": set(), "lo": float("-inf"),
+                                    "hi": float("inf")})
+        c["nodes"].add(i)
+        c["lo"] = max(c["lo"], lo_n)
+        c["hi"] = min(c["hi"], hi_n)
+    sloped_nodes: set = set()           # terminals that must grade, not stay flat
+    for r, c in clusters.items():
+        lo, hi = c["lo"], c["hi"]
+        if lo == float("-inf"):
+            continue                    # not route-reachable from any runway
+        nodes_c = c["nodes"]
+        if lo <= hi:
+            # FLAT: a single level (closest-to-DEM in the band) — flatness kept.
+            dem = sum(dem_elev[i] for i in nodes_c) / len(nodes_c)
+            seed = min(max(dem, lo), hi)
+            for i in nodes_c:
+                _apply(i, seed)
+            tag = f"flat {seed:.1f}"
+        else:
+            # SQUEEZED (band infeasible: the pad straddles a low and a high runway
+            # and CANNOT be one level in grade to both).  Flatness yields to grade
+            # (user 2026-06-09): each vertex seeds at its own band so the pad
+            # SLOPES the minimum, and the pad is marked GRADEABLE so the solver
+            # keeps that slope instead of re-flattening it.
+            for i in nodes_c:
+                lo_n, hi_n = node_band[i]
+                if lo_n == float("-inf"):
+                    continue
+                _apply(i, min(max(dem_elev[i], lo_n), hi_n) if lo_n <= hi_n
+                       else 0.5 * (lo_n + hi_n))
+            sloped_nodes |= nodes_c
+            tag = "SLOPED (squeezed)"
+        if _dbg:
+            print(f"[termseed] {sorted(set(node_refs.get(r, [])))} "
+                  f"n={len(nodes_c)} band[{lo:.1f},{hi:.1f}] -> {tag}")
+        n_seeded += 1
+    # Tell _build_shape_constraints which terminal vertices must GRADE (a squeezed
+    # pad) rather than stay a rigid flat pad.
+    layout._sloped_terminal_nodes = sloped_nodes  # type: ignore[attr-defined]
+    return n_seeded
 
 
 def _node_tiers(layout, bucket_to_idx, n):

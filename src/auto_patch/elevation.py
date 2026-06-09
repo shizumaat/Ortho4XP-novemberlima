@@ -2821,8 +2821,12 @@ def _report_within_shape_violations(
     rounding_allowance_m = ELEV_ROUNDING_NOISE_M
     cos0 = math.cos(math.radians(layout.anchor[0]))
     n_viol = 0
-    worst_pct = 0.0
-    worst_info: tuple[str, str, float, float, float, float] | None = None
+    # Per-shape worst violation (idx -> (pct, role, ref, ea, eb, d, de)) so the
+    # WARN can name the SPECIFIC shapeIDs that need investigation, not just the
+    # single worst pair — matching how the test (verify_and_log/check_grade)
+    # reports.  shapeID == the index into ``layout.shapes`` == the ``shapeID``
+    # tag in the emitted patch OSM.
+    per_shape: dict[int, tuple] = {}
     # Audit every role with a non-None within-shape cap — the single
     # source of truth shared with the validator (``ROLE_GRADE_LIMITS``):
     # apron / junction / terminal AND the sloping rects
@@ -2842,7 +2846,7 @@ def _report_within_shape_violations(
     # (an earlier all-pair-Euclidean model over-reported thousands of phantom
     # pairs on huge non-convex aprons, e.g. HECA 3569 vs the real count).
     from shapely.geometry import LineString as _LS
-    for s in layout.shapes:
+    for s_idx, s in enumerate(layout.shapes):
         if s.polygon is None or s.polygon.is_empty:
             continue
         cap_pct = ROLE_GRADE_LIMITS.get(s.role, TAXI_MAX_GRADE)
@@ -2884,7 +2888,7 @@ def _report_within_shape_violations(
         # JUNCTION — both can be non-convex; only pairs whose chord stays
         # inside the (buffered) polygon are real constraints.
         _vis = None
-        if s.role in (ROLE_APRON, ROLE_JUNCTION):
+        if s.role in (ROLE_APRON, ROLE_JUNCTION, ROLE_TERMINAL):
             try:
                 from shapely.geometry import Polygon as _Pg
                 from shapely.prepared import prep as _prep
@@ -2915,27 +2919,27 @@ def _report_within_shape_violations(
                 if de <= cap_pct * d + rounding_allowance_m:
                     continue
                 pct = (de / d) * 100.0
-                if pct > worst_pct:
-                    worst_pct = pct
-                    worst_info = (
-                        s.role or "?", s.ref or "",
-                        ei, elevs[j], d, de)
                 n_viol += 1
+                prev = per_shape.get(s_idx)
+                if prev is None or pct > prev[0]:
+                    per_shape[s_idx] = (
+                        pct, s.role or "?", s.ref or "", ei, elevs[j], d, de)
     if n_viol > 0:
         try:
-            import sys as _sys
             msg = (f"  [pav-builder] WARN: {icao}: {n_viol} within-shape "
-                   f"grade violations (taxi / apron / junction / rect ≤ "
-                   f"1.5 %, geodesic visibility graph, any distance — "
-                   f"matches tools/check_grade.py)")
-            if worst_info is not None:
-                role, ref, ea, eb, d, de = worst_info
-                rstr = f"/{ref}" if ref else ""
-                msg += (f"; worst {worst_pct:.1f}% on "
-                        f"{role}{rstr} ({ea:.1f} → {eb:.1f}, "
-                        f"d={d:.1f}m, de={de:.1f}m)")
-            msg += "."
+                   f"grade violation(s) over the per-role config cap "
+                   f"(ROLE_GRADE_LIMITS; geodesic visibility graph, any "
+                   f"distance — matches tools/check_grade.py / verify_and_log) "
+                   f"across {len(per_shape)} shape(s).")
             UI.vprint(1, msg)
+            # Name the specific worst shapeIDs so the user can investigate them.
+            for s_idx, (pct, role, ref, ea, eb, d, de) in sorted(
+                    per_shape.items(), key=lambda kv: -kv[1][0])[:8]:
+                rstr = f"/{ref}" if ref else ""
+                UI.vprint(1,
+                          f"  [pav-builder]   within-shape {pct:.1f}% on "
+                          f"{role}{rstr} [#{s_idx}] "
+                          f"({ea:.1f} → {eb:.1f}, d={d:.1f}m, de={de:.1f}m)")
         except _GEOM_EXC:
             pass
 

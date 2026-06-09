@@ -210,7 +210,13 @@ APRON_MAX_GRADE = 0.015         # apron / junction body, all directions (user 20
 # flat / rigid-pad code path).  Raise it (e.g. to APRON_MAX_GRADE) to let terminals
 # GRADE like aprons — they then follow terrain within the cap through the same
 # visibility-graph path as every other surface, no special case.
-TERMINAL_MAX_GRADE = 0.0
+# Terminal pads are rigid FLAT by default in the SOLVER (a building sits on one
+# floor); this value is the MAXIMUM grade a terminal MAY take when it cannot stay
+# flat — a pad squeezed between a low and a high runway must SLOPE to stay in grade
+# to both (user 2026-06-09: flatness yields to grade).  It is also the cap the
+# grade VALIDATOR (tools/check_grade.py, via ROLE_GRADE_LIMITS) holds terminals to,
+# so the test always checks whatever the config says for each role.
+TERMINAL_MAX_GRADE = APRON_MAX_GRADE
 SERVICE_ROAD_MAX_GRADE = 0.040  # ground-vehicle route (apt.dat 1206 + OSM small roads) — cars handle 4%
 # Ground-vehicle 4%-grade ``service_road`` rect geometry (session 47).
 SERVICE_ROAD_WIDTH_M = 6.0          # corridor width for a service-road rect
