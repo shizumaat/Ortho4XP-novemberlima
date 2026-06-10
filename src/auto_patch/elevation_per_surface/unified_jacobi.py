@@ -366,7 +366,8 @@ def solve(layout, icao: str,
         # the runway's length.  No-op unless a residual violation remains.
         total_iters += _relax_runway_and_resolve(
             n, elev, layout, bucket_to_idx, base_hard,
-            shape_constraints, tol_m)
+            shape_constraints, tol_m,
+            relief_eg=relief_eg, relief_el=relief_el)
         # FINAL within-shape enforcement (difference-constraint solve): drive
         # every FEASIBLE within-shape edge to <=cap against the now-settled
         # runway/seam anchors, and report the band-pinned residual (the only
@@ -1658,19 +1659,21 @@ def _runway_centerline_chain(layout, bucket_to_idx, rects):
 
 
 def _resmooth_runways_in_elev(layout, elev, bucket_to_idx, anchored_nodes,
-                              demand_ref=None, demand_lo=None,
-                              demand_hi=None):
+                              demand_lo=None,
+                              demand_hi=None, only_refs=None):
     """Re-fit every runway's centerline elevations IN ``elev`` to an FAA grade +
     vertical-curve compliant profile (``runway_segments.faa_joint_solve``),
-    anchored at ``anchored_nodes`` (thresholds + seam-pinned + flex demand-anchors).
+    anchored at ``anchored_nodes`` (thresholds + seam-pinned + crossings).
     Used after the runway-flex band solve, which is piecewise-linear and leaves
     kinks at the flex boundaries: re-smoothing turns a benign flatten (CYXY) into
-    a genuinely compliant curve, and — with the flex's new low point in
-    ``anchored_nodes`` (see ``_flex_demand_anchors``) — grades ONE smooth profile
-    threshold→low-point→threshold so a connecting taxiway can pull the runway
-    middle down (HECA 05C/23C: 104→~102) WITHOUT lowering the thresholds, instead
-    of filling the lone dip back up to terrain.  Mutates ``elev``; operates on
-    the FULL runway centerline as the 1-D path."""
+    a genuinely compliant curve.  Under the demand synthesis,
+    ``demand_lo``/``demand_hi`` carry per-node flex bounds: the envelope +
+    consistency filters prune jointly-infeasible bounds and the iterative
+    anchor loop grades ONE smooth profile threshold→demand→threshold so a
+    connecting taxiway can pull the runway middle down/up WITHOUT moving the
+    thresholds, instead of the solve filling the dip back toward terrain.
+    ``only_refs`` restricts to those runway refs (sequential per-ref commits).
+    Mutates ``elev``; operates on the FULL runway centerline as the 1-D path."""
     from auto_patch.pavement.runway_segments import faa_joint_solve
     by_ref: dict = {}
     for s in layout.shapes:
@@ -1680,39 +1683,34 @@ def _resmooth_runways_in_elev(layout, elev, bucket_to_idx, anchored_nodes,
         if len(cs) == 4:
             by_ref.setdefault(s.ref or "", []).append(cs)
     for ref_key, rects in by_ref.items():
+        if only_refs is not None and ref_key not in only_refs:
+            continue
         positions, L = _runway_centerline_chain(layout, bucket_to_idx, rects)
         if not positions or len(positions) < 3 or L <= 0:
             continue
+        if demand_lo is not None:
+            # MERGE sub-5 m stations (junction-cut slivers — the same
+            # class check_runway_profile merges): with interior demand
+            # anchors in play, ``faa_rate_of_change_pass`` computes
+            # grades over the 2 m pair and its anchored-neighbour
+            # displacement spirals (measured: stations at d=1099/1101
+            # solved to 28.85 between 71/67 anchors).  Demand-path only,
+            # so the gate-off profile is untouched.
+            mpos: list = []
+            for p in positions:
+                if mpos and p["d"] - mpos[-1]["d"] < 5.0:
+                    prev = mpos[-1]
+                    prev["idxs"] = list(prev["idxs"]) + list(p["idxs"])
+                    prev["d"] = (prev["d"] + p["d"]) / 2.0
+                else:
+                    mpos.append(dict(p))
+            if len(mpos) >= 3:
+                positions = mpos
         fractions = [p["d"] / L for p in positions]
         elevs = [sum(elev[i] for i in p["idxs"]) / len(p["idxs"])
                  for p in positions]
         anchored = [any(i in anchored_nodes for i in p["idxs"])
                     for p in positions]
-        # DEMAND ANCHOR (re-hosted from s64's _flex_demand_anchors,
-        # removed in s67; regressed for LOCAL single-connection demands
-        # — Phase-0 2026-06-09 measured the re-smooth UNDOING the band
-        # solve's settled profile, pavement violations 57→137): anchor
-        # the ONE interior point per runway the band solve displaced
-        # the most from its pre-flex profile (``demand_ref``), so
-        # ``faa_joint_solve`` grades threshold→demand-point→threshold
-        # instead of filling the lone dip/rise back toward terrain.
-        # Only the WORST point — anchoring shallow secondary dips pins
-        # the runway high and reverts (s64 lesson).  Direction-agnostic
-        # (symmetric flex, user 2026-06-09).
-        if demand_ref is not None:
-            best_k = -1
-            best_dev = 0.05            # ignore sub-5 cm noise
-            for k, p in enumerate(positions):
-                if anchored[k]:
-                    continue
-                dev = abs(
-                    sum(elev[i] - demand_ref[i] for i in p["idxs"])
-                    / len(p["idxs"]))
-                if dev > best_dev:
-                    best_dev = dev
-                    best_k = k
-            if best_k >= 0:
-                anchored[best_k] = True
         if not any(anchored):
             anchored[0] = anchored[-1] = True       # fallback: pin the ends
         # NO flat-seed: preserve the runway's settled (incoming) profile and let
@@ -1749,23 +1747,77 @@ def _resmooth_runways_in_elev(layout, elev, bucket_to_idx, anchored_nodes,
             # intersect [anchor ∓ 1.5 %·distance] from every initially
             # anchored station; intersect the survivors.
             cap_r = _role_grade(ROLE_RUNWAY)
+
+            def _pair_slack(fa, fb):
+                """Max |Δelev| the FAA caps allow between two stations:
+                0.8 % (RUNWAY_END_GRADE) over the portion of the span in
+                the first/last RUNWAY_END_FRACTION, 1.5 % over the rest.
+                Using the uniform cap accepted end-region anchors the
+                solve could not legalise (05L 1.56 % at d=2963)."""
+                a, b = sorted((fa * L, fb * L))
+                end = RUNWAY_END_FRACTION * L
+                o_lo = max(0.0, min(b, end) - min(a, end))
+                o_hi = max(0.0, max(b, L - end) - max(a, L - end))
+                mid = max(0.0, (b - a) - o_lo - o_hi)
+                return RUNWAY_END_GRADE * (o_lo + o_hi) + cap_r * mid
+
             anch0 = [k for k in range(len(positions)) if anchored[k]]
             for k in range(len(positions)):
                 env_lo = float("-inf")
                 env_hi = float("inf")
                 for j in anch0:
-                    dd = abs(fractions[k] - fractions[j]) * L
-                    if elevs[j] - cap_r * dd > env_lo:
-                        env_lo = elevs[j] - cap_r * dd
-                    if elevs[j] + cap_r * dd < env_hi:
-                        env_hi = elevs[j] + cap_r * dd
+                    sl = _pair_slack(fractions[k], fractions[j])
+                    if elevs[j] - sl > env_lo:
+                        env_lo = elevs[j] - sl
+                    if elevs[j] + sl < env_hi:
+                        env_hi = elevs[j] + sl
                 if st_lo[k] > env_hi or st_hi[k] < env_lo:
                     st_lo[k] = float("-inf")     # conflict: leave free
                     st_hi[k] = float("inf")
                 else:
                     st_lo[k] = max(st_lo[k], env_lo)
                     st_hi[k] = min(st_hi[k], env_hi)
-        for _round in range(8):
+            # PAIRWISE CONSISTENCY (2026-06-10): a rise FLOOR at one
+            # station and a dip CEILING at another that cannot both hold
+            # at the runway cap along the chain (HECA 05C: floor 118.1
+            # from the 05R network two metres from a 113.2 ceiling from
+            # the T4 chain) would otherwise each be anchored in turn —
+            # forcing a wall no FAA fit can legalise (measured 255 %
+            # adj-grade, the whole flex then reverts).  Resolve by demand
+            # DEPTH vs the incoming profile: the DEEPER demand carries
+            # the larger committed tension and survives; the shallower
+            # side returns to the pavement (the relief re-run pushes it
+            # outward to whatever can yield).  Iterate until stable —
+            # dropping one bound can clear a chain of conflicts.
+            dep_lo = [(st_lo[k] - elevs[k]
+                       if st_lo[k] > float("-inf") else 0.0)
+                      for k in range(len(positions))]
+            dep_hi = [(elevs[k] - st_hi[k]
+                       if st_hi[k] < float("inf") else 0.0)
+                      for k in range(len(positions))]
+            changed = True
+            while changed:
+                changed = False
+                for ka in range(len(positions)):
+                    if dep_lo[ka] <= 0.05:
+                        continue
+                    for kb in range(len(positions)):
+                        if dep_hi[kb] <= 0.05:
+                            continue
+                        if (st_lo[ka] - st_hi[kb]
+                                <= _pair_slack(fractions[ka],
+                                               fractions[kb]) + 0.01):
+                            continue
+                        if dep_lo[ka] < dep_hi[kb]:
+                            st_lo[ka] = float("-inf")
+                            dep_lo[ka] = 0.0
+                        else:
+                            st_hi[kb] = float("inf")
+                            dep_hi[kb] = 0.0
+                        changed = True
+        _dbg_rs = _os.environ.get("O4_FLEX_DEBUG") == "1" and st_lo is not None
+        banned: set = set()
+        for _round in range(12):
             faa_joint_solve(fractions, elevs, anchored, L,
                             end_grade_cap=RUNWAY_END_GRADE,
                             end_fraction=RUNWAY_END_FRACTION)
@@ -1774,7 +1826,7 @@ def _resmooth_runways_in_elev(layout, elev, bucket_to_idx, anchored_nodes,
             worst_k = -1
             worst_ex = 0.05
             for k in range(len(positions)):
-                if anchored[k]:
+                if anchored[k] or k in banned:
                     continue
                 if st_lo[k] > st_hi[k]:
                     continue               # infeasible station: leave free
@@ -1784,9 +1836,48 @@ def _resmooth_runways_in_elev(layout, elev, bucket_to_idx, anchored_nodes,
                     worst_k = k
             if worst_k < 0:
                 break
-            elevs[worst_k] = min(max(elevs[worst_k], st_lo[worst_k]),
-                                 st_hi[worst_k])
+            # ANCHOR-CONSISTENCY GUARD: the clamped value must be cap-
+            # reachable from EVERY existing anchor (the envelope filter
+            # only checked the INITIAL anchors — an anchor added in an
+            # earlier round can make a later bound jointly infeasible).
+            v = min(max(elevs[worst_k], st_lo[worst_k]), st_hi[worst_k])
+            ok = True
+            for j in range(len(positions)):
+                if not anchored[j]:
+                    continue
+                if (abs(v - elevs[j])
+                        > _pair_slack(fractions[worst_k],
+                                      fractions[j]) + 0.02):
+                    ok = False
+                    break
+            if not ok:
+                banned.add(worst_k)
+                if _dbg_rs:
+                    print(f"[flex]   resmooth {ref_key} r{_round}: BAN "
+                          f"st{worst_k} d={positions[worst_k]['d']:.0f} "
+                          f"bound [{st_lo[worst_k]:.2f},"
+                          f"{st_hi[worst_k]:.2f}] vs anchors")
+                continue
+            if _dbg_rs:
+                print(f"[flex]   resmooth {ref_key} r{_round}: anchor "
+                      f"st{worst_k} d={positions[worst_k]['d']:.0f} "
+                      f"elev {elevs[worst_k]:.2f} -> bound "
+                      f"[{st_lo[worst_k]:.2f},{st_hi[worst_k]:.2f}]")
+            elevs[worst_k] = v
             anchored[worst_k] = True
+        if _dbg_rs:
+            wg, wk = 0.0, -1
+            for k in range(1, len(positions)):
+                dd = positions[k]["d"] - positions[k - 1]["d"]
+                if dd > 1e-6:
+                    g = abs(elevs[k] - elevs[k - 1]) / dd
+                    if g > wg:
+                        wg, wk = g, k
+            if wk >= 0:
+                print(f"[flex]   resmooth {ref_key} final: worst "
+                      f"adj-grade {wg*100:.2f}% at d="
+                      f"{positions[wk]['d']:.0f} "
+                      f"({elevs[wk-1]:.2f}->{elevs[wk]:.2f})")
         for p, e in zip(positions, elevs):
             for i in p["idxs"]:
                 if i not in anchored_nodes:
@@ -1962,11 +2053,13 @@ def _flex_route_bands(layout, elev, bucket_to_idx, free_nodes,
     if not pos or not anchor_pts:
         return {}
     bands: dict = {}
+    _dbg_band = _os.environ.get("O4_FLEX_BAND_DEBUG") == "1"
     for i, (x, y) in pos.items():
         dm, sg = G.distances_from((x, y))
         if dm is None:
             continue
         lo_i, hi_i = float("-inf"), float("inf")
+        lo_a = hi_a = None
         for akey, agap, ae in anchor_pts:
             d = dm.get(akey)
             if d is None:
@@ -1974,15 +2067,29 @@ def _flex_route_bands(layout, elev, bucket_to_idx, free_nodes,
             slack = cap * (d + sg + agap)
             if ae - slack > lo_i:
                 lo_i = ae - slack
+                lo_a = (akey, d, ae)
             if ae + slack < hi_i:
                 hi_i = ae + slack
+                hi_a = (akey, d, ae)
         if lo_i > float("-inf") or hi_i < float("inf"):
             bands[i] = (lo_i, hi_i)
+            if _dbg_band:
+                def _fmt(a):
+                    if a is None:
+                        return "-"
+                    akey, d, ae = a
+                    pt = G.coord.get(akey)
+                    return (f"e={ae:.1f}@d={d:.0f}m"
+                            f"({pt[0]:.0f},{pt[1]:.0f})")
+                print(f"[band] n{i} ({x:.0f},{y:.0f}) "
+                      f"lo={lo_i:.2f}<-{_fmt(lo_a)} "
+                      f"hi={hi_i:.2f}<-{_fmt(hi_a)}")
     return bands
 
 
 def _relax_runway_and_resolve(n, elev, layout, bucket_to_idx, base_hard,
-                              shape_constraints, tol_m) -> int:
+                              shape_constraints, tol_m,
+                              relief_eg=None, relief_el=None) -> int:
     """Third pass (user 2026-05-28): if a within-shape grade violation remains
     after the reverse pass, free part of the runway and re-run the difference-
     constraint band solve over the combined pavement + runway grade graph so an
@@ -2060,6 +2167,14 @@ def _relax_runway_and_resolve(n, elev, layout, bucket_to_idx, base_hard,
     rwy_g0, rwy_curv0 = _runway_profile_compliance(
         layout, snapshot0, bucket_to_idx)
     _dbg = _os.environ.get("O4_FLEX_DEBUG") == "1"
+    # FLEX DEMAND SYNTHESIS gate (s68-close design).  Only when the airport
+    # has NO runway-runway crossings (interim guard, 2026-06-09): with a
+    # crossing, anchoring the flexed second runway COMMITS the dormant
+    # crossing-anchor injection bug (s65 OPEN — the agreed E_x never lands in
+    # the second runway's profile; CYXY 14L/32R floats to 695.9 vs 02/20's
+    # 693.7).  Lift this guard when the injection fix lands in runway_segments.
+    _clamp_on = (not crossing
+                 and _os.environ.get("O4_FLEX_MIN_CLAMP") == "1")
     if _dbg:
         print(f"[flex] seam_pinned={len(seam_pinned)} "
               f"seam_keys={len(getattr(layout, '_seam_anchor_keys', None) or [])} "
@@ -2079,15 +2194,26 @@ def _relax_runway_and_resolve(n, elev, layout, bucket_to_idx, base_hard,
         #     level) and the pavement, solve the combined grade bands.  When the
         #     thresholds are freed this lets the runway TILT to the hard seam
         #     anchor (seam > CIFP) — the tilt must NOT be undone.
-        lo, hi = _grade_bands(n, elev, is_hard2, all_edges)
-        sweeps, _viol = _project_within_bands(
-            elev, all_edges, is_hard2, lo, hi, coupling,
-            held_extra=terminal_nodes, max_sweeps=1000, tol=comply)
-        sweeps_total += sweeps
-        if _os.environ.get("O4_FLEX_DEBUG") == "1":
-            wa, ca, _ta = _within_excess_stats(elev, pav_edges, comply)
-            print(f"[flex]  level{_li} after combined-band (a): "
-                  f"pav within c={ca} worst={wa:.3f}")
+        if _clamp_on and not thr_freed:
+            # DEMAND-SYNTHESIS path: the (a) settle is SKIPPED.  Demands are
+            # measured at the held-runway saturation state — which is exactly
+            # ``snapshot0`` (steps 1-2 ran with every runway node hard), and
+            # the level restart above just reset ``elev`` to it.  Running (a)
+            # here would only manufacture the chord-graph over-dip the
+            # synthesis exists to replace (terminal7→05C reads ~2,030 m on
+            # the constraint graph where the real route is ~3,100 m → false
+            # 102.1 demand).
+            pass
+        else:
+            lo, hi = _grade_bands(n, elev, is_hard2, all_edges)
+            sweeps, _viol = _project_within_bands(
+                elev, all_edges, is_hard2, lo, hi, coupling,
+                held_extra=terminal_nodes, max_sweeps=1000, tol=comply)
+            sweeps_total += sweeps
+            if _os.environ.get("O4_FLEX_DEBUG") == "1":
+                wa, ca, _ta = _within_excess_stats(elev, pav_edges, comply)
+                print(f"[flex]  level{_li} after combined-band (a): "
+                      f"pav within c={ca} worst={wa:.3f}")
         if not thr_freed:
             # INTERIOR flex (thresholds locked at CIFP).  The combined band
             # solve in (a) settles the runway toward the connecting demand,
@@ -2107,46 +2233,37 @@ def _relax_runway_and_resolve(n, elev, layout, bucket_to_idx, base_hard,
             # anchors the edge-graph chord-cuts junctions / shortcuts
             # aprons and manufactures false demand (05C hi=102.1 via a
             # 2,030 m chain where the real route allows ~108+).
-            # ⛔ GATED OFF (O4_FLEX_MIN_CLAMP=1 to experiment): the
-            # minimal-flex clamp + demand anchor are DISABLED until the
-            # route-band bound can reach the runway THRESHOLDS.  Findings
-            # (2026-06-09, all measured): (1) the (a) band solve OVER-DIPS
-            # — its geodesic/chord edge graph under-counts distance
-            # (terminal7→05C reads ~2,030 m where the real route is
-            # ~3,100 m) so it manufactures false demand (05C → 102.1);
-            # (2) the demand anchor then LOCKS the false demand through
-            # the re-smooth (the re-smooth's partial refill previously
-            # hid ~2 m of it → 104.3); (3) clamping against geodesic
-            # bands is circular (settled pavement pins the runway where
-            # it is) and clamping against route bands from terminals+
-            # thresholds found NO sub-flat bound — the taxi-route graph
-            # (apt_taxi_centerlines) does not reach the threshold ring
-            # corners, so the 05L-route demand (60.7 + 1.5 %·~3.2 km ≈
-            # 108.5, the CORRECT T4 dip) never forms.  NEXT: include the
-            # runway centerline rows in the route graph (or anchor at
-            # other-runway CONNECTION nodes with their own threshold
-            # envelope composed), then re-enable.
-            lo_b: dict = {}
-            hi_b: dict = {}
-            if _os.environ.get("O4_FLEX_MIN_CLAMP") == "1":
-                # PER-RUNWAY ROUTE-BAND FLEX (user-directed 2026-06-09):
-                # runway reachability is measured along the taxiway
-                # ROUTE (s65/s66 doctrine) — NOT the constraint-graph
-                # chains (their cross-apron geodesic hops are the
-                # measurement-artifact class the doctrine rejects).
-                # Reset the freed runways to the pre-flex profile, then
-                # per runway: route-band bounds from {held terminals +
-                # ALL thresholds + OTHER runways' pavement contacts at
-                # current values}, own centerline excluded (no
-                # fictitious 1.5 % rise-corridor), clamp toward the
-                # pre-flex profile within the band.  Sequential refs:
-                # each committed runway anchors the next (Exit-3's pin
-                # chains through L to the 05C network — visible to 05R
-                # only with 05C's contacts as anchors).
+            # FLEX DEMAND SYNTHESIS (s68-close design, gated
+            # O4_FLEX_MIN_CLAMP=1): per-runway demand at each PAVEMENT
+            # CONTACT = min(contact-edge EXCESS at the held-runway
+            # saturation state, ROUTE-BAND justified depth).
+            #   - The excess term is the user model verbatim (pavement
+            #     grades to max FIRST, then the runway flexes the minimum
+            #     so every junction meets it), expressed as a BAND: the
+            #     directional relief pushes violations OUTWARD, so at
+            #     ``snapshot0`` the contact EDGE itself reads compliant
+            #     and the saturation sits deeper in the network — the
+            #     demand is the gap between the runway's profile and the
+            #     pavement network's own feasible band at the contact
+            #     (``_grade_bands`` over the pavement edges with the
+            #     flexing runway UNPINNED).  This term sees PAVEMENT-
+            #     INTERNAL pins (Exit-3's 0.9 m via the #207↔L chain to a
+            #     held 05C contact) that route-to-anchor bounds cannot.
+            #   - The route-band term caps the MAGNITUDE per the s65/s66
+            #     doctrine: when a real taxi route to a hard anchor itself
+            #     justifies a flex at the contact, take the SHALLOWER of
+            #     the two depths — saturated excess beyond the band is the
+            #     geodesic-chord measurement-artifact class (T4 dips to
+            #     ~108.5, the 05L-route level, never the chord ~104).
+            #     When the band has no opinion (Exit-3), the local contact
+            #     excess stands alone — a single edge cannot chord-cut.
+            # Bounds are applied ONLY through the bounded re-smooth below
+            # (threshold-envelope filter + iterative anchor addition); raw
+            # clamping lifted 05L to a 7.3 % wall 30 m from its locked
+            # threshold (within 41→176).
+            if _clamp_on:
                 _dbg2 = _os.environ.get("O4_FLEX_DEBUG") == "1"
                 soft_set = set(soft)
-                for i in soft:
-                    elev[i] = snapshot0[i]
                 ref_nodes: dict = {}
                 for s in layout.shapes:
                     if (s.role != ROLE_RUNWAY or s.polygon is None
@@ -2160,65 +2277,181 @@ def _relax_runway_and_resolve(n, elev, layout, bucket_to_idx, base_hard,
                                 float(x), float(y)))
                         if idx is not None and idx in soft_set:
                             ref_nodes.setdefault(rr, set()).add(idx)
+                pav_node_set: set = set()
+                for sc in shape_constraints:
+                    pav_node_set.update(sc["nodes"])
+                # CHAIN graph for term 1 = pavement edges WITHOUT the
+                # apron shapes' visibility chords: a runway-demand chain
+                # that rides ACROSS an apron interior is the s66
+                # measurement-artifact class (05L read +10.5 m floors
+                # from cross-apron chains where the real route needs
+                # none).  Taxiway-rect/junction/stub chains stay — they
+                # are the carrier of pavement-internal pins the route
+                # graph cannot see (Exit-3 via #207↔L).
+                pav_edges_t1 = [e for sc in shape_constraints
+                                if sc["role"] != ROLE_APRON
+                                for e in sc["edges"]]
+
+                def _ref_demands(rr):
+                    """(all_contacts, rise_d, dip_d) for runway ``rr`` at
+                    the CURRENT ``elev`` (committed refs included).
+
+                    Saturation demand (term 1, the CHAIN measure): the
+                    apron-free pavement network's feasible band at the
+                    contact, anchored at {held terminal seeds +
+                    thresholds/seam + the OTHER runways' nodes at
+                    current values}, the flexing runway's own soft nodes
+                    UNPINNED.  A band ceiling below the runway's profile
+                    means every rect/junction path from the contact to
+                    some anchor is saturated at cap — "pavement graded
+                    to max first"; the residual gap is the runway's to
+                    flex.
+                    """
+                    own = ref_nodes[rr]
+                    all_contacts = {i for i in own if i in pav_node_set}
+                    if not all_contacts:
+                        return all_contacts, {}, {}
+                    is_hard_p = list(base_hard)
+                    for i in terminal_nodes:
+                        is_hard_p[i] = True
+                    for i in rwy_node_set - own:
+                        is_hard_p[i] = True
+                    lo_p, hi_p = _grade_bands(n, elev, is_hard_p,
+                                              pav_edges_t1)
+                    rise_d: dict = {}
+                    dip_d: dict = {}
+                    for i in all_contacts:
+                        s0 = snapshot0[i]
+                        if s0 - hi_p[i] > 0.05:       # 5 cm noise floor
+                            dip_d[i] = s0 - hi_p[i]
+                        elif lo_p[i] - s0 > 0.05:
+                            rise_d[i] = lo_p[i] - s0
+                    return all_contacts, rise_d, dip_d
+
+                # SEQUENTIAL per-ref commit, DEEPEST demand first: each
+                # committed runway anchors the next ref's measurement
+                # (05C must dip to ~108.5 BEFORE 05L's bands are read, or
+                # 05L sees the unflexed 110-116 contacts as anchors and
+                # manufactures an inflated rise).  Order by the max
+                # demand depth measured against the pre-flex state.
+                depth0: dict = {}
                 for rr in sorted(ref_nodes):
-                    bands = _flex_route_bands(
-                        layout, elev, bucket_to_idx, ref_nodes[rr],
-                        thresh, terminal_nodes, TAXI_MAX_GRADE,
-                        flex_ref=rr)
-                    # NO raw per-node clamp here: bounds are applied
-                    # ONLY through the bounded re-smooth, which runs
-                    # the threshold-envelope filter and the iterative
-                    # anchor loop.  Clamping directly lifted 05L to
-                    # 62.9 just 30 m from its locked 60.7 threshold —
-                    # a 7.3 % wall no FAA fit can legalise (within
-                    # 41→176).
-                    n_demand = 0
-                    for i, (lo_i, hi_i) in bands.items():
-                        if lo_i > hi_i:
-                            continue       # infeasible: leave unbound
-                        lo_b[i] = lo_i
-                        hi_b[i] = hi_i
-                        if (snapshot0[i] < lo_i - 0.05
-                                or snapshot0[i] > hi_i + 0.05):
-                            n_demand += 1
-                    if _dbg2:
-                        print(f"[flex]  route-flex {rr}: "
-                              f"{len(bands)}/{len(ref_nodes[rr])} "
-                              f"bounded, {n_demand} demand pre-flex "
-                              f"profile to move")
-            # (no in-block re-grade: the bounded re-smooth below produces
-            # the final profile; the hard3 re-grade after it brings the
-            # pavement to that profile in one pass.)
-            # Re-smooth to fold in the FAA vertical-curve / end-grade the
-            # band solve doesn't model, anchored at the locked thresholds
-            # plus the per-runway DEMAND point (the clamped profile's
-            # worst-displaced node — now the true minimal demand).
-            # Demand anchor only when the airport has NO runway-runway
-            # crossings (interim guard, 2026-06-09): with a crossing,
-            # anchoring the flexed second runway COMMITS the dormant
-            # crossing-anchor injection bug (s65 OPEN #1 — the agreed
-            # E_x never lands in the second runway's profile; CYXY
-            # 14L/32R floats to 695.9 vs 02/20's 693.7, 10 cross
-            # violations at the shared corners).  Lift this guard when
-            # the injection fix lands in runway_segments.
-            _clamp_on = (not crossing and
-                         _os.environ.get("O4_FLEX_MIN_CLAMP") == "1")
-            _resmooth_runways_in_elev(
-                layout, elev, bucket_to_idx,
-                thresh | seam_pinned | crossing,
-                demand_ref=(snapshot0 if _clamp_on else None),
-                demand_lo=(lo_b if _clamp_on else None),
-                demand_hi=(hi_b if _clamp_on else None))
+                    _c, r_d, d_d = _ref_demands(rr)
+                    depth0[rr] = max([*r_d.values(), *d_d.values()],
+                                     default=0.0)
+                for rr in sorted(ref_nodes,
+                                 key=lambda r: -depth0[r]):
+                    all_contacts, rise_d, dip_d = _ref_demands(rr)
+                    lo_b: dict = {}
+                    hi_b: dict = {}
+                    contacts = all_contacts
+                    if contacts:
+                        # Route bands at EVERY contact (term 2): anchors
+                        # = held terminals + ALL thresholds + OTHER
+                        # runways' pavement contacts at current values,
+                        # own centerline excluded (no fictitious 1.5 %
+                        # rise-corridor).  The demand depth = min over
+                        # the opinions that EXIST: the chain (term 1)
+                        # carries pavement-internal pins the route
+                        # cannot see (Exit-3); the route carries apron-
+                        # borne demand the apron-free chain cannot see
+                        # (T4) and CAPS the chain where both measure
+                        # (route bands are authoritative, user
+                        # 2026-06-09).  A one-sided "no demand" from
+                        # either measure is absence of evidence, not a
+                        # veto — bands are upper/lower bounds, not
+                        # assertions the other path's demand is false.
+                        bands = _flex_route_bands(
+                            layout, elev, bucket_to_idx, contacts,
+                            thresh, terminal_nodes, TAXI_MAX_GRADE,
+                            flex_ref=rr)
+                        n_dip = n_rise = 0
+                        for i in contacts:
+                            in_band = (i in bands
+                                       and bands[i][0] <= bands[i][1])
+                            blo, bhi = (bands[i] if in_band
+                                        else (float("-inf"),
+                                              float("inf")))
+                            s0 = snapshot0[i]
+                            cands_r = [d for d in (
+                                rise_d.get(i),
+                                (blo - s0) if in_band else None)
+                                if d is not None and d > 0.05]
+                            if cands_r:
+                                lo_b[i] = min(s0 + min(cands_r), bhi)
+                                n_rise += 1
+                            cands_d = [d for d in (
+                                dip_d.get(i),
+                                (s0 - bhi) if in_band else None)
+                                if d is not None and d > 0.05]
+                            if cands_d:
+                                hi_b[i] = max(s0 - min(cands_d), blo)
+                                n_dip += 1
+                            if _dbg2:
+                                xy = next(
+                                    ((x, y) for s2 in layout.shapes
+                                     if s2.role == ROLE_RUNWAY
+                                     and (s2.ref or "") == rr
+                                     and s2.polygon is not None
+                                     for (x, y) in _open_ring(list(
+                                         s2.polygon.exterior.coords))
+                                     if bucket_to_idx.get(
+                                         layout.canonical_points
+                                         .get_or_add(float(x), float(y)))
+                                     == i), None)
+                                print(
+                                    f"[flex]   contact {rr} n{i} "
+                                    f"xy={xy} s0={snapshot0[i]:.2f} "
+                                    f"t1=(r{rise_d.get(i, 0):.2f}/"
+                                    f"d{dip_d.get(i, 0):.2f}) "
+                                    f"t2=[{blo:.2f},{bhi:.2f}] -> "
+                                    f"lo={lo_b.get(i)} hi={hi_b.get(i)}")
+                        if _dbg2:
+                            print(f"[flex]  demand-synth {rr}: "
+                                  f"{len(contacts)} demand contacts "
+                                  f"({n_dip} dip / {n_rise} rise), "
+                                  f"{len(bands)} route-banded")
+                    # Bounded re-smooth of THIS ref only (envelope
+                    # filter + pairwise consistency + iterative anchor
+                    # loop); its committed stations then anchor the
+                    # next ref's demand measurement.
+                    _resmooth_runways_in_elev(
+                        layout, elev, bucket_to_idx,
+                        thresh | seam_pinned | crossing,
+                        demand_lo=lo_b, demand_hi=hi_b,
+                        only_refs={rr})
+            else:
+                # (no in-block re-grade: the re-smooth produces the final
+                # profile; the hard3 re-grade after it brings the
+                # pavement to that profile in one pass.)
+                # Re-smooth to fold in the FAA vertical-curve / end-grade
+                # the band solve doesn't model, anchored at the locked
+                # thresholds.
+                _resmooth_runways_in_elev(
+                    layout, elev, bucket_to_idx,
+                    thresh | seam_pinned | crossing)
             # Re-grade the pavement against the smoothed, HELD runway: hold the
             # WHOLE runway so the band solve cannot re-pull its interior down
             # toward low aprons (which would undo the flat profile).
             hard3 = list(base_hard)
             for i in rwy_node_set:
                 hard3[i] = True
-            lo3, hi3 = _grade_bands(n, elev, hard3, all_edges)
-            sweeps3, _v3 = _project_within_bands(
-                elev, all_edges, hard3, lo3, hi3, coupling,
-                held_extra=terminal_nodes, max_sweeps=1000, tol=comply)
+            if _clamp_on and relief_eg:
+                # FULL relief re-run against the committed profile (s68
+                # measured: ONE band re-grade cannot redistribute 3-6 m
+                # profile moves through the network — within 41→167; the
+                # outward shape-cascade can).  Pavement is still at the
+                # saturation state (only runway stations moved above), so
+                # this is exactly STEP 2 re-run with the flexed runway as
+                # the hard anchor set; terminals stay held at their seeds.
+                sweeps3 = _directional_relief(
+                    n, elev, hard3, relief_eg, relief_el,
+                    shape_constraints, _RELIEF_MAX_ITERS, tol_m)
+            else:
+                lo3, hi3 = _grade_bands(n, elev, hard3, all_edges)
+                sweeps3, _v3 = _project_within_bands(
+                    elev, all_edges, hard3, lo3, hi3, coupling,
+                    held_extra=terminal_nodes, max_sweeps=1000, tol=comply)
             sweeps_total += sweeps3
             w1, c1, t1 = _within_excess_stats(elev, pav_edges, comply)
             rwy_g1, rwy_curv1 = _runway_profile_compliance(
