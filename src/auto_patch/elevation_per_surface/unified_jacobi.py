@@ -2999,6 +2999,20 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                     rwy_nodes.add(i)
                     rwy_ref_of[i] = s.ref or ""
 
+    # Free-APRON ring nodes: a chain terminus whose mouth opens into an
+    # apron (no junction, no rect — ``junc=None``) anchors at the apron's
+    # DEM-settled edge value.  That anchor must not VETO the tie network
+    # (HECA taxiway A #25: apron-mouth anchor 64.7 froze-out the A5-complex
+    # consensus 61.8 and held the 63.3-vs-60.7 junction cliff) — the apron
+    # is free pavement that re-grades toward the corridor in the relief
+    # re-run, so the corridor profile is the route truth at the seam.
+    apron_nodes: set = set()
+    for s in layout.shapes:
+        if (s.role == ROLE_APRON and s.polygon is not None
+                and not s.polygon.is_empty):
+            _r, _i = _ring_idxs(s)
+            apron_nodes.update(i for i in _i if i is not None)
+
     # ── junctions first (mouth detection is connectivity-driven)
     juncs: list = []
     for s in layout.shapes:
@@ -3346,6 +3360,14 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                 merged_any = True
     chains = [c for c in chains if c is not None]
     if _os.environ.get("O4_CORRIDOR_DEBUG") == "1":
+        for c in chains:
+            if len(c) >= 2:
+                refs9 = [(rects[ri]["shape"].ref or "?") for (ri, _n, _f) in c]
+                hm = rects[c[0][0]]["mouths"][c[0][1]]
+                tm = rects[c[-1][0]]["mouths"][c[-1][2]]
+                print(f"[corr] chain-ends {refs9} "
+                      f"head junc={hm['junc']} mid={tuple(round(v) for v in hm['mid'])} "
+                      f"tail junc={tm['junc']} mid={tuple(round(v) for v in tm['mid'])}")
         for c in chains:
             if len(c) == 1:
                 ri = c[0][0]
@@ -4437,6 +4459,55 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                      <= TAXI_MAX_GRADE * abs(sts[k]["d"] - sts[j]["d"])
                      + 0.05
                      for j in range(len(sts)) if cd["anchored"][j])
+            if not ok:
+                # APRON-MOUTH TERMINUS RELAX: when every blocking anchor
+                # is a non-hard, UNTIED terminus whose mouth opens into a
+                # free apron (junc=None, ring nodes shared with an apron),
+                # project it MINIMALLY into the tie's cap-reach and
+                # accept the tie — the apron edge re-grades to meet the
+                # moved terminus in the relief re-run.  The anchor is the
+                # apron edge's DEM-settled value: per the model it is a
+                # STARTING point, not a demand — it must not VETO the
+                # consensus the route data supports (HECA #25's mouth:
+                # route ceiling 62.4 at the junction side, tie 61.76,
+                # apron anchor 64.67 froze-out everything).  ★ Projection,
+                # NOT un-anchoring: dropping the anchor lets the flat
+                # extension fall all the way to the tie value — HECA J's
+                # tail was 0.33 m infeasible and fell 4.7 m (68.1→63.4),
+                # a manufactured wall against G2's legitimate 68.7-70.9
+                # writes in the same apron.  The minimal move keeps the
+                # apron-edge level authoritative up to cap feasibility.
+                blockers = [
+                    j for j in range(len(sts))
+                    if cd["anchored"][j]
+                    and abs(v - cd["elevs"][j])
+                    > TAXI_MAX_GRADE * abs(sts[k]["d"] - sts[j]["d"])
+                    + 0.05]
+                if blockers and all(
+                        not cd["hard"][j]
+                        and j in (0, len(sts) - 1)
+                        and (ci, j) not in root_of
+                        and sts[j].get("junc") is None
+                        and not sts[j].get("virtual")
+                        and not (sts[j]["nodes"] & rwy_nodes)
+                        and (sts[j]["nodes"] & apron_nodes)
+                        for j in blockers):
+                    dbg8 = _os.environ.get("O4_CORRIDOR_DEBUG") == "1"
+                    for j in blockers:
+                        lim8 = (TAXI_MAX_GRADE
+                                * abs(sts[k]["d"] - sts[j]["d"]) + 0.05)
+                        new8 = min(max(cd["elevs"][j], v - lim8),
+                                   v + lim8)
+                        if dbg8:
+                            refs8 = sorted({rects[ri]["shape"].ref or "?"
+                                            for (ri, _n, _f)
+                                            in cd["chain"]})
+                            print(f"[corr]   relax apron-mouth terminus "
+                                  f"chain={refs8} d={sts[j]['d']:.0f} "
+                                  f"e={cd['elevs'][j]:.2f} -> {new8:.2f} "
+                                  f"(tie v={v:.2f}@d={sts[k]['d']:.0f})")
+                        cd["elevs"][j] = new8
+                    ok = True
             if ok:
                 cd["elevs"][k] = v
                 cd["anchored"][k] = True
