@@ -1,5 +1,32 @@
 # Auto-Patch Status — session 73 = FLEX SYNTHESIS + SLOPING TERMINALS + JUNCTION VISIBILITY + DEADBAND LIVE; CORRIDOR-PROFILE PASS BUILT (gated OFF → #3)
 
+## ★★ SESSION 73 PART 5 (2026-06-10) — dev `c61ba6e`: ROUTE-FIELD #3 PIECES BUILT (gated) ★★
+User ratified the full surface model: rects slope in ONE direction; junction
+arms TWIST from flat mouth cross-sections to the max COMPOUND slope at the
+center and back out; DEM = starting point, correct grade is king.  Built into
+`_taxi_corridor_profiles` (still `TAXI_CORRIDOR_PROFILE=False`):
+1. **Route-band threading** — per-station bands from `_runway_reach_bands`
+   (taxi-route Dijkstra from runway anchors; seam intersect TODO); flat seed
+   clamped into bands + iterative worst-violation anchoring with a taxi-cap
+   consistency guard (the runway bounded-re-smooth pattern ported).
+2. **Junction TWIST pass** — crossed junctions' vertices blend crossing
+   corridors' profiles (line sources) + mouth station values (point sources)
+   by inverse-square lateral distance; weighted-variance DISAGREEMENT GUARD
+   skips genuinely conflicting vertices (leaves them to the enforce).
+3. Cross-ref merges restricted to stub/wide-short bridges (T4→U class).
+**MEASURED (HECA, gate on): T monotone through -10292 ✓, T4+U+U ~2 % ✓,
+#291 internal 64 %→25 %, runways unchanged.  REMAINING BLOCKER: independent
+same-ref chains disagree at SHARED junctions (#217 3.9 m / 49 % — every
+chain flat-seeds between its OWN termini, no joint consistency; crossing
+reconciliation is sequential, not simultaneous), within 552, and gate-on
+flips CYXY's grade gate RED → default stays OFF.**
+**→ NEXT (the one missing piece): JOINT CORRIDOR-NETWORK SOLVE — treat the
+corridor graph as ONE system: shared-junction crossing elevations are
+common variables; solve all chain profiles simultaneously (route bands +
+taxi caps + Δg as constraints), then twist-blend.  Everything else
+(chains, stations, bands, twist, relief/enforce holds) is in the tree.**
+Gate-off suite: 306p/3f (CYXY green re-verified).
+
 ## ★★ SESSION 73 PART 4 (2026-06-10) — dev `3853b9a`: TAXI-CORRIDOR PROFILES BUILT, GATED OFF ★★
 User follow-up on #291: a corridor must carry ONE continuous grade through
 junctions ("can't distinguish where they join" — T through junction -10292;
