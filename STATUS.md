@@ -1,6 +1,64 @@
-# Auto-Patch Status — session 73 = FLEX SYNTHESIS + SLOPING TERMINALS + JUNCTION VISIBILITY + DEADBAND LIVE; CORRIDOR-PROFILE PASS BUILT (gated OFF → #3)
+# Auto-Patch Status — session 73 = FLEX SYNTHESIS + SLOPING TERMINALS + JUNCTION VISIBILITY + DEADBAND LIVE; JOINT CORRIDOR-NETWORK SOLVE BUILT (gated OFF)
 
-## ★★ SESSION 73 PART 5 (2026-06-10) — dev `c61ba6e`: ROUTE-FIELD #3 PIECES BUILT (gated) ★★
+## ★★ SESSION 73 PART 6 (2026-06-10) — branch `joint-corridor-solve`
+## (worktree `.claude/worktrees/joint-corridor-solve`, commit `8306827`):
+## JOINT CORRIDOR-NETWORK SOLVE BUILT — CYXY gate-on GREEN ★★
+⚠ Worked in a WORKTREE off dev `61d8c33` because a concurrent session was
+editing the main tree (unified_jacobi.py `_snap_junction_verts_to_rect_edge
+_plane` + vertices.py/elevation.py, uncommitted).  Check that session's
+state before merging this branch to dev.  Worktree env: OSM_data +
+Elevation_data rsynced.
+
+**BUILT (the p5 missing piece — corridor graph as ONE system, all inside
+`_taxi_corridor_profiles`, still `TAXI_CORRIDOR_PROFILE=False`):**
+1. **STAGE A/B split** — stations are built for ALL chains first (geometry
+   only), then inter-chain TIES: crossing gap-segments → ONE shared station
+   inserted into BOTH chains (equality — one physical point); terminus
+   against another chain's crossing run → projected station + grade-cap tie
+   over the lateral offset; shared canonical nodes → equality; co-located
+   mouths at one junction → grade-cap tie over the in-junction geodesic.
+   The old sequential `"fix"`-station reconciliation (first-writer-wins) is
+   REMOVED.
+2. **Damped consensus solve** over tie groups: wish = flat interpolation
+   between each chain's pins; group value = mean(wishes) clamped into
+   route bands ∩ every member chain's anchor-feasibility; cap ties project
+   pairs; FREEZE anchors the consensus into each chain, rejecting values a
+   chain cannot cap-reach (honest conflict beats a manufactured cliff).
+   Undamped it never converged (cap-tie projection vs wish averaging).
+3. **Anchor self-consistency** — non-hard termini project onto pairwise
+   cap-feasibility first (T4+U was pinned 110.4-HARD↔98.4-DEM over 611 m =
+   1.96 %: NOTHING in between was satisfiable; G 1.7 %, J 1.93 % same).
+4. **Junction HARD bands on TRUE geodesics** — corridor stations (per
+   member NODE, not mouth-mid) and twist writes clamp against the crossed
+   junction's hard ring vertices over in-polygon visibility-graph Dijkstra
+   distances (`_junc_geo_table`).  Measured ladder at CYXY #74 (L-shaped
+   junction E×runway 14R/32L): no band → 14 % (corridor flat-seeded 2.9 m
+   above the runway vertex one junction-width away); direct-chord band →
+   3.1 % (concave pair skipped); one-bend → 2.2-2.4 %; multi-bend → 0 ✓
+   (one-bend OVER-estimates around double corners, so two writes both "at
+   cap" violated their mutual chord).
+5. **Enforce band-exemption** — corridor-touched junctions' free vertices
+   are exempt from per-vertex route-band pinning in
+   `_enforce_within_shape_grade` (new `band_exempt` param): the threaded
+   corridor profile is the route truth there; the per-vertex bands
+   (route-graph artifacts) held free vertices metres above held corridor
+   writes — the p4 cliff class.
+**MEASURED gate-on: CYXY 19 viol/14 % → 0 ✓✓ (the gate-on RED blocker —
+which turned out NOT to be chain disagreement: CYXY has zero tie groups;
+it was the corridor pass ignoring junction-local hard caps).  HECA: #217
+0 violations ✓ (the p5 named case), #291 64 % (p4) → 13.6 %, T monotone
+kept.  Suite gate-off 306p/3f (same 3 gates, 2 xpass) — byte-path
+unchanged off-gate.**
+**REMAINING (why the gate still defaults OFF): HECA gate-on within ≈459
+vs 246 gate-off, dominated by the T4-WALL ROUTE TENSION — the freeze
+isolates T/T4+U ties as infeasible by ~1.1-1.7 m (the 110.9 05C contact
+forces ≥106.9 at 234 m down T4 while the crossing network sits at
+102-104; #290 holds the 1.9 m cliff between the two corridors' mouths
+7.4 m apart).  That is the part-1 arbitration (route demand vs junction
+network — runway-flex / option-(b) displacement-demand territory), NOT a
+corridor-disagreement bug; the joint solve now MEASURES it precisely
+(`O4_CORRIDOR_DEBUG=1` prints per-tie freeze-skips with over-by).
+Debug: `[corr] joint network: N tie group(s) … freeze-skipped=K`.**
 User ratified the full surface model: rects slope in ONE direction; junction
 arms TWIST from flat mouth cross-sections to the max COMPOUND slope at the
 center and back out; DEM = starting point, correct grade is king.  Built into
