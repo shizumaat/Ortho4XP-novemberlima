@@ -1,6 +1,39 @@
-# Auto-Patch Status — session 73 = FLEX DEMAND SYNTHESIS BUILT (gated) — profiles land on the user-ruled values; within-metric arbitration needed
+# Auto-Patch Status — session 73 = FLEX DEMAND SYNTHESIS BUILT → MERGED + GATE ON + SLOPING TERMINALS (in-sim evaluation state)
 
-## ★★ SESSION 73 (2026-06-10) — branch `flex-demand-synthesis` (worktree
+## ★★ SESSION 73 PART 2 (2026-06-10) — dev `6be62f6`: EVALUATION STATE LIVE ★★
+User call after part 1's arbitration writeup: **see it in-sim with the gate on
+and terminals allowed to slope.**  Merged `flex-demand-synthesis` → dev
+(`1b58781`, clean — the concurrent KPHX session had committed 4cf9db8..1bee887
+by then), then `6be62f6`:
+- **`O4_FLEX_MIN_CLAMP` now DEFAULTS ON** (`=0` restores the legacy
+  combined-band flex; the crossing guard still routes CYXY-class airports to
+  the legacy path).
+- **`config.TERMINAL_PADS_SLOPE = True`** (new): every pad may slope up to
+  `TERMINAL_MAX_GRADE` via the apron visibility path (the s66-designed
+  config switch, now actually wired in `_build_shape_constraints`); `False`
+  restores rigid-flat with squeezed-pad exceptions.  `check_terminal_flat`
+  already self-disables (cap > 0); terminals emit per-vertex.
+- **Per-pad isolated polish** after the final enforce (seam-preserving:
+  shared/hard nodes held) — global POCS leaves sloping-pad interiors lumpy;
+  pads converge in isolation (s67 lab).  ⚠ measured nearly no-op at HECA
+  (294→identical worst pairs): the terminal4 lump pairs are BOTH-ends-shared
+  with apron #249 = the s66 band-conflict class, not pad-internal.
+**Measured (HECA, this state): 05C/23C min 110.9 ✓, Exit-3 cleared ✓, 05L
++1.6 at A4/23R, runways FAA-clean — `test_runway_vertical_curve` HECA+SPJC
+flip to XPASS.  within 36→294** (115 of them ≤0.5 % over; worst: U connector
+12.6 %, terminal4 interior 12.5 % (≈1-2 m lumps, see above), apron #249 T4
+side 10 %, A4 stub 7.0 %).  Sloping pads drained STEP2 480→325 model edges
+but ADDED pad-interior/band-conflict residue vs flat-pads gate-on (185).
+**Suite 306p/3f — the SAME 3 pre-existing gates** (SPJC 2 runway edge-steps
+0.61 m, SPLP stub/B ~1.98 %, HECA within), 2 xpass as above; compare_target
+green (fixtures tolerate the changes).  ⚠ RESTART Ortho4XP before building
+(module cache).  Revert levers: `O4_FLEX_MIN_CLAMP=0` env;
+`TERMINAL_PADS_SLOPE=False` config; both → byte-equal s68 shipping.
+NEXT after in-sim verdict: the within-294 residue classes (band-conflict
+pairs #249/terminal4, U connector, A4 stub route-floor under-prediction —
+part-1 option (b), the (a)-displacement demand term).
+
+## ★★ SESSION 73 PART 1 (2026-06-10) — branch `flex-demand-synthesis` (worktree
 ## `.claude/worktrees/flex-demand-synthesis`), commit `a515cea` ★★
 ⚠ Worked in a WORKTREE because another session was concurrently editing the
 main tree (bridges/KPHX: bridges.py, layout.py, pipeline.py, finalize.py,
