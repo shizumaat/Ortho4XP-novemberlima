@@ -397,19 +397,21 @@ def _push_junction_vertices_off_taxi_rect_edges(
             vx, vy = ring_open[i]
             px, py = ring_open[(i - 1) % n_v]
             nx, ny = ring_open[(i + 1) % n_v]
-            # Runway coincident-run collapse (user 2026-06-09): the
-            # runway is segmented with corners exactly where junction
-            # corners should attach (pavement-intersection seams), so a
-            # junction edge that COINCIDES with a runway piece's edge
-            # must conform corner-to-corner — never be pushed 1 m off
-            # (the push scalloped a 400 m contact spanning pieces and
-            # left 1.4 m mid-edge cliffs at HECA Exit-2/3).  A vertex on
-            # a runway edge interior whose ring-neighbours BOTH lie on
-            # the same edge (interior or corner) is part of such a run:
-            # drop it; the surviving span corners snap in Stage 2.
+            # Coincident-run collapse (user 2026-06-09): rect chains are
+            # segmented with corners exactly where junction corners
+            # should attach (runways at pavement-intersection seams,
+            # taxi rects at their piece joints), so a junction edge that
+            # COINCIDES with a rect's edge must conform corner-to-corner
+            # — never be pushed 1 m off.  The push scalloped a 400 m
+            # runway contact at HECA Exit-2/3 (1.4 m mid-edge cliffs)
+            # and opened a 1 m unpaved ring beside the U cross-connector
+            # (61 m² of real apt.dat pavement lost + the flanking aprons
+            # de-coupled from U's grading, a 2 m seam).  A vertex on a
+            # rect edge interior whose ring-neighbours BOTH lie on the
+            # same edge line (interior or corner, collinear across the
+            # chain's pieces) is part of such a run: drop it; the
+            # surviving span corners snap in Stage 2.
             for rect_poly, corners, rect_role in rects:
-                if rect_role != ROLE_RUNWAY:
-                    continue
                 v_edge = _on_edge_between_corners(vx, vy, corners)
                 if v_edge is None:
                     continue
@@ -460,7 +462,10 @@ def _push_junction_vertices_off_taxi_rect_edges(
         new_ring: list[tuple[float, float]] = []
         n_snapped = 0
         n_pushed = 0
-        for vx, vy in ring_after_collapse:
+        n_keep = len(ring_after_collapse)
+        for vi2, (vx, vy) in enumerate(ring_after_collapse):
+            pvx, pvy = ring_after_collapse[(vi2 - 1) % n_keep]
+            nvx, nvy = ring_after_collapse[(vi2 + 1) % n_keep]
             target = (vx, vy)
             for rect_poly, corners, _rect_role in rects:
                 ci = _at_corner_index(vx, vy, corners)
@@ -471,32 +476,56 @@ def _push_junction_vertices_off_taxi_rect_edges(
                     break
                 ei = _on_edge_between_corners(vx, vy, corners)
                 if ei is not None:
-                    # RUNWAY span-end reconciliation (user 2026-06-09):
-                    # the runway segmentation inserts piece corners
-                    # exactly where junction corners should attach (the
-                    # pavement-intersection seams), but simplification
-                    # drift can leave the junction's span-end vertex a
-                    # few metres from its seam corner — past the 2 m
-                    # corner snap, so it used to get the 1 m push,
-                    # leaving a tapered cliff wedge (HECA #379↔#182:
-                    # vertex 5 m from the 181/182 seam).  Snap ALONG
-                    # the edge to the nearest corner of THIS edge
-                    # instead; the movement stays on the shared
-                    # boundary line, so distortion is minimal.
-                    if _rect_role == ROLE_RUNWAY:
-                        _RUNWAY_EDGE_CORNER_SNAP_M = 10.0
-                        best_c = None
-                        best_d = _RUNWAY_EDGE_CORNER_SNAP_M
-                        for cidx in (ei, (ei + 1) % 4):
-                            cx2, cy2 = corners[cidx]
-                            d = math.hypot(cx2 - vx, cy2 - vy)
-                            if d < best_d:
-                                best_d = d
-                                best_c = (cx2, cy2)
-                        if best_c is not None:
-                            target = best_c
-                            n_snapped += 1
-                            break
+                    # Span-end reconciliation (user 2026-06-09): rect
+                    # chains carry piece corners exactly where junction
+                    # corners should attach (runway pavement-
+                    # intersection seams, taxi-rect joints), but
+                    # simplification drift can leave the junction's
+                    # span-end vertex a few metres from its corner —
+                    # past the 2 m corner snap, so it used to get the
+                    # 1 m push, leaving a tapered cliff wedge (HECA
+                    # #379↔#182: vertex 5 m from the 181/182 seam).
+                    # Snap ALONG the edge to the nearest corner of THIS
+                    # edge instead; the movement stays on the shared
+                    # boundary line, so distortion is minimal.  Runways
+                    # get a wider tolerance (long pieces, larger drift)
+                    # than taxi rects (pieces can be 20-50 m).
+                    _along_snap = (10.0 if _rect_role == ROLE_RUNWAY
+                                   else 5.0)
+                    best_c = None
+                    best_d = _along_snap
+                    for cidx in (ei, (ei + 1) % 4):
+                        cx2, cy2 = corners[cidx]
+                        d = math.hypot(cx2 - vx, cy2 - vy)
+                        if d < best_d:
+                            best_d = d
+                            best_c = (cx2, cy2)
+                    if best_c is not None:
+                        target = best_c
+                        n_snapped += 1
+                        break
+                    # FLUSH-CONTACT span end on a SLOPING (long) edge
+                    # (user 2026-06-09, HECA U connector): the piece
+                    # runs ALONG this rect's edge (a ring-neighbour
+                    # lies on the same edge line) and its span end is
+                    # far from any rect corner — the rect simply has
+                    # no joint here YET.  Pushing 1 m off opened an
+                    # unpaved ring of real apt.dat pavement AND
+                    # de-coupled the flanking pieces' grading (2 m
+                    # seam).  Leave the vertex in place: the later
+                    # ``_split_sloped_rects_at_violations`` pass splits
+                    # the rect AT this vertex, making it a legal
+                    # shared corner.  (Stray vertices — no neighbour
+                    # on the edge line — keep the push.)
+                    e_len = [math.hypot(
+                        corners[(k + 1) % 4][0] - corners[k][0],
+                        corners[(k + 1) % 4][1] - corners[k][1])
+                        for k in range(4)]
+                    is_long = e_len[ei] >= sorted(e_len)[2] - 0.01
+                    if is_long and (
+                            _near_edge_line(pvx, pvy, corners, ei)
+                            or _near_edge_line(nvx, nvy, corners, ei)):
+                        break               # leave in place
                     target = _push_off(
                         vx, vy, rect_poly, corners, ei)
                     if target != (vx, vy):
