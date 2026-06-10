@@ -150,8 +150,16 @@ def _import_check_grade():
 # ── Geometry invariants ─────────────────────────────────────────────
 def check_self_overlap(layout):
     """Invariant A1: no two emitted pavement polygons may overlap.
-    Returns ``[(area_m2, idx_a, idx_b, "lat,lon"), …]`` largest first."""
+    Returns ``[(area_m2, idx_a, idx_b, "lat,lon"), …]`` largest first.
+
+    Noise floor 0.1 m²: the post-solve feature conformance welds seam
+    nodes by inserting a neighbour's exact vertex, which detours a
+    ring by float-epsilon and leaves sliver "overlaps" 0.00–0.05 m²
+    (sub-millimetre wide over tens of metres).  Those quantize to
+    nothing at the .11f OSM emit precision — they cannot reach the
+    mesh — so flagging them is pure noise."""
     from shapely.strtree import STRtree
+    NOISE_M2 = 0.1
     polys = [(i, s.polygon) for i, s in enumerate(layout.shapes)
              if s.polygon is not None and not s.polygon.is_empty]
     if len(polys) < 2:
@@ -167,7 +175,7 @@ def check_self_overlap(layout):
                 inter = pa.intersection(pb)
             except Exception:
                 continue
-            if inter.is_empty or inter.area <= 0.0:
+            if inter.is_empty or inter.area <= NOISE_M2:
                 continue
             c = inter.representative_point()
             pairs.append((inter.area, idx_a, idx_b, _ll(layout, c.x, c.y)))
@@ -492,8 +500,18 @@ def check_vertex_on_sloping_edge(layout):
                and not (s.altitude is not None and s.altitude_high is None
                         and s.altitude_low is None)
                and s.node_altitudes is None]
+    # Designed-clearance road features are exempt: the depressed-road
+    # plates and their retaining walls are clipped to exactly
+    # wall_gap_m = 0.5 m from all airside pavement (the road passes
+    # UNDER; the gap IS the separation, no shared node intended) —
+    # their vertices therefore always sit at d≈EDGE_PROX_M and would
+    # permanently false-positive here (same rule as the groundside
+    # exemption in check_vertex_on_flat_edge).
+    _CLEARANCE_FEATURE_ROLES = {"tunnel_ramp", "retaining_wall"}
     others = [s for s in layout.shapes
-              if s.role not in sloping_roles and s.polygon is not None
+              if s.role not in sloping_roles
+              and s.role not in _CLEARANCE_FEATURE_ROLES
+              and s.polygon is not None
               and not s.polygon.is_empty]
     if not sloping or not others:
         return []

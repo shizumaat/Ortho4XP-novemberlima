@@ -60,6 +60,7 @@ from .layout import (
     ROLE_STUB,
     ROLE_TERMINAL,
     ROLE_RETAINING_WALL,
+    ROLE_RUNWAY_CROSSING,
     ROLE_TUNNEL_RAMP,
     SHARED_VERTEX_TOL_M,
 )
@@ -1667,6 +1668,237 @@ def _emit_underpass_road_approaches(
     return n_processed
 
 
+def _discover_depressed_roads(
+        layout: "PavementLayout",
+        xplane_root: str,
+        icao: str,
+        ) -> tuple[dict | None, set | None, BaseGeometry | None]:
+    """Shared discovery for the depressed-road system (geometry only,
+    no DEM): which OSM highway ways must be depressed through this
+    airport.  A way qualifies when its inside-boundary stretch passes
+    under an ``aeroway=*, bridge=yes`` way, plus every way CONNECTED
+    to a qualifying one via shared OSM nodes inside the boundary
+    (on/off ramps).  Factored out of
+    ``_emit_through_airport_depressed_roads`` so the PRE-solve
+    terminal-gap carve can see the same corridors the POST-solve
+    plate emitter will pave.
+
+    Returns ``(way_lookup, depressed_set, boundary)`` —
+    ``way_lookup``: wid → (LineString in layout meters, node refs);
+    ``depressed_set``: the qualifying wids — or ``(None, None,
+    None)`` when the airport has no depressed roads.
+    """
+    from .pipeline import _load_osm_airports, _load_osm_big_roads
+    if (layout.airport_boundary is None
+            or layout.airport_boundary.is_empty):
+        return (None, None, None)
+    boundary = layout.airport_boundary
+    # Build a slightly contracted boundary for inside-vs-outside
+    # tests so a road point exactly ON the boundary doesn't bounce
+    # between true / false on numeric jitter.
+    try:
+        boundary_strict = boundary.buffer(-0.5)
+        if boundary_strict.is_empty:
+            boundary_strict = boundary
+    except _GEOM_EXC:
+        boundary_strict = boundary
+
+    # Load OSM airport-layer tile (for aeroway=bridge LineStrings).
+    try:
+        nodes_a, ways_a, _ = _load_osm_airports(
+            xplane_root, icao,
+            layout.anchor[0], layout.anchor[1])
+    except _GEOM_EXC:
+        return (None, None, None)
+    if not ways_a:
+        return (None, None, None)
+
+    lat0, lon0 = layout.anchor
+    cos0 = math.cos(math.radians(lat0))
+    R = R_EARTH
+
+    def _to_m(lon: float, lat: float) -> tuple[float, float]:
+        return (math.radians(lon - lon0) * R * cos0,
+                math.radians(lat - lat0) * R)
+
+    # ── Bridge LineStrings (airport-layer OSM) ─────────────────
+    bridge_lines: list[LineString] = []
+    nodes_a_m: dict[str, tuple[float, float]] = {}
+    for nid, (lat, lon) in nodes_a.items():
+        nodes_a_m[nid] = _to_m(lon, lat)
+    for wid, nrefs, tags in ways_a:
+        if not tags.get("aeroway"):
+            continue
+        if tags.get("bridge", "") not in ("yes", "viaduct"):
+            continue
+        pts = [nodes_a_m[n] for n in nrefs if n in nodes_a_m]
+        if len(pts) < 2:
+            continue
+        try:
+            ls = LineString(pts)
+        except _GEOM_EXC:
+            continue
+        if ls.is_empty or ls.length < 5.0:
+            continue
+        bridge_lines.append(ls)
+    if not bridge_lines:
+        return (None, None, None)
+
+    # Load OSM big_roads (for highway ways) — only now that we know
+    # the airport actually has aeroway bridges.
+    nodes_r, ways_r = _load_osm_big_roads(
+        layout.anchor[0], layout.anchor[1])
+    if not ways_r:
+        return (None, None, None)
+
+    # ── Highway candidates (big_roads OSM) ─────────────────────
+    HW_TYPES = {
+        "motorway", "trunk", "primary", "secondary",
+        "tertiary", "motorway_link", "trunk_link",
+        "primary_link", "secondary_link", "tertiary_link",
+        "residential", "service", "unclassified",
+    }
+    nodes_r_m: dict[str, tuple[float, float]] = {}
+    for nid, (lat, lon) in nodes_r.items():
+        nodes_r_m[nid] = _to_m(lon, lat)
+    way_data: list[tuple[str, LineString, list[str]]] = []
+    for wid, nrefs, tags in ways_r:
+        if tags.get("highway") not in HW_TYPES:
+            continue
+        if tags.get("bridge", "") in ("yes", "viaduct"):
+            # The road IS the bridge, not what's under — skip.
+            continue
+        # tunnel=building_passage tagging is INCLUDED.  At KPHX,
+        # the under-bridge road segments use this tag; they're
+        # exactly the seeds we want.
+        pts = [nodes_r_m[n] for n in nrefs if n in nodes_r_m]
+        if len(pts) < 2:
+            continue
+        try:
+            ls = LineString(pts)
+        except _GEOM_EXC:
+            continue
+        if ls.is_empty or ls.length < 5.0:
+            continue
+        way_data.append((wid, ls, list(nrefs)))
+    if not way_data:
+        return (None, None, None)
+
+    # ── Seed: ways whose inside-boundary section crosses a bridge ──
+    BRIDGE_PROXIMITY_M = 5.0
+    seed_depressed: set = set()
+    for wid, ls, _nrefs in way_data:
+        try:
+            inside = ls.intersection(boundary)
+        except _GEOM_EXC:
+            continue
+        if inside.is_empty:
+            continue
+        segs = []
+        if inside.geom_type == "LineString":
+            segs = [inside]
+        elif inside.geom_type == "MultiLineString":
+            segs = list(inside.geoms)
+        for seg in segs:
+            if seg.is_empty or seg.length < 1.0:
+                continue
+            for bls in bridge_lines:
+                try:
+                    if seg.distance(bls) < BRIDGE_PROXIMITY_M:
+                        seed_depressed.add(wid)
+                        break
+                except _GEOM_EXC:
+                    continue
+            if wid in seed_depressed:
+                break
+    if not seed_depressed:
+        return (None, None, None)
+
+    # ── BFS over OSM-graph node-sharing INSIDE the boundary ────
+    # On-ramps/off-ramps inside the airport are separate OSM
+    # ways; if they connect to a depressed seed at any node
+    # INSIDE the boundary, they must be depressed too (otherwise
+    # the seed and the connecting way disagree on altitude at
+    # their shared node and X-Plane renders a cliff).
+    node_to_ways: dict[str, list[str]] = {}
+    way_lookup: dict[str, tuple[LineString, list[str]]] = {}
+    for wid, ls, nrefs in way_data:
+        way_lookup[wid] = (ls, nrefs)
+        for n in nrefs:
+            node_to_ways.setdefault(n, []).append(wid)
+    depressed_set: set = set(seed_depressed)
+    queue: list[str] = list(seed_depressed)
+    while queue:
+        wid = queue.pop()
+        ls, nrefs = way_lookup[wid]
+        for n in nrefs:
+            n_xy = nodes_r_m.get(n)
+            if n_xy is None:
+                continue
+            try:
+                if not boundary_strict.contains(Point(n_xy)):
+                    continue
+            except _GEOM_EXC:
+                continue
+            for other_wid in node_to_ways.get(n, []):
+                if other_wid in depressed_set:
+                    continue
+                # Only propagate if the other way also has an
+                # inside-boundary portion (otherwise it's just a
+                # surface road glancing the boundary node).
+                _o_ls, _o_nrefs = way_lookup[other_wid]
+                try:
+                    if _o_ls.intersection(boundary).is_empty:
+                        continue
+                except _GEOM_EXC:
+                    continue
+                depressed_set.add(other_wid)
+                queue.append(other_wid)
+    return (way_lookup, depressed_set, boundary)
+
+
+def _depressed_road_corridor_band(
+        layout: "PavementLayout",
+        xplane_root: str,
+        icao: str,
+        road_width_m: float = 22.0,
+        clearance_m: float = 0.5,
+        ) -> BaseGeometry | None:
+    """The inside-boundary depressed-road corridor, buffered to road
+    half-width + ``clearance_m`` — the band that must stay OPEN
+    through terminal pads (per user 2026-06-10: terminals split and
+    leave a gap for the road to pass through; the road then keeps
+    ``clearance_m`` to the terminal edges).  ``None`` when the
+    airport has no depressed roads."""
+    way_lookup, depressed_set, boundary = _discover_depressed_roads(
+        layout, xplane_root, icao)
+    if not depressed_set:
+        return None
+    bands: list[BaseGeometry] = []
+    half_w = road_width_m / 2.0
+    for wid in sorted(depressed_set):
+        ls, _nrefs = way_lookup[wid]
+        try:
+            inside = ls.intersection(boundary)
+        except _GEOM_EXC:
+            continue
+        if inside.is_empty:
+            continue
+        try:
+            band = inside.buffer(half_w + clearance_m,
+                                 cap_style=2, join_style=2)
+        except _GEOM_EXC:
+            continue
+        if not band.is_empty:
+            bands.append(band)
+    if not bands:
+        return None
+    try:
+        return unary_union(bands)
+    except _GEOM_EXC:
+        return None
+
+
 def _emit_through_airport_depressed_roads(
         layout: "PavementLayout",
         dem,
@@ -1736,34 +1968,9 @@ def _emit_through_airport_depressed_roads(
     by this pass, so the explicit-tunnel emitter doesn't
     double-process the same building_passage segments.
     """
-    from .pipeline import _load_osm_airports, _load_osm_big_roads
-    if (layout.airport_boundary is None
-            or layout.airport_boundary.is_empty):
-        return (0, set())
-    boundary = layout.airport_boundary
-    # Build a slightly contracted boundary for inside-vs-outside
-    # tests so a road point exactly ON the boundary doesn't bounce
-    # between true / false on numeric jitter.
-    try:
-        boundary_strict = boundary.buffer(-0.5)
-        if boundary_strict.is_empty:
-            boundary_strict = boundary
-    except _GEOM_EXC:
-        boundary_strict = boundary
-
-    # Load OSM airport-layer tile (for aeroway=bridge LineStrings).
-    try:
-        nodes_a, ways_a, _ = _load_osm_airports(
-            xplane_root, icao,
-            layout.anchor[0], layout.anchor[1])
-    except _GEOM_EXC:
-        return (0, set())
-    if not ways_a:
-        return (0, set())
-    # Load OSM big_roads (for highway ways).
-    nodes_r, ways_r = _load_osm_big_roads(
-        layout.anchor[0], layout.anchor[1])
-    if not ways_r:
+    way_lookup, depressed_set, boundary = _discover_depressed_roads(
+        layout, xplane_root, icao)
+    if not depressed_set:
         return (0, set())
 
     grade_safety_margin = 0.005
@@ -1817,140 +2024,58 @@ def _emit_through_airport_depressed_roads(
         except _GEOM_EXC:
             return None
 
-    # ── Bridge LineStrings (airport-layer OSM) ─────────────────
-    bridge_lines: list[LineString] = []
-    nodes_a_m: dict[str, tuple[float, float]] = {}
-    for nid, (lat, lon) in nodes_a.items():
-        nodes_a_m[nid] = _to_m(lon, lat)
-    for wid, nrefs, tags in ways_a:
-        if not tags.get("aeroway"):
-            continue
-        if tags.get("bridge", "") not in ("yes", "viaduct"):
-            continue
-        pts = [nodes_a_m[n] for n in nrefs if n in nodes_a_m]
-        if len(pts) < 2:
-            continue
-        try:
-            ls = LineString(pts)
-        except _GEOM_EXC:
-            continue
-        if ls.is_empty or ls.length < 5.0:
-            continue
-        bridge_lines.append(ls)
-    if not bridge_lines:
-        return (0, set())
-
-    # ── Highway candidates (big_roads OSM) ─────────────────────
-    HW_TYPES = {
-        "motorway", "trunk", "primary", "secondary",
-        "tertiary", "motorway_link", "trunk_link",
-        "primary_link", "secondary_link", "tertiary_link",
-        "residential", "service", "unclassified",
-    }
-    nodes_r_m: dict[str, tuple[float, float]] = {}
-    for nid, (lat, lon) in nodes_r.items():
-        nodes_r_m[nid] = _to_m(lon, lat)
-    way_data: list[tuple[str, LineString, list[str]]] = []
-    for wid, nrefs, tags in ways_r:
-        if tags.get("highway") not in HW_TYPES:
-            continue
-        if tags.get("bridge", "") in ("yes", "viaduct"):
-            # The road IS the bridge, not what's under — skip.
-            continue
-        # tunnel=building_passage tagging is INCLUDED.  At KPHX,
-        # the under-bridge road segments use this tag; they're
-        # exactly the seeds we want.
-        pts = [nodes_r_m[n] for n in nrefs if n in nodes_r_m]
-        if len(pts) < 2:
-            continue
-        try:
-            ls = LineString(pts)
-        except _GEOM_EXC:
-            continue
-        if ls.is_empty or ls.length < 5.0:
-            continue
-        way_data.append((wid, ls, list(nrefs)))
-    if not way_data:
-        return (0, set())
-
-    # ── Seed: ways whose inside-boundary section crosses a bridge ──
-    BRIDGE_PROXIMITY_M = 5.0
-    seed_depressed: set = set()
-    inside_geom_by_wid: dict[str, BaseGeometry] = {}
-    for wid, ls, _nrefs in way_data:
-        try:
-            inside = ls.intersection(boundary)
-        except _GEOM_EXC:
-            continue
-        if inside.is_empty:
-            continue
-        inside_geom_by_wid[wid] = inside
-        # Iterate inside segments and check bridge proximity.
-        segs = []
-        if inside.geom_type == "LineString":
-            segs = [inside]
-        elif inside.geom_type == "MultiLineString":
-            segs = list(inside.geoms)
-        for seg in segs:
-            if seg.is_empty or seg.length < 1.0:
-                continue
-            for bls in bridge_lines:
-                try:
-                    if seg.distance(bls) < BRIDGE_PROXIMITY_M:
-                        seed_depressed.add(wid)
-                        break
-                except _GEOM_EXC:
-                    continue
-            if wid in seed_depressed:
-                break
-    if not seed_depressed:
-        return (0, set())
-
-    # ── BFS over OSM-graph node-sharing INSIDE the boundary ────
-    # On-ramps/off-ramps inside the airport are separate OSM
-    # ways; if they connect to a depressed seed at any node
-    # INSIDE the boundary, they must be depressed too (otherwise
-    # the seed and the connecting way disagree on altitude at
-    # their shared node and X-Plane renders a cliff).
-    node_to_ways: dict[str, list[str]] = {}
-    way_lookup: dict[str, tuple[LineString, list[str]]] = {}
-    for wid, ls, nrefs in way_data:
-        way_lookup[wid] = (ls, nrefs)
-        for n in nrefs:
-            node_to_ways.setdefault(n, []).append(wid)
-    depressed_set: set = set(seed_depressed)
-    queue: list[str] = list(seed_depressed)
-    while queue:
-        wid = queue.pop()
-        ls, nrefs = way_lookup[wid]
-        for n in nrefs:
-            n_xy = nodes_r_m.get(n)
-            if n_xy is None:
-                continue
-            try:
-                if not boundary_strict.contains(Point(n_xy)):
-                    continue
-            except _GEOM_EXC:
-                continue
-            for other_wid in node_to_ways.get(n, []):
-                if other_wid in depressed_set:
-                    continue
-                # Only propagate if the other way also has an
-                # inside-boundary portion (otherwise it's just a
-                # surface road glancing the boundary node).
-                _o_ls, _o_nrefs = way_lookup[other_wid]
-                try:
-                    if _o_ls.intersection(boundary).is_empty:
-                        continue
-                except _GEOM_EXC:
-                    continue
-                depressed_set.add(other_wid)
-                queue.append(other_wid)
-
     # ── Emit one set of polygons per depressed way ─────────────
     n_emitted = 0
     exclusion_zones: list[Polygon] = []
     half_w = road_width_m / 2.0
+
+    # Airside clearance union (user 2026-06-10): a depressed-road
+    # plate must STOP ``wall_gap_m`` (0.5 m) short of taxiway /
+    # junction / apron / runway pavement — the airside surface IS
+    # the bridge deck there — and resume on the other side.
+    # Terminals are NOT in this union: they yield instead (the
+    # pre-solve terminal-gap carve splits the pad around the road
+    # corridor), so a plate crossing an uncarved terminal shows up
+    # as an overlap warning rather than silently truncating the
+    # road.
+    _AIRSIDE_STOP_ROLES = {
+        ROLE_RUNWAY, ROLE_RUNWAY_CROSSING, ROLE_PRIMARY_PARALLEL,
+        ROLE_SECONDARY_PARALLEL, ROLE_STUB, ROLE_CROSS_CONNECTOR,
+        ROLE_JUNCTION, ROLE_APRON,
+    }
+    try:
+        _airside_polys = [s.polygon for s in layout.shapes
+                          if s.role in _AIRSIDE_STOP_ROLES
+                          and s.polygon is not None
+                          and not s.polygon.is_empty]
+        airside_clear = (unary_union(_airside_polys)
+                         .buffer(wall_gap_m)
+                         if _airside_polys else None)
+    except _GEOM_EXC:
+        airside_clear = None
+    # Terminal pads: the pre-solve carve already splits them around
+    # the road corridor with the 0.5 m clearance; subtract them
+    # UNBUFFERED here too so buffer-miter mismatches between the
+    # carve band and the plate buffer can't leave cm² overlaps at
+    # bends (KPHX terminal2, 0.4 m²).
+    try:
+        _term_polys = [s.polygon for s in layout.shapes
+                       if s.role == ROLE_TERMINAL
+                       and s.polygon is not None
+                       and not s.polygon.is_empty]
+        terminal_union = (unary_union(_term_polys)
+                          if _term_polys else None)
+    except _GEOM_EXC:
+        terminal_union = None
+    # Running union of already-emitted plates: parallel
+    # carriageways / ramp chains closer than the 22 m plate width
+    # used to emit overlapping plates (KPHX Sky Harbor Blvd,
+    # overlap storm up to 1 437 m²); subtracting the running union
+    # (buffered 1 cm so shared-edge float noise becomes a hairline
+    # gap, not an epsilon overlap) keeps the depressed surface
+    # single-cover.
+    plate_union: BaseGeometry | None = None
+    MIN_PLATE_PIECE_M2 = 25.0
 
     def _smooth_walk(pts: list[tuple[float, float]],
                       min_segment_m: float = 15.0
@@ -1998,16 +2123,47 @@ def _emit_through_airport_depressed_roads(
                     flat_poly = flat_poly.buffer(0)
             except _GEOM_EXC:
                 continue
-            if (flat_poly.is_empty
-                    or flat_poly.geom_type != "Polygon"):
+            if flat_poly.is_empty:
                 continue
-            layout.shapes.append(BuiltShape(
-                polygon=flat_poly,
-                role=ROLE_TUNNEL_RAMP,
-                ref="depressed_road",
-                altitude=round(elev_low, 1)))
-            exclusion_zones.append(flat_poly)
-            n_emitted += 1
+            # Stop short of airside pavement (0.5 m) and of plates
+            # already emitted; what survives on each side of a
+            # bridge deck is its own plate ("start again on the
+            # other side").
+            clipped = flat_poly
+            try:
+                if airside_clear is not None:
+                    clipped = clipped.difference(airside_clear)
+                if terminal_union is not None:
+                    clipped = clipped.difference(terminal_union)
+                if plate_union is not None:
+                    clipped = clipped.difference(
+                        plate_union.buffer(0.01))
+            except _GEOM_EXC:
+                pass
+            if clipped.is_empty:
+                continue
+            plate_pieces = [g for g in
+                            (clipped.geoms
+                             if hasattr(clipped, "geoms")
+                             else [clipped])
+                            if g.geom_type == "Polygon"
+                            and not g.is_empty
+                            and g.area >= MIN_PLATE_PIECE_M2]
+            for plate in plate_pieces:
+                layout.shapes.append(BuiltShape(
+                    polygon=plate,
+                    role=ROLE_TUNNEL_RAMP,
+                    ref="depressed_road",
+                    altitude=round(elev_low, 1)))
+                exclusion_zones.append(plate)
+                n_emitted += 1
+            if plate_pieces:
+                try:
+                    new_u = unary_union(plate_pieces)
+                    plate_union = (new_u if plate_union is None
+                                   else plate_union.union(new_u))
+                except _GEOM_EXC:
+                    pass
 
         # 2) Outside-boundary ramp(s) — one per side of the
         #    boundary the way crosses.  Take the OSM polyline
