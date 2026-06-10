@@ -39,11 +39,24 @@ Suite **304 passed / 3 failed** (intentional HECA/SPLP/SPJC gates; CYXY green).
    forms). Crossing guard also stays (s65 CYXY injection bug).
 
 ### NEXT (priority order)
-0. **Flex route-band demand (unblocks Phase 1)** — add the runway centerline
-   rows to the taxi-route graph (or anchor other-runway CONNECTION nodes with
-   their threshold envelope composed) so `_flex_route_bands` reaches the
-   thresholds; re-enable `O4_FLEX_MIN_CLAMP` → correct ~108 T4 dip AND the
-   41→14 reduction together.
+0. **TERMINAL SEED vs the REAL chain metric (unblocks minimum-flex compliance;
+   commit c78e9b7 has the full machinery, gated `O4_FLEX_MIN_CLAMP`).**
+   Audited end-to-end: the binding terminal7→05C demand chain is REAL
+   (21 hops of real taxiway along-axis caps, 1,923 m, ceiling 104.16 — probe
+   /tmp/probes/s68_pathaudit.py), so the s65 "~108" was anchor-incomplete and
+   104.2 is the true minimal T4 dip. The gated clamp + bounded re-smooth
+   (terminals-only Dijkstra bands; iterative anchor addition; threshold-
+   envelope filter) now lands the profile EXACTLY on demand (05C min 104.2 ✓)
+   — but within rises to ~120 because the residual moves to chains the runway
+   cannot absorb (112.6 ceiling 51 m from the locked 116.5 23C threshold).
+   ROOT CAUSE one level up: `_seed_terminals_from_taxi_routes` uses taxi-ROUTE
+   distances (~3,100 m) where the real constraint-graph chain is 1,923 m →
+   terminals seeded ~2 m too low for minimum-flex compliance. FIX: seed/yield
+   terminals against the CONSTRAINT-GRAPH chain metric (cap-Dijkstra from
+   runway flat profiles over shape_constraints edges — the audit machinery),
+   then enable the gate by default → correct profile AND ~0 within together.
+   ⚠ do NOT lift bounds from threshold-anchored band paths along freed
+   runways (fictitious 1.5% rise-corridor, false 102.09 ceiling).
 1. **s65 crossing-anchor injection fix** (runway_segments ~L973-1331): make the
    agreed crossing E_x actually land in the SECOND runway's profile; then lift
    the demand-anchor crossing guard (CYXY currently masks the bug by reverting).
