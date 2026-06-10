@@ -1,3 +1,94 @@
+# Auto-Patch Status — session 73 = FLEX DEMAND SYNTHESIS BUILT (gated) — profiles land on the user-ruled values; within-metric arbitration needed
+
+## ★★ SESSION 73 (2026-06-10) — branch `flex-demand-synthesis` (worktree
+## `.claude/worktrees/flex-demand-synthesis`), commit `a515cea` ★★
+⚠ Worked in a WORKTREE because another session was concurrently editing the
+main tree (bridges/KPHX: bridges.py, layout.py, pipeline.py, finalize.py,
+verification.py uncommitted there).  Do NOT merge this branch to dev without
+checking that session's state.  Worktree env: OSM_data rsynced; the 2 extra
+suite skips are tile_cut_parity (raw HGT tiles absent here), environmental.
+
+**Suite 304p/3f (same 3 intentional gates, CYXY green).  Gate-off HECA on this
+code = byte-equivalent shipping baseline: within 36, 05C min 104.4.**
+
+### WHAT WAS BUILT (s68 NEXT #1, all gated `O4_FLEX_MIN_CLAMP`)
+Per-runway demand at each pavement contact = **min over the measures that
+EXIST** (a one-sided "no demand" is absence of evidence, not a veto):
+1. **CHAIN measure (term 1)** — `_grade_bands` over the pavement edges
+   WITHOUT apron shapes' visibility chords, anchored at {held terminal seeds
+   + thresholds/seam + OTHER runways' nodes at current values}, own runway
+   unpinned.  Carries pavement-internal pins the route cannot see (Exit-3 via
+   #207↔L → 05R dips 3.6 m, Exit-3 cleared ✓).  Apron chords excluded because
+   they manufactured +10.5 m floors on 05L (cross-apron chains from high
+   anchors where the real route needs none — the s66 artifact class).
+2. **ROUTE measure (term 2)** — `_flex_route_bands` at every contact;
+   carries apron-borne demand (T4 → 05C ceiling 110.92 via n762) and CAPS
+   the chain where both measure (route is authoritative, user 2026-06-09).
+Mechanics that made it land (each fixed a measured failure):
+- **Sequential per-ref commit, deepest demand first** (`only_refs` param on
+  `_resmooth_runways_in_elev`): 05L measured against the unflexed 05C read
+  inflated anchors.
+- **Pairwise bound-consistency pruning** in the re-smooth: a rise floor and
+  dip ceiling chain-infeasible at the cap (05C: floor 118.1 two metres from
+  ceiling 113.2) anchored in turn = 255 % wall → drop the SHALLOWER demand.
+- **Anchor-consistency guard**: a bound must be cap-reachable from every
+  already-added anchor (envelope filter only checks the initial ones).
+- **End-grade-aware slack** (0.8 % in the end fraction) in all three
+  consistency layers — uniform 1.5 % accepted end-region anchors the FAA
+  solve could not legalise (1.56 % at 05L d=2963 → whole flex reverted).
+- **Sub-5 m station merge** (demand path only): `faa_rate_of_change_pass`
+  spirals on 2 m junction-sliver stations (solved 28.85 between 71/67
+  anchors).
+- **(a) combined-band settle SKIPPED under the gate** (its chord-graph
+  over-dip is what the synthesis replaces); demands measured at snapshot0 =
+  the held-runway saturation state.  Post-commit re-grade = **full
+  `_directional_relief` re-run** against the committed profiles.
+- Initial mistake worth remembering: contact-EDGE excess at snapshot0 is ~0
+  everywhere — the directional relief pushes violations OUTWARD, so the
+  saturation demand is only visible as a BAND quantity, not on the edge.
+
+### MEASURED (HECA, gate on): profiles ✓, within ✗
+- **05C/23C min 110.9** (the user-expected value), 05L +1.6 at the A4/23R
+  zone, 05R 139.6→136.0 at the Exit-3 chain.  Runways FAA-clean: worst
+  adjacent grade 1.24 %, curvature 0, `improved=True`, committed.
+- **Exit-3 GONE from check_grade** (was 2.07–2.81 %).
+- **BUT within 36 → 185** (89 of them ≤0.5 % over; 9 over 5 %): worst
+  U-connector 11.7 %, A4 stub 7.95 % (3.5 m/44 m), apron #249 chains, stub
+  T4 3.8 %.  Cross/v2e/mid/plane all 0 in both builds.
+
+### ★ THE ARBITRATION THE USER MUST MAKE (quantified this session)
+The two rulings collide at HECA: **(i) 05C dips only to the route-justified
+~110.9** and **(ii) within-shape grade is measured on the geodesic visibility
+graph with terminals held at their seeds**.  Every metre of dip the route cap
+refuses (104.4 → 110.9 = 6.5 m at T4) reappears as pavement violations on the
+geodesic chains (terminal7@70 + 1.5 %·~2,030 m geodesic ⇒ apron ceiling
+~100.5 at T4 vs runway 110.9).  Gate-off "within 36" is only achievable
+because the (a) solve's 104.4 over-dip absorbs that tension into the runway —
+the very dip the user rejected visually.  Options measured/identified:
+  a. Accept the honest residual at 110.9 (gate ON, within ≈185, runway right).
+  b. Next design lever: per-contact demand from the **(a)-settled saturation
+     displacement** min route depth — captures A4's true +3.5 (the route
+     floor under-predicts +1.64 because the apron is pinned ABOVE its
+     route floor by its own chains); does NOT close T4 without breaking the
+     route cap.
+  c. Terminal-cluster slope extension / apron-metric arbitration (the T4
+     chain ceiling comes from the held seeds + geodesic; user has ruled
+     terminals must not rise and within-apron grade stays geodesic — those
+     two plus 110.9 are jointly infeasible; one must bend).
+**Gate stays OFF until the user rules.**
+
+### Worktree / measurement notes
+- Build+measure exactly as s68 (`/tmp/probes/build_heca_synth.py` builds from
+  the worktree; `tools/check_grade.py`; `s69_runway_mins.py` per-runway
+  min/max).  Debug: `O4_FLEX_DEBUG=1` now prints per-contact demand synthesis
+  (`[flex]   contact …`), per-round re-smooth anchors/bans, and final
+  worst adjacent grade per ref; `O4_FLEX_BAND_DEBUG=1` prints the binding
+  route anchor per banded node.
+- `demand_ref` (s64 single-anchor mechanism) REMOVED from
+  `_resmooth_runways_in_elev` — superseded by the bound-driven anchor loop.
+
+---
+
 # Auto-Patch Status — session 68 = GEOMETRY SWEEP (Exit-2/3, U seam, hole-router v2, blast pad) + GROUNDSIDE RULE + FLEX DEMAND R&D (gated)
 
 ## ★★ SESSION 68 (2026-06-09/10) — branch `dev`, all committed through `7961235` ★★
