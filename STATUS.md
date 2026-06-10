@@ -1,5 +1,30 @@
 # Auto-Patch Status — session 73 = CORRIDORS LIVE + CURVE-AWARE GRADING RULED (branch `corridor-curves`, parked for tuning)
 
+## ★ SESSION 73 PART 10c (2026-06-10) — `corridor-curves` @f6561c4: MERGE GATED (CYXY red); A-GAP DIAGNOSED ★
+User asked to merge for in-sim testing → merge-gate checks run: **suite
+on the branch = 4 failed (CYXY newly RED: 10 junction violations at the
+exit junctions #64/#72/#75, 0.5-1.2 m — from per-axis + extension
+effects), HECA #284 3.7 m unresolved, #350/#317 un-triaged → NOT merged**
+(dev stays at part 9 = the user's current in-sim state).
+★★ USER RULING (A-area model): 23R threshold ≈ 60 m → taxiway A near
+A5 stays FLAT (~60) until it reaches the APRON — A5 flat at 60.4 is
+CORRECT; the p10 attempts to anchor A5's top HIGH were the wrong
+direction.  The #284 cliff = taxiway A's TWO chains never merging
+(59.2-59.8 vs 62.9-65.9, 4.3 m apart across the A5 junction complex);
+ONE chain ramps <1 % end-to-end.  Their mid-chain anchors are FROZEN
+CONSENSUS TIES (not hard nodes — chain debug now prints provenance
+H/R/A).  Same-ref phase-B merges no longer need a stub/wide bridge
+(committed) BUT the A chains still don't merge: their ends don't share
+a junction (adjacency = same-junc or shared-nodes; the gap spans the
+complex).  NEXT (priority order): (1) extend phase-B adjacency across
+junction-ADJACENT junctions (or tie same-ref chain ends ≤~150 m apart
+at their in-network path distance) → A merges → #284 closes; (2) CYXY
+exit-junction 10 violations (likely corridor writes at the exits
+over-cap on within-junction chords the per-axis rule still keeps —
+needs per-pair reading); (3) #350/#317; (4) full re-measure + merge.
+Branch state otherwise GOOD: 05C 108.7 ✓, 05L 57.9-60.7 ✓, A4 1.1 % w/
+#282 carrying the climb ✓.
+
 ## ★ SESSION 73 PART 10b (2026-06-10) — `corridor-curves` @cc4e7c6: T4 DIP RESTORED (108.7) ★
 The part-10 "05C regression" was three separable bugs, all found by
 reading the demand instrumentation (not a design flaw):
