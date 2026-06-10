@@ -2876,9 +2876,25 @@ def _report_within_shape_violations(
                 s.altitude_high, s.altitude_low)
         else:
             continue
+        # Decide the coordinate space ONCE PER RING.  Pipeline-internal
+        # shapes are local meters; a lat/lon ring (standalone callers) has
+        # every |coord| within the degree domain AND a sub-degree extent.
+        # The old PER-VERTEX guess (``abs(coord) > 180`` ⇒ meters)
+        # misconverted any meter vertex within ±180 m of the anchor as
+        # DEGREES, blasting it ~10^6 m away — the visibility polygon
+        # ballooned to ~10^13 m² and every cross-notch chord counted as
+        # "visible", reporting phantom violations on compliant aprons
+        # (HEAZ #51/#41: 64 phantom, while check_grade on the same data
+        # reports 0).
+        xs = [c[0] for c in coords]
+        ys = [c[1] for c in coords]
+        ring_is_latlon = (
+            max(xs) - min(xs) <= 0.5 and max(ys) - min(ys) <= 0.5
+            and all(abs(x) <= 180.0 for x in xs)
+            and all(abs(y) <= 90.0 for y in ys))
         coords_m = []
         for (lon, lat) in coords:
-            if abs(lon) > 180.0 or abs(lat) > 180.0:
+            if not ring_is_latlon:
                 coords_m.append((lon, lat))
             else:
                 x = math.radians(lon - layout.anchor[1]) * R_EARTH * cos0
