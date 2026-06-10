@@ -27,14 +27,23 @@ Suite **304 passed / 3 failed** (intentional HECA/SPLP/SPJC gates; CYXY green).
    `_grade_limit_groundside_chords` (finalize, LAST altitude writer): 4 %
    Lipschitz envelope over chord pairs — ring-ramp alone left hillside
    groundside at 4.7-5.5 %.
-6. **Solver Phase 1 — re-smooth demand anchor** (`_resmooth_runways_in_elev
-   demand_ref`): Phase-0 measured the re-smooth UNDOING the band solve
-   (57→137); anchoring the worst-displaced point per runway fixed it.
-   **HECA within 41 → 14 (~7 unique)**. ★ INTERIM GUARD: skipped when runway
-   CROSSINGS exist — it exposes the dormant s65 crossing-anchor injection bug
-   (CYXY 14L/32R floats 695.9 vs 02/20 693.7 at the shared corners).
+6. **Solver Phase 1 — re-smooth demand anchor — BUILT then GATED OFF**
+   (`O4_FLEX_MIN_CLAMP=1` to experiment, commit 844a59a). The anchor gave
+   HECA 41→14 but LOCKED a FALSE 05C/23C over-dip (102.1; user caught it
+   visually; pre-anchor 104.3; true route minimum ~108). Measured: the flex
+   band's geodesic/chord graph under-counts distance (terminal7→05C ~2,030 m
+   chord vs ~3,100 m route) → false demand; the re-smooth refill had been
+   hiding ~2 m of overshoot; geodesic clamps are circular; the route-band
+   clamp (`_flex_route_bands`) found no bound because `apt_taxi_centerlines`
+   does not reach the threshold corners (the legit 05L demand ≈108.5 never
+   forms). Crossing guard also stays (s65 CYXY injection bug).
 
 ### NEXT (priority order)
+0. **Flex route-band demand (unblocks Phase 1)** — add the runway centerline
+   rows to the taxi-route graph (or anchor other-runway CONNECTION nodes with
+   their threshold envelope composed) so `_flex_route_bands` reaches the
+   thresholds; re-enable `O4_FLEX_MIN_CLAMP` → correct ~108 T4 dip AND the
+   41→14 reduction together.
 1. **s65 crossing-anchor injection fix** (runway_segments ~L973-1331): make the
    agreed crossing E_x actually land in the SECOND runway's profile; then lift
    the demand-anchor crossing guard (CYXY currently masks the bug by reverting).
