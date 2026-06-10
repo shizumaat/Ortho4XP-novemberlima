@@ -638,51 +638,78 @@ class PavementLayout:
                     latlon_ring.append(
                         (float(f"{lat:.11f}"),
                          float(f"{lon:.11f}")))
-                check_poly = Polygon(
-                    [(lon, lat) for lat, lon in latlon_ring])
-                if not check_poly.is_valid:
-                    UI.vprint(1,
-                        f"  [pav-builder] WARN: dropping "
-                        f"invalid polygon (role={s.role}, "
-                        f"nids={len(ext_nids) - 1}): "
-                        f"X-Plane mesh builder would crash.")
-                    continue
-                # Sliver-corner safety net: if any interior angle is
-                # below SLIVER_ANGLE_THRESHOLD_DEG, drop the polygon.
-                # The source-fix _drop_sliver_corners normally
-                # eliminates these for junctions, but this catches
-                # any path (rect emission, decomposition fragment,
-                # repaired-by-buffer(0) polygon) that could
-                # reintroduce a needle tip Triangle4XP can't handle.
+                # Sliver-corner safety net + REPAIR: an interior angle
+                # below SLIVER_ANGLE_THRESHOLD_DEG is a needle tip
+                # Triangle4XP can't handle.  These can be BORN HERE —
+                # canonical-point interning (~0.5 m buckets) plus the
+                # .11f truncation sharpened a legal 9.3° corner on
+                # KPHX's 400 704 m² terminal-core apron to 0.36°, and
+                # the old drop-the-whole-shape response deleted the
+                # entire terminal area from the patch.  Repair instead:
+                # remove the needle-tip vertex (the spur is degenerate
+                # — at 2° a 2.5 m spur tip sits <9 cm off the long
+                # edge) and re-scan; drop the shape only if the ring
+                # degenerates below 3 vertices or ends up invalid.
+                work_nids = list(ext_nids[:-1])
+                work_ring = list(latlon_ring)
                 ring_m = [self.ll_to_m(lat, lon)
-                          for (lat, lon) in latlon_ring]
+                          for (lat, lon) in work_ring]
                 cos_thresh = math.cos(
                     math.radians(SLIVER_ANGLE_THRESHOLD_DEG))
-                m = len(ring_m)
-                worst_ang = None
-                for vi in range(m):
-                    ax, ay = ring_m[(vi - 1) % m]
-                    bx, by = ring_m[vi]
-                    cx, cy = ring_m[(vi + 1) % m]
-                    v1x, v1y = ax - bx, ay - by
-                    v2x, v2y = cx - bx, cy - by
-                    n1 = math.hypot(v1x, v1y)
-                    n2 = math.hypot(v2x, v2y)
-                    if n1 < 1e-9 or n2 < 1e-9:
-                        continue
-                    cos = (v1x * v2x + v1y * v2y) / (n1 * n2)
-                    if cos > cos_thresh:
-                        worst_ang = math.degrees(
-                            math.acos(max(-1.0, min(1.0, cos))))
+                n_repaired = 0
+                for _attempt in range(len(ring_m)):
+                    m = len(ring_m)
+                    if m < 3:
                         break
-                if worst_ang is not None:
+                    worst_vi = None
+                    worst_cos = cos_thresh
+                    for vi in range(m):
+                        ax, ay = ring_m[(vi - 1) % m]
+                        bx, by = ring_m[vi]
+                        cx, cy = ring_m[(vi + 1) % m]
+                        v1x, v1y = ax - bx, ay - by
+                        v2x, v2y = cx - bx, cy - by
+                        n1 = math.hypot(v1x, v1y)
+                        n2 = math.hypot(v2x, v2y)
+                        if n1 < 1e-9 or n2 < 1e-9:
+                            continue
+                        cos = (v1x * v2x + v1y * v2y) / (n1 * n2)
+                        if cos > worst_cos:
+                            worst_cos = cos
+                            worst_vi = vi
+                    if worst_vi is None:
+                        break
+                    del ring_m[worst_vi]
+                    del work_ring[worst_vi]
+                    del work_nids[worst_vi]
+                    n_repaired += 1
+                if len(ring_m) < 3:
                     UI.vprint(1,
                         f"  [pav-builder] WARN: dropping "
                         f"sliver-corner polygon (role={s.role}, "
+                        f"nids={len(ext_nids) - 1}): degenerated "
+                        f"during needle repair.")
+                    continue
+                check_poly = Polygon(
+                    [(lon, lat) for lat, lon in work_ring])
+                if not check_poly.is_valid:
+                    try:
+                        _area_m2 = abs(Polygon(ring_m).area)
+                    except _GEOM_EXC:
+                        _area_m2 = 0.0
+                    UI.vprint(1,
+                        f"  [pav-builder] WARN: dropping "
+                        f"invalid polygon (role={s.role}, "
                         f"nids={len(ext_nids) - 1}, "
-                        f"min angle {worst_ang:.2f}°): "
+                        f"~{_area_m2:.0f} m²): "
                         f"X-Plane mesh builder would crash.")
                     continue
+                if n_repaired:
+                    UI.vprint(1,
+                        f"  [pav-builder] {s.role}: repaired "
+                        f"{n_repaired} sliver corner(s) at emit "
+                        f"(needle vertex removed, shape kept).")
+                    ext_nids = work_nids + [work_nids[0]]
             except _GEOM_EXC:
                 continue
             pending.append((s_idx, s, ext_nids))
