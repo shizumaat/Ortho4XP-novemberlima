@@ -1,5 +1,52 @@
 # Auto-Patch Status — session 73 = CORRIDORS LIVE + CURVE-AWARE GRADING RULED (branch `corridor-curves`, parked for tuning)
 
+## ★ SESSION 73 PART 10d (2026-06-10) — `corridor-curves` @7e3a8ed: A-GAP ROOT CAUSE REVISED + FIXED (apron-mouth terminus relax) ★
+HECA apt.dat was updated (Custom Scenery 15:31) — re-measured first: the
+two A chains and their values are essentially unchanged (the cliff is
+now junction #232 in the new numbering, 2.6 m, 63.3 vs 60.7; was #284).
+**p10c's framing REVISED by measurement: the two A chains are 1.86 km
+apart and apron #190 (59.2→91.7, 1.6×2 km) carries the taxi route
+between them — NO same-ref end merge can bridge that (junction-adjacent
+adjacency / ≤150 m end ties don't apply), and none is needed: the high
+chain was ALREADY coupled to the A5 complex through its tie group
+(consensus 61.76; route-band ceiling at the junction-side mouth 62.4 =
+the user's predicted ~62.5; terminal7 is 749 m by route through the
+apron lanes, floor ~58.8).**  TRUE blocker: a chain terminus at an
+APRON MOUTH (mouth junc=None, ring nodes shared with a free apron)
+anchors at the apron edge's DEM-settled value at station construction
+(~L3346) and NOTHING downstream can move it — ties form chain↔chain
+only, anchor self-consistency is intra-chain, the freeze veto's only
+escape (runway flex demand) requires a runway blocker → the tie
+freeze-skipped and the corridor wrote ~63.3 against the 60.4-60.7 carve.
+**FIX (@7e3a8ed, in the tie freeze): when EVERY blocking anchor is a
+non-hard UNTIED terminus whose mouth opens into a free apron, project it
+MINIMALLY into the tie's cap reach and accept the tie.  ★ PROJECTION,
+NOT UN-ANCHORING — the un-anchor variant was measured and REJECTED: J's
+tail was 0.33 m infeasible and the flat extension dropped it 4.7 m
+(68.1→63.4) = a manufactured 5.3 m wall against G2's legitimate
+68.7-70.9 writes in the same apron.**
+MEASURED: A-complex cliffs CLEARED (#232/#233/#228 gone; A profile
+62.5..61.8(tie)..63.4); 05C 108.7 ✓ 05L 57.9-60.7 ✓ A4 carries the
+climb ✓ A5 flat ✓.  The relax also fires on T head/tail, G, J — all
+≤1.6 m nudges.  #261 grew 2.4→3.0 m (T-corridor junction spanning the
+100-level mouth system vs the 103-level corridor — T4-wall family, NOT
+new).  CYXY: relax never fires, 10 pre-existing exit-junction viol
+unchanged.  SPJC: untouched (R1/R2 residual).  Suite 305p/4f = exact
+branch baseline (same 4 gates, HECA+SPJC vertical-curve XPASS kept).
+**REMAINING (new, precisely measured class): apron band-noise residue —
+within 343→372 (#190 21→35, #194 4→23, ALL ≤1.7 m, most ≤1 m): free
+apron vertices pinned at their route-band FLOORS 0.6-1.7 m above the
+moved corridor writes (e.g. floor 64.0 = 108.7 − 1.5 %·~2,980 m route
+from the 05C contact vs the corridor's 63.4 — a ~0.02 % route-graph
+disagreement over 3 km).  The p4/p7 band-pinning class → NEXT: extend
+the junction `band_exempt` treatment (or a route-noise deadband on
+floors) to apron vertices near corridor writes; then CYXY exit
+junctions, #350/#317, re-check the merge gate.**  apt.dat note: the
+conformance WARN (4 edge crossings) pre-exists the fix and improved
+from 5 with the new apt.dat.  Probes: /tmp/probes/s75_a25_band.py
+(route bands + terminal routes at a mouth); builds /tmp/HECA_relax2.osm
+(fixed) vs /tmp/HECA_aptupdate2.osm (pre-fix baseline, new apt.dat).
+
 ## ★ SESSION 73 PART 10c (2026-06-10) — `corridor-curves` @f6561c4: MERGE GATED (CYXY red); A-GAP DIAGNOSED ★
 User asked to merge for in-sim testing → merge-gate checks run: **suite
 on the branch = 4 failed (CYXY newly RED: 10 junction violations at the
