@@ -3,10 +3,10 @@
 ## ★★ SESSION 73 PART 7 (2026-06-10) — branch `joint-corridor-solve`
 ## (worktree `.claude/worktrees/joint-corridor-solve`, commit `8306827`):
 ## JOINT CORRIDOR-NETWORK SOLVE BUILT — CYXY gate-on GREEN ★★
-⚠ Worked in a WORKTREE off dev `61d8c33` because a concurrent session was
-editing the main tree (unified_jacobi.py `_snap_junction_verts_to_rect_edge
-_plane` + vertices.py/elevation.py, uncommitted).  Check that session's
-state before merging this branch to dev.  Worktree env: OSM_data +
+⚠ Worked in a WORKTREE off dev `61d8c33` because the part-6 shadow-edge
+session was concurrently editing the main tree; their work landed as dev
+`13531fd` and is MERGED into this branch (code auto-merged cleanly —
+disjoint regions of unified_jacobi.py).  Worktree env: OSM_data +
 Elevation_data rsynced.
 
 **BUILT (the p5 missing piece — corridor graph as ONE system, all inside
@@ -59,6 +59,36 @@ network — runway-flex / option-(b) displacement-demand territory), NOT a
 corridor-disagreement bug; the joint solve now MEASURES it precisely
 (`O4_CORRIDOR_DEBUG=1` prints per-tie freeze-skips with over-by).
 Debug: `[corr] joint network: N tie group(s) … freeze-skipped=K`.**
+
+## ★★ SESSION 73 PART 6 (2026-06-10) — dev `13531fd`: SPJC GRADE GATE GREEN (shadow-edge reconciliation) ★★
+User: confirm the SPJC/HECA gates real, fix root cause (SPLP deferred to the
+joint corridor solve).  Both CONFIRMED byte-identical at HEAD.  Root cause =
+two blind spots in the vertex-based push/snap machinery where a junction
+borders a rect/runway without shared nodes:
+1. **Corner-into-grazing-edge insertion** (pavement/vertices.py, runs in
+   Phase-1 geometry AND in `_unify_airside_geometry` before the weld): a
+   junction EDGE grazing past a rect/runway CORNER with no junction vertex
+   nearby now routes THROUGH the corner (taxi 0.6 m / runway 1.5 m capture).
+2. **Edge-plane snap** (unified_jacobi, post-enforce; `O4_STEP_DEBUG` prints
+   counts): junction vertices ≤2.0 m off a sloping rect's OR RUNWAY'S long
+   segment take the edge-plane altitude + local re-project.  The first build
+   of this pass (removed earlier in s73 as "0 applicable") had EXCLUDED
+   runway edges — which is exactly SPJC's case: a SHADOW edge from a shared
+   runway corner whose far endpoint sat 1.74 m off holding 15.1 vs plane
+   16.26; both endpoints on the plane ⇒ the straight edge lerps along it.
+**SPJC gate GREEN (2 steps → 0). Suite 307p/2f, no new failures.**
+REMAINING:
+- **HECA's 2 graze steps** (junction -10193 ↔ TX29): deviation peaks
+  MID-EDGE (no vertex to snap) and at SOLVE-time geometry TX29's corners do
+  NOT present as insertion candidates (only the emitted ring shows 0.01/0.49
+  lateral — solve-time differs, or the near-vertex skip eats it).  Needs
+  instrumentation inside the build at the -10193 site (probe pattern:
+  O4_GRAZE_DEBUG candidate dump + a solve-time ring dump around
+  (30.1010,31.4050)).
+- SPLP 1 × 0.4 m junction lump — deferred (user) pending the JOINT
+  CORRIDOR-NETWORK SOLVE (part 5).
+
+## ★★ SESSION 73 PART 5 (2026-06-10) — dev `c61ba6e`: ROUTE-FIELD #3 PIECES BUILT (gated) ★★
 User ratified the full surface model: rects slope in ONE direction; junction
 arms TWIST from flat mouth cross-sections to the max COMPOUND slope at the
 center and back out; DEM = starting point, correct grade is king.  Built into

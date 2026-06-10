@@ -188,6 +188,16 @@ def _unify_airside_geometry(layout, icao: str) -> None:
             _connect_discovered_lane_dead_ends_to_junctions)
         _connect_discovered_lane_dead_ends_to_junctions(layout, icao=icao)
 
+    # A junction EDGE that grazes past a rect/runway CORNER with no
+    # junction vertex nearby never shares a node with the rect (the
+    # vertex-based push/snap machinery can't see it) — route the edge
+    # THROUGH the corner.  Runs here, at final pre-solve geometry, because
+    # the graze often only exists after the junction-repair / overlap-clip
+    # passes (the Phase-1 call in elevation.py catches the early cases).
+    from .pavement.vertices import (
+        _insert_rect_corners_into_grazing_junction_edges)
+    _insert_rect_corners_into_grazing_junction_edges(layout)
+
     # Weld near-coincident airside vertices to one fresh canonical
     # coordinate so a rect corner and the junction vertex beside it become a
     # single point (the conformance below then has only genuine T-junctions
