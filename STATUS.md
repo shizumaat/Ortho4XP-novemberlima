@@ -1,88 +1,137 @@
-# Auto-Patch Status — session 68 = GEOMETRY FIXES (Exit-2/3 junction, U seam, hole-router v2 merge) + GROUNDSIDE RULE + SOLVER PHASE 1 (HECA 41→14)
+# Auto-Patch Status — session 68 = GEOMETRY SWEEP (Exit-2/3, U seam, hole-router v2, blast pad) + GROUNDSIDE RULE + FLEX DEMAND R&D (gated)
 
-## ★★ SESSION 68 (2026-06-09) — branch `dev`, all committed through `5537626` ★★
-Commits: 3845907 (junction piece recovery + runway conform), f64750b (STATUS),
-1f8e849 (merge `redesign-hole-router-v2` = `plan_hole_cuts_v2`, flag
-`O4_HOLE_ROUTER_V2` default ON), ba2305d (U-seam taxi-rect conform), d99907c
-(plane profile revert), 642c8b2 (runway-disconnected aprons → groundside +
-SPJC target re-cut), 5537626 (flex demand anchor + groundside chord limit).
-Suite **304 passed / 3 failed** (intentional HECA/SPLP/SPJC gates; CYXY green).
+## ★★ SESSION 68 (2026-06-09/10) — branch `dev`, all committed through `7961235` ★★
+Suite **306 passed / 3 failed** (intentional HECA/SPLP/SPJC grade gates; CYXY
+green; the +2 over s67 = hole-router unit tests + flat-edge invariant).  dev
+also absorbed two EXTERNAL sessions mid-stream: s69/s70 `Smart-data-cleanup`
+(HEAZ verify clean, ribbon T-junctions, phantom-WARN fix) and the Phoenix
+triage (short-edge keep-largest fixes) — see their memory files.
 
-### What landed (full detail in memory `heca_exit23_runway_junction.md` + `hole_router_gap_redesign.md`)
-1. **Exit-2/3 ↔ 05R/23L junction restored** — the vertex-push's buffer(0)
-   keep-largest silently deleted the 11,568 m² connector; pieces ≥50 m² now
-   re-added; junction conforms to the runway corner-to-corner (coincident-run
-   collapse via `_near_edge_line` + span-end corner snap, vertices.py).
-2. **U-connector seam closed** — same push against a TAXI rect (U was one rect
-   at push time); flush-contact span ends now LEFT for
-   `_split_sloped_rects_at_violations` to corner. U steps 8/5/20 → 0/0/0.
-3. **Hole-router v2 merged** — Prim min-spanning-forest slits, polygonize
-   application, sibling-merge instead of drops. Fan gaps (670+2,543 m²) GONE;
-   HECA coverage 10→7 (rest = groundside-emit class, diagnosed not fixed).
-4. **Plane profile restored** (`_slope_profile_for` spline experiment reverted).
-5. **Groundside rule (user)** — apron must have a touch-chain to a runway, else
-   groundside: `_reclassify_runway_disconnected_to_groundside` (DEM-follow +
-   separation; runs before tile_cut). CYXY 9, SPJC 2 (target re-cut), HECA 38
-   (+15 disconnected TX service lanes reported, left as-is).
-   `_grade_limit_groundside_chords` (finalize, LAST altitude writer): 4 %
-   Lipschitz envelope over chord pairs — ring-ramp alone left hillside
-   groundside at 4.7-5.5 %.
-6. **Solver Phase 1 — re-smooth demand anchor — BUILT then GATED OFF**
-   (`O4_FLEX_MIN_CLAMP=1` to experiment, commit 844a59a). The anchor gave
-   HECA 41→14 but LOCKED a FALSE 05C/23C over-dip (102.1; user caught it
-   visually; pre-anchor 104.3; true route minimum ~108). Measured: the flex
-   band's geodesic/chord graph under-counts distance (terminal7→05C ~2,030 m
-   chord vs ~3,100 m route) → false demand; the re-smooth refill had been
-   hiding ~2 m of overshoot; geodesic clamps are circular; the route-band
-   clamp (`_flex_route_bands`) found no bound because `apt_taxi_centerlines`
-   does not reach the threshold corners (the legit 05L demand ≈108.5 never
-   forms). Crossing guard also stays (s65 CYXY injection bug).
+**HECA shipping state (gate off): within 36 (~18 unique), cross/v2e/mid 0/0/0,
+05C/23C min 104.4, coverage gaps 7 (groundside-emit class).**  User verdict on
+the build: "best HECA yet."
+
+### Commits (ours, in order)
+3845907 Exit-2/3 junction recovery + runway coincident-run conform (vertices.py)
+f64750b/65e2cba/37423b2/2de3ad4/7961235 STATUS updates
+1f8e849 MERGE `redesign-hole-router-v2` (`plan_hole_cuts_v2`, `O4_HOLE_ROUTER_V2` ON)
+ba2305d U-connector seam: all-rect conform + flush-contact span ends
+d99907c plane profile restored (spline experiment reverted)
+642c8b2 runway-disconnected aprons → groundside (+SPJC target re-cut, apron 19)
+5537626 flex demand anchor + groundside chord grade limit
+844a59a demand anchor GATED OFF (locked a false 05C over-dip 102.1)
+3f8093a route-graph augmentation + demand-path audit
+c78e9b7 bounded demand re-smooth (iterative anchors + threshold-envelope filter)
+e39537e #174 blast-pad spike: ORPHAN-NODE SYNC in the re-smooth
+9488cff per-runway ROUTE-BAND flex (gated WIP) + measured results
+
+### Geometry fixes (all live, all verified in-sim by user)
+1. **Exit-2/3 ↔ 05R/23L junction restored.** The vertex-push's buffer(0)
+   keep-largest silently deleted the 11,568 m² connector piece; pieces ≥50 m²
+   are now re-added; junction conforms to the runway corner-to-corner
+   (`_near_edge_line` coincident-run collapse + span-end corner snap ≤10 m).
+2. **U-connector seam closed** (user caught it: NOT a source void — apt.dat
+   covers 61/68 m²). Same push pathology vs a TAXI rect; flush-contact span
+   ends on sloping edges are now LEFT for `_split_sloped_rects_at_violations`
+   to convert into shared corners. U steps 8/5/20 → 0/0/0.
+3. **Hole-router v2 merged.** Prim min-spanning-forest slits + polygonize
+   application + sibling-merge instead of drops. Radial fan gaps (670+2,543 m²)
+   GONE. Remaining 7 coverage gaps = groundside-emit class (diagnosed, open).
+4. **#174 blast-pad single-node spike fixed** (the 5.76 % worst pair). Blast
+   pads ARE modelled flat (g=0 chain segments) and #174 solved flat — except a
+   mid-edge conformance insert the flex freed and the re-smooth couldn't write
+   (only chain STATIONS are written). Fix = orphan-node sync: non-station ring
+   nodes interpolate the smoothed profile. ⛔ hold-don't-free variant froze
+   multi-vertex pieces (within 39→105) — documented, reverted.
+5. **Groundside rule (user-authoritative): an apron must have a touch-chain to
+   a runway, else it is GROUNDSIDE.** `_reclassify_runway_disconnected_to_
+   groundside` (junction_repair; STRtree BFS from runways; DEM-follow with
+   simplify_tol=0; runs BEFORE tile_cut — the clip severs cross-tile chains)
+   + `_grade_limit_groundside_chords` (groundside.py, called LAST in finalize —
+   `_separate_groundside_from_airside` re-derives altitudes, ORDER MATTERS):
+   4 % Lipschitz pull-down over chord pairs, cluster-unified shared nodes.
+   CYXY 9 → groundside (grade test stays green), SPJC 2 (target re-cut),
+   HECA 38 (+15 disconnected TX service-lane rects reported, left airside —
+   user call pending).
+
+### Model rulings this session (user-authoritative — overrides older notes)
+- **Runway flex is SYMMETRIC** (dip OR rise the minimum).
+- **Terminals must NOT rise**; terminal7 belongs ~70; the 6/7/10 cluster
+  resolves tension by SLOPING (per-node seeds exist since s67) — the
+  "raise terminals to the chain metric" proposal is REJECTED.
+- **ROUTE BANDS are the authoritative runway-reachability metric.** The
+  21-hop constraint-graph audit chain (ceiling 104.16 at T4) rides an 839 m
+  cross-apron geodesic hop = the s66 measurement-artifact class. 05C at T4
+  should be ~108-110, not 104.
+
+### Flex demand R&D — what was measured (ALL gated `O4_FLEX_MIN_CLAMP`, default OFF)
+- **Why narrow demands vanish:** the flex band solve DOES dip runways at
+  junction demands (417→57 edges), but the unanchored FAA re-smooth fills
+  NARROW notches (lifting one station is the minimal move) while BROAD dips
+  survive — that's why 05C keeps its 104.4 dip today with no anchor, and 05R
+  shows nothing at Exit-3 (2.81 %).
+- **Demand anchor at the settled value = over-dip locked** (05C → 102.1; 05R
+  exit → −3.3 m where 0.9 m is needed). The POCS 50/50 split overshoots below
+  true demand; the re-smooth refill used to hide ~2 m of it.
+- **Per-runway ROUTE-BAND flex (9488cff)**: bounds from {held terminals + all
+  thresholds + OTHER runways' pavement contacts at current values}, own
+  centerline EXCLUDED (else the threshold rides the freed interior as a
+  fictitious 1.5 % rise-corridor — false 102.09), bounds applied ONLY through
+  the bounded re-smooth (raw clamping lifted 05L to a 7.3 % wall 30 m from
+  its locked threshold). RESULTS: 05C → 110.9 ✓ (user-expected), 05L +3 m at
+  A4 ✓ (the s65 split rule)… BUT Exit-3 unchanged (its pin is PAVEMENT-
+  INTERNAL saturation #207↔L — no hard anchor on the chain, invisible to
+  route-to-anchor bounds BY CONSTRUCTION) and within 41→167 (one re-grade
+  cannot redistribute 3-6 m profile moves).
+- Machinery in the tree, all gated: `_flex_route_bands` (route graph +
+  runway-centerline augmentation + per-ref anchors/exclusion), bounded
+  `_resmooth_runways_in_elev` (per-station demand bounds, iterative anchor
+  addition ≤8 rounds, threshold-envelope filter), orphan-node sync (LIVE,
+  ungated), per-ref reset-and-bound loop in `_relax_runway_and_resolve`.
 
 ### NEXT (priority order)
--1. **FLEX DEMAND SYNTHESIS (s68-close design, commit 9488cff has all machinery
-   gated `O4_FLEX_MIN_CLAMP`):** per-runway demand at each pavement contact =
-   **min( contact-edge excess after a HELD-runway pavement-saturation solve,
-   route-band justified depth )** — the first term is the user model verbatim
-   (pavement to max grade first → runway flexes the minimum so every junction
-   meets it; captures Exit-3's local 0.9 m which pure route-to-anchor bounds
-   cannot see — its pin is pavement-internal saturation #207↔L), the second
-   caps magnitude per the route doctrine (T4 stays ~108-110, not the chord
-   12 m). Then bounded re-smooth (envelope filter + iterative anchors, built)
-   and a FULL relief re-run against the committed profiles (single re-grade
-   cannot redistribute 3-6 m moves; within 41→167 in the route-flex test).
-   Route-flex test also CONFIRMED: 05C→110.9 ✓, 05L +3 m at A4 ✓ (split rule).
+1. **FLEX DEMAND SYNTHESIS** — per-runway demand at each pavement contact =
+   **min( contact-edge EXCESS after a HELD-runway pavement-saturation solve,
+   route-band justified depth )**. First term = the user model verbatim
+   ("pavement to max grade first, then the runway flexes the minimum so every
+   junction meets it") — gives direction+locality, captures Exit-3's 0.9 m;
+   second term caps magnitude per the route doctrine (T4 ~108-110, never the
+   chord 12 m). Feed as bounds to the bounded re-smooth, then a FULL relief
+   re-run against committed profiles (not just one re-grade). Validate: 05C
+   ~108-110, Exit-3 ≤1.5 %, within ≤ 36 and falling, CYXY/SPJC/SPLP suite
+   unchanged. Then default the gate ON.
+2. **s65 crossing-anchor injection fix** (runway_segments ~L973-1331): land the
+   agreed crossing E_x in the SECOND runway's profile (CYXY 14L/32R floats
+   695.9 vs 693.7); then lift the flex crossing guard.
+3. **Blast-pad segment seams** — extend the pavement-intersection seam
+   collection into the blast-pad zone (beyond thresholds) so junctions snap at
+   segment corners there (the #174/#286 join was a mid-edge insert because no
+   corner existed; user expects a segment).
+4. **Easy +0.22 m at #207** (enforcement convergence polish) — trims Exit-3
+   2.81→~2.5 % independent of item 1.
+5. **Groundside-emit coverage class** (HECA 7 / SPJC 1 / CYXY 2 gaps):
+   deconflict keep-largest + simplify(2.0) boundary movement (agent-diagnosed).
+6. **Short-span micro-bumps** #313/#252/#312/#314 (0.3-0.4 m over 7-16 m) +
+   the 23R-end squeeze cluster around #315 (A held by chain vs locked 60.7
+   threshold — shared corners verified EXACT; the "0.1 m" the user saw is
+   #315's over-cap interior descent, not a seam mismatch).
+7. Disconnected TX service-lane rects (15 at HECA) — groundside? (user call).
 
-0. **TERMINAL SEED vs the REAL chain metric (unblocks minimum-flex compliance;
-   commit c78e9b7 has the full machinery, gated `O4_FLEX_MIN_CLAMP`).**
-   Audited end-to-end: the binding terminal7→05C demand chain is REAL
-   (21 hops of real taxiway along-axis caps, 1,923 m, ceiling 104.16 — probe
-   /tmp/probes/s68_pathaudit.py), so the s65 "~108" was anchor-incomplete and
-   104.2 is the true minimal T4 dip. The gated clamp + bounded re-smooth
-   (terminals-only Dijkstra bands; iterative anchor addition; threshold-
-   envelope filter) now lands the profile EXACTLY on demand (05C min 104.2 ✓)
-   — but within rises to ~120 because the residual moves to chains the runway
-   cannot absorb (112.6 ceiling 51 m from the locked 116.5 23C threshold).
-   ROOT CAUSE one level up: `_seed_terminals_from_taxi_routes` uses taxi-ROUTE
-   distances (~3,100 m) where the real constraint-graph chain is 1,923 m →
-   terminals seeded ~2 m too low for minimum-flex compliance. FIX: seed/yield
-   terminals against the CONSTRAINT-GRAPH chain metric (cap-Dijkstra from
-   runway flat profiles over shape_constraints edges — the audit machinery),
-   then enable the gate by default → correct profile AND ~0 within together.
-   ⚠ do NOT lift bounds from threshold-anchored band paths along freed
-   runways (fictitious 1.5% rise-corridor, false 102.09 ceiling).
-1. **s65 crossing-anchor injection fix** (runway_segments ~L973-1331): make the
-   agreed crossing E_x actually land in the SECOND runway's profile; then lift
-   the demand-anchor crossing guard (CYXY currently masks the bug by reverting).
-2. **23R-threshold junction-cut sliver** (#174 ↔ junction, 5.76 %, 0.8 m/13.9 m)
-   — geometry fix at the cut source (Phase 2 of the solver plan).
-3. Remaining HECA ~7 unique: terminal7 marginals (0.4-0.7 m short spans), 05C
-   #147 local dip 2.28 % (demand-anchor transition steeper than chain measure —
-   check sample spacing), Exit-3 2.07 % residual, L#11 +0.04 % hairline.
-4. Groundside-emit coverage class (HECA 7 / SPJC 1 / CYXY 2 gaps) — deconflict
-   keep-largest + simplify(2.0) boundary movement (agent-diagnosed).
-5. Disconnected TX service-lane rects (15 at HECA) — should they be groundside
-   service roads? (user call).
-
+### Handover notes for the next session
+- **Tree state**: dev `7961235`, clean. Everything experimental is behind
+  `O4_FLEX_MIN_CLAMP` (default off) — shipping behavior = the user-approved
+  state. `O4_HOLE_ROUTER_V2` defaults ON (the new router IS shipping).
+- **Numbering**: shapeIDs in user conversation = standalone build numbering
+  (`/tmp/HECA_review.osm`-era); production patch = standalone+2 (memory).
+- **Measure**: build ≈90-120 s; `tools/check_grade.py /tmp/X.osm --top-n 40`;
+  runway profile probe pattern in /tmp/probes/s68_05c_profile.py; demand-path
+  audit /tmp/probes/s68_pathaudit.py; per-pass void/coverage attribution
+  pattern /tmp/probes/s68_allfn3.py + s68_vtrace2.py (function-wrap with a
+  RING-AREA metric — min-distance metrics get masked by legitimate touches).
+- **Restart Ortho4XP** after edits (module cache) before any in-sim check.
+- ⚠ Do NOT: raise terminals; use chord/constraint-graph chains as runway
+  demand magnitudes; apply flex bounds outside the bounded re-smooth; trust
+  `improved=rwy-grade-only` as a pavement gate (it commits do-nothing flexes).
 ---
 
 # Auto-Patch Status — session 67 = DEMAND-DRIVEN RUNWAY FLEX + TAXI-ROUTE TERMINAL SEED + SLOPING SQUEEZED TERMINALS (HECA 168→28)
