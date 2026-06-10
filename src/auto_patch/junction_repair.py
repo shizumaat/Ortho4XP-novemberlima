@@ -1475,6 +1475,110 @@ def _drop_off_source_residue(
     return len(to_drop)
 
 
+def _decompose_airside_holed_shapes(
+        layout: "PavementLayout",
+        icao: str = "",
+        min_hole_area_m2: float = 100.0,
+        ) -> int:
+    """Hole-free normalization of airside residue, run just before the
+    pre-solve node-unification.
+
+    Interior-ring holes cannot survive to the OSM patch (``to_osm``
+    writes exterior rings only), and ring-rebuilding passes silently
+    FILL them — ``_enforce_runway_1to1_sharing`` and the
+    ``_unify_airside_geometry`` weld both reconstruct
+    ``Polygon(exterior_pts)``.  A terminal pad wholly inside an apron
+    is carved out by the overlap-clip as an interior ring, so the
+    carve came back as a double-cover the moment a later pass rebuilt
+    the ring: KSDL terminal1 ∩ apron (1 030 m²), HECA ×3 — s70
+    Phoenix triage item 6.  Decompose each holed apron/junction into
+    hole-free pieces with conforming cuts
+    (``_decompose_polygon_with_holes``, the junction-emit machinery)
+    so there is no ring left to fill; cut endpoints land on canonical
+    nodes shared with the adjacent shapes (node-shared seam).
+
+    Returns the number of shapes decomposed.
+    """
+    holed: list[int] = []
+    for i, s in enumerate(layout.shapes):
+        if s.role not in (ROLE_APRON, ROLE_JUNCTION):
+            continue
+        p = s.polygon
+        if p is None or p.is_empty or p.geom_type != "Polygon":
+            continue
+        try:
+            if any(Polygon(h).area >= min_hole_area_m2
+                   for h in p.interiors):
+                holed.append(i)
+        except _GEOM_EXC:
+            continue
+    if not holed:
+        return 0
+    from .pavement.junctions import _decompose_polygon_with_holes
+    from .junction_rules import longest_runway_axis_deg
+    # Conforming-cut node set: canonical registry + every fixed-shape
+    # perimeter vertex (mirrors emit_junctions) so cut endpoints land
+    # on nodes adjacent shapes already own.
+    snap_pts: list[tuple[float, float]] = []
+    reg = getattr(layout, "canonical_points", None)
+    if reg is not None:
+        try:
+            snap_pts.extend(reg.points())
+        except _GEOM_EXC:
+            pass
+    fixed_roles = (ROLE_RUNWAY, ROLE_TERMINAL, ROLE_PRIMARY_PARALLEL,
+                   ROLE_SECONDARY_PARALLEL, ROLE_STUB,
+                   ROLE_CROSS_CONNECTOR)
+    for s in layout.shapes:
+        if s.role not in fixed_roles:
+            continue
+        if s.polygon is None or s.polygon.is_empty \
+                or s.polygon.geom_type != "Polygon":
+            continue
+        try:
+            c = list(s.polygon.exterior.coords)
+        except _GEOM_EXC:
+            continue
+        if c and c[0] == c[-1]:
+            c = c[:-1]
+        snap_pts.extend(c)
+    axis_deg = longest_runway_axis_deg(layout)
+    n_done = 0
+    new_shapes: list[BuiltShape] = []
+    for i in holed:
+        s = layout.shapes[i]
+        try:
+            pieces = _decompose_polygon_with_holes(
+                s.polygon, min_area_m2=50.0,
+                runway_axis_deg=axis_deg,
+                corner_snap_pts=snap_pts)
+        except _GEOM_EXC:
+            continue
+        pieces = [p for p in pieces
+                  if p is not None and p.geom_type == "Polygon"
+                  and not p.is_empty and p.area >= 50.0]
+        if not pieces:
+            continue
+        s.polygon = pieces[0]
+        s.node_altitudes = None
+        for p in pieces[1:]:
+            new_shapes.append(BuiltShape(
+                polygon=p, role=s.role, ref=s.ref,
+                altitude=s.altitude))
+        n_done += 1
+    if new_shapes:
+        layout.shapes.extend(new_shapes)
+    if n_done:
+        try:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: decomposed {n_done} holed "
+                f"apron/junction(s) into hole-free pieces "
+                f"(+{len(new_shapes)} shape(s)).")
+        except _GEOM_EXC:
+            pass
+    return n_done
+
+
 def _orient_rect_sloping_edge_first(coords: list, source_axis=None) -> list:
     """Rotate a 4-corner rect's vertex ring so edge ``(c0, c1)`` is a
     SLOPING edge (the side parallel to the rect's centerline, along

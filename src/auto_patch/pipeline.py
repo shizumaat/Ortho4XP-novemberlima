@@ -3166,6 +3166,17 @@ def build_airport_pavement(icao: str, xplane_root: str,
         from .junction_repair import _drop_off_source_residue
         _drop_off_source_residue(layout, icao=icao)
 
+        # Hole-free normalization: decompose any apron/junction still
+        # carrying an interior ring (e.g. the overlap-clip's carve of a
+        # wholly-contained terminal pad) into hole-free pieces with
+        # conforming cuts.  MUST run before _unify_airside_geometry —
+        # its weld rebuilds Polygon(exterior) and silently FILLS holes,
+        # re-covering the carved terminal (KSDL terminal1, HECA ×3);
+        # and to_osm writes exterior rings only, so a hole could never
+        # reach the patch anyway.
+        from .junction_repair import _decompose_airside_holed_shapes
+        _decompose_airside_holed_shapes(layout, icao=icao)
+
         # ── Airside node-unification (refactor Phases 6+7, PRE-solve) ──
         # Weld + full conformance + final corner snaps, run HERE so the solver
         # sees the FINAL node-set and grades every shared vertex to ONE
