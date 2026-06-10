@@ -1,4 +1,38 @@
-# Auto-Patch Status — session 73 = FLEX SYNTHESIS + SLOPING TERMINALS + JUNCTION VISIBILITY + DEADBAND LIVE; JOINT CORRIDOR-NETWORK SOLVE BUILT (gated OFF)
+# Auto-Patch Status — session 73 = FLEX SYNTHESIS + SLOPING TERMINALS + JUNCTION VISIBILITY + DEADBAND LIVE; JOINT CORRIDOR-NETWORK SOLVE BUILT (gated OFF); HECA GRAZE STEPS FIXED
+
+## ★★ SESSION 73 PART 8 (2026-06-10) — dev `bc04e91`: HECA 2 GRAZE STEPS → 0 (exact-corner pinch split) ★★
+The part-6 "REMAINING" item, root-caused by the prescribed in-build
+instrumentation (`O4_GRAZE_DEBUG` + solve-time ring dump,
+`/tmp/probes/s74_graze_site.py`).  The s73-p3 description was STALE: at
+HEAD the corners ARE attached — junction -10193's ring traces TX29
+corner-to-corner on the inner run (all 4 corners shared, the 144 m run
+coincident with TX29's long edge) — but the ring's OUTER boundary edge
+(e6, 314 m, alts 120.10→122.30) STILL runs collinear 0–0.5 m outside
+that same long edge, enclosing a ~35 m² sliver tongue.  e6's 314 m lerp
+vs TX29's plane (120.7→122.1 over the 144 m stretch) = exactly the
+0.51/0.66 m mid-edge steps.  The corner-insertion pass skipped it
+because its "already attached (exact ring vertex)" gate doesn't know the
+corner is attached on a DIFFERENT, non-incident edge.
+**FIX (pavement/vertices.py, `_insert_rect_corners_into_grazing_junction_edges`):**
+1. Exact corners now search NON-INCIDENT edges for a graze (incident
+   edges excluded — they legitimately use the corner).
+2. Inserting there pinches the ring at the corner (coordinate appears
+   twice → invalid).  The invalid-ring branch now resolves a deliberate
+   pinch via buffer(0): largest part keeps the slot, other parts ≥50 m²
+   re-added as junction shapes (vertex-push recovered-pieces contract,
+   NN-resampled altitudes), the zero-area sliver vanishes; area-
+   conservation guard (1 % + 50 m²) so a ring-fold that EATS a lobe
+   (s70 lesson) is never accepted.  Non-pinch invalids still skip.
+**MEASURED (HECA): exactly ONE pinch fires airport-wide — -10193 splits
+into its two real components (43,102 m² + 824 m²), each conformed
+corner-to-corner on its own short end of TX29; the long edge is now the
+true shared boundary.  Mid-edge steps 2→0, within 293 / cross 0 / v2e 0
+unchanged, verify byte-identical.  Suite 307p/2f, same 2 fails, NO new
+failures: HECA's gate is now red on the within-293 evaluation-state
+residue ONLY (caps are 0; pre-fix it failed at the steps assert first);
+SPLP = the deferred lump.  SPJC + CYXY green, HECA/SPJC vertical-curve
+XPASS kept.**  Note: suite ran on dev AFTER the part-7 joint-corridor
+merge (`8db08fb`) — validates the combined tree.
 
 ## ★★ SESSION 73 PART 7 (2026-06-10) — branch `joint-corridor-solve`
 ## (worktree `.claude/worktrees/joint-corridor-solve`, commit `8306827`):
@@ -78,13 +112,10 @@ borders a rect/runway without shared nodes:
    16.26; both endpoints on the plane ⇒ the straight edge lerps along it.
 **SPJC gate GREEN (2 steps → 0). Suite 307p/2f, no new failures.**
 REMAINING:
-- **HECA's 2 graze steps** (junction -10193 ↔ TX29): deviation peaks
-  MID-EDGE (no vertex to snap) and at SOLVE-time geometry TX29's corners do
-  NOT present as insertion candidates (only the emitted ring shows 0.01/0.49
-  lateral — solve-time differs, or the near-vertex skip eats it).  Needs
-  instrumentation inside the build at the -10193 site (probe pattern:
-  O4_GRAZE_DEBUG candidate dump + a solve-time ring dump around
-  (30.1010,31.4050)).
+- **HECA's 2 graze steps** (junction -10193 ↔ TX29) — ✅ FIXED in part 8
+  (dev `bc04e91`, exact-corner pinch split; the "solve-time differs"
+  hypothesis was wrong — the corners were exact ring vertices on the
+  inner run and the gate skipped them).
 - SPLP 1 × 0.4 m junction lump — deferred (user) pending the JOINT
   CORRIDOR-NETWORK SOLVE (part 5).
 
