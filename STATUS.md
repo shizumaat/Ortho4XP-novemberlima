@@ -1,4 +1,49 @@
-# Auto-Patch Status — session 73 = FLEX DEMAND SYNTHESIS BUILT → MERGED + GATE ON + SLOPING TERMINALS (in-sim evaluation state)
+# Auto-Patch Status — session 73 = FLEX DEMAND SYNTHESIS MERGED + GATE ON + SLOPING TERMINALS + JUNCTION VISIBILITY + ROUTE DEADBAND (in-sim evaluation state)
+
+## ★★ SESSION 73 PART 3 (2026-06-10) — dev `bb74ed4`: JUNCTION VISIBILITY + ROUTE-NOISE DEADBAND ★★
+User analysis session ("why is T4 110.9 / A4 rising / #291 flat?") produced two
+fixes + the #3 design direction (deferred until after in-sim test):
+1. **Junctions grade through `_visible_grade_edges`** with chords tested
+   against the **AIRSIDE-PAVEMENT UNION** (a cross-notch chord over a
+   neighbour's pavement = real grade path; over a true void = excluded).
+   The all-pair web had pinned long-armed junctions near-flat with fictitious
+   cross-arm chords (#291: 71/228 chords outside the polygon; its 6 tightest
+   all fictitious) so the taxiway-T grade piled into #75 (4.1 %) instead of
+   flowing #16→#291→#75.  check_grade has visibility-gated junctions since
+   s62 — solver now matches.  Result: #291 slopes, #75 4.12→3.44 %, U
+   12.6→10.1 %, **SPLP grade gate GREEN (first since s62 — its stub/B class
+   was junction-pinned). Suite 307p/2f.**
+2. **Route-noise deadband** (`_ROUTE_NOISE_FRAC = 0.04`) in the demand
+   synthesis: traced the A4 floor to the T4 contact at 3,217 m route where
+   reality (A4≈60, T4≈110, ≤1.5 %) needs ≥3,353 m — the route graph
+   under-counts ~4 % (straight endpoint stubs: 125 m on this corridor;
+   uncurved row joins).  A route demand below 4 %·cap·route_d no longer
+   flexes a runway; clearing demands keep FULL depth (threshold semantics —
+   shrinking by noise under-flexes T4).  **05L back to exactly 57.9–60.7
+   (user real-world ✓), T4 keeps 110.9, Exit-3 stays clean** (its dip now
+   0.66 m chain-driven; the chain drains via sloping junctions/pads).
+   `_flex_route_bands` returns per-bound binding-anchor distances.
+   Per-role cap integration along routes = currently a NO-OP (every pavement
+   role caps 1.5 % in config) — only worth building when caps diverge.
+- **05C now also carries a small route-justified rise near 23C (max 117.1,
+  +0.6)** — the 05R-network corridor demand; symmetric flex, env-feasible.
+- **★ KNOWN NEW RESIDUAL (geometry, next session): 2 mid-edge steps (0.66 m
+  worst)** — junction `-10193`'s 314 m edge GRAZES rect TX29's long edge for
+  ~140 m (lateral 0.49→0.01 m) with NO shared vertices, so its straight lerp
+  cannot follow the rect plane once the junction slopes (the other side of
+  the same junction shares the edge line and matches the plane EXACTLY).
+  Altitude-only snap measured 0 applicable vertices (deviation peaks
+  mid-edge).  FIX = pre-solve conformance: conform grazing junction edges to
+  the rect corner projections (the s68 `_near_edge_line` coincident-run
+  class).  HECA's grade gate now fails on exactly these 2 steps.
+- **#3 (user-approved direction, START AFTER IN-SIM VERDICT): route-field
+  model** — long-range pavement law = taxi-route distance from all anchors
+  (per-role caps integrated along the path), visibility geodesic demoted to
+  a LOCAL smoothness cap (~60–100 m pairs), validator changed identically.
+  Derivation in the s73 conversation: real-world T4≈110/terminal7≈70 with a
+  2,030 m in-polygon chord is only possible if the real pavement is
+  interrupted — km-scale chords systematically under-measure; terminals then
+  EMERGE at their route positions (no seeds needed).
 
 ## ★★ SESSION 73 PART 2 (2026-06-10) — dev `6be62f6`: EVALUATION STATE LIVE ★★
 User call after part 1's arbitration writeup: **see it in-sim with the gate on
