@@ -75,20 +75,26 @@ pytestmark = [
 # SPJC RE-CUT again 2026-06-09 (later): runway-disconnected aprons →
 # groundside (user rule: an apron must have a touch-chain to a runway);
 # 2 terminal-curbside aprons reclassified (apron 21->19, groundside 3->5).
+# SPJC RE-CUT 2026-06-10: third-party DSF pavement admission by MATERIAL
+# DESCRIPTOR (config.DSF_PAVEMENT_MATERIAL_TOKENS — "asphalt"/"concrete"
+# + FR/DE/ES/IT/PT equivalents, per user): the pack's CDB-Library /
+# aericaps asphalt .pol polygons are now part of the pavement source,
+# which re-shapes the rect/junction split (junction 42->26,
+# primary_parallel 28->19, stub 18->11, apron 19->16; total 1312->1271).
 SPJC_BASELINE: Dict[str, int] = {
-    "apron":              18,   # of  19 target
+    "apron":              15,   # of  16 target
     "boundary":          977,   # of 1028 target
     "cross_connector":     8,   # of   8 target
-    "junction":           40,   # of  42 target
-    "primary_parallel":   27,   # of  28 target
+    "junction":           25,   # of  26 target
+    "primary_parallel":   18,   # of  19 target
     "retaining_wall":     65,   # of  68 target
     "runway":             28,   # of  30 target
     "secondary_parallel":  6,   # of   6 target
-    "stub":               17,   # of  18 target
+    "stub":               10,   # of  11 target
     "terminal":            2,   # of   2 target
     "tunnel_ramp":        34,   # of  36 target
 }
-SPJC_BASELINE_TOTAL = 1246  # of 1312 target (emitted)
+SPJC_BASELINE_TOTAL = 1207  # of 1271 target (emitted)
 
 # SPLP is cross-tile (spans -13/-77 and -13/-78).  Each tile-half has
 # its own baseline; a regression in either half trips the gate.

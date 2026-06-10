@@ -194,17 +194,27 @@ EMIT_BRIDGES_AND_TUNNELS = True
 # whichever apt.dat is picked.
 LOAD_DSF_PAVEMENT = True
 
-# Third-party DSF pavement allowlist (user 2026-06-10, KPHX south
-# aprons): library prefixes (lowercase, prefix match) whose ``.pol``
-# defs are trusted as BASE pavement when the path also names a
-# pavement material (concrete/asphalt/…).  Kept deliberately narrow:
-# blanket material-token admission regressed the SPJC compare-target
-# (CDB-Library / aericaps "tarmac"/"asphalt" overlays), and even
-# MisterX_Library/Ground_Textures flooded KSDL (222 DSF polys kept,
-# clean verify → short_edge/cross/steps noise).  Extend per-library
-# only after verifying the affected airports.
-DSF_THIRD_PARTY_PAVEMENT_PREFIXES = (
-    "zdp_library/",
+# Third-party DSF pavement descriptors (user 2026-06-10, KPHX south
+# aprons): a third-party ``.pol`` is trusted as BASE pavement when its
+# path contains one of these material descriptors — the common naming
+# convention across scenery libraries (ZDP_Library/.../concrete/flat/
+# Flat_New_Uniform.pol, MisterX_Library/Ground_Textures/Asphalt_2_
+# Base.pol, …).  Per user: "asphalt" and "concrete" plus their French,
+# German, Spanish, Italian and Portuguese equivalents.  Decorative /
+# non-pavement uses of the same words (lines, markings, stains, …) are
+# rejected by the skip-token list in ``dsf_reader``.
+DSF_PAVEMENT_MATERIAL_TOKENS = (
+    # English
+    "asphalt", "concrete",
+    # French (asphalte, béton)
+    "asphalte", "beton", "béton",
+    # German (Asphalt — same spelling — and Beton, covered above)
+    # Spanish (asfalto, hormigón / concreto)
+    "asfalto", "hormigon", "hormigón", "concreto",
+    # Italian (asfalto — same as Spanish — and calcestruzzo)
+    "calcestruzzo",
+    # Portuguese (asfalto — covered — and betão / concreto — covered)
+    "betao", "betão",
 )
 
 

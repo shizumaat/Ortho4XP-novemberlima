@@ -88,18 +88,14 @@ _PAVEMENT_SKIP = (
 # ``.pol`` IS sometimes the BASE pavement, not an overlay —
 # ``ZDP_Library/ground_textures/concrete/flat/Flat_New_Uniform.pol``
 # carries KPHX's south aprons with NO apt.dat row-110 beneath them.
-# Admit third-party defs only when (a) the library prefix is on the
-# config allowlist (``DSF_THIRD_PARTY_PAVEMENT_PREFIXES`` — blanket
-# material-token admission regressed the SPJC compare-target via
-# CDB-Library/aericaps overlays), (b) the path names a pavement
-# MATERIAL, and (c) nothing decorative; the pipeline's geometric
-# overlay gate (a polygon ≥ 80 % inside the apt.dat union is
-# dropped) additionally keeps overlays painted ON apt.dat pavement
-# out of the layout.
-from .config import DSF_THIRD_PARTY_PAVEMENT_PREFIXES
-_PAVEMENT_MATERIAL_TOKENS = (
-    "concrete", "asphalt", "tarmac", "cement", "pavement",
-)
+# Admit third-party ``.pol`` defs by MATERIAL DESCRIPTOR in the path
+# (the common library naming convention; token list in config —
+# "asphalt"/"concrete" + FR/DE/ES/IT/PT equivalents per user), with
+# nothing decorative in the path; the pipeline's geometric overlay
+# gate (a polygon ≥ 80 % inside the apt.dat union is dropped)
+# additionally keeps overlays painted ON apt.dat pavement out of the
+# layout.
+from .config import DSF_PAVEMENT_MATERIAL_TOKENS
 _THIRD_PARTY_SKIP_TOKENS = _PAVEMENT_SKIP + (
     "grass", "terrain", "dirt", "gravel", "soil", "mud", "snow",
     "paint", "line", "marking", "light", "decal", "sign", "logo",
@@ -154,9 +150,7 @@ def _is_pavement_def(path: str) -> bool:
     if any(p.startswith(prefix) for prefix in _PAVEMENT_PREFIXES):
         return not any(s in p for s in _PAVEMENT_SKIP)
     if (p.endswith(".pol")
-            and any(p.startswith(prefix)
-                    for prefix in DSF_THIRD_PARTY_PAVEMENT_PREFIXES)
-            and any(t in p for t in _PAVEMENT_MATERIAL_TOKENS)):
+            and any(t in p for t in DSF_PAVEMENT_MATERIAL_TOKENS)):
         return not any(s.lower() in p for s in _THIRD_PARTY_SKIP_TOKENS)
     return False
 
