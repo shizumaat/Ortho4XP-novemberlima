@@ -39,6 +39,19 @@ Suite **304 passed / 3 failed** (intentional HECA/SPLP/SPJC gates; CYXY green).
    forms). Crossing guard also stays (s65 CYXY injection bug).
 
 ### NEXT (priority order)
+-1. **FLEX DEMAND SYNTHESIS (s68-close design, commit 9488cff has all machinery
+   gated `O4_FLEX_MIN_CLAMP`):** per-runway demand at each pavement contact =
+   **min( contact-edge excess after a HELD-runway pavement-saturation solve,
+   route-band justified depth )** — the first term is the user model verbatim
+   (pavement to max grade first → runway flexes the minimum so every junction
+   meets it; captures Exit-3's local 0.9 m which pure route-to-anchor bounds
+   cannot see — its pin is pavement-internal saturation #207↔L), the second
+   caps magnitude per the route doctrine (T4 stays ~108-110, not the chord
+   12 m). Then bounded re-smooth (envelope filter + iterative anchors, built)
+   and a FULL relief re-run against the committed profiles (single re-grade
+   cannot redistribute 3-6 m moves; within 41→167 in the route-flex test).
+   Route-flex test also CONFIRMED: 05C→110.9 ✓, 05L +3 m at A4 ✓ (split rule).
+
 0. **TERMINAL SEED vs the REAL chain metric (unblocks minimum-flex compliance;
    commit c78e9b7 has the full machinery, gated `O4_FLEX_MIN_CLAMP`).**
    Audited end-to-end: the binding terminal7→05C demand chain is REAL
