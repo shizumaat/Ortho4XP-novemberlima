@@ -34,6 +34,7 @@ __all__ = [
     "TAXI_MAX_GRADE",
     "APRON_MAX_GRADE",
     "TERMINAL_MAX_GRADE",
+    "TERMINAL_PADS_SLOPE",
     "SERVICE_ROAD_MAX_GRADE",
     "SERVICE_ROAD_WIDTH_M",
     "MIN_SERVICE_STRIP_LEN_M",
@@ -218,6 +219,14 @@ APRON_MAX_GRADE = 0.015         # apron / junction body, all directions (user 20
 # grade VALIDATOR (tools/check_grade.py, via ROLE_GRADE_LIMITS) holds terminals to,
 # so the test always checks whatever the config says for each role.
 TERMINAL_MAX_GRADE = APRON_MAX_GRADE
+# Let EVERY terminal pad slope (up to TERMINAL_MAX_GRADE) through the same
+# visibility-graph path as aprons, instead of the rigid-flat default with
+# squeezed-pad exceptions.  Evaluation state (user 2026-06-10): with the flex
+# demand synthesis landing runways on the route-justified profiles (HECA 05C
+# min 110.9, not the rejected 104.4 over-dip), the chain tension the over-dip
+# used to absorb must drain into the terminals.  Set False to restore the
+# rigid-flat default (squeezed pads still slope via the seed marking).
+TERMINAL_PADS_SLOPE = True
 SERVICE_ROAD_MAX_GRADE = 0.040  # ground-vehicle route (apt.dat 1206 + OSM small roads) — cars handle 4%
 # Ground-vehicle 4%-grade ``service_road`` rect geometry (session 47).
 SERVICE_ROAD_WIDTH_M = 6.0          # corridor width for a service-road rect

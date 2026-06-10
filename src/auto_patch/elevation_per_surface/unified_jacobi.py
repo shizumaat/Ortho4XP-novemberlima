@@ -53,7 +53,7 @@ from shapely.errors import GEOSException, TopologicalError
 
 from auto_patch.config import (
     ROLE_GRADE_LIMITS, RUNWAY_END_FRACTION, RUNWAY_END_GRADE,
-    RUNWAY_MAX_GRADE)
+    RUNWAY_MAX_GRADE, TERMINAL_PADS_SLOPE)
 from auto_patch.elevation import (
     APRON_MAX_GRADE, SERVICE_ROAD_MAX_GRADE, TAXI_MAX_GRADE)
 from auto_patch.layout import (
@@ -379,6 +379,28 @@ def solve(layout, icao: str,
         _enforce_within_shape_grade(
             elev, shape_constraints, base_hard,
             nodes=nodes, layout=layout, bucket_to_idx=bucket_to_idx, icao=icao)
+        # SLOPING-PAD POLISH (TERMINAL_PADS_SLOPE, s73): the global POCS
+        # plateaus before converging terminal INTERIORS (s67 measured:
+        # terminal4 carries 12 % lumps globally yet grades to 0 violations
+        # in 25 ISOLATED cap-projection sweeps).  Per-pad isolated polish:
+        # hold every node the pad shares with another shape (+ hard
+        # anchors) so seams cannot move, cap-project the pad's private
+        # nodes on its own visibility edges.  Seam-preserving by
+        # construction — cross/v2e/mid metrics untouched.
+        if TERMINAL_PADS_SLOPE:
+            owners: dict = {}
+            for sc in shape_constraints:
+                for i in sc["nodes"]:
+                    owners[i] = owners.get(i, 0) + 1
+            for sc in shape_constraints:
+                if sc["role"] != ROLE_TERMINAL or not sc["edges"]:
+                    continue
+                held_t = {i for i in sc["nodes"]
+                          if base_hard[i] or owners.get(i, 0) > 1}
+                if len(held_t) == len(sc["nodes"]):
+                    continue
+                _project_shape(elev, sc["nodes"], held_t, sc["edges"],
+                               False)
 
     n_terms, n_rects, n_juncs = _writeback(
         layout, elev, bucket_to_idx)
@@ -1181,15 +1203,17 @@ def _build_shape_constraints(layout, bucket_to_idx):
         if len(nodes) < 2:
             continue
         cap = _role_grade(s.role)
-        # Terminals are rigid FLAT pads by DEFAULT (flatness preferred), even
-        # though the terminal cap (``TERMINAL_MAX_GRADE``) is > 0 — that config
-        # value is the MAX a terminal MAY slope, not a mandate that every pad
-        # grade.  Only a pad the taxi-route seed marked SQUEEZED (it straddles a
-        # low and a high runway and cannot be one level in grade to both) grades,
-        # at the terminal cap, through the visibility graph — so it keeps the
-        # minimum cross-pad slope the seed set (user 2026-06-09: flatness yields
-        # to grade, but ONLY where grade demands it).
-        if s.role == ROLE_TERMINAL:
+        # Terminal pads: with ``config.TERMINAL_PADS_SLOPE`` (evaluation state,
+        # user 2026-06-10) EVERY pad may slope up to the terminal cap through
+        # the visibility graph, like an apron — the route-justified runway
+        # profiles (05C 110.9, not the rejected 104.4 over-dip) leave chain
+        # tension only the terminals can drain.  With it False, pads are rigid
+        # FLAT by default (flatness preferred — the config cap is the MAX a
+        # terminal MAY slope, not a mandate) and only a pad the taxi-route
+        # seed marked SQUEEZED (straddles a low and a high runway, cannot be
+        # one level in grade to both) grades at the cap (user 2026-06-09:
+        # flatness yields to grade, but ONLY where grade demands it).
+        if s.role == ROLE_TERMINAL and not TERMINAL_PADS_SLOPE:
             _sloped = getattr(layout, "_sloped_terminal_nodes", None)
             if not (_sloped and any(i in _sloped for i in nodes)):
                 cap = 0.0
@@ -2167,14 +2191,16 @@ def _relax_runway_and_resolve(n, elev, layout, bucket_to_idx, base_hard,
     rwy_g0, rwy_curv0 = _runway_profile_compliance(
         layout, snapshot0, bucket_to_idx)
     _dbg = _os.environ.get("O4_FLEX_DEBUG") == "1"
-    # FLEX DEMAND SYNTHESIS gate (s68-close design).  Only when the airport
-    # has NO runway-runway crossings (interim guard, 2026-06-09): with a
-    # crossing, anchoring the flexed second runway COMMITS the dormant
-    # crossing-anchor injection bug (s65 OPEN — the agreed E_x never lands in
-    # the second runway's profile; CYXY 14L/32R floats to 695.9 vs 02/20's
-    # 693.7).  Lift this guard when the injection fix lands in runway_segments.
+    # FLEX DEMAND SYNTHESIS gate (s68-close design; DEFAULT ON since s73 —
+    # user 2026-06-10 evaluation; O4_FLEX_MIN_CLAMP=0 restores the legacy
+    # combined-band flex).  Only when the airport has NO runway-runway
+    # crossings (interim guard, 2026-06-09): with a crossing, anchoring the
+    # flexed second runway COMMITS the dormant crossing-anchor injection bug
+    # (s65 OPEN — the agreed E_x never lands in the second runway's profile;
+    # CYXY 14L/32R floats to 695.9 vs 02/20's 693.7).  Lift this guard when
+    # the injection fix lands in runway_segments.
     _clamp_on = (not crossing
-                 and _os.environ.get("O4_FLEX_MIN_CLAMP") == "1")
+                 and _os.environ.get("O4_FLEX_MIN_CLAMP", "1") == "1")
     if _dbg:
         print(f"[flex] seam_pinned={len(seam_pinned)} "
               f"seam_keys={len(getattr(layout, '_seam_anchor_keys', None) or [])} "
