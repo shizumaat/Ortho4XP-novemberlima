@@ -276,6 +276,22 @@ def emit_terrain_transition_features(layout: PavementLayout, icao: str, xplane_r
                     f"polygon(s) from terminal/airside (clearance gap).")
         except _GEOM_EXC:
             pass
+        # Chord grade limit — LAST groundside-altitude writer: pull every
+        # groundside field to the largest 4 %-Lipschitz field ≤ DEM over
+        # straight-line pairs (the within-shape validator metric; the
+        # ring-ramp limit alone leaves hillside pieces >4 % across the
+        # interior).  Must follow the separation above, which re-derives
+        # DEM altitudes for clipped results.
+        try:
+            from .groundside import _grade_limit_groundside_chords
+            n_gl = _grade_limit_groundside_chords(layout)
+            if n_gl:
+                UI.vprint(1,
+                    f"  [pav-builder] chord-grade-limited {n_gl} "
+                    f"groundside polygon(s) to "
+                    f"{100 * 0.04:.0f}%.")
+        except _GEOM_EXC:
+            pass
         # Then emit DEM-bridge polygons inside the boundary
         # wherever the clamped boundary altitude differs from
         # raw DEM by > 5 m (per user 2026-04-28).  Kept POST-solve:

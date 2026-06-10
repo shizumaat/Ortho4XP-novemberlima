@@ -236,6 +236,76 @@ def _dem_follow_polygon(p, _dem_at, densify_step_m: float = 15.0,
     return new_poly, alts + [alts[0]]
 
 
+def _grade_limit_groundside_chords(layout) -> int:
+    """Pull every groundside shape's altitude field down to the largest
+    ``GROUNDSIDE_MAX_GRADE``-Lipschitz field ≤ its current (DEM) values,
+    measured over straight-line CHORD pairs — the within-shape validator
+    metric.  ``_dem_follow_polygon``'s ring-ramp limit only bounds
+    CONSECUTIVE ring vertices; a ring-compliant hillside piece still
+    reads >4 % across its interior (HECA #230: 4.7-5.5 %).  Shared
+    boundary nodes are UNIFIED across shapes (keyed by rounded coords)
+    so abutting groundside pieces stay flush.  Runs ONCE, late, over
+    ALL groundside shapes regardless of which pass created them.
+    Returns the number of shapes whose altitudes changed."""
+    node_alt: dict = {}
+    rings: dict = {}
+    for i, s in enumerate(layout.shapes):
+        if s.role != ROLE_GROUNDSIDE_PAVEMENT:
+            continue
+        if (s.polygon is None or s.polygon.is_empty
+                or s.polygon.geom_type != "Polygon"):
+            continue
+        if not s.node_altitudes:
+            continue
+        try:
+            ring = list(s.polygon.exterior.coords)
+        except _GEOM_EXC:
+            continue
+        if ring and ring[0] == ring[-1]:
+            ring = ring[:-1]
+        alts = list(s.node_altitudes)
+        if len(alts) == len(ring) + 1:
+            alts = alts[:-1]
+        if len(alts) != len(ring) or len(ring) < 3:
+            continue
+        keys = [(round(x, 2), round(y, 2)) for x, y in ring]
+        rings[i] = keys
+        for kxy, a in zip(keys, alts):
+            v = float(a)
+            node_alt[kxy] = min(node_alt.get(kxy, v), v)
+    if not rings:
+        return 0
+    for _sweep in range(4):
+        changed = False
+        for i, keys in rings.items():
+            m = len(keys)
+            for ai in range(m):
+                xa, ya = keys[ai]
+                best = node_alt[keys[ai]]
+                for bj in range(m):
+                    if bj == ai:
+                        continue
+                    xb, yb = keys[bj]
+                    dd = math.hypot(xa - xb, ya - yb)
+                    cap = node_alt[keys[bj]] + GROUNDSIDE_MAX_GRADE * dd
+                    if cap < best:
+                        best = cap
+                if best < node_alt[keys[ai]] - 1e-6:
+                    node_alt[keys[ai]] = best
+                    changed = True
+        if not changed:
+            break
+    n_changed = 0
+    for i, keys in rings.items():
+        s = layout.shapes[i]
+        alts = [round(node_alt[k], 1) for k in keys]
+        closed = alts + [alts[0]]
+        if closed != list(s.node_altitudes):
+            s.node_altitudes = closed
+            n_changed += 1
+    return n_changed
+
+
 def _perimeter_frac_near(poly, region, radius_m: float = 1.5,
                          step_m: float = 1.5) -> float:
     """Fraction of ``poly``'s exterior perimeter lying within ``radius_m``

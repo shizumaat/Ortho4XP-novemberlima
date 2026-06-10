@@ -3062,10 +3062,12 @@ def _reclassify_runway_disconnected_to_groundside(
     from .groundside import (
         _dem_follow_polygon, _dem_sampler,
         _separate_groundside_from_airside)
+    from .config import GROUNDSIDE_MAX_GRADE
     _dem_at = (_dem_sampler(layout, dem, tile_lat, tile_lon)
                if dem is not None else None)
     n_reclassified = 0
     n_rect_orphans = 0
+    converted: list[int] = []         # layout indices, for the cluster limit
     for k, i in enumerate(idxs):
         if k in seen:
             continue
@@ -3084,18 +3086,23 @@ def _reclassify_runway_disconnected_to_groundside(
                 s.polygon, s.node_altitudes = built
             s.role = ROLE_GROUNDSIDE_PAVEMENT
             s.ref = "groundside"
+            converted.append(i)
             n_reclassified += 1
         elif s.role in (ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
                         ROLE_STUB, ROLE_CROSS_CONNECTOR):
             n_rect_orphans += 1
+
+    # New groundside members must honour the no-shared-boundary
+    # invariant vs terminals / airside (clearance clip).  MUST run
+    # BEFORE the chord grade limit below — it re-derives DEM altitudes
+    # for clipped results and would overwrite the limited field.
     if n_reclassified and dem is not None:
-        # New groundside members must honour the no-shared-boundary
-        # invariant vs terminals / airside (clearance clip).
         try:
             _separate_groundside_from_airside(
                 layout, dem, tile_lat, tile_lon)
         except _GEOM_EXC:
             pass
+
     if n_reclassified or n_rect_orphans:
         try:
             UI.vprint(1,

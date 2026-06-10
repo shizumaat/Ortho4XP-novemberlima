@@ -1657,7 +1657,8 @@ def _runway_centerline_chain(layout, bucket_to_idx, rects):
     return positions, L
 
 
-def _resmooth_runways_in_elev(layout, elev, bucket_to_idx, anchored_nodes):
+def _resmooth_runways_in_elev(layout, elev, bucket_to_idx, anchored_nodes,
+                              demand_ref=None):
     """Re-fit every runway's centerline elevations IN ``elev`` to an FAA grade +
     vertical-curve compliant profile (``runway_segments.faa_joint_solve``),
     anchored at ``anchored_nodes`` (thresholds + seam-pinned + flex demand-anchors).
@@ -1686,6 +1687,31 @@ def _resmooth_runways_in_elev(layout, elev, bucket_to_idx, anchored_nodes):
                  for p in positions]
         anchored = [any(i in anchored_nodes for i in p["idxs"])
                     for p in positions]
+        # DEMAND ANCHOR (re-hosted from s64's _flex_demand_anchors,
+        # removed in s67; regressed for LOCAL single-connection demands
+        # — Phase-0 2026-06-09 measured the re-smooth UNDOING the band
+        # solve's settled profile, pavement violations 57→137): anchor
+        # the ONE interior point per runway the band solve displaced
+        # the most from its pre-flex profile (``demand_ref``), so
+        # ``faa_joint_solve`` grades threshold→demand-point→threshold
+        # instead of filling the lone dip/rise back toward terrain.
+        # Only the WORST point — anchoring shallow secondary dips pins
+        # the runway high and reverts (s64 lesson).  Direction-agnostic
+        # (symmetric flex, user 2026-06-09).
+        if demand_ref is not None:
+            best_k = -1
+            best_dev = 0.05            # ignore sub-5 cm noise
+            for k, p in enumerate(positions):
+                if anchored[k]:
+                    continue
+                dev = abs(
+                    sum(elev[i] - demand_ref[i] for i in p["idxs"])
+                    / len(p["idxs"]))
+                if dev > best_dev:
+                    best_dev = dev
+                    best_k = k
+            if best_k >= 0:
+                anchored[best_k] = True
         if not any(anchored):
             anchored[0] = anchored[-1] = True       # fallback: pin the ends
         # NO flat-seed: preserve the runway's settled (incoming) profile and let
@@ -1823,9 +1849,18 @@ def _relax_runway_and_resolve(n, elev, layout, bucket_to_idx, base_hard,
             # and re-smooth only to fold in the FAA vertical-curve / end-grade the
             # band solve doesn't model, anchored at the locked thresholds (the
             # interior keeps its demanded levels where FAA-compliant).
+            # Demand anchor only when the airport has NO runway-runway
+            # crossings (interim guard, 2026-06-09): with a crossing,
+            # anchoring the flexed second runway COMMITS the dormant
+            # crossing-anchor injection bug (s65 OPEN #1 — the agreed
+            # E_x never lands in the second runway's profile; CYXY
+            # 14L/32R floats to 695.9 vs 02/20's 693.7, 10 cross
+            # violations at the shared corners).  Lift this guard when
+            # the injection fix lands in runway_segments.
             _resmooth_runways_in_elev(
                 layout, elev, bucket_to_idx,
-                thresh | seam_pinned | crossing)
+                thresh | seam_pinned | crossing,
+                demand_ref=(snapshot0 if not crossing else None))
             # Re-grade the pavement against the smoothed, HELD runway: hold the
             # WHOLE runway so the band solve cannot re-pull its interior down
             # toward low aprons (which would undo the flat profile).
