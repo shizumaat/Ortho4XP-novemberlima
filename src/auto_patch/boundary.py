@@ -76,7 +76,107 @@ __all__ = [
     "_snap_bridge_vertices_to_runway_corners",
     "_insert_bridge_contacts_into_junctions",
     "_flatten_bridge_pinch_necks",
+    "_despike_airport_boundary",
 ]
+
+
+# Row-130 needle removal (``_despike_airport_boundary``).  A vertex is a
+# digitization NEEDLE when its interior wedge is sharper than the apex
+# threshold AND dropping it changes the ring area by less than the area
+# threshold — a sharp, near-zero-area zigzag no real airport fence has
+# (HEAZ @ 30.10017,31.35442: 50.6° apex, 10.4 m / 4.4 m legs, ~18 m²).
+# Real acute boundary corners enclose far more area than 150 m²; the
+# ribbon's miter at any apex sharper than ~60° exceeds short legs and
+# folds the strip over itself (boundary∩boundary overlap).
+_BOUNDARY_SPIKE_MAX_APEX_DEG = 60.0
+_BOUNDARY_SPIKE_MAX_AREA_M2 = 150.0
+
+
+def _despike_airport_boundary(
+        poly: Polygon,
+        max_apex_deg: float = _BOUNDARY_SPIKE_MAX_APEX_DEG,
+        max_spike_area_m2: float = _BOUNDARY_SPIKE_MAX_AREA_M2,
+        icao: str = "") -> Polygon:
+    """Remove digitization needle vertices from a row-130 boundary
+    polygon (meter space).  Returns the cleaned polygon, or the input
+    unchanged when nothing qualifies or the cleaned ring degenerates.
+
+    The apt.dat row-130 ring is traced by hand and occasionally contains
+    a needle — a vertex whose two edges double back at a sharp angle
+    enclosing almost no area.  The boundary ribbon (a
+    ``BOUNDARY_STRIP_HALF_WIDTH_M`` band following the ring) needs a
+    miter longer than the needle's legs at such an apex, so consecutive
+    ribbon pieces fold over each other and emit overlapping pavement
+    (HEAZ #448∩#449/#450).  Dropping the apex vertex is a faithful
+    cleanup: the enclosed area is below mapping resolution.
+    """
+    if poly is None or poly.is_empty or poly.geom_type != "Polygon":
+        return poly
+    cos_max = math.cos(math.radians(max_apex_deg))
+    n_removed = 0
+
+    def _despike_ring(coords: list) -> list:
+        nonlocal n_removed
+        pts = list(coords)
+        if len(pts) >= 2 and pts[0] == pts[-1]:
+            pts = pts[:-1]
+        changed = True
+        while changed and len(pts) > 3:
+            changed = False
+            for i in range(len(pts)):
+                px, py = pts[i - 1]
+                cx, cy = pts[i]
+                nx, ny = pts[(i + 1) % len(pts)]
+                v1x, v1y = px - cx, py - cy
+                v2x, v2y = nx - cx, ny - cy
+                n1 = math.hypot(v1x, v1y)
+                n2 = math.hypot(v2x, v2y)
+                if n1 < 1e-9 or n2 < 1e-9:
+                    # Doubled vertex — drop it.
+                    del pts[i]
+                    n_removed += 1
+                    changed = True
+                    break
+                # cos(apex) > cos(threshold) ⇔ apex < threshold.
+                cos_apex = (v1x * v2x + v1y * v2y) / (n1 * n2)
+                if cos_apex <= cos_max:
+                    continue
+                tri = 0.5 * abs((cx - px) * (ny - py)
+                                - (cy - py) * (nx - px))
+                if tri >= max_spike_area_m2:
+                    continue
+                del pts[i]
+                n_removed += 1
+                changed = True
+                break
+        return pts
+
+    try:
+        ext = _despike_ring(poly.exterior.coords)
+        if len(ext) < 3:
+            return poly
+        holes = []
+        for ring in poly.interiors:
+            h = _despike_ring(ring.coords)
+            if len(h) >= 3:
+                holes.append(h)
+        if not n_removed:
+            return poly
+        cleaned = Polygon(ext, holes or None)
+        if not cleaned.is_valid:
+            cleaned = cleaned.buffer(0)
+        if (cleaned.is_empty or cleaned.geom_type != "Polygon"
+                or cleaned.area < 0.99 * poly.area):
+            return poly
+    except _GEOM_EXC:
+        return poly
+    try:
+        UI.vprint(1,
+            f"  [pav-builder] {icao}: de-spiked {n_removed} needle "
+            f"vertex(es) from the row-130 airport boundary.")
+    except _GEOM_EXC:
+        pass
+    return cleaned
 
 
 # Half-width (m) of the airport-boundary ribbon strip.  Single source
@@ -906,6 +1006,7 @@ def _emit_airport_boundary_shape(
     # their flat (cross) edge nodes exactly — and reproduce the SAME band
     # the pre-solve clip (``_compute_boundary_ribbon_interior``) used.
     n_emitted = 0
+    band_union = None    # running union of emitted rects (overlap guard)
     for p0, p1, perp0, perp1 in _ribbon_segment_geometry(
             boundary_geom, strip_half_width_m, densify_step_m):
         a0 = _runway_clamped_alt(p0[0], p0[1])
@@ -926,40 +1027,69 @@ def _emit_airport_boundary_shape(
         if built is None:
             continue
         poly, eh, el, seg_high, seg_low = built
+        # Overlap guard (HEAZ #448∩#449/#450, 2026-06-09): at a sharp
+        # boundary corner — a needle apex, or two near-coincident
+        # corners turning sharply within less than the band width — the
+        # band's miter is longer than the adjacent segment, so the next
+        # rect FOLDS back over the previously emitted one and the ribbon
+        # double-covers (boundary∩boundary self-overlap).  Subtract the
+        # already-emitted band from each new rect so the ribbon tiles
+        # overlap-free by construction; a clipped remainder re-derives
+        # its per-vertex altitudes via the non-quad path below.
+        pieces = [poly]
+        if band_union is not None:
+            try:
+                if poly.intersection(band_union).area > 0.01:
+                    diff = poly.difference(band_union)
+                    pieces = [
+                        g for g in getattr(diff, "geoms", [diff])
+                        if (g.geom_type == "Polygon" and not g.is_empty
+                            and g.area >= 0.5)]
+                    if not pieces:
+                        continue   # fully under the already-emitted band
+            except _GEOM_EXC:
+                pass
+        try:
+            band_union = (poly if band_union is None
+                          else band_union.union(poly))
+        except _GEOM_EXC:
+            pass
         # No pavement self-trim here: the ribbon now owns the outer
         # ``strip_width_m`` band exclusively, and pavement is clipped
         # back to the ribbon's inner edge by
         # ``_clip_pavement_to_boundary_interior`` so the two tile
         # conformingly (shared inner-edge nodes, no slivers).
-        shape = BuiltShape(
-            polygon=poly,
-            role=ROLE_BOUNDARY,
-            ref="airport_boundary",
-        )
-        if eh is None:
-            shape.altitude = el
-        else:
-            # A buffer(0) repair in ``_rect_for_segment`` can turn the
-            # 4-corner sloped quad into a non-quad.  ``altitude_high``/
-            # ``altitude_low`` is only valid on a closed 4-corner
-            # quad — Ortho4XP rejects anything else ("Wrong number
-            # of nodes ... altitude_high/altitude_low polygon,
-            # skipped").  For a non-quad, preserve the
-            # along-perimeter slope as per-vertex ``node_altitudes``
-            # (linear eh->el interpolation along the high->low
-            # segment axis) rather than dropping it or flattening.
-            ring = list(poly.exterior.coords)
-            open_ring = (ring[:-1]
-                         if (ring and ring[0] == ring[-1]) else ring)
-            if len(open_ring) == 4:
-                shape.altitude_high = eh
-                shape.altitude_low = el
+        for piece in pieces:
+            shape = BuiltShape(
+                polygon=piece,
+                role=ROLE_BOUNDARY,
+                ref="airport_boundary",
+            )
+            if eh is None:
+                shape.altitude = el
             else:
-                shape.node_altitudes = (
-                    _node_altitudes_from_segment_slope(
-                        open_ring, seg_high, seg_low, eh, el))
-        layout.shapes.append(shape)
-        n_emitted += 1
+                # A buffer(0) repair in ``_rect_for_segment`` (or the
+                # overlap clip above) can turn the 4-corner sloped quad
+                # into a non-quad.  ``altitude_high``/``altitude_low`` is
+                # only valid on a closed 4-corner quad — Ortho4XP rejects
+                # anything else ("Wrong number of nodes ...
+                # altitude_high/altitude_low polygon, skipped").  For a
+                # non-quad, preserve the along-perimeter slope as
+                # per-vertex ``node_altitudes`` (linear eh->el
+                # interpolation along the high->low segment axis) rather
+                # than dropping it or flattening.
+                ring = list(piece.exterior.coords)
+                open_ring = (ring[:-1]
+                             if (ring and ring[0] == ring[-1]) else ring)
+                if len(open_ring) == 4:
+                    shape.altitude_high = eh
+                    shape.altitude_low = el
+                else:
+                    shape.node_altitudes = (
+                        _node_altitudes_from_segment_slope(
+                            open_ring, seg_high, seg_low, eh, el))
+            layout.shapes.append(shape)
+            n_emitted += 1
     return n_emitted
 
 

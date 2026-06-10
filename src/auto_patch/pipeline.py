@@ -295,9 +295,18 @@ def build_airport_pavement(icao: str, xplane_root: str,
     if apt.boundary is not None and not apt.boundary.is_empty:
         try:
             from shapely.ops import transform as _shp_transform
-            layout.airport_boundary = _shp_transform(
-                lambda lon, lat, z=None: to_m(lon, lat),
-                apt.boundary)
+            # Smart source cleanup: drop digitization NEEDLES from the
+            # hand-traced row-130 ring (sharp near-zero-area zigzags) so
+            # every boundary consumer — ribbon, DEM bridge, interior
+            # clip — sees a clean ring.  A needle's apex folds the
+            # ribbon strip over itself → boundary∩boundary overlap
+            # (HEAZ @ 30.10017,31.35442).
+            from .boundary import _despike_airport_boundary
+            layout.airport_boundary = _despike_airport_boundary(
+                _shp_transform(
+                    lambda lon, lat, z=None: to_m(lon, lat),
+                    apt.boundary),
+                icao=icao)
         except _GEOM_EXC:
             layout.airport_boundary = None
 
