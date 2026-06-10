@@ -114,6 +114,7 @@ from .layout import (
 from .pavement.vertices import (
     _drop_spike_vertices,
     _enforce_shared_vertices,
+    _insert_rect_corners_into_grazing_junction_edges,
     _push_junction_vertices_off_taxi_rect_edges,
     _snap_polygon_vertices_to_rect_corners,
     _validate_shared_vertex_invariant,
@@ -1270,6 +1271,11 @@ def _apply_geometric_finalization(
     """
     # Phase 1: pre-solve geometry.
     _push_junction_vertices_off_taxi_rect_edges(layout)
+    # The push/snap machinery is vertex-based; a junction EDGE grazing
+    # past a rect/runway CORNER with no junction vertex nearby never
+    # shares a node with the rect (the SPJC/HECA 0.6 m grade-gate
+    # steps) — route the edge THROUGH the corner.
+    _insert_rect_corners_into_grazing_junction_edges(layout)
     # Triangulate junctions — initial node_altitudes come from
     # the corner-elev map + DEM fallback.  These are placeholders
     # for the first unified-solver pass below.

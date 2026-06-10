@@ -20,6 +20,7 @@ compatibility with internal callers in O4_Airport_Pavement_Builder):
 from __future__ import annotations
 
 import math
+import os
 import sys
 
 from shapely.errors import GEOSException, TopologicalError
@@ -694,6 +695,153 @@ def _push_junction_vertices_off_taxi_rect_edges(
         except Exception:
             pass
         n_modified += n_recovered
+    return n_modified
+
+
+def _insert_rect_corners_into_grazing_junction_edges(
+        layout: "PavementLayout",
+        taxi_tol_m: float = 0.6,
+        runway_tol_m: float = 1.5,
+        ) -> int:
+    """Insert a rect/runway CORNER into a junction EDGE that grazes past
+    it — the inverse of the vertex-based machinery above (s73, the last
+    two grade-gate steps).
+
+    Stage 1/2 only act when a junction VERTEX lies near a rect; a long
+    straight junction edge that passes within a hair of a rect corner
+    with no junction vertex anywhere nearby is invisible to them, so the
+    two shapes never share a node there and their solved surfaces step
+    apart at emit: SPJC read a 0.61 m mid-edge step at a runway corner
+    0.92 m off a junction edge; HECA junction -10193's single 314 m edge
+    converges onto rect TX29's long edge (corners at 0.49 m and 0.01 m
+    lateral) and stepped 0.66 m.  Routing the junction boundary THROUGH
+    the corner is the designed contract (a corner touch is the one legal
+    junction↔rect contact) and makes the node canonically shared, so the
+    solver couples the surfaces and the in-between segment runs
+    corner-to-corner exactly like the same junction's conformed sides.
+
+    Runway corners get a wider capture (``runway_tol_m`` =
+    RUNWAY_BOUNDARY_TOL_M's class) than taxi-rect corners.  Geometric
+    only; per-vertex altitudes, when present, interpolate at the
+    insertion point.  Returns the number of junctions modified.
+    """
+    rect_roles = {
+        ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
+        ROLE_STUB, ROLE_CROSS_CONNECTOR, ROLE_RUNWAY}
+    corners: list[tuple[float, float, bool]] = []
+    for s in layout.shapes:
+        if s.role not in rect_roles:
+            continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        try:
+            cs = open_ring(list(s.polygon.exterior.coords))
+        except _GEOM_EXC:
+            continue
+        if len(cs) != 4:
+            continue
+        is_rwy = s.role == ROLE_RUNWAY
+        corners.extend((x, y, is_rwy) for (x, y) in cs)
+    if not corners:
+        return 0
+    n_modified = 0
+    for shape in layout.shapes:
+        if shape.role != ROLE_JUNCTION:
+            continue
+        if shape.polygon is None or shape.polygon.is_empty:
+            continue
+        try:
+            ring = list(shape.polygon.exterior.coords)
+        except _GEOM_EXC:
+            continue
+        ring_open = ring[:-1] if (ring and ring[0] == ring[-1]) else ring
+        n_v = len(ring_open)
+        if n_v < 3:
+            continue
+        # Cheap reject: corner must be near the junction at all.
+        minx, miny, maxx, maxy = shape.polygon.bounds
+        ins: dict[int, list[tuple[float, tuple[float, float]]]] = {}
+        _gdbg = os.environ.get("O4_GRAZE_DEBUG") == "1"
+        for (cx, cy, is_rwy) in corners:
+            tol = runway_tol_m if is_rwy else taxi_tol_m
+            if not (minx - tol <= cx <= maxx + tol
+                    and miny - tol <= cy <= maxy + tol):
+                continue
+            # Already attached (a ring vertex EXACTLY at the corner)?
+            exact = any((cx - vx) ** 2 + (cy - vy) ** 2 <= 1e-4
+                        for (vx, vy) in ring_open)
+            if exact:
+                continue
+            near = any((cx - vx) ** 2 + (cy - vy) ** 2 <= 0.25
+                       for (vx, vy) in ring_open)
+            best = None
+            for i in range(n_v):
+                ax, ay = ring_open[i]
+                bx, by = ring_open[(i + 1) % n_v]
+                dx, dy = bx - ax, by - ay
+                seg2 = dx * dx + dy * dy
+                if seg2 < 1.0:
+                    continue
+                t = ((cx - ax) * dx + (cy - ay) * dy) / seg2
+                if t <= 0.02 or t >= 0.98:
+                    continue
+                px, py = ax + t * dx, ay + t * dy
+                d2 = (cx - px) ** 2 + (cy - py) ** 2
+                if d2 <= tol * tol and (best is None or d2 < best[0]):
+                    best = (d2, i, t)
+            if _gdbg and (best is not None or near):
+                print(f"[graze]  cand corner ({cx:.0f},{cy:.0f}) "
+                      f"rwy={is_rwy} near_vert={near} "
+                      f"best={'-' if best is None else f'{best[0] ** 0.5:.2f}m@e{best[1]}t{best[2]:.2f}'}")
+            if near:
+                continue
+            if best is not None:
+                ins.setdefault(best[1], []).append((best[2], (cx, cy)))
+        if not ins:
+            continue
+        alts = (list(shape.node_altitudes)
+                if shape.node_altitudes else None)
+        closed_alts = alts is not None and len(alts) == n_v + 1
+        if alts is not None and len(alts) not in (n_v, n_v + 1):
+            alts = None
+        new_ring: list[tuple[float, float]] = []
+        new_alts: list[float] | None = [] if alts is not None else None
+        for i in range(n_v):
+            new_ring.append(ring_open[i])
+            if new_alts is not None:
+                new_alts.append(alts[i])
+            for t, pt in sorted(ins.get(i, ())):
+                if (pt[0] - new_ring[-1][0]) ** 2 \
+                        + (pt[1] - new_ring[-1][1]) ** 2 < 0.0025:
+                    continue                 # duplicate corner
+                new_ring.append(pt)
+                if new_alts is not None:
+                    a0 = alts[i]
+                    a1 = alts[(i + 1) % n_v]
+                    new_alts.append(a0 + t * (a1 - a0))
+        try:
+            new_poly = Polygon(new_ring + [new_ring[0]],
+                               list(shape.polygon.interiors))
+        except _GEOM_EXC:
+            continue
+        # Bending an edge ≤ tol can self-intersect a concave ring —
+        # skip rather than buffer-repair (this pass is opportunistic).
+        if (not new_poly.is_valid or new_poly.is_empty
+                or new_poly.geom_type != "Polygon"):
+            continue
+        shape.polygon = new_poly
+        if new_alts is not None:
+            if closed_alts:
+                new_alts.append(new_alts[0])
+            shape.node_altitudes = new_alts
+        n_modified += 1
+        if os.environ.get("O4_GRAZE_DEBUG") == "1":
+            pts = [pt for lst in ins.values() for (_t, pt) in lst]
+            print(f"[graze] junction ref={shape.ref or '?'} "
+                  f"inserted {len(pts)} corner(s): "
+                  + " ".join(f"({px:.0f},{py:.0f})" for px, py in pts))
+    if os.environ.get("O4_GRAZE_DEBUG") == "1":
+        print(f"[graze] insert pass: {n_modified} junction(s) modified")
     return n_modified
 
 

@@ -432,18 +432,20 @@ def solve(layout, icao: str,
                     continue
                 _project_shape(elev, sc["nodes"], held_t, sc["edges"],
                                False)
-        # KNOWN RESIDUAL (s73, with junction visibility): a junction EDGE
-        # that GRAZES a sloping rect's long edge over a run without shared
-        # vertices (HECA junction -10193's 314 m edge converges onto rect
-        # TX29's 144 m edge, lateral 0.49→0.01 m) cannot follow the rect's
-        # plane once the junction slopes — its straight lerp deviates up to
-        # ~0.7 m at the touch point (2 mid-edge steps).  An altitude-only
-        # vertex snap measured ZERO applicable vertices (the deviation
-        # peaks mid-edge, where no vertex exists) — the fix is PRE-SOLVE
-        # GEOMETRY: conform the grazing junction edge to the rect's corner
-        # projections (the coincident-run-collapse class, s68
-        # ``_near_edge_line``), so the solver couples them via shared
-        # nodes.  Tracked in STATUS.
+        # EDGE-PLANE SNAP (s73): a junction vertex the geometry passes
+        # left a designed standoff from a sloping rect's or RUNWAY's long
+        # edge (the 1.0 m vertex push; mouth drift) must still carry the
+        # rect's edge-plane altitude — the surfaces meet across the gap.
+        # SPJC's 0.61 m grade-gate step is a 4-vertex junction holding
+        # 15.3 one metre off a runway long edge whose plane reads 15.9.
+        # The first build of this pass missed it by EXCLUDING runway
+        # edges.  Snap, then locally re-project each touched junction
+        # (snapped + shared + hard held) so the correction grades through
+        # the body.  (HECA's mid-edge graze class is handled by the
+        # pre-solve corner insertion in pavement/vertices.py.)
+        _snap_junction_verts_to_rect_edge_plane(
+            layout, elev, bucket_to_idx, shape_constraints, base_hard,
+            owners)
 
     n_terms, n_rects, n_juncs = _writeback(
         layout, elev, bucket_to_idx)
@@ -2038,6 +2040,107 @@ def _resmooth_runways_in_elev(layout, elev, bucket_to_idx, anchored_nodes,
                         elev[idx] = (elevs[k - 1]
                                      + t * (elevs[k] - elevs[k - 1]))
                         break
+
+
+# A junction vertex within this distance of a sloping rect's / runway's
+# long edge is treated as HUGGING/SHADOWING it (the vertex-push pass keeps
+# a designed 1.0 m standoff; accumulated drift puts shadow-edge endpoints
+# at up to ~1.8 m — SPJC's stepping endpoint sat 1.74 m off) and takes the
+# edge-plane altitude, so a straight shadowing edge lerps along the plane.
+_EDGE_PLANE_SNAP_DIST_M = 2.0
+
+
+def _snap_junction_verts_to_rect_edge_plane(layout, elev, bucket_to_idx,
+                                            shape_constraints, base_hard,
+                                            owners) -> int:
+    """Post-solve, altitude-only: every junction vertex within
+    ``_EDGE_PLANE_SNAP_DIST_M`` of a sloping rect's or RUNWAY's long ring
+    segment takes the segment's interpolated altitude (the vertex was
+    deliberately pushed just off that edge — the surfaces must meet across
+    the designed gap); the junction's interior is then locally
+    re-projected with the snapped + shared + hard nodes held.  Returns the
+    number of snapped vertices."""
+    rect_edges: list = []
+    for s in layout.shapes:
+        if s.role not in SLOPING_RECT_ROLES and s.role != ROLE_RUNWAY:
+            continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        ring = _open_ring(list(s.polygon.exterior.coords))
+        idxs = [bucket_to_idx.get(
+            layout.canonical_points.get_or_add(float(x), float(y)))
+            for x, y in ring]
+        m = len(ring)
+        for a in range(m):
+            b = (a + 1) % m
+            if idxs[a] is None or idxs[b] is None:
+                continue
+            ax, ay = ring[a]
+            bx, by = ring[b]
+            seg = math.hypot(bx - ax, by - ay)
+            if seg >= 3.0:
+                rect_edges.append((ax, ay, bx, by, seg,
+                                   idxs[a], idxs[b]))
+    if not rect_edges:
+        return 0
+    CELL = 50.0
+    grid: dict = {}
+    for k, (ax, ay, bx, by, seg, ia, ib) in enumerate(rect_edges):
+        for gx in range(int(min(ax, bx) // CELL),
+                        int(max(ax, bx) // CELL) + 1):
+            for gy in range(int(min(ay, by) // CELL),
+                            int(max(ay, by) // CELL) + 1):
+                grid.setdefault((gx, gy), []).append(k)
+    n_snapped = 0
+    sc_by_nodes = {frozenset(sc["nodes"]): sc for sc in shape_constraints
+                   if sc["role"] == ROLE_JUNCTION}
+    for sh in layout.shapes:
+        if (sh.role != ROLE_JUNCTION or sh.polygon is None
+                or sh.polygon.is_empty):
+            continue
+        ring = _open_ring(list(sh.polygon.exterior.coords))
+        idxs = [bucket_to_idx.get(
+            layout.canonical_points.get_or_add(float(x), float(y)))
+            for x, y in ring]
+        sc = sc_by_nodes.get(frozenset(i for i in idxs if i is not None))
+        if sc is None:
+            continue
+        moved: set = set()
+        for (x, y), i in zip(ring, idxs):
+            if i is None or base_hard[i]:
+                continue
+            gx0, gy0 = int(x // CELL), int(y // CELL)
+            cand: set = set()
+            for dgx in (-1, 0, 1):
+                for dgy in (-1, 0, 1):
+                    cand.update(grid.get((gx0 + dgx, gy0 + dgy), ()))
+            best = None
+            bd = _EDGE_PLANE_SNAP_DIST_M
+            for k in cand:
+                ax, ay, bx, by, seg, ia, ib = rect_edges[k]
+                t = (((x - ax) * (bx - ax) + (y - ay) * (by - ay))
+                     / (seg * seg))
+                if t < 0.01 or t > 0.99:
+                    continue                  # corner region: shared node
+                px, py = ax + t * (bx - ax), ay + t * (by - ay)
+                d = math.hypot(x - px, y - py)
+                if d < bd:
+                    bd = d
+                    best = elev[ia] + t * (elev[ib] - elev[ia])
+            if best is not None and abs(elev[i] - best) > 0.05:
+                elev[i] = best
+                moved.add(i)
+                n_snapped += 1
+        if moved and sc["edges"]:
+            held_j = {i for i in sc["nodes"]
+                      if base_hard[i] or owners.get(i, 0) > 1} | moved
+            if len(held_j) < len(sc["nodes"]):
+                _project_shape(elev, sc["nodes"], held_j, sc["edges"],
+                               False)
+    if _os.environ.get("O4_STEP_DEBUG") == "1":
+        print(f"[step] edge-plane snap: {n_snapped} junction vertex(es) "
+              f"took rect/runway edge-plane altitudes")
+    return n_snapped
 
 
 # Route-distance measurement uncertainty, as a fraction of the route length.
