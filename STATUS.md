@@ -1,4 +1,57 @@
-# Auto-Patch Status — session 73 = FLEX DEMAND SYNTHESIS MERGED + GATE ON + SLOPING TERMINALS + JUNCTION VISIBILITY + ROUTE DEADBAND (in-sim evaluation state)
+# Auto-Patch Status — session 73 = FLEX SYNTHESIS + SLOPING TERMINALS + JUNCTION VISIBILITY + DEADBAND LIVE; CORRIDOR-PROFILE PASS BUILT (gated OFF → #3)
+
+## ★★ SESSION 73 PART 4 (2026-06-10) — dev `3853b9a`: TAXI-CORRIDOR PROFILES BUILT, GATED OFF ★★
+User follow-up on #291: a corridor must carry ONE continuous grade through
+junctions ("can't distinguish where they join" — T through junction -10292;
+T4 flowing into U).  Root cause measured: nothing in the solver PREFERS a
+monotone corridor — shapes settle DEM-near and a V-notch at a junction is
+per-pair cap-legal (T read 111.7 → 104.5 ↘NE-mouth, 105.0 ↗SW-mouth → 103.5
+= flat-to-REVERSED where one ~1 % ramp exists; `faa_joint_solve` is a
+feasibility PROJECTOR — fed the V it keeps it, since Δg over 100s-of-metre
+segments is far inside the 1/3000 rate).
+**BUILT (`_taxi_corridor_profiles`, config `TAXI_CORRIDOR_PROFILE`, ⛔ OFF):**
+- CONNECTIVITY-driven rect mouths (shared-node clusters vs junctions/rects —
+  a wide-short connector's taxi axis is junction→junction across its SHORT
+  side: U is 12.7×75 m; its geometric axis mis-profiled it at 9.4 %).
+- Same-ref chains bind first; then chain ENDS merge cross-ref (every rect is
+  a phase-A seed, so candidates are CHAIN ENDS — that merge is how T4+U+U
+  formed); wide-short ends use the whole-chain travel direction (their own
+  axis is noise).
+- FLAT SEED between anchored stations (runway model: flattest line through
+  pins, DEM lowest), then faa_joint_solve at taxi caps
+  (`TAXIWAY_MAX_GRADE_CHANGE_PER_M` now in config; driver re-exports).
+- Crossing-reconciliation stations (runway-crossing rule: later corridor
+  bends THROUGH the earlier one's value); rect bodies + junction crossing
+  bands take the profile; corridor nodes held through a full
+  `_directional_relief` re-run + the enforce (`held_extra` param added).
+**MEASURED gate-on (HECA): the named cases LAND** — T 101.3→113.0 monotone
+~0.8 % straight through -10292 ✓; T4+U+U chain forms, T4's wall 3.4-4.8 % →
+~2 % steady ✓; the corridor writes even fixed one TX29 graze step.  **BUT
+within 293→604 and junctions crossed by TWO corridors get up to 64 %
+internal cliffs (#291: T's band ~103.3 vs T4→U's band 107.1, 6 m apart)** —
+two missing pieces, BOTH route-field-model parts:
+  (a) **TILTED-PLANE junction crossings** — the user's "roll and yaw near
+      equal": each band write is laterally flat; two crossing corridors on a
+      diagonally-sloping junction are consistent only at the crossing point.
+      The junction needs a fitted plane (or the band writes need lateral
+      gradients) honouring both corridor profiles.
+  (b) **Route-floor-aware corridor seeds** — T's flat seed ignores the
+      05C-route demand entering via T4 (the junction area must be ≥~106-109
+      to climb to the runway at ≤1.5 %); the enforce's runway-reach bands
+      then hold free junction nodes UP against held corridor nodes = the
+      cliffs.  Corridor station bands must intersect the route bands.
+**→ This IS STATUS #3 (route-field model).  Start there next session; the
+machinery (chains, stations, crossing reconciliation, profile writeback,
+relief integration) is in the tree, gated.**
+Suite at close: 306p/3f — SPJC 2 runway edge-steps (pre-existing), HECA 2
+junction↔TX29 graze mid-edge steps (part-3 known residual), SPLP 1 NEW
+marginal (junction #19 internal 3.02 %/0.4 m — the POCS-lump class, appeared
+in the mixed tree with the concurrent DSF session's SPLP changes; its
+historical stub/B class stays cured).  ⚠ Concurrent-session note: the DSF
+session (051eebc/aee3129) and this one interleaved uncommitted config.py
+edits; their `DSF_PAVEMENT_MATERIAL_TOKENS` was briefly clobbered by a
+config reset here and re-added by them — the committed list is theirs and
+authoritative.  ⚠ RESTART Ortho4XP before in-sim builds.
 
 ## ★★ SESSION 73 PART 3 (2026-06-10) — dev `bb74ed4`: JUNCTION VISIBILITY + ROUTE-NOISE DEADBAND ★★
 User analysis session ("why is T4 110.9 / A4 rising / #291 flat?") produced two
