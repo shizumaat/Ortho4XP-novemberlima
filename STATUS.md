@@ -1,4 +1,50 @@
-# Auto-Patch Status — session 73 = FLEX SYNTHESIS + SLOPING TERMINALS + JUNCTION VISIBILITY + DEADBAND LIVE; JOINT CORRIDOR-NETWORK SOLVE BUILT (gated OFF); HECA GRAZE STEPS FIXED
+# Auto-Patch Status — session 73 = CORRIDORS LIVE (gate ON) + CORRIDOR→RUNWAY FLEX FEEDBACK; HECA 05C → 107.9 at T4
+
+## ★★ SESSION 73 PART 9 (2026-06-10) — dev `f7aa5ad`+`dc8f787`: GATE ON + CORRIDOR→RUNWAY FLEX FEEDBACK ★★
+User flipped `TAXI_CORRIDOR_PROFILE` ON for in-sim evaluation and reported
+(HECA): #291 flat at the crossing + dip/hump at its rect mouths; U(#32)
+meets apron #241 steep/uneven; "once pavement reaches max grade why isn't
+the runway flexing — dipping to 108 at T4 might resolve it."  All three
+traced to ONE root: the T4+U corridor's anchors were infeasible (runway
+contact ~110.4 vs the 101-104 network), every tie freeze-skipped, the
+conflicting writes were guard-skipped and the enforce flattened the
+junction interiors.  BUILT (dc8f787):
+1. **CORRIDOR→RUNWAY FLEX FEEDBACK** — a freeze-skipped tie blocked
+   at/THROUGH a runway contact (terminus on the runway-adjacent junction;
+   budget += in-junction geodesic to the runway vertex) becomes a flex
+   demand → restore pre-corridor surface → `_resmooth_runways_in_elev`
+   through the bounds → full relief re-grade → corridor pass re-run.
+   **ONE round only** (re-measuring after the relief chases the dip
+   circularly: 107.9→106.3→wants 105.5 = the s68 over-dip class).
+   **DIP demands only** (rises trace to DEM-settled free pavement that
+   must fill toward the runway — the J chain re-manufactured the 05L
+   +1.1 rise the p3 deadband killed).  ★ HECA: 05C contact 110.9 →
+   **107.9 (user-predicted ~108)**, T4+U feasible end-to-end, #290 cliff
+   1.9→~1.0 m, #291 = coherent tilted surface 101.8→105.4, U↔#241 seam
+   continuous (apron edge == U low end 97.7); 05L untouched 57.9-60.7,
+   thresholds intact (116.5).
+2. **Twin + coupling writes** — corridor writes respect ≤0.1 m
+   near-coincident twins (first writer wins) and sloping rects' END-PAIR
+   co-level coupling (`_build_level_coupling` passed in; the plane emit
+   carries ONE altitude per end — individually-twisted corners read as
+   0.2 m cross steps at d=0).  HECA cross 3→0.
+3. **Bridge ties** — an UNCHAINED rect linking two junctions is a real
+   grade path: tie station pairs across it at the through-path geodesic
+   (per-node legs), else the corridor descends legally along its route
+   while the 23 m bridge reads the whole drop (SPJC R1 4.8 %).
+4. **Twist = SEED, not hold** — per-junction local cap-projection sweep
+   (two LOW-variance vertices near different sources evade the
+   per-vertex disagreement guard: SPJC #107 1.4 m), then twist writes
+   stay FREE for the enforce (corridor junctions are band-exempt; POCS
+   knows the bridges/chords the twist cannot see).
+**Suite 306p/3f**: SPLP+HECA pre-existing; **SPJC red gate-on** =
+the V/Q/R complex residual (R1/R2 bridge flanks 0.9-1.4 m — persists
+across held/free twist variants, so the flanks are pinned by something
+OUTSIDE the corridor machinery; #107 0.5 m; one 0.2 m V3 emit step) —
+NEXT: diagnose what pins R1/R2's flanking junction surfaces.  CYXY fully
+clean (0 within / 0 cross / 0 steps).  ⚠ RESTART Ortho4XP before in-sim
+builds (module cache).
+
 
 ## ★★ SESSION 73 PART 8 (2026-06-10) — dev `bc04e91`: HECA 2 GRAZE STEPS → 0 (exact-corner pinch split) ★★
 The part-6 "REMAINING" item, root-caused by the prescribed in-build
