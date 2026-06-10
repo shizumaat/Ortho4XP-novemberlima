@@ -1386,6 +1386,149 @@ def _clip_pavement_to_boundary_interior(
     return clipped, left_outside
 
 
+def _conform_pavement_to_ribbon_inner_corners(
+        layout: "PavementLayout", *,
+        roles: frozenset | set,
+        strip_half_width_m: float = BOUNDARY_STRIP_HALF_WIDTH_M,
+        densify_step_m: float = 15.0,
+        tol: float = SHARED_VERTEX_TOL_M) -> int:
+    """Pre-solve seam conformance for pavement that HUGS the boundary
+    ribbon's inner edge without straddling it.
+
+    ``_clip_pavement_to_boundary_interior`` only reshapes shapes that
+    actually cross into the ribbon band; a shape whose ring runs just
+    INSIDE the band's inner edge (closer than ``tol`` but never outside)
+    is left untouched, so the ribbon rects emitted post-solve drop their
+    inner-corner nodes mid-edge onto it — one residual T-junction per
+    densify step (HEAZ apron #29: a 168 m edge hugging the seam at
+    0.07–0.5 m collected 7).  Post-solve conformance cannot repair this:
+    airside is frozen after the solve (geom-guard), and vertices may only
+    be inserted into feature shapes.
+
+    Fix at the source, PRE-solve: re-route any ring edge that passes
+    within ``tol`` of a ribbon inner-corner node THROUGH that node.  The
+    corners come from the shared :func:`_ribbon_segment_geometry`, so they
+    are bit-identical to the corners the post-solve ribbon emit produces;
+    between two consecutively adopted corners the re-routed edge IS the
+    ribbon's inner edge — the sub-tolerance sliver gap closes and the
+    seam shares nodes exactly.  Corners within ``tol`` of an existing
+    ring vertex are skipped (vertex-near-endpoint is not a T-junction,
+    and moving an existing vertex here would race the weld pass).
+
+    Returns the number of shapes reshaped.
+    """
+    ab = getattr(layout, "airport_boundary", None)
+    if ab is None or ab.is_empty:
+        return 0
+    corners: list[tuple[float, float]] = []
+    seen: set[tuple[float, float]] = set()
+    for p0, p1, perp0, perp1 in _ribbon_segment_geometry(
+            ab, strip_half_width_m, densify_step_m):
+        for c in ((p0[0] + perp0[0], p0[1] + perp0[1]),
+                  (p1[0] + perp1[0], p1[1] + perp1[1])):
+            if c not in seen:
+                seen.add(c)
+                corners.append(c)
+    if not corners:
+        return 0
+    from collections import defaultdict
+    cell = max(densify_step_m, 4.0 * tol)
+    grid: dict = defaultdict(list)
+    for c in corners:
+        grid[(int(c[0] // cell), int(c[1] // cell))].append(c)
+
+    def _corners_near_edge(ax, ay, bx, by):
+        i0 = int((min(ax, bx) - tol) // cell)
+        i1 = int((max(ax, bx) + tol) // cell)
+        j0 = int((min(ay, by) - tol) // cell)
+        j1 = int((max(ay, by) + tol) // cell)
+        out = []
+        for i in range(i0, i1 + 1):
+            for j in range(j0, j1 + 1):
+                out.extend(grid.get((i, j), ()))
+        return out
+
+    n_shapes = 0
+    for s in layout.shapes:
+        if s.role not in roles:
+            continue
+        p = s.polygon
+        if p is None or p.is_empty or p.geom_type != "Polygon":
+            continue
+        ring = list(p.exterior.coords)
+        if ring and ring[0] == ring[-1]:
+            ring = ring[:-1]
+        if len(ring) < 3:
+            continue
+        old_open = list(ring)
+        ring_set = set(ring)
+        changed = False
+        # Fixpoint: adopting one corner shifts the neighbouring sub-edges
+        # outward, which can bring the NEXT corner inside ``tol``.
+        for _ in range(16):
+            inserted = False
+            n = len(ring)
+            for i in range(n):
+                ax, ay = ring[i]
+                bx, by = ring[(i + 1) % n]
+                dx, dy = bx - ax, by - ay
+                L2 = dx * dx + dy * dy
+                if L2 < 1e-12:
+                    continue
+                adds: list[tuple[float, tuple[float, float]]] = []
+                for c in _corners_near_edge(ax, ay, bx, by):
+                    if c in ring_set:
+                        continue
+                    cx, cy = c
+                    if (math.hypot(cx - ax, cy - ay) < tol
+                            or math.hypot(cx - bx, cy - by) < tol):
+                        continue   # near an existing vertex: not a TJ
+                    t = ((cx - ax) * dx + (cy - ay) * dy) / L2
+                    if t <= 0.0 or t >= 1.0:
+                        continue
+                    perp = abs((cx - ax) * dy - (cy - ay) * dx) / math.sqrt(L2)
+                    if perp >= tol:
+                        continue
+                    adds.append((t, c))
+                if not adds:
+                    continue
+                adds.sort()
+                ring[i + 1:i + 1] = [c for _, c in adds]
+                ring_set.update(c for _, c in adds)
+                inserted = True
+                changed = True
+                break   # ring re-indexed; restart the edge scan
+            if not inserted:
+                break
+        if not changed:
+            continue
+        try:
+            new_poly = Polygon(ring)
+            if not new_poly.is_valid:
+                new_poly = new_poly.buffer(0)
+            if (new_poly.is_empty or new_poly.geom_type != "Polygon"
+                    or abs(new_poly.area - p.area)
+                    > len(ring) * tol * densify_step_m):
+                continue   # re-route went wrong; keep the original
+        except _GEOM_EXC:
+            continue
+        if (s.altitude is not None and s.node_altitudes is None
+                and s.altitude_high is None):
+            s.polygon = new_poly
+        else:
+            alts_open = _shape_open_alts(s, len(old_open))
+            old_closed = (alts_open + [alts_open[0]] if alts_open else None)
+            new_alts = _resample_node_altitudes_nn(
+                new_poly, old_open, old_closed)
+            s.polygon = new_poly
+            if new_alts is not None:
+                s.node_altitudes = new_alts
+                s.altitude_high = None
+                s.altitude_low = None
+        n_shapes += 1
+    return n_shapes
+
+
 def _collect_shape_nodes(layout, predicate
                          ) -> list[tuple[float, float, float]]:
     """Collect ``(x, y, alt)`` for every exterior vertex of each shape
