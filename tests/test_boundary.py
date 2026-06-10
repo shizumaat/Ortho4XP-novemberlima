@@ -336,3 +336,78 @@ def test_flatten_bridge_pinch_neck_leaves_wide_ribbon_alone():
     n = _flatten_bridge_pinch_necks(_ShapesOnly([strip, bridge]))
     assert n == 0
     assert bridge.node_altitudes == before
+
+
+# ──────────────────────────────────────────────────────────────────
+# _conform_pavement_to_ribbon_inner_corners — pre-solve seam pass
+# (pure, no X-Plane build)
+# ──────────────────────────────────────────────────────────────────
+# Pavement that hugs the boundary ribbon's inner edge (closer than the
+# shared-vertex tolerance, but never outside it) is invisible to the
+# straddle clip, so the ribbon rects emitted post-solve drop their
+# inner-corner nodes mid-edge onto it — residual T-junctions that the
+# post-solve conformance pass cannot repair (airside is frozen).  The
+# pass re-routes such edges THROUGH the ribbon inner-corner nodes
+# (HEAZ aprons #29/#50).
+from auto_patch.boundary import (
+    _conform_pavement_to_ribbon_inner_corners,
+    _ribbon_segment_geometry,
+    BOUNDARY_STRIP_HALF_WIDTH_M,
+)
+from auto_patch.layout import ROLE_APRON
+
+
+class _SeamLayout:
+    def __init__(self, shapes, airport_boundary):
+        self.shapes = shapes
+        self.airport_boundary = airport_boundary
+
+
+def test_seam_pass_reroutes_hugging_edge_through_inner_corners():
+    # 300×300 square boundary; the ribbon band along the south side spans
+    # y ∈ [0, 5] (strip half-width 2.5 → full width 5), inner edge y = 5
+    # with a corner node every 15 m densify step.  The apron's south edge
+    # runs at y = 5.3 — 0.3 m inside the inner edge, never outside, so
+    # the straddle clip leaves it alone but every corner node lands
+    # mid-edge within the 0.5 m tolerance.
+    ab = _Poly([(0.0, 0.0), (300.0, 0.0), (300.0, 300.0), (0.0, 300.0)])
+    apron = BuiltShape(
+        polygon=_Poly([(50.0, 5.3), (250.0, 5.3),
+                       (250.0, 100.0), (50.0, 100.0)]),
+        role=ROLE_APRON, ref="")
+    layout = _SeamLayout([apron], ab)
+    n = _conform_pavement_to_ribbon_inner_corners(
+        layout, roles=frozenset({ROLE_APRON}))
+    assert n == 1
+    # Every adopted node is bit-identical to a ribbon inner corner (the
+    # post-solve emit produces the same floats via the shared
+    # _ribbon_segment_geometry), and the hugged stretch adopted them all.
+    inner = set()
+    for p0, p1, perp0, perp1 in _ribbon_segment_geometry(
+            ab, BOUNDARY_STRIP_HALF_WIDTH_M, 15.0):
+        inner.add((p0[0] + perp0[0], p0[1] + perp0[1]))
+        inner.add((p1[0] + perp1[0], p1[1] + perp1[1]))
+    ring = set(apron.polygon.exterior.coords)
+    adopted = ring & inner
+    original = {(50.0, 5.3), (250.0, 5.3), (250.0, 100.0), (50.0, 100.0)}
+    assert ring - inner == original          # nothing else was invented
+    # Corners every 15 m between x=60 and x=240 (those farther than the
+    # 0.5 m tolerance from the apron's own end vertices).
+    assert {(x * 1.0, 5.0) for x in range(60, 241, 15)} <= adopted
+    assert apron.polygon.is_valid
+
+
+def test_seam_pass_leaves_distant_pavement_alone():
+    # Apron edge 1.2 m inside the inner edge — beyond the 0.5 m
+    # tolerance, no T-junction, nothing to re-route.
+    ab = _Poly([(0.0, 0.0), (300.0, 0.0), (300.0, 300.0), (0.0, 300.0)])
+    apron = BuiltShape(
+        polygon=_Poly([(50.0, 6.2), (250.0, 6.2),
+                       (250.0, 100.0), (50.0, 100.0)]),
+        role=ROLE_APRON, ref="")
+    layout = _SeamLayout([apron], ab)
+    before = list(apron.polygon.exterior.coords)
+    n = _conform_pavement_to_ribbon_inner_corners(
+        layout, roles=frozenset({ROLE_APRON}))
+    assert n == 0
+    assert list(apron.polygon.exterior.coords) == before

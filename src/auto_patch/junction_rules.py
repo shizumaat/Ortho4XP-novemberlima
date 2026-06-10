@@ -88,6 +88,28 @@ SLOPING_RECT_FLAT_THRESHOLD_M = 0.05
 # runway can net-gain area while still abandoning a real-pavement wedge.
 RUNWAY_REWRITE_MAX_ABS_LOSS = 2000.0
 
+# Max contiguous OFF-SOURCE area (m²) a single ``_enforce_runway_1to1_
+# sharing`` rewrite may GAIN before that gained piece is subtracted back
+# out of the rewritten polygon.  The straightening chord can capture bare
+# ground that carries NO source pavement at all — a dirt notch between two
+# pavement lobes beside the runway (HEAZ: a 3,042 m² wedge beside runway
+# 04/22 turned a 47%-on-source apron out of thin air).  Tiny gained
+# slivers along the runway edge are the point of the pass (they realise
+# the 1:1 corner sharing) and stay; only large contiguous off-source
+# pieces are carved back off.  500 m² sits far above the legitimate miter
+# slivers (≤ tens of m²) and well below the HEAZ wedge.
+RUNWAY_REWRITE_MAX_OFFSOURCE_GAIN_M2 = 500.0
+
+# The carve must NEVER cut within this halo of the runway: the off-source
+# boundary is the SIMPLIFIED source union (tol 2.0), which wobbles ±2 m
+# around the runway edge.  Carving along it plants near-edge junction
+# vertices that the airside conformance pass then inserts into the RUNWAY
+# ring, bulging the runway into the junction (HECA off taxiway A: +21 m²
+# runway∩junction overlap).  Keeping a runway-side margin preserves the
+# rewrite's clean runway-corner chord; only dirt clear of the runway is
+# carved.  Must exceed the source-union simplify tolerance (2.0).
+RUNWAY_REWRITE_CARVE_RUNWAY_HALO_M = 3.0
+
 # Max real pavement (pav_union) a single ``widen_junctions_to_runway_
 # corners`` insertion may abandon before it is rejected.  Widening must
 # GROW a junction toward the runway corners, never carve pavement away —
@@ -1557,6 +1579,24 @@ def _enforce_runway_1to1_sharing(layout: PavementLayout) -> None:
          and s.polygon.geom_type == "Polygon"),
         key=lambda i: _min_d_to_runway(layout.shapes[i]))
 
+    # Loop-invariant references for the off-source-gain carve below:
+    # ``_carve_ref`` = everything that counts as legitimate ground for a
+    # rewrite to gain (source pavement ∪ runway); ``_rwy_halo`` = the
+    # runway-side margin the carve must never cut into.
+    _carve_ref = None
+    _rwy_halo = None
+    _src_u = getattr(layout, "source_pavement_union", None)
+    if _src_u is not None and not _src_u.is_empty:
+        _carve_ref = _src_u
+        _rwy_u = getattr(layout, "runway_union", None)
+        if _rwy_u is not None and not _rwy_u.is_empty:
+            try:
+                _carve_ref = _carve_ref.union(_rwy_u)
+                _rwy_halo = _rwy_u.buffer(
+                    RUNWAY_REWRITE_CARVE_RUNWAY_HALO_M)
+            except _GEOM_EXC:
+                _rwy_halo = None
+
     for shape_idx in junction_indices_ordered:
         shape = layout.shapes[shape_idx]
         poly = shape.polygon
@@ -1662,9 +1702,62 @@ def _enforce_runway_1to1_sharing(layout: PavementLayout) -> None:
             lost_pavement = abandoned.area
         if lost_pavement > RUNWAY_REWRITE_MAX_ABS_LOSS:
             continue
+        # Off-source-gain guard (HEAZ apron #65, 2026-06-09): the loss cap
+        # above protects pavement the rewrite ABANDONS, but nothing capped
+        # what it GAINS.  The straightening chord can capture bare ground
+        # with no source pavement beneath it — emitted pavement over dirt,
+        # flagged by check_source_adjacency.  Carve any contiguous gained
+        # off-source piece ≥ RUNWAY_REWRITE_MAX_OFFSOURCE_GAIN_M2 back out,
+        # KEEPING a RUNWAY_REWRITE_CARVE_RUNWAY_HALO_M margin along the
+        # runway (see that constant); small miter slivers stay (they
+        # realise the corner sharing).  BEST-EFFORT: when the carve is not
+        # clean (geometry error, splits the junction, area floor) fall
+        # back to the UNCARVED rewrite — never skip it.  Skipping would
+        # keep the OLD runway-overlapping vertex run, a worse artifact
+        # than the off-source gain.
+        if _carve_ref is not None:
+            try:
+                off_gain = new_poly.difference(poly).difference(_carve_ref)
+                big_off = [
+                    g for g in getattr(off_gain, "geoms", [off_gain])
+                    if (g.geom_type == "Polygon" and not g.is_empty
+                        and g.area >= RUNWAY_REWRITE_MAX_OFFSOURCE_GAIN_M2)]
+            except _GEOM_EXC:
+                big_off = []
+            if big_off and _rwy_halo is not None:
+                clipped = []
+                for g in big_off:
+                    try:
+                        gg = g.difference(_rwy_halo)
+                    except _GEOM_EXC:
+                        continue
+                    clipped.extend(
+                        q for q in getattr(gg, "geoms", [gg])
+                        if q.geom_type == "Polygon" and not q.is_empty
+                        and q.area >= 1.0)
+                big_off = clipped
+            if big_off:
+                try:
+                    trimmed = new_poly.difference(unary_union(big_off))
+                except _GEOM_EXC:
+                    trimmed = None
+                if (trimmed is not None
+                        and trimmed.geom_type == "Polygon"
+                        and not trimmed.is_empty
+                        and trimmed.is_valid and trimmed.is_simple
+                        and trimmed.area >= 0.5 * poly.area):
+                    new_poly = trimmed
+                    # The carve changed the ring — the rewritten
+                    # per-vertex altitude mapping no longer applies.
+                    new_alts_out = None
+                    shape.node_altitudes = None
         shape.polygon = new_poly
         if new_alts_out is not None:
             shape.node_altitudes = new_alts_out + [new_alts_out[0]]
+        # Claim corners from the REWRITE's vertex list (pre-buffer(0),
+        # pre-carve) — the established semantics.  A carved-off corner may
+        # be over-claimed; that only affects later rewrites' collision
+        # ordering, same as the pre-existing buffer(0) case.
         for v in new_pts:
             on_rwy = False
             for ax, ay, bx, by, _, _ in rwy_segs:

@@ -295,9 +295,18 @@ def build_airport_pavement(icao: str, xplane_root: str,
     if apt.boundary is not None and not apt.boundary.is_empty:
         try:
             from shapely.ops import transform as _shp_transform
-            layout.airport_boundary = _shp_transform(
-                lambda lon, lat, z=None: to_m(lon, lat),
-                apt.boundary)
+            # Smart source cleanup: drop digitization NEEDLES from the
+            # hand-traced row-130 ring (sharp near-zero-area zigzags) so
+            # every boundary consumer — ribbon, DEM bridge, interior
+            # clip — sees a clean ring.  A needle's apex folds the
+            # ribbon strip over itself → boundary∩boundary overlap
+            # (HEAZ @ 30.10017,31.35442).
+            from .boundary import _despike_airport_boundary
+            layout.airport_boundary = _despike_airport_boundary(
+                _shp_transform(
+                    lambda lon, lat, z=None: to_m(lon, lat),
+                    apt.boundary),
+                icao=icao)
         except _GEOM_EXC:
             layout.airport_boundary = None
 
@@ -3039,7 +3048,8 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # (which now SKIPS airside).
         from .boundary import (
             _compute_boundary_ribbon_interior,
-            _clip_pavement_to_boundary_interior as _clip_boundary_interior)
+            _clip_pavement_to_boundary_interior as _clip_boundary_interior,
+            _conform_pavement_to_ribbon_inner_corners)
         from .geom_guard import _AIRSIDE_ROLES as _AIRSIDE_CLIP_ROLES
         _pre_interior = _compute_boundary_ribbon_interior(layout)
         if _pre_interior is not None:
@@ -3051,6 +3061,19 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     f"  [pav-builder] {icao}: pre-solve boundary clip — "
                     f"clipped {_n_clip} straddling airside shape(s), "
                     f"left {_n_out} external shape(s) untouched.")
+            # Pavement that HUGS the ribbon's inner edge (within the
+            # shared-vertex tolerance, but never outside it) is invisible
+            # to the straddle clip above; re-route those edges through the
+            # ribbon's inner-corner nodes so the seam shares nodes with
+            # the post-solve-emitted ribbon (no residual T-junctions —
+            # airside is frozen after the solve).
+            _n_seam = _conform_pavement_to_ribbon_inner_corners(
+                layout, roles=_AIRSIDE_CLIP_ROLES)
+            if _n_seam:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: pre-solve ribbon-seam "
+                    f"conformance — re-routed {_n_seam} airside shape(s) "
+                    f"through ribbon inner-corner node(s).")
 
         # ── Groundside emit + absorb/reclassify (refactor Phase 4, PRE-solve) ─
         # Emit groundside pavement (DEM-following, solve-INDEPENDENT — the
