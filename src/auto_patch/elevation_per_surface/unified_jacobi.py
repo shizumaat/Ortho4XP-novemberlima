@@ -386,8 +386,58 @@ def solve(layout, icao: str,
         corridor_held: set = set()
         corridor_exempt: set = set()
         if TAXI_CORRIDOR_PROFILE:
-            corridor_held, corridor_exempt = _taxi_corridor_profiles(
-                layout, elev, bucket_to_idx, base_hard, nodes=nodes)
+            snap_c = list(elev)
+            coupling_c = _build_level_coupling(shape_constraints)
+            corridor_held, corridor_exempt, rwy_dem = \
+                _taxi_corridor_profiles(
+                    layout, elev, bucket_to_idx, base_hard, nodes=nodes,
+                    coupling=coupling_c)
+            # CORRIDOR → RUNWAY FLEX FEEDBACK (user 2026-06-10: "once
+            # pavement reaches max grade the runway flexes a bit"):
+            # freeze-skipped ties blocked at/through a runway contact are
+            # a measured demand — restore the pre-corridor surface,
+            # re-smooth the runway through the demanded bounds (the
+            # bounded re-smooth's envelope + consistency filters guard
+            # the thresholds), re-grade the pavement against the flexed
+            # runway (the corridor anchors live on the ADJACENT junctions
+            # — without the relief they re-measure the stale values), and
+            # re-run the corridor pass.  ONE round only: the demand is
+            # honest only against the ORIGINAL saturated state (the s68
+            # snapshot0 lesson) — re-measuring after the relief re-levels
+            # the network toward DEM chases the dip circularly (measured:
+            # 107.9 → 106.3 → asks 105.5 — the (a) over-dip class).
+            for _fb in range(1):
+                if not (rwy_dem[0] or rwy_dem[1]):
+                    break
+                dem_lo_c, dem_hi_c, dem_refs_c = rwy_dem
+                elev[:] = snap_c
+                _resmooth_runways_in_elev(
+                    layout, elev, bucket_to_idx,
+                    _runway_threshold_nodes(layout, bucket_to_idx)
+                    | _seam_pinned_runway_nodes(layout, bucket_to_idx)
+                    | _runway_crossing_nodes(layout, bucket_to_idx),
+                    demand_lo=dem_lo_c, demand_hi=dem_hi_c,
+                    only_refs=dem_refs_c)
+                hard_rw = list(base_hard)
+                for i in runway_nodes:
+                    if i < n:
+                        hard_rw[i] = True
+                total_iters += _directional_relief(
+                    n, elev, hard_rw, relief_eg, relief_el,
+                    shape_constraints, _RELIEF_MAX_ITERS, tol_m)
+                snap_c = list(elev)
+                corridor_held, corridor_exempt, rwy_dem2 = \
+                    _taxi_corridor_profiles(
+                        layout, elev, bucket_to_idx, base_hard,
+                        nodes=nodes, coupling=coupling_c)
+                # merge: keep the deeper of the committed and re-measured
+                # demands so round 2 never un-dips round 1
+                nxt_hi = dict(dem_hi_c)
+                for i2, v2 in rwy_dem2[1].items():
+                    nxt_hi[i2] = min(nxt_hi.get(i2, float("inf")), v2)
+                rwy_dem = (rwy_dem2[0],
+                           nxt_hi if rwy_dem2[1] else {},
+                           rwy_dem2[2] | dem_refs_c)
             if corridor_held:
                 # FULL relief re-run against the committed corridors (the
                 # same lesson as the runway flex: corridors move metres;
@@ -2819,7 +2869,7 @@ def _interp_profile(ds, es, dq):
 
 
 def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
-                            nodes=None) -> set:
+                            nodes=None, coupling=None):
     """Re-profile every taxi CORRIDOR — a chain of taxi rects continuing
     through junctions (same ref, else the best axis-aligned continuation) —
     as ONE smooth 1-D line, exactly like a runway centerline: grade-capped
@@ -2859,11 +2909,15 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
         return ring, idxs
 
     rwy_nodes: set = set()
+    rwy_ref_of: dict = {}
     for s in layout.shapes:
         if (s.role == ROLE_RUNWAY and s.polygon is not None
                 and not s.polygon.is_empty):
             _r, _i = _ring_idxs(s)
-            rwy_nodes.update(i for i in _i if i is not None)
+            for i in _i:
+                if i is not None:
+                    rwy_nodes.add(i)
+                    rwy_ref_of[i] = s.ref or ""
 
     # ── junctions first (mouth detection is connectivity-driven)
     juncs: list = []
@@ -3502,6 +3556,53 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                     continue
                 cap_ties.append((("s", ca, ka), ("s", cb, kb),
                                  max(gap, 2.0)))
+    # BRIDGE TIES: an UNCHAINED rect linking two different junctions is a
+    # real grade path between them — without it a corridor's profile can
+    # descend legally along its own route while the short bridge reads
+    # the whole drop (SPJC R1: 23 m wide between two R-chain junctions,
+    # 1.1 m = 4.8 %).  Tie every station pair across the bridge at the
+    # through-path geodesic (in-junction legs + bridge span — euclidean
+    # between mids would over-tighten around corners, the s73 lesson).
+    chained_r: set = set()
+    for c in chains:
+        chained_r.update(ri for (ri, _n, _f) in c)
+    for ri, r in enumerate(rects):
+        if ri in chained_r:
+            continue
+        ja = r["mouths"][0].get("junc")
+        jb = r["mouths"][1].get("junc")
+        if (ja is None or jb is None or ja == jb
+                or ja not in j_sts or jb not in j_sts):
+            continue
+        def _st_geo(jx, st, mouth_mid):
+            # tightest in-junction leg: the station VALUE applies at every
+            # member node, so the nearest node binds (mid-only legs left
+            # SPJC R2's bridge cap ~1.3 m loose)
+            ptsq = [st["mid"]] if st["mid"] is not None else []
+            if nodes is not None:
+                ptsq.extend(nodes[i4] for i4 in st["nodes"]
+                            if i4 < len(nodes))
+            best = None
+            for p4 in ptsq:
+                g4 = _junc_geo_dist(jx, p4, mouth_mid)
+                if g4 is not None and (best is None or g4 < best):
+                    best = g4
+            return best
+
+        for (ca, ka) in j_sts[ja]:
+            ga2 = _st_geo(ja, chain_data[ca]["stations"][ka],
+                          r["mouths"][0]["mid"])
+            if ga2 is None:
+                continue
+            for (cb, kb) in j_sts[jb]:
+                if ca == cb and ka == kb:
+                    continue
+                gb2 = _st_geo(jb, chain_data[cb]["stations"][kb],
+                              r["mouths"][1]["mid"])
+                if gb2 is None:
+                    continue
+                cap_ties.append((("s", ca, ka), ("s", cb, kb),
+                                 max(ga2 + r["span"] + gb2, 2.0)))
 
     # apply pending inserts; a pending point within 3 m of an existing or
     # already-inserted station BINDS to it instead (sub-5 m stations
@@ -3672,7 +3773,7 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
     # runway vertex 20 m across the junction it crosses).
     jhard: dict = {}
     for ji, J in enumerate(juncs):
-        hp = [(J["ring"][k2], elev[i2])
+        hp = [(J["ring"][k2], elev[i2], i2)
               for k2, i2 in enumerate(J["idxs"])
               if i2 is not None and (base_hard[i2] or i2 in rwy_nodes)]
         if hp:
@@ -3700,7 +3801,7 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                 if nodes is not None:
                     pts.extend(nodes[i2] for i2 in ns if i2 < len(nodes))
                 hlo, hhi = float("-inf"), float("inf")
-                for (hp, he) in jhard[ji]:
+                for (hp, he, _hi2) in jhard[ji]:
                     for pt in pts:
                         dd = _junc_geo_dist(ji, pt, hp)
                         if dd is None:
@@ -3842,8 +3943,16 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
     # FREEZE the consensus into each chain: tie stations become anchors —
     # most-constrained (largest) groups first; a value a chain cannot
     # cap-reach from its existing anchors is SKIPPED (left free: an
-    # honest local conflict beats a manufactured cliff)
+    # honest local conflict beats a manufactured cliff).  When the
+    # blocking anchor is a RUNWAY CONTACT, the skip is converted into a
+    # RUNWAY FLEX DEMAND (user model: pavement grades to max FIRST, then
+    # the runway flexes the minimum — HECA T4+U needs the 05C contact at
+    # ~107.5, not 110.4, for the corridor to fit at 1.5 %): the caller
+    # re-smooths the runway through these bounds and re-runs the pass.
     n_skip = 0
+    dem_lo: dict = {}
+    dem_hi: dict = {}
+    dem_refs: set = set()
     for ci, cd in enumerate(chain_data):
         sts = cd["stations"]
         ks = [k for k in range(len(sts))
@@ -3860,21 +3969,76 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                 cd["anchored"][k] = True
             else:
                 n_skip += 1
+                for j in range(len(sts)):
+                    if not cd["anchored"][j]:
+                        continue
+                    dj = abs(sts[k]["d"] - sts[j]["d"])
+                    if abs(cd["elevs"][j] - v) <= TAXI_MAX_GRADE * dj \
+                            + 0.05:
+                        continue             # this anchor isn't blocking
+                    # the blocked tie demands flex at every RUNWAY vertex
+                    # this anchor stands on — directly (contact station)
+                    # or THROUGH its junction (a terminus on the
+                    # runway-adjacent junction: budget grows by the
+                    # in-junction geodesic to the runway vertex)
+                    targets = [(i, dj) for i in sts[j]["nodes"]
+                               if i in rwy_nodes]
+                    ji2 = sts[j].get("junc")
+                    if (not targets and ji2 is not None
+                            and ji2 in jhard
+                            and sts[j]["mid"] is not None):
+                        for (hp, _he, hi2) in jhard[ji2]:
+                            if hi2 not in rwy_nodes:
+                                continue
+                            gd = _junc_geo_dist(ji2, sts[j]["mid"], hp)
+                            if gd is not None:
+                                targets.append((hi2, dj + gd))
+                    # DIP demands only: a corridor squeezed against a HIGH
+                    # runway is the saturated-pavement case the runway
+                    # must absorb.  RISE demands trace to DEM-settled free
+                    # pavement at the far end — per the priority model
+                    # that pavement fills toward the runway instead (the
+                    # J-chain class re-manufactured the 05L +1.1 rise the
+                    # s73-p3 deadband killed; user-verified 05L stays
+                    # 57.9-60.7).
+                    for i, dtot in targets:
+                        lim = TAXI_MAX_GRADE * dtot
+                        if elev[i] - v > lim and elev[i] - (v + lim) \
+                                >= 0.5:      # vertex must DIP
+                            dem_hi[i] = min(
+                                dem_hi.get(i, float("inf")), v + lim)
+                            dem_refs.add(rwy_ref_of.get(i, ""))
                 if _os.environ.get("O4_CORRIDOR_DEBUG") == "1":
                     refs = sorted({rects[ri]["shape"].ref or "?"
                                    for (ri, _n, _f) in cd["chain"]})
-                    worst = max(
-                        (abs(v - cd["elevs"][j])
-                         - TAXI_MAX_GRADE
-                         * abs(sts[k]["d"] - sts[j]["d"])
-                         for j in range(len(sts)) if cd["anchored"][j]),
-                        default=0.0)
+                    wj, worst = -1, 0.0
+                    for j in range(len(sts)):
+                        if not cd["anchored"][j]:
+                            continue
+                        ex2 = (abs(v - cd["elevs"][j])
+                               - TAXI_MAX_GRADE
+                               * abs(sts[k]["d"] - sts[j]["d"]))
+                        if ex2 > worst:
+                            wj, worst = j, ex2
+                    blk = ""
+                    if wj >= 0:
+                        blk = (f" blocker[d={sts[wj]['d']:.0f} "
+                               f"e={cd['elevs'][wj]:.2f} "
+                               f"hard={cd['hard'][wj]} "
+                               f"rwy={bool(sts[wj]['nodes'] & rwy_nodes)}"
+                               f" n={len(sts[wj]['nodes'])}]")
                     print(f"[corr]   freeze-skip chain={refs} "
                           f"d={sts[k]['d']:.0f} v={v:.2f} "
-                          f"over-by={worst:.2f}m")
+                          f"over-by={worst:.2f}m{blk}")
         if not any(cd["anchored"]):
             cd["anchored"][0] = True
             cd["anchored"][-1] = True
+    if _os.environ.get("O4_CORRIDOR_DEBUG") == "1":
+        for i in sorted(set(dem_hi) | set(dem_lo)):
+            print(f"[corr]   runway-flex demand n{i} "
+                  f"ref={rwy_ref_of.get(i, '?')!r} "
+                  f"cur={elev[i]:.2f} "
+                  f"lo={dem_lo.get(i)} hi={dem_hi.get(i)}")
     if _os.environ.get("O4_CORRIDOR_DEBUG") == "1" and g_members:
         print(f"[corr] joint network: {len(g_members)} tie group(s) / "
               f"{sum(len(mm) for mm in g_members)} station(s), "
@@ -3890,6 +4054,43 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
     written: set = set()
     crossings: dict = {}                       # junction idx → line sources
     jpoints: dict = {}                         # junction idx → point sources
+    # NEAR-COINCIDENT TWINS: distinct canonical nodes ≤0.1 m apart (just
+    # past the weld tolerance) carry ONE surface — first writer wins
+    # ACROSS twins, else two chains' writes 0.2 m apart at d=0.00 read as
+    # an infinite-grade cross-shape step (HECA W2↔W3 / L↔#293 / E↔#320).
+    twin: dict = {}
+    if nodes is not None:
+        cellt: dict = {}
+        for i2, (x2, y2) in enumerate(nodes):
+            cellt.setdefault((int(x2 // 1.0), int(y2 // 1.0)),
+                             []).append(i2)
+        for i2, (x2, y2) in enumerate(nodes):
+            tw = [j2
+                  for dx2 in (-1, 0, 1) for dy2 in (-1, 0, 1)
+                  for j2 in cellt.get((int(x2 // 1.0) + dx2,
+                                       int(y2 // 1.0) + dy2), ())
+                  if j2 != i2
+                  and (x2 - nodes[j2][0]) ** 2
+                  + (y2 - nodes[j2][1]) ** 2 <= 0.01]
+            if tw:
+                twin[i2] = tw
+
+    def _write(i, v):
+        for j2 in twin.get(i, ()):
+            if j2 in written:
+                v = elev[j2]               # first writer wins across twins
+                break
+        elev[i] = v
+        written.add(i)
+        # a sloping rect's END-PAIR corners must stay CO-LEVEL (the
+        # X-Plane plane emit carries ONE altitude per end — the twist
+        # writing them individually left HECA stub L's low end 111.4 vs
+        # 111.7, which the emit averaged into a 0.2 m cross-shape step)
+        for j2 in (coupling.get(i, ()) if coupling else ()):
+            if j2 != i and j2 not in written and not base_hard[j2]:
+                elev[j2] = v
+                written.add(j2)
+
     n_chains = 0
     for cd in chain_data:
         chain = cd["chain"]
@@ -3980,8 +4181,7 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
         for st, e in zip(stations, elevs):
             for i in st["nodes"]:
                 if not base_hard[i] and i not in written:
-                    elev[i] = e
-                    written.add(i)
+                    _write(i, e)
         st_ds = [st["d"] for st in stations]
         # rect bodies: every ring vertex interpolates axially between its
         # rect's two mouth stations (keeps inserted shared-edge vertices —
@@ -3999,8 +4199,7 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                     continue
                 t = (r["projs"][k] - pn) / span
                 t = min(max(t, 0.0), 1.0)
-                elev[i] = en + t * (ef - en)
-                written.add(i)
+                _write(i, en + t * (ef - en))
         # RECORD junction sources for the twist pass: each crossing as a
         # LINE source (the corridor's profile along its crossing segment),
         # each mouth touching a junction as a POINT source (its station
@@ -4036,9 +4235,11 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
     # rect), at the center the crossings superpose into the max COMPOUND
     # slope, and the arms twist smoothly between.  Point sources (mouth
     # station values) keep arms serving non-crossing corridors anchored.
+    tw_all: set = set()                 # twist writes across all junctions
     for ji, xs in crossings.items():
         J = juncs[ji]
         pts = jpoints.get(ji, ())
+        tw_set: set = set()             # this junction's twist writes
         for k, i in enumerate(J["idxs"]):
             if i is None or base_hard[i] or i in written:
                 continue
@@ -4080,7 +4281,7 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
             # vertices metres apart) — these junctions are instead
             # EXEMPTED from band pinning in the final enforce.
             lo, hi = float("-inf"), float("inf")
-            for (hp, he) in jhard.get(ji, ()):
+            for (hp, he, _hi2) in jhard.get(ji, ()):
                 dd = _junc_geo_dist(ji, (x, y), hp)
                 if dd is None:
                     continue
@@ -4088,8 +4289,95 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                 hi = min(hi, he + TAXI_MAX_GRADE * dd + 0.02)
             if lo > hi:
                 continue
-            elev[i] = min(max(mean, lo), hi)
-            written.add(i)
+            _write(i, min(max(mean, lo), hi))
+            tw_set.add(i)
+            tw_all.add(i)
+        # LOCAL CONSISTENCY SWEEP: the inverse-square blend leaves two
+        # LOW-variance vertices near different sources metres apart (the
+        # per-vertex disagreement guard cannot see the pair — SPJC #107
+        # read 1.4 m / 24 m internally).  Cap-project the twist writes
+        # against each other and the held ring values over the in-polygon
+        # geodesics; mouths/stations/hard stay fixed.
+        if tw_set:
+            tab2 = _junc_geo_table(ji)
+            idxs2 = J["idxs"]
+            for _sw in range(30):
+                worst2 = 0.0
+                for a in range(len(idxs2)):
+                    ia = idxs2[a]
+                    if ia is None or not (ia in written
+                                          or base_hard[ia]):
+                        continue
+                    for b in range(a + 1, len(idxs2)):
+                        ib = idxs2[b]
+                        if ib is None or not (ib in written
+                                              or base_hard[ib]):
+                            continue
+                        fa = ia in tw_set
+                        fb = ib in tw_set
+                        if not (fa or fb):
+                            continue
+                        dd2 = tab2[a][b]
+                        if dd2 == float("inf"):
+                            continue
+                        lim2 = TAXI_MAX_GRADE * dd2 + 0.02
+                        diff2 = elev[ia] - elev[ib]
+                        ex2 = abs(diff2) - lim2
+                        if ex2 <= 0.0:
+                            continue
+                        sgn2 = 1.0 if diff2 > 0 else -1.0
+                        if fa and fb:
+                            elev[ia] -= sgn2 * ex2 / 2.0
+                            elev[ib] += sgn2 * ex2 / 2.0
+                        elif fa:
+                            elev[ia] -= sgn2 * ex2
+                        else:
+                            elev[ib] += sgn2 * ex2
+                        worst2 = max(worst2, ex2)
+                if worst2 < 0.01:
+                    break
+            # re-level any rect end-pair the sweep split (the plane emit
+            # carries one altitude per end)
+            if coupling:
+                done2: set = set()
+                for i3 in sorted(tw_set):
+                    grp = coupling.get(i3)
+                    if not grp or grp in done2:
+                        continue
+                    done2.add(grp)
+                    vals3 = [elev[j3] for j3 in grp if j3 in written]
+                    if not vals3:
+                        continue
+                    vmean = sum(vals3) / len(vals3)
+                    for j3 in grp:
+                        if not base_hard[j3] and j3 in written:
+                            elev[j3] = vmean
+    # COINCIDENT-NODE SYNC: distinct canonical nodes a few centimetres
+    # apart (just past the weld tolerance) must carry ONE surface — a
+    # corridor write on one twin and not the other reads as an
+    # infinite-grade cross-shape step (HECA W2↔W3 / L↔#293: 0.2 m at
+    # d=0.00 m).  The unwritten twin takes the written value and is held.
+    if nodes is not None and written:
+        cell2: dict = {}
+        for i2 in range(len(nodes)):
+            x2, y2 = nodes[i2]
+            cell2.setdefault((int(x2 // 1.0), int(y2 // 1.0)),
+                             []).append(i2)
+        for i2 in sorted(written):
+            if i2 >= len(nodes):
+                continue
+            x2, y2 = nodes[i2]
+            for dx2 in (-1, 0, 1):
+                for dy2 in (-1, 0, 1):
+                    for j2 in cell2.get((int(x2 // 1.0) + dx2,
+                                         int(y2 // 1.0) + dy2), ()):
+                        if (j2 == i2 or j2 in written
+                                or base_hard[j2]):
+                            continue
+                        xj, yj = nodes[j2]
+                        if (x2 - xj) ** 2 + (y2 - yj) ** 2 <= 0.01:
+                            _write(j2, elev[i2])
+
     # corridor-touched junctions are EXEMPT from per-vertex route-band
     # pinning in the final enforce: the threaded corridor profile is the
     # route truth there; the per-vertex bands (route-graph artifacts)
@@ -4101,11 +4389,20 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
         for i in juncs[ji]["idxs"]:
             if i is not None and not base_hard[i]:
                 exempt.add(i)
+    # TWIST writes are a SEED, not a hold: the corridor-touched junctions
+    # are band-exempt in the enforce, so the full POCS (which knows the
+    # bridge rects, visibility chords and every neighbouring shape the
+    # twist cannot see) finishes the junction interiors — holding them
+    # left cross-junction conflicts the enforce could never close (SPJC's
+    # V/Q/R complex: R2 bridge read 1.4 m between two held twist flanks).
+    held_out = written - tw_all
     if _os.environ.get("O4_STEP_DEBUG") == "1":
         print(f"[step] corridor profiles: {n_chains} multi-rect corridor(s), "
-              f"{len(written)} node(s) written+held, "
-              f"{len(exempt)} junction node(s) band-exempt")
-    return written, exempt
+              f"{len(written)} node(s) written ({len(held_out)} held, "
+              f"{len(tw_all)} twist-seeded free), "
+              f"{len(exempt)} junction node(s) band-exempt, "
+              f"{len(set(dem_lo) | set(dem_hi))} runway-flex demand(s)")
+    return held_out, exempt, (dem_lo, dem_hi, dem_refs)
 
 
 def _merge_terminal_level_groups(coupling: dict, shape_constraints) -> dict:
