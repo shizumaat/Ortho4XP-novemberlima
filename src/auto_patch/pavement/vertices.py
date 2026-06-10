@@ -255,7 +255,7 @@ def _push_junction_vertices_off_taxi_rect_edges(
         ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
         ROLE_STUB, ROLE_CROSS_CONNECTOR}
     guard_rect_polys: list[Polygon] = []
-    rects: list[tuple[Polygon, list[tuple[float, float]]]] = []
+    rects: list[tuple[Polygon, list[tuple[float, float]], str]] = []
     for s in layout.shapes:
         if s.role not in rect_roles:
             continue
@@ -269,7 +269,7 @@ def _push_junction_vertices_off_taxi_rect_edges(
             continue
         if len(coords) != 4:
             continue
-        rects.append((s.polygon, coords))
+        rects.append((s.polygon, coords, s.role))
     if not rects:
         return 0
     from ..junction_rules import _snap_grows_rect_overlap
@@ -342,6 +342,15 @@ def _push_junction_vertices_off_taxi_rect_edges(
                 cy_proj + perp_y * edge_gap_m)
 
     n_modified = 0
+    # Pieces split off a junction by the buffer(0) validity repair
+    # below.  Keeping only the largest piece silently uncovered real
+    # pavement (HECA: an 11,568 m² piece carrying the whole
+    # Exit-2/Exit-3 ↔ 05R/23L runway connection) — every significant
+    # piece is re-added as its own junction shape after the loop.
+    _MIN_RECOVERED_PIECE_M2 = 50.0
+    recovered: list[tuple[Polygon, str | None,
+                          list[tuple[float, float]] | None,
+                          list[float] | None]] = []
     for shape in layout.shapes:
         if shape.role != ROLE_JUNCTION:
             continue
@@ -363,11 +372,54 @@ def _push_junction_vertices_off_taxi_rect_edges(
         # neighbours are at the two corners of the same rect edge
         # AND v itself lies on that edge's interior.
         keep_mask = [True] * n_v
+
+        def _near_edge_line(x: float, y: float,
+                            corners: list[tuple[float, float]],
+                            edge_idx: int) -> bool:
+            """True if the point lies within ``edge_tol_m`` of the
+            INFINITE line through edge ``edge_idx``.  Used for the
+            runway coincident-run test: a SEGMENTED runway's long
+            edges are collinear across pieces, so a ring-neighbour
+            sitting on the NEXT piece's edge (past the seam corner)
+            still counts as part of the same run.  A neighbour on a
+            perpendicular edge (runway end-cap) fails this test, so
+            corner-wrapping rings are never collapsed."""
+            ax, ay = corners[edge_idx]
+            bx, by = corners[(edge_idx + 1) % 4]
+            dx, dy = bx - ax, by - ay
+            seg = math.hypot(dx, dy)
+            if seg < 0.01:
+                return False
+            return (abs((x - ax) * dy - (y - ay) * dx) / seg
+                    <= edge_tol_m)
+
         for i in range(n_v):
             vx, vy = ring_open[i]
             px, py = ring_open[(i - 1) % n_v]
             nx, ny = ring_open[(i + 1) % n_v]
-            for rect_poly, corners in rects:
+            # Runway coincident-run collapse (user 2026-06-09): the
+            # runway is segmented with corners exactly where junction
+            # corners should attach (pavement-intersection seams), so a
+            # junction edge that COINCIDES with a runway piece's edge
+            # must conform corner-to-corner — never be pushed 1 m off
+            # (the push scalloped a 400 m contact spanning pieces and
+            # left 1.4 m mid-edge cliffs at HECA Exit-2/3).  A vertex on
+            # a runway edge interior whose ring-neighbours BOTH lie on
+            # the same edge (interior or corner) is part of such a run:
+            # drop it; the surviving span corners snap in Stage 2.
+            for rect_poly, corners, rect_role in rects:
+                if rect_role != ROLE_RUNWAY:
+                    continue
+                v_edge = _on_edge_between_corners(vx, vy, corners)
+                if v_edge is None:
+                    continue
+                if (_near_edge_line(px, py, corners, v_edge)
+                        and _near_edge_line(nx, ny, corners, v_edge)):
+                    keep_mask[i] = False
+                    break
+            if not keep_mask[i]:
+                continue
+            for rect_poly, corners, _rect_role in rects:
                 p_corner = _at_corner_index(px, py, corners)
                 n_corner = _at_corner_index(nx, ny, corners)
                 if p_corner is None or n_corner is None:
@@ -410,7 +462,7 @@ def _push_junction_vertices_off_taxi_rect_edges(
         n_pushed = 0
         for vx, vy in ring_after_collapse:
             target = (vx, vy)
-            for rect_poly, corners in rects:
+            for rect_poly, corners, _rect_role in rects:
                 ci = _at_corner_index(vx, vy, corners)
                 if ci is not None:
                     target = corners[ci]
@@ -419,6 +471,32 @@ def _push_junction_vertices_off_taxi_rect_edges(
                     break
                 ei = _on_edge_between_corners(vx, vy, corners)
                 if ei is not None:
+                    # RUNWAY span-end reconciliation (user 2026-06-09):
+                    # the runway segmentation inserts piece corners
+                    # exactly where junction corners should attach (the
+                    # pavement-intersection seams), but simplification
+                    # drift can leave the junction's span-end vertex a
+                    # few metres from its seam corner — past the 2 m
+                    # corner snap, so it used to get the 1 m push,
+                    # leaving a tapered cliff wedge (HECA #379↔#182:
+                    # vertex 5 m from the 181/182 seam).  Snap ALONG
+                    # the edge to the nearest corner of THIS edge
+                    # instead; the movement stays on the shared
+                    # boundary line, so distortion is minimal.
+                    if _rect_role == ROLE_RUNWAY:
+                        _RUNWAY_EDGE_CORNER_SNAP_M = 10.0
+                        best_c = None
+                        best_d = _RUNWAY_EDGE_CORNER_SNAP_M
+                        for cidx in (ei, (ei + 1) % 4):
+                            cx2, cy2 = corners[cidx]
+                            d = math.hypot(cx2 - vx, cy2 - vy)
+                            if d < best_d:
+                                best_d = d
+                                best_c = (cx2, cy2)
+                        if best_c is not None:
+                            target = best_c
+                            n_snapped += 1
+                            break
                     target = _push_off(
                         vx, vy, rect_poly, corners, ei)
                     if target != (vx, vy):
@@ -438,19 +516,30 @@ def _push_junction_vertices_off_taxi_rect_edges(
             new_poly = Polygon(new_ring_closed,
                                 list(shape.polygon.interiors))
             buffer_repaired = False
+            extra_pieces: list[Polygon] = []
             if not new_poly.is_valid:
                 # The original ring may already be self-intersecting
                 # — buffer(0) can return a MultiPolygon with one
-                # main piece + tiny artifacts.  Take the largest
-                # Polygon piece so the rect-edge fix still applies.
+                # main piece + tiny artifacts.  The largest piece
+                # keeps this shape's slot; the OTHER pieces are NOT
+                # artifacts in general (a bowtie split can carve off
+                # thousands of m² of real pavement) — collect every
+                # piece ≥ _MIN_RECOVERED_PIECE_M2 for re-adding.
                 fixed = new_poly.buffer(0)
                 if fixed.geom_type == "Polygon":
                     new_poly = fixed
                     buffer_repaired = True
                 elif (fixed.geom_type == "MultiPolygon"
                         and not fixed.is_empty):
-                    new_poly = max(
-                        fixed.geoms, key=lambda g: g.area)
+                    _parts = sorted(
+                        (g for g in fixed.geoms
+                         if g.geom_type == "Polygon"
+                         and not g.is_empty),
+                        key=lambda g: -g.area)
+                    new_poly = _parts[0] if _parts else None
+                    extra_pieces = [
+                        g for g in _parts[1:]
+                        if g.area >= _MIN_RECOVERED_PIECE_M2]
                     buffer_repaired = True
                 else:
                     new_poly = None
@@ -467,6 +556,9 @@ def _push_junction_vertices_off_taxi_rect_edges(
                               if shape.node_altitudes else None)
                 _old_open = list(ring_open)  # captured pre-rebuild
                 shape.polygon = new_poly
+                for _g in extra_pieces:
+                    recovered.append(
+                        (_g, shape.ref, _old_open, _old_alts))
                 n_new = len(list(new_poly.exterior.coords)) - 1
                 # Preserve per-vertex altitudes where we can.  When
                 # Stage 1 collapsed K vertices but Stage 2 only
@@ -524,6 +616,55 @@ def _push_junction_vertices_off_taxi_rect_edges(
                 n_modified += 1
         except _GEOM_EXC:
             pass
+
+    # Re-add the pieces the buffer(0) bowtie split carved off the
+    # kept-largest junctions.  A piece that would overlap a sloped
+    # rect is skipped (same no-overlap concern as the push guard).
+    n_recovered = 0
+    for piece, ref, old_open, old_alts in recovered:
+        try:
+            if any(piece.intersection(rp).area > 1.0
+                   for rp in guard_rect_polys):
+                continue
+            ns = BuiltShape(polygon=piece, role=ROLE_JUNCTION, ref=ref)
+            if old_alts and old_open:
+                src_alts = (
+                    old_alts[:-1]
+                    if (len(old_alts) == len(old_open) + 1
+                        and old_alts[0] == old_alts[-1])
+                    else old_alts[:len(old_open)])
+                p_open = list(piece.exterior.coords)
+                if p_open and p_open[0] == p_open[-1]:
+                    p_open = p_open[:-1]
+                if src_alts and p_open:
+                    alts = []
+                    for nx, ny in p_open:
+                        best_d2 = float("inf")
+                        best_a = src_alts[0]
+                        for k, (sx, sy) in enumerate(old_open):
+                            if k >= len(src_alts):
+                                break
+                            d2 = (nx - sx) ** 2 + (ny - sy) ** 2
+                            if d2 < best_d2:
+                                best_d2 = d2
+                                best_a = src_alts[k]
+                        alts.append(round(float(best_a), 1))
+                    ns.node_altitudes = alts + [alts[0]]
+            layout.shapes.append(ns)
+            n_recovered += 1
+        except _GEOM_EXC:
+            continue
+    if n_recovered:
+        try:
+            import O4_UI_Utils as UI
+            UI.vprint(1,
+                f"  [pav-builder] junction vertex-push: re-added "
+                f"{n_recovered} piece(s) split off by ring validity "
+                f"repair (total {sum(p.area for p, *_ in recovered):,.0f}"
+                f" m²).")
+        except Exception:
+            pass
+        n_modified += n_recovered
     return n_modified
 
 
