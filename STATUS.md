@@ -1,4 +1,54 @@
-# Auto-Patch Status — session 73 = CORRIDORS LIVE (gate ON) + CORRIDOR→RUNWAY FLEX FEEDBACK; HECA 05C → 107.9 at T4
+# Auto-Patch Status — session 73 = CORRIDORS LIVE + CURVE-AWARE GRADING RULED (branch `corridor-curves`, parked for tuning)
+
+## ★★ SESSION 73 PART 10 (2026-06-10) — branch `corridor-curves` (worktree
+## `.claude/worktrees/joint-corridor-solve`, commit `f5f81a8`, NOT merged):
+## CURVE-AWARE JUNCTION GRADING + RUNWAY-EXIT EXTENSION ★★
+★★ USER RULING (model, authoritative): the 1.5 % grade cap applies along
+the taxi CENTERLINE.  Cross-axis junction diagonals are an UNREGULATED
+direction (ICAO Annex 14 §3.9 / EASA CS-ADR-DSN.D.265/.280 regulate
+longitudinal-along-route + transverse); the INSIDE edge of a curve is
+shorter than the centerline and must be allowed to EXCEED 1.5 % for the
+centerline to carry 1.5 %.  Straight chords under-measure turning routes
+— that is why high-speed exit junctions (#282/#283) pinned flat and why
+#291 (75's axis bending into 95's) can't blend.  A high-speed exit
+junction must CARRY the climb from the runway to its rect (user: #282 ≈
+1.8 m of rise from where the centerline leaves the runway to the A4
+mouth; same for #283/A5).
+BUILT on the branch (all measured at HECA):
+1. `_PER_AXIS_JUNCTIONS=True` + the rule applied in
+   `_build_shape_constraints` (the flag previously only affected the
+   _build_edges path, NOT the visibility-chord junction constraints the
+   enforce actually uses — the binding edge at #282 was a 47 m straight
+   chord from A4's mouth to a runway vertex, cap 0.71 m, headroom 0.01):
+   along-axis pairs cap at the ARC between projections, cross-axis
+   diagonals DROP, ring-adjacent pairs always survive.
+2. Curve-aware corridor distances (`_junc_axis_arc` ∨ multi-bend
+   geodesic) in hard bands / twist clamps / ties.
+3. RUNWAY-EXIT EXTENSION: chain termini at runway-touching junctions get
+   a virtual HARD station at the runway contact (singletons like A4/A5
+   survive chaining for this).  ★ Contact derivation matters: apt.dat's
+   A4 line is 167 m but cuts the fan corner (40 m in-junction where the
+   flow runs ~190 m — the curved exit line is among the 12 ingest-dropped
+   runway-crossing centerlines and `layout.apt_taxi_centerlines` keeps
+   the full set but does NOT contain it either); fallback = the fan's
+   THROAT (farthest runway-adjacent vertex by in-junction geodesic).
+   Value = runway-edge interpolation (corner-within-10 m silently
+   skipped everything).  The virtual gap is a twist line source.
+**MEASURED WIN: #282 now carries the climb — 59.4 (throat) → 60.4 → 61.3
+→ 62.6 (A4 mouth) ≈ 1.5 % along the fan, and A4 7 % → 1.4 % — exactly
+the user-specified behaviour.**
+**WHY PARKED (not merged): (a) A5/#283 unchanged — its far-mouth nodes
+were ALREADY relief-crushed to ~60.5 before the corridor pass ran
+(different mechanism; #284 holds 3.9 m); (b) NEW residuals #302 3.7 m /
+#192 1.2 m (per-axis freed surfaces moved); (c) the 05C T4 dip regressed
+107.9 → 110.4 (virtual runway anchors changed the corridor demand
+measurement — the freeze-skip demand path needs reconciling with the
+virtual-station path).  NEXT: fix (c) first (keep the user-approved
+~107.9), then A5's pre-corridor crush, then re-measure #291/#302/#192;
+check_grade junction handling must mirror the per-axis rule (tests pass
+`taxi_axes_ll` automatically when the flag is on; standalone runs
+over-report).  dev is UNTOUCHED — the user's in-sim state stays part-9.**
+
 
 ## ★★ SESSION 73 PART 9 (2026-06-10) — dev `f7aa5ad`+`dc8f787`: GATE ON + CORRIDOR→RUNWAY FLEX FEEDBACK ★★
 User flipped `TAXI_CORRIDOR_PROFILE` ON for in-sim evaluation and reported
