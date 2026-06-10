@@ -581,9 +581,15 @@ def check_vertex_on_flat_edge(layout):
     """Invariant: a sloping rect's FLAT (cross) edge meets a junction /
     apron 1:1 — only its 2 corners are legal shared vertices, never a
     node on the edge interior (a third node there steps the rect's slope
-    away from its linear-corner plane).  Returns ``[(rect_idx, detail,
+    away from its linear-corner plane).  Groundside pavement is exempt:
+    ``_separate_groundside_from_airside`` clips it to exactly
+    GROUNDSIDE_CLEARANCE_M (1.0 m) from all airside pavement, so its
+    vertices legitimately sit inside EDGE_PROX_M with no shared node
+    (the gap IS the separation — same skip as check_grade's
+    airside<->groundside rule).  Returns ``[(rect_idx, detail,
     "lat,lon"), …]``."""
     import math
+    from .layout import ROLE_GROUNDSIDE_PAVEMENT
     sloping_roles = {"primary_parallel", "secondary_parallel",
                      "stub", "cross_connector", "service_road"}
     sloping = [(i, s) for i, s in enumerate(layout.shapes)
@@ -615,6 +621,8 @@ def check_vertex_on_flat_edge(layout):
             if o is s or o.polygon is None or o.polygon.is_empty:
                 continue
             if o.role in sloping_roles:
+                continue
+            if o.role == ROLE_GROUNDSIDE_PAVEMENT:
                 continue
             ocoords = list(o.polygon.exterior.coords)
             if ocoords and ocoords[0] == ocoords[-1]:
