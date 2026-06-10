@@ -53,7 +53,10 @@ FT_TO_M = 0.3048  # left over from the dead surface-patches code (slice 0)
 MAX_TAXIWAY_GRADE = 0.015     # 1.5% max longitudinal grade for taxiways
 
 # FAA vertical-curve rules — taxiway counterpart of the runway value.
-MAX_TAXIWAY_GRADE_CHANGE_PER_M = 1.0 / 3000.0
+# Value lives in config.py (single source of truth); re-exported here under
+# the historical local name.
+from .config import TAXIWAY_MAX_GRADE_CHANGE_PER_M as \
+    MAX_TAXIWAY_GRADE_CHANGE_PER_M  # noqa: E402
 
 DEFAULT_STEEPNESS = 2
 # Maximum number of runway chunks for a single patch polygon

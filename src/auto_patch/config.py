@@ -35,6 +35,8 @@ __all__ = [
     "APRON_MAX_GRADE",
     "TERMINAL_MAX_GRADE",
     "TERMINAL_PADS_SLOPE",
+    "TAXI_CORRIDOR_PROFILE",
+    "TAXIWAY_MAX_GRADE_CHANGE_PER_M",
     "SERVICE_ROAD_MAX_GRADE",
     "SERVICE_ROAD_WIDTH_M",
     "MIN_SERVICE_STRIP_LEN_M",
@@ -250,6 +252,30 @@ TERMINAL_MAX_GRADE = APRON_MAX_GRADE
 # used to absorb must drain into the terminals.  Set False to restore the
 # rigid-flat default (squeezed pads still slope via the seed marking).
 TERMINAL_PADS_SLOPE = True
+# Taxi-corridor profile pass (user 2026-06-10): a chain of taxi rects that
+# CONTINUES through junctions (same ref, or the best axis-aligned
+# continuation - HECA's T through junction -10292, T4 into U) is re-profiled
+# as ONE smooth 1-D line, exactly like a runway centerline: grade-capped,
+# grade-CHANGE-capped, anchored at hard nodes / runway contacts / corridor
+# termini, DEM lowest priority.  Without it the solver settles each shape
+# DEM-near and a corridor legally V-notches at a junction (T read 111.7 ->
+# 104.5 -> 105.0 -> 103.5 - flat-to-reversed through the junction where one
+# steady ~1 % ramp exists).  The corridor's profile then anchors the final
+# within-shape enforcement (neighbouring pavement conforms to it - taxi
+# routes outrank aprons per the user's priority model).
+# ⛔ DEFAULT OFF (s73-close): the pass delivers the corridor continuity
+# (T monotone through junction -10292, T4 chained into U) but junctions
+# crossed by TWO corridors need a TILTED-PLANE crossing model (both axes
+# slope, the user's "roll and yaw near equal") and the corridor seeds
+# need route-floor awareness (T's flat seed ignored the 05C-route demand
+# entering via T4) — without those, adjacent band writes leave up to 64 %
+# internal junction cliffs.  Those two pieces ARE the route-field model
+# (STATUS #3); enable for experiments with O4-style config edit.
+TAXI_CORRIDOR_PROFILE = False
+# Taxiway vertical-curve rate (rise/run change per metre) used by the
+# corridor profile - the taxi sibling of RUNWAY_MAX_GRADE_CHANGE_PER_M
+# (driver.py re-exports it as MAX_TAXIWAY_GRADE_CHANGE_PER_M).
+TAXIWAY_MAX_GRADE_CHANGE_PER_M = 1.0 / 3000.0
 SERVICE_ROAD_MAX_GRADE = 0.040  # ground-vehicle route (apt.dat 1206 + OSM small roads) — cars handle 4%
 # Ground-vehicle 4%-grade ``service_road`` rect geometry (session 47).
 SERVICE_ROAD_WIDTH_M = 6.0          # corridor width for a service-road rect
