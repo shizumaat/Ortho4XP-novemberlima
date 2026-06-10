@@ -10,10 +10,10 @@ red→green; no green→red). Build WARN and `tools/check_grade.py` now AGREE (2
 1. **Pavement grades to max grade first** (terminals yielded), THEN the runway
    flexes the MINIMUM — dip OR rise — so every junction meets it. End state = 0
    violations; any residual = a measurement bug or broken geometry.
-2. **Runway only ever DIPS toward a LOWER neighbour, never RISES toward a higher
-   one** — the higher runway dips toward the lower; the lower stays at its locked
-   threshold and the junctions descend to it ("junctions could be descending — the
-   runway is raised way too high").
+2. **Runway flex is SYMMETRIC — it may DIP or RISE the minimum** (user revision
+   2026-06-09, superseding the earlier dip-only wording). Code agrees:
+   `_relax_runway_and_resolve` step-(a) combined band solve is direction-agnostic
+   — it dips toward a saturated-low junction and rises toward a saturated-high one.
 3. **Terminal flatness is LOWER priority than grade.** A pad seeded at its
    taxi-route grade-feasible level is FLAT where it can be, and SLOPES only when it
    straddles a low and a high runway and cannot be one level in grade to both.
