@@ -668,6 +668,21 @@ def _absorb_apron_enclosed_groundside(
             s.polygon = None
             absorbed += 1
             continue
+        # Double-source coverage (s70 Phoenix triage): when the emitted
+        # aprons ALREADY cover essentially the whole piece — apt.dat
+        # apron and OSM groundside both map the same pocket — merging or
+        # re-tagging emits a duplicate on top of pavement that is
+        # already there (KLUF apron#74∩island#106 5 752 m², KSDL
+        # #72∩#152 104 m²).  The piece is fully redundant: drop it.
+        # Terminal-wedged islands (HECA) keep >1 % outside the aprons
+        # and are unaffected.
+        try:
+            if q.difference(apron_union).area <= max(1.0, 0.01 * q.area):
+                s.polygon = None
+                absorbed += 1
+                continue
+        except _GEOM_EXC:
+            pass
         # (user 2026-06-03) Genuinely MERGE the piece into the apron it borders
         # most — one continuous, node-shared polygon — instead of leaving a
         # standalone flat "apron-island" whose coincident-but-unshared vertices
