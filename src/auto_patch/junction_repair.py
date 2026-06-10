@@ -872,6 +872,67 @@ def _try_iso_elevation_cut(  # noqa: C901 (long helper, see body)
     return validated_subs
 
 
+def _reinsert_lost_boundary_vertices(merged, sources,
+                                     tol_m: float = 0.02):
+    """Re-insert source-ring vertices that ``unary_union`` dissolved off the
+    merged exterior even though they still LIE ON it (GEOS merges collinear
+    segments when a shared edge is dissolved).  Those vertices are shared
+    conformance anchors — e.g. a junction vertex at a stub's end corner; if
+    the union silently drops it the stub is left ending in mid-air (HECA
+    W2/B/Exit-2 after the conforming-cuts redesign produced residue pieces
+    big enough to be sliver-merge targets).  Returns a Polygon with the
+    on-boundary vertices restored (interiors preserved)."""
+    from shapely.geometry import Polygon as _Poly
+    try:
+        ring = list(merged.exterior.coords)
+        if ring and ring[0] == ring[-1]:
+            ring = ring[:-1]
+        have = {(round(x, 6), round(y, 6)) for x, y in ring}
+        lost: list[tuple[float, float]] = []
+        for src in sources:
+            if src is None or src.is_empty:
+                continue
+            sc = list(src.exterior.coords)
+            if sc and sc[0] == sc[-1]:
+                sc = sc[:-1]
+            for x, y in sc:
+                if (round(x, 6), round(y, 6)) in have:
+                    continue
+                lost.append((float(x), float(y)))
+        if not lost:
+            return merged
+        n = len(ring)
+        inserts: dict[int, list[tuple[float, tuple[float, float]]]] = {}
+        for px, py in lost:
+            for i in range(n):
+                ax, ay = ring[i]
+                bx, by = ring[(i + 1) % n]
+                dx, dy = bx - ax, by - ay
+                seg2 = dx * dx + dy * dy
+                if seg2 <= 1e-12:
+                    continue
+                t = ((px - ax) * dx + (py - ay) * dy) / seg2
+                if t <= 1e-9 or t >= 1.0 - 1e-9:
+                    continue
+                qx, qy = ax + t * dx, ay + t * dy
+                if (px - qx) ** 2 + (py - qy) ** 2 <= tol_m * tol_m:
+                    inserts.setdefault(i, []).append((t, (px, py)))
+                    break
+        if not inserts:
+            return merged
+        out: list[tuple[float, float]] = []
+        for i in range(n):
+            out.append(ring[i])
+            for _t, p in sorted(inserts.get(i, [])):
+                out.append(p)
+        rebuilt = _Poly(out, [r.coords for r in merged.interiors])
+        if rebuilt.is_valid and not rebuilt.is_empty:
+            return rebuilt
+    except _GEOM_EXC:
+        pass
+    return merged
+
+
 def _merge_sliver_junctions_into_neighbours(
         layout: "PavementLayout",
         icao: str = "",
@@ -944,6 +1005,48 @@ def _merge_sliver_junctions_into_neighbours(
             merge_into[i] = best_idx
     if not merge_into:
         return 0
+    # Sloping-rect corner buckets: a junction vertex coinciding with one is
+    # a rect's ONLY connection into the residue — a merge that erases it
+    # (the union dissolves the shared notch into the interior, or collinear-
+    # merges it off the boundary) leaves the rect ending in mid-air (HECA
+    # stub W2 / B / Exit-2 after the conforming-cuts redesign).  Such merges
+    # are VETOED; the sliver simply stays a separate shape.
+    _RECT_ROLES = (ROLE_STUB, ROLE_PRIMARY_PARALLEL,
+                   ROLE_SECONDARY_PARALLEL, ROLE_CROSS_CONNECTOR)
+    _bucket = shared_vertex_tol_m
+    rect_corner_buckets: set = set()
+    for s in layout.shapes:
+        if s.role not in _RECT_ROLES or s.polygon is None \
+                or s.polygon.is_empty:
+            continue
+        try:
+            rc = list(s.polygon.exterior.coords)
+        except _GEOM_EXC:
+            continue
+        for cx, cy in rc:
+            rect_corner_buckets.add(
+                (round(cx / _bucket), round(cy / _bucket)))
+
+    def _merge_erases_rect_anchor(merged, *sources) -> bool:
+        """True if a source-ring vertex coinciding with a sloping-rect
+        corner is no longer a VERTEX of the merged ring (whether the
+        union dissolved it into the interior or collinear-merged it off
+        the boundary) — either way the rect's shared anchor is gone."""
+        try:
+            mv = {(round(x, 4), round(y, 4))
+                  for x, y in merged.exterior.coords}
+            for src in sources:
+                for vx, vy in src.exterior.coords:
+                    if ((round(vx / _bucket), round(vy / _bucket))
+                            not in rect_corner_buckets):
+                        continue
+                    if (round(vx, 4), round(vy, 4)) not in mv:
+                        return True
+        except _GEOM_EXC:
+            return True
+        return False
+
+    merged_slivers: set[int] = set()
     for sliver_i, target_j in merge_into.items():
         try:
             target_shape = layout.shapes[target_j]
@@ -953,6 +1056,17 @@ def _merge_sliver_junctions_into_neighbours(
                 sliver_shape.polygon])
             if (merged.geom_type == "Polygon"
                     and not merged.is_empty):
+                # Restore shared conformance anchors the union dissolved
+                # off the (collinear-merged) boundary — e.g. the junction
+                # vertex at a stub's end corner.
+                merged = _reinsert_lost_boundary_vertices(
+                    merged, [target_shape.polygon,
+                             sliver_shape.polygon])
+                if _merge_erases_rect_anchor(
+                        merged, target_shape.polygon,
+                        sliver_shape.polygon):
+                    continue
+                merged_slivers.add(sliver_i)
                 # Build a per-vertex elevation lookup from the
                 # ORIGINAL target + sliver vertices, then re-derive
                 # node_altitudes for the merged polygon by nearest-
@@ -1028,18 +1142,20 @@ def _merge_sliver_junctions_into_neighbours(
                 target_shape.node_altitudes = new_alts
         except _GEOM_EXC:
             continue
-    sliver_set = set(merge_into.keys())
+    # Only remove slivers whose union actually succeeded — a vertex-touch
+    # pair unions to a MultiPolygon (no merge applied); deleting the sliver
+    # anyway would silently uncover its pavement.
     layout.shapes = [
         s for k, s in enumerate(layout.shapes)
-        if k not in sliver_set]
+        if k not in merged_slivers]
     try:
         UI.vprint(1,
             f"  [pav-builder] {icao}: merged "
-            f"{len(merge_into)} sliver junction(s) into "
+            f"{len(merged_slivers)} sliver junction(s) into "
             f"adjacent larger junctions.")
     except _GEOM_EXC:
         pass
-    return len(merge_into)
+    return len(merged_slivers)
 
 
 def _drop_thin_orphan_slivers(

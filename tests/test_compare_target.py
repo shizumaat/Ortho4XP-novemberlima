@@ -66,11 +66,17 @@ pytestmark = [
 # segments at terrain peaks/valleys, so disabling them reduces the segment count
 # (SPJC primary_parallel 31->28, runway 31->30; SPLP-77 primary_parallel 11->8;
 # SPLP-78 primary_parallel 8->5).  Floors = target - round(5%).
+# SPJC RE-CUT 2026-06-09 (session 68) for the conforming-cuts hole-router
+# redesign (config.HOLE_ROUTER_V2): the Prim min-spanning-forest planner
+# opens residue holes with MINIMUM chained slits instead of per-hole
+# balanced cuts, so the apron residue partitions into FEWER, larger pieces
+# (apron 30->21; junction 34->42 via the sliver-merge anchor veto keeping
+# rect-end connector pieces separate).  Total emitted unchanged at 1312.
 SPJC_BASELINE: Dict[str, int] = {
-    "apron":              28,   # of  30 target
+    "apron":              20,   # of  21 target
     "boundary":          977,   # of 1028 target
     "cross_connector":     8,   # of   8 target
-    "junction":           32,   # of  34 target
+    "junction":           40,   # of  42 target
     "primary_parallel":   27,   # of  28 target
     "retaining_wall":     65,   # of  68 target
     "runway":             28,   # of  30 target

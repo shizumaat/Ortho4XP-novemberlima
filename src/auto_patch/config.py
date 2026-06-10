@@ -22,6 +22,7 @@ __all__ = [
     "ENABLE_DISCOVERED_TAXIWAYS",
     "ENABLE_APRON_NECK_SPLIT",
     "HOLE_ROUTER_ENABLED",
+    "HOLE_ROUTER_V2",
     "EMIT_BRIDGES_AND_TUNNELS",
     "JUNCTION_CLUSTER_DIST_M",
     "MAX_BOUNDARY_EDGE_M",
@@ -379,6 +380,18 @@ ENABLE_APRON_NECK_SPLIT = True
 # ``O4_HOLE_ROUTER=1`` for a single build.
 import os as _os  # noqa: E402
 HOLE_ROUTER_ENABLED = _os.environ.get("O4_HOLE_ROUTER", "1") == "1"
+
+# (session 68) Conforming-cuts hole-router REDESIGN: plan ALL of a polygon's
+# hole-opening cuts as a Prim-style MIN-SPANNING-FOREST on ONE shared
+# visibility graph (each hole connects to the nearest point of the already-
+# connected boundary network — exterior ring or a previously-opened hole —
+# via its two shortest node-disjoint bridges).  Replaces the v1 per-hole
+# independent two-bridge cuts whose Dijkstra exits all converged on a single
+# exterior hub vertex, creating needle-thin (1–2°) wedge slices that the
+# downstream sliver guards truncated or dropped → uncovered-source wedges
+# (the HECA 670 m² fan gap).  ``O4_HOLE_ROUTER_V2=0`` restores the v1
+# planner for A/B comparison.  Only consulted when HOLE_ROUTER_ENABLED.
+HOLE_ROUTER_V2 = _os.environ.get("O4_HOLE_ROUTER_V2", "1") == "1"
 
 # (session 63) Cut long taxi rects AND runway segments at interior terrain
 # extrema (``split_long_rects_along_terrain`` + the runway peak/valley seams in
