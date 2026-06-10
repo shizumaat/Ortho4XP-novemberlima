@@ -1745,6 +1745,55 @@ def _flex_route_bands(layout, elev, bucket_to_idx, free_nodes,
     G = build_taxi_route_graph(layout)
     if not getattr(G, "coord", None):
         return {}
+    # AUGMENT the graph with RUNWAY CENTERLINES (2026-06-09): the apt.dat
+    # taxi-route rows stop at/near the runway edge, so threshold anchors
+    # were unreachable and the legitimate other-runway demand (e.g. HECA
+    # 05L 60.7 + 1.5 %·~3.2 km ≈ 108.5 at the T4 join) never formed.
+    # Each runway piece contributes its cross-end midpoint pair as an
+    # edge (the piece's centerline segment — pieces share cross-ends, so
+    # the chain connects); each midpoint also bridges to the nearest
+    # PRE-EXISTING taxi node within 40 m (the taxi rows' on-runway
+    # endpoints, e.g. HECA node 181 "05R/23L_start").  Local to the flex
+    # — the terminal seed keeps the unaugmented graph.
+    _taxi_nodes_snapshot = list(G.coord.values())
+
+    def _aug_edge(pa, pb):
+        ka, kb = G._key(*pa), G._key(*pb)
+        G.coord.setdefault(ka, pa)
+        G.coord.setdefault(kb, pb)
+        if ka == kb:
+            return
+        w = math.hypot(pb[0] - pa[0], pb[1] - pa[1])
+        G.adj.setdefault(ka, []).append((kb, w))
+        G.adj.setdefault(kb, []).append((ka, w))
+
+    _mids: list = []
+    for s in layout.shapes:
+        if s.role != ROLE_RUNWAY or s.polygon is None or s.polygon.is_empty:
+            continue
+        ring = _open_ring(list(s.polygon.exterior.coords))
+        if len(ring) != 4:
+            continue
+        edges4 = [(ring[k], ring[(k + 1) % 4]) for k in range(4)]
+        edges4.sort(key=lambda ab: math.hypot(
+            ab[1][0] - ab[0][0], ab[1][1] - ab[0][1]))
+        m0 = ((edges4[0][0][0] + edges4[0][1][0]) / 2.0,
+              (edges4[0][0][1] + edges4[0][1][1]) / 2.0)
+        m1 = ((edges4[1][0][0] + edges4[1][1][0]) / 2.0,
+              (edges4[1][0][1] + edges4[1][1][1]) / 2.0)
+        _aug_edge(m0, m1)
+        _mids.append(m0)
+        _mids.append(m1)
+    for mp in _mids:
+        best_pt = None
+        best_d = 40.0
+        for (tx, ty) in _taxi_nodes_snapshot:
+            d = math.hypot(tx - mp[0], ty - mp[1])
+            if d < best_d:
+                best_d = d
+                best_pt = (tx, ty)
+        if best_pt is not None:
+            _aug_edge(mp, best_pt)
     free_set = set(free_nodes)
     pos: dict = {}
     anchor_pts: list = []                  # (key, gap, elev)
