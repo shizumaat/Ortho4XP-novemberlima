@@ -154,7 +154,16 @@ _TAXI_TIER_ROLES = frozenset((*SLOPING_RECT_ROLES, ROLE_JUNCTION,
 # aprons collect the apt.dat taxilane axes crossing them so along-lane pairs
 # grade along the (looser) arc — directional relief inside aprons — while the
 # general apron BODY (pairs off any lane) keeps its all-pair Euclidean cap.
-_PER_AXIS_JUNCTIONS = False
+# Per-axis junction grading (user 2026-06-10 ruling): the 1.5 % cap
+# applies along the taxi CENTERLINE; a curved junction's cross-axis
+# diagonal chords are an unregulated direction (ICAO Annex 14 §3.9 /
+# EASA CS-ADR-DSN.D.265/.280 regulate longitudinal-along-route +
+# transverse) and the inside-of-curve edge legitimately exceeds the cap
+# for the centerline to carry it.  All-pair chords had pinned high-speed
+# exit junctions flat (HECA #282/#283 could not rise toward A4/A5) and
+# blocked smooth blends through turning junctions (#291: 75's axis
+# bending into 95's).  check_grade mirrors via ``taxi_axes_ll``.
+_PER_AXIS_JUNCTIONS = True
 
 # Runway-flex third pass (user 2026-05-28).  The runway's elevation profile is
 # DERIVED from the DEM (interpolated between CIFP threshold anchors); the DEM is
@@ -1419,10 +1428,69 @@ def _build_shape_constraints(layout, bucket_to_idx):
             # run over neighbouring pavement = real grade paths (#192 stepped
             # 0.66 m off TX29's edge when those were dropped); only chords
             # over true voids are excluded.
-            edges.extend(_visible_grade_edges(
+            vis_edges = _visible_grade_edges(
                 coords, idx, cap, s.polygon,
                 container=(airside_buf if s.role == ROLE_JUNCTION
-                           else None)))
+                           else None))
+            # PER-AXIS JUNCTION GRADING (user 2026-06-10): the 1.5 % cap
+            # applies along the taxi CENTERLINE.  A chord between two
+            # vertices following the same (curved) axis caps at the
+            # ARC length between their projections — a straight chord
+            # under-measures a turning route and pins the junction flat
+            # (HECA #282: A4's mouth sat 47 m by chord from a runway
+            # vertex but ~120 m along the curved exit centerline, so the
+            # whole 1.8 m climb the exit should carry was forbidden).
+            # Cross-axis diagonals are an unregulated direction (ICAO
+            # Annex 14 §3.9 / EASA CS-ADR-DSN.D.265/.280 regulate
+            # longitudinal-along-route + transverse) and are dropped;
+            # ring-adjacent pairs always survive (the physical edge).
+            if s.role == ROLE_JUNCTION and _PER_AXIS_JUNCTIONS:
+                axes = _collect_junction_axes(layout, s.polygon)
+                if axes:
+                    from shapely.geometry import Point as _Pt
+                    m2 = len(coords)
+                    ring_adj = set()
+                    pos2: dict = {}
+                    for a2 in range(m2):
+                        ia2 = idx[a2]
+                        ib2 = idx[(a2 + 1) % m2]
+                        if ia2 is not None:
+                            pos2.setdefault(ia2, coords[a2])
+                        if ia2 is not None and ib2 is not None:
+                            ring_adj.add((min(ia2, ib2), max(ia2, ib2)))
+                    pdist: dict = {}
+                    kept: list = []
+                    for (ea, eb, ecap) in vis_edges:
+                        pa, pb = pos2.get(ea), pos2.get(eb)
+                        if pa is None or pb is None:
+                            kept.append((ea, eb, ecap))
+                            continue
+                        arc_best = None
+                        for ax2 in axes:
+                            ka2 = (id(ax2), ea)
+                            kb2 = (id(ax2), eb)
+                            da2 = pdist.get(ka2)
+                            if da2 is None:
+                                da2 = ax2.distance(_Pt(pa))
+                                pdist[ka2] = da2
+                            db2 = pdist.get(kb2)
+                            if db2 is None:
+                                db2 = ax2.distance(_Pt(pb))
+                                pdist[kb2] = db2
+                            if (da2 <= JUNCTION_AXIS_PERP_TOL_M
+                                    and db2 <= JUNCTION_AXIS_PERP_TOL_M):
+                                arc = abs(ax2.project(_Pt(pa))
+                                          - ax2.project(_Pt(pb)))
+                                if arc_best is None or arc > arc_best:
+                                    arc_best = arc
+                        if arc_best is not None:
+                            kept.append((ea, eb,
+                                         max(ecap, cap * arc_best)))
+                        elif (min(ea, eb), max(ea, eb)) in ring_adj:
+                            kept.append((ea, eb, ecap))
+                        # else: cross-axis diagonal — dropped
+                    vis_edges = kept
+            edges.extend(vis_edges)
         else:
             # All-pair (seam-cut rect / service junction): small near-convex
             # shapes.
@@ -3267,7 +3335,26 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                 jcs = [m["junc"] for m in r["mouths"]]
                 print(f"[corr] singleton ref={r['shape'].ref or '?'} "
                       f"span={r['span']:.0f} mouths@{mids} junc={jcs}")
-    chains = [c for c in chains if len(c) >= 2]
+    # multi-rect chains always profile; a SINGLETON survives when a mouth
+    # junction touches the RUNWAY — the runway-exit extension below gives
+    # it a hard runway anchor so the corridor WRITES the climb through
+    # the exit junction (HECA A4/A5: feasibility headroom alone never
+    # lifted the projected surface — it needs a driver)
+    def _touches_runway(c):
+        for mi2 in (c[0][1], c[0][2]):
+            ji2 = rects[c[0][0]]["mouths"][mi2].get("junc")
+            if ji2 is not None and (juncs[ji2]["nodes"] & rwy_nodes):
+                return True
+        return False
+
+    if _os.environ.get("O4_CORRIDOR_DEBUG") == "1":
+        for c in chains:
+            if len(c) == 1:
+                jt = _touches_runway(c)
+                print(f"[corr] singleton keep={jt} "
+                      f"ref={rects[c[0][0]]['shape'].ref or '?'} "
+                      f"juncs={[rects[c[0][0]]['mouths'][m].get('junc') for m in (0, 1)]}")
+    chains = [c for c in chains if len(c) >= 2 or _touches_runway(c)]
 
     # ── ROUTE BANDS (route-field model, user 2026-06-10 "correct grade is
     # king, DEM is a starting point"): per-node feasible band from the
@@ -3283,82 +3370,6 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
         except _GEOM_EXC:
             reach_lo = reach_hi = None
 
-    # ── STAGE A: stations per chain (geometry + current network values).
-    # Profiles are NOT solved here — solving chains one at a time let
-    # INDEPENDENT chains disagree by metres at SHARED junctions (#217 read
-    # 3.9 m: each chain flat-seeded between its OWN termini, and crossing
-    # reconciliation was sequential first-writer-wins).  The JOINT
-    # corridor-network solve below treats every shared-junction elevation
-    # as ONE common variable across all chains.
-    chain_data: list = []
-    for chain in chains:
-        stations: list = []
-        mouth_st: list = []                   # per chain elem: [k_near, k_far]
-        gaps: list = []                       # junction-gap crossing segments
-        d = 0.0
-        prev_mid = None
-        prev_m = None
-        for (ri, nmi, fmi) in chain:
-            r = rects[ri]
-            pair = []
-            for mi2 in (nmi, fmi):
-                m = r["mouths"][mi2]
-                if prev_mid is not None:
-                    gl = math.hypot(m["mid"][0] - prev_mid[0],
-                                    m["mid"][1] - prev_mid[1])
-                    # record the junction gap segment (entering a rect) —
-                    # the tie pass below intersects these ACROSS chains
-                    ji = prev_m.get("junc") if prev_m else None
-                    if (mi2 == nmi and gl > 2.0 and ji is not None
-                            and ji == m.get("junc")):
-                        gaps.append({
-                            "ji": ji, "A": prev_mid, "B": m["mid"],
-                            "dA": d, "dB": d + gl,
-                            "band": max(prev_m["halfw"],
-                                        m["halfw"]) + 2.0})
-                    d += gl
-                if stations and d - stations[-1]["d"] < 1.0:
-                    stations[-1]["nodes"] |= m["nodes"]   # abutting mouths
-                    if stations[-1]["junc"] is None:
-                        stations[-1]["junc"] = m.get("junc")
-                    pair.append(len(stations) - 1)
-                else:
-                    stations.append({"d": d, "nodes": set(m["nodes"]),
-                                     "mid": m["mid"], "halfw": m["halfw"],
-                                     "junc": m.get("junc")})
-                    pair.append(len(stations) - 1)
-                prev_mid = m["mid"]
-                prev_m = m
-            mouth_st.append(pair)
-        L = stations[-1]["d"]
-        if L < 30.0 or len(stations) < 3:
-            continue
-        elevs = []
-        hard = []
-        for st in stations:
-            vals = [elev[i] for i in st["nodes"]]
-            elevs.append(sum(vals) / len(vals))
-            hard.append(any(base_hard[i] for i in st["nodes"])
-                        or bool(st["nodes"] & rwy_nodes))
-        chain_data.append({
-            "chain": chain, "stations": stations, "mouth_st": mouth_st,
-            "gaps": gaps, "L": L, "elevs": elevs, "hard": hard,
-            "anchored": [h or k == 0 or k == len(stations) - 1
-                         for k, h in enumerate(hard)]})
-
-    # ── STAGE B: JOINT CORRIDOR-NETWORK TIES.  Where chains meet they
-    # must AGREE — the shared elevation is a COMMON variable:
-    #   * two chains' junction-gap segments CROSS → one shared station
-    #     inserted into BOTH chains (EQUALITY: one physical point, one
-    #     elevation);
-    #   * a chain TERMINUS abuts another chain's crossing run → a station
-    #     at the projection + a grade-cap tie over the lateral offset
-    #     (the T-junction continuation);
-    #   * stations of different chains sharing canonical NODES → equality;
-    #   * mouth stations of different chains at the SAME junction → a
-    #     grade-cap tie over their chord, only when the chord stays
-    #     inside the junction (a chord over a void is fictitious — the
-    #     s73 junction-visibility lesson; it would pin arms flat again).
     from shapely.geometry import LineString as _LineString
     from shapely.geometry import Polygon as _Polygon
 
@@ -3425,6 +3436,39 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
         jgeo_cache[ji] = tab
         return tab
 
+    jaxes_cache: dict = {}
+
+    def _junc_axis_arc(ji, pa, pb):
+        """Longest along-axis ARC between pa and pb when both lie within
+        the perp tolerance of a centerline axis through junction ji —
+        the curve-aware grade distance (user 2026-06-10: the cap applies
+        along the CENTERLINE; a straight chord under-measures a turning
+        route, pinning the junction flat)."""
+        ax_list = jaxes_cache.get(ji)
+        if ax_list is None:
+            try:
+                ax_list = _collect_junction_axes(
+                    layout, _Polygon(juncs[ji]["ring"]))
+            except _GEOM_EXC:
+                ax_list = []
+            jaxes_cache[ji] = ax_list
+        if not ax_list:
+            return None
+        from shapely.geometry import Point as _Point
+        Pa, Pb = _Point(pa), _Point(pb)
+        best = None
+        for ax in ax_list:
+            try:
+                if (ax.distance(Pa) <= JUNCTION_AXIS_PERP_TOL_M
+                        and ax.distance(Pb)
+                        <= JUNCTION_AXIS_PERP_TOL_M):
+                    arc = abs(ax.project(Pa) - ax.project(Pb))
+                    if best is None or arc > best:
+                        best = arc
+            except _GEOM_EXC:
+                continue
+        return best
+
     def _junc_geo_dist(ji, pa, pb):
         """In-junction grade-path length pa→pb: the direct chord when it
         stays inside the junction, else the SHORTEST multi-bend path over
@@ -3432,10 +3476,15 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
         constrains through its interior, and a one-bend approximation
         OVER-estimates around double corners — two vertices clamped at
         one-bend caps then violate their mutual chord (CYXY #74 read
-        2.16 % between two twist writes both 'at cap').  ``None`` = no
-        in-junction path found."""
+        2.16 % between two twist writes both 'at cap').  When both points
+        follow a centerline AXIS through the junction, the along-axis ARC
+        supersedes a shorter straight path (curve-aware grading — the
+        route turns, the chord does not).  ``None`` = no in-junction
+        path found."""
         if _junc_chord_ok(ji, pa, pb):
-            return math.hypot(pa[0] - pb[0], pa[1] - pb[1])
+            d = math.hypot(pa[0] - pb[0], pa[1] - pb[1])
+            arc = _junc_axis_arc(ji, pa, pb)
+            return max(d, arc) if arc is not None else d
         ring = juncs[ji]["ring"]
         m = len(ring)
         tab = _junc_geo_table(ji)
@@ -3455,7 +3504,311 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
         rb = _reach(pb)
         best = min((a + b for a, b in zip(ra, rb)),
                    default=float("inf"))
-        return best if best < float("inf") else None
+        if best >= float("inf"):
+            return None
+        arc = _junc_axis_arc(ji, pa, pb)
+        return max(best, arc) if arc is not None else best
+
+    # ── STAGE A: stations per chain (geometry + current network values).
+    # Profiles are NOT solved here — solving chains one at a time let
+    # INDEPENDENT chains disagree by metres at SHARED junctions (#217 read
+    # 3.9 m: each chain flat-seeded between its OWN termini, and crossing
+    # reconciliation was sequential first-writer-wins).  The JOINT
+    # corridor-network solve below treats every shared-junction elevation
+    # as ONE common variable across all chains.
+    chain_data: list = []
+    for chain in chains:
+        stations: list = []
+        mouth_st: list = []                   # per chain elem: [k_near, k_far]
+        gaps: list = []                       # junction-gap crossing segments
+        d = 0.0
+        prev_mid = None
+        prev_m = None
+        for (ri, nmi, fmi) in chain:
+            r = rects[ri]
+            pair = []
+            for mi2 in (nmi, fmi):
+                m = r["mouths"][mi2]
+                if prev_mid is not None:
+                    gl = math.hypot(m["mid"][0] - prev_mid[0],
+                                    m["mid"][1] - prev_mid[1])
+                    # record the junction gap segment (entering a rect) —
+                    # the tie pass below intersects these ACROSS chains
+                    ji = prev_m.get("junc") if prev_m else None
+                    if (mi2 == nmi and gl > 2.0 and ji is not None
+                            and ji == m.get("junc")):
+                        gaps.append({
+                            "ji": ji, "A": prev_mid, "B": m["mid"],
+                            "dA": d, "dB": d + gl,
+                            "band": max(prev_m["halfw"],
+                                        m["halfw"]) + 2.0})
+                    d += gl
+                if stations and d - stations[-1]["d"] < 1.0:
+                    stations[-1]["nodes"] |= m["nodes"]   # abutting mouths
+                    if stations[-1]["junc"] is None:
+                        stations[-1]["junc"] = m.get("junc")
+                    pair.append(len(stations) - 1)
+                else:
+                    stations.append({"d": d, "nodes": set(m["nodes"]),
+                                     "mid": m["mid"], "halfw": m["halfw"],
+                                     "junc": m.get("junc")})
+                    pair.append(len(stations) - 1)
+                prev_mid = m["mid"]
+                prev_m = m
+            mouth_st.append(pair)
+        L = stations[-1]["d"]
+        if L < 8.0 or len(stations) < 2:
+            continue                  # final ≥3-station/30 m gate is below
+        elevs = []
+        hard = []
+        for st in stations:
+            vals = [elev[i] for i in st["nodes"]]
+            elevs.append(sum(vals) / len(vals))
+            hard.append(any(base_hard[i] for i in st["nodes"])
+                        or bool(st["nodes"] & rwy_nodes))
+        chain_data.append({
+            "chain": chain, "stations": stations, "mouth_st": mouth_st,
+            "gaps": gaps, "L": L, "elevs": elevs, "hard": hard,
+            "anchored": [h or k == 0 or k == len(stations) - 1
+                         for k, h in enumerate(hard)]})
+
+    # ── RUNWAY-EXIT EXTENSION (user 2026-06-10: a high-speed exit
+    # junction must CARRY the climb from the runway to its rect — HECA
+    # #282 should rise ~1.8 m along its curved centerline run, and
+    # feasibility headroom alone never lifts a projected surface).  A
+    # chain terminus whose mouth junction touches the RUNWAY gains a
+    # virtual HARD station at the nearest runway vertex, at the
+    # curve-aware in-junction distance; the corridor profile then ramps
+    # from the runway value through the junction, and the recorded
+    # crossing segment lets the twist pass paint the junction interior.
+    for cd in chain_data:
+        sts = cd["stations"]
+        for end in (0, 1):
+            k = 0 if end == 0 else len(sts) - 1
+            st = sts[k]
+            ji = st.get("junc")
+            if _os.environ.get("O4_CORRIDOR_DEBUG") == "1" \
+                    and len(cd["chain"]) == 1:
+                rr5 = rects[cd["chain"][0][0]]["shape"].ref or "?"
+                rw5 = (len(juncs[ji]["nodes"] & rwy_nodes)
+                       if ji is not None else -1)
+                ax5 = jaxes_cache.get(ji)
+                print(f"[corr]   ext-eval ref={rr5} end={end} ji={ji} "
+                      f"hard={cd['hard'][k] if cd['hard'] else '?'} "
+                      f"mid={st['mid'] is not None} rwyN={rw5} "
+                      f"axes={'?' if ax5 is None else len(ax5)}")
+            if (ji is None or st["mid"] is None
+                    or not cd["hard"] or cd["hard"][k]):
+                continue
+            # the contact point and the climb distance come from the EXIT
+            # CENTERLINE AXIS, not the nearest runway vertex: the nearest
+            # vertex sits a short geodesic away across the fan (47 m at
+            # HECA #282) while the curved centerline runs ~120 m — using
+            # the short-cut dragged A4's apron end DOWN to runway+0.7
+            # instead of letting the junction carry the climb.
+            ax_list = jaxes_cache.get(ji)
+            if ax_list is None:
+                try:
+                    ax_list = _collect_junction_axes(
+                        layout, _Polygon(juncs[ji]["ring"]))
+                except _GEOM_EXC:
+                    ax_list = []
+                jaxes_cache[ji] = ax_list
+            from shapely.geometry import Point as _Pt2
+            Pm = _Pt2(st["mid"])
+            try:
+                jp3 = _Polygon(juncs[ji]["ring"])
+            except _GEOM_EXC:
+                continue
+            rwys3 = [s3 for s3 in layout.shapes
+                     if s3.role == ROLE_RUNWAY and s3.polygon is not None
+                     and not s3.polygon.is_empty
+                     and jp3.distance(s3.polygon) <= 3.0]
+            # Per qualifying axis: contact = its NEAREST runway
+            # intersection (extending the cut end straight when the
+            # ingest dropped the runway-crossing part); across axes take
+            # the LONGEST arc — the curved high-speed exit line is the
+            # physical taxi path, while the rect's own short stub line
+            # extended straight under-counts the climb (A4 read 40 m
+            # instead of ~120 and the relax dragged its apron end down).
+            best = None
+            n_ax = 0
+            for ax3 in ax_list:
+                try:
+                    if ax3.distance(Pm) > JUNCTION_AXIS_PERP_TOL_M:
+                        continue
+                except _GEOM_EXC:
+                    continue
+                n_ax += 1
+                t_m = ax3.project(Pm)
+                acs3 = list(ax3.coords)
+                ax_hit = None
+                for s3 in rwys3:
+                    try:
+                        inter = ax3.intersection(s3.polygon.exterior)
+                    except _GEOM_EXC:
+                        continue
+                    pts3 = []
+                    if not inter.is_empty:
+                        pts3 = ([inter] if inter.geom_type == "Point"
+                                else [g for g in
+                                      getattr(inter, "geoms", ())
+                                      if g.geom_type == "Point"])
+                    for p3 in pts3:
+                        arc3 = abs(ax3.project(p3) - t_m)
+                        if arc3 > 4.0 and (ax_hit is None
+                                           or arc3 < ax_hit[0]):
+                            ax_hit = (arc3, (p3.x, p3.y), s3)
+                    if pts3 or len(acs3) < 2:
+                        continue
+                    for (p_end, p_prev, end_t) in (
+                            (acs3[0], acs3[1], 0.0),
+                            (acs3[-1], acs3[-2], ax3.length)):
+                        dxe = p_end[0] - p_prev[0]
+                        dye = p_end[1] - p_prev[1]
+                        dl3 = math.hypot(dxe, dye)
+                        if dl3 < 1e-6:
+                            continue
+                        ray = _LineString([
+                            p_end,
+                            (p_end[0] + dxe / dl3 * 250.0,
+                             p_end[1] + dye / dl3 * 250.0)])
+                        try:
+                            hit = ray.intersection(s3.polygon.exterior)
+                        except _GEOM_EXC:
+                            continue
+                        if hit.is_empty:
+                            continue
+                        hpts = ([hit] if hit.geom_type == "Point"
+                                else [g for g in
+                                      getattr(hit, "geoms", ())
+                                      if g.geom_type == "Point"])
+                        for p3 in hpts:
+                            arc3 = abs(end_t - t_m) + ray.project(p3)
+                            if arc3 > 4.0 and (ax_hit is None
+                                               or arc3 < ax_hit[0]):
+                                ax_hit = (arc3, (p3.x, p3.y), s3)
+                if ax_hit is not None and (best is None
+                                           or ax_hit[0] > best[0]):
+                    best = ax_hit
+            # the apt.dat line often CUTS the fan straight across (A4's
+            # line: 40 m in-junction where the flow runs ~120-190 m) —
+            # the fan polygon itself records the flow: its far
+            # runway-adjacent THROAT vertex by in-junction geodesic is
+            # the entry; take the longest of the two measures
+            for k2, i3 in enumerate(juncs[ji]["idxs"]):
+                if i3 is None or i3 not in rwy_nodes:
+                    continue
+                rp = juncs[ji]["ring"][k2]
+                gd6 = _junc_geo_dist(ji, st["mid"], rp)
+                if gd6 is None or gd6 <= 4.0:
+                    continue
+                if best is None or gd6 > best[0]:
+                    best = (gd6, rp, i3)
+            if n_ax == 0:
+                if (_os.environ.get("O4_CORRIDOR_DEBUG") == "1"
+                        and juncs[ji]["nodes"] & rwy_nodes):
+                    print(f"[corr]   exit-ext SKIP (no axis ≤"
+                          f"{JUNCTION_AXIS_PERP_TOL_M:.0f}m of mouth; "
+                          f"{len(ax_list)} axes) junc={ji} "
+                          f"mouth={tuple(round(v) for v in st['mid'])}")
+                continue
+            if best is None:
+                if (_os.environ.get("O4_CORRIDOR_DEBUG") == "1"
+                        and juncs[ji]["nodes"] & rwy_nodes):
+                    print(f"[corr]   exit-ext SKIP (axis has no runway "
+                          f"intersection >4m) junc={ji}")
+                continue
+            gd, hp, s3b = best
+            if not hasattr(s3b, "polygon"):      # throat VERTEX contact
+                i6 = s3b
+                val5 = elev[i6]
+                s3b = None
+            # runway surface value AT the contact: interpolate the ring
+            # edge containing it (runway corners are sparse — requiring
+            # a vertex within 10 m silently skipped most exits)
+            if s3b is None:
+                pass
+            else:
+                val5 = None
+                bseg = 5.0
+                rring = _open_ring(list(s3b.polygon.exterior.coords))
+                m5 = len(rring)
+                for k2 in range(m5):
+                    a5 = rring[k2]
+                    b5 = rring[(k2 + 1) % m5]
+                    ex5, ey5 = b5[0] - a5[0], b5[1] - a5[1]
+                    L5sq = ex5 * ex5 + ey5 * ey5
+                    if L5sq < 1e-9:
+                        continue
+                    t5 = (((hp[0] - a5[0]) * ex5
+                           + (hp[1] - a5[1]) * ey5) / L5sq)
+                    if not -0.05 <= t5 <= 1.05:
+                        continue
+                    t5c = min(max(t5, 0.0), 1.0)
+                    px5 = a5[0] + t5c * ex5
+                    py5 = a5[1] + t5c * ey5
+                    d5 = math.hypot(hp[0] - px5, hp[1] - py5)
+                    if d5 >= bseg:
+                        continue
+                    ia5 = bucket_to_idx.get(
+                        cps.get_or_add(float(a5[0]), float(a5[1])))
+                    ib5 = bucket_to_idx.get(
+                        cps.get_or_add(float(b5[0]), float(b5[1])))
+                    if ia5 is None or ib5 is None:
+                        continue
+                    bseg = d5
+                    val5 = elev[ia5] + t5c * (elev[ib5] - elev[ia5])
+            if val5 is None:
+                if _os.environ.get("O4_CORRIDOR_DEBUG") == "1":
+                    print(f"[corr]   exit-ext SKIP (no runway edge at "
+                          f"contact) junc={ji}")
+                continue
+            band_v = max(st["halfw"], 8.0) + 2.0
+            vst = {"d": 0.0, "nodes": set(), "mid": hp, "halfw": 4.0,
+                   "junc": ji, "virtual": True}
+            if end == 0:
+                for s2 in sts:
+                    s2["d"] += gd
+                for g2 in cd["gaps"]:
+                    g2["dA"] += gd
+                    g2["dB"] += gd
+                sts.insert(0, vst)
+                cd["elevs"].insert(0, val5)
+                cd["hard"].insert(0, True)
+                cd["mouth_st"] = [[a3 + 1, b3 + 1]
+                                  for (a3, b3) in cd["mouth_st"]]
+                cd["gaps"].insert(0, {
+                    "ji": ji, "A": hp, "B": st["mid"],
+                    "dA": 0.0, "dB": gd, "band": band_v})
+            else:
+                vst["d"] = sts[-1]["d"] + gd
+                cd["gaps"].append({
+                    "ji": ji, "A": st["mid"], "B": hp,
+                    "dA": sts[-1]["d"], "dB": vst["d"],
+                    "band": band_v})
+                sts.append(vst)
+                cd["elevs"].append(val5)
+                cd["hard"].append(True)
+        cd["L"] = sts[-1]["d"]
+        cd["anchored"] = [h or k3 == 0 or k3 == len(sts) - 1
+                          for k3, h in enumerate(cd["hard"])]
+    chain_data = [cd for cd in chain_data
+                  if cd["L"] >= 30.0 and len(cd["stations"]) >= 3]
+
+    # ── STAGE B: JOINT CORRIDOR-NETWORK TIES.  Where chains meet they
+    # must AGREE — the shared elevation is a COMMON variable:
+    #   * two chains' junction-gap segments CROSS → one shared station
+    #     inserted into BOTH chains (EQUALITY: one physical point, one
+    #     elevation);
+    #   * a chain TERMINUS abuts another chain's crossing run → a station
+    #     at the projection + a grade-cap tie over the lateral offset
+    #     (the T-junction continuation);
+    #   * stations of different chains sharing canonical NODES → equality;
+    #   * mouth stations of different chains at the SAME junction → a
+    #     grade-cap tie over their chord, only when the chord stays
+    #     inside the junction (a chord over a void is fictitious — the
+    #     s73 junction-visibility lesson; it would pin arms flat again).
 
     def _seg_x(P0, P1, Q0, Q1):
         rX, rY = P1[0] - P0[0], P1[1] - P0[1]
@@ -3737,6 +4090,14 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
     # king, the network terminus value is only the DEM starting point).
     for cd in chain_data:
         sts = cd["stations"]
+        # an extended SINGLETON exit stub keeps its far terminus at the
+        # surrounding network value: relaxing it toward the runway
+        # virtual crushed the stub flat and left the whole gap as a
+        # cliff at the apron seam (HECA A5 ↔ #284 read 3.9 m) — the
+        # infeasible remainder stays as honest stub steepness instead
+        if (len(cd["chain"]) == 1
+                and any(s5.get("virtual") for s5 in sts)):
+            continue
         anc = [k for k in range(len(sts)) if cd["anchored"][k]]
         for _sweep in range(20):
             worst = 0.0
@@ -4228,6 +4589,27 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
             crossings.setdefault(ji, []).append({
                 "A": mA["mid"], "B": mB["mid"], "dA": dA, "dB": dB,
                 "ds": list(st_ds), "es": list(elevs)})
+        # virtual runway-exit segments paint their junction too: the
+        # twist line source runs from the runway vertex to the first
+        # mouth — the exit junction carries the climb (HECA #282)
+        for end2 in (0, 1):
+            k4 = 0 if end2 == 0 else len(stations) - 1
+            st4 = stations[k4]
+            if not st4.get("virtual") or st4.get("junc") is None:
+                continue
+            step4 = 1 if end2 == 0 else -1
+            kn4 = k4 + step4
+            while (0 <= kn4 < len(stations)
+                   and stations[kn4]["mid"] is None):
+                kn4 += step4
+            if not 0 <= kn4 < len(stations):
+                continue
+            crossings.setdefault(st4["junc"], []).append({
+                "A": st4["mid"], "B": stations[kn4]["mid"],
+                "dA": st4["d"], "dB": stations[kn4]["d"],
+                "ds": list(st_ds), "es": list(elevs)})
+            jpoints.setdefault(st4["junc"], []).append(
+                (st4["mid"], elevs[k4]))
 
     # ── TWIST PASS (user model 2026-06-10): junction vertices blend the
     # crossing corridors' profiles by inverse-square distance — near a
