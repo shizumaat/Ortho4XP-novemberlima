@@ -1,5 +1,44 @@
 # Auto-Patch Status — session 73 = CORRIDORS LIVE + CURVE-AWARE GRADING RULED (branch `corridor-curves`, parked for tuning)
 
+## ★ SESSION 73 PART 10e (2026-06-10) — FAILURE-CLASS MAP: SPJC/CYXY/HECA gates share one root ★
+ANALYSIS ONLY (no code).  Per-axis audit numbers (the gates' own metric,
+caps=0): HECA 296 within + 1 plane, SPJC 13 within + 1 CROSS (the assert
+that actually trips: stub V3 #19 15.9 vs junction #97 16.1 at d=0 — the
+p9 0.2 m emit step), CYXY = CLEAN standalone (3-test run PASSES; its
+full-suite RED = the s72 intermittent parallel-suite flake; its 10
+standalone-only viol are per-axis audit artifacts).  ★★ UNIFIED ROOT:
+the surface is assembled from HELD subsystems (chains, twist writes,
+runway contacts, band pins, apron edges); wherever two meet at different
+levels the disagreement stays IN the surface on whatever element spans
+the seam — because ties either (1) freeze-skip against NON-HARD blockers
+(HECA #261: junction inherits T@103.2/T@101.6/G@100.0 at shared corners;
+G's closing tie 101.42 died against G's own mid-chain FROZEN-TIE anchor
+91.34), (2) use the wrong distance (SPJC R1/R2: bridge ties cap at
+ga+span+gb through-path but the rect EMITS one plane over span 23-28 m →
+4.4-4.9 %; probe s75_spjc_r1r2.py: corners shared with junctions
+#117/#104 #118/#103, bands 25 m wide = NOT band-pinned), (3) never form
+(apron not a tie medium: J tail vs G2 head 0.9 m, 50 m apart in #190;
+V3 emit conflict), (4) pin free neighbours at band noise (HECA
+#190/#194: floors 0.02 % route-noise above held writes), (5) hard-flex
+blocked by the ONE-round limit (T4-wall: #242 = T4@106.0/T@103.6/
+U@103.1/T@102.4 around one junction, 21 viol; 05C already at its route
+ceiling 108.7 → residual CANNOT come from more runway dip).
+PLAN (priority order, each step re-measured vs the ruled invariants
+05C 108.7/05L/A4/A5/T-monotone/terminals-don't-rise):
+P0 determinism (CYXY flake: repeat-build hash, find order-dependent
+iteration, sort);  P1 SPJC: (a) V3↔#97 coincident-write reconcile (the
+p9 twin pass misses it), (b) bridge ties ALSO cap the rect's own
+end-pair at cap·SPAN;  P2 band-noise deadband/exempt for free apron
+verts near held corridor writes (≈−60-80 HECA viol);  P3 freeze-skip
+REDISTRIBUTION: when the blocker is a non-hard frozen-tie anchor,
+re-open both groups + local feasibility re-solve (anchor
+self-consistency extended to tie groups) — kills the #261 class;
+P4 apron as TIE MEDIUM: same-apron chain ends ≤~100 m tie at in-apron
+route distance (#290/J-G2 class; generalizes p10d);  P5 remainder:
+T4-wall arbitration (#242 family — may need the part-1 option-(b) USER
+ruling: route demand vs junction network at a ceiling-pinned runway),
+terminal4 lumps, #247 plane 2.16 %, #199 v2e 0.54 m.
+
 ## ★ SESSION 73 PART 10d (2026-06-10) — `corridor-curves` @7e3a8ed: A-GAP ROOT CAUSE REVISED + FIXED (apron-mouth terminus relax) ★
 HECA apt.dat was updated (Custom Scenery 15:31) — re-measured first: the
 two A chains and their values are essentially unchanged (the cliff is
