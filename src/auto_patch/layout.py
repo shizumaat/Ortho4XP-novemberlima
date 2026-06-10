@@ -722,23 +722,13 @@ class PavementLayout:
             ROLE_RUNWAY_CROSSING)
 
         # (user 2026-06-04) A long sloping rect rendered with the linear "plane"
-        # profile meets its neighbours at a sharp grade kink.  Use the eased
-        # "spline" profile (3x²−2x³, flat at both ends) on any sloping rect whose
-        # long axis exceeds this length so the slope rounds off; shorter rects
-        # keep the configured default.
-        _LONG_RECT_PROFILE_M = 300.0
-
+        # Long-rect "spline" easing evaluated and REVERTED (user 2026-06-09):
+        # every sloping rect emits with the configured profile (plane).  The
+        # spline (3x²−2x³, flat at BOTH ends) is the wrong shape for
+        # slope→slope joints — it left residual kinks at the boundaries; the
+        # proper smoothing is the vertical-curve design (parabola micro-
+        # cascade at extrema, see vertical_curve_extrema).
         def _slope_profile_for(poly) -> str:
-            try:
-                c = list(poly.exterior.coords)
-            except _GEOM_EXC:
-                return PATCH_SLOPE_PROFILE
-            if len(c) >= 2:
-                longest = max(
-                    math.hypot(c[i + 1][0] - c[i][0], c[i + 1][1] - c[i][1])
-                    for i in range(len(c) - 1))
-                if longest > _LONG_RECT_PROFILE_M:
-                    return "spline"
             return PATCH_SLOPE_PROFILE
 
         for s_idx, s, ext_nids in pending:
