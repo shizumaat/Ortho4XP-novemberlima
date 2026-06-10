@@ -729,6 +729,7 @@ def _insert_rect_corners_into_grazing_junction_edges(
         ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
         ROLE_STUB, ROLE_CROSS_CONNECTOR, ROLE_RUNWAY}
     corners: list[tuple[float, float, bool]] = []
+    rect_polys: list[Polygon] = []
     for s in layout.shapes:
         if s.role not in rect_roles:
             continue
@@ -742,9 +743,16 @@ def _insert_rect_corners_into_grazing_junction_edges(
             continue
         is_rwy = s.role == ROLE_RUNWAY
         corners.extend((x, y, is_rwy) for (x, y) in cs)
+        rect_polys.append(s.polygon)
     if not corners:
         return 0
     n_modified = 0
+    # Pieces pinched off by an exact-corner insertion (see below) —
+    # re-added as their own junction shapes after the loop.
+    _MIN_PIECE_M2 = 50.0
+    pinched: list[tuple[Polygon, str | None,
+                        list[tuple[float, float]],
+                        list[float] | None]] = []
     for shape in layout.shapes:
         if shape.role != ROLE_JUNCTION:
             continue
@@ -762,20 +770,33 @@ def _insert_rect_corners_into_grazing_junction_edges(
         minx, miny, maxx, maxy = shape.polygon.bounds
         ins: dict[int, list[tuple[float, tuple[float, float]]]] = {}
         _gdbg = os.environ.get("O4_GRAZE_DEBUG") == "1"
+        pinch_inserted = False
         for (cx, cy, is_rwy) in corners:
             tol = runway_tol_m if is_rwy else taxi_tol_m
             if not (minx - tol <= cx <= maxx + tol
                     and miny - tol <= cy <= maxy + tol):
                 continue
-            # Already attached (a ring vertex EXACTLY at the corner)?
-            exact = any((cx - vx) ** 2 + (cy - vy) ** 2 <= 1e-4
-                        for (vx, vy) in ring_open)
-            if exact:
-                continue
+            # A ring vertex EXACTLY at the corner means the corner is
+            # attached — but only on the edges INCIDENT to that vertex.
+            # A different, non-incident edge of the same ring can still
+            # graze past the corner (HECA -10193: the conformed inner
+            # run holds TX29's corners while the 314 m outer boundary
+            # edge runs collinear 0-0.5 m outside them, leaving a
+            # sliver whose lerp steps off the rect plane mid-edge).
+            # Candidate edges for an exact corner therefore exclude the
+            # incident ones; inserting on a non-incident edge pinches
+            # the ring at the corner (resolved by the buffer(0) split
+            # below).
+            exact_idxs = {
+                vi for vi, (vx, vy) in enumerate(ring_open)
+                if (cx - vx) ** 2 + (cy - vy) ** 2 <= 1e-4}
             near = any((cx - vx) ** 2 + (cy - vy) ** 2 <= 0.25
                        for (vx, vy) in ring_open)
             best = None
             for i in range(n_v):
+                if exact_idxs and (
+                        i in exact_idxs or (i + 1) % n_v in exact_idxs):
+                    continue
                 ax, ay = ring_open[i]
                 bx, by = ring_open[(i + 1) % n_v]
                 dx, dy = bx - ax, by - ay
@@ -792,11 +813,14 @@ def _insert_rect_corners_into_grazing_junction_edges(
             if _gdbg and (best is not None or near):
                 print(f"[graze]  cand corner ({cx:.0f},{cy:.0f}) "
                       f"rwy={is_rwy} near_vert={near} "
+                      f"exact={sorted(exact_idxs)} "
                       f"best={'-' if best is None else f'{best[0] ** 0.5:.2f}m@e{best[1]}t{best[2]:.2f}'}")
-            if near:
+            if not exact_idxs and near:
                 continue
             if best is not None:
                 ins.setdefault(best[1], []).append((best[2], (cx, cy)))
+                if exact_idxs:
+                    pinch_inserted = True
         if not ins:
             continue
         alts = (list(shape.node_altitudes)
@@ -826,8 +850,69 @@ def _insert_rect_corners_into_grazing_junction_edges(
             continue
         # Bending an edge ≤ tol can self-intersect a concave ring —
         # skip rather than buffer-repair (this pass is opportunistic).
+        # EXCEPT for the deliberate exact-corner pinch: there the ring
+        # touches itself at the inserted corner(s) by construction, and
+        # buffer(0) resolves it into the real pieces (the grazing
+        # sliver between the outer edge and the conformed run has
+        # ~zero area and vanishes).  Guarded by area conservation so a
+        # ring-fold that EATS a lobe (the s70 keep-largest lesson) is
+        # never accepted.
         if (not new_poly.is_valid or new_poly.is_empty
                 or new_poly.geom_type != "Polygon"):
+            if not pinch_inserted:
+                continue
+            try:
+                fixed = new_poly.buffer(0)
+            except _GEOM_EXC:
+                continue
+            parts = []
+            if fixed.geom_type == "Polygon" and not fixed.is_empty:
+                parts = [fixed]
+            elif fixed.geom_type == "MultiPolygon":
+                parts = sorted(
+                    (g for g in fixed.geoms
+                     if g.geom_type == "Polygon" and not g.is_empty),
+                    key=lambda g: -g.area)
+            if not parts:
+                continue
+            if abs(sum(g.area for g in parts) - shape.polygon.area) \
+                    > 0.01 * shape.polygon.area + 50.0:
+                continue
+            ring_for_alts = list(new_ring)
+            alts_for_alts = (list(new_alts)
+                             if new_alts is not None else None)
+
+            def _nn_alts(poly: Polygon) -> list[float] | None:
+                if alts_for_alts is None:
+                    return None
+                p_open = open_ring(list(poly.exterior.coords))
+                out = []
+                for nx, ny in p_open:
+                    best_d2 = float("inf")
+                    best_a = alts_for_alts[0]
+                    for k, (sx, sy) in enumerate(ring_for_alts):
+                        d2 = (nx - sx) ** 2 + (ny - sy) ** 2
+                        if d2 < best_d2:
+                            best_d2 = d2
+                            best_a = alts_for_alts[k]
+                    out.append(round(float(best_a), 1))
+                return out + [out[0]]
+            shape.polygon = parts[0]
+            if alts_for_alts is not None:
+                shape.node_altitudes = _nn_alts(parts[0])
+            for g in parts[1:]:
+                if g.area < _MIN_PIECE_M2:
+                    continue
+                if any(g.intersection(rp).area > 1.0
+                       for rp in rect_polys):
+                    continue
+                pinched.append(
+                    (g, shape.ref, ring_for_alts, alts_for_alts))
+            n_modified += 1
+            if os.environ.get("O4_GRAZE_DEBUG") == "1":
+                print(f"[graze] junction ref={shape.ref or '?'} "
+                      f"pinch split: kept {parts[0].area:,.0f} m², "
+                      f"{len(parts) - 1} other piece(s)")
             continue
         shape.polygon = new_poly
         if new_alts is not None:
@@ -840,6 +925,33 @@ def _insert_rect_corners_into_grazing_junction_edges(
             print(f"[graze] junction ref={shape.ref or '?'} "
                   f"inserted {len(pts)} corner(s): "
                   + " ".join(f"({px:.0f},{py:.0f})" for px, py in pts))
+    # Re-add the real pieces the exact-corner pinch split off (the
+    # junction was genuinely two components joined by the grazing
+    # sliver) — same recovered-pieces contract as the vertex-push pass.
+    for piece, ref, src_open, src_alts in pinched:
+        ns = BuiltShape(polygon=piece, role=ROLE_JUNCTION, ref=ref)
+        if src_alts and src_open:
+            try:
+                p_open = open_ring(list(piece.exterior.coords))
+            except _GEOM_EXC:
+                p_open = []
+            if p_open:
+                alts = []
+                for nx, ny in p_open:
+                    best_d2 = float("inf")
+                    best_a = src_alts[0]
+                    for k, (sx, sy) in enumerate(src_open):
+                        d2 = (nx - sx) ** 2 + (ny - sy) ** 2
+                        if d2 < best_d2:
+                            best_d2 = d2
+                            best_a = src_alts[k]
+                    alts.append(round(float(best_a), 1))
+                ns.node_altitudes = alts + [alts[0]]
+        layout.shapes.append(ns)
+        n_modified += 1
+        if os.environ.get("O4_GRAZE_DEBUG") == "1":
+            print(f"[graze] re-added pinched piece "
+                  f"{piece.area:,.0f} m² (ref={ref or '?'})")
     if os.environ.get("O4_GRAZE_DEBUG") == "1":
         print(f"[graze] insert pass: {n_modified} junction(s) modified")
     return n_modified
