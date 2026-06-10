@@ -273,13 +273,18 @@ TERMINAL_PADS_SLOPE = True
 # (STATUS #3).  s73-p5 BUILT route-band threading + the junction TWIST
 # blend (+ disagreement guard, stub/wide-only cross-ref merges): the
 # named corridors land (T monotone through -10292, T4+U ~2 % steady,
-# #291 internal 64%→25%), but INDEPENDENT same-ref chains still
-# disagree at shared junctions (#217 3.9 m — each chain flat-seeds
-# between its OWN termini) and the gate-on suite flips CYXY's grade
-# gate red.  Remaining piece = a JOINT corridor-network solve (chains
-# coupled at shared junctions as one system).  OFF until that lands;
-# set True to evaluate the corridors in-sim.
-TAXI_CORRIDOR_PROFILE = False
+# #291 internal 64%→25%).  s73-p7 BUILT the JOINT corridor-network
+# solve: chains coupled at shared junctions as one system (crossing
+# equality stations, terminus-projection + mouth geodesic cap ties,
+# damped consensus + feasibility-guarded freeze, anchor
+# self-consistency, junction hard bands on true in-polygon geodesics,
+# enforce band-exemption for corridor junctions) — CYXY gate-on 19→0
+# green, HECA #217 → 0, #291 → 13.6 %.  ON for in-sim evaluation
+# (user 2026-06-10).  Known gate-on residual: HECA's T4-wall route
+# tension (freeze-skipped ties, `O4_CORRIDOR_DEBUG=1` prints them) —
+# the runway-flex arbitration, not a corridor bug.  False restores the
+# pre-corridor surfaces byte-identically.
+TAXI_CORRIDOR_PROFILE = True
 # Taxiway vertical-curve rate (rise/run change per metre) used by the
 # corridor profile - the taxi sibling of RUNWAY_MAX_GRADE_CHANGE_PER_M
 # (driver.py re-exports it as MAX_TAXIWAY_GRADE_CHANGE_PER_M).
