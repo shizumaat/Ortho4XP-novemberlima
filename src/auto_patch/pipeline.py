@@ -848,6 +848,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
                                by_max + DSF_AIRPORT_RADIUS_M)
         except _GEOM_EXC:
             apt_bbox_m = None
+    third_party_pav_ids: set = set()
     try:
         if not LOAD_DSF_PAVEMENT:
             raise StopIteration  # skip the DSF block entirely
@@ -866,12 +867,43 @@ def build_airport_pavement(icao: str, xplane_root: str,
         n_dsf_kept = 0
         n_dsf_dropped_overlay = 0
         n_dsf_dropped_far = 0
+        # Third-party .pol pavement (tier-2 reader admissions, e.g.
+        # ZDP_Library concrete at KPHX): real base pavement for
+        # coverage purposes, but excluded from apron-merge semantics
+        # below (a full-airport base-texture layer under the runways
+        # must not read as "an apron enclosing the runway" — it
+        # apron-merged 65/67 KPHX runway segments).  Tracked in
+        # ``third_party_pav_ids`` (initialised before this block).
+        #
+        # A cross-tile airport's scenery pack ships ONE DSF PER TILE
+        # (KPHX straddles the −112 meridian; its south/east aprons
+        # live only in the pack's +33-112.dsf).  Read every tile DSF
+        # the airport's pavement bbox touches, not just the anchor
+        # tile — the boundary/distance gates still clip each polygon
+        # to this airport.
+        _dsf_tiles: set = {(math.floor(anchor[0]),
+                            math.floor(anchor[1]))}
+        if apt_bbox_m is not None:
+            _cos0 = math.cos(math.radians(anchor[0]))
+            for _bx, _by in ((apt_bbox_m[0], apt_bbox_m[1]),
+                             (apt_bbox_m[2], apt_bbox_m[3])):
+                _blat = anchor[0] + math.degrees(_by / R_EARTH)
+                _blon = anchor[1] + math.degrees(
+                    _bx / (R_EARTH * _cos0)) if _cos0 > 1e-9 else anchor[1]
+                _dsf_tiles.add((math.floor(_blat), math.floor(_blon)))
+            # Fill the rectangle between the two corners (an airport
+            # can only realistically span 2×2 tiles).
+            _lats = sorted({t[0] for t in _dsf_tiles})
+            _lons = sorted({t[1] for t in _dsf_tiles})
+            _dsf_tiles = {(la, lo) for la in range(_lats[0], _lats[-1] + 1)
+                          for lo in range(_lons[0], _lons[-1] + 1)}
         for ad in all_apt_dats:
-            dsf = _DSFR.find_associated_dsf(ad, anchor[0], anchor[1])
+          for _tlat, _tlon in sorted(_dsf_tiles):
+            dsf = _DSFR.find_associated_dsf(ad, _tlat + 0.5, _tlon + 0.5)
             if dsf is None or dsf in seen_dsf:
                 continue
             seen_dsf.add(dsf)
-            for outer, holes in _DSFR.read_dsf_pavements(dsf):
+            for outer, holes, def_path in _DSFR.read_dsf_pavements(dsf):
                 if len(outer) < 3:
                     continue
                 try:
@@ -958,6 +990,8 @@ def build_airport_pavement(icao: str, xplane_root: str,
                         except _GEOM_EXC:
                             pass
                     pav_polys.append(pm)
+                    if not _DSFR.is_stock_pavement_def(def_path):
+                        third_party_pav_ids.add(id(pm))
                     n_dsf_kept += 1
                 except _GEOM_EXC:
                     continue
@@ -1103,7 +1137,11 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # apron pavement enclosing a runway is far wider than the
     # runway, while a normal runway lies inside a runway-shaped
     # apt.dat polygon that's only marginally larger than itself.
-    apron_candidates = list(pav_polys)  # apt.dat + DSF, pre-subtract
+    # Third-party DSF base-texture polys are NOT apron candidates: a
+    # full-airport ``.pol`` layer under the runways would apron-merge
+    # every runway segment (KPHX lost 65/67 to ZDP concrete).
+    apron_candidates = [p for p in pav_polys
+                        if id(p) not in third_party_pav_ids]
     if pav_union is not None and layout.runway_union is not None:
         # Per user 2026-04-28: where a runway passes through a much
         # larger apron polygon, the runway is "apron-merged" — the

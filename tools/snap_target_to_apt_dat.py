@@ -148,12 +148,14 @@ def _apt_pavement_boundary_m(apt: APR.Airport, to_m,
                 if dsf is None or dsf in seen_dsf:
                     continue
                 seen_dsf.add(dsf)
-                for ring in _DSFR.read_dsf_pavements(dsf):
-                    if len(ring) < 3:
+                for outer, holes, _def_path in _DSFR.read_dsf_pavements(dsf):
+                    if len(outer) < 3:
                         continue
                     try:
                         poly_ll = Polygon(
-                            [(lon, lat) for (lon, lat) in ring])
+                            [(lon, lat) for (lon, lat) in outer],
+                            [[(lon, lat) for (lon, lat) in h]
+                             for h in holes if len(h) >= 3])
                         if not poly_ll.is_valid:
                             poly_ll = poly_ll.buffer(0)
                         if (poly_ll.is_empty

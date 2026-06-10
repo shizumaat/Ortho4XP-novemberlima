@@ -194,6 +194,19 @@ EMIT_BRIDGES_AND_TUNNELS = True
 # whichever apt.dat is picked.
 LOAD_DSF_PAVEMENT = True
 
+# Third-party DSF pavement allowlist (user 2026-06-10, KPHX south
+# aprons): library prefixes (lowercase, prefix match) whose ``.pol``
+# defs are trusted as BASE pavement when the path also names a
+# pavement material (concrete/asphalt/…).  Kept deliberately narrow:
+# blanket material-token admission regressed the SPJC compare-target
+# (CDB-Library / aericaps "tarmac"/"asphalt" overlays), and even
+# MisterX_Library/Ground_Textures flooded KSDL (222 DSF polys kept,
+# clean verify → short_edge/cross/steps noise).  Extend per-library
+# only after verifying the affected airports.
+DSF_THIRD_PARTY_PAVEMENT_PREFIXES = (
+    "zdp_library/",
+)
+
 
 # ── Aerodrome longitudinal grade standards (single source of truth) ──
 # Every grade / vertical-curve rule VALUE lives here so the whole tuning

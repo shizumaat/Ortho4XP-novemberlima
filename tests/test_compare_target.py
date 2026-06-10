@@ -96,28 +96,35 @@ SPJC_BASELINE_TOTAL = 1246  # of 1312 target (emitted)
 # surface production ships.  Previously cut with a RAW O4DEM, which adds
 # terrain roughness X-Plane never renders and produced different rect
 # splits (e.g. primary_parallel 5->7 here).  Floors = target - round(5%).
+# Re-cut 2026-06-10: the multi-tile DSF read now loads the pack's
+# -13-078.dsf as well (a cross-tile airport ships one DSF per tile; the
+# anchor-tile-only read missed half the DSF pavement — the same bug that
+# hid KPHX's south aprons).  The added pavement re-shapes the rect /
+# junction split on both halves.
 SPLP_BASELINE_TILE_M77: Dict[str, int] = {
-    "apron":               5,   # of   6 target (1 apron is invalid-dropped at
+    "apron":               6,   # of   7 target (1 apron is invalid-dropped at
                                 #   emit; allow ±1 for that nondeterminism)
     "boundary":          200,   # of 211 target
+    "cross_connector":     1,   # of   1 target
     "junction":            3,   # of   3 target
-    "primary_parallel":    8,   # of   8 target
+    "primary_parallel":    2,   # of   2 target
     "runway":              8,   # of   8 target
-    "stub":                4,   # of   4 target
+    "stub":                3,   # of   3 target
 }
-SPLP_BASELINE_TILE_M77_TOTAL = 235  # of 247 target (emitted)
+SPLP_BASELINE_TILE_M77_TOTAL = 230  # of 242 target (emitted)
 
 SPLP_BASELINE_TILE_M78: Dict[str, int] = {
-    "apron":               4,   # of   4 target
+    "apron":              19,   # of  20 target (±1 emit nondeterminism)
     "boundary":          281,   # of 296 target
     "cross_connector":     1,   # of   1 target
-    "junction":            8,   # of   8 target
-    "primary_parallel":    5,   # of   5 target
+    "junction":            9,   # of   9 target
+    "primary_parallel":    4,   # of   4 target
     "runway":              8,   # of   8 target
-    "stub":                4,   # of   4 target
+    "secondary_parallel":  4,   # of   4 target
+    "stub":               12,   # of  12 target
     "terminal":            1,   # of   1 target
 }
-SPLP_BASELINE_TILE_M78_TOTAL = 318  # of 338 target
+SPLP_BASELINE_TILE_M78_TOTAL = 345  # of 365 target
 
 
 def _build_layout(icao: str, tile_lat=None, tile_lon=None):

@@ -84,6 +84,38 @@ _PAVEMENT_SKIP = (
     "/decals/",
     "DirSigns",
 )
+# Second tier (user 2026-06-10, KPHX south apron): a third-party
+# ``.pol`` IS sometimes the BASE pavement, not an overlay —
+# ``ZDP_Library/ground_textures/concrete/flat/Flat_New_Uniform.pol``
+# carries KPHX's south aprons with NO apt.dat row-110 beneath them.
+# Admit third-party defs only when (a) the library prefix is on the
+# config allowlist (``DSF_THIRD_PARTY_PAVEMENT_PREFIXES`` — blanket
+# material-token admission regressed the SPJC compare-target via
+# CDB-Library/aericaps overlays), (b) the path names a pavement
+# MATERIAL, and (c) nothing decorative; the pipeline's geometric
+# overlay gate (a polygon ≥ 80 % inside the apt.dat union is
+# dropped) additionally keeps overlays painted ON apt.dat pavement
+# out of the layout.
+from .config import DSF_THIRD_PARTY_PAVEMENT_PREFIXES
+_PAVEMENT_MATERIAL_TOKENS = (
+    "concrete", "asphalt", "tarmac", "cement", "pavement",
+)
+_THIRD_PARTY_SKIP_TOKENS = _PAVEMENT_SKIP + (
+    "grass", "terrain", "dirt", "gravel", "soil", "mud", "snow",
+    "paint", "line", "marking", "light", "decal", "sign", "logo",
+    "grunge", "stain", "skid", "crack_line",
+)
+
+
+def is_stock_pavement_def(path: str) -> bool:
+    """True when the POLYGON_DEF path is X-Plane STOCK pavement
+    (``lib/airport/pavement/…``).  Third-party admissions (tier 2 in
+    ``_is_pavement_def``) return False — the pipeline counts them as
+    pavement COVERAGE but excludes them from apron-merge semantics
+    (a full-airport base-texture ``.pol`` under the runways must not
+    read as "an apron enclosing the runway")."""
+    p = path.lower()
+    return any(p.startswith(prefix) for prefix in _PAVEMENT_PREFIXES)
 
 
 def _dsftool_path() -> str | None:
@@ -105,19 +137,28 @@ def _dsftool_path() -> str | None:
 def _is_pavement_def(path: str) -> bool:
     """True if the POLYGON_DEF path is bulk pavement geometry.
 
-    Strict: only X-Plane stock pavement library paths are admitted.
-    Third-party libraries (e.g. ``zannespol/``, ``CDB-Library/``,
-    ``aericaps_collection/``) commonly use the same path tokens
-    (``asphalt``, ``concrete``, ``tarmac``) for layered visual
-    OVERLAYS rather than base pavement footprint, so admitting them
-    by name pulls non-pavement decorative geometry into the layout.
+    Tier 1 — X-Plane stock pavement library paths, always admitted.
+
+    Tier 2 — third-party ``.pol`` defs (``ZDP_Library/``,
+    ``zannespol/``, pack-local files, …) whose path names a pavement
+    MATERIAL (concrete/asphalt/…) and nothing decorative.  These are
+    often layered visual overlays painted ON apt.dat pavement — but
+    sometimes they ARE the base pavement (KPHX south aprons ship
+    solely as ``ZDP_Library/.../concrete/flat/Flat_New_Uniform.pol``
+    with no row-110 beneath).  Admit them here; the pipeline's
+    geometric overlay gate drops any polygon ≥ 80 % inside the
+    apt.dat union, so true overlays (SPJC zannespol tinted asphalt)
+    still never reach the layout.
     """
     p = path.lower()
-    if not any(p.startswith(prefix) for prefix in _PAVEMENT_PREFIXES):
-        return False
-    if any(s in p for s in _PAVEMENT_SKIP):
-        return False
-    return True
+    if any(p.startswith(prefix) for prefix in _PAVEMENT_PREFIXES):
+        return not any(s in p for s in _PAVEMENT_SKIP)
+    if (p.endswith(".pol")
+            and any(p.startswith(prefix)
+                    for prefix in DSF_THIRD_PARTY_PAVEMENT_PREFIXES)
+            and any(t in p for t in _PAVEMENT_MATERIAL_TOKENS)):
+        return not any(s.lower() in p for s in _THIRD_PARTY_SKIP_TOKENS)
+    return False
 
 
 def _interpolate_dsf_ring(
@@ -210,10 +251,13 @@ def read_dsf_pavements(
             Defaults to a per-DSF temp file alongside the source.
 
     Returns:
-        A list of pavement polygons, each as ``(outer_ring, holes)``
-        where ``outer_ring`` is a list of ``(lon, lat)`` tuples and
-        ``holes`` is a list of inner rings (each also a list of
-        ``(lon, lat)``).  Rings are NOT closed (first vertex isn't
+        A list of pavement polygons, each as ``(outer_ring, holes,
+        def_path)`` where ``outer_ring`` is a list of ``(lon, lat)``
+        tuples, ``holes`` is a list of inner rings (each also a list
+        of ``(lon, lat)``), and ``def_path`` is the POLYGON_DEF
+        resource path that produced the polygon (lets the caller
+        distinguish stock-library pavement from third-party ``.pol``
+        admissions).  Rings are NOT closed (first vertex isn't
         repeated).  Returns ``[]`` on any failure (DSFTool missing,
         DSF unreadable, no pavement defs, etc.).
     """
@@ -270,15 +314,15 @@ def read_dsf_pavements(
         return []
 
     # Pass 1: collect POLYGON_DEFs in order; track which indices
-    # are pavement.
-    pav_def_idx: set = set()
+    # are pavement (and their resource paths, returned per polygon).
+    pav_def_idx: dict[int, str] = {}
     def_idx = 0
     for line in lines:
         if line.startswith("POLYGON_DEF"):
             tok = line.strip().split(maxsplit=1)
             path = tok[1] if len(tok) > 1 else ""
             if _is_pavement_def(path):
-                pav_def_idx.add(def_idx)
+                pav_def_idx[def_idx] = path.strip()
             def_idx += 1
     if not pav_def_idx:
         return []
@@ -300,8 +344,10 @@ def read_dsf_pavements(
     # which then leave residue against the apt.dat bezier curves on
     # union.  Capture the control points and tessellate.
     polys: list[tuple[list[tuple[float, float]],
-                      list[list[tuple[float, float]]]]] = []
+                      list[list[tuple[float, float]]],
+                      str]] = []
     in_pavement = False
+    cur_def_path = ""
     in_winding = False
     cur_depth = 2
     # Each winding node is (anchor_xy, ctrl_xy_or_None).
@@ -326,6 +372,7 @@ def read_dsf_pavements(
             except (ValueError, IndexError):
                 cur_depth = 2
             in_pavement = idx in pav_def_idx
+            cur_def_path = pav_def_idx.get(idx, "")
             in_winding = False
             current_ring = None
             cur_outer = None
@@ -333,7 +380,7 @@ def read_dsf_pavements(
             continue
         if line.startswith("END_POLYGON"):
             if in_pavement and cur_outer and len(cur_outer) >= 3:
-                polys.append((cur_outer, cur_holes))
+                polys.append((cur_outer, cur_holes, cur_def_path))
             in_pavement = False
             in_winding = False
             current_ring = None

@@ -574,7 +574,13 @@ def _pair_grade_limit(way_a: "Way", way_b: "Way",
 # STEP checks below — which assume neighbouring pavement should be vertically
 # continuous — must NOT fire across the airside <-> groundside boundary.  (Each
 # side's own within-shape grade still applies.)
-_GROUNDSIDE_ROLES = {"groundside_pavement", "service_road", "service_junction"}
+# ``tunnel_ramp`` (the depressed-road plates + portal ramps) is the same class
+# (user 2026-06-10): the road runs at apt_elev−8 m, clipped 0.5 m short of all
+# airside pavement — the 8 m face across that designed gap is the retaining
+# wall, not an elevation defect.  KPHX's ZDP aprons abutting Sky Harbor Blvd
+# fired 307 step / 32 cross warnings on this designed separation.
+_GROUNDSIDE_ROLES = {"groundside_pavement", "service_road", "service_junction",
+                     "tunnel_ramp"}
 
 
 def _is_groundside(way: "Way") -> bool:
