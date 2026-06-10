@@ -1,5 +1,25 @@
 # Auto-Patch Status — session 73 = CORRIDORS LIVE + CURVE-AWARE GRADING RULED (branch `corridor-curves`, parked for tuning)
 
+## ★ SESSION 73 PART 10b (2026-06-10) — `corridor-curves` @cc4e7c6: T4 DIP RESTORED (108.7) ★
+The part-10 "05C regression" was three separable bugs, all found by
+reading the demand instrumentation (not a design flaw):
+(1) THROAT fallback now SINGLETON-only — HECA's diagonal runways made
+T4+U read tangential and the 216 m throat budget dissolved its demand;
+(2) virtual-blocker demands carry the CONTACT need to runway vertices
+≤60 m (adding the contact→vertex leg diluted 107.9→109.6; p9 semantics
+restored); (3) route-reach bands relax to the chain's own curve-aware
+distance at virtual-anchored stations (the reach graph cuts the same
+curve corners and re-clamped the granted climb).  **05C min 108.7 ✓
+(user ~108), 05L 57.9-60.7 ✓, A4 1.1 % with #282 carrying the climb ✓.**
+STILL OPEN before merge: A5/#284 3.7 m — THREE anchor sources tried for
+A5's far terminus (own nodes 60.5 = its own carve; far-junction median
+60.5 = junction fully carved; far-junction max = still 60.5!) ⇒ the
+64.4 uncarved level lives on a DIFFERENT shape than A5's mouth junction
+— next probe: map A5's far mouth juncs-index → shape id, find which
+shape holds 64.4, anchor against THAT neighbourhood.  Also #350 1.9 m /
+#317 1.6 m un-triaged; within 493 — full SPJC/CYXY/suite re-measure
+needed before any merge.
+
 ## ★★ SESSION 73 PART 10 (2026-06-10) — branch `corridor-curves` (worktree
 ## `.claude/worktrees/joint-corridor-solve`, commit `f5f81a8`, NOT merged):
 ## CURVE-AWARE JUNCTION GRADING + RUNWAY-EXIT EXTENSION ★★
