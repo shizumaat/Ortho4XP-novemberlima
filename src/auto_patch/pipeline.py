@@ -1587,6 +1587,58 @@ def build_airport_pavement(icao: str, xplane_root: str,
         except _GEOM_EXC:
             pass
         terminal_polys.append(pad)
+
+    # ── Terminal gap for depressed roads (user 2026-06-10) ───────
+    # Where a depressed road (KPHX Sky Harbor Blvd class — a public
+    # road passing under aeroway bridges inside the boundary) runs
+    # through a terminal pad, the terminal must SPLIT and leave a
+    # gap for the road to pass through: carve the road corridor
+    # (half-width + 0.5 m clearance) out of the pad and keep each
+    # surviving piece as its own terminal.  Runs at construction —
+    # pre-solve — because terminals are frozen airside after the
+    # solve (geom-guard).  Gated on the airport actually having
+    # aeroway bridges so the big_roads OSM layer isn't parsed for
+    # the common no-bridge airport.
+    if terminal_polys and any(
+            _tags.get("aeroway") and _tags.get("bridge", "")
+            in ("yes", "viaduct")
+            for _wid, _nds, _tags in ways):
+        try:
+            from .bridges import _depressed_road_corridor_band
+            _road_band = _depressed_road_corridor_band(
+                layout, xplane_root, icao)
+        except _GEOM_EXC:
+            _road_band = None
+        if _road_band is not None and not _road_band.is_empty:
+            _carved: List[Polygon] = []
+            _n_split = 0
+            for tp in terminal_polys:
+                try:
+                    if not tp.intersects(_road_band):
+                        _carved.append(tp)
+                        continue
+                    diff = tp.difference(_road_band)
+                except _GEOM_EXC:
+                    _carved.append(tp)
+                    continue
+                pieces = [g for g in
+                          (diff.geoms if hasattr(diff, "geoms")
+                           else [diff])
+                          if g.geom_type == "Polygon"
+                          and not g.is_empty and g.area >= 100.0]
+                if pieces:
+                    _carved.extend(pieces)
+                    _n_split += 1
+                # else: pad entirely inside the corridor — the road
+                # wins; the pad is dropped.
+            if _n_split:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: split {_n_split} "
+                    f"terminal pad(s) around depressed-road "
+                    f"corridor(s) ({len(terminal_polys)} → "
+                    f"{len(_carved)} pads).")
+                terminal_polys = _carved
+
     terminal_union = (unary_union(terminal_polys)
                       if terminal_polys else None)
     for i, tp in enumerate(terminal_polys):
