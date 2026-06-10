@@ -1679,7 +1679,7 @@ def _resmooth_runways_in_elev(layout, elev, bucket_to_idx, anchored_nodes,
         cs = _open_ring(list(s.polygon.exterior.coords))
         if len(cs) == 4:
             by_ref.setdefault(s.ref or "", []).append(cs)
-    for rects in by_ref.values():
+    for ref_key, rects in by_ref.items():
         positions, L = _runway_centerline_chain(layout, bucket_to_idx, rects)
         if not positions or len(positions) < 3 or L <= 0:
             continue
@@ -1789,6 +1789,57 @@ def _resmooth_runways_in_elev(layout, elev, bucket_to_idx, anchored_nodes,
             for i in p["idxs"]:
                 if i not in anchored_nodes:
                     elev[i] = e
+        # ORPHAN-NODE SYNC (user 2026-06-09, HECA #174 blast pad): ring
+        # nodes that are NOT chain stations — mid-edge conformance
+        # inserts, e.g. a junction corner planted on a blast-pad long
+        # edge where no segment seam exists, and every vertex of a
+        # non-quad runway piece — are never written by the station loop
+        # above, so the flex band-solve could leave a SINGLE node 0.8 m
+        # above its flat piece (5.76 % within, #174 node at 61.5 on a
+        # 60.7 blast pad).  Set each to the smoothed profile
+        # interpolated at its axial position.
+        station_idxs: set = set()
+        for p in positions:
+            station_idxs.update(p["idxs"])
+        pts_ax = [pt for cs in rects for pt in cs]
+        bestd = -1.0
+        A = B = None
+        for ii in range(len(pts_ax)):
+            for jj in range(ii + 1, len(pts_ax)):
+                dd = ((pts_ax[jj][0] - pts_ax[ii][0]) ** 2
+                      + (pts_ax[jj][1] - pts_ax[ii][1]) ** 2)
+                if dd > bestd:
+                    bestd, A, B = dd, pts_ax[ii], pts_ax[jj]
+        if A is None or bestd <= 0:
+            continue
+        axL = math.sqrt(bestd)
+        ux, uy = (B[0] - A[0]) / axL, (B[1] - A[1]) / axL
+        ds = [p["d"] for p in positions]
+        cps_r = layout.canonical_points
+        for s in layout.shapes:
+            if (s.role != ROLE_RUNWAY or (s.ref or "") != ref_key
+                    or s.polygon is None or s.polygon.is_empty):
+                continue
+            for (x, y) in _open_ring(list(s.polygon.exterior.coords)):
+                idx = bucket_to_idx.get(cps_r.get_or_add(float(x), float(y)))
+                if idx is None or idx in station_idxs:
+                    continue
+                if idx in anchored_nodes:
+                    continue
+                d_n = (x - A[0]) * ux + (y - A[1]) * uy
+                if d_n <= ds[0]:
+                    elev[idx] = elevs[0]
+                    continue
+                if d_n >= ds[-1]:
+                    elev[idx] = elevs[-1]
+                    continue
+                for k in range(1, len(ds)):
+                    if d_n <= ds[k]:
+                        span = ds[k] - ds[k - 1]
+                        t = ((d_n - ds[k - 1]) / span) if span > 1e-9 else 0.0
+                        elev[idx] = (elevs[k - 1]
+                                     + t * (elevs[k] - elevs[k - 1]))
+                        break
 
 
 def _flex_route_bands(layout, elev, bucket_to_idx, free_nodes,
