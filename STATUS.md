@@ -1,3 +1,55 @@
+# Auto-Patch Status — session 68 = GEOMETRY FIXES (Exit-2/3 junction, U seam, hole-router v2 merge) + GROUNDSIDE RULE + SOLVER PHASE 1 (HECA 41→14)
+
+## ★★ SESSION 68 (2026-06-09) — branch `dev`, all committed through `5537626` ★★
+Commits: 3845907 (junction piece recovery + runway conform), f64750b (STATUS),
+1f8e849 (merge `redesign-hole-router-v2` = `plan_hole_cuts_v2`, flag
+`O4_HOLE_ROUTER_V2` default ON), ba2305d (U-seam taxi-rect conform), d99907c
+(plane profile revert), 642c8b2 (runway-disconnected aprons → groundside +
+SPJC target re-cut), 5537626 (flex demand anchor + groundside chord limit).
+Suite **304 passed / 3 failed** (intentional HECA/SPLP/SPJC gates; CYXY green).
+
+### What landed (full detail in memory `heca_exit23_runway_junction.md` + `hole_router_gap_redesign.md`)
+1. **Exit-2/3 ↔ 05R/23L junction restored** — the vertex-push's buffer(0)
+   keep-largest silently deleted the 11,568 m² connector; pieces ≥50 m² now
+   re-added; junction conforms to the runway corner-to-corner (coincident-run
+   collapse via `_near_edge_line` + span-end corner snap, vertices.py).
+2. **U-connector seam closed** — same push against a TAXI rect (U was one rect
+   at push time); flush-contact span ends now LEFT for
+   `_split_sloped_rects_at_violations` to corner. U steps 8/5/20 → 0/0/0.
+3. **Hole-router v2 merged** — Prim min-spanning-forest slits, polygonize
+   application, sibling-merge instead of drops. Fan gaps (670+2,543 m²) GONE;
+   HECA coverage 10→7 (rest = groundside-emit class, diagnosed not fixed).
+4. **Plane profile restored** (`_slope_profile_for` spline experiment reverted).
+5. **Groundside rule (user)** — apron must have a touch-chain to a runway, else
+   groundside: `_reclassify_runway_disconnected_to_groundside` (DEM-follow +
+   separation; runs before tile_cut). CYXY 9, SPJC 2 (target re-cut), HECA 38
+   (+15 disconnected TX service lanes reported, left as-is).
+   `_grade_limit_groundside_chords` (finalize, LAST altitude writer): 4 %
+   Lipschitz envelope over chord pairs — ring-ramp alone left hillside
+   groundside at 4.7-5.5 %.
+6. **Solver Phase 1 — re-smooth demand anchor** (`_resmooth_runways_in_elev
+   demand_ref`): Phase-0 measured the re-smooth UNDOING the band solve
+   (57→137); anchoring the worst-displaced point per runway fixed it.
+   **HECA within 41 → 14 (~7 unique)**. ★ INTERIM GUARD: skipped when runway
+   CROSSINGS exist — it exposes the dormant s65 crossing-anchor injection bug
+   (CYXY 14L/32R floats 695.9 vs 02/20 693.7 at the shared corners).
+
+### NEXT (priority order)
+1. **s65 crossing-anchor injection fix** (runway_segments ~L973-1331): make the
+   agreed crossing E_x actually land in the SECOND runway's profile; then lift
+   the demand-anchor crossing guard (CYXY currently masks the bug by reverting).
+2. **23R-threshold junction-cut sliver** (#174 ↔ junction, 5.76 %, 0.8 m/13.9 m)
+   — geometry fix at the cut source (Phase 2 of the solver plan).
+3. Remaining HECA ~7 unique: terminal7 marginals (0.4-0.7 m short spans), 05C
+   #147 local dip 2.28 % (demand-anchor transition steeper than chain measure —
+   check sample spacing), Exit-3 2.07 % residual, L#11 +0.04 % hairline.
+4. Groundside-emit coverage class (HECA 7 / SPJC 1 / CYXY 2 gaps) — deconflict
+   keep-largest + simplify(2.0) boundary movement (agent-diagnosed).
+5. Disconnected TX service-lane rects (15 at HECA) — should they be groundside
+   service roads? (user call).
+
+---
+
 # Auto-Patch Status — session 67 = DEMAND-DRIVEN RUNWAY FLEX + TAXI-ROUTE TERMINAL SEED + SLOPING SQUEEZED TERMINALS (HECA 168→28)
 
 ## ★★ SESSION 67 (2026-06-09) — branch `dev`, UNCOMMITTED → committing this milestone ★★
