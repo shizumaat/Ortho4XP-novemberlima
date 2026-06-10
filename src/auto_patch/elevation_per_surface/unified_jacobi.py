@@ -357,10 +357,20 @@ def solve(layout, icao: str,
             layout, bucket_to_idx)
 
         _step_dbg = _os.environ.get("O4_STEP_DEBUG") == "1"
+        _trace_n = [int(t) for t in
+                    _os.environ.get("O4_TRACE_NODES", "").split(",")
+                    if t.strip().isdigit()]
+
+        def _trace(tag):
+            if _trace_n:
+                print("[trace]", tag, " ".join(
+                    f"n{t}={elev[t]:.2f}" for t in _trace_n if t < n))
+        _trace("pre-STEP1")
         if _step_dbg:
             v, w = _count_within_viol(elev, shape_constraints)
             print(f"[step] {icao} after STEP1 forward cascade: "
                   f"within-edge viol={v} worst={w:.2f}m")
+        _trace("post-STEP1")
         total_iters += _directional_relief(
             n, elev, relief_hard, relief_eg, relief_el,
             shape_constraints, _RELIEF_MAX_ITERS, tol_m)
@@ -368,6 +378,7 @@ def solve(layout, icao: str,
             v, w = _count_within_viol(elev, shape_constraints)
             print(f"[step] {icao} after STEP2 reverse relief+yield: "
                   f"within-edge viol={v} worst={w:.2f}m")
+        _trace("post-STEP2")
         # STEP 3 (user 2026-05-28): an impossible apron<->runway connection
         # (a junction/stub wedged between soft apron and a DEM-dipped
         # runway-anchored node) has nowhere to go while every runway node
@@ -386,6 +397,7 @@ def solve(layout, icao: str,
             v, w = _count_within_viol(elev, shape_constraints)
             print(f"[step] {icao} after STEP3 runway flex: "
                   f"within-edge viol={v} worst={w:.2f}m")
+        _trace("post-STEP3")
         # TAXI-CORRIDOR PROFILES (user 2026-06-10): each chain of taxi rects
         # continuing through junctions becomes one smooth grade+curve-capped
         # 1-D profile (runway-centerline treatment, DEM lowest priority);
@@ -3695,16 +3707,50 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
             # line: 40 m in-junction where the flow runs ~120-190 m) —
             # the fan polygon itself records the flow: its far
             # runway-adjacent THROAT vertex by in-junction geodesic is
-            # the entry; take the longest of the two measures
-            for k2, i3 in enumerate(juncs[ji]["idxs"]):
-                if i3 is None or i3 not in rwy_nodes:
+            # the entry; take the longest of the two measures.  ONLY for
+            # TANGENTIAL entries (high-speed exits): a chain entering
+            # PERPENDICULAR (T4 straight into the 05C junction) must not
+            # use the throat — the farthest runway vertex of a
+            # runway-hugging junction is just runway length, and the
+            # inflated distance ATE the runway-flex demand (05C dip
+            # regressed 107.9 → 110.4).
+            el0 = cd["chain"][0] if end == 0 else cd["chain"][-1]
+            tmi = el0[1] if end == 0 else el0[2]
+            tdir = _out_dir(el0[0], tmi)
+            tangential = False
+            for s3 in rwys3:
+                rc3 = _open_ring(list(s3.polygon.exterior.coords))
+                if len(rc3) != 4:
                     continue
-                rp = juncs[ji]["ring"][k2]
-                gd6 = _junc_geo_dist(ji, st["mid"], rp)
-                if gd6 is None or gd6 <= 4.0:
+                e1 = math.hypot(rc3[1][0] - rc3[0][0],
+                                rc3[1][1] - rc3[0][1])
+                e2 = math.hypot(rc3[2][0] - rc3[1][0],
+                                rc3[2][1] - rc3[1][1])
+                if e1 >= e2 and e1 > 1e-6:
+                    axd = ((rc3[1][0] - rc3[0][0]) / e1,
+                           (rc3[1][1] - rc3[0][1]) / e1)
+                elif e2 > 1e-6:
+                    axd = ((rc3[2][0] - rc3[1][0]) / e2,
+                           (rc3[2][1] - rc3[1][1]) / e2)
+                else:
                     continue
-                if best is None or gd6 > best[0]:
-                    best = (gd6, rp, i3)
+                if abs(tdir[0] * axd[0] + tdir[1] * axd[1]) >= 0.5:
+                    tangential = True
+                    break
+            if tangential and len(cd["chain"]) == 1:
+                # exit-fan THROAT only for SINGLETON stubs: a multi-rect
+                # through-corridor (T4+U) has real centerline data and a
+                # near contact — the 216 m throat budget dissolved its
+                # runway-flex demand (05C dip 107.9 → 110.4)
+                for k2, i3 in enumerate(juncs[ji]["idxs"]):
+                    if i3 is None or i3 not in rwy_nodes:
+                        continue
+                    rp = juncs[ji]["ring"][k2]
+                    gd6 = _junc_geo_dist(ji, st["mid"], rp)
+                    if gd6 is None or gd6 <= 4.0:
+                        continue
+                    if best is None or gd6 > best[0]:
+                        best = (gd6, rp, i3)
             if n_ax == 0:
                 if (_os.environ.get("O4_CORRIDOR_DEBUG") == "1"
                         and juncs[ji]["nodes"] & rwy_nodes):
@@ -3720,6 +3766,14 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                           f"intersection >4m) junc={ji}")
                 continue
             gd, hp, s3b = best
+            if _os.environ.get("O4_CORRIDOR_DEBUG") == "1":
+                refs6 = sorted({rects[r6]["shape"].ref or "?"
+                                for (r6, _n6, _f6) in cd["chain"]})
+                print(f"[corr]   exit-ext refs={refs6} end={end} ji={ji} "
+                      f"tang={tangential} tdir=({tdir[0]:+.2f},"
+                      f"{tdir[1]:+.2f}) gd={gd:.0f} "
+                      f"contact=({hp[0]:.0f},{hp[1]:.0f}) "
+                      f"vertex={not hasattr(s3b, 'polygon')}")
             if not hasattr(s3b, "polygon"):      # throat VERTEX contact
                 i6 = s3b
                 val5 = elev[i6]
@@ -3793,6 +3847,40 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
         cd["L"] = sts[-1]["d"]
         cd["anchored"] = [h or k3 == 0 or k3 == len(sts) - 1
                           for k3, h in enumerate(cd["hard"])]
+        # an extended SINGLETON's far terminus anchors at the NEIGHBOUR-
+        # HOOD it must meet, not at its own nodes: the relief carves a
+        # low channel through the far junction along the stub's old
+        # descent (HECA A5: terminus read 60.5 while junction #284's
+        # surroundings sit at 64.4 — the chain then ramped into its own
+        # carve and the 3.7 m cliff stayed)
+        if (len(cd["chain"]) == 1
+                and any(s7.get("virtual") for s7 in sts)):
+            own7 = set()
+            for s7 in sts:
+                own7 |= s7["nodes"]
+            for k7 in (0, len(sts) - 1):
+                if sts[k7].get("virtual") or cd["hard"][k7]:
+                    continue
+                ji7 = sts[k7].get("junc")
+                if ji7 is None:
+                    continue
+                vals7 = sorted(
+                    elev[i7] for i7 in juncs[ji7]["nodes"] - own7
+                    if not base_hard[i7])
+                if len(vals7) >= 3:
+                    # the carve runs THROUGH the junction, so even its
+                    # median reads carved (A5/#284: median 60.5 vs the
+                    # uncarved side 64.4) — meet the HIGH side, clamped
+                    # to what the chain can legally climb from the
+                    # runway virtual
+                    vv7 = vals7[-1]
+                    for s8 in sts:
+                        if s8.get("virtual"):
+                            lim8 = (cd["elevs"][sts.index(s8)]
+                                    + TAXI_MAX_GRADE
+                                    * abs(sts[k7]["d"] - s8["d"]))
+                            vv7 = min(vv7, lim8)
+                    cd["elevs"][k7] = max(cd["elevs"][k7], vv7)
     chain_data = [cd for cd in chain_data
                   if cd["L"] >= 30.0 and len(cd["stations"]) >= 3]
 
@@ -4141,6 +4229,15 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
             jhard[ji] = hp
     for cd in chain_data:
         st_lo, st_hi = [], []
+        # the route-reach graph CUTS curve corners (same data flaw as the
+        # exit centerlines), so its bands under-measure and cap the very
+        # climb the virtual runway anchor grants (A5's mouth: chain says
+        # ~63.6, graph ceiling ~61 → clamped flat).  At stations of a
+        # virtual-anchored chain the chain's own curve-aware distance
+        # supersedes: only RELAXES the band, never tightens.
+        virts6 = [(st6["d"], cd["elevs"][k6])
+                  for k6, st6 in enumerate(cd["stations"])
+                  if st6.get("virtual")]
         for st in cd["stations"]:
             ns = st["nodes"]
             slo, shi = float("-inf"), float("inf")
@@ -4174,6 +4271,13 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                         slo, shi = max(slo, hlo), min(shi, hhi)
                     else:
                         slo, shi = hlo, hhi    # local hard cap wins
+            if virts6:
+                hi6 = min(vv6 + TAXI_MAX_GRADE * abs(st["d"] - vd6)
+                          for (vd6, vv6) in virts6)
+                lo6 = max(vv6 - TAXI_MAX_GRADE * abs(st["d"] - vd6)
+                          for (vd6, vv6) in virts6)
+                shi = max(shi, hi6)
+                slo = min(slo, lo6)
             st_lo.append(slo)
             st_hi.append(shi)
         cd["st_lo"], cd["st_hi"] = st_lo, st_hi
@@ -4348,8 +4452,21 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                     if (not targets and ji2 is not None
                             and ji2 in jhard
                             and sts[j]["mid"] is not None):
+                        virt7 = bool(sts[j].get("virtual"))
                         for (hp, _he, hi2) in jhard[ji2]:
                             if hi2 not in rwy_nodes:
+                                continue
+                            if virt7:
+                                # the virtual sits ON the runway: the dip
+                                # centres at the contact, so nearby
+                                # vertices carry the CONTACT need (adding
+                                # the contact→vertex leg diluted the T4
+                                # demand 107.9 → 109.6)
+                                dd7 = math.hypot(
+                                    sts[j]["mid"][0] - hp[0],
+                                    sts[j]["mid"][1] - hp[1])
+                                if dd7 <= 60.0:
+                                    targets.append((hi2, dj))
                                 continue
                             gd = _junc_geo_dist(ji2, sts[j]["mid"], hp)
                             if gd is not None:
