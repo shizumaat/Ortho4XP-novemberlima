@@ -48,9 +48,11 @@ from .layout import (
     PavementLayout,
     ROLE_APRON,
     ROLE_CROSS_CONNECTOR,
+    ROLE_GROUNDSIDE_PAVEMENT,
     ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL,
     ROLE_RUNWAY,
+    ROLE_RUNWAY_CROSSING,
     ROLE_SECONDARY_PARALLEL,
     ROLE_STUB,
     ROLE_TERMINAL,
@@ -2988,6 +2990,121 @@ def _reclassify_apron_junctions(
                 f"  [pav-builder] {icao}: reclassified "
                 f"{n_reclassified} junction(s) as apron "
                 f"(boundary > {cap_m:.0f} m from any centerline).")
+        except _GEOM_EXC:
+            pass
+    return n_reclassified
+
+
+def _reclassify_runway_disconnected_to_groundside(
+        layout: "PavementLayout",
+        icao: str = "",
+        dem=None,
+        tile_lat: int = 0,
+        tile_lon: int = 0,
+        touch_tol_m: float = 0.05,
+        ) -> int:
+    """Reclassify aprons / junctions with NO touch-chain to a runway as
+    groundside pavement (DEM-following, like every groundside shape).
+
+    Per user 2026-06-09: an APRON must have a direct connection chain
+    (through touching airside shapes) back to a runway — pavement
+    islands without one are landside (FBO ramps, curbside, parking)
+    and belong to the 4 % ``ROLE_GROUNDSIDE_PAVEMENT`` regime, not the
+    airside apron solver (CYXY: 9 west-side "aprons" 92-35,500 m²,
+    6-153 m from the airside network).  Only aprons and junctions are
+    reclassified; a disconnected RECT (taxiway) is left alone and
+    reported — that's a connectivity bug to fix, not a landside area.
+
+    Each reclassified shape is RE-ELEVATED via the groundside
+    ``_dem_follow_polygon`` (keeping its solved airside-flat altitude
+    left a 2.7 m cliff against the true DEM-following groundside at
+    CYXY), and ``_separate_groundside_from_airside`` re-runs so the
+    no-shared-boundary groundside invariant holds for the new members.
+
+    Runs at geometry-final, after ``_reclassify_apron_junctions`` and
+    after all conformance/weld passes (so every legitimate connection
+    already shares geometry), and BEFORE tile_cut (the tile clip severs
+    cross-tile chains).  Returns the count reclassified.
+    """
+    from shapely.strtree import STRtree
+    idxs = [i for i, s in enumerate(layout.shapes)
+            if s.role in (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
+                          ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
+                          ROLE_STUB, ROLE_CROSS_CONNECTOR,
+                          ROLE_JUNCTION, ROLE_APRON, ROLE_TERMINAL)
+            and s.polygon is not None and not s.polygon.is_empty]
+    if not idxs:
+        return 0
+    polys = [layout.shapes[i].polygon for i in idxs]
+    tree = STRtree(polys)
+    adj: dict[int, set[int]] = {k: set() for k in range(len(idxs))}
+    for k, p in enumerate(polys):
+        try:
+            for m in tree.query(p.buffer(touch_tol_m)):
+                m = int(m)
+                if m == k:
+                    continue
+                if p.distance(polys[m]) <= touch_tol_m:
+                    adj[k].add(m)
+                    adj[m].add(k)
+        except _GEOM_EXC:
+            continue
+    seeds = [k for k, i in enumerate(idxs)
+             if layout.shapes[i].role in (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING)]
+    seen = set(seeds)
+    stack = list(seeds)
+    while stack:
+        x = stack.pop()
+        for y in adj[x]:
+            if y not in seen:
+                seen.add(y)
+                stack.append(y)
+    from .groundside import (
+        _dem_follow_polygon, _dem_sampler,
+        _separate_groundside_from_airside)
+    _dem_at = (_dem_sampler(layout, dem, tile_lat, tile_lon)
+               if dem is not None else None)
+    n_reclassified = 0
+    n_rect_orphans = 0
+    for k, i in enumerate(idxs):
+        if k in seen:
+            continue
+        s = layout.shapes[i]
+        if s.role in (ROLE_APRON, ROLE_JUNCTION):
+            if _dem_at is not None:
+                # simplify_tol=0: these boundaries come out of the
+                # airside conformance pipeline already clean; the
+                # default 2 m simplify moves adjacent pieces'
+                # boundaries independently → mutual overlap (CYXY
+                # #102∩#103, 5.4 m²).
+                built = _dem_follow_polygon(
+                    s.polygon, _dem_at, simplify_tol=0.0)
+                if built is None:
+                    continue          # never half-convert real pavement
+                s.polygon, s.node_altitudes = built
+            s.role = ROLE_GROUNDSIDE_PAVEMENT
+            s.ref = "groundside"
+            n_reclassified += 1
+        elif s.role in (ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
+                        ROLE_STUB, ROLE_CROSS_CONNECTOR):
+            n_rect_orphans += 1
+    if n_reclassified and dem is not None:
+        # New groundside members must honour the no-shared-boundary
+        # invariant vs terminals / airside (clearance clip).
+        try:
+            _separate_groundside_from_airside(
+                layout, dem, tile_lat, tile_lon)
+        except _GEOM_EXC:
+            pass
+    if n_reclassified or n_rect_orphans:
+        try:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: reclassified "
+                f"{n_reclassified} runway-disconnected apron/junction(s) "
+                f"as groundside pavement (DEM-follow)"
+                + (f"; {n_rect_orphans} disconnected taxi rect(s) left "
+                   f"as-is" if n_rect_orphans else "")
+                + ".")
         except _GEOM_EXC:
             pass
     return n_reclassified

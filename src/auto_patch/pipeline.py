@@ -2875,6 +2875,16 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # ROLE_APRON so absorb only targets genuine final junctions.
         from .junction_repair import _reclassify_apron_junctions
         _reclassify_apron_junctions(layout, icao=icao)
+        # An apron must have a touch-chain back to a runway (user
+        # 2026-06-09); pavement islands without one are landside ramps /
+        # parking → groundside (4 %).  MUST run before tile_cut: the
+        # tile clip severs cross-tile chains and would false-positive
+        # legitimately connected aprons.
+        from .junction_repair import (
+            _reclassify_runway_disconnected_to_groundside)
+        _reclassify_runway_disconnected_to_groundside(
+            layout, icao=icao, dem=dem,
+            tile_lat=tile_lat, tile_lon=tile_lon)
 
         # Single-pass sloping-edge absorption (user 2026-05-17): dissolve
         # a sloping rect that shares a sloping edge with a genuine

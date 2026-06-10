@@ -72,8 +72,11 @@ pytestmark = [
 # balanced cuts, so the apron residue partitions into FEWER, larger pieces
 # (apron 30->21; junction 34->42 via the sliver-merge anchor veto keeping
 # rect-end connector pieces separate).  Total emitted unchanged at 1312.
+# SPJC RE-CUT again 2026-06-09 (later): runway-disconnected aprons →
+# groundside (user rule: an apron must have a touch-chain to a runway);
+# 2 terminal-curbside aprons reclassified (apron 21->19, groundside 3->5).
 SPJC_BASELINE: Dict[str, int] = {
-    "apron":              20,   # of  21 target
+    "apron":              18,   # of  19 target
     "boundary":          977,   # of 1028 target
     "cross_connector":     8,   # of   8 target
     "junction":           40,   # of  42 target
