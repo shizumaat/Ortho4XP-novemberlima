@@ -1022,6 +1022,8 @@ def _drop_offcorridor_centerlines(
         half-width is >= ``_BURIED_HALFWIDTH_M`` (it runs through the
         middle of a wide junction/apron, not a narrow taxi corridor).
     Returns (kept, n_runway_dropped, n_buried_dropped)."""
+    import os as _osm
+    _dbg = _osm.environ.get("O4_RECT_DROP_DEBUG") == "1"
     kept: list[tuple[LineString, str]] = []
     n_rwy = n_buried = 0
     for ls, ref in centerlines:
@@ -1030,6 +1032,9 @@ def _drop_offcorridor_centerlines(
                 inter = ls.intersection(rwy_union)
                 if getattr(inter, "length", 0.0) > _RWY_CROSS_DROP_M:
                     n_rwy += 1
+                    if _dbg:
+                        print(f"[cl-drop] RWY ref={ref} len={ls.length:.0f} "
+                              f"bounds={tuple(round(v,1) for v in ls.bounds)}")
                     continue
             except _GEOM_EXC:
                 pass
@@ -1037,6 +1042,9 @@ def _drop_offcorridor_centerlines(
                 and _median_perp_halfwidth(ls, pav_union)
                 >= _BURIED_HALFWIDTH_M):
             n_buried += 1
+            if _dbg:
+                print(f"[cl-drop] BURIED ref={ref} len={ls.length:.0f} "
+                      f"bounds={tuple(round(v,1) for v in ls.bounds)}")
             continue
         kept.append((ls, ref))
     return kept, n_rwy, n_buried

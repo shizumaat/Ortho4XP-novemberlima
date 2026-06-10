@@ -2389,9 +2389,21 @@ def build_airport_pavement(icao: str, xplane_root: str,
                                 abs(len_i - len_j) < 0.5
                                 and rect_i.area < rect_j.area):
                             drop_idx.add(i)
+                            if os.environ.get("O4_RECT_DROP_DEBUG") == "1":
+                                print(f"[rect-drop] loser ref={ref_i} "
+                                      f"len={len_i:.0f} area={rect_i.area:.0f} "
+                                      f"bounds={tuple(round(v,1) for v in rect_i.bounds)} "
+                                      f"winner ref={ref_j} len={len_j:.0f} "
+                                      f"inter={inter.area:.0f}")
                             break
                         else:
                             drop_idx.add(j)
+                            if os.environ.get("O4_RECT_DROP_DEBUG") == "1":
+                                print(f"[rect-drop] loser ref={ref_j} "
+                                      f"len={len_j:.0f} area={rect_j.area:.0f} "
+                                      f"bounds={tuple(round(v,1) for v in rect_j.bounds)} "
+                                      f"winner ref={ref_i} len={len_i:.0f} "
+                                      f"inter={inter.area:.0f}")
                     except _GEOM_EXC:
                         continue
             if drop_idx:

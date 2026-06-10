@@ -25,7 +25,7 @@ from shapely.ops import unary_union
 from .config import EMIT_JUNCTIONS
 from .layout import BuiltShape, ROLE_JUNCTION
 from .pavement.junctions import _decompose_polygon_with_holes
-from .canonical_points import snap_polygon_through_registry
+from .canonical_points import snap_polygon_parts_through_registry
 
 
 # Narrow exception tuple for shapely / numeric-geometry failure
@@ -254,29 +254,42 @@ def emit_junctions(layout, *, pav_union, emitted_taxi_rects,
                 ring = _drop_sliver_corners(ring)
                 if len(ring) < 3:
                     continue
+                # Keep EVERY Polygon part of the validity repair, not
+                # just the largest — a pinched residue ring splits into
+                # siblings that are all real pavement; keep-largest
+                # silently uncovered 26 000 m² at KGYR / 3 800 m² at
+                # KCHD, leaving taxi rect ends in mid-air (short-edge
+                # verify warnings) over covered source pavement.
                 try:
                     cleaned = Polygon(ring)
                     if not cleaned.is_valid:
                         cleaned = cleaned.buffer(0)
-                        if cleaned.geom_type == "MultiPolygon":
-                            cleaned = max(cleaned.geoms,
-                                          key=lambda g: g.area)
+                    if cleaned.geom_type == "MultiPolygon":
+                        parts = [g for g in cleaned.geoms
+                                 if g.geom_type == "Polygon"
+                                 and not g.is_empty]
+                    else:
+                        parts = [cleaned]
                 except _GEOM_EXC:
                     continue
-                if (cleaned.geom_type != "Polygon"
-                        or cleaned.is_empty
-                        or cleaned.area < MIN_JUNCTION_AREA_M2):
-                    continue
-                # Route every perimeter vertex through the canonical
-                # registry so any drift introduced by ``buffer(0)``
-                # validity repair (or by the upstream
-                # difference / decomposition) resolves to the same
-                # canonical (x, y) as the adjacent rect / runway /
-                # row-110 source point.  Per user 2026-05-18.
-                cleaned = snap_polygon_through_registry(
-                    cleaned, getattr(layout, "canonical_points", None))
-                if (cleaned is None or cleaned.is_empty
-                        or cleaned.area < MIN_JUNCTION_AREA_M2):
-                    continue
-                layout.shapes.append(BuiltShape(
-                    polygon=cleaned, role=ROLE_JUNCTION))
+                for part in parts:
+                    if (part.geom_type != "Polygon"
+                            or part.is_empty
+                            or part.area < MIN_JUNCTION_AREA_M2):
+                        continue
+                    # Route every perimeter vertex through the canonical
+                    # registry so any drift introduced by ``buffer(0)``
+                    # validity repair (or by the upstream
+                    # difference / decomposition) resolves to the same
+                    # canonical (x, y) as the adjacent rect / runway /
+                    # row-110 source point.  Per user 2026-05-18.
+                    # Parts-preserving: the snap itself can pinch the
+                    # ring apart; every split piece is kept.
+                    for snapped in snap_polygon_parts_through_registry(
+                            part, getattr(layout, "canonical_points",
+                                          None)):
+                        if (snapped is None or snapped.is_empty
+                                or snapped.area < MIN_JUNCTION_AREA_M2):
+                            continue
+                        layout.shapes.append(BuiltShape(
+                            polygon=snapped, role=ROLE_JUNCTION))

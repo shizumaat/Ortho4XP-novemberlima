@@ -37,7 +37,7 @@ from shapely.geometry import Polygon
 
 
 __all__ = ["CanonicalPointRegistry", "snap_polygon_through_registry",
-           "weld_layout_vertices"]
+           "snap_polygon_parts_through_registry", "weld_layout_vertices"]
 
 
 _GEOM_EXC = (ValueError, TypeError,
@@ -168,10 +168,39 @@ def snap_polygon_through_registry(
             snapped.append(cp)
         return snapped
 
+    parts = snap_polygon_parts_through_registry(poly, registry)
+    if not parts:
+        return None
+    return max(parts, key=lambda g: g.area)
+
+
+def snap_polygon_parts_through_registry(
+        poly: Polygon | None,
+        registry: CanonicalPointRegistry | None,
+) -> list:
+    """Parts-preserving variant of ``snap_polygon_through_registry``:
+    when the snap pinches the ring into a self-intersection and the
+    ``buffer(0)`` validity repair splits it into a MultiPolygon, return
+    EVERY Polygon part instead of silently keeping only the largest
+    (the discarded siblings are real pavement — at KGYR a 26 000 m²
+    junction piece vanished this way, leaving taxi rect ends in
+    mid-air over covered source pavement).  Returns ``[poly]``
+    unchanged when there is nothing to snap, ``[]`` when the snap
+    degenerates."""
+    if registry is None or poly is None or poly.is_empty:
+        return [] if poly is None or poly.is_empty else [poly]
+
+    def _snap_ring(coords):
+        snapped = []
+        for x, y in coords:
+            cp = registry.get_or_add(float(x), float(y))
+            snapped.append(cp)
+        return snapped
+
     try:
         ext = _snap_ring(poly.exterior.coords)
         if len(set(ext)) < 3:
-            return None
+            return []
         interiors = []
         for ring in poly.interiors:
             ri = _snap_ring(ring.coords)
@@ -184,13 +213,13 @@ def snap_polygon_through_registry(
             if (snapped_poly.is_empty
                     or snapped_poly.geom_type not in (
                         "Polygon", "MultiPolygon")):
-                return None
-            if snapped_poly.geom_type == "MultiPolygon":
-                snapped_poly = max(
-                    snapped_poly.geoms, key=lambda g: g.area)
-        return snapped_poly
+                return []
+        if snapped_poly.geom_type == "MultiPolygon":
+            return [g for g in snapped_poly.geoms
+                    if g.geom_type == "Polygon" and not g.is_empty]
+        return [snapped_poly]
     except _GEOM_EXC:
-        return None
+        return []
 
 
 def weld_layout_vertices(layout, roles, tol_m: float = 0.5) -> int:

@@ -54,6 +54,7 @@ compatibility with internal callers in O4_Airport_Pavement_Builder.
 from __future__ import annotations
 
 import math
+import os as _os
 import sys
 
 import O4_UI_Utils as UI
@@ -426,6 +427,9 @@ def _drop_primary_parallels_embedded_in_pavement(
         if not kept_intervals:
             n_full += 1
             abs_refs.append(ref or "?")
+            if _os.environ.get("O4_RECT_DROP_DEBUG") == "1":
+                print(f"[absorb-drop] FULL ref={ref} role={role} "
+                      f"L={L:.0f} bounds={tuple(round(v, 1) for v in rect.bounds)}")
             continue
 
         # No-op: kept covers (almost) the full rect.

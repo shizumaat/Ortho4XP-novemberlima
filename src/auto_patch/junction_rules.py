@@ -663,6 +663,11 @@ def _snap_to_sloping_edge_corners(layout: PavementLayout) -> None:
                     return (r_idx, c_idx)
         return None
 
+    try:
+        rect_union = unary_union(rect_polys) if rect_polys else None
+    except _GEOM_EXC:
+        rect_union = None
+    extra_junction_parts: list[Polygon] = []
     for shape in layout.shapes:
         if shape.role != ROLE_JUNCTION:
             continue
@@ -772,19 +777,76 @@ def _snap_to_sloping_edge_corners(layout: PavementLayout) -> None:
             continue
         if new_poly.is_empty:
             continue
+        # When the snap pinches the ring into a self-intersection and
+        # the ``buffer(0)`` repair splits it, every part is real
+        # pavement: keep the largest in place and re-emit each sibling
+        # ≥ 50 m² as its own junction (keep-largest silently uncovered
+        # the area beyond a taxi rect's end at KSDL — short-edge
+        # verify warning over covered source pavement).
+        sibling_parts: list[Polygon] = []
         if new_poly.geom_type == "MultiPolygon":
-            new_poly = max(new_poly.geoms, key=lambda g: g.area)
+            _parts = sorted(
+                [g for g in new_poly.geoms
+                 if g.geom_type == "Polygon" and not g.is_empty],
+                key=lambda g: -g.area)
+            if not _parts:
+                continue
+            new_poly = _parts[0]
+            sibling_parts = [g for g in _parts[1:] if g.area >= 50.0]
         if new_poly.geom_type != "Polygon":
             continue
         # Reject a re-snap that sweeps the junction across a rect (the
         # "yanked to a far corner" overshoot) — keep the un-snapped
-        # polygon so junctions never overlap rects.
-        if _snap_grows_rect_overlap(poly, new_poly, rect_polys):
+        # polygon so junctions never overlap rects.  Guard on the FULL
+        # post-snap footprint (largest + siblings).
+        full_new = new_poly
+        if sibling_parts:
+            try:
+                full_new = unary_union([new_poly, *sibling_parts])
+            except _GEOM_EXC:
+                full_new = new_poly
+        if _snap_grows_rect_overlap(poly, full_new, rect_polys):
             continue
+        # Coverage-loss guard (KSDL taxiway N): a snap can FOLD the
+        # ring over itself, and ``buffer(0)`` then EATS the folded
+        # lobe while still returning a single Polygon — the sibling
+        # handling above never sees it, and the lobe (real pavement
+        # beyond a rect's end) goes uncovered.  Re-emit every lost
+        # piece ≥ 50 m² that no sloped rect covers as its own
+        # junction; thin snap ribbons and rect-covered retreat areas
+        # are skipped.
+        try:
+            lost = poly.difference(full_new)
+        except _GEOM_EXC:
+            lost = None
+        if lost is not None and not lost.is_empty:
+            for lp in (lost.geoms if hasattr(lost, "geoms")
+                       else [lost]):
+                if (lp.geom_type != "Polygon" or lp.is_empty
+                        or lp.area < 50.0):
+                    continue
+                unc = lp
+                if rect_union is not None:
+                    try:
+                        unc = lp.difference(rect_union)
+                    except _GEOM_EXC:
+                        unc = lp
+                for g in (unc.geoms if hasattr(unc, "geoms")
+                          else [unc]):
+                    if (g.geom_type == "Polygon" and not g.is_empty
+                            and g.area >= 50.0
+                            and not g.buffer(-1.0).is_empty):
+                        extra_junction_parts.append(g)
         shape.polygon = new_poly
+        extra_junction_parts.extend(sibling_parts)
         if node_alts is not None:
             new_alts = [e[1] for e in deduped]
             shape.node_altitudes = new_alts + [new_alts[0]]
+
+    # Re-emit pinched-off siblings as their own junctions (after the
+    # loop — appending during iteration would re-process them).
+    for g in extra_junction_parts:
+        layout.shapes.append(BuiltShape(polygon=g, role=ROLE_JUNCTION))
 
 
 # ── Rule 1: junction-runway 1:1 vertex sharing ───────────────────
