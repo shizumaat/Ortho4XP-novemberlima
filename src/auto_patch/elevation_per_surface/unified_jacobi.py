@@ -379,6 +379,10 @@ def solve(layout, icao: str,
         _enforce_within_shape_grade(
             elev, shape_constraints, base_hard,
             nodes=nodes, layout=layout, bucket_to_idx=bucket_to_idx, icao=icao)
+        owners: dict = {}
+        for sc in shape_constraints:
+            for i in sc["nodes"]:
+                owners[i] = owners.get(i, 0) + 1
         # SLOPING-PAD POLISH (TERMINAL_PADS_SLOPE, s73): the global POCS
         # plateaus before converging terminal INTERIORS (s67 measured:
         # terminal4 carries 12 % lumps globally yet grades to 0 violations
@@ -388,10 +392,6 @@ def solve(layout, icao: str,
         # nodes on its own visibility edges.  Seam-preserving by
         # construction — cross/v2e/mid metrics untouched.
         if TERMINAL_PADS_SLOPE:
-            owners: dict = {}
-            for sc in shape_constraints:
-                for i in sc["nodes"]:
-                    owners[i] = owners.get(i, 0) + 1
             for sc in shape_constraints:
                 if sc["role"] != ROLE_TERMINAL or not sc["edges"]:
                     continue
@@ -401,6 +401,18 @@ def solve(layout, icao: str,
                     continue
                 _project_shape(elev, sc["nodes"], held_t, sc["edges"],
                                False)
+        # KNOWN RESIDUAL (s73, with junction visibility): a junction EDGE
+        # that GRAZES a sloping rect's long edge over a run without shared
+        # vertices (HECA junction -10193's 314 m edge converges onto rect
+        # TX29's 144 m edge, lateral 0.49→0.01 m) cannot follow the rect's
+        # plane once the junction slopes — its straight lerp deviates up to
+        # ~0.7 m at the touch point (2 mid-edge steps).  An altitude-only
+        # vertex snap measured ZERO applicable vertices (the deviation
+        # peaks mid-edge, where no vertex exists) — the fix is PRE-SOLVE
+        # GEOMETRY: conform the grazing junction edge to the rect's corner
+        # projections (the coincident-run-collapse class, s68
+        # ``_near_edge_line``), so the solver couples them via shared
+        # nodes.  Tracked in STATUS.
 
     n_terms, n_rects, n_juncs = _writeback(
         layout, elev, bucket_to_idx)
@@ -1140,22 +1152,31 @@ def _directional_relief(n, elev, is_hard, edge_grade, edge_length,
 _GRADE_VISIBILITY_BUFFER_M = 1.0
 
 
-def _visible_grade_edges(coords, idx, cap, polygon):
+def _visible_grade_edges(coords, idx, cap, polygon, container=None):
     """All-pair grade edges restricted to MUTUALLY-VISIBLE vertices — the chord
     between the two vertices stays inside ``polygon`` (grown by
     ``_GRADE_VISIBILITY_BUFFER_M``).  This is the in-pavement visibility graph:
     the band Dijkstra over these edges yields the true geodesic distance, so a
     non-convex apron's far ends are correctly far apart instead of joined by a
     Euclidean chord that cuts across non-pavement.  Falls back to plain all-pair
-    if the geometry op fails (degenerate/invalid polygon)."""
+    if the geometry op fails (degenerate/invalid polygon).
+
+    ``container``: optional PREPARED geometry to test chords against instead
+    of the shape's own buffered polygon.  Junctions pass the airside-pavement
+    UNION: a chord that leaves the junction across a NEIGHBOUR's pavement is a
+    physically real grade path (the s73 #192 lesson — dropping it let the
+    junction step 0.66 m off the rect edge it hugs), while a chord across a
+    true void (grass between arms) stays excluded."""
     from shapely.geometry import LineString
     m = len(idx)
     try:
-        from shapely.prepared import prep
-        pg = prep(polygon.buffer(_GRADE_VISIBILITY_BUFFER_M))
-        _vis = pg.contains
+        if container is not None:
+            _vis = container.contains
+        else:
+            from shapely.prepared import prep
+            pg = prep(polygon.buffer(_GRADE_VISIBILITY_BUFFER_M))
+            _vis = pg.contains
     except _GEOM_EXC:
-        pg = None
         _vis = None
     out: list[tuple[int, int, float]] = []
     for a in range(m):
@@ -1188,6 +1209,21 @@ def _build_shape_constraints(layout, bucket_to_idx):
     junction/seam-rect use all-pair; terminal is flat.  Runway/seam are HARD,
     not included."""
     out = []
+    # Airside-pavement union, prepared, for JUNCTION chord-visibility (see
+    # ``_visible_grade_edges``): junction chords may cross neighbouring
+    # pavement (real grade paths) but not true voids.  Built once per solve.
+    airside_buf = None
+    try:
+        from shapely.ops import unary_union
+        from shapely.prepared import prep
+        polys = [s.polygon for s in layout.shapes
+                 if s.role in PAVEMENT_ROLES
+                 and s.polygon is not None and not s.polygon.is_empty]
+        if polys:
+            airside_buf = prep(
+                unary_union(polys).buffer(_GRADE_VISIBILITY_BUFFER_M))
+    except _GEOM_EXC:
+        airside_buf = None
     for s in layout.shapes:
         if s.role not in PAVEMENT_ROLES or s.role == ROLE_RUNWAY:
             continue
@@ -1262,25 +1298,39 @@ def _build_shape_constraints(layout, bucket_to_idx):
                     flat_pairs.append((idx[a], idx[b]))
                 else:                    # the two most-parallel = sloping edges
                     edges.append((idx[a], idx[b], cap * el))
-        elif s.role in (ROLE_APRON, ROLE_TERMINAL):
-            # In-pavement VISIBILITY graph for APRONS (and GRADED terminals when
-            # TERMINAL_MAX_GRADE > 0 — they are large near-flat pads, same as an
-            # apron).  The within-shape grade
+        elif s.role in (ROLE_APRON, ROLE_TERMINAL, ROLE_JUNCTION):
+            # In-pavement VISIBILITY graph for APRONS, GRADED terminals (when
+            # TERMINAL_MAX_GRADE > 0 — large near-flat pads, same as an apron)
+            # and JUNCTIONS.  The within-shape grade
             # limit applies ALONG the pavement, so a grade edge is added only
             # between MUTUALLY-VISIBLE vertices (the chord stays inside the
-            # polygon).  On a non-convex apron the Euclidean chord between two
+            # polygon).  On a non-convex shape the Euclidean chord between two
             # far vertices leaves the polygon and cuts across non-pavement,
             # fabricating a phantom short grade path; restricting to visible
             # pairs makes the band Dijkstra compute the true GEODESIC distance
             # (visibility-graph shortest path = exact geodesic in a simple
             # polygon — bends at reflex vertices, all of which are nodes here).
-            # Convex aprons: every pair visible, so identical to all-pair.
-            # Scoped to aprons (not junctions/seam-rects): those are small and
-            # near-convex, where the chord problem is negligible but the change
-            # risks marginal regressions.
-            edges.extend(_visible_grade_edges(coords, idx, cap, s.polygon))
+            # Convex shapes: every pair visible, so identical to all-pair.
+            # JUNCTIONS added s73 (user 2026-06-10): the old "small and
+            # near-convex" assumption fails for long-armed junctions — HECA
+            # #291 (149×229 m, solidity 0.82) carried 71/228 all-pair chords
+            # OUTSIDE its polygon, and its 6 tightest constraints were all
+            # fictitious cross-arm chords, pinning it near-flat so the
+            # taxiway-T grade piled into the next rect (#75 at 4.1 %) instead
+            # of flowing through.  check_grade has visibility-gated junctions
+            # since s62 — this aligns the solver with the validator.
+            # Junctions test chords against the AIRSIDE UNION, not their own
+            # polygon: a junction hugs its rects, so its cross-notch chords
+            # run over neighbouring pavement = real grade paths (#192 stepped
+            # 0.66 m off TX29's edge when those were dropped); only chords
+            # over true voids are excluded.
+            edges.extend(_visible_grade_edges(
+                coords, idx, cap, s.polygon,
+                container=(airside_buf if s.role == ROLE_JUNCTION
+                           else None)))
         else:
-            # All-pair (junction / seam-cut rect): small near-convex shapes.
+            # All-pair (seam-cut rect / service junction): small near-convex
+            # shapes.
             m = len(idx)
             for a in range(m):
                 if idx[a] is None:
@@ -1959,6 +2009,16 @@ def _resmooth_runways_in_elev(layout, elev, bucket_to_idx, anchored_nodes,
                         break
 
 
+# Route-distance measurement uncertainty, as a fraction of the route length.
+# The taxi-route graph under-counts real taxi paths: endpoint stubs are
+# straight chords (the centerline rows stop short of runway edges) and row
+# joins are uncurved corners (no fillets).  Measured at HECA's A4↔T4 corridor
+# (s73): graph 3,217 m vs the ≥3,353 m reality requires — ~4 % short.  A route
+# demand below ``frac · cap · route_d`` is within measurement noise of a
+# feasible corridor; the demand synthesis drops it instead of flexing a runway.
+_ROUTE_NOISE_FRAC = 0.04
+
+
 def _flex_route_bands(layout, elev, bucket_to_idx, free_nodes,
                       thresh_nodes, terminal_nodes, cap,
                       flex_ref=None):
@@ -2083,20 +2143,27 @@ def _flex_route_bands(layout, elev, bucket_to_idx, free_nodes,
         if dm is None:
             continue
         lo_i, hi_i = float("-inf"), float("inf")
+        d_lo = d_hi = 0.0
         lo_a = hi_a = None
         for akey, agap, ae in anchor_pts:
             d = dm.get(akey)
             if d is None:
                 continue
-            slack = cap * (d + sg + agap)
+            dtot = d + sg + agap
+            slack = cap * dtot
             if ae - slack > lo_i:
                 lo_i = ae - slack
+                d_lo = dtot
                 lo_a = (akey, d, ae)
             if ae + slack < hi_i:
                 hi_i = ae + slack
+                d_hi = dtot
                 hi_a = (akey, d, ae)
         if lo_i > float("-inf") or hi_i < float("inf"):
-            bands[i] = (lo_i, hi_i)
+            # (lo, hi, binding-anchor route distance for each bound) —
+            # the distances feed the route-noise deadband in the demand
+            # synthesis (measurement uncertainty scales with route length).
+            bands[i] = (lo_i, hi_i, d_lo, d_hi)
             if _dbg_band:
                 def _fmt(a):
                     if a is None:
@@ -2395,21 +2462,41 @@ def _relax_runway_and_resolve(n, elev, layout, bucket_to_idx, base_hard,
                         for i in contacts:
                             in_band = (i in bands
                                        and bands[i][0] <= bands[i][1])
-                            blo, bhi = (bands[i] if in_band
-                                        else (float("-inf"),
-                                              float("inf")))
+                            blo, bhi, bdlo, bdhi = (
+                                bands[i] if in_band
+                                else (float("-inf"), float("inf"),
+                                      0.0, 0.0))
                             s0 = snapshot0[i]
-                            cands_r = [d for d in (
-                                rise_d.get(i),
-                                (blo - s0) if in_band else None)
-                                if d is not None and d > 0.05]
+                            # ROUTE-NOISE DEADBAND (s73, measured at the
+                            # A4↔T4 corridor): the route graph reads
+                            # 3,217 m where reality (A4≈60, T4≈110 at
+                            # ≤1.5 %) needs ≥3,353 m — straight endpoint
+                            # stubs (125 m here) + uncurved row joins
+                            # under-count by ~4 %.  A route demand
+                            # smaller than that distance-proportional
+                            # uncertainty is indistinguishable from a
+                            # feasible corridor and must NOT flex a
+                            # runway (A4's false +1.6 m rise).  Demands
+                            # that clear the deadband keep their FULL
+                            # point estimate (T4's 4.3 m dip → 110.9;
+                            # shrinking by the noise would under-flex).
+                            noise_r = max(0.05, _ROUTE_NOISE_FRAC
+                                          * TAXI_MAX_GRADE * bdlo)
+                            noise_d = max(0.05, _ROUTE_NOISE_FRAC
+                                          * TAXI_MAX_GRADE * bdhi)
+                            route_r = ((blo - s0) if in_band else None)
+                            if route_r is not None and route_r <= noise_r:
+                                route_r = None
+                            route_d = ((s0 - bhi) if in_band else None)
+                            if route_d is not None and route_d <= noise_d:
+                                route_d = None
+                            cands_r = [d for d in (rise_d.get(i), route_r)
+                                       if d is not None and d > 0.05]
                             if cands_r:
                                 lo_b[i] = min(s0 + min(cands_r), bhi)
                                 n_rise += 1
-                            cands_d = [d for d in (
-                                dip_d.get(i),
-                                (s0 - bhi) if in_band else None)
-                                if d is not None and d > 0.05]
+                            cands_d = [d for d in (dip_d.get(i), route_d)
+                                       if d is not None and d > 0.05]
                             if cands_d:
                                 hi_b[i] = max(s0 - min(cands_d), blo)
                                 n_dip += 1
