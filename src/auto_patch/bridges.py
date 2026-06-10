@@ -33,6 +33,8 @@ import math
 import os
 import re
 
+import O4_UI_Utils as UI
+
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, Polygon
 from shapely.geometry.base import BaseGeometry
@@ -1332,6 +1334,132 @@ def _emit_taxi_bridges(
         # below also clears the deck area.
         exclusion_zones.append(s.polygon)
         n_emitted += 1
+
+    # ── Deck coverage of the FULL tunnel-tagged road segment ──────
+    # (user 2026-06-10, KPHX) The taxi-bridge deck is the taxi rect,
+    # but the OSM road segment tagged ``tunnel`` often extends past
+    # the rect's footprint — that overhang would otherwise be open
+    # terrain draped over an underground road (a dirt strip between
+    # the deck edge and the portal).  Emit flat deck plates at the
+    # adjacent bridge's deck elevation covering every tunnel-tagged
+    # segment near a bridge rect, minus the airport pavement that
+    # already covers it.
+    if n_emitted:
+        try:
+            nodes_r, ways_r = _load_osm_big_roads(
+                layout.anchor[0], layout.anchor[1])
+        except _GEOM_EXC:
+            nodes_r, ways_r = {}, []
+        lat0, lon0 = layout.anchor
+        cos0 = math.cos(math.radians(lat0))
+
+        def _to_m(lon: float, lat: float) -> tuple[float, float]:
+            return (math.radians(lon - lon0) * R_EARTH * cos0,
+                    math.radians(lat - lat0) * R_EARTH)
+
+        tunnel_lines: list[LineString] = []
+        for _wid, nrefs, tags in ways_r:
+            if not tags.get("highway"):
+                continue
+            if tags.get("tunnel", "") not in ("yes",
+                                              "building_passage"):
+                continue
+            pts = [_to_m(lon, lat) for n in nrefs
+                   if n in nodes_r
+                   for (lat, lon) in (nodes_r[n],)]
+            if len(pts) < 2:
+                continue
+            try:
+                ls = LineString(pts)
+            except _GEOM_EXC:
+                continue
+            if not ls.is_empty and ls.length >= 2.0:
+                tunnel_lines.append(ls)
+        if tunnel_lines:
+            DECK_HALF_W_M = 12.0     # 22 m road + 1 m overhang each side
+            MIN_DECK_PIECE_M2 = 10.0
+            try:
+                airside_cover = unary_union(
+                    [sh.polygon for sh in layout.shapes
+                     if sh.polygon is not None
+                     and not sh.polygon.is_empty
+                     and sh.role in (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
+                                     ROLE_PRIMARY_PARALLEL,
+                                     ROLE_SECONDARY_PARALLEL,
+                                     ROLE_STUB, ROLE_CROSS_CONNECTOR,
+                                     ROLE_JUNCTION, ROLE_APRON,
+                                     ROLE_TERMINAL)])
+            except _GEOM_EXC:
+                airside_cover = None
+            n_deck = 0
+            deck_union: Polygon | None = None
+            for ls in tunnel_lines:
+                # Associate with the nearest bridge deck; skip tunnel
+                # ways nowhere near a taxi bridge (handled by the
+                # portal emitter alone).
+                best = None
+                best_d = 60.0
+                for s in bridge_shapes:
+                    try:
+                        d = s.polygon.distance(ls)
+                    except _GEOM_EXC:
+                        continue
+                    if d < best_d:
+                        best_d = d
+                        best = s
+                if best is None:
+                    continue
+                if (best.altitude_high is not None
+                        and best.altitude_low is not None):
+                    deck_elev = 0.5 * (best.altitude_high
+                                       + best.altitude_low)
+                elif best.altitude is not None:
+                    deck_elev = best.altitude
+                else:
+                    continue
+                try:
+                    zone = ls.buffer(DECK_HALF_W_M, cap_style=2,
+                                     join_style=2)
+                    if airside_cover is not None:
+                        zone = zone.difference(airside_cover)
+                    # Walls + bridge rects already emitted above
+                    # (exclusion_zones) win their footprint — with the
+                    # standard 0.5 m standoff, so the deck never shares
+                    # an exact edge with a wall (the post-solve feature
+                    # conformance would graft wall vertices into a
+                    # coincident deck edge and bulge it into an
+                    # overlap).
+                    if exclusion_zones:
+                        zone = zone.difference(
+                            unary_union(exclusion_zones)
+                            .buffer(wall_gap_m))
+                    if deck_union is not None:
+                        zone = zone.difference(deck_union)
+                except _GEOM_EXC:
+                    continue
+                for g in (zone.geoms if hasattr(zone, "geoms")
+                          else [zone]):
+                    if (g.geom_type != "Polygon" or g.is_empty
+                            or g.area < MIN_DECK_PIECE_M2):
+                        continue
+                    layout.shapes.append(BuiltShape(
+                        polygon=g,
+                        role=ROLE_TUNNEL_RAMP,
+                        ref="bridge_deck",
+                        altitude=round(float(deck_elev), 1)))
+                    exclusion_zones.append(g)
+                    n_deck += 1
+                    try:
+                        deck_union = (g if deck_union is None
+                                      else deck_union.union(g))
+                    except _GEOM_EXC:
+                        pass
+            if n_deck:
+                UI.vprint(1,
+                    f"  [pav-builder] emitted {n_deck} bridge-deck "
+                    f"plate(s) covering tunnel-tagged road "
+                    f"segment(s).")
+
     # Boundary coordination: subtract the actual (rect ∪ walls)
     # footprint, buffered by 0.5 m, from each ROLE_BOUNDARY shape.
     # Same pattern as ``_emit_tunnel_portals``.

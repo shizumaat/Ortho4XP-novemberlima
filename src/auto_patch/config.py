@@ -190,6 +190,14 @@ RUNWAY_APRON_AREA_RATIO = 3.0
 # ``test_no_self_overlap`` stays green.
 EMIT_BRIDGES_AND_TUNNELS = True
 
+# Through-airport depressed roads (user 2026-06-10): DISABLED for now —
+# instead of depressing a road's entire inside-airport stretch to
+# apt_elev−8 m (open trench), only the tunnel-portal ramps are built
+# (the road descends at each portal and the tunnel-tagged stretch stays
+# under the airport surface).  The pre-solve terminal-gap carve is
+# gated on this too (no trench → no gap through the terminals).
+EMIT_DEPRESSED_ROADS = False
+
 # Combine apt.dat with DSF pavement polygons: when True the
 # smart-apt.dat selector still runs to choose the best custom-pack
 # vs global candidate by OSM coverage; DSF polygons supplement

@@ -32,8 +32,10 @@ from .layout import (
     BuiltShape, PavementLayout, R_EARTH,
     ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
     ROLE_STUB, ROLE_CROSS_CONNECTOR, ROLE_RUNWAY, ROLE_JUNCTION,
-    ROLE_APRON, ROLE_TERMINAL, ROLE_SERVICE_ROAD, vertex_bucket,
+    ROLE_APRON, ROLE_TERMINAL, ROLE_SERVICE_ROAD, ROLE_TUNNEL_RAMP,
+    ROLE_RETAINING_WALL, vertex_bucket,
 )
+from .config import TUNNEL_RAMP_MAX_GRADE
 
 
 # Taxi rects whose elevation slopes ALONG ``source_axis`` only — their
@@ -53,6 +55,19 @@ _SLOPING_RECT_ROLES = frozenset({
 # are excluded.
 _PIN_SLICE_ROLES = _SLOPING_RECT_ROLES | frozenset({
     ROLE_JUNCTION, ROLE_APRON,
+})
+
+# POST-solve feature roles carrying SYNTHETIC (non-DEM) elevations —
+# tunnel ramps / depressed-road plates at apt_elev−8 m and their
+# retaining walls at deck level.  When the tile slice cuts one, its
+# seam edge would otherwise sit metres above/below the neighbouring
+# tile's raw terrain.  Per user 2026-06-10 these must MATCH the DEM at
+# the seam and GRADE back to their design elevation inside the tile
+# (``_grade_feature_piece_to_seam_dem``).  Groundside / boundary /
+# clearance features already follow the DEM, so they agree at the seam
+# naturally.
+_SEAM_GRADE_FEATURE_ROLES = frozenset({
+    ROLE_TUNNEL_RAMP, ROLE_RETAINING_WALL,
 })
 
 # Narrow exception set — covers real shapely degeneracy without
@@ -263,6 +278,10 @@ def cut_layout_at_tile_boundaries(
                 if s.role in _PIN_SLICE_ROLES:
                     _terrain_pin_slice_nodes(
                         new_s, cut_union, (), layout, dem,
+                        cur_tile_lat, cur_tile_lon)
+                elif s.role in _SEAM_GRADE_FEATURE_ROLES:
+                    _grade_feature_piece_to_seam_dem(
+                        new_s, cut_union, layout, dem,
                         cur_tile_lat, cur_tile_lon)
                 new_shapes.append(new_s)
     layout.shapes = new_shapes
@@ -1129,6 +1148,97 @@ def _terrain_pin_slice_nodes(fs, cut_union, clip_pts, layout,
             fs.altitude_high = None
             fs.altitude_low = None
             fs.altitude = None
+
+
+def _grade_feature_piece_to_seam_dem(
+        fs: BuiltShape,
+        cut_union,
+        layout,
+        dem,
+        tile_lat: int,
+        tile_lon: int,
+        grade_cap: float = TUNNEL_RAMP_MAX_GRADE,
+) -> None:
+    """Post-solve feature piece cut at a tile seam: pin its slice-edge
+    vertices to the seam DEM and grade every other vertex from the seam
+    toward the piece's design elevation at ≤ ``grade_cap``.
+
+    Per user 2026-06-10: every shape must MATCH the terrain at the tile
+    boundary — the neighbouring tile renders raw DEM there — and ramp
+    back to its own level inside the tile.  Without this, a depressed-
+    road plate (apt_elev−8 m) or a deck-level retaining wall cut at the
+    seam presents an 8 m vertical face against the next tile's terrain.
+
+    Mutates ``fs`` in place: converts to ``node_altitudes`` (seam
+    vertices at DEM, interior clamped to the cap-feasible band toward
+    the design elevation).  No-op when the piece has no slice-edge
+    vertex or no elevation data.
+    """
+    if (dem is None or layout is None
+            or fs.polygon is None or fs.polygon.is_empty):
+        return
+    try:
+        cut_boundary = cut_union.boundary
+        coords = list(fs.polygon.exterior.coords)
+    except _GEOM_EXC:
+        return
+    if len(coords) < 4:
+        return
+    # Per-vertex DESIGN elevations from the piece's existing tags
+    # (``_build_piece_shape`` has already converted sloped quads to
+    # node_altitudes; flat plates carry ``altitude``).
+    if fs.node_altitudes and len(fs.node_altitudes) >= len(coords):
+        design = [float(a) for a in fs.node_altitudes[:len(coords)]]
+    elif fs.altitude is not None:
+        design = [float(fs.altitude)] * len(coords)
+    else:
+        return
+    nodata = getattr(dem, "nodata", -32768)
+
+    def _dem_at(x: float, y: float) -> float | None:
+        try:
+            lat, lon = layout.m_to_ll(x, y)
+            v = float(dem.alt((lon - tile_lon, lat - tile_lat)))
+        except _GEOM_EXC:
+            return None
+        if v != v or v == nodata:
+            return None
+        return v
+
+    seam: list[tuple[float, float, float]] = []   # (x, y, dem_alt)
+    seam_alt_by_idx: dict[int, float] = {}
+    for i, (x, y) in enumerate(coords):
+        try:
+            if Point(x, y).distance(cut_boundary) >= 0.75:
+                continue
+        except _GEOM_EXC:
+            continue
+        v = _dem_at(x, y)
+        if v is None:
+            continue
+        seam.append((float(x), float(y), v))
+        seam_alt_by_idx[i] = v
+    if not seam:
+        return
+    new_alts: list[float] = []
+    for i, (x, y) in enumerate(coords):
+        if i in seam_alt_by_idx:
+            new_alts.append(round(seam_alt_by_idx[i], 1))
+            continue
+        lo = float("-inf")
+        hi = float("inf")
+        for sx, sy, sv in seam:
+            d = math.hypot(x - sx, y - sy)
+            hi = min(hi, sv + grade_cap * d)
+            lo = max(lo, sv - grade_cap * d)
+        if lo > hi:                      # conflicting seam anchors
+            new_alts.append(round(0.5 * (lo + hi), 1))
+            continue
+        new_alts.append(round(min(max(design[i], lo), hi), 1))
+    fs.node_altitudes = new_alts
+    fs.altitude = None
+    fs.altitude_high = None
+    fs.altitude_low = None
 
 
 def _build_piece_shape(

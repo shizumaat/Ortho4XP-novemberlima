@@ -1647,7 +1647,8 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # solve (geom-guard).  Gated on the airport actually having
     # aeroway bridges so the big_roads OSM layer isn't parsed for
     # the common no-bridge airport.
-    if terminal_polys and any(
+    from .config import EMIT_DEPRESSED_ROADS as _EMIT_DEPRESSED
+    if _EMIT_DEPRESSED and terminal_polys and any(
             _tags.get("aeroway") and _tags.get("bridge", "")
             in ("yes", "viaduct")
             for _wid, _nds, _tags in ways):
@@ -3454,6 +3455,12 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # vertex (so the pre-solve-graded airside altitudes stay intact).  When
     # the pre-solve unification did NOT run (non-per-surface / no-elevation
     # path) fall back to the full both-sided unification here.
+    # The bridge vertex post-processing and boundary-interior clip above
+    # MOVE feature vertices after the emit-time deconflict — re-run it on
+    # the settled geometry so road features stay single-cover; the
+    # feature conformance below then heals the clipped seams.
+    finalize.deconflict_road_features(layout, icao)
+
     from .conformance import (
         enforce_conformance, find_conformance_violations)
     if _airside_unified_presolve:

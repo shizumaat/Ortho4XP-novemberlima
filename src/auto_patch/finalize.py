@@ -75,7 +75,110 @@ if TYPE_CHECKING:
     from .layout import PavementLayout
 
 
-__all__ = ["compute_elevations_and_repair_geometry", "emit_terrain_transition_features"]
+__all__ = ["compute_elevations_and_repair_geometry",
+           "deconflict_road_features",
+           "emit_terrain_transition_features"]
+
+
+def deconflict_road_features(layout, icao: str = "") -> None:
+    """Road-feature self-deconfliction (s70 KPHX overlap storm, user
+    2026-06-10).  The portal / taxi-bridge / approach emitters walk
+    connected OSM ways outward with no geometric check against EACH
+    OTHER — parallel carriageways < 22 m apart emit near-identical
+    ramp chains / plates / decks on top of one another.  Walk every
+    tunnel_ramp / retaining_wall piece in EMIT ORDER (earlier emitter
+    wins: depressed plates when enabled, then portal chains, then
+    bridge walls/decks):
+
+      * a piece ≥ 85 % covered by the running union of earlier pieces
+        is redundant — drop it;
+      * a partially-covered FLAT piece is clipped to its uncovered
+        remainder (parts ≥ 1 m² kept);
+      * a partially-covered SLOPED quad keeps its small overlap
+        (clipping would break the 4-corner altitude_high/low
+        convention) — sub-85 % overlaps between ramp chains are
+        corner kisses in practice.
+
+    The AIRSIDE pavement (runways / rects / junctions / aprons /
+    terminals) seeds the union, so road features always yield to it —
+    a portal wall or ramp nicking an apron edge is clipped/dropped
+    rather than overlapping.  Idempotent — called once inside the
+    feature emit block and again from the pipeline tail, because the
+    bridge vertex post-processing
+    (``_snap_bridge_vertices_to_runway_corners`` et al.) MOVES feature
+    vertices after the first run and can re-introduce small overlaps.
+    """
+    _AIRSIDE_SEED_ROLES = ("terminal", "runway", "runway_crossing",
+                           "primary_parallel", "secondary_parallel",
+                           "stub", "cross_connector", "junction",
+                           "apron")
+    try:
+        from shapely.ops import unary_union as _uu
+        from .layout import (BuiltShape,
+                             ROLE_TUNNEL_RAMP as _R_TR,
+                             ROLE_RETAINING_WALL as _R_RW)
+        _run_u = None
+        try:
+            _terms = [s.polygon for s in layout.shapes
+                      if s.role in _AIRSIDE_SEED_ROLES
+                      and s.polygon is not None
+                      and not s.polygon.is_empty]
+            if _terms:
+                _run_u = _uu(_terms)
+        except _GEOM_EXC:
+            _run_u = None
+        _n_drop = 0
+        _n_clip = 0
+        for s in layout.shapes:
+            if (s.role not in (_R_TR, _R_RW)
+                    or s.polygon is None
+                    or s.polygon.is_empty
+                    or s.polygon.area <= 0):
+                continue
+            try:
+                if _run_u is not None \
+                        and s.polygon.intersects(_run_u):
+                    _cov = (s.polygon.intersection(_run_u)
+                            .area / s.polygon.area)
+                    if _cov >= 0.85:
+                        s.polygon = None
+                        _n_drop += 1
+                        continue
+                    is_sloped = (s.altitude_high is not None
+                                 and s.altitude_low is not None)
+                    if not is_sloped and _cov > 0.0005:
+                        d = s.polygon.difference(_run_u)
+                        parts = [g for g in
+                                 (d.geoms if hasattr(d, "geoms")
+                                  else [d])
+                                 if g.geom_type == "Polygon"
+                                 and not g.is_empty
+                                 and g.area >= 1.0]
+                        if not parts:
+                            s.polygon = None
+                            _n_drop += 1
+                            continue
+                        parts.sort(key=lambda g: -g.area)
+                        s.polygon = parts[0]
+                        for g in parts[1:]:
+                            layout.shapes.append(BuiltShape(
+                                polygon=g, role=s.role,
+                                ref=s.ref,
+                                altitude=s.altitude))
+                        _n_clip += 1
+                _run_u = (s.polygon if _run_u is None
+                          else _run_u.union(s.polygon))
+            except _GEOM_EXC:
+                continue
+        if _n_drop or _n_clip:
+            layout.shapes = [s for s in layout.shapes
+                             if s.polygon is not None]
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: road-feature "
+                f"deconflict — {_n_drop} redundant piece(s) "
+                f"dropped, {_n_clip} clipped.")
+    except _GEOM_EXC:
+        pass
 
 
 def compute_elevations_and_repair_geometry(layout: PavementLayout, icao: str, xplane_root: str,
@@ -324,18 +427,25 @@ def emit_terrain_transition_features(layout: PavementLayout, icao: str, xplane_r
             # Run BEFORE _emit_tunnel_portals so the latter can
             # skip OSM ways already depressed here.
             _depressed_way_ids: set = set()
-            _depressed_ok = False
+            from .config import EMIT_DEPRESSED_ROADS
+            # (user 2026-06-10) Through-airport trenches OFF by
+            # default: the tunnel-portal emitter below handles the
+            # road's descent at each portal; the tunnel-tagged stretch
+            # stays under the airport surface.  Empty exclusion set →
+            # the portal emitter sees every tunnel way.
+            _depressed_ok = not EMIT_DEPRESSED_ROADS
             try:
-                n_dep, _depressed_way_ids = (
-                    _emit_through_airport_depressed_roads(
-                        layout, _dem, _tile_lat, _tile_lon,
-                        xplane_root=xplane_root, icao=icao))
-                _depressed_ok = True
-                if n_dep:
-                    UI.vprint(1,
-                        f"  [pav-builder] emitted "
-                        f"{n_dep} through-airport depressed "
-                        f"road segment(s).")
+                if EMIT_DEPRESSED_ROADS:
+                    n_dep, _depressed_way_ids = (
+                        _emit_through_airport_depressed_roads(
+                            layout, _dem, _tile_lat, _tile_lon,
+                            xplane_root=xplane_root, icao=icao))
+                    _depressed_ok = True
+                    if n_dep:
+                        UI.vprint(1,
+                            f"  [pav-builder] emitted "
+                            f"{n_dep} through-airport depressed "
+                            f"road segment(s).")
             except _GEOM_EXC as exc:
                 # The depressed-road emit may have already created
                 # depressed segments for SOME OSM ways before
@@ -419,158 +529,6 @@ def emit_terrain_transition_features(layout: PavementLayout, icao: str, xplane_r
                         f"{' (cut through under bridge OBJ)' if _scn_bridge else ' (ramp up to bridge edge)'}.")
             except _GEOM_EXC:
                 pass
-            # ── Deconflict vs the depressed-road plates ───────────
-            # (s70 KPHX overlap storm, user 2026-06-10) The portal /
-            # taxi-bridge / approach emitters walk connected OSM ways
-            # outward and were never geometrically checked against
-            # the through-airport plates — ramp-chain pieces land
-            # fully inside the depressed surface, double-covering it
-            # 8 m down.  The plates ARE the depressed surface (and
-            # are themselves clipped 0.5 m short of airside), so
-            # they are authoritative: drop any other tunnel_ramp /
-            # retaining_wall piece ≥ 90 % covered by the plate union.
-            try:
-                from shapely.ops import unary_union as _uu
-                from .layout import (BuiltShape,
-                                     ROLE_TUNNEL_RAMP as _R_TR,
-                                     ROLE_RETAINING_WALL as _R_RW)
-                _plates = [s.polygon for s in layout.shapes
-                           if s.role == _R_TR
-                           and s.ref == "depressed_road"
-                           and s.polygon is not None
-                           and not s.polygon.is_empty]
-                if _plates:
-                    _plate_u = _uu(_plates)
-                    _n_drop = 0
-                    for s in layout.shapes:
-                        if s.role not in (_R_TR, _R_RW):
-                            continue
-                        if s.ref == "depressed_road":
-                            continue
-                        if (s.polygon is None
-                                or s.polygon.is_empty
-                                or s.polygon.area <= 0):
-                            continue
-                        try:
-                            _cov = (s.polygon.intersection(_plate_u)
-                                    .area / s.polygon.area)
-                        except _GEOM_EXC:
-                            continue
-                        if _cov >= 0.9:
-                            s.polygon = None
-                            _n_drop += 1
-                    if _n_drop:
-                        layout.shapes = [
-                            s for s in layout.shapes
-                            if s.polygon is not None]
-                        UI.vprint(1,
-                            f"  [pav-builder] {icao}: dropped "
-                            f"{_n_drop} tunnel/wall piece(s) "
-                            f"already covered by depressed-road "
-                            f"plates.")
-                    # Walls WIN their band: a taxi-bridge retaining
-                    # wall sits wall_gap..wall_gap+1 m outboard of
-                    # the deck edge — exactly the first metre of the
-                    # road plate.  Carve the wall footprint out of
-                    # the plates (the wall foot stands between
-                    # pavement edge and road surface).
-                    _walls = [s.polygon for s in layout.shapes
-                              if s.role == _R_RW
-                              and s.polygon is not None
-                              and not s.polygon.is_empty]
-                    if _walls:
-                        _wall_u = _uu(_walls).buffer(0.01)
-                        _n_clip = 0
-                        for s in layout.shapes:
-                            if (s.role != _R_TR
-                                    or s.ref != "depressed_road"
-                                    or s.polygon is None
-                                    or s.polygon.is_empty):
-                                continue
-                            try:
-                                if not s.polygon.intersects(_wall_u):
-                                    continue
-                                d = s.polygon.difference(_wall_u)
-                            except _GEOM_EXC:
-                                continue
-                            parts = [g for g in
-                                     (d.geoms if hasattr(d, "geoms")
-                                      else [d])
-                                     if g.geom_type == "Polygon"
-                                     and not g.is_empty
-                                     and g.area >= 1.0]
-                            if not parts:
-                                s.polygon = None
-                                _n_clip += 1
-                                continue
-                            parts.sort(key=lambda g: -g.area)
-                            s.polygon = parts[0]
-                            for g in parts[1:]:
-                                layout.shapes.append(BuiltShape(
-                                    polygon=g, role=s.role,
-                                    ref=s.ref,
-                                    altitude=s.altitude))
-                            _n_clip += 1
-                        if _n_clip:
-                            layout.shapes = [
-                                s for s in layout.shapes
-                                if s.polygon is not None]
-                            UI.vprint(1,
-                                f"  [pav-builder] {icao}: clipped "
-                                f"{_n_clip} depressed-road plate(s) "
-                                f"at retaining walls.")
-                    # Final single-cover sweep: the clips above can
-                    # leave sub-cm² kisses between plates (and vs
-                    # terminals) from difference() float noise.
-                    # Walk the plates in order and subtract the
-                    # running union of everything already settled —
-                    # deterministic, zero plate∩plate / plate∩
-                    # terminal residue.
-                    _term_u = None
-                    try:
-                        _terms = [s.polygon for s in layout.shapes
-                                  if s.role == "terminal"
-                                  and s.polygon is not None
-                                  and not s.polygon.is_empty]
-                        if _terms:
-                            _term_u = _uu(_terms)
-                    except _GEOM_EXC:
-                        _term_u = None
-                    _run_u = _term_u
-                    for s in layout.shapes:
-                        if (s.role != _R_TR
-                                or s.ref != "depressed_road"
-                                or s.polygon is None
-                                or s.polygon.is_empty):
-                            continue
-                        try:
-                            if (_run_u is not None
-                                    and s.polygon.intersects(_run_u)):
-                                d = s.polygon.difference(_run_u)
-                                parts = [g for g in
-                                         (d.geoms
-                                          if hasattr(d, "geoms")
-                                          else [d])
-                                         if g.geom_type == "Polygon"
-                                         and not g.is_empty
-                                         and g.area >= 1.0]
-                                if not parts:
-                                    s.polygon = None
-                                    continue
-                                parts.sort(key=lambda g: -g.area)
-                                s.polygon = parts[0]
-                                for g in parts[1:]:
-                                    layout.shapes.append(BuiltShape(
-                                        polygon=g, role=s.role,
-                                        ref=s.ref,
-                                        altitude=s.altitude))
-                            _run_u = (s.polygon if _run_u is None
-                                      else _run_u.union(s.polygon))
-                        except _GEOM_EXC:
-                            continue
-                    layout.shapes = [s for s in layout.shapes
-                                     if s.polygon is not None]
-            except _GEOM_EXC:
-                pass
+            deconflict_road_features(layout, icao)
     except _GEOM_EXC:
         pass
