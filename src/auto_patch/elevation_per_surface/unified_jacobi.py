@@ -3320,7 +3320,15 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                 # (#217 read 3.9 m / 49 %).
                 eri = (chains[ci][-1][0] if tail else chains[ci][0][0])
                 erj = (chains[cj][-1][0] if j_tail else chains[cj][0][0])
-                bridge_ok = any(
+                # SAME-REF ends always merge (one physical taxiway split
+                # by a junction the phase-A local gate rejected): HECA's
+                # two 'A' chains sat at 59.2 and 64.1 across one junction
+                # — a 4.3 m disagreement where ONE profile ramps <1 %.
+                # The #217 lesson (no arbitrary cross-ref ramps) applies
+                # to DIFFERENT refs only.
+                same_ref9 = bool(rects[eri]["shape"].ref) and (
+                    rects[eri]["shape"].ref == rects[erj]["shape"].ref)
+                bridge_ok = same_ref9 or any(
                     rects[rr]["shape"].role == ROLE_STUB or _is_wide(rr)
                     for rr in (eri, erj))
                 if not bridge_ok:
@@ -4652,7 +4660,10 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                     for (ri, _n, _f) in chain]
             print(f"[corr] chain L={L:.0f} {refs}")
             print("       " + " ".join(
-                f"{st['d']:.0f}:{p:.1f}->{e:.1f}{'A' if a else ''}"
+                f"{st['d']:.0f}:{p:.1f}->{e:.1f}"
+                + ("H" if any(base_hard[i9] for i9 in st["nodes"]) else "")
+                + ("R" if st["nodes"] & rwy_nodes else "")
+                + ("A" if a else "")
                 for st, p, e, a in zip(stations, pre, elevs, anchored)))
         # station nodes take the profile (first corridor to write a node
         # wins — longer corridors are processed first via the seed order).
