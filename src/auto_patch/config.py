@@ -270,7 +270,15 @@ TERMINAL_PADS_SLOPE = True
 # need route-floor awareness (T's flat seed ignored the 05C-route demand
 # entering via T4) — without those, adjacent band writes leave up to 64 %
 # internal junction cliffs.  Those two pieces ARE the route-field model
-# (STATUS #3); enable for experiments with O4-style config edit.
+# (STATUS #3).  s73-p5 BUILT route-band threading + the junction TWIST
+# blend (+ disagreement guard, stub/wide-only cross-ref merges): the
+# named corridors land (T monotone through -10292, T4+U ~2 % steady,
+# #291 internal 64%→25%), but INDEPENDENT same-ref chains still
+# disagree at shared junctions (#217 3.9 m — each chain flat-seeds
+# between its OWN termini) and the gate-on suite flips CYXY's grade
+# gate red.  Remaining piece = a JOINT corridor-network solve (chains
+# coupled at shared junctions as one system).  OFF until that lands;
+# set True to evaluate the corridors in-sim.
 TAXI_CORRIDOR_PROFILE = False
 # Taxiway vertical-curve rate (rise/run change per metre) used by the
 # corridor profile - the taxi sibling of RUNWAY_MAX_GRADE_CHANGE_PER_M
