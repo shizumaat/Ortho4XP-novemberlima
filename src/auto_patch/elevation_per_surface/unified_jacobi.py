@@ -384,8 +384,9 @@ def solve(layout, icao: str,
         # so the surrounding pavement conforms to the corridor, not the
         # reverse (taxi routes outrank aprons in the user's priority model).
         corridor_held: set = set()
+        corridor_exempt: set = set()
         if TAXI_CORRIDOR_PROFILE:
-            corridor_held = _taxi_corridor_profiles(
+            corridor_held, corridor_exempt = _taxi_corridor_profiles(
                 layout, elev, bucket_to_idx, base_hard, nodes=nodes)
             if corridor_held:
                 # FULL relief re-run against the committed corridors (the
@@ -409,7 +410,8 @@ def solve(layout, icao: str,
         _enforce_within_shape_grade(
             elev, shape_constraints, base_hard,
             nodes=nodes, layout=layout, bucket_to_idx=bucket_to_idx,
-            icao=icao, held_extra=corridor_held)
+            icao=icao, held_extra=corridor_held,
+            band_exempt=corridor_exempt)
         owners: dict = {}
         for sc in shape_constraints:
             for i in sc["nodes"]:
@@ -786,7 +788,8 @@ def _count_within_viol(elev, shape_constraints):
 
 def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                                 nodes=None, layout=None, bucket_to_idx=None,
-                                icao=None, held_extra=None) -> int:
+                                icao=None, held_extra=None,
+                                band_exempt=None) -> int:
     """FINAL within-shape grade ENFORCEMENT via the difference-constraint solve.
 
     Every within-shape limit ``|x_i - x_j| <= cap·d`` is a difference
@@ -836,6 +839,15 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
             TAXI_MAX_GRADE, layout)
     else:
         lo, hi = _grade_bands(n, elev, is_hard, all_edges)
+    # corridor-touched junctions: the held corridor profile is the route
+    # truth there; per-vertex route bands (route-graph artifacts) would
+    # pin free vertices metres off the held writes — exempt them and let
+    # the visibility-edge projection conform them to the corridor.
+    if band_exempt:
+        for i in band_exempt:
+            if i < n and not is_hard[i]:
+                lo[i] = float("-inf")
+                hi[i] = float("inf")
     band_pinned = {i for i in range(n) if lo[i] > hi[i] + 1e-6}
     # Terminals YIELD in the final enforce instead of being frozen at their
     # STEP-2 level (user model phase 1/2: terminals move to the level the
@@ -2723,7 +2735,17 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
     vertices off the corridor stay free, so a junction crossed by two
     corridors blends both.  Returns the written node set — the final
     enforcement holds it, so neighbouring pavement conforms to the corridor
-    (taxi routes outrank aprons).  Mutates ``elev``."""
+    (taxi routes outrank aprons).  Mutates ``elev``.
+
+    The corridor graph is solved as ONE SYSTEM (the s73 part-5 missing
+    piece): everywhere two chains meet a junction — geometric crossing,
+    terminus against a crossing run, shared nodes, co-located mouths —
+    the shared elevation is a COMMON variable tied across the chains
+    (equality at physical points, grade-cap over junction chords), found
+    by consensus iteration over each chain's flat-line wish and frozen
+    into every profile before the per-chain banded solve.  Without it,
+    independent chains flat-seeded between their OWN termini and
+    disagreed by metres at shared junctions (#217: 3.9 m / 49 %)."""
     from auto_patch.pavement.runway_segments import faa_joint_solve
     cps = layout.canonical_points
 
@@ -3104,22 +3126,18 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
         except _GEOM_EXC:
             reach_lo = reach_hi = None
 
-    # ── per chain: stations at every mouth (+ CROSSING-RECONCILIATION
-    # stations where an earlier corridor already wrote a shared junction's
-    # band — the runway-crossing rule: the later corridor bends THROUGH the
-    # established elevation), smooth ROUTE-BANDED profile, writeback.
-    # Junction interiors are NOT written per-chain: crossings and mouth
-    # values are RECORDED, and a final TWIST pass blends them (user model:
-    # rects slope in ONE direction; the junction's arms twist from the flat
-    # cross-sections at the mouths to the max COMPOUND slope at the center
-    # and back out the other sides).
-    written: set = set()
-    crossings: dict = {}                       # junction idx → line sources
-    jpoints: dict = {}                         # junction idx → point sources
-    n_chains = 0
+    # ── STAGE A: stations per chain (geometry + current network values).
+    # Profiles are NOT solved here — solving chains one at a time let
+    # INDEPENDENT chains disagree by metres at SHARED junctions (#217 read
+    # 3.9 m: each chain flat-seeded between its OWN termini, and crossing
+    # reconciliation was sequential first-writer-wins).  The JOINT
+    # corridor-network solve below treats every shared-junction elevation
+    # as ONE common variable across all chains.
+    chain_data: list = []
     for chain in chains:
         stations: list = []
         mouth_st: list = []                   # per chain elem: [k_near, k_far]
+        gaps: list = []                       # junction-gap crossing segments
         d = 0.0
         prev_mid = None
         prev_m = None
@@ -3131,44 +3149,26 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                 if prev_mid is not None:
                     gl = math.hypot(m["mid"][0] - prev_mid[0],
                                     m["mid"][1] - prev_mid[1])
-                    # crossing check on the junction gap (entering a rect)
+                    # record the junction gap segment (entering a rect) —
+                    # the tie pass below intersects these ACROSS chains
                     ji = prev_m.get("junc") if prev_m else None
                     if (mi2 == nmi and gl > 2.0 and ji is not None
                             and ji == m.get("junc")):
-                        J = juncs[ji]
-                        band = max(prev_m["halfw"], m["halfw"]) + 2.0
-                        Ax, Ay = prev_mid
-                        Bx, By = m["mid"]
-                        ts, vs = [], []
-                        for kk, ii in enumerate(J["idxs"]):
-                            if ii is None or ii not in written:
-                                continue
-                            x, y = J["ring"][kk]
-                            t = (((x - Ax) * (Bx - Ax)
-                                  + (y - Ay) * (By - Ay)) / (gl * gl))
-                            if t <= 0.02 or t >= 0.98:
-                                continue
-                            px = Ax + t * (Bx - Ax)
-                            py = Ay + t * (By - Ay)
-                            if math.hypot(x - px, y - py) > band:
-                                continue
-                            ts.append(t)
-                            vs.append(elev[ii])
-                        if ts:
-                            t_c = sum(ts) / len(ts)
-                            stations.append({
-                                "d": d + t_c * gl, "nodes": set(),
-                                "mid": (Ax + t_c * (Bx - Ax),
-                                        Ay + t_c * (By - Ay)),
-                                "halfw": band,
-                                "fix": sum(vs) / len(vs)})
+                        gaps.append({
+                            "ji": ji, "A": prev_mid, "B": m["mid"],
+                            "dA": d, "dB": d + gl,
+                            "band": max(prev_m["halfw"],
+                                        m["halfw"]) + 2.0})
                     d += gl
                 if stations and d - stations[-1]["d"] < 1.0:
                     stations[-1]["nodes"] |= m["nodes"]   # abutting mouths
+                    if stations[-1]["junc"] is None:
+                        stations[-1]["junc"] = m.get("junc")
                     pair.append(len(stations) - 1)
                 else:
                     stations.append({"d": d, "nodes": set(m["nodes"]),
-                                     "mid": m["mid"], "halfw": m["halfw"]})
+                                     "mid": m["mid"], "halfw": m["halfw"],
+                                     "junc": m.get("junc")})
                     pair.append(len(stations) - 1)
                 prev_mid = m["mid"]
                 prev_m = m
@@ -3176,20 +3176,627 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
         L = stations[-1]["d"]
         if L < 30.0 or len(stations) < 3:
             continue
-        fractions = [st["d"] / L for st in stations]
         elevs = []
-        anchored = []
-        for k, st in enumerate(stations):
-            if "fix" in st:
-                elevs.append(st["fix"])
-                anchored.append(True)
-                continue
+        hard = []
+        for st in stations:
             vals = [elev[i] for i in st["nodes"]]
             elevs.append(sum(vals) / len(vals))
-            anchored.append(
-                k == 0 or k == len(stations) - 1
-                or any(base_hard[i] for i in st["nodes"])
-                or bool(st["nodes"] & rwy_nodes))
+            hard.append(any(base_hard[i] for i in st["nodes"])
+                        or bool(st["nodes"] & rwy_nodes))
+        chain_data.append({
+            "chain": chain, "stations": stations, "mouth_st": mouth_st,
+            "gaps": gaps, "L": L, "elevs": elevs, "hard": hard,
+            "anchored": [h or k == 0 or k == len(stations) - 1
+                         for k, h in enumerate(hard)]})
+
+    # ── STAGE B: JOINT CORRIDOR-NETWORK TIES.  Where chains meet they
+    # must AGREE — the shared elevation is a COMMON variable:
+    #   * two chains' junction-gap segments CROSS → one shared station
+    #     inserted into BOTH chains (EQUALITY: one physical point, one
+    #     elevation);
+    #   * a chain TERMINUS abuts another chain's crossing run → a station
+    #     at the projection + a grade-cap tie over the lateral offset
+    #     (the T-junction continuation);
+    #   * stations of different chains sharing canonical NODES → equality;
+    #   * mouth stations of different chains at the SAME junction → a
+    #     grade-cap tie over their chord, only when the chord stays
+    #     inside the junction (a chord over a void is fictitious — the
+    #     s73 junction-visibility lesson; it would pin arms flat again).
+    from shapely.geometry import LineString as _LineString
+    from shapely.geometry import Polygon as _Polygon
+
+    jpoly_cache: dict = {}
+    chord_cache: dict = {}
+
+    def _junc_chord_ok(ji, pa, pb):
+        ka = (round(pa[0], 1), round(pa[1], 1))
+        kb = (round(pb[0], 1), round(pb[1], 1))
+        key = (ji, ka, kb) if ka <= kb else (ji, kb, ka)
+        hit = chord_cache.get(key)
+        if hit is not None:
+            return hit
+        poly = jpoly_cache.get(ji)
+        if poly is None:
+            try:
+                poly = _Polygon(juncs[ji]["ring"]).buffer(1.0)
+            except _GEOM_EXC:
+                poly = False
+            jpoly_cache[ji] = poly
+        if poly is False:
+            ok = False
+        else:
+            try:
+                ok = bool(poly.covers(_LineString([pa, pb])))
+            except _GEOM_EXC:
+                ok = False
+        chord_cache[key] = ok
+        return ok
+
+    jgeo_cache: dict = {}
+
+    def _junc_geo_table(ji):
+        """All-pairs in-polygon geodesic distances between ring vertices
+        of junction ji (Dijkstra over the ring-vertex visibility graph)."""
+        tab = jgeo_cache.get(ji)
+        if tab is not None:
+            return tab
+        ring = juncs[ji]["ring"]
+        m = len(ring)
+        adj: list = [[] for _ in range(m)]
+        for a in range(m):
+            for b in range(a + 1, m):
+                if _junc_chord_ok(ji, ring[a], ring[b]):
+                    dd = math.hypot(ring[a][0] - ring[b][0],
+                                    ring[a][1] - ring[b][1])
+                    adj[a].append((b, dd))
+                    adj[b].append((a, dd))
+        tab = []
+        for s in range(m):
+            dist = [float("inf")] * m
+            dist[s] = 0.0
+            pq = [(0.0, s)]
+            while pq:
+                dc, u = heapq.heappop(pq)
+                if dc > dist[u] + 1e-9:
+                    continue
+                for v2, w2 in adj[u]:
+                    nd = dc + w2
+                    if nd < dist[v2] - 1e-9:
+                        dist[v2] = nd
+                        heapq.heappush(pq, (nd, v2))
+            tab.append(dist)
+        jgeo_cache[ji] = tab
+        return tab
+
+    def _junc_geo_dist(ji, pa, pb):
+        """In-junction grade-path length pa→pb: the direct chord when it
+        stays inside the junction, else the SHORTEST multi-bend path over
+        the ring-vertex visibility graph.  An L-shaped junction still
+        constrains through its interior, and a one-bend approximation
+        OVER-estimates around double corners — two vertices clamped at
+        one-bend caps then violate their mutual chord (CYXY #74 read
+        2.16 % between two twist writes both 'at cap').  ``None`` = no
+        in-junction path found."""
+        if _junc_chord_ok(ji, pa, pb):
+            return math.hypot(pa[0] - pb[0], pa[1] - pb[1])
+        ring = juncs[ji]["ring"]
+        m = len(ring)
+        tab = _junc_geo_table(ji)
+
+        def _reach(p):
+            for k2, q in enumerate(ring):
+                if (abs(q[0] - p[0]) < 1e-6
+                        and abs(q[1] - p[1]) < 1e-6):
+                    return tab[k2]
+            base = [(math.hypot(p[0] - R[0], p[1] - R[1])
+                     if _junc_chord_ok(ji, p, R) else float("inf"))
+                    for R in ring]
+            return [min(base[r1] + tab[r1][k2] for r1 in range(m))
+                    for k2 in range(m)]
+
+        ra = _reach(pa)
+        rb = _reach(pb)
+        best = min((a + b for a, b in zip(ra, rb)),
+                   default=float("inf"))
+        return best if best < float("inf") else None
+
+    def _seg_x(P0, P1, Q0, Q1):
+        rX, rY = P1[0] - P0[0], P1[1] - P0[1]
+        sX, sY = Q1[0] - Q0[0], Q1[1] - Q0[1]
+        den = rX * sY - rY * sX
+        if abs(den) < 1e-9:
+            return None
+        qpX, qpY = Q0[0] - P0[0], Q0[1] - P0[1]
+        t = (qpX * sY - qpY * sX) / den
+        u = (qpX * rY - qpY * rX) / den
+        if 0.02 < t < 0.98 and 0.02 < u < 0.98:
+            return t, u
+        return None
+
+    pend: list = []                   # pending station inserts [ci, d]
+    eq_pairs: list = []               # (token, token) equality ties
+    cap_ties: list = []               # (token, token, length_m) grade ties
+    j_gaps: dict = {}
+    for ci, cd in enumerate(chain_data):
+        for gi, g in enumerate(cd["gaps"]):
+            j_gaps.setdefault(g["ji"], []).append((ci, gi))
+    for ji in sorted(j_gaps):
+        lst = j_gaps[ji]
+        for a in range(len(lst)):
+            for b in range(a + 1, len(lst)):
+                ca, ga = lst[a]
+                cb, gb = lst[b]
+                if ca == cb:
+                    continue
+                GA = chain_data[ca]["gaps"][ga]
+                GB = chain_data[cb]["gaps"][gb]
+                hit = _seg_x(GA["A"], GA["B"], GB["A"], GB["B"])
+                if hit is None:
+                    continue
+                t, u = hit
+                X = (GA["A"][0] + t * (GA["B"][0] - GA["A"][0]),
+                     GA["A"][1] + t * (GA["B"][1] - GA["A"][1]))
+                ta = ("p", len(pend))
+                pend.append([ca, GA["dA"] + t * (GA["dB"] - GA["dA"]),
+                             ji, X])
+                tb = ("p", len(pend))
+                pend.append([cb, GB["dA"] + u * (GB["dB"] - GB["dA"]),
+                             ji, X])
+                eq_pairs.append((ta, tb))
+    for ci, cd in enumerate(chain_data):
+        for k in (0, len(cd["stations"]) - 1):
+            st = cd["stations"][k]
+            if st["junc"] is None:
+                continue
+            for (cj, gj) in j_gaps.get(st["junc"], ()):
+                if cj == ci:
+                    continue
+                G = chain_data[cj]["gaps"][gj]
+                Ax, Ay = G["A"]
+                Bx, By = G["B"]
+                gl2 = (Bx - Ax) ** 2 + (By - Ay) ** 2
+                if gl2 < 4.0:
+                    continue
+                t = (((st["mid"][0] - Ax) * (Bx - Ax)
+                      + (st["mid"][1] - Ay) * (By - Ay)) / gl2)
+                if not 0.02 < t < 0.98:
+                    continue
+                px = Ax + t * (Bx - Ax)
+                py = Ay + t * (By - Ay)
+                lat = math.hypot(st["mid"][0] - px, st["mid"][1] - py)
+                if lat > G["band"]:
+                    continue
+                if not _junc_chord_ok(st["junc"], st["mid"], (px, py)):
+                    continue
+                tp = ("p", len(pend))
+                pend.append([cj, G["dA"] + t * (G["dB"] - G["dA"]),
+                             st["junc"], (px, py)])
+                cap_ties.append((("s", ci, k), tp, max(lat, 1.0)))
+    node_owner: dict = {}
+    j_sts: dict = {}
+    for ci, cd in enumerate(chain_data):
+        for k, st in enumerate(cd["stations"]):
+            if st["junc"] is not None:
+                j_sts.setdefault(st["junc"], []).append((ci, k))
+            for i in sorted(st["nodes"]):
+                o = node_owner.get(i)
+                if o is None:
+                    node_owner[i] = (ci, k)
+                elif o[0] != ci:
+                    eq_pairs.append((("s", o[0], o[1]), ("s", ci, k)))
+    for ji in sorted(j_sts):
+        lst = j_sts[ji]
+        for a in range(len(lst)):
+            for b in range(a + 1, len(lst)):
+                ca, ka = lst[a]
+                cb, kb = lst[b]
+                if ca == cb:
+                    continue
+                ma = chain_data[ca]["stations"][ka]["mid"]
+                mb = chain_data[cb]["stations"][kb]["mid"]
+                gap = _junc_geo_dist(ji, ma, mb)
+                if gap is None:
+                    continue
+                cap_ties.append((("s", ca, ka), ("s", cb, kb),
+                                 max(gap, 2.0)))
+
+    # apply pending inserts; a pending point within 3 m of an existing or
+    # already-inserted station BINDS to it instead (sub-5 m stations
+    # spiral ``faa_rate_of_change_pass`` — the s73 runway lesson)
+    idx_map: dict = {}
+    by_chain: dict = {}
+    for pi, p in enumerate(pend):
+        by_chain.setdefault(p[0], []).append(pi)
+    for ci in sorted(by_chain):
+        cd = chain_data[ci]
+        sts = cd["stations"]
+        new_ds: list = []                 # (d, junc, mid)
+        for pi in sorted(by_chain[ci], key=lambda q: pend[q][1]):
+            dq = pend[pi][1]
+            if (any(abs(s["d"] - dq) <= 3.0 for s in sts)
+                    or any(abs(x[0] - dq) <= 3.0 for x in new_ds)):
+                continue
+            new_ds.append((dq, pend[pi][2], pend[pi][3]))
+        if not new_ds:
+            continue
+        old_ds = [s["d"] for s in sts]
+        old_es = list(cd["elevs"])
+        merged = sorted([(s["d"], 0, oi) for oi, s in enumerate(sts)]
+                        + [(dq, 1, oi) for oi, dq in
+                           enumerate(x[0] for x in new_ds)])
+        amap: dict = {}
+        n_sts: list = []
+        n_es: list = []
+        n_hd: list = []
+        n_an: list = []
+        for dq, kind, oi in merged:
+            if kind == 0:
+                amap[oi] = len(n_sts)
+                n_sts.append(sts[oi])
+                n_es.append(cd["elevs"][oi])
+                n_hd.append(cd["hard"][oi])
+                n_an.append(cd["anchored"][oi])
+            else:
+                n_sts.append({"d": dq, "nodes": set(),
+                              "mid": new_ds[oi][2], "halfw": 0.0,
+                              "junc": new_ds[oi][1]})
+                n_es.append(_interp_profile(old_ds, old_es, dq))
+                n_hd.append(False)
+                n_an.append(False)
+        cd["stations"] = n_sts
+        cd["elevs"] = n_es
+        cd["hard"] = n_hd
+        cd["anchored"] = n_an
+        cd["mouth_st"] = [[amap[a], amap[b]] for (a, b) in cd["mouth_st"]]
+        idx_map[ci] = amap
+
+    def _resolve(tok):
+        if tok[0] == "s":
+            _t, ci, k = tok
+            return (ci, idx_map[ci][k]) if ci in idx_map else (ci, k)
+        ci, dq = pend[tok[1]][0], pend[tok[1]][1]
+        sts = chain_data[ci]["stations"]
+        k = min(range(len(sts)), key=lambda q: abs(sts[q]["d"] - dq))
+        return (ci, k)
+
+    parent: dict = {}
+
+    def _find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for ta, tb in eq_pairs:
+        a, b = _resolve(ta), _resolve(tb)
+        if a != b:
+            parent[_find(a)] = _find(b)
+    tie_keys: set = set(parent)
+    edges_r: list = []
+    for ta, tb, ln in cap_ties:
+        a, b = _resolve(ta), _resolve(tb)
+        if a == b or _find(a) == _find(b):
+            continue
+        edges_r.append((a, b, ln))
+        tie_keys.add(a)
+        tie_keys.add(b)
+    gid_of: dict = {}
+    g_members: list = []
+    for key in sorted(tie_keys):
+        rt = _find(key)
+        if rt not in gid_of:
+            gid_of[rt] = len(g_members)
+            g_members.append([])
+        g_members[gid_of[rt]].append(key)
+    root_of = {key: gid_of[_find(key)] for key in tie_keys}
+    g_edges: dict = {}
+    for a, b, ln in edges_r:
+        kk = (min(root_of[a], root_of[b]), max(root_of[a], root_of[b]))
+        g_edges[kk] = min(g_edges.get(kk, float("inf")), ln)
+
+    # a tied TERMINUS is no longer pinned at its stale network value —
+    # the tie IS its connection (the stale pin was the disagreement)
+    for (ci, k) in sorted(tie_keys):
+        if not chain_data[ci]["hard"][k]:
+            chain_data[ci]["anchored"][k] = False
+    # …but a tie COMPONENT with no anchor anywhere re-anchors its termini
+    # (nothing else pins it to the network)
+    cpar = list(range(len(chain_data)))
+
+    def _cf(x):
+        while cpar[x] != x:
+            cpar[x] = cpar[cpar[x]]
+            x = cpar[x]
+        return x
+
+    for members in g_members:
+        for (ci, _k) in members[1:]:
+            cpar[_cf(members[0][0])] = _cf(ci)
+    for (ga, gb) in g_edges:
+        cpar[_cf(g_members[ga][0][0])] = _cf(g_members[gb][0][0])
+    comp_anch: dict = {}
+    for ci, cd in enumerate(chain_data):
+        rt = _cf(ci)
+        comp_anch[rt] = comp_anch.get(rt, False) or any(cd["anchored"])
+    for ci, cd in enumerate(chain_data):
+        if not comp_anch.get(_cf(ci), True):
+            cd["anchored"][0] = True
+            cd["anchored"][-1] = True
+
+    # ANCHOR SELF-CONSISTENCY: a chain whose anchors are mutually
+    # cap-infeasible (HECA T4+U: hard runway contact 110.4 at one end,
+    # DEM-settled terminus 98.4 at the other, 611 m = 1.96 %) can satisfy
+    # NOTHING in between — every consensus tie freeze-fails and the
+    # profile rides an over-cap ramp.  Project the NON-HARD anchors onto
+    # pairwise cap feasibility (hard ones immovable: correct grade is
+    # king, the network terminus value is only the DEM starting point).
+    for cd in chain_data:
+        sts = cd["stations"]
+        anc = [k for k in range(len(sts)) if cd["anchored"][k]]
+        for _sweep in range(20):
+            worst = 0.0
+            for a2 in range(len(anc)):
+                for b2 in range(a2 + 1, len(anc)):
+                    j, k = anc[a2], anc[b2]
+                    dd = abs(sts[k]["d"] - sts[j]["d"])
+                    lim = TAXI_MAX_GRADE * dd + 0.01
+                    diff = cd["elevs"][k] - cd["elevs"][j]
+                    ex = abs(diff) - lim
+                    if ex <= 0.0:
+                        continue
+                    hj, hk = cd["hard"][j], cd["hard"][k]
+                    if hj and hk:
+                        continue          # runway-flex territory
+                    sgn = 1.0 if diff > 0 else -1.0
+                    if hj:
+                        cd["elevs"][k] -= sgn * ex
+                    elif hk:
+                        cd["elevs"][j] += sgn * ex
+                    else:
+                        cd["elevs"][k] -= sgn * ex / 2.0
+                        cd["elevs"][j] += sgn * ex / 2.0
+                    worst = max(worst, ex)
+            if worst < 0.01:
+                break
+
+    # per-station bands = runway-route bands (post-insert) ∩ junction
+    # HARD bands.  A corridor station at / inside a junction is capped by
+    # the junction's HARD ring vertices (runway contacts, immutable seeds)
+    # over the in-junction chord — the route bands cannot see a runway one
+    # junction-width away when the centerline graph under-connects there
+    # (CYXY #74: chain E's flat seed lifted its crossing 2.9 m above a
+    # runway vertex 20 m across the junction it crosses).
+    jhard: dict = {}
+    for ji, J in enumerate(juncs):
+        hp = [(J["ring"][k2], elev[i2])
+              for k2, i2 in enumerate(J["idxs"])
+              if i2 is not None and (base_hard[i2] or i2 in rwy_nodes)]
+        if hp:
+            jhard[ji] = hp
+    for cd in chain_data:
+        st_lo, st_hi = [], []
+        for st in cd["stations"]:
+            ns = st["nodes"]
+            slo, shi = float("-inf"), float("inf")
+            if reach_lo is not None:
+                slo = max((reach_lo[i] for i in ns if i < len(reach_lo)),
+                          default=float("-inf"))
+                shi = min((reach_hi[i] for i in ns if i < len(reach_hi)),
+                          default=float("inf"))
+                if slo > shi:                  # infeasible: leave free
+                    slo, shi = float("-inf"), float("inf")
+            ji = st.get("junc")
+            if ji in jhard:
+                # the station value lands on EVERY member node — the cap
+                # must hold at the tightest node position, not just the
+                # mouth midpoint (the corner nearer the runway binds)
+                pts = []
+                if st["mid"] is not None:
+                    pts.append(st["mid"])
+                if nodes is not None:
+                    pts.extend(nodes[i2] for i2 in ns if i2 < len(nodes))
+                hlo, hhi = float("-inf"), float("inf")
+                for (hp, he) in jhard[ji]:
+                    for pt in pts:
+                        dd = _junc_geo_dist(ji, pt, hp)
+                        if dd is None:
+                            continue
+                        hlo = max(hlo, he - TAXI_MAX_GRADE * dd - 0.02)
+                        hhi = min(hhi, he + TAXI_MAX_GRADE * dd + 0.02)
+                if hlo <= hhi:
+                    if max(slo, hlo) <= min(shi, hhi):
+                        slo, shi = max(slo, hlo), min(shi, hhi)
+                    else:
+                        slo, shi = hlo, hhi    # local hard cap wins
+            st_lo.append(slo)
+            st_hi.append(shi)
+        cd["st_lo"], cd["st_hi"] = st_lo, st_hi
+
+    # ── JOINT SOLVE: one value per tie group, found by consensus
+    # iteration.  Each chain's WISH for a tie station is the flat
+    # interpolation between its flanking pins (anchored stations + its
+    # OTHER tie stations at their current group values) — the flat-seed
+    # preference expressed pointwise.  Groups average member wishes
+    # (anchored members are immovable), clamp into the intersected route
+    # band, and the grade-cap ties project pairs together.  Caps/Δg are
+    # enforced by the final per-chain solve below; the FREEZE rejects any
+    # consensus value a chain genuinely cannot cap-reach.
+    def _chain_feas(ci, k):
+        """Cap-feasibility interval for station k of chain ci against the
+        chain's (static) anchors — a consensus value outside it would only
+        be rejected at freeze time, leaving the cliff in place."""
+        cd = chain_data[ci]
+        sts = cd["stations"]
+        lo, hi = float("-inf"), float("inf")
+        for j in range(len(sts)):
+            if not cd["anchored"][j]:
+                continue
+            dd = abs(sts[k]["d"] - sts[j]["d"])
+            lo = max(lo, cd["elevs"][j] - TAXI_MAX_GRADE * dd)
+            hi = min(hi, cd["elevs"][j] + TAXI_MAX_GRADE * dd)
+        return lo, hi
+
+    g_fix: list = []
+    g_val: list = []
+    g_lo: list = []
+    g_hi: list = []
+    for members in g_members:
+        fixv = [chain_data[ci]["elevs"][k] for (ci, k) in members
+                if chain_data[ci]["anchored"][k]]
+        g_fix.append(bool(fixv))
+        vals = fixv or [chain_data[ci]["elevs"][k] for (ci, k) in members]
+        g_val.append(sum(vals) / len(vals))
+        lo, hi = float("-inf"), float("inf")
+        for (ci, k) in members:
+            cd = chain_data[ci]
+            if cd["st_lo"] is not None:
+                lo = max(lo, cd["st_lo"][k])
+                hi = min(hi, cd["st_hi"][k])
+        if lo > hi:
+            lo, hi = float("-inf"), float("inf")
+        # intersect with every member chain's anchor feasibility — when
+        # jointly feasible the consensus stays freezable by construction;
+        # when not, keep the band (the freeze guard then keeps the
+        # reachable members and leaves the rest as honest conflicts)
+        flo, fhi = lo, hi
+        for (ci, k) in members:
+            a, b = _chain_feas(ci, k)
+            flo, fhi = max(flo, a), min(fhi, b)
+        if flo <= fhi:
+            lo, hi = flo, fhi
+        g_lo.append(lo)
+        g_hi.append(hi)
+
+    def _wish(ci, k):
+        cd = chain_data[ci]
+        sts = cd["stations"]
+
+        def _pv(j):
+            if cd["anchored"][j]:
+                return cd["elevs"][j]
+            return g_val[root_of[(ci, j)]]
+
+        lk = rk = None
+        for j in range(k - 1, -1, -1):
+            if cd["anchored"][j] or (ci, j) in root_of:
+                lk = j
+                break
+        for j in range(k + 1, len(sts)):
+            if cd["anchored"][j] or (ci, j) in root_of:
+                rk = j
+                break
+        if lk is not None and rk is not None:
+            da, db = sts[lk]["d"], sts[rk]["d"]
+            if db - da < 1e-9:
+                return _pv(lk)
+            t = (sts[k]["d"] - da) / (db - da)
+            return _pv(lk) + t * (_pv(rk) - _pv(lk))
+        if lk is not None:
+            return _pv(lk)
+        if rk is not None:
+            return _pv(rk)
+        return cd["elevs"][k]
+
+    n_rounds = 0
+    for _rnd in range(60):
+        n_rounds = _rnd + 1
+        new_val = []
+        for gid, members in enumerate(g_members):
+            if g_fix[gid]:
+                new_val.append(g_val[gid])
+                continue
+            ws = [_wish(ci, k) for (ci, k) in members]
+            v = sum(ws) / len(ws)
+            # damped (oscillation between wish-average and the cap-tie
+            # projection never settled at 30 undamped rounds)
+            v = 0.5 * g_val[gid] + 0.5 * v
+            new_val.append(min(max(v, g_lo[gid]), g_hi[gid]))
+        for (ga, gb) in sorted(g_edges):
+            lim = TAXI_MAX_GRADE * g_edges[(ga, gb)] + 0.02
+            diff = new_val[ga] - new_val[gb]
+            ex = abs(diff) - lim
+            if ex <= 0.0 or (g_fix[ga] and g_fix[gb]):
+                continue
+            sgn = 1.0 if diff > 0 else -1.0
+            if g_fix[ga]:
+                new_val[gb] += sgn * ex
+            elif g_fix[gb]:
+                new_val[ga] -= sgn * ex
+            else:
+                new_val[ga] -= sgn * ex / 2.0
+                new_val[gb] += sgn * ex / 2.0
+        for gid in range(len(new_val)):
+            if not g_fix[gid] and g_lo[gid] <= g_hi[gid]:
+                new_val[gid] = min(max(new_val[gid], g_lo[gid]),
+                                   g_hi[gid])
+        moved = max((abs(va - vb) for va, vb in zip(new_val, g_val)),
+                    default=0.0)
+        g_val = new_val
+        if moved < 0.005:
+            break
+
+    # FREEZE the consensus into each chain: tie stations become anchors —
+    # most-constrained (largest) groups first; a value a chain cannot
+    # cap-reach from its existing anchors is SKIPPED (left free: an
+    # honest local conflict beats a manufactured cliff)
+    n_skip = 0
+    for ci, cd in enumerate(chain_data):
+        sts = cd["stations"]
+        ks = [k for k in range(len(sts))
+              if (ci, k) in root_of and not cd["anchored"][k]]
+        for k in sorted(ks, key=lambda q:
+                        (-len(g_members[root_of[(ci, q)]]), q)):
+            v = g_val[root_of[(ci, k)]]
+            ok = all(abs(v - cd["elevs"][j])
+                     <= TAXI_MAX_GRADE * abs(sts[k]["d"] - sts[j]["d"])
+                     + 0.05
+                     for j in range(len(sts)) if cd["anchored"][j])
+            if ok:
+                cd["elevs"][k] = v
+                cd["anchored"][k] = True
+            else:
+                n_skip += 1
+                if _os.environ.get("O4_CORRIDOR_DEBUG") == "1":
+                    refs = sorted({rects[ri]["shape"].ref or "?"
+                                   for (ri, _n, _f) in cd["chain"]})
+                    worst = max(
+                        (abs(v - cd["elevs"][j])
+                         - TAXI_MAX_GRADE
+                         * abs(sts[k]["d"] - sts[j]["d"])
+                         for j in range(len(sts)) if cd["anchored"][j]),
+                        default=0.0)
+                    print(f"[corr]   freeze-skip chain={refs} "
+                          f"d={sts[k]['d']:.0f} v={v:.2f} "
+                          f"over-by={worst:.2f}m")
+        if not any(cd["anchored"]):
+            cd["anchored"][0] = True
+            cd["anchored"][-1] = True
+    if _os.environ.get("O4_CORRIDOR_DEBUG") == "1" and g_members:
+        print(f"[corr] joint network: {len(g_members)} tie group(s) / "
+              f"{sum(len(mm) for mm in g_members)} station(s), "
+              f"{len(g_edges)} cap tie(s), rounds={n_rounds}, "
+              f"freeze-skipped={n_skip}")
+
+    # ── per chain: smooth ROUTE-BANDED profile through the (now agreed)
+    # anchors + writeback.  Junction interiors are NOT written per-chain:
+    # crossings and mouth values are RECORDED, and a final TWIST pass
+    # blends them (user model: rects slope in ONE direction; the
+    # junction's arms twist from the flat cross-sections at the mouths to
+    # the max COMPOUND slope at the center and back out the other sides).
+    written: set = set()
+    crossings: dict = {}                       # junction idx → line sources
+    jpoints: dict = {}                         # junction idx → point sources
+    n_chains = 0
+    for cd in chain_data:
+        chain = cd["chain"]
+        stations = cd["stations"]
+        mouth_st = cd["mouth_st"]
+        L = cd["L"]
+        elevs = cd["elevs"]
+        anchored = cd["anchored"]
+        st_lo, st_hi = cd["st_lo"], cd["st_hi"]
+        fractions = [st["d"] / L for st in stations]
         pre = list(elevs)
         # FLAT SEED (the runway profile model applied to corridors):
         # interior stations take the piecewise-linear interpolation
@@ -3199,7 +3806,13 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
         # DEM-following values it keeps any cap-legal V-notch (HECA T:
         # 105.0 → 104.5 → 111.7 through junction -10292 was Δg-legal
         # because the flanking segments are hundreds of metres long).
+        # Beyond the outermost pins the seed extends FLAT (a tied
+        # terminus is no longer an anchor; its stretch follows the pin).
         ai = [k for k in range(len(stations)) if anchored[k]]
+        for k in range(ai[0]):
+            elevs[k] = elevs[ai[0]]
+        for k in range(ai[-1] + 1, len(stations)):
+            elevs[k] = elevs[ai[-1]]
         for a, b in zip(ai, ai[1:]):
             da, db = stations[a]["d"], stations[b]["d"]
             if db - da < 1e-9:
@@ -3214,19 +3827,7 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
         # with an anchor-consistency guard at the taxi cap (the s73
         # runway lesson: an anchor added later can be jointly infeasible
         # with earlier ones).
-        st_lo = st_hi = None
-        if reach_lo is not None:
-            st_lo, st_hi = [], []
-            for st in stations:
-                ns = st["nodes"]
-                slo = max((reach_lo[i] for i in ns if i < len(reach_lo)),
-                          default=float("-inf"))
-                shi = min((reach_hi[i] for i in ns if i < len(reach_hi)),
-                          default=float("inf"))
-                if slo > shi:                  # infeasible: leave free
-                    slo, shi = float("-inf"), float("inf")
-                st_lo.append(slo)
-                st_hi.append(shi)
+        if st_lo is not None:
             for k in range(len(stations)):
                 if not anchored[k]:
                     elevs[k] = min(max(elevs[k], st_lo[k]), st_hi[k])
@@ -3366,12 +3967,42 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
             var = sum(w * (v - mean) ** 2 for w, v in srcs) / den
             if var > 1.0:
                 continue
-            elev[i] = mean
+            # clamp into the junction's HARD band (a blend that ignores a
+            # runway vertex a chord away manufactures the grade the
+            # enforce cannot fix — same rule as the station bands).  The
+            # per-vertex ROUTE bands are deliberately NOT applied here:
+            # inside a corridor-crossed junction the corridor profile IS
+            # the route truth and the per-vertex route bands are the
+            # noisy approximation (route-graph artifacts lift adjacent
+            # vertices metres apart) — these junctions are instead
+            # EXEMPTED from band pinning in the final enforce.
+            lo, hi = float("-inf"), float("inf")
+            for (hp, he) in jhard.get(ji, ()):
+                dd = _junc_geo_dist(ji, (x, y), hp)
+                if dd is None:
+                    continue
+                lo = max(lo, he - TAXI_MAX_GRADE * dd - 0.02)
+                hi = min(hi, he + TAXI_MAX_GRADE * dd + 0.02)
+            if lo > hi:
+                continue
+            elev[i] = min(max(mean, lo), hi)
             written.add(i)
+    # corridor-touched junctions are EXEMPT from per-vertex route-band
+    # pinning in the final enforce: the threaded corridor profile is the
+    # route truth there; the per-vertex bands (route-graph artifacts)
+    # otherwise hold free junction vertices metres above held corridor
+    # writes — the part-4 cliff class (HECA #290: free 104.0 against
+    # held 102.1, 7.4 m apart, unfixable by POCS).
+    exempt: set = set()
+    for ji in set(j_sts) | set(crossings):
+        for i in juncs[ji]["idxs"]:
+            if i is not None and not base_hard[i]:
+                exempt.add(i)
     if _os.environ.get("O4_STEP_DEBUG") == "1":
         print(f"[step] corridor profiles: {n_chains} multi-rect corridor(s), "
-              f"{len(written)} node(s) written+held")
-    return written
+              f"{len(written)} node(s) written+held, "
+              f"{len(exempt)} junction node(s) band-exempt")
+    return written, exempt
 
 
 def _merge_terminal_level_groups(coupling: dict, shape_constraints) -> dict:
