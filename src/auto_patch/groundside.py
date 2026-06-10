@@ -161,6 +161,16 @@ def _dem_follow_polygon(p, _dem_at, densify_step_m: float = 15.0,
         ring = ring[:-1]
     if len(ring) < 3:
         return None
+    # Truncate needle-tip corners (interior angle below the Triangle4XP
+    # sliver threshold) at SOURCE: the OSM emitter drops any polygon that
+    # still carries one, and dropping a whole groundside shape uncovers
+    # its entire source footprint (HECA: a 30-vertex strip lost to one
+    # 1.62° tip → two interior coverage gaps).  Truncation loses only the
+    # sub-50 m² wedge beyond the chord.
+    from .pavement.junctions import _drop_sliver_corners
+    ring = _drop_sliver_corners(ring)
+    if len(ring) < 3:
+        return None
     # Densify so per-vertex altitudes resolve well across long edges.
     densified: List[Tuple[float, float]] = []
     n_r = len(ring)

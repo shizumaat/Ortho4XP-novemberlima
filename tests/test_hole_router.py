@@ -192,3 +192,82 @@ def test_plan_hole_cuts_multi_hole():
     pieces = _apply_cuts(poly, cuts)
     assert all(len(list(p.interiors)) == 0 for p in pieces)
     assert abs(sum(p.area for p in pieces) - poly.area) < 1.0
+
+
+# ── 8. v2 Prim forest planner: conforming, chained, needle-free ──────────────
+def _piece_min_angle_deg(p):
+    import math
+    ring = list(p.exterior.coords)[:-1]
+    n = len(ring)
+    worst = 180.0
+    for i in range(n):
+        ax, ay = ring[(i - 1) % n]
+        bx, by = ring[i]
+        cx, cy = ring[(i + 1) % n]
+        v1 = (ax - bx, ay - by)
+        v2 = (cx - bx, cy - by)
+        n1 = math.hypot(*v1)
+        n2 = math.hypot(*v2)
+        if n1 < 1e-9 or n2 < 1e-9:
+            continue
+        c = max(-1.0, min(1.0, (v1[0] * v2[0] + v1[1] * v2[1]) / (n1 * n2)))
+        worst = min(worst, math.degrees(math.acos(c)))
+    return worst
+
+
+def test_plan_hole_cuts_v2_opens_all_holes_exact_tiling():
+    from shapely.ops import polygonize, unary_union
+    from auto_patch.pavement.hole_router import plan_hole_cuts_v2
+
+    ext = _densified_square(200.0)
+    holes = [
+        [(20, 20), (40, 20), (40, 40), (20, 40)],
+        [(60, 20), (80, 20), (80, 40), (60, 40)],     # neighbour → chaining
+        [(150, 150), (170, 150), (170, 170), (150, 170)],
+        [(90, 90), (100, 95), (95, 105)],             # triangle hole
+    ]
+    poly = Polygon(ext, holes)
+    cuts = plan_hole_cuts_v2(poly, min_hole_area=50.0)
+    assert len(cuts) == 4                              # one cut per hole
+
+    # apply as the production code does: one global arrangement.
+    noded = unary_union([poly.boundary] + list(cuts))
+    pieces = []
+    for f in polygonize(noded):
+        c = f.intersection(poly)
+        for g in getattr(c, "geoms", [c]):
+            if g.geom_type == "Polygon" and not g.is_empty and g.area > 1e-6:
+                pieces.append(g)
+    # every hole opened (no piece keeps a big interior ring)
+    assert all(Polygon(h).area < 50.0
+               for p in pieces for h in p.interiors)
+    # EXACT tiling: nothing uncovered, nothing paved over the voids
+    assert poly.difference(unary_union(pieces)).area < 1e-6
+    assert unary_union(pieces).difference(poly).area < 1e-6
+    # no needle wedge pieces (the v1 fan failure mode)
+    assert all(_piece_min_angle_deg(p) >= 2.0 for p in pieces)
+
+
+def test_plan_hole_cuts_v2_no_shared_endpoint_fan():
+    """Two bridges of one cut must not share an endpoint, and no graph node
+    may serve as an endpoint for a pile of cuts (the v1 hub-fan failure)."""
+    from collections import Counter
+    from auto_patch.pavement.hole_router import plan_hole_cuts_v2
+
+    ext = _densified_square(200.0)
+    # a row of holes all nearest to the same boundary region — v1 fanned
+    # every bridge into the same exterior vertex here.
+    holes = [
+        [(30 + dx, 60), (45 + dx, 60), (45 + dx, 75), (30 + dx, 75)]
+        for dx in (0, 40, 80, 120)
+    ]
+    poly = Polygon(ext, holes)
+    cuts = plan_hole_cuts_v2(poly, min_hole_area=50.0)
+    assert len(cuts) == 4
+    ends = Counter()
+    for c in cuts:
+        cs = list(c.coords)
+        assert tuple(cs[0]) != tuple(cs[-1])           # no degenerate loop
+        ends[tuple(cs[0])] += 1
+        ends[tuple(cs[-1])] += 1
+    assert max(ends.values()) <= 2                     # no hub fan

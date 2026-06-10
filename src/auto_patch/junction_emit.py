@@ -203,6 +203,27 @@ def emit_junctions(layout, *, pav_union, emitted_taxi_rects,
         from .junction_rules import longest_runway_axis_deg
         from .pavement.junctions import _drop_sliver_corners
         _runway_axis_deg = longest_runway_axis_deg(layout)
+        # GLOBAL shared node set for the conforming-cuts hole router: the
+        # canonical registry (apt.dat row-110 verts + runway + rect corners
+        # registered at build time) plus every fixed-shape perimeter vertex.
+        # The router admits the subset sitting ON a residue piece's boundary
+        # as cut endpoints, so cuts end at the SAME node an abutting shape
+        # already owns (conforming — no divergent wedge).
+        _global_nodes: list = []
+        _reg = getattr(layout, "canonical_points", None)
+        if _reg is not None:
+            try:
+                _global_nodes.extend(_reg.points())
+            except _GEOM_EXC:
+                pass
+        for _fp in fixed_polys:
+            try:
+                _coords = list(_fp.exterior.coords)
+            except _GEOM_EXC:
+                continue
+            if _coords and _coords[0] == _coords[-1]:
+                _coords = _coords[:-1]
+            _global_nodes.extend(_coords)
         # (session 51) Apron neck-split was MOVED out of junction_emit and
         # into pipeline.py at the end of the geometry phase (just before the
         # solve).  Reason: at junction-emit time many of the mouth-pair
@@ -216,7 +237,7 @@ def emit_junctions(layout, *, pav_union, emitted_taxi_rects,
                 _decompose_polygon_with_holes(
                     part, min_area_m2=MIN_JUNCTION_AREA_M2,
                     runway_axis_deg=_runway_axis_deg,
-                    corner_snap_pts=None)
+                    corner_snap_pts=_global_nodes)
                 if any(Polygon(h).area >= MIN_HOLE_AREA_M2
                        for h in part.interiors)
                 else [part])

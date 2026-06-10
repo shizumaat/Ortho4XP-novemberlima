@@ -125,7 +125,8 @@ def _decompose_polygon_with_holes(polygon: Polygon,
     # aprons).  Returns None to fall back to the legacy guillotine below.
     from ..config import HOLE_ROUTER_ENABLED
     if _router and HOLE_ROUTER_ENABLED:
-        routed = _decompose_via_router(polygon, min_area_m2, runway_axis_deg)
+        routed = _decompose_via_router(polygon, min_area_m2, runway_axis_deg,
+                                       extra_nodes=corner_snap_pts)
         if routed is not None:
             return routed
     big_interiors.sort(key=lambda h: -Polygon(h).area)
@@ -317,66 +318,259 @@ def _decompose_polygon_with_holes(polygon: Polygon,
     return pieces
 
 
+def _on_boundary_extra_nodes(polygon: "Polygon",
+                             pts,
+                             tol_m: float = 0.05,
+                             cap: int = 4000,
+                             ) -> "list[tuple[float, float]]":
+    """Filter the airport-wide shared/canonical point set ``pts`` down to the
+    points sitting ON ``polygon``'s boundary (within ``tol_m``) — neighbour-
+    shape corners that are legal conforming cut endpoints for this polygon
+    but are not (yet) ring vertices.  Ring vertices themselves dedupe away
+    inside the router's node bucketing, so no pre-exclusion is needed."""
+    if not pts:
+        return []
+    try:
+        minx, miny, maxx, maxy = polygon.bounds
+    except _GEOM_EXC:
+        return []
+    cand = [(float(x), float(y)) for (x, y) in pts
+            if minx - tol_m <= x <= maxx + tol_m
+            and miny - tol_m <= y <= maxy + tol_m]
+    if not cand:
+        return []
+    try:
+        from shapely.prepared import prep
+        near_boundary = prep(polygon.boundary.buffer(tol_m))
+    except _GEOM_EXC:
+        return []
+    out = [p for p in cand if near_boundary.intersects(Point(p))]
+    return out[:cap]
+
+
+def _piece_has_needle_corner(p: "Polygon") -> bool:
+    """True if any exterior-ring interior angle of ``p`` is below
+    ``SLIVER_ANGLE_THRESHOLD_DEG`` — such a piece would be truncated by
+    ``_drop_sliver_corners`` or dropped whole by the OSM-emit guard, leaving
+    an uncovered-source wedge.  Detected at decompose time so the piece can
+    be MERGED into a sibling (coverage preserved) instead."""
+    ring = list(p.exterior.coords)
+    if ring and ring[0] == ring[-1]:
+        ring = ring[:-1]
+    n = len(ring)
+    if n < 3:
+        return True
+    cos_thresh = math.cos(math.radians(SLIVER_ANGLE_THRESHOLD_DEG))
+    for i in range(n):
+        ax, ay = ring[(i - 1) % n]
+        bx, by = ring[i]
+        cx, cy = ring[(i + 1) % n]
+        v1x, v1y = ax - bx, ay - by
+        v2x, v2y = cx - bx, cy - by
+        n1 = math.hypot(v1x, v1y)
+        n2 = math.hypot(v2x, v2y)
+        if n1 < 1e-9 or n2 < 1e-9:
+            continue
+        if (v1x * v2x + v1y * v2y) / (n1 * n2) > cos_thresh:
+            return True
+    return False
+
+
+def _union_reopens_hole(u, a: "Polygon", b: "Polygon",
+                        min_area_m2: float) -> bool:
+    """True if union ``u`` of pieces ``a`` + ``b`` carries a big interior
+    ring that NEITHER input had — i.e. the merge re-encircled an opened
+    hole (the two inputs were the two sides of a hole-opening cut)."""
+    try:
+        for h in u.interiors:
+            ha = Polygon(h).area
+            if ha < min_area_m2:
+                continue
+            pre = any(abs(Polygon(g).area - ha) < 1e-6
+                      for src in (a, b) for g in src.interiors)
+            if not pre:
+                return True
+    except _GEOM_EXC:
+        return True
+    return False
+
+
+def _merge_pieces_into_siblings(keep: "list[Polygon]",
+                                defer: "list[Polygon]",
+                                min_area_m2: float,
+                                ) -> "list[Polygon]":
+    """Union each ``defer`` piece (sub-threshold or needle-cornered) into a
+    ``keep`` sibling along their shared cut edge — preserving coverage.
+    Siblings are tried longest-shared-boundary first; a union that would
+    RE-ENCIRCLE an opened hole (merging the two sides of a hole-opening
+    cut) or go non-Polygon is rejected and the next sibling tried.  A piece
+    with no mergeable sibling is KEPT as-is (never silently dropped —
+    dropping uncovers source pavement)."""
+    out = list(keep)
+    for p in defer:
+        shares: list[tuple[float, int]] = []
+        for j, q in enumerate(out):
+            try:
+                shared = p.boundary.intersection(q.boundary).length
+            except _GEOM_EXC:
+                continue
+            if shared > 0.0:
+                shares.append((shared, j))
+        shares.sort(reverse=True)
+        merged_at: int | None = None
+        for _shared, j in shares[:4]:
+            try:
+                u = unary_union([p, out[j]])
+            except _GEOM_EXC:
+                continue
+            if (u.geom_type != "Polygon" or u.is_empty
+                    or _union_reopens_hole(u, p, out[j], min_area_m2)):
+                continue
+            out[j] = u
+            merged_at = j
+            break
+        if merged_at is None:
+            out.append(p)
+    return out
+
+
 def _decompose_via_router(polygon: "Polygon",
                           min_area_m2: float,
                           runway_axis_deg: float | None,
+                          extra_nodes=None,
                           ) -> "list[Polygon] | None":
-    """Open every interior hole with visibility-graph-routed SPLIT cuts
-    (``hole_router.plan_hole_cuts``) and return the resulting simple-polygon
-    pieces, or ``None`` to fall back to the legacy guillotine.
+    """Open every interior hole with visibility-graph-routed SPLIT cuts and
+    return the resulting simple-polygon pieces, or ``None`` to fall back to
+    the legacy guillotine.
 
     The graph is built ONCE for ``polygon`` and every hole routed against it.
-    Each cut bends around rects corner-to-corner and ends on existing vertices,
-    so no mid-edge node is planted and no far corner is sheared.  A piece that
-    still carries a big hole (a hole whose two diameter ends had no visible
-    bridge to the exterior) is handed to the legacy guillotine in isolation."""
-    from .hole_router import plan_hole_cuts
+    Each cut bends around rects corner-to-corner and ends on existing
+    vertices (plus ``extra_nodes`` — shared neighbour-shape corners on this
+    polygon's boundary), so no mid-edge node is planted and no far corner is
+    sheared.  With ``config.HOLE_ROUTER_V2`` the cuts come from the Prim
+    min-spanning-forest planner (``plan_hole_cuts_v2`` — conforming, chained,
+    needle-free); otherwise from the v1 per-hole planner.  A piece that still
+    carries a big hole (no visible bridge pair) is handed to the legacy
+    guillotine in isolation.  Sub-threshold and needle-cornered pieces are
+    MERGED into the sibling sharing their cut edge — never silently dropped
+    (a dropped piece uncovers source pavement: the HECA fan-wedge bug)."""
+    from ..config import HOLE_ROUTER_V2
+    from .hole_router import plan_hole_cuts, plan_hole_cuts_v2
     from shapely.ops import split as _shp_split
+    use_v2 = HOLE_ROUTER_V2
     try:
-        cuts = plan_hole_cuts(polygon, min_hole_area=min_area_m2,
-                              runway_axis_deg=runway_axis_deg)
+        if use_v2:
+            cuts = plan_hole_cuts_v2(
+                polygon, min_hole_area=min_area_m2,
+                extra_nodes=_on_boundary_extra_nodes(polygon,
+                                                     extra_nodes or ()))
+        else:
+            cuts = plan_hole_cuts(polygon, min_hole_area=min_area_m2,
+                                  runway_axis_deg=runway_axis_deg)
     except _GEOM_EXC:
         return None
     if not cuts:
         return None
-    pieces: list[Polygon] = [polygon]
-    for cut in cuts:
-        nxt: list[Polygon] = []
-        for p in pieces:
-            if p.geom_type != "Polygon" or p.is_empty:
+    if use_v2:
+        # Apply ALL cuts as one global arrangement: node the polygon
+        # boundary with every cut, polygonize the linework, and clip each
+        # face back to the polygon.  Unlike sequential ``shapely.split``
+        # this is immune to cut interactions (a cut touching another cut,
+        # or a ring, mid-application) — the faces tile the polygon EXACTLY,
+        # and an unopened hole survives as an interior ring of its clipped
+        # face (handed to the guillotine fallback below).
+        from shapely.ops import polygonize as _polygonize
+        try:
+            noded = unary_union([polygon.boundary] + list(cuts))
+            faces = list(_polygonize(noded))
+        except _GEOM_EXC:
+            return None
+        pieces = []
+        for f in faces:
+            if f.geom_type != "Polygon" or f.is_empty or f.area < 1e-6:
                 continue
             try:
-                if not cut.intersects(p):
+                clipped = f.intersection(polygon)
+            except _GEOM_EXC:
+                continue
+            for gpiece in (clipped.geoms
+                           if hasattr(clipped, "geoms") else [clipped]):
+                if (gpiece.geom_type == "Polygon"
+                        and not gpiece.is_empty and gpiece.area > 1e-6):
+                    pieces.append(gpiece)
+        if not pieces:
+            return None
+    else:
+        pieces = [polygon]
+        for cut in cuts:
+            nxt: list[Polygon] = []
+            for p in pieces:
+                if p.geom_type != "Polygon" or p.is_empty:
+                    continue
+                try:
+                    if not cut.intersects(p):
+                        nxt.append(p)
+                        continue
+                    res = _shp_split(p, cut)
+                except _GEOM_EXC:
                     nxt.append(p)
                     continue
-                res = _shp_split(p, cut)
-            except _GEOM_EXC:
-                nxt.append(p)
-                continue
-            geoms = (list(res.geoms) if res.geom_type != "Polygon"
-                     else [res])
-            nxt.extend(g for g in geoms
-                       if g.geom_type == "Polygon" and not g.is_empty)
-        pieces = nxt
+                geoms = (list(res.geoms) if res.geom_type != "Polygon"
+                         else [res])
+                nxt.extend(g for g in geoms
+                           if g.geom_type == "Polygon" and not g.is_empty)
+            pieces = nxt
     out: list[Polygon] = []
+    defer: list[Polygon] = []
     for p in pieces:
         if p.is_empty or p.geom_type != "Polygon":
             continue
         if any(Polygon(h).area >= min_area_m2 for h in p.interiors):
             # A hole the router could not open — let the guillotine handle
             # just this piece (no further router attempts: _router=False).
-            out.extend(_decompose_polygon_with_holes(
+            sub = _decompose_polygon_with_holes(
                 p, min_area_m2=min_area_m2,
-                runway_axis_deg=runway_axis_deg, _router=False))
+                runway_axis_deg=runway_axis_deg, _router=False)
+            out.extend(sub)
+            # Recover anything the guillotine dropped (its sub-threshold /
+            # thin-strip discards): defer the lost fragments into the
+            # sibling-merge below so coverage is preserved.
+            try:
+                lost = (p.difference(unary_union(sub)) if sub else p)
+            except _GEOM_EXC:
+                lost = None
+            if lost is not None and not lost.is_empty:
+                for lg in (lost.geoms if hasattr(lost, "geoms")
+                           else [lost]):
+                    if (lg.geom_type == "Polygon" and not lg.is_empty
+                            and lg.area >= 1.0):
+                        defer.append(lg)
             continue
         if p.interiors:
             p = Polygon(p.exterior.coords)   # drop sub-threshold holes
-        if p.is_empty or p.area < min_area_m2:
+        if p.is_empty:
+            continue
+        # Defer for sibling-merge: sub-threshold fragments, and SMALL
+        # needle-cornered pieces (cut-created wedge slivers the downstream
+        # guards would truncate or drop — uncovering source).  Large pieces
+        # with a needle corner keep the status-quo path (the emit-side
+        # ``_drop_sliver_corners`` trims just the tip): they are not wedge
+        # slices and merging them away would destabilise the partition.
+        _NEEDLE_MERGE_MAX_M2 = 5000.0
+        if (p.area < min_area_m2
+                or (p.area < _NEEDLE_MERGE_MAX_M2
+                    and _piece_has_needle_corner(p))):
+            defer.append(p)
             continue
         out.append(p)
+    if not out and not defer:
+        return None
+    out = _merge_pieces_into_siblings(out, defer, min_area_m2)
     if not out:
         return None
-    return _merge_thin_decomposed_pieces(out, min_thickness_m=12.0)
+    return _merge_thin_decomposed_pieces(out, min_thickness_m=12.0,
+                                         drop_unmergeable=False,
+                                         min_hole_area_m2=min_area_m2)
 
 
 def _polygon_min_thickness(poly: "Polygon") -> float:
@@ -405,6 +599,8 @@ def _merge_thin_decomposed_pieces(
         pieces: "list[Polygon]",
         min_thickness_m: float = 4.0,
         max_iters: int = 50,
+        drop_unmergeable: bool = True,
+        min_hole_area_m2: float = 50.0,
         ) -> "list[Polygon]":
     """Merge any piece in ``pieces`` whose minimum-rotated-rectangle
     thickness is less than ``min_thickness_m`` into the neighbouring
@@ -412,16 +608,22 @@ def _merge_thin_decomposed_pieces(
     ``_decompose_polygon_with_holes`` to suppress 2 m-thick horizontal
     strips that arise when multiple holes have close y-centroids.
     Returns a possibly-shorter list with thin strips absorbed.
+
+    ``drop_unmergeable=False`` (the conforming-cuts router path) KEEPS a
+    thin piece whose merge fails instead of dropping it — a dropped piece
+    uncovers source pavement (X-Plane interpolates raw terrain across the
+    gap), which is worse than a thin-but-covered strip.
     """
     if not pieces:
         return pieces
     work = list(pieces)
+    kept_thin: set[int] = set()
     for _it in range(max_iters):
         # Find the thinnest piece below threshold.
         thin_idx: int | None = None
         thin_thick = float('inf')
         for i, p in enumerate(work):
-            if p is None or p.is_empty:
+            if p is None or p.is_empty or i in kept_thin:
                 continue
             t = _polygon_min_thickness(p)
             if t < min_thickness_m and t < thin_thick:
@@ -430,6 +632,13 @@ def _merge_thin_decomposed_pieces(
         if thin_idx is None:
             break
         thin = work[thin_idx]
+
+        def _discard(idx: int) -> None:
+            if drop_unmergeable:
+                work[idx] = None
+            else:
+                kept_thin.add(idx)
+
         # Find the neighbour with the longest shared boundary.
         best_j: int | None = None
         best_share = 0.0
@@ -446,27 +655,32 @@ def _merge_thin_decomposed_pieces(
                 best_share = shared
                 best_j = j
         if best_j is None or best_share <= 0.0:
-            # No neighbour to merge with; drop the thin piece so
-            # it doesn't render as a cliff.
-            work[thin_idx] = None
+            # No neighbour to merge with.
+            _discard(thin_idx)
             continue
         try:
             merged = unary_union([thin, work[best_j]])
             if merged.is_empty:
-                work[thin_idx] = None
+                _discard(thin_idx)
                 continue
             if merged.geom_type == "MultiPolygon":
-                # Pick the largest piece — the union didn't fully
-                # bridge.  Drop the thin one.
-                work[thin_idx] = None
+                # The union didn't fully bridge.
+                _discard(thin_idx)
                 continue
             if merged.geom_type != "Polygon":
-                work[thin_idx] = None
+                _discard(thin_idx)
+                continue
+            if _union_reopens_hole(merged, thin, work[best_j],
+                                   min_hole_area_m2):
+                # The thin piece and this neighbour are the two sides of a
+                # hole-opening cut — merging them would re-encircle the
+                # hole.  Keep the thin piece instead.
+                _discard(thin_idx)
                 continue
             work[best_j] = merged
             work[thin_idx] = None
         except _GEOM_EXC:
-            work[thin_idx] = None
+            _discard(thin_idx)
     return [p for p in work if p is not None and not p.is_empty]
 
 

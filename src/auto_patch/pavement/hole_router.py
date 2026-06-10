@@ -36,7 +36,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from shapely.errors import GEOSException, TopologicalError
-from shapely.geometry import LineString, Polygon
+from shapely.geometry import LineString, Point, Polygon
 from shapely.prepared import prep
 
 _GEOM_EXC = (ValueError, GEOSException, TopologicalError)
@@ -52,6 +52,7 @@ __all__ = [
     "build_graph",
     "build_obstacles",
     "plan_hole_cuts",
+    "plan_hole_cuts_v2",
     "route_between",
     "route_hole_opening",
 ]
@@ -396,6 +397,399 @@ def plan_hole_cuts(polygon: Polygon, *,
         # Keep the most BALANCED cut (largest smaller-piece area).
         best = max(candidates, key=lambda c: _min_piece_area_after(polygon, c))
         cuts.append(best)
+    return cuts
+
+
+# ── v2: Prim min-spanning-forest conforming-cuts planner (session 68) ──────
+#
+# The v1 planner above routes EVERY hole's two bridges independently to the
+# nearest exterior node.  On a large apron with many holes the Dijkstra exits
+# all converge on the same few reflex corners (HECA: 12 of 50 cut endpoints on
+# ONE hub vertex, several cuts degenerate loops with start == end), carving
+# needle-thin wedge slices (1–2° apex) between near-parallel bridges.  The
+# downstream sliver guards then truncate or drop those needles — uncovering
+# source pavement (the HECA 670 m² fan wedge).  v2 instead grows a Prim-style
+# spanning forest: each hole connects to the NEAREST point of the already-
+# connected boundary network (the exterior ring or a previously-opened hole),
+# so bridges are short, chained, and endpoint-shared by construction — no
+# parallel duplicate bridges, no fan, no needles.
+
+
+def _dijkstra_all(adj, sources, blocked=frozenset()):
+    """Multi-source Dijkstra over the whole graph.  Returns ``(dist, prev)``
+    arrays; ``blocked`` nodes are impassable (and excluded as sources)."""
+    n = len(adj)
+    INF = float("inf")
+    dist = [INF] * n
+    prev = [-1] * n
+    pq: list[tuple[float, int]] = []
+    for s in sources:
+        if s in blocked:
+            continue
+        dist[s] = 0.0
+        heapq.heappush(pq, (0.0, s))
+    while pq:
+        d, u = heapq.heappop(pq)
+        if d > dist[u]:
+            continue
+        for v, w in adj[u]:
+            if v in blocked:
+                continue
+            nd = d + w
+            if nd < dist[v]:
+                dist[v] = nd
+                prev[v] = u
+                heapq.heappush(pq, (nd, v))
+    return dist, prev
+
+
+def _walk_back(prev, end, sources):
+    """Node path ``[source, …, end]`` from a ``_dijkstra_all`` prev array."""
+    path = [end]
+    u = end
+    while u not in sources:
+        u = prev[u]
+        if u < 0:
+            return None
+        path.append(u)
+    path.reverse()
+    return path
+
+
+def _segments_properly_intersect(a1, a2, b1, b2) -> bool:
+    """True iff open segments a1–a2 and b1–b2 cross at a point interior to
+    BOTH (shared endpoints do not count)."""
+    def orient(p, q, r):
+        v = ((q[0] - p[0]) * (r[1] - p[1])
+             - (q[1] - p[1]) * (r[0] - p[0]))
+        if v > 1e-12:
+            return 1
+        if v < -1e-12:
+            return -1
+        return 0
+    # Shared endpoint → not a proper crossing.
+    for p in (a1, a2):
+        for q in (b1, b2):
+            if abs(p[0] - q[0]) < 1e-9 and abs(p[1] - q[1]) < 1e-9:
+                return False
+    o1 = orient(a1, a2, b1)
+    o2 = orient(a1, a2, b2)
+    o3 = orient(b1, b2, a1)
+    o4 = orient(b1, b2, a2)
+    return o1 != o2 and o3 != o4 and 0 not in (o1, o2, o3, o4)
+
+
+def _polyline_crosses(pts_a: Sequence[tuple[float, float]],
+                      pts_b: Sequence[tuple[float, float]]) -> bool:
+    """True iff any segment of polyline A properly crosses one of B."""
+    for i in range(len(pts_a) - 1):
+        a1, a2 = pts_a[i], pts_a[i + 1]
+        lo_x = min(a1[0], a2[0]) - 1e-9
+        hi_x = max(a1[0], a2[0]) + 1e-9
+        lo_y = min(a1[1], a2[1]) - 1e-9
+        hi_y = max(a1[1], a2[1]) + 1e-9
+        for j in range(len(pts_b) - 1):
+            b1, b2 = pts_b[j], pts_b[j + 1]
+            if (max(b1[0], b2[0]) < lo_x or min(b1[0], b2[0]) > hi_x
+                    or max(b1[1], b2[1]) < lo_y
+                    or min(b1[1], b2[1]) > hi_y):
+                continue
+            if _segments_properly_intersect(a1, a2, b1, b2):
+                return True
+    return False
+
+
+def _prune_edges_crossing(g: "VisibilityGraph",
+                          cut_pts: Sequence[tuple[float, float]]) -> None:
+    """Drop every visibility edge that properly crosses the accepted cut —
+    later bridges must route AROUND planted cuts, not across them (an X
+    crossing between two cuts encloses an island ring in the arrangement)."""
+    minx = min(p[0] for p in cut_pts) - 1e-9
+    maxx = max(p[0] for p in cut_pts) + 1e-9
+    miny = min(p[1] for p in cut_pts) - 1e-9
+    maxy = max(p[1] for p in cut_pts) + 1e-9
+    for i in range(len(g.nodes)):
+        xi, yi = g.nodes[i]
+        kept = []
+        changed = False
+        for j, w in g.adj[i]:
+            xj, yj = g.nodes[j]
+            if (max(xi, xj) < minx or min(xi, xj) > maxx
+                    or max(yi, yj) < miny or min(yi, yj) > maxy):
+                kept.append((j, w))
+                continue
+            if _polyline_crosses(((xi, yi), (xj, yj)), cut_pts):
+                changed = True
+                continue
+            kept.append((j, w))
+        if changed:
+            g.adj[i] = kept
+
+
+def _void_path(hole_poly: Polygon, a, b,
+               eps_m: float) -> list[tuple[float, float]] | None:
+    """Polyline from ``a`` to ``b`` staying inside the hole VOID (used when
+    the straight chord between the two bridge feet would clip pavement on a
+    non-convex hole).  ``None`` if no route exists."""
+    try:
+        if hole_poly.is_empty or hole_poly.geom_type != "Polygon":
+            return None
+        return route_between(hole_poly, [a], [b], eps_m=eps_m)
+    except _GEOM_EXC:
+        return None
+
+
+def plan_hole_cuts_v2(polygon: Polygon, *,
+                      obstacles=(),
+                      eps_m: float = _EPS_M,
+                      min_hole_area: float = 50.0,
+                      extra_nodes: Sequence[tuple[float, float]] = (),
+                      ) -> list[LineString]:
+    """Plan one conforming SPLIT cut per interior hole ≥ ``min_hole_area`` as
+    a Prim-style minimum-spanning-forest of slits.
+
+    One visibility graph is built for the WHOLE polygon (every ring vertex +
+    obstacle corner + ``extra_nodes`` — shared/global points, e.g. neighbour-
+    shape corners sitting on this polygon's boundary).  Holes are then opened
+    nearest-first: the next hole is the one closest to the CONNECTED boundary
+    network (initially the exterior ring; thereafter also every opened hole's
+    ring and every planted bridge), and its cut is
+
+        ``A …bridge-1… H_a — (void crossing) — H_b …bridge-2… B``
+
+    with bridge-2 node-disjoint from bridge-1 (so the two bridges can never
+    pinch a zero-width wedge at a shared endpoint — the v1 fan failure).  The
+    void crossing is the straight chord when it stays inside the hole, else a
+    route through the hole interior.  Cuts must be APPLIED in the returned
+    order: a later cut may end on a ring that an earlier cut exposes.
+
+    Holes with no two disjoint visible bridges are SKIPPED (left in place for
+    the caller's legacy-guillotine fallback on that piece alone).
+    """
+    g = build_graph(polygon, obstacles=obstacles, eps_m=eps_m,
+                    extra_nodes=extra_nodes)
+    if g is None:
+        return []
+    interiors = list(polygon.interiors)
+    INF = float("inf")
+
+    # Big-hole node sets (graph idx) + hole polygons.
+    remaining: dict[int, set[int]] = {}
+    hole_polys: dict[int, Polygon] = {}
+    for k, ring_idxs in enumerate(g.hole_rings):
+        idxs = {i for i in ring_idxs if i is not None}
+        if len(idxs) < 3:
+            continue
+        try:
+            hp = Polygon(interiors[k])
+            if hp.area < min_hole_area:
+                continue
+        except _GEOM_EXC:
+            continue
+        remaining[k] = idxs
+        hole_polys[k] = hp
+
+    if not remaining:
+        return []
+
+    # Connected boundary network: exterior ring vertices + any extra node
+    # sitting ON the exterior ring (a neighbour-shape corner mid-edge).
+    # Extra nodes sitting ON a big hole's ring join that hole's node set —
+    # they are legal conforming bridge FEET for that hole.
+    connected: set[int] = set(g.ext_idx)
+    all_hole_idx = set().union(*remaining.values())
+    try:
+        ext_line = polygon.exterior
+        for i, (x, y) in enumerate(g.nodes):
+            if i in connected or i in all_hole_idx:
+                continue
+            pt = Point(x, y)
+            if ext_line.distance(pt) <= eps_m:
+                connected.add(i)
+                continue
+            for k in remaining:
+                if interiors[k].distance(pt) <= eps_m:
+                    remaining[k].add(i)
+                    all_hole_idx.add(i)
+                    break
+    except _GEOM_EXC:
+        pass
+
+    def _crossing(ha: int, hb: int, k: int) -> list[tuple[float, float]] | None:
+        """The void-crossing polyline from node ``ha`` to ``hb`` of hole
+        ``k``: the straight chord if it does not clip pavement (and does not
+        run along the ring), else a detour through the hole's interior (its
+        representative point — handles triangle holes where every vertex
+        chord IS a ring edge), else a routed path through the void.
+        ``None`` if nothing works."""
+        pa, pb = g.nodes[ha], g.nodes[hb]
+        if math.hypot(pa[0] - pb[0], pa[1] - pb[1]) <= 1e-9:
+            return None
+
+        def _stays_in_void(pts: list[tuple[float, float]]) -> bool:
+            try:
+                return _max_line_len(
+                    LineString(pts).intersection(polygon)) <= eps_m
+            except _GEOM_EXC:
+                return False
+
+        if _stays_in_void([pa, pb]):
+            return [pa, pb]
+        try:
+            rp = hole_polys[k].representative_point()
+            mid = (float(rp.x), float(rp.y))
+            if _stays_in_void([pa, mid, pb]):
+                return [pa, mid, pb]
+        except _GEOM_EXC:
+            pass
+        via = _void_path(hole_polys[k], pa, pb, eps_m)
+        if via is not None and len(via) >= 2:
+            return via
+        return None
+
+    # Ring vertices that merely SUBDIVIDE a straight edge (collinear within
+    # ~1°) are not conforming attachment points: along a subtracted rect the
+    # residue ring runs flush with the rect side, so such a vertex sits on
+    # the rect-edge INTERIOR — a cut attaching there decouples the piece
+    # from the rect downstream (the push-off-edge pass shoves the vertex
+    # 1 m off → no weld → cliff; HECA U-connector).  True corners and
+    # global/shared extra nodes stay legal.
+    extra_keys = {(round(float(x) * 1e6), round(float(y) * 1e6))
+                  for (x, y) in extra_nodes}
+    mid_edge: set[int] = set()
+    _COLLINEAR_COS = -math.cos(math.radians(1.0))   # cos(179°)
+
+    def _mark_collinear(ring_obj):
+        pts_r = _ring_pts(ring_obj)
+        m = len(pts_r)
+        if m < 3:
+            return
+        for ii in range(m):
+            ax, ay = pts_r[(ii - 1) % m]
+            bx, by = pts_r[ii]
+            cx, cy = pts_r[(ii + 1) % m]
+            v1x, v1y = ax - bx, ay - by
+            v2x, v2y = cx - bx, cy - by
+            n1 = math.hypot(v1x, v1y)
+            n2 = math.hypot(v2x, v2y)
+            if n1 < 1e-9 or n2 < 1e-9:
+                continue
+            if (v1x * v2x + v1y * v2y) / (n1 * n2) >= _COLLINEAR_COS:
+                continue                      # a real corner
+            key = (round(bx * 1e6), round(by * 1e6))
+            if key in extra_keys:
+                continue                      # shared neighbour corner
+            idx = index_lookup(bx, by)
+            if idx is not None:
+                mid_edge.add(idx)
+
+    def index_lookup(x, y):
+        return g.index.get((round(x * 1e6), round(y * 1e6)))
+
+    try:
+        _mark_collinear(polygon.exterior)
+        for ring_obj in interiors:
+            _mark_collinear(ring_obj)
+    except _GEOM_EXC:
+        mid_edge = set()
+
+    cuts: list[LineString] = []
+    while remaining:
+        # No bridge may pass THROUGH an unopened hole's ring node: a cut
+        # polyline merely TOUCHING a still-closed void makes shapely's
+        # split merge that void into the cut (HECA: three holes fused
+        # into one 85 k m² leftover ring).  Unopened ring nodes are
+        # therefore blocked as waypoints and reached only as bridge FEET
+        # via their last visibility edge.
+        unopened = set().union(*remaining.values())
+
+        # Bridge 1: nearest unopened hole from the connected network.
+        dist, prev = _dijkstra_all(g.adj, connected,
+                                   blocked=unopened | mid_edge)
+        best = None
+        for k, idxs in remaining.items():
+            for t in idxs:
+                if t in mid_edge:
+                    continue
+                for j, w in g.adj[t]:
+                    if j in unopened or dist[j] >= INF:
+                        continue
+                    c = dist[j] + w
+                    if best is None or c < best[0]:
+                        best = (c, k, t, j)
+        if best is None:
+            break                        # nothing reachable — caller falls back
+        _, k, ha, j1 = best
+        p1 = _walk_back(prev, j1, connected)
+        if p1 is None:
+            remaining.pop(k)
+            continue
+        p1 = p1 + [ha]
+
+        # Bridge 2: from the network back to the same hole, node-disjoint
+        # from bridge 1 so the two bridges cannot pinch a zero-width wedge
+        # at a shared vertex (the v1 fan/needle failure).
+        hole_idx = remaining[k]
+        p1_set = set(p1)
+        blocked2 = (unopened - {ha}) | p1_set | mid_edge
+        src2 = connected - p1_set
+        dist2, prev2 = _dijkstra_all(g.adj, src2, blocked=blocked2)
+        feet: list[tuple[float, int, int]] = []
+        for t in hole_idx:
+            if t == ha or t in mid_edge:
+                continue
+            for j, w in g.adj[t]:
+                if j in blocked2 or dist2[j] >= INF:
+                    continue
+                feet.append((dist2[j] + w, t, j))
+        feet.sort()
+        cut_pts = None
+        accepted_p2 = None
+        tried_feet: set[int] = set()
+        p1_pts = [g.nodes[i] for i in p1]
+        for _c, foot, j2 in feet:
+            if foot in tried_feet:
+                continue
+            tried_feet.add(foot)
+            mid = _crossing(ha, foot, k)
+            if mid is None:
+                continue
+            p2 = _walk_back(prev2, j2, src2)
+            if p2 is None:
+                continue
+            p2 = p2 + [foot]
+            # The two bridges are node-disjoint but may still CROSS each
+            # other mid-pavement — the X would enclose an island ring in
+            # the arrangement (a piece with a leftover interior ring).
+            if _polyline_crosses([g.nodes[i] for i in p2], p1_pts):
+                continue
+            #   A …bridge-1… H_a  +  void crossing  +  H_b …bridge-2… B
+            cut_pts = ([g.nodes[i] for i in p1]
+                       + list(mid[1:-1])
+                       + [g.nodes[i] for i in reversed(p2)])
+            accepted_p2 = p2
+            break
+        if cut_pts is None:
+            remaining.pop(k)             # guillotine fallback handles this one
+            continue
+
+        clean: list[tuple[float, float]] = []
+        for p in cut_pts:
+            if clean and (abs(p[0] - clean[-1][0]) < 1e-9
+                          and abs(p[1] - clean[-1][1]) < 1e-9):
+                continue
+            clean.append(p)
+        if len(clean) < 2:
+            remaining.pop(k)
+            continue
+        cuts.append(LineString(clean))
+        # Later bridges must route around this cut, never across it.
+        _prune_edges_crossing(g, clean)
+
+        # The opened hole's ring + both bridges join the connected network.
+        connected |= hole_idx | p1_set | set(accepted_p2)
+        remaining.pop(k)
+
     return cuts
 
 
