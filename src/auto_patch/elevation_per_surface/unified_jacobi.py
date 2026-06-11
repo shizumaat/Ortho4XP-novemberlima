@@ -1298,10 +1298,15 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
     # clamped down to its band CEILING here, then the pads are HELD through
     # every projection below so nothing can drag them back up.
     _term_nodes: set = set()
+    _tdbg = _os.environ.get("O4_TERM_DEBUG") == "1"
     if not TERMINAL_PADS_SLOPE:
         for sc2 in shape_constraints:
             if sc2["role"] == ROLE_TERMINAL:
                 _term_nodes.update(sc2["nodes"])
+                if _tdbg:
+                    print(f"[term] sc ref={sc2['ref']} flat={sc2['flat']} "
+                          f"nodes={len(sc2['nodes'])} "
+                          f"edges={len(sc2['edges'])}")
         seed_ceil = (getattr(layout, "_terminal_seed_ceiling", None)
                      if layout is not None else None) or {}
         seen_g: set = set()
@@ -1317,17 +1322,68 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
             # Group ceiling = band ceiling ∩ the TAXI-ROUTE SEED levels
             # (the ruling's reference level — the relief may have lifted
             # the pad above its seed toward high aprons; pull it back).
-            ghi = min((min(hi[m], seed_ceil.get(m, float("inf")))
-                       for m in grp if m < n), default=float("inf"))
+            ceil_seed = min((seed_ceil.get(m, float("inf"))
+                             for m in grp if m < n), default=float("inf"))
+            ghi = min((hi[m] for m in grp if m < n), default=float("inf"))
             glo = max((lo[m] for m in grp if m < n), default=float("-inf"))
-            if glo > ghi:
-                continue                  # squeezed (pinned) — hold as is
-            lvl = max(elev[m] for m in grp if m < n)
-            if ghi < lvl - 1e-9:
-                d = ghi - lvl
-                for m in grp:
-                    if m < n and not is_hard[m]:
-                        elev[m] += d
+            # RE-LEVEL + yield-down in one move: the relief can leave a
+            # flat pad internally INCONSISTENT (a shared node dragged low
+            # by an apron — HECA terminal2 carried a 1.2 m single-vertex
+            # dip, terminal1 0.2 m; the freeze below would print them).
+            # The pad's level = its PREVAILING (median) value, capped at
+            # the band ceiling when the group band is FEASIBLE and always
+            # at the taxi-route SEED ceiling — pad COHERENCE is not a
+            # "rise".  When the group band is INFEASIBLE (a big pad's
+            # member floors cross its ceilings — the squeeze: HECA
+            # terminal1's 88-node group), the bands are the ARBITRATION
+            # residue, not a reason to freeze an incoherent pad: still
+            # re-level at min(median, seed).  Single-node groups (sloped
+            # squeezed pads) reduce to the plain per-node yield-down.
+            vals = sorted(elev[m] for m in grp if m < n)
+            med = vals[len(vals) // 2]
+            if glo <= ghi:
+                lvl = min(med, ghi, ceil_seed)
+            else:
+                lvl = min(med, ceil_seed)
+            if _tdbg and (len(grp) > 1 or abs(lvl - vals[0]) > 0.05):
+                print(f"[term] re-level grp({len(grp)}) "
+                      f"{vals[0]:.2f}..{vals[-1]:.2f} -> {lvl:.2f} "
+                      f"(ghi={ghi:.2f} glo={glo:.2f} seed={ceil_seed:.2f})")
+            for m in grp:
+                if m < n and not is_hard[m]:
+                    elev[m] = lvl
+        # DOWN-ONLY internal pad smoothing: the relief leaves kinks inside
+        # squeezed pads (mixed-authority shared nodes — HECA terminal1
+        # 0.20 m at 0.7 m, terminal2 1.2 m at 5.8 m), and the freeze below
+        # would preserve them.  Resolve each over-cap pad pair by lowering
+        # the HIGHER node only (never lift — the ruling); the pad ends
+        # cap-smooth at or below its ceilings, and neighbouring aprons
+        # re-conform around the frozen result in the projections below.
+        for sc2 in shape_constraints:
+            if sc2["role"] != ROLE_TERMINAL or not sc2["edges"]:
+                continue
+            n_moves2 = 0
+            for _ in range(200):
+                mx2 = 0.0
+                for (i2, j2, c2) in sc2["edges"]:
+                    if c2 <= 0.0:
+                        continue
+                    d2 = elev[i2] - elev[j2]
+                    ex2 = abs(d2) - c2
+                    if ex2 <= 1e-4:
+                        continue
+                    hi_n2, lo_n2 = (i2, j2) if d2 > 0 else (j2, i2)
+                    if is_hard[hi_n2]:
+                        continue
+                    elev[hi_n2] = elev[lo_n2] + c2
+                    n_moves2 += 1
+                    if ex2 > mx2:
+                        mx2 = ex2
+                if mx2 <= 1e-4:
+                    break
+            if _tdbg and n_moves2:
+                print(f"[term] down-only ref={sc2['ref']} "
+                      f"moves={n_moves2}")
     held_all = set(held_extra or set()) | _term_nodes
     _dbg = _os.environ.get("O4_ENFORCE_DEBUG") == "1"
     if _dbg:
@@ -5955,6 +6011,34 @@ def _seed_terminals_from_taxi_routes(layout, elev, bucket_to_idx, dem_elev,
                     lo_n = max(lo_n, eR - capm * route)
                     hi_n = min(hi_n, eR + capm * route)
             node_band[idx] = (lo_n, hi_n)
+        # RING-LIPSCHITZ smoothing of the per-node seed bands (s76 part 3):
+        # adjacent ring vertices can enter the route graph at DIFFERENT
+        # nodes and carry sharply different bands — the same graph-entry
+        # discontinuity class the enforce's bands needed
+        # (_lipschitz_tighten_bands).  Squeezed pads are now FROZEN at
+        # levels derived from these bands, so a discontinuity becomes a
+        # visible KINK inside the pad (HECA terminal2: 1.9 m over 5.8 m,
+        # terminal1: 0.21 m at adjacent vertices — the in-sim "verify"
+        # spikes).  Tighten each bound along the ring at the pad's own
+        # grade cap so levels/midpoints are taken from a smooth field.
+        ring_idx = [(i, xy) for xy, i in zip(ring, idxs) if i is not None]
+        m_r = len(ring_idx)
+        if m_r >= 3:
+            for _cyc in range(3):
+                changed = False
+                for k in range(m_r):
+                    i, (x1, y1) = ring_idx[k]
+                    j, (x0, y0) = ring_idx[(k - 1) % m_r]
+                    dseg = math.hypot(x1 - x0, y1 - y0)
+                    lj, hj = node_band[j]
+                    li, hi_v = node_band[i]
+                    nh = min(hi_v, hj + cap * dseg)
+                    nl = max(li, lj - cap * dseg)
+                    if nh < hi_v - 1e-9 or nl > li + 1e-9:
+                        node_band[i] = (nl, nh)
+                        changed = True
+                if not changed:
+                    break
         node_refs.setdefault(_find(first), []).append(s.ref or "?")
     n_seeded = 0
     _dbg = _os.environ.get("O4_SEED_DEBUG") == "1"

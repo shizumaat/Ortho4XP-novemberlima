@@ -1896,6 +1896,15 @@ def _split_sloped_rects_at_violations(
             else:
                 corner_a = corner_a_raw
                 corner_b = corner_b_raw
+            # The rect's plane altitude AT the new corner: a pulled
+            # junction vertex must CARRY it, or its solved altitude
+            # (valid at the OLD position) rides metres along the edge
+            # and prints a step into the junction ring (s76: HECA
+            # junction ring carried 8 %/3 %/5.8 % zig-zag edges where
+            # 6 vertices were pulled — the in-sim "steep and uneven
+            # terrain").
+            corner_alt = (alt_h + cluster_t * (alt_l - alt_h)
+                          if has_alt else None)
             for (j_idx, v_idx, jx, jy) in v_data_list:
                 da = (jx - corner_a[0]) ** 2 + (jy - corner_a[1]) ** 2
                 db = (jx - corner_b[0]) ** 2 + (jy - corner_b[1]) ** 2
@@ -1903,7 +1912,8 @@ def _split_sloped_rects_at_violations(
                 # Last-write-wins if two rects' splits both name the
                 # same (j_idx, v_idx).  In practice each junction
                 # vertex is near at most one rect's long edge.
-                junction_moves.setdefault(j_idx, {})[v_idx] = target
+                junction_moves.setdefault(j_idx, {})[v_idx] = (
+                    target, corner_alt)
 
     if not new_shapes:
         return 0
@@ -1939,9 +1949,24 @@ def _split_sloped_rects_at_violations(
         if had_close:
             jc = jc[:-1]
         new_jc = list(jc)
-        for v_idx, new_xy in vert_updates.items():
+        # node_altitudes ride along with the moved vertices (see
+        # ``corner_alt`` above) — but only when the list is still
+        # index-aligned with the ring; a desynced list is left alone.
+        alts9 = (list(j_shape.node_altitudes)
+                 if getattr(j_shape, "node_altitudes", None) is not None
+                 else None)
+        alts_close = False
+        if alts9 is not None:
+            if len(alts9) == len(jc) + 1:
+                alts_close = True
+                alts9 = alts9[:-1]
+            if len(alts9) != len(jc):
+                alts9 = None
+        for v_idx, (new_xy, new_alt9) in vert_updates.items():
             if 0 <= v_idx < len(new_jc):
                 new_jc[v_idx] = new_xy
+                if alts9 is not None and new_alt9 is not None:
+                    alts9[v_idx] = round(float(new_alt9), 1)
         if had_close:
             new_jc = new_jc + [new_jc[0]]
         from shapely.geometry import Polygon
@@ -1972,6 +1997,24 @@ def _split_sloped_rects_at_violations(
                                     _guard_rects):
             continue
         j_shape.polygon = new_poly
+        # Re-sync the moved altitudes ONLY if the final (repaired +
+        # registry-snapped) ring is still 1:1 with the ring we updated —
+        # a buffer(0) reorder would desync the whole list (pre-existing
+        # hazard; geometry-only behaviour kept for that case).
+        if alts9 is not None:
+            try:
+                fc9 = list(new_poly.exterior.coords)
+                if fc9 and fc9[0] == fc9[-1]:
+                    fc9 = fc9[:-1]
+                ref9 = new_jc[:-1] if had_close else new_jc
+                if len(fc9) == len(ref9) and all(
+                        abs(a[0] - b[0]) < 1e-6
+                        and abs(a[1] - b[1]) < 1e-6
+                        for a, b in zip(fc9, ref9)):
+                    j_shape.node_altitudes = (
+                        alts9 + [alts9[0]] if alts_close else alts9)
+            except _GEOM_EXC:
+                pass
         n_jct_moves += len(vert_updates)
 
     layout.shapes = [
