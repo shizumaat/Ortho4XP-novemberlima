@@ -3007,6 +3007,9 @@ def _report_within_shape_violations(
                 for ln, _nm in (getattr(layout, "apt_taxi_centerlines", [])
                                 or [])
                 if ln is not None and not ln.is_empty]
+            # (s78 measured: field VALUES as extra anchors were rejected —
+            # see verification.route_ctx_from_layout; the WARN mirrors
+            # check_grade exactly, so neither passes field_pts)
             rbvs = route_band_violations(
                 centerlines_xy, _rf_runway_rings, _rf_check_pts,
                 TAXI_MAX_GRADE, noise_frac=ROUTE_NOISE_FRAC,

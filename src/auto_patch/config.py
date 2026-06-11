@@ -456,6 +456,23 @@ WRITE_ARBITRATION = True
 # groups in every projection.  A pad sharing a hard node stays held.
 # False restores the s76 seed-ceiling + freeze behaviour.
 TERMINAL_LEAF_LEVELS = True
+# NETWORK PROFILE MODEL (#4, docs/network_profile_model.md — user-approved
+# s77p4: "solve the full centerline taxi network, which includes curves,
+# solve every intersection, similar to crossing runways, so they always
+# agree, then map that to the geometry").  ONE elevation profile is solved
+# over the COMPLETE centerline graph (auto_patch/network_profile.py):
+# intersections are shared vertices (agreement by construction — the tie /
+# consensus / freeze layer is bypassed), runway contacts are hard anchors
+# whose infeasibility against the rest of the field emits the runway-flex
+# demand DIRECTLY, jointly-infeasible squeezes spread minimax along the
+# route instead of standing as walls at seams, and the corridor write
+# layer (stations, rect planes, junction twist) SAMPLES the field.  The
+# singleton `_touches_runway` chain gate lifts under this model (taxiway-B
+# class stubs profile from the field; there is no tie network to spread a
+# squeeze — the s77p3 revert reason).  Requires TAXI_CORRIDOR_PROFILE
+# (the corridor pass is the carrier).  False restores the s77 tie-layer
+# behaviour byte-identically.
+NETWORK_PROFILE_MODEL = True
 
 
 # Per-role within-shape grade limits (rise / run).  The validator in

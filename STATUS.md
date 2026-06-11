@@ -1,4 +1,94 @@
-# Auto-Patch Status — session 77 = APRON GEODESIC BINDING + WRITE ARBITRATION + TERMINAL LEAF LEVELS + APRON LONG-RANGE LAW; NEXT = NETWORK PROFILE MODEL (#4)
+# Auto-Patch Status — session 78 = NETWORK PROFILE MODEL (#4) BUILT, gate `NETWORK_PROFILE_MODEL` default ON; NEXT = in-sim verdict
+
+## ★★ SESSION 78 (2026-06-11) — NETWORK PROFILE MODEL (#4) BUILT END-TO-END (`auto_patch/network_profile.py`), DEFAULT ON ★★
+Implements `docs/network_profile_model.md` (user-approved s77p4).  ONE
+elevation field solved per CENTERLINE-GRAPH VERTEX over the complete
+taxi network; the corridor write layer SAMPLES it; the tie /consensus/
+freeze layer is BYPASSED under the gate (kept intact for gate-off).
+USER RULINGS this session: (1) runway flex = DIP OR RISE symmetric
+(supersedes the s73-p9 DIP-only rule — on the field the demand basis is
+hard-anchored contact-vs-contact, so the old false-rise class cannot
+fire); (2) zero per-axis violations expected — confirmed BY CONSTRUCTION
+along the network; residuals were off-network machinery seams, driven to
+0 at CYXY/SPJC.
+**THE FIELD (`network_profile.build_and_solve`):** graph = FULL
+`apt_taxi_centerlines` (pre-drop set incl. the 12+28 dropped lines) +
+discovered-rect source axes, split at intersections AND at NEAR-PASS
+closest-approach points (≤60 m); runway CONTACTS = lane×runway-edge
+crossings (ring-lerped values) + runway-INTERIOR anchors (piece-axis
+lerp) + polyline-END bridges (≤40 m) + EXIT-ARC overrides (the s73-p10
+curve-aware arcs, now ref-tagged); runway MIDLINE chains as aug nodes
+(law-graph parity — without them the field is legal on a longer graph
+and the enforce rejects its writes: CYXY #68 held 713.1 vs a 702.5
+ceiling THROUGH the runway); ★ PROXIMITY COUPLING edges (nodes ≤60 m
+whose connector is airside; small grass notches inflate the weight
+4×outside, >35 % outside = no edge) — near-passing lanes are ONE
+surface (CYXY #95: 6.9 m cliff between uncoupled lanes 55 m apart);
+★ LAW-ENTRY GAP EDGES (every non-apt node → nearest apt/midline node,
+≤300 m) mirror the enforce's anchor-entry mechanic (CYXY n31/n42: law
+route 99 m, field route ∞ → enforce self-pinch); base_hard pins enter
+the BAND Dijkstras (a field ignorant of a seam pin writes what the
+enforce then rejects).  Solve = DEM seed (anchored comps) /
+CURRENT-SURFACE seed (anchor-less comps — DEM-seeding fragments wrote
+raw terrain into graded junctions, 25 % walls), Gauss-Seidel cap
+projection + Δg rate pass (phase 1), then ★ CAP-ONLY to convergence
+(phase 2 — cap is LAW, Δg a preference; alternating them oscillates
+~2 % ramps).  MINIMAX cap relax per component (M5) — ★ SAME-RUNWAY
+contact pairs EXCLUDED (SPLP: its runway legitimately drops 17 m/660 m
+at the tile seam; smearing that 1.67× relax network-wide degraded every
+taxiway to 2.5 % = 197 viol; cross-runway squeezes keep the spread:
+HECA relax 1.09 → flex → 1.03).  DIP-or-RISE demands per contact vs
+OTHER refs' contacts at capm (with ROUTE_NOISE_FRAC margin — without it
+05C over-dipped 106.9 vs the blessed ~108.5), 0.5 m deadband.
+**WIRING (unified_jacobi):** singleton `_touches_runway` gate LIFTED +
+station floor ≥2 (taxiway-B class profiles from the field); stations
+sample the field (gap ≤50 m — at 30 a mouth at 31 m fell back to relief
+0.7 m off the field = a written wall, SPJC #92), all sampled stations
+anchored, st-bands None, per-chain faa solve = no-op; crossing-insert
+stations kept (field samples at the SAME point agree by construction);
+write layer/twist/W2/jhard unchanged; flex loop unchanged (demands now
+from the field).  ENFORCE: long-range bands measured ON THE FIELD GRAPH
+(`route_graph_view()`) with every plain field vertex as a dense anchor
+(band-entry noise dies; discovered-lane areas had no consistent entry
+into the apt-only graph) + Lipschitz tighten as before; short (≤20 m)
+same-shape pairs are unconditional edges (solve-time vs emit-time
+visibility flutter); ★ FINAL STRICT PAIR-LAW CLOSURE: bounded (±1 m,
+per-move clamped, coupling-aware) cap-only projection with CORRIDOR
+WRITES MOVABLE and pads held — hard anchors + the local pair cap
+outrank band placements and field writes at seams ("zero violations"
+> the written profile; unbounded variant = SOR divergence, SPLP 181).
+APRON geodesic seeds = exact field samples at the nearest corridor
+point (M6).  VALIDATOR: `route_field.route_band_violations` accepts
+`field_pts` anchors; ⛔ exporting them MEASURED-REJECTED (292 false
+flags at CYXY — the model deliberately lets pavement deviate where the
+preference yields; straight-gap entry over-binds across grass) — the
+validator law under the model = strict pair law + runway route bands,
+both asserted; engine param kept for future measured steps.
+**MEASURED (all at HEAD, gate ON):** CYXY grade gate GREEN 0/0/0 (from
+100 viol + 12 m walls in the first build); SPJC GREEN 0/0/0; HECA
+per-axis within ~116 (s77 baseline 140) / cross 0 / steps 0; HECA
+invariants: 05C/23C min **108.70** ✓ (4 dip demands 108.7-110.3, relax
+1.0898→1.0286 after flex), 05L/23R **57.9→62.8** ⚠ (8 RISE demands
+61.8-62.8 at the 23R/A5 end — the user's dip-or-rise ruling firing on a
+hard cross-runway floor; IN-SIM VERDICT NEEDED), A4 60.3-61.0, A5
+61.6-62.4 (⚠ in-sim), terminals 99.2/99.7×3/95.0/97.3/79.8 stable,
+#256 spread **0.6 m** (s77p3: 1.6), #198 graded 100.4-107.9 (the
+through-apron item, was raw relief); SPLP within 119 vs 134 GATE-OFF on
+its main tile (its red = the pre-existing deferred class, model
+improves it); DETERMINISTIC (PYTHONHASHSEED 1==2 byte-identical);
+GATE-OFF BYTE-IDENTICAL to s77 @407f833 (CYXY verified).  ⚠ SUITE
+note: `test_compare_target_splp` (both tiles) fails on PURE s77 HEAD
+too — environment/fixture drift (SPLP Test scenery), NOT this session;
+true pre-session baseline = 305p/4f.
+**OPEN:** (1) in-sim verdict (RESTART Ortho4XP): 05C 108.7, ⚠ 05L rise
+62.8, A5 ~62, CYXY lifted-toward-DEM aprons near route-law floors,
+terminal levels; (2) SPLP deferred class (its runway legitimately >1.5 %
+at the seam — threshold/vertical-curve work); (3) compare_target SPLP
+re-baseline (env drift); (4) measured deletes of the tie layer (§6 —
+only after the in-sim verdict ratifies); (5) KPHX-scale field perf
+check.  Probes: /tmp/probes/s78_network_audit (field-vs-routegraph,
+pairpath, residuals, invariants, splp_relax); env `O4_NPF_DEBUG=1`
+(field audit + demands), `O4_BAND_NODES="i,j"` (enforce band stages).
 
 ## ★★ SESSION 77 PART 4 (2026-06-11) — `docs/network_profile_model.md`: NETWORK PROFILE MODEL (#4) DESIGN, USER-APPROVED ★★
 USER (after the architecture explanation): "I think this is the right

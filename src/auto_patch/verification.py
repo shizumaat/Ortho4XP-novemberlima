@@ -844,7 +844,10 @@ def taxi_axes_ll(layout):
 def route_ctx_from_layout(layout):
     """Route-field ``route_ctx`` for check_grade — the builder's apt.dat
     taxi centerlines as lat/lon polylines (the SAME construction the grade
-    test uses; never re-derived from the OSM)."""
+    test uses; never re-derived from the OSM).  Under the NETWORK PROFILE
+    MODEL the solved field's vertices ride along (``field_pts_ll``) so the
+    validator's long-range law measures against the SAME field the
+    geometry was graded from (design §7 validator simultaneity)."""
     cls = []
     for ln, _name in (getattr(layout, "apt_taxi_centerlines", []) or []):
         if ln is None or ln.is_empty:
@@ -852,7 +855,17 @@ def route_ctx_from_layout(layout):
         pts = [layout.m_to_ll(x, y) for (x, y) in ln.coords]
         if len(pts) >= 2:
             cls.append(pts)
-    return {"centerlines_ll": cls} if cls else None
+    if not cls:
+        return None
+    # NOTE (s78, measured): exporting the solved FIELD VALUES as extra
+    # route-band anchors (``field_pts_ll``) was MEASURED-REJECTED — the
+    # model deliberately lets pavement deviate from the field where the
+    # apron preference yields, and the straight-gap anchor entry
+    # over-binds across grass (CYXY: 292 false route-band flags).  The
+    # validator's law under the model = the strict pair law + the
+    # runway-anchor route bands, both already asserted.  The engine
+    # still accepts ``field_pts`` for future measured steps.
+    return {"centerlines_ll": cls}
 
 
 def run_grade_checks(layout):

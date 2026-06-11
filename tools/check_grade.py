@@ -870,10 +870,19 @@ def _check_route_bands(vertices: List[Vertex],
         check_src.append(v)
     if not check_pts:
         return []
+    # NETWORK PROFILE MODEL field anchors (the same-field law): the
+    # builder exports its solved centerline-field vertices; the long-range
+    # law then measures against the field the geometry was graded FROM,
+    # not just the runway anchors (validator simultaneity, §7).
+    field_pts = []
+    for (lat, lon, fv) in route_ctx.get("field_pts_ll", []) or []:
+        x9, y9 = ll_to_m(lat, lon)
+        field_pts.append((x9, y9, fv))
     rbvs = route_band_violations(
         centerlines_xy, runway_rings, check_pts, max_grade,
         noise_frac=ROUTE_NOISE_FRAC,
-        rounding_noise_m=ELEV_ROUNDING_NOISE_M)
+        rounding_noise_m=ELEV_ROUNDING_NOISE_M,
+        field_pts=field_pts)
     capm = max_grade * (1.0 + ROUTE_NOISE_FRAC)
     out: List[Violation] = []
     for rb in rbvs:

@@ -195,12 +195,20 @@ def route_band_violations(
         cap: float,
         noise_frac: float = ROUTE_NOISE_FRAC,
         rounding_noise_m: float = ELEV_ROUNDING_NOISE_M,
+        field_pts: Sequence[Tuple[float, float, float]] = (),
 ) -> List[RouteBandViolation]:
     """Validate ``check_pts`` (``(x, y, elev)`` in one consistent meter frame)
     against the route bands from the RUNWAY anchors (every ``runway_rings``
     vertex with an elevation).  ``cap`` is the single long-range grade cap
     (decimal — every pavement role caps at 1.5 % today, per the design's
-    single-capL statement).  Returns one entry per out-of-band vertex."""
+    single-capL statement).  Returns one entry per out-of-band vertex.
+
+    ``field_pts``: NETWORK PROFILE MODEL field vertices ``(x, y, elev)``
+    — additional anchors at the SOLVED centerline-field values (the
+    same-field law, design §7 validator simultaneity).  They enter the
+    graph like every non-runway anchor (nearest node + straight gap at
+    cap) and tighten the long-range law toward the field the geometry
+    was graded from."""
     adj, coord, aug = _build_graph(centerlines_xy, runway_rings)
     if not coord:
         return []
@@ -232,6 +240,13 @@ def route_band_violations(
             if key is None:
                 continue
             anchors.append((key, gap, float(elevs[k]), (x, y)))
+    for (x, y, v) in (field_pts or ()):
+        if v is None:
+            continue
+        key, gap = plain_grid.nearest(x, y)
+        if key is None:
+            continue
+        anchors.append((key, gap, float(v), (x, y)))
     if not anchors:
         return []
 
