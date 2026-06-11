@@ -1,4 +1,24 @@
-# Auto-Patch Status — session 77 = APRON GEODESIC BINDING + WRITE ARBITRATION + TERMINAL LEAF LEVELS + APRON LONG-RANGE LAW
+# Auto-Patch Status — session 77 = APRON GEODESIC BINDING + WRITE ARBITRATION + TERMINAL LEAF LEVELS + APRON LONG-RANGE LAW; NEXT = NETWORK PROFILE MODEL (#4)
+
+## ★★ SESSION 77 PART 4 (2026-06-11) — `docs/network_profile_model.md`: NETWORK PROFILE MODEL (#4) DESIGN, USER-APPROVED ★★
+USER (after the architecture explanation): "I think this is the right
+direction — solve the full centerline taxi network, which includes
+curves, solve every intersection, similar to crossing runways, so they
+always agree, then map that to the geometry because we'll have a clear
+profile running through almost everything."
+**→ NEXT SESSION = BUILD #4, START AT `docs/network_profile_model.md`**
+— the full design: ONE elevation profile solved over the complete
+centerline graph (curves, apron lanes, exits), intersections = shared
+vertices (agree by construction — no tie machinery), runway contacts =
+hard anchors with direct flex demands, geometry graded FROM the field
+(rect planes sample it, junctions twist, aprons bind via the s77
+geodesic bands with EXACT field seeds, terminals leaf), validator reads
+the SAME field.  Subsumes: #198/#208 through-apron grading, Exit-3 fan
+holes, #256 residual, D #285, squeeze placement.  Prereqs in §4 (ingest
+the 12+28 dropped centerlines as graph edges, intersection splitting,
+connectivity audit probe FIRST).  Gate `NETWORK_PROFILE_MODEL`, ship
+COMPLETE not incremental (the s77p3 partial-coupling lesson: walls
+21→46), full validation battery + invariants register in §§8-9.
 
 ## ★★ SESSION 77 PART 3 (2026-06-11) — dev @6555527: APRON LONG-RANGE LAW + PINNED PLACEMENT; SINGLETON EXPERIMENT MEASURED-REVERTED ★★
 User JOSM/X-Plane eval: extreme apron dips when distant from taxiways
