@@ -1,4 +1,69 @@
-# Auto-Patch Status — session 73 = CORRIDORS LIVE + CURVE-AWARE GRADING RULED → MERGED TO dev
+# Auto-Patch Status — session 76 = ROUTE-FIELD MODEL (#3) BUILT ON dev
+
+## ★★ SESSION 76 (2026-06-10) — dev @619843e: ROUTE-FIELD MODEL (#3) BUILT — HECA within 216→111, CYXY+SPJC 0/0/0, suite 307p/2f ★★
+Implemented `docs/route_field_model.md` end-to-end (solver + validator +
+runtime WARN change TOGETHER, per the design's one-piece rule).  Gate =
+`config.ROUTE_FIELD_MODEL` (default ON; OFF restores the s73-p10h
+baseline byte-identically — verified at HECA, 05C back to exactly 108.7).
+1. **LOCAL WINDOW** — `_visible_grade_edges(max_len=W)` with
+   `ROUTE_FIELD_LOCAL_WINDOW_M = 80`: apron/terminal/junction visibility
+   chords beyond W are dropped (ring-adjacent pairs ALWAYS survive — the
+   physical edge); per-axis junction logic unchanged.  Same window in
+   `check_grade._check_within_shape` + the elevation.py WARN.
+2. **LONG-RANGE LAW** — `_runway_reach_bands` extended: anchors = runway
+   nodes + base_hard pins + corridor-held writes (held_extra) at current
+   values; weights carry the 4 % `ROUTE_NOISE_FRAC` margin (now in
+   config, shared with the validator); graph = shared cached
+   runway-augmented route graph (`taxi_routing.shared_taxi_route_graph` /
+   `runway_augmented_route_graph`; the flex path's inline augmentation
+   was centralized onto it, semantics identical).  `band_exempt` is NOT
+   applied under the model (corridor writes are anchors — the route-band
+   vs corridor fight disappears by construction; machinery kept for
+   gate-off).  Corridor's own st-band call left untouched this step
+   (attribution doctrine).
+3. **VALIDATOR route-band check** — NEW shared engine
+   `auto_patch/route_field.py` (one engine for check_grade + the WARN,
+   the s64 drift lesson): per-vertex band vs every runway anchor over
+   the centerline graph + runway-midline augmentation, margin + rounding
+   noise.  `run_checks(route_ctx=...)`; gate test +
+   `verification.run_grade_checks` pass it (`route_ctx_from_layout`);
+   standalone CLI prints a skip notice.
+4. **★ KEY FIX (measured, CYXY)** — augmented runway-midline nodes are
+   ANCHOR-ENTRY/route segments only: pavement-VERTEX nearest-node queries
+   are PLAIN-node restricted (`nearest_key(plain_only=True)`, engine
+   mirror).  Otherwise a vertex in a route-graph COVERAGE HOLE near a
+   runway (CYXY TX1: nearest taxi row 345 m, midline ~60 m) gets a TIGHT
+   fictitious band through a straight hop across grass instead of the
+   hole's weak band — 11 false violations on a corridor profile the
+   curve-aware model had legally written.
+**MEASURED (s76 probes /tmp/probes/build_rf.py + s76_axis_audit.py —
+point at the MAIN repo; the old s75 probes point at the worktree):**
+- CYXY 0/0/0 and SPJC 0/0/0 per-axis INCLUDING the route-band check.
+- HECA per-axis within 216 → **111** (cross 0, steps 0): the ~70 small
+  #190/#194 apron violations (the p10g km-chord under-measurement) are
+  GONE.  Residual = terminal4 lump family (5-12 %, ≤50 m local pairs),
+  J3/U stubs, + 18 route-band: 6 × Exit-3/#281/#171 near 05R (exit-fan
+  route-graph holes — the §5.1 known-gap class, the curved exit lines
+  are ingest-dropped) and 12 × apron #186 vs 05L over 0.9-1.7 km
+  (excess ≤0.26 % — the 05C↔05L squeeze, T4-wall ARBITRATION family).
+- Invariants: 05L/23R exactly 57.9-60.7 ✓, thresholds 116.5 ✓, A5 flat
+  60.4-60.5 ✓, A4 = gate-off values ✓.  **⚠ 05C/23C min 108.7 → 109.3**:
+  same demand machinery (per-tie debug compared), but the T4+U network
+  settles ~0.5-0.7 m HIGHER without km-chord drag → demands a shallower
+  dip (109.32 vs 108.74 contact ceiling); joint-solve freeze-skips after
+  feedback drop 16 → 2 (network MORE consistent).  Model-consistent —
+  **needs the user's in-sim verdict** (prior ~108 was a chord-law
+  number).
+- Suite **307p/2f** identical to baseline (SPLP deferred lump + HECA
+  within; HECA+SPJC vertical-curve XPASS kept).  CYXY byte-identical
+  across PYTHONHASHSEED 1/2.
+**NEXT:** (1) user in-sim eval (RESTART Ortho4XP — module cache) incl.
+the 109.3 dip; (2) HECA residual: terminal4 seed-vs-route transition
+(§6 step 2 — trial seed removal, separate measured step), Exit-3
+exit-fan graph holes, #186 squeeze arbitration (the p10e P5 user
+ruling); (3) measured deletes per §5.6 (band_exempt machinery, P2
+exemption) once the user ratifies; (4) corridor st-bands onto the
+shared band computation (deferred this step to protect invariants).
 
 ## ★★ SESSION 73 PART 10h (2026-06-10) — `corridor-curves` MERGED → dev @7e12384 ★★
 User call (no other sessions active): merge everything.  Clean ort
