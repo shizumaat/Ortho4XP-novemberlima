@@ -52,9 +52,11 @@ from collections import deque
 from shapely.errors import GEOSException, TopologicalError
 
 from auto_patch.config import (
+    APRON_CORRIDOR_SMOOTH_GRADE, APRON_CORRIDOR_SMOOTH_RADIUS_M,
     ROLE_GRADE_LIMITS, ROUTE_FIELD_LOCAL_WINDOW_M, ROUTE_FIELD_MODEL,
     ROUTE_NOISE_FRAC, RUNWAY_END_FRACTION, RUNWAY_END_GRADE,
-    RUNWAY_MAX_GRADE, TAXI_CORRIDOR_PROFILE, TAXIWAY_MAX_GRADE_CHANGE_PER_M,
+    RUNWAY_MAX_GRADE, SURFACE_FAIRING, SURFACE_FAIRING_MAX_MOVE_M,
+    TAXI_CORRIDOR_PROFILE, TAXIWAY_MAX_GRADE_CHANGE_PER_M,
     TERMINAL_PADS_SLOPE)
 from auto_patch.elevation import (
     APRON_MAX_GRADE, SERVICE_ROAD_MAX_GRADE, TAXI_MAX_GRADE)
@@ -719,6 +721,222 @@ def _project_within_bands(elev, edges, is_hard, lo, hi, coupling,
     return sweep + 1, mx
 
 
+def _apron_corridor_zone_edges(layout, nodes, shape_constraints):
+    """APRON CORRIDOR SMOOTHING edge set (s76, user in-sim verdict at CYXY:
+    aprons read much too steep at the 1.5 % legal cap even where taxi routes
+    look right).  Aprons should fall away from the taxi corridors that serve
+    them at ideally ``APRON_CORRIDOR_SMOOTH_GRADE`` (1 % — also the ICAO
+    Annex 14 apron recommendation) within
+    ``APRON_CORRIDOR_SMOOTH_RADIUS_M`` (200 m).
+
+    Returns the apron grade edges whose BOTH endpoints lie within the radius
+    of a corridor polyline — apt.dat/OSM taxi centerlines PLUS every taxi
+    rect's ``source_axis`` (discovered taxiways carry no apt.dat row; CYXY's
+    TX1 apron is served only by discovered rects) — with their caps scaled
+    from the apron legal grade down to the smoothing grade.  The caller
+    projects them BEST-EFFORT after the legal enforce: this is a solver
+    preference, NOT a law change (the validator still asserts
+    ROLE_GRADE_LIMITS); wherever hard anchors genuinely demand more than
+    1 %, the projection plateaus and the legal surface stands."""
+    if (APRON_CORRIDOR_SMOOTH_GRADE <= 0.0
+            or APRON_CORRIDOR_SMOOTH_RADIUS_M <= 0.0):
+        return []
+    segs: list = []
+    for entry in (getattr(layout, "apt_taxi_centerlines", None) or []):
+        ls = entry[0] if isinstance(entry, (tuple, list)) else entry
+        try:
+            cs = list(ls.coords)
+        except (AttributeError, TypeError):
+            continue
+        segs.extend(zip(cs, cs[1:]))
+    for s in layout.shapes:
+        if s.role not in SLOPING_RECT_ROLES or s.role == ROLE_SERVICE_ROAD:
+            continue          # aircraft taxi corridors only (no 4 % roads)
+        ax = getattr(s, "source_axis", None)
+        if ax is None or ax.is_empty:
+            continue
+        try:
+            cs = list(ax.coords)
+        except (AttributeError, TypeError):
+            continue
+        segs.extend(zip(cs, cs[1:]))
+    if not segs:
+        return []
+    R = APRON_CORRIDOR_SMOOTH_RADIUS_M
+    CELL = R
+    grid: dict = {}
+    for k, ((ax, ay), (bx, by)) in enumerate(segs):
+        for gx in range(int(min(ax, bx) // CELL),
+                        int(max(ax, bx) // CELL) + 1):
+            for gy in range(int(min(ay, by) // CELL),
+                            int(max(ay, by) // CELL) + 1):
+                grid.setdefault((gx, gy), []).append(k)
+
+    zone_cache: dict[int, bool] = {}
+
+    def _in_zone(i):
+        hit = zone_cache.get(i)
+        if hit is not None:
+            return hit
+        x, y = nodes[i]
+        gx0, gy0 = int(x // CELL), int(y // CELL)
+        ok = False
+        for dgx in (-1, 0, 1):
+            for dgy in (-1, 0, 1):
+                for k in grid.get((gx0 + dgx, gy0 + dgy), ()):
+                    (ax, ay), (bx, by) = segs[k]
+                    dx, dy = bx - ax, by - ay
+                    s2 = dx * dx + dy * dy
+                    if s2 < 1e-12:
+                        continue
+                    t = ((x - ax) * dx + (y - ay) * dy) / s2
+                    t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+                    if math.hypot(x - (ax + t * dx),
+                                  y - (ay + t * dy)) <= R:
+                        ok = True
+                        break
+                if ok:
+                    break
+            if ok:
+                break
+        zone_cache[i] = ok
+        return ok
+
+    out: list[tuple[int, int, float]] = []
+    for sc in shape_constraints:
+        if sc["role"] != ROLE_APRON:
+            continue
+        role_cap = _role_grade(ROLE_APRON)
+        if role_cap <= 0:
+            continue
+        scale = APRON_CORRIDOR_SMOOTH_GRADE / role_cap
+        if scale >= 1.0:
+            continue
+        for (i, j, c) in sc["edges"]:
+            if c <= 0.0:
+                continue
+            if _in_zone(i) and _in_zone(j):
+                out.append((i, j, c * scale))
+    return out
+
+
+def _lipschitz_tighten_bands(n, lo, hi, edges):
+    """Tightest IMPLIED per-node bands under the local edge caps (s76
+    junction-ripple root): the ROUTE bands are computed over the CENTERLINE
+    graph, so two ring-adjacent vertices can enter that graph at different
+    nodes and carry floors/ceilings differing by more than their own edge
+    cap allows — the one-time band clamp then prints that discontinuity
+    into the surface as a ripple.  The edge system already implies the
+    smooth version: ``lo*_i = max_j (lo_j − capdist(i, j))`` and
+    ``hi*_i = min_j (hi_j + capdist(i, j))`` over cap-weighted edge paths.
+    One multi-source Dijkstra per side (every node seeds its own bound)
+    makes the band field edge-Lipschitz — pure tightening, no new
+    constraint: anything outside ``[lo*, hi*]`` violated the original
+    system through some edge path anyway."""
+    INF = float("inf")
+    adj: dict[int, list[tuple[int, float]]] = {}
+    for (i, j, c) in edges:
+        adj.setdefault(i, []).append((j, c))
+        adj.setdefault(j, []).append((i, c))
+
+    def _relax(init):
+        dist = list(init)
+        pq = [(d, i) for i, d in enumerate(dist) if d < INF]
+        heapq.heapify(pq)
+        while pq:
+            d, u = heapq.heappop(pq)
+            if d > dist[u]:
+                continue
+            for v, c in adj.get(u, ()):
+                nd = d + c
+                if nd < dist[v]:
+                    dist[v] = nd
+                    heapq.heappush(pq, (nd, v))
+        return dist
+
+    hi2 = _relax([(x if x < INF else INF) for x in hi])
+    nlo = _relax([(-x if x > -INF else INF) for x in lo])
+    lo2 = [(-x if x < INF else -INF) for x in nlo]
+    return lo2, hi2
+
+
+def _fair_surface_ripples(elev, edges, is_hard, lo, hi, coupling,
+                          held_extra, band_pinned, max_move,
+                          sweeps=150, omega=0.5, tol=0.005) -> int:
+    """FINAL FAIRING (s76, user in-sim feedback: "we used to have a final
+    solver pass that distributed things and smoothed everything").  The old
+    dense all-pair chord web acted as an implicit smoother — every vertex was
+    tied to many far neighbours, so the band clamp + cap projection ironed
+    sub-cap DEM noise flat.  With chords demoted to the local window
+    (ROUTE_FIELD_MODEL) that side effect disappeared and junction/apron
+    interiors keep visible sub-cap ripples.
+
+    This pass restores the smoothing EXPLICITLY and lawfully: each soft,
+    uncoupled vertex relaxes toward the inverse-cap-weighted average of its
+    grade-graph neighbours (weight ∝ 1/distance — short edges dominate, so
+    it kills local bumps first), clamped each sweep into
+
+      * its route band ``[lo, hi]`` (the long-range law stays satisfied), and
+      * a per-node displacement budget ``±max_move`` from its solved value
+        (this is a RIPPLE smoother, not a re-leveller — without the budget a
+        long Laplacian run drifts whole aprons toward the harmonic surface).
+
+    HARD anchors, corridor-held writes, band-pinned nodes and COUPLED groups
+    (rect flat ends, terminal levels — planes/levels, not ripple carriers)
+    never move.  A short cap re-projection afterwards (caller) cleans any
+    residual cap drift.  Returns the number of vertices moved > 1 cm.
+    """
+    INF = float("inf")
+    n = len(elev)
+    nbrs: dict[int, list[tuple[int, float]]] = {}
+    for (i, j, c) in edges:
+        if c <= 0.0:
+            continue                      # flat pairs are coupled levels
+        w = 1.0 / max(c, 0.05)
+        nbrs.setdefault(i, []).append((j, w))
+        nbrs.setdefault(j, []).append((i, w))
+    fixed = [False] * n
+    for i in range(n):
+        if is_hard[i] or i in held_extra or i in band_pinned:
+            fixed[i] = True
+        elif coupling is not None and i in coupling and len(coupling[i]) > 1:
+            fixed[i] = True               # rigid level group — not faired
+    free = [i for i in nbrs if i < n and not fixed[i]]
+    if not free:
+        return 0
+    orig = {i: elev[i] for i in free}
+    for _ in range(sweeps):
+        mx = 0.0
+        for i in free:
+            acc = 0.0
+            wsum = 0.0
+            for (j, w) in nbrs[i]:
+                acc += w * elev[j]
+                wsum += w
+            if wsum <= 0.0:
+                continue
+            tgt = elev[i] + omega * (acc / wsum - elev[i])
+            o = orig[i]
+            if tgt > o + max_move:
+                tgt = o + max_move
+            elif tgt < o - max_move:
+                tgt = o - max_move
+            li, hi_i = lo[i], hi[i]
+            if li > hi_i:
+                continue                  # infeasible band — leave as is
+            if hi_i < INF and tgt > hi_i:
+                tgt = hi_i
+            if li > -INF and tgt < li:
+                tgt = li
+            d = tgt - elev[i]
+            if abs(d) > mx:
+                mx = abs(d)
+            elev[i] = tgt
+        if mx < tol:
+            break
+    return sum(1 for i in free if abs(elev[i] - orig[i]) > 0.01)
+
+
 def _grade_bands(n, elev, is_hard, edges):
     """Feasible elevation band ``[lo[v], hi[v]]`` for every node under the
     within-shape grade edges, by two multi-source Dijkstras from the HARD
@@ -976,6 +1194,11 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                 TAXI_MAX_GRADE, layout, extra_anchors=extra,
                 noise_frac=_ROUTE_NOISE_FRAC,
                 graph=runway_augmented_route_graph(layout))
+            # Route bands live on the CENTERLINE graph; make the band field
+            # edge-Lipschitz before clamping or adjacent vertices print
+            # their graph-entry discontinuities into the surface as
+            # ripples (pure tightening — see _lipschitz_tighten_bands).
+            lo, hi = _lipschitz_tighten_bands(n, lo, hi, all_edges)
         else:
             lo, hi = _runway_reach_bands(
                 nodes, elev, runway_nodes, seam_nodes, all_edges,
@@ -1065,20 +1288,97 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
     # lacked).  A group sharing a hard node is still held (one corner pinned).
     coupling = _merge_terminal_level_groups(
         _build_level_coupling(shape_constraints), shape_constraints)
+    # TERMINALS MUST NOT RISE (standing ruling; terminal7 ≈ 70).  In
+    # rigid-flat mode (TERMINAL_PADS_SLOPE False) pads enter the enforce at
+    # their taxi-route-seeded + relief levels; the band clamp/sweeps must
+    # never lift them (the Lipschitz-implied floors near a high corridor
+    # dragged HECA terminal7 70 → 72.9 in the first s76 build — that
+    # tension is the runway-flex/arbitration layer's job, like any other
+    # anchor squeeze).  YIELD-DOWN stays legal: each pad level group is
+    # clamped down to its band CEILING here, then the pads are HELD through
+    # every projection below so nothing can drag them back up.
+    _term_nodes: set = set()
+    if not TERMINAL_PADS_SLOPE:
+        for sc2 in shape_constraints:
+            if sc2["role"] == ROLE_TERMINAL:
+                _term_nodes.update(sc2["nodes"])
+        seed_ceil = (getattr(layout, "_terminal_seed_ceiling", None)
+                     if layout is not None else None) or {}
+        seen_g: set = set()
+        for i in _term_nodes:
+            if i >= n:
+                continue
+            grp = coupling[i] if (coupling is not None and i in coupling) \
+                else (i,)
+            key = tuple(sorted(grp))
+            if key in seen_g:
+                continue
+            seen_g.add(key)
+            # Group ceiling = band ceiling ∩ the TAXI-ROUTE SEED levels
+            # (the ruling's reference level — the relief may have lifted
+            # the pad above its seed toward high aprons; pull it back).
+            ghi = min((min(hi[m], seed_ceil.get(m, float("inf")))
+                       for m in grp if m < n), default=float("inf"))
+            glo = max((lo[m] for m in grp if m < n), default=float("-inf"))
+            if glo > ghi:
+                continue                  # squeezed (pinned) — hold as is
+            lvl = max(elev[m] for m in grp if m < n)
+            if ghi < lvl - 1e-9:
+                d = ghi - lvl
+                for m in grp:
+                    if m < n and not is_hard[m]:
+                        elev[m] += d
+    held_all = set(held_extra or set()) | _term_nodes
     _dbg = _os.environ.get("O4_ENFORCE_DEBUG") == "1"
     if _dbg:
         v0 = sum(1 for (i, j, c) in all_edges
                  if c > 0 and abs(elev[i] - elev[j]) > c + 1e-4)
     sweeps, resid = _project_within_bands(
         elev, all_edges, is_hard, lo, hi, coupling,
-        held_extra=(held_extra or set()),
+        held_extra=held_all,
         max_sweeps=_WITHIN_ENFORCE_MAX_SWEEPS,
         tol=_SPREAD_COMPLY_TOL_M)
+    # APRON CORRIDOR SMOOTHING (best-effort 1 % near taxi corridors — see
+    # _apron_corridor_zone_edges): a bounded projection on the tightened
+    # apron-zone edges, run AFTER the legal enforce so it can only smooth
+    # within the already-feasible region (bands still clamp every move).
+    # Pads stay held (smoothing a slope toward 1 % between high anchors
+    # and low free pavement LIFTS the low side — pads dragged up 2.5 m
+    # through shared nodes in the first build).
+    n_zone = 0
+    if nodes is not None and layout is not None:
+        zone_edges = _apron_corridor_zone_edges(
+            layout, nodes, shape_constraints)
+        if zone_edges:
+            n_zone = len(zone_edges)
+            _project_within_bands(
+                elev, zone_edges, is_hard, lo, hi, coupling,
+                held_extra=held_all,
+                max_sweeps=800, tol=_SPREAD_COMPLY_TOL_M)
+    # FINAL FAIRING + cap re-projection: iron sub-cap ripples the windowed
+    # chord web no longer smooths implicitly (see _fair_surface_ripples),
+    # then re-project caps so the smoothing cannot leave a new violation.
+    n_faired = 0
+    if SURFACE_FAIRING:
+        n_faired = _fair_surface_ripples(
+            elev, all_edges, is_hard, lo, hi, coupling,
+            held_extra=held_all,
+            band_pinned=band_pinned,
+            max_move=SURFACE_FAIRING_MAX_MOVE_M)
+    if n_faired or n_zone:
+        # restore strict LEGAL-cap feasibility after the preference passes
+        # (a zone/fairing move can over-steepen a pair with an out-of-zone
+        # or unfaired neighbour); pads still held.
+        _project_within_bands(
+            elev, all_edges, is_hard, lo, hi, coupling,
+            held_extra=held_all,
+            max_sweeps=400, tol=_SPREAD_COMPLY_TOL_M)
     if _dbg:
         v1 = sum(1 for (i, j, c) in all_edges
                  if c > 0 and abs(elev[i] - elev[j]) > c + 1e-4)
         print(f"[enforce] {icao}: {sweeps} sweeps, edge-viol {v0}->{v1}, "
-              f"residual {resid:.3f} m, band-pinned = {len(band_pinned)}")
+              f"residual {resid:.3f} m, band-pinned = {len(band_pinned)}, "
+              f"apron-zone edges = {n_zone}, faired = {n_faired}")
     return len(band_pinned)
 
 
@@ -5645,18 +5945,32 @@ def _seed_terminals_from_taxi_routes(layout, elev, bucket_to_idx, dem_elev,
                     route = d + sg + tgap
                     if ref not in best or route < best[ref][0]:
                         best[ref] = (route, eR)
+                # §5.2 route-noise margin (s76): the route graph under-counts
+                # real taxi paths ~4 %; a seed band used as a HARD level must
+                # carry it or the floor over-pins the pad (HECA terminal7:
+                # raw floor 71.5 from the 05C side vs the user-known ~70 —
+                # the margin is exactly the difference).
+                capm = cap * (1.0 + _ROUTE_NOISE_FRAC)
                 for route, eR in best.values():
-                    lo_n = max(lo_n, eR - cap * route)
-                    hi_n = min(hi_n, eR + cap * route)
+                    lo_n = max(lo_n, eR - capm * route)
+                    hi_n = min(hi_n, eR + capm * route)
             node_band[idx] = (lo_n, hi_n)
         node_refs.setdefault(_find(first), []).append(s.ref or "?")
     n_seeded = 0
     _dbg = _os.environ.get("O4_SEED_DEBUG") == "1"
+    # Record every seeded level: the seed IS the route-feasible level for
+    # the pad, and the standing ruling (terminals must NOT rise;
+    # terminal7 ≈ 70) makes it the pad's CEILING for the rest of the solve
+    # — the enforce's yield-down clamp reads this (s76: the relief lifted
+    # squeezed pads 1.5-3 m above their seeds toward high aprons).
+    seed_ceiling: dict = {}
+    layout._terminal_seed_ceiling = seed_ceiling  # type: ignore[attr-defined]
 
     def _apply(i, val):
         elev[i] = val
         dem_elev[i] = val               # the vertex TARGET (DEM is only a guess;
         #                                 the pad goes where grade feasibility puts it)
+        seed_ceiling[i] = val
 
     # Coupled clusters with their COMBINED band (intersection of member-node
     # bands).  A cluster is FLAT (one level) when that band is feasible — flatness

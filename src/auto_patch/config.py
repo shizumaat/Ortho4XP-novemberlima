@@ -55,6 +55,10 @@ __all__ = [
     "ROUTE_FIELD_MODEL",
     "ROUTE_FIELD_LOCAL_WINDOW_M",
     "ROUTE_NOISE_FRAC",
+    "SURFACE_FAIRING",
+    "SURFACE_FAIRING_MAX_MOVE_M",
+    "APRON_CORRIDOR_SMOOTH_RADIUS_M",
+    "APRON_CORRIDOR_SMOOTH_GRADE",
     "RUNWAY_ADJACENCY_TOL_M",
     "RUNWAY_BOUNDARY_TOL_M",
     "RUNWAY_INSIDE_APRON_FRAC",
@@ -257,12 +261,14 @@ APRON_MAX_GRADE = 0.015         # apron / junction body, all directions (user 20
 TERMINAL_MAX_GRADE = APRON_MAX_GRADE
 # Let EVERY terminal pad slope (up to TERMINAL_MAX_GRADE) through the same
 # visibility-graph path as aprons, instead of the rigid-flat default with
-# squeezed-pad exceptions.  Evaluation state (user 2026-06-10): with the flex
-# demand synthesis landing runways on the route-justified profiles (HECA 05C
-# min 110.9, not the rejected 104.4 over-dip), the chain tension the over-dip
-# used to absorb must drain into the terminals.  Set False to restore the
-# rigid-flat default (squeezed pads still slope via the seed marking).
-TERMINAL_PADS_SLOPE = True
+# squeezed-pad exceptions.  The s73-p2 evaluation state had this True so the
+# route-justified runway profiles' chain tension could drain into terminals;
+# the in-sim verdict (user 2026-06-10, s76) is that sloping pads leave
+# BUILDINGS FLOATING (HECA terminal1 spanned 100.2-105.3) — pads must stay
+# flat and the connective aprons/taxiways carry the grade.  False = the
+# rigid-flat default; squeezed pads still slope via the seed marking
+# (_sloped_terminal_nodes), e.g. HECA 6/7/10 straddling two runway levels.
+TERMINAL_PADS_SLOPE = False
 # Taxi-corridor profile pass (user 2026-06-10): a chain of taxi rects that
 # CONTINUES through junctions (same ref, or the best axis-aligned
 # continuation - HECA's T through junction -10292, T4 into U) is re-profiled
@@ -378,6 +384,27 @@ ROUTE_FIELD_MODEL = True
 # Local smoothness window (m): visibility-chord pairs at or under this
 # length keep the chord grade law (design start 80, measure 60–100).
 ROUTE_FIELD_LOCAL_WINDOW_M = 80.0
+# FINAL SURFACE FAIRING (s76, user in-sim feedback): the dense all-pair
+# chord web used to act as an implicit smoother — with chords windowed,
+# sub-cap DEM noise survives the solve as visible ripples at junctions.
+# A final weighted-Laplacian fairing pass irons them: soft uncoupled
+# vertices relax toward their grade-graph neighbours, clamped into the
+# route bands and a per-node displacement budget (so it smooths ripples
+# without re-levelling surfaces), then caps are re-projected.
+SURFACE_FAIRING = True
+SURFACE_FAIRING_MAX_MOVE_M = 0.5
+# APRON CORRIDOR SMOOTHING (s76, user in-sim verdict at CYXY: "the apron is
+# much too steep ... use taxi route corridors along the edges or into aprons,
+# and ensure apron grade outward from those in maybe a 200 m radius is graded
+# at ideally 1 %").  Within this radius of a taxi corridor (apt.dat/OSM
+# centerline OR a taxi rect's source axis — discovered taxiways carry no
+# apt.dat row), apron vertex pairs are projected toward this grade as a
+# best-effort SOLVER PREFERENCE after the enforce.  The LEGAL cap (and the
+# validator's law) stays ROLE_GRADE_LIMITS — "ideally" means the projection
+# plateaus wherever hard anchors genuinely demand more.  Radius 0 or grade 0
+# disables.
+APRON_CORRIDOR_SMOOTH_RADIUS_M = 200.0
+APRON_CORRIDOR_SMOOTH_GRADE = 0.010
 # The route graph under-counts real taxi routes by ~4 % (straight endpoint
 # stubs, uncurved row joins — s73-p3 measured).  Route bands used as HARD
 # constraints carry this relative margin; the validator MUST use the same
