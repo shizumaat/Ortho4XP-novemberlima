@@ -285,6 +285,7 @@ def build_tile(tile):
 
 ################################################################################
 def build_all(tile):
+    UI.reset_total_elapsed()
     VMAP.build_poly_file(tile)
     if UI.red_flag:
         UI.exit_message_and_bottom_line("")
@@ -311,6 +312,7 @@ def build_all(tile):
         UI.exit_message_and_bottom_line("")
         return 0
     UI.is_working = 0
+    UI.total_bottom_line(tile.lat, tile.lon)
     if IMG.incomplete_imgs:
         UI.lvprint(
             0,
@@ -333,6 +335,7 @@ def build_tile_list(
     k = 0
     for (lat, lon) in list_lat_lon:
         k += 1
+        UI.reset_total_elapsed()
         UI.vprint(
             1,
             "Dealing with tile ",
@@ -387,6 +390,7 @@ def build_tile_list(
             if UI.red_flag:
                 UI.exit_message_and_bottom_line()
                 return 0
+        UI.total_bottom_line(lat, lon)
         try:
             UI.gui.earth_window.canvas.delete(
                 UI.gui.earth_window.dico_tiles_todo[(lat, lon)]

@@ -10,6 +10,7 @@ is_working = False
 cleaning_level = 1
 gui = None
 log = True
+total_elapsed = 0.0
 
 
 ################################################################################
@@ -82,9 +83,32 @@ def exit_message_and_bottom_line(*args):
 
 
 ################################################################################
+def reset_total_elapsed():
+    global total_elapsed
+    total_elapsed = 0.0
+
+
+################################################################################
+def total_bottom_line(lat, lon):
+    print(
+        "\nTile "
+        + FNAMES.short_latlon(lat, lon)
+        + " completed in "
+        + nicer_timer(total_elapsed)
+        + "."
+    )
+    print(
+        "_____________________________________________________________"
+        + "____________________________________"
+    )
+
+
+################################################################################
 def timings_and_bottom_line(tinit):
-    global is_working
-    print("\nCompleted in " + nicer_timer(time.time() - tinit) + ".")
+    global is_working, total_elapsed
+    elapsed = time.time() - tinit
+    total_elapsed += elapsed
+    print("\nCompleted in " + nicer_timer(elapsed) + ".")
     print(
         "_____________________________________________________________"
         + "____________________________________"
