@@ -105,6 +105,60 @@ from .pavement.runway_segments import (
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Patch freshness — skip rebuilding when the existing auto-patch is current
+# ──────────────────────────────────────────────────────────────────────────────
+def _auto_patch_is_current(auto_patch_file: str, xp_root: str,
+                           icao: str) -> bool:
+    """True when an existing auto-patch can be reused as-is.
+
+    A patch is current when the apt.dat that would be selected for
+    this airport TODAY is the same file the patch was built from
+    (path match — catches a newly installed Custom Scenery pack
+    taking selection priority) AND that apt.dat is unmodified since
+    the build (mtime match — catches an in-place airport update).
+
+    Provenance comes from the ``o4_apt_dat`` / ``o4_apt_dat_mtime``
+    attributes ``PavementLayout.to_osm`` stamps on the ``<osm>``
+    root.  Patches that pre-date the stamp report not-current and
+    rebuild once (getting stamped in the process).
+
+    Set ``O4_AUTO_PATCH_REBUILD=1`` to force rebuilds regardless
+    (e.g. after editing auto_patch source — code changes do NOT
+    invalidate an existing patch on their own).
+    """
+    if os.environ.get("O4_AUTO_PATCH_REBUILD", "0") == "1":
+        return False
+    if not os.path.isfile(auto_patch_file):
+        return False
+    from .layout import read_patch_source
+    meta = read_patch_source(auto_patch_file)
+    if not meta:
+        return False
+    from .osm_load import _pick_best_apt_dat_against_osm
+    apt_now = _pick_best_apt_dat_against_osm(xp_root, icao)
+    if not apt_now:
+        return False
+    if os.path.realpath(apt_now) != os.path.realpath(meta["apt_dat"]):
+        return False
+    try:
+        mtime_now = os.path.getmtime(apt_now)
+    except OSError:
+        return False
+    stored = meta.get("apt_dat_mtime")
+    if stored is None:
+        # Stamp carries a path but no mtime (apt.dat was unreadable
+        # at emit time): fall back to file-date ordering against the
+        # patch itself.
+        try:
+            return mtime_now <= os.path.getmtime(auto_patch_file)
+        except OSError:
+            return False
+    # Exact-match, not newer-than: replacing an airport with an OLDER
+    # apt.dat (pack downgrade / restore) must also trigger a rebuild.
+    return abs(mtime_now - stored) < 1e-6
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Main Entry Point
 # ──────────────────────────────────────────────────────────────────────────────
 def generate_auto_patches(tile, cifp_path: str,
@@ -178,6 +232,7 @@ def generate_auto_patches(tile, cifp_path: str,
     # Scan all CIFP airports
     cifp_airports = discover_cifp_airports(cifp_path)
     auto_patched: list[str] = []
+    reused: list[str] = []
 
     # Apply the auto-patch log-verbosity knob for the build (restored
     # after the loop).  Build-time verification still runs at every
@@ -220,6 +275,28 @@ def generate_auto_patches(tile, cifp_path: str,
         # Pair runways and generate patch
         pairs = pair_runways(runways)
         if not pairs:
+            continue
+
+        xp_root = xplane_root_from_cifp_path(cifp_path)
+        if xp_root is None:
+            UI.vprint(
+                1, "   Auto-patch: Skipping", icao,
+                "(cannot resolve X-Plane root from CIFP path).")
+            continue
+
+        # Reuse the existing auto-patch when it was built from the
+        # apt.dat that would be selected today and that apt.dat is
+        # unchanged since — runs BEFORE any expensive per-airport
+        # work.  include_patches() picks the file up from disk either
+        # way; nothing downstream needs the rebuild.
+        auto_patch_file = os.path.join(
+            patch_dir, "{}_auto.patch.osm".format(icao)
+        )
+        if _auto_patch_is_current(auto_patch_file, xp_root, icao):
+            UI.lvprint(
+                0, "   Auto-patch:", icao,
+                "up to date (apt.dat unchanged), reusing existing patch.")
+            reused.append(icao)
             continue
 
         # Look up actual runway widths from apt.dat
@@ -276,12 +353,6 @@ def generate_auto_patches(tile, cifp_path: str,
         # non-overlapping junction polygons, and terminal pads, all in
         # one self-contained call from the same CIFP + apt.dat + OSM +
         # DEM inputs the legacy pipeline used.
-        xp_root = xplane_root_from_cifp_path(cifp_path)
-        if xp_root is None:
-            UI.vprint(
-                1, "   Auto-patch: Skipping", icao,
-                "(cannot resolve X-Plane root from CIFP path).")
-            continue
         import time as _time
         _t_apt = _time.time()
         try:
@@ -329,9 +400,6 @@ def generate_auto_patches(tile, cifp_path: str,
         if not os.path.exists(patch_dir):
             os.makedirs(patch_dir)
 
-        auto_patch_file = os.path.join(
-            patch_dir, "{}_auto.patch.osm".format(icao)
-        )
         try:
             layout.to_osm(auto_patch_file)
             # Classify shapes for the status line.
@@ -381,7 +449,14 @@ def generate_auto_patches(tile, cifp_path: str,
                 len(auto_patched)
             ),
         )
-    else:
+    if reused:
+        UI.vprint(
+            0,
+            "   Auto-patch: Reused {} up-to-date existing patches.".format(
+                len(reused)
+            ),
+        )
+    if not auto_patched and not reused:
         UI.vprint(2, "   Auto-patch: No airports with CIFP data in this tile.")
 
     return auto_patched

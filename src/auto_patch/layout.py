@@ -23,6 +23,9 @@ pavement-builder dependency hierarchy alongside Pavement_Config.
 from __future__ import annotations
 
 import math
+import os
+import re
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, overload
@@ -937,9 +940,27 @@ class PavementLayout:
                     if w_id == _mwid:
                         referenced_nids.update(n_list)
                         break
+        # Stamp apt.dat provenance on the <osm> root so a later build
+        # can tell whether this patch is still current (the driver's
+        # freshness check, ``read_patch_source``).  The path is
+        # percent-encoded: keeps the attribute value free of quotes /
+        # spaces regardless of where the user's scenery pack lives.
+        osm_open = ("<osm version='0.6' upload='false' "
+                    "generator='O4_Airport_Pavement_Builder'")
+        if self.apt_dat_path:
+            osm_open += (" o4_apt_dat='"
+                         + urllib.parse.quote(str(self.apt_dat_path))
+                         + "'")
+            try:
+                osm_open += (" o4_apt_dat_mtime='"
+                             + f"{os.path.getmtime(self.apt_dat_path):.6f}"
+                             + "'")
+            except OSError:
+                pass
+        osm_open += ">"
         lines = [
             "<?xml version='1.0' encoding='UTF-8'?>",
-            "<osm version='0.6' upload='false' generator='O4_Airport_Pavement_Builder'>",
+            osm_open,
         ]
         for nid, (lat, lon) in sorted(node_id_to_ll.items(), reverse=True):
             if nid not in referenced_nids:
@@ -970,6 +991,44 @@ class PavementLayout:
             lines.append("  </relation>")
         lines.append("</osm>")
         Path(path).write_text("\n".join(lines) + "\n")
+
+
+_PATCH_SOURCE_APT_RE = re.compile(r"o4_apt_dat='([^']*)'")
+_PATCH_SOURCE_MTIME_RE = re.compile(r"o4_apt_dat_mtime='([^']*)'")
+
+
+def read_patch_source(path: str) -> dict | None:
+    """Read the apt.dat provenance stamped into an auto-patch file.
+
+    ``to_osm`` records the apt.dat the build consumed as
+    ``o4_apt_dat`` / ``o4_apt_dat_mtime`` attributes on the ``<osm>``
+    root element.  Returns ``{"apt_dat": str,
+    "apt_dat_mtime": float | None}``, or ``None`` when the file is
+    missing, unreadable, or pre-dates the provenance stamp.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            # The root element is line 1 or 2 (after the XML
+            # declaration) — same convention O4_OSM_Utils relies on.
+            line = f.readline()
+            if "<osm " not in line:
+                line = f.readline()
+    except OSError:
+        return None
+    if "<osm " not in line:
+        return None
+    m = _PATCH_SOURCE_APT_RE.search(line)
+    if not m:
+        return None
+    apt_dat = urllib.parse.unquote(m.group(1))
+    mtime: float | None = None
+    m = _PATCH_SOURCE_MTIME_RE.search(line)
+    if m:
+        try:
+            mtime = float(m.group(1))
+        except ValueError:
+            mtime = None
+    return {"apt_dat": apt_dat, "apt_dat_mtime": mtime}
 
 
 # ──────────────────────────────────────────────────────────────────
