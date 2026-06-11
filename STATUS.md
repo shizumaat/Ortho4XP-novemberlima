@@ -1,4 +1,35 @@
-# Auto-Patch Status — session 77 = APRON GEODESIC BINDING + WRITE ARBITRATION + TERMINAL LEAF LEVELS
+# Auto-Patch Status — session 77 = APRON GEODESIC BINDING + WRITE ARBITRATION + TERMINAL LEAF LEVELS + APRON LONG-RANGE LAW
+
+## ★★ SESSION 77 PART 3 (2026-06-11) — dev @6555527: APRON LONG-RANGE LAW + PINNED PLACEMENT; SINGLETON EXPERIMENT MEASURED-REVERTED ★★
+User JOSM/X-Plane eval: extreme apron dips when distant from taxiways
+(valley @30.1131103,31.4074412 = HECA #193), apron #198 bad where it
+joins B and C ("corridors through this apron not graded"), #208 should
+climb.
+1. **TWO-RATE LONG-RANGE APRON LAW** — geodesic corridor-value bands now
+   cover the FULL interior-path field: 1 % inside the 200 m zone, legal
+   1.5 % rate beyond (extra slack on the geodesic-shortest path).  With
+   80 m-windowed chords + holed route bands, distant apron interiors had
+   NO long-range constraint (#193: ring 89.6..110.1 followed raw DEM).
+2. **PINNED-NODE LEAST-VIOLATION PLACEMENT** — band-pinned verts (lo>hi,
+   squeeze families) were held at RELIEF values; the valley vert sat at
+   99.46 with band [104.14, 102.38] = 2.9 m below even the CEILING.
+   Clamp into the inverted interval (nearest edge): valley 99.80→102.40;
+   the legal A↔05C descent across #193 stays.
+3. ⛔ **SINGLETON PROFILING MEASURED-REVERTED** (the #198 B/C item): the
+   `_touches_runway` gate drops every non-runway singleton (taxiway B =
+   5 stubs) — lifting it + ≥2-station chains + singleton bridge ties
+   closed #256 FULLY (1.4 m), restored A5 60.1, B/C graded 102.3-106.3
+   coherent — BUT the tie network spread the C/B-vs-S route squeeze onto
+   MORE surfaces: standalone >5 % walls 21→46 (writes) / 29 (tie-only;
+   D #285 corners first-written 107.9/104.7 = 29 %/11.8 m).  Reverted
+   byte-identical.  **OPEN DESIGN ITEM: grade through-apron connectors
+   (#198 B/C, #208 climbing) — needs per-tie handling where mouth
+   networks are route-pinned APART (same family as #256 residual /
+   irreducible-squeeze ruling).**
+**SHIPPED STATE: HECA valley filled, #256 1.6 m (14 %), 05C 108.5, 05L
+exact, A4, A5 60.9-61.1 (flagged), >5 % walls 21 (was ~32), per-axis
+within 140 / 0 / 0; CYXY 0/0/0 spread 44.4→37.4; SPJC 0/0/0; gate-off
+byte-identical; deterministic; suite 307p/2f.**
 
 ## ★★ SESSION 77 PART 2 (2026-06-10) — dev @bdeae13: WRITE-LAYER ARBITRATION + TERMINAL LEAF LEVELS (user-approved rulings) ★★
 USER RULINGS this session: (1) taxi routes graded properly ⇒ aprons grade
