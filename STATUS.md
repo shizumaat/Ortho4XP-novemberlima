@@ -80,15 +80,65 @@ GATE-OFF BYTE-IDENTICAL to s77 @407f833 (CYXY verified).  ⚠ SUITE
 note: `test_compare_target_splp` (both tiles) fails on PURE s77 HEAD
 too — environment/fixture drift (SPLP Test scenery), NOT this session;
 true pre-session baseline = 305p/4f.
-**OPEN:** (1) in-sim verdict (RESTART Ortho4XP): 05C 108.7, ⚠ 05L rise
-62.8, A5 ~62, CYXY lifted-toward-DEM aprons near route-law floors,
-terminal levels; (2) SPLP deferred class (its runway legitimately >1.5 %
-at the seam — threshold/vertical-curve work); (3) compare_target SPLP
-re-baseline (env drift); (4) measured deletes of the tie layer (§6 —
-only after the in-sim verdict ratifies); (5) KPHX-scale field perf
-check.  Probes: /tmp/probes/s78_network_audit (field-vs-routegraph,
-pairpath, residuals, invariants, splp_relax); env `O4_NPF_DEBUG=1`
-(field audit + demands), `O4_BAND_NODES="i,j"` (enforce band stages).
+**s78 PART 2 (user follow-ups):**
+1. ★★ **SPLP ROOT CAUSE = CIFP DATA, NOT THE MODEL** — the user's
+   navdata update (morning 2026-06-11, Custom Data touched 09:16) ships
+   `CIFP/SPLP.dat` with BOTH thresholds at 00253 ft (77.1 m); the real
+   RW20 end is ~192 ft.  With RW20=00192 the runway segments back into
+   the fixture's 8 pieces (verified by diagnostic edit, then restored).
+   The flat-CIFP record collapses the runway to ONE degenerate piece →
+   the 4.5 % runway pairs + ~190 downstream violations + the
+   compare_target mismatch (runway matched 1 < floor 8).  User is
+   correcting the navdata; RE-RUN the SPLP gates + compare_target after.
+   ★ DSF packs / DEM / apt.dat were ruled out by isolation builds.
+2. **HECA within 111 → 72** — final-closure budget ±1 m → ±2.5 m (the
+   ±1 cut left taxiway-G rect planes 0.8 m over-cap: W2 clamped the
+   ends to the legal 6.41 m, then the closure dragged the low mouth
+   toward lower neighbours and hit its budget mid-redistribution).
+   Residual 72 = dominated by **1.5–1.6 % long stretches (380–580 m)**
+   on the documented squeeze corridors (taxiway G #18/#21/#23, aprons
+   #185/#189/#209) = the design's M5 spreading policy IN ACTION — "an
+   irreducible squeeze shows as ~1.6–1.9 % over a long stretch instead
+   of a wall" — **the §10 'To confirm' ruling now has its measured
+   numbers; needs the user verdict** (alternatives: more runway flex
+   depth, or accept the spread).  Invariants re-verified after the
+   budget change: 05C 108.70 ✓, 05L 57.9–62.8 (rise, flagged), A4/A5
+   unchanged; CYXY+SPJC still 0/0/0; gate-off still byte-identical;
+   still deterministic.
+**s78 PART 3 (user in-sim: "HECA is the best one yet, much smoother"):**
+1. ★ User fixed the SPLP CIFP (RW20 → 00152): compare_target SPLP GREEN
+   both tiles, SPLP grade ~190 → **1** (a single 0.58 m vertex-to-edge
+   step on apron -10015 at −12.151288, −76.999317, vertex 73.22 vs
+   projected edge 73.8 at d=0.77 m — OPEN, ⚠ the EdgeStep lat/lon is
+   way-centroid-adjacent; O4_TRACE_LL at it armed 0 nodes).
+2. ★★ **05L SHARP STEPS (user in-sim) FIXED — runway-flex writeback
+   hole**: `_writeback` SKIPS clean 4-corner runway pieces without
+   node_altitudes (their CIFP plane was authoritative) — but the flex
+   re-smooth mutates `elev` at runway nodes, so seam-regraded pieces
+   (node_altitudes) took the 05L rise while plane pieces kept the stale
+   pre-flex plane: piece@60.1/60.4 sharing corners with a risen 62.8
+   ring = a 2.4 m emitted cliff ON the runway.  05C never hit it (all
+   its pieces carry node_altitudes).  Fix (gated): refresh the plane
+   from solved corners via `_canonicalise_rect` when any corner moved
+   >0.05 m.  05L now CONTINUOUS 57.9 → 62.8 (peak at the demanded
+   rise) → 60.7 threshold, shared boundary values exact; a runway
+   VERTICAL-CURVE test flipped to XPASS (the flexed profile is fully
+   curve-compliant).  ⚠ LATENT at gate-off: the same hole exists for
+   s73-p9 dips if a dip ever lands on a plane-only piece (never
+   observed — note for the tie-layer delete session).
+   **SUITE 307p/2f** (SPLP 1-step + HECA within = the M5 spread);
+   invariants re-held (05C 108.70, 05L 57.9-62.8 smooth, A4/A5);
+   deterministic; gate-off byte-identical.
+**OPEN:** (1) in-sim re-verdict on 05L (smooth rise now) + the user's
+"remaining cliffs and steep slopes" — collect locations, likely the
+HECA-72 M5-spread + #185/#189/#209 small-pair families; (2) ★ M5
+spreading ruling on HECA's 72 (above); (3) SPLP's last 0.58 m step;
+(4) measured deletes of the tie layer (§6 — after the verdict);
+(5) KPHX-scale field perf check.  Probes: /tmp/probes/s78_*.py
+(field-vs-routegraph, pairpath, residuals, classify, invariants,
+splp_relax/tile/pieces, 05l_profile/boundary); env `O4_NPF_DEBUG=1`
+(field audit + demands), `O4_BAND_NODES="i,j"` (enforce band stages +
+pair-edge presence).
 
 ## ★★ SESSION 77 PART 4 (2026-06-11) — `docs/network_profile_model.md`: NETWORK PROFILE MODEL (#4) DESIGN, USER-APPROVED ★★
 USER (after the architecture explanation): "I think this is the right

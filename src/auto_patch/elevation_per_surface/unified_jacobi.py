@@ -1972,8 +1972,12 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
         # (measured: SPLP slid to 181 violations unbounded).  "Zero
         # violations" outranks the written profile at the seam (user
         # 2026-06-11).
-        _cl_lo = [elev[i9] - 1.0 for i9 in range(n)]
-        _cl_hi = [elev[i9] + 1.0 for i9 in range(n)]
+        # ±2.5 m: enough to finish a squeeze redistribution (the ±1
+        # first cut left taxiway-G rect planes 0.8 m over-cap at HECA
+        # — the low mouth hit its budget mid-move), small enough that
+        # infeasible-hard-anchor sites (bad input data) stay local.
+        _cl_lo = [elev[i9] - 2.5 for i9 in range(n)]
+        _cl_hi = [elev[i9] + 2.5 for i9 in range(n)]
         _held9 = [False] * n
         for i9 in range(n):
             grp9 = (coupling[i9] if (coupling is not None
@@ -7887,6 +7891,33 @@ def _writeback(layout, elev, bucket_to_idx):
             if _rc_check and _rc_check[0] == _rc_check[-1]:
                 _rc_check = _rc_check[:-1]
             if len(_rc_check) == 4:
+                # CIFP-plane piece: normally authoritative as-is — but a
+                # runway-FLEX (dip/rise re-smooth) mutates ``elev`` at
+                # runway nodes, and skipping the refresh leaves THIS
+                # piece's plane at the pre-flex profile while its
+                # node_altitudes neighbours move (HECA 05L: piece at
+                # 60.1/60.4 sharing corners with a risen 62.8 ring =
+                # a 2.4 m emitted cliff ON the runway).  Refresh the
+                # plane from the solved corners when they moved.
+                if NETWORK_PROFILE_MODEL:
+                    _ce9 = _read_corner_elevs(
+                        _rc_check, elev, bucket_to_idx, layout)
+                    if (_ce9 is not None
+                            and s.altitude_high is not None
+                            and s.altitude_low is not None
+                            and any(min(abs(c9 - s.altitude_high),
+                                        abs(c9 - s.altitude_low)) > 0.05
+                                    for c9 in _ce9)):
+                        _nc9, _hi9, _lo9 = _canonicalise_rect(
+                            _rc_check, _ce9, s.source_axis,
+                            _short_end_pairs_by_axis)
+                        if _nc9 is not None:
+                            if _nc9 != _rc_check:
+                                s.polygon = Polygon(_nc9 + [_nc9[0]])
+                            s.altitude_high = round(float(_hi9), 1)
+                            s.altitude_low = round(float(_lo9), 1)
+                            s.altitude = None
+                            n_rects += 1
                 continue
         if s.polygon is None or s.polygon.is_empty:
             continue
