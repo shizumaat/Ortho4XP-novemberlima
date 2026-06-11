@@ -1,5 +1,62 @@
 # Auto-Patch Status — session 76 = ROUTE-FIELD MODEL (#3) BUILT + IN-SIM TUNING
 
+## ★★ SESSION 77 (2026-06-10) — dev @3a72f9b: APRON INTERIOR-GEODESIC GRADE vs SERVING CENTERLINE — INVESTIGATED + BUILT ★★
+User question: keep aprons from steep areas by measuring, per apron node,
+the shortest INTERIOR path to a taxi-route centerline and holding grade
+along it.  Probe `/tmp/probes/s77_apron_geodesic.py` (MAIN repo; fresh
+HEAD builds /tmp/CYXY_s77.osm /tmp/HECA_s77.osm): graph = airside ring
+edges + ≤80 m in-polygon visibility chords; multi-source Dijkstra from
+corridor seeds (corridors = apt.dat centerlines + taxi-rect source axes,
+the `_apron_corridor_zone_edges` set); two variants — mid-corridor IDW
+attach (alt-estimation error, over-reports) and `VSEED=1` exact
+vertex-alt attach (authoritative).
+**MEASURED (VSEED):**
+1. **At 1.5 % the metric ALREADY holds everywhere** — CYXY max 1.52 %
+   (1 vert over), HECA max 1.49 % (0 over).  Expected mathematically:
+   the surface is assembled from cap-bounded edges and the interior
+   geodesic runs through them.  As a 1.5 % validator law it is ~vacuous;
+   the in-sim "too steep" complaint lives AT the legal cap.
+2. **At 1 % (the user's apron ruling) it is the real lever**: CYXY 77/397
+   verts (19.4 %) over, move budget sum 22.3 m / max 1.08 m / median
+   0.20 m = CHEAP, best-effort achievable.  HECA 332/864 (38.4 %) over,
+   budget 785 m / max 7.49 m / median 1.95 m — DOMINATED by
+   route-law-PINNED verts (graded 1.45-1.49 % against anchors 0.7-1.6 km
+   away by interior path: #209 vs the 116.4 threshold, #185/#195 vs
+   taxiway-A 60.7 — the #186-squeeze/T-wall ARBITRATION family).  A hard
+   1 % geodesic law is infeasible there; must stay preference/yield.
+3. **The current Euclid zone misattributes**: verts with d_eu 13-65 m but
+   d_geo 0.7-1.6 km (corridor across grass / not actually the serving
+   one).  Geodesic binding fixes attribution by construction.
+**→ BUILT SAME SESSION (user: "proceed with both improvements") — dev
+@3a72f9b, gate `APRON_CORRIDOR_GEODESIC` (default ON; OFF = s76 Euclid
+zone byte-identical, verified):**
+1. **Geodesic attribution** — zone by interior-path Dijkstra over the
+   solver edge graph; pair smoothing keeps the s76 Euclid coverage as a
+   UNION (strictly additive — pair caps reference no corridor value, so
+   attribution cannot mislead them; geodesic-only zone MEASURED-REGRESSED
+   CYXY 77→111 >1 % by dropping near-miss coverage).
+2. **Corridor-value bands** — in-zone apron verts clamp best-effort into
+   [corridor_alt ± g·interior_d]; ★ bands CLAMPED INTO the legal route
+   bands, NOT intersect-or-drop (~95 % of wanting nodes have EMPTY
+   intersections — route floors sit above corridor+1 %; collapse to the
+   nearest legal edge moves the apron as close as the law allows).
+3. **Seeds** — corridor-adjacent verts at own values ±g·d0: ≤15 m
+   unconditional; 15-60 m require the connector INSIDE the airside union
+   (apron lanes run through apron INTERIORS — ring verts sit 15-60 m off
+   laterally; across grass = the misattribution).  Plus every aircraft
+   taxi-rect vertex.  HECA seeds 426→961, in-zone 446→569.
+**MEASURED: CYXY spread 44.4→42.6 m (#97 wall 2.7→1.2 m); CYXY+SPJC
+per-axis 0/0/0; HECA within 135 = baseline, cross 0, steps 0, invariants
+exact (05C 109.5 new-apt.dat, 05L 57.9-60.7, A4, A5 flat, 116.5);
+deterministic (PYTHONHASHSEED 1==2); suite 307p/2f = baseline.
+O4_APZ_DEBUG=1 prints seed/zone/pull stats.  ★ The big >1 % residual is
+ROUTE-LAW-PINNED (verts at legal floors 1.3-1.5 % vs corridor — HECA
+budget 785 m, max 7.5 m): by design the preference YIELDS there — that
+class belongs to the write-layer arbitration session (user rulings),
+which remains the top item.**  Probes: s77_apron_geodesic.py (VSEED=1
+authoritative), s77_invariants.py, s77_spread.py, s77_altdiff.py,
+s77_gateoff.py.
+
 ## ★★ SESSION 76 PART 3 (2026-06-10) — dev @cf87793: PAD COHERENCE + PULLED-VERTEX ALTITUDES (user verify report) ★★
 User verify report: within-terminal spikes (32.5 %/5.8 m), terminal1↔#211
 cross steps, junction (user #203) "surprisingly steep and uneven".
