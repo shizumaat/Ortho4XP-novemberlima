@@ -282,6 +282,8 @@ def generate_auto_patches(tile, cifp_path: str,
                 1, "   Auto-patch: Skipping", icao,
                 "(cannot resolve X-Plane root from CIFP path).")
             continue
+        import time as _time
+        _t_apt = _time.time()
         try:
             from .pipeline import build_airport_pavement
             # Forward Ortho4XP-side per-airport data already
@@ -345,11 +347,19 @@ def generate_auto_patches(tile, cifp_path: str,
             # Build-time verification on THIS airport (the tile's own
             # airport set — see airport_in_tile filter above).  Surfaces
             # grade errors to the user; never aborts the build.
+            _t_v = _time.time()
             try:
                 verify_and_log(layout, icao)
             except _DRIVER_EXC as _ve:
                 UI.lvprint(0, "   Auto-patch: verification error for",
                            icao, ":", str(_ve))
+            # Per-airport wall-clock (build vs verify) — the tile-build
+            # perf breakdown lives here; O4_PERF=1 adds the solver's
+            # per-phase + network-field timings underneath.
+            UI.vprint(
+                1, "   Auto-patch:", icao,
+                f"took {_time.time() - _t_apt:.1f}s "
+                f"(verify {_time.time() - _t_v:.1f}s)")
         except _DRIVER_EXC as e:
             UI.vprint(
                 1,

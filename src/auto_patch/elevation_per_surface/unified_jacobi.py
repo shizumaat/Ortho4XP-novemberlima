@@ -267,6 +267,18 @@ def solve(layout, icao: str,
     DEM-elevated terrain to runway level.
     """
     t_start = _time.time()
+    # O4_PERF=1: per-phase wall-clock breakdown (the build-perf
+    # instrumentation — production tile builds print it per airport)
+    _perf_on = _os.environ.get("O4_PERF") == "1"
+    _perf: list = []
+    _perf_t = [t_start]
+
+    def _mark(label9):
+        if _perf_on:
+            now9 = _time.time()
+            _perf.append((label9, now9 - _perf_t[0]))
+            _perf_t[0] = now9
+
     nodes, bucket_to_idx = _build_node_list(layout)
     if not nodes:
         return
@@ -290,6 +302,7 @@ def solve(layout, icao: str,
     _seed_terminals_from_taxi_routes(
         layout, elev, bucket_to_idx, dem_elev)
 
+    _mark("seed")
     tiers = _node_tiers(layout, bucket_to_idx, n)
 
     # Per-tier edge sets.  Each phase grades a tier against the FROZEN tier
@@ -328,6 +341,7 @@ def solve(layout, icao: str,
     runway_nodes = _runway_node_set(layout, bucket_to_idx)
     total_iters += _phase1_hop_priority(
         n, elev, base_hard, dem_elev, shape_constraints_p1, runway_nodes)
+    _mark("phase1-cascade")
 
     # Relief — STEP 2 of the directional grade-relief algorithm (user
     # 2026-05-25).  STEP 1 is the cascade above (seed DEM, spread terminal ->
@@ -379,6 +393,7 @@ def solve(layout, icao: str,
         total_iters += _directional_relief(
             n, elev, relief_hard, relief_eg, relief_el,
             shape_constraints, _RELIEF_MAX_ITERS, tol_m)
+        _mark("relief-1")
         if _step_dbg:
             v, w = _count_within_viol(elev, shape_constraints)
             print(f"[step] {icao} after STEP2 reverse relief+yield: "
@@ -394,6 +409,7 @@ def solve(layout, icao: str,
             n, elev, layout, bucket_to_idx, base_hard,
             shape_constraints, tol_m,
             relief_eg=relief_eg, relief_el=relief_el)
+        _mark("runway-flex-step3")
         # FINAL within-shape enforcement (difference-constraint solve): drive
         # every FEASIBLE within-shape edge to <=cap against the now-settled
         # runway/seam anchors, and report the band-pinned residual (the only
@@ -419,6 +435,7 @@ def solve(layout, icao: str,
                     layout, elev, bucket_to_idx, base_hard, nodes=nodes,
                     coupling=coupling_c,
                     dem_ctx=(dem, tile_lat, tile_lon))
+            _mark("corridor-pass-1")
             # CORRIDOR → RUNWAY FLEX FEEDBACK (user 2026-06-10: "once
             # pavement reaches max grade the runway flexes a bit"):
             # freeze-skipped ties blocked at/through a runway contact are
@@ -460,12 +477,14 @@ def solve(layout, icao: str,
                 total_iters += _directional_relief(
                     n, elev, hard_rw, relief_eg, relief_el,
                     shape_constraints, _RELIEF_MAX_ITERS, tol_m)
+                _mark("flex-relief")
                 snap_c = list(elev)
                 corridor_held, corridor_exempt, rwy_dem2 = \
                     _taxi_corridor_profiles(
                         layout, elev, bucket_to_idx, base_hard,
                         nodes=nodes, coupling=coupling_c,
                         dem_ctx=(dem, tile_lat, tile_lon))
+                _mark("corridor-pass-flex")
                 # merge: keep the deeper of the committed and re-measured
                 # demands so round 2 never un-dips round 1
                 nxt_hi = dict(dem_hi_c)
@@ -489,6 +508,7 @@ def solve(layout, icao: str,
                 total_iters += _directional_relief(
                     n, elev, hard_c, relief_eg, relief_el,
                     shape_constraints, _RELIEF_MAX_ITERS, tol_m)
+                _mark("relief-post-corridor")
             if _step_dbg:
                 v, w = _count_within_viol(elev, shape_constraints)
                 print(f"[step] {icao} after corridor profiles+relief: "
@@ -498,6 +518,7 @@ def solve(layout, icao: str,
             nodes=nodes, layout=layout, bucket_to_idx=bucket_to_idx,
             icao=icao, held_extra=corridor_held,
             band_exempt=corridor_exempt)
+        _mark("enforce")
         if _os.environ.get("O4_TRACE_LL"):
             for part9 in _os.environ["O4_TRACE_LL"].split(";"):
                 try:
@@ -546,6 +567,7 @@ def solve(layout, icao: str,
         _snap_junction_verts_to_rect_edge_plane(
             layout, elev, bucket_to_idx, shape_constraints, base_hard,
             owners)
+        _mark("polish+snap")
 
     # FINAL CO-LEVEL RECONCILE: post-enforce passes that move a single
     # vertex (edge-plane snap, twist, polish) can decohere a rect
@@ -557,8 +579,15 @@ def solve(layout, icao: str,
     if n_lvl and _os.environ.get("O4_STEP_DEBUG") == "1":
         print(f"  [step] re-levelled {n_lvl} decohered flat-end group(s)")
 
+    _mark("reconcile")
     n_terms, n_rects, n_juncs = _writeback(
         layout, elev, bucket_to_idx)
+    _mark("writeback")
+    if _perf_on:
+        tot9 = _time.time() - t_start
+        parts9 = " ".join(f"{k}={v:.1f}s" for (k, v) in _perf
+                           if v >= 0.05)
+        print(f"  [perf] {icao} solve {tot9:.1f}s: {parts9}")
     _report(icao, total_iters, max_iters,
              _time.time() - t_start,
              n_terms, n_rects, n_juncs)

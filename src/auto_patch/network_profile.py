@@ -324,6 +324,18 @@ def build_and_solve(
     Without these the field can legally sit where a seam pin's ceiling
     forbids the surface to follow (a 1 m lo>hi pinch at CYXY #63).
     """
+    import os as _os
+    import time as _time
+    _perf_on = _os.environ.get("O4_PERF") == "1"
+    _pf: list = []
+    _pt = [_time.time()]
+
+    def _mark(label9):
+        if _perf_on:
+            now9 = _time.time()
+            _pf.append((label9, now9 - _pt[0]))
+            _pt[0] = now9
+
     raw = []
     raw_is_apt = []
     for k, (pa, pb) in enumerate(segments_xy):
@@ -415,6 +427,7 @@ def build_and_solve(
                     continue
                 contact_pts.append((x, y, ea + u * (eb - ea), ref))
 
+    _mark("splits+contacts")
     # ── graph build (snapped keys; weights = true sub-segment lengths)
     coord: Dict[Tuple[int, int], Tuple[float, float]] = {}
     edge_w: Dict[Tuple[Tuple[int, int], Tuple[int, int]], float] = {}
@@ -601,6 +614,7 @@ def build_and_solve(
             if best4 is not None:
                 _add_edge((x, y), coord[best4[1]], w=max(best4[0], 0.5))
 
+    _mark("edges+midlines")
     # ── PROXIMITY COUPLING through pavement: any two graph nodes whose
     # straight connector lies inside the airside union are points on ONE
     # contiguous surface — the downstream band law couples them through
@@ -647,6 +661,7 @@ def build_and_solve(
                         edge_w[ek] = max(w9, 0.5)
                         prox_keys.add(ek)
 
+    _mark("proximity")
     # ── LAW-ENTRY GAP EDGES: the downstream route-band law enters every
     # anchor at its nearest APT-CENTERLINE node across a straight gap at
     # cap — for field nodes off the apt rows (discovered-rect axes,
@@ -692,6 +707,7 @@ def build_and_solve(
             edge_w[ek] = max(d, 0.5)
             prox_keys.add(ek)            # cap-only, not a taxi path
 
+    _mark("gap-edges")
     # ── index the nodes (sorted keys → deterministic ids)
     keys = sorted(coord)
     idx_of = {kk: i for i, kk in enumerate(keys)}
@@ -744,6 +760,7 @@ def build_and_solve(
                     n_interior += 1
                 break
 
+    _mark("index+interior")
     # ── components
     parent = list(range(n))
 
@@ -841,6 +858,7 @@ def build_and_solve(
                         factor = need
         F.relax[comp] = factor
 
+    _mark("relax")
     # ── runway-flex demands (M3, BEFORE relaxing): per runway ref, the
     # ceiling AND floor its contacts get from every OTHER ref's contacts
     # — "the profile value the network wants at the contact".  DIP and
@@ -876,6 +894,7 @@ def build_and_solve(
                     and wanted_lo - F.elev[i] >= _DEMAND_MIN_DIP_M):
                 F.demands.append((F.nodes[i], wanted_lo, ref, "rise"))
 
+    _mark("demands")
     # ── anchor-feasibility bands at the (relaxed) effective cap
     INF = float("inf")
     F.band_lo = [-INF] * n
@@ -932,6 +951,7 @@ def build_and_solve(
                     mid = 0.5 * (F.band_lo[i] + F.band_hi[i])
                     F.band_lo[i] = F.band_hi[i] = mid
 
+    _mark("bands")
     # ── seed (M5), clamp into bands.  ANCHORED components seed at DEM —
     # the runway-profile pattern, correct grade is king and DEM the
     # starting point.  ANCHOR-LESS components seed at the CURRENT SOLVED
@@ -1044,6 +1064,7 @@ def build_and_solve(
             # to the cap-only phase (usually an immediate no-op)
             dg_per_m = 0.0
 
+    _mark("gs-solve")
     F._build_sample_grid()
 
     comp_stats: Dict[int, Dict] = {}
@@ -1058,6 +1079,9 @@ def build_and_solve(
         st = comp_stats[F.comp_of[i]]
         st["contacts"] += 1
         st["refs"].add(ref)
+    if _perf_on:
+        parts9 = " ".join(f"{k}={v:.2f}s" for (k, v) in _pf if v >= 0.01)
+        print(f"  [perf]   field build: {parts9}")
     F.audit = {
         "nodes": n,
         "edges": len(edge_list),
