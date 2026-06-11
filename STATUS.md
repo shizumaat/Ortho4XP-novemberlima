@@ -1,4 +1,41 @@
-# Auto-Patch Status — session 78 = NETWORK PROFILE MODEL (#4) BUILT, gate `NETWORK_PROFILE_MODEL` default ON; NEXT = in-sim verdict
+# Auto-Patch Status — session 78 = NETWORK PROFILE MODEL (#4) BUILT + HECA in-sim rulings; NEXT = in-sim re-verdict + road-strip re-role question
+
+## ★★ SESSION 78 PART 5 (2026-06-11) — dev @c49b29e: HECA IN-SIM RULINGS (#198 cliff, T1/T2 bowl) ★★
+User in-sim items: (1) #198 sharp ridge near 30.1070553,31.4004721;
+(2) #198 flatter + 3-5 m LOWER along its 05C edge (a switchback road
+climbs between it and taxiway S — a real cliff belongs there);
+(3) terminals 1/2 too low (apron bowls down to them; groundside should
+absorb, apron stays a smooth ~1 % plane).
+1. **APRON TERRAIN-BREAK EDGE RETREAT** (post-writeback, gated): rim
+   runs route-pinned ≥2.5 m above the LOCAL DEM, with the apron's
+   interior-lane field median agreeing with its DEM median, get lowered
+   to terrain (DEM-floored) and UNWELDED (10 m local-normal retreat,
+   containment-tested) — the strip becomes non-airside and the
+   clearance machinery renders the cliff face.  #198 rim 107.9-108.2 →
+   **104.3-105.1** vs junction 108.2 across the road gap ✓ the ruling.
+   Hard-won guards (each measured): RUNWAY-anchor law floor via
+   `F.band_lo` (CYXY's route-law-LIFTED aprons = legal lift, 34 viol
+   when missed); runs ≥3 with apply-feasibility BEFORE the run filter
+   (partial application = new ring steps); local-NORMAL inward moves
+   (centroid rays exit concave rings — SPJC/SPLP overlap reds);
+   welded-unmovable verts kill their whole run; ≥0.8 m min drop.
+   ⛔ field-graph pavement gatings (gap edges/raw segments) tried +
+   MEASURED-REVERTED — they remove the across-grass law-parity
+   couplings CYXY needs.
+2. **PAD 1 %-PLANE LOWER BOUND** in the leaf re-level: bound the
+   adjacent-apron median from below by the corridor 1 %-plane (c_lo,
+   two-rate beyond the zone, ≥8 samples so terminal7 ≈ 70 stands).
+   terminal1 99.7 → 100.2 (+0.5; in-sim verdict whether enough).
+**HECA within 68 / cross 0 / steps 0** (s77 ship: 140); 05C 108.70 ✓,
+05L 57.9-62.8 smooth ✓; SUITE 316p/2f (HECA within + SPLP's one 0.58 m
+step); CYXY/SPJC + overlap gates green; deterministic; gate-off
+byte-identical (modulo the concurrent o4_apt_dat header @8cf7480).
+**OPEN → user:** (a) emit-#197 — the SWITCHBACK ROAD strip between
+#198 and S is mapped as an APRON and carries ~12 violations climbing
+103.8→108.7 at 30.110943,31.402940; physically a road → re-role to
+groundside (4 % law, DEM-follow)?  (b) is T1/T2 +0.5-1.0 enough or
+push the pads higher?  (c) in-sim re-verdict on the #198 cliff edge.
+
 
 ## ★★ SESSION 78 (2026-06-11) — NETWORK PROFILE MODEL (#4) BUILT END-TO-END (`auto_patch/network_profile.py`), DEFAULT ON ★★
 Implements `docs/network_profile_model.md` (user-approved s77p4).  ONE
