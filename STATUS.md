@@ -1,5 +1,50 @@
 # Auto-Patch Status — session 73 = CORRIDORS LIVE + CURVE-AWARE GRADING RULED (branch `corridor-curves`, parked for tuning)
 
+## ★★ SESSION 73 PART 10g (2026-06-10) — `corridor-curves` @153ad57: CYXY + SPJC PER-AXIS 0/0/0; HECA steps 0; ROOT OF THE APRON RESIDUE FOUND ★★
+W1-W3 from the 10f NEXT list (all general):
+1. **W2 SKEWED-RECT END-PAIR CAP** (post-solve pre-write, corridor write
+   loop): the chain solve caps a rect's drop over the MOUTH-MID span but
+   the emitted plane's binding run is its SHORTEST LONG EDGE — skewed
+   ends carry the full delta over less distance (CYXY stub A: 0.81 m
+   legal over the ~50 m span = 1.74 % on the 48.9 m edge).  Minimal pair
+   clamp (free ends first, frozen pairs split, hard never moves).
+   ★ MUST run AFTER the per-chain solve — the pre-solve version was
+   re-solved away (a singleton's near mouth is a MID-chain station).
+   **CYXY per-axis 1→0 (FULL GREEN 0/0/0); SPJC per-axis 11→0 (FULL
+   GREEN — its junction marginals were the same skew class).**
+2. **W3 `_insert_junction_corners_into_grazing_apron_edges`** (pre-solve,
+   pipeline; junction↔apron counterpart of the rect-corner pass): a
+   junction vertex 0.73 m off an apron edge BETWEEN two shared corners
+   (HECA #199↔#194) stepped off the apron's lerp at emit.  Route the
+   apron boundary THROUGH the corner.  **HECA steps 2→0** (was the grade
+   gate's first-failing assert).
+3. **W1 DIAGNOSIS — the "write layer" was INNOCENT** (trace machinery
+   kept, env `O4_TRACE_LL="lat,lon;…"`: per-node corridor write trace +
+   enforce band trace + provenance Dijkstra for the binding lo-anchor).
+   MEASURED: frozen tie values ARE delivered verbatim (G's 101.42
+   station-written); the pass-2 re-consensus legitimately re-derives
+   them post-relief; and the #261-class junction "cliffs" are per-axis
+   EXEMPT diagonals (standalone check_grade without taxi_axes_ll
+   OVER-REPORTS — always audit with /tmp/probes/s75_axis_audit.py).
+   ★★ THE REAL apron-residue driver: the HARD 05C contact (108.74,
+   n656) reaches the A-mouth area through ~2,500 m of CHAINED VISIBILITY
+   CHORDS — ~580 m SHORT of the real taxi route — demanding ≥71.2 where
+   the route-justified level is ~62.5 (edge-graph band [71.2, 62.7]
+   = infeasible by 8.5 m, distributed as ~70 small #190/#194 apron
+   violations).  This is exactly the km-scale chord under-measurement
+   the USER-APPROVED route-field model (s73-p3 item #3) eliminates:
+   visibility chords demoted to a LOCAL smoothness cap (~60-100 m),
+   long-range law = taxi-route distance from anchors, validator changed
+   identically.  **→ NEXT = BUILD #3.  It should drain the bulk of
+   HECA's remaining per-axis within=216 (apron chains + terminal4's
+   geodesic-vs-route tension + J3/U class).**
+**HECA per-axis after 10g: within 216 / cross 0 / steps 0; runways
+exact (05C 108.7, 05L 57.9-60.7, A4 climb, A5 flat).
+★★ SUITE 307p/2f — CYXY GATE GREEN, SPJC GATE GREEN (session started
+at 4f).  Remaining: SPLP (user-deferred lump) + HECA (within only —
+route-field #3 territory).
+Builds: /tmp/HECA_w3.osm /tmp/SPJC_w2.osm /tmp/CYXY_w2b.osm.**
+
 ## ★ SESSION 73 PART 10f (2026-06-10) — `corridor-curves` @0038375: P1-P4 BUILT — SPJC GATE GREEN; suite 306p/3f ★
 Implemented the p10e plan P0-P4 (all general, no airport-specific code).
 **SUITE 306p/3f (was 305p/4f): SPJC grade gate GREEN.**  Runways held
