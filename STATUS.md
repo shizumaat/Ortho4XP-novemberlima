@@ -1,4 +1,41 @@
-# Auto-Patch Status — session 78 = NETWORK PROFILE MODEL (#4) BUILT + HECA in-sim rulings; NEXT = in-sim re-verdict + road-strip re-role question
+# Auto-Patch Status — session 78 = NETWORK PROFILE MODEL (#4) BUILT + HECA in-sim rulings; NEXT SESSION STARTS BELOW
+
+## ★★ NEXT SESSION (user directives, 2026-06-11 session close) ★★
+1. **The #198 road strip should have been DECOMPOSED, not patched.**
+   The narrow, long switchback strip beside apron #198 (emit-#197,
+   ~30.110943,31.402940, climbing 103.8→108.7) is a ROAD: it should
+   have been SPLIT AT ITS MOUTH and reclassified as a road with 4 %
+   grading — a JUNCTION at the far south-west and SLOPING RECTS for
+   the two main legs.  INVESTIGATE why phase-1 geometry didn't do
+   that: why did the centerline/rect decomposition leave it inside an
+   apron blob?  (Is there a 1206 service-road row / OSM road there
+   that was dropped?  Did the narrowness test miss it?  Is it part of
+   apt.dat's apron polygon with no centerline at all — and should the
+   discovered-taxiway medial-axis machinery or a road-discovery
+   equivalent have caught it?)  The s78p5 edge-retreat treats the
+   SYMPTOM (the cliff edge); the decomposition is the real fix and
+   likely replaces the retreat at this site.
+2. **★★ RULING: NO shape may ever check grade ACROSS GRASS.**
+   s78p5 claimed CYXY needs across-grass law-parity couplings (the
+   field's LAW-ENTRY GAP EDGES + anchor straight-gap entries; removing
+   them regressed CYXY to 34 violations) — INVESTIGATE that claim and
+   kill the class.  The route-band law's straight endpoint-gap entry
+   (route_field.py docstring says a far vertex "gets a WEAK band ...
+   that is CORRECT behaviour") and `_runway_reach_bands`' gap charging
+   couple surfaces across non-pavement; the field copied that topology
+   for parity.  Per the ruling the LAW itself is wrong wherever the
+   connector crosses grass: entry gaps must be pavement-gated (or
+   interior-path-measured) in route_field + _runway_reach_bands + the
+   field TOGETHER (validator simultaneity), and CYXY's 34-violation
+   regression must be root-caused properly — what did those couplings
+   paper over (probably the discovered-fragment fields disagreeing
+   with held writes — the n31/n42/n98 class) and what is the
+   pavement-respecting fix (interior-path entries? prox-style
+   notch-inflated gating? component-local anchors)?
+   Start: revert-test /tmp-style at CYXY with the s78p5 gatings
+   re-applied (they exist in git history @c49b29e^ diffs), classify
+   the 34, fix the root, then apply the ruling everywhere.
+
 
 ## ★★ SESSION 78 PART 5 (2026-06-11) — dev @c49b29e: HECA IN-SIM RULINGS (#198 cliff, T1/T2 bowl) ★★
 User in-sim items: (1) #198 sharp ridge near 30.1070553,31.4004721;
