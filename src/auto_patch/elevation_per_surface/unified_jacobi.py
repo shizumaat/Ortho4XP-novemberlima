@@ -1411,6 +1411,26 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                 lo[i] = float("-inf")
                 hi[i] = float("inf")
     band_pinned = {i for i in range(n) if lo[i] > hi[i] + 1e-6}
+    # PINNED-NODE LEAST-VIOLATION PLACEMENT (s77p3, user: "aprons are
+    # allowing some extreme dips — they can't just follow terrain"):
+    # a band-pinned node (floor above ceiling — the squeeze families) is
+    # held through the projections, but holding it at its RELIEF value
+    # leaves it wherever DEM put it — HECA #193's valley vertex sat at
+    # 99.46 with band [104.14 lo, 102.38 hi]: 2.9 m below even the
+    # CEILING, violating both laws by more than necessary.  Any value
+    # outside [hi, lo] is Pareto-worse than the nearest interval edge;
+    # clamp into the inverted interval (nearest edge keeps the move
+    # minimal and inherits the band fields' edge-Lipschitz smoothness).
+    # The projections below then conform free neighbours around the
+    # lifted values.
+    if WRITE_ARBITRATION:
+        held0 = held_extra or ()
+        for i in band_pinned:
+            if is_hard[i] or i in held0:
+                continue
+            v0 = min(max(elev[i], hi[i]), lo[i])
+            if v0 != elev[i]:
+                elev[i] = v0
     if _os.environ.get("O4_TRACE_LL") and nodes is not None \
             and layout is not None:
         hard_plus = list(is_hard)
@@ -1689,14 +1709,29 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                 n_zone = len(zone_edges)
                 lo2 = list(lo)
                 hi2 = list(hi)
+                # TWO-RATE long-range apron law (s77p3, user: "aprons are
+                # allowing some extreme dips — they can't just follow
+                # terrain when distant from a taxiway"): the corridor
+                # VALUE bands apply at 1 % within the smoothing zone and
+                # at the LEGAL apron grade beyond it, over the full
+                # interior-path field — with chords windowed at 80 m and
+                # the route bands holed, distant apron interiors had NO
+                # long-range constraint at all (HECA #193: ring 89.6 to
+                # 110.1, a 9.9 m DEM valley between vertices 126-200 m
+                # apart).  The extra slack reconstructs the legal-rate
+                # law on the geodesic-shortest path.
+                cap_l = _role_grade(ROLE_APRON)
+                g_z = APRON_CORRIDOR_SMOOTH_GRADE
                 for sc3 in shape_constraints:
                     if sc3["role"] != ROLE_APRON:
                         continue
                     for i in sc3["nodes"]:
-                        if i >= n or geo_dist[i] > R_z:
+                        if i >= n or geo_dist[i] == float("inf"):
                             continue
                         if lo2[i] > hi2[i]:
                             continue          # band-pinned: arbitration's job
+                        extra = max(0.0, geo_dist[i] - R_z) \
+                            * max(0.0, cap_l - g_z)
                         # Corridor band CLAMPED INTO the legal band (not
                         # intersected-or-dropped): when the corridor value
                         # is unreachable legally (route floors/ceilings —
@@ -1704,8 +1739,8 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                         # the nearest legal edge, moving the apron as
                         # CLOSE to its corridor as the law allows instead
                         # of leaving it at DEM height.
-                        tlo = max(lo2[i], min(c_lo[i], hi2[i]))
-                        thi = min(hi2[i], max(c_hi[i], lo2[i]))
+                        tlo = max(lo2[i], min(c_lo[i] - extra, hi2[i]))
+                        thi = min(hi2[i], max(c_hi[i] + extra, lo2[i]))
                         if (tlo, thi) != (lo2[i], hi2[i]):
                             lo2[i] = tlo
                             hi2[i] = thi
@@ -3979,6 +4014,12 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
         rects.append({"shape": s, "ring": ring, "idxs": idxs,
                       "projs": projs, "span": span, "mouths": mouths})
 
+    if _os.environ.get("O4_CORR_CHDBG") == "1":
+        have9 = {id(r["shape"]) for r in rects}
+        drop9 = sorted((rr["shape"].ref or "?", round(rr["shape"].polygon.area))
+                       for rr in raw if id(rr["shape"]) not in have9)
+        print(f"[chdbg] raw={len(raw)} rects={len(rects)} "
+              f"mouth-dropped={drop9}")
     if not rects:
         return set()
     for r in rects:
@@ -4237,6 +4278,13 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                 print(f"[corr] singleton keep={jt} "
                       f"ref={rects[c[0][0]]['shape'].ref or '?'} "
                       f"juncs={[rects[c[0][0]]['mouths'][m].get('junc') for m in (0, 1)]}")
+    # NOTE (s77p3 measured, then REVERTED): profiling ALL singletons (not
+    # just runway-touching) closed #256 fully and restored A5 ≈ 60.1, but
+    # the tie network distributed the C/B-vs-S route squeeze onto MORE
+    # surfaces — standalone >5 % walls went 21 → 46 (writes) / 29
+    # (tie-only).  Grading the through-apron connectors (HECA taxiway B,
+    # user request) needs per-tie handling of route-pinned-apart mouth
+    # networks first — the open design item.
     chains = [c for c in chains if len(c) >= 2 or _touches_runway(c)]
 
     # ── ROUTE BANDS (route-field model, user 2026-06-10 "correct grade is
@@ -4399,6 +4447,21 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
     # reconciliation was sequential first-writer-wins).  The JOINT
     # corridor-network solve below treats every shared-junction elevation
     # as ONE common variable across all chains.
+    if _os.environ.get("O4_CORR_CHDBG") == "1":
+        cov9: set = set()
+        for ch9 in chains:
+            if not ch9:
+                continue
+            cov9.update(ri9 for (ri9, _n9, _f9) in ch9)
+        miss9 = sorted({rects[ri9]["shape"].ref or "?"
+                        for ri9 in range(len(rects)) if ri9 not in cov9})
+        bch9 = [sorted({rects[ri9]["shape"].ref or "?"
+                        for (ri9, _n, _f) in ch9})
+                for ch9 in chains if ch9
+                and any((rects[ri9]["shape"].ref or "") == "B"
+                        for (ri9, _n, _f) in ch9)]
+        print(f"[chdbg] chains={sum(1 for c in chains if c)} "
+              f"uncovered-refs={miss9} B-chains={bch9}")
     chain_data: list = []
     for chain in chains:
         stations: list = []
@@ -4752,6 +4815,20 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                                     * abs(sts[k7]["d"] - s8["d"]))
                             vv7 = min(vv7, lim8)
                     cd["elevs"][k7] = max(cd["elevs"][k7], vv7)
+    # ≥2 stations: a SINGLETON stub between two junctions/aprons is a real
+    # corridor (two mouth anchors, one plane) — the old ≥3 floor silently
+    # dropped every unchained stub, so nothing profiled or tied them and
+    # their surroundings followed raw relief (s77p3, user at HECA #198:
+    # "the taxi corridors passing through this apron are not being
+    # graded" — taxiway B = five singleton stubs, all dropped here).
+    if _os.environ.get("O4_CORR_CHDBG") == "1":
+        for cd in chain_data:
+            refs9 = sorted({rects[ri]["shape"].ref or "?"
+                            for (ri, _n, _f) in cd["chain"]})
+            print(f"[chdbg] L={cd['L']:.0f} sts={len(cd['stations'])} "
+                  f"{refs9}"
+                  + ("" if cd["L"] >= 30.0
+                     and len(cd["stations"]) >= 2 else " DROPPED"))
     chain_data = [cd for cd in chain_data
                   if cd["L"] >= 30.0 and len(cd["stations"]) >= 3]
 
@@ -5258,7 +5335,9 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
         sts = cd["stations"]
         lo, hi = float("-inf"), float("inf")
         for j in range(len(sts)):
-            if j == k or not cd["anchored"][j]:
+            if j == k and WRITE_ARBITRATION:
+                continue
+            if not cd["anchored"][j]:
                 continue
             dd = abs(sts[k]["d"] - sts[j]["d"])
             lo = max(lo, cd["elevs"][j] - TAXI_MAX_GRADE * dd)
