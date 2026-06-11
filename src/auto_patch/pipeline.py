@@ -195,8 +195,10 @@ def _unify_airside_geometry(layout, icao: str) -> None:
     # the graze often only exists after the junction-repair / overlap-clip
     # passes (the Phase-1 call in elevation.py catches the early cases).
     from .pavement.vertices import (
+        _insert_junction_corners_into_grazing_apron_edges,
         _insert_rect_corners_into_grazing_junction_edges)
     _insert_rect_corners_into_grazing_junction_edges(layout)
+    _insert_junction_corners_into_grazing_apron_edges(layout)
 
     # Weld near-coincident airside vertices to one fresh canonical
     # coordinate so a rect corner and the junction vertex beside it become a

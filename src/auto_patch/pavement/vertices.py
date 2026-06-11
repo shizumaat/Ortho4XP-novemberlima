@@ -31,6 +31,7 @@ from shapely.strtree import STRtree
 from ..layout import (
     BuiltShape,
     PavementLayout,
+    ROLE_APRON,
     ROLE_BOUNDARY,
     ROLE_CROSS_CONNECTOR,
     ROLE_GROUNDSIDE_PAVEMENT,
@@ -954,6 +955,128 @@ def _insert_rect_corners_into_grazing_junction_edges(
                   f"{piece.area:,.0f} m² (ref={ref or '?'})")
     if os.environ.get("O4_GRAZE_DEBUG") == "1":
         print(f"[graze] insert pass: {n_modified} junction(s) modified")
+    return n_modified
+
+
+def _insert_junction_corners_into_grazing_apron_edges(
+        layout: "PavementLayout", tol_m: float = 1.0) -> int:
+    """Insert a junction ring CORNER into an APRON edge that grazes past
+    it with no shared node — the junction↔apron counterpart of
+    :func:`_insert_rect_corners_into_grazing_junction_edges`.
+
+    HECA #199: a junction vertex sat 0.73 m off apron #194's edge
+    BETWEEN two properly shared corners; the junction's solved value
+    steps off the apron edge's straight lerp at emit (0.51/0.59 m
+    vertex-to-edge + mid-edge steps — the grade gate's step assert).
+    Routing the apron boundary THROUGH the corner makes the node
+    canonically shared so the solver couples the surfaces.
+
+    Geometric only, pre-solve; per-vertex altitudes, when present,
+    interpolate at the insertion point.  Corners that already coincide
+    with an apron vertex (≤0.05 m) are attached — skipped.  Returns the
+    number of apron shapes modified.
+    """
+    corners: list[tuple[float, float]] = []
+    for s in layout.shapes:
+        if s.role != ROLE_JUNCTION:
+            continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        try:
+            corners.extend(open_ring(list(s.polygon.exterior.coords)))
+        except _GEOM_EXC:
+            continue
+    if not corners:
+        return 0
+    n_modified = 0
+    for shape in layout.shapes:
+        if shape.role != ROLE_APRON:
+            continue
+        if shape.polygon is None or shape.polygon.is_empty:
+            continue
+        try:
+            ring = list(shape.polygon.exterior.coords)
+        except _GEOM_EXC:
+            continue
+        ring_open = ring[:-1] if (ring and ring[0] == ring[-1]) else ring
+        n_v = len(ring_open)
+        if n_v < 3:
+            continue
+        minx, miny, maxx, maxy = shape.polygon.bounds
+        ins: dict[int, list[tuple[float, tuple[float, float]]]] = {}
+        for (cx, cy) in corners:
+            if not (minx - tol_m <= cx <= maxx + tol_m
+                    and miny - tol_m <= cy <= maxy + tol_m):
+                continue
+            # already an apron vertex (shared/welded) → attached
+            if any((cx - vx) ** 2 + (cy - vy) ** 2 <= 0.0025
+                   for (vx, vy) in ring_open):
+                continue
+            best = None
+            for i in range(n_v):
+                ax, ay = ring_open[i]
+                bx, by = ring_open[(i + 1) % n_v]
+                dx, dy = bx - ax, by - ay
+                seg2 = dx * dx + dy * dy
+                if seg2 < 1.0:
+                    continue
+                t = ((cx - ax) * dx + (cy - ay) * dy) / seg2
+                if t <= 0.02 or t >= 0.98:
+                    continue
+                px, py = ax + t * dx, ay + t * dy
+                d2 = (cx - px) ** 2 + (cy - py) ** 2
+                if d2 <= tol_m * tol_m and (best is None or d2 < best[0]):
+                    best = (d2, i, t)
+            if best is not None:
+                ins.setdefault(best[1], []).append((best[2], (cx, cy)))
+        if not ins:
+            continue
+        alts = (list(shape.node_altitudes)
+                if shape.node_altitudes else None)
+        closed_alts = alts is not None and len(alts) == n_v + 1
+        if alts is not None and len(alts) not in (n_v, n_v + 1):
+            alts = None
+        new_ring: list[tuple[float, float]] = []
+        new_alts: list[float] | None = [] if alts is not None else None
+        for i in range(n_v):
+            new_ring.append(ring_open[i])
+            if new_alts is not None:
+                new_alts.append(alts[i])
+            for t, pt in sorted(ins.get(i, ())):
+                if (pt[0] - new_ring[-1][0]) ** 2 \
+                        + (pt[1] - new_ring[-1][1]) ** 2 < 0.0025:
+                    continue
+                new_ring.append(pt)
+                if new_alts is not None:
+                    a0 = alts[i]
+                    a1 = alts[(i + 1) % n_v]
+                    new_alts.append(a0 + t * (a1 - a0))
+        try:
+            new_poly = Polygon(new_ring + [new_ring[0]],
+                               list(shape.polygon.interiors))
+        except _GEOM_EXC:
+            continue
+        # Bending an apron edge ≤ tol can self-intersect a concave ring —
+        # this pass is opportunistic, skip rather than repair.
+        if (not new_poly.is_valid or new_poly.is_empty
+                or new_poly.geom_type != "Polygon"):
+            continue
+        if abs(new_poly.area - shape.polygon.area) \
+                > 0.01 * shape.polygon.area + 50.0:
+            continue
+        shape.polygon = new_poly
+        if new_alts is not None:
+            if closed_alts:
+                new_alts.append(new_alts[0])
+            shape.node_altitudes = new_alts
+        n_modified += 1
+        if os.environ.get("O4_GRAZE_DEBUG") == "1":
+            pts = [pt for lst in ins.values() for (_t, pt) in lst]
+            print(f"[graze] apron ref={shape.ref or '?'} inserted "
+                  f"{len(pts)} junction corner(s): "
+                  + " ".join(f"({px:.0f},{py:.0f})" for px, py in pts))
+    if os.environ.get("O4_GRAZE_DEBUG") == "1":
+        print(f"[graze] apron insert pass: {n_modified} apron(s) modified")
     return n_modified
 
 

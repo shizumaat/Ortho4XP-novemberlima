@@ -483,6 +483,18 @@ def solve(layout, icao: str,
             nodes=nodes, layout=layout, bucket_to_idx=bucket_to_idx,
             icao=icao, held_extra=corridor_held,
             band_exempt=corridor_exempt)
+        if _os.environ.get("O4_TRACE_LL"):
+            for part9 in _os.environ["O4_TRACE_LL"].split(";"):
+                try:
+                    la9, lo9 = (float(x) for x in part9.split(","))
+                    xq, yq = layout.ll_to_m(la9, lo9)
+                except _GEOM_EXC:
+                    continue
+                for i9, (xn9, yn9) in enumerate(nodes):
+                    if (xn9 - xq) ** 2 + (yn9 - yq) ** 2 <= 2.25:
+                        print(f"[trace] post-enforce n{i9}="
+                              f"{elev[i9]:.2f} "
+                              f"held={i9 in (corridor_held or ())}")
         owners: dict = {}
         for sc in shape_constraints:
             for i in sc["nodes"]:
@@ -932,6 +944,62 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                 lo[i] = float("-inf")
                 hi[i] = float("inf")
     band_pinned = {i for i in range(n) if lo[i] > hi[i] + 1e-6}
+    if _os.environ.get("O4_TRACE_LL") and nodes is not None \
+            and layout is not None:
+        hard_plus = list(is_hard)
+        for i9 in (held_extra or ()):
+            if i9 < n:
+                hard_plus[i9] = True
+        glo9, ghi9 = _grade_bands(n, elev, hard_plus, all_edges)
+        # provenance Dijkstra: which anchor BINDS the lo side
+        adj9: dict = {}
+        for (i2, j2, c2) in all_edges:
+            adj9.setdefault(i2, []).append((j2, c2))
+            adj9.setdefault(j2, []).append((i2, c2))
+        dist9 = [float("inf")] * n
+        src9: list = [None] * n
+        pq9: list = []
+        for a2 in range(n):
+            if hard_plus[a2]:
+                dist9[a2] = -elev[a2]
+                src9[a2] = a2
+                heapq.heappush(pq9, (dist9[a2], a2))
+        while pq9:
+            d2, u2 = heapq.heappop(pq9)
+            if d2 > dist9[u2]:
+                continue
+            for v2, c2 in adj9.get(u2, ()):
+                nd2 = d2 + c2
+                if nd2 < dist9[v2]:
+                    dist9[v2] = nd2
+                    src9[v2] = src9[u2]
+                    heapq.heappush(pq9, (nd2, v2))
+        for part9 in _os.environ["O4_TRACE_LL"].split(";"):
+            try:
+                la9, lo9q = (float(x) for x in part9.split(","))
+                xq, yq = layout.ll_to_m(la9, lo9q)
+            except _GEOM_EXC:
+                continue
+            for i9, (xn9, yn9) in enumerate(nodes):
+                if (xn9 - xq) ** 2 + (yn9 - yq) ** 2 <= 2.25:
+                    s9 = src9[i9]
+                    sinfo = "-"
+                    if s9 is not None:
+                        sx9, sy9 = nodes[s9]
+                        sll = layout.m_to_ll(sx9, sy9)
+                        sinfo = (f"n{s9}@({sll[0]:.6f},{sll[1]:.6f}) "
+                                 f"e={elev[s9]:.2f} "
+                                 f"hard={is_hard[s9]} "
+                                 f"held={s9 in (held_extra or ())} "
+                                 f"cap-path="
+                                 f"{elev[s9] + dist9[i9]:.2f}m")
+                    print(f"[trace] enforce n{i9} e={elev[i9]:.2f} "
+                          f"routeband=[{lo[i9]:.2f},{hi[i9]:.2f}] "
+                          f"edgeband=[{glo9[i9]:.2f},{ghi9[i9]:.2f}] "
+                          f"hard={is_hard[i9]} "
+                          f"held={i9 in (held_extra or ())} "
+                          f"pinned={i9 in band_pinned} "
+                          f"lo-anchor: {sinfo}")
     # Terminals YIELD in the final enforce instead of being frozen at their
     # STEP-2 level (user model phase 1/2: terminals move to the level the
     # connecting aprons need).  Freezing them held the worst HECA squeeze open —
@@ -4801,11 +4869,33 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
             if tw:
                 twin[i2] = tw
 
+    # write tracing: O4_TRACE_LL="lat,lon;lat,lon" prints every corridor
+    # write touching nodes within 1.5 m of the given points
+    tr_set: set = set()
+    tr_ctx = ["?"]
+    if _os.environ.get("O4_TRACE_LL") and nodes is not None:
+        for part9 in _os.environ["O4_TRACE_LL"].split(";"):
+            try:
+                la9, lo9 = (float(x) for x in part9.split(","))
+                xq, yq = layout.ll_to_m(la9, lo9)
+            except _GEOM_EXC:
+                continue
+            for i9, (xn9, yn9) in enumerate(nodes):
+                if (xn9 - xq) ** 2 + (yn9 - yq) ** 2 <= 2.25:
+                    tr_set.add(i9)
+        print(f"[trace] corridor write-trace armed for nodes "
+              f"{sorted(tr_set)}")
+
     def _write(i, v):
+        v0 = v
         for j2 in twin.get(i, ()):
             if j2 in written:
                 v = elev[j2]               # first writer wins across twins
                 break
+        if i in tr_set:
+            print(f"[trace]   write n{i}={v:.2f}"
+                  + (f" (twin override of {v0:.2f})" if v != v0 else "")
+                  + f" ctx={tr_ctx[0]}")
         elev[i] = v
         written.add(i)
         # a sloping rect's END-PAIR corners must stay CO-LEVEL (the
@@ -4814,6 +4904,8 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
         # 111.7, which the emit averaged into a 0.2 m cross-shape step)
         for j2 in (coupling.get(i, ()) if coupling else ()):
             if j2 != i and j2 not in written and not base_hard[j2]:
+                if j2 in tr_set:
+                    print(f"[trace]   write n{j2}={v:.2f} ctx=couple<-n{i}")
                 elev[j2] = v
                 written.add(j2)
 
@@ -4905,12 +4997,74 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                 + ("R" if st["nodes"] & rwy_nodes else "")
                 + ("A" if a else "")
                 for st, p, e, a in zip(stations, pre, elevs, anchored)))
+        # SKEWED-RECT END-PAIR CAP (post-solve, pre-write): the banded
+        # solve caps a rect's profile drop over the MOUTH-MID distance,
+        # but the emitted plane's binding run is the SHORTEST LONG EDGE —
+        # a rect with skewed ends carries the full end-to-end delta over
+        # less distance than the span (CYXY stub A: 0.81 m legal over
+        # the ~50 m span but its long edge is 48.9 m → 1.74 % on the
+        # emitted surface, the airport's last per-axis violation).
+        # Clamp each rect's mouth-station pair minimally: free ends
+        # move first; frozen-tie pairs split (the small post-freeze
+        # projection is the established pattern); hard ends never move.
+        for (ri9, nmi9, fmi9), (kn9, kf9) in zip(chain, mouth_st):
+            r9 = rects[ri9]
+            na_set = r9["mouths"][nmi9]["nodes"]
+            nb_set = r9["mouths"][fmi9]["nodes"]
+            idxs9 = r9["idxs"]
+            ring9 = r9["ring"]
+            m9 = len(idxs9)
+            if not m9 or len(ring9) < m9:
+                continue
+            min_le = None
+            for a9 in range(m9):
+                ia9, ib9 = idxs9[a9], idxs9[(a9 + 1) % m9]
+                if ia9 is None or ib9 is None:
+                    continue
+                if ((ia9 in na_set and ib9 in nb_set)
+                        or (ia9 in nb_set and ib9 in na_set)):
+                    (xa9, ya9) = ring9[a9]
+                    (xb9, yb9) = ring9[(a9 + 1) % m9]
+                    le9 = math.hypot(xa9 - xb9, ya9 - yb9)
+                    if min_le is None or le9 < min_le:
+                        min_le = le9
+            if min_le is None:
+                continue
+            lim9 = TAXI_MAX_GRADE * max(min_le, 2.0) + 0.04
+            ea9, eb9 = elevs[kn9], elevs[kf9]
+            ex9 = abs(ea9 - eb9) - lim9
+            if ex9 <= 0.0:
+                continue
+            ha9 = cd["hard"][kn9]
+            hb9 = cd["hard"][kf9]
+            if ha9 and hb9:
+                continue
+            sgn9 = 1.0 if ea9 > eb9 else -1.0
+            if ha9:
+                elevs[kf9] = eb9 + sgn9 * ex9
+            elif hb9:
+                elevs[kn9] = ea9 - sgn9 * ex9
+            else:
+                elevs[kn9] = ea9 - sgn9 * ex9 / 2.0
+                elevs[kf9] = eb9 + sgn9 * ex9 / 2.0
+            if _os.environ.get("O4_CORRIDOR_DEBUG") == "1":
+                print(f"[corr]   skew end-pair cap "
+                      f"{r9['shape'].ref or '?'} min_edge={min_le:.0f} "
+                      f"({ea9:.2f},{eb9:.2f}) -> "
+                      f"({elevs[kn9]:.2f},{elevs[kf9]:.2f})")
         # station nodes take the profile (first corridor to write a node
         # wins — longer corridors are processed first via the seed order).
+        if tr_set:
+            tr_ctx[0] = "station " + "/".join(sorted(
+                {rects[ri]["shape"].ref or "?" for (ri, _n, _f) in chain}))
         for st, e in zip(stations, elevs):
             for i in st["nodes"]:
                 if not base_hard[i] and i not in written:
                     _write(i, e)
+                elif i in tr_set:
+                    print(f"[trace]   SKIP n{i} station v={e:.2f} "
+                          f"(hard={base_hard[i]} "
+                          f"already={elev[i]:.2f})")
         st_ds = [st["d"] for st in stations]
         # rect bodies: every ring vertex interpolates axially between its
         # rect's two mouth stations (keeps inserted shared-edge vertices —
@@ -4923,8 +5077,16 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
             if abs(span) < 1e-6:
                 continue
             en, ef = elevs[kn], elevs[kf]
+            if tr_set:
+                tr_ctx[0] = (f"body {r['shape'].ref or '?'} "
+                             f"{en:.2f}->{ef:.2f}")
             for k, i in enumerate(r["idxs"]):
                 if i is None or base_hard[i] or i in written:
+                    if i is not None and i in tr_set:
+                        print(f"[trace]   SKIP n{i} body "
+                              f"{r['shape'].ref or '?'} "
+                              f"(hard={base_hard[i]} "
+                              f"already={elev[i]:.2f})")
                     continue
                 t = (r["projs"][k] - pn) / span
                 t = min(max(t, 0.0), 1.0)
@@ -5039,6 +5201,9 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                 hi = min(hi, he + TAXI_MAX_GRADE * dd + 0.02)
             if lo > hi:
                 continue
+            if tr_set:
+                tr_ctx[0] = (f"twist ji={ji} mean={mean:.2f} "
+                             f"band=[{lo:.2f},{hi:.2f}]")
             _write(i, min(max(mean, lo), hi))
             tw_set.add(i)
             tw_all.add(i)
@@ -5186,6 +5351,11 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
               f"{len(tw_all)} twist-seeded free), "
               f"{len(exempt)} junction node(s) band-exempt, "
               f"{len(set(dem_lo) | set(dem_hi))} runway-flex demand(s)")
+    if tr_set:
+        for i9 in sorted(tr_set):
+            print(f"[trace] corridor END n{i9}={elev[i9]:.2f} "
+                  f"written={i9 in written} twist={i9 in tw_all} "
+                  f"held={i9 in held_out}")
     return held_out, exempt, (dem_lo, dem_hi, dem_refs)
 
 
