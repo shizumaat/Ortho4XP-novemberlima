@@ -1,6 +1,50 @@
-# Auto-Patch Status — session 76 = ROUTE-FIELD MODEL (#3) BUILT ON dev
+# Auto-Patch Status — session 76 = ROUTE-FIELD MODEL (#3) BUILT + IN-SIM TUNING
 
-## ★★ SESSION 76 (2026-06-10) — dev @619843e: ROUTE-FIELD MODEL (#3) BUILT — HECA within 216→111, CYXY+SPJC 0/0/0, suite 307p/2f ★★
+## ★★ SESSION 76 PART 2 (2026-06-10) — dev @3b35fef: IN-SIM TUNING — flat pads, fairing, Lipschitz bands, apron 1 % corridor smoothing ★★
+User in-sim verdicts on part 1: structural issues fixed; NEW problems =
+(a) sloping pads float buildings (terminal1 "all around 101" carried a
+105 corner), (b) small ripples at almost every junction, (c) CYXY aprons
+much too steep — RULING: smooth aprons toward ~1 % within ~200 m of the
+taxi corridors that serve them.
+1. **`TERMINAL_PADS_SLOPE = False`** (the s73-p2 experiment's verdict is
+   in): pads rigid-flat, squeezed pads still slope via the seed marking.
+   Pads HELD through every enforce projection, may only YIELD DOWN
+   (group clamp to band-ceiling ∩ taxi-route SEED — the relief lifted
+   squeezed pads 1.5-3 m above seeds; ruling: terminals must NOT rise).
+   Terminal seed bands now carry the §5.2 route-noise margin.
+   terminal1 BACK at 99.2-100.8 (user's expected ~101; its part-1
+   100-105 slope = route-law floor from the 116.39 corridor-held write
+   near 23C, ~670 m by route — measured via O4_TRACE_LL).
+2. **SURFACE_FAIRING** (config): final weighted-Laplacian smoothing of
+   soft uncoupled vertices — bands-clamped, ±0.5 m budget
+   (SURFACE_FAIRING_MAX_MOVE_M), legal-cap re-projection after.
+   Junction+apron ring bumps >0.15 m: CYXY 90→62, SPJC 65→35.
+3. **`_lipschitz_tighten_bands`** (ripple ROOT): route bands live on the
+   CENTERLINE graph → ring-adjacent vertices carry graph-entry
+   discontinuities the band clamp printed into the surface.  Propagate
+   every node's bound through the cap-weighted edge graph (pure
+   tightening, the implied constraints) before clamping.
+4. **APRON CORRIDOR SMOOTHING** (`APRON_CORRIDOR_SMOOTH_RADIUS_M=200`,
+   `_GRADE=0.01`): best-effort projection of apron pairs (both endpoints
+   in-radius of apt.dat centerlines + taxi-rect source axes — discovered
+   taxiways have no apt.dat row) toward 1 % — solver PREFERENCE, the
+   validator law stays ROLE_GRADE_LIMITS ("ideally 1 %").  ★ Pads held
+   or the lift cascades (terminal7 rose 70→72.9 in the first build).
+   CYXY apron spread sum 56.2→44.4 m (#63 9.6→6.7, #93 2.9→1.2).
+**MEASURED: CYXY + SPJC 0/0/0 per-axis; HECA 05C 109.3 / 05L exact /
+A5 flat / 116.5 ✓; suite 307p/2f = baseline; deterministic.  ⚠ FLAGGED
+FOR USER: terminal7 now sits at its squeeze MIDPOINT 71.5-73.0 (its
+per-node seed bands are INFEASIBLE — 05C floor crosses 05L ceiling;
+the historical "~70" was the free pad dragged below its band while the
+violations parked on the apron edges) — T4-wall arbitration family,
+needs a ruling.  HECA within 118 / cross 3: the 3 cross = terminal1 ↔
+apron #211, 0.3 m at d≈0.6 m (sub-weld-tolerance seam; post-solve
+snap variant MEASURED-REJECTED — within 97→101, cross 3→4; fix =
+PRE-SOLVE conformance insertion, vertices.py family).  NEXT: in-sim
+verdict; then terminal1↔#211 pre-solve weld, terminal7 ruling, #186
+squeeze arbitration, Exit-3 exit-fan graph holes.**
+
+## ★★ SESSION 76 PART 1 (2026-06-10) — dev @619843e: ROUTE-FIELD MODEL (#3) BUILT — HECA within 216→111, CYXY+SPJC 0/0/0, suite 307p/2f ★★
 Implemented `docs/route_field_model.md` end-to-end (solver + validator +
 runtime WARN change TOGETHER, per the design's one-piece rule).  Gate =
 `config.ROUTE_FIELD_MODEL` (default ON; OFF restores the s73-p10h
