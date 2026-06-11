@@ -1,5 +1,66 @@
 # Auto-Patch Status — session 73 = CORRIDORS LIVE + CURVE-AWARE GRADING RULED (branch `corridor-curves`, parked for tuning)
 
+## ★ SESSION 73 PART 10f (2026-06-10) — `corridor-curves` @0038375: P1-P4 BUILT — SPJC GATE GREEN; suite 306p/3f ★
+Implemented the p10e plan P0-P4 (all general, no airport-specific code).
+**SUITE 306p/3f (was 305p/4f): SPJC grade gate GREEN.**  Runways held
+everywhere (05C 108.7 / 05L 57.9-60.7 / A4 / A5).  ⚠ ANALYSIS-CONTEXT
+BUG found mid-session: a `cd` to the main repo made every relative-path
+command run against DEV — the p10e "CYXY=flake / HECA 296 / SPJC 13+1"
+audit numbers were DEV numbers.  True branch numbers re-measured below.
+1. **P0 determinism: VERIFIED** — CYXY byte-identical across
+   PYTHONHASHSEED 1/2/7 and across the P1-P4 changes (none fire there).
+   CYXY's gate red is NOT a flake: it is ONE real per-axis-audited
+   violation (stub A 1.84 % over 48.9 m, 693.5→692.6).  Root: a CHAINED
+   singleton whose junction-shared mouth nodes were FIRST-WRITTEN by
+   another corridor — same span-vs-tie-distance class as R1/R2 but for
+   chained rects (the co-located-mouth tie allows it over the in-junction
+   geodesic; the emitted rect runs it over span).  NEXT: mouth ties
+   between stations whose rects SHARE nodes must use the lateral offset,
+   not the in-junction geodesic.
+2. **P1a co-level reconcile** (`_reconcile_level_coupling`, pre-writeback):
+   post-enforce single-vertex passes (edge-plane snap) decohere rect
+   flat-end pairs → plane emit averages → 0.2 m cross step at d=0 (SPJC
+   V3↔#97, the gate's hard-fail).  Re-level: hard wins, else mean
+   projected into external cap edges.  **SPJC cross 1→0.**
+3. **P1b bridge ties at SPAN** (not ga+span+gb): the rect emits ONE plane
+   over span; the twist paints junctions from corridor values so the legs
+   never carry grade.  **SPJC R1/R2 4.4-4.9 % → 0; within 18→11** (all
+   remaining ≤0.7 m junction marginals).
+4. **P3 unified blocker rescue** in the tie freeze (subsumes p10d):
+   per-blocker classify — apron-mouth untied terminus → minimal
+   projection; frozen-tie member → move the GROUP into the tie's reach
+   (vetoed by member-chain hard anchors + neighbour cap ties); others
+   keep the veto.  ★ No side-effect moves (a clamp that pushes PAST the
+   tie = don't move — T d=302 went 104.82→106.45 chasing 102.00 in the
+   first build) and ★ project 1 cm INSIDE the limit (exact-boundary
+   moves fail the float re-check — G's tie re-skipped at over-by 0.05).
+   Mixed blocker sets now resolve (G = frozen ties + apron tail; the
+   two-branch version required ALL blockers per kind → both passed).
+   HECA #261's G tie now ACCEPTED (head freezes 101.4) — **but the
+   junction still reads 100.0-vs-103.0: the WRITE layer (first-writer-
+   wins, twist painting, per-chain band clamps) does not deliver agreed
+   freeze values to the junction nodes.  That is the next layer; the
+   freeze machinery itself is done.**
+5. **P2 apron band-exemption** near held corridor writes: MEASURED NO-OP
+   (HECA #190/#194 pairs unchanged) — band pinning is NOT what holds
+   those pairs (kept: harmless; the p10d floor-noise numerology was
+   suggestive but wrong as mechanism — the write layer again).
+6. **P4 same-apron terminus projection** (post-freeze pairwise, replaces
+   the cap-tie variant which dragged termini toward their chains'
+   INTERIOR wishes — J fell ~2 m, seam grew to 1.9 m; measured,
+   rejected): small safe moves; J/G2 seam itself still pending the
+   write layer.
+**HECA net: 372→375 standalone (noise); the gate now trips on 2 STEPS
+(junction #199 ↔ apron #194 graze seam, pre-existing 0.49-0.54 m,
+nudged to 0.51-0.59 by the T-tail apron-fill move) BEFORE within.
+NEXT (priority): (1) the WRITE LAYER — deliver frozen-tie values to
+junction nodes (first-writer-wins arbitration, twist vs station write
+ordering); (2) CYXY shared-node mouth ties at lateral offset → its last
+violation; (3) #199↔#194 graze conformance (s73-p3/p8 family);
+(4) terminal4 (#3) lumps + the T4-wall arbitration (user ruling may be
+needed).  Builds: /tmp/HECA_p6.osm /tmp/SPJC_final.osm
+/tmp/CYXY_final2.osm; probe s75_spjc_r1r2.py (band/sharer audit).**
+
 ## ★ SESSION 73 PART 10e (2026-06-10) — FAILURE-CLASS MAP: SPJC/CYXY/HECA gates share one root ★
 ANALYSIS ONLY (no code).  Per-axis audit numbers (the gates' own metric,
 caps=0): HECA 296 within + 1 plane, SPJC 13 within + 1 CROSS (the assert
