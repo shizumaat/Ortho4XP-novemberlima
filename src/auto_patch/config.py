@@ -61,6 +61,8 @@ __all__ = [
     "APRON_CORRIDOR_SMOOTH_GRADE",
     "APRON_CORRIDOR_GEODESIC",
     "APRON_CORRIDOR_SEED_RADIUS_M",
+    "WRITE_ARBITRATION",
+    "TERMINAL_LEAF_LEVELS",
     "RUNWAY_ADJACENCY_TOL_M",
     "RUNWAY_BOUNDARY_TOL_M",
     "RUNWAY_INSIDE_APRON_FRAC",
@@ -430,6 +432,30 @@ APRON_CORRIDOR_SEED_RADIUS_M = 15.0
 # constraints carry this relative margin; the validator MUST use the same
 # margin or it flags the solver's own legal output.
 ROUTE_NOISE_FRAC = 0.04
+# WRITE-LAYER ARBITRATION (s77, user-approved): when a corridor tie cannot
+# reach its consensus value (route-law anchors block and the blocker
+# rescue does not apply), the tie used to be DROPPED entirely — the two
+# chains then wrote values metres apart at one junction and the
+# disagreement stood in the surface as a wall on whatever spans the seam
+# (HECA #256: G@100.9 held against T@104.2 free-pinned, 3.3 m over
+# 11.5 m, per-axis exempt but a cliff to the eye).  Instead, accept a
+# PARTIAL tie: clamp the consensus value into the member chain's
+# anchor-feasible interval and anchor there — each chain moves as close
+# to agreement as its own route law allows, shrinking the wall to the
+# genuine route-law residual.  The runway-flex demand synthesis still
+# fires from the ORIGINAL consensus value, so arbitration never masks a
+# legitimate flex demand.  False restores drop-on-skip.
+WRITE_ARBITRATION = True
+# TERMINAL LEAF LEVELS (s77 user ruling, supersedes "terminals must not
+# rise"): terminal pads are natural LEAF nodes — rigid-flat, but their
+# LEVEL follows the apron(s) they connect to (up or down) through the
+# grade projection, instead of being pre-calculated from taxi-route seed
+# bands and locked.  Pads re-level to their median for coherence, are
+# band-EXEMPT (their own route bands are graph-entry-noisy; the aprons
+# they follow are themselves band-clamped), and move as rigid level
+# groups in every projection.  A pad sharing a hard node stays held.
+# False restores the s76 seed-ceiling + freeze behaviour.
+TERMINAL_LEAF_LEVELS = True
 
 
 # Per-role within-shape grade limits (rise / run).  The validator in
