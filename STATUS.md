@@ -1,4 +1,59 @@
-# Auto-Patch Status — session 76 = ROUTE-FIELD MODEL (#3) BUILT + IN-SIM TUNING
+# Auto-Patch Status — session 77 = APRON GEODESIC BINDING + WRITE ARBITRATION + TERMINAL LEAF LEVELS
+
+## ★★ SESSION 77 PART 2 (2026-06-10) — dev @bdeae13: WRITE-LAYER ARBITRATION + TERMINAL LEAF LEVELS (user-approved rulings) ★★
+USER RULINGS this session: (1) taxi routes graded properly ⇒ aprons grade
+locally vs nearest interior route (model CONFIRMED); (2) ★★ TERMINALS =
+NATURAL LEAF NODES — rigid-flat, level follows the apron(s) they connect
+to UP OR DOWN, never pre-calculated/locked (SUPERSEDES "terminals must
+not rise"); (3) build the write-layer arbitration.
+**A. WRITE_ARBITRATION (@39a987c, default ON):** (1) PARTIAL TIES —
+freeze-skips clamp the consensus into the member chain's anchor-feasible
+interval instead of dropping (HECA skips 14→0; flex demands still fire
+from the ORIGINAL value); (2) NODE-LEVEL TIE CAPS — same-junction mouth
+ties bind at the nearest NODE pair geodesic, not mid-mid (#256: mids
+74-82 m, corners 11.5/18 m — W2 skew lesson at the tie layer);
+(3) CAP-TIE RESIDUAL ARBITRATION post-consensus without the st-band
+clamp (cross-chain bands disagree by metres at junction scale);
+(4) SOFT-TERMINUS GROUPS — non-hard terminus anchors don't FIX their
+group (p10d generalized); projected to the settled value bounded by hard
+anchors + junction hard band + 2.5 m; (5) POST-FREEZE TIE RECONCILE —
+frozen pairs re-project into tie windows, headroom decides who yields.
+★ Singleton-virtual exit stubs (A5 class) exempt from ALL new move paths.
+**Measured: #256 wall 3.3→2.3 m (28.7→20 %), standalone walls 202→157;
+the 2.3 m residual = the GENUINE 05C↔A-complex squeeze (T's d=302 route
+anchor ≥103.3 vs G's own-chain ceiling 100.9) — ruling needed: may a
+chain ride ~1.9 % to spread an irreducible squeeze, or do walls stay?**
+**B. TERMINAL_LEAF_LEVELS (@bdeae13, default ON):** pads enter at their
+own MEDIAN (coherence, NO seed ceiling), stay HELD through projections
+(★ free-following MEASURED-REJECTED ×2 — cap edges bind at the worst
+single neighbour: terminal1 99.7→106.1), then LEAF RE-LEVEL = median of
+adjacent apron surface (≤40 m, robust to pinned outliers, ±3 m bound) +
+final legal re-projection conforms aprons around the moved pads.  Sloped
+(squeezed) pads keep symmetric internal kink smoothing.
+**Measured: terminal1/2/9 = 99.80 ✓ (user ~99.7-101), terminal4 95.1 /
+terminal5 64.3 / terminal8 79.8 = FLUSH with apron medians (seed values
+sat 0.3-2 m below the surrounding surface); terminal7 71.5-73.0 = its
+apron edges (absolute level awaits #186-squeeze ruling).**
+**VALIDATION: all-three-s77-gates-off = s76 BYTE-IDENTICAL; CYXY+SPJC
+per-axis 0/0/0; CYXY spread 42.6 kept; HECA within 136 (≈135 baseline) /
+cross 0 / steps 0; invariants 05C 109.1 (was 109.5 — tie network
+transmits demands slightly differently, in-sim verdict), 05L 57.9-60.7
+exact, A4 exact, ⚠ A5 60.9-61.2 (was 60.4: still flat, risen toward the
+apron-edge consensus 61.8 — model-consistent, FLAGGED for in-sim);
+deterministic; suite 307p/2f = baseline.**
+PREFERENCE HIERARCHY (user-confirmed model, where implemented):
+terminals FLAT (cap 0) unless seed-band-infeasible (squeezed → slope
+≤1.5 %); aprons 1 % preference (APRON_CORRIDOR_SMOOTH_GRADE zone pairs +
+geodesic corridor-value bands) stretching to the 1.5 % law
+(ROLE_GRADE_LIMITS) wherever route demands bind.
+NEXT: user in-sim verdict (RESTART Ortho4XP) — 05C 109.1, A5 61.0,
+terminal levels, #256 @ 2.3 m; the irreducible-squeeze ruling (above);
+#186/terminal7 squeeze arbitration; Exit-3 exit-fan graph holes.
+Probes: s77_apron_geodesic/invariants/spread/altdiff/alloff.py;
+O4_CORR_JDUMP=<node,ids> junction tie dump, O4_CORR_RECDBG=1 reconcile
+trace, O4_APZ_DEBUG=1 zone stats, O4_TERM_DEBUG=1 leaf moves.
+
+# (s76 and earlier below)
 
 ## ★★ SESSION 77 (2026-06-10) — dev @3a72f9b: APRON INTERIOR-GEODESIC GRADE vs SERVING CENTERLINE — INVESTIGATED + BUILT ★★
 User question: keep aprons from steep areas by measuring, per apron node,
