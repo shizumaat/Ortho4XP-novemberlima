@@ -355,9 +355,12 @@ def generate_auto_patches(tile, cifp_path: str,
                            icao, ":", str(_ve))
             # Per-airport wall-clock (build vs verify) — the tile-build
             # perf breakdown lives here; O4_PERF=1 adds the solver's
-            # per-phase + network-field timings underneath.
-            UI.vprint(
-                1, "   Auto-patch:", icao,
+            # per-phase + network-field timings underneath.  lvprint(0):
+            # the loop runs at UI.verbosity = LOG_VERBOSITY (0), which
+            # suppresses vprint(1) — this line must always show (one
+            # line per airport; tiles carry a handful).
+            UI.lvprint(
+                0, "   Auto-patch:", icao,
                 f"took {_time.time() - _t_apt:.1f}s "
                 f"(verify {_time.time() - _t_v:.1f}s)")
         except _DRIVER_EXC as e:
