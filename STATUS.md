@@ -1,4 +1,17 @@
-# Auto-Patch Status — session 73 = CORRIDORS LIVE + CURVE-AWARE GRADING RULED (branch `corridor-curves`, parked for tuning)
+# Auto-Patch Status — session 73 = CORRIDORS LIVE + CURVE-AWARE GRADING RULED → MERGED TO dev
+
+## ★★ SESSION 73 PART 10h (2026-06-10) — `corridor-curves` MERGED → dev @7e12384 ★★
+User call (no other sessions active): merge everything.  Clean ort
+merge (branch = src code only; dev since base = STATUS/docs only).
+**Merged-dev suite VERIFIED: 307p/2f — identical to the branch
+(CYXY + SPJC grade gates GREEN; SPLP deferred lump + HECA within=216
+remain; HECA+SPJC vertical-curve XPASS kept).**  dev is now the
+implementation base for the route-field model — START AT
+`docs/route_field_model.md`.  ⚠ dev's in-sim state moved from p9 to
+the full s73-p10 line (curve-aware junctions, runway-exit extension,
+apron-mouth relax, P1-P4, W1-W3) — **RESTART Ortho4XP before any
+in-sim build** (module cache).  The joint-corridor-solve worktree is
+now redundant with dev (kept; prune when convenient).
 
 ## ★★ SESSION 73 PART 10g (2026-06-10) — `corridor-curves` @153ad57: CYXY + SPJC PER-AXIS 0/0/0; HECA steps 0; ROOT OF THE APRON RESIDUE FOUND ★★
 W1-W3 from the 10f NEXT list (all general):
