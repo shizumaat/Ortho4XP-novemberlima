@@ -129,12 +129,29 @@ true pre-session baseline = 305p/4f.
    **SUITE 307p/2f** (SPLP 1-step + HECA within = the M5 spread);
    invariants re-held (05C 108.70, 05L 57.9-62.8 smooth, A4/A5);
    deterministic; gate-off byte-identical.
+**s78 PART 4 — PERF (user: "auto-patch creation ~10× slower") @ed8e555:**
+Measured at HEAD (no profiler overhead): CYXY 12 s, HEAZ 17 s, HECA
+36.9 s gate-on vs 34.5 s gate-off (**network model = +2.4 s, ~7 %**),
+KPHX 158 s (dominated by the PRE-EXISTING `hole_router._visible` pass,
+~90 s — an old cost, not s78).  ⚠ cProfile inflates ~2× (the earlier
+"70 s HECA" was overhead).  **No 10× reproduces inside auto_patch** —
+prime suspect = the morning's FULL-CYCLE CIFP install (17,065
+airports): every tile now builds EVERY ICAO airport it contains
+(Phoenix +33-113: 6 incl. new KBXK/KGEU; +33-112: 5 incl. new KIWA;
+Cairo +HECP, no apt.dat → cheap fallback) and NEW airports trigger
+first-time OSM overpass downloads (minutes each, network-bound).  The
+17 k CIFP scan itself is 0.4 s — fine.  INSTRUMENTATION SHIPPED:
+production tile builds now print per-airport `took Xs (verify Ys)`;
+`O4_PERF=1` adds the solver per-phase breakdown + network-field
+sub-phases.  NEXT = user captures one slow tile build log (with
+O4_PERF=1 in the Ortho4XP env) → read the per-airport lines.
 **OPEN:** (1) in-sim re-verdict on 05L (smooth rise now) + the user's
 "remaining cliffs and steep slopes" — collect locations, likely the
 HECA-72 M5-spread + #185/#189/#209 small-pair families; (2) ★ M5
 spreading ruling on HECA's 72 (above); (3) SPLP's last 0.58 m step;
 (4) measured deletes of the tie layer (§6 — after the verdict);
-(5) KPHX-scale field perf check.  Probes: /tmp/probes/s78_*.py
+(5) the slow-tile perf log (above); KPHX hole-router 90 s = the
+biggest standing perf item overall (pre-dates s78).  Probes: /tmp/probes/s78_*.py
 (field-vs-routegraph, pairpath, residuals, classify, invariants,
 splp_relax/tile/pieces, 05l_profile/boundary); env `O4_NPF_DEBUG=1`
 (field audit + demands), `O4_BAND_NODES="i,j"` (enforce band stages +
