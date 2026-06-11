@@ -431,7 +431,15 @@ def solve(layout, icao: str,
             # snapshot0 lesson) — re-measuring after the relief re-levels
             # the network toward DEM chases the dip circularly (measured:
             # 107.9 → 106.3 → asks 105.5 — the (a) over-dip class).
-            for _fb in range(1):
+            # Under WRITE_ARBITRATION, TWO rounds: the transitive tie
+            # demands (s77p2) only become measurable after the first
+            # flex re-ties the network, and their basis is HARD-anchored
+            # (HECA #256: the G side is pinned by the 60.65 contact, so
+            # the demand converges instead of chasing — user-predicted
+            # 23C ≈ 108; round-2 measured 108.46).  The merge below
+            # keeps deepening monotone and round-3 demands are still
+            # DISCARDED, so the worst case is one bounded extra dip.
+            for _fb in range(2 if WRITE_ARBITRATION else 1):
                 if not (rwy_dem[0] or rwy_dem[1]):
                     break
                 dem_lo_c, dem_hi_c, dem_refs_c = rwy_dem
@@ -5662,6 +5670,33 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                     # in-junction geodesic to the runway vertex)
                     targets = [(i, dj) for i in sts[j]["nodes"]
                                if i in rwy_nodes]
+                    # TRANSITIVE PROVENANCE (s77p2 user: "if the taxiway
+                    # requires it, why isn't the runway already dipping
+                    # enough? we shouldn't be generating a violation"):
+                    # a blocker that is a frozen TIE station (crossing
+                    # insert, no nodes) carries another chain's runway
+                    # demand one tie hop away — HECA #256: T@d302's
+                    # ~105 is pinned by the 05C contact THROUGH the
+                    # crossing chain, so the dip the T↔G tie needs never
+                    # reached the runway.  Walk the blocking tie group's
+                    # member chains to their runway-contact anchors and
+                    # demand over the ACCUMULATED route distance (the
+                    # tie is one physical point — its legs add).
+                    if (WRITE_ARBITRATION and not targets
+                            and (ci, j) in root_of):
+                        for (cj3, kj3) in g_members[root_of[(ci, j)]]:
+                            cd3 = chain_data[cj3]
+                            sts3 = cd3["stations"]
+                            for j3 in range(len(sts3)):
+                                if not cd3["anchored"][j3]:
+                                    continue
+                                rn3 = [i3 for i3 in sts3[j3]["nodes"]
+                                       if i3 in rwy_nodes]
+                                if not rn3:
+                                    continue
+                                d3 = dj + abs(sts3[kj3]["d"]
+                                              - sts3[j3]["d"])
+                                targets.extend((i3, d3) for i3 in rn3)
                     ji2 = sts[j].get("junc")
                     if (not targets and ji2 is not None
                             and ji2 in jhard
