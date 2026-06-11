@@ -1,5 +1,38 @@
 # Auto-Patch Status — session 76 = ROUTE-FIELD MODEL (#3) BUILT + IN-SIM TUNING
 
+## ★★ SESSION 76 PART 3 (2026-06-10) — dev @cf87793: PAD COHERENCE + PULLED-VERTEX ALTITUDES (user verify report) ★★
+User verify report: within-terminal spikes (32.5 %/5.8 m), terminal1↔#211
+cross steps, junction (user #203) "surprisingly steep and uneven".
+1. **PAD COHERENCE re-level** (yield-down clamp): the part-2 freeze
+   preserved relief incoherence INSIDE pads; flat groups with INFEASIBLE
+   band intersections (terminal1's 88-node group — the squeeze) were
+   skipped entirely.  Now every pad group re-levels to min(median,
+   band-ceiling-if-feasible, taxi-route-seed).  Coherence ≠ rise.
+   Pre-apt.dat-edit HECA: ALL flat pads ONE level (terminal1/2/9 = 99.7),
+   terminal7 70.1-71.3 (~70 ruling RESTORED — its earlier 71.5-73 was the
+   per-node squeeze midpoints), **cross 3→0, per-axis within 119→89**.
+2. Ring-Lipschitz seed-band smoothing + §5.2 margin on seed bands +
+   down-only internal smoothing of sloped pads.
+3. **`_split_sloped_rects_at_violations` pulled-vertex altitudes**
+   (junction_repair): a junction vertex pulled metres along a rect edge
+   now carries the rect PLANE altitude at its new corner (node_altitudes
+   re-synced when the ring stays 1:1).  The stale solved altitude at the
+   new position printed 3-8 % zig-zag ring edges.  Control-attributed
+   (within-neutral; the visible zig-zag class).
+**⚠ apt.dat RE-BASELINE: user edited HECA's apt.dat mid-session (fixed a
+source error) — geometry reorganized (junction counts, splits); per-axis
+within now ~134 (control without the part-3 junction fix: 135).  The
+remaining VISIBLE walls (#256 27.8 %/12 m ring edge etc.) are the
+CORRIDOR-vs-CORRIDOR write disagreement: #256 holds T@102.7-104.1 on two
+sides vs G@100.7 between = the documented #261/T-wall family — per-axis
+EXEMPT (diagonals) but 3 m walls to the eye → THE write-layer
+arbitration design item (p10f NEXT #1) is now the top visible-quality
+blocker; needs user rulings (T4-wall, #186 squeeze, 05C 109.3,
+terminal7 ~70-vs-midpoint all same family).**  Suite 307p/2f; CYXY+SPJC
+0/0/0; deterministic.  NEXT: write-layer arbitration session (user
+rulings); terminal1↔#211-class pre-solve weld if it recurs on the new
+apt.dat; in-sim re-verdict.
+
 ## ★★ SESSION 76 PART 2 (2026-06-10) — dev @3b35fef: IN-SIM TUNING — flat pads, fairing, Lipschitz bands, apron 1 % corridor smoothing ★★
 User in-sim verdicts on part 1: structural issues fixed; NEW problems =
 (a) sloping pads float buildings (terminal1 "all around 101" carried a
