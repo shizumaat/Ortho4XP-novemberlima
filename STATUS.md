@@ -19,10 +19,20 @@ group (p10d generalized); projected to the settled value bounded by hard
 anchors + junction hard band + 2.5 m; (5) POST-FREEZE TIE RECONCILE —
 frozen pairs re-project into tie windows, headroom decides who yields.
 ★ Singleton-virtual exit stubs (A5 class) exempt from ALL new move paths.
-**Measured: #256 wall 3.3→2.3 m (28.7→20 %), standalone walls 202→157;
-the 2.3 m residual = the GENUINE 05C↔A-complex squeeze (T's d=302 route
-anchor ≥103.3 vs G's own-chain ceiling 100.9) — ruling needed: may a
-chain ride ~1.9 % to spread an irreducible squeeze, or do walls stay?**
+**Measured: #256 wall 3.3→2.3 m (28.7→20 %), standalone walls 202→157.**
+**A2. TRANSITIVE RUNWAY-FLEX DEMANDS (@0d645b6, user: "if the taxiway
+requires it, why isn't the runway already dipping? We shouldn't be
+generating a violation"):** the demand synthesis only saw blockers
+DIRECTLY on a runway contact; #256's blocker = a frozen TIE station
+(crossing insert, no nodes) pinned by 05C THROUGH the crossing chain —
+the demand never reached the runway.  Fix: walk the blocking tie group's
+member chains to their runway-contact anchors, demand over the
+ACCUMULATED route distance; flex feedback now TWO rounds under the gate
+(transitive demands only measurable after the first flex re-ties the
+network; basis is HARD-anchored → converges, not the s68 chase; round-3
+demands still discarded).  **05C dips 109.1→108.50 (user-predicted ~108);
+#256 1.6 m / 14 % (orig 3.3 m / 28.7 %); junction reads 100.9-102.6.
+HECA within 135 = EXACT baseline / 0 / 0; terminal levels unchanged.**
 **B. TERMINAL_LEAF_LEVELS (@bdeae13, default ON):** pads enter at their
 own MEDIAN (coherence, NO seed ceiling), stay HELD through projections
 (★ free-following MEASURED-REJECTED ×2 — cap edges bind at the worst
