@@ -43,7 +43,13 @@ exact (05C 108.7, 05L 57.9-60.7, A4 climb, A5 flat).
 ★★ SUITE 307p/2f — CYXY GATE GREEN, SPJC GATE GREEN (session started
 at 4f).  Remaining: SPLP (user-deferred lump) + HECA (within only —
 route-field #3 territory).
-Builds: /tmp/HECA_w3.osm /tmp/SPJC_w2.osm /tmp/CYXY_w2b.osm.**
+Builds: /tmp/HECA_w3.osm /tmp/SPJC_w2.osm /tmp/CYXY_w2b.osm.
+★★ NEXT SESSION STARTS AT `docs/route_field_model.md` (dev @ac72add) —
+the FULL #3 implementation design: model statements, measured evidence,
+per-site implementation map (solver + validator), route-graph known
+gaps, noise margin, terminal transition, validation protocol, rulings
+register (incl. the one SUPERSEDED ruling), ops notes.  User confirmed
+the analysis 2026-06-10; the doc is the handover.**
 
 ## ★ SESSION 73 PART 10f (2026-06-10) — `corridor-curves` @0038375: P1-P4 BUILT — SPJC GATE GREEN; suite 306p/3f ★
 Implemented the p10e plan P0-P4 (all general, no airport-specific code).
