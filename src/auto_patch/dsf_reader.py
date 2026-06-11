@@ -344,6 +344,7 @@ def read_dsf_pavements(
     cur_def_path = ""
     in_winding = False
     cur_depth = 2
+    cur_uv_mode = False
     # Each winding node is (anchor_xy, ctrl_xy_or_None).
     current_ring: list[tuple[tuple[float, float],
                              tuple[float, float] | None]] | None = None
@@ -365,6 +366,18 @@ def read_dsf_pavements(
                 cur_depth = int(tok[3])
             except (ValueError, IndexError):
                 cur_depth = 2
+            # Draped-polygon param 65535 = explicit per-vertex UV mode:
+            # depth 4 is (lon, lat, u, v) — planes 3-4 are TEXTURE
+            # coords in [0,1], not bezier handles.  UV-mode bezier is
+            # depth 8 (lon, lat, ctrl_lon, ctrl_lat, u, v, ctrl_u,
+            # ctrl_v), where planes 3-4 ARE the handles again.  Reading
+            # UVs as handles turned 4-corner road quads in the stock
+            # Global Airports +39-076.dsf into continental-scale bezier
+            # rings (lon −97…−54) that wedged the KOQN hole router.
+            try:
+                cur_uv_mode = int(tok[2]) == 65535
+            except (ValueError, IndexError):
+                cur_uv_mode = False
             in_pavement = idx in pav_def_idx
             cur_def_path = pav_def_idx.get(idx, "")
             in_winding = False
@@ -407,7 +420,7 @@ def read_dsf_pavements(
             except (ValueError, IndexError):
                 continue
             ctrl = None
-            if cur_depth >= 4:
+            if cur_depth >= 4 and (not cur_uv_mode or cur_depth >= 8):
                 try:
                     cx = float(tok[3])
                     cy = float(tok[4])
