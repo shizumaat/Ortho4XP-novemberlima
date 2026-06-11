@@ -59,6 +59,8 @@ __all__ = [
     "SURFACE_FAIRING_MAX_MOVE_M",
     "APRON_CORRIDOR_SMOOTH_RADIUS_M",
     "APRON_CORRIDOR_SMOOTH_GRADE",
+    "APRON_CORRIDOR_GEODESIC",
+    "APRON_CORRIDOR_SEED_RADIUS_M",
     "RUNWAY_ADJACENCY_TOL_M",
     "RUNWAY_BOUNDARY_TOL_M",
     "RUNWAY_INSIDE_APRON_FRAC",
@@ -405,6 +407,24 @@ SURFACE_FAIRING_MAX_MOVE_M = 0.5
 # disables.
 APRON_CORRIDOR_SMOOTH_RADIUS_M = 200.0
 APRON_CORRIDOR_SMOOTH_GRADE = 0.010
+# GEODESIC corridor binding (s77 investigation, user-approved): measure the
+# zone by the shortest INTERIOR path through pavement (multi-source Dijkstra
+# over the solver's edge graph) instead of straight-line distance — a vertex
+# 13 m across grass from a centerline is NOT served by it — and additionally
+# clamp in-zone apron vertices into corridor-VALUE bands
+# [corridor_alt ± grade·interior_distance] propagated at the smoothing grade,
+# so an apron cannot sit on a uniform offset (wall) from the corridor that
+# serves it — internal pair-cap scaling alone cannot see that.  Still a
+# best-effort preference: bands yield to the legal route-law bands wherever
+# they conflict (the squeeze/arbitration families).  False restores the
+# straight-line zone test and pair-only smoothing.
+APRON_CORRIDOR_GEODESIC = True
+# Corridor-adjacent vertices SEED the geodesic field at their own solved
+# values: any pavement vertex within this straight-line distance of a
+# corridor polyline (≈ on the corridor surface), plus every taxi-rect
+# vertex (the rect IS the corridor; wide rects' corners sit beyond any
+# small threshold).
+APRON_CORRIDOR_SEED_RADIUS_M = 15.0
 # The route graph under-counts real taxi routes by ~4 % (straight endpoint
 # stubs, uncurved row joins — s73-p3 measured).  Route bands used as HARD
 # constraints carry this relative margin; the validator MUST use the same

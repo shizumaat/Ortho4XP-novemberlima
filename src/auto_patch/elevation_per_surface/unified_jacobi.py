@@ -52,6 +52,7 @@ from collections import deque
 from shapely.errors import GEOSException, TopologicalError
 
 from auto_patch.config import (
+    APRON_CORRIDOR_GEODESIC, APRON_CORRIDOR_SEED_RADIUS_M,
     APRON_CORRIDOR_SMOOTH_GRADE, APRON_CORRIDOR_SMOOTH_RADIUS_M,
     ROLE_GRADE_LIMITS, ROUTE_FIELD_LOCAL_WINDOW_M, ROUTE_FIELD_MODEL,
     ROUTE_NOISE_FRAC, RUNWAY_END_FRACTION, RUNWAY_END_GRADE,
@@ -721,26 +722,11 @@ def _project_within_bands(elev, edges, is_hard, lo, hi, coupling,
     return sweep + 1, mx
 
 
-def _apron_corridor_zone_edges(layout, nodes, shape_constraints):
-    """APRON CORRIDOR SMOOTHING edge set (s76, user in-sim verdict at CYXY:
-    aprons read much too steep at the 1.5 % legal cap even where taxi routes
-    look right).  Aprons should fall away from the taxi corridors that serve
-    them at ideally ``APRON_CORRIDOR_SMOOTH_GRADE`` (1 % — also the ICAO
-    Annex 14 apron recommendation) within
-    ``APRON_CORRIDOR_SMOOTH_RADIUS_M`` (200 m).
-
-    Returns the apron grade edges whose BOTH endpoints lie within the radius
-    of a corridor polyline — apt.dat/OSM taxi centerlines PLUS every taxi
-    rect's ``source_axis`` (discovered taxiways carry no apt.dat row; CYXY's
-    TX1 apron is served only by discovered rects) — with their caps scaled
-    from the apron legal grade down to the smoothing grade.  The caller
-    projects them BEST-EFFORT after the legal enforce: this is a solver
-    preference, NOT a law change (the validator still asserts
-    ROLE_GRADE_LIMITS); wherever hard anchors genuinely demand more than
-    1 %, the projection plateaus and the legal surface stands."""
-    if (APRON_CORRIDOR_SMOOTH_GRADE <= 0.0
-            or APRON_CORRIDOR_SMOOTH_RADIUS_M <= 0.0):
-        return []
+def _corridor_segments(layout) -> list:
+    """Taxi-corridor polyline segments: apt.dat/OSM taxi centerlines PLUS
+    every taxi rect's ``source_axis`` (discovered taxiways carry no apt.dat
+    row; CYXY's TX1 apron is served only by discovered rects).  Aircraft
+    corridors only — no 4 % service roads."""
     segs: list = []
     for entry in (getattr(layout, "apt_taxi_centerlines", None) or []):
         ls = entry[0] if isinstance(entry, (tuple, list)) else entry
@@ -751,7 +737,7 @@ def _apron_corridor_zone_edges(layout, nodes, shape_constraints):
         segs.extend(zip(cs, cs[1:]))
     for s in layout.shapes:
         if s.role not in SLOPING_RECT_ROLES or s.role == ROLE_SERVICE_ROAD:
-            continue          # aircraft taxi corridors only (no 4 % roads)
+            continue
         ax = getattr(s, "source_axis", None)
         if ax is None or ax.is_empty:
             continue
@@ -760,48 +746,53 @@ def _apron_corridor_zone_edges(layout, nodes, shape_constraints):
         except (AttributeError, TypeError):
             continue
         segs.extend(zip(cs, cs[1:]))
-    if not segs:
-        return []
-    R = APRON_CORRIDOR_SMOOTH_RADIUS_M
-    CELL = R
+    return segs
+
+
+def _seg_grid(segs, cell):
+    """Coarse spatial index over polyline segments (query = 3×3 cells)."""
     grid: dict = {}
     for k, ((ax, ay), (bx, by)) in enumerate(segs):
-        for gx in range(int(min(ax, bx) // CELL),
-                        int(max(ax, bx) // CELL) + 1):
-            for gy in range(int(min(ay, by) // CELL),
-                            int(max(ay, by) // CELL) + 1):
+        for gx in range(int(min(ax, bx) // cell),
+                        int(max(ax, bx) // cell) + 1):
+            for gy in range(int(min(ay, by) // cell),
+                            int(max(ay, by) // cell) + 1):
                 grid.setdefault((gx, gy), []).append(k)
+    return grid
 
-    zone_cache: dict[int, bool] = {}
 
-    def _in_zone(i):
-        hit = zone_cache.get(i)
-        if hit is not None:
-            return hit
-        x, y = nodes[i]
-        gx0, gy0 = int(x // CELL), int(y // CELL)
-        ok = False
-        for dgx in (-1, 0, 1):
-            for dgy in (-1, 0, 1):
-                for k in grid.get((gx0 + dgx, gy0 + dgy), ()):
-                    (ax, ay), (bx, by) = segs[k]
-                    dx, dy = bx - ax, by - ay
-                    s2 = dx * dx + dy * dy
-                    if s2 < 1e-12:
-                        continue
-                    t = ((x - ax) * dx + (y - ay) * dy) / s2
-                    t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
-                    if math.hypot(x - (ax + t * dx),
-                                  y - (ay + t * dy)) <= R:
-                        ok = True
-                        break
-                if ok:
-                    break
-            if ok:
-                break
-        zone_cache[i] = ok
-        return ok
+def _corridor_point_nearest(x, y, segs, grid, cell):
+    """Nearest corridor point over the 3×3 grid neighbourhood: returns
+    ``(distance, px, py)`` (exact for distances ≤ cell; beyond that
+    ``(+inf, x, y)``)."""
+    gx0, gy0 = int(x // cell), int(y // cell)
+    best = float("inf")
+    bx0, by0 = x, y
+    for dgx in (-1, 0, 1):
+        for dgy in (-1, 0, 1):
+            for k in grid.get((gx0 + dgx, gy0 + dgy), ()):
+                (ax, ay), (bx, by) = segs[k]
+                dx, dy = bx - ax, by - ay
+                s2 = dx * dx + dy * dy
+                if s2 < 1e-12:
+                    continue
+                t = ((x - ax) * dx + (y - ay) * dy) / s2
+                t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+                px, py = ax + t * dx, ay + t * dy
+                d = math.hypot(x - px, y - py)
+                if d < best:
+                    best, bx0, by0 = d, px, py
+    return best, bx0, by0
 
+
+def _corridor_point_distance(x, y, segs, grid, cell):
+    """Min point→segment distance (see ``_corridor_point_nearest``)."""
+    return _corridor_point_nearest(x, y, segs, grid, cell)[0]
+
+
+def _apron_zone_scaled_edges(shape_constraints, in_zone) -> list:
+    """Apron grade edges whose BOTH endpoints satisfy ``in_zone``, caps
+    scaled from the apron legal grade down to the smoothing grade."""
     out: list[tuple[int, int, float]] = []
     for sc in shape_constraints:
         if sc["role"] != ROLE_APRON:
@@ -815,9 +806,194 @@ def _apron_corridor_zone_edges(layout, nodes, shape_constraints):
         for (i, j, c) in sc["edges"]:
             if c <= 0.0:
                 continue
-            if _in_zone(i) and _in_zone(j):
+            if in_zone(i) and in_zone(j):
                 out.append((i, j, c * scale))
     return out
+
+
+def _apron_corridor_zone_edges(layout, nodes, shape_constraints):
+    """APRON CORRIDOR SMOOTHING edge set (s76, user in-sim verdict at CYXY:
+    aprons read much too steep at the 1.5 % legal cap even where taxi routes
+    look right).  Aprons should fall away from the taxi corridors that serve
+    them at ideally ``APRON_CORRIDOR_SMOOTH_GRADE`` (1 % — also the ICAO
+    Annex 14 apron recommendation) within
+    ``APRON_CORRIDOR_SMOOTH_RADIUS_M`` (200 m).
+
+    STRAIGHT-LINE zone test — the ``APRON_CORRIDOR_GEODESIC`` gate-off
+    path (s77 measured: this misattributes across grass; the geodesic
+    state below supersedes it).  The caller projects the returned edges
+    BEST-EFFORT after the legal enforce: a solver preference, NOT a law
+    change (the validator still asserts ROLE_GRADE_LIMITS); wherever hard
+    anchors genuinely demand more than 1 %, the projection plateaus and
+    the legal surface stands."""
+    if (APRON_CORRIDOR_SMOOTH_GRADE <= 0.0
+            or APRON_CORRIDOR_SMOOTH_RADIUS_M <= 0.0):
+        return []
+    segs = _corridor_segments(layout)
+    if not segs:
+        return []
+    R = APRON_CORRIDOR_SMOOTH_RADIUS_M
+    grid = _seg_grid(segs, R)
+    zone_cache: dict[int, bool] = {}
+
+    def _in_zone(i):
+        hit = zone_cache.get(i)
+        if hit is None:
+            x, y = nodes[i]
+            hit = _corridor_point_distance(x, y, segs, grid, R) <= R
+            zone_cache[i] = hit
+        return hit
+
+    return _apron_zone_scaled_edges(shape_constraints, _in_zone)
+
+
+# Taxi-rect vertices always seed the geodesic corridor field (the rect IS
+# the corridor surface); their transverse offset to the axis is bounded by
+# the half-width — beyond this something is wrong, don't seed.
+_RECT_SEED_MAX_D0_M = 60.0
+
+
+def _apron_corridor_geodesic_state(layout, nodes, elev, shape_constraints,
+                                   all_edges):
+    """GEODESIC corridor zone + corridor-VALUE bands (s77, user-approved
+    upgrade of the straight-line zone above — both improvements together):
+
+    1. ATTRIBUTION — zone membership by the shortest INTERIOR path through
+       pavement, not straight-line distance (s77 measured at HECA: apron
+       vertices 13-65 m across grass from a centerline whose true interior
+       path is 0.7-1.6 km — the Euclidean zone smooths them against a
+       corridor that does not serve them).
+    2. VALUE BINDING — in-zone apron vertices are clamped (best-effort)
+       into bands [corridor_value ± g·interior_distance]: internal
+       pair-cap scaling alone cannot see an apron sitting on a uniform
+       OFFSET (wall) from the corridor that serves it.
+
+    Mechanism: corridor-adjacent vertices (within
+    ``APRON_CORRIDOR_SEED_RADIUS_M`` of a corridor polyline, plus every
+    aircraft taxi-rect vertex) SEED the field at their own solved values
+    with the transverse allowance ``± g·d0``; one multi-source Dijkstra
+    over the solver's edge graph at plain lengths yields the interior
+    distance (zone membership ≤ ``APRON_CORRIDOR_SMOOTH_RADIUS_M``), two
+    more at ``g``-scaled lengths yield the value bands (the
+    ``_lipschitz_tighten_bands`` relaxation seeded at corridor values).
+
+    s77 measured calibration: at the 1.5 % legal cap this field already
+    holds everywhere (the surface is assembled from cap-bounded edges) —
+    the lever is the 1 % preference; route-law-pinned vertices (HECA's
+    #186-squeeze family) must YIELD, so the caller intersects these bands
+    with the legal route bands and keeps the legal ones wherever the
+    intersection is empty.
+
+    Returns ``(geo_dist, lo, hi)`` per-node lists (unreached = inf /
+    unbounded) or ``None`` when disabled or no corridors exist."""
+    g = APRON_CORRIDOR_SMOOTH_GRADE
+    if g <= 0.0 or APRON_CORRIDOR_SMOOTH_RADIUS_M <= 0.0:
+        return None
+    segs = _corridor_segments(layout)
+    if not segs:
+        return None
+    n = len(nodes)
+    INF = float("inf")
+    cell = max(APRON_CORRIDOR_SEED_RADIUS_M, _RECT_SEED_MAX_D0_M)
+    grid = _seg_grid(segs, cell)
+
+    rect_nodes: set = set()
+    near_nodes: set = set()
+    for sc in shape_constraints:
+        role = sc["role"]
+        if role in SLOPING_RECT_ROLES and role != ROLE_SERVICE_ROAD:
+            rect_nodes.update(sc["nodes"])
+        elif role in (ROLE_APRON, ROLE_JUNCTION, ROLE_TERMINAL):
+            near_nodes.update(sc["nodes"])
+    # Airside union for the mid-range seed visibility test (apron lanes run
+    # through apron INTERIORS — ring vertices sit 15-60 m away laterally;
+    # they seed only when the connector to the lane stays inside pavement,
+    # the true transverse offset.  Across grass = the misattribution this
+    # whole function exists to kill).
+    airside = None
+    try:
+        from shapely.geometry import LineString
+        from shapely.ops import unary_union
+        from shapely.prepared import prep
+        polys = [s.polygon for s in layout.shapes
+                 if s.role in PAVEMENT_ROLES
+                 and s.polygon is not None and not s.polygon.is_empty]
+        if polys:
+            airside = prep(unary_union(polys).buffer(0.5))
+    except _GEOM_EXC:
+        airside = None
+    seeds: dict[int, float] = {}
+    for i in rect_nodes:
+        if i < n:
+            d0 = _corridor_point_distance(*nodes[i], segs, grid, cell)
+            if d0 <= _RECT_SEED_MAX_D0_M:
+                seeds[i] = d0
+    for i in near_nodes:
+        if i >= n or i in seeds:
+            continue
+        d0, px, py = _corridor_point_nearest(*nodes[i], segs, grid, cell)
+        if d0 <= APRON_CORRIDOR_SEED_RADIUS_M:
+            seeds[i] = d0
+        elif d0 <= _RECT_SEED_MAX_D0_M and airside is not None:
+            try:
+                if airside.contains(
+                        LineString((nodes[i], (px, py)))):
+                    seeds[i] = d0
+            except _GEOM_EXC:
+                pass
+    if not seeds:
+        return None
+
+    adj: dict[int, list[tuple[int, float]]] = {}
+    for (i, j, _c) in all_edges:
+        if i >= n or j >= n or i == j:
+            continue
+        (xa, ya), (xb, yb) = nodes[i], nodes[j]
+        d = math.hypot(xa - xb, ya - yb)
+        adj.setdefault(i, []).append((j, d))
+        adj.setdefault(j, []).append((i, d))
+
+    def _relax(init, scale):
+        dist = list(init)
+        pq = [(dv, i) for i, dv in enumerate(dist) if dv < INF]
+        heapq.heapify(pq)
+        while pq:
+            dv, u = heapq.heappop(pq)
+            if dv > dist[u]:
+                continue
+            for v, d in adj.get(u, ()):
+                nd = dv + d * scale
+                if nd < dist[v]:
+                    dist[v] = nd
+                    heapq.heappush(pq, (nd, v))
+        return dist
+
+    init_d = [INF] * n
+    init_hi = [INF] * n
+    init_nlo = [INF] * n
+    for i, d0 in seeds.items():
+        init_d[i] = d0
+        init_hi[i] = elev[i] + g * d0
+        init_nlo[i] = -(elev[i] - g * d0)
+    geo_dist = _relax(init_d, 1.0)
+    c_hi = _relax(init_hi, g)
+    c_lo = [(-x if x < INF else -INF) for x in _relax(init_nlo, g)]
+    if _os.environ.get("O4_APZ_DEBUG") == "1":
+        ap = {i for sc in shape_constraints if sc["role"] == ROLE_APRON
+              for i in sc["nodes"] if i < n}
+        R_dbg = APRON_CORRIDOR_SMOOTH_RADIUS_M
+        in_z = [i for i in ap if geo_dist[i] <= R_dbg]
+        near_miss = sum(1 for i in ap if R_dbg < geo_dist[i] <= 1.5 * R_dbg)
+        far = sum(1 for i in ap if geo_dist[i] > 1.5 * R_dbg)
+        viol = [(abs(min(max(elev[i], c_lo[i]), c_hi[i]) - elev[i]), i)
+                for i in in_z]
+        viol.sort(reverse=True)
+        print(f"[apz] seeds={len(seeds)} apron-nodes={len(ap)} "
+              f"in-zone={len(in_z)} near-miss(R..1.5R)={near_miss} "
+              f"far={far} "
+              f"band-pulls>0.1m={sum(1 for v, _ in viol if v > 0.1)} "
+              f"max-pull={viol[0][0] if viol else 0:.2f}m")
+    return geo_dist, c_lo, c_hi
 
 
 def _lipschitz_tighten_bands(n, lo, hi, edges):
@@ -1395,22 +1571,74 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
         max_sweeps=_WITHIN_ENFORCE_MAX_SWEEPS,
         tol=_SPREAD_COMPLY_TOL_M)
     # APRON CORRIDOR SMOOTHING (best-effort 1 % near taxi corridors — see
-    # _apron_corridor_zone_edges): a bounded projection on the tightened
-    # apron-zone edges, run AFTER the legal enforce so it can only smooth
-    # within the already-feasible region (bands still clamp every move).
-    # Pads stay held (smoothing a slope toward 1 % between high anchors
-    # and low free pavement LIFTS the low side — pads dragged up 2.5 m
-    # through shared nodes in the first build).
+    # _apron_corridor_zone_edges / _apron_corridor_geodesic_state): a
+    # bounded projection on the tightened apron-zone edges, run AFTER the
+    # legal enforce so it can only smooth within the already-feasible
+    # region (bands still clamp every move).  Pads stay held (smoothing a
+    # slope toward 1 % between high anchors and low free pavement LIFTS
+    # the low side — pads dragged up 2.5 m through shared nodes in the
+    # first build).  Under APRON_CORRIDOR_GEODESIC the zone is measured
+    # by interior path and in-zone apron vertices are additionally
+    # clamped into corridor-VALUE bands intersected with the legal route
+    # bands (legal wins whenever the intersection is empty — the
+    # route-pinned squeeze families YIELD, s77).
     n_zone = 0
+    n_geo_tight = 0
     if nodes is not None and layout is not None:
-        zone_edges = _apron_corridor_zone_edges(
-            layout, nodes, shape_constraints)
-        if zone_edges:
-            n_zone = len(zone_edges)
-            _project_within_bands(
-                elev, zone_edges, is_hard, lo, hi, coupling,
-                held_extra=held_all,
-                max_sweeps=800, tol=_SPREAD_COMPLY_TOL_M)
+        geo_state = (_apron_corridor_geodesic_state(
+                         layout, nodes, elev, shape_constraints, all_edges)
+                     if APRON_CORRIDOR_GEODESIC else None)
+        if geo_state is not None:
+            geo_dist, c_lo, c_hi = geo_state
+            R_z = APRON_CORRIDOR_SMOOTH_RADIUS_M
+            # Pair-smoothing ZONE = straight-line ∪ interior-path radius
+            # (strictly additive over the in-sim-validated s76 coverage:
+            # the pair caps reference no corridor value, so attribution
+            # cannot mislead them; the interior path only GOVERNS the
+            # value bands below).
+            eu_zone = {e2 for e2 in _apron_corridor_zone_edges(
+                layout, nodes, shape_constraints)}
+            zone_edges = list({*eu_zone, *_apron_zone_scaled_edges(
+                shape_constraints, lambda i: geo_dist[i] <= R_z)})
+            zone_edges.sort()
+            if zone_edges:
+                n_zone = len(zone_edges)
+                lo2 = list(lo)
+                hi2 = list(hi)
+                for sc3 in shape_constraints:
+                    if sc3["role"] != ROLE_APRON:
+                        continue
+                    for i in sc3["nodes"]:
+                        if i >= n or geo_dist[i] > R_z:
+                            continue
+                        if lo2[i] > hi2[i]:
+                            continue          # band-pinned: arbitration's job
+                        # Corridor band CLAMPED INTO the legal band (not
+                        # intersected-or-dropped): when the corridor value
+                        # is unreachable legally (route floors/ceilings —
+                        # the squeeze families), the band collapses onto
+                        # the nearest legal edge, moving the apron as
+                        # CLOSE to its corridor as the law allows instead
+                        # of leaving it at DEM height.
+                        tlo = max(lo2[i], min(c_lo[i], hi2[i]))
+                        thi = min(hi2[i], max(c_hi[i], lo2[i]))
+                        if (tlo, thi) != (lo2[i], hi2[i]):
+                            lo2[i] = tlo
+                            hi2[i] = thi
+                            n_geo_tight += 1
+                _project_within_bands(
+                    elev, zone_edges, is_hard, lo2, hi2, coupling,
+                    held_extra=held_all,
+                    max_sweeps=800, tol=_SPREAD_COMPLY_TOL_M)
+        else:
+            zone_edges = _apron_corridor_zone_edges(
+                layout, nodes, shape_constraints)
+            if zone_edges:
+                n_zone = len(zone_edges)
+                _project_within_bands(
+                    elev, zone_edges, is_hard, lo, hi, coupling,
+                    held_extra=held_all,
+                    max_sweeps=800, tol=_SPREAD_COMPLY_TOL_M)
     # FINAL FAIRING + cap re-projection: iron sub-cap ripples the windowed
     # chord web no longer smooths implicitly (see _fair_surface_ripples),
     # then re-project caps so the smoothing cannot leave a new violation.
@@ -1434,7 +1662,8 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                  if c > 0 and abs(elev[i] - elev[j]) > c + 1e-4)
         print(f"[enforce] {icao}: {sweeps} sweeps, edge-viol {v0}->{v1}, "
               f"residual {resid:.3f} m, band-pinned = {len(band_pinned)}, "
-              f"apron-zone edges = {n_zone}, faired = {n_faired}")
+              f"apron-zone edges = {n_zone} "
+              f"(geo-tightened {n_geo_tight}), faired = {n_faired}")
     return len(band_pinned)
 
 
