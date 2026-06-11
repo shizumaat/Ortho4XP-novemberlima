@@ -85,6 +85,9 @@ from .config import (
     ELEV_ROUNDING_NOISE_M,
     GRADE_VISIBILITY_BUFFER_M,
     ROLE_GRADE_LIMITS,
+    ROUTE_FIELD_LOCAL_WINDOW_M,
+    ROUTE_FIELD_MODEL,
+    ROUTE_NOISE_FRAC,
     RUNWAY_APRON_AREA_RATIO,
     RUNWAY_INSIDE_APRON_FRAC,
     SERVICE_ROAD_MAX_GRADE,
@@ -2852,6 +2855,15 @@ def _report_within_shape_violations(
     # (an earlier all-pair-Euclidean model over-reported thousands of phantom
     # pairs on huge non-convex aprons, e.g. HECA 3569 vs the real count).
     from shapely.geometry import LineString as _LS
+    # ROUTE-FIELD MODEL: collect the runway anchors + airside check points in
+    # the same pass for the long-range route-band check (the within-shape
+    # window's counterpart), run through the SHARED engine
+    # (auto_patch.route_field) the validator uses, so WARN == gate.
+    _rf_runway_rings: list = []
+    _rf_check_pts: list = []
+    _rf_check_src: list = []
+    _rf_groundside = {"groundside_pavement", "service_road",
+                      "service_junction", "tunnel_ramp"}
     for s_idx, s in enumerate(layout.shapes):
         if s.polygon is None or s.polygon.is_empty:
             continue
@@ -2906,6 +2918,17 @@ def _report_within_shape_violations(
                 x = math.radians(lon - layout.anchor[1]) * R_EARTH * cos0
                 y = math.radians(lat - layout.anchor[0]) * R_EARTH
                 coords_m.append((x, y))
+        # Route-band data (ROUTE_FIELD_MODEL): runway rings are the anchors
+        # (+ the runway-midline graph augmentation inside the engine);
+        # regulated airside vertices are the check points.
+        if ROUTE_FIELD_MODEL:
+            if s.role == ROLE_RUNWAY:
+                _rf_runway_rings.append((list(coords_m), list(elevs)))
+            elif (s.role != ROLE_RUNWAY_CROSSING
+                  and s.role not in _rf_groundside):
+                for (xm, ym), em in zip(coords_m, elevs):
+                    _rf_check_pts.append((xm, ym, em))
+                    _rf_check_src.append((s_idx, s.role or "?", s.ref or ""))
         # In-pavement visibility predicate (geodesic grade) for APRON +
         # JUNCTION — both can be non-convex; only pairs whose chord stays
         # inside the (buffered) polygon are real constraints.
@@ -2935,6 +2958,14 @@ def _report_within_shape_violations(
                 d = math.hypot(xi - xj, yi - yj)
                 if d < 0.5:
                     continue
+                # ROUTE-FIELD MODEL: chords are a LOCAL law — non-ring-
+                # adjacent pairs beyond the window are not graded (the
+                # route-band check below is the long-range law).  Mirrors
+                # the validator's windowed _check_within_shape.
+                if (ROUTE_FIELD_MODEL
+                        and d > ROUTE_FIELD_LOCAL_WINDOW_M
+                        and not (j == i + 1 or (i == 0 and j == n - 1))):
+                    continue
                 if _vis is not None and not _vis(xi, yi, xj, yj):
                     continue          # chord leaves the polygon — phantom path
                 de = abs(ei - elevs[j])
@@ -2950,8 +2981,9 @@ def _report_within_shape_violations(
         try:
             msg = (f"  [pav-builder] WARN: {icao}: {n_viol} within-shape "
                    f"grade violation(s) over the per-role config cap "
-                   f"(ROLE_GRADE_LIMITS; geodesic visibility graph, any "
-                   f"distance — matches tools/check_grade.py / verify_and_log) "
+                   f"(ROLE_GRADE_LIMITS; geodesic visibility graph"
+                   f"{', local window' if ROUTE_FIELD_MODEL else ', any distance'}"
+                   f" — matches tools/check_grade.py / verify_and_log) "
                    f"across {len(per_shape)} shape(s).")
             UI.vprint(1, msg)
             # Name the specific worst shapeIDs so the user can investigate them.
@@ -2964,6 +2996,51 @@ def _report_within_shape_violations(
                           f"({ea:.1f} → {eb:.1f}, d={d:.1f}m, de={de:.1f}m)")
         except _GEOM_EXC:
             pass
+    # ROUTE-FIELD long-range law (the window's counterpart) — the SAME engine
+    # the validator runs (auto_patch.route_field), so this WARN reports the
+    # count the gate would assert.
+    if ROUTE_FIELD_MODEL and _rf_runway_rings and _rf_check_pts:
+        try:
+            from .route_field import route_band_violations
+            centerlines_xy = [
+                list(ln.coords)
+                for ln, _nm in (getattr(layout, "apt_taxi_centerlines", [])
+                                or [])
+                if ln is not None and not ln.is_empty]
+            rbvs = route_band_violations(
+                centerlines_xy, _rf_runway_rings, _rf_check_pts,
+                TAXI_MAX_GRADE, noise_frac=ROUTE_NOISE_FRAC,
+                rounding_noise_m=ELEV_ROUNDING_NOISE_M)
+        except _GEOM_EXC:
+            rbvs = []
+        except ImportError:
+            rbvs = []
+        if rbvs:
+            try:
+                per_shape_rb: dict[int, tuple] = {}
+                for rb in rbvs:
+                    s_idx, role, ref = _rf_check_src[rb.index]
+                    prev = per_shape_rb.get(s_idx)
+                    if prev is None or rb.excess_m > prev[0]:
+                        per_shape_rb[s_idx] = (
+                            rb.excess_m, role, ref, rb.elev,
+                            rb.anchor_elev, rb.route_d_m)
+                UI.vprint(1,
+                          f"  [pav-builder] WARN: {icao}: {len(rbvs)} "
+                          f"ROUTE-BAND violation(s) (runway-anchor "
+                          f"route-distance law, margin "
+                          f"{ROUTE_NOISE_FRAC * 100:.0f}% — matches "
+                          f"tools/check_grade.py) across "
+                          f"{len(per_shape_rb)} shape(s).")
+                for s_idx, (ex, role, ref, ev, ae, rd) in sorted(
+                        per_shape_rb.items(), key=lambda kv: -kv[1][0])[:8]:
+                    rstr = f"/{ref}" if ref else ""
+                    UI.vprint(1,
+                              f"  [pav-builder]   route-band +{ex:.2f}m on "
+                              f"{role}{rstr} [#{s_idx}] (v={ev:.1f} vs "
+                              f"anchor {ae:.1f} @ route {rd:.0f}m)")
+            except _GEOM_EXC:
+                pass
 
 
 WITHIN_SHAPE_VIOLATION_RADIUS_M = 60.0   # spatial-pair edge radius for the

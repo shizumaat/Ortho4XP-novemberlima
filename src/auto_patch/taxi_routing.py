@@ -24,7 +24,9 @@ import heapq
 import math
 from typing import Dict, List, Optional, Tuple
 
-__all__ = ["TaxiRouteGraph", "build_taxi_route_graph", "taxi_route_distance"]
+__all__ = ["TaxiRouteGraph", "build_taxi_route_graph", "taxi_route_distance",
+           "shared_taxi_route_graph", "augment_with_runway_centerlines",
+           "runway_augmented_route_graph"]
 
 # Centerline vertices within this distance (m) are treated as the same graph
 # node, so abutting taxiway segments join.  Small relative to taxiway spacing.
@@ -34,24 +36,48 @@ _SNAP_TOL_M = 3.0
 class TaxiRouteGraph:
     """Undirected graph of taxiway-centerline segments joined at shared
     endpoints.  ``adj[key] = [(other_key, length_m), ...]``; ``coord[key] =
-    (x, y)`` in layout-local metres."""
+    (x, y)`` in layout-local metres.
 
-    __slots__ = ("adj", "coord", "tol")
+    ``aug`` holds the keys ADDED by runway-centerline augmentation (see
+    ``augment_with_runway_centerlines``).  Augmented nodes are ROUTE
+    segments and ANCHOR entry points only — a pavement vertex must never
+    take an augmented node as its nearest graph entry, or a vertex sitting
+    in a route-graph COVERAGE HOLE near a runway gets a tight fictitious
+    band through a straight perpendicular hop across non-pavement instead
+    of the weak band the hole should produce (measured at CYXY TX1, s76:
+    nearest plain node 345 m, nearest midline node ~60 m → 11 false
+    route-band violations on a corridor profile the curve-aware model had
+    legally written)."""
 
-    def __init__(self, adj, coord, tol):
+    __slots__ = ("adj", "coord", "tol", "aug")
+
+    def __init__(self, adj, coord, tol, aug=None):
         self.adj = adj
         self.coord = coord
         self.tol = tol
+        self.aug = aug if aug is not None else set()
 
     def _key(self, x: float, y: float) -> Tuple[int, int]:
         return (int(round(x / self.tol)), int(round(y / self.tol)))
 
-    def nearest_key(self, x: float, y: float
+    def copy(self) -> "TaxiRouteGraph":
+        """Independent copy (adjacency lists + coord dict are duplicated) so a
+        caller may AUGMENT it (e.g. with runway centerlines) without mutating a
+        shared cached instance."""
+        return TaxiRouteGraph({k: list(v) for k, v in self.adj.items()},
+                              dict(self.coord), self.tol, set(self.aug))
+
+    def nearest_key(self, x: float, y: float, plain_only: bool = False
                     ) -> Tuple[Optional[Tuple[int, int]], float]:
-        """The graph node nearest ``(x, y)`` and its distance (m)."""
+        """The graph node nearest ``(x, y)`` and its distance (m).
+        ``plain_only`` skips augmentation-added nodes (see class doc —
+        required for pavement-VERTEX queries on an augmented graph)."""
         best = None
         bd = float("inf")
+        aug = self.aug if plain_only else None
         for k, (cx, cy) in self.coord.items():
+            if aug is not None and k in aug:
+                continue
             d = math.hypot(cx - x, cy - y)
             if d < bd:
                 bd, best = d, k
@@ -141,6 +167,102 @@ def build_taxi_route_graph(layout, tol_m: float = _SNAP_TOL_M
             w = math.hypot(x1 - x0, y1 - y0)
             adj.setdefault(ka, []).append((kb, w))
             adj.setdefault(kb, []).append((ka, w))
+    return g
+
+
+def shared_taxi_route_graph(layout) -> TaxiRouteGraph:
+    """The per-layout CACHED centerline route graph (built once per solve and
+    shared by the enforce bands, the corridor pass, the terminal seed and the
+    flex path — they used to each rebuild it).  Callers must NOT mutate the
+    returned instance; augmenting callers take ``.copy()`` first (see
+    ``augment_with_runway_centerlines``)."""
+    g = getattr(layout, "_taxi_route_graph_cache", None)
+    if g is None:
+        g = build_taxi_route_graph(layout)
+        try:
+            layout._taxi_route_graph_cache = g
+        except (AttributeError, TypeError):
+            pass
+    return g
+
+
+def augment_with_runway_centerlines(G: TaxiRouteGraph, layout,
+                                    skip_ref: Optional[str] = None,
+                                    bridge_m: float = 40.0) -> None:
+    """AUGMENT ``G`` (in place — pass a copy of a shared graph) with RUNWAY
+    centerline segments: the apt.dat taxi-route rows stop at/near the runway
+    edge, so runway-end/threshold anchors are otherwise unreachable through the
+    graph (s68 — the legitimate other-runway demand never formed).  Each
+    4-corner runway piece contributes its cross-end midpoint pair as an edge
+    (pieces share cross-ends, so the chain connects along the runway); each
+    midpoint also bridges to the nearest PRE-EXISTING taxi node within
+    ``bridge_m`` (the taxi rows' on-runway endpoints).
+
+    ``skip_ref``: exclude that runway's own pieces — the flex demand path must
+    not let a flexing runway's threshold ride its own interior as a fictitious
+    1.5 % rise-corridor (the s68 false 102.09 ceiling)."""
+    taxi_nodes_snapshot = list(G.coord.values())
+
+    def _aug_edge(pa, pb):
+        ka, kb = G._key(*pa), G._key(*pb)
+        if ka not in G.coord:
+            G.coord[ka] = pa
+            G.aug.add(ka)          # added by augmentation, not a taxi row
+        if kb not in G.coord:
+            G.coord[kb] = pb
+            G.aug.add(kb)
+        if ka == kb:
+            return
+        w = math.hypot(pb[0] - pa[0], pb[1] - pa[1])
+        G.adj.setdefault(ka, []).append((kb, w))
+        G.adj.setdefault(kb, []).append((ka, w))
+
+    mids: List[Tuple[float, float]] = []
+    for s in layout.shapes:
+        if s.role != "runway" or s.polygon is None or s.polygon.is_empty:
+            continue
+        if skip_ref is not None and (s.ref or "") == skip_ref:
+            continue        # no rise-corridor along the flexing runway
+        ring = list(s.polygon.exterior.coords)
+        if len(ring) > 1 and ring[0] == ring[-1]:
+            ring = ring[:-1]
+        if len(ring) != 4:
+            continue
+        edges4 = [(ring[k], ring[(k + 1) % 4]) for k in range(4)]
+        edges4.sort(key=lambda ab: math.hypot(
+            ab[1][0] - ab[0][0], ab[1][1] - ab[0][1]))
+        m0 = ((edges4[0][0][0] + edges4[0][1][0]) / 2.0,
+              (edges4[0][0][1] + edges4[0][1][1]) / 2.0)
+        m1 = ((edges4[1][0][0] + edges4[1][1][0]) / 2.0,
+              (edges4[1][0][1] + edges4[1][1][1]) / 2.0)
+        _aug_edge(m0, m1)
+        mids.append(m0)
+        mids.append(m1)
+    for mp in mids:
+        best_pt = None
+        best_d = bridge_m
+        for (tx, ty) in taxi_nodes_snapshot:
+            d = math.hypot(tx - mp[0], ty - mp[1])
+            if d < best_d:
+                best_d = d
+                best_pt = (tx, ty)
+        if best_pt is not None:
+            _aug_edge(mp, best_pt)
+
+
+def runway_augmented_route_graph(layout) -> TaxiRouteGraph:
+    """Per-layout CACHED copy of the shared route graph augmented with ALL
+    runway centerlines — the graph for the route-field long-range law (the
+    enforce's reach bands), where runways are HARD at solved values and a route
+    along a runway is a physically real path."""
+    g = getattr(layout, "_taxi_route_graph_rwy_cache", None)
+    if g is None:
+        g = shared_taxi_route_graph(layout).copy()
+        augment_with_runway_centerlines(g, layout)
+        try:
+            layout._taxi_route_graph_rwy_cache = g
+        except (AttributeError, TypeError):
+            pass
     return g
 
 

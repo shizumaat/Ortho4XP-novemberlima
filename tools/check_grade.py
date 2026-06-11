@@ -65,6 +65,9 @@ try:
         ROLE_GRADE_LIMITS,
         GRADE_VISIBILITY_BUFFER_M as _GRADE_VISIBILITY_BUFFER_M,
         ELEV_ROUNDING_NOISE_M,
+        ROUTE_FIELD_MODEL,
+        ROUTE_FIELD_LOCAL_WINDOW_M,
+        ROUTE_NOISE_FRAC,
     )
 except Exception:
     ROLE_GRADE_LIMITS: Dict[str, Optional[float]] = {}
@@ -72,6 +75,9 @@ except Exception:
     # validator still runs if the package import fails.
     _GRADE_VISIBILITY_BUFFER_M = 1.0
     ELEV_ROUNDING_NOISE_M = 0.15
+    ROUTE_FIELD_MODEL = False
+    ROUTE_FIELD_LOCAL_WINDOW_M = 80.0
+    ROUTE_NOISE_FRAC = 0.04
 
 
 # ── OSM parsing ─────────────────────────────────────────────────
@@ -657,12 +663,13 @@ def _check_within_shape(ways: List[Way],
     edge X-Plane will render — check all 3 pairs.
 
     For 4+-vertex polygons, check every MUTUALLY-VISIBLE pair (the
-    straight chord stays inside the pavement) at ANY distance — the
-    average slope between two visible vertices is a real grade the
-    aircraft experiences regardless of separation.  There is NO
-    distance limit: visibility (not proximity) is what makes a pair a
-    real constraint, and it excludes chords that cut across a
-    non-convex shape's notch.  Apron + junction polygons are gated by
+    straight chord stays inside the pavement).  Under the ROUTE-FIELD
+    MODEL (config) visibility chords are a LOCAL smoothness law only:
+    non-ring-adjacent pairs longer than ``ROUTE_FIELD_LOCAL_WINDOW_M``
+    are skipped (long chords systematically UNDER-measure the real taxi
+    route — the long-range law is the route-band check instead);
+    ring-adjacent pairs always survive.  With the model off the legacy
+    any-distance rule applies.  Apron + junction polygons are gated by
     visibility; convex rects have every pair visible.
 
     Pairs that include a seam vertex are skipped — those endpoints
@@ -721,6 +728,18 @@ def _check_within_shape(ways: List[Way],
             pairs = []
             for i in range(n):
                 for j in range(i + 1, n):
+                    # ROUTE-FIELD MODEL: visibility chords are a LOCAL law
+                    # only — pairs beyond the window are not graded against
+                    # each other (the long-range law is the route-band
+                    # check); ring-adjacent pairs (the physical edge
+                    # X-Plane lerps) always survive.  Mirrors the solver's
+                    # windowed ``_visible_grade_edges``.
+                    if ROUTE_FIELD_MODEL and not (
+                            j == i + 1 or (i == 0 and j == n - 1)):
+                        if math.hypot(pts[i][0] - pts[j][0],
+                                      pts[i][1] - pts[j][1]) \
+                                > ROUTE_FIELD_LOCAL_WINDOW_M:
+                            continue
                     if _vis is not None and not _vis(
                             pts[i][0], pts[i][1], pts[j][0], pts[j][1]):
                         continue
@@ -775,6 +794,101 @@ def _check_within_shape(ways: List[Way],
                 way_a=w, way_b=w,
                 pt_a=(xi, yi), pt_b=(xj, yj),
                 elev_a=ei, elev_b=ej))
+    return out
+
+
+# Roles excluded from the route-band check: anchors themselves (runway /
+# runway-interpolated crossings) and groundside surfaces (wall-separated from
+# the airside network by design — they have no taxi route to a runway).
+_ROUTE_BAND_SKIP_ROLES = {"runway", "runway_crossing"}
+
+
+def _check_route_bands(vertices: List[Vertex],
+                       ways: List[Way],
+                       nodes: Dict[str, Tuple[float, float]],
+                       ll_to_m,
+                       max_grade: float,
+                       route_ctx: dict,
+                       seam_nids: Optional[set] = None,
+                       ) -> List[Violation]:
+    """ROUTE-FIELD long-range law (docs/route_field_model.md §3/§5.5): every
+    airside pavement vertex must sit inside the band
+    ``[E_a − cap·route_d·(1+ROUTE_NOISE_FRAC), E_a + cap·route_d·(1+…)]``
+    for every RUNWAY anchor ``a``, with ``route_d`` the taxi-route distance
+    over the centerline graph (+ endpoint gaps).  This replaces the long-range
+    half of the visibility-chord law the local window dropped.
+
+    ``route_ctx['centerlines_ll']`` = the builder's apt.dat taxi centerlines
+    as lat/lon polylines (same sourcing rule as ``taxi_axes_ll`` — NEVER
+    re-derived from the OSM).  The engine (``auto_patch.route_field``) is
+    SHARED with the runtime WARN so the two cannot drift (the s64 lesson).
+    """
+    try:
+        from auto_patch.route_field import route_band_violations
+    except Exception:
+        return []
+    seam_nids = seam_nids or set()
+    centerlines_xy = []
+    for line_ll in route_ctx.get("centerlines_ll", []) or []:
+        pts_m = [ll_to_m(lat, lon) for (lat, lon) in line_ll]
+        if len(pts_m) >= 2:
+            centerlines_xy.append(pts_m)
+    if not centerlines_xy:
+        return []
+    # Runway pieces: ring (audit meter frame) + per-vertex elevations —
+    # the anchors AND the runway-centerline graph augmentation.
+    runway_rings = []
+    for w in ways:
+        if w.tags.get("role") != "runway":
+            continue
+        ring = w.nids
+        if len(ring) > 1 and ring[0] == ring[-1]:
+            ring = ring[:-1]
+        pts = []
+        elevs = []
+        for k, nid in enumerate(ring):
+            if nid not in nodes:
+                break
+            pts.append(ll_to_m(*nodes[nid]))
+            elevs.append(w.elevs[k] if k < len(w.elevs) else None)
+        else:
+            runway_rings.append((pts, elevs))
+    if not runway_rings:
+        return []
+    check_pts = []
+    check_src = []
+    for v in vertices:
+        if v.elev is None or v.nid in seam_nids:
+            continue
+        w = ways[v.way_idx]
+        role = w.tags.get("role")
+        if role in _ROUTE_BAND_SKIP_ROLES or _is_groundside(w):
+            continue
+        if _role_grade_limit(w, max_grade) is None:
+            continue
+        check_pts.append((v.x, v.y, v.elev))
+        check_src.append(v)
+    if not check_pts:
+        return []
+    rbvs = route_band_violations(
+        centerlines_xy, runway_rings, check_pts, max_grade,
+        noise_frac=ROUTE_NOISE_FRAC,
+        rounding_noise_m=ELEV_ROUNDING_NOISE_M)
+    capm = max_grade * (1.0 + ROUTE_NOISE_FRAC)
+    out: List[Violation] = []
+    for rb in rbvs:
+        v = check_src[rb.index]
+        d = rb.route_d_m if rb.route_d_m > 0.5 else 1.0
+        de = abs(rb.elev - rb.anchor_elev)
+        grade = de / d
+        out.append(Violation(
+            grade_pct=grade * 100,
+            excess_pct=(grade - capm) * 100,
+            distance_m=d,
+            de_m=rb.excess_m,
+            way_a=ways[v.way_idx], way_b=ways[v.way_idx],
+            pt_a=(v.x, v.y), pt_b=rb.anchor_xy,
+            elev_a=rb.elev, elev_b=rb.anchor_elev))
     return out
 
 
@@ -1107,6 +1221,7 @@ def run_checks(
     top_n: int = 10,
     taxi_axes_ll: Optional[list] = None,
     quiet: bool = False,
+    route_ctx: Optional[dict] = None,
 ) -> Tuple[List[Violation], List[Violation], List[EdgeStep]]:
     """``taxi_axes_ll`` (per-axis junction grading): the builder's APT.DAT taxi
     centerlines as ``[(latlon_points, cL, cT), …]`` — ``latlon_points`` a list
@@ -1117,6 +1232,14 @@ def run_checks(
     per-axis (see ``_per_axis_allowance``); when None, the legacy all-pair
     Euclidean cap applies.  Re-deriving centerlines from the OSM would diverge
     from the apt.dat geometry the builder actually used — do not.
+
+    ``route_ctx`` (ROUTE-FIELD MODEL long-range law): ``{"centerlines_ll":
+    [[(lat, lon), …], …]}`` — the builder's apt.dat taxi centerlines (same
+    sourcing rule as ``taxi_axes_ll``).  When supplied (and the model flag is
+    on in config) every airside pavement vertex is additionally checked
+    against its RUNWAY-anchor route bands (``_check_route_bands``); those
+    violations are merged into the ``within`` list.  Standalone runs without
+    a layout skip the check with a notice — same pattern as ``taxi_axes_ll``.
     """
     nodes, ways = _parse_osm(osm_path)
     ll_to_m = _ll_to_m_factory(nodes)
@@ -1159,6 +1282,21 @@ def run_checks(
     _pv(f"PLANE GRADIENT (triangle surface) > {max_grade_pct}%",
         plane, top_n)
     within = within + plane
+
+    # ROUTE-FIELD long-range law (the within-shape window's counterpart).
+    if ROUTE_FIELD_MODEL:
+        if route_ctx:
+            route_v = _check_route_bands(
+                vertices, ways, nodes, ll_to_m, max_grade, route_ctx,
+                seam_nids=seam_nids)
+            _pv("ROUTE-BAND (runway-anchor route-distance law, "
+                f"margin {ROUTE_NOISE_FRAC * 100:.0f}%)", route_v, top_n)
+            within = within + route_v
+        elif not quiet:
+            print("\nROUTE-BAND check skipped (no route_ctx — pass the "
+                  "builder's centerlines for the long-range law; "
+                  "within-shape pairs above the local window are NOT "
+                  "graded).")
 
     cross = _check_cross_shape_proximity(
         vertices, ways, proximity_m, max_grade)

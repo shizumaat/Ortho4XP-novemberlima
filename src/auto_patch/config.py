@@ -52,6 +52,9 @@ __all__ = [
     "RUNWAY_DEM_FOLLOW_BAND_M",
     "GRADE_VISIBILITY_BUFFER_M",
     "ELEV_ROUNDING_NOISE_M",
+    "ROUTE_FIELD_MODEL",
+    "ROUTE_FIELD_LOCAL_WINDOW_M",
+    "ROUTE_NOISE_FRAC",
     "RUNWAY_ADJACENCY_TOL_M",
     "RUNWAY_BOUNDARY_TOL_M",
     "RUNWAY_INSIDE_APRON_FRAC",
@@ -342,17 +345,44 @@ RUNWAY_DEM_FOLLOW_BAND_M = 0.0
 # runtime audit (``elevation._report_within_shape_violations``, the WARN shown
 # in the Ortho4XP window) and the validator (``tools/check_grade.py``, what the
 # test suite asserts), so the two never diverge:
-#   * A within-shape grade constraint exists between any two MUTUALLY-VISIBLE
+#   * A within-shape grade constraint exists between two MUTUALLY-VISIBLE
 #     vertices — a pair whose straight chord stays inside the polygon (grown by
-#     ``GRADE_VISIBILITY_BUFFER_M``) — at ANY distance.  Visibility (not
-#     proximity) is the gate: the average slope between two visible vertices is
-#     a real grade the aircraft experiences however far apart they are, while a
-#     chord that cuts across a non-convex notch is a phantom path and excluded.
-#     There is deliberately NO distance cap — matches the solver's uncapped
-#     ``unified_jacobi._visible_grade_edges``.
+#     ``GRADE_VISIBILITY_BUFFER_M``).  Visibility is the gate: a chord that
+#     cuts across a non-convex notch is a phantom path and excluded.
+#   * Under ``ROUTE_FIELD_MODEL`` (below) visibility chords are additionally a
+#     LOCAL law only: pairs longer than ``ROUTE_FIELD_LOCAL_WINDOW_M`` are not
+#     graded against each other (ring-adjacent pairs — the physical edge —
+#     always are); the LONG-RANGE law is the route-band check instead.
 #   * ``ELEV_ROUNDING_NOISE_M`` absorbs single-decimal (0.1 m) altitude rounding.
 GRADE_VISIBILITY_BUFFER_M = 1.0
 ELEV_ROUNDING_NOISE_M = 0.15
+
+# ── ROUTE-FIELD MODEL (#3, user-approved s73-p3, built s75; see
+# docs/route_field_model.md) ─────────────────────────────────────────────
+# The long-range within-pavement grade law is the TAXI-ROUTE distance from
+# the hard anchors (runway nodes at solved values, seam/threshold pins,
+# corridor-held writes): a vertex's feasible band is the intersection over
+# anchors a of [E_a ± cap·route_d(a, v)·(1 + ROUTE_NOISE_FRAC)].  Grade
+# rules (ICAO Annex 14 §3.9, EASA CS-ADR-DSN.D.265/.280) regulate slope
+# along the taxi route; nothing regulates the straight chord between two
+# points kilometres apart, and km-scale visibility chords systematically
+# UNDER-measure the route (corner cuts, cross-shape chains) — at HECA the
+# hard 05C contact reached the taxiway-A apron mouth through ~2.5 km of
+# chained chords where the real route is ~3.08 km, an 8.5 m manufactured
+# infeasibility (s73-p10g).  Visibility chords survive only as a LOCAL
+# smoothness cap (pairs ≤ ROUTE_FIELD_LOCAL_WINDOW_M; ring-adjacent pairs
+# always).  The validator (tools/check_grade.py) and the runtime WARN
+# change IDENTICALLY with this flag — the definition of a violation
+# changes, so the model must never ship solver-only or validator-only.
+ROUTE_FIELD_MODEL = True
+# Local smoothness window (m): visibility-chord pairs at or under this
+# length keep the chord grade law (design start 80, measure 60–100).
+ROUTE_FIELD_LOCAL_WINDOW_M = 80.0
+# The route graph under-counts real taxi routes by ~4 % (straight endpoint
+# stubs, uncurved row joins — s73-p3 measured).  Route bands used as HARD
+# constraints carry this relative margin; the validator MUST use the same
+# margin or it flags the solver's own legal output.
+ROUTE_NOISE_FRAC = 0.04
 
 
 # Per-role within-shape grade limits (rise / run).  The validator in

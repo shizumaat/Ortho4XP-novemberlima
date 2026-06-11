@@ -52,7 +52,8 @@ from collections import deque
 from shapely.errors import GEOSException, TopologicalError
 
 from auto_patch.config import (
-    ROLE_GRADE_LIMITS, RUNWAY_END_FRACTION, RUNWAY_END_GRADE,
+    ROLE_GRADE_LIMITS, ROUTE_FIELD_LOCAL_WINDOW_M, ROUTE_FIELD_MODEL,
+    ROUTE_NOISE_FRAC, RUNWAY_END_FRACTION, RUNWAY_END_GRADE,
     RUNWAY_MAX_GRADE, TAXI_CORRIDOR_PROFILE, TAXIWAY_MAX_GRADE_CHANGE_PER_M,
     TERMINAL_PADS_SLOPE)
 from auto_patch.elevation import (
@@ -776,7 +777,8 @@ _WITHIN_ENFORCE_MAX_SWEEPS = 2000
 
 
 def _runway_reach_bands(nodes, elev, runway_nodes, seam_nodes, all_edges, cap,
-                        layout):
+                        layout, extra_anchors=None, noise_frac=0.0,
+                        graph=None):
     """Per-node feasible band ``[lo, hi]`` from the runway/seam HARD anchors,
     where RUNWAY reachability is measured along the taxiway CENTERLINE route
     (``taxi_routing``) and SEAM reachability via the within-shape geodesic, then
@@ -793,37 +795,67 @@ def _runway_reach_bands(nodes, elev, runway_nodes, seam_nodes, all_edges, cap,
     geodesic (enforced by the projection's edges); only the runway-REACHABILITY
     distance switches to the centerline.  Seam anchors stay geodesic (a tile-seam
     pins its LOCAL pavement directly, not via a taxi route).
+
+    ROUTE-FIELD MODEL extensions (docs/route_field_model.md §5.2/§5.3 —
+    these bands are THE long-range grade law for the enforce):
+
+    * ``extra_anchors``: additional node indices anchored at their current
+      ``elev`` values through the route graph — base_hard pins (thresholds,
+      seam, boundary) and corridor-held writes (which threaded their own
+      route bands, so anchoring on them is consistent; this replaces the
+      p7/p10g ``band_exempt`` carve-out by construction).
+    * ``noise_frac``: relative route-measurement margin — the route graph
+      under-counts real routes ~4 % (straight endpoint stubs, uncurved row
+      joins), so a band used as a HARD constraint must be relaxed by
+      ``noise_frac·cap·route_d`` or it manufactures sub-metre tension
+      against legal surfaces.  The validator carries the SAME margin.
+    * ``graph``: a prebuilt ``TaxiRouteGraph`` (typically the shared
+      runway-augmented instance) — callers that need threshold/runway-end
+      reachability pass the augmented graph; default = the shared cached
+      plain centerline graph (built once per solve).
     """
-    from auto_patch.taxi_routing import build_taxi_route_graph
+    from auto_patch.taxi_routing import shared_taxi_route_graph
     n = len(nodes)
     NEG, POS = float("-inf"), float("inf")
     lo = [NEG] * n
     hi = [POS] * n
-    G = build_taxi_route_graph(layout)
-    if G.coord and runway_nodes:
+    G = graph if graph is not None else shared_taxi_route_graph(layout)
+    capm = cap * (1.0 + (noise_frac or 0.0))
+    anchor_nodes = set(runway_nodes)
+    if extra_anchors:
+        anchor_nodes |= set(extra_anchors)
+    if G.coord and anchor_nodes:
         # Cache each node's nearest centerline (key, gap) — one O(|coord|) scan
-        # per node, reused for seeds and queries.
-        near: dict[int, tuple] = {}
+        # per node, reused for seeds and queries.  On an AUGMENTED graph,
+        # pavement-vertex queries (and non-runway anchors) are restricted to
+        # PLAIN taxi-row nodes: augmented runway-midline nodes are route
+        # segments + RUNWAY-anchor entry points only — a vertex in a
+        # route-graph coverage hole must get the hole's WEAK band, not a
+        # tight fictitious band via a straight hop across non-pavement
+        # (CYXY TX1, s76).
+        near: dict[tuple, tuple] = {}
 
-        def _near(i):
-            r = near.get(i)
+        def _near(i, plain_only):
+            r = near.get((i, plain_only))
             if r is None:
-                r = G.nearest_key(*nodes[i])
-                near[i] = r
+                r = G.nearest_key(*nodes[i], plain_only=plain_only)
+                near[(i, plain_only)] = r
             return r
+
+        rwy_set = set(runway_nodes)
 
         def _propagate(sign):
             # Multi-source Dijkstra over the centerline graph (edge weight =
-            # cap*length) seeded at each runway anchor's centerline entry.
+            # capm*length) seeded at each anchor's centerline entry.
             dist: dict = {}
             pq: list = []
-            for a in runway_nodes:
+            for a in anchor_nodes:
                 if a >= n:
                     continue
-                key, gap = _near(a)
+                key, gap = _near(a, a not in rwy_set)
                 if key is None:
                     continue
-                v0 = sign * elev[a] + cap * gap
+                v0 = sign * elev[a] + capm * gap
                 if v0 < dist.get(key, POS):
                     dist[key] = v0
                     heapq.heappush(pq, (v0, key))
@@ -832,23 +864,23 @@ def _runway_reach_bands(nodes, elev, runway_nodes, seam_nodes, all_edges, cap,
                 if d > dist.get(u, POS):
                     continue
                 for v, w in G.adj.get(u, ()):  # type: ignore[union-attr]
-                    nd = d + cap * w
+                    nd = d + capm * w
                     if nd < dist.get(v, POS):
                         dist[v] = nd
                         heapq.heappush(pq, (nd, v))
             return dist
-        ceil_key = _propagate(1.0)            # elev[a] + cap*(gap+route)
-        floor_key = _propagate(-1.0)          # -elev[a] + cap*(gap+route)
+        ceil_key = _propagate(1.0)            # elev[a] + capm*(gap+route)
+        floor_key = _propagate(-1.0)          # -elev[a] + capm*(gap+route)
         for v in range(n):
-            key, gap = _near(v)
+            key, gap = _near(v, True)
             if key is None:
                 continue
             c = ceil_key.get(key)
             if c is not None:
-                hi[v] = c + cap * gap
+                hi[v] = c + capm * gap
             f = floor_key.get(key)
             if f is not None:
-                lo[v] = -(f + cap * gap)
+                lo[v] = -(f + capm * gap)
     # Seam anchors: keep the geodesic band (local pin), intersect.
     if seam_nodes:
         is_seam = [False] * n
@@ -929,16 +961,36 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
     # NOT infeasibility).  Falls back to the geodesic band when node coords aren't
     # available (older callers).
     if nodes is not None and layout is not None and runway_nodes:
-        lo, hi = _runway_reach_bands(
-            nodes, elev, runway_nodes, seam_nodes, all_edges,
-            TAXI_MAX_GRADE, layout)
+        if ROUTE_FIELD_MODEL:
+            # ROUTE-FIELD MODEL (#3): these bands ARE the long-range grade
+            # law.  Anchor set per docs/route_field_model.md §5.3 — runway
+            # nodes + base_hard pins + corridor-held writes, all at their
+            # current values, measured over the runway-AUGMENTED route
+            # graph with the §5.2 noise margin.
+            from auto_patch.taxi_routing import runway_augmented_route_graph
+            extra = {i for i in range(n) if base_hard[i]}
+            if held_extra:
+                extra |= {i for i in held_extra if i < n}
+            lo, hi = _runway_reach_bands(
+                nodes, elev, runway_nodes, seam_nodes, all_edges,
+                TAXI_MAX_GRADE, layout, extra_anchors=extra,
+                noise_frac=_ROUTE_NOISE_FRAC,
+                graph=runway_augmented_route_graph(layout))
+        else:
+            lo, hi = _runway_reach_bands(
+                nodes, elev, runway_nodes, seam_nodes, all_edges,
+                TAXI_MAX_GRADE, layout)
     else:
         lo, hi = _grade_bands(n, elev, is_hard, all_edges)
     # corridor-touched junctions: the held corridor profile is the route
     # truth there; per-vertex route bands (route-graph artifacts) would
     # pin free vertices metres off the held writes — exempt them and let
     # the visibility-edge projection conform them to the corridor.
-    if band_exempt:
+    # Under ROUTE_FIELD_MODEL the exemption is NOT applied: corridor-held
+    # writes are IN the band anchor set, so the route-band-vs-corridor
+    # fight it papered over disappears by construction (§5.4; machinery
+    # kept for the gate-off path — delete only with measurements).
+    if band_exempt and not ROUTE_FIELD_MODEL:
         for i in band_exempt:
             if i < n and not is_hard[i]:
                 lo[i] = float("-inf")
@@ -1346,7 +1398,8 @@ def _directional_relief(n, elev, is_hard, edge_grade, edge_length,
 _GRADE_VISIBILITY_BUFFER_M = 1.0
 
 
-def _visible_grade_edges(coords, idx, cap, polygon, container=None):
+def _visible_grade_edges(coords, idx, cap, polygon, container=None,
+                         max_len=None):
     """All-pair grade edges restricted to MUTUALLY-VISIBLE vertices — the chord
     between the two vertices stays inside ``polygon`` (grown by
     ``_GRADE_VISIBILITY_BUFFER_M``).  This is the in-pavement visibility graph:
@@ -1360,7 +1413,16 @@ def _visible_grade_edges(coords, idx, cap, polygon, container=None):
     UNION: a chord that leaves the junction across a NEIGHBOUR's pavement is a
     physically real grade path (the s73 #192 lesson — dropping it let the
     junction step 0.66 m off the rect edge it hugs), while a chord across a
-    true void (grass between arms) stays excluded."""
+    true void (grass between arms) stays excluded.
+
+    ``max_len`` (the ROUTE-FIELD LOCAL WINDOW, user-approved s73-p3 #3):
+    visibility chords are a LOCAL smoothness law only — pairs farther apart
+    than this are NOT graded against each other; the long-range law is the
+    taxi-route band (``_runway_reach_bands``).  km-scale chords (and chains
+    of them across shared nodes) systematically UNDER-measure the real taxi
+    route and manufacture infeasibility (HECA s73-p10g: 2.5 km chord chain
+    vs 3.08 km route = 8.5 m false demand).  RING-ADJACENT pairs always
+    survive regardless of length — the physical edge X-Plane lerps."""
     from shapely.geometry import LineString
     m = len(idx)
     try:
@@ -1384,6 +1446,9 @@ def _visible_grade_edges(coords, idx, cap, polygon, container=None):
             d = math.hypot(xa - xb, ya - yb)
             if d < 0.5:
                 continue
+            if max_len is not None and d > max_len \
+                    and not (b == a + 1 or (a == 0 and b == m - 1)):
+                continue          # beyond the local window, not a ring edge
             if _vis is not None:
                 try:
                     if not _vis(LineString(((xa, ya), (xb, yb)))):
@@ -1518,10 +1583,16 @@ def _build_shape_constraints(layout, bucket_to_idx):
             # run over neighbouring pavement = real grade paths (#192 stepped
             # 0.66 m off TX29's edge when those were dropped); only chords
             # over true voids are excluded.
+            # ROUTE-FIELD MODEL: visibility chords are demoted to a LOCAL
+            # smoothness window; the long-range law is the taxi-route band
+            # in the enforce (docs/route_field_model.md §3).  Ring-adjacent
+            # pairs always survive inside _visible_grade_edges.
             vis_edges = _visible_grade_edges(
                 coords, idx, cap, s.polygon,
                 container=(airside_buf if s.role == ROLE_JUNCTION
-                           else None))
+                           else None),
+                max_len=(ROUTE_FIELD_LOCAL_WINDOW_M if ROUTE_FIELD_MODEL
+                         else None))
             # PER-AXIS JUNCTION GRADING (user 2026-06-10): the 1.5 % cap
             # applies along the taxi CENTERLINE.  A chord between two
             # vertices following the same (curved) axis caps at the
@@ -2370,7 +2441,9 @@ def _snap_junction_verts_to_rect_edge_plane(layout, elev, bucket_to_idx,
 # (s73): graph 3,217 m vs the ≥3,353 m reality requires — ~4 % short.  A route
 # demand below ``frac · cap · route_d`` is within measurement noise of a
 # feasible corridor; the demand synthesis drops it instead of flexing a runway.
-_ROUTE_NOISE_FRAC = 0.04
+# Value lives in config (single source of truth — the route-field bands and
+# the validator use the SAME margin); re-exported under the historical name.
+_ROUTE_NOISE_FRAC = ROUTE_NOISE_FRAC
 
 
 def _flex_route_bands(layout, elev, bucket_to_idx, free_nodes,
@@ -2392,62 +2465,23 @@ def _flex_route_bands(layout, elev, bucket_to_idx, free_nodes,
     centerline segments are NOT added to the graph, so its threshold
     cannot ride its own interior as a fictitious 1.5 % rise-corridor
     (the false 102.09 ceiling)."""
-    from auto_patch.taxi_routing import build_taxi_route_graph
+    from auto_patch.taxi_routing import (
+        augment_with_runway_centerlines, shared_taxi_route_graph)
     cps = layout.canonical_points
-    G = build_taxi_route_graph(layout)
+    G = shared_taxi_route_graph(layout)
     if not getattr(G, "coord", None):
         return {}
-    # AUGMENT the graph with RUNWAY CENTERLINES (2026-06-09): the apt.dat
-    # taxi-route rows stop at/near the runway edge, so threshold anchors
-    # were unreachable and the legitimate other-runway demand (e.g. HECA
-    # 05L 60.7 + 1.5 %·~3.2 km ≈ 108.5 at the T4 join) never formed.
-    # Each runway piece contributes its cross-end midpoint pair as an
-    # edge (the piece's centerline segment — pieces share cross-ends, so
-    # the chain connects); each midpoint also bridges to the nearest
-    # PRE-EXISTING taxi node within 40 m (the taxi rows' on-runway
-    # endpoints, e.g. HECA node 181 "05R/23L_start").  Local to the flex
-    # — the terminal seed keeps the unaugmented graph.
-    _taxi_nodes_snapshot = list(G.coord.values())
-
-    def _aug_edge(pa, pb):
-        ka, kb = G._key(*pa), G._key(*pb)
-        G.coord.setdefault(ka, pa)
-        G.coord.setdefault(kb, pb)
-        if ka == kb:
-            return
-        w = math.hypot(pb[0] - pa[0], pb[1] - pa[1])
-        G.adj.setdefault(ka, []).append((kb, w))
-        G.adj.setdefault(kb, []).append((ka, w))
-
-    _mids: list = []
-    for s in layout.shapes:
-        if s.role != ROLE_RUNWAY or s.polygon is None or s.polygon.is_empty:
-            continue
-        if flex_ref is not None and (s.ref or "") == flex_ref:
-            continue        # no rise-corridor along the flexing runway
-        ring = _open_ring(list(s.polygon.exterior.coords))
-        if len(ring) != 4:
-            continue
-        edges4 = [(ring[k], ring[(k + 1) % 4]) for k in range(4)]
-        edges4.sort(key=lambda ab: math.hypot(
-            ab[1][0] - ab[0][0], ab[1][1] - ab[0][1]))
-        m0 = ((edges4[0][0][0] + edges4[0][1][0]) / 2.0,
-              (edges4[0][0][1] + edges4[0][1][1]) / 2.0)
-        m1 = ((edges4[1][0][0] + edges4[1][1][0]) / 2.0,
-              (edges4[1][0][1] + edges4[1][1][1]) / 2.0)
-        _aug_edge(m0, m1)
-        _mids.append(m0)
-        _mids.append(m1)
-    for mp in _mids:
-        best_pt = None
-        best_d = 40.0
-        for (tx, ty) in _taxi_nodes_snapshot:
-            d = math.hypot(tx - mp[0], ty - mp[1])
-            if d < best_d:
-                best_d = d
-                best_pt = (tx, ty)
-        if best_pt is not None:
-            _aug_edge(mp, best_pt)
+    # AUGMENT a COPY of the shared graph with RUNWAY CENTERLINES
+    # (2026-06-09, centralized in taxi_routing): the apt.dat taxi-route
+    # rows stop at/near the runway edge, so threshold anchors were
+    # unreachable and the legitimate other-runway demand (e.g. HECA 05L
+    # 60.7 + 1.5 %·~3.2 km ≈ 108.5 at the T4 join) never formed.
+    # ``skip_ref`` excludes the FLEXING runway's own pieces so its
+    # threshold cannot ride its own interior as a fictitious 1.5 %
+    # rise-corridor (the false 102.09 ceiling).  Local to the flex — the
+    # terminal seed keeps the unaugmented graph.
+    G = G.copy()
+    augment_with_runway_centerlines(G, layout, skip_ref=flex_ref)
     free_set = set(free_nodes)
     # Pavement-contact nodes per runway (a runway ring node also used
     # by a non-runway pavement shape): contacts of OTHER runways are
@@ -5541,9 +5575,9 @@ def _seed_terminals_from_taxi_routes(layout, elev, bucket_to_idx, dem_elev,
     that tension onto the apron/runway.  When terminals are FLAT (cap 0) the
     cluster seeds as ONE level (combined band; midpoint if the squeeze is
     infeasible)."""
-    from auto_patch.taxi_routing import build_taxi_route_graph
+    from auto_patch.taxi_routing import shared_taxi_route_graph
     cps = layout.canonical_points
-    G = build_taxi_route_graph(layout)
+    G = shared_taxi_route_graph(layout)     # read-only use of the shared cache
     if not G.coord:
         return 0
     # Runway connection points: a runway node also used by a non-runway pavement

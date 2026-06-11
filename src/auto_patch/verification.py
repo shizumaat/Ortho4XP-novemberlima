@@ -841,6 +841,20 @@ def taxi_axes_ll(layout):
     return axes
 
 
+def route_ctx_from_layout(layout):
+    """Route-field ``route_ctx`` for check_grade — the builder's apt.dat
+    taxi centerlines as lat/lon polylines (the SAME construction the grade
+    test uses; never re-derived from the OSM)."""
+    cls = []
+    for ln, _name in (getattr(layout, "apt_taxi_centerlines", []) or []):
+        if ln is None or ln.is_empty:
+            continue
+        pts = [layout.m_to_ll(x, y) for (x, y) in ln.coords]
+        if len(pts) >= 2:
+            cls.append(pts)
+    return {"centerlines_ll": cls} if cls else None
+
+
 def run_grade_checks(layout):
     """Run the grade engine on ``layout``.  Returns ``(within, cross,
     steps)`` with ``.lat`` / ``.lon`` + way labels populated."""
@@ -851,7 +865,7 @@ def run_grade_checks(layout):
         return check_grade.run_checks(
             out, max_grade_pct=1.5, proximity_m=1.0, edge_search_m=5.0,
             edge_step_m=0.5, top_n=5, taxi_axes_ll=taxi_axes_ll(layout),
-            quiet=True)
+            quiet=True, route_ctx=route_ctx_from_layout(layout))
 
 
 # ── Build-time entry point ──────────────────────────────────────────
