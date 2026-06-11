@@ -856,6 +856,10 @@ _RECT_SEED_MAX_D0_M = 60.0
 # J-tail lesson: an unbounded terminus move manufactures walls elsewhere).
 _TERM_PROJ_MAX_M = 2.5
 
+# Max move for the terminal LEAF re-level toward the adjacent-apron median
+# (bounded so one badly-pinned apron region cannot relocate a whole pad).
+_LEAF_MAX_MOVE_M = 3.0
+
 
 def _apron_corridor_geodesic_state(layout, nodes, elev, shape_constraints,
                                    all_edges):
@@ -1479,7 +1483,75 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
     # every projection below so nothing can drag them back up.
     _term_nodes: set = set()
     _tdbg = _os.environ.get("O4_TERM_DEBUG") == "1"
-    if not TERMINAL_PADS_SLOPE:
+    if not TERMINAL_PADS_SLOPE and TERMINAL_LEAF_LEVELS:
+        # TERMINAL LEAF LEVELS (s77 user ruling, supersedes "terminals
+        # must not rise"): pads are natural LEAF nodes — rigid-flat, and
+        # their LEVEL follows the apron(s) they connect to, up or down,
+        # not a pre-calculated seed ceiling or lock.  Mechanism: pads
+        # enter the projections at their own MEDIAN (coherence only — no
+        # seed ceiling) and stay HELD through them (free-following was
+        # MEASURED-REJECTED twice: cap edges bind at the WORST single
+        # neighbour, so route-pinned apron edges drag the whole rigid
+        # pad — s76 terminal7 70→72.9, s77 leaf-v1 terminal1
+        # 99.7→106.1); the actual LEAF re-level happens after the apron
+        # solve below — the pad takes the MEDIAN of its adjacent apron
+        # surface (robust to pinned outliers), then the legal
+        # re-projection conforms the aprons around it.
+        for sc2 in shape_constraints:
+            if sc2["role"] == ROLE_TERMINAL:
+                _term_nodes.update(sc2["nodes"])
+        seen_g0: set = set()
+        for i in _term_nodes:
+            if i >= n:
+                continue
+            grp = coupling[i] if (coupling is not None and i in coupling) \
+                else (i,)
+            key = tuple(sorted(grp))
+            if key in seen_g0:
+                continue
+            seen_g0.add(key)
+            vals = sorted(elev[m] for m in grp if m < n)
+            if not vals:
+                continue
+            lvl = vals[len(vals) // 2]
+            if _tdbg and (vals[-1] - vals[0]) > 0.05:
+                print(f"[term] leaf entry re-level grp({len(grp)}) "
+                      f"{vals[0]:.2f}..{vals[-1]:.2f} -> {lvl:.2f}")
+            for m in grp:
+                if m < n and not is_hard[m]:
+                    elev[m] = lvl
+        # internal kink smoothing for SLOPED (squeezed) pads — the s76p3
+        # coherence fix, SYMMETRIC under the leaf ruling (pads may move
+        # either way; the relief leaves 1-3 m mixed-authority kinks that
+        # the hold below would otherwise print)
+        for sc2 in shape_constraints:
+            if sc2["role"] != ROLE_TERMINAL or not sc2["edges"]:
+                continue
+            for _ in range(200):
+                mx2 = 0.0
+                for (i2, j2, c2) in sc2["edges"]:
+                    if c2 <= 0.0:
+                        continue
+                    d2 = elev[i2] - elev[j2]
+                    ex2 = abs(d2) - c2
+                    if ex2 <= 1e-4:
+                        continue
+                    s2 = 1.0 if d2 > 0 else -1.0
+                    h_i, h_j = is_hard[i2], is_hard[j2]
+                    if h_i and h_j:
+                        continue
+                    if h_i:
+                        elev[j2] += s2 * ex2
+                    elif h_j:
+                        elev[i2] -= s2 * ex2
+                    else:
+                        elev[i2] -= s2 * ex2 / 2.0
+                        elev[j2] += s2 * ex2 / 2.0
+                    if ex2 > mx2:
+                        mx2 = ex2
+                if mx2 <= 1e-4:
+                    break
+    elif not TERMINAL_PADS_SLOPE:
         for sc2 in shape_constraints:
             if sc2["role"] == ROLE_TERMINAL:
                 _term_nodes.update(sc2["nodes"])
@@ -1643,6 +1715,63 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                     elev, zone_edges, is_hard, lo, hi, coupling,
                     held_extra=held_all,
                     max_sweeps=800, tol=_SPREAD_COMPLY_TOL_M)
+    # LEAF RE-LEVEL (TERMINAL_LEAF_LEVELS, s77 user ruling): with the
+    # aprons solved and corridor-smoothed, each pad group takes the
+    # MEDIAN of its adjacent apron surface — up or down.  The median is
+    # robust against route-pinned outlier edges (terminal1's boundary is
+    # mostly ~99-101 with a 104+ stretch near 23C; terminal7's
+    # neighbours sit ~70 where its squeeze-band midpoint said 71.7).
+    # The legal re-projection below then conforms the aprons around the
+    # moved pads (pads stay held).
+    n_leaf = 0
+    if not TERMINAL_PADS_SLOPE and TERMINAL_LEAF_LEVELS and _term_nodes:
+        pad_set = {i for i in _term_nodes if i < n}
+        nbr_l: dict = {}
+        for sc3 in shape_constraints:
+            if sc3["role"] != ROLE_APRON:
+                continue
+            for (i3, j3, _c3) in sc3["edges"]:
+                a3 = i3 in pad_set
+                b3 = j3 in pad_set
+                if a3 == b3:
+                    continue
+                p3, q3 = (i3, j3) if a3 else (j3, i3)
+                if q3 >= n:
+                    continue
+                if nodes is not None:
+                    (x3, y3), (x4, y4) = nodes[p3], nodes[q3]
+                    if math.hypot(x3 - x4, y3 - y4) > 40.0:
+                        continue
+                nbr_l.setdefault(p3, set()).add(q3)
+        seen_g1: set = set()
+        for i in sorted(pad_set):
+            grp = coupling[i] if (coupling is not None and i in coupling) \
+                else (i,)
+            key = tuple(sorted(grp))
+            if key in seen_g1:
+                continue
+            seen_g1.add(key)
+            if any(m < n and is_hard[m] for m in grp):
+                continue
+            nv = sorted({elev[b] for m in grp for b in nbr_l.get(m, ())})
+            cv = sorted(elev[m] for m in grp if m < n)
+            if not nv or not cv:
+                continue
+            target = nv[len(nv) // 2]
+            cur = cv[len(cv) // 2]
+            move = target - cur
+            if abs(move) < 0.02:
+                continue
+            move = max(-_LEAF_MAX_MOVE_M, min(_LEAF_MAX_MOVE_M, move))
+            for m in grp:
+                if m < n:
+                    elev[m] = cur + move
+            n_leaf += 1
+            if _tdbg:
+                print(f"[term] leaf follow grp({len(grp)}) "
+                      f"{cur:.2f} -> {cur + move:.2f} "
+                      f"(apron median {target:.2f}, "
+                      f"{len(nv)} neighbour values)")
     # FINAL FAIRING + cap re-projection: iron sub-cap ripples the windowed
     # chord web no longer smooths implicitly (see _fair_surface_ripples),
     # then re-project caps so the smoothing cannot leave a new violation.
@@ -1653,10 +1782,10 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
             held_extra=held_all,
             band_pinned=band_pinned,
             max_move=SURFACE_FAIRING_MAX_MOVE_M)
-    if n_faired or n_zone:
+    if n_faired or n_zone or n_leaf:
         # restore strict LEGAL-cap feasibility after the preference passes
-        # (a zone/fairing move can over-steepen a pair with an out-of-zone
-        # or unfaired neighbour); pads still held.
+        # (a zone/fairing/leaf move can over-steepen a pair with an
+        # out-of-zone or unfaired neighbour); pads still held.
         _project_within_bands(
             elev, all_edges, is_hard, lo, hi, coupling,
             held_extra=held_all,
