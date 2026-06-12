@@ -1,4 +1,80 @@
-# Auto-Patch Status — session 78 = NETWORK PROFILE MODEL (#4) BUILT + HECA in-sim rulings; NEXT SESSION STARTS BELOW
+# Auto-Patch Status — session 80 = APRON-FOLLOWS RE-SOLVE BUILT (TERMINAL_NATURAL_LEVELS, default ON); NEXT = in-sim verdict + the 3 chord warns
+
+## ★★ SESSION 80 (2026-06-12) — dev @2baaf6a: APRON-FOLLOWS RE-SOLVE BUILT END-TO-END (docs/apron_follows_resolve.md), gate `TERMINAL_NATURAL_LEVELS` DEFAULT ON ★★
+USER HIERARCHY (this session's directive): apron maintains grade to the
+runways — top priority; flat terminals + smooth grade to pad edges when
+terrain allows; too much tension → the terminal SLOPES; NEVER pull the
+apron out of grade.  All five work-order steps landed in one gate
+(OFF = byte-identical, PROVEN vs a no-my-changes worktree at HECA):
+1. **Pads TRANSPARENT** (§2a): no taxi-route seed/ceiling (the seed call
+   is skipped under the gate), no cap-0 rigidity (`_build_shape_
+   constraints` grades pads at TERMINAL_MAX_GRADE), no holds through the
+   apron projections.  Pad = **INHERIT**: median of its OWN settled
+   nodes → flat; PAIRWISE grade resolution with a ★ 150 m proximity
+   cutoff (the first build transitively chained 7 HECA complexes and
+   sloped the whole row); flat-vs-slope = MEASURED ACCEPTANCE (apron
+   complex gains within-violations after the conform → revert to the
+   settled surface; acceptance prints under O4_TERM_DEBUG=1); sloping
+   complexes get the isolated ≤cap polish (seams held).
+2. **Corridor-plane attractor** (§2b): in-zone apron+pad verts move TO
+   the c_lo..c_hi midline, ★ bands Lipschitz-tightened FIRST (a stepped
+   band field printed a 10 % pair at #257), band-pinned verts keep their
+   least-violation placement.
+3. ★★ **FIELD-LEVEL ROOT FIX** (the real §2b): the network field's
+   APRON-LANE verts (DEM-seeded gate lanes) bowl, and EVERYTHING
+   downstream certifies that bowl (the enforce's dense-anchor band
+   ceilings ~99.5 near T1, the corridor-state seeds, then the pad).
+   Two new passes in `network_profile.build_and_solve` (params
+   taxi_test/apron_test/apron_plane_grade/term_polys/chord_*):
+   (a) nearest-TAXI-SEGMENT plane clamp — ★ LIFT-ONLY (pulling t_hi
+   re-imported low levels two chains away: t1/2/9 fell 102.6→99.3),
+   ★ PHYSICAL distance + bridge-tested connector, NOT field-graph route
+   (gate-lane fragments are graph-DISCONNECTED — taxidist=∞ at 9 m;
+   two-source graph bands INVERT under squeezes, nearest-segment cannot;
+   a 1 % graph-floor Dijkstra is an over-lifting machine — t_lo read
+   110.04 near terminal11); (b) the pad PERPENDICULAR-CHORD WINDOW
+   floor (user ruling) applied to lanes within 2× chord reach of each
+   pad (floor = window_lo − 1 %·d(pad)); both clamp into the
+   runway-anchored field bands (the route LAW outranks), roads exempt,
+   cap-only re-convergence after; O4_NPF_DEBUG=1 prints both.
+4. **Chord law = VALIDATOR** (work-order 5): `_warn_terminal_chord_law`
+   (WARN > 0.25 m; infeasible windows = squeeze, skipped); the s79
+   solver-side lift + acceptance machinery DELETED; `TERMINAL_CHORD_LAW`
+   gate removed from config (constants kept for the warn).
+5. **Rim retreat generalized** (§2c): terrain-break clause fires beyond
+   the corridor zone (Euclid dist to corridor segs >
+   APRON_CORRIDOR_SMOOTH_RADIUS_M) even when the apron interior is
+   intentionally above DEM; tgt = DEM; law-floor + run filters stay.
+   HECA retreat 9 → 13 verts.
+**MEASURED (gate ON):** SPJC grade gate GREEN 0/0/0 (the hard gate —
+its terminal2 window reads INFEASIBLE = squeeze, correctly skipped, no
+8 % pair); CYXY GREEN (after the concurrent @0e86c61 road-frontage fix);
+HECA invariants EXACT (05C 108.70 ✓, 05L 57.9–62.8 smooth ✓, A4/A5);
+HECA per-axis within 65 vs 63 gate-off (worst wall 18.2 % → 10.0 %);
+terminals: t4/t5/t11 FLATTEN (93.7/64.4/100.3), t1/2/9 lift toward the
+serving plane (98.9→100.3–101.4 sloped); ★ CHORD WARNS (the new honest
+residue): terminal1 +2.46 m vs [102.78,103.37], terminal9 +1.39 m,
+terminal11 +4.13 m vs [104.41,106.97] — t11 = a GENUINE east(~106)/
+west(~100.2) squeeze whose window is route-law-unreachable; KPHL pad
+rows co-level at 1.32 ✓ (s79p4 fixture; apron #189 carries +5 local
+2.5–3.7 % pairs, net apron violations 126→102 — acceptance accepted a
+net win); deterministic (PYTHONHASHSEED 1==2 byte-identical); suite =
+baseline failures only (SPLP 0.58 step + HECA within + the
+compare_target_spjc fixture item that fails at clean bdc2404 too).
+**OPEN → user:** (1) in-sim verdict (RESTART Ortho4XP) — terminal
+levels, the t1/t9 partial lift, the #198/#257 areas; (2) ruling on the
+3 chord warns: how hard should the model chase the window where the
+1 %-per-route law lawfully disagrees (t1/t9 ~2 m short) and where the
+window is squeeze-unreachable (t11 +4.1 m — full compliance = a 4–7 m
+engineered fill across a 50 k m² complex)?; (3) KPHL apron #189's 5
+local pairs (acceptance-by-count accepted a net improvement — switch to
+worst-excess acceptance?); (4) the s79 #198-road + across-grass-law
+directives remain queued.  Probes: /tmp/probes/s80_*.py (build prints
+runways+terminals+grade checks; field_t1b/planebands/nearseg/lowsegs/
+whynolift = the field-forensics chain).  ⚠ concurrent sessions this
+session: @bdc2404 (KEVY seams) regressed CYXY/compare-target, fixed by
+their @0e86c61; @48a9b73 shoulder extent; bridges.py WIP still
+uncommitted (not mine).
 
 ## REFACTOR (user-approved, any future session): rename `unified_jacobi.py` → `airside_grading.py`
 Both name words are fossils ("unified" = the long-gone per-surface
