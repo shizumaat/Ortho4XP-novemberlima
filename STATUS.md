@@ -47,14 +47,23 @@ feasible pads are LAW-PINNED (don't negotiate in the grade-grouping).
   ceilings near T1 read 99.5 where the surface lawfully rose to
   102.7 = the under-measured-entry family; per-pad post-settle
   acceptance missed SPJC's pair one hop inside the apron).
-**NEXT = APRON-FOLLOWS re-solve** (the missing half): lift the pad's
-apron complex AS A SURFACE toward the chord plane (re-solve, not
-projection), push the residual drop to the rim/groundside (s78p5
-retreat class).  Ships together with flipping TERMINAL_CHORD_LAW ON;
-SPJC is the gate fixture (its #96 must come back green or the 2 pairs
-need an explicit user-accepted baseline).  USER DECISION: accept
-SPJC's 2 squeeze pairs interim (gate ON now), or wait for
-apron-follows.
+**NEXT = APRON-FOLLOWS re-solve — full design in
+`docs/apron_follows_resolve.md` (USER-DIRECTION 2026-06-12: terminals
+= a NATURAL RESULT of grading the apron correctly; the terminal IS
+currently pulling the apron — code-verified: pads re-level at
+min(median, band, taxi-route SEED ceiling [superseded rule still
+live!]) and are HELD through every apron projection → the apron
+lawfully bowls down to the held pad, then the leaf re-level reads the
+bowl back).**  Plan: invert the dependency — (a) pads TRANSPARENT in
+the apron solve (≠ the twice-rejected rigid-free pad: no rigidity to
+drag, flatness imposed after from the median), (b) apron relief
+TARGETS the corridor plane inside the zone (upgrade of the existing
+geodesic state from clamp to attractor), (c) rim drop via the s78p5
+retreat (trigger generalized), (d) pad = INHERIT (median of own
+settled nodes) and the chord law demotes to VALIDATOR; deletes 3
+pad-leveling mechanisms + the s79 lift/acceptance code.  ONE gate
+`TERMINAL_NATURAL_LEVELS`; SPJC green = hard gate; t7≈70 + KPHL
+grade-grouping = regression fixtures.
 
 ## (superseded by the ruling above) TERMINAL1 brief (2026-06-12) ★★
 T1 sits at **100.10** while its serving taxiways (stub B 102.3-103.4,
