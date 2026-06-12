@@ -22,6 +22,31 @@ network-profile-model verdict closes (§6 of that plan) — split after
 those deletes, not before.  Natural split lines when the time comes:
 law/bands, corridor profiles, write layer, apron/terminal features.
 
+## ★★ OPEN (user in-sim, 2026-06-12): TERMINAL1 STILL TOO LOW — needs a DESIGN SESSION ★★
+T1 sits at **100.10** while its serving taxiways (stub B 102.3-103.4,
+junction#291 103.0-103.9) are only **36-40 m away** = a 6-10 % bowl
+slope; user: "too steep a slope from taxiways" (third strike: s77p2
+leaf levels, s78p5 +0.5 pad bound did not cure it).  MEASURED THIS
+SESSION (O4_TERM_DEBUG=1 prints per-group diagnostics now):
+* T1's leaf group target = 100.00 — the MEDIAN OF THE ADJACENT APRON,
+  which is already bowled (apron #257 spans 93.9..107.1 legally).
+* The s78p5 corridor-1 %-plane lower bound computes 100.14 (gate-lane
+  seeds bowl with the pad = self-certifying) — and a RECT-SEEDS-ONLY
+  variant was TRIED + MEASURED-REVERTED: plane median **99.05**, i.e.
+  even lower, because the plane's interior geodesic from B to the pad
+  face runs **~300 m over the solver edge graph where the real
+  distance is 36 m** (the under-connected leaf-path / km-chord family
+  — shared-node hops through apron piece boundaries).
+* ⚠ Even a perfect pad bound only lifts the PAD; the APRON stays
+  bowled — the slope just moves.  The user ruling (s78p5) is about the
+  APRON: "groundside should absorb, apron stays a smooth ~1 % plane".
+**NEXT = design session:** hold the terminal-complex APRON at the
+serving-taxiway plane (B/junction#291 ≈ 102.3-103.9 → pad ≈ 101.9-102.6
+at 1 %) and push the elevation drop to the apron's outer rim /
+groundside (the s78p5 terrain-break retreat class, generalized from
+rim-above-DEM to pad-complex-below-plane).  Probe diagnostics:
+`O4_TERM_DEBUG=1` leaf-group prints; the serving-taxiway numbers above.
+
 ## ★★ NEXT SESSION (user directives, 2026-06-11 session close) ★★
 1. **The #198 road strip should have been DECOMPOSED, not patched.**
    The narrow, long switchback strip beside apron #198 (emit-#197,

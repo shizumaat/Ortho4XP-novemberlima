@@ -366,8 +366,27 @@ def _build_taxi_rects(
         # PROVENANCE, not geometry: the 4 % ``service_road`` law applies
         # regardless of bearing/length (a road parallel to the runway is
         # still a road, never a primary_parallel/stub).
-        if ref.startswith("SVC"):
+        if _is_svc:
             role = ROLE_SERVICE_ROAD
+            # PAVEMENT-COVERAGE acceptance (user 2026-06-12, HECA
+            # SVC9/18/22/23): SVC rects are exempt from the taxiway
+            # interior gates (edge-blended roads need that), so a
+            # mis-placed rect — off-centre placement / corner snapping
+            # drifting it onto GRASS (HECA SVC23: 0 % on pavement,
+            # SVC9: 6 %) — has nothing left to reject it.  A road rect
+            # that is not substantially ON pavement must not emit.
+            # 0.55 calibration: the user-flagged set measures ≤43 %;
+            # reviewed-unflagged borderline pieces sit at 58-66 %.
+            try:
+                _cov = (rect.intersection(pav_union).area
+                        / rect.area if rect.area > 0 else 0.0)
+            except _GEOM_EXC:
+                _cov = 0.0
+            if _cov < 0.55:
+                if os.environ.get("O4_SVC_DEBUG") == "1":
+                    print(f"[svc-drop] {ref} len={trimmed.length:.0f}: "
+                          f"only {_cov*100:.0f}% on pavement")
+                continue
         # Per user 2026-05-16: drop unrefed STUB rects whose
         # centerline is short.  Unrefed centerlines come from
         # apt.dat taxi edges with no name — at most airports those

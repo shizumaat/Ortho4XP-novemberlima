@@ -107,6 +107,7 @@ from .layout import (
     ROLE_RUNWAY,
     ROLE_RUNWAY_CROSSING,
     ROLE_SECONDARY_PARALLEL,
+    ROLE_SERVICE_ROAD,
     ROLE_STUB,
     ROLE_TERMINAL,
     ROLE_RETAINING_WALL,
@@ -3247,8 +3248,12 @@ def _drop_overlap_against_fixed_shapes(
         # AGAINST it instead of overlapping into its footprint.
         {ROLE_RUNWAY, ROLE_RUNWAY_CROSSING},
         {ROLE_TERMINAL},
+        # (s79) SVC road rects are fixed geometry the residue must
+        # fit around, exactly like taxi rects — without this an apron
+        # overlapped the CYXY pav[1] ramp by 13.5 m2 (zero-tolerance
+        # self-overlap test).
         {ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
-         ROLE_STUB, ROLE_CROSS_CONNECTOR},
+         ROLE_STUB, ROLE_CROSS_CONNECTOR, ROLE_SERVICE_ROAD},
         residue_tier,
         {ROLE_BOUNDARY},
     ]

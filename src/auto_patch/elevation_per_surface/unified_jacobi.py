@@ -927,7 +927,7 @@ _LEAF_MAX_MOVE_M = 3.0
 
 
 def _apron_corridor_geodesic_state(layout, nodes, elev, shape_constraints,
-                                   all_edges):
+                                   all_edges, rect_seeds_only=False):
     """GEODESIC corridor zone + corridor-VALUE bands (s77, user-approved
     upgrade of the straight-line zone above — both improvements together):
 
@@ -1001,7 +1001,10 @@ def _apron_corridor_geodesic_state(layout, nodes, elev, shape_constraints,
             d0 = _corridor_point_distance(*nodes[i], segs, grid, cell)
             if d0 <= _RECT_SEED_MAX_D0_M:
                 seeds[i] = d0
-    for i in near_nodes:
+    # ``rect_seeds_only``: the LEAF-bound variant (s79) — gate-lane-
+    # adjacent apron vertices sample the field at lanes that bowled
+    # with the pad; aircraft taxi rects are the level-holding sources.
+    for i in (() if rect_seeds_only else near_nodes):
         if i >= n or i in seeds:
             continue
         d0, px, py = _corridor_point_nearest(*nodes[i], segs, grid, cell)
@@ -1910,6 +1913,17 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                      if APRON_CORRIDOR_GEODESIC else None)
         if geo_state is not None:
             geo_dist, c_lo, c_hi = geo_state
+            # ⚠ terminal1 bowl (user 2026-06-12, OPEN — see STATUS):
+            # this bound cannot lift T1.  Measured: target = 100.00
+            # (median of the already-bowled adjacent apron), full-state
+            # plane 100.14, RECT-SEEDS-ONLY plane variant 99.05 — the
+            # plane's interior geodesic from the serving taxiways (B at
+            # 102.3, 36 m away) runs ~300 m over the solver edge graph
+            # (under-connected leaf path), and lifting the PAD alone
+            # would leave the apron bowled anyway.  The fix is the s78p5
+            # ruling applied to the APRON: hold the pad complex's apron
+            # at the serving-taxiway plane and push the drop to the
+            # groundside/rim — a design-session item.
             geo_leaf = (geo_dist, c_lo)
             R_z = APRON_CORRIDOR_SMOOTH_RADIUS_M
             # Pair-smoothing ZONE = straight-line ∪ interior-path radius

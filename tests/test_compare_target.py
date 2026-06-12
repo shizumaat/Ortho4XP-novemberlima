@@ -81,20 +81,30 @@ pytestmark = [
 # aericaps asphalt .pol polygons are now part of the pavement source,
 # which re-shapes the rect/junction split (junction 42->26,
 # primary_parallel 28->19, stub 18->11, apron 19->16; total 1312->1271).
+# SPJC RE-CUT 2026-06-12 (s79): SERVICE_ROAD_CARVE default ON —
+# apt.dat 1206 truck routes emit as ``service_road`` rects and
+# legitimately CLAIM lanes the medial machinery used to discover as
+# TX taxiways (TX6/TX9 secondary_parallels + TX12 stub ride SVC8's
+# road now: roads beat DISCOVERED rects at the overlap pass, while
+# apt.dat aircraft rows — named or unnamed — always beat roads), and
+# the carve re-cuts the surrounding apron/junction residue
+# (secondary_parallel 6->4, stub 11->9, junction 26->24, apron
+# 16->19).
 SPJC_BASELINE: Dict[str, int] = {
-    "apron":              15,   # of  16 target
+    "apron":              18,   # of  19 target
     "boundary":          977,   # of 1028 target
     "cross_connector":     8,   # of   8 target
-    "junction":           25,   # of  26 target
+    "junction":           23,   # of  24 target
     "primary_parallel":   18,   # of  19 target
     "retaining_wall":     65,   # of  68 target
     "runway":             28,   # of  30 target
-    "secondary_parallel":  6,   # of   6 target
-    "stub":               10,   # of  11 target
+    "secondary_parallel":  4,   # of   4 target
+    "service_road":        6,   # of   6 target
+    "stub":                9,   # of   9 target
     "terminal":            2,   # of   2 target
     "tunnel_ramp":        34,   # of  36 target
 }
-SPJC_BASELINE_TOTAL = 1207  # of 1271 target (emitted)
+SPJC_BASELINE_TOTAL = 1192  # of 1263 target (emitted)
 
 # SPLP is cross-tile (spans -13/-77 and -13/-78).  Each tile-half has
 # its own baseline; a regression in either half trips the gate.

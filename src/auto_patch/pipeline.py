@@ -2247,27 +2247,14 @@ def build_airport_pavement(icao: str, xplane_root: str,
                         continue
                     _svc_lines.append((_piece, _ref))
             if _svc_lines:
-                # ★ 1206 PROVENANCE BEATS DISCOVERY (user 2026-06-11,
-                # CYXY verdict): the medial-axis machinery discovers the
-                # same narrow lanes as unreferenced TX taxiways, and the
-                # rect overlap-drop then kills the ROAD rect.  Remove
-                # discovered TX centerlines covered by a qualifying road
-                # run — the lane is a road, not a taxiway.
-                try:
-                    _svc_cover = unary_union(
-                        [p for p, _r in _svc_lines]).buffer(18.0)
-                    _kept_cl = []
-                    _n_tx_dropped = 0
-                    for _cl, _cref in osm_centerlines:
-                        if (_cref.startswith("TX") and _cl.length > 0.0
-                                and _cl.intersection(_svc_cover).length
-                                > 0.6 * _cl.length):
-                            _n_tx_dropped += 1
-                            continue
-                        _kept_cl.append((_cl, _cref))
-                    osm_centerlines = _kept_cl
-                except _GEOM_EXC:
-                    _n_tx_dropped = 0
+                # ★ 1206 provenance vs DISCOVERED (TX) lanes resolves at
+                # the rect OVERLAP pass (SVC beats TX there), NOT here:
+                # a feed-time line yield killed lanes whose road rect
+                # then failed to emit (coverage/degenerate drops) —
+                # SPJC lost TX6/TX9 secondary_parallels to roads that
+                # never materialised.  Arbitrating on EMITTED geometry
+                # keeps whichever surface actually exists.
+                _n_tx_dropped = 0
                 osm_centerlines = list(osm_centerlines) + _svc_lines
                 # Reclassification / repair passes measure junction
                 # territory against the FULL preserved centerline set —
@@ -2598,20 +2585,36 @@ def build_airport_pavement(icao: str, xplane_root: str,
                             continue
                         # (s79) 1206 PROVENANCE BEATS DISCOVERY (user
                         # 2026-06-11): a road (SVC) rect overlapping a
-                        # DISCOVERED (TX/unref) rect wins regardless of
-                        # axis length — the lane is a road.  Referenced
-                        # aircraft taxiways still outrank roads via the
-                        # normal length rule below.
+                        # medial-DISCOVERED (TX) rect wins regardless of
+                        # axis length — the lane is a road.  apt.dat
+                        # aircraft rows — INCLUDING unnamed ones (the
+                        # SPLP lesson: unref 1202 rows are real
+                        # taxiways; SPJC lost secondary_parallel/stub
+                        # floors when blank refs yielded to roads) —
+                        # rank via the normal length rule below.
                         _svc_i = ref_i.startswith("SVC")
                         _svc_j = ref_j.startswith("SVC")
-                        _disc_i = ref_i.startswith("TX") or not ref_i
-                        _disc_j = ref_j.startswith("TX") or not ref_j
+                        _disc_i = ref_i.startswith("TX")
+                        _disc_j = ref_j.startswith("TX")
                         if _svc_i and _disc_j:
                             drop_idx.add(j)
                             continue
                         if _svc_j and _disc_i:
                             drop_idx.add(i)
                             break
+                        # A road vs an AIRCRAFT rect (referenced or
+                        # unnamed apt.dat row): the road ALWAYS yields
+                        # — vehicles drive on the taxiway, aircraft
+                        # rules govern (the absorption ruling).  The
+                        # length rule below would let a LONG road beat
+                        # a short stub (SPJC lost 2 secondary_parallels
+                        # + a stub to SVC8's 5,441 m² rect).
+                        if _svc_i and not _svc_j:
+                            drop_idx.add(i)
+                            break
+                        if _svc_j and not _svc_i:
+                            drop_idx.add(j)
+                            continue
                         if _svc_i and _svc_j:
                             # (s79) ROAD-vs-ROAD overlap: an out-and-
                             # back 1206 route yields two parallel runs
@@ -3527,6 +3530,18 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # are eliminated at the source.  THE cliff fix.
         _unify_airside_geometry(layout, icao)
         _airside_unified_presolve = True
+
+        # (s79) FINAL pre-solve overlap clip: the unify pass's vertex
+        # snaps (weld / corner snaps / conformance) can sweep an apron
+        # or junction edge back ONTO a fixed rect — measured at CYXY:
+        # the pav[1] ROAD rect re-acquired a 13.5 m² apron overlap
+        # AFTER the mid-finalize clip had zeroed it.  The clip is
+        # idempotent, pure geometry, and pre-solve (node_altitudes not
+        # yet derived), so re-running it here closes the window.
+        if SERVICE_ROAD_CARVE:
+            from .elevation import _drop_overlap_against_fixed_shapes
+            _drop_overlap_against_fixed_shapes(
+                layout, icao=icao, include_aprons=True)
 
         # Pre-solve geometry guard (dev, O4_GEOM_GUARD=1): snapshot every
         # airside shape's ring geometry HERE, immediately before the solve,

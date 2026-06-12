@@ -476,6 +476,13 @@ def merge_small_apron_fragments(layout: "PavementLayout",
             and s.polygon.geom_type in ("Polygon", "MultiPolygon")])
     except _GEOM_EXC:
         other_union = None
+    try:
+        road_union = unary_union([
+            s.polygon for s in layout.shapes
+            if s.role in (ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION)
+            and s.polygon is not None and not s.polygon.is_empty])
+    except _GEOM_EXC:
+        road_union = None
     n = 0
     for s in sorted(aprons, key=lambda a: a.polygon.area):   # smallest first
         p = s.polygon
@@ -498,6 +505,21 @@ def merge_small_apron_fragments(layout: "PavementLayout",
         cleaned = _clean_merge(merged)
         if cleaned is None:
             continue
+        # (s79) the sliver-corner drop can chord the merged ring ACROSS
+        # a carved ROAD corridor (the KPHL terminal-incursion class with
+        # a road instead of a pad — CYXY pav[1] ramp, 13.5 m² onto
+        # SVC11): clip the merge result back off the road rects.
+        if road_union is not None and not road_union.is_empty:
+            try:
+                clipped = cleaned.difference(road_union)
+            except _GEOM_EXC:
+                clipped = None
+            if clipped is not None and clipped.geom_type == "Polygon" \
+                    and not clipped.is_empty:
+                cleaned = clipped
+            elif clipped is not None \
+                    and clipped.geom_type == "MultiPolygon":
+                cleaned = max(clipped.geoms, key=lambda g: g.area)
         host.polygon = cleaned             # solver assigns node_altitudes later
         s.polygon = None
         n += 1
