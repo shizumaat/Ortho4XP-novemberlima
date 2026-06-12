@@ -593,9 +593,23 @@ def _is_groundside(way: "Way") -> bool:
     return way.tags.get("role") in _GROUNDSIDE_ROLES
 
 
+_ROAD_FAMILY_ROLES = {"service_road", "service_junction"}
+
+
 def _airside_groundside_pair(way_a: "Way", way_b: "Way") -> bool:
-    """True iff exactly one of the two ways is groundside — a wall separates
-    them, so a vertical step between them is by design, not a defect."""
+    """True iff a designed wall separates the two ways: exactly one is
+    groundside, OR exactly one is ROAD-family (s79 Step D) — a
+    ground-vehicle road grades at 4 % from its apron mouth down to
+    terrain, so where it runs beside curbside groundside (the CYXY
+    pav[1] ramp: a 6.5 m retaining wall vs the parking lot) or beside
+    airside pavement, the vertical seam is by design.  Road↔road pairs
+    stay checked — the road network itself is one continuous surface.
+    (Both-groundside-family pairs previously slipped the exactly-one
+    test and fired 151 false steps at the CYXY ramp.)"""
+    a_road = way_a.tags.get("role") in _ROAD_FAMILY_ROLES
+    b_road = way_b.tags.get("role") in _ROAD_FAMILY_ROLES
+    if a_road != b_road:
+        return True
     return _is_groundside(way_a) != _is_groundside(way_b)
 
 

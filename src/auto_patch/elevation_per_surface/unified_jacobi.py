@@ -772,17 +772,26 @@ def _project_within_bands(elev, edges, is_hard, lo, hi, coupling,
     return sweep + 1, mx
 
 
-def _corridor_segments(layout, split: bool = False):
+def _corridor_segments(layout, split: bool = False,
+                       include_roads: bool = True):
     """Taxi-corridor polyline segments: apt.dat/OSM taxi centerlines PLUS
     every taxi rect's ``source_axis`` (discovered taxiways carry no apt.dat
-    row; CYXY's TX1 apron is served only by discovered rects).  Aircraft
-    corridors only — no 4 % service roads.  ``split=True`` returns
-    ``(apt_segs, axis_segs)`` — the network-profile graph needs the
-    provenance (apt rows are the route-graph plain set; axis nodes enter
-    it across straight gaps, the law's anchor-entry mechanic)."""
+    row; CYXY's TX1 apron is served only by discovered rects).
+    ``split=True`` returns ``(apt_segs, axis_segs)`` — the network-profile
+    graph needs the provenance (apt rows are the route-graph plain set;
+    axis nodes enter it across straight gaps, the law's anchor-entry
+    mechanic).  ``include_roads=False`` drops the ground-vehicle SVC
+    centerlines (s79 Step D): an APRON must never bind to a road's
+    profile — the road descends at 4 % toward terrain and is
+    wall-separated; corridor-seeding aprons from it split the apron
+    into two write families (HECA #266: 98 vs 102.7, 30 violations).
+    Rect source AXES already exclude ROLE_SERVICE_ROAD."""
     apt_segs: list = []
     for entry in (getattr(layout, "apt_taxi_centerlines", None) or []):
         ls = entry[0] if isinstance(entry, (tuple, list)) else entry
+        if (not include_roads and isinstance(entry, (tuple, list))
+                and len(entry) > 1 and str(entry[1]).startswith("SVC")):
+            continue
         try:
             cs = list(ls.coords)
         except (AttributeError, TypeError):
@@ -885,7 +894,7 @@ def _apron_corridor_zone_edges(layout, nodes, shape_constraints):
     if (APRON_CORRIDOR_SMOOTH_GRADE <= 0.0
             or APRON_CORRIDOR_SMOOTH_RADIUS_M <= 0.0):
         return []
-    segs = _corridor_segments(layout)
+    segs = _corridor_segments(layout, include_roads=False)
     if not segs:
         return []
     R = APRON_CORRIDOR_SMOOTH_RADIUS_M
@@ -953,7 +962,7 @@ def _apron_corridor_geodesic_state(layout, nodes, elev, shape_constraints,
     g = APRON_CORRIDOR_SMOOTH_GRADE
     if g <= 0.0 or APRON_CORRIDOR_SMOOTH_RADIUS_M <= 0.0:
         return None
-    segs = _corridor_segments(layout)
+    segs = _corridor_segments(layout, include_roads=False)
     if not segs:
         return None
     n = len(nodes)
@@ -4244,13 +4253,23 @@ def _network_field_stations(layout, elev, bucket_to_idx, chain_data,
     F = None
     try:
         apt_segs, axis_segs = _corridor_segments(layout, split=True)
+        # Ground-vehicle ROAD centerlines (SVC refs) grade at 4 % in
+        # the field (service_road_carve.md Step C) — the ramp class
+        # must descend to terrain faster than the taxi law allows.
+        _svc_lines9 = [e9[0] for e9 in
+                       (getattr(layout, "apt_taxi_centerlines", None)
+                        or [])
+                       if isinstance(e9, (tuple, list)) and len(e9) > 1
+                       and str(e9[1]).startswith("SVC")]
         F = _np.build_and_solve(
             apt_segs + axis_segs, rings, TAXI_MAX_GRADE,
             TAXIWAY_MAX_GRADE_CHANGE_PER_M, seed_at=seed_at,
             exit_overrides=exit_overrides, fallback_at=fallback_at,
             bridge_test=bridge_test, n_apt_segments=len(apt_segs),
             extra_band_anchors=bh_pts,
-            entry_dist=_interior_entry_dist(layout))
+            entry_dist=_interior_entry_dist(layout),
+            road_lines=_svc_lines9,
+            road_cap=SERVICE_ROAD_MAX_GRADE)
     except _GEOM_EXC:
         F = None
     layout._network_profile_field = F

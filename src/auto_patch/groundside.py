@@ -35,6 +35,8 @@ from .layout import (
     ROLE_PRIMARY_PARALLEL,
     ROLE_RUNWAY,
     ROLE_SECONDARY_PARALLEL,
+    ROLE_SERVICE_JUNCTION,
+    ROLE_SERVICE_ROAD,
     ROLE_STUB,
     ROLE_TERMINAL,
     ROLE_RETAINING_WALL,
@@ -1130,6 +1132,12 @@ def _separate_groundside_from_airside(
         ROLE_RUNWAY, ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
         ROLE_STUB, ROLE_CROSS_CONNECTOR, ROLE_APRON, ROLE_JUNCTION,
         ROLE_TERMINAL, ROLE_TUNNEL_RAMP, ROLE_RETAINING_WALL,
+        # (s79 Step D) ground-vehicle ROADS grade from their apron
+        # mouth, not the DEM — groundside lots beside them need the
+        # same clearance gap as beside airside, or the shared boundary
+        # smears the retaining wall into BOTH rings as within-shape
+        # violations (CYXY 'Crew cars' road vs lots #101/#102).
+        ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION,
     }
     clip_polys = []
     for s in layout.shapes:

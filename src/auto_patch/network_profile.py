@@ -292,6 +292,8 @@ def build_and_solve(
         entry_dist: Optional[Callable[[Tuple[float, float],
                                        Tuple[float, float]],
                                       Optional[float]]] = None,
+        road_lines: Sequence = (),
+        road_cap: float = 0.0,
 ) -> Optional[NetworkProfileField]:
     """Build the centerline graph and solve the field.
 
@@ -333,6 +335,16 @@ def build_and_solve(
     charge the in-pavement path length instead of the straight chord;
     ``None`` = no interior path = no coupling.  ``None`` (the
     parameter) keeps the legacy straight-gap behaviour (gate off).
+
+    ``road_lines`` + ``road_cap``: ground-vehicle ROAD centerlines
+    (SERVICE_ROAD_CARVE, docs/service_road_carve.md Step C).  Segment
+    edges lying on a road line have their stored length scaled by
+    ``road_cap/cap`` so every consumer (cap projection, band
+    Dijkstras, relax, demands) applies the 4 % road law along them
+    implicitly; route distances THROUGH roads read proportionally
+    longer — a conservative distortion (looser bands elsewhere never
+    tighten anything).  Proximity/gap coupling edges stay at the taxi
+    cap (surface continuity, not travel law).
     """
     import os as _os
     import time as _time
@@ -724,6 +736,27 @@ def build_and_solve(
             prox_keys.add(ek)            # cap-only, not a taxi path
 
     _mark("gap-edges")
+    # ── ROAD edges: scale stored lengths to the 4 % law (see the
+    # ``road_lines`` docstring note).  Geometry-tagged (3 m buffer,
+    # midpoint test) — provenance survives intersection splitting.
+    if road_lines and road_cap > 0.0 and cap > 0.0 and road_cap > cap:
+        try:
+            from shapely.geometry import Point as _RPt
+            from shapely.ops import unary_union as _runion
+            from shapely.prepared import prep as _rprep
+            _rbuf = _runion(list(road_lines)).buffer(3.0)
+            _rprep9 = _rprep(_rbuf)
+            _rscale = road_cap / cap
+            for ek in sorted(edge_w):
+                if ek in prox_keys:
+                    continue
+                (xa9, ya9) = coord[ek[0]]
+                (xb9, yb9) = coord[ek[1]]
+                if _rprep9.contains(
+                        _RPt((xa9 + xb9) / 2.0, (ya9 + yb9) / 2.0)):
+                    edge_w[ek] = edge_w[ek] * _rscale
+        except Exception:
+            pass
     # ── index the nodes (sorted keys → deterministic ids)
     keys = sorted(coord)
     idx_of = {kk: i for i, kk in enumerate(keys)}
