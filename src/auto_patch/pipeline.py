@@ -109,6 +109,7 @@ from . import finalize, junction_emit
 # ──────────────────────────────────────────────────────────────────
 from .pavement.runways import (
     _detect_runway_shoulders,
+    _detect_runway_shoulder_extent,
     _runway_rect_m,
     _widen_runway_rect,
 )
@@ -1140,6 +1141,91 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 f"(+{shoulder_w_m}m/side, apt.dat shoulder code "
                 f"{r.shoulder_code}).")
         if _widened_any:
+            layout.runway_union = (unary_union(runway_polys)
+                                   if runway_polys else None)
+        for ridx, r in enumerate(apt.runways):
+            # Row-100-widened runways join the skip set so the
+            # extent pass below doesn't compound on top.
+            if r.shoulder_code // 100 >= 1:
+                _shoulder_widened_refs.add(f"{r.desig_a}/{r.desig_b}")
+
+    # ── Extent-based runway shoulder widening (user 2026-06-12) ────
+    # Shoulders carried only by DSF pavement (KPHL StarSim: a whole-
+    # airport Groundtextures asphalt.pol ring, 3.7 M m²/87 holes) have
+    # no discrete row-110 strip polygon for the whole-polygon pass
+    # (which also runs pre-DSF) and no row-100 declared width for the
+    # spec pass above — the strip along each runway edge falls into
+    # residue and emits as apron pieces hugging the runway.  Measure
+    # the pavement itself: when a consistent strip of shoulder-range
+    # width runs along a runway edge in the FINAL union and is mostly
+    # NOT row-110-covered (the DSF gap — measured KPHL q1/median
+    # extents 3-11 m at 100 % station coverage on every side), widen
+    # the rect over it here, BEFORE the runway subtraction below, so
+    # the strip becomes runway.  Row-110-carried shoulders keep their
+    # established handling (whole-polygon absorption; SPJC's envelope
+    # shoulders deliberately live in the junction cut — see the
+    # INTERSECTION_PROX_M budget above).
+    from .config import (
+        RUNWAY_SHOULDER_EXTENT,
+        RUNWAY_SHOULDER_EXTENT_MAX_APT_FRAC,
+        RUNWAY_SHOULDER_EXTENT_MAX_M,
+        RUNWAY_SHOULDER_EXTENT_MIN_COVERAGE,
+        RUNWAY_SHOULDER_EXTENT_MIN_M,
+        RUNWAY_SHOULDER_EXTENT_STATION_M,
+        RUNWAY_SHOULDER_EXTENT_STEP_M,
+    )
+    if (RUNWAY_SHOULDER_EXTENT and runway_polys
+            and pav_union is not None and not pav_union.is_empty):
+        _apt_only_union = None
+        try:
+            _apt_only_union = unary_union(
+                [p for p in apt_only_pav_polys
+                 if p is not None and not p.is_empty])
+        except _GEOM_EXC:
+            _apt_only_union = None
+        _ext_widened_any = False
+        for ridx, r in enumerate(apt.runways):
+            if ridx >= len(runway_polys):
+                continue
+            ref = f"{r.desig_a}/{r.desig_b}"
+            if ref in _shoulder_widened_refs:
+                continue
+            rect = runway_polys[ridx]
+            if rect is None or rect.is_empty:
+                continue
+            try:
+                extent = _detect_runway_shoulder_extent(
+                    r, to_m, pav_union, _apt_only_union,
+                    station_m=RUNWAY_SHOULDER_EXTENT_STATION_M,
+                    step_m=RUNWAY_SHOULDER_EXTENT_STEP_M,
+                    min_w=RUNWAY_SHOULDER_EXTENT_MIN_M,
+                    max_w=RUNWAY_SHOULDER_EXTENT_MAX_M,
+                    min_coverage=RUNWAY_SHOULDER_EXTENT_MIN_COVERAGE,
+                    max_apt_frac=RUNWAY_SHOULDER_EXTENT_MAX_APT_FRAC)
+            except _GEOM_EXC:
+                continue
+            if extent is None:
+                continue
+            new_left, new_right = extent
+            old_w = r.width_m
+            new_rect = _widen_runway_rect(
+                r, layout.anchor, new_left, new_right, to_m)
+            if new_rect is None or new_rect.is_empty:
+                continue
+            runway_polys[ridx] = new_rect
+            for s in layout.shapes:
+                if s.role == ROLE_RUNWAY and s.ref == ref:
+                    s.polygon = new_rect
+                    break
+            _shoulder_widened_refs.add(ref)
+            _ext_widened_any = True
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: extent-widened runway "
+                f"{ref}: {old_w:.1f}m → {r.width_m:.1f}m "
+                f"(measured shoulder strip "
+                f"{-new_left - old_w / 2.0:+.1f}m/"
+                f"{new_right - old_w / 2.0:+.1f}m per side).")
+        if _ext_widened_any:
             layout.runway_union = (unary_union(runway_polys)
                                    if runway_polys else None)
 

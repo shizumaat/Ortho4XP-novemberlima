@@ -239,6 +239,44 @@ DSF_PAVEMENT_MATERIAL_TOKENS = (
     "betao", "betão",
 )
 
+# ── Extent-based runway shoulder widening (user 2026-06-12, KPHL) ──
+# Shoulders carried by a DSF base-texture layer (e.g. KPHL StarSim's
+# whole-airport Groundtextures asphalt.pol ring, 3.7 M m²/87 holes)
+# have NO discrete row-110 strip polygon for the whole-polygon
+# absorber and NO row-100 declared width for the spec pass — the
+# strip along the runway edges falls into residue and emits as apron
+# pieces hugging the runway.  This pass measures the pavement itself:
+# walk perpendicular from each runway edge through the final source
+# union per station; a consistent (high-coverage) strip of
+# shoulder-range width on a side is a shoulder → widen the rect over
+# it BEFORE the runway subtraction, so the strip becomes runway.
+# Scoped to the DSF gap: a side only fires when its strip is mostly
+# NOT covered by apt.dat row-110 pavement — row-110-carried shoulders
+# stay with the established passes (HECA whole-polygon absorption;
+# SPJC's envelope shoulders deliberately live in the junction cut,
+# see the INTERSECTION_PROX_M budget in pipeline.py).
+# Gate is defined with the other env-overridable flags below (after
+# the ``import os as _os``): ``RUNWAY_SHOULDER_EXTENT``.
+# Station spacing along the centerline for the perpendicular walk.
+RUNWAY_SHOULDER_EXTENT_STATION_M = 25.0
+# Outward walk resolution.
+RUNWAY_SHOULDER_EXTENT_STEP_M = 1.0
+# Shoulder width admitted per side.  Upper bound per FAA AC
+# 150/5300-13B / EASA CS-ADR-DSN.B.080: runway + shoulders ≤ 75 m at
+# code letter F (60 m runway → 7.5 m/side); 15 m/side is a generous
+# envelope over every code.  Anything wider adjoining the runway is
+# taxiway/apron slab, never absorbed.  Lower bound filters the ~2 m
+# pavement-union simplify tolerance.
+RUNWAY_SHOULDER_EXTENT_MIN_M = 2.0
+RUNWAY_SHOULDER_EXTENT_MAX_M = 15.0
+# Fraction of stations on a side that must show pavement immediately
+# past the runway edge ("consistent along the runway").
+RUNWAY_SHOULDER_EXTENT_MIN_COVERAGE = 0.8
+# DSF-attribution gate: fraction of the strip's sample points allowed
+# on the apt.dat-only union before the side is considered row-110-
+# carried (established passes own it) and skipped.
+RUNWAY_SHOULDER_EXTENT_MAX_APT_FRAC = 0.5
+
 
 # ── Aerodrome longitudinal grade standards (single source of truth) ──
 # Every grade / vertical-curve rule VALUE lives here so the whole tuning
@@ -638,6 +676,13 @@ TERMINAL_CHORD_LAW = _os.environ.get("O4_TERMINAL_CHORD", "0") == "1"
 # failure mode (s78p5 revert; s79 field-only experiment = 50 viol).
 # OFF restores the straight-gap behaviour byte-identically.
 INTERIOR_PATH_ENTRIES = _os.environ.get("O4_INTERIOR_PATH", "1") == "1"
+
+# (s80) Extent-based runway shoulder widening — tuning constants and
+# rationale with the other RUNWAY_SHOULDER_EXTENT_* values near the
+# DSF block above.  ``O4_SHOULDER_EXTENT=0`` restores the pre-s80
+# build (shoulder strips carried only by DSF pavement fall into
+# apron residue along the runway).
+RUNWAY_SHOULDER_EXTENT = _os.environ.get("O4_SHOULDER_EXTENT", "1") == "1"
 
 # (s79) ON-PAVEMENT service-road carve — docs/service_road_carve.md.
 # ★ USER RULINGS 2026-06-11: roads = apt.dat 1206 routes ONLY (no

@@ -60,6 +60,7 @@ The runway profile is built and re-checked by:
 | RESA / runway-end graded length, by code | 1:60, 2:90, 3:150, 4:240 m | ICAO Annex 14 (90 m min, 240 m recommended) | `config.py` `RUNWAY_END_CLEARANCE_LENGTH_BY_CODE` |
 | RESA longitudinal slope cap | 5% | ICAO Annex 14 | `config.py` `RUNWAY_END_RESA_MAX_SLOPE` |
 | Graded runway-strip half-width, by code | 1:30, 2:40, 3:75, 4:75 m | ICAO Annex 14 (graded portion) | `config.py` `RUNWAY_STRIP_HALF_WIDTH_BY_CODE` |
+| Runway shoulder max width per side (extent-based widening cap; measured strips wider than this adjoining a runway are taxiway/apron, never shoulder) | 15 m | FAA AC 150/5300-13B / EASA CS-ADR-DSN.B.080 (runway + shoulders ≤ 75 m at code F) | `config.py` `RUNWAY_SHOULDER_EXTENT_MAX_M`; detector `pavement/runways._detect_runway_shoulder_extent`, wired in `pipeline.py` after the row-100 spec widening |
 
 ## Lateral (wingtip) clearance
 

@@ -58,6 +58,7 @@ __all__ = [
     "_resolve_runway_crossings",
     "_insert_runway_chain_bridges",
     "_detect_runway_shoulders",
+    "_detect_runway_shoulder_extent",
     "_widen_runway_rect",
 ]
 
@@ -1023,6 +1024,127 @@ def _detect_runway_shoulders(
         if n_max > new_right:
             new_right = n_max
     return (new_left, new_right, absorbed)
+
+
+def _detect_runway_shoulder_extent(
+        runway,
+        to_m,
+        pav_union,
+        apt_only_union,
+        station_m: float,
+        step_m: float,
+        min_w: float,
+        max_w: float,
+        min_coverage: float,
+        max_apt_frac: float,
+        ) -> "tuple[float, float] | None":
+    """Measure DSF-carried shoulder strips along a runway's edges.
+
+    Walks perpendicular outward from each runway edge through
+    ``pav_union`` (the final apt.dat ⊕ DSF source union) at stations
+    every ``station_m`` along the centerline, recording the contiguous
+    pavement extent past the edge.  A side is a shoulder when:
+
+      1. Coverage: ≥ ``min_coverage`` of stations have pavement
+         immediately past the edge (within ``step_m``) — "consistent
+         along the runway".
+      2. Width: the 25th-percentile extent is ≥ ``min_w`` (filters
+         union-simplify noise).  The widening width is the
+         75th-percentile extent clamped to [min_w, max_w] — wide-biased
+         on purpose: the graded area beside a runway is the runway
+         strip the standards require smooth anyway, while under-
+         covering leaves on-source residue slivers that re-emit as
+         apron pieces hugging the runway (the bug this pass kills).
+         Stations where the walk runs past ``max_w`` are exits /
+         taxiway connections; the junction shapes own that pavement
+         and the percentile clamp ignores them.
+      3. Attribution: < ``max_apt_frac`` of the strip's mid-points lie
+         on ``apt_only_union`` — row-110-carried shoulders belong to
+         the established passes (whole-polygon absorption / the
+         INTERSECTION_PROX_M junction-cut budget), only the DSF gap
+         (KPHL StarSim's whole-airport asphalt.pol ring) fires here.
+
+    Returns ``(new_left, new_right)`` perpendicular offsets from the
+    centerline (a non-qualifying side keeps ±half), or ``None`` when
+    neither side qualifies.
+    """
+    try:
+        from shapely.prepared import prep
+    except ImportError:                    # pragma: no cover
+        return None
+    if pav_union is None or pav_union.is_empty:
+        return None
+    ax, ay = to_m(runway.lon_a, runway.lat_a)
+    bx, by = to_m(runway.lon_b, runway.lat_b)
+    L = math.hypot(bx - ax, by - ay)
+    if L < 2.0 * station_m:
+        return None
+    ux, uy = (bx - ax) / L, (by - ay) / L
+    nx, ny = -uy, ux
+    half = runway.width_m / 2.0
+    walk_cap = max_w + step_m            # one step past max = "open"
+    try:
+        pav_prep = prep(pav_union)
+    except _GEOM_EXC:
+        return None
+    apt_prep = None
+    if apt_only_union is not None and not apt_only_union.is_empty:
+        try:
+            apt_prep = prep(apt_only_union)
+        except _GEOM_EXC:
+            apt_prep = None
+
+    n_st = int(L / station_m)
+    new_left = -half
+    new_right = half
+    qualified = False
+    for side in (1.0, -1.0):
+        extents: list[float] = []
+        for k in range(1, n_st):
+            sx = ax + ux * (k * station_m)
+            sy = ay + uy * (k * station_m)
+            ext = 0.0
+            t = step_m
+            while t <= walk_cap:
+                if pav_prep.contains(Point(
+                        sx + side * nx * (half + t),
+                        sy + side * ny * (half + t))):
+                    ext = t
+                    t += step_m
+                else:
+                    break
+            extents.append(ext)
+        if not extents:
+            continue
+        sv = sorted(extents)
+        n = len(sv)
+        coverage = sum(1 for e in extents if e >= step_m) / n
+        if coverage < min_coverage:
+            continue
+        q1 = sv[n // 4]
+        if q1 < min_w:
+            continue
+        width = min(max_w, sv[(3 * n) // 4])
+        if width < min_w:
+            continue
+        if apt_prep is not None:
+            on_apt = sum(
+                1 for k in range(1, n_st)
+                if apt_prep.contains(Point(
+                    ax + ux * (k * station_m)
+                    + side * nx * (half + 0.5 * width),
+                    ay + uy * (k * station_m)
+                    + side * ny * (half + 0.5 * width))))
+            if on_apt / n > max_apt_frac:
+                continue
+        qualified = True
+        if side > 0:
+            new_right = half + width
+        else:
+            new_left = -(half + width)
+    if not qualified:
+        return None
+    return (new_left, new_right)
 
 
 def _widen_runway_rect(
