@@ -606,6 +606,27 @@ HOLE_ROUTER_ENABLED = _os.environ.get("O4_HOLE_ROUTER", "1") == "1"
 # planner for A/B comparison.  Only consulted when HOLE_ROUTER_ENABLED.
 HOLE_ROUTER_V2 = _os.environ.get("O4_HOLE_ROUTER_V2", "1") == "1"
 
+# (s79) TERMINAL PERPENDICULAR-CHORD LAW — ★ USER RULING 2026-06-12:
+# terminals adjust UP OR DOWN so that a perpendicular chord from each
+# taxi centerline that intersects the terminal does not exceed this
+# grade.  The perpendicular construction naturally selects LATERAL
+# serving taxiways (a head-on gate lane's perpendiculars miss the pad),
+# which kills the bowl-self-certification that defeated the previous
+# adjacent-apron-median and corridor-1%-plane bounds (HECA terminal1
+# at 100.1 vs stub B 102.3 only 36 m away).
+TERMINAL_CHORD_MAX_GRADE = 0.01
+TERMINAL_CHORD_REACH_M = 200.0      # max perpendicular chord length
+# Gate: OFF by default pending the APRON-FOLLOWS re-solve — the rule
+# itself lands pads correctly (HECA terminal1 100.1 → 102.7, exactly
+# the serving-taxiway window), but the apron BETWEEN pad and taxiway
+# must rise as a SURFACE and the post-level projection can only do
+# that where no vert is route/band-pinned: SPJC's lifted terminal
+# leaves 2 within-pairs on its pinned apron (#96) = its green grade
+# gate breaks; HECA leaves 33 interior pairs on #257 (red-baseline
+# absorbs them).  Flip per-build via ``O4_TERMINAL_CHORD=1`` for
+# in-sim evaluation; ship ON together with the apron-follows work.
+TERMINAL_CHORD_LAW = _os.environ.get("O4_TERMINAL_CHORD", "0") == "1"
+
 # (s79) INTERIOR-PATH ENTRIES — docs/interior_path_entries.md.
 # ★ USER RULING 2026-06-11: no shape may ever check grade ACROSS GRASS.
 # Every off-graph entry into the centerline route graph (route-band law

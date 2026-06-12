@@ -22,7 +22,41 @@ network-profile-model verdict closes (§6 of that plan) — split after
 those deletes, not before.  Natural split lines when the time comes:
 law/bands, corridor profiles, write layer, apron/terminal features.
 
-## ★★ OPEN (user in-sim, 2026-06-12): TERMINAL1 STILL TOO LOW — needs a DESIGN SESSION ★★
+## ★★ TERMINAL PERPENDICULAR-CHORD LAW BUILT (user ruling 2026-06-12) — gate `TERMINAL_CHORD_LAW`, OFF pending APRON-FOLLOWS ★★
+★★ USER RULING: terminals adjust UP OR DOWN so that a perpendicular
+chord from each taxi centerline that intersects the terminal does not
+exceed 1 % (`TERMINAL_CHORD_MAX_GRADE`).  BUILT in the leaf re-level
+(`chord_win` in unified_jacobi): per pad, window = ∩[v ± 1 %·d] over
+perpendicular chords from aircraft centerlines (NETWORK-FIELD values
+at the feet; reach 200 m); pad PROJECTS into the window; window-
+feasible pads are LAW-PINNED (don't negotiate in the grade-grouping).
+★ Key construction lessons (each measured):
+* chord samples INSIDE apron polygons are EXCLUDED — in a terminal
+  ROW one pad's gate lane runs LATERALLY past its neighbours and its
+  bowled field re-imports the bowl (HECA T1 window read [103.2,99.05]
+  infeasible; with the exclusion [102.72,103.37] = 594 chords).
+* ✓ HECA T1/T2/T9 → **102.70** (was 100.10; serving stub B 102.3 /
+  junction#291 103.0 at 36-40 m — exactly the user's expectation);
+  terminal7 ≈ 70 ruling stands (no window reaches it).
+* ⛔ GATED OFF (O4_TERMINAL_CHORD=1 to evaluate): the apron BETWEEN
+  pad and taxiway must rise as a SURFACE — the post-level projection
+  follows only where verts aren't route/band-pinned.  SPJC's lifted
+  terminal leaves 2 within-pairs on pinned apron #96 (8.1 %, GREEN
+  GATE breaks); HECA leaves 33 interior pairs ≥2 m on #257
+  (red-baseline absorbs).  Predictive clamps DON'T work (HECA's band
+  ceilings near T1 read 99.5 where the surface lawfully rose to
+  102.7 = the under-measured-entry family; per-pad post-settle
+  acceptance missed SPJC's pair one hop inside the apron).
+**NEXT = APRON-FOLLOWS re-solve** (the missing half): lift the pad's
+apron complex AS A SURFACE toward the chord plane (re-solve, not
+projection), push the residual drop to the rim/groundside (s78p5
+retreat class).  Ships together with flipping TERMINAL_CHORD_LAW ON;
+SPJC is the gate fixture (its #96 must come back green or the 2 pairs
+need an explicit user-accepted baseline).  USER DECISION: accept
+SPJC's 2 squeeze pairs interim (gate ON now), or wait for
+apron-follows.
+
+## (superseded by the ruling above) TERMINAL1 brief (2026-06-12) ★★
 T1 sits at **100.10** while its serving taxiways (stub B 102.3-103.4,
 junction#291 103.0-103.9) are only **36-40 m away** = a 6-10 % bowl
 slope; user: "too steep a slope from taxiways" (third strike: s77p2

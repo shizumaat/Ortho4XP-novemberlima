@@ -59,6 +59,8 @@ from auto_patch.config import (
     RUNWAY_END_GRADE, RUNWAY_MAX_GRADE, SURFACE_FAIRING,
     SURFACE_FAIRING_MAX_MOVE_M, TAXI_CORRIDOR_PROFILE,
     TAXIWAY_MAX_GRADE_CHANGE_PER_M, TERMINAL_LEAF_LEVELS,
+    TERMINAL_CHORD_LAW, TERMINAL_CHORD_MAX_GRADE,
+    TERMINAL_CHORD_REACH_M,
     TERMINAL_PADS_SLOPE, WRITE_ARBITRATION)
 from auto_patch.elevation import (
     APRON_MAX_GRADE, SERVICE_ROAD_MAX_GRADE, TAXI_MAX_GRADE)
@@ -1906,25 +1908,16 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
     # route-pinned squeeze families YIELD, s77).
     n_zone = 0
     n_geo_tight = 0
-    geo_leaf = None          # (geo_dist, c_lo) for the leaf lower bound
     if nodes is not None and layout is not None:
         geo_state = (_apron_corridor_geodesic_state(
                          layout, nodes, elev, shape_constraints, all_edges)
                      if APRON_CORRIDOR_GEODESIC else None)
         if geo_state is not None:
             geo_dist, c_lo, c_hi = geo_state
-            # ⚠ terminal1 bowl (user 2026-06-12, OPEN — see STATUS):
-            # this bound cannot lift T1.  Measured: target = 100.00
-            # (median of the already-bowled adjacent apron), full-state
-            # plane 100.14, RECT-SEEDS-ONLY plane variant 99.05 — the
-            # plane's interior geodesic from the serving taxiways (B at
-            # 102.3, 36 m away) runs ~300 m over the solver edge graph
-            # (under-connected leaf path), and lifting the PAD alone
-            # would leave the apron bowled anyway.  The fix is the s78p5
-            # ruling applied to the APRON: hold the pad complex's apron
-            # at the serving-taxiway plane and push the drop to the
-            # groundside/rim — a design-session item.
-            geo_leaf = (geo_dist, c_lo)
+            # (geo_leaf retired 2026-06-12: the corridor-1 %-plane leaf
+            # bound is SUPERSEDED by the user's perpendicular-chord
+            # rule — see the chord_win construction in the leaf
+            # re-level below.)
             R_z = APRON_CORRIDOR_SMOOTH_RADIUS_M
             # Pair-smoothing ZONE = straight-line ∪ interior-path radius
             # (strictly additive over the in-sim-validated s76 coverage:
@@ -1999,6 +1992,7 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
     # The legal re-projection below then conforms the aprons around the
     # moved pads (pads stay held).
     n_leaf = 0
+    _chord_lifted: list = []   # (grp, [(pad_node, nbr_node, dist)]) law lifts
     if not TERMINAL_PADS_SLOPE and TERMINAL_LEAF_LEVELS and _term_nodes:
         pad_set = {i for i in _term_nodes if i < n}
         nbr_l: dict = {}
@@ -2018,6 +2012,118 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                     if math.hypot(x3 - x4, y3 - y4) > 40.0:
                         continue
                 nbr_l.setdefault(p3, set()).add(q3)
+        # ★★ PERPENDICULAR-CHORD WINDOW (user ruling 2026-06-12):
+        # terminals adjust UP OR DOWN so that a perpendicular chord
+        # from each taxi centerline that intersects the terminal does
+        # not exceed TERMINAL_CHORD_MAX_GRADE (1 %).  The perpendicular
+        # construction selects LATERAL serving taxiways geometrically —
+        # a head-on gate lane's perpendiculars run parallel to the pad
+        # face and miss it, killing the bowl self-certification that
+        # defeated the adjacent-apron-median and corridor-1 %-plane
+        # bounds (terminal1 100.1 vs stub B 102.3 at 36 m).  Chord
+        # values are NETWORK-FIELD samples at the centerline foot.
+        chord_win: dict = {}     # solver node -> (lo_w, hi_w, n_chords)
+        npf_t = (getattr(layout, "_network_profile_field", None)
+                 if NETWORK_PROFILE_MODEL and TERMINAL_CHORD_LAW
+                 else None)
+        if npf_t is not None and nodes is not None and layout is not None:
+            from shapely.geometry import LineString as _TL
+            from shapely.geometry import Point as _TP
+            from shapely.prepared import prep as _tprep
+            segs_t = _corridor_segments(layout, include_roads=False)
+            g_t = TERMINAL_CHORD_MAX_GRADE
+            reach_t = TERMINAL_CHORD_REACH_M
+            term_polys = [s.polygon for s in layout.shapes
+                          if s.role == ROLE_TERMINAL
+                          and s.polygon is not None
+                          and not s.polygon.is_empty]
+            # "Taxi centerline" = portions on TAXI pavement (rects /
+            # junctions).  Apron-lane portions are EXCLUDED: in a
+            # terminal ROW the gate lane serving one pad runs LATERALLY
+            # past its neighbours, and its bowled field values re-import
+            # the bowl this rule exists to kill (HECA T1's window read
+            # [103.2, 99.05] = infeasible, from a neighbour's gate
+            # lane).
+            apr_prep_t = None
+            try:
+                from shapely.ops import unary_union as _tunion
+                apolys_t = [s.polygon for s in layout.shapes
+                            if s.role == ROLE_APRON
+                            and s.polygon is not None
+                            and not s.polygon.is_empty]
+                if apolys_t:
+                    apr_prep_t = _tprep(_tunion(apolys_t))
+            except _GEOM_EXC:
+                apr_prep_t = None
+            for sc4 in shape_constraints:
+                if sc4["role"] != ROLE_TERMINAL or not sc4["nodes"]:
+                    continue
+                first4 = sorted(m for m in sc4["nodes"] if m < n)
+                if not first4:
+                    continue
+                px4, py4 = nodes[first4[0]]
+                poly4 = None
+                for tp4 in term_polys:
+                    if tp4.distance(_TP(px4, py4)) < 2.0:
+                        poly4 = tp4
+                        break
+                if poly4 is None:
+                    continue
+                pprep4 = _tprep(poly4)
+                bx0, by0, bx1, by1 = poly4.bounds
+                lo_w, hi_w, n_ch = float("-inf"), float("inf"), 0
+                for (sa4, sb4) in segs_t:
+                    if (max(sa4[0], sb4[0]) < bx0 - reach_t
+                            or min(sa4[0], sb4[0]) > bx1 + reach_t
+                            or max(sa4[1], sb4[1]) < by0 - reach_t
+                            or min(sa4[1], sb4[1]) > by1 + reach_t):
+                        continue
+                    dx4 = sb4[0] - sa4[0]
+                    dy4 = sb4[1] - sa4[1]
+                    sl4 = math.hypot(dx4, dy4)
+                    if sl4 < 1.0:
+                        continue
+                    ux4, uy4 = dx4 / sl4, dy4 / sl4
+                    nx4, ny4 = -uy4, ux4
+                    k4 = max(1, int(sl4 // 12.0))
+                    for t4 in range(k4 + 1):
+                        f4 = min(t4 * 12.0, sl4)
+                        qx4 = sa4[0] + ux4 * f4
+                        qy4 = sa4[1] + uy4 * f4
+                        q4 = _TP(qx4, qy4)
+                        if pprep4.contains(q4):
+                            continue     # lane ON the pad: head-on/gate
+                        if apr_prep_t is not None \
+                                and apr_prep_t.contains(q4):
+                            continue     # apron gate lane, not a taxiway
+                        try:
+                            ray4 = _TL([
+                                (qx4 - reach_t * nx4, qy4 - reach_t * ny4),
+                                (qx4 + reach_t * nx4, qy4 + reach_t * ny4)])
+                            if not pprep4.intersects(ray4):
+                                continue
+                            inter4 = ray4.intersection(poly4)
+                            if inter4.is_empty:
+                                continue
+                            d4 = inter4.distance(q4)
+                        except _GEOM_EXC:
+                            continue
+                        if d4 < 3.0:
+                            continue     # edge-touching lane
+                        v4, gap4 = npf_t.sample(qx4, qy4)
+                        if v4 is None or gap4 > 10.0:
+                            continue
+                        lo_c = v4 - g_t * d4
+                        hi_c = v4 + g_t * d4
+                        if lo_c > lo_w:
+                            lo_w = lo_c
+                        if hi_c < hi_w:
+                            hi_w = hi_c
+                        n_ch += 1
+                if n_ch:
+                    for m4 in sc4["nodes"]:
+                        chord_win[m4] = (lo_w, hi_w, n_ch)
+
         seen_g1: set = set()
         leaf_entries: list = []          # (grp, cur, target, lo_bound)
         for i in sorted(pad_set):
@@ -2034,52 +2140,53 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
             if not nv or not cv:
                 continue
             target = nv[len(nv) // 2]
-            # PAD 1 %-PLANE LOWER BOUND (user 2026-06-11: terminal1/2 sat
-            # in a bowl — the apron sloped down hard to reach the pads;
-            # "better to have a bigger deviation on the groundside, and
-            # keep a smooth 1 % sloping apron away from the terminal").
-            # The adjacent-apron MEDIAN follows the bowl the pad itself
-            # dragged; bound it from below by the corridor 1 %-plane
-            # value at the pad face (c_lo = corridor − 1 %·interior d),
-            # relaxed by the two-rate slack beyond the smoothing zone so
-            # distant user-approved pads (terminal4/5/8) keep their
-            # levels.
-            if NETWORK_PROFILE_MODEL and geo_leaf is not None:
-                gd9, clo9 = geo_leaf
-                cap9 = _role_grade(ROLE_APRON)
-                g9 = APRON_CORRIDOR_SMOOTH_GRADE
-                los9 = []
-                for m in grp:
-                    for b in nbr_l.get(m, ()):
-                        if b >= n or clo9[b] <= float("-inf"):
-                            continue
-                        if gd9[b] == float("inf"):
-                            continue
-                        extra9 = max(0.0, gd9[b]
-                                     - APRON_CORRIDOR_SMOOTH_RADIUS_M) \
-                            * max(0.0, cap9 - g9)
-                        los9.append(clo9[b] - extra9)
-                # ≥8 samples: a bound from a handful of adjacent verts
-                # is one pinned outlier away from re-litigating settled
-                # pad levels (terminal7 ≈ 70 is an explicit ruling; the
-                # first cut raised it 70.3 → 72.9 off ONE neighbour)
+            # ★★ PERPENDICULAR-CHORD WINDOW (user ruling 2026-06-12,
+            # SUPERSEDES the s78p5 corridor-1 %-plane lower bound —
+            # that bound's gate-lane seeds self-certified the bowl and
+            # its rect-only variant under-measured the interior path
+            # ~300 m where the real taxiway distance is 36 m): the pad
+            # PROJECTS into the intersection of [v ± 1 %·d] over every
+            # perpendicular chord from a taxi centerline that reaches
+            # the pad.  Infeasible window (two serving taxiways more
+            # than 1 % apart) → least-violation midpoint; the
+            # grade-grouping below may then slope the complex.
+            win4 = None
+            for m in grp:
+                w4 = chord_win.get(m)
+                if w4 is None:
+                    continue
+                win4 = (w4 if win4 is None else
+                        (max(win4[0], w4[0]), min(win4[1], w4[1]),
+                         win4[2] + w4[2]))
+            if win4 is not None:
+                lo_w4, hi_w4, n_ch4 = win4
+                old_t4 = target
+                if lo_w4 <= hi_w4:
+                    target = min(max(target, lo_w4), hi_w4)
+                else:
+                    target = 0.5 * (lo_w4 + hi_w4)
+                # zero-violations vs the chord LAW resolves AFTER the
+                # re-projection (post-settle feedback below): predictive
+                # clamps from the band ceilings are unusable — HECA's
+                # hi[] near T1 reads 99.5 where the surface lawfully
+                # rose to 102.7 (the under-measured-entry family), while
+                # SPJC's pinned apron genuinely cannot follow.
                 if _tdbg:
-                    print(f"[term] leaf grp({len(grp)}) target={target:.2f} "
-                          f"plane samples={len(los9)} "
-                          f"median={sorted(los9)[len(los9)//2]:.2f}"
-                          if los9 else
-                          f"[term] leaf grp({len(grp)}) target={target:.2f} "
-                          f"plane samples=0")
-                if len(los9) >= 8:
-                    los9.sort()
-                    lo_b9 = los9[len(los9) // 2]
-                    if target < lo_b9:
-                        if _tdbg:
-                            print(f"[term] leaf 1%-plane bound "
-                                  f"{target:.2f} -> {lo_b9:.2f}")
-                        target = lo_b9
+                    print(f"[term] leaf grp({len(grp)}) chord window "
+                          f"[{lo_w4:.2f},{hi_w4:.2f}] ({n_ch4} chords) "
+                          f"target {old_t4:.2f} -> {target:.2f}")
+            elif _tdbg:
+                print(f"[term] leaf grp({len(grp)}) no chord window "
+                      f"(target {target:.2f})")
             cur = cv[len(cv) // 2]
-            leaf_entries.append((grp, cur, target))
+            # law_pinned: a FEASIBLE chord window is the user's
+            # perpendicular-chord LAW — the pad does not negotiate in
+            # the grade-grouping below (the row apron between law-pinned
+            # pads already carries their slope: the serving taxiways
+            # do).
+            law4 = win4 is not None and win4[0] <= win4[1]
+            leaf_entries.append((grp, cur, target, law4,
+                                 win4 is not None))
 
         # ── TERMINAL GRADE-GROUPING (user 2026-06-12) ────────────────
         # Two flat pads leveled independently can land further apart
@@ -2106,9 +2213,11 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
 
         if nodes is not None and len(leaf_entries) > 1:
             pts_e = [[nodes[m] for m in grp if m < n]
-                     for (grp, _c, _t) in leaf_entries]
+                     for (grp, _c, _t, _p, _w) in leaf_entries]
             for a in range(len(leaf_entries)):
                 for b in range(a + 1, len(leaf_entries)):
+                    if leaf_entries[a][3] or leaf_entries[b][3]:
+                        continue        # law-pinned: no negotiation
                     ta = leaf_entries[a][2]
                     tb = leaf_entries[b][2]
                     if not pts_e[a] or not pts_e[b]:
@@ -2131,8 +2240,8 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                 if spread <= 2.0 * slack_pad:
                     common = 0.5 * (max(ts) + min(ts))
                     for k9 in members:
-                        grp, cur, _t = leaf_entries[k9]
-                        leaf_entries[k9] = (grp, cur, common)
+                        grp, cur, _t, _p9, _w9 = leaf_entries[k9]
+                        leaf_entries[k9] = (grp, cur, common, _p9, _w9)
                     if _tdbg:
                         print(f"[term] grade-group {len(members)} pads "
                               f"spread {spread:.2f} -> common "
@@ -2140,20 +2249,39 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                 else:
                     # real spread — pads slope (smooth shared edges)
                     for k9 in members:
-                        grp, _c, _t = leaf_entries[k9]
+                        grp, _c, _t, _p9, _w9 = leaf_entries[k9]
                         slope_pads.update(m for m in grp if m < n)
-                        leaf_entries[k9] = (grp, None, None)
+                        leaf_entries[k9] = (grp, None, None, _p9, _w9)
                     if _tdbg:
                         print(f"[term] grade-group {len(members)} pads "
                               f"spread {spread:.2f} > "
                               f"{2*slack_pad:.2f} — sloping fallback")
-        for grp, cur, target in leaf_entries:
+        for grp, cur, target, _law, _win_used in leaf_entries:
             if cur is None:
                 continue
             move = target - cur
             if abs(move) < 0.02:
                 continue
             move = max(-_LEAF_MAX_MOVE_M, min(_LEAF_MAX_MOVE_M, move))
+            if _win_used and move > 0.02 and nodes is not None:
+                # register BEFORE mutating: pre_v must be the true
+                # pre-lift violation count of the pad's apron complex
+                nbr_set_f = {b for m in grp if m < n
+                             for b in nbr_l.get(m, ()) if b < n}
+                apron_edges_f = []
+                for sc8 in shape_constraints:
+                    if sc8["role"] != ROLE_APRON:
+                        continue
+                    if not (set(sc8["nodes"]) & nbr_set_f):
+                        continue
+                    apron_edges_f.extend(sc8["edges"])
+                if apron_edges_f:
+                    pre_v = sum(
+                        1 for (i8, j8, c8) in apron_edges_f
+                        if c8 > 0 and abs(elev[i8] - elev[j8]) - c8
+                        > 0.02)
+                    _chord_lifted.append(
+                        (tuple(grp), cur, apron_edges_f, pre_v))
             for m in grp:
                 if m < n:
                     elev[m] = cur + move
@@ -2202,6 +2330,39 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
             elev, all_edges, is_hard, lo, hi, coupling,
             held_extra=held_all,
             max_sweeps=400, tol=_SPREAD_COMPLY_TOL_M)
+        # POST-SETTLE FEEDBACK for chord-lifted pads (the perpendicular
+        # -chord LAW, user 2026-06-12): zero violations outrank the
+        # preference, and only the SETTLED surface knows whether the
+        # apron could follow — a route-PINNED neighbour stays put
+        # (SPJC: 8.1 % pair after a +2.8 m lift) while an
+        # under-measured-band neighbour rises fine (HECA T1 → 102.7,
+        # clean).  Re-clamp each lifted pad to min(settled neighbour +
+        # cap·d) and re-project once.
+        if _chord_lifted:
+            redo_f = False
+            for (grp_f, cur_f, apron_edges_f, pre_v_f) in _chord_lifted:
+                post_v = sum(
+                    1 for (i8, j8, c8) in apron_edges_f
+                    if c8 > 0 and abs(elev[i8] - elev[j8]) - c8 > 0.02)
+                if post_v > pre_v_f:
+                    # MEASURED ACCEPTANCE: the pad's apron complex
+                    # gained within-violations — the surface could not
+                    # legally follow the chord lift (route/band-pinned
+                    # verts), and zero violations outrank the
+                    # preference.  REVERT this pad; the apron-follows
+                    # re-solve (STATUS) is the forward fix.
+                    for m in grp_f:
+                        if m < n:
+                            elev[m] = cur_f
+                    redo_f = True
+                    if _tdbg:
+                        print(f"[term] chord lift REVERTED "
+                              f"(apron viol {pre_v_f} -> {post_v})")
+            if redo_f:
+                _project_within_bands(
+                    elev, all_edges, is_hard, lo, hi, coupling,
+                    held_extra=held_all,
+                    max_sweeps=400, tol=_SPREAD_COMPLY_TOL_M)
     if NETWORK_PROFILE_MODEL:
         # FINAL strict pair-law closure (the validator's own metric): a
         # band-pinned placement or a CORRIDOR WRITE carries the
