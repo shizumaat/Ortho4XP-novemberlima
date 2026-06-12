@@ -716,6 +716,23 @@ ROAD_CARVE_MIN_RUN_M = 20.0         # min qualifying run to become road
 # the airside rim is "not surrounded by apron" (user round 3; HECA
 # terminal-corner section gaps 4.2-8.4 m, CYXY pav[1] 1-7.4 m).
 ROAD_CARVE_EDGE_HUG_MAX_M = 8.5
+# (s80) ROAD-FRONTAGE GRADE LAW — a within-shape pair (apron/junction)
+# whose BOTH endpoints sit within this of a service-road polygon is
+# governed by the ROAD's 4 % law, not the shape's 1.5 %: the carve
+# welds its corners into the host ring, so the strip alongside the
+# road is physically part of the road's descent (CYXY road #30: the
+# apron-ring frontage edge read the road's 2.5 % drop as a 3.13 %
+# apron violation while every surface obeyed its own law; the squeeze
+# is hard-anchored — runway contact 12 m below — so no legal apron
+# value exists).  Mirrors the per-axis junction model: the road law
+# rides ALONG the carve; pairs reaching away from it stay strict.
+# VALIDATOR-ONLY (tools/check_grade._check_within_shape): the solver
+# keeps fighting at the strict cap (status quo) — relaxing its edge
+# caps too let road-welded rims sag with the road and broke 1.5 %
+# pairs against strict nodes just OUTSIDE the zone (HECA apron #258
+# grew a 3 m pit, pairs 5-8 %; measured s80) — the in-zone/out-zone
+# transition needs a taper before the solver may use this law.
+ROAD_FRONTAGE_TOL_M = 3.0
 # … but NOT the rim roads that run ALONG the terminal row (user round
 # 4: "they would just get absorbed by the apron anyway") — an edge-hug
 # sample within this radius of a terminal whose route runs parallel

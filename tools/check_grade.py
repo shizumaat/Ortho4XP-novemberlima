@@ -68,6 +68,8 @@ try:
         ROUTE_FIELD_MODEL,
         ROUTE_FIELD_LOCAL_WINDOW_M,
         ROUTE_NOISE_FRAC,
+        ROAD_FRONTAGE_TOL_M,
+        SERVICE_ROAD_MAX_GRADE,
     )
 except Exception:
     ROLE_GRADE_LIMITS: Dict[str, Optional[float]] = {}
@@ -78,6 +80,8 @@ except Exception:
     ROUTE_FIELD_MODEL = False
     ROUTE_FIELD_LOCAL_WINDOW_M = 80.0
     ROUTE_NOISE_FRAC = 0.04
+    ROAD_FRONTAGE_TOL_M = 3.0
+    SERVICE_ROAD_MAX_GRADE = 0.04
 
 
 # ── OSM parsing ─────────────────────────────────────────────────
@@ -698,6 +702,32 @@ def _check_within_shape(ways: List[Way],
     """
     seam_nids = seam_nids or set()
     out: List[Violation] = []
+    # ROAD-FRONTAGE zone (config.ROAD_FRONTAGE_TOL_M): an apron/junction
+    # pair with BOTH endpoints welded to a service-road carve carries the
+    # ROAD's 4 % law, not the shape's 1.5 % — the carve corners sit ON
+    # the host ring, so the host's law would otherwise regulate the
+    # road's own descent (CYXY road #30: the apron-ring frontage edge
+    # read the road's drop as a 3.13 % apron violation; the squeeze is
+    # hard-anchored, so no legal apron value exists).  VALIDATOR-ONLY:
+    # the solver still solves at the strict cap (see config note).
+    road_zone = None
+    try:
+        from shapely.geometry import Point as _FzPt, Polygon as _FzPoly
+        from shapely.ops import unary_union as _fz_union
+        from shapely.prepared import prep as _fz_prep
+        _fz_polys = []
+        for w in ways:
+            if w.tags.get("role") not in _ROAD_FAMILY_ROLES:
+                continue
+            ring = [ll_to_m(*nodes[nid]) for nid in w.nids
+                    if nid in nodes]
+            if len(ring) >= 3:
+                _fz_polys.append(_FzPoly(ring).buffer(0))
+        if _fz_polys:
+            road_zone = _fz_prep(
+                _fz_union(_fz_polys).buffer(ROAD_FRONTAGE_TOL_M))
+    except Exception:
+        road_zone = None
     for w in ways:
         grade_cap = _role_grade_limit(w, max_grade)
         if grade_cap is None:
@@ -797,6 +827,17 @@ def _check_within_shape(ways: List[Way],
             else:
                 allowance = grade_cap * d + ELEV_ROUNDING_NOISE_M
                 grade_cap_pair = grade_cap
+            # ROAD-FRONTAGE law (see road_zone above): both endpoints
+            # welded to a road carve -> the road's cap governs.
+            if (road_zone is not None
+                    and SERVICE_ROAD_MAX_GRADE > grade_cap_pair
+                    and de > allowance
+                    and road_zone.contains(_FzPt((xi, yi)))
+                    and road_zone.contains(_FzPt((xj, yj)))):
+                grade_cap_pair = SERVICE_ROAD_MAX_GRADE
+                allowance = max(
+                    allowance,
+                    SERVICE_ROAD_MAX_GRADE * d + ELEV_ROUNDING_NOISE_M)
             if de <= allowance:
                 continue
             grade = de / d
