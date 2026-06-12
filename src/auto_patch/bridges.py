@@ -197,9 +197,32 @@ def _emit_tunnel_portals(
     1 cap + 2 arm walls + a ramp chain).
     """
     from .pipeline import _load_osm_airports, _load_osm_big_roads
-    # Load big-roads OSM cache for this tile.
+    # Load big-roads OSM cache for this tile — AND small_roads (user
+    # 2026-06-12, KPHL): the big/small highway split puts tertiary /
+    # residential / service ways in small_roads, so a minor-road
+    # tunnel bore (KPHL's road+rail tunnel under the RWY 26 hill:
+    # highway=tertiary, 151 m past the threshold) was invisible to
+    # this emitter even though its type is in HW_TUNNEL_TYPES.
     nodes_r, ways_r = _load_osm_big_roads(
         layout.anchor[0], layout.anchor[1])
+    _big_way_ids = {w[0] for w in ways_r}
+    from .osm_load import _load_osm_small_roads as _losr
+    nodes_s, ways_s = _losr(layout.anchor[0], layout.anchor[1])
+    if nodes_s:
+        # ⚠ The road caches use SYNTHETIC per-layer negative ids:
+        # ``r-13-078:-202`` in big_roads and in small_roads are
+        # DIFFERENT real-world features.  A raw dict merge overwrote
+        # big-road node coordinates with unrelated small-road points
+        # and displaced whole tunnel ways by kilometres (SPJC's 4
+        # user-approved tunnels measured 5-12 km from the boundary
+        # and vanished).  Namespace every small-cache id instead.
+        merged_n = dict(nodes_r)
+        for nid, ll in nodes_s.items():
+            merged_n["S|" + nid] = ll
+        nodes_r = merged_n
+        ways_r = list(ways_r) + [
+            ("S|" + wid, ["S|" + n for n in nrefs], tags)
+            for wid, nrefs, tags in ways_s]
     if not ways_r:
         return 0
     # Project nodes to meter space.
@@ -217,11 +240,39 @@ def _emit_tunnel_portals(
     nodes_m: dict[str, tuple[float, float]] = {}
     for nid, (lat, lon) in nodes_r.items():
         nodes_m[nid] = _to_m(lon, lat)
+    # Airside pavement union for the per-portal gate (see the
+    # AIRSIDE / DOUBLE-EMIT GATE comment below).
+    _AIRSIDE_GATE_ROLES = (
+        "runway", "runway_crossing", "primary_parallel",
+        "secondary_parallel", "stub", "cross_connector", "junction",
+        "apron", "terminal", "groundside_pavement", "service_road",
+        "service_junction")
+    try:
+        from shapely.ops import unary_union as _uu8
+        _airside_gate_u = _uu8(
+            [s.polygon for s in layout.shapes
+             if s.polygon is not None and not s.polygon.is_empty
+             and s.role in _AIRSIDE_GATE_ROLES])
+        if _airside_gate_u.is_empty:
+            _airside_gate_u = None
+    except _GEOM_EXC:
+        _airside_gate_u = None
     HW_TUNNEL_TYPES = {
         "motorway", "trunk", "primary", "secondary",
         "tertiary", "motorway_link", "trunk_link",
         "primary_link", "residential", "service",
     }
+    # Rail tunnels qualify too (user 2026-06-12, KPHL: a combined
+    # road+rail tunnel passes under the hill past the RWY 26
+    # threshold — the rail bore is railway=rail tunnel=yes and has
+    # no highway tag at all, so the highway-only filter dropped it).
+    RAIL_TUNNEL_TYPES = {
+        "rail", "light_rail", "subway", "narrow_gauge", "tram",
+    }
+
+    def _tunnelable(tags9: dict) -> bool:
+        return (tags9.get("highway") in HW_TUNNEL_TYPES
+                or tags9.get("railway") in RAIL_TUNNEL_TYPES)
     TUNNEL_VALUES = {"yes", "building_passage"}
     # Build node-to-way and way-by-id indices for surface-road walking.
     way_by_id: dict[str, tuple[list[str], dict[str, str]]] = {}
@@ -353,7 +404,7 @@ def _emit_tunnel_portals(
             o_nrefs, o_tags = way_by_id[other_wid]
             if o_tags.get("tunnel") in TUNNEL_VALUES:
                 continue
-            if o_tags.get("highway") not in HW_TUNNEL_TYPES:
+            if not _tunnelable(o_tags):
                 continue
             refs = _orient_away(o_nrefs, portal_nid)
             if refs is None or len(refs) < 2 \
@@ -496,12 +547,22 @@ def _emit_tunnel_portals(
     portal_data: list[tuple[str, str, list[tuple[float, float]],
                               str, float, float]] = []
     excluded = excluded_way_ids or set()
+    _emit_start_idx = len(layout.shapes)
+
     for tw_id, t_nrefs, t_tags in ways_r:
         if t_tags.get("tunnel") not in TUNNEL_VALUES:
             continue
         hw = t_tags.get("highway")
-        if hw not in HW_TUNNEL_TYPES:
+        if not _tunnelable(t_tags):
             continue
+        # OLD candidates (big_roads + highway type — the only ways the
+        # emitter saw before 2026-06-12) keep the original behaviour
+        # verbatim: no new gates (SPJC's user-approved tunnels emit
+        # bit-identically).  NEW candidates (small_roads bores, rail)
+        # carry the gates below — they widened the input enough to
+        # surface the dead-boundary-gate strays at KPHL.
+        _is_new_cand = not (tw_id in _big_way_ids
+                            and hw in HW_TUNNEL_TYPES)
         if len(t_nrefs) < 2:
             continue
         # Skip OSM way IDs already handled by the through-
@@ -513,6 +574,22 @@ def _emit_tunnel_portals(
             portal_nid = t_nrefs[portal_idx]
             if portal_nid not in nodes_m:
                 continue
+            # Airport-proximity gate against the AIRSIDE PAVEMENT
+            # union (user 2026-06-12, KPHL): the boundary_line gate
+            # below is DEAD in production — the boundary ribbon is
+            # emitted AFTER this pass, so ROLE_BOUNDARY is empty and
+            # far portals sailed through (caps at 19-62 km once
+            # small_roads/rail widened the candidate set; the latent
+            # bug never fired from big_roads alone).  The pavement
+            # union exists at this point and scales with the airport.
+            if _is_new_cand and _airside_gate_u is not None:
+                _ppx, _ppy = nodes_m[portal_nid]
+                try:
+                    if _airside_gate_u.distance(
+                            Point(_ppx, _ppy)) > max_boundary_dist_m:
+                        continue
+                except _GEOM_EXC:
+                    pass
             if boundary_line is not None:
                 px, py = nodes_m[portal_nid]
                 try:
@@ -622,7 +699,7 @@ def _emit_tunnel_portals(
                 far_dem = elev_low + max_drop
             portal_data.append(
                 (portal_nid, tw_id, walk, hw,
-                 float(apt_elev), float(far_dem)))
+                 float(apt_elev), float(far_dem), _is_new_cand))
     if not portal_data:
         return 0
     # Cluster portals by node-coord proximity (divided highways
@@ -668,7 +745,9 @@ def _emit_tunnel_portals(
         # location.  Use the first portal's walk as the canonical
         # arm path; combine widths for divided highways.
         head = portal_data[cl[0]]
-        portal_nid, _wid_unused, walk_pts, hw_type, apt_elev, far_dem = head
+        (portal_nid, _wid_unused, walk_pts, hw_type, apt_elev,
+         far_dem, _head_new) = head
+        _cl_all_new = all(portal_data[k][6] for k in cl)
         if len(walk_pts) < 2:
             continue
         # Per-OSM-highway-type carriageway width (user 2026-05-03):
@@ -763,6 +842,27 @@ def _emit_tunnel_portals(
             except _GEOM_EXC:
                 return None
             return None
+        # AIRSIDE / DOUBLE-EMIT GATE (user 2026-06-12, KPHL): with
+        # small_roads + railways feeding this emitter, service-tunnel
+        # bores UNDER the apron/terminal complex now qualify — but a
+        # tunnel under solid pavement has no visible ramp to model
+        # (the surface above it is the graded apron).  The
+        # discriminator is the RAMP, not the portal: a legitimate
+        # portal's ramp leads AWAY from pavement (SPJC's runway
+        # tunnels: portals at the pavement FACE, ramps off-airport),
+        # a buried bore's ramp stays ON it (KPHL terminal-area
+        # service tunnels).  Skip when more than half the ramp walk
+        # runs over airside pavement; also skip a cap landing inside
+        # an already-emitted portal's footprint (road and rail bores
+        # of one tunnel cluster emitting twice).
+        try:
+            if _cl_all_new and exclusion_zones:
+                from shapely.ops import unary_union as _uu9
+                if _uu9(exclusion_zones).buffer(2.0).contains(
+                        Point(walk_pts[0])):
+                    continue
+        except _GEOM_EXC:
+            pass
         # 1) Cap wall AT the portal cluster's centroid, perpendicular
         #    to the first segment.  The cap's centre line passes
         #    through the cluster centroid (so divided-highway
@@ -1085,6 +1185,39 @@ def _emit_tunnel_portals(
                                   else None),
                         node_altitudes=resampled))
         layout.shapes = kept_shapes
+    # PAVEMENT-OVERLAP CLIP (user 2026-06-12, KPHL): tunnel structure
+    # is emitted for REAL under-pavement service roads too (the
+    # small_roads ``building_passage`` ways threading the terminal
+    # complex) — but a cap/wall/ramp piece may not overlap any
+    # pavement shape; the covered stretch has no visible structure.
+    # Pieces are short, so dropping the overlapping ones lets the
+    # trench dive under a taxiway and re-emerge on the far side.
+    if _airside_gate_u is not None:
+        _kept9 = []
+        _n_clip = 0
+        for _k9, s9 in enumerate(layout.shapes):
+            if (_k9 >= _emit_start_idx
+                    and getattr(s9, "ref", "") in
+                    ("tunnel_cap", "tunnel_wall", "tunnel_ramp")
+                    and s9.polygon is not None
+                    and not s9.polygon.is_empty):
+                try:
+                    if s9.polygon.intersection(
+                            _airside_gate_u).area > 0.25:
+                        _n_clip += 1
+                        continue
+                except _GEOM_EXC:
+                    pass
+            _kept9.append(s9)
+        if _n_clip:
+            layout.shapes = _kept9
+            try:
+                UI.vprint(1,
+                    f"  [pav-builder] dropped {_n_clip} tunnel "
+                    f"piece(s) under pavement (covered stretch — no "
+                    f"visible structure).")
+            except _GEOM_EXC:
+                pass
     return n_emitted
 
 
