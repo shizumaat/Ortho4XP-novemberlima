@@ -200,12 +200,20 @@ taxiway A2 = absorbed, user-consistent), SVC-vs-SVC clips the loser
 (out-and-back routes); SVC rect area floor 100 m²; road-only junction
 re-role → `service_junction`.  `O4_SVC_DEBUG=1` traces builder drops.
 
-## 7. Status & next steps
+## 7. Status
 
-Geometry SHIPPED to user review (rounds 1-4); gate `SERVICE_ROAD_CARVE`
-stays **default OFF** until the §3 Step-C elevation treatment lands —
-measured: CYXY gate-on full build = 18 within-violations, EXACTLY the
-across-grass family (apron #67/#69) the s79 item-2 investigation
-root-caused ⇒ build the interior-path entry fix FIRST, then field
-edges at 4 % eff_cap, then default ON.  HECA gate-on full build
-already IMPROVES (within 52 vs 68 baseline).
+Geometry (rounds 1-4) @f40835c; interior-path entries @b1e36c5;
+**Steps C/D @b391e27**: field 4 % law (SVC edge-length scaling),
+designed-wall exemption (road-family pairs in check_grade — the
+exactly-one-groundside test missed road↔groundside and fired 151
+false steps at the CYXY ramp), groundside separation from roads,
+ROAD-BLIND apron corridors (corridor-seeding an apron from a
+descending road split HECA #266 into two write families), wingtip/
+RESA verified road-free.
+
+Measured: **CYXY roads-on 0/0/0**; HECA roads-on 57/0/0 vs 51
+roads-off — the +6 = sub-metre pairs on the re-cut #198-area apron
+#271; invariants held; suite 325p/2f.  Gate still default OFF —
+remaining items are USER VERDICTS, not code: (a) in-sim look at the
+road cliffs/walls (#198, the CYXY ramp), (b) the #271 residual,
+(c) then flip the default ON.
