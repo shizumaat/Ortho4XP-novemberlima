@@ -878,11 +878,43 @@ def _check_route_bands(vertices: List[Vertex],
     for (lat, lon, fv) in route_ctx.get("field_pts_ll", []) or []:
         x9, y9 = ll_to_m(lat, lon)
         field_pts.append((x9, y9, fv))
+    # INTERIOR-PATH entry measure (docs/interior_path_entries.md — "no
+    # grade checks across grass"): the validator builds the SAME
+    # airside union the solver used (same shared module + role set) so
+    # entry gaps charge identical in-pavement paths on both sides.
+    entry_dist = None
+    try:
+        from auto_patch.config import INTERIOR_PATH_ENTRIES
+        if INTERIOR_PATH_ENTRIES:
+            from shapely.geometry import Polygon as _Poly
+            from auto_patch.interior_path import (
+                AIRSIDE_MEASURE_ROLES, measure_from_polys)
+            _air_polys = []
+            for w in ways:
+                if w.tags.get("role") not in AIRSIDE_MEASURE_ROLES:
+                    continue
+                ring = w.nids
+                if len(ring) > 1 and ring[0] == ring[-1]:
+                    ring = ring[:-1]
+                if len(ring) < 3 or any(nid not in nodes
+                                        for nid in ring):
+                    continue
+                try:
+                    _p = _Poly([ll_to_m(*nodes[nid]) for nid in ring])
+                    if _p.is_valid and not _p.is_empty:
+                        _air_polys.append(_p)
+                except Exception:
+                    continue
+            _m = measure_from_polys(_air_polys)
+            entry_dist = _m.distance if _m is not None else None
+    except Exception:
+        entry_dist = None
     rbvs = route_band_violations(
         centerlines_xy, runway_rings, check_pts, max_grade,
         noise_frac=ROUTE_NOISE_FRAC,
         rounding_noise_m=ELEV_ROUNDING_NOISE_M,
-        field_pts=field_pts)
+        field_pts=field_pts,
+        entry_dist=entry_dist)
     capm = max_grade * (1.0 + ROUTE_NOISE_FRAC)
     out: List[Violation] = []
     for rb in rbvs:

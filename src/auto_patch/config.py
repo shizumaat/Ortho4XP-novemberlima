@@ -606,6 +606,56 @@ HOLE_ROUTER_ENABLED = _os.environ.get("O4_HOLE_ROUTER", "1") == "1"
 # planner for A/B comparison.  Only consulted when HOLE_ROUTER_ENABLED.
 HOLE_ROUTER_V2 = _os.environ.get("O4_HOLE_ROUTER_V2", "1") == "1"
 
+# (s79) INTERIOR-PATH ENTRIES — docs/interior_path_entries.md.
+# ★ USER RULING 2026-06-11: no shape may ever check grade ACROSS GRASS.
+# Every off-graph entry into the centerline route graph (route-band law
+# anchors/check vertices, the network-profile field's law-entry gap
+# edges and band anchors, _runway_reach_bands gap charging) charges the
+# IN-PAVEMENT path length instead of the straight chord; no interior
+# path ⇒ no coupling.  Solver, field and validator share ONE measure
+# (auto_patch/interior_path.py) — partial application is the measured
+# failure mode (s78p5 revert; s79 field-only experiment = 50 viol).
+# OFF restores the straight-gap behaviour byte-identically.
+INTERIOR_PATH_ENTRIES = _os.environ.get("O4_INTERIOR_PATH", "1") == "1"
+
+# (s79) ON-PAVEMENT service-road carve — docs/service_road_carve.md.
+# ★ USER RULINGS 2026-06-11: roads = apt.dat 1206 routes ONLY (no
+# polygon/OSM detection); only pavement narrower than the cross-section
+# cap is classified; nothing near a terminal; roads WORK LIKE TAXIWAYS
+# — qualifying runs join the centerline set as ``SVC*`` refs and ride
+# the single rect → junction → absorption decomposition with role
+# ``service_road`` (4 %).  Independent of ``ENABLE_SERVICE_ROADS`` (the
+# deferred OSM small-road / off-pavement builder).  Default OFF during
+# bring-up; flip per-build via ``O4_SERVICE_ROAD_CARVE=1``.
+SERVICE_ROAD_CARVE = _os.environ.get("O4_SERVICE_ROAD_CARVE", "0") == "1"
+# Max perpendicular pavement cross-section for ROAD classification.
+# User rule "< 10 m"; measured at the HECA #198 switchback legs:
+# 8.2-9.4 m and 12.2 m (the fused DSF pavement includes shoulder) →
+# 13 m so both legs qualify (pending the user's KML verdict).
+ROAD_CARVE_MAX_WIDTH_M = 13.0
+# Terminal guard (refined, user 2026-06-11 round 3): drop a road sample
+# near a terminal only when the route runs ALONGSIDE it (locally
+# parallel within the angle below) — a road passing a terminal CORNER
+# perpendicular/diagonally is a real road (HECA terminal4 → junction
+# #168 section).  Terminal curbside pavement is already subtracted from
+# pav_union by the groundside pass, so this is a second line.
+ROAD_CARVE_TERMINAL_CLEAR_M = 30.0
+ROAD_CARVE_TERMINAL_PARA_DEG = 35.0
+ROAD_CARVE_SAMPLE_M = 6.0           # sampling step along 1206 routes
+ROAD_CARVE_MIN_RUN_M = 20.0         # min qualifying run to become road
+# Mode C (edge-hugging): a sample within this of the pavement BOUNDARY
+# qualifies even when the cross-section is blended-wide — a road along
+# the airside rim is "not surrounded by apron" (user round 3; HECA
+# terminal-corner section gaps 4.2-8.4 m, CYXY pav[1] 1-7.4 m).
+ROAD_CARVE_EDGE_HUG_MAX_M = 8.5
+# … but NOT the rim roads that run ALONG the terminal row (user round
+# 4: "they would just get absorbed by the apron anyway") — an edge-hug
+# sample within this radius of a terminal whose route runs parallel
+# (≤ ROAD_CARVE_TERMINAL_PARA_DEG) to the nearest terminal edge is
+# dropped.  Perpendicular corner-passers (the HECA terminal4 →
+# junction #168 section, 70°) keep.  Modes A/B are unaffected.
+ROAD_CARVE_TERMINAL_RIM_M = 300.0
+
 # (session 63) Cut long taxi rects AND runway segments at interior terrain
 # extrema (``split_long_rects_along_terrain`` + the runway peak/valley seams in
 # ``pavement/runway_segments.py``).  DEFAULT OFF (user 2026-06-05): the extrema

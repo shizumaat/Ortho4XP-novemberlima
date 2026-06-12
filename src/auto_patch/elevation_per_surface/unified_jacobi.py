@@ -365,6 +365,14 @@ def solve(layout, icao: str,
     # a genuine multi-runway squeeze where no outward move can satisfy all
     # runway connections (SPJC) — see pipeline / runway_redistribute.
     relief_hard = [base_hard[i] or tiers[i] == 0 for i in range(n)]
+    # Built UNCONDITIONALLY: the post-relief passes (final co-level
+    # reconcile at function level, writeback-adjacent users) need the
+    # constraint set even when EVERY node is relief-hard and the whole
+    # relief block below is skipped — an airport with only runway/seam
+    # nodes (no soft taxi/apron pavement) crashed with an
+    # UnboundLocalError here (user production tile, 2026-06-12).
+    shape_constraints = _build_shape_constraints(
+        layout, bucket_to_idx)
     if not all(relief_hard):
         relief_eg = dict(taxi_eg)
         relief_eg.update(apron_eg)
@@ -372,8 +380,6 @@ def solve(layout, icao: str,
         relief_el = dict(taxi_el)
         relief_el.update(apron_el)
         relief_el.update(term_el)
-        shape_constraints = _build_shape_constraints(
-            layout, bucket_to_idx)
 
         _step_dbg = _os.environ.get("O4_STEP_DEBUG") == "1"
         _trace_n = [int(t) for t in
@@ -1244,9 +1250,40 @@ def _grade_bands(n, elev, is_hard, edges):
 _WITHIN_ENFORCE_MAX_SWEEPS = 2000
 
 
+def _interior_entry_dist(layout):
+    """The shared INTERIOR-PATH entry measure (gate
+    ``INTERIOR_PATH_ENTRIES``, docs/interior_path_entries.md): returns
+    ``measure.distance`` or ``None`` (gate off / no airside).  Built
+    ONCE per solve from the layout's airside union and cached on the
+    layout — the field, the reach bands and (via the same module) the
+    validator all share it, so law-graph parity holds by construction
+    (partial application is the s78p5/s79 measured failure mode)."""
+    from ..config import INTERIOR_PATH_ENTRIES
+    if not INTERIOR_PATH_ENTRIES or layout is None:
+        return None
+    M = getattr(layout, "_interior_measure", None)
+    if M is False:
+        return None
+    if M is None:
+        from ..interior_path import AIRSIDE_MEASURE_ROLES, \
+            measure_from_polys
+        try:
+            M = measure_from_polys(
+                [s.polygon for s in layout.shapes
+                 if s.role in AIRSIDE_MEASURE_ROLES
+                 and s.polygon is not None
+                 and not s.polygon.is_empty])
+        except Exception:
+            M = None
+        layout._interior_measure = M if M is not None else False
+        if M is None:
+            return None
+    return M.distance
+
+
 def _runway_reach_bands(nodes, elev, runway_nodes, seam_nodes, all_edges, cap,
                         layout, extra_anchors=None, noise_frac=0.0,
-                        graph=None, extra_points=None):
+                        graph=None, extra_points=None, entry_dist=None):
     """Per-node feasible band ``[lo, hi]`` from the runway/seam HARD anchors,
     where RUNWAY reachability is measured along the taxiway CENTERLINE route
     (``taxi_routing``) and SEAM reachability via the within-shape geodesic, then
@@ -1313,6 +1350,14 @@ def _runway_reach_bands(nodes, elev, runway_nodes, seam_nodes, all_edges, cap,
             r = near.get((i, plain_only))
             if r is None:
                 r = G.nearest_key(*nodes[i], plain_only=plain_only)
+                if (entry_dist is not None and r[0] is not None
+                        and r[1] > 0.5):
+                    # interior-path entry gap ("no grade checks across
+                    # grass" — docs/interior_path_entries.md); no
+                    # in-pavement path = no band from this entry.
+                    d9 = entry_dist(
+                        (nodes[i][0], nodes[i][1]), G.coord[r[0]])
+                    r = (None, r[1]) if d9 is None else (r[0], d9)
                 near[(i, plain_only)] = r
             return r
 
@@ -1337,6 +1382,10 @@ def _runway_reach_bands(nodes, elev, runway_nodes, seam_nodes, all_edges, cap,
                 key, gap = G.nearest_key(xp, yp, plain_only=True)
                 if key is None:
                     continue
+                if entry_dist is not None and gap > 0.5:
+                    gap = entry_dist((xp, yp), G.coord[key])
+                    if gap is None:
+                        continue
                 v0 = sign * vp + capm * gap
                 if v0 < dist.get(key, POS):
                     dist[key] = v0
@@ -1476,7 +1525,8 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                 TAXI_MAX_GRADE, layout, extra_anchors=extra,
                 noise_frac=_ROUTE_NOISE_FRAC,
                 graph=band_graph,
-                extra_points=field_pts)
+                extra_points=field_pts,
+                entry_dist=_interior_entry_dist(layout))
             # Route bands live on the CENTERLINE graph; make the band field
             # edge-Lipschitz before clamping or adjacent vertices print
             # their graph-entry discontinuities into the surface as
@@ -1498,7 +1548,8 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
         else:
             lo, hi = _runway_reach_bands(
                 nodes, elev, runway_nodes, seam_nodes, all_edges,
-                TAXI_MAX_GRADE, layout)
+                TAXI_MAX_GRADE, layout,
+                entry_dist=_interior_entry_dist(layout))
     else:
         lo, hi = _grade_bands(n, elev, is_hard, all_edges)
     # corridor-touched junctions: the held corridor profile is the route
@@ -4198,7 +4249,8 @@ def _network_field_stations(layout, elev, bucket_to_idx, chain_data,
             TAXIWAY_MAX_GRADE_CHANGE_PER_M, seed_at=seed_at,
             exit_overrides=exit_overrides, fallback_at=fallback_at,
             bridge_test=bridge_test, n_apt_segments=len(apt_segs),
-            extra_band_anchors=bh_pts)
+            extra_band_anchors=bh_pts,
+            entry_dist=_interior_entry_dist(layout))
     except _GEOM_EXC:
         F = None
     layout._network_profile_field = F
@@ -4762,7 +4814,8 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
         # the station route bands exist only to thread the tie layer)
         try:
             reach_lo, reach_hi = _runway_reach_bands(
-                nodes, elev, rwy_nodes, set(), [], TAXI_MAX_GRADE, layout)
+                nodes, elev, rwy_nodes, set(), [], TAXI_MAX_GRADE, layout,
+                entry_dist=_interior_entry_dist(layout))
         except _GEOM_EXC:
             reach_lo = reach_hi = None
 

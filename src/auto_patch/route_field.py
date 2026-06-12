@@ -196,6 +196,7 @@ def route_band_violations(
         noise_frac: float = ROUTE_NOISE_FRAC,
         rounding_noise_m: float = ELEV_ROUNDING_NOISE_M,
         field_pts: Sequence[Tuple[float, float, float]] = (),
+        entry_dist=None,
 ) -> List[RouteBandViolation]:
     """Validate ``check_pts`` (``(x, y, elev)`` in one consistent meter frame)
     against the route bands from the RUNWAY anchors (every ``runway_rings``
@@ -206,9 +207,17 @@ def route_band_violations(
     ``field_pts``: NETWORK PROFILE MODEL field vertices ``(x, y, elev)``
     — additional anchors at the SOLVED centerline-field values (the
     same-field law, design §7 validator simultaneity).  They enter the
-    graph like every non-runway anchor (nearest node + straight gap at
-    cap) and tighten the long-range law toward the field the geometry
-    was graded from."""
+    graph like every non-runway anchor and tighten the long-range law
+    toward the field the geometry was graded from.
+
+    ``entry_dist(pa, pb) -> float | None``: the INTERIOR-PATH entry
+    measure (docs/interior_path_entries.md — ★ no shape may ever check
+    grade ACROSS GRASS, user 2026-06-11).  When provided, every entry
+    gap (anchor AND check vertex) charges the in-pavement path length;
+    ``None`` = no interior path = that anchor/vertex simply does not
+    enter the long-range law (its local within-shape law still
+    applies).  This SUPERSEDES the previous reading that a straight
+    far-vertex gap was "correct behaviour"."""
     adj, coord, aug = _build_graph(centerlines_xy, runway_rings)
     if not coord:
         return []
@@ -225,8 +234,15 @@ def route_band_violations(
     plain_grid = _NearestGrid(plain_coord)
     mult = cap * (1.0 + noise_frac)
 
-    # Anchor seeds: each runway vertex enters the graph at its nearest node
-    # plus the straight endpoint gap at cap.
+    # Anchor seeds: each runway vertex enters the graph at its nearest
+    # node plus the endpoint gap at cap — the gap charged along the
+    # INTERIOR pavement path when ``entry_dist`` is provided.
+    def _entry(x, y, key, gap):
+        if entry_dist is None or key is None or gap <= 0.5:
+            return key, gap
+        d9 = entry_dist((x, y), coord[key])
+        return (None, gap) if d9 is None else (key, d9)
+
     anchors: List[Tuple[Tuple[int, int], float, float,
                         Tuple[float, float]]] = []
     for ring, elevs in runway_rings:
@@ -236,14 +252,14 @@ def route_band_violations(
         for k, (x, y) in enumerate(pts):
             if k >= len(elevs) or elevs[k] is None:
                 continue
-            key, gap = grid.nearest(x, y)
+            key, gap = _entry(x, y, *grid.nearest(x, y))
             if key is None:
                 continue
             anchors.append((key, gap, float(elevs[k]), (x, y)))
     for (x, y, v) in (field_pts or ()):
         if v is None:
             continue
-        key, gap = plain_grid.nearest(x, y)
+        key, gap = _entry(x, y, *plain_grid.nearest(x, y))
         if key is None:
             continue
         anchors.append((key, gap, float(v), (x, y)))
@@ -286,7 +302,7 @@ def route_band_violations(
         ck = (round(x, 1), round(y, 1))
         hit = near_cache.get(ck)
         if hit is None:
-            hit = plain_grid.nearest(x, y)
+            hit = _entry(x, y, *plain_grid.nearest(x, y))
             near_cache[ck] = hit
         key, gap = hit
         if key is None:

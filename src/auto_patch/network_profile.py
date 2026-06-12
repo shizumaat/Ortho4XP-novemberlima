@@ -289,6 +289,9 @@ def build_and_solve(
         bridge_m: float = 60.0,
         n_apt_segments: Optional[int] = None,
         extra_band_anchors: Sequence[Tuple[float, float, float]] = (),
+        entry_dist: Optional[Callable[[Tuple[float, float],
+                                       Tuple[float, float]],
+                                      Optional[float]]] = None,
 ) -> Optional[NetworkProfileField]:
     """Build the centerline graph and solve the field.
 
@@ -323,6 +326,13 @@ def build_and_solve(
     straight gap, exactly as the enforce will later anchor on them.
     Without these the field can legally sit where a seam pin's ceiling
     forbids the surface to follow (a 1 m lo>hi pinch at CYXY #63).
+
+    ``entry_dist(pa, pb) -> float | None``: the INTERIOR-PATH measure
+    (docs/interior_path_entries.md — "no grade checks across grass").
+    When provided, the law-entry gap edges and the anchor band entries
+    charge the in-pavement path length instead of the straight chord;
+    ``None`` = no interior path = no coupling.  ``None`` (the
+    parameter) keeps the legacy straight-gap behaviour (gate off).
     """
     import os as _os
     import time as _time
@@ -702,6 +712,12 @@ def build_and_solve(
         if best is None:
             continue
         d, kk2 = best
+        if entry_dist is not None:
+            # interior-path entries (docs/interior_path_entries.md):
+            # charge the in-pavement path; no path = no coupling.
+            d = entry_dist(coord[kk], coord[kk2])
+            if d is None:
+                continue
         ek = (kk, kk2) if kk < kk2 else (kk2, kk)
         if ek not in edge_w:
             edge_w[ek] = max(d, 0.5)
@@ -925,7 +941,16 @@ def build_and_solve(
             if best is not None and best[0] <= r * 100.0:
                 break
         if best is not None and best[0] <= 200.0:
-            extra_entry.append((best[1], best[0], float(va)))
+            gap9 = best[0]
+            if entry_dist is not None and gap9 > 0.5:
+                # interior-path anchor entry (the s79 measurement:
+                # gating these is FREE at CYXY; the tile-seam case is
+                # the SPLP watch item — docs/interior_path_entries.md
+                # §6)
+                gap9 = entry_dist((xa, ya), F.nodes[best[1]])
+                if gap9 is None:
+                    continue
+            extra_entry.append((best[1], gap9, float(va)))
     band_comps = set(anchors_by_comp)
     band_comps.update(F.comp_of[i] for (i, _g, _v) in extra_entry)
     if band_comps:
