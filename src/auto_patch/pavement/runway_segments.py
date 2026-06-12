@@ -1168,6 +1168,16 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
             # Anchored fractions (thresholds, physical ends) are
             # never replaced; pav_intersections within
             # ``anchor_dedup_m`` of an anchor are dropped.
+            #
+            # PAV-vs-PAV merges use a much tighter 2 m (user
+            # 2026-06-12, KEVY): a fillet's two boundary crossings
+            # are genuinely distinct joins 5-15 m apart — merging
+            # them leaves the junction's runway frontage with no
+            # corner at the fillet tangent, and the 1:1 runway-run
+            # rewrite then straight-chords across the fillet curve
+            # (KEVY station 81: 391 m² of pavement cut off, the
+            # parallel taxiway left "ending in mid-air").  2 m still
+            # consolidates true double-crossing slivers.
             if pav_intersections and phys_dist > 0:
                 pav_pts = []
                 ca = canonical_runway_desig(desig_a)
@@ -1188,7 +1198,9 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
                         break
                 rL2 = dx_phys * dx_phys + dy_phys * dy_phys
                 merge_t = 12.0 / phys_dist
+                sliver_t = 2.0 / phys_dist
                 anchor_dedup_t = 2.0 / phys_dist
+                pav_frac_idx: set = set()
                 for pp_lat, pp_lon in pav_pts:
                     px = (pp_lon - phys_end_a[1]) * cos_lat_v * DEG_TO_M
                     py = (pp_lat - phys_end_a[0]) * DEG_TO_M
@@ -1202,21 +1214,28 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
                     if any(abs(pt - a) < anchor_dedup_t for a in anchored_t):
                         continue
                     # Otherwise, replace the closest non-anchored
-                    # fraction within merge_t (= uniform-seam
-                    # snap), or append if none in range.
+                    # fraction within range — merge_t for uniform /
+                    # profile seams (the seam SNAPS to the join),
+                    # sliver_t when the closest is itself a pavement
+                    # join (two real joins stay distinct) — or append
+                    # if none in range.
                     closest_idx = None
-                    closest_d = merge_t
+                    closest_d = None
                     for i, f in enumerate(fractions):
                         if any(abs(f - a) < 1e-6 for a in anchored_t):
                             continue
                         d = abs(pt - f)
-                        if d < closest_d:
+                        if closest_d is None or d < closest_d:
                             closest_d = d
                             closest_idx = i
-                    if closest_idx is not None:
+                    limit = (sliver_t if closest_idx in pav_frac_idx
+                             else merge_t)
+                    if closest_idx is not None and closest_d < limit:
                         fractions[closest_idx] = pt
+                        pav_frac_idx.add(closest_idx)
                     else:
                         fractions.append(pt)
+                        pav_frac_idx.add(len(fractions) - 1)
                     pav_int_t_vals.append(pt)
                 fractions.sort()
 
