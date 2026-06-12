@@ -935,6 +935,97 @@ def _reinsert_lost_boundary_vertices(merged, sources,
     return merged
 
 
+def _absorb_wedge_rects_into_junctions(
+        layout: "PavementLayout",
+        icao: str = "",
+        max_narrow_end_m: float = 5.0,
+        min_end_ratio: float = 2.0,
+        max_area_m2: float = 1500.0,
+        ) -> int:
+    """Absorb degenerate WEDGE rects into their adjacent junction.
+
+    Clipping can leave a plane rect whose two end edges differ wildly
+    (KPHL stub K5: 16 m -> 3.3 m).  A plane (altitude_high/low) is the
+    wrong surface parameterization for such a quad — the full plane
+    differential lands across the narrow end and emits as a steep edge
+    no re-split can fix (0.2 m over 3.3 m = 6 %).  Per user 2026-06-12
+    the wedge belongs INSIDE the junction it abuts: per-vertex
+    node_altitudes + the junction twist machinery smooth the
+    transition.  Runs pre-solve (geometry only).  Returns the count
+    absorbed.
+    """
+    SLOPED = (ROLE_STUB, ROLE_PRIMARY_PARALLEL,
+              ROLE_SECONDARY_PARALLEL, ROLE_CROSS_CONNECTOR)
+    juncs = [(i, s) for i, s in enumerate(layout.shapes)
+             if s.role == ROLE_JUNCTION
+             and s.polygon is not None and not s.polygon.is_empty]
+    if not juncs:
+        return 0
+    drop: set = set()
+    n_done = 0
+    for ri, rs in enumerate(layout.shapes):
+        if rs.role not in SLOPED:
+            continue
+        p = rs.polygon
+        if p is None or p.is_empty or p.geom_type != "Polygon":
+            continue
+        if p.area > max_area_m2:
+            # A big tapering rect is a real taxiway piece (SPJC 'L':
+            # 3.9 -> 74.5 m ends over 177 m, ~7,000 m²), not a
+            # junction-scale clipping sliver — leave it alone.
+            continue
+        ring = list(p.exterior.coords)
+        if ring and ring[0] == ring[-1]:
+            ring = ring[:-1]
+        if len(ring) != 4:
+            continue
+        e = [math.hypot(ring[(k + 1) % 4][0] - ring[k][0],
+                        ring[(k + 1) % 4][1] - ring[k][1])
+             for k in range(4)]
+        # ends = the opposite-edge pair with the smaller total length
+        if e[0] + e[2] <= e[1] + e[3]:
+            end_a, end_b = e[0], e[2]
+        else:
+            end_a, end_b = e[1], e[3]
+        lo_e, hi_e = min(end_a, end_b), max(end_a, end_b)
+        if lo_e > max_narrow_end_m or hi_e < min_end_ratio * lo_e:
+            continue
+        # host = junction sharing the longest boundary run
+        best = None
+        for ji, js in juncs:
+            try:
+                shared = p.exterior.intersection(
+                    js.polygon.exterior.buffer(0.1)).length
+            except _GEOM_EXC:
+                continue
+            if shared > 1.0 and (best is None or shared > best[0]):
+                best = (shared, ji, js)
+        if best is None:
+            continue
+        _, ji, js = best
+        # _merge_piece_into_apron does the union + node-shared ring +
+        # altitude rebuild (old junction verts keep theirs, new verts
+        # sample the junction's PRE-merge surface — the smooth
+        # transition the ruling asks for).  Pre-solve (no
+        # node_altitudes yet) it is a plain geometry union.
+        from .groundside import _merge_piece_into_apron
+        if not _merge_piece_into_apron(p, js, 1.5):
+            continue
+        drop.add(ri)
+        n_done += 1
+    if drop:
+        layout.shapes = [s for k, s in enumerate(layout.shapes)
+                         if k not in drop]
+        try:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: absorbed {n_done} wedge "
+                f"rect(s) into their adjacent junction (narrow end "
+                f"≤ {max_narrow_end_m:.0f} m).")
+        except _GEOM_EXC:
+            pass
+    return n_done
+
+
 def _merge_sliver_junctions_into_neighbours(
         layout: "PavementLayout",
         icao: str = "",

@@ -2005,6 +2005,7 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                         continue
                 nbr_l.setdefault(p3, set()).add(q3)
         seen_g1: set = set()
+        leaf_entries: list = []          # (grp, cur, target, lo_bound)
         for i in sorted(pad_set):
             grp = coupling[i] if (coupling is not None and i in coupling) \
                 else (i,)
@@ -2048,6 +2049,13 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                 # is one pinned outlier away from re-litigating settled
                 # pad levels (terminal7 ≈ 70 is an explicit ruling; the
                 # first cut raised it 70.3 → 72.9 off ONE neighbour)
+                if _tdbg:
+                    print(f"[term] leaf grp({len(grp)}) target={target:.2f} "
+                          f"plane samples={len(los9)} "
+                          f"median={sorted(los9)[len(los9)//2]:.2f}"
+                          if los9 else
+                          f"[term] leaf grp({len(grp)}) target={target:.2f} "
+                          f"plane samples=0")
                 if len(los9) >= 8:
                     los9.sort()
                     lo_b9 = los9[len(los9) // 2]
@@ -2057,6 +2065,77 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                                   f"{target:.2f} -> {lo_b9:.2f}")
                         target = lo_b9
             cur = cv[len(cv) // 2]
+            leaf_entries.append((grp, cur, target))
+
+        # ── TERMINAL GRADE-GROUPING (user 2026-06-12) ────────────────
+        # Two flat pads leveled independently can land further apart
+        # than the apron BETWEEN them may climb (KPHL terminal23 @2.2 vs
+        # terminal13 @1.1, 44 m apart: the shared apron edge lerps the
+        # 1.1 m at 2.5 %).  Pad PAIRS whose target difference exceeds
+        # cap·gap are grade-coupled into a super-group:
+        #   * feasible (spread fits a common level within the leaf
+        #     window's slack) → ONE flat level for the whole group —
+        #     the preferred outcome;
+        #   * infeasible (real terrain spread) → the pads SLOPE: skip
+        #     the flat re-level and per-pad polish them onto the field
+        #     (the TERMINAL_PADS_SLOPE treatment, scoped to the group)
+        #     so shared edges stay smooth.
+        cap_pad = _role_grade(ROLE_APRON)
+        slack_pad = cap_pad * 40.0       # the leaf rule's own window
+        parent = list(range(len(leaf_entries)))
+
+        def _find(a):
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]
+                a = parent[a]
+            return a
+
+        if nodes is not None and len(leaf_entries) > 1:
+            pts_e = [[nodes[m] for m in grp if m < n]
+                     for (grp, _c, _t) in leaf_entries]
+            for a in range(len(leaf_entries)):
+                for b in range(a + 1, len(leaf_entries)):
+                    ta = leaf_entries[a][2]
+                    tb = leaf_entries[b][2]
+                    if not pts_e[a] or not pts_e[b]:
+                        continue
+                    gap = min(math.hypot(xa - xb, ya - yb)
+                              for (xa, ya) in pts_e[a]
+                              for (xb, yb) in pts_e[b])
+                    if abs(ta - tb) > cap_pad * max(gap, 1.0):
+                        ra, rb = _find(a), _find(b)
+                        if ra != rb:
+                            parent[ra] = rb
+        slope_pads: set = set()
+        groups9: dict = {}
+        for k9 in range(len(leaf_entries)):
+            groups9.setdefault(_find(k9), []).append(k9)
+        for members in groups9.values():
+            if len(members) > 1:
+                ts = [leaf_entries[k][2] for k in members]
+                spread = max(ts) - min(ts)
+                if spread <= 2.0 * slack_pad:
+                    common = 0.5 * (max(ts) + min(ts))
+                    for k9 in members:
+                        grp, cur, _t = leaf_entries[k9]
+                        leaf_entries[k9] = (grp, cur, common)
+                    if _tdbg:
+                        print(f"[term] grade-group {len(members)} pads "
+                              f"spread {spread:.2f} -> common "
+                              f"{common:.2f}")
+                else:
+                    # real spread — pads slope (smooth shared edges)
+                    for k9 in members:
+                        grp, _c, _t = leaf_entries[k9]
+                        slope_pads.update(m for m in grp if m < n)
+                        leaf_entries[k9] = (grp, None, None)
+                    if _tdbg:
+                        print(f"[term] grade-group {len(members)} pads "
+                              f"spread {spread:.2f} > "
+                              f"{2*slack_pad:.2f} — sloping fallback")
+        for grp, cur, target in leaf_entries:
+            if cur is None:
+                continue
             move = target - cur
             if abs(move) < 0.02:
                 continue
@@ -2068,8 +2147,28 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
             if _tdbg:
                 print(f"[term] leaf follow grp({len(grp)}) "
                       f"{cur:.2f} -> {cur + move:.2f} "
-                      f"(apron median {target:.2f}, "
-                      f"{len(nv)} neighbour values)")
+                      f"(target {target:.2f})")
+        # Sloping fallback: pads released to the field via the same
+        # isolated per-pad polish TERMINAL_PADS_SLOPE uses — seams
+        # (shared / hard nodes) held, private nodes cap-projected.
+        if slope_pads:
+            owners9: dict = {}
+            for sc9 in shape_constraints:
+                for m in sc9["nodes"]:
+                    owners9[m] = owners9.get(m, 0) + 1
+            for sc9 in shape_constraints:
+                if sc9["role"] != ROLE_TERMINAL or not sc9["edges"]:
+                    continue
+                if not (set(sc9["nodes"]) & slope_pads):
+                    continue
+                held_t9 = {m for m in sc9["nodes"]
+                           if (m < n and is_hard[m])
+                           or owners9.get(m, 0) > 1}
+                if len(held_t9) == len(sc9["nodes"]):
+                    continue
+                _project_shape(elev, sc9["nodes"], held_t9,
+                               sc9["edges"], False)
+            n_leaf += 1
     # FINAL FAIRING + cap re-projection: iron sub-cap ripples the windowed
     # chord web no longer smooths implicitly (see _fair_surface_ripples),
     # then re-project caps so the smoothing cannot leave a new violation.

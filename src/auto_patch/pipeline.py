@@ -3143,6 +3143,15 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # vertices.  Snap "almost-at-the-corner" junction vertices
         # (perpendicular ≤ 2 m, corner ≤ 10 m) to the new corners.
         _snap_junction_vertices_to_rect_flat_edge_corners(layout)
+        # The split can carve a WEDGE sub-rect whose narrow end cannot
+        # carry a plane differential (KPHL K5: a 16.9 m -> 3.3 m quad;
+        # the solve later puts 0.2 m across the 3.3 m end = 6 %).
+        # Absorb it into the adjacent junction so per-vertex
+        # node_altitudes + twist smooth the transition (user
+        # 2026-06-12).  The finalize-time pass runs BEFORE this split
+        # and cannot see these sub-rects.
+        from .junction_repair import _absorb_wedge_rects_into_junctions
+        _absorb_wedge_rects_into_junctions(layout, icao=icao)
         # Single-pass sloping-edge absorption at end of pipeline
         # (user 2026-05-17).  At this point all post-elevation
         # junction-refinement passes have run, so the FINAL
@@ -3246,6 +3255,14 @@ def build_airport_pavement(icao: str, xplane_root: str,
             # sloping edge interior).
             _split_sloped_rects_at_violations(layout, icao=icao)
             _snap_junction_vertices_to_rect_flat_edge_corners(layout)
+            # The split can carve a WEDGE sub-rect whose narrow end
+            # cannot carry its plane differential (KPHL K5: 0.2 m
+            # across a 3.3 m end).  Absorb it into the adjacent
+            # junction (per-vertex altitudes sample the junction's
+            # surface) — user 2026-06-12.
+            from .junction_repair import (
+                _absorb_wedge_rects_into_junctions as _awj)
+            _awj(layout, icao=icao)
 
         # Rule-2 sloping-edge snap, re-run on the FINAL junction set.
         # ``_absorb_rects_at_junction_perimeters`` extends junction

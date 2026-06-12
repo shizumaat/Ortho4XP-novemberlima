@@ -279,6 +279,12 @@ def compute_elevations_and_repair_geometry(layout: PavementLayout, icao: str, xp
     # adjacent to -10243 = 30 k m²).  Merge them back so
     # JOSM doesn't show two near-duplicate polygons.
     _merge_sliver_junctions_into_neighbours(layout, icao=icao)
+    # Per user 2026-06-12: a wedge rect whose narrow end cannot carry
+    # its plane differential dissolves into the adjacent junction so
+    # per-vertex node_altitudes + twist smooth the transition (KPHL
+    # stub K5: 0.2 m across a 3.3 m end = 6 %).
+    from .junction_repair import _absorb_wedge_rects_into_junctions
+    _absorb_wedge_rects_into_junctions(layout, icao=icao)
     # Per user 2026-05-12: drop thin orphan sliver junctions that
     # form residue along a stub / parallel rect's long edge.  These
     # appear when the apt.dat row-110 pavement boundary curves
