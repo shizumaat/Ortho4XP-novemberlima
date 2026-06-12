@@ -294,6 +294,12 @@ def build_and_solve(
                                       Optional[float]]] = None,
         road_lines: Sequence = (),
         road_cap: float = 0.0,
+        taxi_test: Optional[Callable[[float, float], bool]] = None,
+        apron_test: Optional[Callable[[float, float], bool]] = None,
+        apron_plane_grade: float = 0.0,
+        term_polys: Sequence = (),
+        chord_grade: float = 0.0,
+        chord_reach: float = 0.0,
 ) -> Optional[NetworkProfileField]:
     """Build the centerline graph and solve the field.
 
@@ -1123,6 +1129,282 @@ def build_and_solve(
             dg_per_m = 0.0
 
     _mark("gs-solve")
+    # ── APRON-LANE TAXI-PLANE PASS (apron-follows §2b root fix, user
+    # 2026-06-12: aprons grade to the plane of the taxi corridors that
+    # serve them; pads inherit the apron).  The field is DEM-seeded, so
+    # its APRON-LANE vertices (gate lanes etc.) legally bowl wherever
+    # terrain dips — and everything downstream CERTIFIES that bowl:
+    # the enforce's dense-anchor bands cap the apron at the bowled
+    # lane values, the geodesic corridor state seeds from them, and
+    # the pad inherits the result (HECA T1: gate lanes ~99.9 vs
+    # serving stub B ~102.3 only 36 m away).  Clamp every soft
+    # apron-only vertex into the ``apron_plane_grade`` band around the
+    # TAXI-PAVEMENT plane measured over the field graph (the true lane
+    # routing; road edges carry their 4 % scaling), then re-converge
+    # the cap-only projection.  Taxi-pavement vertices are untouched —
+    # the plane flows ONE WAY, taxi → apron lanes (no back-edge).
+    # ROAD vertices are exempt (the descend-to-terrain ramp class must
+    # not be pulled up to the taxi plane).
+    if (apron_plane_grade > 0.0 and taxi_test is not None
+            and apron_test is not None):
+        INF9 = float("inf")
+        road_pt = None
+        if road_lines:
+            try:
+                from shapely.geometry import Point as _RPt2
+                from shapely.ops import unary_union as _runion2
+                from shapely.prepared import prep as _rprep2
+                _rp9 = _rprep2(_runion2(list(road_lines)).buffer(3.0))
+
+                def road_pt(x9, y9):
+                    return _rp9.contains(_RPt(x9, y9))
+
+                _RPt = _RPt2
+            except Exception:                          # pragma: no cover
+                road_pt = None
+        on_taxi9 = [False] * n
+        ap_only = [False] * n
+        for i in range(n):
+            x9, y9 = F.nodes[i]
+            try:
+                if taxi_test(x9, y9):
+                    on_taxi9[i] = True
+                elif apron_test(x9, y9):
+                    ap_only[i] = (road_pt is None
+                                  or not road_pt(x9, y9))
+            except Exception:                          # pragma: no cover
+                continue
+        # TAXI-pavement field segments (midpoint-classified, real lane
+        # edges only — proximity couplings are not taxi paths).  The
+        # plane is measured to the NEAREST serving segment by PHYSICAL
+        # distance with the connector inside pavement (bridge_test) —
+        # NOT by field-graph route: gate-lane fragments are often
+        # graph-DISCONNECTED from taxi pavement (HECA terminal11's
+        # lanes: taxidist=∞ at 9 m), and a two-source graph band
+        # inverts under squeezes; the nearest-segment band cannot.
+        # This is the user's lateral-serving-taxiway measure (the
+        # perpendicular-chord ruling, applied to the lanes).
+        taxi_segs9 = []
+        for i in range(n):
+            for (j, w9, _c9) in F.adj[i]:
+                if j <= i or (i, j) in F.prox:
+                    continue
+                (xa9, ya9) = F.nodes[i]
+                (xb9, yb9) = F.nodes[j]
+                try:
+                    if taxi_test((xa9 + xb9) / 2.0, (ya9 + yb9) / 2.0):
+                        taxi_segs9.append((i, j))
+                except Exception:                      # pragma: no cover
+                    continue
+        n_pl = 0
+        # vert-to-taxi distance runs LONGER than the pad-to-taxi chord
+        # reach (a gate lane's far vertex sits past the pad); the
+        # 1 %·distance slack keeps far sources weak anyway.
+        reach9 = 400.0
+        if taxi_segs9 and any(ap_only):
+            for i in range(n):
+                if not ap_only[i] or F.hard[i]:
+                    continue
+                x9, y9 = F.nodes[i]
+                cands9 = []
+                for (ia9, ib9) in taxi_segs9:
+                    (xa9, ya9) = F.nodes[ia9]
+                    (xb9, yb9) = F.nodes[ib9]
+                    dx9, dy9 = xb9 - xa9, yb9 - ya9
+                    s29 = dx9 * dx9 + dy9 * dy9
+                    if s29 < 1e-12:
+                        continue
+                    t9 = ((x9 - xa9) * dx9 + (y9 - ya9) * dy9) / s29
+                    t9 = 0.0 if t9 < 0.0 else (1.0 if t9 > 1.0 else t9)
+                    px9 = xa9 + t9 * dx9
+                    py9 = ya9 + t9 * dy9
+                    d9 = math.hypot(x9 - px9, y9 - py9)
+                    if d9 <= reach9:
+                        v9s = (F.elev[ia9]
+                               + t9 * (F.elev[ib9] - F.elev[ia9]))
+                        cands9.append((d9, v9s, px9, py9))
+                cands9.sort()
+                best9 = None
+                for (d9, v9s, px9, py9) in cands9[:6]:
+                    w9 = d9
+                    if bridge_test is not None and d9 > 1.0:
+                        w9 = bridge_test((x9, y9), (px9, py9))
+                        if w9 is None:
+                            continue   # connector crosses grass
+                    best9 = (w9, v9s)
+                    break
+                if best9 is None:
+                    continue
+                w9, v9s = best9
+                # LIFT-ONLY: the bowl is a lane BELOW its serving
+                # plane; a lane lawfully ABOVE the plane (high apron
+                # draining via its rim/groundside) must not be dragged
+                # down to the taxiway — pulling t_hi re-imported low
+                # neighbours' levels two chains away (HECA t1/2/9 fell
+                # 102.6 → 99.3 in the first segment-clamp build).
+                t_lo9 = v9s - apron_plane_grade * w9
+                v9 = max(F.elev[i], t_lo9)
+                v9 = min(max(v9, F.band_lo[i]), F.band_hi[i])
+                if v9 != F.elev[i]:
+                    F.elev[i] = v9
+                    n_pl += 1
+        # ── PAD CHORD-WINDOW FLOOR (★ user ruling 2026-06-12): the
+        # perpendicular-chord law binds each PAD to the plane of the
+        # taxi centerlines whose perpendiculars cross it; the lanes
+        # between pad and taxiway must carry that plane, or every
+        # downstream consumer (the enforce's dense-anchor bands, the
+        # corridor-state seeds, the apron solve) re-certifies the bowl
+        # at 1 %-per-lane-route — lawful by the ROUTE measure, wrong
+        # by the user's LATERAL measure (HECA terminal1: taxiways at
+        # 103 read 360 m away by lane routing vs a [102.78, 103.37]
+        # chord window 200 m laterally).  Window construction mirrors
+        # the validator (_warn_terminal_chord_law): chords sampled
+        # every 12 m along TAXI-classified portions, perpendicular ray
+        # must cross the pad ≥3 m in.  Floor = window_lo − g·d(pad);
+        # LIFT-only, clamped into the runway-anchored bands (the route
+        # LAW still outranks the chord preference where they collide).
+        if (chord_grade > 0.0 and chord_reach > 0.0 and term_polys
+                and taxi_segs9 and any(ap_only)):
+            try:
+                from shapely.geometry import LineString as _CL
+                from shapely.geometry import Point as _CP
+                from shapely.prepared import prep as _cprep2
+            except Exception:                          # pragma: no cover
+                term_polys = ()
+            n_fl = 0
+            for tp9 in term_polys:
+                if tp9 is None or tp9.is_empty:
+                    continue
+                try:
+                    pp9 = _cprep2(tp9)
+                    bx0, by0, bx1, by1 = tp9.bounds
+                except Exception:                      # pragma: no cover
+                    continue
+                lo_w9, hi_w9, n_ch9 = float("-inf"), float("inf"), 0
+                for (ia9, ib9) in taxi_segs9:
+                    (xa9, ya9) = F.nodes[ia9]
+                    (xb9, yb9) = F.nodes[ib9]
+                    if (max(xa9, xb9) < bx0 - chord_reach
+                            or min(xa9, xb9) > bx1 + chord_reach
+                            or max(ya9, yb9) < by0 - chord_reach
+                            or min(ya9, yb9) > by1 + chord_reach):
+                        continue
+                    dx9, dy9 = xb9 - xa9, yb9 - ya9
+                    sl9 = math.hypot(dx9, dy9)
+                    if sl9 < 1.0:
+                        continue
+                    ux9, uy9 = dx9 / sl9, dy9 / sl9
+                    nx9, ny9 = -uy9, ux9
+                    k9 = max(1, int(sl9 // 12.0))
+                    for t9 in range(k9 + 1):
+                        f9 = min(t9 * 12.0, sl9)
+                        qx9 = xa9 + ux9 * f9
+                        qy9 = ya9 + uy9 * f9
+                        try:
+                            if not taxi_test(qx9, qy9):
+                                continue
+                            if pp9.contains(_CP(qx9, qy9)):
+                                continue
+                            ray9 = _CL([
+                                (qx9 - chord_reach * nx9,
+                                 qy9 - chord_reach * ny9),
+                                (qx9 + chord_reach * nx9,
+                                 qy9 + chord_reach * ny9)])
+                            if not pp9.intersects(ray9):
+                                continue
+                            inter9 = ray9.intersection(tp9)
+                            if inter9.is_empty:
+                                continue
+                            d9c = inter9.distance(_CP(qx9, qy9))
+                        except Exception:              # pragma: no cover
+                            continue
+                        if d9c < 3.0:
+                            continue
+                        v9c = (F.elev[ia9]
+                               + (f9 / sl9) * (F.elev[ib9]
+                                               - F.elev[ia9]))
+                        lo_c9 = v9c - chord_grade * d9c
+                        hi_c9 = v9c + chord_grade * d9c
+                        if lo_c9 > lo_w9:
+                            lo_w9 = lo_c9
+                        if hi_c9 < hi_w9:
+                            hi_w9 = hi_c9
+                        n_ch9 += 1
+                if not n_ch9 or lo_w9 > hi_w9:
+                    continue          # no window / squeezed: no floor
+                # apply out to 2× the chord reach: the serving apron
+                # between pad and taxiway extends past the pad's own
+                # window reach, and its lane verts are the enforce's
+                # dense band anchors — the 1 %·d decay keeps the far
+                # floor weak by construction.
+                apply_r9 = 2.0 * chord_reach
+                for i in range(n):
+                    if not ap_only[i] or F.hard[i]:
+                        continue
+                    x9, y9 = F.nodes[i]
+                    if (x9 < bx0 - apply_r9 or x9 > bx1 + apply_r9
+                            or y9 < by0 - apply_r9
+                            or y9 > by1 + apply_r9):
+                        continue
+                    try:
+                        d9p = tp9.distance(_CP(x9, y9))
+                    except Exception:                  # pragma: no cover
+                        continue
+                    if d9p > apply_r9:
+                        continue
+                    fl9 = lo_w9 - apron_plane_grade * d9p
+                    v9 = max(F.elev[i], fl9)
+                    v9 = min(max(v9, F.band_lo[i]), F.band_hi[i])
+                    if v9 != F.elev[i]:
+                        F.elev[i] = v9
+                        n_fl += 1
+            n_pl += n_fl
+            if _os.environ.get("O4_NPF_DEBUG") == "1":
+                print(f"  [npf] pad chord-window floor lifted {n_fl} "
+                      f"lane vert(s)")
+        if n_pl:
+            # cap-only re-convergence after the lifts (both stages)
+            for _sw9 in range(_SOLVE_MAX_SWEEPS):
+                moved9 = 0.0
+                for (a, b, w) in edge_list:
+                    lim9 = max(eff_of[a], eff_of[b]) * w + 1e-6
+                    diff9 = F.elev[a] - F.elev[b]
+                    ex9 = abs(diff9) - lim9
+                    if ex9 <= 0.0:
+                        continue
+                    sgn9 = 1.0 if diff9 > 0 else -1.0
+                    ha9, hb9 = F.hard[a], F.hard[b]
+                    if ha9 and hb9:
+                        continue
+                    if ha9:
+                        nv9 = F.elev[b] + sgn9 * ex9
+                        nv9 = min(max(nv9, F.band_lo[b]),
+                                  F.band_hi[b])
+                        moved9 = max(moved9, abs(nv9 - F.elev[b]))
+                        F.elev[b] = nv9
+                    elif hb9:
+                        nv9 = F.elev[a] - sgn9 * ex9
+                        nv9 = min(max(nv9, F.band_lo[a]),
+                                  F.band_hi[a])
+                        moved9 = max(moved9, abs(nv9 - F.elev[a]))
+                        F.elev[a] = nv9
+                    else:
+                        na9 = F.elev[a] - sgn9 * ex9 / 2.0
+                        nb9 = F.elev[b] + sgn9 * ex9 / 2.0
+                        na9 = min(max(na9, F.band_lo[a]),
+                                  F.band_hi[a])
+                        nb9 = min(max(nb9, F.band_lo[b]),
+                                  F.band_hi[b])
+                        moved9 = max(moved9, abs(na9 - F.elev[a]),
+                                     abs(nb9 - F.elev[b]))
+                        F.elev[a], F.elev[b] = na9, nb9
+                if moved9 < _SOLVE_TOL_M:
+                    break
+        if _os.environ.get("O4_NPF_DEBUG") == "1":
+            print(f"  [npf] apron-lane plane pass: {len(taxi_segs9)} "
+                  f"taxi seg(s), {sum(ap_only)} apron-lane vert(s), "
+                  f"{n_pl} clamped to the taxi plane")
+        _mark("apron-plane")
     F._build_sample_grid()
 
     comp_stats: Dict[int, Dict] = {}

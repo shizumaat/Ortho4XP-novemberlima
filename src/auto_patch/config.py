@@ -64,6 +64,7 @@ __all__ = [
     "APRON_CORRIDOR_SEED_RADIUS_M",
     "WRITE_ARBITRATION",
     "TERMINAL_LEAF_LEVELS",
+    "TERMINAL_NATURAL_LEVELS",
     "RUNWAY_ADJACENCY_TOL_M",
     "RUNWAY_BOUNDARY_TOL_M",
     "RUNWAY_INSIDE_APRON_FRAC",
@@ -651,19 +652,34 @@ HOLE_ROUTER_V2 = _os.environ.get("O4_HOLE_ROUTER_V2", "1") == "1"
 # serving taxiways (a head-on gate lane's perpendiculars miss the pad),
 # which kills the bowl-self-certification that defeated the previous
 # adjacent-apron-median and corridor-1%-plane bounds (HECA terminal1
-# at 100.1 vs stub B 102.3 only 36 m away).
+# at 100.1 vs stub B 102.3 only 36 m away).  Under the apron-follows
+# model (TERMINAL_NATURAL_LEVELS) the rule holds BY CONSTRUCTION —
+# the apron at the pad face sits on the corridor plane and the pad
+# inherits it — so it is checked as a VALIDATOR warn, not solved for
+# (the s79 solver-side lift was measured-rejected: the pad landed
+# right but the apron behind it kept the bowl as within-pairs).
 TERMINAL_CHORD_MAX_GRADE = 0.01
 TERMINAL_CHORD_REACH_M = 200.0      # max perpendicular chord length
-# Gate: OFF by default pending the APRON-FOLLOWS re-solve — the rule
-# itself lands pads correctly (HECA terminal1 100.1 → 102.7, exactly
-# the serving-taxiway window), but the apron BETWEEN pad and taxiway
-# must rise as a SURFACE and the post-level projection can only do
-# that where no vert is route/band-pinned: SPJC's lifted terminal
-# leaves 2 within-pairs on its pinned apron (#96) = its green grade
-# gate breaks; HECA leaves 33 interior pairs on #257 (red-baseline
-# absorbs them).  Flip per-build via ``O4_TERMINAL_CHORD=1`` for
-# in-sim evaluation; ship ON together with the apron-follows work.
-TERMINAL_CHORD_LAW = _os.environ.get("O4_TERMINAL_CHORD", "0") == "1"
+
+# (s80) APRON-FOLLOWS RE-SOLVE — docs/apron_follows_resolve.md (user
+# direction 2026-06-12: terminals = a NATURAL RESULT of grading the
+# apron correctly).  One-way dependency, no back-edges:
+#   network field → taxi rects/junctions → APRONS → TERMINAL PADS.
+# Under the gate: (a) pads are TRANSPARENT in the solve — ordinary
+# graded nodes (TERMINAL_MAX_GRADE cap), no taxi-route seed ceiling,
+# no rigid flat-coupling, no holds through the apron projections (this
+# is NOT the twice-rejected rigid-free pad: there is no rigidity to
+# drag; flatness is imposed AFTER from the median); (b) inside the
+# corridor geodesic zone the apron's attractor is the CORRIDOR-PLANE
+# value instead of the DEM (the bowl's second parent); (c) each pad
+# INHERITS the median of its own settled nodes, then flattens —
+# measured acceptance: a flatten that adds within-violations to its
+# apron complex reverts to the settled (sloped) surface, so the pad
+# can never out-run its own apron; (d) the outer-rim terrain-break
+# retreat may fire beyond the corridor zone even when the apron
+# interior is intentionally above the DEM.  OFF = the s79 behaviour
+# byte-identically.
+TERMINAL_NATURAL_LEVELS = _os.environ.get("O4_TERMINAL_NATURAL", "1") == "1"
 
 # (s79) INTERIOR-PATH ENTRIES — docs/interior_path_entries.md.
 # ★ USER RULING 2026-06-11: no shape may ever check grade ACROSS GRASS.
