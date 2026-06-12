@@ -1451,13 +1451,22 @@ def _drop_off_source_residue(
             area = s.polygon.area
         except _GEOM_EXC:
             continue
-        if area <= 1.0 or area >= max_area_m2:
+        if area <= 1.0:
             continue
         try:
             on = s.polygon.intersection(src).area
         except _GEOM_EXC:
             continue
-        if on / area < min_on_source_frac:
+        # Essentially-zero on-source coverage is spurious at ANY size:
+        # aprons/junctions are cut FROM the source union, so a ~0%
+        # piece can only be a synthesis artifact (e.g. a 1to1
+        # straightening chord swallowing a boundary bay — SPJC's 5
+        # pockets, 688-2447 m², exposed once the hole decompose split
+        # them out of the big apron).  The size-capped branch keeps
+        # its tight fraction for genuine-residue judgement calls.
+        if on / area <= 0.02:
+            to_drop.append(i)
+        elif area < max_area_m2 and on / area < min_on_source_frac:
             to_drop.append(i)
 
     if not to_drop:
@@ -1969,15 +1978,14 @@ def _split_sloped_rects_at_violations(
                     alts9[v_idx] = round(float(new_alt9), 1)
         if had_close:
             new_jc = new_jc + [new_jc[0]]
-        from shapely.geometry import Polygon
         try:
-            new_poly = Polygon(new_jc)
-            if not new_poly.is_valid:
-                new_poly = new_poly.buffer(0)
-            if new_poly.is_empty:
+            # Carry interior rings through the rebuild — Polygon(ring)
+            # alone silently fills grass-infield holes (KOQN class).
+            from .junction_rules import _rebuild_ring_with_holes
+            new_poly = _rebuild_ring_with_holes(
+                new_jc, j_shape.polygon, normalize=False)
+            if new_poly is None:
                 continue
-            if new_poly.geom_type == "MultiPolygon":
-                new_poly = max(new_poly.geoms, key=lambda g: g.area)
             # Route the (possibly ``buffer(0)``-repaired) modified
             # junction perimeter through the canonical registry so
             # any drift from the Shapely repair resolves back to
@@ -3172,8 +3180,17 @@ def _reclassify_runway_disconnected_to_groundside(
     after all conformance/weld passes (so every legitimate connection
     already shares geometry), and BEFORE tile_cut (the tile clip severs
     cross-tile chains).  Returns the count reclassified.
+
+    Per user 2026-06-11: airports with NO terminal have no landside —
+    every paved area is airside (small fields' pavement islands are
+    aircraft parking, not curbside), so this pass is skipped entirely
+    and nothing emits as groundside.
     """
     from shapely.strtree import STRtree
+    if not any(s.role == ROLE_TERMINAL
+               and s.polygon is not None and not s.polygon.is_empty
+               for s in layout.shapes):
+        return 0
     idxs = [i for i, s in enumerate(layout.shapes)
             if s.role in (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
                           ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
@@ -3215,6 +3232,7 @@ def _reclassify_runway_disconnected_to_groundside(
     n_reclassified = 0
     n_rect_orphans = 0
     converted: list[int] = []         # layout indices, for the cluster limit
+    rect_orphan_idxs: list[int] = []
     for k, i in enumerate(idxs):
         if k in seen:
             continue
@@ -3238,6 +3256,65 @@ def _reclassify_runway_disconnected_to_groundside(
         elif s.role in (ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
                         ROLE_STUB, ROLE_CROSS_CONNECTOR):
             n_rect_orphans += 1
+            rect_orphan_idxs.append(i)
+
+    # Second pass — disconnected RECTS (user 2026-06-11 auto-correct):
+    # a SYNTHESIZED rect (discovered strip ``TX#`` / painted line
+    # ``P#``) on a groundside island rides the island into groundside
+    # (leaving it airside keeps a dangling short-edge verify warning
+    # and an airside-solved rect inside a DEM-following island — KOQN
+    # TX10).  Rects from the apt.dat 1201/1202 NETWORK keep their
+    # airside role no matter what: the network is the authoritative
+    # taxi-route declaration, so their disconnection is a
+    # connectivity bug to surface, not a landside area (SPLP's 2
+    # secondary rects are airside taxiways — converting them
+    # regressed the compare-target fixture).
+    if rect_orphan_idxs:
+        import re as _re
+        gs_polys = [layout.shapes[j].polygon for j in converted]
+        gs_polys += [s.polygon for s in layout.shapes
+                     if s.role == ROLE_GROUNDSIDE_PAVEMENT
+                     and s.polygon is not None and not s.polygon.is_empty]
+        # Runway-CONNECTED airside footprint: a rect abutting it is a
+        # boundary taxiway beside a landside strip (SPLP TX#: real
+        # airside, fixture-confirmed) — only an ISOLATED rect whose
+        # whole island went groundside converts (KOQN TX10).
+        airside_polys = [polys[k] for k in seen]
+        for i in rect_orphan_idxs:
+            s = layout.shapes[i]
+            if not gs_polys:
+                break
+            if not _re.fullmatch(r"(TX|P)\d+", (s.ref or "")):
+                continue              # network rect — never landside
+            try:
+                if s.polygon.area > 3000.0:
+                    # A kilometre-scale taxiway is real airside even
+                    # when touch-chain-broken (SPLP TX53/54, 12-14 k m²,
+                    # fixture-confirmed) — only a small island STRIP
+                    # demotes with its island.
+                    continue
+                near_gs = any(s.polygon.distance(g) <= 2.0
+                              for g in gs_polys)
+                near_airside = any(s.polygon.distance(g) <= 2.5
+                                   for g in airside_polys)
+            except _GEOM_EXC:
+                continue
+            if not near_gs or near_airside:
+                continue
+            if _dem_at is not None:
+                built = _dem_follow_polygon(
+                    s.polygon, _dem_at, simplify_tol=0.0)
+                if built is None:
+                    continue          # never half-convert real pavement
+                s.polygon, s.node_altitudes = built
+            s.role = ROLE_GROUNDSIDE_PAVEMENT
+            s.ref = "groundside"
+            s.altitude = None
+            s.altitude_high = None
+            s.altitude_low = None
+            converted.append(i)
+            n_reclassified += 1
+            n_rect_orphans -= 1
 
     # New groundside members must honour the no-shared-boundary
     # invariant vs terminals / airside (clearance clip).  MUST run

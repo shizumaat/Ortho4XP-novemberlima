@@ -20,6 +20,7 @@ __all__ = [
     "ENABLE_SERVICE_ROADS",
     "ABSORB_RECTS_ALONGSIDE_APRONS",
     "ENABLE_DISCOVERED_TAXIWAYS",
+    "PAINTED_CENTERLINE_FALLBACK",
     "ENABLE_APRON_NECK_SPLIT",
     "HOLE_ROUTER_ENABLED",
     "HOLE_ROUTER_V2",
@@ -564,6 +565,19 @@ ABSORB_RECTS_ALONGSIDE_APRONS = False  # (session 51 experiment 2026-05-27)
 # gates ensure only strips with nothing along their sloping edge become rects.
 # See pavement/discovered_taxiways.py.
 ENABLE_DISCOVERED_TAXIWAYS = True
+
+# When apt.dat has NO 1201/1202 taxi-route network, synthesize the taxi
+# centerline set from its row-120 PAINTED lines (paint codes 1/7/51/57 =
+# the solid-yellow centerline family) after basic is-it-really-a-
+# centerline checks (on-pavement, not boundary-hugging like an edge
+# line, runway footprint clipped) — see
+# ``apt_dat_reader.painted_taxi_centerlines``.  Small Global Airports
+# fields routinely ship only painted lines; without this they build no
+# taxi rects, their aprons read runway-disconnected, and the discovered-
+# strip fallback reconstructs a much cruder network (user 2026-06-11;
+# KOQN).  Airports WITH a 1201/1202 network are untouched (cross-
+# referencing painted curves against the network is future work).
+PAINTED_CENTERLINE_FALLBACK = True
 
 # Phase 2: split large apron/junction residue pieces at their narrow NECKS
 # (taxi-width pinches / arm mouths) into convex pads joined by short

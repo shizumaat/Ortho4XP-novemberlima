@@ -1271,9 +1271,33 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # ``apt_dat_reader.taxi_size_letters``.
         layout.apt_taxi_letters = APR.taxi_size_letters(apt)
     else:
-        UI.vprint(1,
-            f"  [pav-builder] {icao}: apt.dat has no taxi network — no "
-            f"taxi rects will be emitted (fix the apt.dat input).")
+        # No 1201/1202 network — fall back to the airport's PAINTED
+        # taxiway centerlines (row 120, paint code 1/7/51/57).  Small
+        # Global Airports fields routinely ship only the painted
+        # lines; they carry the authored bezier curves and connect
+        # aprons to the runway, where strip discovery reconstructs a
+        # much cruder network (user 2026-06-11; KOQN).  Gated by
+        # PAINTED_CENTERLINE_FALLBACK; airports WITH a network are
+        # untouched (cross-referencing painted geometry against the
+        # network is a separate, future step).
+        from .config import PAINTED_CENTERLINE_FALLBACK
+        painted_cl: list = []
+        if PAINTED_CENTERLINE_FALLBACK:
+            painted_cl = APR.painted_taxi_centerlines(
+                apt, to_m,
+                pavement_union_m=pav_union,
+                runway_union_m=layout.runway_union)
+        if painted_cl:
+            osm_centerlines = painted_cl
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: no apt.dat taxi network — "
+                f"using {len(painted_cl)} painted (row-120) taxiway "
+                f"centerline(s) instead.")
+        else:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: apt.dat has no taxi network "
+                f"(and no usable painted centerlines) — no taxi rects "
+                f"will be emitted (fix the apt.dat input).")
     # Preserve the full input centerline set for the apron-
     # reclassification pass (junction_repair).  Surviving rect
     # ``source_axis`` lines cover only the part of the network
@@ -3279,6 +3303,12 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # reach the patch anyway.
         from .junction_repair import _decompose_airside_holed_shapes
         _decompose_airside_holed_shapes(layout, icao=icao)
+        # Re-run the off-source residue drop on the decompose output:
+        # splitting a big holed apron exposes filled boundary-bay
+        # pockets (1to1 straightening chords over grass) as separate
+        # ~0%-on-source pieces that the pre-decompose pass could not
+        # see inside the monolithic shape.
+        _drop_off_source_residue(layout, icao=icao)
 
         # ── Airside node-unification (refactor Phases 6+7, PRE-solve) ──
         # Weld + full conformance + final corner snaps, run HERE so the solver

@@ -295,4 +295,25 @@ def split_polygon_at_necks(poly: Polygon,
             else:
                 nxt.append(pc)
         pieces = nxt
+    if len(pieces) > 1 and poly.interiors:
+        # The manual ring split works on the EXTERIOR arcs only, so a
+        # piece spanning a grass-infield hole comes back solid.  Clip
+        # every piece against the holed source to re-impose the
+        # interiors (KOQN lost 5 apron holes here); the downstream
+        # hole-free normalization then decomposes them properly.
+        clipped: list[Polygon] = []
+        for pc in pieces:
+            try:
+                g = pc.intersection(poly)
+            except _GEOM_EXC:
+                clipped.append(pc)
+                continue
+            if g.is_empty:
+                continue
+            parts = (list(g.geoms) if g.geom_type in
+                     ("MultiPolygon", "GeometryCollection") else [g])
+            clipped.extend(p for p in parts
+                           if p.geom_type == "Polygon" and p.area >= 1.0)
+        if clipped:
+            pieces = clipped
     return pieces

@@ -361,3 +361,79 @@ class TestTruckEdgeParsing:
         apt = APR.load_airport(str(p), "ZNOP")
         assert apt.truck_edges == []
         assert APR.service_road_centerlines(apt, lambda lon, lat: (lon, lat)) == []
+
+
+class TestPaintedLines:
+    """Row-120 painted linear features (taxiway centerlines etc.)."""
+
+    def _load(self, tmp_path):
+        p = tmp_path / "apt_lines.dat"
+        p.write_text(
+            "A\n"
+            "1    100 0 0 ZPNT Painted Lines\n"
+            "100 45.00 1 0 0.25 1 1 0 09 -12.000 -77.000 0 60 0 0 0 0"
+            " 27 -12.000 -77.010 0 60 0 0 0 0\n"
+            # Open centerline (paint 1), one bezier node, 115 end.
+            "120 CL A\n"
+            "111 -12.0010 -77.0010 1\n"
+            "112 -12.0020 -77.0020 -12.0030 -77.0020 1\n"
+            "115 -12.0040 -77.0030\n"
+            # Open hold bar (paint 4) — excluded by the classifier.
+            "120 hold\n"
+            "111 -12.0050 -77.0040 4\n"
+            "115 -12.0051 -77.0041\n"
+            # Closed loop (paint 1) — excluded by the classifier.
+            "120 loop\n"
+            "111 -12.0060 -77.0050 1\n"
+            "111 -12.0060 -77.0060 1\n"
+            "111 -12.0070 -77.0060 1\n"
+            "113 -12.0070 -77.0050 1\n",
+            encoding="utf-8")
+        return APR.load_airport(str(p), "ZPNT")
+
+    def test_parses_all_blocks(self, tmp_path):
+        apt = self._load(tmp_path)
+        assert len(apt.painted_lines) == 3
+        open_cl, hold, loop = apt.painted_lines
+        assert open_cl.paint_codes == frozenset({1})
+        assert not open_cl.closed
+        # The bezier node tessellates: more vertices than the 3 nodes.
+        assert len(open_cl.line.coords) > 3
+        assert hold.paint_codes == frozenset({4})
+        assert loop.closed
+        # Closed ring repeats the first vertex.
+        c = list(loop.line.coords)
+        assert c[0] == c[-1]
+
+    def test_is_centerline_paint(self, tmp_path):
+        apt = self._load(tmp_path)
+        open_cl, hold, loop = apt.painted_lines
+        assert open_cl.is_centerline_paint
+        assert not hold.is_centerline_paint
+        assert loop.is_centerline_paint  # paint says yes ...
+
+    def test_painted_taxi_centerlines_filters(self, tmp_path):
+        apt = self._load(tmp_path)
+
+        def to_m(lon, lat):
+            return ((lon + 77.0) * 1e5, (lat + 12.0) * 1e5)
+        # No pavement/runway gates: only the paint-code + closed
+        # filters apply -> exactly the open centerline survives.
+        out = APR.painted_taxi_centerlines(apt, to_m)
+        assert len(out) == 1
+        line, name = out[0]
+        assert name == "P1"
+        assert line.length > 8.0
+
+    def test_no_painted_lines_block(self, tmp_path):
+        p = tmp_path / "apt_plain.dat"
+        p.write_text(
+            "A\n"
+            "1    100 0 0 ZNOL No Lines\n"
+            "100 45.00 1 0 0.25 1 1 0 09 -12 -77 0 60 0 0 0 0"
+            " 27 -12 -77.01 0 60 0 0 0 0\n",
+            encoding="utf-8")
+        apt = APR.load_airport(str(p), "ZNOL")
+        assert apt.painted_lines == []
+        assert APR.painted_taxi_centerlines(
+            apt, lambda lon, lat: (lon, lat)) == []

@@ -121,6 +121,65 @@ RUNWAY_REWRITE_CARVE_RUNWAY_HALO_M = 3.0
 WIDEN_MAX_ABANDONED_PAVEMENT_M2 = 50.0
 
 
+def _rebuild_ring_with_holes(new_pts, src_poly,
+                             normalize: bool = True,
+                             collapse: bool = True):
+    """Polygon from a rebuilt exterior ring, re-imposing ``src_poly``'s
+    interior rings by DIFFERENCE.
+
+    Every ring-rebuilding pass that did ``Polygon(new_pts)`` silently
+    FILLED grass-infield holes (KOQN lost 5 of 6 apron holes; SPJC's
+    big apron lost 5 source holes the same way).  Passing the rings to
+    the constructor is not enough: when the rebuilt exterior crosses a
+    hole the polygon is invalid and ``buffer(0)``'s repair drops it
+    (SPJC straightened runway runs over 5 holes).  Subtracting the
+    hole polygons instead clips them to the new footprint — exact for
+    interior holes, correct (open notch) for boundary-crossing ones.
+
+    Returns the largest Polygon part (or, with ``collapse=False``, the
+    raw Polygon/MultiPolygon so the caller can keep sibling parts), or
+    ``None`` if degenerate.
+    ``normalize=True`` applies ``buffer(0)`` unconditionally (the 1to1
+    rewrite / corner-snap sites always did — keeps their ring
+    normalization); ``False`` first tries the plain constructor with
+    the rings attached (EXACT exterior ring order — the stitch /
+    vertex-move sites track node_altitudes by ring index) and only
+    falls back to the difference repair when that is invalid.
+    """
+    try:
+        if not normalize:
+            direct = Polygon(
+                new_pts, [list(r.coords) for r in src_poly.interiors])
+            if direct.is_valid and not direct.is_empty:
+                return direct
+        poly = Polygon(new_pts)
+        if normalize or not poly.is_valid:
+            poly = poly.buffer(0)
+        if poly.is_empty:
+            return None
+        if collapse and poly.geom_type == "MultiPolygon":
+            poly = max(poly.geoms, key=lambda g: g.area)
+        if poly.geom_type not in ("Polygon", "MultiPolygon"):
+            return None
+        holes = [Polygon(r) for r in src_poly.interiors]
+        holes = [h.buffer(0) if not h.is_valid else h
+                 for h in holes if not h.is_empty]
+        holes = [h for h in holes if not h.is_empty and h.area > 1e-6]
+        out = poly
+        if holes:
+            out = poly.difference(unary_union(holes))
+            if out.is_empty:
+                return None
+            if collapse and out.geom_type == "MultiPolygon":
+                out = max(out.geoms, key=lambda g: g.area)
+        if out.geom_type not in ("Polygon", "MultiPolygon") or (
+                collapse and out.geom_type != "Polygon"):
+            return None
+        return out
+    except (GEOSException, TopologicalError, ValueError):
+        return None
+
+
 def _align_rect_slope_to_axis(layout: PavementLayout) -> None:
     """Per user 2026-05-02: a sloping rect with a negligible high/low
     altitude delta should be converted to FLAT (single altitude).
@@ -771,11 +830,12 @@ def _snap_to_sloping_edge_corners(layout: PavementLayout) -> None:
         if len(deduped) < 3:
             continue
         new_pts = [e[0] for e in deduped]
-        try:
-            new_poly = Polygon(new_pts).buffer(0)
-        except _GEOM_EXC:
-            continue
-        if new_poly.is_empty:
+        # Keep interior rings: Polygon(exterior) alone fills
+        # grass-infield holes (KOQN class).  collapse=False — the
+        # sibling-part re-emit below must see every split part.
+        new_poly = _rebuild_ring_with_holes(new_pts, poly,
+                                            collapse=False)
+        if new_poly is None:
             continue
         # When the snap pinches the ring into a self-intersection and
         # the ``buffer(0)`` repair splits it, every part is real
@@ -1721,17 +1781,15 @@ def _enforce_runway_1to1_sharing(layout: PavementLayout) -> None:
         new_pts, new_alts_out = new_polygon
         if len(new_pts) < 3:
             continue
-        try:
-            new_poly = Polygon(new_pts).buffer(0)
-        except _GEOM_EXC:
+        # Carry the source interior rings through the rewrite — a bare
+        # Polygon(new_pts) fills grass-infield holes; the off-source
+        # carve below then only re-creates the ones over
+        # RUNWAY_REWRITE_MAX_OFFSOURCE_GAIN_M2, silently losing smaller
+        # islands (KOQN's 383 m² infield, 5 SPJC pockets).
+        new_poly = _rebuild_ring_with_holes(new_pts, poly)
+        if new_poly is None:
             continue
-        if new_poly.is_empty:
-            continue
-        if new_poly.geom_type == "MultiPolygon":
-            new_poly = max(new_poly.geoms, key=lambda g: g.area)
-        if new_poly.geom_type != "Polygon":
-            continue
-        if not new_poly.is_valid or not new_poly.is_simple:
+        if not new_poly.is_valid:
             continue
         if new_poly.area < 0.5 * poly.area:
             continue
@@ -2228,18 +2286,28 @@ def stitch_pavement_to_terminals(
                 deduped_alts.append(new_alts[k])
         if len(deduped) < 3:
             continue
-        try:
-            new_poly = Polygon(deduped + [deduped[0]])
-            if not new_poly.is_valid:
-                new_poly = new_poly.buffer(0)
-            if (new_poly.is_empty
-                    or new_poly.geom_type != "Polygon"):
-                continue
-        except _GEOM_EXC:
+        # Carry the source interior rings through the rebuild — a
+        # bare Polygon(exterior) silently FILLS grass-infield holes
+        # (KOQN lost 5 of 6 apron holes here; the hole-free
+        # normalization runs later and never saw them).
+        new_poly = _rebuild_ring_with_holes(
+            deduped + [deduped[0]], pav.polygon, normalize=False)
+        if new_poly is None or new_poly.geom_type != "Polygon":
             continue
         pav.polygon = new_poly
         if deduped_alts is not None:
-            pav.node_altitudes = deduped_alts + [deduped_alts[0]]
+            # Altitudes are tracked by exterior-ring index; only keep
+            # them when the rebuilt ring is still the deduped ring
+            # verbatim (the helper's invalid-input repair path may
+            # reorder it).
+            ext9 = list(new_poly.exterior.coords)
+            if (len(ext9) == len(deduped) + 1
+                    and all(abs(a[0] - b[0]) < 1e-9
+                            and abs(a[1] - b[1]) < 1e-9
+                            for a, b in zip(ext9[:-1], deduped))):
+                pav.node_altitudes = deduped_alts + [deduped_alts[0]]
+            else:
+                pav.node_altitudes = None
 
     # Apply terminal-side inserts.
     for term in terminals:

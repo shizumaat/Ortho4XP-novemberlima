@@ -107,6 +107,12 @@ SPJC_BASELINE_TOTAL = 1207  # of 1271 target (emitted)
 # anchor-tile-only read missed half the DSF pavement — the same bug that
 # hid KPHX's south aprons).  The added pavement re-shapes the rect /
 # junction split on both halves.
+# Re-cut 2026-06-11 (-78 half only): small SYNTHESIZED strips (TX#/P#)
+# isolated on a groundside island now ride the island into groundside
+# (user auto-correct ruling; KOQN TX10's dangling short-edge class) —
+# SPLP's TX53/TX54 (437/1,994 m², on the landside parking island whose
+# two big aprons were ALREADY groundside in the previous target) moved
+# secondary_parallel → groundside_pavement.  Same total shape count.
 SPLP_BASELINE_TILE_M77: Dict[str, int] = {
     "apron":               6,   # of   7 target (1 apron is invalid-dropped at
                                 #   emit; allow ±1 for that nondeterminism)
@@ -126,7 +132,8 @@ SPLP_BASELINE_TILE_M78: Dict[str, int] = {
     "junction":            9,   # of   9 target
     "primary_parallel":    4,   # of   4 target
     "runway":              8,   # of   8 target
-    "secondary_parallel":  4,   # of   4 target
+    "secondary_parallel":  2,   # of   2 target (TX53/54 → groundside,
+                                #   re-cut 2026-06-11)
     "stub":               12,   # of  12 target
     "terminal":            1,   # of   1 target
 }

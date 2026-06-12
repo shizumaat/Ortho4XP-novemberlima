@@ -83,10 +83,19 @@ ROW_NODE = 111
 ROW_NODE_BEZIER = 112
 ROW_CLOSE = 113
 ROW_CLOSE_BEZIER = 114
+ROW_END_LINE = 115             # open-polyline terminator (plain)
+ROW_END_LINE_BEZIER = 116      # open-polyline terminator (bezier)
+ROW_LINE_HEADER = 120          # painted linear feature (taxi lines etc.)
 ROW_BOUNDARY_HEADER = 130
 ROW_TAXI_NODE = 1201
 ROW_TAXI_EDGE = 1202
 ROW_TRUCK_EDGE = 1206          # ground-vehicle (service-road) route edge
+
+# Row-120 painted-line type codes that mark a TAXIWAY CENTERLINE:
+# 1 = solid yellow, 7 = centerline in non-movement area; 51/57 = the
+# same with a black border (apt.dat 1100 spec).  Codes 2/3/8/9 are
+# taxiway EDGE / queue markings, 4/5/6 hold-position bars, 20+ roadway.
+CENTERLINE_PAINT_CODES = frozenset((1, 7, 51, 57))
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -122,6 +131,27 @@ class Pavement:
     roughness: float            # 0.0 (smooth) … 1.0 (rough)
     orientation: float          # texture rotation in degrees from N
     name: str = ""              # pavement label, e.g. "TWY A", "RAMP 1"
+
+
+@dataclass
+class PaintedLine:
+    """One painted linear feature (apt.dat row 120).
+
+    ``line`` vertices are (lon, lat) like ``Pavement`` rings, bezier
+    nodes already tessellated.  ``paint_codes`` collects every
+    line-type attribute seen on the feature's nodes — paint types are
+    < 100, lighting types ≥ 100 (the apt.dat 1100 convention).  A
+    feature closed by 113/114 has ``closed=True`` (its line repeats
+    the first vertex at the end); 115/116-terminated features are
+    open polylines.
+    """
+    line: LineString
+    paint_codes: frozenset[int]
+    closed: bool = False
+
+    @property
+    def is_centerline_paint(self) -> bool:
+        return bool(self.paint_codes & CENTERLINE_PAINT_CODES)
 
 
 @dataclass
@@ -176,6 +206,10 @@ class Airport:
     # ``TaxiEdge`` shape with ``kind == "truck"``; share the 1201 nodes
     # in ``taxi_nodes``.  Drive the 4 %-grade ``service_road`` rects.
     truck_edges: list[TaxiEdge] = field(default_factory=list)
+    # Painted linear features (row 120) — taxiway centerlines, edge
+    # lines, hold bars.  Carries the authored bezier curves; airports
+    # without a 1201/1202 taxi network often have ONLY these.
+    painted_lines: list[PaintedLine] = field(default_factory=list)
     boundary: Polygon | None = None
     source_path: str = ""
 
@@ -312,8 +346,10 @@ def load_airport(
 
     pavement_rows: list[list[str]] = []
     boundary_rows: list[list[str]] = []
+    line_rows: list[list[str]] = []
     in_pavement = False
     in_boundary = False
+    in_line = False
 
     def flush_pavement():
         if pavement_rows:
@@ -321,6 +357,13 @@ def load_airport(
             if pav is not None:
                 airport.pavements.append(pav)
             pavement_rows.clear()
+
+    def flush_line():
+        if line_rows:
+            pl = _parse_painted_line(line_rows, bezier_segments)
+            if pl is not None:
+                airport.painted_lines.append(pl)
+            line_rows.clear()
 
     def flush_boundary():
         if boundary_rows:
@@ -348,20 +391,34 @@ def load_airport(
         except ValueError:
             continue
 
-        # Pavement / boundary blocks accumulate consecutive node rows.
+        # Pavement / boundary / line blocks accumulate consecutive
+        # node rows.
         if row_type == ROW_PAVEMENT_HEADER:
             flush_pavement()
             flush_boundary()
+            flush_line()
             in_pavement = True
             in_boundary = False
+            in_line = False
             pavement_rows.append(toks)
             continue
         if row_type == ROW_BOUNDARY_HEADER:
             flush_pavement()
             flush_boundary()
+            flush_line()
             in_pavement = False
             in_boundary = True
+            in_line = False
             boundary_rows.append(toks)
+            continue
+        if row_type == ROW_LINE_HEADER:
+            flush_pavement()
+            flush_boundary()
+            flush_line()
+            in_pavement = False
+            in_boundary = False
+            in_line = True
+            line_rows.append(toks)
             continue
         if row_type in (ROW_NODE, ROW_NODE_BEZIER,
                         ROW_CLOSE, ROW_CLOSE_BEZIER):
@@ -369,14 +426,26 @@ def load_airport(
                 pavement_rows.append(toks)
             elif in_boundary:
                 boundary_rows.append(toks)
+            elif in_line:
+                line_rows.append(toks)
+            continue
+        if row_type in (ROW_END_LINE, ROW_END_LINE_BEZIER):
+            # Open-polyline terminator: only meaningful inside a 120
+            # block (115/116 appear nowhere else).
+            if in_line:
+                line_rows.append(toks)
+                flush_line()
+                in_line = False
             continue
 
-        # Anything else terminates the current pavement / boundary
-        # block (and contributes its own data).
+        # Anything else terminates the current pavement / boundary /
+        # line block (and contributes its own data).
         flush_pavement()
         flush_boundary()
+        flush_line()
         in_pavement = False
         in_boundary = False
+        in_line = False
 
         if row_type == ROW_RUNWAY:
             rwy = _parse_runway(toks)
@@ -398,6 +467,7 @@ def load_airport(
     # Final flush in case the block ends mid-pavement.
     flush_pavement()
     flush_boundary()
+    flush_line()
 
     # Per user 2026-05-04: deduplicate near-identical pavement
     # polygons.  Some custom-scenery apt.dat files carry the same
@@ -915,6 +985,118 @@ def _parse_boundary(rows: list[list[str]],
     return poly
 
 
+def _parse_painted_line(rows: list[list[str]],
+                        bezier_segments: int) -> "PaintedLine | None":
+    """Parse a row-120 header + node rows into a :class:`PaintedLine`.
+
+    A 120 block is one polyline: 111/112 nodes terminated either by a
+    113/114 row (closed loop — e.g. an apron edge outline) or a
+    115/116 row (open line — the common taxiway-centerline case).
+    Line-type attributes ride on the nodes (paint < 100, lighting
+    ≥ 100); 115/116 terminators carry no attributes.
+    """
+    if len(rows) < 3:        # header + at least two nodes
+        return None
+    node_rows: list[list[str]] = []
+    codes: set[int] = set()
+    closed = False
+    for row in rows[1:]:
+        try:
+            rt = int(row[0])
+        except (ValueError, IndexError):
+            continue
+        if rt in (ROW_NODE, ROW_CLOSE):
+            attr_start = 3
+        elif rt in (ROW_NODE_BEZIER, ROW_CLOSE_BEZIER):
+            attr_start = 5
+        elif rt in (ROW_END_LINE, ROW_END_LINE_BEZIER):
+            attr_start = None
+        else:
+            continue
+        if rt in (ROW_CLOSE, ROW_CLOSE_BEZIER):
+            closed = True
+        if attr_start is not None:
+            for tok in row[attr_start:attr_start + 2]:
+                try:
+                    codes.add(int(tok))
+                except ValueError:
+                    pass
+        node_rows.append(row)
+    if len(node_rows) < 2:
+        return None
+    if closed:
+        pts = _interpolate_contour(node_rows, bezier_segments)
+        if len(pts) >= 3 and pts[0] != pts[-1]:
+            pts.append(pts[0])
+    else:
+        pts = _interpolate_open_polyline(node_rows, bezier_segments)
+    if len(pts) < 2:
+        return None
+    try:
+        ls = LineString(pts)
+        if ls.is_empty or ls.length <= 0.0:
+            return None
+    except _GEOM_EXC:
+        return None
+    return PaintedLine(line=ls, paint_codes=frozenset(codes),
+                       closed=closed)
+
+
+def _interpolate_open_polyline(
+        node_rows: list[list[str]],
+        bezier_segments: int) -> list[tuple[float, float]]:
+    """Open-polyline variant of :func:`_interpolate_contour`: same
+    per-segment bezier conventions, no wraparound segment, and the
+    final node IS appended."""
+    n = len(node_rows)
+    if n < 2:
+        return []
+    out: list[tuple[float, float]] = []
+    for i in range(n - 1):
+        a_row = node_rows[i]
+        b_row = node_rows[i + 1]
+        a_xy = _node_xy(a_row)
+        b_xy = _node_xy(b_row)
+        a_ctrl = _node_ctrl(a_row)
+        b_ctrl = _node_ctrl(b_row)
+        if not out or out[-1] != a_xy:
+            out.append(a_xy)
+        if a_ctrl is None and b_ctrl is None:
+            continue
+        if a_ctrl is not None and b_ctrl is None:
+            ctrl_eff = a_ctrl
+        elif a_ctrl is None and b_ctrl is not None:
+            ctrl_eff = _mirror(b_ctrl, b_xy)
+        else:
+            mirrored = _mirror(b_ctrl, b_xy)
+            mid = (0.5 * (a_xy[0] + b_xy[0]),
+                   0.5 * (a_xy[1] + b_xy[1]))
+            d1 = math.hypot(a_ctrl[0] - mid[0], a_ctrl[1] - mid[1])
+            d2 = math.hypot(mirrored[0] - mid[0],
+                            mirrored[1] - mid[1])
+            if 0.5 * max(d1, d2) < BEZIER_FLATTEN_DEV_DEG:
+                continue
+            for pt in _cubic_bezier(a_xy, a_ctrl, mirrored, b_xy,
+                                    bezier_segments)[1:-1]:
+                if not out or out[-1] != pt:
+                    out.append(pt)
+            continue
+        mid = (0.5 * (a_xy[0] + b_xy[0]),
+               0.5 * (a_xy[1] + b_xy[1]))
+        if 0.5 * math.hypot(ctrl_eff[0] - mid[0],
+                            ctrl_eff[1] - mid[1]) \
+                < BEZIER_FLATTEN_DEV_DEG:
+            continue
+        for pt in _quadratic_bezier(a_xy, ctrl_eff, b_xy,
+                                    bezier_segments)[1:-1]:
+            if not out or out[-1] != pt:
+                out.append(pt)
+    b_last = _node_xy(node_rows[-1])
+    if not out or out[-1] != b_last:
+        out.append(b_last)
+    return out
+
+
 def _split_contours(node_rows: list[list[str]]) -> list[list[list[str]]]:
     """Walk a list of 111/112/113/114 rows and split into contours.
 
@@ -953,14 +1135,15 @@ def _node_xy(row: list[str]) -> tuple[float, float]:
 
 
 def _node_ctrl(row: list[str]) -> tuple[float, float] | None:
-    """Return the Bezier control point for a 112/114 node, or None
-    for a plain 111/113 node.
+    """Return the Bezier control point for a 112/114/116 node, or
+    None for a plain 111/113/115 node.
     """
     try:
         rt = int(row[0])
     except ValueError:
         return None
-    if rt not in (ROW_NODE_BEZIER, ROW_CLOSE_BEZIER):
+    if rt not in (ROW_NODE_BEZIER, ROW_CLOSE_BEZIER,
+                  ROW_END_LINE_BEZIER):
         return None
     try:
         return (float(row[4]), float(row[3]))
@@ -1204,6 +1387,96 @@ def taxi_size_letters(airport: Airport) -> dict[str, str]:
         if prev is None or lt > prev:
             letters[e.name] = lt
     return letters
+
+
+def painted_taxi_centerlines(
+        airport: Airport,
+        to_m: "Callable[[float, float], tuple[float, float]]",
+        pavement_union_m=None,
+        runway_union_m=None,
+        min_len_m: float = 8.0,
+        edge_zone_m: float = 1.5,
+        edge_frac_max: float = 0.5,
+        on_pavement_frac_min: float = 0.7,
+) -> "list[tuple[LineString, str]]":
+    """Synthesize taxi centerlines from row-120 PAINTED lines.
+
+    Airports without a 1201/1202 taxi-route network frequently still
+    carry the real taxiway centerlines as painted line features —
+    authored bezier curves, far better geometry than what strip
+    discovery can reconstruct.  Returns ``(LineString_m, name)``
+    pairs shaped like :func:`taxi_centerlines` so the rect builder
+    consumes either source interchangeably; names are synthetic
+    (``P1``, ``P2``, …) so provenance is recognizable.
+
+    "Is it really a centerline" checks (user 2026-06-11 — the same
+    line resource also draws taxiway EDGE lines and other markings):
+
+      * paint code must be in :data:`CENTERLINE_PAINT_CODES`
+        (1/7/51/57 — solid-yellow centerline family); hold bars (4-6)
+        and edge/queue codes are excluded;
+      * closed loops are excluded (a closed "centerline" is an
+        outline, not a route);
+      * the line must lie ON pavement (``on_pavement_frac_min`` of
+        its length within ``pavement_union_m`` +1 m) — paint floats
+        on pavement by definition;
+      * the line must NOT hug the pavement boundary the way an edge
+        line does: at most ``edge_frac_max`` of its length inside
+        the ``edge_zone_m`` band along the boundary (a real
+        centerline keeps about half a taxiway width of clearance,
+        crossing the band only at junction mouths);
+      * portions inside ``runway_union_m`` are clipped away (exit
+        centerlines extend to the runway centerline — the runway
+        rects own that surface), and each surviving piece must still
+        be ``min_len_m`` long.
+    """
+    out: "list[tuple[LineString, str]]" = []
+    if not airport.painted_lines:
+        return out
+    pav_buf = None
+    edge_zone = None
+    if pavement_union_m is not None and not pavement_union_m.is_empty:
+        try:
+            pav_buf = pavement_union_m.buffer(1.0)
+            edge_zone = pavement_union_m.boundary.buffer(edge_zone_m)
+        except _GEOM_EXC:
+            pav_buf = edge_zone = None
+    k = 0
+    for pl in airport.painted_lines:
+        if not pl.is_centerline_paint or pl.closed:
+            continue
+        try:
+            line_m = LineString(
+                [to_m(lon, lat) for lon, lat in pl.line.coords])
+        except _GEOM_EXC:
+            continue
+        if line_m.length < min_len_m:
+            continue
+        g = line_m
+        if runway_union_m is not None and not runway_union_m.is_empty:
+            try:
+                g = g.difference(runway_union_m)
+            except _GEOM_EXC:
+                pass
+        parts = ([g] if g.geom_type == "LineString"
+                 else [q for q in getattr(g, "geoms", [])
+                       if q.geom_type == "LineString"])
+        for part in parts:
+            if part.length < min_len_m:
+                continue
+            if pav_buf is not None:
+                try:
+                    on = part.intersection(pav_buf).length
+                    if on / part.length < on_pavement_frac_min:
+                        continue
+                    near_edge = part.intersection(edge_zone).length
+                    if near_edge / part.length > edge_frac_max:
+                        continue
+                except _GEOM_EXC:
+                    continue
+            k += 1
+            out.append((part, f"P{k}"))
+    return out
 
 
 def taxi_centerlines(
