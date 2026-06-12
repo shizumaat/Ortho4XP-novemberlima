@@ -60,6 +60,7 @@ from .config import (
     MIN_SERVICE_STRIP_LEN_M,
     SERVICE_ROAD_PAVEMENT_NEAR_M,
     ENABLE_SERVICE_ROADS,
+    SERVICE_ROAD_CARVE,
     ENABLE_DISCOVERED_TAXIWAYS,
 )
 from .layout import (
@@ -1310,7 +1311,9 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # 1206 service roads become 4 %-grade ``service_road`` rects when the
     # feature is enabled.  Parsing the apt.dat 1206 centerlines is skipped
     # while service roads are disabled (don't derive routes we won't use).
-    if ENABLE_SERVICE_ROADS:
+    # SERVICE_ROAD_CARVE (s79, docs/service_road_carve.md) needs the same
+    # merged 1206 centerlines for its ON-pavement road detection.
+    if ENABLE_SERVICE_ROADS or SERVICE_ROAD_CARVE:
         layout.apt_service_centerlines = APR.service_road_centerlines(apt, to_m)
         if layout.apt_service_centerlines:
             UI.vprint(1,
@@ -2207,6 +2210,79 @@ def build_airport_pavement(icao: str, xplane_root: str,
     from .pavement.centerlines import _trim_short_bend_hooks
     osm_centerlines = _trim_short_bend_hooks(osm_centerlines)
 
+    # ── (s79) ON-PAVEMENT service-road centerlines (SVC refs) ─────
+    # docs/service_road_carve.md: qualifying apt.dat 1206 truck-route
+    # runs (narrow dedicated strips, away from terminals) join the
+    # centerline set here and ride the SAME rect → junction →
+    # absorption decomposition as a taxiway (user 2026-06-11), with
+    # role ``service_road`` forced by the SVC ref prefix in
+    # ``_build_taxi_rects``.  Late join — after the taxi-specific
+    # trim / spine passes (roads are not aircraft taxi paths), before
+    # the off-corridor drop and rect construction.
+    _svc_widths: Dict[str, float] = {}   # SVC run ref → measured width
+    if SERVICE_ROAD_CARVE and pav_union is not None \
+            and not pav_union.is_empty:
+        _svc_routes = list(getattr(layout, "apt_service_centerlines",
+                                   None) or [])
+        if _svc_routes:
+            from .pavement.service_roads import detect_road_runs
+            from .pavement.centerlines import split_merged_centerline
+            # Mode-B source polys = apt.dat-AUTHORED pavement only:
+            # narrow DSF strips at HECA qualified runs the user ruled
+            # NOT roads (2026-06-11 verdict pinned HECA's set); the
+            # edge-blended-road case (CYXY pav[1] "New Taxiway 40")
+            # is an apt.dat 110 polygon.
+            _svc_runs = detect_road_runs(
+                _svc_routes, pav_union,
+                terminal_polys=terminal_polys,
+                runway_union=layout.runway_union,
+                source_polys=apt_only_pav_polys)
+            _svc_lines: List[Tuple[LineString, str]] = []
+            for _k, (_run, _w, _rname) in enumerate(_svc_runs, 1):
+                _ref = f"SVC{_k}"
+                _svc_widths[_ref] = float(_w)
+                for _piece, _pr in split_merged_centerline(
+                        _run, _ref, rwy_centerlines):
+                    if _piece.is_empty or _piece.length < 1.0:
+                        continue
+                    _svc_lines.append((_piece, _ref))
+            if _svc_lines:
+                # ★ 1206 PROVENANCE BEATS DISCOVERY (user 2026-06-11,
+                # CYXY verdict): the medial-axis machinery discovers the
+                # same narrow lanes as unreferenced TX taxiways, and the
+                # rect overlap-drop then kills the ROAD rect.  Remove
+                # discovered TX centerlines covered by a qualifying road
+                # run — the lane is a road, not a taxiway.
+                try:
+                    _svc_cover = unary_union(
+                        [p for p, _r in _svc_lines]).buffer(18.0)
+                    _kept_cl = []
+                    _n_tx_dropped = 0
+                    for _cl, _cref in osm_centerlines:
+                        if (_cref.startswith("TX") and _cl.length > 0.0
+                                and _cl.intersection(_svc_cover).length
+                                > 0.6 * _cl.length):
+                            _n_tx_dropped += 1
+                            continue
+                        _kept_cl.append((_cl, _cref))
+                    osm_centerlines = _kept_cl
+                except _GEOM_EXC:
+                    _n_tx_dropped = 0
+                osm_centerlines = list(osm_centerlines) + _svc_lines
+                # Reclassification / repair passes measure junction
+                # territory against the FULL preserved centerline set —
+                # roads included, so the road-junction territory at
+                # bends (the #198 U-turn) stays junction, not apron.
+                layout.apt_taxi_centerlines = (
+                    list(layout.apt_taxi_centerlines) + _svc_lines)
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: {len(_svc_lines)} "
+                    f"service-road centerline piece(s) from "
+                    f"{len(_svc_runs)} qualifying 1206 run(s)"
+                    + (f"; {_n_tx_dropped} discovered TX line(s) "
+                       f"yielded to road provenance."
+                       if _n_tx_dropped else "."))
+
     # ── Drop runway-crossing + junction-buried centerlines ────────
     # A taxi centerline whose body lies inside the runway (the runway
     # emit covers that surface) or buried in the middle of a wide
@@ -2214,8 +2290,17 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # taxiway rect — drop it before rect construction (user 2026-05-31).
     from .pavement.centerlines import _drop_offcorridor_centerlines
     _n_before = len(osm_centerlines)
-    osm_centerlines, _n_rwy, _n_buried = _drop_offcorridor_centerlines(
-        osm_centerlines, pav_union, layout.runway_union)
+    # (s79) SVC road lines are EXEMPT from the off-corridor drop:
+    # `detect_road_runs` already qualified them, and an edge-blended
+    # road (its own strip ALONG apron pavement) reads "junction-buried"
+    # to the corridor test even though it is a real road lane.
+    _svc_keep = [(c, r) for (c, r) in osm_centerlines
+                 if r.startswith("SVC")]
+    _non_svc = [(c, r) for (c, r) in osm_centerlines
+                if not r.startswith("SVC")]
+    _non_svc, _n_rwy, _n_buried = _drop_offcorridor_centerlines(
+        _non_svc, pav_union, layout.runway_union)
+    osm_centerlines = _non_svc + _svc_keep
     if _n_rwy or _n_buried:
         UI.vprint(1,
             f"  [pav-builder] {icao}: dropped {_n_rwy} runway-crossing + "
@@ -2254,7 +2339,8 @@ def build_airport_pavement(icao: str, xplane_root: str,
         osm_centerlines, pav_union, layout.runway_union,
         rwy_centerlines, apt_vertices=apt_pav_vertices,
         ref_overall_bearings=ref_overall_bearings,
-        registry=layout.canonical_points)
+        registry=layout.canonical_points,
+        svc_widths=_svc_widths or None)
 
     # Drop DEGENERATE clipped taxi rects (user 2026-06-01).  The rect builder
     # sizes each rect to the local pavement width and clips it to the pavement
@@ -2509,6 +2595,71 @@ def build_airport_pavement(icao: str, xplane_root: str,
                                 and inter.area
                                 / smaller_area
                                 <= RECT_OVERLAP_FRAC_TOL):
+                            continue
+                        # (s79) 1206 PROVENANCE BEATS DISCOVERY (user
+                        # 2026-06-11): a road (SVC) rect overlapping a
+                        # DISCOVERED (TX/unref) rect wins regardless of
+                        # axis length — the lane is a road.  Referenced
+                        # aircraft taxiways still outrank roads via the
+                        # normal length rule below.
+                        _svc_i = ref_i.startswith("SVC")
+                        _svc_j = ref_j.startswith("SVC")
+                        _disc_i = ref_i.startswith("TX") or not ref_i
+                        _disc_j = ref_j.startswith("TX") or not ref_j
+                        if _svc_i and _disc_j:
+                            drop_idx.add(j)
+                            continue
+                        if _svc_j and _disc_i:
+                            drop_idx.add(i)
+                            break
+                        if _svc_i and _svc_j:
+                            # (s79) ROAD-vs-ROAD overlap: an out-and-
+                            # back 1206 route yields two parallel runs
+                            # whose rects overlap; dropping one loses
+                            # real road coverage (CYXY "Crew cars" /
+                            # pav[1]).  CLIP the shorter rect to its
+                            # non-overlapping remainder instead; drop
+                            # only when nothing usable remains.
+                            li, lj = ((i, j) if len_i < len_j
+                                      or (abs(len_i - len_j) < 0.5
+                                          and rect_i.area < rect_j.area)
+                                      else (j, i))
+                            r_lose, a_lose, ro_lose, rf_lose = kept[li]
+                            r_win = kept[lj][0]
+                            try:
+                                rem = r_lose.difference(r_win)
+                            except _GEOM_EXC:
+                                rem = None
+                            best_rem = None
+                            if rem is not None and not rem.is_empty:
+                                cand = (rem.geoms if rem.geom_type
+                                        == "MultiPolygon" else [rem])
+                                polys9 = [g for g in cand
+                                          if g.geom_type == "Polygon"
+                                          and g.area >= 150.0]
+                                if polys9:
+                                    best_rem = max(polys9,
+                                                   key=lambda g: g.area)
+                            if best_rem is None:
+                                drop_idx.add(li)
+                            else:
+                                try:
+                                    a_new = a_lose.difference(r_win)
+                                except _GEOM_EXC:
+                                    a_new = a_lose
+                                if a_new.geom_type == "MultiLineString" \
+                                        and not a_new.is_empty:
+                                    a_new = max(a_new.geoms,
+                                                key=lambda g: g.length)
+                                if (a_new.is_empty
+                                        or a_new.geom_type
+                                        != "LineString"):
+                                    a_new = a_lose
+                                kept[li] = (best_rem, a_new, ro_lose,
+                                            rf_lose)
+                                changed = True
+                            if li == i:
+                                break
                             continue
                         # Drop the shorter-axis rect; tie-break by
                         # smaller area.
@@ -3033,6 +3184,48 @@ def build_airport_pavement(icao: str, xplane_root: str,
         _reclassify_runway_disconnected_to_groundside(
             layout, icao=icao, dem=dem,
             tile_lat=tile_lat, tile_lon=tile_lon)
+
+        # (s79) SERVICE-JUNCTION re-role (docs/service_road_carve.md):
+        # a junction whose pavement neighbours are EXCLUSIVELY
+        # ``service_road`` rects (the #198 U-turn bulge between the two
+        # road legs) is road territory — 4 % ``service_junction``, not a
+        # 1.5 % aircraft junction.  A junction shared with any aircraft
+        # pavement (the road's mouth at taxiway S) stays ROLE_JUNCTION.
+        if SERVICE_ROAD_CARVE:
+            from .layout import ROLE_SERVICE_JUNCTION, ROLE_SERVICE_ROAD
+            _aircraft_roles = {
+                ROLE_RUNWAY, "primary_parallel", "secondary_parallel",
+                ROLE_STUB, "cross_connector", "apron", "terminal"}
+            _n_svc_j = 0
+            for _ji, _js in enumerate(layout.shapes):
+                if _js.role != "junction" or _js.polygon is None \
+                        or _js.polygon.is_empty:
+                    continue
+                _has_road = _has_aircraft = False
+                for _os9 in layout.shapes:
+                    if _os9 is _js or _os9.polygon is None \
+                            or _os9.polygon.is_empty:
+                        continue
+                    if _os9.role not in _aircraft_roles \
+                            and _os9.role != ROLE_SERVICE_ROAD:
+                        continue
+                    try:
+                        if _js.polygon.distance(_os9.polygon) > 0.2:
+                            continue
+                    except _GEOM_EXC:
+                        continue
+                    if _os9.role == ROLE_SERVICE_ROAD:
+                        _has_road = True
+                    else:
+                        _has_aircraft = True
+                        break
+                if _has_road and not _has_aircraft:
+                    _js.role = ROLE_SERVICE_JUNCTION
+                    _n_svc_j += 1
+            if _n_svc_j:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: re-roled {_n_svc_j} "
+                    f"road-only junction(s) → service_junction (4 %).")
 
         # Single-pass sloping-edge absorption (user 2026-05-17): dissolve
         # a sloping rect that shares a sloping edge with a genuine

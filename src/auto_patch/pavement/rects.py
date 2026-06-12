@@ -27,6 +27,7 @@ with internal callers in ``O4_Airport_Pavement_Builder``):
 from __future__ import annotations
 
 import math
+import os
 
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, MultiLineString, Point, Polygon
@@ -39,6 +40,7 @@ from ..layout import (
     ROLE_CROSS_CONNECTOR,
     ROLE_PRIMARY_PARALLEL,
     ROLE_SECONDARY_PARALLEL,
+    ROLE_SERVICE_ROAD,
     ROLE_STUB,
     SHARED_VERTEX_TOL_M,
 )
@@ -77,6 +79,7 @@ def _build_taxi_rects(
     apt_vertices: list[tuple[float, float]] | None = None,
     ref_overall_bearings: dict[str, float] | None = None,
     registry: CanonicalPointRegistry | None = None,
+    svc_widths: dict[str, float] | None = None,
 ) -> list[tuple[Polygon, LineString, str, str]]:
     """Convert each usable centerline into a 4-vertex rect.
 
@@ -156,6 +159,10 @@ def _build_taxi_rects(
         if clipped.geom_type != "LineString":
             continue
         if clipped.length < 20.0:
+            if ref.startswith("SVC") \
+                    and os.environ.get("O4_SVC_DEBUG") == "1":
+                print(f"[svc-drop] {ref} axis={axis.length:.0f}: "
+                      f"clipped to {clipped.length:.0f} m (<20)")
             continue
 
         # Probe half-widths along axis.  ``narrow_hw`` (p10) is the
@@ -166,7 +173,23 @@ def _build_taxi_rects(
         # that extra width is junction territory.
         _natural_hw, _max_hw, narrow_hw = _natural_half_width(
             clipped, pav_non_rwy)
-        if narrow_hw < 3.5 or narrow_hw > 40.0:
+        # (s79) SVC road axes hug the OUTER pavement edge (the truck
+        # drives the strip's grass side), so the boundary-distance
+        # probe under-reads the half-width.  Use the detection's
+        # measured cross-section (``svc_widths``, keyed by run ref)
+        # as the floor instead of dropping the lane.
+        _is_svc = ref.startswith("SVC")
+        _svc_w = (svc_widths or {}).get(ref) if _is_svc else None
+        if _svc_w:
+            narrow_hw = max(narrow_hw, _svc_w / 2.0)
+        # (s79) roads may be narrower than any taxiway (CYXY 'D': 5.3 m
+        # ramp) — the SVC floor is 2.5 m half-width, taxi stays 3.5.
+        _hw_floor = 2.5 if _is_svc else 3.5
+        if narrow_hw < _hw_floor or narrow_hw > 40.0:
+            if _is_svc and os.environ.get("O4_SVC_DEBUG") == "1":
+                print(f"[svc-drop] {ref} len={clipped.length:.0f}: "
+                      f"narrow_hw={narrow_hw:.1f} out of "
+                      f"[{_hw_floor},40]")
             continue
 
         # Width-based endpoint trim (general rule, user 2026-05-30):
@@ -183,8 +206,13 @@ def _build_taxi_rects(
             clipped, pav_non_rwy, narrow_hw)
         trim_narrow_hw = narrow_hw
 
-        # Dedup against trimmed axis
-        if emitted_union is not None and not emitted_union.is_empty:
+        # Dedup against trimmed axis.  (s79) SVC road pieces are EXEMPT:
+        # a discovered TX rect emitted earlier over the same lane must
+        # not silently swallow the road — both emit, and the overlap
+        # pass drops the DISCOVERED one (1206 provenance wins, user
+        # 2026-06-11).
+        if not _is_svc and emitted_union is not None \
+                and not emitted_union.is_empty:
             try:
                 inside_len = trimmed.intersection(emitted_union).length
                 if inside_len / trimmed.length > 0.7:
@@ -225,7 +253,10 @@ def _build_taxi_rects(
                 and rwy_centerlines):
             db_axis = _axis_to_nearest_rwy_db(
                 trimmed, rwy_centerlines)
-            if db_axis is not None and db_axis >= 20.0:
+            # (s79) SVC roads always get the asymmetric retry — a road
+            # flares where it meets aprons regardless of its bearing to
+            # the runway (the bearing test is a taxi-stub heuristic).
+            if _is_svc or (db_axis is not None and db_axis >= 20.0):
                 rect = _rect_from_axis_extended(
                     trimmed, width, pav_non_rwy,
                     apt_vertices=apt_vertices,
@@ -233,7 +264,11 @@ def _build_taxi_rects(
                     half_left=half_left,
                     half_right=half_right,
                     registry=registry)
-        if rect is None or rect.is_empty:
+        if rect is None or rect.is_empty \
+                or (_is_svc and rect.area < 100.0):
+            if _is_svc and os.environ.get("O4_SVC_DEBUG") == "1":
+                print(f"[svc-drop] {ref} len={trimmed.length:.0f}: "
+                      f"rect builder returned none/degenerate")
             continue
         # Skip invalid rects (self-intersecting after snap).
         if not rect.is_valid:
@@ -268,7 +303,14 @@ def _build_taxi_rects(
         n_off_boundary = sum(
             1 for (cx, cy) in rect_coords
             if Point(cx, cy).distance(boundary) > CORNER_OFF_BOUNDARY_TOL_M)
-        if n_off_boundary >= 2:
+        # (s79) SVC road rects are EXEMPT from the two interior gates
+        # below: `detect_road_runs` already guarantees strip-ness
+        # (cross-section ≤ cap or a narrow source polygon), and an
+        # edge-blended road — its own strip running ALONG apron
+        # pavement (CYXY pav[1] "New Taxiway 40", user-confirmed ROAD
+        # 2026-06-11) — legitimately has its inner long edge inside
+        # the fused pavement.
+        if n_off_boundary >= 2 and not _is_svc:
             # ≥ 2 corners away from any pavement edge — the rect
             # sits inside an apron.  Skip it; the apron pavement
             # stays as residue → junction.
@@ -295,7 +337,7 @@ def _build_taxi_rects(
         # quasi-rectangle whose long edges sit deep inside junction
         # pavement (with adjacent junctions on both sides).  Drop
         # the rect so the pavement stays as junction residue.
-        if not _rect_long_edges_at_pavement_boundary(
+        if not _is_svc and not _rect_long_edges_at_pavement_boundary(
                 rect, trimmed, pav_non_rwy):
             continue
 
@@ -319,6 +361,13 @@ def _build_taxi_rects(
         role = _classify_role(trimmed, width, rwy_centerlines,
                                rwy_union, ref=ref,
                                ref_overall_bearings=ref_overall_bearings)
+        # (s79) SVC refs are ground-vehicle ROAD centerlines (qualifying
+        # apt.dat 1206 runs, docs/service_road_carve.md) — classified by
+        # PROVENANCE, not geometry: the 4 % ``service_road`` law applies
+        # regardless of bearing/length (a road parallel to the runway is
+        # still a road, never a primary_parallel/stub).
+        if ref.startswith("SVC"):
+            role = ROLE_SERVICE_ROAD
         # Per user 2026-05-16: drop unrefed STUB rects whose
         # centerline is short.  Unrefed centerlines come from
         # apt.dat taxi edges with no name — at most airports those
@@ -357,6 +406,10 @@ def _build_taxi_rects(
     # fragment across internal bends.
     def _should_dedup(ref_str: str, role_str: str) -> bool:
         if not ref_str:
+            return False
+        if ref_str.startswith("SVC"):
+            # (s79) SVC digits are run indices, not stub sub-refs — a
+            # road run legitimately emits several rects along its bends.
             return False
         if any(c.isdigit() for c in ref_str):
             return True
