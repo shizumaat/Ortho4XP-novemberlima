@@ -274,6 +274,13 @@ def _emit_tunnel_portals(
         return (tags9.get("highway") in HW_TUNNEL_TYPES
                 or tags9.get("railway") in RAIL_TUNNEL_TYPES)
     TUNNEL_VALUES = {"yes", "building_passage"}
+    # Portal EMISSION qualifies only real excavated tunnels (user
+    # 2026-06-12): ``building_passage`` is a BUILDING built over an
+    # at-grade road — no trench, no ramps, nothing for the patch to
+    # model (KPHL's terminal-complex service passages).  The broader
+    # TUNNEL_VALUES set stays for the surface-walk exclusions — a
+    # ramp should not continue INTO a passage either way.
+    PORTAL_TUNNEL_VALUES = {"yes"}
     # Build node-to-way and way-by-id indices for surface-road walking.
     way_by_id: dict[str, tuple[list[str], dict[str, str]]] = {}
     node_to_ways: dict[str, list[str]] = {}
@@ -550,7 +557,7 @@ def _emit_tunnel_portals(
     _emit_start_idx = len(layout.shapes)
 
     for tw_id, t_nrefs, t_tags in ways_r:
-        if t_tags.get("tunnel") not in TUNNEL_VALUES:
+        if t_tags.get("tunnel") not in PORTAL_TUNNEL_VALUES:
             continue
         hw = t_tags.get("highway")
         if not _tunnelable(t_tags):
