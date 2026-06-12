@@ -177,6 +177,30 @@ def check_self_overlap(layout):
                 continue
             if inter.is_empty or inter.area <= NOISE_M2:
                 continue
+            # Hairline weave: boundary conformance + later sliver-
+            # vertex drops leave mm-wide ribbons along long shared
+            # edges (KPHL terminal22 ∩ apron: 0.185 m² over a 127 m
+            # run = ~1.5 mm wide) whose raw AREA beats the flat floor
+            # but which have no mesh-scale width.  An overlap that
+            # erodes away at 1 cm cannot survive triangulation; a
+            # real double-cover (≥ a few cm wide) does survive.
+            try:
+                if inter.area <= 5.0:
+                    # The intersection of two weaving boundaries is
+                    # typically a GeometryCollection (polygons + line
+                    # fragments) — erode only its polygonal part.
+                    if inter.geom_type == "GeometryCollection":
+                        from shapely.ops import unary_union as _uu
+                        inter_poly = _uu([g for g in inter.geoms
+                                          if g.geom_type in
+                                          ("Polygon", "MultiPolygon")])
+                    else:
+                        inter_poly = inter
+                    if (inter_poly.is_empty
+                            or inter_poly.buffer(-0.01).is_empty):
+                        continue
+            except Exception:
+                pass
             c = inter.representative_point()
             pairs.append((inter.area, idx_a, idx_b, _ll(layout, c.x, c.y)))
     pairs.sort(key=lambda r: r[0], reverse=True)

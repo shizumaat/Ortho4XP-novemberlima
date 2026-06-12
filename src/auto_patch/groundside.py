@@ -419,7 +419,15 @@ def _clean_merge(merged):
         ring = _drop_sliver_corners(ring)
         if len(ring) < 3:
             return None
-        cleaned = Polygon(ring)
+        # Keep the merged polygon's interior rings — a bare
+        # Polygon(ring) FILLED them, re-covering a terminal pad the
+        # overlap-clip had carved out of the apron (KPHL terminal11,
+        # 6,352 m² overlap; no clip pass runs after this absorb).
+        from .junction_rules import _rebuild_ring_with_holes
+        cleaned = _rebuild_ring_with_holes(ring, merged,
+                                           normalize=False)
+        if cleaned is None:
+            return None
         if not cleaned.is_valid:
             cleaned = cleaned.buffer(0)
         if cleaned.geom_type != "Polygon" or cleaned.is_empty:
@@ -496,12 +504,16 @@ def merge_small_apron_fragments(layout: "PavementLayout",
     return n
 
 
-def _merge_piece_into_apron(piece: "Polygon", apron, radius_m: float) -> bool:
+def _merge_piece_into_apron(piece: "Polygon", apron, radius_m: float,
+                            clip_against=None) -> bool:
     """Union ``piece`` into ``apron`` as ONE continuous, node-shared polygon and
     rebuild the apron's per-vertex altitudes: old vertices keep theirs, new
     (piece) vertices sample the apron's PRE-merge surface (``_edge_interp_alt``).
     Returns ``False`` (caller falls back) if the union isn't a clean single
-    polygon."""
+    polygon.  ``clip_against`` (e.g. the terminal-pad union) is subtracted
+    from the cleaned merge — ``_clean_merge``'s sliver-corner drop can chord
+    a notch ACROSS a terminal edge (KPHL terminal22: a 0.4 m × 2.5 m
+    incursion pocket), and no overlap-clip pass runs after this absorb."""
     from types import SimpleNamespace
     from .clearance import _edge_interp_alt
     before = apron.polygon
@@ -525,6 +537,17 @@ def _merge_piece_into_apron(piece: "Polygon", apron, radius_m: float) -> bool:
     merged = _clean_merge(merged)
     if merged is None:
         return False
+    if clip_against is not None and not clip_against.is_empty:
+        try:
+            if merged.intersects(clip_against):
+                clipped = merged.difference(clip_against)
+                if clipped.geom_type == "MultiPolygon":
+                    clipped = max(clipped.geoms, key=lambda g: g.area)
+                if (clipped.geom_type == "Polygon"
+                        and not clipped.is_empty):
+                    merged = clipped
+        except _GEOM_EXC:
+            pass
     if before_na is None:
         # Flat apron: the union stays flat at the same altitude, nothing to
         # rebuild per-vertex.
@@ -557,11 +580,16 @@ def _merge_piece_into_apron(piece: "Polygon", apron, radius_m: float) -> bool:
     return True
 
 
-def _merge_piece_into_terminal(piece: "Polygon", terminal, radius_m: float) -> bool:
+def _merge_piece_into_terminal(piece: "Polygon", terminal, radius_m: float,
+                               clip_against=None) -> bool:
     """Union ``piece`` into ``terminal`` as one continuous polygon, kept FLAT at
     the terminal's level (building pads are flat).  Same thin-gap bridge as the
     apron merge for point-touching pieces.  ``False`` if the union isn't a clean
-    single polygon."""
+    single polygon.  ``clip_against`` (the apron union) is subtracted from the
+    cleaned merge: the 0.6 m gap-bridge can lap onto an adjacent apron's
+    footprint, and the apron-side absorb bridges the SAME thin gap from the
+    other side — the two independently-bridged rings overlapped by a ~0.1 m²
+    sliver at KPHL terminal22, with no overlap-clip pass running after."""
     before = terminal.polygon
     try:
         merged = unary_union([before, piece])
@@ -575,6 +603,17 @@ def _merge_piece_into_terminal(piece: "Polygon", terminal, radius_m: float) -> b
     merged = _clean_merge(merged)
     if merged is None:
         return False
+    if clip_against is not None and not clip_against.is_empty:
+        try:
+            if merged.intersects(clip_against):
+                clipped = merged.difference(clip_against)
+                if clipped.geom_type == "MultiPolygon":
+                    clipped = max(clipped.geoms, key=lambda g: g.area)
+                if (clipped.geom_type == "Polygon"
+                        and not clipped.is_empty):
+                    merged = clipped
+        except _GEOM_EXC:
+            pass
     lvl = _shape_repr_alt(terminal)
     terminal.polygon = merged
     if lvl is not None:
@@ -627,6 +666,13 @@ def _absorb_apron_enclosed_groundside(
     except _GEOM_EXC:
         term_union = None
     absorbed = 0
+    # Running clip unions: a piece absorbed into the APRON earlier in
+    # this loop is apron footprint the next TERMINAL merge must not lap
+    # onto (and vice versa) — the start-of-pass unions don't contain
+    # it, and both sides' 0.6 m gap-bridges can otherwise claim the
+    # same thin gap (KPHL terminal22 ∩ apron, ~0.1 m² sliver).
+    apron_clip = apron_union
+    term_clip = term_union
     for s in gs_shapes:
         p = s.polygon
         apron_f = _perimeter_frac_near(p, apron_union, radius_m)
@@ -642,9 +688,15 @@ def _absorb_apron_enclosed_groundside(
         if term_f >= _APRON_ISLAND_TERM_MAJORITY and terminal_shapes:
             host_t = _best_bordering_shape(p, terminal_shapes, radius_m)
             if host_t is not None and _merge_piece_into_terminal(
-                    p, host_t, radius_m):
+                    p, host_t, radius_m, clip_against=apron_clip):
                 s.polygon = None
                 absorbed += 1
+                try:
+                    term_clip = unary_union(
+                        [g for g in (term_clip, host_t.polygon)
+                         if g is not None])
+                except _GEOM_EXC:
+                    pass
                 continue
         # Clip to the terminal footprint so aircraft apron never intrudes
         # under the building; keep the largest surviving piece.
@@ -692,9 +744,16 @@ def _absorb_apron_enclosed_groundside(
         # The flush standalone re-tag below is the fallback when there is no
         # apron to merge into.
         host = _best_bordering_shape(q, apron_shapes, radius_m)
-        if host is not None and _merge_piece_into_apron(q, host, radius_m):
+        if host is not None and _merge_piece_into_apron(
+                q, host, radius_m, clip_against=term_clip):
             s.polygon = None
             absorbed += 1
+            try:
+                apron_clip = unary_union(
+                    [g for g in (apron_clip, host.polygon)
+                     if g is not None])
+            except _GEOM_EXC:
+                pass
             continue
         # Standalone re-tag fallback (no bordering apron to merge into): the
         # piece becomes a flush apron-island at the mean representative
