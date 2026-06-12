@@ -625,9 +625,11 @@ INTERIOR_PATH_ENTRIES = _os.environ.get("O4_INTERIOR_PATH", "1") == "1"
 # — qualifying runs join the centerline set as ``SVC*`` refs and ride
 # the single rect → junction → absorption decomposition with role
 # ``service_road`` (4 %).  Independent of ``ENABLE_SERVICE_ROADS`` (the
-# deferred OSM small-road / off-pavement builder).  Default OFF during
-# bring-up; flip per-build via ``O4_SERVICE_ROAD_CARVE=1``.
-SERVICE_ROAD_CARVE = _os.environ.get("O4_SERVICE_ROAD_CARVE", "0") == "1"
+# deferred OSM small-road / off-pavement builder).  DEFAULT ON for the
+# user's in-sim evaluation (2026-06-12; Steps C/D landed @b391e27 —
+# CYXY roads-on 0/0/0, HECA 57/0/0 invariants held);
+# ``O4_SERVICE_ROAD_CARVE=0`` restores the road-less build.
+SERVICE_ROAD_CARVE = _os.environ.get("O4_SERVICE_ROAD_CARVE", "1") == "1"
 # Max perpendicular pavement cross-section for ROAD classification.
 # User rule "< 10 m"; measured at the HECA #198 switchback legs:
 # 8.2-9.4 m and 12.2 m (the fused DSF pavement includes shoulder) →
