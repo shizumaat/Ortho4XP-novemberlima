@@ -1,5 +1,27 @@
 # Auto-Patch Status — session 78 = NETWORK PROFILE MODEL (#4) BUILT + HECA in-sim rulings; NEXT SESSION STARTS BELOW
 
+## REFACTOR (user-approved, any future session): rename `unified_jacobi.py` → `airside_grading.py`
+Both name words are fossils ("unified" = the long-gone per-surface
+solver merge; "Jacobi" = the original iteration scheme — today the
+relaxation core is ~10 % of the file and Gauss-Seidel-flavoured).
+The file IS the airside grading engine (8.6 k lines, 60 defs):
+orchestration cascade, solver graph, the long-range law
+(reach bands / interior-path entries), within-shape enforcement,
+runway-flex interaction, the corridor/network-profile wiring
+(~2.7 k lines), apron+terminal features, the write layer.
+PLAN: (1) single NO-OP commit — `git mv` + the 14 mechanical
+references (8 code files incl. `elevation_per_surface/solver.py`,
+`verification.py`, `interior_path.py`, `network_profile.py`,
+`tools/check_grade.py`, 2 tests, `__init__.py`) + CLAUDE.md/docs
+mentions; nothing else rides in the commit so the history seam is
+trivially auditable (`git log --follow` covers it; STATUS/memory/docs
+cite unified_jacobi line numbers — archaeology grep gets one seam).
+(2) DO NOT split the file yet: a large slice (tie/consensus/freeze
+corridor machinery) is slated for measured DELETION once the
+network-profile-model verdict closes (§6 of that plan) — split after
+those deletes, not before.  Natural split lines when the time comes:
+law/bands, corridor profiles, write layer, apron/terminal features.
+
 ## ★★ NEXT SESSION (user directives, 2026-06-11 session close) ★★
 1. **The #198 road strip should have been DECOMPOSED, not patched.**
    The narrow, long switchback strip beside apron #198 (emit-#197,
