@@ -915,209 +915,345 @@ def _emit_tunnel_portals(
         # by offsetting the FIRST ramp segment's near corners
         # individually below; ``walk_pts`` itself stays at the portal.
 
-        # 2) Arm walls + 3) Ramp polygons — one per walk segment.
-        # Pre-compute per-vertex offset corners using the bisector
-        # of adjacent segments at interior bends.  This makes
-        # consecutive segments share their boundary vertices
-        # exactly — no overlap, no gap.
-        arm_off = combined_half + wall_gap_m + half_wall_w
-        n_w = len(walk_pts)
-        # Per-vertex perpendicular direction (unit vector).
-        verts_perp: list[tuple[float, float]] = []
-        verts_scale: list[float] = []  # extension scale (1/cos(θ/2))
-        for i in range(n_w):
-            if i == 0:
-                s = (walk_pts[1][0] - walk_pts[0][0],
-                     walk_pts[1][1] - walk_pts[0][1])
-                sl = math.hypot(*s)
-                verts_perp.append((-s[1] / sl, s[0] / sl))
-                verts_scale.append(1.0)
-            elif i == n_w - 1:
-                s = (walk_pts[i][0] - walk_pts[i - 1][0],
-                     walk_pts[i][1] - walk_pts[i - 1][1])
-                sl = math.hypot(*s)
-                verts_perp.append((-s[1] / sl, s[0] / sl))
-                verts_scale.append(1.0)
-            else:
-                s1 = (walk_pts[i][0] - walk_pts[i - 1][0],
-                      walk_pts[i][1] - walk_pts[i - 1][1])
-                s2 = (walk_pts[i + 1][0] - walk_pts[i][0],
-                      walk_pts[i + 1][1] - walk_pts[i][1])
-                l1 = math.hypot(*s1)
-                l2 = math.hypot(*s2)
-                u1 = (s1[0] / l1, s1[1] / l1)
-                u2 = (s2[0] / l2, s2[1] / l2)
-                avg = ((u1[0] + u2[0]) / 2.0,
-                       (u1[1] + u2[1]) / 2.0)
-                al = math.hypot(*avg)
-                if al < 1e-6:
-                    # Near-180° doubleback — use first segment's
-                    # perpendicular and scale 1.
-                    verts_perp.append((-u1[1], u1[0]))
+
+        def _emit_chain(chain_pts, chain_half, e_lo_c, e_hi_c,
+                        cap_gap):
+            """Emit arm walls + ramp chain along ``chain_pts`` at
+            half-width ``chain_half``, elevations linear from
+            ``e_lo_c`` (start) to ``e_hi_c`` (end).  ``cap_gap``
+            applies the first-segment wall_gap offset (the chain
+            abuts the portal cap).  Extracted verbatim from the
+            single-ramp emit so the parallel-bores path is
+            unchanged; the Y-split calls it once for the shared
+            throat and once per diverging branch (user 2026-06-12,
+            KPHL RWY 26 north portal: road+rail share the tunnel,
+            then fork right outside — the ramp must fork too)."""
+            n_c = len(chain_pts)
+            if n_c < 2:
+                return
+            c_cums = [0.0]
+            for i in range(1, n_c):
+                c_cums.append(c_cums[-1] + math.hypot(
+                    chain_pts[i][0] - chain_pts[i - 1][0],
+                    chain_pts[i][1] - chain_pts[i - 1][1]))
+            c_total = c_cums[-1]
+            if c_total < 1.0:
+                return
+            c_first = (chain_pts[1][0] - chain_pts[0][0],
+                       chain_pts[1][1] - chain_pts[0][1])
+            c_first_len = math.hypot(*c_first)
+            if c_first_len < 0.1:
+                return
+            c_first_dir = (c_first[0] / c_first_len,
+                           c_first[1] / c_first_len)
+            arm_off = chain_half + wall_gap_m + half_wall_w
+            verts_perp = []
+            verts_scale = []
+            for i in range(n_c):
+                if i == 0:
+                    s = (chain_pts[1][0] - chain_pts[0][0],
+                         chain_pts[1][1] - chain_pts[0][1])
+                    sl = math.hypot(*s)
+                    verts_perp.append((-s[1] / sl, s[0] / sl))
                     verts_scale.append(1.0)
-                    continue
-                tangent = (avg[0] / al, avg[1] / al)
-                perp = (-tangent[1], tangent[0])
-                # Adjust offset to compensate for bend angle.
-                # cos(θ/2) ≈ sqrt((1 + u1·u2) / 2).
-                dot = u1[0] * u2[0] + u1[1] * u2[1]
-                cos_half = max(0.1, math.sqrt(
-                    max(0.0, (1.0 + dot) / 2.0)))
-                verts_perp.append(perp)
-                verts_scale.append(1.0 / cos_half)
-
-        def _vertex_offset(idx: int, off: float
-                           ) -> tuple[float, float]:
-            px, py = walk_pts[idx]
-            nx, ny = verts_perp[idx]
-            scaled = off * verts_scale[idx]
-            return (px + nx * scaled, py + ny * scaled)
-
-        for i in range(n_w - 1):
-            p_a = walk_pts[i]
-            p_b = walk_pts[i + 1]
-            d_a = cum_dists[i]
-            d_b = cum_dists[i + 1]
-            seg_len = d_b - d_a
-            if seg_len < 0.5:
-                continue
-            frac_a = d_a / total_walk if total_walk > 0 else 0.0
-            frac_b = d_b / total_walk if total_walk > 0 else 0.0
-            e_a = (1 - frac_a) * elev_low + frac_a * elev_high
-            e_b = (1 - frac_b) * elev_low + frac_b * elev_high
-            # Arm walls (one per side).  Inner edge at +/- (arm_off
-            # − half_wall_w); outer edge at +/- (arm_off +
-            # half_wall_w).  Using the per-vertex bisector so
-            # adjacent segments share their join.
-            #
-            # Per user 2026-05-04: walls are at altitude ``apt_elev``;
-            # once the ramp climbs to that height the wall is just a
-            # spur sticking out of the terrain (a "trench").  Skip the
-            # wall when the segment runs entirely at or above the cap
-            # altitude; truncate it at the crossing point when only
-            # the upper end exceeds.
-            wall_top = apt_elev
-            wall_thresh = wall_top - 0.05  # 0.1 m altitude rounding
-            seg_e_lo = min(e_a, e_b)
-            seg_e_hi = max(e_a, e_b)
-            if seg_e_lo >= wall_thresh:
-                # Whole segment at/above wall height — no wall.
-                pass
-            else:
-                if seg_e_hi > wall_thresh and abs(e_b - e_a) > 1e-3:
-                    # Mixed: truncate at the crossing point on the
-                    # walk.  ``frac_cross`` runs 0→1 along the
-                    # segment; the wall covers walk[i] → cross only.
-                    frac_cross = (
-                        (wall_thresh - e_a) / (e_b - e_a))
-                    frac_cross = max(0.0, min(1.0, frac_cross))
+                elif i == n_c - 1:
+                    s = (chain_pts[i][0] - chain_pts[i - 1][0],
+                         chain_pts[i][1] - chain_pts[i - 1][1])
+                    sl = math.hypot(*s)
+                    verts_perp.append((-s[1] / sl, s[0] / sl))
+                    verts_scale.append(1.0)
                 else:
-                    frac_cross = 1.0
-                pa = walk_pts[i]
-                pb = walk_pts[i + 1]
-                cross = (
-                    pa[0] + frac_cross * (pb[0] - pa[0]),
-                    pa[1] + frac_cross * (pb[1] - pa[1]))
-                for sign in (+1, -1):
-                    inner = sign * (arm_off - half_wall_w)
-                    outer = sign * (arm_off + half_wall_w)
-                    ai = _vertex_offset(i, inner)
-                    ao = _vertex_offset(i, outer)
-                    if frac_cross >= 0.999:
-                        bi = _vertex_offset(i + 1, inner)
-                        bo = _vertex_offset(i + 1, outer)
-                    else:
-                        # Build the truncated end perpendicular at
-                        # ``cross`` using this segment's perp (no
-                        # bisector blend — the wall just stops here).
-                        sx, sy = (pb[0] - pa[0], pb[1] - pa[1])
-                        sl = math.hypot(sx, sy) or 1.0
-                        nx, ny = -sy / sl, sx / sl
-                        bi = (cross[0] + nx * inner,
-                              cross[1] + ny * inner)
-                        bo = (cross[0] + nx * outer,
-                              cross[1] + ny * outer)
-                    try:
-                        wp = Polygon([ai, bi, bo, ao])
-                        if not wp.is_valid:
-                            wp = wp.buffer(0)
-                        if (wp.geom_type == "Polygon"
-                                and not wp.is_empty
-                                and wp.area > 0.5):
-                            layout.shapes.append(BuiltShape(
-                                polygon=wp,
-                                role=ROLE_RETAINING_WALL,
-                                ref="tunnel_wall",
-                                altitude=round(apt_elev, 1)))
-                            exclusion_zones.append(wp)
-                    except _GEOM_EXC:
+                    s1 = (chain_pts[i][0] - chain_pts[i - 1][0],
+                          chain_pts[i][1] - chain_pts[i - 1][1])
+                    s2 = (chain_pts[i + 1][0] - chain_pts[i][0],
+                          chain_pts[i + 1][1] - chain_pts[i][1])
+                    l1 = math.hypot(*s1)
+                    l2 = math.hypot(*s2)
+                    u1 = (s1[0] / l1, s1[1] / l1)
+                    u2 = (s2[0] / l2, s2[1] / l2)
+                    avg = ((u1[0] + u2[0]) / 2.0,
+                           (u1[1] + u2[1]) / 2.0)
+                    al = math.hypot(*avg)
+                    if al < 1e-6:
+                        verts_perp.append((-u1[1], u1[0]))
+                        verts_scale.append(1.0)
                         continue
-            # Ramp polygon (single segment, sloped).  Corners
-            # share with adjacent segments via verts_perp.
-            #
-            # Per user 2026-05-04: the FIRST ramp segment's near
-            # edge sits ``wall_gap_m`` forward of the portal so the
-            # bottom of the ramp leaves the same clearance from the
-            # cap as it does from the side walls (the side walls
-            # themselves still touch the cap — continuous "U").
-            if i == 0 and first_len > wall_gap_m + 0.5:
-                near_xy = (walk_pts[0][0] + first_dir[0] * wall_gap_m,
-                           walk_pts[0][1] + first_dir[1] * wall_gap_m)
-                # Apply the perp offset at this shifted position
-                # using the first segment's perpendicular.
-                npx, npy = verts_perp[0]
-                ra = (near_xy[0] + npx * combined_half,
-                      near_xy[1] + npy * combined_half)
-                rd = (near_xy[0] - npx * combined_half,
-                      near_xy[1] - npy * combined_half)
-                # Pull the ramp's near-edge elevation forward by the
-                # same fraction so the slope rate stays correct.
-                if cum_dists[1] > 0:
-                    e_a = (
-                        e_a + (e_b - e_a)
-                        * (wall_gap_m / cum_dists[1]))
-            else:
-                ra = _vertex_offset(i, +combined_half)
-                rd = _vertex_offset(i, -combined_half)
-            rb = _vertex_offset(i + 1, +combined_half)
-            rc = _vertex_offset(i + 1, -combined_half)
-            # Rect convention (see _sample_runway_segment_elev):
-            # corners [0, 3] are the HIGH-elevation short edge
-            # (across the road at the high end), corners [1, 2]
-            # are the LOW-elevation short edge.  ra/rb sit on
-            # the +side, rd/rc on the -side; ra/rd are at walk[i]
-            # and rb/rc at walk[i+1].  Order corners so the slope
-            # axis runs ALONG the road (i ↔ i+1), not across it.
-            if e_b >= e_a:
-                # walk[i+1] = HIGH end → corners 0,3 at i+1
-                ramp_corners = [rb, ra, rd, rc]
-                eh, el = e_b, e_a
-            else:
-                # walk[i] = HIGH end → corners 0,3 at i
-                ramp_corners = [ra, rb, rc, rd]
-                eh, el = e_a, e_b
-            try:
-                rp = Polygon(ramp_corners)
-                if not rp.is_valid:
-                    rp = rp.buffer(0)
-                if (rp.geom_type == "Polygon"
-                        and not rp.is_empty
-                        and rp.area > 0.5):
-                    if abs(eh - el) >= 0.1:
-                        layout.shapes.append(BuiltShape(
-                            polygon=rp,
-                            role=ROLE_TUNNEL_RAMP,
-                            ref="tunnel_ramp",
-                            altitude_high=round(eh, 1),
-                            altitude_low=round(el, 1)))
+                    tangent = (avg[0] / al, avg[1] / al)
+                    perp = (-tangent[1], tangent[0])
+                    dot = u1[0] * u2[0] + u1[1] * u2[1]
+                    cos_half = max(0.1, math.sqrt(
+                        max(0.0, (1.0 + dot) / 2.0)))
+                    verts_perp.append(perp)
+                    verts_scale.append(1.0 / cos_half)
+
+            def _vertex_offset(idx, off):
+                px, py = chain_pts[idx]
+                nx, ny = verts_perp[idx]
+                scaled = off * verts_scale[idx]
+                return (px + nx * scaled, py + ny * scaled)
+
+            for i in range(n_c - 1):
+                p_a = chain_pts[i]
+                p_b = chain_pts[i + 1]
+                d_a = c_cums[i]
+                d_b = c_cums[i + 1]
+                seg_len = d_b - d_a
+                if seg_len < 0.5:
+                    continue
+                frac_a = d_a / c_total
+                frac_b = d_b / c_total
+                e_a = (1 - frac_a) * e_lo_c + frac_a * e_hi_c
+                e_b = (1 - frac_b) * e_lo_c + frac_b * e_hi_c
+                wall_top = apt_elev
+                wall_thresh = wall_top - 0.05
+                seg_e_lo = min(e_a, e_b)
+                seg_e_hi = max(e_a, e_b)
+                if seg_e_lo >= wall_thresh:
+                    pass
+                else:
+                    if seg_e_hi > wall_thresh \
+                            and abs(e_b - e_a) > 1e-3:
+                        frac_cross = (
+                            (wall_thresh - e_a) / (e_b - e_a))
+                        frac_cross = max(0.0, min(1.0, frac_cross))
                     else:
-                        layout.shapes.append(BuiltShape(
-                            polygon=rp,
-                            role=ROLE_TUNNEL_RAMP,
-                            ref="tunnel_ramp",
-                            altitude=round(
-                                0.5 * (eh + el), 1)))
-                    exclusion_zones.append(rp)
+                        frac_cross = 1.0
+                    pa = chain_pts[i]
+                    pb = chain_pts[i + 1]
+                    cross = (
+                        pa[0] + frac_cross * (pb[0] - pa[0]),
+                        pa[1] + frac_cross * (pb[1] - pa[1]))
+                    for sign in (+1, -1):
+                        inner = sign * (arm_off - half_wall_w)
+                        outer = sign * (arm_off + half_wall_w)
+                        ai = _vertex_offset(i, inner)
+                        ao = _vertex_offset(i, outer)
+                        if frac_cross >= 0.999:
+                            bi = _vertex_offset(i + 1, inner)
+                            bo = _vertex_offset(i + 1, outer)
+                        else:
+                            sx, sy = (pb[0] - pa[0], pb[1] - pa[1])
+                            sl = math.hypot(sx, sy) or 1.0
+                            nx, ny = -sy / sl, sx / sl
+                            bi = (cross[0] + nx * inner,
+                                  cross[1] + ny * inner)
+                            bo = (cross[0] + nx * outer,
+                                  cross[1] + ny * outer)
+                        try:
+                            wp = Polygon([ai, bi, bo, ao])
+                            if not wp.is_valid:
+                                wp = wp.buffer(0)
+                            if (wp.geom_type == "Polygon"
+                                    and not wp.is_empty
+                                    and wp.area > 0.5):
+                                layout.shapes.append(BuiltShape(
+                                    polygon=wp,
+                                    role=ROLE_RETAINING_WALL,
+                                    ref="tunnel_wall",
+                                    altitude=round(apt_elev, 1)))
+                                exclusion_zones.append(wp)
+                        except _GEOM_EXC:
+                            continue
+                if cap_gap and i == 0 \
+                        and c_first_len > wall_gap_m + 0.5:
+                    near_xy = (
+                        chain_pts[0][0] + c_first_dir[0] * wall_gap_m,
+                        chain_pts[0][1] + c_first_dir[1] * wall_gap_m)
+                    npx, npy = verts_perp[0]
+                    ra = (near_xy[0] + npx * chain_half,
+                          near_xy[1] + npy * chain_half)
+                    rd = (near_xy[0] - npx * chain_half,
+                          near_xy[1] - npy * chain_half)
+                    if c_cums[1] > 0:
+                        e_a = (
+                            e_a + (e_b - e_a)
+                            * (wall_gap_m / c_cums[1]))
+                else:
+                    ra = _vertex_offset(i, +chain_half)
+                    rd = _vertex_offset(i, -chain_half)
+                rb = _vertex_offset(i + 1, +chain_half)
+                rc = _vertex_offset(i + 1, -chain_half)
+                if e_b >= e_a:
+                    ramp_corners = [rb, ra, rd, rc]
+                    eh, el = e_b, e_a
+                else:
+                    ramp_corners = [ra, rb, rc, rd]
+                    eh, el = e_a, e_b
+                try:
+                    rp = Polygon(ramp_corners)
+                    if not rp.is_valid:
+                        rp = rp.buffer(0)
+                    if (rp.geom_type == "Polygon"
+                            and not rp.is_empty
+                            and rp.area > 0.5):
+                        if abs(eh - el) >= 0.1:
+                            layout.shapes.append(BuiltShape(
+                                polygon=rp,
+                                role=ROLE_TUNNEL_RAMP,
+                                ref="tunnel_ramp",
+                                altitude_high=round(eh, 1),
+                                altitude_low=round(el, 1)))
+                        else:
+                            layout.shapes.append(BuiltShape(
+                                polygon=rp,
+                                role=ROLE_TUNNEL_RAMP,
+                                ref="tunnel_ramp",
+                                altitude=round(
+                                    0.5 * (eh + el), 1)))
+                        exclusion_zones.append(rp)
+                except _GEOM_EXC:
+                    pass
+
+        # ── Y-SPLIT (user 2026-06-12): when cluster members share the
+        # portal but their ways DIVERGE just outside (KPHL RWY 26
+        # north: road and rail fork right after the tunnel), emit a
+        # shared throat to the fork station, then per-member branch
+        # ramps following each way separately as they grade to DEM.
+        # Parallel members (south side, SPJC divided highways) keep
+        # the single combined ramp unchanged.
+        def _point_at(pts, cums, s):
+            for i in range(1, len(pts)):
+                if cums[i] >= s:
+                    seg = cums[i] - cums[i - 1]
+                    t = ((s - cums[i - 1]) / seg) if seg > 0 else 0.0
+                    return (pts[i - 1][0]
+                            + t * (pts[i][0] - pts[i - 1][0]),
+                            pts[i - 1][1]
+                            + t * (pts[i][1] - pts[i - 1][1]))
+            return pts[-1]
+
+        s_div = None
+        member_chains = []
+        if len(cl) > 1:
+            for k in cl:
+                w_k = portal_data[k][2]
+                if w_k and len(w_k) >= 2:
+                    c_k = [0.0]
+                    for i in range(1, len(w_k)):
+                        c_k.append(c_k[-1] + math.hypot(
+                            w_k[i][0] - w_k[i - 1][0],
+                            w_k[i][1] - w_k[i - 1][1]))
+                    member_chains.append((k, w_k, c_k))
+            if len(member_chains) > 1:
+                probe_max = min(c[2][-1] for c in member_chains)
+                s = 10.0
+                while s < probe_max:
+                    pts_at = [_point_at(w, c, s)
+                              for (_k, w, c) in member_chains]
+                    spread = max(
+                        math.hypot(p1[0] - p2[0], p1[1] - p2[1])
+                        for x1, p1 in enumerate(pts_at)
+                        for p2 in pts_at[x1 + 1:])
+                    if spread > cluster_span + 8.0:
+                        s_div = s
+                        break
+                    s += 5.0
+                if s_div is not None and (probe_max - s_div) < 10.0:
+                    s_div = None     # fork too close to the end
+
+        if s_div is None:
+            _emit_chain(walk_pts, combined_half,
+                        elev_low, elev_high, True)
+        else:
+            # Shared throat on the (centred) canonical walk.
+            throat = [walk_pts[0]]
+            for i in range(1, len(walk_pts)):
+                if cum_dists[i] < s_div:
+                    throat.append(walk_pts[i])
+                else:
+                    break
+            throat.append(_point_at(walk_pts, cum_dists, s_div))
+            e_div = (elev_low + (elev_high - elev_low)
+                     * (s_div / total_walk if total_walk > 0
+                        else 0.0))
+            _cl_start_idx = len(layout.shapes)
+            _emit_chain(throat, combined_half,
+                        elev_low, e_div, True)
+            # Per-member branches along their OWN alignments —
+            # widest first; each later branch starts where it CLEARS
+            # the corridors of the ones already emitted (the fork
+            # crotch otherwise overlaps ramp-on-ramp).
+            ordered = []
+            for k, w_k, c_k in member_chains:
+                hw_k = portal_data[k][3]
+                half_k = 0.5 * _carriageway_width_for(
+                    hw_k, carriageway_width_m)
+                ordered.append((half_k, k, w_k, c_k))
+            ordered.sort(key=lambda t: -t[0])
+            # Every branch must clear the THROAT corridor too — a
+            # member's own arc-s_div point can sit slightly inside
+            # it (the throat runs on the canonical alignment), which
+            # lapped the branch's first ramp onto the throat's last.
+            prior: list = []          # (LineString, half)
+            try:
+                prior.append((LineString(throat), combined_half))
+            except _GEOM_EXC:
+                pass
+            for half_k, k, w_k, c_k in ordered:
+                branch = [_point_at(w_k, c_k, s_div)]
+                for i in range(1, len(w_k)):
+                    if c_k[i] > s_div:
+                        branch.append(w_k[i])
+                if len(branch) < 2:
+                    continue
+                if prior:
+                    # advance the start until clear of the throat +
+                    # every prior sibling corridor (sample 2 m).
+                    bl = LineString(branch)
+                    s9 = 0.0
+                    while s9 < bl.length - 4.0:
+                        pt9 = bl.interpolate(s9)
+                        if all(pt9.distance(pl) >= half_k + ph + 0.5
+                               for pl, ph in prior):
+                            break
+                        s9 += 2.0
+                    if s9 > 0.0:
+                        if bl.length - s9 < 6.0:
+                            continue
+                        head9 = bl.interpolate(s9)
+                        branch = ([(head9.x, head9.y)]
+                                  + [pp for i9, pp in enumerate(branch)
+                                     if bl.project(Point(pp)) > s9])
+                        if len(branch) < 2:
+                            continue
+                far_k = portal_data[k][5]
+                _emit_chain(branch, half_k, e_div, far_k, False)
+                try:
+                    prior.append((LineString(branch), half_k))
+                except _GEOM_EXC:
+                    pass
+            # WALL OPENINGS: a diverging branch must cross the
+            # throat's (or a sibling's) side wall — clip every wall
+            # piece of THIS cluster against the cluster's ramp
+            # polygons (walls are flat; clipping is safe).
+            try:
+                ramps9 = [s9.polygon for s9 in
+                          layout.shapes[_cl_start_idx:]
+                          if getattr(s9, 'ref', '') == 'tunnel_ramp'
+                          and s9.polygon is not None]
+                if ramps9:
+                    from shapely.ops import unary_union as _uu7
+                    ramp_u9 = _uu7(ramps9).buffer(0.3)
+                    for s9 in layout.shapes[_cl_start_idx:]:
+                        if getattr(s9, 'ref', '') != 'tunnel_wall' \
+                                or s9.polygon is None:
+                            continue
+                        if not s9.polygon.intersects(ramp_u9):
+                            continue
+                        d9 = s9.polygon.difference(ramp_u9)
+                        if d9.is_empty:
+                            s9.polygon = None
+                            continue
+                        parts9 = sorted(
+                            (g for g in getattr(d9, 'geoms', [d9])
+                             if g.geom_type == 'Polygon'
+                             and g.area >= 0.5),
+                            key=lambda g: -g.area)
+                        s9.polygon = parts9[0] if parts9 else None
+                    layout.shapes = [
+                        s9 for s9 in layout.shapes
+                        if not (getattr(s9, 'ref', '') == 'tunnel_wall'
+                                and s9.polygon is None)]
             except _GEOM_EXC:
                 pass
         n_emitted += 1
