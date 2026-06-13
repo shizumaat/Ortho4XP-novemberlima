@@ -1,4 +1,45 @@
-# Auto-Patch Status — session 80 = APRON-FOLLOWS RE-SOLVE BUILT + USER BOWL REPORT FIXED (pads land ON their chord windows); NEXT = in-sim verdict
+# Auto-Patch Status — session 80 = APRON-FOLLOWS + TWO-RATE CHORD WINDOWS (terminals adjust for the 1 % apron grade); ⚠ unified_jacobi p3 hunks UNCOMMITTED pending the terminal→building rename
+
+## ★★ SESSION 80 PART 3 (2026-06-12) — dev @d9f2af8: TWO-RATE CHORD WINDOWS — "terminal elevation adjusts to allow the apron to grade at 1 %" (user) ★★
+USER: "I was expecting terminal elevation to be adjusted to allow
+apron to grade at 1 %."  Built (config + network_profile committed
+@d9f2af8; ⚠ THE MATCHING unified_jacobi.py HUNKS ARE IN THE WORKING
+TREE BUT UNCOMMITTED — the concurrent session's terminal→building
+role rename is in-flight in that file and committing it now breaks
+clean-HEAD imports (layout.ROLE_BUILDING uncommitted).  COMMIT
+unified_jacobi WHEN THE RENAME LANDS.  Clean-reference copy (pre-
+rename tokens): /tmp/probes/s80_unified_jacobi_clean_round.py):
+1. `TERMINAL_CHORD_REACH_M` 200 → 400 (200 missed taxiway S 350-400 m
+   from HECA's big pad — its 1 % demand never entered the window).
+2. Windows at TWO RATES (1 % preference + APRON_MAX_GRADE law) in
+   `_terminal_chord_windows`; resolution `_chord_window_target`:
+   feasible 1 % → clamp; 1 % inverted → 1 % least-violation midpoint
+   clamped into the law window; law-infeasible → the pad SLOPES
+   (hierarchy: flatness yields to grade, never the apron).
+3. ★ SERVING test: a chord binds only across APRON — an intervening
+   taxiway re-anchors (at 400 m a far 109-corridor demanded 108 of a
+   pad two taxiways away).  Sampled every 8 m, leading source-taxiway
+   run ignored (`_crosses_taxi_t` / `_crosses_taxi9`).
+4. Floor pass mirrors the resolution; ★ both-inverted fallback gated
+   to ≤1 m inversions — a wide-inversion midpoint violates both sides
+   by half the gap (CYXY: ~705.9 floor vs ~702 runway-side ceiling
+   lifted lanes 4 m over the pad's law ceiling = a 102 % wall).
+5. Validator warn asserts the LAW window; 1 %-dev prints as debug (a
+   lawful complex compromise is not a defect).
+**MEASURED in a CLEAN WORKTREE at HEAD** (★ the main tree was carrying
+the rename mid-flight — builds there were contaminated; ALWAYS verify
+in a worktree when a concurrent refactor is live): HECA terminal1/2/9
+= **103.81 FLAT law-dev 0** (three edge-connected pads lawfully
+compromise conflicting 1 % windows: t2 wants ≥104.77, t1/t9 ≤103.48),
+terminal11 **SLOPES 101.2..106.3 ≈ 0.93 %** across the pad (its 1 %
+window [108.31,104.60] AND law window are geometrically infeasible —
+~106-east vs ~100-west serving planes; the slope bridges them), user's
+S→pad route ≈ 0.9-1 % ✓; **HECA per-axis within 63 = EXACTLY the
+gate-off baseline** (worst = pre-existing #257 family); SPJC + CYXY
+GREEN; runways exact; deterministic (seed 1==2).
+**OPEN:** (1) commit unified_jacobi when the rename lands (the tree
+copy already carries ROLE_BUILDING tokens, content = this round);
+(2) in-sim verdict; (3) #257 family.
 
 ## ★★ SESSION 80 PART 2 (2026-06-12) — dev @7bee273: USER BOWL REPORT FIXED — terminals ON their chord windows, zero warns ★★
 USER IN-SIM REPORT: taxiway S (shape 121, 109.4) → big pad (~100.8)
