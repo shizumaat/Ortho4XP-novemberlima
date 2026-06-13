@@ -98,6 +98,10 @@ HIGHWAY_CARRIAGEWAY_WIDTH_M = {
     "tertiary_link":     6.0,
     "residential":       7.0,
     "service":           6.0,
+    # Pseudo-type for railway tunnel bores (user 2026-06-12):
+    # double-track right-of-way — far narrower than the 22 m road
+    # default the KPHL RWY 26 rail branch first emitted with.
+    "railway":          10.0,
 }
 
 
@@ -562,6 +566,11 @@ def _emit_tunnel_portals(
         hw = t_tags.get("highway")
         if not _tunnelable(t_tags):
             continue
+        if hw is None and t_tags.get("railway") in RAIL_TUNNEL_TYPES:
+            # Pseudo-type so the width table can size rail bores
+            # (10 m double-track vs the 22 m road default).  Never in
+            # HW_TUNNEL_TYPES, so rail stays NEW-class for the gates.
+            hw = "railway"
         # OLD candidates (big_roads + highway type — the only ways the
         # emitter saw before 2026-06-12) keep the original behaviour
         # verbatim: no new gates (SPJC's user-approved tunnels emit
