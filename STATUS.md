@@ -1,4 +1,42 @@
-# Auto-Patch Status — session 80 = APRON-FOLLOWS RE-SOLVE BUILT (TERMINAL_NATURAL_LEVELS, default ON); NEXT = in-sim verdict + the 3 chord warns
+# Auto-Patch Status — session 80 = APRON-FOLLOWS RE-SOLVE BUILT + USER BOWL REPORT FIXED (pads land ON their chord windows); NEXT = in-sim verdict
+
+## ★★ SESSION 80 PART 2 (2026-06-12) — dev @7bee273: USER BOWL REPORT FIXED — terminals ON their chord windows, zero warns ★★
+USER IN-SIM REPORT: taxiway S (shape 121, 109.4) → big pad (~100.8)
+over ~350 m taxi route = 2.46 % bowl ("are the taxiways really at max
+grade? why is the apron allowed to exceed 1.5 % let alone 1 %?").
+**DIAGNOSIS (the full chain, each step measured):** (1) every existing
+law MEASURE reads that path 3–5× longer than physical — field graph
+1241 m, taxi_routing 1694 m vs ~350–400 m lateral — because they only
+know CENTERLINES + entries; the perpendicular-chord window is the
+correct lateral measure; (2) the within-shape law DOES flag the bowl
+(the standing HECA-within red IS this area) — the solver just couldn't
+fix it because the apron was CEILINGED by dense field anchors at
+~100: a 42 m gate-lane fragment at the pad face stayed at DEM because
+an apt.dat SVC service-road line overlaps it and the plane pass's
+ROAD EXEMPTION skipped it.  **FIXES @7bee273:** (a) SVC exemption
+REMOVED where road verts classify as apron (inside an apron polygon
+the apron law rules; true descend-ramps are carved out of the union
+and never classify); (b) `_terminal_chord_windows` extracted (shared
+validator + inherit) and the INHERIT TARGET CLAMPS into the complex's
+feasible window — law-pinned, no pair negotiation; NOT the rejected
+s79 lift: the field passes lift the anchors to the same plane first,
+and the measured acceptance still reverts what the apron can't absorb;
+(c) acceptance hardened ×2: LOCAL edge set (complex + 1-ring — whole-
+apron sets overlapped and one pad's strain falsely reverted a pad
+700 m away) and cost = SUMMED EXCESS (m) incl. the settled pad's own
+internal excess (a count weighed a 3 cm pair equal to a 2.6 m wall and
+kept the wall); reverted pads get the slope-fallback polish.
+**MEASURED:** HECA terminal1/2/9 = **102.78 FLAT** (s79 expectation
+~102.7 ✓), terminal11 = **104.41 FLAT** (the reported bowl: S→pad now
+1.3–1.4 % ✓), terminal4 flattens 93.9 (settled excess 3.5→1.5 m),
+**chord warns 0**; per-axis within 76 (63 gate-off; worst = the
+pre-existing #257 10 % family, was 18.2 % gate-off); runways exact;
+KPHL both rows flatten ~zero excess (#189 resolved); SPJC+CYXY GREEN;
+deterministic; gate-off byte-identical; suite 327p/3f = standing set
+(SPLP step, HECA within, compare_target_spjc fixture item).
+**OPEN:** in-sim verdict (RESTART Ortho4XP; O4_AUTO_PATCH_REBUILD=1);
+the #257 within-family remains the HECA red (pre-existing, both
+states); s79 #198-road + across-grass directives still queued.
 
 ## ★★ SESSION 80 (2026-06-12) — dev @2baaf6a: APRON-FOLLOWS RE-SOLVE BUILT END-TO-END (docs/apron_follows_resolve.md), gate `TERMINAL_NATURAL_LEVELS` DEFAULT ON ★★
 USER HIERARCHY (this session's directive): apron maintains grade to the
