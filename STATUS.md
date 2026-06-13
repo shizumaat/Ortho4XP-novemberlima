@@ -1,4 +1,61 @@
-# Auto-Patch Status — session 81 = HANGAR PADS + ROLE_BUILDING rename (uncommitted, ready); the s80p3 unified_jacobi hunks can now be committed WITH the rename
+# Auto-Patch Status — session 82 = TUNNEL Y-FORK rework + CONTINUOUS PERIMETER WALL + a latent to_osm bug fixed
+
+## ★★ SESSION 82 (2026-06-13) — TUNNEL FORK + CONTINUOUS DEM PERIMETER WALL (committed this session) ★★
+Reworked the KPHL road+rail tunnel fork (gate `TUNNEL_FORK_THROAT`,
+config default ON; OFF = legacy bare-crotch byte-identical).  All in
+`bridges.py _emit_tunnel_portals`; details + traps in memory
+`tunnel_fork_throat.md` and `docs/tunnel_fork_crotch_plan.md`.
+
+USER RULINGS (in order, all built):
+1. Bore forks EARLY (s_div margin 2 m) and the bore is SHORTENED to
+   `min(s_div, s_arm − 10)` so a ≥10 m throat junction widens cleanly
+   to the arms — no jog.  Arms start at the close symmetric `s_arm`.
+2. Bore stays a sloping rect; **bore width now spans each member way's
+   OUTER edge** (portal node ± its OWN carriageway half) — was head-
+   width only, so it fell short on the wider road side.  KPHL bore
+   20.8→22.9 m (covers the whole mouth).
+3. **Rail width 10→5 m** (single-track `railway=rail`) so the 9 m
+   tertiary road is ~2× it.  ⚠ reverts the s79 10 m double-track
+   assumption — flip to widening the road if that rail is double-track.
+4. **THE WALL IS ONE CONTINUOUS SHAPE around the whole tunnel
+   perimeter, fork or not** (user).  Per-segment/cap/throat walls
+   REMOVED (gate-on); at cluster end the ramp-union is offset-buffered
+   (`buffer(g1).difference(buffer(g0))`, mitre 2.0) → annulus, SLIT
+   into one hole-free ring (to_osm drops interior rings), node_altitudes
+   = DEM.  ONE tunnel_wall per cluster, DEM-following.
+The throat = an N-arm star-fan `node_altitudes` junction with a reflex
+V-notch per adjacent pair (crotch left UNPAVED); arms stay sloping
+rects.  KPHL band-on CLEAN: overlap 0, conformance 5 T-junc / 2
+crossings, junctions 13/38 — all = gate-off baseline.  SPJC self-
+overlap 3→0 (buffer band fixed the manual-miter fold-over).
+
+★★★ LATENT to_osm BUG FOUND + FIXED (`layout.py`): the tag-writing
+loop read `shape_node_altitudes`/`shape_altitude` left STALE from the
+validation loop's last iteration — when the last-emitted shape had
+`node_altitudes=None`+`altitude` set (any tunnel wall emitted last;
+normally masked because the boundary ribbon, with na, emits last), the
+line-901 "flat shape stays flat" guard fired for EVERY shape → ALL
+junctions flattened to apt_elev airport-wide (the s82 "wall-merge
+flattens 51 junctions 1156 m away" mystery — never spatial).  FIX:
+carry both per-shape in the `pending` tuples.  Unblocks any wall
+approach + is a general correctness fix.
+
+SUITE: 5 failed / 333 passed.  ONLY NEW red = **SPLP grade** — a 0.65 m
+step between aprons #16/#20 (SPLP has NO tunnels); the to_osm fix
+correctly applies flat-shape-stays-flat and SURFACED a real pre-existing
+apron-vs-apron solver disagreement the stale-var bug was consensus-
+masking.  Other 4 (CYXY self-overlap, SPJC compare/grade, HECA grade)
+= standing concurrent-WIP reds.  KPHL not a fixture.
+
+OPEN: (a) road/rail width DIRECTION (narrowed rail vs widen road —
+user call); (b) the surfaced SPLP apron step (solver, non-tunnel).
+
+★ also fixed (unrelated, this session): `pipeline.py` groundside
+`_ground_zone` block now guards `pav_union is not None` — OSM-terminal-
+only airports with NO apt.dat pavement (tile +44-094 small MN fields)
+crashed `None.intersection`.
+
+# Auto-Patch Status (prior) — session 81 = HANGAR PADS + ROLE_BUILDING rename (uncommitted, ready); the s80p3 unified_jacobi hunks can now be committed WITH the rename
 
 ## ★★ SESSION 81 (2026-06-12) — HANGAR PADS BUILT, gate `HANGAR_PADS` default ON (uncommitted) ★★
 USER RULINGS (plan `docs/hangar_pads.md`): (1) ROLE_TERMINAL →

@@ -103,10 +103,13 @@ HIGHWAY_CARRIAGEWAY_WIDTH_M = {
     "tertiary_link":     6.0,
     "residential":       7.0,
     "service":           6.0,
-    # Pseudo-type for railway tunnel bores (user 2026-06-12):
-    # double-track right-of-way — far narrower than the 22 m road
-    # default the KPHL RWY 26 rail branch first emitted with.
-    "railway":          10.0,
+    # Pseudo-type for railway tunnel bores.  Single-track right-of-way
+    # (one ``railway=rail`` line, no ``tracks=2``): a rail bore is
+    # NARROWER than the road carriageway it forks from — user 2026-06-13,
+    # "roads are supposed to be wider (double I think) than rail".  Was
+    # 10 m (double-track, user 2026-06-12); a 9 m tertiary road is now
+    # ~2× this.
+    "railway":          5.0,
 }
 
 
@@ -312,6 +315,18 @@ def _emit_tunnel_portals(
     arm_walk_max_m = max(arm_max_length_m,
                          ramp_min_length_m,
                          tunnel_depth_m / plan_grade)
+    # Helper: ground (DEM) elevation at a local-meter point.  Tunnel
+    # retaining walls follow the DEM along their length (user 2026-06-13:
+    # "the wall should work similar to the boundary, a chain of rects
+    # following DEM elevations") so their top tracks the real ground the
+    # trench is cut into, instead of a single flat apt_elev.
+    def _dem_at(cx: float, cy: float) -> float | None:
+        try:
+            lat, lon = _m_to_ll(cx, cy)
+            return float(_sample_dem(dem, tile_lat, tile_lon, lat, lon))
+        except _GEOM_EXC:
+            return None
+
     # Helper: airport surface elevation at (cx, cy).  Use the
     # boundary-ribbon ``node_altitudes`` (CIFP-anchored, grade-
     # clamped) when a vertex is nearby, else fall back to DEM.
@@ -928,19 +943,35 @@ def _emit_tunnel_portals(
         first_dir = (first_seg[0] / first_len,
                      first_seg[1] / first_len)
         first_perp = (-first_dir[1], first_dir[0])
-        spans = []
+        # Project each member's portal node onto the perpendicular AND
+        # carry its own carriageway half-width, so the combined bore spans
+        # from the leftmost member's OUTER edge to the rightmost member's
+        # OUTER edge — covering the whole tunnel mouth even when the
+        # members differ in width (e.g. a 9 m road + a 5 m rail).  Using
+        # only the head member's half-width left the bore short on the
+        # wider member's side (user 2026-06-13).
+        spans = []          # centre-projection per member (for divergence)
+        _edges = []         # (outer_left, outer_right) per member
         for k in cl:
             ni = portal_data[k][0]
             if ni not in nodes_m:
                 continue
             p = nodes_m[ni]
-            spans.append(
-                (p[0] - walk_pts[0][0]) * first_perp[0]
-                + (p[1] - walk_pts[0][1]) * first_perp[1])
+            proj = ((p[0] - walk_pts[0][0]) * first_perp[0]
+                    + (p[1] - walk_pts[0][1]) * first_perp[1])
+            half_k = 0.5 * _carriageway_width_for(
+                portal_data[k][3], carriageway_width_m)
+            spans.append(proj)
+            _edges.append((proj - half_k, proj + half_k))
         cluster_span = max(spans) - min(spans) if spans else 0.0
-        cluster_perp_offset = (
-            (max(spans) + min(spans)) / 2.0 if spans else 0.0)
-        combined_half = half_carriage + 0.5 * cluster_span
+        if _edges:
+            _ml = min(e[0] for e in _edges)
+            _mr = max(e[1] for e in _edges)
+            cluster_perp_offset = 0.5 * (_ml + _mr)
+            combined_half = 0.5 * (_mr - _ml)
+        else:
+            cluster_perp_offset = 0.0
+            combined_half = half_carriage
         if abs(cluster_perp_offset) > 1e-6:
             shift_x = first_perp[0] * cluster_perp_offset
             shift_y = first_perp[1] * cluster_perp_offset
@@ -1009,6 +1040,10 @@ def _emit_tunnel_portals(
         #    2026-05-03), its width spans the combined carriageways
         #    + 2 × wall_gap, its thickness is
         #    retaining_wall_width_m.
+        # Index of the first shape THIS cluster emits — the gate-on
+        # perimeter wall band (emitted at cluster end) unions every
+        # tunnel_ramp from here on.
+        _cl_start_idx = len(layout.shapes)
         cap_half_len = combined_half + wall_gap_m
         cap_centre = walk_pts[0]
         c0 = (cap_centre[0] + first_perp[0] * cap_half_len,
@@ -1022,20 +1057,24 @@ def _emit_tunnel_portals(
                    c0[1] - first_dir[1] * retaining_wall_width_m)
         c1_back = (c1[0] - first_dir[0] * retaining_wall_width_m,
                    c1[1] - first_dir[1] * retaining_wall_width_m)
-        try:
-            cap_poly = Polygon([c0, c1, c1_back, c0_back])
-            if not cap_poly.is_valid:
-                cap_poly = cap_poly.buffer(0)
-            if (cap_poly.geom_type == "Polygon"
-                    and not cap_poly.is_empty):
-                layout.shapes.append(BuiltShape(
-                    polygon=cap_poly,
-                    role=ROLE_RETAINING_WALL,
-                    ref="tunnel_cap",
-                    altitude=round(apt_elev, 1)))
-                exclusion_zones.append(cap_poly)
-        except _GEOM_EXC:
-            pass
+        # Gate ON folds the cap into the continuous perimeter wall band
+        # (which wraps the portal end too); gate OFF keeps the separate
+        # flat cap.
+        if not TUNNEL_FORK_THROAT:
+            try:
+                cap_poly = Polygon([c0, c1, c1_back, c0_back])
+                if not cap_poly.is_valid:
+                    cap_poly = cap_poly.buffer(0)
+                if (cap_poly.geom_type == "Polygon"
+                        and not cap_poly.is_empty):
+                    layout.shapes.append(BuiltShape(
+                        polygon=cap_poly,
+                        role=ROLE_RETAINING_WALL,
+                        ref="tunnel_cap",
+                        altitude=round(apt_elev, 1)))
+                    exclusion_zones.append(cap_poly)
+            except _GEOM_EXC:
+                pass
         # Per user 2026-05-04: the cap + arm walls form a continuous
         # "U" — arms touch the cap on both sides (their inner-front
         # corner sits exactly at the cap's outer-front corner, since
@@ -1136,11 +1175,17 @@ def _emit_tunnel_portals(
                 frac_b = d_b / c_total
                 e_a = (1 - frac_a) * e_lo_c + frac_a * e_hi_c
                 e_b = (1 - frac_b) * e_lo_c + frac_b * e_hi_c
+                # Legacy per-segment flat walls (gate OFF only — byte-
+                # identical to the pre-2026-06-13 behaviour).  Gate ON
+                # traces ONE continuous DEM-following wall band around the
+                # whole cluster ramp union after all ramps are emitted
+                # (see ``_emit_perimeter_wall``), so per-segment walls are
+                # skipped here.
                 wall_top = apt_elev
                 wall_thresh = wall_top - 0.05
                 seg_e_lo = min(e_a, e_b)
                 seg_e_hi = max(e_a, e_b)
-                if seg_e_lo >= wall_thresh:
+                if TUNNEL_FORK_THROAT or seg_e_lo >= wall_thresh:
                     pass
                 else:
                     if seg_e_hi > wall_thresh \
@@ -1237,7 +1282,7 @@ def _emit_tunnel_portals(
                     pass
 
         def _emit_fork_throat(throat_pts, throat_half, e_throat,
-                              wall_alt, arms):
+                              wall_alt, arms, cl_start_idx):
             """Bridge the shared bore (ending at the fork point ``F``)
             to the per-arm sloping rects with ONE ``node_altitudes``
             "throat" polygon carrying a V-notch, then trace the whole Y
@@ -1350,13 +1395,6 @@ def _emit_tunnel_portals(
                 if idx != len(arm_info) - 1:
                     _push(_apex(a, arm_info[idx + 1]), True)
             _push(NR, False)                     # NR → NL (bore): no wall
-            if os.environ.get("O4_FORK_DEBUG"):
-                UI.vprint(0, f"  [fork] F={F} t_dir={t_dir} "
-                    f"combined_half={throat_half:.1f} narms={len(arm_info)}")
-                for a in arm_info:
-                    UI.vprint(0, f"    arm E={a['E']} half={a['half']:.1f} "
-                        f"adv={a['adv']:.1f} cL={a['cL']} cR={a['cR']}")
-                UI.vprint(0, f"    ring={[(round(p[0],1),round(p[1],1)) for p in ring]}")
 
             try:
                 poly = Polygon(ring)
@@ -1373,54 +1411,17 @@ def _emit_tunnel_portals(
             # node_altitudes (the junction representation) so a future
             # change with differing per-arm start elevations bridges
             # them per-vertex with no further work.
-            na = [round(e_throat, 1)] * (len(ring) + 1)
+            _np = len(poly.exterior.coords) - 1
+            na = [round(e_throat, 1)] * (_np + 1)
             layout.shapes.append(BuiltShape(
                 polygon=poly, role=ROLE_TUNNEL_RAMP,
                 ref="tunnel_ramp", node_altitudes=na))
             exclusion_zones.append(poly)
 
-            # Walls: each flagged perimeter edge, offset OUTWARD (away
-            # from the fan centroid) by wall_gap, thickness
-            # retaining_wall_width_m, flat at DEM.  Honour the
-            # wall_thresh contract — no wall where the landing already
-            # sits at/above DEM.
-            if e_throat < wall_alt - 0.05:
-                cx, cy = poly.centroid.x, poly.centroid.y
-                w = retaining_wall_width_m
-                for i in range(len(ring)):
-                    if not wall_edge[i]:
-                        continue
-                    p_a = ring[i]
-                    p_b = ring[(i + 1) % len(ring)]
-                    sx, sy = p_b[0] - p_a[0], p_b[1] - p_a[1]
-                    sl = math.hypot(sx, sy)
-                    if sl < 0.5:
-                        continue
-                    nx, ny = -sy / sl, sx / sl
-                    mx, my = 0.5 * (p_a[0] + p_b[0]), 0.5 * (p_a[1] + p_b[1])
-                    if (mx - cx) * nx + (my - cy) * ny < 0.0:
-                        nx, ny = -nx, -ny
-                    corners = [
-                        (p_a[0] + nx * wall_gap_m, p_a[1] + ny * wall_gap_m),
-                        (p_b[0] + nx * wall_gap_m, p_b[1] + ny * wall_gap_m),
-                        (p_b[0] + nx * (wall_gap_m + w),
-                         p_b[1] + ny * (wall_gap_m + w)),
-                        (p_a[0] + nx * (wall_gap_m + w),
-                         p_a[1] + ny * (wall_gap_m + w)),
-                    ]
-                    try:
-                        wp = Polygon(corners)
-                        if not wp.is_valid:
-                            wp = wp.buffer(0)
-                        if (wp.geom_type == "Polygon" and not wp.is_empty
-                                and wp.area > 0.5):
-                            layout.shapes.append(BuiltShape(
-                                polygon=wp, role=ROLE_RETAINING_WALL,
-                                ref="tunnel_wall",
-                                altitude=round(wall_alt, 1)))
-                            exclusion_zones.append(wp)
-                    except _GEOM_EXC:
-                        pass
+            # No walls here — the continuous perimeter wall band is traced
+            # around the whole cluster ramp union after all ramps emit
+            # (``_emit_perimeter_wall``); the throat is just one more ramp
+            # piece in that union.
             return True
 
         # ── Y-SPLIT (user 2026-06-12): when cluster members share the
@@ -1455,7 +1456,14 @@ def _emit_tunnel_portals(
                     member_chains.append((k, w_k, c_k))
             if len(member_chains) > 1:
                 probe_max = min(c[2][-1] for c in member_chains)
-                s = 10.0
+                # Gate-on ends the shared bore as soon as the ways START
+                # to diverge (small margin, fine probe) so the bore is
+                # short enough for the throat to widen smoothly into the
+                # arms (user 2026-06-13).  The legacy bare-crotch path
+                # keeps the wider 8 m margin.
+                _div_margin = 2.0 if TUNNEL_FORK_THROAT else 8.0
+                _div_step = 2.5 if TUNNEL_FORK_THROAT else 5.0
+                s = 5.0 if TUNNEL_FORK_THROAT else 10.0
                 while s < probe_max:
                     pts_at = [_point_at(w, c, s)
                               for (_k, w, c) in member_chains]
@@ -1463,10 +1471,10 @@ def _emit_tunnel_portals(
                         math.hypot(p1[0] - p2[0], p1[1] - p2[1])
                         for x1, p1 in enumerate(pts_at)
                         for p2 in pts_at[x1 + 1:])
-                    if spread > cluster_span + 8.0:
+                    if spread > cluster_span + _div_margin:
                         s_div = s
                         break
-                    s += 5.0
+                    s += _div_step
                 if s_div is not None and (probe_max - s_div) < 10.0:
                     s_div = None     # fork too close to the end
 
@@ -1474,24 +1482,7 @@ def _emit_tunnel_portals(
             _emit_chain(walk_pts, combined_half,
                         elev_low, elev_high, True)
         else:
-            # Shared throat on the (centred) canonical walk.
-            throat = [walk_pts[0]]
-            for i in range(1, len(walk_pts)):
-                if cum_dists[i] < s_div:
-                    throat.append(walk_pts[i])
-                else:
-                    break
-            throat.append(_point_at(walk_pts, cum_dists, s_div))
-            e_div = (elev_low + (elev_high - elev_low)
-                     * (s_div / total_walk if total_walk > 0
-                        else 0.0))
-            _cl_start_idx = len(layout.shapes)
-            _emit_chain(throat, combined_half,
-                        elev_low, e_div, True)
-            # Per-member branches along their OWN alignments —
-            # widest first; each later branch starts where it CLEARS
-            # the corridors of the ones already emitted (the fork
-            # crotch otherwise overlaps ramp-on-ramp).
+            # Per-member branches (widest first).
             ordered = []
             for k, w_k, c_k in member_chains:
                 hw_k = portal_data[k][3]
@@ -1499,31 +1490,76 @@ def _emit_tunnel_portals(
                     hw_k, carriageway_width_m)
                 ordered.append((half_k, k, w_k, c_k))
             ordered.sort(key=lambda t: -t[0])
-            # Every branch must clear the THROAT corridor too — a
-            # member's own arc-s_div point can sit slightly inside
-            # it (the throat runs on the canonical alignment), which
-            # lapped the branch's first ramp onto the throat's last.
+            # Gate-on: arms start at the common station where every pair has
+            # separated by their combined half-widths + a gap (they start
+            # CLOSE together), and the bore (a sloping rect) ends EARLY
+            # enough to leave at least a ``_throat_min`` junction that
+            # cleanly widens from the bore to the arms — no jog (user
+            # 2026-06-13).  The legacy path keeps s_div + per-arm advance.
+            _throat_min = 10.0
+            s_arm = s_div
+            s_bore_end = s_div
+            if TUNNEL_FORK_THROAT and len(ordered) >= 2:
+                _half_of = {k: hk for hk, k, _w, _c in ordered}
+                _chain_of = {k: (w, c) for _h, k, w, c in ordered}
+                d_adv = 0.0
+                while s_div + d_adv < probe_max - 4.0:
+                    _pa = {k: _point_at(_chain_of[k][0], _chain_of[k][1],
+                                        s_div + d_adv) for k in _half_of}
+                    _clear = True
+                    _ks = list(_half_of)
+                    for _i9 in range(len(_ks)):
+                        for _j9 in range(_i9 + 1, len(_ks)):
+                            _ka, _kb = _ks[_i9], _ks[_j9]
+                            _need = (_half_of[_ka] + _half_of[_kb]
+                                     + 2.0 * wall_gap_m + 2.0)
+                            if math.hypot(
+                                    _pa[_ka][0] - _pa[_kb][0],
+                                    _pa[_ka][1] - _pa[_kb][1]) < _need:
+                                _clear = False
+                                break
+                        if not _clear:
+                            break
+                    if _clear:
+                        break
+                    d_adv += 1.0
+                s_arm = s_div + d_adv
+                # Shorten the bore so the junction spans ≥ _throat_min; the
+                # bore never extends past the fork (s_div).
+                s_bore_end = max(1.0, min(s_div, s_arm - _throat_min))
+            # Shared bore (sloping rect) on the centred canonical walk,
+            # ending at s_bore_end.
+            throat = [walk_pts[0]]
+            for i in range(1, len(walk_pts)):
+                if cum_dists[i] < s_bore_end:
+                    throat.append(walk_pts[i])
+                else:
+                    break
+            throat.append(_point_at(walk_pts, cum_dists, s_bore_end))
+            e_div = (elev_low + (elev_high - elev_low)
+                     * (s_bore_end / total_walk if total_walk > 0
+                        else 0.0))
+            _emit_chain(throat, combined_half,
+                        elev_low, e_div, True)
             prior: list = []          # (LineString, half)
             try:
                 prior.append((LineString(throat), combined_half))
             except _GEOM_EXC:
                 pass
-            # Collect the (advanced) arm chains first; the fork throat
-            # (when gated on) must see every arm's fork-side start
-            # BEFORE the arms emit, so the bridging polygon + Y-tracing
-            # walls land between the bore and the arms.  Gate OFF: the
-            # arm geometry computed here is identical to the legacy
-            # inline emit (same prior-clearance order), so emitting them
-            # in the loop below is byte-identical.
+            # Collect the arm chains.  Gate ON: every arm starts at the
+            # common ``s_arm`` station (mutually clear by construction, so
+            # no per-arm advance).  Gate OFF: legacy per-arm advance past
+            # the throat + prior siblings (byte-identical to before).
             arm_specs: list = []      # (branch_pts, half_k, far_k)
             for half_k, k, w_k, c_k in ordered:
-                branch = [_point_at(w_k, c_k, s_div)]
+                _start_s = s_arm if TUNNEL_FORK_THROAT else s_div
+                branch = [_point_at(w_k, c_k, _start_s)]
                 for i in range(1, len(w_k)):
-                    if c_k[i] > s_div:
+                    if c_k[i] > _start_s:
                         branch.append(w_k[i])
                 if len(branch) < 2:
                     continue
-                if prior:
+                if not TUNNEL_FORK_THROAT and prior:
                     # advance the start until clear of the throat +
                     # every prior sibling corridor (sample 2 m).
                     bl = LineString(branch)
@@ -1549,11 +1585,11 @@ def _emit_tunnel_portals(
                     prior.append((LineString(branch), half_k))
                 except _GEOM_EXC:
                     pass
-            # Fork throat junction (bridge bore→arms, trace the Y) —
-            # before the arms so it abuts the bore's far edge.
+            # Throat bridges bore→arms; emitted before the arms so it abuts
+            # the bore's far edge.
             if TUNNEL_FORK_THROAT and len(arm_specs) >= 2:
                 _emit_fork_throat(throat, combined_half, e_div,
-                                  apt_elev, arm_specs)
+                                  apt_elev, arm_specs, _cl_start_idx)
             for branch, half_k, far_k in arm_specs:
                 _emit_chain(branch, half_k, e_div, far_k, False)
             # WALL OPENINGS: a diverging branch must cross the
@@ -1588,6 +1624,85 @@ def _emit_tunnel_portals(
                         s9 for s9 in layout.shapes
                         if not (getattr(s9, 'ref', '') == 'tunnel_wall'
                                 and s9.polygon is None)]
+            except _GEOM_EXC:
+                pass
+        # ── CONTINUOUS PERIMETER WALL (gate ON, user 2026-06-13): ONE
+        # wall traced around the WHOLE cluster ramp-union perimeter,
+        # regardless of whether the tunnel forks.  The band is the ramp
+        # union's outward offset annulus (shapely buffer → clean corners,
+        # no self-overlap on curves/sharp ends), node_altitudes FOLLOWING
+        # THE DEM like the airport boundary ribbon.  The annulus is "slit"
+        # into a single hole-free ring (to_osm drops interior rings, which
+        # would otherwise emit a filled disc over the ramp).  Replaces the
+        # per-segment / cap / throat walls entirely.
+        if TUNNEL_FORK_THROAT:
+            try:
+                from shapely.ops import unary_union as _uuB
+                _ramps_b = [
+                    s.polygon for s in layout.shapes[_cl_start_idx:]
+                    if getattr(s, 'ref', '') == 'tunnel_ramp'
+                    and s.polygon is not None
+                    and not s.polygon.is_empty]
+                _ru = _uuB(_ramps_b) if _ramps_b else None
+                _ru_polys = [g for g in getattr(_ru, 'geoms', [_ru] if _ru
+                                                else [])
+                             if g.geom_type == 'Polygon'
+                             and not g.is_empty]
+                _g0 = wall_gap_m
+                _g1 = wall_gap_m + retaining_wall_width_m
+                for _rp in _ru_polys:
+                    try:
+                        _outer = _rp.buffer(_g1, join_style=2,
+                                            mitre_limit=2.0)
+                        _inner = _rp.buffer(_g0, join_style=2,
+                                            mitre_limit=2.0)
+                        _band = _outer.difference(_inner)
+                    except _GEOM_EXC:
+                        continue
+                    for _bp in getattr(_band, 'geoms', [_band]):
+                        if (_bp.geom_type != 'Polygon' or _bp.is_empty
+                                or _bp.area < 0.5):
+                            continue
+                        _ext = list(_bp.exterior.coords)
+                        if _ext and _ext[0] == _ext[-1]:
+                            _ext = _ext[:-1]
+                        if _bp.interiors and len(_ext) >= 3:
+                            # Slit: walk the exterior to the vertex nearest
+                            # the hole, dive in, walk the hole (reversed),
+                            # come back out — one self-touching ring, no hole.
+                            _intr = list(_bp.interiors[0].coords)
+                            if _intr and _intr[0] == _intr[-1]:
+                                _intr = _intr[:-1]
+                            _i = min(range(len(_ext)), key=lambda q:
+                                     (_ext[q][0] - _intr[0][0]) ** 2
+                                     + (_ext[q][1] - _intr[0][1]) ** 2)
+                            _j = min(range(len(_intr)), key=lambda q:
+                                     (_intr[q][0] - _ext[_i][0]) ** 2
+                                     + (_intr[q][1] - _ext[_i][1]) ** 2)
+                            _ir = _intr[_j:] + _intr[:_j]
+                            _ring = (_ext[:_i + 1] + [_ir[0]]
+                                     + list(reversed(_ir)) + [_ext[_i]]
+                                     + _ext[_i + 1:])
+                        else:
+                            _ring = _ext
+                        if len(_ring) < 4:
+                            continue
+                        _na = []
+                        for _vx, _vy in _ring:
+                            _d = _dem_at(_vx, _vy)
+                            _na.append(round(_d if _d is not None
+                                             else apt_elev, 1))
+                        _na.append(_na[0])
+                        try:
+                            _wp = Polygon(_ring)
+                            if _wp.is_empty:
+                                continue
+                            layout.shapes.append(BuiltShape(
+                                polygon=_wp, role=ROLE_RETAINING_WALL,
+                                ref="tunnel_wall", node_altitudes=_na))
+                            exclusion_zones.append(_bp)
+                        except _GEOM_EXC:
+                            continue
             except _GEOM_EXC:
                 pass
         n_emitted += 1

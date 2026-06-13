@@ -546,7 +546,11 @@ class PavementLayout:
         # Pass-1 holding pen: each entry survives validation +
         # interning and waits for the consensus pass to write its
         # altitude tags from the per-node mean.
-        pending: list[tuple["BuiltShape", list[int]]] = []
+        # (s_idx, shape, ext_nids, shape_altitude, shape_node_altitudes)
+        # — the per-shape altitude copies are carried so the tag-writing
+        # pass below reads THIS shape's values, not a stale leftover from
+        # the validation loop's last iteration.
+        pending: list = []
         next_wid = [-10001]
         for s_idx, s in enumerate(self.shapes):
             # Validate the polygon's geometry before emission.
@@ -783,7 +787,8 @@ class PavementLayout:
                         f"polygon at emit (buffer(0), {len(ext_nids) - 1}"
                         f"→{len(repaired_nids) - 1} verts; quantization "
                         f"self-intersection).")
-                    pending.append((s_idx, s, repaired_nids))
+                    pending.append((s_idx, s, repaired_nids,
+                                    shape_altitude, shape_node_altitudes))
                     continue
                 if n_repaired:
                     UI.vprint(1,
@@ -793,7 +798,8 @@ class PavementLayout:
                     ext_nids = work_nids + [work_nids[0]]
             except _GEOM_EXC:
                 continue
-            pending.append((s_idx, s, ext_nids))
+            pending.append((s_idx, s, ext_nids,
+                            shape_altitude, shape_node_altitudes))
 
         # ── Consensus pass ──────────────────────────────────────
         # For each node id we now have every altitude any shape
@@ -839,7 +845,8 @@ class PavementLayout:
         def _slope_profile_for(poly) -> str:
             return PATCH_SLOPE_PROFILE
 
-        for s_idx, s, ext_nids in pending:
+        for s_idx, s, ext_nids, shape_altitude, shape_node_altitudes \
+                in pending:
             tags = {
                 "aeroway": AEROWAY_FOR_ROLE.get(s.role, "taxiway"),
                 "role": s.role,

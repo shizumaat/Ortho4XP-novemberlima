@@ -211,11 +211,53 @@ did not re-solve elevations and the observed values are already continuous at th
 * **One wall traces the whole Y**, at DEM, terminating per-arm where the ramp reaches
   DEM.
 
-## 8. Open questions
+## 8. Implementation outcome (BUILT 2026-06-12)
 
-* **V apex pullback distance** — how far back toward the portal should the notch apex
-  sit (controls how "pointed" the crotch is)? Propose: where the two arms' inner edges
-  are `~retaining_wall_width_m + 2·wall_gap_m` apart, so the inner walls just clear.
-* **3+ way forks** — KPHL is a clean 2-way (road+rail). Should the model generalise to
-  N arms (N−1 inner walls, an N-way `node_altitudes` throat), or assert 2 and fall
-  back to today's behaviour otherwise?
+Gate `TUNNEL_FORK_THROAT` (config.py, default ON; OFF = legacy bare-crotch
+byte-identical). New nested helper `_emit_fork_throat` in `bridges.py` inside the
+`s_div is not None` branch of `_emit_tunnel_portals`. **Generalised to N arms** (the
+user's call): arms sorted by angle about the fork point `F`; the throat is an
+N-arm star-fan `node_altitudes` polygon with one V-notch per adjacent pair; the
+apex of each notch is the back-extended intersection of the two facing inner edges
+(natural fork point), falling back to a pulled-back midpoint. Walls trace every
+perimeter edge that does not abut a ramp (outer fan edges + inner-V edges).
+
+KPHL RWY 26 north portal (2-arm road+rail fork) verified, `PYTHONHASHSEED=0`:
+
+* Throat bridges the bore to **both** arms; reflex V-notch confirmed; **crotch
+  between arms is unpaved**. 1 notched throat ramp (>4 verts) emitted.
+* `node_altitudes` all `= e_div` here (both arms land at the same bore-handoff
+  elevation), so `to_osm` collapses it to a flat `altitude` tag — correct; the
+  mechanism bridges per-vertex when arm starts differ.
+* **Zero regressions vs gate-OFF baseline**: self-overlap pairs `0`; conformance
+  T-junctions `5` / edge crossings `2` (both crossings pre-existing runway×apron);
+  junctions `13 flat / 38 sloped` (identical); `check_grade` shows only the 8/1/1
+  pre-existing junction violations, **zero tunnel violations**. Shapes 365→370
+  (throat + 4 walls). Gate-OFF byte-identical to prior behaviour.
+* Suite: CYXY self-overlap / SPJC compare-target / HECA+SPJC grade reds are
+  **pre-existing** (reproduce with gate OFF — concurrent uncommitted solver WIP),
+  not caused by this change.
+
+### Rejected approach — global cluster wall-union (DO NOT REINTRODUCE)
+
+The notch inner-V walls miter-**cross** the arms' side walls at the fork corners (2
+extra edge crossings). First fix tried: `unary_union` of all cluster `tunnel_wall`
+polygons (all flat at `apt_elev`) into a single Y-tracing wall. It eliminated the
+crossings BUT **flattened all 51 KPHL junctions airport-wide to `altitude=3.0`** in
+`to_osm` — a global consensus corruption that survived `PYTHONHASHSEED=0` and was
+NOT spatial (nearest junction is 1156 m from the fork; merged walls span only
+x∈[3451,3666]). Mechanism never fully traced; the merge changes shape count/order
+and something in the `to_osm` per-node consensus pass then collapses every sloped
+junction. **Shipped fix instead**: trim each notch-wall edge back from both ends by
+`retaining_wall_width_m + wall_gap_m` so it can't overlap the abutting bore/arm wall
+— crossings drop to the pre-existing 2, no global effect, tiny invisible gaps at
+wall corners.
+
+### Known minor / latent
+
+* Small (~1.6 m) gaps where notch walls meet bore/arm walls (the trim) — invisible
+  on a retaining wall.
+* `deconflict_road_features` treats the `node_altitudes` throat as non-sloped and
+  would `difference`-clip it if it overlapped airside pavement; at KPHL coverage is
+  `0.00` so it never fires. If a future fork's throat overlaps airside, the clipped
+  remainder would lose its `node_altitudes` (gets `altitude=None`) — revisit then.

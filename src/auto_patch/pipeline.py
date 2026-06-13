@@ -1488,7 +1488,14 @@ def build_airport_pavement(icao: str, xplane_root: str,
             _osm_terminal_buildings, nodes, ways, to_m,
             apt_pavement_seeds=runway_polys,
             apt_pavement_polys=apt_only_pav_polys)
-        if _ground_zone is not None and not _ground_zone.is_empty:
+        if (_ground_zone is not None and not _ground_zone.is_empty
+                and pav_union is not None and not pav_union.is_empty):
+            # ``pav_union`` is None when the airport has no apt.dat
+            # pavement polygons at all (OSM-terminal-only fields, e.g.
+            # in tile +44-094) — there is then nothing to intersect /
+            # subtract the groundside zone against, so skip the whole
+            # capture rather than crash on ``None.intersection`` (the
+            # downstream ``pav_union.difference`` would fail too).
             # Capture the groundside-only visible pavement BEFORE
             # the subtraction below empties pav_union of it.  Per
             # user 2026-04-29: groundside pavement should remain

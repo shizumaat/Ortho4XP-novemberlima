@@ -23,7 +23,6 @@ Two public entry points:
 from __future__ import annotations
 
 import math
-import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -148,12 +147,6 @@ def deconflict_road_features(layout, icao: str = "") -> None:
                         continue
                     is_sloped = (s.altitude_high is not None
                                  and s.altitude_low is not None)
-                    if (os.environ.get("O4_FORK_DEBUG")
-                            and s.ref == "tunnel_ramp"
-                            and s.node_altitudes is not None):
-                        UI.vprint(0, f"  [fork-deconflict] throat "
-                            f"area={s.polygon.area:.1f} cov={_cov:.2f} "
-                            f"is_sloped={is_sloped}")
                     if not is_sloped and _cov > 0.0005:
                         d = s.polygon.difference(_run_u)
                         parts = [g for g in
