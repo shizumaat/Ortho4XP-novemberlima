@@ -1143,25 +1143,17 @@ def build_and_solve(
     # routing; road edges carry their 4 % scaling), then re-converge
     # the cap-only projection.  Taxi-pavement vertices are untouched —
     # the plane flows ONE WAY, taxi → apron lanes (no back-edge).
-    # ROAD vertices are exempt (the descend-to-terrain ramp class must
-    # not be pulled up to the taxi plane).
+    # ★ ROAD (SVC) verts are NOT exempt where they classify as apron:
+    # inside an apron polygon the APRON surface law rules and the road
+    # rides it — the first build exempted them and a 42 m SVC-overlap
+    # lane fragment at HECA terminal11's face stayed at DEM (99.9),
+    # then anchored the enforce ceilings at ~100 against a feasible
+    # [104.4, 107.0] chord window (the user-reported 2.46 % S→pad
+    # bowl).  Genuine descend-to-terrain ramps are CARVED out of the
+    # apron union, so they never classify ap_only in the first place.
     if (apron_plane_grade > 0.0 and taxi_test is not None
             and apron_test is not None):
         INF9 = float("inf")
-        road_pt = None
-        if road_lines:
-            try:
-                from shapely.geometry import Point as _RPt2
-                from shapely.ops import unary_union as _runion2
-                from shapely.prepared import prep as _rprep2
-                _rp9 = _rprep2(_runion2(list(road_lines)).buffer(3.0))
-
-                def road_pt(x9, y9):
-                    return _rp9.contains(_RPt(x9, y9))
-
-                _RPt = _RPt2
-            except Exception:                          # pragma: no cover
-                road_pt = None
         on_taxi9 = [False] * n
         ap_only = [False] * n
         for i in range(n):
@@ -1170,8 +1162,7 @@ def build_and_solve(
                 if taxi_test(x9, y9):
                     on_taxi9[i] = True
                 elif apron_test(x9, y9):
-                    ap_only[i] = (road_pt is None
-                                  or not road_pt(x9, y9))
+                    ap_only[i] = True
             except Exception:                          # pragma: no cover
                 continue
         # TAXI-pavement field segments (midpoint-classified, real lane

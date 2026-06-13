@@ -2130,20 +2130,53 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                     node_first9[m9] = k9
         comps9: dict = {}
         for k9 in range(len(term_scs9)):
-            comps9.setdefault(_findp(k9), set()).update(
-                term_scs9[k9]["nodes"])
-        entries9: list = []      # [nodes(list), level | None, refs]
-        for nodes_c9 in comps9.values():
+            comps9.setdefault(_findp(k9), []).append(k9)
+        # ★ PERPENDICULAR-CHORD WINDOW CLAMP (user 2026-06-12, re-armed
+        # after the field-side fixes): the inherit target clamps into
+        # the complex's intersected serving-taxiway window when it is
+        # FEASIBLE.  This is NOT the rejected s79 lift: the field's
+        # apron-lane plane passes have already lifted the anchors/bands
+        # to the same plane, so the apron CAN follow — and the measured
+        # acceptance below still reverts any flatten its apron cannot
+        # legally absorb.  Window-clamped complexes are LAW-pinned: no
+        # pair negotiation (the apron between law-pinned pads carries
+        # their slope — the serving taxiways do).
+        wins9 = (_terminal_chord_windows(layout, nodes,
+                                         shape_constraints, n)
+                 if nodes is not None else {})
+        win_of9 = {id(shape_constraints[k4]): w4
+                   for k4, w4 in wins9.items()}
+        entries9: list = []  # [nodes(list), level | None, refs, law]
+        for members9 in comps9.values():
+            nodes_c9: set = set()
+            for k9 in members9:
+                nodes_c9.update(term_scs9[k9]["nodes"])
             cn9 = sorted(m9 for m9 in nodes_c9 if m9 < n)
             if not cn9:
                 continue
             if any(is_hard[m9] for m9 in cn9):
                 continue             # seam-dictated: stays settled
             vals9 = sorted(elev[m9] for m9 in cn9)
-            cset0 = set(cn9)
-            refs9 = sorted({sc9.get("ref") or "?" for sc9 in term_scs9
-                            if set(sc9["nodes"]) & cset0})
-            entries9.append([cn9, vals9[len(vals9) // 2], refs9])
+            refs9 = sorted({term_scs9[k9].get("ref") or "?"
+                            for k9 in members9})
+            lvl9 = vals9[len(vals9) // 2]
+            w9c = None
+            for k9 in members9:
+                w4 = win_of9.get(id(term_scs9[k9]))
+                if w4 is None:
+                    continue
+                w9c = (w4 if w9c is None else
+                       (max(w9c[0], w4[0]), min(w9c[1], w4[1]),
+                        w9c[2] + w4[2]))
+            law9 = w9c is not None and w9c[0] <= w9c[1]
+            if law9:
+                old9 = lvl9
+                lvl9 = min(max(lvl9, w9c[0]), w9c[1])
+                if _tdbg and abs(lvl9 - old9) > 0.05:
+                    print(f"[term] inherit {refs9} window clamp "
+                          f"{old9:.2f} -> {lvl9:.2f} "
+                          f"[{w9c[0]:.2f},{w9c[1]:.2f}]")
+            entries9.append([cn9, lvl9, refs9, law9])
         # PAIRWISE grade resolution (KPHL terminal13/23, s79p4): two
         # flat levels further apart than the apron between them may
         # climb (|Δ| > cap·gap) co-level to their mean when the spread
@@ -2169,6 +2202,8 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
             for _it8 in range(8):
                 changed8 = False
                 for (a8, b8) in sorted(pair_gap9):
+                    if entries9[a8][3] or entries9[b8][3]:
+                        continue     # law-pinned: no negotiation
                     ta8 = entries9[a8][1]
                     tb8 = entries9[b8][1]
                     if ta8 is None or tb8 is None:
@@ -2199,7 +2234,7 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
         # flatten + register for the measured acceptance below; held
         # (corridor-written) members are never moved — the closure
         # arbitrates that seam.
-        for cn9, lvl9, refs9 in entries9:
+        for cn9, lvl9, refs9, _law9 in entries9:
             if lvl9 is None:
                 continue             # sloping fallback, polished below
             vals9 = [elev[m9] for m9 in cn9]
@@ -2208,21 +2243,53 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                 n_leaf += 1
                 continue             # already one level
             cset9 = set(cn9)
-            apron_edges9 = []
+            # acceptance edge set = LOCAL to the pad's frontage (the
+            # complex's nodes + their 1-ring apron neighbours).  HECA's
+            # huge shared aprons made whole-apron edge sets OVERLAP
+            # between complexes, so one pad's strain falsely reverted
+            # a pad 700 m away (terminal4), whose reverted seam-pinned
+            # state then carried 9.9 % internal pairs.
+            ring9: set = set(cset9)
+            cand_edges9 = []
             for sc8 in shape_constraints:
                 if sc8["role"] != ROLE_APRON:
                     continue
                 if not (set(sc8["nodes"]) & cset9):
                     continue
-                apron_edges9.extend(sc8["edges"])
-            pre_v9 = sum(1 for (i8, j8, c8) in apron_edges9
+                cand_edges9.extend(sc8["edges"])
+            for (i8, j8, _c8) in cand_edges9:
+                if i8 in cset9 or j8 in cset9:
+                    ring9.add(i8)
+                    ring9.add(j8)
+            apron_edges9 = [e8 for e8 in cand_edges9
+                            if e8[0] in ring9 or e8[1] in ring9]
+            # cost metric = SUMMED EXCESS in metres, not a pair count
+            # (a count weighs a 3 cm pair equal to a 2.6 m wall —
+            # terminal4 reverted a small-excess flatten to keep two
+            # metre-scale internal walls).  The settled pad's OWN
+            # internal excess is part of the pre-state cost: a flat
+            # pad has ZERO internal pairs, so a flatten that adds a
+            # little frontage strain while erasing a pinned-patchwork
+            # interior is a net win.
+            pre_v9 = sum(abs(elev[i8] - elev[j8]) - c8
+                         for (i8, j8, c8) in apron_edges9
                          if c8 > 0
                          and abs(elev[i8] - elev[j8]) - c8 > 0.02)
+            pad_int9 = 0.0
+            for sc8 in term_scs9:
+                if not (set(sc8["nodes"]) & cset9):
+                    continue
+                pad_int9 += sum(abs(elev[i8] - elev[j8]) - c8
+                                for (i8, j8, c8) in sc8["edges"]
+                                if c8 > 0
+                                and abs(elev[i8] - elev[j8]) - c8
+                                > 0.02)
             saved9 = {m9: elev[m9] for m9 in cn9}
             for m9 in cn9:
                 if m9 not in held_all:
                     elev[m9] = lvl9
-            _inherit_flat.append((saved9, apron_edges9, pre_v9))
+            _inherit_flat.append((saved9, apron_edges9,
+                                  pre_v9 + pad_int9))
             n_leaf += 1
             if _tdbg:
                 print(f"[term] inherit {refs9} grp({len(cn9)}) "
@@ -2235,7 +2302,7 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
         # HECA pad read 96.6..103.3).  Per-pad isolated cap projection
         # with every seam (shared / hard) node held — the gate-off
         # slope-fallback treatment, seam-preserving by construction.
-        slope_nodes9 = {m9 for (cn9, lvl9, _r9) in entries9
+        slope_nodes9 = {m9 for (cn9, lvl9, _r9, _l9) in entries9
                         if lvl9 is None for m9 in cn9}
         if slope_nodes9:
             owners9: dict = {}
@@ -2439,24 +2506,50 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
         # (sloped) surface and the projection re-runs once.
         if _inherit_flat:
             redo_f = False
+            reverted9: set = set()
             for (saved9, apron_edges_f, pre_v_f) in _inherit_flat:
                 post_v = sum(
-                    1 for (i8, j8, c8) in apron_edges_f
+                    abs(elev[i8] - elev[j8]) - c8
+                    for (i8, j8, c8) in apron_edges_f
                     if c8 > 0 and abs(elev[i8] - elev[j8]) - c8 > 0.02)
                 if _tdbg:
                     print(f"[term] inherit acceptance grp({len(saved9)})"
-                          f" apron-viol {pre_v_f} -> {post_v} "
+                          f" excess {pre_v_f:.2f} -> {post_v:.2f} m "
                           f"({len(apron_edges_f)} edges)")
-                if post_v > pre_v_f:
+                if post_v > pre_v_f + 0.02:
                     for m9, v9 in saved9.items():
                         if not is_hard[m9]:
                             elev[m9] = v9
+                    reverted9 |= set(saved9)
                     redo_f = True
                     if _tdbg:
                         print(f"[term] inherit flatten REVERTED — "
-                              f"pad slopes (apron viol "
-                              f"{pre_v_f} -> {post_v})")
+                              f"pad slopes (excess "
+                              f"{pre_v_f:.2f} -> {post_v:.2f} m)")
             if redo_f:
+                # reverted pads return to the RAW settled values, which
+                # can carry pinned-vert patchwork (the same class the
+                # slope fallback polishes — a reverted terminal4 kept a
+                # 1.1 m step over 4.2 m).  Same isolated ≤cap polish:
+                # seams (shared/hard/corridor-held) held, private nodes
+                # cap-projected onto one coherent surface.
+                owners8: dict = {}
+                for sc8 in shape_constraints:
+                    for m8 in sc8["nodes"]:
+                        owners8[m8] = owners8.get(m8, 0) + 1
+                for sc8 in shape_constraints:
+                    if sc8["role"] != ROLE_TERMINAL or not sc8["edges"]:
+                        continue
+                    if not (set(sc8["nodes"]) & reverted9):
+                        continue
+                    held_t8 = {m8 for m8 in sc8["nodes"]
+                               if (m8 < n and is_hard[m8])
+                               or m8 in (held_extra or set())
+                               or owners8.get(m8, 0) > 1}
+                    if len(held_t8) == len(sc8["nodes"]):
+                        continue
+                    _project_shape(elev, sc8["nodes"], held_t8,
+                                   sc8["edges"], False)
                 _project_within_bands(
                     elev, all_edges, is_hard, lo, hi, coupling,
                     held_extra=held_all,
@@ -2534,37 +2627,29 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
     return len(band_pinned)
 
 
-def _warn_terminal_chord_law(layout, nodes, elev, shape_constraints,
-                             icao=None) -> int:
-    """VALIDATOR check for the perpendicular-chord rule (★ user ruling
-    2026-06-12): a perpendicular chord from any taxi centerline that
-    intersects a terminal must not exceed ``TERMINAL_CHORD_MAX_GRADE``
-    (1 %).  Under the apron-follows model the rule should hold BY
-    CONSTRUCTION — the apron at the pad face sits on the corridor
-    plane and the pad inherits it — so this is a WARN, not a solve
-    target (the s79 solver-side LIFT was measured-rejected: the pad
-    landed right but the apron behind it kept the bowl as
-    within-pairs).  Chord values are NETWORK-FIELD samples at the
-    centerline foot; apron-lane portions are EXCLUDED (a neighbour's
-    gate lane re-imports the bowl this rule exists to catch).
-    Squeezed (infeasible) windows are skipped — that residue belongs
-    to the arbitration/flex layers.  Returns the warn count."""
+def _terminal_chord_windows(layout, nodes, shape_constraints, n):
+    """Per-pad PERPENDICULAR-CHORD windows (★ user ruling 2026-06-12):
+    intersection of ``[v ± TERMINAL_CHORD_MAX_GRADE·d]`` over every
+    perpendicular chord from a taxi centerline that crosses the pad.
+    Chord values are NETWORK-FIELD samples at the centerline foot;
+    apron-lane portions are EXCLUDED (a neighbour's gate lane
+    re-imports the bowl this rule exists to catch).  Returns
+    ``{shape_constraints index: (lo_w, hi_w, n_chords)}`` for terminal
+    entries with at least one chord (``lo_w > hi_w`` = squeezed)."""
     npf_t = (getattr(layout, "_network_profile_field", None)
              if NETWORK_PROFILE_MODEL else None)
     if npf_t is None or nodes is None or layout is None:
-        return 0
-    n = len(elev)
-    _tdbg = _os.environ.get("O4_TERM_DEBUG") == "1"
+        return {}
     try:
         from shapely.geometry import LineString as _TL
         from shapely.geometry import Point as _TP
         from shapely.prepared import prep as _tprep
         from shapely.ops import unary_union as _tunion
     except Exception:                                  # pragma: no cover
-        return 0
+        return {}
     segs_t = _corridor_segments(layout, include_roads=False)
     if not segs_t:
-        return 0
+        return {}
     g_t = TERMINAL_CHORD_MAX_GRADE
     reach_t = TERMINAL_CHORD_REACH_M
     term_polys = [s.polygon for s in layout.shapes
@@ -2581,9 +2666,8 @@ def _warn_terminal_chord_law(layout, nodes, elev, shape_constraints,
             apr_prep_t = _tprep(_tunion(apolys_t))
     except _GEOM_EXC:
         apr_prep_t = None
-    n_warn = 0
-    msgs = []
-    for sc4 in shape_constraints:
+    out: dict = {}
+    for k4, sc4 in enumerate(shape_constraints):
         if sc4["role"] != ROLE_TERMINAL or not sc4["nodes"]:
             continue
         first4 = sorted(m for m in sc4["nodes"] if m < n)
@@ -2613,8 +2697,8 @@ def _warn_terminal_chord_law(layout, nodes, elev, shape_constraints,
                 continue
             ux4, uy4 = dx4 / sl4, dy4 / sl4
             nx4, ny4 = -uy4, ux4
-            k4 = max(1, int(sl4 // 12.0))
-            for t4 in range(k4 + 1):
+            k9 = max(1, int(sl4 // 12.0))
+            for t4 in range(k9 + 1):
                 f4 = min(t4 * 12.0, sl4)
                 qx4 = sa4[0] + ux4 * f4
                 qy4 = sa4[1] + uy4 * f4
@@ -2648,9 +2732,30 @@ def _warn_terminal_chord_law(layout, nodes, elev, shape_constraints,
                 if hi_c < hi_w:
                     hi_w = hi_c
                 n_ch += 1
-        if not n_ch:
-            continue
+        if n_ch:
+            out[k4] = (lo_w, hi_w, n_ch)
+    return out
+
+
+def _warn_terminal_chord_law(layout, nodes, elev, shape_constraints,
+                             icao=None) -> int:
+    """VALIDATOR check for the perpendicular-chord rule (★ user ruling
+    2026-06-12; window construction in :func:`_terminal_chord_windows`,
+    shared with the inherit step's window clamp).  A WARN here means a
+    pad sits outside its serving-taxiway window — a model defect to
+    investigate.  Squeezed (infeasible) windows are skipped — that
+    residue belongs to the arbitration/flex layers.  Returns the warn
+    count."""
+    n = len(elev)
+    _tdbg = _os.environ.get("O4_TERM_DEBUG") == "1"
+    wins = _terminal_chord_windows(layout, nodes, shape_constraints, n)
+    n_warn = 0
+    msgs = []
+    for k4, (lo_w, hi_w, n_ch) in sorted(wins.items()):
+        sc4 = shape_constraints[k4]
         vals4 = sorted(elev[m] for m in sc4["nodes"] if m < n)
+        if not vals4:
+            continue
         med4 = vals4[len(vals4) // 2]
         ref4 = sc4.get("ref") or "?"
         if lo_w > hi_w:
@@ -2665,8 +2770,10 @@ def _warn_terminal_chord_law(layout, nodes, elev, shape_constraints,
                   f"[{lo_w:.2f},{hi_w:.2f}] ({n_ch} chords) "
                   f"dev={dev4:.2f}")
         if dev4 > 0.25:
-            cen4 = poly4.centroid
-            la4, lo4 = layout.m_to_ll(cen4.x, cen4.y)
+            pts4 = [nodes[m] for m in sc4["nodes"] if m < n]
+            cx4 = sum(p[0] for p in pts4) / len(pts4)
+            cy4 = sum(p[1] for p in pts4) / len(pts4)
+            la4, lo4 = layout.m_to_ll(cx4, cy4)
             msgs.append(f"  chord-law {ref4}: pad {med4:.2f} vs "
                         f"window [{lo_w:.2f},{hi_w:.2f}] "
                         f"(+{dev4:.2f}m, {n_ch} chords) "
