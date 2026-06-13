@@ -22,6 +22,8 @@ from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 
+from .config import HANGAR_PADS
+
 # Narrow exception tuple for shapely / numeric-geometry failure
 # modes.  Programming errors propagate so they surface immediately.
 _GEOM_EXC = (ValueError, GEOSException, TopologicalError)
@@ -561,15 +563,22 @@ def _extract_osm_terminals(
     altitude structures on apron pavement that the surrounding
     apron should grade to.
 
-    Guard against false positives: ``aeroway=hangar`` /
-    ``aeroway=tower`` are only used when the airport has NO
-    ``aeroway=terminal`` items.  At airports where mappers DID
-    use ``aeroway=terminal`` (e.g. SPJC), the explicit terminals
+    HANGAR_PADS (s81, user 2026-06-12): hangars are ALWAYS
+    building pads, terminal-airports included — aprons weld to
+    their edges and taxi centerlines stop at their footprints
+    (the pipeline trims lanes at pad boundaries, which retires
+    the original malformed-sloping-rect concern below).
+
+    Guard against false positives (pre-s81, still governs
+    ``aeroway=tower`` and gate-off hangars): hangar / tower are
+    only used when the airport has NO ``aeroway=terminal``
+    items.  At airports where mappers DID use
+    ``aeroway=terminal`` (e.g. SPJC), the explicit terminals
     are authoritative and the hangar/tower buildings are likely
     actual hangars / towers that overlap pavement and would
     cause overlap-clip to malform sloping rects.
 
-    All accepted categories are emitted as ROLE_TERMINAL.
+    All accepted categories are emitted as ROLE_BUILDING.
     """
     # Detect whether this airport uses explicit aeroway=terminal.
     has_explicit_terminal = any(
@@ -582,6 +591,8 @@ def _extract_osm_terminals(
         terminal_aeroway_tags = {"terminal"}
     else:
         terminal_aeroway_tags = {"terminal", "hangar", "tower"}
+    if HANGAR_PADS:
+        terminal_aeroway_tags = terminal_aeroway_tags | {"hangar"}
     TERMINAL_AEROWAY_TAGS = terminal_aeroway_tags
     out: List[Polygon] = []
     way_by_id = {wid: (nds, tags) for wid, nds, tags in ways}
@@ -678,3 +689,53 @@ def _extract_osm_terminals(
     return out
 
 
+
+
+def trim_centerlines_at_buildings(
+    centerlines: List[Tuple[LineString, str]],
+    building_union,
+    min_piece_m: float = 1.0,
+) -> Tuple[List[Tuple[LineString, str]], int]:
+    """(s81) Taxilanes stop at building edges (user 2026-06-12).
+
+    Subtract the building-pad union from every taxi / service
+    centerline feeding the rect builder, so each rect's axis — and
+    therefore its end edge — lands ON the pad boundary.  The unify
+    weld + conformance passes then share the boundary nodes between
+    rect and pad (one altitude per shared vertex = the smooth
+    transition the ruling asks for), exactly as rects end against
+    aprons.  A lane crossing a building splits into independent
+    pieces, each kept as its own axis under the same ref; the rect
+    builder's own minimum-length filter decides which pieces are
+    long enough to emit.
+
+    Returns ``(trimmed_list, n_trimmed)`` where ``n_trimmed`` counts
+    input centerlines that lost any length to a building.
+    """
+    if building_union is None or getattr(building_union, "is_empty", True):
+        return list(centerlines), 0
+    out: List[Tuple[LineString, str]] = []
+    n_trimmed = 0
+    for axis, ref in centerlines:
+        try:
+            if not axis.intersects(building_union):
+                out.append((axis, ref))
+                continue
+            diff = axis.difference(building_union)
+        except _GEOM_EXC:
+            out.append((axis, ref))
+            continue
+        n_trimmed += 1
+        if diff.is_empty:
+            continue  # lane entirely inside the building
+        if diff.geom_type == "LineString":
+            pieces = [diff]
+        elif hasattr(diff, "geoms"):
+            pieces = [g for g in diff.geoms
+                      if g.geom_type == "LineString"]
+        else:
+            pieces = []
+        for piece in pieces:
+            if piece.length >= min_piece_m:
+                out.append((piece, ref))
+    return out, n_trimmed

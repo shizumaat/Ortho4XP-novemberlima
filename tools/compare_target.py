@@ -127,6 +127,11 @@ def load_shapes(path: Path, anchor: Tuple[float, float], source: str) -> List[Os
         role = tags.get("role")
         if not role:
             continue
+        # Legacy alias: pre-rename patches (and target fixtures cut
+        # before 2026-06-12) carry role='terminal'; the role is now
+        # 'building'.  Normalize on read so targets need no re-cut.
+        if role == "terminal":
+            role = "building"
         if not rings:
             continue
         # First ring = exterior; remaining = interior rings (holes).

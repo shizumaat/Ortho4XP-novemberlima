@@ -234,10 +234,19 @@ def include_airports(vector_map, tile):
             if os.path.isdir(candidate):
                 cifp_path = candidate
         if cifp_path:
-            # Extract taxiway centerlines from OSM data for patch generation
-            taxiway_data = OSMAERO.extract_taxiway_info(
-                airport_layer, dico_airports, tile
-            )
+            # The taxiway/building/road extraction below is passed as
+            # zero-arg callables: generate_auto_patches invokes them
+            # only when at least one airport actually needs a rebuild.
+            # A tile whose auto-patches are all up to date (apt.dat
+            # unchanged) skips the parsing — and its log output —
+            # entirely.
+
+            # Taxiway centerlines from OSM data for patch generation.
+            def _taxiway_provider():
+                return OSMAERO.extract_taxiway_info(
+                    airport_layer, dico_airports, tile
+                )
+
             # Building data: rely solely on aeroway=hangar and
             # aeroway=terminal features that are ALREADY in the
             # per-tile airport_layer cache.  Per user 2026-04-27:
@@ -252,14 +261,19 @@ def include_airports(vector_map, tile):
             # hangars dominate the apron-paint cut-outs.  Skipping
             # the extra query trades minor coverage for speed,
             # robustness, and zero rate-limit risk.
-            building_data = OSMAERO.extract_building_info(
-                airport_layer, dico_airports, tile,
-                building_layer=None,
-            )
-            # Load cached big roads for tunnel/road-aware terrain modeling
-            road_data = None
-            cached_roads = FNAMES.osm_cached(tile.lat, tile.lon, "big_roads")
-            if os.path.isfile(cached_roads):
+            def _building_provider():
+                return OSMAERO.extract_building_info(
+                    airport_layer, dico_airports, tile,
+                    building_layer=None,
+                )
+
+            # Cached big roads for tunnel/road-aware terrain modeling.
+            def _road_provider():
+                cached_roads = FNAMES.osm_cached(
+                    tile.lat, tile.lon, "big_roads"
+                )
+                if not os.path.isfile(cached_roads):
+                    return None
                 road_osm_layer = OSM.OSM_layer()
                 road_osm_layer.update_dicosm(
                     cached_roads,
@@ -268,14 +282,15 @@ def include_airports(vector_map, tile):
                     {"n": [], "w": [("highway", ""), ("tunnel", ""),
                                     ("bridge", "")], "r": []},
                 )
-                road_data = OSMAERO.extract_road_info(
+                return OSMAERO.extract_road_info(
                     dico_airports, tile, road_layer=road_osm_layer)
+
             AUTOPATCH.generate_auto_patches(
                 tile, cifp_path,
-                taxiway_data=taxiway_data,
-                building_data=building_data,
+                taxiway_data=_taxiway_provider,
+                building_data=_building_provider,
                 dico_airports=dico_airports,
-                road_data=road_data,
+                road_data=_road_provider,
                 mode=auto_patch_mode,
             )
     (patches_area, patches_list) = include_patches(vector_map, tile)

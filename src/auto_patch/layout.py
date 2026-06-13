@@ -68,7 +68,7 @@ __all__ = [
     "ROLE_STUB",
     "ROLE_CROSS_CONNECTOR",
     "ROLE_APRON",
-    "ROLE_TERMINAL",
+    "ROLE_BUILDING",
     "ROLE_JUNCTION",
     "ROLE_RUNWAY_CROSSING",
     "ROLE_BOUNDARY",
@@ -187,7 +187,12 @@ ROLE_SECONDARY_PARALLEL = PS.ROLE_SECONDARY_PARALLEL
 ROLE_STUB = PS.ROLE_STUB
 ROLE_CROSS_CONNECTOR = PS.ROLE_CROSS_CONNECTOR
 ROLE_APRON = PS.ROLE_APRON
-ROLE_TERMINAL = "terminal"
+# Building pads: terminals, hangars, towers — any flat fixed-floor
+# structure the surrounding apron grades to.  Renamed from
+# ROLE_TERMINAL (value "terminal") per user 2026-06-12; read paths
+# (ROLE_GRADE_LIMITS, compare-target loader) keep a legacy
+# "terminal" alias for pre-rename patches on disk.
+ROLE_BUILDING = "building"
 ROLE_JUNCTION = "junction"
 # A junction at the intersection of two runways (user 2026-05-18).
 # Created by ``_resolve_runway_crossings`` when overlapping runway
@@ -242,7 +247,7 @@ AEROWAY_FOR_ROLE = {
     ROLE_JUNCTION: "taxiway",
     ROLE_RUNWAY_CROSSING: "runway",
     ROLE_APRON: "apron",
-    ROLE_TERMINAL: "building",
+    ROLE_BUILDING: "building",
     ROLE_BOUNDARY: "aerodrome",
     ROLE_TUNNEL_RAMP: "taxiway",
     ROLE_RETAINING_WALL: "building",

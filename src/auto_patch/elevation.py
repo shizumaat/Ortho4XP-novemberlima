@@ -109,7 +109,7 @@ from .layout import (
     ROLE_SECONDARY_PARALLEL,
     ROLE_SERVICE_ROAD,
     ROLE_STUB,
-    ROLE_TERMINAL,
+    ROLE_BUILDING,
     ROLE_RETAINING_WALL,
     SHARED_VERTEX_TOL_M,
     vertex_bucket,
@@ -874,7 +874,7 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
                 from dataclasses import replace as _dc_replace
                 new_shapes: list[BuiltShape] = []
                 for shape in layout.shapes:
-                    if shape.role in (ROLE_RUNWAY, ROLE_TERMINAL):
+                    if shape.role in (ROLE_RUNWAY, ROLE_BUILDING):
                         new_shapes.append(shape)
                         continue
                     # Clean sub-polygon before difference — apt.dat
@@ -1024,7 +1024,7 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
     for shape in layout.shapes:
         if USE_PER_SURFACE_SOLVER:
             break  # legacy terminal pre-pin disabled
-        if shape.role != ROLE_TERMINAL:
+        if shape.role != ROLE_BUILDING:
             continue
         if shape.polygon is None or shape.polygon.is_empty:
             continue
@@ -1382,7 +1382,7 @@ def _solve_pavement_elevations_unified(
            - ROLE_PRIMARY_PARALLEL / SECONDARY_PARALLEL / STUB /
              CROSS_CONNECTOR: derive altitude_high/low from the
              rect's 4 corners (avg of corners 0,3 / corners 1,2).
-           - ROLE_TERMINAL: avg of all corners → altitude.
+           - ROLE_BUILDING: avg of all corners → altitude.
            - ROLE_JUNCTION: per-vertex node_altitudes from corner
              elevations.
 
@@ -1405,7 +1405,7 @@ def _solve_pavement_elevations_unified(
     pavement_roles = {
         ROLE_RUNWAY, ROLE_PRIMARY_PARALLEL,
         ROLE_SECONDARY_PARALLEL, ROLE_STUB,
-        ROLE_CROSS_CONNECTOR, ROLE_TERMINAL, ROLE_JUNCTION,
+        ROLE_CROSS_CONNECTOR, ROLE_BUILDING, ROLE_JUNCTION,
     }
     bucket_to_idx: dict[tuple[int, int], int] = {}
     nodes: list[tuple[float, float]] = []
@@ -1641,7 +1641,7 @@ def _solve_pavement_elevations_unified(
     # Terminal corners — flat constraint (all share the same value).
     terminal_groups: list[list[int]] = []
     for s in layout.shapes:
-        if s.role != ROLE_TERMINAL:
+        if s.role != ROLE_BUILDING:
             continue
         if s.polygon is None or s.polygon.is_empty:
             continue
@@ -1768,7 +1768,7 @@ def _solve_pavement_elevations_unified(
                 corner_elevs.append(float("nan"))
         if any(math.isnan(e) for e in corner_elevs):
             continue
-        if s.role == ROLE_TERMINAL:
+        if s.role == ROLE_BUILDING:
             avg = sum(corner_elevs) / len(corner_elevs)
             s.altitude = round(float(avg), 1)
             n_terms += 1
@@ -2057,7 +2057,7 @@ def _rederive_terminal_altitude_from_apron_neighbours(
     n_changed = 0
     radius2 = sample_radius_m * sample_radius_m
     for s in layout.shapes:
-        if s.role != ROLE_TERMINAL:
+        if s.role != ROLE_BUILDING:
             continue
         if s.polygon is None or s.polygon.is_empty:
             continue
@@ -2219,7 +2219,7 @@ def _snap_junction_altitudes_to_rect_corners(
         # terminal is FLAT at ``s.altitude`` and the apron must
         # match at every shared corner — otherwise X-Plane
         # renders a step where the apron meets the terminal pad.
-        ROLE_TERMINAL,
+        ROLE_BUILDING,
     }
     # Also collect the FULL sloping-rect shapes for interior-
     # snap (point-in-polygon + interpolated altitude).
@@ -2934,7 +2934,7 @@ def _report_within_shape_violations(
         # JUNCTION — both can be non-convex; only pairs whose chord stays
         # inside the (buffered) polygon are real constraints.
         _vis = None
-        if s.role in (ROLE_APRON, ROLE_JUNCTION, ROLE_TERMINAL):
+        if s.role in (ROLE_APRON, ROLE_JUNCTION, ROLE_BUILDING):
             try:
                 from shapely.geometry import Polygon as _Pg
                 from shapely.prepared import prep as _prep
@@ -3162,7 +3162,7 @@ def _drop_overlap_against_fixed_shapes(
     #     larger is "the more authoritative" footprint).
     #   * If the clip leaves no usable polygon, drop it.
     same_role_sets = [
-            {ROLE_TERMINAL},
+            {ROLE_BUILDING},
             {ROLE_RUNWAY},
             {ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
              ROLE_STUB, ROLE_CROSS_CONNECTOR}]
@@ -3247,7 +3247,7 @@ def _drop_overlap_against_fixed_shapes(
         # ROLE_RUNWAY so adjacent rects/junctions/aprons clip
         # AGAINST it instead of overlapping into its footprint.
         {ROLE_RUNWAY, ROLE_RUNWAY_CROSSING},
-        {ROLE_TERMINAL},
+        {ROLE_BUILDING},
         # (s79) SVC road rects are fixed geometry the residue must
         # fit around, exactly like taxi rects — without this an apron
         # overlapped the CYXY pav[1] ramp by 13.5 m2 (zero-tolerance

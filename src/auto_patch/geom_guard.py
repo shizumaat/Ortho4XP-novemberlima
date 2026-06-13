@@ -41,7 +41,7 @@ from .layout import (
     ROLE_SECONDARY_PARALLEL,
     ROLE_SERVICE_JUNCTION,
     ROLE_STUB,
-    ROLE_TERMINAL,
+    ROLE_BUILDING,
 )
 
 if TYPE_CHECKING:
@@ -55,7 +55,7 @@ _AIRSIDE_ROLES = frozenset({
     ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
     ROLE_STUB, ROLE_CROSS_CONNECTOR,
     ROLE_JUNCTION, ROLE_SERVICE_JUNCTION,
-    ROLE_APRON, ROLE_TERMINAL,
+    ROLE_APRON, ROLE_BUILDING,
 })
 
 # Round ring coords to this many metres when hashing, so float jitter from

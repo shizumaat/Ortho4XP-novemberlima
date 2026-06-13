@@ -68,7 +68,7 @@ from auto_patch.layout import (
     ROLE_APRON, ROLE_BOUNDARY, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL, ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
     ROLE_SECONDARY_PARALLEL, ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION,
-    ROLE_STUB, ROLE_TERMINAL,
+    ROLE_STUB, ROLE_BUILDING,
 )
 
 # Narrow exception tuple for shapely / numeric-geometry failure
@@ -86,7 +86,7 @@ SLOPING_RECT_ROLES = (
 
 PAVEMENT_ROLES = {
     ROLE_RUNWAY, *SLOPING_RECT_ROLES,
-    ROLE_APRON, ROLE_TERMINAL, ROLE_JUNCTION,
+    ROLE_APRON, ROLE_BUILDING, ROLE_JUNCTION,
     # Service-road network junction: all-pair grading branch at 4%
     # (not a sloping rect — irregular fill polygon at bends/intersections).
     ROLE_SERVICE_JUNCTION,
@@ -322,7 +322,7 @@ def solve(layout, icao: str,
         layout, bucket_to_idx, roles=frozenset((ROLE_APRON,)),
         add_runway_anchor=False)
     term_eg, term_el = _build_edges(
-        layout, bucket_to_idx, roles=frozenset((ROLE_TERMINAL,)),
+        layout, bucket_to_idx, roles=frozenset((ROLE_BUILDING,)),
         add_runway_anchor=False)
 
     total_iters = 0
@@ -558,7 +558,7 @@ def solve(layout, icao: str,
         # construction — cross/v2e/mid metrics untouched.
         if TERMINAL_PADS_SLOPE:
             for sc in shape_constraints:
-                if sc["role"] != ROLE_TERMINAL or not sc["edges"]:
+                if sc["role"] != ROLE_BUILDING or not sc["edges"]:
                     continue
                 held_t = {i for i in sc["nodes"]
                           if base_hard[i] or owners.get(i, 0) > 1}
@@ -989,7 +989,7 @@ def _apron_corridor_geodesic_state(layout, nodes, elev, shape_constraints,
         role = sc["role"]
         if role in SLOPING_RECT_ROLES and role != ROLE_SERVICE_ROAD:
             rect_nodes.update(sc["nodes"])
-        elif role in (ROLE_APRON, ROLE_JUNCTION, ROLE_TERMINAL):
+        elif role in (ROLE_APRON, ROLE_JUNCTION, ROLE_BUILDING):
             near_nodes.update(sc["nodes"])
     # Airside union for the mid-range seed visibility test (apron lanes run
     # through apron INTERIORS — ring vertices sit 15-60 m away laterally;
@@ -1735,7 +1735,7 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
         # _term_nodes is collected only for the inherit grouping and
         # the final strict closure.
         for sc2 in shape_constraints:
-            if sc2["role"] == ROLE_TERMINAL:
+            if sc2["role"] == ROLE_BUILDING:
                 _term_nodes.update(sc2["nodes"])
     elif not TERMINAL_PADS_SLOPE and TERMINAL_LEAF_LEVELS:
         # TERMINAL LEAF LEVELS (s77 user ruling, supersedes "terminals
@@ -1752,7 +1752,7 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
         # surface (robust to pinned outliers), then the legal
         # re-projection conforms the aprons around it.
         for sc2 in shape_constraints:
-            if sc2["role"] == ROLE_TERMINAL:
+            if sc2["role"] == ROLE_BUILDING:
                 _term_nodes.update(sc2["nodes"])
         seen_g0: set = set()
         for i in _term_nodes:
@@ -1779,7 +1779,7 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
         # either way; the relief leaves 1-3 m mixed-authority kinks that
         # the hold below would otherwise print)
         for sc2 in shape_constraints:
-            if sc2["role"] != ROLE_TERMINAL or not sc2["edges"]:
+            if sc2["role"] != ROLE_BUILDING or not sc2["edges"]:
                 continue
             for _ in range(200):
                 mx2 = 0.0
@@ -1807,7 +1807,7 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                     break
     elif not TERMINAL_PADS_SLOPE:
         for sc2 in shape_constraints:
-            if sc2["role"] == ROLE_TERMINAL:
+            if sc2["role"] == ROLE_BUILDING:
                 _term_nodes.update(sc2["nodes"])
                 if _tdbg:
                     print(f"[term] sc ref={sc2['ref']} flat={sc2['flat']} "
@@ -1866,7 +1866,7 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
         # cap-smooth at or below its ceilings, and neighbouring aprons
         # re-conform around the frozen result in the projections below.
         for sc2 in shape_constraints:
-            if sc2["role"] != ROLE_TERMINAL or not sc2["edges"]:
+            if sc2["role"] != ROLE_BUILDING or not sc2["edges"]:
                 continue
             n_moves2 = 0
             for _ in range(200):
@@ -1982,7 +1982,7 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                     # they sit in (previously HELD, so never banded).
                     if sc3["role"] != ROLE_APRON and not (
                             TERMINAL_NATURAL_LEVELS
-                            and sc3["role"] == ROLE_TERMINAL):
+                            and sc3["role"] == ROLE_BUILDING):
                         continue
                     for i in sc3["nodes"]:
                         if i >= n or geo_dist[i] == float("inf"):
@@ -2038,7 +2038,7 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                     seen_at: set = set()
                     for sc3 in shape_constraints:
                         if sc3["role"] not in (ROLE_APRON,
-                                               ROLE_TERMINAL):
+                                               ROLE_BUILDING):
                             continue
                         for i in sc3["nodes"]:
                             if i >= n or i in seen_at:
@@ -2109,7 +2109,7 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
         # cannot disagree with its own apron, because it is DERIVED
         # from it.
         term_scs9 = [sc9 for sc9 in shape_constraints
-                     if sc9["role"] == ROLE_TERMINAL and sc9["nodes"]]
+                     if sc9["role"] == ROLE_BUILDING and sc9["nodes"]]
         parent9: dict = {}
 
         def _findp(a):
@@ -2167,15 +2167,29 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                     continue
                 w9c = (w4 if w9c is None else
                        (max(w9c[0], w4[0]), min(w9c[1], w4[1]),
-                        w9c[2] + w4[2]))
-            law9 = w9c is not None and w9c[0] <= w9c[1]
-            if law9:
-                old9 = lvl9
-                lvl9 = min(max(lvl9, w9c[0]), w9c[1])
-                if _tdbg and abs(lvl9 - old9) > 0.05:
-                    print(f"[term] inherit {refs9} window clamp "
-                          f"{old9:.2f} -> {lvl9:.2f} "
-                          f"[{w9c[0]:.2f},{w9c[1]:.2f}]")
+                        max(w9c[2], w4[2]), min(w9c[3], w4[3]),
+                        w9c[4] + w4[4]))
+            law9 = False
+            if w9c is not None:
+                tgt9, law9 = _chord_window_target(w9c, lvl9)
+                if tgt9 is None:
+                    # LAW-infeasible squeeze: no flat level can hold
+                    # even 1.5 % to every serving taxiway — the user
+                    # hierarchy says the terminal SLOPES (flatness
+                    # yields to grade, never the apron).
+                    lvl9 = None
+                    if _tdbg:
+                        print(f"[term] inherit {refs9} law-infeasible "
+                              f"squeeze 1%[{w9c[0]:.2f},{w9c[1]:.2f}] "
+                              f"law[{w9c[2]:.2f},{w9c[3]:.2f}] — "
+                              f"SLOPES")
+                elif law9:
+                    if _tdbg and abs(tgt9 - lvl9) > 0.05:
+                        print(f"[term] inherit {refs9} window clamp "
+                              f"{lvl9:.2f} -> {tgt9:.2f} "
+                              f"1%[{w9c[0]:.2f},{w9c[1]:.2f}] "
+                              f"law[{w9c[2]:.2f},{w9c[3]:.2f}]")
+                    lvl9 = tgt9
             entries9.append([cn9, lvl9, refs9, law9])
         # PAIRWISE grade resolution (KPHL terminal13/23, s79p4): two
         # flat levels further apart than the apron between them may
@@ -2466,7 +2480,7 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                 for m in sc9["nodes"]:
                     owners9[m] = owners9.get(m, 0) + 1
             for sc9 in shape_constraints:
-                if sc9["role"] != ROLE_TERMINAL or not sc9["edges"]:
+                if sc9["role"] != ROLE_BUILDING or not sc9["edges"]:
                     continue
                 if not (set(sc9["nodes"]) & slope_pads):
                     continue
@@ -2538,7 +2552,7 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                     for m8 in sc8["nodes"]:
                         owners8[m8] = owners8.get(m8, 0) + 1
                 for sc8 in shape_constraints:
-                    if sc8["role"] != ROLE_TERMINAL or not sc8["edges"]:
+                    if sc8["role"] != ROLE_BUILDING or not sc8["edges"]:
                         continue
                     if not (set(sc8["nodes"]) & reverted9):
                         continue
@@ -2629,13 +2643,18 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
 
 def _terminal_chord_windows(layout, nodes, shape_constraints, n):
     """Per-pad PERPENDICULAR-CHORD windows (★ user ruling 2026-06-12):
-    intersection of ``[v ± TERMINAL_CHORD_MAX_GRADE·d]`` over every
-    perpendicular chord from a taxi centerline that crosses the pad.
-    Chord values are NETWORK-FIELD samples at the centerline foot;
-    apron-lane portions are EXCLUDED (a neighbour's gate lane
-    re-imports the bowl this rule exists to catch).  Returns
-    ``{shape_constraints index: (lo_w, hi_w, n_chords)}`` for terminal
-    entries with at least one chord (``lo_w > hi_w`` = squeezed)."""
+    intersection of ``[v ± g·d]`` over every perpendicular chord from
+    a taxi centerline that crosses the pad, at TWO rates — the 1 %
+    APRON PREFERENCE (``TERMINAL_CHORD_MAX_GRADE``) and the legal
+    apron rate (``APRON_MAX_GRADE``).  The terminal level adjusts so
+    the apron grades at 1 % to its serving taxiways wherever geometry
+    allows; when two taxiways' 1 % demands conflict (inverted window)
+    the LAW-rate window is the fallback.  Chord values are
+    NETWORK-FIELD samples at the centerline foot; apron-lane portions
+    are EXCLUDED (a neighbour's gate lane re-imports the bowl this
+    rule exists to catch).  Returns ``{shape_constraints index:
+    (lo1, hi1, lo_law, hi_law, n_chords)}`` for terminal entries with
+    at least one chord."""
     npf_t = (getattr(layout, "_network_profile_field", None)
              if NETWORK_PROFILE_MODEL else None)
     if npf_t is None or nodes is None or layout is None:
@@ -2645,17 +2664,56 @@ def _terminal_chord_windows(layout, nodes, shape_constraints, n):
         from shapely.geometry import Point as _TP
         from shapely.prepared import prep as _tprep
         from shapely.ops import unary_union as _tunion
+        from shapely.ops import nearest_points as _tnear
     except Exception:                                  # pragma: no cover
         return {}
     segs_t = _corridor_segments(layout, include_roads=False)
     if not segs_t:
         return {}
     g_t = TERMINAL_CHORD_MAX_GRADE
+    g_law_t = _role_grade(ROLE_APRON)
     reach_t = TERMINAL_CHORD_REACH_M
     term_polys = [s.polygon for s in layout.shapes
-                  if s.role == ROLE_TERMINAL
+                  if s.role == ROLE_BUILDING
                   and s.polygon is not None
                   and not s.polygon.is_empty]
+    # SERVING test: a chord binds only when the connector from the
+    # centerline foot to the pad crosses APRON, not another taxiway —
+    # an intervening taxi surface re-anchors the profile, so the
+    # relationship is transitive, not direct (at the 400 m reach a
+    # far 109-level corridor otherwise "demands" 108 of a pad two
+    # taxiways away).  Sampled every 8 m; the source taxiway's own
+    # half-width is the leading run and is ignored.
+    taxi_prep_t = None
+    try:
+        tx4 = [s.polygon for s in layout.shapes
+               if (s.role in SLOPING_RECT_ROLES
+                   and s.role != ROLE_SERVICE_ROAD
+                   or s.role == ROLE_JUNCTION)
+               and s.polygon is not None and not s.polygon.is_empty]
+        if tx4:
+            taxi_prep_t = _tprep(_tunion(tx4).buffer(0.5))
+    except _GEOM_EXC:
+        taxi_prep_t = None
+
+    def _crosses_taxi_t(qx9, qy9, px9, py9):
+        if taxi_prep_t is None:
+            return False
+        dx9, dy9 = px9 - qx9, py9 - qy9
+        ln9 = math.hypot(dx9, dy9)
+        if ln9 < 8.0:
+            return False
+        kk9 = int(ln9 // 8.0)
+        left_src9 = False
+        for t9 in range(1, kk9 + 1):
+            f9 = t9 * 8.0 / ln9
+            on9 = taxi_prep_t.contains(
+                _TP(qx9 + f9 * dx9, qy9 + f9 * dy9))
+            if not on9:
+                left_src9 = True
+            elif left_src9:
+                return True          # taxi pavement AFTER leaving src
+        return False
     apr_prep_t = None
     try:
         apolys_t = [s.polygon for s in layout.shapes
@@ -2668,7 +2726,7 @@ def _terminal_chord_windows(layout, nodes, shape_constraints, n):
         apr_prep_t = None
     out: dict = {}
     for k4, sc4 in enumerate(shape_constraints):
-        if sc4["role"] != ROLE_TERMINAL or not sc4["nodes"]:
+        if sc4["role"] != ROLE_BUILDING or not sc4["nodes"]:
             continue
         first4 = sorted(m for m in sc4["nodes"] if m < n)
         if not first4:
@@ -2684,6 +2742,7 @@ def _terminal_chord_windows(layout, nodes, shape_constraints, n):
         pprep4 = _tprep(poly4)
         bx0, by0, bx1, by1 = poly4.bounds
         lo_w, hi_w, n_ch = float("-inf"), float("inf"), 0
+        lo_l, hi_l = float("-inf"), float("inf")
         for (sa4, sb4) in segs_t:
             if (max(sa4[0], sb4[0]) < bx0 - reach_t
                     or min(sa4[0], sb4[0]) > bx1 + reach_t
@@ -2718,6 +2777,9 @@ def _terminal_chord_windows(layout, nodes, shape_constraints, n):
                     if inter4.is_empty:
                         continue
                     d4 = inter4.distance(q4)
+                    pn4 = _tnear(inter4, q4)[0]
+                    if _crosses_taxi_t(qx4, qy4, pn4.x, pn4.y):
+                        continue     # another taxiway re-anchors
                 except _GEOM_EXC:
                     continue
                 if d4 < 3.0:
@@ -2731,10 +2793,34 @@ def _terminal_chord_windows(layout, nodes, shape_constraints, n):
                     lo_w = lo_c
                 if hi_c < hi_w:
                     hi_w = hi_c
+                lo_c = v4 - g_law_t * d4
+                hi_c = v4 + g_law_t * d4
+                if lo_c > lo_l:
+                    lo_l = lo_c
+                if hi_c < hi_l:
+                    hi_l = hi_c
                 n_ch += 1
         if n_ch:
-            out[k4] = (lo_w, hi_w, n_ch)
+            out[k4] = (lo_w, hi_w, lo_l, hi_l, n_ch)
     return out
+
+
+def _chord_window_target(win9, cur9):
+    """Resolve a two-rate chord window to a pad TARGET (user 2026-06-12:
+    the terminal adjusts so the apron grades at 1 % to its serving
+    taxiways).  Preference order: clamp into the feasible 1 % window;
+    if the 1 % demands conflict (inverted), the 1 % least-violation
+    MIDPOINT clamped into the feasible LAW-rate window; if even the
+    law window is infeasible → ``(None, False)`` (genuine squeeze —
+    the grade-grouping / slope fallback decides).  Returns
+    ``(target, law_pinned)``."""
+    lo1, hi1, lo_l, hi_l, _n = win9
+    if lo1 <= hi1:
+        return min(max(cur9, lo1), hi1), True
+    if lo_l <= hi_l:
+        mid1 = 0.5 * (lo1 + hi1)
+        return min(max(mid1, lo_l), hi_l), True
+    return None, False
 
 
 def _warn_terminal_chord_law(layout, nodes, elev, shape_constraints,
@@ -2751,31 +2837,42 @@ def _warn_terminal_chord_law(layout, nodes, elev, shape_constraints,
     wins = _terminal_chord_windows(layout, nodes, shape_constraints, n)
     n_warn = 0
     msgs = []
-    for k4, (lo_w, hi_w, n_ch) in sorted(wins.items()):
+    for k4, (lo1, hi1, lo_l, hi_l, n_ch) in sorted(wins.items()):
         sc4 = shape_constraints[k4]
         vals4 = sorted(elev[m] for m in sc4["nodes"] if m < n)
         if not vals4:
             continue
         med4 = vals4[len(vals4) // 2]
         ref4 = sc4.get("ref") or "?"
-        if lo_w > hi_w:
+        # The WARN asserts the LAW-rate window (1.5 %); the 1 % window
+        # is the PREFERENCE — a pad lawfully compromising inside an
+        # edge-connected complex sits outside one member's 1 % window
+        # by design, and that is not a defect.  Both windows
+        # infeasible → arbitration residue, debug note only.
+        if lo_l > hi_l:
             if _tdbg:
-                print(f"[term] chord-law {ref4}: window "
-                      f"[{lo_w:.2f},{hi_w:.2f}] INFEASIBLE "
+                print(f"[term] chord-law {ref4}: windows "
+                      f"1%[{lo1:.2f},{hi1:.2f}] "
+                      f"law[{lo_l:.2f},{hi_l:.2f}] INFEASIBLE "
                       f"(squeeze, {n_ch} chords) med={med4:.2f}")
             continue
+        lo_w, hi_w, tag4 = lo_l, hi_l, "law"
         dev4 = max(lo_w - med4, med4 - hi_w, 0.0)
         if _tdbg:
-            print(f"[term] chord-law {ref4}: med={med4:.2f} window "
-                  f"[{lo_w:.2f},{hi_w:.2f}] ({n_ch} chords) "
-                  f"dev={dev4:.2f}")
+            dev1 = max(lo1 - med4, med4 - hi1, 0.0) \
+                if lo1 <= hi1 else None
+            print(f"[term] chord-law {ref4}: med={med4:.2f} "
+                  f"law window [{lo_w:.2f},{hi_w:.2f}] "
+                  f"1%[{lo1:.2f},{hi1:.2f}] ({n_ch} chords) "
+                  f"law-dev={dev4:.2f} 1%-dev="
+                  f"{'squeezed' if dev1 is None else f'{dev1:.2f}'}")
         if dev4 > 0.25:
             pts4 = [nodes[m] for m in sc4["nodes"] if m < n]
             cx4 = sum(p[0] for p in pts4) / len(pts4)
             cy4 = sum(p[1] for p in pts4) / len(pts4)
             la4, lo4 = layout.m_to_ll(cx4, cy4)
             msgs.append(f"  chord-law {ref4}: pad {med4:.2f} vs "
-                        f"window [{lo_w:.2f},{hi_w:.2f}] "
+                        f"{tag4} window [{lo_w:.2f},{hi_w:.2f}] "
                         f"(+{dev4:.2f}m, {n_ch} chords) "
                         f"@({la4:.6f},{lo4:.6f})")
             n_warn += 1
@@ -3226,7 +3323,7 @@ def _build_shape_constraints(layout, bucket_to_idx):
         # terminal cap through the visibility graph, exactly like an apron
         # (no cap-0 rigidity for ANY pad; flatness is imposed post-solve by
         # the INHERIT step from the settled median, see the enforce).
-        if (s.role == ROLE_TERMINAL and not TERMINAL_PADS_SLOPE
+        if (s.role == ROLE_BUILDING and not TERMINAL_PADS_SLOPE
                 and not TERMINAL_NATURAL_LEVELS):
             _sloped = getattr(layout, "_sloped_terminal_nodes", None)
             if not (_sloped and any(i in _sloped for i in nodes)):
@@ -3276,7 +3373,7 @@ def _build_shape_constraints(layout, bucket_to_idx):
                     flat_pairs.append((idx[a], idx[b]))
                 else:                    # the two most-parallel = sloping edges
                     edges.append((idx[a], idx[b], cap * el))
-        elif s.role in (ROLE_APRON, ROLE_TERMINAL, ROLE_JUNCTION):
+        elif s.role in (ROLE_APRON, ROLE_BUILDING, ROLE_JUNCTION):
             # In-pavement VISIBILITY graph for APRONS, GRADED terminals (when
             # TERMINAL_MAX_GRADE > 0 — large near-flat pads, same as an apron)
             # and JUNCTIONS.  The within-shape grade
@@ -4220,7 +4317,7 @@ def _flex_route_bands(layout, elev, bucket_to_idx, free_nodes,
     for s in layout.shapes:
         if s.polygon is None or s.polygon.is_empty:
             continue
-        is_term = s.role == ROLE_TERMINAL
+        is_term = s.role == ROLE_BUILDING
         is_rwy = s.role == ROLE_RUNWAY
         if not (is_term or is_rwy):
             continue
@@ -4898,7 +4995,7 @@ def _network_field_stations(layout, elev, bucket_to_idx, chain_data,
                        or s.role == ROLE_JUNCTION)
                    and s.polygon is not None and not s.polygon.is_empty]
             ap9 = [s.polygon for s in layout.shapes
-                   if s.role in (ROLE_APRON, ROLE_TERMINAL)
+                   if s.role in (ROLE_APRON, ROLE_BUILDING)
                    and s.polygon is not None and not s.polygon.is_empty]
             if tx9 and ap9:
                 _txp9 = _cprep(_cunion(tx9).buffer(0.5))
@@ -4935,11 +5032,12 @@ def _network_field_stations(layout, elev, bucket_to_idx, chain_data,
             apron_plane_grade=(APRON_CORRIDOR_SMOOTH_GRADE
                                if TERMINAL_NATURAL_LEVELS else 0.0),
             term_polys=(tuple(s.polygon for s in layout.shapes
-                              if s.role == ROLE_TERMINAL
+                              if s.role == ROLE_BUILDING
                               and s.polygon is not None
                               and not s.polygon.is_empty)
                         if TERMINAL_NATURAL_LEVELS else ()),
             chord_grade=TERMINAL_CHORD_MAX_GRADE,
+            chord_law_grade=_role_grade(ROLE_APRON),
             chord_reach=TERMINAL_CHORD_REACH_M)
     except _GEOM_EXC:
         F = None
@@ -8355,7 +8453,7 @@ def _seed_terminals_from_taxi_routes(layout, elev, bucket_to_idx, dem_elev,
     node_band: dict = {}                # node_idx -> (lo, hi)
     node_refs: dict = {}                # cluster-root -> [ref...]  (debug)
     for s in layout.shapes:
-        if s.role != ROLE_TERMINAL or s.polygon is None or s.polygon.is_empty:
+        if s.role != ROLE_BUILDING or s.polygon is None or s.polygon.is_empty:
             continue
         ring = _open_ring(list(s.polygon.exterior.coords))
         idxs = [bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
@@ -8504,7 +8602,7 @@ def _node_tiers(layout, bucket_to_idx, n):
             t = _TIER_TAXI
         elif s.role == ROLE_APRON:
             t = _TIER_APRON
-        elif s.role == ROLE_TERMINAL:
+        elif s.role == ROLE_BUILDING:
             t = _TIER_TERMINAL
         else:
             continue
@@ -9121,7 +9219,7 @@ def _writeback(layout, elev, bucket_to_idx):
             coords_open, elev, bucket_to_idx, layout)
         if corner_elevs is None:
             continue
-        if s.role == ROLE_TERMINAL and _role_grade(ROLE_TERMINAL) <= 0.0:
+        if s.role == ROLE_BUILDING and _role_grade(ROLE_BUILDING) <= 0.0:
             # Terminal is FLAT (the default: TERMINAL_MAX_GRADE = 0, a terminal
             # sits on one floor altitude — per user 2026-05-18).  The flat
             # equality group already enforced this in the solver; average is just
@@ -9133,7 +9231,7 @@ def _writeback(layout, elev, bucket_to_idx):
             s.altitude_low = None
             s.node_altitudes = None
             n_terms += 1
-        elif s.role in (ROLE_APRON, ROLE_TERMINAL):
+        elif s.role in (ROLE_APRON, ROLE_BUILDING):
             # Per user 2026-05-18: aprons are NOT 100 % flat — they
             # satisfy 1.5 % across their surface, NOT zero gradient.
             # Keep the solver's per-corner altitudes (which it

@@ -49,7 +49,7 @@ from .layout import (
     ROLE_APRON,
     ROLE_JUNCTION,
     ROLE_RUNWAY,
-    ROLE_TERMINAL,
+    ROLE_BUILDING,
     SHARED_VERTEX_TOL_M,
     vertex_bucket,
 )
@@ -2151,7 +2151,7 @@ def stitch_pavement_to_terminals(
     ``node_altitudes`` is updated in lockstep with polygon rewrites.
     Run as the last geometry pass before OSM emit.
     """
-    terminals = [s for s in layout.shapes if s.role == ROLE_TERMINAL]
+    terminals = [s for s in layout.shapes if s.role == ROLE_BUILDING]
     if not terminals:
         return
     pavements = [s for s in layout.shapes

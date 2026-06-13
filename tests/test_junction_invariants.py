@@ -268,7 +268,7 @@ def test_junction_vertices_have_source(icao):
     SOURCE_ROLES = {
         "runway", "primary_parallel", "secondary_parallel",
         "stub", "cross_connector",
-        "apron", "terminal", "groundside_pavement", "boundary",
+        "apron", "building", "groundside_pavement", "boundary",
         "tunnel_ramp", "retaining_wall",
         "runway_crossing",
     }
@@ -312,6 +312,25 @@ def test_junction_vertices_have_source(icao):
     # covers that drift; orphans from real densification still flag.
     BOUNDARY_TOL = 1.0
     pav_boundary = getattr(layout, "apt_pavement_boundary", None)
+    # Groundside-clearance anchoring: a junction ring that runs along
+    # a groundside cut inherits the PRE-separation cut line; the
+    # groundside polygon itself is then pushed GROUNDSIDE_CLEARANCE_M
+    # (1.0 m) back by _separate_groundside_from_airside (user
+    # 2026-05-22 — groundside shares no node/edge with airside).
+    # Such vertices ARE source-anchored — to the cut — but sit
+    # exactly one clearance gap from the moved groundside edge.
+    # Accept any junction vertex within clearance + shared-vertex
+    # tolerance of a groundside boundary.  (First exercised by s81
+    # hangar pads, whose groundside lots can abut a junction face.)
+    from auto_patch.groundside import GROUNDSIDE_CLEARANCE_M
+    gs_boundary = None
+    _gs_polys = [s.polygon for s in layout.shapes
+                 if s.role == "groundside_pavement"
+                 and s.polygon is not None and not s.polygon.is_empty]
+    if _gs_polys:
+        from shapely.ops import unary_union as _uu
+        gs_boundary = _uu([p.boundary for p in _gs_polys])
+    GS_TOL = GROUNDSIDE_CLEARANCE_M + SHARED_VERTEX_TOL_M
 
     orphans: List[str] = []
     for idx, s in enumerate(layout.shapes):
@@ -343,6 +362,15 @@ def test_junction_vertices_have_source(icao):
                 if d_b <= BOUNDARY_TOL:
                     continue
                 d = min(d, d_b)
+            # Groundside-clearance anchoring (see GS_TOL above).
+            if gs_boundary is not None:
+                try:
+                    d_g = gs_boundary.distance(Point(vx, vy))
+                except Exception:
+                    d_g = float("inf")
+                if d_g <= GS_TOL:
+                    continue
+                d = min(d, d_g)
             orphans.append(
                 f"{_shape_label(layout, idx, s)} "
                 f"vertex#{v_idx} at ({vx:.1f},{vy:.1f}) — "
@@ -377,6 +405,16 @@ def test_junction_neighbour_corners_shared(icao):
     others = [
         (idx, s) for idx, s in enumerate(layout.shapes)
         if s.role != "junction"
+        # Groundside pavement NEVER shares nodes with airside BY
+        # DESIGN (user 2026-05-22): _separate_groundside_from_airside
+        # holds it exactly GROUNDSIDE_CLEARANCE_M (1.0 m) off every
+        # airside ring — right at this test's proximity band — so its
+        # vertices can never legally coincide with a junction's and
+        # the shared-corner invariant does not apply to it.  (First
+        # exercised by s81 hangar pads, whose groundside lots can
+        # abut a junction face; terminal groundside always abutted
+        # aprons/terminals, which this test doesn't scan.)
+        and s.role != "groundside_pavement"
         and s.polygon is not None
         and not s.polygon.is_empty]
     if not junctions or not others:

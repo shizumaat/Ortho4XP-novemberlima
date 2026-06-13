@@ -54,7 +54,7 @@ from .layout import (
     ROLE_RUNWAY,
     ROLE_SECONDARY_PARALLEL,
     ROLE_STUB,
-    ROLE_TERMINAL,
+    ROLE_BUILDING,
     SHARED_VERTEX_TOL_M,
 )
 from .pavement.junctions import (
@@ -250,7 +250,7 @@ def _triangulate_junctions(
     # geometry separately as a skip-only list.
     terminal_edges: List[Tuple[float, float, float, float]] = []
     for s in layout.shapes:
-        if s.role != ROLE_TERMINAL:
+        if s.role != ROLE_BUILDING:
             continue
         try:
             rc = list(s.polygon.exterior.coords)

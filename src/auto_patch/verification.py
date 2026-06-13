@@ -40,7 +40,7 @@ _TAXI_ROLES = ("primary_parallel", "secondary_parallel",
 _NON_SOURCE_PAVEMENT_ROLES = frozenset({
     "boundary", "taxiway_clearance", "runway_clearance",
     "retaining_wall", "tunnel_ramp", "groundside_pavement",
-    "service_road", "service_junction", "terminal",
+    "service_road", "service_junction", "building",
 })
 
 _HINTS = {
@@ -488,7 +488,7 @@ def check_terminal_flat(layout):
         return []
     out = []
     for i, s in enumerate(layout.shapes):
-        if (s.role or "") != "terminal":
+        if (s.role or "") != "building":
             continue
         if s.polygon is None or s.polygon.is_empty:
             continue

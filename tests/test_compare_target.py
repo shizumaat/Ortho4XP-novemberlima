@@ -101,7 +101,9 @@ SPJC_BASELINE: Dict[str, int] = {
     "secondary_parallel":  4,   # of   4 target
     "service_road":        6,   # of   6 target
     "stub":                9,   # of   9 target
-    "terminal":            2,   # of   2 target
+    "building":            2,   # of   2 target (role renamed
+                                #   from "terminal" 2026-06-12;
+                                #   loader normalizes legacy tags)
     "tunnel_ramp":        34,   # of  36 target
 }
 SPJC_BASELINE_TOTAL = 1192  # of 1263 target (emitted)
@@ -145,7 +147,8 @@ SPLP_BASELINE_TILE_M78: Dict[str, int] = {
     "secondary_parallel":  2,   # of   2 target (TX53/54 → groundside,
                                 #   re-cut 2026-06-11)
     "stub":               12,   # of  12 target
-    "terminal":            1,   # of   1 target
+    "building":            1,   # of   1 target (legacy
+                                #   "terminal" -- see above)
 }
 SPLP_BASELINE_TILE_M78_TOTAL = 345  # of 365 target
 

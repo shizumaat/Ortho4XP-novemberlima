@@ -58,7 +58,7 @@ from .layout import (
     ROLE_RUNWAY_CROSSING,
     ROLE_SECONDARY_PARALLEL,
     ROLE_STUB,
-    ROLE_TERMINAL,
+    ROLE_BUILDING,
     ROLE_RETAINING_WALL,
     SHARED_VERTEX_TOL_M,
     corner_alts_from_high_low,
@@ -362,7 +362,7 @@ def _clip_boundary_bridges_against_pavement(
     NON_BRIDGE_PAVEMENT = {
         ROLE_RUNWAY, ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
         ROLE_STUB, ROLE_CROSS_CONNECTOR,
-        ROLE_JUNCTION, ROLE_TERMINAL, ROLE_APRON,
+        ROLE_JUNCTION, ROLE_BUILDING, ROLE_APRON,
     }
     obstacles = [s for s in layout.shapes
                  if s.role in NON_BRIDGE_PAVEMENT

@@ -108,7 +108,7 @@ def deconflict_road_features(layout, icao: str = "") -> None:
     (``_snap_bridge_vertices_to_runway_corners`` et al.) MOVES feature
     vertices after the first run and can re-introduce small overlaps.
     """
-    _AIRSIDE_SEED_ROLES = ("terminal", "runway", "runway_crossing",
+    _AIRSIDE_SEED_ROLES = ("building", "runway", "runway_crossing",
                            "primary_parallel", "secondary_parallel",
                            "stub", "cross_connector", "junction",
                            "apron")

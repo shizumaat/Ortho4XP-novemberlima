@@ -349,7 +349,7 @@ def test_junction_vertices_outside_pavement(icao):
     for s in layout.shapes:
         if s.role not in ("primary_parallel", "secondary_parallel",
                           "stub", "cross_connector",
-                          "runway", "terminal"):
+                          "runway", "building"):
             continue
         if s.polygon is None or s.polygon.is_empty:
             continue

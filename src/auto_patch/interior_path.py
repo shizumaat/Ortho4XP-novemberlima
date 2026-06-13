@@ -55,7 +55,7 @@ AIRSIDE_MEASURE_ROLES = frozenset((
     "runway", "runway_crossing",
     "primary_parallel", "secondary_parallel", "stub", "cross_connector",
     "service_road", "service_junction",
-    "apron", "terminal", "junction",
+    "apron", "building", "junction",
 ))
 
 # Buffer applied to the raw airside union (mirrors the prox

@@ -55,7 +55,7 @@ from .layout import (
     ROLE_RUNWAY_CROSSING,
     ROLE_SECONDARY_PARALLEL,
     ROLE_STUB,
-    ROLE_TERMINAL,
+    ROLE_BUILDING,
     SHARED_VERTEX_TOL_M,
     corner_alts_from_high_low,
 )
@@ -225,7 +225,7 @@ def _clamp_junction_free_vertices(
 
     rect_like_roles = {ROLE_RUNWAY, ROLE_PRIMARY_PARALLEL,
                        ROLE_SECONDARY_PARALLEL, ROLE_STUB,
-                       ROLE_CROSS_CONNECTOR, ROLE_TERMINAL}
+                       ROLE_CROSS_CONNECTOR, ROLE_BUILDING}
 
     n_changed = 0
     for si, s in enumerate(layout.shapes):
@@ -1626,7 +1626,7 @@ def _decompose_airside_holed_shapes(
             snap_pts.extend(reg.points())
         except _GEOM_EXC:
             pass
-    fixed_roles = (ROLE_RUNWAY, ROLE_TERMINAL, ROLE_PRIMARY_PARALLEL,
+    fixed_roles = (ROLE_RUNWAY, ROLE_BUILDING, ROLE_PRIMARY_PARALLEL,
                    ROLE_SECONDARY_PARALLEL, ROLE_STUB,
                    ROLE_CROSS_CONNECTOR)
     for s in layout.shapes:
@@ -3278,7 +3278,7 @@ def _reclassify_runway_disconnected_to_groundside(
     and nothing emits as groundside.
     """
     from shapely.strtree import STRtree
-    if not any(s.role == ROLE_TERMINAL
+    if not any(s.role == ROLE_BUILDING
                and s.polygon is not None and not s.polygon.is_empty
                for s in layout.shapes):
         return 0
@@ -3286,7 +3286,7 @@ def _reclassify_runway_disconnected_to_groundside(
             if s.role in (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
                           ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
                           ROLE_STUB, ROLE_CROSS_CONNECTOR,
-                          ROLE_JUNCTION, ROLE_APRON, ROLE_TERMINAL)
+                          ROLE_JUNCTION, ROLE_APRON, ROLE_BUILDING)
             and s.polygon is not None and not s.polygon.is_empty]
     if not idxs:
         return 0

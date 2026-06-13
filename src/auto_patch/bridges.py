@@ -60,7 +60,7 @@ from .layout import (
     ROLE_RUNWAY,
     ROLE_SECONDARY_PARALLEL,
     ROLE_STUB,
-    ROLE_TERMINAL,
+    ROLE_BUILDING,
     ROLE_RETAINING_WALL,
     ROLE_RUNWAY_CROSSING,
     ROLE_TUNNEL_RAMP,
@@ -249,7 +249,7 @@ def _emit_tunnel_portals(
     _AIRSIDE_GATE_ROLES = (
         "runway", "runway_crossing", "primary_parallel",
         "secondary_parallel", "stub", "cross_connector", "junction",
-        "apron", "terminal", "groundside_pavement", "service_road",
+        "apron", "building", "groundside_pavement", "service_road",
         "service_junction")
     try:
         from shapely.ops import unary_union as _uu8
@@ -1673,7 +1673,7 @@ def _emit_taxi_bridges(
                                      ROLE_SECONDARY_PARALLEL,
                                      ROLE_STUB, ROLE_CROSS_CONNECTOR,
                                      ROLE_JUNCTION, ROLE_APRON,
-                                     ROLE_TERMINAL)])
+                                     ROLE_BUILDING)])
             except _GEOM_EXC:
                 airside_cover = None
             n_deck = 0
@@ -2473,7 +2473,7 @@ def _emit_through_airport_depressed_roads(
     # bends (KPHX terminal2, 0.4 m²).
     try:
         _term_polys = [s.polygon for s in layout.shapes
-                       if s.role == ROLE_TERMINAL
+                       if s.role == ROLE_BUILDING
                        and s.polygon is not None
                        and not s.polygon.is_empty]
         terminal_union = (unary_union(_term_polys)

@@ -23,7 +23,7 @@ from auto_patch.layout import (
     ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL,
     ROLE_RUNWAY,
-    ROLE_TERMINAL,
+    ROLE_BUILDING,
     SHARED_VERTEX_TOL_M,
     _airport_anchor,
     _projection,
@@ -390,7 +390,7 @@ def test_to_osm_flat_altitude_emits_single_tag():
     altitude= tag."""
     layout = _make_layout()
     layout.shapes.append(BuiltShape(
-        polygon=_square(0, 0, 10), role=ROLE_TERMINAL,
+        polygon=_square(0, 0, 10), role=ROLE_BUILDING,
         altitude=42.7))
     _, ways = _emit_and_parse(layout)
     tags = ways[0][2]
@@ -619,7 +619,7 @@ def test_aeroway_for_role_covers_all_roles():
     expected coverage."""
     expected_roles = {
         ROLE_RUNWAY, ROLE_PRIMARY_PARALLEL, ROLE_APRON,
-        ROLE_TERMINAL, ROLE_JUNCTION,
+        ROLE_BUILDING, ROLE_JUNCTION,
     }
     for role in expected_roles:
         assert role in AEROWAY_FOR_ROLE

@@ -62,6 +62,7 @@ from .config import (
     ENABLE_SERVICE_ROADS,
     SERVICE_ROAD_CARVE,
     ENABLE_DISCOVERED_TAXIWAYS,
+    HANGAR_PADS as HANGAR_PADS_GATE,
 )
 from .layout import (
     BuiltShape,
@@ -69,7 +70,7 @@ from .layout import (
     R_EARTH,
     ROLE_RUNWAY,
     ROLE_STUB,
-    ROLE_TERMINAL,
+    ROLE_BUILDING,
     _airport_anchor,
     _projection,
 )
@@ -180,7 +181,7 @@ def _unify_airside_geometry(layout, icao: str) -> None:
     from .layout import (
         ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL, ROLE_STUB,
         ROLE_CROSS_CONNECTOR, ROLE_JUNCTION, ROLE_RUNWAY,
-        ROLE_RUNWAY_CROSSING, ROLE_APRON, ROLE_TERMINAL)
+        ROLE_RUNWAY_CROSSING, ROLE_APRON, ROLE_BUILDING)
 
     # Re-connect discovered (TX) lane dead-ends pulled away from their
     # residue junction (SPJC TX15), extending the junction back onto the
@@ -205,12 +206,12 @@ def _unify_airside_geometry(layout, icao: str) -> None:
     # Weld near-coincident airside vertices to one fresh canonical
     # coordinate so a rect corner and the junction vertex beside it become a
     # single point (the conformance below then has only genuine T-junctions
-    # left).  ROLE_TERMINAL included so a terminal's boundary vertices weld
+    # left).  ROLE_BUILDING included so a terminal's boundary vertices weld
     # 1:1 with the surrounding apron's (one solver node, no tilt/wall).
     _weld_roles = {ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
                    ROLE_STUB, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
                    ROLE_RUNWAY, ROLE_RUNWAY_CROSSING, ROLE_APRON,
-                   ROLE_TERMINAL}
+                   ROLE_BUILDING}
     n_welded = weld_layout_vertices(layout, _weld_roles)
     if n_welded:
         UI.vprint(1,
@@ -1750,6 +1751,11 @@ def build_airport_pavement(icao: str, xplane_root: str,
         except _GEOM_EXC:
             pass
         terminal_polys.append(pad)
+    if osm_terminal_polys:
+        UI.vprint(1,
+            f"  [pav-builder] {icao}: building pads "
+            f"{len(terminal_polys)}/{len(osm_terminal_polys)} kept "
+            f"(boundary-gate/area filters).")
 
     # ── Terminal gap for depressed roads (user 2026-06-10) ───────
     # Where a depressed road (KPHX Sky Harbor Blvd class — a public
@@ -1807,7 +1813,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
                       if terminal_polys else None)
     for i, tp in enumerate(terminal_polys):
         layout.shapes.append(BuiltShape(
-            polygon=tp, role=ROLE_TERMINAL, ref=f"terminal{i+1}"))
+            polygon=tp, role=ROLE_BUILDING, ref=f"terminal{i+1}"))
 
     # ── Identify junction node CLUSTERS ──────────────────────────
     # Per user 2026-05-12: when the taxi graph comes from apt.dat
@@ -2407,6 +2413,25 @@ def build_airport_pavement(icao: str, xplane_root: str,
         except _GEOM_EXC:
             pass
 
+    # ── (s81) Taxilanes stop at building edges ───────────────────
+    # User ruling 2026-06-12: a lane that intersects a building pad
+    # (terminal / hangar) ends AT the pad boundary and welds to it —
+    # shared edge/nodes/elevation, like rects ending against aprons.
+    # Trim the rect-feeding centerlines against the pad union so no
+    # rect is ever built over (or through) a building.  The FULL
+    # centerline set stashed on ``layout.apt_taxi_centerlines``
+    # stays untrimmed — route-graph laws still measure the route
+    # up to the building.
+    if HANGAR_PADS_GATE and terminal_union is not None \
+            and not terminal_union.is_empty:
+        from .terminals import trim_centerlines_at_buildings
+        osm_centerlines, _n_cl_trim = trim_centerlines_at_buildings(
+            osm_centerlines, terminal_union)
+        if _n_cl_trim:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: trimmed {_n_cl_trim} "
+                f"centerline(s) at building-pad edges.")
+
     # ── Build taxi rects from centerlines ────────────────────────
     taxi_rects = _build_taxi_rects(
         osm_centerlines, pav_union, layout.runway_union,
@@ -2414,6 +2439,41 @@ def build_airport_pavement(icao: str, xplane_root: str,
         ref_overall_bearings=ref_overall_bearings,
         registry=layout.canonical_points,
         svc_widths=_svc_widths or None)
+
+    # (s81) Building pads win rect overlap: an axis trimmed at the
+    # pad boundary can still sweep a rect corner INTO the pad when
+    # the building edge is oblique to the lane.  Clip each rect
+    # against the pad union (largest surviving piece); the
+    # degenerate sub-quad drop below then culls what no longer has
+    # a usable 4-corner footprint.
+    if HANGAR_PADS_GATE and terminal_union is not None \
+            and not terminal_union.is_empty:
+        _pad_clipped: list = []
+        _n_rect_clip = 0
+        for _re in taxi_rects:
+            _rp = _re[0]
+            try:
+                if _rp is None or _rp.is_empty \
+                        or not _rp.intersects(terminal_union):
+                    _pad_clipped.append(_re)
+                    continue
+                _diff = _rp.difference(terminal_union)
+            except _GEOM_EXC:
+                _pad_clipped.append(_re)
+                continue
+            _n_rect_clip += 1
+            if _diff.is_empty:
+                continue  # rect entirely under the building
+            if _diff.geom_type == "MultiPolygon":
+                _diff = max(_diff.geoms, key=lambda g: g.area)
+            if _diff.geom_type != "Polygon" or _diff.is_empty:
+                continue
+            _pad_clipped.append((_diff,) + tuple(_re[1:]))
+        if _n_rect_clip:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: clipped {_n_rect_clip} "
+                f"taxi rect(s) against building pads.")
+        taxi_rects = _pad_clipped
 
     # Drop DEGENERATE clipped taxi rects (user 2026-06-01).  The rect builder
     # sizes each rect to the local pavement width and clips it to the pavement
@@ -3293,7 +3353,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
             from .layout import ROLE_SERVICE_JUNCTION, ROLE_SERVICE_ROAD
             _aircraft_roles = {
                 ROLE_RUNWAY, "primary_parallel", "secondary_parallel",
-                ROLE_STUB, "cross_connector", "apron", "terminal"}
+                ROLE_STUB, "cross_connector", "apron", "building"}
             _n_svc_j = 0
             for _ji, _js in enumerate(layout.shapes):
                 if _js.role != "junction" or _js.polygon is None \

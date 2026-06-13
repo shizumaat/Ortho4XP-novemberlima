@@ -1,4 +1,42 @@
-# Auto-Patch Status — session 80 = APRON-FOLLOWS + TWO-RATE CHORD WINDOWS (terminals adjust for the 1 % apron grade); ⚠ unified_jacobi p3 hunks UNCOMMITTED pending the terminal→building rename
+# Auto-Patch Status — session 81 = HANGAR PADS + ROLE_BUILDING rename (uncommitted, ready); the s80p3 unified_jacobi hunks can now be committed WITH the rename
+
+## ★★ SESSION 81 (2026-06-12) — HANGAR PADS BUILT, gate `HANGAR_PADS` default ON (uncommitted) ★★
+USER RULINGS (plan `docs/hangar_pads.md`): (1) ROLE_TERMINAL →
+ROLE_BUILDING (constant AND serialized value "terminal"→"building";
+legacy read aliases in ROLE_GRADE_LIMITS + the compare_target
+loader — target fixtures need NO re-cut); (2) hangars feed the SAME
+pad list as terminals (`_extract_osm_terminals` + gate; `tower`
+stays fallback-only); (3) taxilanes STOP at building edges
+(`terminals.trim_centerlines_at_buildings` pre-rect-build + a
+pad-wins rect clip in pipeline, both gated); (4) hangars get
+groundside, same rules (automatic via the same list — SPJC
+groundside 10→12 ✓); (5) gate ON for in-sim test.
+**PROVEN:** gate-off byte-identical modulo the role rename on CYXY
+AND SPJC (worktree proof with the concurrent s80p3 WIP held equal);
+deterministic.  Unit tests `tests/test_hangar_pads.py` (8).
+**GATE-ON:** SPJC 9 pads (2 terminal-relations + 7 hangars), 1 lane
+trimmed at a pad, 1 rect clipped, verify ALL-ZERO; HECA 27/27
+pads unchanged (the no-terminal fallback already admitted its
+hangars), within 72 = standing baseline; SPLP unchanged (its 1 pad
+dies in tile-cut PRE-EXISTING, identical gate on/off).
+**PUNCH LIST (gate-on, CYXY 3 pads = 1 term + 2 hangars):**
+(a) 102.2 % / 3.8 m apron wall #114/#131 @(60.70851,-135.07248) —
+the hangar pads pulled the apron field to ~702 (law-correct),
+exposing terminal1 sitting 3.5 m ABOVE its chord window (+3.51 m
+chord warn) = the s80p3 two-rate-window/floor class, NOT a
+geometry bug — fix belongs in that machinery; (b) SVC8∩SVC9
+overlap 237 m² @(60.70844,-135.07432) (detect_road_runs now sees
+hangar terminal_polys → runs split differently); (c) suite gate-on
+331p + reds = 3 standing (compare_target_spjc, grade SPLP/HECA) +
+CYXY grade/overlap pair (= a+b).  Junction-invariant tests amended
+for groundside-clearance anchoring (groundside sits exactly 1.0 m
+off airside BY DESIGN, user 2026-05-22; first exercised by hangar
+groundside abutting a junction face).
+⚠ in-sim: RESTART Ortho4XP + `O4_AUTO_PATCH_REBUILD=1` (code edits
+do NOT invalidate existing patches).  The driver also got LAZY
+taxiway/building/road extraction this session (tile-level OSM
+parsing skipped when every airport's patch is current/manual —
+tests in test_auto_patch_freshness.py).
 
 ## ★★ SESSION 80 PART 3 (2026-06-12) — dev @d9f2af8: TWO-RATE CHORD WINDOWS — "terminal elevation adjusts to allow the apron to grade at 1 %" (user) ★★
 USER: "I was expecting terminal elevation to be adjusted to allow

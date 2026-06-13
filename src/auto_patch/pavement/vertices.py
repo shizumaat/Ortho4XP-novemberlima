@@ -40,7 +40,7 @@ from ..layout import (
     ROLE_RUNWAY,
     ROLE_SECONDARY_PARALLEL,
     ROLE_STUB,
-    ROLE_TERMINAL,
+    ROLE_BUILDING,
     SHARED_VERTEX_TOL_M,
 )
 from ..config import (

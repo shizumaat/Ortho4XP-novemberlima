@@ -37,7 +37,7 @@ from auto_patch.layout import (
     ROLE_RUNWAY,
     ROLE_SECONDARY_PARALLEL,
     ROLE_STUB,
-    ROLE_TERMINAL,
+    ROLE_BUILDING,
 )
 from auto_patch.pavement.absorption import (
     _drop_primary_parallels_embedded_in_pavement,
@@ -102,7 +102,7 @@ def test_non_sloping_roles_pass_through():
     fully embedded."""
     big_apron = _apron(-50.0, 200.0, -50.0, 50.0)
     poly, axis = _rect(length=80.0)
-    for role in (ROLE_APRON, ROLE_TERMINAL, ROLE_RUNWAY):
+    for role in (ROLE_APRON, ROLE_BUILDING, ROLE_RUNWAY):
         result = _drop_primary_parallels_embedded_in_pavement(
             [(poly, axis, role, "X")], big_apron)
         assert len(result) == 1, f"role {role} must pass through"

@@ -65,6 +65,7 @@ __all__ = [
     "WRITE_ARBITRATION",
     "TERMINAL_LEAF_LEVELS",
     "TERMINAL_NATURAL_LEVELS",
+    "HANGAR_PADS",
     "RUNWAY_ADJACENCY_TOL_M",
     "RUNWAY_BOUNDARY_TOL_M",
     "RUNWAY_INSIDE_APRON_FRAC",
@@ -535,9 +536,13 @@ ROLE_GRADE_LIMITS = {
     # (per user 2026-05-07).
     "apron":              APRON_MAX_GRADE,
     "junction":           APRON_MAX_GRADE,
-    # Terminals: 0 = flat (default).  Drives the flat-vs-graded code path —
-    # see TERMINAL_MAX_GRADE.
-    "terminal":           TERMINAL_MAX_GRADE,
+    # Building pads (terminals / hangars / towers): drives the
+    # flat-vs-graded code path — see TERMINAL_MAX_GRADE.  The role was
+    # renamed from "terminal" (user 2026-06-12); the legacy key stays
+    # as a read alias so check_grade still validates pre-rename
+    # patches on disk.
+    "building":           TERMINAL_MAX_GRADE,
+    "terminal":           TERMINAL_MAX_GRADE,  # legacy alias (read-only)
     # Tunnel ramps descend from pavement elevation to the tunnel
     # floor; 4% is the navigable taxi grade for ramped portals
     # (per user 2026-05-08).
@@ -689,6 +694,18 @@ TERMINAL_CHORD_REACH_M = 400.0
 # interior is intentionally above the DEM.  OFF = the s79 behaviour
 # byte-identically.
 TERMINAL_NATURAL_LEVELS = _os.environ.get("O4_TERMINAL_NATURAL", "1") == "1"
+
+# (s81) HANGAR PADS — docs/hangar_pads.md (user rulings 2026-06-12).
+# When ON, ``aeroway=hangar`` buildings are ALWAYS admitted into the
+# building-pad list alongside terminals and treated identically (weld,
+# apron-follows inherit, groundside).  Previously hangars only entered
+# via the no-terminal fallback (user 2026-04-28, HECA mistagging);
+# ``aeroway=tower`` keeps that fallback-only behaviour.  Taxi
+# centerlines that enter a building footprint stop at the building
+# edge and weld to it (rects never contest pad area — the failure
+# mode that motivated the old guard).  OFF = fallback-only admission,
+# byte-identical to pre-s81.
+HANGAR_PADS = _os.environ.get("O4_HANGAR_PADS", "1") == "1"
 
 # (s79) INTERIOR-PATH ENTRIES — docs/interior_path_entries.md.
 # ★ USER RULING 2026-06-11: no shape may ever check grade ACROSS GRASS.

@@ -38,7 +38,7 @@ from .layout import (
     ROLE_SERVICE_JUNCTION,
     ROLE_SERVICE_ROAD,
     ROLE_STUB,
-    ROLE_TERMINAL,
+    ROLE_BUILDING,
     ROLE_RETAINING_WALL,
     ROLE_TUNNEL_RAMP,
     SHARED_VERTEX_TOL_M,
@@ -471,7 +471,7 @@ def merge_small_apron_fragments(layout: "PavementLayout",
     try:
         other_union = unary_union([
             s.polygon for s in layout.shapes
-            if s.role not in (ROLE_APRON, ROLE_TERMINAL)
+            if s.role not in (ROLE_APRON, ROLE_BUILDING)
             and s.polygon is not None and not s.polygon.is_empty
             and s.polygon.geom_type in ("Polygon", "MultiPolygon")])
     except _GEOM_EXC:
@@ -681,7 +681,7 @@ def _absorb_apron_enclosed_groundside(
     except _GEOM_EXC:
         return 0
     terminal_shapes = [s for s in layout.shapes
-                       if s.role == ROLE_TERMINAL
+                       if s.role == ROLE_BUILDING
                        and s.polygon is not None and not s.polygon.is_empty]
     term_union = None
     try:
@@ -861,7 +861,7 @@ def _emit_groundside_pavement_dem(
     _term_buf = None
     try:
         _t_polys = [s.polygon for s in layout.shapes
-                    if s.role == ROLE_TERMINAL
+                    if s.role == ROLE_BUILDING
                     and s.polygon is not None
                     and not s.polygon.is_empty]
         if _t_polys:
@@ -1026,7 +1026,7 @@ def _reclassify_groundside_orphan_junctions(
     AIRSIDE_SEED_ROLES = {
         ROLE_RUNWAY, ROLE_PRIMARY_PARALLEL,
         ROLE_SECONDARY_PARALLEL, ROLE_STUB,
-        ROLE_CROSS_CONNECTOR, ROLE_TERMINAL, ROLE_APRON,
+        ROLE_CROSS_CONNECTOR, ROLE_BUILDING, ROLE_APRON,
     }
     bucket_size = vertex_match_tol_m
 
@@ -1153,7 +1153,7 @@ def _separate_groundside_from_airside(
     AIRSIDE_ROLES = {
         ROLE_RUNWAY, ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
         ROLE_STUB, ROLE_CROSS_CONNECTOR, ROLE_APRON, ROLE_JUNCTION,
-        ROLE_TERMINAL, ROLE_TUNNEL_RAMP, ROLE_RETAINING_WALL,
+        ROLE_BUILDING, ROLE_TUNNEL_RAMP, ROLE_RETAINING_WALL,
         # (s79 Step D) ground-vehicle ROADS grade from their apron
         # mouth, not the DEM — groundside lots beside them need the
         # same clearance gap as beside airside, or the shared boundary

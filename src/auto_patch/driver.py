@@ -162,10 +162,10 @@ def _auto_patch_is_current(auto_patch_file: str, xp_root: str,
 # Main Entry Point
 # ──────────────────────────────────────────────────────────────────────────────
 def generate_auto_patches(tile, cifp_path: str,
-                          taxiway_data: dict | None = None,
-                          building_data: dict | None = None,
+                          taxiway_data=None,
+                          building_data=None,
                           dico_airports: dict | None = None,
-                          road_data: dict | None = None,
+                          road_data=None,
                           mode: str = "ICAO") -> list[str]:
     """Generate auto-patch files for all CIFP airports within a tile.
 
@@ -185,10 +185,22 @@ def generate_auto_patches(tile, cifp_path: str,
     Args:
         tile: Tile object with .lat, .lon, and .dem attributes.
         cifp_path: Path to the CIFP data directory.
-        taxiway_data: Optional dict from extract_taxiway_info().
-        building_data: Optional dict from extract_building_info().
+        taxiway_data: Optional dict from extract_taxiway_info(), or a
+                      zero-arg callable returning one (invoked lazily —
+                      see below).
+        building_data: Optional dict from extract_building_info(), or a
+                       zero-arg callable returning one.
         dico_airports: Optional dict with processed airport data (provides
                        apron geometry and boundaries).
+        road_data: Optional dict from extract_road_info(), or a zero-arg
+                   callable returning one.
+
+    ``taxiway_data`` / ``building_data`` / ``road_data`` passed as
+    callables are resolved only when the first airport survives every
+    skip check (manual patch, not-in-tile, up-to-date auto-patch) and
+    actually needs a rebuild.  A tile whose patches are all current
+    therefore never pays for — or logs — the OSM taxiway/building/road
+    extraction.
         mode: "ICAO" (default) only patches airports with a 4-letter ICAO
               code; "All" patches every CIFP airport regardless of code
               format. ("None" is handled at the call site by skipping this
@@ -205,11 +217,6 @@ def generate_auto_patches(tile, cifp_path: str,
             ", skipping.",
         )
         return []
-
-    if building_data is None:
-        building_data = {}
-    if taxiway_data is None:
-        taxiway_data = {}
 
     tile_lat = int(floor(tile.lat))
     tile_lon = int(floor(tile.lon))
@@ -241,6 +248,33 @@ def generate_auto_patches(tile, cifp_path: str,
     from .verification import verify_and_log
     _saved_verbosity = UI.verbosity
     UI.verbosity = _cfg.LOG_VERBOSITY
+
+    # Lazy tile-level inputs: callables resolve on the FIRST airport
+    # that needs a rebuild, at the tile's own verbosity so their log
+    # output (e.g. "N buildings for ICAO") matches the eager-path
+    # chatter exactly.  All-current tiles never invoke them.
+    _inputs_resolved = False
+
+    def _resolve_lazy_inputs():
+        nonlocal taxiway_data, building_data, road_data, _inputs_resolved
+        if _inputs_resolved:
+            return
+        _inputs_resolved = True
+        prev_verbosity = UI.verbosity
+        UI.verbosity = _saved_verbosity
+        try:
+            if callable(taxiway_data):
+                taxiway_data = taxiway_data()
+            if callable(building_data):
+                building_data = building_data()
+            if callable(road_data):
+                road_data = road_data()
+        finally:
+            UI.verbosity = prev_verbosity
+        if taxiway_data is None:
+            taxiway_data = {}
+        if building_data is None:
+            building_data = {}
 
     for icao, filepath in sorted(cifp_airports.items()):
         # In ICAO mode, only patch airports with a real 4-letter ICAO code
@@ -298,6 +332,10 @@ def generate_auto_patches(tile, cifp_path: str,
                 "up to date (apt.dat unchanged), reusing existing patch.")
             reused.append(icao)
             continue
+
+        # This airport WILL be rebuilt — now (and only now) pay for the
+        # tile-level OSM extraction if it was deferred.
+        _resolve_lazy_inputs()
 
         # Look up actual runway widths from apt.dat
         runway_widths = {}
