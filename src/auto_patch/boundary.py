@@ -329,22 +329,34 @@ def _runway_clamped_alt_at(
 
 def _clip_boundary_bridges_against_pavement(
         layout: "PavementLayout",
-        min_area_m2: float = 25.0) -> int:
+        min_area_m2: float = 25.0,
+        min_overlap_m2: float = 1.0) -> int:
     """Post-process: re-subtract pavement (junction/terminal/rect/
-    runway) from every ``boundary_dem_bridge`` shape.
+    runway) AND the airport_boundary ribbon from every
+    ``boundary_dem_bridge`` shape.
 
     ``_emit_boundary_dem_bridge`` subtracts the junctions/terminals
-    present AT EMIT TIME, but downstream passes (per_surface_solve,
-    subdivide_violating_junctions, stitch_pavement_polygons,
-    _split_sloped_rects_at_violations) reshape pavement polygons —
-    a junction may merge with a neighbour, a subdivide may grow
-    a junction across the bridge boundary, etc.  Any such growth
-    creates a stale overlap because the bridge was clipped against
-    the bridge's emit-time snapshot.
+    AND the ribbon present AT EMIT TIME, but downstream passes
+    (per_surface_solve, subdivide_violating_junctions,
+    stitch_pavement_polygons, _split_sloped_rects_at_violations,
+    boundary-interior clip, feature conformance) reshape pavement and
+    ribbon polygons — a junction may merge with a neighbour, a
+    subdivide may grow a junction across the bridge boundary, the
+    boundary-interior clip moves ribbon edges, etc.  Any such growth
+    creates a stale overlap because the bridge was clipped against the
+    emit-time snapshot (LMML: the ribbon's post-emit reshape left 5
+    pieces × 37.8 m² over one DEM bridge).
 
-    This pass runs LAST, just before tile_cut, against the final
-    pavement geometry.  Per user 2026-05-13 (CYXY way -10483
-    overlap report): zero tolerance for bridge↔pavement overlap.
+    This pass runs LAST, after all ribbon / pavement reshaping.  The
+    DEM bridge is conformance-exempt (``conformance._OVERLAY_REFS``),
+    so re-clipping it here never reintroduces a reported T-junction.
+    Per user 2026-05-13 (CYXY way -10483 overlap report): zero
+    tolerance for bridge↔pavement overlap.
+
+    Only overlaps larger than ``min_overlap_m2`` are trimmed, so
+    bridges that merely TOUCH pavement / ribbon along a flush shared
+    edge (sub-m² float slivers) are left byte-identical — this keeps
+    every fixture that has no real bridge overlap untouched.
 
     Returns the number of bridge shapes modified (clipped or dropped).
     """
@@ -356,16 +368,27 @@ def _clip_boundary_bridges_against_pavement(
     if not bridges:
         return 0
 
-    # Roles that bridges must NOT overlap.  We exclude other
-    # boundary shapes (ribbon + DEM bridges) because they share
-    # vertices by design at the airport perimeter.
+    # Roles that bridges must NOT overlap.  We exclude OTHER DEM
+    # bridges (they genuinely share vertices by design where adjacent
+    # bridge runs meet at a perimeter corner — mutual subtraction
+    # would erode them).  The airport_boundary RIBBON, however, is
+    # meant to meet the bridge FLUSH (bridge outer edge on ribbon
+    # inner edge); the emit-time trim subtracts ``ribbon_union``, but
+    # downstream passes that reshape the ribbon (seam conformance,
+    # vertex welding) can leave a stale interior overlap this last
+    # pass never cleaned (LMML: 5 ribbon pieces × 37.8 m² over one
+    # DEM bridge).  Subtracting the ribbon here removes that real
+    # double-cover while leaving a truly flush shared edge untouched
+    # (difference() of a merely-touching polygon is a no-op).
     NON_BRIDGE_PAVEMENT = {
         ROLE_RUNWAY, ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
         ROLE_STUB, ROLE_CROSS_CONNECTOR,
         ROLE_JUNCTION, ROLE_BUILDING, ROLE_APRON,
     }
     obstacles = [s for s in layout.shapes
-                 if s.role in NON_BRIDGE_PAVEMENT
+                 if (s.role in NON_BRIDGE_PAVEMENT
+                     or (s.role == ROLE_BOUNDARY
+                         and s.ref == "airport_boundary"))
                  and s.polygon is not None
                  and not s.polygon.is_empty]
     if not obstacles:
@@ -391,7 +414,7 @@ def _clip_boundary_bridges_against_pavement(
                 if not bridge_poly.intersects(obs.polygon):
                     continue
                 inter_area = bridge_poly.intersection(obs.polygon).area
-                if inter_area <= 0.0:
+                if inter_area <= min_overlap_m2:
                     continue
                 bridge_poly = bridge_poly.difference(obs.polygon)
                 modified = True

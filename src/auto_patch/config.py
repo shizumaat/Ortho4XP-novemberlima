@@ -14,6 +14,8 @@ __all__ = [
     "LOG_VERBOSITY",
     "AXIS_ALIGN_TOL_DEG",
     "LOAD_DSF_PAVEMENT",
+    "DSF_BUILDINGS",
+    "DSF_BUILDING_OSM_OVERLAP_FRAC",
     "SLOPING_EDGE_SNAP_M",
     "EMIT_JUNCTIONS",
     "EMIT_APRONS",
@@ -47,6 +49,9 @@ __all__ = [
     "RUNWAY_END_GRADE",
     "RUNWAY_END_FRACTION",
     "TUNNEL_RAMP_MAX_GRADE",
+    "SKIP_TUNNEL_RAMPS_NEAR_ROADS",
+    "TUNNEL_ADJACENT_ROAD_DIST_M",
+    "TUNNEL_FORK_THROAT",
     "GROUNDSIDE_MAX_GRADE",
     "RUNWAY_VERTICAL_CURVE_K_M",
     "RUNWAY_MAX_GRADE_CHANGE_PER_M",
@@ -218,6 +223,27 @@ EMIT_DEPRESSED_ROADS = False
 # whichever apt.dat is picked.
 LOAD_DSF_PAVEMENT = True
 
+# Pull TERMINAL and HANGAR building footprints from the DSF
+# (user 2026-06-12).  X-Plane places airport buildings as draped
+# FACADE polygons (``.fac``) in the Global Airports / scenery-pack
+# DSF; ``dsf_reader.read_dsf_buildings`` extracts the footprints of
+# the terminal (``term_building_*.fac``) and hangar (``*hangar*.fac``)
+# facades.  These are UNIONED with the OSM-derived building outlines
+# in ``terminals``/``pipeline`` — DSF is PREFERRED (it is where the
+# sim physically renders the building, so grading should match it) and
+# OSM fills the gaps where the DSF has no facade.  Off = byte-identical
+# to the OSM-only behaviour.  Env override ``O4_DSF_BUILDINGS`` is read
+# below, next to HANGAR_PADS (where ``import os as _os`` is in scope).
+
+# When merging the two building sources, an OSM building outline is
+# treated as ALREADY covered by the DSF (and dropped in favour of the
+# DSF footprint) when this fraction of its area overlaps any DSF
+# building footprint.  Below the threshold the OSM building is a
+# distinct structure the DSF didn't place and is kept (OSM fills the
+# gap).  Lowering it makes the DSF more dominant; raising it keeps more
+# OSM buildings.
+DSF_BUILDING_OSM_OVERLAP_FRAC = 0.2
+
 # Third-party DSF pavement descriptors (user 2026-06-10, KPHX south
 # aprons): a third-party ``.pol`` is trusted as BASE pavement when its
 # path contains one of these material descriptors — the common naming
@@ -374,6 +400,30 @@ RUNWAY_MAX_GRADE = 0.015        # FAA AC 150/5300-13B runway longitudinal (ARC C
 RUNWAY_END_GRADE = 0.008        # EASA CS-ADR-DSN / ICAO Annex 14, first/last quarter (code 3/4)
 RUNWAY_END_FRACTION = 0.25      # extent of each runway end zone (fraction of length)
 TUNNEL_RAMP_MAX_GRADE = 0.040   # navigable ramp grade for tunnel portals (user 2026-05-08)
+# Skip tunnel-portal ramp emission where the tunnel runs under / alongside
+# OTHER roads (user 2026-06-12, LMML): in a dense road interchange the
+# surface walk traces a tangle of parallel carriageways, slip roads and
+# roundabouts, and the ramps overlap.  Rather than model that complexity,
+# skip ramp emission for any tunnel that has another road CROSSING it or
+# running within ``TUNNEL_ADJACENT_ROAD_DIST_M`` of it.  The test excludes
+# (a) ``highway=service`` minor roads, (b) other tunnels (a divided
+# highway's own clustered carriageway), and (c) shared-node continuations
+# (the surface road the ramp is meant to follow) — so an isolated tunnel,
+# or one crossed only by service roads / its own carriageway, still emits
+# ramps (SPJC's user-approved tunnels are kept; all 6 LMML tunnels skip).
+SKIP_TUNNEL_RAMPS_NEAR_ROADS = True
+TUNNEL_ADJACENT_ROAD_DIST_M = 15.0
+# Y-fork throat junction (user 2026-06-12, KPHL RWY 26 north portal:
+# road+rail share a bore then fork outside).  When True, the diverging
+# end of a Y-split tunnel is modelled like a taxiway sloping-rect +
+# junction: a single ``node_altitudes`` "throat" polygon with a V-notch
+# bridges the shared bore to the per-arm sloping rects, and a continuous
+# retaining wall traces the whole Y (outer fan edges + the inner V
+# between the arms).  No pavement is graded between the arms.  When False
+# the legacy Y-split (advance each branch clear of its siblings, leaving
+# the crotch bare) is byte-identical — only the FORK path is affected;
+# parallel-bore clusters (SPJC divided highways) are untouched either way.
+TUNNEL_FORK_THROAT = True
 GROUNDSIDE_MAX_GRADE = 0.040    # groundside pavement ramp grade (user 2026-05-22)
 # FAA vertical-curve rule L = K × |Δg|.  K = 305 m for ARC C/D (lighter
 # A/B ≈ 76 m, heavy E ≈ 610 m).  ``RUNWAY_MAX_GRADE_CHANGE_PER_M`` is the
@@ -706,6 +756,11 @@ TERMINAL_NATURAL_LEVELS = _os.environ.get("O4_TERMINAL_NATURAL", "1") == "1"
 # mode that motivated the old guard).  OFF = fallback-only admission,
 # byte-identical to pre-s81.
 HANGAR_PADS = _os.environ.get("O4_HANGAR_PADS", "1") == "1"
+
+# DSF terminal/hangar building footprints (user 2026-06-12) — see the
+# documented block near LOAD_DSF_PAVEMENT above.  Read here because
+# ``import os as _os`` only comes into scope at this point in the file.
+DSF_BUILDINGS = _os.environ.get("O4_DSF_BUILDINGS", "1") == "1"
 
 # (s79) INTERIOR-PATH ENTRIES — docs/interior_path_entries.md.
 # ★ USER RULING 2026-06-11: no shape may ever check grade ACROSS GRASS.

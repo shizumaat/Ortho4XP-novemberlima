@@ -689,6 +689,94 @@ def _extract_osm_terminals(
     return out
 
 
+def _cluster_dsf_building_facades(
+    facades: List[Polygon],
+    min_area_m2: float = 100.0,
+) -> List[Polygon]:
+    """Collapse a flat list of DSF facade footprints into one polygon
+    per physical building.
+
+    X-Plane places a single building as SEVERAL stacked / adjacent
+    facade pieces (e.g. ``term_building_Ground`` + ``…_Levels`` on the
+    SAME corners; a long terminal split into a run of abutting facade
+    segments).  Unioning the lot merges each stack and each run of
+    touching pieces into one solid footprint; the connected components
+    of that union are the individual buildings.  A tiny snap-buffer
+    bridges sub-decimetre gaps between facades that share an edge but
+    don't quite touch, then is removed so the outline isn't inflated.
+
+    Returns one outline Polygon per building (≥ ``min_area_m2``).
+    """
+    if not facades:
+        return []
+    clean = [f for f in facades
+             if f is not None and not f.is_empty]
+    if not clean:
+        return []
+    try:
+        # 0.25 m snap closes hairline seams between abutting facade
+        # pieces without merging genuinely separate buildings.
+        merged = unary_union([f.buffer(0.25) for f in clean]).buffer(-0.25)
+    except _GEOM_EXC:
+        try:
+            merged = unary_union(clean)
+        except _GEOM_EXC:
+            return [f for f in clean if f.area >= min_area_m2]
+    if merged.is_empty:
+        return []
+    geoms = (list(merged.geoms)
+             if merged.geom_type == "MultiPolygon" else [merged])
+    out: List[Polygon] = []
+    for g in geoms:
+        if g.geom_type != "Polygon" or g.is_empty:
+            continue
+        if g.area < min_area_m2:
+            continue
+        out.append(g)
+    return out
+
+
+def _combine_building_sources(
+    dsf_buildings: List[Polygon],
+    osm_buildings: List[Polygon],
+    overlap_frac: float,
+) -> List[Polygon]:
+    """Union DSF and OSM building outlines, PREFERRING the DSF.
+
+    The DSF footprints are kept verbatim (the sim renders the building
+    there, so the grade should match it).  An OSM building is added
+    only when it is NOT already represented in the DSF — i.e. less than
+    ``overlap_frac`` of its area overlaps the union of DSF footprints.
+    OSM buildings clearing that bar are distinct structures the DSF
+    didn't place (OSM fills the gap) and are kept as-is.
+
+    Returns the combined seed list (DSF first, then surviving OSM),
+    ready to flow through the existing terminal-pad pipeline.
+    """
+    dsf = [b for b in dsf_buildings if b is not None and not b.is_empty]
+    osm = [b for b in osm_buildings if b is not None and not b.is_empty]
+    if not dsf:
+        return osm
+    try:
+        dsf_union = unary_union(dsf)
+    except _GEOM_EXC:
+        dsf_union = None
+    combined: List[Polygon] = list(dsf)
+    for ob in osm:
+        if dsf_union is None or ob.area <= 0:
+            combined.append(ob)
+            continue
+        try:
+            inter = ob.intersection(dsf_union).area
+        except _GEOM_EXC:
+            combined.append(ob)
+            continue
+        if inter / ob.area < overlap_frac:
+            combined.append(ob)  # distinct from any DSF building
+        # else: DSF already covers this building → DSF wins, drop OSM.
+    return combined
+
+
 
 
 def trim_centerlines_at_buildings(

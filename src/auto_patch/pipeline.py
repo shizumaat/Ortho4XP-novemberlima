@@ -54,6 +54,8 @@ from .pavement import strips as PS
 from .config import (
     MIN_SEGMENT_LEN_M,
     LOAD_DSF_PAVEMENT,
+    DSF_BUILDINGS,
+    DSF_BUILDING_OSM_OVERLAP_FRAC,
     RUNWAY_APRON_AREA_RATIO,
     OSM_SMALL_ROAD_HIGHWAY_TYPES,
     SERVICE_ROAD_WIDTH_M,
@@ -864,6 +866,11 @@ def build_airport_pavement(icao: str, xplane_root: str,
         except _GEOM_EXC:
             apt_bbox_m = None
     third_party_pav_ids: set = set()
+    # DSF terminal/hangar building footprints (meter space), collected
+    # in the same DSF sweep as pavement and unioned with the OSM
+    # building outlines at terminal-pad construction below.
+    dsf_building_polys: List[Polygon] = []
+    n_dsf_buildings = 0
     try:
         if not LOAD_DSF_PAVEMENT:
             raise StopIteration  # skip the DSF block entirely
@@ -1010,6 +1017,47 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     n_dsf_kept += 1
                 except _GEOM_EXC:
                     continue
+            # Terminal / hangar building footprints from the SAME DSF.
+            # Same projection + distance + boundary gates as pavement,
+            # but a CENTROID-in-boundary gate (keep the whole footprint
+            # rather than clipping a building that grazes the boundary).
+            if DSF_BUILDINGS:
+                for b_outer, b_holes, _b_role in \
+                        _DSFR.read_dsf_buildings(dsf):
+                    if len(b_outer) < 3:
+                        continue
+                    try:
+                        bpoly_ll = Polygon(
+                            [(lon, lat) for (lon, lat) in b_outer],
+                            [[(lon, lat) for (lon, lat) in h]
+                             for h in b_holes if len(h) >= 3],
+                        )
+                        if not bpoly_ll.is_valid:
+                            bpoly_ll = bpoly_ll.buffer(0)
+                        if (bpoly_ll.is_empty
+                                or bpoly_ll.geom_type != "Polygon"):
+                            continue
+                        bm = shp_transform(to_m, bpoly_ll)
+                        if bm.is_empty or bm.geom_type != "Polygon":
+                            continue
+                        if apt_bbox_m is not None:
+                            bx0, by0, bx1, by1 = bm.bounds
+                            if (bx1 < apt_bbox_m[0]
+                                    or bx0 > apt_bbox_m[2]
+                                    or by1 < apt_bbox_m[1]
+                                    or by0 > apt_bbox_m[3]):
+                                continue
+                        if boundary_gate_m is not None:
+                            try:
+                                if not boundary_gate_m.contains(
+                                        bm.centroid):
+                                    continue
+                            except _GEOM_EXC:
+                                continue
+                        dsf_building_polys.append(bm)
+                        n_dsf_buildings += 1
+                    except _GEOM_EXC:
+                        continue
         if (n_dsf_kept or n_dsf_dropped_overlay
                 or n_dsf_dropped_far):
             try:
@@ -1018,6 +1066,14 @@ def build_airport_pavement(icao: str, xplane_root: str,
                        f"{n_dsf_dropped_overlay} dropped as overlay, "
                        f"{n_dsf_dropped_far} dropped as off-airport")
                 UI.vprint(1, msg + ".")
+            except _GEOM_EXC:
+                pass
+        if n_dsf_buildings:
+            try:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: DSF buildings: "
+                    f"{n_dsf_buildings} terminal/hangar facade(s) "
+                    f"inside boundary.")
             except _GEOM_EXC:
                 pass
     except StopIteration:
@@ -1716,6 +1772,23 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # footprint; we use that as a seed.
     osm_terminal_polys = _extract_osm_terminals(
         nodes, ways, relations, to_m)
+    # Union the DSF terminal/hangar building footprints with the OSM
+    # outlines (user 2026-06-12).  Stacked / abutting facade pieces are
+    # first clustered into one outline per building; the merge PREFERS
+    # the DSF (the sim renders the building there) and lets OSM fill any
+    # gap the DSF didn't place.  Off (DSF_BUILDINGS=0) → OSM-only, the
+    # pre-existing behaviour.
+    if DSF_BUILDINGS and dsf_building_polys:
+        dsf_seed_polys = _cluster_dsf_building_facades(dsf_building_polys)
+        combined_n_before = len(osm_terminal_polys)
+        osm_terminal_polys = _combine_building_sources(
+            dsf_seed_polys, osm_terminal_polys,
+            DSF_BUILDING_OSM_OVERLAP_FRAC)
+        UI.vprint(1,
+            f"  [pav-builder] {icao}: building sources merged — "
+            f"{len(dsf_seed_polys)} DSF building(s) + "
+            f"{combined_n_before} OSM → {len(osm_terminal_polys)} "
+            f"seed(s) (DSF-preferred).")
     # Min-spacing simplification: vertices closer than this to a
     # neighbour are redundant for the airport-scale render and only
     # serve to spawn sliver triangles in the eventual ear-clip.
@@ -3901,6 +3974,19 @@ def build_airport_pavement(icao: str, xplane_root: str,
             f"  [pav-builder] {icao}: flattened {n_pinch} DEM-bridge "
             f"pinch-neck vertex(es) (anti-tear).")
 
+    # Re-clip DEM bridges against the FINAL pavement + ribbon geometry.
+    # The emit-time trim used the emit-time snapshot; the boundary-
+    # interior clip and feature conformance above can reshape the
+    # ribbon and pavement edges and leave a stale overlap (LMML: ribbon
+    # pieces × 37.8 m² over a DEM bridge).  The DEM bridge is
+    # conformance-exempt, so this never reintroduces a T-junction.
+    from .boundary import _clip_boundary_bridges_against_pavement
+    n_bclip = _clip_boundary_bridges_against_pavement(layout)
+    if n_bclip:
+        UI.vprint(1,
+            f"  [pav-builder] {icao}: re-clipped {n_bclip} DEM-bridge "
+            f"shape(s) against final pavement / ribbon.")
+
     tjs, crossings = find_conformance_violations(layout.shapes)
     if tjs or crossings:
         UI.vprint(1,
@@ -3976,6 +4062,8 @@ from .boundary import _emit_boundary_dem_bridge
 # OSM terminal pad extraction (re-exported from O4_Pavement_Terminals)
 # ──────────────────────────────────────────────────────────────────
 from .terminals import (
+    _cluster_dsf_building_facades,
+    _combine_building_sources,
     _extract_osm_terminals,
     _terminal_groundside_zone,
     _terminal_pad_from_building,

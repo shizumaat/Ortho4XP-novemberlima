@@ -701,16 +701,89 @@ class PavementLayout:
                 check_poly = Polygon(
                     [(lon, lat) for lat, lon in work_ring])
                 if not check_poly.is_valid:
+                    # The .11f quantization turned a full-precision-valid
+                    # ring self-intersecting (a thin spur / tab whose
+                    # sides cross at millimetre precision; the gate-1
+                    # buffer(0) above only fires on full-precision-
+                    # invalid polygons).  Dropping the whole shape leaves
+                    # a hole in the pavement — LMML apron #152 was a
+                    # 5 887 m² apron lost this way.  Repair with buffer(0)
+                    # and keep the largest piece (the degenerate tab
+                    # becomes a tiny sliver and is discarded).  Re-map the
+                    # recovered ring to node ids: vertices that coincide
+                    # with the pre-repair ring reuse their node id (and
+                    # thus their consensus altitude + shared-vertex
+                    # identity); buffer(0)'s self-touch vertex is interned
+                    # fresh with the altitude of its nearest pre-repair
+                    # vertex.
+                    repaired_nids = None
                     try:
-                        _area_m2 = abs(Polygon(ring_m).area)
+                        _rep = check_poly.buffer(0)
+                        if _rep.geom_type == "MultiPolygon":
+                            _rep = max(_rep.geoms, key=lambda g: g.area)
+                        if (_rep.geom_type == "Polygon"
+                                and not _rep.is_empty and _rep.is_valid):
+                            _coord_to_nid = {
+                                (round(la, 11), round(lo, 11)): work_nids[k]
+                                for k, (la, lo) in enumerate(work_ring)}
+                            _alt_for_nid = {}
+                            if ext_elevs:
+                                for k in range(min(len(work_nids),
+                                                   len(ext_elevs))):
+                                    _alt_for_nid[work_nids[k]] = ext_elevs[k]
+                            _rep_open = list(_rep.exterior.coords)[:-1]
+                            _mapped = []
+                            for _lo, _la in _rep_open:   # (lon, lat)
+                                _key = (round(_la, 11), round(_lo, 11))
+                                _nid = _coord_to_nid.get(_key)
+                                if _nid is None:
+                                    # New self-touch vertex: NN altitude
+                                    # from the pre-repair ring.
+                                    _alt_nn = None
+                                    _best = float("inf")
+                                    for _k, (_la2, _lo2) in enumerate(
+                                            work_ring):
+                                        _d = ((_la - _la2) ** 2
+                                              + (_lo - _lo2) ** 2)
+                                        if (_d < _best
+                                                and work_nids[_k]
+                                                in _alt_for_nid):
+                                            _best = _d
+                                            _alt_nn = _alt_for_nid[
+                                                work_nids[_k]]
+                                    _xm, _ym = self.ll_to_m(_la, _lo)
+                                    _nid = _intern(_xm, _ym, _alt_nn)
+                                _mapped.append(_nid)
+                            _seen2: set = set()
+                            _dd: list[int] = []
+                            for _nid in _mapped:
+                                if _nid in _seen2:
+                                    continue
+                                _seen2.add(_nid)
+                                _dd.append(_nid)
+                            if len(_dd) >= 3:
+                                _dd.append(_dd[0])
+                                repaired_nids = _dd
                     except _GEOM_EXC:
-                        _area_m2 = 0.0
+                        repaired_nids = None
+                    if repaired_nids is None:
+                        try:
+                            _area_m2 = abs(Polygon(ring_m).area)
+                        except _GEOM_EXC:
+                            _area_m2 = 0.0
+                        UI.vprint(1,
+                            f"  [pav-builder] WARN: dropping "
+                            f"invalid polygon (role={s.role}, "
+                            f"nids={len(ext_nids) - 1}, "
+                            f"~{_area_m2:.0f} m²): "
+                            f"X-Plane mesh builder would crash.")
+                        continue
                     UI.vprint(1,
-                        f"  [pav-builder] WARN: dropping "
-                        f"invalid polygon (role={s.role}, "
-                        f"nids={len(ext_nids) - 1}, "
-                        f"~{_area_m2:.0f} m²): "
-                        f"X-Plane mesh builder would crash.")
+                        f"  [pav-builder] {s.role}: repaired invalid "
+                        f"polygon at emit (buffer(0), {len(ext_nids) - 1}"
+                        f"→{len(repaired_nids) - 1} verts; quantization "
+                        f"self-intersection).")
+                    pending.append((s_idx, s, repaired_nids))
                     continue
                 if n_repaired:
                     UI.vprint(1,

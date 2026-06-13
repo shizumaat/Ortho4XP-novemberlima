@@ -23,6 +23,7 @@ Two public entry points:
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -62,6 +63,7 @@ from .elevation import (
 )
 from .groundside import (
     _separate_groundside_from_airside,
+    _deconflict_groundside_overlaps,
 )
 from .pavement.vertices import (
     _enforce_shared_vertices,
@@ -146,6 +148,12 @@ def deconflict_road_features(layout, icao: str = "") -> None:
                         continue
                     is_sloped = (s.altitude_high is not None
                                  and s.altitude_low is not None)
+                    if (os.environ.get("O4_FORK_DEBUG")
+                            and s.ref == "tunnel_ramp"
+                            and s.node_altitudes is not None):
+                        UI.vprint(0, f"  [fork-deconflict] throat "
+                            f"area={s.polygon.area:.1f} cov={_cov:.2f} "
+                            f"is_sloped={is_sloped}")
                     if not is_sloped and _cov > 0.0005:
                         d = s.polygon.difference(_run_u)
                         parts = [g for g in
@@ -383,6 +391,18 @@ def emit_terrain_transition_features(layout: PavementLayout, icao: str, xplane_r
                 UI.vprint(1,
                     f"  [pav-builder] separated {n_sep} groundside "
                     f"polygon(s) from terminal/airside (clearance gap).")
+        except _GEOM_EXC:
+            pass
+        # Groundside↔groundside deconfliction: clip overlapping
+        # groundside pieces so no two share interior area (the
+        # separation above only handles groundside↔airside).
+        try:
+            n_gd = _deconflict_groundside_overlaps(
+                layout, _dem, _tile_lat, _tile_lon)
+            if n_gd:
+                UI.vprint(1,
+                    f"  [pav-builder] deconflicted {n_gd} overlapping "
+                    f"groundside polygon(s).")
         except _GEOM_EXC:
             pass
         # Chord grade limit — LAST groundside-altitude writer: pull every

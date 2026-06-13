@@ -231,29 +231,40 @@ def _interpolate_dsf_ring(
     return out
 
 
-def read_dsf_pavements(
+def _read_dsf_polys(
     dsf_path: str,
+    accept_fn,
     cache_dir: str | None = None,
     bezier_segments: int = DEFAULT_BEZIER_SEGMENTS,
-) -> list[list[tuple[float, float]]]:
-    """Extract draped pavement polygons from a DSF file.
+) -> list[tuple[list[tuple[float, float]],
+                list[list[tuple[float, float]]],
+                str]]:
+    """Extract draped polygons from a DSF file, keeping only those
+    whose ``POLYGON_DEF`` path satisfies ``accept_fn(path) -> bool``.
+
+    This is the shared walker behind both ``read_dsf_pavements``
+    (``accept_fn = _is_pavement_def``) and ``read_dsf_buildings``
+    (``accept_fn`` = "is a terminal/hangar facade").  Pavement and
+    building facades are BOTH draped POLYGON placements in the DSF —
+    they differ only in which ``POLYGON_DEF`` resource the placement
+    references — so the bezier/winding/hole machinery is identical.
 
     Args:
         dsf_path: path to a binary ``.dsf`` file.
+        accept_fn: predicate on the POLYGON_DEF resource path; only
+            polygons whose def path passes are returned.
         cache_dir: directory to store the converted text file
             (saves a re-run of DSFTool on subsequent reads).
             Defaults to a per-DSF temp file alongside the source.
 
     Returns:
-        A list of pavement polygons, each as ``(outer_ring, holes,
-        def_path)`` where ``outer_ring`` is a list of ``(lon, lat)``
-        tuples, ``holes`` is a list of inner rings (each also a list
-        of ``(lon, lat)``), and ``def_path`` is the POLYGON_DEF
-        resource path that produced the polygon (lets the caller
-        distinguish stock-library pavement from third-party ``.pol``
-        admissions).  Rings are NOT closed (first vertex isn't
-        repeated).  Returns ``[]`` on any failure (DSFTool missing,
-        DSF unreadable, no pavement defs, etc.).
+        A list of polygons, each as ``(outer_ring, holes, def_path)``
+        where ``outer_ring`` is a list of ``(lon, lat)`` tuples,
+        ``holes`` is a list of inner rings (each also a list of
+        ``(lon, lat)``), and ``def_path`` is the POLYGON_DEF resource
+        path that produced the polygon.  Rings are NOT closed (first
+        vertex isn't repeated).  Returns ``[]`` on any failure
+        (DSFTool missing, DSF unreadable, no accepted defs, etc.).
     """
     if not dsf_path or not os.path.isfile(dsf_path):
         return []
@@ -307,18 +318,18 @@ def read_dsf_pavements(
     except OSError:
         return []
 
-    # Pass 1: collect POLYGON_DEFs in order; track which indices
-    # are pavement (and their resource paths, returned per polygon).
-    pav_def_idx: dict[int, str] = {}
+    # Pass 1: collect POLYGON_DEFs in order; track which indices the
+    # caller accepts (and their resource paths, returned per polygon).
+    accepted_def_idx: dict[int, str] = {}
     def_idx = 0
     for line in lines:
         if line.startswith("POLYGON_DEF"):
             tok = line.strip().split(maxsplit=1)
             path = tok[1] if len(tok) > 1 else ""
-            if _is_pavement_def(path):
-                pav_def_idx[def_idx] = path.strip()
+            if accept_fn(path):
+                accepted_def_idx[def_idx] = path.strip()
             def_idx += 1
-    if not pav_def_idx:
+    if not accepted_def_idx:
         return []
 
     # Pass 2: walk BEGIN_POLYGON / END_POLYGON / BEGIN_WINDING /
@@ -340,7 +351,7 @@ def read_dsf_pavements(
     polys: list[tuple[list[tuple[float, float]],
                       list[list[tuple[float, float]]],
                       str]] = []
-    in_pavement = False
+    in_accepted = False
     cur_def_path = ""
     in_winding = False
     cur_depth = 2
@@ -378,23 +389,23 @@ def read_dsf_pavements(
                 cur_uv_mode = int(tok[2]) == 65535
             except (ValueError, IndexError):
                 cur_uv_mode = False
-            in_pavement = idx in pav_def_idx
-            cur_def_path = pav_def_idx.get(idx, "")
+            in_accepted = idx in accepted_def_idx
+            cur_def_path = accepted_def_idx.get(idx, "")
             in_winding = False
             current_ring = None
             cur_outer = None
             cur_holes = []
             continue
         if line.startswith("END_POLYGON"):
-            if in_pavement and cur_outer and len(cur_outer) >= 3:
+            if in_accepted and cur_outer and len(cur_outer) >= 3:
                 polys.append((cur_outer, cur_holes, cur_def_path))
-            in_pavement = False
+            in_accepted = False
             in_winding = False
             current_ring = None
             cur_outer = None
             cur_holes = []
             continue
-        if not in_pavement:
+        if not in_accepted:
             continue
         if line.startswith("BEGIN_WINDING"):
             in_winding = True
@@ -431,6 +442,86 @@ def read_dsf_pavements(
                     ctrl = None
             current_ring.append(((lon, lat), ctrl))
     return polys
+
+
+def read_dsf_pavements(
+    dsf_path: str,
+    cache_dir: str | None = None,
+    bezier_segments: int = DEFAULT_BEZIER_SEGMENTS,
+) -> list[tuple[list[tuple[float, float]],
+                list[list[tuple[float, float]]],
+                str]]:
+    """Extract draped pavement polygons from a DSF file.
+
+    Thin wrapper over ``_read_dsf_polys`` admitting only pavement
+    ``POLYGON_DEF`` paths (see ``_is_pavement_def``).  Return shape and
+    semantics are unchanged from before the building reader was added:
+    ``(outer_ring, holes, def_path)`` per polygon, rings unclosed.
+    """
+    return _read_dsf_polys(dsf_path, _is_pavement_def,
+                           cache_dir, bezier_segments)
+
+
+# Building-facade detector: X-Plane places airport TERMINAL and HANGAR
+# buildings as draped FACADE polygons (``.fac``) in the DSF.  The
+# library virtual paths name the building class:
+#   terminals → lib/airport/Modern_Airports/Terminal_kit/term_building_*.fac
+#   hangars   → lib/airport/Common_Elements/Hangars/*Hangar.fac,
+#               lib/airport/hangars/.../*.fac
+# We classify by substring on the lowercased def path: "term_building"
+# → terminal, "hangar" → hangar.  Restricted to ``.fac`` so a pavement
+# ``.pol`` or object ``.obj`` that merely happens to contain "hangar"
+# in its name can never be mistaken for a building footprint.
+#
+# The Terminal_kit also ships term_roof_* / term_bridge_* decorative
+# pieces that stack ON the footprint; matching only "term_building"
+# keeps the footprint-bearing Ground/Levels/Slab/Tall/BigHall pieces
+# and drops the roofs / jet bridges (they carry no new outline).
+def _building_role_for_def(path: str) -> str | None:
+    """Return ``"terminal"`` / ``"hangar"`` if the POLYGON_DEF path is a
+    terminal or hangar facade, else ``None``."""
+    p = path.lower()
+    if not p.endswith(".fac"):
+        return None
+    if "term_building" in p:
+        return "terminal"
+    if "hangar" in p:
+        return "hangar"
+    return None
+
+
+def read_dsf_buildings(
+    dsf_path: str,
+    cache_dir: str | None = None,
+    bezier_segments: int = DEFAULT_BEZIER_SEGMENTS,
+) -> list[tuple[list[tuple[float, float]],
+                list[list[tuple[float, float]]],
+                str]]:
+    """Extract terminal/hangar building footprints from a DSF file.
+
+    Returns a list of ``(outer_ring, holes, role)`` where ``role`` is
+    ``"terminal"`` or ``"hangar"`` (mapped from the facade's
+    POLYGON_DEF path via ``_building_role_for_def``), ``outer_ring`` is
+    a list of ``(lon, lat)`` tuples and ``holes`` its inner rings.
+    Rings are NOT closed.  Returns ``[]`` on any failure.
+
+    A single building is often placed as SEVERAL stacked facade pieces
+    sharing one footprint (e.g. ``term_building_Ground`` +
+    ``term_building_Levels`` on the same corners); de-duplicating /
+    unioning coincident footprints is the caller's responsibility.
+    """
+    polys = _read_dsf_polys(
+        dsf_path,
+        lambda pth: _building_role_for_def(pth) is not None,
+        cache_dir, bezier_segments)
+    out: list[tuple[list[tuple[float, float]],
+                    list[list[tuple[float, float]]],
+                    str]] = []
+    for outer, holes, def_path in polys:
+        role = _building_role_for_def(def_path)
+        if role is not None:
+            out.append((outer, holes, role))
+    return out
 
 
 def find_associated_dsf(apt_dat_path: str,

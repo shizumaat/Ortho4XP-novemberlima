@@ -69,6 +69,11 @@ from .layout import (
 from .pavement.vertices import _snap_polygon_vertices_to_rect_corners
 from .pavement.runways import _sample_runway_segment_elev
 from .elevation import _resample_node_altitudes_nn, _sample_dem
+from .config import (
+    SKIP_TUNNEL_RAMPS_NEAR_ROADS,
+    TUNNEL_ADJACENT_ROAD_DIST_M,
+    TUNNEL_FORK_THROAT,
+)
 
 
 __all__ = [
@@ -148,6 +153,8 @@ def _emit_tunnel_portals(
         # spurious ramps along distant urban roads.
         max_boundary_dist_m: float = 1000.0,
         excluded_way_ids: set | None = None,
+        skip_if_adjacent_road: bool = SKIP_TUNNEL_RAMPS_NEAR_ROADS,
+        adjacent_road_dist_m: float = TUNNEL_ADJACENT_ROAD_DIST_M,
         ) -> int:
     """For each tunnel portal (each end of an OSM ``aeroway=*``
     ``tunnel=yes|building_passage`` way), emit the visible road-
@@ -437,30 +444,58 @@ def _emit_tunnel_portals(
             return None
 
         pts: list[tuple[float, float]] = []
+        cums: list[float] = []
         cum = 0.0
         visited_ways = {tunnel_wid, first_way}
         current_refs = first_refs
         current_hw = way_by_id[first_way][1].get("highway")
+        # Loop detection: a surface road that folds back on itself
+        # (roundabout, hairpin) brings the walk back into the corridor
+        # of an EARLIER segment.  Continuing would emit ramp polygons
+        # overlapping the ramps already laid down (LMML SW Kirkop:
+        # the walk looped a roundabout and the returning tail overlapped
+        # its own start by 104 m² with a 3.8 m elevation step).  Stop
+        # the walk when a new node lands within one corridor width of an
+        # earlier node that is more than ``_loop_ignore_m`` back along
+        # the path (the back-distance gate keeps gentle curves and
+        # normal forward progress from tripping it).
+        _loop_hit_m = carriageway_width_m
+        _loop_ignore_m = max(2.0 * carriageway_width_m, 40.0)
 
         def _append_node(p: tuple[float, float]) -> bool:
-            """Append ``p`` to ``pts``; truncate at ``length_m``.
-            Returns True if walk should stop (length reached)."""
+            """Append ``p`` to ``pts``; truncate at ``length_m`` or
+            where the path loops back on itself.  Returns True if the
+            walk should stop."""
             nonlocal cum
             if not pts:
                 pts.append(p)
+                cums.append(0.0)
                 return False
             seg_len = math.hypot(
                 p[0] - pts[-1][0], p[1] - pts[-1][1])
-            if cum + seg_len >= length_m:
+            new_cum = cum + seg_len
+            # Self-intersection (loop) check against non-recent points.
+            # ``cums`` is monotonically increasing, so once the back-
+            # distance drops below the ignore band the remaining points
+            # are all recent — stop scanning.
+            for i in range(len(pts)):
+                if new_cum - cums[i] < _loop_ignore_m:
+                    break
+                if math.hypot(p[0] - pts[i][0],
+                              p[1] - pts[i][1]) < _loop_hit_m:
+                    return True
+            if new_cum >= length_m:
                 if seg_len > 0:
                     t = (length_m - cum) / seg_len
                     tx = pts[-1][0] + t * (p[0] - pts[-1][0])
                     ty = pts[-1][1] + t * (p[1] - pts[-1][1])
                     pts.append((tx, ty))
+                    cums.append(length_m)
                 cum = length_m
                 return True
-            cum += seg_len
+            cum = new_cum
             pts.append(p)
+            cums.append(cum)
             return False
 
         while True:
@@ -558,8 +593,83 @@ def _emit_tunnel_portals(
     portal_data: list[tuple[str, str, list[tuple[float, float]],
                               str, float, float]] = []
     excluded = excluded_way_ids or set()
-    _emit_start_idx = len(layout.shapes)
+    # Identity-set of shapes that exist BEFORE this pass emits anything.
+    # The under-pavement clip below (PAVEMENT-OVERLAP CLIP) must act
+    # ONLY on pieces THIS pass emitted — but it cannot use a captured
+    # start INDEX, because the boundary-coordination pass between emit
+    # and clip rebuilds ``layout.shapes`` (drops empty ribbon pieces,
+    # splits MultiPolygon results) and SHIFTS every index.  On LMML
+    # that net-removed 23 shapes, so the first 23 tunnel pieces fell
+    # below the stale index and skipped the clip — leaving ramps and
+    # flat tunnel walls overlapping the apron.  Identity is stable:
+    # the rebuild keeps tunnel pieces by object reference (only
+    # ROLE_BOUNDARY shapes are replaced).
+    _pre_emit_ids = {id(s) for s in layout.shapes}
 
+    # Adjacent-road skip (user 2026-06-12, LMML): tunnels that run
+    # under / alongside OTHER roads sit in a dense interchange where the
+    # surface walk traces a tangle of parallel carriageways, slip roads
+    # and roundabouts, and the ramps overlap.  Rather than model that,
+    # skip ramp emission for a tunnel whose line is CROSSED by — or runs
+    # within ``adjacent_road_dist_m`` of — another road.  The "other
+    # road" set excludes ``highway=service`` (minor aisles/driveways),
+    # other tunnels (a divided highway's own clustered carriageway), and
+    # — per tunnel, below — any way sharing a node with it (the surface
+    # continuation the ramp is meant to follow).  This skips all 6 LMML
+    # tunnels and keeps SPJC's user-approved tunnels (crossed only by
+    # service roads; parallel carriageway > dist away).
+    _other_road_lines: list = []   # (LineString, frozenset(nodes), wid)
+    _other_road_tree = None
+    if skip_if_adjacent_road:
+        try:
+            from shapely.strtree import STRtree as _STRtree
+            for _w2, _n2, _t2 in ways_r:
+                if _t2.get("highway") is None:
+                    continue
+                if _t2.get("highway") == "service":
+                    continue
+                if _t2.get("tunnel") in TUNNEL_VALUES:
+                    continue
+                _pts2 = [nodes_m[n] for n in _n2 if n in nodes_m]
+                if len(_pts2) < 2:
+                    continue
+                try:
+                    _other_road_lines.append(
+                        (LineString(_pts2), frozenset(_n2), _w2))
+                except _GEOM_EXC:
+                    continue
+            if _other_road_lines:
+                _other_road_tree = _STRtree(
+                    [ln for ln, _, _ in _other_road_lines])
+        except _GEOM_EXC:
+            _other_road_tree = None
+
+    def _tunnel_has_adjacent_road(tw_id2, t_nrefs2) -> bool:
+        if _other_road_tree is None:
+            return False
+        _pts = [nodes_m[n] for n in t_nrefs2 if n in nodes_m]
+        if len(_pts) < 2:
+            return False
+        try:
+            _tline = LineString(_pts)
+            _buf = _tline.buffer(adjacent_road_dist_m)
+        except _GEOM_EXC:
+            return False
+        _tnodes = set(t_nrefs2)
+        for _qi in _other_road_tree.query(_buf):
+            _oline, _onodes, _owid = _other_road_lines[int(_qi)]
+            if _owid == tw_id2 or (_tnodes & _onodes):
+                continue
+            try:
+                if (_tline.crosses(_oline)
+                        or _tline.distance(_oline)
+                        < adjacent_road_dist_m):
+                    return True
+            except _GEOM_EXC:
+                continue
+        return False
+
+    _n_adj_skip = 0
     for tw_id, t_nrefs, t_tags in ways_r:
         if t_tags.get("tunnel") not in PORTAL_TUNNEL_VALUES:
             continue
@@ -585,6 +695,12 @@ def _emit_tunnel_portals(
         # airport depressed-road emit (which produces a single
         # uniform depression instead of per-bridge ramps).
         if tw_id in excluded:
+            continue
+        # Skip tunnels running under / alongside other roads — their
+        # surface walk traces a dense interchange whose ramps overlap
+        # (user 2026-06-12, LMML).  Both portals are skipped.
+        if _tunnel_has_adjacent_road(tw_id, t_nrefs):
+            _n_adj_skip += 1
             continue
         for portal_idx in (0, len(t_nrefs) - 1):
             portal_nid = t_nrefs[portal_idx]
@@ -716,6 +832,13 @@ def _emit_tunnel_portals(
             portal_data.append(
                 (portal_nid, tw_id, walk, hw,
                  float(apt_elev), float(far_dem), _is_new_cand))
+    if _n_adj_skip:
+        try:
+            UI.vprint(1,
+                f"  [pav-builder] skipped {_n_adj_skip} tunnel(s) with "
+                f"an adjacent/crossing road (ramps not modelled).")
+        except _GEOM_EXC:
+            pass
     if not portal_data:
         return 0
     # Cluster portals by node-coord proximity (divided highways
@@ -1113,6 +1236,193 @@ def _emit_tunnel_portals(
                 except _GEOM_EXC:
                     pass
 
+        def _emit_fork_throat(throat_pts, throat_half, e_throat,
+                              wall_alt, arms):
+            """Bridge the shared bore (ending at the fork point ``F``)
+            to the per-arm sloping rects with ONE ``node_altitudes``
+            "throat" polygon carrying a V-notch, then trace the whole Y
+            with retaining walls (outer fan edges + the inner V between
+            the arms).  No pavement is graded between the arms — each
+            crotch wedge is carved out by an apex vertex.  Modelled on
+            the taxiway sloping-rect + junction pattern (user
+            2026-06-12, KPHL RWY 26 north portal).  Generalises to N
+            arms (N-1 crotches, a star-shaped fan about ``F``).
+
+            ``arms`` = list of ``(branch_pts, half_k, far_k)``; each
+            branch starts at the arm's (advanced) fork-side end, so its
+            near-edge corners intern 1:1 with the arm ramp's near edge.
+            Returns True when a throat polygon was emitted."""
+            if len(throat_pts) < 2 or len(arms) < 2:
+                return False
+            F = throat_pts[-1]
+            # Perp of the throat's FAR edge — matches _emit_chain's
+            # last-vertex offset so NL/NR intern with the bore's far
+            # corners (continuity at the bore→throat seam).
+            tdx = throat_pts[-1][0] - throat_pts[-2][0]
+            tdy = throat_pts[-1][1] - throat_pts[-2][1]
+            tl = math.hypot(tdx, tdy)
+            if tl < 1e-6:
+                return False
+            t_dir = (tdx / tl, tdy / tl)
+            t_perp = (-t_dir[1], t_dir[0])
+            NL = (F[0] + t_perp[0] * throat_half,
+                  F[1] + t_perp[1] * throat_half)
+            NR = (F[0] - t_perp[0] * throat_half,
+                  F[1] - t_perp[1] * throat_half)
+            # Per-arm fork-side geometry.  Near corners are computed
+            # exactly as _emit_chain's vertex-0 offset (±half along the
+            # branch's first-segment perp) so they share arm-ramp nodes.
+            arm_info = []
+            for branch, half_k, _far_k in arms:
+                if len(branch) < 2:
+                    continue
+                E = branch[0]
+                adx = branch[1][0] - branch[0][0]
+                ady = branch[1][1] - branch[0][1]
+                al = math.hypot(adx, ady)
+                if al < 1e-6:
+                    continue
+                a_dir = (adx / al, ady / al)
+                a_perp = (-a_dir[1], a_dir[0])
+                cP = (E[0] + a_perp[0] * half_k, E[1] + a_perp[1] * half_k)
+                cM = (E[0] - a_perp[0] * half_k, E[1] - a_perp[1] * half_k)
+                adv = math.hypot(E[0] - F[0], E[1] - F[1])
+                arm_info.append({"E": E, "dir": a_dir, "half": half_k,
+                                 "cP": cP, "cM": cM, "adv": adv})
+            if len(arm_info) < 2:
+                return False
+            # Nothing to fill if no arm advanced past the fork.
+            if max(a["adv"] for a in arm_info) < 2.0:
+                return False
+
+            def _ang_about_F(p):
+                vx, vy = p[0] - F[0], p[1] - F[1]
+                return math.atan2(vx * t_perp[0] + vy * t_perp[1],
+                                  vx * t_dir[0] + vy * t_dir[1])
+            # Order arms left→right (decreasing angle about the bore
+            # forward axis) so the fan ring stays simple.
+            arm_info.sort(key=lambda a: _ang_about_F(a["E"]),
+                          reverse=True)
+            # Classify each arm's two near corners as more-left (cL) and
+            # more-right (cR) about F.
+            for a in arm_info:
+                if _ang_about_F(a["cP"]) >= _ang_about_F(a["cM"]):
+                    a["cL"], a["cR"] = a["cP"], a["cM"]
+                else:
+                    a["cL"], a["cR"] = a["cM"], a["cP"]
+
+            def _fwd(p):
+                return (p[0] - F[0]) * t_dir[0] + (p[1] - F[1]) * t_dir[1]
+
+            def _apex(a_left, a_right):
+                # Crotch apex = where the two facing inner edges (left
+                # arm's right edge, right arm's left edge), extended back
+                # toward F, meet — the natural fork point.  Fall back to
+                # a pulled-back midpoint when near-parallel or the meet
+                # lands behind F / past the inner corners.
+                p1, d1 = a_left["cR"], a_left["dir"]
+                p2, d2 = a_right["cL"], a_right["dir"]
+                denom = d1[0] * (-d2[1]) - d1[1] * (-d2[0])
+                if abs(denom) > 1e-9:
+                    rx, ry = p2[0] - p1[0], p2[1] - p1[1]
+                    t1 = (rx * (-d2[1]) - ry * (-d2[0])) / denom
+                    mx, my = p1[0] + t1 * d1[0], p1[1] + t1 * d1[1]
+                    fwd = (mx - F[0]) * t_dir[0] + (my - F[1]) * t_dir[1]
+                    cap = max(_fwd(p1), _fwd(p2))
+                    if 0.0 < fwd <= cap + 0.5:
+                        return (mx, my)
+                mid = (0.5 * (p1[0] + p2[0]), 0.5 * (p1[1] + p2[1]))
+                return (F[0] + 0.6 * (mid[0] - F[0]),
+                        F[1] + 0.6 * (mid[1] - F[1]))
+
+            # Build the fan ring (CCW from NL).  Edge i→i+1 carries a
+            # wall unless it abuts a ramp: arm near edges (cL→cR) and the
+            # bore near edge (NR→NL) do, everything else is a wall.
+            ring, wall_edge = [], []
+
+            def _push(p, wall):
+                ring.append(p)
+                wall_edge.append(wall)
+            _push(NL, True)                      # NL → first arm: outer wall
+            for idx, a in enumerate(arm_info):
+                _push(a["cL"], False)            # arm near edge: no wall
+                _push(a["cR"], True)             # cR → apex / NR: wall
+                if idx != len(arm_info) - 1:
+                    _push(_apex(a, arm_info[idx + 1]), True)
+            _push(NR, False)                     # NR → NL (bore): no wall
+            if os.environ.get("O4_FORK_DEBUG"):
+                UI.vprint(0, f"  [fork] F={F} t_dir={t_dir} "
+                    f"combined_half={throat_half:.1f} narms={len(arm_info)}")
+                for a in arm_info:
+                    UI.vprint(0, f"    arm E={a['E']} half={a['half']:.1f} "
+                        f"adv={a['adv']:.1f} cL={a['cL']} cR={a['cR']}")
+                UI.vprint(0, f"    ring={[(round(p[0],1),round(p[1],1)) for p in ring]}")
+
+            try:
+                poly = Polygon(ring)
+                if not poly.is_valid:
+                    poly = poly.buffer(0)
+                if poly.geom_type == "MultiPolygon":
+                    poly = max(poly.geoms, key=lambda g: g.area)
+                if (poly.geom_type != "Polygon" or poly.is_empty
+                        or poly.area < 1.0):
+                    return False
+            except _GEOM_EXC:
+                return False
+            # Flat landing at the bore-handoff elevation, carried as
+            # node_altitudes (the junction representation) so a future
+            # change with differing per-arm start elevations bridges
+            # them per-vertex with no further work.
+            na = [round(e_throat, 1)] * (len(ring) + 1)
+            layout.shapes.append(BuiltShape(
+                polygon=poly, role=ROLE_TUNNEL_RAMP,
+                ref="tunnel_ramp", node_altitudes=na))
+            exclusion_zones.append(poly)
+
+            # Walls: each flagged perimeter edge, offset OUTWARD (away
+            # from the fan centroid) by wall_gap, thickness
+            # retaining_wall_width_m, flat at DEM.  Honour the
+            # wall_thresh contract — no wall where the landing already
+            # sits at/above DEM.
+            if e_throat < wall_alt - 0.05:
+                cx, cy = poly.centroid.x, poly.centroid.y
+                w = retaining_wall_width_m
+                for i in range(len(ring)):
+                    if not wall_edge[i]:
+                        continue
+                    p_a = ring[i]
+                    p_b = ring[(i + 1) % len(ring)]
+                    sx, sy = p_b[0] - p_a[0], p_b[1] - p_a[1]
+                    sl = math.hypot(sx, sy)
+                    if sl < 0.5:
+                        continue
+                    nx, ny = -sy / sl, sx / sl
+                    mx, my = 0.5 * (p_a[0] + p_b[0]), 0.5 * (p_a[1] + p_b[1])
+                    if (mx - cx) * nx + (my - cy) * ny < 0.0:
+                        nx, ny = -nx, -ny
+                    corners = [
+                        (p_a[0] + nx * wall_gap_m, p_a[1] + ny * wall_gap_m),
+                        (p_b[0] + nx * wall_gap_m, p_b[1] + ny * wall_gap_m),
+                        (p_b[0] + nx * (wall_gap_m + w),
+                         p_b[1] + ny * (wall_gap_m + w)),
+                        (p_a[0] + nx * (wall_gap_m + w),
+                         p_a[1] + ny * (wall_gap_m + w)),
+                    ]
+                    try:
+                        wp = Polygon(corners)
+                        if not wp.is_valid:
+                            wp = wp.buffer(0)
+                        if (wp.geom_type == "Polygon" and not wp.is_empty
+                                and wp.area > 0.5):
+                            layout.shapes.append(BuiltShape(
+                                polygon=wp, role=ROLE_RETAINING_WALL,
+                                ref="tunnel_wall",
+                                altitude=round(wall_alt, 1)))
+                            exclusion_zones.append(wp)
+                    except _GEOM_EXC:
+                        pass
+            return True
+
         # ── Y-SPLIT (user 2026-06-12): when cluster members share the
         # portal but their ways DIVERGE just outside (KPHL RWY 26
         # north: road and rail fork right after the tunnel), emit a
@@ -1198,6 +1508,14 @@ def _emit_tunnel_portals(
                 prior.append((LineString(throat), combined_half))
             except _GEOM_EXC:
                 pass
+            # Collect the (advanced) arm chains first; the fork throat
+            # (when gated on) must see every arm's fork-side start
+            # BEFORE the arms emit, so the bridging polygon + Y-tracing
+            # walls land between the bore and the arms.  Gate OFF: the
+            # arm geometry computed here is identical to the legacy
+            # inline emit (same prior-clearance order), so emitting them
+            # in the loop below is byte-identical.
+            arm_specs: list = []      # (branch_pts, half_k, far_k)
             for half_k, k, w_k, c_k in ordered:
                 branch = [_point_at(w_k, c_k, s_div)]
                 for i in range(1, len(w_k)):
@@ -1226,11 +1544,18 @@ def _emit_tunnel_portals(
                         if len(branch) < 2:
                             continue
                 far_k = portal_data[k][5]
-                _emit_chain(branch, half_k, e_div, far_k, False)
+                arm_specs.append((branch, half_k, far_k))
                 try:
                     prior.append((LineString(branch), half_k))
                 except _GEOM_EXC:
                     pass
+            # Fork throat junction (bridge bore→arms, trace the Y) —
+            # before the arms so it abuts the bore's far edge.
+            if TUNNEL_FORK_THROAT and len(arm_specs) >= 2:
+                _emit_fork_throat(throat, combined_half, e_div,
+                                  apt_elev, arm_specs)
+            for branch, half_k, far_k in arm_specs:
+                _emit_chain(branch, half_k, e_div, far_k, False)
             # WALL OPENINGS: a diverging branch must cross the
             # throat's (or a sibling's) side wall — clip every wall
             # piece of THIS cluster against the cluster's ramp
@@ -1348,7 +1673,7 @@ def _emit_tunnel_portals(
         _kept9 = []
         _n_clip = 0
         for _k9, s9 in enumerate(layout.shapes):
-            if (_k9 >= _emit_start_idx
+            if (id(s9) not in _pre_emit_ids
                     and getattr(s9, "ref", "") in
                     ("tunnel_cap", "tunnel_wall", "tunnel_ramp")
                     and s9.polygon is not None
@@ -1370,6 +1695,59 @@ def _emit_tunnel_portals(
                     f"visible structure).")
             except _GEOM_EXC:
                 pass
+    # WALL-vs-RAMP CLIP (user 2026-06-12, LMML): a retaining wall / cap
+    # is flat at apt_elev and must never sit ON TOP of a tunnel ROAD
+    # ramp surface.  Where two portal walks of one tunnel reach past
+    # each other (LMML east cluster), one portal's walls land on the
+    # other portal's ramps — walls entirely covered (#1327: 33 m² wall,
+    # 32.7 m² on a ramp).  The per-cluster wall-opening clip above only
+    # sees its OWN cluster's ramps; clip every emitted wall/cap against
+    # the union of ALL emitted ramps.  The 0.6 m ``wall_gap_m`` keeps a
+    # wall clear of its OWN ramp, so only cross-walk coverage is removed.
+    _ramp_polys = [s9.polygon for s9 in layout.shapes
+                   if id(s9) not in _pre_emit_ids
+                   and getattr(s9, "ref", "") == "tunnel_ramp"
+                   and s9.polygon is not None
+                   and not s9.polygon.is_empty]
+    if _ramp_polys:
+        try:
+            from shapely.ops import unary_union as _uuR
+            _ramp_u = _uuR(_ramp_polys)
+        except _GEOM_EXC:
+            _ramp_u = None
+        if _ramp_u is not None and not _ramp_u.is_empty:
+            _keptW = []
+            _n_wclip = 0
+            for s9 in layout.shapes:
+                if (id(s9) not in _pre_emit_ids
+                        and getattr(s9, "ref", "") in
+                        ("tunnel_cap", "tunnel_wall")
+                        and s9.polygon is not None
+                        and not s9.polygon.is_empty):
+                    try:
+                        if (s9.polygon.intersection(_ramp_u).area
+                                > 0.25):
+                            _d = s9.polygon.difference(_ramp_u)
+                            if _d.geom_type == "MultiPolygon":
+                                _d = max(_d.geoms, key=lambda g: g.area)
+                            if (_d.is_empty
+                                    or _d.geom_type != "Polygon"
+                                    or _d.area < 1.0):
+                                _n_wclip += 1
+                                continue
+                            s9.polygon = _d
+                            _n_wclip += 1
+                    except _GEOM_EXC:
+                        pass
+                _keptW.append(s9)
+            if _n_wclip:
+                layout.shapes = _keptW
+                try:
+                    UI.vprint(1,
+                        f"  [pav-builder] clipped {_n_wclip} tunnel "
+                        f"wall/cap piece(s) off overlapping ramps.")
+                except _GEOM_EXC:
+                    pass
     return n_emitted
 
 

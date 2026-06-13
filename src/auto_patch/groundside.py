@@ -1228,3 +1228,84 @@ def _separate_groundside_from_airside(
     return n_clipped
 
 
+def _deconflict_groundside_overlaps(
+        layout: "PavementLayout", dem, tile_lat: int, tile_lon: int,
+        min_overlap_m2: float = 0.5) -> int:
+    """Clip overlapping groundside-vs-groundside pavement so no two
+    groundside polygons share interior area.
+
+    ``_separate_groundside_from_airside`` removes groundside↔airside
+    overlap but never groundside↔groundside — an orphan junction
+    reclassified to groundside, or two independently DEM-followed
+    pieces, can overlap each other (LMML: piece #238 covered #185 by
+    32.7 m² and #182 by 3.0 m²).  Larger pieces are canonical; each
+    smaller piece YIELDS the overlap (subtract the running union of the
+    already-kept larger pieces), is rebuilt with DEM altitudes, and
+    sub-minimum remnants are dropped.  Pieces that merely ABUT a larger
+    one are untouched (difference of a touching polygon is a no-op).
+
+    Returns the number of groundside shapes modified or dropped."""
+    gs = [(i, s) for i, s in enumerate(layout.shapes)
+          if s.role == ROLE_GROUNDSIDE_PAVEMENT
+          and s.polygon is not None and not s.polygon.is_empty]
+    if len(gs) < 2:
+        return 0
+    # Largest-first, deterministic index tie-break.
+    order = sorted(gs, key=lambda t: (-t[1].polygon.area, t[0]))
+    _dem_at = _dem_sampler(layout, dem, tile_lat, tile_lon)
+    kept_union = None
+    replace: Dict[int, list] = {}   # original idx → [BuiltShape, …] ([] = drop)
+    n_mod = 0
+    for i, s in order:
+        poly = s.polygon
+        if kept_union is not None and not kept_union.is_empty:
+            try:
+                overlap = poly.intersection(kept_union).area
+            except _GEOM_EXC:
+                overlap = 0.0
+            if overlap > min_overlap_m2:
+                try:
+                    diff = poly.difference(kept_union)
+                except _GEOM_EXC:
+                    diff = None
+                parts = ([] if diff is None or diff.is_empty
+                         else [diff] if diff.geom_type == "Polygon"
+                         else list(getattr(diff, "geoms", [])))
+                new_pieces = []
+                for part in parts:
+                    if (part.geom_type != "Polygon" or part.is_empty
+                            or part.area < _GROUNDSIDE_MIN_AREA_M2):
+                        continue
+                    built = _dem_follow_polygon(part, _dem_at,
+                                                simplify_tol=0.0)
+                    if built is None:
+                        continue
+                    np_, na = built
+                    new_pieces.append(BuiltShape(
+                        polygon=np_, role=ROLE_GROUNDSIDE_PAVEMENT,
+                        ref="groundside", node_altitudes=na))
+                replace[i] = new_pieces
+                n_mod += 1
+                try:
+                    poly = (unary_union([p.polygon for p in new_pieces])
+                            if new_pieces else None)
+                except _GEOM_EXC:
+                    poly = None
+        if poly is not None and not poly.is_empty:
+            try:
+                kept_union = (poly if kept_union is None
+                              else unary_union([kept_union, poly]))
+            except _GEOM_EXC:
+                pass
+    if not replace:
+        return 0
+    out = []
+    for i, s in enumerate(layout.shapes):
+        if i in replace:
+            out.extend(replace[i])
+        else:
+            out.append(s)
+    layout.shapes = out
+    return n_mod
+
+
