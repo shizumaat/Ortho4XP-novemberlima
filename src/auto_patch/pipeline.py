@@ -3412,23 +3412,23 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # ROLE_APRON so absorb only targets genuine final junctions.
         from .junction_repair import _reclassify_apron_junctions
         _reclassify_apron_junctions(layout, icao=icao)
-        # An apron must have a touch-chain back to a runway (user
-        # 2026-06-09); pavement islands without one are landside ramps /
-        # parking → groundside (4 %).  MUST run before tile_cut: the
-        # tile clip severs cross-tile chains and would false-positive
-        # legitimately connected aprons.
-        from .junction_repair import (
-            _reclassify_runway_disconnected_to_groundside)
-        _reclassify_runway_disconnected_to_groundside(
-            layout, icao=icao, dem=dem,
-            tile_lat=tile_lat, tile_lon=tile_lon)
-
         # (s79) SERVICE-JUNCTION re-role (docs/service_road_carve.md):
         # a junction whose pavement neighbours are EXCLUSIVELY
         # ``service_road`` rects (the #198 U-turn bulge between the two
-        # road legs) is road territory — 4 % ``service_junction``, not a
-        # 1.5 % aircraft junction.  A junction shared with any aircraft
-        # pavement (the road's mouth at taxiway S) stays ROLE_JUNCTION.
+        # road legs; the HECA SVC29↔SVC30 connector #336) is road
+        # territory — 4 % ``service_junction``, not a 1.5 % aircraft
+        # junction.  A junction shared with any aircraft pavement (the
+        # road's mouth at taxiway S) stays ROLE_JUNCTION.
+        #
+        # ★ MUST run BEFORE the runway-disconnected→groundside pass
+        # below: that pass excludes service roads from its airside
+        # connectivity graph, so a road-only junction reads
+        # "runway-disconnected" and is demoted to DEM groundside before
+        # this re-role can claim it — leaving the two road runs split by
+        # a DEM blob they cannot grade through (the HECA #336 cliff
+        # between SVC29 and SVC30).  Re-roling first makes it a
+        # ``service_junction`` (excluded from that pass) so the road
+        # network grades continuously across it.
         if SERVICE_ROAD_CARVE:
             from .layout import ROLE_SERVICE_JUNCTION, ROLE_SERVICE_ROAD
             _aircraft_roles = {
@@ -3464,6 +3464,20 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 UI.vprint(1,
                     f"  [pav-builder] {icao}: re-roled {_n_svc_j} "
                     f"road-only junction(s) → service_junction (4 %).")
+
+        # An apron must have a touch-chain back to a runway (user
+        # 2026-06-09); pavement islands without one are landside ramps /
+        # parking → groundside (4 %).  MUST run before tile_cut: the
+        # tile clip severs cross-tile chains and would false-positive
+        # legitimately connected aprons.  Runs AFTER the service-junction
+        # re-role above so road-only junctions are already ``service_
+        # junction`` (excluded here) rather than being demoted to a DEM
+        # groundside blob that splits the road network.
+        from .junction_repair import (
+            _reclassify_runway_disconnected_to_groundside)
+        _reclassify_runway_disconnected_to_groundside(
+            layout, icao=icao, dem=dem,
+            tile_lat=tile_lat, tile_lon=tile_lon)
 
         # Single-pass sloping-edge absorption (user 2026-05-17): dissolve
         # a sloping rect that shares a sloping edge with a genuine
