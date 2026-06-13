@@ -299,6 +299,7 @@ def build_and_solve(
         apron_plane_grade: float = 0.0,
         term_polys: Sequence = (),
         chord_grade: float = 0.0,
+        chord_law_grade: float = 0.0,
         chord_reach: float = 0.0,
 ) -> Optional[NetworkProfileField]:
     """Build the centerline graph and solve the field.
@@ -1260,9 +1261,35 @@ def build_and_solve(
                 from shapely.geometry import LineString as _CL
                 from shapely.geometry import Point as _CP
                 from shapely.prepared import prep as _cprep2
+                from shapely.ops import nearest_points as _cnear2
             except Exception:                          # pragma: no cover
                 term_polys = ()
             n_fl = 0
+
+            def _crosses_taxi9(qx0, qy0, px0, py0):
+                # serving test (mirrors _terminal_chord_windows): a
+                # chord binds only across APRON — taxi pavement after
+                # the source taxiway's own leading run re-anchors the
+                # profile (transitive, not direct).
+                dx0, dy0 = px0 - qx0, py0 - qy0
+                ln0 = math.hypot(dx0, dy0)
+                if ln0 < 8.0:
+                    return False
+                kk0 = int(ln0 // 8.0)
+                left0 = False
+                for t0 in range(1, kk0 + 1):
+                    f0 = t0 * 8.0 / ln0
+                    try:
+                        on0 = taxi_test(qx0 + f0 * dx0,
+                                        qy0 + f0 * dy0)
+                    except Exception:          # pragma: no cover
+                        return False
+                    if not on0:
+                        left0 = True
+                    elif left0:
+                        return True
+                return False
+
             for tp9 in term_polys:
                 if tp9 is None or tp9.is_empty:
                     continue
@@ -1272,6 +1299,9 @@ def build_and_solve(
                 except Exception:                      # pragma: no cover
                     continue
                 lo_w9, hi_w9, n_ch9 = float("-inf"), float("inf"), 0
+                lo_l9, hi_l9 = float("-inf"), float("inf")
+                g_law9 = (chord_law_grade if chord_law_grade > 0.0
+                          else chord_grade)
                 for (ia9, ib9) in taxi_segs9:
                     (xa9, ya9) = F.nodes[ia9]
                     (xb9, yb9) = F.nodes[ib9]
@@ -1320,9 +1350,36 @@ def build_and_solve(
                             lo_w9 = lo_c9
                         if hi_c9 < hi_w9:
                             hi_w9 = hi_c9
+                        lo_c9 = v9c - g_law9 * d9c
+                        hi_c9 = v9c + g_law9 * d9c
+                        if lo_c9 > lo_l9:
+                            lo_l9 = lo_c9
+                        if hi_c9 < hi_l9:
+                            hi_l9 = hi_c9
                         n_ch9 += 1
-                if not n_ch9 or lo_w9 > hi_w9:
-                    continue          # no window / squeezed: no floor
+                if not n_ch9:
+                    continue          # no window: no floor
+                # two-rate resolution (user 2026-06-12): the pad level
+                # = the 1 % window's floor when feasible; 1 % demands
+                # in conflict → the 1 % least-violation midpoint
+                # clamped into the LAW-rate window.  Both infeasible:
+                # the LAW midpoint is used only for a NEAR-feasible
+                # inversion (≤1 m — HECA t11's was 0.19 m; skipping
+                # left its lanes floor-less at DEM).  A WIDE inversion
+                # means genuinely conflicting demands — a midpoint
+                # violates both sides by half the gap (CYXY: a ~705.9
+                # floor against a ~702 runway-side ceiling lifted the
+                # lanes 4 m above the pad's law ceiling and printed a
+                # 102 % wall) — no floor; arbitration's residue.
+                if lo_w9 <= hi_w9:
+                    pad_lvl9 = lo_w9
+                elif lo_l9 <= hi_l9:
+                    pad_lvl9 = min(max(0.5 * (lo_w9 + hi_w9), lo_l9),
+                                   hi_l9)
+                elif lo_l9 - hi_l9 <= 1.0:
+                    pad_lvl9 = 0.5 * (lo_l9 + hi_l9)
+                else:
+                    continue
                 # apply out to 2× the chord reach: the serving apron
                 # between pad and taxiway extends past the pad's own
                 # window reach, and its lane verts are the enforce's
@@ -1343,7 +1400,7 @@ def build_and_solve(
                         continue
                     if d9p > apply_r9:
                         continue
-                    fl9 = lo_w9 - apron_plane_grade * d9p
+                    fl9 = pad_lvl9 - apron_plane_grade * d9p
                     v9 = max(F.elev[i], fl9)
                     v9 = min(max(v9, F.band_lo[i]), F.band_hi[i])
                     if v9 != F.elev[i]:

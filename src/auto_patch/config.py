@@ -659,7 +659,16 @@ HOLE_ROUTER_V2 = _os.environ.get("O4_HOLE_ROUTER_V2", "1") == "1"
 # (the s79 solver-side lift was measured-rejected: the pad landed
 # right but the apron behind it kept the bowl as within-pairs).
 TERMINAL_CHORD_MAX_GRADE = 0.01
-TERMINAL_CHORD_REACH_M = 200.0      # max perpendicular chord length
+# Max perpendicular chord length.  400 m (user 2026-06-12): the
+# terminal level must be adjusted so the apron grades at ~1 % to its
+# serving taxiways — at 200 m the reach missed HECA's taxiway S
+# 350-400 m from the big pad, so its 1 % demand never entered the
+# window and the apron between settled at 1.3-1.4 %.  Where two
+# taxiways' 1 % demands conflict (window inverts), the construction
+# falls back to the APRON_MAX_GRADE law-rate window with the 1 %
+# least-violation midpoint — the preference yields to the law, never
+# the reverse.
+TERMINAL_CHORD_REACH_M = 400.0
 
 # (s80) APRON-FOLLOWS RE-SOLVE — docs/apron_follows_resolve.md (user
 # direction 2026-06-12: terminals = a NATURAL RESULT of grading the
