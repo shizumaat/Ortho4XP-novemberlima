@@ -2865,6 +2865,35 @@ def _report_within_shape_violations(
     _rf_check_src: list = []
     _rf_groundside = {"groundside_pavement", "service_road",
                       "service_junction", "tunnel_ramp"}
+    # PER-AXIS junction/apron exemption — the SAME construction
+    # (verification.taxi_axes_ll) + engine (check_grade._per_axis_allowance)
+    # the gate uses, so the WARN count == what the test asserts.  Without
+    # it the audit flagged the cross-axis junction diagonals + along-lane
+    # apron pairs the per-axis model legally allows, drifting far above the
+    # gate (HECA 247 audit vs 94 gate).  Built in METERS (same frame as
+    # ``coords_m``); ``apt_taxi_letters`` gives the A/B 3 %/2 % caps.
+    _per_axis_allowance = None
+    _taxi_axes_m = None
+    try:
+        from .elevation_per_surface import unified_jacobi as _uj
+        if getattr(_uj, "_PER_AXIS_JUNCTIONS", False):
+            from .verification import _import_check_grade
+            _per_axis_allowance = _import_check_grade()._per_axis_allowance
+            _letters = getattr(layout, "apt_taxi_letters", {}) or {}
+            _taxi_axes_m = []
+            for _ln, _nm in (getattr(layout, "apt_taxi_centerlines", [])
+                             or []):
+                if _ln is None or _ln.is_empty:
+                    continue
+                _lt = _letters.get(_nm)
+                _cL = 0.03 if _lt in ("A", "B") else 0.015
+                _cT = 0.02 if _lt in ("A", "B") else 0.015
+                _taxi_axes_m.append((list(_ln.coords), _cL, _cT))
+            if not _taxi_axes_m:
+                _per_axis_allowance = None
+    except Exception:                              # pragma: no cover
+        _per_axis_allowance = None
+        _taxi_axes_m = None
     for s_idx, s in enumerate(layout.shapes):
         if s.polygon is None or s.polygon.is_empty:
             continue
@@ -2970,7 +2999,22 @@ def _report_within_shape_violations(
                 if _vis is not None and not _vis(xi, yi, xj, yj):
                     continue          # chord leaves the polygon — phantom path
                 de = abs(ei - elevs[j])
-                if de <= cap_pct * d + rounding_allowance_m:
+                # PER-AXIS junction/apron (mirror check_grade._check_within_
+                # shape): a junction's pairs are graded longitudinally along a
+                # shared centerline + transverse, and unregulated cross-axis
+                # diagonals are skipped; an apron's along-lane pairs use the
+                # per-axis allowance, its body pairs the all-pair cap.
+                if (_per_axis_allowance is not None
+                        and s.role in (ROLE_JUNCTION, ROLE_APRON)):
+                    allowance = _per_axis_allowance(
+                        (xi, yi), (xj, yj), _taxi_axes_m, rounding_allowance_m)
+                    if allowance is None:
+                        if s.role == ROLE_JUNCTION:
+                            continue   # unregulated inter-centerline diagonal
+                        allowance = cap_pct * d + rounding_allowance_m
+                    if de <= allowance:
+                        continue
+                elif de <= cap_pct * d + rounding_allowance_m:
                     continue
                 pct = (de / d) * 100.0
                 n_viol += 1
