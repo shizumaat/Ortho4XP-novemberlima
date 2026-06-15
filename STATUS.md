@@ -4,6 +4,40 @@
 > Branch `dev`, HEAD `9b327bb`. Memory file
 > `heca_g_j1_apron_swallow.md` has the blow-by-blow + every probe path.
 
+### ▸ PROFILE-SMOOTHING INVESTIGATION (user: "junctions should slope more, rects too much; spread the load") — CONCLUDED, no ship
+User hypothesis: the climb concentrates on rects (cross_connectors) while
+junctions stay flat; spread it along the centerline graph. MEASURED on a
+real 85 m HECA transition (probe `heca_corridor_profile.py`): cross_connectors
+carry **47 % of the climb at the 1.5 % cap** while long primary_parallels coast
+at 0.46 % — so the read was RIGHT. But how a node's elevation is set:
+seed=DEM → cap-project → band-clamp (NOT min/max/median; band is a constraint,
+not the value). The damper only smooths degree-2 nodes (junctions/ends
+excluded → sit on raw DEM).
+★★ FIVE mechanisms tried, ALL hit the same wall (all gated OFF, reverted to
+`/tmp/probes/s_profile_smoothing_prototypes.patch`):
+1. full graph-harmonic through junctions → FLATTENS junctions (branch arms
+   drag them), load 47→49 % WORSE.
+2. directed through-path harmonic → no spread; within-shape 66→62 (minor).
+3. valley-fill (through-arm clamp) → +0.2 m fill, within-shape 66→**98**.
+4. valley-fill (all-neighbour clamp) → +0.03 m, within-shape 66→84.
+5. lift-off-terrain seed-high (2 m budget) → +0.19 m fill, within-shape 66→79.
+★ ROOT (definitive): the binding constraint is the within-shape 1.5 % grade
+law to the DENSE WEB of surrounding pavement, not the DEM coupling or the
+route band. A node can't rise without over-grading to its neighbours; the
+emit-level geodesic check (more pairs than the field graph) flags every
+residual. #108 (the user's T/J valley) is pinned by TWO abutting aprons
+(#256 climbs 42 m / 3173 m ≈1.33 %, #340 ≈1.1 %) **already at/over their 1 %
+budget** — aprons flex ≤1 % but these are saturated by the real terrain climb.
+★ SURVEY (`heca_junction_headroom.py`): only **7 of 77** junctions have a
+steep connector (~1.3 %) + band slack + apron headroom — and #108 isn't one
+(abuts only saturated aprons). Rigid-junction-move would help 7 junctions by
+~0.3 % each → NOT worth the mechanism.
+**CONCLUSION: HECA's taxi profile is at the feasible-smoothness frontier;
+the dips + connector-load are FORCED by terrain + the 1.5 % grade web, not
+fixable defects. The baseline 66 within-shape are irreducible — any lift ADDS
+violations.** Probes: `heca_corridor_profile/role_grade/T_valley/108_nbrs/
+junction_headroom.py`. The 3 session wins below stand.
+
 ### ▸ COMMIT 3 — `9b327bb` junction ring-curvature smoothing (gate `JUNCTION_RIPPLE_SMOOTH`, default ON)
 User in-sim: junctions still "a little wavy / tiny kinks... always the
 first node inline away from where the junction joins another shape...
