@@ -1,3 +1,77 @@
+# Auto-Patch Status — 20260614-01 = APRON BACK-EDGE RAMPS + TERMINAL-PAD FLATTENING (terminal9 flat)
+
+## ★★ 20260614-01 (2026-06-14) — APRON BACK-EDGE RAMPS + TERMINAL FLATTENING ★★
+Branch `building-grading` (clone `Ortho4XP-building-grading`; remote IS
+`novemberlima`).  Plans: `docs/apron_back_edge_ramps.md` +
+`docs/apron_terminal_attraction_plan.md`.  Memory:
+`apron_back_edge_ramps_built.md`.  **Committed this session.**
+
+GOAL (user): building pads should be FLAT, falling back to slope only as a last
+resort; allow the apron to grade more steeply BEHIND/BETWEEN buildings (up to 4 %)
+so pads stay flat while the apron twists to meet them, but the apron facing the
+taxiways stays ~1 %.
+
+GATE `APRON_BACK_EDGE_RAMPS` (config, env `O4_APRON_BACK_RAMPS`, **default ON**;
+OFF = byte-identical to prior behaviour, PROVEN vs HEAD at SPJC seed 0).
+`APRON_BACK_EDGE_GRADE = 0.04`.
+
+WHAT WAS BUILT (`unified_jacobi.py` + `config.py` + `tools/check_grade.py`):
+* **Back band** (`_apron_back_band_nodes`) = apron vertices CLOSER to a building
+  than to a taxi corridor (frontage + between-buildings + hill-cut side).  Those
+  edges grade to 4 %; the validator (`check_grade`) mirrors it.
+* **Phase A — terminal level = midpoint of the corridor-facing 1 % chord window**
+  (`_chord_window_midpoint`), NOT the DEM/settled median.  The window now INCLUDES
+  apron-lane corridors (a set-back terminal is served by centerlines over the
+  apron), gated by the **SAME-APRON line-of-sight rule** (user): a corridor serves
+  a building only if the chord from the building face to the corridor stays inside
+  ONE apron (`apr_polys_t`).
+* **Phase B** — the back band is governed by the wider RUNWAY route band in the
+  enforce (not the tight network-profile field band), so it can RISE to meet pads.
+* **Phase C** — after the pad flatten, back-apron verts are attracted to
+  `max over flat terminals of (level − 4 %·dist)` — a 4 % ramp from each terminal.
+* **Close-pad co-level** — two pads within `_INTER_TERMINAL_ADJ_M`=50 m co-level
+  to the LARGER pad's level **even when chord-law-pinned** (the actual terminal9
+  fix: terminal9@96.72 + terminal11@93.58, 5 m apart, both law-pinned, were
+  skipped by the pairwise resolution → terminal11 stayed low and stepped against
+  terminal9 → revert.  Now terminal11 rises to terminal9, acceptance excess 0).
+* `_CHORD_FLATTEN_TOL_M`=2: a small (≤2 m) law-window inversion flattens at the
+  midpoint instead of sloping.  Acceptance tolerance `_BACK_ACCEPT_BUDGET_M`=1.
+
+RESULTS @HECA: terminal9 **FLAT @96.7** (was a 6.8 m slope); terminals flat
+**24→38**; within-shape 85→115.  Gate-OFF byte-identical to HEAD.  Suite
+**332p / 6f** = the 5 standing baseline reds {no_self_overlap[CYXY],
+pavement_grade[SPJC/SPLP/HECA], compare_target_spjc} **+ 1 NEW**:
+pavement_grade[CYXY] (the squeezed-hangar-pad regression below).
+
+KNOWN OPEN (this feature):
+* **pavement_grade[CYXY] regression** — CYXY's squeezed hangar pads
+  (terminal8/terminal3) sit high above their taxiway; flattening them steepens
+  the surrounding apron (>1.5 %).  The only new suite red.  Decide: same
+  treatment / slope-exempt / accept.
+* In-sim verdict pending (RESTART Ortho4XP; `O4_AUTO_PATCH_REBUILD=1`).
+* ★ DEBUG envs: `O4_TERM_DEBUG`, `O4_TERM_DEBUG2`, `O4_CHORD_REF=<ref>`,
+  `O4_BAND_KML=<path>` (route-band KML w/ runway provenance), `O4_PHASEC_WIN`.
+* ★ OPS TRAP (cost real time this session): `git stash push`/`pop` LOST the
+  working changes once (restored from `stash@{0}`).  For gate-off byte-identical
+  use **cp-backup + `git checkout HEAD -- <files>` + cp-restore**, NOT stash.
+
+★★★ NEXT-SESSION TASKS — BUILDING PADS (user 2026-06-14) ★★★
+1. **term_bridge facades**: recognise `term_bridge_*.fac` facades that CONNECT
+   `term_building_*.fac` facades, so the connected set is ONE GROUP graded
+   together (bridges aren't matched today — see `dsf-building-outlines` memory:
+   only `term_building`/`hangar` matched).
+2. **Dropped large terminal near terminal17**: a large terminal building that
+   connects to terminal17 is being COMPLETELY DROPPED — likely a large CURVED
+   section with only a couple of bezier points (geometry rejected).  Find why
+   (dsf_reader bezier handling / facade ring build).
+3. **terminal11→J apron sharp dip**: the apron should grade SMOOTHLY from
+   terminal11 to the far (J-corridor) side — approx `30.120047, 31.4108691` — but
+   leaves a SHARP DIP in the middle near `30.1198944, 31.4096952` (likely a
+   mesh interpolation between sparse apron nodes, or a low-pinned mid-apron node —
+   check apron node coverage / field value along that line).
+
+---
+
 # Auto-Patch Status — session 82 = TUNNEL Y-FORK rework + CONTINUOUS PERIMETER WALL + a latent to_osm bug fixed
 
 ## ★★ SESSION 82 (2026-06-13) — TUNNEL FORK + CONTINUOUS DEM PERIMETER WALL (committed this session) ★★

@@ -70,6 +70,8 @@ try:
         ROUTE_NOISE_FRAC,
         ROAD_FRONTAGE_TOL_M,
         SERVICE_ROAD_MAX_GRADE,
+        APRON_BACK_EDGE_RAMPS,
+        APRON_BACK_EDGE_GRADE,
     )
 except Exception:
     ROLE_GRADE_LIMITS: Dict[str, Optional[float]] = {}
@@ -82,6 +84,8 @@ except Exception:
     ROUTE_NOISE_FRAC = 0.04
     ROAD_FRONTAGE_TOL_M = 3.0
     SERVICE_ROAD_MAX_GRADE = 0.04
+    APRON_BACK_EDGE_RAMPS = True
+    APRON_BACK_EDGE_GRADE = 0.04
 
 
 # ── OSM parsing ─────────────────────────────────────────────────
@@ -728,11 +732,50 @@ def _check_within_shape(ways: List[Way],
                 _fz_union(_fz_polys).buffer(ROAD_FRONTAGE_TOL_M))
     except Exception:
         road_zone = None
+    # BACK-EDGE RAMP corridor set (config.APRON_BACK_EDGE_RAMPS,
+    # docs/apron_back_edge_ramps.md): the INTER-TERMINAL apron — apron vertices
+    # CLOSER to a building frontage than to a taxi corridor (Phase B) — may
+    # grade at APRON_BACK_EDGE_GRADE (4 %), not the 1.5 % apron law: the
+    # building-facing apron (frontage + between-buildings + hill-cut side) that
+    # ramps to meet the flat terminals.  Mirrors the solver's building-facing
+    # band.  VALIDATOR-ONLY.
+    frontage_nids: set = set()
+    if APRON_BACK_EDGE_RAMPS:
+        try:
+            from shapely.geometry import Point as _CPt, Polygon as _CPoly
+            from shapely.ops import unary_union as _cunion
+            _TAXI_ROLES = {"primary_parallel", "secondary_parallel", "stub",
+                           "cross_connector", "junction"}
+            bld_polys, taxi_polys = [], []
+            for w in ways:
+                r = w.tags.get("role")
+                if r not in ("building",) and r not in _TAXI_ROLES:
+                    continue
+                ring = [ll_to_m(*nodes[nid]) for nid in w.nids
+                        if nid in nodes]
+                if len(ring) >= 3:
+                    (bld_polys if r == "building"
+                     else taxi_polys).append(_CPoly(ring).buffer(0))
+            if bld_polys and taxi_polys:
+                bld_u = _cunion(bld_polys)
+                taxi_u = _cunion(taxi_polys)
+                for w in ways:
+                    if w.tags.get("role") != "apron":
+                        continue
+                    for nid in w.nids:
+                        if nid in nodes and nid not in frontage_nids:
+                            x, y = ll_to_m(*nodes[nid])
+                            p = _CPt(x, y)
+                            if bld_u.distance(p) < taxi_u.distance(p):
+                                frontage_nids.add(nid)
+        except Exception:
+            frontage_nids = set()
     for w in ways:
         grade_cap = _role_grade_limit(w, max_grade)
         if grade_cap is None:
             continue  # skip ROLE_GRADE_LIMITS[role] is None
         pts: List[Tuple[float, float, float, bool]] = []
+        pnids: List[str] = []
         for k, nid in enumerate(w.nids[:-1] if (len(w.nids) > 1
                                 and w.nids[0] == w.nids[-1])
                                 else w.nids):
@@ -744,6 +787,7 @@ def _check_within_shape(ways: List[Way],
             if e is None:
                 continue
             pts.append((x, y, e, nid in seam_nids))
+            pnids.append(nid)
         n = len(pts)
         if n < 3:
             continue
@@ -838,6 +882,19 @@ def _check_within_shape(ways: List[Way],
                 allowance = max(
                     allowance,
                     SERVICE_ROAD_MAX_GRADE * d + ELEV_ROUNDING_NOISE_M)
+            # BACK-EDGE RAMP law (see frontage_nids above): an apron pair on the
+            # INTER-TERMINAL strip (both endpoints welded to a building pad)
+            # carries the 4 % back-ramp cap.
+            if (frontage_nids
+                    and role == "apron"
+                    and APRON_BACK_EDGE_GRADE > grade_cap_pair
+                    and de > allowance
+                    and pnids[i] in frontage_nids
+                    and pnids[j] in frontage_nids):
+                grade_cap_pair = APRON_BACK_EDGE_GRADE
+                allowance = max(
+                    allowance,
+                    APRON_BACK_EDGE_GRADE * d + ELEV_ROUNDING_NOISE_M)
             if de <= allowance:
                 continue
             grade = de / d

@@ -67,6 +67,8 @@ __all__ = [
     "APRON_CORRIDOR_SMOOTH_GRADE",
     "APRON_CORRIDOR_GEODESIC",
     "APRON_CORRIDOR_SEED_RADIUS_M",
+    "APRON_BACK_EDGE_GRADE",
+    "APRON_BACK_EDGE_RAMPS",
     "WRITE_ARBITRATION",
     "TERMINAL_LEAF_LEVELS",
     "TERMINAL_NATURAL_LEVELS",
@@ -318,6 +320,15 @@ RUNWAY_SHOULDER_EXTENT_MAX_APT_FRAC = 0.5
 # the runway cap without touching taxiways.
 TAXI_MAX_GRADE = 0.015          # FAA AC 150/5300-13 taxiway-family
 APRON_MAX_GRADE = 0.015         # apron / junction body, all directions (user 2026-05-07)
+# (2026-06-13) APRON BACK-EDGE RAMPS — docs/apron_back_edge_ramps.md.  The
+# back strip of an apron (building frontage + gaps BETWEEN buildings, farthest
+# from taxi routes) may grade up to this steeper cap so building pads can stay
+# flat on sloping terrain: the apron TWISTS — tight 1% taxi-facing front, a
+# steeper back that tracks each pad's flat level, ramps between buildings.  4%
+# matches groundside / tunnel ramps (drivable, not smooth-for-taxiing).  Only
+# back EDGES (both endpoints in the back band) carry it; front-to-back chords
+# keep APRON_MAX_GRADE so the transition stays gradual.
+APRON_BACK_EDGE_GRADE = 0.040
 # Terminal pads.  0.0 = perfectly FLAT (the default — a terminal building sits on
 # one floor altitude); the solver derives its flatness from this cap (cap 0 → the
 # flat / rigid-pad code path).  Raise it (e.g. to APRON_MAX_GRADE) to let terminals
@@ -744,6 +755,20 @@ TERMINAL_CHORD_REACH_M = 400.0
 # interior is intentionally above the DEM.  OFF = the s79 behaviour
 # byte-identically.
 TERMINAL_NATURAL_LEVELS = _os.environ.get("O4_TERMINAL_NATURAL", "1") == "1"
+
+# (2026-06-13) APRON BACK-EDGE RAMPS — docs/apron_back_edge_ramps.md (user
+# direction: "allow just the back edge of aprons — the ones farthest from taxi
+# routes — to go up to grade, so the buildings can be flatter and the apron
+# twists slightly to meet them with ramps between, but the majority of the
+# apron stays at 1%").  Extends TERMINAL_NATURAL_LEVELS: the apron strip behind
+# / between the building pads is allowed to grade at APRON_BACK_EDGE_GRADE (4%)
+# instead of the 1.5% apron law, so the pairwise pad resolution no longer drags
+# adjacent pads to a compromise level and the FLAT-vs-SLOPE acceptance no longer
+# reverts a flatten over a legal back ramp.  The front / interior is never
+# relaxed (corridor smoothing still holds it at 1%).  Default ON (user
+# 2026-06-13, for in-sim eval); O4_APRON_BACK_RAMPS=0 disables → byte-identical
+# to the TERMINAL_NATURAL_LEVELS behaviour (the whole feature is gated).
+APRON_BACK_EDGE_RAMPS = _os.environ.get("O4_APRON_BACK_RAMPS", "1") == "1"
 
 # (s81) HANGAR PADS — docs/hangar_pads.md (user rulings 2026-06-12).
 # When ON, ``aeroway=hangar`` buildings are ALWAYS admitted into the
