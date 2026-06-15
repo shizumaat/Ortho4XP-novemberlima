@@ -1,8 +1,33 @@
 # Auto-Patch Status — 2026-06-15: ROUTE-BAND route-measure fix + corridor damping default-ON (thread C resolved)
 
 > Newest session on top. Older sessions follow below.
-> Branch `dev`, HEAD `70a4b02`. Memory file
+> Branch `dev`, HEAD `9b327bb`. Memory file
 > `heca_g_j1_apron_swallow.md` has the blow-by-blow + every probe path.
+
+### ▸ COMMIT 3 — `9b327bb` junction ring-curvature smoothing (gate `JUNCTION_RIPPLE_SMOOTH`, default ON)
+User in-sim: junctions still "a little wavy / tiny kinks... always the
+first node inline away from where the junction joins another shape...
+that second node needs to be averaged between the shape edge node and the
+third one in." MEASURED (probe `/tmp/probes/heca_jkink.py`): HECA 262
+junction ring ripples >0.15m, 98% adjacent to a welded vertex — a free
+ring vertex bowed off the line between its neighbours, a grade-CHANGE
+(curvature) kink UNDER 1.5% so `_smooth_within_junction_adjacent_pair_grade`
+(grade-MAGNITUDE only) never touched it — AND that legacy smoother is
+SKIPPED under `USE_PER_SURFACE_SOLVER` (the whole `if not
+USE_PER_SURFACE_SOLVER` chain in finalize), so junctions got NO post-solve
+smoothing at all. FIX `_smooth_junction_ring_curvature` (elevation.py):
+ring-Laplacian relax of FREE vertices toward distance-linear interp of
+ring neighbours, HOLDING sloping-rect-corner + welded/shared vertices;
+called from pipeline AFTER `per_surface_solve` (~L3808). ★ PER-JUNCTION
+ACCEPTANCE: ring-Laplacian ignores non-ring within-60m pairs, so it lifted
+a CYXY vertex into +12 within-shape; count >1.5% pairs before/after and
+REVERT the junction if worse (within-shape count can never rise). HECA 84
+verts smoothed, ripples 262→231 (rest are HELD welded verts), within-shape
+66, 05C/05L/05R exact, suite 333p/5f, gate-off byte-identical.
+⚠ REMAINING: the 231 held-welded ripples = a welded vertex whose
+neighbour-dictated value sits off the junction's smooth line; smoothing
+those needs a CROSS-SHAPE pass (move the shared vertex + update BOTH
+shapes) — not built (user called welds "matched correctly").
 
 ## ★★ SESSION 2026-06-15 — THREAD C RESOLVED: field route bands measured along the taxiway, damping now smooths ★★
 
