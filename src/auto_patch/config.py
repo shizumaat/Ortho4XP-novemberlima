@@ -776,7 +776,11 @@ TERMINAL_NATURAL_LEVELS = _os.environ.get("O4_TERMINAL_NATURAL", "1") == "1"
 # byte-identical to pre-s81.
 HANGAR_PADS = _os.environ.get("O4_HANGAR_PADS", "1") == "1"
 # Corridor-profile Laplacian damping (see CORRIDOR_DAMP_ALPHA above).
-CORRIDOR_PROFILE_DAMPING = _os.environ.get("O4_CORRIDOR_DAMP", "0") == "1"
+# Default ON (user 2026-06-14): with FIELD_RUNWAY_ROUTE_BANDS the bands
+# carry real slack, so the harmonic smoothing now halves corridor
+# grade-change (HECA kinks >1%: 56→23) and settles aprons toward terrain
+# instead of being a no-op.  O4_CORRIDOR_DAMP=0 restores the pure DEM-follow.
+CORRIDOR_PROFILE_DAMPING = _os.environ.get("O4_CORRIDOR_DAMP", "1") == "1"
 # Field RUNWAY-anchor route bands (user 2026-06-14): measure the
 # network-profile field's runway-anchor feasibility band along the
 # centerline TAXI ROUTE (taxi_routing) instead of the field graph.  The
