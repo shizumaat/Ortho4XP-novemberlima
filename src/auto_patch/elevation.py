@@ -1993,6 +1993,132 @@ def _smooth_within_junction_adjacent_pair_grade(
     return n_changed_total
 
 
+def _smooth_junction_ring_curvature(
+        layout: "PavementLayout",
+        max_iters: int = 40,
+        convergence_m: float = 0.005,
+        ) -> int:
+    """Ring-Laplacian smoothing of junction node altitudes (user
+    2026-06-15): the twist pass leaves a FREE junction ring vertex bowed
+    off the line between its two ring-neighbours — a grade-CHANGE
+    (curvature) ripple that stays UNDER the 1.5 % cap, so
+    ``_smooth_within_junction_adjacent_pair_grade`` (grade-MAGNITUDE only)
+    never touches it.  This pass averages each free vertex toward the
+    distance-linear interpolation of its immediate ring neighbours,
+    HOLDING anchored vertices so nothing shared moves:
+
+      * HELD = a vertex coincident with a sloping-rect corner (runway /
+        primary_parallel / secondary_parallel / stub / cross_connector —
+        the same hard buckets the grade smoother uses) OR shared with ANY
+        other shape (welded mouth — moving it would open a cross-shape
+        step; the user wants those "matched correctly" and held).
+      * FREE = everything else; Jacobi-relaxed toward its neighbours.
+
+    Free vertices between two held endpoints converge to a smooth altitude
+    ramp; isolated spikes flatten onto the line.  Grade only ever
+    DECREASES at a smoothed vertex (interp stays within the neighbour
+    range), so no new within-shape violation is created.  Gate
+    ``JUNCTION_RIPPLE_SMOOTH``.  Returns the count of vertices moved.
+    """
+    from .config import JUNCTION_RIPPLE_SMOOTH
+    if not JUNCTION_RIPPLE_SMOOTH:
+        return 0
+    sloping_rect_roles = {
+        ROLE_RUNWAY, ROLE_PRIMARY_PARALLEL,
+        ROLE_SECONDARY_PARALLEL, ROLE_STUB, ROLE_CROSS_CONNECTOR,
+    }
+    # bucket -> set of shape ids (welded detection) + sloping-corner set
+    bucket_shapes: dict = {}
+    hard_buckets: set = set()
+    for k, s in enumerate(layout.shapes):
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        try:
+            coords = list(s.polygon.exterior.coords)
+        except _GEOM_EXC:
+            continue
+        if coords and coords[0] == coords[-1]:
+            coords = coords[:-1]
+        for cx, cy in coords:
+            b = _corner_elevation_bucket(cx, cy)
+            bucket_shapes.setdefault(b, set()).add(k)
+            if s.role in sloping_rect_roles:
+                hard_buckets.add(b)
+
+    n_moved = 0
+    for k, s in enumerate(layout.shapes):
+        if s.role != ROLE_JUNCTION or not s.node_altitudes:
+            continue
+        try:
+            coords = list(s.polygon.exterior.coords)
+        except _GEOM_EXC:
+            continue
+        if coords and coords[0] == coords[-1]:
+            coords = coords[:-1]
+        n = len(coords)
+        if n < 4 or len(s.node_altitudes) < n:
+            continue
+        held = []
+        for cx, cy in coords:
+            b = _corner_elevation_bucket(cx, cy)
+            held.append(b in hard_buckets
+                        or len(bucket_shapes.get(b, {k})) > 1)
+        if not any(held) or all(held):
+            continue                    # no anchor to interp toward / nothing free
+        alts = [float(a) for a in s.node_altitudes[:n]]
+        orig = alts[:]
+        for _it in range(max_iters):
+            max_change = 0.0
+            new = alts[:]
+            for i in range(n):
+                if held[i]:
+                    continue
+                p, q = (i - 1) % n, (i + 1) % n
+                dp = math.hypot(coords[i][0] - coords[p][0],
+                                coords[i][1] - coords[p][1])
+                dq = math.hypot(coords[q][0] - coords[i][0],
+                                coords[q][1] - coords[i][1])
+                if dp < 0.3 or dq < 0.3:
+                    continue
+                t = dp / (dp + dq)
+                tgt = alts[p] + t * (alts[q] - alts[p])
+                new[i] = tgt
+                max_change = max(max_change, abs(tgt - alts[i]))
+            alts = new
+            if max_change < convergence_m:
+                break
+
+        # ACCEPTANCE: ring-Laplacian only considers immediate neighbours,
+        # but a free vertex shares grade with EVERY vertex within
+        # ~60 m (the within-shape law).  Linearising one vertex can lift
+        # it into a >1.5 % pair with a NON-ring-adjacent vertex (measured:
+        # +12 within-shape at a CYXY junction).  Count >1.5 % pairs within
+        # 60 m before/after; revert the whole junction if the smoothing
+        # made it worse (so the within-shape count can never increase).
+        def _viol_count(av):
+            c = 0
+            for i in range(n):
+                for j in range(i + 1, n):
+                    d = math.hypot(coords[i][0] - coords[j][0],
+                                   coords[i][1] - coords[j][1])
+                    if d < 0.5 or d > 60.0:
+                        continue
+                    if abs(av[i] - av[j]) / d > 0.0151:
+                        c += 1
+            return c
+        if _viol_count(alts) > _viol_count(orig):
+            continue                         # revert: keep original altitudes
+
+        n_moved += sum(1 for i in range(n)
+                       if not held[i] and abs(alts[i] - orig[i]) > 0.05)
+        s.node_altitudes = [round(a, 1) for a in alts]
+        if (len(s.node_altitudes) == n
+                and s.polygon.exterior.coords[0]
+                == s.polygon.exterior.coords[-1]):
+            s.node_altitudes.append(s.node_altitudes[0])
+    return n_moved
+
+
 def _rederive_terminal_altitude_from_apron_neighbours(
         layout: "PavementLayout",
         sample_radius_m: float = 250.0,

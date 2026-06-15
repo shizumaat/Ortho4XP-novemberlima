@@ -3805,6 +3805,18 @@ def build_airport_pavement(icao: str, xplane_root: str,
             per_surface_solve(layout, icao,
                                dem=dem,
                                tile_lat=tile_lat, tile_lon=tile_lon)
+            # Junction ring-curvature smoothing (user 2026-06-15): the
+            # twist pass leaves a free junction RING vertex bowed off the
+            # line between its ring neighbours — a sub-1.5 % curvature
+            # ripple the grade-magnitude smoother never touches (and that
+            # smoother is skipped under the per-surface solver anyway).
+            # Average each FREE (un-welded, non-rect-corner) vertex toward
+            # its ring-neighbour interpolation, holding shared vertices.
+            from .elevation import _smooth_junction_ring_curvature
+            _jrc = _smooth_junction_ring_curvature(layout)
+            if _jrc and os.environ.get("O4_JCT_RIPPLE_DEBUG") == "1":
+                UI.vprint(1, f"  [pav-builder] {icao}: junction ring "
+                             f"curvature smoothed {_jrc} free vertex(es).")
 
         if n_tile_delta != 0:
             UI.vprint(1,

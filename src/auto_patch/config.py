@@ -781,6 +781,18 @@ HANGAR_PADS = _os.environ.get("O4_HANGAR_PADS", "1") == "1"
 # grade-change (HECA kinks >1%: 56→23) and settles aprons toward terrain
 # instead of being a no-op.  O4_CORRIDOR_DAMP=0 restores the pure DEM-follow.
 CORRIDOR_PROFILE_DAMPING = _os.environ.get("O4_CORRIDOR_DAMP", "1") == "1"
+# Junction node-altitude RIPPLE smoothing (user 2026-06-15): the twist
+# pass leaves a free junction RING vertex bowed off the line between its
+# two ring-neighbours — a grade-CHANGE (curvature) kink under the 1.5 %
+# cap, so the grade-magnitude smoother never touches it (user: "the shape
+# edges are welded and matched correctly but there's a little ripple
+# before getting into the heart of the junction; that second node needs
+# to be averaged between the shape edge node and the third one in").  A
+# ring-Laplacian pass averages each FREE (un-welded, non-rect-corner)
+# vertex toward the distance-linear interpolation of its ring neighbours,
+# HOLDING welded/shared and sloping-rect-corner vertices (so no
+# cross-shape step).  O4_JCT_RIPPLE=0 disables it.
+JUNCTION_RIPPLE_SMOOTH = _os.environ.get("O4_JCT_RIPPLE", "1") == "1"
 # Field RUNWAY-anchor route bands (user 2026-06-14): measure the
 # network-profile field's runway-anchor feasibility band along the
 # centerline TAXI ROUTE (taxi_routing) instead of the field graph.  The

@@ -272,6 +272,9 @@ def compute_elevations_and_repair_geometry(layout: PavementLayout, icao: str, xp
         # vertex the smoother nudged off-target is restored.
         _enforce_shared_vertex_altitudes(layout)
         _snap_junction_altitudes_to_rect_corners(layout)
+        # Junction ring curvature smoothing (user 2026-06-15) runs in the
+        # PER-SURFACE path from pipeline (after per_surface_solve), since
+        # this legacy chain is skipped under USE_PER_SURFACE_SOLVER.
     # Per user 2026-04-29: merge small junction slivers into
     # adjacent larger junctions.  Polygon-with-holes
     # decomposition + post-elevation subdivisions can carve
