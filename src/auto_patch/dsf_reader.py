@@ -431,10 +431,29 @@ def _read_dsf_polys(
             except (ValueError, IndexError):
                 continue
             ctrl = None
-            if cur_depth >= 4 and (not cur_uv_mode or cur_depth >= 8):
+            # Where the bezier control point lives depends on the plane
+            # layout:
+            #  • UV mode (param 65535): planes are (lon, lat, [ctrl_lon,
+            #    ctrl_lat,] u, v[, ctrl_u, ctrl_v]).  A geographic handle
+            #    exists only at depth>=8 and sits at tok[3],tok[4]; depth-4
+            #    is (lon, lat, u, v) with no handle.
+            #  • Plain / param mode: the geographic handle, when present, is
+            #    the LAST TWO coordinate planes — tok[3],tok[4] for a depth-4
+            #    pavement bezier (lon, lat, ctrl_lon, ctrl_lat) AND
+            #    tok[4],tok[5] for a depth-5 FACADE bezier (lon, lat,
+            #    wall_param, ctrl_lon, ctrl_lat).  Reading a fixed tok[3],
+            #    tok[4] for a depth-5 facade grabbed the wall param as the
+            #    control lon (≈3), exploding the ring to continental scale
+            #    (HECA's curved term_building_* facades → ~880 km blobs that
+            #    the boundary gate then silently dropped).
+            if cur_uv_mode:
+                ci, cj, has_bez = 3, 4, cur_depth >= 8
+            else:
+                ci, cj, has_bez = cur_depth - 1, cur_depth, cur_depth >= 4
+            if has_bez:
                 try:
-                    cx = float(tok[3])
-                    cy = float(tok[4])
+                    cx = float(tok[ci])
+                    cy = float(tok[cj])
                     # A control == anchor means "no handle" (corner).
                     if cx != lon or cy != lat:
                         ctrl = (cx, cy)
@@ -473,16 +492,22 @@ def read_dsf_pavements(
 # ``.pol`` or object ``.obj`` that merely happens to contain "hangar"
 # in its name can never be mistaken for a building footprint.
 #
-# The Terminal_kit also ships term_roof_* / term_bridge_* decorative
-# pieces that stack ON the footprint; matching only "term_building"
-# keeps the footprint-bearing Ground/Levels/Slab/Tall/BigHall pieces
-# and drops the roofs / jet bridges (they carry no new outline).
+# The Terminal_kit also ships term_roof_* decorative pieces that stack
+# ON the footprint (no new outline → dropped) and term_bridge_* CONNECTOR
+# facades — enclosed skybridges / link spans that physically join two
+# ``term_building_*`` facades.  Bridges carry the ``"bridge"`` role so the
+# caller can feed them into the building clustering as CONNECTORS (a
+# building + bridge + building run unions into ONE flat pad) without
+# treating a stray bridge as a standalone building.
 def _building_role_for_def(path: str) -> str | None:
-    """Return ``"terminal"`` / ``"hangar"`` if the POLYGON_DEF path is a
-    terminal or hangar facade, else ``None``."""
+    """Return ``"terminal"`` / ``"hangar"`` / ``"bridge"`` if the
+    POLYGON_DEF path is a terminal, hangar, or terminal-bridge facade,
+    else ``None``."""
     p = path.lower()
     if not p.endswith(".fac"):
         return None
+    if "term_bridge" in p:
+        return "bridge"
     if "term_building" in p:
         return "terminal"
     if "hangar" in p:
@@ -500,8 +525,9 @@ def read_dsf_buildings(
     """Extract terminal/hangar building footprints from a DSF file.
 
     Returns a list of ``(outer_ring, holes, role)`` where ``role`` is
-    ``"terminal"`` or ``"hangar"`` (mapped from the facade's
-    POLYGON_DEF path via ``_building_role_for_def``), ``outer_ring`` is
+    ``"terminal"``, ``"hangar"``, or ``"bridge"`` (a term_bridge_*
+    connector facade; mapped from the facade's POLYGON_DEF path via
+    ``_building_role_for_def``), ``outer_ring`` is
     a list of ``(lon, lat)`` tuples and ``holes`` its inner rings.
     Rings are NOT closed.  Returns ``[]`` on any failure.
 

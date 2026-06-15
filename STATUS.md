@@ -1,3 +1,275 @@
+# Auto-Patch Status — 20260615 = DSF BUILDING-FOOTPRINT OVERHAUL (term_bridge union, depth-5 bezier, polygonize, cluster cleanup, finger-pier close)
+
+## ★★★ CURRENT STATE / LESSONS / NEXT STEPS (2026-06-15) ★★★
+Branch `building-grading`.  This session reworked how DSF terminal/hangar
+footprints become grading pads.  New knobs in `config.py` (all default on):
+`TERM_BRIDGE_GROUPING`, `TERMINAL_SIMPLIFY_TOL_M=1.0`,
+`DSF_CLUSTER_SIMPLIFY_TOL_M=0.5`, `BUILDING_OUTLINE_CLOSE_M=55`,
+`BUILDING_CLOSE_MIN_PIECE_M2=2000`, plus `DSF_BUILDING_OSM_OVERLAP_FRAC`.
+Per-feature detail in the dated blocks below + memory
+`term_bridge_grouping_depth5.md`.
+
+**SHIPPED & WORKING (this committed state):**
+1. **depth-5 facade bezier fix** (`dsf_reader.py`) — curved `.fac` facades are
+   `(lon,lat,wall_param,ctrl_lon,ctrl_lat)`; read the control from the LAST
+   TWO planes, not a fixed `tok[3],tok[4]`.  Restored the dropped curved
+   terminals; pavement byte-identical.
+2. **term_bridge UNION** — `term_bridge_*` admitted into the building pool so
+   bridge-joined complexes grade as one building (user ruling).
+3. **OSM-relation POLYGONIZE** (`terminals._extract_osm_terminals`) — relation
+   boundaries are OPEN segment ways; stitch with `polygonize`, NOT per-way
+   rings.  Killed the 247k m² convex-hull "pyramid" (SPJC terminal20 → real
+   95k).  Also the `building{N}` ref rename.
+4. **DSF cluster cleanup** (`DSF_CLUSTER_SIMPLIFY_TOL_M`) — solid footprint +
+   DP-simplify strips the snap-buffer arc noise (HECA terminal 1280→122 v);
+   THIS is what made the close stop cutting.
+5. **finger-pier outline CLOSE** (`_close_building_outline`, mitre join,
+   split-pieces) — absorbs gate STANDS into a simple straight-sided pad.  SPJC
+   PERFECT; HECA much better (no apron stand-cutouts, no building overlaps).
+* Verify: SPJC grade 3 steps, HECA 2 steps; suite **6f / 341p** (same standing
+  reds as the 20260614-01 baseline); 9 new dsf-building unit tests pass.
+
+**LESSONS LEARNED (traps that cost time):**
+* ★ Stacked close-mechanics (fill-gate / taxi-keepout / containment-drop /
+  split-pieces) INTERACT badly.  The clean answer was the minimal set:
+  cluster-simplify + close-all + split-pieces.  STRIP mechanisms when thrashing.
+* ★ The HECA building17 "cut" was NEVER about taxiways (user: stands never
+  touch a taxiway centerline).  It was the 1000s-of-vertex arc noise; on CLEAN
+  clusters the close cuts nothing.  Fix the INPUT, not the symptom.
+* ★ Frame confusion: clustering runs in the build's anchor frame, probes in an
+  arbitrary lat/lon frame — map by AREA not coords.  `/tmp` DSF cache keys on
+  basename → cross-airport collision (use a per-airport cache_dir).
+* ★ One close can't both RECONNECT a split building and ABSORB a finger-pier's
+  stands — opposite treatment of the same MultiPolygon.
+
+**NEXT STEPS — HECA terminal-complex shape (5 user asks, diagnosed not shipped;
+detail in FOLLOW-UP 5):**
+* building17/18 = one building close-split → reconnect via `union([pad]+pieces)`
+  works but un-absorbs piers ⇒ needs a reconnect-vs-absorb discriminator.
+* building21/22 should close to straight rects encompassing their stands.
+* building21+22+32 = one complex joined by DSF bridges ⇒ **post-close
+  bridge-merge** (union closed pads + term_bridge facades, ~2 m snap) verified
+  to unite it (→ 74,474 m²); needs term_bridge facades kept SEPARATE (now
+  lumped into `dsf_building_polys`) and the per-pier close run BEFORE the merge.
+* Recommended order: (1) separate bridge list, (2) close each cluster, (3)
+  post-close bridge-merge, (4) reconnect-vs-absorb discriminator.
+
+---
+
+## ★★ 20260614-02 (2026-06-14) — TERM_BRIDGE GROUPING + DEPTH-5 FACADE PARSE FIX ★★
+Branch `building-grading`. **UNCOMMITTED** (pending user direction).
+Memory: `term_bridge_grouping_depth5.md`. Picks up NEXT-SESSION tasks
+#1 (term_bridge grouping) and #2 (dropped curved terminal) from
+20260614-01 — both addressed; #3 (terminal11→J apron dip) still open.
+
+GOAL (user 2026-06-14, task #1): recognise `term_bridge_*.fac` connector
+facades that join two `term_building_*` facades so the connected set is
+ONE GROUP graded together (a building→bridge→building run flattens to a
+single level).
+
+★★ ROOT BUG FOUND FIRST (un-gated correctness fix, `dsf_reader.py`):
+DSF facade points are authored at **depth 5** = `(lon, lat, wall_param,
+ctrl_lon, ctrl_lat)` for a CURVED facade.  `_read_dsf_polys` read the
+bezier control from a fixed `tok[3],tok[4]` (correct only for depth-4
+pavement), grabbing the wall param (≈ a small int like 3) as the control
+lon → the ring exploded to ±878 km.  Such facades had off-airport
+centroids and were **silently dropped by the boundary gate** = task #2's
+"large curved terminal near terminal17 COMPLETELY DROPPED".  FIX = read
+the control from the LAST TWO coordinate planes (`tok[depth-1],tok[depth]`)
+for non-UV polys — IDENTICAL to the old `tok[3],tok[4]` at depth-4
+(pavement byte-identical) but correct at depth-5.  UV-mode (depth-8) path
+unchanged.  Evidence: HECA facades-inside-boundary **67→72** (+5 curved
+facades restored); HECA building-facade union 8.1e9 m² (garbage) → 215k m².
+
+★★ USER RULING 2026-06-14: "complex buildings are often assembled from a
+variety of `term_building_*` components INCLUDING `term_bridge_*`, so just
+union it all together." → term_bridge is treated as ANOTHER building
+facade class, NOT a special connector.  (The SPJC investigation proved it:
+at SPJC's SOUTH concourse the `term_bridge_03` slabs ARE the floor — the
+only `term_building` there are tiny rooftop towers; at the NORTH terminal a
+`term_bridge_03` sits 100% inside `term_building_Levels_01`.  Both resolve
+correctly under plain union — touching pieces merge, a free-standing slab
+becomes its own pad.)
+
+WHAT WAS BUILT (task #1, gate `TERM_BRIDGE_GROUPING`, env
+`O4_TERM_BRIDGE_GROUPING`, **default ON**; OFF = bridges ignored =
+byte-identical to DSF_BUILDINGS-alone; no effect unless DSF_BUILDINGS ON):
+* `dsf_reader._building_role_for_def`: `term_bridge` (incl.
+  `term_bridge_joint_*`) → role `"bridge"`, matched before term_building so
+  the substring can't mis-route.
+* `pipeline`: when the gate is on, bridge facades go into the SAME
+  `dsf_building_polys` pool as terminal/hangar (skipped entirely when off →
+  byte-identical read).  No separate list, no connector arg.
+* `terminals._cluster_dsf_building_facades`: unchanged signature — just
+  unions everything the caller passes (the 0.25 m snap-union → components =
+  buildings).  Docstring notes term_bridge is one of the unioned classes.
+* New tests `tests/test_dsf_buildings.py` (6): role mapping, depth-5 local
+  ring + curved tessellation, bridge-merge / free-standing-slab-is-a-pad /
+  separate-buildings.
+
+★★ FOLLOW-UP TWEAK (user 2026-06-14, post-review): "terminal1/terminal2 at
+SPJC are oversimplified, dial the simplification back a bit."  Investigation:
+the building-pad DP simplify was hard-coded `MIN_VERTEX_SPACING_M = 2.0` and
+the more articulated DSF terminal pads lost genuine corners.  (★ terminal1/2
+turned out to be the SOUTH-concourse DSF `term_bridge_03` slabs — true
+4-corner rects with NO OSM building near them, so they stay ~5 verts at any
+tolerance; the user's "OSM data" hunch was off, but the simplify WAS over-
+coarsening the *other* terminal pads.)  Built new config
+`TERMINAL_SIMPLIFY_TOL_M` (default **1.0 m**, was effectively 2.0).  Effect
+at SPJC: terminal4/6 7→10, terminal7/9 9→11, terminal8 7→9 verts.  ★ Tested
+0.5 m — recovered a few more corners but OVER-CONSTRAINED the apron solve (4
+new within-shape apron grade violations up to 4.13 %); 1.0 m is the balance
+point (SPJC grade stays at the baseline 2 steps/1.00 m).
+
+RESULTS:
+* **HECA (user's target airport): CLEAN.** Bridges consolidate the
+  fragmented terminal towers (DSF buildings 38→22, seeds 46→30). Curved
+  terminals restored (task #2).  Grade lone-red shifted 2 steps/0.72 m →
+  1 cross-shape/0.50 m with the tol-1.0 detail (worst defect DECREASED).
+* ★ **SPJC grade IMPROVED 8→2 steps** (worst 1.67 m → 1.00 m), DETERMINISTIC
+  across PYTHONHASHSEED 0/1/2: the south concourse now grades as proper flat
+  concourse pads instead of fragmented tower clusters surrounded by stepping
+  apron.  `compare_target_spjc` verdict unchanged.
+* **Suite: 6 failed / 338 passed** = the SAME 6 standing-red set as the
+  20260614-01 baseline (no new red) + the 6 new dsf-building tests passing
+  (332→338). The depth-5 fix alone is suite-neutral (byte-identical grade
+  with bridges OFF).
+* Review patches rebuilt (tol 1.0): `/tmp/SPJC_20260614-02.osm`,
+  `/tmp/HECA_20260614-02.osm`.
+
+★★ FOLLOW-UP 2 (user 2026-06-15, three items):
+1. **ref rename `terminalXX` → `buildingXX`** (pipeline.py): the pad pool
+   now mixes terminals + hangars + DSF term_bridge slabs, so the emitted
+   `ref` is generic `building{N}` (ROLE was already ROLE_BUILDING).
+   compare_target matches by ROLE+IoU, not ref → rename is match-safe.
+2. **PYRAMID / "MISSING BUILDING" BUG FIXED** (terminals.py
+   `_extract_osm_terminals`).  ★ ROOT: an OSM multipolygon `aeroway=terminal`
+   RELATION encodes its boundary as a run of OPEN member ways (segments)
+   that must be STITCHED end-to-end into rings.  The old per-way
+   `_ring_polygon` treated each OPEN segment as its own closed ring →
+   sliver garbage; it then masked that by emitting the CONVEX HULL of the
+   slivers — a giant pyramid spanning the apron between concourses (SPJC
+   rel -2 hull 247,422 m² for a real 95,594 m² building; user "turning a T
+   into a big pyramid").  FIX = `polygonize(unary_union(open segments))`
+   reconstructs the true footprint (handles closed-way members too):
+   SPJC rel -1 → 56,007 m², rel -2 → 95,594 m² (single concave buildings,
+   fill_ratio 0.30/0.64).  building20 247k→94,932 m² (255 verts), building19
+   78k→55,872 m².  HECA unaffected.
+
+3. **FINGER-PIER OUTLINE CLOSE** (user 2026-06-15): the corrected terminal
+   footprints are sprawling finger-pier concourses (NOT a "T" — the convex
+   hull of finger piers just LOOKED like a triangle).  User wants the gate
+   STANDS between piers absorbed into one simple straight-sided pad, "keep
+   the straight sides, widen the fingers, no smoothed ripples."  Built
+   `_close_building_outline` (config `BUILDING_OUTLINE_CLOSE_M`, default
+   **55 m**): a MORPHOLOGICAL CLOSE (dilate→erode) with a **MITRE** join
+   (straight square edges, not round ripples — user call) widens each finger
+   until it meets its neighbour, swallowing the stands; a concavity WIDER
+   than ~2× the radius (a real reentrant L/U) is preserved → pad stays
+   concave, never convex.  Applied per-pad to ALL building sources in the
+   pipeline pad loop (★ user: HECA terminals have finger stands from DSF too,
+   so it is CONCAVITY-driven, NOT source-scoped).  Guard: reject the close if
+   it splits the pad (thin neck < 2×r) or shrinks it (raw kept).  No-op for a
+   convex footprint.  SPJC terminal20 95,594→144,298 m² (fill 0.45, 56 v);
+   HECA building17 82k→95k, building20 14k→20k.  Radii visually tuned with
+   the user (m40/m55/m70 widgets) — m55 chosen.
+
+★★ FOLLOW-UP 3 (user 2026-06-15, "fix DSF clustering first"): the HECA
+buildings were visibly wrong — a huge cut in building17, building20 keeping
+its stands, a pier west of building20 disappearing + leaving stand cutouts
+in apron #296/#300.  ROOT (diagnosed): `_cluster_dsf_building_facades`
+unions facade pieces with a 0.25 m snap-buffer that ROUNDS every corner →
+HECA's main terminal came out **1,280 verts + 2 spurious holes**, a
+gate-pier **1,669 verts fill 0.23**.  That arc-noise (a) split the outline
+close (MultiPolygon → rejected → stands kept), (b) over-resolved the
+overlap-clip (30 ops), and (c) the close grew building17 into the taxiway →
+overlap-clip carved it back = the cut.  FIX (`DSF_CLUSTER_SIMPLIFY_TOL_M`
+=0.5): reduce each cluster to a SOLID footprint (fill buffer-artifact holes)
++ DP-simplify away the arc noise → building17 1,280→122 v, pier 1,669→205 v,
+shapes unchanged.  ★ RESULT: HECA grade **7 steps → 1 cross-shape/0.50 m
+(baseline restored)** — building17 no longer over-closed/cut.  SPJC still
+3 steps (terminal20 absorbed).  Suite **6f / 341p** (same set).
+★★ FOLLOW-UP 4 (user 2026-06-15, "proceed with the remaining 2 issues"):
+both RESOLVED, and they turned out to be downstream of the cluster cleanup.
+* **building20 stands**: the pier's close is a MultiPolygon because it is
+  genuinely TWO pier groups joined by a thin spine.  `_close_building_outline`
+  now RETURNS A LIST — each significant closed piece (≥
+  `BUILDING_CLOSE_MIN_PIECE_M2`=2000) becomes its own pad (pipeline pad loop
+  iterates the list); a split that doesn't preserve the bulk is rejected
+  (raw kept).  ★ KEY: on the CLEAN (simplified) clusters the close no longer
+  cuts anything, so it runs on ALL pads — NO fill-gate, NO taxi-keepout
+  (user: stands never touch a taxiway centerline, so the keepout was a
+  no-op — removed), NO containment-drop (it was the SPJC regressor —
+  removed).  Result: HECA + SPJC have ZERO concave (fill<0.45) buildings —
+  every pier's stands absorbed; building17→building18 closes to 76,353 m²
+  fill 0.77, 28 v, NO cut, NO holes.
+* **pier ∩ building30 overlap**: still 19% at combine, but the OUTPUT has
+  ZERO building-building overlaps and ZERO apron interior holes — on the
+  clean low-vertex geometry, overlap-clip resolves it cleanly (no more
+  shredded pier, no stand cutouts in apron #296/#300).
+* GRADE: HECA 2 steps/0.72 m, SPJC 3 steps/1.03 m (both standing reds, low).
+  Suite **6f / 341p** (same set).  ★ TRAP: the close-mechanics churn this
+  round (fill-gate / keepout / containment-drop) all INTERACTED badly; the
+  clean answer was just cluster-simplify + close-all + split-pieces.
+
+★★ FOLLOW-UP 5 (user 2026-06-15, HECA terminal-complex shape — SPJC perfect):
+five asks, ALL diagnosed but NOT shipped (the fixes CONFLICT in one close —
+needs a dedicated building-topology pass).  State left at the "much better"
+split-pieces version.
+* **building17/18 are ONE building, split.** They are close-SPLIT pieces of
+  ONE cluster (the bezier-curved wing on a thin link; erode severs it).  FIX
+  THAT WORKS: on a MultiPolygon close, `unary_union([pad]+pieces)` re-connects
+  via the original spine → ONE pad (verified: b17+b18 → 106,493 m²).  ⚠ BUT
+  the same union-with-original re-adds the ORIGINAL concavity, so it makes the
+  finger-piers (building21 fill 0.68 / 22 fill 0.61) stay CONCAVE instead of
+  absorbing their stands → conflicts with asks #3/#4.  split-pieces absorbs
+  the piers but splits b17/b18.  ONE close can't do both — needs a
+  reconnect-vs-absorb discriminator (solid-wings+thin-link ⇒ reconnect;
+  finger-comb ⇒ absorb).
+* **building22 / building21 should be straight rects encompassing their
+  stands (like SPJC).**  Their close MultiPolygons; under split-pieces they
+  partly absorb, under union-with-original they stay concave.
+* **building21 + 22 + 32 are ONE complex (DSF bridges connect them).**  The
+  bridges DO connect — `unary_union(closed_pads + bridge_facades)` → ONE
+  75,824 m² polygon — but the CLUSTERING (raw facades, build frame) keeps
+  them as 3 clusters even at 10 m snap, because the bridges reach the CLOSED
+  pads (b21–b32 0.7 m via the 301 m² bridge; b22–b32 0 m) NOT the smaller raw
+  facades.  FIX DIRECTION: a POST-close bridge-merge — union the closed pads
+  with the term_bridge facades (≈2 m snap) → re-component → the complex
+  unites (verified → 74,474 m² component).  Needs term_bridge facades kept
+  SEPARATE (they are currently lumped into dsf_building_polys).  ⚠ even
+  merged, the complex's INTER-pier stands are >110 m wide so the 55 m close
+  can't fill them — the per-pier close must run BEFORE the merge.
+* ★ Recommended next-session shape: (1) keep term_bridge facades in a
+  separate list; (2) close each cluster; (3) post-close bridge-merge; (4)
+  the reconnect-vs-absorb discriminator for the close itself.
+
+OPEN / DECISIONS:
+* ⚠ **GRADE FOLLOW-UP (user ACCEPTED — "keep close, grade as follow-up")**:
+  absorbing the stands turns them into FLAT building pad, so the surrounding
+  apron must ramp to meet the enlarged pad.  SPJC grade IMPROVED 16→**3**
+  steps (the polygonized fingers were the source of the 16); HECA REGRESSED
+  1→**7** steps — 5 are building17↔apron #302 (~1.0–1.17 m) and apron #302
+  now grades 17% within-shape, because building17 sits in a tighter apron.
+  NEXT TASK = apron-follows-the-enlarged-pad grading (let the apron ramp
+  smoothly up to the big flat pads; the back-edge-ramp machinery from
+  20260614-01 is the place to start).  Suite still 6f/338p (both grade tests
+  were already red).
+* ⚠ **compare_target_spjc fixture STALE for buildings**: target
+  `terminal1`/`terminal2` ARE the old hull pyramids (77,558 / 245,673 m²,
+  fill_ratio 1.00); the corrected 56k/95k footprints sit INSIDE them so they
+  still IoU-match at floor 2 (`building matched=2` — PASSES) — but the target
+  should be re-cut to the real footprints when convenient.
+* Patches rebuilt: `/tmp/SPJC_20260614-02.osm`, `/tmp/HECA_20260614-02.osm`.
+* Task #3 (terminal11→J apron sharp dip ~30.1199,31.4097) — NOT started.
+* In-sim verdict pending (RESTART Ortho4XP; `O4_AUTO_PATCH_REBUILD=1`).
+* ★ OPS: `/tmp` DSF cache-name collision (basename only) under-reports
+  facades across airports — use a per-airport `cache_dir` in probes
+  (bit me on SPJC: read a stale empty `-13-078.dsf.text`). Production uses
+  cache_dir=None (alongside the DSF) so is unaffected.
+
+---
+
 # Auto-Patch Status — 20260614-01 = APRON BACK-EDGE RAMPS + TERMINAL-PAD FLATTENING (terminal9 flat)
 
 ## ★★ 20260614-01 (2026-06-14) — APRON BACK-EDGE RAMPS + TERMINAL FLATTENING ★★

@@ -16,6 +16,11 @@ __all__ = [
     "LOAD_DSF_PAVEMENT",
     "DSF_BUILDINGS",
     "DSF_BUILDING_OSM_OVERLAP_FRAC",
+    "DSF_CLUSTER_SIMPLIFY_TOL_M",
+    "BUILDING_OUTLINE_CLOSE_M",
+    "BUILDING_CLOSE_MIN_PIECE_M2",
+    "TERM_BRIDGE_GROUPING",
+    "TERMINAL_SIMPLIFY_TOL_M",
     "SLOPING_EDGE_SNAP_M",
     "EMIT_JUNCTIONS",
     "EMIT_APRONS",
@@ -245,6 +250,50 @@ LOAD_DSF_PAVEMENT = True
 # gap).  Lowering it makes the DSF more dominant; raising it keeps more
 # OSM buildings.
 DSF_BUILDING_OSM_OVERLAP_FRAC = 0.2
+
+# DSF facade-cluster cleanup (user 2026-06-15).  Clustering unions the DSF
+# facade pieces with a 0.25 m snap-buffer; that buffer ROUNDS every corner,
+# so a complex terminal comes out with hundreds-to-thousands of arc
+# vertices (HECA's main terminal: 1,280 verts + 2 spurious interior holes;
+# a gate-finger pier: 1,669) — noise that wrecks the downstream outline
+# close (it splits on the jagged spine) and the overlap-clip.  Each cluster
+# is reduced to a SOLID footprint (buffer-artifact holes filled — a grading
+# pad is solid) and DP-simplified at this tolerance to strip the arc noise
+# while keeping the real corners.  0.5 m → HECA terminal 1,280→139 verts.
+DSF_CLUSTER_SIMPLIFY_TOL_M = 0.5
+
+# Building-pad outline close (user 2026-06-15).  A multi-finger terminal
+# (a concourse with gate piers) has deep narrow notches between the piers
+# — the aircraft stands.  Grading the apron around every finger leaves a
+# noisy, step-prone boundary.  A morphological CLOSE (dilate then erode)
+# with this radius widens each finger until it meets its neighbours,
+# absorbing the stands between them into one simple solid pad, while a
+# concavity WIDER than ~2× this radius (the genuine reentrant shape of an
+# L / T / U building) is preserved — so the pad stays concave, never a
+# convex blob.  The close uses a MITRE join so the result keeps STRAIGHT
+# square edges (a round join leaves smoothed ripples — user call).
+# Applied per-pad, so it never merges two separate buildings.  0 disables.
+BUILDING_OUTLINE_CLOSE_M = 55.0
+
+# When the close of a finger pier SPLITS it into several blobs (two pier
+# groups joined by a thin spine the erode severs), each significant piece
+# ≥ this area is emitted as its OWN closed pad, rather than rejecting the
+# whole close and keeping the raw stands (HECA pier → 25.7k + 17.8k m²).
+BUILDING_CLOSE_MIN_PIECE_M2 = 2000.0
+
+# Douglas-Peucker tolerance for the building-pad simplification pass
+# (pipeline, applied to every OSM/DSF terminal+hangar footprint).  A
+# small tolerance removes only sub-pad noise — closely-spaced OSM
+# vertices and the arc facets left by the DSF facade-cluster snap-buffer
+# — that would otherwise spawn sliver triangles in the ear-clip, while
+# PRESERVING the real building corners.  Was 2.0 m (user 2026-06-14:
+# "dial that back a bit" — at 2 m the more articulated terminal pads
+# lost genuine corners, e.g. SPJC terminal4/6 10→7, terminal7/9 11→9).
+# 1.0 m recovers those corners; dropping to 0.5 m recovered a few more
+# but over-constrained the apron solve (4 new within-shape apron grade
+# violations at SPJC) — 1.0 m is the balance point.  The south-concourse
+# DSF slabs (true 4-corner rects) stay ~5 verts regardless.
+TERMINAL_SIMPLIFY_TOL_M = 1.0
 
 # Third-party DSF pavement descriptors (user 2026-06-10, KPHX south
 # aprons): a third-party ``.pol`` is trusted as BASE pavement when its
@@ -786,6 +835,17 @@ HANGAR_PADS = _os.environ.get("O4_HANGAR_PADS", "1") == "1"
 # documented block near LOAD_DSF_PAVEMENT above.  Read here because
 # ``import os as _os`` only comes into scope at this point in the file.
 DSF_BUILDINGS = _os.environ.get("O4_DSF_BUILDINGS", "1") == "1"
+
+# (20260614-02) TERM-BRIDGE GROUPING (user 2026-06-14): X-Plane's
+# Terminal_kit ships ``term_bridge_*.fac`` connector facades (enclosed
+# skybridges / link spans) that physically join two ``term_building_*``
+# facades.  When ON, these bridge footprints are fed into the DSF
+# building clustering as CONNECTORS so a building + bridge + building
+# run unions into ONE pad and grades as a single flat group (the
+# bridged concourses sit at a common level).  OFF = bridges ignored
+# (the prior behaviour, byte-identical to DSF_BUILDINGS alone).  Has
+# no effect unless DSF_BUILDINGS is also ON.
+TERM_BRIDGE_GROUPING = _os.environ.get("O4_TERM_BRIDGE_GROUPING", "1") == "1"
 
 # (s79) INTERIOR-PATH ENTRIES — docs/interior_path_entries.md.
 # ★ USER RULING 2026-06-11: no shape may ever check grade ACROSS GRASS.
