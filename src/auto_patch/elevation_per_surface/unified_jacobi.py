@@ -1275,6 +1275,24 @@ def _grade_bands(n, elev, is_hard, edges):
 _WITHIN_ENFORCE_MAX_SWEEPS = 2000
 
 
+def _rw_route_graph_for_field(layout):
+    """The centerline route graph for the field's RUNWAY route bands (gate
+    ``FIELD_RUNWAY_ROUTE_BANDS``); ``None`` when the gate is off so
+    ``build_and_solve`` keeps the pure field-graph band (byte-identical).
+    Uses the PLAIN shared graph — the enforce's ``_runway_reach_bands``
+    default — so a runway CONTACT is reached along the real taxiway route,
+    not by taxiing along the runway centerline (the augmented graph offers
+    that shortcut and only loosens ~1/3 as much); field/validator parity."""
+    from ..config import FIELD_RUNWAY_ROUTE_BANDS
+    if not FIELD_RUNWAY_ROUTE_BANDS or layout is None:
+        return None
+    try:
+        from ..taxi_routing import shared_taxi_route_graph
+        return shared_taxi_route_graph(layout)
+    except Exception:                                  # pragma: no cover
+        return None
+
+
 def _interior_entry_dist(layout):
     """The shared INTERIOR-PATH entry measure (gate
     ``INTERIOR_PATH_ENTRIES``, docs/interior_path_entries.md): returns
@@ -5038,7 +5056,8 @@ def _network_field_stations(layout, elev, bucket_to_idx, chain_data,
                         if TERMINAL_NATURAL_LEVELS else ()),
             chord_grade=TERMINAL_CHORD_MAX_GRADE,
             chord_law_grade=_role_grade(ROLE_APRON),
-            chord_reach=TERMINAL_CHORD_REACH_M)
+            chord_reach=TERMINAL_CHORD_REACH_M,
+            rw_route_graph=_rw_route_graph_for_field(layout))
     except _GEOM_EXC:
         F = None
     layout._network_profile_field = F

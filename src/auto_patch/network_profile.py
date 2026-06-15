@@ -271,6 +271,100 @@ def _seg_intersection(P0, P1, Q0, Q1):
     return None
 
 
+# ── RUNWAY route bands (gate FIELD_RUNWAY_ROUTE_BANDS) ─────────────────
+# Measure each field node's runway-anchor feasibility along the centerline
+# TAXI ROUTE rather than the field graph (which shortcuts straight across
+# apron/junction interiors via chord + proximity edges).  See the config
+# note; mirrors unified_jacobi._runway_reach_bands.
+def _rw_route_cells(graph, cell: float = 100.0):
+    """Spatial grid of the route graph's node keys for nearest lookup:
+    ``({(gx, gy): [key, ...]}, cell, aug_keys)``."""
+    cells: Dict[Tuple[int, int], List] = {}
+    for k, (x, y) in graph.coord.items():
+        cells.setdefault((int(x // cell), int(y // cell)), []).append(k)
+    return cells, cell, getattr(graph, "aug", set())
+
+
+def _nearest_route_key(cells_t, coord, x, y, plain_only):
+    """Nearest route-graph node key to ``(x, y)`` → ``(key, gap_m)``.
+    ``plain_only`` excludes augmented runway-midline nodes (pavement-vertex
+    queries route to plain taxi rows; the enforce does the same)."""
+    cells, cell, aug = cells_t
+    cx, cy = int(x // cell), int(y // cell)
+    best = None
+    for r in range(0, 9):
+        for gx in range(cx - r, cx + r + 1):
+            for gy in range(cy - r, cy + r + 1):
+                if max(abs(gx - cx), abs(gy - cy)) != r:
+                    continue
+                for k in cells.get((gx, gy), ()):
+                    if plain_only and k in aug:
+                        continue
+                    kx, ky = coord[k]
+                    d = math.hypot(kx - x, ky - y)
+                    if best is None or d < best[1]:
+                        best = (k, d)
+        if best is not None and best[1] <= r * cell:
+            break
+    return (best[0], best[1]) if best else (None, 0.0)
+
+
+def _runway_route_band(srcs, comp, eff, graph, cells_t, F, n):
+    """Per-field-node runway band measured along the centerline route.
+    Returns ``(up_r, dn_r)`` (length ``n``), ``inf`` where the route graph
+    cannot reach the node from any anchor in ``srcs`` (caller falls back to
+    the field-graph band there, so a node is only ever LOOSENED)."""
+    INF = float("inf")
+    coord, adj = graph.coord, graph.adj
+    up_d: Dict = {}
+    dn_d: Dict = {}
+    pq_up: List = []
+    pq_dn: List = []
+    for s in srcs:                       # anchors enter at their nearest key
+        x, y = F.nodes[s]
+        key, gap = _nearest_route_key(cells_t, coord, x, y, plain_only=False)
+        if key is None:
+            continue
+        bu = F.elev[s] + eff * gap
+        bd = -F.elev[s] + eff * gap
+        if bu < up_d.get(key, INF):
+            up_d[key] = bu
+            heapq.heappush(pq_up, (bu, key))
+        if bd < dn_d.get(key, INF):
+            dn_d[key] = bd
+            heapq.heappush(pq_dn, (bd, key))
+
+    def _dijkstra(dist, pq):
+        while pq:
+            d, u = heapq.heappop(pq)
+            if d > dist.get(u, INF):
+                continue
+            for (v, w) in adj.get(u, ()):
+                nd = d + eff * w
+                if nd < dist.get(v, INF):
+                    dist[v] = nd
+                    heapq.heappush(pq, (nd, v))
+
+    _dijkstra(up_d, pq_up)
+    _dijkstra(dn_d, pq_dn)
+    up_r = [INF] * n
+    dn_r = [INF] * n
+    for i in range(n):
+        if F.comp_of[i] != comp or F.hard[i]:
+            continue
+        x, y = F.nodes[i]
+        key, gap = _nearest_route_key(cells_t, coord, x, y, plain_only=True)
+        if key is None:
+            continue
+        du = up_d.get(key, INF)
+        dd = dn_d.get(key, INF)
+        if du < INF:
+            up_r[i] = du + eff * gap
+        if dd < INF:
+            dn_r[i] = dd + eff * gap
+    return up_r, dn_r
+
+
 def build_and_solve(
         segments_xy: Sequence[Tuple[Tuple[float, float],
                                     Tuple[float, float]]],
@@ -301,6 +395,7 @@ def build_and_solve(
         chord_grade: float = 0.0,
         chord_law_grade: float = 0.0,
         chord_reach: float = 0.0,
+        rw_route_graph=None,
 ) -> Optional[NetworkProfileField]:
     """Build the centerline graph and solve the field.
 
@@ -991,27 +1086,57 @@ def build_and_solve(
                 if gap9 is None:
                     continue
             extra_entry.append((best[1], gap9, float(va)))
+    # RUNWAY-anchor reachability along the centerline TAXI ROUTE (gate
+    # FIELD_RUNWAY_ROUTE_BANDS): the field graph shortcuts straight across
+    # apron/junction interiors, floors aprons ~1-3 m too high.  Split the
+    # band into the RUNWAY part (srcs — route-measured when gated) and the
+    # SEAM/threshold part (point_seeds — field-graph entry, unchanged).
+    # min over the two source groups == one combined Dijkstra (shortest
+    # paths are unaffected by grouping), so gate-off is byte-identical.
+    try:
+        from auto_patch.config import FIELD_RUNWAY_ROUTE_BANDS as _FRRB
+    except Exception:                                  # pragma: no cover
+        _FRRB = False
+    _use_route = bool(_FRRB) and rw_route_graph is not None \
+        and getattr(rw_route_graph, "coord", None)
+    _rw_cells = _rw_route_cells(rw_route_graph) if _use_route else None
+
     band_comps = set(anchors_by_comp)
     band_comps.update(F.comp_of[i] for (i, _g, _v) in extra_entry)
     if band_comps:
+        neg = [-F.elev[s] for s in range(n)]
         # effective cap varies per component → run per component
         for comp in sorted(band_comps):
             eff = cap * F.relax.get(comp, 1.0) + 1e-9
             srcs = anchors_by_comp.get(comp, [])
             up_seeds = [(i, v + eff * g) for (i, g, v) in extra_entry]
             dn_seeds = [(i, -v + eff * g) for (i, g, v) in extra_entry]
-            up = _dijkstra_from(srcs, eff, comp=comp, values=F.elev,
-                                point_seeds=up_seeds)
-            neg = [-F.elev[s] for s in range(n)]
-            dn = _dijkstra_from(srcs, eff, comp=comp, values=neg,
-                                point_seeds=dn_seeds)
+            # SEAM/threshold pins — field-graph entry (point_seeds only)
+            up_s = _dijkstra_from([], eff, comp=comp, values=F.elev,
+                                  point_seeds=up_seeds)
+            dn_s = _dijkstra_from([], eff, comp=comp, values=neg,
+                                  point_seeds=dn_seeds)
+            # RUNWAY contacts — field graph, with TAXI-ROUTE override where
+            # the route graph reaches the node (else field-graph fallback,
+            # so a node is only ever loosened, never left unconstrained).
+            up_r = _dijkstra_from(srcs, eff, comp=comp, values=F.elev)
+            dn_r = _dijkstra_from(srcs, eff, comp=comp, values=neg)
+            if _use_route and srcs:
+                up_t, dn_t = _runway_route_band(
+                    srcs, comp, eff, rw_route_graph, _rw_cells, F, n)
+                up_r = [up_t[i] if up_t[i] < INF else up_r[i]
+                        for i in range(n)]
+                dn_r = [dn_t[i] if dn_t[i] < INF else dn_r[i]
+                        for i in range(n)]
             for i in range(n):
                 if F.comp_of[i] != comp:
                     continue
-                if up[i] < INF:
-                    F.band_hi[i] = up[i] + 0.02
-                if dn[i] < INF:
-                    F.band_lo[i] = -dn[i] - 0.02
+                up_i = min(up_s[i], up_r[i])
+                dn_i = min(dn_s[i], dn_r[i])
+                if up_i < INF:
+                    F.band_hi[i] = up_i + 0.02
+                if dn_i < INF:
+                    F.band_lo[i] = -dn_i - 0.02
                 if F.band_lo[i] > F.band_hi[i]:      # least-violation
                     mid = 0.5 * (F.band_lo[i] + F.band_hi[i])
                     F.band_lo[i] = F.band_hi[i] = mid

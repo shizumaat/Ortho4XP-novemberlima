@@ -42,6 +42,7 @@ __all__ = [
     "TAXIWAY_MAX_GRADE_CHANGE_PER_M",
     "CORRIDOR_PROFILE_DAMPING",
     "CORRIDOR_DAMP_ALPHA",
+    "FIELD_RUNWAY_ROUTE_BANDS",
     "SERVICE_ROAD_MAX_GRADE",
     "SERVICE_ROAD_WIDTH_M",
     "MIN_SERVICE_STRIP_LEN_M",
@@ -776,6 +777,19 @@ TERMINAL_NATURAL_LEVELS = _os.environ.get("O4_TERMINAL_NATURAL", "1") == "1"
 HANGAR_PADS = _os.environ.get("O4_HANGAR_PADS", "1") == "1"
 # Corridor-profile Laplacian damping (see CORRIDOR_DAMP_ALPHA above).
 CORRIDOR_PROFILE_DAMPING = _os.environ.get("O4_CORRIDOR_DAMP", "0") == "1"
+# Field RUNWAY-anchor route bands (user 2026-06-14): measure the
+# network-profile field's runway-anchor feasibility band along the
+# centerline TAXI ROUTE (taxi_routing) instead of the field graph.  The
+# field graph carries chord + proximity coupling edges that shortcut
+# STRAIGHT across apron/junction interiors, so a runway contact reachable
+# in 146 m of pavement-geodesic is really ~350 m along the taxiway an
+# aircraft (and the graded surface) follows — the field floors the apron
+# ~1-3 m too high, lifting it off the terrain (the bump the user reports).
+# Mirrors the enforce's _runway_reach_bands (already route-measured); the
+# field was the one out of step.  Seam/threshold pins keep the field-graph
+# entry.  Default ON (user 2026-06-14); O4_FIELD_RW_ROUTE=0 restores the
+# pure field-graph band (byte-identical).
+FIELD_RUNWAY_ROUTE_BANDS = _os.environ.get("O4_FIELD_RW_ROUTE", "1") == "1"
 
 # DSF terminal/hangar building footprints (user 2026-06-12) — see the
 # documented block near LOAD_DSF_PAVEMENT above.  Read here because
