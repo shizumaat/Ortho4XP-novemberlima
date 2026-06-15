@@ -1649,7 +1649,32 @@ def _split_centerlines_at_points(
                 still needs room for its polygon)."""
                 if narrow_hw <= 0:
                     return base
-                target_hw = narrow_hw * CORRIDOR_WIDTH_FACTOR
+                # Corridor-BODY half-width reference (user 2026-06-13,
+                # HECA G): ``narrow_hw`` is the p10 over the WHOLE ref,
+                # so where this ref runs shoulder-less elsewhere it is
+                # far below the local corridor width.  A uniformly WIDE
+                # run here (taxiway + apt.dat/DSF shoulder pavement)
+                # then never narrows to ``narrow_hw × 1.3``, so the
+                # walk treats the entire wide run as a junction approach
+                # and trims hundreds of metres of real taxiway into
+                # apron (G: 375 m end-trim dropped the gap_param-880
+                # corridor into apron #253, the 19.9 % wall).  Reference
+                # the LOCAL body width (median of interior probes) so
+                # only a widening PAST the corridor's own body counts as
+                # a junction; a genuine wide junction at the end (J1,
+                # ~240 m) is still wider than the body and trims to where
+                # it narrows back to the corridor.
+                body_probes = []
+                for _fr in (0.35, 0.5, 0.65):
+                    try:
+                        _bh = _avg_perp_halfwidth(ls, p0 + gap * _fr)
+                    except _GEOM_EXC:
+                        _bh = 0.0
+                    if _bh > 0:
+                        body_probes.append(_bh)
+                body_hw = (sorted(body_probes)[len(body_probes) // 2]
+                           if body_probes else narrow_hw)
+                target_hw = max(narrow_hw, body_hw) * CORRIDOR_WIDTH_FACTOR
                 STEP = 5.0
                 MAX = max(base, gap / 2.0)
                 u = base
