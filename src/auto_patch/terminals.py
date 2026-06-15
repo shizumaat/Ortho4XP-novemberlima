@@ -25,7 +25,8 @@ from shapely.ops import polygonize, unary_union
 
 from .config import (
     BUILDING_CLOSE_MIN_PIECE_M2,
-    BUILDING_OUTLINE_CLOSE_M,
+    BUILDING_OUTLINE_FILL_R,
+    BUILDING_OUTLINE_FILL_GATE_M,
     DSF_CLUSTER_SIMPLIFY_TOL_M,
     HANGAR_PADS,
 )
@@ -695,42 +696,62 @@ def _extract_osm_terminals(
 
 
 def _close_building_outline(pad: Polygon) -> List[Polygon]:
-    """Absorb the gate stands of a finger-pier terminal into simple pad(s)
-    (user 2026-06-15).  Returns a LIST — usually ``[pad]``, but a pier that
-    the close splits comes back as one pad per piece.
+    """Absorb the gate-stand teeth of a finger-pier terminal into a clean
+    straight-sided pad (user 2026-06-15) by filling only the NARROW gaps.
 
-    A concourse with gate piers has deep narrow notches between the piers
-    — the aircraft stands.  A morphological CLOSE (dilate then erode)
-    fills each notch, swallowing the stands; a concavity WIDER than ~2× the
-    radius (the genuine reentrant shape of an L / U building) is preserved,
-    so the pad stays concave, never a convex blob.  A MITRE join keeps
-    STRAIGHT square edges (a round join leaves smoothed ripples — user
-    call).  No-op for a simple convex footprint.  Closing is safe on a
-    CLEAN cluster — it was the 1000s-of-vertex arc noise (now stripped by
-    DSF_CLUSTER_SIMPLIFY_TOL_M) that made the close grow ragged and got
-    overlap-clip-carved into a cut at HECA building17.
+    Gate stands are small fingers extending perpendicular off a pier; the
+    gaps between them give a terminal a noisy sawtooth boundary.  We fill
+    those narrow gaps out to the tooth tips (flat edges) while leaving
+    genuine open spaces untouched::
 
-    The close can SPLIT a pier into several blobs (two pier groups joined
-    by a thin spine the erode severs — HECA's south pier → 25.7k + 17.8k
-    m²).  Each significant component (≥ ``BUILDING_CLOSE_MIN_PIECE_M2``) is
-    returned as its own closed pad, provided they preserve the bulk of the
-    building (else the close is rejected, raw kept).  Applies to ALL
-    building sources — OSM and DSF terminals alike carry finger piers.
+        closed = pad.close(R)      # dilate→erode: bridges EVERY gap up to 2R
+        fill   = closed − pad      # all the area the close added
+        wide   = fill.open(GATE)   # the WIDE fills — open courtyards/centres
+        result = closed − wide     # keep only the narrow teeth-gaps filled
+
+    ``R`` (``BUILDING_OUTLINE_FILL_R``) is how far the fill reaches to
+    bridge a teeth gap; a gap WIDER than ``2×GATE``
+    (``BUILDING_OUTLINE_FILL_GATE_M``) is reopened as a genuine open space
+    (a U courtyard, the space between two piers, the open centre of a
+    finger comb).  Because the wide fill is SUBTRACTED from the connected
+    closed shape (rather than narrow fills being added back as fragments),
+    the pad stays in ONE piece — no floating rinds, no severed spines.
+    This supersedes the old plain morphological close, which could only
+    bridge gaps ≤ ``2×r`` and so left HECA's sparse, wide-gapped stands as
+    a sawtooth (or severed the pier spine when the radius was raised).
+
+    Robust across topologies (U-terminals, blob+pier, bars, long
+    buildings) with no limb decomposition; a MITRE join keeps STRAIGHT
+    square edges.  No-op for a simple convex/solid footprint.  Applies to
+    ALL building sources — OSM and DSF terminals alike.  Returns a LIST for
+    API compatibility: a single connected piece in the normal case, but if
+    the wide subtraction ever pinches the pad apart, each piece ≥
+    ``BUILDING_CLOSE_MIN_PIECE_M2`` is returned.
     """
-    r = BUILDING_OUTLINE_CLOSE_M
-    if r <= 0 or pad is None or pad.is_empty:
+    R = BUILDING_OUTLINE_FILL_R
+    G = BUILDING_OUTLINE_FILL_GATE_M
+    if R <= 0 or pad is None or pad.is_empty:
         return [pad]
     try:
-        c = pad.buffer(
-            r, join_style=_MITRE_JOIN, mitre_limit=8.0).buffer(
-            -r, join_style=_MITRE_JOIN, mitre_limit=8.0)
+        closed = pad.buffer(
+            R, join_style=_MITRE_JOIN, mitre_limit=8.0).buffer(
+            -R, join_style=_MITRE_JOIN, mitre_limit=8.0)
+        fill = closed.difference(pad)
+        if not fill.is_empty and G > 0:
+            wide = fill.buffer(
+                -G, join_style=_MITRE_JOIN).buffer(
+                G, join_style=_MITRE_JOIN)
+            if not wide.is_empty:
+                closed = closed.difference(wide)
     except _GEOM_EXC:
         return [pad]
-    if (c.geom_type == "Polygon" and not c.is_empty
-            and c.area >= pad.area):
-        return [c]
-    if c.geom_type == "MultiPolygon":
-        pieces = [g for g in c.geoms
+    # The result always ⊇ pad (we only ever ADD narrow fill); guard anyway.
+    if closed.is_empty or closed.area < pad.area - 1.0:
+        return [pad]
+    if closed.geom_type == "Polygon":
+        return [closed]
+    if closed.geom_type == "MultiPolygon":
+        pieces = [g for g in closed.geoms
                   if g.geom_type == "Polygon" and not g.is_empty
                   and g.area >= BUILDING_CLOSE_MIN_PIECE_M2]
         if pieces and sum(g.area for g in pieces) >= 0.9 * pad.area:

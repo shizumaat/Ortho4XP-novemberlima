@@ -17,7 +17,8 @@ __all__ = [
     "DSF_BUILDINGS",
     "DSF_BUILDING_OSM_OVERLAP_FRAC",
     "DSF_CLUSTER_SIMPLIFY_TOL_M",
-    "BUILDING_OUTLINE_CLOSE_M",
+    "BUILDING_OUTLINE_FILL_R",
+    "BUILDING_OUTLINE_FILL_GATE_M",
     "BUILDING_CLOSE_MIN_PIECE_M2",
     "TERM_BRIDGE_GROUPING",
     "TERMINAL_SIMPLIFY_TOL_M",
@@ -265,23 +266,31 @@ DSF_BUILDING_OSM_OVERLAP_FRAC = 0.2
 # while keeping the real corners.  0.5 m → HECA terminal 1,280→139 verts.
 DSF_CLUSTER_SIMPLIFY_TOL_M = 0.5
 
-# Building-pad outline close (user 2026-06-15).  A multi-finger terminal
-# (a concourse with gate piers) has deep narrow notches between the piers
-# — the aircraft stands.  Grading the apron around every finger leaves a
-# noisy, step-prone boundary.  A morphological CLOSE (dilate then erode)
-# with this radius widens each finger until it meets its neighbours,
-# absorbing the stands between them into one simple solid pad, while a
-# concavity WIDER than ~2× this radius (the genuine reentrant shape of an
-# L / T / U building) is preserved — so the pad stays concave, never a
-# convex blob.  The close uses a MITRE join so the result keeps STRAIGHT
-# square edges (a round join leaves smoothed ripples — user call).
-# Applied per-pad, so it never merges two separate buildings.  0 disables.
-BUILDING_OUTLINE_CLOSE_M = 55.0
+# Building-pad outline NARROW-GAP FILL (user 2026-06-15).  Gate stands are
+# small fingers extending perpendicular off a pier; the gaps between them
+# give a terminal a noisy sawtooth boundary that the apron then has to
+# step around.  We fill only those NARROW gaps and leave genuine open
+# spaces (a U courtyard, the space between two piers, the open centre of a
+# finger comb) untouched:
+#     closed = pad.close(R)      # dilate→erode: bridges EVERY gap up to 2R
+#     fill   = closed − pad      # all the area the close added
+#     wide   = fill.open(GATE)   # the WIDE fills — open courtyards / centres
+#     result = closed − wide     # keep only the narrow teeth-gaps filled
+# R (FILL_R) sets how far the fill reaches to bridge a teeth gap; a gap
+# WIDER than 2×GATE (FILL_GATE_M) is reopened as a genuine open space.
+# Subtracting the wide fill from the connected closed shape keeps the pad
+# in ONE piece (no floating rinds, no severed spines) — which is why this
+# replaces the old plain morphological close that left HECA's sparse,
+# wide-gapped stands as a sawtooth.  Applied per-pad, so it never merges
+# two separate buildings.  MITRE join → straight square edges.  Robust
+# across topologies (U-terminals, blob+pier, bars, long buildings) without
+# any limb decomposition.  FILL_R = 0 disables (raw pad kept).
+BUILDING_OUTLINE_FILL_R = 110.0
+BUILDING_OUTLINE_FILL_GATE_M = 55.0
 
-# When the close of a finger pier SPLITS it into several blobs (two pier
-# groups joined by a thin spine the erode severs), each significant piece
-# ≥ this area is emitted as its OWN closed pad, rather than rejecting the
-# whole close and keeping the raw stands (HECA pier → 25.7k + 17.8k m²).
+# If the wide-fill subtraction ever pinches the pad into separate blobs,
+# each significant piece ≥ this area is emitted as its own pad (the normal
+# result is a single connected piece).
 BUILDING_CLOSE_MIN_PIECE_M2 = 2000.0
 
 # Douglas-Peucker tolerance for the building-pad simplification pass

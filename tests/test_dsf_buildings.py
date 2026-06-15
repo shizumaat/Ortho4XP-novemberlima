@@ -145,29 +145,28 @@ def test_cluster_separate_buildings_unchanged():
 from shapely.ops import unary_union as _uunion
 
 from auto_patch.terminals import _close_building_outline
-from auto_patch.config import BUILDING_OUTLINE_CLOSE_M as _R
+from auto_patch.config import BUILDING_OUTLINE_FILL_GATE_M as _GATE
 
 
 def _fill_ratio(p):
     return p.area / p.convex_hull.area
 
 
-def _comb(gap, depth=240):
-    # Spine + four deep fingers separated by ``gap`` m — a stylised
-    # finger-pier terminal with a low (deeply-concave) fill-ratio.  Fingers
-    # are 30 m wide.
-    spine = _sq(0, 0, 3 * gap + 4 * 30, 20)
+def _comb(gap, depth=240, n=4, tooth=30):
+    # Spine + ``n`` deep fingers separated by ``gap`` m — a stylised
+    # finger-pier terminal with a low (deeply-concave) fill-ratio.
+    spine = _sq(0, 0, (n - 1) * gap + n * tooth, 20)
     parts = [spine]
     x = 0
-    for _ in range(4):
-        parts.append(_sq(x, 20, 30, depth))
-        x += 30 + gap
+    for _ in range(n):
+        parts.append(_sq(x, 20, tooth, depth))
+        x += tooth + gap
     return _uunion(parts)
 
 
 def test_close_absorbs_narrow_stands():
-    # A deep comb (gaps 80 m < 2× the close radius) is closed: the stands
-    # fill in → one simpler, more solid pad.
+    # A deep comb (gaps 80 m < 2×GATE) is narrow-filled: the stands fill in
+    # out to the tooth tips → one simpler, more solid pad.
     comb = _comb(80)
     out = _close_building_outline(comb)
     assert len(out) == 1
@@ -183,10 +182,35 @@ def test_close_noop_on_convex():
 
 
 def test_close_preserves_wide_concavity():
-    # A wide U (opening WIDER than 2× the radius) keeps its concavity — the
-    # close fills only the narrow stands, never the genuine reentrant shape.
-    wide = 3 * _R + 60
+    # A wide U (opening WIDER than 2×GATE) keeps its concavity — narrow-fill
+    # bridges only the narrow stands, never the genuine reentrant shape.
+    wide = 4 * _GATE + 60                 # > 2×GATE
     u = _sq(0, 0, wide + 100, 300).difference(_sq(50, 90, wide, 300))
     out = _close_building_outline(u)
     assert len(out) == 1
     assert _fill_ratio(out[0]) < 0.95
+
+
+def test_close_fills_teeth_but_not_wide_centre():
+    # The HECA case: a finger comb whose tooth gaps are NARROW (absorbed)
+    # but whose open centre is WIDE (preserved).  Two outer-toothed piers
+    # joined by a spine, with a wide gap between them.  Narrow-fill must
+    # grow the area (teeth absorbed) yet stay well below the convex hull
+    # (the wide centre is NOT bridged).
+    centre_gap = 6 * _GATE                # >> 2×GATE → stays open
+    pier_w, pier_h, tooth = 30.0, 240.0, 25.0
+    left = _comb(40, depth=pier_h, n=1, tooth=pier_w)   # toothless pier core
+    # left pier with outer teeth
+    parts = [_sq(0, 0, pier_w, pier_h)]
+    for k in range(4):
+        parts.append(_sq(-tooth, 10 + k * 60, tooth, 25))   # teeth to the left
+    rx = pier_w + centre_gap
+    parts.append(_sq(rx, 0, pier_w, pier_h))
+    for k in range(4):
+        parts.append(_sq(rx + pier_w, 10 + k * 60, tooth, 25))  # teeth right
+    parts.append(_sq(0, pier_h, rx + pier_w, 20))           # top spine
+    comb = _uunion(parts)
+    out = _close_building_outline(comb)
+    merged = _uunion(out)
+    assert merged.area > comb.area                  # teeth absorbed
+    assert merged.area < 0.85 * comb.convex_hull.area   # centre NOT filled
