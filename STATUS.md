@@ -1,3 +1,148 @@
+# Auto-Patch Status — 2026-06-14: HECA corridor/junction SMOOTHING investigation + within-shape WARN reconcile
+
+> Newest session on top. Older session-82 handover follows below.
+> Branch `dev`, HEAD `4f1a99b`. Memory file
+> `heca_g_j1_apron_swallow.md` has the blow-by-blow + every probe path.
+
+### ▸ 2026-06-14 (continued) — TREE CLEANUP (user: "clean up the tree first")
+The handover below was one step stale. Reconciled + cleaned the tree:
+- **`b681e71 20260614-02`** = the `centerlines.py` corridor fix the
+  handover called "ready to commit" — ALREADY COMMITTED (G coverage
+  77→92 %, #253 wall gone). NEXT-step #1 is DONE.
+- **`4f1a99b 20260614-03`** = corridor Laplacian DAMPING committed as
+  gated scaffolding (gate `O4_CORRIDOR_DAMP` default OFF, byte-identical
+  off; no-op at HECA, kept for long-corridor airports).
+- **CARVE** (`junction_repair.py` +217, all 3 geometries non-functional)
+  REVERTED — saved to `/tmp/probes/s_carve_parked.patch` (re-apply with
+  `git apply`; verified clean). The user's wanted perpendicular WAIST cut
+  was never built; rebuild fresh if pursued.
+- STILL OPEN (unchanged): **thread C — route-band accuracy** (the 146 m
+  05C→#337 path the user disputes; re-trace with `heca_path2.py` MAX) and
+  the over-steepness slack fix. The `docs/junction_smoothing_plan.md`
+  taxiway-shoulder absorption pass remains a candidate (not built).
+
+## ★★ SESSION 2026-06-14 — HECA smoothing (1 commit; corridor-fix ready to commit; carve + damping parked; band investigation OPEN) ★★
+
+The whole session chased one user goal: **HECA taxiways/junctions are
+bumpier than the terrain requires — make the centerline grading
+smooth.** We fixed one real bug (committed), found+fixed the corridor
+gap (ready to commit), and PARKED two approaches that didn't pan out.
+The live thread at session end is the **route-band accuracy** (below).
+
+### COMMITTED — `02bf8bf` within-shape WARN per-axis exemption
+`elevation._report_within_shape_violations` over-reported (HECA **247**
+vs the gate's **94**): it graded every visible pair at the flat role
+cap with NO per-axis junction/apron exemption. FIX = import
+check_grade's OWN `_per_axis_allowance` + build taxi axes in METRES
+(mirror `verification.taxi_axes_ll`; A/B caps from `apt_taxi_letters`).
+Junction cross-axis diagonal (allowance `None`) → skip; apron body →
+all-pair cap. Now HECA 247→91, CYXY 21→2. Residual ~3 = source(meter,
+`layout.shapes`)-vs-emit(lat-lon OSM, densified, seam-anchor-skip);
+EXACT match needs `run_grade_checks` = MEASURED **25 s/airport**, too
+slow for a per-build diagnostic. NB `verify_and_log` is NOT called in
+the build — this fn is the only WARN.
+
+### UNCOMMITTED (4 files) — what each is + state
+1. **`pavement/centerlines.py` (+27) — CORRIDOR FIX (taxiway G builds): ★ READY TO COMMIT.**
+   ROOT of the original #253 bump: `_split_centerlines_at_points._bend_margin_at`
+   trimmed **375 m** off G's centerline because its narrowing target was the
+   GLOBAL p10 `narrow_hw`; G's uniform ~36 m half-width (taxiway + shoulders)
+   never narrows to `1.3×narrow_hw`, so it walked 375 m into apron #253 — the
+   19.9 %/4.8 m wall. FIX: `target_hw = max(narrow_hw, BODY_hw)×1.3`, body_hw =
+   median of interior `_avg_perp_halfwidth` probes. RESULT: G coverage 77→92 %,
+   #253 wall GONE; A/B = NO new test failures (SPLP/SPJC×2/HECA pre-existing red
+   both ways, CYXY green both). SIDE EFFECT: 2 smaller terminal-pad steps
+   (terminal6 1.4 m, terminal43 2.9 m) from apron-follows reshaping — net win.
+   → **commit this as its own clean change.**
+2. **`junction_repair.py` (+217) — CARVE (gate `O4_CARVE_CL_JUNCTIONS`, default OFF): PARKED.**
+   Carve named taxiway/junction (G3 ≈ 81 m, too wide+irregular for a rect) out of
+   the wide apron so it grades as a junction. Tried 3 geoms — round buffer
+   (curving cutout + round end caps, 67 nodes), flat buffer (spike defect),
+   `neck_cuts`+`_cut_at_mouth` (trims thin ARMS, leaves G3 in the 353 k body).
+   ALL bad. User wants a **perpendicular WAIST cut across the corridor at the
+   apron mouth** (walk centerline, classify corridor[both half-widths ≤cap]-vs-
+   open, cut perpendicular `_cut_at_mouth` at the transition) — NOT BUILT.
+   Grading is fine without it (G3-as-apron grades per-axis). Gated off.
+   ⚠ in-sim cutouts persist via CACHED `{ICAO}_auto.patch.osm` — need
+   `O4_AUTO_PATCH_REBUILD=1` (or delete the patch) + RESTART Ortho4XP.
+3. **`network_profile.py` (+46) + `config.py` (+20) — CORRIDOR DAMPING (gate `O4_CORRIDOR_DAMP`, default OFF; `CORRIDOR_DAMP_ALPHA`): PARKED, no-op at HECA.**
+   Laplacian (harmonic) damping in the corridor Gauss-Seidel: degree-2
+   (mid-corridor 1-D only) nodes diffuse toward neighbour inverse-dist mean,
+   clamped to band, FIRST in the sweep so the cap projection is the last word.
+   MEASURED no help at HECA — corridors are short/meshed (no long interior to
+   smooth); the bumpiness is at JUNCTION SEAMS, not corridor interiors. Graph-
+   Laplacian made it WORSE (junction nodes pull to multi-mean → severe walls
+   16→24). Kept gated-off for long-corridor airports.
+
+### KEY FINDINGS (the meat for the next agent)
+**A. Junction-edge kinks = CORRIDOR SEAMS, not junction bugs.** Traced
+#345/#361/#236: each kink = a junction FREE vertex sandwiched between two
+neighbours HELD at different levels (#345: rect#65 @112.30 ─11.5m─ v13 free
+@112.80 ─16.4m─ stub#79 @113.00 → 0.7 m over 28 m, INFEASIBLE ≤1.5 %). 43 at
+HECA, all per-axis-EXEMPT (cross-axis). NO junction-internal fix works:
+re-project AND full-ring balance were both byte-identical NO-OPs — the free node
+is PINNED by its along-axis held neighbour (its own taxiway centerline, held at
+the taxiway contacts). Fix must be CORRIDOR-LEVEL (reconcile connected taxiway
+levels at shared junctions) OR accept the twist (per-axis already exempts it).
+
+**B. Slack audit — we DO over-steepen (the user is right).** `layout.
+_network_profile_field` (F) carries the route bands: F.band_lo/band_hi/elev per
+node. Audit of 587 soft nodes (probe `heca_fslack.py`): **29 % pinned at
+band-min, 13 % at band-max, 58 % MID-band with slack both ways; 33 % of edges at
+max grade (≥1.45 %)**; median 1.5 m room to lower (46 % >2 m). So the corridor
+sits at the DEM and leaves slack unused. BUT HECA's 3 runways are at WILDLY
+different elevations — **05L/23R ≈58 m, 05C/23C ≈114 m, 05R/23L ≈137 m** — so
+taxiways MUST transition 56–79 m; a lot of the grade is genuinely forced.
+
+**C. ★ THE OPEN THREAD — route-band accuracy (where the session ended).**
+User exported a KML in a PRIOR session showing the band at the #54/#74/#337
+junction (30.109947 N, 31.408383 E = local **(-2542,110)**) as WIDE (~89–117).
+My current build's F.band there: node 465 = **[108.71, 113.85]**; the #337
+junction nodes floored ~113. Reconciliation so far:
+  - NOT nondeterminism (I wrongly claimed it — was a PROBE BUG: `min` vs `max`
+    for the binding anchor; the band IS deterministic).
+  - The two values are likely CODE-STATE: my uncommitted `centerlines.py`
+    corridor fix changes the geometry → field graph → route distances → bands.
+    The KML predates it. **Build on a CLEAN tree (stash) to compare apples-to-
+    apples; ask the user which commit the KML came from.**
+  - F floors #337 at 113.56 via a graph path to 05C (115.76) measured at
+    **146 m**. ⚠⚠ USER DISPUTES: "no path from 05C to #337 shorter than 250 m."
+    Strong suspicion: the band's route uses a **PROXIMITY/GAP edge**, not pure
+    pavement — CONFIRMED that excluding `F.prox` edges leaves node 465 unable to
+    reach ANY anchor (every anchor connection is a gap/anchor-entry edge). So
+    band route-distances are shortcut by gap edges → bands too tight (the
+    "straight-gap entry over-binds across grass" class — see memory
+    `network_profile_model_built.md`, `s79_two_investigations.md`).
+  - **NEXT: re-trace the 146 m path (probe `heca_path2.py` — use MAX not min),
+    print each node's lat/lon + whether it's ON pavement; if a gap edge
+    shortcuts it, THAT is the over-binding bug, and fixing the gap-edge route
+    distance loosens the bands → the slack the user expects → smoother corridors.**
+
+### NEXT STEPS to a committable state
+1. **Commit `centerlines.py` corridor fix** (validated, fixes #253 bump, no
+   regressions) as its own change.
+2. **Decide carve + damping**: both gated-off + byte-identical-off — commit as
+   gated scaffolding OR revert. (User leaning: rework carve to the perpendicular
+   waist cut; damping only helps long-corridor airports.)
+3. **Resolve thread C** (the 146 m path: real pavement vs gap shortcut). This is
+   the lever for the corridor over-steepness the user reported.
+4. Then the over-steepness fix proper (use the 58 % mid-band slack to flatten),
+   gated, measured against the 05C/05L/05R invariants + SPJC/CYXY.
+
+### REPRO / GOTCHAS
+- Build via `venv/bin/python /tmp/probes/<x>.py` from repo root (~75 s). ⚠ scipy
+  NOT installed — use numpy. Field: `layout._network_profile_field`.
+- Probes this session in `/tmp/probes/`: `heca_fslack.py` (field slack audit),
+  `heca_band_at.py`, `heca_dij.py` / `heca_path2.py` (band path trace — **use
+  MAX for the binding floor anchor**), `heca_anchor.py`, `heca_337.py`,
+  `heca_54.py`, `heca_g3area.py`. The corridor-fix probes: `heca_gap.py`,
+  `heca_kink.py`, `heca_ring.py`.
+- The within-shape gate engine is `verification.run_grade_checks` (emits OSM +
+  `check_grade` with `taxi_axes_ll` + `route_ctx`); it's the authoritative
+  metric — 25 s/airport.
+
+---
+
 # Auto-Patch Status — session 82 = TUNNEL Y-FORK rework + CONTINUOUS PERIMETER WALL + a latent to_osm bug fixed
 
 ## ★★ SESSION 82 (2026-06-13) — TUNNEL FORK + CONTINUOUS DEM PERIMETER WALL (committed this session) ★★
