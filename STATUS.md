@@ -1,8 +1,79 @@
-# Auto-Patch Status — 2026-06-14: HECA corridor/junction SMOOTHING investigation + within-shape WARN reconcile
+# Auto-Patch Status — 2026-06-15: ROUTE-BAND route-measure fix + corridor damping default-ON (thread C resolved)
 
-> Newest session on top. Older session-82 handover follows below.
-> Branch `dev`, HEAD `4f1a99b`. Memory file
+> Newest session on top. Older sessions follow below.
+> Branch `dev`, HEAD `70a4b02`. Memory file
 > `heca_g_j1_apron_swallow.md` has the blow-by-blow + every probe path.
+
+## ★★ SESSION 2026-06-15 — THREAD C RESOLVED: field route bands measured along the taxiway, damping now smooths ★★
+
+User goal: "make sure our route band is being calculated correctly." It
+WASN'T — and fixing it unlocked the parked damping. Two commits, both
+measured-safe (suite 333p/5f baseline, 05C/05L/05R invariants exact).
+
+### THE BUG (thread C) — field bands shortcut across pavement
+The network-profile field's feasibility band measured RUNWAY-anchor reach
+over the field graph `F.adj`, which carries chord + proximity coupling
+edges that jump STRAIGHT across apron/junction interiors. A 05C contact
+reachable in 146 m of pavement-geodesic is really **~350 m along the
+taxiway** the surface follows (user confirmed in Google Earth: the
+centerline route from #336/05C is 373.84 m, curving — the field's 146 m
+chord cuts across the apron). So the field floored aprons **~1-3 m too
+high**, lifting them off terrain. Same under-count the enforce's
+`_runway_reach_bands` already avoids via `taxi_routing`; the FIELD was the
+one out of step.
+★ INVESTIGATION TRAPS (I flip-flopped 3× before the user's KML+Measure
+screenshot settled it): (1) shape INDICES are NOT stable across builds —
+the handover's "#337" is `layout.shapes[336]` (an APRON) now; identify
+shapes by COORDINATE (user gave southernmost vtx 30.1099761,31.4084092).
+(2) `taxi_route_distance` SNAPS query points to the nearest centerline
+VERTEX (not edge projection); a field node on a centerline interior snaps
+to a far endpoint → I wrongly dismissed the real ~350 m as an artifact.
+(3) the band path edges looked "colinear with an apt centerline" but the
+real taxiway CURVES — the straight chord is on continuous pavement
+(`outgrass=0`) yet is a cross-axis diagonal across the apron, NOT the
+route. Probes `/tmp/probes/heca_threadC*.py`; KML `/tmp/heca_threadC.kml`.
+
+### COMMIT 1 — `22edd20` route bands (gate `FIELD_RUNWAY_ROUTE_BANDS`, default ON)
+`network_profile.build_and_solve` band split: RUNWAY part
+(`anchors_by_comp` — purely runway contacts/arcs/ends/midlines) now
+measured along the PLAIN centerline route graph
+(`taxi_routing.shared_taxi_route_graph` — the enforce default; the
+AUGMENTED graph lets routes taxi along the runway and loosens only ~1/3
+as much) via new helpers `_runway_route_band` / `_rw_route_cells` /
+`_nearest_route_key`, with a field-graph FALLBACK where the route graph
+can't reach a node (so a node is only ever LOOSENED). SEAM/threshold pins
+(`extra_entry` point_seeds) keep the field-graph entry. ★ min over the
+two source groups == one combined Dijkstra (shortest paths are
+group-invariant) ⇒ **gate-off byte-identical** (verified). Caller wires
+`_rw_route_graph_for_field(layout)` in `unified_jacobi` (~L5041; returns
+None gate-off). HECA: node 465 floor 108.71→107.83; apron floors loosen
+~0.7-0.9 m; within-shape 71→66; invariants exact.
+⚠ NUANCE: at node 465 the floor was NOT binding (apron sits on DEM ~112,
+above its floor) — the route-band fix corrects the band VALUE but doesn't
+move that surface alone. It moves surfaces only where the floor binds (the
+5 resolved within-shape) — and, crucially, it gives DAMPING room (commit 2).
+
+### COMMIT 2 — `70a4b02` corridor damping default ON (gate `O4_CORRIDOR_DAMP`)
+★★ USER INSIGHT: "if there's room in the feasible band, we should be able
+to CHOOSE to move #336 down or raise valleys to smooth taxiways." The
+Laplacian damping committed `4f1a99b` was a measured no-op ONLY because the
+pre-fix tight bands left it nowhere to move. WITH the route-band slack it
+bites: HECA degree-2 corridor grade-change mean **0.62%→0.32%**, kinks >1%
+**56→23**, apron node465 settles **112.39→111.47** (down into slack toward
+terrain). Invariants exact; within-shape 66; suite 333p/5f. Cost: ROUTE-BAND
+warns 10→12 (2 sub-0.1% nudges, not failures). `CORRIDOR_DAMP_ALPHA=0.5`
+(tunable). O4_CORRIDOR_DAMP=0 restores pure DEM-follow.
+
+### OPEN / NEXT
+- **In-sim verdict** (RESTART Ortho4XP + `O4_AUTO_PATCH_REBUILD=1`): eyeball
+  the smoothed HECA corridors + the lowered apron. Both gates default-ON now.
+- Damping is degree-2-corridor-only (excludes junctions/apron interiors —
+  graph-Laplacian on junctions made walls 16→24, s-prior). If the user wants
+  apron interiors / valleys smoothed too, EXTEND the damper's node set.
+- ROUTE-BAND warns 10→12 — small; revisit if in-sim shows any apron dipping
+  below terrain awkwardly.
+- The parked carve (`/tmp/probes/s_carve_parked.patch`) + the taxiway-shoulder
+  absorption plan (`docs/junction_smoothing_plan.md`) remain candidates.
 
 ### ▸ 2026-06-14 (continued) — TREE CLEANUP (user: "clean up the tree first")
 The handover below was one step stale. Reconciled + cleaned the tree:
