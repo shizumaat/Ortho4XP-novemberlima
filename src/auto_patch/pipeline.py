@@ -56,6 +56,8 @@ from .config import (
     LOAD_DSF_PAVEMENT,
     DSF_BUILDINGS,
     DSF_BUILDING_OSM_OVERLAP_FRAC,
+    TERM_BRIDGE_GROUPING,
+    TERMINAL_SIMPLIFY_TOL_M,
     RUNWAY_APRON_AREA_RATIO,
     OSM_SMALL_ROAD_HIGHWAY_TYPES,
     SERVICE_ROAD_WIDTH_M,
@@ -869,6 +871,10 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # DSF terminal/hangar building footprints (meter space), collected
     # in the same DSF sweep as pavement and unioned with the OSM
     # building outlines at terminal-pad construction below.
+    # DSF terminal / hangar / term_bridge building footprints (meter
+    # space).  term_bridge_* slabs are admitted here too (gated by
+    # TERM_BRIDGE_GROUPING) — they are just another component of a
+    # complex building and union into the same per-building outline.
     dsf_building_polys: List[Polygon] = []
     n_dsf_buildings = 0
     try:
@@ -1025,6 +1031,11 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 for b_outer, b_holes, _b_role in \
                         _DSFR.read_dsf_buildings(dsf):
                     if len(b_outer) < 3:
+                        continue
+                    # term_bridge slabs are only admitted when the
+                    # grouping gate is on; otherwise they are ignored
+                    # entirely (byte-identical to the pre-grouping read).
+                    if _b_role == "bridge" and not TERM_BRIDGE_GROUPING:
                         continue
                     try:
                         bpoly_ll = Polygon(
@@ -1796,13 +1807,13 @@ def build_airport_pavement(icao: str, xplane_root: str,
             f"{len(dsf_seed_polys)} DSF building(s) + "
             f"{combined_n_before} OSM → {len(osm_terminal_polys)} "
             f"seed(s) (DSF-preferred).")
-    # Min-spacing simplification: vertices closer than this to a
-    # neighbour are redundant for the airport-scale render and only
-    # serve to spawn sliver triangles in the eventual ear-clip.
-    # Applied to terminals (curved building footprints often
-    # inherit closely-spaced OSM vertices) and to the junction
-    # boundaries below.
-    MIN_VERTEX_SPACING_M = 2.0
+    # Building-pad simplification: strip sub-pad noise (closely-spaced
+    # OSM vertices and the arc facets left by the DSF facade-cluster
+    # snap-buffer) that would only spawn sliver triangles in the
+    # eventual ear-clip, while PRESERVING the real building corners.
+    # Tolerance is TERMINAL_SIMPLIFY_TOL_M (config; dialled back to
+    # 0.5 m so articulated terminal pads keep their genuine corners —
+    # user 2026-06-14).
     terminal_polys: List[Polygon] = []
     for otp in osm_terminal_polys:
         # Boundary gate: OSM aeroway=terminal buildings are loaded
@@ -1818,19 +1829,22 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 pass
         # Apt.dat-only candidates — DSF polygons (overlays, gap
         # fills) shouldn't compete for terminal-pad selection.
-        pad = _terminal_pad_from_building(otp, apt_only_pav_polys)
-        if pad is None:
+        pad0 = _terminal_pad_from_building(otp, apt_only_pav_polys)
+        if pad0 is None:
             continue
-        try:
-            simp = pad.simplify(
-                MIN_VERTEX_SPACING_M, preserve_topology=True)
-            if (simp.geom_type == "Polygon"
-                    and not simp.is_empty
-                    and simp.area >= 100.0):
-                pad = simp
-        except _GEOM_EXC:
-            pass
-        terminal_polys.append(pad)
+        # Absorb finger-pier gate stands into simple pad(s) (all sources);
+        # a split pier comes back as one pad per piece.
+        for pad in _close_building_outline(pad0):
+            try:
+                simp = pad.simplify(
+                    TERMINAL_SIMPLIFY_TOL_M, preserve_topology=True)
+                if (simp.geom_type == "Polygon"
+                        and not simp.is_empty
+                        and simp.area >= 100.0):
+                    pad = simp
+            except _GEOM_EXC:
+                pass
+            terminal_polys.append(pad)
     if osm_terminal_polys:
         UI.vprint(1,
             f"  [pav-builder] {icao}: building pads "
@@ -1892,8 +1906,12 @@ def build_airport_pavement(icao: str, xplane_root: str,
     terminal_union = (unary_union(terminal_polys)
                       if terminal_polys else None)
     for i, tp in enumerate(terminal_polys):
+        # ref "building{N}" (user 2026-06-15): the pad pool now mixes
+        # terminals, hangars, and DSF term_bridge slabs, so a generic
+        # "building" label is more accurate than "terminal".  The ROLE is
+        # already ROLE_BUILDING; only the display ref changes.
         layout.shapes.append(BuiltShape(
-            polygon=tp, role=ROLE_BUILDING, ref=f"terminal{i+1}"))
+            polygon=tp, role=ROLE_BUILDING, ref=f"building{i+1}"))
 
     # ── Identify junction node CLUSTERS ──────────────────────────
     # Per user 2026-05-12: when the taxi graph comes from apt.dat
@@ -4095,6 +4113,7 @@ from .boundary import _emit_boundary_dem_bridge
 # OSM terminal pad extraction (re-exported from O4_Pavement_Terminals)
 # ──────────────────────────────────────────────────────────────────
 from .terminals import (
+    _close_building_outline,
     _cluster_dsf_building_facades,
     _combine_building_sources,
     _extract_osm_terminals,

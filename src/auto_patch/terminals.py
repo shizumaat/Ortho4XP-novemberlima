@@ -19,10 +19,18 @@ import math
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from shapely.errors import GEOSException, TopologicalError
+from shapely.geometry import JOIN_STYLE as _JOIN_STYLE
 from shapely.geometry import LineString, Point, Polygon
-from shapely.ops import unary_union
+from shapely.ops import polygonize, unary_union
 
-from .config import HANGAR_PADS
+from .config import (
+    BUILDING_CLOSE_MIN_PIECE_M2,
+    BUILDING_OUTLINE_CLOSE_M,
+    DSF_CLUSTER_SIMPLIFY_TOL_M,
+    HANGAR_PADS,
+)
+
+_MITRE_JOIN = _JOIN_STYLE.mitre
 
 # Narrow exception tuple for shapely / numeric-geometry failure
 # modes.  Programming errors propagate so they surface immediately.
@@ -623,41 +631,56 @@ def _extract_osm_terminals(
         if p is not None and p.area >= 100.0:
             out.append(p)
 
-    # Relation terminals — emit ONE simplified polygon per
-    # aeroway=terminal relation that captures the full building
-    # extent without per-jet-bridge fine detail.
+    # Relation terminals — STITCH the multipolygon's outer members into
+    # the building's boundary ring(s), then emit each significant
+    # component as its OWN building pad.
     #
-    # Previously the code took only the largest connected component
-    # of the union of all outer rings.  That works when the largest
-    # piece dominates (e.g. SPJC rel -222: 28,883 m² largest covers
-    # the bulk of the terminal-between-runways).  It FAILS when the
-    # building is fragmented into many comparable pieces (e.g. SPJC
-    # rel -221: largest 6,557 m² is only 49 % of the total
-    # 13,500 m² building footprint — missing the satellite concourses).
-    #
-    # Strategy (user 2026-04-24): take the convex hull of the union
-    # of all "significant" components (≥ ``MIN_TERMINAL_COMPONENT_M2``).
-    # If the largest component is already > LARGEST_DOMINATES_FRAC of
-    # the total significant area, use it as-is (preserves the
-    # well-shaped output for dominant-piece terminals).  Otherwise
-    # use the convex hull (captures full multi-piece extent in a
-    # single simplified polygon).
+    # ⚠ OSM multipolygon relations encode the outer boundary as a run of
+    # OPEN member ways (segments) sharing endpoints — they are NOT each a
+    # closed ring.  Treating every member as an independent ring (the old
+    # ``_ring_polygon`` per-way path) turned each segment into a sliver
+    # and fragmented the building into garbage; the old code then masked
+    # that by emitting the CONVEX HULL of the slivers, which spanned the
+    # apron between detached concourses into a giant pyramid (SPJC rel -2
+    # → 247,422 m², 16× the real building — user 2026-06-15 "turning a T
+    # into a big pyramid").  Polygonizing the open linework reconstructs
+    # the true footprint: SPJC rel -1 → 56,007 m², rel -2 → 95,594 m²
+    # (single concave buildings).  Some relations instead use already-
+    # closed member ways — handle both.
     MIN_TERMINAL_COMPONENT_M2 = 500.0
-    LARGEST_DOMINATES_FRAC = 0.7
     for rid, outer_wids, tags in relations:
         if tags.get("aeroway") not in TERMINAL_AEROWAY_TAGS:
             continue
-        rings = []
+        seglines: List[LineString] = []
+        ring_polys: List[Polygon] = []
         for wid in outer_wids:
             if wid not in way_by_id:
                 continue
             nds, _ = way_by_id[wid]
-            p = _ring_polygon(nds)
-            if p is not None:
-                rings.append(p)
-        if not rings:
+            pts = [to_m(nodes[n][1], nodes[n][0])
+                   for n in nds if n in nodes]
+            if len(pts) < 2:
+                continue
+            if len(pts) >= 4 and nds[0] == nds[-1]:
+                p = _ring_polygon(nds)
+                if p is not None:
+                    ring_polys.append(p)
+            else:
+                seglines.append(LineString(pts))
+        if seglines:
+            try:
+                ring_polys.extend(
+                    g for g in polygonize(unary_union(seglines))
+                    if not g.is_empty)
+            except _GEOM_EXC:
+                pass
+        if not ring_polys:
             continue
-        merged = unary_union(rings).buffer(0)
+        try:
+            merged = unary_union(
+                [g.buffer(0) for g in ring_polys]).buffer(0)
+        except _GEOM_EXC:
+            continue
         # Collect significant components.
         if merged.geom_type == "Polygon":
             components = [merged] if merged.area >= 100.0 else []
@@ -667,26 +690,52 @@ def _extract_osm_terminals(
                           and g.area >= MIN_TERMINAL_COMPONENT_M2]
         else:
             continue
-        if not components:
-            continue
-        components.sort(key=lambda g: -g.area)
-        total = sum(g.area for g in components)
-        # Single dominant component → use directly.
-        if components[0].area / total >= LARGEST_DOMINATES_FRAC:
-            out.append(components[0])
-            continue
-        # Multi-piece terminal → emit the convex hull as a single
-        # simplified polygon spanning the full footprint.
-        try:
-            hull = unary_union(components).convex_hull
-        except _GEOM_EXC:
-            out.append(components[0])
-            continue
-        if hull.geom_type == "Polygon" and hull.area >= 100.0:
-            out.append(hull)
-        else:
-            out.append(components[0])
+        out.extend(components)
     return out
+
+
+def _close_building_outline(pad: Polygon) -> List[Polygon]:
+    """Absorb the gate stands of a finger-pier terminal into simple pad(s)
+    (user 2026-06-15).  Returns a LIST — usually ``[pad]``, but a pier that
+    the close splits comes back as one pad per piece.
+
+    A concourse with gate piers has deep narrow notches between the piers
+    — the aircraft stands.  A morphological CLOSE (dilate then erode)
+    fills each notch, swallowing the stands; a concavity WIDER than ~2× the
+    radius (the genuine reentrant shape of an L / U building) is preserved,
+    so the pad stays concave, never a convex blob.  A MITRE join keeps
+    STRAIGHT square edges (a round join leaves smoothed ripples — user
+    call).  No-op for a simple convex footprint.  Closing is safe on a
+    CLEAN cluster — it was the 1000s-of-vertex arc noise (now stripped by
+    DSF_CLUSTER_SIMPLIFY_TOL_M) that made the close grow ragged and got
+    overlap-clip-carved into a cut at HECA building17.
+
+    The close can SPLIT a pier into several blobs (two pier groups joined
+    by a thin spine the erode severs — HECA's south pier → 25.7k + 17.8k
+    m²).  Each significant component (≥ ``BUILDING_CLOSE_MIN_PIECE_M2``) is
+    returned as its own closed pad, provided they preserve the bulk of the
+    building (else the close is rejected, raw kept).  Applies to ALL
+    building sources — OSM and DSF terminals alike carry finger piers.
+    """
+    r = BUILDING_OUTLINE_CLOSE_M
+    if r <= 0 or pad is None or pad.is_empty:
+        return [pad]
+    try:
+        c = pad.buffer(
+            r, join_style=_MITRE_JOIN, mitre_limit=8.0).buffer(
+            -r, join_style=_MITRE_JOIN, mitre_limit=8.0)
+    except _GEOM_EXC:
+        return [pad]
+    if (c.geom_type == "Polygon" and not c.is_empty
+            and c.area >= pad.area):
+        return [c]
+    if c.geom_type == "MultiPolygon":
+        pieces = [g for g in c.geoms
+                  if g.geom_type == "Polygon" and not g.is_empty
+                  and g.area >= BUILDING_CLOSE_MIN_PIECE_M2]
+        if pieces and sum(g.area for g in pieces) >= 0.9 * pad.area:
+            return pieces
+    return [pad]
 
 
 def _cluster_dsf_building_facades(
@@ -696,16 +745,21 @@ def _cluster_dsf_building_facades(
     """Collapse a flat list of DSF facade footprints into one polygon
     per physical building.
 
-    X-Plane places a single building as SEVERAL stacked / adjacent
-    facade pieces (e.g. ``term_building_Ground`` + ``…_Levels`` on the
-    SAME corners; a long terminal split into a run of abutting facade
-    segments).  Unioning the lot merges each stack and each run of
-    touching pieces into one solid footprint; the connected components
-    of that union are the individual buildings.  A tiny snap-buffer
-    bridges sub-decimetre gaps between facades that share an edge but
-    don't quite touch, then is removed so the outline isn't inflated.
+    X-Plane assembles a single (often complex) building from SEVERAL
+    facade pieces — stacked (``term_building_Ground`` + ``…_Levels`` on
+    the SAME corners), abutting (a long terminal split into a run of
+    touching segments), and link spans (``term_bridge_*`` slabs that join
+    two wings or, at some airports, ARE the concourse floor).  Unioning
+    the lot merges each stack / run / span into one solid footprint; the
+    connected components of that union are the individual buildings.  A
+    tiny snap-buffer bridges sub-decimetre gaps between facades that share
+    an edge but don't quite touch, then is removed so the outline isn't
+    inflated.
 
-    Returns one outline Polygon per building (≥ ``min_area_m2``).
+    The caller decides which facade classes enter ``facades`` (terminal +
+    hangar always; ``term_bridge`` gated by ``TERM_BRIDGE_GROUPING``) —
+    everything passed in is unioned together.  Returns one outline Polygon
+    per building (≥ ``min_area_m2``).
     """
     if not facades:
         return []
@@ -732,6 +786,22 @@ def _cluster_dsf_building_facades(
             continue
         if g.area < min_area_m2:
             continue
+        # Reduce each cluster to a SOLID footprint (fill the buffer-artifact
+        # interior holes — a grading pad is solid) and DP-simplify away the
+        # snap-buffer arc noise, keeping the real corners.  Without this a
+        # complex terminal carries 1000s of arc vertices that split the
+        # outline close and over-resolve the overlap-clip (user 2026-06-15).
+        try:
+            solid = Polygon(g.exterior)
+            simp = solid.simplify(
+                DSF_CLUSTER_SIMPLIFY_TOL_M, preserve_topology=True)
+            if (simp.geom_type == "Polygon" and not simp.is_empty
+                    and simp.area >= min_area_m2):
+                g = simp
+            else:
+                g = solid
+        except _GEOM_EXC:
+            pass
         out.append(g)
     return out
 
