@@ -40,6 +40,8 @@ __all__ = [
     "TERMINAL_PADS_SLOPE",
     "TAXI_CORRIDOR_PROFILE",
     "TAXIWAY_MAX_GRADE_CHANGE_PER_M",
+    "CORRIDOR_PROFILE_DAMPING",
+    "CORRIDOR_DAMP_ALPHA",
     "SERVICE_ROAD_MAX_GRADE",
     "SERVICE_ROAD_WIDTH_M",
     "MIN_SERVICE_STRIP_LEN_M",
@@ -377,6 +379,22 @@ TAXI_CORRIDOR_PROFILE = True
 # corridor profile - the taxi sibling of RUNWAY_MAX_GRADE_CHANGE_PER_M
 # (driver.py re-exports it as MAX_TAXIWAY_GRADE_CHANGE_PER_M).
 TAXIWAY_MAX_GRADE_CHANGE_PER_M = 1.0 / 3000.0
+# ── Corridor-profile DAMPING (user 2026-06-14) ──────────────────
+# The taxi-corridor field SEEDS at the DEM and projects onto the legal
+# band, so wherever the DEM is locally legal the profile sits ON the
+# terrain — following its noise too closely.  Real airports grade
+# taxiways/aprons "as flat as the terrain allows": the DEM is a noisy
+# GUIDE, not a target; max grade is RARE (used only where no flatter
+# routing satisfies the constraints), and the only HARD anchors are the
+# CIFP runway thresholds + tile seams.  This adds a Laplacian (harmonic)
+# smoothing term to the corridor Gauss-Seidel: each soft node diffuses
+# toward its neighbours' inverse-distance-weighted mean (minimising
+# Σ grade² → the smoothest profile), clamped to its legal band, with the
+# 1.5 % caps + hard anchors still binding.  ``CORRIDOR_DAMP_ALPHA`` =
+# per-sweep relaxation toward that mean (1.0 = full harmonic; lower =
+# gentler / more DEM-near).  Gate ``CORRIDOR_PROFILE_DAMPING``
+# (``O4_CORRIDOR_DAMP``) — OFF restores the pure DEM-follow.
+CORRIDOR_DAMP_ALPHA = 0.5
 SERVICE_ROAD_MAX_GRADE = 0.040  # ground-vehicle route (apt.dat 1206 + OSM small roads) — cars handle 4%
 # Ground-vehicle 4%-grade ``service_road`` rect geometry (session 47).
 SERVICE_ROAD_WIDTH_M = 6.0          # corridor width for a service-road rect
@@ -756,6 +774,8 @@ TERMINAL_NATURAL_LEVELS = _os.environ.get("O4_TERMINAL_NATURAL", "1") == "1"
 # mode that motivated the old guard).  OFF = fallback-only admission,
 # byte-identical to pre-s81.
 HANGAR_PADS = _os.environ.get("O4_HANGAR_PADS", "1") == "1"
+# Corridor-profile Laplacian damping (see CORRIDOR_DAMP_ALPHA above).
+CORRIDOR_PROFILE_DAMPING = _os.environ.get("O4_CORRIDOR_DAMP", "0") == "1"
 
 # DSF terminal/hangar building footprints (user 2026-06-12) — see the
 # documented block near LOAD_DSF_PAVEMENT above.  Read here because

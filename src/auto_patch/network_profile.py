@@ -1057,6 +1057,23 @@ def build_and_solve(
     edge_list.sort()
     eff_of = [cap * F.relax.get(F.comp_of[i], 1.0) for i in range(n)]
 
+    # Corridor-profile Laplacian damping strength (user 2026-06-14): how
+    # hard each soft node is pulled toward its neighbours' mean (the
+    # smoothest profile) per sweep, within its band.  0 = pure DEM-follow.
+    try:
+        from auto_patch.config import (CORRIDOR_PROFILE_DAMPING as _CPD,
+                                        CORRIDOR_DAMP_ALPHA as _CDA)
+        damp_alpha = float(_CDA) if _CPD else 0.0
+    except Exception:                                  # pragma: no cover
+        damp_alpha = 0.0
+    # Centerline-neighbour degree (non-proximity) — used to restrict the
+    # damping to mid-corridor 1-D stretches AWAY from junctions.
+    _deg = [0] * n
+    if damp_alpha > 0.0:
+        for v in range(n):
+            _deg[v] = sum(1 for (j, _w, _c) in F.adj[v]
+                          if (min(v, j), max(v, j)) not in F.prox)
+
     # Phase 1 alternates cap projection with the grade-rate pass; the two
     # OSCILLATE where a smooth ramp wants >cap (measured at CYXY: a
     # 14 m / 724 m descent left every edge ~2 %).  The cap is LAW, the
@@ -1065,6 +1082,35 @@ def build_and_solve(
     for _sweep in range(2 * _SOLVE_MAX_SWEEPS):
         dg_active = (dg_per_m > 0.0 and _sweep < _SOLVE_MAX_SWEEPS)
         moved = 0.0
+        # ── LAPLACIAN DAMPING (user 2026-06-14): diffuse each soft node
+        # toward its neighbours' inverse-distance-weighted mean — the
+        # harmonic (minimum Σ grade²) profile, "as flat as feasible".
+        # Runs FIRST in the sweep so the cap projection below is the LAST
+        # word: the 1.5 % caps are LAW and the hard anchors (CIFP
+        # thresholds, seams) pin the levels; this only damps the noisy
+        # DEM follow between them.  Clamped to the legal band; proximity
+        # couplings are not profile neighbours.
+        if damp_alpha > 0.0:
+            for v in range(n):
+                if F.hard[v]:
+                    continue
+                # ONLY mid-corridor (degree-2) nodes — smoothing ALONG the
+                # 1-D profile.  A junction node (3+ centerline neighbours)
+                # must NOT diffuse to the multi-neighbour mean: that pulls
+                # it to the middle of converging taxiways and STEEPENS the
+                # grade to each held contact (measured: severe walls 16→24).
+                if _deg[v] != 2:
+                    continue                  # mid-corridor 1-D nodes only
+                nb = [(j, w) for (j, w, _c) in F.adj[v]
+                      if (min(v, j), max(v, j)) not in F.prox]
+                (j0, w0), (j1, w1) = nb
+                iw0, iw1 = 1.0 / max(w0, 1.0), 1.0 / max(w1, 1.0)
+                target = (F.elev[j0] * iw0 + F.elev[j1] * iw1) / (iw0 + iw1)
+                nv = F.elev[v] + damp_alpha * (target - F.elev[v])
+                nv = min(max(nv, F.band_lo[v]), F.band_hi[v])
+                if nv != F.elev[v]:
+                    moved = max(moved, abs(nv - F.elev[v]))
+                    F.elev[v] = nv
         for (a, b, w) in edge_list:
             lim = max(eff_of[a], eff_of[b]) * w + 1e-6
             diff = F.elev[a] - F.elev[b]
