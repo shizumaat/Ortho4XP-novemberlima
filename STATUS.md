@@ -1,4 +1,55 @@
-# Auto-Patch Status — 20260616 = HECA taxiway-B↔apron GAP root-caused (apron-edge-retreat + apt_smoothing_pix), #312 service-junction, apt bezier split-handle
+# Auto-Patch Status — 20260616 = LPPT taxi-less-pack selector fix; HECA taxiway-B↔apron GAP root-caused (apron-edge-retreat + apt_smoothing_pix), #312 service-junction, apt bezier split-handle
+
+## ★★ 20260616-05 (2026-06-16, dev) — LPPT EMITTED NO PATCH: apt.dat selector picked a taxi-less Custom pack ★★
+User report: building tile **+38-010 fails to emit a patch for LPPT**
+(Lisbon); guessed it was special characters in the airport name. **Name
+hypothesis was wrong** — names are ASCII ("Lisboa"/"Humberto Delgado") and
+the patch filename uses the ICAO. The user's follow-up ("LPPT definitely has
+taxi routes") was the real lead. Memory: `lppt_empty_taxi_network_unpack.md`.
+
+**ROOT CAUSE — selector picked an apt.dat with no taxi-routing network.**
+`_pick_best_apt_dat_against_osm` (`osm_load.py`) took the FIRST Custom Scenery
+pack with no content check (the 2026-05-21 "always prefer custom" policy).
+LPPT's `c_PRT … LPPT Lisbon (MKStudios)/Earth nav data/apt.dat` draws the
+airport as 2 giant draped row-110 pavement polygons + 298 row-120 painted
+lines but ships **ZERO 1201/1202 taxi-routing graph** (the painted lines are
+present but already judged "no usable painted centerlines"). Only 2 candidates
+are enumerated — MKStudios-main + Global; the MKStudios `Buildings/` subfolder
+apt.dat HAS the network but is a nested subfolder, not a top-level pack, so
+neither X-Plane nor `find_all_airport_apt_dats` sees it. Global has the full
+network (425 nodes / 205 edges). Selector picked MKStudios → no taxi rects →
+degenerate patch. The existing `_file_has_airport_with_pavement` fallback did
+NOT help because MKStudios HAS row-110.
+
+**FIX (user-approved "fall back when taxi-less"):**
+1. `apt_dat_reader.py`: extended the cached `_index_apt_dat` to a 3-tuple
+   `(icaos, with_pavement, with_taxi)` tracking rows 1201/1202; bumped the
+   persist file `auto_patch_apt_index_v1.pkl`→`v2.pkl` + a `len(cached)==3`
+   guard (the cross-process cache can be touched by mixed code versions
+   mid-deploy); added `_file_has_airport_with_taxi_routing`.
+2. `osm_load.py`: selector now prefers the first Custom Scenery pack that
+   ROUTES; if none route, falls back to the first candidate (Global/default)
+   that does; else prior policy. Custom packs that DO route are unchanged —
+   HECA/CYXY/SPJC/KPHL all stay CUSTOM; only LPPT flips to GLOBAL.
+   LPPT → **988 shapes / 942 KB** (119 taxi centerlines).
+
+**Defensive guard (kept, but NOT the root cause).** While diagnosing I first
+hit a crash: `_taxi_corridor_profiles` (`unified_jacobi.py` ~L5927)
+`if not rects: return set()` returned 1 value while the caller (~L447) unpacks
+3 → `ValueError: not enough values to unpack`. `ValueError ∈ _DRIVER_EXC`
+(driver.py:25) → caught at driver.py:439, logged "Pavement builder failed for
+LPPT", `continue` → silent no-patch. Fixed to `return set(), set(),
+({}, {}, set())` matching the full return (L8407). With the selector fix LPPT
+no longer takes this path (it has 50 taxi rects); the guard is retained
+(user choice) so a GENUINELY taxi-less airport degrades to runway/boundary
+instead of crash-and-skip.
+
+Suite **5f/344p** (CYXY/SPJC/SPLP/HECA grade + SPJC compare-target = the
+documented standing reds; no regression). ★ TRAP: `tempfile.gettempdir()` on
+macOS is `/var/folders/.../T`, NOT `/tmp` (deleted the wrong cache file,
+chased a phantom stale-2-tuple). ★ single-airport silent no-patch → run
+`build_airport_pavement(icao, …, compute_elevations=True)` standalone;
+`_DRIVER_EXC` hides the traceback in production.
 
 ## ★★ 20260616-04 (2026-06-16, dev) — CYXY SVC7∩SVC8 SELF-OVERLAP FIXED + verify debug-log routing ★★
 Two things shipped this turn (memory: `cyxy_svc_donut_overlap.md`):

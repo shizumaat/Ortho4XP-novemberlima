@@ -5875,7 +5875,12 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
         print(f"[chdbg] raw={len(raw)} rects={len(rects)} "
               f"mouth-dropped={drop9}")
     if not rects:
-        return set()
+        # No taxi corridors to profile (e.g. an apt.dat with no taxi
+        # network — LPPT/MKStudios).  Match the full return's arity:
+        # (held, exempt, rwy_dem) where rwy_dem == (dem_lo, dem_hi,
+        # dem_refs).  Returning a bare set() unpacked to 0 values at the
+        # call site (ValueError → _DRIVER_EXC swallows it → no patch).
+        return set(), set(), ({}, {}, set())
     for r in rects:
         for m in r["mouths"]:
             m["junc"] = next((ji for ji, J in enumerate(juncs)

@@ -593,7 +593,7 @@ _APT_DAT_INDEX_CACHE: dict = {}
 # file is always SAFE (mismatched keys are ignored), so loads/saves are
 # wrapped to never raise.
 _APT_DAT_PERSIST_PATH = os.path.join(
-    tempfile.gettempdir(), "auto_patch_apt_index_v1.pkl")
+    tempfile.gettempdir(), "auto_patch_apt_index_v2.pkl")
 _APT_DAT_PERSIST_LOADED = False
 _APT_DAT_PERSIST_DIRTY = False
 
@@ -648,25 +648,32 @@ def _save_persistent_apt_index() -> None:
         pass
 
 
-def _index_apt_dat(aptdat_path: str) -> tuple[frozenset, frozenset]:
-    """Return ``(icaos_present, icaos_with_pavement)`` for the file.
+def _index_apt_dat(
+        aptdat_path: str) -> tuple[frozenset, frozenset, frozenset]:
+    """Return ``(icaos_present, icaos_with_pavement, icaos_with_taxi)``.
 
-    Both sets are uppercase ICAO codes.  An entry in
+    All three sets are uppercase ICAO codes.  An entry in
     ``icaos_with_pavement`` means the airport block has at least one
-    row 110 (pavement header).  Result is cached process-wide AND in a
-    persistent temp file (see :data:`_APT_DAT_PERSIST_PATH`); if the
-    file is rewritten (mtime / size changes) the cache entry is
-    invalidated and the file is rescanned.
+    row 110 (pavement header); an entry in ``icaos_with_taxi`` means it
+    has at least one taxi-routing-network row (1201 node / 1202 edge),
+    which is what the taxi-rect builder needs.  Result is cached
+    process-wide AND in a persistent temp file (see
+    :data:`_APT_DAT_PERSIST_PATH`); if the file is rewritten (mtime /
+    size changes) the cache entry is invalidated and the file is
+    rescanned.
     """
     global _APT_DAT_PERSIST_DIRTY
     _load_persistent_apt_index()
     try:
         st = os.stat(aptdat_path)
     except OSError:
-        return frozenset(), frozenset()
+        return frozenset(), frozenset(), frozenset()
     key = (aptdat_path, st.st_mtime_ns, st.st_size)
     cached = _APT_DAT_INDEX_CACHE.get(key)
-    if cached is not None:
+    # Guard against a stale-format entry (e.g. a 2-tuple written by an
+    # older code version that shared the persistent cache file): rescan
+    # rather than unpack the wrong arity.
+    if cached is not None and len(cached) == 3:
         return cached
     # Drop any stale entry for this path (different mtime/size).
     for k in [k for k in _APT_DAT_INDEX_CACHE if k[0] == aptdat_path]:
@@ -674,8 +681,10 @@ def _index_apt_dat(aptdat_path: str) -> tuple[frozenset, frozenset]:
 
     icaos = set()
     with_pavement = set()
+    with_taxi = set()
     current: str | None = None
     saw_pavement_in_current = False
+    saw_taxi_in_current = False
     try:
         with open(aptdat_path, "r", encoding="utf-8",
                   errors="replace") as f:
@@ -687,26 +696,39 @@ def _index_apt_dat(aptdat_path: str) -> tuple[frozenset, frozenset]:
                         # Close out the previous airport block.
                         if current is not None and saw_pavement_in_current:
                             with_pavement.add(current)
+                        if current is not None and saw_taxi_in_current:
+                            with_taxi.add(current)
                         current = parts[4].upper()
                         saw_pavement_in_current = False
+                        saw_taxi_in_current = False
                         icaos.add(current)
                         continue
-                if (current is not None
-                        and not saw_pavement_in_current
+                if current is None:
+                    continue
+                if (not saw_pavement_in_current
                         and (stripped.startswith("110 ")
                              or stripped.startswith("110\t"))):
                     saw_pavement_in_current = True
+                elif (not saw_taxi_in_current
+                        and (stripped.startswith("1201 ")
+                             or stripped.startswith("1201\t")
+                             or stripped.startswith("1202 ")
+                             or stripped.startswith("1202\t"))):
+                    saw_taxi_in_current = True
         # Close out the last block at EOF.
         if current is not None and saw_pavement_in_current:
             with_pavement.add(current)
+        if current is not None and saw_taxi_in_current:
+            with_taxi.add(current)
     except OSError:
         # Cache an empty result so we don't re-attempt every call.
-        result = (frozenset(), frozenset())
+        result = (frozenset(), frozenset(), frozenset())
         _APT_DAT_INDEX_CACHE[key] = result
         _APT_DAT_PERSIST_DIRTY = True
         return result
 
-    result = (frozenset(icaos), frozenset(with_pavement))
+    result = (frozenset(icaos), frozenset(with_pavement),
+              frozenset(with_taxi))
     _APT_DAT_INDEX_CACHE[key] = result
     _APT_DAT_PERSIST_DIRTY = True
     return result
@@ -718,7 +740,7 @@ def _file_has_airport(aptdat_path: str, icao: str) -> bool:
     Backed by :func:`_index_apt_dat`'s process-wide cache; the file is
     fully scanned at most once per (path, mtime, size).
     """
-    icaos, _ = _index_apt_dat(aptdat_path)
+    icaos, _, _ = _index_apt_dat(aptdat_path)
     return icao.upper() in icaos
 
 
@@ -735,8 +757,25 @@ def _file_has_airport_with_pavement(aptdat_path: str, icao: str) -> bool:
 
     Backed by :func:`_index_apt_dat`'s process-wide cache.
     """
-    _, with_pavement = _index_apt_dat(aptdat_path)
+    _, with_pavement, _ = _index_apt_dat(aptdat_path)
     return icao.upper() in with_pavement
+
+
+def _file_has_airport_with_taxi_routing(aptdat_path: str, icao: str) -> bool:
+    """Return True if `aptdat_path` contains a row 1 header for ICAO
+    AND the airport block has at least one taxi-routing-network row
+    (1201 node / 1202 edge).
+
+    Some Custom Scenery packs (e.g. MKStudios LPPT) draw the airport as
+    draped row-110 pavement polygons + row-120 painted lines but ship NO
+    1201/1202 taxi-routing graph, so our taxi-rect builder emits nothing
+    and the patch comes out boundary-only.  The selector uses this to
+    fall back to a candidate (Global) that does carry the network.
+
+    Backed by :func:`_index_apt_dat`'s process-wide cache.
+    """
+    _, _, with_taxi = _index_apt_dat(aptdat_path)
+    return icao.upper() in with_taxi
 
 
 def _read_airport_block(aptdat_path: str, icao: str) -> list[str] | None:

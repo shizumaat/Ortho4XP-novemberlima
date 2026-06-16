@@ -439,16 +439,46 @@ def _pick_best_apt_dat_against_osm(
     candidates = APR.find_all_airport_apt_dats(xplane_root, icao)
     if not candidates:
         return APR.find_airport_apt_dat(xplane_root, icao)
-    # Prefer the first genuine Custom Scenery pack.  The Global
-    # Airports pack lives under Custom Scenery on X-Plane 11, so
-    # exclude it (and the default-scenery pack) by path before
-    # falling back to whichever candidate is first.
-    for cand in candidates:
-        if "Global Airports" not in cand and "default scenery" not in cand:
+
+    def _is_global_or_default(c: str) -> bool:
+        # The Global Airports pack lives under Custom Scenery on
+        # X-Plane 11, so identify it (and the default-scenery pack) by
+        # path rather than by directory position.
+        return "Global Airports" in c or "default scenery" in c
+
+    custom = [c for c in candidates if not _is_global_or_default(c)]
+
+    # Prefer the first genuine Custom Scenery pack that can actually
+    # drive the taxi build — i.e. one whose apt.dat carries a 1201/1202
+    # taxi-routing network.  Some packs (MKStudios LPPT) draw the
+    # airport as draped pavement polygons + painted lines but ship NO
+    # routing graph; picking such a pack emits a taxi-less,
+    # boundary-only patch.  User 2026-06-16: fall back to a candidate
+    # (Global) that does route rather than honour the custom pack
+    # blindly.  Custom packs that DO route are unchanged.
+    for cand in custom:
+        if APR._file_has_airport_with_taxi_routing(cand, icao):
             UI.vprint(1,
                 f"  [pav-builder] {icao}: using Custom Scenery "
                 f"apt.dat (no pavement analysis): {cand}")
             return cand
+    # No Custom Scenery pack has a taxi network.  Fall back to the
+    # first remaining candidate (Global, then default) that does.
+    if custom:
+        for cand in candidates:
+            if (_is_global_or_default(cand)
+                    and APR._file_has_airport_with_taxi_routing(cand, icao)):
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: Custom Scenery pack has no "
+                    f"taxi-routing network; falling back to {cand}")
+                return cand
+    # Nothing routes anywhere — preserve the prior policy (first custom
+    # pack, else first candidate) so runways/boundary still emit.
+    if custom:
+        UI.vprint(1,
+            f"  [pav-builder] {icao}: using Custom Scenery "
+            f"apt.dat (no pavement analysis): {custom[0]}")
+        return custom[0]
     UI.vprint(1,
         f"  [pav-builder] {icao}: no Custom Scenery pack; using "
         f"{candidates[0]}")
