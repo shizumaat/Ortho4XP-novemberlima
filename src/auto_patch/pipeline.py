@@ -3431,22 +3431,27 @@ def build_airport_pavement(icao: str, xplane_root: str,
         from .junction_repair import _reclassify_apron_junctions
         _reclassify_apron_junctions(layout, icao=icao)
         # (s79) SERVICE-JUNCTION re-role (docs/service_road_carve.md):
-        # a junction whose pavement neighbours are EXCLUSIVELY
+        # a junction OR apron whose pavement neighbours are EXCLUSIVELY
         # ``service_road`` rects (the #198 U-turn bulge between the two
-        # road legs; the HECA SVC29↔SVC30 connector #336) is road
+        # road legs; the HECA SVC29↔SVC30 connector #336; the HECA
+        # SVC29/35/36 plaza #290 that reads as an apron) is road
         # territory — 4 % ``service_junction``, not a 1.5 % aircraft
-        # junction.  A junction shared with any aircraft pavement (the
-        # road's mouth at taxiway S) stays ROLE_JUNCTION.
+        # junction/apron.  A shape shared with any aircraft pavement (the
+        # road's mouth at taxiway S) stays its original role.
         #
         # ★ MUST run BEFORE the runway-disconnected→groundside pass
         # below: that pass excludes service roads from its airside
-        # connectivity graph, so a road-only junction reads
+        # connectivity graph, so a road-only junction/apron reads
         # "runway-disconnected" and is demoted to DEM groundside before
-        # this re-role can claim it — leaving the two road runs split by
-        # a DEM blob they cannot grade through (the HECA #336 cliff
-        # between SVC29 and SVC30).  Re-roling first makes it a
-        # ``service_junction`` (excluded from that pass) so the road
-        # network grades continuously across it.
+        # this re-role can claim it — leaving the road runs split by a
+        # DEM blob they cannot grade through (the HECA #336 cliff between
+        # SVC29 and SVC30; the #290/#312 plaza severed from its SVC roads
+        # by the 1 m groundside clearance gap).  Re-roling first makes it
+        # a ``service_junction`` (excluded from that pass) so the road
+        # network grades continuously across it.  An APRON only qualifies
+        # when it touches NO aircraft pavement at all — a real aircraft
+        # apron always chains to a taxiway/stub/building, so the guard
+        # claims only genuine road plazas.
         if SERVICE_ROAD_CARVE:
             from .layout import ROLE_SERVICE_JUNCTION, ROLE_SERVICE_ROAD
             _aircraft_roles = {
@@ -3454,8 +3459,8 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 ROLE_STUB, "cross_connector", "apron", "building"}
             _n_svc_j = 0
             for _ji, _js in enumerate(layout.shapes):
-                if _js.role != "junction" or _js.polygon is None \
-                        or _js.polygon.is_empty:
+                if _js.role not in ("junction", "apron") \
+                        or _js.polygon is None or _js.polygon.is_empty:
                     continue
                 _has_road = _has_aircraft = False
                 for _os9 in layout.shapes:
@@ -3481,7 +3486,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
             if _n_svc_j:
                 UI.vprint(1,
                     f"  [pav-builder] {icao}: re-roled {_n_svc_j} "
-                    f"road-only junction(s) → service_junction (4 %).")
+                    f"road-only junction/apron(s) → service_junction (4 %).")
 
         # An apron must have a touch-chain back to a runway (user
         # 2026-06-09); pavement islands without one are landside ramps /
