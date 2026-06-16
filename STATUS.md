@@ -1,3 +1,66 @@
+# Auto-Patch Status — 20260615-07 = BUILDING OUTLINE NARROW-GAP FILL (replaces the morphological close)
+
+## ★★★ 20260615-07 (2026-06-15, dev @3f4fcb5) — NARROW-GAP FILL ★★★
+Branch `dev`. **COMMITTED.**  Reworked how gate-stand teeth are absorbed
+into building pads, replacing the morphological close from the overhaul
+below.  Memory: `building_outline_narrow_fill.md`.
+
+USER GOAL (review): the outline machinery was over-complicated; want
+something simple that traces the max outline WITHOUT cutting across large
+empty spaces — union touching pieces, then expand the little gate-stand
+spurs until they're inside the enlarged shape.  ★ USER CLARIFICATION:
+stands are small fingers extending PERPENDICULAR off a pier (not notches);
+detect how far they extend and expand the pier out to just absorb them —
+"we don't want lots of little teeth."  Width = out to the tooth tips
+(max outline); SPJC ~7-8% cleaner cleanup ACCEPTED.
+
+★★ KEY REALISATION (from prototyping, all visuals `/tmp/*.png`, probes
+`/tmp/probes/`): a morphological CLOSE fills concavities but does NOT shave
+or absorb a protruding tooth, and at HECA the pier gaps are >110 m so r=55
+left a sawtooth while r=110 filled the whole U centre.  Convex/concave hull
+overreach; per-limb oriented-rect works on thin piers (c19) but a uniform
+erode can't separate a fused blob+pier (c16 → one giant diagonal rect).
+The robust answer is **NARROW-GAP FILL** — fill the gaps between teeth (=
+absorbing a row of perpendicular teeth) but gate by ENCLOSED-ness/width,
+not size, with NO limb decomposition:
+```
+closed = pad.close(R=110)      # bridge EVERY gap up to 2R (teeth + open)
+fill   = closed − pad          # everything the close added
+wide   = fill.open(GATE=55)    # the WIDE fills (open courtyards / U-centres)
+result = closed − wide         # keep only the narrow teeth-gaps filled
+```
+Subtracting the wide fill from the CONNECTED closed shape keeps the pad in
+ONE piece (no floating rinds, no severed spine) — that was the failure mode
+of `unary_union([pad]+narrow)` (SPJC fragmented to 4 pc).  R = reach to
+bridge a teeth gap; a gap WIDER than 2×GATE is reopened as genuine open
+space.  Robust across U-terminals / blob+pier / bars / long buildings.
+
+WHAT CHANGED:
+* `config.py`: `BUILDING_OUTLINE_CLOSE_M` → `BUILDING_OUTLINE_FILL_R=110`
+  + `BUILDING_OUTLINE_FILL_GATE_M=55` (MITRE join kept).
+* `terminals._close_building_outline`: narrow-fill (same name / List return
+  / split-piece fallback for the rare pinch).  All the old split-piece /
+  reconnect-vs-absorb / min-piece machinery is now vestigial (single piece
+  in the normal case).
+* `tests/test_dsf_buildings.py`: 3 outline tests updated to the new knobs +
+  NEW `test_close_fills_teeth_but_not_wide_centre` (HECA U-case).
+
+RESULTS: HECA terminal cluster = clean straight-sided piers, teeth
+absorbed, open centres preserved; **HECA pavement_grade UNCHANGED (2 steps
+/ 0.72 m)**.  SPJC central concourse ~7-8% cleaner (side fingers absorbed),
+courtyard preserved as a hole.  Suite **6f / 342p** — same standing-red set
+(CYXY overlap, SPJC compare-target, 4× pavement_grade), no new failures,
++1 new test.  Unit tests 10/10.
+
+⚠ OPEN — SPJC apron-follows: SPJC `pavement_grade` steps **3 → 14** (each
+SMALLER, worst 1.03 → 0.69 m) because the enlarged flat central terminal
+now has more apron edges abutting it.  This is the documented
+apron-follows-the-enlarged-pad follow-up (back-edge-ramp machinery from
+20260614-01 is where to address it).  User ACCEPTED the cleanup; grading is
+the next task.  HECA's grade did NOT regress.
+
+---
+
 # Auto-Patch Status — 20260615 = DSF BUILDING-FOOTPRINT OVERHAUL (term_bridge union, depth-5 bezier, polygonize, cluster cleanup, finger-pier close)
 
 ## ★★★ CURRENT STATE / LESSONS / NEXT STEPS (2026-06-15) ★★★
