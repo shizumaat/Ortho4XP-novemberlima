@@ -1,6 +1,14 @@
 # Auto-Patch Status — 20260616 = HECA taxiway-B↔apron GAP root-caused (apron-edge-retreat + apt_smoothing_pix), #312 service-junction, apt bezier split-handle
 
-## ★★★ 20260616-01 (2026-06-16, dev @1324893 + default-flip uncommitted) — APRON-EDGE-RETREAT GAP ★★★
+## ★★★ 20260616 (2026-06-16, dev @<retreat-removed>) — APRON-EDGE-RETREAT GAP (function REMOVED) ★★★
+★ FINAL STATE: `_retreat_route_pinned_apron_edges` is **DELETED** (user
+ruling: not needed, road ramp grades fine without it, nothing should mutate
+geometry post-solve). The `APRON_EDGE_RETREAT` config flag, the gate, the
+`_RETREAT_*` constants, and the call site are all gone. The history below is
+the investigation that found it. Suite after removal: **6f/343p** (same
+standing-red set, no regression).
+
+## ★★★ 20260616-01 (2026-06-16) — APRON-EDGE-RETREAT GAP (investigation) ★★★
 Branch `dev`. Picks up a user report: at HECA, **taxiway B (stub, the rect
 the user calls #130 in the in-sim patch) is disconnected from its apron by
 a gap** that "should be connected." Multi-turn root-cause; the user's
@@ -38,40 +46,32 @@ rects overlapping the DSF grass-island hole, or the bezier parse (all
 investigated + ruled out; the DSF teardrop grass island at the junction is
 real and correctly unpaved).
 
-WHAT WAS BUILT (committed @1324893):
-1. **pix fix** (`elevation.py` ~L305): the standalone DEM blur reads the
-   live `O4_Config_Utils.apt_smoothing_pix` (env override
+WHAT SHIPPED:
+1. **pix fix** (`elevation.py` ~L305, committed @1324893): the standalone
+   DEM blur reads the live `O4_Config_Utils.apt_smoothing_pix` (env override
    `O4_APT_SMOOTHING_PIX`; default 8 only if no config loads). ★ `import
-   O4_Config_Utils` auto-loads `Ortho4XP.cfg`, so bare probes now read
-   pix=4 and reproduce production (417) with NO env var. Does NOT affect
-   production (override_dem path skips this branch). Suite stays 6f/343p
-   (now builds at pix=4).
-2. **`APRON_EDGE_RETREAT` gate** (`config.py`, env `O4_APRON_EDGE_RETREAT`)
-   + the call gated in `unified_jacobi.py` (`if NETWORK_PROFILE_MODEL and
-   APRON_EDGE_RETREAT:`). Committed ON.
+   O4_Config_Utils` auto-loads `Ortho4XP.cfg`, so bare probes now read pix=4
+   and reproduce production (417) with NO env var. Does NOT affect production
+   (override_dem path skips this branch). KEEP THIS — it's what makes
+   standalone match the user's in-sim builds.
+2. **`_retreat_route_pinned_apron_edges` REMOVED** (the function, its
+   `_RETREAT_*` constants, the call site, the `APRON_EDGE_RETREAT` flag/gate
+   — all deleted, user ruling 2026-06-16). Geometry is no longer mutated
+   after the solve. HECA apron now stays welded to taxiway B's corners; gap
+   = 334 m² (the real DSF grass island only). #198 road cliff reverts to a
+   graded ramp (user: works fine without the retreat). Suite **6f/343p**
+   (same standing reds, no regression).
+   ⚠ The intermediate `1324893` (gate, default ON) + `5fa1809` (default OFF)
+   commits are now superseded by the removal — the flag no longer exists.
 
-★ UNCOMMITTED (this is the handover edit): **`APRON_EDGE_RETREAT` default
-flipped ON→OFF** (config.py `"1"`→`"0"`) per user 2026-06-16 — disable the
-retreat in production so the user can eval in X-Plane. With it OFF: HECA
-apron reconnects to stub B (corner 0.05 m), gap closes to 334 m² (the grass
-island only). `O4_APRON_EDGE_RETREAT=1` restores the retreat.
-
-⚠ OPEN / NEXT:
-* ⚠ **Suite NOT re-run after the default flip** (user said skip re-verify).
-  Last green = 6f/343p with retreat ON (this session). The flip disables
-  the geometry-mutating retreat for ALL airports — re-run `pytest tests/`
-  to confirm no grade regression at SPJC/CYXY/SPLP before relying on it.
-* **In-sim verdict (user testing now)**: rebuild HECA from dev
-  (`O4_AUTO_PATCH_REBUILD=1`, restart Ortho4XP) and eyeball (a) the stub-B
-  gap (gone) and (b) the **#198 road ramp** — it reverts from a cliff to a
-  graded ramp. If #198 must keep its cliff, the proper fix is to make the
-  retreat **SMARTER** (only fire where a ROAD is actually present, never at
-  a taxi-rect junction) instead of the blunt global OFF.
-* ★ Probes in `/tmp/probes/heca_*.py`: reproduce with O4_APT_SMOOTHING_PIX=4
-  (or bare now); `heca_pix4_retreat.py` traces the retreat before/after;
-  `cmp_patches.py` diffs the user's `Patches/+30+030/+30+031/
-  HECA_auto.patch.osm` vs `/tmp/HECA_emit.osm`. Gap at meter (-3565,-314) =
-  lat 30.106138 lon 31.397752. O4_RETREAT_DEBUG=1 for the retreat.
+OPEN / NEXT:
+* **In-sim verdict** (user testing): rebuild HECA from dev
+  (`O4_AUTO_PATCH_REBUILD=1`, restart Ortho4XP) — stub-B gap gone, #198 road
+  ramp graded. No remaining apron-retreat machinery to revisit.
+* ★ Probes in `/tmp/probes/heca_*.py`: reproduce standalone with bare build
+  now (config auto-loads pix=4); `cmp_patches.py` diffs the user's
+  `Patches/+30+030/+30+031/HECA_auto.patch.osm` vs `/tmp/HECA_emit.osm`. Gap
+  at meter (-3565,-314) = lat 30.106138 lon 31.397752.
 
 ## ★★★ 20260615-09/10 (2026-06-15→16, dev @089671d) — #312 SERVICE-JUNCTION + apt BEZIER SPLIT-HANDLE ★★★
 * **#312 (`f2296ef`)**: HECA service-road plaza (SVC29/35/36 junction) was
