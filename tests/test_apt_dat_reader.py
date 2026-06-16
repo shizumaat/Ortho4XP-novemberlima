@@ -154,6 +154,29 @@ class TestPavementParsing:
         assert pav.polygon.area > 0
         assert pav.polygon.is_valid
 
+    def test_split_handle_zero_length_span_no_spike(self):
+        # WED encodes a SPLIT bezier handle as a RUN of same-anchor nodes
+        # (a zero-length span).  ``_interpolate_contour`` must SKIP the
+        # degenerate span, not tessellate a self-intersecting spike across
+        # it — otherwise ``_parse_pavement``'s buffer(0) repair punches a
+        # spurious HOLE (losing real pavement, e.g. HECA taxiway fillets).
+        # A unit square whose top-right corner carries a split handle
+        # (two same-anchor 112 nodes, outgoing + incoming).
+        rows = [
+            ["111", "0.0000", "0.0000"],
+            ["111", "0.0000", "0.0010"],
+            ["112", "0.0010", "0.0010", "0.0010", "0.0014"],   # out handle
+            ["112", "0.0010", "0.0010", "0.0010", "0.0006"],   # in handle (split)
+            ["113", "0.0010", "0.0000"],
+        ]
+        ring = APR._interpolate_contour(rows, APR.DEFAULT_BEZIER_SEGMENTS)
+        if ring and ring[0] != ring[-1]:
+            ring.append(ring[0])
+        poly = Polygon(ring)
+        assert poly.is_valid          # no self-intersecting spike
+        assert poly.area > 0
+        assert len(poly.interiors) == 0   # no spurious hole punched
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Boundary parsing

@@ -1229,6 +1229,21 @@ def _interpolate_contour(contour: list[list[str]],
         if not out or out[-1] != a_xy:
             out.append(a_xy)
 
+        # Zero-length span between split-handle duplicates.  WED encodes a
+        # SPLIT bezier handle (independent in/out direction) as a RUN of
+        # same-anchor nodes — the point before the break carries the
+        # INCOMING handle, the point after the OUTGOING handle.  There is
+        # no curve to draw across the zero-length gap; the duplicates'
+        # handles already serve the adjacent real segments.  Without this
+        # skip the degenerate span tessellates into a self-intersecting
+        # SPIKE, which ``buffer(0)`` then repairs into a spurious HOLE
+        # (or, for larger crossings, a MultiPolygon whose smaller pieces
+        # are dropped) — losing real pavement (HECA's taxiway-fillet
+        # pavements parsed with a teardrop hole).  Mirrors the DSF
+        # reader's ``_interpolate_dsf_ring`` handling.
+        if a_xy == b_xy:
+            continue
+
         if a_ctrl is None and b_ctrl is None:
             # Straight line — nothing to interpolate, B will be added
             # next iteration.
