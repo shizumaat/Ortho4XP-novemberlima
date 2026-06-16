@@ -847,6 +847,20 @@ TERMINAL_NATURAL_LEVELS = _os.environ.get("O4_TERMINAL_NATURAL", "1") == "1"
 # to the TERMINAL_NATURAL_LEVELS behaviour (the whole feature is gated).
 APRON_BACK_EDGE_RAMPS = _os.environ.get("O4_APRON_BACK_RAMPS", "1") == "1"
 
+# APRON EDGE RETREAT (user ruling 2026-06-11, HECA #198 road cliff) — a
+# post-solve pass (``_retreat_route_pinned_apron_edges``) that, where an
+# apron edge is route-pinned above its own field equilibrium AND welded to
+# a neighbour, MOVES the apron polygon inward (10 m) to break the weld and
+# render a cliff face.  ★ It mutates GEOMETRY during the elevation solve.
+# Under a sharper DEM (e.g. apt_smoothing_pix=4) it FALSE-FIRES at plain
+# taxiway-rect junctions — at HECA it retreated apron #300 off taxiway B's
+# corners (30.1062366/31.3978542 and 30.1069018/31.3976827), opening a gap
+# between stub B and the apron that should not exist (no road there).
+# OFF = the apron stays welded to its rects (geometry no longer changes in
+# the solve); the #198 road cliff reverts to a graded ramp.  Default ON
+# pending the in-sim road-ramp verdict.
+APRON_EDGE_RETREAT = _os.environ.get("O4_APRON_EDGE_RETREAT", "1") == "1"
+
 # (s81) HANGAR PADS — docs/hangar_pads.md (user rulings 2026-06-12).
 # When ON, ``aeroway=hangar`` buildings are ALWAYS admitted into the
 # building-pad list alongside terminals and treated identically (weld,

@@ -302,7 +302,28 @@ def _load_airport_dem(lat0: float, lon0: float, override_dem=None):
     try:
         import numpy as _np  # noqa: F401
         from PIL import Image as _Image
-        pix = 8  # O4_Cfg_Vars apt_smoothing_pix default
+        # apt_smoothing_pix: this standalone branch (override_dem is None)
+        # must blur with the SAME radius Ortho4XP used to smooth the
+        # tile.dem it normally passes in — otherwise a non-default config
+        # (e.g. apt_smoothing_pix=4) gives the standalone path a smoother
+        # surface than production, changing the grade (and grade-driven
+        # geometry).  Read the live O4_Config_Utils value, with an env
+        # override for tests/probes; default 8 only when no config is
+        # loaded.
+        import os as _os_pix
+        pix = None
+        _pix_env = _os_pix.environ.get("O4_APT_SMOOTHING_PIX")
+        if _pix_env is not None:
+            try:
+                pix = int(_pix_env)
+            except ValueError:
+                pix = None
+        if pix is None:
+            try:
+                import O4_Config_Utils as _CFG_pix
+                pix = int(getattr(_CFG_pix, "apt_smoothing_pix", 8))
+            except Exception:
+                pix = 8
         ny, nx = dem.alt_dem.shape
         mask = _Image.new("L", (nx, ny), 255)
         dem.alt_dem = _DEM.smoothen(

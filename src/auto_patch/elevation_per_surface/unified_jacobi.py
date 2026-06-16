@@ -52,7 +52,7 @@ from collections import deque
 from shapely.errors import GEOSException, TopologicalError
 
 from auto_patch.config import (
-    APRON_BACK_EDGE_GRADE, APRON_BACK_EDGE_RAMPS,
+    APRON_BACK_EDGE_GRADE, APRON_BACK_EDGE_RAMPS, APRON_EDGE_RETREAT,
     APRON_CORRIDOR_GEODESIC, APRON_CORRIDOR_SEED_RADIUS_M,
     APRON_CORRIDOR_SMOOTH_GRADE, APRON_CORRIDOR_SMOOTH_RADIUS_M,
     NETWORK_PROFILE_MODEL, ROLE_GRADE_LIMITS, ROUTE_FIELD_LOCAL_WINDOW_M,
@@ -596,7 +596,7 @@ def solve(layout, icao: str,
     _mark("reconcile")
     n_terms, n_rects, n_juncs = _writeback(
         layout, elev, bucket_to_idx)
-    if NETWORK_PROFILE_MODEL:
+    if NETWORK_PROFILE_MODEL and APRON_EDGE_RETREAT:
         _retreat_route_pinned_apron_edges(
             layout, dem_ctx=(dem, tile_lat, tile_lon),
             bucket_to_idx=bucket_to_idx)
