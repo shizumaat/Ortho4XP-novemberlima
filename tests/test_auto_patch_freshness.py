@@ -180,7 +180,7 @@ def _drive_generate(tmp_path, monkeypatch, apt):
         lambda icao, xp_root, **kw: PavementLayout(
             icao=icao, anchor=(40.0, -100.0), apt_dat_path=str(apt)))
     monkeypatch.setattr(verification, "verify_and_log",
-                        lambda layout, icao: None)
+                        lambda layout, icao, **kw: None)
     _select(monkeypatch, apt)
 
     tile = types.SimpleNamespace(lat=40.0, lon=-100.0, dem=None)

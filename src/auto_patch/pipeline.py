@@ -2867,6 +2867,25 @@ def build_airport_pavement(icao: str, xplane_root: str,
                             # pav[1]).  CLIP the shorter rect to its
                             # non-overlapping remainder instead; drop
                             # only when nothing usable remains.
+                            #
+                            # CONTAINMENT (CYXY SVC7⊃SVC8): when one rect
+                            # (almost) fully contains the other, the
+                            # difference is a DONUT.  The donut survives to
+                            # the layout, but the pre-solve weld /
+                            # conformance rebuilds rings from the EXTERIOR
+                            # only (``_open_ring``) and silently FILLS the
+                            # hole — re-creating the very overlap the clip
+                            # removed (the 237 m² CYXY self-overlap).  The
+                            # contained rect adds no coverage the container
+                            # lacks, so DROP it whole and keep the container
+                            # intact: no donut, no coverage loss.
+                            if inter.area >= 0.9 * smaller_area:
+                                drop_c = (i if rect_i.area <= rect_j.area
+                                          else j)
+                                drop_idx.add(drop_c)
+                                if drop_c == i:
+                                    break
+                                continue
                             li, lj = ((i, j) if len_i < len_j
                                       or (abs(len_i - len_j) < 0.5
                                           and rect_i.area < rect_j.area)
@@ -2881,9 +2900,14 @@ def build_airport_pavement(icao: str, xplane_root: str,
                             if rem is not None and not rem.is_empty:
                                 cand = (rem.geoms if rem.geom_type
                                         == "MultiPolygon" else [rem])
+                                # Reject HOLED remainders too: a donut
+                                # passes the area floor but its hole is
+                                # dropped downstream (see above), so it is
+                                # not a usable non-overlapping piece.
                                 polys9 = [g for g in cand
                                           if g.geom_type == "Polygon"
-                                          and g.area >= 150.0]
+                                          and g.area >= 150.0
+                                          and len(g.interiors) == 0]
                                 if polys9:
                                     best_rem = max(polys9,
                                                    key=lambda g: g.area)

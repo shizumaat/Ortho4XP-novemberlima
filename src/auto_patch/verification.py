@@ -905,11 +905,58 @@ def run_grade_checks(layout):
             quiet=True, route_ctx=route_ctx_from_layout(layout))
 
 
+# Categories that are NOT user-actionable, so they are written to a
+# per-tile debug log for an engineer to track down rather than surfaced
+# as [verify] chatter:
+#   * overlap — all pavement is unioned downstream, so an overlap never
+#     reaches the mesh; a real one is OUR geometry bug, not source data.
+#   * source  — emitted pavement off its source means WE produced a shape
+#     that drifted off the source after modifying it, not a source problem
+#     (a genuine non-pavement polygon would simply be ignored upstream).
+#   * within  — we set every vertex elevation to be within the grade cap,
+#     independent of the DEM; a residual is a solver bug the user cannot
+#     fix from the source.
+_DEBUG_ONLY_CATEGORIES = ("overlap", "source", "within")
+
+
+def _write_verify_debug(path, layout, icao, overlaps, source, within,
+                        taxi_index, gdesc) -> None:
+    """Append the non-user-actionable verify findings (overlap / off-source
+    / within-shape grade) to the per-tile debug log at ``path`` — the full
+    lists, for an engineer to track down and fix.  No-op when ``path`` is
+    falsy or there is nothing to write; never raises."""
+    if not path or not (overlaps or source or within):
+        return
+    lines = [f"=== {icao} ==="]
+    for area, ia, ib, loc in overlaps:
+        lines.append(f"  OVERLAP {area:.1f} m² @ {loc}: "
+                     f"{describe_shape(layout, ia, taxi_index)} ∩ "
+                     f"{describe_shape(layout, ib, taxi_index)}")
+    for idx, area, frac, loc in source:
+        lines.append(f"  OFF-SOURCE {area:.0f} m² ({frac*100:.0f}% on "
+                     f"source) @ {loc}: "
+                     f"{describe_shape(layout, idx, taxi_index)}")
+    for v in sorted(within, key=lambda v: -v.grade_pct):
+        loc = f"{v.lat:.5f},{v.lon:.5f}" if v.lat is not None else "?,?"
+        lines.append(f"  WITHIN-SHAPE {v.grade_pct:.1f}% over "
+                     f"{v.distance_m:.1f} m @ {loc}: {gdesc(v.way_a)}")
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+    except Exception:                                  # pragma: no cover
+        pass
+
+
 # ── Build-time entry point ──────────────────────────────────────────
-def verify_and_log(layout, icao: str) -> dict:
+def verify_and_log(layout, icao: str, debug_log_path: str | None = None) -> dict:
     """Run every verification check on a freshly-built layout and LOG a
     diagnostic summary (never raises).  Returns a counts dict.  Problems
-    log at verbosity 0; a clean airport at verbosity 1."""
+    log at verbosity 0; a clean airport at verbosity 1.
+
+    The non-user-actionable categories (``overlap`` / ``source`` /
+    ``within``; see ``_DEBUG_ONLY_CATEGORIES``) are NOT printed — they are
+    appended to ``debug_log_path`` (the per-tile verify debug log) for an
+    engineer to track down."""
     overlaps = source = within = cross = steps = []
     try:
         overlaps = check_self_overlap(layout)
@@ -987,23 +1034,24 @@ def verify_and_log(layout, icao: str) -> dict:
                 pass
         return glabel_id._label(way) if glabel_id else "?"
 
-    tally = " ".join(f"{k}={v}" for k, v in counts.items() if v)
+    # Non-user-actionable findings → per-tile debug log, never user chatter.
+    _write_verify_debug(debug_log_path, layout, icao, overlaps, source,
+                        within, taxi_index, _gdesc)
+
+    # Only the user-actionable categories drive the [verify] output below.
+    if not sum(v for k, v in counts.items()
+               if k not in _DEBUG_ONLY_CATEGORIES):
+        UI.vprint(1, f"  [verify] {icao}: OK — no user-actionable issues "
+                     f"(see verify debug log for any overlap / off-source / "
+                     f"within-shape findings).")
+        return counts
+
+    tally = " ".join(f"{k}={v}" for k, v in counts.items()
+                     if v and k not in _DEBUG_ONLY_CATEGORIES)
     UI.lvprint(0,
         f"  [verify] {icao}: PATCH ISSUES — {tally}. "
         f"Likely apt.dat / DSF source problems — details below.")
 
-    if overlaps:
-        for area, ia, ib, loc in overlaps[:5]:
-            UI.lvprint(0, f"  [verify]   OVERLAP {area:.1f} m² @ {loc}: "
-                          f"{describe_shape(layout, ia, taxi_index)} ∩ "
-                          f"{describe_shape(layout, ib, taxi_index)}")
-        UI.lvprint(0, f"  [verify]     ↳ {_HINTS['overlap']}")
-    if source:
-        for idx, area, frac, loc in source[:5]:
-            UI.lvprint(0, f"  [verify]   OFF-SOURCE {area:.0f} m² "
-                          f"({frac*100:.0f}% on source) @ {loc}: "
-                          f"{describe_shape(layout, idx, taxi_index)}")
-        UI.lvprint(0, f"  [verify]     ↳ {_HINTS['source']}")
     if flat:
         for idx, detail, loc in flat[:5]:
             UI.lvprint(0, f"  [verify]   TERMINAL-FLAT @ {loc}: "
@@ -1045,12 +1093,6 @@ def verify_and_log(layout, icao: str) -> dict:
             UI.lvprint(0, f"  [verify]   CROSS-SHAPE {v.de_m:.2f} m @ {loc}: "
                           f"{_gdesc(v.way_a)} ↔ {_gdesc(v.way_b)}")
         UI.lvprint(0, f"  [verify]     ↳ {_HINTS['cross']}")
-    if within:
-        for v in sorted(within, key=lambda v: -v.grade_pct)[:5]:
-            loc = f"{v.lat:.5f},{v.lon:.5f}" if v.lat is not None else "?,?"
-            UI.lvprint(0, f"  [verify]   WITHIN-SHAPE {v.grade_pct:.1f}% over "
-                          f"{v.distance_m:.1f} m @ {loc}: {_gdesc(v.way_a)}")
-        UI.lvprint(0, f"  [verify]     ↳ {_HINTS['within']}")
     if steps:
         UI.lvprint(0, f"  [verify]   EDGE-STEPS: {len(steps)} vertical "
                       f"step(s) > 0.5 m between adjacent surfaces.")

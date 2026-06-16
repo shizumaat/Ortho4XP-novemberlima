@@ -249,6 +249,14 @@ def generate_auto_patches(tile, cifp_path: str,
     _saved_verbosity = UI.verbosity
     UI.verbosity = _cfg.LOG_VERBOSITY
 
+    # Per-tile verify DEBUG log: the non-user-actionable verify findings
+    # (overlap / off-source / within-shape grade — our geometry/solver bugs,
+    # not anything the user can fix in the source) are written here instead
+    # of being surfaced as [verify] chatter, for an engineer to track down.
+    # Truncated lazily on the first airport that verifies this build pass.
+    _verify_debug_path = os.path.join(patch_dir, "auto_patch_verify_debug.log")
+    _verify_debug_truncated = [False]
+
     # Lazy tile-level inputs: callables resolve on the FIRST airport
     # that needs a rebuild, at the tile's own verbosity so their log
     # output (e.g. "N buildings for ICAO") matches the eager-path
@@ -455,7 +463,14 @@ def generate_auto_patches(tile, cifp_path: str,
             # grade errors to the user; never aborts the build.
             _t_v = _time.time()
             try:
-                verify_and_log(layout, icao)
+                if not _verify_debug_truncated[0]:
+                    try:
+                        open(_verify_debug_path, "w").close()
+                    except OSError:
+                        pass
+                    _verify_debug_truncated[0] = True
+                verify_and_log(layout, icao,
+                               debug_log_path=_verify_debug_path)
             except _DRIVER_EXC as _ve:
                 UI.lvprint(0, "   Auto-patch: verification error for",
                            icao, ":", str(_ve))

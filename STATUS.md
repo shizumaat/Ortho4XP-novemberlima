@@ -1,5 +1,36 @@
 # Auto-Patch Status — 20260616 = HECA taxiway-B↔apron GAP root-caused (apron-edge-retreat + apt_smoothing_pix), #312 service-junction, apt bezier split-handle
 
+## ★★ 20260616-04 (2026-06-16, dev) — CYXY SVC7∩SVC8 SELF-OVERLAP FIXED + verify debug-log routing ★★
+Two things shipped this turn (memory: `cyxy_svc_donut_overlap.md`):
+1. **verify debug-log routing** (`verification.py` + `driver.py`): the
+   non-user-actionable verify categories (`overlap` / `source` / `within`)
+   no longer print as `[verify]` chatter — they're written to a per-tile
+   `<patch_dir>/auto_patch_verify_debug.log` for an engineer to track down
+   (user: these aren't user-fixable — overlaps get unioned away, off-source /
+   within-grade residuals are our geometry/solver bugs).
+2. **CYXY `test_no_self_overlap[CYXY]` (237 m² SVC8∩SVC7) FIXED**
+   (`pipeline.py` ROAD-vs-ROAD overlap-clip ~L2862). SVC8's hook rect is
+   built FULLY INSIDE SVC7's; the clip made SVC7 a DONUT, then
+   `enforce_conformance` rebuilt the ring from the EXTERIOR only and silently
+   FILLED the hole → re-created the overlap. Fix = containment guard (drop the
+   contained rect whole, keep the container) + reject holed clip-remainders.
+   Overlap 237→0, no coverage lost; geometry suite green.
+
+★★★ TODO (improvement recommendation, NOT done — latent footgun) ★★★
+**`enforce_conformance` / `_open_ring` (and the pre-solve weld) silently DROP
+polygon interior rings (holes) whenever a shape receives a T-junction vertex
+insertion** — `conformance.py:_open_ring` reads `poly.exterior.coords` only and
+`Polygon(new_ring)` at conformance.py:302 discards interiors (same behavior
+noted for the weld at pipeline.py:3776). This is exactly what re-created the
+CYXY self-overlap above; it was fixed AT THE SOURCE (don't produce a holed
+clip-remainder) rather than here. But the general hazard stands: **any shape
+that legitimately needs an interior ring will lose it the moment conformance
+inserts a vertex into it.** Not biting anything else today (holed airside
+shapes are not currently expected), so deferred. FIX when it next surfaces =
+teach `_open_ring` + the conformance ring-rebuild to carry `poly.interiors`
+through (rebuild `Polygon(new_exterior, [new_interior_rings])`), or assert
+no-holes at emit so a donut can never reach conformance silently.
+
 ## ★★★ 20260616 (2026-06-16, dev @<retreat-removed>) — APRON-EDGE-RETREAT GAP (function REMOVED) ★★★
 ★ FINAL STATE: `_retreat_route_pinned_apron_edges` is **DELETED** (user
 ruling: not needed, road ramp grades fine without it, nothing should mutate
