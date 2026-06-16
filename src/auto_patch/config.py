@@ -857,9 +857,11 @@ APRON_BACK_EDGE_RAMPS = _os.environ.get("O4_APRON_BACK_RAMPS", "1") == "1"
 # corners (30.1062366/31.3978542 and 30.1069018/31.3976827), opening a gap
 # between stub B and the apron that should not exist (no road there).
 # OFF = the apron stays welded to its rects (geometry no longer changes in
-# the solve); the #198 road cliff reverts to a graded ramp.  Default ON
-# pending the in-sim road-ramp verdict.
-APRON_EDGE_RETREAT = _os.environ.get("O4_APRON_EDGE_RETREAT", "1") == "1"
+# the solve); the #198 road cliff reverts to a graded ramp.  ★ DEFAULT OFF
+# (user 2026-06-16): the false-fire at taxiway junctions (HECA stub-B gap)
+# outweighs the #198 cliff; disabled in production for in-sim eval of the
+# road-ramp tradeoff.  O4_APRON_EDGE_RETREAT=1 restores the retreat.
+APRON_EDGE_RETREAT = _os.environ.get("O4_APRON_EDGE_RETREAT", "0") == "1"
 
 # (s81) HANGAR PADS — docs/hangar_pads.md (user rulings 2026-06-12).
 # When ON, ``aeroway=hangar`` buildings are ALWAYS admitted into the

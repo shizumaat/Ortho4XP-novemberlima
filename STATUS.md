@@ -1,4 +1,93 @@
-# Auto-Patch Status — 20260615-07 = BUILDING OUTLINE NARROW-GAP FILL (replaces the morphological close)
+# Auto-Patch Status — 20260616 = HECA taxiway-B↔apron GAP root-caused (apron-edge-retreat + apt_smoothing_pix), #312 service-junction, apt bezier split-handle
+
+## ★★★ 20260616-01 (2026-06-16, dev @1324893 + default-flip uncommitted) — APRON-EDGE-RETREAT GAP ★★★
+Branch `dev`. Picks up a user report: at HECA, **taxiway B (stub, the rect
+the user calls #130 in the in-sim patch) is disconnected from its apron by
+a gap** that "should be connected." Multi-turn root-cause; the user's
+intuition ("something is pushing the nodes away from the rect") was exactly
+right.
+
+★★ THE TRAP THAT COST THE WHOLE INVESTIGATION: my standalone probes never
+reproduced the gap (I kept measuring 334 m² unpaved; the user's PRODUCTION
+patch had 419). Cause = **`apt_smoothing_pix` mismatch**. The standalone DEM
+loader `_load_airport_dem` (used ONLY when `override_dem is None` — tests /
+tools / probes; production passes the pre-smoothed `tile_dem` and returns
+early) HARDCODED `pix=8`, but the user's `Ortho4XP.cfg` sets
+`apt_smoothing_pix=4`. Less smoothing → sharper terrain → steeper grade →
+the gap. ★ LESSON: when a standalone build won't reproduce an in-sim/
+production patch, suspect the DEM/config inputs (smoothing pixels), not the
+geometry code — geometry is DEM-independent EXCEPT through grade-driven
+passes. Repro the gap standalone with `O4_APT_SMOOTHING_PIX=4` (or just let
+it read the config — see fix 1).
+
+★★ ROOT CAUSE: **`_retreat_route_pinned_apron_edges`** (unified_jacobi.py
+~L8410, gated by NETWORK_PROFILE_MODEL) **mutates apron GEOMETRY during the
+elevation solve** — user flagged this as dangerous (geometry shouldn't
+change in elevation solving). It is intended for genuine ROAD CLIFFS (HECA
+#198: a switchback road climbing between an apron and taxiway S — break the
+apron↔taxiway weld and render a cliff). Where an apron edge is route-pinned
+>2 m above its field equilibrium AND welded/hugging a neighbour, it moves
+the apron polygon `_RETREAT_IN_M`=10 m inward to break the weld. Under the
+sharper pix=4 terrain it **FALSE-FIRES at the plain taxiway-B/C junction**:
+it retreated apron #300 off taxiway B's TWO corners — the user's exact
+coords **(30.1062366,31.3978542)** and **(30.1069018,31.3976827)** — corner
+distance 0.05 m → **7.75 m**, apron 105276 → 104376 m², gap 334 → **417 m²**
+(matches production 419). The unpaved "gap" the user saw IS this retreat,
+NOT: the narrow-fill, the hole-decompose slit, a dropped junction piece, the
+rects overlapping the DSF grass-island hole, or the bezier parse (all
+investigated + ruled out; the DSF teardrop grass island at the junction is
+real and correctly unpaved).
+
+WHAT WAS BUILT (committed @1324893):
+1. **pix fix** (`elevation.py` ~L305): the standalone DEM blur reads the
+   live `O4_Config_Utils.apt_smoothing_pix` (env override
+   `O4_APT_SMOOTHING_PIX`; default 8 only if no config loads). ★ `import
+   O4_Config_Utils` auto-loads `Ortho4XP.cfg`, so bare probes now read
+   pix=4 and reproduce production (417) with NO env var. Does NOT affect
+   production (override_dem path skips this branch). Suite stays 6f/343p
+   (now builds at pix=4).
+2. **`APRON_EDGE_RETREAT` gate** (`config.py`, env `O4_APRON_EDGE_RETREAT`)
+   + the call gated in `unified_jacobi.py` (`if NETWORK_PROFILE_MODEL and
+   APRON_EDGE_RETREAT:`). Committed ON.
+
+★ UNCOMMITTED (this is the handover edit): **`APRON_EDGE_RETREAT` default
+flipped ON→OFF** (config.py `"1"`→`"0"`) per user 2026-06-16 — disable the
+retreat in production so the user can eval in X-Plane. With it OFF: HECA
+apron reconnects to stub B (corner 0.05 m), gap closes to 334 m² (the grass
+island only). `O4_APRON_EDGE_RETREAT=1` restores the retreat.
+
+⚠ OPEN / NEXT:
+* ⚠ **Suite NOT re-run after the default flip** (user said skip re-verify).
+  Last green = 6f/343p with retreat ON (this session). The flip disables
+  the geometry-mutating retreat for ALL airports — re-run `pytest tests/`
+  to confirm no grade regression at SPJC/CYXY/SPLP before relying on it.
+* **In-sim verdict (user testing now)**: rebuild HECA from dev
+  (`O4_AUTO_PATCH_REBUILD=1`, restart Ortho4XP) and eyeball (a) the stub-B
+  gap (gone) and (b) the **#198 road ramp** — it reverts from a cliff to a
+  graded ramp. If #198 must keep its cliff, the proper fix is to make the
+  retreat **SMARTER** (only fire where a ROAD is actually present, never at
+  a taxi-rect junction) instead of the blunt global OFF.
+* ★ Probes in `/tmp/probes/heca_*.py`: reproduce with O4_APT_SMOOTHING_PIX=4
+  (or bare now); `heca_pix4_retreat.py` traces the retreat before/after;
+  `cmp_patches.py` diffs the user's `Patches/+30+030/+30+031/
+  HECA_auto.patch.osm` vs `/tmp/HECA_emit.osm`. Gap at meter (-3565,-314) =
+  lat 30.106138 lon 31.397752. O4_RETREAT_DEBUG=1 for the retreat.
+
+## ★★★ 20260615-09/10 (2026-06-15→16, dev @089671d) — #312 SERVICE-JUNCTION + apt BEZIER SPLIT-HANDLE ★★★
+* **#312 (`f2296ef`)**: HECA service-road plaza (SVC29/35/36 junction) was
+  an APRON touching only service roads; the service-junction re-role only
+  handled `role=="junction"`, so the runway-disconnected pass demoted it to
+  `groundside_pavement` and the 1 m clearance gap severed it from the roads.
+  FIX: extend the re-role (`pipeline.py` ~L3456) to also claim `role=="apron"`
+  shapes with no aircraft-pavement neighbour → becomes `service_junction`,
+  welded, graded as road. HECA re-role 9→10, groundside 6→5.
+* **apt bezier split-handle (`089671d`)**: `_interpolate_contour`
+  (`apt_dat_reader.py`) lacked the zero-length-span skip the DSF reader has;
+  WED SPLIT handles (same-anchor node runs) tessellated a self-intersecting
+  spike → `buffer(0)` punched spurious HOLES / dropped MultiPolygon pieces,
+  losing pavement. FIX: skip `a_xy == b_xy` spans (mirrors
+  `_interpolate_dsf_ring`). + unit test. NOTE: this was NOT the #130 gap (a
+  separate real bug found en route).
 
 ## ★★★ 20260615-07 (2026-06-15, dev @3f4fcb5) — NARROW-GAP FILL ★★★
 Branch `dev`. **COMMITTED.**  Reworked how gate-stand teeth are absorbed
