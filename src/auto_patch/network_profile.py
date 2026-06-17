@@ -78,11 +78,12 @@ class NetworkProfileField:
 
     __slots__ = ("nodes", "elev", "hard", "adj", "contacts", "demands",
                  "comp_of", "relax", "audit", "_segs", "_grid", "_cell",
-                 "band_lo", "band_hi", "aug", "prox")
+                 "band_lo", "band_hi", "aug", "prox", "road")
 
     def __init__(self):
         self.aug: set = set()
         self.prox: set = set()      # proximity-coupling edge pairs (i<j)
+        self.road: set = set()      # ground-vehicle ROAD edge pairs (i<j)
         self.nodes: List[Tuple[float, float]] = []
         self.elev: List[float] = []
         self.hard: List[bool] = []
@@ -875,6 +876,7 @@ def build_and_solve(
     # ── ROAD edges: scale stored lengths to the 4 % law (see the
     # ``road_lines`` docstring note).  Geometry-tagged (3 m buffer,
     # midpoint test) — provenance survives intersection splitting.
+    road_keys: set = set()
     if road_lines and road_cap > 0.0 and cap > 0.0 and road_cap > cap:
         try:
             from shapely.geometry import Point as _RPt
@@ -891,6 +893,7 @@ def build_and_solve(
                 if _rprep9.contains(
                         _RPt((xa9 + xb9) / 2.0, (ya9 + yb9) / 2.0)):
                     edge_w[ek] = edge_w[ek] * _rscale
+                    road_keys.add(ek)
         except Exception:
             pass
     # ── index the nodes (sorted keys → deterministic ids)
@@ -900,6 +903,9 @@ def build_and_solve(
     F.aug = {idx_of[kk] for kk in aug_keys}
     F.prox = {(min(idx_of[ka], idx_of[kb]), max(idx_of[ka], idx_of[kb]))
               for (ka, kb) in prox_keys}
+    F.road = {(min(idx_of[ka], idx_of[kb]), max(idx_of[ka], idx_of[kb]))
+              for (ka, kb) in road_keys
+              if ka in idx_of and kb in idx_of}
     F.nodes = [coord[kk] for kk in keys]
     n = len(F.nodes)
     F.adj = [[] for _ in range(n)]
@@ -1362,15 +1368,40 @@ def build_and_solve(
         INF9 = float("inf")
         on_taxi9 = [False] * n
         ap_only = [False] * n
-        for i in range(n):
-            x9, y9 = F.nodes[i]
-            try:
-                if taxi_test(x9, y9):
+        # TAXI-SLACK (user 2026-06-16): geometry emits rects only for SOME
+        # centerlines (apron-embedded ones get no rect), but ELEVATION/GRADING
+        # must use the FULL taxi-network graph — a centerline running through an
+        # apron (e.g. OMAA taxiway K3) is a real corridor the apron must grade
+        # to.  So a node is "on taxi" when it has an incident taxi-corridor edge
+        # in the GRAPH (any plain edge that is not a road / runway-midline /
+        # proximity coupling), not when it sits on emitted taxi PAVEMENT.
+        if taxi_slack:
+            for i in range(n):
+                if i in F.aug:
+                    continue
+                has_taxi = any(
+                    (min(i, j), max(i, j)) not in F.prox
+                    and (min(i, j), max(i, j)) not in F.road
+                    and j not in F.aug
+                    for (j, _w, _c) in F.adj[i])
+                if has_taxi:
                     on_taxi9[i] = True
-                elif apron_test(x9, y9):
-                    ap_only[i] = True
-            except Exception:                          # pragma: no cover
-                continue
+                else:
+                    try:
+                        if apron_test(*F.nodes[i]):
+                            ap_only[i] = True
+                    except Exception:                  # pragma: no cover
+                        continue
+        else:
+            for i in range(n):
+                x9, y9 = F.nodes[i]
+                try:
+                    if taxi_test(x9, y9):
+                        on_taxi9[i] = True
+                    elif apron_test(x9, y9):
+                        ap_only[i] = True
+                except Exception:                      # pragma: no cover
+                    continue
         # TAXI-pavement field segments (midpoint-classified, real lane
         # edges only — proximity couplings are not taxi paths).  The
         # plane is measured to the NEAREST serving segment by PHYSICAL
@@ -1385,6 +1416,14 @@ def build_and_solve(
         for i in range(n):
             for (j, w9, _c9) in F.adj[i]:
                 if j <= i or (i, j) in F.prox:
+                    continue
+                if taxi_slack:
+                    # full taxi-network graph: every plain corridor edge
+                    # (exclude roads + runway midlines), incl. apron-embedded
+                    # centerlines that emit no rect.
+                    if ((i, j) in F.road or i in F.aug or j in F.aug):
+                        continue
+                    taxi_segs9.append((i, j))
                     continue
                 (xa9, ya9) = F.nodes[i]
                 (xb9, yb9) = F.nodes[j]
@@ -1527,7 +1566,11 @@ def build_and_solve(
                         qx9 = xa9 + ux9 * f9
                         qy9 = ya9 + uy9 * f9
                         try:
-                            if not taxi_test(qx9, qy9):
+                            # under taxi_slack the foot is already on a taxi
+                            # GRAPH edge (taxi_segs9 is the full network),
+                            # incl. apron-embedded centerlines that fail the
+                            # emitted-pavement taxi_test.
+                            if not taxi_slack and not taxi_test(qx9, qy9):
                                 continue
                             if pp9.contains(_CP(qx9, qy9)):
                                 continue
@@ -1706,8 +1749,9 @@ def build_and_solve(
                         qx9 = xa9 + ux9 * f9
                         qy9 = ya9 + uy9 * f9
                         try:
-                            if not taxi_test(qx9, qy9):
-                                continue
+                            # taxi_segs9 is already the full taxi graph under
+                            # taxi_slack (this flex only runs then), so the foot
+                            # is on a corridor — no emitted-pavement gate.
                             if ppf.contains(_FP(qx9, qy9)):
                                 continue
                             ray9 = _FL([
