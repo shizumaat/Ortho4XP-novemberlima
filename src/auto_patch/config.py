@@ -946,6 +946,24 @@ INTERIOR_PATH_ENTRIES = _os.environ.get("O4_INTERIOR_PATH", "1") == "1"
 # apron residue along the runway).
 RUNWAY_SHOULDER_EXTENT = _os.environ.get("O4_SHOULDER_EXTENT", "1") == "1"
 
+# (2026-06-17) RUNWAY-SHOULDER SEGMENTATION REACH — docs/runway_
+# shoulder_detection.md.  The runway-segmentation breakpoint collector
+# splits the runway where adjacent pavement / taxiway polygon edges
+# CONTACT it, but its proximity budget is a FIXED generic ~7.6 m FAA
+# shoulder allowance.  When apt.dat row-100 declares an EXPLICIT
+# shoulder width (``shoulder_code // 100`` ≥ 1, e.g. OMAA's 20 m), the
+# real paved edge a taxiway connects to sits at runway-half + that
+# shoulder (50 m from a 60 m runway's centerline), well past the 42 m
+# the fixed budget reaches — so the exit's contact never becomes a
+# seam and the runway segment boundary lands at the wrong longitudinal
+# position (the OMAA 13R/31L gap).  ON ⇒ the contact budget for a
+# shouldered runway is its apt.dat-coded shoulder + chart tolerance, so
+# seams land where pavement meets the shoulder edge as defined in
+# apt.dat.  Runways with NO coded shoulder (code < 100) keep the 7.6 m
+# budget ⇒ byte-identical.  Env override ``O4_SHOULDER_SEGMENT``.
+RUNWAY_SHOULDER_SEGMENT = (
+    _os.environ.get("O4_SHOULDER_SEGMENT", "1") == "1")
+
 # (s79) ON-PAVEMENT service-road carve — docs/service_road_carve.md.
 # ★ USER RULINGS 2026-06-11: roads = apt.dat 1206 routes ONLY (no
 # polygon/OSM detection); only pavement narrower than the cross-section

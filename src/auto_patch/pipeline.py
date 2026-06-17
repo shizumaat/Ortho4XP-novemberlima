@@ -557,6 +557,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # shoulder edge), no runway seam fires at Lima's natural
     # pavement termination, and Lima's end junction degenerates
     # into a triangle.
+    from .config import RUNWAY_SHOULDER_SEGMENT
     RUNWAY_SHOULDER_M = 7.6
     CHART_TOL_M = 4.4
     INTERSECTION_PROX_M = RUNWAY_SHOULDER_M + CHART_TOL_M  # 12.0 m
@@ -627,8 +628,25 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # rect and treated the same (contacts there cut too); only the
         # CIFP threshold cut itself comes from the segmenter's anchored
         # fractions.
+        # Reach to the apt.dat-DECLARED shoulder edge.  ``rect`` is the
+        # row-100 rect, but where apt.dat row-100 codes an explicit
+        # shoulder width (``shoulder_code // 100`` ≥ 1) the runway is
+        # widened to it downstream and exits/taxiways physically connect
+        # at that shoulder edge — so the contact budget must span the
+        # coded shoulder (OMAA 20 m ⇒ reach 24.4 m), not the generic
+        # 7.6 m FAA allowance, or no seam fires there and the segment
+        # boundary lands at the wrong longitudinal position (the OMAA
+        # 13R/31L gap).  Runways with NO coded shoulder keep the FAA
+        # allowance (the reach for a shoulder apt.dat shows but doesn't
+        # size — SPJC's ~11 m row-110 boundary) ⇒ byte-identical.
+        prox_m = INTERSECTION_PROX_M
+        if RUNWAY_SHOULDER_SEGMENT:
+            coded_shoulder_m = r.shoulder_code // 100
+            if coded_shoulder_m >= 1:
+                prox_m = max(RUNWAY_SHOULDER_M,
+                             float(coded_shoulder_m)) + CHART_TOL_M
         try:
-            prox_band = rect_boundary.buffer(INTERSECTION_PROX_M)
+            prox_band = rect_boundary.buffer(prox_m)
         except _GEOM_EXC:
             prox_band = None
         if prox_band is not None:

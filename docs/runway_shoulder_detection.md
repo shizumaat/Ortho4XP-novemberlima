@@ -1,7 +1,75 @@
-# Robust runway shoulder detection + segmentation (variable, centerline-graph-aware)
+# Runway shoulder segmentation reach (segment at the apt.dat shoulder edge)
 
-**Status:** in progress (2026-06-16, dev). Replaces the brittle fixed-width
-shoulder widening. **Gate:** reuse/extend `RUNWAY_SHOULDER_EXTENT`
+**Status:** IMPLEMENTED (2026-06-17, dev). **Gate:** `RUNWAY_SHOULDER_SEGMENT`
+(`O4_SHOULDER_SEGMENT`, default ON); gate-off byte-identical to baseline
+(proven at OMAA).
+
+## ★ RESOLUTION (user 2026-06-17) — the scope is SEGMENTATION, not width
+The original plan below assumed the shoulder *width* was wrong and needed a
+variable, measured, centerline-graph-aware re-derivation. **That premise was
+wrong for OMAA.** Investigation found:
+- OMAA's runway shoulders have **NO vector source** — apt.dat row-110 has no
+  polygons along the runways, and the DSF pavement (1.5 M m²) is all 318 m away
+  on the apron/terminal side (zero coverage along either runway). The ~97 m /
+  ~75 m widths the user saw exist only in the orthophoto.
+- Both runways are **byte-identical in apt.dat**: `60.05 m` + shoulder code
+  `2029` (⇒ 20 m/side ⇒ 100 m). **The user confirmed apt.dat is authoritative:
+  treat both as 60 m runways with 20 m shoulders (100 m).** So the fixed
+  widening to 100 m is CORRECT and must NOT change. Measuring admitted pavement
+  gives a *misleading* answer (it catches the adjacent parallel D/E taxiway
+  pavement, not the shoulder).
+- The real bug is purely **segmentation**: the runway must be split where
+  pavement/taxiway polygon edges intersect the runway **shoulder edge** (the
+  100 m extent), not just the bare 60 m runway.
+
+### What was built
+The runway-segmentation breakpoint collector (`pipeline.py` ~L505-780) splits
+the runway where adjacent pavement boundaries CONTACT it, by intersecting each
+pavement polygon's boundary with a proximity band around the runway rect. That
+band used a **fixed generic 7.6 m** shoulder budget (`INTERSECTION_PROX_M`
+= 12 m), reaching only ~42 m from a 60 m runway's centerline — so an exit
+connecting at the 50 m shoulder edge was never seen, no seam fired there, and
+the segment boundary landed at the wrong longitudinal position (the OMAA
+13R/31L gap; wedge apron filled the misalignment, breaking segmentation).
+
+**Fix:** when apt.dat declares an explicit shoulder (`shoulder_code // 100 ≥ 1`),
+the per-runway contact budget becomes that coded shoulder + chart tolerance
+(`max(7.6, coded) + 4.4`), so seams land where pavement meets the shoulder edge
+as defined in apt.dat. Runways with no coded shoulder (code < 100: SPJC/CYXY/
+KPHL) keep the 7.6 m budget ⇒ **byte-identical**. Only OMAA + HECA are touched.
+
+### Why the FAA fallback stays (the 7.6 m is NOT a blind guess)
+The reach for a runway with no apt.dat-coded shoulder is the FAA standard
+shoulder (7.6 m) + chart tol = 12 m.  This is the *determination* for the case
+"apt.dat declares a shoulder SURFACE but no width" — SPJC row-100 codes shoulder
+surface 27/28, and its row-110 shoulder pavement sits ~11 m past the rect but is
+NOT folded into the runway width (it lives in the junction cut, by design).
+**It is load-bearing:** the "no generic — reach only the determined edge"
+variant was built and tested; it REGRESSES SPJC (`test_pavement_rests_on_
+source[SPJC]` fails — no seam fires at the shoulder's end).  And the
+pavement-detected cases (KPHL extent-merged ring, CYXY whole-polygon absorption)
+already fold their shoulder INTO the runway rect, so the rect is the determined
+edge everywhere it is consumed; their segmentation has no gap (KPHL inter-shape
+steps 0→0), so the tighter reach there only adds within-shape churn (+2) and
+makes HECA worse (79→87) — measured, rejected (user ruling 2026-06-17: keep
+surgical).  So: coded shoulder ⇒ reach to it; detected-and-folded shoulder ⇒
+already in the rect; shoulder present-but-unsized ⇒ FAA standard; truly no
+shoulder ⇒ also FAA standard (harmless, no pavement out there to catch).
+
+### Results (authoritative `tools/check_grade.py`)
+- **OMAA**: inter-shape STEPS 4→0 (vertex-to-edge 1→0, mid-edge 3→0 — the gap
+  signature), cross-shape 9→7; runway segments 31→48 (now split at the
+  shoulder-edge connections); the wedge apron at the wrong position is gone and
+  the runway seam shares a node with the connecting aprons. Within-shape apron
+  grade +4 (apron-interior grading is separate WIP, left alone).
+- **HECA**: inter-shape 0→0 (perfect), within-shape 81→79 (−2) — net neutral.
+- **SPJC/CYXY/KPHL**: byte-identical. Suite: no new failures (4 pre-existing).
+
+---
+
+## Original design plan (superseded by the resolution above)
+
+**Gate:** reuse/extend `RUNWAY_SHOULDER_EXTENT`
 (`O4_SHOULDER_EXTENT`); keep gate-off byte-identical until shipped.
 
 ## Problem (OMAA 13R/31L, user-reported)
