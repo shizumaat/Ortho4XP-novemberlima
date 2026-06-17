@@ -1,4 +1,78 @@
-# Auto-Patch Status — 20260616 = LPPT taxi-less-pack selector fix; HECA taxiway-B↔apron GAP root-caused (apron-edge-retreat + apt_smoothing_pix), #312 service-junction, apt bezier split-handle
+# Auto-Patch Status — 20260617 = JUNCTION CENTERLINE SPINE (slice junctions/aprons along taxi centerlines, pre-solve; gate O4_JCT_SPINE default OFF = byte-identical); MERGED to dev
+
+## ★★ 20260617-01 (2026-06-17) — JUNCTION-CENTERLINE-SPINE merged to dev (gate default OFF = byte-identical); OUTSTANDING ISSUES for followup ★★
+
+**Feature** (`docs/junction_centerline_spine.md`; branch `junction-centerline-spine`,
+merged here): junctions/aprons emit as one ring polygon, so X-Plane interpolates
+the interior between boundary-only vertices and a taxi centerline crossing the
+INTERIOR renders a WAVING surface instead of the corridor's ≤1.5% profile (OMAA
+taxiway H @ junction -10225: field flat 1.5%, emitted spiked to 3.6%). FIX = SLICE
+each junction/apron along every crossing taxi centerline so the centerline becomes
+a real shared EDGE with nodes on it. Gate `JUNCTION_CENTERLINE_SPINE` / env
+`O4_JCT_SPINE` **default OFF → gate-off byte-identical** (proven CYXY MD5 vs dev).
+Set `O4_JCT_SPINE=1` to enable; `O4_JCT_SPINE_DEBUG=1` logs the centerline source
+breakdown + per-shape skip reasons.
+
+**Architecture (key decisions, all user-directed):**
+1. **PURE GEOMETRY, PRE-SOLVE** — `apply_junction_centerline_spine` runs right
+   after the hole cuts (`_decompose_airside_holed_shapes`) and BEFORE
+   `_unify_airside_geometry` + the per-surface solver (pipeline ~L3826). It only
+   CUTS the polygons (pieces carry NO altitudes); the unify pass welds the new
+   shared nodes and the solver grades the sliced surface coherently. This killed
+   the post-solve "lateral field-vs-boundary seam" (CYXY within-shape grade
+   74→4) and the sloping-rect/self-overlap regressions the post-solve cap fought.
+2. **PAINTED (row-120) bezier centerlines** — the 1201/1202 routing graph is
+   straight node-to-node edges (NO bezier) and is DISCONNECTED at junction nodes,
+   so a turning taxiway crosses as 2 disjoint parts → no through-path → no slice.
+   The row-120 PAINTED lines carry the authored curves; they were only a fallback
+   (no 1201/1202). Now computed even WITH a network, stashed on
+   `layout._painted_centerlines`; `junction_spine._full_centerlines` PREFERS them,
+   fills gaps with uncovered 1201/1202 edges (de-dup 6 m / 70%) + discovered lanes.
+3. **GRID-NODED SPLIT** — cut endpoints land a few µm off the raw pre-solve
+   boundary, so polygonize/split left clean cuts UNSPLIT; `union_all(grid_size=0.01)`
+   re-nodes so they split. Took CYXY 19→30 junction/apron sliced.
+
+**Measured CYXY gate-ON:** sliced 30 junction/apron into ~92 pieces; within-shape
+grade 3; OMAA H grades the field's 1.50% through the junction (was 3.6% spike).
+
+**★ OUTSTANDING ISSUES (followup):**
+- **Conformance regressed with the extra slicing: 7 residual T-junction(s) /
+  7 edge crossing(s)** at CYXY (was 2/0) → Triangle4XP mesh slivers. The pre-solve
+  `_unify_airside_geometry` leaves some seams from the new pieces. NEEDS A LOOK —
+  this is the most important followup (slivers = mesh load).
+- **Off-source-piece tail** — where a junction/apron extends PAST `pav_union`,
+  slicing splits the off-source lobe into its own piece → fails `rests_on_source`
+  / `outside_pavement` / `have_source` (CYXY #92 ~733 m²@39% on source; #153
+  floating 0%-on-source). FIX = clip the slice to pavement / merge off-source
+  slivers into the adjacent on-pavement piece.
+- **Remaining single_face skips (~17 at CYXY)** — mostly GENUINE dead-end stubs
+  (taxiways that enter an apron/junction and STOP — no boundary-to-boundary
+  through-path). Could bridge compatible stubs or improve discovered-lane
+  coverage, but many are correctly un-sliced.
+- **Rect-end caps (user #3) — DEFERRED.** Idea: shrink each sloping rect 2 m at its
+  junction-facing flat ends and fill the strip with a flat cap so the junction's
+  node lands on the flat cap (clear of the rect's flat edge), retiring the
+  in-junction "rectangle cap" (`_make_cap`). First implementation REGRESSED
+  (sliced 30→22, within-shape grade 3→11) because the caps grade as SEPARATE flat
+  junctions (steps vs the sloping rect they should continue) and interfere with
+  the slice. Needs the cap to CONTINUE the rect's slope (corridor role /
+  `source_axis`), not be a flat junction — a solver/role question. Reverted.
+- **Gate-ON suite tail** (gate-OFF suite is clean at its standing reds): CYXY/SPJC/
+  SPLP `have_source`/`outside_pavement`/`rests_on_source`, `tile_cut_parity[SPLP]`,
+  `pavement_grade[CYXY]` (the residual within-shape). All flow from the off-source
+  tail + the conformance seams above.
+- **In-sim visual review pending** — user reviews the curved-junction slices
+  (painted curves) and the open items; review patch built standalone with
+  `tools/build_target_osm.py CYXY` (or `/tmp/build_apt.py`), `O4_JCT_SPINE=1`.
+
+**★ Key traps for the next session:** (1) the spine is PRE-SOLVE geometry now — do
+NOT reintroduce field-sampling / elevation in it (deleted `_node_z`/`_zfor`/
+`_weld_soft_nodes`); (2) `single_face` skips trace to the centerline NETWORK being
+disconnected (use painted curves) AND µm noding (use `grid_size`); (3) the spine
+must never place a node in a runway or on a sloping rect's flat edge
+(`test_no_vertex_on_sloping_rect_flat_edge`, EDGE_PROX 1.5 m) — runways keep the
+`_make_cap` rectangle cap, sloping rects rely on the inboard placement; (4) painted
+centerlines only computed when `O4_JCT_SPINE` is on (keeps gate-off byte-identical).
 
 ## ★★ 20260616-05 (2026-06-16, dev) — LPPT EMITTED NO PATCH: apt.dat selector picked a taxi-less Custom pack ★★
 User report: building tile **+38-010 fails to emit a patch for LPPT**
