@@ -66,19 +66,34 @@ Measured slack (probe `tools/`-style `/tmp/probe_slack.py`, uses
       4% back-edge ramps (still on) mask it at the acceptance step. Phase 2+3
       make the corridors flex and the aprons 1%.
 
-### Phase 2 — Corridor flex toward the target  (the core)
-- [ ] Inspect existing `term_polys` / `chord_grade` handling inside
-      `network_profile.build_and_solve` (already passed in) — extend vs add.
-- [ ] Per serving corridor derive a target value = L clamped into
-      `[L−g·d, L+g·d] ∩ [band_lo, band_hi]`; inject as a SOFT demand on those
-      corridor nodes (reuse the runway-flex `demands` / `extra_band_anchors`
-      plumbing). Re-solve so corridors flex toward the building while:
-      (a) staying inside their bands (runway-legal), (b) smooth along each
-      taxiway ≤1.5% (no new kinks — must be a re-solve, not per-node clamps),
-      (c) consistent at junctions, (d) a corridor serving TWO terminals
-      compromises.
-- [ ] Outer iteration (1–2): solve corridors → choose L → demand → re-solve.
-      Bounded; converge on band midpoints.
+### Phase 2 — Corridor flex toward the target  ◐ FIRST CUT (WIP, committed)
+- [x] Found the existing terminal pass in `build_and_solve` (~L1462): it is
+      LIFT-ONLY on apron LANES toward a low pad floor — does NOT move corridors.
+- [x] Added a `taxi_slack` param + a CORRIDOR-FLEX pass after the apron-lane
+      pass: per terminal, band-widened 1% window → plane P = median serving
+      corridor value clamped into it; flex each serving corridor NODE minimally
+      toward `[P−g·d, P+g·d]` within its band; re-converge cap/rate.
+- [x] Gate-off byte-identical (SPJC). Gate-on: SPJC building19 — flex fires 0
+      nodes and aprons are already ≤1.5% (within 13→3): **Phase 1's band-window
+      flatten ALONE solves the common case** (close corridors already ≈ the flat
+      level, far ones have grading room).
+- ⚠ **OMAA building2 (450k m² main terminal) is the STRESS CASE and NOT solved:**
+      flattens to 17.4 (out of canyon ✓) and 7 corridor nodes flex, but the
+      huge terminal's aprons break into 53% walls (apron #271/#332 at 21–25 m
+      vs the 17.4 pad). Two root causes to fix next session:
+      1. **Level choice too low.** Clamping the natural median (17.29) raises it
+         only to 17.4 (band floor) — the HIGH-terrain aprons (21–25) then can't
+         meet it. For a wide-straddle terminal the band-window MIDPOINT (~21)
+         or a min-max-apron level is better. (HECA earlier showed midpoint can
+         over-raise — needs a straddle-aware rule, not a blanket midpoint.)
+      2. **Flex too weak + apron doesn't follow.** Only 7 nodes moved; the
+         apron-internal solve still walls. Need: flex MORE serving corridors
+         (and the apron lanes) and re-grade the apron from the flexed field
+         (Phase 3), not just the corridor nodes. The 53% walls are
+         apron-vert↔apron-vert, i.e. the apron field itself isn't reconciling
+         to the flat pad.
+- [ ] Outer iteration (solve → choose L → flex → re-grade aprons), straddle-aware
+      level, junction/multi-terminal consistency. NOT done.
 
 ### Phase 3 — Aprons at 1% from the flexed field
 - [ ] Retarget the corridor-plane attractor (apron-follows §2b) to 1% default

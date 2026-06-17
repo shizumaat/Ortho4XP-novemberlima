@@ -5679,6 +5679,7 @@ def _network_field_stations(layout, elev, bucket_to_idx, chain_data,
             chord_grade=TERMINAL_CHORD_MAX_GRADE,
             chord_law_grade=_role_grade(ROLE_APRON),
             chord_reach=TERMINAL_CHORD_REACH_M,
+            taxi_slack=TAXI_SLACK_TERMINALS,
             rw_route_graph=_rw_route_graph_for_field(layout))
     except _GEOM_EXC:
         F = None

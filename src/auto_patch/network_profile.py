@@ -428,6 +428,7 @@ def build_and_solve(
         chord_grade: float = 0.0,
         chord_law_grade: float = 0.0,
         chord_reach: float = 0.0,
+        taxi_slack: bool = False,
         rw_route_graph=None,
 ) -> Optional[NetworkProfileField]:
     """Build the centerline graph and solve the field.
@@ -1656,6 +1657,141 @@ def build_and_solve(
             print(f"  [npf] apron-lane plane pass: {len(taxi_segs9)} "
                   f"taxi seg(s), {sum(ap_only)} apron-lane vert(s), "
                   f"{n_pl} clamped to the taxi plane")
+        # ── TAXI-SLACK CORRIDOR FLEX (user 2026-06-16, Phase 2; gate
+        # TAXI_SLACK_TERMINALS) ───────────────────────────────────────────
+        # Spend the corridor route-band slack so a flat building can sit among
+        # its serving taxiways with the apron in grade: flex each SERVING
+        # corridor node STEEPER toward the terminal plane P (the band-widened
+        # window's level, mirroring _terminal_chord_windows), only as far as
+        # the apron-grade constraint needs (within g*d of P) and never outside
+        # the node's runway band; then re-converge the cap/rate so the taxiway
+        # stays smooth and runway-legal.  The corridor takes the steepness,
+        # the apron stays at 1%.
+        if (taxi_slack and chord_grade > 0.0 and chord_reach > 0.0
+                and term_polys and taxi_segs9):
+            try:
+                from shapely.geometry import LineString as _FL
+                from shapely.geometry import Point as _FP
+                from shapely.prepared import prep as _fprep
+            except Exception:                              # pragma: no cover
+                term_polys = ()
+            g_f = chord_grade
+            node_target: Dict[int, float] = {}
+            for tp9 in term_polys:
+                if tp9 is None or tp9.is_empty:
+                    continue
+                try:
+                    ppf = _fprep(tp9)
+                    bx0, by0, bx1, by1 = tp9.bounds
+                except Exception:                          # pragma: no cover
+                    continue
+                serving = []          # (node, d_to_pad, corridor_foot_value)
+                for (ia9, ib9) in taxi_segs9:
+                    (xa9, ya9) = F.nodes[ia9]
+                    (xb9, yb9) = F.nodes[ib9]
+                    if (max(xa9, xb9) < bx0 - chord_reach
+                            or min(xa9, xb9) > bx1 + chord_reach
+                            or max(ya9, yb9) < by0 - chord_reach
+                            or min(ya9, yb9) > by1 + chord_reach):
+                        continue
+                    dx9, dy9 = xb9 - xa9, yb9 - ya9
+                    sl9 = math.hypot(dx9, dy9)
+                    if sl9 < 1.0:
+                        continue
+                    ux9, uy9 = dx9 / sl9, dy9 / sl9
+                    nx9, ny9 = -uy9, ux9
+                    k9 = max(1, int(sl9 // 12.0))
+                    for t9 in range(k9 + 1):
+                        f9 = min(t9 * 12.0, sl9)
+                        qx9 = xa9 + ux9 * f9
+                        qy9 = ya9 + uy9 * f9
+                        try:
+                            if not taxi_test(qx9, qy9):
+                                continue
+                            if ppf.contains(_FP(qx9, qy9)):
+                                continue
+                            ray9 = _FL([
+                                (qx9 - chord_reach * nx9,
+                                 qy9 - chord_reach * ny9),
+                                (qx9 + chord_reach * nx9,
+                                 qy9 + chord_reach * ny9)])
+                            if not ppf.intersects(ray9):
+                                continue
+                            inter9 = ray9.intersection(tp9)
+                            if inter9.is_empty:
+                                continue
+                            d9c = inter9.distance(_FP(qx9, qy9))
+                        except Exception:                  # pragma: no cover
+                            continue
+                        if d9c < 3.0:
+                            continue
+                        nn9 = ia9 if f9 < sl9 * 0.5 else ib9
+                        if F.hard[nn9]:
+                            continue
+                        v9c = (F.elev[ia9]
+                               + (f9 / sl9) * (F.elev[ib9] - F.elev[ia9]))
+                        serving.append((nn9, d9c, v9c))
+                if not serving:
+                    continue
+                # band-widened 1% window over the serving corridors
+                lo_b = max(F.band_lo[nn9] - g_f * d9c
+                           for (nn9, d9c, _v) in serving)
+                hi_b = min(F.band_hi[nn9] + g_f * d9c
+                           for (nn9, d9c, _v) in serving)
+                if lo_b > hi_b:
+                    continue          # genuine squeeze — building slopes
+                vs9 = sorted(v for (_n, _d, v) in serving)
+                p_term = min(max(vs9[len(vs9) // 2], lo_b), hi_b)
+                for (nn9, d9c, _v) in serving:
+                    cur9 = F.elev[nn9]
+                    tgt9 = min(max(cur9, p_term - g_f * d9c),
+                               p_term + g_f * d9c)
+                    tgt9 = min(max(tgt9, F.band_lo[nn9]), F.band_hi[nn9])
+                    if nn9 not in node_target or (
+                            abs(tgt9 - p_term)
+                            < abs(node_target[nn9] - p_term)):
+                        node_target[nn9] = tgt9
+            n_flex = 0
+            for nn9, tgt9 in node_target.items():
+                if abs(tgt9 - F.elev[nn9]) > 1e-6:
+                    F.elev[nn9] = tgt9
+                    n_flex += 1
+            if n_flex:
+                for _swf in range(_SOLVE_MAX_SWEEPS):
+                    movedf = 0.0
+                    for (a, b, w) in edge_list:
+                        limf = max(eff_of[a], eff_of[b]) * w + 1e-6
+                        diff = F.elev[a] - F.elev[b]
+                        exf = abs(diff) - limf
+                        if exf <= 0.0:
+                            continue
+                        sgn = 1.0 if diff > 0 else -1.0
+                        ha, hb = F.hard[a], F.hard[b]
+                        if ha and hb:
+                            continue
+                        if ha:
+                            nv = min(max(F.elev[b] + sgn * exf,
+                                         F.band_lo[b]), F.band_hi[b])
+                            movedf = max(movedf, abs(nv - F.elev[b]))
+                            F.elev[b] = nv
+                        elif hb:
+                            nv = min(max(F.elev[a] - sgn * exf,
+                                         F.band_lo[a]), F.band_hi[a])
+                            movedf = max(movedf, abs(nv - F.elev[a]))
+                            F.elev[a] = nv
+                        else:
+                            na = min(max(F.elev[a] - sgn * exf / 2.0,
+                                         F.band_lo[a]), F.band_hi[a])
+                            nb = min(max(F.elev[b] + sgn * exf / 2.0,
+                                         F.band_lo[b]), F.band_hi[b])
+                            movedf = max(movedf, abs(na - F.elev[a]),
+                                         abs(nb - F.elev[b]))
+                            F.elev[a], F.elev[b] = na, nb
+                    if movedf < _SOLVE_TOL_M:
+                        break
+            if _os.environ.get("O4_NPF_DEBUG") == "1":
+                print(f"  [npf] taxi-slack corridor flex: {n_flex} "
+                      f"corridor node(s) flexed toward terminal planes")
         _mark("apron-plane")
     F._build_sample_grid()
 
