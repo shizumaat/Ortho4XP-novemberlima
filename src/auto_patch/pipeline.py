@@ -1649,6 +1649,12 @@ def build_airport_pavement(icao: str, xplane_root: str,
             runway_union=layout.runway_union)
         if _discovered:
             osm_centerlines = list(osm_centerlines) + _discovered
+            # Persist the discovered (unreferenced TX) centerlines so the
+            # junction-spine pass can densify the FULL route graph through
+            # junctions.  ``layout.apt_taxi_centerlines`` was snapshotted
+            # ABOVE (before discovery), so it carries only apt.dat refs;
+            # the spine pass unions these in (see junction_spine.py).
+            layout._discovered_centerlines = list(_discovered)
             UI.vprint(1,
                 f"  [pav-builder] {icao}: discovered "
                 f"{len(_discovered)} unreferenced taxiway centerline(s).")

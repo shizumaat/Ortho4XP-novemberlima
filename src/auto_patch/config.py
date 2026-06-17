@@ -946,6 +946,24 @@ INTERIOR_PATH_ENTRIES = _os.environ.get("O4_INTERIOR_PATH", "1") == "1"
 # apron residue along the runway).
 RUNWAY_SHOULDER_EXTENT = _os.environ.get("O4_SHOULDER_EXTENT", "1") == "1"
 
+# (20260616) JUNCTION CENTERLINE SPINE — docs/junction_centerline_spine.md.
+# Junctions emit today as a single ring polygon with boundary-only
+# node_altitudes; X-Plane triangulates the interior by interpolating
+# between boundary vertices, so a taxi centerline crossing the junction
+# INTERIOR (where there are no vertices) waves instead of tracking the
+# solver's clean ≤1.5% corridor profile (OMAA taxiway H @ junction
+# -10225: field is a flat 1.5% but the emitted surface spikes to 3.6%).
+# When ON, each junction is re-emitted as a self-triangulated triangle
+# fan with interior "spine" nodes placed every ~SPINE_STEP_M along each
+# crossing centerline, each pinned to the network-profile field value
+# (layout._network_profile_field.sample) — so the rendered surface
+# follows the corridor.  Default OFF (gate-off byte-identical until
+# shipped); O4_JCT_SPINE=1 enables.
+JUNCTION_CENTERLINE_SPINE = _os.environ.get("O4_JCT_SPINE", "0") == "1"
+# Spacing (m) of spine nodes densified along each crossing centerline
+# inside a junction.
+SPINE_STEP_M = float(_os.environ.get("O4_JCT_SPINE_STEP_M", "12.0"))
+
 # (s79) ON-PAVEMENT service-road carve — docs/service_road_carve.md.
 # ★ USER RULINGS 2026-06-11: roads = apt.dat 1206 routes ONLY (no
 # polygon/OSM detection); only pavement narrower than the cross-section
