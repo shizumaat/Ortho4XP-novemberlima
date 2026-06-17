@@ -8,34 +8,36 @@ P3 (conformance) IN PROGRESS; P4 pending. Branch `junction-centerline-spine`.
 ## Progress / measured state (2026-06-17, PYTHONHASHSEED=0)
 **P2 SUCCESS — the decisive metric is fixed.** OMAA taxiway H @ junction `-10225`:
 emitted surface grade was `1.27 → 2.12 (bulge) → 0.13 (flat) → 3.58%` (the user's
-spike) at gate-OFF; at gate-ON it tracks the field's flat **1.50%** (max 1.67%, just
-the 0.1 m `node_altitudes` rounding over 12 m spacing). Emitted elevations match the
-field within ~0.05 m at every station.
+spike); at gate-ON it tracks the field's flat **1.50%** (max 1.68%).
 
-**Gate-OFF byte-identical** confirmed (CYXY MD5 match). Full suite runs gate-off so it
-stays at baseline; no gated-on tests yet (add in P4).
+**P3 DONE — the triangle fan was REPLACED by the user's rib-quad model** (`b9ea6cc`),
+which keeps the grade fix AND restores conformance to ~the ring baseline. The fan poked
+unconstrained-Delaunay chord edges across concave junction boundaries into neighbours
+(28 crossings) — abandoned. `src/auto_patch/junction_spine.py` now:
+- Densifies spine nodes along each crossing centerline at `SPINE_STEP_M`, **strictly
+  INBOARD** (first ~one interval in, NONE on the boundary). This is the key conformance
+  move — the crossing point is the interior of the feeding rect's flat edge where a node
+  is illegal (`test_no_vertex_on_sloping_rect_flat_edge`); inboard placement leaves the
+  entry as a gap polygon bounded by the rect's existing corners. (191→3 T-junctions.)
+- Casts a perpendicular **rib** from each spine node to the junction edge. A rib hitting
+  boundary shared with a sloping rect/runway (`near_hard`) reuses an existing corner; on
+  apron/free boundary it may land a new node.
+- Polygonizes `{spine polylines ∪ ribs}` into corridor quad strips + gap polygons.
+- **Conformance-heal:** `enforce_conformance(owner_roles={junction,apron})` welds the new
+  apron/junction-shared boundary nodes into the neighbour (collinear, altitude-neutral);
+  rects are excluded (sloping invariant) and stay conformant via the corner-reuse rule.
 
-**P3 costs at gate-ON (OMAA), still open** — gate-OFF → gate-ON:
-- conformance edge-crossings **2 → 28**, T-junctions 2 → 3 (→ Triangle4XP slivers; the
-  real regression). Likely cause: unconstrained `shapely.ops.triangulate` (Delaunay over
-  the convex hull) + centroid-inside filter leaves edges crossing concave-junction
-  boundaries / neighbour edges. P3 fix = constrained triangulation (the `triangle` lib or
-  a boundary-respecting CDT) instead of hull-Delaunay+centroid-filter.
-- within-shape **29 → 43**, route-band **1 → 77**: MOSTLY per-triangle counting inflation
-  (one junction → ~54 triangles, each counted separately — note duplicate entries
-  #2447≡#2459, #1436/#1437/#1486… same spot). PLUS a real **boundary-vs-interior seam**:
-  boundary vertex keeps the solver altitude, the adjacent interior spine node gets the
-  field value; where they disagree (0.5–0.7 m) the straddling edge-triangle steps 4.1–4.6%.
-  P3 fix candidate = also re-sample boundary vertices to the field where covered
-  (`gap < tol`), keeping solver altitude only on field-uncovered corners — but that touches
-  neighbour welds, so re-weld carefully.
-- 42 junctions → **2285 triangles** (mesh-load; measure with `tools/mesh_region_tris.py`
-  in P4; consider larger `SPINE_STEP_M` or fan-decimation away from the spine).
-- **Ordering bug to fix in P3:** `_insert_bridge_contacts_into_junctions` (pipeline L3920,
-  runs AFTER the spine pass) iterates `ROLE_JUNCTION` shapes — now 2285 triangles, not 42
-  rings; inserting a contact into one boundary triangle but not its edge-neighbour
-  manufactures a T-junction. Either run the spine pass AFTER that insert, or make the insert
-  skip already-triangulated junctions.
+**Measured (gate-ON):** OMAA conformance **191/51 (naive rib) → 3 T-junc / 5 crossings**
+(ring baseline 2/2); CYXY **conformance-clean (0/0)**; H grade tracks 1.50%. OMAA 45
+junctions → 1216 pieces (was 2285 fan triangles). **Gate-OFF byte-identical** (CYXY MD5
+match vs HEAD).
+
+**P4 OPEN:**
+- Residual 1 T-junc + 3 crossings over baseline at OMAA — chase to zero.
+- within-shape 29→55, route-band 1→36: mostly per-piece counting inflation (one junction
+  → ~27 pieces each counted) + the lateral spine-vs-boundary seam; confirm how much is real.
+- Multi-airport (SPJC/HECA/SPLP) conformance + grade; mesh-tri count
+  (`tools/mesh_region_tris.py`); determinism; add a gated-on test. Then gate ON.
 
 ## Problem (diagnosed)
 The corridor solver (`network_profile.py`) already solves every taxi centerline's
