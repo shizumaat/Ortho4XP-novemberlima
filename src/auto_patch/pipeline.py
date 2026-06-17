@@ -3816,6 +3816,16 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # see inside the monolithic shape.
         _drop_off_source_residue(layout, icao=icao)
 
+        # Junction/apron centerline-spine SLICE (gated JUNCTION_CENTERLINE_
+        # SPINE; docs/junction_centerline_spine.md).  PURE GEOMETRY, run
+        # HERE — right after the hole cuts and BEFORE _unify_airside_
+        # geometry + the solver — so the unify pass welds the new shared
+        # centerline nodes and the elevation solver grades the sliced
+        # surface coherently (the corridor profile is the solver's job).
+        # Gate-off = no-op (shapes survive unchanged → byte-identical).
+        from .junction_spine import apply_junction_centerline_spine
+        apply_junction_centerline_spine(layout)
+
         # ── Airside node-unification (refactor Phases 6+7, PRE-solve) ──
         # Weld + full conformance + final corner snaps, run HERE so the solver
         # sees the FINAL node-set and grades every shared vertex to ONE
@@ -3870,14 +3880,6 @@ def build_airport_pavement(icao: str, xplane_root: str,
             if _jrc and os.environ.get("O4_JCT_RIPPLE_DEBUG") == "1":
                 UI.vprint(1, f"  [pav-builder] {icao}: junction ring "
                              f"curvature smoothed {_jrc} free vertex(es).")
-            # Junction centerline-spine triangulation (20260616): re-emit
-            # each junction ring as a self-triangulated fan with interior
-            # spine nodes pinned to the network-profile field so a taxi
-            # centerline grades <=1.5% THROUGH the junction in the
-            # rendered surface (not just the solver field).  Gated; off =
-            # no-op (the ring polygons survive unchanged).
-            from .junction_spine import apply_junction_centerline_spine
-            apply_junction_centerline_spine(layout)
 
         if n_tile_delta != 0:
             UI.vprint(1,
