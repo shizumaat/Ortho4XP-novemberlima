@@ -964,6 +964,21 @@ RUNWAY_SHOULDER_EXTENT = _os.environ.get("O4_SHOULDER_EXTENT", "1") == "1"
 RUNWAY_SHOULDER_SEGMENT = (
     _os.environ.get("O4_SHOULDER_SEGMENT", "1") == "1")
 
+# (20260616) JUNCTION CENTERLINE SPINE — docs/junction_centerline_spine.md.
+# Junctions/aprons emit as a single ring polygon, so X-Plane interpolates
+# the interior between boundary-only node_altitudes and a taxi centerline
+# crossing the INTERIOR (no vertices on it) waves instead of tracking the
+# solver's clean ≤1.5% corridor profile (OMAA taxiway H @ junction -10225:
+# field flat 1.5% but the emitted surface spikes to 3.6%).  When ON, each
+# junction/apron is SLICED along every crossing taxi centerline (pre-solve
+# pure geometry) so the centerline becomes a real shared edge the solver
+# grades — see junction_spine.py.  Default OFF (gate-off byte-identical);
+# O4_JCT_SPINE=1 enables.
+JUNCTION_CENTERLINE_SPINE = _os.environ.get("O4_JCT_SPINE", "0") == "1"
+# Spacing (m) of spine nodes densified along each crossing centerline
+# inside a junction.
+SPINE_STEP_M = float(_os.environ.get("O4_JCT_SPINE_STEP_M", "12.0"))
+
 # (s79) ON-PAVEMENT service-road carve — docs/service_road_carve.md.
 # ★ USER RULINGS 2026-06-11: roads = apt.dat 1206 routes ONLY (no
 # polygon/OSM detection); only pavement narrower than the cross-section

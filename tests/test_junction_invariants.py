@@ -332,6 +332,27 @@ def test_junction_vertices_have_source(icao):
         gs_boundary = _uu([p.boundary for p in _gs_polys])
     GS_TOL = GROUNDSIDE_CLEARANCE_M + SHARED_VERTEX_TOL_M
 
+    # Spine source (user ruling 2026-06-17, docs/junction_centerline_-
+    # spine.md): the junction-centerline-spine feature (O4_JCT_SPINE)
+    # places INTERIOR nodes ON each crossing route-graph taxi centerline
+    # so the corridor profile renders through the junction.  Such a vertex
+    # IS source-anchored — to the centerline — though it is neither a
+    # neighbour corner nor a row-110 perimeter vertex.  Accept any junction
+    # vertex within CL_TOL of a route-graph centerline.  No-op gate-off:
+    # ring junctions carry no interior centerline vertices.
+    cl_geoms = []
+    for _csrc in ((getattr(layout, "apt_taxi_centerlines", []) or []),
+                  (getattr(layout, "_discovered_centerlines", []) or [])):
+        for _it in _csrc:
+            _ln = _it[0] if isinstance(_it, tuple) else _it
+            if _ln is not None and not _ln.is_empty:
+                cl_geoms.append(_ln)
+    cl_union = None
+    if cl_geoms:
+        from shapely.ops import unary_union as _uu_cl
+        cl_union = _uu_cl(cl_geoms)
+    CL_TOL = 1.0
+
     orphans: List[str] = []
     for idx, s in enumerate(layout.shapes):
         if s.role != "junction":
@@ -371,6 +392,16 @@ def test_junction_vertices_have_source(icao):
                 if d_g <= GS_TOL:
                     continue
                 d = min(d, d_g)
+            # Spine source: a node ON a route-graph centerline (see
+            # CL_TOL above).
+            if cl_union is not None:
+                try:
+                    d_c = cl_union.distance(Point(vx, vy))
+                except Exception:
+                    d_c = float("inf")
+                if d_c <= CL_TOL:
+                    continue
+                d = min(d, d_c)
             orphans.append(
                 f"{_shape_label(layout, idx, s)} "
                 f"vertex#{v_idx} at ({vx:.1f},{vy:.1f}) — "
