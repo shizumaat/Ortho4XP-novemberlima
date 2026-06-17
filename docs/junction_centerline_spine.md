@@ -5,7 +5,24 @@ P3 (conformance) IN PROGRESS; P4 pending. Branch `junction-centerline-spine`.
 **Gate:** `JUNCTION_CENTERLINE_SPINE` (config, env `O4_JCT_SPINE`, default OFF
 → gate-off byte-identical, proven CYXY MD5-match vs HEAD).
 
-## SLICE model (2026-06-17, current) — `397943d`
+## APRON slicing + overlap fix (2026-06-17) — `133f6b2`
+Extended the slice to ROLE_APRON (taxi centerlines grade through aprons).
+Fixes: honor hole rings (don't fill building cutouts); local edge-cap (not
+global-nearest vertex); **removed the conformance-heal** (it reshaped dense
+apron pieces into ~540 m² of SPJC self-overlap — proven heal-off → 0
+overlap; the slice is already conformant via existing-vertex caps).
+Gate-ON OMAA: 88 junction/apron sliced → 598 pieces, conformance 2/2,
+self-overlap 0.  Gate-OFF byte-identical.
+
+**Deferred to post-merge visual refinement (user — "situations like CYXY"):**
+off-source slice pieces where a junction/apron extends past `pav_union`
+(CYXY #116 594 m²@40%, #153 16 m²@0% → fails rests_on_source /
+outside_pavement / have_source); SPLP cross-tile cut parity; field-vs-
+boundary lateral grade seam (74 viol).  Plan: merge to dev, test visually,
+then decide (merge off-source slivers into the adjacent on-pavement piece;
+bound the lateral seam).
+
+## SLICE model (2026-06-17) — `397943d`
 User insight: ribs were over-engineering.  Slice the junction along each
 crossing taxi centerline (cap each end to the nearest EXISTING boundary
 vertex = the rect corner), insert the spine nodes, keep the boundary edges
