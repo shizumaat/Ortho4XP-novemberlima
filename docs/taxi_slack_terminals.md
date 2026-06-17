@@ -92,8 +92,28 @@ Measured slack (probe `tools/`-style `/tmp/probe_slack.py`, uses
          (Phase 3), not just the corridor nodes. The 53% walls are
          apron-vert↔apron-vert, i.e. the apron field itself isn't reconciling
          to the flat pad.
-- [ ] Outer iteration (solve → choose L → flex → re-grade aprons), straddle-aware
-      level, junction/multi-terminal consistency. NOT done.
+- [x] **BALANCED level (user 2026-06-16):** `_chord_window_slack_target` now
+      returns the MIDPOINT of the 1% fixed window (= the minimax level that
+      equalises the worst up/down apron demand — "balance the elevation load"),
+      clamped into the band window. DROPS the DEM-natural bias that sank OMAA
+      b2. Field flex plane P matches it. SPJC b19 → 28.9 (was 30.3), within
+      still 3. Gate-off byte-identical. (Both b19 & b2 have NO close corridors
+      <60 m — all serving taxiways are >150 m, so balance over the whole spread
+      is right.)
+- [ ] **Phase 3 apron-follow — THE remaining gap.** OMAA check_grade: gate-off
+      99 within (b2 sloped −5.3→16.2 = canyon) → gate-on 98 (b2 FLAT@17.4, out
+      of canyon ✓) but the COUNT barely moved. The flex moves corridors (16
+      nodes) yet the APRON SHAPES don't all re-grade to the flat pad: worst
+      walls apron #271/#332 (21.5↔29.2, 110%) are present gate-OFF too
+      (pre-existing, NOT terminal-caused) and the flex doesn't reach them. NEXT:
+      after the corridor flex, the apron field/geodesic-corridor pass must
+      re-grade the apron shapes from the flexed corridors + flat pad (the
+      existing apron-lane LIFT pass is lift-only and pad-floored low). Also:
+      flex MORE corridors (only 16 of OMAA's hundreds moved), and the
+      corridor-plane attractor / two-rate band must target 1% off the flexed
+      field. Investigate whether #271-class walls are decompose/narrow-strip
+      aprons that never follow any plane.
+- [ ] Junction / multi-terminal consistency; outer iteration. NOT done.
 
 ### Phase 3 — Aprons at 1% from the flexed field
 - [ ] Retarget the corridor-plane attractor (apron-follows §2b) to 1% default

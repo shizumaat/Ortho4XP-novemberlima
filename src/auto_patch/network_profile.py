@@ -1740,8 +1740,14 @@ def build_and_solve(
                            for (nn9, d9c, _v) in serving)
                 if lo_b > hi_b:
                     continue          # genuine squeeze — building slopes
-                vs9 = sorted(v for (_n, _d, v) in serving)
-                p_term = min(max(vs9[len(vs9) // 2], lo_b), hi_b)
+                # BALANCED plane = midpoint of the 1% fixed window (minimax of
+                # the up/down apron demand — "balance the elevation load"),
+                # clamped into the band window so the corridors can flex to it.
+                lo_w9 = max(v9 - g_f * d9
+                            for (_n, d9, v9) in serving)
+                hi_w9 = min(v9 + g_f * d9
+                            for (_n, d9, v9) in serving)
+                p_term = min(max(0.5 * (lo_w9 + hi_w9), lo_b), hi_b)
                 for (nn9, d9c, _v) in serving:
                     cur9 = F.elev[nn9]
                     tgt9 = min(max(cur9, p_term - g_f * d9c),

@@ -3408,25 +3408,33 @@ def _chord_window_target(win9, cur9):
 
 def _chord_window_slack_target(win9, cur9):
     """TAXI-SLACK target (user 2026-06-16, docs/taxi_slack_terminals.md): keep
-    the building FLAT and let the serving taxi corridors flex within their
-    runway route bands so the apron stays in grade.  Preference order —
-    1% with the corridors at their solved value (no flex) > 1% achievable by
-    flexing corridors within their bands > 1.5% by flex > slope.  The natural
-    level ``cur9`` is CLAMPED into the chosen window: if it sits below the
-    window (a DEM canyon) it is RAISED to the window floor (anti-canyon);
-    above, lowered to the ceiling; otherwise kept (least movement).  Returns
-    ``(target, law_pinned)``; ``None`` slopes only when even the 1.5% band
-    window inverts (no feasible taxi route band)."""
+    the building FLAT at the BALANCED level and let the serving taxi corridors
+    flex within their runway route bands so the apron stays in grade.
+
+    The balanced level = the MIDPOINT of the 1% fixed window ``[lo1, hi1]``
+    (corridors at their solved value).  When that window is feasible the
+    midpoint sits inside it (0 flex, the apron is ≤1% as-is); when it inverts
+    — a terminal straddling terrain — the midpoint is the MINIMAX level that
+    EQUALISES the worst up- and down-apron demand, i.e. "balances the
+    elevation load" so no corridor/apron is overloaded (user: select an
+    elevation that balances the load).  The DEM-settled ``cur9`` is NOT used —
+    the load is the corridors, not where the building's terrain happens to sit
+    (that bias sank OMAA building2 into its canyon).
+
+    The balanced level is then CLAMPED into the feasible band window so the
+    serving corridors can actually flex to it within their runway bands —
+    preferring the 1% band, falling to 1.5% only when 1% is infeasible even
+    with the full slack.  Returns ``(target, law_pinned)``; ``None`` slopes
+    only when even the 1.5% band window inverts (no feasible taxi route
+    band)."""
     lo1, hi1, lo_l, hi_l, _n, lo_b1, hi_b1, lo_b15, hi_b15 = win9
-    # 1% with corridors as solved — best, no flex needed.
-    if lo1 <= hi1:
-        return min(max(cur9, lo1), hi1), True
-    # 1% achievable by flexing the serving corridors within their bands.
+    bal = 0.5 * (lo1 + hi1)
+    # 1% apron achievable (corridors at value, or by flexing within band).
     if lo_b1 <= hi_b1:
-        return min(max(cur9, lo_b1), hi_b1), True
+        return min(max(bal, lo_b1), hi_b1), True
     # 1.5% by flex — only when 1% is infeasible even with the full slack.
     if lo_b15 <= hi_b15:
-        return min(max(cur9, lo_b15), hi_b15), True
+        return min(max(bal, lo_b15), hi_b15), True
     return None, False
 
 
