@@ -51,17 +51,20 @@ Measured slack (probe `tools/`-style `/tmp/probe_slack.py`, uses
 - [ ] Config gate `TAXI_SLACK_TERMINALS` (default OFF, env `O4_TAXI_SLACK`).
 - [ ] Confirm gate-off byte-identical vs `dev@de15311` (SPJC + HECA, seed 0).
 
-### Phase 1 — Band-aware feasibility window
-- [ ] In `_terminal_chord_windows`: per serving corridor add band-widened
+### Phase 1 — Band-aware feasibility window  ✅ DONE (commit on branch)
+- [x] In `_terminal_chord_windows`: per serving corridor add band-widened
       bounds `[band_lo − g·d, band_hi + g·d]` at g=1% and g=1.5% (sample the
-      field band at the corridor foot). Return them in the window tuple.
-- [ ] `_chord_window_*`: choose flat L = natural level clamped into the 1% band
-      window (fall to 1.5% band window only if 1% inverts; slope only if 1.5%
-      band inverts). Bias L to (a) least corridor movement, (b) prefer RAISING
-      over sinking (anti-canyon).
-- [ ] Verify buildings pick good flat targets (SPJC b19 ~29, OMAA b2 ~21).
-      NOTE: aprons still steep here — corridors haven't moved. Not shippable
-      alone; this only sets the target.
+      field band at the corridor foot). Window tuple grew 5→9; all 4 consumers
+      (combine, `_chord_window_midpoint`/`_target`, validator) updated.
+- [x] `_chord_window_slack_target(win9, cur9)`: 1% fixed > 1% band > 1.5% band
+      > slope; clamp natural level into the chosen window (raises out of a
+      canyon, lowers from a peak, else keeps — least movement + anti-canyon).
+- [x] Gate-off BYTE-IDENTICAL vs de15311 (SPJC seed 0, proven).
+- [x] Gate-on: SPJC building19 FLAT @30.3 (was sloped); OMAA building2 FLAT
+      @17.4 (was sloped −5.3→+16.4 = the CANYON — now raised out of it).
+- ⚠ As expected, aprons still steep here — corridors haven't moved yet, and the
+      4% back-edge ramps (still on) mask it at the acceptance step. Phase 2+3
+      make the corridors flex and the aprons 1%.
 
 ### Phase 2 — Corridor flex toward the target  (the core)
 - [ ] Inspect existing `term_polys` / `chord_grade` handling inside

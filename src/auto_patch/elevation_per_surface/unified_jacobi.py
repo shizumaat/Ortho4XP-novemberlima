@@ -59,6 +59,7 @@ from auto_patch.config import (
     ROUTE_FIELD_MODEL, ROUTE_NOISE_FRAC, RUNWAY_END_FRACTION,
     RUNWAY_END_GRADE, RUNWAY_MAX_GRADE, SURFACE_FAIRING,
     SURFACE_FAIRING_MAX_MOVE_M, TAXI_CORRIDOR_PROFILE,
+    TAXI_SLACK_TERMINALS,
     TAXIWAY_MAX_GRADE_CHANGE_PER_M, TERMINAL_LEAF_LEVELS,
     TERMINAL_CHORD_MAX_GRADE, TERMINAL_CHORD_REACH_M,
     TERMINAL_NATURAL_LEVELS,
@@ -2446,7 +2447,9 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                 w9c = (w4 if w9c is None else
                        (max(w9c[0], w4[0]), min(w9c[1], w4[1]),
                         max(w9c[2], w4[2]), min(w9c[3], w4[3]),
-                        w9c[4] + w4[4]))
+                        w9c[4] + w4[4],
+                        max(w9c[5], w4[5]), min(w9c[6], w4[6]),
+                        max(w9c[7], w4[7]), min(w9c[8], w4[8])))
             law9 = False
             if w9c is not None:
                 # PHASE A (user 2026-06-14): the terminal level is the
@@ -2454,9 +2457,16 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                 # taxi-corridor-facing edge with the corridors in grade —
                 # i.e. the MIDDLE of the corridor-facing 1 % chord window,
                 # NOT the DEM/settled median.  (DEM is irrelevant here.)
-                tgt9, law9 = (_chord_window_midpoint(w9c)
-                              if APRON_BACK_EDGE_RAMPS
-                              else _chord_window_target(w9c, lvl9))
+                # TAXI-SLACK: the band-widened window lets the building stay
+                # flat where the fixed-value window inverts — the serving
+                # corridors flex within their route bands (Phase 2 drives
+                # them there); the apron still meets the pad at 1%/1.5%.
+                if TAXI_SLACK_TERMINALS:
+                    tgt9, law9 = _chord_window_slack_target(w9c, lvl9)
+                elif APRON_BACK_EDGE_RAMPS:
+                    tgt9, law9 = _chord_window_midpoint(w9c)
+                else:
+                    tgt9, law9 = _chord_window_target(w9c, lvl9)
                 if tgt9 is None:
                     # LAW-infeasible squeeze: no flat level can hold
                     # even 1.5 % to every serving taxiway — the user
@@ -3107,8 +3117,12 @@ def _terminal_chord_windows(layout, nodes, shape_constraints, n):
     NETWORK-FIELD samples at the centerline foot; apron-lane portions
     are EXCLUDED (a neighbour's gate lane re-imports the bowl this
     rule exists to catch).  Returns ``{shape_constraints index:
-    (lo1, hi1, lo_law, hi_law, n_chords)}`` for terminal entries with
-    at least one chord."""
+    (lo1, hi1, lo_law, hi_law, n_chords, lo_b1, hi_b1, lo_b15, hi_b15)}`` for
+    terminal entries with at least one chord — the first five are the
+    fixed-value windows (corridors at their solved elevation) at 1% and 1.5%;
+    the last four are the TAXI-SLACK band-widened windows at 1% and 1.5%
+    (corridors free to flex within their route bands; ``±inf`` when the gate is
+    off)."""
     npf_t = (getattr(layout, "_network_profile_field", None)
              if NETWORK_PROFILE_MODEL else None)
     if npf_t is None or nodes is None or layout is None:
@@ -3127,6 +3141,13 @@ def _terminal_chord_windows(layout, nodes, shape_constraints, n):
     g_t = TERMINAL_CHORD_MAX_GRADE
     g_law_t = _role_grade(ROLE_APRON)
     reach_t = TERMINAL_CHORD_REACH_M
+    # TAXI-SLACK: also track BAND-widened windows — per serving corridor
+    # [band_lo - g*d, band_hi + g*d] at the 1% preference and 1.5% law rates.
+    # The band is how far the corridor may flex within its runway route band
+    # (npf_t.sample_band), so a band window stays feasible where the
+    # fixed-value window inverts: the corridor takes the steepness, the apron
+    # stays in grade.  Only computed under the gate (else byte-identical).
+    slack_t = TAXI_SLACK_TERMINALS and hasattr(npf_t, "sample_band")
     term_polys = [s.polygon for s in layout.shapes
                   if s.role == ROLE_BUILDING
                   and s.polygon is not None
@@ -3204,6 +3225,9 @@ def _terminal_chord_windows(layout, nodes, shape_constraints, n):
         bx0, by0, bx1, by1 = poly4.bounds
         lo_w, hi_w, n_ch = float("-inf"), float("inf"), 0
         lo_l, hi_l = float("-inf"), float("inf")
+        # band-widened windows (TAXI-SLACK): 1% pref + 1.5% law
+        lo_b1, hi_b1 = float("-inf"), float("inf")
+        lo_b15, hi_b15 = float("-inf"), float("inf")
         _dbg_t9 = (_os.environ.get("O4_TERM_DEBUG2") == "1"
                    and sc4.get("ref") == _os.environ.get("O4_CHORD_REF"))
         _rej9 = {"bbox": 0, "onpad": 0, "apron": 0, "noray": 0,
@@ -3304,12 +3328,40 @@ def _terminal_chord_windows(layout, nodes, shape_constraints, n):
                     lo_l = lo_c
                 if hi_c < hi_l:
                     hi_l = hi_c
+                if slack_t:
+                    bl4, bh4, bg4 = npf_t.sample_band(qx4, qy4)
+                    if bl4 is not None and bg4 <= 10.0:
+                        # corridor may flex anywhere in [bl4, bh4]; the band
+                        # window is the chosen value's reach widened by both
+                        # band ends.
+                        if bl4 - g_t * d4 > lo_b1:
+                            lo_b1 = bl4 - g_t * d4
+                        if bh4 + g_t * d4 < hi_b1:
+                            hi_b1 = bh4 + g_t * d4
+                        if bl4 - g_law_t * d4 > lo_b15:
+                            lo_b15 = bl4 - g_law_t * d4
+                        if bh4 + g_law_t * d4 < hi_b15:
+                            hi_b15 = bh4 + g_law_t * d4
+                    else:
+                        # no band here → fall back to the fixed value so this
+                        # corridor still binds (band can't be looser than value)
+                        if v4 - g_t * d4 > lo_b1:
+                            lo_b1 = v4 - g_t * d4
+                        if v4 + g_t * d4 < hi_b1:
+                            hi_b1 = v4 + g_t * d4
+                        if v4 - g_law_t * d4 > lo_b15:
+                            lo_b15 = v4 - g_law_t * d4
+                        if v4 + g_law_t * d4 < hi_b15:
+                            hi_b15 = v4 + g_law_t * d4
                 n_ch += 1
         if _dbg_t9:
             print(f"[chord] {sc4.get('ref')} n_ch={n_ch} rejects={_rej9} "
-                  f"win1%[{lo_w:.1f},{hi_w:.1f}] law[{lo_l:.1f},{hi_l:.1f}]")
+                  f"win1%[{lo_w:.1f},{hi_w:.1f}] law[{lo_l:.1f},{hi_l:.1f}] "
+                  f"band1%[{lo_b1:.1f},{hi_b1:.1f}] "
+                  f"band1.5%[{lo_b15:.1f},{hi_b15:.1f}]")
         if n_ch:
-            out[k4] = (lo_w, hi_w, lo_l, hi_l, n_ch)
+            out[k4] = (lo_w, hi_w, lo_l, hi_l, n_ch,
+                       lo_b1, hi_b1, lo_b15, hi_b15)
     return out
 
 
@@ -3320,7 +3372,7 @@ def _chord_window_midpoint(win9):
     settled value.  Falls back to the law-rate window midpoint when the 1 %
     demands conflict, and to ``(None, False)`` (slope) when even the law window
     is infeasible (genuine squeeze).  Returns ``(target, law_pinned)``."""
-    lo1, hi1, lo_l, hi_l, _n = win9
+    lo1, hi1, lo_l, hi_l, _n, *_ = win9
     if lo1 <= hi1:
         return 0.5 * (lo1 + hi1), True
     if lo_l <= hi_l:
@@ -3345,12 +3397,36 @@ def _chord_window_target(win9, cur9):
     law window is infeasible → ``(None, False)`` (genuine squeeze —
     the grade-grouping / slope fallback decides).  Returns
     ``(target, law_pinned)``."""
-    lo1, hi1, lo_l, hi_l, _n = win9
+    lo1, hi1, lo_l, hi_l, _n, *_ = win9
     if lo1 <= hi1:
         return min(max(cur9, lo1), hi1), True
     if lo_l <= hi_l:
         mid1 = 0.5 * (lo1 + hi1)
         return min(max(mid1, lo_l), hi_l), True
+    return None, False
+
+
+def _chord_window_slack_target(win9, cur9):
+    """TAXI-SLACK target (user 2026-06-16, docs/taxi_slack_terminals.md): keep
+    the building FLAT and let the serving taxi corridors flex within their
+    runway route bands so the apron stays in grade.  Preference order —
+    1% with the corridors at their solved value (no flex) > 1% achievable by
+    flexing corridors within their bands > 1.5% by flex > slope.  The natural
+    level ``cur9`` is CLAMPED into the chosen window: if it sits below the
+    window (a DEM canyon) it is RAISED to the window floor (anti-canyon);
+    above, lowered to the ceiling; otherwise kept (least movement).  Returns
+    ``(target, law_pinned)``; ``None`` slopes only when even the 1.5% band
+    window inverts (no feasible taxi route band)."""
+    lo1, hi1, lo_l, hi_l, _n, lo_b1, hi_b1, lo_b15, hi_b15 = win9
+    # 1% with corridors as solved — best, no flex needed.
+    if lo1 <= hi1:
+        return min(max(cur9, lo1), hi1), True
+    # 1% achievable by flexing the serving corridors within their bands.
+    if lo_b1 <= hi_b1:
+        return min(max(cur9, lo_b1), hi_b1), True
+    # 1.5% by flex — only when 1% is infeasible even with the full slack.
+    if lo_b15 <= hi_b15:
+        return min(max(cur9, lo_b15), hi_b15), True
     return None, False
 
 
@@ -3368,7 +3444,8 @@ def _warn_terminal_chord_law(layout, nodes, elev, shape_constraints,
     wins = _terminal_chord_windows(layout, nodes, shape_constraints, n)
     n_warn = 0
     msgs = []
-    for k4, (lo1, hi1, lo_l, hi_l, n_ch) in sorted(wins.items()):
+    for k4, (lo1, hi1, lo_l, hi_l, n_ch,
+             lo_b1, hi_b1, lo_b15, hi_b15) in sorted(wins.items()):
         sc4 = shape_constraints[k4]
         vals4 = sorted(elev[m] for m in sc4["nodes"] if m < n)
         if not vals4:
@@ -3380,22 +3457,30 @@ def _warn_terminal_chord_law(layout, nodes, elev, shape_constraints,
         # edge-connected complex sits outside one member's 1 % window
         # by design, and that is not a defect.  Both windows
         # infeasible → arbitration residue, debug note only.
-        if lo_l > hi_l:
+        # TAXI-SLACK: a flat building sits inside the BAND-widened window
+        # (the corridors flex to it), so assert that wider window — flat
+        # within it is compliant, not a +Δ-from-fixed-value defect.
+        if TAXI_SLACK_TERMINALS:
+            lo_chk4, hi_chk4, tag4 = lo_b15, hi_b15, "band"
+        else:
+            lo_chk4, hi_chk4, tag4 = lo_l, hi_l, "law"
+        if lo_chk4 > hi_chk4:
             if _tdbg:
                 print(f"[term] chord-law {ref4}: windows "
                       f"1%[{lo1:.2f},{hi1:.2f}] "
-                      f"law[{lo_l:.2f},{hi_l:.2f}] INFEASIBLE "
+                      f"law[{lo_l:.2f},{hi_l:.2f}] "
+                      f"band1.5%[{lo_b15:.2f},{hi_b15:.2f}] INFEASIBLE "
                       f"(squeeze, {n_ch} chords) med={med4:.2f}")
             continue
-        lo_w, hi_w, tag4 = lo_l, hi_l, "law"
+        lo_w, hi_w = lo_chk4, hi_chk4
         dev4 = max(lo_w - med4, med4 - hi_w, 0.0)
         if _tdbg:
             dev1 = max(lo1 - med4, med4 - hi1, 0.0) \
                 if lo1 <= hi1 else None
             print(f"[term] chord-law {ref4}: med={med4:.2f} "
-                  f"law window [{lo_w:.2f},{hi_w:.2f}] "
+                  f"{tag4} window [{lo_w:.2f},{hi_w:.2f}] "
                   f"1%[{lo1:.2f},{hi1:.2f}] ({n_ch} chords) "
-                  f"law-dev={dev4:.2f} 1%-dev="
+                  f"{tag4}-dev={dev4:.2f} 1%-dev="
                   f"{'squeezed' if dev1 is None else f'{dev1:.2f}'}")
         if dev4 > 0.25:
             pts4 = [nodes[m] for m in sc4["nodes"] if m < n]
