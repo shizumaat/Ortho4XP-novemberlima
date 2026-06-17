@@ -78,6 +78,7 @@ __all__ = [
     "APRON_CORRIDOR_SEED_RADIUS_M",
     "APRON_BACK_EDGE_GRADE",
     "APRON_BACK_EDGE_RAMPS",
+    "TAXI_SLACK_TERMINALS",
     "WRITE_ARBITRATION",
     "TERMINAL_LEAF_LEVELS",
     "TERMINAL_NATURAL_LEVELS",
@@ -846,6 +847,17 @@ TERMINAL_NATURAL_LEVELS = _os.environ.get("O4_TERMINAL_NATURAL", "1") == "1"
 # 2026-06-13, for in-sim eval); O4_APRON_BACK_RAMPS=0 disables → byte-identical
 # to the TERMINAL_NATURAL_LEVELS behaviour (the whole feature is gated).
 APRON_BACK_EDGE_RAMPS = _os.environ.get("O4_APRON_BACK_RAMPS", "1") == "1"
+
+# TAXI-NETWORK SLACK for flat terminals (user ruling 2026-06-16, docs/
+# taxi_slack_terminals.md).  Replaces the back-edge-ramp philosophy: instead of
+# letting the APRON grade at 4% to keep a building flat, the serving taxi
+# CORRIDORS flex STEEPER within their runway-anchored route bands so the apron
+# stays at 1% (1.5% only when 1% is infeasible even after flexing).  A building
+# straddling terrain — whose serving corridors sit at very different elevations
+# — stays flat at a level the band-widened chord window allows, raised out of
+# any DEM canyon; it slopes only when even the 1.5% band window inverts.
+# Default OFF until shipped (gate-off byte-identical).  O4_TAXI_SLACK=1 enables.
+TAXI_SLACK_TERMINALS = _os.environ.get("O4_TAXI_SLACK", "0") == "1"
 
 # (apron-edge-retreat REMOVED 2026-06-16, user ruling): a post-solve pass
 # (`_retreat_route_pinned_apron_edges`) used to move apron polygons inward
