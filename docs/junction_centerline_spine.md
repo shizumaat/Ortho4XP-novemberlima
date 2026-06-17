@@ -5,6 +5,33 @@ P3 (conformance) IN PROGRESS; P4 pending. Branch `junction-centerline-spine`.
 **Gate:** `JUNCTION_CENTERLINE_SPINE` (config, env `O4_JCT_SPINE`, default OFF
 → gate-off byte-identical, proven CYXY MD5-match vs HEAD).
 
+## PAINTED curves + grid-noded split (2026-06-17) — `cf2e0a6`
+Two user-directed fixes so junctions/aprons actually slice where taxiways
+turn through them:
+- **Painted (row-120) bezier centerlines.**  The 1201/1202 routing graph is
+  straight node-to-node edges (NO bezier) and is often DISCONNECTED at a
+  junction node, so a turning taxiway crosses as 2 disjoint parts → no
+  through-path → no slice.  The row-120 PAINTED lines carry the authored
+  curves (continuous arcs) — they were only a fallback (no 1201/1202).  Now
+  computed even WITH a network and stashed on ``layout._painted_centerlines``;
+  ``_full_centerlines`` PREFERS them and fills gaps with the uncovered
+  1201/1202 edges (de-dup 6 m / 70%).
+- **Grid-noded split.**  Cut endpoints land a few µm off the raw pre-solve
+  boundary, so polygonize/split left clean cuts unsplit.
+  ``union_all(grid_size=0.01)`` re-nodes so they split.
+Measured CYXY gate-ON: sliced **19 → 30** junction/apron; within-shape grade
+3; gate-OFF byte-identical.  Remaining skips are mostly genuine dead-end
+stubs.  ``O4_JCT_SPINE_DEBUG=1`` logs source + skip reasons.
+
+**DEFERRED — rect-end caps (user #3).**  Idea: shrink each sloping rect 2 m
+at its junction-facing flat ends and fill the strip with a flat cap, so the
+junction's node lands on the flat cap (clear of the rect edge), no pentagon
+cap.  First implementation REGRESSED (sliced 30→22, grade 3→11) because the
+caps grade as separate flat junctions (steps vs the sloping rect) and
+interfere with the slice.  Needs the cap to CONTINUE the rect's slope
+(corridor role / source_axis), not be a flat junction — a solver/role
+question.  Reverted; revisit.
+
 ## PRE-SOLVE move — the architecture fix (2026-06-17) — `1b5894e`
 User direction: the centerline slice is GEOMETRY; move it pre-solve and
 let the solver own grade.  `apply_junction_centerline_spine` now runs
