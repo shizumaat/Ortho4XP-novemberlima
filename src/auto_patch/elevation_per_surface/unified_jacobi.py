@@ -950,7 +950,11 @@ def _apron_back_band_nodes(layout, bucket_to_idx):
 
     Returns a set of global node indices (empty when the gate is off / no
     buildings)."""
-    if not APRON_BACK_EDGE_RAMPS:
+    if not APRON_BACK_EDGE_RAMPS or TAXI_SLACK_TERMINALS:
+        # TAXI-SLACK supersedes back-edge ramps: there is NO relaxed back band
+        # (the apron never grades at 4%).  Every apron vert is plane-attracted
+        # to the FLEXED corridor plane and capped at the 1.5% law / 1% pref —
+        # the corridors took the steepness, so the apron stays in grade.
         return set()
     cano = layout.canonical_points
 
@@ -2407,6 +2411,30 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                         parent9[ra9] = rb9
                 else:
                     node_first9[m9] = k9
+        # TAXI-SLACK (user 2026-06-16, "balance load across the taxi
+        # NETWORK"): buildings closer than _INTER_TERMINAL_ADJ_M share apron
+        # frontage, so they CANNOT each sit flat at a different level — the
+        # apron between them would wall.  Cluster them (proximity union) so the
+        # group takes ONE load-balanced level over its COMBINED serving
+        # corridors.  This replaces the pairwise co-level/slope device (which
+        # oscillated at OMAA's secondary cluster) with a single coherent level.
+        if TAXI_SLACK_TERMINALS and nodes is not None:
+            pts_of9 = [[nodes[m9] for m9 in term_scs9[k9]["nodes"]
+                        if m9 < n] for k9 in range(len(term_scs9))]
+            for k9a in range(len(term_scs9)):
+                pa = pts_of9[k9a]
+                if not pa:
+                    continue
+                for k9b in range(k9a + 1, len(term_scs9)):
+                    if _findp(k9a) == _findp(k9b):
+                        continue
+                    pb = pts_of9[k9b]
+                    if not pb:
+                        continue
+                    gmin = min(math.hypot(xa - xb, ya - yb)
+                               for (xa, ya) in pa for (xb, yb) in pb)
+                    if gmin <= _INTER_TERMINAL_ADJ_M:
+                        parent9[_findp(k9a)] = _findp(k9b)
         comps9: dict = {}
         for k9 in range(len(term_scs9)):
             comps9.setdefault(_findp(k9), []).append(k9)

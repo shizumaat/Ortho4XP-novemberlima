@@ -115,12 +115,26 @@ Measured slack (probe `tools/`-style `/tmp/probe_slack.py`, uses
       aprons that never follow any plane.
 - [ ] Junction / multi-terminal consistency; outer iteration. NOT done.
 
-### Phase 3 — Aprons at 1% from the flexed field
-- [ ] Retarget the corridor-plane attractor (apron-follows §2b) to 1% default
-      (1.5% only where the band forced it).
-- [ ] Retire the five 4% back-edge-ramp touch-points + the back-band machinery
-      (or keep gated under the old flag for fallback).
-- [ ] Flatten-acceptance metric: accept when apron ≤1% (≤1.5% where forced).
+### Phase 3 — Aprons follow the flat pad  ◐ MOSTLY DONE
+- [x] **Back-band OFF under TAXI_SLACK** (`_apron_back_band_nodes` returns ∅):
+      no 4% relaxed strip — every apron vert is plane-attracted to the FLEXED
+      corridor plane and capped 1.5%/1%. (OMAA 98→91.)
+- [x] **NETWORK cluster balancing** (user: "balance load across the taxi
+      NETWORK"): proximity-union buildings within `_INTER_TERMINAL_ADJ_M` (50 m)
+      into one cluster that takes ONE load-balanced level over its COMBINED
+      serving corridors. Replaces the pairwise co-level/slope device that
+      OSCILLATED (OMAA building29 flip-flopped 21.9↔29.2 between two
+      differently-served neighbours). ★ KEY: adjacent buildings CANNOT each be
+      flat at their own level — the apron between them walls; the cluster MUST
+      share a level. (OMAA 91→**57**; the pre-existing 110% walls #271/#332/#333
+      GONE — they were terminal-cluster aprons.)
+- [x] Measured (gate-on vs baseline, gate-off byte-identical): **SPJC 2** ·
+      **OMAA 99→57** · **HECA 85→73 + mid-edge steps 2→0** — all improve.
+- [ ] **Remaining (~57 OMAA):** dominated by junction `-10225` (a junction
+      inside a terminal cluster that did NOT co-level with it → 1.7 m internal
+      step, ~8 violations) + minor aprons (#235/#238 at 3–8%). NEXT: junctions
+      embedded in a terminal cluster should follow the cluster level; flex more
+      corridors; check the small residual aprons.
 
 ### Phase 4 — Validation & tuning
 - [ ] SPJC b19 flat + aprons ≤1%; OMAA b2 raised ~21 m out of canyon; HECA /
