@@ -1014,6 +1014,16 @@ _INTER_TERMINAL_GAP_M = 400.0
 # one level, the apron grading to meet the lowered end.
 _INTER_TERMINAL_ADJ_M = 50.0
 
+# TAXI_SLACK_TERMINALS: max min-vertex gap for two terminals to be candidates
+# for one shared (co-levelled) cluster.  Within this reach they share apron
+# frontage and CAN be considered for co-levelling, BUT they only actually merge
+# when the apron between them cannot bridge their independent balanced levels at
+# <= the apron grade (|ΔL| > apron_grade * gap).  A string of buildings spaced
+# along a long corridor whose levels step gently (apron <= 1.5%) therefore stays
+# INDEPENDENT and the apron slopes between them — only buildings whose level gap
+# the apron can't span share one level.
+_TERMINAL_CLUSTER_REACH_M = 250.0
+
 # APRON_BACK_EDGE_RAMPS: max law-window INVERSION (metres) for which a terminal
 # still flattens (at the inverted-window midpoint) instead of sloping — a mild
 # serving-corridor conflict the user wants flat; larger conflicts slope.
@@ -2411,33 +2421,6 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                         parent9[ra9] = rb9
                 else:
                     node_first9[m9] = k9
-        # TAXI-SLACK (user 2026-06-16, "balance load across the taxi
-        # NETWORK"): buildings closer than _INTER_TERMINAL_ADJ_M share apron
-        # frontage, so they CANNOT each sit flat at a different level — the
-        # apron between them would wall.  Cluster them (proximity union) so the
-        # group takes ONE load-balanced level over its COMBINED serving
-        # corridors.  This replaces the pairwise co-level/slope device (which
-        # oscillated at OMAA's secondary cluster) with a single coherent level.
-        if TAXI_SLACK_TERMINALS and nodes is not None:
-            pts_of9 = [[nodes[m9] for m9 in term_scs9[k9]["nodes"]
-                        if m9 < n] for k9 in range(len(term_scs9))]
-            for k9a in range(len(term_scs9)):
-                pa = pts_of9[k9a]
-                if not pa:
-                    continue
-                for k9b in range(k9a + 1, len(term_scs9)):
-                    if _findp(k9a) == _findp(k9b):
-                        continue
-                    pb = pts_of9[k9b]
-                    if not pb:
-                        continue
-                    gmin = min(math.hypot(xa - xb, ya - yb)
-                               for (xa, ya) in pa for (xb, yb) in pb)
-                    if gmin <= _INTER_TERMINAL_ADJ_M:
-                        parent9[_findp(k9a)] = _findp(k9b)
-        comps9: dict = {}
-        for k9 in range(len(term_scs9)):
-            comps9.setdefault(_findp(k9), []).append(k9)
         # ★ PERPENDICULAR-CHORD WINDOW CLAMP (user 2026-06-12, re-armed
         # after the field-side fixes): the inherit target clamps into
         # the complex's intersected serving-taxiway window when it is
@@ -2453,6 +2436,60 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                  if nodes is not None else {})
         win_of9 = {id(shape_constraints[k4]): w4
                    for k4, w4 in wins9.items()}
+
+        def _combine_win9(members):
+            w = None
+            for k9 in members:
+                w4 = win_of9.get(id(term_scs9[k9]))
+                if w4 is None:
+                    continue
+                w = (w4 if w is None else
+                     (max(w[0], w4[0]), min(w[1], w4[1]),
+                      max(w[2], w4[2]), min(w[3], w4[3]), w[4] + w4[4],
+                      max(w[5], w4[5]), min(w[6], w4[6]),
+                      max(w[7], w4[7]), min(w[8], w4[8])))
+            return w
+
+        # TAXI-SLACK NETWORK clustering (user 2026-06-16): two nearby terminals
+        # co-level ONLY when the apron between them cannot bridge their
+        # INDEPENDENT balanced levels at the apron grade — i.e.
+        # |ΔL| > apron_grade·gap.  A string of buildings spaced along a long
+        # corridor whose balanced levels step gently (apron ≤ 1.5%) stays
+        # INDEPENDENT (the apron slopes between them); only buildings whose
+        # level gap the apron can't span merge into one shared level.  This is
+        # NOT "all near buildings to one elevation".
+        if TAXI_SLACK_TERMINALS and nodes is not None:
+            comps0: dict = {}
+            for k9 in range(len(term_scs9)):
+                comps0.setdefault(_findp(k9), []).append(k9)
+            pts_of0: dict = {}
+            lvl_of0: dict = {}
+            for root0, members0 in comps0.items():
+                pts0 = [nodes[m9] for k9 in members0
+                        for m9 in term_scs9[k9]["nodes"] if m9 < n]
+                pts_of0[root0] = pts0
+                w0 = _combine_win9(members0)
+                if w0 is not None:
+                    lvl_of0[root0], _ = _chord_window_slack_target(w0, 0.0)
+            g_apr9 = _role_grade(ROLE_APRON)
+            roots0 = [r for r in comps0
+                      if pts_of0.get(r) and lvl_of0.get(r) is not None]
+            for ia in range(len(roots0)):
+                ra = roots0[ia]
+                pa, la = pts_of0[ra], lvl_of0[ra]
+                for ib in range(ia + 1, len(roots0)):
+                    rb = roots0[ib]
+                    if _findp(ra) == _findp(rb):
+                        continue
+                    pb, lb = pts_of0[rb], lvl_of0[rb]
+                    gmin = min(math.hypot(xa - xb, ya - yb)
+                               for (xa, ya) in pa for (xb, yb) in pb)
+                    if (gmin <= _TERMINAL_CLUSTER_REACH_M
+                            and abs(la - lb) > g_apr9 * max(gmin, 1.0)):
+                        parent9[_findp(ra)] = _findp(rb)
+        comps9: dict = {}
+        for k9 in range(len(term_scs9)):
+            comps9.setdefault(_findp(k9), []).append(k9)
         entries9: list = []  # [nodes(list), level | None, refs, law]
         for members9 in comps9.values():
             nodes_c9: set = set()
@@ -2533,7 +2570,15 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                     if (APRON_BACK_EDGE_RAMPS and back_band9)
                     else _role_grade(ROLE_APRON))
         slack_pad9 = cap_pad9 * 40.0
-        if nodes is not None and len(entries9) > 1:
+        # TAXI-SLACK: the NETWORK clustering above already merged the terminals
+        # that must co-level (apron can't bridge their gap); everything else is
+        # INTENTIONALLY independent (the apron slopes ≤1.5% between).  The
+        # pairwise co-level/slope device fights that (it over-raised OMAA
+        # building28 21→26.8 into a neighbour's level → apron strain → revert),
+        # so it is skipped under the gate.
+        if TAXI_SLACK_TERMINALS:
+            pass
+        elif nodes is not None and len(entries9) > 1:
             pair_gap9: dict = {}
             for a8 in range(len(entries9)):
                 for b8 in range(a8 + 1, len(entries9)):
@@ -3463,7 +3508,13 @@ def _chord_window_slack_target(win9, cur9):
     # 1.5% by flex — only when 1% is infeasible even with the full slack.
     if lo_b15 <= hi_b15:
         return min(max(bal, lo_b15), hi_b15), True
-    return None, False
+    # Even the 1.5% band window inverts — no flat level grades ≤1.5% to every
+    # serving corridor even with full slack.  The building still stays FLAT
+    # (user: "all buildings at whatever elevation minimizes grade") at the
+    # least-violation level = the midpoint of the (inverted) 1.5% band window;
+    # the apron carries the small residual past 1.5% rather than the building
+    # sloping.
+    return 0.5 * (lo_b15 + hi_b15), True
 
 
 def _warn_terminal_chord_law(layout, nodes, elev, shape_constraints,

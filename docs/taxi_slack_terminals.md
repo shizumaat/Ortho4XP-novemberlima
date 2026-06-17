@@ -119,22 +119,29 @@ Measured slack (probe `tools/`-style `/tmp/probe_slack.py`, uses
 - [x] **Back-band OFF under TAXI_SLACK** (`_apron_back_band_nodes` returns ∅):
       no 4% relaxed strip — every apron vert is plane-attracted to the FLEXED
       corridor plane and capped 1.5%/1%. (OMAA 98→91.)
-- [x] **NETWORK cluster balancing** (user: "balance load across the taxi
-      NETWORK"): proximity-union buildings within `_INTER_TERMINAL_ADJ_M` (50 m)
-      into one cluster that takes ONE load-balanced level over its COMBINED
-      serving corridors. Replaces the pairwise co-level/slope device that
-      OSCILLATED (OMAA building29 flip-flopped 21.9↔29.2 between two
-      differently-served neighbours). ★ KEY: adjacent buildings CANNOT each be
-      flat at their own level — the apron between them walls; the cluster MUST
-      share a level. (OMAA 91→**57**; the pre-existing 110% walls #271/#332/#333
-      GONE — they were terminal-cluster aprons.)
+- [x] **CONDITIONAL network clustering** (user 2026-06-16: do NOT force all near
+      buildings to one elevation — a string of buildings along a long corridor
+      should step gently, the apron sloping ≤1.5% between them). Two terminals
+      co-level ONLY when within `_TERMINAL_CLUSTER_REACH_M` (250 m) AND the apron
+      can't bridge their INDEPENDENT balanced levels at the apron grade
+      (|ΔL| > apron_grade·gap). Computes per-complex independent levels first,
+      then conditional union. Replaces the pairwise co-level that OSCILLATED.
+      The old pairwise device is SKIPPED under the gate (it over-raised
+      building28 21→26.8 into a neighbour). `_chord_window_slack_target` now
+      returns a flat COMPROMISE (inverted-band midpoint) instead of sloping —
+      buildings stay flat. VERIFIED on OMAA: building24/25 → 16.2/17.2 (apron
+      1.68% between), building17/18/28/31 step 21.9→23.6 (0.25–0.51%), while
+      genuinely-tight groups share a level (building21/22/33 @13.9, b19/35
+      @22.1). NOT "all near buildings same elevation".
 - [x] Measured (gate-on vs baseline, gate-off byte-identical): **SPJC 2** ·
-      **OMAA 99→57** · **HECA 85→73 + mid-edge steps 2→0** — all improve.
-- [ ] **Remaining (~57 OMAA):** dominated by junction `-10225` (a junction
-      inside a terminal cluster that did NOT co-level with it → 1.7 m internal
-      step, ~8 violations) + minor aprons (#235/#238 at 3–8%). NEXT: junctions
-      embedded in a terminal cluster should follow the cluster level; flex more
-      corridors; check the small residual aprons.
+      **OMAA 99→57** (110% walls gone; 20 flat / 8 sloped buildings) ·
+      **HECA 85→78 + mid-edge steps 2→0** — all improve.
+- [ ] **Remaining (~57 OMAA):** junction `-10225` inside a terminal cluster
+      that did NOT co-level (1.7 m step, ~8 viols); 8 buildings still SLOPED
+      (acceptance reverts the flatten — apron can't follow even flexed); minor
+      aprons (#235/#238 3–8%). NEXT: cluster-embedded JUNCTIONS follow the
+      cluster level; decide whether to force the 8 reverted buildings flat
+      (accept apron strain) per "all buildings flat"; flex more corridors.
 
 ### Phase 4 — Validation & tuning
 - [ ] SPJC b19 flat + aprons ≤1%; OMAA b2 raised ~21 m out of canyon; HECA /
