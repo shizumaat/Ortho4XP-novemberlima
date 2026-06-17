@@ -156,6 +156,39 @@ class NetworkProfileField:
         v = self.elev[i] + best[2] * (self.elev[j] - self.elev[i])
         return v, best[0]
 
+    def sample_band(self, x: float, y: float):
+        """The anchor-feasibility BAND ``(lo, hi, gap_m)`` at the nearest
+        point of the nearest graph edge — how far the corridor at that foot
+        may legally flex (runway-anchored route slack at the relaxed cap).
+        ``(None, None, inf)`` beyond one grid cell.  This is the slack the
+        terminal/apron law spends so a building can stay flat with the apron
+        in grade (the corridor takes the steepness, not the apron)."""
+        cell = self._cell
+        gx0, gy0 = int(x // cell), int(y // cell)
+        best = (float("inf"), None, 0.0)
+        for dgx in (-1, 0, 1):
+            for dgy in (-1, 0, 1):
+                for k in self._grid.get((gx0 + dgx, gy0 + dgy), ()):
+                    i, j = self._segs[k]
+                    (ax, ay), (bx, by) = self.nodes[i], self.nodes[j]
+                    dx, dy = bx - ax, by - ay
+                    s2 = dx * dx + dy * dy
+                    if s2 < 1e-12:
+                        continue
+                    t = ((x - ax) * dx + (y - ay) * dy) / s2
+                    t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+                    px, py = ax + t * dx, ay + t * dy
+                    d = math.hypot(x - px, y - py)
+                    if d < best[0]:
+                        best = (d, k, t)
+        if best[1] is None or not self.band_lo:
+            return None, None, float("inf")
+        i, j = self._segs[best[1]]
+        t = best[2]
+        lo = self.band_lo[i] + t * (self.band_lo[j] - self.band_lo[i])
+        hi = self.band_hi[i] + t * (self.band_hi[j] - self.band_hi[i])
+        return lo, hi, best[0]
+
     def route_graph_view(self):
         """A ``taxi_routing.TaxiRouteGraph`` over THIS graph (index-keyed)
         — the route-band law's measuring graph under the network profile
