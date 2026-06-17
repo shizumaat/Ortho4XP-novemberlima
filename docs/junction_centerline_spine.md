@@ -5,7 +5,29 @@ P3 (conformance) IN PROGRESS; P4 pending. Branch `junction-centerline-spine`.
 **Gate:** `JUNCTION_CENTERLINE_SPINE` (config, env `O4_JCT_SPINE`, default OFF
 → gate-off byte-identical, proven CYXY MD5-match vs HEAD).
 
-## Progress / measured state (2026-06-17, PYTHONHASHSEED=0)
+## SLICE model (2026-06-17, current) — `397943d`
+User insight: ribs were over-engineering.  Slice the junction along each
+crossing taxi centerline (cap each end to the nearest EXISTING boundary
+vertex = the rect corner), insert the spine nodes, keep the boundary edges
+exactly as-is, let Triangle4XP fill the lateral gradient.  `junction_spine.py`
+is now ~120 lines lighter (all rib machinery deleted).
+
+**Gate-ON measured:** OMAA H grade tracks 1.50%; conformance **2/2 = ring
+baseline**; 226 pieces (was 1216 rib-quad / 2285 fan).  Invariants that the
+rib model failed now PASS gate-ON: `have_source` (21→0), `outside_pavement`
+(0), `no_vertex_on_sloping_rect_edge`/`_flat_edge` (0).  Gate-OFF byte-id.
+
+**Remaining gate-ON failures (CYXY only):**
+- `pavement_grade`: 74 within-shape 7-13% **lateral-seam** violations — the
+  spine pins the centerline to the network-profile FIELD, but the junction
+  boundary keeps the SOLVER value; at CYXY they diverge 0.7-1.3 m, so the
+  piece slopes steeply from the (lower) centerline to the (higher) boundary
+  over 5-11 m.  Open question: bound the spine's deviation from the local
+  surface to the 1.5% cap, OR re-level the boundary toward the field, OR
+  accept (Triangle4XP fills it).
+- `rests_on_source`: 1 lobe piece (#95, 295 m², 33% on source).
+
+## EARLIER rib-quad model (superseded) measured state
 **P2 SUCCESS — the decisive metric is fixed.** OMAA taxiway H @ junction `-10225`:
 emitted surface grade was `1.27 → 2.12 (bulge) → 0.13 (flat) → 3.58%` (the user's
 spike); at gate-ON it tracks the field's flat **1.50%** (max 1.68%).
