@@ -50,11 +50,22 @@ from typing import Dict, List, Tuple
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import polygonize, unary_union
+from shapely.strtree import STRtree
 
 import O4_UI_Utils as UI
 
 from .config import JUNCTION_CENTERLINE_SPINE, SPINE_STEP_M
-from .layout import BuiltShape, ROLE_APRON, ROLE_JUNCTION
+from .layout import (
+    BuiltShape, ROLE_APRON, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
+    ROLE_PRIMARY_PARALLEL, ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
+    ROLE_SECONDARY_PARALLEL, ROLE_STUB)
+
+# Sloping 4-corner rects + runways: a junction/apron vertex may share
+# only their CORNERS, never a mid-edge node — so a slice end meeting one
+# of these gets a tiny corner-cap rather than a node on the centerline.
+_HARD_END_ROLES = frozenset({
+    ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL, ROLE_STUB,
+    ROLE_CROSS_CONNECTOR, ROLE_RUNWAY, ROLE_RUNWAY_CROSSING})
 
 _GEOM_EXC = (ValueError, GEOSException, TopologicalError)
 
@@ -65,6 +76,13 @@ __all__ = ["apply_junction_centerline_spine"]
 # (a centerline×centerline crossing inside the junction) when assigning
 # its altitude.
 _LAT_GRADE = 0.015
+# A spine node is densified this far inboard of each boundary crossing so
+# the slice stays on the centerline; a sloping-rect/runway end then gets a
+# TINY (≈this deep) cap to the crossed edge's corners.
+_END_INSET_M = 1.5
+# A boundary crossing within this distance of a sloping-rect / runway
+# boundary is a HARD end (tiny-cap to corners, no mid-edge node).
+_HARD_EDGE_TOL_M = 1.5
 # Coordinate rounding (m) for the node→altitude map / polygonize snap.
 _RND = 3
 # Drop emitted pieces smaller than this (slivers).
@@ -130,7 +148,7 @@ def _boundary_z_at(ring, ring_z, x, y, tol=0.30):
 
 
 def _partition_junction(s: BuiltShape, centerlines, field,
-                        pav_union, runway_union):
+                        pav_union, runway_union, near_hard):
     """Return a list of (Polygon, node_altitudes) pieces for junction
     ``s`` under the SLICE model, or None to leave the ring unchanged.
 
@@ -182,11 +200,11 @@ def _partition_junction(s: BuiltShape, centerlines, field,
         if len(_hl) >= 3:
             _ring_lists.append(_hl)
 
-    def _edge_cap(px, py):
-        """Nearer endpoint of the boundary EDGE closest to ``(px,py)`` —
-        the crossing point's flanking corner.  Local to the crossed edge
-        (never the globally-nearest vertex, whose cap line can jump across
-        a concave apron and self-intersect the slice)."""
+    def _edge_corners(px, py):
+        """The two endpoints of the boundary EDGE closest to ``(px,py)``
+        — the crossing point's flanking corners.  Local to the crossed
+        edge (never the globally-nearest vertex, whose cap line can jump
+        across a concave apron)."""
         best = None
         for rl in _ring_lists:
             m = len(rl)
@@ -202,9 +220,10 @@ def _partition_junction(s: BuiltShape, centerlines, field,
                 cx, cy = ax + t * dx, ay + t * dy
                 d = (px - cx) ** 2 + (py - cy) ** 2
                 if best is None or d < best[0]:
-                    near = (ax, ay) if t <= 0.5 else (bx, by)
-                    best = (d, near)
-        return best[1] if best else None
+                    best = (d, (ax, ay), (bx, by))
+        if best is None:
+            return None, None
+        return best[1], best[2]
 
     def _on_pav(px, py):
         try:
@@ -212,9 +231,30 @@ def _partition_junction(s: BuiltShape, centerlines, field,
         except _GEOM_EXC:
             return True
 
-    # ── Slice lines: capped centerline polylines ──
+    def _node_z(px, py):
+        v, gap = (field.sample(px, py) if field is not None
+                  else (None, float("inf")))
+        if v is None:
+            v = _boundary_z_at(ropen, bz, px, py, tol=1e9)
+            if v is None:
+                v = sum(bz) / n
+        return float(v)
+
+    # ── Slice lines: centerline polylines that STAY on the centerline ──
+    # The slice must not skew off the centerline at its ends.  Densify a
+    # node just inside each boundary crossing; then attach to the
+    # boundary by neighbour type:
+    #   * HARD end (sloping rect / runway — can't take a mid-edge node):
+    #     a TINY CAP fans the near-edge node to the crossed edge's two
+    #     corners, so the centerline stays straight until ~END_INSET of
+    #     the edge.
+    #   * SOFT end (node_altitudes apron / junction / free boundary):
+    #     extend the slice to the crossing point P right ON the centerline
+    #     (a legal mid-edge node there); an abutting sliced shape places
+    #     the same P, so the corridor stays continuous across the seam.
     cut_lines: List[LineString] = []
     spine_map: Dict[Tuple[float, float], float] = {}
+    soft_pts: List[Tuple[float, float, float]] = []
     for ln in centerlines:
         try:
             seg = poly.intersection(ln)
@@ -233,40 +273,88 @@ def _partition_junction(s: BuiltShape, centerlines, field,
             L = part.length
             if L < max(2.0, 0.5 * SPINE_STEP_M):
                 continue
-            # Interior spine nodes — evenly spaced, none ON the boundary.
+            inset = min(_END_INSET_M, 0.45 * L)
             nseg = max(2, int(round(L / SPINE_STEP_M)))
-            spine_xy: List[Tuple[float, float]] = []
+            ds = {inset, L - inset}
             for i in range(1, nseg):
-                d = i * L / nseg
+                ds.add(i * L / nseg)
+            spine_xy: List[Tuple[float, float]] = []
+            for d in sorted(x for x in ds if 0.0 < x < L):
                 p = part.interpolate(d)
                 if not _on_pav(p.x, p.y):
                     continue          # never a node in a runway / off-pav
-                v, gap = (field.sample(p.x, p.y) if field is not None
-                          else (None, float("inf")))
-                if v is None:
-                    v = _boundary_z_at(ropen, bz, p.x, p.y, tol=1e9)
-                    if v is None:
-                        v = sum(bz) / n
-                spine_map[_key(p.x, p.y)] = float(v)
+                k = _key(p.x, p.y)
+                if k not in spine_map:
+                    spine_map[k] = _node_z(p.x, p.y)
                 spine_xy.append((p.x, p.y))
             if not spine_xy:
                 continue
-            # Cap each end to the nearest existing boundary vertex (the
-            # rect corner) so the slice reaches the boundary at a shared
-            # node — never a fresh node on the rect's flat edge.
-            cap_a = _edge_cap(*part.coords[0])
-            cap_b = _edge_cap(*part.coords[-1])
-            slice_pts = []
-            if cap_a is not None and cap_a != spine_xy[0]:
-                slice_pts.append(cap_a)
-            slice_pts.extend(spine_xy)
-            if cap_b is not None and cap_b != spine_xy[-1]:
-                slice_pts.append(cap_b)
+            slice_pts: List[Tuple[float, float]] = list(spine_xy)
+            extra: List[LineString] = []
+            # Attach each end.
+            for is_entry in (True, False):
+                px, py = (part.coords[0] if is_entry else part.coords[-1])
+                end_node = spine_xy[0] if is_entry else spine_xy[-1]
+                c1, c2 = _edge_corners(px, py)
+                if near_hard(px, py) and c1 is not None and c2 is not None:
+                    # CAP: a ~END_INSET × edge-width rectangle bridging the
+                    # rect's two corners (C1,C2) to a 3-node inboard side —
+                    # E1, E2 at the pavement edges and M (= end_node) in
+                    # the MIDDLE on the centerline.  The centerline slice
+                    # attaches at M, dead-centre, so it never skews to a
+                    # corner; the rect keeps its 2-corner flat edge intact.
+                    ex, ey = c2[0] - c1[0], c2[1] - c1[1]
+                    eL = math.hypot(ex, ey)
+                    cap_ok = eL > 1e-6
+                    if cap_ok:
+                        ux, uy = ex / eL, ey / eL
+                        nrm = (-uy, ux)
+                        cmid = ((c1[0] + c2[0]) * 0.5,
+                                (c1[1] + c2[1]) * 0.5)
+                        if not poly.contains(Point(
+                                cmid[0] + 0.5 * nrm[0],
+                                cmid[1] + 0.5 * nrm[1])):
+                            nrm = (uy, -ux)
+                        e1 = (c1[0] + _END_INSET_M * nrm[0],
+                              c1[1] + _END_INSET_M * nrm[1])
+                        e2 = (c2[0] + _END_INSET_M * nrm[0],
+                              c2[1] + _END_INSET_M * nrm[1])
+                        if not (poly.contains(Point(*e1))
+                                and poly.contains(Point(*e2))):
+                            cap_ok = False
+                    if cap_ok:
+                        for e in (e1, e2):
+                            if _key(*e) not in spine_map:
+                                spine_map[_key(*e)] = _node_z(*e)
+                        extra.append(LineString([c1, e1]))
+                        extra.append(LineString([c2, e2]))
+                        extra.append(LineString([e1, end_node]))
+                        extra.append(LineString([end_node, e2]))
+                    else:
+                        # Degenerate edge — fall back to corner caps.
+                        for c in (c1, c2):
+                            if math.hypot(c[0] - end_node[0],
+                                          c[1] - end_node[1]) > 1e-6:
+                                extra.append(LineString([end_node, c]))
+                else:
+                    # Soft end: extend the slice onto the boundary at P,
+                    # a node right on the centerline.  Record P so it can be
+                    # WELDED into the abutting node_altitudes neighbour (it
+                    # is a NEW boundary node the neighbour must share).
+                    pz = _node_z(px, py)
+                    if _key(px, py) not in spine_map:
+                        spine_map[_key(px, py)] = pz
+                    soft_pts.append((px, py, pz))
+                    if is_entry:
+                        slice_pts = [(px, py)] + slice_pts
+                    else:
+                        slice_pts = slice_pts + [(px, py)]
             if len(slice_pts) >= 2:
                 try:
                     cut_lines.append(LineString(slice_pts))
                 except _GEOM_EXC:
-                    continue
+                    pass
+            cut_lines.extend(extra)
     if not spine_map:
         return None
 
@@ -346,7 +434,98 @@ def _partition_junction(s: BuiltShape, centerlines, field,
             continue
         ce = [round(_zfor(x, y), 1) for (x, y) in cring]
         out.append((f, ce))
-    return out if out else None
+    return (out, soft_pts) if out else None
+
+
+# Roles that may RECEIVE a welded mid-edge node (NOT sloping rects /
+# runways, whose flat form admits only corner sharing).
+_WELD_RECEIVER_ROLES = frozenset({
+    ROLE_JUNCTION, ROLE_APRON, "service_road", "service_junction",
+    "groundside_pavement"})
+# A soft node welds into a neighbour edge within this distance.
+_WELD_TOL_M = 0.25
+
+
+def _weld_soft_nodes(layout, soft_pts) -> int:
+    """Insert each soft-end centerline boundary node into any abutting
+    receiver shape whose edge passes through it but that lacks the vertex
+    — collinear, with the edge-interpolated altitude (no area/grade
+    change).  Targeted (only these nodes) so it cannot reshape pieces the
+    way a full conformance pass does.  Returns the count inserted."""
+    if not soft_pts:
+        return 0
+    pts = []
+    seen = set()
+    for (x, y, _z) in soft_pts:
+        k = _key(x, y)
+        if k not in seen:
+            seen.add(k)
+            pts.append((x, y))
+    if not pts:
+        return 0
+    tree = STRtree([Point(p) for p in pts])
+    inserted = 0
+    for s in layout.shapes:
+        if (s.role or "") not in _WELD_RECEIVER_ROLES:
+            continue
+        poly = s.polygon
+        if poly is None or poly.is_empty or poly.geom_type != "Polygon":
+            continue
+        ring = _open(list(poly.exterior.coords))
+        nr = len(ring)
+        if nr < 3:
+            continue
+        alts = s.node_altitudes
+        open_alts = (list(alts[:nr]) if alts is not None
+                     and len(alts) >= nr else None)
+        ownset = {_key(*v) for v in ring}
+        new_ring: List[Tuple[float, float]] = []
+        new_alts: List[float] = [] if open_alts is not None else None
+        changed = False
+        for i in range(nr):
+            ax, ay = ring[i]
+            bx, by = ring[(i + 1) % nr]
+            new_ring.append((ax, ay))
+            if new_alts is not None:
+                new_alts.append(open_alts[i])
+            dx, dy = bx - ax, by - ay
+            s2 = dx * dx + dy * dy
+            if s2 < 1e-12:
+                continue
+            # Candidate soft points near this edge's bbox.
+            seg = LineString([(ax, ay), (bx, by)])
+            on_edge = []
+            for idx in tree.query(seg.buffer(_WELD_TOL_M)):
+                px, py = pts[idx]
+                if _key(px, py) in ownset:
+                    continue
+                t = ((px - ax) * dx + (py - ay) * dy) / s2
+                if t <= 1e-4 or t >= 1.0 - 1e-4:
+                    continue
+                cx, cy = ax + t * dx, ay + t * dy
+                if math.hypot(px - cx, py - cy) <= _WELD_TOL_M:
+                    on_edge.append((t, (px, py)))
+            for t, (px, py) in sorted(on_edge):
+                new_ring.append((px, py))
+                if new_alts is not None:
+                    a_i = open_alts[i]
+                    a_j = open_alts[(i + 1) % nr]
+                    new_alts.append(a_i + t * (a_j - a_i))
+                ownset.add(_key(px, py))
+                changed = True
+                inserted += 1
+        if not changed:
+            continue
+        try:
+            np_ = Polygon(new_ring)
+            if not np_.is_valid or np_.is_empty:
+                continue
+        except _GEOM_EXC:
+            continue
+        s.polygon = np_
+        if new_alts is not None:
+            s.node_altitudes = new_alts + [new_alts[0]]
+    return inserted
 
 
 def apply_junction_centerline_spine(layout) -> int:
@@ -360,11 +539,38 @@ def apply_junction_centerline_spine(layout) -> int:
     pav_union = getattr(layout, "_source_pav_union", None)
     runway_union = getattr(layout, "runway_union", None)
 
+    # Index sloping-rect / runway boundaries so a slice END can tell
+    # whether it meets a HARD edge (tiny corner-cap) or a SOFT one
+    # (node on the centerline).
+    hard_lines = []
+    for s in layout.shapes:
+        if (s.role in _HARD_END_ROLES and s.polygon is not None
+                and not s.polygon.is_empty
+                and s.polygon.geom_type == "Polygon"):
+            try:
+                hard_lines.append(s.polygon.exterior)
+            except _GEOM_EXC:
+                continue
+    hard_tree = STRtree(hard_lines) if hard_lines else None
+
+    def _near_hard(px, py):
+        if hard_tree is None:
+            return False
+        p = Point(px, py)
+        for idx in hard_tree.query(p.buffer(_HARD_EDGE_TOL_M)):
+            try:
+                if hard_lines[idx].distance(p) <= _HARD_EDGE_TOL_M:
+                    return True
+            except _GEOM_EXC:
+                continue
+        return False
+
     # Slice JUNCTIONS and APRONS along the centerlines that cross them
     # (user 2026-06-17: extend the slice to aprons so a taxi centerline
     # grading THROUGH an apron splits it into a few connected pieces that
     # follow the corridor).  Buildings/terminals stay flat — never sliced.
     new_shapes: List[BuiltShape] = []
+    soft_pts_all: List[Tuple[float, float, float]] = []
     n_done = 0
     n_pieces = 0
     for s in layout.shapes:
@@ -382,12 +588,14 @@ def apply_junction_centerline_spine(layout) -> int:
                     crossing.append(ln)
             except _GEOM_EXC:
                 continue
-        pieces = (_partition_junction(s, crossing, field,
-                                      pav_union, runway_union)
+        result = (_partition_junction(s, crossing, field,
+                                      pav_union, runway_union, _near_hard)
                   if crossing else None)
-        if not pieces:
+        if not result:
             new_shapes.append(s)
             continue
+        pieces, soft_pts = result
+        soft_pts_all.extend(soft_pts)
         for f, ce in pieces:
             ns = BuiltShape(polygon=f, role=s.role, ref=s.ref)
             if max(ce) - min(ce) < 0.05:
@@ -400,14 +608,15 @@ def apply_junction_centerline_spine(layout) -> int:
 
     layout.shapes = new_shapes
     if n_done:
+        # Weld each soft-end centerline boundary node into the abutting
+        # node_altitudes neighbour that shares that edge (collinear,
+        # altitude-interpolated → no area/grade change) so the corridor
+        # node is SHARED — no T-junction.  Targeted to just these nodes
+        # (the full enforce_conformance reshaped dense apron pieces into
+        # self-overlap; this does not).
+        n_weld = _weld_soft_nodes(layout, soft_pts_all)
         UI.vprint(1,
             f"  [pav-builder] {getattr(layout, 'icao', '')}: "
             f"junction-spine sliced {n_done} junction/apron(s) into "
-            f"{n_pieces} piece(s).")
-        # NO conformance-heal: the slice caps reuse EXISTING boundary
-        # vertices and the pieces share the centerline/cap edges exactly,
-        # so the partition is already a conforming tiling — there are no
-        # new perimeter nodes to weld.  (Running enforce_conformance over
-        # the dense apron-piece set instead REshaped pieces into ~540 m²
-        # of self-overlap at SPJC — test_no_self_overlap — for no gain.)
+            f"{n_pieces} piece(s); welded {n_weld} corridor seam node(s).")
     return n_done
