@@ -3870,6 +3870,14 @@ def build_airport_pavement(icao: str, xplane_root: str,
             if _jrc and os.environ.get("O4_JCT_RIPPLE_DEBUG") == "1":
                 UI.vprint(1, f"  [pav-builder] {icao}: junction ring "
                              f"curvature smoothed {_jrc} free vertex(es).")
+            # Junction centerline-spine triangulation (20260616): re-emit
+            # each junction ring as a self-triangulated fan with interior
+            # spine nodes pinned to the network-profile field so a taxi
+            # centerline grades <=1.5% THROUGH the junction in the
+            # rendered surface (not just the solver field).  Gated; off =
+            # no-op (the ring polygons survive unchanged).
+            from .junction_spine import apply_junction_centerline_spine
+            apply_junction_centerline_spine(layout)
 
         if n_tile_delta != 0:
             UI.vprint(1,
