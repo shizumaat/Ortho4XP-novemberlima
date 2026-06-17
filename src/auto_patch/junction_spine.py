@@ -117,9 +117,14 @@ def _key(x, y):
 
 
 def _full_centerlines(layout):
-    """Every centerline of the FULL route graph as plain LineStrings:
-    apt.dat taxi network + discovered/unreferenced lanes + runway
-    long-axes (for runway-crossing junctions)."""
+    """Every TAXI centerline of the route graph as plain LineStrings:
+    apt.dat taxi network + discovered/unreferenced lanes.
+
+    Runway long-axes are deliberately EXCLUDED (user 2026-06-17: never
+    add spine nodes or ribs inside a runway).  A runway long-axis would
+    plant spine nodes straight down the runway — off the taxi pavement and
+    off ``pav_union`` (which excludes runways) — and runway grade is owned
+    by the FAA runway profile, not the junction spine."""
     out: List[LineString] = []
     for item in (getattr(layout, "apt_taxi_centerlines", None) or []):
         ln = item[0] if isinstance(item, tuple) else item
@@ -129,21 +134,6 @@ def _full_centerlines(layout):
         ln = item[0] if isinstance(item, tuple) else item
         if ln is not None and not ln.is_empty:
             out.append(ln)
-    for s in layout.shapes:
-        if s.role != ROLE_RUNWAY or s.polygon is None or s.polygon.is_empty:
-            continue
-        try:
-            rc = _open(list(s.polygon.exterior.coords))
-        except _GEOM_EXC:
-            continue
-        if len(rc) != 4:
-            continue
-        a_mid = (0.5 * (rc[0][0] + rc[3][0]), 0.5 * (rc[0][1] + rc[3][1]))
-        b_mid = (0.5 * (rc[1][0] + rc[2][0]), 0.5 * (rc[1][1] + rc[2][1]))
-        try:
-            out.append(LineString([a_mid, b_mid]))
-        except _GEOM_EXC:
-            continue
     return out
 
 
@@ -181,16 +171,28 @@ def _nearest_boundary_hit(boundary, px, py, nx, ny, reach):
 
 
 def _ribs_for_centerline(poly: Polygon, boundary, bverts, spine, reach,
-                         near_hard):
+                         near_hard, pav_region):
     """Build rib cut-lines for one centerline's interior spine nodes.
 
     ``spine`` is ``[(x, y, z, d, tx, ty)]`` — interior nodes with the
     unit centerline tangent ``(tx, ty)``.  ``near_hard(x, y)`` is True
     when a point lies on the junction boundary shared with a sloping rect
     / runway — there a rib MUST reuse an existing boundary vertex (no
-    fresh node), so the abutting rect stays conformant.  Returns
-    ``rib_lines``."""
+    fresh node), so the abutting rect stays conformant.  ``pav_region`` is
+    the taxi-pavement clip (``poly ∩ pav_union − runway``): a rib may NOT
+    plant a NEW node off it (in a runway / off source pavement, user
+    2026-06-17) — such a hit falls back to an existing vertex or is
+    dropped.  Returns ``rib_lines``."""
     rib_lines: List[LineString] = []
+    bvert_set = set(bverts)
+
+    def _off_pav(qx, qy):
+        if pav_region is None:
+            return False
+        try:
+            return pav_region.distance(Point(qx, qy)) > 0.1
+        except _GEOM_EXC:
+            return False
 
     def _snap_soft(hx, hy):
         # Re-use an existing boundary vertex only when the hit is almost
@@ -243,6 +245,14 @@ def _ribs_for_centerline(poly: Polygon, boundary, bverts, spine, reach,
                 sx, sy = snapped
             else:
                 sx, sy = _snap_soft(hx, hy)
+            # A rib may reuse an existing (possibly off-pavement, but
+            # exempt) boundary vertex, but must never plant a NEW node off
+            # the taxi pavement / inside a runway.
+            if (sx, sy) not in bvert_set and _off_pav(sx, sy):
+                snapped = _snap_hard(hx, hy)
+                if snapped is None:
+                    continue
+                sx, sy = snapped
             if math.hypot(sx - px, sy - py) < 1e-6:
                 continue
             rib_lines.append(LineString([(px, py), (sx, sy)]))
@@ -273,11 +283,14 @@ def _boundary_z_at(ring, ring_z, x, y, tol=0.30):
     return None
 
 
-def _partition_junction(s: BuiltShape, centerlines, field, near_hard):
+def _partition_junction(s: BuiltShape, centerlines, field, near_hard,
+                        pav_union, runway_union):
     """Return a list of (Polygon, node_altitudes) pieces for junction
     ``s`` under the rib-quad model, or None to leave the ring unchanged.
     ``near_hard(x, y)`` flags boundary shared with a sloping rect/runway
-    (ribs there reuse existing nodes)."""
+    (ribs there reuse existing nodes); the spine is clipped to
+    ``pav_union`` (source pavement) MINUS ``runway_union`` — no spine node
+    or rib ever lands inside a runway (user 2026-06-17)."""
     poly = s.polygon
     ring = list(poly.exterior.coords)
     ropen = _open(ring)
@@ -297,11 +310,34 @@ def _partition_junction(s: BuiltShape, centerlines, field, near_hard):
     minx, miny, maxx, maxy = poly.bounds
     reach = math.hypot(maxx - minx, maxy - miny) + 10.0
 
+    # Densify spine nodes only where the junction polygon overlaps the
+    # SOURCE pavement footprint (apt.dat + DSF; runways are NOT in it).
+    # A centerline — especially a runway long-axis — can cross a part of
+    # the junction polygon that is off ``pav_union``, and a spine node
+    # there sits OUTSIDE the pavement (invariant A4 /
+    # test_junction_vertices_outside_pavement).  Clip the centerline to
+    # ``poly ∩ pav_union`` with NO full-poly fallback: an empty clip means
+    # the junction is off source pavement, so it keeps its ring (the
+    # ``seg`` loop below yields nothing and the function returns None).
+    clip = poly
+    if pav_union is not None and not pav_union.is_empty:
+        try:
+            clip = poly.intersection(pav_union)
+        except _GEOM_EXC:
+            clip = poly
+    if runway_union is not None and not runway_union.is_empty:
+        try:
+            clip = clip.difference(runway_union)
+        except _GEOM_EXC:
+            pass
+    if clip.is_empty:
+        return None
+
     # ── Densify every crossing centerline to spine nodes (field z) ──
     spines: List[List[Tuple[float, float, float, float]]] = []
     for ln in centerlines:
         try:
-            seg = poly.intersection(ln)
+            seg = clip.intersection(ln)
         except _GEOM_EXC:
             continue
         if seg.is_empty:
@@ -367,7 +403,7 @@ def _partition_junction(s: BuiltShape, centerlines, field, near_hard):
         if len(spine) >= 2:
             cut_lines.append(LineString([(p[0], p[1]) for p in spine]))
         ribs = _ribs_for_centerline(
-            poly, boundary, bverts, spine, reach, near_hard)
+            poly, boundary, bverts, spine, reach, near_hard, clip)
         cut_lines.extend(ribs)
 
     # ── Partition ──
@@ -444,6 +480,8 @@ def apply_junction_centerline_spine(layout) -> int:
         return 0
     field = getattr(layout, "_network_profile_field", None)
     centerlines = _full_centerlines(layout)
+    pav_union = getattr(layout, "_source_pav_union", None)
+    runway_union = getattr(layout, "runway_union", None)
 
     # Index every sloping-rect / runway boundary so a rib can tell when
     # its hit lands on a rect-shared junction edge (→ reuse an existing
@@ -489,7 +527,8 @@ def apply_junction_centerline_spine(layout) -> int:
                     crossing.append(ln)
             except _GEOM_EXC:
                 continue
-        pieces = (_partition_junction(s, crossing, field, _near_hard)
+        pieces = (_partition_junction(s, crossing, field, _near_hard,
+                                      pav_union, runway_union)
                   if crossing else None)
         if not pieces:
             new_shapes.append(s)
