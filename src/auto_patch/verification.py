@@ -3,21 +3,21 @@
 Single source of truth for the auto-patch invariant checks, shared by:
 
   * the PRODUCTION build — ``driver.generate_auto_patches`` calls
-    :func:`verify_and_log` on every airport it builds for a tile, so a
-    user running Ortho4XP is told when an airport patch has errors; and
+    :func:`verify_and_log` on every airport it builds for a tile; and
   * the DEV pytest gate — the baseline-airport tests call the same check
     functions and ``assert`` on them.
 
 There is exactly ONE implementation of each check.  Thresholds are
 UNIVERSAL — no per-airport exceptions.
 
-Diagnostics: the user's only fix lever is the source data (apt.dat /
-DSF), so every reported violation says WHAT, WHERE — the ``shapeID`` to
-open in the patch, a lat/lon, and (for junctions/aprons) the taxiways
-that meet there, e.g. "junction [#375] where taxiways A, M meet" — a
-likely CAUSE, and a suggested FIX.  Once the elevation solver is
-complete a grade violation almost always means a geometry / source
-problem, so the hints lean that way.
+Diagnostics: EVERY finding is an auto-patch BUG to be tracked down and
+fixed by an engineer, NOT something the user can correct in the source
+data (user ruling 2026-06-16).  So no finding is printed as ``[verify]``
+chatter — ``verify_and_log`` appends them ALL to the per-tile verify
+DEBUG log (``<patch_dir>/auto_patch_verify_debug.log``), each saying WHAT,
+WHERE — the ``shapeID`` to open in the patch, a lat/lon, and (for
+junctions/aprons) the taxiways that meet there, e.g. "junction [#375]
+where taxiways A, M meet".
 
 ``shapeID`` == the shape's index in ``layout.shapes`` (the same value
 ``layout.to_osm`` writes as the ``shapeID`` tag), so a reported id maps
@@ -42,29 +42,6 @@ _NON_SOURCE_PAVEMENT_ROLES = frozenset({
     "retaining_wall", "tunnel_ramp", "groundside_pavement",
     "service_road", "service_junction", "building",
 })
-
-_HINTS = {
-    "overlap": ("two pavement shapes share footprint — likely a duplicate "
-                "DSF .pol overlay over apt.dat row-110, or two row-110 "
-                "polygons covering the same area. Fix: remove the redundant "
-                "overlay / merge the duplicate source pavement."),
-    "source":  ("emitted pavement with NO apt.dat/DSF source beneath it — a "
-                "spurious synthesis or a non-pavement polygon (grass/decor) "
-                "tagged as pavement. Fix: correct or remove that source "
-                "polygon."),
-    "within":  ("the surface cannot stay within its grade cap — terrain "
-                "(DEM) too steep across it, or incompatible anchor "
-                "elevations. Fix: check the apt.dat geometry isn't spanning "
-                "a real slope and the CIFP runway-threshold elevations are "
-                "right (with a complete elevation solver, a residual here is "
-                "a geometry/source problem)."),
-    "cross":   ("adjacent surfaces meet at incompatible elevations (e.g. "
-                "flat areas at different levels sharing a corner). Fix: check "
-                "the apt.dat pavement layout where these shapes meet."),
-    "steps":   ("a surface meets a neighbour at a vertical step — usually "
-                "resolves once the grade issues above are fixed."),
-}
-
 
 def _ll(layout, x, y) -> str:
     """Format a layout-meter point as a ``lat,lon`` string."""
@@ -776,6 +753,40 @@ def check_rect_short_edges(layout):
             all_vertices.append((x, y, si))
     tol2 = CORNER_SHARE_TOL_M * CORNER_SHARE_TOL_M
     pav_b = getattr(layout, "apt_pavement_boundary", None)
+    # Groundside-clearance terminus exemption: a taxiway that runs to a
+    # GROUNDSIDE ramp / vehicle area legitimately STOPS at the airside↔
+    # groundside boundary, where ``_separate_groundside_from_airside`` clips
+    # the groundside pavement back by GROUNDSIDE_CLEARANCE_M (1.0 m) from all
+    # airside pavement.  The short edge therefore shares no corner — the gap
+    # IS the connection (the same exemption check_vertex_on_flat_edge /
+    # check_vertex_on_sloping_edge already make for groundside).  An end whose
+    # BOTH corners sit within GROUNDSIDE_PROX_M of a groundside shape is such a
+    # terminus, not a rect ending in mid-air.
+    from .layout import ROLE_GROUNDSIDE_PAVEMENT
+    GROUNDSIDE_PROX_M = 1.5            # clearance 1.0 m + weld/conformance drift
+    _gs_polys = [s.polygon for s in layout.shapes
+                 if s.role == ROLE_GROUNDSIDE_PAVEMENT
+                 and s.polygon is not None and not s.polygon.is_empty]
+    _gs_tree = None
+    if _gs_polys:
+        try:
+            from shapely.strtree import STRtree
+            _gs_tree = STRtree(_gs_polys)
+        except Exception:
+            _gs_tree = None
+
+    def _abuts_groundside(px, py):
+        if _gs_tree is None:
+            return False
+        pt = _P(px, py)
+        try:
+            for j in _gs_tree.query(pt.buffer(GROUNDSIDE_PROX_M)):
+                if _gs_polys[j].distance(pt) <= GROUNDSIDE_PROX_M:
+                    return True
+        except Exception:
+            return False
+        return False
+
     out = []
     for ri, r in enumerate(layout.shapes):
         if r.role not in rect_roles or r.polygon is None or r.polygon.is_empty:
@@ -805,6 +816,8 @@ def check_rect_short_edges(layout):
                 continue
             if _on_tile_edge(ax, ay) and _on_tile_edge(bx, by):
                 continue
+            if _abuts_groundside(ax, ay) and _abuts_groundside(bx, by):
+                continue                       # airside→groundside terminus
             if (r.ref or "").startswith("TX"):
                 o_a, o_b = ((1, 2) if end_label == "end_A" else (0, 3))
                 oax, oay = rc[o_a]
@@ -905,58 +918,85 @@ def run_grade_checks(layout):
             quiet=True, route_ctx=route_ctx_from_layout(layout))
 
 
-# Categories that are NOT user-actionable, so they are written to a
-# per-tile debug log for an engineer to track down rather than surfaced
-# as [verify] chatter:
-#   * overlap — all pavement is unioned downstream, so an overlap never
-#     reaches the mesh; a real one is OUR geometry bug, not source data.
-#   * source  — emitted pavement off its source means WE produced a shape
-#     that drifted off the source after modifying it, not a source problem
-#     (a genuine non-pavement polygon would simply be ignored upstream).
-#   * within  — we set every vertex elevation to be within the grade cap,
-#     independent of the DEM; a residual is a solver bug the user cannot
-#     fix from the source.
-_DEBUG_ONLY_CATEGORIES = ("overlap", "source", "within")
 
 
-def _write_verify_debug(path, layout, icao, overlaps, source, within,
-                        taxi_index, gdesc) -> None:
-    """Append the non-user-actionable verify findings (overlap / off-source
-    / within-shape grade) to the per-tile debug log at ``path`` — the full
-    lists, for an engineer to track down and fix.  No-op when ``path`` is
-    falsy or there is nothing to write; never raises."""
-    if not path or not (overlaps or source or within):
-        return
-    lines = [f"=== {icao} ==="]
+# ── Per-tile verify DEBUG log ────────────────────────────────────────
+# EVERY verification finding is an auto-patch BUG to be tracked down and
+# fixed, NOT something the user can correct in the source data (user ruling
+# 2026-06-16).  So no finding is printed as [verify] chatter — they are all
+# appended to the per-tile verify debug log instead.  The few that could in
+# principle be a source-data issue (overlap = duplicate DSF overlay, source =
+# non-pavement polygon tagged as pavement) are in practice still our geometry
+# bugs at the airports we build, and the user does not want to chase them.
+
+def _verify_debug_lines(layout, icao, taxi_index, gdesc, *,
+                        overlaps, source, flat, edge_v, flat_v, axis_v,
+                        short_e, cross, within, steps, rwy_grade) -> list:
+    """Build the full per-category diagnostic lines for the verify debug
+    log (no 5-item cap — this is for an engineer, not the console)."""
+    def ds(idx):
+        return describe_shape(layout, idx, taxi_index)
+
+    out = []
     for area, ia, ib, loc in overlaps:
-        lines.append(f"  OVERLAP {area:.1f} m² @ {loc}: "
-                     f"{describe_shape(layout, ia, taxi_index)} ∩ "
-                     f"{describe_shape(layout, ib, taxi_index)}")
+        out.append(f"  OVERLAP {area:.1f} m² @ {loc}: {ds(ia)} ∩ {ds(ib)}")
     for idx, area, frac, loc in source:
-        lines.append(f"  OFF-SOURCE {area:.0f} m² ({frac*100:.0f}% on "
-                     f"source) @ {loc}: "
-                     f"{describe_shape(layout, idx, taxi_index)}")
+        out.append(f"  OFF-SOURCE {area:.0f} m² ({frac*100:.0f}% on source) "
+                   f"@ {loc}: {ds(idx)}")
+    for idx, detail, loc in flat:
+        out.append(f"  TERMINAL-FLAT @ {loc}: {ds(idx)} {detail}")
+    for idx, detail, loc in edge_v:
+        out.append(f"  VERTEX-ON-EDGE @ {loc}: {ds(idx)} — {detail}")
+    for idx, detail, loc in flat_v:
+        out.append(f"  FLAT-EDGE @ {loc}: {ds(idx)} — {detail}")
+    for idx, detail, loc in axis_v:
+        out.append(f"  AXIS-TILT @ {loc}: {ds(idx)} — {detail}")
+    for idx, detail, loc in short_e:
+        out.append(f"  SHORT-EDGE @ {loc}: {ds(idx)} — {detail}")
+    for v in sorted(cross, key=lambda v: -v.de_m):
+        loc = f"{v.lat:.5f},{v.lon:.5f}" if v.lat is not None else "?,?"
+        out.append(f"  CROSS-SHAPE {v.de_m:.2f} m @ {loc}: "
+                   f"{gdesc(v.way_a)} ↔ {gdesc(v.way_b)}")
     for v in sorted(within, key=lambda v: -v.grade_pct):
         loc = f"{v.lat:.5f},{v.lon:.5f}" if v.lat is not None else "?,?"
-        lines.append(f"  WITHIN-SHAPE {v.grade_pct:.1f}% over "
-                     f"{v.distance_m:.1f} m @ {loc}: {gdesc(v.way_a)}")
+        out.append(f"  WITHIN-SHAPE {v.grade_pct:.1f}% over {v.distance_m:.1f} "
+                   f"m @ {loc}: {gdesc(v.way_a)}")
+    for v in sorted(steps, key=lambda v: -v.step_m):
+        loc = f"{v.lat:.5f},{v.lon:.5f}" if v.lat is not None else "?,?"
+        out.append(f"  EDGE-STEP {v.step_m:.2f} m @ {loc}: "
+                   f"{gdesc(v.way_v)} ↔ {gdesc(v.way_e)}")
+    for kind, ref, val, cap, loc in rwy_grade:
+        out.append(f"  RUNWAY-GRADE {val*100:.2f}% > {cap*100:.1f}% @ {loc}: "
+                   f"runway {ref}")
+    return out
+
+
+def _write_verify_debug(path, icao, counts, lines) -> None:
+    """Append a per-airport section (tally header + every finding) to the
+    per-tile verify debug log at ``path``.  No-op when ``path`` is falsy or
+    there is nothing to write; never raises."""
+    if not path or not lines:
+        return
+    tally = " ".join(f"{k}={v}" for k, v in counts.items() if v)
+    section = [f"=== {icao}: {tally} ==="] + lines
     try:
         with open(path, "a", encoding="utf-8") as fh:
-            fh.write("\n".join(lines) + "\n")
+            fh.write("\n".join(section) + "\n")
     except Exception:                                  # pragma: no cover
         pass
 
 
 # ── Build-time entry point ──────────────────────────────────────────
 def verify_and_log(layout, icao: str, debug_log_path: str | None = None) -> dict:
-    """Run every verification check on a freshly-built layout and LOG a
-    diagnostic summary (never raises).  Returns a counts dict.  Problems
-    log at verbosity 0; a clean airport at verbosity 1.
+    """Run every verification check on a freshly-built layout and route the
+    diagnostics to the per-tile verify DEBUG log (never raises).  Returns a
+    counts dict.
 
-    The non-user-actionable categories (``overlap`` / ``source`` /
-    ``within``; see ``_DEBUG_ONLY_CATEGORIES``) are NOT printed — they are
-    appended to ``debug_log_path`` (the per-tile verify debug log) for an
-    engineer to track down."""
+    EVERY finding is an auto-patch bug to be tracked down — none is a
+    user-fixable source-data problem (user ruling 2026-06-16) — so nothing is
+    printed as [verify] chatter.  The full per-category detail is appended to
+    ``debug_log_path``; the console gets only a one-line vprint(1) summary
+    (suppressed at the build's LOG_VERBOSITY)."""
     overlaps = source = within = cross = steps = []
     try:
         overlaps = check_self_overlap(layout)
@@ -991,8 +1031,8 @@ def verify_and_log(layout, icao: str, debug_log_path: str | None = None) -> dict
     try:
         within, cross, steps = run_grade_checks(layout)
     except Exception as exc:                       # pragma: no cover
-        UI.lvprint(0, f"  [verify] {icao}: grade verification "
-                       f"unavailable ({exc})")
+        UI.vprint(1, f"  [verify] {icao}: grade verification "
+                     f"unavailable ({exc})")
         within = cross = steps = []
     # Runway longitudinal grade at the uniform 1.5% cap — the binding limit the
     # runway solver enforces today.  (The 0.8% end cap + FAA vertical-curve
@@ -1013,8 +1053,7 @@ def verify_and_log(layout, icao: str, debug_log_path: str | None = None) -> dict
               "cross": len(cross), "within": len(within),
               "steps": len(steps), "runway_grade": len(rwy_grade)}
     if not sum(counts.values()):
-        UI.vprint(1, f"  [verify] {icao}: OK — no overlap / source / "
-                     f"grade issues.")
+        UI.vprint(1, f"  [verify] {icao}: OK — no patch issues.")
         return counts
 
     taxi_index = build_taxi_index(layout)
@@ -1034,74 +1073,16 @@ def verify_and_log(layout, icao: str, debug_log_path: str | None = None) -> dict
                 pass
         return glabel_id._label(way) if glabel_id else "?"
 
-    # Non-user-actionable findings → per-tile debug log, never user chatter.
-    _write_verify_debug(debug_log_path, layout, icao, overlaps, source,
-                        within, taxi_index, _gdesc)
+    lines = _verify_debug_lines(
+        layout, icao, taxi_index, _gdesc,
+        overlaps=overlaps, source=source, flat=flat, edge_v=edge_v,
+        flat_v=flat_v, axis_v=axis_v, short_e=short_e, cross=cross,
+        within=within, steps=steps, rwy_grade=rwy_grade)
+    _write_verify_debug(debug_log_path, icao, counts, lines)
 
-    # Only the user-actionable categories drive the [verify] output below.
-    if not sum(v for k, v in counts.items()
-               if k not in _DEBUG_ONLY_CATEGORIES):
-        UI.vprint(1, f"  [verify] {icao}: OK — no user-actionable issues "
-                     f"(see verify debug log for any overlap / off-source / "
-                     f"within-shape findings).")
-        return counts
-
-    tally = " ".join(f"{k}={v}" for k, v in counts.items()
-                     if v and k not in _DEBUG_ONLY_CATEGORIES)
-    UI.lvprint(0,
-        f"  [verify] {icao}: PATCH ISSUES — {tally}. "
-        f"Likely apt.dat / DSF source problems — details below.")
-
-    if flat:
-        for idx, detail, loc in flat[:5]:
-            UI.lvprint(0, f"  [verify]   TERMINAL-FLAT @ {loc}: "
-                          f"{describe_shape(layout, idx, taxi_index)} {detail}")
-        UI.lvprint(0, f"  [verify]     ↳ a terminal building pad must be a "
-                      f"single flat altitude. Fix: usually a builder issue, "
-                      f"not source data.")
-    if edge_v:
-        for idx, detail, loc in edge_v[:5]:
-            UI.lvprint(0, f"  [verify]   VERTEX-ON-EDGE @ {loc}: "
-                          f"{describe_shape(layout, idx, taxi_index)} — {detail}")
-        UI.lvprint(0, f"  [verify]     ↳ a junction/apron vertex sits on a "
-                      f"taxi-rect edge interior (should meet only at corners). "
-                      f"Fix: usually a builder issue, not source data.")
-    if flat_v:
-        for idx, detail, loc in flat_v[:5]:
-            UI.lvprint(0, f"  [verify]   FLAT-EDGE @ {loc}: "
-                          f"{describe_shape(layout, idx, taxi_index)} — {detail}")
-        UI.lvprint(0, f"  [verify]     ↳ a junction/apron vertex sits on a "
-                      f"taxi-rect FLAT (cross) edge interior (only the 2 corners "
-                      f"may be shared). Fix: usually a builder issue.")
-    if axis_v:
-        for idx, detail, loc in axis_v[:5]:
-            UI.lvprint(0, f"  [verify]   AXIS-TILT @ {loc}: "
-                          f"{describe_shape(layout, idx, taxi_index)} — {detail}")
-        UI.lvprint(0, f"  [verify]     ↳ a taxi rect tilts across its centerline "
-                      f"instead of sloping only along it. Fix: usually a builder "
-                      f"issue, not source data.")
-    if short_e:
-        for idx, detail, loc in short_e[:5]:
-            UI.lvprint(0, f"  [verify]   SHORT-EDGE @ {loc}: "
-                          f"{describe_shape(layout, idx, taxi_index)} — {detail}")
-        UI.lvprint(0, f"  [verify]     ↳ a taxiway rect ends without meeting a "
-                      f"junction/runway/terminal. Fix: often a gap in the apt.dat "
-                      f"taxi network or a missing connecting pavement.")
-    if cross:
-        for v in sorted(cross, key=lambda v: -v.de_m)[:5]:
-            loc = f"{v.lat:.5f},{v.lon:.5f}" if v.lat is not None else "?,?"
-            UI.lvprint(0, f"  [verify]   CROSS-SHAPE {v.de_m:.2f} m @ {loc}: "
-                          f"{_gdesc(v.way_a)} ↔ {_gdesc(v.way_b)}")
-        UI.lvprint(0, f"  [verify]     ↳ {_HINTS['cross']}")
-    if steps:
-        UI.lvprint(0, f"  [verify]   EDGE-STEPS: {len(steps)} vertical "
-                      f"step(s) > 0.5 m between adjacent surfaces.")
-        UI.lvprint(0, f"  [verify]     ↳ {_HINTS['steps']}")
-    if rwy_grade:
-        for kind, ref, val, cap, loc in rwy_grade[:5]:
-            UI.lvprint(0, f"  [verify]   RUNWAY-GRADE {val*100:.2f}% > "
-                          f"{cap*100:.1f}% @ {loc}: runway {ref}")
-        UI.lvprint(0, f"  [verify]     ↳ the runway longitudinal profile "
-                      f"exceeds the 1.5% grade cap — the solver / runway-flex "
-                      f"pulled it out of compliance. Fix: the runway solver.")
+    # User console: one summary line only (suppressed at build verbosity 0);
+    # every finding is an auto-patch bug logged to the verify debug file.
+    tally = " ".join(f"{k}={v}" for k, v in counts.items() if v)
+    UI.vprint(1, f"  [verify] {icao}: {sum(counts.values())} patch issue(s) "
+                 f"({tally}) — logged to the verify debug file.")
     return counts

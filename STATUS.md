@@ -51,6 +51,48 @@ chased a phantom stale-2-tuple). ★ single-airport silent no-patch → run
 `build_airport_pavement(icao, …, compute_elevations=True)` standalone;
 `_DRIVER_EXC` hides the traceback in production.
 
+## ★★ 20260616-06 (2026-06-16, dev) — ALL verify findings → debug log; KCLT short-edge false positives killed; KCLT root-cause map ★★
+User (KCLT, tile 35/-081): the remaining `[verify]` console output (short_edge /
+cross / steps) is ALSO all auto-patch bugs, not user-fixable. Route EVERY verify
+category to the debug log, then investigate the KCLT causes.
+
+**Shipped (verification.py + tests):**
+1. **EVERY verify category → per-tile debug log** (extends 20260616-04, which
+   only moved overlap/source/within). `verify_and_log` now writes ALL findings
+   (overlap, source, terminal_flat, vertex_on_edge/flat_edge, axis_tilt,
+   short_edge, cross, within, steps, runway_grade) to
+   `<patch_dir>/auto_patch_verify_debug.log` via `_verify_debug_lines` +
+   `_write_verify_debug`; the console gets ONE `vprint(1)` summary line
+   (suppressed at build LOG_VERBOSITY=0). NO more `[verify]` chatter, no
+   per-category hint blocks. Removed the now-dead `_HINTS` dict + the
+   `_DEBUG_ONLY_CATEGORIES` split. ★ EdgeStep uses `step_m`/`way_v`/`way_e`
+   (NOT de_m/way_a/way_b) — got that wrong first.
+2. **KCLT short_edge 13→6: killed 7 FALSE POSITIVES.** `check_rect_short_edges`
+   now exempts an end whose BOTH corners sit ≤1.5 m (GROUNDSIDE_CLEARANCE_M 1.0
+   + drift) from a `groundside_pavement` shape — a taxiway running to a
+   groundside ramp legitimately STOPS at the airside↔groundside boundary (the
+   clearance gap IS the connection; same exemption the vertex checks already
+   make). New ungated unit tests `tests/test_verification_checks.py` (synthetic,
+   no airport build): genuine-disconnect still flagged, groundside terminus
+   exempt. Fixtures + freshness green.
+
+**KCLT root-cause map (investigation — NOT all fixed):**
+- **within=162 + cross=3 + steps=82 = BUILDING/APRON GRADING** — buildings 2/3/4/6/8/9
+  carry sloped `node_altitudes` instead of one flat level; building4 #3 has a
+  **105% internal wall** (220.50→222.30 over 1.72 m) where an edge vertex is
+  pulled up to the serving apron (~222) next to the pad interior (220.5).
+  This is the building-pad-flattening frontier = **the OTHER session's active
+  unified_jacobi "terminal band-fill" WIP. LEFT ALONE per user.** (The cross/steps
+  are downstream of the same building↔apron level mismatch.)
+- **short_edge 6 genuine** — stubs U/E2/E3 end 40-46 m short of runway 18C/36C,
+  S/C12 ~30-46 m short; ALL sit at `→source=0.0 m` (0% off-source), i.e. each
+  stub correctly traces its OWN source pavement to its edge — the gap to the
+  runway is a real **source/network gap** (taxiway pavement doesn't connect to
+  the runway polygon in the Nimbus apt.dat). Real, NOT a floating synth rect;
+  needs a builder decision (bridge the gap vs. accept). NOT fixed.
+- **source=1** — `cross_connector M [#162]` 203 m², 0% on source = a connector
+  emitted entirely OFF pavement (floating synth). Real geometry bug. NOT fixed.
+
 ## ★★ 20260616-04 (2026-06-16, dev) — CYXY SVC7∩SVC8 SELF-OVERLAP FIXED + verify debug-log routing ★★
 Two things shipped this turn (memory: `cyxy_svc_donut_overlap.md`):
 1. **verify debug-log routing** (`verification.py` + `driver.py`): the
