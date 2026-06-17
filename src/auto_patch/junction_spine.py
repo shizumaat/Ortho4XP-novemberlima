@@ -159,8 +159,6 @@ def _partition_junction(s: BuiltShape, centerlines, field,
     if len(bz) != n:
         return None
 
-    boundary = poly.exterior
-
     # Spine nodes live only where the junction overlaps SOURCE pavement
     # (apt.dat + DSF) MINUS runways — never in a runway / off pavement.
     pav_clip = poly
@@ -177,12 +175,35 @@ def _partition_junction(s: BuiltShape, centerlines, field,
     if pav_clip.is_empty:
         return None
 
-    def _nearest_bvert(px, py):
+    # Every boundary segment (exterior + hole rings) for the LOCAL cap.
+    _ring_lists = [ropen]
+    for _hole in poly.interiors:
+        _hl = _open(list(_hole.coords))
+        if len(_hl) >= 3:
+            _ring_lists.append(_hl)
+
+    def _edge_cap(px, py):
+        """Nearer endpoint of the boundary EDGE closest to ``(px,py)`` —
+        the crossing point's flanking corner.  Local to the crossed edge
+        (never the globally-nearest vertex, whose cap line can jump across
+        a concave apron and self-intersect the slice)."""
         best = None
-        for (vx, vy) in ropen:
-            d = (vx - px) ** 2 + (vy - py) ** 2
-            if best is None or d < best[0]:
-                best = (d, (vx, vy))
+        for rl in _ring_lists:
+            m = len(rl)
+            for i in range(m):
+                ax, ay = rl[i]
+                bx, by = rl[(i + 1) % m]
+                dx, dy = bx - ax, by - ay
+                s2 = dx * dx + dy * dy
+                if s2 < 1e-12:
+                    continue
+                t = ((px - ax) * dx + (py - ay) * dy) / s2
+                t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+                cx, cy = ax + t * dx, ay + t * dy
+                d = (px - cx) ** 2 + (py - cy) ** 2
+                if best is None or d < best[0]:
+                    near = (ax, ay) if t <= 0.5 else (bx, by)
+                    best = (d, near)
         return best[1] if best else None
 
     def _on_pav(px, py):
@@ -233,8 +254,8 @@ def _partition_junction(s: BuiltShape, centerlines, field,
             # Cap each end to the nearest existing boundary vertex (the
             # rect corner) so the slice reaches the boundary at a shared
             # node — never a fresh node on the rect's flat edge.
-            cap_a = _nearest_bvert(*part.coords[0])
-            cap_b = _nearest_bvert(*part.coords[-1])
+            cap_a = _edge_cap(*part.coords[0])
+            cap_b = _edge_cap(*part.coords[-1])
             slice_pts = []
             if cap_a is not None and cap_a != spine_xy[0]:
                 slice_pts.append(cap_a)
@@ -250,10 +271,23 @@ def _partition_junction(s: BuiltShape, centerlines, field,
         return None
 
     # ── Partition ──
+    # Use the FULL boundary (exterior + any interior hole rings) so the
+    # slice pieces respect holes — an apron with a building cutout must
+    # not be filled (that would overlap the building; test_no_self_-
+    # overlap).  Keep only faces whose interior is inside the polygon
+    # (drops the hole faces).
     try:
-        arrangement = unary_union([boundary] + cut_lines)
-        faces = [f for f in polygonize(arrangement)
-                 if not f.is_empty and f.geom_type == "Polygon"]
+        arrangement = unary_union([poly.boundary] + cut_lines)
+        faces = []
+        for f in polygonize(arrangement):
+            if f.is_empty or f.geom_type != "Polygon":
+                continue
+            try:
+                if not poly.contains(f.representative_point()):
+                    continue
+            except _GEOM_EXC:
+                continue
+            faces.append(f)
     except _GEOM_EXC:
         return None
     if not faces:
@@ -326,11 +360,15 @@ def apply_junction_centerline_spine(layout) -> int:
     pav_union = getattr(layout, "_source_pav_union", None)
     runway_union = getattr(layout, "runway_union", None)
 
+    # Slice JUNCTIONS and APRONS along the centerlines that cross them
+    # (user 2026-06-17: extend the slice to aprons so a taxi centerline
+    # grading THROUGH an apron splits it into a few connected pieces that
+    # follow the corridor).  Buildings/terminals stay flat — never sliced.
     new_shapes: List[BuiltShape] = []
     n_done = 0
     n_pieces = 0
     for s in layout.shapes:
-        if s.role != ROLE_JUNCTION:
+        if s.role not in (ROLE_JUNCTION, ROLE_APRON):
             new_shapes.append(s)
             continue
         poly = s.polygon
@@ -351,7 +389,7 @@ def apply_junction_centerline_spine(layout) -> int:
             new_shapes.append(s)
             continue
         for f, ce in pieces:
-            ns = BuiltShape(polygon=f, role=ROLE_JUNCTION, ref=s.ref)
+            ns = BuiltShape(polygon=f, role=s.role, ref=s.ref)
             if max(ce) - min(ce) < 0.05:
                 ns.altitude = round(sum(ce[:-1]) / max(1, len(ce) - 1), 1)
             else:
@@ -364,23 +402,12 @@ def apply_junction_centerline_spine(layout) -> int:
     if n_done:
         UI.vprint(1,
             f"  [pav-builder] {getattr(layout, 'icao', '')}: "
-            f"junction-spine partitioned {n_done} junction(s) into "
+            f"junction-spine sliced {n_done} junction/apron(s) into "
             f"{n_pieces} piece(s).")
-        # Conformance-heal: the slice caps reuse existing boundary
-        # vertices, so the junction perimeter is unchanged and normally
-        # stays conformant.  Run a light heal anyway (RECEIVERS = apron +
-        # junction only — never a sloping rect, whose 4-corner form must
-        # not gain an edge node) to weld any cap vertex shared with an
-        # abutting apron/junction (collinear, altitude-neutral).
-        try:
-            from .conformance import enforce_conformance
-            _hs, _hv = enforce_conformance(
-                layout, owner_roles={ROLE_JUNCTION, ROLE_APRON})
-            if _hv:
-                UI.vprint(1,
-                    f"  [pav-builder] {getattr(layout, 'icao', '')}: "
-                    f"junction-spine conformance-heal inserted {_hv} "
-                    f"vertex(es) into {_hs} apron/junction shape(s).")
-        except _GEOM_EXC:
-            pass
+        # NO conformance-heal: the slice caps reuse EXISTING boundary
+        # vertices and the pieces share the centerline/cap edges exactly,
+        # so the partition is already a conforming tiling — there are no
+        # new perimeter nodes to weld.  (Running enforce_conformance over
+        # the dense apron-piece set instead REshaped pieces into ~540 m²
+        # of self-overlap at SPJC — test_no_self_overlap — for no gain.)
     return n_done
