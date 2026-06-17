@@ -5,7 +5,35 @@ P3 (conformance) IN PROGRESS; P4 pending. Branch `junction-centerline-spine`.
 **Gate:** `JUNCTION_CENTERLINE_SPINE` (config, env `O4_JCT_SPINE`, default OFF
 → gate-off byte-identical, proven CYXY MD5-match vs HEAD).
 
-## APRON slicing + overlap fix (2026-06-17) — `133f6b2`
+## PRE-SOLVE move — the architecture fix (2026-06-17) — `1b5894e`
+User direction: the centerline slice is GEOMETRY; move it pre-solve and
+let the solver own grade.  `apply_junction_centerline_spine` now runs
+right after the hole cuts and BEFORE `_unify_airside_geometry` + the
+per-surface solver.  `junction_spine.py` is pure geometry (~half the
+size): slice → pieces with NO altitudes.  Deleted: the network-profile
+field dependency, `_node_z`/`_boundary_z_at`/`_zfor`, and `_weld_soft_
+nodes` (the unify pass welds the new shared nodes; the solver grades the
+sliced surface coherently).
+
+**This fixed the things the post-solve cap was fighting:**
+- within-shape grade **74 → 4** (CYXY) — the lateral field-vs-boundary
+  seam is GONE (solver grades centerline + boundary together).
+- `no_vertex_on_sloping_rect_edge`/`_flat_edge`, `no_self_overlap`,
+  `junction_runway_node_sharing` — all PASS gate-ON (unify handles the
+  cap/weld conformance).
+- conformance 2 T-junc / 0 crossings.  Gate-OFF byte-identical.
+
+**Remaining gate-ON tail (13 fail = 4 standing + spine):** the OFF-SOURCE
+PIECE family — where a junction/apron extends past `pav_union`, slicing
+splits the off-source lobe into its own piece (`rests_on_source` CYXY
+#92 733 m²@39%; `outside_pavement` #241 1.42 m; `have_source` #113 ~6.8
+m).  Fix = clip the slice to pavement / merge off-source slivers.  Plus
+`tile_cut_parity[SPLP]` and `pavement_grade[CYXY]` (4 within-shape).
+Plus the centerline-vs-parallel bad-data spots (CYXY A2/E/TX1, under
+investigation — possible discovered-centerline duplicate, see
+/tmp/CYXY_spine_spots.osm).
+
+## APRON slicing + overlap fix (2026-06-17, superseded by pre-solve) — `133f6b2`
 Extended the slice to ROLE_APRON (taxi centerlines grade through aprons).
 Fixes: honor hole rings (don't fill building cutouts); local edge-cap (not
 global-nearest vertex); **removed the conformance-heal** (it reshaped dense
