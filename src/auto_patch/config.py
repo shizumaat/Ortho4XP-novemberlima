@@ -856,8 +856,9 @@ APRON_BACK_EDGE_RAMPS = _os.environ.get("O4_APRON_BACK_RAMPS", "1") == "1"
 # straddling terrain — whose serving corridors sit at very different elevations
 # — stays flat at a level the band-widened chord window allows, raised out of
 # any DEM canyon; it slopes only when even the 1.5% band window inverts.
-# Default OFF until shipped (gate-off byte-identical).  O4_TAXI_SLACK=1 enables.
-TAXI_SLACK_TERMINALS = _os.environ.get("O4_TAXI_SLACK", "0") == "1"
+# Default ON (user 2026-06-16, for in-sim eval).  O4_TAXI_SLACK=0 disables →
+# byte-identical to the pre-feature behaviour.
+TAXI_SLACK_TERMINALS = _os.environ.get("O4_TAXI_SLACK", "1") == "1"
 
 # (apron-edge-retreat REMOVED 2026-06-16, user ruling): a post-solve pass
 # (`_retreat_route_pinned_apron_edges`) used to move apron polygons inward
