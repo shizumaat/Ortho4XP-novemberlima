@@ -972,9 +972,10 @@ RUNWAY_SHOULDER_SEGMENT = (
 # field flat 1.5% but the emitted surface spikes to 3.6%).  When ON, each
 # junction/apron is SLICED along every crossing taxi centerline (pre-solve
 # pure geometry) so the centerline becomes a real shared edge the solver
-# grades — see junction_spine.py.  Default OFF (gate-off byte-identical);
-# O4_JCT_SPINE=1 enables.
-JUNCTION_CENTERLINE_SPINE = _os.environ.get("O4_JCT_SPINE", "0") == "1"
+# grades — see junction_spine.py.  Default ON (2026-06-17, user — enabled
+# in dev for in-sim testing); set O4_JCT_SPINE=0 to disable / restore the
+# byte-identical ring junctions.  Outstanding issues: STATUS.md 20260617-01.
+JUNCTION_CENTERLINE_SPINE = _os.environ.get("O4_JCT_SPINE", "1") == "1"
 # Spacing (m) of spine nodes densified along each crossing centerline
 # inside a junction.
 SPINE_STEP_M = float(_os.environ.get("O4_JCT_SPINE_STEP_M", "12.0"))

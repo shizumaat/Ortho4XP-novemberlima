@@ -1,4 +1,4 @@
-# Auto-Patch Status — 20260617 = JUNCTION CENTERLINE SPINE (slice junctions/aprons along taxi centerlines, pre-solve; gate O4_JCT_SPINE default OFF = byte-identical); MERGED to dev
+# Auto-Patch Status — 20260617 = JUNCTION CENTERLINE SPINE (slice junctions/aprons along taxi centerlines, pre-solve); MERGED to dev + gate `O4_JCT_SPINE` flipped DEFAULT ON for in-sim testing (set O4_JCT_SPINE=0 to restore byte-identical ring junctions)
 
 ## ★★ 20260617-01 (2026-06-17) — JUNCTION-CENTERLINE-SPINE merged to dev (gate default OFF = byte-identical); OUTSTANDING ISSUES for followup ★★
 
