@@ -91,21 +91,48 @@ def _open(ring):
     return pts
 
 
-def _full_centerlines(layout):
-    """Every TAXI centerline of the route graph (apt.dat network +
-    discovered lanes).  Runway long-axes are EXCLUDED — runway grade is
-    the FAA profile's job, and a spine node must never land in a runway
-    (user 2026-06-17)."""
+def _coords(items):
     out: List[LineString] = []
-    for item in (getattr(layout, "apt_taxi_centerlines", None) or []):
-        ln = item[0] if isinstance(item, tuple) else item
-        if ln is not None and not ln.is_empty:
-            out.append(ln)
-    for item in (getattr(layout, "_discovered_centerlines", None) or []):
+    for item in (items or []):
         ln = item[0] if isinstance(item, tuple) else item
         if ln is not None and not ln.is_empty:
             out.append(ln)
     return out
+
+
+def _full_centerlines(layout):
+    """The spine's taxi centerlines: PREFER the painted (row-120) BEZIER
+    curves (continuous arcs through junctions) and fill gaps with the
+    1201/1202 edges they do NOT cover; plus the discovered lanes.  Falls
+    back to the plain 1201/1202 + discovered set when no painted curves
+    were computed (e.g. the gate built them into ``apt_taxi_centerlines``
+    already, or none exist).  Runway long-axes are EXCLUDED — runway grade
+    is the FAA profile's job, and a spine node must never land in a runway
+    (user 2026-06-17)."""
+    painted = list(getattr(layout, "_painted_centerlines", None) or [])
+    apt_cl = _coords(getattr(layout, "apt_taxi_centerlines", None))
+    disc = _coords(getattr(layout, "_discovered_centerlines", None))
+    if not painted:
+        return apt_cl + disc
+    # De-dup: keep only the 1201/1202 edges the painted curves don't
+    # already cover (within ~6 m for most of their length), so no taxiway
+    # is sliced twice by two slightly-offset lines.
+    try:
+        pbuf = unary_union(painted).buffer(6.0)
+    except _GEOM_EXC:
+        pbuf = None
+    uncovered: List[LineString] = []
+    for ln in apt_cl:
+        if pbuf is None or ln.length < 1e-6:
+            uncovered.append(ln)
+            continue
+        try:
+            cov = ln.intersection(pbuf).length / ln.length
+        except _GEOM_EXC:
+            cov = 0.0
+        if cov < 0.7:
+            uncovered.append(ln)
+    return painted + uncovered + disc
 
 
 def _perp_dist(qx, qy, c1, c2):
@@ -151,7 +178,7 @@ def _partition_junction(s, centerlines, pav_union, runway_union, near_hard):
     poly = s.polygon
     ropen = _open(list(poly.exterior.coords))
     if len(ropen) < 3:
-        return None
+        return None, "degenerate" 
 
     # Spine nodes live only where the shape overlaps SOURCE pavement
     # (apt.dat + DSF) MINUS runways.
@@ -167,7 +194,7 @@ def _partition_junction(s, centerlines, pav_union, runway_union, near_hard):
         except _GEOM_EXC:
             pass
     if pav_clip.is_empty:
-        return None
+        return None, "off_pavement" 
 
     _ring_lists = [ropen]
     for _hole in poly.interiors:
@@ -279,16 +306,20 @@ def _partition_junction(s, centerlines, pav_union, runway_union, near_hard):
                     pass
             cut_lines.extend(extra)
     if not cut_lines:
-        return None
+        return None, "no_cut" 
 
-    # Polygonize against the FULL boundary (exterior + hole rings) so the
-    # slice respects holes; keep faces whose interior is inside the poly.
+    # Polygonize against the FULL boundary (exterior + hole rings).  Union
+    # with a GRID_SIZE so the cut endpoints — which land a few µm off the
+    # boundary edge in the raw pre-solve geometry — snap onto it and NODE;
+    # without grid-snapped noding polygonize leaves clean boundary-to-
+    # boundary cuts unsplit.
+    from shapely import union_all
     try:
-        arrangement = unary_union([poly.boundary] + cut_lines)
+        arrangement = union_all([poly.boundary] + cut_lines, grid_size=0.01)
+        raw = [f for f in polygonize(arrangement)
+               if not f.is_empty and f.geom_type == "Polygon"]
         faces = []
-        for f in polygonize(arrangement):
-            if f.is_empty or f.geom_type != "Polygon":
-                continue
+        for f in raw:
             if f.area < _MIN_PIECE_AREA:
                 continue
             try:
@@ -298,8 +329,10 @@ def _partition_junction(s, centerlines, pav_union, runway_union, near_hard):
                 continue
             faces.append(f)
     except _GEOM_EXC:
-        return None
-    return faces if len(faces) > 1 else None
+        return None, "polygonize_err"
+    if len(faces) > 1:
+        return faces, "ok"
+    return None, f"single_face(raw={len(raw)},cuts={len(cut_lines)})"
 
 
 def apply_junction_centerline_spine(layout) -> int:
@@ -311,6 +344,17 @@ def apply_junction_centerline_spine(layout) -> int:
     centerlines = _full_centerlines(layout)
     if not centerlines:
         return 0
+    import os as _os
+    _DEBUG = _os.environ.get("O4_JCT_SPINE_DEBUG") == "1"
+    _skips = []
+    if _DEBUG:
+        UI.vprint(1, "  [pav-builder] junction-spine source: %d centerline(s)"
+                  " (painted=%d, apt=%d, disc=%d)" % (
+                      len(centerlines),
+                      len(getattr(layout, "_painted_centerlines", None) or []),
+                      len(getattr(layout, "apt_taxi_centerlines", None) or []),
+                      len(getattr(layout, "_discovered_centerlines", None)
+                          or [])))
     pav_union = getattr(layout, "_source_pav_union", None)
     runway_union = getattr(layout, "runway_union", None)
 
@@ -356,11 +400,20 @@ def apply_junction_centerline_spine(layout) -> int:
                     crossing.append(ln)
             except _GEOM_EXC:
                 continue
-        pieces = (_partition_junction(s, crossing, pav_union,
-                                      runway_union, _near_hard)
-                  if crossing else None)
+        if not crossing:
+            new_shapes.append(s)
+            continue
+        pieces, reason = _partition_junction(
+            s, crossing, pav_union, runway_union, _near_hard)
         if not pieces:
             new_shapes.append(s)
+            if _DEBUG:
+                try:
+                    c = s.polygon.representative_point()
+                    la, lo = layout.m_to_ll(c.x, c.y)
+                    _skips.append((reason, s.role, round(la, 5), round(lo, 5)))
+                except Exception:
+                    _skips.append((reason, s.role, 0, 0))
             continue
         for f in pieces:
             # Geometry only — no altitudes; the per-surface solver grades
@@ -376,4 +429,8 @@ def apply_junction_centerline_spine(layout) -> int:
             f"  [pav-builder] {getattr(layout, 'icao', '')}: "
             f"junction-spine sliced {n_done} junction/apron(s) into "
             f"{n_pieces} piece(s) (pre-solve geometry).")
+    if _DEBUG and _skips:
+        from collections import Counter
+        UI.vprint(1, "  [pav-builder] junction-spine SKIPPED %d: %s" % (
+            len(_skips), dict(Counter(r for r, *_ in _skips))))
     return n_done

@@ -1461,6 +1461,26 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # longer reachable from layout.shapes.
     layout.apt_taxi_centerlines = list(osm_centerlines)
 
+    # Painted (row-120) taxiway centerlines carry the authored BEZIER
+    # curves that the straight 1201/1202 edges lack — continuous arcs
+    # through junctions where the routing graph is disconnected at the
+    # node.  The fallback above only used them when the 1201/1202 network
+    # was ABSENT; when the junction-spine is on, compute them HERE even
+    # WITH a network and stash them for the spine, which prefers the
+    # curves and fills any gaps from the 1201/1202 edges (junction_spine.
+    # _full_centerlines).  Gated, so gate-off stays byte-identical; only
+    # needed in the WITH-network case (no-network already left the painted
+    # curves in ``apt_taxi_centerlines``).
+    from .config import JUNCTION_CENTERLINE_SPINE as _JCS
+    if _JCS and apt.taxi_edges:
+        try:
+            _painted = APR.painted_taxi_centerlines(
+                apt, to_m, pavement_union_m=pav_union,
+                runway_union_m=layout.runway_union)
+            layout._painted_centerlines = [ln for ln, _nm in _painted]
+        except Exception:
+            layout._painted_centerlines = []
+
     # apt.dat ramp starts (stands) + ground-vehicle service roads.
     # 1206 service roads become 4 %-grade ``service_road`` rects when the
     # feature is enabled.  Parsing the apt.dat 1206 centerlines is skipped
