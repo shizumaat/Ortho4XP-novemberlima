@@ -47,6 +47,8 @@ from .apt_dat_reader import (
     _mirror,
     _quadratic_bezier,
 )
+from . import agp_reader as _AGPR
+from .config import AGP_BUILDINGS
 
 
 # Pavement-detector patterns: a POLYGON_DEF must START with one of
@@ -231,6 +233,87 @@ def _interpolate_dsf_ring(
     return out
 
 
+# Memoized DSFTool text dumps, keyed by (abspath, mtime).  Both
+# ``read_dsf_pavements`` and ``read_dsf_buildings`` — and the ``.agp``
+# OBJECT walk — run on the SAME DSF; this keeps the conversion AND the
+# (potentially tens-of-MB) ``readlines`` to ONCE per DSF per process
+# instead of once per caller.  Keyed on mtime so a rebuilt DSF
+# re-converts and re-reads.
+_DSF_LINES_CACHE: dict[tuple[str, float], list[str]] = {}
+
+
+def _load_dsf_text(dsf_path: str,
+                   cache_dir: str | None = None) -> list[str] | None:
+    """Return the DSFTool ``--dsf2text`` lines for a DSF (memoized).
+
+    Runs DSFTool only when the cached ``<dsf>.text`` is missing/stale,
+    and reads the text from disk only ONCE per DSF per process (shared
+    across every reader that walks the same DSF).  Returns None on any
+    failure (missing file/tool, conversion error).
+    """
+    if not dsf_path or not os.path.isfile(dsf_path):
+        return None
+    try:
+        mtime = os.path.getmtime(dsf_path)
+    except OSError:
+        return None
+    ckey = (os.path.abspath(dsf_path), mtime)
+    cached = _DSF_LINES_CACHE.get(ckey)
+    if cached is not None:
+        return cached
+
+    tool = _dsftool_path()
+    if tool is None:
+        UI.vprint(1,
+            "  [dsf-reader] WARN: DSFTool binary not found at "
+            f"{os.path.join(FNAMES.Utils_dir, platform.system().lower())}; "
+            "DSF data will not be loaded.")
+        return None
+
+    # Cache the converted text alongside the DSF (or in cache_dir).
+    if cache_dir is None:
+        cache_dir = os.path.dirname(dsf_path)
+    text_path = os.path.join(
+        cache_dir,
+        os.path.basename(dsf_path) + ".text",
+    )
+    # Re-convert if text is missing or older than the DSF.
+    needs_convert = (not os.path.isfile(text_path)
+                     or (os.path.getmtime(text_path) < mtime))
+    if needs_convert:
+        try:
+            # Some platforms don't allow writing into Custom Scenery;
+            # fall back to a temp file in /tmp if the cache write fails.
+            try:
+                subprocess.run(
+                    [tool, "--dsf2text", dsf_path, text_path],
+                    check=True, capture_output=True, timeout=120,
+                )
+            except (PermissionError, subprocess.CalledProcessError):
+                fallback = tempfile.NamedTemporaryFile(
+                    suffix=".dsf.text", delete=False)
+                text_path = fallback.name
+                fallback.close()
+                subprocess.run(
+                    [tool, "--dsf2text", dsf_path, text_path],
+                    check=True, capture_output=True, timeout=120,
+                )
+        except (OSError, subprocess.SubprocessError) as exc:
+            UI.vprint(1,
+                f"  [dsf-reader] WARN: DSFTool failed on "
+                f"{os.path.basename(dsf_path)}: {exc}")
+            return None
+
+    try:
+        with open(text_path, "r", encoding="utf-8",
+                  errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return None
+    _DSF_LINES_CACHE[ckey] = lines
+    return lines
+
+
 def _read_dsf_polys(
     dsf_path: str,
     accept_fn,
@@ -266,56 +349,8 @@ def _read_dsf_polys(
         vertex isn't repeated).  Returns ``[]`` on any failure
         (DSFTool missing, DSF unreadable, no accepted defs, etc.).
     """
-    if not dsf_path or not os.path.isfile(dsf_path):
-        return []
-    tool = _dsftool_path()
-    if tool is None:
-        UI.vprint(1,
-            "  [dsf-reader] WARN: DSFTool binary not found at "
-            f"{os.path.join(FNAMES.Utils_dir, platform.system().lower())}; "
-            "DSF pavement will not be loaded.")
-        return []
-
-    # Cache the converted text alongside the DSF (or in cache_dir).
-    if cache_dir is None:
-        cache_dir = os.path.dirname(dsf_path)
-    text_path = os.path.join(
-        cache_dir,
-        os.path.basename(dsf_path) + ".text",
-    )
-    # Re-convert if text is missing or older than the DSF.
-    needs_convert = (not os.path.isfile(text_path)
-                     or (os.path.getmtime(text_path)
-                         < os.path.getmtime(dsf_path)))
-    if needs_convert:
-        try:
-            # Some platforms don't allow writing into Custom Scenery;
-            # fall back to a temp file in /tmp if the cache write fails.
-            try:
-                subprocess.run(
-                    [tool, "--dsf2text", dsf_path, text_path],
-                    check=True, capture_output=True, timeout=120,
-                )
-            except (PermissionError, subprocess.CalledProcessError):
-                fallback = tempfile.NamedTemporaryFile(
-                    suffix=".dsf.text", delete=False)
-                text_path = fallback.name
-                fallback.close()
-                subprocess.run(
-                    [tool, "--dsf2text", dsf_path, text_path],
-                    check=True, capture_output=True, timeout=120,
-                )
-        except (OSError, subprocess.SubprocessError) as exc:
-            UI.vprint(1,
-                f"  [dsf-reader] WARN: DSFTool failed on "
-                f"{os.path.basename(dsf_path)}: {exc}")
-            return []
-
-    try:
-        with open(text_path, "r", encoding="utf-8",
-                  errors="replace") as f:
-            lines = f.readlines()
-    except OSError:
+    lines = _load_dsf_text(dsf_path, cache_dir)
+    if not lines:
         return []
 
     # Pass 1: collect POLYGON_DEFs in order; track which indices the
@@ -515,10 +550,61 @@ def _building_role_for_def(path: str) -> str | None:
     return None
 
 
+def _read_dsf_object_placements(
+        lines: list[str], accept_fn,
+) -> list[tuple[str, float, float, float]]:
+    """Walk ``OBJECT_DEF`` / ``OBJECT`` placements over an already-loaded
+    DSF text dump.
+
+    Returns ``(def_path, lon, lat, heading_deg)`` for each placement
+    whose ``OBJECT_DEF`` path satisfies ``accept_fn``.  Mirrors the
+    POLYGON_DEF index-table pattern: ``OBJECT_DEF``\\ s are numbered
+    0..N in declaration order; an ``OBJECT`` / ``OBJECT_MSL`` /
+    ``OBJECT_AGL`` instruction references one by index, followed by
+    lon, lat and (for MSL/AGL, after the elevation field) the heading
+    in degrees clockwise from true north.
+    """
+    accepted: dict[int, str] = {}
+    idx = 0
+    for line in lines:
+        if line.startswith("OBJECT_DEF"):
+            tok = line.strip().split(maxsplit=1)
+            path = tok[1].strip() if len(tok) > 1 else ""
+            if accept_fn(path):
+                accepted[idx] = path
+            idx += 1
+    if not accepted:
+        return []
+    out: list[tuple[str, float, float, float]] = []
+    for line in lines:
+        if not line.startswith("OBJECT"):
+            continue
+        tok = line.split()
+        kw = tok[0]
+        if kw == "OBJECT":
+            hi = 4                       # idx lon lat HEADING
+        elif kw in ("OBJECT_MSL", "OBJECT_AGL"):
+            hi = 5                       # idx lon lat ELEV HEADING
+        else:                            # OBJECT_DEF and unknowns
+            continue
+        try:
+            oi = int(tok[1])
+            lon = float(tok[2])
+            lat = float(tok[3])
+            heading = float(tok[hi]) if len(tok) > hi else 0.0
+        except (ValueError, IndexError):
+            continue
+        p = accepted.get(oi)
+        if p is not None:
+            out.append((p, lon, lat, heading))
+    return out
+
+
 def read_dsf_buildings(
     dsf_path: str,
     cache_dir: str | None = None,
     bezier_segments: int = DEFAULT_BEZIER_SEGMENTS,
+    xplane_root: str | None = None,
 ) -> list[tuple[list[tuple[float, float]],
                 list[list[tuple[float, float]]],
                 str]]:
@@ -535,6 +621,17 @@ def read_dsf_buildings(
     sharing one footprint (e.g. ``term_building_Ground`` +
     ``term_building_Levels`` on the same corners); de-duplicating /
     unioning coincident footprints is the caller's responsibility.
+
+    Two sources feed the same list:
+      * ``.fac`` facades — full draped POLYGONs whose ring geometry is
+        read straight from the DSF (terminal / hangar / bridge roles).
+      * ``.agp`` autogen-point hangars — placed as a single ``OBJECT``
+        handle + heading; their footprint is resolved from the ``.agp``
+        sidecar via ``library.txt`` and projected onto the handle
+        (role ``"hangar"``).  This source is gated by ``AGP_BUILDINGS``
+        and requires ``xplane_root`` to resolve the library; when the
+        gate is off (or no root is supplied) the result is exactly the
+        prior ``.fac``-only behaviour.
     """
     polys = _read_dsf_polys(
         dsf_path,
@@ -547,6 +644,17 @@ def read_dsf_buildings(
         role = _building_role_for_def(def_path)
         if role is not None:
             out.append((outer, holes, role))
+
+    # ── .agp point-placed hangars (just another building source) ────
+    if AGP_BUILDINGS and xplane_root:
+        lines = _load_dsf_text(dsf_path, cache_dir)   # memoized: no re-read
+        if lines:
+            for vpath, lon, lat, heading in _read_dsf_object_placements(
+                    lines, _AGPR.is_agp_building_def):
+                ring = _AGPR.agp_footprint_lonlat(
+                    vpath, lon, lat, heading, xplane_root)
+                if ring and len(ring) >= 3:
+                    out.append((ring, [], "hangar"))
     return out
 
 

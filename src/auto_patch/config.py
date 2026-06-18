@@ -15,6 +15,7 @@ __all__ = [
     "AXIS_ALIGN_TOL_DEG",
     "LOAD_DSF_PAVEMENT",
     "DSF_BUILDINGS",
+    "AGP_BUILDINGS",
     "DSF_BUILDING_OSM_OVERLAP_FRAC",
     "DSF_CLUSTER_SIMPLIFY_TOL_M",
     "BUILDING_OUTLINE_FILL_R",
@@ -915,6 +916,20 @@ FIELD_RUNWAY_ROUTE_BANDS = _os.environ.get("O4_FIELD_RW_ROUTE", "1") == "1"
 # documented block near LOAD_DSF_PAVEMENT above.  Read here because
 # ``import os as _os`` only comes into scope at this point in the file.
 DSF_BUILDINGS = _os.environ.get("O4_DSF_BUILDINGS", "1") == "1"
+
+# (20260617) AGP HANGAR BUILDINGS (user 2026-06-17): X-Plane also places
+# airport hangars as ``.agp`` AUTOGEN POINTS — a single ``OBJECT`` handle
+# + heading in the DSF, with the footprint encoded in the ``.agp`` sidecar
+# (TILE/CROP_POLY in texture pixels × TEXTURE_WIDTH/HEIGHT ÷ TEXTURE_SCALE,
+# anchored at ANCHOR_PT).  ``dsf_reader.read_dsf_buildings`` resolves the
+# sidecar through the X-Plane ``library.txt`` map and projects the footprint
+# onto the handle, feeding it into the SAME building pool as the ``.fac``
+# facades (role ``"hangar"``).  Scoped initially to the
+# ``lib/airport/Common_Elements/Hangars/`` virtual prefix.  Default ON
+# (user 2026-06-17, for in-sim testing); O4_AGP_BUILDINGS=0 disables it
+# (byte-identical to the prior .fac-only behaviour).  Has no effect
+# unless DSF_BUILDINGS is also ON (shares the building path).
+AGP_BUILDINGS = _os.environ.get("O4_AGP_BUILDINGS", "1") == "1"
 
 # (20260614-02) TERM-BRIDGE GROUPING (user 2026-06-14): X-Plane's
 # Terminal_kit ships ``term_bridge_*.fac`` connector facades (enclosed
