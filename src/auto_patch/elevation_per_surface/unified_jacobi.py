@@ -1793,7 +1793,13 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
             # graph with the §5.2 noise margin.
             from auto_patch.taxi_routing import runway_augmented_route_graph
             extra = {i for i in range(n) if base_hard[i]}
-            if held_extra:
+            # W2_CLEAN_BANDS: anchor the band on TRUTH ONLY (runway/seam +
+            # base_hard thresholds/boundary) — NOT the corridor held-writes.
+            # Anchoring on the held corridor profile (a cascade artifact, not
+            # surveyed truth) tightens the band against the apron's own
+            # within-shape law and EMPTIES the feasible polytope (the stall).
+            # The oracle proves the truth-only band is feasible.
+            if held_extra and not W2_CLEAN_BANDS:
                 extra |= {i for i in held_extra if i < n}
             # NETWORK PROFILE MODEL: the solved field's plain vertices
             # join the anchor set — DENSE anchors give adjacent vertices
@@ -2323,10 +2329,8 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
     sweeps, resid = _project_within_bands(
         elev, all_edges, is_hard, lo, hi, coupling,
         held_extra=held_all,
-        max_sweeps=(int(_os.environ.get("O4_W2_SWEEPS", "2000"))
-                    if W2_CLEAN_BANDS else _WITHIN_ENFORCE_MAX_SWEEPS),
-        tol=(0.001 if W2_CLEAN_BANDS else _SPREAD_COMPLY_TOL_M),
-        reclamp=W2_CLEAN_BANDS)
+        max_sweeps=_WITHIN_ENFORCE_MAX_SWEEPS,
+        tol=_SPREAD_COMPLY_TOL_M)
     _bn_dump("post-project")
     if _os.environ.get("O4_W2_DUMP") == "1":
         print(f"[w2] {icao}: projection resid(mx)={resid:.4f}m "
@@ -3292,14 +3296,47 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
         # first cut left taxiway-G rect planes 0.8 m over-cap at HECA
         # — the low mouth hit its budget mid-move), small enough that
         # infeasible-hard-anchor sites (bad input data) stay local.
-        _cl_lo = [elev[i9] - 2.5 for i9 in range(n)]
-        _cl_hi = [elev[i9] + 2.5 for i9 in range(n)]
+        # W2_CLEAN_BANDS: the final closure's box becomes the CLEAN feasible
+        # band [lo,hi] (not elev±2.5).  POCS (this projection + the per-move
+        # box clamp in _gmove9) provably converges to ZERO on a non-empty
+        # polytope, and the clean band IS the true feasible polytope (the
+        # ±2.5 m movement clamp was emptying it for big-move nodes → the
+        # 0.82 m stall).  Unbounded nodes keep a wide ±budget.  Validated in
+        # tools/grade_feasibility_audit.py: POCS on the clean polytope hits
+        # 0 violations (CYXY/SPJC/SPLP).
+        if W2_CLEAN_BANDS:
+            # Use the clean feasible band [lo,hi] ONLY where it is finite AND
+            # feasible (lo<=hi).  POCS converges to ZERO on the feasible
+            # polytope (CYXY/SPJC).  Where a node is BAND-PINNED (lo>hi: a
+            # genuine terrain-canyon infeasibility, W3/W5's job) or UNBOUNDED,
+            # fall back to a bounded ±2.5 m move so POCS can't diverge there
+            # (without this, an empty local polytope ran SPLP to a 16 m
+            # residual).  Feasible airports converge; infeasible spots stay
+            # bounded best-effort.
+            _cl_lo, _cl_hi = [0.0] * n, [0.0] * n
+            for i9 in range(n):
+                l9, h9 = lo[i9], hi[i9]
+                if l9 != float("-inf") and h9 != float("inf") and l9 <= h9:
+                    _cl_lo[i9], _cl_hi[i9] = l9, h9
+                else:
+                    _cl_lo[i9], _cl_hi[i9] = elev[i9] - 2.5, elev[i9] + 2.5
+        else:
+            _cl_lo = [elev[i9] - 2.5 for i9 in range(n)]
+            _cl_hi = [elev[i9] + 2.5 for i9 in range(n)]
+        # W2_CLEAN_BANDS: hold ONLY truly-hard (runway/seam).  Terminals are
+        # NOT held at a fixed level — they stay FLAT via their coupling group
+        # (one level for the pad) but the level is FREE to yield to a feasible
+        # value (the cascade ruling: terminal yields the minimum).  Holding the
+        # pad at its cascade level empties the polytope where that level is
+        # infeasible (the validated oracle model holds only truth + flat
+        # equality).  Legacy path keeps the terminal hold.
         _held9 = [False] * n
         for i9 in range(n):
             grp9 = (coupling[i9] if (coupling is not None
                                      and i9 in coupling) else (i9,))
-            _held9[i9] = any(is_hard[m9] or m9 in _term_nodes
-                             for m9 in grp9)
+            _held9[i9] = any(
+                is_hard[m9] or (m9 in _term_nodes and not W2_CLEAN_BANDS)
+                for m9 in grp9)
 
         def _gmove9(i9, dd9):
             # move i9's coupled group together, delta clamped into the
@@ -3313,7 +3350,9 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                 elev[m9] += dd9
             return abs(dd9)
 
-        for _sw9 in range(800):
+        _maxsw9 = 8000 if W2_CLEAN_BANDS else 800
+        _tol9 = 0.001 if W2_CLEAN_BANDS else _SPREAD_COMPLY_TOL_M
+        for _sw9 in range(_maxsw9):
             mx9 = 0.0
             for (i9, j9, c9) in all_edges:
                 if c9 <= 0.0:
@@ -3333,8 +3372,11 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                 else:
                     mx9 = max(mx9, _gmove9(i9, -s9 * ex9 / 2.0))
                     mx9 = max(mx9, _gmove9(j9, s9 * ex9 / 2.0))
-            if mx9 < _SPREAD_COMPLY_TOL_M:
+            if mx9 < _tol9:
                 break
+        if _os.environ.get("O4_W2_DUMP") == "1":
+            print(f"[w2] {icao}: final closure sweeps={_sw9 + 1}/{_maxsw9} "
+                  f"resid={mx9:.4f}m")
     _bn_dump("post-final")
     if _dbg:
         v1 = sum(1 for (i, j, c) in all_edges

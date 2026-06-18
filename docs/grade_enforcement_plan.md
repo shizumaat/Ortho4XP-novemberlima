@@ -149,6 +149,37 @@ measured against SPJC building20 + HECA terminal flatten, not blind-landed.
 The `O4_W2_DUMP` diagnostic + `tools/grade_feasibility_audit.py` are the
 instruments to drive it to zero.
 
+## W2 SOLVER BUILT (2026-06-18, gate `O4_W2_BANDS` default off = byte-identical)
+The within-shape enforce was three accreted cap-projection passes, each with its
+own artificial constraint (corridor held-write anchors, ±2.5 m movement clamp,
+field self-anchor) that EMPTIES the feasible polytope → the projection stalls.
+Validated in `tools/grade_feasibility_audit.py`: plain POCS (cyclic edge
+projection + box clamp) converges to ZERO on the TRUE feasible polytope
+(CYXY 36 sweeps, SPJC 270, SPLP 36) — so the fix is "one clean projection," not
+a fancier solver. Under the gate:
+1. Band anchored on TRUTH ONLY (runway/seam/base_hard) — drop the field
+   self-anchor AND the corridor held-write anchors.
+2. Final pair-law closure box = the clean feasible band `[lo,hi]` where finite &
+   feasible; bounded ±2.5 m fallback where band-pinned/unbounded (so POCS can't
+   diverge at genuine infeasibilities).
+3. Terminals held FLAT via their coupling group but LEVEL FREE to yield (not
+   pinned at the cascade value) — keeps building20 flat while freeing the
+   polytope.
+
+Measured (within-shape validator):
+  | airport | baseline | W2 | note |
+  |---|---|---|---|
+  | CYXY | 17 | **0** | converged (resid 0.001 m) |
+  | SPJC | 1  | **1** | the 1 is the post-solve tunnel-ramp feature; airside **0** |
+  | SPLP | 149 | **91** | improved + bounded; 4 fundamental remain (W3/W5) |
+  | HECA | 66 | **60** | improved + bounded; 305 pinned reps remain (W3/W5) |
+
+So W2 drives the FEASIBLE airports to zero and IMPROVES the infeasible ones
+without diverging. building#30 (185k m², the building20 case) stays FLAT;
+minor 0.1–0.2 m slope appears on a few SMALL pads (coupling not fully holding
+them — not validator violations; a follow-up). Gate-off byte-identical (CYXY
+md5 match). NEXT: tune small-pad terminal coupling; then W3/W5 for HECA/SPLP.
+
 ## Suggested order
 W1 → W2 (foundational, low risk, turn residuals into *true* infeasibility counts)
 → measure how many/where true infeasibilities are per fixture → W5 + W4 (remove

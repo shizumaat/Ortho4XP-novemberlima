@@ -1010,16 +1010,19 @@ SPINE_STEP_M = float(_os.environ.get("O4_JCT_SPINE_STEP_M", "12.0"))
 # byte-identical (no caps carved).  Two earlier Phase-2 attempts regressed
 # within-shape grade — the PHASE, not the role, was the bug.
 # (20260618 W2) CLEAN ENFORCE BANDS — docs/grade_enforcement_plan.md.
-# The ROUTE_FIELD enforce band self-anchors on the CURRENT solved field
-# (NETWORK_PROFILE_MODEL `extra_points` + the field's route-graph view), which
-# manufactures band INVERSIONS (lo>hi) on nodes the feasibility oracle proves
-# compliant → those nodes get HELD out of the projection → feasible grade
-# violations can never be fixed.  When ON, the hard band drops the field
-# self-anchor (keeps the legitimate runway/seam/held-write/terminal anchors,
-# so building-flatten's terminal anchoring survives) and the field-tie moves
-# to the projection's movement-minimising seed + the corridor attractor.
-# Default OFF = byte-identical.
-W2_CLEAN_BANDS = _os.environ.get("O4_W2_BANDS", "0") == "1"
+# The legacy within-shape enforce is 3 accreted cap-projections whose
+# artificial constraints (field self-anchor + corridor held-write band
+# anchors + ±2.5 m movement clamp) EMPTY the feasible polytope → the
+# projection stalls and FEASIBLE grade violations can never be fixed.  When
+# ON, the hard band is anchored on TRUTH ONLY (runway/seam), the final closure
+# box is the clean feasible band (±2.5 m fallback only where genuinely
+# infeasible, so POCS can't diverge there), and terminals stay FLAT (coupled)
+# but level-free.  Plain POCS then converges to ZERO on the feasible polytope:
+# CYXY 17→0, SPJC airside→0; SPLP/HECA improved + bounded (their residual
+# violations are genuine terrain-canyon infeasibility = the W3/W5 work).
+# Default ON in dev (2026-06-18, user — for in-sim testing); set O4_W2_BANDS=0
+# to restore the legacy field-anchored bands.
+W2_CLEAN_BANDS = _os.environ.get("O4_W2_BANDS", "1") == "1"
 
 RECT_END_CAPS = _os.environ.get("O4_RECT_CAPS", "0") == "1"
 # Depth (m, perpendicular to the rect's flat end) of each end-cap — strictly

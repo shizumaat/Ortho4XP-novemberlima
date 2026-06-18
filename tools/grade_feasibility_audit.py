@@ -149,6 +149,64 @@ def _route_band_intervals(ways, nodes, ll_to_m, route_ctx, seam_nids,
     return lo_d, hi_d
 
 
+def _pocs_solve(adj, hard, lo, hi, seed, max_sweeps=5000, tol=1e-4):
+    """Cyclic POCS: project each difference constraint then clamp to the box,
+    until the worst edge excess < tol.  Converges to a feasible point iff the
+    polytope is non-empty.  Returns (sweeps, resid, n_edges_over_cap+0.15m)."""
+    INF = float("inf")
+    z = {}
+    for r in (set(adj.keys()) | set(hard.keys())
+              | set(lo.keys()) | set(hi.keys()) | set(seed.keys())):
+        z[r] = hard[r] if r in hard else seed.get(r, 0.0)
+    edges, seen = [], set()
+    for u in adj:
+        for (v, w) in adj[u]:
+            key = (u, v) if u < v else (v, u)
+            if key in seen:
+                continue
+            seen.add(key)
+            edges.append((u, v, w))
+
+    def _clamp():
+        for r in z:
+            if r in hard:
+                continue
+            l = lo.get(r, -INF)
+            h = hi.get(r, INF)
+            if l <= h:
+                z[r] = min(max(z[r], l), h)
+    _clamp()
+    sweep = 0
+    mx = 0.0
+    for sweep in range(max_sweeps):
+        mx = 0.0
+        for (i, j, c) in edges:
+            d = z[i] - z[j]
+            ex = abs(d) - c
+            if ex <= 0.0:
+                continue
+            hi_i = i in hard
+            hj = j in hard
+            if hi_i and hj:
+                continue
+            if ex > mx:
+                mx = ex
+            s = 1.0 if d > 0 else -1.0
+            if hi_i:
+                z[j] += s * ex
+            elif hj:
+                z[i] -= s * ex
+            else:
+                z[i] -= 0.5 * s * ex
+                z[j] += 0.5 * s * ex
+        _clamp()
+        if mx < tol:
+            break
+    nviol = sum(1 for (i, j, c) in edges
+                if abs(z[i] - z[j]) > c + 0.15)
+    return sweep + 1, mx, nviol
+
+
 def audit_layout(layout, icao):
     out = tempfile.NamedTemporaryFile(suffix=".osm", delete=False).name
     layout.to_osm(out)
@@ -249,6 +307,20 @@ def audit_layout(layout, icao):
     hi = _dijkstra(None, adj, ceil_seed)
     lo_neg = _dijkstra(None, adj, floor_seed)
     lo = {v: -lo_neg[v] for v in lo_neg}
+
+    # ALGORITHM TEST: run plain POCS (cyclic edge-projection + box-clamp) on the
+    # ORACLE's proven-feasible polytope (clean route+within bounds, hold only
+    # truly-hard runway/seam), seeded at the emitted field.  POCS converges to a
+    # point in the intersection iff the polytope is NON-EMPTY — so if this
+    # reaches ~0 violations, the solver fix is "ONE clean projection" (the
+    # current 3-pass stall is from artificial holds/movement-clamps emptying the
+    # polytope), and we don't need a fancier exact solver.
+    seed = {}
+    for _nid, _e in elev.items():
+        seed.setdefault(rep(_nid), _e)
+    sweeps_p, mx_p, nv_p = _pocs_solve(adj, hard, lo, hi, seed)
+    print(f"  [POCS on clean polytope] sweeps={sweeps_p} resid={mx_p:.4f}m "
+          f"-> {nv_p} edges still >cap+0.15m")
 
     # Band-pinned representatives (no compliant field exists there).
     reps = (set(adj.keys()) | set(hard.keys())
