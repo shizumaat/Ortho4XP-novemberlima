@@ -1870,6 +1870,74 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
             if i < n and not is_hard[i]:
                 lo[i] = float("-inf")
                 hi[i] = float("inf")
+    # SPINE GUIDE NODES (user 2026-06-17): the junction/apron centerline
+    # spine places interior nodes ON each taxi centerline so the corridor
+    # grades a smooth profile through the shape.  These are GUIDES, not
+    # constraints — they carry no runway-reach obligation of their own, so
+    # a per-node reach band falsely INVERTS for them (the dense sliced-apron
+    # graph shortcuts between runway anchors → lo>hi → frozen at terrain,
+    # which then defeats the building-flatten: SPJC building20 tilted ~8 m,
+    # band-pinned 65→861).  Exempt them UNCONDITIONALLY (the band_exempt
+    # carve-out above is off under ROUTE_FIELD_MODEL): an infinite band
+    # leaves the guide free for the projection to grade it smooth and lets
+    # the network pull slack to keep buildings flat.  Hard nodes (a guide
+    # that also landed on a runway/seam) keep their anchor.
+    #
+    # The same false inversion hits APRON-OWNED nodes of the sliced apron
+    # (deep-apron verts 100+ m from any taxiway): slicing injects the
+    # centerline into the reach graph and over-constrains them.  An apron is
+    # a FOLLOWER (APRON tier yields to TERMINAL, grades to TAXI), so a sliced
+    # apron's own nodes carry no runway-reach obligation either — exempt the
+    # ones NOT shared with a taxi/runway/building shape (those keep their
+    # band from the bordering corridor).  This is what lets the apron grade
+    # to a FLAT building instead of freezing at terrain.
+    n_guide_exempt = 0
+    if (layout is not None and bucket_to_idx is not None
+            and (getattr(layout, "_spine_guide_points", None)
+                 or getattr(layout, "_spine_apron_points", None))):
+        from ..layout import SHARED_VERTEX_TOL_M, ROLE_APRON as _RA
+        cps = getattr(layout, "canonical_points", None)
+
+        def _exempt(px, py):
+            key = (cps.find_nearest(float(px), float(py), SHARED_VERTEX_TOL_M)
+                   if cps is not None else None)
+            if key is None:
+                return False
+            i = bucket_to_idx.get(key)
+            if i is None or i >= n or is_hard[i]:
+                return False
+            if lo[i] == float("-inf") and hi[i] == float("inf"):
+                return False                # already exempt
+            lo[i] = float("-inf")
+            hi[i] = float("inf")
+            return True
+
+        for (gx, gy) in (getattr(layout, "_spine_guide_points", None) or []):
+            if _exempt(gx, gy):
+                n_guide_exempt += 1
+        # APRON-owned only: a node used by any NON-apron pavement shape keeps
+        # its reach band (the corridor/runway/building side still constrains
+        # it 1:1).
+        apron_pts = getattr(layout, "_spine_apron_points", None) or []
+        if apron_pts:
+            non_apron_nodes = {ni for sc in shape_constraints
+                               if sc.get("role") != _RA
+                               for ni in sc["nodes"]}
+            for (gx, gy) in apron_pts:
+                key = (cps.find_nearest(float(gx), float(gy),
+                                        SHARED_VERTEX_TOL_M)
+                       if cps is not None else None)
+                if key is None:
+                    continue
+                i = bucket_to_idx.get(key)
+                if (i is None or i >= n or is_hard[i]
+                        or i in non_apron_nodes):
+                    continue
+                if _exempt(gx, gy):
+                    n_guide_exempt += 1
+    if n_guide_exempt and _os.environ.get("O4_ENFORCE_DEBUG") == "1":
+        print(f"[enforce] {icao}: spine-guide exempt {n_guide_exempt} "
+              f"node(s) from reach bands")
     band_pinned = {i for i in range(n) if lo[i] > hi[i] + 1e-6}
     # PINNED-NODE LEAST-VIOLATION PLACEMENT (s77p3, user: "aprons are
     # allowing some extreme dips — they can't just follow terrain"):
@@ -2175,6 +2243,18 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
     # ordinary pavement.  (Flattened pads join the held set AFTER the
     # inherit step below, so the conform re-projection respects them.)
     held_all = set(held_extra or set())
+    # CORRIDORS YIELD TO FLAT TERMINALS (user 2026-06-17, cascade ruling
+    # TERMINAL > APRON > TAXI).  ``held_extra`` is the corridor-held set
+    # (the network-profile route writes).  Holding it preserves the smooth
+    # corridor profile for the GENERAL settle — but a held corridor frozen
+    # at terrain walls the apron off a flat building (SPJC building20: the
+    # serving corridor sat ~8 m above the pad's feasible flat level and the
+    # apron couldn't bridge it).  Per the cascade, TAXI yields to TERMINAL:
+    # in the post-flatten acceptance projection the corridors are RELEASED
+    # to flex within their own route bands [lo, hi] (still runway-grade-
+    # compliant) so the network pulls slack toward the flat pad.  Movement-
+    # minimising projection keeps corridors on profile away from pads.
+    corridor_held_set = frozenset(held_extra or ())
     if not TERMINAL_NATURAL_LEVELS:
         held_all |= _term_nodes
     _dbg = _os.environ.get("O4_ENFORCE_DEBUG") == "1"
@@ -2966,10 +3046,13 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
     if n_faired or n_zone or n_leaf:
         # restore strict LEGAL-cap feasibility after the preference passes
         # (a zone/fairing/leaf move can over-steepen a pair with an
-        # out-of-zone or unfaired neighbour); pads still held.
+        # out-of-zone or unfaired neighbour); pads still held, but CORRIDORS
+        # are RELEASED so they flex within their route bands to follow the
+        # flattened pads (cascade: TAXI yields to TERMINAL).
+        held_yield = held_all - corridor_held_set
         _project_within_bands(
             elev, all_edges, is_hard, lo, hi, coupling,
-            held_extra=held_all,
+            held_extra=held_yield,
             max_sweeps=400, tol=_SPREAD_COMPLY_TOL_M)
         # MEASURED ACCEPTANCE for inherited-flat pads (apron-follows
         # §2a — the flat-vs-slope fallback): zero violations outrank
@@ -3103,7 +3186,7 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                                    sc8["edges"], False)
                 _project_within_bands(
                     elev, all_edges, is_hard, lo, hi, coupling,
-                    held_extra=held_all,
+                    held_extra=held_all - corridor_held_set,
                     max_sweeps=400, tol=_SPREAD_COMPLY_TOL_M)
     if NETWORK_PROFILE_MODEL:
         # FINAL strict pair-law closure (the validator's own metric): a
@@ -3225,6 +3308,20 @@ def _terminal_chord_windows(layout, nodes, shape_constraints, n):
                   if s.role == ROLE_BUILDING
                   and s.polygon is not None
                   and not s.polygon.is_empty]
+    # Map ref -> the building's OWN polygon so a pad's chord window is built
+    # against ITS footprint, not a different building that merely overlaps its
+    # first node (user 2026-06-17: SPJC building20's huge 185k m² footprint was
+    # matched to the tiny 127 m² building12 that overlaps its corner — earlier
+    # in shape order — so every perpendicular chord missed it [noray] and the
+    # pad fell back to the DEM median instead of its balanced chord level).
+    # Keep the LARGEST polygon per ref when a ref repeats.
+    term_poly_by_ref: dict = {}
+    for _ts in layout.shapes:
+        if (_ts.role == ROLE_BUILDING and _ts.polygon is not None
+                and not _ts.polygon.is_empty and (_ts.ref or "")):
+            _pr = term_poly_by_ref.get(_ts.ref)
+            if _pr is None or _ts.polygon.area > _pr.area:
+                term_poly_by_ref[_ts.ref] = _ts.polygon
     # SERVING test: a chord binds only when the connector from the
     # centerline foot to the pad crosses APRON, not another taxiway —
     # an intervening taxi surface re-anchors the profile, so the
@@ -3287,11 +3384,14 @@ def _terminal_chord_windows(layout, nodes, shape_constraints, n):
         if not first4:
             continue
         px4, py4 = nodes[first4[0]]
-        poly4 = None
-        for tp4 in term_polys:
-            if tp4.distance(_TP(px4, py4)) < 2.0:
-                poly4 = tp4
-                break
+        # Prefer the pad's OWN polygon (by ref); fall back to the nearest
+        # building when the ref is unknown.
+        poly4 = term_poly_by_ref.get(sc4.get("ref"))
+        if poly4 is None:
+            for tp4 in term_polys:
+                if tp4.distance(_TP(px4, py4)) < 2.0:
+                    poly4 = tp4
+                    break
         if poly4 is None:
             continue
         pprep4 = _tprep(poly4)

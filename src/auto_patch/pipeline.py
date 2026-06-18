@@ -240,6 +240,71 @@ def _unify_airside_geometry(layout, icao: str) -> None:
     _share_neighbour_corners_into_junctions(layout, icao=icao)
 
 
+def _dedup_coincident_ring_vertices(layout, icao: str, tol_m: float = 0.05):
+    """Drop consecutive coincident exterior-ring vertices (zero-length
+    edges) from every shape, keeping ``node_altitudes`` aligned.
+
+    The spine polygonize + weld/conformance can leave a vertex repeated at
+    the same coordinate (SPJC: 44 zero-length edges).  X-Plane / Triangle4XP
+    triangulate a zero-length edge into a degenerate (near-zero-area) sliver
+    that renders as a STRETCHED / distorted texture.  Removing the duplicate
+    is geometry-neutral (the kept vertex sits at the same spot, same
+    altitude) so it cannot create a T-junction or move a seam — safe to run
+    just before the final conformance check / emit.  Returns the count of
+    shapes cleaned."""
+    import math as _math
+    from shapely.geometry import Polygon as _Poly
+    n_fixed = 0
+    for s in layout.shapes:
+        p = getattr(s, "polygon", None)
+        if p is None or p.is_empty or p.geom_type != "Polygon":
+            continue
+        coords = list(p.exterior.coords)            # includes closing repeat
+        if len(coords) < 4:
+            continue
+        na = s.node_altitudes
+        # node_altitudes aligns 1:1 with exterior.coords (closing repeat) in
+        # the canonical form; only dedup-with-altitude when that holds, else
+        # dedup geometry only (flat / high-low shapes carry no per-vertex
+        # list to misalign).
+        aligned = na is not None and len(na) == len(coords)
+        na_list = list(na) if aligned else None
+        new_coords = [coords[0]]
+        new_na = [na_list[0]] if aligned else None
+        for k in range(1, len(coords)):
+            px, py = new_coords[-1]
+            x, y = coords[k]
+            if _math.hypot(x - px, y - py) < tol_m:
+                continue                            # skip duplicate
+            new_coords.append((x, y))
+            if aligned:
+                new_na.append(na_list[k])
+        if len(new_coords) == len(coords):
+            continue                                # nothing removed
+        # keep the ring closed
+        if new_coords[0] != new_coords[-1]:
+            new_coords.append(new_coords[0])
+            if aligned:
+                new_na.append(new_na[0])
+        if len(new_coords) < 4:
+            continue                                # would degenerate
+        try:
+            np_ = _Poly(new_coords, [list(r.coords) for r in p.interiors])
+            if not np_.is_valid or np_.is_empty:
+                continue
+        except Exception:
+            continue
+        s.polygon = np_
+        if aligned:
+            s.node_altitudes = new_na
+        n_fixed += 1
+    if n_fixed:
+        UI.vprint(1,
+            f"  [pav-builder] {icao}: removed zero-length edge(s) "
+            f"(duplicate ring vertices) from {n_fixed} shape(s).")
+    return n_fixed
+
+
 # ──────────────────────────────────────────────────────────────────
 # Top-level builder
 # ──────────────────────────────────────────────────────────────────
@@ -1047,7 +1112,8 @@ def build_airport_pavement(icao: str, xplane_root: str,
             # rather than clipping a building that grazes the boundary).
             if DSF_BUILDINGS:
                 for b_outer, b_holes, _b_role in \
-                        _DSFR.read_dsf_buildings(dsf):
+                        _DSFR.read_dsf_buildings(
+                            dsf, xplane_root=xplane_root):
                     if len(b_outer) < 3:
                         continue
                     # term_bridge slabs are only admitted when the
@@ -4120,6 +4186,12 @@ def build_airport_pavement(icao: str, xplane_root: str,
         UI.vprint(1,
             f"  [pav-builder] {icao}: re-clipped {n_bclip} DEM-bridge "
             f"shape(s) against final pavement / ribbon.")
+
+    # Strip zero-length edges (duplicate ring vertices) the geometry passes
+    # left behind — they triangulate into degenerate slivers (stretched
+    # textures).  Geometry-neutral, so it runs after conformance enforcement
+    # and before the final conformance audit.
+    _dedup_coincident_ring_vertices(layout, icao)
 
     tjs, crossings = find_conformance_violations(layout.shapes)
     if tjs or crossings:

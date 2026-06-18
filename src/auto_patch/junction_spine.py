@@ -54,21 +54,29 @@ import O4_UI_Utils as UI
 from .config import JUNCTION_CENTERLINE_SPINE, SPINE_STEP_M
 from .layout import (
     BuiltShape, ROLE_APRON, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
-    ROLE_PRIMARY_PARALLEL, ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
-    ROLE_SECONDARY_PARALLEL, ROLE_STUB)
+    ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL, ROLE_STUB)
 
 _GEOM_EXC = (ValueError, GEOSException, TopologicalError)
 
 __all__ = ["apply_junction_centerline_spine"]
 
-# Sloping 4-corner rects + runways: a junction/apron vertex may share only
-# their CORNERS, never a mid-edge node — so a slice end meeting one gets a
-# rectangle cap rather than a node on the edge.  Service ROADS are
-# 4-corner sloping rects too (verification.check_vertex_on_flat_edge).
+# Sloping 4-corner taxi rects: a junction/apron vertex may share only their
+# CORNERS, never a mid-edge node (verification.check_vertex_on_flat_edge /
+# check_vertex_on_sloping_edge step the rect's linear-corner plane), so a
+# slice end meeting one gets a rectangle cap rather than a node on the edge.
+# Service ROADS are 4-corner sloping rects too.
+#
+# RUNWAYS are deliberately NOT hard ends (user 2026-06-17): a runway segment
+# may carry a node on its edge where a centerline crosses.  By spine time the
+# seam/redistribute pipeline has already set runway altitudes, and the
+# pre-solve ``enforce_conformance`` inserts the junction's crossing vertex
+# into the runway edge at the linearly-interpolated (FAA-profile) altitude,
+# converting the runway to ``node_altitudes`` — which both runway-edge checks
+# exempt.  So a runway end is SOFT (the slice lands right on the crossing
+# point); no rectangle cap, no extra shape around the runway edge.
 _HARD_END_ROLES = frozenset({
     ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL, ROLE_STUB,
-    ROLE_CROSS_CONNECTOR, ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
-    "service_road"})
+    ROLE_CROSS_CONNECTOR, "service_road"})
 # A boundary crossing within this distance of a hard boundary is a HARD
 # end (rectangle cap, no node on the flat edge).
 _HARD_EDGE_TOL_M = 1.5
@@ -78,6 +86,22 @@ _HARD_EDGE_TOL_M = 1.5
 _CAP_DEPTH_M = 2.0
 # Spine nodes are densified ~this far inboard of each boundary crossing.
 _END_INSET_M = 1.5
+# Painted-curve filter (user 2026-06-17): a row-120 painted centerline is
+# kept only where it TRACKS a taxi route — within this distance of, AND
+# roughly parallel to, a 1201/1202 route segment.  Off-route lobes and
+# perpendicular crossers (painted edge lines, hold bars, one taxiway's paint
+# crossing a DIFFERENT taxiway's route) are dropped so the spine slices each
+# corridor along ONE line, not several near-parallel / crossing ones.  The
+# straight route segments won't follow a painted CURVE point-for-point, so
+# the match is by proximity-and-parallelism per short interval, not overlap.
+_PAINTED_ROUTE_NEAR_M = 5.0
+# Keep a painted interval when |cos(angle to a near route segment)| ≥ this:
+# cos 60° = 0.5 admits taxi turns up to ~120° while rejecting near-
+# perpendicular crossings.
+_PAINTED_ROUTE_PARALLEL_DOT = 0.5
+# Painted walk step + minimum kept-run length (m).
+_PAINTED_WALK_STEP_M = 4.0
+_PAINTED_MIN_RUN_M = 6.0
 # Coordinate rounding (m) for polygonize snap.
 _RND = 3
 # Drop emitted pieces smaller than this (slivers).
@@ -100,39 +124,102 @@ def _coords(items):
     return out
 
 
-def _full_centerlines(layout):
-    """The spine's taxi centerlines: PREFER the painted (row-120) BEZIER
-    curves (continuous arcs through junctions) and fill gaps with the
-    1201/1202 edges they do NOT cover; plus the discovered lanes.  Falls
-    back to the plain 1201/1202 + discovered set when no painted curves
-    were computed (e.g. the gate built them into ``apt_taxi_centerlines``
-    already, or none exist).  Runway long-axes are EXCLUDED — runway grade
-    is the FAA profile's job, and a spine node must never land in a runway
-    (user 2026-06-17)."""
-    painted = list(getattr(layout, "_painted_centerlines", None) or [])
-    apt_cl = _coords(getattr(layout, "apt_taxi_centerlines", None))
-    disc = _coords(getattr(layout, "_discovered_centerlines", None))
-    if not painted:
-        return apt_cl + disc
-    # De-dup: keep only the 1201/1202 edges the painted curves don't
-    # already cover (within ~6 m for most of their length), so no taxiway
-    # is sliced twice by two slightly-offset lines.
-    try:
-        pbuf = unary_union(painted).buffer(6.0)
-    except _GEOM_EXC:
-        pbuf = None
-    uncovered: List[LineString] = []
+def _filter_painted_to_routes(painted, apt_cl):
+    """Keep painted-curve geometry only where it runs within
+    ``_PAINTED_ROUTE_NEAR_M`` of, AND roughly parallel to, a taxi-route
+    (1201/1202) segment; drop the off-route lobes and perpendicular
+    crossers.  Walks each painted line in short intervals: an interval is
+    kept when SOME route segment is both near (≤ NEAR_M) and parallel
+    (|cos| ≥ PARALLEL_DOT) to it — so at a crossing the painted line keeps
+    the part parallel to its OWN route and drops a line perpendicular to
+    every nearby route.  Consecutive kept intervals are stitched back into
+    a run; runs shorter than ``_PAINTED_MIN_RUN_M`` are dropped.  With no
+    routes to validate against, returns the painted lines unchanged (a
+    painted-only airport — nothing to de-dup against)."""
+    seg_lines: List[LineString] = []
+    seg_dir: List[Tuple[float, float]] = []
     for ln in apt_cl:
-        if pbuf is None or ln.length < 1e-6:
-            uncovered.append(ln)
+        if ln is None or ln.is_empty:
             continue
-        try:
-            cov = ln.intersection(pbuf).length / ln.length
-        except _GEOM_EXC:
-            cov = 0.0
-        if cov < 0.7:
-            uncovered.append(ln)
-    return painted + uncovered + disc
+        cs = list(ln.coords)
+        for i in range(len(cs) - 1):
+            ax, ay = cs[i]
+            bx, by = cs[i + 1]
+            dx, dy = bx - ax, by - ay
+            L = math.hypot(dx, dy)
+            if L < 1e-6:
+                continue
+            seg_lines.append(LineString([(ax, ay), (bx, by)]))
+            seg_dir.append((dx / L, dy / L))
+    if not seg_lines:
+        return list(painted)
+    tree = STRtree(seg_lines)
+    out: List[LineString] = []
+    for ln in painted:
+        if ln is None or ln.is_empty or ln.geom_type != "LineString":
+            continue
+        L = ln.length
+        if L < 1e-6:
+            continue
+        n = max(1, int(round(L / _PAINTED_WALK_STEP_M)))
+        pts = [ln.interpolate(k * L / n) for k in range(n + 1)]
+        run: List[Tuple[float, float]] = []
+        for k in range(n):
+            p0, p1 = pts[k], pts[k + 1]
+            sdx, sdy = p1.x - p0.x, p1.y - p0.y
+            sL = math.hypot(sdx, sdy)
+            keep = False
+            if sL >= 1e-6:
+                sdx, sdy = sdx / sL, sdy / sL
+                mp = Point(0.5 * (p0.x + p1.x), 0.5 * (p0.y + p1.y))
+                for j in tree.query(mp.buffer(_PAINTED_ROUTE_NEAR_M)):
+                    try:
+                        if seg_lines[j].distance(mp) > _PAINTED_ROUTE_NEAR_M:
+                            continue
+                    except _GEOM_EXC:
+                        continue
+                    rdx, rdy = seg_dir[j]
+                    if (abs(sdx * rdx + sdy * rdy)
+                            >= _PAINTED_ROUTE_PARALLEL_DOT):
+                        keep = True
+                        break
+            if keep:
+                if not run:
+                    run.append((p0.x, p0.y))
+                run.append((p1.x, p1.y))
+            elif run:
+                if LineString(run).length >= _PAINTED_MIN_RUN_M:
+                    out.append(LineString(run))
+                run = []
+        if run and LineString(run).length >= _PAINTED_MIN_RUN_M:
+            out.append(LineString(run))
+    return out
+
+
+def _is_service_ref(name) -> bool:
+    """A 1206 ground-vehicle (truck) route — merged into
+    ``apt_taxi_centerlines`` for the road carve with a ``SVC*`` ref."""
+    return isinstance(name, str) and name.upper().startswith("SVC")
+
+
+def _full_centerlines(layout):
+    """The spine's taxi centerlines: the apt.dat 1201/1202 ROUTE network
+    ONLY (user 2026-06-17 experiment).  Painted (row-120) curves and
+    discovered ("TX") lanes are EXCLUDED.  Ground-vehicle 1206 service
+    routes (ref ``SVC*``, merged into ``apt_taxi_centerlines`` for the
+    road carve) are filtered OUT — they are truck paths, not aircraft taxi
+    corridors.  Runway long-axes are excluded upstream; a spine node must
+    never land in a runway."""
+    out: List[LineString] = []
+    for item in (getattr(layout, "apt_taxi_centerlines", None) or []):
+        ln = item[0] if isinstance(item, tuple) else item
+        name = item[1] if (isinstance(item, tuple) and len(item) > 1) else ""
+        if ln is None or ln.is_empty:
+            continue
+        if _is_service_ref(name):
+            continue
+        out.append(ln)
+    return out
 
 
 def _perp_dist(qx, qy, c1, c2):
@@ -171,7 +258,8 @@ def _make_cap(mx, my, c1, c2, poly):
             LineString([e1, (mx, my)]), LineString([(mx, my), e2])]
 
 
-def _partition_junction(s, centerlines, pav_union, runway_union, near_hard):
+def _partition_junction(s, centerlines, pav_union, runway_union, near_hard,
+                        guide_sink=None):
     """Slice junction/apron ``s`` along its crossing centerlines and
     return the list of piece Polygons (geometry only), or None to leave
     the shape unchanged."""
@@ -291,6 +379,16 @@ def _partition_junction(s, centerlines, pav_union, runway_union, near_hard):
             if lo > hi:
                 continue
             slice_pts: List[Tuple[float, float]] = list(cand[lo:hi + 1])
+            # The interior centerline points are GUIDE nodes (user
+            # 2026-06-17): they mark where the corridor runs through the
+            # shape so the solver grades a smooth profile, but they carry
+            # NO runway-reach obligation of their own — the solver must
+            # leave them flexible (never band-pin them) so the network can
+            # pull slack to keep buildings flat.  Boundary-crossing
+            # endpoints are NOT guides (they are shared with the neighbour
+            # and keep their normal band).
+            if guide_sink is not None:
+                guide_sink.extend(slice_pts)
             for is_entry in (True, False):
                 if not end_soft[is_entry]:
                     continue
@@ -383,6 +481,8 @@ def apply_junction_centerline_spine(layout) -> int:
         return False
 
     new_shapes: List[BuiltShape] = []
+    guide_pts: List[Tuple[float, float]] = []
+    apron_pts: List[Tuple[float, float]] = []
     n_done = 0
     n_pieces = 0
     for s in layout.shapes:
@@ -404,7 +504,8 @@ def apply_junction_centerline_spine(layout) -> int:
             new_shapes.append(s)
             continue
         pieces, reason = _partition_junction(
-            s, crossing, pav_union, runway_union, _near_hard)
+            s, crossing, pav_union, runway_union, _near_hard,
+            guide_sink=guide_pts)
         if not pieces:
             new_shapes.append(s)
             if _DEBUG:
@@ -420,10 +521,28 @@ def apply_junction_centerline_spine(layout) -> int:
             # these pieces (the unify pass first welds the new nodes).
             new_shapes.append(BuiltShape(polygon=f, role=s.role,
                                          ref=s.ref))
+            # An APRON sliced by the spine becomes a follower of the taxi
+            # network + its building (cascade APRON-tier): collect ALL its
+            # piece vertices so the solver can drop the runway-reach band on
+            # the APRON-OWNED ones.  Slicing injects the centerline into the
+            # reach graph and falsely inverts the bands of deep-apron nodes
+            # (115 m from any taxiway), freezing them at terrain and
+            # defeating the building-flatten.  Junction pieces are NOT
+            # collected — junctions ARE the taxi network and keep their
+            # reach bands (the OMAA waving fix needs them).
+            if s.role == ROLE_APRON:
+                apron_pts.extend(_open(list(f.exterior.coords)))
             n_pieces += 1
         n_done += 1
 
     layout.shapes = new_shapes
+    # Stash the interior centerline GUIDE points + the sliced-apron piece
+    # points so the solver can flag those nodes as flexible (no runway-reach
+    # band / never band-pinned).  Coordinates are matched through the
+    # canonical registry (≤0.5 m) at solve time, so the post-polygonize
+    # grid-snap drift is absorbed.
+    layout._spine_guide_points = guide_pts
+    layout._spine_apron_points = apron_pts
     if n_done:
         UI.vprint(1,
             f"  [pav-builder] {getattr(layout, 'icao', '')}: "
