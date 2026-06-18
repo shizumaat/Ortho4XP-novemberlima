@@ -1050,8 +1050,12 @@ def _merge_sliver_junctions_into_neighbours(
 
     Returns the number of slivers merged.
     """
+    # Rect end-caps (gate RECT_END_CAPS) are intentional thin junction
+    # strips that MUST persist so the centerline-spine welds onto their
+    # soft edge instead of the rect's sloping edge — never merge them away.
     junction_idxs = [i for i, s in enumerate(layout.shapes)
                      if s.role == ROLE_JUNCTION
+                     and not getattr(s, "is_rect_cap", False)
                      and s.polygon is not None
                      and not s.polygon.is_empty]
     if len(junction_idxs) < 2:

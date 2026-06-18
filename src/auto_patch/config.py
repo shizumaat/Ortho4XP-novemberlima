@@ -995,6 +995,38 @@ JUNCTION_CENTERLINE_SPINE = _os.environ.get("O4_JCT_SPINE", "1") == "1"
 # inside a junction.
 SPINE_STEP_M = float(_os.environ.get("O4_JCT_SPINE_STEP_M", "12.0"))
 
+# (20260618) RECT END-CAPS — STATUS.md 20260618-01.  A centerline-spine
+# slice ending at a SLOPING taxi rect used to weld a mid-edge node onto the
+# rect's long edge, flipping the clean 4-corner sloping plane to
+# ``node_altitudes`` so it graded only ~half its length (SPJC taxiway L
+# dropped 3.8 m of a 7.5 m drop), starving the apron of slack.  When ON,
+# each sloping rect is carved 2 m at every JUNCTION-FACING flat end at
+# RECT-BUILD TIME (Phase 1, before junctions form as ``pav_union − rects``
+# and before any elevation); the carved strip is emitted as a junction cap
+# and subtracted from the residue.  The rect body stays a full-length
+# 4-corner plane (the spine now welds onto the FLAT cap's edge, a soft
+# junction edge), and the solver grades the cap like any other junction so
+# the rect end settles to the junction level on its own.  Default OFF =
+# byte-identical (no caps carved).  Two earlier Phase-2 attempts regressed
+# within-shape grade — the PHASE, not the role, was the bug.
+# (20260618 W2) CLEAN ENFORCE BANDS — docs/grade_enforcement_plan.md.
+# The ROUTE_FIELD enforce band self-anchors on the CURRENT solved field
+# (NETWORK_PROFILE_MODEL `extra_points` + the field's route-graph view), which
+# manufactures band INVERSIONS (lo>hi) on nodes the feasibility oracle proves
+# compliant → those nodes get HELD out of the projection → feasible grade
+# violations can never be fixed.  When ON, the hard band drops the field
+# self-anchor (keeps the legitimate runway/seam/held-write/terminal anchors,
+# so building-flatten's terminal anchoring survives) and the field-tie moves
+# to the projection's movement-minimising seed + the corridor attractor.
+# Default OFF = byte-identical.
+W2_CLEAN_BANDS = _os.environ.get("O4_W2_BANDS", "0") == "1"
+
+RECT_END_CAPS = _os.environ.get("O4_RECT_CAPS", "0") == "1"
+# Depth (m, perpendicular to the rect's flat end) of each end-cap — strictly
+# beyond verification.check_vertex_on_flat_edge's EDGE_PROX_M (1.5 m) so no
+# junction vertex lands in the rect's exclusion band.
+RECT_END_CAP_DEPTH_M = float(_os.environ.get("O4_RECT_CAP_DEPTH_M", "2.0"))
+
 # (s79) ON-PAVEMENT service-road carve — docs/service_road_carve.md.
 # ★ USER RULINGS 2026-06-11: roads = apt.dat 1206 routes ONLY (no
 # polygon/OSM detection); only pavement narrower than the cross-section

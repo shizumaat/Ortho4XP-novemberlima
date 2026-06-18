@@ -297,6 +297,13 @@ class BuiltShape:
     # OSM ``bridge=yes`` flag.  Set on taxi rects whose source
     # OSM way is tagged as a bridge — see ``_emit_taxi_bridges``.
     is_bridge: bool = False
+    # Rect end-cap flag (gate RECT_END_CAPS).  Set on the small flat
+    # junction strips carved off a sloping rect's open flat ends at
+    # rect-build time (rect_end_caps.py).  They are INTENTIONAL geometry
+    # that must persist (so the centerline-spine welds onto the cap's
+    # soft edge, 2 m clear of the rect's sloping edge), so the
+    # sliver-junction merge pass must NOT absorb them back.
+    is_rect_cap: bool = False
 
 
 

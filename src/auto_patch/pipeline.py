@@ -3920,6 +3920,20 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # see inside the monolithic shape.
         _drop_off_source_residue(layout, icao=icao)
 
+        # Rect end-caps (gate RECT_END_CAPS; rect_end_caps.py).  Carve a
+        # flat cap off each junction-facing sloping-rect end RIGHT BEFORE the
+        # spine — after every dissolve/merge/drop pass that would otherwise
+        # eat it, and after the junctions exist.  The rect body shrinks to a
+        # full-length 4-corner plane; the cap takes its vacated 2 m so the
+        # spine welds onto the flat cap (a soft junction edge) instead of the
+        # rect's sloping edge, leaving the rect free to grade its whole
+        # length.  Gate-off = no carve (byte-identical).
+        from .config import RECT_END_CAPS, RECT_END_CAP_DEPTH_M
+        if RECT_END_CAPS:
+            from .rect_end_caps import carve_rect_end_caps_before_spine
+            carve_rect_end_caps_before_spine(
+                layout, depth_m=RECT_END_CAP_DEPTH_M)
+
         # Junction/apron centerline-spine SLICE (gated JUNCTION_CENTERLINE_
         # SPINE; docs/junction_centerline_spine.md).  PURE GEOMETRY, run
         # HERE — right after the hole cuts and BEFORE _unify_airside_

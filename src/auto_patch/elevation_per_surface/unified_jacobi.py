@@ -53,6 +53,7 @@ from shapely.errors import GEOSException, TopologicalError
 
 from auto_patch.config import (
     APRON_BACK_EDGE_GRADE, APRON_BACK_EDGE_RAMPS,
+    W2_CLEAN_BANDS,
     APRON_CORRIDOR_GEODESIC, APRON_CORRIDOR_SEED_RADIUS_M,
     APRON_CORRIDOR_SMOOTH_GRADE, APRON_CORRIDOR_SMOOTH_RADIUS_M,
     NETWORK_PROFILE_MODEL, ROLE_GRADE_LIMITS, ROUTE_FIELD_LOCAL_WINDOW_M,
@@ -694,7 +695,8 @@ def _project_shape(elev, nodes, held, edges, flat, coupling=None) -> None:
 
 
 def _project_within_bands(elev, edges, is_hard, lo, hi, coupling,
-                          held_extra, max_sweeps, tol) -> tuple[int, float]:
+                          held_extra, max_sweeps, tol,
+                          reclamp=False) -> tuple[int, float]:
     """Cap-project all within-shape grade edges to convergence, CLAMPED to the
     per-node feasible bands ``[lo, hi]`` (user 2026-05-28).
 
@@ -757,8 +759,36 @@ def _project_within_bands(elev, edges, is_hard, lo, hi, coupling,
         for m in grp:
             elev[m] = v
 
-    # Plain cap projection from that seed (terminals held, both-HARD seam edges
-    # skipped) — bounded by the good start; no per-move re-clamp.
+    # Cap projection from that seed (terminals held, both-HARD seam edges
+    # skipped).  With ``reclamp`` (W2 clean-band path) every sweep ALSO
+    # re-projects each soft node back into its feasible box — alternating
+    # edge / box projection (POCS) converges to a feasible point when the
+    # bands don't invert (which the clean-band construction guarantees), so
+    # the iteration drives every fixable edge to compliance instead of
+    # stopping at the seed-clamp residual.  Without ``reclamp`` (legacy
+    # field-anchored bands, which DO invert) the per-sweep box projection
+    # oscillated, so the old single-seed-clamp behaviour is kept.
+    def _box_clamp():
+        seen2: set = set()
+        for i in range(n_nodes):
+            if held[i]:
+                continue
+            grp = mem[i]
+            if len(grp) > 1:
+                key = tuple(sorted(grp))
+                if key in seen2:
+                    continue
+                seen2.add(key)
+                glo = max((lo[m] for m in grp), default=-INF)
+                ghi = min((hi[m] for m in grp), default=INF)
+            else:
+                glo, ghi = lo[i], hi[i]
+            if glo > ghi or (glo == -INF and ghi == INF):
+                continue
+            v = min(max(elev[grp[0]], glo), ghi)
+            for m in grp:
+                elev[m] = v
+
     mx = 0.0
     sweep = 0
     for sweep in range(max_sweeps):
@@ -782,6 +812,8 @@ def _project_within_bands(elev, edges, is_hard, lo, hi, coupling,
             else:
                 _move(i, -0.5 * s * ex)
                 _move(j, 0.5 * s * ex)
+        if reclamp:
+            _box_clamp()
         if mx < tol:
             break
     return sweep + 1, mx
@@ -1771,8 +1803,15 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
             # long-range law becomes the FIELD by construction (M6).
             field_pts = None
             band_graph = runway_augmented_route_graph(layout)
+            # W2_CLEAN_BANDS: drop the self-referential field anchor (the
+            # solved field's vertex values + graph view) — it manufactures
+            # band inversions on feasible nodes.  Keep the runway/seam/held/
+            # terminal truth anchors (extra_anchors) so building-flatten still
+            # has its terminal anchoring; the field-tie moves to the
+            # projection seed + corridor attractor.
             npf9 = (getattr(layout, "_network_profile_field", None)
-                    if NETWORK_PROFILE_MODEL else None)
+                    if (NETWORK_PROFILE_MODEL and not W2_CLEAN_BANDS)
+                    else None)
             if npf9 is not None:
                 field_pts = npf9.vertices_with_values()
                 # the law measures on the FIELD's graph — it contains
@@ -1939,6 +1978,9 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
         print(f"[enforce] {icao}: spine-guide exempt {n_guide_exempt} "
               f"node(s) from reach bands")
     band_pinned = {i for i in range(n) if lo[i] > hi[i] + 1e-6}
+    if _os.environ.get("O4_W2_DUMP") == "1":
+        print(f"[w2] {icao}: band_pinned (lo>hi) = {len(band_pinned)} "
+              f"of {n} nodes")
     # PINNED-NODE LEAST-VIOLATION PLACEMENT (s77p3, user: "aprons are
     # allowing some extreme dips — they can't just follow terrain"):
     # a band-pinned node (floor above ceiling — the squeeze families) is
@@ -2281,9 +2323,52 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
     sweeps, resid = _project_within_bands(
         elev, all_edges, is_hard, lo, hi, coupling,
         held_extra=held_all,
-        max_sweeps=_WITHIN_ENFORCE_MAX_SWEEPS,
-        tol=_SPREAD_COMPLY_TOL_M)
+        max_sweeps=(int(_os.environ.get("O4_W2_SWEEPS", "2000"))
+                    if W2_CLEAN_BANDS else _WITHIN_ENFORCE_MAX_SWEEPS),
+        tol=(0.001 if W2_CLEAN_BANDS else _SPREAD_COMPLY_TOL_M),
+        reclamp=W2_CLEAN_BANDS)
     _bn_dump("post-project")
+    if _os.environ.get("O4_W2_DUMP") == "1":
+        print(f"[w2] {icao}: projection resid(mx)={resid:.4f}m "
+              f"sweeps={sweeps}/{_WITHIN_ENFORCE_MAX_SWEEPS}")
+        import collections as _col9
+        _reasons = _col9.Counter()
+        _reasons_big = _col9.Counter()
+        _n9 = 0
+        _nbig = 0
+        for (i, j, cap) in all_edges:
+            if cap <= 0 or abs(elev[i] - elev[j]) <= cap + 1e-4:
+                continue
+            _excess = abs(elev[i] - elev[j]) - cap
+            _n9 += 1
+            def _flags(k):
+                f = []
+                if is_hard[k]:
+                    f.append("HARD")
+                if k in held_all:
+                    f.append("held")
+                if k in band_pinned:
+                    f.append("pinned")
+                if coupling is not None and k in coupling \
+                        and len(coupling[k]) > 1:
+                    f.append("coupled")
+                lo_k = lo[k] if lo[k] != float("-inf") else None
+                hi_k = hi[k] if hi[k] != float("inf") else None
+                bw = ("inf" if lo_k is None or hi_k is None
+                      else f"{hi_k - lo_k:.2f}")
+                return "+".join(f) or "free", bw
+            fi, bwi = _flags(i)
+            fj, bwj = _flags(j)
+            _reasons[tuple(sorted((fi, fj)))] += 1
+            if _excess > 0.1:
+                _nbig += 1
+                _reasons_big[tuple(sorted((fi, fj)))] += 1
+            if _n9 <= 12:
+                print(f"[w2] over {abs(elev[i]-elev[j])-cap:.3f}m "
+                      f"i[{fi} bw={bwi}] j[{fj} bw={bwj}]")
+        print(f"[w2] {icao}: {_n9} post-project edge viol "
+              f"({_nbig} with excess>0.1m); by held-reason: {dict(_reasons)}")
+        print(f"[w2] {icao}: LARGE(>0.1m) by reason: {dict(_reasons_big)}")
     # APRON CORRIDOR SMOOTHING (best-effort 1 % near taxi corridors — see
     # _apron_corridor_zone_edges / _apron_corridor_geodesic_state): a
     # bounded projection on the tightened apron-zone edges, run AFTER the

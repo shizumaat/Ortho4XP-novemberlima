@@ -1,0 +1,355 @@
+"""Grade-feasibility oracle — classify every within-shape grade violation as
+either FUNDAMENTALLY INFEASIBLE (no compliant field exists given the hard
+anchors) or FEASIBLE-BUT-UNENFORCED (a compliant field exists; the solver
+just didn't reach it).
+
+This is the W1/W2 measurement foundation for the zero-violation plan
+(docs/grade_enforcement_plan.md).  It treats the within-shape grade law as a
+DIFFERENCE-CONSTRAINT system: every validated vertex pair (i,j) is
+``|z_i - z_j| <= cap * d_ij``; runway/seam nodes are HARD (fixed at their
+solved elevation); each building/terminal pad is a FLAT equality group.  The
+tightest feasible interval for a free node v is
+
+    hi[v] = min over hard anchors a of (z_a + shortest cap-weighted path a->v)
+    lo[v] = max over hard anchors a of (z_a - shortest cap-weighted path a->v)
+
+computed by two multi-source Dijkstras.  A node with ``lo > hi`` is
+BAND-PINNED — the anchors are closer in the grade graph than their elevation
+gap allows, so NO compliant field exists there (W3/W5: yield an anchor, flex
+the corridor, or split with a transition).  A check_grade violation whose
+endpoints are NOT band-pinned is the solver leaving feasible slack on the
+table (W2 exact projection / W4 route-profile freedom).
+
+The constrained pair set comes from ``check_grade.iter_shape_grade_constraints``
+— the SAME generator the validator uses — so the oracle and the validator can
+never drift (W1 graph lockstep).
+
+Usage:
+    venv/bin/python tools/grade_feasibility_audit.py SPJC [CYXY HECA ...]
+"""
+from __future__ import annotations
+
+import heapq
+import math
+import os
+import sys
+import tempfile
+from collections import defaultdict
+
+_THIS = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_THIS)
+for _p in (os.path.join(_ROOT, "src"), _ROOT, os.path.join(_ROOT, "tests")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+import check_grade as CG
+from shapely.geometry import LineString
+
+
+class _UF:
+    def __init__(self):
+        self.p: dict = {}
+
+    def find(self, x):
+        self.p.setdefault(x, x)
+        while self.p[x] != x:
+            self.p[x] = self.p[self.p[x]]
+            x = self.p[x]
+        return x
+
+    def union(self, a, b):
+        ra, rb = self.find(a), self.find(b)
+        if ra != rb:
+            self.p[ra] = rb
+
+
+def _dijkstra(n_index, adj, sources):
+    """Multi-source Dijkstra. ``sources`` = {node: init_dist}. Returns the
+    min over sources of (init_dist[s] + path(s->node)). Non-negative weights."""
+    INF = float("inf")
+    dist = defaultdict(lambda: INF)
+    pq = []
+    for s, d0 in sources.items():
+        if d0 < dist[s]:
+            dist[s] = d0
+            heapq.heappush(pq, (d0, s))
+    while pq:
+        d, u = heapq.heappop(pq)
+        if d > dist[u]:
+            continue
+        for v, w in adj[u]:
+            nd = d + w
+            if nd < dist[v]:
+                dist[v] = nd
+                heapq.heappush(pq, (nd, v))
+    return dist
+
+
+def _route_band_intervals(ways, nodes, ll_to_m, route_ctx, seam_nids,
+                          cap=0.015):
+    """Per-node route-band interval [lo,hi] = the runway-reach long-range law
+    over the taxi-centerline graph (the bound deep pavement gets from the
+    runway that the within-shape law cannot carry).  Reuses the SAME engine
+    the validator uses (``route_field.route_band_violations``) by probing each
+    node with a sentinel elevation so every reachable node returns its band."""
+    try:
+        from auto_patch.route_field import route_band_violations
+    except Exception:
+        return {}, {}
+    centerlines_xy = []
+    for line_ll in (route_ctx or {}).get("centerlines_ll", []) or []:
+        pts = [ll_to_m(la, lo) for la, lo in line_ll]
+        if len(pts) >= 2:
+            centerlines_xy.append(pts)
+    if not centerlines_xy:
+        return {}, {}
+    runway_rings = []
+    for w in ways:
+        if w.tags.get("role") != "runway":
+            continue
+        ring = (w.nids[:-1] if len(w.nids) > 1 and w.nids[0] == w.nids[-1]
+                else w.nids)
+        pts, elevs, ok = [], [], True
+        for k, nid in enumerate(ring):
+            if nid not in nodes:
+                ok = False
+                break
+            pts.append(ll_to_m(*nodes[nid]))
+            elevs.append(w.elevs[k] if k < len(w.elevs) else None)
+        if ok:
+            runway_rings.append((pts, elevs))
+    if not runway_rings:
+        return {}, {}
+    check_nids, check_pts = [], []
+    SKIP = {"runway", "runway_crossing"}
+    for w in ways:
+        role = w.tags.get("role")
+        if role in SKIP or CG._is_groundside(w):
+            continue
+        if CG._role_grade_limit(w, 0.015) is None:
+            continue
+        ring = (w.nids[:-1] if len(w.nids) > 1 and w.nids[0] == w.nids[-1]
+                else w.nids)
+        for k, nid in enumerate(ring):
+            if nid in nodes and nid not in seam_nids and w.elevs[k] is not None:
+                x, y = ll_to_m(*nodes[nid])
+                check_nids.append(nid)
+                check_pts.append((x, y, 1e9))   # sentinel: always over ceiling
+    if not check_pts:
+        return {}, {}
+    vios = route_band_violations(centerlines_xy, runway_rings, check_pts,
+                                 cap=cap)
+    lo_d, hi_d = {}, {}
+    for rbv in vios:
+        nid = check_nids[rbv.index]
+        if math.isfinite(rbv.hi):
+            hi_d[nid] = min(hi_d.get(nid, float("inf")), rbv.hi)
+        if math.isfinite(rbv.lo):
+            lo_d[nid] = max(lo_d.get(nid, float("-inf")), rbv.lo)
+    return lo_d, hi_d
+
+
+def audit_layout(layout, icao):
+    out = tempfile.NamedTemporaryFile(suffix=".osm", delete=False).name
+    layout.to_osm(out)
+    nodes, ways = CG._parse_osm(__import__("pathlib").Path(out))
+    ll_to_m = CG._ll_to_m_factory(nodes)
+    seam_nids = CG._seam_nids(nodes)
+
+    # Per-axis taxi axes (match the build's constraint set exactly).
+    taxi_axes = None
+    try:
+        from auto_patch.verification import taxi_axes_ll as _tall
+        tll = _tall(layout)
+        if tll:
+            taxi_axes = [([ll_to_m(la, lo) for la, lo in pts], cL, cT)
+                         for pts, cL, cT in tll]
+    except Exception:
+        taxi_axes = None
+
+    constraints = CG.iter_shape_grade_constraints(
+        ways, nodes, ll_to_m, 0.015, seam_nids, taxi_axes)
+
+    # Per-vertex emitted elevation lookup (nid -> elev) from the ways.
+    elev: dict = {}
+    role_of_nid = defaultdict(set)
+    for w in ways:
+        role = w.tags.get("role")
+        ring = (w.nids[:-1] if len(w.nids) > 1 and w.nids[0] == w.nids[-1]
+                else w.nids)
+        for k, nid in enumerate(ring):
+            if nid in nodes and w.elevs[k] is not None:
+                elev[nid] = w.elevs[k]
+                role_of_nid[nid].add(role)
+
+    # FLAT equality groups: union every building/terminal pad's vertices.
+    uf = _UF()
+    for w in ways:
+        if w.tags.get("role") not in ("building", "terminal", "stand"):
+            continue
+        ring = [nid for nid in w.nids if nid in nodes]
+        for nid in ring[1:]:
+            uf.union(ring[0], nid)
+
+    def rep(nid):
+        return uf.find(nid)
+
+    # Build the difference-constraint graph over representatives.
+    adj = defaultdict(list)
+    n_edges = 0
+    for c in constraints:
+        ra, rb = rep(c.nid_a), rep(c.nid_b)
+        if ra == rb:
+            continue                      # intra-flat-group: auto-satisfied
+        w = c.cap * c.dist
+        adj[ra].append((rb, w))
+        adj[rb].append((ra, w))
+        n_edges += 1
+
+    # HARD anchors: runway / runway_crossing / seam nodes, at emitted elev.
+    HARD_ROLES = {"runway", "runway_crossing"}
+    hard = {}
+    for nid, roles in role_of_nid.items():
+        if (roles & HARD_ROLES) or nid in seam_nids:
+            if nid in elev:
+                hard[rep(nid)] = elev[nid]
+    if not hard:
+        print(f"  {icao}: no hard anchors found — cannot bound. SKIP")
+        return None
+
+    # ROUTE-BAND law: the long-range runway-reach bound per node (what the
+    # within-shape law alone cannot carry to deep pavement).  Combined model:
+    # every node is seeded at its route band, then the within-shape edges
+    # TIGHTEN between neighbours (multi-source Dijkstra).  hi[v] =
+    # min(route_hi[v], min over within-shape paths from any seed); lo
+    # symmetric.  A node still infeasible after BOTH laws (lo>hi) has no
+    # compliant field = a true (fundamental) infeasibility.
+    route_ctx = {}
+    try:
+        from auto_patch.verification import route_ctx_from_layout
+        route_ctx = route_ctx_from_layout(layout) or {}
+    except Exception:
+        route_ctx = {}
+    route_lo, route_hi = _route_band_intervals(
+        ways, nodes, ll_to_m, route_ctx, seam_nids)
+
+    ceil_seed: dict = {}
+    floor_seed: dict = {}
+    for r, z in hard.items():                       # hard anchors: exact
+        ceil_seed[r] = min(ceil_seed.get(r, float("inf")), z)
+        floor_seed[r] = min(floor_seed.get(r, float("inf")), -z)
+    for nid, hv in route_hi.items():                # route ceiling per node
+        r = rep(nid)
+        ceil_seed[r] = min(ceil_seed.get(r, float("inf")), hv)
+    for nid, lv in route_lo.items():                # route floor per node
+        r = rep(nid)
+        floor_seed[r] = min(floor_seed.get(r, float("inf")), -lv)
+
+    n_route_bounded = len(set(map(rep, route_hi)) | set(map(rep, route_lo)))
+    hi = _dijkstra(None, adj, ceil_seed)
+    lo_neg = _dijkstra(None, adj, floor_seed)
+    lo = {v: -lo_neg[v] for v in lo_neg}
+
+    # Band-pinned representatives (no compliant field exists there).
+    reps = (set(adj.keys()) | set(hard.keys())
+            | set(map(rep, route_hi)) | set(map(rep, route_lo)))
+    pinned = {}
+    for v in reps:
+        h = hi.get(v, float("inf"))
+        l = lo.get(v, float("-inf"))
+        if l > h + 1e-6:
+            pinned[v] = l - h            # infeasibility margin (m)
+
+    # check_grade violations (validator truth) and their feasibility class.
+    vios = CG._check_within_shape(ways, nodes, ll_to_m, 0.015,
+                                  seam_nids, taxi_axes)
+    fundamental = 0
+    unenforced = 0
+    samples_f = []
+    samples_u = []
+    # Map violation endpoints back to reps via coordinate match within the way.
+    nid_by_xy = {}
+    for nid, (la, lo_) in nodes.items():
+        x, y = ll_to_m(la, lo_)
+        nid_by_xy[(round(x, 2), round(y, 2))] = nid
+
+    def _rep_near(pt):
+        nid = nid_by_xy.get((round(pt[0], 2), round(pt[1], 2)))
+        return rep(nid) if nid is not None else None
+
+    def _bounds(r):
+        if r is None:
+            return (float("-inf"), float("inf"))
+        return (lo.get(r, float("-inf")), hi.get(r, float("inf")))
+
+    n_unmapped = 0
+    n_disconnected = 0       # violation with an endpoint that has NO finite bound
+    for v in vios:
+        ra, rb = _rep_near(v.pt_a), _rep_near(v.pt_b)
+        if ra is None or rb is None:
+            n_unmapped += 1
+        la, ha = _bounds(ra)
+        lb, hb = _bounds(rb)
+        if not (math.isfinite(la) or math.isfinite(ha)) or \
+           not (math.isfinite(lb) or math.isfinite(hb)):
+            n_disconnected += 1
+        # Pair-level feasibility: do the two endpoint bands admit
+        # |za-zb| <= cap*d ?  Infeasible iff intervals can't get within cap*d.
+        cap_d = 0.015 * v.distance_m   # approx (per-axis caps vary; lower bound)
+        m_a = pinned.get(ra)
+        m_b = pinned.get(rb)
+        gap = max(la - hb, lb - ha)    # min achievable |za-zb| if >0
+        fund = (m_a is not None) or (m_b is not None) or \
+               (math.isfinite(gap) and gap > cap_d + 1e-6)
+        if fund:
+            fundamental += 1
+            if len(samples_f) < 6:
+                samples_f.append((v, (la, ha), (lb, hb)))
+        else:
+            unenforced += 1
+            if len(samples_u) < 6:
+                samples_u.append((v, (la, ha), (lb, hb)))
+
+    print(f"\n=== {icao}: {len(vios)} within-shape violation(s) | "
+          f"graph {len(reps)} reps / {n_edges} edges / {len(hard)} hard "
+          f"anchors | {len(pinned)} band-pinned rep(s) ===")
+    print(f"  FUNDAMENTAL (no compliant field exists → W3/W5): {fundamental}")
+    print(f"  FEASIBLE-but-unenforced (→ W2/W4):              {unenforced}")
+    print(f"  [sanity] route-bounded reps={n_route_bounded} | viol endpoints "
+          f"unmapped={n_unmapped} unbounded={n_disconnected} (of {len(vios)})")
+
+    def _fmt(b):
+        l, h = b
+        ls = f"{l:.1f}" if math.isfinite(l) else "-inf"
+        hs = f"{h:.1f}" if math.isfinite(h) else "+inf"
+        return f"[{ls},{hs}]"
+    for v, ba, bb in samples_f:
+        print(f"    [FUND]  {v.way_a.tags.get('role')} {v.grade_pct:.1f}% "
+              f"d={v.distance_m:.1f} de={v.de_m:.2f} "
+              f"bands {_fmt(ba)} {_fmt(bb)}")
+    for v, ba, bb in samples_u:
+        print(f"    [unenf] {v.way_a.tags.get('role')} {v.grade_pct:.1f}% "
+              f"d={v.distance_m:.1f} de={v.de_m:.2f} "
+              f"bands {_fmt(ba)} {_fmt(bb)}")
+    return {"vios": len(vios), "fundamental": fundamental,
+            "unenforced": unenforced, "pinned": len(pinned)}
+
+
+def main(argv):
+    from conftest import xplane_root
+    from auto_patch.pipeline import build_airport_pavement
+    icaos = argv[1:] or ["SPJC"]
+    summary = {}
+    for icao in icaos:
+        layout = build_airport_pavement(icao, xplane_root(),
+                                        compute_elevations=True)
+        summary[icao] = audit_layout(layout, icao)
+    print("\n=== SUMMARY ===")
+    for icao, s in summary.items():
+        if s:
+            print(f"  {icao}: {s['vios']} viol = {s['fundamental']} fundamental "
+                  f"+ {s['unenforced']} unenforced  ({s['pinned']} pinned reps)")
+
+
+if __name__ == "__main__":
+    main(sys.argv)

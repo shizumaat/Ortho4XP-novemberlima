@@ -666,46 +666,48 @@ def _polygon_visibility(pts):
     return _vis
 
 
-def _check_within_shape(ways: List[Way],
-                        nodes: Dict[str, Tuple[float, float]],
-                        ll_to_m,
-                        max_grade: float,
-                        seam_nids: Optional[set] = None,
-                        taxi_axes: Optional[list] = None,
-                        ) -> List[Violation]:
-    """Grade check between vertex pairs on the same way.
+@dataclass
+class ShapePairConstraint:
+    """One within-shape grade constraint on a vertex pair (the SINGLE source
+    of truth for the constrained pair set — consumed by the validator AND the
+    feasibility oracle ``tools/grade_feasibility_audit.py``).  The grade law
+    is ``|elev_a - elev_b| <= cap * dist`` (the validator allows an extra
+    ``ELEV_ROUNDING_NOISE_M`` on top, folded into ``allowance``)."""
+    way: "Way"
+    nid_a: str
+    nid_b: str
+    xa: float
+    ya: float
+    ea: float
+    xb: float
+    yb: float
+    eb: float
+    dist: float
+    cap: float          # decimal grade limit for this pair (role / road / ramp)
+    allowance: float    # cap*dist + ELEV_ROUNDING_NOISE_M (validator tolerance)
 
-    The grade limit per way is resolved from
-    ``ROLE_GRADE_LIMITS`` (auto_patch.config) — taxiway-class
-    surfaces use 1.5 %, tunnel ramps use 4 %, and roles whose
-    limit is ``None`` (boundary, retaining_wall,
-    groundside_pavement) are skipped entirely.
 
-    For 3-vertex polygons (triangles), every pair IS a triangle
-    edge X-Plane will render — check all 3 pairs.
+def iter_shape_grade_constraints(
+        ways: List[Way],
+        nodes: Dict[str, Tuple[float, float]],
+        ll_to_m,
+        max_grade: float,
+        seam_nids: Optional[set] = None,
+        taxi_axes: Optional[list] = None,
+        ) -> "list[ShapePairConstraint]":
+    """Yield every within-shape vertex-pair the grade check constrains.
 
-    For 4+-vertex polygons, check every MUTUALLY-VISIBLE pair (the
-    straight chord stays inside the pavement).  Under the ROUTE-FIELD
-    MODEL (config) visibility chords are a LOCAL smoothness law only:
-    non-ring-adjacent pairs longer than ``ROUTE_FIELD_LOCAL_WINDOW_M``
-    are skipped (long chords systematically UNDER-measure the real taxi
-    route — the long-range law is the route-band check instead);
-    ring-adjacent pairs always survive.  With the model off the legacy
-    any-distance rule applies.  Apron + junction polygons are gated by
-    visibility; convex rects have every pair visible.
-
-    Pairs that include a seam vertex are skipped — those endpoints
-    are HARD-anchored to DEM by the seam pipeline and the solver
-    cannot move them, so a grade violation here reflects DEM noise
-    along the tile boundary, not a solver bug.
-
-    A violation requires ``|de| > grade × dist + ELEV_ROUNDING_NOISE_M``
-    so single-decimal rounding doesn't produce spurious flags at
-    sub-metre distances (where 0.05 m of true error rounds to 0.10 m
-    of stored error).
+    SINGLE SOURCE OF TRUTH for "which pairs are graded" — ``_check_within_shape``
+    (the validator) and the feasibility oracle both consume this so the
+    solver-target and the audit can never drift (W1 graph lockstep).  Encodes:
+    triangle = all 3 edges; 4+ = mutually-visible pairs (apron/junction gated by
+    ``_polygon_visibility``; convex rects all-pair) within the ROUTE-FIELD local
+    window (ring edges always kept); per-axis junction/apron allowance with the
+    cross-axis diagonal skip; seam-anchored pairs dropped (DEM controls); road-
+    frontage and back-edge-ramp relaxed caps.
     """
     seam_nids = seam_nids or set()
-    out: List[Violation] = []
+    out: List[ShapePairConstraint] = []
     # ROAD-FRONTAGE zone (config.ROAD_FRONTAGE_TOL_M): an apron/junction
     # pair with BOTH endpoints welded to a service-road carve carries the
     # ROAD's 4 % law, not the shape's 1.5 % — the carve corners sit ON
@@ -858,7 +860,6 @@ def _check_within_shape(ways: List[Way],
             d = math.hypot(xi - xj, yi - yj)
             if d < 0.5:
                 continue
-            de = abs(ei - ej)
             if per_axis:
                 allowance = _per_axis_allowance(
                     (xi, yi), (xj, yj), taxi_axes, ELEV_ROUNDING_NOISE_M)
@@ -871,11 +872,14 @@ def _check_within_shape(ways: List[Way],
             else:
                 allowance = grade_cap * d + ELEV_ROUNDING_NOISE_M
                 grade_cap_pair = grade_cap
-            # ROAD-FRONTAGE law (see road_zone above): both endpoints
-            # welded to a road carve -> the road's cap governs.
+            # ROAD-FRONTAGE law (see road_zone above): both endpoints welded to
+            # a road carve -> the road's cap governs.  Applied unconditionally
+            # on zone membership (it only ever RELAXES the cap, so a compliant
+            # pair stays compliant and a flagged pair is identical to the old
+            # ``de > allowance``-gated form — keeps the validator byte-identical
+            # while giving the oracle the true effective cap).
             if (road_zone is not None
                     and SERVICE_ROAD_MAX_GRADE > grade_cap_pair
-                    and de > allowance
                     and road_zone.contains(_FzPt((xi, yi)))
                     and road_zone.contains(_FzPt((xj, yj)))):
                 grade_cap_pair = SERVICE_ROAD_MAX_GRADE
@@ -888,24 +892,46 @@ def _check_within_shape(ways: List[Way],
             if (frontage_nids
                     and role == "apron"
                     and APRON_BACK_EDGE_GRADE > grade_cap_pair
-                    and de > allowance
                     and pnids[i] in frontage_nids
                     and pnids[j] in frontage_nids):
                 grade_cap_pair = APRON_BACK_EDGE_GRADE
                 allowance = max(
                     allowance,
                     APRON_BACK_EDGE_GRADE * d + ELEV_ROUNDING_NOISE_M)
-            if de <= allowance:
-                continue
-            grade = de / d
-            out.append(Violation(
-                grade_pct=grade * 100,
-                excess_pct=(grade - grade_cap_pair) * 100,
-                distance_m=d,
-                de_m=de,
-                way_a=w, way_b=w,
-                pt_a=(xi, yi), pt_b=(xj, yj),
-                elev_a=ei, elev_b=ej))
+            out.append(ShapePairConstraint(
+                way=w, nid_a=pnids[i], nid_b=pnids[j],
+                xa=xi, ya=yi, ea=ei, xb=xj, yb=yj, eb=ej,
+                dist=d, cap=grade_cap_pair, allowance=allowance))
+    return out
+
+
+def _check_within_shape(ways: List[Way],
+                        nodes: Dict[str, Tuple[float, float]],
+                        ll_to_m,
+                        max_grade: float,
+                        seam_nids: Optional[set] = None,
+                        taxi_axes: Optional[list] = None,
+                        ) -> List[Violation]:
+    """Grade check between vertex pairs on the same way.  Consumes
+    ``iter_shape_grade_constraints`` (the single source of constrained pairs)
+    and flags any pair whose stored Δelev exceeds its allowance — a violation
+    requires ``|de| > cap*dist + ELEV_ROUNDING_NOISE_M`` so single-decimal
+    rounding doesn't produce spurious sub-metre flags."""
+    out: List[Violation] = []
+    for c in iter_shape_grade_constraints(
+            ways, nodes, ll_to_m, max_grade, seam_nids, taxi_axes):
+        de = abs(c.ea - c.eb)
+        if de <= c.allowance:
+            continue
+        grade = de / c.dist
+        out.append(Violation(
+            grade_pct=grade * 100,
+            excess_pct=(grade - c.cap) * 100,
+            distance_m=c.dist,
+            de_m=de,
+            way_a=c.way, way_b=c.way,
+            pt_a=(c.xa, c.ya), pt_b=(c.xb, c.yb),
+            elev_a=c.ea, elev_b=c.eb))
     return out
 
 
