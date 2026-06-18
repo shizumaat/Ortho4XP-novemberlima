@@ -1,3 +1,67 @@
+# Auto-Patch Status — 20260618 = SPINE building-flat fixes COMMITTED (cfd165d); rect-end-cap design (Phase-1) is the next focused effort
+
+## ★★ 20260618-01 (2026-06-18, dev @cfd165d) — SPINE building-flat / apron-grade work COMMITTED; rect-end-cap = NEXT (must be Phase-1) ★★
+
+**COMMITTED (cfd165d)** — net improvement, suite regression-neutral vs the prior
+spine stack (same standing reds); gate-off byte-identical (all new behavior keys off
+spine-only attributes / the spine path):
+- `_full_centerlines`: spine now uses the apt.dat **1201/1202 ROUTE network ONLY** —
+  painted curves + discovered ("TX") lanes dropped; **1206 ground-truck (`SVC*`) routes
+  filtered out**.  (`_filter_painted_to_routes` kept for A/B but unused.)
+- **Runways are soft ends** (a centerline crossing lands a node on the runway edge;
+  conformance welds it — no rectangle cap).
+- **Spine-node flexibility**: interior centerline GUIDE points + sliced-apron piece
+  points tagged on the layout; the band builder gives them an INFINITE band (never
+  band-pinned).  The dense sliced-apron graph was falsely inverting their reach bands
+  (`lo>hi`) and freezing them at terrain → SPJC band-pinned **861 → 147**.
+- **Corridors YIELD to flat terminals**: in the post-flatten acceptance projection the
+  corridor-held set is RELEASED so corridors flex within their route bands to follow a
+  flat pad (cascade TERMINAL > APRON > TAXI).
+- **`_terminal_chord_windows` poly4 fix**: a pad's chord window is built against ITS
+  own footprint (by ref), not the first building within 2 m of its node.  SPJC
+  **building20** (185k m²) was matched to the tiny overlapping **building12** (127 m²),
+  so every perpendicular chord missed it (`noray`) and the pad fell back to the DEM
+  median (19.2).  Fixed → building20 gets its 156 chords and the band-window floor
+  lifts it to its balanced level **21.5, FLAT**.
+- **`_dedup_coincident_ring_vertices`** (pipeline): strips zero-length edges (duplicate
+  ring vertices) that triangulate to degenerate slivers (stretched textures).  SPJC
+  **44 → 0**.
+
+Net (gate-on): SPJC building20 + building19 FLAT (were tilted ~8 m), apron worst grade
+**6.7% → 1.9%**, zero-length edges 44→0; HECA within-shape **715 → 99**.
+
+**★ NEXT — RECT-END-CAP (must be built in PHASE 1, user 2026-06-18):**
+Problem: a spine slice ending at a sloping taxi rect welds a mid-edge node onto the
+rect's long edge → conformance flips the 4-corner rect to `node_altitudes` → it no
+longer grades as one plane, so it descends only ~half its length (SPJC taxiway L
+shapeID 22: 3.8 m of a 7.5 m drop), starving the apron of slack.
+
+Design (user): carve a **2 m end-cap off each JUNCTION-FACING end of every sloping
+rect**; the MAIN rect body stays a clean 4-corner sloping rect (full-length plane);
+the cap is **just another junction** (2-node inner side welded to the rect's flat end,
+3-node outer side to the junction with the centerline node M in the middle — create M
+on the centerline and snap the spine cut to it, OR create the cap without M and insert
+M at cut time).
+
+★★ CRITICAL: build the caps **when rects are created, BEFORE junctions form
+(`emit_junctions` = residue `pav_union − rects`) and BEFORE any elevations** — then the
+solver grades the cap like every other shape and the rect ends settle to the junction
+levels naturally (rect slopes its full length).  TWO failed attempts this session both
+built the cap in PHASE 2 (inside the spine, after junctions formed against the full
+rects + after the seam/redistribute pass): the cap was squeezed against geometry that
+didn't know about it and concentrated the corridor-vs-junction-body level mismatch into
+2 m → within-shape **3 → 40 (cap as rect role) / 92 (cap as junction role)**, even
+though conformance T-junctions dropped 6 → 1.  The phase, not the role, was the bug.
+Integration points: after `_build_taxi_rects` (pipeline ~L2644), before `emit_junctions`
+(junction_emit.py:94); rects are `(poly, axis, role, ref)` tuples; the caps must be
+SUBTRACTED from the junction residue (add to the rect/cap set `emit_junctions` differences
+out, or emit them as explicit junction shapes the residue avoids).
+
+Also still open: **apron 1% skirt** where no corridor serves it (north of building20 sags
+to DEM instead of holding 1% off the flat building — needs a building-side attractor);
+**full corridor descent** (network slack so the rect reaches the junction level, ~7.5 m);
+and the 3 standing spine-tail reds (`runway_node_sharing[CYXY,SPLP]`, `rests_on_source[CYXY]`).
+
 # Auto-Patch Status — 20260617 = JUNCTION CENTERLINE SPINE (slice junctions/aprons along taxi centerlines, pre-solve); MERGED to dev + gate `O4_JCT_SPINE` flipped DEFAULT ON for in-sim testing (set O4_JCT_SPINE=0 to restore byte-identical ring junctions)
 
 ## ★★ 20260617-01 (2026-06-17) — JUNCTION-CENTERLINE-SPINE merged to dev (gate default OFF = byte-identical); OUTSTANDING ISSUES for followup ★★
