@@ -240,20 +240,38 @@ def audit_layout(layout, icao):
                 elev[nid] = w.elevs[k]
                 role_of_nid[nid].add(role)
 
-    # FLAT equality groups: union every building/terminal pad's vertices.
+    # Buildings/terminals are NOT rigid-flat — the law caps them at
+    # TERMINAL_MAX_GRADE (1.5%, == apron), so they may slope a small amount
+    # (user 2026-06-18: "worst case a couple buildings slope a small amount").
+    # Forcing them to ONE level (a UF equality group) is STRICTER than the law
+    # and manufactures false inversions wherever the network needs a building
+    # to tilt slightly — that was the spurious "canyon" infeasibility.  Grade
+    # them at their cap via their own within-shape edges, like any other shape.
     uf = _UF()
-    for w in ways:
-        if w.tags.get("role") not in ("building", "terminal", "stand"):
-            continue
-        ring = [nid for nid in w.nids if nid in nodes]
-        for nid in ring[1:]:
-            uf.union(ring[0], nid)
+    import os as _os9
+    if _os9.environ.get("O4_AUDIT_FLAT_BUILDINGS") == "1":   # diagnostic A/B
+        for w in ways:
+            if w.tags.get("role") not in ("building", "terminal", "stand"):
+                continue
+            ring = [nid for nid in w.nids if nid in nodes]
+            for nid in ring[1:]:
+                uf.union(ring[0], nid)
 
     def rep(nid):
         return uf.find(nid)
 
     # Build the difference-constraint graph over representatives.
+    #   adj      = ALL in-pavement visible chords — used for the POCS grade
+    #              feasibility test (the surface law: no distance window).
+    #   adj_win  = SHORT (<=REACH_WINDOW) chords only — used for the 2-sided
+    #              REACH bounds.  A long straight chord across an apron interior
+    #              UNDER-measures the real curving taxi route, so using it for
+    #              the runway-reach bound manufactures false "canyons" (the bug
+    #              the old 80 m window was guarding against — but it must apply
+    #              to REACH, not to grade enforcement).
+    REACH_WINDOW = 80.0
     adj = defaultdict(list)
+    adj_win = defaultdict(list)
     n_edges = 0
     for c in constraints:
         ra, rb = rep(c.nid_a), rep(c.nid_b)
@@ -262,6 +280,9 @@ def audit_layout(layout, icao):
         w = c.cap * c.dist
         adj[ra].append((rb, w))
         adj[rb].append((ra, w))
+        if c.dist <= REACH_WINDOW:
+            adj_win[ra].append((rb, w))
+            adj_win[rb].append((ra, w))
         n_edges += 1
 
     # HARD anchors: runway / runway_crossing / seam nodes, at emitted elev.
@@ -307,6 +328,7 @@ def audit_layout(layout, icao):
     hi = _dijkstra(None, adj, ceil_seed)
     lo_neg = _dijkstra(None, adj, floor_seed)
     lo = {v: -lo_neg[v] for v in lo_neg}
+    _ = adj_win  # (windowed-reach experiment reverted — made HECA worse)
 
     # ALGORITHM TEST: run plain POCS (cyclic edge-projection + box-clamp) on the
     # ORACLE's proven-feasible polytope (clean route+within bounds, hold only

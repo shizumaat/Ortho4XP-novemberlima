@@ -2107,8 +2107,19 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
     # flatness is preserved, and the runway-reach band clamps its travel (bounded
     # ~5 m, no slosh — the band-clamp is what the earlier free-terminal attempts
     # lacked).  A group sharing a hard node is still held (one corner pinned).
-    coupling = _merge_terminal_level_groups(
-        _build_level_coupling(shape_constraints), shape_constraints)
+    # W2_CLEAN_BANDS: do NOT flat-couple building pads.  The law caps them at
+    # 1% (TERMINAL_MAX_GRADE), not 0% — flat-coupling forces a single rigid
+    # level, which manufactures false infeasibility wherever the network needs
+    # a pad to tilt slightly (user 2026-06-18: pads flat 99% of the time, but
+    # the ~3 HECA pads must be allowed to slope to their cap).  Without the
+    # coupling each pad node grades via its own 1% within-shape edges, and the
+    # movement-minimising POCS keeps it near-flat unless forced.  Rect
+    # flat-end coupling is KEPT (sloping rects must stay planar).
+    if W2_CLEAN_BANDS:
+        coupling = _build_level_coupling(shape_constraints)
+    else:
+        coupling = _merge_terminal_level_groups(
+            _build_level_coupling(shape_constraints), shape_constraints)
     # TERMINALS MUST NOT RISE (standing ruling; terminal7 ≈ 70).  In
     # rigid-flat mode (TERMINAL_PADS_SLOPE False) pads enter the enforce at
     # their taxi-route-seeded + relief levels; the band clamp/sweeps must

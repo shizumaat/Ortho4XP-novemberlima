@@ -1,3 +1,80 @@
+# Auto-Patch Status — 20260618-02 = W2 GRADE SOLVER (clean bands + POCS) default ON in dev; 80m grade window REMOVED; apron+building cap → 1%; HANDOVER below
+
+## ★★ 20260618-02 (2026-06-18, dev @d7216f7 + WIP) — W2 grade enforcement: HANDOVER TO NEW AGENT ★★
+
+Read `docs/grade_enforcement_plan.md` (the plan + all results), `docs/pipeline_geometry_audit.md`
+(the geometry-sequence audit), and the memory file `grade_enforcement_plan_and_audit.md`.
+Tools: `tools/grade_feasibility_audit.py` (feasibility oracle — `O4_W2_BANDS=1 venv/bin/python
+tools/grade_feasibility_audit.py <ICAO>`) and `O4_W2_DUMP=1` (solver band_pinned + closure resid dump).
+
+### What shipped (committed)
+- **W1** (`e233842`): `tools/check_grade.py` exposes `iter_shape_grade_constraints` — the SINGLE
+  generator of within-shape constrained pairs, consumed by the validator AND the oracle (lockstep).
+- **W2 solver** (`aec4c45`, gate `W2_CLEAN_BANDS`/`O4_W2_BANDS` **default ON in dev**): the legacy
+  enforce was 3 accreted cap-projections whose artificial constraints (field self-anchor + corridor
+  held-write band anchors + ±2.5 m movement clamp) EMPTY the feasible polytope → it stalls.  Fix:
+  band anchored on TRUTH ONLY (runway/seam), final-closure box = the clean feasible band (±2.5 m
+  fallback only where genuinely infeasible), terminals held FLAT via coupling but level-free.  Plain
+  POCS then converges to ZERO on the feasible polytope.  `O4_W2_BANDS=0` restores the legacy solver.
+- **80m grade window REMOVED** (`d7216f7`): `ROUTE_FIELD_LOCAL_WINDOW_M` was a LAW BUG — it skipped
+  long in-pavement visible chords (a 90 m apron span at 6.7% slipped through) AND prevented corridors
+  from descending to relieve aprons.  Dropped in the validator (unconditional) + the solver
+  (`_visible_grade_edges` `max_len=None` under W2).  ★ Enforcing the long apron chord FORCES the high
+  corridor DOWN — SPJC taxiway L descent 3.8 m → 6.0 m, apron #233 6.8% → ≤1.5%.
+
+### WIP (UNCOMMITTED at handover — committed WITH this STATUS)
+- **config**: `APRON_MAX_GRADE` 0.015 → **0.01** (apron + building pads = 1%, user 2026-06-18);
+  `ROLE_GRADE_LIMITS["junction"]` decoupled → `TAXI_MAX_GRADE` (junctions stay 1.5%, the moving network).
+- **solver** (`unified_jacobi`): under W2, skip `_merge_terminal_level_groups` so building pads are
+  NOT flat-coupled — they grade at their 1% cap via their own within-shape edges (movement-minimised
+  → near-flat 99% of the time, free to slope for the ~3 HECA pads).  ★ This was a REAL bug: forcing
+  pads to one rigid level (0%) manufactured false "canyon" infeasibility (SPLP fundamental 14→1).
+- **oracle**: building UF-merge gated behind `O4_AUDIT_FLAT_BUILDINGS` (default off = pads graded, not
+  rigid-flat); a windowed-reach-bounds experiment was tried and REVERTED (made HECA worse).
+
+### Current measured state (W2 on)
+- **CYXY = 0**, **SPJC airside = 0** (the 1 left is the post-solve tunnel-ramp feature) — the user's
+  in-sim targets are clean even at the 1% apron/building cap.  Aprons "much better" (user-confirmed).
+- SPLP: 413 emitted within-shape violations BUT the POCS feasibility test converges (0 edges over cap)
+  → **feasible, the solver just isn't reaching it** (W2 convergence work, NOT infeasibility).
+- HECA: the oracle's "fundamental" count is UNRELIABLE (measurement bugs — the windowed-reach attempt
+  reverted).  ★ USER DOMAIN TRUTH: there are NO canyons; HECA worst case is ~3 buildings sloping a
+  small amount.  Trust this over the oracle number.
+
+### OPEN ITEMS (priority order for the new agent)
+1. **RECT END-CAPS missing → rects emit as `node_altitudes`; USER WANTS RECTS KEPT AS RECTS (planes).**
+   `RECT_END_CAPS`/`O4_RECT_CAPS` is gated OFF (it earlier regressed grade, but that was the old
+   solver).  With W2 + no-window, RE-TEST caps ON: `O4_RECT_CAPS=1 O4_W2_BANDS=1`.  Earlier caps+W2
+   showed a W1 lockstep gap (cap-adjacent apron pairs the solver didn't enforce) — the no-window
+   change may have closed it.  Goal: rects stay clean 4-corner planes AND zero grade.  Counter
+   node_altitudes via `/tmp/count_na.py` pattern (plane vs node_altitudes per sloping rect; CYXY/SPJC
+   without caps = 11/42 node_altitudes, with caps = 1/1).
+2. **TEXTURE TEARING at SPJC bbox `-12.0316502,-77.1044111 .. -12.0275893,-77.1089387`.**
+   Probe (`/tmp/probe_bbox.py`) found NO zero-length edges and NO coincident-different-elevation
+   vertices there.  29 shapes: aprons, ~10 small buildings (576 m² each), 2 taxiway_clearance,
+   service_road.  ★ LEAD: tearing is NOT zero-edges — check OVERLAPPING shapes (clearance cuts over
+   aprons) and the building-apron boundaries (buildings now SLOPE at 1% under W2 instead of flat, so a
+   pad tilting against its apron can tear).  Render the bbox shapes offline.
+3. **W2 solver convergence on SPLP/HECA** — feasible (POCS converges) but the solver leaves violations.
+   The final closure (`unified_jacobi` ~L3294) caps at 8000 sweeps; investigate why it doesn't reach
+   the POCS field (band differences vs the oracle, held set, the ±2.5 m fallback near pinned nodes).
+4. **PERFORMANCE**: no-window all-pair visibility + non-convergent POCS → HECA bare build 90s → 208s
+   (~2.3×).  Optimize the visibility edge build + cap/scale sweeps for big airports.
+5. **Re-baseline the suite grade tests**: removing the window flags many more (real) within-shape
+   violations; the old "0" numbers were inflated.  CYXY `pavement_grade` should now PASS.
+6. The oracle's HECA classification needs a correct reach-band model (route distance, NOT all-pair
+   chord shortcuts) — the windowed-`adj` attempt was wrong; rethink (maybe trust the POCS verdict only).
+
+### Traps
+- `O4_W2_BANDS=1` is the DEFAULT now; set `=0` for the legacy A/B.  Gate-off was byte-identical at
+  `aec4c45` (the window-removal `d7216f7` changes the validator unconditionally).
+- POCS DIVERGES on an empty polytope — the ±2.5 m fallback box at band-pinned/unbounded nodes is
+  mandatory (without it SPLP ran to a 16 m residual).
+- Auto-patch REBUILD-SKIP: code edits alone don't regenerate in-sim patches — `O4_AUTO_PATCH_REBUILD=1`
+  or delete the patch.  Confirm a patch is current by comparing a shape to a fresh standalone build.
+
+---
+
 # Auto-Patch Status — 20260618 = SPINE building-flat fixes COMMITTED (cfd165d); rect-end-cap design (Phase-1) is the next focused effort
 
 ## ★★ 20260618-01 (2026-06-18, dev @cfd165d) — SPINE building-flat / apron-grade work COMMITTED; rect-end-cap = NEXT (must be Phase-1) ★★

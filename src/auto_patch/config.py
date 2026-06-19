@@ -382,7 +382,11 @@ RUNWAY_SHOULDER_EXTENT_MAX_APT_FRAC = 0.5
 # trace to different standards and may diverge — e.g. EASA could tighten
 # the runway cap without touching taxiways.
 TAXI_MAX_GRADE = 0.015          # FAA AC 150/5300-13 taxiway-family
-APRON_MAX_GRADE = 0.015         # apron / junction body, all directions (user 2026-05-07)
+# Aprons + building pads grade at 1% (user 2026-06-18: "both builds and aprons
+# should be 1%") — flat is preferred 99% of the time, the cap is the fallback.
+# JUNCTIONS stay at the TAXI rate (1.5%): they are part of the moving network
+# where 1.5% taxiways flow through, not parking surface (decoupled below).
+APRON_MAX_GRADE = 0.01          # apron + building pad, all directions
 # (2026-06-13) APRON BACK-EDGE RAMPS — docs/apron_back_edge_ramps.md.  The
 # back strip of an apron (building frontage + gaps BETWEEN buildings, farthest
 # from taxi routes) may grade up to this steeper cap so building pads can stay
@@ -672,10 +676,11 @@ ROLE_GRADE_LIMITS = {
     "secondary_parallel": TAXI_MAX_GRADE,
     "stub":               TAXI_MAX_GRADE,
     "cross_connector":    TAXI_MAX_GRADE,
-    # Apron / junction — 1.5% all directions within the polygon
-    # (per user 2026-05-07).
+    # Apron — 1% all directions (user 2026-06-18).  Junction stays at the
+    # TAXI rate (1.5%): it is the moving network where taxiways flow through,
+    # not parking surface.
     "apron":              APRON_MAX_GRADE,
-    "junction":           APRON_MAX_GRADE,
+    "junction":           TAXI_MAX_GRADE,
     # Building pads (terminals / hangars / towers): drives the
     # flat-vs-graded code path — see TERMINAL_MAX_GRADE.  The role was
     # renamed from "terminal" (user 2026-06-12); the legacy key stays
