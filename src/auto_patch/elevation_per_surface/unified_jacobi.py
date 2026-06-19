@@ -4343,12 +4343,17 @@ def _build_shape_constraints(layout, bucket_to_idx):
             # smoothness window; the long-range law is the taxi-route band
             # in the enforce (docs/route_field_model.md §3).  Ring-adjacent
             # pairs always survive inside _visible_grade_edges.
+            # W2_CLEAN_BANDS: NO distance window — enforce EVERY in-pavement
+            # visible chord (matches the corrected validator).  A long apron
+            # chord is the surface the aircraft sits on; enforcing it is also
+            # what forces a high corridor to DESCEND so the apron can grade.
             vis_edges = _visible_grade_edges(
                 coords, idx, cap, s.polygon,
                 container=(airside_buf if s.role == ROLE_JUNCTION
                            else None),
-                max_len=(ROUTE_FIELD_LOCAL_WINDOW_M if ROUTE_FIELD_MODEL
-                         else None))
+                max_len=(None if W2_CLEAN_BANDS
+                         else (ROUTE_FIELD_LOCAL_WINDOW_M if ROUTE_FIELD_MODEL
+                               else None)))
             # PER-AXIS JUNCTION GRADING (user 2026-06-10): the 1.5 % cap
             # applies along the taxi CENTERLINE.  A chord between two
             # vertices following the same (curved) axis caps at the

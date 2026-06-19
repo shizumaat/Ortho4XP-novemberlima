@@ -815,21 +815,18 @@ def iter_shape_grade_constraints(
             # Mirrors the solver's uncapped ``_visible_grade_edges``.
             _vis = (_polygon_visibility(pts)
                     if w.tags.get("role") in ("apron", "junction") else None)
+            # NO distance window (2026-06-18, user): an in-pavement
+            # mutually-VISIBLE chord across an apron/junction IS the surface
+            # the aircraft sits on, so its average slope is a real grade no
+            # matter how far apart the two vertices are (a 90 m apron span at
+            # 6.7% was slipping through the old 80 m ROUTE_FIELD window — and
+            # the apron law is 1% between buildings/taxi-centerlines/edges).
+            # Visibility already excludes chords that leave the pavement; the
+            # window's only valid job (stopping km chords from under-measuring
+            # the runway-REACH route) belongs to the route-band law, not here.
             pairs = []
             for i in range(n):
                 for j in range(i + 1, n):
-                    # ROUTE-FIELD MODEL: visibility chords are a LOCAL law
-                    # only — pairs beyond the window are not graded against
-                    # each other (the long-range law is the route-band
-                    # check); ring-adjacent pairs (the physical edge
-                    # X-Plane lerps) always survive.  Mirrors the solver's
-                    # windowed ``_visible_grade_edges``.
-                    if ROUTE_FIELD_MODEL and not (
-                            j == i + 1 or (i == 0 and j == n - 1)):
-                        if math.hypot(pts[i][0] - pts[j][0],
-                                      pts[i][1] - pts[j][1]) \
-                                > ROUTE_FIELD_LOCAL_WINDOW_M:
-                            continue
                     if _vis is not None and not _vis(
                             pts[i][0], pts[i][1], pts[j][0], pts[j][1]):
                         continue
