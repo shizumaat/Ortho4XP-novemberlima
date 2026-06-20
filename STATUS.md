@@ -1,3 +1,41 @@
+# Auto-Patch Status — 20260619-01 = RECT END-CAPS shipped (shrink-rect, 12m, ≥40m rects) + PLANAR-CAP corridor-flex (cap-adjacent grade CYXY 4→0 / SPJC 44→0) + spine even-spacing + SVC13 flat-edge tear fix; HANDOVER below
+
+## ★★ 20260619-01 (2026-06-19, dev) — CAP + SPINE + PLANAR-CAP GRADE: shipped, committed ★★
+
+Read memory `caps_spine_flatedge_20260619.md` for the full detail. Net: the rect
+end-cap mechanism is now ON by default and the cap-adjacent grade is solved in the
+solver. Geometry/junction suite 11→3 reds (8 fixed, 0 new), SPJC conformance
+T-junctions 5→1.
+
+**Shipped this session (all defaults flipped ON unless noted):**
+- **Shrink-rect caps** (`config.RECT_END_CAPS` ON): a cap shrinks the sloping rect at
+  its junction-facing flat end and fills the vacated space; the junction keeps its
+  caps-off size. Depth `RECT_END_CAP_DEPTH_M` = **12 m**; a rect shorter than
+  `RECT_END_CAP_MIN_RECT_LEN_M` = **40 m** gets NO cap (converts to node_altitudes).
+- **Spine** (`junction_spine.py`): even node spacing (dropped the `_END_INSET_M` 1.5 m
+  densification → killed 4-node knots, sub-5m pairs −73%); **never slices caps** (a deep
+  cap had a through-path and got sliced, stripping is_rect_cap → 12m caps now survive).
+- **Flat-edge tear fix** (`flatedge_snap.drop_flatedge_nodes`, post-solve): drops any
+  non-corner node on a sloping-rect flat edge (the SPJC SVC13 tear). Conformance 3→1.
+- **PLANAR CAP** (`unified_jacobi._build_shape_constraints`, gate `O4_CAP_PLANAR` ON):
+  grade the cap as a planar EXTENSION of its parent rect (inner flat-pair welded to the
+  rect flat end, outer flat-pairs for corners+M, axial edges at the taxi cap) so rect+cap
+  TILT as one plane and the cap-adjacent junction CO-SOLVES flat. **This is the
+  corridor-flex done right.** Within-shape: **CYXY 4→0, SPJC 44→0**, SPLP neutral.
+- **Cap M de-bulge** (`cap_plane.debulge_cap_centre_nodes`): snaps the cap centre node M
+  onto the outer-corner line (now mostly a no-op under planar cap; kept for the
+  non-planar-cap fallback).
+
+**★ KNOWN REGRESSION (TODO):** PLANAR CAP regresses **HECA within-shape 741→883** —
+terminal-canyon caps where the parent rect physically can't tilt over-constrain.
+`O4_CAP_PLANAR=0` reverts. Fix: fall back to the free-junction cap where the tilt is
+infeasible (rect anchored both ends + required tilt > grade cap).
+
+**Other open:** SPLP runway tile-seam (tile -13/-78) rect+wedge — not started (runways
+excluded from `tile_cut._SLOPING_RECT_ROLES` clip path).
+
+---
+
 # Auto-Patch Status — 20260618-02 = W2 GRADE SOLVER (clean bands + POCS) default ON in dev; 80m grade window REMOVED; apron+building cap → 1%; HANDOVER below
 
 ## ★★ 20260618-02 (2026-06-18, dev @d7216f7 + WIP) — W2 grade enforcement: HANDOVER TO NEW AGENT ★★

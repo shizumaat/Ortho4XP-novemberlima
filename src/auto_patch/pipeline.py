@@ -4207,6 +4207,31 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # and before the final conformance audit.
     _dedup_coincident_ring_vertices(layout, icao)
 
+    # De-bulge rect end-cap centre nodes (user 2026-06-19): the solver grades
+    # the cap as a free junction, so its outer-edge centre node M drifts
+    # 0.1-0.2m off the straight line between the cap's two outer corners → a
+    # step where the junction joins the cap centre.  Snap M onto that line
+    # (corners keep their solved network level, so junction grades are
+    # unchanged) and propagate to the shared junction node.
+    import os as _os_db
+    # Corridor-flex is done IN the solver (O4_CAP_PLANAR: the capped rect+cap
+    # tilt as one plane so the cap-adjacent junction co-solves flat).  A
+    # post-solve lift was tried and dropped (net-neutral — a rigid plane can
+    # only tilt linearly, but the network varies non-linearly).
+    if _os_db.environ.get("O4_CAP_DEBULGE", "1") == "1":
+        from .cap_plane import debulge_cap_centre_nodes
+        debulge_cap_centre_nodes(layout)
+
+    # Enforce the rect flat-end rule (user 2026-06-19): only a sloping rect's
+    # 2 CORNERS are legal shared vertices on its flat end.  The spine slice +
+    # the weld/conformance chain can leave an apron/junction vertex mid-flat-
+    # edge (SPJC SVC13 ran corner→MID→corner along SVC13's flat end) — an
+    # illegal shared vertex that triangulates to a Triangle4XP T-junction tear.
+    # Drop any such node so the edge straightens corner-to-corner.  LATE pass
+    # (final geometry + altitudes), before the conformance audit below.
+    from .flatedge_snap import drop_flatedge_nodes
+    drop_flatedge_nodes(layout)
+
     tjs, crossings = find_conformance_violations(layout.shapes)
     if tjs or crossings:
         UI.vprint(1,

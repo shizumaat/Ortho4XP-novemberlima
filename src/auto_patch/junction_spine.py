@@ -84,8 +84,6 @@ _HARD_EDGE_TOL_M = 1.5
 # edge — strictly beyond verification.check_vertex_on_flat_edge's
 # EDGE_PROX_M (1.5 m), so no junction/apron vertex lands in the band.
 _CAP_DEPTH_M = 2.0
-# Spine nodes are densified ~this far inboard of each boundary crossing.
-_END_INSET_M = 1.5
 # Painted-curve filter (user 2026-06-17): a row-120 painted centerline is
 # kept only where it TRACKS a taxi route — within this distance of, AND
 # roughly parallel to, a 1201/1202 route segment.  Off-route lobes and
@@ -336,9 +334,15 @@ def _partition_junction(s, centerlines, pav_union, runway_union, near_hard,
             L = part.length
             if L < max(2.0, 0.5 * SPINE_STEP_M):
                 continue
+            # Spread interior nodes EVENLY along the cut, endpoint to endpoint
+            # (user 2026-06-19): the old code also placed a fixed node 1.5 m
+            # inboard of each boundary crossing, sitting right beside the
+            # crossing node itself — a built-in ~1.5 m cluster that triangulated
+            # to slivers (X-Plane tearing).  Dividing [0, L] into ``nseg`` equal
+            # parts keeps every node ~SPINE_STEP_M apart from its neighbours AND
+            # from the endpoints (boundary crossings / cap M).
             nseg = max(2, int(round(L / SPINE_STEP_M)))
-            ds = {min(_END_INSET_M, 0.45 * L),
-                  L - min(_END_INSET_M, 0.45 * L)}
+            ds = set()
             for i in range(1, nseg):
                 ds.add(i * L / nseg)
             cand: List[Tuple[float, float]] = []
@@ -486,7 +490,14 @@ def apply_junction_centerline_spine(layout) -> int:
     n_done = 0
     n_pieces = 0
     for s in layout.shapes:
-        if s.role not in (ROLE_JUNCTION, ROLE_APRON):
+        # Never slice a rect end-cap (user 2026-06-19): the cap IS the rect-end
+        # transition (a planar extension of the rect), not a sliceable junction.
+        # A thin 2 m cap survived by luck (no boundary-to-boundary through-path
+        # = single_face), but a deeper cap (e.g. 12 m) has one and gets sliced,
+        # stripping its is_rect_cap flag → it loses the planar-cap treatment and
+        # the cap-adjacent junction grade returns.  Skip it.
+        if s.role not in (ROLE_JUNCTION, ROLE_APRON) \
+                or getattr(s, "is_rect_cap", False):
             new_shapes.append(s)
             continue
         poly = s.polygon

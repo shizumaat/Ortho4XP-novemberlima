@@ -1029,11 +1029,22 @@ SPINE_STEP_M = float(_os.environ.get("O4_JCT_SPINE_STEP_M", "12.0"))
 # to restore the legacy field-anchored bands.
 W2_CLEAN_BANDS = _os.environ.get("O4_W2_BANDS", "1") == "1"
 
-RECT_END_CAPS = _os.environ.get("O4_RECT_CAPS", "0") == "1"
+# Rect end-caps (rect_end_caps.py) DEFAULT ON (user 2026-06-19): a cap SHRINKS
+# the sloping rect at its junction-facing flat end and occupies the vacated
+# 2 m, so the rect stays a full-length 4-corner plane and the junction/apron
+# keeps its caps-off size (the cap is carved from the RECT, never the junction).
+# Set O4_RECT_CAPS=0 to restore the old behaviour (rect ends emit as
+# node_altitudes where a spine centerline crosses them).
+RECT_END_CAPS = _os.environ.get("O4_RECT_CAPS", "1") == "1"
 # Depth (m, perpendicular to the rect's flat end) of each end-cap — strictly
 # beyond verification.check_vertex_on_flat_edge's EDGE_PROX_M (1.5 m) so no
 # junction vertex lands in the rect's exclusion band.
-RECT_END_CAP_DEPTH_M = float(_os.environ.get("O4_RECT_CAP_DEPTH_M", "2.0"))
+RECT_END_CAP_DEPTH_M = float(_os.environ.get("O4_RECT_CAP_DEPTH_M", "12.0"))
+# A sloping rect shorter than this (m, along its axis) gets NO cap and just
+# converts to node_altitudes where the spine centerline crosses it (user
+# 2026-06-19): short rects don't have the length to host a cap + tilt cleanly.
+RECT_END_CAP_MIN_RECT_LEN_M = float(
+    _os.environ.get("O4_RECT_CAP_MIN_RECT_LEN_M", "40.0"))
 
 # (s79) ON-PAVEMENT service-road carve — docs/service_road_carve.md.
 # ★ USER RULINGS 2026-06-11: roads = apt.dat 1206 routes ONLY (no

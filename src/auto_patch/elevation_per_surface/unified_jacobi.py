@@ -4245,6 +4245,28 @@ def _build_shape_constraints(layout, bucket_to_idx):
     layout._apron_back_band = back_band
     back_scale = (APRON_BACK_EDGE_GRADE / APRON_MAX_GRADE
                   if APRON_MAX_GRADE > 0 else 1.0)
+    # Node indices on a clean sloping-rect PLANE (4-corner, altitude_high/low).
+    # Used to grade a rect end-cap as a PLANAR EXTENSION of its parent rect
+    # (O4_CAP_PLANAR): the cap's inner edge sits on these nodes.
+    # Default ON (user 2026-06-19, for in-sim test): grade rect end-caps as a
+    # planar extension of their parent rect so the rect+cap tilt as one plane
+    # and the cap-adjacent junctions co-solve flat (CYXY 4→0, SPJC 44→0; SPLP
+    # neutral).  ⚠ HECA REGRESSES (741→883) — the terminal-canyon caps where
+    # the rect can't tilt over-constrain; investigate.  O4_CAP_PLANAR=0 reverts.
+    _cap_planar = _os.environ.get("O4_CAP_PLANAR", "1") == "1"
+    rect_plane_idx: set = set()
+    if _cap_planar:
+        for s in layout.shapes:
+            if (s.role in SLOPING_RECT_ROLES and s.node_altitudes is None
+                    and s.polygon is not None and not s.polygon.is_empty):
+                _c = _open_ring(list(s.polygon.exterior.coords))
+                if len(_c) != 4:
+                    continue
+                for (x, y) in _c:
+                    k = bucket_to_idx.get(
+                        layout.canonical_points.get_or_add(float(x), float(y)))
+                    if k is not None:
+                        rect_plane_idx.add(k)
     for s in layout.shapes:
         if s.role not in PAVEMENT_ROLES or s.role == ROLE_RUNWAY:
             continue
@@ -4324,6 +4346,34 @@ def _build_shape_constraints(layout, bucket_to_idx):
                     flat_pairs.append((idx[a], idx[b]))
                 else:                    # the two most-parallel = sloping edges
                     edges.append((idx[a], idx[b], cap * el))
+        elif (_cap_planar and getattr(s, "is_rect_cap", False)
+              and len([i for i in idx if i in rect_plane_idx]) >= 2
+              and len([i for i in idx
+                       if i is not None and i not in rect_plane_idx]) >= 2):
+            # Rect end-cap → PLANAR EXTENSION of its parent rect (user
+            # 2026-06-19).  INNER edge = the 2 nodes welded to the rect's flat
+            # end (already the rect's coupled pair, so _build_level_coupling
+            # unions them); OUTER edge = the 2 corners + the centreline node M.
+            # Couple inner flat and outer flat, join them with axial edges at
+            # the taxi cap → the rect+cap form one plane that TILTS as a unit so
+            # the cap-adjacent junction co-solves flat (a free-junction cap
+            # stays a rigid flat buffer that blocks the rect from tilting to the
+            # network → the 0.1-0.4 m cap-adjacent grade violations).
+            inner = [i for i in range(len(idx))
+                     if idx[i] is not None and idx[i] in rect_plane_idx]
+            outer = [i for i in range(len(idx))
+                     if idx[i] is not None and idx[i] not in rect_plane_idx]
+            edges.append((idx[inner[0]], idx[inner[1]], 0.0))
+            flat_pairs.append((idx[inner[0]], idx[inner[1]]))
+            for k in range(1, len(outer)):
+                edges.append((idx[outer[0]], idx[outer[k]], 0.0))
+                flat_pairs.append((idx[outer[0]], idx[outer[k]]))
+            for ii in inner:
+                jj = min(outer, key=lambda o: (coords[ii][0] - coords[o][0]) ** 2
+                         + (coords[ii][1] - coords[o][1]) ** 2)
+                d = math.hypot(coords[ii][0] - coords[jj][0],
+                               coords[ii][1] - coords[jj][1])
+                edges.append((idx[ii], idx[jj], cap * d))
         elif s.role in (ROLE_APRON, ROLE_BUILDING, ROLE_JUNCTION):
             # In-pavement VISIBILITY graph for APRONS, GRADED terminals (when
             # TERMINAL_MAX_GRADE > 0 — large near-flat pads, same as an apron)

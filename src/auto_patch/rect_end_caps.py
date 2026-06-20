@@ -112,11 +112,14 @@ def _carve_one(rect, axis, facing_geom, depth_m):
     else:
         flat = sorted(edges, key=lambda e: e[4])[:2]
 
-    # Length along the slope; refuse to cap a rect too short to survive a
-    # bite at every flagged end.
+    # Length along the slope; refuse to cap a rect shorter than the configured
+    # minimum (user 2026-06-19: a rect < RECT_END_CAP_MIN_RECT_LEN_M gets NO
+    # cap and just converts to node_altitudes where the spine crosses it) — and
+    # never shorter than two depth bites plus a 2 m middle.
+    from .config import RECT_END_CAP_MIN_RECT_LEN_M
     sloping = [e for e in edges if e not in flat]
     rect_len = (sum(e[4] for e in sloping) / len(sloping)) if sloping else 0.0
-    if rect_len < 2.0 * depth_m + 2.0:
+    if rect_len < max(RECT_END_CAP_MIN_RECT_LEN_M, 2.0 * depth_m + 2.0):
         return None
 
     cx, cy = rect.centroid.x, rect.centroid.y
