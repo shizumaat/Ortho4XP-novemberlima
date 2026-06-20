@@ -53,7 +53,7 @@ from .layout import (
 
 _GEOM_EXC = (ValueError, GEOSException, TopologicalError)
 
-__all__ = ["carve_rect_end_caps_before_spine"]
+__all__ = ["carve_rect_end_caps_before_spine", "rect_axis_length"]
 
 # Sloping 4-corner taxi rects (the shapes whose plane the spine can break).
 _CAP_ROLES = frozenset({
@@ -78,6 +78,40 @@ def _axis_unit(axis):
     if L < 1e-6:
         return None
     return dx / L, dy / L
+
+
+def rect_axis_length(polygon, axis):
+    """Mean length of a 4-corner rect's two edges most parallel to ``axis``
+    (its travel-direction extent), or ``None`` when ``polygon`` is not a clean
+    4-corner ring.  This is the SINGLE definition of a sloping rect's "length"
+    — both the cap-carve gate here and the spine's HARD-end gate
+    (``junction_spine``) call it, so the two passes agree on what "short" means.
+    Without an axis the flat ends fall back to the 2 SHORTEST edges (a sloping
+    rect's flat ends are its short sides)."""
+    if (polygon is None or polygon.is_empty
+            or polygon.geom_type != "Polygon"):
+        return None
+    ring = list(polygon.exterior.coords)
+    if ring and ring[0] == ring[-1]:
+        ring = ring[:-1]
+    if len(ring) != 4:
+        return None
+    au = _axis_unit(axis)
+    edges = []  # (i, dot_to_axis_or_None, length)
+    for i in range(4):
+        a, b = ring[i], ring[(i + 1) % 4]
+        ex, ey = b[0] - a[0], b[1] - a[1]
+        el = math.hypot(ex, ey)
+        dot = None
+        if au is not None and el >= 1e-6:
+            dot = abs(ex * au[0] + ey * au[1]) / el
+        edges.append((i, dot, el))
+    if au is not None:
+        flat = sorted(edges, key=lambda e: (e[1] if e[1] is not None else 1.0))[:2]
+    else:
+        flat = sorted(edges, key=lambda e: e[2])[:2]
+    sloping = [e for e in edges if e not in flat]
+    return (sum(e[2] for e in sloping) / len(sloping)) if sloping else 0.0
 
 
 def _carve_one(rect, axis, facing_geom, depth_m):
@@ -117,8 +151,9 @@ def _carve_one(rect, axis, facing_geom, depth_m):
     # cap and just converts to node_altitudes where the spine crosses it) — and
     # never shorter than two depth bites plus a 2 m middle.
     from .config import RECT_END_CAP_MIN_RECT_LEN_M
-    sloping = [e for e in edges if e not in flat]
-    rect_len = (sum(e[4] for e in sloping) / len(sloping)) if sloping else 0.0
+    rect_len = rect_axis_length(rect, axis)
+    if rect_len is None:
+        return None
     if rect_len < max(RECT_END_CAP_MIN_RECT_LEN_M, 2.0 * depth_m + 2.0):
         return None
 

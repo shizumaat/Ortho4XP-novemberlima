@@ -51,10 +51,13 @@ from shapely.strtree import STRtree
 
 import O4_UI_Utils as UI
 
-from .config import JUNCTION_CENTERLINE_SPINE, SPINE_STEP_M
+from .config import (
+    JUNCTION_CENTERLINE_SPINE, RECT_END_CAP_DEPTH_M,
+    RECT_END_CAP_MIN_RECT_LEN_M, SPINE_STEP_M)
 from .layout import (
     BuiltShape, ROLE_APRON, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL, ROLE_STUB)
+from .rect_end_caps import rect_axis_length
 
 _GEOM_EXC = (ValueError, GEOSException, TopologicalError)
 
@@ -77,6 +80,19 @@ __all__ = ["apply_junction_centerline_spine"]
 _HARD_END_ROLES = frozenset({
     ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL, ROLE_STUB,
     ROLE_CROSS_CONNECTOR, "service_road"})
+# Cappable taxi-rect roles (== rect_end_caps._CAP_ROLES, service_road excluded).
+# A rect of one of these roles SHORTER than the rect-end-cap length threshold
+# gets NO cap (rect_end_caps withholds it) and must therefore read as a SOFT
+# spine end so the centerline node welds onto its edge and enforce_conformance
+# converts it to node_altitudes — instead of the spine building its own
+# HARD-end cap (the duplicate "cap generator" that produced the R1/R2 strips).
+# Service roads and non-quad rects are NEVER capped, so they stay HARD.
+_CAPPABLE_TAXI_ROLES = frozenset({
+    ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL, ROLE_STUB,
+    ROLE_CROSS_CONNECTOR})
+# Min rect length to host a cap (mirrors rect_end_caps._carve_one's gate, so
+# the two passes agree on "short"); a cappable rect below this is SOFT.
+_CAP_MIN_LEN_M = max(RECT_END_CAP_MIN_RECT_LEN_M, 2.0 * RECT_END_CAP_DEPTH_M + 2.0)
 # A boundary crossing within this distance of a hard boundary is a HARD
 # end (rectangle cap, no node on the flat edge).
 _HARD_EDGE_TOL_M = 1.5
@@ -466,6 +482,14 @@ def apply_junction_centerline_spine(layout) -> int:
         if (s.role in _HARD_END_ROLES and s.polygon is not None
                 and not s.polygon.is_empty
                 and s.polygon.geom_type == "Polygon"):
+            # A cappable taxi rect too short to host a rect-end-cap reads SOFT:
+            # leave its boundary OUT of the hard index so a centerline end lands
+            # on its edge (→ node_altitudes) rather than triggering a spine cap.
+            # rect_axis_length is None for non-quad rects → those stay HARD.
+            if s.role in _CAPPABLE_TAXI_ROLES:
+                rlen = rect_axis_length(s.polygon, s.source_axis)
+                if rlen is not None and rlen < _CAP_MIN_LEN_M:
+                    continue
             try:
                 hard_lines.append(s.polygon.exterior)
             except _GEOM_EXC:
