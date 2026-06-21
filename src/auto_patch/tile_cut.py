@@ -35,7 +35,7 @@ from .layout import (
     ROLE_APRON, ROLE_BUILDING, ROLE_SERVICE_ROAD, ROLE_TUNNEL_RAMP,
     ROLE_RETAINING_WALL, vertex_bucket,
 )
-from .config import TUNNEL_RAMP_MAX_GRADE
+from .config import TUNNEL_RAMP_MAX_GRADE, RUNWAY_SEAM_DEM_PIN
 
 
 # Taxi rects whose elevation slopes ALONG ``source_axis`` only — their
@@ -275,7 +275,13 @@ def cut_layout_at_tile_boundaries(
                 # fully soft and diverge between adjacent-tile builds
                 # (test_cross_tile_cut_edge_elevations_consistent).  The
                 # pin makes both tiles compute the same DEM value there.
-                if s.role in _PIN_SLICE_ROLES:
+                if s.role in _PIN_SLICE_ROLES or (
+                        RUNWAY_SEAM_DEM_PIN and s.role == ROLE_RUNWAY):
+                    # Runways join the terrain-pin per the user 2026-06-20
+                    # seam model: the seam (+ setback) is a THRESHOLD at
+                    # DEM, so each runway setback node sits at its own
+                    # terrain altitude (the FAA profile grades up to it from
+                    # the real threshold).  Gated by RUNWAY_SEAM_DEM_PIN.
                     _terrain_pin_slice_nodes(
                         new_s, cut_union, (), layout, dem,
                         cur_tile_lat, cur_tile_lon)

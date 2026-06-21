@@ -422,6 +422,9 @@ def build_and_solve(
                                       Optional[float]]] = None,
         road_lines: Sequence = (),
         road_cap: float = 0.0,
+        narrow_lines: Sequence = (),
+        narrow_cap: float = 0.0,
+        seam_lines: Sequence = (),
         taxi_test: Optional[Callable[[float, float], bool]] = None,
         apron_test: Optional[Callable[[float, float], bool]] = None,
         apron_plane_grade: float = 0.0,
@@ -585,6 +588,33 @@ def build_and_solve(
                 if ea is None or eb is None:
                     continue
                 contact_pts.append((x, y, ea + u * (eb - ea), ref))
+
+    # lane × tile-seam → HARD anchors at the seam DEM value (mirrors the
+    # runway-contact loop above).  Splitting the segment at the crossing
+    # makes it a connected graph node; pinning it to the DEM there lets the
+    # field grade the route SMOOTHLY to the seam instead of stepping to a
+    # DEM pin slapped on afterwards.  Uses ``seed_at`` (the DEM lookup) for
+    # the value — the same HGT region both tiles sample, so it is cross-tile
+    # consistent.  ``seam_val`` is applied to ``F.hard`` below (NOT to
+    # ``F.contacts`` — a seam is an anchor, not a runway-flex demand site).
+    seam_pts: List[Tuple[float, float, float]] = []
+    if seam_lines and seed_at is not None:
+        for k in range(len(raw)):
+            pa, pb = raw[k]
+            for sl in seam_lines:
+                sc = list(sl.coords)
+                for e in range(len(sc) - 1):
+                    hit = _seg_intersection(pa, pb, sc[e], sc[e + 1])
+                    if hit is None:
+                        continue
+                    t, _u = hit
+                    x = pa[0] + t * (pb[0] - pa[0])
+                    y = pa[1] + t * (pb[1] - pa[1])
+                    v = seed_at(x, y)
+                    if v is None:
+                        continue
+                    splits.setdefault(k, []).append(t)
+                    seam_pts.append((x, y, float(v)))
 
     _mark("splits+contacts")
     # ── graph build (snapped keys; weights = true sub-segment lengths)
@@ -896,6 +926,36 @@ def build_and_solve(
                     road_keys.add(ek)
         except Exception:
             pass
+    # ── NARROW-TAXIWAY edges: the SAME length-scaling channel as the SVC
+    # roads (above), but at the 3 % ICAO code-A/B taxiway cap rather than
+    # the 4 % road cap.  An edge whose midpoint sits within the buffered
+    # narrow-taxiway centerlines has its stored length stretched by
+    # ``narrow_cap/cap`` so the uniform ``cap`` law (``|de| <= cap·len``)
+    # admits the steeper real grade everywhere it is applied — Dijkstra
+    # bands, relax, and the cap projection.  Skipped for edges already
+    # tagged ROAD (disjoint surfaces; one scale per edge).  Gate off →
+    # ``narrow_cap``/``narrow_lines`` not passed → block inert →
+    # byte-identical to the uniform-cap field.
+    narrow_keys: set = set()
+    if narrow_lines and narrow_cap > 0.0 and cap > 0.0 and narrow_cap > cap:
+        try:
+            from shapely.geometry import Point as _NPt
+            from shapely.ops import unary_union as _nunion
+            from shapely.prepared import prep as _nprep
+            _nbuf = _nunion(list(narrow_lines)).buffer(3.0)
+            _nprep9 = _nprep(_nbuf)
+            _nscale = narrow_cap / cap
+            for ek in sorted(edge_w):
+                if ek in prox_keys or ek in road_keys:
+                    continue
+                (xa9, ya9) = coord[ek[0]]
+                (xb9, yb9) = coord[ek[1]]
+                if _nprep9.contains(
+                        _NPt((xa9 + xb9) / 2.0, (ya9 + yb9) / 2.0)):
+                    edge_w[ek] = edge_w[ek] * _nscale
+                    narrow_keys.add(ek)
+        except Exception:
+            pass
     # ── index the nodes (sorted keys → deterministic ids)
     keys = sorted(coord)
     idx_of = {kk: i for i, kk in enumerate(keys)}
@@ -925,6 +985,17 @@ def build_and_solve(
         F.elev[i] = v
         if kk not in aug_keys:           # midline nodes anchor, but only
             F.contacts.append((i, v, ref, coord[kk]))  # contacts demand
+
+    # seam crossings: HARD anchor at the seam DEM value so the field grades
+    # the route smoothly to the seam (NOT a contact → no runway-flex demand).
+    # A node that is already a runway contact keeps that value.
+    for (sx, sy, sv) in seam_pts:
+        kk = _key_of(sx, sy)
+        i = idx_of.get(kk)
+        if i is None or F.hard[i]:
+            continue
+        F.hard[i] = True
+        F.elev[i] = sv
 
     # runway-INTERIOR vertices (crossing-lane runs across the runway) are
     # part of the runway surface: anchor them at the containing piece's

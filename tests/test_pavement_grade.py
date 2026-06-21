@@ -184,6 +184,15 @@ def test_pavement_grade(tmp_path, icao):
     # continuity at shared boundaries should be ~perfect; mid-edge
     # discontinuities (sliver triangles whose plane tilts away from
     # neighbouring triangles' surfaces) are the known background.
+    # BUILDING↔BUILDING steps are exempt (user 2026-06-20): two adjacent
+    # terminal/hangar pads are independent FLAT surfaces and may legitimately
+    # sit at different floor levels with a facade/wall between them (SPJC
+    # building16 @30.9 abuts building30 @29.5 = a 1.4 m terminal-to-terminal
+    # step, correct in X-Plane).  A pad-vs-pavement step is still gated.
+    def _both_buildings(s):
+        return (s.way_v.tags.get("role") == "building"
+                and s.way_e.tags.get("role") == "building")
+    steps = [s for s in steps if not _both_buildings(s)]
     step_cap = MID_EDGE_CAP
     assert len(steps) <= step_cap, (
         f"{icao}: {len(steps)} edge/mid-edge steps > 0.5 m exceeds "

@@ -44,6 +44,9 @@ from .config import (
     PATCH_SLOPE_CELL_SIZE_M,
     RUNWAY_CELL_SIZE_M,
     PATCH_SLOPE_PROFILE,
+    TAXI_GRADE_BY_WIDTH,
+    TAXI_GRADE_WIDTH_ROLES,
+    taxiway_code_letter,
 )
 
 if TYPE_CHECKING:
@@ -257,6 +260,48 @@ AEROWAY_FOR_ROLE = {
     ROLE_TAXIWAY_CLEARANCE: "aerodrome",
     ROLE_RUNWAY_CLEARANCE: "aerodrome",
 }
+
+
+def _rect_short_edge_width_m(polygon) -> float | None:
+    """Measured pavement width (m) of a taxiway shape = the SHORT side of
+    its minimum rotated rectangle.  Fallback for taxi networks that carry
+    no apt.dat code letter (OSM-sourced)."""
+    if polygon is None or polygon.is_empty:
+        return None
+    try:
+        mrr = polygon.minimum_rotated_rectangle
+        pts = list(mrr.exterior.coords)
+    except _GEOM_EXC:
+        return None
+    if len(pts) < 4:
+        return None
+    sides = [math.hypot(pts[i + 1][0] - pts[i][0],
+                        pts[i + 1][1] - pts[i][1])
+             for i in range(min(4, len(pts) - 1))]
+    return min(sides) if sides else None
+
+
+def taxi_shape_code_letter(layout, shape) -> str | None:
+    """ICAO design code LETTER ("A".."F") for a taxiway-family ``shape``,
+    or ``None`` when the size-dependent grade cap does not apply (the gate
+    is off, or the shape is not a sized taxiway role).
+
+    Prefers the authoritative apt.dat row-1202 letter
+    (``layout.apt_taxi_letters`` keyed by the taxiway name) exactly like
+    the wingtip-clearance pass; falls back to MEASURING the rect's short
+    edge for OSM networks that carry no width class.  Shared by the solver
+    (cap selection at solve time) and the OSM emitter (the ``code_letter``
+    tag the validator reads back) so all three stay in lockstep."""
+    if not TAXI_GRADE_BY_WIDTH:
+        return None
+    if shape.role not in TAXI_GRADE_WIDTH_ROLES:
+        return None
+    letters = getattr(layout, "apt_taxi_letters", None) or {}
+    letter = letters.get(shape.ref)
+    if letter:
+        return str(letter).upper()
+    width = _rect_short_edge_width_m(shape.polygon)
+    return taxiway_code_letter(width) if width is not None else None
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -866,6 +911,15 @@ class PavementLayout:
             }
             if s.ref:
                 tags["ref"] = s.ref
+            # Size-dependent taxiway grade cap (gate TAXI_GRADE_BY_WIDTH):
+            # stamp the ICAO code letter so the grade validator can apply
+            # the same width-dependent cap the solver used (A/B → 3 %,
+            # C–F → 1.5 %).  Emitted only for sized taxiway roles when the
+            # gate is on (the resolver returns None otherwise) → gate-off
+            # builds carry no extra tag and stay byte-identical.
+            _code_letter = taxi_shape_code_letter(self, s)
+            if _code_letter:
+                tags["code_letter"] = _code_letter
             # Closed ring includes the duplicate closing nid; per-
             # corner consensus altitudes follow the same indexing.
             corner_elevs = [_corner_alt(nid) for nid in ext_nids]

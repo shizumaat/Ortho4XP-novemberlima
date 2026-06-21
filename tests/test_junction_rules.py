@@ -61,7 +61,12 @@ pytestmark = pytest.mark.skipif(
 # (SPJC previously carried a 2-vertex baseline from Rule 5's push pass
 # landing vertices in Rule 1's band — that is now a real failure to fix,
 # not a tolerated exception.)
-RULE1_REGRESSION_BASELINE: Dict[str, int] = {}
+# SPJC=3 baseline (2026-06-20, user-accepted as visually fine in X-Plane):
+# 3 junction vertices kiss a runway boundary but are orphans (not shared with
+# a runway segment endpoint) — #229 v7 / #230 v2 (same pt, 82.6 m orphan) and
+# #264 v5 (5.0 m orphan), from the spine-slice/cap geometry.  ⚠ candidates to
+# drive back to 0; not seam-related.
+RULE1_REGRESSION_BASELINE: Dict[str, int] = {"SPJC": 3}
 # (session 55) Rule 2 / RULE2_REGRESSION_BASELINE removed
 # (test_junction_no_long_edge_proximity): it flagged a junction vertex
 # within SLOPING_EDGE_SNAP_M (20 m) PERPENDICULAR of a sloping rect's long
@@ -85,6 +90,10 @@ A4_BASELINE: Dict[str, int] = {
     # "elevation-smoothing halo") and carried a 240-vertex SPJC
     # baseline — that test was sense-inverted vs A4 and has been
     # rewritten in `test_junction_vertices_outside_pavement` below.
+    # SPJC=2 baseline (2026-06-20, user-accepted as visually fine): 2
+    # junction vertices (#229 v7 / #230 v2, same pt) sit 0.79 m outside the
+    # pavement union, from the spine-slice/cap geometry.  ⚠ candidate to fix.
+    "SPJC": 2,
 }
 
 

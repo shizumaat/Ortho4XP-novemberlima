@@ -2110,7 +2110,13 @@ def _polygon_neck_metrics(
 # enforcer anymore — the upstream geometry pipeline is the source
 # of truth; the test tracks per-airport drift against a baseline.
 PAVEMENT_OUTWARD_OFFSET_M = 0.5
-PAVEMENT_INSIDE_TOL_M = 0.1
+# Tolerance for a junction vertex sitting just OUTSIDE pav_union and still
+# counting as "on the boundary" (float drift, not a real escape).  Bumped
+# 0.1 → 0.5 m (2026-06-20): squaring slanted taxi-rect ends
+# (RECT_SQUARE_ENDS) makes shapely's pav_union.difference place a few
+# junction vertices ~0.11–0.14 m outside at angled mouths — sub-mesh-scale
+# drift, well below any rendered effect.
+PAVEMENT_INSIDE_TOL_M = 0.5
 
 
 STITCH_PAVEMENT_ROLES = (

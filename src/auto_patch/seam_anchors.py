@@ -287,6 +287,11 @@ def split_pavement_at_seams(layout: PavementLayout) -> int:
             x_int = math.radians(lon_int - lon0) * R_EARTH * cos0
             cut_lines.append(LineString([
                 (x_int, miny - 100.0), (x_int, maxy + 100.0)]))
+    # Stash the seam cut-lines for the elevation solver's network-profile
+    # field, which adds a HARD anchor where each centerline crosses a seam
+    # (config.SEAM_FIELD_ANCHORS) so the route grades smoothly to the seam
+    # DEM value instead of stepping to it.
+    layout._seam_cut_lines = list(cut_lines)  # type: ignore[attr-defined]
     if not cut_lines:
         return 0
 

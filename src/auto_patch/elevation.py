@@ -402,13 +402,22 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
     # provided (DEM is the current build tile); otherwise load the
     # anchor tile DEM and use anchor coords.  See pipeline.py for the
     # rationale.
-    dem = _load_airport_dem(lat0, lon0, override_dem=tile_dem)
-    if tile_dem is not None and current_tile_lat is not None:
+    if current_tile_lat is not None:
         tile_lat = current_tile_lat
         tile_lon = current_tile_lon
     else:
         tile_lat = int(math.floor(lat0))
         tile_lon = int(math.floor(lon0))
+    if tile_dem is not None:
+        dem = tile_dem                      # production: current-tile smoothed DEM
+    else:
+        # Standalone: load the DEM for the TILE BEING BUILT, not the anchor
+        # tile.  A cross-tile airport's non-anchor (sliver) tile must sample
+        # its OWN tile's DEM — the anchor-tile DEM clamps at its edge and
+        # returns the wrong terrain for the sliver, so standalone/fixture
+        # builds didn't match production (SPLP -78 sliver read the -77 edge).
+        # current_tile == anchor (single-tile / whole-airport) → unchanged.
+        dem = _load_airport_dem(tile_lat + 0.5, tile_lon + 0.5)
 
     # Meter-space projection (local — the layout's to_m is not
     # exposed, so reconstruct).

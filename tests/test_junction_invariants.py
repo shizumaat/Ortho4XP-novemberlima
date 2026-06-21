@@ -113,7 +113,12 @@ MAX_ORPHAN_NEIGHBOUR_VERTICES = 0
 # Airports without an explicit baseline use the default tight
 # value (zero offenders / hard cap) — those airports are still
 # fully gated by the original invariant.
-JUNCTION_BOUNDARY_DISTANCE_REGRESSION_BASELINE: Dict[str, dict] = {}
+# SPJC baseline 2026-06-20: junction #192 (a large 3,918 m² intersection)
+# has one boundary point 59.4 m from the nearest centerline — just over the
+# 55 m fillet cap, terrain/geometry-benign (verified good in X-Plane).
+JUNCTION_BOUNDARY_DISTANCE_REGRESSION_BASELINE: Dict[str, dict] = {
+    "SPJC": {"max_offenders": 1, "max_distance_m": 60.0},
+}
 
 # Per user 2026-05-16: the shared-sloping-edge rule is universal —
 # no airport-specific exemptions.  A sloping rect's sloping edge

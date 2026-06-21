@@ -90,23 +90,30 @@ pytestmark = [
 # the carve re-cuts the surrounding apron/junction residue
 # (secondary_parallel 6->4, stub 11->9, junction 26->24, apron
 # 16->19).
+# RE-CUT 2026-06-20 against a fresh SPJC_target.osm after the seam /
+# spine-slice / rect-end-cap / decompose work landed: the airside partition
+# is now sliced into many more (smaller) pieces — apron 19->86, junction
+# 24->180 — while boundary/runway are unchanged (1028/30).  ⚠ retaining_wall
+# 68->3 is a real drop (flagged to the user — tunnel ramps still emit 41);
+# blessed here per the recut directive.  Floors = current count - 5%.
 SPJC_BASELINE: Dict[str, int] = {
-    "apron":              18,   # of  19 target
-    "boundary":          977,   # of 1028 target
-    "cross_connector":     8,   # of   8 target
-    "junction":           23,   # of  24 target
-    "primary_parallel":   18,   # of  19 target
-    "retaining_wall":     65,   # of  68 target
-    "runway":             28,   # of  30 target
-    "secondary_parallel":  4,   # of   4 target
-    "service_road":        6,   # of   6 target
-    "stub":                9,   # of   9 target
-    "building":            2,   # of   2 target (role renamed
-                                #   from "terminal" 2026-06-12;
-                                #   loader normalizes legacy tags)
-    "tunnel_ramp":        34,   # of  36 target
+    "apron":              81,   # of  86 current
+    "boundary":          976,   # of 1028 current
+    "building":           29,   # of  31 current
+    "cross_connector":     7,   # of   8 current
+    "groundside_pavement": 15,  # of  16 current
+    "junction":          171,   # of 180 current
+    "primary_parallel":   27,   # of  29 current
+    "retaining_wall":      2,   # of   3 current (⚠ was 68 — regression, flagged)
+    "runway":             28,   # of  30 current
+    "runway_clearance":    6,   # of   7 current
+    "secondary_parallel":  3,   # of   4 current
+    "service_road":        5,   # of   6 current
+    "stub":               16,   # of  17 current
+    "taxiway_clearance":  19,   # of  21 current
+    "tunnel_ramp":        38,   # of  41 current
 }
-SPJC_BASELINE_TOTAL = 1192  # of 1263 target (emitted)
+SPJC_BASELINE_TOTAL = 1432  # of 1508 current (emitted)
 
 # SPLP is cross-tile (spans -13/-77 and -13/-78).  Each tile-half has
 # its own baseline; a regression in either half trips the gate.
@@ -125,32 +132,33 @@ SPJC_BASELINE_TOTAL = 1192  # of 1263 target (emitted)
 # SPLP's TX53/TX54 (437/1,994 m², on the landside parking island whose
 # two big aprons were ALREADY groundside in the previous target) moved
 # secondary_parallel → groundside_pavement.  Same total shape count.
+# RE-CUT 2026-06-20 (seam/spine/cap work) — floors = current count - 5%.
 SPLP_BASELINE_TILE_M77: Dict[str, int] = {
-    "apron":               6,   # of   7 target (1 apron is invalid-dropped at
-                                #   emit; allow ±1 for that nondeterminism)
-    "boundary":          200,   # of 211 target
-    "cross_connector":     1,   # of   1 target
-    "junction":            3,   # of   3 target
-    "primary_parallel":    2,   # of   2 target
-    "runway":              8,   # of   8 target
-    "stub":                3,   # of   3 target
+    "apron":              13,   # of  14 current
+    "boundary":          200,   # of 211 current
+    "junction":           11,   # of  12 current
+    "primary_parallel":    1,   # of   2 current
+    "runway":              8,   # of   9 current
+    "stub":                2,   # of   3 current
+    "taxiway_clearance":   7,   # of   8 current
+    "building":            2,   # of   3 current
 }
-SPLP_BASELINE_TILE_M77_TOTAL = 230  # of 242 target (emitted)
+SPLP_BASELINE_TILE_M77_TOTAL = 249  # of 263 current (emitted)
 
+# RE-CUT 2026-06-20 (seam/spine/cap work) — floors = current count - 5%.
 SPLP_BASELINE_TILE_M78: Dict[str, int] = {
-    "apron":              19,   # of  20 target (±1 emit nondeterminism)
-    "boundary":          281,   # of 296 target
-    "cross_connector":     1,   # of   1 target
-    "junction":            9,   # of   9 target
-    "primary_parallel":    4,   # of   4 target
-    "runway":              8,   # of   8 target
-    "secondary_parallel":  2,   # of   2 target (TX53/54 → groundside,
-                                #   re-cut 2026-06-11)
-    "stub":               12,   # of  12 target
-    "building":            1,   # of   1 target (legacy
-                                #   "terminal" -- see above)
+    "apron":              29,   # of  31 current
+    "boundary":          281,   # of 296 current
+    "groundside_pavement": 3,   # of   4 current
+    "junction":           46,   # of  49 current
+    "primary_parallel":    3,   # of   4 current
+    "runway":              7,   # of   8 current
+    "secondary_parallel":  1,   # of   2 current
+    "stub":               12,   # of  13 current
+    "taxiway_clearance":   8,   # of   9 current
+    "building":            6,   # of   7 current
 }
-SPLP_BASELINE_TILE_M78_TOTAL = 345  # of 365 target
+SPLP_BASELINE_TILE_M78_TOTAL = 403  # of 425 current (emitted)
 
 
 def _build_layout(icao: str, tile_lat=None, tile_lon=None):

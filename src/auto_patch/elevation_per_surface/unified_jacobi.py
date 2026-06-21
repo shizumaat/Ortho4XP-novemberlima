@@ -58,6 +58,7 @@ from auto_patch.config import (
     APRON_CORRIDOR_SMOOTH_GRADE, APRON_CORRIDOR_SMOOTH_RADIUS_M,
     NETWORK_PROFILE_MODEL, ROLE_GRADE_LIMITS, ROUTE_FIELD_LOCAL_WINDOW_M,
     ROUTE_FIELD_MODEL, ROUTE_NOISE_FRAC, RUNWAY_END_FRACTION,
+    SEAM_FIELD_ANCHORS, SPREAD_APRON_GRADE, SEAM_APRON_COMPLEX_POLISH,
     RUNWAY_END_GRADE, RUNWAY_MAX_GRADE, SURFACE_FAIRING,
     SURFACE_FAIRING_MAX_MOVE_M, TAXI_CORRIDOR_PROFILE,
     TAXI_SLACK_TERMINALS,
@@ -67,11 +68,13 @@ from auto_patch.config import (
     TERMINAL_PADS_SLOPE, WRITE_ARBITRATION)
 from auto_patch.elevation import (
     APRON_MAX_GRADE, SERVICE_ROAD_MAX_GRADE, TAXI_MAX_GRADE)
+from auto_patch.config import (
+    taxi_grade_cap_for_letter, TAXI_MAX_GRADE_NARROW)
 from auto_patch.layout import (
     ROLE_APRON, ROLE_BOUNDARY, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL, ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
     ROLE_SECONDARY_PARALLEL, ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION,
-    ROLE_STUB, ROLE_BUILDING,
+    ROLE_STUB, ROLE_BUILDING, taxi_shape_code_letter,
 )
 
 # Narrow exception tuple for shapely / numeric-geometry failure
@@ -250,6 +253,21 @@ def _role_grade(role: str) -> float:
     path instead of grading it."""
     cap = ROLE_GRADE_LIMITS.get(role, TAXI_MAX_GRADE)
     return float("inf") if cap is None else float(cap)
+
+
+def _shape_grade(layout, s) -> float:
+    """Per-SHAPE max grade cap.  Identical to :func:`_role_grade` for every
+    role EXCEPT the sized taxiway-family rects: when the
+    ``TAXI_GRADE_BY_WIDTH`` gate is on, a narrow taxiway (ICAO code A/B,
+    width < 15 m) earns the steeper ``TAXI_MAX_GRADE_NARROW`` (3 %) cap
+    instead of the uniform 1.5 % — ICAO Annex 14 §3.9.3.  The width class
+    comes from :func:`taxi_shape_code_letter` (apt.dat letter, else measured
+    rect width); gate off / non-taxiway roles fall straight back to the
+    role cap, so the solver stays byte-identical to the uniform baseline."""
+    letter = taxi_shape_code_letter(layout, s)
+    if letter is not None:
+        return float(taxi_grade_cap_for_letter(letter))
+    return _role_grade(s.role)
 
 
 def _open_ring(coords) -> list[tuple[float, float]]:
@@ -551,6 +569,114 @@ def solve(layout, icao: str,
         for sc in shape_constraints:
             for i in sc["nodes"]:
                 owners[i] = owners.get(i, 0) + 1
+        # APRON / JUNCTION ISOLATED POLISH (SPREAD_APRON_GRADE): the global
+        # projection leaves a frustrated apron's seam→interior climb dumped in
+        # one steep edge (it oscillates over the welded belt and falls back to
+        # DEM).  Polish each apron / junction ALONE — hold its HARD + SHARED
+        # (cross-shape) vertices so seams/joins are frozen, grade only its
+        # PRIVATE interior on its own visibility edges.  A small isolated shape
+        # converges, so the climb spreads into a smooth ramp.  Shared/hard held
+        # → no cross-shape step introduced.
+        if SPREAD_APRON_GRADE:
+            done_complex: set = set()
+            seam_node: set = set()
+            if SEAM_APRON_COMPLEX_POLISH:
+                # Identify seam nodes (canonical-bucket ∈ _seam_anchor_keys —
+                # robustly catches every seam vertex, incl. the few the seed-
+                # time override misses after a post-cut re-weld dropped the
+                # piece's node_altitudes).  The authoritative seam altitude is
+                # the DEM (``dem_elev``) — same source tile_cut pinned the
+                # setback to — NOT node_altitudes, which these sliced pieces
+                # may have lost.
+                from ..layout import SHARED_VERTEX_TOL_M as _SVT_AP
+                _bks_ap = 1.0 / _SVT_AP
+                _seam_keys_ap = (getattr(layout, "_seam_anchor_keys", None)
+                                 or set())
+                if _seam_keys_ap:
+                    for _i, (_x, _y) in enumerate(nodes):
+                        if (int(round(_x * _bks_ap)),
+                                int(round(_y * _bks_ap))) in _seam_keys_ap:
+                            seam_node.add(_i)
+            nonapron_owner: set = set()
+            apron_scs = []
+            for sc in shape_constraints:
+                if sc["role"] == ROLE_APRON:
+                    apron_scs.append(sc)
+                else:
+                    nonapron_owner.update(sc["nodes"])
+
+            # SEAM-ADJACENT APRON COMPLEX POLISH: thin near-seam slivers each
+            # freeze their shared boundary at the network level, so the drop to
+            # the seam DEM has no contiguous free interior to ramp — and the
+            # seam DEM pin lands AFTER the grade (the seam node drifts to the
+            # network level during the enforce, then writeback restores DEM →
+            # a cliff against the interior).  Polish each connected apron
+            # complex that touches a seam AS ONE: re-assert the seam DEM value,
+            # hold seam + non-apron-shared vertices, FREE the apron<->apron
+            # shared interior, so the ramp spreads across the complex's full
+            # depth against the TRUE seam altitude.
+            if seam_node:
+                parent: dict = {}
+
+                def _find(a):
+                    parent.setdefault(a, a)
+                    while parent[a] != a:
+                        parent[a] = parent[parent[a]]
+                        a = parent[a]
+                    return a
+
+                def _union(a, b):
+                    ra, rb = _find(a), _find(b)
+                    if ra != rb:
+                        parent[ra] = rb
+
+                first_sc: dict = {}
+                for si, sc in enumerate(apron_scs):
+                    parent.setdefault(si, si)
+                    for i in sc["nodes"]:
+                        if i in first_sc:
+                            _union(si, first_sc[i])
+                        else:
+                            first_sc[i] = si
+                comps: dict = {}
+                for si in range(len(apron_scs)):
+                    comps.setdefault(_find(si), []).append(si)
+                for members in comps.values():
+                    comp_nodes: set = set()
+                    comp_edges: list = []
+                    for si in members:
+                        comp_nodes.update(apron_scs[si]["nodes"])
+                        comp_edges.extend(apron_scs[si]["edges"])
+                    if not comp_edges or not (comp_nodes & seam_node):
+                        continue
+                    # Re-assert the authoritative seam DEM so the ramp grades
+                    # against the real boundary altitude, not the value the
+                    # seam node drifted to during the enforce (the late
+                    # writeback otherwise restores DEM at the seam against an
+                    # interior still at network level — the cliff).
+                    for i in comp_nodes & seam_node:
+                        if dem_elev[i] is not None:
+                            elev[i] = dem_elev[i]
+                    held_c = {i for i in comp_nodes
+                              if base_hard[i] or i in nonapron_owner
+                              or i in seam_node}
+                    if len(held_c) == len(comp_nodes):
+                        continue
+                    _project_shape(elev, list(comp_nodes), held_c,
+                                   comp_edges, False)
+                    done_complex.update(members)
+
+            # Per-apron polish for every apron NOT handled as a seam complex
+            # (unchanged behaviour — byte-identical for non-seam airports).
+            for si, sc in enumerate(apron_scs):
+                if si in done_complex or not sc["edges"]:
+                    continue
+                held_a = {i for i in sc["nodes"]
+                          if base_hard[i] or owners.get(i, 0) > 1}
+                if len(held_a) == len(sc["nodes"]):
+                    continue
+                _project_shape(elev, sc["nodes"], held_a, sc["edges"],
+                               False)
         # SLOPING-PAD POLISH (TERMINAL_PADS_SLOPE, s73): the global POCS
         # plateaus before converging terminal INTERIORS (s67 measured:
         # terminal4 carries 12 % lumps globally yet grades to 0 violations
@@ -4281,7 +4407,7 @@ def _build_shape_constraints(layout, bucket_to_idx):
         nodes = [i for i in idx if i is not None]
         if len(nodes) < 2:
             continue
-        cap = _role_grade(s.role)
+        cap = _shape_grade(layout, s)
         # Terminal pads: with ``config.TERMINAL_PADS_SLOPE`` (evaluation state,
         # user 2026-06-10) EVERY pad may slope up to the terminal cap through
         # the visibility graph, like an apron — the route-justified runway
@@ -5896,6 +6022,58 @@ def _interp_profile(ds, es, dq):
     return es[-1]
 
 
+# Tile-cut setback (m): pavement is cut back this far from each integer tile
+# line (tile_cut.cut_layout_at_tile_boundaries half_width_m).  The taxi-route
+# field anchors the seam at the SETBACK (where the pavement actually ends),
+# not at the integer boundary — same model as the runway setback pin (user
+# 2026-06-20): every node at the setback sits at its own DEM, a threshold.
+_SEAM_SETBACK_M = 5.0
+
+
+def _seam_lines_at_setback(layout, seam_lines, tlat, tlon, setback_m):
+    """Shift each integer tile-boundary seam line ``setback_m`` toward the
+    CURRENT tile's interior, so a centerline's crossing with it (and the DEM
+    sample there) lands at the setback node the pavement actually ends on —
+    not the integer line, which tile_cut trims away.  Lines that don't border
+    the current tile are returned unchanged."""
+    if not seam_lines:
+        return seam_lines
+    try:
+        from shapely.geometry import LineString as _LS
+        x_w = layout.ll_to_m(tlat + 0.5, tlon)[0]
+        x_e = layout.ll_to_m(tlat + 0.5, tlon + 1)[0]
+        y_s = layout.ll_to_m(tlat, tlon + 0.5)[1]
+        y_n = layout.ll_to_m(tlat + 1, tlon + 0.5)[1]
+    except _GEOM_EXC:
+        return seam_lines
+    out = []
+    for sl in seam_lines:
+        cs = list(sl.coords)
+        if len(cs) < 2:
+            out.append(sl)
+            continue
+        xs = [c[0] for c in cs]
+        ys = [c[1] for c in cs]
+        dx = dy = 0.0
+        if max(xs) - min(xs) < 1.0:           # constant-x → longitude seam
+            xL = xs[0]
+            if abs(xL - x_w) < 1.0:
+                dx = setback_m                # west edge → interior is +x
+            elif abs(xL - x_e) < 1.0:
+                dx = -setback_m               # east edge → interior is -x
+        elif max(ys) - min(ys) < 1.0:         # constant-y → latitude seam
+            yL = ys[0]
+            if abs(yL - y_s) < 1.0:
+                dy = setback_m
+            elif abs(yL - y_n) < 1.0:
+                dy = -setback_m
+        if dx or dy:
+            out.append(_LS([(x + dx, y + dy) for (x, y) in cs]))
+        else:
+            out.append(sl)
+    return out
+
+
 def _network_field_stations(layout, elev, bucket_to_idx, chain_data,
                             rwy_nodes, rwy_ref_of, nodes, exit_overrides,
                             dem_ctx, base_hard=None):
@@ -6039,6 +6217,18 @@ def _network_field_stations(layout, elev, bucket_to_idx, chain_data,
                         or [])
                        if isinstance(e9, (tuple, list)) and len(e9) > 1
                        and str(e9[1]).startswith("SVC")]
+        # NARROW taxiway centerlines (ICAO code A/B → 3 % via the cap
+        # function) grade steeper in the field's feasible bands; same
+        # length-scaling channel as the SVC roads.  Gate off → the cap
+        # function returns TAXI_MAX_GRADE for every letter → empty list →
+        # inert / byte-identical.
+        _nletters9 = getattr(layout, "apt_taxi_letters", None) or {}
+        _narrow_lines9 = [e9[0] for e9 in
+                          (getattr(layout, "apt_taxi_centerlines", None)
+                           or [])
+                          if isinstance(e9, (tuple, list)) and len(e9) > 1
+                          and taxi_grade_cap_for_letter(
+                              _nletters9.get(e9[1])) > TAXI_MAX_GRADE]
         F = _np.build_and_solve(
             apt_segs + axis_segs, rings, TAXI_MAX_GRADE,
             TAXIWAY_MAX_GRADE_CHANGE_PER_M, seed_at=seed_at,
@@ -6048,6 +6238,14 @@ def _network_field_stations(layout, elev, bucket_to_idx, chain_data,
             entry_dist=_interior_entry_dist(layout),
             road_lines=_svc_lines9,
             road_cap=SERVICE_ROAD_MAX_GRADE,
+            narrow_lines=_narrow_lines9,
+            narrow_cap=TAXI_MAX_GRADE_NARROW,
+            seam_lines=(_seam_lines_at_setback(
+                            layout,
+                            getattr(layout, "_seam_cut_lines", None) or [],
+                            dem_ctx[1], dem_ctx[2], _SEAM_SETBACK_M)
+                        if (SEAM_FIELD_ANCHORS and dem_ctx is not None
+                            and dem_ctx[0] is not None) else []),
             taxi_test=taxi_test9, apron_test=apron_test9,
             apron_plane_grade=(APRON_CORRIDOR_SMOOTH_GRADE
                                if TERMINAL_NATURAL_LEVELS else 0.0),
@@ -6795,6 +6993,21 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                         for (ri9, _n, _f) in ch9)]
         print(f"[chdbg] chains={sum(1 for c in chains if c)} "
               f"uncovered-refs={miss9} B-chains={bch9}")
+    # Size-dependent grade cap (gate TAXI_GRADE_BY_WIDTH): a corridor of
+    # narrow ICAO code A/B taxiways (width < 15 m) may grade at 3 % rather
+    # than the uniform 1.5 % (ICAO Annex 14).  The cap is the LOOSEST its
+    # rects allow but no looser than the strictest member (``min`` across
+    # refs) so a mixed-width chain stays within its tightest taxiway.  Gate
+    # off → every ref maps to TAXI_MAX_GRADE → ``cd["cap"]`` is the uniform
+    # cap and the corridor solve is byte-identical to the baseline.
+    _letters = getattr(layout, "apt_taxi_letters", None) or {}
+
+    def _chain_cap(chain):
+        caps = [taxi_grade_cap_for_letter(
+                    _letters.get(rects[ri]["shape"].ref))
+                for (ri, _n, _f) in chain]
+        return min(caps) if caps else TAXI_MAX_GRADE
+
     chain_data: list = []
     for chain in chains:
         stations: list = []
@@ -6848,6 +7061,7 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
         chain_data.append({
             "chain": chain, "stations": stations, "mouth_st": mouth_st,
             "gaps": gaps, "L": L, "elevs": elevs, "hard": hard,
+            "cap": _chain_cap(chain),
             "anchored": [h or k == 0 or k == len(stations) - 1
                          for k, h in enumerate(hard)]})
 
@@ -7154,7 +7368,7 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                     for s8 in sts:
                         if s8.get("virtual"):
                             lim8 = (cd["elevs"][sts.index(s8)]
-                                    + TAXI_MAX_GRADE
+                                    + cd["cap"]
                                     * abs(sts[k7]["d"] - s8["d"]))
                             vv7 = min(vv7, lim8)
                     cd["elevs"][k7] = max(cd["elevs"][k7], vv7)
@@ -7548,6 +7762,17 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
             kk = (min(root_of[a], root_of[b]), max(root_of[a], root_of[b]))
             g_edges[kk] = min(g_edges.get(kk, float("inf")), ln)
 
+        # Width-dependent cap for a tie GROUP = the strictest taxiway cap
+        # among the chains its member stations belong to (a tie may span a
+        # narrow and a wide taxiway at a junction — use ``min`` so the
+        # shared point satisfies both).  Gate off → every chain cap is
+        # TAXI_MAX_GRADE → group cap is the uniform cap.  (This tie layer
+        # is inactive while NETWORK_PROFILE_MODEL is on — kept width-aware
+        # for parity with the active per-chain path if the model flips.)
+        def _grp_cap(gid):
+            caps = [chain_data[ci]["cap"] for (ci, _k) in g_members[gid]]
+            return min(caps) if caps else TAXI_MAX_GRADE
+
         # a tied TERMINUS is no longer pinned at its stale network value —
         # the tie IS its connection (the stale pin was the disagreement)
         for (ci, k) in sorted(tie_keys):
@@ -7601,7 +7826,7 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                     for b2 in range(a2 + 1, len(anc)):
                         j, k = anc[a2], anc[b2]
                         dd = abs(sts[k]["d"] - sts[j]["d"])
-                        lim = TAXI_MAX_GRADE * dd + 0.01
+                        lim = cd["cap"] * dd + 0.01
                         diff = cd["elevs"][k] - cd["elevs"][j]
                         ex = abs(diff) - lim
                         if ex <= 0.0:
@@ -7665,17 +7890,17 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                             dd = _junc_geo_dist(ji, pt, hp)
                             if dd is None:
                                 continue
-                            hlo = max(hlo, he - TAXI_MAX_GRADE * dd - 0.02)
-                            hhi = min(hhi, he + TAXI_MAX_GRADE * dd + 0.02)
+                            hlo = max(hlo, he - cd["cap"] * dd - 0.02)
+                            hhi = min(hhi, he + cd["cap"] * dd + 0.02)
                     if hlo <= hhi:
                         if max(slo, hlo) <= min(shi, hhi):
                             slo, shi = max(slo, hlo), min(shi, hhi)
                         else:
                             slo, shi = hlo, hhi    # local hard cap wins
                 if virts6:
-                    hi6 = min(vv6 + TAXI_MAX_GRADE * abs(st["d"] - vd6)
+                    hi6 = min(vv6 + cd["cap"] * abs(st["d"] - vd6)
                               for (vd6, vv6) in virts6)
-                    lo6 = max(vv6 - TAXI_MAX_GRADE * abs(st["d"] - vd6)
+                    lo6 = max(vv6 - cd["cap"] * abs(st["d"] - vd6)
                               for (vd6, vv6) in virts6)
                     shi = max(shi, hi6)
                     slo = min(slo, lo6)
@@ -7707,8 +7932,8 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                 if not cd["anchored"][j]:
                     continue
                 dd = abs(sts[k]["d"] - sts[j]["d"])
-                lo = max(lo, cd["elevs"][j] - TAXI_MAX_GRADE * dd)
-                hi = min(hi, cd["elevs"][j] + TAXI_MAX_GRADE * dd)
+                lo = max(lo, cd["elevs"][j] - cd["cap"] * dd)
+                hi = min(hi, cd["elevs"][j] + cd["cap"] * dd)
             return lo, hi
 
         def _sv_chain(ci):
@@ -7826,7 +8051,8 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                 v = 0.5 * g_val[gid] + 0.5 * v
                 new_val.append(min(max(v, g_lo[gid]), g_hi[gid]))
             for (ga, gb) in sorted(g_edges):
-                lim = TAXI_MAX_GRADE * g_edges[(ga, gb)] + 0.02
+                lim = min(_grp_cap(ga), _grp_cap(gb)) \
+                    * g_edges[(ga, gb)] + 0.02
                 diff = new_val[ga] - new_val[gb]
                 ex = abs(diff) - lim
                 if ex <= 0.0 or (g_fix[ga] and g_fix[gb]):
@@ -7868,7 +8094,8 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
             for _rnd2 in range(40):
                 worst2 = 0.0
                 for (ga, gb) in sorted(g_edges):
-                    lim = TAXI_MAX_GRADE * g_edges[(ga, gb)] + 0.02
+                    lim = min(_grp_cap(ga), _grp_cap(gb)) \
+                        * g_edges[(ga, gb)] + 0.02
                     diff = g_val[ga] - g_val[gb]
                     ex = abs(diff) - lim
                     if ex <= 0.005 or (g_fix[ga] and g_fix[gb]):
@@ -7910,7 +8137,7 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                     for j in range(len(sts)):
                         if j == k or not cd["anchored"][j]:
                             continue
-                        lim9 = (TAXI_MAX_GRADE
+                        lim9 = (cd["cap"]
                                 * abs(sts[k]["d"] - sts[j]["d"]) + 0.02)
                         lo9 = max(lo9, cd["elevs"][j] - lim9)
                         hi9 = min(hi9, cd["elevs"][j] + lim9)
@@ -7920,8 +8147,8 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                             dd9 = _junc_geo_dist(ji9, sts[k]["mid"], hp9)
                             if dd9 is None:
                                 continue
-                            lo9 = max(lo9, he9 - TAXI_MAX_GRADE * dd9 - 0.02)
-                            hi9 = min(hi9, he9 + TAXI_MAX_GRADE * dd9 + 0.02)
+                            lo9 = max(lo9, he9 - cd["cap"] * dd9 - 0.02)
+                            hi9 = min(hi9, he9 + cd["cap"] * dd9 + 0.02)
                     if lo9 > hi9:
                         continue
                     v2 = min(max(v, lo9), hi9)
@@ -7956,7 +8183,7 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                             (-len(g_members[root_of[(ci, q)]]), q)):
                 v = g_val[root_of[(ci, k)]]
                 ok = all(abs(v - cd["elevs"][j])
-                         <= TAXI_MAX_GRADE * abs(sts[k]["d"] - sts[j]["d"])
+                         <= cd["cap"] * abs(sts[k]["d"] - sts[j]["d"])
                          + 0.05
                          for j in range(len(sts)) if cd["anchored"][j])
                 if not ok:
@@ -7988,7 +8215,7 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                         j for j in range(len(sts))
                         if cd["anchored"][j]
                         and abs(v - cd["elevs"][j])
-                        > TAXI_MAX_GRADE * abs(sts[k]["d"] - sts[j]["d"])
+                        > cd["cap"] * abs(sts[k]["d"] - sts[j]["d"])
                         + 0.05]
                     plan9: list = []
                     feasible9 = bool(blockers)
@@ -7997,7 +8224,7 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                             feasible9 = False
                             break
                         dd9 = abs(sts[k]["d"] - sts[j]["d"])
-                        lim9 = TAXI_MAX_GRADE * dd9 + 0.05
+                        lim9 = cd["cap"] * dd9 + 0.05
                         cur9 = cd["elevs"][j]
                         # project 1 cm INSIDE the limit — landing exactly on
                         # the boundary fails the float re-check (G's tie
@@ -8014,7 +8241,7 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                                         continue
                                     dd2 = abs(sts2[kj2]["d"]
                                               - sts2[j2]["d"])
-                                    lim2 = TAXI_MAX_GRADE * dd2 + 0.02
+                                    lim2 = cd2["cap"] * dd2 + 0.02
                                     tgt = min(
                                         max(tgt, cd2["elevs"][j2] - lim2),
                                         cd2["elevs"][j2] + lim2)
@@ -8023,7 +8250,8 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                                           else (ga8 if gb8 == gb9 else None))
                                 if other8 is None:
                                     continue
-                                lim3 = TAXI_MAX_GRADE * ln8 + 0.05
+                                lim3 = min(_grp_cap(gb9),
+                                           _grp_cap(other8)) * ln8 + 0.05
                                 tgt = min(max(tgt, g_val[other8] - lim3),
                                           g_val[other8] + lim3)
                             if abs(tgt - v) > lim9:
@@ -8061,7 +8289,7 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                                 cd["elevs"][j] = tgt
                         ok = all(
                             abs(v - cd["elevs"][j])
-                            <= TAXI_MAX_GRADE
+                            <= cd["cap"]
                             * abs(sts[k]["d"] - sts[j]["d"]) + 0.05
                             for j in range(len(sts))
                             if cd["anchored"][j])
@@ -8089,7 +8317,7 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                         for j in range(len(sts)):
                             if not cd["anchored"][j]:
                                 continue
-                            lim8 = (TAXI_MAX_GRADE
+                            lim8 = (cd["cap"]
                                     * abs(sts[k]["d"] - sts[j]["d"]) + 0.05)
                             v_lo = max(v_lo, cd["elevs"][j] - lim8)
                             v_hi = min(v_hi, cd["elevs"][j] + lim8)
@@ -8106,7 +8334,7 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                         if not cd["anchored"][j]:
                             continue
                         dj = abs(sts[k]["d"] - sts[j]["d"])
-                        if abs(cd["elevs"][j] - v) <= TAXI_MAX_GRADE * dj \
+                        if abs(cd["elevs"][j] - v) <= cd["cap"] * dj \
                                 + 0.05:
                             continue             # this anchor isn't blocking
                         # the blocked tie demands flex at every RUNWAY vertex
@@ -8175,7 +8403,7 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                         # s73-p3 deadband killed; user-verified 05L stays
                         # 57.9-60.7).
                         for i, dtot in targets:
-                            lim = TAXI_MAX_GRADE * dtot
+                            lim = cd["cap"] * dtot
                             if elev[i] - v > lim and elev[i] - (v + lim) \
                                     >= 0.5:      # vertex must DIP
                                 dem_hi[i] = min(
@@ -8189,7 +8417,7 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                             if not cd["anchored"][j]:
                                 continue
                             ex2 = (abs(v - cd["elevs"][j])
-                                   - TAXI_MAX_GRADE
+                                   - cd["cap"]
                                    * abs(sts[k]["d"] - sts[j]["d"]))
                             if ex2 > worst:
                                 wj, worst = j, ex2
@@ -8232,7 +8460,7 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                 for j9 in range(len(sts9)):
                     if j9 == k or not cd9["anchored"][j9]:
                         continue
-                    lim9 = (TAXI_MAX_GRADE
+                    lim9 = (cd9["cap"]
                             * abs(sts9[k]["d"] - sts9[j9]["d"]) + 0.02)
                     lo9 = max(lo9, cd9["elevs"][j9] - lim9)
                     hi9 = min(hi9, cd9["elevs"][j9] + lim9)
@@ -8250,7 +8478,7 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                     hb9 = cdb9["hard"][kb9] or _sv_chain(cb9)
                     if ha9 and hb9:
                         continue
-                    lim9 = TAXI_MAX_GRADE * ln9 + 0.02
+                    lim9 = min(cda9["cap"], cdb9["cap"]) * ln9 + 0.02
                     ea9 = cda9["elevs"][ka9]
                     eb9 = cdb9["elevs"][kb9]
                     ex9 = abs(ea9 - eb9) - lim9
@@ -8321,8 +8549,8 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                 if j9 == k9 or not cd9["anchored"][j9]:
                     continue
                 dd9 = abs(sts9[k9]["d"] - sts9[j9]["d"])
-                lo9 = max(lo9, cd9["elevs"][j9] - TAXI_MAX_GRADE * dd9 - 0.04)
-                hi9 = min(hi9, cd9["elevs"][j9] + TAXI_MAX_GRADE * dd9 + 0.04)
+                lo9 = max(lo9, cd9["elevs"][j9] - cd9["cap"] * dd9 - 0.04)
+                hi9 = min(hi9, cd9["elevs"][j9] + cd9["cap"] * dd9 + 0.04)
             return lo9, hi9
 
         for (ca9, ka9, cb9, kb9, d9) in apron_end_pairs:
@@ -8334,7 +8562,7 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
             if cda["hard"][ka9] or cdb["hard"][kb9]:
                 continue
             ea, eb = cda["elevs"][ka9], cdb["elevs"][kb9]
-            lim9 = TAXI_MAX_GRADE * d9 + 0.05
+            lim9 = min(cda["cap"], cdb["cap"]) * d9 + 0.05
             ex9 = abs(ea - eb) - lim9
             if ex9 <= 0.0:
                 continue
@@ -8475,7 +8703,7 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
         banned: set = set()
         for _round in range(7):
             faa_joint_solve(fractions, elevs, anchored, L,
-                            grade_cap=TAXI_MAX_GRADE,
+                            grade_cap=cd["cap"],
                             max_dg_per_m=TAXIWAY_MAX_GRADE_CHANGE_PER_M,
                             end_grade_cap=None)
             if st_lo is None:
@@ -8497,7 +8725,7 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                 if not anchored[j]:
                     continue
                 dd = abs(stations[worst_k]["d"] - stations[j]["d"])
-                if abs(v - elevs[j]) > TAXI_MAX_GRADE * dd + 0.02:
+                if abs(v - elevs[j]) > cd["cap"] * dd + 0.02:
                     ok = False
                     break
             if not ok:
@@ -8549,7 +8777,9 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
                         min_le = le9
             if min_le is None:
                 continue
-            lim9 = TAXI_MAX_GRADE * max(min_le, 2.0) + 0.04
+            _rcap9 = taxi_grade_cap_for_letter(
+                _letters.get(r9["shape"].ref))
+            lim9 = _rcap9 * max(min_le, 2.0) + 0.04
             ea9, eb9 = elevs[kn9], elevs[kf9]
             ex9 = abs(ea9 - eb9) - lim9
             if ex9 <= 0.0:
@@ -9649,7 +9879,7 @@ def _build_edges(layout, bucket_to_idx, roles=None, add_runway_anchor=True
         coords = _open_ring(list(s.polygon.exterior.coords))
         if len(coords) < 2:
             continue
-        gr = _role_grade(s.role)
+        gr = _shape_grade(layout, s)
         m = len(coords)
         node_idx = [bucket_to_idx.get(layout.canonical_points.get_or_add(float(x), float(y)))
                     for x, y in coords]

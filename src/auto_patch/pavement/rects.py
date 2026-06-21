@@ -34,7 +34,8 @@ from shapely.geometry import LineString, MultiLineString, Point, Polygon
 from shapely.ops import nearest_points, unary_union
 
 from ..canonical_points import CanonicalPointRegistry
-from ..config import MIN_SEGMENT_LEN_M
+from ..config import (
+    MIN_SEGMENT_LEN_M, RECT_SQUARE_ENDS, RECT_END_SQUARE_TOL_M)
 from ..geom_safe import min_rotated_rect
 from ..layout import (
     ROLE_CROSS_CONNECTOR,
@@ -1443,6 +1444,11 @@ def _rect_from_axis_extended(axis: LineString, width: float,
             # each other after snap).  Stop iterating — further
             # shrinks will only collapse more aggressively.
             break
+        # NOTE: end-squaring is NOT done here — the later
+        # ``_snap_rect_sloping_edges_to_holes`` pass re-snaps a rect's long
+        # edge onto an apt.dat hole boundary and would re-slant the end.
+        # Squaring is applied once, last, in ``_square_taxi_rect_ends``
+        # (called after hole-snap + split in the pipeline).
 
         # Symmetry check: equal widths (end1 vs end2) AND equal
         # lengths (side1 vs side2).
@@ -1551,6 +1557,147 @@ def _prefer_pav_node(snapped: tuple[float, float],
             best_d2 = d2
             best = (float(v[0]), float(v[1]))
     return best
+
+
+def _square_rect_ends(
+    snapped: list[tuple[float, float]],
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+    ux: float, uy: float,
+) -> list[tuple[float, float]]:
+    """Keep each rect END perpendicular to the axis after the per-corner
+    pavement snap (gate ``RECT_SQUARE_ENDS``).
+
+    ``_snap_corners_to_pavement`` snaps every corner INDEPENDENTLY to the
+    nearest pavement vertex, so where an end meets an angled junction mouth
+    its two corners land at different AXIAL positions and the end goes
+    slanted (the rect emits as a trapezoid).  For a genuinely-slanted end
+    this re-seats BOTH its corners onto the axis ENDPOINT's perpendicular
+    line (p1 for one end, p2 for the other), KEEPING each corner's lateral
+    (perpendicular) offset so the long edges still sit on the actual
+    pavement edges.  The rect then spans exactly its (already
+    pavement-clipped) centerline with square ends; the slanted-pavement
+    wedge it no longer covers becomes junction (``pav_union - rect``) —
+    the user's "junctions align to the rect" rule.
+
+    A perpendicular end (its two corners already within
+    ``RECT_END_SQUARE_TOL_M`` of each other axially) is left untouched, so
+    only genuinely slanted ends move and already-square rects stay
+    byte-identical.  Corner order is the builder's
+    ``[p1+perp, p2+perp, p2-perp, p1-perp]`` — corners 0,3 are the p1 end,
+    1,2 the p2 end.
+    """
+    if len(snapped) != 4:
+        return snapped
+    px, py = -uy, ux
+
+    def _tp(c):
+        vx, vy = c[0] - p1[0], c[1] - p1[1]
+        return (vx * ux + vy * uy, vx * px + vy * py)
+
+    tp = [_tp(c) for c in snapped]
+    mag = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+    out = list(snapped)
+    moved: set = set()
+    # (corner pair, axial position of that end's axis endpoint)
+    for (a, b), t_end in (((0, 3), 0.0), ((1, 2), mag)):
+        if abs(tp[a][0] - tp[b][0]) <= RECT_END_SQUARE_TOL_M:
+            continue                       # end already perpendicular
+        for idx in (a, b):
+            perp = tp[idx][1]
+            out[idx] = (p1[0] + ux * t_end + px * perp,
+                        p1[1] + uy * t_end + py * perp)
+            moved.add(idx)
+    return out, moved
+
+
+def _square_taxi_rect_ends(
+    taxi_rects: list[tuple[Polygon, LineString, str, str]],
+    pav_union: Polygon | None = None,
+) -> list[tuple[Polygon, LineString, str, str]]:
+    """Final end-squaring pass over the built taxi rects (gate
+    ``RECT_SQUARE_ENDS``).
+
+    Runs AFTER ``_snap_rect_sloping_edges_to_holes`` and the long-rect
+    split, so the per-corner pavement snap AND the hole-edge snap have both
+    had their say — whichever left a rect end slanted (its two corners at
+    different axial positions) is straightened here, the LAST word, by
+    :func:`_square_rect_ends`.  Each end's corners collapse to that end's
+    axis-endpoint perpendicular line, keeping their lateral pavement fit; the
+    angled-pavement wedge becomes junction via ``pav_union - rect``.
+
+    Skipped for DIGIT refs (diagonal stubs / SVC roads), whose flare is
+    intentional — the same family the builder admits via
+    ``accept_asymmetric``.  Already-perpendicular ends are left untouched,
+    so non-slanted rects stay byte-identical.
+
+    ``pav_union`` (when given): each squared corner is then snapped back onto
+    the pavement boundary (within ``SQUARE_BOUNDARY_SNAP_M``) so the squared
+    end edge doesn't run a hair INSIDE the angled boundary and leave a thin
+    sliver that ``pav_union - rect`` turns into orphan junction vertices.
+    The snap keeps the corner at its (perpendicular) axial position — it only
+    fixes the lateral offset to land on the boundary."""
+    if not RECT_SQUARE_ENDS:
+        return list(taxi_rects)
+    _SLOPING = (ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
+                ROLE_STUB, ROLE_CROSS_CONNECTOR)
+    SQUARE_BOUNDARY_SNAP_M = 2.5
+    boundary = (pav_union.boundary
+                if (pav_union is not None and not pav_union.is_empty)
+                else None)
+    out: list[tuple[Polygon, LineString, str, str]] = []
+    for rect, axis, role, ref in taxi_rects:
+        if (role in _SLOPING
+                and ref and not any(c.isdigit() for c in ref)
+                and rect is not None and not rect.is_empty
+                and rect.geom_type == "Polygon"
+                and axis is not None and not axis.is_empty):
+            cs = list(rect.exterior.coords)
+            if cs and cs[0] == cs[-1]:
+                cs = cs[:-1]
+            ac = list(axis.coords)
+            if len(cs) == 4 and len(ac) >= 2:
+                p1, p2 = ac[0], ac[-1]
+                ddx, ddy = p2[0] - p1[0], p2[1] - p1[1]
+                mag = math.hypot(ddx, ddy)
+                if mag > 1e-6:
+                    sq, moved = _square_rect_ends(
+                        cs, p1, p2, ddx / mag, ddy / mag)
+                    # Only keep the squared rect if EVERY moved corner can
+                    # land on the pavement boundary — otherwise the squared
+                    # (perpendicular) end runs off the angled boundary and
+                    # ``pav_union - rect`` leaves an orphan-vertex sliver.
+                    # When a corner can't reach the boundary, that mouth is
+                    # too angled to square cleanly: leave the rect
+                    # trapezoidal (corners stay on the boundary, no orphan).
+                    ok = moved and boundary is not None
+                    if ok:
+                        for idx in moved:
+                            near, _ = nearest_points(boundary, Point(sq[idx]))
+                            d = math.hypot(near.x - sq[idx][0],
+                                           near.y - sq[idx][1])
+                            if d > SQUARE_BOUNDARY_SNAP_M:
+                                ok = False
+                                break
+                            sq[idx] = (float(near.x), float(near.y))
+                    if ok:
+                        try:
+                            newp = Polygon(sq)
+                            # Accept the squared rect only if it stays WITHIN
+                            # the pavement (no corner pushed outside → no
+                            # outside-pavement junction vertex, rect still
+                            # rests on source).  A clean square (like G) is a
+                            # subset of the original trapezoid and passes;
+                            # anything the boundary snap nudged out reverts.
+                            if (newp.is_valid and not newp.is_empty
+                                    and (pav_union is None
+                                         or newp.difference(pav_union).area
+                                         <= 0.5)):
+                                rect = newp
+                        except _GEOM_EXC:
+                            pass
+        out.append((rect, axis, role, ref))
+    return out
 
 
 def _snap_corners_to_pavement(

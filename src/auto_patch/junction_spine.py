@@ -53,7 +53,7 @@ import O4_UI_Utils as UI
 
 from .config import (
     JUNCTION_CENTERLINE_SPINE, RECT_END_CAP_DEPTH_M,
-    RECT_END_CAP_MIN_RECT_LEN_M, SPINE_STEP_M)
+    RECT_END_CAP_MIN_RECT_LEN_M, SPINE_PIECE_ROLE_REEVAL, SPINE_STEP_M)
 from .layout import (
     BuiltShape, ROLE_APRON, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL, ROLE_STUB)
@@ -453,6 +453,42 @@ def _partition_junction(s, centerlines, pav_union, runway_union, near_hard,
     return None, f"single_face(raw={len(raw)},cuts={len(cut_lines)})"
 
 
+def _reeval_apron_piece_role(poly, cen, cap_m, step_m=2.0):
+    """Re-derive apron vs junction for a single spine PIECE carved from an
+    APRON parent, using the SAME geometry rule + cap as
+    ``junction_repair._reclassify_apron_junctions``: a piece whose whole
+    boundary stays within ``cap_m`` of a taxi/runway centerline is a
+    corridor (→ ROLE_JUNCTION, taxi-rate grade); one that strays beyond is
+    apron-territory (→ ROLE_APRON, 1 %).
+
+    Applied per piece AFTER the slice, this promotes the narrow corridor
+    pieces sliced out of a wide apron blob — where a taxiway runs through
+    it (CYXY taxiway G) — back to junction so they can climb at taxi rate,
+    while the wide flanks left when a taxiway crosses a real apron (taxiway
+    E through the main apron) stay apron.  PROMOTION-ONLY: slicing only
+    removes area, so a piece's max boundary-to-centerline distance is
+    always <= its parent's; this is only ever called on apron parents.
+    """
+    if cen is None or cen.is_empty:
+        return ROLE_APRON
+    try:
+        bnd = poly.boundary
+        L = bnd.length
+    except _GEOM_EXC:
+        return ROLE_APRON
+    if L <= 0:
+        return ROLE_APRON
+    n_steps = max(2, int(L / step_m) + 1)
+    for i in range(n_steps):
+        u = min(L, i * step_m)
+        try:
+            if cen.distance(bnd.interpolate(u)) > cap_m:
+                return ROLE_APRON
+        except _GEOM_EXC:
+            continue
+    return ROLE_JUNCTION
+
+
 def apply_junction_centerline_spine(layout) -> int:
     """Slice every ROLE_JUNCTION / ROLE_APRON shape along its crossing
     taxi centerlines (geometry only — the solver grades the pieces).
@@ -475,6 +511,21 @@ def apply_junction_centerline_spine(layout) -> int:
                           or [])))
     pav_union = getattr(layout, "_source_pav_union", None)
     runway_union = getattr(layout, "runway_union", None)
+
+    # Spine-piece role re-evaluation (apron-spine grade model): the full
+    # taxi/runway centerline union + the 55 m cap that
+    # ``_reclassify_apron_junctions`` uses, so a narrow corridor sliced out
+    # of a wide apron blob is promoted back to ROLE_JUNCTION.  Lazy import
+    # (junction_repair <-> elevation cycle is already resolved by solve
+    # time).  Computed ONCE — slicing never moves a centerline.
+    _reeval_cen = None
+    _reeval_cap = 0.0
+    if SPINE_PIECE_ROLE_REEVAL:
+        from .junction_repair import (
+            _aeroway_centerlines_union, _APRON_RECLASSIFY_MAX_DISTANCE_M)
+        _reeval_cen = _aeroway_centerlines_union(layout)
+        _reeval_cap = _APRON_RECLASSIFY_MAX_DISTANCE_M
+    _n_promoted = 0
 
     # Index sloping-rect / runway boundaries for the HARD-end test.
     hard_lines = []
@@ -554,7 +605,20 @@ def apply_junction_centerline_spine(layout) -> int:
         for f in pieces:
             # Geometry only — no altitudes; the per-surface solver grades
             # these pieces (the unify pass first welds the new nodes).
-            new_shapes.append(BuiltShape(polygon=f, role=s.role,
+            piece_role = s.role
+            # Spine-piece role re-evaluation: a piece sliced from an APRON
+            # parent whose whole boundary hugs a centerline is the taxiway
+            # corridor running through that apron — promote it back to
+            # ROLE_JUNCTION so it grades at taxi rate (CYXY taxiway G).
+            # Only apron parents are re-tested (slicing can't grow a
+            # junction parent past the cap), so junction parents stay
+            # byte-identical.
+            if (_reeval_cen is not None and s.role == ROLE_APRON):
+                piece_role = _reeval_apron_piece_role(
+                    f, _reeval_cen, _reeval_cap)
+                if piece_role != s.role:
+                    _n_promoted += 1
+            new_shapes.append(BuiltShape(polygon=f, role=piece_role,
                                          ref=s.ref))
             # An APRON sliced by the spine becomes a follower of the taxi
             # network + its building (cascade APRON-tier): collect ALL its
@@ -564,8 +628,9 @@ def apply_junction_centerline_spine(layout) -> int:
             # (115 m from any taxiway), freezing them at terrain and
             # defeating the building-flatten.  Junction pieces are NOT
             # collected — junctions ARE the taxi network and keep their
-            # reach bands (the OMAA waving fix needs them).
-            if s.role == ROLE_APRON:
+            # reach bands (the OMAA waving fix needs them).  A piece promoted
+            # to junction above is likewise excluded (it IS taxi network).
+            if piece_role == ROLE_APRON:
                 apron_pts.extend(_open(list(f.exterior.coords)))
             n_pieces += 1
         n_done += 1
@@ -579,10 +644,12 @@ def apply_junction_centerline_spine(layout) -> int:
     layout._spine_guide_points = guide_pts
     layout._spine_apron_points = apron_pts
     if n_done:
+        _promo = (f"; promoted {_n_promoted} apron corridor piece(s) "
+                  f"to junction" if _n_promoted else "")
         UI.vprint(1,
             f"  [pav-builder] {getattr(layout, 'icao', '')}: "
             f"junction-spine sliced {n_done} junction/apron(s) into "
-            f"{n_pieces} piece(s) (pre-solve geometry).")
+            f"{n_pieces} piece(s) (pre-solve geometry){_promo}.")
     if _DEBUG and _skips:
         from collections import Counter
         UI.vprint(1, "  [pav-builder] junction-spine SKIPPED %d: %s" % (

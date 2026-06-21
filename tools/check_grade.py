@@ -72,6 +72,9 @@ try:
         SERVICE_ROAD_MAX_GRADE,
         APRON_BACK_EDGE_RAMPS,
         APRON_BACK_EDGE_GRADE,
+        TAXI_GRADE_BY_WIDTH,
+        TAXI_GRADE_WIDTH_ROLES,
+        taxi_grade_cap_for_letter,
     )
 except Exception:
     ROLE_GRADE_LIMITS: Dict[str, Optional[float]] = {}
@@ -86,6 +89,16 @@ except Exception:
     SERVICE_ROAD_MAX_GRADE = 0.04
     APRON_BACK_EDGE_RAMPS = True
     APRON_BACK_EDGE_GRADE = 0.04
+    TAXI_GRADE_BY_WIDTH = True
+    TAXI_GRADE_WIDTH_ROLES = frozenset({
+        "primary_parallel", "secondary_parallel", "stub", "cross_connector",
+    })
+
+    def taxi_grade_cap_for_letter(letter, *, enabled=None):
+        on = TAXI_GRADE_BY_WIDTH if enabled is None else enabled
+        if on and letter and str(letter).upper() in ("A", "B"):
+            return 0.030
+        return 0.015
 
 
 # ── OSM parsing ─────────────────────────────────────────────────
@@ -358,13 +371,50 @@ class EdgeStep:
 # boundary vertices plus slack for projection round-trip drift.
 _SEAM_LL_TOL_DEG = 1e-4
 
+# SEAM TERRAIN-MATCHING ZONE (user 2026-06-20): at a tile boundary the
+# pavement must MATCH the neighbour tile's terrain mesh (so X-Plane bridges the
+# gap without a cliff), so it follows the DEM from the seam inward — not the
+# designed flat/compliant surface.  The within-shape grade cap and the
+# runway-anchored route-band law both assume a designed surface, so they YIELD
+# inside this zone.  Only shapes that actually reach a seam (a real integer-line
+# crossing) get the zone; single-tile airports are unaffected.  The width
+# covers the cross-seam sliver where terrain controls (SPLP descends ~4 m to
+# the seam over a few hundred metres).  NOT special-cased per airport.
+_SEAM_ZONE_M = 400.0
+_M_PER_DEG_LAT = 110540.0
+
+
+def _seam_lines(nodes: Dict[str, Tuple[float, float]]) -> Tuple[set, set]:
+    """Integer lat / lon values that an exact seam vertex sits on — i.e. the
+    tile boundaries the airport actually CROSSES (a real seam, not just being
+    near a tile edge)."""
+    seam_lats: set = set()
+    seam_lons: set = set()
+    for (lat, lon) in nodes.values():
+        if abs(lat - round(lat)) <= _SEAM_LL_TOL_DEG:
+            seam_lats.add(round(lat))
+        if abs(lon - round(lon)) <= _SEAM_LL_TOL_DEG:
+            seam_lons.add(round(lon))
+    return seam_lats, seam_lons
+
 
 def _seam_nids(nodes: Dict[str, Tuple[float, float]]) -> set:
-    """Set of nids on a tile-boundary seam (integer lat or lon)."""
+    """Set of nids in the seam terrain-matching zone: within ``_SEAM_ZONE_M``
+    of a tile boundary the airport CROSSES (lat/lon line carrying an exact seam
+    vertex).  Empty for single-tile airports → no exemption (byte-identical)."""
+    seam_lats, seam_lons = _seam_lines(nodes)
+    if not seam_lats and not seam_lons:
+        return set()
     out: set = set()
     for nid, (lat, lon) in nodes.items():
-        if (abs(lat - round(lat)) <= _SEAM_LL_TOL_DEG
-                or abs(lon - round(lon)) <= _SEAM_LL_TOL_DEG):
+        d = float("inf")
+        for sl in seam_lats:
+            d = min(d, abs(lat - sl) * _M_PER_DEG_LAT)
+        if seam_lons:
+            mlon = _M_PER_DEG_LAT * max(0.05, math.cos(math.radians(lat)))
+            for sl in seam_lons:
+                d = min(d, abs(lon - sl) * mlon)
+        if d <= _SEAM_ZONE_M:
             out.add(nid)
     return out
 
@@ -550,6 +600,16 @@ def _role_grade_limit(way: "Way",
       cap so behaviour stays compatible with un-tagged input).
     """
     role = way.tags.get("role")
+    # Size-dependent taxiway cap (gate TAXI_GRADE_BY_WIDTH): a sized
+    # taxiway carries the ICAO code letter the build stamped on it; code
+    # A/B (narrow, <15 m) validate at 3 %, C–F at 1.5 % — ICAO Annex 14
+    # §3.9.3.  Mirrors the solver's per-shape cap so the validator and
+    # build stay in lockstep.  Patches without the tag (gate off / older
+    # builds) fall through to the uniform role cap below.
+    if role in TAXI_GRADE_WIDTH_ROLES:
+        letter = way.tags.get("code_letter")
+        if letter:
+            return taxi_grade_cap_for_letter(letter)
     if role in ROLE_GRADE_LIMITS:
         return ROLE_GRADE_LIMITS[role]
     return default_grade

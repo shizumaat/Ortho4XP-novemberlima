@@ -382,6 +382,14 @@ RUNWAY_SHOULDER_EXTENT_MAX_APT_FRAC = 0.5
 # trace to different standards and may diverge — e.g. EASA could tighten
 # the runway cap without touching taxiways.
 TAXI_MAX_GRADE = 0.015          # FAA AC 150/5300-13 taxiway-family
+# ICAO Annex 14 Vol I §3.9.3 makes the taxiway longitudinal-grade cap
+# SIZE-DEPENDENT: code letters C–F (wide, ≥15 m) cap at 1.5 %, but code
+# letters A/B (narrow, <15 m) may grade up to 3 %.  Stock auto_patch held
+# every taxiway to 1.5 %, over-flattening small taxiways and spending grade
+# budget (corridor flex / apron ramps) to keep them gentler than the spec
+# requires.  See ``taxi_grade_cap_for_letter`` + the ``TAXI_GRADE_BY_WIDTH``
+# gate below.
+TAXI_MAX_GRADE_NARROW = 0.030   # ICAO Annex 14 code A/B taxiway-family
 # Aprons + building pads grade at 1% (user 2026-06-18: "both builds and aprons
 # should be 1%") — flat is preferred 99% of the time, the cap is the fallback.
 # JUNCTIONS stay at the TAXI rate (1.5%): they are part of the moving network
@@ -917,6 +925,69 @@ JUNCTION_RIPPLE_SMOOTH = _os.environ.get("O4_JCT_RIPPLE", "1") == "1"
 # pure field-graph band (byte-identical).
 FIELD_RUNWAY_ROUTE_BANDS = _os.environ.get("O4_FIELD_RW_ROUTE", "1") == "1"
 
+# SEAM FIELD ANCHORS (user 2026-06-20).  On a tile-seam, pavement vertices
+# are pinned to the raw HGT DEM for cross-tile continuity
+# (seam_anchors.apply_seam_dem_anchors).  But the NETWORK PROFILE field only
+# solves to the CIFP runway anchors — it never knew the seam DEM values — so
+# it graded a route to the runway, and the seam DEM pin was slapped on AFTER,
+# leaving a steep step where the route meets the seam (SPLP west sliver:
+# apron 8.35 %, junctions 1.6 % over 340 m).  FIX: feed every seam CROSSING
+# (where a centerline crosses a tile-boundary line) into the field as a HARD
+# anchor at its DEM value, so the field grades the route SMOOTHLY to the
+# seam — exactly like a runway contact.  Single-tile airports have no seam
+# lines → no effect (byte-identical).  O4_SEAM_FIELD_ANCHORS=0 restores the
+# old behaviour.
+SEAM_FIELD_ANCHORS = _os.environ.get("O4_SEAM_FIELD_ANCHORS", "1") == "1"
+
+# RUNWAY SEAM DEM PIN (user 2026-06-20).  When a runway crosses a tile
+# boundary, the old model kept the runway on its FAA vertical profile right
+# through the seam (runways were excluded from tile_cut's
+# ``_PIN_SLICE_ROLES``) — terrain, not profile.  But the FAA profile is a
+# smoothed grade that does NOT follow the local terrain bump at the seam, and
+# the tile-cut's NN-resampling of the cut piece grabs whichever nearby vertex
+# is closest, so the two tiles' setback corners diverged (SPLP RW02/20: -78
+# corner solved 52.7 vs -77 corner 57.3 = a 4.6 m cross-seam step, neither at
+# its own setback DEM of 54.84 / 55.52).  Per the user's seam model the runway
+# is graded like TWO separate runways meeting at the seam, and the seam (+
+# setback) is "just another THRESHOLD at DEM": every setback node sits EXACTLY
+# at the (Ortho4XP-smoothed) terrain at its OWN position — exactly the
+# apron/taxi/junction model.  FIX: include ROLE_RUNWAY in the post-cut
+# terrain-pin so each runway setback node is pinned to its own ``dem.alt`` and
+# recorded as a seam anchor the solver HARD-holds.  Single-tile / non-crossing
+# runways are untouched (no seam) → byte-identical.  O4_RUNWAY_SEAM_PIN=0
+# restores the old profile-through-seam behaviour.
+RUNWAY_SEAM_DEM_PIN = _os.environ.get("O4_RUNWAY_SEAM_PIN", "1") == "1"
+
+# SEAM APRON COMPLEX POLISH (user 2026-06-20).  The per-apron isolated polish
+# (SPREAD_APRON_GRADE) holds every vertex an apron shares with ANOTHER shape, so
+# when a near-seam apron has been sliced into thin slivers (neck-split /
+# spine-slice / decompose), each sliver freezes its shared boundary at the
+# taxi-network level and the 1.5-2 m drop to the seam DEM has no contiguous free
+# interior to ramp through — it dumps into one edge (SPLP -77 aprons #16/#17/#19:
+# 7-18 % cliffs against seam verts that are correctly pinned to terrain).  FIX:
+# for each CONNECTED apron complex that touches a seam, polish the slivers
+# TOGETHER — hold only the seam vertices + vertices shared with NON-apron shapes
+# (the taxi-network boundary), FREE the apron<->apron shared interior, so the
+# ramp spreads across the complex's full depth.  Non-seam apron complexes keep
+# the per-apron polish (byte-identical).  Single-tile airports have no seam → no
+# effect.  O4_SEAM_APRON_COMPLEX=0 restores the per-apron-only polish.
+SEAM_APRON_COMPLEX_POLISH = _os.environ.get(
+    "O4_SEAM_APRON_COMPLEX", "1") == "1"
+
+# SPREAD APRON GRADE (user 2026-06-20).  The global within-shape projection
+# (``_project_within_bands``) doesn't converge on a frustrated apron complex
+# — an apron pinned high on one edge (a seam / neighbour at the higher
+# terrain) and low elsewhere oscillates over the whole welded belt and falls
+# back to the DEM seed, dumping the whole climb into ONE steep edge (SPLP -78
+# apron: 8.35 % over 6 m, the rest flat).  Polish each apron / junction in
+# ISOLATION after the enforce — hold its HARD + SHARED-with-neighbour vertices
+# (so seams and cross-shape joins never move), cap-project only its PRIVATE
+# interior on its own visibility edges (``_project_shape``).  A small isolated
+# shape converges, so the climb SPREADS across the interior to a smooth ramp
+# instead of one wall.  Same machinery as the (gate-off-by-default) terminal
+# pad polish; default ON.  O4_SPREAD_APRON_GRADE=0 restores the old behaviour.
+SPREAD_APRON_GRADE = _os.environ.get("O4_SPREAD_APRON_GRADE", "1") == "1"
+
 # DSF terminal/hangar building footprints (user 2026-06-12) — see the
 # documented block near LOAD_DSF_PAVEMENT above.  Read here because
 # ``import os as _os`` only comes into scope at this point in the file.
@@ -1000,6 +1071,27 @@ JUNCTION_CENTERLINE_SPINE = _os.environ.get("O4_JCT_SPINE", "1") == "1"
 # inside a junction.
 SPINE_STEP_M = float(_os.environ.get("O4_JCT_SPINE_STEP_M", "12.0"))
 
+# (20260620) SPINE PIECE ROLE RE-EVALUATION — apron-spine grade model.
+# ``_reclassify_apron_junctions`` (junction_repair) runs BEFORE the spine
+# slice and demotes a WIDE pavement blob (boundary > 55 m from any
+# centerline) to ROLE_APRON.  When a taxiway then runs THROUGH that blob,
+# the spine slice carves it into narrow corridor pieces — but those pieces
+# blindly inherit the parent's apron role (junction_spine emits
+# ``role=s.role``), so the corridor where the taxiway runs is capped at the
+# 1 % APRON_MAX_GRADE and cannot climb to reach high buildings / sloping
+# terrain (CYXY taxiway G: corridor pieces 7-18 m from the G centerline,
+# stuck flat at ~705 m while the buildings beside them sit at 714-718 m).
+# When ON, every piece sliced from an APRON parent is re-tested with the
+# SAME geometry rule and 55 m cap: a piece whose whole boundary stays
+# within the cap of a centerline is a corridor → promoted back to
+# ROLE_JUNCTION (taxi-rate grade); a piece that strays beyond stays apron.
+# PROMOTION-ONLY by construction: slicing only removes area, so a piece's
+# max boundary-to-centerline distance is always <= its parent's — a
+# junction parent (<= 55 m) can never spawn a > 55 m piece, so junction
+# parents are never re-tested and stay byte-identical.  Default ON (dev);
+# O4_SPINE_ROLE_REEVAL=0 restores the inherit-parent-role behaviour.
+SPINE_PIECE_ROLE_REEVAL = _os.environ.get("O4_SPINE_ROLE_REEVAL", "1") == "1"
+
 # (20260618) RECT END-CAPS — STATUS.md 20260618-01.  A centerline-spine
 # slice ending at a SLOPING taxi rect used to weld a mid-edge node onto the
 # rect's long edge, flipping the clean 4-corner sloping plane to
@@ -1036,6 +1128,23 @@ W2_CLEAN_BANDS = _os.environ.get("O4_W2_BANDS", "1") == "1"
 # Set O4_RECT_CAPS=0 to restore the old behaviour (rect ends emit as
 # node_altitudes where a spine centerline crosses them).
 RECT_END_CAPS = _os.environ.get("O4_RECT_CAPS", "1") == "1"
+# SQUARE RECT ENDS (rects.py `_square_rect_ends`).  `_snap_corners_to_pavement`
+# snaps each rect corner INDEPENDENTLY to the nearest apt.dat pavement vertex,
+# so where a taxi rect meets an angled junction mouth its two end corners snap
+# to boundary vertices at different AXIAL positions — the end goes slanted and
+# the rect emits as a trapezoid (CYXY cross_connector G: long edges 42.6 vs
+# 47.1 m, 9.7% asym — just under the 10% trim threshold, so it slipped through;
+# the end-cap carve then propagated the slant into an off-axis node).  User
+# ruling 2026-06-20: the rect END must stay PERPENDICULAR (straight) and the
+# junction must align to IT — so collapse each genuinely-slanted end's two
+# corners to the INNER axial position (never poking past either into the
+# junction), keeping their lateral pavement fit; `pav_union - rect` then gives
+# the junction the slanted-pavement wedge.  Gate OFF = legacy per-corner snap.
+RECT_SQUARE_ENDS = _os.environ.get("O4_RECT_SQUARE_ENDS", "1") == "1"
+# Only square an end whose two corners differ in AXIAL position by more than
+# this (m) — a perpendicular end (the common case) is left byte-identical; only
+# a genuinely slanted end is corrected.
+RECT_END_SQUARE_TOL_M = float(_os.environ.get("O4_RECT_SQUARE_TOL_M", "1.0"))
 # Depth (m, perpendicular to the rect's flat end) of each end-cap — strictly
 # beyond verification.check_vertex_on_flat_edge's EDGE_PROX_M (1.5 m) so no
 # junction vertex lands in the rect's exclusion band.
@@ -1262,6 +1371,47 @@ def taxiway_code_letter(width_m: float) -> str:
     if width_m >= 10.5:
         return "B"
     return "A"
+
+
+# ── Size-dependent taxiway grade cap (ICAO Annex 14) ──────────────────
+# Narrow taxiways (code letters A/B, pavement width < 15 m) may grade up
+# to TAXI_MAX_GRADE_NARROW (3 %); wider taxiways (C–F) stay at the 1.5 %
+# TAXI_MAX_GRADE.  Gate default ON in dev (user 2026-06-20: small taxiways
+# at CYXY were being held flat when the spec lets them be steeper).  Gate
+# OFF restores the uniform 1.5 % taxiway cap — byte-identical to the
+# pre-feature build (the cap collapses to TAXI_MAX_GRADE for every letter
+# and the emitter skips the code_letter tag).
+TAXI_GRADE_BY_WIDTH = _os.environ.get("O4_TAXI_GRADE_BY_WIDTH", "1") == "1"
+# ICAO code letters that earn the steeper narrow-taxiway grade cap.
+NARROW_TAXI_CODE_LETTERS = frozenset({"A", "B"})
+# Shape roles the size-dependent cap applies to: the taxiway-family rects.
+# Junctions, aprons and runways are intentionally excluded — a junction is
+# the moving network the taxiways flow THROUGH (kept at the tighter rate),
+# not a sized taxiway in the longitudinal-grade sense.
+TAXI_GRADE_WIDTH_ROLES = frozenset({
+    "primary_parallel", "secondary_parallel", "stub", "cross_connector",
+})
+
+
+def taxi_grade_cap_for_letter(letter, *, enabled: bool = None) -> float:
+    """Max longitudinal grade (rise/run) for a taxiway of ICAO code
+    ``letter``.  Code A/B (narrow, <15 m) → ``TAXI_MAX_GRADE_NARROW``
+    (3 %, ICAO Annex 14 §3.9.3); code C–F (and any unknown/None letter) →
+    ``TAXI_MAX_GRADE`` (1.5 %).  When the ``TAXI_GRADE_BY_WIDTH`` gate is
+    off, always returns ``TAXI_MAX_GRADE`` so the build is byte-identical
+    to the uniform-cap baseline.  Pass ``enabled`` to override the gate
+    (used by the validator to honour the same flag the build ran under)."""
+    on = TAXI_GRADE_BY_WIDTH if enabled is None else enabled
+    if on and letter and str(letter).upper() in NARROW_TAXI_CODE_LETTERS:
+        return TAXI_MAX_GRADE_NARROW
+    return TAXI_MAX_GRADE
+
+
+def taxi_grade_cap_for_width(width_m: float, *, enabled: bool = None) -> float:
+    """Convenience wrapper: resolve the code letter from a pavement width
+    (m) via :func:`taxiway_code_letter`, then the grade cap."""
+    return taxi_grade_cap_for_letter(
+        taxiway_code_letter(width_m), enabled=enabled)
 
 
 def taxiway_clearance_half_width_for_letter(letter: str) -> float:

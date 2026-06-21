@@ -3232,6 +3232,14 @@ def build_airport_pavement(icao: str, xplane_root: str,
         except _GEOM_EXC:
             pass
 
+    # Square slanted rect ends (gate RECT_SQUARE_ENDS) — LAST word after the
+    # per-corner pavement snap, the hole-edge snap, and the long-rect split,
+    # any of which can leave a taxi rect's end following an angled junction /
+    # hole boundary (CYXY cross_connector G).  Keeps each end perpendicular so
+    # the junction (pav_union - rect) absorbs the angled-pavement wedge.
+    from .pavement.rects import _square_taxi_rect_ends
+    taxi_rects = _square_taxi_rect_ends(taxi_rects, pav_union)
+
     # Emit taxi rects (already trimmed to narrow-width portion).
     emitted_taxi_rects: List[Polygon] = []
     for ri, (rect, axis, role, ref) in enumerate(taxi_rects):

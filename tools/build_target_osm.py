@@ -9,6 +9,7 @@ target OSM.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -31,20 +32,65 @@ def main(argv=None):
               "solver, terminal stitch.  'final' = full pipeline."))
     args = ap.parse_args(argv)
 
-    out = args.out or f"/tmp/{args.icao}_auto.osm"
-    layout = build_airport_pavement(
-        args.icao, args.xplane,
-        compute_elevations=(args.stage == "final"))
-    layout.to_osm(out)
-
-    # Quick summary
+    import math
     from collections import Counter
-    roles = Counter(s.role for s in layout.shapes)
-    print(f"Wrote {out}")
-    print(f"  anchor={layout.anchor}")
-    print(f"  shapes={len(layout.shapes)}")
-    for r in sorted(roles):
-        print(f"    {r:<22} {roles[r]}")
+    compute = (args.stage == "final")
+    out_dir = os.path.dirname(args.out) if args.out else "/tmp"
+    base = (os.path.basename(args.out).rsplit(".osm", 1)[0]
+            if args.out else f"{args.icao}_auto")
+
+    # Footprint tiles (geometry-only build is cheap).  A cross-tile airport
+    # MUST be re-cut PER TILE with that tile's OWN smoothed DEM — building
+    # the whole airport samples the non-anchor (sliver) tile against the
+    # anchor-tile DEM (clamped at its edge → wrong terrain), so the fixture
+    # wouldn't match production.  Mirrors tests/conftest.cached_airport_layout.
+    foot = build_airport_pavement(
+        args.icao, args.xplane, compute_elevations=False)
+    lats: list = []
+    lons: list = []
+    for s in foot.shapes:
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        for (x, y) in s.polygon.exterior.coords:
+            la, lo = foot.m_to_ll(x, y)
+            lats.append(la)
+            lons.append(lo)
+    tiles = []
+    if lats:
+        for la in range(int(math.floor(min(lats))),
+                        int(math.floor(max(lats))) + 1):
+            for lo in range(int(math.floor(min(lons))),
+                            int(math.floor(max(lons))) + 1):
+                tiles.append((la, lo))
+    multi = len(tiles) > 1
+
+    def _emit(layout, out):
+        layout.to_osm(out)
+        roles = Counter(s.role for s in layout.shapes)
+        print(f"Wrote {out}")
+        print(f"  anchor={layout.anchor}  shapes={len(layout.shapes)}")
+        for r in sorted(roles):
+            print(f"    {r:<22} {roles[r]}")
+
+    if not multi:
+        # Single-tile: anchor tile IS the build tile — whole-airport build
+        # already uses the correct DEM (unchanged behaviour).
+        out = args.out or f"/tmp/{base}.osm"
+        _emit(build_airport_pavement(
+            args.icao, args.xplane, compute_elevations=compute), out)
+        return
+
+    from auto_patch.elevation import _load_airport_dem
+    for (tlat, tlon) in tiles:
+        dem = _load_airport_dem(tlat + 0.5, tlon + 0.5)
+        layout = build_airport_pavement(
+            args.icao, args.xplane, compute_elevations=compute,
+            tile_dem=dem, current_tile_lat=tlat, current_tile_lon=tlon)
+        if not layout.shapes:
+            print(f"  (tile {tlat:+d}{tlon:+d}: no pavement — skipped)")
+            continue
+        out = os.path.join(out_dir, f"{base}_tile{tlat:+d}{tlon:+d}.osm")
+        _emit(layout, out)
 
 
 if __name__ == "__main__":
