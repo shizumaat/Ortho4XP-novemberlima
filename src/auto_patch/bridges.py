@@ -1663,28 +1663,52 @@ def _emit_tunnel_portals(
                         if (_bp.geom_type != 'Polygon' or _bp.is_empty
                                 or _bp.area < 0.5):
                             continue
-                        _ext = list(_bp.exterior.coords)
-                        if _ext and _ext[0] == _ext[-1]:
-                            _ext = _ext[:-1]
-                        if _bp.interiors and len(_ext) >= 3:
-                            # Slit: walk the exterior to the vertex nearest
-                            # the hole, dive in, walk the hole (reversed),
-                            # come back out — one self-touching ring, no hole.
-                            _intr = list(_bp.interiors[0].coords)
-                            if _intr and _intr[0] == _intr[-1]:
-                                _intr = _intr[:-1]
-                            _i = min(range(len(_ext)), key=lambda q:
-                                     (_ext[q][0] - _intr[0][0]) ** 2
-                                     + (_ext[q][1] - _intr[0][1]) ** 2)
-                            _j = min(range(len(_intr)), key=lambda q:
-                                     (_intr[q][0] - _ext[_i][0]) ** 2
-                                     + (_intr[q][1] - _ext[_i][1]) ** 2)
-                            _ir = _intr[_j:] + _intr[:_j]
-                            _ring = (_ext[:_i + 1] + [_ir[0]]
-                                     + list(reversed(_ir)) + [_ext[_i]]
-                                     + _ext[_i + 1:])
-                        else:
-                            _ring = _ext
+                        # Slit EVERY interior hole, not just the first.  A
+                        # Y-fork band has TWO holes — the central hole AND
+                        # the crotch wedge between the diverging arms — so
+                        # the old single-hole self-touching slit left the
+                        # second hole, the ring filled into a solid disc
+                        # over the ramps, and the wall-vs-ramp clip then
+                        # dropped it (the fork lost its wall).  Cut a thin
+                        # radial knife from each hole out to the band
+                        # exterior, collapsing the multiply-connected
+                        # annulus into one simply-connected hole-free ring
+                        # (to_osm drops interior rings, which would fill the
+                        # ramp with a disc).
+                        _slit = _bp
+                        _guard = 0
+                        while (_slit is not None
+                               and _slit.geom_type == 'Polygon'
+                               and _slit.interiors and _guard < 8):
+                            _guard += 1
+                            try:
+                                _pa, _pb = nearest_points(
+                                    _slit.interiors[0], _slit.exterior)
+                            except _GEOM_EXC:
+                                _slit = None
+                                break
+                            _kdx, _kdy = _pb.x - _pa.x, _pb.y - _pa.y
+                            _kl = math.hypot(_kdx, _kdy) or 1.0
+                            _kux, _kuy = _kdx / _kl, _kdy / _kl
+                            _knife = LineString([
+                                (_pa.x - _kux * 0.1, _pa.y - _kuy * 0.1),
+                                (_pb.x + _kux * 0.1, _pb.y + _kuy * 0.1),
+                            ]).buffer(0.02, cap_style=2, join_style=2)
+                            try:
+                                _cut = _slit.difference(_knife)
+                            except _GEOM_EXC:
+                                _slit = None
+                                break
+                            if _cut.geom_type == 'MultiPolygon':
+                                _cut = max(_cut.geoms, key=lambda g: g.area)
+                            _slit = (_cut if _cut.geom_type == 'Polygon'
+                                     and not _cut.is_empty else None)
+                        if (_slit is None or _slit.geom_type != 'Polygon'
+                                or _slit.is_empty or _slit.interiors):
+                            continue
+                        _ring = list(_slit.exterior.coords)
+                        if _ring and _ring[0] == _ring[-1]:
+                            _ring = _ring[:-1]
                         if len(_ring) < 4:
                             continue
                         _na = []

@@ -12,10 +12,31 @@ fully pass. Done:
 - **Recut fixtures** from the current build: `tests/fixtures/SPJC_target.osm`,
   `SPLP_target_tile-13-77.osm`, `SPLP_target_tile-13-78.osm`. Updated all
   `*_BASELINE` dicts + totals in `test_compare_target.py` (floors = current −5%).
-  ⚠⚠ **FLAGGED REGRESSION**: SPJC `retaining_wall` 68→3 (tunnel_ramp still 41) —
-  blessed per the recut directive but is a real drop worth investigating (likely
-  this branch's bridges/wall work). Also SPJC airside fragmented a lot
-  (apron 19→86, junction 24→180 from spine-slice/caps/decompose) — renders fine.
+  ✅ **`retaining_wall` 68→3 EXPLAINED + the missing-4th-wall sub-bug FIXED
+  (2026-06-20).**  68→~4 is the *already-committed* s82 continuous-perimeter-
+  wall rework (`cfa6d33`): per-segment/cap/throat/fan wall polygons were
+  replaced with **ONE continuous DEM-following wall ring per tunnel cluster**
+  (ramp union → offset annulus → slit → hole-free `node_altitudes` ring); the
+  old 68-wall fixture predates it (`266c681`, s79).  SPJC has 4 tunnel-portal
+  clusters, so it should emit **4** walls.  **BUG (user-reported): the NW
+  cluster — a Y-fork — got no wall.**  ROOT: a Y-fork's offset band has TWO
+  holes (the central hole + the crotch wedge between the diverging arms), but
+  the slit only cut `interiors[0]`; the unslit hole made the ring fill into a
+  solid disc over the ramps, which the wall-vs-ramp clip then dropped → 3
+  emitted.  As a side-effect the other 3 clusters' single-hole slits produced
+  *invalid* self-touching rings too (areas 24673/6763/9763 m² = filled discs)
+  that happened to survive the clip.  **FIX** (`bridges.py`, CONTINUOUS
+  PERIMETER WALL block): slit EVERY interior hole — cut a thin radial knife
+  (`nearest_points` hole→exterior, 0.02 m buffer) per hole until the band is
+  simply-connected.  Now all 4 clusters emit a **valid, hole-free** thin band
+  (599/970/539/766 m²).  Fixture: the 4 correct walls were transplanted into
+  `SPJC_target.osm` (wall nodes are exclusive; apron/junction left at the
+  committed 86/180 — a full recut perturbs them nondeterministically, below).
+  Baseline `retaining_wall` → **4** (deterministic, exact floor = guards the
+  fork wall).  ⚠ The SPJC compare test still FAILS on `apron`/`junction`/
+  `taxiway_clearance` — that is the SEPARATE pre-existing PYTHONHASHSEED /
+  `junction_spine.py`-WIP nondeterminism (apron 86↔32, junction 180↔234), NOT
+  the walls; out of scope here.
 - **SPLP grade**: refined `tools/check_grade.py` GENERICALLY (not SPLP-special):
   `_seam_nids` now returns the **seam terrain-matching zone** — nids within
   `_SEAM_ZONE_M=400 m` of a tile boundary the airport actually CROSSES. Within-

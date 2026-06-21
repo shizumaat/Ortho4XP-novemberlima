@@ -93,9 +93,20 @@ pytestmark = [
 # RE-CUT 2026-06-20 against a fresh SPJC_target.osm after the seam /
 # spine-slice / rect-end-cap / decompose work landed: the airside partition
 # is now sliced into many more (smaller) pieces — apron 19->86, junction
-# 24->180 — while boundary/runway are unchanged (1028/30).  ⚠ retaining_wall
-# 68->3 is a real drop (flagged to the user — tunnel ramps still emit 41);
-# blessed here per the recut directive.  Floors = current count - 5%.
+# 24->180 — while boundary/runway are unchanged (1028/30).  Floors = current
+# count - 5%.
+#
+# retaining_wall: SPJC has 4 tunnel-portal clusters (the s82 continuous-wall
+# rework cfa6d33 emits ONE DEM-following wall ring per cluster — the old 68
+# were per-segment/cap/fan polygons from before cfa6d33).  The NW cluster is
+# a Y-fork whose offset band has TWO holes (central + crotch wedge); the
+# single-hole slit left it filled-into-a-disc and the wall-vs-ramp clip
+# dropped it -> only 3 emitted.  FIXED 2026-06-20 (bridges.py: slit EVERY
+# hole) so all 4 clusters emit a valid hole-free wall.  Walls are
+# DETERMINISTIC (DEM-driven cluster geometry), so the floor is the exact 4 —
+# no -5% slack — to guard the fork wall against re-regression.  The fixture's
+# 4 walls were transplanted from a fresh build (apron/junction left at the
+# committed 86/180 partition, which a full recut perturbs nondeterministically).
 SPJC_BASELINE: Dict[str, int] = {
     "apron":              81,   # of  86 current
     "boundary":          976,   # of 1028 current
@@ -104,7 +115,7 @@ SPJC_BASELINE: Dict[str, int] = {
     "groundside_pavement": 15,  # of  16 current
     "junction":          171,   # of 180 current
     "primary_parallel":   27,   # of  29 current
-    "retaining_wall":      2,   # of   3 current (⚠ was 68 — regression, flagged)
+    "retaining_wall":      4,   # of   4 current (one per tunnel cluster incl. NW Y-fork; deterministic, exact floor)
     "runway":             28,   # of  30 current
     "runway_clearance":    6,   # of   7 current
     "secondary_parallel":  3,   # of   4 current
