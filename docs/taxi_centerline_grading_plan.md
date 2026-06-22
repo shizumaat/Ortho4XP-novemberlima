@@ -346,22 +346,28 @@ the corrected per-edge caps + the per-building band.
 
 ## 9.3 The sequenced plan
 
-**P3a — THE UNLOCK: carry the ICAO size for UNNAMED taxi edges.** Associate each
-apt.dat taxi edge's `taxiway_X` letter with its **geometry** (the centerline /
-route-graph edge), not its name, so `taxi_grade_cap_for_letter` returns 3 % for
-the unnamed code-A arms. Fix `taxi_size_letters` (drop the `if not e.name` skip;
-return a per-edge / per-geometry cap, not just a name→letter dict) and thread the
-letter onto the `apt_taxi_centerlines` entries (or a parallel geometry→letter
-map) so it flows into `TaxiRouteGraph.edge_cap` (already per-edge),
-`network_profile`'s `narrow_lines`, and every feasibility band. **Measure this
-FIRST, alone** — it is the highest-leverage fix and may lift most of the bowl at
-the source (band ceiling to the terminal ~709 → ~714–718). Combine with the
-banked `FIELD_ROUTE_BAND_BY_WIDTH` (P3).
-*Where:* `apt_dat_reader.taxi_size_letters` (~L1418/L1434); the
-`apt_taxi_centerlines` construction (`taxi_centerlines`); `taxi_routing.
-build_taxi_route_graph` (consumes the per-edge cap); `network_profile` `narrow_lines`.
-*Caveat:* an unnamed edge that is a genuine medial-axis *discovered* centerline
-(no apt.dat row) still has no code — only apt.dat-sourced edges gain the letter.
+**P3a — THE UNLOCK: carry the ICAO size for UNNAMED taxi edges. [BUILT & VERIFIED
+2026-06-22 — gate `UNNAMED_TAXI_SIZE`, default OFF pending P4+P5.]** An unnamed
+centerline that runs ALONG a narrow code-A/B apt.dat edge is tagged with a
+synthetic ref (`~A`/`~B`) registered in `apt_taxi_letters`, so
+`taxi_grade_cap_for_letter` returns 3 % and it flows into
+`TaxiRouteGraph.edge_cap`, the field `narrow_lines`, and within-shape — zero
+consumer changes (geometry untouched; only the ref string changes).
+*Implemented:* `apt_dat_reader.coded_taxi_edge_segments` (per-edge `(seg, letter)`
+including unnamed) + a resolver in `pipeline` right after `apt_taxi_letters` is
+built (tag unnamed centerlines whose run hugs a coded A/B edge within 3 m;
+narrow-only — unnamed C–F stay 1.5 %, no change).
+*Verified (CYXY):* tags **19** arms; corridor band widens; buildings **directly
+served by a narrow arm un-bowl** (building5 705.8→**713.2 = DEM**, building10→DEM).
+**BUT** the main terminal (building1/3/6) is fronted by a **WIDE APRON**, not the
+arm, so it stays tied to the bowled apron (~709) until **P4** places it by route-
+feasibility and **P5** conforms the apron up. Standalone (P3a [+P3]) it regresses
+(CYXY within 0→8) and shifts the good airports' arm caps — so, exactly like P3, it
+is banked OFF and flips ON with P4+P5. Gate off → byte-identical (verified
+within=0).
+*Caveat (confirmed):* the arms ARE apt.dat-sourced `taxiway_A` edges (not
+medial-axis discovered), so they gain the letter; a genuine discovered unnamed
+centerline has no apt.dat code and is not tagged (correctly).
 
 **P4 — Per-building route-feasibility → building at closest-to-DEM.** For each
 terminal pad, build the runway-anchor feasibility band along the route TO it (now

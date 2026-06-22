@@ -85,6 +85,14 @@ good airports.
   `edge_cap`); banked gated-off because it regresses without P4 (held centerline
   climbs, neighbours don't). FLIP ON with P4. This is the real P3 — not
   scaffolding to retire, just dormant until P4 lands.
+- **`UNNAMED_TAXI_SIZE`** (P3a, NEW 2026-06-22, default OFF) — THE UNLOCK.
+  apt.dat unnamed `taxiway_A/B` connector "arms" lost their 3% (taxi_size_letters
+  keyed by name); now tagged via geometry with a synthetic ref (`~A`/`~B`) so the
+  feasibility band to the terminal uses the real 3%. VERIFIED: tags 19 CYXY arms,
+  un-bowls arm-served buildings (building5→713.2=DEM, building10→DEM). Main
+  terminal (wide-apron-fronted) needs P4+P5. Regresses standalone (within 0→8) →
+  banked OFF, flips ON with P3+P4+P5. `apt_dat_reader.coded_taxi_edge_segments` +
+  pipeline resolver.
 
 **Reproduce the in-sim evaluation build** (lifted aprons + smooth-ish G, rough
 junctions) that the user reviewed: `O4_APRON_FEASIBLE_LIFT=1 O4_TAXI_SPINE=1`.
@@ -155,8 +163,12 @@ flips grade[CYXY] green with no new reds.
   per-node band+provenance.
 
 ## Files touched
-- `config.py` — 6 gates (above; +`CORRIDOR_SPINE_CHAINS` P2 committed,
-  +`FIELD_ROUTE_BAND_BY_WIDTH` P3 default-OFF).
+- `config.py` — 7 gates (above; +`CORRIDOR_SPINE_CHAINS` P2 committed,
+  +`FIELD_ROUTE_BAND_BY_WIDTH` P3 default-OFF, +`UNNAMED_TAXI_SIZE` P3a default-OFF).
+- `apt_dat_reader.py` — P3a: `coded_taxi_edge_segments` (per-edge `(seg,letter)`
+  incl. unnamed).
+- `pipeline.py` — P3a: unnamed-arm size recovery (synthetic `~A`/`~B` ref) after
+  `apt_taxi_letters`.
 - `network_profile.py` — P3: `_runway_route_band` per-edge cap (gated).
 - `taxi_routing.py` — `TaxiRouteGraph.edge_cap` + `_ekey`; per-letter caps in
   `build_taxi_route_graph`.

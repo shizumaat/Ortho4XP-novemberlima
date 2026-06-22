@@ -1509,6 +1509,52 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # clearance, shoulders, fillets, …) — see
         # ``apt_dat_reader.taxi_size_letters``.
         layout.apt_taxi_letters = APR.taxi_size_letters(apt)
+        # P3a (UNNAMED_TAXI_SIZE, docs §9): recover the ICAO size of
+        # UNNAMED taxi connector "arms".  apt.dat row-1202 edges carry a
+        # ``taxiway_A``/``_B`` code even when unnamed, but taxi_size_letters
+        # keys by name and drops them — so the unnamed gate arms (e.g.
+        # CYXY G→terminal) lose their 3 % cap and the feasibility band to
+        # the terminal is computed at the uniform 1.5 %, bowling the
+        # buildings ~9 m below DEM.  Tag each unnamed centerline that runs
+        # ALONG a narrow code-A/B apt.dat edge with a synthetic ref so every
+        # ref→cap consumer (route-graph edge_cap, field narrow_lines,
+        # within-shape) sees the real 3 %.  Geometry is untouched; only the
+        # ref string on these centerlines changes.
+        from .config import UNNAMED_TAXI_SIZE
+        if UNNAMED_TAXI_SIZE:
+            _coded = APR.coded_taxi_edge_segments(apt, to_m)
+            if _coded:
+                _seg_mids = [(s.interpolate(0.5, normalized=True), lt)
+                             for (s, lt) in _coded]
+
+                def _recover_letter(ln):
+                    # widest (tightest) letter among coded edges this
+                    # centerline runs ALONG: a coded edge's midpoint sits
+                    # on the centerline (≤3 m) — RDP keeps the arm ≈ its
+                    # apt.dat edge, so a true arm matches its own edge.
+                    best = None
+                    for (m, lt) in _seg_mids:
+                        if ln.distance(m) <= 3.0:
+                            if best is None or lt > best:
+                                best = lt
+                    return best
+
+                _renamed = 0
+                _retagged = []
+                for (ln, nm) in osm_centerlines:
+                    if not nm:
+                        lt = _recover_letter(ln)
+                        if lt in ("A", "B"):
+                            nm = "~" + lt
+                            layout.apt_taxi_letters[nm] = lt
+                            _renamed += 1
+                    _retagged.append((ln, nm))
+                osm_centerlines = _retagged
+                if _renamed:
+                    UI.vprint(1,
+                        f"  [pav-builder] {icao}: P3a recovered ICAO size "
+                        f"on {_renamed} unnamed narrow taxi arm(s) "
+                        f"(else 1.5%% → bowl).")
     else:
         # No 1201/1202 network — fall back to the airport's PAINTED
         # taxiway centerlines (row 120, paint code 1/7/51/57).  Small

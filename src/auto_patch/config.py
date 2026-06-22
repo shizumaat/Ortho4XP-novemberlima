@@ -1509,6 +1509,28 @@ CORRIDOR_SPINE_CHAINS = _os.environ.get("O4_CORRIDOR_SPINE_CHAINS", "1") == "1"
 FIELD_ROUTE_BAND_BY_WIDTH = _os.environ.get(
     "O4_FIELD_ROUTE_BAND_BY_WIDTH", "0") == "1"
 
+# (20260622) UNNAMED TAXI SIZE — plan P3a (docs §9, THE unlock for the CYXY
+# "bowl").  apt.dat row-1202 taxi edges carry an ICAO size code ("taxiway_A"…
+# "_F") even when they have no NAME, but `apt_dat_reader.taxi_size_letters` is
+# keyed by name and SKIPS unnamed edges — so the unnamed code-A/B connector
+# "arms" (e.g. CYXY's 9 gate arms from taxiway G up to the 718 m terminal) lose
+# their 3 % cap and default to the uniform 1.5 %.  The runway-anchor feasibility
+# band to the terminal is then computed at half the legal climb, and the building
+# pads are clamped ~9 m below their true DEM (the bowl).  When ON, an unnamed
+# centerline that runs ALONG a narrow code-A/B apt.dat edge is tagged with a
+# synthetic ref (``~A``/``~B``) registered in ``apt_taxi_letters``, so every
+# ref→cap consumer (TaxiRouteGraph.edge_cap, the field narrow_lines, within-shape)
+# sees the real 3 %.  Only narrow (A/B) unnamed arms are tagged; unnamed C–F stay
+# uniform (no change).  Gate off → no rename → byte-identical.
+# ★ DEFAULT OFF (2026-06-22): VERIFIED the unlock — tags 19 CYXY arms, widens the
+# corridor band, un-bowls buildings DIRECTLY served by a narrow arm (building5
+# 705.8→713.2=DEM, building10→DEM).  But the MAIN terminal (building1/3/6) is
+# fronted by a WIDE APRON, not the arm, so it stays tied to the bowled apron until
+# P4 places it by route-feasibility + P5 conforms the apron up.  Standalone it
+# regresses (CYXY within 0→8) and shifts the good airports' arm caps — so, like
+# FIELD_ROUTE_BAND_BY_WIDTH (P3), it is banked OFF and flips ON with P4+P5.
+UNNAMED_TAXI_SIZE = _os.environ.get("O4_UNNAMED_TAXI_SIZE", "0") == "1"
+
 
 def taxi_grade_cap_for_letter(letter, *, enabled: bool = None) -> float:
     """Max longitudinal grade (rise/run) for a taxiway of ICAO code

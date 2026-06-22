@@ -1443,6 +1443,44 @@ def taxi_size_letters(airport: Airport) -> dict[str, str]:
     return letters
 
 
+def coded_taxi_edge_segments(
+        airport: Airport,
+        to_m: "Callable[[float, float], tuple[float, float]]",
+) -> "list[tuple[LineString, str]]":
+    """Per-edge ``(LineString_in_meter_space, ICAO letter)`` for every
+    row-1202 taxiway edge that carries a size code (``"taxiway_A"`` …
+    ``"_F"``), **including UNNAMED edges**.
+
+    `taxi_size_letters` maps NAME → letter and skips unnamed connector
+    edges, so the size of the unnamed "arm" connectors (which still carry
+    a ``taxiway_A``/``_B`` code in apt.dat) is otherwise lost.  This
+    returns the raw per-edge segments + letters so a caller can recover an
+    unnamed centerline's ICAO size by geometry (plan P3a — the CYXY gate
+    arms to the terminal).  Runway-typed edges are excluded."""
+    from shapely.geometry import LineString
+    nodes = airport.taxi_nodes
+    out: "list[tuple[LineString, str]]" = []
+    for e in airport.taxi_edges:
+        if not e.kind.startswith("taxiway_"):
+            continue
+        lt = e.kind.split("_")[-1].upper()
+        if lt not in ("A", "B", "C", "D", "E", "F"):
+            continue
+        a = nodes.get(e.node_from)
+        b = nodes.get(e.node_to)
+        if a is None or b is None:
+            continue
+        ax, ay = to_m(a.lon, a.lat)
+        bx, by = to_m(b.lon, b.lat)
+        if (ax - bx) ** 2 + (ay - by) ** 2 < 0.01:
+            continue
+        try:
+            out.append((LineString([(ax, ay), (bx, by)]), lt))
+        except (ValueError, TypeError):
+            continue
+    return out
+
+
 def painted_taxi_centerlines(
         airport: Airport,
         to_m: "Callable[[float, float], tuple[float, float]]",
