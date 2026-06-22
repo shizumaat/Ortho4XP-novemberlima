@@ -1482,6 +1482,33 @@ APRON_FEASIBLE_LIFT = _os.environ.get("O4_APRON_FEASIBLE_LIFT", "0") == "1"
 # TAXI_CORRIDOR_PROFILE (the field that supplies the spine values).
 CORRIDOR_SPINE_CHAINS = _os.environ.get("O4_CORRIDOR_SPINE_CHAINS", "1") == "1"
 
+# (20260622) FIELD ROUTE-BAND BY WIDTH — plan P3 (docs/taxi_centerline_grading_
+# plan.md §5).  The NETWORK PROFILE field's per-node feasibility band
+# [floor, ceiling] is the runway-anchor reach measured along the taxi route.
+# Its field-graph leg already honours the per-letter cap (narrow_lines stretch
+# the edge length so the uniform-cap Dijkstra applies 3 %), BUT the
+# FIELD_RUNWAY_ROUTE_BANDS override (`_runway_route_band`, measured over the
+# plain `rw_route_graph`) recomputed the band at the UNIFORM 1.5 % and REPLACED
+# the field-graph band where it reached — re-pinning a narrow code-A/B route's
+# ceiling ~1.5 m/100 m below where the taxiway may legally climb (CYXY taxiway G:
+# field ceiling 727 → route-override 712, ~6 m below the DEM rim → G band-pinned
+# in the "bowl").  When ON, `_runway_route_band` consumes the route graph's
+# per-edge cap (`TaxiRouteGraph.edge_cap`, the same 3 % data `_runway_reach_bands`
+# uses under TAXI_REACH_BAND_BY_WIDTH), so a narrow route's ceiling rises to its
+# real 3 % reach and the DEM-seeded centerline can climb to terrain (minimal-
+# deviation: closest-to-DEM within the band).  Gate off → uniform `eff` →
+# byte-identical to the prior route override.  Requires FIELD_RUNWAY_ROUTE_BANDS.
+# ★ DEFAULT OFF (2026-06-22): the band fix is CORRECT (the route override no
+# longer wrongly clips a narrow route's ceiling to 1.5 %), but loosening the
+# ceiling STANDALONE regresses — the held centerline climbs ~2-3 m higher while
+# its apron/junction neighbours stay at their lower DEM/relief level, so the
+# within-shape grade across those junctions spikes (CYXY test-mirror within
+# 0→10, build 6→14, a new 8.8 % junction).  The climb must be ABSORBED by
+# conforming neighbours = plan P4 (aprons/buildings conform up to the held
+# centerlines).  Flip ON together with P4; OFF keeps the clean P2 baseline.
+FIELD_ROUTE_BAND_BY_WIDTH = _os.environ.get(
+    "O4_FIELD_ROUTE_BAND_BY_WIDTH", "0") == "1"
+
 
 def taxi_grade_cap_for_letter(letter, *, enabled: bool = None) -> float:
     """Max longitudinal grade (rise/run) for a taxiway of ICAO code

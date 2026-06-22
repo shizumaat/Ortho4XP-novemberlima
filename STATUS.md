@@ -63,20 +63,27 @@ good airports.
   within 18→410). RETIRE; buildings are flat-but-conforming, not hard.
 - **`O4_DEM_ATTR`/`O4_DEM_FLOOR_ATTR`** — made the existing DEM-attraction
   strengths env-tunable (defaults unchanged); keep as knobs.
+- **`FIELD_ROUTE_BAND_BY_WIDTH`** (P3, NEW 2026-06-22, default OFF) — the
+  CORRECT per-letter field route-band fix (`_runway_route_band` uses
+  `edge_cap`); banked gated-off because it regresses without P4 (held centerline
+  climbs, neighbours don't). FLIP ON with P4. This is the real P3 — not
+  scaffolding to retire, just dormant until P4 lands.
 
 **Reproduce the in-sim evaluation build** (lifted aprons + smooth-ish G, rough
 junctions) that the user reviewed: `O4_APRON_FEASIBLE_LIFT=1 O4_TAXI_SPINE=1`.
 Default build = the clean keepers-only baseline (no lift; the bowl).
 
-## Where the plan goes next (P3–P7, see doc; P2 DONE 2026-06-22)
+## Where the plan goes next (P4–P7, see doc; P2 DONE, P3 BANKED 2026-06-22)
 Make the **corridor profile (`_taxi_corridor_profiles`) the single
 smooth-centerline driver**: ✅ P2 DONE — chains now cover the promoted-apron
 junction stretches (gate `CORRIDOR_SPINE_CHAINS`, keeper #4 above); every
-centerline is one network-consistent held profile. NEXT = grade it
-with per-letter caps + curvature, bounded by the feasibility band, objective =
-closest-to-DEM (P3 — this is the field "bowl" fix: G must reach the ~718 m rim,
-not settle at ~708); aprons/buildings CONFORM up/down to the held centerlines
-(no hard anchors, minimal deviation) (P4); kill the junction trough (P5); explicit
+centerline is one network-consistent held profile. ◐ P3 band fix BANKED (gate
+`FIELD_ROUTE_BAND_BY_WIDTH` default OFF — `_runway_route_band` now uses the
+per-letter `edge_cap` so a narrow route's field ceiling is its real 3% reach,
+not 1.5%; CYXY G 712→714). It REGRESSES standalone (held centerline climbs but
+its neighbours don't → within-shape 0→10) so it is gated OFF pending P4. **NEXT
+= P4** (it enables P3): aprons/buildings CONFORM up/down to the held centerlines
+(no hard anchors, minimal deviation); kill the junction trough (P5); explicit
 corridor↔wide-apron transition only where genuinely needed (P6); retire the
 scaffolding + add a centerline-smoothness check/test (P7).
 
@@ -117,8 +124,10 @@ flips grade[CYXY] green with no new reds.
 - `O4_SPINE_DEBUG=1` per-centerline (proj,ceiling,profile); `O4_BAND_KML=/p.kml`
   per-node band+provenance.
 
-## Files touched (all uncommitted)
-- `config.py` — 5 gates (above; +`CORRIDOR_SPINE_CHAINS` P2).
+## Files touched
+- `config.py` — 6 gates (above; +`CORRIDOR_SPINE_CHAINS` P2 committed,
+  +`FIELD_ROUTE_BAND_BY_WIDTH` P3 default-OFF).
+- `network_profile.py` — P3: `_runway_route_band` per-edge cap (gated).
 - `taxi_routing.py` — `TaxiRouteGraph.edge_cap` + `_ekey`; per-letter caps in
   `build_taxi_route_graph`.
 - `elevation_per_surface/unified_jacobi.py` — per-edge caps in

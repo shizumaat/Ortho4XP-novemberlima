@@ -343,13 +343,26 @@ def _nearest_route_key(cells_t, coord, x, y, plain_only):
     return (best[0], best[1]) if best else (None, 0.0)
 
 
-def _runway_route_band(srcs, comp, eff, graph, cells_t, F, n):
+def _runway_route_band(srcs, comp, eff, graph, cells_t, F, n,
+                       cap_uniform=None, by_width=False):
     """Per-field-node runway band measured along the centerline route.
     Returns ``(up_r, dn_r)`` (length ``n``), ``inf`` where the route graph
     cannot reach the node from any anchor in ``srcs`` (caller falls back to
-    the field-graph band there, so a node is only ever LOOSENED)."""
+    the field-graph band there, so a node is only ever LOOSENED).
+
+    ``by_width`` (plan P3, gate ``FIELD_ROUTE_BAND_BY_WIDTH``): charge each
+    route edge its own per-letter cap (``graph.edge_cap`` — narrow code-A/B
+    = 3 %) instead of the uniform ``eff``, mirroring
+    ``_runway_reach_bands``.  ``eff = cap_uniform * relax`` is the
+    component's relaxed uniform rate; the per-edge rate is
+    ``edge_cap·relax`` with ``relax = eff / cap_uniform``.  Anchor/​node
+    ENTRY gaps stay at the uniform ``eff`` (cross-pavement, not along a
+    taxiway segment — same as the reach-band entry)."""
     INF = float("inf")
     coord, adj = graph.coord, graph.adj
+    _ecap = (getattr(graph, "edge_cap", None)
+             if (by_width and cap_uniform) else None) or None
+    _relax = (eff / cap_uniform) if (_ecap and cap_uniform) else None
     up_d: Dict = {}
     dn_d: Dict = {}
     pq_up: List = []
@@ -374,7 +387,9 @@ def _runway_route_band(srcs, comp, eff, graph, cells_t, F, n):
             if d > dist.get(u, INF):
                 continue
             for (v, w) in adj.get(u, ()):
-                nd = d + eff * w
+                ew = (_ecap.get(graph._ekey(u, v), cap_uniform) * _relax
+                      if _ecap is not None else eff)
+                nd = d + ew * w
                 if nd < dist.get(v, INF):
                     dist[v] = nd
                     heapq.heappush(pq, (nd, v))
@@ -1205,9 +1220,10 @@ def build_and_solve(
     # min over the two source groups == one combined Dijkstra (shortest
     # paths are unaffected by grouping), so gate-off is byte-identical.
     try:
-        from auto_patch.config import FIELD_RUNWAY_ROUTE_BANDS as _FRRB
+        from auto_patch.config import (FIELD_RUNWAY_ROUTE_BANDS as _FRRB,
+                                        FIELD_ROUTE_BAND_BY_WIDTH as _FRBW)
     except Exception:                                  # pragma: no cover
-        _FRRB = False
+        _FRRB = _FRBW = False
     _use_route = bool(_FRRB) and rw_route_graph is not None \
         and getattr(rw_route_graph, "coord", None)
     _rw_cells = _rw_route_cells(rw_route_graph) if _use_route else None
@@ -1234,7 +1250,8 @@ def build_and_solve(
             dn_r = _dijkstra_from(srcs, eff, comp=comp, values=neg)
             if _use_route and srcs:
                 up_t, dn_t = _runway_route_band(
-                    srcs, comp, eff, rw_route_graph, _rw_cells, F, n)
+                    srcs, comp, eff, rw_route_graph, _rw_cells, F, n,
+                    cap_uniform=cap, by_width=bool(_FRBW))
                 up_r = [up_t[i] if up_t[i] < INF else up_r[i]
                         for i in range(n)]
                 dn_r = [dn_t[i] if dn_t[i] < INF else dn_r[i]

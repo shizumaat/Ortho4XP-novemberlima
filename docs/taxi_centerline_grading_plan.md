@@ -146,7 +146,9 @@ stretches stay byte-identical (gate-off ≡ gate-on there).
 G still tops out ~708 m vs the ~718 m rim — the field "bowl"; that climb is P3
 (objective = closest-to-DEM within the band), not a P2 coverage concern.
 
-**P3 — Per-letter caps + curvature in the corridor solve.**
+**P3 — Per-letter caps + curvature in the corridor solve. [BAND FIX DONE &
+BANKED 2026-06-22 — gate `FIELD_ROUTE_BAND_BY_WIDTH` default OFF; needs P4 to
+enable]**
 The 1-D profile solve must use the per-letter grade cap (3% narrow / 1.5% wide)
 AND the vertical-curve / grade-change cap (`TAXIWAY_MAX_GRADE_CHANGE_PER_M`,
 already referenced). Solve network-consistent (shared junction nodes are common
@@ -156,6 +158,26 @@ for the extended chains). **Objective = closest-to-DEM within
 the DEM and deviates only where the grade/curvature cap forces it, climbing or
 dropping by the *least* amount needed to stay within grade of its neighbours and
 ends — NOT pinned to the ceiling, NOT pulled to the floor.
+
+*Root cause of the bowl (diagnosed 2026-06-22):* the field already seeds at DEM
+and projects (closest-to-DEM), and the field-graph band honours the per-letter
+cap (narrow_lines stretch edge length). BUT the `FIELD_RUNWAY_ROUTE_BANDS`
+override (`_runway_route_band`, over the plain `rw_route_graph`) recomputed the
+band at the UNIFORM 1.5% and REPLACED the field-graph band where it reached —
+clipping a narrow code-A/B route's ceiling to 1.5% (CYXY G ceiling 727→712,
+~6 m below the DEM rim → G clamped in the bowl).
+*Fix (banked):* `_runway_route_band` now consumes `TaxiRouteGraph.edge_cap`
+(the same 3% per-edge data `_runway_reach_bands` uses), gate
+`FIELD_ROUTE_BAND_BY_WIDTH`. G's far-end ceiling 711.8→714.1 and it climbs to it.
+*Why gated OFF:* standalone the loosened ceiling REGRESSES — the held centerline
+climbs ~2-3 m higher while its apron/junction neighbours stay at the lower
+DEM/relief level, so within-shape grade across those junctions spikes (CYXY
+test-mirror within 0→10, build 6→14, a new 8.8% junction). **The climb must be
+absorbed by conforming neighbours = P4.** P3's band fix and P4's conformance
+must land TOGETHER; flip the gate ON with P4. (Note: G's reachable ceiling is
+~714, not the full 718 rim — the route to G is mostly WIDE 1.5% taxiway, so 718
+is not reachable within grade along it; the rim buildings will sit at the
+closest-feasible level per the priority model, P4.)
 
 **P4 — Aprons & buildings CONFORM to the held centerlines (no hard anchors).**
 Remove the flat apron/building hard-anchors. After the corridor network is held,
@@ -219,9 +241,12 @@ apron-lift, building hard-anchor, building-flex, and standalone spine pass; keep
 ## 8. Files touched this session
 
 - `config.py` — gates `TAXI_REACH_BAND_BY_WIDTH`, `JUNCTION_NARROW_GRADE`,
-  `APRON_FEASIBLE_LIFT`, `BUILDING_DEM_ANCHOR`, `CORRIDOR_SPINE_CHAINS` (P2).
+  `APRON_FEASIBLE_LIFT`, `BUILDING_DEM_ANCHOR`, `CORRIDOR_SPINE_CHAINS` (P2),
+  `FIELD_ROUTE_BAND_BY_WIDTH` (P3, default OFF).
 - `elevation_per_surface/unified_jacobi.py` — P2 spine-station chains in
   `_taxi_corridor_profiles` (inserted between the ≥2-station filter and STAGE B).
+- `network_profile.py` — P3: `_runway_route_band` consumes per-edge caps
+  (`graph.edge_cap`) when `FIELD_ROUTE_BAND_BY_WIDTH` is on.
 - `taxi_routing.py` — `TaxiRouteGraph.edge_cap` + `_ekey`; per-letter caps in
   `build_taxi_route_graph`.
 - `layout.py` — (reverted to original `taxi_shape_code_letter`).
