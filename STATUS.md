@@ -5,7 +5,16 @@ for variable-width & hilly airports** (CYXY taxiway G climbing to rim buildings)
 
 ## ★ START HERE
 - **`docs/taxi_centerline_grading_plan.md`** — the authoritative plan + priority
-  model. Tracked tasks **P2–P7** mirror it. READ IT FIRST.
+  model. **§9 "BRINGING IT TOGETHER" is the definitive plan for the final piece**
+  (written 2026-06-22 after a full pipeline + history analysis; it SUPERSEDES the
+  P4–P7 sketch in §5). READ §1 (model) then §9 FIRST.
+  - TL;DR of §9: the field `F` already computes the right answer (closest-to-DEM,
+    per-letter-banded, network-consistent — CYXY G 708.9 ≈ building3 709). The
+    bowl is a TRANSFER failure: emitted apron/junction/building verts seed DEM,
+    relief flattens them low, and the enforce uses `F` only as band BOUNDS, never
+    as a TARGET (movement-min POCS, no attractor). FIX = adopt `F` as the enforce's
+    per-node TARGET (lift-only, in-band) so neighbours rise WITH the held corridor
+    (P4a), + make the yield-release directional (P4b). Pairs with P3.
 - Memory note `apron_spine_dem_seed_climb.md` — raw session findings behind the
   plan (the dead-ends and why).
 - ⚠ **Pin `PYTHONHASHSEED=0`** for ANY A/B build comparison — the apron/junction
