@@ -8,13 +8,21 @@ for variable-width & hilly airports** (CYXY taxiway G climbing to rim buildings)
   model. **§9 "BRINGING IT TOGETHER" is the definitive plan for the final piece**
   (written 2026-06-22 after a full pipeline + history analysis; it SUPERSEDES the
   P4–P7 sketch in §5). READ §1 (model) then §9 FIRST.
-  - TL;DR of §9: the field `F` already computes the right answer (closest-to-DEM,
-    per-letter-banded, network-consistent — CYXY G 708.9 ≈ building3 709). The
-    bowl is a TRANSFER failure: emitted apron/junction/building verts seed DEM,
-    relief flattens them low, and the enforce uses `F` only as band BOUNDS, never
-    as a TARGET (movement-min POCS, no attractor). FIX = adopt `F` as the enforce's
-    per-node TARGET (lift-only, in-band) so neighbours rise WITH the held corridor
-    (P4a), + make the yield-release directional (P4b). Pairs with P3.
+  - TL;DR of §9 (ROOT CAUSE, verified 2026-06-22): the bowl starts from a DROPPED
+    ICAO SIZE CODE. CYXY's gate arms to the terminal are apt.dat `taxiway_A`
+    (3%) but UNNAMED; `apt_dat_reader.taxi_size_letters` skips unnamed edges
+    (`if not e.name: continue`), so all 9 code-A arms reaching the 713–720 m
+    terminal lose their 3% → default 1.5% → feasibility band to the buildings is
+    computed at HALF the legal climb → buildings clamped ~9 m below DEM (true DEM
+    ≈718; building1 717.8, building3 717.9; emitted ~709) → G + aprons bowl with
+    them. (DEM along G rises ~4.4% > 3% cap, so G tops ~712–714 and the arms take
+    the last climb — exactly the user's model.) FIX, sequenced: **P3a (the
+    unlock)** carry the ICAO size for UNNAMED taxi edges (per-geometry, not name);
+    **P4** per-building route-feasibility band → seat each building flat at
+    closest-to-DEM within it; **P5** conform aprons/junctions/G to the corrected
+    held buildings/corridor (field-target lift-only + directional yield-release).
+    ★ Always judge against the SMOOTHED DEM (`_load_airport_dem(lat,lon)`), NOT
+    emitted (bowled) levels — that error produced a wrong "no 718 rim" reading.
 - Memory note `apron_spine_dem_seed_climb.md` — raw session findings behind the
   plan (the dead-ends and why).
 - ⚠ **Pin `PYTHONHASHSEED=0`** for ANY A/B build comparison — the apron/junction

@@ -143,8 +143,10 @@ stretches stay byte-identical (gate-off ≡ gate-on there).
 35 promoted pieces (held centerline nodes 82→385); within-shape test-mirror
 9→0; build validator 15→6; **`test_pavement_grade[CYXY]` flips RED→GREEN**
 (suite 6→5 failed, no new reds; gate-off = the 6-failed baseline exactly).
-G still tops out ~708 m vs the ~718 m rim — the field "bowl"; that climb is P3
-(objective = closest-to-DEM within the band), not a P2 coverage concern.
+G's far end still sits ~708 m under P2 alone — a partial bowl vs DEM ≈711.5 there
+(NOT the "~718 m rim" stated in an earlier draft; the buildings top at 709.1).
+Lifting it to DEM is P3 (objective = closest-to-DEM within the band), not a P2
+coverage concern.
 
 **P3 — Per-letter caps + curvature in the corridor solve. [BAND FIX DONE &
 BANKED 2026-06-22 — gate `FIELD_ROUTE_BAND_BY_WIDTH` default OFF; needs P4 to
@@ -287,136 +289,118 @@ written after a full pipeline + history analysis (the four-subsystem maps and th
 distilled record of every prior attempt). Read §1 (the model) first; this is how
 we finally satisfy it.*
 
-## 9.1 The one-paragraph diagnosis (why every attempt so far fell short)
+## 9.1 The one-paragraph diagnosis (ROOT CAUSE, verified 2026-06-22)
 
-The network-profile **field `F` already computes the right answer**: solved over
-the whole centerline graph, seeded at DEM, projected onto the per-letter
-feasibility band, with a lift-only apron-plane pass and a building chord-window —
-so at CYXY it puts taxiway G's climb end at **708.9 m**, which already AGREES with
-`building3` sitting flat at **709 m**. The corridor is *not* really in a bowl in
-the field; **the bowl is a TRANSFER failure.** The emitted apron / junction /
-building vertices are seeded at raw DEM in phase 1, flattened toward a low
-compromise by `_directional_relief` (wide aprons cannot grade the terrain rise at
-1 %), and then the final `_enforce_within_shape_grade` uses `F` only as *band
-bounds* — never as a *target*. Its projection (`_project_within_bands`) is a
-**movement-minimising POCS from that corrupted low seed with NO attractor**, so
-nothing pulls the neighbours UP to the held corridor; and the final *"CORRIDORS
-YIELD TO FLAT TERMINALS"* release (`held_all − corridor_held_set`,
-unified_jacobi ~L3318/L3455) then sinks the held corridor back DOWN toward those
-low neighbours. **The solver does not implement the user's stated objective**
-(§1: *minimise |elev − DEM| subject to grade + curvature, within the feasibility
-band*). It minimises movement from a bad seed. That single mismatch is the whole
-remaining problem.
+The bowl has a concrete root cause — **a dropped ICAO size code** — compounded by
+a building-placement that then trusts the resulting wrong band:
 
-This is confirmed by the fact that *every* dead-end failed for the SAME reason —
-no active driver to the consistent level:
+1. CYXY's gate **arms** (the connectors from taxiway G up to the terminal) are
+   apt.dat `taxiway_A` edges — ICAO code **A → 3 % cap** — but they carry **no
+   name**. `apt_dat_reader.taxi_size_letters` is keyed by name and **skips
+   unnamed edges** (`if not e.name: continue`, ~L1434), so **all 9 code-A arms —
+   every one reaching the 713–720 m terminal terrain — lose their 3 %** and fall
+   back to the uniform 1.5 %. (Verified: the letters map is
+   `{G:A, E:D, A2:B, A:D, F:D, D:D}` — not one of the 9 unnamed arms appears.)
+2. So the runway-anchor **feasibility band to the terminal is computed at 1.5 %,
+   half the legal climb** — its ceiling at the buildings is ~709. The
+   building-flatten then seats the terminal pads at that false-low ceiling,
+   **~9 m below their true DEM (≈718; building1 717.8, building3 717.9)**. G and
+   the aprons settle into the resulting bowl (emitted ~707–710 vs DEM 710–718).
 
-| Attempt | Result | Why it failed (all = "no driver to the consistent level") |
+So the field is **NOT** "already computing the right answer" — its *inputs* (the
+arm caps) are wrong, and the buildings are then placed at a falsely-low feasible
+level. (An earlier draft of this section claimed the field was already correct;
+that was read off the *bowled emitted* building levels — corrected here.) Two
+things must both be fixed: the **caps** (so the band reflects the real 3 % arms)
+and the **building placement** (closest-to-DEM within the *correct* band). And the
+DEM rises ~4.4 % along G (709.9→717.2 over 321 m), STEEPER than even the 3 % cap,
+so G itself tops at its ~3 % ceiling (~712–714) and the last metres up to the
+buildings are the arms' job — exactly the user's "G gets to ~714, the arms take
+the last climb."
+
+The historical dead-ends are all explained by this: every one tried to lift the
+airside WITHOUT first correcting the feasibility band, so it fought a band that
+was wrong by ~half:
+
+| Attempt | Result | Why it failed |
 |---|---|---|
-| Building hard-anchors (`BUILDING_DEM_ANCHOR`) | within 18→**410** | rigid pins manufacture infeasibility the network can't yield to |
+| Building hard-anchors (`BUILDING_DEM_ANCHOR`) | within 18→**410** | pinned pads at a DEM the (wrong, 1.5 %) band said was unreachable → infeasibility |
 | Apron flat-lift (`APRON_FEASIBLE_LIFT`) | within→**363**, steps→127 | one flat level per apron → adjacent aprons step against each other |
-| Spine hard-hold (`O4_TAXI_SPINE`) | within 327→**2882** | spine pinned at raw ceiling 718; the WIDE apron can't grade 1 % up to it |
-| P3 band-loosen alone | within 0→**10** | corridor ceiling rises, neighbours don't follow |
-| Corridor-hold-through-enforce | within 10→**13** | corridor held high, neighbours STILL not lifted → more steps |
+| Spine hard-hold (`O4_TAXI_SPINE`) | within 327→**2882** | spine pinned at its (too-low) band ceiling; the wide apron can't grade 1 % up to it |
+| P3 band-loosen alone | within 0→**10** | loosened G's ceiling but NOT the arms' / buildings' → corridor climbs, neighbours don't |
+| Corridor-hold-through-enforce | within 10→**13** | held corridor high, neighbours still pinned low by the wrong band → more steps |
 
-And by the user's repeated rulings (history): buildings FLAT at closest-feasible
-DEM; aprons **1 % whenever possible**; the **taxi network carries the climb via
-its route-band slack**; *"spend taxi-network slack, not steep aprons"*;
-minimal-deviation = closest-to-DEM, move only as grade forces. The
-`TAXI_SLACK_TERMINALS` work (merged ON) already flattens buildings at their
-feasible level by this model and improved every airport — so the building side of
-the model is in place. The missing half is making the **aprons / junctions /
-corridor adopt the field's consistent closest-to-DEM surface** instead of the
-relief bowl.
+## 9.2 The principle (the user's model, now precise)
 
-## 9.2 The principle (what to implement)
-
-**Make the objective real.** For every soft (non-hard-anchor) node, the solved
-elevation must be the **closest-to-DEM value within its feasibility band that is
-network-consistent and grade-compliant** — which is exactly what the field `F`
-encodes. So: **adopt `F` as the per-node TARGET of the final enforce**, not just
-as band bounds. The enforce already has the band `[lo, hi]` (route-band ∩
-edge-band, now per-letter with P3); give its projection a target = `F` (clamped
-to the band), and POCS will settle the *fine* emitted surface on the *coarse*
-field's consistent levels — corridor AND its apron/junction/building neighbours
-rising together, so no step ever opens between a held corridor and its
-neighbour.
-
-Two hard-won constraints on HOW (from the history):
-
-- **The target must live IN the solve, as the projection's clamp target each
-  sweep — NOT a soft spring.** A weak DEM/field spring is "fully overridden by
-  the cap projection" (the retired soft-DEM-attraction lesson). Implement it as
-  the box-clamp center the POCS pulls toward, like the field's own seed-then-
-  project does.
-- **It must be LIFT-BIASED, not a blanket re-seed.** The bowl is too LOW; we need
-  to RAISE the airside toward the field/DEM level, not disturb surfaces already at
-  or above it. Mirror the field's apron-plane pass, which is deliberately
-  **lift-only** (`v = max(elev, corridor − grade·dist)`). A blanket re-seed to DEM
-  would churn the four good airports; a lift-only re-target toward
-  `min(F, ceiling)` only undoes the bowl.
+**Per-building route-feasibility → closest-to-DEM.** Buildings are the heaviest
+anchor, seated **as close to DEM as the real taxi route can actually reach** —
+not full DEM where terrain outruns the taxi cap, and never the runway-pulled
+bowl. For each building, compute the feasibility band along the actual route TO it
+at the *correct* per-edge per-letter caps (arms = 3 %); seat the pad flat at
+`min(DEM, band_ceiling)`. Then every taxiway/arm reaches its building within grade
+**by construction**. The taxi network (G + arms) carries the climb at its
+per-letter caps; aprons grade ≤1 % to their building; junctions/G conform to the
+held centerlines. Minimal-deviation throughout. `TAXI_SLACK_TERMINALS` (merged
+ON) already flattens buildings at a feasible level in this shape — it just needs
+the corrected per-edge caps + the per-building band.
 
 ## 9.3 The sequenced plan
 
-**P3 — flip the per-letter field route-band ON.** Already built
-(`FIELD_ROUTE_BAND_BY_WIDTH`); it widens the band ceiling to the real per-letter
-reach so the field/target can climb. It only regressed because P4 was missing; it
-flips ON together with P4a.
+**P3a — THE UNLOCK: carry the ICAO size for UNNAMED taxi edges.** Associate each
+apt.dat taxi edge's `taxiway_X` letter with its **geometry** (the centerline /
+route-graph edge), not its name, so `taxi_grade_cap_for_letter` returns 3 % for
+the unnamed code-A arms. Fix `taxi_size_letters` (drop the `if not e.name` skip;
+return a per-edge / per-geometry cap, not just a name→letter dict) and thread the
+letter onto the `apt_taxi_centerlines` entries (or a parallel geometry→letter
+map) so it flows into `TaxiRouteGraph.edge_cap` (already per-edge),
+`network_profile`'s `narrow_lines`, and every feasibility band. **Measure this
+FIRST, alone** — it is the highest-leverage fix and may lift most of the bowl at
+the source (band ceiling to the terminal ~709 → ~714–718). Combine with the
+banked `FIELD_ROUTE_BAND_BY_WIDTH` (P3).
+*Where:* `apt_dat_reader.taxi_size_letters` (~L1418/L1434); the
+`apt_taxi_centerlines` construction (`taxi_centerlines`); `taxi_routing.
+build_taxi_route_graph` (consumes the per-edge cap); `network_profile` `narrow_lines`.
+*Caveat:* an unnamed edge that is a genuine medial-axis *discovered* centerline
+(no apt.dat row) still has no code — only apt.dat-sourced edges gain the letter.
 
-**P4a — Field-target conformance (the core).** In the final enforce, before the
-movement-minimising projection, **re-target every soft node toward the field**:
-`target_i = F.sample(x_i, y_i)` where `F` covers it (sample gap ≤ ~a taxi-width),
-else `clamp(DEM_i, lo_i, hi_i)` (closest-to-DEM where the field is silent — open
-apron interiors). Apply **lift-only within band**:
-`elev_i ← max(elev_i, min(target_i, hi_i))`, never below the current value, never
-above the ceiling. Then run the existing `_project_within_bands` (held corridor +
-hard anchors immovable) so the lifted surface is driven grade-compliant. Effect:
-the apron/junction vertices around G rise from the relief bowl up to ~708–709
-(the field/building level), the held G centerline (708.9) now has consistent
-neighbours, and the within-shape steps close. Gate `FIELD_TARGET_CONFORMANCE`
-(default OFF until validated); pairs with P3.
-*Where:* `_enforce_within_shape_grade` (unified_jacobi.py ~L2300, after the band
-computation and the `_term_nodes` handling, before the first `_project_within_
-bands` at ~L2506). The field is `layout._network_profile_field` (already stored);
-`F.sample` / `F.sample_band` exist.
+**P4 — Per-building route-feasibility → building at closest-to-DEM.** For each
+terminal pad, build the runway-anchor feasibility band along the route TO it (now
+with correct caps) and seat the pad flat at `min(DEM, band_ceiling)`. Confirm
+`TAXI_SLACK_TERMINALS` already does this shape and just needs the corrected band;
+if it uses a coarser/global band, switch it to the per-building route band.
+Buildings rise to their reachable-DEM (≈714–718); the arms reach them within 3 %
+by construction. building1/building3 land at whatever their 83 m / route allows
+(≈714–718) — that is the correct "as close to DEM as the route permits."
 
-**P4b — Make the yield-release bidirectional (or retire it).** With neighbours
-lifted by P4a, the *"CORRIDORS YIELD TO FLAT TERMINALS"* release (L3318/L3455)
-must no longer sink a corridor that should stay high. Change the release from
-unconditional to **directional**: a corridor node yields DOWN only toward a
-serving pad whose flat level is genuinely BELOW the corridor's feasible floor (the
-SPJC building20 canyon case); when the adjacent pad/feature is at or ABOVE the
-corridor (CYXY building3), the corridor stays HELD and the pad/apron conforms (it
-already did, via P4a). Concretely: keep a corridor node in the held set during the
-release unless `pad_level < corridor_value − cap·dist` for some served pad.
-First validate whether P4a alone already neutralises the sink (lifted neighbours
-give the release nothing lower to sink toward) — if so, the release can simply
-keep corridors held (retire the subtraction) and SPJC must be re-checked.
+**P5 — Conform the network to the corrected held buildings + climbed corridor.**
+With buildings seated high and G climbing, drive the apron/junction/G neighbours
+to the consistent surface and kill the within-shape steps. This is the field-
+target, lift-only within-shape conformance (the mechanism earlier drafted as
+"P4a"): before the final `_project_within_bands`, re-target each soft node toward
+`F` clamped to its band, **lift-only** (`elev ← max(elev, min(F, hi))`); and make
+the *"CORRIDORS YIELD TO FLAT TERMINALS"* release **directional** (a corridor
+yields DOWN only to a genuinely-lower served pad; otherwise it stays held). Gate
+`FIELD_TARGET_CONFORMANCE`. The target must live IN the projection (its box-clamp
+center), not as a weak spring (the retired soft-DEM-attraction lesson), and be
+lift-biased so it only undoes the bowl, not churns the four good airports.
+*Where:* `_enforce_within_shape_grade` (~L2300 target re-clamp; ~L3318/L3455 the
+release). The field is `layout._network_profile_field` (`F.sample`/`F.sample_band`).
 
-**P5 — Junction smoothness falls out, then reconcile.** With P4a the junction
-interior targets the field too, so the held centerline and the junction body sit
-at one consistent level (no trough). Verify the per-axis junction caps
-(`JUNCTION_NARROW_GRADE`) agree with the field target along the narrow axis; the
-band-exempt set for corridor-touched junctions stays (so the enforce doesn't
-re-pin them off the field).
+**P6 — Explicit transition only where physically forced (contingency).** If after
+P3a+P4 a building's DEM still outruns even its correct 3 % route, seat it at the
+band ceiling (closest-feasible, slightly below DEM) — the minimal-deviation answer
+— rather than forcing a non-ICAO arm. A true ramp/retaining transition is only for
+a WIDE apron that cannot grade to a climbing corridor (HECA-class). Validate
+whether CYXY needs any of this once the arms are correctly 3 % (likely not).
 
-**P6 — Explicit transitions only where physically forced (contingency).** Where a
-WIDE apron genuinely cannot grade up to a climbing corridor at 1 % (terrain too
-wide — the `O4_TAXI_SPINE` 2882 explosion is the warning sign; HECA-class, not
-CYXY), the field's lift-only apron-plane already caps the apron at its reachable
-level and leaves a residual; emit an explicit ramp/retaining transition for that
-residual (user ruling: the steepness sink is an explicit transition, never the
-apron/taxi interior). Validate whether CYXY needs it before building (G is narrow
-side-connections — likely not).
-
-**P7 — Retire scaffolding + lock it with tests.** Once P4a+P4b carry the climb,
+**P7 — Retire scaffolding + lock with tests.** Once P3a+P4+P5 carry the climb,
 delete the gated-off dead-ends (`APRON_FEASIBLE_LIFT` /
 `_anchor_aprons_at_feasible_high`, `BUILDING_DEM_ANCHOR` /
 `_anchor_buildings_at_feasible_dem` / `_relax_buildings_and_resolve`, the
 standalone `O4_TAXI_SPINE` pass). Keep the keepers (`TAXI_REACH_BAND_BY_WIDTH`,
 `JUNCTION_NARROW_GRADE`, `CORRIDOR_SPINE_CHAINS`, `W2_CLEAN_BANDS`, planar caps,
-`TAXI_SLACK_TERMINALS`) and the new P3 + P4 once defaulted ON. Add the two tests
-in §9.5.
+`TAXI_SLACK_TERMINALS`) plus the new P3a + P4 + P5 once defaulted ON. Add the two
+tests in §9.5.
 
 ## 9.4 Why this is different from the things that already failed
 
@@ -427,7 +411,7 @@ in §9.5.
   one flat level per apron, so adjacent aprons can't step against each other (the
   363/127 failure mode cannot recur).
 - **Not the raw spine-hold.** The target is the field's *feasible* apron level
-  (lift-only, band-clamped), NOT the raw 718 spine ceiling — a wide apron is never
+  (lift-only, band-clamped), NOT the raw spine band ceiling — a wide apron is never
   asked to grade 1 % up to a level it cannot reach (the 2882 explosion cannot
   recur). Where it truly can't reach → P6 transition, per the ruling.
 - **Respects the soft-spring lesson.** The field enters as the projection's clamp
@@ -435,11 +419,13 @@ in §9.5.
 
 ## 9.5 Validation / done-criteria (pin `PYTHONHASHSEED=0` for ALL A/B)
 
-- **CYXY:** taxiway G one smooth ≤3 % climb from the E end to the rim; its
-  side-connectors climb to meet it; the apron/junction vertices beside G sit at the
-  field level (no 0.7 m junction steps); `building3` flat ≈ 709 consistent with G
-  708.9; `test_pavement_grade[CYXY]` stays GREEN; `probe_clean` within = 0 with the
-  climb PRESERVED (not the P2 within=0 that came from a lower G).
+- **CYXY:** taxiway G one smooth ≤3 % climb from the low E end (~703) up to its
+  ~712–714 ceiling at the far end; the **gate arms** climb at 3 % the last
+  metres to the terminal; the **terminal buildings rise to their reachable-DEM
+  (≈714–718, up from the bowled ~709)**, FLAT; aprons/junctions conform (no 0.7 m
+  junction steps); `test_pavement_grade[CYXY]` stays GREEN; `probe_clean` within = 0
+  with the climb PRESERVED. ★ Judge against **DEM** (smoothed), never the emitted
+  building levels.
 - **Closest-to-DEM check (NEW test):** for every emitted soft node, assert
   `lo ≤ elev ≤ hi` and that `elev` is within tolerance of `min(DEM, hi)` wherever
   the band permits DEM — i.e., the surface is not pulled needlessly below terrain
@@ -450,46 +436,55 @@ in §9.5.
 - **No net-new regressions:** full suite returns to its standing-reds baseline
   (`rests_on_source[CYXY]`, `grade[HECA]`; SPJC/SPLP compare-target re-cut by the
   user once CYXY is right). **SPJC building20 (the yield-down case) is the gating
-  regression check for P4b** — confirm it still flattens.
+  regression check for the P5 directional release** — confirm it still flattens.
+- **P3a measured ALONE first:** with only the unnamed-edge cap fix, the terminal
+  feasibility-band ceiling should rise from ~709 toward ~714–718 and the buildings
+  un-bowl correspondingly, BEFORE any conformance work. If it does not, the arms
+  are not apt.dat-sourced (medial-axis discovered) and P3a needs a different source.
 
 ## 9.6 Risk register (carried from the distilled traps)
 
-- **SPJC building20** — the canyon yield-DOWN case the release was built for; P4b
-  must preserve it. Check first, before retiring the release.
+- **P3a scope** — only apt.dat-sourced edges gain the letter; a genuinely
+  *discovered* (medial-axis) unnamed centerline has no code. Confirm the 9 arms
+  are apt.dat `taxiway_A` edges (verified 2026-06-22: they are) and that the
+  letter survives into `apt_taxi_centerlines` / `TaxiRouteGraph.edge_cap`.
+- **SPJC building20** — the canyon yield-DOWN case the release was built for; the
+  P5 directional release must preserve it. Check first, before retiring the release.
 - **HECA wide-apron canyon** — the case that may need P6; the `O4_TAXI_SPINE`
-  327→2882 blow-up is the canonical warning. Watch HECA within-shape under P4a.
+  327→2882 blow-up is the canonical warning. Watch HECA within-shape under P5.
 - **`PYTHONHASHSEED=0`** for every A/B — the apron/junction partition is
   hashseed-nondeterministic (within flakes 5↔18 on the same config).
-- **DEM smoothing pix** — standalone reads repo `Ortho4XP.cfg` (`apt_smoothing_pix`
-  = 4 here, 8 on dev); production passes the pre-smoothed tile_dem. Standalone ≠
-  production when this differs — suspect DEM/config before geometry.
+- **DEM = the SMOOTHED load.** Sample DEM via `_load_airport_dem(lat, lon)` with
+  `override_dem=None` (it applies the same `apt_smoothing_pix` blur the build uses);
+  do NOT pass a raw DEM. Standalone reads repo `Ortho4XP.cfg` (`apt_smoothing_pix`
+  = 4 here, 8 on dev); production passes the pre-smoothed tile_dem. ★ Reading
+  *emitted* (bowled) building levels instead of DEM led to a wrong "no 718 rim"
+  conclusion 2026-06-22 — always check DEM, not emitted, when judging the target.
 - **Plain vs augmented route graph** — the field route-band uses the PLAIN
   `shared_taxi_route_graph` deliberately (no taxiing-the-runway shortcut); keep it.
 - **Identify shapes by COORDINATE, not index/ref** (indices drift across builds);
   measure A/B in a detached worktree if another session may commit concurrently.
 - **`F.sample` coverage** — in deep apron interiors the field sample gap is large;
-  P4a must fall back to `clamp(DEM, lo, hi)` there, not use a far centerline value.
+  P5 must fall back to `clamp(DEM, lo, hi)` there, not use a far centerline value.
 
 ## 9.7 Implementation map (file:line anchors)
 
+- **P3a — the unlock:** `apt_dat_reader.taxi_size_letters` (~L1418; the
+  `if not e.name: continue` skip at ~L1434 is the bug) → make it per-edge /
+  per-geometry; the `apt_taxi_centerlines` construction (`taxi_centerlines`) must
+  carry the letter; consumed by `taxi_routing.build_taxi_route_graph`
+  (`edge_cap`, already per-edge) + `network_profile` `narrow_lines`.
 - Field source: `network_profile.build_and_solve` → `layout._network_profile_field`
   (`F.sample`, `F.sample_band`, lift-only apron-plane ~network_profile.py:1454–1745).
 - P3 band: `network_profile._runway_route_band` per-edge `edge_cap`
   (gate `FIELD_ROUTE_BAND_BY_WIDTH`) — built.
-- P4a target re-clamp: `_enforce_within_shape_grade`
+- P4 building placement: the `TAXI_SLACK_TERMINALS` building-flatten +
+  `_runway_reach_bands` per-building route band.
+- P5 target re-clamp: `_enforce_within_shape_grade`
   (unified_jacobi.py ~L2300 → before `_project_within_bands` ~L2506); bands `lo/hi`
-  already computed there; held set = `held_all`.
-- P4b release: the two `held_all − corridor_held_set` sites
-  (unified_jacobi.py ~L3318, ~L3455).
+  already computed there; held set = `held_all`. Directional release: the two
+  `held_all − corridor_held_set` sites (~L3318, ~L3455).
 - Seeding context: phase-1 DEM seed `_phase1_hop_priority` (~L4080); relief
-  `_directional_relief` (~L4095, no reseed) — the bowl origin P4a corrects.
+  `_directional_relief` (~L4095, no reseed) — the bowl origin P5 corrects.
 - Keepers to preserve: `TAXI_REACH_BAND_BY_WIDTH`, `JUNCTION_NARROW_GRADE`,
   `CORRIDOR_SPINE_CHAINS` (P2), `W2_CLEAN_BANDS`, planar caps, `TAXI_SLACK_TERMINALS`.
-- `layout.py` — (reverted to original `taxi_shape_code_letter`).
-- `elevation_per_surface/unified_jacobi.py` — `_runway_reach_bands` per-edge
-  caps; `_collect_junction_axes`→caps + `_edge_narrow_cap` (per-axis junction);
-  `_anchor_aprons_at_feasible_high` (spine + flat-apron, to retire/merge);
-  `_anchor_buildings_at_feasible_dem` + `_relax_buildings_and_resolve` (to
-  retire); env-tunable DEM attraction.
-- `elevation_per_surface/junction_spine.py` — `SPINE_PIECE_ROLE_REEVAL`
-  promotion (narrow spine pieces apron→junction; this one is a keeper).
