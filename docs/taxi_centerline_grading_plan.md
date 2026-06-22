@@ -191,6 +191,34 @@ allows, moving only where REQUIRED:
   HECA): allow a *small* pad slope only when a flat pad would force a connecting
   apron out of grade — the least slope that restores compliance.
 
+*Investigation 2026-06-22 — where P3's climb is lost, two dead-ends ruled out.*
+Traced (with P3 ON) why the held G centerline doesn't keep its climb. The
+corridor pass DOES write the field value onto G (`_write n973=708.89`, held=True)
+and the post-corridor relief preserves it. The loss happens in the FINAL
+within-shape enforce, in a stage tagged **`post-final`** (`_enforce_within_shape_
+grade`, unified_jacobi.py ~L3318/L3455): the *"CORRIDORS YIELD TO FLAT TERMINALS"*
+release — `held_yield = held_all - corridor_held_set` — deliberately RELEASES the
+corridor-held set and re-projects, letting the held centerline flex down within
+its band so the network pulls slack toward a flat pad BELOW it (the SPJC
+building20 case). With P3's raise, that release sinks G from 708.89 back to
+707.24 — even though `building3` next to it is FLAT at 709 and the field value
+(708.89) already AGREES with it. So the climb is undone by the yield-release.
+**Dead-end A (ruled out):** keeping the corridor HELD through the release (don't
+subtract `corridor_held_set`) makes within-shape WORSE, not better (CYXY 10→13):
+the apron/junction/building neighbours do NOT conform UP to the held-high
+centerline — they stay pinned at their lower DEM/relief level, so a held-high
+corridor just opens MORE steps against them. **Dead-end B:** the band loosening
+alone (P3) — same regression (0→10). **Conclusion:** P4 is genuinely the
+ACTIVE-upward-conformance problem — the apron/junction/building neighbours must
+be DRIVEN UP to the held climbed centerline (removing whatever pins them low:
+route-band floors, the DEM/relief seed, the flat-pad level), not merely "held or
+released". This is coupled with P5 (the junction interior must grade to the held
+spine). The two quick levers (release vs hold) both regress; this needs the real
+conformance rework, not a toggle. The yield-release itself must become
+BIDIRECTIONAL: yield the corridor DOWN to a flat pad BELOW it (SPJC), but hold it
+and lift the neighbours UP when the pad/feature is ABOVE it (CYXY). All P4
+attempts this session were reverted (tree clean at the P3-banked commit).
+
 **P5 — Junction smoothness (kill the trough).**
 The held centerline IS the junction's spine. Ensure the junction body grades
 *to* the held spine (edges conform down/up to the centerline), never the spine

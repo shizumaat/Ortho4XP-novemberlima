@@ -83,7 +83,20 @@ per-letter `edge_cap` so a narrow route's field ceiling is its real 3% reach,
 not 1.5%; CYXY G 712→714). It REGRESSES standalone (held centerline climbs but
 its neighbours don't → within-shape 0→10) so it is gated OFF pending P4. **NEXT
 = P4** (it enables P3): aprons/buildings CONFORM up/down to the held centerlines
-(no hard anchors, minimal deviation); kill the junction trough (P5); explicit
+(no hard anchors, minimal deviation).
+  ⮑ P4 INVESTIGATED 2026-06-22 (no code shipped — two dead-ends ruled out, tree
+  clean). The P3 climb is written+held on G, then LOST in the final enforce's
+  *"CORRIDORS YIELD TO FLAT TERMINALS"* release (`held_all - corridor_held_set`,
+  unified_jacobi ~L3318/L3455): it releases the corridor to sink toward a lower
+  neighbour even though the adjacent `building3` is flat at 709 ≈ G's field 708.9.
+  Dead-end A: holding the corridor through the release → within 10→13 (WORSE) —
+  the neighbours don't conform UP, they're pinned low. Dead-end B: P3 band alone
+  → 0→10. So P4 is the ACTIVE upward-conformance rework: DRIVE apron/junction/
+  building neighbours UP to the held climbed centerline (remove the route-band
+  floor / DEM-relief seed / flat-pad pin that holds them low), and make the
+  yield-release BIDIRECTIONAL (yield DOWN to a low pad = SPJC; hold + lift
+  neighbours UP to a high pad = CYXY). Coupled with P5. NOT a toggle — needs the
+  real conformance pass. ALSO: kill the junction trough (P5); explicit
 corridor↔wide-apron transition only where genuinely needed (P6); retire the
 scaffolding + add a centerline-smoothness check/test (P7).
 
