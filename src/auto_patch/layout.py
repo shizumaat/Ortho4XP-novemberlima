@@ -46,7 +46,6 @@ from .config import (
     PATCH_SLOPE_PROFILE,
     TAXI_GRADE_BY_WIDTH,
     TAXI_GRADE_WIDTH_ROLES,
-    NODE_ALT_ABS,
     taxiway_code_letter,
 )
 
@@ -898,10 +897,9 @@ class PavementLayout:
         def _slope_profile_for(poly) -> str:
             return PATCH_SLOPE_PROFILE
 
-        # Backward-compatible per-node altitude (gate NODE_ALT_ABS): nids of
-        # compound sloping shapes whose ``node_altitudes`` way tag is dropped
-        # in favour of per-NODE ``alt_abs`` tags (which stock Ortho4XP reads).
-        # Stays empty when the gate is off → emission byte-identical.
+        # Per-node altitude: nids of compound sloping shapes whose per-corner
+        # altitudes are carried as per-NODE ``alt_abs`` tags (which stock
+        # Ortho4XP reads), in place of a fork-only single-way tag.
         node_alt_abs_nids: set = set()
 
         for s_idx, s, ext_nids, shape_altitude, shape_node_altitudes \
@@ -1028,21 +1026,15 @@ class PavementLayout:
     RUNWAY_CELL_SIZE_M if s.role == ROLE_RUNWAY
     else PATCH_SLOPE_CELL_SIZE_M)
                     tags["profile"] = _slope_profile_for(s.polygon)
-                elif NODE_ALT_ABS:
-                    # Backward-compatible per-corner altitudes: carry them
+                else:
+                    # Compound sloping polygon: carry the per-corner altitudes
                     # as per-NODE ``alt_abs`` tags (read by stock / older
-                    # Ortho4XP) instead of the fork-only ``node_altitudes``
-                    # way tag.  This way emits NO altitude way-tag; every one
-                    # of its vertices is stamped with its consensus altitude
-                    # in the node-writing pass below, so the upstream per-node
+                    # Ortho4XP).  This way emits NO altitude way-tag; every one
+                    # of its vertices is stamped with its consensus altitude in
+                    # the node-writing pass below, so the upstream per-node
                     # override (include_patches, applied to every non-
                     # ``altitude_high/low`` way) fully specifies the ring.
                     node_alt_abs_nids.update(ext_nids)
-                else:
-                    # Legacy fork-only form: per-corner values — including
-                    # the closing repeat — as one way tag.
-                    tags["node_altitudes"] = ",".join(
-                        f"{e:.1f}" for e in corner_elevs)
             else:
                 # No per-corner consensus available (no shape
                 # contributed altitudes to these nodes).  Fall

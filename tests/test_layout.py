@@ -419,10 +419,9 @@ def test_to_osm_flat_altitude_emits_single_tag():
 
 def test_to_osm_compound_slope_emits_per_node_alt_abs():
     """A compound sloping polygon (per-corner ``node_altitudes``) emits
-    its per-vertex altitudes as per-node ``alt_abs`` tags (gate
-    NODE_ALT_ABS, the backward-compatible form read by stock Ortho4XP)
-    rather than the fork-only ``node_altitudes`` way tag."""
-    import auto_patch.layout as _L
+    its per-vertex altitudes as per-node ``alt_abs`` tags (the
+    backward-compatible form read by stock Ortho4XP) rather than a
+    fork-only single-way tag."""
     layout = _make_layout()
     poly = _square(0, 0, 10)
     # 4 corners + closing repeat = 5 elevations.
@@ -430,7 +429,6 @@ def test_to_osm_compound_slope_emits_per_node_alt_abs():
     layout.shapes.append(BuiltShape(
         polygon=poly, role=ROLE_JUNCTION,
         node_altitudes=elevs))
-    assert _L.NODE_ALT_ABS, "gate expected default-on"
     _, ways, node_alts = _emit_and_parse(layout)
     wid, nds, tags = ways[0]
     # No fork-only way tag; every ring vertex carries alt_abs instead.
@@ -443,28 +441,6 @@ def test_to_osm_compound_slope_emits_per_node_alt_abs():
     assert by_ref[0] == 10.0
     assert by_ref[1] == 11.0
     assert by_ref[-1] == by_ref[0]
-
-
-def test_to_osm_compound_slope_legacy_node_altitudes_when_gated_off(
-        monkeypatch):
-    """With the gate off, the legacy ``node_altitudes`` way tag is
-    emitted unchanged (byte-compatible fallback)."""
-    import auto_patch.layout as _L
-    monkeypatch.setattr(_L, "NODE_ALT_ABS", False)
-    layout = _make_layout()
-    poly = _square(0, 0, 10)
-    elevs = [10.0, 11.0, 12.0, 13.0, 10.0]
-    layout.shapes.append(BuiltShape(
-        polygon=poly, role=ROLE_JUNCTION,
-        node_altitudes=elevs))
-    _, ways, node_alts = _emit_and_parse(layout)
-    tags = ways[0][2]
-    assert "node_altitudes" in tags
-    csv_vals = tags["node_altitudes"].split(",")
-    assert len(csv_vals) == len(ways[0][1])
-    assert csv_vals[0] == "10.0"
-    assert csv_vals[1] == "11.0"
-    assert not node_alts, "gate-off must emit no per-node alt_abs tags"
 
 
 def test_to_osm_no_elevation_tags_when_none_set():
