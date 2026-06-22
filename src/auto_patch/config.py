@@ -1531,6 +1531,36 @@ FIELD_ROUTE_BAND_BY_WIDTH = _os.environ.get(
 # FIELD_ROUTE_BAND_BY_WIDTH (P3), it is banked OFF and flips ON with P4+P5.
 UNNAMED_TAXI_SIZE = _os.environ.get("O4_UNNAMED_TAXI_SIZE", "0") == "1"
 
+# (20260622) FIELD-TARGET CONFORMANCE — plan P4/P5 (docs §9): make the final
+# within-shape enforce implement the user's stated objective — *minimise
+# |elev − DEM| within the feasibility band* — instead of movement-minimising from
+# a relief-bowled seed.  Before the final difference-constraint projection, lift
+# each soft (non-hard, non-held, non-band-pinned) node toward its closest-to-DEM
+# feasible level ``clamp(DEM, lo, hi)``, **LIFT-ONLY** (never lower; never above
+# the ceiling).  With the per-letter bands now correct (P3a recovers the unnamed
+# arms' 3 %; P3 the field route-band), this lifts the bowled airside — buildings
+# to their reachable-DEM (min(DEM, ceiling)), aprons/junctions with them — so the
+# held corridor's neighbours rise WITH it and the within-shape steps close.  The
+# subsequent projection (held corridor + hard anchors immovable) drives the lifted
+# surface grade-compliant; all-ceiling is Lipschitz-compliant so the lift is
+# grade-safe.  Pairs with UNNAMED_TAXI_SIZE (P3a) + FIELD_ROUTE_BAND_BY_WIDTH (P3).
+# ★ DEFAULT OFF + INCOMPLETE (2026-06-22): this lift is the conformance VEHICLE
+# but is NOT sufficient alone for the wide-apron terminal.  Measured (CYXY,
+# P3a+P3+this): buildings DIRECTLY on a narrow arm un-bowl, but the MAIN terminal
+# (building1/3/6) does NOT lift — its WIDE APRON is lifted by the field only
+# toward the LOW corridor (the apron-plane pass is lift-only-toward-taxi), so the
+# pad is gated to ~corridor+1%·apron-width, not its arm-route ceiling; lifting the
+# corridor to its raw route-CEILING instead explodes within-shape (89) because the
+# ceiling is Lipschitz along the ROUTE, not the geometry (route-vs-geom steps at
+# held junctions).  THE MISSING PIECE: the BUILDING must be the DRIVER — band via
+# per-edge `edge_cap` (NOT the uniform cap `_anchor_buildings_at_feasible_dem`
+# uses), placed at min(DEM, that band), with the apron conforming UP to the
+# *building* (not the corridor) and the corridor→apron transition taken by the
+# arm/an explicit ramp.  Until that lands this gate is net-neutral-to-negative
+# (CYXY within 8→12) — kept gated OFF as the vehicle.
+FIELD_TARGET_CONFORMANCE = _os.environ.get(
+    "O4_FIELD_TARGET_CONFORMANCE", "0") == "1"
+
 
 def taxi_grade_cap_for_letter(letter, *, enabled: bool = None) -> float:
     """Max longitudinal grade (rise/run) for a taxiway of ICAO code

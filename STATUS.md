@@ -85,6 +85,14 @@ good airports.
   `edge_cap`); banked gated-off because it regresses without P4 (held centerline
   climbs, neighbours don't). FLIP ON with P4. This is the real P3 — not
   scaffolding to retire, just dormant until P4 lands.
+- **`FIELD_TARGET_CONFORMANCE`** (P4/P5 vehicle, NEW 2026-06-22, default OFF +
+  INCOMPLETE) — lift-only re-target toward the field before the final enforce
+  projection (`elev←max(elev,min(F,hi))`, soft non-held). Built as the conformance
+  vehicle but NOT sufficient alone: the wide-apron terminal stays gated (the field
+  lifts the apron toward the LOW corridor, not the building); lifting to the raw
+  route-ceiling instead explodes within-shape (89, route-vs-geom). Needs the P4
+  building-DRIVER (band via edge_cap, place+hold building, apron conforms to the
+  BUILDING). Kept gated OFF as the vehicle. `_enforce_within_shape_grade` + dem_elev.
 - **`UNNAMED_TAXI_SIZE`** (P3a, NEW 2026-06-22, default OFF) — THE UNLOCK.
   apt.dat unnamed `taxiway_A/B` connector "arms" lost their 3% (taxi_size_letters
   keyed by name); now tagged via geometry with a synthetic ref (`~A`/`~B`) so the
@@ -163,8 +171,12 @@ flips grade[CYXY] green with no new reds.
   per-node band+provenance.
 
 ## Files touched
-- `config.py` — 7 gates (above; +`CORRIDOR_SPINE_CHAINS` P2 committed,
-  +`FIELD_ROUTE_BAND_BY_WIDTH` P3 default-OFF, +`UNNAMED_TAXI_SIZE` P3a default-OFF).
+- `config.py` — 8 gates (above; +`CORRIDOR_SPINE_CHAINS` P2 committed,
+  +`FIELD_ROUTE_BAND_BY_WIDTH` P3, +`UNNAMED_TAXI_SIZE` P3a,
+  +`FIELD_TARGET_CONFORMANCE` P4/P5 vehicle — all default-OFF).
+- `elevation_per_surface/unified_jacobi.py` (P4) — `_enforce_within_shape_grade`
+  gains `dem_elev` param + the field-target lift-only block before the first
+  `_project_within_bands`; `_FIELD_TC_MAX_GAP_M` constant.
 - `apt_dat_reader.py` — P3a: `coded_taxi_edge_segments` (per-edge `(seg,letter)`
   incl. unnamed).
 - `pipeline.py` — P3a: unnamed-arm size recovery (synthetic `~A`/`~B` ref) after

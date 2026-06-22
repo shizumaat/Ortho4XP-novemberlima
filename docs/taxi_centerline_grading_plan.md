@@ -369,28 +369,44 @@ within=0).
 medial-axis discovered), so they gain the letter; a genuine discovered unnamed
 centerline has no apt.dat code and is not tagged (correctly).
 
-**P4 — Per-building route-feasibility → building at closest-to-DEM.** For each
-terminal pad, build the runway-anchor feasibility band along the route TO it (now
-with correct caps) and seat the pad flat at `min(DEM, band_ceiling)`. Confirm
-`TAXI_SLACK_TERMINALS` already does this shape and just needs the corrected band;
-if it uses a coarser/global band, switch it to the per-building route band.
-Buildings rise to their reachable-DEM (≈714–718); the arms reach them within 3 %
-by construction. building1/building3 land at whatever their 83 m / route allows
-(≈714–718) — that is the correct "as close to DEM as the route permits."
+**P4 — Per-building route-feasibility → building at closest-to-DEM (the BUILDING
+must be the DRIVER). [IN PROGRESS 2026-06-22 — the hard core; vehicle built, the
+driver not yet.]** For each terminal pad, build the runway-anchor feasibility band
+along the route TO it **at the per-edge caps** and seat the pad flat at
+`min(DEM, band_ceiling)`, then HOLD it so the apron conforms UP to it.
+*Verified state (P3a+P3 on):* the band is now CORRECT (building3 ceiling 714.4 via
+its 3 % arm) and the FIELD even wants building3 at 712.6 — but the EMITTED pad
+settles at 709.6. Two attempts FAILED to lift it (gate `FIELD_TARGET_CONFORMANCE`,
+built as the conformance vehicle):
+- Lift SOFT nodes toward `F` (skip held): pad does NOT lift — its **WIDE APRON**
+  is lifted by the field only toward the LOW corridor (the apron-plane pass is
+  lift-only-toward-taxi), so the pad is gated to ~corridor + 1 %·apron-width.
+  CYXY within 8→12 (net-negative).
+- Lift EVERYTHING (held corridor included) to the raw route-CEILING: pad lifts to
+  712.6 but within-shape **explodes to 89** — the ceiling is Lipschitz along the
+  ROUTE, not the geometry, so geometrically-close-but-route-far held nodes become
+  too-steep (route-vs-geom steps at junctions).
+*The missing piece (the actual P4):* the BUILDING is the heaviest anchor and must
+be the DRIVER, not a follower of its apron — (a) compute its band via the per-edge
+`edge_cap` route (NOT the uniform cap `_anchor_buildings_at_feasible_dem` uses —
+that's why the retired BUILDING_DEM_ANCHOR bowled), (b) seat + hold it at
+`min(DEM, that band)`, (c) make the **apron conform UP to the building**, not the
+corridor (the field's apron-plane must target the pad it fronts, or a post-pass
+lifts the apron toward the held pad), (d) the corridor→apron height difference is
+taken by the narrow ARM (3 %) / an explicit transition, never the apron interior.
+*Where:* a per-edge-cap building band (mirror `_runway_reach_bands`'s `edge_cap`
+use, NOT `shared_taxi_route_graph.distances_from`'s uniform cap); the apron-plane
+pass (`network_profile` ~L1454–1745) target; `_anchor_buildings_at_feasible_dem`
+(rework to edge_cap + soft hold) or a new pass.
 
-**P5 — Conform the network to the corrected held buildings + climbed corridor.**
-With buildings seated high and G climbing, drive the apron/junction/G neighbours
-to the consistent surface and kill the within-shape steps. This is the field-
-target, lift-only within-shape conformance (the mechanism earlier drafted as
-"P4a"): before the final `_project_within_bands`, re-target each soft node toward
-`F` clamped to its band, **lift-only** (`elev ← max(elev, min(F, hi))`); and make
-the *"CORRIDORS YIELD TO FLAT TERMINALS"* release **directional** (a corridor
-yields DOWN only to a genuinely-lower served pad; otherwise it stays held). Gate
-`FIELD_TARGET_CONFORMANCE`. The target must live IN the projection (its box-clamp
-center), not as a weak spring (the retired soft-DEM-attraction lesson), and be
-lift-biased so it only undoes the bowl, not churns the four good airports.
-*Where:* `_enforce_within_shape_grade` (~L2300 target re-clamp; ~L3318/L3455 the
-release). The field is `layout._network_profile_field` (`F.sample`/`F.sample_band`).
+**P5 — Conform the rest of the network (the lift vehicle, built).** Once the
+building drives, the field-target lift-only re-clamp (`FIELD_TARGET_CONFORMANCE`,
+built in `_enforce_within_shape_grade` before the first `_project_within_bands`:
+`elev ← max(elev, min(F, hi))`, soft non-held) carries the apron/junction/G
+neighbours up to the consistent surface; and the *"CORRIDORS YIELD TO FLAT
+TERMINALS"* release (~L3318/L3455) becomes **directional** (yield DOWN only to a
+genuinely-lower served pad; else hold). The vehicle is in place but inert until
+P4's building-driver gives the apron a high pad to conform to.
 
 **P6 — Explicit transition only where physically forced (contingency).** If after
 P3a+P4 a building's DEM still outruns even its correct 3 % route, seat it at the

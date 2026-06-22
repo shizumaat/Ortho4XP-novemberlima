@@ -70,7 +70,7 @@ from auto_patch.elevation import (
     APRON_MAX_GRADE, SERVICE_ROAD_MAX_GRADE, TAXI_MAX_GRADE)
 from auto_patch.config import (
     taxi_grade_cap_for_letter, TAXI_MAX_GRADE_NARROW, JUNCTION_NARROW_GRADE,
-    CORRIDOR_SPINE_CHAINS)
+    CORRIDOR_SPINE_CHAINS, FIELD_TARGET_CONFORMANCE)
 from auto_patch.layout import (
     ROLE_APRON, ROLE_BOUNDARY, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL, ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
@@ -81,6 +81,13 @@ from auto_patch.layout import (
 # Narrow exception tuple for shapely / numeric-geometry failure
 # modes.  Programming errors propagate so they surface immediately.
 _GEOM_EXC = (ValueError, GEOSException, TopologicalError)
+
+# FIELD_TARGET_CONFORMANCE (plan P4/P5): max field-sample gap (m) at which a
+# node still adopts the field value as its lift target.  Beyond this the field
+# (defined on the centerline graph) is too far to be a reliable target — a
+# deep-apron interior keeps its seed.  ~one apron-width; arm-served buildings
+# sample their serving arm well within this.
+_FIELD_TC_MAX_GAP_M = 50.0
 
 
 SLOPING_RECT_ROLES = (
@@ -580,7 +587,7 @@ def solve(layout, icao: str,
             elev, shape_constraints, base_hard,
             nodes=nodes, layout=layout, bucket_to_idx=bucket_to_idx,
             icao=icao, held_extra=corridor_held,
-            band_exempt=corridor_exempt)
+            band_exempt=corridor_exempt, dem_elev=dem_elev)
         _mark("enforce")
         if _os.environ.get("O4_TRACE_LL"):
             for part9 in _os.environ["O4_TRACE_LL"].split(";"):
@@ -1906,7 +1913,7 @@ def _count_within_viol(elev, shape_constraints):
 def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                                 nodes=None, layout=None, bucket_to_idx=None,
                                 icao=None, held_extra=None,
-                                band_exempt=None) -> int:
+                                band_exempt=None, dem_elev=None) -> int:
     """FINAL within-shape grade ENFORCEMENT via the difference-constraint solve.
 
     Every within-shape limit ``|x_i - x_j| <= cap·d`` is a difference
@@ -2502,6 +2509,52 @@ def _enforce_within_shape_grade(elev, shape_constraints, base_hard,
                 hit9 = any({i0, j0} == set(ids9)
                            for (i0, j0, _c0) in all_edges)
                 print(f"[band] pair {pr9} in all_edges: {hit9}")
+    # ── FIELD-TARGET CONFORMANCE (plan P4/P5, docs §9): implement the
+    # objective *minimise |elev − DEM| within the band* by LIFTING each soft
+    # node toward its closest-to-DEM feasible level ``clamp(DEM, lo, hi)``
+    # before the projection — lift-only (never lower, never above ceiling).
+    # With the per-letter bands corrected (P3a + P3) this raises the bowled
+    # airside (buildings to min(DEM, ceiling), aprons/junctions with them) so
+    # the held corridor's neighbours rise WITH it; the projection then drives
+    # the lifted surface grade-compliant (all-ceiling is Lipschitz-compliant,
+    # so the lift is grade-safe).  Held / hard / band-pinned nodes untouched.
+    # Lift each SOFT node toward the FIELD value `F` (the network- AND
+    # geometry-consistent closest-to-DEM surface), clamped to its band,
+    # LIFT-ONLY.  Target = F (NOT the raw route-ceiling): the ceiling is
+    # Lipschitz along the ROUTE graph, so lifting geometrically-close-but-
+    # route-far nodes to their ceilings manufactures within-shape steps (route
+    # vs geometric distance); F is the realizable smooth surface (the held
+    # corridor already sits AT F via P2, so soft neighbours lifted to F agree
+    # with it — no gating-down, no step).  Where F doesn't cover a node (deep
+    # apron interior, sample gap large) leave its seed.  Held / hard / band-
+    # pinned nodes are untouched (the held corridor is already at F).
+    _F_tc = (getattr(layout, "_network_profile_field", None)
+             if FIELD_TARGET_CONFORMANCE else None)
+    if _F_tc is not None and nodes is not None:
+        n_lift = 0
+        for i in range(n):
+            if is_hard[i] or i in held_all or i in band_pinned:
+                continue
+            if i >= len(nodes):
+                continue
+            lo_i, hi_i = lo[i], hi[i]
+            if lo_i > hi_i:                      # band-pinned/infeasible
+                continue
+            x9, y9 = nodes[i]
+            fv, gap = _F_tc.sample(x9, y9)
+            if fv is None or gap > _FIELD_TC_MAX_GAP_M:
+                continue                         # field-silent → keep seed
+            tgt = fv
+            if tgt < lo_i:
+                tgt = lo_i
+            elif tgt > hi_i:
+                tgt = hi_i
+            if tgt > elev[i] + 1e-3:             # LIFT-ONLY
+                elev[i] = tgt
+                n_lift += 1
+        if _os.environ.get("O4_STEP_DEBUG") == "1":
+            print(f"[step] field-target conformance lifted {n_lift} "
+                  f"node(s) toward the field")
     _bn_dump("pre-project")
     sweeps, resid = _project_within_bands(
         elev, all_edges, is_hard, lo, hi, coupling,
