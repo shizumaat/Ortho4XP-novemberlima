@@ -307,12 +307,3 @@ def extend_point(
     ext_dlon = (ux * distance_m) / (cos_lat * DEG_TO_M)
     ext_dlat = (uy * distance_m) / DEG_TO_M
     return (lat_to + ext_dlat, lon_to + ext_dlon)
-
-
-# Adaptive triangulation lives in O4_Surface_Mesh as
-# ``adaptive_triangulate`` and is exercised by tests/test_surface_mesh.py.
-# Phases C2 (apron) and D (junction) will be wired to call it in
-# commits 5 and 6.  The deleted inline definition below this comment
-# was a transitional copy.
-
-
