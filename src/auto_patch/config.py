@@ -1393,6 +1393,96 @@ TAXI_GRADE_WIDTH_ROLES = frozenset({
 })
 
 
+# (20260621) ROUTE-BAND WIDTH CAP — apron-spine climb law.  The runway-reach
+# feasibility band (``_runway_reach_bands``) propagates a single uniform grade
+# cap over the taxi-route graph, so the band ceiling a node can climb to is
+# computed at the 1.5 % ``TAXI_MAX_GRADE`` rate even along a narrow code-A/B
+# taxiway that is allowed 3 %.  That artificially TIGHTENS the band on narrow
+# routes (and can falsely invert a short steep route to the runway — the
+# invariant "every taxi-route centerline stays feasible to the runway").  When
+# ON, each route-graph edge carries its own cap from its taxiway code letter
+# (``taxi_grade_cap_for_letter``): narrow A/B edges 3 %, C–F 1.5 %.  Gate off
+# (or ``TAXI_GRADE_BY_WIDTH`` off, which makes every edge cap fall back to
+# 1.5 %) is byte-identical to the uniform band.  Default ON.
+TAXI_REACH_BAND_BY_WIDTH = _os.environ.get(
+    "O4_REACH_BAND_BY_WIDTH", "1") == "1"
+
+# (20260621) JUNCTION NARROW GRADE (PER-AXIS) — apron-spine climb law.  A
+# JUNCTION is the moving network the taxiways flow through, held to the uniform
+# 1.5 % cap.  But where a narrow code-A/B taxiway runs THROUGH a junction (or a
+# junction-tagged corridor sliced out of an apron — CYXY taxiway G), that
+# corridor IS the narrow taxiway and must climb at its 3 % code-A/B rate to
+# reach high terrain/buildings.  The taxi network's local climb rate is the
+# constraint that actually pins the airside complex ~10 m below terrain (the
+# aprons are welded to the corridor and cannot rise above it).  When ON, the
+# solver's per-axis junction edges that run ALONG a narrow centerline earn the
+# 3 % cap; ring/transverse edges keep 1.5 % (matching the validator's per-axis
+# cL=0.03 / cT=0.02).  ★ PER-AXIS, NOT isotropic: a blunt isotropic 3 % cap
+# destabilises the solve (the corridor tilts transversely; CYXY within 18 → 41).
+# Implemented in unified_jacobi `_build_edges`.  Default ON (the corridor climb
+# only manifests with the DEM attraction already present).
+JUNCTION_NARROW_GRADE = _os.environ.get("O4_JCT_NARROW_GRADE", "1") == "1"
+
+# (20260621) BUILDING DEM ANCHOR — apron-spine climb model (user ruling).
+# Buildings are the HEAVIEST anchor: each pad is hard-anchored FLAT at the
+# closest-to-DEM level that stays route-feasible to every runway it connects to
+# (closest-FEASIBLE-to-DEM, not raw DEM — so the surrounding pavement can always
+# reach it within grade).  This pins the high end the taxiways/aprons grade DOWN
+# from, lifting the airside complex out of the runway-anchored "bowl" (CYXY: the
+# apron/junction network sat ~10 m BELOW terrain because the runway-propagated
+# seed + cap-chain dragged it down and the soft DEM attraction was fully
+# overridden; hard-anchoring the buildings lifts taxiway G to 714-718 = the
+# 718 m buildings).  Pads not route-reachable from any runway, or whose combined
+# band is infeasible, keep their soft DEM seed (no hard pin).  Building-to-
+# building steps are allowed (independent flat pads).  Coexists with
+# TERMINAL_NATURAL_LEVELS (runs as an added hard anchor; gate OFF = the prior
+# transparent-pad behaviour, byte-identical).
+# ★ DEFAULT OFF (2026-06-21): hard-pinning buildings (even feasibility-clamped)
+# is too RIGID — the surrounding taxi network cannot always grade to a pinned
+# pad, so it forces local grade violations the relief cannot yield away (CYXY
+# within-shape 18 → 410).  This is exactly the infeasibility the transparent-pad
+# model was built to avoid.  The lift mechanism is CORRECT (it raises taxiway G
+# to the buildings) but needs a WEIGHTED / yielding form (buildings strongly
+# prefer feasible-DEM but yield locally where the network cannot reach), plus
+# per-letter caps in the feasibility band, before it can be the default.
+BUILDING_DEM_ANCHOR = _os.environ.get("O4_BUILDING_DEM_ANCHOR", "0") == "1"
+
+# (20260621) APRON FEASIBLE LIFT — apron-spine climb model (user ruling: "raise
+# the apron compromise level").  The large flat aprons cannot grade the terrain
+# rise across their width at 1%, so they sit at ONE level.  By default the solve
+# pulls that level DOWN toward the runway (a ~10 m bowl below the rim buildings).
+# When ON, each apron is instead anchored FLAT at the HIGHEST level still route-
+# feasible to every runway it connects to (the per-letter route-band ceiling — so
+# a narrow code-A/B taxi route lets it sit 3%·route above the runway), clamped to
+# DEM (never above terrain).  This lifts the whole complex UP toward the buildings;
+# the taxiways absorb the steeper descent to the runway, and taxiway G ends up near
+# building level.  Pads/aprons not route-reachable keep their soft seed.
+# ★ DEFAULT OFF (2026-06-21) — proved the lift mechanism but the flat hard-anchor
+# is the WRONG driver (pins the apron body high, troughs the centerline).  Being
+# RETIRED in favour of the centerline-driven conformance plan
+# (docs/taxi_centerline_grading_plan.md §5).  O4_APRON_FEASIBLE_LIFT=1 +
+# O4_TAXI_SPINE=1 reproduces the evaluation build.
+APRON_FEASIBLE_LIFT = _os.environ.get("O4_APRON_FEASIBLE_LIFT", "0") == "1"
+
+# (20260622) CORRIDOR SPINE CHAINS — plan P2 (docs/taxi_centerline_grading_plan
+# .md §5): extend the corridor profile to cover EVERY apt.dat taxi centerline,
+# not only the stretches that have taxi RECTS.  Where a centerline runs through
+# an apron as a stretch of promoted ROLE_JUNCTION pieces (SPINE_PIECE_ROLE_REEVAL
+# — CYXY taxiway G crosses its apron as ~7 such pieces) there is no rect, so no
+# corridor station samples/writes the NETWORK PROFILE field along it and the
+# stretch settles to raw relief (the airside "bowl").  When ON, the corridor
+# pass adds a STATION CHAIN over each such centerline's spine nodes (canonical
+# nodes within ~2 m of the line, ordered by projection) so the already-solved
+# field value is written onto those nodes and HELD — making every centerline
+# route one continuous, field-consistent profile that the surrounding apron then
+# conforms to.  Built ONLY for a centerline with ≥1 node no rect station covers
+# (the promoted-apron case); a fully rect-covered centerline is skipped, so an
+# airport without such stretches stays byte-identical.  Implemented in
+# unified_jacobi `_taxi_corridor_profiles`.  Requires NETWORK_PROFILE_MODEL +
+# TAXI_CORRIDOR_PROFILE (the field that supplies the spine values).
+CORRIDOR_SPINE_CHAINS = _os.environ.get("O4_CORRIDOR_SPINE_CHAINS", "1") == "1"
+
+
 def taxi_grade_cap_for_letter(letter, *, enabled: bool = None) -> float:
     """Max longitudinal grade (rise/run) for a taxiway of ICAO code
     ``letter``.  Code A/B (narrow, <15 m) → ``TAXI_MAX_GRADE_NARROW``

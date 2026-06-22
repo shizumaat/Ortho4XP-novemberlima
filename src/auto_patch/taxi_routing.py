@@ -49,13 +49,24 @@ class TaxiRouteGraph:
     route-band violations on a corridor profile the curve-aware model had
     legally written)."""
 
-    __slots__ = ("adj", "coord", "tol", "aug")
+    __slots__ = ("adj", "coord", "tol", "aug", "edge_cap")
 
-    def __init__(self, adj, coord, tol, aug=None):
+    def __init__(self, adj, coord, tol, aug=None, edge_cap=None):
         self.adj = adj
         self.coord = coord
         self.tol = tol
         self.aug = aug if aug is not None else set()
+        # Per-edge grade cap keyed by the SORTED node-pair (ka, kb) with
+        # ka <= kb — the rise/run a route is allowed to climb along that
+        # taxiway segment, from its ICAO code letter (narrow A/B = 3 %,
+        # C–F = 1.5 %).  Empty/absent edge → caller's uniform fallback cap.
+        # Used by ``_runway_reach_bands`` to compute width-aware band
+        # ceilings (config ``TAXI_REACH_BAND_BY_WIDTH``).
+        self.edge_cap = edge_cap if edge_cap is not None else {}
+
+    @staticmethod
+    def _ekey(ka, kb):
+        return (ka, kb) if ka <= kb else (kb, ka)
 
     def _key(self, x: float, y: float) -> Tuple[int, int]:
         return (int(round(x / self.tol)), int(round(y / self.tol)))
@@ -65,7 +76,8 @@ class TaxiRouteGraph:
         caller may AUGMENT it (e.g. with runway centerlines) without mutating a
         shared cached instance."""
         return TaxiRouteGraph({k: list(v) for k, v in self.adj.items()},
-                              dict(self.coord), self.tol, set(self.aug))
+                              dict(self.coord), self.tol, set(self.aug),
+                              dict(self.edge_cap))
 
     def nearest_key(self, x: float, y: float, plain_only: bool = False
                     ) -> Tuple[Optional[Tuple[int, int]], float]:
@@ -148,12 +160,20 @@ def build_taxi_route_graph(layout, tol_m: float = _SNAP_TOL_M
     """Build the centerline-route graph from ``layout.apt_taxi_centerlines``
     (a list of ``(LineString, ref)``).  Each consecutive centerline-vertex pair
     is an edge weighted by its length; vertices within ``tol_m`` coincide."""
+    from .config import taxi_grade_cap_for_letter
     adj: Dict[Tuple[int, int], List[Tuple[Tuple[int, int], float]]] = {}
     coord: Dict[Tuple[int, int], Tuple[float, float]] = {}
-    g = TaxiRouteGraph(adj, coord, tol_m)
+    edge_cap: Dict[Tuple[Tuple[int, int], Tuple[int, int]], float] = {}
+    g = TaxiRouteGraph(adj, coord, tol_m, edge_cap=edge_cap)
     centerlines = getattr(layout, "apt_taxi_centerlines", None) or []
+    letters = getattr(layout, "apt_taxi_letters", None) or {}
     for entry in centerlines:
         ls = entry[0] if isinstance(entry, (tuple, list)) else entry
+        ref = entry[1] if (isinstance(entry, (tuple, list))
+                           and len(entry) > 1) else None
+        # Per-segment grade cap from the taxiway's ICAO code letter (gate
+        # TAXI_GRADE_BY_WIDTH off → uniform TAXI_MAX_GRADE → byte-identical).
+        cap = float(taxi_grade_cap_for_letter(letters.get(ref)))
         try:
             cs = list(ls.coords)
         except (AttributeError, TypeError):
@@ -167,6 +187,12 @@ def build_taxi_route_graph(layout, tol_m: float = _SNAP_TOL_M
             w = math.hypot(x1 - x0, y1 - y0)
             adj.setdefault(ka, []).append((kb, w))
             adj.setdefault(kb, []).append((ka, w))
+            # A shared node between a narrow and a wider taxiway: keep the
+            # LOOSER (larger) cap on the joint edge so the climb the narrow
+            # taxiway is entitled to is never clipped by an abutting wide one.
+            ek = g._ekey(ka, kb)
+            prev = edge_cap.get(ek)
+            edge_cap[ek] = cap if prev is None else max(prev, cap)
     return g
 
 

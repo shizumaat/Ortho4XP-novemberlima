@@ -64,12 +64,13 @@ from auto_patch.config import (
     TAXI_SLACK_TERMINALS,
     TAXIWAY_MAX_GRADE_CHANGE_PER_M, TERMINAL_LEAF_LEVELS,
     TERMINAL_CHORD_MAX_GRADE, TERMINAL_CHORD_REACH_M,
-    TERMINAL_NATURAL_LEVELS,
+    TERMINAL_NATURAL_LEVELS, BUILDING_DEM_ANCHOR, APRON_FEASIBLE_LIFT,
     TERMINAL_PADS_SLOPE, WRITE_ARBITRATION)
 from auto_patch.elevation import (
     APRON_MAX_GRADE, SERVICE_ROAD_MAX_GRADE, TAXI_MAX_GRADE)
 from auto_patch.config import (
-    taxi_grade_cap_for_letter, TAXI_MAX_GRADE_NARROW)
+    taxi_grade_cap_for_letter, TAXI_MAX_GRADE_NARROW, JUNCTION_NARROW_GRADE,
+    CORRIDOR_SPINE_CHAINS)
 from auto_patch.layout import (
     ROLE_APRON, ROLE_BOUNDARY, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL, ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
@@ -223,7 +224,7 @@ _SEAM_CURV_KINK_ALLOWANCE = 2
 # → 0).  A DECAYING weight was tried first and FAILED: once it decayed the
 # pure-cap tail relaxed the network back to the low-terminal compromise
 # (HECA below-DEM unchanged).
-DEM_ATTRACTION = 0.3
+DEM_ATTRACTION = float(_os.environ.get("O4_DEM_ATTR", "0.3"))
 DEM_ATTRACTION_DECAY = 1.0
 DEM_ATTRACTION_MIN = 1e-4
 
@@ -239,7 +240,7 @@ DEM_ATTRACTION_MIN = 1e-4
 # must sit below DEM to stay within grade of a lower HARD anchor is
 # pushed back down (the spring just sets the target, the cap has the last
 # word).
-DEM_FLOOR_ATTRACTION = 0.85
+DEM_FLOOR_ATTRACTION = float(_os.environ.get("O4_DEM_FLOOR_ATTR", "0.85"))
 
 
 def _role_grade(role: str) -> float:
@@ -329,6 +330,24 @@ def solve(layout, icao: str,
     if not TERMINAL_NATURAL_LEVELS:
         _seed_terminals_from_taxi_routes(
             layout, elev, bucket_to_idx, dem_elev)
+
+    # Building DEM anchor (apron-spine climb model): hard-pin each pad FLAT at
+    # its closest-feasible-to-DEM level so it lifts the adjacent aprons/taxiway
+    # corridors out of the runway bowl.  Runs as an ADDED hard anchor alongside
+    # TERMINAL_NATURAL_LEVELS; gate OFF = byte-identical (no hard pin).
+    if BUILDING_DEM_ANCHOR:
+        n_pads9 = _anchor_buildings_at_feasible_dem(
+            layout, elev, base_hard, bucket_to_idx, dem_elev)
+        if n_pads9:
+            _mark("bldg-anchor")
+    # Raise the apron compromise level (user 2026-06-21): anchor each apron flat
+    # at its route-feasible CEILING so the whole complex lifts toward the rim
+    # buildings; the taxiways absorb the descent to the runway.
+    if APRON_FEASIBLE_LIFT:
+        n_apr9 = _anchor_aprons_at_feasible_high(
+            layout, elev, base_hard, bucket_to_idx, nodes, dem_elev)
+        if n_apr9:
+            _mark("apron-lift")
 
     _mark("seed")
     tiers = _node_tiers(layout, bucket_to_idx, n)
@@ -428,6 +447,16 @@ def solve(layout, icao: str,
             n, elev, relief_hard, relief_eg, relief_el,
             shape_constraints, _RELIEF_MAX_ITERS, tol_m)
         _mark("relief-1")
+        # Building-FLEX yield: an anchored pad that over-pins its surrounding
+        # network out of grade DROPS to the level the network can reach (taxiway
+        # grade is sacred; the pad yields, the groundside takes any step).  Pads
+        # not implicated keep their feasible-DEM lift.  No-op when no building
+        # anchor (gate off → no clusters recorded).
+        if BUILDING_DEM_ANCHOR or APRON_FEASIBLE_LIFT:
+            total_iters += _relax_buildings_and_resolve(
+                n, elev, layout, relief_hard, shape_constraints, tol_m,
+                relief_eg=relief_eg, relief_el=relief_el)
+            _mark("bldg-flex")
         if _step_dbg:
             v, w = _count_within_viol(elev, shape_constraints)
             print(f"[step] {icao} after STEP2 reverse relief+yield: "
@@ -1729,7 +1758,16 @@ def _runway_reach_bands(nodes, elev, runway_nodes, seam_nodes, all_edges, cap,
     lo = [NEG] * n
     hi = [POS] * n
     G = graph if graph is not None else shared_taxi_route_graph(layout)
-    capm = cap * (1.0 + (noise_frac or 0.0))
+    nm = 1.0 + (noise_frac or 0.0)
+    capm = cap * nm
+    # Per-edge route caps (apron-spine climb law): each taxiway segment may
+    # climb at its OWN code-letter rate (narrow A/B 3 %, C–F 1.5 %), so the
+    # band ceiling rises faster along a narrow route.  Off-graph entry/exit
+    # gaps keep the uniform ``capm``.  Gate off / no edge caps → uniform band
+    # (byte-identical).
+    from auto_patch.config import TAXI_REACH_BAND_BY_WIDTH as _BAND_BY_W
+    _ecap = (G.edge_cap if (_BAND_BY_W and getattr(G, "edge_cap", None))
+             else None)
     anchor_nodes = set(runway_nodes)
     if extra_anchors:
         anchor_nodes |= set(extra_anchors)
@@ -1801,7 +1839,9 @@ def _runway_reach_bands(nodes, elev, runway_nodes, seam_nodes, all_edges, cap,
                 if d > dist.get(u, POS):
                     continue
                 for v, w in G.adj.get(u, ()):  # type: ignore[union-attr]
-                    nd = d + capm * w
+                    ew = (_ecap.get(G._ekey(u, v), cap) if _ecap is not None
+                          else cap) * nm
+                    nd = d + ew * w
                     if nd < dist.get(v, POS):
                         dist[v] = nd
                         if want_prov and u in src:
@@ -4554,7 +4594,8 @@ def _build_shape_constraints(layout, bucket_to_idx):
             # longitudinal-along-route + transverse) and are dropped;
             # ring-adjacent pairs always survive (the physical edge).
             if s.role == ROLE_JUNCTION and _PER_AXIS_JUNCTIONS:
-                axes = _collect_junction_axes(layout, s.polygon)
+                axes = [a for a, _c in _collect_junction_axes(
+                    layout, s.polygon)]
                 if axes:
                     from shapely.geometry import Point as _Pt
                     m2 = len(coords)
@@ -6909,8 +6950,8 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
         ax_list = jaxes_cache.get(ji)
         if ax_list is None:
             try:
-                ax_list = _collect_junction_axes(
-                    layout, _Polygon(juncs[ji]["ring"]))
+                ax_list = [a for a, _c in _collect_junction_axes(
+                    layout, _Polygon(juncs[ji]["ring"]))]
             except _GEOM_EXC:
                 ax_list = []
             jaxes_cache[ji] = ax_list
@@ -7103,8 +7144,8 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
             ax_list = jaxes_cache.get(ji)
             if ax_list is None:
                 try:
-                    ax_list = _collect_junction_axes(
-                        layout, _Polygon(juncs[ji]["ring"]))
+                    ax_list = [a for a, _c in _collect_junction_axes(
+                        layout, _Polygon(juncs[ji]["ring"]))]
                 except _GEOM_EXC:
                     ax_list = []
                 jaxes_cache[ji] = ax_list
@@ -7397,6 +7438,109 @@ def _taxi_corridor_profiles(layout, elev, bucket_to_idx, base_hard,
     else:
         chain_data = [cd for cd in chain_data
                       if cd["L"] >= 30.0 and len(cd["stations"]) >= 3]
+
+    # ── SPINE-STATION CHAINS (plan P2: extend corridor coverage to ALL
+    # routes).  The rect-based chains above cover taxiway centerlines that
+    # have RECTS, but a centerline running through an apron as a stretch of
+    # promoted ROLE_JUNCTION pieces (SPINE_PIECE_ROLE_REEVAL — CYXY taxiway
+    # G crosses its apron as ~7 such pieces) has NO rect there, so no station
+    # samples/writes the field along it and the stretch settles to raw relief
+    # (the airside "bowl").  The NETWORK PROFILE field F (built next, over the
+    # FULL apt_taxi_centerlines graph) already solves a smooth per-letter-
+    # capped profile along the whole route — the missing piece is a station ON
+    # the centerline through the no-rect stretch to carry the field value onto
+    # its nodes and HOLD it (so the apron conforms to it instead of the
+    # corridor sinking into the apron).  Identify the centerline's spine nodes
+    # (canonical nodes within _SPINE_TOL of the line, ordered by projection —
+    # the prototype from _anchor_aprons_at_feasible_high) and add a station
+    # chain over them.  Built ONLY for a centerline with ≥1 node no rect
+    # station covers (the promoted-apron case); a fully rect-covered centerline
+    # is skipped so airports without such stretches stay byte-identical.
+    # chain=[]/mouth_st=[] (no rect body to interpolate); first-writer-wins in
+    # _write means the spine only fills the uncovered nodes, and its junctions
+    # enter j_sts below so their interiors are band-exempt in the enforce (the
+    # held centerline is the route truth there).
+    if (CORRIDOR_SPINE_CHAINS and nodes is not None
+            and getattr(layout, "apt_taxi_centerlines", None)):
+        from shapely.strtree import STRtree as _STRtree
+        from shapely.geometry import Point as _SPt
+        _covered: set = set()
+        for cd in chain_data:
+            for st in cd["stations"]:
+                _covered |= st["nodes"]
+        _node_junc: dict = {}
+        for ji9, J9 in enumerate(juncs):
+            for i9 in J9["nodes"]:
+                _node_junc.setdefault(i9, ji9)
+        _spts = [_SPt(x, y) for (x, y) in nodes]
+        _stree = _STRtree(_spts)
+        _SPINE_TOL = 2.0
+        n_spine = 0
+        for item in (getattr(layout, "apt_taxi_centerlines", None) or []):
+            ln = item[0] if isinstance(item, (tuple, list)) else item
+            ref = (item[1] if (isinstance(item, (tuple, list))
+                               and len(item) > 1) else None)
+            if ln is None or ln.is_empty:
+                continue
+            if ref and str(ref).upper().startswith("SVC"):
+                continue            # ground-vehicle route, not a taxi spine
+            try:
+                cand = _stree.query(ln.buffer(_SPINE_TOL))
+            except _GEOM_EXC:
+                continue
+            on_line: list = []
+            for qi in cand:
+                i = int(qi)
+                try:
+                    if ln.distance(_spts[i]) <= _SPINE_TOL:
+                        on_line.append((ln.project(_spts[i]), i))
+                except _GEOM_EXC:
+                    continue
+            on_line.sort()
+            # dedup nodes; merge sub-1 m neighbours into one station (the
+            # s73 sub-5 m spiral lesson the rect path also guards)
+            sp_sts: list = []
+            seen: set = set()
+            for pr, i in on_line:
+                if i in seen:
+                    continue
+                seen.add(i)
+                if sp_sts and pr - sp_sts[-1]["d"] < 1.0:
+                    sp_sts[-1]["nodes"].add(i)
+                    continue
+                sp_sts.append({"d": pr, "nodes": {i}, "mid": None,
+                               "halfw": 4.0, "junc": _node_junc.get(i)})
+            if len(sp_sts) < 2 or sp_sts[-1]["d"] < 8.0:
+                continue
+            allnodes: set = set()
+            for st in sp_sts:
+                allnodes |= st["nodes"]
+            if allnodes <= _covered:
+                continue            # fully rect-covered → no spine needed
+            elevs: list = []
+            hard: list = []
+            for st in sp_sts:
+                ns = st["nodes"]
+                st["mid"] = (sum(nodes[i][0] for i in ns) / len(ns),
+                             sum(nodes[i][1] for i in ns) / len(ns))
+                # a merged station's junc: prefer a real junction member
+                if st["junc"] is None:
+                    for i in ns:
+                        if i in _node_junc:
+                            st["junc"] = _node_junc[i]
+                            break
+                elevs.append(sum(elev[i] for i in ns) / len(ns))
+                hard.append(any(base_hard[i] or i in rwy_nodes for i in ns))
+            cap = float(taxi_grade_cap_for_letter(_letters.get(ref)))
+            chain_data.append({
+                "chain": [], "stations": sp_sts, "mouth_st": [],
+                "gaps": [], "L": sp_sts[-1]["d"], "elevs": elevs,
+                "hard": hard, "cap": cap,
+                "anchored": [h or k == 0 or k == len(sp_sts) - 1
+                             for k, h in enumerate(hard)]})
+            n_spine += 1
+        if _os.environ.get("O4_CORRIDOR_DEBUG") == "1":
+            print(f"[corr] spine-station chains added: {n_spine}")
 
     # ── STAGE B: JOINT CORRIDOR-NETWORK TIES.  Where chains meet they
     # must AGREE — the shared elevation is a COMMON variable:
@@ -9261,6 +9405,379 @@ def _build_node_list(layout):
     return nodes, bucket_to_idx
 
 
+def _anchor_buildings_at_feasible_dem(layout, elev, base_hard, bucket_to_idx,
+                                      dem_elev, cap=TAXI_MAX_GRADE) -> int:
+    """Hard-anchor each building FLAT at the closest-to-DEM level that stays
+    route-feasible to every runway it connects to (apron-spine model, user
+    2026-06-21).
+
+    Buildings are the HEAVIEST anchor: pinning their feasible-DEM level pulls
+    the adjacent aprons + taxi corridors UP out of the runway-anchored bowl —
+    the high end the taxiways grade down from.  The level is closest-FEASIBLE-
+    to-DEM (clamped to the route-reach band), NOT raw DEM, so the surrounding
+    pavement can always reach the pad within grade (raw DEM hard-anchoring
+    over-pins pads above their reachable ceiling → airport-wide grade
+    violations).  Edge-coupled pads anchor as ONE flat unit at their combined
+    band; building-to-building steps are allowed (independent pads).  A pad not
+    route-reachable from any runway keeps its soft DEM seed (no hard pin).
+    Mutates ``elev`` + ``base_hard``; returns the number of pads anchored.
+    """
+    from auto_patch.taxi_routing import shared_taxi_route_graph
+    cps = layout.canonical_points
+    G = shared_taxi_route_graph(layout)
+    if not G.coord:
+        return 0
+    # Runway connection points: a runway vertex shared with non-runway pavement.
+    nonrwy: set = set()
+    for s in layout.shapes:
+        if (s.role == ROLE_RUNWAY or s.role not in PAVEMENT_ROLES
+                or s.polygon is None or s.polygon.is_empty):
+            continue
+        for (x, y) in _open_ring(list(s.polygon.exterior.coords)):
+            i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+            if i is not None:
+                nonrwy.add(i)
+    rconn: list = []
+    for s in layout.shapes:
+        if s.role != ROLE_RUNWAY or s.polygon is None or s.polygon.is_empty:
+            continue
+        for (x, y) in _open_ring(list(s.polygon.exterior.coords)):
+            i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+            if i is not None and i in nonrwy:
+                dm, sg = G.distances_from((x, y))
+                rconn.append((dm, sg, elev[i], s.ref or ""))
+    if not rconn:
+        return 0
+    capm = cap * (1.0 + _ROUTE_NOISE_FRAC)
+    parent: dict = {}
+
+    def _find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    # Per-node route-feasible band [lo, hi] (intersection over connected
+    # runways), unioning each pad into edge-coupled clusters.
+    node_band: dict = {}
+    for s in layout.shapes:
+        if s.role != ROLE_BUILDING or s.polygon is None or s.polygon.is_empty:
+            continue
+        ring = _open_ring(list(s.polygon.exterior.coords))
+        idxs = [bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+                for (x, y) in ring]
+        valid = [i for i in idxs if i is not None]
+        if len(valid) < 2:
+            continue
+        first = valid[0]
+        for (x, y), i in zip(ring, idxs):
+            if i is None:
+                continue
+            parent[_find(first)] = _find(i)
+            if i in node_band:
+                continue
+            tkey, tgap = G.nearest_key(x, y)
+            lo_n, hi_n = float("-inf"), float("inf")
+            if tkey is not None:
+                best: dict = {}
+                for dm, sg, eR, ref in rconn:
+                    d = dm.get(tkey)
+                    if d is None:
+                        continue
+                    route = d + sg + tgap
+                    if ref not in best or route < best[ref][0]:
+                        best[ref] = (route, eR)
+                for route, eR in best.values():
+                    lo_n = max(lo_n, eR - capm * route)
+                    hi_n = min(hi_n, eR + capm * route)
+            node_band[i] = (lo_n, hi_n)
+    # Clusters → combined band → flat closest-to-DEM level → HARD anchor.
+    clusters: dict = {}
+    for i, (lo_n, hi_n) in node_band.items():
+        c = clusters.setdefault(_find(i), {"nodes": set(),
+                                           "lo": float("-inf"),
+                                           "hi": float("inf")})
+        c["nodes"].add(i)
+        c["lo"] = max(c["lo"], lo_n)
+        c["hi"] = min(c["hi"], hi_n)
+    n_pads = 0
+    anchored: list = []          # [(frozenset(nodes), level)] for the flex pass
+    for c in clusters.values():
+        lo, hi = c["lo"], c["hi"]
+        if lo == float("-inf"):
+            continue            # not route-reachable from any runway → soft
+        nodes_c = c["nodes"]
+        dvals = sorted(dem_elev[i] for i in nodes_c if dem_elev[i] is not None)
+        if not dvals:
+            continue
+        dem_med = dvals[len(dvals) // 2]
+        level = (min(max(dem_med, lo), hi) if lo <= hi
+                 else 0.5 * (lo + hi))      # infeasible squeeze → midpoint
+        for i in nodes_c:
+            elev[i] = level
+            base_hard[i] = True
+        anchored.append((frozenset(nodes_c), level))
+        n_pads += 1
+    # Record the anchored clusters so the building-FLEX pass can yield (drop) a
+    # pad that over-pins its surrounding network out of grade.
+    layout._building_anchor_clusters = anchored  # type: ignore[attr-defined]
+    return n_pads
+
+
+def _anchor_aprons_at_feasible_high(layout, elev, base_hard, bucket_to_idx,
+                                    nodes, dem_elev) -> int:
+    """Anchor each apron FLAT at the HIGHEST level still route-feasible to every
+    runway it connects to (apron-spine "raise the compromise level" ruling, user
+    2026-06-21), clamped to DEM (never above terrain).
+
+    The wide flat aprons can't grade the terrain rise across their width, so they
+    sit at one level; the default solve pulls it DOWN to the runway (a bowl below
+    the rim buildings).  Anchoring each apron at its route-band CEILING instead
+    (``_runway_reach_bands`` — per-letter caps, so a narrow code-A/B taxi route
+    lets the apron sit 3%·route above the runway) lifts the whole complex UP
+    toward the buildings; the taxiways then grade DOWN to the runway (they're long
+    enough), and taxiway G rises with the apron it is welded to.  Edge-coupled
+    aprons anchor as ONE unit at their shared (min) ceiling so no step opens
+    between them.  An apron not route-reachable keeps its soft seed.  Mutates
+    ``elev`` + ``base_hard``; records clusters for the flex; returns #anchored.
+    """
+    n = len(nodes)
+    cps = layout.canonical_points
+    runway_nodes: set = set()
+    for s in layout.shapes:
+        if (s.role == ROLE_RUNWAY and s.polygon is not None
+                and not s.polygon.is_empty):
+            for (x, y) in _open_ring(list(s.polygon.exterior.coords)):
+                i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+                if i is not None:
+                    runway_nodes.add(i)
+    if not runway_nodes:
+        return 0
+    lo, hi = _runway_reach_bands(
+        nodes, elev, runway_nodes, set(), [], TAXI_MAX_GRADE, layout,
+        noise_frac=_ROUTE_NOISE_FRAC)
+    INF = float("inf")
+
+    # ── SPINE pass: grade each taxi centerline through the apron as a smooth
+    # 1-D profile (the apron-spine model).  A centerline node climbs along the
+    # route, so its route-band ceiling RISES along the spine; cap-erode that
+    # ceiling (the highest <= per-letter-cap profile that stays <= ceiling) →
+    # a smooth ramp, and HARD-hold it so the apron grades 1% DOWN to it instead
+    # of dragging it flat.  The corridor BAND (apron nodes within a taxi-width
+    # of a centerline) is left FREE of the flat apron anchor so it can follow
+    # the spine.
+    from shapely.strtree import STRtree
+    from shapely.geometry import Point as _SPt
+    _pts = [_SPt(x, y) for (x, y) in nodes]
+    _tree = STRtree(_pts)
+    letters = getattr(layout, "apt_taxi_letters", None) or {}
+    _SPINE_TOL = 2.0
+    spine_band: set = set()
+    spine_nodes: set = set()
+    _spine_on = _os.environ.get("O4_TAXI_SPINE", "0") == "1"
+    for item in (getattr(layout, "apt_taxi_centerlines", None) or []) \
+            if _spine_on else []:
+        ln = item[0] if isinstance(item, tuple) else item
+        ref = item[1] if (isinstance(item, tuple) and len(item) > 1) else None
+        if ln is None or ln.is_empty:
+            continue
+        if ref and str(ref).upper().startswith("SVC"):
+            continue                       # ground-vehicle route, not a spine
+        cap = float(taxi_grade_cap_for_letter(letters.get(ref)))
+        on_line: list = []
+        try:
+            cand = _tree.query(ln.buffer(JUNCTION_AXIS_PERP_TOL_M))
+        except _GEOM_EXC:
+            continue
+        for qi in cand:
+            i = int(qi)
+            try:
+                d = ln.distance(_pts[i])
+            except _GEOM_EXC:
+                continue
+            if d <= JUNCTION_AXIS_PERP_TOL_M:
+                spine_band.add(i)
+            if d <= _SPINE_TOL:
+                on_line.append((ln.project(_pts[i]), i))
+        on_line.sort()
+        seen: set = set()
+        ordered: list = []
+        for pr, i in on_line:
+            if i in seen:
+                continue
+            seen.add(i)
+            ordered.append((pr, i))
+        if len(ordered) < 2:
+            continue
+        # Target = min(DEM, ceiling) per spine node (the lifted level).
+        tgt = []
+        for _pr, i in ordered:
+            de = dem_elev[i]
+            ci = hi[i] if i < n else INF
+            base = de if de is not None else ci
+            tgt.append(min(base, ci) if ci < INF
+                       else (base if base is not None else elev[i]))
+        projs = [pr for pr, _ in ordered]
+        prof = list(tgt)
+        for k in range(1, len(prof)):           # cap-erode forward
+            prof[k] = min(prof[k],
+                          prof[k - 1] + cap * abs(projs[k] - projs[k - 1]))
+        for k in range(len(prof) - 2, -1, -1):  # cap-erode backward
+            prof[k] = min(prof[k],
+                          prof[k + 1] + cap * abs(projs[k + 1] - projs[k]))
+        for (_pr, i), v in zip(ordered, prof):
+            elev[i] = v
+            base_hard[i] = True
+            spine_nodes.add(i)
+        if _os.environ.get("O4_SPINE_DEBUG") == "1" and ref:
+            _hs = [(round(pr), round(hi[i], 1) if hi[i] < INF else None,
+                    round(v, 1)) for (pr, i), v in zip(ordered, prof)]
+            print(f"[spine] ref={ref} cap={cap*100:.0f}% n={len(ordered)} "
+                  f"(proj,ceil,prof)={_hs[:14]}")
+
+    # Edge-coupled apron clusters (shared boundary node → one level, no step).
+    parent: dict = {}
+
+    def _find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    apron_rings: list = []
+    for s in layout.shapes:
+        if s.role != ROLE_APRON or s.polygon is None or s.polygon.is_empty:
+            continue
+        ring = _open_ring(list(s.polygon.exterior.coords))
+        idxs = [bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+                for (x, y) in ring]
+        valid = [i for i in idxs if i is not None]
+        if len(valid) < 3:
+            continue
+        first = valid[0]
+        for i in valid:
+            parent[_find(first)] = _find(i)
+        apron_rings.append(valid)
+    clusters: dict = {}
+    for valid in apron_rings:
+        r = _find(valid[0])
+        clusters.setdefault(r, set()).update(valid)
+    anchored: list = []
+    # When the spine pass is driving the lift, the taxiway centerlines are the
+    # held smooth ridges and the aprons CONFORM (grade up) to them — so do NOT
+    # flat-anchor the apron body (that pins it high and lets the centerline sink
+    # into a trough, the very roughness we're removing).  Skip the apron anchor.
+    _anchor_apron_body = not (_os.environ.get("O4_TAXI_SPINE", "0") == "1"
+                              and _os.environ.get("O4_APRON_NOANCHOR", "1")
+                              == "1")
+    for nodes_c in (clusters.values() if _anchor_apron_body else ()):
+        # Leave the spine corridor band FREE — those nodes grade 1% to the held
+        # spine; only the wide apron BODY away from any centerline is anchored.
+        body = [i for i in nodes_c if i not in spine_band]
+        reach = [i for i in body if hi[i] < INF]
+        if not reach:
+            continue                       # not route-reachable → soft seed
+        # One flat level per cluster body (the min ceiling), clamped to DEM and
+        # the floor.
+        ceil = min(hi[i] for i in reach)
+        floor = max((lo[i] for i in body), default=-INF)
+        dvals = sorted(dem_elev[i] for i in body if dem_elev[i] is not None)
+        if not dvals:
+            continue
+        level = min(dvals[len(dvals) // 2], ceil)
+        if level < floor:
+            level = floor
+        for i in body:
+            elev[i] = level
+            base_hard[i] = True
+        anchored.append((frozenset(body), level))
+    layout._building_anchor_clusters = anchored  # reuse the flex's cluster slot
+    return len(anchored)
+
+
+def _relax_buildings_and_resolve(n, elev, layout, relief_hard, shape_constraints,
+                                 tol_m, relief_eg=None, relief_el=None) -> int:
+    """Building-FLEX yield (apron-spine model): a building hard-anchored at its
+    feasible-DEM level is the heaviest anchor, but where pinning it that high
+    forces the surrounding taxi/apron network OUT of grade (a local squeeze the
+    route band cannot see), the BUILDING must yield — taxiway grade is sacred,
+    and a pad sitting a little below terrain (with the groundside taking the
+    step) is the accepted cost.  So: find each anchored pad on the HIGH side of
+    a residual within-shape violation, DROP it to the highest level still in
+    grade of its violating neighbours, re-anchor it there (flat), re-run the
+    relief, and COMMIT only if the worst violation strictly improves (else
+    revert).  Iterates until no anchored pad is adjacent to a violation.  Pads
+    NOT implicated keep their feasible-DEM level (the lift is preserved where it
+    is feasible).  Returns sweeps used."""
+    clusters = list(getattr(layout, "_building_anchor_clusters", None) or [])
+    if not clusters:
+        return 0
+    pav_edges = [e for sc in shape_constraints for e in sc["edges"]]
+    comply = max(tol_m, _SPREAD_COMPLY_TOL_M)
+    w0, c0, _t0 = _within_excess_stats(elev, pav_edges, comply)
+    if c0 == 0:
+        return 0
+    # node -> index of the anchored cluster owning it (for fast lookup).
+    owner: dict = {}
+    for ci, (nodes_c, _lvl) in enumerate(clusters):
+        for i in nodes_c:
+            owner[i] = ci
+    total = 0
+    held = [lvl for _nodes, lvl in clusters]      # current pad levels
+    released = [False] * len(clusters)
+    _bdbg = _os.environ.get("O4_BLDG_FLEX_DEBUG") == "1"
+    if _bdbg:
+        nv = sum(1 for (i, j, c) in pav_edges
+                 if c > 0 and abs(elev[i] - elev[j]) - c > comply)
+        nv_b = sum(1 for (i, j, c) in pav_edges
+                   if c > 0 and abs(elev[i] - elev[j]) - c > comply
+                   and (i in owner or j in owner))
+        print(f"[bldg-flex] clusters={len(clusters)} within-viol={nv} "
+              f"of-which-touch-a-pad={nv_b} c0={c0} w0={w0:.2f}")
+    for _round in range(6):
+        # For each violating edge with exactly one endpoint an anchored pad on
+        # the HIGH side, the pad must drop to <= other_elev + c to clear it.
+        drop: dict = {}                            # cluster -> new max level
+        for (i, j, c) in pav_edges:
+            if c <= 0:
+                continue
+            if abs(elev[i] - elev[j]) - c <= comply:
+                continue
+            for hi_n, lo_n in ((i, j), (j, i)):
+                ci = owner.get(hi_n)
+                if ci is None or released[ci] or owner.get(lo_n) is not None:
+                    continue
+                if elev[hi_n] <= elev[lo_n]:
+                    continue                       # pad is the LOW side — skip
+                cand = elev[lo_n] + c
+                if ci not in drop or cand < drop[ci]:
+                    drop[ci] = cand
+        if not drop:
+            break
+        snapshot = list(elev)
+        for ci, new_lvl in drop.items():
+            new_lvl = min(new_lvl, held[ci])       # only ever DROP, never raise
+            for i in clusters[ci][0]:
+                elev[i] = new_lvl                  # pad stays HARD (in relief_hard)
+            held[ci] = new_lvl
+        total += _directional_relief(
+            n, elev, relief_hard, relief_eg, relief_el,
+            shape_constraints, _RELIEF_MAX_ITERS, tol_m)
+        w1, c1, _t1 = _within_excess_stats(elev, pav_edges, comply)
+        if c1 < c0 or (c1 == c0 and w1 < w0 - 1e-6):
+            c0, w0 = c1, w1
+            for ci in drop:
+                released[ci] = True                # don't re-drop the same pad
+            if c0 == 0:
+                break
+        else:
+            elev[:] = snapshot                     # no improvement → revert
+            break
+    return total
+
+
 def _seed_terminals_from_taxi_routes(layout, elev, bucket_to_idx, dem_elev,
                                      cap=TAXI_MAX_GRADE) -> int:
     """Pre-solve terminal SEED from taxi-route grade feasibility (user 2026-06-09).
@@ -9769,9 +10286,13 @@ JUNCTION_AXIS_PERP_TOL_M = 15.0  # taxi half-width + small slack
 
 
 def _collect_junction_axes(layout, polygon):
-    """Return every centerline / runway long-axis that passes
-    through ``polygon`` — used by ``_build_edges`` to apply
-    per-axis grade constraints to a junction.
+    """Return ``[(axis_LineString, grade_cap)]`` for every centerline /
+    runway long-axis passing through ``polygon`` — used by ``_build_edges``
+    to apply per-axis grade constraints to a junction.  ``grade_cap`` is the
+    taxiway's code-letter cap (narrow A/B 3 %, C–F 1.5 % via
+    ``taxi_grade_cap_for_letter``); runway long-axes carry ``TAXI_MAX_GRADE``.
+    A junction edge running ALONG a narrow axis earns that axis's looser cap
+    (apron-spine climb law) so a code-A/B corridor can climb at 3 %.
 
     Sources:
     * ``layout.apt_taxi_centerlines`` — full apt.dat taxi network.
@@ -9780,14 +10301,17 @@ def _collect_junction_axes(layout, polygon):
     """
     from shapely.geometry import LineString
     axes = []
+    letters = getattr(layout, "apt_taxi_letters", None) or {}
     apt_lines = getattr(layout, "apt_taxi_centerlines", None) or []
     for item in apt_lines:
         ln = item[0] if isinstance(item, tuple) else item
+        ref = item[1] if (isinstance(item, tuple) and len(item) > 1) else None
         if ln is None or ln.is_empty:
             continue
         try:
             if polygon.intersects(ln):
-                axes.append(ln)
+                axes.append((ln, float(taxi_grade_cap_for_letter(
+                    letters.get(ref)))))
         except _GEOM_EXC:
             continue
     for s2 in layout.shapes:
@@ -9810,10 +10334,35 @@ def _collect_junction_axes(layout, polygon):
         b_mid = (0.5 * (rc[1][0] + rc[2][0]),
                  0.5 * (rc[1][1] + rc[2][1]))
         try:
-            axes.append(LineString([a_mid, b_mid]))
+            axes.append((LineString([a_mid, b_mid]), TAXI_MAX_GRADE))
         except _GEOM_EXC:
             continue
     return axes
+
+
+def _edge_narrow_cap(xi, yi, xj, yj, axes, gr):
+    """Loosest grade cap among the NARROW axes this edge runs ALONG — both
+    endpoints within ``JUNCTION_AXIS_PERP_TOL_M`` of the axis AND most of the
+    edge length is along-axis (not across it) — else ``gr``.  Lets a junction
+    edge running along a code-A/B centerline climb at its 3 % rate while
+    ring/transverse edges keep the 1.5 % role cap (PER-AXIS, not isotropic —
+    the isotropic form lets the corridor tilt transversely and destabilises the
+    solve)."""
+    from shapely.geometry import Point
+    chord = math.hypot(xj - xi, yj - yi)
+    if chord < 0.1:
+        return gr
+    best = gr
+    pi = Point(xi, yi)
+    pj = Point(xj, yj)
+    for ax, ax_cap in axes:
+        if ax_cap <= best:
+            continue
+        if (ax.distance(pi) <= JUNCTION_AXIS_PERP_TOL_M
+                and ax.distance(pj) <= JUNCTION_AXIS_PERP_TOL_M
+                and abs(ax.project(pi) - ax.project(pj)) >= 0.6 * chord):
+            best = ax_cap
+    return best
 
 
 def _build_edges(layout, bucket_to_idx, roles=None, add_runway_anchor=True
@@ -9883,19 +10432,35 @@ def _build_edges(layout, bucket_to_idx, roles=None, add_runway_anchor=True
         m = len(coords)
         node_idx = [bucket_to_idx.get(layout.canonical_points.get_or_add(float(x), float(y)))
                     for x, y in coords]
+        is_rect = (s.role in SLOPING_RECT_ROLES
+                   or s.role in (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING))
+        # Converging axes (junction always; apron when per-axis).  Collected
+        # BEFORE the ring edges so a ring edge running ALONG a narrow (code-A/B)
+        # centerline can take that axis's looser 3% cap too — otherwise the
+        # 1.5% ring edge would pin the along-axis pair via _add_edge's
+        # tighter-cap-wins rule (apron-spine climb law, JUNCTION_NARROW_GRADE).
+        if not is_rect and s.role == ROLE_JUNCTION:
+            axes = _collect_junction_axes(layout, s.polygon)
+        elif not is_rect and s.role == ROLE_APRON and _PER_AXIS_JUNCTIONS:
+            axes = _collect_junction_axes(layout, s.polygon)
+        else:
+            axes = []
+        narrow_axes = (JUNCTION_NARROW_GRADE and s.role == ROLE_JUNCTION
+                       and any(c > gr for _, c in axes))
         # Ring edges (every shape).
         for i in range(m):
             j = (i + 1) % m
             x1, y1 = coords[i]
             x2, y2 = coords[j]
             length = math.hypot(x2 - x1, y2 - y1)
-            _add_edge(node_idx[i], node_idx[j], length, gr)
+            cap_ij = (_edge_narrow_cap(x1, y1, x2, y2, axes, gr)
+                      if narrow_axes else gr)
+            _add_edge(node_idx[i], node_idx[j], length, cap_ij)
         # Rects / runways / runway-crossings: ring-only, no spatial
         # pairs.  Runway-crossings are HARD-anchored via the
         # runway-interpolated ``node_altitudes`` seed; spatial
         # edges would constrain them needlessly.
-        if (s.role in SLOPING_RECT_ROLES
-                or s.role in (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING)):
+        if is_rect:
             continue
         # Junction / apron / terminal: all-pair within the polygon.
         # Per user 2026-05-18: "a junction should not exceed 1.5 %
@@ -9915,17 +10480,10 @@ def _build_edges(layout, bucket_to_idx, roles=None, add_runway_anchor=True
         # the all-pair cliff guard still holds off-route.  Aprons /
         # terminals are true multi-directional surfaces and keep pure
         # Euclidean.
-        # Junctions always collect their converging axes (arc-lengthening
-        # + diagonal-drop below).  Aprons collect taxilane axes only when
-        # the per-axis model is active (session 47): along-lane pairs get
-        # the looser arc length so an apron can grade along a taxilane,
-        # while the apron BODY (no shared lane) keeps its all-pair cap.
-        if s.role == ROLE_JUNCTION:
-            axes = _collect_junction_axes(layout, s.polygon)
-        elif s.role == ROLE_APRON and _PER_AXIS_JUNCTIONS:
-            axes = _collect_junction_axes(layout, s.polygon)
-        else:
-            axes = []
+        # (Axes were collected above, before the ring edges.)  Junctions use
+        # them for arc-lengthening + diagonal-drop + the per-axis narrow cap;
+        # aprons use along-lane arc length only (the body keeps its all-pair
+        # cap).
         for i in range(m):
             xi, yi = coords[i]
             for j in range(i + 2, m):
@@ -9934,10 +10492,11 @@ def _build_edges(layout, bucket_to_idx, roles=None, add_runway_anchor=True
                 xj, yj = coords[j]
                 length = math.hypot(xj - xi, yj - yi)
                 along_axis = False
+                pair_cap = gr
                 if axes:
                     pi = Point(xi, yi)
                     pj = Point(xj, yj)
-                    for ax in axes:
+                    for ax, ax_cap in axes:
                         if (ax.distance(pi) <= JUNCTION_AXIS_PERP_TOL_M
                                 and ax.distance(pj)
                                 <= JUNCTION_AXIS_PERP_TOL_M):
@@ -9945,6 +10504,10 @@ def _build_edges(layout, bucket_to_idx, roles=None, add_runway_anchor=True
                             if arc > length:
                                 length = arc
                             along_axis = True
+                            # Per-axis narrow cap: a pair running along a
+                            # code-A/B centerline climbs at 3% (junctions only).
+                            if narrow_axes and ax_cap > pair_cap:
+                                pair_cap = ax_cap
                 # Per-axis junctions (user 2026-05-22): the inter-centerline
                 # DIAGONAL is an unregulated direction (ICAO Annex 14 §3.9 /
                 # EASA CS-ADR-DSN.D.265/.280 regulate LONGITUDINAL along the
@@ -9963,7 +10526,7 @@ def _build_edges(layout, bucket_to_idx, roles=None, add_runway_anchor=True
                 if (_PER_AXIS_JUNCTIONS and s.role == ROLE_JUNCTION
                         and axes and not along_axis):
                     continue
-                _add_edge(node_idx[i], node_idx[j], length, gr)
+                _add_edge(node_idx[i], node_idx[j], length, pair_cap)
 
     # ── Taxi → runway anchor (user 2026-05-22, revives the dormant
     # TAXI_ANCHOR_DIST_M).  A taxi connector approaching a runway must

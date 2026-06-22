@@ -628,9 +628,16 @@ def apply_junction_centerline_spine(layout) -> int:
             # (115 m from any taxiway), freezing them at terrain and
             # defeating the building-flatten.  Junction pieces are NOT
             # collected — junctions ARE the taxi network and keep their
-            # reach bands (the OMAA waving fix needs them).  A piece promoted
-            # to junction above is likewise excluded (it IS taxi network).
-            if piece_role == ROLE_APRON:
+            # reach bands (the OMAA waving fix needs them).
+            #
+            # Gate by the PARENT role (s.role), not the piece role: a piece
+            # promoted to junction above is still an apron-corridor and keeps
+            # its apron sibling's flexible band treatment.  This isolates the
+            # re-evaluation to PURELY the grade cap (apron 1% -> junction
+            # taxi/3%) — the solver's reach-band logic stays byte-identical to
+            # gate-off, so the only thing the promotion changes is which cap
+            # the field is held to.
+            if s.role == ROLE_APRON:
                 apron_pts.extend(_open(list(f.exterior.coords)))
             n_pieces += 1
         n_done += 1
