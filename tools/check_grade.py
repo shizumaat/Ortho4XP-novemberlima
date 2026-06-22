@@ -106,6 +106,12 @@ except Exception:
 _NODE_RE = re.compile(
     r"<node id='(-?\d+)'[^>]*lat='([^']+)'[^>]*lon='([^']+)'"
 )
+# A node carrying a per-node ``alt_abs`` tag (the backward-compatible
+# replacement for the ``node_altitudes`` way tag): the opening <node ...>
+# is NOT self-closing and is immediately followed by its alt_abs child.
+_NODE_ALT_RE = re.compile(
+    r"<node id='(-?\d+)'[^>]*?>\s*<tag k='alt_abs' v='([^']+)'", re.S
+)
 _WAY_RE = re.compile(r"<way id='(-?\d+)'[^>]*>(.*?)</way>", re.S)
 _ND_RE = re.compile(r"<nd ref='(-?\d+)'")
 _TAG_RE = re.compile(r"<tag k='([^']+)' v='([^']+)'")
@@ -128,6 +134,12 @@ def _parse_osm(path: Path) -> Tuple[Dict[str, Tuple[float, float]],
     nodes: Dict[str, Tuple[float, float]] = {}
     for m in _NODE_RE.finditer(txt):
         nodes[m.group(1)] = (float(m.group(2)), float(m.group(3)))
+    node_alt: Dict[str, float] = {}
+    for m in _NODE_ALT_RE.finditer(txt):
+        try:
+            node_alt[m.group(1)] = float(m.group(2))
+        except ValueError:
+            pass
     ways: List[Way] = []
     for m in _WAY_RE.finditer(txt):
         wid = m.group(1)
@@ -136,7 +148,7 @@ def _parse_osm(path: Path) -> Tuple[Dict[str, Tuple[float, float]],
         if len(nids) < 3:
             continue
         tags = dict(_TAG_RE.findall(body))
-        elevs = _derive_per_vertex_elevations(nids, tags)
+        elevs = _derive_per_vertex_elevations(nids, tags, node_alt)
         ways.append(Way(
             wid=wid,
             role=tags.get("role", ""),
@@ -149,20 +161,13 @@ def _parse_osm(path: Path) -> Tuple[Dict[str, Tuple[float, float]],
     return nodes, ways
 
 
-def _derive_per_vertex_elevations(nids: List[str], tags: Dict[str, str]
+def _derive_per_vertex_elevations(nids: List[str], tags: Dict[str, str],
+                                  node_alt: Optional[Dict[str, float]] = None
                                   ) -> List[Optional[float]]:
     """Decode the X-Plane patch elevation tags into a per-nid
     elevation list of the same length as ``nids`` (i.e. closed-ring
     length, last entry == first entry's elevation)."""
     n = len(nids)
-    if "node_altitudes" in tags:
-        try:
-            vals = [float(x) for x in tags["node_altitudes"].split(",")]
-        except ValueError:
-            return [None] * n
-        if len(vals) == n:
-            return [float(v) for v in vals]
-        return [None] * n
     if "altitude_high" in tags and "altitude_low" in tags:
         try:
             ah = float(tags["altitude_high"])
@@ -174,19 +179,38 @@ def _derive_per_vertex_elevations(nids: List[str], tags: Dict[str, str]
         # [4]=closing repeat of [0].  Way[-2:] = [n3, n0] is the
         # HIGH short edge; way[1:3] = [n1, n2] is the LOW short
         # edge.  See O4_Vector_Map.include_patches() for the parser.
+        # altitude_high/low ways are COMPLEX upstream (cplx_way=True):
+        # the per-node alt_abs override does NOT apply to them.
         if n == 5:
             return [ah, al, al, ah, ah]
         # Rectangles with insertions along the long edges are
         # unsupported by X-Plane's altitude_high/low parser
         # (it expects exactly 5 nodes); flag as unknown.
         return [None] * n
-    if "altitude" in tags:
+    # Non-complex ways: start from the way-level altitude form, then apply
+    # the per-node ``alt_abs`` override exactly as O4_Vector_Map.include_
+    # patches() does (it overrides alti_way[i] for every node carrying the
+    # tag).  The legacy ``node_altitudes`` way tag is handled the same way
+    # so old and new patches validate identically.
+    base: List[Optional[float]]
+    if "node_altitudes" in tags:
         try:
-            a = float(tags["altitude"])
+            vals = [float(x) for x in tags["node_altitudes"].split(",")]
         except ValueError:
-            return [None] * n
-        return [a] * n
-    return [None] * n
+            vals = []
+        base = [float(v) for v in vals] if len(vals) == n else [None] * n
+    elif "altitude" in tags:
+        try:
+            base = [float(tags["altitude"])] * n
+        except ValueError:
+            base = [None] * n
+    else:
+        base = [None] * n
+    if node_alt:
+        for i, nid in enumerate(nids):
+            if nid in node_alt:
+                base[i] = node_alt[nid]
+    return base
 
 
 # ── Coordinate space ────────────────────────────────────────────

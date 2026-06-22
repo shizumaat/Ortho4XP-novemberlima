@@ -1155,6 +1155,22 @@ RECT_END_CAP_DEPTH_M = float(_os.environ.get("O4_RECT_CAP_DEPTH_M", "12.0"))
 RECT_END_CAP_MIN_RECT_LEN_M = float(
     _os.environ.get("O4_RECT_CAP_MIN_RECT_LEN_M", "40.0"))
 
+# BACKWARD-COMPATIBLE PER-NODE ALTITUDE (layout.to_osm) DEFAULT ON.
+# The fork-only ``node_altitudes`` WAY tag (one comma-separated per-vertex
+# elevation list on a compound sloping polygon) is NOT understood by stock /
+# older Ortho4XP — those readers ignore it and drape the polygon on raw DEM.
+# Base Ortho4XP DOES read a per-NODE ``alt_abs`` tag (O4_Vector_Map.include_
+# patches applies it to every vertex of any non-``altitude_high/low`` way), so
+# the same per-vertex field is expressible in a backward-compatible form.
+# With this gate ON, to_osm stamps each referenced node with its consensus
+# altitude as ``alt_abs`` and STOPS emitting the ``node_altitudes`` way tag;
+# the smooth-profile ``altitude_high/low`` quads (runways, sloped rects) and
+# flat ``altitude`` polygons keep their way tags unchanged (``altitude_high/
+# low`` ways are complex → upstream ignores ``alt_abs`` on them, preserving the
+# cell_size/profile vertical curve).  Set ``O4_NODE_ALT_ABS=0`` to restore the
+# legacy ``node_altitudes`` emission (byte-identical to pre-gate output).
+NODE_ALT_ABS = _os.environ.get("O4_NODE_ALT_ABS", "1") == "1"
+
 # (s79) ON-PAVEMENT service-road carve — docs/service_road_carve.md.
 # ★ USER RULINGS 2026-06-11: roads = apt.dat 1206 routes ONLY (no
 # polygon/OSM detection); only pavement narrower than the cross-section

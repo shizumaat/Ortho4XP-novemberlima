@@ -46,6 +46,7 @@ from .config import (
     PATCH_SLOPE_PROFILE,
     TAXI_GRADE_BY_WIDTH,
     TAXI_GRADE_WIDTH_ROLES,
+    NODE_ALT_ABS,
     taxiway_code_letter,
 )
 
@@ -897,6 +898,12 @@ class PavementLayout:
         def _slope_profile_for(poly) -> str:
             return PATCH_SLOPE_PROFILE
 
+        # Backward-compatible per-node altitude (gate NODE_ALT_ABS): nids of
+        # compound sloping shapes whose ``node_altitudes`` way tag is dropped
+        # in favour of per-NODE ``alt_abs`` tags (which stock Ortho4XP reads).
+        # Stays empty when the gate is off → emission byte-identical.
+        node_alt_abs_nids: set = set()
+
         for s_idx, s, ext_nids, shape_altitude, shape_node_altitudes \
                 in pending:
             tags = {
@@ -1021,10 +1028,19 @@ class PavementLayout:
     RUNWAY_CELL_SIZE_M if s.role == ROLE_RUNWAY
     else PATCH_SLOPE_CELL_SIZE_M)
                     tags["profile"] = _slope_profile_for(s.polygon)
+                elif NODE_ALT_ABS:
+                    # Backward-compatible per-corner altitudes: carry them
+                    # as per-NODE ``alt_abs`` tags (read by stock / older
+                    # Ortho4XP) instead of the fork-only ``node_altitudes``
+                    # way tag.  This way emits NO altitude way-tag; every one
+                    # of its vertices is stamped with its consensus altitude
+                    # in the node-writing pass below, so the upstream per-node
+                    # override (include_patches, applied to every non-
+                    # ``altitude_high/low`` way) fully specifies the ring.
+                    node_alt_abs_nids.update(ext_nids)
                 else:
-                    # Per-corner values — including the closing
-                    # repeat — matching X-Plane's mesh builder
-                    # interpolation contract.
+                    # Legacy fork-only form: per-corner values — including
+                    # the closing repeat — as one way tag.
                     tags["node_altitudes"] = ",".join(
                         f"{e:.1f}" for e in corner_elevs)
             else:
@@ -1111,10 +1127,22 @@ class PavementLayout:
         for nid, (lat, lon) in sorted(node_id_to_ll.items(), reverse=True):
             if nid not in referenced_nids:
                 continue
-            lines.append(
-                f"  <node id='{nid}' action='modify' visible='true' "
-                f"lat='{lat:.11f}' lon='{lon:.11f}' />"
-            )
+            alt_abs = (node_id_to_consensus.get(nid)
+                       if nid in node_alt_abs_nids else None)
+            if alt_abs is None:
+                lines.append(
+                    f"  <node id='{nid}' action='modify' visible='true' "
+                    f"lat='{lat:.11f}' lon='{lon:.11f}' />"
+                )
+            else:
+                # Per-node absolute altitude: the backward-compatible
+                # replacement for the ``node_altitudes`` way tag.
+                lines.append(
+                    f"  <node id='{nid}' action='modify' visible='true' "
+                    f"lat='{lat:.11f}' lon='{lon:.11f}'>"
+                )
+                lines.append(f"    <tag k='alt_abs' v='{alt_abs:.1f}' />")
+                lines.append("  </node>")
         for wid, nids, tags in way_blocks:
             lines.append(
                 f"  <way id='{wid}' action='modify' visible='true'>"

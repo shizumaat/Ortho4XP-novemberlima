@@ -53,9 +53,11 @@ def _square(cx=0.0, cy=0.0, side=10.0):
 def _emit_and_parse(layout):
     """Call to_osm then parse the resulting XML.
 
-    Returns (nodes, ways) where:
-      nodes: {nid: (lat, lon)}
-      ways:  [(wid, [nid_refs], {tag: val})]
+    Returns (nodes, ways, node_alts) where:
+      nodes:     {nid: (lat, lon)}
+      ways:      [(wid, [nid_refs], {tag: val})]
+      node_alts: {nid: alt_abs}  — per-node ``alt_abs`` tags (the
+                 backward-compatible per-vertex altitude form)
     """
     with tempfile.NamedTemporaryFile(
             mode="r", suffix=".osm", delete=False) as f:
@@ -66,8 +68,14 @@ def _emit_and_parse(layout):
     finally:
         Path(path).unlink()
 
+    # Match the OPENING <node ...> tag for BOTH the self-closing form
+    # (`... />`) and the form that carries a per-node <tag> child
+    # (`...>`).  lat/lon always live in the opening tag.
     node_re = re.compile(
-        r"""<node id='(-?\d+)'[^>]*lat='([^']+)' lon='([^']+)'\s*/>""")
+        r"""<node id='(-?\d+)'[^>]*lat='([^']+)' lon='([^']+)'""")
+    node_alt_re = re.compile(
+        r"""<node id='(-?\d+)'[^>]*?>\s*<tag k='alt_abs' v='([^']+)'""",
+        re.DOTALL)
     way_open_re = re.compile(r"""<way id='(-?\d+)'""")
     nd_re = re.compile(r"""<nd ref='(-?\d+)'""")
     tag_re = re.compile(r"""<tag k='([^']+)' v='([^']+)'""")
@@ -75,6 +83,10 @@ def _emit_and_parse(layout):
     nodes = {}
     for m in node_re.finditer(text):
         nodes[int(m.group(1))] = (float(m.group(2)), float(m.group(3)))
+
+    node_alts = {}
+    for m in node_alt_re.finditer(text):
+        node_alts[int(m.group(1))] = float(m.group(2))
 
     ways = []
     way_blocks = re.findall(
@@ -86,7 +98,7 @@ def _emit_and_parse(layout):
         tags = {k: v for k, v in tag_re.findall(body)}
         ways.append((wid, nds, tags))
 
-    return nodes, ways
+    return nodes, ways, node_alts
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -196,7 +208,7 @@ def test_to_osm_emits_one_way_per_shape():
         polygon=_square(0, 0, 10), role=ROLE_RUNWAY, ref="RW09/RW27"))
     layout.shapes.append(BuiltShape(
         polygon=_square(50, 0, 10), role=ROLE_PRIMARY_PARALLEL, ref="A"))
-    nodes, ways = _emit_and_parse(layout)
+    nodes, ways, _ = _emit_and_parse(layout)
     assert len(ways) == 2
 
 
@@ -206,7 +218,7 @@ def test_to_osm_skips_empty_polygons():
     layout.shapes.append(BuiltShape(polygon=Polygon(), role=ROLE_RUNWAY))
     layout.shapes.append(BuiltShape(
         polygon=_square(0, 0, 10), role=ROLE_RUNWAY, ref="RW09/RW27"))
-    _, ways = _emit_and_parse(layout)
+    _, ways, _ = _emit_and_parse(layout)
     assert len(ways) == 1
 
 
@@ -216,7 +228,7 @@ def test_to_osm_emits_aeroway_and_role_tags():
     layout = _make_layout()
     layout.shapes.append(BuiltShape(
         polygon=_square(0, 0, 10), role=ROLE_RUNWAY))
-    _, ways = _emit_and_parse(layout)
+    _, ways, _ = _emit_and_parse(layout)
     _, _, tags = ways[0]
     assert tags["aeroway"] == AEROWAY_FOR_ROLE[ROLE_RUNWAY]
     assert tags["role"] == ROLE_RUNWAY
@@ -227,7 +239,7 @@ def test_to_osm_ref_tag_emitted_when_set():
     layout = _make_layout()
     layout.shapes.append(BuiltShape(
         polygon=_square(0, 0, 10), role=ROLE_RUNWAY, ref="RW09/RW27"))
-    _, ways = _emit_and_parse(layout)
+    _, ways, _ = _emit_and_parse(layout)
     assert ways[0][2]["ref"] == "RW09/RW27"
 
 
@@ -236,7 +248,7 @@ def test_to_osm_no_ref_tag_when_unset():
     layout = _make_layout()
     layout.shapes.append(BuiltShape(
         polygon=_square(0, 0, 10), role=ROLE_JUNCTION))
-    _, ways = _emit_and_parse(layout)
+    _, ways, _ = _emit_and_parse(layout)
     assert "ref" not in ways[0][2]
 
 
@@ -251,7 +263,7 @@ def test_to_osm_sloped_rect_emits_high_low_cell_profile():
     layout.shapes.append(BuiltShape(
         polygon=_square(0, 0, 10), role=ROLE_PRIMARY_PARALLEL,
         altitude_high=100.5, altitude_low=99.0))
-    _, ways = _emit_and_parse(layout)
+    _, ways, _ = _emit_and_parse(layout)
     tags = ways[0][2]
     assert tags["altitude_high"] == "100.5"
     assert tags["altitude_low"] == "99.0"
@@ -321,7 +333,7 @@ def test_to_osm_inverted_slope_rect_emits_canonical_high_low():
     layout.shapes.append(BuiltShape(
         polygon=_square(0, 0, 10), role=ROLE_PRIMARY_PARALLEL,
         altitude_high=99.0, altitude_low=100.5))   # inverted on purpose
-    _, ways = _emit_and_parse(layout)
+    _, ways, _ = _emit_and_parse(layout)
     wid, nds, tags = ways[0]
     assert "altitude_high" in tags and "altitude_low" in tags
     assert float(tags["altitude_high"]) >= float(tags["altitude_low"])
@@ -358,7 +370,7 @@ def test_to_osm_never_emits_altitude_high_on_non_quad():
     layout.shapes.append(BuiltShape(
         polygon=_pentagon(), role=ROLE_PRIMARY_PARALLEL,
         altitude_high=60.0, altitude_low=55.0))
-    _, ways = _emit_and_parse(layout)
+    _, ways, _ = _emit_and_parse(layout)
     for wid, nds, tags in ways:
         if "altitude_high" in tags or "altitude_low" in tags:
             assert len(nds) == 5, (
@@ -378,10 +390,16 @@ def test_to_osm_non_quad_sloped_shape_still_emits_some_altitude():
     layout.shapes.append(BuiltShape(
         polygon=_pentagon(), role=ROLE_PRIMARY_PARALLEL,
         altitude_high=60.0, altitude_low=55.0))
-    _, ways = _emit_and_parse(layout)
+    nodes, ways, node_alts = _emit_and_parse(layout)
     assert len(ways) == 1
-    tags = ways[0][2]
-    assert ("altitude" in tags or "node_altitudes" in tags), (
+    wid, nds, tags = ways[0]
+    # The shape must carry SOME valid elevation — either a way-level
+    # altitude tag (flat / sloped quad) or per-node ``alt_abs`` on every
+    # vertex (the backward-compatible per-corner form).
+    has_way_alt = ("altitude" in tags or "node_altitudes" in tags
+                   or "altitude_high" in tags)
+    has_node_alt = bool(nds) and all(n in node_alts for n in nds)
+    assert has_way_alt or has_node_alt, (
         "non-quad sloped shape lost all elevation tags")
 
 
@@ -392,17 +410,19 @@ def test_to_osm_flat_altitude_emits_single_tag():
     layout.shapes.append(BuiltShape(
         polygon=_square(0, 0, 10), role=ROLE_BUILDING,
         altitude=42.7))
-    _, ways = _emit_and_parse(layout)
+    _, ways, _ = _emit_and_parse(layout)
     tags = ways[0][2]
     assert tags["altitude"] == "42.7"
     assert "altitude_high" not in tags
     assert "altitude_low" not in tags
 
 
-def test_to_osm_node_altitudes_emits_csv_list():
-    """A polygon with ``node_altitudes`` emits a comma-separated
-    list with one value per ring vertex INCLUDING the closing
-    repeat."""
+def test_to_osm_compound_slope_emits_per_node_alt_abs():
+    """A compound sloping polygon (per-corner ``node_altitudes``) emits
+    its per-vertex altitudes as per-node ``alt_abs`` tags (gate
+    NODE_ALT_ABS, the backward-compatible form read by stock Ortho4XP)
+    rather than the fork-only ``node_altitudes`` way tag."""
+    import auto_patch.layout as _L
     layout = _make_layout()
     poly = _square(0, 0, 10)
     # 4 corners + closing repeat = 5 elevations.
@@ -410,15 +430,41 @@ def test_to_osm_node_altitudes_emits_csv_list():
     layout.shapes.append(BuiltShape(
         polygon=poly, role=ROLE_JUNCTION,
         node_altitudes=elevs))
-    _, ways = _emit_and_parse(layout)
+    assert _L.NODE_ALT_ABS, "gate expected default-on"
+    _, ways, node_alts = _emit_and_parse(layout)
+    wid, nds, tags = ways[0]
+    # No fork-only way tag; every ring vertex carries alt_abs instead.
+    assert "node_altitudes" not in tags
+    assert all(n in node_alts for n in nds), (
+        "every ring vertex must carry a per-node alt_abs tag")
+    # Per-vertex altitudes are preserved, indexed by node ref (the
+    # closing ref repeats the first vertex's value).
+    by_ref = [node_alts[n] for n in nds]
+    assert by_ref[0] == 10.0
+    assert by_ref[1] == 11.0
+    assert by_ref[-1] == by_ref[0]
+
+
+def test_to_osm_compound_slope_legacy_node_altitudes_when_gated_off(
+        monkeypatch):
+    """With the gate off, the legacy ``node_altitudes`` way tag is
+    emitted unchanged (byte-compatible fallback)."""
+    import auto_patch.layout as _L
+    monkeypatch.setattr(_L, "NODE_ALT_ABS", False)
+    layout = _make_layout()
+    poly = _square(0, 0, 10)
+    elevs = [10.0, 11.0, 12.0, 13.0, 10.0]
+    layout.shapes.append(BuiltShape(
+        polygon=poly, role=ROLE_JUNCTION,
+        node_altitudes=elevs))
+    _, ways, node_alts = _emit_and_parse(layout)
     tags = ways[0][2]
     assert "node_altitudes" in tags
     csv_vals = tags["node_altitudes"].split(",")
-    # Length must equal the emitted ring length (which includes
-    # closing repeat).  Square → 4 unique nids + 1 closing = 5.
     assert len(csv_vals) == len(ways[0][1])
     assert csv_vals[0] == "10.0"
     assert csv_vals[1] == "11.0"
+    assert not node_alts, "gate-off must emit no per-node alt_abs tags"
 
 
 def test_to_osm_no_elevation_tags_when_none_set():
@@ -427,11 +473,12 @@ def test_to_osm_no_elevation_tags_when_none_set():
     layout = _make_layout()
     layout.shapes.append(BuiltShape(
         polygon=_square(0, 0, 10), role=ROLE_APRON))
-    _, ways = _emit_and_parse(layout)
+    _, ways, node_alts = _emit_and_parse(layout)
     tags = ways[0][2]
     for k in ("altitude", "altitude_high", "altitude_low",
               "node_altitudes"):
         assert k not in tags
+    assert not node_alts, "geometry-only shape must emit no alt_abs tags"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -448,7 +495,7 @@ def test_to_osm_shared_corner_uses_same_node_id():
     b = Polygon([(10, 0), (20, 0), (20, 10), (10, 10)])
     layout.shapes.append(BuiltShape(polygon=a, role=ROLE_RUNWAY, ref="A"))
     layout.shapes.append(BuiltShape(polygon=b, role=ROLE_RUNWAY, ref="B"))
-    nodes, ways = _emit_and_parse(layout)
+    nodes, ways, _ = _emit_and_parse(layout)
 
     # Find the two shared corners.  In meter space (10, 0) and
     # (10, 10) are present in both shapes.  After interning they
@@ -471,7 +518,7 @@ def test_to_osm_distinct_far_corners_get_different_node_ids():
     layout.shapes.append(BuiltShape(
         polygon=_square(1000, 1000, 10),  # 1.4 km away
         role=ROLE_RUNWAY, ref="B"))
-    _, ways = _emit_and_parse(layout)
+    _, ways, _ = _emit_and_parse(layout)
     way_a_nids = set(ways[0][1])
     way_b_nids = set(ways[1][1])
     assert not (way_a_nids & way_b_nids)
@@ -486,7 +533,7 @@ def test_to_osm_subtol_distance_clusters_nodes():
     b = Polygon([(10.1, 0), (20, 0), (20, 10), (10.1, 10)])
     layout.shapes.append(BuiltShape(polygon=a, role=ROLE_RUNWAY))
     layout.shapes.append(BuiltShape(polygon=b, role=ROLE_RUNWAY))
-    _, ways = _emit_and_parse(layout)
+    _, ways, _ = _emit_and_parse(layout)
     shared = set(ways[0][1]) & set(ways[1][1])
     assert len(shared) >= 2, (
         f"vertices {SHARED_VERTEX_TOL_M} m apart should cluster")
@@ -503,7 +550,7 @@ def test_to_osm_only_referenced_nodes_emitted():
         polygon=_square(0, 0, 10), role=ROLE_RUNWAY))
     layout.shapes.append(BuiltShape(
         polygon=_square(50, 0, 10), role=ROLE_RUNWAY))
-    nodes, ways = _emit_and_parse(layout)
+    nodes, ways, _ = _emit_and_parse(layout)
     referenced = set()
     for _, nids, _ in ways:
         referenced.update(nids)
@@ -518,7 +565,7 @@ def test_to_osm_emits_closed_ring():
     layout = _make_layout()
     layout.shapes.append(BuiltShape(
         polygon=_square(0, 0, 10), role=ROLE_RUNWAY))
-    _, ways = _emit_and_parse(layout)
+    _, ways, _ = _emit_and_parse(layout)
     nids = ways[0][1]
     assert nids[0] == nids[-1], "ring must be closed"
     # Square → 4 unique nodes + closing repeat = 5 entries.
