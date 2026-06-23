@@ -268,6 +268,23 @@ DSF_BUILDING_OSM_OVERLAP_FRAC = 0.2
 # while keeping the real corners.  0.5 m → HECA terminal 1,280→139 verts.
 DSF_CLUSTER_SIMPLIFY_TOL_M = 0.5
 
+# DSF facade-piece MERGE GAP (user 2026-06-23).  A single building is often
+# placed as MANY scattered facade pieces — e.g. a "pier_wooden"-style concourse
+# rendered as dozens of ~0.6 m² panels with 1–3 m gaps between them.  The 0.25 m
+# snap (DSF_CLUSTER_SIMPLIFY_TOL_M's sibling) only closes hairline seams, so each
+# panel stays an isolated sub-min-area piece and is DROPPED — the building gets no
+# pad (CYXY: 68/97 recognized facades, the gate string past building5).  Bridge
+# gaps up to this distance so the pieces of one building MERGE into one cluster
+# (then the outline-close traces the containing pad).  Kept modest so genuinely
+# separate buildings (terminal gates are typically > 2× this apart) don't merge.
+# User ruling: an approved facade inside/overlapping/unclosed must still be kept
+# and get a containing pad.  (Plain consts — ``_os`` is not in scope this early
+# in the file; see the import-os note above.)
+DSF_FACADE_MERGE_GAP_M = 2.0
+# Min cluster area to emit a building pad.  Lowered from 100 (which dropped real
+# small hangars/buildings) to keep approved buildings; a degenerate-noise guard only.
+DSF_MIN_BUILDING_AREA_M2 = 20.0
+
 # Building-pad outline NARROW-GAP FILL (user 2026-06-15).  Gate stands are
 # small fingers extending perpendicular off a pier; the gaps between them
 # give a terminal a noisy sawtooth boundary that the apron then has to

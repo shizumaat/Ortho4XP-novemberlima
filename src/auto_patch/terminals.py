@@ -28,6 +28,8 @@ from .config import (
     BUILDING_OUTLINE_FILL_R,
     BUILDING_OUTLINE_FILL_GATE_M,
     DSF_CLUSTER_SIMPLIFY_TOL_M,
+    DSF_FACADE_MERGE_GAP_M,
+    DSF_MIN_BUILDING_AREA_M2,
     HANGAR_PADS,
 )
 
@@ -761,7 +763,7 @@ def _close_building_outline(pad: Polygon) -> List[Polygon]:
 
 def _cluster_dsf_building_facades(
     facades: List[Polygon],
-    min_area_m2: float = 100.0,
+    min_area_m2: float = DSF_MIN_BUILDING_AREA_M2,
 ) -> List[Polygon]:
     """Collapse a flat list of DSF facade footprints into one polygon
     per physical building.
@@ -789,9 +791,18 @@ def _cluster_dsf_building_facades(
     if not clean:
         return []
     try:
-        # 0.25 m snap closes hairline seams between abutting facade
-        # pieces without merging genuinely separate buildings.
-        merged = unary_union([f.buffer(0.25) for f in clean]).buffer(-0.25)
+        # Merge facade PIECES of one building (stacked / abutting / scattered
+        # panels — e.g. a pier_wooden concourse rendered as dozens of ~0.6 m²
+        # panels with 1–3 m gaps) by bridging gaps up to
+        # ``DSF_FACADE_MERGE_GAP_M``, so each building becomes ONE cluster
+        # instead of a swarm of dropped sub-min-area pieces (user 2026-06-23).
+        # The close also fills the panel-grid interior; the DP-simplify below +
+        # the downstream outline-close trim the rounding.  buffer(0) first so an
+        # unclosed / self-intersecting facade is repaired, never dropped.
+        gap = DSF_FACADE_MERGE_GAP_M
+        clean = [(f if f.is_valid else f.buffer(0)) for f in clean]
+        clean = [f for f in clean if f is not None and not f.is_empty]
+        merged = unary_union([f.buffer(gap) for f in clean]).buffer(-gap)
     except _GEOM_EXC:
         try:
             merged = unary_union(clean)
