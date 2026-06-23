@@ -1128,7 +1128,10 @@ W2_CLEAN_BANDS = _os.environ.get("O4_W2_BANDS", "1") == "1"
 # spine+body model at the taxiway per-letter cap (replaces the legacy per-axis
 # diagonal-skip).  Default OFF during A/B; gate-off = the legacy
 # ``_visible_grade_edges`` branch (byte-identical).
-SINGLE_GRADE_GRAPH = _os.environ.get("O4_SINGLE_GRADE_GRAPH", "0") == "1"
+# Default ON (2026-06-23, user): the single within-shape grade graph + the Phase-3
+# connecting solve are the live airside grading system.  O4_SINGLE_GRADE_GRAPH=0
+# restores the legacy _visible_grade_edges + _min_grade_network path.
+SINGLE_GRADE_GRAPH = _os.environ.get("O4_SINGLE_GRADE_GRAPH", "1") == "1"
 
 # Rect end-caps (rect_end_caps.py) DEFAULT ON (user 2026-06-19): a cap SHRINKS
 # the sloping rect at its junction-facing flat end and occupies the vacated
@@ -1515,8 +1518,11 @@ CORRIDOR_SPINE_CHAINS = _os.environ.get("O4_CORRIDOR_SPINE_CHAINS", "1") == "1"
 # 0→10, build 6→14, a new 8.8 % junction).  The climb must be ABSORBED by
 # conforming neighbours = plan P4 (aprons/buildings conform up to the held
 # centerlines).  Flip ON together with P4; OFF keeps the clean P2 baseline.
+# Default ON (2026-06-23): part of the single-grade-graph stack — the per-edge
+# cap-weighted route band the connecting solve relies on.  O4_FIELD_ROUTE_BAND_BY_WIDTH=0
+# restores the legacy uniform-1.5% band.
 FIELD_ROUTE_BAND_BY_WIDTH = _os.environ.get(
-    "O4_FIELD_ROUTE_BAND_BY_WIDTH", "0") == "1"
+    "O4_FIELD_ROUTE_BAND_BY_WIDTH", "1") == "1"
 
 # (20260622) UNNAMED TAXI SIZE — plan P3a (docs §9, THE unlock for the CYXY
 # "bowl").  apt.dat row-1202 taxi edges carry an ICAO size code ("taxiway_A"…
@@ -1538,7 +1544,10 @@ FIELD_ROUTE_BAND_BY_WIDTH = _os.environ.get(
 # P4 places it by route-feasibility + P5 conforms the apron up.  Standalone it
 # regresses (CYXY within 0→8) and shifts the good airports' arm caps — so, like
 # FIELD_ROUTE_BAND_BY_WIDTH (P3), it is banked OFF and flips ON with P4+P5.
-UNNAMED_TAXI_SIZE = _os.environ.get("O4_UNNAMED_TAXI_SIZE", "0") == "1"
+# Default ON (2026-06-23): part of the single-grade-graph stack — recovers the
+# ICAO size of unnamed taxiway_A/B arms so the route bands + grade graph carry the
+# real 3% narrow cap.  O4_UNNAMED_TAXI_SIZE=0 restores the uniform-1.5% behaviour.
+UNNAMED_TAXI_SIZE = _os.environ.get("O4_UNNAMED_TAXI_SIZE", "1") == "1"
 
 # (20260622) FIELD-TARGET CONFORMANCE — plan P4/P5 (docs §9): make the final
 # within-shape enforce implement the user's stated objective — *minimise
