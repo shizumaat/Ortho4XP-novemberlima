@@ -70,7 +70,8 @@ from auto_patch.elevation import (
     APRON_MAX_GRADE, SERVICE_ROAD_MAX_GRADE, TAXI_MAX_GRADE)
 from auto_patch.config import (
     taxi_grade_cap_for_letter, TAXI_MAX_GRADE_NARROW, JUNCTION_NARROW_GRADE,
-    CORRIDOR_SPINE_CHAINS, FIELD_TARGET_CONFORMANCE, BUILDING_ROUTE_FEASIBILITY)
+    CORRIDOR_SPINE_CHAINS, FIELD_TARGET_CONFORMANCE, BUILDING_ROUTE_FEASIBILITY,
+    MIN_GRADE_NETWORK)
 from auto_patch.layout import (
     ROLE_APRON, ROLE_BOUNDARY, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL, ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
@@ -755,6 +756,19 @@ def solve(layout, icao: str,
             layout, elev, bucket_to_idx, shape_constraints, base_hard,
             owners)
         _mark("polish+snap")
+
+    # P5 MIN-GRADE NETWORK SOLVE (docs §9, user stage 2): re-solve the free
+    # airside nodes as the smoothest (min Σgrade²) surface connecting the HARD
+    # anchors (buildings P4 + runway + seams), cap-bounded — so the network
+    # conforms to the anchors instead of the bowled relief.  Final override
+    # before writeback; gate off → byte-identical.
+    if MIN_GRADE_NETWORK:
+        hard_mg = set(runway_nodes)
+        n_mg = _min_grade_network_solve(
+            elev, shape_constraints, base_hard, nodes, hard_mg)
+        if n_mg and _os.environ.get("O4_STEP_DEBUG") == "1":
+            print(f"  [step] min-grade network: solved {n_mg} free node(s)")
+        _mark("min-grade-network")
 
     # FINAL CO-LEVEL RECONCILE: post-enforce passes that move a single
     # vertex (edge-plane snap, twist, polish) can decohere a rect
@@ -9465,6 +9479,81 @@ def _build_node_list(layout):
                 bucket_to_idx[k] = len(nodes)
                 nodes.append((float(x), float(y)))
     return nodes, bucket_to_idx
+
+
+def _min_grade_network_solve(elev, shape_constraints, base_hard, nodes,
+                             hard_extra, max_iters=600,
+                             tol=0.003) -> int:
+    """P5: solve the free airside nodes as the SMOOTHEST surface (minimise
+    Σ grade²) connecting the HARD anchors, subject to the per-shape grade
+    caps.  Anchors = ``base_hard`` (buildings P4 + seams + thresholds) ∪
+    ``hard_extra`` (runway nodes).  Alternates a harmonic Gauss-Seidel step
+    (each free node → its neighbours' inverse-distance²-weighted mean = the
+    min-Σ-grade² minimiser) with a one-sweep cap projection; converges to the
+    smoothest cap-compliant surface that conforms to the anchors.  Mutates
+    ``elev``; returns #free nodes solved."""
+    adj: dict = {}
+    for sc in shape_constraints:
+        for (i, j, lim) in sc["edges"]:
+            if lim is None:
+                continue
+            xi, yi = nodes[i]
+            xj, yj = nodes[j]
+            L = math.hypot(xi - xj, yi - yj)
+            if L < 1e-6:
+                continue
+            w = 1.0 / (L * L)
+            lm = max(lim, 0.0)
+            adj.setdefault(i, []).append((j, w, lm))
+            adj.setdefault(j, []).append((i, w, lm))
+    if not adj:
+        return 0
+    n = len(elev)
+
+    def _hard(k):
+        return k >= n or base_hard[k] or k in hard_extra
+    free = sorted(k for k in adj if not _hard(k))
+    if not free:
+        return 0
+    for _it in range(max_iters):
+        moved = 0.0
+        # harmonic (min Σ grade²) step
+        for i in free:
+            nb = adj[i]
+            sw = 0.0
+            acc = 0.0
+            for (j, w, _lm) in nb:
+                sw += w
+                acc += elev[j] * w
+            if sw <= 0.0:
+                continue
+            tgt = acc / sw
+            d = tgt - elev[i]
+            if d:
+                elev[i] = tgt
+                if abs(d) > moved:
+                    moved = abs(d)
+        # cap projection (one sweep): free ends absorb; a free↔hard edge
+        # moves only the free end
+        for i in free:
+            ei = elev[i]
+            for (j, _w, lm) in adj[i]:
+                diff = ei - elev[j]
+                ex = abs(diff) - lm
+                if ex <= 1e-6:
+                    continue
+                sgn = 1.0 if diff > 0 else -1.0
+                if not _hard(j):
+                    h = ex * 0.5
+                    elev[i] = ei = ei - sgn * h
+                    elev[j] += sgn * h
+                else:
+                    elev[i] = ei = ei - sgn * ex
+                if ex > moved:
+                    moved = ex
+        if moved < tol:
+            break
+    return len(free)
 
 
 def _seat_buildings_route_feasible(layout, elev, base_hard, bucket_to_idx,

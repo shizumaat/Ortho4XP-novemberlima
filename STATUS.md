@@ -85,6 +85,14 @@ good airports.
   `edge_cap`); banked gated-off because it regresses without P4 (held centerline
   climbs, neighbours don't). FLIP ON with P4. This is the real P3 — not
   scaffolding to retire, just dormant until P4 lands.
+- **`MIN_GRADE_NETWORK`** (P5 prototype, NEW 2026-06-22, default OFF) — re-solve
+  free airside nodes as the smoothest (min Σgrade²) surface connecting the hard
+  anchors (buildings P4 + runway + seams), cap-bounded; final override before
+  writeback. `_min_grade_network_solve`. Holds the anchors + grades the taxi
+  network, but within-shape only 563→481 (apron-dominated, 328) — the wide
+  terminal aprons can't grade ≤1% to the high anchored buildings (P6-transition
+  case) + likely solve-graph≠validator-graph. NOT yet landing; needs P6 +
+  graph reconciliation.
 - **`BUILDING_ROUTE_FEASIBILITY`** (P4 building DRIVER, NEW 2026-06-22, default
   OFF) — THE validated building-placement metric. Seats each airside-touching
   building FLAT at clamp(DEM, floor, ceiling) where the band is the per-edge
@@ -181,11 +189,14 @@ flips grade[CYXY] green with no new reds.
   per-node band+provenance.
 
 ## Files touched
-- `config.py` — 9 gates (above; +`CORRIDOR_SPINE_CHAINS` P2 committed,
+- `config.py` — 10 gates (above; +`CORRIDOR_SPINE_CHAINS` P2 committed,
   +`FIELD_ROUTE_BAND_BY_WIDTH` P3, +`UNNAMED_TAXI_SIZE` P3a,
-  +`FIELD_TARGET_CONFORMANCE`, +`BUILDING_ROUTE_FEASIBILITY` P4 — all default-OFF).
+  +`FIELD_TARGET_CONFORMANCE`, +`BUILDING_ROUTE_FEASIBILITY` P4,
+  +`MIN_GRADE_NETWORK` P5 — all default-OFF).
 - `elevation_per_surface/building_feasibility.py` (NEW) — the validated P4
   building route-feasibility metric (`building_feasible_levels`).
+- `elevation_per_surface/unified_jacobi.py` (P5) — `_min_grade_network_solve`
+  (gate `MIN_GRADE_NETWORK`) + `_seat_buildings_route_feasible` (P4).
 - `pipeline.py` — stash `layout.runway_thresholds` (both ends per runway).
 - `elevation_per_surface/unified_jacobi.py` (P4) — `_enforce_within_shape_grade`
   gains `dem_elev` param + the field-target lift-only block before the first

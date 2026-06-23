@@ -1578,6 +1578,19 @@ FIELD_TARGET_CONFORMANCE = _os.environ.get(
 BUILDING_ROUTE_FEASIBILITY = _os.environ.get(
     "O4_BUILDING_ROUTE_FEASIBILITY", "0") == "1"
 
+# (20260622) MIN-GRADE NETWORK SOLVE — plan P5 (docs §9), the user's stage 2.
+# With buildings (P4) + runway thresholds/interior + tile seams as HARD anchors,
+# re-solve the airside taxi/apron/junction network as the SMOOTHEST profile that
+# connects them — minimise Σ grade² (a harmonic / inverse-distance² Gauss-Seidel
+# step) subject to the per-shape within-shape grade caps as bounds — so the
+# network CONFORMS to the anchors instead of discovering its own bowled levels.
+# Runs as a final override of the free airside nodes (anchors fixed) after the
+# existing solve.  Pairs with BUILDING_ROUTE_FEASIBILITY (P4) — without the
+# building anchors there is nothing new to conform to.  ★ DEFAULT OFF
+# (prototype): replaces field/relief/enforce for the airside; validate before
+# defaulting on.  Gate off → byte-identical.
+MIN_GRADE_NETWORK = _os.environ.get("O4_MIN_GRADE_NETWORK", "0") == "1"
+
 
 def taxi_grade_cap_for_letter(letter, *, enabled: bool = None) -> float:
     """Max longitudinal grade (rise/run) for a taxiway of ICAO code

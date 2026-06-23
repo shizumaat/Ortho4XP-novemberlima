@@ -418,7 +418,29 @@ use, NOT `shared_taxi_route_graph.distances_from`'s uniform cap); the apron-plan
 pass (`network_profile` ~L1454–1745) target; `_anchor_buildings_at_feasible_dem`
 (rework to edge_cap + soft hold) or a new pass.
 
-**P5 — The MIN-GRADE NETWORK SOLVE (the next step; the user's architecture).**
+**P5 — The MIN-GRADE NETWORK SOLVE. [PROTOTYPED 2026-06-22 — gate
+`MIN_GRADE_NETWORK`, default OFF; holds anchors but does NOT yet clear the
+aprons.]** `_min_grade_network_solve` (unified_jacobi): build the within-shape
+edge graph from `shape_constraints` (per-edge limits), fix the hard anchors
+(`base_hard` = buildings P4 + seams + thresholds, ∪ runway nodes), and alternate
+a harmonic Gauss-Seidel step (each free node → its neighbours' inverse-distance²-
+weighted mean = the min-Σ-grade² minimiser) with a cap-projection sweep; final
+override before writeback.
+*Result (CYXY, P3a+P4+P5):* the building anchors HOLD (building9 700.4, building3
+715.7, …) and the taxi network grades to them, but within-shape only drops
+563→**481, still apron-dominated (328 apron, 85 junction)** — short steep spots
+(e.g. 0.5 m / 4 m). The existing enforce (a proven projector) also can't clear
+these with the building anchors (563), so this is NOT just a convergence bug:
+the **wide terminal aprons cannot grade ≤1% from their low taxiway edge up to the
+high anchored building across their width** — exactly the case P6 (explicit
+transition) is for; plus a likely builder-vs-validator graph mismatch (the
+min-grade solves `shape_constraints` edges; `check_grade` uses its own geodesic
+per-axis graph). NEXT: (a) reconcile the solve graph with the validator's; (b) P6
+explicit ramp/wall transitions where a wide apron physically can't reach its
+building at ≤1% (the steepness sink the user has always specified for a connector,
+never the apron interior); (c) consider a true constrained-QP solve rather than
+alternating harmonic/projection. Original intent below.
+
 With buildings (P4) + runway thresholds + tile seams as the HARD anchors, solve
 the taxi/apron network as the **profile that minimises grade throughout the
 network** between those anchors, subject to the per-edge per-letter caps and the
