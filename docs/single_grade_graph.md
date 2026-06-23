@@ -183,6 +183,50 @@ Then wire, each step behind a gate for A/B, deleting the old path once green:
   runway-reach band) → on a canyon (HECA terminal 82–88 m) adjacent pads sit at
   mutually-incompatible levels and the free apron node between can't grade ≤1% to
   BOTH → empty band.
+- **⚠⚠ PHASE 3 CORRECTION (2026-06-23) — the "within 0" was a BOWL = FAILURE.**
+  Locking buildings on the CONNECTING-graph band (above) DEVIATES from §1 ("buildings
+  = closest-to-DEM within their ROUTE-feasibility band, then LOCKED") and bowls them:
+  CYXY building5 ends at 707.7 vs DEM 713.06 (−5.36 m). A within=0 reached by bowling
+  the gate area FLAT-and-LOW is a FAILURE against the central pillar (buildings at DEM
+  + taxiways carrying the climb). ROOT of my wrong shortcut: the "443 false-
+  infeasibility" from pre-pinning at the route level was a BAND-SOURCE BUG — bands
+  were computed from runway+seam ONLY, EXCLUDING the locked buildings, so a node next
+  to a building couldn't see it as a source → false floor>ceiling. **CORRECT FIX
+  (§1, restored):** lock each building at its ROUTE-feasibility closest-to-DEM level
+  (`building_feasibility.building_feasible_levels`; building5 → ~713) as a HARD ANCHOR
+  *and* a BAND SOURCE; then the connecting solve grades the taxiway/arm UP to it. No
+  pass-1 connecting-band clamp on buildings.
+  **★ DONE-CRITERION (makes bowling un-claimable as success):** every building must
+  emit at ≈ `min(DEM, route_band_ceiling)`; a build where a building sits materially
+  below that is a FAILURE even if within=0. Add a test.
+- **★ SPINE-CARRIES-CLIMB — the refined design (2026-06-23, decisive diagnosis).**
+  The bowling/regression is because the **connecting solve does the ROUTE graph's
+  job**. Its Dijkstra bands route a building's reach through the CHEAPEST (1% apron)
+  or SHORTEST (to a nearby low node) connecting-graph path, which UNDER-measures the
+  real reach and manufactures false infeasibility. Decisive CYXY finding: building8's
+  route-feasible level is **712.4** (`building_feasible_levels`, reachable via the
+  long taxi route), but the connecting graph finds a SHORT path to a nearby 694
+  runway-level node → declares it infeasible (462 nodes floor>ceiling; worst pair
+  `bld:building8 712.4 ↔ runway 694`). Locking buildings at route levels then
+  regresses (744 residual). Conversely, locking on the connecting band BOWLS
+  (building5 707.7 vs DEM 713).
+  **THE DESIGN (two graphs, per §1):**
+  1. **ROUTE graph carries the climb.** Building levels = `building_feasible_levels`
+     (route-feasible closest-to-DEM). The SPINE (taxi rects + centerline spines
+     through junctions/aprons) gets a **climbing profile** computed on the ROUTE
+     graph (cap-weighted band from runway+seam over the taxi network at per-letter
+     caps) — NOT the connecting graph. The spine climbs runway→building over the
+     real taxi route; impose it as soft anchors.
+  2. **CONNECTING graph grades the apron body ≤1% from its LOCAL SPINE** (not from
+     spurious short/global paths to far-low anchors). An apron node's band floor/
+     ceiling come from its spine, which is at the climbing level.
+  3. Where the connecting graph has a spurious short path (building on high terrain
+     near a low runway), that is NOT a real grade path — the climb is the taxiway's
+     (long route); do not let it bowl/infeasible the building.
+  KEY: the connecting-graph global Dijkstra is the WRONG tool for building/spine
+  reach — that is the ROUTE graph's job. This is substantial (route-graph cap-band +
+  spine-profile impose + apron-from-spine) and should be built behind its own gate,
+  measured, and only defaulted on when buildings sit at route levels with within=0.
 - **Phase 3b — JOINT BUILDING FEASIBILITY (the canyon case, NEXT).** Lock pads at
   MUTUALLY-consistent levels, not pad-by-pad — the connecting surface between two
   pads must be gradeable: apron ≤1% to its local SPINE; the spine carries the climb
