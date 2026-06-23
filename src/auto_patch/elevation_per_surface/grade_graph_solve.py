@@ -159,7 +159,11 @@ def connecting_solve(elev, shape_constraints, base_hard, nodes, hard_extra,
             lst.append((j, lim, w))
         wadj[i] = lst
 
-    # 3. smooth within band (local sweeps)
+    # 3. PROJECTED Gauss-Seidel: each free node lands directly in its
+    # cap-feasible interval (intersection of the neighbour slabs |z_i−z_j|≤lim
+    # ∩ band), pulled toward the min grade+curvature target.  Landing in the
+    # feasible interval each update makes this monotone/convergent — no
+    # harmonic-vs-projection oscillation (the 400-sweep non-convergence).
     for _it in range(max_sweeps):
         moved = 0.0
         for i in free:
@@ -171,44 +175,48 @@ def connecting_solve(elev, shape_constraints, base_hard, nodes, hard_extra,
             if sw <= 0.0:
                 continue
             harm = acc / sw
-            # curvature term: pull toward the local linear (neighbour mean) too;
-            # harm already IS the weighted neighbour mean, so curvature blends a
-            # plain mean to damp 2nd-difference ripples
             if curvature > 0.0:
                 pm = sum(elev[j] for (j, _l, _w) in lst) / len(lst)
                 tgt = (1.0 - curvature) * harm + curvature * pm
             else:
                 tgt = harm
-            lo = floor.get(i, -math.inf)
-            hi = ceil.get(i, math.inf)
-            if lo <= hi:
-                tgt = min(max(tgt, lo), hi)
+            # cap-feasible interval w.r.t. the CURRENT neighbours, ∩ band
+            lo_e = floor.get(i, -math.inf)
+            hi_e = ceil.get(i, math.inf)
+            for (j, lim, _w) in lst:
+                ej = elev[j]
+                if ej - lim > lo_e:
+                    lo_e = ej - lim
+                if ej + lim < hi_e:
+                    hi_e = ej + lim
+            if lo_e <= hi_e:
+                tgt = min(max(tgt, lo_e), hi_e)
+            else:                          # locally over-constrained → midpoint
+                tgt = 0.5 * (lo_e + hi_e)
             d = tgt - elev[i]
             if d:
                 elev[i] = tgt
                 if abs(d) > moved:
                     moved = abs(d)
-        # cap projection: a free↔free edge splits the excess, free↔hard moves
-        # only the free end
-        for i in free:
-            ei = elev[i]
-            for (j, lim) in adj[i]:
-                diff = ei - elev[j]
-                ex = abs(diff) - lim
-                if ex <= 1e-6:
-                    continue
-                sgn = 1.0 if diff > 0 else -1.0
-                if _hard(j):
-                    elev[i] = ei = ei - sgn * ex
-                else:
-                    h = ex * 0.5
-                    elev[i] = ei = ei - sgn * h
-                    elev[j] += sgn * h
-                if ex > moved:
-                    moved = ex
         if moved < tol:
             break
     if _os.environ.get("O4_STEP_DEBUG") == "1":
+        # in-solve residual: edges in OUR graph still over cap, split by whether
+        # both endpoints are hard (unfixable here) vs has-a-free (solver gap)
+        bh = hf = 0
+        seen = set()
+        for i in adj:
+            for (j, lim) in adj[i]:
+                e = (min(i, j), max(i, j))
+                if e in seen:
+                    continue
+                seen.add(e)
+                if abs(elev[i] - elev[j]) - lim > 1e-3:
+                    if _hard(i) and _hard(j):
+                        bh += 1
+                    else:
+                        hf += 1
         print(f"  [connecting-solve] {len(free)} free node(s), "
-              f"{_it + 1} sweep(s), infeasible={infeasible}")
+              f"{_it + 1} sweep(s), infeasible={infeasible}; "
+              f"in-solve residual edges: both-hard={bh} has-free={hf}")
     return len(free)

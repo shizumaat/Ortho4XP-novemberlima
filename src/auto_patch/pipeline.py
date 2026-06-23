@@ -4294,7 +4294,11 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # tilt as one plane so the cap-adjacent junction co-solves flat).  A
     # post-solve lift was tried and dropped (net-neutral — a rigid plane can
     # only tilt linearly, but the network varies non-linearly).
-    if _os_db.environ.get("O4_CAP_DEBULGE", "1") == "1":
+    from .config import SINGLE_GRADE_GRAPH as _SGG
+    if _os_db.environ.get("O4_CAP_DEBULGE", "1") == "1" and not _SGG:
+        # Superseded by the single-grade-graph connecting solve (the cap is
+        # graded in-grade by the unified solve; this post-solve altitude band-aid
+        # only re-introduces junction violations against it).
         from .cap_plane import debulge_cap_centre_nodes
         debulge_cap_centre_nodes(layout)
 

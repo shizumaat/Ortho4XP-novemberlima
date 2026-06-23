@@ -2050,8 +2050,12 @@ def _smooth_junction_ring_curvature(
     range), so no new within-shape violation is created.  Gate
     ``JUNCTION_RIPPLE_SMOOTH``.  Returns the count of vertices moved.
     """
-    from .config import JUNCTION_RIPPLE_SMOOTH
-    if not JUNCTION_RIPPLE_SMOOTH:
+    from .config import JUNCTION_RIPPLE_SMOOTH, SINGLE_GRADE_GRAPH
+    # The single-grade-graph connecting solve already produces a smooth, in-grade
+    # junction surface; this legacy post-solve altitude band-aid (built for the
+    # old graph) only re-introduces violations against the stricter junction
+    # body grading, so it is superseded here.
+    if not JUNCTION_RIPPLE_SMOOTH or SINGLE_GRADE_GRAPH:
         return 0
     sloping_rect_roles = {
         ROLE_RUNWAY, ROLE_PRIMARY_PARALLEL,
