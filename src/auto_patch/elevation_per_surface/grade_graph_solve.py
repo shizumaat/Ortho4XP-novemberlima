@@ -203,20 +203,39 @@ def connecting_solve(elev, shape_constraints, base_hard, nodes, hard_extra,
     if _os.environ.get("O4_STEP_DEBUG") == "1":
         # in-solve residual: edges in OUR graph still over cap, split by whether
         # both endpoints are hard (unfixable here) vs has-a-free (solver gap)
+        def _typ(k):
+            if k in locked:
+                return "bld"
+            if k in hard_extra:
+                return "rwy"
+            if k < n and base_hard[k]:
+                return "seam"
+            return "free"
         bh = hf = 0
         seen = set()
+        details = []
         for i in adj:
             for (j, lim) in adj[i]:
                 e = (min(i, j), max(i, j))
                 if e in seen:
                     continue
                 seen.add(e)
-                if abs(elev[i] - elev[j]) - lim > 1e-3:
-                    if _hard(i) and _hard(j):
+                ex = abs(elev[i] - elev[j]) - lim
+                if ex > 1e-3:
+                    bothhard = _hard(i) and _hard(j)
+                    if bothhard:
                         bh += 1
                     else:
                         hf += 1
+                    if len(details) < 20:
+                        d = math.hypot(nodes[i][0] - nodes[j][0],
+                                       nodes[i][1] - nodes[j][1])
+                        details.append(
+                            f"{_typ(i)}/{_typ(j)} excess={ex:.2f}m d={d:.0f}m "
+                            f"lev {elev[i]:.1f}/{elev[j]:.1f}")
         print(f"  [connecting-solve] {len(free)} free node(s), "
               f"{_it + 1} sweep(s), infeasible={infeasible}; "
               f"in-solve residual edges: both-hard={bh} has-free={hf}")
+        for ds in details:
+            print(f"    [resid] {ds}")
     return len(free)

@@ -4478,7 +4478,7 @@ def _visible_grade_edges(coords, idx, cap, polygon, container=None,
     return out
 
 
-def _grade_graph_context(layout):
+def _grade_graph_context(layout, bucket_to_idx):
     """Build the shared :mod:`auto_patch.grade_graph` context once per solve:
     the taxi centerlines (LOCAL meters, per-letter caps) + the spine-less
     junction cap-inheritance lookup (nearest connected taxiway-sized rect).
@@ -4517,7 +4517,19 @@ def _grade_graph_context(layout):
                 best = c
         return best if best is not None else TAXI_MAX_GRADE
 
-    return GG.GradeContext(centerlines=cls, inherited_junction_cap=_inherited)
+    # building pad node keys (idx) — an apron/junction edge with BOTH endpoints
+    # here is the inter-pad frontage (building↔building step), not graded.
+    cps = layout.canonical_points
+    bld_keys = set()
+    for s in layout.shapes:
+        if (s.role == ROLE_BUILDING and s.polygon is not None
+                and not s.polygon.is_empty):
+            for (x, y) in _open_ring(list(s.polygon.exterior.coords)):
+                i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+                if i is not None:
+                    bld_keys.add(i)
+    return GG.GradeContext(centerlines=cls, inherited_junction_cap=_inherited,
+                           building_keys=frozenset(bld_keys))
 
 
 def _grade_graph_edges(s, coords, idx, ctx):
@@ -4575,7 +4587,8 @@ def _build_shape_constraints(layout, bucket_to_idx):
     # Single grade graph (docs/single_grade_graph.md): build the apron/junction
     # within-shape constraints from the ONE shared generator the validator also
     # uses.  Built once per solve; gate OFF → legacy _visible_grade_edges branch.
-    _gg_ctx = _grade_graph_context(layout) if SINGLE_GRADE_GRAPH else None
+    _gg_ctx = (_grade_graph_context(layout, bucket_to_idx)
+                if SINGLE_GRADE_GRAPH else None)
     back_scale = (APRON_BACK_EDGE_GRADE / APRON_MAX_GRADE
                   if APRON_MAX_GRADE > 0 else 1.0)
     # Node indices on a clean sloping-rect PLANE (4-corner, altitude_high/low).

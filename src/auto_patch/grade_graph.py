@@ -103,6 +103,12 @@ class GradeContext:
     # the shape's identity (id(shape) for the solver, way id for the validator).
     inherited_junction_cap: Callable[[GradeShape], float] = (
         lambda s: TAXI_MAX_GRADE)
+    # node keys that sit on a BUILDING pad.  An apron/junction edge with BOTH
+    # endpoints on a building is the inter-pad FRONTAGE = a building↔building
+    # step (allowed by the model — adjacent pads may sit at different levels with
+    # a facade/step between them), NOT an apron grade path, so it is not graded.
+    # Mirrors the validator's building↔building step exemption.
+    building_keys: frozenset = frozenset()
 
 
 @dataclass
@@ -230,17 +236,21 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
     spine_cap = _spine_cap(membership, ctx) if membership else body_cap
     vis = _visibility_predicate(ring)
     seam = ctx.seam_keys
+    bld = ctx.building_keys
 
     for i in range(n):
         xi, yi = ring[i]
         ki = keys[i]
         mi = membership.get(i)
+        ki_bld = ki in bld
         for j in range(i + 1, n):
             kj = keys[j]
             if ki == kj:
                 continue
             if ki in seam or kj in seam:
                 continue            # seam-anchored endpoint — DEM controls
+            if ki_bld and kj in bld:
+                continue            # inter-pad frontage = building↔building step
             xj, yj = ring[j]
             d = math.hypot(xi - xj, yi - yj)
             if d < _MIN_PAIR_DIST_M:
