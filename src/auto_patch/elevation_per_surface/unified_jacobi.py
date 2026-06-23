@@ -762,7 +762,32 @@ def solve(layout, icao: str,
     # anchors (buildings P4 + runway + seams), cap-bounded — so the network
     # conforms to the anchors instead of the bowled relief.  Final override
     # before writeback; gate off → byte-identical.
-    if MIN_GRADE_NETWORK:
+    if SINGLE_GRADE_GRAPH:
+        # Phase 3 connecting solve: feasibility bands (direct Dijkstra from the
+        # hard anchors) + min grade+curvature smoothing within them, on the
+        # UNIFIED grade graph.  Replaces _min_grade_network_solve (which is
+        # min-Σgrade²-only and ran on the drifted graph).
+        from auto_patch.elevation_per_surface.grade_graph_solve import (
+            connecting_solve)
+        hard_mg = set(runway_nodes)
+        _cps = layout.canonical_points
+        building_pads = []
+        for _s in layout.shapes:
+            if (_s.role == ROLE_BUILDING and _s.polygon is not None
+                    and not _s.polygon.is_empty):
+                _pad = [bucket_to_idx.get(_cps.get_or_add(float(x), float(y)))
+                        for (x, y) in _open_ring(
+                            list(_s.polygon.exterior.coords))]
+                _pad = [i for i in _pad if i is not None]
+                if _pad:
+                    building_pads.append(_pad)
+        n_cs = connecting_solve(
+            elev, shape_constraints, base_hard, nodes, hard_mg,
+            building_pads=building_pads, dem_elev=dem_elev)
+        if n_cs and _os.environ.get("O4_STEP_DEBUG") == "1":
+            print(f"  [step] connecting-solve: solved {n_cs} free node(s)")
+        _mark("connecting-solve")
+    elif MIN_GRADE_NETWORK:
         hard_mg = set(runway_nodes)
         n_mg = _min_grade_network_solve(
             elev, shape_constraints, base_hard, nodes, hard_mg)
