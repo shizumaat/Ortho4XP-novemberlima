@@ -1,220 +1,160 @@
-# STATUS — handover (2026-06-21)
+# STATUS — handover (2026-06-22)
 
-Branch `dev`. **UNCOMMITTED.** This session worked on **taxi-centerline grading
-for variable-width & hilly airports** (CYXY taxiway G climbing to rim buildings).
+Branch `dev`. **Tree CLEAN — all work committed** (latest `686e7c7`). This and the
+preceding sessions built **taxi-centerline / airside grading for variable-width &
+hilly airports** — the CYXY "bowl" (the airside + terminal sitting ~5–9 m below
+terrain because the network couldn't climb to it within grade).
+
+The default build is unchanged except **P2 is ON** (it flipped
+`test_pavement_grade[CYXY]` GREEN). Everything after P2 (P3, P3a, P4, P5) is
+**built, validated as far as noted, and gated default-OFF**. The pipeline is
+correct and validated through **P4 (building anchors land on the user's exact
+numbers)**; the one unfinished piece is **P5 clearing the wide-apron interiors**.
 
 ## ★ START HERE
-- **`docs/taxi_centerline_grading_plan.md`** — the authoritative plan + priority
-  model. **§9 "BRINGING IT TOGETHER" is the definitive plan for the final piece**
-  (written 2026-06-22 after a full pipeline + history analysis; it SUPERSEDES the
-  P4–P7 sketch in §5). READ §1 (model) then §9 FIRST.
-  - TL;DR of §9 (ROOT CAUSE, verified 2026-06-22): the bowl starts from a DROPPED
-    ICAO SIZE CODE. CYXY's gate arms to the terminal are apt.dat `taxiway_A`
-    (3%) but UNNAMED; `apt_dat_reader.taxi_size_letters` skips unnamed edges
-    (`if not e.name: continue`), so all 9 code-A arms reaching the 713–720 m
-    terminal lose their 3% → default 1.5% → feasibility band to the buildings is
-    computed at HALF the legal climb → buildings clamped ~9 m below DEM (true DEM
-    ≈718; building1 717.8, building3 717.9; emitted ~709) → G + aprons bowl with
-    them. (DEM along G rises ~4.4% > 3% cap, so G tops ~712–714 and the arms take
-    the last climb — exactly the user's model.) FIX, sequenced: **P3a (the
-    unlock)** carry the ICAO size for UNNAMED taxi edges (per-geometry, not name);
-    **P4** per-building route-feasibility band → seat each building flat at
-    closest-to-DEM within it; **P5** conform aprons/junctions/G to the corrected
-    held buildings/corridor (field-target lift-only + directional yield-release).
-    ★ Always judge against the SMOOTHED DEM (`_load_airport_dem(lat,lon)`), NOT
-    emitted (bowled) levels — that error produced a wrong "no 718 rim" reading.
-- Memory note `apron_spine_dem_seed_climb.md` — raw session findings behind the
-  plan (the dead-ends and why).
-- ⚠ **Pin `PYTHONHASHSEED=0`** for ANY A/B build comparison — the apron/junction
-  partition is hashseed-nondeterministic (CYXY within-shape count flakes 5↔18 on
-  the SAME config, independent of any change).
+1. **`docs/taxi_centerline_grading_plan.md`** — authoritative. Read **§1 (model)**
+   then **§9 "BRINGING IT TOGETHER"** (the definitive plan; supersedes the P4–P7
+   sketch in §5). §9 has the root cause, the locked building-feasibility metric,
+   each P-step's state, and the NEXT STEP.
+2. Memory: `taxi_grading_final_plan_field_target.md` (the §9 plan + per-step
+   state), `corridor_spine_chains_p2.md` (P2/P3/P3a detail),
+   `apron_spine_dem_seed_climb.md` (older dead-ends).
+3. ⚠ **Two traps that cost real time:**
+   - **Pin `PYTHONHASHSEED=0`** for ANY A/B — the apron/junction partition is
+     hashseed-nondeterministic (CYXY within-shape flakes on the same config).
+   - **Judge against the SMOOTHED DEM**, never the emitted (bowled) levels:
+     `_load_airport_dem(lat, lon)` with `override_dem=None` (it applies the same
+     `apt_smoothing_pix` blur the build uses). Reading emitted levels led to a
+     wrong "no 718 m terminal" conclusion mid-session.
 
-## The goal & model (1-paragraph)
-The shipped solver is good at most airports but couldn't (a) use the steeper
-grade narrow code-A/B taxiways are allowed (3% vs 1.5%), (b) climb truly hilly
-terrain (CYXY's network sat ~10 m below terrain in a "bowl"), or (c) keep some
-junctions smooth. Model: a **feasibility route band** `[floor, ceiling]` says
-what elevations are POSSIBLE at each point; grading then conforms to FAA/EASA
-grade+curvature within it under a priority hierarchy — **runway thresholds +
-tile seams = the only hard anchors**; grade/curvature compliance is sacred and
-overrides DEM where needed; buildings flat (rare HECA-class small-slope
-exception), aprons ≤1%, taxiways/junctions variable per-letter grade and carry
-the elevation change. **Minimal-deviation principle:** everything sits as close
-to DEM as grade allows — move only as much as REQUIRED, never the runway-pulled
-floor (that over-pull was the bowl). Full detail: the plan §1.
+## The root cause (verified) and the model
+The terminal sits on terrain that rises faster than taxi grade allows; the bowl
+came from **a dropped ICAO size code**: CYXY's gate "arms" from taxiway G to the
+terminal are apt.dat `taxiway_A` (3 %) **but unnamed**, and
+`apt_dat_reader.taxi_size_letters` was keyed by name and skipped unnamed edges —
+so the feasibility band to the terminal was computed at the uniform 1.5 % (half
+the legal climb), clamping the buildings ~9 m below DEM and bowling G + the aprons
+with them.
 
-## Done & banked — KEEPERS (default ON, the variable-grade primitives)
-1. **`TAXI_REACH_BAND_BY_WIDTH`** — `_runway_reach_bands` uses per-edge caps
-   (`TaxiRouteGraph.edge_cap` from `apt_taxi_letters`), so the feasibility band
-   reflects the real per-letter climb rate (CYXY G ceiling 720→727).
-2. **`JUNCTION_NARROW_GRADE`** (per-axis) — a junction edge ALONG a code-A/B
-   centerline earns 3%; ring/transverse stay 1.5% (matches the validator's
-   per-axis cL/cT). `_collect_junction_axes`→caps + `_edge_narrow_cap`.
-   PER-AXIS only — isotropic 3% destabilises (CYXY within 18→41).
-3. **`SPINE_PIECE_ROLE_REEVAL`** — narrow corridor pieces sliced from an apron
-   parent are promoted apron→junction (so a taxiway-through-apron isn't capped at
-   1%). Promotion-only (junction parents byte-identical). `junction_spine.py`.
-4. **`CORRIDOR_SPINE_CHAINS`** (plan P2, NEW 2026-06-22) — `_taxi_corridor_profiles`
-   now adds a station-only `chain_data` entry over the spine nodes of every
-   centerline a rect chain doesn't fully cover (the promoted-apron stretches —
-   CYXY taxiway G's 35 pieces), so the NETWORK PROFILE field value is written and
-   HELD along the WHOLE route (G held nodes 82→385). Built only where ≥1 node is
-   uncovered → airports without such stretches are byte-identical (gate-off ≡ on).
-   **Flipped `test_pavement_grade[CYXY]` RED→GREEN** (suite 6→5 failed, no new
-   reds; gate-off = the 6-failed baseline exactly). G still tops ~708 vs the
-   ~718 m rim (the field "bowl" — that's P3, not P2 coverage).
+**Model (user, authoritative).** Buildings are the heaviest anchor, seated FLAT at
+the elevation closest to DEM that keeps them reachable WITHIN GRADE from **every**
+runway threshold along the real taxi route; the taxi network carries the climb at
+per-letter caps (narrow A/B 3 %, wide C–F 1.5 %); aprons ≤1 %; any steepness the
+terrain forces beyond that goes in an **explicit transition (ramp/wall), never the
+apron/taxi interior**. Minimal-deviation: everything as close to DEM as grade
+allows.
 
-These shift solved values slightly at junctions, so SPJC/SPLP compare-target +
-CYXY grade move (see suite below); they introduce NO new grade violations on the
-good airports.
+**The building-feasibility metric (LOCKED, validated to the user's hand-calcs)** —
+`elevation_per_surface/building_feasibility.py::building_feasible_levels`: for each
+building touching airside pavement, perpendicular from the centroid to the nearest
+taxi centerline (named or not) — corridor part of the perp at the taxiway cap,
+apron part at 1 % — then the per-edge per-letter cap-weighted centerline route
+(incl. the partial first edge from the foot point to its graph node) to **every**
+runway threshold; band = intersection over thresholds (`ceil=min(thr+climb)`,
+`floor=max(thr−climb)`); seat at `clamp(DEM, floor, ceiling)`. CYXY result matches
+the user: building9 (terminal) 700.4, building3 (hangar) 715.7, building5 709.1,
+building10 (not touching) stays DEM.
 
-## Scaffolding — DEFAULT OFF, to RETIRE (proved mechanisms, NOT the architecture)
-- **`APRON_FEASIBLE_LIFT`** (`_anchor_aprons_at_feasible_high`) — hard-anchors
-  aprons flat at their route-band ceiling. Lifts the complex but flat hard-anchor
-  is the WRONG driver (pins the apron body high, troughs the centerline).
-- **`O4_TAXI_SPINE`** — per-centerline smooth profile (inside the same fn). Proved
-  G CAN be made smooth (705→718) but per-segment, not network-consistent.
-- **`O4_APRON_NOANCHOR`** — with spine on, skip the flat anchor so aprons conform.
-- **`BUILDING_DEM_ANCHOR`** (`_anchor_buildings_at_feasible_dem` +
-  `_relax_buildings_and_resolve` flex) — hard building pins; too rigid (CYXY
-  within 18→410). RETIRE; buildings are flat-but-conforming, not hard.
-- **`O4_DEM_ATTR`/`O4_DEM_FLOOR_ATTR`** — made the existing DEM-attraction
-  strengths env-tunable (defaults unchanged); keep as knobs.
-- **`FIELD_ROUTE_BAND_BY_WIDTH`** (P3, NEW 2026-06-22, default OFF) — the
-  CORRECT per-letter field route-band fix (`_runway_route_band` uses
-  `edge_cap`); banked gated-off because it regresses without P4 (held centerline
-  climbs, neighbours don't). FLIP ON with P4. This is the real P3 — not
-  scaffolding to retire, just dormant until P4 lands.
-- **`MIN_GRADE_NETWORK`** (P5 prototype, NEW 2026-06-22, default OFF) — re-solve
-  free airside nodes as the smoothest (min Σgrade²) surface connecting the hard
-  anchors (buildings P4 + runway + seams), cap-bounded; final override before
-  writeback. `_min_grade_network_solve`. Holds the anchors + grades the taxi
-  network, but within-shape only 563→481 (apron-dominated, 328) — the wide
-  terminal aprons can't grade ≤1% to the high anchored buildings (P6-transition
-  case) + likely solve-graph≠validator-graph. NOT yet landing; needs P6 +
-  graph reconciliation.
-- **`BUILDING_ROUTE_FEASIBILITY`** (P4 building DRIVER, NEW 2026-06-22, default
-  OFF) — THE validated building-placement metric. Seats each airside-touching
-  building FLAT at clamp(DEM, floor, ceiling) where the band is the per-edge
-  cap-weighted reach to EVERY runway threshold along the real taxi route
-  (perp-to-nearest-centerline + centerline route; apron 1% outside the taxiway
-  corridor). Matches the user's hand-calcs (CYXY building9 700.4, building3 715.7,
-  building5 709.1, building10 stays DEM). `elevation_per_surface/building_
-  feasibility.py` + `_seat_buildings_route_feasible`; thresholds on
-  `layout.runway_thresholds`. Requires P3a (edge_cap arms). ★ Gated OFF: anchors
-  alone + the OLD network solve explode within-shape to 563 — needs the P5
-  min-grade network solve to conform the network to them (the user's stage 2).
-- **`FIELD_TARGET_CONFORMANCE`** (superseded half-measure, default OFF) — lift-only re-target toward the field before the final enforce
-  projection (`elev←max(elev,min(F,hi))`, soft non-held). Built as the conformance
-  vehicle but NOT sufficient alone: the wide-apron terminal stays gated (the field
-  lifts the apron toward the LOW corridor, not the building); lifting to the raw
-  route-ceiling instead explodes within-shape (89, route-vs-geom). Needs the P4
-  building-DRIVER (band via edge_cap, place+hold building, apron conforms to the
-  BUILDING). Kept gated OFF as the vehicle. `_enforce_within_shape_grade` + dem_elev.
-- **`UNNAMED_TAXI_SIZE`** (P3a, NEW 2026-06-22, default OFF) — THE UNLOCK.
-  apt.dat unnamed `taxiway_A/B` connector "arms" lost their 3% (taxi_size_letters
-  keyed by name); now tagged via geometry with a synthetic ref (`~A`/`~B`) so the
-  feasibility band to the terminal uses the real 3%. VERIFIED: tags 19 CYXY arms,
-  un-bowls arm-served buildings (building5→713.2=DEM, building10→DEM). Main
-  terminal (wide-apron-fronted) needs P4+P5. Regresses standalone (within 0→8) →
-  banked OFF, flips ON with P3+P4+P5. `apt_dat_reader.coded_taxi_edge_segments` +
-  pipeline resolver.
+## Gate stack (all in `config.py`; env override in parens)
+Default-ON keepers (the variable-grade primitives, zero net-new reds):
+- `TAXI_REACH_BAND_BY_WIDTH` — per-edge caps in `_runway_reach_bands`.
+- `JUNCTION_NARROW_GRADE` (per-axis) — narrow junction axis earns 3 %.
+- `SPINE_PIECE_ROLE_REEVAL` — promote narrow apron-corridor pieces → junction.
+- **`CORRIDOR_SPINE_CHAINS` (P2, default ON)** — `_taxi_corridor_profiles` adds
+  station-only chains over the spine nodes of any centerline a rect chain misses
+  (CYXY G's promoted-apron pieces) so the field value is written + held along the
+  whole route. Flipped `grade[CYXY]` RED→GREEN; off-target airports byte-identical.
 
-**Reproduce the in-sim evaluation build** (lifted aprons + smooth-ish G, rough
-junctions) that the user reviewed: `O4_APRON_FEASIBLE_LIFT=1 O4_TAXI_SPINE=1`.
-Default build = the clean keepers-only baseline (no lift; the bowl).
+Built + banked default-OFF (the §9 chain; flip ON together to test the airside):
+- **`UNNAMED_TAXI_SIZE` (P3a)** — recover the ICAO size of unnamed `taxiway_A/B`
+  arms via geometry → synthetic ref `~A`/`~B` in `apt_taxi_letters`
+  (`apt_dat_reader.coded_taxi_edge_segments` + pipeline resolver). THE unlock;
+  tags 19 CYXY arms. Regresses standalone (within 0→8) → needs P4/P5.
+- **`FIELD_ROUTE_BAND_BY_WIDTH` (P3)** — `network_profile._runway_route_band` uses
+  `edge_cap` (was uniform 1.5 %). Correct band fix; regresses standalone → P4/P5.
+- **`BUILDING_ROUTE_FEASIBILITY` (P4)** — seat buildings at the validated metric
+  levels as hard anchors (`_seat_buildings_route_feasible`; thresholds on
+  `layout.runway_thresholds`). VALIDATED. Requires P3a. Anchors alone + old solve
+  → within 563 (network can't reach them) → needs P5.
+- **`MIN_GRADE_NETWORK` (P5, PROTOTYPE)** — `_min_grade_network_solve`: re-solve
+  free airside nodes as the smoothest (min Σgrade²) cap-bounded surface connecting
+  the hard anchors (buildings + runway + seams). Holds the anchors + grades the
+  taxi network, but within-shape only 563→481, **apron-dominated (328)** — see
+  NEXT STEP. Final override before writeback.
 
-## Where the plan goes next (P4–P7, see doc; P2 DONE, P3 BANKED 2026-06-22)
-Make the **corridor profile (`_taxi_corridor_profiles`) the single
-smooth-centerline driver**: ✅ P2 DONE — chains now cover the promoted-apron
-junction stretches (gate `CORRIDOR_SPINE_CHAINS`, keeper #4 above); every
-centerline is one network-consistent held profile. ◐ P3 band fix BANKED (gate
-`FIELD_ROUTE_BAND_BY_WIDTH` default OFF — `_runway_route_band` now uses the
-per-letter `edge_cap` so a narrow route's field ceiling is its real 3% reach,
-not 1.5%; CYXY G 712→714). It REGRESSES standalone (held centerline climbs but
-its neighbours don't → within-shape 0→10) so it is gated OFF pending P4. **NEXT
-= P4** (it enables P3): aprons/buildings CONFORM up/down to the held centerlines
-(no hard anchors, minimal deviation).
-  ⮑ P4 INVESTIGATED 2026-06-22 (no code shipped — two dead-ends ruled out, tree
-  clean). The P3 climb is written+held on G, then LOST in the final enforce's
-  *"CORRIDORS YIELD TO FLAT TERMINALS"* release (`held_all - corridor_held_set`,
-  unified_jacobi ~L3318/L3455): it releases the corridor to sink toward a lower
-  neighbour even though the adjacent `building3` is flat at 709 ≈ G's field 708.9.
-  Dead-end A: holding the corridor through the release → within 10→13 (WORSE) —
-  the neighbours don't conform UP, they're pinned low. Dead-end B: P3 band alone
-  → 0→10. So P4 is the ACTIVE upward-conformance rework: DRIVE apron/junction/
-  building neighbours UP to the held climbed centerline (remove the route-band
-  floor / DEM-relief seed / flat-pad pin that holds them low), and make the
-  yield-release BIDIRECTIONAL (yield DOWN to a low pad = SPJC; hold + lift
-  neighbours UP to a high pad = CYXY). Coupled with P5. NOT a toggle — needs the
-  real conformance pass. ALSO: kill the junction trough (P5); explicit
-corridor↔wide-apron transition only where genuinely needed (P6); retire the
-scaffolding + add a centerline-smoothness check/test (P7).
+Superseded / to retire (proved mechanisms, NOT the architecture):
+`FIELD_TARGET_CONFORMANCE` (half-measure lift, superseded by P5),
+`APRON_FEASIBLE_LIFT`, `O4_TAXI_SPINE`, `BUILDING_DEM_ANCHOR` (uniform-cap →
+bowled; superseded by P4's edge-cap metric), `O4_DEM_ATTR`/`O4_DEM_FLOOR_ATTR`.
 
-User's latest in-sim review of the eval build (the concrete targets for P2–P5):
-G too shallow the first ~100 m (should climb at 3% from the start); a too-steep
-jump then plateau (segment-boundary steps, not one uniform grade); junctions
-(shapes 85/86) trough — centerline BELOW the edges — and don't match the cap/rect
-they connect; connectors (to apron 105) sit flat when they could climb 3% to meet
-G; junctions across the airport rougher than before. **Invariant to hit:** every
-taxiway centerline route smooth and within grade at all times; junctions
-invisible (seamless rect→cap→junction). Aprons & buildings looked good — keep
-them close to DEM.
+**Run the full new airside pipeline:**
+`O4_UNNAMED_TAXI_SIZE=1 O4_FIELD_ROUTE_BAND_BY_WIDTH=1 O4_BUILDING_ROUTE_FEASIBILITY=1 O4_MIN_GRADE_NETWORK=1`
+→ buildings land on their metric levels; within-shape 481 (apron-dominated).
+Default (no env) = clean P2 baseline.
+
+## ► NEXT STEP (where a new session picks up)
+P5 holds the anchors but does NOT clear the **wide terminal aprons** (481 within,
+328 apron). This is NOT solver-tuning: the existing enforce (a proven projector)
+is also stuck at 563 with the anchors, so it's genuine — two parts:
+1. **Builder-vs-validator graph mismatch.** `_min_grade_network_solve` solves the
+   `shape_constraints` edges; `tools/check_grade.py` (and the build WARN) use their
+   own geodesic per-axis graph. FIRST diagnose how many of the 481 are real ≤1 %
+   apron infeasibilities vs edges the solver never sees, and reconcile the solve
+   graph with the validator's. (Probe: dump the within-violations by shape +
+   whether each endpoint is hard — see below.)
+2. **P6 explicit transitions.** Where a wide apron genuinely cannot grade ≤1 %
+   from its low taxiway edge up to the high anchored building across its width,
+   emit an explicit ramp/retaining edge at the building frontage and let the apron
+   interior sit flat at the building level (the user's "steepness in the
+   transition, never the apron interior"). The P4 metric only credits ONE
+   perpendicular apron crossing at 1 %, so a wide apron's far interior nodes are
+   the ones that can't reach.
+Also consider a true constrained-QP for the min-grade solve rather than the
+alternating harmonic/projection prototype.
+Then: flip P3a+P3+P4+P5 (+P6) ON by default; user re-cuts SPJC/SPLP fixtures;
+add a centerline-smoothness + closest-to-DEM test (P7); retire the scaffolding.
 
 ## Test suite
-`PYTHONHASHSEED=0 venv/bin/python -m pytest tests/ -q` → **5 failed / 359 passed**
-(seed 0; 329 s) with the P2 keeper ON (default). The committed baseline before
-this session was 2 failed. The 5:
-- `rests_on_source[CYXY]`, `grade[HECA]` — **pre-existing** standing reds (the 2).
+`PYTHONHASHSEED=0 venv/bin/python -m pytest tests/ -q` (seed 0; ~5.5 min) →
+**5 failed / 359 passed** with defaults (P2 on). The 5:
+- `rests_on_source[CYXY]`, `grade[HECA]` — pre-existing standing reds.
 - `compare_target_splp[-13--77]`, `compare_target_splp[-13--78]`,
-  `compare_target_spjc` — **EXPECTED**: the keeper changes shift junction solved
-  values, so these fixtures no longer match. User will re-cut SPJC/SPLP once CYXY
-  is right — do NOT chase them.
-- `grade[CYXY]` — **NOW GREEN** (P2 resolved it, as predicted). It was the 6th
-  failure pre-P2.
+  `compare_target_spjc` — EXPECTED: keeper changes shifted junction values; the
+  user re-cuts these once CYXY is right. Do NOT chase them.
+`grade[CYXY]` is GREEN (P2 fixed it). A/B: `O4_CORRIDOR_SPINE_CHAINS=0` → 6 failed
+(grade[CYXY] red) = the exact pre-session baseline. (Total tests dropped ~19 vs
+mid-session: an unrelated commit `8107519` removed `tests/test_surface_mesh.py`.)
 
-A/B reference (seed 0): `O4_CORRIDOR_SPINE_CHAINS=0` → **6 failed / 358 passed**
-(grade[CYXY] red) = the exact pre-P2 baseline. So P2 gate-off ≡ baseline, gate-on
-flips grade[CYXY] green with no new reds.
+## Probes (⚠ `/tmp` is periodically CLEARED — recreate as needed)
+Build a single airport (cwd = repo root, venv): see `auto_patch/CLAUDE.md`. Key
+patterns used this session (re-create in `/tmp`):
+- within/cross/steps mirroring `test_pavement_grade`: build CYXY, `to_osm`, then
+  `tools.check_grade.run_checks(out, max_grade_pct=1.5, proximity_m=1.0,
+  edge_search_m=5.0, edge_step_m=0.5, taxi_axes_ll=<per-letter axes>,
+  route_ctx=route_ctx_from_layout(layout))`.
+- building levels vs DEM: build, sample `_load_airport_dem`/`_sample_dem` at each
+  ROLE_BUILDING centroid vs `mean(node_altitudes)`.
+- the route-feasibility table / KMLs (building5 etc.): call
+  `building_feasibility.building_feasible_levels(layout, thresholds_xyz,
+  dem_sampler)` — thresholds from `apt.runways` (both ends) at nearest-runway-node
+  elev. (KMLs of building + nearby centerlines + the route path were very useful
+  for confirming geometry with the user in Google Earth.)
+- env debug: `O4_STEP_DEBUG=1` (per-pass counts incl. "route-feasible buildings
+  seated", "min-grade network"), `O4_CORRIDOR_DEBUG=1`, `O4_NPF_DEBUG=1`.
 
-⚠ hashseed-flaky — always pin seed 0 for A/B.
+## New code this session (all committed)
+- `elevation_per_surface/building_feasibility.py` (NEW) — P4 metric.
+- `elevation_per_surface/unified_jacobi.py` — P2 spine chains in
+  `_taxi_corridor_profiles`; `_seat_buildings_route_feasible` (P4);
+  `_min_grade_network_solve` (P5); `_enforce_within_shape_grade` gained a
+  `dem_elev` param + the (superseded) `FIELD_TARGET_CONFORMANCE` lift block.
+- `apt_dat_reader.py` — `coded_taxi_edge_segments` (P3a).
+- `pipeline.py` — P3a unnamed-arm size recovery; stash `layout.runway_thresholds`.
+- `network_profile.py` — `_runway_route_band` per-edge cap (P3).
+- `config.py` — gates P2/P3/P3a/P4/P5 (above) + `FIELD_TARGET_CONFORMANCE`.
+- `docs/taxi_centerline_grading_plan.md` §9 — the authoritative plan.
 
-## Probes (in /tmp, not tracked)
-- `/tmp/probe_spine.py` — **node-accurate** G centerline profile (dist-from-E,
-  alt). USE THIS, not the shape-level `/tmp/probe_gdem.py` (it misreads — samples
-  the flat apron body, not the centerline).
-- `/tmp/probe_clean.py` — within/cross/steps via `check_grade.run_checks` with
-  per-axis axes + route_ctx (mirrors `test_pavement_grade`).
-- `O4_SPINE_DEBUG=1` per-centerline (proj,ceiling,profile); `O4_BAND_KML=/p.kml`
-  per-node band+provenance.
-
-## Files touched
-- `config.py` — 10 gates (above; +`CORRIDOR_SPINE_CHAINS` P2 committed,
-  +`FIELD_ROUTE_BAND_BY_WIDTH` P3, +`UNNAMED_TAXI_SIZE` P3a,
-  +`FIELD_TARGET_CONFORMANCE`, +`BUILDING_ROUTE_FEASIBILITY` P4,
-  +`MIN_GRADE_NETWORK` P5 — all default-OFF).
-- `elevation_per_surface/building_feasibility.py` (NEW) — the validated P4
-  building route-feasibility metric (`building_feasible_levels`).
-- `elevation_per_surface/unified_jacobi.py` (P5) — `_min_grade_network_solve`
-  (gate `MIN_GRADE_NETWORK`) + `_seat_buildings_route_feasible` (P4).
-- `pipeline.py` — stash `layout.runway_thresholds` (both ends per runway).
-- `elevation_per_surface/unified_jacobi.py` (P4) — `_enforce_within_shape_grade`
-  gains `dem_elev` param + the field-target lift-only block before the first
-  `_project_within_bands`; `_FIELD_TC_MAX_GAP_M` constant.
-- `apt_dat_reader.py` — P3a: `coded_taxi_edge_segments` (per-edge `(seg,letter)`
-  incl. unnamed).
-- `pipeline.py` — P3a: unnamed-arm size recovery (synthetic `~A`/`~B` ref) after
-  `apt_taxi_letters`.
-- `network_profile.py` — P3: `_runway_route_band` per-edge cap (gated).
-- `taxi_routing.py` — `TaxiRouteGraph.edge_cap` + `_ekey`; per-letter caps in
-  `build_taxi_route_graph`.
-- `elevation_per_surface/unified_jacobi.py` — per-edge caps in
-  `_runway_reach_bands`; `_collect_junction_axes`→caps + `_edge_narrow_cap`;
-  **P2 spine-station chains** in `_taxi_corridor_profiles` (between the
-  ≥2-station filter and STAGE B; gate `CORRIDOR_SPINE_CHAINS`);
-  `_anchor_aprons_at_feasible_high` (spine+flat, to retire/merge);
-  `_anchor_buildings_at_feasible_dem` + `_relax_buildings_and_resolve` (to
-  retire); env-tunable DEM attraction.
-- `elevation_per_surface/junction_spine.py` — `SPINE_PIECE_ROLE_REEVAL`.
-- `layout.py` — reverted to original (`taxi_shape_code_letter` unchanged).
-- `docs/taxi_centerline_grading_plan.md` — NEW, the plan.
+## Commit trail (this session, branch dev)
+`6cd8922` P2 + variable-grade keepers (grade[CYXY] →green) · `6779767` P3 banked ·
+`138555c` P4 investigation (docs) · `5627712`+`c83bf10` §9 plan · `4b8fb41` P3a ·
+`8fe80aa` P4 finding · `f9d3875` P4 building driver · `686e7c7` P5 prototype.
