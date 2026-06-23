@@ -1,24 +1,78 @@
-# STATUS — handover (2026-06-22)
+# STATUS — handover (2026-06-23)
 
-Branch `dev`. **Tree CLEAN — all work committed** (latest `686e7c7`). This and the
+Branch `dev`. Working tree has **UNCOMMITTED new work** (the single-grade-graph
+generation — see below); the prior committed state is `fe214de`. This and the
 preceding sessions built **taxi-centerline / airside grading for variable-width &
-hilly airports** — the CYXY "bowl" (the airside + terminal sitting ~5–9 m below
-terrain because the network couldn't climb to it within grade).
+hilly airports** — the CYXY "bowl" (airside + terminal sitting below terrain).
 
-The default build is unchanged except **P2 is ON** (it flipped
-`test_pavement_grade[CYXY]` GREEN). Everything after P2 (P3, P3a, P4, P5) is
-**built, validated as far as noted, and gated default-OFF**. The pipeline is
-correct and validated through **P4 (building anchors land on the user's exact
-numbers)**; the one unfinished piece is **P5 clearing the wide-apron interiors**.
+## ★★ CURRENT GENERATION (2026-06-23) — the SINGLE GRADE GRAPH ★★
+**Authoritative plan: `docs/single_grade_graph.md`.** Memory:
+`p5_lockstep_diagnosis.md`. This SUPERSEDES the P5/P6 sketch below for the
+connecting solve. The pivot this session:
 
-## ★ START HERE
-1. **`docs/taxi_centerline_grading_plan.md`** — authoritative. Read **§1 (model)**
-   then **§9 "BRINGING IT TOGETHER"** (the definitive plan; supersedes the P4–P7
-   sketch in §5). §9 has the root cause, the locked building-feasibility metric,
-   each P-step's state, and the NEXT STEP.
-2. Memory: `taxi_grading_final_plan_field_target.md` (the §9 plan + per-step
-   state), `corridor_spine_chains_p2.md` (P2/P3/P3a detail),
-   `apron_spine_dem_seed_climb.md` (older dead-ends).
+- **Root cause of the residual 481 CYXY within-violations = TWO within-shape
+  graphs.** The solver (`unified_jacobi._visible_grade_edges`) and the validator
+  (`check_grade.iter_shape_grade_constraints`) derive grade pairs from two
+  different functions; on identical geometry they disagree by ~9k pairs (146
+  *violated*). The solver cannot fix what it does not grade → 481 can't reach 0.
+- **User model (authoritative, in the doc + memory):** (1) keep the TAXI ROUTE
+  graph as the feasibility-band / building-elevation layer; (2) ONE within-shape
+  grading graph for solver+validator; (3) buildings = closest-to-DEM in band then
+  LOCKED; everything else = **min grade + curvature** spread on the one graph;
+  (4) **NO genuine infeasibility — anything infeasible is a BUG** (no P6).
+- **Junction = apron with spine+body** (user 2026-06-23): spine graded smooth like
+  a crossing runway at the taxiway per-letter cap (shares elevation at crossings,
+  grades into the adjacent corridor); body = visibility/geodesic at the taxiway cap
+  (NOT 1%); spine-less junction inherits the cap from the nearest connected
+  taxiway. The old per-axis diagonal-skip (`check_grade.py:949`) leaves wide
+  junction bodies UNGRADED — that goes away.
+- **BUILT THIS SESSION (uncommitted, clean-room):**
+  `src/auto_patch/grade_graph.py` = THE single graph (apron/junction spine+body,
+  unified per-edge cap rule, visibility, seam-drop, cap-inheritance) +
+  `tests/test_grade_graph.py` (7 hermetic tests, GREEN). Proof
+  (`/tmp/probe_lockstep_module.py`): same module fed SOLVER shapes vs EMITTED OSM →
+  **0 cap disagreements**, 94% identical pairs; the ~6% residual is geometry
+  non-identity (`to_osm` weld + the 5 post-solve-drift shapes + vis-buffer flutter)
+  = Phase 0.
+- **PHASE 0 DONE (this session):** moved `_dedup_coincident_ring_vertices` +
+  `drop_flatedge_nodes` PRE-solve (gate `O4_PRESOLVE_CLEAN`, default ON;
+  pipeline.py after `_unify_airside_geometry`, idempotent post-solve copies kept).
+  CYXY geom-guard **5→2**; the 2 residual = `_insert_bridge_contacts_into_junctions`
+  (Phase-5 solve-dependent exception, collinear → grade-neutral). ★ Insight: the
+  grade graph is ALTITUDE-INDEPENDENT, so altitude-only post-solve passes
+  (`debulge_cap_centre_nodes`, `_smooth_junction_ring_curvature`) are lockstep-safe
+  and were never the issue. Grade suite: 1 failed (HECA standing) / 14 passed = NO
+  regression. test_grade_graph.py 7/7 green.
+- **PHASE 2 DONE (this session):** solver consumes `grade_graph` for apron/junction
+  (gate `O4_SINGLE_GRADE_GRAPH`, default OFF; helpers `_grade_graph_context` +
+  `_grade_graph_edges` in unified_jacobi; ROLE_BUILDING + service_junction stay
+  legacy). Gate-off byte-identical (new elif requires `_gg_ctx is not None`).
+  **CYXY apron/junction within = 348** under the unified graph
+  (`/tmp/probe_sgg_within.py`, solver+validator both grade_graph) — the OLD solve's
+  quality gap (aprons 10%/4–15m, junctions ~9%), NOT infeasibility. → Phase 3.
+- **NEXT (phases in the doc):** Phase 3 the NEW connecting solve (lock buildings at
+  route-feasible closest-to-DEM, then min GRADE+CURVATURE spread on the unified
+  graph — replaces field/enforce/`_min_grade_network`; direct Dijkstra bands, no
+  POCS). Then Phase 1 wire validator to grade_graph + re-cut fixtures. Then Phase 4
+  verify CYXY→0 + retire legacy. Phase 1 wire validator to
+  grade_graph (+ re-cut fixtures for the junction change); Phase 2 wire solver
+  (gated, A/B `probe_constraint_diff`); Phase 3 the connecting solve (lock
+  buildings, min grade+curvature — NEW, replaces `_min_grade_network_solve`, NO
+  60k-iter POCS — bands are a direct Dijkstra); Phase 4 verify + RETIRE the old
+  per-axis / `_visible_grade_edges` / `_min_grade_network_solve` scaffolding.
+- ⚠ **Clean-room rule (user):** build in NEW files, wire in, DELETE old. Do not
+  extend the legacy graph/solve code.
+
+## (PRIOR GENERATION — context only; the building/route measurement is REUSED)
+The default build is unchanged except **P2 is ON**. P3/P3a/P4/P5 are built + gated
+default-OFF; P4 (route-feasibility building elevations) is VALIDATED and is REUSED
+as the band/building layer. The old plan's NEXT STEP ("P5 clears wide aprons") is
+SUPERSEDED by the single-graph generation above.
+
+## ★ START HERE (older plan, still useful for the route/band + P3a/P4 detail)
+1. **`docs/taxi_centerline_grading_plan.md`** §1 (model) + §9. The building
+   feasibility metric there is the route/band layer the new generation keeps.
+2. Memory: `taxi_grading_final_plan_field_target.md`, `corridor_spine_chains_p2.md`.
 3. ⚠ **Two traps that cost real time:**
    - **Pin `PYTHONHASHSEED=0`** for ANY A/B — the apron/junction partition is
      hashseed-nondeterministic (CYXY within-shape flakes on the same config).

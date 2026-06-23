@@ -1,0 +1,187 @@
+# Single grade graph — ONE within-shape constraint set for solver AND validator
+
+Status: **in progress** (2026-06-23). Owner: handoff-ready. THE authoritative plan
+for the current generation of the elevation solver. Read with
+`memory/p5_lockstep_diagnosis.md`. This SUPERSEDES the P5/P6 sketch in
+`docs/taxi_centerline_grading_plan.md` §9 for the connecting-geometry solve.
+
+> ⚠ **Why this doc exists.** We have made many attempts at airside grading, each
+> leaving gated scaffolding (different graphs, objectives, validators). The current
+> generation collapses that to a **single graph** + a **clean-room** implementation
+> (new files, wired in, old paths retired). Do NOT extend the old per-axis /
+> `_visible_grade_edges` / `_min_grade_network_solve` code — build in the new module
+> and delete the old once it lands.
+
+---
+
+## 1. The model (user, authoritative 2026-06-23)
+
+**Two graphs, both legitimate, DIFFERENT jobs — never collapse into each other:**
+
+1. **Taxi route graph** (`taxi_routing`) → route distance to runway thresholds →
+   per-node **feasibility bands** + the **true optimal building elevations**. The
+   "where can elevations be" layer. KEEP IT.
+2. **Within-shape grading graph** (visibility/geodesic chords) → grades the
+   **connecting surface** between the locked anchors. The "is the realized surface
+   compliant" layer. THIS is the one that must become single (solver = validator).
+
+**Objective hierarchy:**
+- **Hard anchors** = runway thresholds + tile seams ONLY.
+- **Buildings** = closest-to-DEM within their route-feasibility band, **then LOCKED**
+  (become anchors). *Closest-to-DEM applies to buildings only.*
+- **Everything else** = **minimum grade + curvature**, spread throughout, subject to
+  per-edge caps + feasibility bands.
+
+**★ No genuine infeasibility.** Every airport has a feasible solution. DEM is a
+guide; runway thresholds are the anchors; we build a feasible model from data +
+rules. Anything that looks infeasible is a **bug** (mis-measurement / solver / data)
+— NOT a case for an "explicit transition / P6". Do not add P6.
+
+## 2. Shape grading rules (the single within-shape graph)
+
+Every soft airside shape is **spine + body** (this UNIFIES apron and junction —
+they are the SAME code path, differing only in the body cap):
+
+- **APRON:** spine = taxi centerline(s) through it (smooth taxi profile at the
+  taxiway cap); body = visibility/geodesic chords from body nodes to the spine and
+  edges, clamped to **1%**.
+- **JUNCTION:** identical, except the body cap is the **taxiway-size cap** (per-ICAO
+  letter: A/B 3%, C–F 1.5%), NOT 1%.
+  - **With spine(s) (most junctions):** each spine is graded as a **smooth profile
+    from entry to exit, like a crossing runway** — its own smooth longitudinal grade
+    at the taxiway cap; two spines **share the elevation at their crossing node**
+    (one canonical node); each spine **grades smoothly into the adjacent taxiway
+    corridor at its endpoints** (the spine sub-graph and the corridor route-profile
+    must be the SAME profile through the shared end node — a likely seam, watch it).
+  - **No spine:** visibility/geodesic with the cap **inherited from the nearest
+    connected taxiway-sized shape** (junctions are always wired into the taxi
+    network → there is always one to borrow from).
+- **RECT** (runway / sized taxiway / stub / cross_connector / parallels): the clean
+  4-corner **plane** model (flat cross-ends, axial slope at the per-letter cap) +
+  planar end-caps. A correct planar rect already satisfies the convex all-pair check,
+  so rects are not a lockstep gap — keep the plane model.
+- **BUILDING (terminal pad):** FLAT rigid group; locked at its route-feasible,
+  closest-to-DEM level.
+- **RUNWAY / groundside:** runway = FAA profile (hard); groundside = DEM-following
+  (not solved). The validator may CHECK these; the solver does not SOLVE them — this
+  is a legitimate solver/validator scope difference, NOT graph drift.
+
+## 3. Why we are here (the diagnosis — see memory for the numbers)
+
+The within-shape graph has **two divergent implementations** that drifted:
+- solver `unified_jacobi._build_shape_constraints`/`_visible_grade_edges` (only the
+  solver calls it; junction chords vs the airside UNION; per-axis diagonal-skip).
+- validator `check_grade.iter_shape_grade_constraints`/`_polygon_visibility`
+  (consumed by `check_grade` + the audit tool; chords vs the shape's OWN ring;
+  per-axis diagonal-skip → **junction bodies largely UNGRADED**).
+
+On CYXY (full stack) the validator flags **481** within violations; **146** are on
+chords the solver never graded; a direct constraint-set diff is 11352 (solver) vs
+18051 (validator). The solver cannot fix what it doesn't grade → 481 can't reach 0
+while two graphs exist.
+
+**Enabler:** the pre-solve geometry refactor is COMPLETE
+(`docs/presolve_geometry_refactor.md`) — airside geometry is final before the solve
+(Phase-8 guard = 0 on HECA), so one generator on the shared geometry yields
+identical pairs by construction. (⚠ CYXY still drifts 5 airside shapes post-solve →
+Phase 0.)
+
+## 4. Clean-room implementation (new files, then wire in, then retire old)
+
+**New module `src/auto_patch/grade_graph.py`** — THE single within-shape grading
+graph. Pure, self-contained, geometry-representation-agnostic. Both the solver
+(pre-emit `layout.shapes`) and the validator (post-emit OSM ways) build the same
+lightweight input and call it → identical constraints by construction.
+
+Input (built by each caller from its own representation):
+```
+GradeShape:                 # one soft airside shape
+    role: str               # apron | junction | <rect roles> | building
+    ring: [(x, y), ...]     # open ring, LOCAL meter coords
+    keys: [hashable, ...]   # stable per-vertex key (OSM nid | solver node-idx)
+    spine: [[key, ...], ...] # ordered spine node-key chains through the shape
+                             # (from junction_spine slicing); [] if none
+    cap: float | None        # resolved body cap (None → resolve via inheritance)
+GradeContext:
+    taxi_axes:  centerlines + per-letter (cL, cT)   # for spine grading
+    seam_keys:  set                                  # seam-anchored → drop pair
+    airside_union: prepared geom                     # visibility container
+    road_zone / frontage_keys: relaxations
+    cap_for_letter(letter) -> grade ; nearest_taxi_cap(shape) -> grade
+```
+Output: per-shape constraint record (nodes, body edges `(a,b,cap)`, spine chains +
+cap, flat/rect-plane info) + a `flatten_pairs()` helper → `(key_a, key_b, cap,
+allowance)` for the validator. ★ ONE place encodes: visibility/geodesic gate, the
+spine+body split, cap resolution + inheritance, seam drop, the road/ramp
+relaxations. No second copy.
+
+**`src/auto_patch/grade_graph.py` + hermetic unit tests** are written and verified
+in isolation FIRST (fast), before any wiring.
+
+Then wire, each step behind a gate for A/B, deleting the old path once green:
+- **Phase 0** — close CYXY's post-solve geometry drift (`O4_GEOM_GUARD=1`).
+  **★ Key insight:** the grade graph is **altitude-independent** — which pairs are
+  graded + at what cap depends only on XY + role + spine, never on altitudes. So
+  any ALTITUDE-only post-solve pass is lockstep-safe and may stay. Of CYXY's 5
+  post-solve airside changes: `debulge_cap_centre_nodes` + `_smooth_junction_ring_
+  curvature` are **altitude-only** (no XY change → not even flagged by the
+  geom-guard, which hashes XY; they were never the issue). The real XY-geometry
+  passes were `_dedup_coincident_ring_vertices` (grade-neutral anyway — grade_graph
+  filters coincident via `_MIN_PAIR_DIST_M`) and `drop_flatedge_nodes` (drops a real
+  apron vertex — the one that matters). **DONE:** both moved PRE-solve (gate
+  `O4_PRESOLVE_CLEAN`, default ON; pipeline.py after `_unify_airside_geometry`,
+  before the guard snapshot; idempotent post-solve copies kept). CYXY geom-guard
+  **5 → 2**; the residual 2 are `_insert_bridge_contacts_into_junctions` — the
+  documented Phase-5 solve-dependent exception (bridge placement needs solved
+  altitudes), and they are **collinear** inserts → grade-neutral (a subdivided edge
+  complies iff the original does), so they do not break grade-graph lockstep.
+- **Phase 1** — validator consumes `grade_graph` (build GradeShapes from OSM).
+  Decide junction semantics here (see §5). Re-cut fixtures for the intended change.
+- **Phase 2 [DONE]** — solver consumes `grade_graph` for apron/junction (gate
+  `O4_SINGLE_GRADE_GRAPH`/`SINGLE_GRADE_GRAPH`, default OFF; helpers
+  `_grade_graph_context` + `_grade_graph_edges` in unified_jacobi; ROLE_BUILDING +
+  service_junction stay legacy). Gate-off byte-identical. **Measured (CYXY, full
+  airside stack, gate ON): apron/junction within-violations = 348** under the
+  unified graph (`/tmp/probe_sgg_within.py`). The graph is now consistent; 348 is
+  the OLD solve's quality gap (aprons 10%/4–15 m, junctions ~9%) → Phase 3 clears
+  it. NOT infeasibility (the old solve fighting over-pinned P4 buildings on a now-
+  correct graph).
+- **Phase 3** — the connecting solve (NEW, e.g. `grade_graph_solve.py` or a clean
+  fn): lock buildings (closest-to-DEM in route band) + runway + seams, then solve
+  free nodes to **min grade + curvature** on the one graph (bands = direct Dijkstra
+  from anchors; smooth assignment = bounded sweep — NO 60k-iter POCS). Replaces
+  `_min_grade_network_solve`.
+- **Phase 4** — verify + land: CYXY within → 0, climb preserved, buildings at
+  route-feasible/closest-to-DEM; no net-new suite regressions; flip airside gates
+  ON; user re-cuts SPJC/SPLP; add centerline-smoothness + buildings-closest-to-DEM
+  tests; **delete** the retired scaffolding (old per-axis junction model,
+  `_visible_grade_edges`, `_min_grade_network_solve`, the P3a/P3/P4 gates folded in).
+
+## 5. Junction model — how it differs from what's implemented (resolve in Phase 1)
+- **Body grading is the gap.** Current `_per_axis_allowance` requires BOTH endpoints
+  within 15 m of a common centerline; a junction edge node beyond that → pair
+  RETURNS `None` → **skipped** (`check_grade.py:949`). So wide-junction bodies are
+  ungraded. New model: grade EVERY spine→edge visibility/geodesic chord at the
+  taxiway cap (the apron treatment, at the taxiway cap).
+- **Cap.** Current junction cap = uniform `ROLE_GRADE_LIMITS["junction"]` 1.5%
+  (`_shape_grade` → role cap; junctions have no taxi letter). New: the spine's
+  taxiway-size cap; spine-less → nearest connected taxiway cap.
+- **Spine.** `junction_spine.apply_junction_centerline_spine` ALREADY slices the
+  centerline into real shared nodes (keep — the enabler). New: grade the spine as an
+  explicit held smooth profile continuous into the adjacent corridor (not just a
+  pairwise per-axis check).
+- **Drop** the per-axis allowance + diagonal-skip; apron and junction become one
+  spine+body path parameterized by body cap.
+
+## 6. Probes (/tmp; recreate; all need the 4 airside env gates + `PYTHONHASHSEED=0`)
+- `probe_p5_diag.py` — classify violations (seen/unseen, hard-class, role, distance).
+- `probe_constraint_diff.py` — solver-vs-validator constraint-set diff.
+- `probe_unseen.py` — why each unseen edge is missing.
+- `probe_lockstep_solve.py` — feasibility check (⚠ rewrite: hard = runway+seam ONLY,
+  buildings soft/locked-at-band; objective = min grade+curv, NOT closest-to-DEM).
+
+## 7. Baselines / guardrails (PIN `PYTHONHASHSEED=0`)
+- `test_pavement_grade` default build (P2 baseline): HECA red (standing), CYXY/SPJC/
+  SPLP green (~7 min).
+- Full suite default: 5 failed / 359 passed (per STATUS) — the 5 are standing reds +
+  expected compare-target shifts.

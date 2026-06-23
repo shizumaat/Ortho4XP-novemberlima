@@ -1121,6 +1121,15 @@ SPINE_PIECE_ROLE_REEVAL = _os.environ.get("O4_SPINE_ROLE_REEVAL", "1") == "1"
 # to restore the legacy field-anchored bands.
 W2_CLEAN_BANDS = _os.environ.get("O4_W2_BANDS", "1") == "1"
 
+# SINGLE GRADE GRAPH (docs/single_grade_graph.md): build the apron/junction
+# within-shape grade constraints from the ONE shared generator
+# (``auto_patch.grade_graph``) that the validator also consumes, so the surface
+# we BUILD and the surface we CHECK can never drift.  Junction = apron with a
+# spine+body model at the taxiway per-letter cap (replaces the legacy per-axis
+# diagonal-skip).  Default OFF during A/B; gate-off = the legacy
+# ``_visible_grade_edges`` branch (byte-identical).
+SINGLE_GRADE_GRAPH = _os.environ.get("O4_SINGLE_GRADE_GRAPH", "0") == "1"
+
 # Rect end-caps (rect_end_caps.py) DEFAULT ON (user 2026-06-19): a cap SHRINKS
 # the sloping rect at its junction-facing flat end and occupies the vacated
 # 2 m, so the rect stays a full-length 4-corner plane and the junction/apron

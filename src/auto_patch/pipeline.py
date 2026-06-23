@@ -4025,6 +4025,21 @@ def build_airport_pavement(icao: str, xplane_root: str,
             _drop_overlap_against_fixed_shapes(
                 layout, icao=icao, include_aprons=True)
 
+        # Finalize airside geometry PRE-solve (single-grade-graph Phase 0,
+        # docs/single_grade_graph.md): the solver must grade the SAME node-set
+        # the validator checks, so every airside GEOMETRY change must precede
+        # the solve.  These two are pure-geometry cleanups of artifacts the
+        # slice / weld / conformance chain leaves behind — coincident ring
+        # vertices and illegal mid-flat-edge nodes on sloping rects — that used
+        # to run post-solve.  Moving them here makes the graded geometry final
+        # before the solve; the idempotent post-solve copies below then find
+        # nothing to do (so the geom-guard reports 0 airside changes, modulo the
+        # documented solve-dependent bridge-contact inserts).
+        if os.environ.get("O4_PRESOLVE_CLEAN", "1") == "1":
+            _dedup_coincident_ring_vertices(layout, icao)
+            from .flatedge_snap import drop_flatedge_nodes as _pre_flatedge
+            _pre_flatedge(layout)
+
         # Pre-solve geometry guard (dev, O4_GEOM_GUARD=1): snapshot every
         # airside shape's ring geometry HERE, immediately before the solve,
         # so the comparison at emit can report how many airside shapes had
