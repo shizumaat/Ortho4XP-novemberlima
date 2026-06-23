@@ -1,18 +1,59 @@
 # STATUS — handover (2026-06-23)
 
-Branch `dev`. Working tree has **UNCOMMITTED new work** (the single-grade-graph
-generation — see below); the prior committed state is `fe214de`. This and the
-preceding sessions built **taxi-centerline / airside grading for variable-width &
-hilly airports** — the CYXY "bowl" (airside + terminal sitting below terrain).
+Branch `dev`. Tree CLEAN, all committed (latest `4b50ee1`). **THE AUTHORITATIVE
+PLAN is `docs/single_grade_graph.md`** (read it first); memory
+`p5_lockstep_diagnosis.md`. The single-grade-graph generation: the within-shape
+solver/validator drift is collapsed to ONE graph (`grade_graph.py`); the remaining
+work is the connecting solve.
 
-## ⚡ LIVE BY DEFAULT (2026-06-23, commit 42a03c9)
+## ►► NEXT SESSION: IMPLEMENT SPINE-CARRIES-CLIMB ◄◄
+**The default build is ON but NOT usable as-is (user): it BOWLS the buildings.**
+The connecting solve hits within=0 by locking buildings on the CONNECTING band,
+which seats them ~5 m below DEM (building5 707.7 vs DEM 713). **A within=0 reached
+by bowling is a FAILURE against the central pillar (buildings at DEM + taxiways
+carrying the climb).** Locking at ROUTE levels instead regresses (462 floor>ceiling)
+because the connecting-graph Dijkstra routes a building's reach through the
+cheapest/shortest path (decisive: `bld:building8 712.4 ↔ runway 694` short path),
+under-measuring the real long-taxi-route reach.
+**THE FIX TO BUILD = spine-carries-climb (design in `docs/single_grade_graph.md`
+★ SPINE-CARRIES-CLIMB, two graphs):** (1) ROUTE graph carries the climb — building
+levels = `building_feasibility.building_feasible_levels`; the SPINE (taxi rects +
+centerline spines) gets a climbing profile from a cap-weighted band on the ROUTE
+graph, imposed as soft anchors; (2) CONNECTING graph grades the apron body ≤1% from
+its LOCAL SPINE (not from spurious short/global paths to far-low anchors); (3) a
+spurious short path (high-terrain building near low runway) is NOT a real grade
+path. ★ DONE-CRITERION: every building emits at ≈ min(DEM, route-band-ceiling) — a
+build with a building materially below that is a FAILURE even if within=0 (add a
+test). Then Phase 3b joint-feasibility, Phase 1 validator + re-cut, Phase 4 retire
+legacy. Helper `_building_route_levels` (unified_jacobi) computes the route levels.
+
+## ⚙ State of the gates (all committed)
+`SINGLE_GRADE_GRAPH`, `UNNAMED_TAXI_SIZE`, `FIELD_ROUTE_BAND_BY_WIDTH` default ON
+(commit 42a03c9). `O4_SINGLE_GRADE_GRAPH=0` (+ the other two) restores the legacy
+path. ⚠ The full grade + compare_target suite is RED by design (airside is mid-build
++ building set changed by the pad fix — fixtures need re-cut once spine-climb lands).
+
+## ✓ Corrections this session (don't repeat my mistakes)
+- **The build IS DETERMINISTIC** (3 separate processes byte-identical). My earlier
+  "nondeterminism / partition coin-flip" claim was WRONG — an artifact of my own
+  buggy serving-weld code. The older MEMORY "PYTHONHASHSEED partition-nondeterministic"
+  claims are SUSPECT; re-verify before trusting. Identify buildings by CENTROID
+  (refs renumber when the building set changes).
+- **HANGAR PADS FIXED (commit 4b50ee1):** scattered facade pieces (pier_wooden-style
+  ~0.6 m² panels) were dropped (sub-min-area, unmerged) → buildings got no pad.
+  `_cluster_dsf_building_facades` now bridges gaps up to `DSF_FACADE_MERGE_GAP_M`
+  (2.0 m) + repairs invalid rings + min area `DSF_MIN_BUILDING_AREA_M2` (20 m²).
+  CYXY 13→24 buildings; SPJC 31 / HECA 30 (no explosion).
+- **Temp files → /tmp, never the project dir** (user). Probes:
+  `/tmp/probe_sgg_within.py` (O4_PROBE_ICAO=<icao>; unified-graph within count),
+  `/tmp/diag_infeasible.py` (the route-lock infeasibility classifier).
+
+## (historical context below — superseded by the spine-climb design above)
+### ⚡ prior note (commit 42a03c9)
 The single-grade-graph system is **ON by default** (`SINGLE_GRADE_GRAPH`,
 `UNNAMED_TAXI_SIZE`, `FIELD_ROUTE_BAND_BY_WIDTH` all default ON). A plain build
-uses the Phase-3 connecting solve. **CYXY default build = apron/junction within 0.**
-Escape hatch: `O4_SINGLE_GRADE_GRAPH=0` (also `O4_UNNAMED_TAXI_SIZE=0`,
-`O4_FIELD_ROUTE_BAND_BY_WIDTH=0`) restores the legacy path. ⚠ The grade +
-compare_target suite is RED by design (SPJC 134 / HECA 928 residuals = Phase-3b
-joint-building-feasibility, not yet done; fixtures need re-cut). CYXY is validated.
+uses the Phase-3 connecting solve. ⚠ "CYXY within 0" was APRON/JUNCTION-ONLY +
+BOWLED — see the correction above; it is NOT flight-clean.
 
 ## ★★ CURRENT GENERATION (2026-06-23) — the SINGLE GRADE GRAPH ★★
 **Authoritative plan: `docs/single_grade_graph.md`.** Memory:
