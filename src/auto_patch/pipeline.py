@@ -1509,6 +1509,13 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # clearance, shoulders, fillets, …) — see
         # ``apt_dat_reader.taxi_size_letters``.
         layout.apt_taxi_letters = APR.taxi_size_letters(apt)
+        # Runway THRESHOLDS (both ends of each runway, layout-local metres) —
+        # the hard anchors the building route-feasibility metric routes to
+        # (P4, building_feasibility.py).  to_m(lon, lat) -> (x, y).
+        layout.runway_thresholds = []
+        for _r in apt.runways:
+            layout.runway_thresholds.append(to_m(_r.lon_a, _r.lat_a))
+            layout.runway_thresholds.append(to_m(_r.lon_b, _r.lat_b))
         # P3a (UNNAMED_TAXI_SIZE, docs §9): recover the ICAO size of
         # UNNAMED taxi connector "arms".  apt.dat row-1202 edges carry a
         # ``taxiway_A``/``_B`` code even when unnamed, but taxi_size_letters

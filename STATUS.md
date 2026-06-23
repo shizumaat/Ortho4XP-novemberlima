@@ -85,8 +85,18 @@ good airports.
   `edge_cap`); banked gated-off because it regresses without P4 (held centerline
   climbs, neighbours don't). FLIP ON with P4. This is the real P3 — not
   scaffolding to retire, just dormant until P4 lands.
-- **`FIELD_TARGET_CONFORMANCE`** (P4/P5 vehicle, NEW 2026-06-22, default OFF +
-  INCOMPLETE) — lift-only re-target toward the field before the final enforce
+- **`BUILDING_ROUTE_FEASIBILITY`** (P4 building DRIVER, NEW 2026-06-22, default
+  OFF) — THE validated building-placement metric. Seats each airside-touching
+  building FLAT at clamp(DEM, floor, ceiling) where the band is the per-edge
+  cap-weighted reach to EVERY runway threshold along the real taxi route
+  (perp-to-nearest-centerline + centerline route; apron 1% outside the taxiway
+  corridor). Matches the user's hand-calcs (CYXY building9 700.4, building3 715.7,
+  building5 709.1, building10 stays DEM). `elevation_per_surface/building_
+  feasibility.py` + `_seat_buildings_route_feasible`; thresholds on
+  `layout.runway_thresholds`. Requires P3a (edge_cap arms). ★ Gated OFF: anchors
+  alone + the OLD network solve explode within-shape to 563 — needs the P5
+  min-grade network solve to conform the network to them (the user's stage 2).
+- **`FIELD_TARGET_CONFORMANCE`** (superseded half-measure, default OFF) — lift-only re-target toward the field before the final enforce
   projection (`elev←max(elev,min(F,hi))`, soft non-held). Built as the conformance
   vehicle but NOT sufficient alone: the wide-apron terminal stays gated (the field
   lifts the apron toward the LOW corridor, not the building); lifting to the raw
@@ -171,9 +181,12 @@ flips grade[CYXY] green with no new reds.
   per-node band+provenance.
 
 ## Files touched
-- `config.py` — 8 gates (above; +`CORRIDOR_SPINE_CHAINS` P2 committed,
+- `config.py` — 9 gates (above; +`CORRIDOR_SPINE_CHAINS` P2 committed,
   +`FIELD_ROUTE_BAND_BY_WIDTH` P3, +`UNNAMED_TAXI_SIZE` P3a,
-  +`FIELD_TARGET_CONFORMANCE` P4/P5 vehicle — all default-OFF).
+  +`FIELD_TARGET_CONFORMANCE`, +`BUILDING_ROUTE_FEASIBILITY` P4 — all default-OFF).
+- `elevation_per_surface/building_feasibility.py` (NEW) — the validated P4
+  building route-feasibility metric (`building_feasible_levels`).
+- `pipeline.py` — stash `layout.runway_thresholds` (both ends per runway).
 - `elevation_per_surface/unified_jacobi.py` (P4) — `_enforce_within_shape_grade`
   gains `dem_elev` param + the field-target lift-only block before the first
   `_project_within_bands`; `_FIELD_TC_MAX_GAP_M` constant.

@@ -370,8 +370,27 @@ medial-axis discovered), so they gain the letter; a genuine discovered unnamed
 centerline has no apt.dat code and is not tagged (correctly).
 
 **P4 — Per-building route-feasibility → building at closest-to-DEM (the BUILDING
-must be the DRIVER). [IN PROGRESS 2026-06-22 — the hard core; vehicle built, the
-driver not yet.]** For each terminal pad, build the runway-anchor feasibility band
+the DRIVER). [BUILT & VALIDATED 2026-06-22 — gate `BUILDING_ROUTE_FEASIBILITY`,
+default OFF pending the P5 min-grade network solve.]**
+The metric is locked and matches the user's hand-calcs (CYXY: building9 700.4,
+building3 715.7, building5 709.1, building10 stays DEM). It is implemented in
+`elevation_per_surface/building_feasibility.py` (`building_feasible_levels`):
+for each building touching airside pavement, a perpendicular from the centroid
+to the NEAREST taxi centerline (named or not) — the taxiway-corridor part of the
+perp at the taxiway cap, the apron part at 1% — then the per-edge per-letter
+cap-weighted centerline route (incl. the partial first edge from the foot point
+to its graph node) to EVERY runway threshold; band = intersection over all
+thresholds (`ceil=min(thr+climb)`, `floor=max(thr−climb)`); seat FLAT at
+`clamp(DEM, floor, ceiling)`. Routes on `TaxiRouteGraph.edge_cap`, so it requires
+P3a (`UNNAMED_TAXI_SIZE`) for the unnamed arms to carry 3%. Seated as hard
+anchors by `_seat_buildings_route_feasible` (unified_jacobi); runway thresholds
+stashed on `layout.runway_thresholds` in pipeline.
+★ Gated OFF: seating the (correct) anchors with the EXISTING network solve
+explodes within-shape to **563** — the aprons/taxiways are still solved at their
+bowled levels and can't grade to the raised pads. That is the two-stage split:
+P4 (anchors) is done; **P5 (the min-grade network solve) must conform the
+network to them**. Default byte-identical (within=0).
+*Superseded sub-history (the dead-ends that led here):* For each terminal pad, build the runway-anchor feasibility band
 along the route TO it **at the per-edge caps** and seat the pad flat at
 `min(DEM, band_ceiling)`, then HOLD it so the apron conforms UP to it.
 *Verified state (P3a+P3 on):* the band is now CORRECT (building3 ceiling 714.4 via
@@ -399,14 +418,21 @@ use, NOT `shared_taxi_route_graph.distances_from`'s uniform cap); the apron-plan
 pass (`network_profile` ~L1454–1745) target; `_anchor_buildings_at_feasible_dem`
 (rework to edge_cap + soft hold) or a new pass.
 
-**P5 — Conform the rest of the network (the lift vehicle, built).** Once the
-building drives, the field-target lift-only re-clamp (`FIELD_TARGET_CONFORMANCE`,
-built in `_enforce_within_shape_grade` before the first `_project_within_bands`:
-`elev ← max(elev, min(F, hi))`, soft non-held) carries the apron/junction/G
-neighbours up to the consistent surface; and the *"CORRIDORS YIELD TO FLAT
-TERMINALS"* release (~L3318/L3455) becomes **directional** (yield DOWN only to a
-genuinely-lower served pad; else hold). The vehicle is in place but inert until
-P4's building-driver gives the apron a high pad to conform to.
+**P5 — The MIN-GRADE NETWORK SOLVE (the next step; the user's architecture).**
+With buildings (P4) + runway thresholds + tile seams as the HARD anchors, solve
+the taxi/apron network as the **profile that minimises grade throughout the
+network** between those anchors, subject to the per-edge per-letter caps and the
+apron ≤1% — REPLACING the field/relief/enforce stack for the airside. This is
+what makes the network *conform to* the anchors instead of discovering its own
+(bowled) levels; it's required because P4's anchors alone, fed to the existing
+solve, explode within-shape to 563 (the network fights them). Smoothest =
+minimise Σ grade² (a harmonic / Laplace solve on the node graph) with the hard
+anchors fixed and the cap constraints as inequality bounds — a clean
+quadratic/POCS problem on a connected graph with fixed endpoints, which sidesteps
+the bowl, the route-vs-geom junction steps, and the field's proximity-bridge
+inconsistencies (the network no longer *finds* its levels, it interpolates
+between correct fixed ones). The earlier `FIELD_TARGET_CONFORMANCE` lift was a
+half-measure toward this and is superseded by the proper min-grade solve.
 
 **P6 — Explicit transition only where physically forced (contingency).** If after
 P3a+P4 a building's DEM still outruns even its correct 3 % route, seat it at the

@@ -1561,6 +1561,23 @@ UNNAMED_TAXI_SIZE = _os.environ.get("O4_UNNAMED_TAXI_SIZE", "0") == "1"
 FIELD_TARGET_CONFORMANCE = _os.environ.get(
     "O4_FIELD_TARGET_CONFORMANCE", "0") == "1"
 
+# (20260622) BUILDING ROUTE FEASIBILITY — plan P4 (the building DRIVER, docs §9).
+# Seat each building that touches airside pavement FLAT at the elevation closest
+# to its DEM that keeps it reachable WITHIN GRADE from EVERY runway threshold
+# along the real taxi route (user metric, validated on CYXY): a perpendicular
+# from the building centroid to the nearest taxi centerline (taxiway-corridor
+# part at the taxiway cap, apron part at 1%), then the per-edge per-letter-capped
+# centerline route to all thresholds; band = intersection over thresholds;
+# level = clamp(DEM, floor, ceiling).  Buildings NOT touching airside pavement
+# stay at DEM.  Unlike the retired BUILDING_DEM_ANCHOR (uniform cap → bowled),
+# this uses TaxiRouteGraph.edge_cap, so it pairs with UNNAMED_TAXI_SIZE (P3a) —
+# the unnamed arms must carry their real size for the band to be right.  The
+# seated pads become hard anchors the rest of the network grades to.
+# `elevation_per_surface/building_feasibility.py`.  ★ DEFAULT OFF until the
+# network conforms to the anchors (the min-grade network solve is the next step).
+BUILDING_ROUTE_FEASIBILITY = _os.environ.get(
+    "O4_BUILDING_ROUTE_FEASIBILITY", "0") == "1"
+
 
 def taxi_grade_cap_for_letter(letter, *, enabled: bool = None) -> float:
     """Max longitudinal grade (rise/run) for a taxiway of ICAO code

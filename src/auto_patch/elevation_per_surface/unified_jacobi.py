@@ -70,7 +70,7 @@ from auto_patch.elevation import (
     APRON_MAX_GRADE, SERVICE_ROAD_MAX_GRADE, TAXI_MAX_GRADE)
 from auto_patch.config import (
     taxi_grade_cap_for_letter, TAXI_MAX_GRADE_NARROW, JUNCTION_NARROW_GRADE,
-    CORRIDOR_SPINE_CHAINS, FIELD_TARGET_CONFORMANCE)
+    CORRIDOR_SPINE_CHAINS, FIELD_TARGET_CONFORMANCE, BUILDING_ROUTE_FEASIBILITY)
 from auto_patch.layout import (
     ROLE_APRON, ROLE_BOUNDARY, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL, ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
@@ -347,6 +347,15 @@ def solve(layout, icao: str,
             layout, elev, base_hard, bucket_to_idx, dem_elev)
         if n_pads9:
             _mark("bldg-anchor")
+    # P4 building DRIVER (route-feasibility, docs §9): seat each airside-touching
+    # building FLAT at clamp(DEM, floor, ceiling) where the band is the per-edge
+    # cap-weighted reach to EVERY runway threshold along the real taxi route
+    # (the validated user metric).  Hard-anchored so the network grades to it.
+    if BUILDING_ROUTE_FEASIBILITY:
+        n_bf9 = _seat_buildings_route_feasible(
+            layout, elev, base_hard, bucket_to_idx, dem, tile_lat, tile_lon)
+        if n_bf9:
+            _mark("bldg-route-feasible")
     # Raise the apron compromise level (user 2026-06-21): anchor each apron flat
     # at its route-feasible CEILING so the whole complex lifts toward the rim
     # buildings; the taxiways absorb the descent to the runway.
@@ -9456,6 +9465,63 @@ def _build_node_list(layout):
                 bucket_to_idx[k] = len(nodes)
                 nodes.append((float(x), float(y)))
     return nodes, bucket_to_idx
+
+
+def _seat_buildings_route_feasible(layout, elev, base_hard, bucket_to_idx,
+                                   dem, tile_lat, tile_lon) -> int:
+    """P4 building DRIVER: seat each airside-touching building FLAT at
+    ``clamp(DEM, floor, ceiling)`` from the route-feasibility metric
+    (``building_feasibility.building_feasible_levels`` — perp to nearest
+    centerline + per-edge cap-weighted route to EVERY runway threshold).
+    Hard-anchors the pad nodes; returns #buildings seated.  Buildings not
+    touching airside pavement are left at their seed (DEM)."""
+    from auto_patch.elevation_per_surface.building_feasibility import (
+        building_feasible_levels)
+    from auto_patch.elevation import _sample_dem
+    cps = layout.canonical_points
+    thr_m = getattr(layout, "runway_thresholds", None) or []
+    if not thr_m:
+        return 0
+    # threshold elevation = the solved runway surface at the nearest runway node
+    rwy_pts: list = []
+    for s in layout.shapes:
+        if (s.role == ROLE_RUNWAY and s.polygon is not None
+                and not s.polygon.is_empty):
+            for (x, y) in _open_ring(list(s.polygon.exterior.coords)):
+                i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+                if i is not None:
+                    rwy_pts.append((x, y, elev[i]))
+    if not rwy_pts:
+        return 0
+
+    def _thr_elev(tx, ty):
+        return min(rwy_pts, key=lambda v: (v[0] - tx) ** 2
+                   + (v[1] - ty) ** 2)[2]
+
+    thresholds = [(tx, ty, _thr_elev(tx, ty)) for (tx, ty) in thr_m]
+
+    def _dem(x, y):
+        try:
+            lat, lon = layout.m_to_ll(x, y)
+            return _sample_dem(dem, tile_lat, tile_lon, lat, lon)
+        except _GEOM_EXC:
+            return None
+
+    levels = building_feasible_levels(layout, thresholds, _dem)
+    n = 0
+    for s in layout.shapes:
+        lv = levels.get(id(s))
+        if lv is None or s.polygon is None or s.polygon.is_empty:
+            continue
+        for (x, y) in _open_ring(list(s.polygon.exterior.coords)):
+            i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+            if i is not None:
+                elev[i] = lv
+                base_hard[i] = True
+        n += 1
+    if _os.environ.get("O4_STEP_DEBUG") == "1":
+        print(f"[step] route-feasible buildings seated: {n}")
+    return n
 
 
 def _anchor_buildings_at_feasible_dem(layout, elev, base_hard, bucket_to_idx,
