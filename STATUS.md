@@ -5,6 +5,15 @@ generation — see below); the prior committed state is `fe214de`. This and the
 preceding sessions built **taxi-centerline / airside grading for variable-width &
 hilly airports** — the CYXY "bowl" (airside + terminal sitting below terrain).
 
+## ⚡ LIVE BY DEFAULT (2026-06-23, commit 42a03c9)
+The single-grade-graph system is **ON by default** (`SINGLE_GRADE_GRAPH`,
+`UNNAMED_TAXI_SIZE`, `FIELD_ROUTE_BAND_BY_WIDTH` all default ON). A plain build
+uses the Phase-3 connecting solve. **CYXY default build = apron/junction within 0.**
+Escape hatch: `O4_SINGLE_GRADE_GRAPH=0` (also `O4_UNNAMED_TAXI_SIZE=0`,
+`O4_FIELD_ROUTE_BAND_BY_WIDTH=0`) restores the legacy path. ⚠ The grade +
+compare_target suite is RED by design (SPJC 134 / HECA 928 residuals = Phase-3b
+joint-building-feasibility, not yet done; fixtures need re-cut). CYXY is validated.
+
 ## ★★ CURRENT GENERATION (2026-06-23) — the SINGLE GRADE GRAPH ★★
 **Authoritative plan: `docs/single_grade_graph.md`.** Memory:
 `p5_lockstep_diagnosis.md`. This SUPERSEDES the P5/P6 sketch below for the
