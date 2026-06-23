@@ -151,6 +151,46 @@ Then wire, each step behind a gate for A/B, deleting the old path once green:
   free nodes to **min grade + curvature** on the one graph (bands = direct Dijkstra
   from anchors; smooth assignment = bounded sweep — NO 60k-iter POCS). Replaces
   `_min_grade_network_solve`.
+  **[WIP, BUILT — commit 92db144]** `grade_graph_solve.connecting_solve`, wired when
+  `O4_SINGLE_GRADE_GRAPH` is on. ★ **KEY FIX:** buildings are locked on the
+  CONNECTING graph's OWN bands (closest-to-DEM within each pad's band-intersection),
+  NOT pre-pinned from the route graph — pre-pinning (P4) seated pads at levels the
+  within-shape graph can't deliver → 443 nodes with floor>ceiling (FALSE
+  infeasibility). Locking on the connecting bands → floor>ceiling **443→1**, and
+  CYXY apron/junction within **481→69**, with EVERY APRON resolved (residual = 69
+  junctions only). The route graph (P4) over-measured the building reach; the
+  connecting-graph band is the consistent one. **REMAINING (the 69):** all
+  junctions. **[CONVERGED — commit e355e61]** Two further fixes took it to **481→4**:
+  (1) **projected Gauss-Seidel** — each free node lands directly in its cap-feasible
+  interval (neighbour slabs ∩ band) pulled toward the min grade+curvature target;
+  monotone/convergent (102 sweeps; in-solve residual 8 edges = 7 both-hard + 1
+  has-free). (2) **auto-disable the legacy post-solve altitude band-aids** under the
+  gate — `_smooth_junction_ring_curvature` (elevation.py) + `debulge_cap_centre_nodes`
+  (pipeline.py) were re-introducing ~66 junction violations by fighting the
+  connecting solve (they were built for the old graph). Result: **CYXY apron/junction
+  within = 4** (mild ~4% apron spots next to locked buildings) + 7 in-solve both-hard
+  edges = the final cleanup. The single-graph stack is now just
+  `O4_SINGLE_GRADE_GRAPH=1 O4_UNNAMED_TAXI_SIZE=1 O4_FIELD_ROUTE_BAND_BY_WIDTH=1`
+  (building lock is done by the connecting solve, so P4 `BUILDING_ROUTE_FEASIBILITY`
+  is no longer needed).
+  **[CYXY → 0 — commit 4470971]** The final 4+7 were the inter-pad frontage: an
+  apron/junction edge with BOTH endpoints on building pads is a building↔building
+  step (allowed), so it is EXEMPT (`GradeContext.building_keys`; mirrors the
+  validator step exemption). CYXY apron/junction within **4 → 0**.
+  **MULTI-AIRPORT (the architecture is proven on CYXY; the others need Phase 3b):**
+  SPJC 211→134, HECA 1034→928. Dominant remaining = **INFEASIBLE BANDS** (HECA 2593,
+  SPJC 148 floor>ceiling): pads locked INDEPENDENTLY (each closest-to-DEM in its
+  runway-reach band) → on a canyon (HECA terminal 82–88 m) adjacent pads sit at
+  mutually-incompatible levels and the free apron node between can't grade ≤1% to
+  BOTH → empty band.
+- **Phase 3b — JOINT BUILDING FEASIBILITY (the canyon case, NEXT).** Lock pads at
+  MUTUALLY-consistent levels, not pad-by-pad — the connecting surface between two
+  pads must be gradeable: apron ≤1% to its local SPINE; the spine carries the climb
+  at the taxi cap; a large apron is spine-sliced so each piece grades ≤1% locally;
+  where a pad genuinely cannot co-level it STEPS and the apron follows it (building
+  ↔building step, already exempt). This couples the per-pad band lock through the
+  connecting graph (a pad's lock must respect the already-locked neighbours within
+  cap·dist). Probe: `O4_PROBE_ICAO=<icao> /tmp/probe_sgg_within.py`.
 - **Phase 4** — verify + land: CYXY within → 0, climb preserved, buildings at
   route-feasible/closest-to-DEM; no net-new suite regressions; flip airside gates
   ON; user re-cuts SPJC/SPLP; add centerline-smoothness + buildings-closest-to-DEM
