@@ -10,12 +10,16 @@ is THE solve under `SINGLE_GRADE_GRAPH` (default ON, no sub-gate). Build a plain
 dev patch (no env) to fly it.
 - **Bowl FIXED**: buildings lock at route-feasible level (`building_feasible_levels`)
   → 0 CYXY buildings materially below route level (was 16).
-- **SPINE FIXED (the win)**: `_spine_climb_seats` (unified_jacobi) locks the taxi
-  centerlines at their route-traced CLIMBING profile (in-band assignment that climbs
-  at the per-letter cap; `_runway_reach_bands`). ★ The per-node band is reachability
-  NOT a pairwise grade constraint — only the climbing profile is pairwise-compliant,
-  so the spine must be SET to it + locked, not free-solved. CYXY spine violations
-  **60 → 8** (the 8 are building-frontage = canyon).
+- **SPINE PERFECT (commit `e1c5857`)**: `_spine_climb_seats` (unified_jacobi) locks
+  the taxi centerlines at their route-traced CLIMBING profile (in-band assignment
+  that climbs at the per-letter cap; `_runway_reach_bands`). ★ The per-node band is
+  reachability NOT a pairwise grade constraint — only the climbing profile is
+  pairwise-compliant, so the spine must be SET to it + locked, not free-solved.
+  ★★ The locked seats are marked `base_hard` so the post-solve
+  `_reconcile_level_coupling` (snaps rect flat-end groups to the rect plane) HOLDS
+  them instead of raising rect-coupled spine nodes ~0.5m and stranding neighbours.
+  **PURE taxi-route spine violations (grade_graph_validate @ 0.15m noise): CYXY 0,
+  SPJC 0, HECA 0.** All remaining spine residuals are building-frontage (canyon).
 - **As-built validation UNIFIED**: `grade_graph_validate.within_violations(layout)` =
   the same grade_graph the solver used; the build WARN prints it split
   **SPINE(taxi-route) vs BODY(apron)**. (⚠ `tools/check_grade.py` still legacy →
