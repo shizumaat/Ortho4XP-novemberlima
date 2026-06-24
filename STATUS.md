@@ -1,6 +1,104 @@
-# STATUS — handover (2026-06-23, single path landed)
+# STATUS — handover (2026-06-24, end of session) — THE GOAL: ONE GRAPH
 
-Branch `dev`. Tree CLEAN (latest `392d3a4`). **THE AUTHORITATIVE PLAN is
+Branch `dev`. Tree DIRTY (uncommitted at session end; committing now). Prior
+commit `1347cb4`. ⚠ Build/probe the working model with
+`O4_ABSORB_RUNWAY_IN_APRON=0 O4_VISIBLE_CHORD_CONNECT=1` and `PYTHONHASHSEED=0`.
+
+## ►►►►► THE GOAL (user, authoritative 2026-06-24) ◄◄◄◄◄
+**ONE graph that holds all the data it needs and computes the reach band for
+EVERY building the SAME way the spine will be graded.** A building's elevation is
+DETERMINED BY WHAT THE SPINE CAN REACH, so placement and grading CANNOT use two
+different models/measurements. Today there are TWO and they disagree — that is THE
+bug to remove. No second model, no parallel route measurement.
+
+**Why two values exist today (fully traced this session):**
+- Building LEVELS come from `building_feasibility.reach_band_sampler` — a Dijkstra
+  over `shared_taxi_route_graph` with a runway-EDGE anchor model (a graph node
+  within `_CONNECT_TOL_M`=20 m of a runway edge) and per-letter `edge_cap`.
+- The SPINE is graded by the within-shape graph (`grade_graph` + the seater's
+  `spine_adj` in `_spine_climb_seats`): node-to-node, geometric distance, per-edge
+  cap.
+- These diverge on **which runway/route/cap binds a building**. Decisive example —
+  building16: `reach_band` routes it to runway **02** (≈980 m ⇒ 708.7, = the
+  user's 707.8 hand-calc ✓); a spine-graph reach (Dijkstra on `spine_adj` from ALL
+  runway-spine pins) binds it to the NEAREST runway **14R/32L** (≈333 m ⇒ 699,
+  which BOWLS it). Same idea, different ANCHOR SET (reach_band: runway-edge ≤20 m;
+  spine pins: all `runway_nodes ∩ spine`) ⇒ different number.
+
+**PROVED this session:** deriving the building level from a free spine seat drove
+**spine violations to 0** (within 567). So the one-computation architecture is
+RIGHT. It bowled buildings only because the naive spine reach used the wrong
+anchor set/caps. (All those build-from-spine / spine-graph-reach edits were
+REVERTED — current tree is the solid non-bowling state.)
+
+## ►►► THE NEXT TASK (hand-off) ◄◄◄
+Build the ONE graph: compute each building's reach band on the SAME graph + anchor
+model + per-letter caps that grade the spine, then DERIVE the building level from
+it and DROP the separate `reach_band` placement. Concretely:
+1. Pick the anchor model that gives the user-correct answer = `reach_band`'s
+   (runway-EDGE ≤20 m, per-letter caps) — NOT "all runway-spine pins" (that binds
+   b16 to 14R/32L and bowls). The reach must route b16 to 02 (708), not 14R/32L.
+2. Compute the reach band on the graph the spine is graded on (or make `reach_band`
+   and the spine graph provably identical: same nodes, same edges, same caps, same
+   anchors, same distances).
+3. building level = clamp(DEM, reach_at_frontage); spine seated within the same
+   reach; rects already follow the spine (landed). Result must be: spine
+   violations 0 AND no bowled building (every building at ≈min(DEM, reach), b16≈708
+   b19≈700). Add a test asserting both.
+4. Then retire the now-redundant validators (`_warn_terminal_chord_law`,
+   route-band WARN) and the network-profile field as a taxiway elevation source.
+
+## ►► LANDED THIS SESSION (current tree; KEEP) ◄◄
+Working model = `O4_ABSORB_RUNWAY_IN_APRON=0 O4_VISIBLE_CHORD_CONNECT=1`. State:
+spine=16, body=1171, within=1187; b16=708.7 ✓, b19=700.1 ✓, NO bowl.
+- **`ABSORB_RUNWAY_IN_APRON` gate** (config; default ON=baseline). OFF → the full
+  runway is kept (no apron-merge drop; full runway subtracted from pav_union), so
+  the absorbed 02 end reaches its threshold with a real runway CONTACT. within
+  780→742, no crash. ⚠ stays gated: airports with runways genuinely under apron
+  concrete (KPHX, 65/67 segs) need it ON.
+- **`VISIBLE_CHORD_CONNECT` gate** (config; default OFF). ON → a building connects
+  to the nearest centerline whose chord stays IN PAVEMENT (`_pavement_visibility`/
+  `_nearest_visible_centerline` in building_feasibility) — not the straight-line
+  nearest across grass/road. b16→A2 (708.7), b19→DEM. within 742→651 (pre the
+  honest-cap exposure below).
+- **per-edge spine cap in `grade_graph`** (UNCONDITIONAL): a spine edge is capped by
+  the centerline(s) IT lies on (max), not the junction-wide `_spine_cap` — user
+  ruling: a taxi route keeps its own per-letter cap inside a junction (3% up to the
+  edge of a 1.5% taxiway, etc.). Unit tests green.
+- **spine-seater fix** (`_spine_climb_seats`): the within-grade neighbour cap +
+  building-frontage reach are HARD; the route band is a SOFT preference that yields
+  only on conflict → killed the big runway-pin steps (24.7%→gone).
+- **MEMBERSHIP UNIFIED**: solver context (`_grade_graph_context`), validator context
+  (`grade_graph_validate._context`), and the seater now use ONE centerline set
+  (**SVC excluded** — a service road is not a taxi spine) + ONE tolerance
+  (`SPINE_PERP_TOL_M`, seater was 2.0). So solver=validator agree on spine caps by
+  construction.
+- **RECTS FOLLOW THE SPINE** (`_spine_climb_seats` tail, `_TAXI_RECT_ROLES`): every
+  taxi-rect vertex is seated from its centerline's spine profile + LOCKED — one
+  profile, not a separate network-profile solve. (within rose 651→1187 because the
+  rects now consistently SHOW the still-non-compliant spine instead of hiding it
+  behind a 2nd profile; the one-graph task above is what brings it to 0. Do NOT
+  revert — single source is the architecture.)
+- **DELETED dead-end**: the `UNIFY_ROUTE_BAND` / `NetworkProfile.route_band_at`
+  npf-band machinery (network_profile.py fully reverted). Suppression of the
+  chord-window/route-band WARNs was REVERTED (user: don't hide; unify so only real
+  violations show).
+
+## ►► PROBES (recreate in /tmp; PIN PYTHONHASHSEED=0) ◄◄
+- `probe_spine.py <ICAO>` — per-edge spine-violation dump (location, cap, step).
+- `probe_absorb.py` — aggregate within + b16/b19 emit vs DEM (hardcodes CYXY).
+- `probe_vis_b16.py` — b16/b19 chosen centerline + band + seat.
+- To re-trace the seater squeeze: re-add the env-guarded dump in the
+  `_spine_climb_seats` smoothing loop (it computed `clo/chi/lb/ub/_lo/_hi/seat` per
+  node — that's how the infeasible cap-slab + building23 frontage floor were found).
+- ⚠ build vs validator must use the SAME grade graph — `grade_graph_validate` IS the
+  unified within-shape validator; `tools/check_grade.py` is STILL legacy (Phase-1
+  wire + fixture re-cut pending).
+
+---
+## (prior) STATUS — handover (2026-06-23, single path landed)
+
+Branch `dev`. **THE AUTHORITATIVE PLAN is
 `docs/single_grade_graph.md` §4b** (read first); memory `p5_lockstep_diagnosis.md`.
 
 ## ►►► FIRST TASK NEXT SESSION: UNIFY THE ROUTE BAND (still TWO) ◄◄◄

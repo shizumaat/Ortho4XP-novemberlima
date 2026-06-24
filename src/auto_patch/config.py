@@ -213,6 +213,8 @@ RUNWAY_INSIDE_APRON_FRAC = 0.95
 # The containing apt.dat / DSF polygon must be >= this ratio times
 # the segment area to count as an apron.
 RUNWAY_APRON_AREA_RATIO = 3.0
+# ABSORB_RUNWAY_IN_APRON gate is defined below, where ``import os as _os`` is in
+# scope (search ABSORB_RUNWAY_IN_APRON).
 
 # Bridge / tunnel emission flag.  Gates the four feature emit calls
 # in build_airport_pavement: _emit_through_airport_depressed_roads,
@@ -807,6 +809,25 @@ ENABLE_APRON_NECK_SPLIT = True
 # ``O4_HOLE_ROUTER=1`` for a single build.
 import os as _os  # noqa: E402
 HOLE_ROUTER_ENABLED = _os.environ.get("O4_HOLE_ROUTER", "1") == "1"
+
+# (20260624) ABSORB_RUNWAY_IN_APRON — the apron-merged-runway machine.  When a
+# runway passes through a much-larger apron polygon, the overlapping runway
+# segments are DROPPED (elevation.py) and only the NON-merged part of the runway
+# is subtracted from the pavement union (pipeline.py `effective_runway`), so the
+# apron/junction covers the runway footprint.  Side effect (the bug this gate
+# exists to test): the runway END is then absent during the solve — the
+# centerline route graph dead-ends at the built runway and never reaches the
+# absorbed end's threshold, so the feasibility band can't measure the real taxi
+# route to it (CYXY 02: threshold 108 m into the apron → route detours / prox
+# shortcuts → building16/A2 loose, building19 bowled — see
+# memory/route_band_absorbed02_prox_root_cause.md).
+# When OFF: the FULL runway is subtracted from the pavement union and NO segments
+# are dropped, so the runway stays present through the whole solve (a clean
+# runway-shaped void in the apron; the bordering pavement grades to it as a
+# junction).  EXPERIMENT to fix the route-band disconnection at the geometry
+# layer instead of patching the band.  Default ON = current behaviour.
+ABSORB_RUNWAY_IN_APRON = _os.environ.get(
+    "O4_ABSORB_RUNWAY_IN_APRON", "1") == "1"
 
 # (session 68) Conforming-cuts hole-router REDESIGN: plan ALL of a polygon's
 # hole-opening cuts as a Prim-style MIN-SPANNING-FOREST on ONE shared
@@ -1540,6 +1561,19 @@ CORRIDOR_SPINE_CHAINS = _os.environ.get("O4_CORRIDOR_SPINE_CHAINS", "1") == "1"
 # restores the legacy uniform-1.5% band.
 FIELD_ROUTE_BAND_BY_WIDTH = _os.environ.get(
     "O4_FIELD_ROUTE_BAND_BY_WIDTH", "1") == "1"
+
+# (20260624) VISIBLE_CHORD_CONNECT — a building connects to the taxi route by a
+# VISIBLE CHORD (line-of-sight that stays within the pavement), NOT the closest
+# centerline by straight-line distance.  The building-feasibility metric picked
+# `min(cls, key=L.distance)`, which can pick a centerline reachable only by
+# crossing grass / a service road (CYXY building16: the `~A` arm is 55 m away
+# but its chord is 45% off-pavement; A2 is 70 m but its chord stays on the
+# apron → A2 is the real route, giving ~707.8 not the loose ~A-loop ~712).  A
+# spine counts as a taxi centerline, so building→apron-spine→taxiway is valid.
+# When ON, the metric picks the nearest centerline whose chord to the building
+# is contained in the airside pavement union.  Default OFF (A/B).
+VISIBLE_CHORD_CONNECT = _os.environ.get(
+    "O4_VISIBLE_CHORD_CONNECT", "0") == "1"
 
 # (20260622) UNNAMED TAXI SIZE — plan P3a (docs §9, THE unlock for the CYXY
 # "bowl").  apt.dat row-1202 taxi edges carry an ICAO size code ("taxiway_A"…

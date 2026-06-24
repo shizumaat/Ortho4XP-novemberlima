@@ -59,6 +59,7 @@ from .config import (
     TERM_BRIDGE_GROUPING,
     TERMINAL_SIMPLIFY_TOL_M,
     RUNWAY_APRON_AREA_RATIO,
+    ABSORB_RUNWAY_IN_APRON,
     OSM_SMALL_ROAD_HIGHWAY_TYPES,
     SERVICE_ROAD_WIDTH_M,
     MIN_SERVICE_STRIP_LEN_M,
@@ -1410,7 +1411,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # taxiway-sized candidate doesn't qualify (intersection is
         # most of the candidate); only big apron polygons do.
         apron_merged_regions: List[Polygon] = []
-        for r_poly in runway_polys:
+        for r_poly in (runway_polys if ABSORB_RUNWAY_IN_APRON else ()):
             for cand in apron_candidates:
                 try:
                     inter = r_poly.intersection(cand)

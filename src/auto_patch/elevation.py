@@ -730,7 +730,8 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
         # normal runway sits inside a runway-shaped apt.dat
         # polygon that's only marginally larger; an apron-merged
         # runway sits inside a polygon many times its size.
-        if apron_candidates_m:
+        from .config import ABSORB_RUNWAY_IN_APRON
+        if apron_candidates_m and ABSORB_RUNWAY_IN_APRON:
             from shapely.strtree import STRtree
             try:
                 index = STRtree(apron_candidates_m)

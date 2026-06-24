@@ -272,7 +272,6 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
         return sc
     membership = _spine_membership(shape, ctx)
     body_cap = _body_cap(shape, ctx, membership)
-    spine_cap = _spine_cap(membership, ctx) if membership else body_cap
     vis = _visibility_predicate(ring)
     # The shape's spine centerline geometries (those it has nodes on) — a body
     # chord that CROSSES one is NOT a real grade path: the climb between the two
@@ -306,13 +305,23 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
                 if not vis(xi, yi, xj, yj):
                     continue        # chord leaves the pavement — not a path
             mj = membership.get(j)
-            spine_pair = mi is not None and mj is not None \
-                and _shared_centerline(mi, mj)
+            shared = (({c for (c, _a) in mi} & {c for (c, _a) in mj})
+                      if (mi is not None and mj is not None) else set())
+            spine_pair = bool(shared)
             if (not spine_pair and not ring_adjacent
                     and crosses_spine is not None
                     and crosses_spine(xi, yi, xj, yj)):
                 continue            # path is via the spine, not this diagonal
-            cap = spine_cap if spine_pair else body_cap
+            # PER-EDGE spine cap (user 2026-06-24): a taxi route keeps ITS OWN
+            # per-letter cap along its whole length, INCLUDING inside a junction
+            # — a 3% taxiway grades at 3% up to the edge of a 1.5% taxiway it
+            # meets, not at the junction-wide max.  So a spine edge is capped by
+            # the centerline(s) IT lies on (looser of them, mirroring the
+            # seater's per-centerline edge cap), NOT the shape-wide _spine_cap.
+            if spine_pair:
+                cap = max(ctx.centerlines[c].cap for c in shared)
+            else:
+                cap = body_cap
             sc.edges.append((ki, kj, cap))
 
     sc.spine_chains = _build_spine_chains(shape, ctx, membership)

@@ -36,7 +36,7 @@ import heapq
 import math
 from typing import Callable, Dict, List, Tuple
 
-from auto_patch.config import TAXI_MAX_GRADE
+from auto_patch.config import TAXI_MAX_GRADE, VISIBLE_CHORD_CONNECT
 from auto_patch.layout import (
     ROLE_APRON, ROLE_BUILDING, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL, ROLE_RUNWAY, ROLE_SECONDARY_PARALLEL, ROLE_STUB,
@@ -63,6 +63,53 @@ _TOUCH_TOL_M = 2.0         # building↔airside distance to count as "touching"
 _INF = float("inf")
 
 
+_VIS_BUFFER_M = 0.5        # bridge weld-seam slivers between abutting shapes
+_VIS_ON_PAV_FRAC = 0.97    # chord counts as visible if ≥ this fraction is paved
+
+
+def _pavement_visibility(layout):
+    """Prepared airside-pavement geometry (∪ building pads) for the visible-chord
+    test — a building→taxiway connection is legal only if its chord stays within
+    pavement (the user's rule: never taxi across grass / a service road; a spine
+    is a centerline, so apron pavement counts).  Building pads are included so a
+    chord may start inside the building's own pad.  Buffered slightly to bridge
+    numerical weld-seam slivers between abutting shapes."""
+    from shapely.ops import unary_union
+    from shapely.prepared import prep
+    polys = [s.polygon for s in layout.shapes
+             if (s.role in _AIRSIDE_ROLES or s.role == ROLE_BUILDING)
+             and s.polygon is not None and not s.polygon.is_empty]
+    if not polys:
+        return None
+    try:
+        u = unary_union(polys).buffer(_VIS_BUFFER_M)
+        return prep(u)
+    except Exception:                                      # pragma: no cover
+        return None
+
+
+def _nearest_visible_centerline(c, cls, vis):
+    """The nearest centerline to point ``c`` whose connecting chord stays within
+    pavement (``vis``).  Falls back to the straight-line nearest if none is
+    visible (e.g. a building wholly off pavement — the caller's touch test has
+    already gated that out)."""
+    from shapely.geometry import LineString
+    from shapely.ops import nearest_points
+    for ln in sorted(cls, key=lambda L: L.distance(c)):
+        foot = nearest_points(ln, c)[0]
+        chord = LineString([(c.x, c.y), (foot.x, foot.y)])
+        if chord.length < 1e-6 or vis.contains(chord):
+            return ln
+        # tolerate tiny seam gaps: accept when ≥ _VIS_ON_PAV_FRAC is paved
+        try:
+            inside = chord.intersection(vis.context).length
+            if inside / chord.length >= _VIS_ON_PAV_FRAC:
+                return ln
+        except Exception:                                  # pragma: no cover
+            pass
+    return min(cls, key=lambda L: L.distance(c))
+
+
 def reach_band_sampler(layout, runway_pts_xyz):
     """The shared taxi-route FEASIBILITY-BAND sampler used by BOTH the building
     levels and the spine climb (the one model, user 2026-06-23).
@@ -72,21 +119,13 @@ def reach_band_sampler(layout, runway_pts_xyz):
     point may sit at while reachable within grade from EVERY runway it
     taxi-connects to.
 
-    Model:
-    * **Anchors = runway-EDGE taxi connections.**  A centerline-graph node within
-      ``_CONNECT_TOL_M`` of a runway is a real route entry onto that runway edge,
-      anchored at the runway elevation there (nearest runway vertex).  This is the
-      "nearest runway edge VIA a taxi route" — not thresholds-only, not a straight
-      chord to a far runway vertex.
-    * **Measured along the taxi route, with EDGE PROJECTION.**  A point enters the
-      graph at the FOOT of its perpendicular onto the nearest centerline and pays
-      the partial distance along that segment (``ecap * partial``) — so the band
-      varies SMOOTHLY between the coarse centerline vertices (the graph only needs
-      nodes at intersections / taxi-size changes; it measures distance, nothing
-      else).
-    * **Intersection over ALL connections** (the most-deviating route binds):
-      ``ceiling = min(elev_a + budget_a)``, ``floor = max(elev_a − budget_a)``.
-    """
+    Anchors = runway-EDGE taxi connections (a centerline-graph node within
+    ``_CONNECT_TOL_M`` of a runway, anchored at the runway elevation there);
+    measured along the taxi route with FOOT edge projection; intersected over
+    ALL connections (the most-deviating route binds: ``ceiling =
+    min(elev_a + budget_a)``).  The building/spine entry to the route uses a
+    VISIBLE CHORD (``VISIBLE_CHORD_CONNECT``) — the nearest centerline reachable
+    without leaving pavement, not the straight-line nearest."""
     from shapely.geometry import Point
 
     from auto_patch.taxi_routing import shared_taxi_route_graph
@@ -134,9 +173,12 @@ def reach_band_sampler(layout, runway_pts_xyz):
     if not cls:
         return lambda x, y: None
 
+    vis = _pavement_visibility(layout) if VISIBLE_CHORD_CONNECT else None
+
     def band(x, y):
         c = Point(x, y)
-        ln = min(cls, key=lambda L: L.distance(c))
+        ln = (_nearest_visible_centerline(c, cls, vis) if vis is not None
+              else min(cls, key=lambda L: L.distance(c)))
         perp = c.distance(ln)
         coords = list(ln.coords)
         sp = ln.project(c)

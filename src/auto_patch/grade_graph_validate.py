@@ -35,6 +35,8 @@ def _context(layout):
     for ln, name in (getattr(layout, "apt_taxi_centerlines", []) or []):
         if ln is None or getattr(ln, "is_empty", True):
             continue
+        if name and str(name).upper().startswith("SVC"):
+            continue            # service roads are NOT taxi spines (own role)
         try:
             pts = list(ln.coords)
         except Exception:

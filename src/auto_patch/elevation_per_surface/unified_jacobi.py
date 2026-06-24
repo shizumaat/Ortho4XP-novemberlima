@@ -99,6 +99,13 @@ SLOPING_RECT_ROLES = (
     ROLE_SERVICE_ROAD,
 )
 
+# Taxi rects that FOLLOW THE SPINE PROFILE (the aircraft taxiways) — service
+# roads are excluded (not taxi spines; their own role/grade).
+_TAXI_RECT_ROLES = frozenset({
+    ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
+    ROLE_STUB, ROLE_CROSS_CONNECTOR,
+})
+
 PAVEMENT_ROLES = {
     ROLE_RUNWAY, *SLOPING_RECT_ROLES,
     ROLE_APRON, ROLE_BUILDING, ROLE_JUNCTION,
@@ -4498,6 +4505,8 @@ def _grade_graph_context(layout, bucket_to_idx):
     for ln, name in (getattr(layout, "apt_taxi_centerlines", []) or []):
         if ln is None or getattr(ln, "is_empty", True):
             continue
+        if name and str(name).upper().startswith("SVC"):
+            continue            # service roads are NOT taxi spines (own role)
         try:
             pts = list(ln.coords)
         except _GEOM_EXC:
@@ -9805,7 +9814,11 @@ def _spine_climb_seats(layout, nodes, elev, dem_elev, band,
     _pts = [_SPt(x, y) for (x, y) in nodes]
     _tree = STRtree(_pts)
     letters = getattr(layout, "apt_taxi_letters", None) or {}
-    _SPINE_TOL = 2.0
+    # ONE membership tolerance, shared with the validator's grade_graph
+    # (`SPINE_PERP_TOL_M`) so the seater and grade_graph assign a node to the
+    # SAME centerline → seater-cap ≡ validator-cap (user 2026-06-24: unify
+    # membership, then any residual violation is a real root cause).
+    from auto_patch.grade_graph import SPINE_PERP_TOL_M as _SPINE_TOL
     spine_nodes: set = set()
     spine_adj: dict = {}
 
@@ -9953,18 +9966,29 @@ def _spine_climb_seats(layout, nodes, elev, dem_elev, band,
             harm = sum(seats[j] for (j, _w) in nb) / len(nb)
             de = dem_elev[i] if (i < n and dem_elev[i] is not None) else harm
             tgt = (1.0 - _DEM_PULL) * harm + _DEM_PULL * de
-            # the building lower bound is a HARD floor (the apron must reach the
-            # spine at ≤1%): a lower neighbour cannot drag the node below it —
-            # instead the neighbour RISES toward it next sweep, propagating the
-            # climb up to the building's frontage.
-            lo_e = _blo(i)
-            hi_e = _bhi(i)
+            # WITHIN-GRADE is HARD (user 2026-06-24: every spine node must be
+            # within cap of its neighbours + match shapes at endpoints).  The
+            # neighbour cap slabs + the building-frontage reach are HARD; the
+            # ROUTE band (reach_band) is a SOFT preference that YIELDS when it
+            # would force a cap violation — otherwise a node 12 m from a low
+            # runway pin gets shoved to a far-threshold floor and steps off the
+            # runway (the 694.3→695.6 spine break at the CYXY 02 contact).
+            clo, chi = -INF, INF                    # neighbour within-grade
             for (j, w) in nb:
-                if seats[j] - w > lo_e:
-                    lo_e = seats[j] - w
-                if seats[j] + w < hi_e:
-                    hi_e = seats[j] + w
-            tgt = (lo_e if lo_e > hi_e else min(max(tgt, lo_e), hi_e))
+                if seats[j] - w > clo:
+                    clo = seats[j] - w
+                if seats[j] + w < chi:
+                    chi = seats[j] + w
+            hlo = max(clo, lb[i])                    # + building frontage reach
+            hhi = min(chi, ub[i])
+            lo_e = max(hlo, _lo(i))                  # ∩ route band (soft)
+            hi_e = min(hhi, _hi(i))
+            if lo_e > hi_e:                          # route band conflicts →
+                lo_e, hi_e = hlo, hhi                #   it yields to within-grade
+            if lo_e > hi_e:                          # endpoint/building conflict
+                tgt = 0.5 * (lo_e + hi_e)            #   → least-violation
+            else:
+                tgt = min(max(tgt, lo_e), hi_e)
             d = tgt - seats[i]
             if d:
                 seats[i] = tgt
@@ -9972,6 +9996,62 @@ def _spine_climb_seats(layout, nodes, elev, dem_elev, band,
                     moved = abs(d)
         if moved < 0.001:
             break
+
+    # ── TAXI RECTS FOLLOW THE SPINE PROFILE (user 2026-06-24): ONE profile
+    # source.  A taxi rect is a plane following its centerline spine (flat
+    # across), NOT a separate network-profile solve — seating buildings/spine on
+    # `reach_band` then the rect on a DIFFERENT route gave two profiles on one
+    # graph (the spine pinned to a rect climbing faster than its cap = a
+    # violation we created).  Seat each rect vertex at its centerline's spine
+    # profile (interpolated from the seated spine nodes) and LOCK it, so rect +
+    # spine are ONE surface measured by the SAME route.  (Junction-spine
+    # compliance is a separate, still-open issue — the route measurement.)
+    prof: dict = {}                       # centerline ci -> sorted [(arc, level)]
+    for i in spine_nodes:
+        for (ci, arc) in node_cl.get(i, ()):
+            prof.setdefault(ci, []).append((arc, seats[i]))
+    for ci in prof:
+        prof[ci].sort()
+
+    def _interp(pts, arc):
+        if arc <= pts[0][0]:
+            return pts[0][1]
+        if arc >= pts[-1][0]:
+            return pts[-1][1]
+        for (a0, l0), (a1, l1) in zip(pts, pts[1:]):
+            if a0 <= arc <= a1:
+                t = (arc - a0) / (a1 - a0) if a1 > a0 else 0.0
+                return l0 + t * (l1 - l0)
+        return pts[-1][1]
+
+    for s in getattr(layout, "shapes", ()):
+        if (s.role not in _TAXI_RECT_ROLES or s.polygon is None
+                or s.polygon.is_empty):
+            continue
+        ring = _open_ring(list(s.polygon.exterior.coords))
+        c = s.polygon.centroid
+        ci = min((k for k in prof),
+                 key=lambda k: cl_geoms[k].distance(c), default=None)
+        if ci is None:
+            continue
+        ln = cl_geoms[ci]
+        if ln.distance(c) > 12.0:
+            continue                       # not this rect's centerline (half-w+)
+        pts = prof[ci]
+        for (vx, vy) in ring:
+            lv = _interp(pts, ln.project(_SPt(vx, vy)))
+            try:
+                cand = list(_tree.query(_SPt(vx, vy).buffer(0.5)))
+            except _GEOM_EXC:
+                cand = []
+            best_i, best_d = None, 0.6
+            for qi in cand:
+                qi = int(qi)
+                dd = math.hypot(nodes[qi][0] - vx, nodes[qi][1] - vy)
+                if dd < best_d:
+                    best_i, best_d = qi, dd
+            if best_i is not None:
+                seats[best_i] = lv
     return seats
 
 
