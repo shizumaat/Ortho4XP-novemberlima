@@ -50,7 +50,13 @@ __all__ = ["building_feasible_levels", "reach_band_sampler",
 # runway) only when a centerline-graph node sits within this distance of it —
 # excludes mid-runway vertices with no taxiway, whose nearest graph node is a
 # far straight hop (the coarse-graph snapping that over-tightened the spine band).
-_CONNECT_TOL_M = 20.0
+# 25 m (was 20): at an ABSORBED runway end (the runway sits under apron concrete)
+# the entering taxi centerline's nearest coarse-graph vertex stops a few metres
+# beyond 20 m, so the contact was missed and the corridor back to it was credited
+# via a far detour anchor → the spine seated a >cap ramp (CYXY's 16 ~U11/A spine
+# violations).  25 m captures the real contact without anchoring spurious
+# mid-runway vertices (verified: b16 stays 708, no building bowled).
+_CONNECT_TOL_M = 25.0
 
 # Pavement a building must touch to count as airside-served (else → DEM).
 _AIRSIDE_ROLES = frozenset({
@@ -226,6 +232,7 @@ def building_feasible_levels(
         layout,
         runway_pts_xyz: List[Tuple[float, float, float]],
         dem_sampler: Callable[[float, float], "float | None"],
+        band=None,
 ) -> Dict[int, float]:
     """Return ``{id(building_shape): seated_level_m}`` for every
     ``ROLE_BUILDING`` that touches airside pavement.
@@ -237,10 +244,15 @@ def building_feasible_levels(
     DEM is not reachable within grade from every runway route, the level is
     pulled into the band (the building is adjusted to be feasible).  Buildings
     not touching airside pavement are omitted (the caller keeps them at DEM).
-    """
+
+    ``band``: a pre-built sampler from :func:`reach_band_sampler` — pass the
+    spine's band so buildings are placed on the SAME graph the spine is graded on
+    (the single graph; they then agree by construction).  If omitted, a band is
+    built here (identical inputs → identical band)."""
     from shapely.ops import unary_union
 
-    band = reach_band_sampler(layout, runway_pts_xyz)
+    if band is None:
+        band = reach_band_sampler(layout, runway_pts_xyz)
     polys = [s.polygon for s in layout.shapes
              if s.role in _AIRSIDE_ROLES and s.polygon is not None
              and not s.polygon.is_empty]

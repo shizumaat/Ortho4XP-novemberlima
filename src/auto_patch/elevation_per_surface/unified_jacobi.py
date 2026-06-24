@@ -10075,6 +10075,12 @@ def _build_route_layer(layout, elev, bucket_to_idx, dem, tile_lat, tile_lon,
         building_feasible_levels, reach_band_sampler)
     from auto_patch.elevation import _sample_dem
     runway_pts = _runway_edge_pts(layout, elev, bucket_to_idx)
+    # THE single graph (user 2026-06-24): ONE reach band drives BOTH the building
+    # levels and the spine, so they agree by construction.  The band anchors at
+    # runway-edge taxi contacts INCLUDING absorbed runway ends (a centerline
+    # endpoint a little beyond the 20 m proximity tol) — otherwise a corridor
+    # back to an absorbed end is credited via a far detour anchor and the spine
+    # seats a >cap ramp (the 16 CYXY spine violations).
     band = reach_band_sampler(layout, runway_pts)
 
     def _dem(x, y):
@@ -10094,8 +10100,8 @@ def _build_route_layer(layout, elev, bucket_to_idx, dem, tile_lat, tile_lon,
     rwy_pins = {i: elev[i] for i in runway_nodes if i < len(elev)}
 
     # Building levels FIRST — the spine is lower-bounded by them (it rises so the
-    # apron grades ≤1% to each building it serves).
-    levels = building_feasible_levels(layout, runway_pts, _dem)
+    # apron grades ≤1% to each building it serves).  SAME band as the spine.
+    levels = building_feasible_levels(layout, runway_pts, _dem, band=band)
     blds = [(s.polygon, levels[id(s)]) for s in building_shapes
             if id(s) in levels and s.polygon is not None
             and not s.polygon.is_empty]

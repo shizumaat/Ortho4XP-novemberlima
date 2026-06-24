@@ -214,6 +214,52 @@ def test_pavement_grade(tmp_path, icao):
             f"violations (cap {cap}).  Worst:\n  {worst}")
 
 
+def test_cyxy_spine_zero_no_bowl():
+    """THE single-graph invariant (user 2026-06-24): the taxi SPINE must be
+    grade-compliant (0 within-shape spine violations on the unified grade graph)
+    AND no building bowled — building reach and spine grade come from ONE graph
+    (``building_feasibility.reach_band_sampler``), so they agree by construction.
+
+    Guards the absorbed-runway-end anchor fix (``_CONNECT_TOL_M`` 20→25): before
+    it, the CYXY ~U11/taxiway-A corridor back to the absorbed runway-02 end was
+    credited via a far detour anchor and the spine seated a ~3.3% ramp (16 spine
+    violations); the dense-graph attempt fixed the spine but bowled building16 to
+    ~702 (should be ≥706).  This asserts BOTH halves stay fixed."""
+    from auto_patch.grade_graph_validate import within_violations
+    from auto_patch.layout import ROLE_BUILDING
+    from conftest import cached_airport_layout
+    import math
+
+    layout = cached_airport_layout("CYXY")
+    assert layout.shapes, "CYXY: no shapes built"
+
+    # (1) SPINE: zero taxi-route within-shape grade violations.
+    spine = [v for v in within_violations(layout) if v[4]]
+    assert not spine, (
+        f"CYXY: {len(spine)} taxi-spine within-grade violation(s) "
+        f"(expected 0).  Worst: {spine[0][0]:.1f}% (cap {spine[0][1]:.1f}%) "
+        f"{spine[0][3]} @({spine[0][5]:.0f},{spine[0][6]:.0f}).")
+
+    # (2) NO BOWL: building16 / building19 must sit near their route-feasible
+    # level, not dragged metres below it.  Identified by centroid (refs renumber
+    # when the building set changes).  b16 ~708 (working model) / ~712 (default);
+    # the dense-graph bowl drove it to ~702 — the floor below catches that.
+    def _emit_level(lat, lon):
+        px, py = layout.ll_to_m(lat, lon)
+        b = min((s for s in layout.shapes
+                 if s.role == ROLE_BUILDING and s.polygon is not None
+                 and not s.polygon.is_empty and s.node_altitudes),
+                key=lambda s: math.hypot(s.polygon.centroid.x - px,
+                                         s.polygon.centroid.y - py))
+        na = [v for v in b.node_altitudes if v is not None]
+        return sum(na) / len(na)
+
+    b16 = _emit_level(60.707982, -135.075708)
+    b19 = _emit_level(60.714189, -135.076256)
+    assert b16 >= 706.0, f"CYXY building16 bowled to {b16:.1f} (expected >=706)"
+    assert b19 >= 698.0, f"CYXY building19 bowled to {b19:.1f} (expected >=698)"
+
+
 def _fmt_rwy(vios) -> str:
     out = []
     for kind, ref, val, cap, ll in vios[:6]:
