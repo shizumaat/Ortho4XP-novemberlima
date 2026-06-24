@@ -9798,8 +9798,12 @@ def _spine_climb_seats(layout, nodes, elev, dem_elev, route_lo, route_hi,
         de = dem_elev[i] if i < n and dem_elev[i] is not None else elev[i]
         seats[i] = (0.5 * (lo + hi) if lo > hi else min(max(de, lo), hi))
 
-    # the rest of the spine grades toward the rect-pinned ends (boundary nodes
-    # are never updated, so the climbing profile is continuous with the rects)
+    # CLOSEST-TO-DEM profile (NOT min-grade): the spine should RISE with the
+    # terrain toward the buildings (so the apron can grade ≤1% off it), not
+    # flatten down — "everything as close to DEM as grade allows" (the model).
+    # Each node targets its own DEM, clamped to its route band ∩ the neighbour
+    # cap slabs; the slabs only pull it off DEM where DEM steps faster than the
+    # taxi cap, giving the smooth closest-to-DEM ≤cap climb.
     order = sorted(i for i in spine_nodes if i not in pinned)
     for _it in range(300):
         moved = 0.0
@@ -9807,7 +9811,7 @@ def _spine_climb_seats(layout, nodes, elev, dem_elev, route_lo, route_hi,
             nb = spine_adj.get(i, ())
             if not nb:
                 continue
-            tgt = sum(seats[j] for (j, _w) in nb) / len(nb)
+            tgt = dem_elev[i] if (i < n and dem_elev[i] is not None) else seats[i]
             lo_e, hi_e = _lo(i), _hi(i)
             for (j, w) in nb:
                 if seats[j] - w > lo_e:
