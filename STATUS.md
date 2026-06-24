@@ -3,6 +3,36 @@
 Branch `dev`. Tree CLEAN (latest `392d3a4`). **THE AUTHORITATIVE PLAN is
 `docs/single_grade_graph.md` §4b** (read first); memory `p5_lockstep_diagnosis.md`.
 
+## ►►► FIRST TASK NEXT SESSION: UNIFY THE ROUTE BAND (still TWO) ◄◄◄
+**The single-graph effort unified the within-shape GRADE graph (solver=validator)
+and the solver-side route band (`building_feasibility.reach_band_sampler`, used to
+seat buildings + spine). It did NOT unify the ROUTE band — a THIRD, older band is
+still live: `network_profile._runway_route_band` / `NetworkProfile.sample_band`
+(the chord-law "band window" in the WARN). So a building is SEATED by one band and
+VALIDATED by another, and they disagree.**
+
+**Evidence (CYXY building16 @(-456,-170)):**
+- `reach_band_sampler` ceiling = **711.99**: it routes an **826 m DETOUR** from the
+  02 threshold (693.8) — 485 m along a **1.5%** wide taxiway (cheap per metre, so
+  Dijkstra-min-cap·dist prefers it) + 341 m @3% + 55 m perp = budget 18.2 m.
+- `network_profile` band window = **707.30** — matches the user's hand route
+  (02 →56 m apron@1% →420 m A2@3% →54 m apron@1% ≈ 13.7 m → ~707.5), the DIRECT
+  A2 route. building16 emits ~712 (clamped to the loose 711.99) but the chord-law
+  flags it +5 m over 707.3.
+- ROOT: `reach_band_sampler` runs on `shared_taxi_route_graph`, on which the direct
+  A2 route is NOT the min-cap·dist path (or isn't connected), so it detours and
+  **UNDER-constrains** → buildings/A2 sit too high. This is the engine behind the
+  user's "buildings/A2 too high" + steep-cap reports.
+
+**THE FIX:** seat buildings + spine on the SAME band/graph the chord-law validator
+uses (`network_profile`'s route band), OR make `reach_band_sampler` route on that
+graph — ONE route band, solver=validator, like the within-shape graph. Then
+building16 drops to ~707.5 and the looseness/detours go away. ⚠ This must land
+BEFORE the rect/apron clamp below: that clamp lowers anchors to the route-reachable
+ceiling, so it must clamp to the CORRECT (tight) ceiling, not the loose detoured
+one — otherwise it under-lowers. Probes: `/tmp/probe_bldg16*.py` (route trace +
+binding-anchor provenance).
+
 ## ►► NEXT PHASE: NO-GRADE-VIOLATIONS = CLAMP RECTS/APRONS TO ROUTE-REACHABLE ◄◄
 **User principle (2026-06-23): the solver must NEVER emit a grade violation — if
 an anchor can't be reached within grade, LOWER it (and its buildings), don't leave
