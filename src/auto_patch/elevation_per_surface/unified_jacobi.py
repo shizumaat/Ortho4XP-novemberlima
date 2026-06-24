@@ -9696,7 +9696,7 @@ def _runway_edge_pts(layout, elev, bucket_to_idx):
 
 
 def _spine_climb_seats(layout, nodes, elev, dem_elev, band,
-                       pinned=None) -> dict:
+                       buildings=None, pinned=None) -> dict:
     """The SPINE climbing profile (docs/single_grade_graph.md §2): the value the
     route graph DETERMINES for each taxi-centerline vertex by climbing at the
     per-letter cap along the route, within the SHARED route-feasibility band
@@ -9736,6 +9736,8 @@ def _spine_climb_seats(layout, nodes, elev, dem_elev, band,
         spine_adj.setdefault(a, []).append((b, w))
         spine_adj.setdefault(b, []).append((a, w))
 
+    cl_geoms: list = []                  # (ci -> LineString) for frontage spans
+    node_cl: dict = {}                   # spine node -> [(ci, arc_pos), ...]
     for item in (getattr(layout, "apt_taxi_centerlines", None) or []):
         ln = item[0] if isinstance(item, tuple) else item
         ref = item[1] if (isinstance(item, tuple) and len(item) > 1) else None
@@ -9744,6 +9746,8 @@ def _spine_climb_seats(layout, nodes, elev, dem_elev, band,
         if ref and str(ref).upper().startswith("SVC"):
             continue
         cap = float(taxi_grade_cap_for_letter(letters.get(ref)))
+        ci = len(cl_geoms)
+        cl_geoms.append(ln)
         on_line: list = []
         try:
             cand = _tree.query(ln.buffer(_SPINE_TOL))
@@ -9756,7 +9760,9 @@ def _spine_climb_seats(layout, nodes, elev, dem_elev, band,
             except _GEOM_EXC:
                 continue
             if d <= _SPINE_TOL:
-                on_line.append((ln.project(_pts[i]), i))
+                pr = ln.project(_pts[i])
+                on_line.append((pr, i))
+                node_cl.setdefault(i, []).append((ci, pr))
         on_line.sort()
         seen: set = set()
         ordered: list = []
@@ -9791,21 +9797,60 @@ def _spine_climb_seats(layout, nodes, elev, dem_elev, band,
         b = nb_band.get(i)
         return b[1] if b is not None else INF
 
+    # BUILDING lower bound (user 2026-06-23): the spine must RISE to the
+    # buildings it serves so the apron can grade ≤1% off it — a building sits
+    # FLAT at its level and the apron grades ≤1% from the spine across the
+    # frontage, so the spine ALONG a building's frontage must be within an
+    # apron-grade of that level (spine ≥ level − APRON_MAX_GRADE·dist).  ONLY the
+    # building's own FRONTAGE spine (the span of its serving centerline it faces)
+    # is bounded — a far building across some OTHER apron does not connect here
+    # (the bug that pulled the whole spine up to distant high hangars).
+    from shapely.geometry import Point as _BPt
+    blds = buildings or []
+    lb: dict = {i: -INF for i in spine_nodes}
+    _FRONT_MARGIN = 10.0
+    for (poly, lv) in blds:
+        if poly is None or poly.is_empty or not cl_geoms:
+            continue
+        c = poly.centroid
+        ci = min(range(len(cl_geoms)), key=lambda k: cl_geoms[k].distance(c))
+        ln = cl_geoms[ci]
+        # frontage span on the serving centerline = projection of the footprint
+        try:
+            arcs = [ln.project(_BPt(px, py))
+                    for (px, py) in poly.exterior.coords]
+        except _GEOM_EXC:
+            continue
+        a0, a1 = min(arcs) - _FRONT_MARGIN, max(arcs) + _FRONT_MARGIN
+        for i in spine_nodes:
+            for (cj, pr) in node_cl.get(i, ()):
+                if cj == ci and a0 <= pr <= a1:
+                    d = poly.distance(_BPt(*nodes[i]))
+                    v = lv - APRON_MAX_GRADE * d
+                    if v > lb[i]:
+                        lb[i] = v
+                    break
+
+    def _target(i):
+        de = dem_elev[i] if (i < n and dem_elev[i] is not None) else seats.get(i)
+        t = de if de is not None else lb[i]
+        return max(t, lb[i]) if lb[i] > -INF else t
+
     seats: dict = {}
     for i in spine_nodes:
         if i in pinned:
             seats[i] = pinned[i]          # held at the taxiway-rect elevation
             continue
         lo, hi = _lo(i), _hi(i)
-        de = dem_elev[i] if i < n and dem_elev[i] is not None else elev[i]
-        seats[i] = (0.5 * (lo + hi) if lo > hi else min(max(de, lo), hi))
+        seats[i] = (0.5 * (lo + hi) if lo > hi
+                    else min(max(_target(i), lo), hi))
 
-    # CLOSEST-TO-DEM profile (NOT min-grade): the spine should RISE with the
-    # terrain toward the buildings (so the apron can grade ≤1% off it), not
-    # flatten down — "everything as close to DEM as grade allows" (the model).
-    # Each node targets its own DEM, clamped to its route band ∩ the neighbour
-    # cap slabs; the slabs only pull it off DEM where DEM steps faster than the
-    # taxi cap, giving the smooth closest-to-DEM ≤cap climb.
+    # CLOSEST-TO-DEM, LOWER-BOUNDED BY THE BUILDINGS: the spine rises with the
+    # terrain AND up to (building level − 1%·dist) wherever it serves a building,
+    # so the apron grades ≤1% off a spine high enough to reach it; away from
+    # buildings it relaxes to DEM.  Target clamped to the route band ∩ the
+    # neighbour cap slabs (the slabs only pull it off target where the terrain
+    # steps faster than the taxi cap → the smooth ≤cap climb).
     order = sorted(i for i in spine_nodes if i not in pinned)
     for _it in range(300):
         moved = 0.0
@@ -9813,15 +9858,19 @@ def _spine_climb_seats(layout, nodes, elev, dem_elev, band,
             nb = spine_adj.get(i, ())
             if not nb:
                 continue
-            tgt = dem_elev[i] if (i < n and dem_elev[i] is not None) else seats[i]
-            lo_e, hi_e = _lo(i), _hi(i)
+            tgt = _target(i)
+            # the building lower bound is a HARD floor (the apron must reach the
+            # spine at ≤1%): a lower neighbour cannot drag the node below it —
+            # instead the neighbour RISES toward it next sweep, propagating the
+            # climb up to the building's frontage.
+            lo_e = max(_lo(i), lb[i]) if lb[i] > -INF else _lo(i)
+            hi_e = _hi(i)
             for (j, w) in nb:
                 if seats[j] - w > lo_e:
                     lo_e = seats[j] - w
                 if seats[j] + w < hi_e:
                     hi_e = seats[j] + w
-            tgt = (0.5 * (lo_e + hi_e) if lo_e > hi_e
-                   else min(max(tgt, lo_e), hi_e))
+            tgt = (lo_e if lo_e > hi_e else min(max(tgt, lo_e), hi_e))
             d = tgt - seats[i]
             if d:
                 seats[i] = tgt
@@ -9853,7 +9902,6 @@ def _build_route_layer(layout, elev, bucket_to_idx, dem, tile_lat, tile_lon,
     from auto_patch.elevation import _sample_dem
     runway_pts = _runway_edge_pts(layout, elev, bucket_to_idx)
     band = reach_band_sampler(layout, runway_pts)
-    seats = _spine_climb_seats(layout, nodes, elev, dem_elev, band)
 
     def _dem(x, y):
         try:
@@ -9862,7 +9910,14 @@ def _build_route_layer(layout, elev, bucket_to_idx, dem, tile_lat, tile_lon,
         except _GEOM_EXC:
             return None
 
+    # Building levels FIRST — the spine is lower-bounded by them (it rises so the
+    # apron grades ≤1% to each building it serves).
     levels = building_feasible_levels(layout, runway_pts, _dem)
+    blds = [(s.polygon, levels[id(s)]) for s in building_shapes
+            if id(s) in levels and s.polygon is not None
+            and not s.polygon.is_empty]
+    seats = _spine_climb_seats(layout, nodes, elev, dem_elev, band,
+                               buildings=blds)
     for s, pad in zip(building_shapes, building_pads):
         lv = levels.get(id(s))
         if lv is None:
