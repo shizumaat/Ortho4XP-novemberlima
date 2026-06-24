@@ -9924,7 +9924,7 @@ def _spine_climb_seats(layout, nodes, elev, dem_elev, band,
     seats: dict = {}
     for i in spine_nodes:
         if i in pinned:
-            seats[i] = pinned[i]          # held at the taxiway-rect elevation
+            seats[i] = pinned[i]          # held at the runway-edge / rect elev
             continue
         lo, hi = _blo(i), _bhi(i)
         de = dem_elev[i] if (i < n and dem_elev[i] is not None) else None
@@ -10004,6 +10004,15 @@ def _build_route_layer(layout, elev, bucket_to_idx, dem, tile_lat, tile_lon,
         except _GEOM_EXC:
             return None
 
+    # RUNWAY-EDGE PINS (field item 2a): a spine node that shares a RUNWAY edge
+    # must HOLD the runway's elevation there (the runway is authoritative — the
+    # FAA profile) so the spine grades INTO the runway and doesn't overwrite it
+    # with a peak/valley.  The runway already carries the correct interpolated
+    # value at the crossing (enforce_conformance inserted the vertex), so pin at
+    # the current ``elev``.  ``_spine_climb_seats`` applies these only to spine
+    # nodes; the rest of the runway set is inert.
+    rwy_pins = {i: elev[i] for i in runway_nodes if i < len(elev)}
+
     # Building levels FIRST — the spine is lower-bounded by them (it rises so the
     # apron grades ≤1% to each building it serves).
     levels = building_feasible_levels(layout, runway_pts, _dem)
@@ -10011,12 +10020,14 @@ def _build_route_layer(layout, elev, bucket_to_idx, dem, tile_lat, tile_lon,
             if id(s) in levels and s.polygon is not None
             and not s.polygon.is_empty]
     seats = _spine_climb_seats(layout, nodes, elev, dem_elev, band,
-                               buildings=blds)
+                               buildings=blds, pinned=rwy_pins)
     for s, pad in zip(building_shapes, building_pads):
         lv = levels.get(id(s))
         if lv is None:
             continue
         for i in pad:                  # building level WINS over spine
+            if i in rwy_pins:          # …but the RUNWAY wins over a building too
+                continue
             seats[i] = lv
     return seats
 
