@@ -42,7 +42,14 @@ from auto_patch.layout import (
     ROLE_PRIMARY_PARALLEL, ROLE_RUNWAY, ROLE_SECONDARY_PARALLEL, ROLE_STUB,
 )
 
-__all__ = ["building_feasible_levels"]
+__all__ = ["building_feasible_levels", "reach_band_sampler",
+           "runway_edge_anchors"]
+
+# A runway ring vertex counts as a TAXI CONNECTION (a real route entry onto the
+# runway) only when a centerline-graph node sits within this distance of it —
+# excludes mid-runway vertices with no taxiway, whose nearest graph node is a
+# far straight hop (the coarse-graph snapping that over-tightened the spine band).
+_CONNECT_TOL_M = 20.0
 
 # Pavement a building must touch to count as airside-served (else → DEM).
 _AIRSIDE_ROLES = frozenset({
@@ -56,26 +63,36 @@ _TOUCH_TOL_M = 2.0         # building↔airside distance to count as "touching"
 _INF = float("inf")
 
 
-def building_feasible_levels(
-        layout,
-        thresholds_xyz: List[Tuple[float, float, float]],
-        dem_sampler: Callable[[float, float], "float | None"],
-) -> Dict[int, float]:
-    """Return ``{id(building_shape): seated_level_m}`` for every
-    ``ROLE_BUILDING`` that touches airside pavement.
+def reach_band_sampler(layout, runway_pts_xyz):
+    """The shared taxi-route FEASIBILITY-BAND sampler used by BOTH the building
+    levels and the spine climb (the one model, user 2026-06-23).
 
-    ``thresholds_xyz``: ``[(x_m, y_m, elev_m)]`` runway thresholds (both ends
-    of each runway) at their solved elevations.  ``dem_sampler(x, y)``: DEM
-    (metres) at a layout-local point, or None.  Buildings not touching
-    airside pavement are omitted — the caller keeps them at their DEM.
+    ``runway_pts_xyz``: ``[(x, y, elev)]`` every runway ring vertex at its solved
+    elevation.  Returns ``band(x, y) -> (floor, ceiling) | None``: the range a
+    point may sit at while reachable within grade from EVERY runway it
+    taxi-connects to.
+
+    Model:
+    * **Anchors = runway-EDGE taxi connections.**  A centerline-graph node within
+      ``_CONNECT_TOL_M`` of a runway is a real route entry onto that runway edge,
+      anchored at the runway elevation there (nearest runway vertex).  This is the
+      "nearest runway edge VIA a taxi route" — not thresholds-only, not a straight
+      chord to a far runway vertex.
+    * **Measured along the taxi route, with EDGE PROJECTION.**  A point enters the
+      graph at the FOOT of its perpendicular onto the nearest centerline and pays
+      the partial distance along that segment (``ecap * partial``) — so the band
+      varies SMOOTHLY between the coarse centerline vertices (the graph only needs
+      nodes at intersections / taxi-size changes; it measures distance, nothing
+      else).
+    * **Intersection over ALL connections** (the most-deviating route binds):
+      ``ceiling = min(elev_a + budget_a)``, ``floor = max(elev_a − budget_a)``.
     """
-    from shapely.geometry import LineString
-    from shapely.ops import nearest_points, unary_union
+    from shapely.geometry import Point
 
     from auto_patch.taxi_routing import shared_taxi_route_graph
     G = shared_taxi_route_graph(layout)
-    if not getattr(G, "coord", None) or not thresholds_xyz:
-        return {}
+    if not getattr(G, "coord", None) or not runway_pts_xyz:
+        return lambda x, y: None
 
     def _cap(u, v):
         return G.edge_cap.get(G._ekey(u, v), TAXI_MAX_GRADE)
@@ -94,22 +111,93 @@ def building_feasible_levels(
                     heapq.heappush(pq, (nd, v))
         return dist
 
-    # one cap-weighted Dijkstra per threshold (amortised over all buildings)
-    thr: List[Tuple[float, float, dict]] = []
-    for (tx, ty, te) in thresholds_xyz:
-        k, gap = G.nearest_key(tx, ty)
-        if k is not None:
-            thr.append((te, gap, _capdist_from(k)))
-    if not thr:
-        return {}
+    # runway-edge taxi connections: each graph node near a runway edge, anchored
+    # at the runway elevation there (one cap-Dijkstra per connection, amortised).
+    anchors: List[Tuple[float, dict]] = []
+    for k, (gx, gy) in G.coord.items():
+        best_e = None
+        best_d = _CONNECT_TOL_M
+        for (rx, ry, re) in runway_pts_xyz:
+            d = math.hypot(gx - rx, gy - ry)
+            if d < best_d:
+                best_d = d
+                best_e = re
+        if best_e is not None:
+            anchors.append((best_e, _capdist_from(k)))
+    if not anchors:
+        return lambda x, y: None
 
     cls = [ln for (ln, n) in (getattr(layout, "apt_taxi_centerlines", None)
                               or [])
            if ln is not None and not ln.is_empty
            and not str(n or "").upper().startswith("SVC")]
     if not cls:
-        return {}
+        return lambda x, y: None
 
+    def band(x, y):
+        c = Point(x, y)
+        ln = min(cls, key=lambda L: L.distance(c))
+        perp = c.distance(ln)
+        coords = list(ln.coords)
+        sp = ln.project(c)
+        acc = 0.0
+        A = B = None
+        for i in range(len(coords) - 1):
+            seg_len = math.hypot(coords[i + 1][0] - coords[i][0],
+                                 coords[i + 1][1] - coords[i][1])
+            if acc - 1e-6 <= sp <= acc + seg_len + 1e-6:
+                A = (coords[i], sp - acc)
+                B = (coords[i + 1], (acc + seg_len) - sp)
+                break
+            acc += seg_len
+        if A is None:
+            A = (coords[0], 0.0)
+            B = (coords[-1], ln.length)
+        kA, _ = G.nearest_key(*A[0])
+        kB, _ = G.nearest_key(*B[0])
+        ecap = G.edge_cap.get(G._ekey(kA, kB), TAXI_MAX_GRADE)
+        # perpendicular climb: taxiway-corridor part at the taxiway cap, the
+        # rest (real apron) at 1 % (zero for an on-centerline spine node).
+        perp_climb = (ecap * min(perp, _TAXI_HALF_W_M)
+                      + _APRON_CAP * max(0.0, perp - _TAXI_HALF_W_M))
+        floor, ceil = -_INF, _INF
+        for (ae, cdm) in anchors:
+            cands = []
+            if kA in cdm:
+                cands.append(cdm[kA] + ecap * A[1])   # + partial first edge
+            if kB in cdm:
+                cands.append(cdm[kB] + ecap * B[1])
+            if not cands:
+                continue                          # this connection can't reach
+            budget = min(cands) + perp_climb
+            ceil = min(ceil, ae + budget)
+            floor = max(floor, ae - budget)
+        if ceil >= _INF:
+            return None
+        return (floor, ceil)
+
+    return band
+
+
+def building_feasible_levels(
+        layout,
+        runway_pts_xyz: List[Tuple[float, float, float]],
+        dem_sampler: Callable[[float, float], "float | None"],
+) -> Dict[int, float]:
+    """Return ``{id(building_shape): seated_level_m}`` for every
+    ``ROLE_BUILDING`` that touches airside pavement.
+
+    ``runway_pts_xyz``: ``[(x_m, y_m, elev_m)]`` every runway ring vertex at its
+    solved elevation (the runway-edge anchors — see :func:`reach_band_sampler`).
+    ``dem_sampler(x, y)``: DEM (m) at a layout-local point, or None.  The level
+    is ``clamp(DEM, floor, ceiling)`` from the shared route-feasibility band — if
+    DEM is not reachable within grade from every runway route, the level is
+    pulled into the band (the building is adjusted to be feasible).  Buildings
+    not touching airside pavement are omitted (the caller keeps them at DEM).
+    """
+    from shapely.ops import unary_union
+
+    band = reach_band_sampler(layout, runway_pts_xyz)
     polys = [s.polygon for s in layout.shapes
              if s.role in _AIRSIDE_ROLES and s.polygon is not None
              and not s.polygon.is_empty]
@@ -125,52 +213,15 @@ def building_feasible_levels(
         if airside.is_empty or s.polygon.distance(airside) > _TOUCH_TOL_M:
             continue                            # not airside-served → DEM
         c = s.polygon.centroid
-        # nearest taxi centerline (names irrelevant) + perpendicular foot
-        ln = min(cls, key=lambda L: L.distance(c))
-        try:
-            P = nearest_points(ln, c)[0]
-        except Exception:
+        b = band(c.x, c.y)
+        if b is None:
             continue
-        perp = c.distance(ln)
-        # the foot's bracketing centerline vertices = its graph edge
-        coords = list(ln.coords)
-        sp = ln.project(P)
-        acc = 0.0
-        A = B = None
-        for i in range(len(coords) - 1):
-            seg_len = LineString([coords[i], coords[i + 1]]).length
-            if acc - 1e-6 <= sp <= acc + seg_len + 1e-6:
-                A = (coords[i], sp - acc)
-                B = (coords[i + 1], (acc + seg_len) - sp)
-                break
-            acc += seg_len
-        if A is None:
-            A = (coords[0], 0.0)
-            B = (coords[-1], ln.length)
-        kA, _ = G.nearest_key(*A[0])
-        kB, _ = G.nearest_key(*B[0])
-        ecap = G.edge_cap.get(G._ekey(kA, kB), TAXI_MAX_GRADE)
-        # perpendicular climb: taxiway-corridor part at the taxiway cap,
-        # the rest (apron) at 1 %.
-        perp_climb = (ecap * min(perp, _TAXI_HALF_W_M)
-                      + _APRON_CAP * max(0.0, perp - _TAXI_HALF_W_M))
-
-        floor, ceil = -_INF, _INF
-        for (te, gap, cdm) in thr:
-            cands = []
-            if kA in cdm:
-                cands.append(cdm[kA] + ecap * A[1])   # + partial first edge
-            if kB in cdm:
-                cands.append(cdm[kB] + ecap * B[1])
-            if not cands:
-                continue                          # threshold can't reach it
-            budget = _ENTRY_CAP * gap + min(cands) + perp_climb
-            ceil = min(ceil, te + budget)
-            floor = max(floor, te - budget)
-        if ceil >= _INF:
-            continue
+        floor, ceil = b
         de = dem_sampler(c.x, c.y)
         if de is None:
             continue
-        out[id(s)] = min(max(de, floor), ceil)
+        if floor > ceil:                        # infeasible → midpoint (adjust)
+            out[id(s)] = 0.5 * (floor + ceil)
+        else:
+            out[id(s)] = min(max(de, floor), ceil)
     return out
