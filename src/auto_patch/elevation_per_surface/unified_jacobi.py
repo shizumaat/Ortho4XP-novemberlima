@@ -9827,9 +9827,15 @@ def _spine_climb_seats(layout, nodes, elev, dem_elev, band,
     # building's own FRONTAGE spine (the span of its serving centerline it faces)
     # is bounded — a far building across some OTHER apron does not connect here
     # (the bug that pulled the whole spine up to distant high hangars).
+    # BUILDING FRONTAGE band: where the spine faces a building it must be within
+    # an apron grade of that level so the apron grades ≤1% across the frontage —
+    # spine ∈ [level − 1%·dist, level + 1%·dist].  ONLY the building's own
+    # FRONTAGE span (the part of its serving centerline it faces) is bounded — a
+    # far building across some OTHER apron does not connect here.
     from shapely.geometry import Point as _BPt
     blds = buildings or []
-    lb: dict = {i: -INF for i in spine_nodes}
+    lb: dict = {i: -INF for i in spine_nodes}      # apron-reach lower bound
+    ub: dict = {i: INF for i in spine_nodes}        # apron-reach upper bound
     _FRONT_MARGIN = 10.0
     for (poly, lv) in blds:
         if poly is None or poly.is_empty or not cl_geoms:
@@ -9837,7 +9843,6 @@ def _spine_climb_seats(layout, nodes, elev, dem_elev, band,
         c = poly.centroid
         ci = min(range(len(cl_geoms)), key=lambda k: cl_geoms[k].distance(c))
         ln = cl_geoms[ci]
-        # frontage span on the serving centerline = projection of the footprint
         try:
             arcs = [ln.project(_BPt(px, py))
                     for (px, py) in poly.exterior.coords]
@@ -9848,45 +9853,57 @@ def _spine_climb_seats(layout, nodes, elev, dem_elev, band,
             for (cj, pr) in node_cl.get(i, ()):
                 if cj == ci and a0 <= pr <= a1:
                     d = poly.distance(_BPt(*nodes[i]))
-                    v = lv - APRON_MAX_GRADE * d
-                    if v > lb[i]:
-                        lb[i] = v
+                    if lv - APRON_MAX_GRADE * d > lb[i]:
+                        lb[i] = lv - APRON_MAX_GRADE * d
+                    if lv + APRON_MAX_GRADE * d < ub[i]:
+                        ub[i] = lv + APRON_MAX_GRADE * d
                     break
 
-    def _target(i):
-        de = dem_elev[i] if (i < n and dem_elev[i] is not None) else seats.get(i)
-        t = de if de is not None else lb[i]
-        return max(t, lb[i]) if lb[i] > -INF else t
+    # effective band per node = route reach ∩ building frontage reach
+    def _blo(i):
+        return max(_lo(i), lb[i])
+
+    def _bhi(i):
+        return min(_hi(i), ub[i])
 
     seats: dict = {}
     for i in spine_nodes:
         if i in pinned:
             seats[i] = pinned[i]          # held at the taxiway-rect elevation
             continue
-        lo, hi = _lo(i), _hi(i)
-        seats[i] = (0.5 * (lo + hi) if lo > hi
-                    else min(max(_target(i), lo), hi))
+        lo, hi = _blo(i), _bhi(i)
+        de = dem_elev[i] if (i < n and dem_elev[i] is not None) else None
+        if lo > hi:
+            seats[i] = 0.5 * (lo + hi)
+        elif de is not None:
+            seats[i] = min(max(de, lo), hi)
+        else:
+            seats[i] = 0.5 * (lo + hi)
 
-    # CLOSEST-TO-DEM, LOWER-BOUNDED BY THE BUILDINGS: the spine rises with the
-    # terrain AND up to (building level − 1%·dist) wherever it serves a building,
-    # so the apron grades ≤1% off a spine high enough to reach it; away from
-    # buildings it relaxes to DEM.  Target clamped to the route band ∩ the
-    # neighbour cap slabs (the slabs only pull it off target where the terrain
-    # steps faster than the taxi cap → the smooth ≤cap climb).
+    # SMOOTHEST GRADE between the anchors (buildings + runway edges), with only a
+    # MILD pull toward DEM (user 2026-06-23): once the building-frontage nodes are
+    # held within reach of their buildings and the runway edges are fixed, the
+    # spine between them should be the smoothest ramp — NOT a closest-to-DEM trace
+    # that chases every terrain bump.  Each free node targets the neighbour mean
+    # (min curvature) blended with a small DEM term, clamped to its effective
+    # band ∩ the neighbour cap slabs.
+    _DEM_PULL = 0.15
     order = sorted(i for i in spine_nodes if i not in pinned)
-    for _it in range(300):
+    for _it in range(400):
         moved = 0.0
         for i in order:
             nb = spine_adj.get(i, ())
             if not nb:
                 continue
-            tgt = _target(i)
+            harm = sum(seats[j] for (j, _w) in nb) / len(nb)
+            de = dem_elev[i] if (i < n and dem_elev[i] is not None) else harm
+            tgt = (1.0 - _DEM_PULL) * harm + _DEM_PULL * de
             # the building lower bound is a HARD floor (the apron must reach the
             # spine at ≤1%): a lower neighbour cannot drag the node below it —
             # instead the neighbour RISES toward it next sweep, propagating the
             # climb up to the building's frontage.
-            lo_e = max(_lo(i), lb[i]) if lb[i] > -INF else _lo(i)
-            hi_e = _hi(i)
+            lo_e = _blo(i)
+            hi_e = _bhi(i)
             for (j, w) in nb:
                 if seats[j] - w > lo_e:
                     lo_e = seats[j] - w
