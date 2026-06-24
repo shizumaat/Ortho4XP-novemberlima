@@ -241,6 +241,49 @@ Then wire, each step behind a gate for A/B, deleting the old path once green:
   tests; **delete** the retired scaffolding (old per-axis junction model,
   `_visible_grade_edges`, `_min_grade_network_solve`, the P3a/P3/P4 gates folded in).
 
+## 4b. COLLAPSED TO ONE PATH (2026-06-23) — spine-carries-climb is THE solve
+
+The Phase-3 bowling `connecting_solve` is **DELETED**. There is now exactly ONE
+apron/junction grading path under `SINGLE_GRADE_GRAPH` (default ON, no sub-gate):
+`grade_graph_solve.spine_carries_climb_solve`. The earlier `O4_SPINE_CARRIES_CLIMB`
+sub-gate and the `connecting_solve`/`_bands`/`_dijkstra_envelope` scaffolding are
+gone (clean-room rule: one thing grades aprons).
+
+**The model as built (CYXY):**
+1. **HARD anchors** = runway thresholds (FAA surface, unchanged) + tile seams +
+   route-feasible closest-to-DEM **buildings** (`building_feasible_levels`).
+2. **SPINE = its route-traced climbing profile, LOCKED.** `_spine_climb_seats`
+   (unified_jacobi) builds the taxi-centerline sub-graph and picks, within the
+   existing runway-reach band (`_runway_reach_bands`), the in-band assignment that
+   climbs at the per-letter cap (closest-to-DEM, 1-D projected GS). ★ KEY INSIGHT
+   (user 2026-06-23): the per-node feasibility band is **reachability**, not a
+   pairwise grade constraint — two in-band nodes can still step more than the cap
+   because DEM steps inside the band. Only the **climbing profile** (the specific
+   in-band assignment that rises at the cap along the route) is pairwise-compliant
+   by construction. So the spine MUST be set to that profile and locked, not left
+   to free min-grade (which picks a stepped in-band assignment → the 60 spine
+   violations). Locking it → **SPINE violations 60 → 8** (the 8 are building-
+   coincident frontage nodes = canyon, not the route).
+3. **BODY** = the apron/junction interior, solved to min Σgrade² off the locked
+   spine + buildings (`spine_carries_climb_solve`: harmonic + projected Gauss-Seidel
+   cap-slab, no global band). Buildings emit at route level (**0 bowled**).
+4. **grade graph** drops a body↔body chord that CROSSES the shape's spine (the
+   real path is via the spine at the taxi cap; the straight 1% diagonal across a
+   wide apron is not a grade path) — now unconditional in `grade_graph`.
+
+**As-built validation is unified.** `grade_graph_validate.within_violations(layout)`
+builds the SAME `grade_graph` constraints from the emitted geometry; the build's
+WARN reports it, split **SPINE(taxi-route) vs BODY(apron)**. No parallel probe.
+(⚠ `tools/check_grade.py` — the test-suite validator — is STILL legacy; wiring it
+to `grade_graph` + re-cutting fixtures is the remaining Phase-1 chore.)
+
+**Where it stands:** spine clean (8 frontage residuals); **BODY ≈ 1284** = the
+canyon — locking the spine at its correct climbing height exposes that wide aprons
+between stepped pads cannot grade ≤1% to the high spine/buildings. That is the
+**NEXT** task (§3b): spine-slice wide aprons / joint pad feasibility so the body
+grades ≤1% to its LOCAL spine, with building↔building steps where pads can't
+co-level. Probe/visuals: `/tmp/viz_violations_png.py`, `/tmp/viz_violations_kml.py`.
+
 ## 5. Junction model — how it differs from what's implemented (resolve in Phase 1)
 - **Body grading is the gap.** Current `_per_axis_allowance` requires BOTH endpoints
   within 15 m of a common centerline; a junction edge node beyond that → pair

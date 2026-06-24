@@ -3054,8 +3054,15 @@ def _report_within_shape_violations(
     except Exception:                              # pragma: no cover
         _per_axis_allowance = None
         _taxi_axes_m = None
+    # APRON / JUNCTION are owned by the UNIFIED grade graph (the SAME module the
+    # solver builds its constraints from — docs/single_grade_graph.md), so the
+    # as-built check for them cannot drift from the surface we built.  Counted
+    # below via grade_graph_validate; skipped in the legacy per-axis loop here.
+    from .grade_graph import SOFT_VISIBILITY_ROLES as _GG_ROLES
     for s_idx, s in enumerate(layout.shapes):
         if s.polygon is None or s.polygon.is_empty:
+            continue
+        if s.role in _GG_ROLES:
             continue
         cap_pct = ROLE_GRADE_LIMITS.get(s.role, TAXI_MAX_GRADE)
         if cap_pct is None:
@@ -3182,13 +3189,33 @@ def _report_within_shape_violations(
                 if prev is None or pct > prev[0]:
                     per_shape[s_idx] = (
                         pct, s.role or "?", s.ref or "", ei, elevs[j], d, de)
+    # UNIFIED grade-graph audit of apron/junction (spine + body) — the single
+    # source the solver used.  Reported separately so the spine (taxi route)
+    # smoothness is visible directly, no parallel probe needed.
+    try:
+        from .grade_graph_validate import within_violations as _gg_within
+        gg_viol = _gg_within(layout)
+    except Exception:
+        gg_viol = []
+    if gg_viol:
+        spine_n = sum(1 for v in gg_viol if v[4])
+        body_n = len(gg_viol) - spine_n
+        UI.vprint(1,
+                  f"  [pav-builder] WARN: {icao}: {len(gg_viol)} apron/junction "
+                  f"within-grade violation(s) [unified grade graph] — "
+                  f"SPINE(taxi-route)={spine_n}, BODY(apron)={body_n}.")
+        for (pct, cap, d, role, is_spine, x, y) in gg_viol[:8]:
+            UI.vprint(1,
+                      f"  [pav-builder]   {'SPINE' if is_spine else 'body '} "
+                      f"{pct:.1f}% on {role} cap={cap:.1f}% d={d:.1f}m "
+                      f"@({x:.0f},{y:.0f})")
     if n_viol > 0:
         try:
             msg = (f"  [pav-builder] WARN: {icao}: {n_viol} within-shape "
                    f"grade violation(s) over the per-role config cap "
                    f"(ROLE_GRADE_LIMITS; geodesic visibility graph"
                    f"{', local window' if ROUTE_FIELD_MODEL else ', any distance'}"
-                   f" — matches tools/check_grade.py / verify_and_log) "
+                   f" — rects/runway/terminal) "
                    f"across {len(per_shape)} shape(s).")
             UI.vprint(1, msg)
             # Name the specific worst shapeIDs so the user can investigate them.

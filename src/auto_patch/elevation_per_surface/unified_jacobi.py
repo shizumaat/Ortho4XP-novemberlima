@@ -763,15 +763,18 @@ def solve(layout, icao: str,
     # conforms to the anchors instead of the bowled relief.  Final override
     # before writeback; gate off → byte-identical.
     if SINGLE_GRADE_GRAPH:
-        # Phase 3 connecting solve: feasibility bands (direct Dijkstra from the
-        # hard anchors) + min grade+curvature smoothing within them, on the
-        # UNIFIED grade graph.  Replaces _min_grade_network_solve (which is
-        # min-Σgrade²-only and ran on the drifted graph).
+        # SPINE-CARRIES-CLIMB connecting solve (docs/single_grade_graph.md ★):
+        # the runway thresholds (FAA surface) + seams + the route-feasible
+        # closest-to-DEM BUILDINGS are the hard anchors; the taxi spine + apron
+        # body are solved to the SMOOTHEST grade between them on the unified
+        # grade graph.  The runway→building climb emerges along the taxi network
+        # (the spine carries it); the apron body grades 1% to its local spine.
         from auto_patch.elevation_per_surface.grade_graph_solve import (
-            connecting_solve)
+            spine_carries_climb_solve)
         hard_mg = set(runway_nodes)
         _cps = layout.canonical_points
         building_pads = []
+        building_shapes = []
         for _s in layout.shapes:
             if (_s.role == ROLE_BUILDING and _s.polygon is not None
                     and not _s.polygon.is_empty):
@@ -781,12 +784,18 @@ def solve(layout, icao: str,
                 _pad = [i for i in _pad if i is not None]
                 if _pad:
                     building_pads.append(_pad)
-        n_cs = connecting_solve(
+                    building_shapes.append(_s)
+        seam_nodes = _seam_pinned_runway_nodes(layout, bucket_to_idx)
+        hard_seats = _build_route_layer(
+            layout, elev, bucket_to_idx, dem, tile_lat, tile_lon,
+            building_shapes, building_pads, nodes, dem_elev,
+            runway_nodes, seam_nodes)
+        n_cs = spine_carries_climb_solve(
             elev, shape_constraints, base_hard, nodes, hard_mg,
-            building_pads=building_pads, dem_elev=dem_elev)
+            hard_seats=hard_seats, dem_elev=dem_elev)
         if n_cs and _os.environ.get("O4_STEP_DEBUG") == "1":
-            print(f"  [step] connecting-solve: solved {n_cs} free node(s)")
-        _mark("connecting-solve")
+            print(f"  [step] spine-climb solve: solved {n_cs} free node(s)")
+        _mark("spine-climb-solve")
     elif MIN_GRADE_NETWORK:
         hard_mg = set(runway_nodes)
         n_mg = _min_grade_network_solve(
@@ -9666,6 +9675,184 @@ def _min_grade_network_solve(elev, shape_constraints, base_hard, nodes,
         if moved < tol:
             break
     return len(free)
+
+
+def _route_thresholds(layout, elev, bucket_to_idx):
+    """``[(x, y, elev)]`` runway thresholds at their solved surface elevation —
+    the source set for the route-feasibility bands (shared by the building
+    levels and the spine-climb route-band sampler)."""
+    cps = layout.canonical_points
+    thr_m = getattr(layout, "runway_thresholds", None) or []
+    if not thr_m:
+        return []
+    rwy_pts: list = []
+    for s in layout.shapes:
+        if (s.role == ROLE_RUNWAY and s.polygon is not None
+                and not s.polygon.is_empty):
+            for (x, y) in _open_ring(list(s.polygon.exterior.coords)):
+                i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+                if i is not None:
+                    rwy_pts.append((x, y, elev[i]))
+    if not rwy_pts:
+        return []
+
+    def _thr_elev(tx, ty):
+        return min(rwy_pts, key=lambda v: (v[0] - tx) ** 2
+                   + (v[1] - ty) ** 2)[2]
+
+    return [(tx, ty, _thr_elev(tx, ty)) for (tx, ty) in thr_m]
+
+
+def _spine_climb_seats(layout, nodes, elev, dem_elev, route_lo, route_hi
+                       ) -> dict:
+    """The SPINE climbing profile (docs/single_grade_graph.md §2): the value the
+    route graph DETERMINES for each taxi-centerline vertex by climbing at the
+    per-letter cap along the route, within the existing runway-reach feasibility
+    band (``route_lo``/``route_hi`` from ``_runway_reach_bands``).
+
+    The per-node band guarantees a compliant profile EXISTS; this picks that
+    specific in-band assignment — the climbing profile — so consecutive spine
+    nodes are pairwise ≤cap BY CONSTRUCTION (the band alone does not couple
+    adjacent nodes; DEM can step more than the cap inside it).  The spine sub-
+    graph is 1-D (consecutive-on-centerline edges; a crossing node is shared =
+    ONE node), smoothed by projected Gauss-Seidel toward closest-to-DEM within
+    ``[route_lo, route_hi]`` ∩ the neighbour cap slabs.  Returns
+    ``{node_idx: level}`` for the spine vertices, to be LOCKED so the apron body
+    grades off them without dragging them flat."""
+    n = len(nodes)
+    INF = float("inf")
+    from shapely.strtree import STRtree
+    from shapely.geometry import Point as _SPt
+    _pts = [_SPt(x, y) for (x, y) in nodes]
+    _tree = STRtree(_pts)
+    letters = getattr(layout, "apt_taxi_letters", None) or {}
+    _SPINE_TOL = 2.0
+    spine_nodes: set = set()
+    spine_adj: dict = {}
+
+    def _add_edge(a, b, w):
+        spine_adj.setdefault(a, []).append((b, w))
+        spine_adj.setdefault(b, []).append((a, w))
+
+    for item in (getattr(layout, "apt_taxi_centerlines", None) or []):
+        ln = item[0] if isinstance(item, tuple) else item
+        ref = item[1] if (isinstance(item, tuple) and len(item) > 1) else None
+        if ln is None or ln.is_empty:
+            continue
+        if ref and str(ref).upper().startswith("SVC"):
+            continue
+        cap = float(taxi_grade_cap_for_letter(letters.get(ref)))
+        on_line: list = []
+        try:
+            cand = _tree.query(ln.buffer(_SPINE_TOL))
+        except _GEOM_EXC:
+            continue
+        for qi in cand:
+            i = int(qi)
+            try:
+                d = ln.distance(_pts[i])
+            except _GEOM_EXC:
+                continue
+            if d <= _SPINE_TOL:
+                on_line.append((ln.project(_pts[i]), i))
+        on_line.sort()
+        seen: set = set()
+        ordered: list = []
+        for pr, i in on_line:
+            if i in seen:
+                continue
+            seen.add(i)
+            ordered.append((pr, i))
+        if len(ordered) < 2:
+            continue
+        for (p0, i0), (p1, i1) in zip(ordered, ordered[1:]):
+            spine_nodes.add(i0)
+            spine_nodes.add(i1)
+            _add_edge(i0, i1, cap * max(abs(p1 - p0), 1e-3))
+
+    if not spine_nodes:
+        return {}
+
+    def _lo(i):
+        v = route_lo[i] if i < len(route_lo) else -INF
+        return v if v is not None else -INF
+
+    def _hi(i):
+        v = route_hi[i] if i < len(route_hi) else INF
+        return v if v is not None else INF
+
+    seats: dict = {}
+    for i in spine_nodes:
+        lo, hi = _lo(i), _hi(i)
+        de = dem_elev[i] if i < n and dem_elev[i] is not None else elev[i]
+        seats[i] = (0.5 * (lo + hi) if lo > hi else min(max(de, lo), hi))
+
+    order = sorted(spine_nodes)
+    for _it in range(300):
+        moved = 0.0
+        for i in order:
+            nb = spine_adj.get(i, ())
+            if not nb:
+                continue
+            tgt = sum(seats[j] for (j, _w) in nb) / len(nb)
+            lo_e, hi_e = _lo(i), _hi(i)
+            for (j, w) in nb:
+                if seats[j] - w > lo_e:
+                    lo_e = seats[j] - w
+                if seats[j] + w < hi_e:
+                    hi_e = seats[j] + w
+            tgt = (0.5 * (lo_e + hi_e) if lo_e > hi_e
+                   else min(max(tgt, lo_e), hi_e))
+            d = tgt - seats[i]
+            if d:
+                seats[i] = tgt
+                if abs(d) > moved:
+                    moved = abs(d)
+        if moved < 0.001:
+            break
+    return seats
+
+
+def _build_route_layer(layout, elev, bucket_to_idx, dem, tile_lat, tile_lon,
+                       building_shapes, building_pads, nodes, dem_elev,
+                       runway_nodes, seam_nodes):
+    """The SPINE-CARRIES-CLIMB route layer = ``{node_idx: locked_level}`` for
+    BOTH:
+
+    * the taxi SPINE — its route-traced climbing profile within the existing
+      runway-reach band (``_runway_reach_bands`` → ``_spine_climb_seats``), so
+      the spine is pairwise ≤cap by construction (it carries the climb);
+    * the BUILDINGS — FLAT at their route-feasible closest-to-DEM level
+      (``building_feasible_levels``).  A building WINS over a coincident spine
+      node (a pad vertex is its own anchor).
+
+    The solver LOCKS these; the apron body is then graded ≤cap off them.
+    """
+    from auto_patch.elevation_per_surface.building_feasibility import (
+        building_feasible_levels)
+    from auto_patch.elevation import _sample_dem
+    route_lo, route_hi = _runway_reach_bands(
+        nodes, elev, runway_nodes, seam_nodes, [], TAXI_MAX_GRADE, layout,
+        noise_frac=_ROUTE_NOISE_FRAC)
+    seats = _spine_climb_seats(layout, nodes, elev, dem_elev,
+                               route_lo, route_hi)
+    thresholds = _route_thresholds(layout, elev, bucket_to_idx)
+    if thresholds:
+        def _dem(x, y):
+            try:
+                lat, lon = layout.m_to_ll(x, y)
+                return _sample_dem(dem, tile_lat, tile_lon, lat, lon)
+            except _GEOM_EXC:
+                return None
+
+        levels = building_feasible_levels(layout, thresholds, _dem)
+        for s, pad in zip(building_shapes, building_pads):
+            lv = levels.get(id(s))
+            if lv is None:
+                continue
+            for i in pad:                  # building level WINS over spine
+                seats[i] = lv
+    return seats
 
 
 def _seat_buildings_route_feasible(layout, elev, base_hard, bucket_to_idx,

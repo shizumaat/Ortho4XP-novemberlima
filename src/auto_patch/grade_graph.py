@@ -192,6 +192,45 @@ def _spine_membership(shape: GradeShape, ctx: GradeContext
     return out
 
 
+def _spine_crossing_predicate(shape: GradeShape, ctx: GradeContext,
+                              membership: dict):
+    """Return ``crosses(xa,ya,xb,yb)->bool``: True iff the chord crosses one of
+    the shape's spine centerlines (so the real grade path between the two sides
+    is via the spine, not the direct diagonal).  ``None`` if shapely is
+    unavailable or the shape has no spine."""
+    if not membership:
+        return None
+    cl_idx = {c for hits in membership.values() for (c, _a) in hits}
+    if not cl_idx:
+        return None
+    try:
+        from shapely.geometry import LineString
+    except ImportError:  # pragma: no cover
+        return None
+    geoms = []
+    for ci in cl_idx:
+        pts = ctx.centerlines[ci].pts
+        if len(pts) >= 2:
+            try:
+                geoms.append(LineString(pts))
+            except Exception:
+                pass
+    if not geoms:
+        return None
+
+    def _crosses(xa, ya, xb, yb):
+        try:
+            ch = LineString(((xa, ya), (xb, yb)))
+        except Exception:
+            return False
+        for g in geoms:
+            if ch.crosses(g):
+                return True
+        return False
+
+    return _crosses
+
+
 def _shared_centerline(mi, mj) -> bool:
     """True iff ring indices i,j lie on a COMMON centerline (a spine pair)."""
     ci = {c for (c, _a) in mi}
@@ -235,6 +274,13 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
     body_cap = _body_cap(shape, ctx, membership)
     spine_cap = _spine_cap(membership, ctx) if membership else body_cap
     vis = _visibility_predicate(ring)
+    # The shape's spine centerline geometries (those it has nodes on) — a body
+    # chord that CROSSES one is NOT a real grade path: the climb between the two
+    # sides is carried by the SPINE at the taxiway cap (the apron grades 1% to
+    # its local spine, plan §2), so the straight 1%-diagonal across the spine
+    # would falsely declare a wide apron infeasible.  Drop it; the constraint
+    # holds transitively through the spine.
+    crosses_spine = _spine_crossing_predicate(shape, ctx, membership)
     seam = ctx.seam_keys
     bld = ctx.building_keys
 
@@ -262,6 +308,10 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
             mj = membership.get(j)
             spine_pair = mi is not None and mj is not None \
                 and _shared_centerline(mi, mj)
+            if (not spine_pair and not ring_adjacent
+                    and crosses_spine is not None
+                    and crosses_spine(xi, yi, xj, yj)):
+                continue            # path is via the spine, not this diagonal
             cap = spine_cap if spine_pair else body_cap
             sc.edges.append((ki, kj, cap))
 
