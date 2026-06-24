@@ -1,52 +1,51 @@
-# STATUS — handover (2026-06-24, end of session) — THE GOAL: ONE GRAPH
+# STATUS — handover (2026-06-24 PM) — SPINE=0 LANDED; NEXT = BODY
 
-Branch `dev`. Tree DIRTY (uncommitted at session end; committing now). Prior
-commit `1347cb4`. ⚠ Build/probe the working model with
-`O4_ABSORB_RUNWAY_IN_APRON=0 O4_VISIBLE_CHORD_CONNECT=1` and `PYTHONHASHSEED=0`.
+Branch `dev`. Committed: `0e8bde9` (~U taxi naming), `02ac783` (single-graph spine
+fix). ⚠ Build/probe the working model with
+`O4_ABSORB_RUNWAY_IN_APRON=0 O4_VISIBLE_CHORD_CONNECT=1` and `PYTHONHASHSEED=0`
+(spine=0 also holds under plain defaults).
 
-## ►►►►► THE GOAL (user, authoritative 2026-06-24) ◄◄◄◄◄
-**ONE graph that holds all the data it needs and computes the reach band for
-EVERY building the SAME way the spine will be graded.** A building's elevation is
-DETERMINED BY WHAT THE SPINE CAN REACH, so placement and grading CANNOT use two
-different models/measurements. Today there are TWO and they disagree — that is THE
-bug to remove. No second model, no parallel route measurement.
+## ►►► DONE THIS SESSION ◄◄◄
+**CYXY taxi SPINE violations 16 → 0** (the single-graph goal), no building bowled.
 
-**Why two values exist today (fully traced this session):**
-- Building LEVELS come from `building_feasibility.reach_band_sampler` — a Dijkstra
-  over `shared_taxi_route_graph` with a runway-EDGE anchor model (a graph node
-  within `_CONNECT_TOL_M`=20 m of a runway edge) and per-letter `edge_cap`.
-- The SPINE is graded by the within-shape graph (`grade_graph` + the seater's
-  `spine_adj` in `_spine_climb_seats`): node-to-node, geometric distance, per-edge
-  cap.
-- These diverge on **which runway/route/cap binds a building**. Decisive example —
-  building16: `reach_band` routes it to runway **02** (≈980 m ⇒ 708.7, = the
-  user's 707.8 hand-calc ✓); a spine-graph reach (Dijkstra on `spine_adj` from ALL
-  runway-spine pins) binds it to the NEAREST runway **14R/32L** (≈333 m ⇒ 699,
-  which BOWLS it). Same idea, different ANCHOR SET (reach_band: runway-edge ≤20 m;
-  spine pins: all `runway_nodes ∩ spine`) ⇒ different number.
+1. **Unnamed taxi routes carry a unique name + real ICAO size at SOURCE**
+   (`0e8bde9`). `apt_dat_reader.unnamed_edge_component_names` assigns each unnamed
+   route a `~U<k>` serial (union-find by shared node) carrying its row-1202 size,
+   via `by_name` — replaces the P3a `~A/~B` recovery hack (REMOVED) + the
+   `UNNAMED_TAXI_SIZE` gate. config helpers `SYNTH_TAXI_NAME_PREFIX`,
+   `is_unnamed_taxi_ref`, `taxi_ref_is_sub_index` (a `~U` is a MAIN taxiway, not a
+   digit sub-stub); digit sub-ref checks swapped to the predicate; short-unnamed-
+   stub drop kept for `~U` (no degenerate slivers). The CYXY violation corridor is
+   now `~U11` (size D, 1.5%) not anonymous `''`.
+2. **Single graph — the 16 spine violations** (`02ac783`). Buildings + spine
+   ALREADY share ONE graph (`building_feasibility.reach_band_sampler`). The viols
+   were SEATER-CHOSE-BADLY: bands wide & cap-compatible but a ~3.3% ramp. ROOT
+   (probes `/tmp/probe_band_spine.py`, `/tmp/probe_routegraph.py`): an ABSORBED
+   runway end's entering centerline stops ~23 m from the runway — just beyond the
+   20 m anchor tol — so its contact was not a reach anchor and the corridor back to
+   it was credited via a 217 m DETOUR anchor (ceiling ~699 not ~696) → the seater
+   pinned the bottom to the 694 runway and let the top rise → ramp. FIX = ONE LINE
+   `_CONNECT_TOL_M` 20→25. CYXY spine 16→0, **b16=708.7** ✓ (working model) / 712
+   (default ≈DEM), b19≈700, NO bowl. SPJC spine 0 (within identical), HECA spine
+   8→8. Also `band=` param on `building_feasible_levels` (pass the one band).
+   Test `tests/test_pavement_grade.py::test_cyxy_spine_zero_no_bowl` (spine 0 +
+   b16≥706 + b19≥698) PASSES.
+   ⚠ DEAD END (reverted): a DENSE spine-node graph drove spine→0 but BOWLED b16 to
+   702 (set-back buildings sample badly off dense nodes + spurious near-runway
+   anchors). The coarse graph + tol=25 is the minimal correct fix.
 
-**PROVED this session:** deriving the building level from a free spine seat drove
-**spine violations to 0** (within 567). So the one-computation architecture is
-RIGHT. It bowled buildings only because the naive spine reach used the wrong
-anchor set/caps. (All those build-from-spine / spine-graph-reach edits were
-REVERTED — current tree is the solid non-bowling state.)
-
-## ►►► THE NEXT TASK (hand-off) ◄◄◄
-Build the ONE graph: compute each building's reach band on the SAME graph + anchor
-model + per-letter caps that grade the spine, then DERIVE the building level from
-it and DROP the separate `reach_band` placement. Concretely:
-1. Pick the anchor model that gives the user-correct answer = `reach_band`'s
-   (runway-EDGE ≤20 m, per-letter caps) — NOT "all runway-spine pins" (that binds
-   b16 to 14R/32L and bowls). The reach must route b16 to 02 (708), not 14R/32L.
-2. Compute the reach band on the graph the spine is graded on (or make `reach_band`
-   and the spine graph provably identical: same nodes, same edges, same caps, same
-   anchors, same distances).
-3. building level = clamp(DEM, reach_at_frontage); spine seated within the same
-   reach; rects already follow the spine (landed). Result must be: spine
-   violations 0 AND no bowled building (every building at ≈min(DEM, reach), b16≈708
-   b19≈700). Add a test asserting both.
-4. Then retire the now-redundant validators (`_warn_terminal_chord_law`,
-   route-band WARN) and the network-profile field as a taxiway elevation source.
+## ►►► NEXT TASK: THE BODY (apron/junction) ◄◄◄
+Spine is clean; the user said review the BODY violations next. grade_graph_validate
+BODY (apron/junction within-shape) on CYXY ≈ 1140 (working model) / 1076 (default);
+SPJC 1027; HECA ~18k (canyon). These are aprons/junctions that can't grade ≤1% from
+their edge up to the high spine/buildings. User model (memory `apron_spine_grade_model`):
+apron body grades 1% from edges to the centerline SPINE; where a wide apron can't
+reach, spine-slice it / step pads with the apron following / explicit transition —
+NEVER a steep apron interior. `tools/check_grade.py` `test_pavement_grade[*]` is RED
+by design (WITHIN_SHAPE_CAP=0; 4/4 airports failed at baseline 623820c too — NOT a
+regression). Probe: `/tmp/probe_body.py <ICAO>` (body by role + severity).
+Then: retire redundant validators (`_warn_terminal_chord_law`, route-band WARN,
+network-profile field) once the body is on the one graph.
 
 ## ►► LANDED THIS SESSION (current tree; KEEP) ◄◄
 Working model = `O4_ABSORB_RUNWAY_IN_APRON=0 O4_VISIBLE_CHORD_CONNECT=1`. State:
