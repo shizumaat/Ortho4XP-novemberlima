@@ -3,7 +3,27 @@
 Branch `dev`. Tree CLEAN (latest `392d3a4`). **THE AUTHORITATIVE PLAN is
 `docs/single_grade_graph.md` §4b** (read first); memory `p5_lockstep_diagnosis.md`.
 
-## ►► SPINE GRADING TUNED TO FIELD FEEDBACK (2026-06-23, latest) ◄◄
+## ►► NEXT PHASE: NO-GRADE-VIOLATIONS = CLAMP RECTS/APRONS TO ROUTE-REACHABLE ◄◄
+**User principle (2026-06-23): the solver must NEVER emit a grade violation — if
+an anchor can't be reached within grade, LOWER it (and its buildings), don't leave
+a steep cap.** Buildings already obey this (`building_feasible_levels` clamps to
+`clamp(DEM, route_floor, route_ceil)`). **Taxiway RECTS and apron edges do NOT** —
+their elevation comes from the runway/network profile solve, which ignores the
+taxi-route reach band, so e.g. CYXY **A2 #214**'s far end is 699.4 while the band
+caps at 697.7 → the spine reaches 697.2 and the cap junction is too steep. The
+whole A2 corridor (cap→A2→A2 apron ~709) sits above route-reachable.
+**THE FIX (next phase):** extend the route-band clamp (`reach_band_sampler`, exists)
+from buildings to (a) taxiway-rect nodes and (b) apron edges — any node above its
+route-reachable ceiling is lowered to it, cascading DOWN the corridor; where an
+apron span still can't grade ≤1% from its spine, INSERT nodes (the user's "add a
+couple nodes"). ⚠ Clamping a 4-corner rect re-tilts its plane and cascades — needs
+its own careful pass with geometry validated, NOT an end-of-session hack.
+Two field exemplars: (1) A2 cap steep — smooth 3% wanted from E-intersection to
+the A2 apron; (2) building19 apron toward the runway drops >1% from the high spine.
+Also still open: item 4 (E-route centerline GAP → missing spine; surgical
+gap-bridge, the extend-to-boundary over-slices into T-junctions).
+
+## ►► SPINE GRADING TUNED TO FIELD FEEDBACK (2026-06-23) ◄◄
 The spine seating (`_spine_climb_seats` + `building_feasibility.reach_band_sampler`)
 now matches the user's X-Plane review:
 - **ONE shared feasibility band** for buildings + spine (`reach_band_sampler`):
