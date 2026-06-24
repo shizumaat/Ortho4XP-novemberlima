@@ -3,7 +3,33 @@
 Branch `dev`. Tree CLEAN (latest `392d3a4`). **THE AUTHORITATIVE PLAN is
 `docs/single_grade_graph.md` §4b** (read first); memory `p5_lockstep_diagnosis.md`.
 
-## ►► CURRENT STATE: ONE PATH, SPINE CLEAN, BODY/CANYON IS NEXT ◄◄
+## ►► SPINE GRADING TUNED TO FIELD FEEDBACK (2026-06-23, latest) ◄◄
+The spine seating (`_spine_climb_seats` + `building_feasibility.reach_band_sampler`)
+now matches the user's X-Plane review:
+- **ONE shared feasibility band** for buildings + spine (`reach_band_sampler`):
+  measured along taxi routes with centerline **edge projection** (smooth between
+  coarse graph vertices — the graph only measures distance, doesn't need many
+  nodes), anchored on **runway-edge taxi connections** (densified runway boundary)
+  **+ threshold MARKERS** (runway profile extrapolated to the marker — for runway
+  ends absorbed into an apron, e.g. CYXY 02). Intersected over every runway.
+- **Buildings** seat at clamp(DEM, band) → at DEM where reachable (CYXY/SPJC 0
+  below DEM; HECA 6 in its canyon).
+- **Spine** = building-frontage nodes held within apron-reach band
+  `[lvl−1%·d, lvl+1%·d]` of their frontage buildings (so the apron grades ≤1% to
+  them, hard floor) + runway/threshold anchors; between them solved for
+  **smoothest grade** (neighbour-mean min-curvature) with a **mild DEM pull**
+  (`_DEM_PULL=0.15`), NOT closest-to-DEM.
+- RESULT: pure-spine **0** on CYXY/SPJC/HECA; CYXY body 2405→~870 (the spine
+  rising to buildings lets aprons grade to them). Commits `4727c65` `bf16896`
+  `e1dcd40` `76153d8` `92ae9d4` `68334ff`.
+- **OPEN field items:** (2a) pin spine nodes that touch a runway edge to the
+  runway surface (no peak/valley) — not currently triggering but add the guard;
+  (4) E and some ~B route centerlines cross APRON INTERIORS with 0 nodes on them
+  → no spine: `junction_spine` must slice the apron along EVERY crossing route
+  centerline (Phase-1 geometry). Item 3's residual steepness funnels into item 4
+  (coarse 02/20→A2 centerline). BODY/apron grading is still the deferred phase.
+
+## ►► (prior) ONE PATH, SPINE CLEAN, BODY/CANYON IS NEXT ◄◄
 **Collapsed to a SINGLE apron/junction grading path** (commit `392d3a4`): the
 bowling `connecting_solve` is DELETED; `grade_graph_solve.spine_carries_climb_solve`
 is THE solve under `SINGLE_GRADE_GRAPH` (default ON, no sub-gate). Build a plain
