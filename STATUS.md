@@ -1,12 +1,35 @@
-# STATUS — handover (2026-06-23)
+# STATUS — handover (2026-06-23, single path landed)
 
-Branch `dev`. Tree CLEAN, all committed (latest `4b50ee1`). **THE AUTHORITATIVE
-PLAN is `docs/single_grade_graph.md`** (read it first); memory
-`p5_lockstep_diagnosis.md`. The single-grade-graph generation: the within-shape
-solver/validator drift is collapsed to ONE graph (`grade_graph.py`); the remaining
-work is the connecting solve.
+Branch `dev`. Tree CLEAN (latest `392d3a4`). **THE AUTHORITATIVE PLAN is
+`docs/single_grade_graph.md` §4b** (read first); memory `p5_lockstep_diagnosis.md`.
 
-## ►► NEXT SESSION: IMPLEMENT SPINE-CARRIES-CLIMB ◄◄
+## ►► CURRENT STATE: ONE PATH, SPINE CLEAN, BODY/CANYON IS NEXT ◄◄
+**Collapsed to a SINGLE apron/junction grading path** (commit `392d3a4`): the
+bowling `connecting_solve` is DELETED; `grade_graph_solve.spine_carries_climb_solve`
+is THE solve under `SINGLE_GRADE_GRAPH` (default ON, no sub-gate). Build a plain
+dev patch (no env) to fly it.
+- **Bowl FIXED**: buildings lock at route-feasible level (`building_feasible_levels`)
+  → 0 CYXY buildings materially below route level (was 16).
+- **SPINE FIXED (the win)**: `_spine_climb_seats` (unified_jacobi) locks the taxi
+  centerlines at their route-traced CLIMBING profile (in-band assignment that climbs
+  at the per-letter cap; `_runway_reach_bands`). ★ The per-node band is reachability
+  NOT a pairwise grade constraint — only the climbing profile is pairwise-compliant,
+  so the spine must be SET to it + locked, not free-solved. CYXY spine violations
+  **60 → 8** (the 8 are building-frontage = canyon).
+- **As-built validation UNIFIED**: `grade_graph_validate.within_violations(layout)` =
+  the same grade_graph the solver used; the build WARN prints it split
+  **SPINE(taxi-route) vs BODY(apron)**. (⚠ `tools/check_grade.py` still legacy →
+  Phase-1 wire + fixture re-cut pending.)
+- **NEXT = BODY / CANYON** (CYXY body ≈ 1284, HECA 11922, SPJC 1133): wide aprons
+  between stepped pads can't grade ≤1% up to the high spine/buildings. §3b: spine-
+  slice wide aprons / joint pad feasibility so the body grades ≤1% to its LOCAL
+  spine, building↔building steps where pads can't co-level. Visuals:
+  `/tmp/viz_violations_png.py` (inline), `/tmp/viz_violations_kml.py` (Google Earth),
+  `/tmp/probe_buildings.py` (bowl check), `/tmp/probe_spine_profile.py` (DEPRECATED —
+  use grade_graph_validate, not a parallel metric).
+
+## (historical — the original spine-climb implementation note, superseded by §4b)
+### ►► PRIOR PLAN: IMPLEMENT SPINE-CARRIES-CLIMB ◄◄
 **The default build is ON but NOT usable as-is (user): it BOWLS the buildings.**
 The connecting solve hits within=0 by locking buildings on the CONNECTING band,
 which seats them ~5 m below DEM (building5 707.7 vs DEM 713). **A within=0 reached
