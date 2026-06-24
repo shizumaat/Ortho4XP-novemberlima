@@ -9703,8 +9703,8 @@ def _route_thresholds(layout, elev, bucket_to_idx):
     return [(tx, ty, _thr_elev(tx, ty)) for (tx, ty) in thr_m]
 
 
-def _spine_climb_seats(layout, nodes, elev, dem_elev, route_lo, route_hi
-                       ) -> dict:
+def _spine_climb_seats(layout, nodes, elev, dem_elev, route_lo, route_hi,
+                       pinned=None) -> dict:
     """The SPINE climbing profile (docs/single_grade_graph.md §2): the value the
     route graph DETERMINES for each taxi-centerline vertex by climbing at the
     per-letter cap along the route, within the existing runway-reach feasibility
@@ -9718,7 +9718,15 @@ def _spine_climb_seats(layout, nodes, elev, dem_elev, route_lo, route_hi
     ONE node), smoothed by projected Gauss-Seidel toward closest-to-DEM within
     ``[route_lo, route_hi]`` ∩ the neighbour cap slabs.  Returns
     ``{node_idx: level}`` for the spine vertices, to be LOCKED so the apron body
-    grades off them without dragging them flat."""
+    grades off them without dragging them flat.
+
+    ``pinned`` (node idx -> elevation): spine vertices that COINCIDE with a
+    sloping taxiway-rect corner are held at the rect's solved elevation (the
+    taxiway IS the spine's continuation — the spine must grade INTO the adjacent
+    corridor, plan §2/§5).  Without this the route-band profile diverges from the
+    rect, and the post-solve rect-coupling reconcile snaps the rect-side spine
+    node back to the rect while leaving its neighbour low → a step."""
+    pinned = pinned or {}
     n = len(nodes)
     INF = float("inf")
     from shapely.strtree import STRtree
@@ -9783,11 +9791,16 @@ def _spine_climb_seats(layout, nodes, elev, dem_elev, route_lo, route_hi
 
     seats: dict = {}
     for i in spine_nodes:
+        if i in pinned:
+            seats[i] = pinned[i]          # held at the taxiway-rect elevation
+            continue
         lo, hi = _lo(i), _hi(i)
         de = dem_elev[i] if i < n and dem_elev[i] is not None else elev[i]
         seats[i] = (0.5 * (lo + hi) if lo > hi else min(max(de, lo), hi))
 
-    order = sorted(spine_nodes)
+    # the rest of the spine grades toward the rect-pinned ends (boundary nodes
+    # are never updated, so the climbing profile is continuous with the rects)
+    order = sorted(i for i in spine_nodes if i not in pinned)
     for _it in range(300):
         moved = 0.0
         for i in order:

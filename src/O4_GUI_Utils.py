@@ -377,6 +377,12 @@ class Ortho4XP_GUI(tk.Tk):
             f = open(FNAMES.resource_path(".last_gui_params.txt"), "r")
             (lat, lon, default_website, default_zl) = f.readline().split()
             custom_build_dir = f.readline().strip()
+            # Validate lat/lon are integer tiles BEFORE setting them — a corrupt
+            # .last_gui_params.txt (e.g. a malformed "9-136" lon) would otherwise
+            # set the StringVars and crash the GUI at load_tile_cfg's int() below
+            # (no recovery path).  A parse failure here falls through to defaults.
+            int(lat)
+            int(lon)
             self.lat.set(lat)
             self.lon.set(lon)
             self.default_website.set(default_website)

@@ -66,6 +66,11 @@ def spine_carries_climb_solve(
             continue
         elev[i] = lv
         locked[i] = lv
+        # Mark the seat HARD so the post-solve passes that respect base_hard
+        # (notably _reconcile_level_coupling, which snaps a rect flat-end group
+        # to the rect plane) do not move the locked spine/building back —
+        # instead the rect corner conforms to its centerline spine.
+        base_hard[i] = True
 
     def _hard(k):
         return (k >= n or base_hard[k] or k in hard_extra or k in locked)
