@@ -35,7 +35,8 @@ from shapely.ops import nearest_points, unary_union
 
 from ..canonical_points import CanonicalPointRegistry
 from ..config import (
-    MIN_SEGMENT_LEN_M, RECT_SQUARE_ENDS, RECT_END_SQUARE_TOL_M)
+    MIN_SEGMENT_LEN_M, RECT_SQUARE_ENDS, RECT_END_SQUARE_TOL_M,
+    taxi_ref_is_sub_index)
 from ..geom_safe import min_rotated_rect
 from ..layout import (
     ROLE_CROSS_CONNECTOR,
@@ -250,7 +251,7 @@ def _build_taxi_rects(
         # discarded and the junction perimeter draws a 100+ m
         # straight edge across the diagonal pavement.
         if ((rect is None or rect.is_empty)
-                and ref and any(c.isdigit() for c in ref)
+                and ref and taxi_ref_is_sub_index(ref)
                 and rwy_centerlines):
             db_axis = _axis_to_nearest_rwy_db(
                 trimmed, rwy_centerlines)
@@ -399,7 +400,8 @@ def _build_taxi_rects(
         # than typical apron-edge fragments, shorter than any real
         # named-taxi stub at SPJC / SPLP / CYXY / KBNA / HECA.
         from ..layout import ROLE_STUB
-        if (not ref and role == ROLE_STUB
+        from ..config import is_unnamed_taxi_ref
+        if (is_unnamed_taxi_ref(ref) and role == ROLE_STUB
                 and trimmed.length < 150.0):
             continue
         emitted.append((rect, trimmed, role, ref))
@@ -431,7 +433,7 @@ def _build_taxi_rects(
             # (s79) SVC digits are run indices, not stub sub-refs — a
             # road run legitimately emits several rects along its bends.
             return False
-        if any(c.isdigit() for c in ref_str):
+        if taxi_ref_is_sub_index(ref_str):
             return True
         # Letter-only: dedup when classified as stub (B, C, E, G, D).
         if role_str == ROLE_STUB:
@@ -1648,7 +1650,7 @@ def _square_taxi_rect_ends(
     out: list[tuple[Polygon, LineString, str, str]] = []
     for rect, axis, role, ref in taxi_rects:
         if (role in _SLOPING
-                and ref and not any(c.isdigit() for c in ref)
+                and ref and not taxi_ref_is_sub_index(ref)
                 and rect is not None and not rect.is_empty
                 and rect.geom_type == "Polygon"
                 and axis is not None and not axis.is_empty):
@@ -1963,7 +1965,7 @@ def _classify_role(axis: LineString, width: float,
     # PRIMARY_PARALLEL.  The diagonal-parent check above already
     # caught curving sub-segments whose PARENT way is diagonal;
     # this gate only fires on standalone near-parallel sub-refs.
-    if ref and any(c.isdigit() for c in ref) and db >= 15.0:
+    if ref and taxi_ref_is_sub_index(ref) and db >= 15.0:
         return ROLE_STUB
 
     # Per user 2026-05-05: parallel rects (db < 20°) that pass

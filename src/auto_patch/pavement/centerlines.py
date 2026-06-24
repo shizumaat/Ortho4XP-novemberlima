@@ -29,7 +29,7 @@ from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, MultiLineString, Point, Polygon
 from shapely.ops import linemerge
 
-from ..config import MIN_SEGMENT_LEN_M
+from ..config import MIN_SEGMENT_LEN_M, taxi_ref_is_sub_index
 
 # Narrow exception tuple for shapely / numeric-geometry failure
 # modes.  Programming errors propagate so they surface immediately.
@@ -164,7 +164,7 @@ def split_merged_centerline(
     # ``MAX_INTERIOR_BEND_DEG``.  L's max bend is 23° → fails;
     # B/C/E/G/CYXY-E's max wobble is ~5° → still passes.
     MAX_INTERIOR_BEND_DEG = 15.0
-    has_digit = bool(ref) and any(c.isdigit() for c in ref)
+    has_digit = bool(ref) and taxi_ref_is_sub_index(ref)
     if not has_digit:
         path_len = ls.length
         sc = list(simp.coords)
@@ -268,7 +268,7 @@ def split_merged_centerline(
     # bends far more conservatively so the straight run
     # between two curves can survive as its own segment.
     cluster_m = BEND_CLUSTER_M
-    if ref and any(c.isdigit() for c in ref):
+    if ref and taxi_ref_is_sub_index(ref):
         cluster_m = 30.0
     clusters: list[list[int]] = []
     for bi in candidate_bends:
@@ -438,7 +438,7 @@ def _extract_osm_taxi_centerlines(
         # bridging their gaps creates fake segments through
         # non-pavement and confuses downstream width-profile
         # narrow-corridor detection.
-        is_sub_ref = ref and any(c.isdigit() for c in ref)
+        is_sub_ref = ref and taxi_ref_is_sub_index(ref)
         if ref and len(merged_lines) > 1 and not is_sub_ref:
             merged_lines = _bridge_same_ref_polylines(merged_lines)
 
@@ -761,7 +761,7 @@ def _sub_ref_narrow_corridor(
     sub_ref_lines: dict[str, list[LineString]] = defaultdict(list)
     result: list[tuple[LineString, str]] = []
     for ls, ref in centerlines:
-        if ref and any(c.isdigit() for c in ref):
+        if ref and taxi_ref_is_sub_index(ref):
             sub_ref_lines[ref].append(ls)
         else:
             result.append((ls, ref))

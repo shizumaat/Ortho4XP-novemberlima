@@ -26,8 +26,9 @@ could be above or below it.  Buildings NOT touching airside pavement are
 omitted (the caller leaves them at their DEM).
 
 This routes on the SAME `TaxiRouteGraph.edge_cap` the reach-bands use, so a
-narrow code-A/B arm contributes 3 % only when its size is known — which for
-unnamed arms requires the P3a `UNNAMED_TAXI_SIZE` recovery to be on.
+narrow code-A/B arm contributes 3 %.  Unnamed routes carry their real apt.dat
+size via the synthetic ``~U`` name (apt_dat_reader.unnamed_edge_component_names),
+so the per-letter cap is correct without any geometry recovery.
 """
 
 from __future__ import annotations

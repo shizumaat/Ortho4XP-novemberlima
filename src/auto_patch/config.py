@@ -1434,6 +1434,31 @@ def taxiway_code_letter(width_m: float) -> str:
 TAXI_GRADE_BY_WIDTH = _os.environ.get("O4_TAXI_GRADE_BY_WIDTH", "1") == "1"
 # ICAO code letters that earn the steeper narrow-taxiway grade cap.
 NARROW_TAXI_CODE_LETTERS = frozenset({"A", "B"})
+
+# Prefix for the SYNTHETIC name we assign to a taxi route that has no apt.dat
+# designator, so its apt.dat ICAO size code travels WITH it (by name) instead of
+# being dropped when grouping edges by name (apt_dat_reader._unnamed_edge_
+# component_names).  ``~U1``, ``~U2``, … — one per connected component of unnamed
+# taxiway edges.  These ARE real, sized taxi routes (not diagonal sub-stubs), so
+# the geometry heuristics that special-case a numeric SUB-ref (``A1``, ``B2`` —
+# diagonal connectors) must exclude this prefix — see ``taxi_ref_is_sub_index``.
+SYNTH_TAXI_NAME_PREFIX = "~U"
+
+
+def is_unnamed_taxi_ref(ref) -> bool:
+    """True iff ``ref`` carries no real apt.dat taxiway designator — an empty
+    ref OR a synthetic ``~U`` serial we assigned to an unnamed route."""
+    return (not ref) or str(ref).startswith(SYNTH_TAXI_NAME_PREFIX)
+
+
+def taxi_ref_is_sub_index(ref) -> bool:
+    """True iff ``ref`` is a numeric SUB-reference (``A1``, ``B2`` — a diagonal
+    connector / rapid-exit off a main taxiway), which several geometry passes
+    handle more conservatively than a main taxiway.  A synthetic ``~U`` serial
+    contains a digit but is a MAIN route, so it is explicitly excluded."""
+    if not ref or str(ref).startswith(SYNTH_TAXI_NAME_PREFIX):
+        return False
+    return any(c.isdigit() for c in str(ref))
 # Shape roles the size-dependent cap applies to: the taxiway-family rects.
 # Junctions, aprons and runways are intentionally excluded — a junction is
 # the moving network the taxiways flow THROUGH (kept at the tighter rate),
@@ -1575,30 +1600,12 @@ FIELD_ROUTE_BAND_BY_WIDTH = _os.environ.get(
 VISIBLE_CHORD_CONNECT = _os.environ.get(
     "O4_VISIBLE_CHORD_CONNECT", "0") == "1"
 
-# (20260622) UNNAMED TAXI SIZE — plan P3a (docs §9, THE unlock for the CYXY
-# "bowl").  apt.dat row-1202 taxi edges carry an ICAO size code ("taxiway_A"…
-# "_F") even when they have no NAME, but `apt_dat_reader.taxi_size_letters` is
-# keyed by name and SKIPS unnamed edges — so the unnamed code-A/B connector
-# "arms" (e.g. CYXY's 9 gate arms from taxiway G up to the 718 m terminal) lose
-# their 3 % cap and default to the uniform 1.5 %.  The runway-anchor feasibility
-# band to the terminal is then computed at half the legal climb, and the building
-# pads are clamped ~9 m below their true DEM (the bowl).  When ON, an unnamed
-# centerline that runs ALONG a narrow code-A/B apt.dat edge is tagged with a
-# synthetic ref (``~A``/``~B``) registered in ``apt_taxi_letters``, so every
-# ref→cap consumer (TaxiRouteGraph.edge_cap, the field narrow_lines, within-shape)
-# sees the real 3 %.  Only narrow (A/B) unnamed arms are tagged; unnamed C–F stay
-# uniform (no change).  Gate off → no rename → byte-identical.
-# ★ DEFAULT OFF (2026-06-22): VERIFIED the unlock — tags 19 CYXY arms, widens the
-# corridor band, un-bowls buildings DIRECTLY served by a narrow arm (building5
-# 705.8→713.2=DEM, building10→DEM).  But the MAIN terminal (building1/3/6) is
-# fronted by a WIDE APRON, not the arm, so it stays tied to the bowled apron until
-# P4 places it by route-feasibility + P5 conforms the apron up.  Standalone it
-# regresses (CYXY within 0→8) and shifts the good airports' arm caps — so, like
-# FIELD_ROUTE_BAND_BY_WIDTH (P3), it is banked OFF and flips ON with P4+P5.
-# Default ON (2026-06-23): part of the single-grade-graph stack — recovers the
-# ICAO size of unnamed taxiway_A/B arms so the route bands + grade graph carry the
-# real 3% narrow cap.  O4_UNNAMED_TAXI_SIZE=0 restores the uniform-1.5% behaviour.
-UNNAMED_TAXI_SIZE = _os.environ.get("O4_UNNAMED_TAXI_SIZE", "1") == "1"
+# (UNNAMED TAXI SIZE — formerly plan P3a, now removed.)  Unnamed taxi routes
+# carry their real apt.dat ICAO size class directly: apt_dat_reader.unnamed_edge_
+# component_names assigns each unnamed route a synthetic ``~U`` name (one per
+# connected component), and taxi_size_letters keys it to the row-1202 size code,
+# so every ref→cap consumer sees the true per-letter cap with no geometry
+# recovery.  This subsumes the old A/B-only ~A/~B recovery hack.
 
 # (20260622) FIELD-TARGET CONFORMANCE — plan P4/P5 (docs §9): make the final
 # within-shape enforce implement the user's stated objective — *minimise

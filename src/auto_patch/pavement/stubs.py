@@ -20,6 +20,7 @@ from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 
+from ..config import taxi_ref_is_sub_index
 from ..layout import ROLE_STUB
 
 # A taxi rect entry: (footprint polygon, centerline axis, role, ref).
@@ -122,7 +123,7 @@ def _emit_primary_parallel_runway_stubs(
         for ls, name in apt_centerlines:
             # Sub-refs (letter+digit) are short connector spurs —
             # never the long primary parallel we're hunting for.
-            if name and any(c.isdigit() for c in name):
+            if taxi_ref_is_sub_index(name):
                 continue
             by_ref.setdefault(name, []).append(ls)
     else:
@@ -137,7 +138,7 @@ def _emit_primary_parallel_runway_stubs(
             # at the end (UNREFED_MIN_LEN_M for unrefed; the
             # by-ref endpoint test for everything else) keeps
             # only the long ones that touch the runway.
-            if ref and any(c.isdigit() for c in ref):
+            if taxi_ref_is_sub_index(ref):
                 continue
             pts = []
             for n in nds:

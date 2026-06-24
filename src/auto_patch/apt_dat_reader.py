@@ -1415,6 +1415,67 @@ def taxi_junction_points(
     return out
 
 
+def _is_sized_taxiway_edge(e) -> bool:
+    """True iff edge ``e`` is a row-1202 taxiway edge carrying a real ICAO width
+    class (``taxiway_A``…``_F``) — not a runway-typed taxi path, not a service
+    truck route."""
+    if not e.kind.startswith("taxiway_"):
+        return False
+    return e.kind.split("_")[-1].upper() in ("A", "B", "C", "D", "E", "F")
+
+
+def unnamed_edge_component_names(airport: Airport) -> dict[int, str]:
+    """Assign a SYNTHETIC, UNIQUE name to every UNNAMED taxiway route so its
+    apt.dat ICAO size code travels WITH it by name (instead of being dropped when
+    :func:`taxi_centerlines` groups edges by name).
+
+    Returns ``{edge_index -> "~U<k>"}`` for each unnamed sized taxiway edge,
+    where edges that share a node are one connected component (a multi-segment
+    unnamed arm = ONE route = ONE name).  Components are ordered deterministically
+    by the smallest taxi-node id they touch, so the serial is stable across runs.
+
+    Edges sharing a node always land in the same component, so this NEVER turns
+    a continuous unnamed run into a multi-name junction — junction detection in
+    :func:`taxi_centerlines` is preserved (two edges at a node ⇒ same ~U name ⇒
+    not a junction-by-name, exactly as the old empty-name grouping behaved)."""
+    from .config import SYNTH_TAXI_NAME_PREFIX
+    parent: dict[int, int] = {}
+
+    def find(a: int) -> int:
+        parent.setdefault(a, a)
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[min(ra, rb)] = min(ra, rb)
+            parent[max(ra, rb)] = min(ra, rb)
+
+    unnamed_idx: list[int] = []
+    for i, e in enumerate(airport.taxi_edges):
+        if e.name or not _is_sized_taxiway_edge(e):
+            continue
+        union(e.node_from, e.node_to)
+        unnamed_idx.append(i)
+    if not unnamed_idx:
+        return {}
+    # component root -> smallest node id seen (deterministic ordering key)
+    comp_min: dict[int, int] = {}
+    for i in unnamed_idx:
+        e = airport.taxi_edges[i]
+        r = find(e.node_from)
+        for nid in (e.node_from, e.node_to):
+            if r not in comp_min or nid < comp_min[r]:
+                comp_min[r] = nid
+    order = sorted(comp_min, key=lambda r: comp_min[r])
+    serial = {r: f"{SYNTH_TAXI_NAME_PREFIX}{k + 1}" for k, r in enumerate(order)}
+    return {i: serial[find(airport.taxi_edges[i].node_from)]
+            for i in unnamed_idx}
+
+
 def taxi_size_letters(airport: Airport) -> dict[str, str]:
     """Map each taxiway NAME to its ICAO design code LETTER ("A".."F").
 
@@ -1431,15 +1492,20 @@ def taxi_size_letters(airport: Airport) -> dict[str, str]:
     (e.g. when the graph came from OSM).
     """
     letters: dict[str, str] = {}
-    for e in airport.taxi_edges:
-        if not e.name or not e.kind.startswith("taxiway_"):
+    # Unnamed routes get a synthetic ~U name so their size travels by name too.
+    synth = unnamed_edge_component_names(airport)
+    for i, e in enumerate(airport.taxi_edges):
+        if not e.kind.startswith("taxiway_"):
             continue
         lt = e.kind.split("_")[-1].upper()
         if lt not in ("A", "B", "C", "D", "E", "F"):
             continue
-        prev = letters.get(e.name)
+        name = e.name or synth.get(i)
+        if not name:
+            continue
+        prev = letters.get(name)
         if prev is None or lt > prev:
-            letters[e.name] = lt
+            letters[name] = lt
     return letters
 
 
@@ -1630,10 +1696,14 @@ def taxi_centerlines(
         return []
 
     # ── Step 1: group taxi edges by name + identify junction nodes ──
+    # Unnamed sized taxiway edges get a synthetic ~U name (one per connected
+    # component) so their apt.dat size code travels by name and each unnamed
+    # route is a tracked, distinct centerline rather than all collapsing into "".
+    synth_names = unnamed_edge_component_names(airport)
     by_name: dict[str, list[LineString]] = {}
     node_names: dict[int, set[str]] = {}
     runway_endpoint_node_ids: set[int] = set()
-    for edge in edges:
+    for ei, edge in enumerate(edges):
         if edge.kind == "runway":
             # Runway-typed edges don't contribute pavement (the
             # runway emit covers that footprint).  But every node
@@ -1658,9 +1728,10 @@ def taxi_centerlines(
             seg = LineString([(ax, ay), (bx, by)])
         except (ValueError, TypeError):
             continue
-        by_name.setdefault(edge.name, []).append(seg)
-        node_names.setdefault(edge.node_from, set()).add(edge.name)
-        node_names.setdefault(edge.node_to, set()).add(edge.name)
+        ename = edge.name or synth_names.get(ei, "")
+        by_name.setdefault(ename, []).append(seg)
+        node_names.setdefault(edge.node_from, set()).add(ename)
+        node_names.setdefault(edge.node_to, set()).add(ename)
 
     # Junction = node referenced by ≥ 2 distinct taxi names OR by
     # any runway-typed edge.  Convert to a set of metric-space
