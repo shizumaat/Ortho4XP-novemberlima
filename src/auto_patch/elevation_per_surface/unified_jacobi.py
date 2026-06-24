@@ -9714,7 +9714,62 @@ def _runway_edge_pts(layout, elev, bucket_to_idx, step_m=10.0):
                 f = t / n_sub
                 rwy_pts.append((x0 + f * (x1 - x0), y0 + f * (y1 - y0),
                                 e0 + f * (e1 - e0)))
+    # THRESHOLD MARKERS (user 2026-06-23): a runway whose END is absorbed into an
+    # apron (CYXY 02) leaves the CIFP threshold ~200 m beyond the built pavement.
+    # The runway is solved across its WHOLE profile, so extrapolate that profile
+    # to the marker and anchor the route band THERE — otherwise a node 63 m from
+    # the threshold measures the ~200 m route to the pavement and floats too high.
+    rwy_pts.extend(_threshold_anchors(layout, elev, bucket_to_idx))
     return rwy_pts
+
+
+def _threshold_anchors(layout, elev, bucket_to_idx):
+    """``[(x, y, elev)]`` for each runway threshold MARKER, the runway profile
+    extrapolated to the marker along the runway axis (linear least-squares fit of
+    the built pavement's per-vertex elevations vs axis position).  For a runway
+    whose end is built, this ≈ the pavement-end elevation (redundant, harmless);
+    for an absorbed end it recovers the CIFP threshold elevation at the marker."""
+    thr = getattr(layout, "runway_thresholds", None) or []
+    cps = layout.canonical_points
+    rwy_v: list = []
+    for s in layout.shapes:
+        if (s.role == ROLE_RUNWAY and s.polygon is not None
+                and not s.polygon.is_empty):
+            ring = _open_ring(list(s.polygon.exterior.coords))
+            for (x, y) in ring:
+                i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+                if i is not None:
+                    rwy_v.append((x, y, elev[i]))
+    out: list = []
+    for k in range(0, len(thr) - 1, 2):
+        ax0, ay0 = thr[k]
+        bx0, by0 = thr[k + 1]
+        dx, dy = bx0 - ax0, by0 - ay0
+        L = math.hypot(dx, dy)
+        if L < 1.0:
+            continue
+        ux, uy = dx / L, dy / L
+        pts = []                         # (pos_along_axis, elev) on this runway
+        for (x, y, e) in rwy_v:
+            perp = abs((x - ax0) * uy - (y - ay0) * ux)
+            pos = (x - ax0) * ux + (y - ay0) * uy
+            if perp < 60.0 and -60.0 <= pos <= L + 60.0:
+                pts.append((pos, e))
+        if len(pts) < 2:
+            continue
+        nP = len(pts)
+        sp = sum(p for p, _ in pts)
+        se = sum(e for _, e in pts)
+        spp = sum(p * p for p, _ in pts)
+        spe = sum(p * e for p, e in pts)
+        den = nP * spp - sp * sp
+        if abs(den) < 1e-6:
+            continue
+        b = (nP * spe - sp * se) / den
+        a = (se - b * sp) / nP
+        out.append((ax0, ay0, a))                  # marker A
+        out.append((bx0, by0, a + b * L))          # marker B
+    return out
 
 
 def _spine_climb_seats(layout, nodes, elev, dem_elev, band,
