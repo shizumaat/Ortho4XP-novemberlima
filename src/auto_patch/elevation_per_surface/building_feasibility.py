@@ -46,17 +46,14 @@ from auto_patch.layout import (
 __all__ = ["building_feasible_levels", "reach_band_sampler",
            "runway_edge_anchors"]
 
-# A runway ring vertex counts as a TAXI CONNECTION (a real route entry onto the
-# runway) only when a centerline-graph node sits within this distance of it —
-# excludes mid-runway vertices with no taxiway, whose nearest graph node is a
-# far straight hop (the coarse-graph snapping that over-tightened the spine band).
-# 25 m (was 20): at an ABSORBED runway end (the runway sits under apron concrete)
-# the entering taxi centerline's nearest coarse-graph vertex stops a few metres
-# beyond 20 m, so the contact was missed and the corridor back to it was credited
-# via a far detour anchor → the spine seated a >cap ramp (CYXY's 16 ~U11/A spine
-# violations).  25 m captures the real contact without anchoring spurious
-# mid-runway vertices (verified: b16 stays 708, no building bowled).
-_CONNECT_TOL_M = 25.0
+# A taxi centerline ENDPOINT counts as a runway CONTACT (a real route entry onto
+# the runway) when it lies within this distance of the runway POLYGON EDGE (or
+# inside the polygon).  Measured against the runway EDGE, NOT its sparse ring
+# VERTICES (user 2026-06-24: EVERY taxiway that touches the runway must anchor —
+# a taxiway meeting a long runway edge mid-span is far from any ring VERTEX but
+# ~0 from the EDGE; the old vertex-distance test missed 37/51 HECA contacts →
+# detour-credited corridors → spine ramps).
+_CONTACT_EDGE_TOL_M = 12.0
 
 # Pavement a building must touch to count as airside-served (else → DEM).
 _AIRSIDE_ROLES = frozenset({
@@ -126,10 +123,14 @@ def reach_band_sampler(layout, runway_pts_xyz):
     point may sit at while reachable within grade from EVERY runway it
     taxi-connects to.
 
-    Anchors = runway-EDGE taxi connections (a centerline-graph node within
-    ``_CONNECT_TOL_M`` of a runway, anchored at the runway elevation there);
-    measured along the taxi route with FOOT edge projection; intersected over
-    ALL connections (the most-deviating route binds: ``ceiling =
+    Anchors = taxiway↔runway CONTACTS — EVERY taxi centerline that touches a
+    runway provides one (user 2026-06-24).  A contact is a centerline vertex
+    INSIDE a runway polygon, or a centerline ENDPOINT within
+    ``_CONTACT_EDGE_TOL_M`` of a runway EDGE; anchored at the runway elevation
+    there.  Measured against the runway POLYGON (not its sparse ring vertices, a
+    test that missed taxiways meeting a long edge mid-span).  Each contact's
+    reach is measured along the taxi route with FOOT edge projection and
+    intersected over ALL contacts (the most-deviating route binds: ``ceiling =
     min(elev_a + budget_a)``).  The building/spine entry to the route uses a
     VISIBLE CHORD (``VISIBLE_CHORD_CONNECT``) — the nearest centerline reachable
     without leaving pavement, not the straight-line nearest."""
@@ -157,19 +158,47 @@ def reach_band_sampler(layout, runway_pts_xyz):
                     heapq.heappush(pq, (nd, v))
         return dist
 
-    # runway-edge taxi connections: each graph node near a runway edge, anchored
-    # at the runway elevation there (one cap-Dijkstra per connection, amortised).
+    # taxiway↔runway CONTACTS: every centerline vertex INSIDE a runway polygon, or
+    # an ENDPOINT within _CONTACT_EDGE_TOL_M of a runway EDGE.  Anchor that
+    # contact's graph node at the runway surface elevation there (one cap-Dijkstra
+    # per contact, amortised).  Edge/inside distance — NOT runway-ring-vertex
+    # distance — so a taxiway meeting a long runway edge mid-span still anchors.
+    from auto_patch.layout import ROLE_RUNWAY as _ROLE_RWY
+    from shapely.ops import unary_union as _uu
+    _rpolys = [s.polygon for s in layout.shapes
+               if s.role == _ROLE_RWY and s.polygon is not None
+               and not s.polygon.is_empty]
+    _rbnd = _uu([p.boundary for p in _rpolys]) if _rpolys else None
+    _runi = _uu(_rpolys) if _rpolys else None
+
+    def _rwy_elev_at(px, py):
+        return min(runway_pts_xyz,
+                   key=lambda v: (v[0] - px) ** 2 + (v[1] - py) ** 2)[2]
+
     anchors: List[Tuple[float, dict]] = []
-    for k, (gx, gy) in G.coord.items():
-        best_e = None
-        best_d = _CONNECT_TOL_M
-        for (rx, ry, re) in runway_pts_xyz:
-            d = math.hypot(gx - rx, gy - ry)
-            if d < best_d:
-                best_d = d
-                best_e = re
-        if best_e is not None:
-            anchors.append((best_e, _capdist_from(k)))
+    if _rbnd is not None:
+        _seen_anchor: set = set()
+        for entry in (getattr(layout, "apt_taxi_centerlines", None) or []):
+            ln = entry[0] if isinstance(entry, (tuple, list)) else entry
+            ref = entry[1] if (isinstance(entry, (tuple, list))
+                               and len(entry) > 1) else None
+            if (ln is None or ln.is_empty
+                    or str(ref or "").upper().startswith("SVC")):
+                continue
+            coords = list(ln.coords)
+            n_c = len(coords)
+            for vi, (vx, vy) in enumerate(coords):
+                p = Point(vx, vy)
+                is_end = (vi == 0 or vi == n_c - 1)
+                if not (_runi.contains(p)
+                        or (is_end
+                            and _rbnd.distance(p) <= _CONTACT_EDGE_TOL_M)):
+                    continue
+                k, _ = G.nearest_key(vx, vy)
+                if k is None or k in _seen_anchor:
+                    continue
+                _seen_anchor.add(k)
+                anchors.append((_rwy_elev_at(vx, vy), _capdist_from(k)))
     if not anchors:
         return lambda x, y: None
 

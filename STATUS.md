@@ -1,12 +1,13 @@
-# STATUS — handover (2026-06-24 PM) — SPINE=0 LANDED; NEXT = BODY
+# STATUS — handover (2026-06-24 PM) — SPINE=0 ALL AIRPORTS; NEXT = BODY
 
 Branch `dev`. Committed: `0e8bde9` (~U taxi naming), `02ac783` (single-graph spine
-fix). ⚠ Build/probe the working model with
-`O4_ABSORB_RUNWAY_IN_APRON=0 O4_VISIBLE_CHORD_CONNECT=1` and `PYTHONHASHSEED=0`
-(spine=0 also holds under plain defaults).
+fix). UNCOMMITTED: the contact-anchor model (committing now). ⚠ Build/probe the
+working model with `O4_ABSORB_RUNWAY_IN_APRON=0 O4_VISIBLE_CHORD_CONNECT=1` and
+`PYTHONHASHSEED=0` (spine=0 also holds under plain defaults).
 
-## ►►► DONE THIS SESSION ◄◄◄
-**CYXY taxi SPINE violations 16 → 0** (the single-graph goal), no building bowled.
+## ►►► DONE THIS SESSION — SPINE=0 AT ALL TEST AIRPORTS ◄◄◄
+**grade_graph_validate taxi-spine violations: CYXY 16→0, HECA 8→0, SPJC 0, SPLP 0.**
+No building bowled (CYXY b16=708.7 working / 712 default ≈DEM, b19≈700).
 
 1. **Unnamed taxi routes carry a unique name + real ICAO size at SOURCE**
    (`0e8bde9`). `apt_dat_reader.unnamed_edge_component_names` assigns each unnamed
@@ -15,37 +16,40 @@ fix). ⚠ Build/probe the working model with
    `UNNAMED_TAXI_SIZE` gate. config helpers `SYNTH_TAXI_NAME_PREFIX`,
    `is_unnamed_taxi_ref`, `taxi_ref_is_sub_index` (a `~U` is a MAIN taxiway, not a
    digit sub-stub); digit sub-ref checks swapped to the predicate; short-unnamed-
-   stub drop kept for `~U` (no degenerate slivers). The CYXY violation corridor is
-   now `~U11` (size D, 1.5%) not anonymous `''`.
-2. **Single graph — the 16 spine violations** (`02ac783`). Buildings + spine
-   ALREADY share ONE graph (`building_feasibility.reach_band_sampler`). The viols
-   were SEATER-CHOSE-BADLY: bands wide & cap-compatible but a ~3.3% ramp. ROOT
-   (probes `/tmp/probe_band_spine.py`, `/tmp/probe_routegraph.py`): an ABSORBED
-   runway end's entering centerline stops ~23 m from the runway — just beyond the
-   20 m anchor tol — so its contact was not a reach anchor and the corridor back to
-   it was credited via a 217 m DETOUR anchor (ceiling ~699 not ~696) → the seater
-   pinned the bottom to the 694 runway and let the top rise → ramp. FIX = ONE LINE
-   `_CONNECT_TOL_M` 20→25. CYXY spine 16→0, **b16=708.7** ✓ (working model) / 712
-   (default ≈DEM), b19≈700, NO bowl. SPJC spine 0 (within identical), HECA spine
-   8→8. Also `band=` param on `building_feasible_levels` (pass the one band).
-   Test `tests/test_pavement_grade.py::test_cyxy_spine_zero_no_bowl` (spine 0 +
-   b16≥706 + b19≥698) PASSES.
+   stub drop kept for `~U`. CYXY violation corridor is now `~U11` (size D, 1.5%).
+2. **Single graph — buildings + spine on ONE band** (`02ac783` + uncommitted
+   contact-anchor). They share `building_feasibility.reach_band_sampler`; the spine
+   viols were SEATER-CHOSE-BADLY (bands wide & cap-compatible but a ~3.3% ramp).
+   ROOT: a taxiway↔runway CONTACT that the reach band failed to ANCHOR → the
+   corridor back to it was credited via a far DETOUR anchor (ceiling too high) →
+   the seater pinned the bottom to the runway and let the top rise → ramp.
+   **THE PRINCIPLED FIX (user 2026-06-24): EVERY taxiway that touches the runway
+   must provide an anchor.** Old anchor test = centerline-vertex within 20 m of a
+   runway RING VERTEX — both sparse, so a taxiway meeting a long runway edge
+   mid-span was missed (HECA: only 14 of 51 real contacts anchored). NEW
+   (`reach_band_sampler`): a contact = a centerline vertex INSIDE a runway polygon
+   OR a centerline ENDPOINT within `_CONTACT_EDGE_TOL_M`=12 m of the runway EDGE
+   (measured vs the runway POLYGON, not its ring vertices); anchored at the runway
+   surface elevation there. HECA contacts 14→51 → spine 8→0; CYXY b16 stays 708.7,
+   no bowl. (Superseded the `_CONNECT_TOL_M` 20→25 band-aid.) Also `band=` param on
+   `building_feasible_levels` (pass the one band).
+   Test `test_cyxy_spine_zero_no_bowl` (spine 0 + b16≥706 + b19≥698).
    ⚠ DEAD END (reverted): a DENSE spine-node graph drove spine→0 but BOWLED b16 to
    702 (set-back buildings sample badly off dense nodes + spurious near-runway
-   anchors). The coarse graph + tol=25 is the minimal correct fix.
+   anchors).
 
 ## ►►► NEXT TASK: THE BODY (apron/junction) ◄◄◄
-Spine is clean; the user said review the BODY violations next. grade_graph_validate
-BODY (apron/junction within-shape) on CYXY ≈ 1140 (working model) / 1076 (default);
-SPJC 1027; HECA ~18k (canyon). These are aprons/junctions that can't grade ≤1% from
-their edge up to the high spine/buildings. User model (memory `apron_spine_grade_model`):
-apron body grades 1% from edges to the centerline SPINE; where a wide apron can't
-reach, spine-slice it / step pads with the apron following / explicit transition —
-NEVER a steep apron interior. `tools/check_grade.py` `test_pavement_grade[*]` is RED
-by design (WITHIN_SHAPE_CAP=0; 4/4 airports failed at baseline 623820c too — NOT a
-regression). Probe: `/tmp/probe_body.py <ICAO>` (body by role + severity).
-Then: retire redundant validators (`_warn_terminal_chord_law`, route-band WARN,
-network-profile field) once the body is on the one graph.
+Spine is clean at all airports → now solve the BODY (user: "once we have spine 0 at
+all test airports we should be able to solve the remaining body issues").
+grade_graph_validate BODY (apron/junction within-shape, working model): CYXY ~1252,
+SPJC ~1034, HECA ~17.2k (canyon), SPLP ~183. These are aprons/junctions that can't
+grade ≤1% from their edge up to the high spine/buildings. User model (memory
+`apron_spine_grade_model`): apron body grades 1% from edges to the centerline
+SPINE; where a wide apron can't reach, spine-slice it / step pads with the apron
+following / explicit transition — NEVER a steep apron interior. `tools/check_grade.py`
+`test_pavement_grade[*]` is RED by design (WITHIN_SHAPE_CAP=0; 4/4 failed at baseline
+623820c too — NOT a regression). Probe: `/tmp/probe_body.py <ICAO>` (body by role +
+severity). Then retire redundant validators once the body is on the one graph.
 
 ## ►► LANDED THIS SESSION (current tree; KEEP) ◄◄
 Working model = `O4_ABSORB_RUNWAY_IN_APRON=0 O4_VISIBLE_CHORD_CONNECT=1`. State:
