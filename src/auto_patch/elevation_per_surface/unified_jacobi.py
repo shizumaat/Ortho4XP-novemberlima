@@ -9677,21 +9677,43 @@ def _min_grade_network_solve(elev, shape_constraints, base_hard, nodes,
     return len(free)
 
 
-def _runway_edge_pts(layout, elev, bucket_to_idx):
-    """``[(x, y, elev)]`` EVERY runway ring vertex at its solved surface
-    elevation — the runway-EDGE anchor set for the shared route-feasibility band
-    (``building_feasibility.reach_band_sampler``).  The band measures the taxi
-    route to the nearest of these edges that a taxiway actually connects to (not
-    just the thresholds), intersected over all runways."""
+def _runway_edge_pts(layout, elev, bucket_to_idx, step_m=10.0):
+    """``[(x, y, elev)]`` runway-EDGE anchor points for the shared
+    route-feasibility band (``building_feasibility.reach_band_sampler``) —
+    DENSIFIED along the runway boundary (a point every ``step_m``, elevation
+    interpolated along the edge).  A taxiway connects to a runway at any point on
+    its EDGE — often MID-edge (the 02 threshold), far from a corner vertex — so
+    anchoring only on the corners makes the band miss the real near connection
+    and measure a long way round (the over-loose ceiling that let the 02→A2 spine
+    rise too steep, field item 2/3).  Measure to the runway EDGE, not its
+    corners."""
     cps = layout.canonical_points
     rwy_pts: list = []
     for s in layout.shapes:
-        if (s.role == ROLE_RUNWAY and s.polygon is not None
-                and not s.polygon.is_empty):
-            for (x, y) in _open_ring(list(s.polygon.exterior.coords)):
-                i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
-                if i is not None:
-                    rwy_pts.append((x, y, elev[i]))
+        if (s.role != ROLE_RUNWAY or s.polygon is None
+                or s.polygon.is_empty):
+            continue
+        ring = _open_ring(list(s.polygon.exterior.coords))
+        elevs = []
+        for (x, y) in ring:
+            i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+            elevs.append(elev[i] if i is not None else None)
+        m = len(ring)
+        for a in range(m):
+            b = (a + 1) % m
+            (x0, y0), (x1, y1) = ring[a], ring[b]
+            e0, e1 = elevs[a], elevs[b]
+            if e0 is None:
+                continue
+            if e1 is None:
+                rwy_pts.append((x0, y0, e0))
+                continue
+            seg = math.hypot(x1 - x0, y1 - y0)
+            n_sub = max(1, int(seg // step_m))
+            for t in range(n_sub):
+                f = t / n_sub
+                rwy_pts.append((x0 + f * (x1 - x0), y0 + f * (y1 - y0),
+                                e0 + f * (e1 - e0)))
     return rwy_pts
 
 
