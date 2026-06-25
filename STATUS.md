@@ -38,7 +38,15 @@ No building bowled (CYXY b16=708.7 working / 712 default ≈DEM, b19≈700).
    702 (set-back buildings sample badly off dense nodes + spurious near-runway
    anchors).
 
-## ►►► NEXT TASK: ONE PROFILE SOLVE (user spec, authoritative 2026-06-24 PM) ◄◄◄
+## ►►► NEXT TASK: ONE PROFILE SOLVE — full plan in `docs/one_profile_solve.md` ◄◄◄
+**Read `docs/one_profile_solve.md` first** — model + complete pipeline inventory
+(KEEP / BUILD-NEW / LEGACY-to-disconnect, with line numbers) + execution order.
+⚠ User rule: the new solve is the ONLY thing that may set elevations — DISCONNECT +
+mark-for-delete every legacy elevation-modifying pass (≈15, most default-ON today:
+phase1-cascade, directional-relief, taxi-corridor-profiles, enforce, the 3 polish
+passes, reconcile, _spine_climb_seats lock). Apron rule (user): with a building →
+grade from it via visibility ≤cap; no building → closest-to-DEM-feasible via its
+shortest taxi/visible route then grade to cap. Summary below:
 Spine is clean at all airports.  Investigating A2 (flat when it should climb to
 serve building16) exposed the real architecture gap + the user's full model.
 
