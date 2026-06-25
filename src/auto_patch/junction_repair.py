@@ -3286,11 +3286,18 @@ def _reclassify_runway_disconnected_to_groundside(
                and s.polygon is not None and not s.polygon.is_empty
                for s in layout.shapes):
         return 0
+    # AIRCRAFT-PAVEMENT connectivity only (user 2026-06-25): buildings and
+    # service roads do NOT count as a runway chain.  A building sitting on an
+    # apron, or a service road, is landside ACCESS — an apron reachable from the
+    # runway only THROUGH a building or a SVC shape is itself landside and belongs
+    # to groundside (CYXY apron-139: its only airside touch is a building + a
+    # service road).  So the chain graph excludes ROLE_BUILDING (service roads
+    # were already excluded).
     idxs = [i for i, s in enumerate(layout.shapes)
             if s.role in (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
                           ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
                           ROLE_STUB, ROLE_CROSS_CONNECTOR,
-                          ROLE_JUNCTION, ROLE_APRON, ROLE_BUILDING)
+                          ROLE_JUNCTION, ROLE_APRON)
             and s.polygon is not None and not s.polygon.is_empty]
     if not idxs:
         return 0

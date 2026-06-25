@@ -79,6 +79,8 @@ __all__ = [
     "APRON_CORRIDOR_SEED_RADIUS_M",
     "APRON_BACK_EDGE_GRADE",
     "APRON_BACK_EDGE_RAMPS",
+    "APRON_TAXI_BLEND",
+    "APRON_TAXI_TRANSITION_M",
     "TAXI_SLACK_TERMINALS",
     "WRITE_ARBITRATION",
     "TERMINAL_LEAF_LEVELS",
@@ -414,6 +416,8 @@ TAXI_MAX_GRADE_NARROW = 0.030   # ICAO Annex 14 code A/B taxiway-family
 # JUNCTIONS stay at the TAXI rate (1.5%): they are part of the moving network
 # where 1.5% taxiways flow through, not parking surface (decoupled below).
 APRON_MAX_GRADE = 0.01          # apron + building pad, all directions
+# APRON↔TAXI GRADE BLEND (user 2026-06-25) — defined below, where ``import os as
+# _os`` is in scope: APRON_TAXI_BLEND / APRON_TAXI_TRANSITION_M.
 # (2026-06-13) APRON BACK-EDGE RAMPS — docs/apron_back_edge_ramps.md.  The
 # back strip of an apron (building frontage + gaps BETWEEN buildings, farthest
 # from taxi routes) may grade up to this steeper cap so building pads can stay
@@ -809,6 +813,17 @@ ENABLE_APRON_NECK_SPLIT = True
 # ``O4_HOLE_ROUTER=1`` for a single build.
 import os as _os  # noqa: E402
 HOLE_ROUTER_ENABLED = _os.environ.get("O4_HOLE_ROUTER", "1") == "1"
+
+# APRON↔TAXI GRADE BLEND (user 2026-06-25).  A taxi route runs THROUGH aprons, so
+# the apron cannot be a flat 1 % everywhere: as it approaches a taxi centerline it
+# must blend toward that route's (steeper) per-letter cap to make the transition.
+# The blend is ANISOTROPIC — only the ALONG-route component of an apron edge earns
+# the looser cap (the apron still grades 1 % PERPENDICULAR, from its edges to the
+# spine); it decays to APRON_MAX_GRADE past APRON_TAXI_TRANSITION_M from the
+# route.  Lives in the shared grade_graph so the solver grades to it AND the
+# validator accepts it (one graph).  O4_APRON_TAXI_BLEND=0 reverts to flat 1 %.
+APRON_TAXI_BLEND = _os.environ.get("O4_APRON_TAXI_BLEND", "1") == "1"
+APRON_TAXI_TRANSITION_M = 30.0
 
 # (20260624) ABSORB_RUNWAY_IN_APRON — the apron-merged-runway machine.  When a
 # runway passes through a much-larger apron polygon, the overlapping runway

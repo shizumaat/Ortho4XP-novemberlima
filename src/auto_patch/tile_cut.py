@@ -97,7 +97,8 @@ def cut_layout_at_tile_boundaries(
         min_piece_area_m2: float = 1.0,
         current_tile_lat: int | None = None,
         current_tile_lon: int | None = None,
-        dem=None) -> int:
+        dem=None,
+        skip_roles: frozenset = frozenset()) -> int:
     """Cut every shape crossing an integer lat or lon tile boundary,
     leaving a ``2 * half_width_m`` wide gap (default 10 m).
 
@@ -118,6 +119,14 @@ def cut_layout_at_tile_boundaries(
     Mutates ``layout.shapes`` in place.  Returns the net change in
     shape count (positive when shapes split, negative when slivers
     fall below ``min_piece_area_m2`` and get dropped).
+
+    ``skip_roles`` shapes are passed through UNTOUCHED — neither cut nor
+    altitude-resampled.  Used by the POST-solve feature cut to freeze AIRSIDE
+    pavement: it was already cut by the PRE-solve call and graded by the solver
+    against the seam DEM anchors, so re-touching it here only clobbers those
+    solved altitudes (the gapped airside edge grazes the cut buffer and triggers
+    a spurious re-sample).  The single source of airside elevation truth is the
+    solve.
     """
     if not layout.shapes or layout.anchor is None:
         return 0
@@ -210,6 +219,10 @@ def cut_layout_at_tile_boundaries(
     new_shapes: list[BuiltShape] = []
     for s in layout.shapes:
         if s.polygon is None or s.polygon.is_empty:
+            new_shapes.append(s)
+            continue
+        if skip_roles and s.role in skip_roles:
+            # Frozen (already cut pre-solve + solved) — pass through untouched.
             new_shapes.append(s)
             continue
         try:

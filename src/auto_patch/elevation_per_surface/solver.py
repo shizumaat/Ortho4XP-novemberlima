@@ -12,7 +12,18 @@ three-change derivation from the legacy unified solver.
 """
 from __future__ import annotations
 
+import os as _os
+
 from .unified_jacobi import solve as _jacobi_solve
+
+# O4_ROUTE_PROFILE_SOLVE routes the elevation solve through the next-gen
+# one-profile solver (``route_profile`` package, docs/one_profile_solve.md)
+# instead of the legacy ``unified_jacobi`` multi-pass cascade.  Default ON in dev
+# (user 2026-06-25: build + test in X-Plane while we drive CYXY to 0 violations
+# and recut fixtures).  Set ``O4_ROUTE_PROFILE_SOLVE=0`` to fall back to the
+# legacy solver (still live; the new solver also drives the gated airside-freeze
+# in the post-solve tile cut).
+ROUTE_PROFILE_SOLVE = _os.environ.get("O4_ROUTE_PROFILE_SOLVE", "1") == "1"
 
 
 def solve(layout, icao: str,
@@ -27,5 +38,10 @@ def solve(layout, icao: str,
     DEM-driven elevations the user expects (e.g. CYXY taxi E sits
     on terrain ~717 m, not pulled down to the 705 m runway).
     """
+    if ROUTE_PROFILE_SOLVE:
+        from .route_profile import solve_route_profile
+        solve_route_profile(layout, icao, dem=dem,
+                            tile_lat=tile_lat, tile_lon=tile_lon)
+        return
     _jacobi_solve(layout, icao, dem=dem,
                    tile_lat=tile_lat, tile_lon=tile_lon)

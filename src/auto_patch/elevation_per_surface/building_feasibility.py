@@ -114,6 +114,53 @@ def _nearest_visible_centerline(c, cls, vis):
     return min(cls, key=lambda L: L.distance(c))
 
 
+def _runway_route_contacts(layout, G, runway_pts_xyz):
+    """``[(graph_key, runway_elev)]`` — every taxiway↔runway CONTACT on the route
+    graph ``G``: a centerline vertex INSIDE a runway polygon, or an ENDPOINT
+    within ``_CONTACT_EDGE_TOL_M`` of a runway EDGE, snapped to its nearest ``G``
+    node at the runway surface elevation there (edge/inside distance — NOT
+    runway-ring-vertex distance — so a taxiway meeting a long edge mid-span still
+    anchors).  The SINGLE contact source shared by the reach band AND the
+    route-profile solve — one graph, one contact set."""
+    from shapely.geometry import Point
+    from shapely.ops import unary_union
+    rpolys = [s.polygon for s in layout.shapes
+              if s.role == ROLE_RUNWAY and s.polygon is not None
+              and not s.polygon.is_empty]
+    if not rpolys:
+        return []
+    rbnd = unary_union([p.boundary for p in rpolys])
+    runi = unary_union(rpolys)
+
+    def _rwy_elev_at(px, py):
+        return min(runway_pts_xyz,
+                   key=lambda v: (v[0] - px) ** 2 + (v[1] - py) ** 2)[2]
+
+    out = []
+    seen: set = set()
+    for entry in (getattr(layout, "apt_taxi_centerlines", None) or []):
+        ln = entry[0] if isinstance(entry, (tuple, list)) else entry
+        ref = entry[1] if (isinstance(entry, (tuple, list))
+                           and len(entry) > 1) else None
+        if (ln is None or ln.is_empty
+                or str(ref or "").upper().startswith("SVC")):
+            continue
+        coords = list(ln.coords)
+        n_c = len(coords)
+        for vi, (vx, vy) in enumerate(coords):
+            p = Point(vx, vy)
+            is_end = (vi == 0 or vi == n_c - 1)
+            if not (runi.contains(p)
+                    or (is_end and rbnd.distance(p) <= _CONTACT_EDGE_TOL_M)):
+                continue
+            k, _ = G.nearest_key(vx, vy)
+            if k is None or k in seen:
+                continue
+            seen.add(k)
+            out.append((k, _rwy_elev_at(vx, vy)))
+    return out
+
+
 def reach_band_sampler(layout, runway_pts_xyz):
     """The shared taxi-route FEASIBILITY-BAND sampler used by BOTH the building
     levels and the spine climb (the one model, user 2026-06-23).
@@ -158,47 +205,12 @@ def reach_band_sampler(layout, runway_pts_xyz):
                     heapq.heappush(pq, (nd, v))
         return dist
 
-    # taxiway↔runway CONTACTS: every centerline vertex INSIDE a runway polygon, or
-    # an ENDPOINT within _CONTACT_EDGE_TOL_M of a runway EDGE.  Anchor that
-    # contact's graph node at the runway surface elevation there (one cap-Dijkstra
-    # per contact, amortised).  Edge/inside distance — NOT runway-ring-vertex
-    # distance — so a taxiway meeting a long runway edge mid-span still anchors.
-    from auto_patch.layout import ROLE_RUNWAY as _ROLE_RWY
-    from shapely.ops import unary_union as _uu
-    _rpolys = [s.polygon for s in layout.shapes
-               if s.role == _ROLE_RWY and s.polygon is not None
-               and not s.polygon.is_empty]
-    _rbnd = _uu([p.boundary for p in _rpolys]) if _rpolys else None
-    _runi = _uu(_rpolys) if _rpolys else None
-
-    def _rwy_elev_at(px, py):
-        return min(runway_pts_xyz,
-                   key=lambda v: (v[0] - px) ** 2 + (v[1] - py) ** 2)[2]
-
-    anchors: List[Tuple[float, dict]] = []
-    if _rbnd is not None:
-        _seen_anchor: set = set()
-        for entry in (getattr(layout, "apt_taxi_centerlines", None) or []):
-            ln = entry[0] if isinstance(entry, (tuple, list)) else entry
-            ref = entry[1] if (isinstance(entry, (tuple, list))
-                               and len(entry) > 1) else None
-            if (ln is None or ln.is_empty
-                    or str(ref or "").upper().startswith("SVC")):
-                continue
-            coords = list(ln.coords)
-            n_c = len(coords)
-            for vi, (vx, vy) in enumerate(coords):
-                p = Point(vx, vy)
-                is_end = (vi == 0 or vi == n_c - 1)
-                if not (_runi.contains(p)
-                        or (is_end
-                            and _rbnd.distance(p) <= _CONTACT_EDGE_TOL_M)):
-                    continue
-                k, _ = G.nearest_key(vx, vy)
-                if k is None or k in _seen_anchor:
-                    continue
-                _seen_anchor.add(k)
-                anchors.append((_rwy_elev_at(vx, vy), _capdist_from(k)))
+    # taxiway↔runway CONTACTS — the SINGLE shared contact source (one graph): a
+    # cap-Dijkstra from each contact's graph node, anchored at the runway surface
+    # elevation there.
+    anchors: List[Tuple[float, dict]] = [
+        (ae, _capdist_from(k))
+        for (k, ae) in _runway_route_contacts(layout, G, runway_pts_xyz)]
     if not anchors:
         return lambda x, y: None
 

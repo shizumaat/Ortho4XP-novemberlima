@@ -38,7 +38,10 @@ from dataclasses import dataclass, field
 from typing import Callable, Hashable, Optional, Sequence
 
 from .config import (
+    APRON_BACK_EDGE_GRADE,
     APRON_MAX_GRADE,
+    APRON_TAXI_BLEND,
+    APRON_TAXI_TRANSITION_M,
     ELEV_ROUNDING_NOISE_M,
     GRADE_VISIBILITY_BUFFER_M as _VIS_BUF,
     SERVICE_ROAD_MAX_GRADE,
@@ -260,6 +263,57 @@ def _body_cap(shape: GradeShape, ctx: GradeContext, membership: dict) -> float:
     return ctx.inherited_junction_cap(shape)
 
 
+def _nearest_centerline(x: float, y: float, ctx: GradeContext):
+    """``(dist, cap, (tx, ty))`` — the nearest taxi centerline to ``(x, y)``: its
+    perpendicular distance, per-letter cap, and unit tangent at the foot point."""
+    best_d, best_cap, best_t = float("inf"), APRON_MAX_GRADE, (1.0, 0.0)
+    for cl in ctx.centerlines:
+        pts = cl.pts
+        for i in range(len(pts) - 1):
+            ax, ay = pts[i]
+            bx, by = pts[i + 1]
+            dx, dy = bx - ax, by - ay
+            seg2 = dx * dx + dy * dy
+            if seg2 <= 1e-12:
+                continue
+            t = max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / seg2))
+            px, py = ax + t * dx, ay + t * dy
+            d = math.hypot(x - px, y - py)
+            if d < best_d:
+                L = math.sqrt(seg2)
+                best_d, best_cap, best_t = d, cl.cap, (dx / L, dy / L)
+    return best_d, best_cap, best_t
+
+
+def _apron_edge_cap(xi, yi, xj, yj, ni, nj, body_cap, twist):
+    """Apron cap near a taxi route (user 2026-06-25): an apron edge earns the
+    route's (looser) cap as it nears the route, decaying to ``body_cap`` past
+    ``APRON_TAXI_TRANSITION_M``.  ``ni``/``nj`` = ``_nearest_centerline`` at each
+    endpoint.
+
+    ``twist`` (the edge touches a building frontage): the apron WARPS to blend the
+    flat pad into the climbing route — its corners slope ± to meet the route — so
+    the looser cap applies in ALL directions (isotropic).  Elsewhere only the
+    ALONG-route component earns it (the apron still grades ``body_cap``
+    perpendicular, from its edges to the spine)."""
+    d, route_cap, tan = (ni if ni[0] <= nj[0] else nj)
+    # The frontage warp needs MORE than the route cap (the route's climb along the
+    # pad is compressed into the apron depth), so the twist target is the
+    # back-edge ramp grade; elsewhere the apron blends toward the route cap.
+    target = max(route_cap, APRON_BACK_EDGE_GRADE) if twist else route_cap
+    if target <= body_cap or d >= APRON_TAXI_TRANSITION_M:
+        return body_cap
+    dist_factor = 1.0 - d / APRON_TAXI_TRANSITION_M
+    if twist:
+        infl = dist_factor                               # isotropic (the warp)
+    else:
+        ex, ey = xj - xi, yj - yi
+        el = math.hypot(ex, ey) or 1e-9
+        along = abs(ex * tan[0] + ey * tan[1]) / el      # 0 (perp) .. 1 (along)
+        infl = along * dist_factor
+    return body_cap + (target - body_cap) * infl
+
+
 # ── main ────────────────────────────────────────────────────────────────────
 
 def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
@@ -282,6 +336,14 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
     crosses_spine = _spine_crossing_predicate(shape, ctx, membership)
     seam = ctx.seam_keys
     bld = ctx.building_keys
+
+    # APRON↔taxi blend: per-ring-node nearest centerline (dist, cap, tangent), so
+    # an apron body edge's ALONG-route component earns the route's looser cap as
+    # it nears a taxiway running through the apron (user 2026-06-25).
+    near = None
+    if (APRON_TAXI_BLEND and shape.role == APRON_ROLE
+            and ctx.centerlines and body_cap < TAXI_MAX_GRADE):
+        near = [_nearest_centerline(x, y, ctx) for (x, y) in ring]
 
     for i in range(n):
         xi, yi = ring[i]
@@ -320,6 +382,9 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
             # seater's per-centerline edge cap), NOT the shape-wide _spine_cap.
             if spine_pair:
                 cap = max(ctx.centerlines[c].cap for c in shared)
+            elif near is not None:
+                cap = _apron_edge_cap(xi, yi, xj, yj, near[i], near[j],
+                                      body_cap, ki_bld or (kj in bld))
             else:
                 cap = body_cap
             sc.edges.append((ki, kj, cap))

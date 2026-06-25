@@ -4081,11 +4081,19 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # tile line on cross-tile airports — slice them like every other
         # shape (pavement was already cut pre-solve, so only the new
         # feature pieces are cut; no-op for single-tile airports).
+        # Under the one-profile solver, airside is the solve's sole elevation
+        # truth (graded against the seam DEM anchors), so FREEZE it here — the
+        # gapped airside edge grazes the cut buffer and would otherwise get a
+        # spurious altitude re-sample (the SPLP seam clobber).
+        from .elevation_per_surface.solver import ROUTE_PROFILE_SOLVE
+        from .geom_guard import _AIRSIDE_ROLES as _PS_AIRSIDE
+        _ps_skip = _PS_AIRSIDE if ROUTE_PROFILE_SOLVE else frozenset()
         cut_layout_at_tile_boundaries(
             layout,
             current_tile_lat=current_tile_lat,
             current_tile_lon=current_tile_lon,
             dem=dem,
+            skip_roles=_ps_skip,
         )
 
         # Wingtip / RESA terrain-clearance cuts (user 2026-05-22).  Cut
@@ -4127,6 +4135,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     current_tile_lat=current_tile_lat,
                     current_tile_lon=current_tile_lon,
                     dem=dem,
+                    skip_roles=_ps_skip,
                 )
         except _GEOM_EXC:
             pass
