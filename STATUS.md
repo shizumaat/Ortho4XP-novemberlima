@@ -38,50 +38,62 @@ No building bowled (CYXY b16=708.7 working / 712 default ≈DEM, b19≈700).
    702 (set-back buildings sample badly off dense nodes + spurious near-runway
    anchors).
 
-## ►►► NEXT TASK: THE BODY (apron/junction) ◄◄◄
-Spine is clean at all airports → now solve the BODY (user: "once we have spine 0 at
-all test airports we should be able to solve the remaining body issues").
-grade_graph_validate BODY (working model = plain build now): CYXY 1252, SPJC 1034,
-HECA 17286 (canyon), SPLP 183.
+## ►►► NEXT TASK: ONE PROFILE SOLVE (user spec, authoritative 2026-06-24 PM) ◄◄◄
+Spine is clean at all airports.  Investigating A2 (flat when it should climb to
+serve building16) exposed the real architecture gap + the user's full model.
 
-**CYXY 1252 DIAGNOSED** (probes `/tmp/probe_body.py`, `/tmp/probe_body_kind.py`,
-`O4_STEP_DEBUG=1`):
-- by role: apron 915, junction 337.
-- severity over cap: >4% 85, 2-4% 106, 1-2% 148, 0.5-1% 369, <0.5% 544 → ~73% are
-  <1% over (near-miss / anisotropy / non-convergence), 191 are >2% (genuine steep).
-- by endpoint kind: **SPINE-SPINE 414**, BLD-apron 259, SPINE-apron 233,
-  BLD-SPINE 185, apron-apron 142, BLD-BLD 12 (exempt — works), RWY-* 7.
-- solver (`spine_carries_climb_solve`): 613 free, **did NOT converge** (2000
-  sweeps, moved 0.002), **195 over-constrained free**, ~836 residual edges between
-  two LOCKED nodes (it structurally can't move locked spine/buildings).
+**THE BUG (A2):** a sloping taxi rect carries its tilt as `altitude_high/low` (its
+TWO ENDS).  A2's ends were both 696.4 (FLAT) — never set from the route profile —
+while building16 sat at its 708 band-ceiling on the adjacent apron → 12 m cliff.
+(`primary_parallel` not in `grade_graph_validate` → the cliff went unseen.)
+PROVED: setting A2's ends from the profile makes it climb 696→707 (reverted — see
+why below).
 
-**ROOT CAUSES (3) + THE PLAN:**
-1. **ANISOTROPY (biggest lever, ~SPINE-SPINE 414 + much of SPINE-apron).** The
-   apron/junction body is graded ISOTROPICALLY (apron 1% / junction cap in every
-   direction).  An apron edge running ALONG the spine (parallel, between two spine
-   nodes climbing at 1.5-3%) is falsely capped at 1% → ~0.5% false violation.  FIX:
-   PER-AXIS body cap in `grade_graph` (solver+validator share it) — longitudinal
-   (small angle to the local centerline) follows the taxiway cap, transverse gets
-   1% (apron).  Mirrors the retired per-axis junction grade.  Clears the bulk of
-   the <1.5% band.
-2. **PERPENDICULAR over-reach (BLD-apron / BLD-SPINE / SPINE-apron, the 191 >2%).**
-   Genuine: a building/spine sits too high above the apron EDGE across the apron
-   width to grade ≤1%.  FIX (user `apron_spine_grade_model`): SPINE-SLICE wide
-   aprons so every apron node is within ≤1%·dist of a LOCAL spine; the spine
-   carries the climb at the taxiway cap, the apron grades 1% to it.
-3. **JOINT feasibility + steps (the canyon residual; HECA-heavy).** Where two
-   locked pads (or pad+spine) genuinely can't be connected by a ≤1% apron, co-level
-   the pads (joint feasibility) OR step them with the apron following ONE side + an
-   explicit transition (retaining edge) at the frontage — NEVER a steep apron
-   interior.
-4. **SOLVER convergence.** `spine_carries_climb_solve` hits max_sweeps without
-   converging (projected Gauss-Seidel is slow) — SOR/over-relax or a direct sparse
-   harmonic solve clears the <1% near-misses; then retire the legacy validators.
+**WHY MY FIX WAS WRONG (user):** `reach_band_sampler` returns a feasibility BAND
+`[floor,ceil]`, NOT a single traced profile.  Today each consumer INDEPENDENTLY
+collapses the band (buildings clamp(DEM,band); my rect-ends clamp/ceiling; spine
+smoothed).  Independently-collapsed anchors disagree by >cap → locking them =
+violations.  There must be ONE solved profile every node reads (no "band ceiling
+OR clamp DEM" choice).
 
-Start with (1) — anisotropy — it's a `grade_graph` cap rule shared by solver and
-validator, high-leverage, no geometry surgery.  `tools/check_grade.py`
-`test_pavement_grade[*]` is RED by design (WITHIN_SHAPE_CAP=0; 4/4 failed at
-baseline 623820c too — NOT a regression).
+**THE MODEL (user, authoritative — supersedes the anisotropy plan):**
+- HARD anchors: runways (FAA), tile seams (DEM).
+- **Buildings + APRONS: closest to DEM within the band** (surfaces tracking
+  terrain at a feasible level — an apron with no building still gets its
+  reachable closest-to-DEM value, NOT flat).
+- **The ROUTE — junctions + rects (the taxi network): solve for the SMOOTHEST,
+  least-grade profile achievable BETWEEN those anchors** (a smooth man-made ramp;
+  rects don't read DEM — they tilt between their two profile-set ends).
+- ONE solve, cap-projected → every node within grade BY CONSTRUCTION.
+- Everything on the unified graph — RETIRE all legacy per-role plane checks /
+  grading (the `SLOPING_RECT_ROLES` plane, CAP_PLANAR, flat-end coupling, the
+  legacy `check_grade` per-role).
+
+**STATE OF THE CODE vs the model:** `_build_shape_constraints` already puts rects
+in the solve graph (2 flat-end edges + 2 axial cap edges) AND apron/junction via
+`grade_graph`.  BUT `_spine_climb_seats` pre-SEATS+LOCKS the spine at a smoothed-
+toward-DEM level (~696) before the solve → A2 can't climb; and the solve target is
+pure-smoothest for ALL free nodes → aprons go flat (not closest-to-DEM).  So the
+refactor:
+1. STOP pre-locking the spine at an independently-collapsed level (retire the
+   `_spine_climb_seats` seat/lock + the `lb`/`ub` building-frontage hack + the
+   `_rect_end_levels` band-aid idea).  Hard anchors = runways + seams + buildings
+   (closest-to-DEM in band) ONLY.
+2. ONE solve over the unified graph (rects + junctions + aprons all free between
+   anchors) with PER-ROLE target: apron/building nodes pull to closest-to-DEM
+   within the band; ROUTE nodes (rect ends + junction spine) minimise grade
+   (smoothest).  Cap-projected so all ≤cap.
+3. Rect `altitude_high/low` read from the solved end nodes; retire the legacy rect
+   plane solve + CAP_PLANAR + flat-end coupling.
+4. Extend `grade_graph_validate` to rects; retire legacy `check_grade` grading.
+⚠ This is a CORE solve refactor of legacy-heavy `unified_jacobi.py` — do it
+incrementally, re-verifying spine=0 + b16=708 + no-bowl at each step.  Probes:
+`/tmp/probe_a2_hl.py` (rect high/low), `/tmp/probe_a2_nodes.py` (nodes on a
+centerline), `/tmp/probe_body.py`, `/tmp/probe_absorb.py`.
+
+(Superseded: the earlier 4-part anisotropy/spine-slice body plan — the one-profile
+solve above is the user's chosen architecture.  Anisotropy may still matter for the
+apron visibility grading once the route solve is right.)
 
 ## ►► LANDED THIS SESSION (current tree; KEEP) ◄◄
 Working model = `O4_ABSORB_RUNWAY_IN_APRON=0 O4_VISIBLE_CHORD_CONNECT=1`. State:
