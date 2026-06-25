@@ -824,10 +824,15 @@ HOLE_ROUTER_ENABLED = _os.environ.get("O4_HOLE_ROUTER", "1") == "1"
 # When OFF: the FULL runway is subtracted from the pavement union and NO segments
 # are dropped, so the runway stays present through the whole solve (a clean
 # runway-shaped void in the apron; the bordering pavement grades to it as a
-# junction).  EXPERIMENT to fix the route-band disconnection at the geometry
-# layer instead of patching the band.  Default ON = current behaviour.
+# junction).  This keeps the absorbed runway END a real taxi↔runway CONTACT so the
+# reach band can anchor it — the spine=0 working model (user 2026-06-24).
+# ★ DEFAULT OFF (2026-06-24): the plain build keeps full runways (CYXY 02 visible,
+# spine clean).  ⚠ FOLLOW-UP: airports with runways GENUINELY under apron concrete
+# (KPHX, 65/67 segs) want this ON — replace this global gate with a per-airport
+# auto-detect (is the runway end actually paved over?).  Set O4_ABSORB_RUNWAY_IN_
+# APRON=1 to restore the old merge behaviour meanwhile.
 ABSORB_RUNWAY_IN_APRON = _os.environ.get(
-    "O4_ABSORB_RUNWAY_IN_APRON", "1") == "1"
+    "O4_ABSORB_RUNWAY_IN_APRON", "0") == "1"
 
 # (session 68) Conforming-cuts hole-router REDESIGN: plan ALL of a polygon's
 # hole-opening cuts as a Prim-style MIN-SPANNING-FOREST on ONE shared
@@ -1596,9 +1601,12 @@ FIELD_ROUTE_BAND_BY_WIDTH = _os.environ.get(
 # apron → A2 is the real route, giving ~707.8 not the loose ~A-loop ~712).  A
 # spine counts as a taxi centerline, so building→apron-spine→taxiway is valid.
 # When ON, the metric picks the nearest centerline whose chord to the building
-# is contained in the airside pavement union.  Default OFF (A/B).
+# is contained in the airside pavement union.  Default ON (2026-06-24): part of
+# the spine=0 working model (a building connects to the taxiway it can really
+# reach without crossing grass).  Set O4_VISIBLE_CHORD_CONNECT=0 to restore the
+# straight-line-nearest behaviour.
 VISIBLE_CHORD_CONNECT = _os.environ.get(
-    "O4_VISIBLE_CHORD_CONNECT", "0") == "1"
+    "O4_VISIBLE_CHORD_CONNECT", "1") == "1"
 
 # (UNNAMED TAXI SIZE — formerly plan P3a, now removed.)  Unnamed taxi routes
 # carry their real apt.dat ICAO size class directly: apt_dat_reader.unnamed_edge_
