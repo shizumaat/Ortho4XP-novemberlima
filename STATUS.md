@@ -41,15 +41,47 @@ No building bowled (CYXY b16=708.7 working / 712 default ≈DEM, b19≈700).
 ## ►►► NEXT TASK: THE BODY (apron/junction) ◄◄◄
 Spine is clean at all airports → now solve the BODY (user: "once we have spine 0 at
 all test airports we should be able to solve the remaining body issues").
-grade_graph_validate BODY (apron/junction within-shape, working model): CYXY ~1252,
-SPJC ~1034, HECA ~17.2k (canyon), SPLP ~183. These are aprons/junctions that can't
-grade ≤1% from their edge up to the high spine/buildings. User model (memory
-`apron_spine_grade_model`): apron body grades 1% from edges to the centerline
-SPINE; where a wide apron can't reach, spine-slice it / step pads with the apron
-following / explicit transition — NEVER a steep apron interior. `tools/check_grade.py`
-`test_pavement_grade[*]` is RED by design (WITHIN_SHAPE_CAP=0; 4/4 failed at baseline
-623820c too — NOT a regression). Probe: `/tmp/probe_body.py <ICAO>` (body by role +
-severity). Then retire redundant validators once the body is on the one graph.
+grade_graph_validate BODY (working model = plain build now): CYXY 1252, SPJC 1034,
+HECA 17286 (canyon), SPLP 183.
+
+**CYXY 1252 DIAGNOSED** (probes `/tmp/probe_body.py`, `/tmp/probe_body_kind.py`,
+`O4_STEP_DEBUG=1`):
+- by role: apron 915, junction 337.
+- severity over cap: >4% 85, 2-4% 106, 1-2% 148, 0.5-1% 369, <0.5% 544 → ~73% are
+  <1% over (near-miss / anisotropy / non-convergence), 191 are >2% (genuine steep).
+- by endpoint kind: **SPINE-SPINE 414**, BLD-apron 259, SPINE-apron 233,
+  BLD-SPINE 185, apron-apron 142, BLD-BLD 12 (exempt — works), RWY-* 7.
+- solver (`spine_carries_climb_solve`): 613 free, **did NOT converge** (2000
+  sweeps, moved 0.002), **195 over-constrained free**, ~836 residual edges between
+  two LOCKED nodes (it structurally can't move locked spine/buildings).
+
+**ROOT CAUSES (3) + THE PLAN:**
+1. **ANISOTROPY (biggest lever, ~SPINE-SPINE 414 + much of SPINE-apron).** The
+   apron/junction body is graded ISOTROPICALLY (apron 1% / junction cap in every
+   direction).  An apron edge running ALONG the spine (parallel, between two spine
+   nodes climbing at 1.5-3%) is falsely capped at 1% → ~0.5% false violation.  FIX:
+   PER-AXIS body cap in `grade_graph` (solver+validator share it) — longitudinal
+   (small angle to the local centerline) follows the taxiway cap, transverse gets
+   1% (apron).  Mirrors the retired per-axis junction grade.  Clears the bulk of
+   the <1.5% band.
+2. **PERPENDICULAR over-reach (BLD-apron / BLD-SPINE / SPINE-apron, the 191 >2%).**
+   Genuine: a building/spine sits too high above the apron EDGE across the apron
+   width to grade ≤1%.  FIX (user `apron_spine_grade_model`): SPINE-SLICE wide
+   aprons so every apron node is within ≤1%·dist of a LOCAL spine; the spine
+   carries the climb at the taxiway cap, the apron grades 1% to it.
+3. **JOINT feasibility + steps (the canyon residual; HECA-heavy).** Where two
+   locked pads (or pad+spine) genuinely can't be connected by a ≤1% apron, co-level
+   the pads (joint feasibility) OR step them with the apron following ONE side + an
+   explicit transition (retaining edge) at the frontage — NEVER a steep apron
+   interior.
+4. **SOLVER convergence.** `spine_carries_climb_solve` hits max_sweeps without
+   converging (projected Gauss-Seidel is slow) — SOR/over-relax or a direct sparse
+   harmonic solve clears the <1% near-misses; then retire the legacy validators.
+
+Start with (1) — anisotropy — it's a `grade_graph` cap rule shared by solver and
+validator, high-leverage, no geometry surgery.  `tools/check_grade.py`
+`test_pavement_grade[*]` is RED by design (WITHIN_SHAPE_CAP=0; 4/4 failed at
+baseline 623820c too — NOT a regression).
 
 ## ►► LANDED THIS SESSION (current tree; KEEP) ◄◄
 Working model = `O4_ABSORB_RUNWAY_IN_APRON=0 O4_VISIBLE_CHORD_CONNECT=1`. State:
