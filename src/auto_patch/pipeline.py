@@ -4016,6 +4016,13 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # centerline nodes and the elevation solver grades the sliced
         # surface coherently (the corridor profile is the solver's job).
         # Gate-off = no-op (shapes survive unchanged → byte-identical).
+        # SYNTHETIC junction spines (user 2026-06-26): every junction must have a
+        # route through it.  Append synthetic centerlines for spineless junctions
+        # BEFORE the slice, so they are sliced + graded like any taxiway.
+        if os.environ.get("O4_SYNTH_JUNCTION_SPINE", "1") == "1":
+            from .synthetic_junction_spine import synthesize_junction_spines
+            synthesize_junction_spines(layout, icao)
+
         from .junction_spine import apply_junction_centerline_spine
         apply_junction_centerline_spine(layout)
 
