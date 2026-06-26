@@ -88,8 +88,15 @@ def solve_route_profile(layout, icao: str,
         # HARD at the LOCAL runway elevation (the single hard anchor; the building
         # floor yields).  Never override an existing CIFP/seam hard value (it IS
         # the local runway surface there).
+        # Anchor the node the validator's runway-join picks (nearest to each
+        # taxi-centerline runway contact) at the LOCAL runway elevation — even if
+        # it is already a hard runway node: at a runway INTERSECTION the crossing
+        # node sits at a compromise between the two runways (694.8), but the taxi
+        # that contacts ONE of them must meet THAT runway's surface (695.3).  ``re``
+        # is the runway profile, so this is a no-op for a true runway-end node and
+        # only corrects the intersection-compromised crossing node.
         for i, re in G.runway_anchor.items():
-            if i < n and not base_hard[i]:
+            if i < n:
                 elev[i] = float(re)
                 base_hard[i] = True
         u_spine_adj = _merge_spine_adj(spine_adj, G.spine_adj)

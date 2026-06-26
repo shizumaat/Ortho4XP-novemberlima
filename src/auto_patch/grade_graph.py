@@ -844,8 +844,22 @@ def _runway_anchors(layout, G, bucket_to_idx):
                and not s.polygon.is_empty]
     if not runways:
         return
-    # candidate spine geometry nodes = every node already in the graph.
-    nx = list(G.pos.items())
+    # Candidate nodes = EVERY emitted non-runway vertex (the SAME set the
+    # validator's runway-join picks its nearest node from — including
+    # runway_crossing nodes), so we anchor the exact node it checks.  Each is
+    # mapped to its geometry index; a node off the solve graph is skipped.
+    nx = []
+    seen = set()
+    for s in layout.shapes:
+        if (s.role == ROLE_RUNWAY or s.polygon is None or s.polygon.is_empty):
+            continue
+        for (x, y) in _open_ring(list(s.polygon.exterior.coords)):
+            i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+            if i is None or i in seen:
+                continue
+            seen.add(i)
+            nx.append((i, (x, y)))
+            G.pos.setdefault(i, (x, y))
     if not nx:
         return
     for entry in (getattr(layout, "apt_taxi_centerlines", []) or []):
