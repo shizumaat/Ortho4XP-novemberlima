@@ -70,6 +70,43 @@ def test_validator_detects_spine_step():
                "the checker is too weak; do not relax it to fake spine=0.")
 
 
+def test_solver_and_validator_same_nodes():
+    """STRUCTURAL (Step 2): the graph the SOLVER builds and sets elevations on
+    (``grade_graph.build_unified_graph`` — geometry node indices) must cover the
+    EXACT spine the VALIDATOR checks (``grade_graph_validate.within_violations``,
+    via ``checked_spine_geometry``).
+
+    Compared in coordinate space so it is NOT a derivative of one source: the
+    solver graph is keyed by node index, the validator by per-shape ring index,
+    and they are built by independent code paths — equality proves there is one
+    graph in effect (the route-graph/``geo_key`` bridge could never satisfy this,
+    because it sets on nodes the validator does not check)."""
+    from auto_patch import grade_graph as GG
+    from auto_patch.grade_graph_validate import checked_spine_geometry
+    from auto_patch.elevation_per_surface.unified_jacobi import _build_node_list
+
+    layout = _cyxy()
+    nodes, b2i = _build_node_list(layout)
+    G = GG.build_unified_graph(layout, b2i)
+
+    def _k(i):
+        x, y = G.pos[i]
+        return (round(x, 2), round(y, 2))
+    solver_nodes = {_k(i) for i in G.spine_nodes()}
+    solver_edges = {tuple(sorted((_k(a), _k(b)))) for (a, b) in G.spine_edge_set()}
+
+    val_nodes, val_edges = checked_spine_geometry(layout)
+
+    assert solver_nodes == val_nodes, (
+        f"solver graph and validator check DIFFERENT spine nodes: "
+        f"solver-only={len(solver_nodes - val_nodes)}, "
+        f"validator-only={len(val_nodes - solver_nodes)}")
+    assert solver_edges == val_edges, (
+        f"solver graph and validator check DIFFERENT spine edges: "
+        f"solver-only={len(solver_edges - val_edges)}, "
+        f"validator-only={len(val_edges - solver_edges)}")
+
+
 def test_cyxy_spine_zero():
     """OUTCOME: zero spine violations on the strict extended validator (spine +
     rects + caps + runway-joins, width-based, in centerline order).  RED until

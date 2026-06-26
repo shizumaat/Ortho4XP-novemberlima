@@ -40,13 +40,23 @@ def _shape_elevs(s, n):
     return None
 
 
-def within_violations(layout, noise=ELEV_ROUNDING_NOISE_M):
-    """Return the apron/junction within-shape grade violations of the emitted
-    ``layout``, as ``[(pct, cap, dist, role, is_spine, x, y), ...]`` (worst
-    first).  Uses the unified grade graph — identical constraints to the solver.
-    """
+def _iter_checked_pairs(layout):
+    """Yield EVERY within-shape constrained pair the validator checks, as
+    ``(role, is_spine, (xa, ya), za, (xb, yb), zb, cap)``:
+
+      * apron / junction within-shape edges (body + spine, ``grade_graph``);
+      * sloping-rect + end-cap ALL-pair edges (the taxi spine as tilted planes).
+
+    The single source both ``within_violations`` (applies the cap check) and
+    ``checked_spine_geometry`` (extracts the spine node/edge set for the
+    structural test) consume, so the checker and the structural gate cannot
+    drift from each other.  Runway joins are handled separately (one side is a
+    runway-surface sample, not a node)."""
+    from auto_patch.junction_rules import SLOPING_RECT_ROLES
+    from auto_patch.layout import taxi_shape_code_letter
     ctx = GG.build_context(layout)
-    viol = []
+
+    # apron / junction within-shape (body + spine).
     for s in layout.shapes:
         if (s.role not in GG.SOFT_VISIBILITY_ROLES or s.polygon is None
                 or s.polygon.is_empty):
@@ -58,53 +68,18 @@ def within_violations(layout, noise=ELEV_ROUNDING_NOISE_M):
         elevs = _shape_elevs(s, nlen)
         if elevs is None:
             continue
-        keys = list(range(nlen))
         gs = GG.GradeShape(role=s.role, ring=[(x, y) for (x, y) in ring],
-                           keys=keys)
+                           keys=list(range(nlen)))
         sc = GG.shape_constraints(gs, ctx)
-        # spine edges = pairs whose cap is the (steeper) spine cap, i.e. both on
-        # a common centerline; recover via the spine chains for the split.
         spine_pairs = set()
         for chain in sc.spine_chains:
             for a, b in zip(chain, chain[1:]):
                 spine_pairs.add((min(a, b), max(a, b)))
-        pos = {i: ring[i] for i in range(nlen)}
         for (a, b, cap) in sc.edges:
-            xa, ya = pos[a]
-            xb, yb = pos[b]
-            d = math.hypot(xa - xb, ya - yb)
-            if d < 1e-6:
-                continue
-            de = abs(elevs[a] - elevs[b])
-            if de > cap * d + noise:
-                is_spine = (min(a, b), max(a, b)) in spine_pairs
-                viol.append(((de / d) * 100.0, cap * 100.0, d, s.role,
-                             is_spine, 0.5 * (xa + xb), 0.5 * (ya + yb)))
+            is_spine = (min(a, b), max(a, b)) in spine_pairs
+            yield (s.role, is_spine, ring[a], elevs[a], ring[b], elevs[b], cap)
 
-    # The route-graph solver also emits the SLOPING TAXI RECTS and their END-CAPS
-    # from the spine profile, and anchors the spine INTO the runway — so the spine
-    # validator must check those too (user 2026-06-26: test the same thing we
-    # build).  Rects/runway are not ``SOFT_VISIBILITY_ROLES`` so the loop above
-    # skips them; add them here at the SAME per-letter (width-based) cap the solver
-    # used.  All are flagged ``is_spine`` (they ARE the taxi spine) so the spine
-    # gate covers them end to end.
-    viol.extend(_rect_grade_violations(layout, noise))
-    viol.extend(_spine_runway_join_violations(layout, noise))
-
-    viol.sort(reverse=True)
-    return viol
-
-
-def _rect_grade_violations(layout, noise):
-    """Within-shape grade of every sloping taxi RECT (and its end-cap), at the
-    width-based per-letter cap.  A clean rect is a tilted plane (max grade =
-    axial); checking all corner pairs also catches a warped/non-coplanar rect or
-    a cap that does not continue its parent's plane."""
-    from auto_patch.junction_rules import SLOPING_RECT_ROLES
-    from auto_patch.layout import taxi_shape_code_letter
-    out = []
-    # parent-rect cap for each cap, by shared corners (a cap is role junction with
-    # no letter of its own — it must validate at the rect's cap it continues).
+    # sloping rects + end-caps (all-pair, the taxi spine as tilted planes).
     rect_caps = []                      # (corner_key_set, cap)
     for s in layout.shapes:
         if (s.role not in SLOPING_RECT_ROLES or s.polygon is None
@@ -115,8 +90,7 @@ def _rect_grade_violations(layout, noise):
             continue
         cap = float(taxi_grade_cap_for_letter(taxi_shape_code_letter(layout, s)))
         rect_caps.append(({(round(x, 3), round(y, 3)) for (x, y) in ring}, cap))
-        _append_allpair(out, ring, _shape_elevs(s, len(ring)), cap, s.role, noise)
-
+        yield from _all_pair_pairs(s.role, ring, _shape_elevs(s, len(ring)), cap)
     for s in layout.shapes:
         if (not getattr(s, "is_rect_cap", False) or s.polygon is None
                 or s.polygon.is_empty):
@@ -132,26 +106,63 @@ def _rect_grade_violations(layout, noise):
                 best, cap = sh, rcap
         if cap is None:                 # unmatched cap → uniform taxi cap
             cap = float(taxi_grade_cap_for_letter(None))
-        _append_allpair(out, ring, _shape_elevs(s, len(ring)), cap, "rect_cap",
-                        noise)
-    return out
+        yield from _all_pair_pairs("rect_cap", ring, _shape_elevs(s, len(ring)),
+                                   cap)
 
 
-def _append_allpair(out, ring, elevs, cap, role, noise):
+def _all_pair_pairs(role, ring, elevs, cap):
     if elevs is None:
         return
     n = len(ring)
     for i in range(n):
-        xa, ya = ring[i]
         for j in range(i + 1, n):
-            xb, yb = ring[j]
-            d = math.hypot(xa - xb, ya - yb)
-            if d < 1e-6:
-                continue
-            de = abs(elevs[i] - elevs[j])
-            if de > cap * d + noise:
-                out.append(((de / d) * 100.0, cap * 100.0, d, role, True,
-                            0.5 * (xa + xb), 0.5 * (ya + yb)))
+            yield (role, True, ring[i], elevs[i], ring[j], elevs[j], cap)
+
+
+def within_violations(layout, noise=ELEV_ROUNDING_NOISE_M):
+    """Return the apron/junction within-shape grade violations of the emitted
+    ``layout``, as ``[(pct, cap, dist, role, is_spine, x, y), ...]`` (worst
+    first).  Uses the unified grade graph — identical constraints to the solver.
+    """
+    viol = []
+    for (role, is_spine, (xa, ya), za, (xb, yb), zb, cap) in \
+            _iter_checked_pairs(layout):
+        d = math.hypot(xa - xb, ya - yb)
+        if d < 1e-6:
+            continue
+        de = abs(za - zb)
+        if de > cap * d + noise:
+            viol.append(((de / d) * 100.0, cap * 100.0, d, role, is_spine,
+                         0.5 * (xa + xb), 0.5 * (ya + yb)))
+    # The taxi spine also ANCHORS into the runway (one side is a runway-surface
+    # sample, not a node) — checked separately, flagged is_spine.
+    viol.extend(_spine_runway_join_violations(layout, noise))
+    viol.sort(reverse=True)
+    return viol
+
+
+def checked_spine_geometry(layout):
+    """Return ``(nodes, edges)`` — the coord-space SPINE node set and undirected
+    spine edge set the validator checks (``is_spine`` pairs only).  ``nodes`` is
+    ``{(round(x,2), round(y,2)), ...}``; ``edges`` is ``{(node_a, node_b)}`` with
+    ``node_a <= node_b``.  Used by ``test_solver_and_validator_same_nodes`` to
+    assert the SOLVER's unified graph (``grade_graph.build_unified_graph``) and
+    the VALIDATOR check the exact same spine — one graph in effect."""
+    def _k(x, y):
+        return (round(x, 2), round(y, 2))
+    nodes = set()
+    edges = set()
+    for (_role, is_spine, (xa, ya), _za, (xb, yb), _zb, _cap) in \
+            _iter_checked_pairs(layout):
+        if not is_spine:
+            continue
+        a, b = _k(xa, ya), _k(xb, yb)
+        if a == b:
+            continue
+        nodes.add(a)
+        nodes.add(b)
+        edges.add((a, b) if a <= b else (b, a))
+    return nodes, edges
 
 
 def _spine_runway_join_violations(layout, noise):

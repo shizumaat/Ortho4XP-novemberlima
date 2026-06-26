@@ -504,6 +504,230 @@ def build_grade_constraints(shapes: Sequence[GradeShape], ctx: GradeContext
     return out
 
 
+# ── THE ONE GRAPH (solver sets on it, validator checks it) ───────────────────
+
+@dataclass
+class UnifiedGraph:
+    """THE single grade graph on GEOMETRY NODES (node indices via
+    ``bucket_to_idx``) — the SAME nodes the solver sets elevations on and the
+    validator checks (docs/goal_merge_one_graph.md).
+
+    * ``pos``           — ``{node_idx: (x, y)}`` local-meter position.
+    * ``edges``         — every undirected grade edge ``(a, b, cap, is_spine)``:
+      apron/junction within-shape (body + spine) + sloping-rect/cap all-pair.
+      ``is_spine`` marks the taxi-spine pairs (apron/junction spine chains + the
+      rect/cap pairs) the strict spine gate covers.
+    * ``spine_adj``     — ``{i: [(j, budget), ...]}`` over the SMOOTH-PROFILE
+      spine subgraph (centerline-consecutive apron/junction pairs + rect axis +
+      rect-cap continuation), ``budget = cap·dist``.  This is what the spine
+      solve smooths; a 1-D feasible chain.
+    * ``runway_anchor`` — ``{node_idx: local_runway_elev}`` for every geometry
+      node a taxi spine joins the runway at (the single hard anchor; the building
+      floor yields to it).
+    """
+    pos: dict = field(default_factory=dict)
+    edges: list = field(default_factory=list)
+    spine_adj: dict = field(default_factory=dict)
+    runway_anchor: dict = field(default_factory=dict)
+
+    def spine_edge_set(self):
+        """The undirected spine pairs ``{(min(a,b), max(a,b))}`` (is_spine)."""
+        return {(min(a, b), max(a, b))
+                for (a, b, _c, sp) in self.edges if sp}
+
+    def spine_nodes(self):
+        s = set()
+        for (a, b, _c, sp) in self.edges:
+            if sp:
+                s.add(a)
+                s.add(b)
+        return s
+
+
+def build_unified_graph(layout, bucket_to_idx) -> "UnifiedGraph":
+    """Assemble THE one graph on geometry node indices.
+
+    This is the SINGLE graph the route-profile solver sets elevations on and the
+    validator (``grade_graph_validate.within_violations``) checks — the same
+    nodes, edges, per-letter caps and runway anchors, so build and validate can
+    never drift (the whole point of docs/goal_merge_one_graph.md).
+    """
+    from .layout import taxi_shape_code_letter
+    from .junction_rules import SLOPING_RECT_ROLES
+    from .config import taxi_grade_cap_for_letter
+
+    cps = layout.canonical_points
+    ctx = build_context(layout, bucket_to_idx)
+    G = UnifiedGraph()
+
+    def _idx(x, y):
+        return bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+
+    # ── apron / junction within-shape edges (body + spine), node-index keyed ──
+    for s in layout.shapes:
+        if (s.role not in SOFT_VISIBILITY_ROLES or s.polygon is None
+                or s.polygon.is_empty):
+            continue
+        ring = _open_ring(list(s.polygon.exterior.coords))
+        if len(ring) < 3:
+            continue
+        idx = [_idx(x, y) for (x, y) in ring]
+        keys = [i if i is not None else ("_n", p) for p, i in enumerate(idx)]
+        for p, i in enumerate(idx):
+            if i is not None:
+                G.pos[i] = ring[p]
+        gs = GradeShape(role=s.role, ring=list(ring), keys=keys)
+        sc = shape_constraints(gs, ctx)
+        spine_pairs = set()
+        for chain in sc.spine_chains:
+            for u, v in zip(chain, chain[1:]):
+                if isinstance(u, int) and isinstance(v, int):
+                    spine_pairs.add((min(u, v), max(u, v)))
+        for (a, b, cap) in sc.edges:
+            if not isinstance(a, int) or not isinstance(b, int):
+                continue
+            is_spine = (min(a, b), max(a, b)) in spine_pairs
+            G.edges.append((a, b, cap, is_spine))
+            if is_spine:
+                d = _dist(G.pos.get(a), G.pos.get(b))
+                _spine_link(G.spine_adj, a, b, cap * max(d, 1e-3))
+
+    # ── sloping-rect + cap all-pair edges (the taxi spine as tilted planes) ───
+    rect_caps = []                          # (corner_idx_set, cap)
+    for s in layout.shapes:
+        if (s.role not in SLOPING_RECT_ROLES or s.polygon is None
+                or s.polygon.is_empty):
+            continue
+        ring = _open_ring(list(s.polygon.exterior.coords))
+        if len(ring) < 3:
+            continue
+        cap = float(taxi_grade_cap_for_letter(taxi_shape_code_letter(layout, s)))
+        idxs = []
+        for (x, y) in ring:
+            i = _idx(x, y)
+            if i is not None:
+                G.pos[i] = (x, y)
+            idxs.append(i)
+        rect_caps.append(({i for i in idxs if i is not None}, cap))
+        _all_pair(G, idxs, cap)
+        _rect_axis_spine(G, ring, idxs, cap)
+    for s in layout.shapes:
+        if (not getattr(s, "is_rect_cap", False) or s.polygon is None
+                or s.polygon.is_empty):
+            continue
+        ring = _open_ring(list(s.polygon.exterior.coords))
+        if len(ring) < 3:
+            continue
+        idxs = []
+        for (x, y) in ring:
+            i = _idx(x, y)
+            if i is not None:
+                G.pos[i] = (x, y)
+            idxs.append(i)
+        ckeys = {i for i in idxs if i is not None}
+        cap, best = None, 0
+        for (rkeys, rcap) in rect_caps:
+            sh = len(rkeys & ckeys)
+            if sh > best:
+                best, cap = sh, rcap
+        if cap is None:
+            cap = float(taxi_grade_cap_for_letter(None))
+        _all_pair(G, idxs, cap)
+
+    # ── runway anchors: every geometry node a taxi spine joins the runway at ──
+    _runway_anchors(layout, G, bucket_to_idx)
+    return G
+
+
+def _dist(pa, pb):
+    if pa is None or pb is None:
+        return 1e-3
+    return math.hypot(pa[0] - pb[0], pa[1] - pb[1])
+
+
+def _spine_link(spine_adj, a, b, budget):
+    spine_adj.setdefault(a, [])
+    spine_adj.setdefault(b, [])
+    if all(j != b for (j, _w) in spine_adj[a]):
+        spine_adj[a].append((b, budget))
+    if all(j != a for (j, _w) in spine_adj[b]):
+        spine_adj[b].append((a, budget))
+
+
+def _all_pair(G, idxs, cap):
+    """All-corner-pair spine edges of a rect/cap (a tilted plane: every pair is a
+    spine constraint)."""
+    valid = [i for i in idxs if i is not None]
+    for p in range(len(valid)):
+        for q in range(p + 1, len(valid)):
+            a, b = valid[p], valid[q]
+            if a == b:
+                continue
+            G.edges.append((a, b, cap, True))
+
+
+def _rect_axis_spine(G, ring, idxs, cap):
+    """Add the rect's AXIS (long-edge midpoints) into the smooth spine chain via
+    its two short-end corners, so the rect tilts as a plane on the profile."""
+    if len(ring) != 4 or any(i is None for i in idxs):
+        return
+    elens = [math.hypot(ring[(k + 1) % 4][0] - ring[k][0],
+                        ring[(k + 1) % 4][1] - ring[k][1]) for k in range(4)]
+    short = sorted(range(4), key=lambda k: elens[k])[:2]
+    # link the two short-edge corners across the axis (so the plane climbs ≤cap)
+    a0 = idxs[short[0]]
+    a1 = idxs[short[1]]
+    if a0 is not None and a1 is not None and a0 != a1:
+        d = _dist(ring[short[0]], ring[short[1]])
+        _spine_link(G.spine_adj, a0, a1, cap * max(d, 1e-3))
+
+
+def _runway_anchors(layout, G, bucket_to_idx):
+    """Record ``{geometry_node_idx: local_runway_elev}`` for every node where a
+    taxi centerline joins a runway (mirrors the validator's runway-join check).
+    The runway is the single hard anchor; this is what the spine solve pins to."""
+    from shapely.geometry import Point
+    from .layout import ROLE_RUNWAY
+    from .pavement.runways import _sample_runway_segment_elev
+    from .config import taxi_grade_cap_for_letter
+
+    cps = layout.canonical_points
+    _CONTACT_M = 12.0
+    _NEAR_M = 18.0
+    runways = [s for s in layout.shapes
+               if s.role == ROLE_RUNWAY and s.polygon is not None
+               and not s.polygon.is_empty]
+    if not runways:
+        return
+    # candidate spine geometry nodes = every node already in the graph.
+    nx = list(G.pos.items())
+    if not nx:
+        return
+    for entry in (getattr(layout, "apt_taxi_centerlines", []) or []):
+        ln = entry[0] if isinstance(entry, (tuple, list)) else entry
+        ref = entry[1] if (isinstance(entry, (tuple, list))
+                           and len(entry) > 1) else None
+        if ln is None or ln.is_empty or str(ref or "").upper().startswith("SVC"):
+            continue
+        cs = list(ln.coords)
+        for (ex, ey) in (cs[0], cs[-1]):
+            P = Point(ex, ey)
+            rwy = min(runways, key=lambda r: r.polygon.distance(P))
+            if rwy.polygon.distance(P) > _CONTACT_M:
+                continue
+            re = _sample_runway_segment_elev(rwy, ex, ey)
+            if re is None:
+                continue
+            # nearest graph node to the contact = the spine node that anchors
+            best_i, best_d2 = None, _NEAR_M * _NEAR_M
+            for (i, (x, y)) in nx:
+                d2 = (x - ex) ** 2 + (y - ey) ** 2
+                if d2 < best_d2:
+                    best_d2, best_i = d2, i
+            if best_i is not None:
+                G.runway_anchor[best_i] = float(re)
+
+
 def flatten_pairs(constraints: Sequence[ShapeConstraints],
                   noise: float = ELEV_ROUNDING_NOISE_M):
     """Flatten to validator pairs ``(key_a, key_b, cap, allowance)`` where
