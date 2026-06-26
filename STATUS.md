@@ -1,5 +1,13 @@
 # STATUS — handover (2026-06-26) — ROUTE-GRAPH REDESIGN; ROOT = TWO GRAPHS, MUST UNIFY
 
+> ★★★ TOP PRIORITY FOR NEXT SESSION: **`docs/goal_merge_one_graph.md`** —
+> MERGE the route graph and the grade graph into ONE graph so we BUILD and
+> VALIDATE the exact same nodes.  It is a self-contained, measurable goal (run it
+> as the session's goal).  DONE = `tests/test_single_graph_acceptance.py` all
+> green (incl. a new structural test) + `grep geo_key src/` == 0 + one context
+> builder.  Forbidden hacks: bridge / geo_key mapping / post-solve patch /
+> weakened validator.  Everything below is supporting context.
+
 Branch `dev`.  Committed this session (newest first):
 - `f6b6b73` diagnostic stash (elev pre-writeback) — pinned the remaining errors.
 - `01df682` hold rects + caps at route-graph z (read-by-index) → rect/cap
