@@ -285,3 +285,48 @@ WHY synthetics were missing (diagnosed): enrich only snapped rect-end midpoints 
 existing edges within 3 m; TX centerlines not in the source; named taxiway centerlines
 end 7–20 m short of the rect's physical end.  Route-graph SOLVE is clean (residual 0) —
 the gap is graph COVERAGE, and the emission drifting soft rects off the graph z.
+
+---
+# ★ ONE-GRAPH UNIFICATION PLAN (2026-06-26) — the authoritative next-session plan
+
+ROOT (proven this session): elevations are SET on the route graph (Graph A,
+apt.dat centerline nodes + synthetics) and CHECKED on the grade graph (Graph B,
+geometry ring vertices), bridged by `geo_key`, with TWO context builders
+(`unified_jacobi._grade_graph_context` vs `grade_graph_validate._context`).  So
+Graph A can be internally ≤cap while Graph B (the validator) reports violations.
+The 18 residual CYXY spine errors are entirely this drift (spine↔runway at
+runway-adjacent junctions, junction-spine pairs Graph A never had as edges).
+
+The fix is to make it genuinely ONE graph:
+
+1. **One node set.**  The solver must set elevations on the SAME nodes the
+   validator checks — the geometry ring vertices (`bucket_to_idx`), not a
+   parallel route-graph node set read back via `geo_key`.  Either (a) build the
+   route graph ON the geometry vertices (every spine/rect/cap/junction vertex is
+   a graph node), or (b) have the route solve write directly into `elev[idx]` for
+   every validator node and never let a second pass move it.
+
+2. **One context builder.**  Delete the duplication: `spine.spine_adjacency` +
+   `unified_jacobi._build_shape_constraints` (`_grade_graph_context`) and
+   `grade_graph_validate.within_violations` (`_context`) must call ONE shared
+   function that returns the centerlines, per-letter caps, spine membership and
+   edges.  Same membership, same caps, same pairs — solver and validator
+   identical by construction (docs/single_grade_graph.md is the intended design;
+   it is not actually wired for the route-profile path).
+
+3. **One anchor rule (runway is the truth).**  Every node that coincides with /
+   is grade-graph-adjacent to a runway must be a runway CONTACT at the LOCAL
+   runway elevation, so the spine grades to the runway within cap at EVERY join
+   (generalises the F/14R threshold fix).  Where a building floor would lift the
+   spine above the local runway, the building yields (user hierarchy), not the
+   runway.  Today only the contacts `_runway_route_contacts` computed are
+   honored; runway-junction shared vertices are missed.
+
+VERIFY at each step with `/tmp/spine_v.py` (target spine=0) and `/tmp/js_root.py`
+(every flagged pair must be in the solver's set with matching emitted vs solved
+z).  Gate for the user's X-Plane test: spine=0 AND nothing moves the held spine
+post-solve.
+
+After spine=0: caps as bridge edges, the body layer (band from taxi+service,
+building-less apron seating), then re-cut fixtures / suite / other airports /
+retire legacy passes.
