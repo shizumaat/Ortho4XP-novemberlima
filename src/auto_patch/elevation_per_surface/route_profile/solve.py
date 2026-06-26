@@ -69,6 +69,94 @@ def solve_route_profile(layout, icao: str,
     # only to these, so the apron yields to the spine and the spine stays ≤cap.
     spine_nodes, spine_adj = spine_adjacency(layout, nodes, bucket_to_idx)
 
+    # ── THE ONE GRAPH (user 2026-06-26, docs/goal_merge_one_graph.md) ─────────
+    # Solve the spine DIRECTLY on the geometry nodes the validator checks
+    # (``grade_graph.build_unified_graph``) — no separate route graph, no
+    # ``geo_key`` read-by-index bridge.  The spine is smoothed (never hard-frozen
+    # at an over-cap profile value), runway-adjacent geometry nodes anchor at
+    # their OWN LOCAL runway elevation, and a final feasibility-projection drives
+    # every grade-graph edge ≤cap (only edges between two hard anchors —
+    # runway/building — are left, the genuine steps).  This is what makes the
+    # validator's spine zero: build and validate use the exact same nodes.
+    if _os.environ.get("O4_RP_UNIFIED", "1") == "1":
+        from .one_solve import feasibility_project
+        from auto_patch import grade_graph as _GG
+
+        G = _GG.build_unified_graph(layout, bucket_to_idx)
+        n = len(elev)
+        # Runway anchors: every geometry node a taxi spine joins the runway at is
+        # HARD at the LOCAL runway elevation (the single hard anchor; the building
+        # floor yields).  Never override an existing CIFP/seam hard value (it IS
+        # the local runway surface there).
+        for i, re in G.runway_anchor.items():
+            if i < n and not base_hard[i]:
+                elev[i] = float(re)
+                base_hard[i] = True
+        u_spine_adj = _merge_spine_adj(spine_adj, G.spine_adj)
+        u_spine_nodes = set(u_spine_adj) | G.spine_nodes() | set(spine_nodes)
+        # Building-frontage spine floor (the serving arm climbs to its pads),
+        # cap-Lipschitz on the unified spine chain.
+        u_spine_floor = building_spine_floor(
+            layout, nodes, bucket_to_idx, building_seats, node_band, u_spine_adj)
+        if _os.environ.get("O4_RP_NO_SPINE_FLOOR") == "1":
+            u_spine_floor = {}
+
+        # PHASE A — dedicated SMOOTH spine solve on the unified graph (geometry
+        # nodes), runway/seam HARD at their LOCAL value, building floors honoured.
+        # This is the route-graph profile's job done ON the validator's own nodes:
+        # the spine is min-curvature and ≤cap by construction, then FROZEN so the
+        # body grades to it (the body twists to meet the spine, never the reverse).
+        # the HARD anchors that NEVER yield (runway contacts + tile seams) —
+        # captured BEFORE the spine freeze, so the final projection can flex the
+        # spine to clean residuals while these stay pinned.
+        anchor_hard = {i for i in range(n) if base_hard[i]}
+        frozen = _solve_spine_profile(
+            elev, base_hard, u_spine_adj, u_spine_floor)
+        for i in frozen:
+            if i < n:
+                base_hard[i] = True
+
+        # Seat every sloping taxi RECT as a flat-ended tilted plane (read from the
+        # solved spine), freezing its corners so the body grades to it.  Returns
+        # each rect's plane (end node indices) for the final cap re-stamp.
+        rect_planes = _flatten_rect_ends(
+            layout, bucket_to_idx, elev, base_hard, frozen)
+
+        # PHASE B — body fill (apron/junction interiors + rect bodies + caps) with
+        # the spine frozen, min-curvature.
+        n_free = one_profile_solve(
+            elev, shape_constraints, base_hard, nodes, dem_elev,
+            runway_nodes, building_seats, apron_body, u_spine_nodes, u_spine_adj,
+            node_band, u_spine_floor, coupling, apron_smooth=True)
+        # Guarantee compliance: project EVERY grade-graph edge ≤cap with the
+        # spine + runway + buildings + seams HARD; only the apron/junction body
+        # flexes.  Edges left over cap have both ends hard = genuine steps.
+        hard = {i for i in range(n) if base_hard[i]}
+        hard |= {i for i in runway_nodes if i < n}
+        hard |= {i for i in building_seats if i < n}
+        rem, bh = feasibility_project(elev, shape_constraints, hard)
+        # Project on the UNIFIED graph's OWN edges too (the EXACT pairs/caps the
+        # validator checks — rects/caps all-pair, which shape_constraints only
+        # approximates with axial edges), so build and validate cannot leave a
+        # residual between them.  The spine stays HARD; only body nodes flex.
+        u_edges = [(a, b, cap * _GG._dist(G.pos.get(a), G.pos.get(b)))
+                   for (a, b, cap, _sp) in G.edges
+                   if a in G.pos and b in G.pos]
+        rem, bh = feasibility_project(elev, [{"edges": u_edges}], hard)
+        # FINAL re-stamp: continue each end-cap as a planar extension of its
+        # parent rect's FINAL plane (rect ends may have flexed in feasibility),
+        # skipping any cap corner the spine already owns — done LAST so nothing
+        # moves it (the route-graph path's _restamp_caps, on geometry nodes).
+        _restamp_caps_unified(layout, bucket_to_idx, elev, rect_planes, frozen)
+        n_terms, n_rects, n_juncs = _writeback(layout, elev, bucket_to_idx)
+        if _os.environ.get("O4_STEP_DEBUG") == "1":
+            print(f"  [unified] {icao}: {len(frozen)} spine node(s) solved, "
+                  f"{n_free} body node(s); feasibility-project → {rem} edge(s) "
+                  f"over cap ({bh} both-hard = genuine).")
+        _report(icao, n_free, n_free, _time.time() - t0,
+                n_terms, n_rects, n_juncs)
+        return
+
     # ── GRAPH-FIRST PURE-READ (gated, user 2026-06-25) ───────────────────────
     # Solve ONE continuous route profile on the dense centerline graph, then
     # every geometry node READS it (route nodes → the profile; body nodes →
@@ -203,6 +291,195 @@ def solve_route_profile(layout, icao: str,
               f"{len(building_seats)} building pad node(s) anchored.")
     _report(icao, n_free, n_free, _time.time() - t0,
             n_terms, n_rects, n_juncs)
+
+
+def _open4(poly):
+    c = list(poly.exterior.coords)
+    return c[:-1] if c and c[0] == c[-1] else c
+
+
+def _flatten_rect_ends(layout, bucket_to_idx, elev, base_hard, frozen_spine):
+    """Make each sloping taxi rect a FLAT-ENDED tilted plane: both corners of each
+    short end take that end's solved-spine elevation (mean over the corners the
+    spine solve actually set), so the rect emits as a clean plane (the validator
+    checks all-pair).  Freezes the corners.  Returns each rect's plane as
+    ``(corner_idx_set, (e0x,e0y), e0_node, (e1x,e1y), e1_node)`` for the final cap
+    re-stamp (the node indices let the cap re-read the rect's FINAL ends)."""
+    import math
+    from auto_patch.junction_rules import SLOPING_RECT_ROLES
+    cps = layout.canonical_points
+    n = len(elev)
+
+    def _idx(x, y):
+        return bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+
+    planes = []
+    for s in layout.shapes:
+        if (s.role not in SLOPING_RECT_ROLES or s.polygon is None
+                or s.polygon.is_empty):
+            continue
+        coords = _open4(s.polygon)
+        if len(coords) != 4:
+            continue
+        elens = [math.hypot(coords[(k + 1) % 4][0] - coords[k][0],
+                            coords[(k + 1) % 4][1] - coords[k][1])
+                 for k in range(4)]
+        short = sorted(range(4), key=lambda k: elens[k])[:2]
+        ends_mid, end_node, ckeys, ok = [], [], set(), True
+        for e in short:
+            a, b = coords[e], coords[(e + 1) % 4]
+            ia, ib = _idx(*a), _idx(*b)
+            if ia is None or ib is None or ia >= n or ib >= n:
+                ok = False
+                break
+            solved = [c for c in (ia, ib) if c in frozen_spine]
+            if not solved:
+                ok = False
+                break
+            ez = sum(elev[c] for c in solved) / len(solved)
+            elev[ia] = elev[ib] = ez
+            ckeys.add(ia)
+            ckeys.add(ib)
+            ends_mid.append((0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1])))
+            end_node.append(ia)
+        if ok and len(ends_mid) == 2:
+            planes.append((ckeys, ends_mid[0], end_node[0],
+                           ends_mid[1], end_node[1]))
+    return planes
+
+
+def _restamp_caps_unified(layout, bucket_to_idx, elev, rect_planes, frozen_spine):
+    """Continue each end-cap as a planar extension of its parent rect's FINAL
+    plane (matched by ≥2 shared corners), set LAST so nothing moves it.  A cap
+    corner the SPINE owns (``frozen_spine`` — a junction node) is left untouched:
+    the spine is paramount, the cap yields there.  Mutates ``elev`` in place."""
+    cps = layout.canonical_points
+    n = len(elev)
+
+    def _idx(x, y):
+        return bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+
+    for s in layout.shapes:
+        if (not getattr(s, "is_rect_cap", False) or s.polygon is None
+                or s.polygon.is_empty):
+            continue
+        coords = _open4(s.polygon)
+        if len(coords) < 3:
+            continue
+        ckeys = {_idx(x, y) for (x, y) in coords}
+        best, best_sh = None, 1
+        for pl in rect_planes:
+            sh = len(pl[0] & ckeys)
+            if sh > best_sh:
+                best_sh, best = sh, pl
+        if best is None:
+            continue
+        _ck, e0, e0n, e1, e1n = best
+        z0 = elev[e0n] if e0n < n else None
+        z1 = elev[e1n] if e1n < n else None
+        if z0 is None or z1 is None:
+            continue
+        ax, ay = e1[0] - e0[0], e1[1] - e0[1]
+        L2 = ax * ax + ay * ay
+        if L2 < 1e-9:
+            continue
+        for (x, y) in coords:
+            ci = _idx(x, y)
+            if ci is None or ci >= n or ci in frozen_spine:
+                continue
+            t = ((x - e0[0]) * ax + (y - e0[1]) * ay) / L2
+            elev[ci] = z0 + t * (z1 - z0)
+
+
+def _solve_spine_profile(elev, base_hard, spine_adj, spine_floor,
+                         *, max_sweeps=5000, tol=1e-3, curvature=0.25):
+    """Dedicated SMOOTH spine solve on the unified graph's geometry nodes.
+
+    Min-curvature (inverse-budget² harmonic mean blended with the plain mean),
+    clamped into the neighbour cap slabs ``[z_j − budget, z_j + budget]`` and the
+    building-frontage floor — so the result is ≤cap on every consecutive spine
+    pair BY CONSTRUCTION.  Anchors = the nodes already HARD (runway contacts at
+    their LOCAL runway elevation + tile seams).  Mutates ``elev`` in place;
+    returns the set of spine node indices it solved (to be frozen for the body
+    fill)."""
+    import math
+    INF = float("inf")
+    anchors = {i for i in spine_adj if i < len(base_hard) and base_hard[i]}
+    nodes = [k for k in spine_adj if k < len(elev)]
+    free = [k for k in nodes if k not in anchors]
+    # warm start free nodes onto their floor (the serving arm climbs to its pads).
+    for k in free:
+        f = spine_floor.get(k)
+        if f is not None and f > elev[k]:
+            elev[k] = f
+    for _ in range(max_sweeps):
+        moved = 0.0
+        for k in free:
+            nb = spine_adj.get(k, ())
+            if not nb:
+                continue
+            sw = acc = 0.0
+            for (j, w) in nb:
+                wt = 1.0 / max(w, 1e-3) ** 2
+                sw += wt
+                acc += elev[j] * wt
+            harm = acc / sw if sw > 0 else elev[k]
+            pm = sum(elev[j] for (j, _w) in nb) / len(nb)
+            tgt = (1.0 - curvature) * harm + curvature * pm
+            lo, hi = -INF, INF
+            for (j, w) in nb:
+                if elev[j] - w > lo:
+                    lo = elev[j] - w
+                if elev[j] + w < hi:
+                    hi = elev[j] + w
+            f = spine_floor.get(k)
+            if f is not None and f > lo:
+                lo = f
+            tgt = (min(max(tgt, lo), hi) if lo <= hi else 0.5 * (lo + hi))
+            d = tgt - elev[k]
+            if d:
+                elev[k] = tgt
+                if abs(d) > moved:
+                    moved = abs(d)
+        if moved < tol:
+            break
+    # Final EXACT cap-Lipschitz projection on the spine edges (only the runway/
+    # seam anchors are hard) — the Gauss-Seidel's harmonic compromise can leave a
+    # ~cap residual where several centerlines meet at a junction node; this drives
+    # every free↔free spine pair ≤cap (a both-anchor pair stays = genuine step).
+    from .one_solve import feasibility_project
+    s_edges = []
+    seen = set()
+    for i, lst in spine_adj.items():
+        for (j, w) in lst:
+            e = (i, j) if i < j else (j, i)
+            if e in seen:
+                continue
+            seen.add(e)
+            s_edges.append((e[0], e[1], w))
+    feasibility_project(elev, [{"edges": s_edges}], anchors)
+    return set(nodes)
+
+
+def _merge_spine_adj(a, b):
+    """Union two ``{i: [(j, budget), ...]}`` spine adjacencies (the apron/junction
+    consecutive chain + the unified graph's rect-axis links), keeping ONE edge per
+    pair (min budget = tightest cap)."""
+    out: dict = {}
+    seen: dict = {}
+    for src in (a, b):
+        for i, lst in src.items():
+            for (j, w) in lst:
+                e = (min(i, j), max(i, j))
+                if e in seen:
+                    if w < seen[e]:
+                        seen[e] = w
+                    continue
+                seen[e] = w
+    for (i, j), w in seen.items():
+        out.setdefault(i, []).append((j, w))
+        out.setdefault(j, []).append((i, w))
+    return out
 
 
 def _seed_route_skeleton(layout, nodes, bucket_to_idx, elev, node_band, z,

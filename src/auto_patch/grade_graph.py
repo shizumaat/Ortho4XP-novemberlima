@@ -588,9 +588,6 @@ def build_unified_graph(layout, bucket_to_idx) -> "UnifiedGraph":
                 continue
             is_spine = (min(a, b), max(a, b)) in spine_pairs
             G.edges.append((a, b, cap, is_spine))
-            if is_spine:
-                d = _dist(G.pos.get(a), G.pos.get(b))
-                _spine_link(G.spine_adj, a, b, cap * max(d, 1e-3))
 
     # ── sloping-rect + cap all-pair edges (the taxi spine as tilted planes) ───
     rect_caps = []                          # (corner_idx_set, cap)
@@ -610,7 +607,7 @@ def build_unified_graph(layout, bucket_to_idx) -> "UnifiedGraph":
             idxs.append(i)
         rect_caps.append(({i for i in idxs if i is not None}, cap))
         _all_pair(G, idxs, cap)
-        _rect_axis_spine(G, ring, idxs, cap)
+    cap_shapes = []           # (cap_corner_idxs, parent_corner_set, cap)
     for s in layout.shapes:
         if (not getattr(s, "is_rect_cap", False) or s.polygon is None
                 or s.polygon.is_empty):
@@ -625,18 +622,145 @@ def build_unified_graph(layout, bucket_to_idx) -> "UnifiedGraph":
                 G.pos[i] = (x, y)
             idxs.append(i)
         ckeys = {i for i in idxs if i is not None}
-        cap, best = None, 0
+        cap, best, parent = None, 0, frozenset()
         for (rkeys, rcap) in rect_caps:
             sh = len(rkeys & ckeys)
             if sh > best:
-                best, cap = sh, rcap
+                best, cap, parent = sh, rcap, rkeys
         if cap is None:
             cap = float(taxi_grade_cap_for_letter(None))
         _all_pair(G, idxs, cap)
+        cap_shapes.append(([i for i in idxs if i is not None], parent, cap))
+
+    # ── GLOBAL spine chains: per centerline, all on-line geometry nodes ordered
+    # by arc and linked consecutive (budget = cap·arc-gap).  This connects the
+    # spine ACROSS shape boundaries (junction→apron→junction) and SPANS each rect
+    # (the rect interior has no on-line node, so its two flanking junction nodes
+    # are consecutive at budget cap·rect-length) — one connected, ≤cap profile,
+    # exactly what the route graph gave but on the geometry nodes themselves.
+    _build_global_spine(G, ctx)
+
+    # ── weave each sloping RECT into the spine network as a connected sub-chain
+    # (flat ends + axial + links to the flanking on-line nodes) so the ONE spine
+    # solve produces rect-end elevations consistent with the junctions they abut.
+    _add_rects_to_spine(G, layout, bucket_to_idx)
+
+    # ── weave each end-CAP in too: its INNER corners (shared with the parent rect)
+    # link to its OUTER corners at the cap rate, and the outer corners (junction
+    # spine nodes) ride the same profile — so a cap can't be a steep plane that
+    # conflicts with the junction it abuts.
+    _add_caps_to_spine(G, cap_shapes)
 
     # ── runway anchors: every geometry node a taxi spine joins the runway at ──
     _runway_anchors(layout, G, bucket_to_idx)
     return G
+
+
+def _add_caps_to_spine(G, cap_shapes):
+    """Weave each end-cap into ``G.spine_adj``: its INNER corners (shared with the
+    parent rect) link to its OUTER corners at the cap rate (budget ``cap·dist``),
+    so the cap rides the rect→junction profile instead of being a free plane that
+    can conflict with the junction node it shares an outer corner with."""
+    for (idxs, parent, cap) in cap_shapes:
+        present = [i for i in idxs if i in G.pos]
+        inner = [i for i in present if i in parent]
+        outer = [i for i in present if i not in parent]
+        if not inner or not outer:
+            continue
+        # each outer corner links to its nearest inner corner at the cap rate.
+        for o in outer:
+            po = G.pos[o]
+            ni = min(inner, key=lambda i: _dist(po, G.pos[i]))
+            d = _dist(po, G.pos[ni])
+            _spine_link(G.spine_adj, o, ni, cap * max(d, 1e-3))
+        # keep the outer corners flat to each other (a clean cap end).
+        for a, b in zip(outer, outer[1:]):
+            _spine_link(G.spine_adj, a, b, 1e-3)
+
+
+def _add_rects_to_spine(G, layout, bucket_to_idx):
+    """Add each sloping taxi rect to ``G.spine_adj`` as a connected sub-chain:
+    the two short-end corner pairs are flat (budget ``cap·width``), the ends are
+    joined along the axis (budget ``cap·axis_len``), and each end links to the
+    nearest on-line spine node (the flanking junction/apron centerline node) so
+    the rect rides the same continuous profile."""
+    from .layout import taxi_shape_code_letter
+    from .junction_rules import SLOPING_RECT_ROLES
+    from .config import taxi_grade_cap_for_letter
+    cps = layout.canonical_points
+
+    def _idx(x, y):
+        return bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+
+    spine_pts = [(i, G.pos[i]) for i in set(G.spine_adj)]
+    for s in layout.shapes:
+        if (s.role not in SLOPING_RECT_ROLES or s.polygon is None
+                or s.polygon.is_empty):
+            continue
+        ring = _open_ring(list(s.polygon.exterior.coords))
+        if len(ring) != 4:
+            continue
+        idx = [_idx(x, y) for (x, y) in ring]
+        if any(i is None for i in idx):
+            continue
+        cap = float(taxi_grade_cap_for_letter(taxi_shape_code_letter(layout, s)))
+        elens = [math.hypot(ring[(k + 1) % 4][0] - ring[k][0],
+                            ring[(k + 1) % 4][1] - ring[k][1]) for k in range(4)]
+        short = sorted(range(4), key=lambda k: elens[k])[:2]
+        axis_len = max(elens)
+        ends = []                       # [(corner_a_idx, corner_b_idx, mid_xy)]
+        for e in short:
+            a, b = e, (e + 1) % 4
+            mid = (0.5 * (ring[a][0] + ring[b][0]), 0.5 * (ring[a][1] + ring[b][1]))
+            # FLAT end (budget ~0): the two end corners must stay equal so the
+            # rect emits as a clean tilted plane (the validator checks all-pair —
+            # a non-flat end makes the diagonal exceed cap).
+            _spine_link(G.spine_adj, idx[a], idx[b], 1e-3)
+            ends.append((idx[a], idx[b], mid))
+        if len(ends) == 2:
+            # axial links (each end-A corner to its nearer end-B corner).
+            (a0, b0, m0), (a1, b1, m1) = ends
+            pa0 = G.pos[a0]
+            n0 = a1 if (_dist(pa0, G.pos[a1]) <= _dist(pa0, G.pos[b1])) else b1
+            n1 = b1 if n0 == a1 else a1
+            _spine_link(G.spine_adj, a0, n0, cap * max(axis_len, 1e-3))
+            _spine_link(G.spine_adj, b0, n1, cap * max(axis_len, 1e-3))
+            # connect each end midpoint to the nearest on-line spine node.
+            for (ca, cb, mid) in ends:
+                best, bd = None, 15.0 * 15.0
+                for (j, (jx, jy)) in spine_pts:
+                    if j in (ca, cb):
+                        continue
+                    d2 = (jx - mid[0]) ** 2 + (jy - mid[1]) ** 2
+                    if d2 < bd:
+                        bd, best = d2, j
+                if best is not None:
+                    d = math.sqrt(bd)
+                    _spine_link(G.spine_adj, ca, best, cap * max(d, 1e-3))
+
+
+def _build_global_spine(G, ctx):
+    """Order every on-line geometry node along each centerline by arc position and
+    link consecutive ones into ``G.spine_adj`` at the centerline's per-letter cap.
+    A node may lie on several centerlines (a junction crossing) — it is linked on
+    each, so the chains fuse into one connected spine network."""
+    items = list(G.pos.items())
+    for cl in ctx.centerlines:
+        on_line = []
+        for (i, (x, y)) in items:
+            a, d = _project(cl, x, y)
+            if d <= SPINE_PERP_TOL_M:
+                on_line.append((a, i))
+        if len(on_line) < 2:
+            continue
+        on_line.sort(key=lambda t: t[0])
+        for (a0, i0), (a1, i1) in zip(on_line, on_line[1:]):
+            if i0 == i1:
+                continue
+            gap = abs(a1 - a0)
+            d = _dist(G.pos.get(i0), G.pos.get(i1))
+            budget = cl.cap * max(gap, d, 1e-3)
+            _spine_link(G.spine_adj, i0, i1, budget)
 
 
 def _dist(pa, pb):
