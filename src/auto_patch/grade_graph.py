@@ -698,45 +698,66 @@ def _add_rects_to_spine(G, layout, bucket_to_idx):
                 or s.polygon.is_empty):
             continue
         ring = _open_ring(list(s.polygon.exterior.coords))
-        if len(ring) != 4:
+        if len(ring) < 4:
             continue
         idx = [_idx(x, y) for (x, y) in ring]
         if any(i is None for i in idx):
-            continue
+            continue            # (a 5+-corner stub has a split end — handled below)
         cap = float(taxi_grade_cap_for_letter(taxi_shape_code_letter(layout, s)))
-        elens = [math.hypot(ring[(k + 1) % 4][0] - ring[k][0],
-                            ring[(k + 1) % 4][1] - ring[k][1]) for k in range(4)]
-        short = sorted(range(4), key=lambda k: elens[k])[:2]
-        axis_len = max(elens)
-        ends = []                       # [(corner_a_idx, corner_b_idx, mid_xy)]
-        for e in short:
-            a, b = e, (e + 1) % 4
-            mid = (0.5 * (ring[a][0] + ring[b][0]), 0.5 * (ring[a][1] + ring[b][1]))
-            # FLAT end (budget ~0): the two end corners must stay equal so the
-            # rect emits as a clean tilted plane (the validator checks all-pair —
-            # a non-flat end makes the diagonal exceed cap).
-            _spine_link(G.spine_adj, idx[a], idx[b], 1e-3)
-            ends.append((idx[a], idx[b], mid))
-        if len(ends) == 2:
-            # axial links (each end-A corner to its nearer end-B corner).
-            (a0, b0, m0), (a1, b1, m1) = ends
-            pa0 = G.pos[a0]
-            n0 = a1 if (_dist(pa0, G.pos[a1]) <= _dist(pa0, G.pos[b1])) else b1
-            n1 = b1 if n0 == a1 else a1
-            _spine_link(G.spine_adj, a0, n0, cap * max(axis_len, 1e-3))
-            _spine_link(G.spine_adj, b0, n1, cap * max(axis_len, 1e-3))
-            # connect each end midpoint to the nearest on-line spine node.
-            for (ca, cb, mid) in ends:
-                best, bd = None, 15.0 * 15.0
-                for (j, (jx, jy)) in spine_pts:
-                    if j in (ca, cb):
-                        continue
-                    d2 = (jx - mid[0]) ** 2 + (jy - mid[1]) ** 2
-                    if d2 < bd:
-                        bd, best = d2, j
-                if best is not None:
-                    d = math.sqrt(bd)
-                    _spine_link(G.spine_adj, ca, best, cap * max(d, 1e-3))
+        endA, endB, ext = _rect_ends(ring)
+        if endA is None:
+            continue
+        # FLAT ends (budget ~0): every corner at an axis extreme stays equal, so
+        # the rect emits as a clean tilted plane (the validator checks all-pair —
+        # a non-flat end makes a diagonal exceed cap).
+        for grp in (endA, endB):
+            for u, v in zip(grp, grp[1:]):
+                _spine_link(G.spine_adj, idx[u], idx[v], 1e-3)
+        # axial link end-A ↔ end-B at the per-letter cap over the axis extent.
+        _spine_link(G.spine_adj, idx[endA[0]], idx[endB[0]],
+                    cap * max(ext, 1e-3))
+        # connect each end to the nearest on-line spine node (the flanking junction
+        # centerline node) so the rect rides the same continuous profile.
+        for grp in (endA, endB):
+            mx = sum(ring[k][0] for k in grp) / len(grp)
+            my = sum(ring[k][1] for k in grp) / len(grp)
+            gi = {idx[k] for k in grp}
+            best, bd = None, 15.0 * 15.0
+            for (j, (jx, jy)) in spine_pts:
+                if j in gi:
+                    continue
+                d2 = (jx - mx) ** 2 + (jy - my) ** 2
+                if d2 < bd:
+                    bd, best = d2, j
+            if best is not None:
+                _spine_link(G.spine_adj, idx[grp[0]], best,
+                            cap * max(math.sqrt(bd), 1e-3))
+
+
+def _rect_ends(ring):
+    """Split a sloping-rect ring into its two axis-END corner groups (handles
+    4-corner rects AND 5+-corner stubs whose short end is split).  Returns
+    ``(endA_indices, endB_indices, axis_extent)`` or ``(None, None, 0)``."""
+    n = len(ring)
+    elens = [math.hypot(ring[(k + 1) % n][0] - ring[k][0],
+                        ring[(k + 1) % n][1] - ring[k][1]) for k in range(n)]
+    le = max(range(n), key=lambda k: elens[k])      # longest edge = axis dir
+    ax = ring[(le + 1) % n][0] - ring[le][0]
+    ay = ring[(le + 1) % n][1] - ring[le][1]
+    al = math.hypot(ax, ay) or 1.0
+    ax, ay = ax / al, ay / al
+    ts = [(ring[k][0] - ring[0][0]) * ax + (ring[k][1] - ring[0][1]) * ay
+          for k in range(n)]
+    tmin, tmax = min(ts), max(ts)
+    ext = tmax - tmin
+    if ext < 1e-6:
+        return None, None, 0.0
+    tol = 0.25 * ext
+    endA = [k for k in range(n) if ts[k] <= tmin + tol]
+    endB = [k for k in range(n) if ts[k] >= tmax - tol]
+    if not endA or not endB:
+        return None, None, 0.0
+    return endA, endB, ext
 
 
 def _build_global_spine(G, ctx):

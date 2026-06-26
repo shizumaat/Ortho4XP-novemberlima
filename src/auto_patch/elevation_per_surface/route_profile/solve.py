@@ -100,6 +100,16 @@ def solve_route_profile(layout, icao: str,
             layout, nodes, bucket_to_idx, building_seats, node_band, u_spine_adj)
         if _os.environ.get("O4_RP_NO_SPINE_FLOOR") == "1":
             u_spine_floor = {}
+        # A building seat that IS a spine node (a pad node on a taxi centerline)
+        # is anchored at its ACTUAL seat level DURING the spine solve — so the
+        # spine grades its neighbours to within cap of the building (buildings are
+        # heaviest).  Otherwise the spine grades to the softer floor (715.35) and
+        # PHASE B then slams the seat to its real level (715.63), breaking the cap
+        # to the neighbour (the 5.4% junction).  The seat and the spine now agree.
+        for i, lv in building_seats.items():
+            if i < n and lv is not None and i in u_spine_adj:
+                elev[i] = float(lv)
+                base_hard[i] = True
 
         # PHASE A — dedicated SMOOTH spine solve on the unified graph (geometry
         # nodes), runway/seam HARD at their LOCAL value, building floors honoured.
@@ -148,6 +158,15 @@ def solve_route_profile(layout, icao: str,
         # skipping any cap corner the spine already owns — done LAST so nothing
         # moves it (the route-graph path's _restamp_caps, on geometry nodes).
         _restamp_caps_unified(layout, bucket_to_idx, elev, rect_planes, frozen)
+        if _os.environ.get("O4_RP_PROBE"):
+            for tc in _os.environ["O4_RP_PROBE"].split(";"):
+                i = int(tc)
+                z = elev[i] if i < n else None
+                nb = [(j, round(w, 3), round(elev[j], 2))
+                      for (j, w) in u_spine_adj.get(i, [])]
+                print(f"  [probe] idx={i} pos={tuple(round(c) for c in nodes[i])} "
+                      f"elev={z} floor={u_spine_floor.get(i)} "
+                      f"seat={i in building_seats} nbrs={nb}")
         n_terms, n_rects, n_juncs = _writeback(layout, elev, bucket_to_idx)
         if _os.environ.get("O4_STEP_DEBUG") == "1":
             print(f"  [unified] {icao}: {len(frozen)} spine node(s) solved, "
@@ -313,35 +332,36 @@ def _flatten_rect_ends(layout, bucket_to_idx, elev, base_hard, frozen_spine):
     def _idx(x, y):
         return bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
 
+    from auto_patch.grade_graph import _rect_ends
     planes = []
     for s in layout.shapes:
         if (s.role not in SLOPING_RECT_ROLES or s.polygon is None
                 or s.polygon.is_empty):
             continue
         coords = _open4(s.polygon)
-        if len(coords) != 4:
+        if len(coords) < 4:
             continue
-        elens = [math.hypot(coords[(k + 1) % 4][0] - coords[k][0],
-                            coords[(k + 1) % 4][1] - coords[k][1])
-                 for k in range(4)]
-        short = sorted(range(4), key=lambda k: elens[k])[:2]
+        endA, endB, _ext = _rect_ends(coords)
+        if endA is None:
+            continue
         ends_mid, end_node, ckeys, ok = [], [], set(), True
-        for e in short:
-            a, b = coords[e], coords[(e + 1) % 4]
-            ia, ib = _idx(*a), _idx(*b)
-            if ia is None or ib is None or ia >= n or ib >= n:
+        for grp in (endA, endB):
+            cis = [_idx(*coords[k]) for k in grp]
+            if any(c is None or c >= n for c in cis):
                 ok = False
                 break
-            solved = [c for c in (ia, ib) if c in frozen_spine]
+            solved = [c for c in cis if c in frozen_spine]
             if not solved:
                 ok = False
                 break
             ez = sum(elev[c] for c in solved) / len(solved)
-            elev[ia] = elev[ib] = ez
-            ckeys.add(ia)
-            ckeys.add(ib)
-            ends_mid.append((0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1])))
-            end_node.append(ia)
+            for c in cis:
+                elev[c] = ez            # flatten the whole end
+                ckeys.add(c)
+            mx = sum(coords[k][0] for k in grp) / len(grp)
+            my = sum(coords[k][1] for k in grp) / len(grp)
+            ends_mid.append((mx, my))
+            end_node.append(cis[0])
         if ok and len(ends_mid) == 2:
             planes.append((ckeys, ends_mid[0], end_node[0],
                            ends_mid[1], end_node[1]))
