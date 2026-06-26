@@ -44,11 +44,117 @@ def _build_adjacency(shape_constraints, n):
     return adj
 
 
+def feasibility_project(elev, shape_constraints, hard, *,
+                        max_iters=4000, tol=1e-3):
+    """Drive EVERY grade-graph edge to ``|Δelev| ≤ budget`` by iterative
+    constraint projection (user 2026-06-25: nothing may violate a grade cap).
+
+    This is a Gauss-Seidel relaxation of the difference-constraint system
+    ``|z_i − z_j| ≤ cap_ij·d_ij`` on the SAME graph the validator checks
+    (``shape_constraints`` = ``grade_graph``).  ``hard`` nodes (buildings, runway,
+    seams) are immovable; everything else — including the route SKELETON — may
+    flex.  An over-cap edge moves its free endpoint(s) just enough to satisfy it
+    (split the excess when both are free, all of it onto the free one otherwise);
+    repeated sweeps converge to a cap-Lipschitz surface whenever the anchors admit
+    one.  Edges between two hard nodes are genuinely infeasible and reported, not
+    forced.  Mutates ``elev`` in place; returns ``(remaining_over_cap, both_hard)``.
+    """
+    import heapq
+    n = len(elev)
+    edges = []
+    seen = set()
+    adj: dict = {}
+    for sc in shape_constraints:
+        for (i, j, lim) in sc["edges"]:
+            if lim is None or lim < 0 or i >= n or j >= n or i == j:
+                continue
+            e = (i, j) if i < j else (j, i)
+            if e in seen:
+                continue
+            seen.add(e)
+            edges.append((e[0], e[1], lim))
+            adj.setdefault(i, []).append((j, lim))
+            adj.setdefault(j, []).append((i, lim))
+    if not edges:
+        return 0, 0
+
+    # EXACT reachability envelope: ceil_i = min over hard anchors a of
+    # (z_a + capdist(a→i)), floor_i = max of (z_a − capdist).  ``budget`` is the
+    # edge's cap·length, so this is the steepest-compliant reach of every anchor.
+    # Both envelopes are cap-Lipschitz, so clamping into [floor, ceil] removes all
+    # gross (anchor-driven) infeasibility in ONE shot — the iterative pass then
+    # only resolves free↔free edges, which converges fast.
+    INF = float("inf")
+
+    def _reach(sign):                       # sign +1 → ceil, −1 → floor
+        best: dict = {}
+        pq = [((elev[a] if sign > 0 else -elev[a]), a) for a in hard if a < n]
+        heapq.heapify(pq)
+        while pq:
+            val, k = heapq.heappop(pq)
+            t = val if sign > 0 else -val
+            if k in best and ((sign > 0 and t >= best[k])
+                              or (sign < 0 and t <= best[k])):
+                continue
+            best[k] = t
+            for (j, lim) in adj.get(k, ()):
+                nt = t + sign * lim
+                pj = best.get(j)
+                if pj is None or (sign > 0 and nt < pj) or (sign < 0 and nt > pj):
+                    heapq.heappush(pq, ((nt if sign > 0 else -nt), j))
+        return best
+
+    if hard:
+        ceil = _reach(+1)
+        floor = _reach(-1)
+        for i in range(n):
+            if i in hard:
+                continue
+            lo = floor.get(i, -INF)
+            hi = ceil.get(i, INF)
+            if lo > hi:
+                elev[i] = 0.5 * (lo + hi)            # genuine: minimise the break
+            else:
+                elev[i] = min(max(elev[i], lo), hi)  # clamp into the envelope
+    for _it in range(max_iters):
+        worst = 0.0
+        for (i, j, budget) in edges:
+            d = elev[i] - elev[j]
+            ad = abs(d)
+            if ad <= budget + tol:
+                continue
+            ex = ad - budget
+            s = 1.0 if d > 0 else -1.0
+            hi, hj = i in hard, j in hard
+            if hi and hj:
+                continue                                  # genuinely infeasible
+            elif hi:
+                elev[j] += s * ex                         # i fixed → move j up to i
+            elif hj:
+                elev[i] -= s * ex
+            else:
+                elev[i] -= s * ex * 0.5
+                elev[j] += s * ex * 0.5
+            if ex > worst:
+                worst = ex
+        if worst < tol:
+            break
+    # final tally
+    rem = bh = 0
+    for (i, j, budget) in edges:
+        if abs(elev[i] - elev[j]) > budget + tol:
+            rem += 1
+            if i in hard and j in hard:
+                bh += 1
+    return rem, bh
+
+
 def one_profile_solve(
         elev, shape_constraints, base_hard, nodes, dem_elev,
         runway_nodes, building_seats, apron_body, spine_nodes, spine_adj,
         node_band, spine_floor, coupling, *,
-        max_sweeps=3000, tol=0.001, omega=None, curvature=0.25):
+        max_sweeps=3000, tol=0.001, omega=None, curvature=0.25,
+        apron_smooth=None):
     """Run the one-profile solve.  Mutates ``elev`` in place; returns #free nodes.
 
     ``base_hard`` — runway + seam HARD mask (anchors at their seeded elevation).
@@ -67,7 +173,8 @@ def one_profile_solve(
     # Apron body target: closest-to-DEM (default) vs SMOOTH (grade between the
     # apron's anchored edges + spine — user model "aprons grade building→edge/
     # spine, NOT DEM").
-    _apron_smooth = _os.environ.get("O4_RP_APRON_SMOOTH", "0") == "1"
+    _apron_smooth = (apron_smooth if apron_smooth is not None
+                     else _os.environ.get("O4_RP_APRON_SMOOTH", "0") == "1")
     adj = _build_adjacency(shape_constraints, n)
     if not adj:
         return 0

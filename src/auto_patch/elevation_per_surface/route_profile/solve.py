@@ -104,6 +104,66 @@ def solve_route_profile(layout, icao: str,
                     n_terms, n_rects, n_juncs)
             return
 
+    # ── SINGLE-GRAPH ROUTE SKELETON → BODY FILL (user 2026-06-25) ─────────────
+    # PHASE A: solve the route SKELETON (spine + sloping-rect ends) on the SINGLE
+    # taxi-route graph (``route_graph.solve_route_graph``, zero over-cap residual),
+    # then apply it to geometry as a PURE READ BY INDEX — freezing every spine node
+    # and rect corner HARD.  PHASE B: the apron / junction BODY interiors are then
+    # filled by ``one_profile_solve`` on the existing within-shape grade graph with
+    # the skeleton frozen (so the body can only grade TO the route, never drag it),
+    # min-curvature for BOTH aprons and junctions (user 2026-06-25).
+    if _os.environ.get("O4_RP_ROUTE_GRAPH", "1") == "1":
+        from .route_graph import solve_route_graph
+        from .one_solve import feasibility_project
+        z, residual, geo_key, rect_end_keys, _bfloor = solve_route_graph(
+            layout, nodes, spine_nodes, runway_pts, dem_fn)
+        if z:
+            flex = float(_os.environ.get("O4_RP_SKEL_FLEX", "2.0"))
+            cap_records = _seed_route_skeleton(
+                layout, nodes, bucket_to_idx, elev, node_band, z,
+                geo_key, rect_end_keys, flex, base_hard)
+            # Body fill: min-curvature; the skeleton is HARD (the smooth spine is
+            # protected — the body twists to meet it, never the reverse).
+            n_free = one_profile_solve(
+                elev, shape_constraints, base_hard, nodes, dem_elev,
+                runway_nodes, building_seats, apron_body, spine_nodes, spine_adj,
+                node_band, {}, coupling, apron_smooth=True)
+            # Guarantee compliance: project EVERY grade-graph edge ≤cap with the
+            # skeleton + buildings + runway + seams hard, so ONLY apron/junction
+            # body nodes move (they twist within their caps to meet the spine).
+            # Edges left over cap with both ends hard are GENUINELY infeasible
+            # (a flat pad the smooth route cannot reach at cap) — reported, not
+            # forced.  Then re-stamp caps onto each rect's final plane.
+            hard = {i for i in range(len(elev)) if base_hard[i]}
+            hard |= {i for i in runway_nodes if i < len(elev)}
+            hard |= {i for i in building_seats if i < len(elev)}
+            rem, bh = feasibility_project(elev, shape_constraints, hard)
+            _restamp_caps(elev, cap_records)
+            if _os.environ.get("O4_RP_DEBUG_STASH") == "1":
+                try:
+                    from auto_patch.taxi_routing import shared_taxi_route_graph
+                    _G = shared_taxi_route_graph(layout)
+                    layout._rg_debug = {
+                        "z": dict(z), "geo_key": dict(geo_key),
+                        "rect_end_keys": dict(rect_end_keys),
+                        "residual": list(residual),
+                        "zc": [(_G.coord[k][0], _G.coord[k][1], z[k])
+                               for k in z if k in _G.coord],
+                        "adj": {k: [j for (j, _w) in lst]
+                                for k, lst in _G.adj.items()},
+                        "coord": dict(_G.coord),
+                        "runway_pts": list(runway_pts)}
+                except (AttributeError, TypeError, KeyError):
+                    pass
+            n_terms, n_rects, n_juncs = _writeback(layout, elev, bucket_to_idx)
+            if _os.environ.get("O4_STEP_DEBUG") == "1":
+                print(f"  [route-graph] {icao}: profile residual={len(residual)}, "
+                      f"{n_free} body node(s); feasibility-project → {rem} edge(s) "
+                      f"still over cap ({bh} between two hard anchors = genuine).")
+            _report(icao, n_free, n_free, _time.time() - t0,
+                    n_terms, n_rects, n_juncs)
+            return
+
     # RECT-END PROFILE NODES (user 2026-06-25): add a VIRTUAL node to the
     # elevation graph at each rect end (NOT to the geometry — the rect shape is
     # untouched), inserted into the spine chain between the junction-spine and the
@@ -124,10 +184,16 @@ def solve_route_profile(layout, icao: str,
     spine_floor = building_spine_floor(
         layout, nodes, bucket_to_idx, building_seats, node_band, spine_adj)
 
+    # The BODY (apron + junction interiors) is min-curvature, grade-compliant
+    # between anchors — NOT DEM-following (user 2026-06-25: the DEM is unreliable;
+    # we are grading pavement, so compliance between anchors is the model).  This
+    # is neutral vs the old closest-DEM apron target (CYXY 468 vs 469, HECA 4535
+    # vs 4538) and removes the DEM dependence.  ``O4_RP_APRON_SMOOTH=0`` reverts.
+    _apron_sm = _os.environ.get("O4_RP_APRON_SMOOTH", "1") == "1"
     n_free = one_profile_solve(
         elev, shape_constraints, base_hard, nodes, dem_elev,
         runway_nodes, building_seats, apron_body, spine_nodes, spine_adj,
-        node_band, spine_floor, coupling)
+        node_band, spine_floor, coupling, apron_smooth=_apron_sm)
 
     n_terms, n_rects, n_juncs = _writeback(layout, elev, bucket_to_idx)
 
@@ -136,6 +202,143 @@ def solve_route_profile(layout, icao: str,
               f"{len(building_seats)} building pad node(s) anchored.")
     _report(icao, n_free, n_free, _time.time() - t0,
             n_terms, n_rects, n_juncs)
+
+
+def _seed_route_skeleton(layout, nodes, bucket_to_idx, elev, node_band, z,
+                         geo_key, rect_end_keys, flex, base_hard=None):
+    """SEED the route-graph profile onto the geometry and bound the skeleton to a
+    tight FLEX band around it (NOT a hard freeze — user 2026-06-25: some skeleton
+    flexibility is fine, it just can't break a grade cap).  The body then grades
+    from a smooth, near-profile skeleton, and the skeleton can give a little where
+    the body would otherwise be over-constrained.
+
+      * spine / junction-spine node ``i`` → seed ``z[geo_key[i]]``, band ``z±flex``;
+      * each sloping rect → both short-edge corners seed that end's profile node,
+        band ``z±flex`` (the rect stays planar via the flat-end coupling); its
+        PLANE is stashed so the cap can continue it;
+      * each rect END-CAP → seed + band from the parent rect's plane continuation.
+
+    Mutates ``elev`` and ``node_band`` in place.  Returns ``rect_planes`` —
+    ``[(end0_node_idx, e0, end1_node_idx, e1, cap_corner_idxs...)]`` style records
+    used by :func:`_restamp_caps` to re-derive each cap from the rect's FINAL
+    (post-solve) plane.
+    """
+    import math
+    from auto_patch.junction_rules import SLOPING_RECT_ROLES
+
+    cps = layout.canonical_points
+    n = len(elev)
+    # Nodes already HARD before we seed (runway CIFP corners + tile seams) are the
+    # AUTHORITY: a spine/rect/cap node that coincides with one must MATCH it, never
+    # overwrite it (user 2026-06-25: the spine touching the runway anchors AT the
+    # runway).  Overwriting a runway corner with the route-profile value deformed
+    # the runway (the F/14R valley).  Protect them.
+    protected = ({i for i in range(n) if base_hard[i]}
+                 if base_hard is not None else set())
+
+    def _seed(i, val, hard=False):
+        if i is None or i >= n or val is None or i in protected:
+            return
+        elev[i] = float(val)
+        node_band[i] = (float(val) - flex, float(val) + flex)
+        if hard and base_hard is not None:
+            base_hard[i] = True
+
+    def _idx(x, y):
+        return bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+
+    def _open4(poly):
+        c = list(poly.exterior.coords)
+        if c and c[0] == c[-1]:
+            c = c[:-1]
+        return c
+
+    # spine nodes — the centerline profile, by index.  HARD: the smooth spine is
+    # protected (it is paramount); the rects/caps/body twist to meet it.
+    for i, key in geo_key.items():
+        _seed(i, z.get(key), hard=True)
+
+    # sloping rects — both short-edge corners seed that end's profile node.  Stash
+    # the rect's two end NODE indices + midpoints + corner-key set for the cap.
+    planes = []          # (corner_key_set, e0, end0_idx, e1, end1_idx)
+    for s in layout.shapes:
+        ends = rect_end_keys.get(id(s))
+        if (ends is None or s.role not in SLOPING_RECT_ROLES
+                or s.polygon is None or s.polygon.is_empty):
+            continue
+        coords = _open4(s.polygon)
+        if len(coords) != 4:
+            continue
+        elens = [math.hypot(coords[(k + 1) % 4][0] - coords[k][0],
+                            coords[(k + 1) % 4][1] - coords[k][1])
+                 for k in range(4)]
+        short = sorted(range(4), key=lambda k: elens[k])[:2]   # SAME order as enrich
+        end_mid = [None, None]
+        end_idx = [None, None]
+        ckeys = set()
+        ok = True
+        for ei, e in enumerate(short):
+            val = z.get(ends[ei]) if ei < len(ends) else None
+            if val is None:
+                ok = False
+            a, b = coords[e], coords[(e + 1) % 4]
+            end_mid[ei] = (0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]))
+            for (x, y) in (a, b):
+                ckeys.add(cps.get_or_add(float(x), float(y)))
+                _seed(_idx(x, y), val)
+            end_idx[ei] = _idx(*a)
+        if ok and end_idx[0] is not None and end_idx[1] is not None:
+            planes.append((ckeys, end_mid[0], end_idx[0], end_mid[1], end_idx[1]))
+
+    # rect END-CAPS — seed each cap corner from the parent rect's plane (matched
+    # by ≥2 shared corners), continuing the smoothed slope past the rect end.
+    cap_records = []
+    for s in layout.shapes:
+        if (not getattr(s, "is_rect_cap", False) or s.polygon is None
+                or s.polygon.is_empty):
+            continue
+        coords = _open4(s.polygon)
+        if len(coords) < 3:
+            continue
+        cap_keys = {cps.get_or_add(float(x), float(y)) for (x, y) in coords}
+        best, best_sh = None, 1
+        for pl in planes:
+            sh = len(pl[0] & cap_keys)
+            if sh > best_sh:
+                best_sh, best = sh, pl
+        if best is None:
+            continue
+        _ck, e0, e0i, e1, e1i = best
+        ax, ay = e1[0] - e0[0], e1[1] - e0[1]
+        L2 = ax * ax + ay * ay
+        if L2 < 1e-9:
+            continue
+        z0, z1 = elev[e0i], elev[e1i]
+        corner_t = []
+        for (x, y) in coords:
+            t = ((x - e0[0]) * ax + (y - e0[1]) * ay) / L2
+            _seed(_idx(x, y), z0 + t * (z1 - z0))
+            ci = _idx(x, y)
+            if ci is not None:
+                corner_t.append((ci, t))
+        cap_records.append((e0i, e1i, corner_t))
+    return cap_records
+
+
+def _restamp_caps(elev, cap_records):
+    """Re-derive each rect end-cap's corners from its parent rect's FINAL plane
+    (the rect ends may have flexed during the solve/projection), so the cap stays
+    a planar continuation of the rect.  Mutates ``elev``; returns #corners set."""
+    n = 0
+    for (e0i, e1i, corner_t) in cap_records:
+        if e0i >= len(elev) or e1i >= len(elev):
+            continue
+        z0, z1 = elev[e0i], elev[e1i]
+        for (ci, t) in corner_t:
+            if ci < len(elev):
+                elev[ci] = z0 + t * (z1 - z0)
+                n += 1
+    return n
 
 
 def _add_rect_end_nodes(layout, nodes, bucket_to_idx, elev, dem_elev, node_band,

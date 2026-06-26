@@ -38,8 +38,9 @@ def enrich_route_graph(layout, nodes, spine_nodes):
     from collections import defaultdict
     from shapely.geometry import LineString, Point
     from shapely.strtree import STRtree
-    from auto_patch.config import TAXI_MAX_GRADE
+    from auto_patch.config import TAXI_MAX_GRADE, taxi_grade_cap_for_letter
     from auto_patch.junction_rules import SLOPING_RECT_ROLES
+    from auto_patch.layout import taxi_shape_code_letter
     from auto_patch.taxi_routing import shared_taxi_route_graph
 
     G = shared_taxi_route_graph(layout)
@@ -47,6 +48,7 @@ def enrich_route_graph(layout, nodes, spine_nodes):
     # geometry route points to weave in: spine nodes + rect-end axis midpoints.
     geo_pts = [(nodes[i][0], nodes[i][1], ("spine", i))
                for i in spine_nodes if i < len(nodes)]
+    rect_info: dict = {}        # id(rect) -> (mid0, mid1, per-letter cap)
     for s in layout.shapes:
         if (s.role not in SLOPING_RECT_ROLES or s.polygon is None
                 or s.polygon.is_empty):
@@ -59,10 +61,14 @@ def enrich_route_graph(layout, nodes, spine_nodes):
         elens = [math.hypot(coords[(k + 1) % 4][0] - coords[k][0],
                             coords[(k + 1) % 4][1] - coords[k][1])
                  for k in range(4)]
+        rcap = float(taxi_grade_cap_for_letter(taxi_shape_code_letter(layout, s)))
+        rmids = [None, None]
         for ei, e in enumerate(sorted(range(4), key=lambda k: elens[k])[:2]):
             a, b = coords[e], coords[(e + 1) % 4]
-            geo_pts.append((0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]),
-                            ("rect", id(s), ei)))
+            mx, my = 0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1])
+            rmids[ei] = (mx, my)
+            geo_pts.append((mx, my, ("rect", id(s), ei)))
+        rect_info[id(s)] = (rmids[0], rmids[1], rcap)
 
     # original edges (the existing topology — NEVER add a new connection).
     orig_edges = []
@@ -174,6 +180,57 @@ def enrich_route_graph(layout, nodes, spine_nodes):
     G.adj.clear(); G.adj.update(new_adj)
     G.coord.clear(); G.coord.update(new_coord)
     G.edge_cap.clear(); G.edge_cap.update(new_cap)
+
+    # COVERAGE GUARANTEE (user 2026-06-26): every rect must be a graph SEGMENT —
+    # a flat-end node at each short-edge midpoint joined by the rect AXIS — even
+    # when its centerline ends short of the rect (stub / cross-connector extend
+    # past the apt.dat route → the ≤3 m snap above misses them) or the centerline
+    # is absent (discovered TX taxiways).  Add any missing end node and the axis
+    # edge so the rect reads its profile from the graph by index, never off-graph.
+    def _add_edge(a, b, c):
+        if a == b:
+            return
+        (xa, ya), (xb, yb) = G.coord[a], G.coord[b]
+        w = math.hypot(xb - xa, yb - ya)
+        G.adj.setdefault(a, []).append((b, w))
+        G.adj.setdefault(b, []).append((a, w))
+        ek = (a, b) if a <= b else (b, a)
+        prev = G.edge_cap.get(ek)
+        G.edge_cap[ek] = c if prev is None else max(prev, c)
+
+    def _nearest_existing(px, py, maxd, exclude):
+        best, bd = None, maxd * maxd
+        for k, (cx, cy) in G.coord.items():
+            if k in exclude:
+                continue
+            d = (cx - px) ** 2 + (cy - py) ** 2
+            if d < bd:
+                bd, best = d, k
+        return best
+
+    for rid, (m0, m1, rcap) in rect_info.items():
+        if m0 is None or m1 is None:
+            continue
+        ends = rect_end_keys.setdefault(rid, [None, None])
+        mids = [m0, m1]
+        had = [ends[0] is not None, ends[1] is not None]   # already on-graph?
+        for ei in (0, 1):
+            if ends[ei] is None:                            # off-graph end → add
+                k = (_RP_BASE + _ctr[0], 0)
+                _ctr[0] += 1
+                G.coord[k] = mids[ei]
+                G.adj.setdefault(k, [])
+                ends[ei] = k
+        _add_edge(ends[0], ends[1], rcap)                   # the rect AXIS
+        # Fully off-graph rect (e.g. discovered TX, centerline absent): bridge one
+        # end into the network so it is reachable (a stopgap until the centerline
+        # is folded in).  A rect with one end already on-graph is connected via the
+        # axis, so it needs no extra (possibly wrong) proximity edge.
+        if not any(had):
+            nk = _nearest_existing(*mids[0], 40.0, {ends[0], ends[1]})
+            if nk is not None:
+                _add_edge(ends[0], nk, rcap)
+
     return geo_key, {rid: tuple(v) for rid, v in rect_end_keys.items()}
 
 

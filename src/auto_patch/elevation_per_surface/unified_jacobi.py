@@ -9776,8 +9776,22 @@ def _threshold_anchors(layout, elev, bucket_to_idx):
             continue
         b = (nP * spe - sp * se) / den
         a = (se - b * sp) / nP
-        out.append((ax0, ay0, a))                  # marker A
-        out.append((bx0, by0, a + b * L))          # marker B
+        # Only emit a marker for an ABSORBED end (built pavement does NOT reach the
+        # CIFP threshold).  For a BUILT end the real runway edge vertices already
+        # anchor the threshold at its true surface elevation, and the global
+        # least-squares LINE extrapolates a runway with a flattened end BELOW that
+        # surface (CYXY 14R: built end at 693.9, fit extrapolates 691.47) — a
+        # spurious low anchor that becomes the nearest runway "contact" for a
+        # taxiway joining there and drags its spine ~2.4 m under the runway (the
+        # F/14R valley + steep join).  Skip a marker whose endpoint already has
+        # built runway pavement within ``_BUILT_END_TOL_M``.
+        _BUILT_END_TOL_M = 40.0
+        if min((math.hypot(vx - ax0, vy - ay0) for (vx, vy, _e) in rwy_v),
+               default=float("inf")) > _BUILT_END_TOL_M:
+            out.append((ax0, ay0, a))              # marker A (absorbed end only)
+        if min((math.hypot(vx - bx0, vy - by0) for (vx, vy, _e) in rwy_v),
+               default=float("inf")) > _BUILT_END_TOL_M:
+            out.append((bx0, by0, a + b * L))      # marker B (absorbed end only)
     return out
 
 

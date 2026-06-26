@@ -247,3 +247,41 @@ modifications**.  Files touched outside the package: `tile_cut.py` (+skip_roles)
 - Extend `grade_graph_validate` to cover rects (plan item).
 - Flip the gate default → on; then DELETE the ~15 dead legacy passes and
   relocate the KEEP primitives out of `unified_jacobi`.
+
+---
+# ★ ROUTE-GRAPH REDESIGN PLAN (2026-06-26, user-driven)
+
+**Principle (user):** build the route graph RIGHT the first time and read elevations
+DIRECTLY from it by index — never patch emitted elevations, never re-stamp, never
+soft-seed-then-move.  If a surface is wrong, fix the GRAPH.
+
+**One airside route graph** provides elevations for everything:
+- **Taxi routes** (aircraft): spine, per-letter cap (1.5%/3%), anchored at the RUNWAY.
+- **Service roads** (trucks): spine too, 4% cap, anchored at DEM where they enter the
+  perimeter/landside road network AND at airside contacts, graded ≤4% between.
+- **Rects** (taxiway segments): a flat-end NODE at each short-edge midpoint, connected
+  along the rect AXIS (extend from the nearest centerline endpoint when the centerline
+  ends short — NOT a ≤3 m snap).  Every rect is a graph segment.
+- **Caps**: a BRIDGE EDGE rect-end-node ↔ junction-node (rect elevation one side,
+  junction the other), solved in the graph, read by index.  NO re-stamp.
+- **Discovered (TX) taxiways**: fold ``layout._discovered_centerlines`` into the graph
+  source (currently excluded → TX rects 90–540 m off-graph).
+
+**Seating (reachability consumers):**
+- Buildings → reachable level via nearest visible taxi route (have).
+- Aprons WITH a building → from the building frontage (have).
+- Aprons WITHOUT a building → reachable level via WHICHEVER route reaches (taxi OR
+  service road); graded WITHIN the band (min-curvature surface, not flat); if neither
+  reaches → visible-chord patch to nearest reachable pavement.
+
+**Emission** = pure read-by-index of the solved graph (spine + rects + caps + service
+spines, HARD); body grades to it.  Body compliance is the NEXT layer (user: spine
+perfect first).
+
+**Validator** (``grade_graph_validate.within_violations``) now covers rects + caps +
+runway-joins, width-based, flagged ``is_spine`` — extend to service spines too.
+
+WHY synthetics were missing (diagnosed): enrich only snapped rect-end midpoints to
+existing edges within 3 m; TX centerlines not in the source; named taxiway centerlines
+end 7–20 m short of the rect's physical end.  Route-graph SOLVE is clean (residual 0) —
+the gap is graph COVERAGE, and the emission drifting soft rects off the graph z.

@@ -243,6 +243,7 @@ def discover_unreferenced_centerlines(
     rwy_centerlines: list | None = None,
     *,
     runway_union=None,
+    building_union=None,
     width_min: float = _WIDTH_MIN,
     width_max: float = _WIDTH_MAX,
     min_len: float = _MIN_LEN,
@@ -337,6 +338,15 @@ def discover_unreferenced_centerlines(
                     try:
                         if (piece.intersection(covered).length
                                 / piece.length) > 0.6:
+                            continue
+                    except _GEOM_EXC:
+                        pass
+                # Drop a discovered lane that runs THROUGH a building (user
+                # 2026-06-26): the medial skeleton can thread a strip of
+                # building-shadowed pavement (CYXY TX16) — not a real route.
+                if building_union is not None:
+                    try:
+                        if piece.intersection(building_union).length > 1.0:
                             continue
                     except _GEOM_EXC:
                         pass

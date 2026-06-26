@@ -1762,9 +1762,22 @@ def build_airport_pavement(icao: str, xplane_root: str,
             and not pav_union.is_empty:
         from .pavement.discovered_taxiways import (
             discover_unreferenced_centerlines)
+        _disc_bld_polys = [p for p in dsf_building_polys
+                           if p is not None and not p.is_empty]
+        try:                          # OSM terminals/hangars (meters) too — a
+            _disc_bld_polys += [p for p in _osm_terminal_buildings  # noqa: F821
+                                if p is not None and not p.is_empty]
+        except NameError:
+            pass
+        _disc_bld_u = None
+        if _disc_bld_polys:
+            try:
+                _disc_bld_u = unary_union(_disc_bld_polys)
+            except Exception:
+                _disc_bld_u = None
         _discovered = discover_unreferenced_centerlines(
             pav_union, osm_centerlines, rwy_centerlines,
-            runway_union=layout.runway_union)
+            runway_union=layout.runway_union, building_union=_disc_bld_u)
         if _discovered:
             osm_centerlines = list(osm_centerlines) + _discovered
             # Persist the discovered (unreferenced TX) centerlines so the
@@ -2036,6 +2049,46 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # already ROLE_BUILDING; only the display ref changes.
         layout.shapes.append(BuiltShape(
             polygon=tp, role=ROLE_BUILDING, ref=f"building{i+1}"))
+
+    # Drop discovered (TX) centerlines that thread THROUGH a building (user
+    # 2026-06-26: CYXY TX16).  Run HERE — the FINAL building shapes are now in
+    # ``layout.shapes`` (the merge/simplify/gate stages reshape them, so the
+    # discovery-time DSF-only set missed the OSM building TX16 crosses).  Removes
+    # from BOTH the centerline list (→ no rect) and the persisted discovered set
+    # (→ not in the route graph), before rects are built below.
+    if ENABLE_DISCOVERED_TAXIWAYS:
+        _bld_shapes = [s.polygon for s in layout.shapes
+                       if s.role == ROLE_BUILDING and s.polygon is not None
+                       and not s.polygon.is_empty]
+        _disc_bu = None
+        if _bld_shapes:
+            try:
+                _disc_bu = unary_union(_bld_shapes)
+            except _GEOM_EXC:
+                _disc_bu = None
+
+        def _tx_thru_bld(entry):
+            ls = entry[0] if isinstance(entry, tuple) else entry
+            ref = (entry[1] if isinstance(entry, tuple)
+                   and len(entry) > 1 else None)
+            if (_disc_bu is None or ls is None or ls.is_empty
+                    or not str(ref or "").startswith("TX")):
+                return False
+            try:
+                return ls.intersection(_disc_bu).length > 1.0
+            except _GEOM_EXC:
+                return False
+
+        _nb = len(osm_centerlines)
+        osm_centerlines = [e for e in osm_centerlines if not _tx_thru_bld(e)]
+        _dropped_tx = _nb - len(osm_centerlines)
+        if getattr(layout, "_discovered_centerlines", None):
+            layout._discovered_centerlines = [
+                e for e in layout._discovered_centerlines
+                if not _tx_thru_bld(e)]
+        if _dropped_tx:
+            UI.vprint(1, f"  [pav-builder] {icao}: dropped {_dropped_tx} "
+                      f"discovered TX centerline(s) crossing a building.")
 
     # ── Identify junction node CLUSTERS ──────────────────────────
     # Per user 2026-05-12: when the taxi graph comes from apt.dat
@@ -3965,6 +4018,15 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # Gate-off = no-op (shapes survive unchanged → byte-identical).
         from .junction_spine import apply_junction_centerline_spine
         apply_junction_centerline_spine(layout)
+
+        # LATERAL corridor nodes (user 2026-06-26): a vertex on each apron/
+        # junction edge within ±half-taxi-width of a spine, so the lateral grade
+        # spine→apron is solved AND validated (else a steep runway-side drop is
+        # invisible to the vertex-based check).  BEFORE conformance so the new
+        # vertices propagate to neighbouring shapes.
+        if os.environ.get("O4_LATERAL_SPINE_NODES", "1") == "1":
+            from .lateral_spine_nodes import insert_lateral_spine_nodes
+            insert_lateral_spine_nodes(layout, icao)
 
         # ── Airside node-unification (refactor Phases 6+7, PRE-solve) ──
         # Weld + full conformance + final corner snaps, run HERE so the solver
