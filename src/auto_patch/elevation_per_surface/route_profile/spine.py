@@ -29,10 +29,9 @@ def spine_adjacency(layout, nodes, bucket_to_idx):
     """
     from auto_patch import grade_graph as GG
     from auto_patch.layout import ROLE_APRON, ROLE_JUNCTION
-    from auto_patch.elevation_per_surface.unified_jacobi import (
-        _grade_graph_context, _open_ring)
+    from auto_patch.elevation_per_surface.unified_jacobi import _open_ring
 
-    ctx = _grade_graph_context(layout, bucket_to_idx)
+    ctx = GG.build_context(layout, bucket_to_idx)
     cps = layout.canonical_points
     spine_nodes: set = set()
     spine_adj: dict = {}

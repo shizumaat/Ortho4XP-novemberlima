@@ -4494,62 +4494,6 @@ def _visible_grade_edges(coords, idx, cap, polygon, container=None,
     return out
 
 
-def _grade_graph_context(layout, bucket_to_idx):
-    """Build the shared :mod:`auto_patch.grade_graph` context once per solve:
-    the taxi centerlines (LOCAL meters, per-letter caps) + the spine-less
-    junction cap-inheritance lookup (nearest connected taxiway-sized rect).
-    See ``docs/single_grade_graph.md``."""
-    from auto_patch import grade_graph as GG
-    letters = getattr(layout, "apt_taxi_letters", {}) or {}
-    cls = []
-    for ln, name in (getattr(layout, "apt_taxi_centerlines", []) or []):
-        if ln is None or getattr(ln, "is_empty", True):
-            continue
-        if name and str(name).upper().startswith("SVC"):
-            continue            # service roads are NOT taxi spines (own role)
-        try:
-            pts = list(ln.coords)
-        except _GEOM_EXC:
-            continue
-        if len(pts) >= 2:
-            cls.append(GG.Centerline(
-                pts=pts, cap=taxi_grade_cap_for_letter(letters.get(name))))
-    # taxiway-sized rect node coords -> cap (a junction with NO spine inherits
-    # the cap of the nearest CONNECTED taxiway = a rect it shares a node with).
-    rect_cap_at: dict = {}
-    for s in layout.shapes:
-        if (s.role not in SLOPING_RECT_ROLES or s.polygon is None
-                or s.polygon.is_empty):
-            continue
-        cap = _shape_grade(layout, s)
-        for (x, y) in _open_ring(list(s.polygon.exterior.coords)):
-            k = (round(x, 3), round(y, 3))
-            if rect_cap_at.get(k, -1.0) < cap:
-                rect_cap_at[k] = cap
-
-    def _inherited(shape):
-        best = None
-        for (x, y) in shape.ring:
-            c = rect_cap_at.get((round(x, 3), round(y, 3)))
-            if c is not None and (best is None or c > best):
-                best = c
-        return best if best is not None else TAXI_MAX_GRADE
-
-    # building pad node keys (idx) — an apron/junction edge with BOTH endpoints
-    # here is the inter-pad frontage (building↔building step), not graded.
-    cps = layout.canonical_points
-    bld_keys = set()
-    for s in layout.shapes:
-        if (s.role == ROLE_BUILDING and s.polygon is not None
-                and not s.polygon.is_empty):
-            for (x, y) in _open_ring(list(s.polygon.exterior.coords)):
-                i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
-                if i is not None:
-                    bld_keys.add(i)
-    return GG.GradeContext(centerlines=cls, inherited_junction_cap=_inherited,
-                           building_keys=frozenset(bld_keys))
-
-
 def _grade_graph_edges(s, coords, idx, ctx):
     """Adapter: the single grade graph's per-edge ``(key, key, cap)`` for one
     apron/junction shape, converted to the solver's ``(i, j, cap*dist)`` edge
@@ -4605,7 +4549,8 @@ def _build_shape_constraints(layout, bucket_to_idx):
     # Single grade graph (docs/single_grade_graph.md): build the apron/junction
     # within-shape constraints from the ONE shared generator the validator also
     # uses.  Built once per solve; gate OFF → legacy _visible_grade_edges branch.
-    _gg_ctx = (_grade_graph_context(layout, bucket_to_idx)
+    from auto_patch import grade_graph as _GG
+    _gg_ctx = (_GG.build_context(layout, bucket_to_idx)
                 if SINGLE_GRADE_GRAPH else None)
     back_scale = (APRON_BACK_EDGE_GRADE / APRON_MAX_GRADE
                   if APRON_MAX_GRADE > 0 else 1.0)

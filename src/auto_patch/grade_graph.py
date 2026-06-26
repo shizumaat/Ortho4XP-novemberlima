@@ -124,6 +124,89 @@ class ShapeConstraints:
     spine_chains: list[list[Hashable]] = field(default_factory=list)
 
 
+def _open_ring(coords):
+    """Open ring (drop the repeated closing vertex)."""
+    c = list(coords)
+    return c[:-1] if c and c[0] == c[-1] else c
+
+
+def build_context(layout, bucket_to_idx=None) -> "GradeContext":
+    """THE single shared grade-graph context (solver + spine + validator).
+
+    Builds the taxi centerlines (LOCAL meters, per-letter caps), the spine-less
+    junction cap-inheritance lookup (nearest connected taxiway-sized rect), and
+    the building-pad key set.  Both the elevation solver
+    (``unified_jacobi._build_shape_constraints``), the spine
+    (``route_profile/spine.spine_adjacency``) and the validator
+    (``grade_graph_validate.within_violations``) call this, so the centerlines,
+    caps and inheritance can never drift (docs/single_grade_graph.md).
+
+    ``bucket_to_idx`` selects the BUILDING-KEY space (the one place the two
+    representations diverge):
+
+      * given (solver / spine, pre-emit) → SOLVER NODE INDICES
+        (``bucket_to_idx[canonical_points.get_or_add(x, y)]``), matching the
+        node-idx ``keys`` those callers put on their ``GradeShape``s;
+      * ``None`` (validator, post-emit) → ROUNDED-COORD tuples
+        ``(round(x, 3), round(y, 3))`` — the validator keys its shapes by ring
+        index and matches buildings by coordinate.
+    """
+    from .elevation_per_surface.unified_jacobi import (
+        SLOPING_RECT_ROLES, _shape_grade)
+    from .layout import ROLE_BUILDING
+
+    letters = getattr(layout, "apt_taxi_letters", {}) or {}
+    cls: list[Centerline] = []
+    for ln, name in (getattr(layout, "apt_taxi_centerlines", []) or []):
+        if ln is None or getattr(ln, "is_empty", True):
+            continue
+        if name and str(name).upper().startswith("SVC"):
+            continue            # service roads are NOT taxi spines (own role)
+        try:
+            pts = list(ln.coords)
+        except Exception:
+            continue
+        if len(pts) >= 2:
+            cls.append(Centerline(
+                pts=pts, cap=taxi_grade_cap_for_letter(letters.get(name))))
+
+    # taxiway-sized rect node coords -> cap (a junction with NO spine inherits
+    # the cap of the nearest CONNECTED taxiway = a rect it shares a node with).
+    rect_cap_at: dict = {}
+    for s in layout.shapes:
+        if (s.role not in SLOPING_RECT_ROLES or s.polygon is None
+                or s.polygon.is_empty):
+            continue
+        cap = _shape_grade(layout, s)
+        for (x, y) in _open_ring(list(s.polygon.exterior.coords)):
+            k = (round(x, 3), round(y, 3))
+            if rect_cap_at.get(k, -1.0) < cap:
+                rect_cap_at[k] = cap
+
+    def _inherited(shape):
+        best = None
+        for (x, y) in shape.ring:
+            c = rect_cap_at.get((round(x, 3), round(y, 3)))
+            if c is not None and (best is None or c > best):
+                best = c
+        return best if best is not None else TAXI_MAX_GRADE
+
+    cps = getattr(layout, "canonical_points", None)
+    bld_keys: set = set()
+    for s in layout.shapes:
+        if (s.role == ROLE_BUILDING and s.polygon is not None
+                and not s.polygon.is_empty):
+            for (x, y) in _open_ring(list(s.polygon.exterior.coords)):
+                if bucket_to_idx is not None and cps is not None:
+                    i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+                    if i is not None:
+                        bld_keys.add(i)
+                else:
+                    bld_keys.add((round(x, 3), round(y, 3)))
+    return GradeContext(centerlines=cls, inherited_junction_cap=_inherited,
+                        building_keys=frozenset(bld_keys))
+
+
 # ── visibility ──────────────────────────────────────────────────────────────
 
 def _visibility_predicate(ring: list[tuple[float, float]]):
