@@ -198,16 +198,16 @@ def one_profile_solve(
             anchors[i] = float(lv)
 
     # Per-node reachability bounds from the ONE graph (the reach band) — applied
-    # to the taxi ROUTE (spine + rects) ONLY.  The band ceiling follows the
-    # spine's climb along its centerline (the taxi cap, e.g. 3 %); the APRON BODY
-    # must NOT inherit that directly (it would climb 3 % along the spine and
-    # break its 1 % cap).  The apron grades 1 % FROM the spine/building edges via
-    # the neighbour cap slabs (user model — apron grades from edges to spine).
+    # to EVERY node, the apron body included (user 2026-06-26): an apron node sits
+    # at CLOSEST-DEM-FEASIBLE = its DEM clamped into [floor, ceiling], so a
+    # wrong-LOW DEM fills UP to the floor (the west apron 662–685 → ~693) and a
+    # wrong-HIGH DEM pulls DOWN to the ceiling (#156's terminal 715 → 707–710,
+    # graded toward runway 02).  The apron does NOT inherit the band ceiling's 3 %
+    # climb directly because the within-shape 1 % NEIGHBOUR cap slab (below) also
+    # bounds each node — so it grades ≤1 % within the band, exactly the model.
     floor: dict = {}
     ceil: dict = {}
     for i in range(n):
-        if i in apron_body:
-            continue
         b = node_band[i] if i < len(node_band) else None
         if b is not None:
             lo, hi = b

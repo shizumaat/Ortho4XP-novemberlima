@@ -69,6 +69,18 @@ def solve_route_profile(layout, icao: str,
     # only to these, so the apron yields to the spine and the spine stays ≤cap.
     spine_nodes, spine_adj = spine_adjacency(layout, nodes, bucket_to_idx)
 
+    # NO-BUILDING APRON FILL (user 2026-06-26): a no-building apron has no pad to
+    # anchor it, so where the DEM is wrong-low it sags below the level its feeder
+    # taxiways can reach.  Seat each such apron FLAT at the closest-DEM level
+    # reachable from ALL its routes (filled above the bad DEM) so the taxiways
+    # grade smoothly from their runway anchors to it.  Treated like building seats
+    # (heaviest anchors); spine nodes that cross the apron keep their taxi grade.
+    # NO-BUILDING APRON FILL (user 2026-06-26): the closest-DEM level reachable
+    # from all routes, per no-building apron.  Applied below as a per-node FLOOR
+    # (raising node_band) so a no-building apron can't sag below its reachable
+    # level into a wrong-low DEM pit, while still rising to follow a higher local
+    # network (so it does not drag a high-route junction down).
+
     # ── THE ONE GRAPH (user 2026-06-26, docs/goal_merge_one_graph.md) ─────────
     # Solve the spine DIRECTLY on the geometry nodes the validator checks
     # (``grade_graph.build_unified_graph``) — there is no separate route graph and
@@ -121,7 +133,7 @@ def solve_route_profile(layout, icao: str,
         # The spine is min-curvature and ≤cap by construction, then FROZEN so the
         # body grades to it (the body twists to meet the spine, never the reverse).
         frozen = _solve_spine_profile(
-            elev, base_hard, u_spine_adj, u_spine_floor)
+            elev, base_hard, u_spine_adj, u_spine_floor, node_band)
         for i in frozen:
             if i < n:
                 base_hard[i] = True
@@ -133,11 +145,13 @@ def solve_route_profile(layout, icao: str,
             layout, bucket_to_idx, elev, base_hard, frozen)
 
         # PHASE B — body fill (apron/junction interiors + rect bodies + caps) with
-        # the spine frozen, min-curvature.
+        # the spine frozen.  Apron body = CLOSEST-DEM-FEASIBLE (apron_smooth=False):
+        # each node targets its DEM clamped into the reach band [floor, ceiling]
+        # and ≤1% to its neighbours (user 2026-06-26).
         n_free = one_profile_solve(
             elev, shape_constraints, base_hard, nodes, dem_elev,
             runway_nodes, building_seats, apron_body, u_spine_nodes, u_spine_adj,
-            node_band, u_spine_floor, coupling, apron_smooth=True)
+            node_band, u_spine_floor, coupling, apron_smooth=False)
         # Guarantee compliance: project EVERY grade-graph edge ≤cap with the
         # spine + runway + buildings + seams HARD; only the apron/junction body
         # flexes.  Edges left over cap have both ends hard = genuine steps.
@@ -268,26 +282,40 @@ def _restamp_caps_unified(layout, bucket_to_idx, elev, rect_planes, frozen_spine
 
 
 def _solve_spine_profile(elev, base_hard, spine_adj, spine_floor,
+                         node_band=None,
                          *, max_sweeps=5000, tol=1e-3, curvature=0.25):
     """Dedicated SMOOTH spine solve on the unified graph's geometry nodes.
 
     Min-curvature (inverse-budget² harmonic mean blended with the plain mean),
-    clamped into the neighbour cap slabs ``[z_j − budget, z_j + budget]`` and the
-    building-frontage floor — so the result is ≤cap on every consecutive spine
-    pair BY CONSTRUCTION.  Anchors = the nodes already HARD (runway contacts at
-    their LOCAL runway elevation + tile seams).  Mutates ``elev`` in place;
-    returns the set of spine node indices it solved (to be frozen for the body
-    fill)."""
+    clamped into the neighbour cap slabs ``[z_j − budget, z_j + budget]``, the
+    building-frontage floor, AND the per-node REACH BAND ``node_band[i] =
+    (floor, ceiling)`` (user 2026-06-26) — so the spine is closest-DEM-FEASIBLE
+    too: it can't sit BELOW its reachable floor (CYXY TX3 at 677 when its floor is
+    ~685) nor above its ceiling.  Anchors = the nodes already HARD (runway
+    contacts at their LOCAL runway elevation + tile seams).  Mutates ``elev`` in
+    place; returns the set of spine node indices it solved (to be frozen for the
+    body fill)."""
     import math
     INF = float("inf")
     anchors = {i for i in spine_adj if i < len(base_hard) and base_hard[i]}
     nodes = [k for k in spine_adj if k < len(elev)]
     free = [k for k in nodes if k not in anchors]
-    # warm start free nodes onto their floor (the serving arm climbs to its pads).
+
+    def _band(k):
+        b = node_band[k] if (node_band is not None and k < len(node_band)) else None
+        if b is None:
+            return -INF, INF
+        lo, hi = b
+        return (lo, hi) if lo <= hi else (0.5 * (lo + hi), 0.5 * (lo + hi))
+
+    # warm start free nodes onto their reach-band floor / serving floor (fill UP
+    # out of a wrong-low DEM; the serving arm climbs to its pads).
     for k in free:
-        f = spine_floor.get(k)
-        if f is not None and f > elev[k]:
-            elev[k] = f
+        bf, _bh = _band(k)
+        f = spine_floor.get(k, -INF)
+        target = max(bf, f)
+        if target > -INF and target > elev[k]:
+            elev[k] = target
     for _ in range(max_sweeps):
         moved = 0.0
         for k in free:
@@ -302,7 +330,7 @@ def _solve_spine_profile(elev, base_hard, spine_adj, spine_floor,
             harm = acc / sw if sw > 0 else elev[k]
             pm = sum(elev[j] for (j, _w) in nb) / len(nb)
             tgt = (1.0 - curvature) * harm + curvature * pm
-            lo, hi = -INF, INF
+            lo, hi = _band(k)
             for (j, w) in nb:
                 if elev[j] - w > lo:
                     lo = elev[j] - w
