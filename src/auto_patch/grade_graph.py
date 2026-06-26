@@ -811,22 +811,6 @@ def _all_pair(G, idxs, cap):
             G.edges.append((a, b, cap, True))
 
 
-def _rect_axis_spine(G, ring, idxs, cap):
-    """Add the rect's AXIS (long-edge midpoints) into the smooth spine chain via
-    its two short-end corners, so the rect tilts as a plane on the profile."""
-    if len(ring) != 4 or any(i is None for i in idxs):
-        return
-    elens = [math.hypot(ring[(k + 1) % 4][0] - ring[k][0],
-                        ring[(k + 1) % 4][1] - ring[k][1]) for k in range(4)]
-    short = sorted(range(4), key=lambda k: elens[k])[:2]
-    # link the two short-edge corners across the axis (so the plane climbs ≤cap)
-    a0 = idxs[short[0]]
-    a1 = idxs[short[1]]
-    if a0 is not None and a1 is not None and a0 != a1:
-        d = _dist(ring[short[0]], ring[short[1]])
-        _spine_link(G.spine_adj, a0, a1, cap * max(d, 1e-3))
-
-
 def _runway_anchors(layout, G, bucket_to_idx):
     """Record ``{geometry_node_idx: local_runway_elev}`` for every node where a
     taxi centerline joins a runway (mirrors the validator's runway-join check).
