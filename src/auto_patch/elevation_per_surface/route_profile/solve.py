@@ -285,7 +285,7 @@ def _seed_route_skeleton(layout, nodes, bucket_to_idx, elev, node_band, z,
             end_mid[ei] = (0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]))
             for (x, y) in (a, b):
                 ckeys.add(cps.get_or_add(float(x), float(y)))
-                _seed(_idx(x, y), val)
+                _seed(_idx(x, y), val, hard=True)   # HOLD the rect at route-graph z
             end_idx[ei] = _idx(*a)
         if ok and end_idx[0] is not None and end_idx[1] is not None:
             planes.append((ckeys, end_mid[0], end_idx[0], end_mid[1], end_idx[1]))
@@ -317,7 +317,7 @@ def _seed_route_skeleton(layout, nodes, bucket_to_idx, elev, node_band, z,
         corner_t = []
         for (x, y) in coords:
             t = ((x - e0[0]) * ax + (y - e0[1]) * ay) / L2
-            _seed(_idx(x, y), z0 + t * (z1 - z0))
+            _seed(_idx(x, y), z0 + t * (z1 - z0), hard=True)  # HOLD cap on plane
             ci = _idx(x, y)
             if ci is not None:
                 corner_t.append((ci, t))
