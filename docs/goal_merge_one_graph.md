@@ -1,5 +1,35 @@
 # GOAL (TOP PRIORITY) — Merge the route graph and the grade graph into ONE graph
 
+## STATUS 2026-06-26 — DONE (pending the user's X-Plane sign-off)
+All of the Definition of DONE is GREEN:
+* `test_cyxy_spine_zero` — **0** spine violations (was 18).
+* `test_validator_detects_spine_step` — GREEN.
+* `test_solver_and_validator_same_nodes` — GREEN (the unified graph's spine
+  nodes/edges == the validator's, in coord space).
+* `grep -rn "geo_key" src/` == **0**; ONE context builder (`grade_graph.build_context`).
+* `route_graph.py` + `graph_field.py` DELETED; the route-graph/`geo_key`
+  read-by-index bridge and its dead helpers are gone.  The spine is solved
+  directly on the geometry nodes the validator checks
+  (`grade_graph.build_unified_graph` + `route_profile/solve._solve_spine_profile`).
+Stable with and without `PYTHONHASHSEED=0`.
+
+How the 18 → 0 happened (each on the ONE graph, no bridge):
+1. ONE context builder; ONE graph object (`build_unified_graph`) on geometry
+   nodes — connected per-centerline spine chains + rects + caps woven in.
+2. Building seat vs spine floor disagreed → anchor seats that are spine nodes at
+   their real level DURING the spine solve.
+3. `_add_rects_to_spine`/`_flatten_rect_ends` only handled 4-corner rects → a
+   5-corner code-D stub solved 2.1 m over its ends.  `_rect_ends()` now splits
+   any 4+-corner sloping rect by axis projection.
+4. Runway-join: anchor the EXACT node the validator picks (incl. runway_crossing)
+   at the LOCAL runway elevation — fixes the runway-intersection compromise.
+
+Remaining = Step 6's X-Plane gate (user) + the "AFTER the goal" body/other-airport
+work (regressions there are EXPECTED until the body layer lands — user 2026-06-26).
+
+---
+
+
 ## Why
 The route-profile solver SETS spine/rect/cap elevations on the **route graph**
 (`taxi_routing.shared_taxi_route_graph`, taxi-centerline network) and the
