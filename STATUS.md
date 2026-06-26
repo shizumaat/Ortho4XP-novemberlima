@@ -14,42 +14,45 @@ PYTHONHASHSEED=0.  Only CYXY is being worked right now (user: don't chase other
 airports / baselines until the plan is done, tested, debugged).
 
 ---
-## ★★ THE ROOT CAUSE (user 2026-06-26, must fix FIRST) — THERE ARE TWO GRAPHS
+## ★★ THE ROOT CAUSE (user 2026-06-26) — TWO GRAPH STRUCTURES; SPINE ROOT NOT FULLY DIAGNOSED
 
-The "single graph" is **NOT implemented**.  Elevations are SET on one graph and
-CHECKED on another, bridged by a fragile map.  Every remaining spine error is
-this drift.
+⚠ HONESTY NOTE: earlier claims in this session ("two graphs, different nodes",
+"all 18 are spine↔runway") were IMPRECISE and only partly verified.  The verified
+facts below supersede them.  DO NOT assume a single root — diagnose each failing
+edge with `/tmp/js_root.py`.
 
-- **Graph A — route graph** (`taxi_routing.shared_taxi_route_graph` →
-  `route_profile/route_graph.solve_route_graph`).  Nodes = apt.dat
-  taxi-centerline vertices + synthetics (rect-ends, spine welds, service/TX
-  anchors).  **SETS** the spine/rect/cap elevations (`z`, by graph key); feeds the
-  reach band (building levels).
-- **Graph B — grade graph** (`grade_graph.shape_constraints`).  Nodes = shape
-  RING vertices (emitted geometry).  **VALIDATES** (`grade_graph_validate.
-  within_violations`) AND grades the body.  Built by **TWO** context builders:
-  `unified_jacobi._grade_graph_context` (solver, by index) and
-  `grade_graph_validate._context` (validator, by rounded coord).
-- Bridge = `geo_key` ({geometry node idx → Graph-A key}).  Graph B has
-  adjacencies Graph A never had (a junction's spine↔runway vertex pair), so
-  **Graph A is internally ≤cap while Graph B reports violations.**
-- PLUS runway-adjacent nodes have **two elevation sources**: Graph A's `z` AND
-  the runway seed (`_seed_elevations`, hard).  They disagree (CYXY node 567:
-  Graph A 695.63 vs runway 694.89); the protect-guard keeps the runway value and
-  leaves the adjacent spine node (568 = 695.79) inconsistent → 8.2 % over 11 m.
+**Verified facts (CYXY):**
+- There ARE two graph STRUCTURES + two context builders: Graph A = route graph
+  (`taxi_routing.shared_taxi_route_graph` → `route_graph.solve_route_graph`,
+  nodes = apt.dat centerline vertices + synthetics) SETS the spine/rect/cap z;
+  Graph B = grade graph (`grade_graph.shape_constraints`, nodes = geometry ring
+  vertices) VALIDATES + grades the body, built by `unified_jacobi.
+  _grade_graph_context` AND `grade_graph_validate._context` (two builders).
+- BUT the spine NODES are in fact shared via `geo_key` — node 567/568 are both
+  in `geo_key` and the route-graph values there are compliant (0.16 m).  So
+  "different nodes" was WRONG for the spine; the pair definitions agree too
+  (`spine_adjacency` ⊇ validator spine pairs).
+- The 18 spine violations = **9 distinct edges**: **3 runway-adjacent, 6 NOT**.
+  Only ONE has been root-caused: a runway-adjacent dual-source — node 567 has
+  TWO elevation sources (route-graph z 695.63 AND the hard runway seed 694.89);
+  the protect-guard keeps the runway value, leaving its route-graph-set neighbor
+  (568 = 695.79) inconsistent → 8.2 % over 11 m.
+- The other **6 non-runway edges are UNVERIFIED** — could be `geo_key` coverage
+  gaps, a building-floor pushing the spine over cap, the two context builders
+  diverging on caps, or genuine geometry.  NEXT SESSION: run `/tmp/js_root.py`
+  per failing edge and find the real cause for EACH before changing code.
 
-### THE FIX (the actual one-graph) — next major work
-1. **One node set** = the geometry vertices the validator checks.  The solver
-   sets elevations on THOSE nodes/edges, not a parallel route-graph node set
-   bridged by `geo_key`.
-2. **One context builder** — delete the `_grade_graph_context` / `_context`
+### THE FIX (toward the genuine one graph)
+1. **One context builder** — delete the `_grade_graph_context` / `_context`
    duplication; solver and validator call the SAME function for centerlines,
-   caps, spine membership, and edges.  (See `docs/single_grade_graph.md`.)
-3. **One anchor rule** — every runway-adjacent node is a runway CONTACT at the
-   LOCAL runway elevation (the runway is the single hard truth; the building
-   floor yields to it).  This generalises the F/14R fix to ALL runway joins.
-
-Until 1–3 hold, the setter will always miss a pair the checker sees.
+   caps, spine membership, and edges (`docs/single_grade_graph.md`).
+2. **One anchor rule** — every runway-adjacent node is a runway CONTACT at the
+   LOCAL runway elevation (runway is the single hard truth; building floor
+   yields).  Fixes the 3 runway-adjacent edges (generalises the F/14R fix).
+3. **Diagnose the 6 non-runway edges** with `js_root.py` and fix the real cause
+   (likely `geo_key` coverage and/or building-floor-vs-cap).
+4. Ideally collapse Graph A into Graph B so elevations are SET on the exact nodes
+   the validator checks (no `geo_key` bridge, no second source).
 
 ---
 ## What is DONE (committed, working on CYXY)
@@ -90,21 +93,23 @@ Until 1–3 hold, the setter will always miss a pair the checker sees.
 ## ★ DEFINITION OF DONE — `tests/test_single_graph_acceptance.py` (DO NOT bypass)
 Done is NOT a claim or an eyeballed number.  Done = these tests GREEN:
 - `test_cyxy_spine_zero` — zero spine violations on the strict extended
-  validator.  RED today (18, all runway-adjacent value drift).  This is the gate.
-- `test_solver_validator_same_spine_pairs` — solver & validator constrain the
-  SAME spine pairs.  GREEN now; must STAY green (no second pair set / hack).
+  validator.  RED today (18).  THIS is the load-bearing gate: whatever graph sets
+  the elevations, if the surface doesn't satisfy the validator's pairs, it's red.
 - `test_validator_detects_spine_step` — a 3 m injected step MUST be flagged.
   GREEN now; must STAY green (DO NOT weaken the validator to fake spine=0).
-A two-graph bridge, a `geo_key` emission mapping, a post-solve patch, or a
-relaxed validator CANNOT make all three green together.  If you are writing any
-of those, stop — that is the hack the last ~10 sessions kept doing.
 
-Current finding (from the gate): the pair SET is already unified
-(`same_spine_pairs` green); the failure is VALUES at runway-adjacent nodes — the
-route graph (Graph A) and the runway seed disagree there (node 567: 695.63 vs
-694.89).  So the immediate fix is the **one-anchor rule** (#3): anchor the
-route-graph spine to the LOCAL runway at every runway-adjacent node.  Then chase
-any residual with the structural tests as the guard.
+(A `same_spine_pairs` test was REMOVED — it compared two grade-graph derivatives,
+not the route graph that sets the values, so it was trivially green and proved
+nothing.  False assurance is exactly the failure mode this file prevents.)
+
+A `geo_key` emission mapping, a post-solve patch, or a relaxed validator cannot
+make `test_cyxy_spine_zero` + `test_validator_detects_spine_step` green together.
+If you are writing a bridge / second graph / post-solve patch, stop — that is the
+hack.  ⚠ A genuine STRUCTURAL test still wants writing: compare the ELEVATION-
+SETTING graph (route graph / emitted z) to the validator's pairs — add it.
+
+Immediate target: the 3 runway-adjacent edges via the one-anchor rule; diagnose
+the 6 non-runway edges with `js_root.py` (root unknown — do not guess).
 
 ## USER'S GATE for an X-Plane test
 "When the entire graph is read & assigned to geometry, not broken in later

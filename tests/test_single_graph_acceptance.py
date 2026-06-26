@@ -8,16 +8,23 @@ eyeballing spine numbers — which a local bridge/hack can satisfy.
 These tests make "done" OBJECTIVE and HACK-RESISTANT.  They must all pass, and
 they are written so that a two-graph workaround CANNOT make them green:
 
-  * ``test_solver_validator_same_spine_pairs`` — STRUCTURAL.  The elevation
-    solver and the validator must constrain the SAME spine pairs (same nodes,
-    same source).  Two graphs / two context builders differ → fails.  You cannot
-    fake spine=0 by checking a different (weaker) pair set than you enforce.
+  * ``test_cyxy_spine_zero`` — OUTCOME, and the load-bearing guard.  Zero spine
+    violations on the strict extended validator.  This is what catches a setter
+    on a different graph than the checker: whatever graph SETS the elevations, if
+    the surface it produces doesn't satisfy the validator's graph, this is RED.
+    RED today (18); GREEN only when the elevations the setter assigns satisfy the
+    exact pairs the validator checks (= one graph in effect).
   * ``test_validator_detects_spine_step`` — ANTI-GAMING.  A known step injected
     on a spine vertex MUST be flagged, so the validator cannot be quietly
     weakened (looser cap, dropped pairs, inflated noise) to fake spine=0.
-  * ``test_cyxy_spine_zero`` — OUTCOME.  Zero spine violations on the strict
-    extended validator.  A setter on a different graph than the checker leaves
-    residual here.  RED today (18); GREEN only when the graph is truly unified.
+
+NOTE (2026-06-26): a ``test_solver_validator_same_spine_pairs`` was removed — it
+compared ``spine_adjacency`` to the validator, but BOTH are derived from the same
+``grade_graph``, so it was trivially green and proved nothing about the route
+graph that actually sets the spine elevations.  False assurance is the exact
+failure mode this file exists to prevent, so the outcome test is the guard.  A
+genuine structural test must compare the ELEVATION-SETTING graph (the route
+graph / the emitted z) to the validator — see STATUS.md.
 
 RULE for the next session: do NOT add a bridge, a second graph, a ``geo_key``
 mapping for emission, or a post-solve patch.  If you are writing any of those,
@@ -37,61 +44,6 @@ os.environ.setdefault("O4_ROUTE_PROFILE_SOLVE", "1")
 def _cyxy():
     from conftest import cached_airport_layout
     return cached_airport_layout("CYXY")
-
-
-def _rc(xy):
-    return (round(float(xy[0]), 2), round(float(xy[1]), 2))
-
-
-def _validator_spine_pairs(layout):
-    """The spine vertex-pairs the validator (within_violations) checks, keyed by
-    rounded coordinate so they compare across the solver's index keying."""
-    from auto_patch import grade_graph as GG
-    from auto_patch.grade_graph_validate import _context, _open_ring
-    ctx = _context(layout)
-    pairs = set()
-    for s in layout.shapes:
-        if (s.role not in GG.SOFT_VISIBILITY_ROLES or s.polygon is None
-                or s.polygon.is_empty):
-            continue
-        ring = _open_ring(list(s.polygon.exterior.coords))
-        if len(ring) < 3:
-            continue
-        gs = GG.GradeShape(role=s.role, ring=[(x, y) for (x, y) in ring],
-                           keys=list(range(len(ring))))
-        sc = GG.shape_constraints(gs, ctx)
-        for chain in sc.spine_chains:
-            for a, b in zip(chain, chain[1:]):
-                pairs.add(frozenset((_rc(ring[a]), _rc(ring[b]))))
-    return pairs
-
-
-def _solver_spine_pairs(layout):
-    """The spine vertex-pairs the elevation solver constrains (spine_adjacency)."""
-    from auto_patch.elevation_per_surface.unified_jacobi import _build_node_list
-    from auto_patch.elevation_per_surface.route_profile.spine import (
-        spine_adjacency)
-    nodes, b2i = _build_node_list(layout)
-    _spine_nodes, spine_adj = spine_adjacency(layout, nodes, b2i)
-    pairs = set()
-    for i, lst in spine_adj.items():
-        for (j, _b) in lst:
-            if i < len(nodes) and j < len(nodes):
-                pairs.add(frozenset((_rc(nodes[i]), _rc(nodes[j]))))
-    return pairs
-
-
-def test_solver_validator_same_spine_pairs():
-    """The solver must enforce EVERY spine pair the validator checks (one graph,
-    one source of nodes).  A second graph / context builder leaves pairs the
-    validator checks but the solver never constrained."""
-    layout = _cyxy()
-    val = _validator_spine_pairs(layout)
-    solver = _solver_spine_pairs(layout)
-    missing = val - solver
-    assert not missing, (
-        f"{len(missing)} spine pair(s) the VALIDATOR checks are NOT enforced by "
-        f"the solver → two graphs / two sources.  e.g. {list(missing)[:3]}")
 
 
 def test_validator_detects_spine_step():
