@@ -152,7 +152,8 @@ def solve_route_profile(layout, icao: str,
                         "adj": {k: [j for (j, _w) in lst]
                                 for k, lst in _G.adj.items()},
                         "coord": dict(_G.coord),
-                        "runway_pts": list(runway_pts)}
+                        "runway_pts": list(runway_pts),
+                        "elev_presolve": list(elev)}
                 except (AttributeError, TypeError, KeyError):
                     pass
             n_terms, n_rects, n_juncs = _writeback(layout, elev, bucket_to_idx)
