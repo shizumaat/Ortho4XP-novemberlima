@@ -87,12 +87,31 @@ Until 1–3 hold, the setter will always miss a pair the checker sees.
 5. Then: re-cut compare-target fixtures, run the full suite, set new baselines,
    check the other airports (HECA/SPJC/SPLP), retire the ~15 legacy passes.
 
+## ★ DEFINITION OF DONE — `tests/test_single_graph_acceptance.py` (DO NOT bypass)
+Done is NOT a claim or an eyeballed number.  Done = these tests GREEN:
+- `test_cyxy_spine_zero` — zero spine violations on the strict extended
+  validator.  RED today (18, all runway-adjacent value drift).  This is the gate.
+- `test_solver_validator_same_spine_pairs` — solver & validator constrain the
+  SAME spine pairs.  GREEN now; must STAY green (no second pair set / hack).
+- `test_validator_detects_spine_step` — a 3 m injected step MUST be flagged.
+  GREEN now; must STAY green (DO NOT weaken the validator to fake spine=0).
+A two-graph bridge, a `geo_key` emission mapping, a post-solve patch, or a
+relaxed validator CANNOT make all three green together.  If you are writing any
+of those, stop — that is the hack the last ~10 sessions kept doing.
+
+Current finding (from the gate): the pair SET is already unified
+(`same_spine_pairs` green); the failure is VALUES at runway-adjacent nodes — the
+route graph (Graph A) and the runway seed disagree there (node 567: 695.63 vs
+694.89).  So the immediate fix is the **one-anchor rule** (#3): anchor the
+route-graph spine to the LOCAL runway at every runway-adjacent node.  Then chase
+any residual with the structural tests as the guard.
+
 ## USER'S GATE for an X-Plane test
 "When the entire graph is read & assigned to geometry, not broken in later
 passes, and ZERO spine validation errors — build in dev and test in X-Plane."
-We are at 18 spine errors → NOT yet ready.  Note: the 18 are NOT broken in later
-passes (verified: `elev` is already wrong pre-writeback) — they are the
-two-graph drift at the source.
+= `test_cyxy_spine_zero` green (with the other two still green).  NOT yet ready
+(18).  Note: the 18 are NOT broken in later passes (verified: `elev` is already
+wrong pre-writeback) — they are the dual-source drift at runway-adjacent nodes.
 
 ## Probes (/tmp, rebuild as needed; gated O4_RP_DEBUG_STASH=1 exposes layout._rg_debug)
 - `/tmp/spine_v.py` — within_violations total + spine(is_spine) + by-role.
