@@ -3210,6 +3210,22 @@ def _report_within_shape_violations(
                       f"  [pav-builder]   {'SPINE' if is_spine else 'body '} "
                       f"{pct:.1f}% on {role} cap={cap:.1f}% d={d:.1f}m "
                       f"@({x:.0f},{y:.0f})")
+    # ROUTE-REACH: a no-building apron whose feeding taxiways arrive at mutually
+    # unreachable elevations (so it cannot get a single reachable base level).
+    try:
+        from .grade_graph_validate import route_reach_violations as _gg_reach
+        reach_viol = _gg_reach(layout)
+    except Exception:
+        reach_viol = []
+    if reach_viol:
+        UI.vprint(1,
+                  f"  [pav-builder] WARN: {icao}: {len(reach_viol)} ROUTE-REACH "
+                  f"violation(s) — a no-building apron's feeder taxiways arrive "
+                  f"at mutually unreachable elevations (no single reachable base).")
+        for (pct, cap, d, role, _sp, x, y) in reach_viol[:8]:
+            UI.vprint(1,
+                      f"  [pav-builder]   route-reach {pct:.2f}% (cap {cap:.0f}%) "
+                      f"over {d:.0f}m @({x:.0f},{y:.0f})")
     if n_viol > 0:
         try:
             msg = (f"  [pav-builder] WARN: {icao}: {n_viol} within-shape "

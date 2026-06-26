@@ -230,3 +230,94 @@ def _spine_runway_join_violations(layout, noise):
                 out.append(((de / d) * 100.0, cap * 100.0, d, "runway_join",
                             True, ex, ey))
     return out
+
+
+def route_reach_violations(layout, noise=ELEV_ROUNDING_NOISE_M):
+    """Flag a soft airside shape (apron / junction) whose AIRSIDE-ROUTE CONTACTS
+    are at mutually UNREACHABLE elevations.
+
+    User model (2026-06-26): a no-building apron must get a single base elevation
+    that is within-cap reachable via ALL the taxiways that feed it.  If two of its
+    route contacts ``a, b`` (the taxiway/junction shapes that abut it) sit at
+    elevations whose difference exceeds ``cap · dist(a, b)`` — where ``cap`` is the
+    shape's own body cap and ``dist`` is the straight-line gap between the contacts
+    (a LOWER bound on the in-pavement route distance) — then NO cap-compliant
+    surface can connect them through the shape, so the shape is forced to a steep,
+    partly-unreachable elevation (CYXY apron #85: TX2 690.2 vs TX3 677.0 = 13.2 m
+    over 478 m = 2.76 % ≫ the 1 % apron cap).  The fix is upstream — the taxiways
+    must converge toward a shared reachable level — so this is reported as a
+    ``route_reach`` violation, not a within-shape one.
+
+    Returns ``[(pct, cap_pct, dist, role, is_spine=True, x, y), ...]`` (worst
+    first), matching ``within_violations``' tuple shape so callers can merge."""
+    from auto_patch.layout import (ROLE_APRON, ROLE_BUILDING, ROLE_JUNCTION,
+                                   ROLE_RUNWAY)
+    from auto_patch.config import (APRON_MAX_GRADE, taxi_grade_cap_for_letter)
+    from auto_patch.junction_rules import SLOPING_RECT_ROLES
+
+    # the route shapes whose contact elevation feeds an apron/junction: the taxi
+    # network (sloping rects + taxi junctions) — NOT service roads (own datum) and
+    # NOT runways (handled by the runway-join check; a runway contact is not a
+    # flat-apron constraint, it is the hard anchor itself).
+    route_roles = set(SLOPING_RECT_ROLES) | {ROLE_JUNCTION}
+
+    routes = []                 # (shape, elevs)
+    for s in layout.shapes:
+        if (s.role not in route_roles or s.polygon is None or s.polygon.is_empty
+                or str(s.ref or "").upper().startswith("SVC")):
+            continue
+        ring = _open_ring(list(s.polygon.exterior.coords))
+        elevs = _shape_elevs(s, len(ring))
+        if elevs is None:
+            continue
+        routes.append((s, ring, elevs))
+
+    buildings = [t.polygon for t in layout.shapes
+                 if t.role == ROLE_BUILDING and t.polygon is not None
+                 and not t.polygon.is_empty]
+
+    out = []
+    for s in layout.shapes:
+        if (s.role != ROLE_APRON or s.polygon is None or s.polygon.is_empty):
+            continue
+        if any(s.polygon.distance(b) < 1.0 for b in buildings):
+            continue                          # a building anchors the level
+        cap = APRON_MAX_GRADE
+        # contacts: the nearest route vertex to this apron, per touching route.
+        contacts = []                         # (ref, elev, (x, y))
+        for (t, tring, televs) in routes:
+            if t is s or s.polygon.distance(t.polygon) > 1.5:
+                continue
+            best = None
+            for (x, y), e in zip(tring, televs):
+                d2 = s.polygon.exterior.distance(_pt(x, y))
+                if best is None or d2 < best[0]:
+                    best = (d2, e, (x, y))
+            if best is not None:
+                contacts.append((str(t.ref), best[1], best[2]))
+        if len(contacts) < 2:
+            continue
+        worst = None
+        for i in range(len(contacts)):
+            for j in range(i + 1, len(contacts)):
+                (_ra, ea, pa), (_rb, eb, pb) = contacts[i], contacts[j]
+                dist = math.hypot(pa[0] - pb[0], pa[1] - pb[1])
+                if dist < 1e-3:
+                    continue
+                de = abs(ea - eb)
+                if de > cap * dist + noise:
+                    g = de / dist
+                    if worst is None or g > worst[0]:
+                        c = s.polygon.centroid
+                        worst = (g, dist, c.x, c.y)
+        if worst is not None:
+            g, dist, cx, cy = worst
+            out.append((g * 100.0, cap * 100.0, dist, "route_reach", True,
+                        cx, cy))
+    out.sort(reverse=True)
+    return out
+
+
+def _pt(x, y):
+    from shapely.geometry import Point
+    return Point(x, y)
