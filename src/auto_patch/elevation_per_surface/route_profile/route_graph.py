@@ -234,6 +234,222 @@ def enrich_route_graph(layout, nodes, spine_nodes):
     return geo_key, {rid: tuple(v) for rid, v in rect_end_keys.items()}
 
 
+def _anchor_remaining_components(G, anchors, dem_fn, contact_m=12.0):
+    """Catch-all anchor coverage (user 2026-06-26): every airside segment must
+    anchor back to something, or be terrain.  After runway + service-road
+    anchoring, any still-unanchored component (e.g. an isolated discovered-TX
+    piece whose pavement touches an apron but whose graph nodes are far from a
+    taxi node) is connected to the nearest ANCHORED node within ``contact_m``;
+    failing that — it touches airside but has no nearby graph node — it DEM-anchors
+    at terrain (graded ≤cap from there).  Returns #components resolved."""
+    from collections import defaultdict
+    from auto_patch.config import TAXI_MAX_GRADE
+
+    parent = {k: k for k in G.coord}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        parent[find(a)] = find(b)
+
+    for k, lst in G.adj.items():
+        for (j, _w) in lst:
+            if j in parent:
+                union(k, j)
+    comp = defaultdict(list)
+    for k in G.coord:
+        comp[find(k)].append(k)
+    anchored_roots = {find(a) for a in anchors if a in parent}
+    anchored_nodes = [k for k in G.coord if find(k) in anchored_roots]
+
+    n = 0
+    for root, members in comp.items():
+        if root in anchored_roots:
+            continue
+        best, bd, ba = None, contact_m * contact_m, None
+        for k in members:
+            kx, ky = G.coord[k]
+            for j in anchored_nodes:
+                d = (G.coord[j][0] - kx) ** 2 + (G.coord[j][1] - ky) ** 2
+                if d < bd:
+                    bd, best, ba = d, j, k
+        if best is not None:                       # connect into anchored network
+            w = math.hypot(G.coord[best][0] - G.coord[ba][0],
+                           G.coord[best][1] - G.coord[ba][1])
+            G.adj.setdefault(ba, []).append((best, w))
+            G.adj.setdefault(best, []).append((ba, w))
+            ek = (ba, best) if ba <= best else (best, ba)
+            G.edge_cap.setdefault(ek, TAXI_MAX_GRADE)
+            n += 1
+        else:                                      # airside-adjacent → DEM terrain
+            for k in members:
+                de = dem_fn(*G.coord[k])
+                if de is not None:
+                    anchors[k] = float(de)
+                    n += 1
+                    break
+    return n
+
+
+def _service_road_anchors(layout, G, anchors, dem_fn, contact_m=10.0):
+    """Anchor the SERVICE-ROAD spines (user 2026-06-26).  Service roads are in the
+    route graph but the runway-contact anchoring skips them, so they relax to 0.
+    Give them their own datum:
+
+      * set their graph edges to the 4 % service-road cap;
+      * AIRSIDE CONTACT — where a service-road centerline endpoint is within
+        ``contact_m`` of a TAXI node, add a 4 % edge to it so the road adopts the
+        airside elevation there (propagated by the solve);
+      * TERRAIN — any service-road endpoint NOT near a taxi node anchors at DEM
+        (the landside/perimeter road network), graded ≤ 4 % inward.
+
+    Mutates ``G`` (edge caps + contact edges) and ``anchors`` (DEM terrain ends).
+    """
+    from auto_patch.config import SERVICE_ROAD_MAX_GRADE
+
+    cls = getattr(layout, "apt_taxi_centerlines", None) or []
+    svc = [(e[0] if isinstance(e, (tuple, list)) else e)
+           for e in cls
+           if str((e[1] if isinstance(e, (tuple, list)) and len(e) > 1 else None)
+                  or "").upper().startswith("SVC")]
+    svc = [ln for ln in svc if ln is not None and not ln.is_empty]
+    if not svc:
+        return 0
+
+    # SVC graph nodes (keys nearest each SVC centerline vertex).
+    svc_keys: set = set()
+    svc_endpts: list = []
+    for ln in svc:
+        try:
+            cs = list(ln.coords)
+        except Exception:
+            continue
+        for (x, y) in cs:
+            k, _ = G.nearest_key(x, y)
+            if k is not None:
+                svc_keys.add(k)
+        for (x, y) in (cs[0], cs[-1]):
+            k, _ = G.nearest_key(x, y)
+            if k is not None:
+                svc_endpts.append(k)
+
+    # taxi (non-SVC) nodes — the airside the contact connects to.
+    taxi_keys = [k for k in G.coord if k not in svc_keys]
+    taxi_xy = [(k, G.coord[k]) for k in taxi_keys]
+
+    # set every SVC-incident edge to the 4 % service cap.
+    for k in svc_keys:
+        for (j, _w) in G.adj.get(k, ()):
+            ek = G._ekey(k, j)
+            G.edge_cap[ek] = max(G.edge_cap.get(ek, 0.0),
+                                 float(SERVICE_ROAD_MAX_GRADE))
+
+    n_contact = n_terrain = 0
+    c2 = contact_m * contact_m
+    for k in svc_endpts:
+        if k in anchors:
+            continue
+        kx, ky = G.coord[k]
+        best, bd = None, c2
+        for (tk, (tx, ty)) in taxi_xy:
+            d = (tx - kx) ** 2 + (ty - ky) ** 2
+            if d < bd:
+                bd, best = d, tk
+        if best is not None:                    # AIRSIDE CONTACT → connect (4 %)
+            w = math.hypot(G.coord[best][0] - kx, G.coord[best][1] - ky)
+            G.adj.setdefault(k, []).append((best, w))
+            G.adj.setdefault(best, []).append((k, w))
+            ek = (k, best) if k <= best else (best, k)
+            G.edge_cap[ek] = max(G.edge_cap.get(ek, 0.0),
+                                 float(SERVICE_ROAD_MAX_GRADE))
+            n_contact += 1
+        else:                                   # TERRAIN entry → DEM anchor
+            de = dem_fn(kx, ky)
+            if de is not None:
+                anchors[k] = float(de)
+                n_terrain += 1
+    return n_contact + n_terrain
+
+
+def bridge_route_graph_components(G, max_bridge_m=25.0):
+    """Connect the route graph's disconnected components (user 2026-06-26: every
+    airside segment must anchor back to something airside, else be groundside).
+
+    Many apt.dat / discovered centerlines don't share a vertex at a junction (the
+    gap exceeds the build snap tolerance), so the graph fragments into pieces and
+    every off-main component relaxes to 0 (unanchored — D, the terminal-area
+    centerline shards).  Bridge each component to its nearest node in ANOTHER
+    component within ``max_bridge_m`` (a junction-sized gap), iterating via
+    union-find, so the connected airside reaches the runway-anchored network.
+    Genuinely-isolated remnants (> max_bridge_m from anything) stay separate and
+    are caught by the groundside reclassification.  Returns #bridges added."""
+    from collections import defaultdict
+    from auto_patch.config import TAXI_MAX_GRADE
+    from shapely.geometry import Point
+    from shapely.strtree import STRtree
+
+    if len(G.coord) < 2:
+        return 0
+    keys = list(G.coord)
+    pts = [Point(G.coord[k]) for k in keys]
+    tree = STRtree(pts)
+    idx_of = {k: i for i, k in enumerate(keys)}
+
+    parent = {k: k for k in G.coord}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        parent[find(a)] = find(b)
+
+    for k, lst in G.adj.items():
+        for (j, _w) in lst:
+            if j in parent:
+                union(k, j)
+
+    added = 0
+    for _it in range(12):
+        comp = defaultdict(list)
+        for k in G.coord:
+            comp[find(k)].append(k)
+        if len(comp) <= 1:
+            break
+        bridged = False
+        for _root, members in list(comp.items()):
+            mset = set(members)
+            best, bd, ba = None, max_bridge_m * max_bridge_m, None
+            for k in members:
+                xk, yk = G.coord[k]
+                for qi in tree.query(pts[idx_of[k]].buffer(max_bridge_m)):
+                    j = keys[int(qi)]
+                    if j in mset:
+                        continue
+                    d = (G.coord[j][0] - xk) ** 2 + (G.coord[j][1] - yk) ** 2
+                    if d < bd:
+                        bd, best, ba = d, j, k
+            if best is not None and find(ba) != find(best):
+                w = math.hypot(G.coord[best][0] - G.coord[ba][0],
+                               G.coord[best][1] - G.coord[ba][1])
+                G.adj.setdefault(ba, []).append((best, w))
+                G.adj.setdefault(best, []).append((ba, w))
+                ek = (ba, best) if ba <= best else (best, ba)
+                G.edge_cap.setdefault(ek, TAXI_MAX_GRADE)
+                union(ba, best)
+                added += 1
+                bridged = True
+        if not bridged:
+            break
+    return added
+
+
 def solve_route_graph(layout, nodes, spine_nodes, runway_pts, dem_fn,
                       building_levels=None, *, max_sweeps=5000, tol=1e-3,
                       curvature=0.25):
@@ -262,6 +478,15 @@ def solve_route_graph(layout, nodes, spine_nodes, runway_pts, dem_fn,
     G = shared_taxi_route_graph(layout)
     if not getattr(G, "coord", None) or not runway_pts:
         return {}, [], geo_key, rect_end_keys
+    # NOTE: the off-main components are NOT taxi junction-gaps — they are SERVICE
+    # ROADS (anchored at terrain + airside contacts at the 4 % cap, see task #9)
+    # and DISCOVERED taxiways (folded in + classified, task #8).  A generic
+    # nearest-node bridge would wrongly fuse a service road into the taxi network
+    # at the taxi cap, so it is gated OFF; proper per-route-type anchoring handles
+    # them.  (Kept for genuinely-gapped taxi centerlines on other airports.)
+    import os as _os
+    if _os.environ.get("O4_RP_BRIDGE_COMPONENTS", "0") == "1":
+        bridge_route_graph_components(G)
     keys = list(G.coord)
 
     def cap(u, v):
@@ -271,6 +496,31 @@ def solve_route_graph(layout, nodes, spine_nodes, runway_pts, dem_fn,
     anchors: dict = {}
     for (k, ae) in _runway_route_contacts(layout, G, runway_pts):
         anchors[k] = ae
+
+    # ── SERVICE-ROAD spine (user 2026-06-26): service roads get a spine too, at
+    # the 4 % cap, anchored at AIRSIDE CONTACTS (where they touch a taxiway/runway
+    # → connect to that node so they adopt its elevation) and at TERRAIN (DEM)
+    # where they run out to the perimeter/landside.  Without this the SVC chains
+    # sit as unanchored components (z = 0).  Trucks reach via these.
+    _service_road_anchors(layout, G, anchors, dem_fn)
+
+    # An airside-adjacent piece anchors at the AIRSIDE-reachable level (the reach
+    # band), not raw DEM — in a bowl the DEM is metres below the surrounding
+    # apron (CYXY TX3: DEM 668 vs apron 693).  Fall back to DEM only where the
+    # band does not reach (a true perimeter/landside end).
+    _ground_band = reach_band_sampler(layout, runway_pts)
+
+    def _ground_fn(x, y):
+        b = _ground_band(x, y)
+        if b is not None:
+            return 0.5 * (b[0] + b[1])
+        return dem_fn(x, y)
+
+    # Catch-all anchor coverage: any remaining unanchored component (isolated
+    # discovered-TX pieces whose pavement touches an apron but whose graph nodes
+    # are far from a taxi node) connects to the nearest anchored node, else
+    # anchors at the airside-reachable level (band, DEM fallback).
+    _anchor_remaining_components(G, anchors, _ground_fn)
 
     # ── building-serving floors, propagated cap-Lipschitz ON G ────────────────
     if building_levels is None:
