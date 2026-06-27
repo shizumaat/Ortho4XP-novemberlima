@@ -3709,6 +3709,25 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     f"  [pav-builder] {icao}: re-roled {_n_svc_j} "
                     f"road-only junction/apron(s) → service_junction (4 %).")
 
+        # A wide paved LOT reachable only via a service road is landside —
+        # ONE groundside surface, not a road carved through it.  The
+        # on-pavement 1206 carve shreds such a lot into a service_road rect
+        # + narrow service_junction frames (CYXY 'Crew cars' loops the lot
+        # rim); each fragment is individually narrow so the wide-lot guard
+        # in the re-role above never fires.  This runs AFTER that re-role
+        # (so the frames are already service_junction) and BEFORE the
+        # runway-disconnected pass below (so the merged lot can grade as
+        # groundside): a morphological opening on each connected service
+        # component extracts the 2-D lot core and reclassifies it to
+        # groundside, leaving the narrow connector strips as service_road.
+        from .config import ROAD_ONLY_LOT_GROUNDSIDE
+        if ROAD_ONLY_LOT_GROUNDSIDE:
+            from .junction_repair import (
+                _reclassify_road_only_lots_to_groundside)
+            _reclassify_road_only_lots_to_groundside(
+                layout, icao=icao, dem=dem,
+                tile_lat=tile_lat, tile_lon=tile_lon)
+
         # An apron must have a touch-chain back to a runway (user
         # 2026-06-09); pavement islands without one are landside ramps /
         # parking → groundside (4 %).  MUST run before tile_cut: the

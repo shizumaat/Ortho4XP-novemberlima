@@ -1304,6 +1304,42 @@ ROAD_FRONTAGE_TOL_M = 3.0
 # junction #168 section, 70°) keep.  Modes A/B are unaffected.
 ROAD_CARVE_TERMINAL_RIM_M = 300.0
 
+# (2026-06-27) ROAD-ONLY LOT → GROUNDSIDE.  The on-pavement 1206 carve runs
+# a truck-route centerline THROUGH a wide paved lot it merely services
+# (CYXY 'Crew cars' loops the lot rim, every sample qualified by the edge-
+# hugging mode), shredding the lot into an oversized service_road rect +
+# narrow service_junction frames.  Each fragment is individually narrow, so
+# the wide-lot guard in the service-junction re-role never fires, and the
+# service roles are excluded from the runway-disconnected → groundside pass
+# — the lot never becomes the single groundside surface it should be.  A
+# road hugging a lot's rim is LOCALLY identical to one hugging the airfield
+# rim; only connectivity distinguishes them, so the repair runs on the
+# UNION of each connected service_road+service_junction component: a
+# morphological OPENING (erode by the road half-width, dilate back) keeps
+# the genuinely 2-D parts (the lot) and drops the 1-D road strips.  A
+# component whose opened core is ≥ ROAD_LOT_AREA_RATIO of its area is a lot;
+# member shapes mostly inside the core → groundside (DEM-follow, merged into
+# one surface); the narrow connector strips stay service_road.
+# ``O4_ROAD_LOT_GROUNDSIDE``.
+ROAD_ONLY_LOT_GROUNDSIDE = (
+    _os.environ.get("O4_ROAD_LOT_GROUNDSIDE", "1") == "1")
+# Morphological-opening radius (m): erode then dilate by this.  Pavement up
+# to 2·R = 15 m wide vanishes; only wider 2-D pavement survives as a lot.
+# 7.5 m matches the service-junction re-role's own "narrow road < 15 m"
+# threshold (``buffer(-7.5)``), so a legal road (≤ the 13 m carve cap) never
+# survives the opening while a genuine lot does.
+ROAD_LOT_OPEN_RADIUS_M = 7.5
+# Minimum opened-core area (m²) for a surviving piece to count as a lot —
+# rejects junction-bulge slivers at road bends/crossings.  This + the 15 m
+# opening width is the lot-vs-road discriminator (a road network opens to
+# nothing); the area ratio below is an extra knob, off by default.
+ROAD_LOT_MIN_AREA_M2 = 200.0
+# Optional extra guard: require the opened core to be at least this fraction
+# of the component area.  OFF by default (0.0) — a lot hanging off a long
+# connector road has a low whole-component ratio yet is still a real lot, so
+# the opening + min-area test alone decides.
+ROAD_LOT_AREA_RATIO = 0.0
+
 # (session 63) Cut long taxi rects AND runway segments at interior terrain
 # extrema (``split_long_rects_along_terrain`` + the runway peak/valley seams in
 # ``pavement/runway_segments.py``).  DEFAULT OFF (user 2026-06-05): the extrema

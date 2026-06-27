@@ -54,6 +54,8 @@ from .layout import (
     ROLE_RUNWAY,
     ROLE_RUNWAY_CROSSING,
     ROLE_SECONDARY_PARALLEL,
+    ROLE_SERVICE_JUNCTION,
+    ROLE_SERVICE_ROAD,
     ROLE_STUB,
     ROLE_BUILDING,
     SHARED_VERTEX_TOL_M,
@@ -3441,6 +3443,207 @@ def _reclassify_runway_disconnected_to_groundside(
         except _GEOM_EXC:
             pass
     return n_reclassified
+
+
+def _reclassify_road_only_lots_to_groundside(
+        layout: "PavementLayout",
+        icao: str = "",
+        dem=None,
+        tile_lat: int = 0,
+        tile_lon: int = 0,
+        open_radius_m: float | None = None,
+        min_lot_area_m2: float | None = None,
+        lot_area_ratio: float | None = None,
+        member_inside_frac: float = 0.10,
+        touch_tol_m: float = 0.05,
+        ) -> int:
+    """A wide paved LOT reachable only via a service road is landside —
+    ONE groundside surface, not a road carved through it.
+
+    The on-pavement apt.dat-1206 carve runs a truck-route centerline
+    THROUGH such a lot (CYXY 'Crew cars' loops the lot's rim, qualified
+    sample-by-sample by the edge-hugging mode), shredding it into an
+    oversized ``service_road`` rect + narrow ``service_junction`` frames.
+    Each fragment is individually narrow, so the per-piece wide-lot guard
+    in the service-junction re-role never fires, and because the pieces
+    carry service roles they are excluded from the runway-disconnected →
+    groundside pass — the lot never becomes groundside (it stays a
+    fragmented road blob, even leaving an uncovered hole at CYXY).
+
+    A road hugging a lot's rim is LOCALLY identical to a road hugging the
+    airfield rim; only connectivity distinguishes them.  So this works on
+    the UNION of each connected ``service_road`` + ``service_junction``
+    component: a morphological OPENING (erode by the road half-width,
+    dilate back) keeps only the genuinely 2-D parts — the lot — and drops
+    the 1-D road strips.  A component whose opened core is a large enough
+    fraction of its area is a lot; its member shapes lying mostly inside
+    the core are reclassified to ``ROLE_GROUNDSIDE_PAVEMENT`` (DEM-
+    following) and later merged into one surface, while the narrow
+    connector strips stay ``service_road`` and meet the lot at its edge
+    (``GROUNDSIDE_SHARE_SVC``).
+
+    Runs after the service-junction re-role and BEFORE the runway-
+    disconnected → groundside pass.  Skipped for terminal-less airports
+    (no landside, same guard as that pass).  Returns the count
+    reclassified.
+    """
+    from .config import (
+        ROAD_LOT_AREA_RATIO,
+        ROAD_LOT_MIN_AREA_M2,
+        ROAD_LOT_OPEN_RADIUS_M,
+    )
+    R = ROAD_LOT_OPEN_RADIUS_M if open_radius_m is None else open_radius_m
+    min_a = ROAD_LOT_MIN_AREA_M2 if min_lot_area_m2 is None else min_lot_area_m2
+    ratio_min = ROAD_LOT_AREA_RATIO if lot_area_ratio is None else lot_area_ratio
+    # Terminal-less airports have no landside — every paved island is
+    # aircraft parking (same guard as the runway-disconnected pass).
+    if not any(s.role == ROLE_BUILDING
+               and s.polygon is not None and not s.polygon.is_empty
+               for s in layout.shapes):
+        return 0
+    svc_idxs = [i for i, s in enumerate(layout.shapes)
+                if s.role in (ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION)
+                and s.polygon is not None and not s.polygon.is_empty]
+    if not svc_idxs:
+        return 0
+
+    def _as_polys(geom):
+        if geom is None or geom.is_empty:
+            return []
+        if geom.geom_type == "Polygon":
+            return [geom]
+        return [g for g in getattr(geom, "geoms", ())
+                if g.geom_type == "Polygon" and not g.is_empty]
+
+    # Connected components over touching service shapes.
+    from shapely.strtree import STRtree
+    polys = [layout.shapes[i].polygon for i in svc_idxs]
+    tree = STRtree(polys)
+    adj: dict[int, set[int]] = {k: set() for k in range(len(svc_idxs))}
+    for k, p in enumerate(polys):
+        try:
+            for m in tree.query(p.buffer(touch_tol_m)):
+                m = int(m)
+                if m != k and p.distance(polys[m]) <= touch_tol_m:
+                    adj[k].add(m)
+                    adj[m].add(k)
+        except _GEOM_EXC:
+            continue
+    seen: set[int] = set()
+    comps: list[list[int]] = []
+    for k in range(len(svc_idxs)):
+        if k in seen:
+            continue
+        stack = [k]
+        seen.add(k)
+        comp = [k]
+        while stack:
+            x = stack.pop()
+            for y in adj[x]:
+                if y not in seen:
+                    seen.add(y)
+                    stack.append(y)
+                    comp.append(y)
+        comps.append(comp)
+
+    from .groundside import _dem_follow_polygon, _dem_sampler
+    _dem_at = (_dem_sampler(layout, dem, tile_lat, tile_lon)
+               if dem is not None else None)
+    n = 0
+    remove_idxs: set[int] = set()
+    new_shapes: list[BuiltShape] = []
+    for comp in comps:
+        comp_polys = [polys[k] for k in comp]
+        try:
+            comp_union = unary_union(comp_polys)
+            opened = comp_union.buffer(-R).buffer(R)
+        except _GEOM_EXC:
+            continue
+        lot_pieces = [g for g in _as_polys(opened) if g.area >= min_a]
+        if not lot_pieces:
+            continue
+        try:
+            lot = unary_union(lot_pieces)
+            comp_area = comp_union.area
+            if comp_area <= 0.0 or (lot.area / comp_area) < ratio_min:
+                # Mostly 1-D strips (a road network, e.g. HECA) — not a lot.
+                continue
+        except _GEOM_EXC:
+            continue
+        members: list[int] = []
+        for k in comp:
+            i = svc_idxs[k]
+            s = layout.shapes[i]
+            try:
+                # A piece is part of the lot if any meaningful share of it
+                # lies inside the ERODED core.  The threshold is low on
+                # purpose: a thin connector strip (the road leading away to
+                # the apron) erodes away entirely, so it has ~0 overlap with
+                # the core, while a carved lot frame wrapping the core
+                # overlaps well above the floor — a wide, robust gap (CYXY:
+                # connectors 0.00 vs the #156 frame 0.17).
+                inside = s.polygon.intersection(lot).area
+                if s.polygon.area > 0.0 \
+                        and (inside / s.polygon.area) >= member_inside_frac:
+                    members.append(i)
+            except _GEOM_EXC:
+                continue
+        if not members:
+            continue
+        # Emit the lot as ONE surface: union the carved fragments (the
+        # oversized road rect + its junction frames) into a single polygon
+        # per contiguous blob and drop carve-gap interior holes, so the lot
+        # is one clean ``groundside`` shape with the thin connector road
+        # reaching its edge — instead of a fragmented road blob.
+        try:
+            merged = unary_union(
+                [layout.shapes[i].polygon for i in members])
+        except _GEOM_EXC:
+            continue
+        emitted = False
+        for blob in _as_polys(merged):
+            if blob.interiors:
+                kept = [r for r in blob.interiors
+                        if Polygon(r).area >= min_a]
+                blob = Polygon(blob.exterior, kept)
+            built_poly, built_alts = blob, None
+            if _dem_at is not None:
+                built = _dem_follow_polygon(
+                    blob, _dem_at, simplify_tol=0.0)
+                if built is None:
+                    continue          # never half-convert real pavement
+                built_poly, built_alts = built
+            new_shapes.append(BuiltShape(
+                polygon=built_poly,
+                role=ROLE_GROUNDSIDE_PAVEMENT,
+                ref="groundside",
+                node_altitudes=built_alts))
+            n += 1
+            emitted = True
+        if emitted:
+            remove_idxs.update(members)
+
+    if remove_idxs:
+        layout.shapes = [s for j, s in enumerate(layout.shapes)
+                         if j not in remove_idxs]
+        layout.shapes.extend(new_shapes)
+
+    if n and dem is not None:
+        from .groundside import _separate_groundside_from_airside
+        try:
+            _separate_groundside_from_airside(
+                layout, dem, tile_lat, tile_lon)
+        except _GEOM_EXC:
+            pass
+    if n:
+        try:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: {n} road-only lot(s) "
+                f"(service_road/junction fragments) merged → one groundside "
+                f"surface each.")
+        except _GEOM_EXC:
+            pass
+    return n
 
 
 def _connect_discovered_lane_dead_ends_to_junctions(
