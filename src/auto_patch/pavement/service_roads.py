@@ -423,6 +423,7 @@ def detect_road_runs(
         flags: list[bool] = []
         widths: list[float] = []
         dists: list[float] = []
+        offpav: list[bool] = []
         for t in range(n + 1):
             d0 = min(t * step, L)
             p = ls.interpolate(d0)
@@ -481,6 +482,7 @@ def detect_road_runs(
             dists.append(d0)
             flags.append(ok)
             widths.append(w)
+            offpav.append(not pav_prep.contains(p))
 
         t0 = None
         for t in range(n + 2):
@@ -489,6 +491,19 @@ def detect_road_runs(
                 t0 = t
             elif not on and t0 is not None:
                 d_start, d_end = dists[t0], dists[min(t - 1, n)]
+                # CONNECTOR DEAD-END EXTENSION (user 2026-06-26): a connector run
+                # that ends where the route exits pavement INTO the groundside
+                # (the lot was subtracted from pav_union before the carve) stops ~a
+                # road-width short, leaving a GAP to the groundside.  Extend the run
+                # to the first off-pav sample (the groundside boundary) so the SVC
+                # rect reaches it — the overlap-clip then makes the SVC road SHARE
+                # an edge with the groundside (a cut, not a gap).  Only into off-pav
+                # (the lot), never into a wide-apron interior.
+                if connector:
+                    if t <= n and offpav[t]:
+                        d_end = dists[min(t, n)]
+                    if t0 - 1 >= 0 and offpav[t0 - 1]:
+                        d_start = dists[t0 - 1]
                 if d_end - d_start >= min_run:
                     try:
                         run = substring(ls, d_start, d_end)
@@ -497,7 +512,7 @@ def detect_road_runs(
                     if run is not None and run.geom_type == "LineString" \
                             and run.length >= min_run:
                         ws = sorted(widths[t0:min(t - 1, n) + 1])
-                        out.append((run, ws[len(ws) // 2], name))
+                        out.append((run, ws[len(ws) // 2] if ws else max_w, name))
                 t0 = None
 
     # ── STRIP EXTENSION (user round 3): a 1206 road that ENTERS a
