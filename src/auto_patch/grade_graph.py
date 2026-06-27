@@ -34,6 +34,7 @@ them.  This module owns the apron/junction visibility graph only.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 from typing import Callable, Hashable, Optional, Sequence
 
@@ -61,6 +62,14 @@ SPINE_PERP_TOL_M = 1.0
 
 # Pairs closer than this are ring/relative noise — not a grade constraint.
 _MIN_PAIR_DIST_M = 0.5
+
+# Max length of an APRON interior body↔body grade chord (user 2026-06-26): beyond
+# this, a chord across a wide apron is not a real grade path (the grade reference
+# is each point's DIRECT chord to its spine), so it is dropped to decouple the
+# building frontages from the route-maxed-low far interior.  Ring-adjacent, spine,
+# building-frontage and seam chords are NEVER dropped by this.  0 = unlimited (the
+# legacy all-pairs behaviour).  ``O4_APRON_BODY_CHORD_MAX_M`` overrides.
+_APRON_BODY_CHORD_MAX_M = float(os.environ.get("O4_APRON_BODY_CHORD_MAX_M", "60"))
 
 
 @dataclass
@@ -457,6 +466,23 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
                     and crosses_spine is not None
                     and crosses_spine(xi, yi, xj, yj)):
                 continue            # path is via the spine, not this diagonal
+            # DECOUPLE LONG APRON BODY CHORDS (user 2026-06-26): across a wide
+            # single-polygon apron over terrain that rises >cap, a long interior
+            # body↔body visibility chord couples the building frontages to the
+            # route-maxed-low interior far away (CYXY: a 178 m chord pinned the
+            # building18↔16 apron edge down to the runway-side 695.9, a "dip down
+            # and rise again").  The real grade reference is each point's DIRECT
+            # chord to its SPINE (graded ≤cap to the local centerline), not to a
+            # distant interior point — so drop interior body↔body chords beyond
+            # ``_APRON_BODY_CHORD_MAX_M`` (keep ring-adjacent + short locals for
+            # smoothness, and ALL spine / building-frontage / seam chords).  The
+            # apron then grades to its spine/buildings/edges and follows the
+            # terrain smoothly between them instead of bowling to a far anchor.
+            if (_APRON_BODY_CHORD_MAX_M and shape.role == APRON_ROLE
+                    and not spine_pair and not ring_adjacent
+                    and not ki_bld and kj not in bld
+                    and d > _APRON_BODY_CHORD_MAX_M):
+                continue
             # PER-EDGE spine cap (user 2026-06-24): a taxi route keeps ITS OWN
             # per-letter cap along its whole length, INCLUDING inside a junction
             # — a 3% taxiway grades at 3% up to the edge of a 1.5% taxiway it
