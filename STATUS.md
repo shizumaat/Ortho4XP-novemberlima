@@ -111,9 +111,25 @@ correct. Residual 5.4% = building16 a route-limited low pad (acceptable step).
    (`O4_SVC_REROLE_NARROW_ONLY`). (2) groundside SHARES edges with SVC roads — drop
    service roles from `_separate_groundside_from_airside` clearance set
    (`O4_GROUNDSIDE_SHARE_SVC`); gap 1.00→0.00 m. CYXY lot now one groundside level
-   701.6-702.8, spine=0, body viols 302. ⚠ FOLLOW-UP: the SVC road grading SMOOTHLY
-   into the groundside at the now-shared edge not yet verified (gap closed, but the
-   road's 4%-from-apron vs groundside-DEM reconciliation at the shared edge).
+   701.6-702.8, spine=0, body viols 302.
+   ✅ FOLLOW-UP A (5e4dd3a) `_merge_touching_groundside` (`O4_MERGE_GROUNDSIDE`):
+   union groundside pieces sharing a ≥2 m seam → ONE surface. CYXY lot @(-465,408):
+   two pieces 899+1276 → one 2280 m². Split ROOT = upstream junction-emit difference
+   / overlap-clip on a multi-polygon source union (NOT neck-split or decompose —
+   both ruled out by toggling on/off, identical split).
+   ⏳ FOLLOW-UP B (TODO, deferred): apron→groundside truck connection. `1206 11 10
+   twoway N` (apron node 11 N_start @(-403,408) → groundside node 10 N_stop
+   @(-432,398)) is filtered by `detect_road_runs` because the connection crosses
+   ONLY WIDE pavement (apron + lot) — NO sample qualifies as a narrow road, so the
+   mouth-extension hook has nothing to extend from. NEEDS a model change: build a
+   1206 edge terminating at a truck TERMINUS (N_stop/N_start dead-end at a parking
+   area) as an SVC connector despite the wide crossing — requires the 1206
+   node/terminus structure (detect_road_runs only sees merged LineStrings) and the
+   lot isn't groundside-classified yet at carve time. Delicate (shared w/
+   HECA/SPJC).
+   ⚠ FOLLOW-UP C: SVC road grading SMOOTHLY into the groundside at the shared edge
+   not yet verified (gap closed in 73e9d03, but the road 4%-from-apron vs
+   groundside-DEM reconciliation at the shared edge).
 4. **Shape 168 → groundside** — only airside connection is via SVC12; elevation
    seems too low. Reclassify groundside, raise to SVC12 reach.
 5. **Rough transition around shape 214** at the end of A2 — smooth it.
