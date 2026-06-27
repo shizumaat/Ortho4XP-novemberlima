@@ -172,10 +172,17 @@ def _spine_runway_join_violations(layout, noise):
     cap.  Catches a spine that drops below the runway at the join (the F/14R
     valley) — invisible to the per-shape graph because the runway is not in it."""
     from shapely.geometry import Point
-    from auto_patch.layout import ROLE_RUNWAY
+    from auto_patch.layout import ROLE_RUNWAY, ROLE_RUNWAY_CROSSING
     from auto_patch.pavement.runways import _sample_runway_segment_elev
     _CONTACT_M = 12.0
     _NEAR_M = 18.0
+    # A runway_crossing is RUNWAY surface (a taxiway crossing ON the runway), not a
+    # taxi-spine node — comparing it to a runway's profile is runway-vs-runway (the
+    # runway profile's job at an intersection: the crossing sits at a compromise
+    # between the two runways), NOT a taxi runway-join.  Exclude it from the
+    # taxi-node search so the join is measured to the real spine node (user
+    # 2026-06-26: a marginal ~U11/14L-32R join was mis-flagged on the crossing).
+    _RUNWAY_SURFACE = (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING)
 
     runways = [s for s in layout.shapes
                if s.role == ROLE_RUNWAY and s.polygon is not None
@@ -185,7 +192,7 @@ def _spine_runway_join_violations(layout, noise):
     # emitted taxiway / junction nodes (the spine side of the join).
     nx, ny, ne = [], [], []
     for s in layout.shapes:
-        if (s.role in (ROLE_RUNWAY,) or s.polygon is None or s.polygon.is_empty):
+        if (s.role in _RUNWAY_SURFACE or s.polygon is None or s.polygon.is_empty):
             continue
         ring = _open_ring(list(s.polygon.exterior.coords))
         elevs = _shape_elevs(s, len(ring))

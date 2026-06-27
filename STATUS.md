@@ -1,4 +1,10 @@
-# STATUS — handover (2026-06-26 late) — ONE-GRAPH DONE; now on the CYXY BODY LAYER
+# STATUS — handover (2026-06-26 late) — ONE-GRAPH DONE (gate GREEN); on CYXY BODY LAYER
+
+> `docs/goal_merge_one_graph.md` is COMPLETE: `test_single_graph_acceptance.py`
+> ALL 3 GREEN (spine=0, anti-gaming step, structural same-nodes), `grep geo_key
+> src/` == 0, ONE `build_context` — WITH the junction-following densification ON.
+> The body-layer review items below are the NEXT work, not the goal.
+
 
 Branch `dev`. Build a single airport + probe with the venv:
 ```
@@ -53,27 +59,24 @@ DEM.** Building pads + no-building-apron feasible levels are set FIRST (closest-
 within the reach band), THEN the spine is smoothed between them.
 
 ---
-## ⚠ WHERE WE'RE AT — `test_cyxy_spine_zero` is RED(1), AWAITING USER X-PLANE REVIEW
+## ⚠ WHERE WE'RE AT — gate GREEN; awaiting USER X-PLANE REVIEW of the body layer
 
-The junction-edge densification (#5, committed DEFAULT-ON at user request) surfaces
-grade the flat edges hid. REFINED so it only densifies OFF-SPINE, off-runway edges
-(densifying a spine/runway-adjacent edge added near-centerline nodes that became
-NEW spine nodes / perturbed the runway anchor):
-- spine went 4→**1** with the refinement. The remaining 1 = a MARGINAL
-  **runway_join 5.4 %** at runway 14L/32R near (-33,576) — it was 4.5 % even in the
-  ORIGINAL 18, got ≤cap by the one-graph work, and the densification perturbed the
-  global solve enough to flip it back over (the node there is pre-existing, NOT a
-  densified node — it's solve-convergence sensitivity, not geometry).
-- **body 671→793** (grade now visible at junction edges that follow the spine).
-- route-reach 2; structural + anti-gaming tests GREEN. Junction #97 far edge TILTS
-  695.7→698.8 (goal met).
+Junction-edge densification (#5, DEFAULT-ON) makes junctions follow their spine
+(#97 far edge TILTS 695.7→698.8). REFINED to densify only OFF-SPINE, off-runway
+edges (densifying a spine/runway-adjacent edge added near-centerline nodes that
+became NEW spine nodes / perturbed the runway anchor → stub/A 3.2 %).
+- spine = **0** (gate GREEN). The last violation was a MIS-FLAGGED runway-join: the
+  validator's nearest "taxi node" to the ~U11/14L-32R contact was a `runway_
+  crossing` node (RUNWAY surface, sits at the intersection compromise 695.90), so
+  it was runway-vs-runway, not a taxi join. FIX = exclude `ROLE_RUNWAY_CROSSING`
+  from the runway-join taxi-node search (correctness, NOT weakening — real
+  taxi-spine drops are still caught).
+- **body 671→793** (real grade now VISIBLE at junction edges that follow the spine
+  — previously hidden by flat edges). route-reach 2.
 
-USER (last instruction): "Keep it and ensure it's on in dev so I can build and
-review in X-Plane before deciding next steps." So restart Ortho4XP (it caches
-`auto_patch` imports), rebuild CYXY, look in X-Plane. DO NOT revert the
-densification. NEXT after review = the 1 marginal runway_join @(-33,576) (stabilise
-the solve there / anchor the runway-join node) to restore spine=0, then the body
-grade now visible at junction edges.
+USER (last instruction): build + review in X-Plane before next steps. Restart
+Ortho4XP (it caches `auto_patch` imports), rebuild CYXY, look. NEXT after review =
+the body grade now visible at junction↔taxiway joins; crossing #82; items below.
 
 ---
 ## OUTSTANDING — CYXY review batch (memory `cyxy_review_items.md`)
