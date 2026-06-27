@@ -149,12 +149,14 @@ correct. Residual 5.4% = building16 a route-limited low pad (acceptable step).
    apron) → skip the terminal guard (`O4_ROAD_CONNECTOR_KEEP`); pure off-apron curb
    roads still drop (don't cross wide apron). CYXY: neck now an SVC road @(-416,404)
    connecting to the apron (gap 0.00 m); spine=0 (acceptance 3/3); gate-off legacy.
-   ⏳ FOLLOW-UP B2 (TODO): the SVC run stops ~5 m SHORT of the groundside — an
-   off-pav gap in the SOURCE pavement between the neck end (~-425) and the lot
-   (~-431) leaves a ~5 m hole (no shape at -427..-429); the groundside MOUTH is not
-   yet joined. Need the run/rect to reach the groundside edge (extend the run past
-   the last on-pav sample to the route's groundside terminus, or bridge the source
-   gap).
+   ✅ FOLLOW-UP B2 DONE (b472aed): the SVC run stopped ~5 m short because the lot
+   was subtracted from pav_union before the carve (source pavement IS continuous —
+   traced apt+DSF), so the run's last on-pav sample is before the lot edge + the
+   rect trim → a 5 m GAP. FIX: `detect_road_runs` tracks per-sample off-pav; a
+   CONNECTOR run extends its end(s) to the first off-pav sample (the groundside
+   boundary) so the SVC rect reaches it, and the overlap-clip makes them SHARE an
+   edge (cut, not gap). CYXY neck: SVC connects apron 0.00 m AND groundside 0.00 m
+   (was 5.15 m); spine=0 (acceptance 3/3); gate-off legacy. #3-B COMPLETE.
    ⚠ FOLLOW-UP C: SVC road grading SMOOTHLY into the groundside at the shared edge
    not yet verified (gap closed in 73e9d03, but the road 4%-from-apron vs
    groundside-DEM reconciliation at the shared edge).
