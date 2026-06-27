@@ -69,6 +69,7 @@ from ..config import (
     RUNWAY_MAX_GRADE as MAX_RUNWAY_GRADE,
     RUNWAY_MAX_GRADE_CHANGE_PER_M as MAX_RUNWAY_GRADE_CHANGE_PER_M,
     RUNWAY_DEM_FOLLOW_BAND_M,
+    RUNWAY_CROSSING_PHYSICAL_EXTENT,
     SPLIT_LONG_RECTS_ENABLED,
 )
 DEFAULT_CELL_SIZE = float(RUNWAY_CELL_SIZE_M)  # meters between interp points
@@ -155,6 +156,63 @@ def canonical_runway_desig(desig):
         d = d[:-1]
     d = d.lstrip("0") or "0"
     return d + suffix
+
+
+def _runway_physical_extent(desig_a, data_a, desig_b, data_b, apt_runways):
+    """``((lat_a, lon_a), (lat_b, lon_b))`` — the physical pavement ends
+    of a paired runway INCLUDING displaced-threshold and blast-pad
+    extensions, i.e. the same footprint the runway rects (and therefore
+    the crossing-junction builder, ``pavement/runways.py``) span.
+
+    Used for runway-runway crossing DETECTION so a crossing that falls
+    on pavement BEYOND a landing threshold (displaced threshold / blast
+    pad) is still found.  The agreed crossing altitude is still
+    evaluated on the CIFP threshold segment (where the elevations are
+    anchored), so this helper deliberately returns only geometry.
+
+    Mirrors the extent computation in ``generate_patch_osm``'s per-runway
+    emit loop (apt.dat row-100 ends, or CIFP threshold + displaced as a
+    legacy fallback, then extended outward by blast pads).  Returns
+    ``None`` if geometry is degenerate or missing.
+    """
+    apt_a = (apt_runways.get(desig_a)
+             or apt_runways.get(canonical_runway_desig(desig_a)))
+    apt_b = (apt_runways.get(desig_b)
+             or apt_runways.get(canonical_runway_desig(desig_b)))
+    have_apt_geom = apt_a is not None and apt_b is not None
+    if have_apt_geom:
+        lat_a, lon_a = apt_a[0], apt_a[1]
+        lat_b, lon_b = apt_b[0], apt_b[1]
+        displaced_a, blast_a = apt_a[3], apt_a[4]
+        displaced_b, blast_b = apt_b[3], apt_b[4]
+    else:
+        try:
+            lat_a, lon_a = data_a["lat"], data_a["lon"]
+            lat_b, lon_b = data_b["lat"], data_b["lon"]
+            displaced_a = data_a["displaced_m"]
+            displaced_b = data_b["displaced_m"]
+        except (KeyError, TypeError):
+            return None
+        blast_a = blast_b = OVERRUN_EXTENSION
+    # apt.dat row-100 lat/lon ARE the physical ends; the CIFP fallback
+    # sits at the displaced threshold, so extend outward by displaced.
+    if have_apt_geom:
+        phys_a = (lat_a, lon_a)
+        phys_b = (lat_b, lon_b)
+    else:
+        phys_a = (extend_point(lat_b, lon_b, lat_a, lon_a, displaced_a)
+                  if displaced_a > 0 else (lat_a, lon_a))
+        phys_b = (extend_point(lat_a, lon_a, lat_b, lon_b, displaced_b)
+                  if displaced_b > 0 else (lat_b, lon_b))
+    # Absorb blast pads into the extent (same order as the emit loop:
+    # end A first, then end B off the already-extended A).
+    if blast_a > 0.1:
+        phys_a = extend_point(phys_b[0], phys_b[1],
+                              phys_a[0], phys_a[1], blast_a)
+    if blast_b > 0.1:
+        phys_b = extend_point(phys_a[0], phys_a[1],
+                              phys_b[0], phys_b[1], blast_b)
+    return phys_a, phys_b
 
 
 __all__ = [
@@ -923,18 +981,48 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
     # Affects only airports with crossing runways (CYXY).  At
     # SPJC / SPLP each airport has a single runway pair so no
     # crossings exist and this pre-pass is a no-op.
+    # Detection geometry (user 2026-06-27): a runway centerline runs the
+    # FULL pavement extent — including displaced thresholds and blast
+    # pads — not just threshold-to-threshold.  The crossing-junction
+    # builder (``pavement/runways.py``) already spans that full footprint,
+    # so a crossing on pavement beyond a landing threshold (CYXY 02/20 ×
+    # 14L/32R, ~25 m past 02/20's 20 end) builds a junction but the
+    # threshold-to-threshold centerlines used here missed it — leaving the
+    # two profiles unreconciled and the junction blending a 2.2 m / 7.7%
+    # step.  When ``RUNWAY_CROSSING_PHYSICAL_EXTENT`` is on we DETECT on
+    # the physical extent but still EVALUATE the agreed altitude on the
+    # CIFP threshold segment (where elevations are anchored), with the
+    # projection clamped to [0,1] so a beyond-threshold crossing resolves
+    # to the flat blast-pad elevation at the nearest threshold.  Interior
+    # crossings project to t ∈ (0,1) ⇒ identical to the legacy result.
     from shapely.geometry import LineString as _LS
+    _xing_extent = RUNWAY_CROSSING_PHYSICAL_EXTENT
+    _det_lines: dict = {}
+    if _xing_extent:
+        for _pi, (_pda, _pdata_a, _pdb, _pdata_b) in enumerate(paired_list):
+            _ext = _runway_physical_extent(
+                _pda, _pdata_a, _pdb, _pdata_b, apt_runways)
+            if _ext is not None:
+                (_ea, _eb) = _ext
+                _det_lines[_pi] = _LS([
+                    (_ea[1], _ea[0]), (_eb[1], _eb[0])])
     for ti in range(len(paired_list)):
         da_t, dat_a_t, db_t, dat_b_t = paired_list[ti]
         for ri in range(ti + 1, len(paired_list)):
             da_r, dat_a_r, db_r, dat_b_r = paired_list[ri]
             try:
-                cl_t = _LS([
+                # CIFP threshold segments — always used to EVALUATE the
+                # agreed altitude (elevations live at the thresholds).
+                thr_t = _LS([
                     (dat_a_t["lon"], dat_a_t["lat"]),
                     (dat_b_t["lon"], dat_b_t["lat"])])
-                cl_r = _LS([
+                thr_r = _LS([
                     (dat_a_r["lon"], dat_a_r["lat"]),
                     (dat_b_r["lon"], dat_b_r["lat"])])
+                # Detection segments — physical extent when enabled,
+                # else the threshold segments (legacy behaviour).
+                cl_t = _det_lines.get(ti, thr_t) if _xing_extent else thr_t
+                cl_r = _det_lines.get(ri, thr_r) if _xing_extent else thr_r
                 if not cl_t.intersects(cl_r):
                     continue
                 pt = cl_t.intersection(cl_r)
@@ -943,25 +1031,34 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
             if pt.is_empty or pt.geom_type != "Point":
                 continue
             try:
-                t_t = cl_t.project(pt) / cl_t.length
-                t_r = cl_r.project(pt) / cl_r.length
+                # Project onto the THRESHOLD segments; clamp so a
+                # crossing beyond a threshold maps to that threshold.
+                t_t_raw = thr_t.project(pt) / thr_t.length
+                t_r_raw = thr_r.project(pt) / thr_r.length
             except _GEOM_EXC:
                 continue
-            # Skip endpoints — they're already anchored at CIFP
-            # threshold elevations.  Only interior crossings need
-            # this reconciliation.
-            if not (0.001 < t_t < 0.999 and 0.001 < t_r < 0.999):
-                continue
+            if _xing_extent:
+                t_t = min(1.0, max(0.0, t_t_raw))
+                t_r = min(1.0, max(0.0, t_r_raw))
+            else:
+                # Legacy: skip endpoints — they're already anchored at
+                # CIFP threshold elevations.  Only interior crossings
+                # need this reconciliation.
+                t_t, t_r = t_t_raw, t_r_raw
+                if not (0.001 < t_t < 0.999 and 0.001 < t_r < 0.999):
+                    continue
             c_lat, c_lon = pt.y, pt.x
-            # Closer-threshold runway dominates.  Distance to
-            # nearest threshold is min(t, 1-t) × runway-length;
-            # ``cl_t.length`` and ``cl_r.length`` are in lat/lon
-            # units but proportional to physical distance at the
-            # same airport (both have the same cos(lat) scale),
-            # so the relative comparison is valid without
-            # converting to metres.
-            d_t_to_thresh = min(t_t, 1.0 - t_t) * cl_t.length
-            d_r_to_thresh = min(t_r, 1.0 - t_r) * cl_r.length
+            # Closer-threshold runway dominates.  Distance to the
+            # nearest threshold is min(|t|, |t-1|) × runway-length;
+            # ``thr_*.length`` are in lat/lon units but proportional to
+            # physical distance at the same airport (both share the
+            # cos(lat) scale), so the relative comparison is valid
+            # without converting to metres.  Using ``abs`` keeps the
+            # beyond-threshold case (t clamped to 0/1) correct while
+            # remaining identical to the legacy ``min(t, 1-t)`` for
+            # interior crossings.
+            d_t_to_thresh = min(abs(t_t), abs(t_t - 1.0)) * thr_t.length
+            d_r_to_thresh = min(abs(t_r), abs(t_r - 1.0)) * thr_r.length
             if d_t_to_thresh <= d_r_to_thresh:
                 # Runway T's threshold is closer — T's CIFP wins.
                 agreed = dat_a_t["elevation_m"] + t_t * (

@@ -28,6 +28,28 @@ main code or `tools/` (not `/tmp`). Real validators:
 ---
 ## ✅ DONE THIS SESSION (committed on dev, newest first)
 
+0. **Runway-crossing reconciliation on FULL PAVEMENT EXTENT** (UNCOMMITTED; gate
+   `RUNWAY_CROSSING_PHYSICAL_EXTENT` / `O4_RW_XING_EXTENT` default ON). CYXY had
+   TWO 02/20 runway crossings: A (× 14R/32L, mid-body) graded smooth, B (× 14L/32R,
+   ~25 m past 02/20's 20 end) had a **2.2 m / 7.7%** cross-step. ROOT: two passes
+   detect crossings from DIFFERENT geometry — the junction builder
+   (`pavement/runways.py _resolve_runway_crossings`) spans the runway RECTS (incl.
+   displaced threshold + blast pad) so it builds B's junction, but the elevation
+   reconciliation (`pavement/runway_segments.py`) detected crossings from CIFP
+   **threshold-to-threshold** centerlines → 02/20's centerline ends ~25 m short of
+   14L/32R → `intersects=False` → no `agreed` anchor → junction IDW-blends two
+   unreconciled profiles into the step. FIX: reconciliation now DETECTS on the
+   physical extent (`_runway_physical_extent`, mirrors the emit-loop extent geom)
+   but still EVALUATES the agreed altitude on the CIFP threshold segment, projection
+   **clamped to [0,1]** (beyond-threshold crossing → flat blast-pad elevation at the
+   nearest threshold). Interior crossings project to t∈(0,1) ⇒ identical to legacy.
+   RESULT: crossing B span 2.2 m→**0.00** (uniform 693.7), A unchanged 694.1;
+   CYXY within-shape 42→10 (crossing 7.7% + runway/02/20 1.7% both cleared).
+   ★ Suite A/B (PYTHONHASHSEED=0): gate-OFF 22 failed = HEAD baseline; gate-ON 21
+   failed — **ZERO net-new, FIXED `test_runway_longitudinal_grade[CYXY]`** + 1 extra
+   XPASS. Side effect: 14L/32R bends down ~1 m at B (correct — 02/20 is pinned at its
+   end), nudging apron/junction BODY 302→314 (within the known CYXY body-layer WIP).
+
 1. **ONE-GRAPH MERGE — COMPLETE** (`docs/goal_merge_one_graph.md`, the original
    goal). Spine solved DIRECTLY on the geometry nodes the validator checks
    (`grade_graph.build_unified_graph`); `route_graph.py`/`geo_key` DELETED; ONE

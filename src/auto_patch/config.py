@@ -1113,6 +1113,28 @@ RUNWAY_SHOULDER_EXTENT = _os.environ.get("O4_SHOULDER_EXTENT", "1") == "1"
 RUNWAY_SHOULDER_SEGMENT = (
     _os.environ.get("O4_SHOULDER_SEGMENT", "1") == "1")
 
+# (2026-06-27) RUNWAY-CROSSING PHYSICAL-EXTENT RECONCILIATION.
+# Two passes handle a runway crossing: the geometric junction builder
+# (pavement/runways.py ``_resolve_runway_crossings``) detects crossings
+# from the built runway RECT polygons — which include displaced-threshold
+# and blast-pad pavement — while the elevation-profile reconciliation
+# (pavement/runway_segments.py) detected them from CIFP threshold-to-
+# threshold centerlines.  When a crossing falls on the pavement BEYOND a
+# landing threshold (displaced threshold / blast pad), the threshold-to-
+# threshold centerline misses it, so the junction is built but the two
+# runways' profiles are never reconciled — the junction then blends two
+# disagreeing profiles into a step (CYXY 02/20 × 14L/32R: 2.2 m / 7.7%
+# across a 28 m junction at the 20 end of the short crosswind runway).
+# ON ⇒ the reconciliation detects crossings on the FULL pavement extent
+# (apt.dat row-100 ends + blast pads, matching the rect footprint) and
+# evaluates the agreed altitude by projecting onto the CIFP threshold
+# segment (clamped to [0,1], so a beyond-threshold crossing resolves to
+# the nearest threshold's flat blast-pad elevation).  Airports whose
+# crossings are all interior (threshold-to-threshold) are byte-identical
+# (clamp is a no-op there).  Env override ``O4_RW_XING_EXTENT``.
+RUNWAY_CROSSING_PHYSICAL_EXTENT = (
+    _os.environ.get("O4_RW_XING_EXTENT", "1") == "1")
+
 # (20260616) JUNCTION CENTERLINE SPINE — docs/junction_centerline_spine.md.
 # Junctions/aprons emit as a single ring polygon, so X-Plane interpolates
 # the interior between boundary-only node_altitudes and a taxi centerline
