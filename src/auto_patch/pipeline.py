@@ -3689,7 +3689,19 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     else:
                         _has_aircraft = True
                         break
-                if _has_road and not _has_aircraft:
+                # A service road is NARROW (< 15 m wide, user 2026-06-26): only a
+                # narrow road/connector piece becomes a service_junction; a WIDE
+                # road-only residue (a parking lot carved beside the road — CYXY
+                # the 31×61 m piece @(-473,403)) is NOT road, it stays apron/
+                # junction (→ groundside if runway-disconnected) so the lot is one
+                # surface, not split into a 4 % road plaza + DEM groundside (cliff).
+                _narrow = True
+                if os.environ.get("O4_SVC_REROLE_NARROW_ONLY", "1") == "1":
+                    try:
+                        _narrow = _js.polygon.buffer(-7.5).is_empty
+                    except _GEOM_EXC:
+                        _narrow = True
+                if _has_road and not _has_aircraft and _narrow:
                     _js.role = ROLE_SERVICE_JUNCTION
                     _n_svc_j += 1
             if _n_svc_j:

@@ -16,6 +16,7 @@ with internal callers in ``O4_Airport_Pavement_Builder``):
 from __future__ import annotations
 
 import math
+import os as _os
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from shapely.errors import GEOSException, TopologicalError
@@ -1154,13 +1155,15 @@ def _separate_groundside_from_airside(
         ROLE_RUNWAY, ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
         ROLE_STUB, ROLE_CROSS_CONNECTOR, ROLE_APRON, ROLE_JUNCTION,
         ROLE_BUILDING, ROLE_TUNNEL_RAMP, ROLE_RETAINING_WALL,
-        # (s79 Step D) ground-vehicle ROADS grade from their apron
-        # mouth, not the DEM — groundside lots beside them need the
-        # same clearance gap as beside airside, or the shared boundary
-        # smears the retaining wall into BOTH rings as within-shape
-        # violations (CYXY 'Crew cars' road vs lots #101/#102).
-        ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION,
     }
+    # Groundside MAY share an edge with a SERVICE ROAD / junction (user
+    # 2026-06-26): a parking lot is SERVED by its service road, so they touch —
+    # opening the 1 m clearance gap there DISCONNECTS the road from the lot it
+    # feeds (CYXY SVC1 ↔ lot @(-472,404): a cliff across the gap).  Groundside is
+    # still cut back from BUILDINGS (kept above) and aircraft pavement.  Off =
+    # legacy (clearance from roads too).
+    if _os.environ.get("O4_GROUNDSIDE_SHARE_SVC", "1") != "1":
+        AIRSIDE_ROLES |= {ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION}
     clip_polys = []
     for s in layout.shapes:
         if s.role in AIRSIDE_ROLES and s.polygon is not None \
