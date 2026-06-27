@@ -102,10 +102,18 @@ correct. Residual 5.4% = building16 a route-limited low pad (acceptable step).
    drop — the east arm never becomes a junction shape (suspect small-apron-fragment
    merge assigning it to a host across the runway, or residue never claiming it).
    Next: instrument junction emit / fragment-merge for coverage at (57,673).
-3. **Groundside split + SVC cliff** — one pavement that should be ALL groundside is
-   split into 2 (user shapeIDs 205 & 101); it should be served by a SMOOTHLY
-   GRADED service road from the apron, but that SVC is disconnected from the
-   groundside → cliff. Find the split + the SVC disconnect.
+3. **✅ DONE (73e9d03) Groundside split + SVC cliff** — the SERVICE-ROAD CARVE +
+   re-role split a parking lot: wide residue → 4% `service_junction` (~700.2), rest
+   → DEM groundside (~700.9), with a 1 m clearance gap = cliff. FIX (user model: a
+   service road is <15 m wide; groundside may share edges with SVC roads, cut back
+   from buildings): (1) SVC re-role NARROW-ONLY — only re-role pieces with
+   `buffer(-7.5).is_empty` (<15 m); wide lot residue stays groundside
+   (`O4_SVC_REROLE_NARROW_ONLY`). (2) groundside SHARES edges with SVC roads — drop
+   service roles from `_separate_groundside_from_airside` clearance set
+   (`O4_GROUNDSIDE_SHARE_SVC`); gap 1.00→0.00 m. CYXY lot now one groundside level
+   701.6-702.8, spine=0, body viols 302. ⚠ FOLLOW-UP: the SVC road grading SMOOTHLY
+   into the groundside at the now-shared edge not yet verified (gap closed, but the
+   road's 4%-from-apron vs groundside-DEM reconciliation at the shared edge).
 4. **Shape 168 → groundside** — only airside connection is via SVC12; elevation
    seems too low. Reclassify groundside, raise to SVC12 reach.
 5. **Rough transition around shape 214** at the end of A2 — smooth it.
