@@ -145,13 +145,14 @@ def solve_route_profile(layout, icao: str,
             layout, bucket_to_idx, elev, base_hard, frozen)
 
         # PHASE B — body fill (apron/junction interiors + rect bodies + caps) with
-        # the spine frozen.  Apron body = CLOSEST-DEM-FEASIBLE (apron_smooth=False):
-        # each node targets its DEM clamped into the reach band [floor, ceiling]
-        # and ≤1% to its neighbours (user 2026-06-26).
+        # the spine frozen.  Apron body = 1% VISIBILITY/GEODESIC smoothing within
+        # the reach band [floor, ceiling] (apron_smooth=True) — graded ≤1% from its
+        # anchored edges/spine, NOT draped on raw DEM bumps (user 2026-06-26).  The
+        # band still fills it to the reachable level (west apron → ~693).
         n_free = one_profile_solve(
             elev, shape_constraints, base_hard, nodes, dem_elev,
             runway_nodes, building_seats, apron_body, u_spine_nodes, u_spine_adj,
-            node_band, u_spine_floor, coupling, apron_smooth=False)
+            node_band, u_spine_floor, coupling, apron_smooth=True)
         # Guarantee compliance: project EVERY grade-graph edge ≤cap with the
         # spine + runway + buildings + seams HARD; only the apron/junction body
         # flexes.  Edges left over cap have both ends hard = genuine steps.
