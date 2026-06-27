@@ -17,6 +17,7 @@ than aircraft, so these also double as apron↔DEM transition ramps.
 from __future__ import annotations
 
 import math
+import os as _os
 
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, MultiLineString, MultiPolygon, Polygon
@@ -374,11 +375,50 @@ def detect_road_runs(
     # above the width cap so the test stays cheap and unambiguous.
     reach = max_w + 4.0
 
+    # APRON-CONNECTOR exemption (user 2026-06-26): a 1206 truck route that CONNECTS
+    # the apron to a groundside lot is an SVC road CONNECTOR and must be carved (and
+    # cut at both mouths), even where the alongside-terminal guard would drop it as a
+    # curb road — "curbside is just groundside, it doesn't need its own class; a
+    # truck route that never touches the apron just stays groundside."  A route is a
+    # connector iff it CROSSES WIDE aircraft pavement (the apron: a perpendicular
+    # chord through pavement ≫ a road width); a pure off-apron curb/parking road
+    # never does, so it still drops to groundside.  The exemption only affects narrow
+    # samples the terminal guard would otherwise drop (wide samples still fail the
+    # width test), so it is safe.
+    _connector_keep = _os.environ.get("O4_ROAD_CONNECTOR_KEEP", "1") == "1"
+    _apron_reach = 1.5 * max_w + 4.0
+
+    def _touches_apron(ls) -> bool:
+        nn = max(1, int(ls.length // step))
+        for tt in range(nn + 1):
+            dd = min(tt * step, ls.length)
+            pp = ls.interpolate(dd)
+            if not pav_prep.contains(pp):
+                continue
+            a1 = ls.interpolate(max(dd - 2.0, 0.0))
+            a2 = ls.interpolate(min(dd + 2.0, ls.length))
+            adx, ady = a2.x - a1.x, a2.y - a1.y
+            ah = math.hypot(adx, ady) or 1.0
+            apx, apy = -ady / ah, adx / ah
+            try:
+                ac = LineString([(pp.x - _apron_reach * apx, pp.y - _apron_reach * apy),
+                                 (pp.x + _apron_reach * apx, pp.y + _apron_reach * apy)])
+                ai = ac.intersection(pav_union)
+            except _GEOM_EXC:
+                continue
+            for pc in ([ai] if ai.geom_type == "LineString"
+                       else [g for g in getattr(ai, "geoms", ())
+                             if g.geom_type == "LineString"]):
+                if pc.distance(pp) < 0.5 and pc.length > 1.5 * max_w:
+                    return True
+        return False
+
     out: "list[tuple[LineString, float, str]]" = []
     for ls, name in routes:
         L = ls.length
         if L < min_run:
             continue
+        connector = _connector_keep and _touches_apron(ls)
         n = max(1, int(L // step))
         flags: list[bool] = []
         widths: list[float] = []
@@ -392,7 +432,7 @@ def detect_road_runs(
             ok = False
             w = float("inf")
             if (pav_prep.contains(p)
-                    and not _alongside_terminal(p, dx, dy)
+                    and (connector or not _alongside_terminal(p, dx, dy))
                     and (rwy_prep is None or not rwy_prep.contains(p))):
                 h = math.hypot(dx, dy) or 1.0
                 px, py = -dy / h, dx / h
