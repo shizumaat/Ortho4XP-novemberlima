@@ -1,151 +1,108 @@
-# STATUS — handover (2026-06-26) — ROUTE-GRAPH REDESIGN; ROOT = TWO GRAPHS, MUST UNIFY
+# STATUS — handover (2026-06-26 late) — ONE-GRAPH DONE; now on the CYXY BODY LAYER
 
-> ★★★ TOP PRIORITY FOR NEXT SESSION: **`docs/goal_merge_one_graph.md`** —
-> MERGE the route graph and the grade graph into ONE graph so we BUILD and
-> VALIDATE the exact same nodes.  It is a self-contained, measurable goal (run it
-> as the session's goal).  DONE = `tests/test_single_graph_acceptance.py` all
-> green (incl. a new structural test) + `grep geo_key src/` == 0 + one context
-> builder.  Forbidden hacks: bridge / geo_key mapping / post-solve patch /
-> weakened validator.  Everything below is supporting context.
+Branch `dev`. Build a single airport + probe with the venv:
+```
+PYTHONHASHSEED=0 venv/bin/python -c "import sys;sys.path[:0]=['src','.','tests'];\
+from conftest import xplane_root; from auto_patch.pipeline import build_airport_pavement;\
+L=build_airport_pavement('CYXY', xplane_root(), compute_elevations=True)"
+```
+⚠ PIN `PYTHONHASHSEED=0` (apron/junction partition is nondeterministic → shape
+indices/`shapeID` shift between builds — identify shapes by **ref/coord**, never
+raw index). A build is ~60–90 s.
 
-Branch `dev`.  Committed this session (newest first):
-- `f6b6b73` diagnostic stash (elev pre-writeback) — pinned the remaining errors.
-- `01df682` hold rects + caps at route-graph z (read-by-index) → rect/cap
-  violations = 0.
-- `e95fb1f` full anchor coverage (service-road spines + catch-all) → no z=0.
-- `8db18ab` rect graph coverage + lateral nodes + extended validator + F/14R fix
-  + TX16 cull + min-curv body.
-
-Build/probe: `PYTHONHASHSEED=0 O4_ROUTE_PROFILE_SOLVE=1 venv/bin/python …`
-(route-graph emission is default ON, `O4_RP_ROUTE_GRAPH=1`).  Pin
-PYTHONHASHSEED=0.  Only CYXY is being worked right now (user: don't chase other
-airports / baselines until the plan is done, tested, debugged).
+★ STANDING RULE (user, emphatic): use the EXISTING checks/validators/tests, NOT
+ad-hoc `/tmp` scripts that re-derive logic and produce wrong numbers (a uniform
+1.5 % cap in a /tmp script cost hours — the real `reach_band_sampler` uses
+per-edge caps, taxiway G = 3 %). If something isn't covered, ASK to add it to the
+main code or `tools/` (not `/tmp`). Real validators:
+`grade_graph_validate.within_violations` (spine + body) / `.route_reach_violations`,
+`building_feasibility.reach_band_sampler`, `tools/check_grade.py`,
+`tools/trace_reach_route.py` (NEW: reach-route → KML), the pytest suite.
 
 ---
-## ★★ THE ROOT CAUSE (user 2026-06-26) — TWO GRAPH STRUCTURES; SPINE ROOT NOT FULLY DIAGNOSED
+## ✅ DONE THIS SESSION (committed on dev, newest first)
 
-⚠ HONESTY NOTE: earlier claims in this session ("two graphs, different nodes",
-"all 18 are spine↔runway") were IMPRECISE and only partly verified.  The verified
-facts below supersede them.  DO NOT assume a single root — diagnose each failing
-edge with `/tmp/js_root.py`.
+1. **ONE-GRAPH MERGE — COMPLETE** (`docs/goal_merge_one_graph.md`, the original
+   goal). Spine solved DIRECTLY on the geometry nodes the validator checks
+   (`grade_graph.build_unified_graph`); `route_graph.py`/`geo_key` DELETED; ONE
+   `grade_graph.build_context`. `grep geo_key src/` == 0. CYXY spine 18→0.
+   Acceptance `test_validator_detects_spine_step` + `test_solver_and_validator_
+   same_nodes` GREEN. (`test_cyxy_spine_zero` was GREEN at the merge; RED now — see
+   below.)
+2. **route_reach validator** — `route_reach_violations`: a no-building apron whose
+   feeder taxiways arrive at mutually unreachable elevations. `tests/test_route_
+   reach.py`.
+3. **Apron #86 / west apron** — CLOSEST-DEM-FEASIBLE model: every surface
+   (buildings, aprons, spine) = DEM clamped into its per-node reach band
+   [floor,ceil]. West apron filled out of its wrong-low DEM (677→693). Aprons grade
+   **1 % visibility/geodesic** (apron_smooth=True), NOT DEM-draped.
+4. **Synthetic junction spines** — `synthetic_junction_spine.py`: every spineless
+   junction (45 of 112 at CYXY) gets a route through its taxi-network mouths
+   (2→straight, 3+→star). Junction #88 (TX2 drop) 4.2 m→0.5 m; TX2 spreads its
+   climb along its length.
+5. **Junction-edge densification** — `lateral_spine_nodes.densify_junction_edges`
+   (gate `O4_DENSIFY_JUNCTION_EDGES` default ON): subdivide every junction
+   exterior edge to ~12 m (SPINE_STEP_M). Junction #97's 500 m far edge now TILTS
+   695.7→698.8 following the spine (was flat 695.6).
+6. `tools/trace_reach_route.py` — reusable reach-route tracer (KML + per-cap
+   segment lengths), uses the real `reach_band_sampler` cost model.
 
-**Verified facts (CYXY):**
-- There ARE two graph STRUCTURES + two context builders: Graph A = route graph
-  (`taxi_routing.shared_taxi_route_graph` → `route_graph.solve_route_graph`,
-  nodes = apt.dat centerline vertices + synthetics) SETS the spine/rect/cap z;
-  Graph B = grade graph (`grade_graph.shape_constraints`, nodes = geometry ring
-  vertices) VALIDATES + grades the body, built by `unified_jacobi.
-  _grade_graph_context` AND `grade_graph_validate._context` (two builders).
-- BUT the spine NODES are in fact shared via `geo_key` — node 567/568 are both
-  in `geo_key` and the route-graph values there are compliant (0.16 m).  So
-  "different nodes" was WRONG for the spine; the pair definitions agree too
-  (`spine_adjacency` ⊇ validator spine pairs).
-- The 18 spine violations = **9 distinct edges**: **3 runway-adjacent, 6 NOT**.
-  Only ONE has been root-caused: a runway-adjacent dual-source — node 567 has
-  TWO elevation sources (route-graph z 695.63 AND the hard runway seed 694.89);
-  the protect-guard keeps the runway value, leaving its route-graph-set neighbor
-  (568 = 695.79) inconsistent → 8.2 % over 11 m.
-- The other **6 non-runway edges are UNVERIFIED** — could be `geo_key` coverage
-  gaps, a building-floor pushing the spine over cap, the two context builders
-  diverging on caps, or genuine geometry.  NEXT SESSION: run `/tmp/js_root.py`
-  per failing edge and find the real cause for EACH before changing code.
-
-### THE FIX (toward the genuine one graph)
-1. **One context builder** — delete the `_grade_graph_context` / `_context`
-   duplication; solver and validator call the SAME function for centerlines,
-   caps, spine membership, and edges (`docs/single_grade_graph.md`).
-2. **One anchor rule** — every runway-adjacent node is a runway CONTACT at the
-   LOCAL runway elevation (runway is the single hard truth; building floor
-   yields).  Fixes the 3 runway-adjacent edges (generalises the F/14R fix).
-3. **Diagnose the 6 non-runway edges** with `js_root.py` and fix the real cause
-   (likely `geo_key` coverage and/or building-floor-vs-cap).
-4. Ideally collapse Graph A into Graph B so elevations are SET on the exact nodes
-   the validator checks (no `geo_key` bridge, no second source).
+★ USER MODEL (authoritative, 2026-06-26): **junctions FOLLOW their spine, graded
+≤cap laterally from it; aprons grade 1 % visibility/geodesic; nothing drapes raw
+DEM.** Building pads + no-building-apron feasible levels are set FIRST (closest-DEM
+within the reach band), THEN the spine is smoothed between them.
 
 ---
-## What is DONE (committed, working on CYXY)
-- **Rects + caps read the route graph and are CLEAN** (0 within-grade): held hard
-  at route-graph z (`route_profile/solve._seed_route_skeleton`, hard=True).
-- **Full anchor coverage** (no z=0 fragments): runway contacts (taxi),
-  service-road spines (4 %, terrain + airside contacts,
-  `route_graph._service_road_anchors`), catch-all band/contact anchor for
-  isolated discovered-TX (`_anchor_remaining_components`).
-- **Validator EXTENDED** to the full spine: `grade_graph_validate` now checks
-  sloping rects, rect end-caps, and spine→runway joins at the width-based
-  per-letter cap, all flagged `is_spine` (+ `_shape_elevs` handles
-  altitude_high/low).  THIS is the spine test now.
-- **Lateral corridor nodes** (`lateral_spine_nodes.py`, pre-solve, gated
-  `O4_LATERAL_SPINE_NODES=1`): a vertex on each apron/junction edge within
-  ±half-taxi-width of a spine → the lateral drop (CYXY building19 runway-side,
-  17.2 %) is now solved AND validated.
-- **F/14R valley fixed**: `_threshold_anchors` skips the marker for BUILT runway
-  ends; route seed never overwrites a hard runway/seam node.
-- **Discovered building-cull**: TX centerlines crossing a (final) building are
-  dropped (`pipeline.py`, post-merge); TX16 gone, 47 valid discovered remain.
-- **Every rect is a graph segment** (`enrich_route_graph` rect-end nodes + axis).
+## ⚠ WHERE WE'RE AT — `test_cyxy_spine_zero` is RED(4), AWAITING USER X-PLANE REVIEW
 
-## What is NOT done (the remaining work, in order)
-1. **Unify the graph (the ROOT above)** — THE prerequisite for zero spine errors.
-2. CYXY spine validator = **18 errors**, all the spine↔runway / junction-spine
-   drift from the two-graph root (worst 8.2 % at a runway-adjacent junction).
-   rect / cross_connector / stub / rect_cap = 0.
-3. Caps as true BRIDGE edges (rect-end z one side, junction z other) in the ONE
-   graph — currently caps are co-planar rect-continuation (clean on the validator
-   but can cliff at the junction in X-Plane).
-4. BODY layer (regressed under the hard skeleton — expected, body-next):
-   reach band sourced from taxi + service routes; building-less aprons seated at
-   their reachable level (graded within band, visible-chord fallback).
-5. Then: re-cut compare-target fixtures, run the full suite, set new baselines,
-   check the other airports (HECA/SPJC/SPLP), retire the ~15 legacy passes.
+The junction-edge densification (#5, committed DEFAULT-ON at user request) surfaced
+grade the flat edges were hiding:
+- **spine 0→4**, ALL on **stub/A #43** (code D, cap 1.5 %): it bridges two
+  junction/A pieces at **694.7** (#235) and **695.5** (#236) — 0.8 m over 24.9 m
+  = 3.2 % > 1.5 %. ROOT = the two junction/A pieces are at DIFFERENT levels and the
+  short stub can't grade between them; #97 rising to meet taxiway A exposed it.
+- **body 671→765** (grade now visible at junction↔taxiway joins).
+- route-reach still 2; structural + anti-gaming tests GREEN.
 
-## ★ DEFINITION OF DONE — `tests/test_single_graph_acceptance.py` (DO NOT bypass)
-Done is NOT a claim or an eyeballed number.  Done = these tests GREEN:
-- `test_cyxy_spine_zero` — zero spine violations on the strict extended
-  validator.  RED today (18).  THIS is the load-bearing gate: whatever graph sets
-  the elevations, if the surface doesn't satisfy the validator's pairs, it's red.
-- `test_validator_detects_spine_step` — a 3 m injected step MUST be flagged.
-  GREEN now; must STAY green (DO NOT weaken the validator to fake spine=0).
+USER (last instruction): "Keep it and ensure it's on in dev so I can build and
+review in X-Plane before deciding next steps." So restart Ortho4XP (it caches
+`auto_patch` imports), rebuild CYXY, look in X-Plane. DO NOT revert the
+densification. NEXT after review = either fix the 4 stub/A (make the two
+junction/A pieces consistent / grade the stub) to restore spine=0, or adjust per
+what the user sees.
 
-(A `same_spine_pairs` test was REMOVED — it compared two grade-graph derivatives,
-not the route graph that sets the values, so it was trivially green and proved
-nothing.  False assurance is exactly the failure mode this file prevents.)
+---
+## OUTSTANDING — CYXY review batch (memory `cyxy_review_items.md`)
 
-A `geo_key` emission mapping, a post-solve patch, or a relaxed validator cannot
-make `test_cyxy_spine_zero` + `test_validator_detects_spine_step` green together.
-If you are writing a bridge / second graph / post-solve patch, stop — that is the
-hack.  ⚠ A genuine STRUCTURAL test still wants writing: compare the ELEVATION-
-SETTING graph (route graph / emitted z) to the validator's pairs — add it.
+- **stub/A 3.2 % + body** at junction↔taxiway joins (from densification, above).
+- **Crossing #82** (02/20+14L/32R runway crossing): 693.7..695.9 / 6.8 % within-
+  shape — needs smoothing.
+- **Shed buildings**: add DSF OBJECTs whose path starts `lib/g10/US/industrial/`
+  and contains "shed" as building sources (`dsf_reader.read_dsf_buildings` only
+  reads `.fac` facades today; objects need footprint resolution).
+- **SVC7** (service_road, 715.2..715.6) disconnected from its parking-lot
+  groundside — find the clearance/separation that drops it, keep it.
+- **Dead-end road loop** at 60.7102606,-135.072653 (local ≈ -290,79; currently
+  SVC10/SVC9/service_junction 708.5) → classify as apron (closest-DEM-feasible).
+- **Shape "154"** = service_junction next to SVC11 → user: a shape reachable ONLY
+  via an SVC road → treat as GROUNDSIDE, level = that SVC's max-grade reach.
+- **SVC ramp** at 60.7131156,-135.0752334: connect apron (≈694–700) to groundside
+  (≈701) as a smooth SVC ramp, not a projection off the apron.
 
-Immediate target: the 3 runway-adjacent edges via the one-anchor rule; diagnose
-the 6 non-runway edges with `js_root.py` (root unknown — do not guess).
+★ DEAD ENDS that thrashed this session (don't repeat): projecting the COARSE
+3-vertex spine onto edges; a hard "junction-follows-spine" grading pass (rejected);
+`apron_smooth=False` closest-DEM apron body (reverted — aprons = 1 % visibility);
+gating the whole junction body as is_spine (rejected — instead give each junction
+a spine). The WORKING approach = densify junction edges + let the solver grade.
 
-## USER'S GATE for an X-Plane test
-"When the entire graph is read & assigned to geometry, not broken in later
-passes, and ZERO spine validation errors — build in dev and test in X-Plane."
-= `test_cyxy_spine_zero` green (with the other two still green).  NOT yet ready
-(18).  Note: the 18 are NOT broken in later passes (verified: `elev` is already
-wrong pre-writeback) — they are the dual-source drift at runway-adjacent nodes.
+---
+## AFTER the CYXY body layer (deferred)
+Body/apron grade regressed vs the route-graph baseline (EXPECTED until the body
+layer is done — user: CYXY is the sole focus). Then: re-cut compare-target
+fixtures, run the full suite, other airports (HECA/SPJC/SPLP), delete ~15 legacy
+elevation passes. See `docs/one_profile_solve.md` and the memory index.
 
-## Probes (/tmp, rebuild as needed; gated O4_RP_DEBUG_STASH=1 exposes layout._rg_debug)
-- `/tmp/spine_v.py` — within_violations total + spine(is_spine) + by-role.
-- `/tmp/js_root.py` — nail a junction-spine pair: in spine_adj? geo_key? emitted
-  vs route-graph z (this is what proved the two-graph drift).
-- `/tmp/ab.py ICAO` — within-viol total/spine + bowl depth.
-- `/tmp/connect.py`, `/tmp/frag_id.py` — route-graph component anchoring.
-- `/tmp/rect_src.py` — per-rect route-graph grade vs emitted.
-
-## Gates (defaults)
-`O4_ROUTE_PROFILE_SOLVE=1` (route-profile solver live), `O4_RP_ROUTE_GRAPH=1`
-(route-graph emission), `O4_LATERAL_SPINE_NODES=1`, `O4_RP_APRON_SMOOTH=1`
-(min-curv body, no DEM), `O4_RP_BRIDGE_COMPONENTS=0` (component bridge OFF — wrong
-for service roads), `O4_RP_GRAPH_FIELD`/`O4_RP_RECT_BRIDGE`=0 (dead, deletable).
-
-## ⚠ Traps
-- The reach band uses Graph A; building levels come from it.  Changing the
-  contact/anchor model shifts the band → buildings → expect fixture churn.
-- `geo_key` only covers spine nodes woven within 3 m of a route-graph edge; nodes
-  on centerlines not in the cached graph are missed (part of the root).
-- Runway nodes are `protected` from the spine seed (keep CIFP truth) — correct,
-  but it exposes the Graph-A-vs-runway disagreement.
-- Build with the venv (`venv/bin/python`); macOS tempdir `/var/folders`; restart
-  any running Ortho4XP GUI to pick up source edits.
+## Gates / env (CYXY)
+`O4_ROUTE_PROFILE_SOLVE` (the next-gen solver), `O4_DENSIFY_JUNCTION_EDGES`,
+`O4_SYNTH_JUNCTION_SPINE`, `O4_LATERAL_SPINE_NODES` — all default ON. The
+`O4_RP_ROUTE_GRAPH`/`geo_key` path is GONE.
