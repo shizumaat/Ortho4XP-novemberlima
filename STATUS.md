@@ -139,16 +139,22 @@ correct. Residual 5.4% = building16 a route-limited low pad (acceptable step).
    two pieces 899+1276 → one 2280 m². Split ROOT = upstream junction-emit difference
    / overlap-clip on a multi-polygon source union (NOT neck-split or decompose —
    both ruled out by toggling on/off, identical split).
-   ⏳ FOLLOW-UP B (TODO, deferred): apron→groundside truck connection. `1206 11 10
-   twoway N` (apron node 11 N_start @(-403,408) → groundside node 10 N_stop
-   @(-432,398)) is filtered by `detect_road_runs` because the connection crosses
-   ONLY WIDE pavement (apron + lot) — NO sample qualifies as a narrow road, so the
-   mouth-extension hook has nothing to extend from. NEEDS a model change: build a
-   1206 edge terminating at a truck TERMINUS (N_stop/N_start dead-end at a parking
-   area) as an SVC connector despite the wide crossing — requires the 1206
-   node/terminus structure (detect_road_runs only sees merged LineStrings) and the
-   lot isn't groundside-classified yet at carve time. Delicate (shared w/
-   HECA/SPJC).
+   ✅ FOLLOW-UP B CORE (f493fe6) apron→groundside truck CONNECTOR. The ~6 m neck
+   (apt `1206 11 10 N`, apron node 11 @(-403,408) → groundside node 10 @(-432,398))
+   was NOT wide — it's narrow but `detect_road_runs` dropped its samples via
+   `_alongside_terminal` (curb-road guard; building16 25 m away). USER MODEL: a 1206
+   route touching the APRON is an SVC connector; one that never touches the apron
+   stays groundside (curbside = groundside, no own class). FIX: a route is a
+   CONNECTOR iff it crosses WIDE aircraft pavement (perp chord > 1.5×road-cap = the
+   apron) → skip the terminal guard (`O4_ROAD_CONNECTOR_KEEP`); pure off-apron curb
+   roads still drop (don't cross wide apron). CYXY: neck now an SVC road @(-416,404)
+   connecting to the apron (gap 0.00 m); spine=0 (acceptance 3/3); gate-off legacy.
+   ⏳ FOLLOW-UP B2 (TODO): the SVC run stops ~5 m SHORT of the groundside — an
+   off-pav gap in the SOURCE pavement between the neck end (~-425) and the lot
+   (~-431) leaves a ~5 m hole (no shape at -427..-429); the groundside MOUTH is not
+   yet joined. Need the run/rect to reach the groundside edge (extend the run past
+   the last on-pav sample to the route's groundside terminus, or bridge the source
+   gap).
    ⚠ FOLLOW-UP C: SVC road grading SMOOTHLY into the groundside at the shared edge
    not yet verified (gap closed in 73e9d03, but the road 4%-from-apron vs
    groundside-DEM reconciliation at the shared edge).
