@@ -1,9 +1,47 @@
-# STATUS — handover (2026-06-26 late) — ONE-GRAPH DONE (gate GREEN); on CYXY BODY LAYER
+# STATUS — handover (2026-06-27) — ONE-GRAPH DONE (gate GREEN); on CYXY BODY LAYER
 
 > `docs/goal_merge_one_graph.md` is COMPLETE: `test_single_graph_acceptance.py`
 > ALL 3 GREEN (spine=0, anti-gaming step, structural same-nodes), `grep geo_key
 > src/` == 0, ONE `build_context` — WITH the junction-following densification ON.
 > The body-layer review items below are the NEXT work, not the goal.
+
+---
+## ✅ SESSION CLOSE-OUT (2026-06-27) — committed on `dev`, newest first
+Acceptance `test_single_graph_acceptance.py` = **3/3 GREEN** after every commit
+(spine=0 verified serial `-n0`). All new behaviour is GATED default-on; gate-off =
+byte-legacy. ⚠ shapeIDs are nondeterministic — identify shapes by **ref/coord**.
+
+- `b472aed` **#3-B2** service road: connector dead-end reaches the groundside —
+  extend a CONNECTOR run to the first off-pav sample so the SVC rect SHARES an edge
+  with the groundside (cut, not gap). Neck SVC: apron 0.00 m + groundside 0.00 m.
+- `f493fe6` **#3-B** service road: carve apron→groundside truck CONNECTOR —
+  `detect_road_runs` exempts the alongside-terminal guard for a route that crosses
+  WIDE aircraft pavement (touches the apron) = an SVC connector (`O4_ROAD_
+  CONNECTOR_KEEP`). USER MODEL: touches apron → SVC; never touches → groundside
+  (curbside = groundside, no own class).
+- `5e4dd3a` **#3 split** `_merge_touching_groundside` (`O4_MERGE_GROUNDSIDE`): union
+  groundside pieces sharing a ≥2 m seam → ONE surface (lot 899+1276 → 2280). The
+  split root was an UPSTREAM junction-emit/overlap-clip cut of a multi-polygon
+  source union — NOT neck-split or decompose (both toggled off, identical split).
+- `73e9d03` **#3 cliff** SVC re-role NARROW-ONLY (`O4_SVC_REROLE_NARROW_ONLY`,
+  `buffer(-7.5)` empty = <15 m) + groundside SHARES edges with SVC roads
+  (`O4_GROUNDSIDE_SHARE_SVC`, drop service roles from the clearance set).
+- `892ea1e` **#1** synth junction spine: don't route BETWEEN runway contacts
+  (`O4_SYNTH_SPINE_NO_RUNWAY_MOUTH`) — blastpad-wrap fragmentation fixed (one
+  4282 m² junction); CYXY all 9 synth spines were purely runway-mouth → dropped.
+- `d19f106` **APRON DECOUPLE** `grade_graph._APRON_BODY_CHORD_MAX_M` (60 m,
+  `O4_APRON_BODY_CHORD_MAX_M`): drop apron interior body↔body chords > 60 m →
+  building18 apron dip 22.7%→5.4% (kept spine/building-frontage/ring-adjacent).
+- (concurrent agent) `306f913` **runway-crossing** reconcile on full pavement
+  extent (`O4_RW_XING_EXTENT`); `03aaf8f` runway-join validator excludes
+  `runway_crossing` → spine=0.
+
+OPEN QUEUE: **#2** SE-arm drop (upstream residue/junction-formation drop, narrowed
+not fixed); **#3-C** SVC↔groundside SMOOTH grade at the now-shared edge (4%-from-
+apron vs groundside-DEM) not yet verified; **#4** shape 168 → groundside (via SVC12,
+too low); **#5** rough transition at shape 214 (end of A2); **#6** shapes 165+52 →
+one groundside via SVC11 (too low). #4/#6 = the SVC-only→groundside pattern (the
+groundside/SVC machinery is now fresh — natural next target).
 
 
 Branch `dev`. Build a single airport + probe with the venv:
@@ -204,7 +242,11 @@ layer is done — user: CYXY is the sole focus). Then: re-cut compare-target
 fixtures, run the full suite, other airports (HECA/SPJC/SPLP), delete ~15 legacy
 elevation passes. See `docs/one_profile_solve.md` and the memory index.
 
-## Gates / env (CYXY)
-`O4_ROUTE_PROFILE_SOLVE` (the next-gen solver), `O4_DENSIFY_JUNCTION_EDGES`,
-`O4_SYNTH_JUNCTION_SPINE`, `O4_LATERAL_SPINE_NODES` — all default ON. The
-`O4_RP_ROUTE_GRAPH`/`geo_key` path is GONE.
+## Gates / env (CYXY) — all default ON unless noted
+Core: `O4_ROUTE_PROFILE_SOLVE` (next-gen solver), `O4_DENSIFY_JUNCTION_EDGES`,
+`O4_SYNTH_JUNCTION_SPINE`, `O4_LATERAL_SPINE_NODES`. The `O4_RP_ROUTE_GRAPH`/
+`geo_key` path is GONE.
+This session: `O4_APRON_BODY_CHORD_MAX_M` (60), `O4_SYNTH_SPINE_NO_RUNWAY_MOUTH`,
+`O4_SVC_REROLE_NARROW_ONLY`, `O4_GROUNDSIDE_SHARE_SVC`, `O4_MERGE_GROUNDSIDE`,
+`O4_ROAD_CONNECTOR_KEEP`; concurrent: `O4_RW_XING_EXTENT`. Every one = byte-legacy
+when off (verified A/B). PIN `PYTHONHASHSEED=0`.
