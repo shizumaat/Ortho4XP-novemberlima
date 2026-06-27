@@ -53,23 +53,27 @@ DEM.** Building pads + no-building-apron feasible levels are set FIRST (closest-
 within the reach band), THEN the spine is smoothed between them.
 
 ---
-## ⚠ WHERE WE'RE AT — `test_cyxy_spine_zero` is RED(4), AWAITING USER X-PLANE REVIEW
+## ⚠ WHERE WE'RE AT — `test_cyxy_spine_zero` is RED(1), AWAITING USER X-PLANE REVIEW
 
-The junction-edge densification (#5, committed DEFAULT-ON at user request) surfaced
-grade the flat edges were hiding:
-- **spine 0→4**, ALL on **stub/A #43** (code D, cap 1.5 %): it bridges two
-  junction/A pieces at **694.7** (#235) and **695.5** (#236) — 0.8 m over 24.9 m
-  = 3.2 % > 1.5 %. ROOT = the two junction/A pieces are at DIFFERENT levels and the
-  short stub can't grade between them; #97 rising to meet taxiway A exposed it.
-- **body 671→765** (grade now visible at junction↔taxiway joins).
-- route-reach still 2; structural + anti-gaming tests GREEN.
+The junction-edge densification (#5, committed DEFAULT-ON at user request) surfaces
+grade the flat edges hid. REFINED so it only densifies OFF-SPINE, off-runway edges
+(densifying a spine/runway-adjacent edge added near-centerline nodes that became
+NEW spine nodes / perturbed the runway anchor):
+- spine went 4→**1** with the refinement. The remaining 1 = a MARGINAL
+  **runway_join 5.4 %** at runway 14L/32R near (-33,576) — it was 4.5 % even in the
+  ORIGINAL 18, got ≤cap by the one-graph work, and the densification perturbed the
+  global solve enough to flip it back over (the node there is pre-existing, NOT a
+  densified node — it's solve-convergence sensitivity, not geometry).
+- **body 671→793** (grade now visible at junction edges that follow the spine).
+- route-reach 2; structural + anti-gaming tests GREEN. Junction #97 far edge TILTS
+  695.7→698.8 (goal met).
 
 USER (last instruction): "Keep it and ensure it's on in dev so I can build and
 review in X-Plane before deciding next steps." So restart Ortho4XP (it caches
 `auto_patch` imports), rebuild CYXY, look in X-Plane. DO NOT revert the
-densification. NEXT after review = either fix the 4 stub/A (make the two
-junction/A pieces consistent / grade the stub) to restore spine=0, or adjust per
-what the user sees.
+densification. NEXT after review = the 1 marginal runway_join @(-33,576) (stabilise
+the solve there / anchor the runway-join node) to restore spine=0, then the body
+grade now visible at junction edges.
 
 ---
 ## OUTSTANDING — CYXY review batch (memory `cyxy_review_items.md`)

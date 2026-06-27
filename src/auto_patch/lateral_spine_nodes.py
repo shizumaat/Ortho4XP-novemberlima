@@ -62,6 +62,48 @@ def densify_junction_edges(layout, icao: str = "", step: float = None) -> int:
     from .config import SPINE_STEP_M
     if step is None:
         step = SPINE_STEP_M
+    # The spine edge already has its nodes (from junction_spine); densifying it
+    # would add nodes WITHIN the spine perp-tolerance of the centerline, which
+    # become NEW spine nodes and perturb the spine solve (CYXY: raised a
+    # junction/A piece 0.5 m → stub/A 3.2 %).  So skip any edge that runs ON a
+    # centerline; only densify the OFF-spine edges that drape flat.
+    from shapely.geometry import LineString
+    from shapely.ops import unary_union
+    from .layout import ROLE_RUNWAY
+    _SPINE_EDGE_TOL_M = 3.0
+    _RUNWAY_TOL_M = 18.0          # = the runway-join check's _NEAR_M
+    cls = [ln for (ln, n) in (getattr(layout, "apt_taxi_centerlines", None) or [])
+           if ln is not None and not ln.is_empty
+           and not str(n or "").upper().startswith("SVC")]
+    cl_union = None
+    if cls:
+        try:
+            cl_union = unary_union(cls)
+        except _GEOM_EXC:
+            cl_union = None
+    rwy_union = None
+    try:
+        rwys = [s.polygon for s in layout.shapes if s.role == ROLE_RUNWAY
+                and s.polygon is not None and not s.polygon.is_empty]
+        if rwys:
+            rwy_union = unary_union(rwys)
+    except _GEOM_EXC:
+        rwy_union = None
+
+    def _skip_edge(ax, ay, bx, by):
+        """Skip densifying an edge that runs ON a centerline (its nodes would
+        become spine nodes and perturb the spine solve) or ABUTS a runway (its
+        nodes must match the runway surface, not the spine — runway-join check)."""
+        e = LineString([(ax, ay), (bx, by)])
+        try:
+            if cl_union is not None and cl_union.distance(e) < _SPINE_EDGE_TOL_M:
+                return True
+            if rwy_union is not None and rwy_union.distance(e) < _RUNWAY_TOL_M:
+                return True
+        except _GEOM_EXC:
+            return False
+        return False
+
     n_junc = n_added = 0
     for s in layout.shapes:
         if (s.role != ROLE_JUNCTION or s.polygon is None or s.polygon.is_empty
@@ -78,6 +120,8 @@ def densify_junction_edges(layout, icao: str = "", step: float = None) -> int:
             new_ring.append((ax, ay))
             d = math.hypot(bx - ax, by - ay)
             k = max(0, int(round(d / step)) - 1)   # ~step spacing; 0 if already ≤step
+            if k and _skip_edge(ax, ay, bx, by):
+                k = 0                              # spine/runway edge → leave alone
             for j in range(1, k + 1):
                 f = j / (k + 1)
                 new_ring.append((ax + f * (bx - ax), ay + f * (by - ay)))
