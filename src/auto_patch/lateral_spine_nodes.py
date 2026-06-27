@@ -32,7 +32,7 @@ from .layout import ROLE_APRON, ROLE_JUNCTION, ROLE_SERVICE_JUNCTION
 
 _GEOM_EXC = (ValueError, GEOSException, TopologicalError)
 
-__all__ = ["insert_lateral_spine_nodes"]
+__all__ = ["insert_lateral_spine_nodes", "densify_junction_edges"]
 
 # Body shapes that should sample the lateral corridor grade.
 _LATERAL_BODY_ROLES = frozenset({ROLE_APRON, ROLE_JUNCTION, ROLE_SERVICE_JUNCTION})
@@ -46,6 +46,56 @@ def _open(poly):
     if len(cs) > 1 and cs[0] == cs[-1]:
         cs = cs[:-1]
     return cs
+
+
+def densify_junction_edges(layout, icao: str = "", step: float = None) -> int:
+    """Densify every JUNCTION's exterior edges to ~the spine node spacing (user
+    2026-06-26).
+
+    A junction is a taxiway that follows its spine, but a long exterior edge with
+    only its two end corners interpolates FLAT between them and cannot track the
+    spine's rise (CYXY junction #97: a 500 m edge stayed flat at 695.6 while the
+    spine rose 694→699).  Subdividing every junction edge to the spine step gives
+    the solver nodes to grade along that edge, so the whole junction surface tilts
+    with its centerline.  Pure geometry; runs pre-solve next to the lateral pass.
+    Returns the number of nodes inserted."""
+    from .config import SPINE_STEP_M
+    if step is None:
+        step = SPINE_STEP_M
+    n_junc = n_added = 0
+    for s in layout.shapes:
+        if (s.role != ROLE_JUNCTION or s.polygon is None or s.polygon.is_empty
+                or s.polygon.geom_type != "Polygon"):
+            continue
+        ring = _open(s.polygon)
+        if len(ring) < 3:
+            continue
+        new_ring = []
+        added = 0
+        for ei in range(len(ring)):
+            ax, ay = ring[ei]
+            bx, by = ring[(ei + 1) % len(ring)]
+            new_ring.append((ax, ay))
+            d = math.hypot(bx - ax, by - ay)
+            k = max(0, int(round(d / step)) - 1)   # ~step spacing; 0 if already ≤step
+            for j in range(1, k + 1):
+                f = j / (k + 1)
+                new_ring.append((ax + f * (bx - ax), ay + f * (by - ay)))
+                added += 1
+        if added:
+            try:
+                poly = Polygon(new_ring)
+                if poly.is_valid and not poly.is_empty:
+                    s.polygon = poly
+                    n_junc += 1
+                    n_added += added
+            except _GEOM_EXC:
+                continue
+    if n_added:
+        UI.vprint(1, f"  [pav-builder] {icao}: densified {n_junc} junction "
+                  f"ring(s) (+{n_added} node(s)) to ~{step:.0f} m spine spacing "
+                  f"so junction edges can follow the spine.")
+    return n_added
 
 
 def _short_edge_half_w(poly):

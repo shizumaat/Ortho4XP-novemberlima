@@ -4035,6 +4035,14 @@ def build_airport_pavement(icao: str, xplane_root: str,
             from .lateral_spine_nodes import insert_lateral_spine_nodes
             insert_lateral_spine_nodes(layout, icao)
 
+        # DENSIFY JUNCTION EDGES (user 2026-06-26): a junction is a taxiway that
+        # follows its spine, so every junction exterior edge is subdivided to the
+        # spine node spacing — a long edge with only its 2 corners can't track the
+        # spine's rise (junction #97's 500 m flat edge).
+        if os.environ.get("O4_DENSIFY_JUNCTION_EDGES", "1") == "1":
+            from .lateral_spine_nodes import densify_junction_edges
+            densify_junction_edges(layout, icao)
+
         # ── Airside node-unification (refactor Phases 6+7, PRE-solve) ──
         # Weld + full conformance + final corner snaps, run HERE so the solver
         # sees the FINAL node-set and grades every shared vertex to ONE
