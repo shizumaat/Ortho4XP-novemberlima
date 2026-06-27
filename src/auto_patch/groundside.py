@@ -62,6 +62,7 @@ __all__ = [
     "_reclassify_groundside_orphan_junctions",
     "_emit_groundside_pavement_dem",
     "_separate_groundside_from_airside",
+    "_merge_touching_groundside",
 ]
 
 
@@ -1136,6 +1137,97 @@ def _reclassify_groundside_orphan_junctions(
 # snapping, no degenerate seam slivers in Triangle4XP).
 GROUNDSIDE_CLEARANCE_M = SHARED_VERTEX_TOL_M + 0.5  # 1.0 m
 _GROUNDSIDE_MIN_AREA_M2 = 5.0
+
+
+def _merge_touching_groundside(
+        layout: "PavementLayout", dem, tile_lat: int, tile_lon: int,
+        touch_tol: float = 0.5, min_shared_m: float = 2.0) -> int:
+    """Merge groundside pavement pieces that share a real boundary into ONE
+    shape (user 2026-06-26).  Groundside is DEM-following pavement with no spine
+    or internal structure, so two pieces sharing a ≥``min_shared_m`` boundary were
+    SPLIT upstream (junction-emit ``pav_union.difference(rects)`` / overlap-clip on
+    a multi-polygon source union) — they should be a single surface (CYXY parking
+    lot @(-465,408): two pieces 899+1276 m² touching along a 55 m seam).  Pieces
+    that merely touch at a point are left alone (no ``min_shared_m`` seam).
+    """
+    if _os.environ.get("O4_MERGE_GROUNDSIDE", "1") != "1":
+        return 0
+    from shapely.ops import unary_union
+    from shapely.strtree import STRtree
+    gs = [s for s in layout.shapes
+          if s.role == ROLE_GROUNDSIDE_PAVEMENT and s.polygon is not None
+          and not s.polygon.is_empty and s.polygon.geom_type == "Polygon"]
+    if len(gs) < 2:
+        return 0
+    polys = [s.polygon for s in gs]
+    n = len(gs)
+    parent = list(range(n))
+
+    def _find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    tree = STRtree(polys)
+    for i in range(n):
+        try:
+            cand = tree.query(polys[i].buffer(touch_tol))
+        except _GEOM_EXC:
+            continue
+        for qj in cand:
+            j = int(qj)
+            if j <= i:
+                continue
+            try:
+                if polys[i].distance(polys[j]) > touch_tol:
+                    continue
+                shared = polys[i].exterior.intersection(polys[j].exterior)
+                if getattr(shared, "length", 0.0) < min_shared_m:
+                    continue            # point/sliver touch — not a split seam
+            except _GEOM_EXC:
+                continue
+            ri, rj = _find(i), _find(j)
+            if ri != rj:
+                parent[ri] = rj
+
+    groups: dict = {}
+    for i in range(n):
+        groups.setdefault(_find(i), []).append(i)
+
+    _dem_at = _dem_sampler(layout, dem, tile_lat, tile_lon)
+    merged_objs: set = set()
+    new_shapes: list = []
+    n_merged = 0
+    for idxs in groups.values():
+        if len(idxs) < 2:
+            continue
+        try:
+            u = unary_union([polys[k] for k in idxs])
+        except _GEOM_EXC:
+            continue
+        if u.is_empty:
+            continue
+        pieces = ([u] if u.geom_type == "Polygon"
+                  else [g for g in getattr(u, "geoms", []) if g.geom_type == "Polygon"])
+        if not pieces:
+            continue
+        for k in idxs:
+            merged_objs.add(id(gs[k]))
+        for p in pieces:
+            built = _dem_follow_polygon(p, _dem_at, simplify_tol=0.0)
+            if built is None:
+                continue
+            np_, na = built
+            new_shapes.append(BuiltShape(
+                polygon=np_, role=ROLE_GROUNDSIDE_PAVEMENT,
+                ref="groundside", node_altitudes=na))
+        n_merged += len(idxs) - 1
+    if not merged_objs:
+        return 0
+    layout.shapes = [s for s in layout.shapes
+                     if id(s) not in merged_objs] + new_shapes
+    return n_merged
 
 
 def _separate_groundside_from_airside(

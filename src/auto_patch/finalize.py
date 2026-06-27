@@ -63,6 +63,7 @@ from .elevation import (
 from .groundside import (
     _separate_groundside_from_airside,
     _deconflict_groundside_overlaps,
+    _merge_touching_groundside,
 )
 from .pavement.vertices import (
     _enforce_shared_vertices,
@@ -380,6 +381,15 @@ def emit_terrain_transition_features(layout: PavementLayout, icao: str, xplane_r
         # airside pavement so it shares no node or edge with them
         # (groundside = car/building pavement at DEM elevation, distinct
         # from the graded airside).
+        try:
+            n_mg = _merge_touching_groundside(
+                layout, _dem, _tile_lat, _tile_lon)
+            if n_mg:
+                UI.vprint(1,
+                    f"  [pav-builder] merged {n_mg} touching groundside "
+                    f"piece(s) into one surface.")
+        except _GEOM_EXC:
+            pass
         try:
             n_sep = _separate_groundside_from_airside(
                 layout, _dem, _tile_lat, _tile_lon)
