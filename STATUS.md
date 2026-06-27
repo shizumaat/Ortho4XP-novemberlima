@@ -33,8 +33,8 @@ main code or `tools/` (not `/tmp`). Real validators:
    (`grade_graph.build_unified_graph`); `route_graph.py`/`geo_key` DELETED; ONE
    `grade_graph.build_context`. `grep geo_key src/` == 0. CYXY spine 18→0.
    Acceptance `test_validator_detects_spine_step` + `test_solver_and_validator_
-   same_nodes` GREEN. (`test_cyxy_spine_zero` was GREEN at the merge; RED now — see
-   below.)
+   same_nodes` GREEN. `test_cyxy_spine_zero` GREEN (runway-join validator fix
+   03aaf8f — excludes `runway_crossing` nodes; verified 3/3 serial).
 2. **route_reach validator** — `route_reach_violations`: a no-building apron whose
    feeder taxiways arrive at mutually unreachable elevations. `tests/test_route_
    reach.py`.
@@ -59,29 +59,70 @@ DEM.** Building pads + no-building-apron feasible levels are set FIRST (closest-
 within the reach band), THEN the spine is smoothed between them.
 
 ---
-## ⚠ WHERE WE'RE AT — gate GREEN; awaiting USER X-PLANE REVIEW of the body layer
+## ⚠ WHERE WE'RE AT — apron-grading session (decouple COMMITTED d19f106)
 
-Junction-edge densification (#5, DEFAULT-ON) makes junctions follow their spine
-(#97 far edge TILTS 695.7→698.8). REFINED to densify only OFF-SPINE, off-runway
-edges (densifying a spine/runway-adjacent edge added near-centerline nodes that
-became NEW spine nodes / perturbed the runway anchor → stub/A 3.2 %).
-- spine = **0** (gate GREEN). The last violation was a MIS-FLAGGED runway-join: the
-  validator's nearest "taxi node" to the ~U11/14L-32R contact was a `runway_
-  crossing` node (RUNWAY surface, sits at the intersection compromise 695.90), so
-  it was runway-vs-runway, not a taxi join. FIX = exclude `ROLE_RUNWAY_CROSSING`
-  from the runway-join taxi-node search (correctness, NOT weakening — real
-  taxi-spine drops are still caught).
-- **body 671→793** (real grade now VISIBLE at junction edges that follow the spine
-  — previously hidden by flat edges). route-reach 2.
+**APRON DECOUPLE — COMMITTED (d19f106).** `grade_graph._APRON_BODY_CHORD_MAX_M`
+(60 m, `O4_APRON_BODY_CHORD_MAX_M`): drop apron interior body↔body grade chords
+> 60 m (keep ring-adjacent + short-local + spine + building-frontage + seam). A
+wide single-polygon apron over terrain that rises >cap had a long visibility chord
+pinning the building18↔16 frontage down to the route-maxed-low far interior (178 m
+chord to a 695.9 node) — a "dip down then rise again". RESULT: building18 apron
+worst 22.7%→5.4%, within-shape viols 384→16, dip node 698.3→700.2, spine=0,
+acceptance 3/3 green.
 
-USER (last instruction): build + review in X-Plane before next steps. Restart
-Ortho4XP (it caches `auto_patch` imports), rebuild CYXY, look. NEXT after review =
-the body grade now visible at junction↔taxiway joins; crossing #82; items below.
+REJECTED this session (don't repeat): (a) building-apron FLOOR/CEILING envelope in
+one_solve — feasibility_project re-clamps it, no effect; (b) un-bowl by dropping
+apron band ceiling — feasibility re-imposes from runway anchor; (c) enforce reach
+band as HARD bounds in feasibility — the raw band UNDERESTIMATES reachability near
+buildings (routes via the far centerline, not the adjacent higher building/apron),
+so clamping forces the apron wrongly low (broke building22 area to 9%). KEY MODEL
+FACT (user-confirmed): the reach band ALREADY includes apron crossing at the apron
+cap (`reach_band_sampler` perp_climb beyond the 7.5 m taxiway corridor = 1%); so
+building16's 699 IS its apron-inclusive route level. building16 is route-limited
+(149 m at 1.5%), the apron 700.2 IS reachable via building18 — decouple-only is
+correct. Residual 5.4% = building16 a route-limited low pad (acceptable step).
 
 ---
-## OUTSTANDING — CYXY review batch (memory `cyxy_review_items.md`)
+## NEXT QUEUE (user 2026-06-26) — ⚠ shapeIDs UNSTABLE, identify by ref/coord
+1. **✅ DONE (892ea1e) Synthetic spine in impossible places** — `synthesize_
+   junction_spines` anchored mouths on RUNWAYS, so a blastpad-WRAP junction got a
+   star spine routing between runway contacts (runway→wrap→runway) and the slice
+   FRAGMENTED it. FIX: keep taxiway/spined-junction mouths + AT MOST 1 runway mouth
+   (`O4_SYNTH_SPINE_NO_RUNWAY_MOUTH` default on). CYXY all 9 synth spines were
+   purely runway-mouth → dropped; blastpad junction one 4282 m² piece; spine=0
+   (acceptance 3/3); body viols 431→312.
+2. **SE-arm drop** — apt pavement "New Taxiway 1" north tip EAST of runway-20
+   blastpad (local ~(57,673), ~1800 m²) is a HOLE (no shape) → X-Plane drapes it.
+   Present with synth spine ON *and* OFF (separate from #1). The runway cuts the
+   wrap into a U; the small east arm vanishes. RULED OUT: apt-ignored (apt+DSF ARE
+   unioned), runway-shoulder absorption, terminal-groundside subtraction, TX-rect
+   drop (TX33 was at -211,-351), apron holes, thin-orphan-slivers (>1000 m² + runway
+   not in its roles), overlap-clip `_clip_keep_largest` (clip-drop debug printed
+   nothing near the blastpad). REMAINING: an UPSTREAM residue/junction-formation
+   drop — the east arm never becomes a junction shape (suspect small-apron-fragment
+   merge assigning it to a host across the runway, or residue never claiming it).
+   Next: instrument junction emit / fragment-merge for coverage at (57,673).
+3. **Groundside split + SVC cliff** — one pavement that should be ALL groundside is
+   split into 2 (user shapeIDs 205 & 101); it should be served by a SMOOTHLY
+   GRADED service road from the apron, but that SVC is disconnected from the
+   groundside → cliff. Find the split + the SVC disconnect.
+4. **Shape 168 → groundside** — only airside connection is via SVC12; elevation
+   seems too low. Reclassify groundside, raise to SVC12 reach.
+5. **Rough transition around shape 214** at the end of A2 — smooth it.
+6. **Shapes 165 + 52 → one groundside shape** — accessed only by SVC11; should be
+   ONE shape, several metres HIGHER than now (SVC11 reach). (Same pattern as #4 and
+   the existing "shape 154" item.)
 
-- **stub/A 3.2 % + body** at junction↔taxiway joins (from densification, above).
+Pattern across #3/#4/#6 (+ existing shape-154): a pavement reachable ONLY via an
+SVC road = GROUNDSIDE, level = that SVC's max-grade reach; keep it connected/smooth.
+
+---
+## OUTSTANDING — earlier CYXY review batch (memory `cyxy_review_items.md`)
+
+- **body grade** now VISIBLE at junction↔taxiway joins (body 793, was hidden by
+  flat edges). The stub/A 3.2 % is RESOLVED (densify `_skip_edge` + runway-join fix
+  03aaf8f). ⚠ A rare `runway_join` flicker (~2 of 10 builds) remains — same
+  partition nondeterminism that shifts `shapeID`; not chased per user.
 - **Crossing #82** (02/20+14L/32R runway crossing): 693.7..695.9 / 6.8 % within-
   shape — needs smoothing.
 - **Shed buildings**: add DSF OBJECTs whose path starts `lib/g10/US/industrial/`
