@@ -22,6 +22,7 @@ them in and the grade graph treats them as spine at the taxi cap.
 from __future__ import annotations
 
 import math
+import os as _os
 
 import O4_UI_Utils as UI
 
@@ -89,8 +90,8 @@ def synthesize_junction_spines(layout, icao: str = "") -> int:
         if len(nb) < 2:
             continue
         # mouths: ring-edge midpoints lying ON a neighbour boundary, tagged with
-        # the neighbour's taxi letter.
-        mouths = []                          # (x, y, letter)
+        # the neighbour's taxi letter + whether the neighbour is a RUNWAY.
+        mouths = []                          # (x, y, letter, is_runway)
         for ei in range(len(ring)):
             ax, ay = ring[ei]
             bx, by = ring[(ei + 1) % len(ring)]
@@ -99,23 +100,36 @@ def synthesize_junction_spines(layout, icao: str = "") -> int:
                 if t.polygon.exterior.distance(mid) < _ON_EDGE_M:
                     let = (taxi_shape_code_letter(layout, t)
                            if t.role in SLOPING_RECT_ROLES else None)
-                    mouths.append((mid.x, mid.y, let))
+                    mouths.append((mid.x, mid.y, let, t.role == ROLE_RUNWAY))
                     break
         # merge mouths sharing one boundary.
         merged = []
-        for (mx, my, let) in mouths:
-            for j, (qx, qy, _ql) in enumerate(merged):
+        for (mx, my, let, is_rwy) in mouths:
+            for j, (qx, qy, _ql, _qr) in enumerate(merged):
                 if math.hypot(mx - qx, my - qy) < _MERGE_M:
                     break
             else:
-                merged.append((mx, my, let))
+                merged.append((mx, my, let, is_rwy))
+        # IMPOSSIBLE-ROUTE GUARD (user 2026-06-26): do NOT route BETWEEN runway
+        # contacts.  A junction wrapping a runway end (CYXY runway-20 blastpad)
+        # touches the SAME runway on several sides; a star spine between those
+        # contacts is a route runway→wrap→runway — not a taxi path — and the slice
+        # FRAGMENTS the wrap.  Keep every TAXIWAY / spined-junction mouth plus AT
+        # MOST ONE runway mouth (a single taxi→runway ENTRY is a real route), so:
+        #   * taxiway↔taxiway through-junction  → kept,
+        #   * taxiway→runway entry (1 taxi+rwy) → kept (taxi to the runway),
+        #   * runway-only wrap (0 taxi mouths)  → ≤1 mouth → skipped (stays apron).
+        if _os.environ.get("O4_SYNTH_SPINE_NO_RUNWAY_MOUTH", "1") == "1":
+            non_rwy = [m for m in merged if not m[3]]
+            rwy = [m for m in merged if m[3]]
+            merged = non_rwy + (rwy[:1] if rwy else [])
         if len(merged) < 2:
             continue
         # the synthetic spine's letter = the LOOSER (steeper-cap) connecting
         # taxiway, so the route carries its corridor cap through the junction.
         from .config import taxi_grade_cap_for_letter
         best_let, best_cap = None, -1.0
-        for (_x, _y, let) in merged:
+        for (_x, _y, let, _r) in merged:
             c = taxi_grade_cap_for_letter(let)
             if c > best_cap:
                 best_cap, best_let = c, let
@@ -123,7 +137,7 @@ def synthesize_junction_spines(layout, icao: str = "") -> int:
         serial += 1
         letters[ref] = best_let
         cen = s.polygon.centroid
-        pts = [(mx, my) for (mx, my, _l) in merged]
+        pts = [(mx, my) for (mx, my, _l, _r) in merged]
         if len(pts) == 2:
             segs = [LineString([pts[0], pts[1]])]
         else:                                # star: each mouth → centroid
