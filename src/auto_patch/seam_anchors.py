@@ -564,16 +564,22 @@ def apply_seam_dem_anchors(
     """Sample DEM at every seam vertex and overwrite the placeholder
     interp altitude in ``node_altitudes`` with the DEM value.
 
-    Uses ``dem.alt_strict`` so the sample is the raw HGT pixel
-    (preserve_boundary keeps this at the .hgt overlap value, identical
-    in both tiles' DEMs).  Both tiles' builds sample the same lat/lon
-    point and get the same value.
+    Uses the SMOOTHED DEM (``_sample_dem`` → ``dem.alt``, the same sampler the
+    rest of the build uses), NEVER raw ``alt_strict`` (user 2026-06-28).  Raw
+    ``alt_strict`` returns nodata (-32768) AT the tile edge (the seam sits on the
+    DEM's coverage boundary), so the pin below was SKIPPED there — leaving the
+    seam vertex unpinned at its solved apron/junction level on the tile whose edge
+    the seam falls on, while the adjacent tile (seam in-bounds) pinned it: a
+    cross-tile cliff (SPLP -77 left a seam apron at 74.7 vs -78's 72.3, DEM flat
+    ~72.3).  The smoothed sampler interpolates a real value at the edge, so BOTH
+    tiles pin the same seam point to the same value → continuity.
 
     Must be called AFTER ``split_pavement_at_seams`` (which populates
     ``layout._seam_anchor_keys``) and BEFORE the elevation solver.
 
     Returns the number of vertices updated.
     """
+    from .elevation import _sample_dem
     anchor_keys = getattr(layout, "_seam_anchor_keys", None)
     if not anchor_keys:
         return 0
@@ -596,11 +602,10 @@ def apply_seam_dem_anchors(
                 continue
             lat, lon = layout.m_to_ll(x, y)
             try:
-                v = float(dem.alt_strict(
-                    (lon - tile_lon, lat - tile_lat)))
+                v = _sample_dem(dem, tile_lat, tile_lon, lat, lon)
             except _GEOM_EXC:
                 continue
-            if v != v or v == nodata:  # NaN or no-data
+            if v is None or v != v or v == nodata:  # None / NaN / no-data
                 continue
             alts[i] = round(v, 1)
             changed = True

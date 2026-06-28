@@ -1272,30 +1272,57 @@ def _seed_elevations(layout, nodes, bucket_to_idx,
     # cliff in X-Plane.
     seam_keys = getattr(layout, "_seam_anchor_keys", None) or set()
     if seam_keys:
+        from ..layout import SHARED_VERTEX_TOL_M
+        from ..elevation import _sample_dem
+        bk_s = 1.0 / SHARED_VERTEX_TOL_M
+        cps = layout.canonical_points
+        seam_done: set = set()
         for s in layout.shapes:
             if s.polygon is None or s.polygon.is_empty:
-                continue
-            if not s.node_altitudes:
                 continue
             coords = _open_ring(list(s.polygon.exterior.coords))
             if len(coords) < 3:
                 continue
-            alts = list(s.node_altitudes[:len(coords)])
-            for (x, y), a in zip(coords, alts):
-                # Match the bucket convention used by seam_anchors.
-                from ..layout import SHARED_VERTEX_TOL_M
-                bk_s = 1.0 / SHARED_VERTEX_TOL_M
+            # Per-vertex stored altitude (if any) is only a FALLBACK for when the
+            # DEM is unavailable; do NOT gate on it.  A SOFT junction/apron
+            # (node_altitudes unset pre-solve) still owns seam vertices that MUST
+            # be hard-pinned — otherwise the body fill pulls the seam vertex up to
+            # the route/network level (the SPLP tile-77 seam cliff: a junction
+            # seam node seeded 72.2 SOFT → one_profile_solve raised it to 74.7,
+            # while tile-78's apron at the same seam stayed at the DEM → 2.4 m
+            # cross-tile step).
+            alts = list(s.node_altitudes[:len(coords)]) if s.node_altitudes else None
+            for vi, (x, y) in enumerate(coords):
                 seam_bk = (int(round(x * bk_s)), int(round(y * bk_s)))
                 if seam_bk not in seam_keys:
                     continue
-                k = layout.canonical_points.get_or_add(float(x), float(y))
-                idx = bucket_to_idx.get(k)
-                if idx is None:
+                idx = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+                if idx is None or idx in seam_done:
+                    continue
+                # Seam vertex = the SMOOTHED DEM HARD anchor (user 2026-06-28,
+                # never raw HGT): the surface meets terrain at the tile edge so
+                # BOTH tiles pin the same seam point to the same value → cross-tile
+                # continuity.  Re-sampled HERE (not trusted from node_altitudes) so
+                # a seam vertex created by a LATE geometry pass is pinned too.
+                v = None
+                if dem is not None:
+                    try:
+                        lat, lon = layout.m_to_ll(x, y)
+                        sv = _sample_dem(dem, tile_lat, tile_lon, lat, lon)
+                        if sv is not None and sv == sv:
+                            v = float(sv)
+                    except Exception:                          # pragma: no cover
+                        v = None
+                if v is None and alts is not None and vi < len(alts) \
+                        and alts[vi] is not None:
+                    v = float(alts[vi])      # DEM unavailable → stored fallback
+                if v is None:
                     continue
                 # Seam wins: override any existing HARD value too.
-                elev[idx] = float(a)
+                elev[idx] = v
                 is_hard[idx] = True
                 have_initial[idx] = True
+                seam_done.add(idx)
 
     # Warm-start soft nodes.
     for s in layout.shapes:

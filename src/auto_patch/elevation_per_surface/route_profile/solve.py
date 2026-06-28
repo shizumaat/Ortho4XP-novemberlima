@@ -130,6 +130,20 @@ def solve_route_profile(layout, icao: str,
                 elev[i] = float(lv)
                 base_hard[i] = True
 
+        # SEAM SPINE ANCHORS (user 2026-06-28): where a taxi centerline crosses a
+        # tile seam, pin the nearest SPINE node to the SMOOTHED seam DEM as a HARD
+        # anchor — so the spine solve below SPREADS the route→seam drop along the
+        # centerline (≤cap over its length) instead of leaving the spine at the
+        # plateau level and the body cliffing to the seam.  The seam is terrain-
+        # pinned for cross-tile stitching; both tiles' route reaches the same seam
+        # value → no cross-tile cliff AND no within-apron cliff.  Wires the
+        # otherwise-dead ``SEAM_FIELD_ANCHORS`` concept onto the unified graph.
+        from auto_patch.config import SEAM_FIELD_ANCHORS
+        _cut_lines = getattr(layout, "_seam_cut_lines", None) or []
+        if SEAM_FIELD_ANCHORS and dem is not None and _cut_lines:
+            _seam_spine_anchors(layout, G, u_spine_adj, elev, base_hard,
+                                dem, tile_lat, tile_lon, _cut_lines)
+
         # PHASE A — dedicated SMOOTH spine solve on the unified graph (geometry
         # nodes), runway/seam HARD at their LOCAL value, building floors honoured.
         # The spine is min-curvature and ≤cap by construction, then FROZEN so the
@@ -315,6 +329,52 @@ def _restamp_caps_unified(layout, bucket_to_idx, elev, rect_planes, frozen_spine
                 continue
             t = ((x - e0[0]) * ax + (y - e0[1]) * ay) / L2
             elev[ci] = z0 + t * (z1 - z0)
+
+
+def _seam_spine_anchors(layout, G, spine_adj, elev, base_hard,
+                        dem, tile_lat, tile_lon, cut_lines):
+    """Pin the nearest SPINE node to each taxi-centerline × tile-seam crossing at
+    the SMOOTHED seam DEM (HARD), so ``_solve_spine_profile`` grades the route
+    DOWN to the seam over the centerline length instead of leaving the spine at
+    the plateau level (the SPLP tile-77 seam: spine stuck ~74.6, seam 72.2 → the
+    apron body cliffed).  Returns the count pinned."""
+    from shapely.geometry import Point          # noqa: F401  (geom predicates)
+    from auto_patch.elevation import _sample_dem
+    n = len(elev)
+    spine_pts = [(i, G.pos[i]) for i in spine_adj if i in G.pos and i < n]
+    if not spine_pts:
+        return 0
+    pinned = 0
+    seen: set = set()
+    for entry in (getattr(layout, "apt_taxi_centerlines", []) or []):
+        ln = entry[0] if isinstance(entry, (tuple, list)) else entry
+        if ln is None or ln.is_empty:
+            continue
+        for cut in cut_lines:
+            try:
+                inter = ln.intersection(cut)
+            except Exception:                              # pragma: no cover
+                continue
+            if inter.is_empty:
+                continue
+            pts = ([inter] if inter.geom_type == "Point"
+                   else [g for g in getattr(inter, "geoms", [])
+                         if g.geom_type == "Point"])
+            for p in pts:
+                bi, (bx, by) = min(
+                    spine_pts,
+                    key=lambda t: (t[1][0] - p.x) ** 2 + (t[1][1] - p.y) ** 2)
+                if bi in seen or (bx - p.x) ** 2 + (by - p.y) ** 2 > 30.0 ** 2:
+                    continue
+                lat, lon = layout.m_to_ll(bx, by)
+                v = _sample_dem(dem, tile_lat, tile_lon, lat, lon)
+                if v is None or v != v:
+                    continue
+                elev[bi] = float(v)
+                base_hard[bi] = True
+                seen.add(bi)
+                pinned += 1
+    return pinned
 
 
 def _solve_spine_profile(elev, base_hard, spine_adj, spine_floor,
