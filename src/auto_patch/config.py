@@ -814,6 +814,13 @@ ENABLE_APRON_NECK_SPLIT = True
 import os as _os  # noqa: E402
 HOLE_ROUTER_ENABLED = _os.environ.get("O4_HOLE_ROUTER", "1") == "1"
 
+# BUILD PROGRESS banners (user 2026-06-27).  ``progress.BuildProgress``
+# prints a step-counted line to the Ortho4XP window at the start of each
+# pavement-builder component so a watching user sees which step is
+# running and how many remain.  Output-only — the emitted patch is
+# byte-identical regardless.  O4_BUILD_PROGRESS=0 silences the banners.
+BUILD_PROGRESS = _os.environ.get("O4_BUILD_PROGRESS", "1") == "1"
+
 # APRON↔TAXI GRADE BLEND (user 2026-06-25).  A taxi route runs THROUGH aprons, so
 # the apron cannot be a flat 1 % everywhere: as it approaches a taxi centerline it
 # must blend toward that route's (steeper) per-letter cap to make the transition.

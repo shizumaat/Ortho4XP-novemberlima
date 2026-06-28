@@ -361,6 +361,10 @@ def build_airport_pavement(icao: str, xplane_root: str,
         apt.dat row-130 until the source-of-truth question is
         decided.
     """
+    from .progress import for_build as _progress_for_build
+    _progress = _progress_for_build(icao, compute_elevations=compute_elevations)
+    _progress.step()  # [1] Loading apt.dat & runway geometry
+
     apt_path = _pick_best_apt_dat_against_osm(xplane_root, icao)
     if apt_path is None:
         raise RuntimeError(f"No apt.dat found for {icao}")
@@ -414,6 +418,8 @@ def build_airport_pavement(icao: str, xplane_root: str,
             rwy_bearings.append(
                 math.degrees(math.atan2(bx - ax, by - ay)) % 180.0)
     layout.runway_union = unary_union(runway_polys) if runway_polys else None
+
+    _progress.step()  # [2] Assembling pavement & runway shoulders
 
     # ── Pavement union in meter space ────────────────────────────
     pav_polys: List[Polygon] = []
@@ -1476,6 +1482,8 @@ def build_airport_pavement(icao: str, xplane_root: str,
         if _rc and _rc[0] == _rc[-1]:
             _rc = _rc[:-1]
         apt_pav_vertices.extend(_rc)
+
+    _progress.step()  # [3] Building taxiways & terminals
 
     # ── Taxi centerlines (apt.dat primary, OSM fallback) ─────────
     # Per user 2026-05-12: apt.dat row 1201/1202 taxi-network is
@@ -2707,6 +2715,8 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 f"  [pav-builder] {icao}: trimmed {_n_cl_trim} "
                 f"centerline(s) at building-pad edges.")
 
+    _progress.step()  # [4] Building taxi rects, junctions & service roads
+
     # ── Build taxi rects from centerlines ────────────────────────
     taxi_rects = _build_taxi_rects(
         osm_centerlines, pav_union, layout.runway_union,
@@ -3415,6 +3425,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # runs the full unification as a fallback.
     _airside_unified_presolve = False
     if compute_elevations:
+        _progress.step()  # [5] Solving elevations (FAA grade compliance)
         finalize.compute_elevations_and_repair_geometry(
             layout, icao, xplane_root, apt,
             nodes=nodes, ways=ways, to_m=to_m,
@@ -4159,6 +4170,8 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # previously firing mid-pipeline with stale numbers.
         from .elevation import _report_within_shape_violations
         _report_within_shape_violations(layout, icao)
+
+        _progress.step()  # [6] Emitting terrain features & finalizing
 
         # ── Terrain-transition feature emit (POST-solve) ──────────────
         # Boundary ribbon, boundary→DEM bridge and taxi/road bridges emit
