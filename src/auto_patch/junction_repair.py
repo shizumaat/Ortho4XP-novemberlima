@@ -3254,6 +3254,7 @@ def _reclassify_runway_disconnected_to_groundside(
         tile_lat: int = 0,
         tile_lon: int = 0,
         touch_tol_m: float = 0.05,
+        require_service_adjacency: bool = False,
         ) -> int:
     """Reclassify aprons / junctions with NO touch-chain to a runway as
     groundside pavement (DEM-following, like every groundside shape).
@@ -3282,6 +3283,19 @@ def _reclassify_runway_disconnected_to_groundside(
     every paved area is airside (small fields' pavement islands are
     aircraft parking, not curbside), so this pass is skipped entirely
     and nothing emits as groundside.
+
+    ``require_service_adjacency`` (user 2026-06-28) scopes the demotion to
+    unreachable apron/junction COMPONENTS that actually touch a service
+    road — the orphan the late junction→``service_road`` re-role creates.
+    A bridge junction that carries a 1206 truck route is re-roled to
+    ``service_road`` AFTER this pass first runs (LPHR: 6 west-side aprons),
+    severing the apron cluster from the runway chain; the cluster is then
+    landside but stays ``apron`` because the connectivity classifier already
+    ran.  Re-running it catches the orphan — but that re-run happens after
+    ``tile_cut`` (10 m seam gaps), so a plain re-run could false-positive an
+    apron whose real aircraft-pavement chain was merely severed by the seam.
+    Requiring the component to touch a service road (the actual orphaning
+    cause) keeps the seam-gapped case airside.
     """
     from shapely.strtree import STRtree
     if not any(s.role == ROLE_BUILDING
@@ -3345,6 +3359,49 @@ def _reclassify_runway_disconnected_to_groundside(
                    in (getattr(layout, "apt_service_centerlines", None) or [])
                    if ln is not None and not ln.is_empty]
                   if _svc_skip else [])
+    # Service-adjacency scoping (second pass, post truck-route re-role):
+    # demote only an unreachable apron/junction COMPONENT that touches a
+    # service road — the exact orphan the bridge junction→service_road re-role
+    # creates.  Component-level (not per-shape): the cluster's interior aprons
+    # touch only each other; only its rim aprons touch the road (LPHR cluster
+    # of 6 — 3 rim aprons touch the road, all 6 are eligible together).  None →
+    # every unreachable apron/junction is eligible (first pass, unchanged).
+    svc_eligible_i: "set[int] | None" = None
+    if require_service_adjacency:
+        from .layout import ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION
+        svc_polys = [s.polygon for s in layout.shapes
+                     if s.role in (ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION)
+                     and s.polygon is not None and not s.polygon.is_empty]
+        unreach = [k for k, i in enumerate(idxs)
+                   if k not in seen
+                   and layout.shapes[i].role in (ROLE_APRON, ROLE_JUNCTION)]
+        unreach_set = set(unreach)
+        comp_of: dict[int, int] = {}
+        cid = 0
+        for k0 in unreach:
+            if k0 in comp_of:
+                continue
+            stack = [k0]
+            comp_of[k0] = cid
+            while stack:
+                x = stack.pop()
+                for y in adj[x]:
+                    if y in unreach_set and y not in comp_of:
+                        comp_of[y] = cid
+                        stack.append(y)
+            cid += 1
+        comp_touch_svc: dict[int, bool] = {}
+        for k in unreach:
+            if comp_touch_svc.get(comp_of[k]):
+                continue
+            try:
+                if any(polys[k].distance(g) <= touch_tol_m for g in svc_polys):
+                    comp_touch_svc[comp_of[k]] = True
+            except _GEOM_EXC:
+                continue
+        svc_eligible_i = {idxs[k] for k in unreach
+                          if comp_touch_svc.get(comp_of[k])}
+
     n_reclassified = 0
     n_rect_orphans = 0
     converted: list[int] = []         # layout indices, for the cluster limit
@@ -3353,6 +3410,11 @@ def _reclassify_runway_disconnected_to_groundside(
         if k in seen:
             continue
         s = layout.shapes[i]
+        # In service-adjacency mode only road-orphaned components convert; a
+        # disconnected rect is never in the set, so rect-orphan demotion (the
+        # second sub-pass below) is inert here — by design.
+        if svc_eligible_i is not None and i not in svc_eligible_i:
+            continue
         if s.role in (ROLE_APRON, ROLE_JUNCTION):
             if _svc_lines:
                 try:

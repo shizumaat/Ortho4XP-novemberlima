@@ -4230,6 +4230,24 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     f"  [pav-builder] {icao}: re-roled {_n_sl} road-only "
                     f"junction(s) → service_road (truck route / sliver).")
 
+            # The junction→service_road re-role above runs AFTER the
+            # connectivity classifier (it can only see a junction's road-only
+            # adjacency once unify/overlap-clip/tile_cut have settled), so an
+            # apron cluster bridged to the airside only through that junction is
+            # now orphaned behind a service road but still tagged ``apron``
+            # (LPHR: 6 west-side aprons).  Re-run the runway-disconnection
+            # classifier, SCOPED to components that touch a service road, to
+            # demote those orphans to groundside.  ``require_service_adjacency``
+            # keeps the post-tile_cut re-run from false-positiving an apron
+            # whose aircraft-pavement chain was merely severed by the seam gap.
+            if _n_sl:
+                from .junction_repair import (
+                    _reclassify_runway_disconnected_to_groundside)
+                _reclassify_runway_disconnected_to_groundside(
+                    layout, icao=icao, dem=dem,
+                    tile_lat=tile_lat, tile_lon=tile_lon,
+                    require_service_adjacency=True)
+
         if USE_PER_SURFACE_SOLVER and layout.anchor is not None:
             # Runway CIFP thresholds are LOCKED — the solver never moves them.
             # The old runway-threshold-relief passes (step 3
