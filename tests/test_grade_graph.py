@@ -20,7 +20,7 @@ def _square(side=20.0):
 def _cap_of(sc, a, b):
     for (x, y, cap) in sc.edges:
         if {x, y} == {a, b}:
-            return cap
+            return cap.flat_cap()
     return None
 
 
@@ -30,7 +30,7 @@ def test_apron_body_is_one_percent_no_spine():
     ctx = GG.GradeContext(centerlines=[])
     sc = GG.shape_constraints(s, ctx)
     assert sc.edges, "apron must produce body edges"
-    assert all(abs(cap - APRON_MAX_GRADE) < 1e-9 for (_a, _b, cap) in sc.edges)
+    assert all(abs(cap.flat_cap() - APRON_MAX_GRADE) < 1e-9 for (_a, _b, cap) in sc.edges)
 
 
 def test_junction_no_spine_inherits_cap():
@@ -41,7 +41,7 @@ def test_junction_no_spine_inherits_cap():
         centerlines=[], inherited_junction_cap=lambda sh: TAXI_MAX_GRADE_NARROW)
     sc = GG.shape_constraints(s, ctx)
     assert sc.edges
-    assert all(abs(cap - TAXI_MAX_GRADE_NARROW) < 1e-9
+    assert all(abs(cap.flat_cap() - TAXI_MAX_GRADE_NARROW) < 1e-9
                for (_a, _b, cap) in sc.edges)
 
 
@@ -58,7 +58,7 @@ def test_junction_with_spine_uniform_taxiway_cap():
     # the two spine nodes (idx 4,5) share a centerline → spine cap (3%)
     assert _cap_of(sc, 4, 5) == pytest.approx(TAXI_MAX_GRADE_NARROW)
     # junction body is ALSO the taxiway cap → uniform
-    assert all(abs(cap - TAXI_MAX_GRADE_NARROW) < 1e-9
+    assert all(abs(cap.flat_cap() - TAXI_MAX_GRADE_NARROW) < 1e-9
                for (_a, _b, cap) in sc.edges)
     # spine chain recorded, ordered along arc
     assert sc.spine_chains == [[4, 5]] or sc.spine_chains == [[5, 4]]
@@ -91,7 +91,7 @@ def test_service_junction_four_percent():
     s = GG.GradeShape(role="service_junction", ring=ring, keys=keys)
     ctx = GG.GradeContext(centerlines=[])
     sc = GG.shape_constraints(s, ctx)
-    assert all(abs(cap - SERVICE_ROAD_MAX_GRADE) < 1e-9
+    assert all(abs(cap.flat_cap() - SERVICE_ROAD_MAX_GRADE) < 1e-9
                for (_a, _b, cap) in sc.edges)
 
 

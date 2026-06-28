@@ -921,7 +921,8 @@ def iter_shape_grade_constraints(
                 out.append(ShapePairConstraint(
                     way=w, nid_a=pnids[ia], nid_b=pnids[ib],
                     xa=xi, ya=yi, ea=ei, xb=xj, yb=yj, eb=ej,
-                    dist=d, cap=cap, allowance=cap * d + ELEV_ROUNDING_NOISE_M))
+                    dist=d, cap=cap.flat_cap(),
+                    allowance=cap.at(d, 0.0) + ELEV_ROUNDING_NOISE_M))
             continue
         # PLANE shapes (rects / runway / terminal) → the SAME law: all vertex
         # pairs at the role cap, via grade_graph.plane_constraints (the single
@@ -943,7 +944,8 @@ def iter_shape_grade_constraints(
             out.append(ShapePairConstraint(
                 way=w, nid_a=pnids[ia], nid_b=pnids[ib],
                 xa=xi, ya=yi, ea=ei, xb=xj, yb=yj, eb=ej,
-                dist=d, cap=capp, allowance=capp * d + ELEV_ROUNDING_NOISE_M))
+                dist=d, cap=capp.flat_cap(),
+                allowance=capp.at(d, 0.0) + ELEV_ROUNDING_NOISE_M))
     return out
 
 

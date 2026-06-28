@@ -166,7 +166,7 @@ def solve_route_profile(layout, icao: str,
         # validator checks — rects/caps all-pair, which shape_constraints only
         # approximates with axial edges), so build and validate cannot leave a
         # residual between them.  The spine stays HARD; only body nodes flex.
-        u_edges = [(a, b, cap * _GG._dist(G.pos.get(a), G.pos.get(b)))
+        u_edges = [(a, b, cap.at(_GG._dist(G.pos.get(a), G.pos.get(b)), 0.0))
                    for (a, b, cap, _sp) in G.edges
                    if a in G.pos and b in G.pos]
         rem, bh = feasibility_project(elev, [{"edges": u_edges}], hard)

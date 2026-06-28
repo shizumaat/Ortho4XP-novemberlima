@@ -125,10 +125,13 @@ class GradeContext:
 @dataclass
 class ShapeConstraints:
     """The grade constraints of ONE shape: undirected edges ``(key_a, key_b,
-    cap)`` plus the spine chains (ordered spine node keys) for the connecting
-    solve's smooth-profile handling."""
+    allowance)`` — where ``allowance`` is a :class:`grade_law.Allowance`
+    (anisotropic ``cL·Δs∥ + cT·Δs⊥``; evaluate with ``allowance.at(Δs∥, Δs⊥)``,
+    today flat) — plus the spine chains (ordered spine node keys) for the
+    connecting solve's smooth-profile handling."""
     role: str
-    edges: list[tuple[Hashable, Hashable, float]] = field(default_factory=list)
+    edges: list[tuple[Hashable, Hashable, "GL.Allowance"]] = field(
+        default_factory=list)
     spine_chains: list[list[Hashable]] = field(default_factory=list)
 
 
@@ -510,7 +513,7 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
                 blend_cap_fn=blend_fn, both_road=both_road))
             if allow is None:
                 continue
-            sc.edges.append((ki, kj, allow.flat_cap()))
+            sc.edges.append((ki, kj, allow))
 
     sc.spine_chains = _build_spine_chains(shape, ctx, membership)
     return sc
@@ -588,7 +591,7 @@ def plane_constraints(shape: GradeShape, ctx: GradeContext,
                 spine_caps=(), body_cap=cap, both_road=both_road))
             if allow is None:
                 continue
-            sc.edges.append((ki, kj, allow.flat_cap()))
+            sc.edges.append((ki, kj, allow))
     return sc
 
 

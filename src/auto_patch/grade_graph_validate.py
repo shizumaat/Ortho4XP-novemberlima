@@ -146,9 +146,12 @@ def within_violations(layout, noise=ELEV_ROUNDING_NOISE_M):
         if d < 1e-6:
             continue
         de = abs(za - zb)
-        if de > cap * d + noise:
-            viol.append(((de / d) * 100.0, cap * 100.0, d, role, is_spine,
-                         0.5 * (xa + xb), 0.5 * (ya + yb)))
+        # ``cap`` is a grade_law.Allowance; the per-pair budget is its anisotropic
+        # evaluation ``cL·Δs∥ + cT·Δs⊥`` (today Δs∥=d, Δs⊥=0 → cL·d).  The reported
+        # %-cap is the longitudinal cL (flat_cap while every rule is isotropic).
+        if de > cap.at(d, 0.0) + noise:
+            viol.append(((de / d) * 100.0, cap.flat_cap() * 100.0, d, role,
+                         is_spine, 0.5 * (xa + xb), 0.5 * (ya + yb)))
     # The taxi spine also ANCHORS into the runway (one side is a runway-surface
     # sample, not a node) — checked separately, flagged is_spine.
     viol.extend(_spine_runway_join_violations(layout, noise))

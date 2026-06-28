@@ -594,7 +594,8 @@ def _grade_graph_edges(s, coords, idx, ctx):
         if pa is None or pb is None:
             continue
         d = math.hypot(pa[0] - pb[0], pa[1] - pb[1])
-        out.append((a, b, cap * d))
+        # cap is a grade_law.Allowance → budget = cL·Δs∥ + cT·Δs⊥ (today Δs∥=d).
+        out.append((a, b, cap.at(d, 0.0)))
     return out
 
 
