@@ -3295,45 +3295,9 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # CROSS edges instead.
     taxi_rects = _snap_rect_sloping_edges_to_holes(taxi_rects, pav_union)
 
-    # Split long taxi rects at interior terrain extrema (user 2026-05-23).
-    # A taxi rect is graded as ONE plane between its two end edges, so a
-    # >200 m rect crossing a hill/dip can't follow it — the solver floats
-    # it meters above/below the ground mid-span.  Cut it at the DEM
-    # extrema so the solver gets control points there and each piece
-    # follows terrain; the per-axis grade cap keeps the seam between two
-    # plane pieces a <3% (typically <1%) fold, not a visible bump.  Uses
-    # the SAME smoothed DEM the solver will use.  Runs only when elevating
-    # (geometry-only builds have no DEM); runways aren't in taxi_rects.
-    from .config import SPLIT_LONG_RECTS_ENABLED
-    if compute_elevations and layout.anchor is not None and SPLIT_LONG_RECTS_ENABLED:
-        try:
-            from .elevation import _load_airport_dem, _sample_dem
-            from .layout import R_EARTH as _R_E
-            from .pavement.rects import split_long_rects_along_terrain
-            _lat0, _lon0 = layout.anchor
-            _cos0 = math.cos(math.radians(_lat0))
-            _tl = (current_tile_lat if current_tile_lat is not None
-                   else math.floor(_lat0))
-            _tn = (current_tile_lon if current_tile_lon is not None
-                   else math.floor(_lon0))
-            _split_dem = _load_airport_dem(_lat0, _lon0, override_dem=tile_dem)
-            if _split_dem is not None:
-                def _sd(x: float, y: float):
-                    lat = _lat0 + math.degrees(y / _R_E)
-                    lon = _lon0 + math.degrees(x / (_R_E * _cos0))
-                    return _sample_dem(_split_dem, _tl, _tn, lat, lon)
-                _n_before = len(taxi_rects)
-                taxi_rects = split_long_rects_along_terrain(taxi_rects, _sd)
-                if len(taxi_rects) != _n_before:
-                    UI.vprint(1,
-                        f"  [pav-builder] {icao}: split long taxi rect(s) "
-                        f"at terrain extrema (+{len(taxi_rects) - _n_before}).")
-        except _GEOM_EXC:
-            pass
-
     # Square slanted rect ends (gate RECT_SQUARE_ENDS) — LAST word after the
-    # per-corner pavement snap, the hole-edge snap, and the long-rect split,
-    # any of which can leave a taxi rect's end following an angled junction /
+    # per-corner pavement snap and the hole-edge snap, either of which can
+    # leave a taxi rect's end following an angled junction /
     # hole boundary (CYXY cross_connector G).  Keeps each end perpendicular so
     # the junction (pav_union - rect) absorbs the angled-pavement wedge.
     from .pavement.rects import _square_taxi_rect_ends

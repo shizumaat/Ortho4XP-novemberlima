@@ -69,7 +69,6 @@ __all__ = [
     "_snap_corners_to_pavement",
     "_snap_rect_sloping_edges_to_holes",
     "_trim_to_narrow",
-    "split_long_rects_along_terrain",
 ]
 
 
@@ -2499,39 +2498,3 @@ def _split_one_rect_along_terrain(rect, sample_dem, min_len_m,
     return pieces
 
 
-def split_long_rects_along_terrain(
-        taxi_rects,
-        sample_dem,
-        *,
-        min_len_m: float = 200.0,
-        min_seg_m: float = 50.0,
-        dev_thresh_m: float = 1.0,
-        step_m: float = 5.0):
-    """Split taxi rects longer than ``min_len_m`` at interior terrain
-    extrema so the elevation solver can place control points where the
-    ground curves — instead of grading one straight plane across a hill
-    and floating meters above/below it.
-
-    ``sample_dem(x, y) -> float | None`` returns the (smoothed) terrain
-    elevation at a local-meter point; the caller wires it to the same
-    DEM the solver uses.  A rect is split only where the terrain bulges
-    from the endpoint chord by more than ``dev_thresh_m`` and never into
-    pieces shorter than ``min_seg_m``.  The seam between two adjacent
-    pieces is graded within the per-axis grade cap by the solver, so it
-    stays a <3% (typically <1%) fold, not a visible bump.
-
-    Takes/returns the ``(polygon, axis, role, ref)`` tuple list used by
-    ``_build_taxi_rects``.  Runways are not in this list, so this is
-    inherently taxiway-only.
-    """
-    out = []
-    for entry in taxi_rects:
-        rect, axis, role, ref = entry
-        pieces = _split_one_rect_along_terrain(
-            rect, sample_dem, min_len_m, min_seg_m, dev_thresh_m, step_m)
-        if pieces is None:
-            out.append(entry)
-        else:
-            for sub_poly, sub_axis in pieces:
-                out.append((sub_poly, sub_axis, role, ref))
-    return out

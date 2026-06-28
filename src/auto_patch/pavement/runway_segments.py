@@ -70,66 +70,12 @@ from ..config import (
     RUNWAY_MAX_GRADE_CHANGE_PER_M as MAX_RUNWAY_GRADE_CHANGE_PER_M,
     RUNWAY_DEM_FOLLOW_BAND_M,
     RUNWAY_CROSSING_PHYSICAL_EXTENT,
-    SPLIT_LONG_RECTS_ENABLED,
 )
 DEFAULT_CELL_SIZE = float(RUNWAY_CELL_SIZE_M)  # meters between interp points
 DEFAULT_PROFILE = PATCH_SLOPE_PROFILE
 # How far beyond the physical runway end to extend as a flat apron.
 OVERRUN_EXTENSION = 30.0
 RUNWAY_SEGMENT_LENGTH = 100.0  # meters — length of each runway segment
-
-# Minimum elevation swing (m) for a runway-profile peak/valley to get
-# its own segment seam.  The FAA/EASA vertical-curve rules let the slope
-# reverse at a crest or dip, so each genuine one needs a seam (the
-# segment spanning it would otherwise be a single straight grade and
-# couldn't curve over it).  Below this swing it's a little ripple the
-# grade-cap solver smooths away — no seam needed.  Calibrated so SPLP's
-# smooth climb (sub-2 m wiggles) gets none while CYXY 14R/32L's real
-# crest (≈33 m span, prominence > 5 m) gets one.
-PROFILE_EXTREMUM_PROMINENCE_M = 2.0
-
-
-def runway_profile_extrema_fractions(profile, prominence_m):
-    """Return sorted INTERIOR ``t`` values (0..1 along the runway) at
-    profile PEAKS and VALLEYS whose elevation reverses by at least
-    ``prominence_m`` before the next reversal — real crests/dips, not
-    little ripples.
-
-    ``profile`` is ``[(t, elev), ...]`` ordered by ``t``.  A zigzag walk
-    tracks the running extreme since the last confirmed pivot and
-    confirms that pivot once the profile reverses by ``prominence_m``.
-    """
-    if len(profile) < 3:
-        return []
-    ts = [p[0] for p in profile]
-    es = [p[1] for p in profile]
-    n = len(es)
-    out: list[float] = []
-    cand_i = 0      # running extreme since the last confirmed pivot
-    trend = 0       # 0 unknown, +1 rising toward a peak, -1 falling
-    for i in range(1, n):
-        e = es[i]
-        if trend >= 0 and e > es[cand_i]:
-            cand_i = i
-            if trend == 0:
-                trend = 1
-        elif trend <= 0 and e < es[cand_i]:
-            cand_i = i
-            if trend == 0:
-                trend = -1
-        if trend == 1 and es[cand_i] - e >= prominence_m:
-            if 0 < cand_i < n - 1:
-                out.append(ts[cand_i])      # confirmed PEAK
-            cand_i = i
-            trend = -1
-        elif trend == -1 and e - es[cand_i] >= prominence_m:
-            if 0 < cand_i < n - 1:
-                out.append(ts[cand_i])      # confirmed VALLEY
-            cand_i = i
-            trend = 1
-    return sorted(set(out))
-
-
 def canonical_runway_desig(desig):
     """Canonical lookup key for a runway designator, reconciling the
     CIFP and apt.dat spellings.
@@ -1336,38 +1282,6 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
                     pav_int_t_vals.append(pt)
                 fractions.sort()
 
-            # Cut at significant runway-profile PEAKS and VALLEYS
-            # (user 2026-05-23): the FAA/EASA vertical-curve rules let
-            # the slope reverse at a crest or dip, so each genuine one
-            # needs a segment seam — otherwise the segment spanning it is
-            # forced to a single straight grade and can't curve over it.
-            # Densely sample the (smoothed) DEM along the centerline,
-            # find prominent extrema (little ripples ignored), add their
-            # fractions.  No-op when no DEM is available.
-            if phys_dist > 1.0 and SPLIT_LONG_RECTS_ENABLED:
-                n_prof = max(4, int(phys_dist / 15.0))
-                prof: list[tuple[float, float]] = []
-                for k in range(n_prof + 1):
-                    ft = k / n_prof
-                    p_lat = phys_end_a[0] + ft * (phys_end_b[0] - phys_end_a[0])
-                    p_lon = phys_end_a[1] + ft * (phys_end_b[1] - phys_end_a[1])
-                    pe = _sample_dem_ll(p_lat, p_lon)
-                    if pe is not None:
-                        prof.append((ft, pe))
-                if len(prof) >= 3:
-                    pv_merge_t = 12.0 / phys_dist
-                    pv_anchor_t = 2.0 / phys_dist
-                    for et in runway_profile_extrema_fractions(
-                            prof, PROFILE_EXTREMUM_PROMINENCE_M):
-                        if et <= 0.001 or et >= 0.999:
-                            continue
-                        if any(abs(et - a) < pv_anchor_t for a in anchored_t):
-                            continue
-                        if any(abs(et - f) < pv_merge_t for f in fractions):
-                            continue
-                        fractions.append(et)
-                        pav_int_t_vals.append(et)
-                    fractions.sort()
 
             # NOTE: tile-boundary cuts intentionally happen at the
             # end of the pipeline in ``tile_cut.py``, NOT here.

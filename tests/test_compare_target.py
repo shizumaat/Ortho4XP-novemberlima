@@ -61,11 +61,11 @@ pytestmark = [
 # ordering.  A regression that drops more than ~5 % of any role's
 # shapes vs target trips the gate.
 # Floors RE-CUT 2026-06-05 against fresh SPJC / SPLP target fixtures after the
-# terrain-extrema cuts were turned OFF by default (config.SPLIT_LONG_RECTS_ENABLED
-# now defaults off): the extrema cuts had been splitting long parallels / runway
-# segments at terrain peaks/valleys, so disabling them reduces the segment count
-# (SPJC primary_parallel 31->28, runway 31->30; SPLP-77 primary_parallel 11->8;
-# SPLP-78 primary_parallel 8->5).  Floors = target - round(5%).
+# terrain-extrema cuts were turned OFF by default (the extrema cuts had been
+# splitting long parallels / runway segments at terrain peaks/valleys, so
+# disabling them reduced the segment count: SPJC primary_parallel 31->28,
+# runway 31->30; SPLP-77 primary_parallel 11->8; SPLP-78 primary_parallel
+# 8->5).  Floors = target - round(5%).  (The cut path was deleted 2026-06-28.)
 # SPJC RE-CUT 2026-06-09 (session 68) for the conforming-cuts hole-router
 # redesign (config.HOLE_ROUTER_V2): the Prim min-spanning-forest planner
 # opens residue holes with MINIMUM chained slits instead of per-hole

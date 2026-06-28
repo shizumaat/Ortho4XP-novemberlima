@@ -1348,15 +1348,6 @@ ROAD_LOT_MIN_AREA_M2 = 200.0
 # the opening + min-area test alone decides.
 ROAD_LOT_AREA_RATIO = 0.0
 
-# (session 63) Cut long taxi rects AND runway segments at interior terrain
-# extrema (``split_long_rects_along_terrain`` + the runway peak/valley seams in
-# ``pavement/runway_segments.py``).  DEFAULT OFF (user 2026-06-05): the extrema
-# cuts split straight sections into many segments, and verified across
-# HECA/CYXY/SPLP they are NOT needed for runway grade compliance — runways stay
-# within grade (CYXY fully compliant) and the smooth vertical profile handles
-# terrain undulation.  Set ``O4_SPLIT_LONG_RECTS=1`` to restore the cuts.
-SPLIT_LONG_RECTS_ENABLED = _os.environ.get("O4_SPLIT_LONG_RECTS", "0") == "1"
-
 
 # ── Patch mesh-density tuning (X-Plane load-time optimization) ─────────
 # Ortho4XP cuts each SLOPED pavement way into ``cell_size``-metre cells
@@ -1583,47 +1574,6 @@ TAXI_REACH_BAND_BY_WIDTH = _os.environ.get(
 # Default ON (the corridor climb only manifests with the DEM attraction present).
 JUNCTION_NARROW_GRADE = _os.environ.get("O4_JCT_NARROW_GRADE", "1") == "1"
 
-# (20260621) BUILDING DEM ANCHOR — apron-spine climb model (user ruling).
-# Buildings are the HEAVIEST anchor: each pad is hard-anchored FLAT at the
-# closest-to-DEM level that stays route-feasible to every runway it connects to
-# (closest-FEASIBLE-to-DEM, not raw DEM — so the surrounding pavement can always
-# reach it within grade).  This pins the high end the taxiways/aprons grade DOWN
-# from, lifting the airside complex out of the runway-anchored "bowl" (CYXY: the
-# apron/junction network sat ~10 m BELOW terrain because the runway-propagated
-# seed + cap-chain dragged it down and the soft DEM attraction was fully
-# overridden; hard-anchoring the buildings lifts taxiway G to 714-718 = the
-# 718 m buildings).  Pads not route-reachable from any runway, or whose combined
-# band is infeasible, keep their soft DEM seed (no hard pin).  Building-to-
-# building steps are allowed (independent flat pads).  Coexists with
-# TERMINAL_NATURAL_LEVELS (runs as an added hard anchor; gate OFF = the prior
-# transparent-pad behaviour, byte-identical).
-# ★ DEFAULT OFF (2026-06-21): hard-pinning buildings (even feasibility-clamped)
-# is too RIGID — the surrounding taxi network cannot always grade to a pinned
-# pad, so it forces local grade violations the relief cannot yield away (CYXY
-# within-shape 18 → 410).  This is exactly the infeasibility the transparent-pad
-# model was built to avoid.  The lift mechanism is CORRECT (it raises taxiway G
-# to the buildings) but needs a WEIGHTED / yielding form (buildings strongly
-# prefer feasible-DEM but yield locally where the network cannot reach), plus
-# per-letter caps in the feasibility band, before it can be the default.
-BUILDING_DEM_ANCHOR = _os.environ.get("O4_BUILDING_DEM_ANCHOR", "0") == "1"
-
-# (20260621) APRON FEASIBLE LIFT — apron-spine climb model (user ruling: "raise
-# the apron compromise level").  The large flat aprons cannot grade the terrain
-# rise across their width at 1%, so they sit at ONE level.  By default the solve
-# pulls that level DOWN toward the runway (a ~10 m bowl below the rim buildings).
-# When ON, each apron is instead anchored FLAT at the HIGHEST level still route-
-# feasible to every runway it connects to (the per-letter route-band ceiling — so
-# a narrow code-A/B taxi route lets it sit 3%·route above the runway), clamped to
-# DEM (never above terrain).  This lifts the whole complex UP toward the buildings;
-# the taxiways absorb the steeper descent to the runway, and taxiway G ends up near
-# building level.  Pads/aprons not route-reachable keep their soft seed.
-# ★ DEFAULT OFF (2026-06-21) — proved the lift mechanism but the flat hard-anchor
-# is the WRONG driver (pins the apron body high, troughs the centerline).  Being
-# RETIRED in favour of the centerline-driven conformance plan
-# (docs/taxi_centerline_grading_plan.md §5).  O4_APRON_FEASIBLE_LIFT=1 +
-# O4_TAXI_SPINE=1 reproduces the evaluation build.
-APRON_FEASIBLE_LIFT = _os.environ.get("O4_APRON_FEASIBLE_LIFT", "0") == "1"
-
 # (20260622) CORRIDOR SPINE CHAINS — plan P2 (docs/taxi_centerline_grading_plan
 # .md §5): extend the corridor profile to cover EVERY apt.dat taxi centerline,
 # not only the stretches that have taxi RECTS.  Where a centerline runs through
@@ -1733,7 +1683,7 @@ FIELD_TARGET_CONFORMANCE = _os.environ.get(
 # part at the taxiway cap, apron part at 1%), then the per-edge per-letter-capped
 # centerline route to all thresholds; band = intersection over thresholds;
 # level = clamp(DEM, floor, ceiling).  Buildings NOT touching airside pavement
-# stay at DEM.  Unlike the retired BUILDING_DEM_ANCHOR (uniform cap → bowled),
+# stay at DEM.  Unlike the retired uniform-cap building anchor (bowled),
 # this uses TaxiRouteGraph.edge_cap, so it pairs with UNNAMED_TAXI_SIZE (P3a) —
 # the unnamed arms must carry their real size for the band to be right.  The
 # seated pads become hard anchors the rest of the network grades to.
