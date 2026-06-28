@@ -35,9 +35,13 @@ from __future__ import annotations
 
 import heapq
 import math
+import os
 from typing import Callable, Dict, List, Tuple
 
-from auto_patch.config import TAXI_MAX_GRADE, VISIBLE_CHORD_CONNECT
+from auto_patch.config import (
+    BUILDING_FRONTAGE_CORRIDOR_M, BUILDING_FULL_FRONTAGE,
+    BUILDING_FULL_FRONTAGE_AREA_M2, TAXI_MAX_GRADE, VISIBLE_CHORD_CONNECT,
+)
 from auto_patch.layout import (
     ROLE_APRON, ROLE_BUILDING, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL, ROLE_RUNWAY, ROLE_SECONDARY_PARALLEL, ROLE_STUB,
@@ -269,6 +273,65 @@ def reach_band_sampler(layout, runway_pts_xyz):
     return band
 
 
+def _has_visible_corridor(px, py, cls, vis, max_m):
+    """True when a taxi corridor lies within ``max_m`` of ``(px, py)`` AND a chord
+    from the point to that corridor's spine stays on pavement (a VISIBLE chord —
+    the user's gate, 2026-06-27).  ``vis`` None (visibility disabled) → distance
+    gate only."""
+    from shapely.geometry import Point, LineString
+    from shapely.ops import nearest_points
+    c = Point(px, py)
+    cand = [L for L in cls if L.distance(c) <= max_m]
+    if not cand:
+        return False
+    if vis is None:
+        return True
+    for ln in sorted(cand, key=lambda L: L.distance(c)):
+        foot = nearest_points(ln, c)[0]
+        chord = LineString([(px, py), (foot.x, foot.y)])
+        if chord.length < 1e-6 or vis.contains(chord):
+            return True
+        try:                                 # tolerate tiny weld-seam gaps
+            inside = chord.intersection(vis.context).length
+            if inside / chord.length >= _VIS_ON_PAV_FRAC:
+                return True
+        except Exception:                                  # pragma: no cover
+            pass
+    return False
+
+
+def _frontage_band(poly, band, cls, vis, max_corridor_m):
+    """Intersect the route-feasibility ``band`` over the building's ENTIRE
+    qualifying FRONTAGE (user 2026-06-27, large buildings only).
+
+    A frontage SAMPLE (every ring vertex + each edge midpoint) qualifies when a
+    taxi corridor lies within ``max_corridor_m`` AND a visible on-pavement chord
+    reaches that corridor's spine (:func:`_has_visible_corridor`) — i.e. every
+    SIDE flanked by a taxi route, not only the apron the building abuts.  The
+    band is sampled at every qualifying point and the feasible interval is the
+    INTERSECTION — ``(max floor, min ceiling)`` — so the seated flat level keeps
+    EVERY such frontage point gradeable to the spine at ≤1 % (not just the central
+    chord).  Returns ``(floor, ceiling)`` or ``None`` when no side qualifies
+    (caller falls back to the central chord)."""
+    ring = list(poly.exterior.coords)
+    floor, ceil = -_INF, _INF
+    got = False
+    for i in range(len(ring) - 1):
+        ax, ay = ring[i]
+        bx, by = ring[i + 1]
+        mx, my = 0.5 * (ax + bx), 0.5 * (ay + by)
+        for (px, py) in ((ax, ay), (mx, my), (bx, by)):
+            if not _has_visible_corridor(px, py, cls, vis, max_corridor_m):
+                continue
+            bb = band(px, py)
+            if bb is None:
+                continue
+            floor = max(floor, bb[0])
+            ceil = min(ceil, bb[1])
+            got = True
+    return (floor, ceil) if got else None
+
+
 def building_feasible_levels(
         layout,
         runway_pts_xyz: List[Tuple[float, float, float]],
@@ -301,6 +364,21 @@ def building_feasible_levels(
         return {}
     airside = unary_union(polys)
 
+    # Buildings ≥ this footprint must clear their ENTIRE frontage, not just a
+    # single central chord (user 2026-06-27); small buildings keep the centroid
+    # chord.  Gate off → central chord for every building (legacy, byte-identical).
+    full_frontage = (BUILDING_FULL_FRONTAGE
+                     and os.environ.get("O4_BUILDING_FULL_FRONTAGE", "1") == "1")
+    # Taxi corridors + pavement-visibility for the frontage qualifier (a side
+    # grades at 1 % only when a corridor is within range AND visibly chord-reachable).
+    cls = vis = None
+    if full_frontage:
+        cls = [ln for (ln, n) in
+               (getattr(layout, "apt_taxi_centerlines", None) or [])
+               if ln is not None and not ln.is_empty
+               and not str(n or "").upper().startswith("SVC")]
+        vis = _pavement_visibility(layout) if VISIBLE_CHORD_CONNECT else None
+
     out: Dict[int, float] = {}
     for s in layout.shapes:
         if (s.role != ROLE_BUILDING or s.polygon is None
@@ -309,7 +387,15 @@ def building_feasible_levels(
         if airside.is_empty or s.polygon.distance(airside) > _TOUCH_TOL_M:
             continue                            # not airside-served → DEM
         c = s.polygon.centroid
-        b = band(c.x, c.y)
+        # LARGE building → intersect the band over the whole frontage; SMALL (or no
+        # qualifying frontage side) → the single central chord from the centroid.
+        b = None
+        if (full_frontage and cls
+                and s.polygon.area >= BUILDING_FULL_FRONTAGE_AREA_M2):
+            b = _frontage_band(s.polygon, band, cls, vis,
+                               BUILDING_FRONTAGE_CORRIDOR_M)
+        if b is None:
+            b = band(c.x, c.y)
         if b is None:
             continue
         floor, ceil = b

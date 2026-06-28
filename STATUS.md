@@ -6,6 +6,30 @@
 > The body-layer review items below are the NEXT work, not the goal.
 
 ---
+## 🔧 IN PROGRESS (2026-06-27, UNCOMMITTED) — apron→groundside connector grades ≤4%
+**#3-B3 — follow the truck route, raise the apron arm, groundside meets ≤4%.**
+`route_profile/anchors.py::apply_groundside_reach` (gate `O4_GROUNDSIDE_MOUTH_ANCHOR`
+default ON, called LAST in `solve.py`; solve.py then re-runs `feasibility_project` on
+the returned `hard` set so the apron body grades into the raised arm). The connector
+mouth was coincident with the groundside but draped to apron level → `_intern` split it
+into a ~5 m cliff (SVC15). USER MODEL: budget the reach over the FULL ground-truck route
+(groundside edge → apron, ~55 m), keep the SVC ≤4%, and since the narrow apron arm is
+welded to the SVC rect, PULL UP that arm and grade into the apron.
+- BFS apron-reachability over the service network; per reachable connector the route =
+  shortest `apt_service_centerline` through it, `route_len`=arc to the apron-side end,
+  `base_elev`=apron there; groundside shifted (relief-preserving) into the reach band
+  `[base±cap·len]` ∩ over all its connectors, clamped to DEM. Then RAISE the apron arm:
+  corridor nodes (≤14 m of the centerline) take `gs_level − cap·STRAIGHT-dist-from-mouth`
+  (straight → connector rect exactly ≤cap; self-taper confines the raise to the arm).
+  No apron-reaching service road → stays DEM.
+- CYXY: SVC15 → ≤4% (groundside 700.5 ≈ apron base +2.2 m, apron arm 697.6→699.2,
+  welded both ends); 4 pieces re-levelled, ~23 route nodes pinned; SVC2 (not reachable)
+  stays DEM; SVC9 baseline red untouched.
+- Gate-off **byte-identical** to current-tree baseline; CYXY tests **zero net-new** (5
+  standing reds gate-on==gate-off). ⚠ A/B against the CURRENT tree, NOT the stale
+  `/tmp/CYXY.osm` (parallel solver WIP moved the baseline 3846→3882 nodes).
+
+---
 ## ✅ SESSION CLOSE-OUT (2026-06-27) — committed on `dev`, newest first
 Acceptance `test_single_graph_acceptance.py` = **3/3 GREEN** after every commit
 (spine=0 verified serial `-n0`). All new behaviour is GATED default-on; gate-off =

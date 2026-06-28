@@ -3333,6 +3333,18 @@ def _reclassify_runway_disconnected_to_groundside(
     from .config import GROUNDSIDE_MAX_GRADE
     _dem_at = (_dem_sampler(layout, dem, tile_lat, tile_lon)
                if dem is not None else None)
+    # A runway-disconnected apron/junction with a 1206 TRUCK ROUTE running through
+    # it is a ground-vehicle ROAD, not a landside lot — keep its airside role here
+    # (the truck-route pass re-roles it ``service_road`` so it follows DEM as a road
+    # and is NEVER separated from the service network it belongs to).  User
+    # 2026-06-27: groundside 188, a 186 m corridor with 186 m of 1206 through it, was
+    # wrongly demoted to groundside and walled off from the road it continues.
+    import os as _os
+    _svc_skip = _os.environ.get("O4_SVC_CONNECTOR_AS_ROAD", "1") == "1"
+    _svc_lines = ([ln for (ln, _r)
+                   in (getattr(layout, "apt_service_centerlines", None) or [])
+                   if ln is not None and not ln.is_empty]
+                  if _svc_skip else [])
     n_reclassified = 0
     n_rect_orphans = 0
     converted: list[int] = []         # layout indices, for the cluster limit
@@ -3342,6 +3354,15 @@ def _reclassify_runway_disconnected_to_groundside(
             continue
         s = layout.shapes[i]
         if s.role in (ROLE_APRON, ROLE_JUNCTION):
+            if _svc_lines:
+                try:
+                    _truck = sum(ln.intersection(s.polygon).length
+                                 for ln in _svc_lines
+                                 if ln.intersects(s.polygon))
+                except _GEOM_EXC:
+                    _truck = 0.0
+                if _truck >= 15.0:         # a truck road → not groundside
+                    continue
             if _dem_at is not None:
                 # simplify_tol=0: these boundaries come out of the
                 # airside conformance pipeline already clean; the
@@ -3506,6 +3527,40 @@ def _reclassify_road_only_lots_to_groundside(
                 and s.polygon is not None and not s.polygon.is_empty]
     if not svc_idxs:
         return 0
+    # THROUGH-ROAD guard (user 2026-06-27): a thin corridor whose 1206 truck route
+    # runs straight THROUGH its whole length is a service ROAD, not lot interior —
+    # keep it ``service_road`` even though it overlaps the lot core.  A lot FRAME is
+    # distinguished by its rim-looping route being far longer than the frame's
+    # straight extent.  ``apt_service_centerlines`` are the truck routes.
+    import os as _os
+    _svc_lines = ([ln for (ln, _r)
+                   in (getattr(layout, "apt_service_centerlines", None) or [])
+                   if ln is not None and not ln.is_empty]
+                  if _os.environ.get("O4_SVC_CONNECTOR_AS_ROAD", "1") == "1"
+                  else [])
+
+    def _is_through_road(s):
+        try:
+            if s.polygon.area <= 0.0:
+                return False
+            mc = list(s.polygon.minimum_rotated_rectangle.exterior.coords)
+            sides = [math.hypot(mc[j][0] - mc[j + 1][0],
+                                mc[j][1] - mc[j + 1][1]) for j in range(4)]
+            longest, shortest = max(sides), min(sides)
+            tlen = sum(ln.intersection(s.polygon).length
+                       for ln in _svc_lines if ln.intersects(s.polygon))
+        except _GEOM_EXC:
+            return False
+        if longest <= 0.0 or shortest <= 0.0:
+            return False
+        # A very ELONGATED corridor carrying a substantial truck route that does
+        # NOT loop is a through-ROAD — not lot interior (chunky, route ≈ 0) and not
+        # a lot rim FRAME (also elongated, but its route LOOPS the rim so the route
+        # length far exceeds the frame's straight extent, route > 1.4·longest).
+        # CYXY 188 strips: aspect 19-21, route 0.5·longest, non-looping → road.
+        # CYXY 'Crew cars' frame: aspect 8.9 but route 1.66·longest (loops) → lot.
+        return (longest / shortest >= 5.0
+                and 0.4 * longest <= tlen <= 1.4 * longest)
 
     def _as_polys(geom):
         if geom is None or geom.is_empty:
@@ -3585,6 +3640,8 @@ def _reclassify_road_only_lots_to_groundside(
                 inside = s.polygon.intersection(lot).area
                 if s.polygon.area > 0.0 \
                         and (inside / s.polygon.area) >= member_inside_frac:
+                    if _svc_lines and _is_through_road(s):
+                        continue       # a through-road corridor → stays road
                     members.append(i)
             except _GEOM_EXC:
                 continue

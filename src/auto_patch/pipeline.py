@@ -3677,12 +3677,13 @@ def build_airport_pavement(icao: str, xplane_root: str,
             _aircraft_roles = {
                 ROLE_RUNWAY, "primary_parallel", "secondary_parallel",
                 ROLE_STUB, "cross_connector", "apron", "building"}
-            _n_svc_j = 0
+            _n_svc_j = _n_svc_r = 0
             for _ji, _js in enumerate(layout.shapes):
                 if _js.role not in ("junction", "apron") \
                         or _js.polygon is None or _js.polygon.is_empty:
                     continue
                 _has_road = _has_aircraft = False
+                _road_neighbors = 0
                 for _os9 in layout.shapes:
                     if _os9 is _js or _os9.polygon is None \
                             or _os9.polygon.is_empty:
@@ -3697,6 +3698,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
                         continue
                     if _os9.role == ROLE_SERVICE_ROAD:
                         _has_road = True
+                        _road_neighbors += 1
                     else:
                         _has_aircraft = True
                         break
@@ -3713,12 +3715,23 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     except _GEOM_EXC:
                         _narrow = True
                 if _has_road and not _has_aircraft and _narrow:
-                    _js.role = ROLE_SERVICE_JUNCTION
-                    _n_svc_j += 1
-            if _n_svc_j:
+                    # A piece that is the sole extension of ONE road is a CONNECTOR
+                    # corridor → ``service_road`` (grades AXIALLY, a ramp toward DEM).
+                    # ≥2 roads meeting = a real INTERSECTION → all-pair
+                    # ``service_junction`` (user 2026-06-27).  A piece that links a
+                    # road to a GROUNDSIDE lot is also a connector, but groundside is
+                    # not emitted yet here — caught by the post-emit pass below.
+                    if (os.environ.get("O4_SVC_CONNECTOR_AS_ROAD", "1") == "1"
+                            and _road_neighbors == 1):
+                        _js.role = ROLE_SERVICE_ROAD
+                        _n_svc_r += 1
+                    else:
+                        _js.role = ROLE_SERVICE_JUNCTION
+                        _n_svc_j += 1
+            if _n_svc_j or _n_svc_r:
                 UI.vprint(1,
-                    f"  [pav-builder] {icao}: re-roled {_n_svc_j} "
-                    f"road-only junction/apron(s) → service_junction (4 %).")
+                    f"  [pav-builder] {icao}: re-roled road-only junction/apron(s) "
+                    f"→ {_n_svc_r} service_road + {_n_svc_j} service_junction (4 %).")
 
         # A wide paved LOT reachable only via a service road is landside —
         # ONE groundside surface, not a road carved through it.  The
@@ -3986,6 +3999,34 @@ def build_airport_pavement(icao: str, xplane_root: str,
         except _GEOM_EXC:
             pass
 
+        # GROUNDSIDE-CONNECTOR re-role (user 2026-06-27): a narrow service_junction
+        # that links a service road to a groundside lot is a CONNECTOR corridor, not
+        # an intersection — re-role it ``service_road`` so it grades AXIALLY (a ramp
+        # toward DEM).  Runs HERE, after groundside is emitted, because the earlier
+        # service-junction re-role cannot see groundside (not emitted yet).  Gate
+        # off → no change.
+        if os.environ.get("O4_SVC_CONNECTOR_AS_ROAD", "1") == "1":
+            from .layout import (ROLE_SERVICE_JUNCTION, ROLE_SERVICE_ROAD,
+                                 ROLE_GROUNDSIDE_PAVEMENT)
+            _gs_polys = [g.polygon for g in layout.shapes
+                         if g.role == ROLE_GROUNDSIDE_PAVEMENT
+                         and g.polygon is not None and not g.polygon.is_empty]
+            _n_cr = 0
+            for _sj in layout.shapes:
+                if (_sj.role != ROLE_SERVICE_JUNCTION or _sj.polygon is None
+                        or _sj.polygon.is_empty):
+                    continue
+                try:
+                    if any(_sj.polygon.distance(_gp) <= 0.2 for _gp in _gs_polys):
+                        _sj.role = ROLE_SERVICE_ROAD
+                        _n_cr += 1
+                except _GEOM_EXC:
+                    continue
+            if _n_cr:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: re-roled {_n_cr} groundside-connector "
+                    f"service_junction(s) → service_road (axial ramp).")
+
         # (refactor Phase 5) The boundary ribbon + boundary→DEM bridge emit
         # and their airside vertex touches (_snap_bridge_vertices_to_runway_
         # corners, _insert_bridge_contacts_into_junctions) CANNOT move
@@ -4128,6 +4169,80 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # docs/presolve_geometry_refactor.md).  No behaviour change.
         from .geom_guard import snapshot_airside_geometry
         _geom_guard_snap = snapshot_airside_geometry(layout)
+
+        # ROAD-ONLY junction re-role (user 2026-06-27), at FINAL pre-solve geometry:
+        # a junction with a GROUND-TRUCK (apt.dat 1206) route running THROUGH it and
+        # NO aircraft taxiway is part of the service-road network, not an aircraft
+        # junction — re-role it ``service_road`` so it grades AXIALLY / follows DEM
+        # instead of being pinned flat at the airside bowl level.  Two ways in: a
+        # truck route runs through it (wide truck yard / corridor — CYXY shape 151,
+        # 340×45 m, 365 m of 1206 through, 0 m taxi), OR it is a thin residue strip
+        # sharing nodes only with a service road (the spine-slice sliver — CYXY
+        # SVC4's 109×0.8 m piece).  The earlier road-only re-role ran before the
+        # slice and the sliver-merge only folds junction→junction, so these survive.
+        # Aircraft adjacency (apron/runway/taxi rect) or an aircraft taxi-line
+        # through it VETOES the re-role; boundary adjacency does not.  Gate → no-op.
+        if os.environ.get("O4_SVC_CONNECTOR_AS_ROAD", "1") == "1":
+            from .layout import (ROLE_SERVICE_ROAD, ROLE_JUNCTION)
+            _cps = layout.canonical_points
+
+            def _rk(x, y):
+                return _cps.get_or_add(float(x), float(y))
+
+            def _ring_keys(sh):
+                c = list(sh.polygon.exterior.coords)
+                if c and c[0] == c[-1]:
+                    c = c[:-1]
+                return {_rk(x, y) for (x, y) in c}
+
+            # AIRCRAFT pavement (sharing nodes with it = a real aircraft junction).
+            _aircraft = (ROLE_RUNWAY, "primary_parallel", "secondary_parallel",
+                         ROLE_STUB, "cross_connector", "apron", "building")
+            _aircraft_keys: set = set()
+            _road_keys: set = set()
+            for _o in layout.shapes:
+                if _o.polygon is None or _o.polygon.is_empty:
+                    continue
+                if _o.role in _aircraft:
+                    _aircraft_keys |= _ring_keys(_o)
+                elif _o.role == ROLE_SERVICE_ROAD:
+                    _road_keys |= _ring_keys(_o)
+            _svc_lines = [ln for (ln, _r)
+                          in (getattr(layout, "apt_service_centerlines", None)
+                              or []) if ln is not None and not ln.is_empty]
+            _taxi_lines = [ln for (ln, _n)
+                           in (getattr(layout, "apt_taxi_centerlines", None) or [])
+                           if ln is not None and not ln.is_empty
+                           and not str(_n or "").upper().startswith("SVC")]
+            _n_sl = 0
+            for _s in layout.shapes:
+                if (_s.role != ROLE_JUNCTION or _s.polygon is None
+                        or _s.polygon.is_empty):
+                    continue
+                _keys = _ring_keys(_s)
+                _airc = len(_keys & _aircraft_keys)
+                if _airc > 2:                       # real aircraft adjacency → keep
+                    continue
+                try:
+                    if any(ln.intersects(_s.polygon)
+                           and ln.intersection(_s.polygon).length > 5.0
+                           for ln in _taxi_lines):  # aircraft taxi through → keep
+                        continue
+                    _truck = sum(ln.intersection(_s.polygon).length
+                                 for ln in _svc_lines if ln.intersects(_s.polygon))
+                    _narrow = _s.polygon.buffer(-7.5).is_empty
+                except _GEOM_EXC:
+                    continue
+                _road_shared = len(_keys & _road_keys)
+                # (a) a truck route runs through it, or (b) a thin residue strip
+                # sharing nodes with a service road.
+                if _truck >= 15.0 or (_narrow and _road_shared >= 1):
+                    _s.role = ROLE_SERVICE_ROAD
+                    _n_sl += 1
+            if _n_sl:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: re-roled {_n_sl} road-only "
+                    f"junction(s) → service_road (truck route / sliver).")
 
         if USE_PER_SURFACE_SOLVER and layout.anchor is not None:
             # Runway CIFP thresholds are LOCKED — the solver never moves them.

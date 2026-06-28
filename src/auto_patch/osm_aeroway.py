@@ -248,16 +248,6 @@ def extract_building_info(airport_layer, dico_airports, tile,
 
         if buildings:
             result[airport] = buildings
-            sources = {}
-            for b in buildings:
-                s = b.get("source", "unknown")
-                sources[s] = sources.get(s, 0) + 1
-            parts = ", ".join(
-                "{} {}s".format(v, k) for k, v in sorted(sources.items())
-            )
-            UI.vprint(1, "   Auto-patch: {} buildings for {}: {}".format(
-                len(buildings), airport, parts
-            ))
     return result
 
 

@@ -62,12 +62,26 @@ def solve_route_profile(layout, icao: str,
     band, dem_fn, runway_pts = reach_band_for(
         layout, elev, bucket_to_idx, dem, tile_lat, tile_lon)
     node_band = node_bands(nodes, band)
-    building_seats = build_building_seats(
-        layout, bucket_to_idx, band, dem_fn, runway_pts)
-    apron_body = apron_body_nodes(layout, bucket_to_idx)
     # The taxi-spine sub-graph (centerline-consecutive nodes) — spine nodes clamp
     # only to these, so the apron yields to the spine and the spine stays ≤cap.
+    # Built BEFORE seating so the reach-band ceiling can be made cap-consistent
+    # along it (the pad seats against the spine's ACHIEVABLE level, not the
+    # optimistic per-node ceiling — user 2026-06-27).
     spine_nodes, spine_adj = spine_adjacency(layout, nodes, bucket_to_idx)
+    # Unified grade graph (the SAME geometry nodes the spine solves on + the
+    # validator checks).  Built HERE — before seating — so the reach-band ceiling
+    # is made cap-consistent on the MERGED spine graph the spine actually grades
+    # along; the sparse base chain alone does not connect a frontage node to the
+    # lower-ceiling neighbour that drags it down, so regularising on it is a no-op.
+    from auto_patch import grade_graph as _GG
+    G = _GG.build_unified_graph(layout, bucket_to_idx)
+    u_spine_adj = _merge_spine_adj(spine_adj, G.spine_adj)
+    seat_band = band
+    if _os.environ.get("O4_CONSISTENT_CEILING", "1") == "1":
+        seat_band = _cap_consistent_band(band, nodes, node_band, u_spine_adj)
+    building_seats = build_building_seats(
+        layout, bucket_to_idx, seat_band, dem_fn, runway_pts)
+    apron_body = apron_body_nodes(layout, bucket_to_idx)
 
     # NO-BUILDING APRON FILL (user 2026-06-26): a no-building apron has no pad to
     # anchor it, so where the DEM is wrong-low it sags below the level its feeder
@@ -92,9 +106,7 @@ def solve_route_profile(layout, icao: str,
     # zero: build and validate use the exact same nodes.
     if True:
         from .one_solve import feasibility_project
-        from auto_patch import grade_graph as _GG
-
-        G = _GG.build_unified_graph(layout, bucket_to_idx)
+        # G + u_spine_adj already built above (before seating).
         n = len(elev)
         # Runway anchors: every geometry node a taxi spine joins the runway at is
         # HARD at the LOCAL runway elevation (the single hard anchor; the building
@@ -111,7 +123,6 @@ def solve_route_profile(layout, icao: str,
             if i < n:
                 elev[i] = float(re)
                 base_hard[i] = True
-        u_spine_adj = _merge_spine_adj(spine_adj, G.spine_adj)
         u_spine_nodes = set(u_spine_adj) | G.spine_nodes() | set(spine_nodes)
         # Building-frontage spine floor (the serving arm climbs to its pads),
         # cap-Lipschitz on the unified spine chain.
@@ -173,6 +184,39 @@ def solve_route_profile(layout, icao: str,
         # skipping any cap corner the spine already owns — done LAST so nothing
         # moves it (the route-graph path's _restamp_caps, on geometry nodes).
         _restamp_caps_unified(layout, bucket_to_idx, elev, rect_planes, frozen)
+        # GROUNDSIDE REACH + MOUTH WELD (user 2026-06-27).  Done LAST — after the
+        # body solve + feasibility project — so buildings + aprons are anchored:
+        #   1. Re-level each groundside piece a service road connects to an apron, to
+        #      the elevation the connector can REACH within the service-road grade
+        #      cap (apron mouth ± cap·route_len, clamped toward DEM) — so the
+        #      connector grades <=cap instead of ramping steeply to the raw DEM.  A
+        #      piece with no apron-connected service road stays DEM.
+        #   2. Weld each service-road connector mouth to the (re-levelled) groundside
+        #      altitude, so connector and groundside emit as ONE node (no cliff).
+        # Gate off → elev + groundside untouched → byte-identical.
+        if _os.environ.get("O4_GROUNDSIDE_MOUTH_ANCHOR", "1") == "1":
+            from auto_patch.config import SERVICE_ROAD_MAX_GRADE
+            from .anchors import apply_groundside_reach
+            _nrl, _gs_hard = apply_groundside_reach(
+                layout, bucket_to_idx, elev, SERVICE_ROAD_MAX_GRADE)
+            if _gs_hard:
+                # The truck route (apron arm + connector + groundside mouth) is now
+                # pinned on its rising <=cap profile; re-project so the apron BODY
+                # grades into the raised arm and nothing else exceeds its cap.
+                _ghard = hard | {i for i in runway_nodes if i < n} | _gs_hard
+                feasibility_project(elev, shape_constraints, _ghard)
+                feasibility_project(elev, [{"edges": u_edges}], _ghard)
+            # Service roads FOLLOW DEM at <=cap (a ground road climbs toward terrain,
+            # anchored only at its airside/groundside welds) — SVC4 was held flat in
+            # the bowl ~6-11 m below DEM.
+            from .anchors import apply_service_road_dem_follow
+            _svc_moved = apply_service_road_dem_follow(
+                layout, bucket_to_idx, elev, dem_elev, SERVICE_ROAD_MAX_GRADE,
+                anchor_extra=_gs_hard)
+            if (_nrl or _svc_moved) and _os.environ.get("O4_STEP_DEBUG") == "1":
+                print(f"  [groundside-reach] {icao}: re-levelled {_nrl} "
+                      f"groundside piece(s); pinned {len(_gs_hard)} route node(s); "
+                      f"DEM-followed {len(_svc_moved)} service node(s).")
         n_terms, n_rects, n_juncs = _writeback(layout, elev, bucket_to_idx)
         if _os.environ.get("O4_STEP_DEBUG") == "1":
             print(f"  [unified] {icao}: {len(frozen)} spine node(s) solved, "
@@ -364,6 +408,68 @@ def _solve_spine_profile(elev, base_hard, spine_adj, spine_floor,
             s_edges.append((e[0], e[1], w))
     feasibility_project(elev, [{"edges": s_edges}], anchors)
     return set(nodes)
+
+
+def _cap_consistent_band(band, nodes, node_band, spine_adj):
+    """Wrap the reach band so its CEILING is cap-consistent along the spine graph
+    (user 2026-06-27 — "determine the solvable elevation from the routes").
+
+    The raw band gives each node a ceiling from its most-constrained runway route
+    INDEPENDENTLY, but the spine is continuous: a node cannot sit above what its
+    spine NEIGHBOURS support (``neighbour_ceiling + cap·dist``) — the min-curvature
+    spine gets dragged down to that.  So regularise the spine-node ceilings with a
+    multi-source Dijkstra (every spine node a source at its own ceiling, relaxed
+    along ``spine_adj`` budgets = cap·dist), giving the elevation the spine can
+    ACTUALLY reach.  A sampled point's ceiling is then capped by the nearest spine
+    node's consistent ceiling + 1 %·distance, so a building seats against the
+    achievable spine, not the optimistic per-node ceiling.  Floor is unchanged.
+
+    Verified on OEMA: raw foot ceiling 642.4 → consistent 640.9 = the elevation the
+    floored spine actually reaches, dropping the pad 643.6 → 642.1 (apron → 1 %)."""
+    import heapq
+    import math
+    from shapely.geometry import Point
+    from shapely.strtree import STRtree
+    from auto_patch.config import APRON_MAX_GRADE
+    INF = float("inf")
+    cc: dict = {}
+    pq = []
+    for i in spine_adj:
+        if i < len(node_band) and node_band[i] is not None:
+            cc[i] = node_band[i][1]
+            pq.append((cc[i], i))
+    if not pq:
+        return band
+    heapq.heapify(pq)
+    while pq:
+        c, i = heapq.heappop(pq)
+        if c > cc.get(i, INF):
+            continue
+        for (j, budget) in spine_adj.get(i, ()):
+            nc = c + budget
+            if nc < cc.get(j, INF):
+                cc[j] = nc
+                heapq.heappush(pq, (nc, j))
+    sidx = [i for i in cc if i < len(nodes)]
+    if not sidx:
+        return band
+    spts = [Point(*nodes[i]) for i in sidx]
+    tree = STRtree(spts)
+
+    def consistent(x, y):
+        fc = band(x, y)
+        if fc is None:
+            return None
+        try:
+            qi = int(tree.nearest(Point(x, y)))
+        except Exception:                                     # pragma: no cover
+            return fc
+        si = sidx[qi]
+        d = math.hypot(x - nodes[si][0], y - nodes[si][1])
+        ceil = cc[si] + APRON_MAX_GRADE * d
+        return (fc[0], min(fc[1], ceil))
+
+    return consistent
 
 
 def _merge_spine_adj(a, b):

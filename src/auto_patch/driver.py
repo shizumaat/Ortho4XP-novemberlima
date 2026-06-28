@@ -259,8 +259,8 @@ def generate_auto_patches(tile, cifp_path: str,
 
     # Lazy tile-level inputs: callables resolve on the FIRST airport
     # that needs a rebuild, at the tile's own verbosity so their log
-    # output (e.g. "N buildings for ICAO") matches the eager-path
-    # chatter exactly.  All-current tiles never invoke them.
+    # output matches the eager-path chatter exactly.  All-current tiles
+    # never invoke them.
     _inputs_resolved = False
 
     def _resolve_lazy_inputs():
@@ -437,8 +437,8 @@ def generate_auto_patches(tile, cifp_path: str,
                 current_tile_lon=tile_lon,
             )
         except _DRIVER_EXC as _e:
-            UI.vprint(
-                1, "   Auto-patch: Pavement builder failed for",
+            UI.lvprint(
+                0, "   Auto-patch: Pavement builder failed for",
                 icao, ":", str(_e))
             continue
 
@@ -485,8 +485,8 @@ def generate_auto_patches(tile, cifp_path: str,
                 f"took {_time.time() - _t_apt:.1f}s "
                 f"(verify {_time.time() - _t_v:.1f}s)")
         except _DRIVER_EXC as e:
-            UI.vprint(
-                1,
+            UI.lvprint(
+                0,
                 "   Auto-patch: Failed to write",
                 auto_patch_file,
                 ":",

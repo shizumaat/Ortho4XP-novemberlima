@@ -1755,6 +1755,24 @@ BUILDING_ROUTE_FEASIBILITY = _os.environ.get(
 # defaulting on.  Gate off → byte-identical.
 MIN_GRADE_NETWORK = _os.environ.get("O4_MIN_GRADE_NETWORK", "0") == "1"
 
+# (20260627) LARGE-BUILDING FULL-FRONTAGE FEASIBILITY (user 2026-06-27): the
+# route-feasibility band is sampled at a SINGLE CENTRAL CHORD — the building
+# centroid → nearest taxi centerline — only for SMALL buildings.  A building at or
+# above this footprint area must instead have its ENTIRE apron-facing FRONTAGE
+# reachable within grade: the band is intersected over samples taken along every
+# frontage edge (endpoints + midpoints), so a large terminal can never be seated at
+# a level only its CENTRE can grade to the spine at 1 % — every frontage point must.
+# m².  Gate ``O4_BUILDING_FULL_FRONTAGE`` off → single central chord for ALL
+# buildings (byte-identical to the pre-2026-06-27 centroid-only model).
+BUILDING_FULL_FRONTAGE_AREA_M2 = 2000.0
+BUILDING_FULL_FRONTAGE = _os.environ.get(
+    "O4_BUILDING_FULL_FRONTAGE", "1") == "1"
+# A large building's frontage = every SIDE that has a taxi corridor within this
+# distance AND a VISIBLE on-pavement chord to that corridor's spine (user
+# 2026-06-27): a terminal flanked by taxi routes on several sides must grade to
+# the spine at ≤1 % on ALL of them, not only the apron it abuts.  m.
+BUILDING_FRONTAGE_CORRIDOR_M = 200.0
+
 
 def taxi_grade_cap_for_letter(letter, *, enabled: bool = None) -> float:
     """Max longitudinal grade (rise/run) for a taxiway of ICAO code
