@@ -169,20 +169,28 @@ def reach_band_unified(layout, G):
         except Exception:                                     # pragma: no cover
             return None
 
-    def _ecap(a, b):
-        for (j, budget) in G.spine_adj.get(a, ()):
-            if j == b:
-                d = math.hypot(G.pos[a][0] - G.pos[b][0],
-                               G.pos[a][1] - G.pos[b][1])
-                return budget / d if d > 1e-9 else TAXI_MAX_GRADE
-        return TAXI_MAX_GRADE
-
-    cls = [ln for (ln, n) in (getattr(layout, "apt_taxi_centerlines", None)
-                              or [])
-           if ln is not None and not ln.is_empty
-           and not str(n or "").upper().startswith("SVC")]
-    if not cls:
+    # Per-centerline longitudinal cap from its OWN ICAO code letter (apt.dat
+    # row-1202) — the SAME per-letter cap the spine edges carry.  Used for the
+    # foot climb (along the serving centerline + the taxiway-width perp) so the
+    # band credits a code-A/B taxiway at its real 3 %, CONSISTENTLY at every query
+    # point.  The old spine-edge lookup read the cap off the edge between the two
+    # nearest spine nodes to the foot's centerline segment, falling back to 1.5 %
+    # whenever those nodes were not a DIRECT edge — which happens on any long
+    # apt.dat segment — so the SAME taxiway was credited 3 % at a building
+    # frontage but only 1.5 % at an apron 60 m further along it: the building seat
+    # and the route-band check then disagreed though both go through this one band
+    # (CYXY A2 = code B, a 457 m segment → 118 false apron ceil flags).
+    from auto_patch.config import taxi_grade_cap_for_letter
+    letters = getattr(layout, "apt_taxi_letters", None) or {}
+    cls_cap = [(ln, float(taxi_grade_cap_for_letter(letters.get(n))))
+               for (ln, n) in (getattr(layout, "apt_taxi_centerlines", None)
+                               or [])
+               if ln is not None and not ln.is_empty
+               and not str(n or "").upper().startswith("SVC")]
+    if not cls_cap:
         return lambda x, y: None
+    cls = [ln for (ln, _c) in cls_cap]
+    cap_of = {id(ln): c for (ln, c) in cls_cap}
     vis = _pavement_visibility(layout) if VISIBLE_CHORD_CONNECT else None
 
     def band(x, y):
@@ -209,8 +217,7 @@ def reach_band_unified(layout, G):
         kB = _nn(B[0])
         if kA is None and kB is None:
             return None
-        ecap = (_ecap(kA, kB) if (kA is not None and kB is not None)
-                else TAXI_MAX_GRADE)
+        ecap = cap_of.get(id(ln), TAXI_MAX_GRADE)
         perp_climb = (ecap * min(perp, _TAXI_HALF_W_M)
                       + _APRON_CAP * max(0.0, perp - _TAXI_HALF_W_M))
         floor, ceil = -_INF, _INF
