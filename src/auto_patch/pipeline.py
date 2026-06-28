@@ -1219,7 +1219,15 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # over-resolution (sub-meter curve steps) and doubled-vertex needles
     # so rect corners snap to a stable boundary and subtracting rects
     # aligns.  (User-approved tol=2.0 to match the reviewed union.)
-    pav_union = _simplify_pavement_polygon(pav_union, tol=2.0)
+    #
+    # User 2026-06-28: DISABLED by default.  The 2 m vertex moves blur the
+    # narrow truck-route necks that distinguish a groundside parking LOT from
+    # the apron it abuts (CYXY 101/102 = a 12.5k m² apt.dat⊕DSF polygon meeting
+    # the main apron over a 7.6 m truck-only neck) — we want pav_union to keep
+    # the EXACT source outline so those connections stay legible for role
+    # classification.  Set O4_PAV_UNION_SIMPLIFY=1 to restore the old behaviour.
+    if os.environ.get("O4_PAV_UNION_SIMPLIFY", "0") == "1":
+        pav_union = _simplify_pavement_polygon(pav_union, tol=2.0)
 
     # Record the SOURCE pavement union (apt.dat row-110 ⊕ DSF, before
     # runway subtraction) for build-time verification: every emitted
