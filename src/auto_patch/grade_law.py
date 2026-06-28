@@ -33,6 +33,8 @@ import os
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from .config import SERVICE_ROAD_MAX_GRADE
+
 # ── Law constants (the adjustable knobs of the law) ──────────────────────────
 APRON_ROLE = "apron"
 
@@ -106,6 +108,9 @@ class PairContext:
     visible_fn: Optional[Callable[[], bool]] = None
     crosses_spine_fn: Optional[Callable[[], bool]] = None
     blend_cap_fn: Optional[Callable[[], float]] = None
+    # ``both_road``: both endpoints sit on a service-road carve through the host
+    # (so the pair descends at the ROAD cap, not the host body cap).
+    both_road: bool = False
 
 
 SKIP: Optional[Allowance] = None
@@ -142,13 +147,25 @@ def classify_pair(p: PairContext) -> Optional[Allowance]:
             and p.dist > APRON_BODY_CHORD_MAX_M):
         return SKIP
 
-    # CAP selection (first match wins):
+    # CAP selection — base cap (first match wins):
     # — a spine pair keeps its route's per-letter taxi cap (looser of the shared
     #   centerlines), the same cap the seater grades that route at.
     if p.spine_caps:
-        return Allowance.flat(max(p.spine_caps))
+        cap = max(p.spine_caps)
     # — an apron body edge near a taxiway earns the route's blended cap.
-    if p.blend_cap_fn is not None:
-        return Allowance.flat(p.blend_cap_fn())
+    elif p.blend_cap_fn is not None:
+        cap = p.blend_cap_fn()
     # — otherwise the shape's body cap (apron 1%, junction the taxi cap, …).
-    return Allowance.flat(p.body_cap)
+    else:
+        cap = p.body_cap
+
+    # RELAXATIONS — a feature CARVED INTO the host that legitimately grades
+    # steeper than the host body.  Applied by BOTH readers (the solver builds to
+    # it, the validator confirms it) — never a test-only fudge: the carve corners
+    # lie ON the host ring, so without this the host law would wrongly regulate
+    # the carved feature's own descent.  Relax only (raise the cap).
+    # — both endpoints on a service-road carve → the road's cap.
+    if p.both_road and SERVICE_ROAD_MAX_GRADE > cap:
+        cap = SERVICE_ROAD_MAX_GRADE
+
+    return Allowance.flat(cap)

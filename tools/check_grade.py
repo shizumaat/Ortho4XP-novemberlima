@@ -777,7 +777,7 @@ _SLOPING_RECT_OSM_ROLES = frozenset({
 
 
 def _grade_context_from_osm(ways, nodes, ll_to_m, taxi_axes, seam_nids,
-                            max_grade):
+                            max_grade, road_zone=None):
     """Build the SAME ``grade_graph.GradeContext`` the solver uses, but from the
     emitted OSM — so the grade TEST reads the one shared within-shape LAW
     (``grade_law.classify_pair`` via ``grade_graph.shape_constraints``).  Keys are
@@ -817,7 +817,8 @@ def _grade_context_from_osm(ways, nodes, ll_to_m, taxi_axes, seam_nids,
         centerlines=centerlines,
         seam_keys=frozenset(seam_nids or ()),
         inherited_junction_cap=_inherited,
-        building_keys=frozenset(bld_keys))
+        building_keys=frozenset(bld_keys),
+        road_zone=road_zone)
 
 
 def iter_shape_grade_constraints(
@@ -914,7 +915,7 @@ def iter_shape_grade_constraints(
     # terminal) keep their per-role all-pair handling further down.
     from auto_patch import grade_graph as _GG
     _law_ctx = _grade_context_from_osm(ways, nodes, ll_to_m, taxi_axes,
-                                       seam_nids, max_grade)
+                                       seam_nids, max_grade, road_zone=road_zone)
     _SOFT_ROLES = _GG.SOFT_VISIBILITY_ROLES
     for w in ways:
         grade_cap = _role_grade_limit(w, max_grade)
@@ -954,18 +955,13 @@ def iter_shape_grade_constraints(
                 d = math.hypot(xi - xj, yi - yj)
                 if d < 0.5:
                     continue
+                # ``cap`` already includes the road-frontage relaxation — it comes
+                # from the shared law (grade_law.classify_pair via the road_zone on
+                # the context), so the test regulates it exactly as the solver
+                # builds it.  Back-edge ramp is still a test-only layer below until
+                # it is folded into the law.
                 grade_cap_pair = cap
                 allowance = cap * d + ELEV_ROUNDING_NOISE_M
-                # test-only relaxations (raise the cap only; see road_zone /
-                # frontage_nids above) — a road carve's own 4 % descent and the
-                # back-edge ramp are not host-shape grade violations.
-                if (road_zone is not None
-                        and SERVICE_ROAD_MAX_GRADE > grade_cap_pair
-                        and road_zone.contains(_FzPt((xi, yi)))
-                        and road_zone.contains(_FzPt((xj, yj)))):
-                    grade_cap_pair = SERVICE_ROAD_MAX_GRADE
-                    allowance = max(allowance, SERVICE_ROAD_MAX_GRADE * d
-                                    + ELEV_ROUNDING_NOISE_M)
                 if (frontage_nids and role0 == "apron"
                         and APRON_BACK_EDGE_GRADE > grade_cap_pair
                         and pnids[ia] in frontage_nids

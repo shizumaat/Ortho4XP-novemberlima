@@ -115,6 +115,11 @@ class GradeContext:
     # a facade/step between them), NOT an apron grade path, so it is not graded.
     # Mirrors the validator's building↔building step exemption.
     building_keys: frozenset = frozenset()
+    # PREPARED geometry of the service-road carve zone (road shapes unioned and
+    # buffered by ``ROAD_FRONTAGE_TOL_M``), in the caller's meter frame.  A
+    # soft-shape pair with BOTH endpoints inside it descends at the road cap (the
+    # carve corners lie on the host ring).  ``None`` ⇒ no road carves.
+    road_zone: object = None
 
 
 @dataclass
@@ -205,8 +210,24 @@ def build_context(layout, bucket_to_idx=None) -> "GradeContext":
                         bld_keys.add(i)
                 else:
                     bld_keys.add((round(x, 3), round(y, 3)))
+    # Service-road carve zone — a soft-shape pair on a road carve descends at the
+    # road cap (the carve corners lie on the host ring).  Built ONCE here so the
+    # solver and the validator regulate it identically (the law, not a fudge).
+    road_zone = None
+    road_polys = [s.polygon for s in layout.shapes
+                  if s.role in ("service_road", "service_junction")
+                  and s.polygon is not None and not s.polygon.is_empty]
+    if road_polys:
+        try:
+            from shapely.ops import unary_union as _uu
+            from shapely.prepared import prep as _prep
+            from .config import ROAD_FRONTAGE_TOL_M
+            road_zone = _prep(_uu(road_polys).buffer(ROAD_FRONTAGE_TOL_M))
+        except Exception:                                     # pragma: no cover
+            road_zone = None
+
     return GradeContext(centerlines=cls, inherited_junction_cap=_inherited,
-                        building_keys=frozenset(bld_keys))
+                        building_keys=frozenset(bld_keys), road_zone=road_zone)
 
 
 # ── visibility ──────────────────────────────────────────────────────────────
@@ -430,6 +451,13 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
             and ctx.centerlines and body_cap < TAXI_MAX_GRADE):
         near = [_nearest_centerline(x, y, ctx) for (x, y) in ring]
 
+    # Per-vertex service-road-carve membership (O(n) once; the pair rule is then
+    # ``both endpoints on a carve`` → road cap, via grade_law.classify_pair).
+    road_vert = None
+    if ctx.road_zone is not None:
+        from shapely.geometry import Point as _RPt
+        road_vert = [ctx.road_zone.contains(_RPt(x, y)) for (x, y) in ring]
+
     # Build the representation-agnostic PairContext for each pair and apply THE
     # LAW (``grade_law.classify_pair``).  The expensive visibility / spine-cross
     # predicates and the apron blend cap are passed as thunks so the law evaluates
@@ -472,13 +500,14 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
                             _apron_edge_cap(_a, _b, _c, _d, _ni, _nj,
                                             body_cap, _kb))
 
+            both_road = bool(road_vert and road_vert[i] and road_vert[j])
             allow = GL.classify_pair(GL.PairContext(
                 role=shape.role, dist=d, ring_adjacent=ring_adjacent,
                 a_seam=ki in seam, b_seam=kj in seam,
                 a_building=ki_bld, b_building=kj_bld,
                 spine_caps=spine_caps, body_cap=body_cap,
                 visible_fn=visible_fn, crosses_spine_fn=crosses_fn,
-                blend_cap_fn=blend_fn))
+                blend_cap_fn=blend_fn, both_road=both_road))
             if allow is None:
                 continue
             sc.edges.append((ki, kj, allow.flat_cap()))
