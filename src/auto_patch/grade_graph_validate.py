@@ -100,7 +100,8 @@ def _iter_checked_pairs(layout):
             continue
         cap = float(taxi_grade_cap_for_letter(taxi_shape_code_letter(layout, s)))
         rect_caps.append(({(round(x, 3), round(y, 3)) for (x, y) in ring}, cap))
-        yield from _all_pair_pairs(s.role, ring, _shape_elevs(s, len(ring)), cap)
+        yield from _all_pair_pairs(s.role, ring, _shape_elevs(s, len(ring)),
+                                   cap, ctx)
     for s in layout.shapes:
         if (not getattr(s, "is_rect_cap", False) or s.polygon is None
                 or s.polygon.is_empty):
@@ -117,16 +118,20 @@ def _iter_checked_pairs(layout):
         if cap is None:                 # unmatched cap → uniform taxi cap
             cap = float(taxi_grade_cap_for_letter(None))
         yield from _all_pair_pairs("rect_cap", ring, _shape_elevs(s, len(ring)),
-                                   cap)
+                                   cap, ctx)
 
 
-def _all_pair_pairs(role, ring, elevs, cap):
+def _all_pair_pairs(role, ring, elevs, cap, ctx):
+    """Plane shape (rect / cap) pairs via the SHARED plane rule
+    (``grade_graph.plane_constraints`` → ``grade_law``) — the same one the solver
+    enforces (``build_unified_graph``) and the OSM test checks (``check_grade``)."""
     if elevs is None:
         return
     n = len(ring)
-    for i in range(n):
-        for j in range(i + 1, n):
-            yield (role, True, ring[i], elevs[i], ring[j], elevs[j], cap)
+    gs = GG.GradeShape(role=role, ring=[(x, y) for (x, y) in ring],
+                       keys=list(range(n)))
+    for (a, b, c) in GG.plane_constraints(gs, ctx, cap).edges:
+        yield (role, True, ring[a], elevs[a], ring[b], elevs[b], c)
 
 
 def within_violations(layout, noise=ELEV_ROUNDING_NOISE_M):

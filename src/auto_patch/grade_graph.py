@@ -694,7 +694,7 @@ def build_unified_graph(layout, bucket_to_idx) -> "UnifiedGraph":
                 G.pos[i] = (x, y)
             idxs.append(i)
         rect_caps.append(({i for i in idxs if i is not None}, cap))
-        _all_pair(G, idxs, cap)
+        _add_plane_edges(G, s.role, ring, idxs, ctx, cap)
     cap_shapes = []           # (cap_corner_idxs, parent_corner_set, cap)
     for s in layout.shapes:
         if (not getattr(s, "is_rect_cap", False) or s.polygon is None
@@ -717,7 +717,7 @@ def build_unified_graph(layout, bucket_to_idx) -> "UnifiedGraph":
                 best, cap, parent = sh, rcap, rkeys
         if cap is None:
             cap = float(taxi_grade_cap_for_letter(None))
-        _all_pair(G, idxs, cap)
+        _add_plane_edges(G, getattr(s, "role", "rect_cap"), ring, idxs, ctx, cap)
         cap_shapes.append(([i for i in idxs if i is not None], parent, cap))
 
     # ── GLOBAL spine chains: per centerline, all on-line geometry nodes ordered
@@ -887,16 +887,19 @@ def _spine_link(spine_adj, a, b, budget):
         spine_adj[b].append((a, budget))
 
 
-def _all_pair(G, idxs, cap):
-    """All-corner-pair spine edges of a rect/cap (a tilted plane: every pair is a
-    spine constraint)."""
-    valid = [i for i in idxs if i is not None]
-    for p in range(len(valid)):
-        for q in range(p + 1, len(valid)):
-            a, b = valid[p], valid[q]
-            if a == b:
-                continue
-            G.edges.append((a, b, cap, True))
+def _add_plane_edges(G, role, ring, idxs, ctx, cap):
+    """Add a plane shape's (rect / cap) all-pair spine edges to the unified graph
+    via the SHARED plane rule (:func:`plane_constraints` → ``grade_law``), so the
+    SOLVER enforces the exact pairs/caps the validator checks for plane shapes —
+    not a separate inline all-pair.  Every plane pair is a spine constraint
+    (is_spine=True)."""
+    pts = [(ring[p], i) for p, i in enumerate(idxs) if i is not None]
+    if len(pts) < 3:
+        return
+    gs = GradeShape(role=role, ring=[c for (c, _i) in pts],
+                    keys=[i for (_c, i) in pts])
+    for (a, b, c) in plane_constraints(gs, ctx, cap).edges:
+        G.edges.append((a, b, c, True))
 
 
 def _runway_anchors(layout, G, bucket_to_idx):
