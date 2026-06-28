@@ -21,7 +21,6 @@ from .anchors import (
     apron_body_nodes, build_building_seats, building_spine_floor, node_bands,
     reach_band_for)
 from .one_solve import one_profile_solve
-from .spine import spine_adjacency
 
 
 def solve_route_profile(layout, icao: str,
@@ -57,27 +56,26 @@ def solve_route_profile(layout, icao: str,
     shape_constraints = _build_shape_constraints(layout, bucket_to_idx)
     coupling = _build_level_coupling(shape_constraints)
 
-    # THE ONE GRAPH: the taxi-route reach band sets the building levels AND
-    # bounds every apron / spine / rect node, so they agree by construction.
-    band, dem_fn, runway_pts = reach_band_for(
-        layout, elev, bucket_to_idx, dem, tile_lat, tile_lon)
-    node_band = node_bands(nodes, band)
-    # The taxi-spine sub-graph (centerline-consecutive nodes) — spine nodes clamp
-    # only to these, so the apron yields to the spine and the spine stays ≤cap.
-    # Built BEFORE seating so the reach-band ceiling can be made cap-consistent
-    # along it (the pad seats against the spine's ACHIEVABLE level, not the
-    # optimistic per-node ceiling — user 2026-06-27).
-    spine_nodes, spine_adj = spine_adjacency(layout, nodes, bucket_to_idx)
-    # Unified grade graph (the SAME geometry nodes the spine solves on + the
-    # validator checks).  Built HERE — before seating — so the reach-band ceiling
-    # is made cap-consistent on the MERGED spine graph the spine actually grades
-    # along; the sparse base chain alone does not connect a frontage node to the
-    # lower-ceiling neighbour that drags it down, so regularising on it is a no-op.
+    # ── THE ONE GRAPH (user 2026-06-27) ──────────────────────────────────────
+    # Build the unified grade graph ONCE, FIRST — it is the single graph the reach
+    # band, the building seats, the spine solve AND the validator all use.  The
+    # reach band is now computed ON it (``reach_band_unified``): reachability is a
+    # cap-Dijkstra over ``G.spine_adj`` from ``G.runway_anchor``, so the ceiling is
+    # the spine's ACHIEVABLE level and cap-consistent by construction — no separate
+    # route graph, no ``spine_adjacency`` re-derivation, no ``_cap_consistent_band``
+    # bridge.  ``G.spine_adj`` already covers every spine node + edge the old
+    # ``spine_adjacency`` produced (verified redundant), so the merge is gone.
     from auto_patch import grade_graph as _GG
     G = _GG.build_unified_graph(layout, bucket_to_idx)
-    u_spine_adj = _merge_spine_adj(spine_adj, G.spine_adj)
+    u_spine_adj = G.spine_adj
+    band, dem_fn, runway_pts, _G = reach_band_for(
+        layout, elev, bucket_to_idx, dem, tile_lat, tile_lon, unified_graph=G)
+    node_band = node_bands(nodes, band)
+    # Legacy fallback: the route-graph band is per-node inconsistent, so regularise
+    # its ceiling along the spine before seating (gate O4_BAND_ON_UNIFIED_GRAPH=0).
     seat_band = band
-    if _os.environ.get("O4_CONSISTENT_CEILING", "1") == "1":
+    if (_os.environ.get("O4_BAND_ON_UNIFIED_GRAPH", "1") != "1"
+            and _os.environ.get("O4_CONSISTENT_CEILING", "1") == "1"):
         seat_band = _cap_consistent_band(band, nodes, node_band, u_spine_adj)
     building_seats = build_building_seats(
         layout, bucket_to_idx, seat_band, dem_fn, runway_pts)
@@ -123,7 +121,7 @@ def solve_route_profile(layout, icao: str,
             if i < n:
                 elev[i] = float(re)
                 base_hard[i] = True
-        u_spine_nodes = set(u_spine_adj) | G.spine_nodes() | set(spine_nodes)
+        u_spine_nodes = set(u_spine_adj) | G.spine_nodes()
         # Building-frontage spine floor (the serving arm climbs to its pads),
         # cap-Lipschitz on the unified spine chain.
         u_spine_floor = building_spine_floor(

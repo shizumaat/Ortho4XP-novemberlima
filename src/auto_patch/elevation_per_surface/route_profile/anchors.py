@@ -45,15 +45,28 @@ def _open_ring(coords):
     return list(coords)
 
 
-def reach_band_for(layout, elev, bucket_to_idx, dem, tile_lat, tile_lon):
-    """Build the one reach band, a DEM sampler, and the runway-edge anchors."""
+def reach_band_for(layout, elev, bucket_to_idx, dem, tile_lat, tile_lon,
+                   unified_graph=None):
+    """Build the one reach band, a DEM sampler, and the runway-edge anchors.
+
+    When ``O4_BAND_ON_UNIFIED_GRAPH`` is on (default) the band is computed on THE
+    unified grade graph the spine solves on (``reach_band_unified``) — one graph,
+    no route-graph drift, no ``_cap_consistent_band`` bridge.  ``unified_graph`` is
+    the prebuilt ``build_unified_graph`` (the caller already needs it); also
+    returned so the solve reuses the same object.  Gate off → the legacy
+    route-graph band (``reach_band_sampler``)."""
+    import os as _os
     from auto_patch.elevation import _sample_dem
     from auto_patch.elevation_per_surface.building_feasibility import (
-        reach_band_sampler)
+        reach_band_sampler, reach_band_unified)
     from auto_patch.elevation_per_surface.unified_jacobi import _runway_edge_pts
 
     runway_pts = _runway_edge_pts(layout, elev, bucket_to_idx)
-    band = reach_band_sampler(layout, runway_pts)
+    G = unified_graph
+    if _os.environ.get("O4_BAND_ON_UNIFIED_GRAPH", "1") == "1" and G is not None:
+        band = reach_band_unified(layout, G)
+    else:
+        band = reach_band_sampler(layout, runway_pts)
 
     def _dem(x, y):
         try:
@@ -62,7 +75,7 @@ def reach_band_for(layout, elev, bucket_to_idx, dem, tile_lat, tile_lon):
         except Exception:                                     # pragma: no cover
             return None
 
-    return band, _dem, runway_pts
+    return band, _dem, runway_pts, G
 
 
 def build_building_seats(layout, bucket_to_idx, band, dem_fn, runway_pts):

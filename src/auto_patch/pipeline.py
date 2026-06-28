@@ -2612,6 +2612,9 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 terminal_polys=terminal_polys,
                 runway_union=layout.runway_union,
                 source_polys=apt_only_pav_polys)
+            from .pavement.service_roads import _split_at_bends as _svc_bends
+            _svc_bend_split = (
+                os.environ.get("O4_SVC_BEND_SPLIT", "1") == "1")
             _svc_lines: List[Tuple[LineString, str]] = []
             for _k, (_run, _w, _rname) in enumerate(_svc_runs, 1):
                 _ref = f"SVC{_k}"
@@ -2620,7 +2623,26 @@ def build_airport_pavement(icao: str, xplane_root: str,
                         _run, _ref, rwy_centerlines):
                     if _piece.is_empty or _piece.length < 1.0:
                         continue
-                    _svc_lines.append((_piece, _ref))
+                    # split_merged_centerline's bend-clustering over the long
+                    # winding 1206 route can still emit a piece that SPANS a sharp
+                    # corner (CYXY 188: a 33° turn mid-piece) — the taxi-rect builder
+                    # then lays ONE rect across the curve, drifting off the route into
+                    # a skewed wedge.  Bend-split each piece at sharp turns so the
+                    # STRAIGHT parts each get a clean even-width rect and the corner
+                    # falls out as junction residue (the taxiway model, user
+                    # 2026-06-27).  Gate off → single piece.
+                    _runs = (_svc_bends(list(_piece.coords))
+                             if _svc_bend_split else [list(_piece.coords)])
+                    for _sub in _runs:
+                        if len(_sub) < 2:
+                            continue
+                        try:
+                            _subln = LineString(_sub)
+                        except _GEOM_EXC:
+                            continue
+                        if _subln.is_empty or _subln.length < 1.0:
+                            continue
+                        _svc_lines.append((_subln, _ref))
             if _svc_lines:
                 # ★ 1206 provenance vs DISCOVERED (TX) lanes resolves at
                 # the rect OVERLAP pass (SVC beats TX there), NOT here:

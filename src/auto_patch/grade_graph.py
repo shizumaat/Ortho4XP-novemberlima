@@ -144,11 +144,10 @@ def build_context(layout, bucket_to_idx=None) -> "GradeContext":
 
     Builds the taxi centerlines (LOCAL meters, per-letter caps), the spine-less
     junction cap-inheritance lookup (nearest connected taxiway-sized rect), and
-    the building-pad key set.  Both the elevation solver
-    (``unified_jacobi._build_shape_constraints``), the spine
-    (``route_profile/spine.spine_adjacency``) and the validator
-    (``grade_graph_validate.within_violations``) call this, so the centerlines,
-    caps and inheritance can never drift (docs/single_grade_graph.md).
+    the building-pad key set.  The route-profile solver (via
+    ``build_unified_graph``) and the validator
+    (``grade_graph_validate.within_violations``) both call this, so the
+    centerlines, caps and inheritance can never drift (docs/single_grade_graph.md).
 
     ``bucket_to_idx`` selects the BUILDING-KEY space (the one place the two
     representations diverge):

@@ -48,7 +48,7 @@ from auto_patch.layout import (
 )
 
 __all__ = ["building_feasible_levels", "reach_band_sampler",
-           "runway_edge_anchors"]
+           "reach_band_unified", "runway_edge_anchors"]
 
 # A taxi centerline ENDPOINT counts as a runway CONTACT (a real route entry onto
 # the runway) when it lies within this distance of the runway POLYGON EDGE (or
@@ -263,6 +263,120 @@ def reach_band_sampler(layout, runway_pts_xyz):
                 cands.append(cdm[kB] + ecap * B[1])
             if not cands:
                 continue                          # this connection can't reach
+            budget = min(cands) + perp_climb
+            ceil = min(ceil, ae + budget)
+            floor = max(floor, ae - budget)
+        if ceil >= _INF:
+            return None
+        return (floor, ceil)
+
+    return band
+
+
+def reach_band_unified(layout, G):
+    """The reach band computed on THE unified grade graph — the SAME graph the
+    spine solves on and the validator checks (user 2026-06-27, "stop building the
+    same thing in different ways").
+
+    Reachability is a cap-Dijkstra over ``G.spine_adj`` from ``G.runway_anchor``
+    (the exact nodes + elevations the spine solve pins), so the ceiling is the
+    spine's ACHIEVABLE level and is cap-consistent along the spine BY CONSTRUCTION
+    — no separate route graph, no per-node inconsistency, no ``_cap_consistent_band``
+    bridge.  Geometry of the perpendicular foot still uses the taxi centerlines (an
+    accurate perp), but the foot's reachable elevation comes from the nearest
+    unified spine node.  Drop-in for :func:`reach_band_sampler` (same
+    ``band(x, y) -> (floor, ceiling) | None`` contract)."""
+    import heapq
+    from shapely.geometry import Point
+    from shapely.strtree import STRtree
+
+    if not getattr(G, "runway_anchor", None) or not getattr(G, "spine_adj", None):
+        return lambda x, y: None
+
+    def _capdist(src):
+        dist = {src: 0.0}
+        pq = [(0.0, src)]
+        while pq:
+            d, u = heapq.heappop(pq)
+            if d > dist.get(u, _INF):
+                continue
+            for (v, budget) in G.spine_adj.get(u, ()):
+                nd = d + budget
+                if nd < dist.get(v, _INF):
+                    dist[v] = nd
+                    heapq.heappush(pq, (nd, v))
+        return dist
+
+    anchors = [(float(ae), _capdist(k)) for (k, ae) in G.runway_anchor.items()]
+    if not anchors:
+        return lambda x, y: None
+
+    # Unified spine-node positions for the perp-foot → reachable-node lookup.
+    sidx = [i for i in G.spine_adj if i in G.pos]
+    if not sidx:
+        return lambda x, y: None
+    spts = [Point(*G.pos[i]) for i in sidx]
+    tree = STRtree(spts)
+
+    def _nn(pt):
+        try:
+            return sidx[int(tree.nearest(Point(pt[0], pt[1])))]
+        except Exception:                                     # pragma: no cover
+            return None
+
+    def _ecap(a, b):
+        for (j, budget) in G.spine_adj.get(a, ()):
+            if j == b:
+                d = math.hypot(G.pos[a][0] - G.pos[b][0],
+                               G.pos[a][1] - G.pos[b][1])
+                return budget / d if d > 1e-9 else TAXI_MAX_GRADE
+        return TAXI_MAX_GRADE
+
+    cls = [ln for (ln, n) in (getattr(layout, "apt_taxi_centerlines", None)
+                              or [])
+           if ln is not None and not ln.is_empty
+           and not str(n or "").upper().startswith("SVC")]
+    if not cls:
+        return lambda x, y: None
+    vis = _pavement_visibility(layout) if VISIBLE_CHORD_CONNECT else None
+
+    def band(x, y):
+        c = Point(x, y)
+        ln = (_nearest_visible_centerline(c, cls, vis) if vis is not None
+              else min(cls, key=lambda L: L.distance(c)))
+        perp = c.distance(ln)
+        coords = list(ln.coords)
+        sp = ln.project(c)
+        acc = 0.0
+        A = B = None
+        for i in range(len(coords) - 1):
+            seg_len = math.hypot(coords[i + 1][0] - coords[i][0],
+                                 coords[i + 1][1] - coords[i][1])
+            if acc - 1e-6 <= sp <= acc + seg_len + 1e-6:
+                A = (coords[i], sp - acc)
+                B = (coords[i + 1], (acc + seg_len) - sp)
+                break
+            acc += seg_len
+        if A is None:
+            A = (coords[0], 0.0)
+            B = (coords[-1], ln.length)
+        kA = _nn(A[0])
+        kB = _nn(B[0])
+        if kA is None and kB is None:
+            return None
+        ecap = (_ecap(kA, kB) if (kA is not None and kB is not None)
+                else TAXI_MAX_GRADE)
+        perp_climb = (ecap * min(perp, _TAXI_HALF_W_M)
+                      + _APRON_CAP * max(0.0, perp - _TAXI_HALF_W_M))
+        floor, ceil = -_INF, _INF
+        for (ae, cdm) in anchors:
+            cands = []
+            if kA in cdm:
+                cands.append(cdm[kA] + ecap * A[1])
+            if kB in cdm:
+                cands.append(cdm[kB] + ecap * B[1])
+            if not cands:
+                continue
             budget = min(cands) + perp_climb
             ceil = min(ceil, ae + budget)
             floor = max(floor, ae - budget)
