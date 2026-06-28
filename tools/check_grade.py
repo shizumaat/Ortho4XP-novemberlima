@@ -70,8 +70,6 @@ try:
         ROUTE_NOISE_FRAC,
         ROAD_FRONTAGE_TOL_M,
         SERVICE_ROAD_MAX_GRADE,
-        APRON_BACK_EDGE_RAMPS,
-        APRON_BACK_EDGE_GRADE,
         TAXI_GRADE_BY_WIDTH,
         TAXI_GRADE_WIDTH_ROLES,
         taxi_grade_cap_for_letter,
@@ -87,8 +85,6 @@ except Exception:
     ROUTE_NOISE_FRAC = 0.04
     ROAD_FRONTAGE_TOL_M = 3.0
     SERVICE_ROAD_MAX_GRADE = 0.04
-    APRON_BACK_EDGE_RAMPS = True
-    APRON_BACK_EDGE_GRADE = 0.04
     TAXI_GRADE_BY_WIDTH = True
     TAXI_GRADE_WIDTH_ROLES = frozenset({
         "primary_parallel", "secondary_parallel", "stub", "cross_connector",
@@ -868,44 +864,6 @@ def iter_shape_grade_constraints(
                 _fz_union(_fz_polys).buffer(ROAD_FRONTAGE_TOL_M))
     except Exception:
         road_zone = None
-    # BACK-EDGE RAMP corridor set (config.APRON_BACK_EDGE_RAMPS,
-    # docs/apron_back_edge_ramps.md): the INTER-TERMINAL apron — apron vertices
-    # CLOSER to a building frontage than to a taxi corridor (Phase B) — may
-    # grade at APRON_BACK_EDGE_GRADE (4 %), not the 1.5 % apron law: the
-    # building-facing apron (frontage + between-buildings + hill-cut side) that
-    # ramps to meet the flat terminals.  Mirrors the solver's building-facing
-    # band.  VALIDATOR-ONLY.
-    frontage_nids: set = set()
-    if APRON_BACK_EDGE_RAMPS:
-        try:
-            from shapely.geometry import Point as _CPt, Polygon as _CPoly
-            from shapely.ops import unary_union as _cunion
-            _TAXI_ROLES = {"primary_parallel", "secondary_parallel", "stub",
-                           "cross_connector", "junction"}
-            bld_polys, taxi_polys = [], []
-            for w in ways:
-                r = w.tags.get("role")
-                if r not in ("building",) and r not in _TAXI_ROLES:
-                    continue
-                ring = [ll_to_m(*nodes[nid]) for nid in w.nids
-                        if nid in nodes]
-                if len(ring) >= 3:
-                    (bld_polys if r == "building"
-                     else taxi_polys).append(_CPoly(ring).buffer(0))
-            if bld_polys and taxi_polys:
-                bld_u = _cunion(bld_polys)
-                taxi_u = _cunion(taxi_polys)
-                for w in ways:
-                    if w.tags.get("role") != "apron":
-                        continue
-                    for nid in w.nids:
-                        if nid in nodes and nid not in frontage_nids:
-                            x, y = ll_to_m(*nodes[nid])
-                            p = _CPt(x, y)
-                            if bld_u.distance(p) < taxi_u.distance(p):
-                                frontage_nids.add(nid)
-        except Exception:
-            frontage_nids = set()
     # THE LAW reader for soft airside shapes (apron / junction / service_junction):
     # build the shared grade context once and route every soft shape through
     # ``grade_graph.shape_constraints`` (→ ``grade_law.classify_pair``), so the
@@ -955,24 +913,15 @@ def iter_shape_grade_constraints(
                 d = math.hypot(xi - xj, yi - yj)
                 if d < 0.5:
                     continue
-                # ``cap`` already includes the road-frontage relaxation — it comes
-                # from the shared law (grade_law.classify_pair via the road_zone on
-                # the context), so the test regulates it exactly as the solver
-                # builds it.  Back-edge ramp is still a test-only layer below until
-                # it is folded into the law.
-                grade_cap_pair = cap
-                allowance = cap * d + ELEV_ROUNDING_NOISE_M
-                if (frontage_nids and role0 == "apron"
-                        and APRON_BACK_EDGE_GRADE > grade_cap_pair
-                        and pnids[ia] in frontage_nids
-                        and pnids[ib] in frontage_nids):
-                    grade_cap_pair = APRON_BACK_EDGE_GRADE
-                    allowance = max(allowance, APRON_BACK_EDGE_GRADE * d
-                                    + ELEV_ROUNDING_NOISE_M)
+                # ``cap`` comes ENTIRELY from the shared law (incl. the road-
+                # frontage relaxation).  No test-only back-edge relaxation: the
+                # live model (TAXI_SLACK_TERMINALS) regulates the apron strictly
+                # and the back-edge-ramp model it superseded is gone — a steep
+                # building-facing apron pair is a real solver failure to flag.
                 out.append(ShapePairConstraint(
                     way=w, nid_a=pnids[ia], nid_b=pnids[ib],
                     xa=xi, ya=yi, ea=ei, xb=xj, yb=yj, eb=ej,
-                    dist=d, cap=grade_cap_pair, allowance=allowance))
+                    dist=d, cap=cap, allowance=cap * d + ELEV_ROUNDING_NOISE_M))
             continue
         # Build the pairs to check.
         if n == 3:
@@ -1064,18 +1013,6 @@ def iter_shape_grade_constraints(
                 allowance = max(
                     allowance,
                     SERVICE_ROAD_MAX_GRADE * d + ELEV_ROUNDING_NOISE_M)
-            # BACK-EDGE RAMP law (see frontage_nids above): an apron pair on the
-            # INTER-TERMINAL strip (both endpoints welded to a building pad)
-            # carries the 4 % back-ramp cap.
-            if (frontage_nids
-                    and role == "apron"
-                    and APRON_BACK_EDGE_GRADE > grade_cap_pair
-                    and pnids[i] in frontage_nids
-                    and pnids[j] in frontage_nids):
-                grade_cap_pair = APRON_BACK_EDGE_GRADE
-                allowance = max(
-                    allowance,
-                    APRON_BACK_EDGE_GRADE * d + ELEV_ROUNDING_NOISE_M)
             out.append(ShapePairConstraint(
                 way=w, nid_a=pnids[i], nid_b=pnids[j],
                 xa=xi, ya=yi, ea=ei, xb=xj, yb=yj, eb=ej,
