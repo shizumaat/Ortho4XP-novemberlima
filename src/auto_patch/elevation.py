@@ -87,7 +87,6 @@ from .config import (
     ROLE_GRADE_LIMITS,
     ROUTE_FIELD_LOCAL_WINDOW_M,
     ROUTE_FIELD_MODEL,
-    ROUTE_NOISE_FRAC,
     RUNWAY_APRON_AREA_RATIO,
     RUNWAY_INSIDE_APRON_FRAC,
     SERVICE_ROAD_MAX_GRADE,
@@ -3017,15 +3016,6 @@ def _report_within_shape_violations(
     # (an earlier all-pair-Euclidean model over-reported thousands of phantom
     # pairs on huge non-convex aprons, e.g. HECA 3569 vs the real count).
     from shapely.geometry import LineString as _LS
-    # ROUTE-FIELD MODEL: collect the runway anchors + airside check points in
-    # the same pass for the long-range route-band check (the within-shape
-    # window's counterpart), run through the SHARED engine
-    # (auto_patch.route_field) the validator uses, so WARN == gate.
-    _rf_runway_rings: list = []
-    _rf_check_pts: list = []
-    _rf_check_src: list = []
-    _rf_groundside = {"groundside_pavement", "service_road",
-                      "service_junction", "tunnel_ramp"}
     # PER-AXIS junction/apron exemption — the SAME construction
     # (verification.taxi_axes_ll) + engine (check_grade._per_axis_allowance)
     # the gate uses, so the WARN count == what the test asserts.  Without
@@ -3116,17 +3106,6 @@ def _report_within_shape_violations(
                 x = math.radians(lon - layout.anchor[1]) * R_EARTH * cos0
                 y = math.radians(lat - layout.anchor[0]) * R_EARTH
                 coords_m.append((x, y))
-        # Route-band data (ROUTE_FIELD_MODEL): runway rings are the anchors
-        # (+ the runway-midline graph augmentation inside the engine);
-        # regulated airside vertices are the check points.
-        if ROUTE_FIELD_MODEL:
-            if s.role == ROLE_RUNWAY:
-                _rf_runway_rings.append((list(coords_m), list(elevs)))
-            elif (s.role != ROLE_RUNWAY_CROSSING
-                  and s.role not in _rf_groundside):
-                for (xm, ym), em in zip(coords_m, elevs):
-                    _rf_check_pts.append((xm, ym, em))
-                    _rf_check_src.append((s_idx, s.role or "?", s.ref or ""))
         # In-pavement visibility predicate (geodesic grade) for APRON +
         # JUNCTION — both can be non-convex; only pairs whose chord stays
         # inside the (buffered) polygon are real constraints.

@@ -62,18 +62,37 @@ cross-shape proximity / vertex-to-edge / edge-midpoint (weld-invariant
 confirmations), runway longitudinal + vertical-curve (build profile vs check are
 separate code). Map each to a `grade_law` rule or retire/document.
 
-### Original item 5 — cleanup from the route_field retirements — STILL OPEN
-- `route_ctx` plumbing is dead: `check_grade.run_checks` `route_ctx=` param,
-  `verification.route_ctx_from_layout`, the `route_ctx=` arg in
-  `test_pavement_grade`. Remove. (`tests/test_pavement_grade.py` still builds + passes
-  `route_ctx` though `check_grade` ignores it.)
-- `elevation.py` `_rf_runway_rings/_rf_check_pts/_rf_check_src` dead collection.
-- Config gates likely dead post-route_field: `ROUTE_FIELD_MODEL`,
-  `ROUTE_FIELD_LOCAL_WINDOW_M`, `ROUTE_NOISE_FRAC` (verify then retire).
-- `grade_feasibility_audit._route_band_intervals` degrades to `{}` (guarded import
-  of the deleted `route_field`) — repoint to `route_band_violations` / band-on-G.
+### Original item 5 — cleanup from the route_field retirements — MOSTLY DONE
+Landed this session (behaviour-neutral; affected-file subset = same 6 baseline
+failures, no new/no fixed):
+- ✅ `route_ctx` plumbing REMOVED end-to-end: `check_grade.run_checks` param +
+  docstring, `verification.route_ctx_from_layout` + its call site, the
+  `route_ctx=` arg in `test_pavement_grade`, and the `route_ctx_from_layout`
+  caller in `grade_feasibility_audit`.
+- ✅ `elevation.py` `_rf_runway_rings/_rf_check_pts/_rf_check_src` (+ `_rf_groundside`)
+  dead collection REMOVED.
+- ✅ `ROUTE_NOISE_FRAC` RETIRED (was imported in `elevation.py` + `solver_primitives.py`
+  but never used; the route_field band that consumed it is gone) — constant +
+  `__all__` + both imports + `check_grade` import/fallback + the stale formula
+  reference in `config.py`'s ROUTE-FIELD comment.
+- ✅ `grade_feasibility_audit._route_band_intervals` REPOINTED off the deleted
+  `route_field` onto the unified band: builds `G` (`_build_node_list` +
+  `build_unified_graph`) and reads `building_feasibility.reach_band_unified` per
+  regulated airside node, querying by position in the layout's OWN anchor frame
+  (`layout.ll_to_m`, NOT the audit's mean-centred frame). Verified on SPJC:
+  route-bounded reps 0→1671, bands sane, no frame error.
+- ⚠ CORRECTION to handover #1/#2: `ROUTE_FIELD_MODEL` and
+  `ROUTE_FIELD_LOCAL_WINDOW_M` are NOT dead — they are the LIVE within-shape
+  local-window grade law (pairs > window not graded against each other; the
+  route-band is the long-range law). Used in `elevation.py`
+  `_report_within_shape_violations`, `solver_primitives.constraints_from_pavement`,
+  and `check_grade._check_within_shape`. KEPT. (`ROUTE_FIELD_MODEL` is an
+  always-True model flag; inlining it is a separate optional simplification, not
+  dead-code removal — left as-is so the windowing model stays self-documenting.)
+
+Still open under item 5:
 - `Allowance.flat_cap()` asserts `is_flat`; once item 3 makes rules anisotropic,
-  the `%`-report sites need an anisotropic-aware report.
+  the `%`-report sites need an anisotropic-aware report. (Blocked on item 3.)
 
 ## NEW open items surfaced this session (all xfail-tracked, NOT regressions)
 

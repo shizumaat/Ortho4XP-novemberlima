@@ -67,7 +67,6 @@ try:
         ELEV_ROUNDING_NOISE_M,
         ROUTE_FIELD_MODEL,
         ROUTE_FIELD_LOCAL_WINDOW_M,
-        ROUTE_NOISE_FRAC,
         ROAD_FRONTAGE_TOL_M,
         SERVICE_ROAD_MAX_GRADE,
         TAXI_GRADE_BY_WIDTH,
@@ -82,7 +81,6 @@ except Exception:
     ELEV_ROUNDING_NOISE_M = 0.15
     ROUTE_FIELD_MODEL = False
     ROUTE_FIELD_LOCAL_WINDOW_M = 80.0
-    ROUTE_NOISE_FRAC = 0.04
     ROAD_FRONTAGE_TOL_M = 3.0
     SERVICE_ROAD_MAX_GRADE = 0.04
     TAXI_GRADE_BY_WIDTH = True
@@ -1314,7 +1312,6 @@ def run_checks(
     top_n: int = 10,
     taxi_axes_ll: Optional[list] = None,
     quiet: bool = False,
-    route_ctx: Optional[dict] = None,
 ) -> Tuple[List[Violation], List[Violation], List[EdgeStep]]:
     """``taxi_axes_ll`` (per-axis junction grading): the builder's APT.DAT taxi
     centerlines as ``[(latlon_points, cL, cT), …]`` — ``latlon_points`` a list
@@ -1325,14 +1322,6 @@ def run_checks(
     per-axis (see ``_per_axis_allowance``); when None, the legacy all-pair
     Euclidean cap applies.  Re-deriving centerlines from the OSM would diverge
     from the apt.dat geometry the builder actually used — do not.
-
-    ``route_ctx`` (ROUTE-FIELD MODEL long-range law): ``{"centerlines_ll":
-    [[(lat, lon), …], …]}`` — the builder's apt.dat taxi centerlines (same
-    sourcing rule as ``taxi_axes_ll``).  When supplied (and the model flag is
-    on in config) every airside pavement vertex is additionally checked
-    against its RUNWAY-anchor route bands (``_check_route_bands``); those
-    violations are merged into the ``within`` list.  Standalone runs without
-    a layout skip the check with a notice — same pattern as ``taxi_axes_ll``.
     """
     nodes, ways = _parse_osm(osm_path)
     ll_to_m = _ll_to_m_factory(nodes)
@@ -1376,12 +1365,12 @@ def run_checks(
         plane, top_n)
     within = within + plane
 
-    # ROUTE-BAND: RETIRED from the OSM check (route_field was a parallel per-vertex
-    # band on a SEPARATE centerline graph — a duplicate of the solver's
-    # reach_band_unified on the ONE graph G).  The route-band rule is now confirmed
-    # in-memory on G; see docs/grade_law_consolidation_handover.md.  ``route_ctx``
-    # is accepted but ignored (param cleanup is handover work).
-    _ = route_ctx
+    # ROUTE-BAND: NOT checked on the OSM patch.  route_field (a parallel
+    # per-vertex band on a SEPARATE centerline graph) was retired; the
+    # route-band rule is now confirmed in-memory on the ONE graph G by
+    # grade_graph_validate.route_band_violations (see
+    # docs/grade_law_consolidation_handover.md).  Reconstructing G from the
+    # shipped OSM to confirm it here is the remaining "purist OSM-path" follow-up.
 
     cross = _check_cross_shape_proximity(
         vertices, ways, proximity_m, max_grade)

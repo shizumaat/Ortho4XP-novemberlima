@@ -70,7 +70,6 @@ __all__ = [
     "ELEV_ROUNDING_NOISE_M",
     "ROUTE_FIELD_MODEL",
     "ROUTE_FIELD_LOCAL_WINDOW_M",
-    "ROUTE_NOISE_FRAC",
     "SURFACE_FAIRING",
     "SURFACE_FAIRING_MAX_MOVE_M",
     "APRON_CORRIDOR_SMOOTH_RADIUS_M",
@@ -588,7 +587,7 @@ ELEV_ROUNDING_NOISE_M = 0.15
 # The long-range within-pavement grade law is the TAXI-ROUTE distance from
 # the hard anchors (runway nodes at solved values, seam/threshold pins,
 # corridor-held writes): a vertex's feasible band is the intersection over
-# anchors a of [E_a ± cap·route_d(a, v)·(1 + ROUTE_NOISE_FRAC)].  Grade
+# anchors a of [E_a ± cap·route_d(a, v)].  Grade
 # rules (ICAO Annex 14 §3.9, EASA CS-ADR-DSN.D.265/.280) regulate slope
 # along the taxi route; nothing regulates the straight chord between two
 # points kilometres apart, and km-scale visibility chords systematically
@@ -643,11 +642,6 @@ APRON_CORRIDOR_GEODESIC = True
 # vertex (the rect IS the corridor; wide rects' corners sit beyond any
 # small threshold).
 APRON_CORRIDOR_SEED_RADIUS_M = 15.0
-# The route graph under-counts real taxi routes by ~4 % (straight endpoint
-# stubs, uncurved row joins — s73-p3 measured).  Route bands used as HARD
-# constraints carry this relative margin; the validator MUST use the same
-# margin or it flags the solver's own legal output.
-ROUTE_NOISE_FRAC = 0.04
 # WRITE-LAYER ARBITRATION (s77, user-approved): when a corridor tie cannot
 # reach its consensus value (route-law anchors block and the blocker
 # rescue does not apply), the tie used to be DROPPED entirely — the two

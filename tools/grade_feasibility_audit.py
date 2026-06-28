@@ -85,42 +85,27 @@ def _dijkstra(n_index, adj, sources):
     return dist
 
 
-def _route_band_intervals(ways, nodes, ll_to_m, route_ctx, seam_nids,
-                          cap=0.015):
-    """Per-node route-band interval [lo,hi] = the runway-reach long-range law
-    over the taxi-centerline graph (the bound deep pavement gets from the
-    runway that the within-shape law cannot carry).  Reuses the SAME engine
-    the validator uses (``route_field.route_band_violations``) by probing each
-    node with a sentinel elevation so every reachable node returns its band."""
+def _route_band_intervals(layout, ways, nodes, seam_nids):
+    """Per-node route-band interval [lo,hi] = the runway-reach long-range law,
+    read off THE unified grade graph via
+    ``building_feasibility.reach_band_unified`` — the SAME band the spine solves
+    against and ``grade_graph_validate.route_band_violations`` confirms (it
+    replaces the retired ``route_field`` per-vertex band on a separate centerline
+    graph).  The band is queried by position in the layout's OWN anchor-relative
+    meter frame (``layout.ll_to_m``); the audit's mean-centred ``ll_to_m`` is a
+    different frame the band does not share."""
     try:
-        from auto_patch.route_field import route_band_violations
+        from auto_patch.elevation_per_surface.solver_primitives import (
+            _build_node_list)
+        from auto_patch.grade_graph import build_unified_graph
+        from auto_patch.elevation_per_surface.building_feasibility import (
+            reach_band_unified)
     except Exception:
         return {}, {}
-    centerlines_xy = []
-    for line_ll in (route_ctx or {}).get("centerlines_ll", []) or []:
-        pts = [ll_to_m(la, lo) for la, lo in line_ll]
-        if len(pts) >= 2:
-            centerlines_xy.append(pts)
-    if not centerlines_xy:
-        return {}, {}
-    runway_rings = []
-    for w in ways:
-        if w.tags.get("role") != "runway":
-            continue
-        ring = (w.nids[:-1] if len(w.nids) > 1 and w.nids[0] == w.nids[-1]
-                else w.nids)
-        pts, elevs, ok = [], [], True
-        for k, nid in enumerate(ring):
-            if nid not in nodes:
-                ok = False
-                break
-            pts.append(ll_to_m(*nodes[nid]))
-            elevs.append(w.elevs[k] if k < len(w.elevs) else None)
-        if ok:
-            runway_rings.append((pts, elevs))
-    if not runway_rings:
-        return {}, {}
-    check_nids, check_pts = [], []
+    _bnodes, b2i = _build_node_list(layout)
+    G = build_unified_graph(layout, b2i)
+    band = reach_band_unified(layout, G)
+    lo_d, hi_d = {}, {}
     SKIP = {"runway", "runway_crossing"}
     for w in ways:
         role = w.tags.get("role")
@@ -131,21 +116,16 @@ def _route_band_intervals(ways, nodes, ll_to_m, route_ctx, seam_nids,
         ring = (w.nids[:-1] if len(w.nids) > 1 and w.nids[0] == w.nids[-1]
                 else w.nids)
         for k, nid in enumerate(ring):
-            if nid in nodes and nid not in seam_nids and w.elevs[k] is not None:
-                x, y = ll_to_m(*nodes[nid])
-                check_nids.append(nid)
-                check_pts.append((x, y, 1e9))   # sentinel: always over ceiling
-    if not check_pts:
-        return {}, {}
-    vios = route_band_violations(centerlines_xy, runway_rings, check_pts,
-                                 cap=cap)
-    lo_d, hi_d = {}, {}
-    for rbv in vios:
-        nid = check_nids[rbv.index]
-        if math.isfinite(rbv.hi):
-            hi_d[nid] = min(hi_d.get(nid, float("inf")), rbv.hi)
-        if math.isfinite(rbv.lo):
-            lo_d[nid] = max(lo_d.get(nid, float("-inf")), rbv.lo)
+            if nid not in nodes or nid in seam_nids or w.elevs[k] is None:
+                continue
+            b = band(*layout.ll_to_m(*nodes[nid]))
+            if b is None:
+                continue
+            flo, cei = b
+            if math.isfinite(cei):
+                hi_d[nid] = min(hi_d.get(nid, float("inf")), cei)
+            if math.isfinite(flo):
+                lo_d[nid] = max(lo_d.get(nid, float("-inf")), flo)
     return lo_d, hi_d
 
 
@@ -303,14 +283,7 @@ def audit_layout(layout, icao):
     # min(route_hi[v], min over within-shape paths from any seed); lo
     # symmetric.  A node still infeasible after BOTH laws (lo>hi) has no
     # compliant field = a true (fundamental) infeasibility.
-    route_ctx = {}
-    try:
-        from auto_patch.verification import route_ctx_from_layout
-        route_ctx = route_ctx_from_layout(layout) or {}
-    except Exception:
-        route_ctx = {}
-    route_lo, route_hi = _route_band_intervals(
-        ways, nodes, ll_to_m, route_ctx, seam_nids)
+    route_lo, route_hi = _route_band_intervals(layout, ways, nodes, seam_nids)
 
     ceil_seed: dict = {}
     floor_seed: dict = {}

@@ -155,12 +155,6 @@ def test_pavement_grade(tmp_path, icao):
                 pts = [layout.m_to_ll(x, y) for (x, y) in ln.coords]
                 taxi_axes_ll.append((pts, cL, cT))
 
-        # ROUTE-FIELD MODEL: the long-range law is the route-band check —
-        # pass the builder's centerlines (the within-shape pairs above the
-        # local window are no longer graded; the route bands replace them).
-        from auto_patch.verification import route_ctx_from_layout
-        route_ctx = route_ctx_from_layout(layout)
-
         w, c, s = check_grade.run_checks(
             out,
             max_grade_pct=1.5,
@@ -169,7 +163,6 @@ def test_pavement_grade(tmp_path, icao):
             edge_step_m=0.5,
             top_n=5,
             taxi_axes_ll=taxi_axes_ll,
-            route_ctx=route_ctx,
         )
         within += w
         cross += c
