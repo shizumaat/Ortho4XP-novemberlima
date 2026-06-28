@@ -28,10 +28,22 @@ from pathlib import Path
 SOFT_ROLES = {"apron", "junction"}
 
 
+# Endpoints are keyed in a SHARED metric grid (snapped to ``_SNAP_M``) so the two
+# readers' coordinate frames — set A in the layout frame (via ``m_to_ll``), set B
+# from the emitted OSM lat/lon — match despite sub-decimetre round-trip drift.
+# Distinct ring vertices are metres apart, so the snap does not merge them.
+_SNAP_M = 0.30
+
+
+def _snap(latlon):
+    lat, lon = latlon
+    mx = lon * 111320.0 * math.cos(math.radians(lat))
+    my = lat * 110540.0
+    return (round(mx / _SNAP_M), round(my / _SNAP_M))
+
+
 def _key(latlon_a, latlon_b):
-    a = (round(latlon_a[0], 6), round(latlon_a[1], 6))
-    b = (round(latlon_b[0], 6), round(latlon_b[1], 6))
-    return frozenset((a, b))
+    return frozenset((_snap(latlon_a), _snap(latlon_b)))
 
 
 def _set_a(layout):

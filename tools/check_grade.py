@@ -771,6 +771,55 @@ class ShapePairConstraint:
     allowance: float    # cap*dist + ELEV_ROUNDING_NOISE_M (validator tolerance)
 
 
+_SLOPING_RECT_OSM_ROLES = frozenset({
+    "primary_parallel", "secondary_parallel", "stub", "cross_connector",
+})
+
+
+def _grade_context_from_osm(ways, nodes, ll_to_m, taxi_axes, seam_nids,
+                            max_grade):
+    """Build the SAME ``grade_graph.GradeContext`` the solver uses, but from the
+    emitted OSM — so the grade TEST reads the one shared within-shape LAW
+    (``grade_law.classify_pair`` via ``grade_graph.shape_constraints``).  Keys are
+    OSM node ids (the ``GradeShape.keys`` the soft-shape reader puts on its ring),
+    so the seam / building-step exemptions match by identity.  Mirrors
+    ``grade_graph.build_context`` (centerlines from the apt.dat taxi axes, spine-
+    less junction cap inherited from the nearest taxi rect, building-pad keys)."""
+    from auto_patch import grade_graph as GG
+    from auto_patch.config import TAXI_MAX_GRADE
+
+    centerlines = [GG.Centerline(pts=poly, cap=cL)
+                   for (poly, cL, _cT) in (taxi_axes or []) if len(poly) >= 2]
+
+    bld_keys = {nid for w in ways if w.tags.get("role") == "building"
+                for nid in w.nids}
+
+    rect_cap_at: dict = {}
+    for w in ways:
+        if w.tags.get("role") not in _SLOPING_RECT_OSM_ROLES:
+            continue
+        cap = _role_grade_limit(w, max_grade)
+        if cap is None:
+            continue
+        for nid in w.nids:
+            if rect_cap_at.get(nid, -1.0) < cap:
+                rect_cap_at[nid] = cap
+
+    def _inherited(shape):
+        best = None
+        for k in shape.keys:
+            c = rect_cap_at.get(k)
+            if c is not None and (best is None or c > best):
+                best = c
+        return best if best is not None else TAXI_MAX_GRADE
+
+    return GG.GradeContext(
+        centerlines=centerlines,
+        seam_keys=frozenset(seam_nids or ()),
+        inherited_junction_cap=_inherited,
+        building_keys=frozenset(bld_keys))
+
+
 def iter_shape_grade_constraints(
         ways: List[Way],
         nodes: Dict[str, Tuple[float, float]],
@@ -856,6 +905,17 @@ def iter_shape_grade_constraints(
                                 frontage_nids.add(nid)
         except Exception:
             frontage_nids = set()
+    # THE LAW reader for soft airside shapes (apron / junction / service_junction):
+    # build the shared grade context once and route every soft shape through
+    # ``grade_graph.shape_constraints`` (→ ``grade_law.classify_pair``), so the
+    # test selects the SAME within-shape pairs at the SAME base caps the solver
+    # enforces.  The road-frontage / back-edge relaxations below stay a test-only
+    # layer ON TOP (they only RELAX a cap).  Non-soft shapes (rects / runway /
+    # terminal) keep their per-role all-pair handling further down.
+    from auto_patch import grade_graph as _GG
+    _law_ctx = _grade_context_from_osm(ways, nodes, ll_to_m, taxi_axes,
+                                       seam_nids, max_grade)
+    _SOFT_ROLES = _GG.SOFT_VISIBILITY_ROLES
     for w in ways:
         grade_cap = _role_grade_limit(w, max_grade)
         if grade_cap is None:
@@ -876,6 +936,47 @@ def iter_shape_grade_constraints(
             pnids.append(nid)
         n = len(pts)
         if n < 3:
+            continue
+        # ── SOFT airside shapes → THE LAW (one shared within-shape rule set) ──
+        role0 = w.tags.get("role")
+        if role0 in _SOFT_ROLES:
+            ring = [(p[0], p[1]) for p in pts]
+            gs = _GG.GradeShape(role=role0, ring=ring, keys=list(pnids))
+            sc = _GG.shape_constraints(gs, _law_ctx)
+            idx = {pnids[k]: k for k in range(n)}
+            for (ka, kb, cap) in sc.edges:
+                ia = idx.get(ka)
+                ib = idx.get(kb)
+                if ia is None or ib is None:
+                    continue
+                xi, yi, ei, _si = pts[ia]
+                xj, yj, ej, _sj = pts[ib]
+                d = math.hypot(xi - xj, yi - yj)
+                if d < 0.5:
+                    continue
+                grade_cap_pair = cap
+                allowance = cap * d + ELEV_ROUNDING_NOISE_M
+                # test-only relaxations (raise the cap only; see road_zone /
+                # frontage_nids above) — a road carve's own 4 % descent and the
+                # back-edge ramp are not host-shape grade violations.
+                if (road_zone is not None
+                        and SERVICE_ROAD_MAX_GRADE > grade_cap_pair
+                        and road_zone.contains(_FzPt((xi, yi)))
+                        and road_zone.contains(_FzPt((xj, yj)))):
+                    grade_cap_pair = SERVICE_ROAD_MAX_GRADE
+                    allowance = max(allowance, SERVICE_ROAD_MAX_GRADE * d
+                                    + ELEV_ROUNDING_NOISE_M)
+                if (frontage_nids and role0 == "apron"
+                        and APRON_BACK_EDGE_GRADE > grade_cap_pair
+                        and pnids[ia] in frontage_nids
+                        and pnids[ib] in frontage_nids):
+                    grade_cap_pair = APRON_BACK_EDGE_GRADE
+                    allowance = max(allowance, APRON_BACK_EDGE_GRADE * d
+                                    + ELEV_ROUNDING_NOISE_M)
+                out.append(ShapePairConstraint(
+                    way=w, nid_a=pnids[ia], nid_b=pnids[ib],
+                    xa=xi, ya=yi, ea=ei, xb=xj, yb=yj, eb=ej,
+                    dist=d, cap=grade_cap_pair, allowance=allowance))
             continue
         # Build the pairs to check.
         if n == 3:

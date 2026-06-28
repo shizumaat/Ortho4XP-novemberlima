@@ -12,6 +12,7 @@ caller's existing per-role audit keeps validating those.
 """
 from __future__ import annotations
 
+import dataclasses as _dc
 import math
 
 from . import grade_graph as GG
@@ -70,7 +71,16 @@ def _iter_checked_pairs(layout):
             continue
         gs = GG.GradeShape(role=s.role, ring=[(x, y) for (x, y) in ring],
                            keys=list(range(nlen)))
-        sc = GG.shape_constraints(gs, ctx)
+        # Activate the building-step exemption in INDEX key-space: ctx.building_keys
+        # are rounded coords (validator mode) but this shape's keys are ring
+        # indices, so resolve which ring vertices sit on a building pad and pass a
+        # per-shape index set.  Matches the solver (whose global node-index keys
+        # make the exemption active) and the grade test (check_grade, nid keys).
+        bld_idx = frozenset(
+            i for i, (x, y) in enumerate(ring)
+            if (round(x, 3), round(y, 3)) in ctx.building_keys)
+        ctx_s = _dc.replace(ctx, building_keys=bld_idx) if bld_idx else ctx
+        sc = GG.shape_constraints(gs, ctx_s)
         spine_pairs = set()
         for chain in sc.spine_chains:
             for a, b in zip(chain, chain[1:]):
