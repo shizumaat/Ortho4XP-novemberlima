@@ -3245,9 +3245,28 @@ def _report_within_shape_violations(
                           f"({ea:.1f} → {eb:.1f}, d={d:.1f}m, de={de:.1f}m)")
         except _GEOM_EXC:
             pass
-    # ROUTE-BAND WARN: RETIRED with route_field (the parallel per-vertex band
-    # on a separate centerline graph).  The route-band rule is confirmed
-    # on the ONE graph G; see docs/grade_law_consolidation_handover.md.
+    # ROUTE-BAND: every airside vertex must sit inside the runway-reach band on
+    # THE unified graph G (``reach_band_unified``) — the AS-BUILT confirmation of
+    # the bound the solver enforces, on the SAME graph (replaces the retired
+    # route_field per-vertex band on a separate centerline graph).
+    try:
+        from .grade_graph_validate import route_band_violations as _gg_band
+        band_viol = _gg_band(layout)
+    except Exception:
+        band_viol = []
+    if band_viol:
+        from collections import Counter as _Counter
+        cls = _Counter(v[1] for v in band_viol)
+        UI.vprint(1,
+                  f"  [pav-builder] WARN: {icao}: {len(band_viol)} ROUTE-BAND "
+                  f"violation(s) — airside vertex outside the runway-reach band "
+                  f"[unified graph G] (ceil/too-high={cls['ceil']}, "
+                  f"floor/too-low={cls['floor']}, "
+                  f"pinned/no-feasible-band={cls['pinned']}).")
+        for (ex, side, role, x, y, e, lo, hi) in band_viol[:8]:
+            UI.vprint(1,
+                      f"  [pav-builder]   route-band {side} {ex:.1f}m on {role} "
+                      f"elev={e:.1f} band=[{lo:.1f},{hi:.1f}] @({x:.0f},{y:.0f})")
 
 
 

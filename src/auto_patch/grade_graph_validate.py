@@ -343,6 +343,104 @@ def route_reach_violations(layout, noise=ELEV_ROUNDING_NOISE_M):
     return out
 
 
+def _band_roles():
+    """Airside roles whose vertices must sit inside the runway-reach ROUTE BAND:
+    the taxi network + the apron / junction / building surfaces it grades to.
+    Runways are the band ANCHORS (excluded); groundside / service / boundary /
+    clearance carry their own datum and are not runway-reach constrained."""
+    from auto_patch.layout import (
+        ROLE_APRON, ROLE_BUILDING, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
+        ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL, ROLE_STUB)
+    return frozenset({
+        ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL, ROLE_STUB,
+        ROLE_CROSS_CONNECTOR, ROLE_APRON, ROLE_JUNCTION, ROLE_BUILDING})
+
+
+def route_band_violations(layout, noise=ELEV_ROUNDING_NOISE_M, G=None):
+    """Confirm the runway-reach ROUTE BAND on THE unified grade graph ``G``.
+
+    The solver bounds every airside node by the reach band
+    (``building_feasibility.reach_band_unified``: a cap-Dijkstra over
+    ``G.spine_adj`` from the runway anchors ``G.runway_anchor``); this is the
+    AS-BUILT CONFIRMATION of that rule on the SAME graph ``G`` — one graph, no
+    separate route-field.  For every airside taxi / apron / junction / building
+    vertex, the emitted elevation must lie inside ``band(x, y) = (floor,
+    ceiling)``: above the ceiling means the vertex is higher than the steepest
+    cap-compliant climb from any runway can reach; below the floor, lower than
+    any descent can reach.
+
+    Vertices off the spine network (``band`` returns ``None`` — a coverage hole
+    / weak band) are NOT constrained here; their local within-shape law
+    (``within_violations``) still applies.  This is the in-memory home of the
+    check (the layout carries the global spine ``G`` reach_band needs); rebuilding
+    ``G`` from the shipped OSM is a documented follow-up (handover item 1).
+
+    Three failure modes, all REPORTED (no airport is legitimately infeasible —
+    every one is a solver bug, a missing rule, or a rule that needs adjusting, so
+    none are silently dropped; the class just tells us which FIX it needs):
+
+      * ``"ceil"`` — elev above the band ceiling (higher than any cap-compliant
+        climb from a runway can reach).
+      * ``"floor"`` — elev below the band floor (lower than any descent reaches).
+      * ``"pinned"`` — the band itself is EMPTY (``floor > ceiling``): no single
+        elevation is within-cap reachable from every runway at once.  A
+        FUNDAMENTAL multi-anchor infeasibility — whatever the solver emits here
+        violates the reach law from some anchor.  ``excess_m`` is the band
+        deficit ``floor - ceiling`` (how over-constrained the point is); the
+        FIX is upstream (a transition/relaxation rule, a yielded anchor, or a
+        geometry bug), tracked alongside ``route_reach_violations`` /
+        ``grade_feasibility_audit``.
+
+    Vertices off the spine network (``band`` returns ``None`` — a coverage hole
+    / weak band) are NOT constrained here; their local within-shape law
+    (``within_violations``) still applies.  This is the in-memory home of the
+    check (the layout carries the global spine ``G`` reach_band needs); rebuilding
+    ``G`` from the shipped OSM is a documented follow-up (handover item 1).
+
+    Returns ``[(excess_m, side, role, x, y, elev, lo, hi), ...]`` worst (largest
+    ``excess_m``) first."""
+    from .elevation_per_surface.solver_primitives import _build_node_list
+    from .elevation_per_surface.building_feasibility import reach_band_unified
+    if G is None:
+        nodes, b2i = _build_node_list(layout)
+        if not nodes:
+            return []
+        G = GG.build_unified_graph(layout, b2i)
+    band = reach_band_unified(layout, G)
+    roles = _band_roles()
+    out = []
+    seen = set()
+    for s in layout.shapes:
+        if (s.role not in roles or s.polygon is None or s.polygon.is_empty):
+            continue
+        ring = _open_ring(list(s.polygon.exterior.coords))
+        elevs = _shape_elevs(s, len(ring))
+        if elevs is None:
+            continue
+        for (x, y), e in zip(ring, elevs):
+            # dedupe by shared canonical node — the band is positional, so a
+            # welded corner shared by N shapes is ONE band check, not N.
+            key = (round(x, 2), round(y, 2))
+            if key in seen:
+                continue
+            seen.add(key)
+            b = band(x, y)
+            if b is None:
+                continue
+            lo, hi = b
+            if lo > hi + noise:
+                # EMPTY band — no compliant elevation exists at this vertex
+                # (mutually-unreachable runway anchors).  Reported, never
+                # dropped: it is a fundamental infeasibility to root-cause.
+                out.append((lo - hi, "pinned", s.role, x, y, e, lo, hi))
+            elif e > hi + noise:
+                out.append((e - hi, "ceil", s.role, x, y, e, lo, hi))
+            elif e < lo - noise:
+                out.append((lo - e, "floor", s.role, x, y, e, lo, hi))
+    out.sort(reverse=True, key=lambda t: t[0])
+    return out
+
+
 def _pt(x, y):
     from shapely.geometry import Point
     return Point(x, y)
