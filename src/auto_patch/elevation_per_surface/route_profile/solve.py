@@ -61,7 +61,7 @@ def solve_route_profile(layout, icao: str,
     # reach band is now computed ON it (``reach_band_unified``): reachability is a
     # cap-Dijkstra over ``G.spine_adj`` from ``G.runway_anchor``, so the ceiling is
     # the spine's ACHIEVABLE level and cap-consistent by construction — no separate
-    # route graph, no ``spine_adjacency`` re-derivation, no ``_cap_consistent_band``
+    # route graph, no ``spine_adjacency`` re-derivation, no ceiling-consistency
     # bridge.  ``G.spine_adj`` already covers every spine node + edge the old
     # ``spine_adjacency`` produced (verified redundant), so the merge is gone.
     from auto_patch import grade_graph as _GG
@@ -70,14 +70,8 @@ def solve_route_profile(layout, icao: str,
     band, dem_fn, runway_pts, _G = reach_band_for(
         layout, elev, bucket_to_idx, dem, tile_lat, tile_lon, unified_graph=G)
     node_band = node_bands(nodes, band)
-    # Legacy fallback: the route-graph band is per-node inconsistent, so regularise
-    # its ceiling along the spine before seating (gate O4_BAND_ON_UNIFIED_GRAPH=0).
-    seat_band = band
-    if (_os.environ.get("O4_BAND_ON_UNIFIED_GRAPH", "1") != "1"
-            and _os.environ.get("O4_CONSISTENT_CEILING", "1") == "1"):
-        seat_band = _cap_consistent_band(band, nodes, node_band, u_spine_adj)
     building_seats = build_building_seats(
-        layout, bucket_to_idx, seat_band, dem_fn, runway_pts)
+        layout, bucket_to_idx, band, dem_fn, runway_pts)
     apron_body = apron_body_nodes(layout, bucket_to_idx)
 
     # NO-BUILDING APRON FILL (user 2026-06-26): a no-building apron has no pad to
@@ -405,68 +399,6 @@ def _solve_spine_profile(elev, base_hard, spine_adj, spine_floor,
             s_edges.append((e[0], e[1], w))
     feasibility_project(elev, [{"edges": s_edges}], anchors)
     return set(nodes)
-
-
-def _cap_consistent_band(band, nodes, node_band, spine_adj):
-    """Wrap the reach band so its CEILING is cap-consistent along the spine graph
-    (user 2026-06-27 — "determine the solvable elevation from the routes").
-
-    The raw band gives each node a ceiling from its most-constrained runway route
-    INDEPENDENTLY, but the spine is continuous: a node cannot sit above what its
-    spine NEIGHBOURS support (``neighbour_ceiling + cap·dist``) — the min-curvature
-    spine gets dragged down to that.  So regularise the spine-node ceilings with a
-    multi-source Dijkstra (every spine node a source at its own ceiling, relaxed
-    along ``spine_adj`` budgets = cap·dist), giving the elevation the spine can
-    ACTUALLY reach.  A sampled point's ceiling is then capped by the nearest spine
-    node's consistent ceiling + 1 %·distance, so a building seats against the
-    achievable spine, not the optimistic per-node ceiling.  Floor is unchanged.
-
-    Verified on OEMA: raw foot ceiling 642.4 → consistent 640.9 = the elevation the
-    floored spine actually reaches, dropping the pad 643.6 → 642.1 (apron → 1 %)."""
-    import heapq
-    import math
-    from shapely.geometry import Point
-    from shapely.strtree import STRtree
-    from auto_patch.config import APRON_MAX_GRADE
-    INF = float("inf")
-    cc: dict = {}
-    pq = []
-    for i in spine_adj:
-        if i < len(node_band) and node_band[i] is not None:
-            cc[i] = node_band[i][1]
-            pq.append((cc[i], i))
-    if not pq:
-        return band
-    heapq.heapify(pq)
-    while pq:
-        c, i = heapq.heappop(pq)
-        if c > cc.get(i, INF):
-            continue
-        for (j, budget) in spine_adj.get(i, ()):
-            nc = c + budget
-            if nc < cc.get(j, INF):
-                cc[j] = nc
-                heapq.heappush(pq, (nc, j))
-    sidx = [i for i in cc if i < len(nodes)]
-    if not sidx:
-        return band
-    spts = [Point(*nodes[i]) for i in sidx]
-    tree = STRtree(spts)
-
-    def consistent(x, y):
-        fc = band(x, y)
-        if fc is None:
-            return None
-        try:
-            qi = int(tree.nearest(Point(x, y)))
-        except Exception:                                     # pragma: no cover
-            return fc
-        si = sidx[qi]
-        d = math.hypot(x - nodes[si][0], y - nodes[si][1])
-        ceil = cc[si] + APRON_MAX_GRADE * d
-        return (fc[0], min(fc[1], ceil))
-
-    return consistent
 
 
 def _merge_spine_adj(a, b):

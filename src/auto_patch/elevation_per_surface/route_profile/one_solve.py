@@ -1,7 +1,8 @@
 """The ONE-PROFILE solve (user spec 2026-06-24; docs/one_profile_solve.md).
 
 The single source of elevation truth for the airside network, and it uses ONE
-graph: the taxi-route reach band (``building_feasibility.reach_band_sampler``).
+graph: the reach band on the unified grade graph
+(``building_feasibility.reach_band_unified``).
 That band sets the building levels AND bounds every apron / spine / rect node, so
 they agree by construction — there is no second reachability graph.
 
@@ -162,7 +163,7 @@ def one_profile_solve(
     ``building_seats`` — ``{pad_node: flat_level}`` (anchors, the heaviest).
     ``dem_elev`` — per-node DEM (the closest-to-DEM target).
     ``node_band`` — per-node ``(floor, ceiling)`` reachability from THE ONE graph
-      (``building_feasibility.reach_band_sampler`` — the SAME taxi-route band that
+      (``building_feasibility.reach_band_unified`` — the SAME band that
       sets the building levels, so building and apron/spine agree by construction)
       or ``None`` (off-network → unconstrained, the neighbour cap slabs bound it).
     ``coupling`` — rect flat-end groups (members share one elevation).

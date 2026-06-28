@@ -1044,7 +1044,7 @@ def _build_node_list(layout):
 
 def _runway_edge_pts(layout, elev, bucket_to_idx, step_m=10.0):
     """``[(x, y, elev)]`` runway-EDGE anchor points for the shared
-    route-feasibility band (``building_feasibility.reach_band_sampler``) —
+    route-feasibility band (``building_feasibility.reach_band_unified``) —
     DENSIFIED along the runway boundary (a point every ``step_m``, elevation
     interpolated along the edge).  A taxiway connects to a runway at any point on
     its EDGE — often MID-edge (the 02 threshold), far from a corner vertex — so

@@ -218,7 +218,7 @@ def test_cyxy_spine_zero_no_bowl():
     """THE single-graph invariant (user 2026-06-24): the taxi SPINE must be
     grade-compliant (0 within-shape spine violations on the unified grade graph)
     AND no building bowled — building reach and spine grade come from ONE graph
-    (``building_feasibility.reach_band_sampler``), so they agree by construction.
+    (``building_feasibility.reach_band_unified``), so they agree by construction.
 
     Guards the absorbed-runway-end anchor fix (``_CONNECT_TOL_M`` 20→25): before
     it, the CYXY ~U11/taxiway-A corridor back to the absorbed runway-02 end was

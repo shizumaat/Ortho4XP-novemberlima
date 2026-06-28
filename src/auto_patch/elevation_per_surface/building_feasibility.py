@@ -47,8 +47,8 @@ from auto_patch.layout import (
     ROLE_PRIMARY_PARALLEL, ROLE_RUNWAY, ROLE_SECONDARY_PARALLEL, ROLE_STUB,
 )
 
-__all__ = ["building_feasible_levels", "reach_band_sampler",
-           "reach_band_unified", "runway_edge_anchors"]
+__all__ = ["building_feasible_levels", "reach_band_unified",
+           "runway_edge_anchors"]
 
 # A taxi centerline ENDPOINT counts as a runway CONTACT (a real route entry onto
 # the runway) when it lies within this distance of the runway POLYGON EDGE (or
@@ -118,161 +118,6 @@ def _nearest_visible_centerline(c, cls, vis):
     return min(cls, key=lambda L: L.distance(c))
 
 
-def _runway_route_contacts(layout, G, runway_pts_xyz):
-    """``[(graph_key, runway_elev)]`` — every taxiway↔runway CONTACT on the route
-    graph ``G``: a centerline vertex INSIDE a runway polygon, or an ENDPOINT
-    within ``_CONTACT_EDGE_TOL_M`` of a runway EDGE, snapped to its nearest ``G``
-    node at the runway surface elevation there (edge/inside distance — NOT
-    runway-ring-vertex distance — so a taxiway meeting a long edge mid-span still
-    anchors).  The SINGLE contact source shared by the reach band AND the
-    route-profile solve — one graph, one contact set."""
-    from shapely.geometry import Point
-    from shapely.ops import unary_union
-    rpolys = [s.polygon for s in layout.shapes
-              if s.role == ROLE_RUNWAY and s.polygon is not None
-              and not s.polygon.is_empty]
-    if not rpolys:
-        return []
-    rbnd = unary_union([p.boundary for p in rpolys])
-    runi = unary_union(rpolys)
-
-    def _rwy_elev_at(px, py):
-        return min(runway_pts_xyz,
-                   key=lambda v: (v[0] - px) ** 2 + (v[1] - py) ** 2)[2]
-
-    out = []
-    seen: set = set()
-    for entry in (getattr(layout, "apt_taxi_centerlines", None) or []):
-        ln = entry[0] if isinstance(entry, (tuple, list)) else entry
-        ref = entry[1] if (isinstance(entry, (tuple, list))
-                           and len(entry) > 1) else None
-        if (ln is None or ln.is_empty
-                or str(ref or "").upper().startswith("SVC")):
-            continue
-        coords = list(ln.coords)
-        n_c = len(coords)
-        for vi, (vx, vy) in enumerate(coords):
-            p = Point(vx, vy)
-            is_end = (vi == 0 or vi == n_c - 1)
-            if not (runi.contains(p)
-                    or (is_end and rbnd.distance(p) <= _CONTACT_EDGE_TOL_M)):
-                continue
-            k, _ = G.nearest_key(vx, vy)
-            if k is None or k in seen:
-                continue
-            seen.add(k)
-            out.append((k, _rwy_elev_at(vx, vy)))
-    return out
-
-
-def reach_band_sampler(layout, runway_pts_xyz):
-    """The shared taxi-route FEASIBILITY-BAND sampler used by BOTH the building
-    levels and the spine climb (the one model, user 2026-06-23).
-
-    ``runway_pts_xyz``: ``[(x, y, elev)]`` every runway ring vertex at its solved
-    elevation.  Returns ``band(x, y) -> (floor, ceiling) | None``: the range a
-    point may sit at while reachable within grade from EVERY runway it
-    taxi-connects to.
-
-    Anchors = taxiway↔runway CONTACTS — EVERY taxi centerline that touches a
-    runway provides one (user 2026-06-24).  A contact is a centerline vertex
-    INSIDE a runway polygon, or a centerline ENDPOINT within
-    ``_CONTACT_EDGE_TOL_M`` of a runway EDGE; anchored at the runway elevation
-    there.  Measured against the runway POLYGON (not its sparse ring vertices, a
-    test that missed taxiways meeting a long edge mid-span).  Each contact's
-    reach is measured along the taxi route with FOOT edge projection and
-    intersected over ALL contacts (the most-deviating route binds: ``ceiling =
-    min(elev_a + budget_a)``).  The building/spine entry to the route uses a
-    VISIBLE CHORD (``VISIBLE_CHORD_CONNECT``) — the nearest centerline reachable
-    without leaving pavement, not the straight-line nearest."""
-    from shapely.geometry import Point
-
-    from auto_patch.taxi_routing import shared_taxi_route_graph
-    G = shared_taxi_route_graph(layout)
-    if not getattr(G, "coord", None) or not runway_pts_xyz:
-        return lambda x, y: None
-
-    def _cap(u, v):
-        return G.edge_cap.get(G._ekey(u, v), TAXI_MAX_GRADE)
-
-    def _capdist_from(src):
-        dist = {src: 0.0}
-        pq = [(0.0, src)]
-        while pq:
-            d, u = heapq.heappop(pq)
-            if d > dist.get(u, _INF):
-                continue
-            for v, w in G.adj.get(u, ()):
-                nd = d + _cap(u, v) * w
-                if nd < dist.get(v, _INF):
-                    dist[v] = nd
-                    heapq.heappush(pq, (nd, v))
-        return dist
-
-    # taxiway↔runway CONTACTS — the SINGLE shared contact source (one graph): a
-    # cap-Dijkstra from each contact's graph node, anchored at the runway surface
-    # elevation there.
-    anchors: List[Tuple[float, dict]] = [
-        (ae, _capdist_from(k))
-        for (k, ae) in _runway_route_contacts(layout, G, runway_pts_xyz)]
-    if not anchors:
-        return lambda x, y: None
-
-    cls = [ln for (ln, n) in (getattr(layout, "apt_taxi_centerlines", None)
-                              or [])
-           if ln is not None and not ln.is_empty
-           and not str(n or "").upper().startswith("SVC")]
-    if not cls:
-        return lambda x, y: None
-
-    vis = _pavement_visibility(layout) if VISIBLE_CHORD_CONNECT else None
-
-    def band(x, y):
-        c = Point(x, y)
-        ln = (_nearest_visible_centerline(c, cls, vis) if vis is not None
-              else min(cls, key=lambda L: L.distance(c)))
-        perp = c.distance(ln)
-        coords = list(ln.coords)
-        sp = ln.project(c)
-        acc = 0.0
-        A = B = None
-        for i in range(len(coords) - 1):
-            seg_len = math.hypot(coords[i + 1][0] - coords[i][0],
-                                 coords[i + 1][1] - coords[i][1])
-            if acc - 1e-6 <= sp <= acc + seg_len + 1e-6:
-                A = (coords[i], sp - acc)
-                B = (coords[i + 1], (acc + seg_len) - sp)
-                break
-            acc += seg_len
-        if A is None:
-            A = (coords[0], 0.0)
-            B = (coords[-1], ln.length)
-        kA, _ = G.nearest_key(*A[0])
-        kB, _ = G.nearest_key(*B[0])
-        ecap = G.edge_cap.get(G._ekey(kA, kB), TAXI_MAX_GRADE)
-        # perpendicular climb: taxiway-corridor part at the taxiway cap, the
-        # rest (real apron) at 1 % (zero for an on-centerline spine node).
-        perp_climb = (ecap * min(perp, _TAXI_HALF_W_M)
-                      + _APRON_CAP * max(0.0, perp - _TAXI_HALF_W_M))
-        floor, ceil = -_INF, _INF
-        for (ae, cdm) in anchors:
-            cands = []
-            if kA in cdm:
-                cands.append(cdm[kA] + ecap * A[1])   # + partial first edge
-            if kB in cdm:
-                cands.append(cdm[kB] + ecap * B[1])
-            if not cands:
-                continue                          # this connection can't reach
-            budget = min(cands) + perp_climb
-            ceil = min(ceil, ae + budget)
-            floor = max(floor, ae - budget)
-        if ceil >= _INF:
-            return None
-        return (floor, ceil)
-
-    return band
-
-
 def reach_band_unified(layout, G):
     """The reach band computed on THE unified grade graph — the SAME graph the
     spine solves on and the validator checks (user 2026-06-27, "stop building the
@@ -281,11 +126,11 @@ def reach_band_unified(layout, G):
     Reachability is a cap-Dijkstra over ``G.spine_adj`` from ``G.runway_anchor``
     (the exact nodes + elevations the spine solve pins), so the ceiling is the
     spine's ACHIEVABLE level and is cap-consistent along the spine BY CONSTRUCTION
-    — no separate route graph, no per-node inconsistency, no ``_cap_consistent_band``
+    — no separate route graph, no per-node inconsistency, no ceiling-consistency
     bridge.  Geometry of the perpendicular foot still uses the taxi centerlines (an
     accurate perp), but the foot's reachable elevation comes from the nearest
-    unified spine node.  Drop-in for :func:`reach_band_sampler` (same
-    ``band(x, y) -> (floor, ceiling) | None`` contract)."""
+    unified spine node.  The band contract is
+    ``band(x, y) -> (floor, ceiling) | None``."""
     import heapq
     from shapely.geometry import Point
     from shapely.strtree import STRtree
@@ -456,21 +301,22 @@ def building_feasible_levels(
     ``ROLE_BUILDING`` that touches airside pavement.
 
     ``runway_pts_xyz``: ``[(x_m, y_m, elev_m)]`` every runway ring vertex at its
-    solved elevation (the runway-edge anchors — see :func:`reach_band_sampler`).
+    solved elevation (the runway-edge anchors — see :func:`runway_edge_anchors`).
     ``dem_sampler(x, y)``: DEM (m) at a layout-local point, or None.  The level
     is ``clamp(DEM, floor, ceiling)`` from the shared route-feasibility band — if
     DEM is not reachable within grade from every runway route, the level is
     pulled into the band (the building is adjusted to be feasible).  Buildings
     not touching airside pavement are omitted (the caller keeps them at DEM).
 
-    ``band``: a pre-built sampler from :func:`reach_band_sampler` — pass the
-    spine's band so buildings are placed on the SAME graph the spine is graded on
-    (the single graph; they then agree by construction).  If omitted, a band is
-    built here (identical inputs → identical band)."""
+    ``band``: the pre-built unified-graph band from :func:`reach_band_unified`
+    (required) — buildings are placed on the SAME graph the spine is graded on
+    (the single graph; they then agree by construction)."""
     from shapely.ops import unary_union
 
     if band is None:
-        band = reach_band_sampler(layout, runway_pts_xyz)
+        raise ValueError(
+            "building_feasible_levels requires a prebuilt band "
+            "(reach_band_unified); the legacy route-graph sampler was removed")
     polys = [s.polygon for s in layout.shapes
              if s.role in _AIRSIDE_ROLES and s.polygon is not None
              and not s.polygon.is_empty]
