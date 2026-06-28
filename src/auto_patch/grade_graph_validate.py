@@ -408,6 +408,63 @@ def route_band_violations(layout, noise=ELEV_ROUNDING_NOISE_M, G=None):
         G = GG.build_unified_graph(layout, b2i)
     band = reach_band_unified(layout, G)
     roles = _band_roles()
+
+    # SMALL buildings (grade_law.building_requires_full_frontage == False) are
+    # LOCAL reach ANCHORS: ``build_building_seats`` seats such a pad at its
+    # central-chord level and the body solve grades the surrounding apron FROM the
+    # pad at the apron cap, so those points are reachable from the PAD, not the
+    # runway route.  Recognise that here (the SAME reach the solver enforced, one
+    # rule via ``building_requires_full_frontage``) so the looser small-building
+    # frontage — its non-central pad and the apron stepping up to it — is not
+    # falsely flagged.  A LARGE building is NOT an anchor: its whole frontage must
+    # be route-reachable, so its pads stay checked per-vertex.
+    from auto_patch.grade_law import building_requires_full_frontage
+    from auto_patch.layout import ROLE_BUILDING
+    from auto_patch.config import (APRON_MAX_GRADE, BUILDING_FRONTAGE_CORRIDOR_M,
+                                   VISIBLE_CHORD_CONNECT)
+    from .elevation_per_surface.building_feasibility import (
+        _pavement_visibility, _VIS_ON_PAV_FRAC)
+    small_pads = []                          # (polygon, seat)
+    for s in layout.shapes:
+        if (s.role == ROLE_BUILDING and s.polygon is not None
+                and not s.polygon.is_empty
+                and not building_requires_full_frontage(s.polygon.area)):
+            ring = _open_ring(list(s.polygon.exterior.coords))
+            el = _shape_elevs(s, len(ring))
+            if el:
+                small_pads.append((s.polygon, sum(el) / len(el)))
+    _vis = (_pavement_visibility(layout)
+            if (small_pads and VISIBLE_CHORD_CONNECT) else None)
+
+    def _reached_from_small_pad(x, y, e):
+        """True when ``(x, y, e)`` sits within the apron cap of a SMALL building's
+        seat over an ON-PAVEMENT chord — the surface grades to it from the local
+        pad (the looser small-building rule), not the runway route."""
+        if not small_pads:
+            return False
+        from shapely.geometry import Point as _P, LineString as _LS
+        from shapely.ops import nearest_points as _np
+        p = _P(x, y)
+        for (poly, seat) in small_pads:
+            d = poly.distance(p)
+            if d > BUILDING_FRONTAGE_CORRIDOR_M:
+                continue
+            if abs(e - seat) > APRON_MAX_GRADE * d + noise:
+                continue
+            if _vis is None:
+                return True
+            near = _np(poly, p)[0]
+            chord = _LS([(x, y), (near.x, near.y)])
+            if chord.length < 1e-6 or _vis.contains(chord):
+                return True
+            try:
+                if (chord.intersection(_vis.context).length / chord.length
+                        >= _VIS_ON_PAV_FRAC):
+                    return True
+            except Exception:                                  # pragma: no cover
+                pass
+        return False
+
     out = []
     seen = set()
     for s in layout.shapes:
@@ -428,6 +485,13 @@ def route_band_violations(layout, noise=ELEV_ROUNDING_NOISE_M, G=None):
             if b is None:
                 continue
             lo, hi = b
+            # within a feasible runway-reach band → fine.
+            if lo <= hi + noise and (lo - noise) <= e <= (hi + noise):
+                continue
+            # else reachable from a local SMALL-building pad → fine (the apron
+            # grades from the pad at the apron cap; the small-building rule).
+            if _reached_from_small_pad(x, y, e):
+                continue
             if lo > hi + noise:
                 # EMPTY band — no compliant elevation exists at this vertex
                 # (mutually-unreachable runway anchors).  Reported, never
@@ -435,7 +499,7 @@ def route_band_violations(layout, noise=ELEV_ROUNDING_NOISE_M, G=None):
                 out.append((lo - hi, "pinned", s.role, x, y, e, lo, hi))
             elif e > hi + noise:
                 out.append((e - hi, "ceil", s.role, x, y, e, lo, hi))
-            elif e < lo - noise:
+            else:  # e < lo - noise
                 out.append((lo - e, "floor", s.role, x, y, e, lo, hi))
     out.sort(reverse=True, key=lambda t: t[0])
     return out

@@ -33,10 +33,31 @@ import os
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from .config import SERVICE_ROAD_MAX_GRADE
+from .config import (
+    BUILDING_FULL_FRONTAGE, BUILDING_FULL_FRONTAGE_AREA_M2,
+    SERVICE_ROAD_MAX_GRADE)
 
 # ── Law constants (the adjustable knobs of the law) ──────────────────────────
 APRON_ROLE = "apron"
+
+
+def building_requires_full_frontage(area_m2: float) -> bool:
+    """THE canonical building-size reach rule (single source for seater AND
+    checker).  A building at/above ``BUILDING_FULL_FRONTAGE_AREA_M2`` must have
+    its ENTIRE apron-facing frontage reachable from the taxi route within grade
+    (a terminal maneuvers along its whole face).  A SMALLER building need only
+    reach the spine at its central chord — it is seated at that level and acts as
+    a LOCAL reach ANCHOR: its non-central frontage and the apron stepping up to
+    it within the apron cap grade FROM the pad, not from the runway route, so
+    those points are not runway-reach-constrained.  Honours the
+    ``BUILDING_FULL_FRONTAGE`` gate (off ⇒ all buildings use the central-chord
+    rule, the pre-2026-06-27 model).
+
+    Consumed by ``route_profile.anchors.build_building_seats`` (which frontage to
+    seat at) and ``grade_graph_validate.route_band_violations`` (small pads are
+    local anchors; large frontages stay route-reach-checked) — so the level we
+    BUILD a building at and the reach we CHECK it against come from one rule."""
+    return bool(BUILDING_FULL_FRONTAGE) and area_m2 >= BUILDING_FULL_FRONTAGE_AREA_M2
 
 # Pairs closer than this are ring/relative noise — not a grade constraint.
 MIN_PAIR_DIST_M = 0.5

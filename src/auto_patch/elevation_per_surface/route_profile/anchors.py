@@ -103,11 +103,7 @@ def build_building_seats(layout, bucket_to_idx, band, dem_fn, runway_pts):
     # 2026-06-27): the entire frontage must grade to the spine ≤1 %, so the seat is
     # the band intersected over the whole frontage (computed by
     # ``building_feasible_levels``), not the single lowest-ceiling frontage edge.
-    from auto_patch.config import (
-        BUILDING_FULL_FRONTAGE, BUILDING_FULL_FRONTAGE_AREA_M2)
-    _full_frontage = (BUILDING_FULL_FRONTAGE
-                      and _os.environ.get(
-                          "O4_BUILDING_FULL_FRONTAGE", "1") == "1")
+    from auto_patch.grade_law import building_requires_full_frontage
     apron_keys: set = set()
     if _frontage:
         for a in layout.shapes:
@@ -151,7 +147,7 @@ def build_building_seats(layout, bucket_to_idx, band, dem_fn, runway_pts):
             continue
         ring = _open_ring(list(s.polygon.exterior.coords))
         de = dem_fn(s.polygon.centroid.x, s.polygon.centroid.y)
-        if _full_frontage and s.polygon.area >= BUILDING_FULL_FRONTAGE_AREA_M2:
+        if building_requires_full_frontage(s.polygon.area):
             # ``lv`` IS the full-frontage feasible level for a large building.
             level = float(lv)
         else:
