@@ -3245,54 +3245,11 @@ def _report_within_shape_violations(
                           f"({ea:.1f} → {eb:.1f}, d={d:.1f}m, de={de:.1f}m)")
         except _GEOM_EXC:
             pass
-    # ROUTE-FIELD long-range law (the window's counterpart) — the SAME engine
-    # the validator runs (auto_patch.route_field), so this WARN reports the
-    # count the gate would assert.
-    if ROUTE_FIELD_MODEL and _rf_runway_rings and _rf_check_pts:
-        try:
-            from .route_field import route_band_violations
-            centerlines_xy = [
-                list(ln.coords)
-                for ln, _nm in (getattr(layout, "apt_taxi_centerlines", [])
-                                or [])
-                if ln is not None and not ln.is_empty]
-            # (s78 measured: field VALUES as extra anchors were rejected —
-            # see verification.route_ctx_from_layout; the WARN mirrors
-            # check_grade exactly, so neither passes field_pts)
-            rbvs = route_band_violations(
-                centerlines_xy, _rf_runway_rings, _rf_check_pts,
-                TAXI_MAX_GRADE, noise_frac=ROUTE_NOISE_FRAC,
-                rounding_noise_m=ELEV_ROUNDING_NOISE_M)
-        except _GEOM_EXC:
-            rbvs = []
-        except ImportError:
-            rbvs = []
-        if rbvs:
-            try:
-                per_shape_rb: dict[int, tuple] = {}
-                for rb in rbvs:
-                    s_idx, role, ref = _rf_check_src[rb.index]
-                    prev = per_shape_rb.get(s_idx)
-                    if prev is None or rb.excess_m > prev[0]:
-                        per_shape_rb[s_idx] = (
-                            rb.excess_m, role, ref, rb.elev,
-                            rb.anchor_elev, rb.route_d_m)
-                UI.vprint(1,
-                          f"  [pav-builder] WARN: {icao}: {len(rbvs)} "
-                          f"ROUTE-BAND violation(s) (runway-anchor "
-                          f"route-distance law, margin "
-                          f"{ROUTE_NOISE_FRAC * 100:.0f}% — matches "
-                          f"tools/check_grade.py) across "
-                          f"{len(per_shape_rb)} shape(s).")
-                for s_idx, (ex, role, ref, ev, ae, rd) in sorted(
-                        per_shape_rb.items(), key=lambda kv: -kv[1][0])[:8]:
-                    rstr = f"/{ref}" if ref else ""
-                    UI.vprint(1,
-                              f"  [pav-builder]   route-band +{ex:.2f}m on "
-                              f"{role}{rstr} [#{s_idx}] (v={ev:.1f} vs "
-                              f"anchor {ae:.1f} @ route {rd:.0f}m)")
-            except _GEOM_EXC:
-                pass
+    # ROUTE-BAND WARN: RETIRED with route_field (the parallel per-vertex band
+    # on a separate centerline graph).  The route-band rule is confirmed
+    # on the ONE graph G; see docs/grade_law_consolidation_handover.md.
+
+
 
 
 WITHIN_SHAPE_VIOLATION_RADIUS_M = 60.0   # spatial-pair edge radius for the
