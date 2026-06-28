@@ -33,10 +33,10 @@ them.  This module owns the apron/junction visibility graph only.
 from __future__ import annotations
 
 import math
-import os
 from dataclasses import dataclass, field
 from typing import Callable, Hashable, Optional, Sequence
 
+from . import grade_law as GL
 from .config import (
     APRON_BACK_EDGE_GRADE,
     APRON_MAX_GRADE,
@@ -59,16 +59,11 @@ SOFT_VISIBILITY_ROLES = (APRON_ROLE,) + JUNCTION_ROLES
 # line, so this is tight (it only has to absorb float/round noise, not width).
 SPINE_PERP_TOL_M = 1.0
 
-# Pairs closer than this are ring/relative noise — not a grade constraint.
-_MIN_PAIR_DIST_M = 0.5
-
-# Max length of an APRON interior body↔body grade chord (user 2026-06-26): beyond
-# this, a chord across a wide apron is not a real grade path (the grade reference
-# is each point's DIRECT chord to its spine), so it is dropped to decouple the
-# building frontages from the route-maxed-low far interior.  Ring-adjacent, spine,
-# building-frontage and seam chords are NEVER dropped by this.  0 = unlimited (the
-# legacy all-pairs behaviour).  ``O4_APRON_BODY_CHORD_MAX_M`` overrides.
-_APRON_BODY_CHORD_MAX_M = float(os.environ.get("O4_APRON_BODY_CHORD_MAX_M", "60"))
+# The per-pair eligibility/cap decision (min-pair-dist, apron body-chord max,
+# seam/building/spine/visibility skips, cap selection) is THE LAW — it lives in
+# ``grade_law`` so the solver and the grade test share one source.  This module
+# is the solver-side reader: it builds a ``grade_law.PairContext`` per pair and
+# calls ``grade_law.classify_pair``.
 
 
 @dataclass
@@ -435,6 +430,15 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
             and ctx.centerlines and body_cap < TAXI_MAX_GRADE):
         near = [_nearest_centerline(x, y, ctx) for (x, y) in ring]
 
+    # Build the representation-agnostic PairContext for each pair and apply THE
+    # LAW (``grade_law.classify_pair``).  The expensive visibility / spine-cross
+    # predicates and the apron blend cap are passed as thunks so the law evaluates
+    # them lazily (only for pairs surviving the cheap skips) — the same
+    # short-circuiting the legacy in-line loop had.  ``classify_pair`` returns an
+    # ``Allowance``; every current rule is isotropic, so ``flat_cap()`` recovers
+    # the legacy scalar ``(key_a, key_b, cap)`` edge exactly.  The per-edge spine
+    # cap (a taxi route keeps its own per-letter cap inside a junction) and the
+    # per-letter blend are encoded as the ``spine_caps`` / ``blend_cap_fn`` inputs.
     for i in range(n):
         xi, yi = ring[i]
         ki = keys[i]
@@ -444,57 +448,40 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
             kj = keys[j]
             if ki == kj:
                 continue
-            if ki in seam or kj in seam:
-                continue            # seam-anchored endpoint — DEM controls
-            if ki_bld and kj in bld:
-                continue            # inter-pad frontage = building↔building step
             xj, yj = ring[j]
             d = math.hypot(xi - xj, yi - yj)
-            if d < _MIN_PAIR_DIST_M:
-                continue
             ring_adjacent = (j == i + 1) or (i == 0 and j == n - 1)
-            if vis is not None and not ring_adjacent:
-                if not vis(xi, yi, xj, yj):
-                    continue        # chord leaves the pavement — not a path
             mj = membership.get(j)
             shared = (({c for (c, _a) in mi} & {c for (c, _a) in mj})
                       if (mi is not None and mj is not None) else set())
-            spine_pair = bool(shared)
-            if (not spine_pair and not ring_adjacent
-                    and crosses_spine is not None
-                    and crosses_spine(xi, yi, xj, yj)):
-                continue            # path is via the spine, not this diagonal
-            # DECOUPLE LONG APRON BODY CHORDS (user 2026-06-26): across a wide
-            # single-polygon apron over terrain that rises >cap, a long interior
-            # body↔body visibility chord couples the building frontages to the
-            # route-maxed-low interior far away (CYXY: a 178 m chord pinned the
-            # building18↔16 apron edge down to the runway-side 695.9, a "dip down
-            # and rise again").  The real grade reference is each point's DIRECT
-            # chord to its SPINE (graded ≤cap to the local centerline), not to a
-            # distant interior point — so drop interior body↔body chords beyond
-            # ``_APRON_BODY_CHORD_MAX_M`` (keep ring-adjacent + short locals for
-            # smoothness, and ALL spine / building-frontage / seam chords).  The
-            # apron then grades to its spine/buildings/edges and follows the
-            # terrain smoothly between them instead of bowling to a far anchor.
-            if (_APRON_BODY_CHORD_MAX_M and shape.role == APRON_ROLE
-                    and not spine_pair and not ring_adjacent
-                    and not ki_bld and kj not in bld
-                    and d > _APRON_BODY_CHORD_MAX_M):
+            spine_caps = tuple(ctx.centerlines[c].cap for c in shared)
+            kj_bld = kj in bld
+
+            visible_fn = (None if vis is None
+                          else (lambda _a=xi, _b=yi, _c=xj, _d=yj:
+                                vis(_a, _b, _c, _d)))
+            crosses_fn = None
+            if (crosses_spine is not None and not spine_caps
+                    and not ring_adjacent):
+                crosses_fn = (lambda _a=xi, _b=yi, _c=xj, _d=yj:
+                              crosses_spine(_a, _b, _c, _d))
+            blend_fn = None
+            if near is not None:
+                blend_fn = (lambda _a=xi, _b=yi, _c=xj, _d=yj, _ni=near[i],
+                            _nj=near[j], _kb=(ki_bld or kj_bld):
+                            _apron_edge_cap(_a, _b, _c, _d, _ni, _nj,
+                                            body_cap, _kb))
+
+            allow = GL.classify_pair(GL.PairContext(
+                role=shape.role, dist=d, ring_adjacent=ring_adjacent,
+                a_seam=ki in seam, b_seam=kj in seam,
+                a_building=ki_bld, b_building=kj_bld,
+                spine_caps=spine_caps, body_cap=body_cap,
+                visible_fn=visible_fn, crosses_spine_fn=crosses_fn,
+                blend_cap_fn=blend_fn))
+            if allow is None:
                 continue
-            # PER-EDGE spine cap (user 2026-06-24): a taxi route keeps ITS OWN
-            # per-letter cap along its whole length, INCLUDING inside a junction
-            # — a 3% taxiway grades at 3% up to the edge of a 1.5% taxiway it
-            # meets, not at the junction-wide max.  So a spine edge is capped by
-            # the centerline(s) IT lies on (looser of them, mirroring the
-            # seater's per-centerline edge cap), NOT the shape-wide _spine_cap.
-            if spine_pair:
-                cap = max(ctx.centerlines[c].cap for c in shared)
-            elif near is not None:
-                cap = _apron_edge_cap(xi, yi, xj, yj, near[i], near[j],
-                                      body_cap, ki_bld or (kj in bld))
-            else:
-                cap = body_cap
-            sc.edges.append((ki, kj, cap))
+            sc.edges.append((ki, kj, allow.flat_cap()))
 
     sc.spine_chains = _build_spine_chains(shape, ctx, membership)
     return sc
