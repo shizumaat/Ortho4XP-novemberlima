@@ -26,10 +26,9 @@ Design:
     orphaned component writes drift — the 25 %-walls class).
   * Deterministic: vertices sorted, no set/dict order leaks.
 
-Shared by the solver (``elevation_per_surface/unified_jacobi``), the
-field (``network_profile``) and the validator (``tools/check_grade``)
-— ONE measure, so law-graph parity holds by construction (the s78p5 /
-s79 partial-application failure mode).
+Shared by the solver (``elevation_per_surface``) and the validator
+(``tools/check_grade``) — ONE measure, so law-graph parity holds by
+construction (the s78p5 / s79 partial-application failure mode).
 """
 from __future__ import annotations
 
@@ -45,11 +44,11 @@ from shapely.prepared import prep
 _GEOM_EXC = (ValueError, TypeError, GEOSException, TopologicalError)
 
 # The airside-pavement role set the measure's union is built from —
-# ONE canonical list (string form) so the SOLVER (unified_jacobi
-# ``_interior_entry_dist``) and the VALIDATOR (tools/check_grade) build
-# the SAME geometry: mirrors ``unified_jacobi.PAVEMENT_ROLES``
-# (runway + sloping rects incl. service_road + apron/terminal/junction
-# families).  Groundside / boundary / clearance are NOT pavement for
+# ONE canonical list (string form) so the SOLVER and the VALIDATOR
+# (tools/check_grade) build the SAME geometry: mirrors the solver
+# primitives' ``PAVEMENT_ROLES`` (runway + sloping rects incl.
+# service_road + apron/terminal/junction families).  Groundside /
+# boundary / clearance are NOT pavement for
 # the law — a path through them is not an airside surface connection.
 AIRSIDE_MEASURE_ROLES = frozenset((
     "runway", "runway_crossing",

@@ -15,10 +15,12 @@ every connected vertex.  This violates the per-axis FAA grade rule:
 * Only CIFP runway corners are immutable HARD anchors — terminals,
   aprons, and taxi rects can all adjust.
 
-The implementation lives in ``unified_jacobi`` as a single damped
-Jacobi solver with role-aware edge generation (rects ring-only;
-junctions / aprons / terminals ring + all-pair Euclidean).  See
-``docs/elevation_solver.md`` for the full design.
+The implementation lives in the ``route_profile`` package
+(``solve_route_profile``) — one elevation profile solved on the single
+unified grade graph — with the elevation-neutral primitives (node list,
+DEM seed/sample, within-shape constraint + level-coupling graph, runway
+node/edge sets, writeback) in ``solver_primitives``.  See
+``docs/elevation_solver.md`` and ``docs/one_profile_solve.md``.
 """
 from .solver import solve
 

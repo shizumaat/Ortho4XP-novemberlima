@@ -1,0 +1,1718 @@
+"""Elevation-neutral solver PRIMITIVES (extracted from the former
+unified_jacobi cascade, M2 cleanup 2026-06-27).  Node list, DEM seed/
+sample, within-shape constraint + level-coupling graph, runway node/edge
+sets, writeback, report.  The legacy multi-pass solve() cascade was
+deleted; route_profile.solve_route_profile is the only solver.
+See docs/cleanup_consolidation_plan.md (M2).
+"""
+from __future__ import annotations
+
+import heapq
+import math
+import os as _os
+import time as _time
+from collections import deque
+
+from shapely.errors import GEOSException, TopologicalError
+
+from auto_patch.config import (
+    APRON_BACK_EDGE_GRADE, APRON_BACK_EDGE_RAMPS,
+    W2_CLEAN_BANDS,
+    APRON_CORRIDOR_GEODESIC, APRON_CORRIDOR_SEED_RADIUS_M,
+    APRON_CORRIDOR_SMOOTH_GRADE, APRON_CORRIDOR_SMOOTH_RADIUS_M,
+    NETWORK_PROFILE_MODEL, ROLE_GRADE_LIMITS, ROUTE_FIELD_LOCAL_WINDOW_M,
+    ROUTE_FIELD_MODEL, ROUTE_NOISE_FRAC, RUNWAY_END_FRACTION,
+    SEAM_FIELD_ANCHORS, SPREAD_APRON_GRADE, SEAM_APRON_COMPLEX_POLISH,
+    RUNWAY_END_GRADE, RUNWAY_MAX_GRADE, SURFACE_FAIRING,
+    SURFACE_FAIRING_MAX_MOVE_M, TAXI_CORRIDOR_PROFILE,
+    TAXI_SLACK_TERMINALS,
+    TAXIWAY_MAX_GRADE_CHANGE_PER_M, TERMINAL_LEAF_LEVELS,
+    TERMINAL_CHORD_MAX_GRADE, TERMINAL_CHORD_REACH_M,
+    TERMINAL_NATURAL_LEVELS, BUILDING_DEM_ANCHOR, APRON_FEASIBLE_LIFT,
+    TERMINAL_PADS_SLOPE, WRITE_ARBITRATION)
+from auto_patch.elevation import (
+    APRON_MAX_GRADE, SERVICE_ROAD_MAX_GRADE, TAXI_MAX_GRADE)
+from auto_patch.config import (
+    taxi_grade_cap_for_letter, TAXI_MAX_GRADE_NARROW, JUNCTION_NARROW_GRADE,
+    CORRIDOR_SPINE_CHAINS, FIELD_TARGET_CONFORMANCE, BUILDING_ROUTE_FEASIBILITY,
+    MIN_GRADE_NETWORK, SINGLE_GRADE_GRAPH)
+from auto_patch.layout import (
+    ROLE_APRON, ROLE_BOUNDARY, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
+    ROLE_PRIMARY_PARALLEL, ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
+    ROLE_SECONDARY_PARALLEL, ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION,
+    ROLE_STUB, ROLE_BUILDING, taxi_shape_code_letter,
+)
+
+# Narrow exception tuple for shapely / numeric-geometry failure
+# modes.  Programming errors propagate so they surface immediately.
+_GEOM_EXC = (ValueError, GEOSException, TopologicalError)
+
+# FIELD_TARGET_CONFORMANCE (plan P4/P5): max field-sample gap (m) at which a
+# node still adopts the field value as its lift target.  Beyond this the field
+# (defined on the centerline graph) is too far to be a reliable target — a
+# deep-apron interior keeps its seed.  ~one apron-width; arm-served buildings
+# sample their serving arm well within this.
+
+
+SLOPING_RECT_ROLES = (
+    ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
+    ROLE_STUB, ROLE_CROSS_CONNECTOR,
+    # Ground-vehicle service roads grade along their axis like a taxiway
+    # (ring-only + flat cross-section), but at 4% — see _role_grade.
+    ROLE_SERVICE_ROAD,
+)
+
+# Taxi rects that FOLLOW THE SPINE PROFILE (the aircraft taxiways) — service
+# roads are excluded (not taxi spines; their own role/grade).
+
+PAVEMENT_ROLES = {
+    ROLE_RUNWAY, *SLOPING_RECT_ROLES,
+    ROLE_APRON, ROLE_BUILDING, ROLE_JUNCTION,
+    # Service-road network junction: all-pair grading branch at 4%
+    # (not a sloping rect — irregular fill polygon at bends/intersections).
+    ROLE_SERVICE_JUNCTION,
+    # Per user 2026-05-18: runway-crossing junctions carry runway-
+    # interpolated ``node_altitudes`` from
+    # ``_resolve_runway_crossings``.  Treat them as HARD-anchored
+    # ring-only edges (same path as ``ROLE_RUNWAY``) so the solver
+    # doesn't reshape elevations that the runway-interpolation
+    # already established.
+    ROLE_RUNWAY_CROSSING,
+}
+
+
+# ── Priority cascade (user 2026-05-22) ───────────────────────────
+# The solver runs as an ordered cascade rather than one simultaneous
+# relaxation: seam + runway corners are the immutable HARD anchors,
+# then each lower tier is solved against the FROZEN tier above it.
+# Grade is sacred at every tier; the cascade order decides who yields
+# to preserve it.
+#
+#   seam / runway  (HARD)
+#     → TAXI network (rects + junctions): graded between the runway /
+#       seam intersections it touches, closest to DEM within the
+#       taxiway grade cap.  This is the "grade the taxi network like
+#       the runway" step — its anchors are the shared runway/seam
+#       nodes (already HARD-seeded); everything between follows terrain
+#       clamped to grade, dipping below / rising above only as needed
+#       to span the anchors.
+#     → APRONS: the taxi network is now frozen; each apron adjusts (as
+#       a whole, within apron grade) to meet its taxiways at the
+#       shared boundary nodes.
+#     → TERMINALS: aprons frozen; the flat terminal floor adjusts to
+#       connect to its aprons within grade.
+#
+# Why phased (not simultaneous): a single relaxation is a tug-of-war —
+# an apron held at DEM by its own attraction pins a taxiway it borders,
+# forcing the taxiway over-grade (SPLP junction -10025).  Freezing the
+# higher tier and letting the lower tier yield removes that conflict.
+#
+# Priority cascade INVERTED (user 2026-05-23): solve from the TERMINAL
+# outward to the runway, not the runway inward.  Aircraft park at the
+# terminal (which must stay flat) and must be able to taxi to every
+# runway within grade, so the terminal is the anchor and the runway
+# yields last.  Order of authority (solved first, frozen for the rest):
+#   seam / runway-CIFP (HARD) > TERMINAL (flat, DEM-mean) > APRON > TAXI.
+# A node's OWNER tier = the highest-priority role among the shapes that
+# use it (TERMINAL > APRON > TAXI); a node shared by a terminal and an
+# apron is terminal-owned, so the apron yields to the flat terminal floor
+# (this is what keeps the terminal whole-flat with aprons matching 1:1 —
+# no separate post-flatten needed).  A taxiway/apron node is apron-owned.
+# Lower tiers couple to frozen higher tiers through these shared HARD
+# nodes, NOT through cross-tier edges — so each phase uses only its own
+# tier's edges.  (Runway is still base-HARD here; making it yield as the
+# last resort is a separate step.)
+
+
+# Per-axis junction grading (user 2026-05-22).  When True, junction grade
+# constraints are LONGITUDINAL (along each converging centerline) + ring only;
+# the unregulated inter-centerline DIAGONAL is dropped (the all-pair Euclidean
+# cap is stricter than ICAO/EASA require and forbids junctions that
+# legitimately slope along routes over real terrain, e.g. SPLP -10025).  Pairs
+# with the audit (check_grade) which must also go per-axis or it will flag the
+# diagonals this allows.  The audit goes per-axis whenever this flag is True
+# (the grade test passes ``taxi_axes_ll`` gated on this flag), so they stay
+# coupled.  ALSO drives the apron taxilane model (session 47): when True,
+# aprons collect the apt.dat taxilane axes crossing them so along-lane pairs
+# grade along the (looser) arc — directional relief inside aprons — while the
+# general apron BODY (pairs off any lane) keeps its all-pair Euclidean cap.
+# Per-axis junction grading (user 2026-06-10 ruling): the 1.5 % cap
+# applies along the taxi CENTERLINE; a curved junction's cross-axis
+# diagonal chords are an unregulated direction (ICAO Annex 14 §3.9 /
+# EASA CS-ADR-DSN.D.265/.280 regulate longitudinal-along-route +
+# transverse) and the inside-of-curve edge legitimately exceeds the cap
+# for the centerline to carry it.  All-pair chords had pinned high-speed
+# exit junctions flat (HECA #282/#283 could not rise toward A4/A5) and
+# blocked smooth blends through turning junctions (#291: 75's axis
+# bending into 95's).  check_grade mirrors via ``taxi_axes_ll``.
+_PER_AXIS_JUNCTIONS = True
+
+# Runway-flex third pass (user 2026-05-28).  The runway's elevation profile is
+# DERIVED from the DEM (interpolated between CIFP threshold anchors); the DEM is
+# the least-accurate part of the equation.  When a junction/stub cannot reach
+# grade because it is wedged between a soft apron and a runway-anchored node
+# that the DEM dipped/bulged (CYXY 14R/32L dips ~3 m to 691.4 around the 02/20
+# intersection, forcing stub A to 8.9 %), the impossible connection has nowhere
+# to go because EVERY runway node is HARD.  This pass keeps the real-world CIFP
+# THRESHOLD endpoints hard but lets the runway's INTERIOR nodes flex within the
+# runway grade cap, so the dip can rise toward the junction and the gap spreads
+# over the runway's length instead of concentrating on the short connector.
+# Only fires when a residual within-shape violation remains after the reverse
+# pass (the impossible-connection signature) AND only commits if it strictly
+# reduces the worst violation — so airports whose runway anchor is correct are
+# untouched.  Makes the surface MORE faithful: CIFP thresholds are ground
+# truth, pavement is known to exist and be gradeable, the DEM is the guess.
+# Seam-level threshold-yield: the band solve tilts the runway through the hard
+# seam, which can leave a residual vertical-curve kink at the seam crossing
+# (eliminating it needs the seam's runway node anchored in the FAA smooth — a
+# follow-up).  Allow this many marginal kinks so a grade-compliant seam yield
+# still commits instead of leaving the runway grade-violating.
+
+# DEM attraction (user 2026-05-22): each iteration, pull every SOFT node a
+# fixed fraction of the way toward its terrain (DEM) elevation, THEN
+# cap-project.  This makes soft pavement settle "as close to DEM as the
+# grade caps allow" — the documented intent ("reach the highs and lows in
+# DEM that are possible within grade limits").  Without it,
+# cap-projection-only never RAISES a node that warm-started low (a prior
+# pass's value) back toward terrain, so a taxiway/apron network spanning
+# low terminals and high runways sinks several metres below its own
+# terrain (HECA T4 / taxiway T cliff: stub T4 sat 7 m below runway 05C/23C
+# because the genuinely-low south terminals drained the connected network
+# via cap-chains).
+#
+# The pull is PERSISTENT (no decay): the equilibrium balances the DEM
+# spring against the per-edge caps, so each node ends as close to DEM as
+# its caps permit and the low terminals no longer diffuse across the whole
+# field.  Convergence is still clean — a node free to reach DEM converges
+# geometrically (rate ``1 − DEM_ATTRACTION``); a cap-pinned node settles
+# where the spring pull and the cap push-back cancel (net per-iter change
+# → 0).  A DECAYING weight was tried first and FAILED: once it decayed the
+# pure-cap tail relaxed the network back to the low-terminal compromise
+# (HECA below-DEM unchanged).
+
+# Asymmetric DEM attraction (user 2026-05-22): grade > DEM, and a soft
+# node must NOT be dragged BELOW its terrain unless grade toward a HARD
+# anchor genuinely requires it.  A node sitting below its DEM was almost
+# always pulled there by a cap-chain to a low connected shape (SPLP
+# junction (4,503): every vertex 0.5-1.4 m below terrain, dragged by a
+# taxiway descending to 64 m — even though the local terrain is flat ~72
+# and a flat junction/stub would be grade-compliant).  So pull UP toward
+# terrain STRONGLY (restore it); pull DOWN gently.  Grade still wins: the
+# cap-projection runs AFTER this each iteration, so a node that truly
+# must sit below DEM to stay within grade of a lower HARD anchor is
+# pushed back down (the spring just sets the target, the cap has the last
+# word).
+
+
+def _role_grade(role: str) -> float:
+    """Per-role max grade cap — the SINGLE source of truth is
+    ``config.ROLE_GRADE_LIMITS`` (taxiway-family + runway + junction 1.5 %;
+    aprons 1.5 %; service roads 4 %; terminals = ``TERMINAL_MAX_GRADE``,
+    0 = flat by default).  A ``None`` entry (boundary / retaining wall — no
+    grade enforcement) maps to ``+inf`` so any pair passes; an unknown role
+    falls back to the taxiway cap.  A cap of 0 is the FLAT signal (terminals
+    by default) — the solver routes a 0-cap shape through the rigid flat-pad
+    path instead of grading it."""
+    cap = ROLE_GRADE_LIMITS.get(role, TAXI_MAX_GRADE)
+    return float("inf") if cap is None else float(cap)
+
+
+def _shape_grade(layout, s) -> float:
+    """Per-SHAPE max grade cap.  Identical to :func:`_role_grade` for every
+    role EXCEPT the sized taxiway-family rects: when the
+    ``TAXI_GRADE_BY_WIDTH`` gate is on, a narrow taxiway (ICAO code A/B,
+    width < 15 m) earns the steeper ``TAXI_MAX_GRADE_NARROW`` (3 %) cap
+    instead of the uniform 1.5 % — ICAO Annex 14 §3.9.3.  The width class
+    comes from :func:`taxi_shape_code_letter` (apt.dat letter, else measured
+    rect width); gate off / non-taxiway roles fall straight back to the
+    role cap, so the solver stays byte-identical to the uniform baseline."""
+    letter = taxi_shape_code_letter(layout, s)
+    if letter is not None:
+        return float(taxi_grade_cap_for_letter(letter))
+    return _role_grade(s.role)
+
+
+def _open_ring(coords) -> list[tuple[float, float]]:
+    if coords and coords[0] == coords[-1]:
+        return list(coords[:-1])
+    return list(coords)
+
+
+
+
+# Relief iteration budget — umbrella ceiling for the within-bands convergence.
+
+
+
+
+
+
+def _corridor_segments(layout, split: bool = False,
+                       include_roads: bool = True):
+    """Taxi-corridor polyline segments: apt.dat/OSM taxi centerlines PLUS
+    every taxi rect's ``source_axis`` (discovered taxiways carry no apt.dat
+    row; CYXY's TX1 apron is served only by discovered rects).
+    ``split=True`` returns ``(apt_segs, axis_segs)`` — the network-profile
+    graph needs the provenance (apt rows are the route-graph plain set;
+    axis nodes enter it across straight gaps, the law's anchor-entry
+    mechanic).  ``include_roads=False`` drops the ground-vehicle SVC
+    centerlines (s79 Step D): an APRON must never bind to a road's
+    profile — the road descends at 4 % toward terrain and is
+    wall-separated; corridor-seeding aprons from it split the apron
+    into two write families (HECA #266: 98 vs 102.7, 30 violations).
+    Rect source AXES already exclude ROLE_SERVICE_ROAD."""
+    apt_segs: list = []
+    for entry in (getattr(layout, "apt_taxi_centerlines", None) or []):
+        ls = entry[0] if isinstance(entry, (tuple, list)) else entry
+        if (not include_roads and isinstance(entry, (tuple, list))
+                and len(entry) > 1 and str(entry[1]).startswith("SVC")):
+            continue
+        try:
+            cs = list(ls.coords)
+        except (AttributeError, TypeError):
+            continue
+        apt_segs.extend(zip(cs, cs[1:]))
+    axis_segs: list = []
+    for s in layout.shapes:
+        if s.role not in SLOPING_RECT_ROLES or s.role == ROLE_SERVICE_ROAD:
+            continue
+        ax = getattr(s, "source_axis", None)
+        if ax is None or ax.is_empty:
+            continue
+        try:
+            cs = list(ax.coords)
+        except (AttributeError, TypeError):
+            continue
+        axis_segs.extend(zip(cs, cs[1:]))
+    if split:
+        return apt_segs, axis_segs
+    return apt_segs + axis_segs
+
+
+def _seg_grid(segs, cell):
+    """Coarse spatial index over polyline segments (query = 3×3 cells)."""
+    grid: dict = {}
+    for k, ((ax, ay), (bx, by)) in enumerate(segs):
+        for gx in range(int(min(ax, bx) // cell),
+                        int(max(ax, bx) // cell) + 1):
+            for gy in range(int(min(ay, by) // cell),
+                            int(max(ay, by) // cell) + 1):
+                grid.setdefault((gx, gy), []).append(k)
+    return grid
+
+
+def _corridor_point_nearest(x, y, segs, grid, cell):
+    """Nearest corridor point over the 3×3 grid neighbourhood: returns
+    ``(distance, px, py)`` (exact for distances ≤ cell; beyond that
+    ``(+inf, x, y)``)."""
+    gx0, gy0 = int(x // cell), int(y // cell)
+    best = float("inf")
+    bx0, by0 = x, y
+    for dgx in (-1, 0, 1):
+        for dgy in (-1, 0, 1):
+            for k in grid.get((gx0 + dgx, gy0 + dgy), ()):
+                (ax, ay), (bx, by) = segs[k]
+                dx, dy = bx - ax, by - ay
+                s2 = dx * dx + dy * dy
+                if s2 < 1e-12:
+                    continue
+                t = ((x - ax) * dx + (y - ay) * dy) / s2
+                t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+                px, py = ax + t * dx, ay + t * dy
+                d = math.hypot(x - px, y - py)
+                if d < best:
+                    best, bx0, by0 = d, px, py
+    return best, bx0, by0
+
+
+def _corridor_point_distance(x, y, segs, grid, cell):
+    """Min point→segment distance (see ``_corridor_point_nearest``)."""
+    return _corridor_point_nearest(x, y, segs, grid, cell)[0]
+
+
+
+
+
+
+def _apron_back_band_nodes(layout, bucket_to_idx):
+    """Back-band = the BUILDING-FACING apron (user 2026-06-14, Phase B): every
+    apron vertex that is CLOSER to a building frontage than to a taxi corridor.
+    docs/apron_terminal_attraction_plan.md.
+
+    This covers ALL apron around a building — the frontage, the gaps BETWEEN
+    buildings, AND the hill-cut side (the convex-hull-pair definition missed the
+    hill side, which is where HECA terminal9's residual sat).  The taxi-facing
+    apron (closer to a corridor) stays out of the band and keeps its 1 % tie to
+    the taxiway, so "the majority of the apron stays at 1 %".  Back-band edges
+    grade to ``APRON_BACK_EDGE_GRADE`` (4 %) and the back band is governed by
+    the wider runway-route band (see the enforce), so it can RISE to meet the
+    flat terminals.
+
+    Returns a set of global node indices (empty when the gate is off / no
+    buildings)."""
+    if not APRON_BACK_EDGE_RAMPS or TAXI_SLACK_TERMINALS:
+        # TAXI-SLACK supersedes back-edge ramps: there is NO relaxed back band
+        # (the apron never grades at 4%).  Every apron vert is plane-attracted
+        # to the FLEXED corridor plane and capped at the 1.5% law / 1% pref —
+        # the corridors took the steepness, so the apron stays in grade.
+        return set()
+    cano = layout.canonical_points
+
+    def _gidx(x, y):
+        return bucket_to_idx.get(cano.get_or_add(float(x), float(y)))
+
+    bld_polys = [s.polygon for s in layout.shapes
+                 if s.role == ROLE_BUILDING and s.polygon is not None
+                 and not s.polygon.is_empty]
+    apron_xy: dict = {}
+    for s in layout.shapes:
+        if s.role != ROLE_APRON or s.polygon is None or s.polygon.is_empty:
+            continue
+        for x, y in s.polygon.exterior.coords:
+            i = _gidx(x, y)
+            if i is not None:
+                apron_xy[i] = (float(x), float(y))
+    if not bld_polys or not apron_xy:
+        return set()
+    try:
+        from shapely.geometry import Point as _BPt
+        from shapely.ops import unary_union as _bunion
+    except Exception:                                  # pragma: no cover
+        return set()
+    bld_union = _bunion(bld_polys)
+    segs = _corridor_segments(layout, include_roads=False)
+    # Exact taxi-corridor distance up to a generous cell (beyond it the node is
+    # far from every taxiway, so building-facing by default).
+    far = 1000.0
+    grid = _seg_grid(segs, far) if segs else None
+    band: set = set()
+    for i, (x, y) in apron_xy.items():
+        d_bld = bld_union.distance(_BPt(x, y))
+        d_taxi = (_corridor_point_distance(x, y, segs, grid, far)
+                  if grid is not None else float("inf"))
+        if d_bld < d_taxi:
+            band.add(i)
+    if _os.environ.get("O4_TERM_DEBUG") == "1":
+        print(f"[backband] apron_idx={len(apron_xy)} "
+              f"buildings={len(bld_polys)} building_facing_band={len(band)}")
+    return band
+
+
+# Taxi-rect vertices always seed the geodesic corridor field (the rect IS
+# the corridor surface); their transverse offset to the axis is bounded by
+# the half-width — beyond this something is wrong, don't seed.
+
+# APRON_BACK_EDGE_RAMPS: max centroid separation for a building PAIR to define
+# an inter-terminal corridor (the apron between them may grade at 4 %).  Bounds
+# the pairwise convex hulls to genuinely-adjacent terminals.
+
+# APRON_BACK_EDGE_RAMPS: two flat pads closer than this that can't both be flat
+# at their own levels co-level DOWN to the lower neighbour (the larger yields)
+# instead of both sloping — buildings sharing an apron frontage should sit at
+# one level, the apron grading to meet the lowered end.
+
+# TAXI_SLACK_TERMINALS: max min-vertex gap for two terminals to be candidates
+# for one shared (co-levelled) cluster.  Within this reach they share apron
+# frontage and CAN be considered for co-levelling, BUT they only actually merge
+# when the apron between them cannot bridge their independent balanced levels at
+# <= the apron grade (|ΔL| > apron_grade * gap).  A string of buildings spaced
+# along a long corridor whose levels step gently (apron <= 1.5%) therefore stays
+# INDEPENDENT and the apron slopes between them — only buildings whose level gap
+# the apron can't span share one level.
+
+# APRON_BACK_EDGE_RAMPS: max law-window INVERSION (metres) for which a terminal
+# still flattens (at the inverted-window midpoint) instead of sloping — a mild
+# serving-corridor conflict the user wants flat; larger conflicts slope.
+
+# APRON_BACK_EDGE_RAMPS: max summed apron-excess (metres) a flatten may ADD and
+# still be accepted — lets the apron grade to MEET a flat pad with marginal
+# over-cap residual instead of reverting the pad to a slope; genuinely-
+# infeasible pads (metres of free-apron excess) still exceed it and slope.
+
+# Max move for the write-arbitration soft-terminus projection (the p10d
+# J-tail lesson: an unbounded terminus move manufactures walls elsewhere).
+
+# Max move for the terminal LEAF re-level toward the adjacent-apron median
+# (bounded so one badly-pinned apron region cannot relocate a whole pad).
+
+
+
+
+
+
+
+
+
+
+# Difference-constraint within-shape enforcement budget.  The Dijkstra bands
+# (``_grade_bands``) do the heavy lifting directly (O(E·log V), ~6 ms — the
+# shortest cap-path IS the fully-propagated hard-anchor constraint, no iteration);
+# the band-clamp then applies it, and the residual soft↔soft projection converges
+# to its floor in ~1–2 k sweeps (it plateaus — more does nothing).  Anything left
+# at the plateau is structural / anchor-pinned and only an anchor flex can fix it.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def _runway_node_set(layout, bucket_to_idx) -> set:
+    """Return the set of node indices that belong to a runway / runway-
+    crossing shape.  These are the BFS seeds for ``elevation_priority``
+    (priority 1 = touches a runway).  Seam-anchored apron vertices are
+    HARD but NOT runway, so they are excluded — an apron's priority
+    should be hops from the runway, not from a seam."""
+    out: set = set()
+    for s in layout.shapes:
+        if s.role not in (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING):
+            continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        try:
+            coords = _open_ring(list(s.polygon.exterior.coords))
+        except _GEOM_EXC:
+            continue
+        for x, y in coords:
+            k = layout.canonical_points.get_or_add(float(x), float(y))
+            if k in bucket_to_idx:
+                out.add(bucket_to_idx[k])
+    return out
+
+
+
+
+
+
+# Tolerance buffer for the in-pavement visibility test: a chord is "visible"
+# (a real grade constraint) if it stays within the polygon grown by this margin.
+# Absorbs polygon-edge-coincident chords + float noise; far smaller than any real
+# apron void, so it never bridges a genuine gap between pavement arms.
+_GRADE_VISIBILITY_BUFFER_M = 1.0
+
+
+def _visible_grade_edges(coords, idx, cap, polygon, container=None,
+                         max_len=None):
+    """All-pair grade edges restricted to MUTUALLY-VISIBLE vertices — the chord
+    between the two vertices stays inside ``polygon`` (grown by
+    ``_GRADE_VISIBILITY_BUFFER_M``).  This is the in-pavement visibility graph:
+    the band Dijkstra over these edges yields the true geodesic distance, so a
+    non-convex apron's far ends are correctly far apart instead of joined by a
+    Euclidean chord that cuts across non-pavement.  Falls back to plain all-pair
+    if the geometry op fails (degenerate/invalid polygon).
+
+    ``container``: optional PREPARED geometry to test chords against instead
+    of the shape's own buffered polygon.  Junctions pass the airside-pavement
+    UNION: a chord that leaves the junction across a NEIGHBOUR's pavement is a
+    physically real grade path (the s73 #192 lesson — dropping it let the
+    junction step 0.66 m off the rect edge it hugs), while a chord across a
+    true void (grass between arms) stays excluded.
+
+    ``max_len`` (the ROUTE-FIELD LOCAL WINDOW, user-approved s73-p3 #3):
+    visibility chords are a LOCAL smoothness law only — pairs farther apart
+    than this are NOT graded against each other; the long-range law is the
+    taxi-route band (``_runway_reach_bands``).  km-scale chords (and chains
+    of them across shared nodes) systematically UNDER-measure the real taxi
+    route and manufacture infeasibility (HECA s73-p10g: 2.5 km chord chain
+    vs 3.08 km route = 8.5 m false demand).  RING-ADJACENT pairs always
+    survive regardless of length — the physical edge X-Plane lerps."""
+    from shapely.geometry import LineString
+    m = len(idx)
+    try:
+        if container is not None:
+            _vis = container.contains
+        else:
+            from shapely.prepared import prep
+            pg = prep(polygon.buffer(_GRADE_VISIBILITY_BUFFER_M))
+            _vis = pg.contains
+    except _GEOM_EXC:
+        _vis = None
+    out: list[tuple[int, int, float]] = []
+    for a in range(m):
+        if idx[a] is None:
+            continue
+        xa, ya = coords[a]
+        for b in range(a + 1, m):
+            if idx[b] is None or idx[a] == idx[b]:
+                continue
+            xb, yb = coords[b]
+            d = math.hypot(xa - xb, ya - yb)
+            if d < 0.5:
+                continue
+            if max_len is not None and d > max_len \
+                    and not (b == a + 1 or (a == 0 and b == m - 1)):
+                continue          # beyond the local window, not a ring edge
+            if _vis is not None and not (NETWORK_PROFILE_MODEL
+                                         and d <= 20.0):
+                # short same-shape pairs are unconditional under the
+                # network model: the validator re-tests visibility on the
+                # EMITTED polygon, and sub-20 m chords flutter across the
+                # two geometries (SPJC #92: a 4.5 m pair the solver
+                # dropped and the validator kept = an unprojected 0.7 m
+                # step at a smoothing-zone boundary)
+                try:
+                    if not _vis(LineString(((xa, ya), (xb, yb)))):
+                        continue
+                except _GEOM_EXC:
+                    pass
+            out.append((idx[a], idx[b], cap * d))
+    return out
+
+
+def _grade_graph_edges(s, coords, idx, ctx):
+    """Adapter: the single grade graph's per-edge ``(key, key, cap)`` for one
+    apron/junction shape, converted to the solver's ``(i, j, cap*dist)`` edge
+    contract.  Keys are node indices; a ring vertex with no index gets a unique
+    sentinel key so it stays distinct and is filtered out of the result."""
+    from auto_patch import grade_graph as GG
+    keys = [i if i is not None else ("_n", p) for p, i in enumerate(idx)]
+    gs = GG.GradeShape(role=s.role, ring=list(coords), keys=keys)
+    sc = GG.shape_constraints(gs, ctx)
+    pos = {i: coords[p] for p, i in enumerate(idx) if i is not None}
+    out = []
+    for (a, b, cap) in sc.edges:
+        pa, pb = pos.get(a), pos.get(b)
+        if pa is None or pb is None:
+            continue
+        d = math.hypot(pa[0] - pb[0], pa[1] - pb[1])
+        out.append((a, b, cap * d))
+    return out
+
+
+def _build_shape_constraints(layout, bucket_to_idx):
+    """Per-shape grade constraints for the directional relief: one entry per
+    soft pavement shape with ``{nodes, edges, flat}`` — its node indices, its
+    OWN internal grade edges ``(i, j, cap_m)``, and whether it must stay flat
+    (terminal).  Rects use flat-cross (cap≈0) + axial edges; aprons use the
+    in-pavement VISIBILITY graph (geodesic, see ``_visible_grade_edges``);
+    junction/seam-rect use all-pair; terminal is flat.  Runway/seam are HARD,
+    not included."""
+    out = []
+    # Airside-pavement union, prepared, for JUNCTION chord-visibility (see
+    # ``_visible_grade_edges``): junction chords may cross neighbouring
+    # pavement (real grade paths) but not true voids.  Built once per solve.
+    airside_buf = None
+    try:
+        from shapely.ops import unary_union
+        from shapely.prepared import prep
+        polys = [s.polygon for s in layout.shapes
+                 if s.role in PAVEMENT_ROLES
+                 and s.polygon is not None and not s.polygon.is_empty]
+        if polys:
+            airside_buf = prep(
+                unary_union(polys).buffer(_GRADE_VISIBILITY_BUFFER_M))
+    except _GEOM_EXC:
+        airside_buf = None
+    # APRON BACK-EDGE RAMPS (user 2026-06-13): the back strip of an apron
+    # (building frontage + gaps between buildings) may grade at the steeper
+    # APRON_BACK_EDGE_GRADE so pads stay flat (docs/apron_back_edge_ramps.md).
+    # Computed once and stashed for the enforce's coupled touches (band slack,
+    # corridor-plane attractor skip, pairwise pad cap).  Empty set / no-op
+    # when the gate is off → byte-identical.
+    back_band = _apron_back_band_nodes(layout, bucket_to_idx)
+    layout._apron_back_band = back_band
+    # Single grade graph (docs/single_grade_graph.md): build the apron/junction
+    # within-shape constraints from the ONE shared generator the validator also
+    # uses.  Built once per solve; gate OFF → legacy _visible_grade_edges branch.
+    from auto_patch import grade_graph as _GG
+    _gg_ctx = (_GG.build_context(layout, bucket_to_idx)
+                if SINGLE_GRADE_GRAPH else None)
+    back_scale = (APRON_BACK_EDGE_GRADE / APRON_MAX_GRADE
+                  if APRON_MAX_GRADE > 0 else 1.0)
+    # Node indices on a clean sloping-rect PLANE (4-corner, altitude_high/low).
+    # Used to grade a rect end-cap as a PLANAR EXTENSION of its parent rect
+    # (O4_CAP_PLANAR): the cap's inner edge sits on these nodes.
+    # Default ON (user 2026-06-19, for in-sim test): grade rect end-caps as a
+    # planar extension of their parent rect so the rect+cap tilt as one plane
+    # and the cap-adjacent junctions co-solve flat (CYXY 4→0, SPJC 44→0; SPLP
+    # neutral).  ⚠ HECA REGRESSES (741→883) — the terminal-canyon caps where
+    # the rect can't tilt over-constrain; investigate.  O4_CAP_PLANAR=0 reverts.
+    _cap_planar = _os.environ.get("O4_CAP_PLANAR", "1") == "1"
+    rect_plane_idx: set = set()
+    if _cap_planar:
+        for s in layout.shapes:
+            if (s.role in SLOPING_RECT_ROLES and s.node_altitudes is None
+                    and s.polygon is not None and not s.polygon.is_empty):
+                _c = _open_ring(list(s.polygon.exterior.coords))
+                if len(_c) != 4:
+                    continue
+                for (x, y) in _c:
+                    k = bucket_to_idx.get(
+                        layout.canonical_points.get_or_add(float(x), float(y)))
+                    if k is not None:
+                        rect_plane_idx.add(k)
+    for s in layout.shapes:
+        if s.role not in PAVEMENT_ROLES or s.role == ROLE_RUNWAY:
+            continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        coords = _open_ring(list(s.polygon.exterior.coords))
+        if len(coords) < 2:
+            continue
+        idx = [bucket_to_idx.get(
+            layout.canonical_points.get_or_add(float(x), float(y)))
+            for x, y in coords]
+        nodes = [i for i in idx if i is not None]
+        if len(nodes) < 2:
+            continue
+        cap = _shape_grade(layout, s)
+        # Terminal pads: with ``config.TERMINAL_PADS_SLOPE`` (evaluation state,
+        # user 2026-06-10) EVERY pad may slope up to the terminal cap through
+        # the visibility graph, like an apron — the route-justified runway
+        # profiles (05C 110.9, not the rejected 104.4 over-dip) leave chain
+        # tension only the terminals can drain.  With it False, pads are rigid
+        # FLAT by default (flatness preferred — the config cap is the MAX a
+        # terminal MAY slope, not a mandate) and only a pad the taxi-route
+        # seed marked SQUEEZED (straddles a low and a high runway, cannot be
+        # one level in grade to both) grades at the cap (user 2026-06-09:
+        # flatness yields to grade, but ONLY where grade demands it).
+        # APRON-FOLLOWS model: pads are TRANSPARENT — graded shapes at the
+        # terminal cap through the visibility graph, exactly like an apron
+        # (no cap-0 rigidity for ANY pad; flatness is imposed post-solve by
+        # the INHERIT step from the settled median, see the enforce).
+        if (s.role == ROLE_BUILDING and not TERMINAL_PADS_SLOPE
+                and not TERMINAL_NATURAL_LEVELS):
+            _sloped = getattr(layout, "_sloped_terminal_nodes", None)
+            if not (_sloped and any(i in _sloped for i in nodes)):
+                cap = 0.0
+        flat = (cap <= 0.0)
+        edges: list[tuple[int, int, float]] = []
+        flat_pairs: list[tuple[int, int]] = []   # rect flat-end coupled pairs
+        # A clean PLANAR rect (altitude_high/low) gets the flat-cross + axial
+        # constraints.  A per-vertex ``node_altitudes`` piece is NOT planar —
+        # e.g. the tile-cut seam WEDGE that follows the seam terrain's cross-
+        # slope and blends back to the rect (user 2026-05-28) — so it must use
+        # the all-pair rule, NOT a cap-0 flat end (which would force its two
+        # seam-pinned corners equal and read as a spurious 3.3 m violation).
+        is_rect = s.role in SLOPING_RECT_ROLES and len(coords) == 4 \
+            and all(i is not None for i in idx) \
+            and s.node_altitudes is None
+        if flat:
+            pass                                  # handled by _project_shape
+        elif is_rect:
+            # Identify the two AXIS-END (flat-cross, cap 0) edges and the two
+            # AXIAL (sloping, cap = grade·length) edges by projecting each ring
+            # edge onto ``source_axis`` (user 2026-05-28) — NOT by ring index:
+            # absorption / snaps / tile-cut can rotate the ring, and a stale
+            # [H,L,L,H] index assumption mis-labels which edges must stay flat.
+            ring_edges = [(0, 1), (1, 2), (2, 3), (3, 0)]
+            scored = []
+            adx = ady = None
+            ax = getattr(s, "source_axis", None)
+            if ax is not None and not ax.is_empty:
+                acs = list(ax.coords)
+                if len(acs) >= 2:
+                    adx, ady = acs[-1][0] - acs[0][0], acs[-1][1] - acs[0][1]
+                    al = math.hypot(adx, ady) or 1.0
+                    adx, ady = adx / al, ady / al
+            for (a, b) in ring_edges:
+                ex, ey = coords[b][0] - coords[a][0], coords[b][1] - coords[a][1]
+                el = math.hypot(ex, ey) or 1e-9
+                # |edge·axis|/|edge|: 1 = axial (sloping), 0 = perpendicular (flat)
+                par = abs(ex * adx + ey * ady) / el if adx is not None else 0.0
+                scored.append((par, a, b, el))
+            scored.sort()                # ascending: first 2 = flat, last 2 = axial
+            for n, (_par, a, b, el) in enumerate(scored):
+                if idx[a] is None or idx[b] is None or idx[a] == idx[b]:
+                    continue
+                if n < 2:                # the two most-perpendicular = flat ends
+                    edges.append((idx[a], idx[b], 0.0))
+                    flat_pairs.append((idx[a], idx[b]))
+                else:                    # the two most-parallel = sloping edges
+                    edges.append((idx[a], idx[b], cap * el))
+        elif (_cap_planar and getattr(s, "is_rect_cap", False)
+              and len([i for i in idx if i in rect_plane_idx]) >= 2
+              and len([i for i in idx
+                       if i is not None and i not in rect_plane_idx]) >= 2):
+            # Rect end-cap → PLANAR EXTENSION of its parent rect (user
+            # 2026-06-19).  INNER edge = the 2 nodes welded to the rect's flat
+            # end (already the rect's coupled pair, so _build_level_coupling
+            # unions them); OUTER edge = the 2 corners + the centreline node M.
+            # Couple inner flat and outer flat, join them with axial edges at
+            # the taxi cap → the rect+cap form one plane that TILTS as a unit so
+            # the cap-adjacent junction co-solves flat (a free-junction cap
+            # stays a rigid flat buffer that blocks the rect from tilting to the
+            # network → the 0.1-0.4 m cap-adjacent grade violations).
+            inner = [i for i in range(len(idx))
+                     if idx[i] is not None and idx[i] in rect_plane_idx]
+            outer = [i for i in range(len(idx))
+                     if idx[i] is not None and idx[i] not in rect_plane_idx]
+            edges.append((idx[inner[0]], idx[inner[1]], 0.0))
+            flat_pairs.append((idx[inner[0]], idx[inner[1]]))
+            for k in range(1, len(outer)):
+                edges.append((idx[outer[0]], idx[outer[k]], 0.0))
+                flat_pairs.append((idx[outer[0]], idx[outer[k]]))
+            for ii in inner:
+                jj = min(outer, key=lambda o: (coords[ii][0] - coords[o][0]) ** 2
+                         + (coords[ii][1] - coords[o][1]) ** 2)
+                d = math.hypot(coords[ii][0] - coords[jj][0],
+                               coords[ii][1] - coords[jj][1])
+                edges.append((idx[ii], idx[jj], cap * d))
+        elif (_gg_ctx is not None
+              and s.role in (ROLE_APRON, ROLE_JUNCTION)):
+            # SINGLE GRADE GRAPH: apron/junction within-shape edges from the ONE
+            # shared generator (auto_patch.grade_graph) — junction = apron with a
+            # spine+body model at the taxiway per-letter cap (no legacy per-axis
+            # diagonal-skip).  GRADED terminals (ROLE_BUILDING) + service_junction
+            # stay on the legacy branches below for now.
+            edges.extend(_grade_graph_edges(s, coords, idx, _gg_ctx))
+        elif s.role in (ROLE_APRON, ROLE_BUILDING, ROLE_JUNCTION):
+            # In-pavement VISIBILITY graph for APRONS, GRADED terminals (when
+            # TERMINAL_MAX_GRADE > 0 — large near-flat pads, same as an apron)
+            # and JUNCTIONS.  The within-shape grade
+            # limit applies ALONG the pavement, so a grade edge is added only
+            # between MUTUALLY-VISIBLE vertices (the chord stays inside the
+            # polygon).  On a non-convex shape the Euclidean chord between two
+            # far vertices leaves the polygon and cuts across non-pavement,
+            # fabricating a phantom short grade path; restricting to visible
+            # pairs makes the band Dijkstra compute the true GEODESIC distance
+            # (visibility-graph shortest path = exact geodesic in a simple
+            # polygon — bends at reflex vertices, all of which are nodes here).
+            # Convex shapes: every pair visible, so identical to all-pair.
+            # JUNCTIONS added s73 (user 2026-06-10): the old "small and
+            # near-convex" assumption fails for long-armed junctions — HECA
+            # #291 (149×229 m, solidity 0.82) carried 71/228 all-pair chords
+            # OUTSIDE its polygon, and its 6 tightest constraints were all
+            # fictitious cross-arm chords, pinning it near-flat so the
+            # taxiway-T grade piled into the next rect (#75 at 4.1 %) instead
+            # of flowing through.  check_grade has visibility-gated junctions
+            # since s62 — this aligns the solver with the validator.
+            # Junctions test chords against the AIRSIDE UNION, not their own
+            # polygon: a junction hugs its rects, so its cross-notch chords
+            # run over neighbouring pavement = real grade paths (#192 stepped
+            # 0.66 m off TX29's edge when those were dropped); only chords
+            # over true voids are excluded.
+            # ROUTE-FIELD MODEL: visibility chords are demoted to a LOCAL
+            # smoothness window; the long-range law is the taxi-route band
+            # in the enforce (docs/route_field_model.md §3).  Ring-adjacent
+            # pairs always survive inside _visible_grade_edges.
+            # W2_CLEAN_BANDS: NO distance window — enforce EVERY in-pavement
+            # visible chord (matches the corrected validator).  A long apron
+            # chord is the surface the aircraft sits on; enforcing it is also
+            # what forces a high corridor to DESCEND so the apron can grade.
+            vis_edges = _visible_grade_edges(
+                coords, idx, cap, s.polygon,
+                container=(airside_buf if s.role == ROLE_JUNCTION
+                           else None),
+                max_len=(None if W2_CLEAN_BANDS
+                         else (ROUTE_FIELD_LOCAL_WINDOW_M if ROUTE_FIELD_MODEL
+                               else None)))
+            # PER-AXIS JUNCTION GRADING (user 2026-06-10): the 1.5 % cap
+            # applies along the taxi CENTERLINE.  A chord between two
+            # vertices following the same (curved) axis caps at the
+            # ARC length between their projections — a straight chord
+            # under-measures a turning route and pins the junction flat
+            # (HECA #282: A4's mouth sat 47 m by chord from a runway
+            # vertex but ~120 m along the curved exit centerline, so the
+            # whole 1.8 m climb the exit should carry was forbidden).
+            # Cross-axis diagonals are an unregulated direction (ICAO
+            # Annex 14 §3.9 / EASA CS-ADR-DSN.D.265/.280 regulate
+            # longitudinal-along-route + transverse) and are dropped;
+            # ring-adjacent pairs always survive (the physical edge).
+            if s.role == ROLE_JUNCTION and _PER_AXIS_JUNCTIONS:
+                axes = [a for a, _c in _collect_junction_axes(
+                    layout, s.polygon)]
+                if axes:
+                    from shapely.geometry import Point as _Pt
+                    m2 = len(coords)
+                    ring_adj = set()
+                    pos2: dict = {}
+                    for a2 in range(m2):
+                        ia2 = idx[a2]
+                        ib2 = idx[(a2 + 1) % m2]
+                        if ia2 is not None:
+                            pos2.setdefault(ia2, coords[a2])
+                        if ia2 is not None and ib2 is not None:
+                            ring_adj.add((min(ia2, ib2), max(ia2, ib2)))
+                    pdist: dict = {}
+                    kept: list = []
+                    for (ea, eb, ecap) in vis_edges:
+                        pa, pb = pos2.get(ea), pos2.get(eb)
+                        if pa is None or pb is None:
+                            kept.append((ea, eb, ecap))
+                            continue
+                        arc_best = None
+                        for ax2 in axes:
+                            ka2 = (id(ax2), ea)
+                            kb2 = (id(ax2), eb)
+                            da2 = pdist.get(ka2)
+                            if da2 is None:
+                                da2 = ax2.distance(_Pt(pa))
+                                pdist[ka2] = da2
+                            db2 = pdist.get(kb2)
+                            if db2 is None:
+                                db2 = ax2.distance(_Pt(pb))
+                                pdist[kb2] = db2
+                            if (da2 <= JUNCTION_AXIS_PERP_TOL_M
+                                    and db2 <= JUNCTION_AXIS_PERP_TOL_M):
+                                arc = abs(ax2.project(_Pt(pa))
+                                          - ax2.project(_Pt(pb)))
+                                if arc_best is None or arc > arc_best:
+                                    arc_best = arc
+                        if arc_best is not None:
+                            kept.append((ea, eb,
+                                         max(ecap, cap * arc_best)))
+                        elif (min(ea, eb), max(ea, eb)) in ring_adj:
+                            kept.append((ea, eb, ecap))
+                        # else: cross-axis diagonal — dropped
+                    vis_edges = kept
+            # BACK-EDGE RAMP: an apron grade edge with BOTH endpoints in the
+            # back band carries the steeper APRON_BACK_EDGE_GRADE (a back ramp
+            # between buildings).  Front-to-back chords keep one endpoint in
+            # the front, so they retain the apron law — the warp stays gradual.
+            # This also lifts the FLAT-vs-SLOPE acceptance's per-edge cap, so a
+            # legal back ramp no longer counts as excess and reverts the pad
+            # flatten.
+            if (APRON_BACK_EDGE_RAMPS and s.role == ROLE_APRON
+                    and back_band and back_scale > 1.0):
+                vis_edges = [
+                    (ea, eb, ecap * back_scale)
+                    if (ecap > 0.0 and ea in back_band and eb in back_band)
+                    else (ea, eb, ecap)
+                    for (ea, eb, ecap) in vis_edges]
+            edges.extend(vis_edges)
+        else:
+            # All-pair (seam-cut rect / service junction): small near-convex
+            # shapes.
+            m = len(idx)
+            for a in range(m):
+                if idx[a] is None:
+                    continue
+                for b in range(a + 1, m):
+                    if idx[b] is None or idx[a] == idx[b]:
+                        continue
+                    d = math.hypot(coords[a][0] - coords[b][0],
+                                   coords[a][1] - coords[b][1])
+                    if d >= 0.5:
+                        edges.append((idx[a], idx[b], cap * d))
+        out.append({"nodes": nodes, "edges": edges, "flat": flat,
+                    "flat_pairs": flat_pairs,
+                    "area": float(s.polygon.area),
+                    "role": s.role,
+                    "ref": s.ref or ""})
+    return out
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# A junction vertex within this distance of a sloping rect's / runway's
+# long edge is treated as HUGGING/SHADOWING it (the vertex-push pass keeps
+# a designed 1.0 m standoff; accumulated drift puts shadow-edge endpoints
+# at up to ~1.8 m — SPJC's stepping endpoint sat 1.74 m off) and takes the
+# edge-plane altitude, so a straight shadowing edge lerps along the plane.
+
+
+
+
+# Route-distance measurement uncertainty, as a fraction of the route length.
+# The taxi-route graph under-counts real taxi paths: endpoint stubs are
+# straight chords (the centerline rows stop short of runway edges) and row
+# joins are uncurved corners (no fillets).  Measured at HECA's A4↔T4 corridor
+# (s73): graph 3,217 m vs the ≥3,353 m reality requires — ~4 % short.  A route
+# demand below ``frac · cap · route_d`` is within measurement noise of a
+# feasible corridor; the demand synthesis drops it instead of flexing a runway.
+# Value lives in config (single source of truth — the route-field bands and
+# the validator use the SAME margin); re-exported under the historical name.
+
+
+
+
+
+
+# Continuation gate: the exit direction, the across-junction gap vector and
+# the next rect's entry direction must all agree within 45°.
+
+
+
+
+# Tile-cut setback (m): pavement is cut back this far from each integer tile
+# line (tile_cut.cut_layout_at_tile_boundaries half_width_m).  The taxi-route
+# field anchors the seam at the SETBACK (where the pavement actually ends),
+# not at the integer boundary — same model as the runway setback pin (user
+# 2026-06-20): every node at the setback sits at its own DEM, a threshold.
+
+
+
+
+
+
+
+
+
+
+
+
+def _build_level_coupling(shape_constraints) -> dict:
+    """Build the RIGID LEVEL coupling map ``node -> tuple(members)`` (user
+    2026-05-28).  Members of a group must share one elevation and move together
+    under :func:`_project_shape`.  Groups = every rect flat-end cross-corner
+    pair (``flat_pairs``); pairs that share a node (rect meeting rect end-to-end)
+    union into one component so they stay co-levelled."""
+    parent: dict[int, int] = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        parent[find(a)] = find(b)
+
+    for sc in shape_constraints:
+        for (a, b) in sc.get("flat_pairs", ()):  # type: ignore[arg-type]
+            union(a, b)
+    comp: dict[int, list[int]] = {}
+    for x in list(parent):
+        comp.setdefault(find(x), []).append(x)
+    coupling: dict[int, tuple] = {}
+    for members in comp.values():
+        t = tuple(members)
+        for m in members:
+            coupling[m] = t
+    return coupling
+
+
+# ── Stage 1: build node list ──────────────────────────────────────
+
+
+def _build_node_list(layout):
+    """Assign one node index per unique canonical point across all
+    pavement-role shapes.  Returns ``(nodes, bucket_to_idx)`` —
+    the dict still names ``bucket_to_idx`` for legacy continuity
+    but keys are canonical (x, y) tuples when the layout has a
+    registry, else legacy discrete buckets.
+    """
+    bucket_to_idx: dict[tuple[float, float], int] = {}
+    nodes: list[tuple[float, float]] = []
+    for s in layout.shapes:
+        if s.role not in PAVEMENT_ROLES:
+            continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        try:
+            coords = _open_ring(list(s.polygon.exterior.coords))
+        except _GEOM_EXC:
+            continue
+        for x, y in coords:
+            k = layout.canonical_points.get_or_add(float(x), float(y))
+            if k not in bucket_to_idx:
+                bucket_to_idx[k] = len(nodes)
+                nodes.append((float(x), float(y)))
+    return nodes, bucket_to_idx
+
+
+
+
+def _runway_edge_pts(layout, elev, bucket_to_idx, step_m=10.0):
+    """``[(x, y, elev)]`` runway-EDGE anchor points for the shared
+    route-feasibility band (``building_feasibility.reach_band_sampler``) —
+    DENSIFIED along the runway boundary (a point every ``step_m``, elevation
+    interpolated along the edge).  A taxiway connects to a runway at any point on
+    its EDGE — often MID-edge (the 02 threshold), far from a corner vertex — so
+    anchoring only on the corners makes the band miss the real near connection
+    and measure a long way round (the over-loose ceiling that let the 02→A2 spine
+    rise too steep, field item 2/3).  Measure to the runway EDGE, not its
+    corners."""
+    cps = layout.canonical_points
+    rwy_pts: list = []
+    for s in layout.shapes:
+        if (s.role != ROLE_RUNWAY or s.polygon is None
+                or s.polygon.is_empty):
+            continue
+        ring = _open_ring(list(s.polygon.exterior.coords))
+        elevs = []
+        for (x, y) in ring:
+            i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+            elevs.append(elev[i] if i is not None else None)
+        m = len(ring)
+        for a in range(m):
+            b = (a + 1) % m
+            (x0, y0), (x1, y1) = ring[a], ring[b]
+            e0, e1 = elevs[a], elevs[b]
+            if e0 is None:
+                continue
+            if e1 is None:
+                rwy_pts.append((x0, y0, e0))
+                continue
+            seg = math.hypot(x1 - x0, y1 - y0)
+            n_sub = max(1, int(seg // step_m))
+            for t in range(n_sub):
+                f = t / n_sub
+                rwy_pts.append((x0 + f * (x1 - x0), y0 + f * (y1 - y0),
+                                e0 + f * (e1 - e0)))
+    # THRESHOLD MARKERS (user 2026-06-23): a runway whose END is absorbed into an
+    # apron (CYXY 02) leaves the CIFP threshold ~200 m beyond the built pavement.
+    # The runway is solved across its WHOLE profile, so extrapolate that profile
+    # to the marker and anchor the route band THERE — otherwise a node 63 m from
+    # the threshold measures the ~200 m route to the pavement and floats too high.
+    rwy_pts.extend(_threshold_anchors(layout, elev, bucket_to_idx))
+    return rwy_pts
+
+
+def _threshold_anchors(layout, elev, bucket_to_idx):
+    """``[(x, y, elev)]`` for each runway threshold MARKER, the runway profile
+    extrapolated to the marker along the runway axis (linear least-squares fit of
+    the built pavement's per-vertex elevations vs axis position).  For a runway
+    whose end is built, this ≈ the pavement-end elevation (redundant, harmless);
+    for an absorbed end it recovers the CIFP threshold elevation at the marker."""
+    thr = getattr(layout, "runway_thresholds", None) or []
+    cps = layout.canonical_points
+    rwy_v: list = []
+    for s in layout.shapes:
+        if (s.role == ROLE_RUNWAY and s.polygon is not None
+                and not s.polygon.is_empty):
+            ring = _open_ring(list(s.polygon.exterior.coords))
+            for (x, y) in ring:
+                i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+                if i is not None:
+                    rwy_v.append((x, y, elev[i]))
+    out: list = []
+    for k in range(0, len(thr) - 1, 2):
+        ax0, ay0 = thr[k]
+        bx0, by0 = thr[k + 1]
+        dx, dy = bx0 - ax0, by0 - ay0
+        L = math.hypot(dx, dy)
+        if L < 1.0:
+            continue
+        ux, uy = dx / L, dy / L
+        pts = []                         # (pos_along_axis, elev) on this runway
+        for (x, y, e) in rwy_v:
+            perp = abs((x - ax0) * uy - (y - ay0) * ux)
+            pos = (x - ax0) * ux + (y - ay0) * uy
+            if perp < 60.0 and -60.0 <= pos <= L + 60.0:
+                pts.append((pos, e))
+        if len(pts) < 2:
+            continue
+        nP = len(pts)
+        sp = sum(p for p, _ in pts)
+        se = sum(e for _, e in pts)
+        spp = sum(p * p for p, _ in pts)
+        spe = sum(p * e for p, e in pts)
+        den = nP * spp - sp * sp
+        if abs(den) < 1e-6:
+            continue
+        b = (nP * spe - sp * se) / den
+        a = (se - b * sp) / nP
+        # Only emit a marker for an ABSORBED end (built pavement does NOT reach the
+        # CIFP threshold).  For a BUILT end the real runway edge vertices already
+        # anchor the threshold at its true surface elevation, and the global
+        # least-squares LINE extrapolates a runway with a flattened end BELOW that
+        # surface (CYXY 14R: built end at 693.9, fit extrapolates 691.47) — a
+        # spurious low anchor that becomes the nearest runway "contact" for a
+        # taxiway joining there and drags its spine ~2.4 m under the runway (the
+        # F/14R valley + steep join).  Skip a marker whose endpoint already has
+        # built runway pavement within ``_BUILT_END_TOL_M``.
+        _BUILT_END_TOL_M = 40.0
+        if min((math.hypot(vx - ax0, vy - ay0) for (vx, vy, _e) in rwy_v),
+               default=float("inf")) > _BUILT_END_TOL_M:
+            out.append((ax0, ay0, a))              # marker A (absorbed end only)
+        if min((math.hypot(vx - bx0, vy - by0) for (vx, vy, _e) in rwy_v),
+               default=float("inf")) > _BUILT_END_TOL_M:
+            out.append((bx0, by0, a + b * L))      # marker B (absorbed end only)
+    return out
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ── Stage 2: seed initial elevations + HARD anchor flags ─────────
+
+
+def _seed_elevations(layout, nodes, bucket_to_idx,
+                     dem=None, tile_lat: int = 0, tile_lon: int = 0):
+    """Returns ``(elev, is_hard, have_initial)``.
+
+    HARD: only CIFP runway corners.  All other nodes are SOFT — even
+    terminals and aprons, per user 2026-05-03 ("only the runway ends
+    are immutable truth").
+
+    Soft node seeding priority (highest first):
+      1. Existing layout altitude_high/low/altitude/node_altitudes
+         (warm-start from a previous solver pass).
+      2. Per-vertex DEM sample at the node's (x, y).
+      3. Nearest-HARD elevation (cheap geometric backfill).
+
+    The DEM step is what lets a soft node settle at its natural
+    terrain elevation when the rest of the graph allows it; cap
+    projection in subsequent iterations pulls it down toward HARD
+    anchors only where the per-edge grade cap is exceeded.
+    """
+    from auto_patch.elevation import _sample_dem
+    n = len(nodes)
+    elev: list[float] = [0.0] * n
+    is_hard: list[bool] = [False] * n
+    have_initial: list[bool] = [False] * n
+
+    # Runway corners — HARD-anchor every runway segment, sloped or
+    # flat.  The runway's elevation profile is authoritative truth
+    # for adjacent pavement: when a junction shares a vertex with a
+    # runway corner, that vertex must adopt the runway's elevation
+    # so cap projection can pull the rest of the junction (and its
+    # downstream chain of stubs / aprons) up toward it.
+    #
+    # Sloped segments are 4-corner rects with altitude_high/low.
+    # Flat segments use a single ``altitude=`` tag and may carry an
+    # arbitrary number of corners — junctions touching the edge
+    # interior get inserted as new shared vertices upstream so the
+    # solver gets denser HARD anchors along long flat runs (blast
+    # pads, runway-interior flats).
+    # Two-pass runway HARD seeding: process non-regraded (CIFP only)
+    # shapes first, then regraded shapes (those with node_altitudes
+    # from the seam pipeline) — the second pass OVERRIDES any shared
+    # corner the first pass set.  This ensures that when a runway is
+    # segmented into sub-rects and only the seam-crossing sub-rect
+    # was regraded, the regraded values propagate to its shared
+    # threshold corners with adjacent sub-rects.
+    for pass_node_alts in (False, True):
+        for s in layout.shapes:
+            # ROLE_RUNWAY_CROSSING shares the runway HARD-anchor
+            # path: its ``node_altitudes`` come from runway-segment
+            # interpolation in ``_resolve_runway_crossings`` and
+            # are authoritative; the solver must not reshape them.
+            if s.role not in (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING):
+                continue
+            if s.polygon is None or s.polygon.is_empty:
+                continue
+            has_node_alts = bool(s.node_altitudes)
+            if has_node_alts != pass_node_alts:
+                continue
+            coords = _open_ring(list(s.polygon.exterior.coords))
+            if len(coords) < 3:
+                continue
+            if s.altitude_high is not None and s.altitude_low is not None:
+                if len(coords) != 4:
+                    continue
+                per = [s.altitude_high, s.altitude_low,
+                       s.altitude_low, s.altitude_high]
+            elif s.altitude is not None:
+                per = [float(s.altitude)] * len(coords)
+            elif s.node_altitudes:
+                per = [float(a) for a in s.node_altitudes[:len(coords)]]
+                if len(per) < len(coords):
+                    per += [per[-1]] * (len(coords) - len(per))
+            else:
+                continue
+            for (x, y), a in zip(coords, per):
+                k = layout.canonical_points.get_or_add(float(x), float(y))
+                idx = bucket_to_idx.get(k)
+                if idx is None:
+                    continue
+                # Pass 1 (CIFP): only set if not already HARD.
+                # Pass 2 (regraded): always override.
+                if pass_node_alts or not is_hard[idx]:
+                    elev[idx] = float(a)
+                    is_hard[idx] = True
+                    have_initial[idx] = True
+
+    # Per user 2026-05-13: seam vertices are HARD anchors with
+    # OVERRIDE priority over runway CIFP corners.  When a runway
+    # interior vertex is on a tile-boundary seam, its DEM altitude
+    # (already written into node_altitudes by apply_seam_dem_anchors)
+    # wins over the CIFP-interpolated value at the same position.
+    # Architecturally: seam wins because terrain mesh at the tile
+    # boundary is pinned to raw HGT by Ortho4XP's preserve_boundary,
+    # and we need pavement to match terrain there to avoid a visible
+    # cliff in X-Plane.
+    seam_keys = getattr(layout, "_seam_anchor_keys", None) or set()
+    if seam_keys:
+        for s in layout.shapes:
+            if s.polygon is None or s.polygon.is_empty:
+                continue
+            if not s.node_altitudes:
+                continue
+            coords = _open_ring(list(s.polygon.exterior.coords))
+            if len(coords) < 3:
+                continue
+            alts = list(s.node_altitudes[:len(coords)])
+            for (x, y), a in zip(coords, alts):
+                # Match the bucket convention used by seam_anchors.
+                from ..layout import SHARED_VERTEX_TOL_M
+                bk_s = 1.0 / SHARED_VERTEX_TOL_M
+                seam_bk = (int(round(x * bk_s)), int(round(y * bk_s)))
+                if seam_bk not in seam_keys:
+                    continue
+                k = layout.canonical_points.get_or_add(float(x), float(y))
+                idx = bucket_to_idx.get(k)
+                if idx is None:
+                    continue
+                # Seam wins: override any existing HARD value too.
+                elev[idx] = float(a)
+                is_hard[idx] = True
+                have_initial[idx] = True
+
+    # Warm-start soft nodes.
+    for s in layout.shapes:
+        if s.role not in PAVEMENT_ROLES or s.role == ROLE_RUNWAY:
+            continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        coords = _open_ring(list(s.polygon.exterior.coords))
+        if (s.altitude_high is not None and s.altitude_low is not None
+                and len(coords) == 4):
+            per = [s.altitude_high, s.altitude_low,
+                   s.altitude_low, s.altitude_high]
+        elif s.altitude is not None:
+            per = [float(s.altitude)] * len(coords)
+        elif s.node_altitudes:
+            per = [float(a) for a in s.node_altitudes[:len(coords)]]
+            if len(per) < len(coords):
+                per += [per[-1]] * (len(coords) - len(per))
+        else:
+            continue
+        for (x, y), a in zip(coords, per):
+            k = layout.canonical_points.get_or_add(float(x), float(y))
+            idx = bucket_to_idx.get(k)
+            if idx is None or is_hard[idx] or have_initial[idx]:
+                continue
+            elev[idx] = float(a)
+            have_initial[idx] = True
+
+    # DEM seed for soft nodes that warm-start didn't cover.
+    if dem is not None and any(not h for h in have_initial):
+        for i in range(n):
+            if have_initial[i]:
+                continue
+            x, y = nodes[i]
+            lat, lon = layout.m_to_ll(x, y)
+            e = _sample_dem(dem, tile_lat, tile_lon, lat, lon)
+            if e is not None:
+                elev[i] = float(e)
+                have_initial[i] = True
+
+    # Backfill any node still without an initial value via nearest
+    # HARD anchor's elevation (cheap geometric pass).
+    if any(not h for h in have_initial):
+        hard_pts = [(nodes[i][0], nodes[i][1], elev[i])
+                    for i in range(n) if is_hard[i]]
+        for i in range(n):
+            if have_initial[i]:
+                continue
+            x, y = nodes[i]
+            best_d2 = float("inf")
+            best_e = 0.0
+            for hx, hy, he in hard_pts:
+                d2 = (hx - x) ** 2 + (hy - y) ** 2
+                if d2 < best_d2:
+                    best_d2 = d2
+                    best_e = he
+            elev[i] = best_e
+            have_initial[i] = True
+
+    return elev, is_hard, have_initial
+
+
+def _sample_node_dem(layout, nodes, dem, tile_lat, tile_lon):
+    """Return ``[dem_elev | None]`` per node — the terrain elevation
+    each node is fit toward (closest-to-DEM within grade) by the
+    hop-priority forward pass + directional relief.  None entries
+    (no DEM, off-tile) are simply not attracted."""
+    out: list[float | None] = [None] * len(nodes)
+    if dem is None:
+        return out
+    from auto_patch.elevation import _sample_dem
+    for i, (x, y) in enumerate(nodes):
+        try:
+            lat, lon = layout.m_to_ll(x, y)
+            e = _sample_dem(dem, tile_lat, tile_lon, lat, lon)
+        except _GEOM_EXC:
+            e = None
+        if e is not None:
+            out[i] = float(e)
+    return out
+
+
+# ── Stage 3: edge construction (the per-axis rule lives here) ─────
+
+
+JUNCTION_AXIS_PERP_TOL_M = 15.0  # taxi half-width + small slack
+
+
+def _collect_junction_axes(layout, polygon):
+    """Return ``[(axis_LineString, grade_cap)]`` for every centerline /
+    runway long-axis passing through ``polygon`` — used by ``_build_edges``
+    to apply per-axis grade constraints to a junction.  ``grade_cap`` is the
+    taxiway's code-letter cap (narrow A/B 3 %, C–F 1.5 % via
+    ``taxi_grade_cap_for_letter``); runway long-axes carry ``TAXI_MAX_GRADE``.
+    A junction edge running ALONG a narrow axis earns that axis's looser cap
+    (apron-spine climb law) so a code-A/B corridor can climb at 3 %.
+
+    Sources:
+    * ``layout.apt_taxi_centerlines`` — full apt.dat taxi network.
+    * Each runway segment's long-axis (midpoints of its two short
+      edges), for runway-crossing junctions.
+    """
+    from shapely.geometry import LineString
+    axes = []
+    letters = getattr(layout, "apt_taxi_letters", None) or {}
+    apt_lines = getattr(layout, "apt_taxi_centerlines", None) or []
+    for item in apt_lines:
+        ln = item[0] if isinstance(item, tuple) else item
+        ref = item[1] if (isinstance(item, tuple) and len(item) > 1) else None
+        if ln is None or ln.is_empty:
+            continue
+        try:
+            if polygon.intersects(ln):
+                axes.append((ln, float(taxi_grade_cap_for_letter(
+                    letters.get(ref)))))
+        except _GEOM_EXC:
+            continue
+    for s2 in layout.shapes:
+        if s2.role != ROLE_RUNWAY:
+            continue
+        if s2.polygon is None or s2.polygon.is_empty:
+            continue
+        try:
+            if not polygon.intersects(s2.polygon):
+                continue
+            rc = list(s2.polygon.exterior.coords)
+        except _GEOM_EXC:
+            continue
+        if rc and rc[0] == rc[-1]:
+            rc = rc[:-1]
+        if len(rc) != 4:
+            continue
+        a_mid = (0.5 * (rc[0][0] + rc[3][0]),
+                 0.5 * (rc[0][1] + rc[3][1]))
+        b_mid = (0.5 * (rc[1][0] + rc[2][0]),
+                 0.5 * (rc[1][1] + rc[2][1]))
+        try:
+            axes.append((LineString([a_mid, b_mid]), TAXI_MAX_GRADE))
+        except _GEOM_EXC:
+            continue
+    return axes
+
+
+
+
+
+
+# ── Stage 6: write elevations back to layout shapes ──────────────
+
+
+def _writeback(layout, elev, bucket_to_idx):
+    """Apply solved elevations to layout shapes.
+
+    For taxi rects: ensure the polygon's vertex order is canonical
+    (corners 0, 3 at the higher axis-end; corners 1, 2 at the
+    lower).  The OSM emit interpolates altitude_high/low across
+    polygon corners via the legacy convention ``[high, low, low,
+    high]`` for indices 0..3 — that mapping is wrong for any rect
+    whose polygon happens to be ring-rotated relative to canonical,
+    leading to a phantom perpendicular slope (the source of the
+    user 2026-05-03 SPJC F-stub report).  Rotating the ring at
+    writeback aligns the convention with the actual axis-end
+    geometry.
+    """
+    from shapely.geometry import Polygon
+    from auto_patch.elevation import (
+        _corner_elevation_bucket, _short_end_pairs_by_axis,
+    )
+    n_terms = n_rects = n_juncs = 0
+    for s in layout.shapes:
+        if s.role not in PAVEMENT_ROLES:
+            continue
+        # Runway shapes are normally skipped (their altitudes come
+        # from CIFP — HARD-anchored, immutable through the solver).
+        # Exceptions where the writeback DOES run:
+        #   * Seam-converted runway sub-rects (user 2026-05-13): they
+        #     have ``node_altitudes`` set; we write per-vertex
+        #     solver-output altitudes so shared corners with adjacent
+        #     sub-rects agree on the regraded value.
+        #   * Non-4-corner runway shapes (user 2026-05-19): a runway
+        #     segment that lost its canonical 4-corner form through
+        #     downstream geometry passes (crossing union, snap-to-
+        #     corner, etc.) is no longer a sloped rect — its
+        #     altitude_high/low tags are stale because X-Plane's
+        #     planar 4-corner convention requires exactly 4 corners.
+        #     Convert to ``node_altitudes`` so the OSM emit + the
+        #     no-vertex-on-sloping-edge invariant treat it as the
+        #     non-rect it actually is.
+        if s.role == ROLE_RUNWAY and not s.node_altitudes:
+            _rc_check = list(s.polygon.exterior.coords) if s.polygon else []
+            if _rc_check and _rc_check[0] == _rc_check[-1]:
+                _rc_check = _rc_check[:-1]
+            if len(_rc_check) == 4:
+                # CIFP-plane piece: normally authoritative as-is — but a
+                # runway-FLEX (dip/rise re-smooth) mutates ``elev`` at
+                # runway nodes, and skipping the refresh leaves THIS
+                # piece's plane at the pre-flex profile while its
+                # node_altitudes neighbours move (HECA 05L: piece at
+                # 60.1/60.4 sharing corners with a risen 62.8 ring =
+                # a 2.4 m emitted cliff ON the runway).  Refresh the
+                # plane from the solved corners when they moved.
+                if NETWORK_PROFILE_MODEL:
+                    _ce9 = _read_corner_elevs(
+                        _rc_check, elev, bucket_to_idx, layout)
+                    if (_ce9 is not None
+                            and s.altitude_high is not None
+                            and s.altitude_low is not None
+                            and any(min(abs(c9 - s.altitude_high),
+                                        abs(c9 - s.altitude_low)) > 0.05
+                                    for c9 in _ce9)):
+                        _nc9, _hi9, _lo9 = _canonicalise_rect(
+                            _rc_check, _ce9, s.source_axis,
+                            _short_end_pairs_by_axis)
+                        if _nc9 is not None:
+                            if _nc9 != _rc_check:
+                                s.polygon = Polygon(_nc9 + [_nc9[0]])
+                            s.altitude_high = round(float(_hi9), 1)
+                            s.altitude_low = round(float(_lo9), 1)
+                            s.altitude = None
+                            n_rects += 1
+                continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        try:
+            coords = list(s.polygon.exterior.coords)
+        except _GEOM_EXC:
+            continue
+        ring_closed = coords and coords[0] == coords[-1]
+        coords_open = coords[:-1] if ring_closed else coords
+        corner_elevs = _read_corner_elevs(
+            coords_open, elev, bucket_to_idx, layout)
+        if corner_elevs is None:
+            continue
+        if s.role == ROLE_BUILDING and _role_grade(ROLE_BUILDING) <= 0.0:
+            # Terminal is FLAT (the default: TERMINAL_MAX_GRADE = 0, a terminal
+            # sits on one floor altitude — per user 2026-05-18).  The flat
+            # equality group already enforced this in the solver; average is just
+            # a defensive round.  When TERMINAL_MAX_GRADE > 0 the terminal grades
+            # like an apron and falls through to the per-corner branch below.
+            avg = sum(corner_elevs) / len(corner_elevs)
+            s.altitude = round(float(avg), 1)
+            s.altitude_high = None
+            s.altitude_low = None
+            s.node_altitudes = None
+            n_terms += 1
+        elif s.role in (ROLE_APRON, ROLE_BUILDING):
+            # Per user 2026-05-18: aprons are NOT 100 % flat — they
+            # satisfy 1.5 % across their surface, NOT zero gradient.
+            # Keep the solver's per-corner altitudes (which it
+            # already constrained via all-pair Euclidean edges) so
+            # adjacent aprons that share corners don't end up at
+            # 4-8 m cliff steps (each apron previously averaged to
+            # its own single altitude → adjacent aprons diverged).
+            alts = [round(float(e), 1) for e in corner_elevs]
+            if ring_closed:
+                alts.append(alts[0])
+            s.node_altitudes = alts
+            s.altitude = None
+            s.altitude_high = None
+            s.altitude_low = None
+            n_terms += 1
+        elif s.role in SLOPING_RECT_ROLES:
+            # Per user 2026-05-13: keep node_altitudes when the shape
+            # came in with them — even for 4-corner shapes.  This
+            # preserves per-vertex precision for runway sub-rects
+            # adjacent to seam-affected sub-rects: their shared
+            # corners receive HARD seam altitudes that aren't coplanar
+            # with the other 2 CIFP corners, so altitude_high/low
+            # (which assumes a planar surface) would average and
+            # introduce a > 1 m step at the shared boundary.
+            had_node_alts = s.node_altitudes is not None
+            if (len(coords_open) == 4 and not had_node_alts
+                    and _rect_short_ends_perpendicular(
+                        coords_open, s.source_axis)):
+                new_coords, hi, lo = _canonicalise_rect(
+                    coords_open, corner_elevs, s.source_axis,
+                    _short_end_pairs_by_axis)
+                if new_coords is None:
+                    continue
+                if new_coords != coords_open:
+                    s.polygon = Polygon(new_coords + [new_coords[0]])
+                s.altitude_high = round(float(hi), 1)
+                s.altitude_low = round(float(lo), 1)
+                s.altitude = None
+                s.node_altitudes = None
+                n_rects += 1
+            else:
+                alts = [round(float(e), 1) for e in corner_elevs]
+                if ring_closed:
+                    alts.append(alts[0])
+                s.node_altitudes = alts
+                s.altitude_high = None
+                s.altitude_low = None
+                s.altitude = None
+                n_rects += 1
+        elif s.role in (ROLE_JUNCTION, ROLE_SERVICE_JUNCTION):
+            # Junction + service-road-network junction: per-corner
+            # node_altitudes (all-pair shapes, irregular polygons).
+            alts = [round(float(e), 1) for e in corner_elevs]
+            if ring_closed:
+                alts.append(alts[0])
+            s.node_altitudes = alts
+            s.altitude = None
+            n_juncs += 1
+        elif s.role == ROLE_RUNWAY:
+            # Seam-converted runway sub-rect — write per-vertex
+            # altitudes (the only runway shapes that reach here have
+            # node_altitudes pre-set; the skip-guard above filters
+            # the CIFP-only altitude_high/low ones).
+            alts = [round(float(e), 1) for e in corner_elevs]
+            if ring_closed:
+                alts.append(alts[0])
+            s.node_altitudes = alts
+            s.altitude = None
+            s.altitude_high = None
+            s.altitude_low = None
+            n_rects += 1
+    return n_terms, n_rects, n_juncs
+
+
+def _read_corner_elevs(coords_open, elev, bucket_to_idx, layout=None):
+    out = []
+    for x, y in coords_open:
+        idx = bucket_to_idx.get(layout.canonical_points.get_or_add(float(x), float(y)))
+        if idx is None:
+            return None
+        out.append(elev[idx])
+    return out
+
+
+_RECT_SHORT_END_MAX_AXIS_DOT = 0.7  # |edge·axis|/|edge| above this = the
+                                     # "short end" is really axis-parallel
+                                     # (degenerate non-rect quad, e.g. a
+                                     # tapering wedge from junction-splitting)
+
+
+def _rect_short_ends_perpendicular(coords_open, source_axis) -> bool:
+    """True when a 4-corner ring is a genuine sloping rect: its two
+    axis-end (short) edges — as paired by ``_short_end_pairs_by_axis`` —
+    are roughly PERPENDICULAR to ``source_axis``.
+
+    Projection-based pairing breaks on distorted quads (opposite sides
+    not parallel): it can group two corners whose connecting edge runs
+    ALONG the axis, so collapsing to ``altitude_high``/``altitude_low``
+    produces a surface that slopes ACROSS a perpendicular edge.  Such a
+    shape is not a canonical rect and must stay ``node_altitudes`` (user
+    2026-05-24).  A clean rect's short ends have |edge·axis| ≈ 0.
+    """
+    from auto_patch.elevation import _short_end_pairs_by_axis
+    if source_axis is None or source_axis.is_empty:
+        return False
+    ax = list(source_axis.coords)
+    if len(ax) < 2:
+        return False
+    axdx, axdy = ax[-1][0] - ax[0][0], ax[-1][1] - ax[0][1]
+    axlen = math.hypot(axdx, axdy)
+    if axlen < 1e-6:
+        return False
+    aux, auy = axdx / axlen, axdy / axlen
+    sp, ep = _short_end_pairs_by_axis(coords_open, source_axis)
+    if sp is None:
+        return False
+    for pair in (sp, ep):
+        ax0, ay0 = coords_open[pair[0]]
+        ax1, ay1 = coords_open[pair[1]]
+        ex, ey = ax1 - ax0, ay1 - ay0
+        elen = math.hypot(ex, ey)
+        if elen < 1e-6:
+            return False
+        if abs(ex * aux + ey * auy) / elen > _RECT_SHORT_END_MAX_AXIS_DOT:
+            return False
+    return True
+
+
+def _canonicalise_rect(coords_open, corner_elevs, source_axis,
+                        short_end_pairs_fn):
+    """Rotate a rect's 4-vertex ring (and its corner elevations)
+    so corners 0, 3 are at the higher axis-end and 1, 2 at the
+    lower.  Returns ``(new_coords, hi, lo)`` or ``(None, ...)`` if
+    rotation can't be determined.
+    """
+    sp, ep = short_end_pairs_fn(coords_open, source_axis)
+    if sp is None:
+        sp, ep = (0, 3), (1, 2)
+    a_avg = (corner_elevs[sp[0]] + corner_elevs[sp[1]]) / 2.0
+    b_avg = (corner_elevs[ep[0]] + corner_elevs[ep[1]]) / 2.0
+    high_pair = sp if a_avg >= b_avg else ep
+    hi, lo = max(a_avg, b_avg), min(a_avg, b_avg)
+    # Rotation that makes high_pair == (0, 3).
+    rotation = _rotation_for_high_pair(high_pair)
+    if rotation == 0:
+        return list(coords_open), hi, lo
+    new_coords = [coords_open[(i - rotation) % 4]
+                  for i in range(4)]
+    return new_coords, hi, lo
+
+
+def _rotation_for_high_pair(high_pair) -> int:
+    """Return the right-shift k such that rotating the 4-vertex
+    ring by k positions makes ``high_pair`` map to ``(0, 3)``.
+
+    Mapping: under right-shift k, old index ``i`` becomes new
+    index ``(i + k) % 4``.  We solve for k so that
+    ``{(high_pair[0] + k) % 4, (high_pair[1] + k) % 4} == {0, 3}``.
+    """
+    target = {0, 3}
+    a, b = high_pair
+    for k in range(4):
+        if {(a + k) % 4, (b + k) % 4} == target:
+            return k
+    return 0
+
+
+def _report(icao, iters_used, max_iters, elapsed,
+             n_terms, n_rects, n_juncs):
+    import O4_UI_Utils as UI
+    UI.vprint(1,
+        f"  [pav-builder] {icao}: per-surface Jacobi solver "
+        f"converged in {iters_used}/{max_iters} iters "
+        f"({elapsed:.2f} s); applied to {n_terms} terminal/apron(s), "
+        f"{n_rects} rect(s), {n_juncs} junction(s).")

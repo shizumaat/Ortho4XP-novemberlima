@@ -4343,9 +4343,8 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # truth (graded against the seam DEM anchors), so FREEZE it here — the
         # gapped airside edge grazes the cut buffer and would otherwise get a
         # spurious altitude re-sample (the SPLP seam clobber).
-        from .elevation_per_surface.solver import ROUTE_PROFILE_SOLVE
         from .geom_guard import _AIRSIDE_ROLES as _PS_AIRSIDE
-        _ps_skip = _PS_AIRSIDE if ROUTE_PROFILE_SOLVE else frozenset()
+        _ps_skip = _PS_AIRSIDE
         cut_layout_at_tile_boundaries(
             layout,
             current_tile_lat=current_tile_lat,

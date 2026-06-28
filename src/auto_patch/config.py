@@ -672,12 +672,13 @@ WRITE_ARBITRATION = True
 # groups in every projection.  A pad sharing a hard node stays held.
 # False restores the s76 seed-ceiling + freeze behaviour.
 TERMINAL_LEAF_LEVELS = True
-# NETWORK PROFILE MODEL (#4, docs/network_profile_model.md — user-approved
+# NETWORK PROFILE MODEL (#4, user-approved
 # s77p4: "solve the full centerline taxi network, which includes curves,
 # solve every intersection, similar to crossing runways, so they always
 # agree, then map that to the geometry").  ONE elevation profile is solved
-# over the COMPLETE centerline graph (auto_patch/network_profile.py):
-# intersections are shared vertices (agreement by construction — the tie /
+# over the COMPLETE centerline graph (now folded into the solver primitives'
+# within-shape constraint build): intersections are shared vertices
+# (agreement by construction — the tie /
 # consensus / freeze layer is bypassed), runway contacts are hard anchors
 # whose infeasibility against the rest of the field emits the runway-flex
 # demand DIRECTLY, jointly-infeasible squeezes spread minimax along the
@@ -1579,8 +1580,7 @@ TAXI_REACH_BAND_BY_WIDTH = _os.environ.get(
 # 3 % cap; ring/transverse edges keep 1.5 % (matching the validator's per-axis
 # cL=0.03 / cT=0.02).  ★ PER-AXIS, NOT isotropic: a blunt isotropic 3 % cap
 # destabilises the solve (the corridor tilts transversely; CYXY within 18 → 41).
-# Implemented in unified_jacobi `_build_edges`.  Default ON (the corridor climb
-# only manifests with the DEM attraction already present).
+# Default ON (the corridor climb only manifests with the DEM attraction present).
 JUNCTION_NARROW_GRADE = _os.environ.get("O4_JCT_NARROW_GRADE", "1") == "1"
 
 # (20260621) BUILDING DEM ANCHOR — apron-spine climb model (user ruling).
@@ -1637,9 +1637,9 @@ APRON_FEASIBLE_LIFT = _os.environ.get("O4_APRON_FEASIBLE_LIFT", "0") == "1"
 # route one continuous, field-consistent profile that the surrounding apron then
 # conforms to.  Built ONLY for a centerline with ≥1 node no rect station covers
 # (the promoted-apron case); a fully rect-covered centerline is skipped, so an
-# airport without such stretches stays byte-identical.  Implemented in
-# unified_jacobi `_taxi_corridor_profiles`.  Requires NETWORK_PROFILE_MODEL +
-# TAXI_CORRIDOR_PROFILE (the field that supplies the spine values).
+# airport without such stretches stays byte-identical.  Requires
+# NETWORK_PROFILE_MODEL + TAXI_CORRIDOR_PROFILE (the field that supplies the
+# spine values).
 CORRIDOR_SPINE_CHAINS = _os.environ.get("O4_CORRIDOR_SPINE_CHAINS", "1") == "1"
 
 # (20260622) FIELD ROUTE-BAND BY WIDTH — plan P3 (docs/taxi_centerline_grading_

@@ -860,7 +860,7 @@ def taxi_axes_ll(layout):
     """Per-axis taxi grading mirror — the SAME construction the grade
     test uses."""
     try:
-        from .elevation_per_surface import unified_jacobi as _uj
+        from .elevation_per_surface import solver_primitives as _uj
     except Exception:
         return None
     if not getattr(_uj, "_PER_AXIS_JUNCTIONS", False):

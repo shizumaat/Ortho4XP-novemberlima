@@ -1,14 +1,13 @@
 """Top-level orchestration for the one-profile elevation solve.
 
-``solve_route_profile`` is the next-gen replacement for ``unified_jacobi.solve``
-(docs/one_profile_solve.md).  It is the ONLY pass that sets airside elevations:
-the legacy multi-pass cascade is bypassed entirely.  It reuses the proven,
-elevation-neutral primitives from ``unified_jacobi`` (node list, seed, DEM
-sample, shape grade graph, level coupling, writeback) and the route-feasibility
-building levels from ``building_feasibility`` — then runs the single
-:func:`one_profile_solve` (one graph: the taxi-route reach band) over them.
+``solve_route_profile`` (docs/one_profile_solve.md) is the ONLY pass that sets
+airside elevations.  It reuses the proven, elevation-neutral primitives from
+``solver_primitives`` (node list, seed, DEM sample, shape grade graph, level
+coupling, writeback) and the route-feasibility building levels from
+``building_feasibility`` — then runs the single :func:`one_profile_solve`
+(one graph: the taxi-route reach band) over them.
 
-Wiring (``solver.solve`` dispatches here behind ``O4_ROUTE_PROFILE_SOLVE``):
+Wiring (``solver.solve`` dispatches here unconditionally):
 
     nodes/seed/dem  →  reach band + building seats  →  one solve  →  writeback
 """
@@ -31,7 +30,7 @@ def solve_route_profile(layout, icao: str,
     junction/apron ``node_altitudes``, terminal ``altitude``).  Runway segments
     (HARD anchors) are left untouched.
     """
-    from auto_patch.elevation_per_surface.unified_jacobi import (
+    from auto_patch.elevation_per_surface.solver_primitives import (
         _build_node_list, _build_shape_constraints, _build_level_coupling,
         _runway_node_set, _sample_node_dem, _seed_elevations, _writeback,
         _report,

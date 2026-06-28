@@ -8,8 +8,7 @@ OSM ways) build the same representation-agnostic input and call
 *check* can never drift again (see ``docs/single_grade_graph.md``).
 
 It is deliberately self-contained and clean-room: it does NOT import the legacy
-``unified_jacobi._visible_grade_edges`` / ``check_grade.iter_shape_grade_
-constraints`` / per-axis machinery.  Those are retired once this is wired in.
+``check_grade.iter_shape_grade_constraints`` / per-axis machinery.
 
 Model (user, authoritative 2026-06-23) — a soft airside shape is **spine + body**:
 
@@ -159,7 +158,7 @@ def build_context(layout, bucket_to_idx=None) -> "GradeContext":
         ``(round(x, 3), round(y, 3))`` — the validator keys its shapes by ring
         index and matches buildings by coordinate.
     """
-    from .elevation_per_surface.unified_jacobi import (
+    from .elevation_per_surface.solver_primitives import (
         SLOPING_RECT_ROLES, _shape_grade)
     from .layout import ROLE_BUILDING
 

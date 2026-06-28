@@ -34,11 +34,7 @@ route_profile_solver_status.md).
 """
 from __future__ import annotations
 
-import os
-
 import pytest
-
-os.environ.setdefault("O4_ROUTE_PROFILE_SOLVE", "1")
 
 
 def _cyxy():
@@ -83,7 +79,7 @@ def test_solver_and_validator_same_nodes():
     because it sets on nodes the validator does not check)."""
     from auto_patch import grade_graph as GG
     from auto_patch.grade_graph_validate import checked_spine_geometry
-    from auto_patch.elevation_per_surface.unified_jacobi import _build_node_list
+    from auto_patch.elevation_per_surface.solver_primitives import _build_node_list
 
     layout = _cyxy()
     nodes, b2i = _build_node_list(layout)

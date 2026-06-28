@@ -3036,7 +3036,7 @@ def _report_within_shape_violations(
     _per_axis_allowance = None
     _taxi_axes_m = None
     try:
-        from .elevation_per_surface import unified_jacobi as _uj
+        from .elevation_per_surface import solver_primitives as _uj
         if getattr(_uj, "_PER_AXIS_JUNCTIONS", False):
             from .verification import _import_check_grade
             _per_axis_allowance = _import_check_grade()._per_axis_allowance

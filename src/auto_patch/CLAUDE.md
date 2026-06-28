@@ -58,9 +58,13 @@ so there is no second copy to keep in sync. Change the number in `config.py` onl
   `centerlines.py`, `rects.py` (taxi-rect builder), `strips.py`.
 - `junction_emit.py`, `junction_rules.py`, `junction_repair.py` — junction build/repair.
 - `terminals.py`, `groundside.py`, `boundary.py`, `bridges.py`, `clearance.py` — features.
-- `elevation_per_surface/` — **the active elevation solver is
-  `elevation_per_surface/unified_jacobi.py`** (a priority cascade: seam > runway > taxi >
-  apron > terminal). `elevation.py` holds shared solver caps + standalone DEM loading.
+- `elevation_per_surface/` — **the active elevation solver is the
+  `elevation_per_surface/route_profile/` package** (`solve_route_profile`: one
+  elevation profile solved on the single unified grade graph). Its
+  elevation-neutral primitives (node list, DEM seed/sample, within-shape
+  constraint + level-coupling graph, runway node/edge sets, writeback) live in
+  `elevation_per_surface/solver_primitives.py`. `elevation.py` holds shared
+  solver caps + standalone DEM loading.
 - `runway_regrade.py`, `runway_redistribute.py` — runway FAA profile reconciliation.
 - `tile_cut.py` — clips shapes at integer lat/lon tile boundaries (seam handling).
 - `layout.py` — `PavementLayout`, `to_osm`.

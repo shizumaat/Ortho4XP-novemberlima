@@ -59,7 +59,7 @@ def reach_band_for(layout, elev, bucket_to_idx, dem, tile_lat, tile_lon,
     from auto_patch.elevation import _sample_dem
     from auto_patch.elevation_per_surface.building_feasibility import (
         reach_band_sampler, reach_band_unified)
-    from auto_patch.elevation_per_surface.unified_jacobi import _runway_edge_pts
+    from auto_patch.elevation_per_surface.solver_primitives import _runway_edge_pts
 
     runway_pts = _runway_edge_pts(layout, elev, bucket_to_idx)
     G = unified_graph

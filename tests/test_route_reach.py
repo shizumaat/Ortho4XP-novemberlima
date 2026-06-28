@@ -11,11 +11,7 @@ elevation.  ``grade_graph_validate.route_reach_violations`` catches this; the fi
 """
 from __future__ import annotations
 
-import os
-
 import pytest
-
-os.environ.setdefault("O4_ROUTE_PROFILE_SOLVE", "1")
 
 
 def _cyxy():

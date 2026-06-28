@@ -105,7 +105,7 @@ _GRADE_TEST_AIRPORTS = sorted(
 
 @pytest.mark.parametrize("icao", _GRADE_TEST_AIRPORTS)
 def test_pavement_grade(tmp_path, icao):
-    from auto_patch.elevation_per_surface import unified_jacobi as _uj
+    from auto_patch.elevation_per_surface import solver_primitives as _uj
     import check_grade
 
     tiles = _airport_tiles(icao, _xplane_root())
