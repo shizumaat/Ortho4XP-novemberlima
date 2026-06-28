@@ -544,6 +544,54 @@ def build_grade_constraints(shapes: Sequence[GradeShape], ctx: GradeContext
     return out
 
 
+def plane_constraints(shape: GradeShape, ctx: GradeContext,
+                      cap: float) -> ShapeConstraints:
+    """Within-shape constraints for a PLANE shape — a sloping taxi rect, a runway
+    segment, or a flat terminal pad — via the SAME law as the soft shapes
+    (:func:`grade_law.classify_pair`).
+
+    A plane's pairwise grade IS the plane's slope along that chord, so the rule is
+    simply ALL vertex pairs at the shape's ``cap`` (no spine / blend / visibility
+    gating — these shapes are convex 4-corner; terminals are checked all-pair as
+    before).  The seam and road-carve rules still apply (a plane vertex on a road
+    carve descends at the road cap).  ``cap`` is the shape's within-shape cap the
+    caller resolves (per-letter for a taxi rect, the runway/terminal cap
+    otherwise).  This is the single rule source for plane shapes: both the
+    in-memory validator and the OSM grade test build a ``GradeShape`` and call it,
+    so they cannot drift from each other or from the law."""
+    sc = ShapeConstraints(role=shape.role)
+    ring = shape.ring
+    keys = shape.keys
+    n = len(ring)
+    if n < 3:
+        return sc
+    seam = ctx.seam_keys
+    road_vert = None
+    if ctx.road_zone is not None:
+        from shapely.geometry import Point as _RPt
+        road_vert = [ctx.road_zone.contains(_RPt(x, y)) for (x, y) in ring]
+    for i in range(n):
+        xi, yi = ring[i]
+        ki = keys[i]
+        for j in range(i + 1, n):
+            kj = keys[j]
+            if ki == kj:
+                continue
+            xj, yj = ring[j]
+            d = math.hypot(xi - xj, yi - yj)
+            both_road = bool(road_vert and road_vert[i] and road_vert[j])
+            allow = GL.classify_pair(GL.PairContext(
+                role=shape.role, dist=d,
+                ring_adjacent=(j == i + 1) or (i == 0 and j == n - 1),
+                a_seam=ki in seam, b_seam=kj in seam,
+                a_building=False, b_building=False,
+                spine_caps=(), body_cap=cap, both_road=both_road))
+            if allow is None:
+                continue
+            sc.edges.append((ki, kj, allow.flat_cap()))
+    return sc
+
+
 # ── THE ONE GRAPH (solver sets on it, validator checks it) ───────────────────
 
 @dataclass

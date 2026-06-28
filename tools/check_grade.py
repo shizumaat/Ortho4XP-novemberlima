@@ -923,100 +923,27 @@ def iter_shape_grade_constraints(
                     xa=xi, ya=yi, ea=ei, xb=xj, yb=yj, eb=ej,
                     dist=d, cap=cap, allowance=cap * d + ELEV_ROUNDING_NOISE_M))
             continue
-        # Build the pairs to check.
-        if n == 3:
-            pairs = [(0, 1), (1, 2), (2, 0)]  # all 3 triangle edges
-        else:
-            # All MUTUALLY-VISIBLE pairs, at ANY distance.  For an
-            # APRON the grade limit applies along the pavement, so a pair whose
-            # straight chord leaves the polygon (cuts across a notch /
-            # non-pavement on a non-convex apron) is NOT a real constraint — the
-            # surface follows the longer in-pavement path between them.  Mirrors
-            # the solver's apron visibility graph (unified_jacobi.
-            # _visible_grade_edges), scoped to aprons for the same reason.
-            # NO distance limit: if two vertices are MUTUALLY VISIBLE (their
-            # straight chord stays inside the pavement), the surface between
-            # them is a real path and its average slope (Δz / dist) is a grade
-            # the aircraft experiences — no matter how far apart they are (the
-            # 60 m cap was a leftover from the all-pair-Euclidean era;
-            # visibility already excludes chords that cut across non-pavement).
-            # Visibility gates aprons AND junctions (both can be non-convex);
-            # rects are convex 4-corner, so every pair is trivially visible.
-            # Mirrors the solver's uncapped ``_visible_grade_edges``.
-            _vis = (_polygon_visibility(pts)
-                    if w.tags.get("role") in ("apron", "junction") else None)
-            # NO distance window (2026-06-18, user): an in-pavement
-            # mutually-VISIBLE chord across an apron/junction IS the surface
-            # the aircraft sits on, so its average slope is a real grade no
-            # matter how far apart the two vertices are (a 90 m apron span at
-            # 6.7% was slipping through the old 80 m ROUTE_FIELD window — and
-            # the apron law is 1% between buildings/taxi-centerlines/edges).
-            # Visibility already excludes chords that leave the pavement; the
-            # window's only valid job (stopping km chords from under-measuring
-            # the runway-REACH route) belongs to the route-band law, not here.
-            pairs = []
-            for i in range(n):
-                for j in range(i + 1, n):
-                    if _vis is not None and not _vis(
-                            pts[i][0], pts[i][1], pts[j][0], pts[j][1]):
-                        continue
-                    pairs.append((i, j))
-        # Per-axis grading (when taxi_axes are supplied): a JUNCTION's pairs
-        # are graded per-axis (longitudinal along a common centerline +
-        # transverse) and unregulated cross-axis diagonals are skipped.  An
-        # APRON's along-lane pairs likewise use the per-axis allowance, but a
-        # pair off every lane (the apron body / stand area) keeps the all-pair
-        # Euclidean cap — it does NOT get the diagonal skip.  Matches the
-        # solver's ``_build_edges`` (apron body all-pair, lanes arc-lengthened).
-        # Per-axis grading (when taxi_axes are supplied): a JUNCTION's pairs
-        # are graded per-axis (longitudinal along a common centerline +
-        # transverse) and unregulated cross-axis diagonals are skipped.  An
-        # APRON's along-lane pairs likewise use the per-axis allowance, but a
-        # pair off every lane (the apron body) keeps the all-pair Euclidean
-        # cap — it does NOT get the diagonal skip.  Aircraft stands are their
-        # own ROLE_STAND shapes (graded at 1.0% via ROLE_GRADE_LIMITS), so
-        # there is no per-pair stand handling here.  Matches the solver's
-        # ``_build_edges``.
-        role = w.tags.get("role")
-        per_axis = bool(taxi_axes) and role in ("junction", "apron")
-        for i, j in pairs:
-            xi, yi, ei, si = pts[i]
-            xj, yj, ej, sj = pts[j]
-            if si or sj:
-                continue  # seam-anchored endpoint — DEM controls.
-            d = math.hypot(xi - xj, yi - yj)
-            if d < 0.5:
+        # PLANE shapes (rects / runway / terminal) → the SAME law: all vertex
+        # pairs at the role cap, via grade_graph.plane_constraints (the single
+        # rule source for every shape).  classify_pair owns the seam skip, the
+        # min-pair-distance and the road-carve relaxation, so the old per-axis /
+        # triangle / visibility branches here are gone.
+        gs = _GG.GradeShape(role=role0, ring=[(p[0], p[1]) for p in pts],
+                            keys=list(pnids))
+        sc = _GG.plane_constraints(gs, _law_ctx, grade_cap)
+        idx = {pnids[k]: k for k in range(n)}
+        for (ka, kb, capp) in sc.edges:
+            ia = idx.get(ka)
+            ib = idx.get(kb)
+            if ia is None or ib is None:
                 continue
-            if per_axis:
-                allowance = _per_axis_allowance(
-                    (xi, yi), (xj, yj), taxi_axes, ELEV_ROUNDING_NOISE_M)
-                grade_cap_pair = grade_cap
-                if allowance is None:
-                    if role == "junction":
-                        continue  # unregulated inter-centerline diagonal
-                    # Apron body pair (no shared lane): all-pair cap.
-                    allowance = grade_cap * d + ELEV_ROUNDING_NOISE_M
-            else:
-                allowance = grade_cap * d + ELEV_ROUNDING_NOISE_M
-                grade_cap_pair = grade_cap
-            # ROAD-FRONTAGE law (see road_zone above): both endpoints welded to
-            # a road carve -> the road's cap governs.  Applied unconditionally
-            # on zone membership (it only ever RELAXES the cap, so a compliant
-            # pair stays compliant and a flagged pair is identical to the old
-            # ``de > allowance``-gated form — keeps the validator byte-identical
-            # while giving the oracle the true effective cap).
-            if (road_zone is not None
-                    and SERVICE_ROAD_MAX_GRADE > grade_cap_pair
-                    and road_zone.contains(_FzPt((xi, yi)))
-                    and road_zone.contains(_FzPt((xj, yj)))):
-                grade_cap_pair = SERVICE_ROAD_MAX_GRADE
-                allowance = max(
-                    allowance,
-                    SERVICE_ROAD_MAX_GRADE * d + ELEV_ROUNDING_NOISE_M)
+            xi, yi, ei, _sa = pts[ia]
+            xj, yj, ej, _sb = pts[ib]
+            d = math.hypot(xi - xj, yi - yj)
             out.append(ShapePairConstraint(
-                way=w, nid_a=pnids[i], nid_b=pnids[j],
+                way=w, nid_a=pnids[ia], nid_b=pnids[ib],
                 xa=xi, ya=yi, ea=ei, xb=xj, yb=yj, eb=ej,
-                dist=d, cap=grade_cap_pair, allowance=allowance))
+                dist=d, cap=capp, allowance=capp * d + ELEV_ROUNDING_NOISE_M))
     return out
 
 
