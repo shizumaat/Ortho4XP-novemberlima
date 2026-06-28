@@ -1028,12 +1028,19 @@ def verify_and_log(layout, icao: str, debug_log_path: str | None = None) -> dict
         short_e = check_rect_short_edges(layout)
     except Exception:                              # pragma: no cover
         pass
-    try:
-        within, cross, steps = run_grade_checks(layout)
-    except Exception as exc:                       # pragma: no cover
-        UI.vprint(1, f"  [verify] {icao}: grade verification "
-                     f"unavailable ({exc})")
-        within = cross = steps = []
+    # The OSM-patch grade validation (write the patch to a temp OSM and re-check
+    # it with tools/check_grade) is DEBUG-ONLY: once the solver is proven there is
+    # no reason to re-validate the shipped patch on every build — the grade test
+    # (test_pavement_grade) still runs check_grade on the emitted patches in CI.
+    # Enable with O4_VERIFY_OSM_GRADE=1 to log within/cross/step findings to the
+    # verify debug log.  The cheap in-memory geometry checks above always run.
+    if os.environ.get("O4_VERIFY_OSM_GRADE", "0") == "1":
+        try:
+            within, cross, steps = run_grade_checks(layout)
+        except Exception as exc:                   # pragma: no cover
+            UI.vprint(1, f"  [verify] {icao}: grade verification "
+                         f"unavailable ({exc})")
+            within = cross = steps = []
     # Runway longitudinal grade at the uniform 1.5% cap — the binding limit the
     # runway solver enforces today.  (The 0.8% end cap + FAA vertical-curve
     # rate are deliberately NOT logged here: they are expected RED until the
