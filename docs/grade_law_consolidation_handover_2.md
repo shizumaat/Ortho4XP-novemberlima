@@ -78,20 +78,27 @@ guard fired, because the west apron is genuinely fixed — re-pointed to the rem
   MEASURED WORSE (tighter + less coverage — port-to-port diagonals are also
   short-circuits). Route-faithful distance fundamentally requires a centerline arc.
 
-**PART 2 — feeder CONVERGENCE (STILL OPEN).** The 2 remaining flagged aprons
-(small, no-building: 640 m² @(-530,1006), 280 m² @(-321,-422)) are NOT connectivity
-cases — they HAVE bands (reachable), with NON-EMPTY feeder-band intersections (a
-common level exists), but the solver leaves each feeder at its own DEM-driven level
-within the band (6 m / 2 m apart over short contact gaps). The "NO-BUILDING APRON
-FILL" comment in `route_profile/solve.py:77` describes seating each such apron FLAT
-at the shared reachable level but is NOT implemented (aprons rely on `node_band` +
-body fill, which doesn't force a single level). BUILD: a `build_nobuilding_apron_seats`
-(parallel to `build_building_seats`) that computes L = clamp(DEM, ∩ feeder reach
-bands) and seats the apron + its feeder-contact nodes at L (heaviest anchor), so the
-spine grades each feeder to L. Clears the 2 aprons → `test_cyxy_route_reach_zero`
-XPASS; then convert the anti-gaming guard to a SYNTHETIC case (don't depend on a
-real airport staying broken). The route-band `pinned` class (empty band) is the
-per-vertex cousin — HECA ~1,300 (multi-runway, fundamental).
+**PART 2 — feeder CONVERGENCE (BUILT, gate `O4_NOBUILD_APRON_SEAT` default OFF —
+proven to work but over-constrains; needs refinement).** The 2 remaining flagged
+aprons (small, no-building: 640 m² @(-530,1006), 280 m² @(-321,-422)) are NOT
+connectivity cases — they HAVE bands, with NON-EMPTY feeder-band intersections (a
+common level exists), but the solver leaves each feeder at its own DEM-driven level.
+`anchors.build_nobuilding_apron_seats` (parallel to `build_building_seats`, wired in
+`solve.py` and merged into `building_seats` after `building_spine_floor`) seats each
+no-building apron FLAT at L = clamp(DEM, ∩ ring bands), so its welded feeder-contact
+nodes go to L and the feeders converge. WITH THE GATE ON: `route_reach` → 0 at CYXY
+(west feeders all 694.2, the 640 m² both 689.7), `test_cyxy_route_reach_zero` XPASS.
+BUT the FLAT/HARD whole-ring seat over-constrains — as a heaviest anchor it fights
+the spine/runway anchors and **regresses 3 suite tests** (`test_cyxy_spine_zero` +
+`..._no_bowl`, HECA `runway_longitudinal_grade`) → gated OFF (suite back to 19).
+REFINE before enabling: (a) make it a SOFT per-node FLOOR (tighten `node_band`
+toward L) instead of a hard `building_seats` merge — this is the "Applied below as a
+per-node FLOOR" the `solve.py:77` comment always intended; and/or (b) seat ONLY the
+genuinely-incompatible aprons (the band already converges the west apron — don't
+seat it) and SKIP apron nodes already owned by the spine/runway. Anti-gaming guard
+`test_route_reach_detects_incompatible_apron` is now SYNTHETIC (gate-independent), so
+it stays valid no matter how the solver evolves. The route-band `pinned` class
+(empty band) is the per-vertex cousin — HECA ~1,300 (multi-runway, fundamental).
 
 ### Original item 3 — anisotropic CURVE FIX — STILL OPEN (untouched)
 Plumbing is in (`Allowance(cL,cT)`, edges carry it). Supply real Δs∥/Δs⊥ per edge

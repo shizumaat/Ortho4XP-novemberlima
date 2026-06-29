@@ -17,8 +17,8 @@ import os as _os
 import time as _time
 
 from .anchors import (
-    apron_body_nodes, build_building_seats, building_spine_floor, node_bands,
-    reach_band_for)
+    apron_body_nodes, build_building_seats, build_nobuilding_apron_seats,
+    building_spine_floor, node_bands, reach_band_for)
 from .one_solve import one_profile_solve
 
 
@@ -72,6 +72,13 @@ def solve_route_profile(layout, icao: str,
     node_band = node_bands(nodes, band)
     building_seats = build_building_seats(
         layout, bucket_to_idx, band, dem_fn, runway_pts)
+    # FEEDER CONVERGENCE (user directive #3): seat each NO-BUILDING apron flat at a
+    # single level its feeders can all reach (the ring-band intersection, clamped to
+    # DEM), so the feeders converge to it instead of arriving incompatible.  Merged
+    # below into ``building_seats`` AFTER ``building_spine_floor`` (which is a
+    # building-pad chord model) so apron seats ride the same heaviest-anchor
+    # machinery without perturbing the building-frontage spine floor.
+    apron_seats = build_nobuilding_apron_seats(layout, bucket_to_idx, band, dem_fn)
     apron_body = apron_body_nodes(layout, bucket_to_idx)
 
     # NO-BUILDING APRON FILL (user 2026-06-26): a no-building apron has no pad to
@@ -119,6 +126,11 @@ def solve_route_profile(layout, icao: str,
         # cap-Lipschitz on the unified spine chain.
         u_spine_floor = building_spine_floor(
             layout, nodes, bucket_to_idx, building_seats, node_band, u_spine_adj)
+        # No-building apron seats join the heaviest-anchor set here (after the
+        # building-pad spine floor): the apron's ring + welded feeder-contact nodes
+        # seat flat at the shared reachable level, so the spine grades each feeder
+        # to it (feeder convergence) and the apron can't sag back to a split DEM.
+        building_seats.update(apron_seats)
         # A building seat that IS a spine node (a pad node on a taxi centerline)
         # is anchored at its ACTUAL seat level DURING the spine solve — so the
         # spine grades its neighbours to within cap of the building (buildings are

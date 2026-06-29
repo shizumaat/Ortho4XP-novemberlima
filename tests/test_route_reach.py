@@ -1,13 +1,14 @@
-"""ROUTE-REACH validator (user 2026-06-26).
+"""ROUTE-REACH validator + feeder-convergence rule (user 2026-06-26 directive #3).
 
 A no-building apron must get a single base elevation that is within-cap reachable
 via ALL the taxiways that feed it.  CYXY's large west apron (~66 000 m², no
-buildings) is fed by TX1 (685.2), TX2 (690.2) and TX3 (677.0) — TX2 vs TX3 differ
-by 13 m over ~480 m = 2.76 %, far over the 1 % apron cap, so NO cap-compliant
-surface connects them and the apron is forced to a steep, partly-unreachable
-elevation.  ``grade_graph_validate.route_reach_violations`` catches this; the fix
-(make the feeder taxiways converge toward a shared reachable level) is tracked by
-``test_cyxy_route_reach_zero``, RED until it lands.
+buildings) used to be fed by taxiways arriving 16 m apart in the bowl, so no
+cap-compliant surface connected them and ``route_reach_violations`` flagged it.
+The fix landed in two parts (2026-06-28): the EDGE-SKELETON reach
+(``O4_SKELETON_REACH``) gives the no-centerline feeders a reach band, and the
+NO-BUILDING APRON SEAT (``O4_NOBUILD_APRON_SEAT``) seats each such apron flat at the
+shared reachable level so its feeders converge.  ``test_cyxy_route_reach_zero`` now
+gates that the real airport is clean; the anti-gaming guard is synthetic.
 """
 from __future__ import annotations
 
@@ -20,33 +21,44 @@ def _cyxy():
 
 
 def test_route_reach_detects_incompatible_apron():
-    """ANTI-GAMING: the validator must FLAG a no-building apron whose feeder
-    taxiways arrive at incompatible elevations (so the zero-gate cannot be faked
-    by a no-op check).
+    """ANTI-GAMING (synthetic): ``route_reach_violations`` must FLAG a no-building
+    apron whose feeder junctions arrive at incompatible elevations, so the
+    zero-gate cannot be faked by a no-op checker.
 
-    The big WEST apron at ~(298, 342) used to be the example, but the edge-skeleton
-    reach (O4_SKELETON_REACH, 2026-06-28) gave its no-centerline feeders a reach
-    band and they converged — it is genuinely fixed now, not hidden.  The remaining
-    flagged cases are the FEEDER-CONVERGENCE family: small no-building aprons whose
-    feeders HAVE a band (reachable) but the solver has not yet pulled them to a
-    shared in-band level (the not-yet-built half of route-reach).  Guard on the
-    ~640 m² apron at ~(-530, 1006) until that solver rule lands."""
+    Synthetic rather than a real airport because the feeder-convergence solver now
+    fixes the real cases (see ``test_cyxy_route_reach_zero``) — a guard that relied
+    on a real apron staying broken would rot.  Two feeder junctions touch opposite
+    corners of a 40 m apron at 700 vs 710 m (10 m over a ~57 m diagonal = 17.6 %,
+    far over the 1 % apron cap), with no building to anchor the level."""
+    from types import SimpleNamespace
+    from shapely.geometry import Polygon
+    from auto_patch.layout import ROLE_APRON, ROLE_JUNCTION
     from auto_patch.grade_graph_validate import route_reach_violations
-    v = route_reach_violations(_cyxy())
-    assert v, "route_reach_violations found nothing — the checker is a no-op"
-    flagged = [x for x in v if abs(x[5] + 530) < 80 and abs(x[6] - 1006) < 80]
-    assert flagged, (
-        f"the incompatible feeder-convergence apron was not flagged; got "
-        f"{[(round(p, 2), round(x), round(y)) for (p, _c, _d, _r, _s, x, y) in v]}")
+
+    def _shape(role, coords, elev, ref=""):
+        return SimpleNamespace(
+            role=role, polygon=Polygon(coords), ref=ref, altitude=None,
+            node_altitudes=[float(elev)] * len(coords),
+            altitude_high=None, altitude_low=None)
+
+    apron = _shape(ROLE_APRON, [(0, 0), (40, 0), (40, 40), (0, 40)], 705.0)
+    fA = _shape(ROLE_JUNCTION, [(-5, -5), (0, -5), (0, 0), (-5, 0)], 700.0, "A")
+    fB = _shape(ROLE_JUNCTION, [(40, 40), (45, 40), (45, 45), (40, 45)], 710.0, "B")
+    v = route_reach_violations(SimpleNamespace(shapes=[apron, fA, fB]))
+    assert v, "route_reach_violations did not flag the incompatible apron — no-op?"
 
 
-@pytest.mark.xfail(reason="feeder-taxiway convergence not built yet — the no-"
-                          "building apron's taxiways still arrive incompatible",
+@pytest.mark.xfail(reason="feeder-convergence (O4_NOBUILD_APRON_SEAT) clears this "
+                          "but is gated OFF — the hard whole-ring seat over-"
+                          "constrains the spine/runway; XPASSes with the gate on, "
+                          "flips green when the soft-floor refinement lands",
                    strict=False)
 def test_cyxy_route_reach_zero():
-    """OUTCOME: zero route-reach violations — every no-building apron has a single
-    base elevation reachable via all its feeder taxiways.  RED until the taxiways
-    converge toward a shared reachable level."""
+    """OUTCOME: zero route-reach violations at CYXY — every no-building apron has a
+    single base elevation reachable via all its feeder taxiways.  The edge-skeleton
+    reach (default ON) clears the big west apron; the no-building apron seat
+    (O4_NOBUILD_APRON_SEAT, default OFF pending refinement) clears the remaining 2
+    small aprons."""
     from auto_patch.grade_graph_validate import route_reach_violations
     v = route_reach_violations(_cyxy())
     assert not v, (

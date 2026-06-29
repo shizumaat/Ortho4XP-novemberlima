@@ -163,6 +163,69 @@ def build_building_seats(layout, bucket_to_idx, band, dem_fn, runway_pts):
     return seats
 
 
+def build_nobuilding_apron_seats(layout, bucket_to_idx, band, dem_fn):
+    """``{apron_node_idx: flat_level}`` for every NO-BUILDING apron — the FEEDER-
+    CONVERGENCE rule (user 2026-06-26 directive #3, built 2026-06-28).
+
+    A no-building apron has no pad to anchor it, so its feeder taxiways each grade
+    to their own DEM-driven level and arrive at the apron INCOMPATIBLE (the
+    ``route_reach`` violation: feeder contacts whose elevation gap exceeds the apron
+    cap over their separation).  The fix is to seat the apron FLAT at a single level
+    L reachable by ALL its feeders, so the feeders converge to it.  L = the reach
+    band intersected over the apron's OWN ring nodes (every feeder contact is a ring
+    node, so L lies in every feeder's band ⇒ each can grade to it), clamped to the
+    apron's DEM (minimal deviation).  Seating the ring nodes — which include the
+    welded feeder-contact nodes — at L makes the spine grade each feeder to L.
+
+    An apron whose ring-band intersection is EMPTY (floor > ceiling) is
+    FUNDAMENTALLY infeasible (no common level its feeders can share) — skipped, so
+    ``route_reach`` keeps surfacing it as a documented transition, not a gate.
+    Aprons that abut a building are skipped (the pad anchors the level).
+
+    GATE ``O4_NOBUILD_APRON_SEAT`` DEFAULT **OFF** (2026-06-28): this clears every
+    ``route_reach`` violation at CYXY (feeders converge exactly), but the FLAT/HARD
+    whole-ring seat OVER-CONSTRAINS — merged as a heaviest anchor it conflicts with
+    the spine/runway anchors and regresses 3 suite tests (``test_cyxy_spine_zero`` /
+    ``..._no_bowl`` and HECA ``runway_longitudinal_grade``).  The intended form (see
+    ``route_profile/solve.py`` "NO-BUILDING APRON FILL") is a SOFT per-node FLOOR
+    (tighten ``node_band`` toward L), and/or seat ONLY the genuinely-incompatible
+    aprons (not the ones the band already converges, e.g. the west apron) and skip
+    nodes already owned by the spine/runway.  Set =1 to enable the hard version."""
+    import os as _os
+    if _os.environ.get("O4_NOBUILD_APRON_SEAT", "0") != "1":
+        return {}
+    from auto_patch.layout import ROLE_APRON, ROLE_BUILDING
+    cps = layout.canonical_points
+    buildings = [b.polygon for b in layout.shapes
+                 if b.role == ROLE_BUILDING and b.polygon is not None
+                 and not b.polygon.is_empty]
+    seats: dict = {}
+    for s in layout.shapes:
+        if (s.role != ROLE_APRON or s.polygon is None or s.polygon.is_empty):
+            continue
+        if any(s.polygon.distance(b) < 1.0 for b in buildings):
+            continue                            # a building anchors the level
+        ring = _open_ring(list(s.polygon.exterior.coords))
+        floor, ceil, got = -float("inf"), float("inf"), False
+        for (x, y) in ring:
+            b = band(x, y)
+            if b is None:
+                continue
+            floor = max(floor, b[0])
+            ceil = min(ceil, b[1])
+            got = True
+        if not got or floor > ceil:
+            continue                            # off-net / fundamentally pinned
+        de = dem_fn(s.polygon.centroid.x, s.polygon.centroid.y)
+        level = de if de is not None else 0.5 * (floor + ceil)
+        level = min(max(level, floor), ceil)    # closest-DEM in the feasible band
+        for (x, y) in ring:
+            i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+            if i is not None:
+                seats[i] = float(level)
+    return seats
+
+
 def node_bands(nodes, band):
     """Per-node ``(floor, ceiling)`` from the one reach band (``None`` off-net)."""
     return [band(x, y) for (x, y) in nodes]
