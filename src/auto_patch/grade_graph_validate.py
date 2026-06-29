@@ -192,8 +192,9 @@ def _spine_runway_join_violations(layout, noise):
     from shapely.geometry import Point
     from auto_patch.layout import ROLE_RUNWAY, ROLE_RUNWAY_CROSSING
     from auto_patch.pavement.runways import _sample_runway_segment_elev
-    _CONTACT_M = 12.0
-    _NEAR_M = 18.0
+    from auto_patch.grade_law import RUNWAY_CONTACT_M, RUNWAY_JOIN_NEAR_M
+    _CONTACT_M = RUNWAY_CONTACT_M
+    _NEAR_M = RUNWAY_JOIN_NEAR_M
     # A runway_crossing is RUNWAY surface (a taxiway crossing ON the runway), not a
     # taxi-spine node — comparing it to a runway's profile is runway-vs-runway (the
     # runway profile's job at an intersection: the crossing sits at a compromise
@@ -418,10 +419,10 @@ def route_band_violations(layout, noise=ELEV_ROUNDING_NOISE_M, G=None):
     # frontage — its non-central pad and the apron stepping up to it — is not
     # falsely flagged.  A LARGE building is NOT an anchor: its whole frontage must
     # be route-reachable, so its pads stay checked per-vertex.
-    from auto_patch.grade_law import building_requires_full_frontage
+    from auto_patch.grade_law import (
+        building_requires_full_frontage, BUILDING_REACH_CORRIDOR_M)
     from auto_patch.layout import ROLE_BUILDING
-    from auto_patch.config import (APRON_MAX_GRADE, BUILDING_FRONTAGE_CORRIDOR_M,
-                                   VISIBLE_CHORD_CONNECT)
+    from auto_patch.config import APRON_MAX_GRADE, VISIBLE_CHORD_CONNECT
     from .elevation_per_surface.building_feasibility import (
         _pavement_visibility, _VIS_ON_PAV_FRAC)
     small_pads = []                          # (polygon, seat)
@@ -447,7 +448,7 @@ def route_band_violations(layout, noise=ELEV_ROUNDING_NOISE_M, G=None):
         p = _P(x, y)
         for (poly, seat) in small_pads:
             d = poly.distance(p)
-            if d > BUILDING_FRONTAGE_CORRIDOR_M:
+            if d > BUILDING_REACH_CORRIDOR_M:
                 continue
             if abs(e - seat) > APRON_MAX_GRADE * d + noise:
                 continue

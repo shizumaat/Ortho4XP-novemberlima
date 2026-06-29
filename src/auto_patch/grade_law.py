@@ -34,11 +34,25 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from .config import (
-    BUILDING_FULL_FRONTAGE, BUILDING_FULL_FRONTAGE_AREA_M2,
-    SERVICE_ROAD_MAX_GRADE)
+    APRON_MAX_GRADE, BUILDING_FULL_FRONTAGE, BUILDING_FULL_FRONTAGE_AREA_M2,
+    BUILDING_REACH_CORRIDOR_M, SERVICE_ROAD_MAX_GRADE, TAXI_MAX_GRADE)
 
 # ── Law constants (the adjustable knobs of the law) ──────────────────────────
 APRON_ROLE = "apron"
+
+# THE single reach/grade rules, surfaced here so every site refers to ONE value
+# and cannot drift into local copies (user 2026-06-29).
+#  * ``BUILDING_REACH_CORRIDOR_M`` (imported) — max building↔spine apron reach.
+#  * ``APRON_MAX_GRADE`` / ``TAXI_MAX_GRADE`` (imported from config) — the apron
+#    (1 %) and taxiway (1.5 %) grade caps; re-exported so reach/seat/spine code
+#    stops keeping local ``_APRON_CAP`` / ``_ENTRY_CAP`` copies.
+#  * runway-CONTACT geometry: a taxi centerline endpoint within
+#    ``RUNWAY_CONTACT_M`` of a runway is a contact; the nearest emitted node
+#    within ``RUNWAY_JOIN_NEAR_M`` of it is the anchored join node.  One source
+#    for ``grade_graph._runway_anchors``, the validator's runway-join check, and
+#    ``lateral_spine_nodes`` (was three copies of 12 m / 18 m).
+RUNWAY_CONTACT_M = 12.0
+RUNWAY_JOIN_NEAR_M = 18.0
 
 
 def building_requires_full_frontage(area_m2: float) -> bool:

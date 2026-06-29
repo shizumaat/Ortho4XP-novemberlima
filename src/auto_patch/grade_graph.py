@@ -914,9 +914,12 @@ def _runway_anchors(layout, G, bucket_to_idx):
     from .pavement.runways import _sample_runway_segment_elev
     from .config import taxi_grade_cap_for_letter
 
+    import os
     cps = layout.canonical_points
-    _CONTACT_M = 12.0
-    _NEAR_M = 18.0
+    _CONTACT_M = GL.RUNWAY_CONTACT_M
+    _NEAR_M = GL.RUNWAY_JOIN_NEAR_M
+    _spine_edge_anchor = (
+        os.environ.get("O4_RUNWAY_CONTACT_ANCHOR", "1") == "1")
     runways = [s for s in layout.shapes
                if s.role == ROLE_RUNWAY and s.polygon is not None
                and not s.polygon.is_empty]
@@ -940,6 +943,7 @@ def _runway_anchors(layout, G, bucket_to_idx):
             G.pos.setdefault(i, (x, y))
     if not nx:
         return
+    contact_endpoints = []   # centerline endpoints that TERMINATE at a runway
     for entry in (getattr(layout, "apt_taxi_centerlines", []) or []):
         ln = entry[0] if isinstance(entry, (tuple, list)) else entry
         ref = entry[1] if (isinstance(entry, (tuple, list))
@@ -955,6 +959,7 @@ def _runway_anchors(layout, G, bucket_to_idx):
             re = _sample_runway_segment_elev(rwy, ex, ey)
             if re is None:
                 continue
+            contact_endpoints.append((ex, ey))
             # nearest graph node to the contact = the spine node that anchors
             best_i, best_d2 = None, _NEAR_M * _NEAR_M
             for (i, (x, y)) in nx:
@@ -963,6 +968,40 @@ def _runway_anchors(layout, G, bucket_to_idx):
                     best_d2, best_i = d2, i
             if best_i is not None:
                 G.runway_anchor[best_i] = float(re)
+
+    # ── SPINE nodes ON a runway edge where a route TERMINATES (user 2026-06-28) ─
+    # A taxiway that ENDS at the runway already has its contact materialised as a
+    # SHARED node: the runway sub-rect corner, the abutting junction vertex and
+    # the taxi SPINE node are welded to ONE canonical point on the runway edge
+    # (the segmenter cut it; ``_unify_airside_geometry`` welded it).  That node IS
+    # the taxiway↔runway contact and must sit at the runway surface — yet the
+    # endpoint search above misses it when the taxiway's rect ends short of the
+    # centerline's runway-edge endpoint (CYXY taxiway A: the centerline endpoint
+    # is the runway-edge MIDLINE at (-345,914), but the welded spine/runway nodes
+    # are its two SIDE contacts 22.6 m away — past _NEAR_M=18 — so A was left
+    # reach-detoured ~700 m and its served building over-credited 706 vs ~699).
+    # So anchor every spine node that coincides with a runway vertex AND sits near
+    # a TERMINATING contact endpoint (within _EDGE_REACH_M) — the route ends at the
+    # runway there, exactly like a junction pavement edge.  The endpoint gate
+    # excludes a taxiway that merely CROSSES / runs ALONG a runway mid-centerline
+    # (SPJC taxiway F at (2136,-1677), 36 m from F's nearest endpoint) — those are
+    # handled by the runway-crossing reconciliation, and hard-anchoring them
+    # over-constrains the adjacent junction (a 0.16 m floor flag).  ``setdefault``
+    # keeps any centerline-based anchor set above.  Gate O4_RUNWAY_CONTACT_ANCHOR=0.
+    _EDGE_REACH_M = 30.0
+    if _spine_edge_anchor and contact_endpoints:
+        er2 = _EDGE_REACH_M * _EDGE_REACH_M
+        for s in runways:
+            for (x, y) in _open_ring(list(s.polygon.exterior.coords)):
+                i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+                if i is None or i not in G.spine_adj or i in G.runway_anchor:
+                    continue
+                if all((x - ex) ** 2 + (y - ey) ** 2 > er2
+                       for (ex, ey) in contact_endpoints):
+                    continue
+                re = _sample_runway_segment_elev(s, x, y)
+                if re is not None:
+                    G.runway_anchor[i] = float(re)
 
 
 def flatten_pairs(constraints: Sequence[ShapeConstraints],

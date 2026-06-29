@@ -1711,21 +1711,19 @@ MIN_GRADE_NETWORK = _os.environ.get("O4_MIN_GRADE_NETWORK", "0") == "1"
 BUILDING_FULL_FRONTAGE_AREA_M2 = 2000.0
 BUILDING_FULL_FRONTAGE = _os.environ.get(
     "O4_BUILDING_FULL_FRONTAGE", "1") == "1"
-# A large building's frontage = every SIDE that has a taxi corridor within this
-# distance AND a VISIBLE on-pavement chord to that corridor's spine (user
-# 2026-06-27): a terminal flanked by taxi routes on several sides must grade to
-# the spine at ≤1 % on ALL of them, not only the apron it abuts.  m.
-BUILDING_FRONTAGE_CORRIDOR_M = 200.0
-# Reach of the building->SPINE LIFT (user 2026-06-28): a building anchors its
-# serving spine to RISE to meet it, but only when a VISIBLE on-pavement chord
-# connects the spine node to the building edge (no grass / single continuous
-# apron) — so the LIFT range can exceed the frontage-qualifier corridor above
-# without over-reaching: the visibility gate, not the distance, is the real
-# limit.  CYXY building22 sits 219 m from its apron spine (~U12) across one
-# continuous apron, beyond the 200 m frontage corridor, so the spine never rose
-# to serve it (the apron then can't grade 1% to the 702 pad).  Used ONLY by
-# ``_spine_floor_per_node``; gate ``O4_LONG_SPINE_LIFT=0`` restores 200 m.
-BUILDING_SPINE_LIFT_CORRIDOR_M = 350.0
+# THE single building↔spine REACH corridor (user 2026-06-29): the max apron span
+# over which a building reaches a taxi spine, gated by a VISIBLE on-pavement chord
+# (no grass / one continuous apron) — the visibility gate, not the distance, is
+# the real limit, but this caps it.  ONE value referenced by EVERY reach site so
+# they cannot drift: the large-building frontage qualifier (``_frontage_band``),
+# the small-pad route-band exemption (``grade_graph_validate``), and the
+# building→spine lift (``_spine_floor_per_node``).  Exposed as the canonical reach
+# rule via ``grade_law.BUILDING_REACH_CORRIDOR_M``.  200 m is the established
+# default.  ⚠ OPEN (2026-06-29): a building beyond this across one continuous apron
+# (CYXY building22, 208 m from ~U12) is not lifted to — making it a true spine
+# anchor needs the REGION it serves lifted consistently (see the handover), not a
+# point anchor or a wider corridor.
+BUILDING_REACH_CORRIDOR_M = 200.0
 
 
 def taxi_grade_cap_for_letter(letter, *, enabled: bool = None) -> float:

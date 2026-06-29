@@ -70,8 +70,9 @@ def densify_junction_edges(layout, icao: str = "", step: float = None) -> int:
     from shapely.geometry import LineString
     from shapely.ops import unary_union
     from .layout import ROLE_RUNWAY
+    from .grade_law import RUNWAY_JOIN_NEAR_M
     _SPINE_EDGE_TOL_M = 3.0
-    _RUNWAY_TOL_M = 18.0          # = the runway-join check's _NEAR_M
+    _RUNWAY_TOL_M = RUNWAY_JOIN_NEAR_M   # ONE source = the runway-join _NEAR_M
     cls = [ln for (ln, n) in (getattr(layout, "apt_taxi_centerlines", None) or [])
            if ln is not None and not ln.is_empty
            and not str(n or "").upper().startswith("SVC")]

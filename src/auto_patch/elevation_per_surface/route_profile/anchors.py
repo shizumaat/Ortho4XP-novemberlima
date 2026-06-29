@@ -317,12 +317,10 @@ def _spine_floor_per_node(layout, nodes, bucket_to_idx, building_seats,
     cap·spacing), so a big terminal's WHOLE frontage lifts the spine, not just one
     foot.  Each floor is clamped to the node's band ceiling (never above what the
     runway route reaches)."""
-    import os as _os
     from shapely.geometry import Point, LineString
     from shapely.ops import nearest_points
-    from auto_patch.config import (
-        APRON_MAX_GRADE, BUILDING_FRONTAGE_CORRIDOR_M,
-        BUILDING_SPINE_LIFT_CORRIDOR_M, VISIBLE_CHORD_CONNECT)
+    from auto_patch.config import APRON_MAX_GRADE, VISIBLE_CHORD_CONNECT
+    from auto_patch.grade_law import BUILDING_REACH_CORRIDOR_M
     from auto_patch.layout import ROLE_BUILDING
     from auto_patch.elevation_per_surface.building_feasibility import (
         _pavement_visibility, _VIS_ON_PAV_FRAC)
@@ -330,12 +328,10 @@ def _spine_floor_per_node(layout, nodes, bucket_to_idx, building_seats,
     cps = layout.canonical_points
     vis = _pavement_visibility(layout) if VISIBLE_CHORD_CONNECT else None
     # The lift reaches a building over a VISIBLE on-pavement chord at any range up
-    # to this corridor (user 2026-06-28) — the visibility gate below, not the
-    # distance, is the real limit, so a building anchors its serving spine even
-    # across a wide single apron (CYXY building22 at 219 m).
-    corridor = (BUILDING_SPINE_LIFT_CORRIDOR_M
-                if _os.environ.get("O4_LONG_SPINE_LIFT", "0") == "1"
-                else BUILDING_FRONTAGE_CORRIDOR_M)
+    # to THE single reach corridor (the visibility gate below, not the distance, is
+    # the real limit) — so a building anchors its serving spine even across a wide
+    # single apron (CYXY building22 at 219 m).  ONE rule, shared with the seat band.
+    corridor = BUILDING_REACH_CORRIDOR_M
 
     builds = []
     for s in layout.shapes:
@@ -466,8 +462,8 @@ def building_spine_floor(layout, nodes, bucket_to_idx, building_seats,
     # the single centroid foot, as before.
     import os as _os
     from auto_patch.config import (
-        BUILDING_FRONTAGE_CORRIDOR_M, BUILDING_FULL_FRONTAGE,
-        BUILDING_FULL_FRONTAGE_AREA_M2)
+        BUILDING_FULL_FRONTAGE, BUILDING_FULL_FRONTAGE_AREA_M2)
+    from auto_patch.grade_law import BUILDING_REACH_CORRIDOR_M
     from auto_patch.elevation_per_surface.building_feasibility import (
         _has_visible_corridor)
     # ⚠ BANKED DEFAULT OFF: raising the spine to the WHOLE frontage regresses OEMA
@@ -519,7 +515,7 @@ def building_spine_floor(layout, nodes, bucket_to_idx, building_seats,
                 mx, my = 0.5 * (ax + bx), 0.5 * (ay + by)
                 for (px, py) in ((ax, ay), (mx, my), (bx, by)):
                     if _has_visible_corridor(px, py, clines, vis,
-                                             BUILDING_FRONTAGE_CORRIDOR_M):
+                                             BUILDING_REACH_CORRIDOR_M):
                         _anchor(px, py, lv, Point(px, py))
                         anchored = True
         if not anchored:                     # small / no qualifying frontage side

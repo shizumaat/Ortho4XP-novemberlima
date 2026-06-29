@@ -39,9 +39,10 @@ import os
 from typing import Callable, Dict, List, Tuple
 
 from auto_patch.config import (
-    BUILDING_FRONTAGE_CORRIDOR_M, BUILDING_FULL_FRONTAGE,
+    BUILDING_FULL_FRONTAGE,
     BUILDING_FULL_FRONTAGE_AREA_M2, TAXI_MAX_GRADE, VISIBLE_CHORD_CONNECT,
 )
+from auto_patch.grade_law import APRON_MAX_GRADE, BUILDING_REACH_CORRIDOR_M
 from auto_patch.layout import (
     ROLE_APRON, ROLE_BUILDING, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL, ROLE_RUNWAY, ROLE_SECONDARY_PARALLEL, ROLE_STUB,
@@ -50,22 +51,11 @@ from auto_patch.layout import (
 __all__ = ["building_feasible_levels", "reach_band_unified",
            "runway_edge_anchors"]
 
-# A taxi centerline ENDPOINT counts as a runway CONTACT (a real route entry onto
-# the runway) when it lies within this distance of the runway POLYGON EDGE (or
-# inside the polygon).  Measured against the runway EDGE, NOT its sparse ring
-# VERTICES (user 2026-06-24: EVERY taxiway that touches the runway must anchor —
-# a taxiway meeting a long runway edge mid-span is far from any ring VERTEX but
-# ~0 from the EDGE; the old vertex-distance test missed 37/51 HECA contacts →
-# detour-credited corridors → spine ramps).
-_CONTACT_EDGE_TOL_M = 12.0
-
 # Pavement a building must touch to count as airside-served (else → DEM).
 _AIRSIDE_ROLES = frozenset({
     ROLE_APRON, ROLE_JUNCTION, ROLE_RUNWAY, ROLE_PRIMARY_PARALLEL,
     ROLE_SECONDARY_PARALLEL, ROLE_STUB, ROLE_CROSS_CONNECTOR,
 })
-_APRON_CAP = 0.01          # apron grade outside the taxiway-width corridor
-_ENTRY_CAP = 0.015         # runway-threshold → nearest taxi node stub
 _TAXI_HALF_W_M = 7.5       # taxiway half-width corridor (perp split point)
 _TOUCH_TOL_M = 2.0         # building↔airside distance to count as "touching"
 _INF = float("inf")
@@ -212,7 +202,7 @@ def _build_skeleton_band(layout, G):
         except Exception:                                     # pragma: no cover
             return None
         off = math.hypot(G.pos[j][0] - x, G.pos[j][1] - y)
-        slack = _APRON_CAP * off
+        slack = APRON_MAX_GRADE * off
         return (node_floor[j] - slack, node_ceil[j] + slack)
 
     return band
@@ -329,7 +319,7 @@ def reach_band_unified(layout, G):
             return _fallback(x, y)
         ecap = cap_of.get(id(ln), TAXI_MAX_GRADE)
         perp_climb = (ecap * min(perp, _TAXI_HALF_W_M)
-                      + _APRON_CAP * max(0.0, perp - _TAXI_HALF_W_M))
+                      + APRON_MAX_GRADE * max(0.0, perp - _TAXI_HALF_W_M))
         floor, ceil = -_INF, _INF
         for (ae, cdm) in anchors:
             cands = []
@@ -470,7 +460,7 @@ def building_feasible_levels(
         if (full_frontage and cls
                 and s.polygon.area >= BUILDING_FULL_FRONTAGE_AREA_M2):
             b = _frontage_band(s.polygon, band, cls, vis,
-                               BUILDING_FRONTAGE_CORRIDOR_M)
+                               BUILDING_REACH_CORRIDOR_M)
         if b is None:
             b = band(c.x, c.y)
         if b is None:
