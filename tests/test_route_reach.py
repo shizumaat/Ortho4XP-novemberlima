@@ -20,16 +20,23 @@ def _cyxy():
 
 
 def test_route_reach_detects_incompatible_apron():
-    """ANTI-GAMING: the validator must FLAG the west apron whose feeder taxiways
-    arrive at mutually unreachable elevations (so the zero-gate cannot be faked by
-    a no-op check)."""
+    """ANTI-GAMING: the validator must FLAG a no-building apron whose feeder
+    taxiways arrive at incompatible elevations (so the zero-gate cannot be faked
+    by a no-op check).
+
+    The big WEST apron at ~(298, 342) used to be the example, but the edge-skeleton
+    reach (O4_SKELETON_REACH, 2026-06-28) gave its no-centerline feeders a reach
+    band and they converged — it is genuinely fixed now, not hidden.  The remaining
+    flagged cases are the FEEDER-CONVERGENCE family: small no-building aprons whose
+    feeders HAVE a band (reachable) but the solver has not yet pulled them to a
+    shared in-band level (the not-yet-built half of route-reach).  Guard on the
+    ~640 m² apron at ~(-530, 1006) until that solver rule lands."""
     from auto_patch.grade_graph_validate import route_reach_violations
     v = route_reach_violations(_cyxy())
     assert v, "route_reach_violations found nothing — the checker is a no-op"
-    # the big west apron is around (298, 342) in local meters, worst pair ~2.7%.
-    big = [x for x in v if abs(x[5] - 298) < 80 and abs(x[6] - 342) < 80]
-    assert big, (
-        f"the incompatible west apron was not flagged; got "
+    flagged = [x for x in v if abs(x[5] + 530) < 80 and abs(x[6] - 1006) < 80]
+    assert flagged, (
+        f"the incompatible feeder-convergence apron was not flagged; got "
         f"{[(round(p, 2), round(x), round(y)) for (p, _c, _d, _r, _s, x, y) in v]}")
 
 

@@ -118,6 +118,106 @@ def _nearest_visible_centerline(c, cls, vis):
     return min(cls, key=lambda L: L.distance(c))
 
 
+def _build_skeleton_band(layout, G):
+    """EDGE-SKELETON reach for NO-CENTERLINE pavement (user 2026-06-28).
+
+    A taxiway/apron that has no taxi centerline never enters the centerline spine,
+    so :func:`reach_band_unified`'s centerline path returns ``None`` for it and the
+    apron it feeds becomes an unreachable island (no band → ``route_reach`` flags,
+    feeders land at incompatible DEM levels).  This builds a SECOND reach over the
+    pavement's WELDED EDGE SKELETON — ``G.edges`` (abutting shapes share EXACT node
+    indices, so connectivity needs no perpendicular tolerance) unioned with the
+    centerline ``spine_adj`` — anchored at BOTH the centerline→runway joins
+    (``G.runway_anchor``) AND every pavement node COINCIDENT with a runway segment
+    (a no-centerline taxiway reaches the runway through a CROSSING the
+    centerline-endpoint anchor misses).  Returns ``band(x, y) -> (floor, ceiling)
+    | None`` = the nearest skeleton node's reach interval, widened by the apron cap
+    over the offset to it.  Used ONLY where the centerline band is ``None``, so
+    centerlined airports are unchanged."""
+    from shapely.geometry import Point
+    from shapely.strtree import STRtree
+    from auto_patch.layout import ROLE_RUNWAY
+    from auto_patch.grade_graph_validate import _shape_elevs, _open_ring
+
+    def _d(a, b):
+        pa, pb = G.pos.get(a), G.pos.get(b)
+        return math.hypot(pa[0] - pb[0], pa[1] - pb[1]) if pa and pb else 1e-3
+
+    # Augmented adjacency: centerline spine ∪ welded edge skeleton.
+    adj: dict = {}
+
+    def _add(a, b, w):
+        adj.setdefault(a, []).append((b, w))
+        adj.setdefault(b, []).append((a, w))
+
+    for u, nbrs in G.spine_adj.items():
+        for (v, b) in nbrs:
+            _add(u, v, b)
+    for (a, b, cap, _sp) in G.edges:
+        if a in G.pos and b in G.pos:
+            _add(a, b, cap.at(_d(a, b), 0.0))
+
+    # Anchors: centerline→runway joins + runway-coincident pavement nodes.
+    anchor_elev = dict(G.runway_anchor)
+    pos_to_idx = {(round(x, 3), round(y, 3)): i for (i, (x, y)) in G.pos.items()}
+    for s in layout.shapes:
+        if (s.role != ROLE_RUNWAY or s.polygon is None or s.polygon.is_empty):
+            continue
+        ring = _open_ring(list(s.polygon.exterior.coords))
+        elevs = _shape_elevs(s, len(ring))
+        if elevs is None:
+            continue
+        for (x, y), e in zip(ring, elevs):
+            i = pos_to_idx.get((round(x, 3), round(y, 3)))
+            if i is not None and e is not None and i not in anchor_elev:
+                anchor_elev[i] = float(e)
+    if not anchor_elev:
+        return lambda x, y: None
+
+    def _capdist(src):
+        dist = {src: 0.0}
+        pq = [(0.0, src)]
+        while pq:
+            d, u = heapq.heappop(pq)
+            if d > dist.get(u, _INF):
+                continue
+            for (v, budget) in adj.get(u, ()):
+                nd = d + budget
+                if nd < dist.get(v, _INF):
+                    dist[v] = nd
+                    heapq.heappush(pq, (nd, v))
+        return dist
+
+    node_floor: dict = {}
+    node_ceil: dict = {}
+    for k, ae in anchor_elev.items():
+        if k not in adj:
+            continue
+        for v, dd in _capdist(k).items():
+            node_ceil[v] = min(node_ceil.get(v, _INF), ae + dd)
+            node_floor[v] = max(node_floor.get(v, -_INF), ae - dd)
+    if not node_ceil:
+        return lambda x, y: None
+
+    bidx = list(node_ceil.keys())
+    bpts = [Point(*G.pos[i]) for i in bidx if i in G.pos]
+    bidx = [i for i in bidx if i in G.pos]
+    if not bpts:
+        return lambda x, y: None
+    tree = STRtree(bpts)
+
+    def band(x, y):
+        try:
+            j = bidx[int(tree.nearest(Point(x, y)))]
+        except Exception:                                     # pragma: no cover
+            return None
+        off = math.hypot(G.pos[j][0] - x, G.pos[j][1] - y)
+        slack = _APRON_CAP * off
+        return (node_floor[j] - slack, node_ceil[j] + slack)
+
+    return band
+
+
 def reach_band_unified(layout, G):
     """The reach band computed on THE unified grade graph — the SAME graph the
     spine solves on and the validator checks (user 2026-06-27, "stop building the
@@ -193,6 +293,16 @@ def reach_band_unified(layout, G):
     cap_of = {id(ln): c for (ln, c) in cls_cap}
     vis = _pavement_visibility(layout) if VISIBLE_CHORD_CONNECT else None
 
+    # EDGE-SKELETON fallback (user 2026-06-28): no-centerline pavement returns
+    # None below; the skeleton band reaches it over the welded edge graph +
+    # runway-contact anchors.  Used ONLY where the centerline path is None, so
+    # centerlined airports are unchanged.  Gate O4_SKELETON_REACH=0 disables.
+    _skel_band = (_build_skeleton_band(layout, G)
+                  if os.environ.get("O4_SKELETON_REACH", "1") == "1" else None)
+
+    def _fallback(x, y):
+        return _skel_band(x, y) if _skel_band is not None else None
+
     def band(x, y):
         c = Point(x, y)
         ln = (_nearest_visible_centerline(c, cls, vis) if vis is not None
@@ -216,7 +326,7 @@ def reach_band_unified(layout, G):
         kA = _nn(A[0])
         kB = _nn(B[0])
         if kA is None and kB is None:
-            return None
+            return _fallback(x, y)
         ecap = cap_of.get(id(ln), TAXI_MAX_GRADE)
         perp_climb = (ecap * min(perp, _TAXI_HALF_W_M)
                       + _APRON_CAP * max(0.0, perp - _TAXI_HALF_W_M))
@@ -233,7 +343,7 @@ def reach_band_unified(layout, G):
             ceil = min(ceil, ae + budget)
             floor = max(floor, ae - budget)
         if ceil >= _INF:
-            return None
+            return _fallback(x, y)
         return (floor, ceil)
 
     return band

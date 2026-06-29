@@ -42,13 +42,56 @@ The "purist" OSM-path (reconstruct G from the shipped per-tile patch) is not don
 Also re-baseline `test_pavement_grade` route-band counts if you fold the band check
 into the OSM path.
 
-### Original item 2 — apron FEEDER-REACH rule in grade_law — STILL OPEN
-`route_reach_violations` surfaces it; `test_cyxy_route_reach_zero` is xfail (solver
-doesn't yet converge incompatible feeders). DEFINE the rule (feeders — taxiways AND
-abutting building pads — converge to a shared reachable level) in `grade_law`, have
-the SOLVER apply it, gate it. Split feasible (gate) from fundamental (documented
-transition). Note: the route-band `pinned` class (empty band) is the per-vertex
-cousin of this — HECA has ~1,300 pinned (multi-runway).
+### Original item 2 — apron FEEDER-REACH rule — PART 1 (CONNECTIVITY) DONE; PART 2 (CONVERGENCE) OPEN
+Item 2 splits into two distinct sub-problems, root-caused this session via CYXY's
+65 893 m² west apron (the `test_route_reach` example):
+
+**PART 1 — reach CONNECTIVITY (DONE, gate `O4_SKELETON_REACH` default ON).**
+The west apron's feeder taxiways are DISCOVERED (synthesised from pavement, ref
+`TX*`, no apt.dat centerline) — they live on `layout._discovered_centerlines`, NOT
+`apt_taxi_centerlines`, so `_build_global_spine` / `_runway_anchors` (centerline-
+based) never gave them a spine or a runway anchor. Result: the whole west complex
+(apron + TX1–TX4 + local rects, ~113 nodes incl. runway segments) was a graph
+ISLAND disconnected from every runway anchor → `reach_band_unified` returned `None`
+there → no band → feeders unconstrained → they landed 16 m apart in the bowl
+(684/689/674) → `route_reach` flagged. The full pavement EDGE graph didn't reach it
+either, because the only bridge to the runway is a runway CROSSING (runways carry no
+spine edges and only centerline-endpoint anchors).
+FIX (`building_feasibility._build_skeleton_band`): a SECOND reach over the WELDED
+EDGE SKELETON (`G.edges` — abutting shapes share exact node indices, no perp
+tolerance) ∪ `spine_adj`, anchored at `G.runway_anchor` ∪ every pavement node
+COINCIDENT with a runway segment (captures crossings the centerline-endpoint anchor
+misses: 6→90 anchors at CYXY). `reach_band_unified.band()` uses it ONLY as a
+FALLBACK where the centerline path returns `None` (the islands) — so centerlined
+airports are byte-identical AND the smooth centerline spine stays primary for
+curving taxiways (and is REQUIRED for item 3's anisotropic `Allowance`: the
+centerline gives the longitudinal reference an edge-skeleton has no direction for).
+RESULT: west apron gets band (692,699); feeders converge to 693/694/693;
+`route_reach` 3→2. Full suite = 19 baseline, no regressions (only the anti-gaming
+guard fired, because the west apron is genuinely fixed — re-pointed to the remaining
+640 m² apron at (-530,1006)).
+- ⚠ Design note (USER-confirmed): edge-skeleton ONLY where no centerline.
+  Distance over a chord/edge graph is NOT route-faithful (it under-measures vs the
+  curving route — CYXY served-node ceilings up to 24 m tighter), so it must NOT
+  replace a real centerline spine. For a FEASIBILITY band this chord distance is
+  actually the *rigorous* tightest-constraint bound; sparse "port" skeletons were
+  MEASURED WORSE (tighter + less coverage — port-to-port diagonals are also
+  short-circuits). Route-faithful distance fundamentally requires a centerline arc.
+
+**PART 2 — feeder CONVERGENCE (STILL OPEN).** The 2 remaining flagged aprons
+(small, no-building: 640 m² @(-530,1006), 280 m² @(-321,-422)) are NOT connectivity
+cases — they HAVE bands (reachable), with NON-EMPTY feeder-band intersections (a
+common level exists), but the solver leaves each feeder at its own DEM-driven level
+within the band (6 m / 2 m apart over short contact gaps). The "NO-BUILDING APRON
+FILL" comment in `route_profile/solve.py:77` describes seating each such apron FLAT
+at the shared reachable level but is NOT implemented (aprons rely on `node_band` +
+body fill, which doesn't force a single level). BUILD: a `build_nobuilding_apron_seats`
+(parallel to `build_building_seats`) that computes L = clamp(DEM, ∩ feeder reach
+bands) and seats the apron + its feeder-contact nodes at L (heaviest anchor), so the
+spine grades each feeder to L. Clears the 2 aprons → `test_cyxy_route_reach_zero`
+XPASS; then convert the anti-gaming guard to a SYNTHETIC case (don't depend on a
+real airport staying broken). The route-band `pinned` class (empty band) is the
+per-vertex cousin — HECA ~1,300 (multi-runway, fundamental).
 
 ### Original item 3 — anisotropic CURVE FIX — STILL OPEN (untouched)
 Plumbing is in (`Allowance(cL,cT)`, edges carry it). Supply real Δs∥/Δs⊥ per edge
