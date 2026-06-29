@@ -218,6 +218,67 @@ class Airport:
         return self.reference_elev_ft * FT_TO_M
 
 
+@dataclass
+class TaxiCenterline:
+    """One taxi-route centerline, built by NETWORK CONNECTIVITY (user 2026-06-29).
+
+    The taxi route network is grouped by *connectivity*, never by NAME: a route
+    that merely changes name along its length (an unnamed apron lane continuing
+    into named taxiway "F", CYXY ~U12→F) stays ONE continuous polyline, split only
+    at genuine junctions (network degree ≥ 3) and runway contacts.  Grouping by
+    name used to sever such routes into dangling pieces and break the spine; the
+    name carries no structural meaning here — it is a label only.
+
+    ``seg_sizes`` holds the ICAO design-code letter ("A".."F", or "" if unknown)
+    for EACH segment of ``line`` (``len(seg_sizes) == len(line.coords) - 1``), read
+    straight off the apt.dat row-1202 ``TaxiEdge.kind`` — so the per-segment width /
+    grade cap travels on the geometry, not via a name→letter table.  A route may
+    legitimately change width along its length; ``size_at_*`` resolves the letter.
+
+    ``is_service`` marks a ground-vehicle (row-1206) route — NOT an aircraft taxi
+    spine (it grades at the service-road cap and is excluded from the taxi spine),
+    replacing the old ``SVC*`` name-prefix test.
+    """
+    line: "LineString"
+    seg_sizes: list = field(default_factory=list)
+    is_service: bool = False
+    name: str = ""                       # label only (debug / reporting)
+
+    def _seg_index_at_arc(self, s: float) -> int:
+        cs = list(self.line.coords)
+        acc = 0.0
+        for i in range(len(cs) - 1):
+            d = math.hypot(cs[i + 1][0] - cs[i][0], cs[i + 1][1] - cs[i][1])
+            if s <= acc + d + 1e-9:
+                return i
+            acc += d
+        return max(0, len(cs) - 2)
+
+    def size_at_arc(self, s: float) -> str:
+        """ICAO size letter of the segment at arc-length ``s`` along ``line``."""
+        if not self.seg_sizes:
+            return ""
+        i = self._seg_index_at_arc(s)
+        return self.seg_sizes[i] if 0 <= i < len(self.seg_sizes) else ""
+
+    def size_at_point(self, x: float, y: float) -> str:
+        """ICAO size letter nearest point ``(x, y)`` (its projection on ``line``)."""
+        try:
+            from shapely.geometry import Point
+            return self.size_at_arc(self.line.project(Point(x, y)))
+        except Exception:                                     # pragma: no cover
+            return self.seg_sizes[0] if self.seg_sizes else ""
+
+    def dominant_size(self) -> str:
+        """The widest size letter on the route (for a single-letter summary)."""
+        order = "ABCDEF"
+        best = ""
+        for s in self.seg_sizes:
+            if s in order and (best == "" or order.index(s) > order.index(best)):
+                best = s
+        return best
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Public API: locating the right apt.dat
 # ──────────────────────────────────────────────────────────────────────
@@ -1424,129 +1485,6 @@ def _is_sized_taxiway_edge(e) -> bool:
     return e.kind.split("_")[-1].upper() in ("A", "B", "C", "D", "E", "F")
 
 
-def unnamed_edge_component_names(airport: Airport) -> dict[int, str]:
-    """Assign a SYNTHETIC, UNIQUE name to every UNNAMED taxiway route so its
-    apt.dat ICAO size code travels WITH it by name (instead of being dropped when
-    :func:`taxi_centerlines` groups edges by name).
-
-    Returns ``{edge_index -> "~U<k>"}`` for each unnamed sized taxiway edge,
-    where edges that share a node are one connected component (a multi-segment
-    unnamed arm = ONE route = ONE name).  Components are ordered deterministically
-    by the smallest taxi-node id they touch, so the serial is stable across runs.
-
-    Edges sharing a node always land in the same component, so this NEVER turns
-    a continuous unnamed run into a multi-name junction — junction detection in
-    :func:`taxi_centerlines` is preserved (two edges at a node ⇒ same ~U name ⇒
-    not a junction-by-name, exactly as the old empty-name grouping behaved)."""
-    from .config import SYNTH_TAXI_NAME_PREFIX
-    parent: dict[int, int] = {}
-
-    def find(a: int) -> int:
-        parent.setdefault(a, a)
-        while parent[a] != a:
-            parent[a] = parent[parent[a]]
-            a = parent[a]
-        return a
-
-    def union(a: int, b: int) -> None:
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[min(ra, rb)] = min(ra, rb)
-            parent[max(ra, rb)] = min(ra, rb)
-
-    unnamed_idx: list[int] = []
-    for i, e in enumerate(airport.taxi_edges):
-        if e.name or not _is_sized_taxiway_edge(e):
-            continue
-        union(e.node_from, e.node_to)
-        unnamed_idx.append(i)
-    if not unnamed_idx:
-        return {}
-    # component root -> smallest node id seen (deterministic ordering key)
-    comp_min: dict[int, int] = {}
-    for i in unnamed_idx:
-        e = airport.taxi_edges[i]
-        r = find(e.node_from)
-        for nid in (e.node_from, e.node_to):
-            if r not in comp_min or nid < comp_min[r]:
-                comp_min[r] = nid
-    order = sorted(comp_min, key=lambda r: comp_min[r])
-    serial = {r: f"{SYNTH_TAXI_NAME_PREFIX}{k + 1}" for k, r in enumerate(order)}
-    return {i: serial[find(airport.taxi_edges[i].node_from)]
-            for i in unnamed_idx}
-
-
-def taxi_size_letters(airport: Airport) -> dict[str, str]:
-    """Map each taxiway NAME to its ICAO design code LETTER ("A".."F").
-
-    Read from the apt.dat row-1202 taxi-edge "size" field
-    (``TaxiEdge.kind`` == ``"taxiway_C"`` → ``"C"``).  This is the
-    authoritative aircraft-size / width class for a taxiway and is
-    intended to be shared by any feature that needs it (wingtip
-    clearance, shoulder widths, fillet sizing, etc.) rather than
-    re-derived from measured pavement geometry.
-
-    When a taxiway's edges disagree (rare), the WIDEST letter seen is
-    kept.  ``kind == "runway"`` edges and unnamed connectors are
-    skipped.  Returns an empty dict for airports with no taxi network
-    (e.g. when the graph came from OSM).
-    """
-    letters: dict[str, str] = {}
-    # Unnamed routes get a synthetic ~U name so their size travels by name too.
-    synth = unnamed_edge_component_names(airport)
-    for i, e in enumerate(airport.taxi_edges):
-        if not e.kind.startswith("taxiway_"):
-            continue
-        lt = e.kind.split("_")[-1].upper()
-        if lt not in ("A", "B", "C", "D", "E", "F"):
-            continue
-        name = e.name or synth.get(i)
-        if not name:
-            continue
-        prev = letters.get(name)
-        if prev is None or lt > prev:
-            letters[name] = lt
-    return letters
-
-
-def coded_taxi_edge_segments(
-        airport: Airport,
-        to_m: "Callable[[float, float], tuple[float, float]]",
-) -> "list[tuple[LineString, str]]":
-    """Per-edge ``(LineString_in_meter_space, ICAO letter)`` for every
-    row-1202 taxiway edge that carries a size code (``"taxiway_A"`` …
-    ``"_F"``), **including UNNAMED edges**.
-
-    `taxi_size_letters` maps NAME → letter and skips unnamed connector
-    edges, so the size of the unnamed "arm" connectors (which still carry
-    a ``taxiway_A``/``_B`` code in apt.dat) is otherwise lost.  This
-    returns the raw per-edge segments + letters so a caller can recover an
-    unnamed centerline's ICAO size by geometry (plan P3a — the CYXY gate
-    arms to the terminal).  Runway-typed edges are excluded."""
-    from shapely.geometry import LineString
-    nodes = airport.taxi_nodes
-    out: "list[tuple[LineString, str]]" = []
-    for e in airport.taxi_edges:
-        if not e.kind.startswith("taxiway_"):
-            continue
-        lt = e.kind.split("_")[-1].upper()
-        if lt not in ("A", "B", "C", "D", "E", "F"):
-            continue
-        a = nodes.get(e.node_from)
-        b = nodes.get(e.node_to)
-        if a is None or b is None:
-            continue
-        ax, ay = to_m(a.lon, a.lat)
-        bx, by = to_m(b.lon, b.lat)
-        if (ax - bx) ** 2 + (ay - by) ** 2 < 0.01:
-            continue
-        try:
-            out.append((LineString([(ax, ay), (bx, by)]), lt))
-        except (ValueError, TypeError):
-            continue
-    return out
-
-
 def painted_taxi_centerlines(
         airport: Airport,
         to_m: "Callable[[float, float], tuple[float, float]]",
@@ -1641,53 +1579,35 @@ def taxi_centerlines(
         airport: Airport,
         to_m: Callable[[float, float], tuple[float, float]],
         rwy_centerlines: list[LineString] | None = None,
-) -> list[tuple[LineString, str]]:
-    """Build taxi centerlines from apt.dat 1201/1202 rows.
+) -> list[TaxiCenterline]:
+    """Build taxi centerlines from apt.dat 1201/1202 rows, BY CONNECTIVITY.
 
-    Returns a list of ``(LineString_in_meter_space, taxiway_name)``
-    pairs — the same shape as
-    :func:`pavement.centerlines._extract_osm_taxi_centerlines` so the
-    rect builder can consume either source interchangeably.
+    Returns a list of :class:`TaxiCenterline` — each a continuous route polyline
+    (in meter space) carrying its PER-SEGMENT ICAO size.
 
-    Architecture (user 2026-05-15):
+    Model (user 2026-06-29): the routing graph is grouped by **network
+    connectivity**, never by NAME.  Routes are the maximal chains of sized taxi
+    edges that run through degree-2 nodes, split ONLY at genuine junctions
+    (network degree ≥ 3) and runway contacts.  A route that merely changes name
+    along its length — an unnamed apron lane continuing into a named taxiway
+    (CYXY ~U12 → F) — stays ONE continuous polyline, so the spine never sees a
+    manufactured gap at the name boundary (the old per-NAME grouping severed it
+    into two dangling pieces and dead-ended the spine).
 
-      1. Group taxi edges by ``name``.  Drop ``kind == "runway"``
-         edges (taxi paths crossing a runway — not pavement we emit).
-      2. Identify **chart-level junction nodes** — nodes referenced
-         by edges of ≥ 2 distinct taxi names OR endpoints of any
-         runway-typed edge.  These are the authoritative locations
-         where one taxiway's pavement ends and an adjacent taxiway /
-         runway's pavement begins.
-      3. Linemerge each per-name group, then **pre-split every
-         resulting polyline at any interior vertex that coincides
-         with a chart-level junction node** so each emitted polyline
-         runs cleanly between two junctions.
-      4. RDP-simplify each pre-split sub-polyline (1.5 m tol) to drop
-         tiny chart noise; emit each as ONE centerline.
+    The ICAO size travels PER SEGMENT, straight off each edge's ``kind``
+    (``taxiway_C`` → "C"), so width / grade-cap is a property of the geometry, not
+    a name→letter table — a route may change width along its length and each
+    segment keeps its own size.
 
-    Pre-splitting at junctions (instead of bend-splitting after the
-    fact via ``split_merged_centerline``) avoids three cascading
-    failure modes that previously dropped pavement to junction
-    residue (CYXY D-west, user 2026-05-15):
-
-      * Mid-corridor curves treated as junction territory and
-        dropped from the centerline (the curve-skip in
-        ``split_merged_centerline`` over-fires for taxiways whose
-        polyline curves through but doesn't end at the runway).
-      * Bend-induced splits create short sub-segments that the
-        downstream ``_split_centerlines_at_points`` 30 m fixed
-        diagonal-stub margin then consumes entirely.
-      * RDP simplification dropping a runway-crossing node because
-        it's near-collinear with surrounding curve vertices, leaving
-        ``_split_centerlines_at_points`` with no anchor to split at.
-
-    Pre-splitting at junctions makes the chart-level junction
-    structure the authoritative geometry source — single-name
-    polylines remain single rects even when they curve, multi-name
-    junctions become explicit split points.
+    Each connectivity route is then bend-split (``split_merged_centerline``: RDP +
+    curve-skip) for the rect decomposition exactly as before; the bend splits land
+    on shared vertices, so the spine still connects across them — only the
+    name-induced splits (which could fall on a vertexless interior point) are
+    gone.  Each emitted piece re-derives its per-segment size from the parent
+    route, so size is preserved through the split.
     """
-    from shapely.geometry import LineString, MultiLineString
-    from shapely.ops import linemerge
+    from shapely.geometry import LineString, Point
+    from collections import defaultdict
     from .pavement.centerlines import split_merged_centerline
 
     nodes = airport.taxi_nodes
@@ -1695,98 +1615,113 @@ def taxi_centerlines(
     if not nodes or not edges:
         return []
 
-    # ── Step 1: group taxi edges by name + identify junction nodes ──
-    # Unnamed sized taxiway edges get a synthetic ~U name (one per connected
-    # component) so their apt.dat size code travels by name and each unnamed
-    # route is a tracked, distinct centerline rather than all collapsing into "".
-    synth_names = unnamed_edge_component_names(airport)
-    by_name: dict[str, list[LineString]] = {}
-    node_names: dict[int, set[str]] = {}
-    runway_endpoint_node_ids: set[int] = set()
+    def _size_of(edge) -> str:
+        if edge.kind.startswith("taxiway_"):
+            lt = edge.kind.split("_")[-1].upper()
+            return lt if lt in ("A", "B", "C", "D", "E", "F") else ""
+        return ""
+
+    # ── Build the sized-taxi-edge graph (BY CONNECTIVITY, not name) ──
+    pos: dict[int, tuple[float, float]] = {}
+
+    def _pos(nid):
+        if nid not in pos:
+            n = nodes[nid]
+            pos[nid] = to_m(n.lon, n.lat)
+        return pos[nid]
+
+    adj: dict[int, list] = defaultdict(list)   # node -> [(other, size, name, key)]
+    deg: dict[int, int] = defaultdict(int)
+    runway_contact: set[int] = set()
     for ei, edge in enumerate(edges):
         if edge.kind == "runway":
-            # Runway-typed edges don't contribute pavement (the
-            # runway emit covers that footprint).  But every node
-            # they touch IS a chart-level junction — that's where
-            # a taxiway crosses or terminates on a runway.
+            # A runway-typed edge contributes no pavement, but every node it
+            # touches is a chart-level junction (a taxiway terminating on / crossing
+            # a runway) — a route ends there.
             if edge.node_from in nodes:
-                runway_endpoint_node_ids.add(edge.node_from)
+                runway_contact.add(edge.node_from)
             if edge.node_to in nodes:
-                runway_endpoint_node_ids.add(edge.node_to)
+                runway_contact.add(edge.node_to)
             continue
-        if (edge.node_from not in nodes
-                or edge.node_to not in nodes):
+        if edge.node_from not in nodes or edge.node_to not in nodes:
             continue
-        na = nodes[edge.node_from]
-        nb = nodes[edge.node_to]
-        ax, ay = to_m(na.lon, na.lat)
-        bx, by = to_m(nb.lon, nb.lat)
+        ax, ay = _pos(edge.node_from)
+        bx, by = _pos(edge.node_to)
         if (ax - bx) ** 2 + (ay - by) ** 2 < 0.01:
-            # Collapsed edge (both ends at the same node within 0.1 m).
+            continue                               # collapsed edge
+        sz = _size_of(edge)
+        nm = edge.name or ""
+        adj[edge.node_from].append((edge.node_to, sz, nm, ei))
+        adj[edge.node_to].append((edge.node_from, sz, nm, ei))
+        deg[edge.node_from] += 1
+        deg[edge.node_to] += 1
+    if not adj:
+        return []
+
+    def _is_break(n: int) -> bool:
+        # A route ends at a real junction (degree ≠ 2) or a runway contact; a
+        # degree-2 node is a pass-through, even across a name change.
+        return deg[n] != 2 or n in runway_contact
+
+    # ── Walk maximal connectivity chains into routes (node seq + per-seg size) ──
+    used: set[int] = set()
+    routes: list[tuple[list[int], list[str], list[str]]] = []
+
+    def _walk(start: int, nbr) -> tuple[list[int], list[str], list[str]]:
+        node_seq = [start]
+        seg_sizes: list[str] = []
+        names: list[str] = []
+        nxt, sz, nm, key = nbr
+        while key not in used:
+            used.add(key)
+            node_seq.append(nxt)
+            seg_sizes.append(sz)
+            names.append(nm)
+            if _is_break(nxt):
+                break
+            conts = [c for c in adj[nxt] if c[3] != key and c[3] not in used]
+            if len(conts) != 1:
+                break                              # not a clean degree-2 pass
+            nxt, sz, nm, key = conts[0]
+        return node_seq, seg_sizes, names
+
+    for b in [n for n in adj if _is_break(n)]:     # break→break chains first
+        for nbr in adj[b]:
+            if nbr[3] not in used:
+                routes.append(_walk(b, nbr))
+    for n in list(adj):                            # any leftover (pure loops)
+        for nbr in adj[n]:
+            if nbr[3] not in used:
+                routes.append(_walk(n, nbr))
+
+    def _piece_sizes(piece_line, parent: TaxiCenterline) -> list[str]:
+        cs = list(piece_line.coords)
+        return [parent.size_at_point(0.5 * (cs[i][0] + cs[i + 1][0]),
+                                     0.5 * (cs[i][1] + cs[i + 1][1]))
+                for i in range(len(cs) - 1)]
+
+    # ── Build a continuous route, then bend-split it for the rect decomposition ──
+    out: list[TaxiCenterline] = []
+    for (node_seq, seg_sizes, names) in routes:
+        if len(node_seq) < 2:
             continue
+        coords = [_pos(n) for n in node_seq]
         try:
-            seg = LineString([(ax, ay), (bx, by)])
+            route_line = LineString(coords)
         except (ValueError, TypeError):
             continue
-        ename = edge.name or synth_names.get(ei, "")
-        by_name.setdefault(ename, []).append(seg)
-        node_names.setdefault(edge.node_from, set()).add(ename)
-        node_names.setdefault(edge.node_to, set()).add(ename)
-
-    # Junction = node referenced by ≥ 2 distinct taxi names OR by
-    # any runway-typed edge.  Convert to a set of metric-space
-    # positions (rounded to 0.1 m) for fast vertex matching.
-    junction_pts_m: set = set(
-        (round(to_m(nodes[nid].lon, nodes[nid].lat)[0], 1),
-         round(to_m(nodes[nid].lon, nodes[nid].lat)[1], 1))
-        for nid in (set(
-            n for n, ns in node_names.items() if len(ns) >= 2)
-            | runway_endpoint_node_ids)
-        if nid in nodes)
-
-    out: list[tuple[LineString, str]] = []
-    for name, segments in by_name.items():
-        # ── Step 2: linemerge per-name into connected polyline(s) ──
-        merged_lines: list[LineString] = []
-        if len(segments) == 1:
-            merged_lines = [segments[0]]
-        else:
-            try:
-                merged = linemerge(MultiLineString(segments))
-            except (ValueError, TypeError):
-                merged_lines = list(segments)
-            else:
-                if merged.is_empty:
-                    continue
-                elif merged.geom_type == "LineString":
-                    merged_lines = [merged]
-                elif merged.geom_type == "MultiLineString":
-                    merged_lines = [ls for ls in merged.geoms
-                                    if not ls.is_empty]
-
-        # ── Step 3: pre-split at interior junction vertices.
-        # Each sub-polyline now runs cleanly between two chart-level
-        # junctions.  Mid-polyline curves remain part of a single
-        # sub-polyline — they're route bends within ONE taxiway,
-        # not transitions to another ref. ──
-        # ── Step 4: bend-split each sub-polyline.  This preserves
-        # the existing multi-rect decomposition of curving taxiways
-        # (e.g. CYXY's E north chain emits as primary E + stub E
-        # rects, not one bent mega-rect).  ``split_merged_centerline``
-        # also handles RDP-simplification and the curve-skip rule
-        # for true-junction curves (a taxiway curving onto a runway
-        # threshold).  Its at-endpoint check (see centerlines.py)
-        # prevents the curve-skip from firing on mid-polyline route
-        # curves — necessary because pre-split sub-polylines may
-        # still contain curve clusters that aren't at the runway
-        # endpoint (e.g. CYXY's D-west bends at apt.dat nodes 2 and
-        # 1, mid-polyline between E_split and the runway crossing). ──
-        for ls in merged_lines:
-            sub_polylines = _split_polyline_at_junction_vertices(
-                ls, junction_pts_m)
-            for sub_ls in sub_polylines:
-                out.extend(split_merged_centerline(
-                    sub_ls, name, rwy_centerlines))
+        if route_line.is_empty or route_line.length < 1e-6:
+            continue
+        label = next((nm for nm in names if nm), "")   # representative apt.dat name
+        parent = TaxiCenterline(line=route_line, seg_sizes=list(seg_sizes),
+                                name=label)
+        for piece_line, _nm in split_merged_centerline(
+                route_line, label, rwy_centerlines):
+            if piece_line is None or piece_line.is_empty:
+                continue
+            out.append(TaxiCenterline(
+                line=piece_line, seg_sizes=_piece_sizes(piece_line, parent),
+                name=label))
     return out
 
 
@@ -1831,7 +1766,7 @@ def service_road_centerlines(
             continue
         by_name.setdefault(edge.name, []).append(seg)
 
-    out: list[tuple[LineString, str]] = []
+    out: list[TaxiCenterline] = []
     for name, segments in by_name.items():
         if len(segments) == 1:
             merged_lines = [segments[0]]
@@ -1850,61 +1785,9 @@ def service_road_centerlines(
                                     if not ls.is_empty]
         for ls in merged_lines:
             if ls.length > 0:
-                out.append((ls, name))
+                # Ground-vehicle route: is_service marks it OUT of the taxi spine
+                # (no ICAO taxi size; graded at the service-road cap by role).
+                out.append(TaxiCenterline(
+                    line=ls, seg_sizes=[""] * max(0, len(ls.coords) - 1),
+                    is_service=True, name=name or ""))
     return out
-
-
-def _split_polyline_at_junction_vertices(
-    ls: "LineString",
-    junction_pts_m: "set",
-    tol: float = 0.5,
-) -> "list[LineString]":
-    """Split ``ls`` at every INTERIOR vertex that coincides (within
-    ``tol`` m) with a chart-level junction position.  Returns a list
-    of sub-polylines.  The polyline's own endpoints are not used as
-    split points — they bound the polyline naturally.
-
-    If the polyline has no interior junction vertices, returns
-    ``[ls]`` unchanged.
-    """
-    from shapely.geometry import LineString
-    try:
-        coords = list(ls.coords)
-    except (ValueError, TypeError):
-        return [ls]
-    if len(coords) < 3 or not junction_pts_m:
-        return [ls]
-    tol2 = tol * tol
-    split_indices: list[int] = []
-    for i in range(1, len(coords) - 1):
-        x, y = coords[i]
-        rx, ry = round(x, 1), round(y, 1)
-        if (rx, ry) in junction_pts_m:
-            split_indices.append(i)
-            continue
-        # Fallback: scan for any junction point within tol m.
-        # Cheap because junction_pts_m is small (typically < 30
-        # entries per airport).
-        for jx, jy in junction_pts_m:
-            if (x - jx) ** 2 + (y - jy) ** 2 <= tol2:
-                split_indices.append(i)
-                break
-    if not split_indices:
-        return [ls]
-    sub_lines: list[LineString] = []
-    start_idx = 0
-    for split_idx in split_indices:
-        sub_coords = coords[start_idx:split_idx + 1]
-        if len(sub_coords) >= 2:
-            try:
-                sub_lines.append(LineString(sub_coords))
-            except (ValueError, TypeError):
-                pass
-        start_idx = split_idx
-    sub_coords = coords[start_idx:]
-    if len(sub_coords) >= 2:
-        try:
-            sub_lines.append(LineString(sub_coords))
-        except (ValueError, TypeError):
-            pass
-    return sub_lines or [ls]

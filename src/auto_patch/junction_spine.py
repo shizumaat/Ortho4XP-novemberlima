@@ -132,7 +132,7 @@ def _open(ring):
 def _coords(items):
     out: List[LineString] = []
     for item in (items or []):
-        ln = item[0] if isinstance(item, tuple) else item
+        ln = item.line if hasattr(item, "line") else (item[0] if isinstance(item, tuple) else item)
         if ln is not None and not ln.is_empty:
             out.append(ln)
     return out
@@ -226,11 +226,12 @@ def _full_centerlines(layout):
     never land in a runway."""
     out: List[LineString] = []
     for item in (getattr(layout, "apt_taxi_centerlines", None) or []):
-        ln = item[0] if isinstance(item, tuple) else item
-        name = item[1] if (isinstance(item, tuple) and len(item) > 1) else ""
+        ln = item.line if hasattr(item, "line") else (item[0] if isinstance(item, tuple) else item)
+        name = item.name if hasattr(item, "name") else (item[1] if (isinstance(item, tuple) and len(item) > 1) else "")
+        is_svc = item.is_service if hasattr(item, "is_service") else _is_service_ref(name)
         if ln is None or ln.is_empty:
             continue
-        if _is_service_ref(name):
+        if is_svc:
             continue
         out.append(ln)
     return out

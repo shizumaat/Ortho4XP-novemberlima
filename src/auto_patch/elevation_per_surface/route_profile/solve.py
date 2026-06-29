@@ -362,7 +362,7 @@ def _seam_spine_anchors(layout, G, spine_adj, elev, base_hard,
     pinned = 0
     seen: set = set()
     for entry in (getattr(layout, "apt_taxi_centerlines", []) or []):
-        ln = entry[0] if isinstance(entry, (tuple, list)) else entry
+        ln = entry.line if hasattr(entry, "line") else (entry[0] if isinstance(entry, (tuple, list)) else entry)
         if ln is None or ln.is_empty:
             continue
         for cut in cut_lines:

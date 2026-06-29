@@ -263,7 +263,7 @@ def _corridor_segments(layout, split: bool = False,
     Rect source AXES already exclude ROLE_SERVICE_ROAD."""
     apt_segs: list = []
     for entry in (getattr(layout, "apt_taxi_centerlines", None) or []):
-        ls = entry[0] if isinstance(entry, (tuple, list)) else entry
+        ls = entry.line if hasattr(entry, "line") else (entry[0] if isinstance(entry, (tuple, list)) else entry)
         if (not include_roads and isinstance(entry, (tuple, list))
                 and len(entry) > 1 and str(entry[1]).startswith("SVC")):
             continue
@@ -1427,17 +1427,16 @@ def _collect_junction_axes(layout, polygon):
     """
     from shapely.geometry import LineString
     axes = []
-    letters = getattr(layout, "apt_taxi_letters", None) or {}
     apt_lines = getattr(layout, "apt_taxi_centerlines", None) or []
     for item in apt_lines:
-        ln = item[0] if isinstance(item, tuple) else item
-        ref = item[1] if (isinstance(item, tuple) and len(item) > 1) else None
+        ln = item.line if hasattr(item, "line") else (item[0] if isinstance(item, tuple) else item)
+        ref = item.name if hasattr(item, "name") else (item[1] if (isinstance(item, tuple) and len(item) > 1) else None)
         if ln is None or ln.is_empty:
             continue
         try:
             if polygon.intersects(ln):
                 axes.append((ln, float(taxi_grade_cap_for_letter(
-                    letters.get(ref)))))
+                    item.dominant_size() if hasattr(item, "dominant_size") else None))))
         except _GEOM_EXC:
             continue
     for s2 in layout.shapes:

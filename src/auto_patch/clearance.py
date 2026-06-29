@@ -1061,15 +1061,14 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
     tx_slope = CLEARANCE_LATERAL_MAX_SLOPE
     centerlines = getattr(layout, "apt_taxi_centerlines", None) or []
     # Authoritative ICAO size letter per taxiway name (apt.dat row 1202).
-    letters = getattr(layout, "apt_taxi_letters", None) or {}
     if centerlines and prep_pav is not None:
         for entry in centerlines:
-            line = entry[0] if isinstance(entry, tuple) else entry
+            line = entry.line if hasattr(entry, "line") else (entry[0] if isinstance(entry, tuple) else entry)
             ref = entry[1] if (isinstance(entry, tuple)
                                and len(entry) > 1) else ""
             if not isinstance(line, LineString) or line.is_empty:
                 continue
-            letter = letters.get(ref)
+            letter = entry.dominant_size() if hasattr(entry, "dominant_size") else None
             for e_pts, e_alts, e_out, e_bw in _centerline_edge_runs(
                     line, prep_pav, airside, step, letter=letter):
                 for ring, ralts in _build_graded_strips(

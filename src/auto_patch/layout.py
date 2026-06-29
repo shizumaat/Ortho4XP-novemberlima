@@ -286,20 +286,14 @@ def taxi_shape_code_letter(layout, shape) -> str | None:
     or ``None`` when the size-dependent grade cap does not apply (the gate
     is off, or the shape is not a sized taxiway role).
 
-    Prefers the authoritative apt.dat row-1202 letter
-    (``layout.apt_taxi_letters`` keyed by the taxiway name) exactly like
-    the wingtip-clearance pass; falls back to MEASURING the rect's short
-    edge for OSM networks that carry no width class.  Shared by the solver
-    (cap selection at solve time) and the OSM emitter (the ``code_letter``
-    tag the validator reads back) so all three stay in lockstep."""
+    The ICAO size is MEASURED from the rect's short-edge width (user
+    2026-06-29: size is a property of the geometry, not a name→letter table).
+    Shared by the solver (cap selection at solve time) and the OSM emitter (the
+    ``code_letter`` tag the validator reads back) so all three stay in lockstep."""
     if not TAXI_GRADE_BY_WIDTH:
         return None
     if shape.role not in TAXI_GRADE_WIDTH_ROLES:
         return None
-    letters = getattr(layout, "apt_taxi_letters", None) or {}
-    letter = letters.get(shape.ref)
-    if letter:
-        return str(letter).upper()
     width = _rect_short_edge_width_m(shape.polygon)
     return taxiway_code_letter(width) if width is not None else None
 
@@ -377,16 +371,10 @@ class PavementLayout:
     # the original centerlines at SPJC because the rest were
     # absorbed into junction polygons, so the reclassification
     # would otherwise misflag legitimate junctions as aprons.
-    # Stored as ``(LineString, name)`` tuples per
-    # ``apt_dat_reader.taxi_centerlines``.
-    apt_taxi_centerlines: list[tuple[LineString, str]] = field(
+    # Stored as ``apt_dat_reader.TaxiCenterline`` (connectivity routes carrying
+    # per-segment ICAO size + ``is_service``; name is a label only).
+    apt_taxi_centerlines: list = field(
         default_factory=list)
-    # Map of taxiway name -> ICAO design code LETTER ("A".."F"), read
-    # from the apt.dat row-1202 taxi-edge ``kind`` ("taxiway_C" → "C").
-    # The authoritative width class for wingtip-clearance sizing — used
-    # by the clearance pass instead of measuring pavement width.  Empty
-    # when the taxi network came from OSM (no width class available).
-    apt_taxi_letters: dict[str, str] = field(default_factory=dict)
     # Ground-vehicle (service-road) centerlines from apt.dat row 1206,
     # as ``(LineString, route_name)`` in meter space — drive the 4 %-grade
     # ``service_road`` rects.  Empty when the block has no 1206 network.

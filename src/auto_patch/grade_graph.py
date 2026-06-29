@@ -69,12 +69,29 @@ SPINE_PERP_TOL_M = 1.0
 @dataclass
 class Centerline:
     """One taxi route centerline through the airport, in the SAME meter frame as
-    the shape rings the caller passes.  ``cap`` is the taxiway per-letter
-    longitudinal grade cap (from ``taxi_grade_cap_for_letter``)."""
+    the shape rings the caller passes.  ``seg_caps`` is the PER-SEGMENT taxiway
+    longitudinal grade cap (one per ``pts`` segment, from the route's per-segment
+    ICAO size); a route may change width along its length, so the cap is resolved
+    locally via :meth:`cap_at`.  ``cap`` is the tightest cap on the route, for the
+    scalar within-shape-body consumers."""
     pts: Sequence[tuple[float, float]]
-    cap: float
+    seg_caps: list = field(default_factory=list)
     # cumulative arc length at each pt (filled lazily)
     _arc: Optional[list[float]] = None
+
+    @property
+    def cap(self) -> float:
+        return min(self.seg_caps) if self.seg_caps else TAXI_MAX_GRADE
+
+    def cap_at(self, s: float) -> float:
+        """Per-segment cap at arc-length ``s`` along the centerline."""
+        if not self.seg_caps:
+            return TAXI_MAX_GRADE
+        a = self.arc()
+        for i in range(len(a) - 1):
+            if s <= a[i + 1] + 1e-9:
+                return self.seg_caps[min(i, len(self.seg_caps) - 1)]
+        return self.seg_caps[-1]
 
     def arc(self) -> list[float]:
         if self._arc is None:
@@ -165,20 +182,25 @@ def build_context(layout, bucket_to_idx=None) -> "GradeContext":
         SLOPING_RECT_ROLES, _shape_grade)
     from .layout import ROLE_BUILDING
 
-    letters = getattr(layout, "apt_taxi_letters", {}) or {}
     cls: list[Centerline] = []
-    for ln, name in (getattr(layout, "apt_taxi_centerlines", []) or []):
+    for tcl in (getattr(layout, "apt_taxi_centerlines", []) or []):
+        ln = getattr(tcl, "line", tcl)
         if ln is None or getattr(ln, "is_empty", True):
             continue
-        if name and str(name).upper().startswith("SVC"):
+        if getattr(tcl, "is_service", False):
             continue            # service roads are NOT taxi spines (own role)
         try:
             pts = list(ln.coords)
         except Exception:
             continue
         if len(pts) >= 2:
-            cls.append(Centerline(
-                pts=pts, cap=taxi_grade_cap_for_letter(letters.get(name))))
+            # Per-segment cap from the route's per-segment ICAO size (no name→
+            # letter table); pad to one cap per segment.
+            sizes = list(getattr(tcl, "seg_sizes", []) or [])
+            seg_caps = [taxi_grade_cap_for_letter(sizes[i]) if i < len(sizes)
+                        else taxi_grade_cap_for_letter(sizes[-1] if sizes else None)
+                        for i in range(len(pts) - 1)]
+            cls.append(Centerline(pts=pts, seg_caps=seg_caps))
 
     # taxiway-sized rect node coords -> cap (a junction with NO spine inherits
     # the cap of the nearest CONNECTED taxiway = a rect it shares a node with).
@@ -871,7 +893,9 @@ def _build_global_spine(G, ctx):
                 continue
             gap = abs(a1 - a0)
             d = _dist(G.pos.get(i0), G.pos.get(i1))
-            budget = cl.cap * max(gap, d, 1e-3)
+            # Per-segment cap at the midpoint between the two on-line nodes (a
+            # route may change width along its length).
+            budget = cl.cap_at(0.5 * (a0 + a1)) * max(gap, d, 1e-3)
             _spine_link(G.spine_adj, i0, i1, budget)
 
 
@@ -945,7 +969,8 @@ def _runway_anchors(layout, G, bucket_to_idx):
         return
     contact_endpoints = []   # centerline endpoints that TERMINATE at a runway
     for entry in (getattr(layout, "apt_taxi_centerlines", []) or []):
-        ln = entry[0] if isinstance(entry, (tuple, list)) else entry
+        ln = (entry.line if hasattr(entry, "line")
+              else (entry[0] if isinstance(entry, (tuple, list)) else entry))
         ref = entry[1] if (isinstance(entry, (tuple, list))
                            and len(entry) > 1) else None
         if ln is None or ln.is_empty or str(ref or "").upper().startswith("SVC"):

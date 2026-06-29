@@ -427,10 +427,10 @@ def building_spine_floor(layout, nodes, bucket_to_idx, building_seats,
         _nearest_visible_centerline, _pavement_visibility)
 
     cps = layout.canonical_points
-    cl_items = [(ln, n) for (ln, n)
+    cl_items = [(cl.line, cl.name) for cl
                 in (getattr(layout, "apt_taxi_centerlines", None) or [])
-                if ln is not None and not ln.is_empty
-                and not str(n or "").upper().startswith("SVC")]
+                if cl.line is not None and not cl.line.is_empty
+                and not cl.is_service]
     clines = [ln for (ln, _n) in cl_items]
     if not clines:
         return {}
@@ -676,9 +676,9 @@ def apply_groundside_reach(layout, bucket_to_idx, elev, cap):
                 pav_pts.append((x, y, i))
                 if tgt_apron:
                     apron_pts.append((x, y, i))
-    centerlines = [ln for (ln, _r) in
+    centerlines = [cl.line for cl in
                    (getattr(layout, "apt_service_centerlines", None) or [])
-                   if ln is not None and not ln.is_empty]
+                   if cl.line is not None and not cl.line.is_empty]
 
     def _nearest_apron_elev(px, py, tol=16.0):
         best = None

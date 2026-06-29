@@ -34,6 +34,8 @@ from shapely.geometry import LineString, MultiPoint, Point
 from shapely.ops import voronoi_diagram, linemerge, unary_union
 from shapely import segmentize
 
+from ..apt_dat_reader import TaxiCenterline
+
 _GEOM_EXC = (ValueError, ZeroDivisionError, AttributeError, TypeError)
 
 # Defaults (metres). Width band → clearance band is width/2.
@@ -272,7 +274,7 @@ def discover_unreferenced_centerlines(
 
     existing_lines = []
     for c in existing_centerlines or ():
-        ls = c[0] if isinstance(c, tuple) else c
+        ls = c.line if hasattr(c, "line") else (c[0] if isinstance(c, tuple) else c)
         if isinstance(ls, LineString) and not ls.is_empty:
             existing_lines.append(ls)
     covered = None
@@ -285,7 +287,7 @@ def discover_unreferenced_centerlines(
     # Runway bearings (for the parallel-to-runway artifact filter below).
     rwy_bearings: list[float] = []
     for rc in rwy_centerlines or ():
-        ls = rc[0] if isinstance(rc, tuple) else rc
+        ls = rc.line if hasattr(rc, "line") else (rc[0] if isinstance(rc, tuple) else rc)
         if isinstance(ls, LineString) and len(ls.coords) >= 2:
             rwy_bearings.append(_line_bearing_deg(ls))
     rwy_near = (runway_union if (runway_union is not None
@@ -350,5 +352,7 @@ def discover_unreferenced_centerlines(
                             continue
                     except _GEOM_EXC:
                         pass
-                out.append((piece, ref))
+                out.append(TaxiCenterline(
+                    line=piece, name=ref,
+                    seg_sizes=[""] * max(0, len(piece.coords) - 1)))
     return out

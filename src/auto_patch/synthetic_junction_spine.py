@@ -26,6 +26,7 @@ import os as _os
 
 import O4_UI_Utils as UI
 
+from .apt_dat_reader import TaxiCenterline
 from .layout import ROLE_JUNCTION, ROLE_RUNWAY, taxi_shape_code_letter
 
 __all__ = ["synthesize_junction_spines"]
@@ -73,10 +74,6 @@ def synthesize_junction_spines(layout, icao: str = "") -> int:
                and (s.role in SLOPING_RECT_ROLES or s.role == ROLE_RUNWAY
                     or (s.role == ROLE_JUNCTION and id(s) in spined))]
 
-    letters = getattr(layout, "apt_taxi_letters", None)
-    if letters is None:
-        letters = {}
-        layout.apt_taxi_letters = letters
     new_cls = []
     n_syn = 0
     serial = 0
@@ -135,7 +132,6 @@ def synthesize_junction_spines(layout, icao: str = "") -> int:
                 best_cap, best_let = c, let
         ref = f"~SJ{serial}"
         serial += 1
-        letters[ref] = best_let
         cen = s.polygon.centroid
         pts = [(mx, my) for (mx, my, _l, _r) in merged]
         if len(pts) == 2:
@@ -144,7 +140,9 @@ def synthesize_junction_spines(layout, icao: str = "") -> int:
             segs = [LineString([p, (cen.x, cen.y)]) for p in pts]
         for ln in segs:
             if ln.length > 1.0:
-                new_cls.append((ln, ref))
+                new_cls.append(TaxiCenterline(
+                    line=ln, name=ref,
+                    seg_sizes=[best_let or ""] * max(0, len(ln.coords) - 1)))
         n_syn += 1
 
     if new_cls:

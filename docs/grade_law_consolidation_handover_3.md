@@ -45,7 +45,16 @@ variations and local copies." Done (all value-identical → behaviour-neutral):
   established default; the 350 gate was a vestigial experiment, REMOVED). 200 keeps
   SPJC `route_band=0`; 350 surfaced 2× sub-0.25 m ceil at SPJC.
 
-## ★★ OPEN — the spine does NOT rise to serve a building ACROSS an apron
+## ★★ RESOLVED in handover #4 — read that first
+
+> The OPEN item below is **resolved** — but the diagnosis here (a "REGION lift"
+> problem; the 5 reverted approaches) was WRONG. The real root was a
+> data-categorization bug: `taxi_centerlines` grouped edges BY NAME and severed the
+> continuous `~U12→F` route into a dangling orphan apron that broke the spine. Fixed
+> by building centerlines BY CONNECTIVITY (`docs/grade_law_consolidation_handover_4.md`,
+> memory `taxi_centerline_connectivity_model`). **Do not re-try the approaches below.**
+
+## ★★ OPEN (SUPERSEDED — see handover #4) — the spine does NOT rise to serve a building ACROSS an apron
 
 This is the real remaining problem (CYXY north apron: building18 #17 @700.4 /
 building22 #21 @699.1 / building15 #15, all >100 m from their ~U12 spine across one

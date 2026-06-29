@@ -3030,13 +3030,13 @@ def _report_within_shape_violations(
         if getattr(_uj, "_PER_AXIS_JUNCTIONS", False):
             from .verification import _import_check_grade
             _per_axis_allowance = _import_check_grade()._per_axis_allowance
-            _letters = getattr(layout, "apt_taxi_letters", {}) or {}
             _taxi_axes_m = []
-            for _ln, _nm in (getattr(layout, "apt_taxi_centerlines", [])
-                             or []):
+            for _cl in (getattr(layout, "apt_taxi_centerlines", [])
+                        or []):
+                _ln = _cl.line if hasattr(_cl, "line") else _cl
                 if _ln is None or _ln.is_empty:
                     continue
-                _lt = _letters.get(_nm)
+                _lt = _cl.dominant_size() if hasattr(_cl, "dominant_size") else None
                 _cL = 0.03 if _lt in ("A", "B") else 0.015
                 _cT = 0.02 if _lt in ("A", "B") else 0.015
                 _taxi_axes_m.append((list(_ln.coords), _cL, _cT))

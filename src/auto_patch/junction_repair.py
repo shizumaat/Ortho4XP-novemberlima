@@ -3133,7 +3133,7 @@ def _aeroway_centerlines_union(layout: "PavementLayout"):
     for item in apt_lines:
         # apt.dat / OSM taxi extraction returns
         # ``(LineString, name)`` tuples.
-        ln = item[0] if isinstance(item, tuple) else item
+        ln = item.line if hasattr(item, "line") else (item[0] if isinstance(item, tuple) else item)
         if ln is not None and not ln.is_empty:
             lines.append(ln)
     for s in layout.shapes:
@@ -3355,9 +3355,9 @@ def _reclassify_runway_disconnected_to_groundside(
     # wrongly demoted to groundside and walled off from the road it continues.
     import os as _os
     _svc_skip = _os.environ.get("O4_SVC_CONNECTOR_AS_ROAD", "1") == "1"
-    _svc_lines = ([ln for (ln, _r)
+    _svc_lines = ([cl.line for cl
                    in (getattr(layout, "apt_service_centerlines", None) or [])
-                   if ln is not None and not ln.is_empty]
+                   if cl.line is not None and not cl.line.is_empty]
                   if _svc_skip else [])
     # Service-adjacency scoping (second pass, post truck-route re-role):
     # demote only an unreachable apron/junction COMPONENT that touches a
@@ -3595,9 +3595,9 @@ def _reclassify_road_only_lots_to_groundside(
     # distinguished by its rim-looping route being far longer than the frame's
     # straight extent.  ``apt_service_centerlines`` are the truck routes.
     import os as _os
-    _svc_lines = ([ln for (ln, _r)
+    _svc_lines = ([cl.line for cl
                    in (getattr(layout, "apt_service_centerlines", None) or [])
-                   if ln is not None and not ln.is_empty]
+                   if cl.line is not None and not cl.line.is_empty]
                   if _os.environ.get("O4_SVC_CONNECTOR_AS_ROAD", "1") == "1"
                   else [])
 

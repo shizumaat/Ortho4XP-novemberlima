@@ -1520,12 +1520,9 @@ def build_airport_pavement(icao: str, xplane_root: str,
             f"apt.dat taxi-network centerline(s) "
             f"({len(apt.taxi_nodes)} nodes, "
             f"{len(apt.taxi_edges)} edges).")
-        # Map taxiway name -> ICAO design code LETTER from the row-1202
-        # edge "size" field (the authoritative width class).  Exposed on
-        # the layout for any feature that needs taxiway sizing (wingtip
-        # clearance, shoulders, fillets, …) — see
-        # ``apt_dat_reader.taxi_size_letters``.
-        layout.apt_taxi_letters = APR.taxi_size_letters(apt)
+        # ICAO taxiway size now travels PER-SEGMENT on each ``TaxiCenterline``
+        # (``seg_sizes``, from the row-1202 edge ``kind``) — there is no name→
+        # letter table; size consumers read it off the geometry (user 2026-06-29).
         # Runway THRESHOLDS (both ends of each runway, layout-local metres) —
         # the hard anchors the building route-feasibility metric routes to
         # (P4, building_feasibility.py).  to_m(lon, lat) -> (x, y).
@@ -1533,12 +1530,6 @@ def build_airport_pavement(icao: str, xplane_root: str,
         for _r in apt.runways:
             layout.runway_thresholds.append(to_m(_r.lon_a, _r.lat_a))
             layout.runway_thresholds.append(to_m(_r.lon_b, _r.lat_b))
-        # Unnamed taxi routes now carry a synthetic ``~U`` name + their real
-        # apt.dat ICAO size class directly (apt_dat_reader.unnamed_edge_component_
-        # names → taxi_centerlines / taxi_size_letters), so every ref→cap
-        # consumer sees the true per-letter cap.  (This supersedes the old P3a
-        # geometry-recovery hack, which only tagged code-A/B arms and lost the
-        # wide unnamed routes to the 1.5 % default.)
     else:
         # No 1201/1202 network — fall back to the airport's PAINTED
         # taxiway centerlines (row 120, paint code 1/7/51/57).  Small
@@ -1805,6 +1796,15 @@ def build_airport_pavement(icao: str, xplane_root: str,
             UI.vprint(1,
                 f"  [pav-builder] {icao}: discovered "
                 f"{len(_discovered)} unreferenced taxiway centerline(s).")
+
+    # ── Project the SPINE model (TaxiCenterline, connectivity + per-segment size,
+    # already snapshotted onto ``layout.apt_taxi_centerlines`` above) down to the
+    # ``(line, name)`` tuples the RECT-BUILDING pipeline consumes (user 2026-06-29).
+    # The rect builder + its trimming/splitting transforms only need geometry +
+    # label, not size, so they stay tuple-based; the size model lives on
+    # ``layout.apt_taxi_centerlines`` for the grade solve.
+    osm_centerlines = [
+        (c.line, c.name) if hasattr(c, "line") else c for c in osm_centerlines]
 
     # ── Per-ref OVERALL chord bearings (pre-split) ───────────────
     # Used by ``_classify_role`` to disambiguate diagonal-overall
@@ -2084,7 +2084,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 _disc_bu = None
 
         def _tx_thru_bld(entry):
-            ls = entry[0] if isinstance(entry, tuple) else entry
+            ls = entry.line if hasattr(entry, "line") else (entry[0] if isinstance(entry, tuple) else entry)
             ref = (entry[1] if isinstance(entry, tuple)
                    and len(entry) > 1 else None)
             if (_disc_bu is None or ls is None or ls.is_empty
@@ -2664,9 +2664,14 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 # Reclassification / repair passes measure junction
                 # territory against the FULL preserved centerline set —
                 # roads included, so the road-junction territory at
-                # bends (the #198 U-turn) stays junction, not apron.
+                # bends (the #198 U-turn) stays junction, not apron.  On the
+                # SPINE model these are TaxiCenterline(is_service=True) so the
+                # taxi-spine consumers skip them by flag (not a name prefix).
                 layout.apt_taxi_centerlines = (
-                    list(layout.apt_taxi_centerlines) + _svc_lines)
+                    list(layout.apt_taxi_centerlines)
+                    + [APR.TaxiCenterline(line=_ln, is_service=True, name=_rf,
+                                          seg_sizes=[""] * max(0, len(_ln.coords) - 1))
+                       for (_ln, _rf) in _svc_lines])
                 UI.vprint(1,
                     f"  [pav-builder] {icao}: {len(_svc_lines)} "
                     f"service-road centerline piece(s) from "
@@ -2687,9 +2692,9 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # road (its own strip ALONG apron pavement) reads "junction-buried"
     # to the corridor test even though it is a real road lane.
     _svc_keep = [(c, r) for (c, r) in osm_centerlines
-                 if r.startswith("SVC")]
+                 if str(r or "").startswith("SVC")]
     _non_svc = [(c, r) for (c, r) in osm_centerlines
-                if not r.startswith("SVC")]
+                if not str(r or "").startswith("SVC")]
     _non_svc, _n_rwy, _n_buried = _drop_offcorridor_centerlines(
         _non_svc, pav_union, layout.runway_union)
     osm_centerlines = _non_svc + _svc_keep
@@ -4201,13 +4206,13 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     _aircraft_keys |= _ring_keys(_o)
                 elif _o.role == ROLE_SERVICE_ROAD:
                     _road_keys |= _ring_keys(_o)
-            _svc_lines = [ln for (ln, _r)
+            _svc_lines = [cl.line for cl
                           in (getattr(layout, "apt_service_centerlines", None)
-                              or []) if ln is not None and not ln.is_empty]
-            _taxi_lines = [ln for (ln, _n)
+                              or []) if cl.line is not None and not cl.line.is_empty]
+            _taxi_lines = [cl.line for cl
                            in (getattr(layout, "apt_taxi_centerlines", None) or [])
-                           if ln is not None and not ln.is_empty
-                           and not str(_n or "").upper().startswith("SVC")]
+                           if cl.line is not None and not cl.line.is_empty
+                           and not cl.is_service]
             _n_sl = 0
             for _s in layout.shapes:
                 if (_s.role != ROLE_JUNCTION or _s.polygon is None

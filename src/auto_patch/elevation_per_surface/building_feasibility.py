@@ -25,10 +25,9 @@ and the seated level is ``clamp(DEM, floor, ceiling)`` — closest to DEM,
 could be above or below it.  Buildings NOT touching airside pavement are
 omitted (the caller leaves them at their DEM).
 
-This routes on the SAME `TaxiRouteGraph.edge_cap` the reach-bands use, so a
-narrow code-A/B arm contributes 3 %.  Unnamed routes carry their real apt.dat
-size via the synthetic ``~U`` name (apt_dat_reader.unnamed_edge_component_names),
-so the per-letter cap is correct without any geometry recovery.
+A narrow code-A/B arm contributes its 3 % cap.  The ICAO size travels
+PER-SEGMENT on each ``apt_dat_reader.TaxiCenterline`` (``seg_sizes``), so the
+per-letter cap at the foot is read off the geometry — no name→letter table.
 """
 
 from __future__ import annotations
@@ -271,16 +270,16 @@ def reach_band_unified(layout, G):
     # and the route-band check then disagreed though both go through this one band
     # (CYXY A2 = code B, a 457 m segment → 118 false apron ceil flags).
     from auto_patch.config import taxi_grade_cap_for_letter
-    letters = getattr(layout, "apt_taxi_letters", None) or {}
-    cls_cap = [(ln, float(taxi_grade_cap_for_letter(letters.get(n))))
-               for (ln, n) in (getattr(layout, "apt_taxi_centerlines", None)
-                               or [])
-               if ln is not None and not ln.is_empty
-               and not str(n or "").upper().startswith("SVC")]
-    if not cls_cap:
+    # PER-SEGMENT cap: keep the TaxiCenterline so the foot climb credits the cap of
+    # the SEGMENT the foot lands on (no name→letter table; a route may change width
+    # along its length).  ``cap_of`` maps a line's identity to its TaxiCenterline.
+    cls_tcl = [cl for cl in (getattr(layout, "apt_taxi_centerlines", None) or [])
+               if cl.line is not None and not cl.line.is_empty
+               and not cl.is_service]
+    if not cls_tcl:
         return lambda x, y: None
-    cls = [ln for (ln, _c) in cls_cap]
-    cap_of = {id(ln): c for (ln, c) in cls_cap}
+    cls = [cl.line for cl in cls_tcl]
+    cap_of = {id(cl.line): cl for cl in cls_tcl}
     vis = _pavement_visibility(layout) if VISIBLE_CHORD_CONNECT else None
 
     # EDGE-SKELETON fallback (user 2026-06-28): no-centerline pavement returns
@@ -317,7 +316,9 @@ def reach_band_unified(layout, G):
         kB = _nn(B[0])
         if kA is None and kB is None:
             return _fallback(x, y)
-        ecap = cap_of.get(id(ln), TAXI_MAX_GRADE)
+        _tcl = cap_of.get(id(ln))
+        ecap = (taxi_grade_cap_for_letter(_tcl.size_at_arc(sp))
+                if _tcl is not None else TAXI_MAX_GRADE)
         perp_climb = (ecap * min(perp, _TAXI_HALF_W_M)
                       + APRON_MAX_GRADE * max(0.0, perp - _TAXI_HALF_W_M))
         floor, ceil = -_INF, _INF
@@ -440,10 +441,10 @@ def building_feasible_levels(
     # grades at 1 % only when a corridor is within range AND visibly chord-reachable).
     cls = vis = None
     if full_frontage:
-        cls = [ln for (ln, n) in
+        cls = [cl.line for cl in
                (getattr(layout, "apt_taxi_centerlines", None) or [])
-               if ln is not None and not ln.is_empty
-               and not str(n or "").upper().startswith("SVC")]
+               if cl.line is not None and not cl.line.is_empty
+               and not cl.is_service]
         vis = _pavement_visibility(layout) if VISIBLE_CHORD_CONNECT else None
 
     out: Dict[int, float] = {}

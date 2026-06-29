@@ -865,16 +865,35 @@ def taxi_axes_ll(layout):
         return None
     if not getattr(_uj, "_PER_AXIS_JUNCTIONS", False):
         return None
-    letters = getattr(layout, "apt_taxi_letters", {}) or {}
+    def _cLcT(letter):
+        return ((0.03, 0.02) if letter in ("A", "B") else (0.015, 0.015))
+
     axes = []
-    for ln, name in (getattr(layout, "apt_taxi_centerlines", []) or []):
+    for _cl in (getattr(layout, "apt_taxi_centerlines", []) or []):
+        ln, name = _cl.line, _cl.name
         if ln is None or ln.is_empty:
             continue
-        letter = letters.get(name)
-        cL = 0.03 if letter in ("A", "B") else 0.015
-        cT = 0.02 if letter in ("A", "B") else 0.015
-        pts = [layout.m_to_ll(x, y) for (x, y) in ln.coords]
-        axes.append((pts, cL, cT))
+        cs = list(ln.coords)
+        sizes = list(getattr(_cl, "seg_sizes", []) or [])
+        if not sizes or len(cs) < 2:
+            cL, cT = _cLcT(_cl.dominant_size()
+                           if hasattr(_cl, "dominant_size") else None)
+            axes.append(([layout.m_to_ll(x, y) for (x, y) in cs], cL, cT))
+            continue
+        # Split the route into PER-SIZE sub-axes (group consecutive same-size
+        # segments) so each gets its own cL/cT — a route may change width.
+        i = 0
+        nseg = len(cs) - 1
+        while i < nseg:
+            sz = sizes[i] if i < len(sizes) else sizes[-1]
+            j = i
+            while (j + 1 < nseg
+                   and (sizes[j + 1] if j + 1 < len(sizes) else sizes[-1]) == sz):
+                j += 1
+            cL, cT = _cLcT(sz)
+            pts = [layout.m_to_ll(cs[k][0], cs[k][1]) for k in range(i, j + 2)]
+            axes.append((pts, cL, cT))
+            i = j + 1
     return axes
 
 

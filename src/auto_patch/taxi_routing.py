@@ -166,14 +166,14 @@ def build_taxi_route_graph(layout, tol_m: float = _SNAP_TOL_M
     edge_cap: Dict[Tuple[Tuple[int, int], Tuple[int, int]], float] = {}
     g = TaxiRouteGraph(adj, coord, tol_m, edge_cap=edge_cap)
     centerlines = getattr(layout, "apt_taxi_centerlines", None) or []
-    letters = getattr(layout, "apt_taxi_letters", None) or {}
     for entry in centerlines:
-        ls = entry[0] if isinstance(entry, (tuple, list)) else entry
+        ls = entry.line if hasattr(entry, "line") else (entry[0] if isinstance(entry, (tuple, list)) else entry)
         ref = entry[1] if (isinstance(entry, (tuple, list))
                            and len(entry) > 1) else None
         # Per-segment grade cap from the taxiway's ICAO code letter (gate
         # TAXI_GRADE_BY_WIDTH off → uniform TAXI_MAX_GRADE → byte-identical).
-        cap = float(taxi_grade_cap_for_letter(letters.get(ref)))
+        cap = float(taxi_grade_cap_for_letter(
+            entry.dominant_size() if hasattr(entry, "dominant_size") else None))
         try:
             cs = list(ls.coords)
         except (AttributeError, TypeError):

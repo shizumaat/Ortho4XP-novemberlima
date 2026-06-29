@@ -152,7 +152,8 @@ def build_service_road_network(
     # already entirely off aircraft pavement — skip the expensive
     # difference() unless the road actually touches it (prepared check).
     ext: list[tuple[LineString, str]] = []
-    for line, name in centerlines:
+    for line, name in ((c.line, c.name) if hasattr(c, "line") else c
+                       for c in centerlines):
         if line is None or line.is_empty:
             continue
         if pav_buf is not None and pav_prep.intersects(line):
@@ -414,7 +415,8 @@ def detect_road_runs(
         return False
 
     out: "list[tuple[LineString, float, str]]" = []
-    for ls, name in routes:
+    for ls, name in ((c.line, c.name) if hasattr(c, "line") else c
+                     for c in routes):
         L = ls.length
         if L < min_run:
             continue
@@ -538,7 +540,8 @@ def detect_road_runs(
         for sprep, sp in narrow_srcs:
             inside = 0.0
             touch_name = ""
-            for ls, name in routes:
+            for ls, name in ((c.line, c.name) if hasattr(c, "line") else c
+                             for c in routes):
                 try:
                     li = ls.intersection(sp).length
                 except _GEOM_EXC:

@@ -73,9 +73,9 @@ def densify_junction_edges(layout, icao: str = "", step: float = None) -> int:
     from .grade_law import RUNWAY_JOIN_NEAR_M
     _SPINE_EDGE_TOL_M = 3.0
     _RUNWAY_TOL_M = RUNWAY_JOIN_NEAR_M   # ONE source = the runway-join _NEAR_M
-    cls = [ln for (ln, n) in (getattr(layout, "apt_taxi_centerlines", None) or [])
-           if ln is not None and not ln.is_empty
-           and not str(n or "").upper().startswith("SVC")]
+    cls = [cl.line for cl in (getattr(layout, "apt_taxi_centerlines", None) or [])
+           if cl.line is not None and not cl.line.is_empty
+           and not cl.is_service]
     cl_union = None
     if cls:
         try:
@@ -180,7 +180,7 @@ def insert_lateral_spine_nodes(layout, icao: str = "") -> int:
     rings = [_open(p) for p in polys]
 
     for entry in centerlines:
-        ln = entry[0] if isinstance(entry, (tuple, list)) else entry
+        ln = entry.line if hasattr(entry, "line") else (entry[0] if isinstance(entry, (tuple, list)) else entry)
         ref = (entry[1] if (isinstance(entry, (tuple, list)) and len(entry) > 1)
                else None)
         if ln is None or ln.is_empty or str(ref or "").upper().startswith("SVC"):

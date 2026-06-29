@@ -222,17 +222,22 @@ def _spine_runway_join_violations(layout, noise):
     if not nx:
         return []
 
-    letters = getattr(layout, "apt_taxi_letters", {}) or {}
     out = []
     for entry in (getattr(layout, "apt_taxi_centerlines", []) or []):
-        ln = entry[0] if isinstance(entry, (tuple, list)) else entry
-        ref = entry[1] if (isinstance(entry, (tuple, list))
-                           and len(entry) > 1) else None
-        if ln is None or ln.is_empty or str(ref or "").upper().startswith("SVC"):
+        ln = entry.line if hasattr(entry, "line") else (entry[0] if isinstance(entry, (tuple, list)) else entry)
+        is_svc = (entry.is_service if hasattr(entry, "is_service")
+                  else str((entry[1] if isinstance(entry, (tuple, list))
+                            and len(entry) > 1 else "") or "").upper().startswith("SVC"))
+        if ln is None or ln.is_empty or is_svc:
             continue
-        cap = float(taxi_grade_cap_for_letter(letters.get(ref)))
         cs = list(ln.coords)
-        for (ex, ey) in (cs[0], cs[-1]):
+        # Per-segment cap at the ENDPOINT touching the runway (a route may change
+        # width along its length; the join cap is the size at the contact end).
+        for (ex, ey), _arc in ((cs[0], 0.0), (cs[-1], ln.length)):
+            cap = float(taxi_grade_cap_for_letter(
+                entry.size_at_arc(_arc) if hasattr(entry, "size_at_arc")
+                else (entry.dominant_size() if hasattr(entry, "dominant_size")
+                      else None)))
             P = Point(ex, ey)
             rwy = min(runways, key=lambda r: r.polygon.distance(P))
             if rwy.polygon.distance(P) > _CONTACT_M:

@@ -1024,9 +1024,11 @@ def _drop_offcorridor_centerlines(
     Returns (kept, n_runway_dropped, n_buried_dropped)."""
     import os as _osm
     _dbg = _osm.environ.get("O4_RECT_DROP_DEBUG") == "1"
-    kept: list[tuple[LineString, str]] = []
+    kept: list = []
     n_rwy = n_buried = 0
-    for ls, ref in centerlines:
+    for _cl in centerlines:
+        ls = _cl.line if hasattr(_cl, "line") else _cl[0]
+        ref = _cl.name if hasattr(_cl, "name") else (_cl[1] if len(_cl) > 1 else "")
         if rwy_union is not None and not rwy_union.is_empty:
             try:
                 inter = ls.intersection(rwy_union)
@@ -1046,7 +1048,7 @@ def _drop_offcorridor_centerlines(
                 print(f"[cl-drop] BURIED ref={ref} len={ls.length:.0f} "
                       f"bounds={tuple(round(v,1) for v in ls.bounds)}")
             continue
-        kept.append((ls, ref))
+        kept.append(_cl)
     return kept, n_rwy, n_buried
 
 
