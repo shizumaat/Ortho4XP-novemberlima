@@ -78,27 +78,35 @@ guard fired, because the west apron is genuinely fixed — re-pointed to the rem
   MEASURED WORSE (tighter + less coverage — port-to-port diagonals are also
   short-circuits). Route-faithful distance fundamentally requires a centerline arc.
 
-**PART 2 — feeder CONVERGENCE (BUILT, gate `O4_NOBUILD_APRON_SEAT` default OFF —
-proven to work but over-constrains; needs refinement).** The 2 remaining flagged
-aprons (small, no-building: 640 m² @(-530,1006), 280 m² @(-321,-422)) are NOT
-connectivity cases — they HAVE bands, with NON-EMPTY feeder-band intersections (a
-common level exists), but the solver leaves each feeder at its own DEM-driven level.
-`anchors.build_nobuilding_apron_seats` (parallel to `build_building_seats`, wired in
-`solve.py` and merged into `building_seats` after `building_spine_floor`) seats each
-no-building apron FLAT at L = clamp(DEM, ∩ ring bands), so its welded feeder-contact
-nodes go to L and the feeders converge. WITH THE GATE ON: `route_reach` → 0 at CYXY
-(west feeders all 694.2, the 640 m² both 689.7), `test_cyxy_route_reach_zero` XPASS.
-BUT the FLAT/HARD whole-ring seat over-constrains — as a heaviest anchor it fights
-the spine/runway anchors and **regresses 3 suite tests** (`test_cyxy_spine_zero` +
-`..._no_bowl`, HECA `runway_longitudinal_grade`) → gated OFF (suite back to 19).
-REFINE before enabling: (a) make it a SOFT per-node FLOOR (tighten `node_band`
-toward L) instead of a hard `building_seats` merge — this is the "Applied below as a
-per-node FLOOR" the `solve.py:77` comment always intended; and/or (b) seat ONLY the
-genuinely-incompatible aprons (the band already converges the west apron — don't
-seat it) and SKIP apron nodes already owned by the spine/runway. Anti-gaming guard
-`test_route_reach_detects_incompatible_apron` is now SYNTHETIC (gate-independent), so
-it stays valid no matter how the solver evolves. The route-band `pinned` class
-(empty band) is the per-vertex cousin — HECA ~1,300 (multi-runway, fundamental).
+**PART 2 — feeder CONVERGENCE (DONE, gate `O4_NOBUILD_APRON_SEAT` default ON; suite
+== 19 baseline, no regressions; `test_cyxy_route_reach_zero` GREEN).** The TILT
+model (user 2026-06-28): a no-building apron is ANCHORED like a building so its
+feeder SPINES grade to meet it, but at PER-CONTACT feasible levels (the apron tilts
+≤cap between feeders) — NOT one flat level. `anchors.build_nobuilding_apron_seats`:
+for each no-building apron, take each feeder's contact (nearest route vertex) with
+its reach band + DEM-biased target `t_i = clamp(DEM_i, band_i)`, then
+`_project_apron_contacts` solves the metric/Lipschitz projection
+`min Σ(L_i−t_i)² s.t. |L_i−L_j| ≤ cap·d_ij, f_i ≤ L_i ≤ ce_i` by cyclic POCS. A
+solution clears `route_reach` BY CONSTRUCTION (its condition IS the constraint set);
+an EMPTY polytope = FUNDAMENTAL → skipped. `solve.py` merges the result into
+`building_seats` (HARD anchor → spines adjust). KEY: per-contact tilt levels are
+each in-band, so the spine reaches them without an over-cap step — that's why the
+TILT version is clean where the earlier FLAT version (one level for all feeders)
+forced unreachable levels and regressed `cyxy_spine_zero`/`_no_bowl` + HECA runway.
+`t_i = clamp(DEM, band)` also pulls a feeder floating ABOVE its band (CYXY 280 m²
+junction at 714.7, ceiling 712.79) back into reach. Anti-gaming guard
+`test_route_reach_detects_incompatible_apron` is SYNTHETIC (gate-independent).
+The route-band `pinned` class (empty band) is the per-vertex cousin — HECA ~1,300
+(multi-runway, fundamental).
+
+OPEN follow-up (user 2026-06-28, separate pre-existing issue inside
+`test_pavement_grade[CYXY]`): a BUILDING-anchored apron's region MORE THAN ~60 m
+from any building has no grade enforcement and drapes to DEM — CYXY's 116 607 m²
+north apron @(60.7188,-135.0781) hits 698.7 next to 690 (15.5% over 56 m). The
+≤cap edge EXISTS (budget 0.56 m) but the violation survives feasibility — the north
+boundary node is raised to DEM by a POST-feasibility step (ribbon-seam / boundary→
+DEM adoption). Fix = grade-enforce the far-from-building apron interior (re-project
+after the boundary/ribbon adoption, or hold those boundary nodes into band).
 
 ### Original item 3 — anisotropic CURVE FIX — STILL OPEN (untouched)
 Plumbing is in (`Allowance(cL,cT)`, edges carry it). Supply real Δs∥/Δs⊥ per edge

@@ -12,8 +12,6 @@ gates that the real airport is clean; the anti-gaming guard is synthetic.
 """
 from __future__ import annotations
 
-import pytest
-
 
 def _cyxy():
     from conftest import cached_airport_layout
@@ -48,17 +46,13 @@ def test_route_reach_detects_incompatible_apron():
     assert v, "route_reach_violations did not flag the incompatible apron — no-op?"
 
 
-@pytest.mark.xfail(reason="feeder-convergence (O4_NOBUILD_APRON_SEAT) clears this "
-                          "but is gated OFF — the hard whole-ring seat over-"
-                          "constrains the spine/runway; XPASSes with the gate on, "
-                          "flips green when the soft-floor refinement lands",
-                   strict=False)
 def test_cyxy_route_reach_zero():
-    """OUTCOME: zero route-reach violations at CYXY — every no-building apron has a
-    single base elevation reachable via all its feeder taxiways.  The edge-skeleton
-    reach (default ON) clears the big west apron; the no-building apron seat
-    (O4_NOBUILD_APRON_SEAT, default OFF pending refinement) clears the remaining 2
-    small aprons."""
+    """OUTCOME: zero route-reach violations at CYXY — every no-building apron is
+    feasible for all its feeders.  The edge-skeleton reach (O4_SKELETON_REACH)
+    connects the no-centerline west apron; the no-building apron seat
+    (O4_NOBUILD_APRON_SEAT) anchors each apron's feeder contacts at their per-feeder
+    feasible level (the apron tilts ≤cap between them) so the feeder spines converge
+    to meet it."""
     from auto_patch.grade_graph_validate import route_reach_violations
     v = route_reach_violations(_cyxy())
     assert not v, (

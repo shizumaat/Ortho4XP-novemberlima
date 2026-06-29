@@ -126,10 +126,13 @@ def solve_route_profile(layout, icao: str,
         # cap-Lipschitz on the unified spine chain.
         u_spine_floor = building_spine_floor(
             layout, nodes, bucket_to_idx, building_seats, node_band, u_spine_adj)
-        # No-building apron seats join the heaviest-anchor set here (after the
-        # building-pad spine floor): the apron's ring + welded feeder-contact nodes
-        # seat flat at the shared reachable level, so the spine grades each feeder
-        # to it (feeder convergence) and the apron can't sag back to a split DEM.
+        # FEEDER CONVERGENCE (tilt model): a no-building apron is ANCHORED like a
+        # building so its feeder SPINES grade to meet it — but at the per-feeder
+        # feasible level L_i (the apron tilts ≤cap between contacts, see
+        # build_nobuilding_apron_seats), NOT one flat level.  Each L_i is in its
+        # feeder's reach band, so the spine reaches it without an over-cap step (the
+        # earlier FLAT hard seat forced unreachable levels → regressed
+        # cyxy_spine_zero + HECA runway; the per-contact tilt level does not).
         building_seats.update(apron_seats)
         # A building seat that IS a spine node (a pad node on a taxi centerline)
         # is anchored at its ACTUAL seat level DURING the spine solve — so the

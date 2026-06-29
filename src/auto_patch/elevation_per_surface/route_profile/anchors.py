@@ -163,66 +163,136 @@ def build_building_seats(layout, bucket_to_idx, band, dem_fn, runway_pts):
     return seats
 
 
+def _project_apron_contacts(targets, boxes, positions, cap,
+                            max_iter=300, tol=1e-4):
+    """Project per-feeder target levels onto (box ∩ apron-cap polytope).
+
+    Find ``L_i`` minimising ``Σ(L_i − t_i)²`` s.t. ``|L_i − L_j| ≤ cap·d_ij`` (the
+    apron grades between contacts at ≤cap) and ``f_i ≤ L_i ≤ ce_i`` (each feeder's
+    reach band).  ``d_ij`` = straight gap (a LOWER bound on the in-apron route, so
+    the cap constraint is conservative).  Cyclic projection (POCS): push each
+    violated pair together by half the excess, then re-clamp to the boxes; repeat.
+    Returns ``[L_i]`` on convergence, or ``None`` when the polytope is EMPTY (boxes
+    incompatible with the cap couplings = the FUNDAMENTAL case)."""
+    import math
+    n = len(targets)
+    L = [min(max(targets[i], boxes[i][0]), boxes[i][1]) for i in range(n)]
+    cij = [[cap * math.hypot(positions[i][0] - positions[j][0],
+                             positions[i][1] - positions[j][1])
+            for j in range(n)] for i in range(n)]
+    for _ in range(max_iter):
+        worst = 0.0
+        for i in range(n):
+            for j in range(i + 1, n):
+                d = L[i] - L[j]
+                lim = cij[i][j]
+                if d > lim:
+                    e = 0.5 * (d - lim)
+                    L[i] -= e
+                    L[j] += e
+                    worst = max(worst, d - lim)
+                elif -d > lim:
+                    e = 0.5 * (-d - lim)
+                    L[i] += e
+                    L[j] -= e
+                    worst = max(worst, -d - lim)
+        for i in range(n):
+            L[i] = min(max(L[i], boxes[i][0]), boxes[i][1])
+        if worst <= tol:
+            break
+    ok = all(abs(L[i] - L[j]) <= cij[i][j] + 1e-3
+             for i in range(n) for j in range(i + 1, n))
+    return L if ok else None
+
+
 def build_nobuilding_apron_seats(layout, bucket_to_idx, band, dem_fn):
-    """``{apron_node_idx: flat_level}`` for every NO-BUILDING apron — the FEEDER-
-    CONVERGENCE rule (user 2026-06-26 directive #3, built 2026-06-28).
+    """``{feeder_contact_node_idx: feasible_level}`` for every NO-BUILDING apron —
+    the FEEDER-CONVERGENCE rule (user 2026-06-26 directive #3; tilt model
+    2026-06-28).
 
     A no-building apron has no pad to anchor it, so its feeder taxiways each grade
-    to their own DEM-driven level and arrive at the apron INCOMPATIBLE (the
-    ``route_reach`` violation: feeder contacts whose elevation gap exceeds the apron
-    cap over their separation).  The fix is to seat the apron FLAT at a single level
-    L reachable by ALL its feeders, so the feeders converge to it.  L = the reach
-    band intersected over the apron's OWN ring nodes (every feeder contact is a ring
-    node, so L lies in every feeder's band ⇒ each can grade to it), clamped to the
-    apron's DEM (minimal deviation).  Seating the ring nodes — which include the
-    welded feeder-contact nodes — at L makes the spine grade each feeder to L.
+    to their own DEM-driven level and can arrive INCOMPATIBLE (the ``route_reach``
+    violation: feeder contacts whose elevation gap exceeds the apron cap over their
+    separation).  Rather than force the apron FLAT (one level for all feeders, which
+    over-constrains and wastes the apron's own grade budget), anchor EACH feeder
+    contact at the level feasible THERE — its reach band, biased to DEM — projected
+    onto the apron-cap polytope so the apron TILTS ≤cap between contacts:
 
-    An apron whose ring-band intersection is EMPTY (floor > ceiling) is
-    FUNDAMENTALLY infeasible (no common level its feeders can share) — skipped, so
-    ``route_reach`` keeps surfacing it as a documented transition, not a gate.
-    Aprons that abut a building are skipped (the pad anchors the level).
+        minimise Σ(L_i − t_i)²  s.t.  |L_i − L_j| ≤ cap·d_ij  and  f_i ≤ L_i ≤ ce_i
 
-    GATE ``O4_NOBUILD_APRON_SEAT`` DEFAULT **OFF** (2026-06-28): this clears every
-    ``route_reach`` violation at CYXY (feeders converge exactly), but the FLAT/HARD
-    whole-ring seat OVER-CONSTRAINS — merged as a heaviest anchor it conflicts with
-    the spine/runway anchors and regresses 3 suite tests (``test_cyxy_spine_zero`` /
-    ``..._no_bowl`` and HECA ``runway_longitudinal_grade``).  The intended form (see
-    ``route_profile/solve.py`` "NO-BUILDING APRON FILL") is a SOFT per-node FLOOR
-    (tighten ``node_band`` toward L), and/or seat ONLY the genuinely-incompatible
-    aprons (not the ones the band already converges, e.g. the west apron) and skip
-    nodes already owned by the spine/runway.  Set =1 to enable the hard version."""
+    (:func:`_project_apron_contacts`).  ``t_i = clamp(DEM_i, band_i)`` pulls a feeder
+    floating ABOVE its reach band back down to a reachable level; the projection
+    then shares the apron's cap so close feeders need not be equal, only gradeable.
+    A solution clears ``route_reach`` BY CONSTRUCTION (the constraints ARE its
+    condition); an EMPTY polytope (a feeder's band can't reconcile with another's
+    across the cap) is FUNDAMENTAL → skipped (documented transition, not a gate).
+
+    Aprons that abut a building are skipped (the pad anchors the level).  The caller
+    (``solve.py``) ANCHORS the returned ``{contact_node: L_i}`` like a building seat
+    (heaviest), so the feeder SPINES grade to meet the apron (user 2026-06-28 — the
+    apron must anchor for the spines to adjust to it; a SOFT ``node_band`` clamp let
+    whatever pinned a feeder win and didn't converge).  Only the per-feeder CONTACTS
+    are anchored — at their OWN reachable level — so the apron body still flexes and
+    the feeder reaches L_i without an over-cap step (the earlier FLAT whole-ring seat
+    forced unreachable levels → regressed ``cyxy_spine_zero`` + HECA runway).  Gate
+    ``O4_NOBUILD_APRON_SEAT=0`` disables (no apron seats, byte-identical)."""
     import os as _os
-    if _os.environ.get("O4_NOBUILD_APRON_SEAT", "0") != "1":
+    if _os.environ.get("O4_NOBUILD_APRON_SEAT", "1") != "1":
         return {}
-    from auto_patch.layout import ROLE_APRON, ROLE_BUILDING
+    from shapely.geometry import Point
+    from auto_patch.layout import ROLE_APRON, ROLE_BUILDING, ROLE_JUNCTION
+    from auto_patch.junction_rules import SLOPING_RECT_ROLES
+    from auto_patch.config import APRON_MAX_GRADE
     cps = layout.canonical_points
     buildings = [b.polygon for b in layout.shapes
                  if b.role == ROLE_BUILDING and b.polygon is not None
                  and not b.polygon.is_empty]
+    # The taxi-network shapes whose contact feeds an apron (the SAME set
+    # ``route_reach_violations`` measures): sloping rects + junctions, not SVC.
+    route_roles = set(SLOPING_RECT_ROLES) | {ROLE_JUNCTION}
+    routes = [t for t in layout.shapes
+              if t.role in route_roles and t.polygon is not None
+              and not t.polygon.is_empty
+              and not str(t.ref or "").upper().startswith("SVC")]
     seats: dict = {}
     for s in layout.shapes:
         if (s.role != ROLE_APRON or s.polygon is None or s.polygon.is_empty):
             continue
         if any(s.polygon.distance(b) < 1.0 for b in buildings):
             continue                            # a building anchors the level
-        ring = _open_ring(list(s.polygon.exterior.coords))
-        floor, ceil, got = -float("inf"), float("inf"), False
-        for (x, y) in ring:
-            b = band(x, y)
+        # Each feeder's CONTACT = its nearest vertex to the apron (what route_reach
+        # measures), with its reach band + DEM-biased target.
+        idxs, tgts, boxes, poss = [], [], [], []
+        for t in routes:
+            if t is s or s.polygon.distance(t.polygon) > 1.5:
+                continue
+            best = None
+            for (x, y) in _open_ring(list(t.polygon.exterior.coords)):
+                d2 = s.polygon.exterior.distance(Point(x, y))
+                if best is None or d2 < best[0]:
+                    best = (d2, (x, y))
+            if best is None:
+                continue
+            px, py = best[1]
+            b = band(px, py)
             if b is None:
                 continue
-            floor = max(floor, b[0])
-            ceil = min(ceil, b[1])
-            got = True
-        if not got or floor > ceil:
-            continue                            # off-net / fundamentally pinned
-        de = dem_fn(s.polygon.centroid.x, s.polygon.centroid.y)
-        level = de if de is not None else 0.5 * (floor + ceil)
-        level = min(max(level, floor), ceil)    # closest-DEM in the feasible band
-        for (x, y) in ring:
-            i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
-            if i is not None:
-                seats[i] = float(level)
+            i = bucket_to_idx.get(cps.get_or_add(float(px), float(py)))
+            if i is None:
+                continue
+            de = dem_fn(px, py)
+            tgt = de if de is not None else 0.5 * (b[0] + b[1])
+            idxs.append(i)
+            tgts.append(min(max(tgt, b[0]), b[1]))
+            boxes.append(b)
+            poss.append((px, py))
+        if len(idxs) < 2:
+            continue
+        L = _project_apron_contacts(tgts, boxes, poss, APRON_MAX_GRADE)
+        if L is None:
+            continue                            # fundamental → documented transition
+        for i, Li in zip(idxs, L):
+            seats[i] = float(Li)
     return seats
 
 
