@@ -317,16 +317,25 @@ def _spine_floor_per_node(layout, nodes, bucket_to_idx, building_seats,
     cap·spacing), so a big terminal's WHOLE frontage lifts the spine, not just one
     foot.  Each floor is clamped to the node's band ceiling (never above what the
     runway route reaches)."""
+    import os as _os
     from shapely.geometry import Point, LineString
     from shapely.ops import nearest_points
     from auto_patch.config import (
-        APRON_MAX_GRADE, BUILDING_FRONTAGE_CORRIDOR_M, VISIBLE_CHORD_CONNECT)
+        APRON_MAX_GRADE, BUILDING_FRONTAGE_CORRIDOR_M,
+        BUILDING_SPINE_LIFT_CORRIDOR_M, VISIBLE_CHORD_CONNECT)
     from auto_patch.layout import ROLE_BUILDING
     from auto_patch.elevation_per_surface.building_feasibility import (
         _pavement_visibility, _VIS_ON_PAV_FRAC)
 
     cps = layout.canonical_points
     vis = _pavement_visibility(layout) if VISIBLE_CHORD_CONNECT else None
+    # The lift reaches a building over a VISIBLE on-pavement chord at any range up
+    # to this corridor (user 2026-06-28) — the visibility gate below, not the
+    # distance, is the real limit, so a building anchors its serving spine even
+    # across a wide single apron (CYXY building22 at 219 m).
+    corridor = (BUILDING_SPINE_LIFT_CORRIDOR_M
+                if _os.environ.get("O4_LONG_SPINE_LIFT", "0") == "1"
+                else BUILDING_FRONTAGE_CORRIDOR_M)
 
     builds = []
     for s in layout.shapes:
@@ -353,7 +362,7 @@ def _spine_floor_per_node(layout, nodes, bucket_to_idx, building_seats,
         best = None
         for (poly, lv) in builds:
             d = poly.distance(p)
-            if d > BUILDING_FRONTAGE_CORRIDOR_M:
+            if d > corridor:
                 continue
             near = nearest_points(poly, p)[0]   # spine-facing building edge point
             chord = LineString([(px, py), (near.x, near.y)])

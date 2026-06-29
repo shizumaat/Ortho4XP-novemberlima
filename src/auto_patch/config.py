@@ -1716,6 +1716,16 @@ BUILDING_FULL_FRONTAGE = _os.environ.get(
 # 2026-06-27): a terminal flanked by taxi routes on several sides must grade to
 # the spine at ≤1 % on ALL of them, not only the apron it abuts.  m.
 BUILDING_FRONTAGE_CORRIDOR_M = 200.0
+# Reach of the building->SPINE LIFT (user 2026-06-28): a building anchors its
+# serving spine to RISE to meet it, but only when a VISIBLE on-pavement chord
+# connects the spine node to the building edge (no grass / single continuous
+# apron) — so the LIFT range can exceed the frontage-qualifier corridor above
+# without over-reaching: the visibility gate, not the distance, is the real
+# limit.  CYXY building22 sits 219 m from its apron spine (~U12) across one
+# continuous apron, beyond the 200 m frontage corridor, so the spine never rose
+# to serve it (the apron then can't grade 1% to the 702 pad).  Used ONLY by
+# ``_spine_floor_per_node``; gate ``O4_LONG_SPINE_LIFT=0`` restores 200 m.
+BUILDING_SPINE_LIFT_CORRIDOR_M = 350.0
 
 
 def taxi_grade_cap_for_letter(letter, *, enabled: bool = None) -> float:

@@ -17,11 +17,20 @@ landed and what is still open. The goal is unchanged:
 | `7783d66` | **ecap fix in `reach_band_unified`.** The foot-climb cap was read off the `G.spine_adj` edge between the foot's two bracketing spine nodes and fell back to `TAXI_MAX_GRADE` (1.5%) whenever they weren't a DIRECT edge (any long centerline segment) — so a code-B (3%) taxiway was credited 3% at one point and 1.5% 60 m further. Now credits the SERVING centerline's own per-letter cap. **Flipped `test_cyxy_spine_zero_no_bowl` GREEN** (building16/19 were bowled by that under-credit); suite 21→20. |
 | `2ec5146` | **Building-size reach rule is canonical.** `grade_law.building_requires_full_frontage(area)` (the `<2000 m²` central-chord vs `≥2000 m²` full-frontage decision), consumed by BOTH `build_building_seats` and `route_band_violations`. The checker treats a SMALL building pad as a LOCAL reach anchor (apron grades from it at the apron cap over an on-pavement chord), so its looser non-central frontage isn't false-flagged. CYXY route-band 150→106 (building false-positives 27→0). |
 | `a7b0e42` | **SPLP cross-tile seam cliff fixed (3 bugs).** (1) seam pinned to RAW HGT (`alt_strict`, nodata at the tile edge) → SMOOTHED DEM (`_sample_dem`); (2) SOFT junction/apron seam vertices were never hard-pinned (the seam blocks only processed shapes with pre-set `node_altitudes`) → `one_profile_solve` raised them; `_seed_elevations` now hard-pins EVERY seam-key vertex by position to the smoothed DEM; (3) the spine had NO anchor at the seam (`SEAM_FIELD_ANCHORS` imported-but-unused, `_seam_cut_lines` set-but-unconsumed) → added `route_profile.solve._seam_spine_anchors` (centerline×seam crossing → hard spine anchor) so the spine SPREADS the route→seam drop. **`tile_cut_parity@SPLP` GREEN** (SPLP 7→6); tile-77 seam region within-shape→0. Seam-gated ⇒ CYXY/SPJC/HECA byte-identical. |
+| `defb96e` | **Item 5 — route_field cleanup.** Removed dead `route_ctx` plumbing (param + `route_ctx_from_layout` + callers), the `_rf_*` collection in `elevation.py`, and `ROUTE_NOISE_FRAC` (imported never used). Repointed `grade_feasibility_audit._route_band_intervals` off the deleted `route_field` onto the unified band (`reach_band_unified`; SPJC route-bounded reps 0→1671). Behaviour-neutral (affected-file subset = same baseline failures). ⚠ `ROUTE_FIELD_MODEL`/`ROUTE_FIELD_LOCAL_WINDOW_M` are NOT dead (live within-shape window law) — kept; handover #1/#2 mislabelled them. |
+| `10ab6d5` | **Item 2 PART 1 — edge-skeleton reach for no-centerline pavement** (gate `O4_SKELETON_REACH` ON). CYXY west apron (65 893 m²) fed by DISCOVERED taxiways (ref `TX*`, on `layout._discovered_centerlines`, not `apt_taxi_centerlines`) was a reach ISLAND → no band → feeders 16 m apart in the bowl. `building_feasibility._build_skeleton_band` = a fallback reach over the WELDED EDGE skeleton (`G.edges`) ∪ `spine_adj`, anchored at `G.runway_anchor` ∪ runway-coincident nodes, used ONLY where the centerline band is None. West apron banded, feeders converge, route_reach 3→2, suite = baseline. Centerline spine stays primary (curves + item-3 anisotropy). |
+| `fbc7e2b`,`3869756` | **Item 2 PART 2 — feeder convergence (TILT model)** (gate `O4_NOBUILD_APRON_SEAT` ON; `3869756` is the working version, `fbc7e2b` the gated-off flat predecessor). `anchors.build_nobuilding_apron_seats` + `_project_apron_contacts`: a no-building apron is ANCHORED like a building (spines grade to it) but at PER-CONTACT feasible levels — the apron TILTS ≤cap between feeders via a POCS projection `min Σ(L_i−t_i)² s.t. |L_i−L_j|≤cap·d_ij, f_i≤L_i≤ce_i`. Clears `route_reach` to 0 at CYXY; `test_cyxy_route_reach_zero` GREEN; suite = **19** baseline, no regressions. The anti-gaming guard is now SYNTHETIC. |
 
-State: suite ~21→**19** (derived: full-suite-verified at 20 after the ecap/small-
-building commits, then seam-gated SPLP-only change fixed `tile_cut_parity@SPLP`).
-**Run the full suite once to confirm 19 and re-capture the baseline set** (the old
-`/tmp/suite_ab/clean.set` is the pre-session 21).
+State: suite **19** (full-suite-verified at `3869756`, IDENTICAL to the pre-item-2
+baseline set — items 5 + 2 added no regressions and flipped `test_cyxy_route_reach_zero`
+green). Baseline set saved this session; route_reach is now a hard gate.
+
+UNCOMMITTED (working tree, gated OFF — a partial step toward the runway-anchor fix
+below, NOT the fix): `config.BUILDING_SPINE_LIFT_CORRIDOR_M` + `_spine_floor_per_node`
+using it under gate `O4_LONG_SPINE_LIFT` (default 0). It extends the building→spine
+lift past the 200 m frontage corridor (building22 is 219 m from its spine), but the
+lift is built on an over-credited ceiling (see below), so it doesn't fix building22
+alone. Keep or revert when the runway-anchor work lands.
 
 Tooling: `tools/trace_reach_route.py` PORTED to the unified band
 (`reach_band_unified(layout,G)` + spine path reconstruction; reports serving
@@ -33,6 +42,57 @@ or port.)
 Relevant memory written this session: `splp_seam_cliff_fix`,
 `cyxy_route_band_ceil_rootcause`, and the corrected `splp_seam_apron_polish`
 (seam → SMOOTHED DEM, never raw HGT).
+
+## ★★ TOP-PRIORITY NEW FINDING — RUNWAY-ANCHOR COVERAGE BUG (critical to the entire solve)
+
+**Getting the runway anchors right is foundational: every reach band, building seat,
+spine lift and route-band is measured as a cap-distance FROM the runway anchors. A
+missing or mis-placed anchor inflates the route to a node, which over-credits its
+ceiling, which strands buildings/aprons above their real reach.** This was traced
+end-to-end at CYXY building22 (a building seated at 702.2 that the apron can't grade
+to — the 116 607 m² north apron's 15.5% cliff at (60.7188,-135.0781), inside the
+baseline `test_pavement_grade[CYXY]`).
+
+THE BUG (source-confirmed): in the **raw apt.dat** routing graph (`apt.taxi_nodes`/
+`apt.taxi_edges`, 1 connected component), the unnamed apron route **~U12** and
+taxiway **A** share a node at local **(-477,862)**, and from there it is **142 m via
+A** (2 A edges) to a runway contact at **(-345,914)**. Our unified spine graph keeps
+the A↔~U12 weld (node 658 at (-477,862) is on 3 centerlines, 3 spine neighbours) —
+but the cap-route from node 658 to a runway anchor is **~740 m** (or 620 m via E),
+NOT 142 m. Reason: **A's near runway contact at (-345,914) is NOT a `G.runway_anchor`**
+— `_runway_anchors` (`grade_graph.py`) anchored only A's FAR contact (-162,978, via
+anchor 357), so reach detours to the far anchor. That inflated route is the whole
+over-credit: building22's frontage ceiling comes out **705.8** (via ~U12's 620 m) when
+the true reach via A's 142 m route is **≈ 694 + 1.5%·142 + 1%·215 ≈ 698** — i.e.
+building22 should be capped ~698 and the apron would grade, instead of being seated at
+its 702 DEM and stranding the apron.
+
+WHY `_runway_anchors` misses (-345,914) is the one thing left to pin down: it anchors
+apt.dat centerline ENDPOINTS within `_CONTACT_M`=12 m of a runway, then the nearest
+emitted node within `_NEAR_M`=18 m. (-345,914) is an endpoint of two A segments at
+0 m from a runway, so it *should* qualify — verify whether (a) no emitted node sits
+within 18 m there, (b) `_sample_runway_segment_elev` returns None, or (c) it's a
+runway_crossing handled differently. The fix is to ensure EVERY taxiway↔runway
+contact that exists in raw apt.dat becomes a runway anchor (mid-network joins, not
+just the two centerline endpoints).
+
+This is the SAME ROOT FAMILY as item 2 PART 1 (no-centerline islands) and the user's
+shape-107 (an apron mis-classified mid-taxiway-F, breaking F's spine, shapeID 107 =
+the 640 m² apron at (60.7186,-135.0771)): the spine/reach graph not faithfully
+reflecting source connectivity. After the anchors are right, re-evaluate whether the
+long-range spine lift (`O4_LONG_SPINE_LIFT`, gated off) is still needed.
+
+How to reproduce / verify (probes used, all `cached_airport_layout("CYXY")`):
+- raw graph: `apt = apt_dat_reader.load_airport(_pick_best_apt_dat_against_osm(...))`;
+  `unnamed_edge_component_names(apt)` gives the `~U` labels; Dijkstra over
+  `apt.taxi_edges` (geometric weights) ~U12-near-b22 → nearest runway-contact node =
+  **142 m via A**.
+- our graph: `G = build_unified_graph(L, b2i)`; cap-Dijkstra over `G.spine_adj` from
+  `G.runway_anchor` to node 658 = **740 m**; `reach_band_unified(L,G)` at building22
+  centroid = (682.8, **705.8**). ⚠ Build G from the SAME (pre-emit) layout the solve
+  uses — rebuilding from a post-build layout can differ; here it MATCHED the live
+  solve (verified by an `O4_B22_DEBUG` print), so the over-credit is real, not a
+  probe artifact.
 
 ## REMAINING (original handover items, updated)
 
