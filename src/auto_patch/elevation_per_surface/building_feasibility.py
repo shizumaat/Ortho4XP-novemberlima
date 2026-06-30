@@ -38,6 +38,7 @@ import os
 from typing import Callable, Dict, List, Tuple
 
 from auto_patch.config import (
+    ANISO_EDGES,
     BUILDING_FULL_FRONTAGE,
     BUILDING_FULL_FRONTAGE_AREA_M2, TAXI_MAX_GRADE, VISIBLE_CHORD_CONNECT,
 )
@@ -57,6 +58,7 @@ _AIRSIDE_ROLES = frozenset({
 })
 _TAXI_HALF_W_M = 7.5       # taxiway half-width corridor (perp split point)
 _TOUCH_TOL_M = 2.0         # building↔airside distance to count as "touching"
+_MULTI_ROUTE_M = 30.0      # junction-band: widen ceiling over routes within this
 _INF = float("inf")
 
 
@@ -306,6 +308,26 @@ def reach_band_unified(layout, G):
     cap_of = {id(cl.line): cl for cl in cls_tcl}
     vis = _pavement_visibility(layout) if VISIBLE_CHORD_CONNECT else None
 
+    # ANISOTROPIC EDGES: a JUNCTION is graded UNIFORMLY at the taxi cap (its body
+    # is the spine's per-letter cap, not 1 %), so a junction foot point beyond the
+    # taxiway corridor must climb at the taxi cap too — NOT drop to APRON_MAX_GRADE.
+    # Without this the band under-credits the junction interior and false-flags the
+    # very junction-body points the new edge law lets climb (docs/anisotropic_edge_
+    # handling_plan.md Phase 4).  Prepared junction union; tested per query.  Gate
+    # OFF ⇒ ``junc_zone`` is None and the foot climb is byte-identical (apron drop).
+    junc_zone = None
+    if ANISO_EDGES:
+        try:
+            from shapely.ops import unary_union
+            from shapely.prepared import prep
+            jpolys = [s.polygon for s in layout.shapes
+                      if s.role == ROLE_JUNCTION and s.polygon is not None
+                      and not s.polygon.is_empty]
+            if jpolys:
+                junc_zone = prep(unary_union(jpolys))
+        except Exception:                                     # pragma: no cover
+            junc_zone = None
+
     # EDGE-SKELETON fallback (user 2026-06-28): no-centerline pavement returns
     # None below; the skeleton band reaches it over the welded edge graph +
     # runway-contact anchors.  Used ONLY where the centerline path is None, so
@@ -316,22 +338,12 @@ def reach_band_unified(layout, G):
     def _fallback(x, y):
         return _skel_band(x, y) if _skel_band is not None else None
 
-    def band(x, y):
-        c = Point(x, y)
-        ln = (_nearest_visible_centerline(c, cls, vis) if vis is not None
-              else min(cls, key=lambda L: L.distance(c)))
+    def _band_via(c, x, y, ln, in_junc):
+        """``(floor, ceil)`` reachable for point ``c`` SERVED by centerline ``ln``,
+        or None if ``ln`` cannot serve it (no anchored spine node).  ``in_junc`` ⇒
+        the climb beyond the taxiway corridor stays at the taxi cap (uniform
+        junction), not the apron cap."""
         perp = c.distance(ln)
-        if vis is not None and perp > _PHANTOM_MIN_PERP_M:
-            from shapely.ops import nearest_points
-            foot = nearest_points(ln, c)[0]
-            if not _chord_on_pavement(c, foot, vis):
-                # PHANTOM binding: the only nearby centerline is FAR and only
-                # reachable ACROSS GRASS (CYXY south runway-crossing junction →
-                # centerline D, 367 m, 23 % paved).  Binding the reach band to it
-                # pins the floor far above the node's real route (3.3 m high → a
-                # 36.7 % body cliff).  Reach it over the welded-edge SKELETON
-                # instead — that taxiway over its OWN pavement.
-                return _fallback(x, y)
         coords = list(ln.coords)
         sp = ln.project(c)
         acc = 0.0
@@ -350,12 +362,13 @@ def reach_band_unified(layout, G):
         kA = _nn(A[0])
         kB = _nn(B[0])
         if kA is None and kB is None:
-            return _fallback(x, y)
+            return None
         _tcl = cap_of.get(id(ln))
         ecap = (taxi_grade_cap_for_letter(_tcl.size_at_arc(sp))
                 if _tcl is not None else TAXI_MAX_GRADE)
+        beyond_cap = ecap if in_junc else APRON_MAX_GRADE
         perp_climb = (ecap * min(perp, _TAXI_HALF_W_M)
-                      + APRON_MAX_GRADE * max(0.0, perp - _TAXI_HALF_W_M))
+                      + beyond_cap * max(0.0, perp - _TAXI_HALF_W_M))
         floor, ceil = -_INF, _INF
         for (ae, cdm) in anchors:
             cands = []
@@ -369,7 +382,52 @@ def reach_band_unified(layout, G):
             ceil = min(ceil, ae + budget)
             floor = max(floor, ae - budget)
         if ceil >= _INF:
+            return None
+        return (floor, ceil)
+
+    def band(x, y):
+        c = Point(x, y)
+        ln = (_nearest_visible_centerline(c, cls, vis) if vis is not None
+              else min(cls, key=lambda L: L.distance(c)))
+        perp = c.distance(ln)
+        if vis is not None and perp > _PHANTOM_MIN_PERP_M:
+            from shapely.ops import nearest_points
+            foot = nearest_points(ln, c)[0]
+            if not _chord_on_pavement(c, foot, vis):
+                # PHANTOM binding: the only nearby centerline is FAR and only
+                # reachable ACROSS GRASS (CYXY south runway-crossing junction →
+                # centerline D, 367 m, 23 % paved).  Binding the reach band to it
+                # pins the floor far above the node's real route (3.3 m high → a
+                # 36.7 % body cliff).  Reach it over the welded-edge SKELETON
+                # instead — that taxiway over its OWN pavement.
+                return _fallback(x, y)
+        in_junc = junc_zone is not None and junc_zone.contains(c)
+        prim = _band_via(c, x, y, ln, in_junc)
+        if prim is None:
             return _fallback(x, y)
+        floor, ceil = prim
+        # ANISOTROPIC EDGES: the within-shape law lets a point be reached from ANY
+        # nearby converging spine route, but the band above used the NEAREST
+        # centerline only — under-crediting the ceiling and false-flagging the
+        # junction/apron interiors the new law lets climb.  Widen to the
+        # most-reachable route over the other on-pavement centerlines within a
+        # BOUNDED reach (so a genuinely-too-high point still flags — no far route
+        # reaches it) and only across a VISIBLE on-pavement chord, so band and law
+        # agree without over-loosening.
+        if junc_zone is not None:
+            from shapely.ops import nearest_points
+            others = sorted((L for L in cls if L is not ln
+                             and L.distance(c) <= _MULTI_ROUTE_M),
+                            key=lambda L: L.distance(c))[:3]
+            for L in others:
+                if vis is not None:
+                    foot = nearest_points(L, c)[0]
+                    if not _chord_on_pavement(c, foot, vis):
+                        continue
+                r = _band_via(c, x, y, L, in_junc)
+                if r is not None:
+                    floor = min(floor, r[0])
+                    ceil = max(ceil, r[1])
         return (floor, ceil)
 
     return band
