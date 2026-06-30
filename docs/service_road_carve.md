@@ -213,7 +213,14 @@ RESA verified road-free.
 
 Measured: **CYXY roads-on 0/0/0**; HECA roads-on 57/0/0 vs 51
 roads-off — the +6 = sub-metre pairs on the re-cut #198-area apron
-#271; invariants held; suite 325p/2f.  Gate still default OFF —
-remaining items are USER VERDICTS, not code: (a) in-sim look at the
-road cliffs/walls (#198, the CYXY ramp), (b) the #271 residual,
-(c) then flip the default ON.
+#271; invariants held; suite 325p/2f.  The remaining items were
+USER VERDICTS, not code: (a) in-sim look at the road cliffs/walls
+(#198, the CYXY ramp), (b) the #271 residual, (c) then flip the
+default ON.
+
+> ✅ **RESOLVED (2026-06-30 audit): `SERVICE_ROAD_CARVE` now defaults ON**
+> (`O4_SERVICE_ROAD_CARVE` = "1", config.py). The verdicts above were taken and the
+> default flipped; nothing in this plan remains unbuilt. The 4 % road law lives in the
+> current `grade_graph.py` (`SERVICE_ROAD_MAX_GRADE`, `service_road`/`service_junction`
+> in `ROLE_GRADE_LIMITS`); the across-grass dependency on interior-path entries is moot
+> (that concern is handled by the grade_law reach-band rework).

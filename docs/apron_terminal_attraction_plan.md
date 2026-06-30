@@ -1,5 +1,9 @@
 # Plan — settle terminals in the feasible middle + attract aprons to them
 
+> ⚠ **SUPERSEDED (2026-06-30 audit) — never built.** Its model rested on
+> `_terminal_chord_windows` in the deleted `unified_jacobi.py`. The terminal-leveling
+> problem was instead solved by `TAXI_SLACK_TERMINALS` (see `taxi_slack_terminals.md`).
+
 **Status:** PLAN (not built). Supersedes the level-picking parts of
 [`apron_back_edge_ramps.md`](apron_back_edge_ramps.md); the back-edge corridor
 relaxation + the KML band tool from that work are inputs here.

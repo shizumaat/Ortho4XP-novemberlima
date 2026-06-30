@@ -1,5 +1,10 @@
 # Route-profile solver — status (next-gen one-profile solve)
 
+> ⚠ **SUPERSEDED (2026-06-30 audit).** Mid-evolution snapshot. The `O4_ROUTE_PROFILE_SOLVE`
+> gate and sibling modules (`route_graph.py`, `envelope.py`, …) it describes are gone;
+> `route_profile` is now the only solver. Live model → **`anisotropic_edge_handling_plan.md`**.
+> Acknowledged-open items (suite reds, SPJC spine 0→2 regression) → **`OPEN_ITEMS.md`**.
+
 Implements `docs/one_profile_solve.md` as a clean-room package.  **LIVE IN DEV by
 default** (`O4_ROUTE_PROFILE_SOLVE=1`, user 2026-06-25 — for X-Plane review;
 `=0` falls back to legacy).  `unified_jacobi.py` is untouched.

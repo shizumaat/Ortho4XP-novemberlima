@@ -1,5 +1,11 @@
 # Auto-Patch Tier 2 Implementation Plan
 
+> ⚠ **SUPERSEDED (2026-06-30 audit).** Written against the pre-rewrite `O4_*.py` module
+> layout (`O4_Auto_Patch.py`, `O4_Surface_Patch.py`, … — all deleted; pipeline now lives in
+> `src/auto_patch/`). Features A/B (taxiway grades, building flattening) are done-by-other-means.
+> Features **C (tunnel/overpass crossing patches)** and **D (DSF custom-mesh import)** were
+> never built — re-spec against the current pipeline if still wanted (see **`OPEN_ITEMS.md`**).
+
 ## Overview
 
 Tier 2 builds on the Tier 1 CIFP-based runway slope patches with three features:

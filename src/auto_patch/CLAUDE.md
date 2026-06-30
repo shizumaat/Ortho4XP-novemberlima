@@ -109,5 +109,7 @@ so there is no second copy to keep in sync. Change the number in `config.py` onl
 - `docs/auto_patch_design_requirements.docx` — original design requirements.
 - `docs/elevation_solver.md` — **the elevation solver reference** (cascade +
   stiffness-weighted relief; the model, the rules, and the approaches rejected).
-- `docs/auto_patch_tier2_plan.md` — tier-2 design/architecture notes.
-- `docs/TEST_PLAN_SPJC.md` — test plan for the SPJC fixture airport.
+- `docs/OPEN_ITEMS.md` — distilled backlog of planned-but-unbuilt work (2026-06-30 audit).
+- `docs/archive/README.md` — index of superseded/retired plan docs.
+- `docs/auto_patch_tier2_plan.md` — tier-2 design notes (⚠ historical: pre-rewrite module layout).
+- `docs/TEST_PLAN_SPJC.md` — SPJC test plan (⚠ obsolete: SPJC now covered by pytest fixtures).

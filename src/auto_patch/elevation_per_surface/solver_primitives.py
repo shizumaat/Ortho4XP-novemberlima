@@ -34,8 +34,7 @@ from auto_patch.elevation import (
     APRON_MAX_GRADE, SERVICE_ROAD_MAX_GRADE, TAXI_MAX_GRADE)
 from auto_patch.config import (
     taxi_grade_cap_for_letter, TAXI_MAX_GRADE_NARROW, JUNCTION_NARROW_GRADE,
-    CORRIDOR_SPINE_CHAINS, FIELD_TARGET_CONFORMANCE, BUILDING_ROUTE_FEASIBILITY,
-    MIN_GRADE_NETWORK)
+    CORRIDOR_SPINE_CHAINS)
 from auto_patch.layout import (
     ROLE_APRON, ROLE_BOUNDARY, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL, ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
@@ -46,13 +45,6 @@ from auto_patch.layout import (
 # Narrow exception tuple for shapely / numeric-geometry failure
 # modes.  Programming errors propagate so they surface immediately.
 _GEOM_EXC = (ValueError, GEOSException, TopologicalError)
-
-# FIELD_TARGET_CONFORMANCE (plan P4/P5): max field-sample gap (m) at which a
-# node still adopts the field value as its lift target.  Beyond this the field
-# (defined on the centerline graph) is too far to be a reliable target — a
-# deep-apron interior keeps its seed.  ~one apron-width; arm-served buildings
-# sample their serving arm well within this.
-
 
 SLOPING_RECT_ROLES = (
     ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,

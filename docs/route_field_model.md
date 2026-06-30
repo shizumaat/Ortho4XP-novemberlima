@@ -1,5 +1,11 @@
 # Route-Field Model (#3) — implementation design
 
+> ⚠ **SUPERSEDED (2026-06-30 audit).** Intermediate solver model. Lineage:
+> route-field → network_profile → route_profile → **`anisotropic_edge_handling_plan.md`**
+> (the live model). The code targets named here (`unified_jacobi.py`) are deleted.
+> Its one still-open follow-up (route-band check on the shipped OSM patch) is tracked
+> in **`OPEN_ITEMS.md`**.
+
 **Status: DESIGN, user-approved direction (s73-p3, re-confirmed s73-p10g).
 Not built.  This document is the handover for the implementing session.**
 

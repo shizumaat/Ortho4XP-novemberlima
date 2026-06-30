@@ -1,5 +1,11 @@
 # Network Profile Model (#4) — implementation design
 
+> ⚠ **SUPERSEDED (2026-06-30 audit).** Built in s78, then folded into
+> `route_profile`/`grade_graph`; the standalone `network_profile.py` module is deleted.
+> Live model → **`anisotropic_edge_handling_plan.md`**. Carried-forward open directives
+> (#198 switchback-as-road decomposition; "no shape may check grade across grass")
+> are tracked in **`OPEN_ITEMS.md`**.
+
 **Status: DESIGN, user-approved direction (s77p3, 2026-06-11: "I think
 this is the right direction... solve the full centerline taxi network,
 which includes curves, solve every intersection, similar to crossing

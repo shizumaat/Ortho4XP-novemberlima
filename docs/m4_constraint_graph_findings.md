@@ -1,6 +1,13 @@
 # M4 findings — the two within-shape pair generators disagree TWO ways
 
-**Status: HANDED BACK for a human modeling decision** (per the M4 NOTE in
+> ✅ **RESOLVED (2026-06-30 audit).** The hand-back below was later acted on: the two
+> generators were unified onto one shared law. `tools/check_grade.py` now consumes
+> `grade_graph.shape_constraints` → `grade_law.classify_pair` directly (commit `e22e39e`
+> "check_grade reads the shared grade law" + the grade_law one-plane-rule work `0bbb097`,
+> `3124a2a`), so it no longer reimplements its own pair selection. The original status
+> line is preserved below for history.
+
+**Status (original — now superseded): HANDED BACK for a human modeling decision** (per the M4 NOTE in
 `docs/cleanup_consolidation_plan.md`: "this changes *what is counted* … if unsure,
 STOP and leave a written summary instead of guessing"). The reusable measurement
 tool `tools/diff_constraint_graphs.py` and the data below are the deliverable; the

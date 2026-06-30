@@ -1098,18 +1098,6 @@ AGP_BUILDINGS = _os.environ.get("O4_AGP_BUILDINGS", "1") == "1"
 # no effect unless DSF_BUILDINGS is also ON.
 TERM_BRIDGE_GROUPING = _os.environ.get("O4_TERM_BRIDGE_GROUPING", "1") == "1"
 
-# (s79) INTERIOR-PATH ENTRIES — docs/interior_path_entries.md.
-# ★ USER RULING 2026-06-11: no shape may ever check grade ACROSS GRASS.
-# Every off-graph entry into the centerline route graph (route-band law
-# anchors/check vertices, the network-profile field's law-entry gap
-# edges and band anchors, _runway_reach_bands gap charging) charges the
-# IN-PAVEMENT path length instead of the straight chord; no interior
-# path ⇒ no coupling.  Solver, field and validator share ONE measure
-# (auto_patch/interior_path.py) — partial application is the measured
-# failure mode (s78p5 revert; s79 field-only experiment = 50 viol).
-# OFF restores the straight-gap behaviour byte-identically.
-INTERIOR_PATH_ENTRIES = _os.environ.get("O4_INTERIOR_PATH", "1") == "1"
-
 # (s80) Extent-based runway shoulder widening — tuning constants and
 # rationale with the other RUNWAY_SHOULDER_EXTENT_* values near the
 # DSF block above.  ``O4_SHOULDER_EXTENT=0`` restores the pre-s80

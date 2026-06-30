@@ -1,5 +1,9 @@
 # grade_law consolidation — handover
 
+> ⚠ **SUPERSEDED (2026-06-30 audit) by `grade_law_consolidation_handover_4.md`.**
+> Items 1–3,5 landed in later handovers. Still-open carry-forwards (route-band-on-OSM
+> check; "audit every check against principle #2" / `_check_plane_gradient`) → **`OPEN_ITEMS.md`**.
+
 **Goal (user-set, 2026-06-28):** one canonical ruleset that BOTH the solver and
 the validators use, so output is tuned by editing *rules*, not by chasing three
 implementations. The principles, verbatim:

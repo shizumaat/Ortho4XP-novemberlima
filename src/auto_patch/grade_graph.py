@@ -43,7 +43,6 @@ from .config import (
     APRON_MAX_GRADE,
     APRON_TAXI_BLEND,
     APRON_TAXI_TRANSITION_M,
-    ELEV_ROUNDING_NOISE_M,
     GRADE_VISIBILITY_BUFFER_M as _VIS_BUF,
     SERVICE_ROAD_MAX_GRADE,
     TAXI_MAX_GRADE,
@@ -1190,14 +1189,3 @@ def _runway_anchors(layout, G, bucket_to_idx):
                 re = _sample_runway_segment_elev(s, x, y)
                 if re is not None:
                     G.runway_anchor[i] = float(re)
-
-
-def flatten_pairs(constraints: Sequence[ShapeConstraints],
-                  noise: float = ELEV_ROUNDING_NOISE_M):
-    """Flatten to validator pairs ``(key_a, key_b, cap, allowance)`` where
-    ``allowance = cap * dist + noise`` — but dist is unknown here, so the
-    validator recomputes it; we return ``(key_a, key_b, cap)`` and let the caller
-    add dist/allowance.  Kept as a thin helper so the validator has one entry."""
-    for sc in constraints:
-        for (a, b, cap) in sc.edges:
-            yield (a, b, cap)

@@ -1,5 +1,9 @@
 # grade_law consolidation — handover #2 (continues `grade_law_consolidation_handover.md`)
 
+> ⚠ **SUPERSEDED (2026-06-30 audit) by `grade_law_consolidation_handover_4.md`.**
+> Carry-forward open items (route-band-on-OSM; building-anchored apron >60 m draping to
+> DEM) → **`OPEN_ITEMS.md`**.
+
 Read `docs/grade_law_consolidation_handover.md` first (the original goal +
 architecture + principles). This file records what the **2026-06-28 session**
 landed and what is still open. The goal is unchanged:

@@ -1,5 +1,11 @@
 # Apron back-edge ramps — flatter building pads via a twisting apron
 
+> ⚠ **SUPERSEDED (2026-06-30 audit) by `taxi_slack_terminals.md`.** The back-edge-ramp
+> model is a no-op under the default config (`TAXI_SLACK_TERMINALS` on → `_apron_back_band_nodes`
+> returns `{}`) and its validator exemption was deleted (commit `54bd5d2`). Kept only for the
+> `APRON_BACK_EDGE_GRADE` / `_apron_back_band_nodes` rationale (those symbols are still live).
+> Removing the gated-off machinery is a cleanup candidate in **`OPEN_ITEMS.md`**.
+
 **Status:** built — gate `APRON_BACK_EDGE_RAMPS`, **default ON** (user 2026-06-13,
 for in-sim eval; `O4_APRON_BACK_RAMPS=0` disables, byte-identical-OFF proven at
 SPJC with `PYTHONHASHSEED=0`). Suite baseline below.

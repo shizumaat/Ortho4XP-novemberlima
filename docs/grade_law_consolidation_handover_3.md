@@ -1,5 +1,9 @@
 # grade_law consolidation — handover #3 (continues handover #2)
 
+> ⚠ **SUPERSEDED (2026-06-30 audit) by `grade_law_consolidation_handover_4.md`.**
+> Its main open item (spine rising to serve a building across an apron) was re-diagnosed
+> and resolved there (taxi centerlines by connectivity, commit `adc6bac`).
+
 Read `docs/grade_law_consolidation_handover_2.md` first. This records the
 2026-06-29 session. Goal unchanged: ONE canonical ruleset (`grade_law`) both the
 solver and validators use; no airport legitimately infeasible.

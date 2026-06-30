@@ -1,5 +1,11 @@
 # Single grade graph — ONE within-shape constraint set for solver AND validator
 
+> ✅ **DONE / RELOCATED (2026-06-30 audit).** The single-grade-graph model is live and
+> the only path (the `SINGLE_GRADE_GRAPH` gate was retired byte-identically in `69c087e`).
+> The module names prescribed here (`grade_graph_solve.py`, `spine_carries_climb_solve`)
+> were never created — the solve lives in `route_profile`/`grade_graph`. Kept as design
+> rationale, not as a pending plan.
+
 Status: **in progress** (2026-06-23). Owner: handoff-ready. THE authoritative plan
 for the current generation of the elevation solver. Read with
 `memory/p5_lockstep_diagnosis.md`. This SUPERSEDES the P5/P6 sketch in

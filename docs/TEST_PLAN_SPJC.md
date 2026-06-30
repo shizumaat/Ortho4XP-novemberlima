@@ -1,5 +1,11 @@
 # SPJC Surface-Patch Test Plan
 
+> ⚠ **OBSOLETE (2026-06-30 audit).** This manual protocol targets the deleted
+> `O4_Surface_Patch.py` / `build_surface_patch` / `USE_NEW_SURFACE_PIPELINE` and a working
+> directory that no longer exists. SPJC is now covered by pytest fixtures
+> (`tests/test_compare_target.py`, `tests/test_pavement_grade.py`). Kept for the hard
+> invariants it documents (no overlaps; continuous surface; ≤1.0 % apron / ≤1.5 % taxi grade).
+
 This document describes how to test `src/O4_Surface_Patch.py`
 (the analysis+emit pipeline for runways, buildings, taxiways, aprons)
 against the reference airport SPJC (Jorge Chávez, Lima, Peru) in tile
