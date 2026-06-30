@@ -257,7 +257,12 @@ def audit_layout(layout, icao):
         ra, rb = rep(c.nid_a), rep(c.nid_b)
         if ra == rb:
             continue                      # intra-flat-group: auto-satisfied
-        w = c.cap * c.dist
+        # Edge budget = THE LAW's per-pair allowance (cap.at(Δs∥,Δs⊥)+noise from
+        # iter_shape_grade_constraints), NOT a recomputed cap·dist — so the oracle
+        # uses the same ANISOTROPIC budget the solver builds to and the validator
+        # checks.  A curving route's arc-credited pair is no longer scored against
+        # its shorter chord, so the audit can't report a false infeasibility there.
+        w = c.allowance
         adj[ra].append((rb, w))
         adj[rb].append((ra, w))
         if c.dist <= REACH_WINDOW:
