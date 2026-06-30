@@ -3324,6 +3324,73 @@ def build_airport_pavement(icao: str, xplane_root: str,
             polygon=rect, role=role, ref=ref, source_axis=axis,
             is_bridge=(ri in bridge_rect_indices)))
 
+    # ── Rectless SVC connector → service_junction ────────────────
+    # A service-road (SVC) centerline piece too CURVED/short for the rect
+    # builder produces NO rect (the bend-split chops it into sub-min-length /
+    # degenerate pieces — CYXY truck-route 'D' arm to lots 102/104/105).
+    # Without an emitted service shape its pavement stays FUSED into the apron,
+    # so the lot it serves never reads as road-only and wrongly stays apron.
+    # Emit the piece's uncovered pavement CORRIDOR as a ``service_junction``
+    # (all-pair 4 %, no axial rect needed); it separates the lot like a rect
+    # would and the lot then reclassifies road-only → groundside.
+    #
+    # ONLY a NARROW CONNECTOR ROAD BETWEEN larger shapes qualifies — never a
+    # truck route running THROUGH a large apron (user 2026-06-29).  The test is
+    # CONNECTIVITY: a real connector is a BRIDGE — removing its corridor splits
+    # the LOCAL pavement into two sizable pieces (the apron and the lot it
+    # feeds).  A truck route inside one apron, or a rect-trim edge remainder,
+    # leaves the local pavement in one piece, so it is skipped.
+    if os.environ.get("O4_SVC_CURVED_JUNCTION", "1") == "1":
+        from .layout import ROLE_SERVICE_JUNCTION
+        _SVC_JCT_MIN_AREA_M2 = 30.0
+        _BRIDGE_REACH_M = 60.0       # local pavement window around a connector
+        _BRIDGE_PIECE_M2 = 50.0      # a split-off piece this big = a real shape
+        _covered = (unary_union(emitted_taxi_rects)
+                    if emitted_taxi_rects else None)
+        _n_svc_jct = 0
+        for _ln, _ref in osm_centerlines:
+            if (not str(_ref or "").startswith("SVC")
+                    or _ln is None or _ln.is_empty):
+                continue
+            _hw = max((_svc_widths or {}).get(_ref, 5.0) / 2.0, 2.5)
+            try:
+                _corr = _ln.buffer(_hw, cap_style=2).intersection(pav_union)
+                if terminal_union is not None and not terminal_union.is_empty:
+                    _corr = _corr.difference(terminal_union)
+                if _covered is not None:
+                    _corr = _corr.difference(_covered)
+            except _GEOM_EXC:
+                continue
+            _parts = ([_corr] if _corr.geom_type == "Polygon"
+                      else [g for g in getattr(_corr, "geoms", ())
+                            if g.geom_type == "Polygon"])
+            for _p in _parts:
+                if _p.is_empty or _p.area < _SVC_JCT_MIN_AREA_M2:
+                    continue
+                # Bridge test: does removing this corridor disconnect the local
+                # pavement into >=2 sizable pieces?
+                try:
+                    _nbhd = pav_union.intersection(_p.buffer(_BRIDGE_REACH_M))
+                    _without = _nbhd.difference(_p.buffer(0.5))
+                    _wc = ([_without] if _without.geom_type == "Polygon"
+                           else [g for g in getattr(_without, "geoms", ())
+                                 if g.geom_type == "Polygon"])
+                    if sum(1 for g in _wc
+                           if g.area >= _BRIDGE_PIECE_M2) < 2:
+                        continue          # not a bridge between two shapes
+                except _GEOM_EXC:
+                    continue
+                emitted_taxi_rects.append(_p)
+                _covered = (unary_union([_covered, _p])
+                            if _covered is not None else _p)
+                layout.shapes.append(BuiltShape(
+                    polygon=_p, role=ROLE_SERVICE_JUNCTION, ref=_ref))
+                _n_svc_jct += 1
+        if _n_svc_jct:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: emitted {_n_svc_jct} narrow SVC "
+                f"connector(s) as service_junction (rectless, between shapes).")
+
     # ── Junction emission (finalize/repair runs downstream) ──────
     junction_emit.emit_junctions(
         layout,

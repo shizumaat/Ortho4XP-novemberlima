@@ -1254,7 +1254,8 @@ def _separate_groundside_from_airside(
     # feeds (CYXY SVC1 ↔ lot @(-472,404): a cliff across the gap).  Groundside is
     # still cut back from BUILDINGS (kept above) and aircraft pavement.  Off =
     # legacy (clearance from roads too).
-    if _os.environ.get("O4_GROUNDSIDE_SHARE_SVC", "1") != "1":
+    _share_svc = _os.environ.get("O4_GROUNDSIDE_SHARE_SVC", "1") == "1"
+    if not _share_svc:
         AIRSIDE_ROLES |= {ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION}
     clip_polys = []
     for s in layout.shapes:
@@ -1268,6 +1269,16 @@ def _separate_groundside_from_airside(
                 clip_polys.append(s.polygon.buffer(clearance, join_style=2))
             except _GEOM_EXC:
                 continue
+    # Groundside may TOUCH a service road (shared edge, kept above) but must not
+    # OVERLAP it (area overlap = self-overlap, not a shared edge — e.g. a curved
+    # SVC connector emitted as service_junction that straddles the lot it feeds).
+    # Add the service polys at ZERO clearance so an overlap is trimmed while the
+    # touching edge survives (no disconnecting gap).
+    if _share_svc:
+        for s in layout.shapes:
+            if s.role in (ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION) \
+                    and s.polygon is not None and not s.polygon.is_empty:
+                clip_polys.append(s.polygon)
     if not clip_polys:
         return 0
     try:
