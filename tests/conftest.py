@@ -211,8 +211,15 @@ def _discover_airports_in_tile(lat: int, lon: int) -> List[str]:
     return sorted(found)
 
 
+@pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):
     """Per-airport xdist grouping + optional ship-mode skip.
+
+    MUST run before xdist's own ``pytest_collection_modifyitems`` (remote.py),
+    which converts the ``xdist_group`` marker into the ``@group`` nodeid suffix
+    the loadgroup scheduler keys on.  Without ``tryfirst`` our hook runs AFTER
+    xdist's, so the marker isn't present when xdist reads it → no grouping → each
+    airport rebuilds on every worker (CYXY/SPJC/SPLP were each built ~14×/run).
 
     Under ``--dist loadgroup`` (set in ``pytest.ini``), tests sharing an
     ``xdist_group`` run on the SAME worker.  Assigning every airport-
