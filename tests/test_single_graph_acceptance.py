@@ -85,11 +85,23 @@ def test_solver_and_validator_same_nodes():
     nodes, b2i = _build_node_list(layout)
     G = GG.build_unified_graph(layout, b2i)
 
+    # Key both sides through the SAME canonical registry the solver welds on,
+    # so a sub-SHARED_VERTEX_TOL_M vertex pair is one node to both (matches
+    # grade_graph_validate.checked_spine_geometry).
+    _reg = getattr(layout, "canonical_points", None)
+
     def _k(i):
         x, y = G.pos[i]
+        if _reg is not None:
+            cp = _reg.find_nearest(x, y, _reg.tol_m)
+            if cp is not None:
+                x, y = cp
         return (round(x, 2), round(y, 2))
     solver_nodes = {_k(i) for i in G.spine_nodes()}
-    solver_edges = {tuple(sorted((_k(a), _k(b)))) for (a, b) in G.spine_edge_set()}
+    # drop self-loops: an edge between two vertices that canonicalize to the
+    # SAME node is not a real spine edge (checked_spine_geometry skips a == b).
+    solver_edges = {tuple(sorted((_k(a), _k(b)))) for (a, b) in G.spine_edge_set()
+                    if _k(a) != _k(b)}
 
     val_nodes, val_edges = checked_spine_geometry(layout)
 

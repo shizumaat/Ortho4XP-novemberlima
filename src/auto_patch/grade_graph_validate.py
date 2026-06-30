@@ -165,8 +165,21 @@ def checked_spine_geometry(layout):
     ``{(round(x,2), round(y,2)), ...}``; ``edges`` is ``{(node_a, node_b)}`` with
     ``node_a <= node_b``.  Used by ``test_solver_and_validator_same_nodes`` to
     assert the SOLVER's unified graph (``grade_graph.build_unified_graph``) and
-    the VALIDATOR check the exact same spine — one graph in effect."""
+    the VALIDATOR check the exact same spine — one graph in effect.
+
+    Node identity is resolved through ``layout.canonical_points`` — the SAME
+    registry the solver keys its nodes on (``_build_node_list``).  The solver
+    welds vertices within ``SHARED_VERTEX_TOL_M`` into ONE node; keying the
+    validator's raw ring coords through that registry (instead of a bare
+    ``round(x, 2)`` bucket) makes a sub-weld-tolerance vertex pair the SAME node
+    to both — no false node-set divergence from a conformance-inserted sliver."""
+    reg = getattr(layout, "canonical_points", None)
+
     def _k(x, y):
+        if reg is not None:
+            cp = reg.find_nearest(x, y, reg.tol_m)
+            if cp is not None:
+                x, y = cp
         return (round(x, 2), round(y, 2))
     nodes = set()
     edges = set()
