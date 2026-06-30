@@ -278,75 +278,47 @@ def split_merged_centerline(
             clusters[-1].append(bi)
         else:
             clusters.append([bi])
-    # Build an ordered list of (break_index, kind) where
-    # kind='point' (single bend) or 'interval_start' /
-    # 'interval_end' (curve boundaries).
-    events: list[tuple[int, str]] = [(0, "point")]
+    # Break the simplified polyline into rect-axis segments at bend
+    # POINTS.  Each single bend is one break point; a multi-bend cluster
+    # (a curve) is split either at EVERY bend or at the cluster midpoint.
+    events: list[int] = [0]
     for cl in clusters:
         if len(cl) == 1:
-            events.append((cl[0], "point"))
+            events.append(cl[0])
+            continue
+        # A near-runway curve at a polyline ENDPOINT is a taxiway turning
+        # and CLIMBING into an apron / toward a runway threshold.  Earlier
+        # this curve was SKIPPED ("junction territory"), which dropped the
+        # climbing taxi spine and left the curve pavement to grade as flat
+        # apron (CYXY taxiway E: a whole-route curve whose spine should
+        # turn and climb into the north apron).  Per user 2026-06-29 we KEEP
+        # such curves — split at EVERY bend so the rects (and the spine they
+        # carry) follow the turn.  A gentle mid-route curve (e.g. A's bend
+        # mid-airport) instead stays a single midpoint dogleg break, as
+        # before — splitting it finely is unnecessary and a mid-polyline
+        # curve must remain rect territory anyway (skipping it once let the
+        # neighbour rect overshoot past the split — CYXY taxiway D, 2026-05-15).
+        near_rwy = False
+        if rwy_centerlines:
+            cp = Point(scoords[cl[len(cl) // 2]])
+            near_rwy = any(cp.distance(r) < 200.0 for r in rwy_centerlines)
+        at_endpoint = False
+        if near_rwy:
+            cs = Point(scoords[cl[0]])
+            ce = Point(scoords[cl[-1]])
+            ls_start = Point(scoords[0])
+            ls_end = Point(scoords[-1])
+            CLUSTER_TO_POLYLINE_END_TOL_M = 30.0
+            at_endpoint = (
+                cs.distance(ls_start) < CLUSTER_TO_POLYLINE_END_TOL_M
+                or ce.distance(ls_end) < CLUSTER_TO_POLYLINE_END_TOL_M)
+        if near_rwy and at_endpoint:
+            events.extend(cl)                   # follow every bend
         else:
-            # Only treat curve as junction interval (skip the curve
-            # so it becomes junction territory) when BOTH:
-            #
-            #   (a) the cluster is NEAR A RUNWAY (per user rule 3:
-            #       "primary taxiway curves and intersects the
-            #       runway" → straight rect, curve = junction, perp
-            #       = stub), AND
-            #   (b) the cluster sits at one of the polyline's
-            #       ENDPOINTS — i.e. the curve IS the transition
-            #       between this taxiway and another ref (typically
-            #       a runway threshold).
-            #
-            # A cluster in the middle of a polyline is a route curve
-            # along a single continuous taxiway and must remain rect
-            # territory; skipping it would drop the mid-corridor
-            # pavement to junction residue and cause the neighbour
-            # rect to expand past the split point into the abandoned
-            # pavement.  See CYXY taxiway D bends at apt.dat nodes 2
-            # and 1 — mid-polyline between E_split (141) and the
-            # runway crossing (135), 55 m from runway centerline —
-            # without test (b), -10003 (primary E south) overshot
-            # past node 141 to occupy the would-be D-west pavement
-            # (user 2026-05-15).
-            #
-            # Curves nowhere near a runway (e.g. A's gentle bend
-            # mid-airport) fail (a) and stay as single break points.
-            near_rwy = False
-            at_endpoint = False
-            if rwy_centerlines:
-                cluster_mid = scoords[cl[len(cl) // 2]]
-                cp = Point(cluster_mid)
-                for r in rwy_centerlines:
-                    if cp.distance(r) < 200.0:
-                        near_rwy = True
-                        break
-            if near_rwy:
-                cs = Point(scoords[cl[0]])
-                ce = Point(scoords[cl[-1]])
-                ls_start = Point(scoords[0])
-                ls_end = Point(scoords[-1])
-                CLUSTER_TO_POLYLINE_END_TOL_M = 30.0
-                at_endpoint = (
-                    cs.distance(ls_start) < CLUSTER_TO_POLYLINE_END_TOL_M
-                    or ce.distance(ls_end) < CLUSTER_TO_POLYLINE_END_TOL_M)
-            if near_rwy and at_endpoint:
-                events.append((cl[0], "interval_start"))
-                events.append((cl[-1], "interval_end"))
-            else:
-                events.append((cl[len(cl) // 2], "point"))
-    events.append((len(scoords) - 1, "point"))
-    events.sort()
-    # Walk events pair-wise; skip intervals between
-    # interval_start and interval_end (that's the curve).
-    for k in range(len(events) - 1):
-        i0, k0 = events[k]
-        i1, k1 = events[k + 1]
-        # Skip the curve interval itself.
-        if k0 == "interval_start" and k1 == "interval_end":
-            continue
-        if i0 == i1:
-            continue
+            events.append(cl[len(cl) // 2])     # single dogleg break
+    events.append(len(scoords) - 1)
+    ev = sorted(set(events))
+    for i0, i1 in zip(ev, ev[1:]):
         try:
             seg = LineString(scoords[i0:i1 + 1])
         except _GEOM_EXC:
