@@ -109,6 +109,11 @@ def close_ring(coords: "list[tuple[float, float]]"
 
 
 
+# On-pavement snap-guard tolerances (see _snap_polygon_vertices_to_rect_corners).
+_SNAP_PAV_BUFFER_M = 0.15   # absorb the boundary epsilon at the segment ends
+_SNAP_PAV_GAP_M = 0.5       # min off-pavement run that counts as crossing a gap
+
+
 def _snap_polygon_vertices_to_rect_corners(
         poly: "Polygon",
         sloping_rect_polys: "list[Polygon]",
@@ -145,7 +150,9 @@ def _snap_polygon_vertices_to_rect_corners(
     if len(coords) < 3:
         return poly
 
-    corners: list[tuple[float, float]] = []
+    # Each corner remembers its owning rect so the on-pavement guard below can
+    # test the snap path against ``poly ∪ that-rect`` (cheap, 2 polygons).
+    corners: list[tuple[float, float, "Polygon"]] = []
     for r in sloping_rect_polys:
         if r is None or r.is_empty:
             continue
@@ -155,21 +162,45 @@ def _snap_polygon_vertices_to_rect_corners(
             continue
         if rc and rc[0] == rc[-1]:
             rc = rc[:-1]
-        corners.extend((float(x), float(y)) for x, y in rc)
+        corners.extend((float(x), float(y), r) for x, y in rc)
     if not corners:
         return poly
+
+    # ON-PAVEMENT GUARD (user 2026-06-30): never snap a vertex to a rect corner
+    # if the straight path V→corner leaves the pavement — that drags the vertex
+    # ACROSS a no-pavement wedge onto the corner, collapsing the wedge into a
+    # near-zero-width self-touch that the spike cleanup then severs (the HECA
+    # stub-B/-707 gap).  ``poly ∪ owning-rect`` is the local pavement; if more
+    # than ``_SNAP_PAV_GAP_M`` of the path lies outside it (buffered for the
+    # boundary epsilon), the snap crosses a gap — leave the vertex put.  Gate
+    # ``O4_SNAP_ON_PAV_GUARD=0`` restores the unguarded snap.
+    _guard = os.environ.get("O4_SNAP_ON_PAV_GUARD", "1") == "1"
+
+    def _snap_crosses_gap(vx, vy, cx, cy, rect) -> bool:
+        try:
+            seg = LineString([(vx, vy), (cx, cy)])
+            if seg.length < 1e-9:
+                return False
+            local_pav = poly.union(rect).buffer(_SNAP_PAV_BUFFER_M)
+            return seg.difference(local_pav).length > _SNAP_PAV_GAP_M
+        except _GEOM_EXC:
+            return False
 
     snap_tol2 = snap_tol_m * snap_tol_m
     snapped: list[tuple[float, float]] = []
     for vx, vy in coords:
         best_corner: tuple[float, float] | None = None
+        best_rect = None
         best_d2 = snap_tol2
-        for cx, cy in corners:
+        for cx, cy, r in corners:
             d2 = (vx - cx) ** 2 + (vy - cy) ** 2
             if d2 < best_d2:
                 best_d2 = d2
                 best_corner = (cx, cy)
-        if best_corner is not None:
+                best_rect = r
+        if (best_corner is not None and not (
+                _guard and _snap_crosses_gap(
+                    vx, vy, best_corner[0], best_corner[1], best_rect))):
             snapped.append(best_corner)
         else:
             snapped.append((float(vx), float(vy)))

@@ -18,7 +18,7 @@ import time as _time
 
 from .anchors import (
     apron_body_nodes, build_building_seats, build_nobuilding_apron_seats,
-    building_spine_floor, node_bands, reach_band_for)
+    build_apron_contact_floors, building_spine_floor, node_bands, reach_band_for)
 from .one_solve import one_profile_solve
 
 
@@ -126,6 +126,18 @@ def solve_route_profile(layout, icao: str,
         # cap-Lipschitz on the unified spine chain.
         u_spine_floor = building_spine_floor(
             layout, nodes, bucket_to_idx, building_seats, node_band, u_spine_adj)
+        # APRON-CONTACT FLOOR (user 2026-06-29): a taxiway/junction that meets a
+        # BUILDING-anchored apron's edge FAR from the building gets no building floor
+        # (>corridor) and no no-building seat (skipped for building aprons), so it
+        # solves to its own low DEM and the senior apron cliffs down to it (OEMA TX8
+        # #275 → 96 % apron step).  Floor each such feeder contact at the apron's own
+        # reachable level so the taxi spine grades UP to the apron — the apron keeps
+        # its cap, the taxi yields (the documented apron-owned authority).  Merged as
+        # a floor (max), so it composes with the building-frontage floor.
+        for _i, _fl in build_apron_contact_floors(
+                layout, bucket_to_idx, band, dem_fn, building_seats).items():
+            if _fl > u_spine_floor.get(_i, -float("inf")):
+                u_spine_floor[_i] = _fl
         # FEEDER CONVERGENCE (tilt model): a no-building apron is ANCHORED like a
         # building so its feeder SPINES grade to meet it — but at the per-feeder
         # feasible level L_i (the apron tilts ≤cap between contacts, see
