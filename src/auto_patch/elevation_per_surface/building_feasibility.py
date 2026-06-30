@@ -62,6 +62,13 @@ _INF = float("inf")
 
 _VIS_BUFFER_M = 0.5        # bridge weld-seam slivers between abutting shapes
 _VIS_ON_PAV_FRAC = 0.97    # chord counts as visible if ≥ this fraction is paved
+# A reach binding is PHANTOM only when the serving centerline is BOTH far AND
+# only reachable across grass.  The CYXY south runway-crossing junction binds a
+# centerline 367 m away over 77 % grass; a building/apron vertex a few tens of m
+# from its serving centerline across a small grass sliver is NOT phantom (forcing
+# IT onto the skeleton band shifts building seats — building12's pad).  The perp
+# gate isolates the egregious case without disturbing normal apron-frontage reach.
+_PHANTOM_MIN_PERP_M = 100.0
 
 
 def _pavement_visibility(layout):
@@ -105,6 +112,23 @@ def _nearest_visible_centerline(c, cls, vis):
         except Exception:                                  # pragma: no cover
             pass
     return min(cls, key=lambda L: L.distance(c))
+
+
+def _chord_on_pavement(c, foot, vis):
+    """True when the straight chord from ``c`` to its centerline ``foot`` stays on
+    pavement (≥ ``_VIS_ON_PAV_FRAC`` paved) — the SAME visible-chord rule
+    :func:`_nearest_visible_centerline` uses to accept a connection.  A chord that
+    mostly crosses grass is a PHANTOM route (you cannot taxi it), so the reach band
+    must not be bound through it."""
+    from shapely.geometry import LineString
+    chord = LineString([(c.x, c.y), (foot.x, foot.y)])
+    if chord.length < 1e-6 or vis.contains(chord):
+        return True
+    try:
+        return (chord.intersection(vis.context).length
+                / chord.length) >= _VIS_ON_PAV_FRAC
+    except Exception:                                      # pragma: no cover
+        return False
 
 
 def _build_skeleton_band(layout, G):
@@ -297,6 +321,17 @@ def reach_band_unified(layout, G):
         ln = (_nearest_visible_centerline(c, cls, vis) if vis is not None
               else min(cls, key=lambda L: L.distance(c)))
         perp = c.distance(ln)
+        if vis is not None and perp > _PHANTOM_MIN_PERP_M:
+            from shapely.ops import nearest_points
+            foot = nearest_points(ln, c)[0]
+            if not _chord_on_pavement(c, foot, vis):
+                # PHANTOM binding: the only nearby centerline is FAR and only
+                # reachable ACROSS GRASS (CYXY south runway-crossing junction →
+                # centerline D, 367 m, 23 % paved).  Binding the reach band to it
+                # pins the floor far above the node's real route (3.3 m high → a
+                # 36.7 % body cliff).  Reach it over the welded-edge SKELETON
+                # instead — that taxiway over its OWN pavement.
+                return _fallback(x, y)
         coords = list(ln.coords)
         sp = ln.project(c)
         acc = 0.0
