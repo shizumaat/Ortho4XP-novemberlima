@@ -771,7 +771,7 @@ _SLOPING_RECT_OSM_ROLES = frozenset({
 
 
 def _grade_context_from_osm(ways, nodes, ll_to_m, taxi_axes, seam_nids,
-                            max_grade, road_zone=None):
+                            max_grade, road_zone=None, routes_m=None):
     """Build the SAME ``grade_graph.GradeContext`` the solver uses, but from the
     emitted OSM — so the grade TEST reads the one shared within-shape LAW
     (``grade_law.classify_pair`` via ``grade_graph.shape_constraints``).  Keys are
@@ -784,6 +784,23 @@ def _grade_context_from_osm(ways, nodes, ll_to_m, taxi_axes, seam_nids,
 
     centerlines = [GG.Centerline(pts=poly, seg_caps=[cL] * (len(poly) - 1))
                    for (poly, cL, _cT) in (taxi_axes or []) if len(poly) >= 2]
+
+    # ANISOTROPIC EDGES (gate O4_ANISO_EDGES): chained ROUTES (meter polylines)
+    # for the spine-arc decomposition, so the standalone grade TEST uses the SAME
+    # anisotropic budget the solver built to (else a curve the solver arc-credited
+    # would false-flag here).  Each centerline is bound to its nearest route.  Gate
+    # OFF / no routes ⇒ ``routes`` empty, ``route_idx`` -1, isotropic (byte-ident).
+    routes = [GG.RouteChain(pts=list(r)) for r in (routes_m or []) if len(r) >= 2]
+    if routes:
+        for cl in centerlines:
+            mx = 0.5 * (cl.pts[0][0] + cl.pts[-1][0])
+            my = 0.5 * (cl.pts[0][1] + cl.pts[-1][1])
+            best_i, best_d = -1, float("inf")
+            for ri, r in enumerate(routes):
+                _a, d, _f = GG._project(r, mx, my)
+                if d < best_d:
+                    best_d, best_i = d, ri
+            cl.route_idx = best_i
 
     bld_keys = {nid for w in ways if w.tags.get("role") == "building"
                 for nid in w.nids}
@@ -809,6 +826,7 @@ def _grade_context_from_osm(ways, nodes, ll_to_m, taxi_axes, seam_nids,
 
     return GG.GradeContext(
         centerlines=centerlines,
+        routes=routes,
         seam_keys=frozenset(seam_nids or ()),
         inherited_junction_cap=_inherited,
         building_keys=frozenset(bld_keys),
@@ -822,6 +840,7 @@ def iter_shape_grade_constraints(
         max_grade: float,
         seam_nids: Optional[set] = None,
         taxi_axes: Optional[list] = None,
+        routes_ll: Optional[list] = None,
         ) -> "list[ShapePairConstraint]":
     """Yield every within-shape vertex-pair the grade check constrains.
 
@@ -870,8 +889,12 @@ def iter_shape_grade_constraints(
     # layer ON TOP (they only RELAX a cap).  Non-soft shapes (rects / runway /
     # terminal) keep their per-role all-pair handling further down.
     from auto_patch import grade_graph as _GG
+    routes_m = ([[ll_to_m(la, lo) for (la, lo) in pts]
+                 for pts in routes_ll if pts and len(pts) >= 2]
+                if routes_ll else None)
     _law_ctx = _grade_context_from_osm(ways, nodes, ll_to_m, taxi_axes,
-                                       seam_nids, max_grade, road_zone=road_zone)
+                                       seam_nids, max_grade, road_zone=road_zone,
+                                       routes_m=routes_m)
     _SOFT_ROLES = _GG.SOFT_VISIBILITY_ROLES
     for w in ways:
         grade_cap = _role_grade_limit(w, max_grade)
@@ -953,6 +976,7 @@ def _check_within_shape(ways: List[Way],
                         max_grade: float,
                         seam_nids: Optional[set] = None,
                         taxi_axes: Optional[list] = None,
+                        routes_ll: Optional[list] = None,
                         ) -> List[Violation]:
     """Grade check between vertex pairs on the same way.  Consumes
     ``iter_shape_grade_constraints`` (the single source of constrained pairs)
@@ -961,7 +985,7 @@ def _check_within_shape(ways: List[Way],
     rounding doesn't produce spurious sub-metre flags."""
     out: List[Violation] = []
     for c in iter_shape_grade_constraints(
-            ways, nodes, ll_to_m, max_grade, seam_nids, taxi_axes):
+            ways, nodes, ll_to_m, max_grade, seam_nids, taxi_axes, routes_ll):
         de = abs(c.ea - c.eb)
         if de <= c.allowance:
             continue
@@ -1311,6 +1335,7 @@ def run_checks(
     edge_step_m: float = 0.5,
     top_n: int = 10,
     taxi_axes_ll: Optional[list] = None,
+    routes_ll: Optional[list] = None,
     quiet: bool = False,
 ) -> Tuple[List[Violation], List[Violation], List[EdgeStep]]:
     """``taxi_axes_ll`` (per-axis junction grading): the builder's APT.DAT taxi
@@ -1355,7 +1380,7 @@ def run_checks(
 
     within = _check_within_shape(
         ways, nodes, ll_to_m, max_grade, seam_nids=seam_nids,
-        taxi_axes=taxi_axes)
+        taxi_axes=taxi_axes, routes_ll=routes_ll)
     _pv(f"WITHIN-SHAPE vertex-pair grade > {max_grade_pct}%",
         within, top_n)
 

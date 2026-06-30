@@ -154,6 +154,7 @@ def test_pavement_grade(tmp_path, icao):
                 pts = [layout.m_to_ll(x, y) for (x, y) in ln.coords]
                 taxi_axes_ll.append((pts, cL, cT))
 
+        from auto_patch.verification import taxi_routes_ll as _trll
         w, c, s = check_grade.run_checks(
             out,
             max_grade_pct=1.5,
@@ -162,6 +163,7 @@ def test_pavement_grade(tmp_path, icao):
             edge_step_m=0.5,
             top_n=5,
             taxi_axes_ll=taxi_axes_ll,
+            routes_ll=_trll(layout),
         )
         within += w
         cross += c

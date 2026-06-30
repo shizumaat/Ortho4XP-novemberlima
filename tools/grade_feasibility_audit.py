@@ -196,17 +196,21 @@ def audit_layout(layout, icao):
 
     # Per-axis taxi axes (match the build's constraint set exactly).
     taxi_axes = None
+    routes_ll = None
     try:
-        from auto_patch.verification import taxi_axes_ll as _tall
+        from auto_patch.verification import (taxi_axes_ll as _tall,
+                                             taxi_routes_ll as _trll)
         tll = _tall(layout)
         if tll:
             taxi_axes = [([ll_to_m(la, lo) for la, lo in pts], cL, cT)
                          for pts, cL, cT in tll]
+        routes_ll = _trll(layout) or None
     except Exception:
         taxi_axes = None
+        routes_ll = None
 
     constraints = CG.iter_shape_grade_constraints(
-        ways, nodes, ll_to_m, 0.015, seam_nids, taxi_axes)
+        ways, nodes, ll_to_m, 0.015, seam_nids, taxi_axes, routes_ll)
 
     # Per-vertex emitted elevation lookup (nid -> elev) from the ways.
     elev: dict = {}
@@ -334,7 +338,7 @@ def audit_layout(layout, icao):
 
     # check_grade violations (validator truth) and their feasibility class.
     vios = CG._check_within_shape(ways, nodes, ll_to_m, 0.015,
-                                  seam_nids, taxi_axes)
+                                  seam_nids, taxi_axes, routes_ll)
     fundamental = 0
     unenforced = 0
     samples_f = []
