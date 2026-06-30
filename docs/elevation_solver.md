@@ -16,10 +16,16 @@ It supersedes and merges the two earlier design docs (`ELEVATION_FIELD_PLAN.md`,
 `docs/elevation_per_surface_redesign.md`), both of which described designs that were
 implemented, measured, and then superseded — see **History** at the bottom.
 
-**Active solver:** `src/auto_patch/elevation_per_surface/unified_jacobi.py` → `solve()`,
-selected by `USE_PER_SURFACE_SOLVER`. Rule *values* live in `config.py`
-(`ROLE_GRADE_LIMITS`, runway caps); the within-shape validator is `tools/check_grade.py`,
-which reads the same constants (solver ↔ audit must stay in lockstep).
+**Active solver:** `src/auto_patch/elevation_per_surface/route_profile/` →
+`solve.solve_route_profile` (one elevation profile solved on the single unified
+grade graph; see `one_solve.py`, `building_feasibility.py`, and the
+elevation-neutral primitives in `elevation_per_surface/solver_primitives.py`).
+The retired `unified_jacobi.py::solve()` is no longer the active path. Rule
+*values* live in `config.py` (`ROLE_GRADE_LIMITS`, runway caps, the
+`O4_ANISO_EDGES` anisotropic-edge gate); the within-shape law is
+`grade_law.py`/`grade_graph.py` and the validator is `tools/check_grade.py` — all
+read the same constants and the same `grade_graph.shape_constraints` (solver ↔
+validator stay in lockstep, incl. the baked anisotropic allowance).
 
 ---
 
@@ -143,7 +149,7 @@ cap.
   (If ever revived for genuine multi-level terraces, pieces must be DISCONNECTED at grade
   breaks — separate nodes + a wall/ramp — not shared-node grid cells.)
 
-## Config knobs (`unified_jacobi.py`)
+## Config knobs (legacy `unified_jacobi.py` — retired; see `route_profile/` for the active solver)
 - `_RELIEF_TERMINAL_STIFFNESS = 20.0` — higher = terminal holds DEM harder / yields less.
 - `_RELIEF_MAX_ITERS = 12000` — relief iteration budget (stiff anchor converges slowly).
 - `_compliant_spread_fit(..., stiffness=<list>)` — the weighted cap projection.

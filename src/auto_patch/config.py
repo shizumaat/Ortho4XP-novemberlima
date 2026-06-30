@@ -410,6 +410,13 @@ TAXI_MAX_GRADE = 0.015          # FAA AC 150/5300-13 taxiway-family
 # requires.  See ``taxi_grade_cap_for_letter`` + the ``TAXI_GRADE_BY_WIDTH``
 # gate below.
 TAXI_MAX_GRADE_NARROW = 0.030   # ICAO Annex 14 code A/B taxiway-family
+# TRANSVERSE (cross) grade cap — the cT in the anisotropic within-shape allowance
+# cL·Δs∥ + cT·Δs⊥ (see ``taxi_transverse_cap_for_letter`` +
+# docs/anisotropic_edge_handling_plan.md).  ICAO Annex 14 Vol I Table 3-2 caps the
+# taxiway TRANSVERSE slope at 2 % for code A/B and 1.5 % for C–F — so for C–F it
+# coincides with the longitudinal cap (isotropic) and only A/B is genuinely
+# anisotropic (cT 2 % < cL 3 %).
+TAXI_MAX_TRANSVERSE_NARROW = 0.020   # ICAO Annex 14 Table 3-2 code A/B transverse
 # Aprons + building pads grade at 1% (user 2026-06-18: "both builds and aprons
 # should be 1%") — flat is preferred 99% of the time, the cap is the fallback.
 # JUNCTIONS stay at the TAXI rate (1.5%): they are part of the moving network
@@ -827,6 +834,19 @@ BUILD_PROGRESS = _os.environ.get("O4_BUILD_PROGRESS", "1") == "1"
 APRON_TAXI_BLEND = _os.environ.get("O4_APRON_TAXI_BLEND", "1") == "1"
 APRON_TAXI_TRANSITION_M = 30.0
 
+# ANISOTROPIC WITHIN-SHAPE EDGES (docs/anisotropic_edge_handling_plan.md).  When
+# ON, a spine / junction-body / apron-blend pair's grade budget is the anisotropic
+# cL·Δs∥ + cT·Δs⊥ decomposed against the pair's whole chained ROUTE (Δs∥ = spine
+# arc) instead of the isotropic cap·(chord).  This credits a climbing CURVE its
+# full arc length so it stops being false-flagged at junctions.  DEFAULT-ON (user
+# 2026-06-30): net fewer within-shape violations + fewer >8% cliffs on every
+# fixture (CYXY 319→268, SPJC 502→418, SPLP 146→133, HECA 8031→7483 body viols;
+# cliffs 28→24/20→18/8→8/229→215) and 0 fundamental in the feasibility audit; a
+# few residual solver-miss cliffs remain (NOT infeasibilities) — tracked as
+# solver-quality follow-ups.  O4_ANISO_EDGES=0 reverts to the isotropic cap·dist
+# law, byte-identical to the pre-feature build.
+ANISO_EDGES = _os.environ.get("O4_ANISO_EDGES", "1") == "1"
+
 # (20260624) ABSORB_RUNWAY_IN_APRON — the apron-merged-runway machine.  When a
 # runway passes through a much-larger apron polygon, the overlapping runway
 # segments are DROPPED (elevation.py) and only the NON-merged part of the runway
@@ -1202,18 +1222,6 @@ SPINE_PIECE_ROLE_REEVAL = _os.environ.get("O4_SPINE_ROLE_REEVAL", "1") == "1"
 # Default ON in dev (2026-06-18, user — for in-sim testing); set O4_W2_BANDS=0
 # to restore the legacy field-anchored bands.
 W2_CLEAN_BANDS = _os.environ.get("O4_W2_BANDS", "1") == "1"
-
-# SINGLE GRADE GRAPH (docs/single_grade_graph.md): build the apron/junction
-# within-shape grade constraints from the ONE shared generator
-# (``auto_patch.grade_graph``) that the validator also consumes, so the surface
-# we BUILD and the surface we CHECK can never drift.  Junction = apron with a
-# spine+body model at the taxiway per-letter cap (replaces the legacy per-axis
-# diagonal-skip).  Default OFF during A/B; gate-off = the legacy
-# ``_visible_grade_edges`` branch (byte-identical).
-# Default ON (2026-06-23, user): the single within-shape grade graph + the Phase-3
-# connecting solve are the live airside grading system.  O4_SINGLE_GRADE_GRAPH=0
-# restores the legacy _visible_grade_edges + _min_grade_network path.
-SINGLE_GRADE_GRAPH = _os.environ.get("O4_SINGLE_GRADE_GRAPH", "1") == "1"
 
 # Rect end-caps (rect_end_caps.py) DEFAULT ON (user 2026-06-19): a cap SHRINKS
 # the sloping rect at its junction-facing flat end and occupies the vacated
@@ -1745,6 +1753,23 @@ def taxi_grade_cap_for_width(width_m: float, *, enabled: bool = None) -> float:
     (m) via :func:`taxiway_code_letter`, then the grade cap."""
     return taxi_grade_cap_for_letter(
         taxiway_code_letter(width_m), enabled=enabled)
+
+
+def taxi_transverse_cap_for_letter(letter, *, enabled: bool = None) -> float:
+    """Max TRANSVERSE (cross) grade for a taxiway of ICAO code ``letter`` — the
+    ``cT`` in the anisotropic within-shape allowance ``cL·Δs∥ + cT·Δs⊥``.
+
+    Code A/B (narrow) → ``TAXI_MAX_TRANSVERSE_NARROW`` (2 %, ICAO Annex 14 Table
+    3-2); code C–F (and any unknown/None letter) → the LONGITUDINAL cap
+    (:func:`taxi_grade_cap_for_letter`, 1.5 %), i.e. ISOTROPIC there.  Honours the
+    same ``TAXI_GRADE_BY_WIDTH`` gate as the longitudinal cap, so when
+    width-grading is off ``cT`` collapses to ``cL`` for EVERY letter and the
+    allowance is the legacy isotropic ``cap·dist``.  ``enabled`` overrides the gate
+    (the validator passes the flag the build ran under, for lockstep)."""
+    on = TAXI_GRADE_BY_WIDTH if enabled is None else enabled
+    if on and letter and str(letter).upper() in NARROW_TAXI_CODE_LETTERS:
+        return TAXI_MAX_TRANSVERSE_NARROW
+    return taxi_grade_cap_for_letter(letter, enabled=enabled)
 
 
 def taxiway_clearance_half_width_for_letter(letter: str) -> float:

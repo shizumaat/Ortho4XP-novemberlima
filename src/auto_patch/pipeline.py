@@ -4357,18 +4357,9 @@ def build_airport_pavement(icao: str, xplane_root: str,
             per_surface_solve(layout, icao,
                                dem=dem,
                                tile_lat=tile_lat, tile_lon=tile_lon)
-            # Junction ring-curvature smoothing (user 2026-06-15): the
-            # twist pass leaves a free junction RING vertex bowed off the
-            # line between its ring neighbours — a sub-1.5 % curvature
-            # ripple the grade-magnitude smoother never touches (and that
-            # smoother is skipped under the per-surface solver anyway).
-            # Average each FREE (un-welded, non-rect-corner) vertex toward
-            # its ring-neighbour interpolation, holding shared vertices.
-            from .elevation import _smooth_junction_ring_curvature
-            _jrc = _smooth_junction_ring_curvature(layout)
-            if _jrc and os.environ.get("O4_JCT_RIPPLE_DEBUG") == "1":
-                UI.vprint(1, f"  [pav-builder] {icao}: junction ring "
-                             f"curvature smoothed {_jrc} free vertex(es).")
+            # (Legacy junction ring-curvature smoothing removed: it was a no-op
+            # under the single-grade-graph connecting solve, which produces a
+            # smooth in-grade junction surface directly.)
 
         if n_tile_delta != 0:
             UI.vprint(1,
@@ -4588,24 +4579,9 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # and before the final conformance audit.
     _dedup_coincident_ring_vertices(layout, icao)
 
-    # De-bulge rect end-cap centre nodes (user 2026-06-19): the solver grades
-    # the cap as a free junction, so its outer-edge centre node M drifts
-    # 0.1-0.2m off the straight line between the cap's two outer corners → a
-    # step where the junction joins the cap centre.  Snap M onto that line
-    # (corners keep their solved network level, so junction grades are
-    # unchanged) and propagate to the shared junction node.
-    import os as _os_db
-    # Corridor-flex is done IN the solver (O4_CAP_PLANAR: the capped rect+cap
-    # tilt as one plane so the cap-adjacent junction co-solves flat).  A
-    # post-solve lift was tried and dropped (net-neutral — a rigid plane can
-    # only tilt linearly, but the network varies non-linearly).
-    from .config import SINGLE_GRADE_GRAPH as _SGG
-    if _os_db.environ.get("O4_CAP_DEBULGE", "1") == "1" and not _SGG:
-        # Superseded by the single-grade-graph connecting solve (the cap is
-        # graded in-grade by the unified solve; this post-solve altitude band-aid
-        # only re-introduces junction violations against it).
-        from .cap_plane import debulge_cap_centre_nodes
-        debulge_cap_centre_nodes(layout)
+    # (Legacy post-solve cap-debulge removed: it ran only under the retired
+    # O4_SINGLE_GRADE_GRAPH=0 path; the single-grade-graph connecting solve grades
+    # the cap in-grade, so the post-solve band-aid is superseded.)
 
     # Enforce the rect flat-end rule (user 2026-06-19): only a sloping rect's
     # 2 CORNERS are legal shared vertices on its flat end.  The spine slice +

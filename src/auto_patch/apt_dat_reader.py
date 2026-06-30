@@ -243,6 +243,21 @@ class TaxiCenterline:
     seg_sizes: list = field(default_factory=list)
     is_service: bool = False
     name: str = ""                       # label only (debug / reporting)
+    # The CONTINUOUS parent route this piece was bend-split from (LOCAL-meter
+    # ``LineString``).  A taxi route is split into rect-axis PIECES for the rect
+    # decomposition (``split_merged_centerline``), but the grade graph needs the
+    # WHOLE route's geometry to credit a climbing CURVE its full spine ARC length
+    # (Δs∥): projecting a junction-body vertex onto a single short piece would
+    # reset the arc at every bend (docs/anisotropic_edge_handling_plan.md §3d).
+    # ``None`` ⇒ this centerline IS its own route (service road, synthetic
+    # junction spine, OSM-derived) — consumers fall back to ``line``.
+    route_line: "LineString | None" = None
+
+    @property
+    def chained_line(self) -> "LineString":
+        """The continuous route polyline this piece belongs to (``route_line`` if
+        it was bend-split from a parent, else ``line`` — it is its own route)."""
+        return self.route_line if self.route_line is not None else self.line
 
     def _seg_index_at_arc(self, s: float) -> int:
         cs = list(self.line.coords)
@@ -1721,7 +1736,7 @@ def taxi_centerlines(
                 continue
             out.append(TaxiCenterline(
                 line=piece_line, seg_sizes=_piece_sizes(piece_line, parent),
-                name=label))
+                name=label, route_line=route_line))
     return out
 
 

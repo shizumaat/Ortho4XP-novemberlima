@@ -17,6 +17,8 @@ not single constants — they live in the modules noted below, and this index po
 | Rule | Value | Standard | Implemented in |
 |------|-------|----------|----------------|
 | Within-shape grade cap, taxiway-family (taxiway, parallels, stub, cross-connector) | 1.5% | FAA AC 150/5300-13 | `config.py` `ROLE_GRADE_LIMITS` |
+| Taxiway **longitudinal** grade cap `cL` (along the route, size-dependent) | C–F 1.5%, A/B 3.0% | ICAO Annex 14 Vol I §3.9.3 / Table 3-2; EASA CS-ADR-DSN.D.265 | `config.py` `taxi_grade_cap_for_letter` (`TAXI_MAX_GRADE` / `TAXI_MAX_GRADE_NARROW`), gate `TAXI_GRADE_BY_WIDTH` |
+| Taxiway **transverse** grade cap `cT` (across the route) | C–F 1.5%, A/B 2.0% | ICAO Annex 14 Vol I Table 3-2 (taxiway transverse slope); EASA CS-ADR-DSN.D.280 | `config.py` `taxi_transverse_cap_for_letter` (`TAXI_MAX_TRANSVERSE_NARROW`), same gate |
 | Within-shape grade cap, apron / junction body (all directions) | 1.5% | FAA AC 150/5300-13 (per-user 2026-05-07) | `config.py` `ROLE_GRADE_LIMITS` |
 | Within-shape grade cap, aircraft STAND (all directions) | 1.0% | FAA AC 150/5300-13B §5.9 / EASA CS ADR-DSN.E.360 / ICAO Annex 14 §3.13 | `config.py` `STAND_MAX_GRADE` + `ROLE_GRADE_LIMITS["stand"]`. Aprons are split into `ROLE_STAND` pads (at ramp-start 1300/1301 zones), lane corridors, and body by `pavement/apron_split.decompose_aprons` so the cap binds to real geometry |
 | Within-shape grade cap, terminal | 1.5% | design | `config.py` `ROLE_GRADE_LIMITS` |
@@ -27,6 +29,14 @@ not single constants — they live in the modules noted below, and this index po
 
 The within-shape grade *validator* (`tools/check_grade.py`) reads `ROLE_GRADE_LIMITS`
 directly, so it always matches whatever the table says.
+
+The taxiway caps are **anisotropic** in the local route frame: a pair's grade
+budget is `cL·Δs∥ + cT·Δs⊥`, where `Δs∥` is the along-route spine ARC and `Δs⊥`
+the transverse offset (`grade_law.Allowance`, `grade_graph.ds_decompose`). For C–F
+`cT == cL` so the allowance is isotropic (the legacy `cap·dist`); only A/B and
+curved spines are genuinely anisotropic, which is what lets a climbing taxiway
+CURVE keep its full longitudinal budget through a junction (the spine arc, not its
+shorter chord). See `docs/anisotropic_edge_handling_plan.md`.
 
 ## Runway longitudinal profile
 

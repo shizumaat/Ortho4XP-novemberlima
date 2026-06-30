@@ -146,7 +146,7 @@ def _split_taxi_rect_at_seams(
     the canonical 4-corner [HI-LEFT, LO-LEFT, LO-RIGHT, HI-RIGHT]
     ring convention (or equivalent CCW rotation), and EVERY
     downstream pass that operates on rects assumes 4 corners
-    (absorption, junction-rule tests, ``_collect_junction_axes``,
+    (absorption, junction-rule tests,
     sloping-edge identification).  Inserting seam vertices into a
     sloping edge breaks that assumption: even a vertex collinear
     with its neighbours produces 5- or 6-corner rings that the
@@ -298,7 +298,7 @@ def split_pavement_at_seams(layout: PavementLayout) -> int:
     anchor_keys: set[tuple[int, int]] = set()
     # Per user 2026-05-19: don't add vertices to a sloping taxi rect
     # — every downstream pass (absorption, junction-rule tests,
-    # _collect_junction_axes) assumes a canonical 4-corner ring and
+    # sloping-edge identification) assumes a canonical 4-corner ring and
     # breaks when extra vertices appear on a sloping edge.  Instead,
     # for taxi rect roles, SPLIT the rect at each seam into 2
     # 4-corner sub-rects so each sub-rect remains 4-corner.  Altitude

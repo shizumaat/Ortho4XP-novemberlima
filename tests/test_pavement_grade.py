@@ -105,7 +105,6 @@ _GRADE_TEST_AIRPORTS = sorted(
 
 @pytest.mark.parametrize("icao", _GRADE_TEST_AIRPORTS)
 def test_pavement_grade(tmp_path, icao):
-    from auto_patch.elevation_per_surface import solver_primitives as _uj
     import check_grade
 
     tiles = _airport_tiles(icao, _xplane_root())
@@ -141,19 +140,18 @@ def test_pavement_grade(tmp_path, icao):
         # (layout.apt_taxi_centerlines), passed as lat/lon so the
         # audit's mean-centred meter frame lines up.  NEVER re-derive
         # from the OSM.
-        taxi_axes_ll = None
-        if getattr(_uj, "_PER_AXIS_JUNCTIONS", False):
-            taxi_axes_ll = []
-            for tcl in (getattr(layout, "apt_taxi_centerlines", []) or []):
-                ln = tcl.line
-                if ln is None or ln.is_empty:
-                    continue
-                letter = tcl.dominant_size()
-                cL = 0.03 if letter in ("A", "B") else 0.015
-                cT = 0.02 if letter in ("A", "B") else 0.015
-                pts = [layout.m_to_ll(x, y) for (x, y) in ln.coords]
-                taxi_axes_ll.append((pts, cL, cT))
+        taxi_axes_ll = []
+        for tcl in (getattr(layout, "apt_taxi_centerlines", []) or []):
+            ln = tcl.line
+            if ln is None or ln.is_empty:
+                continue
+            letter = tcl.dominant_size()
+            cL = 0.03 if letter in ("A", "B") else 0.015
+            cT = 0.02 if letter in ("A", "B") else 0.015
+            pts = [layout.m_to_ll(x, y) for (x, y) in ln.coords]
+            taxi_axes_ll.append((pts, cL, cT))
 
+        from auto_patch.verification import taxi_routes_ll as _trll
         w, c, s = check_grade.run_checks(
             out,
             max_grade_pct=1.5,
@@ -162,6 +160,7 @@ def test_pavement_grade(tmp_path, icao):
             edge_step_m=0.5,
             top_n=5,
             taxi_axes_ll=taxi_axes_ll,
+            routes_ll=_trll(layout),
         )
         within += w
         cross += c

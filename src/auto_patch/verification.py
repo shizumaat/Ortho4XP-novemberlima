@@ -857,14 +857,9 @@ def check_rect_short_edges(layout):
 
 # ── Grade invariants (reuse the check_grade engine) ─────────────────
 def taxi_axes_ll(layout):
-    """Per-axis taxi grading mirror — the SAME construction the grade
-    test uses."""
-    try:
-        from .elevation_per_surface import solver_primitives as _uj
-    except Exception:
-        return None
-    if not getattr(_uj, "_PER_AXIS_JUNCTIONS", False):
-        return None
+    """The builder's APT.DAT taxi centerlines as ``[(latlon_pts, cL, cT), …]`` —
+    the within-shape grade test's CENTERLINE source (spine membership + per-letter
+    cap), the SAME centerlines the build used."""
     def _cLcT(letter):
         return ((0.03, 0.02) if letter in ("A", "B") else (0.015, 0.015))
 
@@ -897,6 +892,35 @@ def taxi_axes_ll(layout):
     return axes
 
 
+def taxi_routes_ll(layout):
+    """The WHOLE chained taxi routes (one per distinct ``route_line``) as lat/lon
+    polylines, for the anisotropic-edge grade test: the standalone ``check_grade``
+    decomposes a soft-shape pair against its route's spine ARC (Δs∥), so it must
+    see the SAME continuous routes the solver's ``grade_graph.build_context`` does
+    (``Centerline.route_idx`` → these).  Deduped by ``route_line`` identity; a
+    piece with no parent route (synthetic / service-excluded handled by caller)
+    falls back to its own ``line``."""
+    seen = set()
+    out = []
+    for tcl in (getattr(layout, "apt_taxi_centerlines", []) or []):
+        if getattr(tcl, "is_service", False):
+            continue
+        rl = getattr(tcl, "route_line", None)
+        if rl is None:
+            rl = getattr(tcl, "line", None)
+        if rl is None or getattr(rl, "is_empty", True):
+            continue
+        key = id(rl)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            out.append([layout.m_to_ll(x, y) for (x, y) in rl.coords])
+        except Exception:
+            continue
+    return out
+
+
 def run_grade_checks(layout):
     """Run the grade engine on ``layout``.  Returns ``(within, cross,
     steps)`` with ``.lat`` / ``.lon`` + way labels populated."""
@@ -907,7 +931,7 @@ def run_grade_checks(layout):
         return check_grade.run_checks(
             out, max_grade_pct=1.5, proximity_m=1.0, edge_search_m=5.0,
             edge_step_m=0.5, top_n=5, taxi_axes_ll=taxi_axes_ll(layout),
-            quiet=True)
+            routes_ll=taxi_routes_ll(layout), quiet=True)
 
 
 

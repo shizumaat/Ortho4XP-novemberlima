@@ -114,3 +114,47 @@ def test_cyxy_spine_zero():
     assert not spine, (
         f"{len(spine)} spine violation(s) — single graph not done.  worst: "
         f"{[(round(p, 1), round(c, 1), round(d, 1), r) for (p, c, d, r, *_ ) in sorted(spine, reverse=True)[:4]]}")
+
+
+def test_solver_validator_same_edge_budgets(monkeypatch):
+    """LOCKSTEP (p5): with the anisotropic edge law ON, the SOLVER's unified-graph
+    per-edge budget ``cap.at(Δs∥,Δs⊥)`` must equal the VALIDATOR's for every
+    SHARED edge — not just the same node set.  Both go through one
+    ``grade_graph.shape_constraints`` that bakes the route decomposition once, so a
+    drift here would mean the build and the check disagree on the budget."""
+    import math
+    from auto_patch import grade_graph as GG
+    from auto_patch.grade_graph_validate import _iter_checked_pairs
+    from auto_patch.elevation_per_surface.solver_primitives import _build_node_list
+    monkeypatch.setattr(GG, "ANISO_EDGES", True)
+
+    layout = _cyxy()
+    _nodes, b2i = _build_node_list(layout)
+    G = GG.build_unified_graph(layout, b2i)
+
+    def _k(x, y):
+        return (round(x, 2), round(y, 2))
+
+    solver = {}
+    for (a, b, cap, _is_sp) in G.edges:
+        pa, pb = G.pos.get(a), G.pos.get(b)
+        if pa is None or pb is None:
+            continue
+        d = math.hypot(pa[0] - pb[0], pa[1] - pb[1])
+        if d < 1e-9:
+            continue
+        solver[tuple(sorted((_k(*pa), _k(*pb))))] = cap.at(d, 0.0)
+
+    val = {}
+    for (_role, _sp, (xa, ya), _za, (xb, yb), _zb, cap) in _iter_checked_pairs(layout):
+        d = math.hypot(xa - xb, ya - yb)
+        if d < 1e-9:
+            continue
+        val[tuple(sorted((_k(xa, ya), _k(xb, yb))))] = cap.at(d, 0.0)
+
+    shared = set(solver) & set(val)
+    assert len(shared) > 100, f"too few shared edges ({len(shared)}) to prove lockstep"
+    bad = [(k, solver[k], val[k]) for k in shared
+           if abs(solver[k] - val[k]) > 1e-6]
+    assert not bad, (f"{len(bad)}/{len(shared)} shared edges have mismatched "
+                     f"budgets (build≠check), e.g. {bad[:3]}")
