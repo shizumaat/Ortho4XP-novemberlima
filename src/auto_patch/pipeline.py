@@ -4337,12 +4337,12 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     tile_lat=tile_lat, tile_lon=tile_lon,
                     require_service_adjacency=True)
 
-        # FINAL apron→junction demotion (user 2026-06-30): a sub-2000 m² apron
-        # is a decomposition fragment of a larger apron-blob, not a real apron —
-        # flip it back to junction HERE (final geometry, before the solve) so it
-        # grades as a junction (1.5 %) not an apron (1 %).  See HECA #455.
-        from .junction_repair import _demote_small_aprons_to_junction
-        _demote_small_aprons_to_junction(layout, icao=icao)
+        # NOTE (user 2026-06-30): sub-2000 m² aprons are NOT demoted to junction.
+        # The goal of the old demotion was to keep them UNANCHORED (a small
+        # decomposition fragment shouldn't pin the network to its DEM level); that
+        # is now handled directly by the apron-seat area filter in
+        # build_nobuilding_apron_seats, so the shape keeps role=apron — correct
+        # geometry that passes the junction invariants (HECA #455 stays an apron).
 
         if USE_PER_SURFACE_SOLVER and layout.anchor is not None:
             # Runway CIFP thresholds are LOCKED — the solver never moves them.
@@ -4374,8 +4374,10 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # final state — junction / apron / terminal Euclidean caps
         # post-final-solver.  Per user 2026-05-03 the WARN was
         # previously firing mid-pipeline with stale numbers.
-        from .elevation import _report_within_shape_violations
-        _report_within_shape_violations(layout, icao)
+        from .config import REPORT_GRADE_AUDIT
+        if REPORT_GRADE_AUDIT:
+            from .elevation import _report_within_shape_violations
+            _report_within_shape_violations(layout, icao)
 
         _progress.step()  # [6] Emitting terrain features & finalizing
 

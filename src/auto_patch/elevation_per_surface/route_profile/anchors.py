@@ -205,6 +205,15 @@ def _project_apron_contacts(targets, boxes, positions, cap,
     return L if ok else None
 
 
+# Minimum apron area to ANCHOR a no-building apron (user 2026-06-30).  A
+# sub-threshold apron is a decomposition fragment of a larger apron-blob, not a
+# real expanse; pinning it to its DEM-feasible level over-constrains the network
+# for no benefit, so it is left to flex with its feeders instead.  This replaces
+# the old apron→junction demotion (which mutated role purely to dodge anchoring
+# and broke the junction invariants on non-HECA airports).
+_NOBUILD_APRON_SEAT_MIN_AREA_M2 = 2000.0
+
+
 def build_nobuilding_apron_seats(layout, bucket_to_idx, band, dem_fn):
     """``{feeder_contact_node_idx: feasible_level}`` for every NO-BUILDING apron —
     the FEEDER-CONVERGENCE rule (user 2026-06-26 directive #3; tilt model
@@ -258,6 +267,8 @@ def build_nobuilding_apron_seats(layout, bucket_to_idx, band, dem_fn):
     for s in layout.shapes:
         if (s.role != ROLE_APRON or s.polygon is None or s.polygon.is_empty):
             continue
+        if s.polygon.area <= _NOBUILD_APRON_SEAT_MIN_AREA_M2:
+            continue            # too small to anchor — flexes with its feeders
         if any(s.polygon.distance(b) < 1.0 for b in buildings):
             continue                            # a building anchors the level
         # Each feeder's CONTACT = its nearest vertex to the apron (what route_reach

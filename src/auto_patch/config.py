@@ -823,6 +823,14 @@ HOLE_ROUTER_ENABLED = _os.environ.get("O4_HOLE_ROUTER", "1") == "1"
 # byte-identical regardless.  O4_BUILD_PROGRESS=0 silences the banners.
 BUILD_PROGRESS = _os.environ.get("O4_BUILD_PROGRESS", "1") == "1"
 
+# Runtime within-shape grade WARN audit (``elevation._report_within_shape_violations``).
+# It recomputes the full unified grade graph + reach bands on EVERY build just to
+# print WARN chatter that nothing acts on (~12% of a HECA build).  The real grade
+# gate is the CI test (``test_pavement_grade`` runs ``check_grade`` on the emitted
+# patch).  Default OFF; set O4_REPORT_GRADE_AUDIT=1 to restore the build-time WARN
+# lines for debugging.  Output-only — the emitted patch is identical regardless.
+REPORT_GRADE_AUDIT = _os.environ.get("O4_REPORT_GRADE_AUDIT", "0") == "1"
+
 # APRON↔TAXI GRADE BLEND (user 2026-06-25).  A taxi route runs THROUGH aprons, so
 # the apron cannot be a flat 1 % everywhere: as it approaches a taxi centerline it
 # must blend toward that route's (steeper) per-letter cap to make the transition.

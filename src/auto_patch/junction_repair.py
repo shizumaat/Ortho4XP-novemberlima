@@ -3219,11 +3219,6 @@ def _reclassify_apron_junctions(
                 max_d = d
                 if max_d > cap_m:
                     break
-        if max_d > cap_m and s.polygon.area <= _APRON_RECLASSIFY_MIN_AREA_M2:
-            # Too small to be an apron — a real apron is a sizeable expanse,
-            # not a centerline-free residue sliver.  Keep it ROLE_JUNCTION
-            # (user 2026-06-30).
-            continue
         if max_d > cap_m:
             # CONCEPT NOTE: "junction" is the STRUCTURAL kind (a
             # residue-decomposition polygon); ``role`` is the FINAL
@@ -3254,39 +3249,6 @@ def _reclassify_apron_junctions(
         except _GEOM_EXC:
             pass
     return n_reclassified
-
-
-def _demote_small_aprons_to_junction(
-        layout: "PavementLayout",
-        icao: str = "",
-        max_area_m2: float = _APRON_RECLASSIFY_MIN_AREA_M2,
-        ) -> int:
-    """Flip any apron smaller than ``max_area_m2`` back to ``role=junction``
-    (user 2026-06-30).
-
-    ``_reclassify_apron_junctions`` runs on the UNDECOMPOSED residue, so it can
-    tag a huge apron-territory blob as apron and the later decomposition then
-    carves small junction-sized fragments out of it that inherit ``apron``
-    (HECA #455: a 1.9k m² taxiway/service-road junction split off a 0.49 km²
-    apron blob).  A real apron is a sizeable expanse; a sub-``max_area_m2``
-    fragment is a junction and must grade as one (1.5 % cap, not the apron
-    1 %).  Run at FINAL geometry, BEFORE the solve, so the role drives grading.
-    Role-only change (per-corner ``node_altitudes`` preserved)."""
-    n = 0
-    for s in layout.shapes:
-        if (s.role == ROLE_APRON and s.polygon is not None
-                and not s.polygon.is_empty
-                and s.polygon.area < max_area_m2):
-            s.role = ROLE_JUNCTION
-            n += 1
-    if n:
-        try:
-            UI.vprint(1,
-                f"  [pav-builder] {icao}: demoted {n} apron fragment(s) "
-                f"< {max_area_m2:.0f} m² back to junction.")
-        except _GEOM_EXC:
-            pass
-    return n
 
 
 def _reclassify_runway_disconnected_to_groundside(

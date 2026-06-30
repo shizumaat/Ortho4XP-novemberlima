@@ -73,10 +73,12 @@ try:
         TAXI_GRADE_WIDTH_ROLES,
         taxi_grade_cap_for_letter,
     )
+    from auto_patch.layout import SHARED_VERTEX_TOL_M
 except Exception:
     ROLE_GRADE_LIMITS: Dict[str, Optional[float]] = {}
-    # Fallbacks (kept in sync with auto_patch.config) so the standalone
+    # Fallbacks (kept in sync with auto_patch.config/layout) so the standalone
     # validator still runs if the package import fails.
+    SHARED_VERTEX_TOL_M = 0.5
     _GRADE_VISIBILITY_BUFFER_M = 1.0
     ELEV_ROUNDING_NOISE_M = 0.15
     ROUTE_FIELD_MODEL = False
@@ -1264,7 +1266,7 @@ def _print_steps(title: str, steps: List[EdgeStep], top_n: int,
 def run_checks(
     osm_path: Path,
     max_grade_pct: float = 1.5,
-    proximity_m: float = 1.0,
+    proximity_m: float = SHARED_VERTEX_TOL_M,
     edge_search_m: float = 5.0,
     edge_step_m: float = 0.5,
     top_n: int = 10,
@@ -1373,8 +1375,10 @@ def main(argv=None) -> int:
                    help="Path to an X-Plane patch.osm file.")
     p.add_argument("--max-grade", type=float, default=1.5,
                    help="Max permitted grade in %% (default 1.5)")
-    p.add_argument("--proximity-m", type=float, default=1.0,
-                   help="Cross-shape proximity radius (default 1.0 m)")
+    p.add_argument("--proximity-m", type=float, default=SHARED_VERTEX_TOL_M,
+                   help="Cross-shape proximity radius (defaults to the solver's "
+                        "SHARED_VERTEX_TOL_M weld tolerance — vertices farther "
+                        "apart are independent solver nodes, not a grade pair)")
     p.add_argument("--edge-search-m", type=float, default=5.0,
                    help="Vertex-to-edge search radius (default 5.0 m)")
     p.add_argument("--edge-step-m", type=float, default=0.5,
