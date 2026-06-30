@@ -152,3 +152,25 @@ def test_ds_decompose_matches_centerline_and_routechain():
     a = GG.ds_decompose((5.0, 2.0), (35.0, 3.0), rc)
     b = GG.ds_decompose((5.0, 2.0), (35.0, 3.0), cl)
     assert a == pytest.approx(b, abs=1e-9)
+
+
+# ── cT transverse-cap table (Phase 2) ────────────────────────────────────────
+
+def test_taxi_transverse_cap_per_letter():
+    """ICAO Annex 14 Table 3-2 transverse caps: A/B → 2 %, C–F → = longitudinal
+    (isotropic).  When width-grading is off, cT collapses to cL everywhere."""
+    from auto_patch.config import (
+        taxi_transverse_cap_for_letter as cT,
+        taxi_grade_cap_for_letter as cL,
+        TAXI_MAX_TRANSVERSE_NARROW)
+    # C–F (and unknown) are isotropic: cT == cL
+    for L in ("C", "D", "E", "F", None, ""):
+        assert cT(L, enabled=True) == cL(L, enabled=True)
+    # A/B earn the 2 % transverse cap when width-grading is on
+    assert cT("A", enabled=True) == pytest.approx(0.02)
+    assert cT("B", enabled=True) == pytest.approx(TAXI_MAX_TRANSVERSE_NARROW)
+    # cT (2 %) is BELOW cL (3 %) for A/B — anisotropic, not looser
+    assert cT("A", enabled=True) < cL("A", enabled=True)
+    # gate OFF → cT collapses to cL (isotropic) for every letter
+    for L in ("A", "B", "C", "F"):
+        assert cT(L, enabled=False) == cL(L, enabled=False)

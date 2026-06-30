@@ -410,6 +410,13 @@ TAXI_MAX_GRADE = 0.015          # FAA AC 150/5300-13 taxiway-family
 # requires.  See ``taxi_grade_cap_for_letter`` + the ``TAXI_GRADE_BY_WIDTH``
 # gate below.
 TAXI_MAX_GRADE_NARROW = 0.030   # ICAO Annex 14 code A/B taxiway-family
+# TRANSVERSE (cross) grade cap — the cT in the anisotropic within-shape allowance
+# cL·Δs∥ + cT·Δs⊥ (see ``taxi_transverse_cap_for_letter`` +
+# docs/anisotropic_edge_handling_plan.md).  ICAO Annex 14 Vol I Table 3-2 caps the
+# taxiway TRANSVERSE slope at 2 % for code A/B and 1.5 % for C–F — so for C–F it
+# coincides with the longitudinal cap (isotropic) and only A/B is genuinely
+# anisotropic (cT 2 % < cL 3 %).
+TAXI_MAX_TRANSVERSE_NARROW = 0.020   # ICAO Annex 14 Table 3-2 code A/B transverse
 # Aprons + building pads grade at 1% (user 2026-06-18: "both builds and aprons
 # should be 1%") — flat is preferred 99% of the time, the cap is the fallback.
 # JUNCTIONS stay at the TAXI rate (1.5%): they are part of the moving network
@@ -1745,6 +1752,23 @@ def taxi_grade_cap_for_width(width_m: float, *, enabled: bool = None) -> float:
     (m) via :func:`taxiway_code_letter`, then the grade cap."""
     return taxi_grade_cap_for_letter(
         taxiway_code_letter(width_m), enabled=enabled)
+
+
+def taxi_transverse_cap_for_letter(letter, *, enabled: bool = None) -> float:
+    """Max TRANSVERSE (cross) grade for a taxiway of ICAO code ``letter`` — the
+    ``cT`` in the anisotropic within-shape allowance ``cL·Δs∥ + cT·Δs⊥``.
+
+    Code A/B (narrow) → ``TAXI_MAX_TRANSVERSE_NARROW`` (2 %, ICAO Annex 14 Table
+    3-2); code C–F (and any unknown/None letter) → the LONGITUDINAL cap
+    (:func:`taxi_grade_cap_for_letter`, 1.5 %), i.e. ISOTROPIC there.  Honours the
+    same ``TAXI_GRADE_BY_WIDTH`` gate as the longitudinal cap, so when
+    width-grading is off ``cT`` collapses to ``cL`` for EVERY letter and the
+    allowance is the legacy isotropic ``cap·dist``.  ``enabled`` overrides the gate
+    (the validator passes the flag the build ran under, for lockstep)."""
+    on = TAXI_GRADE_BY_WIDTH if enabled is None else enabled
+    if on and letter and str(letter).upper() in NARROW_TAXI_CODE_LETTERS:
+        return TAXI_MAX_TRANSVERSE_NARROW
+    return taxi_grade_cap_for_letter(letter, enabled=enabled)
 
 
 def taxiway_clearance_half_width_for_letter(letter: str) -> float:
