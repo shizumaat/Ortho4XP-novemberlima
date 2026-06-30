@@ -916,6 +916,38 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
         if not raw_strips:
             return 0
         strips = [(ring, alts) for _p, ring, alts, _r in raw_strips]
+        # Inner-edge snap: a cut vertex sitting at the pavement gap follows the
+        # rendered edge altitude of the airside shape it ABUTS.  The strips of
+        # runway + taxiway clearance are unioned into one region, so resampling
+        # alone let a vertex beside an APRON pick up the far higher RUNWAY strip
+        # and spike several metres (CYXY taxiway-A2 clearance sat 5 m above the
+        # apron 1.5 m away).  Snapping to the nearest pavement makes the cut
+        # follow the surface it protects, whatever that surface is.
+        _pav_list = [s for s in airside
+                     if s.polygon is not None and not s.polygon.is_empty]
+        _pav_tree = None
+        if _pav_list:
+            try:
+                _pav_tree = STRtree([s.polygon for s in _pav_list])
+            except _GEOM_EXC:
+                _pav_tree = None
+        # Inner vertices sit at the 1.5 m pavement gap; corners pulled in by
+        # decimation/merge can reach ~2.5 m.  The OUTER (daylight) edge is a
+        # full station step (5 m) out, so a 3.5 m window snaps every inner
+        # vertex without ever catching the daylight edge.
+        _SNAP_TOL_M = _PAVEMENT_GAP_M + 2.0
+
+        def _adjacent_pav_alt(x: float, y: float):
+            if _pav_tree is None:
+                return None
+            pt = Point(x, y)
+            try:
+                s = _pav_list[int(_pav_tree.nearest(pt))]
+            except Exception:                                  # pragma: no cover
+                return None
+            if s.polygon.distance(pt) > _SNAP_TOL_M:
+                return None
+            return _edge_interp_alt(s, x, y)
         try:
             region = unary_union([p for p, _r, _a, _ro in raw_strips])
             if static_block is not None and not static_block.is_empty:
@@ -1001,6 +1033,12 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                     a = _adopt_alt(vx, vy)
                     if a is not None:
                         node_open[vi] = a
+                # Inner edge follows the pavement it abuts (overrides the strip
+                # resample / sibling adoption for pavement-adjacent vertices).
+                for vi, (vx, vy) in enumerate(final_ring):
+                    pa = _adjacent_pav_alt(vx, vy)
+                    if pa is not None:
+                        node_open[vi] = round(float(pa), 1)
                 # Collapse degenerate zero-length edges across an altitude
                 # step (the torn vertical micro-cliff — see
                 # ``_merge_coincident_ring_vertices``).  Only adopt the
