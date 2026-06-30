@@ -24,6 +24,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 
+import O4_UI_Utils as UI
 from shapely.geometry import LineString
 from shapely.strtree import STRtree
 
@@ -37,6 +38,7 @@ from .layout import (
 __all__ = [
     "find_conformance_violations",
     "enforce_conformance",
+    "planarize_airside",
     "CONFORMANCE_TOL_M",
 ]
 
@@ -315,3 +317,253 @@ def enforce_conformance(layout: "PavementLayout",
         shapes_modified += 1
         vertices_inserted += inserted_here
     return shapes_modified, vertices_inserted
+
+
+def _param_on_edge(ax, ay, bx, by, px, py) -> float:
+    """Parameter t∈[0,1] of the foot of ``(px,py)`` on segment a→b."""
+    dx, dy = bx - ax, by - ay
+    L2 = dx * dx + dy * dy
+    if L2 < 1e-12:
+        return -1.0
+    return ((px - ax) * dx + (py - ay) * dy) / L2
+
+
+def _resolve_edge_crossings(layout: "PavementLayout") -> int:
+    """Insert each edge–edge intersection point as a shared vertex in BOTH
+    crossing shapes.
+
+    A "crossing" is two shapes' edges meeting at an interior point of both.
+    The intersection point lies EXACTLY on both edges, so inserting it splits
+    each edge there without moving it (shape-preserving, no bend, no area
+    change) — and because both shapes now have a vertex at that point, it is a
+    shared endpoint, not an interior crossing, so the conformance invariant
+    stops flagging it.  The ≤noise-area sliver of a near-tangent crossing stays
+    below the overlap-clip's floor.  Returns the number of vertices inserted."""
+    from shapely.geometry import Polygon
+
+    elig = [s for s in layout.shapes if _eligible(s)]
+    rings = [_open_ring(s.polygon) for s in elig]
+    edges: list[tuple[tuple, tuple]] = []
+    meta: list[tuple[int, int]] = []           # (shape_idx, edge_idx_in_ring)
+    for si, ring in enumerate(rings):
+        if ring is None:
+            continue
+        n = len(ring)
+        for i in range(n):
+            a, b = ring[i], ring[(i + 1) % n]
+            if a != b:
+                edges.append((a, b))
+                meta.append((si, i))
+    if not edges:
+        return 0
+    lines = [LineString([a, b]) for a, b in edges]
+    tree = STRtree(lines)
+    # inserts[shape_idx][edge_idx] -> [(t, point)]
+    inserts: dict = defaultdict(lambda: defaultdict(list))
+    for ei, ln in enumerate(lines):
+        for ej in tree.query(ln):
+            if ej <= ei:
+                continue
+            a0, a1 = edges[ei]
+            b0, b1 = edges[ej]
+            if {a0, a1} & {b0, b1}:
+                continue                       # share an endpoint: not a crossing
+            try:
+                inter = ln.intersection(lines[ej])
+            except Exception:
+                continue
+            if inter.geom_type != "Point":
+                continue
+            X = (inter.x, inter.y)
+            if X in (a0, a1, b0, b1):
+                continue
+            si, i = meta[ei]
+            sj, j = meta[ej]
+            ta = _param_on_edge(a0[0], a0[1], a1[0], a1[1], X[0], X[1])
+            tb = _param_on_edge(b0[0], b0[1], b1[0], b1[1], X[0], X[1])
+            if 0.0 < ta < 1.0:
+                inserts[si][i].append((ta, X))
+            if 0.0 < tb < 1.0:
+                inserts[sj][j].append((tb, X))
+    if not inserts:
+        return 0
+
+    n_inserted = 0
+    for si, by_edge in inserts.items():
+        shape = elig[si]
+        ring = rings[si]
+        if ring is None:
+            continue
+        n = len(ring)
+        alts = _vertex_alts(shape, n)
+        flat_single_alt = (shape.node_altitudes is None
+                           and shape.altitude_high is None
+                           and shape.altitude_low is None
+                           and shape.altitude is not None)
+        new_ring: list = []
+        new_alts: list | None = [] if alts is not None else None
+        added_here = 0
+        for i in range(n):
+            new_ring.append(ring[i])
+            if new_alts is not None:
+                new_alts.append(alts[i])
+            if i in by_edge:
+                seen: set = set()
+                a_i = alts[i] if alts is not None else None
+                a_j = alts[(i + 1) % n] if alts is not None else None
+                for t, X in sorted(by_edge[i]):
+                    key = round(t, 4)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    new_ring.append(X)
+                    if new_alts is not None:
+                        new_alts.append(a_i + t * (a_j - a_i))
+                    added_here += 1
+        if not added_here:
+            continue
+        try:
+            new_poly = Polygon(new_ring + [new_ring[0]])
+            if not new_poly.is_valid or new_poly.is_empty:
+                continue
+        except Exception:
+            continue
+        shape.polygon = new_poly
+        if new_alts is not None and not flat_single_alt:
+            shape.node_altitudes = new_alts + [new_alts[0]]
+            shape.altitude_high = None
+            shape.altitude_low = None
+        n_inserted += added_here
+    return n_inserted
+
+
+# A T-junction whose vertex sits within this perpendicular distance of the edge
+# is COLLINEAR (a clip ``difference()`` plants vertices exactly on the edge):
+# inserting it bends the edge by ≤ this, so it is effectively shape-preserving
+# and cannot create a >noise overlap.  Vertices farther off the edge are real
+# near-misses left alone (inserting them would bend an edge into a neighbour —
+# the 13.5 m² overlap the 0.5 m insert produced).
+_PLANARIZE_INSERT_TOL_M = float(__import__("os").environ.get(
+    "O4_PLANARIZE_INSERT_TOL_M", "0.05"))
+
+
+# Overlap-priority tiers (mirrors elevation._drop_overlap_against_fixed_shapes):
+# a LOWER number yields to nothing; a shape may conform (bend) to a vertex of a
+# STRICTLY-higher-priority shape with no overlap risk, because that vertex sits
+# on the higher shape's fixed boundary.  Bending toward a SAME/lower-tier peer
+# can push an edge into it (the 3 m² junction×junction overlap), so those are
+# left to the collinear-only insert.
+_OVERLAP_TIER = {
+    "runway": 0, "runway_crossing": 0, "building": 1,
+    "primary_parallel": 2, "secondary_parallel": 2, "stub": 2,
+    "cross_connector": 2, "service_road": 2,
+    "junction": 3, "apron": 3, "service_junction": 3, "boundary": 4,
+}
+
+
+def _tier(role) -> int:
+    return _OVERLAP_TIER.get(role or "", 3)
+
+
+def _resolve_yielding_tjunctions(layout: "PavementLayout", tol: float) -> int:
+    """Insert, into each shape B's edge, every nearby vertex of a STRICTLY
+    higher-priority shape A (``tier(A) < tier(B)``) within ``tol`` — B yields
+    (conforms) to A's fixed boundary, so the bend cannot overlap A.  This clears
+    runway/rect-vertex-on-junction near-misses that the collinear insert leaves.
+    Returns the number of vertices inserted."""
+    from shapely.geometry import Polygon
+    elig = [s for s in layout.shapes if _eligible(s)]
+    rings = [_open_ring(s.polygon) for s in elig]
+    cell, grid = _build_vertex_index(elig)
+    # coord -> highest priority (lowest tier) among shapes owning it
+    vtx_tier: dict = {}
+    for s, ring in zip(elig, rings):
+        if not ring:
+            continue
+        t = _tier(s.role)
+        for v in ring:
+            if t < vtx_tier.get(v, 99):
+                vtx_tier[v] = t
+    n_inserted = 0
+    for si, (shape, ring) in enumerate(zip(elig, rings)):
+        if ring is None:
+            continue
+        tb = _tier(shape.role)
+        n = len(ring)
+        ownset = set(ring)
+        alts = _vertex_alts(shape, n)
+        flat_single_alt = (shape.node_altitudes is None
+                           and shape.altitude_high is None
+                           and shape.altitude_low is None
+                           and shape.altitude is not None)
+        new_ring: list = []
+        new_alts: list | None = [] if alts is not None else None
+        added = 0
+        for i in range(n):
+            ax, ay = ring[i]
+            bx, by = ring[(i + 1) % n]
+            new_ring.append((ax, ay))
+            if new_alts is not None:
+                new_alts.append(alts[i])
+            cands = [pt for pt in _points_near_edge(grid, cell, ax, ay, bx, by, tol)
+                     if pt not in ownset and vtx_tier.get(pt, 99) < tb]
+            for t, (px, py) in _tjunctions_on_edge(ax, ay, bx, by, cands, tol):
+                new_ring.append((px, py))
+                if new_alts is not None:
+                    a_i = alts[i]
+                    a_j = alts[(i + 1) % n]
+                    new_alts.append(a_i + t * (a_j - a_i))
+                added += 1
+        if not added:
+            continue
+        try:
+            new_poly = Polygon(new_ring + [new_ring[0]])
+            if not new_poly.is_valid or new_poly.is_empty:
+                continue
+        except Exception:
+            continue
+        shape.polygon = new_poly
+        if new_alts is not None and not flat_single_alt:
+            shape.node_altitudes = new_alts + [new_alts[0]]
+            shape.altitude_high = None
+            shape.altitude_low = None
+        n_inserted += added
+    return n_inserted
+
+
+def planarize_airside(layout: "PavementLayout", icao: str = "",
+                      max_iters: int = 6) -> tuple[int, int]:
+    """Drive the conformance invariant toward ZERO, SHAPE-PRESERVINGLY, so it is
+    safe as the FINAL (post-solve) geometry pass.
+
+    Iterates two insert-only steps until stable:
+      * ``enforce_conformance`` with a TIGHT tolerance — inserts only COLLINEAR
+        T-junction vertices (≤ ``_PLANARIZE_INSERT_TOL_M`` off the edge), so no
+        edge bends into a neighbour (no overlap), and
+      * ``_resolve_edge_crossings`` — inserts each edge-intersection point on
+        both edges (the point lies exactly on both, so zero bend).
+    Both interpolate inserted-vertex altitudes from the edge, so running this
+    AFTER the solve introduces no cliffs.  Returns the residual
+    ``(t_junctions, crossings)`` at the CHECK tolerance."""
+    tj_total = cr_total = 0
+    for _ in range(max_iters):
+        _, nv = enforce_conformance(layout, tol=_PLANARIZE_INSERT_TOL_M)
+        # A lower-tier shape may also conform to a strictly-higher-tier shape's
+        # vertex at the full CHECK tolerance (it bends onto a fixed boundary, so
+        # no overlap) — clears runway/rect-on-junction near-misses.
+        nv += _resolve_yielding_tjunctions(layout, tol=CONFORMANCE_TOL_M)
+        nc = _resolve_edge_crossings(layout)
+        tj_total += nv
+        cr_total += nc
+        if nv == 0 and nc == 0:
+            break
+    tj, cr = find_conformance_violations(layout.shapes)
+    if tj_total or cr_total:
+        try:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: planarized airside — inserted "
+                f"{tj_total} T-junction + {cr_total} crossing vertex(es); "
+                f"residual {len(tj)} T-junction(s), {len(cr)} crossing(s).")
+        except Exception:
+            pass
+    return len(tj), len(cr)

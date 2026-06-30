@@ -4337,6 +4337,13 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     tile_lat=tile_lat, tile_lon=tile_lon,
                     require_service_adjacency=True)
 
+        # FINAL apron→junction demotion (user 2026-06-30): a sub-2000 m² apron
+        # is a decomposition fragment of a larger apron-blob, not a real apron —
+        # flip it back to junction HERE (final geometry, before the solve) so it
+        # grades as a junction (1.5 %) not an apron (1 %).  See HECA #455.
+        from .junction_repair import _demote_small_aprons_to_junction
+        _demote_small_aprons_to_junction(layout, icao=icao)
+
         if USE_PER_SURFACE_SOLVER and layout.anchor is not None:
             # Runway CIFP thresholds are LOCKED — the solver never moves them.
             # The old runway-threshold-relief passes (step 3
@@ -4609,6 +4616,17 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # (final geometry + altitudes), before the conformance audit below.
     from .flatedge_snap import drop_flatedge_nodes
     drop_flatedge_nodes(layout)
+
+    # FINAL planarization (user 2026-06-30, gate O4_PLANARIZE_AIRSIDE): drive the
+    # conformance invariant to 0 as the LAST geometry step — resolve edge
+    # CROSSINGS (insert the intersection point on both edges) + collinear
+    # T-junctions, both shape-preserving and altitude-interpolating so it is
+    # safe post-solve.  Runs here, after EVERY geometry pass, so nothing can
+    # re-introduce a crossing afterward (the pre-solve crossings returned because
+    # later passes re-cut edges).
+    if os.environ.get("O4_PLANARIZE_AIRSIDE", "1") == "1":
+        from .conformance import planarize_airside
+        planarize_airside(layout, icao=icao)
 
     tjs, crossings = find_conformance_violations(layout.shapes)
     if tjs or crossings:
