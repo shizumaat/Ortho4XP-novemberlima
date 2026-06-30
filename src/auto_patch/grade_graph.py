@@ -38,6 +38,7 @@ from typing import Callable, Hashable, Optional, Sequence
 
 from . import grade_law as GL
 from .config import (
+    ANISO_EDGES,
     APRON_BACK_EDGE_GRADE,
     APRON_MAX_GRADE,
     APRON_TAXI_BLEND,
@@ -46,6 +47,8 @@ from .config import (
     GRADE_VISIBILITY_BUFFER_M as _VIS_BUF,
     SERVICE_ROAD_MAX_GRADE,
     TAXI_MAX_GRADE,
+    TAXI_MAX_GRADE_NARROW,
+    TAXI_MAX_TRANSVERSE_NARROW,
     taxi_grade_cap_for_letter,
 )
 
@@ -531,6 +534,69 @@ def _apron_edge_cap(xi, yi, xj, yj, ni, nj, body_cap, twist):
     return body_cap + (target - body_cap) * infl
 
 
+# ── anisotropic edge decomposition (O4_ANISO_EDGES) ──────────────────────────
+
+def _nearest_route(x: float, y: float, ctx: GradeContext):
+    """``(route_idx, perp)`` — the nearest chained route to ``(x, y)`` and its
+    perpendicular distance.  ``(-1, inf)`` if there are no routes."""
+    best_ri, best_d = -1, float("inf")
+    for ri, r in enumerate(ctx.routes):
+        if len(r.pts) < 2:
+            continue
+        _a, d, _f = _project(r, x, y)
+        if d < best_d:
+            best_d, best_ri = d, ri
+    return best_ri, best_d
+
+
+def _edge_route(role, shared, ctx, vr_i, vr_j, di_perp, dj_perp):
+    """The route a pair decomposes against (§3c), or ``None`` to stay isotropic.
+
+    * SPINE pair (shares a centerline) → that route (the looser-cap centerline's
+      chained route) — the climbing curve earns its full arc as Δs∥.
+    * JUNCTION body pair → the NEAREST route, but only when BOTH endpoints share
+      the same nearest route (same Voronoi crotch cell); spanning the convergence
+      (different nearest routes) stays isotropic / is already skipped.
+    * APRON pair → only in the BLEND zone (both endpoints within
+      ``APRON_TAXI_TRANSITION_M`` of the one shared route); apron body far from any
+      route keeps its isotropic 1 % (no arc credit for a far interior chord)."""
+    if shared:
+        c_star = max(shared, key=lambda c: ctx.centerlines[c].cap)
+        ridx = ctx.centerlines[c_star].route_idx
+        if 0 <= ridx < len(ctx.routes):
+            return ctx.routes[ridx]
+        return ctx.centerlines[c_star]
+    ri, rj = vr_i, vr_j
+    if ri < 0 or ri != rj:
+        return None
+    if role == APRON_ROLE and (di_perp > APRON_TAXI_TRANSITION_M
+                               or dj_perp > APRON_TAXI_TRANSITION_M):
+        return None
+    return ctx.routes[ri]
+
+
+def _bake_edge(allow, role, pa, pb, shared, ctx, vr_i, vr_j):
+    """Replace a live ``Allowance`` with its route-decomposed BAKED budget (when
+    the pair has a route, §3c); otherwise return it unchanged (isotropic).
+
+    The budget is the anisotropic ``cL·Δs∥ + cT·Δs⊥`` against the pair's route —
+    the correct max |Δz| on a surface that grades ``cL`` along the route and ``cT``
+    across it (for a straight route this is the L1 norm ``cL·(along+across)``,
+    which the legacy Euclidean ``cap·dist`` UNDER-budgets; for a curve Δs∥ is the
+    arc, crediting the climbing turn)."""
+    route = _edge_route(role, shared, ctx, vr_i[0], vr_j[0], vr_i[1], vr_j[1])
+    if route is None:
+        return allow
+    dp, dt = ds_decompose(pa, pb, route)
+    cL = allow.cL
+    # Transverse cap: only A/B taxiways (cL == narrow 3 %) earn the tighter 2 %
+    # transverse (ICAO Annex 14 Table 3-2); every other cap (C–F 1.5 %, apron 1 %,
+    # service 4 %, apron-blend gradients) stays isotropic cT == cL.
+    cT = (TAXI_MAX_TRANSVERSE_NARROW
+          if abs(cL - TAXI_MAX_GRADE_NARROW) < 1e-9 else cL)
+    return GL.Allowance.baked(cL, cT, cL * dp + cT * dt)
+
+
 # ── main ────────────────────────────────────────────────────────────────────
 
 def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
@@ -568,6 +634,14 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
     if ctx.road_zone is not None:
         from shapely.geometry import Point as _RPt
         road_vert = [ctx.road_zone.contains(_RPt(x, y)) for (x, y) in ring]
+
+    # ANISOTROPIC EDGES (O4_ANISO_EDGES): per-vertex nearest chained route, so a
+    # surviving spine / junction-body / apron-blend pair can be decomposed against
+    # its route (Δs∥ = spine arc) and its budget BAKED into the Allowance.  Off ⇒
+    # ``vert_route`` is None and every edge stays the legacy isotropic cap·dist.
+    aniso = ANISO_EDGES and bool(ctx.routes)
+    vert_route = ([_nearest_route(x, y, ctx) for (x, y) in ring]
+                  if aniso else None)
 
     # Build the representation-agnostic PairContext for each pair and apply THE
     # LAW (``grade_law.classify_pair``).  The expensive visibility / spine-cross
@@ -621,6 +695,9 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
                 blend_cap_fn=blend_fn, both_road=both_road))
             if allow is None:
                 continue
+            if vert_route is not None:
+                allow = _bake_edge(allow, shape.role, (xi, yi), (xj, yj),
+                                   shared, ctx, vert_route[i], vert_route[j])
             sc.edges.append((ki, kj, allow))
 
     sc.spine_chains = _build_spine_chains(shape, ctx, membership)

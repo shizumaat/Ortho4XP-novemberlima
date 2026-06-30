@@ -834,6 +834,15 @@ BUILD_PROGRESS = _os.environ.get("O4_BUILD_PROGRESS", "1") == "1"
 APRON_TAXI_BLEND = _os.environ.get("O4_APRON_TAXI_BLEND", "1") == "1"
 APRON_TAXI_TRANSITION_M = 30.0
 
+# ANISOTROPIC WITHIN-SHAPE EDGES (docs/anisotropic_edge_handling_plan.md).  When
+# ON, a spine / junction-body / apron-blend pair's grade budget is the anisotropic
+# cL·Δs∥ + cT·Δs⊥ decomposed against the pair's whole chained ROUTE (Δs∥ = spine
+# arc) instead of the isotropic cap·(chord).  This credits a climbing CURVE its
+# full arc length so it stops being false-flagged at junctions.  DEFAULT OFF until
+# the plan's Phase 3/4 milestones pass; OFF is byte-identical (the law keeps
+# emitting flat cap·dist allowances).
+ANISO_EDGES = _os.environ.get("O4_ANISO_EDGES", "0") == "1"
+
 # (20260624) ABSORB_RUNWAY_IN_APRON — the apron-merged-runway machine.  When a
 # runway passes through a much-larger apron polygon, the overlapping runway
 # segments are DROPPED (elevation.py) and only the NON-merged part of the runway

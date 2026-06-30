@@ -87,15 +87,33 @@ APRON_BODY_CHORD_MAX_M = float(os.environ.get("O4_APRON_BODY_CHORD_MAX_M", "60")
 @dataclass(frozen=True)
 class Allowance:
     """Max |Δz| budget for a pair: ``cL·Δs∥ + cT·Δs⊥``.  A flat allowance has
-    ``cL == cT`` and (with Δs⊥ = 0) is the legacy scalar ``cap·dist``."""
+    ``cL == cT`` and (with Δs⊥ = 0) is the legacy scalar ``cap·dist``.
+
+    When the pair has been decomposed against its route up front (anisotropic
+    edges, ``grade_graph.shape_constraints``), the resulting scalar budget is
+    BAKED into ``budget``: ``at()`` then returns it directly, ignoring the
+    distance a consumer passes.  This is what lets every consumer keep its
+    existing ``cap.at(d, 0.0)`` call yet receive the route-arc budget — the
+    decomposition is computed ONCE in the law (no per-site copy, so the solver and
+    validator graphs can't drift).  ``budget is None`` ⇒ a plain live allowance."""
     cL: float
     cT: float
+    budget: Optional[float] = None
 
     @classmethod
     def flat(cls, cap: float) -> "Allowance":
         return cls(cap, cap)
 
+    @classmethod
+    def baked(cls, cL: float, cT: float, budget: float) -> "Allowance":
+        """An allowance whose anisotropic budget is already evaluated (against the
+        pair's route).  ``at()`` returns ``budget``; ``flat_cap()`` still reports
+        the longitudinal ``cL`` for %-cap messages."""
+        return cls(cL, cT, budget)
+
     def at(self, ds_parallel: float, ds_perp: float = 0.0) -> float:
+        if self.budget is not None:
+            return self.budget
         return self.cL * ds_parallel + self.cT * ds_perp
 
     @property
@@ -103,10 +121,12 @@ class Allowance:
         return self.cL == self.cT
 
     def flat_cap(self) -> float:
-        """The scalar cap of a flat allowance (legacy ``(a, b, cap)`` form).
-        Only valid while the rule is isotropic — asserts so a future anisotropic
-        rule can't silently lose its cT through a scalar consumer."""
-        assert self.is_flat, "anisotropic allowance has no single scalar cap"
+        """The longitudinal scalar cap.  For a flat LIVE allowance this is the
+        legacy ``(a, b, cap)`` value; for a BAKED allowance it is ``cL`` (the
+        %-cap to report).  Asserts only for a live anisotropic allowance — that
+        would silently lose its ``cT`` through a scalar consumer."""
+        if self.budget is None:
+            assert self.is_flat, "anisotropic allowance has no single scalar cap"
         return self.cL
 
 
