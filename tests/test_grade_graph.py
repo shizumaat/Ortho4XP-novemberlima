@@ -104,3 +104,51 @@ def test_nonconvex_visibility_drops_chord_across_notch():
     sc = GG.shape_constraints(s, ctx)
     # (30,0) idx1 to (0,30) idx5: chord cuts across the missing quadrant
     assert _cap_of(sc, 1, 5) is None
+
+
+# ── ds_decompose: the anisotropic (Δs∥, Δs⊥) primitive (Phase 1) ──────────────
+
+def test_ds_decompose_straight_route_is_isotropic():
+    """A STRAIGHT route → (Δs∥, Δs⊥) == (sep, 0): straight taxiways/aprons see
+    the legacy ``cap·dist`` budget, so wiring anisotropy can't change them."""
+    route = GG.RouteChain(pts=[(0.0, 0.0), (100.0, 0.0)])
+    # a pair strung ALONG the line
+    dpar, dperp = GG.ds_decompose((10.0, 0.0), (40.0, 0.0), route)
+    assert dpar == pytest.approx(30.0, abs=1e-6)
+    assert dperp == pytest.approx(0.0, abs=1e-6)
+    # a pair offset to the SAME side (parallel) — still zero transverse SEPARATION
+    dpar2, dperp2 = GG.ds_decompose((10.0, 5.0), (40.0, 5.0), route)
+    assert dpar2 == pytest.approx(30.0, abs=1e-6)
+    assert dperp2 == pytest.approx(0.0, abs=1e-6)
+    # a pure PERPENDICULAR pair → (0, perp)
+    dpar3, dperp3 = GG.ds_decompose((20.0, 0.0), (20.0, 12.0), route)
+    assert dpar3 == pytest.approx(0.0, abs=1e-6)
+    assert dperp3 == pytest.approx(12.0, abs=1e-6)
+
+
+def test_ds_decompose_curved_route_credits_arc():
+    """A CURVED (L-bend) route → Δs∥ is the spine ARC (> chord), Δs⊥ ≈ 0 for two
+    points ON the route.  This is the rising-curve fix: the climb is budgeted
+    against the route's arc length, not its shorter chord."""
+    # up 100 m then right 100 m: total arc 200, chord (0,0)->(100,100) = 141.42
+    route = GG.RouteChain(pts=[(0.0, 0.0), (0.0, 100.0), (100.0, 100.0)])
+    chord = math.hypot(100.0, 100.0)
+    dpar, dperp = GG.ds_decompose((0.0, 0.0), (100.0, 100.0), route)
+    assert dpar == pytest.approx(200.0, abs=1e-6)      # full arc
+    assert dpar > chord + 50.0                          # arc >> chord
+    assert dperp < 0.5                                  # both ON the route
+    # mid-leg pair: (0,40)->(0,90) is 50 m of pure arc on the first leg
+    dpar2, dperp2 = GG.ds_decompose((0.0, 40.0), (0.0, 90.0), route)
+    assert dpar2 == pytest.approx(50.0, abs=1e-6)
+    assert dperp2 == pytest.approx(0.0, abs=1e-6)
+
+
+def test_ds_decompose_matches_centerline_and_routechain():
+    """``ds_decompose`` is geometry-only and duck-typed: a single-segment route
+    gives identical results whether passed a ``Centerline`` or a ``RouteChain``."""
+    pts = [(0.0, 0.0), (50.0, 0.0)]
+    rc = GG.RouteChain(pts=pts)
+    cl = GG.Centerline(pts=pts, seg_caps=[TAXI_MAX_GRADE])
+    a = GG.ds_decompose((5.0, 2.0), (35.0, 3.0), rc)
+    b = GG.ds_decompose((5.0, 2.0), (35.0, 3.0), cl)
+    assert a == pytest.approx(b, abs=1e-9)

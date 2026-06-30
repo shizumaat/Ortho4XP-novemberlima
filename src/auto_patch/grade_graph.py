@@ -78,6 +78,10 @@ class Centerline:
     seg_caps: list = field(default_factory=list)
     # cumulative arc length at each pt (filled lazily)
     _arc: Optional[list[float]] = None
+    # Index into ``GradeContext.routes`` of the WHOLE route this bend-split piece
+    # belongs to (the chained-route spine-arc frame, see :class:`RouteChain`).
+    # ``-1`` ⇒ no chained route attached (legacy / piece is its own route).
+    route_idx: int = -1
 
     @property
     def cap(self) -> float:
@@ -104,6 +108,36 @@ class Centerline:
 
 
 @dataclass
+class RouteChain:
+    """A WHOLE taxi route (the continuous parent polyline of a set of bend-split
+    :class:`Centerline` pieces), in LOCAL meters.
+
+    It exists to give an off-spine pair a single continuous spine-ARC frame: a
+    climbing route that curves through a junction is bend-split into short pieces,
+    so projecting a body vertex onto one piece resets the arc at every bend and the
+    curve never earns its full Δs∥.  Projecting onto the chained route instead
+    credits the route's true arc length (``docs/anisotropic_edge_handling_plan.md``
+    §3d).  Geometry only — per-letter caps still travel on the ``Centerline``
+    pieces; the route supplies the (Δs∥, Δs⊥) decomposition frame, not the cap."""
+    pts: Sequence[tuple[float, float]]
+    _arc: Optional[list[float]] = None
+
+    def arc(self) -> list[float]:
+        if self._arc is None:
+            a = [0.0]
+            for i in range(1, len(self.pts)):
+                a.append(a[-1] + math.hypot(self.pts[i][0] - self.pts[i - 1][0],
+                                            self.pts[i][1] - self.pts[i - 1][1]))
+            self._arc = a
+        return self._arc
+
+    def project(self, x: float, y: float) -> tuple[float, float]:
+        """``(arc_pos, perp_dist)`` of ``(x, y)`` onto this chained route."""
+        a, d, _ = _project(self, x, y)
+        return a, d
+
+
+@dataclass
 class GradeShape:
     """One soft airside shape, representation-agnostic.
 
@@ -120,6 +154,10 @@ class GradeShape:
 class GradeContext:
     """Shared context every caller builds once from its own representation."""
     centerlines: list[Centerline]
+    # The WHOLE routes (chained parent polylines); ``Centerline.route_idx`` indexes
+    # this list.  An off-spine pair decomposes against its centerline's route here
+    # so a curving route earns its full spine ARC as Δs∥ (anisotropic edge law).
+    routes: list[RouteChain] = field(default_factory=list)
     seam_keys: frozenset = frozenset()
     # cap to use for a junction that has NO spine of its own — the caller resolves
     # the nearest connected taxiway-sized shape's cap and passes a lookup keyed by
@@ -183,6 +221,8 @@ def build_context(layout, bucket_to_idx=None) -> "GradeContext":
     from .layout import ROLE_BUILDING
 
     cls: list[Centerline] = []
+    routes: list[RouteChain] = []
+    route_key_to_idx: dict = {}
     for tcl in (getattr(layout, "apt_taxi_centerlines", []) or []):
         ln = getattr(tcl, "line", tcl)
         if ln is None or getattr(ln, "is_empty", True):
@@ -200,7 +240,22 @@ def build_context(layout, bucket_to_idx=None) -> "GradeContext":
             seg_caps = [taxi_grade_cap_for_letter(sizes[i]) if i < len(sizes)
                         else taxi_grade_cap_for_letter(sizes[-1] if sizes else None)
                         for i in range(len(pts) - 1)]
-            cls.append(Centerline(pts=pts, seg_caps=seg_caps))
+            # Chain this piece to its WHOLE route.  Pieces bend-split from the same
+            # parent share the SAME ``route_line`` object (or fall back to their own
+            # ``line``) — dedupe by identity so each distinct route appears once in
+            # ``routes`` and every piece points at it via ``route_idx``.
+            rline = getattr(tcl, "route_line", None)
+            rkey = id(rline) if rline is not None else ("self", id(ln))
+            ridx = route_key_to_idx.get(rkey)
+            if ridx is None:
+                try:
+                    rpts = list(rline.coords) if rline is not None else pts
+                except Exception:
+                    rpts = pts
+                ridx = len(routes)
+                routes.append(RouteChain(pts=rpts))
+                route_key_to_idx[rkey] = ridx
+            cls.append(Centerline(pts=pts, seg_caps=seg_caps, route_idx=ridx))
 
     # taxiway-sized rect node coords -> cap (a junction with NO spine inherits
     # the cap of the nearest CONNECTED taxiway = a rect it shares a node with).
@@ -251,7 +306,8 @@ def build_context(layout, bucket_to_idx=None) -> "GradeContext":
         except Exception:                                     # pragma: no cover
             road_zone = None
 
-    return GradeContext(centerlines=cls, inherited_junction_cap=_inherited,
+    return GradeContext(centerlines=cls, routes=routes,
+                        inherited_junction_cap=_inherited,
                         building_keys=frozenset(bld_keys), road_zone=road_zone)
 
 
@@ -288,10 +344,13 @@ def _visibility_predicate(ring: list[tuple[float, float]]):
 
 # ── spine membership ────────────────────────────────────────────────────────
 
-def _project(cl: Centerline, x: float, y: float):
-    """Return ``(arc_pos, perp_dist)`` of (x,y) onto centerline ``cl``."""
+def _project(cl, x: float, y: float):
+    """Return ``(arc_pos, perp_dist, (foot_x, foot_y))`` of ``(x, y)`` onto the
+    polyline ``cl`` (any object exposing ``.pts`` + ``.arc()`` — a
+    :class:`Centerline` piece or a whole :class:`RouteChain`)."""
     best_d = float("inf")
     best_a = 0.0
+    best_foot = (x, y)
     arc = cl.arc()
     for i in range(len(cl.pts) - 1):
         ax, ay = cl.pts[i]
@@ -307,7 +366,34 @@ def _project(cl: Centerline, x: float, y: float):
         if d < best_d:
             best_d = d
             best_a = arc[i] + t * math.sqrt(seg2)
-    return best_a, best_d
+            best_foot = (px, py)
+    return best_a, best_d, best_foot
+
+
+def ds_decompose(pa: tuple[float, float], pb: tuple[float, float],
+                 route) -> tuple[float, float]:
+    """Decompose the separation of two points into ``(Δs∥, Δs⊥)`` w.r.t. a route
+    (a :class:`RouteChain` or :class:`Centerline`):
+
+    * ``Δs∥`` = the along-route spine ARC between the two projections
+      (``|arc_a − arc_b|``) — it follows the route's CURVE, so a climbing turn
+      earns its full longitudinal budget, not just its chord;
+    * ``Δs⊥`` = the residual transverse offset, ``√(max(0, sep² − long_chord²))``
+      where ``sep`` is the straight pair distance and ``long_chord`` the chord
+      between the two foot points.
+
+    THE single decomposition primitive — the anisotropic allowance is then
+    ``Allowance.at(Δs∥, Δs⊥) = cL·Δs∥ + cT·Δs⊥`` (``grade_law``).  Ported from the
+    legacy ``check_grade._per_axis_allowance`` so the built and checked surfaces
+    use identical math.  For a STRAIGHT route this returns ``(sep, 0)`` (the
+    isotropic ``cap·dist`` case), so straight taxiways/aprons are unaffected."""
+    arc_a, _da, qa = _project(route, pa[0], pa[1])
+    arc_b, _db, qb = _project(route, pb[0], pb[1])
+    ds_par = abs(arc_a - arc_b)
+    sep = math.hypot(pa[0] - pb[0], pa[1] - pb[1])
+    long_chord = math.hypot(qa[0] - qb[0], qa[1] - qb[1])
+    ds_perp = math.sqrt(max(0.0, sep * sep - long_chord * long_chord))
+    return ds_par, ds_perp
 
 
 def _spine_membership(shape: GradeShape, ctx: GradeContext
@@ -318,7 +404,7 @@ def _spine_membership(shape: GradeShape, ctx: GradeContext
     for ri, (x, y) in enumerate(shape.ring):
         hits = []
         for ci, cl in enumerate(ctx.centerlines):
-            a, d = _project(cl, x, y)
+            a, d, _ = _project(cl, x, y)
             if d <= SPINE_PERP_TOL_M:
                 hits.append((ci, a))
         if hits:
@@ -882,7 +968,7 @@ def _build_global_spine(G, ctx):
     for cl in ctx.centerlines:
         on_line = []
         for (i, (x, y)) in items:
-            a, d = _project(cl, x, y)
+            a, d, _ = _project(cl, x, y)
             if d <= SPINE_PERP_TOL_M:
                 on_line.append((a, i))
         if len(on_line) < 2:
