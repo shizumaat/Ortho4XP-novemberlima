@@ -296,6 +296,99 @@ def build_nobuilding_apron_seats(layout, bucket_to_idx, band, dem_fn):
     return seats
 
 
+def build_apron_contact_floors(layout, bucket_to_idx, band, dem_fn, building_seats):
+    """``{feeder_contact_node_idx: floor_level}`` for taxiways/junctions that meet a
+    BUILDING-ANCHORED apron's edge — so the feeder SPINE grades UP to the apron
+    instead of the (senior) apron sagging down to the feeder's DEM-low mouth.
+
+    The complement of :func:`build_nobuilding_apron_seats`, which handles ONLY
+    no-building aprons (it bails on any apron within 1 m of a building).  A building
+    apron is held high by its pad seat, but where the apron edge is FAR from the
+    building (beyond ``BUILDING_REACH_CORRIDOR_M``, so the building-frontage spine
+    floor never reaches it) a feeder taxiway contacting that edge falls through every
+    floor rule and solves to its own low DEM — dragging the apron edge into a cliff
+    (OEMA TX8 #275: apron #198 held at 639 by a building 310 m away, TX8 mouth at the
+    DEM 629 → a 96 % within-apron step).  This was the documented authority inverted:
+    "a taxiway/apron node is apron-owned; the taxi yields", not the reverse.
+
+    The floor is the apron's OWN guaranteed-reachable level at the contact: the apron
+    grades ≤ ``APRON_MAX_GRADE`` from each adjacent building seat, so at a contact
+    ``d`` metres from a building seated at ``S`` the apron is at least ``S − cap·d``.
+    Taking the max over the apron's buildings and clamping to the contact's reach band
+    gives the level the feeder must rise to (never above the band ceiling, so it stays
+    runway-reachable; never below the band floor).  A FLOOR (not a hard seat) so the
+    feeder spine still grades smoothly up from its runway anchor and the apron body
+    flexes — the taxi yields UP, the apron keeps its cap.  Gate
+    ``O4_APRON_CONTACT_FLOOR=0`` disables (no floors, byte-identical)."""
+    import os as _os
+    if _os.environ.get("O4_APRON_CONTACT_FLOOR", "1") != "1":
+        return {}
+    from shapely.geometry import Point
+    from auto_patch.layout import ROLE_APRON, ROLE_BUILDING, ROLE_JUNCTION
+    from auto_patch.junction_rules import SLOPING_RECT_ROLES
+    from auto_patch.config import APRON_MAX_GRADE
+    cps = layout.canonical_points
+    cap = APRON_MAX_GRADE
+
+    # Each building's seat level (its pad nodes all share one seat in building_seats)
+    # paired with its polygon, for the seat − cap·d reach bound.
+    bseats: list = []
+    for b in layout.shapes:
+        if (b.role != ROLE_BUILDING or b.polygon is None or b.polygon.is_empty):
+            continue
+        lv = None
+        for (x, y) in _open_ring(list(b.polygon.exterior.coords)):
+            i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+            if i is not None and building_seats.get(i) is not None:
+                lv = building_seats[i]
+                break
+        if lv is not None:
+            bseats.append((b.polygon, float(lv)))
+    if not bseats:
+        return {}
+
+    route_roles = set(SLOPING_RECT_ROLES) | {ROLE_JUNCTION}
+    routes = [t for t in layout.shapes
+              if t.role in route_roles and t.polygon is not None
+              and not t.polygon.is_empty
+              and not str(t.ref or "").upper().startswith("SVC")]
+
+    floors: dict = {}
+    for s in layout.shapes:
+        if (s.role != ROLE_APRON or s.polygon is None or s.polygon.is_empty):
+            continue
+        # Only BUILDING-anchored aprons (no-building ones use the seat path above).
+        near = [(poly, lv) for (poly, lv) in bseats if s.polygon.distance(poly) < 1.0]
+        if not near:
+            continue
+        for t in routes:
+            if t is s or s.polygon.distance(t.polygon) > 1.5:
+                continue
+            # contact = the feeder vertex nearest the apron (what route_reach measures)
+            best = None
+            for (x, y) in _open_ring(list(t.polygon.exterior.coords)):
+                d2 = s.polygon.exterior.distance(Point(x, y))
+                if best is None or d2 < best[0]:
+                    best = (d2, (x, y))
+            if best is None:
+                continue
+            px, py = best[1]
+            bnd = band(px, py)
+            if bnd is None:
+                continue
+            cpt = Point(px, py)
+            # the apron's guaranteed-reachable level here: max_b(seat_b − cap·d_b),
+            # i.e. the lowest level the apron still grades to each building within cap.
+            reach = max(lv - cap * poly.distance(cpt) for (poly, lv) in near)
+            floor = min(max(reach, bnd[0]), bnd[1])         # clamp into reach band
+            i = bucket_to_idx.get(cps.get_or_add(float(px), float(py)))
+            if i is None:
+                continue
+            if floor > floors.get(i, -float("inf")):
+                floors[i] = float(floor)
+    return floors
+
+
 def node_bands(nodes, band):
     """Per-node ``(floor, ceiling)`` from the one reach band (``None`` off-net)."""
     return [band(x, y) for (x, y) in nodes]
