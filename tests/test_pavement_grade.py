@@ -205,6 +205,7 @@ def test_pavement_grade(tmp_path, icao):
             f"violations (cap {cap}).  Worst:\n  {worst}")
 
 
+@pytest.mark.xdist_group("CYXY")   # reuse CYXY's already-built layout
 def test_cyxy_spine_zero_no_bowl():
     """THE single-graph invariant (user 2026-06-24): the taxi SPINE must be
     grade-compliant (0 within-shape spine violations on the unified grade graph)

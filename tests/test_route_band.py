@@ -42,6 +42,7 @@ def _param(icao):
     return icao
 
 
+@pytest.mark.xdist_group("CYXY")   # reuse CYXY's already-built layout
 def test_route_band_flags_cyxy_apron_ceiling():
     """ANTI-GAMING: the checker MUST flag CYXY's aprons seated above their reach
     ceiling, so the zero-gate cannot be faked by a no-op / over-weakened check."""
@@ -53,6 +54,7 @@ def test_route_band_flags_cyxy_apron_ceiling():
         f"{[t[1] for t in v[:6]]}")
 
 
+@pytest.mark.xdist_group("SPJC")   # reuse SPJC's already-built layout
 def test_route_band_detects_injected_overshoot():
     """ANTI-GAMING: a vertex shoved well above its band MUST be flagged ``ceil``,
     so the gate cannot be quietly weakened (looser band, dropped vertices).  Uses

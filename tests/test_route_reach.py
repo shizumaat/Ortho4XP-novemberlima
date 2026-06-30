@@ -12,6 +12,12 @@ gates that the real airport is clean; the anti-gaming guard is synthetic.
 """
 from __future__ import annotations
 
+import pytest
+
+# All-CYXY module (hardcoded) — pin to CYXY's xdist group so it reuses the
+# already-built layout instead of rebuilding on a stray worker.
+pytestmark = pytest.mark.xdist_group("CYXY")
+
 
 def _cyxy():
     from conftest import cached_airport_layout

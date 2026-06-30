@@ -28,6 +28,10 @@ _SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+# All builds here are CYXY (hardcoded) — pin to CYXY's xdist group so they reuse
+# the already-built layout instead of rebuilding on a stray worker.
+pytestmark = pytest.mark.xdist_group("CYXY")
+
 
 _requires_xplane = pytest.mark.skipif(
     not xplane_available(),

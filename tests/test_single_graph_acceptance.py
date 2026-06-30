@@ -36,6 +36,11 @@ from __future__ import annotations
 
 import pytest
 
+# Every test here is CYXY (hardcoded, not icao-parametrised), so the conftest's
+# auto xdist_group misses them. Pin the whole module to CYXY's group so they
+# share the worker that already builds CYXY instead of rebuilding it.
+pytestmark = pytest.mark.xdist_group("CYXY")
+
 
 def _cyxy():
     from conftest import cached_airport_layout
