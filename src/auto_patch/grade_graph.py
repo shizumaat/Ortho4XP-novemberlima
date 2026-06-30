@@ -386,10 +386,10 @@ def ds_decompose(pa: tuple[float, float], pb: tuple[float, float],
       between the two foot points.
 
     THE single decomposition primitive — the anisotropic allowance is then
-    ``Allowance.at(Δs∥, Δs⊥) = cL·Δs∥ + cT·Δs⊥`` (``grade_law``).  Ported from the
-    legacy ``check_grade._per_axis_allowance`` so the built and checked surfaces
-    use identical math.  For a STRAIGHT route this returns ``(sep, 0)`` (the
-    isotropic ``cap·dist`` case), so straight taxiways/aprons are unaffected."""
+    ``Allowance.at(Δs∥, Δs⊥) = cL·Δs∥ + cT·Δs⊥`` (``grade_law``); the solver and
+    validator both call it, so the built and checked surfaces use identical math.
+    For a STRAIGHT route this returns ``(sep, 0)`` (the isotropic ``cap·dist``
+    case), so straight taxiways/aprons are unaffected."""
     arc_a, _da, qa = _project(route, pa[0], pa[1])
     arc_b, _db, qb = _project(route, pb[0], pb[1])
     ds_par = abs(arc_a - arc_b)

@@ -857,14 +857,9 @@ def check_rect_short_edges(layout):
 
 # ── Grade invariants (reuse the check_grade engine) ─────────────────
 def taxi_axes_ll(layout):
-    """Per-axis taxi grading mirror — the SAME construction the grade
-    test uses."""
-    try:
-        from .elevation_per_surface import solver_primitives as _uj
-    except Exception:
-        return None
-    if not getattr(_uj, "_PER_AXIS_JUNCTIONS", False):
-        return None
+    """The builder's APT.DAT taxi centerlines as ``[(latlon_pts, cL, cT), …]`` —
+    the within-shape grade test's CENTERLINE source (spine membership + per-letter
+    cap), the SAME centerlines the build used."""
     def _cLcT(letter):
         return ((0.03, 0.02) if letter in ("A", "B") else (0.015, 0.015))
 

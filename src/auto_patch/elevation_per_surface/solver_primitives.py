@@ -35,7 +35,7 @@ from auto_patch.elevation import (
 from auto_patch.config import (
     taxi_grade_cap_for_letter, TAXI_MAX_GRADE_NARROW, JUNCTION_NARROW_GRADE,
     CORRIDOR_SPINE_CHAINS, FIELD_TARGET_CONFORMANCE, BUILDING_ROUTE_FEASIBILITY,
-    MIN_GRADE_NETWORK, SINGLE_GRADE_GRAPH)
+    MIN_GRADE_NETWORK)
 from auto_patch.layout import (
     ROLE_APRON, ROLE_BOUNDARY, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL, ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
@@ -124,28 +124,6 @@ PAVEMENT_ROLES = {
 # last resort is a separate step.)
 
 
-# Per-axis junction grading (user 2026-05-22).  When True, junction grade
-# constraints are LONGITUDINAL (along each converging centerline) + ring only;
-# the unregulated inter-centerline DIAGONAL is dropped (the all-pair Euclidean
-# cap is stricter than ICAO/EASA require and forbids junctions that
-# legitimately slope along routes over real terrain, e.g. SPLP -10025).  Pairs
-# with the audit (check_grade) which must also go per-axis or it will flag the
-# diagonals this allows.  The audit goes per-axis whenever this flag is True
-# (the grade test passes ``taxi_axes_ll`` gated on this flag), so they stay
-# coupled.  ALSO drives the apron taxilane model (session 47): when True,
-# aprons collect the apt.dat taxilane axes crossing them so along-lane pairs
-# grade along the (looser) arc — directional relief inside aprons — while the
-# general apron BODY (pairs off any lane) keeps its all-pair Euclidean cap.
-# Per-axis junction grading (user 2026-06-10 ruling): the 1.5 % cap
-# applies along the taxi CENTERLINE; a curved junction's cross-axis
-# diagonal chords are an unregulated direction (ICAO Annex 14 §3.9 /
-# EASA CS-ADR-DSN.D.265/.280 regulate longitudinal-along-route +
-# transverse) and the inside-of-curve edge legitimately exceeds the cap
-# for the centerline to carry it.  All-pair chords had pinned high-speed
-# exit junctions flat (HECA #282/#283 could not rise toward A4/A5) and
-# blocked smooth blends through turning junctions (#291: 75's axis
-# bending into 95's).  check_grade mirrors via ``taxi_axes_ll``.
-_PER_AXIS_JUNCTIONS = True
 
 # Runway-flex third pass (user 2026-05-28).  The runway's elevation profile is
 # DERIVED from the DEM (interpolated between CIFP threshold anchors); the DEM is
@@ -635,8 +613,7 @@ def _build_shape_constraints(layout, bucket_to_idx):
     # within-shape constraints from the ONE shared generator the validator also
     # uses.  Built once per solve; gate OFF → legacy _visible_grade_edges branch.
     from auto_patch import grade_graph as _GG
-    _gg_ctx = (_GG.build_context(layout, bucket_to_idx)
-                if SINGLE_GRADE_GRAPH else None)
+    _gg_ctx = _GG.build_context(layout, bucket_to_idx)
     back_scale = (APRON_BACK_EDGE_GRADE / APRON_MAX_GRADE
                   if APRON_MAX_GRADE > 0 else 1.0)
     # Node indices on a clean sloping-rect PLANE (4-corner, altitude_high/low).
@@ -768,18 +745,17 @@ def _build_shape_constraints(layout, bucket_to_idx):
                 d = math.hypot(coords[ii][0] - coords[jj][0],
                                coords[ii][1] - coords[jj][1])
                 edges.append((idx[ii], idx[jj], cap * d))
-        elif (_gg_ctx is not None
-              and s.role in (ROLE_APRON, ROLE_JUNCTION)):
+        elif s.role in (ROLE_APRON, ROLE_JUNCTION):
             # SINGLE GRADE GRAPH: apron/junction within-shape edges from the ONE
             # shared generator (auto_patch.grade_graph) — junction = apron with a
             # spine+body model at the taxiway per-letter cap (no legacy per-axis
             # diagonal-skip).  GRADED terminals (ROLE_BUILDING) + service_junction
             # stay on the legacy branches below for now.
             edges.extend(_grade_graph_edges(s, coords, idx, _gg_ctx))
-        elif s.role in (ROLE_APRON, ROLE_BUILDING, ROLE_JUNCTION):
-            # In-pavement VISIBILITY graph for APRONS, GRADED terminals (when
-            # TERMINAL_MAX_GRADE > 0 — large near-flat pads, same as an apron)
-            # and JUNCTIONS.  The within-shape grade
+        elif s.role == ROLE_BUILDING:
+            # In-pavement VISIBILITY graph for GRADED terminals (when
+            # TERMINAL_MAX_GRADE > 0 — large near-flat pads, same as an apron).
+            # The within-shape grade
             # limit applies ALONG the pavement, so a grade edge is added only
             # between MUTUALLY-VISIBLE vertices (the chord stays inside the
             # polygon).  On a non-convex shape the Euclidean chord between two
@@ -812,84 +788,10 @@ def _build_shape_constraints(layout, bucket_to_idx):
             # what forces a high corridor to DESCEND so the apron can grade.
             vis_edges = _visible_grade_edges(
                 coords, idx, cap, s.polygon,
-                container=(airside_buf if s.role == ROLE_JUNCTION
-                           else None),
+                container=None,
                 max_len=(None if W2_CLEAN_BANDS
                          else (ROUTE_FIELD_LOCAL_WINDOW_M if ROUTE_FIELD_MODEL
                                else None)))
-            # PER-AXIS JUNCTION GRADING (user 2026-06-10): the 1.5 % cap
-            # applies along the taxi CENTERLINE.  A chord between two
-            # vertices following the same (curved) axis caps at the
-            # ARC length between their projections — a straight chord
-            # under-measures a turning route and pins the junction flat
-            # (HECA #282: A4's mouth sat 47 m by chord from a runway
-            # vertex but ~120 m along the curved exit centerline, so the
-            # whole 1.8 m climb the exit should carry was forbidden).
-            # Cross-axis diagonals are an unregulated direction (ICAO
-            # Annex 14 §3.9 / EASA CS-ADR-DSN.D.265/.280 regulate
-            # longitudinal-along-route + transverse) and are dropped;
-            # ring-adjacent pairs always survive (the physical edge).
-            if s.role == ROLE_JUNCTION and _PER_AXIS_JUNCTIONS:
-                axes = [a for a, _c in _collect_junction_axes(
-                    layout, s.polygon)]
-                if axes:
-                    from shapely.geometry import Point as _Pt
-                    m2 = len(coords)
-                    ring_adj = set()
-                    pos2: dict = {}
-                    for a2 in range(m2):
-                        ia2 = idx[a2]
-                        ib2 = idx[(a2 + 1) % m2]
-                        if ia2 is not None:
-                            pos2.setdefault(ia2, coords[a2])
-                        if ia2 is not None and ib2 is not None:
-                            ring_adj.add((min(ia2, ib2), max(ia2, ib2)))
-                    pdist: dict = {}
-                    kept: list = []
-                    for (ea, eb, ecap) in vis_edges:
-                        pa, pb = pos2.get(ea), pos2.get(eb)
-                        if pa is None or pb is None:
-                            kept.append((ea, eb, ecap))
-                            continue
-                        arc_best = None
-                        for ax2 in axes:
-                            ka2 = (id(ax2), ea)
-                            kb2 = (id(ax2), eb)
-                            da2 = pdist.get(ka2)
-                            if da2 is None:
-                                da2 = ax2.distance(_Pt(pa))
-                                pdist[ka2] = da2
-                            db2 = pdist.get(kb2)
-                            if db2 is None:
-                                db2 = ax2.distance(_Pt(pb))
-                                pdist[kb2] = db2
-                            if (da2 <= JUNCTION_AXIS_PERP_TOL_M
-                                    and db2 <= JUNCTION_AXIS_PERP_TOL_M):
-                                arc = abs(ax2.project(_Pt(pa))
-                                          - ax2.project(_Pt(pb)))
-                                if arc_best is None or arc > arc_best:
-                                    arc_best = arc
-                        if arc_best is not None:
-                            kept.append((ea, eb,
-                                         max(ecap, cap * arc_best)))
-                        elif (min(ea, eb), max(ea, eb)) in ring_adj:
-                            kept.append((ea, eb, ecap))
-                        # else: cross-axis diagonal — dropped
-                    vis_edges = kept
-            # BACK-EDGE RAMP: an apron grade edge with BOTH endpoints in the
-            # back band carries the steeper APRON_BACK_EDGE_GRADE (a back ramp
-            # between buildings).  Front-to-back chords keep one endpoint in
-            # the front, so they retain the apron law — the warp stays gradual.
-            # This also lifts the FLAT-vs-SLOPE acceptance's per-edge cap, so a
-            # legal back ramp no longer counts as excess and reverts the pad
-            # flatten.
-            if (APRON_BACK_EDGE_RAMPS and s.role == ROLE_APRON
-                    and back_band and back_scale > 1.0):
-                vis_edges = [
-                    (ea, eb, ecap * back_scale)
-                    if (ecap > 0.0 and ea in back_band and eb in back_band)
-                    else (ea, eb, ecap)
-                    for (ea, eb, ecap) in vis_edges]
             edges.extend(vis_edges)
         else:
             # All-pair (seam-cut rect / service junction): small near-convex
@@ -1403,68 +1305,6 @@ def _sample_node_dem(layout, nodes, dem, tile_lat, tile_lon):
         if e is not None:
             out[i] = float(e)
     return out
-
-
-# ── Stage 3: edge construction (the per-axis rule lives here) ─────
-
-
-JUNCTION_AXIS_PERP_TOL_M = 15.0  # taxi half-width + small slack
-
-
-def _collect_junction_axes(layout, polygon):
-    """Return ``[(axis_LineString, grade_cap)]`` for every centerline /
-    runway long-axis passing through ``polygon`` — used by ``_build_edges``
-    to apply per-axis grade constraints to a junction.  ``grade_cap`` is the
-    taxiway's code-letter cap (narrow A/B 3 %, C–F 1.5 % via
-    ``taxi_grade_cap_for_letter``); runway long-axes carry ``TAXI_MAX_GRADE``.
-    A junction edge running ALONG a narrow axis earns that axis's looser cap
-    (apron-spine climb law) so a code-A/B corridor can climb at 3 %.
-
-    Sources:
-    * ``layout.apt_taxi_centerlines`` — full apt.dat taxi network.
-    * Each runway segment's long-axis (midpoints of its two short
-      edges), for runway-crossing junctions.
-    """
-    from shapely.geometry import LineString
-    axes = []
-    apt_lines = getattr(layout, "apt_taxi_centerlines", None) or []
-    for item in apt_lines:
-        ln = item.line if hasattr(item, "line") else (item[0] if isinstance(item, tuple) else item)
-        ref = item.name if hasattr(item, "name") else (item[1] if (isinstance(item, tuple) and len(item) > 1) else None)
-        if ln is None or ln.is_empty:
-            continue
-        try:
-            if polygon.intersects(ln):
-                axes.append((ln, float(taxi_grade_cap_for_letter(
-                    item.dominant_size() if hasattr(item, "dominant_size") else None))))
-        except _GEOM_EXC:
-            continue
-    for s2 in layout.shapes:
-        if s2.role != ROLE_RUNWAY:
-            continue
-        if s2.polygon is None or s2.polygon.is_empty:
-            continue
-        try:
-            if not polygon.intersects(s2.polygon):
-                continue
-            rc = list(s2.polygon.exterior.coords)
-        except _GEOM_EXC:
-            continue
-        if rc and rc[0] == rc[-1]:
-            rc = rc[:-1]
-        if len(rc) != 4:
-            continue
-        a_mid = (0.5 * (rc[0][0] + rc[3][0]),
-                 0.5 * (rc[0][1] + rc[3][1]))
-        b_mid = (0.5 * (rc[1][0] + rc[2][0]),
-                 0.5 * (rc[1][1] + rc[2][1]))
-        try:
-            axes.append((LineString([a_mid, b_mid]), TAXI_MAX_GRADE))
-        except _GEOM_EXC:
-            continue
-    return axes
-
-
 
 
 

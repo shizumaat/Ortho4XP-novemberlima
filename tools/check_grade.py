@@ -533,72 +533,6 @@ def _check_plane_gradient(ways: List[Way],
 # within-shape check is now uncapped + visibility-gated — see
 # _check_within_shape.)
 
-# Per-axis junction grading (user 2026-05-22).  A junction may legitimately
-# slope along each converging taxi centerline (LONGITUDINAL ≤ code-letter cap)
-# and across it (TRANSVERSE), per ICAO Annex 14 §3.9 / EASA CS-ADR-DSN.D.265/
-# .280; the inter-centerline DIAGONAL is unregulated.  When ``taxi_axes`` is
-# supplied (from the builder's APT.DAT centerlines — NOT re-derived from the
-# OSM, which would diverge from what the build used), junction within-shape
-# pairs are checked per-axis: a pair is graded only if both endpoints lie
-# within this perp tolerance of a COMMON centerline (= a longitudinal/
-# transverse pair); cross-axis diagonal pairs are unregulated and skipped.
-# Matches the solver's ``_PER_AXIS_JUNCTIONS`` edge rule.
-_PER_AXIS_PERP_TOL_M = 15.0
-
-
-def _project_to_polyline(poly, px, py):
-    """Project point ``(px, py)`` onto polyline ``poly`` (list of (x, y)).
-
-    Returns ``(arc, perp, (qx, qy))`` — cumulative arc-length to the nearest
-    point on the polyline, the perpendicular distance, and that nearest point.
-    Pure-math (no shapely) to keep the audit dependency-light.
-    """
-    best = None  # (perp2, arc, qx, qy)
-    arc_acc = 0.0
-    for k in range(len(poly) - 1):
-        ax, ay = poly[k]
-        bx, by = poly[k + 1]
-        dx, dy = bx - ax, by - ay
-        seg2 = dx * dx + dy * dy
-        if seg2 < 1e-12:
-            continue
-        t = ((px - ax) * dx + (py - ay) * dy) / seg2
-        t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
-        qx, qy = ax + t * dx, ay + t * dy
-        perp2 = (px - qx) ** 2 + (py - qy) ** 2
-        arc = arc_acc + t * math.sqrt(seg2)
-        if best is None or perp2 < best[0]:
-            best = (perp2, arc, qx, qy)
-        arc_acc += math.sqrt(seg2)
-    if best is None:
-        return 0.0, float("inf"), (px, py)
-    return best[1], math.sqrt(best[0]), (best[2], best[3])
-
-
-def _per_axis_allowance(pi, pj, taxi_axes, noise):
-    """Per-axis grade allowance for a junction vertex pair.
-
-    Returns the max |de| a per-axis-compliant surface could exhibit between
-    ``pi`` and ``pj`` (decomposing their separation into LONGITUDINAL and
-    TRANSVERSE w.r.t. a common centerline), or ``None`` if the pair lies along
-    NO common centerline — an unregulated diagonal that should NOT be flagged.
-    """
-    best = None
-    sep = math.hypot(pi[0] - pj[0], pi[1] - pj[1])
-    for poly, cL, cT in taxi_axes:
-        ai, di, qi = _project_to_polyline(poly, pi[0], pi[1])
-        if di > _PER_AXIS_PERP_TOL_M:
-            continue
-        aj, dj, qj = _project_to_polyline(poly, pj[0], pj[1])
-        if dj > _PER_AXIS_PERP_TOL_M:
-            continue
-        long_arc = abs(aj - ai)
-        long_chord = math.hypot(qi[0] - qj[0], qi[1] - qj[1])
-        trans = math.sqrt(max(0.0, sep * sep - long_chord * long_chord))
-        allow = cL * long_arc + cT * trans + noise
-        if best is None or allow > best:
-            best = allow
-    return best
 
 
 def _role_grade_limit(way: "Way",
@@ -1338,15 +1272,14 @@ def run_checks(
     routes_ll: Optional[list] = None,
     quiet: bool = False,
 ) -> Tuple[List[Violation], List[Violation], List[EdgeStep]]:
-    """``taxi_axes_ll`` (per-axis junction grading): the builder's APT.DAT taxi
-    centerlines as ``[(latlon_points, cL, cT), …]`` — ``latlon_points`` a list
-    of ``(lat, lon)``, ``cL``/``cT`` the longitudinal/transverse grade caps
-    (decimals).  Sourced from ``layout.apt_taxi_centerlines`` (apt.dat, the same
-    centerlines the build used) and passed as lat/lon so the audit's mean-centred
-    meter frame matches.  When supplied, junction within-shape pairs are graded
-    per-axis (see ``_per_axis_allowance``); when None, the legacy all-pair
-    Euclidean cap applies.  Re-deriving centerlines from the OSM would diverge
-    from the apt.dat geometry the builder actually used — do not.
+    """``taxi_axes_ll`` (the builder's APT.DAT taxi centerlines as
+    ``[(latlon_points, cL, cT), …]``) supplies the within-shape grade graph's
+    CENTERLINES (spine membership + per-letter cap), sourced from
+    ``layout.apt_taxi_centerlines`` and passed as lat/lon so the audit's
+    mean-centred meter frame matches; ``routes_ll`` supplies the chained ROUTES
+    for the anisotropic spine-arc decomposition (``grade_graph``).  Re-deriving
+    centerlines from the OSM would diverge from the apt.dat geometry the builder
+    actually used — do not.
     """
     nodes, ways = _parse_osm(osm_path)
     ll_to_m = _ll_to_m_factory(nodes)
