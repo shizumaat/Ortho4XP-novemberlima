@@ -36,6 +36,7 @@ Public API:
 from __future__ import annotations
 
 import math
+import os
 from collections import defaultdict
 
 import numpy as np
@@ -95,6 +96,11 @@ _MIN_CUT_AREA_M2 = 25.0
 # lands on a sloping rect's edge (``test_no_vertex_on_sloping_rect_-
 # edge`` flags non-rect vertices within 1 m of a rect edge interior).
 _PAVEMENT_GAP_M = 1.5
+# Enclosed-pocket wingtip clearance (Pass A2, user 2026-06-30): ring the full
+# perimeter of a small NON-pavement pocket fully enclosed by taxi pavement, so
+# sharp terrain a wingtip overhangs is cut even where no centerline reaches it.
+# O4_POCKET_CLEARANCE=0 disables it (revert to centerline-only junction clearance).
+_POCKET_CLEARANCE = os.environ.get("O4_POCKET_CLEARANCE", "1") == "1"
 # Only build lateral strips for shapes that are genuinely elongated
 # (a taxiway / runway).  Chunky absorbed pieces (aspect < this) are
 # blob-like — "edge clearance" is ill-defined and they'd otherwise
@@ -1140,6 +1146,90 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                         pts, alts, [outward] * m, [band_w] * m,
                         tx_slope, tx_threshold, step, sample_dem):
                     _collect(ring, ralts, ROLE_TAXIWAY_CLEARANCE)
+
+    # ── Pass A2: ENCLOSED-POCKET wingtip clearance (user 2026-06-30) ──
+    # A taxi network can fully ENCLOSE a small non-pavement pocket (a hole in the
+    # airside union) between converging junctions.  A taxiing aircraft's wingtip
+    # overhangs INTO that pocket from the surrounding pavement, but Pass A
+    # (centerline-perpendicular, reach = clear_half) leaves the pocket's oblique
+    # far edges uncovered — no centerline's perpendicular reaches them as the
+    # junction widens past clear_half — so sharp terrain in the pocket slips
+    # through (CYXY jct134/jct148 throat).  Ring the ENTIRE perimeter of every
+    # pocket small enough to lie within wingtip reach, regardless of centerlines.
+    if airside and prep_pav is not None and _POCKET_CLEARANCE:
+        try:
+            _au = unary_union([s.polygon for s in airside])
+            _au_polys = (list(_au.geoms) if _au.geom_type == "MultiPolygon"
+                         else [_au])
+        except _GEOM_EXC:
+            _au_polys = []
+        _cls = [e for e in (getattr(layout, "apt_taxi_centerlines", None) or [])
+                if getattr(e, "line", None) is not None and not e.line.is_empty
+                and not getattr(e, "is_service", False)]
+        _default_half = taxiway_clearance_half_width_m(_MAX_TAXIWAY_WIDTH_M)
+
+        def _pocket_edge_alt(x, y):
+            """Pavement-surface altitude at a pocket-boundary point — the NEAREST
+            airside shape's edge-interpolated altitude (the boundary may fall in a
+            hairline inter-shape gap that ``_pav_alt`` containment misses)."""
+            p = Point(x, y)
+            best, bd = None, float("inf")
+            for s in airside:
+                try:
+                    d = s.polygon.distance(p)
+                except _GEOM_EXC:
+                    continue
+                if d < bd:
+                    bd, best = d, s
+            return _edge_interp_alt(best, x, y) if best is not None else None
+
+        for _poly in _au_polys:
+            for _hole in _poly.interiors:
+                try:
+                    pocket = Polygon(_hole)
+                except _GEOM_EXC:
+                    continue
+                if pocket.is_empty or pocket.area < _MIN_CUT_AREA_M2:
+                    continue
+                # LOCAL wingtip reach: the nearest taxi centerline's code letter
+                # (so a code-B pocket isn't ringed with a code-E band).
+                cen = pocket.centroid
+                pk_half = _default_half
+                if _cls:
+                    e = min(_cls, key=lambda e: e.line.distance(cen))
+                    if hasattr(e, "dominant_size") and e.dominant_size():
+                        pk_half = taxiway_clearance_half_width_for_letter(
+                            e.dominant_size())
+                # WINGTIP-POCKET gate: erode by the reach; a true pocket lies
+                # entirely within reach so its core vanishes.  The open INFIELD
+                # keeps a large core → skipped (Pass A covers its centerlined band).
+                try:
+                    core = pocket.buffer(-pk_half)
+                except _GEOM_EXC:
+                    continue
+                if not core.is_empty and core.area > _MIN_CUT_AREA_M2:
+                    continue
+                ring_open = _open_coords(pocket)
+                m = len(ring_open)
+                stations, outs, alts, bws = [], [], [], []
+                for i in range(m):
+                    a = ring_open[i]
+                    b = ring_open[(i + 1) % m]
+                    out = _outward_normal(pocket, a, b)   # OUT of pocket → pavement
+                    if out is None:
+                        continue
+                    into = (-out[0], -out[1])             # INTO pocket → terrain
+                    for (sx, sy) in _stations(a, b, step)[:-1]:
+                        ref = _pocket_edge_alt(sx + out[0] * 0.5, sy + out[1] * 0.5)
+                        stations.append((sx, sy))
+                        outs.append(into)
+                        alts.append(ref)
+                        bws.append(pk_half)
+                if len(stations) >= 2:
+                    for ring, ralts in _build_graded_strips(
+                            stations, alts, outs, bws, tx_slope, tx_threshold,
+                            step, sample_dem):
+                        _collect(ring, ralts, ROLE_TAXIWAY_CLEARANCE)
 
     # ── Pass B: runway lateral graded-strip cuts (rect long-edges) ──
     rw_threshold = CLEARANCE_OBSTRUCTION_THRESHOLD_M["runway"]
