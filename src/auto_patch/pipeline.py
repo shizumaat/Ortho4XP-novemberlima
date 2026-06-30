@@ -3340,7 +3340,16 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # the LOCAL pavement into two sizable pieces (the apron and the lot it
     # feeds).  A truck route inside one apron, or a rect-trim edge remainder,
     # leaves the local pavement in one piece, so it is skipped.
-    if os.environ.get("O4_SVC_CURVED_JUNCTION", "1") == "1":
+    #
+    # DEFAULT OFF (user 2026-06-29): carving the connector out of the apron is a
+    # NET NEGATIVE as it stands — the lots do reclassify to groundside, but the
+    # apron edges re-grade (+~100 moderate within-shape pairs at CYXY) and the
+    # all-pair-4 % service_junction connectors are themselves steep on slope.
+    # NEEDS MORE WORK before default-on: emit the connector as DEM-following
+    # groundside (merged with the lot) rather than an all-pair junction, and/or
+    # clip the apron cleanly so it does not fragment.  Enable with
+    # O4_SVC_CURVED_JUNCTION=1 to experiment.
+    if os.environ.get("O4_SVC_CURVED_JUNCTION", "0") == "1":
         from .layout import ROLE_SERVICE_JUNCTION
         _SVC_JCT_MIN_AREA_M2 = 30.0
         _BRIDGE_REACH_M = 60.0       # local pavement window around a connector
