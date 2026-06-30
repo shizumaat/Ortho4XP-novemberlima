@@ -838,10 +838,14 @@ APRON_TAXI_TRANSITION_M = 30.0
 # ON, a spine / junction-body / apron-blend pair's grade budget is the anisotropic
 # cL·Δs∥ + cT·Δs⊥ decomposed against the pair's whole chained ROUTE (Δs∥ = spine
 # arc) instead of the isotropic cap·(chord).  This credits a climbing CURVE its
-# full arc length so it stops being false-flagged at junctions.  DEFAULT OFF until
-# the plan's Phase 3/4 milestones pass; OFF is byte-identical (the law keeps
-# emitting flat cap·dist allowances).
-ANISO_EDGES = _os.environ.get("O4_ANISO_EDGES", "0") == "1"
+# full arc length so it stops being false-flagged at junctions.  DEFAULT-ON (user
+# 2026-06-30): net fewer within-shape violations + fewer >8% cliffs on every
+# fixture (CYXY 319→268, SPJC 502→418, SPLP 146→133, HECA 8031→7483 body viols;
+# cliffs 28→24/20→18/8→8/229→215) and 0 fundamental in the feasibility audit; a
+# few residual solver-miss cliffs remain (NOT infeasibilities) — tracked as
+# solver-quality follow-ups.  O4_ANISO_EDGES=0 reverts to the isotropic cap·dist
+# law, byte-identical to the pre-feature build.
+ANISO_EDGES = _os.environ.get("O4_ANISO_EDGES", "1") == "1"
 
 # (20260624) ABSORB_RUNWAY_IN_APRON — the apron-merged-runway machine.  When a
 # runway passes through a much-larger apron polygon, the overlapping runway
