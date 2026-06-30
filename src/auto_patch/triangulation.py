@@ -21,11 +21,13 @@ Public API:
 """
 from __future__ import annotations
 
+import dataclasses
 import math
+import os
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from shapely.errors import GEOSException, TopologicalError
-from shapely.geometry import Polygon
+from shapely.geometry import MultiPolygon, Polygon
 
 import O4_UI_Utils as UI
 
@@ -65,6 +67,67 @@ from .pavement.vertices import _drop_spike_vertices
 
 
 __all__ = ["_triangulate_junctions"]
+
+# DROP-PROTECTION (user 2026-06-30): the per-junction ring cleanup
+# (``_drop_spike_vertices`` / ``_drop_sliver_corners`` + buffer(0)) severs a
+# near-self-touch (a <5 mm neck) and the polygonize then discards the lobe
+# hanging off it.  That is correct for a degenerate sliver, but where the lobe
+# is REAL pavement (the HECA stub-B 216 m² wedge) the coverage just vanishes
+# → a gap.  Recover any orphaned piece at/above this area as its OWN junction
+# (a clean standalone polygon, mesh-safe, no degenerate neck).  Gate
+# ``O4_SPIKE_LOBE_KEEP=0`` restores the silent-drop behaviour.
+_SPIKE_LOBE_KEEP = os.environ.get("O4_SPIKE_LOBE_KEEP", "1") == "1"
+_SPIKE_LOBE_KEEP_M2 = 50.0
+
+
+def _safe_poly(ring: Sequence[Tuple[float, float]]) -> Optional[Polygon]:
+    """Polygon(ring) repaired to a single valid Polygon, or None."""
+    try:
+        p = Polygon(ring)
+        if not p.is_valid:
+            p = p.buffer(0)
+    except (GEOSException, TopologicalError, ValueError):
+        return None
+    if p.is_empty:
+        return None
+    if p.geom_type == "MultiPolygon":
+        p = max(p.geoms, key=lambda g: g.area)
+    return p if p.geom_type == "Polygon" else None
+
+
+def _orphaned_lobes(pre: Optional[Polygon], post: Optional[Polygon]
+                    ) -> List[Polygon]:
+    """Polygon pieces present in ``pre`` but lost from ``post`` whose area is
+    ≥ ``_SPIKE_LOBE_KEEP_M2`` — the real lobes the cleanup orphaned (degenerate
+    sub-threshold slivers are intentionally left dropped)."""
+    if pre is None or post is None:
+        return []
+    try:
+        lost = pre.difference(post)
+    except (GEOSException, TopologicalError, ValueError):
+        return []
+    if lost.is_empty:
+        return []
+    geoms = lost.geoms if isinstance(lost, MultiPolygon) else [lost]
+    out = []
+    for g in geoms:
+        if g.geom_type != "Polygon" or g.is_empty:
+            continue
+        if not g.is_valid:
+            g = g.buffer(0)
+        if g.geom_type == "Polygon" and g.area >= _SPIKE_LOBE_KEEP_M2:
+            out.append(g)
+    return out
+
+
+def _open_ring_coords(poly: Polygon) -> Optional[List[Tuple[float, float]]]:
+    try:
+        coords = list(poly.exterior.coords)
+    except (GEOSException, TopologicalError, ValueError):
+        return None
+    if coords and coords[0] == coords[-1]:
+        coords = coords[:-1]
+    return coords if len(coords) >= 3 else None
 
 
 def _triangulate_junctions(
@@ -499,6 +562,9 @@ def _triangulate_junctions(
                 continue
         if len(ring) < 3:
             continue
+        # Pre-cleanup footprint, to recover any large lobe the spike/sliver
+        # cleanup orphans (drop-protection, user 2026-06-30).
+        pre_poly = _safe_poly(ring) if _SPIKE_LOBE_KEEP else None
         ring = _drop_spike_vertices(ring)
         if len(ring) < 3:
             continue
@@ -514,6 +580,16 @@ def _triangulate_junctions(
                 continue
         except _GEOM_EXC:
             continue
+        # Re-emit each orphaned real lobe as its own standalone junction so the
+        # pavement it covered survives (no degenerate neck, so mesh-safe).
+        for lobe in _orphaned_lobes(pre_poly, poly):
+            lobe_ring = _open_ring_coords(lobe)
+            if lobe_ring is None:
+                continue
+            lobe_shape = dataclasses.replace(
+                shape, polygon=lobe, node_altitudes=None,
+                altitude=None, altitude_high=None, altitude_low=None)
+            junction_cleaned.append((lobe_shape, lobe_ring, lobe))
         junction_cleaned.append((shape, ring, poly))
 
     # ── Single-pass per-junction smoothing + shared-vertex
