@@ -1,5 +1,32 @@
 # Implementation Plan — Fully Anisotropic Edge Handling
 
+> **STATUS 2026-06-29 (gate `O4_ANISO_EDGES`, default OFF):**
+> - **P0** ✅ `e463b02` — route chaining (`TaxiCenterline.route_line`, `RouteChain`,
+>   `GradeContext.routes`, `Centerline.route_idx`); `tools/probe_route_chains.py`.
+> - **P1** ✅ `e463b02` — `grade_graph.ds_decompose`; unit tests.
+> - **P2** ✅ `bfeb099` — `config.taxi_transverse_cap_for_letter` (A/B 2 %), STANDARDS.
+> - **P3** ✅ `0e6a3f0` — anisotropy BAKED into the per-edge `Allowance` inside
+>   `shape_constraints` (all 5 sites get it via their existing `cap.at(d,0)`, 0 site
+>   edits); lockstep budget test. CYXY gate-on within body 319→268, >8% cliffs 28→24
+>   ZERO new (4 resolved).
+> - **P4** ✅ `38ccf36` — reach band agrees with the law (junction full-cap perp +
+>   multi-route ceiling); CYXY route_band 159→145. Gate-off byte-identical.
+> - **P5** ✅ `541c70a` — feasibility-audit edge weight = the law's `c.allowance`;
+>   CYXY 0 fundamental, POCS resid ≈ 0.
+> - **P6** ⚠️ functional core ✅ `3124a2a` — standalone `check_grade` wired with the
+>   chained routes (gate-on within 362→303, agrees with the solver). **DEFERRED:**
+>   the legacy per-axis CODE DELETION (`_per_axis_allowance`, `taxi_axes_ll`,
+>   `_PER_AXIS_JUNCTIONS`, `_project_to_polyline`, cT-discard, `flatten_pairs`) —
+>   `_PER_AXIS_JUNCTIONS` still gates active solver code (`solver_primitives.py:832`)
+>   + the retired `unified_jacobi` path (`elevation.py:3020-3157`); needs dead-code
+>   verification, not a byte-identical trivial delete.
+> - **P7** 🚧 docs corrected (`grade_law` docstring, `elevation_solver.md`). Default-on
+>   pending all-fixture gate-on cliff validation; note "full suite green" is gated by
+>   PRE-EXISTING failures (`test_pavement_grade` cap=0, `test_route_band_zero`) that
+>   the anisotropy IMPROVES but doesn't resolve — out of this plan's scope.
+
+
+
 **Goal:** make the within-shape grade law genuinely anisotropic — longitudinal cap
 `cL` along a taxi route, transverse cap `cT` across it — instead of the current
 isotropic shortcut where every evaluation passes `Δs⊥ = 0` and uses straight-line

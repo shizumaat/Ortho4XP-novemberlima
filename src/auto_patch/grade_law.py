@@ -21,11 +21,16 @@ the inside of a turn the edge climbs the same Δz over a shorter physical chord
 the SPINE arc length it spans, not its own chord — see
 ``docs/m4_constraint_graph_findings.md`` and the curved-junction model.
 
-Today every rule is ISOTROPIC (cL == cT, evaluated against the Euclidean chord
-with Δs⊥ = 0), which is exactly the legacy scalar ``cap·dist`` behaviour — so this
-module is byte-identical to the prior in-line logic.  The anisotropic form is the
-hook for the deliberate junction-law switch (then the readers evaluate
-``Allowance.at(Δs∥, Δs⊥)`` instead of collapsing to a scalar).
+The law emits an ``Allowance(cL, cT)`` per pair.  Under the ``O4_ANISO_EDGES``
+gate (``docs/anisotropic_edge_handling_plan.md``), ``grade_graph.shape_constraints``
+decomposes a spine / junction-body / apron-blend pair against its whole chained
+ROUTE and BAKES the anisotropic budget ``cL·Δs∥ + cT·Δs⊥`` (Δs∥ = spine arc) into
+the allowance — so a climbing CURVE earns its full arc length and stops being
+false-flagged at junctions, and A/B taxiways carry the tighter 2 % transverse cap.
+With the gate OFF the allowance is flat (``cL == cT``, Δs⊥ = 0) and reduces to the
+legacy scalar ``cap·dist`` — byte-identical to the prior in-line logic.  Either
+way every reader evaluates ``Allowance.at(Δs∥, Δs⊥)``; the BAKED allowance returns
+its precomputed budget so the solver and validator share one decomposition.
 """
 from __future__ import annotations
 
