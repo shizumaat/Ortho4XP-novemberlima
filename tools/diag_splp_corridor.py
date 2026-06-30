@@ -37,7 +37,8 @@ def near_junc(pt):
     return math.hypot(pt[0]-JUNC[0], pt[1]-JUNC[1]) < 2.0
 
 north = south = None
-for ln, name in apt_lines:
+for tcl in apt_lines:
+    ln, name = tcl.line, tcl.name
     if name != "A":
         continue
     a, b = ln.coords[0], ln.coords[-1]

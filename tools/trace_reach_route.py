@@ -83,7 +83,8 @@ def _binding_route(layout, x, y):
     from auto_patch.elevation_per_surface.solver_primitives import _build_node_list
     from auto_patch.elevation_per_surface.building_feasibility import (
         reach_band_unified, _pavement_visibility, _nearest_visible_centerline,
-        _TAXI_HALF_W_M, _APRON_CAP)
+        _TAXI_HALF_W_M)
+    from auto_patch.grade_law import APRON_MAX_GRADE as _APRON_CAP
     from auto_patch.layout import ROLE_RUNWAY
 
     nodes, b2i = _build_node_list(layout)
@@ -111,11 +112,12 @@ def _binding_route(layout, x, y):
                 return budget / d if d > 1e-9 else TAXI_MAX_GRADE
         return TAXI_MAX_GRADE
 
-    cls_named = [(ln, str(n or "?"))
-                 for (ln, n) in (getattr(layout, "apt_taxi_centerlines", None)
-                                 or [])
-                 if ln is not None and not ln.is_empty
-                 and not str(n or "").upper().startswith("SVC")]
+    cls_named = [(tcl.line, str(tcl.name or "?"))
+                 for tcl in (getattr(layout, "apt_taxi_centerlines", None)
+                             or [])
+                 if tcl.line is not None and not tcl.line.is_empty
+                 and not tcl.is_service
+                 and not str(tcl.name or "").upper().startswith("SVC")]
     cls = [ln for (ln, _n) in cls_named]
     if not cls:
         return None
@@ -295,9 +297,9 @@ def main():
                          f'{line(ring+[ring[0]])}'
                          '</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>')
     for entry in (getattr(layout, "apt_taxi_centerlines", []) or []):
-        ln, nm = entry[0], str(entry[1] or "?")
+        ln, nm = entry.line, str(entry.name or "?")
         if (ln is None or ln.is_empty or ln.distance(near) > 120
-                or nm.upper().startswith("SVC")):
+                or entry.is_service or nm.upper().startswith("SVC")):
             continue
         parts.append(f'<Placemark><name>{nm}</name><styleUrl>#cl</styleUrl>'
                      f'<LineString><coordinates>{line(list(ln.coords))}'

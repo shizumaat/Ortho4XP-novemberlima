@@ -105,7 +105,8 @@ print(f"  total apt_taxi_centerlines: {len(apt_lines)}")
 
 from shapely.geometry import Point  # noqa: E402
 
-for ln, name in apt_lines:
+for tcl in apt_lines:
+    ln, name = tcl.line, tcl.name
     if ln is None or ln.is_empty:
         continue
     # does it pass within 30m of any worst junction centroid?
@@ -117,7 +118,7 @@ for ln, name in apt_lines:
             break
     if near is None:
         continue
-    letter = (layout.apt_taxi_letters or {}).get(name, "?")
+    letter = tcl.dominant_size() or "?"
     print(f"\n  centerline name={name!r} letter={letter} length={ln.length:.1f}m "
           f"passes {near[2]:.1f}m from junction near ({near[0]:.1f},{near[1]:.1f})")
     # arc-length vs DEM profile

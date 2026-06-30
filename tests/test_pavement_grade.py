@@ -143,13 +143,12 @@ def test_pavement_grade(tmp_path, icao):
         # from the OSM.
         taxi_axes_ll = None
         if getattr(_uj, "_PER_AXIS_JUNCTIONS", False):
-            letters = getattr(layout, "apt_taxi_letters", {}) or {}
             taxi_axes_ll = []
-            for ln, name in (
-                    getattr(layout, "apt_taxi_centerlines", []) or []):
+            for tcl in (getattr(layout, "apt_taxi_centerlines", []) or []):
+                ln = tcl.line
                 if ln is None or ln.is_empty:
                     continue
-                letter = letters.get(name)
+                letter = tcl.dominant_size()
                 cL = 0.03 if letter in ("A", "B") else 0.015
                 cT = 0.02 if letter in ("A", "B") else 0.015
                 pts = [layout.m_to_ll(x, y) for (x, y) in ln.coords]

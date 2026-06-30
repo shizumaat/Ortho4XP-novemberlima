@@ -79,7 +79,8 @@ def rwy_alt_near(pt):
         d=math.hypot(pt[0]-x,pt[1]-y)
         if best is None or d<best[0]: best=(d,a)
     return best
-for ln,name in (getattr(layout,'apt_taxi_centerlines',[]) or []):
+for tcl in (getattr(layout,'apt_taxi_centerlines',[]) or []):
+    ln, name = tcl.line, tcl.name
     if name!="A" or ln is None or ln.is_empty: continue
     for end in (ln.coords[0], ln.coords[-1]):
         p=Point(end)

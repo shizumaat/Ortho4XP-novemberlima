@@ -51,7 +51,7 @@ def test_junction_with_spine_uniform_taxiway_cap():
             (0.0, 10.0), (20.0, 10.0)]   # last two ON the centerline y=10
     keys = list(range(len(ring)))
     cl = GG.Centerline(pts=[(0.0, 10.0), (20.0, 10.0)],
-                       cap=TAXI_MAX_GRADE_NARROW)
+                       seg_caps=[TAXI_MAX_GRADE_NARROW])
     s = GG.GradeShape(role="junction", ring=ring, keys=keys)
     ctx = GG.GradeContext(centerlines=[cl])
     sc = GG.shape_constraints(s, ctx)
@@ -68,7 +68,7 @@ def test_apron_with_spine_taxi_on_spine_one_percent_body():
     ring = [(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0),
             (0.0, 10.0), (20.0, 10.0)]
     keys = list(range(len(ring)))
-    cl = GG.Centerline(pts=[(0.0, 10.0), (20.0, 10.0)], cap=TAXI_MAX_GRADE)
+    cl = GG.Centerline(pts=[(0.0, 10.0), (20.0, 10.0)], seg_caps=[TAXI_MAX_GRADE])
     s = GG.GradeShape(role="apron", ring=ring, keys=keys)
     ctx = GG.GradeContext(centerlines=[cl])
     sc = GG.shape_constraints(s, ctx)

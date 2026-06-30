@@ -167,11 +167,20 @@ def main(argv=None):
     lines = list(getattr(layout, "apt_taxi_centerlines", []) or [])
     disc = list(getattr(layout, "_discovered_centerlines", []) or [])
     lines = lines + disc
+    def _ln_ref(item):
+        """(line, name) from a TaxiCenterline, a (line, name) tuple, or a bare
+        LineString — the centerline producers all emit TaxiCenterline now."""
+        ln = getattr(item, "line", None)
+        if ln is not None:
+            return ln, getattr(item, "name", "")
+        if isinstance(item, tuple):
+            return item[0], (item[1] if len(item) > 1 else "")
+        return item, ""
+
     want = args.centerline.upper()
     sel = []
     for item in lines:
-        ln = item[0] if isinstance(item, tuple) else item
-        ref = (item[1] if isinstance(item, tuple) and len(item) > 1 else "")
+        ln, ref = _ln_ref(item)
         if ln is None or ln.is_empty:
             continue
         if want in str(ref).upper() or want == "*":
@@ -179,8 +188,7 @@ def main(argv=None):
     if not sel:
         print(f"no centerline matching ref={want!r}; available refs:",
               file=sys.stderr)
-        refs = sorted({str(it[1]) for it in lines
-                       if isinstance(it, tuple) and len(it) > 1})
+        refs = sorted({str(_ln_ref(it)[1]) for it in lines})
         print("  " + ", ".join(refs), file=sys.stderr)
         return 1
 

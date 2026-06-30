@@ -70,7 +70,8 @@ print("\nCENTERLINES intersecting the junction polygon:")
 apt_lines = getattr(layout, "apt_taxi_centerlines", []) or []
 PERP = 15.0
 through = []
-for ln, name in apt_lines:
+for tcl in apt_lines:
+    ln, name = tcl.line, tcl.name
     if ln is None or ln.is_empty:
         continue
     if not s.polygon.intersects(ln):

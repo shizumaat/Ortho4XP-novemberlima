@@ -782,7 +782,7 @@ def _grade_context_from_osm(ways, nodes, ll_to_m, taxi_axes, seam_nids,
     from auto_patch import grade_graph as GG
     from auto_patch.config import TAXI_MAX_GRADE
 
-    centerlines = [GG.Centerline(pts=poly, cap=cL)
+    centerlines = [GG.Centerline(pts=poly, seg_caps=[cL] * (len(poly) - 1))
                    for (poly, cL, _cT) in (taxi_axes or []) if len(poly) >= 2]
 
     bld_keys = {nid for w in ways if w.tags.get("role") == "building"
