@@ -205,9 +205,12 @@ def _spine_runway_join_violations(layout, noise):
     from shapely.geometry import Point
     from auto_patch.layout import ROLE_RUNWAY, ROLE_RUNWAY_CROSSING
     from auto_patch.pavement.runways import _sample_runway_segment_elev
-    from auto_patch.grade_law import RUNWAY_CONTACT_M, RUNWAY_JOIN_NEAR_M
+    import os as _os
+    from auto_patch.grade_law import (
+        RUNWAY_CONTACT_M, RUNWAY_JOIN_NEAR_M, runway_join_contact)
     _CONTACT_M = RUNWAY_CONTACT_M
     _NEAR_M = RUNWAY_JOIN_NEAR_M
+    _edge_contact = _os.environ.get("O4_RUNWAY_EDGE_CONTACT", "1") == "1"
     # A runway_crossing is RUNWAY surface (a taxiway crossing ON the runway), not a
     # taxi-spine node — comparing it to a runway's profile is runway-vs-runway (the
     # runway profile's job at an intersection: the crossing sits at a compromise
@@ -255,13 +258,20 @@ def _spine_runway_join_violations(layout, noise):
             rwy = min(runways, key=lambda r: r.polygon.distance(P))
             if rwy.polygon.distance(P) > _CONTACT_M:
                 continue
-            re = _sample_runway_segment_elev(rwy, ex, ey)
+            # Contact at the runway EDGE crossing (shared law), not the interior
+            # centerline endpoint — mirrors the solver anchor exactly (lockstep).
+            if _edge_contact:
+                c = runway_join_contact(ln, (ex, ey), rwy.polygon)
+                cx, cy = c if c is not None else (ex, ey)
+            else:
+                cx, cy = ex, ey
+            re = _sample_runway_segment_elev(rwy, cx, cy)
             if re is None:
                 continue
             # nearest emitted taxiway/junction node to the contact
             best_d2, best_e = _NEAR_M * _NEAR_M, None
             for k in range(len(nx)):
-                d2 = (nx[k] - ex) ** 2 + (ny[k] - ey) ** 2
+                d2 = (nx[k] - cx) ** 2 + (ny[k] - cy) ** 2
                 if d2 < best_d2:
                     best_d2, best_e = d2, ne[k]
             if best_e is None:
@@ -272,7 +282,7 @@ def _spine_runway_join_violations(layout, noise):
             de = abs(re - best_e)
             if de > cap * d + noise:
                 out.append(((de / d) * 100.0, cap * 100.0, d, "runway_join",
-                            True, ex, ey))
+                            True, cx, cy))
     return out
 
 

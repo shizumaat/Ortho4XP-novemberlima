@@ -60,6 +60,43 @@ RUNWAY_CONTACT_M = 12.0
 RUNWAY_JOIN_NEAR_M = 18.0
 
 
+def runway_join_contact(ln, endpoint, rwy_polygon):
+    """THE runway-join contact point for a taxi centerline endpoint (single source
+    for ``grade_graph._runway_anchors`` AND the validator's runway-join check, so
+    the solver anchors exactly the node the validator checks).
+
+    Returns the ``(x, y)`` where the taxiway↔runway CONTACT node sits, or ``None``
+    when ``endpoint`` is not within ``RUNWAY_CONTACT_M`` of the runway.
+
+    A taxi route connects to the runway CENTERLINE, so when the endpoint lies
+    INSIDE the runway the real contact is where the centerline crosses the runway
+    EDGE — that is where the emitted taxi/junction/runway node is welded, and it
+    is what ``RUNWAY_JOIN_NEAR_M`` must reach.  On a WIDE runway the centerline is
+    ~half the width from the edge (HECA shoulder-widened to 86 m ⇒ ~43 m ≫ the
+    18 m join radius), so anchoring at the deep-interior endpoint finds no emitted
+    node and the join is silently missed → the taxiway grades to DEM off the runway
+    (a big drop at F→05R, T5→05C).  Using the edge crossing fixes both.  For an
+    endpoint at/outside the edge the endpoint is already the contact."""
+    from shapely.geometry import Point
+    P = Point(endpoint)
+    if rwy_polygon.distance(P) > RUNWAY_CONTACT_M:
+        return None
+    if not rwy_polygon.covers(P):
+        return (endpoint[0], endpoint[1])
+    try:
+        xing = ln.intersection(rwy_polygon.boundary)
+    except Exception:
+        return (endpoint[0], endpoint[1])
+    pts = ([xing] if getattr(xing, "geom_type", "") == "Point"
+           else [g for g in getattr(xing, "geoms", [])
+                 if g.geom_type == "Point"])
+    if not pts:
+        return (endpoint[0], endpoint[1])
+    ex, ey = endpoint
+    best = min(pts, key=lambda p: (p.x - ex) ** 2 + (p.y - ey) ** 2)
+    return (best.x, best.y)
+
+
 def building_requires_full_frontage(area_m2: float) -> bool:
     """THE canonical building-size reach rule (single source for seater AND
     checker).  A building at/above ``BUILDING_FULL_FRONTAGE_AREA_M2`` must have

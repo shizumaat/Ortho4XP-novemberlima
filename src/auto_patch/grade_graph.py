@@ -1172,6 +1172,8 @@ def _runway_anchors(layout, G, bucket_to_idx):
     _NEAR_M = GL.RUNWAY_JOIN_NEAR_M
     _spine_edge_anchor = (
         os.environ.get("O4_RUNWAY_CONTACT_ANCHOR", "1") == "1")
+    _edge_contact = (
+        os.environ.get("O4_RUNWAY_EDGE_CONTACT", "1") == "1")
     runways = [s for s in layout.shapes
                if s.role == ROLE_RUNWAY and s.polygon is not None
                and not s.polygon.is_empty]
@@ -1209,14 +1211,24 @@ def _runway_anchors(layout, G, bucket_to_idx):
             rwy = min(runways, key=lambda r: r.polygon.distance(P))
             if rwy.polygon.distance(P) > _CONTACT_M:
                 continue
-            re = _sample_runway_segment_elev(rwy, ex, ey)
+            # The contact NODE sits where the centerline meets the runway EDGE, not
+            # at the deep-interior centerline endpoint (a taxi route joins the
+            # runway CENTERLINE, ~half-width inside on a wide runway).  Resolve it
+            # through the shared law so the nearest-node search reaches the emitted
+            # taxiway↔runway node.  O4_RUNWAY_EDGE_CONTACT=0 reverts to the endpoint.
+            if _edge_contact:
+                c = GL.runway_join_contact(ln, (ex, ey), rwy.polygon)
+                cx, cy = c if c is not None else (ex, ey)
+            else:
+                cx, cy = ex, ey
+            re = _sample_runway_segment_elev(rwy, cx, cy)
             if re is None:
                 continue
-            contact_endpoints.append((ex, ey))
+            contact_endpoints.append((cx, cy))
             # nearest graph node to the contact = the spine node that anchors
             best_i, best_d2 = None, _NEAR_M * _NEAR_M
             for (i, (x, y)) in nx:
-                d2 = (x - ex) ** 2 + (y - ey) ** 2
+                d2 = (x - cx) ** 2 + (y - cy) ** 2
                 if d2 < best_d2:
                     best_d2, best_i = d2, i
             if best_i is not None:
