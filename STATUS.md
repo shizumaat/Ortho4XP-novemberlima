@@ -1,87 +1,105 @@
-# STATUS — handover (2026-06-30) — ANISOTROPIC EDGES default-ON, clearance pockets, legacy retired
+# STATUS — handover (2026-07-01) — HECA F→05R FIXED; **T5→05C spine still OPEN**
 
-> All three work-streams below are **committed on `dev`** and the tree is clean.
-> The anisotropic within-shape grade law is now the **default** build behaviour.
-> What's left is solver-quality polish + pre-existing suite reds — NOT new feature
-> work. Read `docs/anisotropic_edge_handling_plan.md` (marked DONE) for the model.
+> Everything below is **committed on `dev`** and the tree is clean. The one open
+> engineering item is **T5→05C: the taxiway-T5 spine does not reach runway 05C in
+> the sim** (user-confirmed in X-Plane). F→05R is FIXED (edge-contact anchor).
+> ⚠ Ortho4XP caches `auto_patch.*` — after any commit you must **restart Ortho4XP**,
+> not just rebuild the tile, or it runs stale modules (this masked the F fix for a while).
 
-Build/verify (no system python): `PYTHONHASHSEED=0 venv/bin/python …`; single build
-`build_airport_pavement("CYXY", xplane_root())` (~60–90 s). Suite
-`venv/bin/python -m pytest tests/ -q` (~7 min). Fixtures: CYXY, SPJC, SPLP, HECA.
+Build/verify (no system python): `venv/bin/python`. Single build
+`build_airport_pavement("HECA", xplane_root(), compute_elevations=True, tile_dem=<dem>,
+current_tile_lat=30, current_tile_lon=31)` (~2 min). Suite
+`venv/bin/python -m pytest tests/ -q` (~4–7 min). Fixtures: CYXY, SPJC, SPLP, HECA.
 ⚠ shapeIDs are build-specific — identify shapes by **ref/coord**, not index.
+
+**Fast iteration (learned the hard way this session):**
+- DEM load+smooth is only ~1 s — NOT the bottleneck. A build is ~2 min (solver+geometry).
+  Cache the smoothed DEM once (`elevation._load_airport_dem(30.5,31.5)` → pickle) and pass
+  `tile_dem=dem` to skip the reload.
+- `compute_elevations=False` (~44 s) SKIPS Phase 2 — so it also **skips the junction-spine
+  slice**; use it only for pre-slice geometry (centerline/node positions), never spine work.
+- Run gate A/B builds as TWO parallel background commands (~2 min wall, not 4).
+- ⚠ Geometric probes were repeatedly MISLEADING here (measured adjacent shapes / wrong
+  junctions → a long wrong diagnosis). Cross-check the emitted ride profile and the sim.
+
+---
+## 🔴 OPEN — T5→05C taxiway spine does not reach the runway (HECA)
+
+**Symptom (user, in X-Plane):** T5 (a diagonal taxiway curving into runway 05C) — its
+spine/grade does not properly reach the runway. F→05R had the same complaint and is now
+FIXED by `5ca42e7`; **T5 is not.** Both curve at the runway.
+
+**What geometric probes show on HEAD (take with salt — see warning above):** T5 DOES appear
+to form spine boundaries — 5 emitted junctions have T5 vertices ON their ring (two corridor
+pieces with 14/15 verts), T5's runway-edge crossing at local `(-1260, 991)` has an airside
+node 4.6 m away (within the 18 m anchor radius). So it is NOT the "no node on the runway
+edge" story. **Prime suspect:** an adjacent junction near T5 has a **5.6 m elevation span**
+(vs ~1.5–2 m on the clean F/T5 corridors) — likely the visible cliff.
+
+**Concrete next step:** build HECA (cached DEM), get the T5 union
+(`[c.line for c in layout.apt_taxi_centerlines if c.name=="T5" and not c.is_service]`),
+dump every junction within ~5 m of it — `node_altitudes` span, which routes bound each,
+and the emitted elevation profile ALONG T5 from the runway edge inward (mirror what was
+done for F: it graded smooth 136.6→138.7 @ 1.1–1.6%). Find where T5's profile jumps.
+
+**Ruled out this session (do NOT re-chase):**
+- NOT the runway anchor missing (contacts resolve; F's fix `5ca42e7` = edge-crossing contact).
+- NOT clutter / `near_hard` (user confirmed area not cluttered; trace: both cut ends SOFT).
+- NOT "no node on the runway edge" (already 0.01 m at F's crossing, 4.6 m at T5's).
+- NOT the runway-crossing rect drop; NOT splitting the route at the runway edge
+  (implemented → **−5 within, a no-op**; the slice already reaches the edge via `_on_pav`).
+- The junction-spine slice DOES split along curved crossings (cut-line trace: the interior
+  bend-piece connects the runway-edge cut to the opposite-boundary cut → 6 faces). The long
+  "dangling cut → no split" theory was WRONG.
+
+Files: `junction_spine.py` (slice / `_partition_junction`), `grade_graph.py`
+(`_spine_membership`, `_runway_anchors`), `grade_law.runway_join_contact` (the F fix).
+Memory: `curved_runway_crossing_spine.md`, `runway_join_edge_contact.md`.
+
+---
+## 🟡 DEFERRED quality lever (real, not tied to T5)
+
+Slicing junctions along the **chained route** (`junction_spine._full_centerlines` →
+continuous `route_line` / `linemerge(pieces)` instead of bend-split pieces) cut HECA
+within-shape violations **4144 → 3479 (−16%)** — curved crossings grade sub-optimally in
+many junctions network-wide. BUT it breaks per-junction invariants
+(`test_junction_vertices_have_source`, `test_junction_neighbour_corners_shared` on
+CYXY/SPLP/SPJC): a cut spanning junction A→B conflicts with the per-junction slice model.
+Needs a per-junction-LOCAL formulation (or fix the A/B-boundary corner sharing) to capture
+the win safely. Gate idea `O4_SLICE_CHAINED_ROUTE`.
 
 ---
 ## ✅ SHIPPED THIS SESSION (committed on `dev`, newest first)
 
-- `69c087e` **cleanup: retire `O4_SINGLE_GRADE_GRAPH` + per-axis legacy.**
-  `unified_jacobi.py` was already gone; this deletes the dead `=0` path + the
-  per-axis machinery it gated (`_PER_AXIS_JUNCTIONS`, `_per_axis_allowance`,
-  `_project_to_polyline`, `_collect_junction_axes`, `_smooth_junction_ring_curvature`,
-  cap-debulge, the old per-axis WARN audit). −645 lines, 9 files. **CYXY
-  BYTE-IDENTICAL** under default. `solver_primitives._build_shape_constraints` now
-  always takes the shared `_grade_graph_edges` branch; the legacy
-  `_visible_grade_edges` arm is BUILDING-only. `taxi_axes_ll` kept = check_grade's
-  CENTERLINE source. (A subagent did the solver-side deletes but missed the
-  pipeline.py dangling ripple caller → its byte-identity loop never converged; I
-  took over and finished.)
-- `8d53837` **clearance: ring enclosed wingtip POCKETS (Pass A2).** A taxi network
-  can fully enclose a small non-pavement pocket (a HOLE in the airside union);
-  centerline-perpendicular Pass A misses its oblique far edges so sharp terrain
-  slipped through (CYXY jct134/148 throat, 9 m rise). Pass A2 rings the full
-  perimeter of every hole that is a true wingtip pocket (`hole.buffer(-reach)`
-  core ≈ empty → excludes the giant infield). Edge-alt = NEAREST shape's
-  `_edge_interp_alt` (the union hole boundary falls in hairline inter-shape gaps
-  that `_pav_alt` containment misses). Gate `O4_POCKET_CLEARANCE` (default on).
-- `5d2e66d` **aniso-edges P7: `O4_ANISO_EDGES` default ON** (user-approved). Plus
-  P0–P6 (`e463b02 bfeb099 0e6a3f0 38ccf36 541c70a 3124a2a c80cd1b`): route chaining
-  → `ds_decompose` → cT table → anisotropy BAKED into the per-edge `Allowance` in
-  `grade_graph.shape_constraints` (0 site edits; all consumers get it via their
-  existing `cap.at(d,0)`) → reach-band agreement → audit oracle → standalone
-  check_grade wired with chained routes → default-on. Lockstep test
-  `test_solver_validator_same_edge_budgets` green.
+- `5ca42e7` **grade: anchor taxi↔runway joins at the runway EDGE** (default-on,
+  `O4_RUNWAY_EDGE_CONTACT`). A taxi route joins at the runway CENTERLINE, so on a wide
+  (shoulder-widened 86 m) runway its endpoint is ~43 m inside — beyond the 18/30 m anchor
+  radius, so the join was never anchored/checked → junction grades to DEM. Shared law
+  `grade_law.runway_join_contact` resolves the contact to the runway EDGE crossing; solver
+  anchor + validator both use it (lockstep). HECA within 4351→4152; **FIXED F→05R.**
+- `44b5688` + `e337000` **junction within-shape grade = spine + triangle-mesh edges**
+  (default-on, `O4_JUNCTION_MESH_CONSTRAINTS`). Body CHORDS (81–97% of the count, phantom)
+  retired from solver+validator; APRON visibility-geodesic kept. HECA within 6950→4351,
+  junction −64%, solve −37%. Lockstep via shared `shape_constraints`.
+- `527c4be` **rects: short taxi rects (<100 m) stay junction** (default-on,
+  `O4_MIN_RECT_LENGTH_M=100`) so the spine curves through tight climbing turns smoothly.
+  Within-pair count regresses (junction fill = many facets); that metric scores facets, not
+  the ride — visual in-sim is the judge.
+- `3b93fef` **painted centerlines return `TaxiCenterline`, not legacy `(line,ref)` tuples.**
+  Root cause of a tile emitting only ONE airport's patch: `painted_taxi_centerlines`
+  (airports with no apt.dat taxi network, e.g. HEAZ) still returned tuples post-connectivity-
+  refactor → `AttributeError` in `densify_junction_edges` → HEAZ build crashed.
+- `f6eec8c` **driver: contain per-airport build failures.** Now catches broad `Exception`
+  per-airport with traceback to the tile's `auto_patch_verify_debug.log`; one bad airport
+  never aborts the tile or vanishes as a parallel "worker died hard".
 
-## The anisotropic law in one paragraph (for the new session)
-A spine / junction-body / apron-blend pair's grade budget is `cL·Δs∥ + cT·Δs⊥`
-decomposed against the pair's whole chained ROUTE (`grade_graph.ds_decompose`;
-Δs∥ = spine arc). It is computed ONCE in `shape_constraints` and BAKED into the
-`Allowance` (`grade_law.Allowance.baked`), so the solver, the in-build validator
-(`within_violations`), the standalone `check_grade`, and the feasibility audit all
-share one decomposition (proven by the lockstep test). `O4_ANISO_EDGES=0` reverts
-to the isotropic `cap·dist` law, byte-identical to pre-feature.
+(Earlier this session, also committed: parallel per-airport builds default-on
+`2729650`/`9861f6a`, worker progress→main window `f314ea7`, solver byte-ident −26% `667a514`,
+solver/validator canonical identity `20265a7`, grade-audit gating + small-apron anchor
+`6aab784`, xdist grouping fixes `281ef9e`/`de9a911`.)
 
----
-## ⚠ OUTSTANDING (follow-ups, NOT plan work)
-
-1. **Residual solver-miss cliffs from default-on.** Default-on is a net win on
-   every fixture (within-shape viols + total >8% cliffs DOWN; audit **0
-   fundamental**), but the solver redistributes under the more-correct L1 law and
-   leaves a FEW new >8% cliffs — **HECA `(-2522,1936)` apron 6.3%→15.8%**, **SPJC
-   `(1629,-268)` jct 3.5%→8.3%**, **CYXY `(-325,-429)` jct 7.8%→8.6%**. These are
-   solver MISSES (audit says feasible), not law errors — drive them down with
-   solver work, not by loosening the law. Measure with
-   `grade_graph_validate.within_violations` filtered to >8%; the anisotropic L1
-   budget (`cL·Δalong+cT·Δacross`) is the CORRECT max-Δz on a tilted plane.
-2. **Pocket-clearance partial coverage.** The user's pocket is fixed, but a few
-   OTHER pockets with high terrain still get no cut — `_build_graded_strips` needs
-   ≥2 consecutive obstructed stations, so isolated/central obstructions slip (e.g.
-   CYXY hole area 2050 @`(-124,-280)`, 9.6 m rise, strips=0). Consider clipping
-   high terrain to the whole pocket vs per-edge perpendicular strips.
-3. **`O4_POCKET_CLEARANCE` reach** uses the nearest-centerline code letter per
-   pocket (over-reaches a code-B pocket bordered near a wider route; clipped to
-   non-pavement so harmless, but per-edge reach would be cleaner).
-
-## Pre-existing reds (predate this work — NOT regressions)
-`pytest tests/ -q` ≈ 22 failed (gate-on AND gate-off the same set, modulo counts):
-`test_apron_with_spine_taxi_on_spine_one_percent_body` (apron body-cap 0.01→0.0133
-re-baseline owed), `test_pavement_grade[*]` (cap=0, the solver-miss cliffs above),
-`test_route_band_zero`, and the connectivity-refactor geometry-baseline shifts
-(`test_junction_invariants`, `test_pavement_geometry::test_pavement_rests_on_source`,
-`test_compare_target`). Anisotropy IMPROVES their numbers but can't zero them; they
-need their own re-baseline pass. The acceptance gate
-`test_single_graph_acceptance.py` (spine=0, lockstep, anti-gaming) is GREEN.
-
-## Optional / not done (deliberate)
-- `crosses_spine_fn` cross-crotch skip kept (plan P6 said drop only "if proven
-  safe" — the nearest-route model makes it redundant but it was left in).
-- The single true X junction (#154) 4-cell behaviour not separately eyeballed (the
-  nearest-route Voronoi model + clean audit covered it implicitly).
+## Pre-existing suite reds (baseline, NOT from this session)
+`test_pavement_grade` (universal-zero, RED by design until the solver drives misses to 0),
+`test_junction_boundary_near_centerline[CYXY]`, `test_apron_..._one_percent_body` (stale
+flat-1% assert vs blend 0.0133 — chip spawned), `route_band` XFAILs. Confirm any "new" red
+is truly new by stashing the change and re-running on HEAD.
