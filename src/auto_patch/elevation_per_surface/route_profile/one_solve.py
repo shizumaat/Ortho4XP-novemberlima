@@ -29,6 +29,15 @@ import os as _os
 
 _INF = float("inf")
 
+# EXPERIMENTAL (user 2026-06-30): vectorise feasibility_project's Gauss-Seidel
+# projection with numpy.  This converts it to a DEGREE-NORMALISED JACOBI sweep
+# (all edges updated from the same snapshot each iteration, per-node corrections
+# averaged for stability) — ~orders faster per iteration, but a DIFFERENT (still
+# grade-compliant) feasible surface, so NOT byte-identical.  Default OFF; the
+# scalar path stays the byte-identical default until this is validated (elevation
+# delta small, residual violations equivalent-or-better) and re-baselined.
+_FP_VECTORIZE = _os.environ.get("O4_FP_VECTORIZE", "0") == "1"
+
 
 def _build_adjacency(shape_constraints, n):
     """``adj[i] = [(j, budget), ...]`` where ``budget = cap·length`` (the max
@@ -43,6 +52,45 @@ def _build_adjacency(shape_constraints, n):
             adj.setdefault(i, []).append((j, lim))
             adj.setdefault(j, []).append((i, lim))
     return adj
+
+
+def _project_vectorized(elev, iter_edges, n, max_iters, tol):
+    """Vectorised DEGREE-NORMALISED JACOBI variant of the feasibility projection
+    (gated by ``_FP_VECTORIZE``).  Mutates ``elev`` (a list) in place.
+
+    Every iteration updates ALL nodes from the same snapshot (Jacobi, not
+    Gauss-Seidel), so it vectorises with numpy — but a node touched by many
+    over-cap edges would OVERSHOOT if the corrections were summed, so each node's
+    correction is AVERAGED over its active edges (``acc / cnt``).  A hard
+    endpoint's weight (``wi``/``wj``) is 0 on every edge it touches, so hard nodes
+    never move — same invariant as the scalar path.  Converges to a DIFFERENT
+    (still ≤cap) feasible surface than Gauss-Seidel, hence not byte-identical."""
+    import numpy as np
+    m = len(iter_edges)
+    I = np.fromiter((e[0] for e in iter_edges), dtype=np.intp, count=m)
+    J = np.fromiter((e[1] for e in iter_edges), dtype=np.intp, count=m)
+    B = np.fromiter((e[2] for e in iter_edges), dtype=np.float64, count=m)
+    K = np.fromiter((e[3] for e in iter_edges), dtype=np.int8, count=m)
+    wi = np.where(K == 0, 0.5, np.where(K == 2, 1.0, 0.0))   # i's share of the fix
+    wj = np.where(K == 0, 0.5, np.where(K == 1, 1.0, 0.0))   # j's share
+    z = np.asarray(elev, dtype=np.float64)
+    for _it in range(max_iters):
+        d = z[I] - z[J]
+        over = np.abs(d) - B
+        active = over > tol
+        if not active.any():
+            break
+        # signed excess per ACTIVE edge (0 elsewhere) — scatter-add to endpoints
+        # via bincount (true C scatter, far faster than np.add.at).
+        se = np.where(active, np.sign(d) * over, 0.0)
+        acc = (np.bincount(I, weights=-se * wi, minlength=n)
+               + np.bincount(J, weights=se * wj, minlength=n))
+        af = active.astype(np.float64)
+        cnt = (np.bincount(I, weights=af, minlength=n)
+               + np.bincount(J, weights=af, minlength=n))
+        nz = cnt > 0.0
+        z[nz] += acc[nz] / cnt[nz]                          # degree-normalised step
+    elev[:] = z.tolist()
 
 
 def feasibility_project(elev, shape_constraints, hard, *,
@@ -131,26 +179,29 @@ def feasibility_project(elev, shape_constraints, hard, *,
             continue
         iter_edges.append((i, j, budget, 1 if hi else (2 if hj else 0)))
 
-    for _it in range(max_iters):
-        worst = 0.0
-        for (i, j, budget, kind) in iter_edges:
-            d = elev[i] - elev[j]
-            ad = -d if d < 0.0 else d                     # inline abs() (hot path)
-            if ad <= budget + tol:
-                continue
-            ex = ad - budget
-            s = 1.0 if d > 0 else -1.0
-            if kind == 0:
-                elev[i] -= s * ex * 0.5
-                elev[j] += s * ex * 0.5
-            elif kind == 1:
-                elev[j] += s * ex                         # i fixed → move j up to i
-            else:
-                elev[i] -= s * ex                         # j fixed → move i
-            if ex > worst:
-                worst = ex
-        if worst < tol:
-            break
+    if _FP_VECTORIZE and iter_edges:
+        _project_vectorized(elev, iter_edges, n, max_iters, tol)
+    else:
+        for _it in range(max_iters):
+            worst = 0.0
+            for (i, j, budget, kind) in iter_edges:
+                d = elev[i] - elev[j]
+                ad = -d if d < 0.0 else d                  # inline abs() (hot path)
+                if ad <= budget + tol:
+                    continue
+                ex = ad - budget
+                s = 1.0 if d > 0 else -1.0
+                if kind == 0:
+                    elev[i] -= s * ex * 0.5
+                    elev[j] += s * ex * 0.5
+                elif kind == 1:
+                    elev[j] += s * ex                      # i fixed → move j up to i
+                else:
+                    elev[i] -= s * ex                      # j fixed → move i
+                if ex > worst:
+                    worst = ex
+            if worst < tol:
+                break
     # final tally
     rem = bh = 0
     for (i, j, budget) in edges:
