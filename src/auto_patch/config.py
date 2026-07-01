@@ -836,9 +836,10 @@ REPORT_GRADE_AUDIT = _os.environ.get("O4_REPORT_GRADE_AUDIT", "0") == "1"
 # them cuts a many-airport tile from the SUM of build times toward ~the MAX.
 # The tile DEM + already-extracted tile-level OSM data are shared to workers;
 # each worker does its own cheap (~1s) per-airport OSM / apt.dat / DSF loads.
-# Default OFF until validated in a real Ortho4XP tile build; serial path is
-# unchanged.
-PARALLEL_AIRPORTS = _os.environ.get("O4_PARALLEL_AIRPORTS", "0") == "1"
+# Default ON (2026-06-30) for real-tile testing; the mechanism is validated
+# BYTE-IDENTICAL to serial. Set O4_PARALLEL_AIRPORTS=0 to force the serial path
+# (e.g. for debugging, or on a RAM-constrained machine — see the worker cap).
+PARALLEL_AIRPORTS = _os.environ.get("O4_PARALLEL_AIRPORTS", "1") == "1"
 
 
 def parallel_airports_worker_count(n_tasks: int) -> int:
