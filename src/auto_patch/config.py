@@ -1178,6 +1178,17 @@ JUNCTION_CENTERLINE_SPINE = _os.environ.get("O4_JCT_SPINE", "1") == "1"
 # inside a junction.
 SPINE_STEP_M = float(_os.environ.get("O4_JCT_SPINE_STEP_M", "12.0"))
 
+# (20260701) CURVE-NATIVE SPINE v2 — docs/curve_native_spine_v2_plan.md.
+# Instead of manufacturing straight taxi rects and slicing junctions/aprons
+# out of the residue, CUT the real ``pav_union`` (which already follows every
+# true curve, fillet and width change) by the RECOGNIZED curved centerlines in
+# ONE global polygonize arrangement.  Each face is a grading cell carrying a
+# spine edge; conformance is 0/0 by construction (one re-noded arrangement →
+# faces share exact edges, no T-junction repair, no sliver/residue cleanup).
+# Requires O4_RECOGNIZED_CENTERLINES for a curved spine to cut with.  Default
+# OFF; gate-OFF byte-identical to the rect pipeline.  Env O4_CURVE_NATIVE_SPINE.
+CURVE_NATIVE_SPINE = _os.environ.get("O4_CURVE_NATIVE_SPINE", "0") == "1"
+
 # (20260620) SPINE PIECE ROLE RE-EVALUATION — apron-spine grade model.
 # ``_reclassify_apron_junctions`` (junction_repair) runs BEFORE the spine
 # slice and demotes a WIDE pavement blob (boundary > 55 m from any
