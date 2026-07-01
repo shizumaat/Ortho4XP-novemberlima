@@ -57,10 +57,19 @@ __all__ = [
 ]
 
 
+@functools.lru_cache(maxsize=32)
 def _load_osm_tile(path: str) -> tuple[dict[str, tuple[float, float]],
                                        list[tuple[str, list[str], dict[str, str]]],
                                        list[tuple[str, list[str], dict[str, str]]]]:
     """Parse an Ortho4XP-cached OSM tile (.osm.bz2 or .osm).
+
+    Cached by PATH (``maxsize=32`` covers a tile's 3×3 neighbourhood across the
+    airport / big_roads / small_roads layers).  ``_load_osm_road_layer`` /
+    ``_load_osm_airports`` are keyed on the AIRPORT COORD, so without this each
+    airport in a tile re-parsed the same (up to 50 MB, dense-area) bz2 files —
+    N× per tile serially, and once per worker in the parallel build.  Callers
+    build NEW namespace-prefixed node/way structures from the return, so the
+    cached objects are never mutated (READ-ONLY contract).
 
     Delegates to ``O4_OSM_Utils.OSM_layer.update_dicosm`` for the
     actual XML parsing (handles bz2 + plain, encoding edge cases,

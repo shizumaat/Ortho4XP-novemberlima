@@ -831,6 +831,32 @@ BUILD_PROGRESS = _os.environ.get("O4_BUILD_PROGRESS", "1") == "1"
 # lines for debugging.  Output-only — the emitted patch is identical regardless.
 REPORT_GRADE_AUDIT = _os.environ.get("O4_REPORT_GRADE_AUDIT", "0") == "1"
 
+# Parallel per-airport builds within a tile (driver.generate_auto_patches).
+# Each airport's build is independent (its own OSM patch), so a ProcessPool over
+# them cuts a many-airport tile from the SUM of build times toward ~the MAX.
+# The tile DEM + already-extracted tile-level OSM data are shared to workers;
+# each worker does its own cheap (~1s) per-airport OSM / apt.dat / DSF loads.
+# Default OFF until validated in a real Ortho4XP tile build; serial path is
+# unchanged.
+PARALLEL_AIRPORTS = _os.environ.get("O4_PARALLEL_AIRPORTS", "0") == "1"
+
+
+def parallel_airports_worker_count(n_tasks: int) -> int:
+    """Worker count for the per-airport build pool: ``min(tasks, all cores)``.
+
+    The builds are independent and CPU-bound (the elevation solve), and the main
+    process just waits on the pool, so use ALL logical cores by default — the
+    real limiter is usually the airport count (few per tile).  Memory-constrained
+    machines can cap it with ``O4_PARALLEL_AIRPORTS_N`` (each worker holds the
+    tile DEM + its OSM + build peak, so a many-airport dense tile can be RAM-heavy)."""
+    import os as _o
+    env = _os.environ.get("O4_PARALLEL_AIRPORTS_N")
+    if env and env.isdigit() and int(env) > 0:
+        cap = int(env)
+    else:
+        cap = _o.cpu_count() or 1
+    return max(1, min(n_tasks, cap))
+
 # APRON↔TAXI GRADE BLEND (user 2026-06-25).  A taxi route runs THROUGH aprons, so
 # the apron cannot be a flat 1 % everywhere: as it approaches a taxi centerline it
 # must blend toward that route's (steeper) per-letter cap to make the transition.

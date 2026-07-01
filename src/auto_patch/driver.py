@@ -159,6 +159,152 @@ def _auto_patch_is_current(auto_patch_file: str, xp_root: str,
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Per-airport build worker (shared by the serial and parallel paths)
+# ──────────────────────────────────────────────────────────────────────────────
+# The tile DEM is the ONE big shared input across a tile's airports.  In the
+# parallel path it is set once per worker by the ProcessPool initializer; in the
+# serial path the driver sets it once in-process.  Keeping it out of the per-task
+# payload avoids re-pickling ~50 MB for every airport.
+_WORKER_DEM = None
+
+
+def _set_worker_dem(dem) -> None:
+    global _WORKER_DEM
+    _WORKER_DEM = dem
+
+
+def _build_write_verify_one(task: dict) -> dict:
+    """Build ONE airport, write its ``*_auto.patch.osm``, and verify it.
+
+    A top-level (picklable) worker for the per-airport ProcessPool AND the serial
+    path, so both run identical logic.  Reads the shared tile DEM from the module
+    global ``_WORKER_DEM``.  Returns a status dict — the MAIN process does all
+    console logging so parallel workers never interleave output.  ``task`` keys:
+    icao, xp_root, taxiway_data, boundary, tile_lat, tile_lon, auto_patch_file,
+    verify_log_path.
+    """
+    import time as _time
+    from collections import Counter as _Counter
+    icao = task["icao"]
+    t_apt = _time.time()
+    try:
+        from .pipeline import build_airport_pavement
+        layout = build_airport_pavement(
+            icao, task["xp_root"],
+            taxiway_data=task["taxiway_data"],
+            tile_dem=_WORKER_DEM,
+            airport_boundary=task["boundary"],
+            current_tile_lat=task["tile_lat"],
+            current_tile_lon=task["tile_lon"],
+        )
+    except _DRIVER_EXC as _e:
+        return {"icao": icao, "ok": False, "stage": "build", "error": str(_e)}
+    try:
+        _pd = os.path.dirname(task["auto_patch_file"])
+        if _pd and not os.path.exists(_pd):
+            os.makedirs(_pd)
+        layout.to_osm(task["auto_patch_file"])
+    except _DRIVER_EXC as _e:
+        return {"icao": icao, "ok": False, "stage": "write", "error": str(_e),
+                "auto_patch_file": task["auto_patch_file"]}
+    counts = _Counter(s.role for s in layout.shapes)
+    summary = " + ".join("{} {}".format(n, r) for r, n in
+                         sorted(counts.items(), key=lambda x: -x[1]))
+    build_s = _time.time() - t_apt
+    # Verify to a PER-AIRPORT log part (the main process concatenates them in
+    # order) so parallel workers don't race on the shared verify debug log.
+    t_v = _time.time()
+    verify_err = None
+    try:
+        from .verification import verify_and_log
+        verify_and_log(layout, icao, debug_log_path=task["verify_log_path"])
+    except _DRIVER_EXC as _ve:
+        verify_err = str(_ve)
+    return {"icao": icao, "ok": True, "summary": summary, "build_s": build_s,
+            "verify_s": _time.time() - t_v, "verify_err": verify_err,
+            "verify_log_path": task["verify_log_path"]}
+
+
+def _run_build_tasks(tasks: list, tile, auto_patched: list,
+                     verify_debug_path: str) -> None:
+    """Run the collected per-airport build tasks — in parallel across airports
+    when ``O4_PARALLEL_AIRPORTS`` is set and there is more than one, otherwise
+    serially (behaviourally identical to the old inline loop).  All console
+    logging + the verify-log concatenation happen HERE (main process) so
+    parallel workers never race or interleave.  Appends built ICAOs to
+    ``auto_patched`` in task order for stable output."""
+    if not tasks:
+        return
+    from . import config as _cfg
+    dem = getattr(tile, "dem", None)
+    # Truncate the shared verify debug log once per build pass.
+    try:
+        open(verify_debug_path, "w").close()
+    except OSError:
+        pass
+    _set_worker_dem(dem)            # the serial path reads this module global too
+
+    results: list[dict] = []
+    if _cfg.PARALLEL_AIRPORTS and len(tasks) > 1:
+        import concurrent.futures as _cf
+        import multiprocessing as _mp
+        n = _cfg.parallel_airports_worker_count(len(tasks))
+        UI.lvprint(0, "   Auto-patch: building", len(tasks),
+                   "airports in parallel across", n, "workers.")
+        try:
+            ctx = _mp.get_context("spawn")
+            with _cf.ProcessPoolExecutor(
+                    max_workers=n, mp_context=ctx,
+                    initializer=_set_worker_dem, initargs=(dem,)) as ex:
+                futs = [ex.submit(_build_write_verify_one, t) for t in tasks]
+                for fut in _cf.as_completed(futs):
+                    try:
+                        results.append(fut.result())
+                    except Exception as _e:             # a worker died hard
+                        results.append({"icao": None, "ok": False,
+                                        "stage": "worker", "error": str(_e)})
+        except Exception as _e:      # pool setup failed → serial fallback
+            UI.lvprint(0, "   Auto-patch: parallel build unavailable (",
+                       str(_e), ") — falling back to serial.")
+            results = [_build_write_verify_one(t) for t in tasks]
+    else:
+        results = [_build_write_verify_one(t) for t in tasks]
+
+    # Process results in TASK order (stable logs / auto_patched ordering).
+    by_icao = {r.get("icao"): r for r in results if r.get("icao")}
+    for t in tasks:
+        r = by_icao.get(t["icao"]) or {"icao": t["icao"], "ok": False,
+                                       "stage": "missing", "error": "no result"}
+        icao = t["icao"]
+        if not r.get("ok"):
+            stage = r.get("stage", "?")
+            if stage == "write":
+                UI.lvprint(0, "   Auto-patch: Failed to write",
+                           t["auto_patch_file"], ":", r.get("error"))
+            else:
+                UI.lvprint(0, "   Auto-patch: Pavement builder failed for",
+                           icao, "(", stage, "):", r.get("error"))
+            continue
+        UI.vprint(1, "   Auto-patch: Generated", icao,
+                  "(" + r["summary"] + ")")
+        auto_patched.append(icao)
+        if r.get("verify_err"):
+            UI.lvprint(0, "   Auto-patch: verification error for", icao,
+                       ":", r["verify_err"])
+        # Concatenate this airport's verify-log part into the shared log.
+        part = r.get("verify_log_path")
+        if part and os.path.exists(part):
+            try:
+                with open(part) as _pf, open(verify_debug_path, "a") as _lf:
+                    _lf.write(_pf.read())
+                os.remove(part)
+            except OSError:
+                pass
+        UI.lvprint(0, "   Auto-patch:", icao,
+                   f"took {r['build_s']:.1f}s (verify {r['verify_s']:.1f}s)")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Main Entry Point
 # ──────────────────────────────────────────────────────────────────────────────
 def generate_auto_patches(tile, cifp_path: str,
@@ -240,12 +386,12 @@ def generate_auto_patches(tile, cifp_path: str,
     cifp_airports = discover_cifp_airports(cifp_path)
     auto_patched: list[str] = []
     reused: list[str] = []
+    tasks: list[dict] = []          # per-airport build tasks, executed post-loop
 
     # Apply the auto-patch log-verbosity knob for the build (restored
     # after the loop).  Build-time verification still runs at every
     # level — only the chatter volume changes.
     from . import config as _cfg
-    from .verification import verify_and_log
     _saved_verbosity = UI.verbosity
     UI.verbosity = _cfg.LOG_VERBOSITY
 
@@ -253,9 +399,9 @@ def generate_auto_patches(tile, cifp_path: str,
     # (overlap / off-source / within-shape grade — our geometry/solver bugs,
     # not anything the user can fix in the source) are written here instead
     # of being surfaced as [verify] chatter, for an engineer to track down.
-    # Truncated lazily on the first airport that verifies this build pass.
+    # Truncated once per build pass by _run_build_tasks, which then appends each
+    # airport's verify-log part into it (safe under parallel builds).
     _verify_debug_path = os.path.join(patch_dir, "auto_patch_verify_debug.log")
-    _verify_debug_truncated = [False]
 
     # Lazy tile-level inputs: callables resolve on the FIRST airport
     # that needs a rebuild, at the tile's own verbosity so their log
@@ -393,105 +539,32 @@ def generate_auto_patches(tile, cifp_path: str,
                 or {}
             )
 
-        # ── Generate the patch content ──────────────────────────────────
-        # Use the new O4_Airport_Pavement_Builder pipeline.  It produces
-        # segmented sloped runway rects, grade-compliant taxi rects,
-        # non-overlapping junction polygons, and terminal pads, all in
-        # one self-contained call from the same CIFP + apt.dat + OSM +
-        # DEM inputs the legacy pipeline used.
-        import time as _time
-        _t_apt = _time.time()
-        try:
-            from .pipeline import build_airport_pavement
-            # Forward Ortho4XP-side per-airport data already
-            # computed during the tile pipeline:
-            #   * ``airport_taxiways`` from ``extract_taxiway_info``
-            #     (above) — OSM centerlines, used by Pipeline's
-            #     centerline-union helper.
-            #   * ``tile.dem`` — Ortho4XP's post-smoothing DEM,
-            #     reused by Phase-2 elevation + boundary emit so
-            #     auto_patch reads the SAME smoothed DEM that
-            #     drives flattening, instead of loading its own.
-            #     User 2026-05-07: tested raw-DEM switch; reverted
-            #     because it didn't fix the SPJC apron rough spot
-            #     and risked re-introducing terrain artefacts the
-            #     smoothing was added to remove.
-            #   * ``dico_apt_entry['boundary']`` — currently
-            #     reserved (parameter slot only); auto_patch's
-            #     boundary emit still derives its outline from
-            #     apt.dat row-130 until source-of-truth chosen.
-            layout = build_airport_pavement(
-                icao, xp_root,
-                taxiway_data=airport_taxiways,
-                tile_dem=getattr(tile, "dem", None),
-                airport_boundary=dico_apt_entry.get("boundary")
-                                  if dico_apt_entry else None,
-                # Per user 2026-05-12: pass the CURRENT tile being
-                # processed by Ortho4XP (not the airport's anchor
-                # tile) so ``tile_cut`` drops the right shape
-                # pieces.  Cross-tile airports (e.g. SPLP at
-                # lon ~ -77.0) get processed multiple times — once
-                # per tile they touch — and each pass should
-                # produce only the in-tile shapes.
-                current_tile_lat=tile_lat,
-                current_tile_lon=tile_lon,
-            )
-        except _DRIVER_EXC as _e:
-            UI.lvprint(
-                0, "   Auto-patch: Pavement builder failed for",
-                icao, ":", str(_e))
-            continue
+        # ── Collect the build task ──────────────────────────────────────
+        # The build + write + verify (identical logic for the serial and the
+        # parallel paths) is done by ``_build_write_verify_one`` after the loop.
+        # ``dico_apt_entry['boundary']`` is currently a reserved slot (auto_patch
+        # derives its outline from apt.dat row-130 until a source-of-truth is
+        # chosen).  ``current_tile_*`` is the CURRENT tile (not the airport anchor)
+        # so tile_cut drops the right pieces for cross-tile airports.
+        tasks.append({
+            "icao": icao,
+            "xp_root": xp_root,
+            "taxiway_data": airport_taxiways,
+            "boundary": (dico_apt_entry.get("boundary")
+                         if dico_apt_entry else None),
+            "tile_lat": tile_lat,
+            "tile_lon": tile_lon,
+            "auto_patch_file": auto_patch_file,
+            "verify_log_path": _verify_debug_path + "." + icao + ".part",
+        })
 
-        # Write the auto-patch file
-        if not os.path.exists(patch_dir):
-            os.makedirs(patch_dir)
-
-        try:
-            layout.to_osm(auto_patch_file)
-            # Classify shapes for the status line.
-            from collections import Counter as _Counter
-            counts = _Counter(s.role for s in layout.shapes)
-            summary = " + ".join(
-                "{} {}".format(n, r) for r, n in
-                sorted(counts.items(), key=lambda x: -x[1]))
-            UI.vprint(
-                1, "   Auto-patch: Generated", icao,
-                "(" + summary + ")")
-            auto_patched.append(icao)
-            # Build-time verification on THIS airport (the tile's own
-            # airport set — see airport_in_tile filter above).  Surfaces
-            # grade errors to the user; never aborts the build.
-            _t_v = _time.time()
-            try:
-                if not _verify_debug_truncated[0]:
-                    try:
-                        open(_verify_debug_path, "w").close()
-                    except OSError:
-                        pass
-                    _verify_debug_truncated[0] = True
-                verify_and_log(layout, icao,
-                               debug_log_path=_verify_debug_path)
-            except _DRIVER_EXC as _ve:
-                UI.lvprint(0, "   Auto-patch: verification error for",
-                           icao, ":", str(_ve))
-            # Per-airport wall-clock (build vs verify) — the tile-build
-            # perf breakdown lives here; O4_PERF=1 adds the solver's
-            # per-phase + network-field timings underneath.  lvprint(0):
-            # the loop runs at UI.verbosity = LOG_VERBOSITY (0), which
-            # suppresses vprint(1) — this line must always show (one
-            # line per airport; tiles carry a handful).
-            UI.lvprint(
-                0, "   Auto-patch:", icao,
-                f"took {_time.time() - _t_apt:.1f}s "
-                f"(verify {_time.time() - _t_v:.1f}s)")
-        except _DRIVER_EXC as e:
-            UI.lvprint(
-                0,
-                "   Auto-patch: Failed to write",
-                auto_patch_file,
-                ":",
-                str(e),
-            )
+    # ── Execute the collected build tasks ────────────────────────────────
+    # Each airport is independent, so with O4_PARALLEL_AIRPORTS they run across a
+    # ProcessPool (the tile DEM shared once per worker via the initializer); the
+    # MAIN process does all logging + the verify-log concatenation so nothing
+    # races or interleaves.  Serial path (default) is behaviourally identical to
+    # the old inline loop.
+    _run_build_tasks(tasks, tile, auto_patched, _verify_debug_path)
 
     UI.verbosity = _saved_verbosity
 
