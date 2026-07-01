@@ -72,7 +72,8 @@ def _radius_for_halfwidth(w: float) -> float:
 _MIN_FILLET_R = 12.0      # below this a bend stays a plain corner
 _TURN_MIN_DEG = 12.0      # bends flatter than this are "straight"
 _TURN_MAX_DEG = 150.0     # sharper pairs are turn-backs, not fillets
-_THROUGH_MAX_DEG = 25.0   # end pairs this collinear merge into one through
+_THROUGH_MAX_DEG = 40.0   # body-axis pairs this collinear merge into a through
+_CHORD_CLEAR_M = 2.0      # a straight chord needs this edge clearance to win
 _NODE_TOL_M = 0.75        # chain endpoints within this share a node
 # Runway-contact classification (angle between spine and runway axis).
 _DIAG_MIN_DEG = 20.0
@@ -172,46 +173,103 @@ def _local_dirs(line: LineString, P: Point, window: float = 12.0):
 
 def _merge_through(chains):
     """Concatenate chains whose ends meet near-collinearly (a straight
-    taxiway continues through the junction).  ``chains`` = [[coords, radii]]."""
-    merged = True
-    while merged:
-        merged = False
-        for i in range(len(chains)):
-            if chains[i] is None:
+    taxiway continues through the junction).  Pairing at each node is by
+    BEST continuation angle over all end pairs, not first match — at a
+    dual-lane island throat the tip-wrap chain also meets the lane at a
+    shallow angle, and a greedy first match can steal the lane's true
+    continuation.  Collinearity is judged from the chain BODY (45 m back):
+    the medial arm curves into the throat, the design axis does not.
+    ``chains`` = [[coords, radii]]."""
+    def _key(tip):
+        return (round(tip[0] / _NODE_TOL_M), round(tip[1] / _NODE_TOL_M))
+
+    changed = True
+    while changed:
+        changed = False
+        ends: dict = {}
+        for ci, ch in enumerate(chains):
+            if ch is None:
                 continue
-            for j in range(len(chains)):
-                if i == j or chains[j] is None:
+            for at_start in (True, False):
+                tip = ch[0][0] if at_start else ch[0][-1]
+                ends.setdefault(_key(tip), []).append((ci, at_start))
+        for lst in ends.values():
+            if len(lst) < 2:
+                continue
+            cand = []
+            for a in range(len(lst)):
+                for b in range(a + 1, len(lst)):
+                    ia, sa = lst[a]
+                    ib, sb = lst[b]
+                    if ia == ib or chains[ia] is None or chains[ib] is None:
+                        continue
+                    u = _end_dir(chains[ia][0], at_start=sa, back_m=45.0)
+                    v = _end_dir(chains[ib][0], at_start=sb, back_m=45.0)
+                    ang = _angle_deg(u, (-v[0], -v[1]))
+                    if ang <= _THROUGH_MAX_DEG:
+                        cand.append((ang, ia, sa, ib, sb))
+            used: set = set()
+            for ang, ia, sa, ib, sb in sorted(cand, key=lambda t: t[0]):
+                if ia in used or ib in used \
+                        or chains[ia] is None or chains[ib] is None:
                     continue
-                ci, ri = chains[i]
-                cj, rj = chains[j]
-                for ei, ej, flip_i, flip_j in (
-                        (-1, 0, False, False), (-1, -1, False, True),
-                        (0, 0, True, False), (0, -1, True, True)):
-                    if np.hypot(*(ci[ei] - cj[ej])) > _NODE_TOL_M:
-                        continue
-                    u = _end_dir(ci, at_start=(ei == 0))
-                    v = _end_dir(cj, at_start=(ej == 0))
-                    # arriving directions oppose when the run is straight
-                    if _angle_deg(u, (-v[0], -v[1])) > _THROUGH_MAX_DEG:
-                        continue
-                    a, ra = (ci[::-1], ri[::-1]) if flip_i else (ci, ri)
-                    b, rb = (cj[::-1], rj[::-1]) if flip_j else (cj, rj)
-                    chains[i] = [np.vstack([a, b[1:]]),
-                                 np.concatenate([ra, rb[1:]])]
-                    chains[j] = None
-                    merged = True
-                    break
-                if merged:
-                    break
-            if merged:
-                break
+                used.add(ia)
+                used.add(ib)
+                A, RA = chains[ia]
+                B, RB = chains[ib]
+                a_c, a_r = (A[::-1], RA[::-1]) if sa else (A, RA)
+                b_c, b_r = (B, RB) if sb else (B[::-1], RB[::-1])
+                chains[ia] = [np.vstack([a_c, b_c[1:]]),
+                              np.concatenate([a_r, b_r[1:]])]
+                chains[ib] = None
+                changed = True
+            if changed:
+                break                     # endpoint map is stale; rebuild
     return [c for c in chains if c is not None]
 
 
-def _fair_chain(coords, radii, pav_ok):
-    """Straight runs + tangent bend arcs from a wobbly medial chain."""
+def _chord_straighten(coords, radii, chord_ok):
+    """THE "straight path" rule: greedily replace each stretch of the chain
+    with the longest straight CHORD that (a) fits the pavement with edge
+    clearance and (b) stays laterally near the medial (no shortcutting to a
+    different corridor).  Medial wobble — throat bows, island-tip wraps,
+    widening bulges — collapses onto the design axis; genuine curves keep
+    their vertices and become arcs in the bend pass."""
+    cs = np.asarray(coords)
+    n = len(cs)
+    out_idx = [0]
+    i = 0
+    while i < n - 1:
+        j = n - 1
+        chosen = i + 1
+        while j > i + 1:
+            a, b = cs[i], cs[j]
+            ab = b - a
+            L = float(np.hypot(*ab))
+            if L < 1e-6:
+                j -= 1
+                continue
+            # lateral deviation of the medial from the chord
+            rel = cs[i:j + 1] - a
+            dev = np.abs(rel[:, 0] * ab[1] - rel[:, 1] * ab[0]) / L
+            w_med = float(np.median(radii[i:j + 1])) if len(radii) else 8.0
+            if float(dev.max()) <= max(3.0, 0.9 * w_med) \
+                    and chord_ok(LineString([tuple(a), tuple(b)])):
+                chosen = j
+                break
+            j = i + max(1, int((j - i) * 0.7))
+        out_idx.append(chosen)
+        i = chosen
+    return cs[out_idx]
+
+
+def _fair_chain(coords, radii, pav_ok, chord_ok):
+    """Straight chords + tangent bend arcs from a wobbly medial chain."""
+    radii = np.asarray(radii, dtype=float)
+    simp = _chord_straighten(coords, radii, chord_ok)
+    if len(simp) > 2:
+        simp = np.asarray(LineString(simp).simplify(_FAIR_SIMPLIFY_M).coords)
     ln = LineString(coords)
-    simp = np.asarray(ln.simplify(_FAIR_SIMPLIFY_M).coords)
     # carry half-widths onto the simplified vertices (arc-position lookup)
     pos = [0.0]
     for k in range(1, len(coords)):
@@ -246,6 +304,97 @@ def _fair_chain(coords, radii, pav_ok):
     return np.asarray(out)
 
 
+# ── step 3b: throat S-connectors (replace medial rungs) ─────────────────────
+
+_RUNG_MAX_LEN_M = 90.0        # a lane-to-lane rung is short-ish; the
+#                               near-parallel-hosts test is the real filter
+_RUNG_PARALLEL_MAX_DEG = 30.0  # ...and joins near-parallel lanes
+
+
+def _hermite(a, ta, b, tb, scale, n=16):
+    """Cubic Hermite from ``a`` (tangent ta) to ``b`` (tangent tb)."""
+    a, b = np.asarray(a), np.asarray(b)
+    m0 = np.asarray(ta) * scale
+    m1 = np.asarray(tb) * scale
+    ts = np.linspace(0.0, 1.0, n)
+    h00 = 2 * ts**3 - 3 * ts**2 + 1
+    h10 = ts**3 - 2 * ts**2 + ts
+    h01 = -2 * ts**3 + 3 * ts**2
+    h11 = ts**3 - ts**2
+    return (h00[:, None] * a + h10[:, None] * m0
+            + h01[:, None] * b + h11[:, None] * m1)
+
+
+def _min_turn_radius(coords) -> float:
+    """Smallest circumradius along a sampled path (∞ for straight)."""
+    best = float("inf")
+    cs = np.asarray(coords)
+    for k in range(1, len(cs) - 1):
+        a, b, c = cs[k - 1], cs[k], cs[k + 1]
+        ab, bc, ca = (np.hypot(*(b - a)), np.hypot(*(c - b)),
+                      np.hypot(*(a - c)))
+        area2 = abs((b[0] - a[0]) * (c[1] - a[1])
+                    - (b[1] - a[1]) * (c[0] - a[0]))
+        if area2 < 1e-9:
+            continue
+        best = min(best, ab * bc * ca / (2.0 * area2))
+    return best
+
+
+def _throat_connectors(ways, rungs, pav_ok):
+    """Replace each lane-to-lane RUNG with tangent S-connectors — the two
+    mirrored reverse curves an aircraft actually follows to change lanes
+    through the throat (one per travel direction).  This is the airport-
+    diagram geometry at dual-lane island throats: the lanes stay straight,
+    the movements are smooth diagonals."""
+    out = []
+    lines = [w.line for w in ways]
+
+    def _host(tip):
+        best = None
+        for i, ln in enumerate(lines):
+            if ln.length < 80.0:
+                continue
+            d = ln.distance(Point(tip))
+            if d < 30.0 and (best is None or d < best[0]):
+                anchor = nearest_points(Point(tip), ln)[1]
+                ds = _local_dirs(ln, anchor)
+                if len(ds) >= 2:
+                    best = (d, i, anchor, ds[0])
+        return best
+
+    for (P, Q) in rungs:
+        ha, hb = _host(P), _host(Q)
+        if ha is None or hb is None or ha[1] == hb[1]:
+            continue
+        _da, ia, anch_a, ta = ha
+        _db, ib, anch_b, _tb = hb
+        gap = float(anch_a.distance(anch_b))
+        span = max(1.6 * gap, 30.0)
+        for sgn in (1.0, -1.0):           # the two travel directions
+            u = (ta[0] * sgn, ta[1] * sgn)
+            # pick lane B direction best aligned with u
+            db = _local_dirs(lines[ib], anch_b)
+            if len(db) < 2:
+                continue
+            v = max(db, key=lambda d: d[0] * u[0] + d[1] * u[1])
+            if _angle_deg(u, v) > _RUNG_PARALLEL_MAX_DEG + 15.0:
+                continue
+            a = (anch_a.x - u[0] * span * 0.5, anch_a.y - u[1] * span * 0.5)
+            b = (anch_b.x + v[0] * span * 0.5, anch_b.y + v[1] * span * 0.5)
+            # anchor the endpoints ON the lanes
+            pa = nearest_points(Point(a), lines[ia])[1]
+            pb = nearest_points(Point(b), lines[ib])[1]
+            for stretch in (1.0, 1.5, 2.2):
+                cs = _hermite((pa.x, pa.y), u, (pb.x, pb.y), v,
+                              scale=span * stretch)
+                ln_s = LineString(cs)
+                if pav_ok(ln_s) and _min_turn_radius(cs) >= _MIN_FILLET_R:
+                    out.append(SpineWay(ln_s, "connector"))
+                    break
+    return out
+
+
 # ── step 4: junction arcs ────────────────────────────────────────────────────
 
 def _junction_arcs(ways, nodes, pav_ok, halfwidth_at):
@@ -254,31 +403,43 @@ def _junction_arcs(ways, nodes, pav_ok, halfwidth_at):
     arcs, seen = [], set()
     for node in nodes:
         P = Point(node)
+        # chord-straightening pulls faired lanes several metres off the raw
+        # medial node; the branches of this junction are the lines nearby
         incident = [i for i, ln in enumerate(lines)
-                    if ln.distance(P) < _NODE_TOL_M]
+                    if ln.distance(P) < 10.0]
         if len(incident) < 2:
             continue
         w_local = halfwidth_at(node)
-        branches = []                     # (way_idx, arrive_dir)
+        branches = []                     # (way_idx, arrive_dir, anchor_pt)
         for i in incident:
-            for d in _local_dirs(lines[i], P):
-                branches.append((i, d))
+            anchor = nearest_points(P, lines[i])[1]
+            for d in _local_dirs(lines[i], anchor):
+                branches.append((i, d, anchor))
         for a in range(len(branches)):
             for b in range(a + 1, len(branches)):
-                ia, ua = branches[a]
-                ib, ub = branches[b]
+                ia, ua, pa = branches[a]
+                ib, ub, pb = branches[b]
                 if ia == ib:
                     continue              # same chain: through or bend, done
-                # arrive along ua, depart opposite ub's arrival = -ub…
                 # both u are ARRIVING directions; departure along branch b
                 # is -ub.
                 u_out = (-ub[0], -ub[1])
                 ang = _angle_deg(ua, u_out)
                 if ang < _TURN_MIN_DEG or ang > _TURN_MAX_DEG:
                     continue
+                # corner = intersection of the two tangent LINES, so the
+                # arc is tangent to the lanes as-built, not to the node
+                den = ua[0] * u_out[1] - ua[1] * u_out[0]
+                if abs(den) < 1e-6:
+                    continue
+                dx, dy = pb.x - pa.x, pb.y - pa.y
+                s = (dx * u_out[1] - dy * u_out[0]) / den
+                corner = (pa.x + ua[0] * s, pa.y + ua[1] * s)
+                if math.hypot(corner[0] - P.x, corner[1] - P.y) > 40.0:
+                    continue              # degenerate near-parallel pair
                 r = _radius_for_halfwidth(w_local)
                 while r >= _MIN_FILLET_R:
-                    arc, _t = _fillet_between((P.x, P.y), ua, u_out, r)
+                    arc, _t = _fillet_between(corner, ua, u_out, r)
                     if arc is None:
                         break
                     ln_arc = LineString(arc)
@@ -443,9 +604,13 @@ def synthesize_spine(
         except Exception:
             pass
     allow = shapely.buffer(pav_eff, 0.3)
+    strict = shapely.buffer(pav_eff, -_CHORD_CLEAR_M)
 
     def pav_ok(line: LineString) -> bool:
         return allow.contains(line)
+
+    def chord_ok(line: LineString) -> bool:
+        return strict.contains(line)
 
     # 1: medial skeleton (building-free pavement)
     skel = build_pavement_skeleton(pav_nav, runway_union=runway_union)
@@ -464,7 +629,7 @@ def synthesize_spine(
     merged = _merge_through(chains)
     ways: list[SpineWay] = []
     for coords, radii in merged:
-        faired = _fair_chain(coords, radii, pav_ok)
+        faired = _fair_chain(coords, radii, pav_ok, chord_ok)
         if len(faired) < 2:
             continue
         ln = LineString(faired)
@@ -472,8 +637,48 @@ def synthesize_spine(
             continue
         ways.append(SpineWay(ln, "line", float(np.median(radii))))
 
+    # 3b: classify lane-to-lane RUNGS (short chain, both ends interior to a
+    # longer near-parallel through-lane) and replace them with tangent
+    # S-connectors — lanes stay straight, movements are smooth diagonals.
+    lane_lines = [w.line for w in ways]
+    rungs, rung_idx, rung_nodes = [], set(), set()
+    for wi, w in enumerate(ways):
+        if w.line.length > _RUNG_MAX_LEN_M:
+            continue
+        cs = np.asarray(w.line.coords)
+        P, Q = cs[0], cs[-1]
+        hosts = []
+        for tip in (P, Q):
+            host = None
+            for oi, oln in enumerate(lane_lines):
+                if oi == wi or oln.length < 80.0:
+                    continue
+                # chord-straightening pulls the lane well off the raw medial
+                # node at a throat (the medial bulges into the gap) — search
+                # wide, anchor at the projection onto the lane as-built
+                if oln.distance(Point(tuple(tip))) < 30.0:
+                    anchor = nearest_points(Point(tuple(tip)), oln)[1]
+                    ds = _local_dirs(oln, anchor)
+                    if len(ds) >= 2:      # anchor sits INSIDE the through lane
+                        host = (oi, ds[0])
+                        break
+            hosts.append(host)
+        if hosts[0] is None or hosts[1] is None \
+                or hosts[0][0] == hosts[1][0]:
+            continue
+        axis_ang = _angle_deg(hosts[0][1], hosts[1][1])
+        axis_ang = min(axis_ang, 180.0 - axis_ang)
+        if axis_ang > _RUNG_PARALLEL_MAX_DEG:
+            continue
+        rungs.append((tuple(P), tuple(Q)))
+        rung_idx.add(wi)
+        rung_nodes.add((round(P[0], 1), round(P[1], 1)))
+        rung_nodes.add((round(Q[0], 1), round(Q[1], 1)))
+    ways = [w for wi, w in enumerate(ways) if wi not in rung_idx]
+    ways.extend(_throat_connectors(ways, rungs, pav_ok))
+    nodes = [n for n in nodes if n not in rung_nodes]
+
     # 4: one fillet per branch pair per junction node
-    skel_union = unary_union([w.line for w in ways]) if ways else None
 
     def halfwidth_at(node) -> float:
         best, bw = None, 8.0
