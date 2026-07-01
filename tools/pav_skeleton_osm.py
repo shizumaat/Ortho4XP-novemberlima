@@ -176,8 +176,7 @@ def main(argv=None) -> int:
         kinds = {"medial": len(chains)}
     else:
         from auto_patch.pavement.spine_synthesis import synthesize_spine
-        ways = synthesize_spine(pav, runway_union=rwy, routes=routes,
-                                buildings=buildings,
+        ways = synthesize_spine(pav, runway_union=rwy, buildings=buildings,
                                 terminal_setback=args.setback)
         lines = [w.line for w in ways]
         kinds = {}
@@ -185,10 +184,8 @@ def main(argv=None) -> int:
             kinds[w.kind] = kinds.get(w.kind, 0) + 1
             tags = {"layer": "skeleton", "kind": w.kind, "way": str(i),
                     "len_m": f"{w.line.length:.0f}"}
-            if w.size:
-                tags["icao_size"] = w.size
-            if w.service:
-                tags["service"] = "yes"
+            if w.halfwidth:
+                tags["halfwidth"] = f"{w.halfwidth:.1f}"
             entries.append((w.line, tags))
 
     _osm_write(frame, entries, f"{prefix}_skeleton.osm")
@@ -201,6 +198,33 @@ def main(argv=None) -> int:
     print(f"  ways                   : {len(lines)}  (total {total:.0f} m)")
     print(f"  kinds                  : " +
           ", ".join(f"{k}={v}" for k, v in sorted(kinds.items())))
+
+    # Cross-reference vs the apt.dat taxi ROUTE graph (development yardstick,
+    # never a construction input): how much of the route network does the
+    # pavement-derived spine reproduce?
+    if routes and lines:
+        skel = unary_union(lines)
+        pav_probe = pav_eff.buffer(0.5)
+        covered = total_r = 0.0
+        for rt in routes:
+            ln = rt.chained_line
+            if ln is None or ln.is_empty or getattr(rt, "is_service", False):
+                continue
+            n = max(2, int(ln.length / 8))
+            for k in range(n):
+                a = ln.interpolate(k * ln.length / n)
+                b = ln.interpolate((k + 1) * ln.length / n)
+                if not pav_probe.contains(a):
+                    continue          # runway-riding stretch etc.
+                seg = a.distance(b)
+                total_r += seg
+                if skel.distance(a) <= 6.0:
+                    covered += seg
+        if total_r > 0:
+            print(f"  route-graph coverage   : "
+                  f"{100.0 * covered / total_r:.1f}%  "
+                  f"({covered:.0f}/{total_r:.0f} m of aircraft routes "
+                  f"within 6 m of spine)")
 
     if recog and lines:
         skel = unary_union(lines)
