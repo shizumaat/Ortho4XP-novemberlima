@@ -117,25 +117,36 @@ def feasibility_project(elev, shape_constraints, hard, *,
                 elev[i] = 0.5 * (lo + hi)            # genuine: minimise the break
             else:
                 elev[i] = min(max(elev[i], lo), hi)  # clamp into the envelope
+
+    # Pre-split the edges ONCE by hard-membership.  The inner loop otherwise ran
+    # two ``in hard`` set lookups PER edge PER iteration (up to ~0.5 B lookups on
+    # a big airport).  Both-hard edges can never move, so drop them from the
+    # iteration entirely (they are only counted in the final tally below).
+    # ``kind``: 0 = both free (split the excess), 1 = i hard (move j), 2 = j hard.
+    iter_edges = []
+    for (i, j, budget) in edges:
+        hi = i in hard
+        hj = j in hard
+        if hi and hj:
+            continue
+        iter_edges.append((i, j, budget, 1 if hi else (2 if hj else 0)))
+
     for _it in range(max_iters):
         worst = 0.0
-        for (i, j, budget) in edges:
+        for (i, j, budget, kind) in iter_edges:
             d = elev[i] - elev[j]
-            ad = abs(d)
+            ad = -d if d < 0.0 else d                     # inline abs() (hot path)
             if ad <= budget + tol:
                 continue
             ex = ad - budget
             s = 1.0 if d > 0 else -1.0
-            hi, hj = i in hard, j in hard
-            if hi and hj:
-                continue                                  # genuinely infeasible
-            elif hi:
-                elev[j] += s * ex                         # i fixed → move j up to i
-            elif hj:
-                elev[i] -= s * ex
-            else:
+            if kind == 0:
                 elev[i] -= s * ex * 0.5
                 elev[j] += s * ex * 0.5
+            elif kind == 1:
+                elev[j] += s * ex                         # i fixed → move j up to i
+            else:
+                elev[i] -= s * ex                         # j fixed → move i
             if ex > worst:
                 worst = ex
         if worst < tol:
