@@ -110,13 +110,13 @@ def _arc_pts(center, r, a0, a1, ccw: bool, step_m: float = 4.0):
             for t in ts]
 
 
-def _fillet(P, u_in, u_out, r):
+def _fillet(P, u_in, u_out, r, gamma_max=_TURN_MAX_DEG):
     """Tangent arc at corner ``P``: arrive along ``u_in``, depart along
     ``u_out``.  Returns (arc_coords, tangent_len) or (None, 0)."""
     gamma = math.acos(max(-1.0, min(1.0,
         u_in[0] * u_out[0] + u_in[1] * u_out[1])))
     if gamma < math.radians(_TURN_MIN_DEG) \
-            or gamma > math.radians(_TURN_MAX_DEG):
+            or gamma > math.radians(gamma_max):
         return None, 0.0
     t = r * math.tan(gamma / 2.0)
     ta = (P[0] - u_in[0] * t, P[1] - u_in[1] * t)
@@ -263,6 +263,37 @@ class _Graph:
         self.add_edge(np.asarray(first), e["kind"], e["size"], e["w"])
         self.add_edge(np.asarray(second), e["kind"], e["size"], e["w"])
         return mid
+
+    def consolidate(self):
+        """Merge degree-2 nodes where two same-kind, same-size edges continue
+        near-collinearly — undoes split fragmentation so the emitted ways are
+        clean long lanes.  Genuine corners (real turns) keep their node."""
+        changed = True
+        while changed:
+            changed = False
+            for ni, ends in self.incident().items():
+                live = [(ei, aa) for ei, aa in ends if self.edges[ei]["alive"]]
+                if len(live) != 2:
+                    continue
+                (ea, aa), (eb, ab) = live
+                if ea == eb:
+                    continue
+                A, B = self.edges[ea], self.edges[eb]
+                if A["kind"] != B["kind"] or A["size"] != B["size"]:
+                    continue
+                u = self.edge_dir_at(ea, aa)
+                v = self.edge_dir_at(eb, ab)
+                if _angle_deg(u, (-v[0], -v[1])) > 30.0:
+                    continue
+                a_cs = A["cs"][::-1] if aa else A["cs"]     # node LAST
+                b_cs = B["cs"] if ab else B["cs"][::-1]     # node FIRST
+                merged = np.vstack([a_cs, b_cs[1:]])
+                A["alive"] = False
+                B["alive"] = False
+                self.add_edge(merged, A["kind"], A["size"],
+                              max(A["w"], B["w"]))
+                changed = True
+                break
 
     def ways(self) -> list[SpineWay]:
         out = []
@@ -548,9 +579,41 @@ def _add_junction_arcs(g: _Graph, pav_ok):
 
 # ── runway diagonals ─────────────────────────────────────────────────────────
 
-def _add_runway_turns(g: _Graph, runway_union, pav_ok):
+def _walk_locate(g: _Graph, ei: int, from_a: bool, t: float, max_hops=6):
+    """Locate arc length ``t`` measured from one end of edge ``ei``, walking
+    across near-collinear lane continuations when ``t`` overruns the edge —
+    a big sharp-turn arc's tangent point often lies beyond the tip fragment
+    that junction-arc splits left behind.  Returns (edge, s) or None."""
+    for _hop in range(max_hops):
+        e = g.edges[ei]
+        L = LineString(e["cs"]).length
+        if t <= L - 1.0:
+            return ei, (t if from_a else L - t)
+        far = e["b"] if from_a else e["a"]
+        u = g.edge_dir_at(ei, at_a=not from_a)     # arriving at the far end
+        nxt = None
+        for (ej, aj) in g.incident().get(far, []):
+            if ej == ei or not g.edges[ej]["alive"] \
+                    or g.edges[ej]["kind"] != "lane":
+                continue
+            v = g.edge_dir_at(ej, at_a=aj)
+            if _angle_deg(u, (-v[0], -v[1])) <= 30.0:
+                nxt = (ej, aj)
+                break
+        if nxt is None:
+            return None
+        t -= L
+        ei, from_a = nxt
+    return None
+
+
+def _add_runway_turns(g: _Graph, runway_union, pav_eff):
+    """The sharp-turn arc lands ON the runway edge and can sweep up to
+    ~160 deg on shallow diagonals, so it gets its own containment slack
+    (1 m) and gamma ceiling."""
     if runway_union is None or runway_union.is_empty:
         return
+    allow_rwy = shapely.buffer(pav_eff, 1.0)
     edge_b = runway_union.boundary
     for ei in range(len(g.edges)):
         e = g.edges[ei]
@@ -579,23 +642,24 @@ def _add_runway_turns(g: _Graph, runway_union, pav_ok):
                 u_out = (e_dir[0] * e_sgn, e_dir[1] * e_sgn)
                 if _angle_deg(u_in, u_out) < 95.0:
                     continue               # shallow side = the straight itself
-                edge_len = LineString(e["cs"]).length
-                r, arc, t = r_std, None, 0.0
+                r, arc, t, loc = r_std, None, 0.0, None
                 while r >= _MIN_ARC_FIT * r_std:
-                    arc, t = _fillet(tuple(tip), u_in, u_out, r)
-                    if arc is not None and t <= 0.75 * edge_len \
-                            and pav_ok(LineString(arc)):
-                        break
+                    arc, t = _fillet(tuple(tip), u_in, u_out, r,
+                                     gamma_max=162.0)
+                    if arc is not None:
+                        loc = _walk_locate(g, ei, at_a, t)
+                        if loc is not None \
+                                and allow_rwy.contains(LineString(arc)):
+                            break
                     arc = None
                     r *= 0.75
-                if arc is None:
+                if arc is None or loc is None:
                     continue
-                s_split = t if at_a else edge_len - t
-                na = g.split_edge(ei, s_split)
+                na = g.split_edge(loc[0], loc[1])
                 cs = np.asarray(arc)
                 cs[0] = g.nodes[na]
                 g.add_edge(cs, "rwy_turn", e["size"], e["w"])
-                break                      # edge retired by the split
+                break                      # one sharp turn per tip
             if not e["alive"]:
                 break
     return
@@ -765,9 +829,12 @@ def synthesize_spine(
     _add_junction_arcs(g, pav_ok)
 
     # 5: runway diagonal sharp-turn arcs
-    _add_runway_turns(g, runway_union, pav_ok)
+    _add_runway_turns(g, runway_union, pav_eff)
 
     # 6: buildings (welded stubs + rings)
     _add_building_ways(g, buildings, pav_eff, terminal_setback)
+
+    # 7: merge split fragments back into clean long ways
+    g.consolidate()
 
     return g.ways()

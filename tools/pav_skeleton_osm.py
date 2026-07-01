@@ -202,17 +202,22 @@ def main(argv=None) -> int:
     print(f"  kinds                  : " +
           ", ".join(f"{k}={v}" for k, v in sorted(kinds.items())))
 
-    # GATE 1 — connectivity: every endpoint must touch another way or the
-    # pavement boundary (a building-stub door end is also legitimate).
+    # GATE 1 — connectivity: every endpoint must touch another way, the
+    # pavement boundary, or a building edge (lead-in door ends and lanes
+    # terminating at a pad are legitimate).
     floating = 0
     bnd = pav_eff.boundary
+    bldg_union = unary_union([b for b, _r in buildings]) if buildings else None
     for i, ln in enumerate(lines):
         for tip in (ln.coords[0], ln.coords[-1]):
             p = Point(tip)
             dmin = min((lines[j].distance(p)
                         for j in range(len(lines)) if j != i), default=99.0)
-            if dmin > 0.5 and bnd.distance(p) > 2.0:
-                floating += 1
+            if dmin <= 0.5 or bnd.distance(p) <= 2.0:
+                continue
+            if bldg_union is not None and bldg_union.distance(p) <= 2.0:
+                continue
+            floating += 1
     print(f"  GATE floating ends     : {floating}  (target 0)")
 
     # GATE 2 — arc radius histogram (should spike at the per-size standards)
