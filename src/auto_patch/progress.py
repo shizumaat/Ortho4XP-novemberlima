@@ -29,6 +29,22 @@ import O4_UI_Utils as UI
 from . import config
 
 
+# When an airport build runs in a per-airport ProcessPool worker
+# (driver._run_build_tasks), its UI output can't reach the main Ortho4XP window.
+# The pool initializer sets this to a shared queue; ``step`` then PUSHES each
+# phase transition onto it and the MAIN process drains + prints them (labelled by
+# ICAO, so a watcher sees every airport advancing live).  None = normal in-process
+# logging (serial builds / the test suite).
+_worker_queue = None
+
+
+def set_worker_queue(q) -> None:
+    """Route phase-progress events to ``q`` (a shared queue) instead of the local
+    UI — called once per worker by the pool initializer."""
+    global _worker_queue
+    _worker_queue = q
+
+
 class BuildProgress:
     """Step-counted progress reporter for one airport build.
 
@@ -62,6 +78,14 @@ class BuildProgress:
         label = self.labels[self._done]
         self._done += 1
         if not self.enabled:
+            return
+        q = _worker_queue
+        if q is not None:
+            # In a pool worker: hand the event to the main process to print.
+            try:
+                q.put((self.icao, self._done, self.total, label))
+            except Exception:
+                pass
             return
         try:
             UI.lvprint(

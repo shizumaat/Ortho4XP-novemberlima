@@ -173,6 +173,15 @@ def _set_worker_dem(dem) -> None:
     _WORKER_DEM = dem
 
 
+def _init_worker(dem, progress_queue) -> None:
+    """ProcessPool initializer: set the shared tile DEM AND route this worker's
+    per-phase build progress to the shared queue the main process drains, so the
+    Ortho4XP window keeps updating live while airports build in the background."""
+    _set_worker_dem(dem)
+    from . import progress as _progress
+    _progress.set_worker_queue(progress_queue)
+
+
 def _build_write_verify_one(task: dict) -> dict:
     """Build ONE airport, write its ``*_auto.patch.osm``, and verify it.
 
@@ -248,25 +257,58 @@ def _run_build_tasks(tasks: list, tile, auto_patched: list,
     if _cfg.PARALLEL_AIRPORTS and len(tasks) > 1:
         import concurrent.futures as _cf
         import multiprocessing as _mp
+        import queue as _queue
         n = _cfg.parallel_airports_worker_count(len(tasks))
-        UI.lvprint(0, "   Auto-patch: building", len(tasks),
-                   "airports in parallel across", n, "workers.")
+        UI.lvprint(0, "   Auto-patch: building", len(tasks), "airports (" +
+                   ", ".join(t["icao"] for t in tasks) +
+                   ") in parallel across", n, "workers.")
+        mgr = None
         try:
             ctx = _mp.get_context("spawn")
+            mgr = ctx.Manager()
+            pq = mgr.Queue()
+
+            def _drain_progress() -> None:
+                # Print each worker's pending phase events on the MAIN thread
+                # (same thread as the serial UI, so no GUI-thread hazard).  Keeps
+                # the window alive while airports build in the background.
+                while True:
+                    try:
+                        _icao, _step, _tot, _lab = pq.get_nowait()
+                    except _queue.Empty:
+                        break
+                    except Exception:
+                        break
+                    UI.lvprint(0, "   Auto-patch: {} [{}/{}] {}".format(
+                        _icao, _step, _tot, _lab))
+
             with _cf.ProcessPoolExecutor(
                     max_workers=n, mp_context=ctx,
-                    initializer=_set_worker_dem, initargs=(dem,)) as ex:
+                    initializer=_init_worker, initargs=(dem, pq)) as ex:
                 futs = [ex.submit(_build_write_verify_one, t) for t in tasks]
-                for fut in _cf.as_completed(futs):
-                    try:
-                        results.append(fut.result())
-                    except Exception as _e:             # a worker died hard
-                        results.append({"icao": None, "ok": False,
-                                        "stage": "worker", "error": str(_e)})
-        except Exception as _e:      # pool setup failed → serial fallback
+                pending = set(futs)
+                while pending:
+                    done, pending = _cf.wait(
+                        pending, timeout=0.5,
+                        return_when=_cf.FIRST_COMPLETED)
+                    _drain_progress()
+                    for fut in done:
+                        try:
+                            results.append(fut.result())
+                        except Exception as _e:         # a worker died hard
+                            results.append({"icao": None, "ok": False,
+                                            "stage": "worker", "error": str(_e)})
+                _drain_progress()                        # flush trailing events
+        except Exception as _e:      # pool/manager setup failed → serial fallback
             UI.lvprint(0, "   Auto-patch: parallel build unavailable (",
                        str(_e), ") — falling back to serial.")
             results = [_build_write_verify_one(t) for t in tasks]
+        finally:
+            if mgr is not None:
+                try:
+                    mgr.shutdown()
+                except Exception:
+                    pass
     else:
         results = [_build_write_verify_one(t) for t in tasks]
 
