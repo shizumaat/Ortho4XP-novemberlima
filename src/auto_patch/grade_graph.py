@@ -36,7 +36,13 @@ import math
 from dataclasses import dataclass, field
 from typing import Callable, Hashable, Optional, Sequence
 
+from shapely.errors import GEOSException, TopologicalError
+
 from . import grade_law as GL
+
+# Shapely-domain failures a triangulation / geometry op may raise (never catch
+# built-ins broadly — a KeyError etc. is a real bug, not a bad polygon).
+_GEOM_EXC = (ValueError, GEOSException, TopologicalError)
 from .config import (
     ANISO_EDGES,
     APRON_BACK_EDGE_GRADE,
@@ -44,6 +50,7 @@ from .config import (
     APRON_TAXI_BLEND,
     APRON_TAXI_TRANSITION_M,
     GRADE_VISIBILITY_BUFFER_M as _VIS_BUF,
+    JUNCTION_MESH_CONSTRAINTS,
     SERVICE_ROAD_MAX_GRADE,
     TAXI_MAX_GRADE,
     TAXI_MAX_GRADE_NARROW,
@@ -596,6 +603,48 @@ def _bake_edge(allow, role, pa, pb, shared, ctx, vr_i, vr_j):
     return GL.Allowance.baked(cL, cT, cL * dp + cT * dt)
 
 
+# ── junction mesh edges (O4_JUNCTION_MESH_CONSTRAINTS) ───────────────────────
+
+def mesh_edge_keys(ring: Sequence[tuple[float, float]],
+                   keys: Sequence[Hashable]) -> set:
+    """The triangle-mesh EDGE set of a shape, as ``frozenset({key_a, key_b})``
+    pairs — the edges a constrained-Delaunay triangulation of the ring facets
+    (what X-Plane's mesh approximates).  Includes the perimeter (ring-adjacent)
+    edges and the interior/cross-slope edges; excludes long chords across the
+    shape.  A junction's real grade paths are these edges plus its spine; the
+    remaining ``O(n²)`` chords are phantom (see ``config.JUNCTION_MESH_CONSTRAINTS``).
+
+    SINGLE SOURCE both the solver (``shape_constraints``) and the validator use,
+    so they cannot drift.  Deterministic (GEOS Delaunay is order-stable).  Falls
+    back to ring-adjacent-only if the polygon is degenerate / triangulation fails
+    (never raises — a bad triangulation must not abort a build)."""
+    from shapely.geometry import Polygon as _Poly
+    n = len(ring)
+    # ring-adjacent perimeter edges are always mesh edges (the polygon boundary).
+    out = {frozenset((keys[i], keys[(i + 1) % n])) for i in range(n)}
+    if n < 4:
+        return out
+    idx = {(round(x, 3), round(y, 3)): keys[i] for i, (x, y) in enumerate(ring)}
+    try:
+        poly = _Poly(ring)
+        if (not poly.is_valid) or poly.is_empty or poly.area <= 0.0:
+            return out
+        from shapely.ops import triangulate as _tri
+        for t in _tri(poly):
+            # keep only triangles inside the (possibly concave) polygon.
+            if not poly.contains(t.centroid):
+                continue
+            corners = list(t.exterior.coords)[:-1]
+            tk = [idx.get((round(x, 3), round(y, 3))) for (x, y) in corners]
+            for a in range(3):
+                u, v = tk[a], tk[(a + 1) % 3]
+                if u is not None and v is not None and u != v:
+                    out.add(frozenset((u, v)))
+    except _GEOM_EXC:
+        return out
+    return out
+
+
 # ── main ────────────────────────────────────────────────────────────────────
 
 def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
@@ -609,6 +658,16 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
     membership = _spine_membership(shape, ctx)
     body_cap = _body_cap(shape, ctx, membership)
     vis = _visibility_predicate(ring)
+    # JUNCTION MESH CONSTRAINTS (O4_JUNCTION_MESH_CONSTRAINTS): for a junction the
+    # only real grade paths are the spine + the triangle-mesh edges; the remaining
+    # body chords are phantom (an aircraft follows the spine, not the diagonal) and
+    # mesh compliance already implies straight-chord compliance.  Keep the mesh-edge
+    # key set here and drop any non-spine, non-mesh pair below.  APRONS keep their
+    # full visibility graph (the geodesic flatness model catches aggregate slope a
+    # mesh edge misses), so this is junction/service_junction only.
+    mesh_keys = (mesh_edge_keys(ring, keys)
+                 if (JUNCTION_MESH_CONSTRAINTS
+                     and shape.role in JUNCTION_ROLES) else None)
     # The shape's spine centerline geometries (those it has nodes on) — a body
     # chord that CROSSES one is NOT a real grade path: the climb between the two
     # sides is carried by the SPINE at the taxiway cap (the apron grades 1% to
@@ -668,6 +727,13 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
                       if (mi is not None and mj is not None) else set())
             spine_caps = tuple(ctx.centerlines[c].cap for c in shared)
             kj_bld = kj in bld
+
+            # Junction: drop a pair that is neither a spine path nor a mesh edge
+            # (a phantom body chord) before the expensive visibility/law work.
+            if (mesh_keys is not None and not spine_caps
+                    and not ring_adjacent
+                    and frozenset((ki, kj)) not in mesh_keys):
+                continue
 
             visible_fn = (None if vis is None
                           else (lambda _a=xi, _b=yi, _c=xj, _d=yj:

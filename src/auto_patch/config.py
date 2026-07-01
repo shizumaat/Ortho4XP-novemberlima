@@ -882,6 +882,24 @@ APRON_TAXI_TRANSITION_M = 30.0
 # law, byte-identical to the pre-feature build.
 ANISO_EDGES = _os.environ.get("O4_ANISO_EDGES", "1") == "1"
 
+# JUNCTION MESH CONSTRAINTS (user 2026-06-30).  A JUNCTION is taxi-centerline
+# fill: aircraft travel ALONG the spine through it, so the only grade paths that
+# physically exist are the spine (longitudinal) and the triangle-mesh EDGES X-Plane
+# facets (the local surface, incl. cross-slope).  A body CHORD between two
+# non-adjacent junction vertices is not a path anything traverses, and mesh-edge
+# compliance already implies straight-chord compliance — so the ~O(n²) chord
+# constraints are phantom: they over-report (they were the bulk of the within-shape
+# count and ballooned when a rect became junction fill) AND over-constrain the solve.
+# When ON, junction / service_junction shapes emit only spine + mesh-edge (+ ring-
+# adjacent) constraints; the chords are dropped.  APRONS are UNCHANGED — their
+# visibility-geodesic graph (stand/building → spine) is a deliberate user-ruled
+# flatness model that catches AGGREGATE slope a short mesh edge misses (a steadily-
+# sloping apron: each 12 m edge < 1 % but the 100 m direct chord > 1 %).  The
+# solver + validator + grade test read this together (LOCKSTEP).  Default-OFF
+# pending re-baseline; O4_JUNCTION_MESH_CONSTRAINTS=1 to enable.
+JUNCTION_MESH_CONSTRAINTS = (
+    _os.environ.get("O4_JUNCTION_MESH_CONSTRAINTS", "0") == "1")
+
 # (20260624) ABSORB_RUNWAY_IN_APRON — the apron-merged-runway machine.  When a
 # runway passes through a much-larger apron polygon, the overlapping runway
 # segments are DROPPED (elevation.py) and only the NON-merged part of the runway
