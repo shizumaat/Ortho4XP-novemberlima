@@ -36,7 +36,10 @@ X-Plane.**
 - The project lives at `/Users/noah/Ortho4XP-novemberlima`.
 - Use the bundled virtualenv: **`venv/bin/python`** (there's no system `python`).
 - `venv/bin/pip` is broken — if you need to install, use `venv/bin/python -m pip`.
-- Dependencies are in `requirements.txt`; shapely is the core geometry library.
+- Dependencies are in `requirements.txt` (the platform install scripts
+  `install_mac.sh` / `install_windows.bat` both install from it); shapely is the
+  core geometry library, scipy (Voronoi/splines) + networkx (skeleton graphs)
+  serve the pavement-skeleton spine (`pavement/pav_skeleton.py`).
 
 ## Your first build
 Build one airport and write its patch. CYXY (Whitehorse) and SPLP are good small fixtures.
