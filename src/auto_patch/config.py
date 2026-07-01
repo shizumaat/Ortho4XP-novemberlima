@@ -1280,6 +1280,14 @@ RECT_END_CAP_DEPTH_M = float(_os.environ.get("O4_RECT_CAP_DEPTH_M", "12.0"))
 RECT_END_CAP_MIN_RECT_LEN_M = float(
     _os.environ.get("O4_RECT_CAP_MIN_RECT_LEN_M", "40.0"))
 
+# SHORT-RECT → JUNCTION (user 2026-06-30): a taxi rect shorter than this along
+# its axis is a rigid sloping PLANE where the spine wants to CURVE through
+# smoothly (HECA's curved taxiways).  Such rects are NOT emitted — the pavement
+# stays junction residue (pav_union.difference(rects)) so the centerline grades
+# through it continuously instead of as a chain of planar facets.  ``0`` disables
+# (restore the prior behaviour where any-length rects are emitted).
+MIN_RECT_LENGTH_M = float(_os.environ.get("O4_MIN_RECT_LENGTH_M", "100.0"))
+
 # (s79) ON-PAVEMENT service-road carve — docs/service_road_carve.md.
 # ★ USER RULINGS 2026-06-11: roads = apt.dat 1206 routes ONLY (no
 # polygon/OSM detection); only pavement narrower than the cross-section

@@ -35,8 +35,8 @@ from shapely.ops import nearest_points, unary_union
 
 from ..canonical_points import CanonicalPointRegistry
 from ..config import (
-    MIN_SEGMENT_LEN_M, RECT_SQUARE_ENDS, RECT_END_SQUARE_TOL_M,
-    taxi_ref_is_sub_index)
+    MIN_SEGMENT_LEN_M, MIN_RECT_LENGTH_M, RECT_SQUARE_ENDS,
+    RECT_END_SQUARE_TOL_M, taxi_ref_is_sub_index)
 from ..geom_safe import min_rotated_rect
 from ..layout import (
     ROLE_CROSS_CONNECTOR,
@@ -398,7 +398,18 @@ def _build_taxi_rects(
         # as primary_parallel, not stub).  Threshold 150 m: longer
         # than typical apron-edge fragments, shorter than any real
         # named-taxi stub at SPJC / SPLP / CYXY / KBNA / HECA.
-        from ..layout import ROLE_STUB
+        from ..layout import ROLE_STUB, ROLE_SERVICE_ROAD
+        # SHORT-RECT → JUNCTION (user 2026-06-30, gate O4_MIN_RECT_LENGTH_M):
+        # an AIRCRAFT taxi rect below this length is a rigid sloping PLANE where
+        # the spine wants to curve through smoothly (HECA's curved taxiways).
+        # Don't emit it — the pavement stays junction residue
+        # (pav_union.difference(rects)) so the centerline grades through it
+        # continuously instead of as planar facets.  Service roads are EXCLUDED:
+        # they are car roads (4% cap, own semantics), not taxiways, and must not
+        # become aircraft-pavement junctions.
+        if (MIN_RECT_LENGTH_M > 0.0 and trimmed.length < MIN_RECT_LENGTH_M
+                and role != ROLE_SERVICE_ROAD):
+            continue
         from ..config import is_unnamed_taxi_ref
         if (is_unnamed_taxi_ref(ref) and role == ROLE_STUB
                 and trimmed.length < 150.0):
