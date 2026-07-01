@@ -1509,16 +1509,18 @@ def painted_taxi_centerlines(
         edge_zone_m: float = 1.5,
         edge_frac_max: float = 0.5,
         on_pavement_frac_min: float = 0.7,
-) -> "list[tuple[LineString, str]]":
+) -> "list[TaxiCenterline]":
     """Synthesize taxi centerlines from row-120 PAINTED lines.
 
     Airports without a 1201/1202 taxi-route network frequently still
     carry the real taxiway centerlines as painted line features —
     authored bezier curves, far better geometry than what strip
-    discovery can reconstruct.  Returns ``(LineString_m, name)``
-    pairs shaped like :func:`taxi_centerlines` so the rect builder
-    consumes either source interchangeably; names are synthetic
-    (``P1``, ``P2``, …) so provenance is recognizable.
+    discovery can reconstruct.  Returns :class:`TaxiCenterline` objects
+    shaped like :func:`taxi_centerlines` so every downstream consumer
+    (rect builder, grade-graph spine, junction densifier) treats either
+    source interchangeably — painted lines carry no apt.dat ICAO size, so
+    ``seg_sizes`` is ``""`` per segment (the default taxi grade cap).
+    Names are synthetic (``P1``, ``P2``, …) so provenance is recognizable.
 
     "Is it really a centerline" checks (user 2026-06-11 — the same
     line resource also draws taxiway EDGE lines and other markings):
@@ -1541,7 +1543,7 @@ def painted_taxi_centerlines(
         rects own that surface), and each surviving piece must still
         be ``min_len_m`` long.
     """
-    out: "list[tuple[LineString, str]]" = []
+    out: "list[TaxiCenterline]" = []
     if not airport.painted_lines:
         return out
     pav_buf = None
@@ -1586,7 +1588,9 @@ def painted_taxi_centerlines(
                 except _GEOM_EXC:
                     continue
             k += 1
-            out.append((part, f"P{k}"))
+            out.append(TaxiCenterline(
+                line=part, name=f"P{k}",
+                seg_sizes=[""] * max(0, len(part.coords) - 1)))
     return out
 
 
