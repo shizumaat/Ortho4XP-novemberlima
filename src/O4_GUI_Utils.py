@@ -367,6 +367,12 @@ class Ortho4XP_GUI(tk.Tk):
         self.console_update()
         self.pgrb_queue = queue.Queue()
         self.pgrb_update()
+        # Second progress window (auto-patch, one bar per airport). The build
+        # worker thread only enqueues events here; autopatch_update drains them
+        # on the Tk main thread and creates/updates the window.
+        self.autopatch_queue = queue.Queue()
+        self.autopatch_window = None
+        self.autopatch_update()
 
         # Redirection
         self.stdout_orig = sys.stdout
@@ -430,6 +436,43 @@ class Ortho4XP_GUI(tk.Tk):
         except queue.Empty:
             pass
         self.callback_pgrb = self.after(100, self.pgrb_update)
+
+    # Auto-patch progress window ------------------------------------------
+    def autopatch_begin(self, icaos):
+        """Queue a request to (re)open the auto-patch window with a row per
+        airport.  Thread-safe: called from the build worker thread."""
+        self.autopatch_queue.put(("begin", list(icaos), None, None, None))
+
+    def autopatch_event(self, icao, done, total, label, status="run"):
+        """Queue a per-airport progress update.  Thread-safe."""
+        self.autopatch_queue.put(("event", icao, done, total, label, status))
+
+    def autopatch_update(self):
+        try:
+            while 1:
+                item = self.autopatch_queue.get_nowait()
+                if item[0] == "begin":
+                    _, icaos, _a, _b, _c = item
+                    self._ensure_autopatch_window().set_airports(icaos)
+                elif item[0] == "event":
+                    _, icao, done, total, label, status = item
+                    # Only update an OPEN window — if the user closed it we
+                    # leave it closed until the next build's begin re-opens it.
+                    win = self.autopatch_window
+                    if win is not None and win.winfo_exists():
+                        win.update_airport(icao, done, total, label, status)
+        except queue.Empty:
+            pass
+        self.callback_autopatch = self.after(100, self.autopatch_update)
+
+    def _ensure_autopatch_window(self):
+        if self.autopatch_window is None or \
+                not self.autopatch_window.winfo_exists():
+            self.autopatch_window = Ortho4XP_AutoPatch_Progress(self)
+        else:
+            self.autopatch_window.deiconify()
+            self.autopatch_window.lift()
+        return self.autopatch_window
 
     def tile_change(self, *args):
         """Load tile configuration on tile change."""
@@ -780,7 +823,122 @@ class Ortho4XP_GUI(tk.Tk):
             pass
         self.after_cancel(self.callback_pgrb)
         self.after_cancel(self.callback_console)
+        try:
+            self.after_cancel(self.callback_autopatch)
+        except Exception:
+            pass
         sys.stdout = self.stdout_orig
+        self.destroy()
+
+################################################################################
+class Ortho4XP_AutoPatch_Progress(tk.Toplevel):
+    """Second progress window for the auto-patch pavement builder.
+
+    Shows a scrollable vertical table with one row per airport being
+    patched in the current tile: the ICAO on the left, a progress bar on the
+    right, and a small live detail line under the bar (the current build
+    phase, or "Done"/"FAILED").  While airports build in parallel every row
+    advances independently, so the user can watch the whole tile progress.
+
+    All public methods run on the Tk main thread (they are called only from
+    ``Ortho4XP_GUI.autopatch_update``, the queue-drain ``after`` loop), so
+    they may touch widgets directly.
+    """
+
+    def __init__(self, parent):
+        tk.Toplevel.__init__(self)
+        self.parent = parent
+        self.title("Auto-patch progress")
+        self.geometry("470x420")
+        self.minsize(320, 160)
+        self.protocol("WM_DELETE_WINDOW", self.exit)
+        self.configure(bg="light green")
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+
+        # One row-widget bundle per ICAO.
+        self.rows = {}
+
+        # Scrollable body: Canvas + inner Frame + vertical Scrollbar (the
+        # standard Tkinter scrolling-frame idiom).
+        container = tk.Frame(self, bg="light green")
+        container.grid(row=0, column=0, sticky=N + S + E + W)
+        container.rowconfigure(0, weight=1)
+        container.columnconfigure(0, weight=1)
+        self.canvas = tk.Canvas(
+            container, bg="light green", highlightthickness=0)
+        self.canvas.grid(row=0, column=0, sticky=N + S + E + W)
+        vsb = ttk.Scrollbar(
+            container, orient="vertical", command=self.canvas.yview)
+        vsb.grid(row=0, column=1, sticky=N + S)
+        self.canvas.configure(yscrollcommand=vsb.set)
+        self.body = tk.Frame(self.canvas, bg="light green")
+        self.body.columnconfigure(0, weight=1)
+        self._body_id = self.canvas.create_window(
+            (0, 0), window=self.body, anchor="nw")
+        self.body.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(
+                scrollregion=self.canvas.bbox("all")))
+        self.canvas.bind(
+            "<Configure>",
+            lambda e: self.canvas.itemconfigure(self._body_id, width=e.width))
+
+    # -- public API (main-thread only) ------------------------------------
+    def set_airports(self, icaos):
+        """Clear the table and create a fresh 0 % row for every ICAO (start
+        of a new tile's auto-patch run)."""
+        for r in self.rows.values():
+            r["frame"].destroy()
+        self.rows.clear()
+        for icao in icaos:
+            self._ensure_row(icao)
+
+    def update_airport(self, icao, done, total, label, status="run"):
+        """Advance one airport's bar + detail line."""
+        row = self._ensure_row(icao)
+        if status == "done":
+            row["var"].set(100)
+            row["detail"].configure(
+                text=label or "Done", fg="#0a6b0a")
+        elif status == "fail":
+            row["detail"].configure(
+                text=label or "FAILED", fg="red")
+        else:
+            pct = int(100 * done / total) if total else 0
+            row["var"].set(pct)
+            row["detail"].configure(
+                text="[{}/{}] {}".format(done, total, label), fg="black")
+        row["frame"].update_idletasks()
+
+    # -- helpers ----------------------------------------------------------
+    def _ensure_row(self, icao):
+        if icao in self.rows:
+            return self.rows[icao]
+        idx = len(self.rows)
+        frame = tk.Frame(
+            self.body, bg="light green", bd=1, relief="solid")
+        frame.grid(row=idx, column=0, sticky=E + W, padx=4, pady=2)
+        frame.columnconfigure(1, weight=1)
+        tk.Label(
+            frame, text=icao, bg="light green", width=6, anchor=W,
+            font=("TkDefaultFont", 10, "bold")).grid(
+                row=0, column=0, rowspan=2, padx=(4, 8), pady=2, sticky=W)
+        var = tk.IntVar(value=0)
+        bar = ttk.Progressbar(
+            frame, mode="determinate", orient=HORIZONTAL,
+            variable=var, maximum=100)
+        bar.grid(row=0, column=1, sticky=E + W, padx=(0, 6), pady=(4, 0))
+        detail = tk.Label(
+            frame, text="waiting…", bg="light green", anchor=W,
+            font=("TkDefaultFont", 8))
+        detail.grid(row=1, column=1, sticky=W, padx=(0, 6), pady=(0, 4))
+        self.rows[icao] = {
+            "frame": frame, "var": var, "bar": bar, "detail": detail}
+        return self.rows[icao]
+
+    def exit(self):
+        self.parent.autopatch_window = None
         self.destroy()
 
 ################################################################################

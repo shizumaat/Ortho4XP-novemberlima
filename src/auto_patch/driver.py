@@ -264,6 +264,10 @@ def _run_build_tasks(tasks: list, tile, auto_patched: list,
         pass
     _set_worker_dem(dem)            # the serial path reads this module global too
 
+    # Open/refresh the auto-patch progress window with a row per airport (a
+    # no-op on the command line / in tests). Phase updates below fill each row.
+    UI.auto_patch_begin([t["icao"] for t in tasks])
+
     results: list[dict] = []
     if _cfg.PARALLEL_AIRPORTS and len(tasks) > 1:
         import concurrent.futures as _cf
@@ -292,6 +296,7 @@ def _run_build_tasks(tasks: list, tile, auto_patched: list,
                         break
                     UI.lvprint(0, "   Auto-patch: {} [{}/{}] {}".format(
                         _icao, _step, _tot, _lab))
+                    UI.auto_patch_progress(_icao, _step, _tot, _lab)
 
             with _cf.ProcessPoolExecutor(
                     max_workers=n, mp_context=ctx,
@@ -331,6 +336,8 @@ def _run_build_tasks(tasks: list, tile, auto_patched: list,
         icao = t["icao"]
         if not r.get("ok"):
             stage = r.get("stage", "?")
+            UI.auto_patch_progress(icao, 1, 1, "FAILED ({})".format(stage),
+                                   status="fail")
             if stage == "write":
                 UI.lvprint(0, "   Auto-patch: Failed to write",
                            t["auto_patch_file"], ":", r.get("error"))
@@ -364,6 +371,9 @@ def _run_build_tasks(tasks: list, tile, auto_patched: list,
                 os.remove(part)
             except OSError:
                 pass
+        UI.auto_patch_progress(icao, 1, 1,
+                               "Done ({:.1f}s)".format(r["build_s"]),
+                               status="done")
         UI.lvprint(0, "   Auto-patch:", icao,
                    f"took {r['build_s']:.1f}s (verify {r['verify_s']:.1f}s)")
 

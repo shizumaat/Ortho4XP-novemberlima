@@ -93,6 +93,10 @@ class BuildProgress:
                 "   Auto-patch: {} [{}/{}] {}".format(
                     self.icao, self._done, self.total, label),
             )
+            # Serial builds run in the main process, so the phase event can go
+            # straight to the second progress window (parallel builds route it
+            # through the pool queue + driver._drain_progress instead).
+            UI.auto_patch_progress(self.icao, self._done, self.total, label)
         except Exception:
             # Never let a logging hiccup abort an airport build.
             pass

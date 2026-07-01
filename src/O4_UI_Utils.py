@@ -30,6 +30,36 @@ def progress_bar(nbr, percentage, message=None):
 
 
 ################################################################################
+def auto_patch_begin(icaos):
+    """(Re)open the auto-patch progress window with one row per airport in
+    ``icaos``.  No-op without a GUI (command-line builds / the test suite).
+    Only enqueues onto the GUI's thread-safe queue — safe to call from the
+    build worker thread; the actual widgets are created on the Tk main
+    thread."""
+    if gui:
+        try:
+            gui.autopatch_begin(icaos)
+        except Exception:
+            pass
+
+
+################################################################################
+def auto_patch_progress(icao, done, total, label, status="run"):
+    """Update one airport's row in the auto-patch progress window.
+
+    ``done``/``total`` drive the progress bar (percent = done/total); ``label``
+    is the small detail line under the bar.  ``status`` is ``"run"`` for a
+    phase transition, ``"done"`` when the airport finished (bar → 100 %), or
+    ``"fail"`` when its build failed (row flagged red).  No-op without a GUI
+    and never raises — progress is cosmetic."""
+    if gui:
+        try:
+            gui.autopatch_event(icao, done, total, label, status)
+        except Exception:
+            pass
+
+
+################################################################################
 def vprint(min_verbosity, *args):
     if verbosity >= min_verbosity:
         print(*args)
