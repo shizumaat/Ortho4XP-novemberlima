@@ -895,10 +895,13 @@ ANISO_EDGES = _os.environ.get("O4_ANISO_EDGES", "1") == "1"
 # visibility-geodesic graph (stand/building → spine) is a deliberate user-ruled
 # flatness model that catches AGGREGATE slope a short mesh edge misses (a steadily-
 # sloping apron: each 12 m edge < 1 % but the 100 m direct chord > 1 %).  The
-# solver + validator + grade test read this together (LOCKSTEP).  Default-OFF
-# pending re-baseline; O4_JUNCTION_MESH_CONSTRAINTS=1 to enable.
+# solver + validator + grade test read this together (LOCKSTEP).  DEFAULT-ON
+# (user 2026-06-30, for the HECA smooth-climbing-turn visual test): re-baselined
+# HECA within 6950→4351 (junction −64%), CYXY 233→89 (junction −80%), aprons
+# unchanged, solve −37%/−25%; every remaining violation is real (mesh miss / apron
+# geodesic / runway-join).  O4_JUNCTION_MESH_CONSTRAINTS=0 reverts byte-identically.
 JUNCTION_MESH_CONSTRAINTS = (
-    _os.environ.get("O4_JUNCTION_MESH_CONSTRAINTS", "0") == "1")
+    _os.environ.get("O4_JUNCTION_MESH_CONSTRAINTS", "1") == "1")
 
 # (20260624) ABSORB_RUNWAY_IN_APRON — the apron-merged-runway machine.  When a
 # runway passes through a much-larger apron polygon, the overlapping runway
