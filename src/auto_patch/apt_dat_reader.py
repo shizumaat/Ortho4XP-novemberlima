@@ -71,8 +71,13 @@ DEFAULT_BEZIER_SEGMENTS = 4
 # created the "wrong-side" junction vertex.  Real curves (taxiway
 # turns, swept apron edges) have deviations well above this.
 # Threshold expressed in DEGREES because the calculation runs in
-# lat/lon space; 0.000014 deg ≈ 1.5 m.
-BEZIER_FLATTEN_DEV_DEG = 1.5 / 111111.0
+# lat/lon space; 0.000014 deg ≈ 1.5 m.  Tunable in METRES via
+# ``O4_BEZIER_FLATTEN_DEV_M`` (default 1.5) — set 0 to keep ALL source bezier
+# curves (tight corner-softening arcs included), so tight curves grade smoothly
+# instead of flattening to an abrupt corner.  Trade-off: the arc vertices can
+# make downstream residue/junction passes wrap a junction around the corner
+# (the original reason for the flatten — user 2026-05-04).
+BEZIER_FLATTEN_DEV_DEG = float(os.environ.get("O4_BEZIER_FLATTEN_DEV_M", "1.5")) / 111111.0
 
 # Row type codes (X-Plane apt.dat 1100 / 1200 spec).
 ROW_AIRPORT_HEADER = 1

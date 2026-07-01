@@ -365,7 +365,10 @@ def build_airport_pavement(icao: str, xplane_root: str,
     _progress = _progress_for_build(icao, compute_elevations=compute_elevations)
     _progress.step()  # [1] Loading apt.dat & runway geometry
 
-    apt_path = _pick_best_apt_dat_against_osm(xplane_root, icao)
+    # O4_FORCE_APT_DAT overrides source selection (e.g. compare Global Airports
+    # vs a custom pack) — diagnostic only.
+    apt_path = (os.environ.get("O4_FORCE_APT_DAT")
+                or _pick_best_apt_dat_against_osm(xplane_root, icao))
     if apt_path is None:
         raise RuntimeError(f"No apt.dat found for {icao}")
     apt = APR.load_airport(apt_path, icao)
@@ -1585,6 +1588,35 @@ def build_airport_pavement(icao: str, xplane_root: str,
             layout._painted_centerlines = [ln for ln, _nm in _painted]
         except Exception:
             layout._painted_centerlines = []
+
+    # RAW painted lines in METERS (ALL row-120 features, paint codes IGNORED — a
+    # code marks centerline OR edge line unreliably, so the taxi-fillet extractor
+    # discriminates GEOMETRICALLY: a fillet rides the route centerlines, an edge
+    # line sits a half-width off).  Populated whenever painted lines exist.
+    try:
+        from shapely.geometry import LineString as _LS_pl
+        layout._painted_lines_m = [
+            _LS_pl([to_m(lo, la) for lo, la in pl.line.coords])
+            for pl in (apt.painted_lines or [])
+            if pl.line is not None and len(pl.line.coords) >= 2]
+    except Exception:
+        layout._painted_lines_m = []
+
+    # RECOGNIZED CURVED CENTERLINES (user 2026-06-30, gate O4_RECOGNIZED_CENTERLINES):
+    # swap each straight taxi route for the painted centerline that rides it (real
+    # curves), before the rects / spine consume ``apt_taxi_centerlines``.  Routes
+    # with no riding painted centerline keep their raw straight geometry.
+    try:
+        from .centerline_recognition import recognize_curved_centerlines
+        recognize_curved_centerlines(layout, icao)
+        # ONE source: when recognition ran, the taxi RECTS must be built from the
+        # SAME recognized centerlines the spine uses — not the separate straight
+        # ``osm_centerlines`` (user 2026-07-01: no multiple/conflicting sources).
+        if os.environ.get("O4_RECOGNIZED_CENTERLINES", "0") == "1":
+            osm_centerlines = list(layout.apt_taxi_centerlines)
+    except Exception:
+        UI.vprint(1, f"  [pav-builder] {icao}: curved-centerline recognition "
+                  f"skipped (error).")
 
     # apt.dat ramp starts (stands) + ground-vehicle service roads.
     # 1206 service roads become 4 %-grade ``service_road`` rects when the
@@ -4174,10 +4206,21 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # centerline nodes and the elevation solver grades the sliced
         # surface coherently (the corridor profile is the solver's job).
         # Gate-off = no-op (shapes survive unchanged → byte-identical).
+        # SYNTHETIC turn-fillet arcs (user 2026-06-30, gate O4_TAXI_FILLET): the
+        # sparse 1201/1202 network has no arc where two taxi routes meet, so add
+        # the standard-radius fillet to the ROUTE GRAPH here — BEFORE the spine
+        # slice — and it is cut into the junctions like any taxiway centerline.
+        from .taxi_route_fillets import add_junction_fillet_arcs
+        add_junction_fillet_arcs(layout, icao)
+
         # SYNTHETIC junction spines (user 2026-06-26): every junction must have a
         # route through it.  Append synthetic centerlines for spineless junctions
         # BEFORE the slice, so they are sliced + graded like any taxiway.
-        if os.environ.get("O4_SYNTH_JUNCTION_SPINE", "1") == "1":
+        # Recognized painted centerlines are the real spine; do NOT manufacture
+        # straight synthetic centerlines for spineless junctions (user 2026-06-30:
+        # no synthetic centerlines for any spine when recognition is on).
+        if (os.environ.get("O4_SYNTH_JUNCTION_SPINE", "1") == "1"
+                and os.environ.get("O4_RECOGNIZED_CENTERLINES", "0") != "1"):
             from .synthetic_junction_spine import synthesize_junction_spines
             synthesize_junction_spines(layout, icao)
 
@@ -4200,6 +4243,13 @@ def build_airport_pavement(icao: str, xplane_root: str,
         if os.environ.get("O4_DENSIFY_JUNCTION_EDGES", "1") == "1":
             from .lateral_spine_nodes import densify_junction_edges
             densify_junction_edges(layout, icao)
+
+        # Round tight pavement turn-backs (sharp tip / narrow flat end) into a
+        # ~5-node half-circle so the boundary turns on a smooth arc (user
+        # 2026-06-30, gate O4_ROUND_TURNBACK).  Pre-solve so the arc is graded;
+        # the unify/clip/planarize below reconcile shared edges.
+        from .pavement.vertices import _round_turnback_corners
+        _round_turnback_corners(layout, icao)
 
         # ── Airside node-unification (refactor Phases 6+7, PRE-solve) ──
         # Weld + full conformance + final corner snaps, run HERE so the solver

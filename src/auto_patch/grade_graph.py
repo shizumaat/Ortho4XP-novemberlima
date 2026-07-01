@@ -33,6 +33,7 @@ them.  This module owns the apron/junction visibility graph only.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 from typing import Callable, Hashable, Optional, Sequence
 
@@ -61,6 +62,14 @@ SOFT_VISIBILITY_ROLES = (APRON_ROLE,) + JUNCTION_ROLES
 # perpendicular distance of it.  Post-slice the spine nodes sit exactly on the
 # line, so this is tight (it only has to absorb float/round noise, not width).
 SPINE_PERP_TOL_M = 1.0
+
+# Apron↔taxi-route CONTACT allowance (user 2026-06-30): an apron ring edge welded
+# to a taxi-route pavement earns the taxi cap in its own direction (the contact
+# ramp from the apron body down/up to the route), instead of the flat apron cap
+# that false-flags it.  ``_ROUTE_CONTACT_TOL_M`` buffers the route union so a
+# node ON the shared boundary reads as inside.  Gate off ⇒ prior blend behaviour.
+APRON_ROUTE_CONTACT = os.environ.get("O4_APRON_ROUTE_CONTACT", "1") == "1"
+_ROUTE_CONTACT_TOL_M = 0.5
 
 # The per-pair eligibility/cap decision (min-pair-dist, apron body-chord max,
 # seam/building/spine/visibility skips, cap selection) is THE LAW — it lives in
@@ -178,6 +187,14 @@ class GradeContext:
     # soft-shape pair with BOTH endpoints inside it descends at the road cap (the
     # carve corners lie on the host ring).  ``None`` ⇒ no road carves.
     road_zone: object = None
+    # PREPARED union of the taxi-ROUTE pavements (junction / parallels / stub /
+    # cross-connector), buffered a hair.  An apron ring node inside it is welded to
+    # a taxi route it abuts — so its ring edges are the apron's CONTACT with that
+    # route and earn the taxi cap in their own climbing direction (they must drop
+    # from the apron body to the lower/higher route), not the flat apron cap.  Keys
+    # off the route PAVEMENT, so it fires even at a wide junction whose painted
+    # centerline is far from the contact.  ``None`` ⇒ off.
+    route_zone: object = None
 
 
 @dataclass
@@ -309,9 +326,27 @@ def build_context(layout, bucket_to_idx=None) -> "GradeContext":
         except Exception:                                     # pragma: no cover
             road_zone = None
 
+    # Taxi-ROUTE pavement zone — apron edges that contact it are contact ramps and
+    # earn the taxi cap (user 2026-06-30).  Keyed off the pavement (not the far
+    # centerline) so it fires at wide-junction contacts.  Gate O4_APRON_ROUTE_CONTACT.
+    route_zone = None
+    if APRON_ROUTE_CONTACT:
+        route_polys = [s.polygon for s in layout.shapes
+                       if s.role in ("junction", "primary_parallel",
+                                     "secondary_parallel", "stub", "cross_connector")
+                       and s.polygon is not None and not s.polygon.is_empty]
+        if route_polys:
+            try:
+                from shapely.ops import unary_union as _uu
+                from shapely.prepared import prep as _prep
+                route_zone = _prep(_uu(route_polys).buffer(_ROUTE_CONTACT_TOL_M))
+            except Exception:                                 # pragma: no cover
+                route_zone = None
+
     return GradeContext(centerlines=cls, routes=routes,
                         inherited_junction_cap=_inherited,
-                        building_keys=frozenset(bld_keys), road_zone=road_zone)
+                        building_keys=frozenset(bld_keys), road_zone=road_zone,
+                        route_zone=route_zone)
 
 
 # ── visibility ──────────────────────────────────────────────────────────────
@@ -505,7 +540,8 @@ def _nearest_centerline(x: float, y: float, ctx: GradeContext):
     return best_d, best_cap, best_t
 
 
-def _apron_edge_cap(xi, yi, xj, yj, ni, nj, body_cap, twist):
+def _apron_edge_cap(xi, yi, xj, yj, ni, nj, body_cap, twist, boundary=False,
+                    contact=False):
     """Apron cap near a taxi route (user 2026-06-25): an apron edge earns the
     route's (looser) cap as it nears the route, decaying to ``body_cap`` past
     ``APRON_TAXI_TRANSITION_M``.  ``ni``/``nj`` = ``_nearest_centerline`` at each
@@ -513,19 +549,33 @@ def _apron_edge_cap(xi, yi, xj, yj, ni, nj, body_cap, twist):
 
     ``twist`` (the edge touches a building frontage): the apron WARPS to blend the
     flat pad into the climbing route — its corners slope ± to meet the route — so
-    the looser cap applies in ALL directions (isotropic).  Elsewhere only the
-    ALONG-route component earns it (the apron still grades ``body_cap``
-    perpendicular, from its edges to the spine)."""
+    the looser cap applies in ALL directions (isotropic).
+
+    ``boundary`` (user 2026-06-30): a RING-ADJACENT apron edge that runs along a
+    taxi route is the apron's CONTACT with the route — it must drop from the apron
+    body down to the (lower/higher) route it abuts, so like a frontage warp it
+    grades the route cap in its OWN direction (isotropic), not only parallel to the
+    centerline.  This is what lets an apron↔taxiway contact ramp exceed the flat
+    apron cap instead of being false-flagged as an apron body violation.
+
+    ``contact`` (an endpoint is welded to a taxi-route pavement, via ``route_zone``)
+    forces the FULL route cap regardless of centerline distance — the corner of a
+    wide junction is metres from its own painted centerline, but it is still the
+    apron's contact with that route, so the along-centerline decay must not shrink
+    the allowance to nothing there.
+
+    Otherwise only the ALONG-route component earns it (the apron still grades
+    ``body_cap`` perpendicular, from its edges to the spine)."""
     d, route_cap, tan = (ni if ni[0] <= nj[0] else nj)
     # The frontage warp needs MORE than the route cap (the route's climb along the
     # pad is compressed into the apron depth), so the twist target is the
     # back-edge ramp grade; elsewhere the apron blends toward the route cap.
     target = max(route_cap, APRON_BACK_EDGE_GRADE) if twist else route_cap
-    if target <= body_cap or d >= APRON_TAXI_TRANSITION_M:
+    if target <= body_cap or (d >= APRON_TAXI_TRANSITION_M and not contact):
         return body_cap
-    dist_factor = 1.0 - d / APRON_TAXI_TRANSITION_M
-    if twist:
-        infl = dist_factor                               # isotropic (the warp)
+    dist_factor = 1.0 if contact else 1.0 - d / APRON_TAXI_TRANSITION_M
+    if twist or boundary or contact:
+        infl = dist_factor                               # isotropic (warp/contact)
     else:
         ex, ey = xj - xi, yj - yi
         el = math.hypot(ex, ey) or 1e-9
@@ -635,6 +685,13 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
         from shapely.geometry import Point as _RPt
         road_vert = [ctx.road_zone.contains(_RPt(x, y)) for (x, y) in ring]
 
+    # Per-vertex taxi-route-pavement contact (apron only): a ring node welded to a
+    # junction/parallel/stub pavement makes its ring edges contact ramps → taxi cap.
+    route_vert = None
+    if ctx.route_zone is not None and shape.role == APRON_ROLE and near is not None:
+        from shapely.geometry import Point as _RPt2
+        route_vert = [ctx.route_zone.contains(_RPt2(x, y)) for (x, y) in ring]
+
     # ANISOTROPIC EDGES (O4_ANISO_EDGES): per-vertex nearest chained route, so a
     # surviving spine / junction-body / apron-blend pair can be decomposed against
     # its route (Δs∥ = spine arc) and its budget BAKED into the Allowance.  Off ⇒
@@ -680,10 +737,13 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
                               crosses_spine(_a, _b, _c, _d))
             blend_fn = None
             if near is not None:
+                _ct = bool(route_vert and ring_adjacent
+                           and (route_vert[i] or route_vert[j]))
                 blend_fn = (lambda _a=xi, _b=yi, _c=xj, _d=yj, _ni=near[i],
-                            _nj=near[j], _kb=(ki_bld or kj_bld):
+                            _nj=near[j], _kb=(ki_bld or kj_bld),
+                            _ra=(ring_adjacent and APRON_ROUTE_CONTACT), _cn=_ct:
                             _apron_edge_cap(_a, _b, _c, _d, _ni, _nj,
-                                            body_cap, _kb))
+                                            body_cap, _kb, boundary=_ra, contact=_cn))
 
             both_road = bool(road_vert and road_vert[i] and road_vert[j])
             allow = GL.classify_pair(GL.PairContext(

@@ -832,7 +832,12 @@ BUILD_PROGRESS = _os.environ.get("O4_BUILD_PROGRESS", "1") == "1"
 # route.  Lives in the shared grade_graph so the solver grades to it AND the
 # validator accepts it (one graph).  O4_APRON_TAXI_BLEND=0 reverts to flat 1 %.
 APRON_TAXI_BLEND = _os.environ.get("O4_APRON_TAXI_BLEND", "1") == "1"
-APRON_TAXI_TRANSITION_M = 30.0
+# 40 m (user 2026-06-30): a route CENTERLINE is offset from the apron edge by the
+# taxiway half-width plus the wide-junction pavement it runs through, so a taxi
+# route arcing past an apron corner sits ~36 m from the apron edge even though the
+# pavement is adjacent — the apron edge must still reach it to decompose against
+# the arc (and blend to its cap) rather than fall back to the flat apron 1 %.
+APRON_TAXI_TRANSITION_M = float(_os.environ.get("O4_APRON_TAXI_TRANSITION_M", "40"))
 
 # ANISOTROPIC WITHIN-SHAPE EDGES (docs/anisotropic_edge_handling_plan.md).  When
 # ON, a spine / junction-body / apron-blend pair's grade budget is the anisotropic
