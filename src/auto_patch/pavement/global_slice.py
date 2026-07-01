@@ -1,0 +1,467 @@
+"""Curve-native spine v2, Phase 1 — the GLOBAL slice.
+
+Instead of manufacturing straight taxi rects and slicing junctions out of
+the residue, cut the REAL ``pav_union`` (already following every true
+curve, fillet and width change) by the recognized curved centerlines in
+ONE global polygonize arrangement.  Each resulting face is a grading cell
+that carries a spine edge; because every face is born from the same
+grid-snapped, re-noded arrangement, the faces share EXACT edges — so the
+result is conformant (no T-junctions) by construction, with no per-junction
+weld/repair pass.
+
+This module is pure geometry (no elevations, no roles beyond a placeholder).
+It is consumed behind the ``O4_CURVE_NATIVE_SPINE`` gate.  See
+docs/curve_native_spine_v2_plan.md.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from shapely import union_all
+from shapely.geometry import LineString, MultiLineString, Point, Polygon
+from shapely.ops import polygonize, unary_union
+
+from ..config import SPINE_STEP_M
+
+# Same polygonize-noding grid + min-piece area as the per-junction slice
+# (``junction_spine``) so the two produce comparable geometry.
+_GRID_SIZE = 0.01
+_MIN_PIECE_AREA = 0.25
+# A face vertex within this of a centerline lies ON that centerline (the
+# solver's ``grade_graph.SPINE_PERP_TOL_M``).
+_ON_TOL_M = 1.0
+
+# ── Dead-end keyhole ─────────────────────────────────────────────────
+# A centerline that terminates INSIDE the pavement is a dangling cut.
+# ``polygonize`` keeps only minimal CYCLES and drops bridge edges, so a
+# bare dead-end (or a dead-end reaching a detached ring) never becomes a
+# face boundary — no spine nodes at the tip.  A medial line only becomes a
+# face edge when it SEPARATES two regions, i.e. reaches a boundary.  So the
+# keyhole spurs the tip to the nearest pavement boundary (the corridor
+# side-rail, or a stand's building-pad hole): the short spur + the
+# centerline then run boundary-to-boundary and split off a face, putting
+# spine nodes on the centerline to its tip.  The spur is the "tiny keyhole
+# in the pavement" — a hairline cut to the nearest edge, kept short by the
+# cap below.  The centerlines fed here are recognized, route-ridden lines
+# (recognition already dropped stray paint), so every free interior end is
+# a real taxiway terminus.
+#
+# An endpoint farther than this from the pavement boundary is INTERIOR.
+_DEADEND_BOUNDARY_TOL_M = 3.0
+# Another centerline within this of an endpoint means it JOINS the graph
+# there (a junction node), not a free dead-end.
+_JOIN_TOL_M = 3.0
+# Do not spur a tip whose nearest boundary is farther than this (a taxi
+# corridor is at most ~this wide; a longer spur would seam an open apron).
+_KEYHOLE_MAX_SPUR_M = 40.0
+
+
+@dataclass
+class SliceFace:
+    """One polygonized grading cell from the global slice."""
+    polygon: Polygon
+    # Indices (into the input centerline list) whose line touches this face.
+    centerline_ids: list[int] = field(default_factory=list)
+    # Phase-2 classification (set by ``classify_faces``): "corridor",
+    # "junction", or "apron"; ``axis`` is the centerline arc a corridor face
+    # runs along (its spine), else None.
+    kind: str = ""
+    axis: LineString | None = None
+
+
+# A single-centerline face wider than this (mean width = area / shared-edge
+# length) is an APRON, not a taxi CORRIDOR.  ~ICAO-F taxiway + fillet slack.
+_CORRIDOR_MAX_WIDTH_M = 50.0
+# A face with ≥2 centerlines but larger than this is a big open pavement an
+# aircraft crosses (an APRON), NOT a tight taxiway junction — grade it with the
+# gentle apron body model, not junction all-pair at 1.5%.  Matches the rect
+# model, where junctions are small residue pieces and aprons are the big blobs.
+_JUNCTION_MAX_AREA_M2 = 2500.0
+
+
+def classify_faces(faces: list[SliceFace], centerlines: list[LineString]
+                   ) -> None:
+    """Tag each face corridor / junction / apron from spine topology, in place.
+
+    * **junction** — ≥2 centerlines meet/cross AND the face is small
+      (≤ ``_JUNCTION_MAX_AREA_M2``); a bigger multi-centerline face is an apron.
+    * **corridor** — exactly 1 centerline, and the face is narrow (mean width
+      = area / shared-edge length ≤ ``_CORRIDOR_MAX_WIDTH_M``); ``axis`` is set.
+    * **apron** — everything else (0 centerlines, wide 1-CL, or big multi-CL)."""
+    for face in faces:
+        ids = face.centerline_ids
+        if len(ids) >= 2:
+            if face.polygon.area <= _JUNCTION_MAX_AREA_M2:
+                face.kind = "junction"
+                face.axis = None
+                continue
+            # big multi-centerline pavement → apron (handled below)
+        elif len(ids) == 1:
+            cl = centerlines[ids[0]]
+            shared = 0.0
+            try:
+                shared = face.polygon.exterior.intersection(
+                    cl.buffer(_ON_TOL_M, cap_style=2)).length
+            except Exception:
+                shared = 0.0
+            width = (face.polygon.area / shared) if shared > 1.0 else 1e9
+            if width <= _CORRIDOR_MAX_WIDTH_M:
+                face.kind = "corridor"
+                face.axis = cl
+                continue
+        face.kind = "apron"
+        face.axis = None
+
+
+def _resample(line: LineString, step: float) -> LineString:
+    """Even node spacing along ``line`` at ``step`` m so the shared edge a
+    through-centerline creates carries nodes ~``step`` apart (matching the
+    spine densification the solver expects)."""
+    L = line.length
+    if L <= step or step <= 0:
+        return line
+    n = max(2, int(round(L / step)) + 1)
+    return LineString([line.interpolate(i * L / (n - 1)) for i in range(n)])
+
+
+def _as_lines(geom) -> list[LineString]:
+    if geom is None or geom.is_empty:
+        return []
+    if isinstance(geom, LineString):
+        return [geom]
+    if isinstance(geom, MultiLineString):
+        return [g for g in geom.geoms if not g.is_empty]
+    # GeometryCollection etc. — keep only 1-D parts.
+    out = []
+    for g in getattr(geom, "geoms", ()):
+        if isinstance(g, (LineString, MultiLineString)):
+            out.extend(_as_lines(g))
+    return out
+
+
+# Two centerlines running within this of each other are the SAME physical
+# line (a recognized curve can ride a straight route offset up to ~7 m, so
+# a painted line and the route it swapped can co-exist over the pavement) —
+# keep only one, else the buried duplicate carries no spine nodes.
+_DEDUP_TOL_M = 3.5
+_DEDUP_MIN_KEEP_M = 4.0
+
+
+def dedup_centerlines(lines: list[LineString], tol: float = _DEDUP_TOL_M
+                      ) -> list[LineString]:
+    """Greedily drop stretches of each line that run coincident with an
+    already-kept line, so no two centerlines overlap (which would bury the
+    duplicate inside a face with no nodes).  Distinct parallel taxiways
+    (> ``tol`` apart) are untouched — they never bury each other."""
+    order = sorted(range(len(lines)),
+                   key=lambda i: lines[i].length if lines[i] else 0.0,
+                   reverse=True)
+    kept: list[LineString] = []
+    kept_buf = None
+    for i in order:
+        cl = lines[i]
+        if cl is None or cl.is_empty or cl.length < 1.0:
+            continue
+        remain = cl
+        if kept_buf is not None:
+            try:
+                remain = cl.difference(kept_buf)
+            except Exception:
+                remain = cl
+        for piece in _as_lines(remain):
+            if piece.length < _DEDUP_MIN_KEEP_M:
+                continue
+            kept.append(piece)
+        try:
+            buf = cl.buffer(tol, cap_style=2)
+            kept_buf = buf if kept_buf is None else kept_buf.union(buf)
+        except Exception:
+            pass
+    return kept
+
+
+def _boundary_lines(poly: Polygon) -> list[LineString]:
+    """Exterior + hole boundaries of a Polygon / MultiPolygon as lines."""
+    out: list[LineString] = []
+    geoms = getattr(poly, "geoms", None) or [poly]
+    for g in geoms:
+        if g.is_empty or g.geom_type != "Polygon":
+            continue
+        out.append(LineString(g.exterior.coords))
+        for hole in g.interiors:
+            out.append(LineString(hole.coords))
+    return out
+
+
+def build_global_slice_faces(
+    pav_union: Polygon,
+    centerlines: list[LineString],
+    *,
+    runway_union: Polygon | None = None,
+    step: float = SPINE_STEP_M,
+    keyholes: bool = True,
+    dedup: bool = True,
+    extra_cuts: list[LineString] | None = None,
+    collect_spurs: list | None = None,
+) -> list[SliceFace]:
+    """Cut ``pav_union`` by ``centerlines`` into conformant grading faces.
+
+    ``centerlines`` are continuous aircraft-taxi lines in the layout meter
+    frame.  When ``dedup`` is set, coincident/overlapping lines are reduced to
+    one representative first (else the buried duplicate carries no nodes).
+    When ``keyholes`` is set, each free interior dead-end is spurred to the
+    nearest boundary so its centerline grades to its tip.  ``extra_cuts`` are
+    additional caller-supplied cut lines.  Returns the faces that lie on
+    pavement, each tagged with the (effective, post-dedup) centerline indices
+    it touches; ``effective_centerlines`` returns that same list.
+    """
+    if pav_union is None or pav_union.is_empty:
+        return []
+    pav = pav_union
+    if runway_union is not None and not runway_union.is_empty:
+        pav = pav.difference(runway_union)
+    if pav.is_empty:
+        return []
+
+    if dedup:
+        centerlines = dedup_centerlines(centerlines)
+
+    # Clip each centerline to the pavement (recognition feeds them un-clipped)
+    # and resample to even node spacing, so the shared edges carry ~step nodes.
+    cut_lines: list[LineString] = list(_boundary_lines(pav))
+    clipped: list[LineString] = []          # index-aligned to ``centerlines``
+    for cl in centerlines:
+        if cl is None or cl.is_empty or cl.length < 1.0:
+            clipped.append(None)
+            continue
+        try:
+            inside = cl.intersection(pav)
+        except Exception:
+            clipped.append(None)
+            continue
+        parts = _as_lines(inside)
+        if not parts:
+            clipped.append(None)
+            continue
+        merged = unary_union(parts) if len(parts) > 1 else parts[0]
+        line = merged if isinstance(merged, LineString) else None
+        # Keep the longest piece as the representative for tagging/coverage;
+        # feed ALL pieces as cuts.
+        rep = None
+        for p in _as_lines(merged) if line is None else [line]:
+            rp = _resample(p, step)
+            cut_lines.append(rp)
+            if rep is None or rp.length > rep.length:
+                rep = rp
+        clipped.append(rep)
+
+    # Dead-end keyholes: spur each free interior terminus to the nearest
+    # pavement boundary so the centerline separates a face (nodes to the tip).
+    if keyholes:
+        from shapely.ops import nearest_points
+        pav_bnd = pav.boundary
+        for i, rep in enumerate(clipped):
+            if rep is None:
+                continue
+            rc = list(rep.coords)
+            for end in (Point(rc[0]), Point(rc[-1])):
+                if pav_bnd.distance(end) <= _DEADEND_BOUNDARY_TOL_M:
+                    continue                       # reaches a pavement edge
+                joined = False
+                for j, other in enumerate(clipped):
+                    if j == i or other is None:
+                        continue
+                    if other.distance(end) <= _JOIN_TOL_M:
+                        joined = True
+                        break
+                if joined:
+                    continue                       # a junction node, not a tip
+                _, bpt = nearest_points(end, pav_bnd)
+                if end.distance(bpt) > _KEYHOLE_MAX_SPUR_M:
+                    continue                       # too far — would seam apron
+                spur = LineString([(end.x, end.y), (bpt.x, bpt.y)])
+                cut_lines.append(spur)
+                if collect_spurs is not None:
+                    collect_spurs.append(("deadend", spur))
+
+    if extra_cuts:
+        cut_lines.extend(c for c in extra_cuts if c is not None and not c.is_empty)
+
+    def _polygonize(cuts):
+        arrangement = union_all(cuts, grid_size=_GRID_SIZE)
+        out = []
+        for f in polygonize(arrangement):
+            if f.is_empty or f.area < _MIN_PIECE_AREA:
+                continue
+            if not pav.contains(f.representative_point()):
+                continue
+            out.append(f)
+        return out
+
+    # Pass 1.  A "bridge" centerline (a line whose interior lies wholly inside
+    # one wide face, separating nothing — a deep-interior connector or cluster)
+    # is dropped by polygonize, leaving no nodes on it.  Detect those and spur
+    # their interior endpoints to the nearest boundary so they become separating
+    # edges in pass 2 (the keyhole generalised from dead-ends to any buried end).
+    if keyholes:
+        from shapely.ops import nearest_points, unary_union as _uu
+        raw = _polygonize(cut_lines)
+        face_bnd = _uu([f.exterior for f in raw]) if raw else None
+        pav_bnd = pav.boundary
+        extra = []
+        if face_bnd is not None:
+            for rep in clipped:
+                if rep is None:
+                    continue
+                mid = rep.interpolate(0.5, normalized=True)
+                if face_bnd.distance(mid) <= _ON_TOL_M:
+                    continue                       # already an edge somewhere
+                rc = list(rep.coords)
+                for end in (Point(rc[0]), Point(rc[-1])):
+                    if pav_bnd.distance(end) <= _DEADEND_BOUNDARY_TOL_M:
+                        continue
+                    _, bpt = nearest_points(end, pav_bnd)
+                    if end.distance(bpt) > _KEYHOLE_MAX_SPUR_M:
+                        continue
+                    spur = LineString([(end.x, end.y), (bpt.x, bpt.y)])
+                    extra.append(spur)
+                    if collect_spurs is not None:
+                        collect_spurs.append(("bridge", spur))
+        cut_lines.extend(extra)
+
+    # Final grid-snapped, re-noded arrangement → conformant faces by construction.
+    faces: list[SliceFace] = [
+        SliceFace(polygon=f, centerline_ids=[]) for f in _polygonize(cut_lines)]
+
+    # Tag each face with the centerlines that run along its boundary.
+    for face in faces:
+        ring = face.polygon.exterior
+        for ci, cl in enumerate(clipped):
+            if cl is None:
+                continue
+            # A centerline touches the face when a run of the face's boundary
+            # lies within _ON_TOL_M of it (shared edge), not merely a crossing.
+            if ring.distance(cl) <= _ON_TOL_M and cl.distance(face.polygon) <= _ON_TOL_M:
+                face.centerline_ids.append(ci)
+
+    return faces
+
+
+def _osm_write(layout, entries, path: str) -> None:
+    """Write ``entries`` (list of (geometry, {tag:val})) to a JOSM-readable OSM
+    file, converting the layout's meter frame to lat/lon via ``m_to_ll`` so it
+    overlays the emitted patch exactly.  Polygons emit their exterior + each
+    hole as separate closed ways; LineStrings emit as open ways."""
+    nid = [0]
+    nodes: list[str] = []
+    ways: list[str] = []
+
+    def _ring(coords, tags):
+        ids = []
+        for (x, y) in coords:
+            nid[0] -= 1
+            lat, lon = layout.m_to_ll(x, y)
+            nodes.append(f"  <node id='{nid[0]}' visible='true' "
+                         f"lat='{lat:.9f}' lon='{lon:.9f}'/>")
+            ids.append(nid[0])
+        nid[0] -= 1
+        wid = nid[0]
+        nds = "".join(f"    <nd ref='{i}'/>\n" for i in ids)
+        tg = "".join(f"    <tag k='{k}' v='{v}'/>\n" for k, v in tags.items())
+        ways.append(f"  <way id='{wid}' visible='true'>\n{nds}{tg}  </way>")
+
+    for geom, tags in entries:
+        if geom is None or geom.is_empty:
+            continue
+        polys = getattr(geom, "geoms", None)
+        if geom.geom_type in ("Polygon", "MultiPolygon"):
+            for g in (polys or [geom]):
+                if g.is_empty or g.geom_type != "Polygon":
+                    continue
+                _ring(list(g.exterior.coords), {**tags, "part": "outline"})
+                for h in g.interiors:
+                    _ring(list(h.coords), {**tags, "part": "hole"})
+        else:
+            for ln in _as_lines(geom):
+                _ring(list(ln.coords), tags)
+
+    with open(path, "w") as f:
+        f.write("<?xml version='1.0' encoding='UTF-8'?>\n"
+                "<osm version='0.6' generator='global_slice'>\n")
+        f.write("\n".join(nodes))
+        f.write("\n")
+        f.write("\n".join(ways))
+        f.write("\n</osm>\n")
+
+
+def dump_slice_inputs_osm(layout, pav, centerlines, prefix: str,
+                          *, runway_union=None) -> None:
+    """Write two JOSM layers: ``<prefix>_pavement.osm`` (the pav_union outline +
+    holes actually fed to the slice) and ``<prefix>_spine.osm`` (the centerlines
+    + the dead-end / bridge keyhole spurs the slice will add)."""
+    pav_eff = pav
+    if runway_union is not None and not runway_union.is_empty:
+        try:
+            pav_eff = pav.difference(runway_union)
+        except Exception:
+            pav_eff = pav
+    _osm_write(layout, [(pav_eff, {"layer": "pav_union"})],
+               f"{prefix}_pavement.osm")
+    # Re-derive the exact cut lines (centerlines + spurs) the slice will apply.
+    spurs: list = []
+    faces = build_global_slice_faces(
+        pav, centerlines, runway_union=runway_union, dedup=False,
+        collect_spurs=spurs)
+    entries = []
+    for i, cl in enumerate(centerlines):
+        if cl is not None and not cl.is_empty:
+            entries.append((cl, {"layer": "spine", "cl": str(i)}))
+    _osm_write(layout, entries, f"{prefix}_spine.osm")
+    _osm_write(layout, [(s, {"layer": "spur", "kind": k}) for k, s in spurs],
+               f"{prefix}_spur.osm")
+    print(f"[global_slice] dumped {prefix}_pavement.osm ({len(centerlines)} "
+          f"centerline(s)) + {prefix}_spine.osm + {prefix}_spur.osm "
+          f"({len(spurs)} spur(s)); faces={len(faces)}")
+
+
+def slice_coverage(
+    faces: list[SliceFace],
+    centerlines: list[LineString],
+    *,
+    step: float = SPINE_STEP_M,
+) -> tuple[float, float]:
+    """(covered_len, total_len) of ``centerlines`` by face vertices within
+    ``_ON_TOL_M`` — the same metric ``tools/spine_coverage.py`` reports, but
+    computed directly from the faces (no full build)."""
+    verts: list[tuple[float, float]] = []
+    for face in faces:
+        verts.extend(face.polygon.exterior.coords)
+        for hole in face.polygon.interiors:
+            verts.extend(hole.coords)
+    cover_r = 0.75 * step
+    total = 0.0
+    covered = 0.0
+    for cl in centerlines:
+        if cl is None or cl.is_empty or cl.length < 1.0:
+            continue
+        L = cl.length
+        total += L
+        intervals = []
+        for (x, y) in verts:
+            p = Point(x, y)
+            if cl.distance(p) > _ON_TOL_M:
+                continue
+            a = cl.project(p)
+            intervals.append((max(0.0, a - cover_r), min(L, a + cover_r)))
+        intervals.sort()
+        if not intervals:
+            continue
+        ca, cb = intervals[0]
+        for a, b in intervals[1:]:
+            if a <= cb:
+                cb = max(cb, b)
+            else:
+                covered += cb - ca
+                ca, cb = a, b
+        covered += cb - ca
+    return covered, total

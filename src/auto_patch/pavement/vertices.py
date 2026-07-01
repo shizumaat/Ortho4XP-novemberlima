@@ -1376,3 +1376,150 @@ def _validate_shared_vertex_invariant(layout: "PavementLayout",
                                 # fine, created spurious crossings at
                                 # every sub-way endpoint)
 JUNCTION_RADIUS_SCALE = 1.5     # disc radius = local_half_width × this
+
+
+# ── Scoop tight under-sampled turns (user 2026-06-30, gate O4_ROUND_TURNBACK) ─
+# At a few spots a SHORT boundary edge meets a STEEP TURN coming off a LONG edge
+# (the boundary departs sharply with no intermediate nodes to model the turn —
+# SPJC apron ring[29]→[30] / [2]→[3]).  Replace that short edge with a concave
+# ``scoop`` — a ~5-node half-circle bulging toward the shape INTERIOR — so the
+# boundary eases the turn on an arc (longer path ⇒ the grade spreads) instead of
+# a single abrupt chord.  Concave (inward), not a convex bump.
+_RTB_MAX_TURN_INTERIOR_DEG = 100.0   # interior angle below this = a steep turn
+_RTB_LONG_EDGE_M = 18.0              # the approach edge into the turn
+_RTB_SHORT_EDGE_M = 10.0             # the under-sampled edge to scoop
+# The far end of the short edge must ease GENTLY but not run nearly straight —
+# this separates a freeform apron turn-back (far angle obtuse, 100–165°) from a
+# deliberate rectangular taxi-corner (≈180° straight-continuation or ≈90° next
+# square corner), which must be left untouched.
+_RTB_FAR_MIN_DEG = 100.0
+_RTB_FAR_MAX_DEG = 165.0
+_RTB_NODES = 5
+# Scoop depth as a fraction of the chord (sagitta).  Shallow by default: a deep
+# notch makes the solver pull the new interior nodes to terrain and the grade
+# gets WORSE.  Env-tunable for in-sim experimentation.
+_RTB_SAGITTA_FRAC = float(os.environ.get("O4_SCOOP_SAGITTA_FRAC", "0.35"))
+# All airside pavement.  Junctions and rect-spanning edges are fair game; the
+# gentle-far-side band (100–165°) excludes the ~90° square corners that make a
+# rect SIDE, so an edge between two corners of the SAME rect is never scooped —
+# only an edge that turns steeply off a long run while the far end eases.
+_RTB_ROLES = frozenset({
+    ROLE_JUNCTION, ROLE_APRON, ROLE_STUB, ROLE_CROSS_CONNECTOR,
+    ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL})
+
+
+def _rtb_unit(dx, dy):
+    n = math.hypot(dx, dy)
+    return (dx / n, dy / n) if n > 1e-9 else (0.0, 0.0)
+
+
+def _rtb_angle(a, v, b):
+    u1 = _rtb_unit(a[0] - v[0], a[1] - v[1])
+    u2 = _rtb_unit(b[0] - v[0], b[1] - v[1])
+    return math.degrees(math.acos(max(-1.0, min(1.0, u1[0]*u2[0] + u1[1]*u2[1]))))
+
+
+def _rtb_semicircle(P, Q, bulge, n=_RTB_NODES, sag_frac=None):
+    """``n`` points on a circular arc through P and Q whose mid-point bulges
+    toward ``bulge`` by ``sag_frac`` × |PQ| (sagitta).  sag_frac=0.5 is a true
+    half-circle; a shallow scoop uses a small fraction.  out[0]==P, out[-1]==Q."""
+    if sag_frac is None:
+        sag_frac = _RTB_SAGITTA_FRAC
+    chord = math.hypot(Q[0] - P[0], Q[1] - P[1])
+    if chord < 0.2:
+        return [P, Q]
+    mx, my = (P[0] + Q[0]) / 2, (P[1] + Q[1]) / 2
+    c = chord / 2.0
+    h = sag_frac * chord                      # sagitta
+    wx, wy = _rtb_unit(*( -(Q[1]-P[1]), Q[0]-P[0] ))   # unit ⟂ to chord
+    if wx * bulge[0] + wy * bulge[1] < 0:
+        wx, wy = -wx, -wy
+    R = (c*c + h*h) / (2*h)                    # arc radius
+    # circle centre is on the side OPPOSITE the bulge, at distance R-h from mid
+    ox, oy = mx - (R - h) * wx, my - (R - h) * wy
+    a0 = math.atan2(P[1]-oy, P[0]-ox)
+    a1 = math.atan2(Q[1]-oy, Q[0]-ox)
+    # take the short way that passes through the bulged mid-point
+    while a1 - a0 > math.pi:  a1 -= 2*math.pi
+    while a1 - a0 < -math.pi: a1 += 2*math.pi
+    out = []
+    for k in range(n):
+        th = a0 + (a1 - a0) * k / (n - 1)
+        out.append((ox + R * math.cos(th), oy + R * math.sin(th)))
+    out[0], out[-1] = P, Q
+    return out
+
+
+def _round_turnback_corners(layout: "PavementLayout", icao: str = "") -> int:
+    """Scoop a short under-sampled edge that meets a steep turn off a long edge
+    into a concave ``_RTB_NODES``-node half-circle (bulging toward the shape
+    interior).  Returns the count scooped; clears node_altitudes so the solver
+    re-grades the arc."""
+    if os.environ.get("O4_ROUND_TURNBACK", "0") != "1":
+        return 0
+    n_done = 0
+    for s in layout.shapes:
+        if (s.role not in _RTB_ROLES or s.polygon is None or s.polygon.is_empty
+                or s.polygon.geom_type != "Polygon"):
+            continue
+        try:
+            ring = list(s.polygon.exterior.coords)
+        except _GEOM_EXC:
+            continue
+        if ring and ring[0] == ring[-1]:
+            ring = ring[:-1]
+        n = len(ring)
+        if n < 4:
+            continue
+        cen = s.polygon.centroid
+        # Which edges to scoop: a SHORT edge whose ONE endpoint is a steep turn
+        # arriving off a LONG edge (the under-sampled turn).
+        scoop = set()
+        for i in range(n):
+            P = ring[i]; Q = ring[(i + 1) % n]
+            Lpq = math.hypot(Q[0]-P[0], Q[1]-P[1])
+            if not (1.0 < Lpq < _RTB_SHORT_EDGE_M):
+                continue
+            Pprev = ring[(i - 1) % n]; Qnext = ring[(i + 2) % n]
+            # steep turn at one end off a LONG approach edge, while the OTHER
+            # end eases gently (the under-sampled freeform turn-back).
+            angP = _rtb_angle(Pprev, P, Q)
+            longP = math.hypot(P[0]-Pprev[0], P[1]-Pprev[1]) > _RTB_LONG_EDGE_M
+            angQ = _rtb_angle(P, Q, Qnext)
+            longQ = math.hypot(Q[0]-Qnext[0], Q[1]-Qnext[1]) > _RTB_LONG_EDGE_M
+            steepP = (angP < _RTB_MAX_TURN_INTERIOR_DEG and longP
+                      and _RTB_FAR_MIN_DEG < angQ < _RTB_FAR_MAX_DEG)
+            steepQ = (angQ < _RTB_MAX_TURN_INTERIOR_DEG and longQ
+                      and _RTB_FAR_MIN_DEG < angP < _RTB_FAR_MAX_DEG)
+            if steepP or steepQ:
+                scoop.add(i)
+        if not scoop:
+            continue
+        new_ring: list = []
+        for i in range(n):
+            new_ring.append(ring[i])
+            if i in scoop:
+                P = ring[i]; Q = ring[(i + 1) % n]
+                mid = ((P[0]+Q[0])/2, (P[1]+Q[1])/2)
+                # Bulge INWARD = remove material (scoop out the convex point),
+                # not toward the centroid (wrong side on a concave corner).
+                # Pick the chord-normal whose tiny offset lands INSIDE the poly.
+                nx, ny = _rtb_unit(-(Q[1]-P[1]), Q[0]-P[0])
+                if not s.polygon.contains(Point(mid[0]+0.25*nx, mid[1]+0.25*ny)):
+                    nx, ny = -nx, -ny
+                new_ring.extend(_rtb_semicircle(P, Q, (nx, ny))[1:-1])
+        try:
+            poly = Polygon(new_ring + [new_ring[0]])
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            if poly.geom_type == "Polygon" and not poly.is_empty:
+                s.polygon = poly
+                s.node_altitudes = None
+                n_done += len(scoop)
+        except _GEOM_EXC:
+            continue
+    if n_done:
+        import O4_UI_Utils as UI
+        UI.vprint(1, f"  [pav-builder] {icao}: scooped {n_done} under-sampled "
+                  f"turn(s) into concave half-circle arcs.")
+    return n_done

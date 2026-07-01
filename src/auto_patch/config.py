@@ -867,7 +867,12 @@ def parallel_airports_worker_count(n_tasks: int) -> int:
 # route.  Lives in the shared grade_graph so the solver grades to it AND the
 # validator accepts it (one graph).  O4_APRON_TAXI_BLEND=0 reverts to flat 1 %.
 APRON_TAXI_BLEND = _os.environ.get("O4_APRON_TAXI_BLEND", "1") == "1"
-APRON_TAXI_TRANSITION_M = 30.0
+# 40 m (user 2026-06-30): a route CENTERLINE is offset from the apron edge by the
+# taxiway half-width plus the wide-junction pavement it runs through, so a taxi
+# route arcing past an apron corner sits ~36 m from the apron edge even though the
+# pavement is adjacent — the apron edge must still reach it to decompose against
+# the arc (and blend to its cap) rather than fall back to the flat apron 1 %.
+APRON_TAXI_TRANSITION_M = float(_os.environ.get("O4_APRON_TAXI_TRANSITION_M", "40"))
 
 # ANISOTROPIC WITHIN-SHAPE EDGES (docs/anisotropic_edge_handling_plan.md).  When
 # ON, a spine / junction-body / apron-blend pair's grade budget is the anisotropic
@@ -1227,6 +1232,17 @@ SPINE_STEP_M = float(_os.environ.get("O4_JCT_SPINE_STEP_M", "12.0"))
 # O4_JCT_SPINE_INTERIOR_STITCH=0 to restore the plain-only (pre-fix) slice.
 JUNCTION_SPINE_INTERIOR_STITCH = _os.environ.get(
     "O4_JCT_SPINE_INTERIOR_STITCH", "1") == "1"
+
+# (20260701) CURVE-NATIVE SPINE v2 — docs/curve_native_spine_v2_plan.md.
+# Instead of manufacturing straight taxi rects and slicing junctions/aprons
+# out of the residue, CUT the real ``pav_union`` (which already follows every
+# true curve, fillet and width change) by the RECOGNIZED curved centerlines in
+# ONE global polygonize arrangement.  Each face is a grading cell carrying a
+# spine edge; conformance is 0/0 by construction (one re-noded arrangement →
+# faces share exact edges, no T-junction repair, no sliver/residue cleanup).
+# Requires O4_RECOGNIZED_CENTERLINES for a curved spine to cut with.  Default
+# OFF; gate-OFF byte-identical to the rect pipeline.  Env O4_CURVE_NATIVE_SPINE.
+CURVE_NATIVE_SPINE = _os.environ.get("O4_CURVE_NATIVE_SPINE", "0") == "1"
 
 # (20260620) SPINE PIECE ROLE RE-EVALUATION — apron-spine grade model.
 # ``_reclassify_apron_junctions`` (junction_repair) runs BEFORE the spine
