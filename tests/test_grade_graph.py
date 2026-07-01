@@ -65,16 +65,22 @@ def test_junction_with_spine_uniform_taxiway_cap():
 
 
 def test_apron_with_spine_taxi_on_spine_one_percent_body():
-    ring = [(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0),
-            (0.0, 10.0), (20.0, 10.0)]
+    # Same topology as the junction spine test, scaled 4× in y so the bottom
+    # body edge (corners 0→1) sits 40 m from the mid-height spine — beyond
+    # APRON_TAXI_TRANSITION_M (30 m).  With O4_APRON_TAXI_BLEND on, a body edge
+    # that is BOTH near AND along a running taxiway earns a blended cap (see
+    # _apron_edge_cap); placing this edge past the transition lets it decay back
+    # to the flat apron 1 % so the body-vs-spine distinction is what's tested.
+    ring = [(0.0, 0.0), (20.0, 0.0), (20.0, 80.0), (0.0, 80.0),
+            (0.0, 40.0), (20.0, 40.0)]
     keys = list(range(len(ring)))
-    cl = GG.Centerline(pts=[(0.0, 10.0), (20.0, 10.0)], seg_caps=[TAXI_MAX_GRADE])
+    cl = GG.Centerline(pts=[(0.0, 40.0), (20.0, 40.0)], seg_caps=[TAXI_MAX_GRADE])
     s = GG.GradeShape(role="apron", ring=ring, keys=keys)
     ctx = GG.GradeContext(centerlines=[cl])
     sc = GG.shape_constraints(s, ctx)
     # spine pair (4,5) at taxiway cap
     assert _cap_of(sc, 4, 5) == pytest.approx(TAXI_MAX_GRADE)
-    # a body pair (corner 0 to corner 1) at apron 1%
+    # a body pair (corner 0 to corner 1), 40 m from the spine → flat apron 1%
     assert _cap_of(sc, 0, 1) == pytest.approx(APRON_MAX_GRADE)
 
 
