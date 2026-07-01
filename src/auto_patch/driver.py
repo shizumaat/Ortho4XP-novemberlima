@@ -193,9 +193,18 @@ def _build_write_verify_one(task: dict) -> dict:
     verify_log_path.
     """
     import time as _time
+    import traceback as _tb
     from collections import Counter as _Counter
     icao = task["icao"]
     t_apt = _time.time()
+    # Catch BROADLY (Exception, not just _DRIVER_EXC): one airport's build must
+    # never abort the whole tile (serial: an uncaught error propagates out of the
+    # caller's list-comp and aborts every remaining airport) nor vanish as an
+    # anonymous "worker died hard" (parallel: the pool loses the icao).  Any
+    # failure is CONTAINED here and returned WITH its icao + traceback so the main
+    # process logs which airport failed and why — no patch is ever silently
+    # dropped.  (A hard process death — segfault/OOM-kill — still escapes Python
+    # and is handled as a dead future in ``_run_build_tasks``.)
     try:
         from .pipeline import build_airport_pavement
         layout = build_airport_pavement(
@@ -206,16 +215,18 @@ def _build_write_verify_one(task: dict) -> dict:
             current_tile_lat=task["tile_lat"],
             current_tile_lon=task["tile_lon"],
         )
-    except _DRIVER_EXC as _e:
-        return {"icao": icao, "ok": False, "stage": "build", "error": str(_e)}
+    except Exception as _e:
+        return {"icao": icao, "ok": False, "stage": "build", "error": str(_e),
+                "traceback": _tb.format_exc()}
     try:
         _pd = os.path.dirname(task["auto_patch_file"])
         if _pd and not os.path.exists(_pd):
             os.makedirs(_pd)
         layout.to_osm(task["auto_patch_file"])
-    except _DRIVER_EXC as _e:
+    except Exception as _e:
         return {"icao": icao, "ok": False, "stage": "write", "error": str(_e),
-                "auto_patch_file": task["auto_patch_file"]}
+                "auto_patch_file": task["auto_patch_file"],
+                "traceback": _tb.format_exc()}
     counts = _Counter(s.role for s in layout.shapes)
     summary = " + ".join("{} {}".format(n, r) for r, n in
                          sorted(counts.items(), key=lambda x: -x[1]))
@@ -227,7 +238,7 @@ def _build_write_verify_one(task: dict) -> dict:
     try:
         from .verification import verify_and_log
         verify_and_log(layout, icao, debug_log_path=task["verify_log_path"])
-    except _DRIVER_EXC as _ve:
+    except Exception as _ve:
         verify_err = str(_ve)
     return {"icao": icao, "ok": True, "summary": summary, "build_s": build_s,
             "verify_s": _time.time() - t_v, "verify_err": verify_err,
@@ -324,8 +335,19 @@ def _run_build_tasks(tasks: list, tile, auto_patched: list,
                 UI.lvprint(0, "   Auto-patch: Failed to write",
                            t["auto_patch_file"], ":", r.get("error"))
             else:
-                UI.lvprint(0, "   Auto-patch: Pavement builder failed for",
+                UI.lvprint(0, "   Auto-patch: Pavement builder FAILED for",
                            icao, "(", stage, "):", r.get("error"))
+            # Persist the full traceback to the per-tile verify debug log so the
+            # cause of a dropped patch is recoverable (the console only shows the
+            # one-line error).
+            _trace = r.get("traceback")
+            if _trace:
+                try:
+                    with open(verify_debug_path, "a") as _lf:
+                        _lf.write("\n=== {} build FAILED ({}) ===\n{}\n".format(
+                            icao, stage, _trace))
+                except OSError:
+                    pass
             continue
         UI.vprint(1, "   Auto-patch: Generated", icao,
                   "(" + r["summary"] + ")")
