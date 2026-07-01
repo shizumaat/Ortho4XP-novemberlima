@@ -1216,6 +1216,17 @@ JUNCTION_CENTERLINE_SPINE = _os.environ.get("O4_JCT_SPINE", "1") == "1"
 # Spacing (m) of spine nodes densified along each crossing centerline
 # inside a junction.
 SPINE_STEP_M = float(_os.environ.get("O4_JCT_SPINE_STEP_M", "12.0"))
+# (20260701) INTERIOR-STITCH fallback for the junction slice.  A taxi route
+# is bend-split into TaxiCenterline pieces; where it bends INSIDE a junction,
+# each piece dead-ends in the interior and the per-piece cut spans no
+# boundary, so polygonize never splits the shape and no spine forms (HECA
+# T5→05C).  When ON, ``_partition_junction`` tries the plain per-piece slice
+# FIRST and only when it fails to split retries with the crossing pieces
+# stitched at their shared INTERIOR bends — so junctions that already slice
+# stay byte-identical and only no-spine shapes are rescued.  Set
+# O4_JCT_SPINE_INTERIOR_STITCH=0 to restore the plain-only (pre-fix) slice.
+JUNCTION_SPINE_INTERIOR_STITCH = _os.environ.get(
+    "O4_JCT_SPINE_INTERIOR_STITCH", "1") == "1"
 
 # (20260620) SPINE PIECE ROLE RE-EVALUATION — apron-spine grade model.
 # ``_reclassify_apron_junctions`` (junction_repair) runs BEFORE the spine

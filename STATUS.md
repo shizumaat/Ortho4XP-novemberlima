@@ -1,8 +1,8 @@
-# STATUS — handover (2026-07-01) — HECA F→05R FIXED; **T5→05C spine still OPEN**
+# STATUS — handover (2026-07-01) — HECA F→05R FIXED; **T5→05C spine FIXED**
 
-> Everything below is **committed on `dev`** and the tree is clean. The one open
-> engineering item is **T5→05C: the taxiway-T5 spine does not reach runway 05C in
-> the sim** (user-confirmed in X-Plane). F→05R is FIXED (edge-contact anchor).
+> Everything below is **committed on `dev`** and the tree is clean. Both runway-contact
+> spine complaints are now fixed: **F→05R** (edge-contact anchor `5ca42e7`) and
+> **T5→05C** (junction interior-stitch — see SHIPPED, newest first).
 > ⚠ Ortho4XP caches `auto_patch.*` — after any commit you must **restart Ortho4XP**,
 > not just rebuild the tile, or it runs stale modules (this masked the F fix for a while).
 
@@ -23,38 +23,35 @@ current_tile_lat=30, current_tile_lon=31)` (~2 min). Suite
   junctions → a long wrong diagnosis). Cross-check the emitted ride profile and the sim.
 
 ---
-## 🔴 OPEN — T5→05C taxiway spine does not reach the runway (HECA)
+## ✅ RESOLVED — T5→05C taxiway spine now reaches the runway (HECA)
 
-**Symptom (user, in X-Plane):** T5 (a diagonal taxiway curving into runway 05C) — its
-spine/grade does not properly reach the runway. F→05R had the same complaint and is now
-FIXED by `5ca42e7`; **T5 is not.** Both curve at the runway.
+**Root cause (confirmed via a T4-works-vs-T5-broken differential):** T5 and T4 are
+near-identical diagonal taxiways curving into 05C, but their runway-contact *neighbourhood*
+differs. T4 joins through LARGE multi-taxiway junctions (5–6 crossing centerlines) that
+slice into a spine regardless. T5 joins through ONE small junction (5794 m², only the 2
+bend-split pieces of T5 crossing it), and its only qualifying piece **dead-ends 1.46 m
+INSIDE** the polygon: the apt.dat route bends ~6 m from the runway edge, so the 77 m piece
+stops at that interior bend and the 4.8 m runway-reaching remainder is dropped by the 6 m
+min-cut-length gate. A cut that dead-ends inside a polygon can't split it → `single_face`
+→ no spine node planted at the contact → T5 grade drapes to DEM.
 
-**What geometric probes show on HEAD (take with salt — see warning above):** T5 DOES appear
-to form spine boundaries — 5 emitted junctions have T5 vertices ON their ring (two corridor
-pieces with 14/15 verts), T5's runway-edge crossing at local `(-1260, 991)` has an airside
-node 4.6 m away (within the 18 m anchor radius). So it is NOT the "no node on the runway
-edge" story. **Prime suspect:** an adjacent junction near T5 has a **5.6 m elevation span**
-(vs ~1.5–2 m on the clean F/T5 corridors) — likely the visible cliff.
+⚠ The earlier "geometric probes show T5 forms spine boundaries" note was a CONFOUND — those
+probes re-sliced the FINAL `layout.shapes` (already spine pieces → trivially `single_face`).
+Instrument the REAL slice by monkeypatching `_partition_junction` during the build.
 
-**Concrete next step:** build HECA (cached DEM), get the T5 union
-(`[c.line for c in layout.apt_taxi_centerlines if c.name=="T5" and not c.is_service]`),
-dump every junction within ~5 m of it — `node_altitudes` span, which routes bound each,
-and the emitted elevation profile ALONG T5 from the runway edge inward (mirror what was
-done for F: it graded smooth 136.6→138.7 @ 1.1–1.6%). Find where T5's profile jumps.
+**Fix (`junction_spine._partition_junction`, gate `O4_JCT_SPINE_INTERIOR_STITCH`, default-on):**
+try the plain per-piece slice FIRST (byte-identical for junctions that already split); only
+when it fails to split, retry with the crossing pieces stitched at their shared INTERIOR
+bends (`_stitch_interior_joints`, degree-2 interior joints only — never on the boundary, so
+no shared neighbour corner is absorbed into a cut interior). Verified: T5 contact junction
+`single_face`→`ok_stitched` (2 pieces); T5 emitted profile grades smooth through the junction
+(114.44→114.80 m @ ~1.2%) and MEETS 05C at 0.05% — no step. Full suite: **0 new failures**
+(failed-set identical to HEAD baseline). An always-on stitch (no plain-first gate) instead
+broke `neighbour_corners_shared[SPJC]`; the adaptive plain-first fallback is what avoids it.
 
-**Ruled out this session (do NOT re-chase):**
-- NOT the runway anchor missing (contacts resolve; F's fix `5ca42e7` = edge-crossing contact).
-- NOT clutter / `near_hard` (user confirmed area not cluttered; trace: both cut ends SOFT).
-- NOT "no node on the runway edge" (already 0.01 m at F's crossing, 4.6 m at T5's).
-- NOT the runway-crossing rect drop; NOT splitting the route at the runway edge
-  (implemented → **−5 within, a no-op**; the slice already reaches the edge via `_on_pav`).
-- The junction-spine slice DOES split along curved crossings (cut-line trace: the interior
-  bend-piece connects the runway-edge cut to the opposite-boundary cut → 6 faces). The long
-  "dangling cut → no split" theory was WRONG.
-
-Files: `junction_spine.py` (slice / `_partition_junction`), `grade_graph.py`
-(`_spine_membership`, `_runway_anchors`), `grade_law.runway_join_contact` (the F fix).
-Memory: `curved_runway_crossing_spine.md`, `runway_join_edge_contact.md`.
+Files: `junction_spine.py` (`_partition_junction`, `_stitch_interior_joints`, `_slice`),
+`config.py` (`JUNCTION_SPINE_INTERIOR_STITCH`). Memory: `curved_runway_crossing_spine.md`,
+`runway_join_edge_contact.md`.
 
 ---
 ## 🟡 DEFERRED quality lever (real, not tied to T5)
@@ -71,6 +68,13 @@ the win safely. Gate idea `O4_SLICE_CHAINED_ROUTE`.
 ---
 ## ✅ SHIPPED THIS SESSION (committed on `dev`, newest first)
 
+- **junction interior-stitch — FIXES T5→05C** (default-on, `O4_JCT_SPINE_INTERIOR_STITCH`).
+  A taxi route bend-split INSIDE a small runway-contact junction left every crossing piece
+  dead-ending in the interior → the slice never split → no spine (HECA T5→05C).
+  `_partition_junction` now tries the plain per-piece slice first and, only on failure,
+  retries with pieces stitched at their shared INTERIOR bends (`_stitch_interior_joints`).
+  Junctions that already slice stay byte-identical; T5 now grades smooth to 05C (0.05% at
+  contact). 0 new suite failures. See RESOLVED section above for the full differential.
 - `5ca42e7` **grade: anchor taxi↔runway joins at the runway EDGE** (default-on,
   `O4_RUNWAY_EDGE_CONTACT`). A taxi route joins at the runway CENTERLINE, so on a wide
   (shoulder-widened 86 m) runway its endpoint is ~43 m inside — beyond the 18/30 m anchor

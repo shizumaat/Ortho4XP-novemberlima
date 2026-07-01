@@ -52,8 +52,9 @@ from shapely.strtree import STRtree
 import O4_UI_Utils as UI
 
 from .config import (
-    JUNCTION_CENTERLINE_SPINE, RECT_END_CAP_DEPTH_M,
-    RECT_END_CAP_MIN_RECT_LEN_M, SPINE_PIECE_ROLE_REEVAL, SPINE_STEP_M)
+    JUNCTION_CENTERLINE_SPINE, JUNCTION_SPINE_INTERIOR_STITCH,
+    RECT_END_CAP_DEPTH_M, RECT_END_CAP_MIN_RECT_LEN_M, SPINE_PIECE_ROLE_REEVAL,
+    SPINE_STEP_M)
 from .layout import (
     BuiltShape, ROLE_APRON, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL, ROLE_STUB)
@@ -273,6 +274,88 @@ def _make_cap(mx, my, c1, c2, poly):
             LineString([e1, (mx, my)]), LineString([(mx, my), e2])]
 
 
+_STITCH_INTERIOR_TOL_M = 0.5
+
+
+def _stitch_interior_joints(pieces, poly, tol=_STITCH_INTERIOR_TOL_M):
+    """Concatenate clipped centerline ``pieces`` that share an endpoint lying
+    strictly INSIDE ``poly`` (a route bend within the junction), so a route
+    that bends inside the shape cuts boundary-to-boundary as one line instead
+    of dead-ending piece-by-piece.  Pieces that meet ON the boundary (within
+    ``tol``) are left separate — each is a real crossing whose endpoint is a
+    shared ring/neighbour corner, so straight crossings stay byte-identical
+    and no boundary corner is swallowed into a cut interior.  Only degree-2
+    interior joints are chained (a fork inside a junction stays unmerged)."""
+    ext = poly.exterior
+
+    def _key(pt):
+        return (round(pt[0], 3), round(pt[1], 3))
+
+    def _interior(pt):
+        try:
+            return ext.distance(Point(pt[0], pt[1])) > tol
+        except _GEOM_EXC:
+            return False
+
+    chains = [list(p.coords) for p in pieces if len(p.coords) >= 2]
+    # Count how many chain-ends land on each interior endpoint; only a joint
+    # where EXACTLY two ends meet (degree 2) is an unambiguous through-bend.
+    changed = True
+    while changed:
+        changed = False
+        for i in range(len(chains)):
+            a = chains[i]
+            if a is None:
+                continue
+            for ai in (-1, 0):
+                aend = a[ai]
+                if not _interior(aend):
+                    continue
+                # degree of this joint across all live chain-ends
+                deg = 0
+                for c in chains:
+                    if c is None:
+                        continue
+                    if _key(c[0]) == _key(aend):
+                        deg += 1
+                    if _key(c[-1]) == _key(aend):
+                        deg += 1
+                if deg != 2:
+                    continue
+                # find the partner chain-end sharing aend
+                jj = None
+                for j in range(len(chains)):
+                    if j == i or chains[j] is None:
+                        continue
+                    b = chains[j]
+                    if _key(b[0]) == _key(aend):
+                        jj, brev = j, False
+                        break
+                    if _key(b[-1]) == _key(aend):
+                        jj, brev = j, True
+                        break
+                if jj is None:
+                    continue
+                b = chains[jj] if not brev else chains[jj][::-1]
+                # b now starts at aend; splice, dropping the duplicate joint
+                merged = (a + b[1:]) if ai == -1 else (b[::-1] + a[1:])
+                chains[i] = merged
+                chains[jj] = None
+                changed = True
+                break
+            if changed:
+                break
+    out = []
+    for c in chains:
+        if c is None:
+            continue
+        try:
+            out.append(LineString(c))
+        except _GEOM_EXC:
+            continue
+    return out
+
+
 def _partition_junction(s, centerlines, pav_union, runway_union, near_hard,
                         guide_sink=None):
     """Slice junction/apron ``s`` along its crossing centerlines and
@@ -332,7 +415,22 @@ def _partition_junction(s, centerlines, pav_union, runway_union, near_hard,
         except _GEOM_EXC:
             return True
 
-    cut_lines: List[LineString] = []
+    # Clip every crossing centerline to the junction, then STITCH the
+    # clipped pieces that meet at a bend INSIDE the junction into continuous
+    # crossings (user 2026-07-01).  The apt.dat route is bend-split into
+    # TaxiCenterline pieces, so a route that bends within the junction arrives
+    # as several segments sharing a bend node in the interior.  Sliced piece-
+    # by-piece, the segment on either side of the bend dead-ends inside the
+    # polygon (its cut spans no boundary) and a short runway-reaching stub is
+    # dropped by the min-cut length gate below — so polygonize never splits
+    # the shape and no spine forms (HECA T5→05C: a 77 m piece dead-ends 1.5 m
+    # short of the runway edge, its 4.8 m continuation to the edge is < the
+    # 6 m gate).  ``_stitch_interior_joints`` joins ONLY at shared endpoints
+    # strictly inside the polygon, so a stitched cut stays wholly within this
+    # junction and pieces meeting ON the boundary (real crossings / shared
+    # neighbour corners) are left untouched — byte-identical for straight
+    # crossings, no A/B-boundary corner is absorbed into a cut interior.
+    clipped: List[LineString] = []
     for ln in centerlines:
         try:
             seg = poly.intersection(ln)
@@ -340,13 +438,20 @@ def _partition_junction(s, centerlines, pav_union, runway_union, near_hard,
             continue
         if seg.is_empty:
             continue
-        parts = []
         if seg.geom_type == "LineString":
-            parts = [seg]
+            clipped.append(seg)
         elif seg.geom_type == "MultiLineString":
-            parts = list(seg.geoms)
+            clipped.extend(seg.geoms)
         elif seg.geom_type == "GeometryCollection":
-            parts = [g for g in seg.geoms if g.geom_type == "LineString"]
+            clipped.extend(g for g in seg.geoms if g.geom_type == "LineString")
+    from shapely import union_all
+
+    def _slice(parts, guide_out):
+        """Build spine cuts from ``parts`` and polygonize.  Returns
+        ``(faces, reason)`` — faces is None when the cut does not split the
+        shape.  Interior guide nodes are appended to ``guide_out`` so a
+        rejected attempt contributes no guides."""
+        cut_lines: List[LineString] = []
         for part in parts:
             L = part.length
             if L < max(2.0, 0.5 * SPINE_STEP_M):
@@ -354,10 +459,10 @@ def _partition_junction(s, centerlines, pav_union, runway_union, near_hard,
             # Spread interior nodes EVENLY along the cut, endpoint to endpoint
             # (user 2026-06-19): the old code also placed a fixed node 1.5 m
             # inboard of each boundary crossing, sitting right beside the
-            # crossing node itself — a built-in ~1.5 m cluster that triangulated
-            # to slivers (X-Plane tearing).  Dividing [0, L] into ``nseg`` equal
-            # parts keeps every node ~SPINE_STEP_M apart from its neighbours AND
-            # from the endpoints (boundary crossings / cap M).
+            # crossing node itself — a built-in ~1.5 m cluster that
+            # triangulated to slivers (X-Plane tearing).  Dividing [0, L] into
+            # ``nseg`` equal parts keeps every node ~SPINE_STEP_M apart from
+            # its neighbours AND from the endpoints (boundary crossings/cap M).
             nseg = max(2, int(round(L / SPINE_STEP_M)))
             ds = set()
             for i in range(1, nseg):
@@ -408,8 +513,7 @@ def _partition_junction(s, centerlines, pav_union, runway_union, near_hard,
             # pull slack to keep buildings flat.  Boundary-crossing
             # endpoints are NOT guides (they are shared with the neighbour
             # and keep their normal band).
-            if guide_sink is not None:
-                guide_sink.extend(slice_pts)
+            guide_out.extend(slice_pts)
             for is_entry in (True, False):
                 if not end_soft[is_entry]:
                     continue
@@ -424,34 +528,58 @@ def _partition_junction(s, centerlines, pav_union, runway_union, near_hard,
                 except _GEOM_EXC:
                     pass
             cut_lines.extend(extra)
-    if not cut_lines:
-        return None, "no_cut" 
+        if not cut_lines:
+            return None, "no_cut"
 
-    # Polygonize against the FULL boundary (exterior + hole rings).  Union
-    # with a GRID_SIZE so the cut endpoints — which land a few µm off the
-    # boundary edge in the raw pre-solve geometry — snap onto it and NODE;
-    # without grid-snapped noding polygonize leaves clean boundary-to-
-    # boundary cuts unsplit.
-    from shapely import union_all
-    try:
-        arrangement = union_all([poly.boundary] + cut_lines, grid_size=0.01)
-        raw = [f for f in polygonize(arrangement)
-               if not f.is_empty and f.geom_type == "Polygon"]
-        faces = []
-        for f in raw:
-            if f.area < _MIN_PIECE_AREA:
-                continue
-            try:
-                if not poly.contains(f.representative_point()):
+        # Polygonize against the FULL boundary (exterior + hole rings).  Union
+        # with a GRID_SIZE so the cut endpoints — which land a few µm off the
+        # boundary edge in the raw pre-solve geometry — snap onto it and NODE;
+        # without grid-snapped noding polygonize leaves clean boundary-to-
+        # boundary cuts unsplit.
+        try:
+            arrangement = union_all([poly.boundary] + cut_lines, grid_size=0.01)
+            raw = [f for f in polygonize(arrangement)
+                   if not f.is_empty and f.geom_type == "Polygon"]
+            faces = []
+            for f in raw:
+                if f.area < _MIN_PIECE_AREA:
                     continue
-            except _GEOM_EXC:
-                continue
-            faces.append(f)
-    except _GEOM_EXC:
-        return None, "polygonize_err"
-    if len(faces) > 1:
-        return faces, "ok"
-    return None, f"single_face(raw={len(raw)},cuts={len(cut_lines)})"
+                try:
+                    if not poly.contains(f.representative_point()):
+                        continue
+                except _GEOM_EXC:
+                    continue
+                faces.append(f)
+        except _GEOM_EXC:
+            return None, "polygonize_err"
+        if len(faces) > 1:
+            return faces, "ok"
+        return None, f"single_face(raw={len(raw)},cuts={len(cut_lines)})"
+
+    # Try the plain per-piece slice FIRST — byte-identical to the pre-stitch
+    # code for every junction that already splits.  Only when it fails to
+    # split (a route bends inside the junction, so each piece dead-ends and no
+    # cut spans boundary-to-boundary — HECA T5→05C) do we retry with the
+    # interior-stitched cut.  Adopting the stitch solely on failure means a
+    # junction that already slices keeps its exact rings/corners (SPJC
+    # neighbour-corner invariant unchanged); only shapes that got NO spine
+    # before can change.
+    plain_guides: List[Tuple[float, float]] = []
+    faces, reason = _slice(clipped, plain_guides)
+    if faces is not None:
+        if guide_sink is not None:
+            guide_sink.extend(plain_guides)
+        return faces, reason
+    if JUNCTION_SPINE_INTERIOR_STITCH and len(clipped) > 1:
+        stitched = _stitch_interior_joints(clipped, poly)
+        if len(stitched) < sum(1 for p in clipped if len(p.coords) >= 2):
+            st_guides: List[Tuple[float, float]] = []
+            faces2, _ = _slice(stitched, st_guides)
+            if faces2 is not None:
+                if guide_sink is not None:
+                    guide_sink.extend(st_guides)
+                return faces2, "ok_stitched"
+    return None, reason
 
 
 def _reeval_apron_piece_role(poly, cen, cap_m, step_m=2.0):
