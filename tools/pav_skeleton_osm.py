@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tests"))
 
 import numpy as np
 from shapely import wkb
-from shapely.geometry import LineString
+from shapely.geometry import LineString, Point
 from shapely.ops import unary_union
 
 _CACHE_VERSION = 2
@@ -177,6 +177,7 @@ def main(argv=None) -> int:
     else:
         from auto_patch.pavement.spine_synthesis import synthesize_spine
         ways = synthesize_spine(pav, runway_union=rwy, buildings=buildings,
+                                routes=routes,  # size letters ONLY
                                 terminal_setback=args.setback)
         lines = [w.line for w in ways]
         kinds = {}
@@ -184,6 +185,8 @@ def main(argv=None) -> int:
             kinds[w.kind] = kinds.get(w.kind, 0) + 1
             tags = {"layer": "skeleton", "kind": w.kind, "way": str(i),
                     "len_m": f"{w.line.length:.0f}"}
+            if w.size:
+                tags["icao_size"] = w.size
             if w.halfwidth:
                 tags["halfwidth"] = f"{w.halfwidth:.1f}"
             entries.append((w.line, tags))
@@ -192,12 +195,80 @@ def main(argv=None) -> int:
     _osm_write(frame, [(pav_eff, {"layer": "pav_union"})],
                f"{prefix}_pavement.osm")
 
-    # ── stats ───────────────────────────────────────────────────────────────
+    # ── stats + QA gates ────────────────────────────────────────────────────
     total = sum(ln.length for ln in lines)
     print(f"# {args.icao} spine ({'medial' if args.medial_only else 'synth'})")
     print(f"  ways                   : {len(lines)}  (total {total:.0f} m)")
     print(f"  kinds                  : " +
           ", ".join(f"{k}={v}" for k, v in sorted(kinds.items())))
+
+    # GATE 1 — connectivity: every endpoint must touch another way or the
+    # pavement boundary (a building-stub door end is also legitimate).
+    floating = 0
+    bnd = pav_eff.boundary
+    for i, ln in enumerate(lines):
+        for tip in (ln.coords[0], ln.coords[-1]):
+            p = Point(tip)
+            dmin = min((lines[j].distance(p)
+                        for j in range(len(lines)) if j != i), default=99.0)
+            if dmin > 0.5 and bnd.distance(p) > 2.0:
+                floating += 1
+    print(f"  GATE floating ends     : {floating}  (target 0)")
+
+    # GATE 2 — arc radius histogram (should spike at the per-size standards)
+    def _circ_r(cs):
+        cs = np.asarray(cs)
+        a, b, c2 = cs[0], cs[len(cs) // 2], cs[-1]
+        ab = np.hypot(*(b - a)); bc = np.hypot(*(c2 - b))
+        ca = np.hypot(*(a - c2))
+        ar2 = abs((b[0] - a[0]) * (c2[1] - a[1])
+                  - (b[1] - a[1]) * (c2[0] - a[0]))
+        return ab * bc * ca / (2 * ar2) if ar2 > 1e-9 else float("inf")
+    if not args.medial_only:
+        rads = sorted(_circ_r(w.line.coords) for w in ways
+                      if w.kind in ("arc", "rwy_turn"))
+        rads = [r for r in rads if r < 300]
+        if rads:
+            h, edges_ = np.histogram(
+                rads, bins=[0, 10, 14, 18, 25, 33, 40, 50, 60, 300])
+            print("  arc radii              : " + ", ".join(
+                f"{int(edges_[i])}-{int(edges_[i+1])}m:{int(h[i])}"
+                for i in range(len(h)) if h[i]))
+
+    # GATE 3 — diff vs the approved target KML, when present.
+    kml_path = f"/Users/noah/Ortho4XP-troubleshoot/{args.icao}_curved_spine.kml"
+    if os.path.exists(kml_path) and lines:
+        import re as _re
+        from auto_patch.layout import R_EARTH
+        lat0, lon0 = c["anchor"]
+        cos0 = math.cos(math.radians(lat0))
+        tgt = []
+        txt = open(kml_path).read()
+        for m in _re.finditer(
+                r"<styleUrl>#(\w+)</styleUrl><LineString>.*?"
+                r"<coordinates>([^<]+)</coordinates>", txt, _re.S):
+            if m.group(1) == "svc":
+                continue
+            pts = []
+            for tok in m.group(2).split():
+                lon, lat = float(tok.split(",")[0]), float(tok.split(",")[1])
+                pts.append((math.radians(lon - lon0) * R_EARTH * cos0,
+                            math.radians(lat - lat0) * R_EARTH))
+            if len(pts) >= 2:
+                tgt.append(LineString(pts))
+        if tgt:
+            skel = unary_union(lines)
+            ds = []
+            for t in tgt:
+                n = max(2, int(t.length / 10))
+                for k in range(n + 1):
+                    p = t.interpolate(k * t.length / n)
+                    if pav_eff.buffer(0.5).contains(p):
+                        ds.append(skel.distance(p))
+            a = np.asarray(ds)
+            print(f"  GATE vs target KML     : n={len(a)}  "
+                  f"mean {a.mean():.2f}  median {np.median(a):.2f}  "
+                  f"p95 {np.percentile(a, 95):.2f}  max {a.max():.2f} m")
 
     # Cross-reference vs the apt.dat taxi ROUTE graph (development yardstick,
     # never a construction input): how much of the route network does the
