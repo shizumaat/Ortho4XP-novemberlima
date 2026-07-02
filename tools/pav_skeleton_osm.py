@@ -156,6 +156,9 @@ def main(argv=None) -> int:
     ap.add_argument("--v7", action="store_true",
                     help="previous-generation heuristic synthesis "
                          "(spine_synthesis.synthesize_spine)")
+    ap.add_argument("--v10", action="store_true",
+                    help="outline-trace model (outline_trace."
+                         "synthesize_spine_v10; pavement-only 7-rule set)")
     ap.add_argument("--setback", type=float, default=100.0,
                     help="terminal/large-building ring setback (m)")
     ap.add_argument("--cache", action="store_true",
@@ -210,6 +213,9 @@ def main(argv=None) -> int:
     else:
         if args.v7:
             from auto_patch.pavement.spine_synthesis import synthesize_spine
+        elif args.v10:
+            from auto_patch.pavement.outline_trace import (
+                synthesize_spine_v10 as synthesize_spine)
         else:
             from auto_patch.pavement.edge_trace import (
                 synthesize_spine_v8 as synthesize_spine)
