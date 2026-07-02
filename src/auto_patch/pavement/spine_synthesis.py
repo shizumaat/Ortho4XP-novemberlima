@@ -69,6 +69,11 @@ _NODE_KEY_M = 0.05        # node weld quantum
 _DIAG_MIN_DEG = 20.0      # runway diagonal band
 _DIAG_MAX_DEG = 65.0
 
+_OPEN_HALFWIDTH_M = 32.0  # lanes with more clearance than this are open-
+#                            pavement medial, not taxiway spine — dropped
+_SVC_HALFWIDTH_M = 5.5    # ...and lanes NARROWER than this are service roads,
+#                            not aircraft taxiways (target keeps none)
+
 SMALL_BUILDING_M2 = 2000.0
 TERMINAL_SETBACK_M = 100.0
 _STUB_MAX_REACH_M = 80.0
@@ -281,7 +286,10 @@ class _Graph:
         The two halves keep the edge's kind/size."""
         e = self.edges[ei]
         ln = LineString(e["cs"])
-        s = max(0.5, min(ln.length - 0.5, s))
+        if s <= 1.0:
+            return e["a"]                 # reuse the end node — no sliver
+        if s >= ln.length - 1.0:
+            return e["b"]
         p = ln.interpolate(s)
         # build vertex lists
         first, second = [], []
@@ -724,6 +732,91 @@ def _size_for_halfwidth(w: float) -> str:
     return "F"
 
 
+def _prune_components(g: _Graph, runway_union, pav_eff):
+    """Keep only lane components that reach a RUNWAY edge (every taxiway
+    system serves the runways; apron-bay networks that only connected via
+    open pavement are exactly what the hand-edited target leaves empty).
+    Very large components survive regardless (isolated pavement islands
+    with their own internal taxiways)."""
+    if runway_union is None or runway_union.is_empty:
+        return
+    edge_b = runway_union.boundary
+    adj = defaultdict(set)
+    comp_edges = defaultdict(list)
+    for ei, e in enumerate(g.edges):
+        if e["alive"] and e["kind"] == "lane":
+            adj[e["a"]].add(e["b"])
+            adj[e["b"]].add(e["a"])
+    seen: set = set()
+    for start in list(adj.keys()):
+        if start in seen:
+            continue
+        comp = [start]
+        seen.add(start)
+        stack = [start]
+        while stack:
+            cur = stack.pop()
+            for nxt in adj[cur]:
+                if nxt not in seen:
+                    seen.add(nxt)
+                    comp.append(nxt)
+                    stack.append(nxt)
+        comp_set = set(comp)
+        touches = any(edge_b.distance(Point(tuple(g.nodes[ni]))) < 2.5
+                      for ni in comp)
+        length = sum(LineString(e["cs"]).length for e in g.edges
+                     if e["alive"] and e["kind"] == "lane"
+                     and e["a"] in comp_set)
+        if not touches and length < 400.0:
+            for e in g.edges:
+                if e["alive"] and e["kind"] == "lane" \
+                        and e["a"] in comp_set:
+                    e["alive"] = False
+
+
+def _fix_dangles(g: _Graph, pav_eff):
+    """The coverage policy severs lanes where they met open-pavement medial.
+    A dangling lane tip either EXTENDS along its tangent to the pavement
+    boundary (user: an opening into a small apron gets the spine drawn
+    across to the edge) or, if the boundary is unreachable, the short
+    dangling fragment is trimmed back to its junction."""
+    bnd = pav_eff.boundary
+    changed = True
+    while changed:
+        changed = False
+        for ni, ends in list(g.incident().items()):
+            live = [(ei, aa) for ei, aa in ends if g.edges[ei]["alive"]]
+            if len(live) != 1:
+                continue
+            (ei, at_a) = live[0]
+            e = g.edges[ei]
+            tip = g.nodes[ni]
+            if bnd.distance(Point(tuple(tip))) <= 2.0:
+                continue                   # already a legitimate edge end
+            other = e["b"] if at_a else e["a"]
+            u = _unit(*(tip - g.nodes[other]))
+            done = False
+            if u != (0.0, 0.0):
+                # "an opening into a small apron: draw the spine ACROSS to
+                # the edge" — reach far enough to span the whole bay
+                ray = LineString([tuple(tip),
+                                  (tip[0] + u[0] * 220.0,
+                                   tip[1] + u[1] * 220.0)])
+                hit = ray.intersection(bnd)
+                pts = [q for q in getattr(hit, "geoms", [hit])
+                       if q.geom_type == "Point"]
+                if pts:
+                    q = min(pts, key=lambda q: q.distance(Point(tuple(tip))))
+                    probe = LineString([tuple(tip), (q.x, q.y)])
+                    if shapely.buffer(pav_eff, 0.5).contains(probe):
+                        g.move_node(ni, [q.x - u[0] * 0.1,
+                                         q.y - u[1] * 0.1])
+                        done = True
+            if not done and LineString(e["cs"]).length < 40.0:
+                e["alive"] = False
+                changed = True
+
+
 def _attribute_sizes(g: _Graph, routes):
     """ICAO size letters: from the nearest apt.dat route where available
     (ATTRIBUTE lookup only — geometry never comes from routes), else from
@@ -762,14 +855,12 @@ def _radius_for(size: str) -> float:
 
 
 def _add_junction_arcs(g: _Graph, pav_ok, runway_union=None):
-    """At every node, one STANDARD arc per branch-direction pair with a real
-    turn between them.  Tangent points split the branch edges, so the arc is
-    welded into the graph at real shared nodes.  This turns an H junction
-    (two parallels + straight rung) into exactly four equal arcs.
-
-    Splitting an edge retires it and re-creates its halves, so the incident
-    edge list is re-resolved after every placement; pairs already handled
-    (or judged unplaceable) are remembered by their direction signature."""
+    """At every node, STANDARD arcs for every branch pair with a real turn —
+    all arcs of one junction share ONE radius (user: where arcs come
+    together they are the same size, mirrored), so symmetric pairs land on
+    shared tangent nodes.  Tangent points split the branch edges (endpoint
+    reuse welds coincident tangents), keeping the graph coherent.  An H
+    junction is a straight rung + four EQUAL quarter-circles."""
     rwy_b = runway_union.boundary \
         if runway_union is not None and not runway_union.is_empty else None
     node_ids = list(g.incident().keys())
@@ -777,66 +868,88 @@ def _add_junction_arcs(g: _Graph, pav_ok, runway_union=None):
         P = g.nodes[ni]
         if rwy_b is not None and rwy_b.distance(Point(tuple(P))) < 3.0:
             continue        # square runway contact: straight line, no arcs
-        done: set = set()
-        for _guard in range(24):           # max arcs per node, safety bound
-            ends = [(ei, at_a) for (ei, at_a) in g.incident().get(ni, [])
-                    if g.edges[ei]["alive"] and g.edges[ei]["kind"] == "lane"]
-            placed_this_round = False
-            for x in range(len(ends)):
-                for y in range(x + 1, len(ends)):
-                    (ea, aa), (eb, ab) = ends[x], ends[y]
-                    if ea == eb:
-                        continue
-                    u = g.edge_dir_at(ea, aa)      # arriving along a
-                    v = g.edge_dir_at(eb, ab)      # arriving along b
-                    u_out = (-v[0], -v[1])         # departing along b
-                    key = tuple(sorted((
-                        (round(u[0], 1), round(u[1], 1)),
-                        (round(v[0], 1), round(v[1], 1)))))
-                    if key in done:
-                        continue
-                    done.add(key)
-                    gamma = _angle_deg(u, u_out)
-                    if gamma < _TURN_MIN_DEG or gamma > _TURN_MAX_DEG:
-                        continue
-                    size = min(g.edges[ea]["size"] or "C",
-                               g.edges[eb]["size"] or "C")
-                    r_std = _radius_for(size)
-                    len_a = LineString(g.edges[ea]["cs"]).length
-                    len_b = LineString(g.edges[eb]["cs"]).length
-                    r = r_std
-                    placed = None
-                    while r >= _MIN_ARC_FIT * r_std:
-                        arc, t = _fillet(tuple(P), u, u_out, r)
-                        if arc is None:
-                            break
-                        if t <= 0.75 * len_a and t <= 0.75 * len_b \
-                                and pav_ok(LineString(arc)):
-                            placed = (arc, t)
-                            break
-                        r *= 0.75
-                    if placed is None:
-                        continue
-                    arc, t = placed
-                    w_pair = g.edges[ea]["w"]
-                    s_a = t if aa else len_a - t
-                    na = g.split_edge(ea, s_a)
-                    s_b = t if ab else len_b - t
-                    nb = g.split_edge(eb, s_b)
-                    cs = np.asarray(arc)
-                    cs[0] = g.nodes[na]
-                    cs[-1] = g.nodes[nb]
-                    g.add_edge(cs, "arc", size, w_pair)
-                    placed_this_round = True
-                    break
-                if placed_this_round:
-                    break
-            if not placed_this_round:
-                break
+
+        def _ends():
+            return [(ei, at_a) for (ei, at_a) in g.incident().get(ni, [])
+                    if g.edges[ei]["alive"]
+                    and g.edges[ei]["kind"] == "lane"]
+
+        ends = _ends()
+        if len(ends) < 2:
+            continue
+        # ── dry-run: per-pair max fitting radius, then the junction's
+        #    COMMON radius = the smallest of them (mirrored equal arcs)
+        pair_list = []
+        r_common = None
+        for x in range(len(ends)):
+            for y in range(x + 1, len(ends)):
+                (ea, aa), (eb, ab) = ends[x], ends[y]
+                if ea == eb:
+                    continue
+                u = g.edge_dir_at(ea, aa)
+                v = g.edge_dir_at(eb, ab)
+                u_out = (-v[0], -v[1])
+                gamma = _angle_deg(u, u_out)
+                if gamma < _TURN_MIN_DEG or gamma > _TURN_MAX_DEG:
+                    continue
+                size = min(g.edges[ea]["size"] or "C",
+                           g.edges[eb]["size"] or "C")
+                r_std = _radius_for(size)
+                len_a = LineString(g.edges[ea]["cs"]).length
+                len_b = LineString(g.edges[eb]["cs"]).length
+                r_fit = None
+                r = r_std
+                while r >= _MIN_ARC_FIT * r_std:
+                    arc, t = _fillet(tuple(P), u, u_out, r)
+                    if arc is None:
+                        break
+                    # half-length budget: a branch may host arcs at BOTH
+                    # of its ends (H rung), so each side gets half
+                    if t <= 0.55 * len_a and t <= 0.55 * len_b \
+                            and pav_ok(LineString(arc)):
+                        r_fit = r
+                        break
+                    r *= 0.85
+                if r_fit is None:
+                    continue
+                pair_list.append((u, u_out, size))
+                r_common = r_fit if r_common is None else min(r_common, r_fit)
+        if not pair_list or r_common is None:
+            continue
+        # ── place every pair at the common radius
+        for (u, u_out, size) in pair_list:
+            ends_now = _ends()
+            # re-resolve the two branches by direction match
+            best_a = best_b = None
+            for (ei, at_a) in ends_now:
+                d = g.edge_dir_at(ei, at_a)
+                if _angle_deg(d, u) < 10.0 and best_a is None:
+                    best_a = (ei, at_a)
+                elif _angle_deg(d, (-u_out[0], -u_out[1])) < 10.0 \
+                        and best_b is None:
+                    best_b = (ei, at_a)
+            if best_a is None or best_b is None or best_a[0] == best_b[0]:
+                continue
+            arc, t = _fillet(tuple(P), u, u_out, r_common)
+            if arc is None:
+                continue
+            ln_arc = LineString(arc)
+            if not pav_ok(ln_arc):
+                continue
+            (ea, aa), (eb, ab) = best_a, best_b
+            len_a = LineString(g.edges[ea]["cs"]).length
+            len_b = LineString(g.edges[eb]["cs"]).length
+            if t > len_a + 1.0 or t > len_b + 1.0:
+                continue
+            w_pair = g.edges[ea]["w"]
+            na = g.split_edge(ea, t if aa else len_a - t)
+            nb = g.split_edge(eb, t if ab else len_b - t)
+            cs = np.asarray(arc)
+            cs[0] = g.nodes[na]
+            cs[-1] = g.nodes[nb]
+            g.add_edge(cs, "arc", size, w_pair)
     return
 
-
-# ── runway diagonals ─────────────────────────────────────────────────────────
 
 def _walk_locate(g: _Graph, ei: int, from_a: bool, t: float, max_hops=6):
     """Locate arc length ``t`` measured from one end of edge ``ei``, walking
@@ -1150,6 +1263,14 @@ def synthesize_spine(
     g = _Graph()
     for ch in build_pavement_skeleton(pav_nav, runway_union=runway_union):
         w = float(np.median(ch.radii)) if ch.radii else 8.0
+        # COVERAGE POLICY (user 2026-07-01, from the hand-edited target):
+        # open pavement stays EMPTY — the spine covers the taxiway system,
+        # rides holes at half-width for its turns, and crosses small apron
+        # openings to their edge.  The medial clearance radius IS the
+        # openness measure: corridor lanes, hole-riding turns and small-bay
+        # spurs all have small clearance; big-apron medial does not.
+        if w > _OPEN_HALFWIDTH_M or w < _SVC_HALFWIDTH_M:
+            continue
         if rwy_zone is not None and ch.line.length > 1.0:
             n = max(2, int(ch.line.length / 10))
             inside = sum(1 for k in range(n + 1)
@@ -1169,6 +1290,9 @@ def synthesize_spine(
                 if is_par:
                     continue
         g.add_edge(np.asarray(ch.line.coords), "lane", "", w)
+
+    # 1b: drop networks that never reach a runway (target leaves them empty)
+    _prune_components(g, runway_union, pav_eff)
 
     # 2: through paths + runway-grid straightening (graph-preserving)
     axes = _runway_axes(runway_union)
@@ -1190,8 +1314,11 @@ def synthesize_spine(
     # 5: runway diagonal sharp-turn arcs
     _add_runway_turns(g, runway_union, pav_eff)
 
-    # 6: buildings (welded stubs + rings)
-    _add_building_ways(g, buildings, pav_eff, terminal_setback)
+    # 6: dangling tips extend to the pavement edge or trim away
+    _fix_dangles(g, pav_eff)
+
+    # (building stubs/rings retired — the hand-edited target keeps none;
+    # buildings only shape the pavement via pav_nav subtraction)
 
     # 7: merge split fragments back into clean long ways
     g.consolidate()

@@ -191,7 +191,14 @@ def main(argv=None) -> int:
                 tags["halfwidth"] = f"{w.halfwidth:.1f}"
             entries.append((w.line, tags))
 
-    _osm_write(frame, entries, f"{prefix}_skeleton.osm")
+    # grading wants a node roughly every SPINE_STEP_M (12 m) along the spine
+    dense_entries = []
+    for geom, tags in entries:
+        try:
+            dense_entries.append((geom.segmentize(12.0), tags))
+        except Exception:
+            dense_entries.append((geom, tags))
+    _osm_write(frame, dense_entries, f"{prefix}_skeleton.osm")
     _osm_write(frame, [(pav_eff, {"layer": "pav_union"})],
                f"{prefix}_pavement.osm")
 
@@ -240,7 +247,52 @@ def main(argv=None) -> int:
                 f"{int(edges_[i])}-{int(edges_[i+1])}m:{int(h[i])}"
                 for i in range(len(h)) if h[i]))
 
-    # GATE 3 — diff vs the approved target KML, when present.
+    # GATE 3 — diff vs the HAND-EDITED target fixture, when present (the
+    # authoritative reference; the user edited a generated OSM to the ideal).
+    fixture = os.path.join(os.path.dirname(__file__), "..", "tests",
+                           "fixtures", "spine_targets",
+                           f"{args.icao}_spine_target.osm")
+    if os.path.exists(fixture) and lines:
+        import xml.etree.ElementTree as _ET
+        from auto_patch.layout import R_EARTH as _RE
+        lat0, lon0 = c["anchor"]
+        cos0 = math.cos(math.radians(lat0))
+        root = _ET.parse(fixture).getroot()
+        nds = {n.get("id"): (math.radians(float(n.get("lon")) - lon0)
+                             * _RE * cos0,
+                             math.radians(float(n.get("lat")) - lat0) * _RE)
+               for n in root.findall("node")}
+        tgt_lines = []
+        for wy in root.findall("way"):
+            pts = [nds[r.get("ref")] for r in wy.findall("nd")
+                   if r.get("ref") in nds]
+            if len(pts) >= 2:
+                tgt_lines.append(LineString(pts))
+        if tgt_lines:
+            skel_u = unary_union(lines)
+            tgt_u = unary_union(tgt_lines)
+            ds = []
+            for t in tgt_lines:
+                n = max(2, int(t.length / 8))
+                ds.extend(skel_u.distance(t.interpolate(k * t.length / n))
+                          for k in range(n + 1))
+            a = np.asarray(ds)
+            over = tot = 0.0
+            for ln in lines:
+                n = max(2, int(ln.length / 8))
+                for k in range(n):
+                    p0 = ln.interpolate(k * ln.length / n)
+                    seg = ln.length / n
+                    tot += seg
+                    if tgt_u.distance(p0) > 10.0:
+                        over += seg
+            print(f"  GATE vs TARGET fixture : miss median "
+                  f"{np.median(a):.2f}  p95 {np.percentile(a, 95):.2f}  "
+                  f"max {a.max():.1f} m | overgeneration "
+                  f"{100.0 * over / max(tot, 1e-9):.1f}% of spine >10 m "
+                  f"from target")
+
+    # GATE 3b — diff vs the approved target KML, when present.
     kml_path = f"/Users/noah/Ortho4XP-troubleshoot/{args.icao}_curved_spine.kml"
     if os.path.exists(kml_path) and lines:
         import re as _re
