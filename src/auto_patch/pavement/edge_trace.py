@@ -845,23 +845,43 @@ def _max_chords(cs, d_orig, w, allow, bnd):
     return out
 
 
-def _straighten_routes(g: _Graph, accepted_paths, pav_eff, w: float):
-    """Rule (i) applied to each accepted anchor-to-anchor ROUTE as one
-    unit: chords span ring wiggles and weld kinks across every node of the
-    route, producing the tangent straights the target draws through open
-    space (through-path assembly alone stays pinned at ring junctions)."""
+def _straighten_routes(g: _Graph, accepted_paths, pav_eff, w: float,
+                       r_std: float = 30.0):
+    """Rule (i) applied to each accepted anchor-to-anchor ROUTE: the taut
+    version of the boundary-hugging geometry the router had to use.
+    Routes split only at REAL junctions — nodes shared by another
+    accepted route or touching a corridor lane — never at mere weld
+    attachments (deg>=3 splitting chopped weld geometry and measured
+    net-negative; unsplit chopping cut real turns and measured
+    net-negative; route-use is the discriminator both needed)."""
+    from collections import Counter as _Counter
+    node_use: _Counter = _Counter()
+    for node_path, _eis in accepted_paths:
+        for ni in set(node_path):
+            node_use[ni] += 1
+    trunk_nodes = set()
+    for e in g.edges:
+        if e["alive"] and e["kind"] == "lane":
+            trunk_nodes.add(e["a"])
+            trunk_nodes.add(e["b"])
     paths = []
     for node_path, eis in accepted_paths:
-        path = []
+        cur = []
         for k, ei in enumerate(eis):
             e = g.edges[ei]
             if not e["alive"]:
-                path = None
-                break
-            path.append((ei, bool(e["a"] == node_path[k])))
-        if path:
-            paths.append(path)
-    _straighten_path_list(g, paths, pav_eff, w)
+                if cur:
+                    paths.append(cur)
+                cur = []
+                continue
+            cur.append((ei, bool(e["a"] == node_path[k])))
+            end_node = node_path[k + 1]
+            if node_use[end_node] >= 2 or end_node in trunk_nodes:
+                paths.append(cur)
+                cur = []
+        if cur:
+            paths.append(cur)
+    _straighten_path_list(g, [p for p in paths if p], pav_eff, w, r_std)
 
 
 def _fit_line(pts):
@@ -1217,7 +1237,9 @@ def synthesize_spine_v8(
     _planarize_crossings(g)
     _connect_free_ends(g, pav_eff)
     if not os.environ.get("O4_ET_NO_SELECT"):
-        _select_routes(g, runway_union)
+        accepted = _select_routes(g, runway_union)
+        _straighten_routes(g, accepted, pav_eff, w,
+                           R90_BY_SIZE.get(size, 30.0))
     # R5 granularity: open-space BODIES = core opened at h (necks between
     # sub-separation connections cut), so a big apron is its own area even
     # when the eroded space is globally connected.
