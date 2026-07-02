@@ -881,7 +881,53 @@ def _straighten_routes(g: _Graph, accepted_paths, pav_eff, w: float,
                 cur = []
         if cur:
             paths.append(cur)
-    _straighten_path_list(g, [p for p in paths if p], pav_eff, w, r_std)
+    _straighten_path_list(g, [p for p in paths if p], pav_eff, w, r_std,
+                          taut=True)
+
+
+def _taut_tighten(cs, w, bnd, max_iters: int = 30):
+    """CONTINUOUS-SPACE taut path: constrained curve-shortening of a dense
+    polyline — every interior vertex relaxes toward its neighbours'
+    midpoint while keeping a clearance floor (0.9w in the open, the
+    path's own clearance through pinches).  Unlike chord decimation this
+    can LEAVE the boundary-offset material: the result is straight in the
+    open and wraps obstacles at the floor — the sweep geometry the target
+    draws through aprons."""
+    ln = LineString(cs)
+    if ln.length < 80.0:
+        return None
+    n = max(4, int(ln.length / 5.0))
+    P = np.asarray([ln.interpolate(k * ln.length / n).coords[0]
+                    for k in range(n + 1)])
+    d0 = np.asarray([bnd.distance(Point(tuple(p))) for p in P])
+    floor = np.minimum(0.9 * w, np.maximum(1.0, d0 - 0.5))
+    moved_any = False
+    for _it in range(max_iters):
+        moved = 0
+        for k in range(1, len(P) - 1):
+            tgt = 0.5 * (P[k - 1] + P[k + 1])
+            q = P[k] + 0.6 * (tgt - P[k])
+            if float(np.hypot(*(q - P[k]))) < 0.03:
+                continue
+            if bnd.distance(Point(tuple(q))) >= floor[k]:
+                P[k] = q
+                moved += 1
+        if moved == 0:
+            break
+        moved_any = True
+    if not moved_any:
+        return None
+    # drop collinear interior vertices so downstream fitting sees runs
+    keep = [0]
+    for k in range(1, len(P) - 1):
+        a, b, c2 = P[keep[-1]], P[k], P[k + 1]
+        ab, cb = b - a, c2 - b
+        cross = abs(ab[0] * cb[1] - ab[1] * cb[0])
+        if cross > 0.05 * max(np.hypot(*ab), 1e-9) \
+                * max(np.hypot(*cb), 1e-9) or k - keep[-1] > 8:
+            keep.append(k)
+    keep.append(len(P) - 1)
+    return P[keep]
 
 
 def _fit_line(pts):
@@ -1012,7 +1058,8 @@ def _straighten_paths(g: _Graph, pav_eff, w: float, r_std: float = 30.0,
 
 
 def _straighten_path_list(g: _Graph, paths, pav_eff, w: float,
-                          r_std: float = 30.0, axes=None):
+                          r_std: float = 30.0, axes=None,
+                          taut: bool = False):
     from shapely.ops import substring
     bnd = pav_eff.boundary
     allow = shapely.buffer(pav_eff, 0.5)
@@ -1020,6 +1067,10 @@ def _straighten_path_list(g: _Graph, paths, pav_eff, w: float,
         cs, _rr, node_seq = _collect_path(g, path)
         if len(cs) < 3:
             continue
+        if taut:
+            cs2 = _taut_tighten(cs, w, bnd)
+            if cs2 is not None and allow.contains(LineString(cs2)):
+                cs = cs2
         d_orig = np.asarray([bnd.distance(Point(tuple(p))) for p in cs])
         new_line = None
         if not os.environ.get("O4_ET_NO_REFIT"):
@@ -1082,13 +1133,10 @@ def _straighten_path_list(g: _Graph, paths, pav_eff, w: float,
             cand_line = LineString(pts)
             new_line = cand_line if allow.contains(cand_line) \
                 else LineString(cs[keep])
-        # each edge boundary index in cs: recompute by walking the path
-        idx = [0]
-        pos = 0
-        for (ei, at_a) in path:
-            pos += len(g.edges[ei]["cs"]) - 1
-            idx.append(pos)
-        proj_s = [new_line.project(Point(tuple(cs[k]))) for k in idx]
+        # project the NODE positions themselves (cs may have been replaced
+        # by the taut geometry, so index bookkeeping into it is invalid)
+        proj_s = [new_line.project(Point(tuple(g.nodes[ni])))
+                  for ni in node_seq]
         if any(proj_s[k + 1] < proj_s[k] - 1.0
                for k in range(len(proj_s) - 1)):
             continue                    # refit folded relative to the nodes
