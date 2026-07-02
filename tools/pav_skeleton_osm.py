@@ -159,8 +159,13 @@ def main(argv=None) -> int:
     if pav is None or pav.is_empty:
         print("NO pav_union", file=sys.stderr)
         return 1
-    pav_eff = pav.difference(rwy) if rwy is not None and not rwy.is_empty \
-        else pav
+    # working pavement = buildings subtracted (user 2026-07-02: chords must
+    # never pass through buildings; this is the deciding footprint)
+    bldg_union = unary_union([b for b, _r in buildings]) if buildings else None
+    pav_nav = pav.difference(bldg_union.buffer(0.5)) \
+        if bldg_union is not None else pav
+    pav_eff = pav_nav.difference(rwy) if rwy is not None and not rwy.is_empty \
+        else pav_nav
 
     # ── build the spine ─────────────────────────────────────────────────────
     entries = []
@@ -214,7 +219,6 @@ def main(argv=None) -> int:
     # terminating at a pad are legitimate).
     floating = 0
     bnd = pav_eff.boundary
-    bldg_union = unary_union([b for b, _r in buildings]) if buildings else None
     for i, ln in enumerate(lines):
         for tip in (ln.coords[0], ln.coords[-1]):
             p = Point(tip)
