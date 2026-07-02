@@ -82,10 +82,29 @@ def _trace_arcs(poly: Polygon, runway_union, w: float, step: float = 2.0):
         if not poly.contains(Point(tuple(probe))):
             norms = -norms
 
+        # a boundary sample lies ON the runway edge only if it is close
+        # to the runway AND its own tangent runs PARALLEL to the runway
+        # edge there.  True overlap cuts sit at <0.5 m; east-side source
+        # polygons under-lap the runway rect by 1.5-3 m, so the distance
+        # tolerance must be loose — parallelism is what keeps the mouth
+        # CORNERS (perpendicular side edges near the cut) out.
         on_rwy = np.zeros(n, dtype=bool)
         if rwy_b is not None:
             for k in range(n):
-                if rwy_b.distance(Point(tuple(pts[k]))) < 3.0:
+                p = Point(tuple(pts[k]))
+                if rwy_b.distance(p) >= 3.5:
+                    continue
+                s0 = rwy_b.project(p)
+                a2 = rwy_b.interpolate(max(0.0, s0 - 4.0))
+                b2 = rwy_b.interpolate(s0 + 4.0)
+                rv = np.asarray([b2.x - a2.x, b2.y - a2.y])
+                tv = tang[k]
+                nr = float(np.hypot(*rv))
+                ntv = float(np.hypot(*tv))
+                if nr < 1e-6 or ntv < 1e-6:
+                    continue
+                cosang = abs(float(np.dot(rv, tv)) / (nr * ntv))
+                if cosang > 0.90:              # within ~25 deg of parallel
                     on_rwy[k] = True
 
         # offset each sample by min(w, L/2); L = local width by ray cast
@@ -144,7 +163,16 @@ def synthesize_spine_v12(
         except Exception:
             pav_nav = pav
     pav_eff = pav_nav
-    if runway_union is not None and not runway_union.is_empty:
+    thru_rwy = bool(os.environ.get("O4_PT_THRU_RWY"))
+    if thru_rwy:
+        # experiment (user 2026-07-02): trace the WHOLE pavement with
+        # runways left in — the spine passes through them like any
+        # other pavement; no contact logic at all.  The runway strips
+        # are NOT part of source_pavement_union, so union them in.
+        if runway_union is not None and not runway_union.is_empty:
+            pav_eff = unary_union([pav_nav, runway_union])
+        runway_union = None
+    elif runway_union is not None and not runway_union.is_empty:
         try:
             pav_eff = pav_nav.difference(runway_union)
         except Exception:

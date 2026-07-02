@@ -196,6 +196,12 @@ def main(argv=None) -> int:
     if pav is None or pav.is_empty:
         print("NO pav_union", file=sys.stderr)
         return 1
+    if os.environ.get("O4_PT_THRU_RWY") and rwy is not None:
+        # experiment (user 2026-07-02): runway rects unioned into
+        # pav_union at the TOP — one continuous pavement, no runway
+        # edges anywhere in the pipeline or the emitted _pavement.osm
+        pav = unary_union([pav, rwy])
+        rwy = None
     # working pavement = buildings subtracted (user 2026-07-02: chords must
     # never pass through buildings; this is the deciding footprint)
     bldg_union = unary_union([b for b, _r in buildings]) if buildings else None
