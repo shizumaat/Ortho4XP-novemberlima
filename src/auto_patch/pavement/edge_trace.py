@@ -65,6 +65,134 @@ _RWY_TRACE_SLACK_M = 3.0
 _WELD_REACH_M = 80.0
 _WELD_SNAP_M = 12.0
 
+# Recognized painted centerlines are the DESIGN GEOMETRY where they exist
+# (user ruling 2026-07-02: the hand-edited target measures median 1.3 m
+# from the recognized-paint network — the target IS a selected subset of
+# the paint).  Pavement-inferred candidates within this fraction of w of
+# paint are duplicates and yield to it.
+_PAINT_DEDUP_FRAC = 0.5
+
+
+def _paint_candidates(recognized, pav_eff, w, corridors):
+    """Recognized-paint lines as spine candidates: clipped to the taxi
+    pavement (paint crossing a runway is cut at the runway edge — rule b
+    contact machinery re-attaches the tips), split into corridor TRUNK
+    (rides a regime-A corridor arm) vs conditional routing material.
+    Returns (list[(cs, kind)], paint_union)."""
+    corridor_union = unary_union(corridors) if corridors else None
+    # recognition emits most centerlines TWICE (near-identical pieces) and
+    # chains that share long stretches — dedup by coverage, longest first,
+    # or the network carries a phantom twin of nearly every lane
+    raw = []
+    for ln in recognized or []:
+        if ln is None or ln.is_empty or ln.length < 8.0:
+            continue
+        clipped = ln.intersection(shapely.buffer(pav_eff, 0.25))
+        for p in ([clipped] if clipped.geom_type == "LineString"
+                  else list(getattr(clipped, "geoms", []))):
+            if p.geom_type == "LineString" and p.length >= 8.0:
+                raw.append(p)
+    raw.sort(key=lambda p: -p.length)
+    dedup, kept_u = [], None
+    for p in raw:
+        if kept_u is None:
+            dedup.append(p)
+            kept_u = p
+            continue
+        rem = p.difference(shapely.buffer(kept_u, 2.0))
+        parts = [rem] if rem.geom_type == "LineString" else \
+            list(getattr(rem, "geoms", []))
+        fresh = []
+        for q in parts:
+            if q.geom_type != "LineString" or q.length < 8.0:
+                continue
+            # re-attach the cut ends: the dedup cut leaves a ~2 m gap to
+            # the kept twin — snap each free end onto it so the novel
+            # stretch stays welded to the network instead of orphaning
+            cs_q = list(q.coords)
+            for end, idx in ((0, 0), (-1, len(cs_q))):
+                pt = Point(cs_q[end])
+                if kept_u.distance(pt) <= 3.0:
+                    np_, _ = nearest_points(kept_u, pt)
+                    if end == 0:
+                        cs_q.insert(0, (np_.x, np_.y))
+                    else:
+                        cs_q.append((np_.x, np_.y))
+            fresh.append(LineString(cs_q))
+        if not fresh:
+            continue
+        # only genuinely new stretches survive; a piece that is mostly
+        # covered contributes just its novel parts (welds re-attach them)
+        dedup.extend(fresh)
+        kept_u = unary_union([kept_u, *fresh])
+
+    out = []
+    kept_lines = []
+    from shapely.ops import substring
+    for whole in dedup:
+        whole = whole.simplify(0.2)
+        # classify LOCALLY: long painted lines run corridor->apron->
+        # corridor, so trunk-vs-conditional is a per-chunk decision
+        n_chunk = max(1, int(round(whole.length / 120.0)))
+        step = whole.length / n_chunk
+        for k in range(n_chunk):
+            p = substring(whole, k * step, min((k + 1) * step,
+                                               whole.length))
+            if p.geom_type != "LineString" or p.length < 4.0:
+                continue
+            cs = np.asarray(p.coords, dtype=float)
+            # recognition jitter cleanup: a near-straight painted run
+            # is a design STRAIGHT (the hand target draws it clean) —
+            # drop the wiggle, keep the welded endpoints
+            if len(cs) > 2:
+                a, b = cs[0], cs[-1]
+                u = b - a
+                L = float(np.hypot(*u))
+                if L > 1.0:
+                    u = u / L
+                    dev = np.abs((cs - a) @ np.asarray([-u[1], u[0]]))
+                    if float(dev.max()) < 1.2:
+                        cs = np.asarray([a, b])
+            out.append([cs, "paint"])
+            kept_lines.append(LineString(cs))
+    # TRUNK = the painted centerline OF a corridor, decided by NEAREST-
+    # PAINT VOTING: each corridor-medial sample elects the closest paint
+    # chunk; a chunk that wins a majority of its own length is that
+    # corridor's centerline.  (Absolute-distance thresholds fail both
+    # ways: 0.6w sweeps every parallel stand comb into 53 km of
+    # unprunable trunk, 0.2w orphans real centerlines on asymmetric
+    # shoulders.)
+    if corridors and out:
+        from shapely.strtree import STRtree
+        chunk_lines = [LineString(cs) for cs, _k in out]
+        tree = STRtree(chunk_lines)
+        votes = Counter()
+        for cor in corridors:
+            n = max(2, int(cor.length / 15.0))
+            for t in np.linspace(0.0, 1.0, n):
+                q = cor.interpolate(t, normalized=True)
+                i = int(tree.nearest(q))
+                if chunk_lines[i].distance(q) <= 0.7 * w:
+                    votes[i] += 1
+        for i, v in votes.items():
+            if v * 15.0 >= 0.5 * chunk_lines[i].length:
+                out[i][1] = "paint_trunk"
+    paint_union = unary_union(kept_lines) if kept_lines else None
+    return out, paint_union
+
+
+def _duplicates_paint(cs, paint_union, thr: float) -> bool:
+    """True when the candidate polyline runs along existing paint — every
+    probe sample within ``thr`` — so the paint carries that corridor."""
+    if paint_union is None:
+        return False
+    ln = LineString(cs)
+    n = max(3, min(9, int(ln.length / 25.0) + 2))
+    for t in np.linspace(0.0, 1.0, n):
+        if paint_union.distance(ln.interpolate(t, normalized=True)) > thr:
+            return False
+    return True
+
 
 def _dominant_halfwidth(chains) -> float:
     """Length-weighted mode of medial clearance radii over the corridor
@@ -359,9 +487,194 @@ def _connect_free_ends(g: _Graph, pav_eff):
             break
 
 
+def _strip_stand_combs(g: _Graph):
+    """PARKING IS NOT TAXIING (user deletion criterion): short dead-end
+    painted lead-ins into stands are parking guidance, never spine — but
+    each comb's attachment point marks a STAND the network must serve, so
+    the roots come back as movement-demand anchors for selection."""
+    demand = set()
+    changed = True
+    while changed:
+        changed = False
+        deg = Counter()
+        for e in g.edges:
+            if e["alive"]:
+                deg[e["a"]] += 1
+                deg[e["b"]] += 1
+        for e in g.edges:
+            if not e["alive"] or e["kind"] != "paint":
+                continue
+            if LineString(e["cs"]).length > 60.0:
+                continue
+            leaf_a, leaf_b = deg[e["a"]] == 1, deg[e["b"]] == 1
+            if leaf_a == leaf_b:
+                continue                        # interior or isolated
+            e["alive"] = False
+            demand.add(e["a"] if leaf_b else e["b"])
+            changed = True
+    demand = {ni for ni in demand
+              if any(e["alive"] and ni in (e["a"], e["b"])
+                     for e in g.edges)}
+    if os.environ.get("O4_ET_DEBUG"):
+        print(f"[edge_trace] stand combs stripped; demand anchors: "
+              f"{len(demand)}", flush=True)
+    return demand
+
+
+def _enforce_min_separation(g: _Graph, w: float, sep: float, pav_eff,
+                            demand=()):
+    """USER WIDTH RULE (hard invariant, 2026-07-02): two spine lines may
+    run parallel through the SAME pavement space only when separated by
+    the taxiway-to-taxiway standard; closer pairs keep ONE line.  A
+    pavement hole/island/building between the pair means separate spaces
+    — the racetrack sides around a stand island both live.  The worse
+    edge of a violating pair dies (rank: corridor trunk > other paint >
+    inferred lane; longer beats shorter)."""
+    from shapely.prepared import prep
+    from shapely.strtree import STRtree
+    allow = prep(shapely.buffer(pav_eff, 0.5))
+    rank = {"paint_trunk": 0, "lane": 1, "center": 1, "paint": 2}
+    alive = [(ei, e) for ei, e in enumerate(g.edges)
+             if e["alive"] and e["kind"] in rank]
+    if not alive:
+        return
+    lines = [LineString(e["cs"]) for _ei, e in alive]
+    order = sorted(range(len(alive)), key=lambda i: (
+        -rank.get(alive[i][1]["kind"], 9), lines[i].length))
+    tree = STRtree(lines)
+    demand_pts = [Point(tuple(g.nodes[ni])) for ni in demand]
+    killed = 0
+    dead_local = set()
+    for i in order:
+        ei, e = alive[i]
+        ln = lines[i]
+        n = max(3, int(ln.length / 10.0))
+        samples = [ln.interpolate(t, normalized=True)
+                   for t in np.linspace(0.05, 0.95, n)]
+        cands = [int(j) for j in tree.query(
+            ln.buffer(0.95 * sep))
+            if int(j) != i and int(j) not in dead_local]
+        if not cands:
+            continue
+        my_rank = rank.get(e["kind"], 9)
+        viol = 0
+        for q in samples:
+            t0 = ln.project(q)
+            a0 = ln.interpolate(max(0.0, t0 - 3.0))
+            a1 = ln.interpolate(min(ln.length, t0 + 3.0))
+            u = np.asarray([a1.x - a0.x, a1.y - a0.y])
+            nu = float(np.hypot(*u))
+            if nu < 1e-6:
+                continue
+            u /= nu
+            for j in cands:
+                oj, eo = alive[j]
+                lo = lines[j]
+                r2 = rank.get(eo["kind"], 9)
+                better = (r2, -lo.length) < (my_rank, -ln.length)
+                if not better:
+                    continue
+                d = lo.distance(q)
+                if not (3.0 <= d <= 0.95 * sep):
+                    continue
+                s0 = lo.project(q)
+                b0 = lo.interpolate(max(0.0, s0 - 3.0))
+                b1 = lo.interpolate(min(lo.length, s0 + 3.0))
+                v = np.asarray([b1.x - b0.x, b1.y - b0.y])
+                nv = float(np.hypot(*v))
+                if nv < 1e-6:
+                    continue
+                v /= nv
+                ang = _angle_deg(tuple(u), tuple(v))
+                ang = min(ang, 180.0 - ang)
+                if ang > 25.0:
+                    continue
+                p2 = lo.interpolate(s0)
+                conn = LineString([(q.x, q.y), (p2.x, p2.y)])
+                if conn.length >= 1.0 and not allow.covers(conn):
+                    continue                    # a hole separates them
+                viol += 1
+                break
+        if viol >= 0.75 * len(samples):
+            # a line that serves stands directly is the frontage the
+            # demand anchors live on — never the duplicate
+            if demand_pts and any(ln.distance(q) < 2.0
+                                  for q in demand_pts):
+                continue
+            e["alive"] = False
+            dead_local.add(i)
+            killed += 1
+    if os.environ.get("O4_ET_DEBUG"):
+        print(f"[edge_trace] width invariant: killed {killed} parallel "
+              f"duplicates", flush=True)
+
+
+def _prune_parking_paint(g: _Graph, ramps, radius: float = 50.0,
+                         majority: float = 0.6):
+    """PARKING IS NOT TAXIING (user deletion criterion, measured 46%-vs-2%
+    discrimination on SPJC): spine material that lives among the apt.dat
+    parking positions is stand guidance, not taxi routing.  Kills any
+    edge with a majority of samples within ``radius`` of a ramp start."""
+    if not ramps:
+        return
+    ramp_u = unary_union([Point(x, y) for x, y in ramps])
+    killed = 0
+    for e in g.edges:
+        if not e["alive"]:
+            continue
+        ln = LineString(e["cs"])
+        n = max(3, int(ln.length / 12.0))
+        near = sum(1 for t in np.linspace(0.05, 0.95, n)
+                   if ramp_u.distance(
+                       ln.interpolate(t, normalized=True)) <= radius)
+        if near >= majority * n:
+            e["alive"] = False
+            killed += 1
+    if os.environ.get("O4_ET_DEBUG"):
+        print(f"[edge_trace] parking prune: killed {killed} edges near "
+              f"{len(ramps)} ramp starts", flush=True)
+
+
+def _prune_paint_leaves(g: _Graph, runway_union, pav_eff, demand=()):
+    """NO-MOVEMENT-NEEDS-IT: iteratively drop dead-end painted scraps
+    whose free tip serves nothing — not a runway contact, not a pavement-
+    edge termination, not a stand-demand anchor."""
+    rwy_b = runway_union.boundary if runway_union is not None \
+        and not runway_union.is_empty else None
+    bnd = pav_eff.boundary
+    demand = set(demand)
+    removed = 0
+    changed = True
+    while changed:
+        changed = False
+        deg = Counter()
+        for e in g.edges:
+            if e["alive"]:
+                deg[e["a"]] += 1
+                deg[e["b"]] += 1
+        for e in g.edges:
+            if not e["alive"] or not e["kind"].startswith("paint"):
+                continue
+            for tip, other in ((e["a"], e["b"]), (e["b"], e["a"])):
+                if deg[tip] != 1 or tip in demand:
+                    continue
+                p = Point(tuple(g.nodes[tip]))
+                if rwy_b is not None and rwy_b.distance(p) < 6.0:
+                    continue
+                if bnd.distance(p) < 10.0:
+                    continue
+                e["alive"] = False
+                removed += 1
+                changed = True
+                break
+    if os.environ.get("O4_ET_DEBUG"):
+        print(f"[edge_trace] paint leaf prune: removed {removed}",
+              flush=True)
+
+
 def _select_routes(g: _Graph, runway_union,
-                   keep_kinds=("lane",),
-                   center_bonus: float = 0.9):
+                   keep_kinds=("lane", "paint_trunk"),
+                   center_bonus: float = 0.9, extra_anchors=()):
     """ANCHOR-ROUTED NETWORK (R1/R3): corridor trunk lanes and building
     frontage are the spine's fixed anchoring structure; everything else
     (hole rings, centered opening lines, welds) exists only as ROUTING
@@ -380,10 +693,15 @@ def _select_routes(g: _Graph, runway_union,
         L = float(LineString(cs).length)
         chord = float(np.hypot(*(cs[-1] - cs[0])))
         # taxi routes are straight-by-design: a wiggly edge (boundary hug)
-        # costs more than its length, so straights win where both exist
-        curvy = min(2.0, L / max(chord, 1e-6))
-        wgt = L * curvy * curvy \
-            * (center_bonus if e["kind"] == "center" else 1.0)
+        # costs more than its length, so straights win where both exist.
+        # Painted lines are exempt — their curves ARE the design, and the
+        # router must prefer them over any inferred alternative.
+        if e["kind"].startswith("paint"):
+            wgt = 0.85 * L
+        else:
+            curvy = min(2.0, L / max(chord, 1e-6))
+            wgt = L * curvy * curvy \
+                * (center_bonus if e["kind"] == "center" else 1.0)
         if G.has_edge(e["a"], e["b"]) \
                 and G[e["a"]][e["b"]]["weight"] <= wgt:
             pass
@@ -411,6 +729,8 @@ def _select_routes(g: _Graph, runway_union,
         elif rwy_b is not None and len(ks) == 1 \
                 and rwy_b.distance(Point(tuple(g.nodes[ni]))) < 2.5:
             anchors.append(ni)
+    anchors.extend(ni for ni in extra_anchors
+                   if ni in kind_at and ni not in set(anchors))
     # candidate pairs: local direct connections (distant anchors reuse the
     # trunk network; two anchors closer than a mouth are the same mouth)
     max_direct = 8.0 * 80.0                     # ~ a few openings
@@ -480,7 +800,8 @@ def _add_mouth_projections(g: _Graph, pav_eff, max_len: float = 650.0):
     added = 0
     for ni, ends in list(g.incident().items()):
         live = [(ei, aa) for ei, aa in ends if g.edges[ei]["alive"]]
-        if len(live) != 1 or g.edges[live[0][0]]["kind"] != "lane":
+        if len(live) != 1 or g.edges[live[0][0]]["kind"] not in (
+                "lane", "paint_trunk", "paint"):
             continue
         ei, at_a = live[0]
         tip = g.nodes[ni]
@@ -595,6 +916,12 @@ def _area_access_hugs(g: _Graph, circ_pieces, w: float, sep: float,
                       for ei in ring_eis)
         if len_alive > 0.25 * len_all:
             continue                             # area already served
+        # any selected line (e.g. PAINT) crossing the area serves it too
+        try:
+            if net.intersection(piece).length > 0.25 * len_all:
+                continue
+        except Exception:
+            pass
         n_empty += 1
         ring_set = set(ring_eis)
         ring_nodes = set()
@@ -862,7 +1189,7 @@ def _straighten_routes(g: _Graph, accepted_paths, pav_eff, w: float,
             node_use[ni] += 1
     trunk_nodes = set()
     for e in g.edges:
-        if e["alive"] and e["kind"] == "lane":
+        if e["alive"] and e["kind"] in ("lane", "paint_trunk"):
             trunk_nodes.add(e["a"])
             trunk_nodes.add(e["b"])
     paths = []
@@ -870,7 +1197,9 @@ def _straighten_routes(g: _Graph, accepted_paths, pav_eff, w: float,
         cur = []
         for k, ei in enumerate(eis):
             e = g.edges[ei]
-            if not e["alive"]:
+            # painted stretches are design geometry — never tautened;
+            # they bound the pieces the straightener may touch
+            if not e["alive"] or e["kind"].startswith("paint"):
                 if cur:
                     paths.append(cur)
                 cur = []
@@ -985,6 +1314,8 @@ def _visibility_reroute(g: _Graph, accepted_paths, pav_eff, w: float,
     for node_path, eis in accepted_paths:
         if any(not g.edges[ei]["alive"] for ei in eis):
             continue
+        if any(g.edges[ei]["kind"].startswith("paint") for ei in eis):
+            continue                    # painted routes keep their geometry
         pts = [list(g.nodes[node_path[0]])]
         for k, ei in enumerate(eis):
             e = g.edges[ei]
@@ -1352,10 +1683,13 @@ def _straighten_path_list(g: _Graph, paths, pav_eff, w: float,
 
 def synthesize_spine_v8(
     pav, runway_union=None, buildings=None, routes=None, *,
-    terminal_setback: float = 100.0,
+    terminal_setback: float = 100.0, recognized=None, ramps=None,
 ) -> list[SpineWay]:
     """Edge-trace spine (module docstring).  ``routes`` supplies ICAO size
-    letters ONLY — geometry never comes from it."""
+    letters ONLY — geometry never comes from it.  ``recognized`` supplies
+    geometry-verified painted centerlines; where they exist they are the
+    PRIMARY design geometry (user ruling 2026-07-02) and the pavement
+    inference only fills unpainted areas."""
     buildings = [(b, r) for (b, r) in (buildings or [])
                  if b is not None and not b.is_empty]
     building_union = unary_union([b for b, _ in buildings]) \
@@ -1438,18 +1772,29 @@ def synthesize_spine_v8(
                     continue
                 center_runs.append((cs, rr))
 
+    # PAINT-PRIMARY (v9): recognized painted centerlines are the design
+    # geometry wherever present; every pavement-inferred candidate that
+    # merely re-derives a painted line yields to the paint.
+    paint_edges, paint_union = _paint_candidates(
+        recognized, pav_eff, w, corridors)
+    dedup_thr = _PAINT_DEDUP_FRAC * w
+
     g = _Graph()
     trunk_lines = []
     for cs, rr, w_med in kept_runs:
         if bay_union is not None and bay_union.contains(
                 LineString(cs).interpolate(0.5, normalized=True)):
             continue                            # bay-interior medial
+        if _duplicates_paint(cs, paint_union, dedup_thr):
+            continue                            # paint carries this corridor
         g.add_edge(cs, "lane", "", w_med)
         trunk_lines.append(LineString(cs))
     trunk_union = unary_union(trunk_lines) if trunk_lines else None
     for cs, rr in center_runs:
         if bay_union is not None and bay_union.contains(
                 LineString(cs).interpolate(0.5, normalized=True)):
+            continue
+        if _duplicates_paint(cs, paint_union, dedup_thr):
             continue
         g.add_edge(cs, "center", "", w + float(np.median(rr)))
 
@@ -1460,13 +1805,35 @@ def synthesize_spine_v8(
         if bay_union is not None and bay_union.contains(
                 t.interpolate(0.5, normalized=True)):
             continue
+        if _duplicates_paint(np.asarray(t.coords), paint_union, dedup_thr):
+            continue
         g.add_edge(np.asarray(t.coords), kind, "", w)
+
+    for cs, kind in paint_edges:
+        if bay_union is not None and bay_union.contains(
+                LineString(cs).interpolate(0.5, normalized=True)):
+            continue                            # parking combs stay empty
+        g.add_edge(cs, kind, "", w)
+    if os.environ.get("O4_ET_DEBUG") and paint_edges:
+        n_tr = sum(1 for _c, k in paint_edges if k == "paint_trunk")
+        print(f"[edge_trace] paint: {len(paint_edges)} pieces "
+              f"({n_tr} trunk)", flush=True)
 
     _add_mouth_projections(g, pav_eff)
     _planarize_crossings(g)
+    demand = _strip_stand_combs(g)
     _connect_free_ends(g, pav_eff)
     if not os.environ.get("O4_ET_NO_SELECT"):
-        accepted = _select_routes(g, runway_union)
+        # paint is design geometry — kept by default, pruned by the
+        # deletion criteria (parking/leaf passes below), NOT by the
+        # detour spanner: the spanner kills legitimate >=separation
+        # parallels (measured -14 coverage) while the true overgen is
+        # parking material the criteria remove directly
+        keep = ("lane", "paint_trunk") \
+            if os.environ.get("O4_ET_PAINT_SPAN") else \
+            ("lane", "paint_trunk", "paint")
+        accepted = _select_routes(g, runway_union, extra_anchors=demand,
+                                  keep_kinds=keep)
         _straighten_routes(g, accepted, pav_eff, w,
                            R90_BY_SIZE.get(size, 30.0))
     # R5 granularity: open-space BODIES = core opened at h (necks between
@@ -1478,6 +1845,14 @@ def synthesize_spine_v8(
             shapely.buffer(core, -h), h + 0.05))
     _area_access_hugs(g, area_bodies, w, sep, pav_eff)
     _trim_proj_tails(g, runway_union)
+    # NOTE: a global parallel-distance invariant is REFUTED by the target's
+    # own geometry (123 same-space parallel samples under 10 m: junction
+    # fans, converging lanes) — the user width rule is per stand AREA, not
+    # a spacing law.  _enforce_min_separation kept for a future scoped use.
+    if os.environ.get("O4_ET_SEP_INVARIANT"):
+        _enforce_min_separation(g, w, sep, pav_eff, demand=demand)
+    _prune_parking_paint(g, ramps)
+    _prune_paint_leaves(g, runway_union, pav_eff, demand=demand)
     # NOTE: straightening each accepted route as one unit (endpoints at
     # anchors) was tried and is NET-NEGATIVE (coverage 60.8->59.1,
     # alignment 1.21->1.43): chords cut curves the target keeps.  The
@@ -1486,7 +1861,10 @@ def synthesize_spine_v8(
     _fix_dangles(g, pav_eff)
     if not os.environ.get("O4_ET_KINDS"):        # keep kinds for debug only
         for e in g.edges:
-            e["kind"] = "lane"
+            # paint keeps its kind: it must stay outside through-path
+            # assembly and every straightener (it IS the design geometry)
+            if not e["kind"].startswith("paint"):
+                e["kind"] = "lane"
     g.consolidate()
     _straighten_paths(g, pav_eff, w, R90_BY_SIZE.get(size, 30.0), axes)
     g.consolidate()

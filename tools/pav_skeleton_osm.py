@@ -38,7 +38,7 @@ from shapely import wkb
 from shapely.geometry import LineString, Point
 from shapely.ops import unary_union
 
-_CACHE_VERSION = 2
+_CACHE_VERSION = 3
 
 
 class _Frame:
@@ -109,6 +109,30 @@ def _extract(icao: str, xplane: str):
     except Exception:
         pass
 
+    # apt.dat parking positions (rows 1300/15) — the movement-demand
+    # endpoints: paint that only distributes into stands is parking
+    # guidance, not taxi spine (user deletion criterion 2026-07-02)
+    ramps = []
+    try:
+        from auto_patch.apt_dat_reader import (
+            find_airport_apt_dat, _read_airport_block)
+        path = find_airport_apt_dat(xplane, icao)
+        lat0, lon0 = layout.anchor
+        cos0 = math.cos(math.radians(lat0))
+        R = 6378137.0
+        for row in _read_airport_block(path, icao) or []:
+            toks = row.split()
+            if not toks or toks[0] not in ("1300", "15"):
+                continue
+            try:
+                lat, lon = float(toks[1]), float(toks[2])
+            except (ValueError, IndexError):
+                continue
+            ramps.append((math.radians(lon - lon0) * R * cos0,
+                          math.radians(lat - lat0) * R))
+    except Exception:
+        pass
+
     return {
         "version": _CACHE_VERSION,
         "anchor": layout.anchor,
@@ -117,6 +141,7 @@ def _extract(icao: str, xplane: str):
         "routes": [(wkb.dumps(l), s, sv) for (l, s, sv) in routes],
         "buildings": [(wkb.dumps(b), r) for (b, r) in buildings],
         "recog": [wkb.dumps(r) for r in recog],
+        "ramps": ramps,
     }
 
 
@@ -188,9 +213,11 @@ def main(argv=None) -> int:
         else:
             from auto_patch.pavement.edge_trace import (
                 synthesize_spine_v8 as synthesize_spine)
+        kwargs = {} if args.v7 else {"recognized": recog,
+                                     "ramps": c.get("ramps") or []}
         ways = synthesize_spine(pav, runway_union=rwy, buildings=buildings,
                                 routes=routes,  # size letters ONLY
-                                terminal_setback=args.setback)
+                                terminal_setback=args.setback, **kwargs)
         lines = [w.line for w in ways]
         kinds = {}
         for i, w in enumerate(ways):
