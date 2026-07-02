@@ -128,6 +128,9 @@ def main(argv=None) -> int:
                     help="output path prefix (default /tmp/<ICAO>_skel)")
     ap.add_argument("--medial-only", action="store_true",
                     help="pure Voronoi medial skeleton (no route guidance)")
+    ap.add_argument("--v7", action="store_true",
+                    help="previous-generation heuristic synthesis "
+                         "(spine_synthesis.synthesize_spine)")
     ap.add_argument("--setback", type=float, default=100.0,
                     help="terminal/large-building ring setback (m)")
     ap.add_argument("--cache", action="store_true",
@@ -180,7 +183,11 @@ def main(argv=None) -> int:
                 "halfwidth_mean": f"{float(np.mean(ch.radii)):.1f}"}))
         kinds = {"medial": len(chains)}
     else:
-        from auto_patch.pavement.spine_synthesis import synthesize_spine
+        if args.v7:
+            from auto_patch.pavement.spine_synthesis import synthesize_spine
+        else:
+            from auto_patch.pavement.edge_trace import (
+                synthesize_spine_v8 as synthesize_spine)
         ways = synthesize_spine(pav, runway_union=rwy, buildings=buildings,
                                 routes=routes,  # size letters ONLY
                                 terminal_setback=args.setback)
