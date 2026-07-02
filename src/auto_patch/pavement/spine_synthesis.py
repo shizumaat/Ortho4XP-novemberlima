@@ -1072,9 +1072,15 @@ def _add_junction_arcs(g: _Graph, pav_ok, runway_union=None,
                     if arc is None:
                         break
                     # half-length budget: a branch may host arcs at BOTH
-                    # of its ends (H rung), so each side gets half
-                    if t <= 0.55 * len_a and t <= 0.55 * len_b \
-                            and pav_ok(LineString(arc)):
+                    # of its ends (H rung), so each side gets half.  In
+                    # walk mode (v8: planarize fragments are short) the
+                    # tangent may continue across collinear fragments.
+                    if r_start_for is not None:
+                        fits = (_walk_locate(g, ea, aa, t) is not None
+                                and _walk_locate(g, eb, ab, t) is not None)
+                    else:
+                        fits = t <= 0.55 * len_a and t <= 0.55 * len_b
+                    if fits and pav_ok(LineString(arc)):
                         r_fit = r
                         break
                     r *= 0.85
@@ -1107,11 +1113,19 @@ def _add_junction_arcs(g: _Graph, pav_ok, runway_union=None,
             (ea, aa), (eb, ab) = best_a, best_b
             len_a = LineString(g.edges[ea]["cs"]).length
             len_b = LineString(g.edges[eb]["cs"]).length
-            if t > len_a + 1.0 or t > len_b + 1.0:
-                continue
             w_pair = g.edges[ea]["w"]
-            na = g.split_edge(ea, t if aa else len_a - t)
-            nb = g.split_edge(eb, t if ab else len_b - t)
+            if r_start_for is not None:
+                loc_a = _walk_locate(g, ea, aa, t)
+                loc_b = _walk_locate(g, eb, ab, t)
+                if loc_a is None or loc_b is None:
+                    continue
+                na = g.split_edge(loc_a[0], loc_a[1])
+                nb = g.split_edge(loc_b[0], loc_b[1])
+            else:
+                if t > len_a + 1.0 or t > len_b + 1.0:
+                    continue
+                na = g.split_edge(ea, t if aa else len_a - t)
+                nb = g.split_edge(eb, t if ab else len_b - t)
             cs = np.asarray(arc)
             cs[0] = g.nodes[na]
             cs[-1] = g.nodes[nb]

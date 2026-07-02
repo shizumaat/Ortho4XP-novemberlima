@@ -670,6 +670,42 @@ def _area_access_hugs(g: _Graph, circ_pieces, w: float, sep: float,
               f"revived {revived} edges", flush=True)
 
 
+def _trim_proj_tails(g: _Graph, runway_union):
+    """A kept projection is a CONNECTOR: once it has served its last
+    junction, the ray's tail to the far pavement edge is spam — trim it
+    back to the last node where other spine meets it.  A projection with
+    NO interior junction is the access lane itself (mouth → far edge,
+    user R5/z4 case) and keeps its full length, as does a tail that ends
+    on the runway edge (rule b contact)."""
+    rwy_b = runway_union.boundary if runway_union is not None \
+        and not runway_union.is_empty else None
+    changed = True
+    while changed:
+        changed = False
+        for ni, ends in list(g.incident().items()):
+            live = [(ei, aa) for ei, aa in ends if g.edges[ei]["alive"]]
+            if len(live) != 1 or g.edges[live[0][0]]["kind"] != "proj":
+                continue
+            if rwy_b is not None and rwy_b.distance(
+                    Point(tuple(g.nodes[ni]))) < 2.5:
+                continue                        # runway contact tail
+            ei, at_a = live[0]
+            e = g.edges[ei]
+            other = e["b"] if at_a else e["a"]
+            others = [(ej, aa) for ej, aa in g.incident().get(other, [])
+                      if g.edges[ej]["alive"] and ej != ei]
+            if len(others) < 2:
+                continue                        # not a junction: keep access
+            u_tail = g.edge_dir_at(ei, not at_a)    # arriving at `other`
+            sibling = any(
+                g.edges[ej]["kind"] == "proj"
+                and _angle_deg(u_tail, g.edge_dir_at(ej, aa)) > 155.0
+                for ej, aa in others)
+            if sibling:
+                e["alive"] = False              # overshoot past a junction
+                changed = True
+
+
 def _prune_leaf_kinds(g: _Graph, kinds=("center", "weld")):
     """Center lines and edge traces are BRIDGES by definition (an opening
     between spaces, a frontage between corridors) — a dead-end branch made
@@ -1057,6 +1093,7 @@ def synthesize_spine_v8(
         area_bodies = _polygons(shapely.buffer(
             shapely.buffer(core, -h), h + 0.05))
     _area_access_hugs(g, area_bodies, w, sep, pav_eff)
+    _trim_proj_tails(g, runway_union)
     # NOTE: straightening each accepted route as one unit (endpoints at
     # anchors) was tried and is NET-NEGATIVE (coverage 60.8->59.1,
     # alignment 1.21->1.43): chords cut curves the target keeps.  The
@@ -1082,7 +1119,7 @@ def synthesize_spine_v8(
     def r_start_for(P, r_std):
         # wide-open junction crossings take the biggest mirrored arcs that
         # fit; the local clearance at the node is the openness measure
-        return min(2.5 * r_std, max(r_std, bnd_arc.distance(Point(tuple(P)))))
+        return min(1.6 * r_std, max(r_std, bnd_arc.distance(Point(tuple(P)))))
 
     _add_junction_arcs(g, pav_ok, runway_union, r_start_for=r_start_for)
     _add_runway_turns(g, runway_union, pav_eff)
