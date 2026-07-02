@@ -110,12 +110,13 @@ def _arc_pts(center, r, a0, a1, ccw: bool, step_m: float = 4.0):
             for t in ts]
 
 
-def _fillet(P, u_in, u_out, r, gamma_max=_TURN_MAX_DEG):
+def _fillet(P, u_in, u_out, r, gamma_max=_TURN_MAX_DEG,
+            gamma_min=_TURN_MIN_DEG):
     """Tangent arc at corner ``P``: arrive along ``u_in``, depart along
     ``u_out``.  Returns (arc_coords, tangent_len) or (None, 0)."""
     gamma = math.acos(max(-1.0, min(1.0,
         u_in[0] * u_out[0] + u_in[1] * u_out[1])))
-    if gamma < math.radians(_TURN_MIN_DEG) \
+    if gamma < math.radians(gamma_min) \
             or gamma > math.radians(gamma_max):
         return None, 0.0
     t = r * math.tan(gamma / 2.0)
@@ -452,7 +453,7 @@ def _straighten_paths(g: _Graph, paths, chord_ok, axes, pav_eff):
         snap = _snap_direction(d_chord, axes) if len(coords) >= 2 else None
         path_len = float(LineString(coords).length)
 
-        if snap is not None and path_len > 40.0:
+        if snap is not None and path_len > 12.0:
             # axis-aligned lane: offset from the NARROW cross-sections
             d = np.asarray(snap)
             nvec = np.asarray((-snap[1], snap[0]))
@@ -555,6 +556,29 @@ def _straighten_paths(g: _Graph, paths, chord_ok, axes, pav_eff):
         e = g.edges[ei]
         if e["alive"]:
             e["cs"] = np.asarray([g.nodes[e["a"]], g.nodes[e["b"]]])
+
+
+def _collapse_straight_edges(g: _Graph, pav_ok, tol: float = 2.5):
+    """Node reconciliation moves edge ENDPOINTS; a multi-vertex edge then
+    carries a kink at its second vertex.  Any lane edge whose interior stays
+    within ``tol`` of the endpoint chord (and whose chord fits the pavement)
+    collapses to the clean 2-point straight."""
+    for e in g.edges:
+        if not e["alive"] or e["kind"] != "lane":
+            continue
+        cs = e["cs"]
+        if len(cs) <= 2:
+            continue
+        a, b = cs[0], cs[-1]
+        ab = b - a
+        L = float(np.hypot(*ab))
+        if L < 1e-6:
+            continue
+        rel = cs - a
+        dev = np.abs(rel[:, 0] * ab[1] - rel[:, 1] * ab[0]) / L
+        if float(dev.max()) <= tol \
+                and pav_ok(LineString([tuple(a), tuple(b)])):
+            e["cs"] = np.asarray([a, b])
 
 
 def _fair_edge_bends(g: _Graph, pav_ok):
@@ -745,14 +769,21 @@ def _walk_locate(g: _Graph, ei: int, from_a: bool, t: float, max_hops=6):
 
 
 def _add_runway_turns(g: _Graph, runway_union, pav_eff):
-    """The sharp-turn arc lands ON the runway edge and can sweep up to
-    ~160 deg on shallow diagonals, so it gets its own containment slack
-    (1 m) and gamma ceiling."""
+    """Runway-contact arcs at DIAGONAL (rapid-exit style) lane tips.
+
+    Sharp side: one long STANDARD-radius arc (the ~135° turn), tangent to
+    the diagonal, landing on the runway edge.  Shallow side: the rare
+    gentle LARGE-radius blend into the runway (550 m down to 120 m, first
+    that fits).  Both weld into the graph; tangent points may lie beyond
+    the tip fragment, so they walk across collinear continuations.  The
+    live tip edge is re-resolved before every placement because a previous
+    split may have retired it."""
     if runway_union is None or runway_union.is_empty:
         return
     allow_rwy = shapely.buffer(pav_eff, 1.0)
     edge_b = runway_union.boundary
-    for ei in range(len(g.edges)):
+    n_edges0 = len(g.edges)
+    for ei in range(n_edges0):
         e = g.edges[ei]
         if not e["alive"] or e["kind"] != "lane":
             continue
@@ -761,6 +792,7 @@ def _add_runway_turns(g: _Graph, runway_union, pav_eff):
             P = Point(tuple(tip))
             if edge_b.distance(P) > 1.5:
                 continue
+            tip_node = e["a"] if at_a else e["b"]
             u_in = g.edge_dir_at(ei, not at_a)
             if at_a:
                 u_in = (-u_in[0], -u_in[1])
@@ -774,17 +806,82 @@ def _add_runway_turns(g: _Graph, runway_union, pav_eff):
             ang = min(ang, 180.0 - ang)
             if not (_DIAG_MIN_DEG <= ang <= _DIAG_MAX_DEG):
                 continue
+            # a lane that CROSSES the runway (continuation on the opposite
+            # side) is a crossing, not a rapid exit — no diagonal arcs
+            probe = LineString([tuple(tip),
+                                (tip[0] + u_in[0] * 400.0,
+                                 tip[1] + u_in[1] * 400.0)])
+            exit_pt = None
+            inter = probe.intersection(edge_b)
+            cand = [q for q in getattr(inter, "geoms", [inter])
+                    if q.geom_type == "Point"
+                    and q.distance(P) > 5.0]
+            if cand:
+                exit_pt = min(cand, key=lambda q: q.distance(P))
+            if exit_pt is not None:
+                near_far = any(
+                    o["alive"] and o["kind"] == "lane"
+                    and LineString(o["cs"]).distance(exit_pt) < 35.0
+                    for o in g.edges)
+                if near_far:
+                    continue
             r_std = _radius_for(e["size"])
+
+            def _live_tip_edge():
+                for (ej, aj) in g.incident().get(tip_node, []):
+                    if g.edges[ej]["alive"] \
+                            and g.edges[ej]["kind"] == "lane":
+                        return ej, aj
+                return None, None
+
             for e_sgn in (1.0, -1.0):
                 u_out = (e_dir[0] * e_sgn, e_dir[1] * e_sgn)
+                cei, cat_a = _live_tip_edge()
+                if cei is None:
+                    break
                 if _angle_deg(u_in, u_out) < 95.0:
-                    continue               # shallow side = the straight itself
+                    # SHALLOW side: the gentle large-radius blend mostly
+                    # lives ON the runway (the paint eases from the runway
+                    # centerline onto the diagonal), so at our domain edge
+                    # the arc is CLIPPED at the runway boundary: keep the
+                    # taxi-side piece — a gentle ease-off from the diagonal
+                    # ending on the edge.
+                    for r_blend in (550.0, 400.0, 275.0, 180.0, 120.0):
+                        arc_b, t_b = _fillet(tuple(tip), u_in, u_out,
+                                             r_blend, gamma_max=70.0,
+                                             gamma_min=10.0)
+                        if arc_b is None:
+                            break
+                        loc_b = _walk_locate(g, cei, cat_a, t_b)
+                        if loc_b is None:
+                            continue
+                        # smooth prefix of the arc while it stays on
+                        # pavement (clip artifacts would kink the line)
+                        keep = [arc_b[0]]
+                        for q in arc_b[1:]:
+                            if not allow_rwy.contains(Point(q)):
+                                break
+                            keep.append(q)
+                        if len(keep) < 3:
+                            continue
+                        piece = LineString(keep)
+                        if piece.length < 25.0:
+                            continue
+                        nb2 = g.split_edge(loc_b[0], loc_b[1])
+                        cs_b = np.asarray(piece.coords)
+                        cs_b[0] = g.nodes[nb2]
+                        g.add_edge(cs_b, "blend", e["size"], e["w"])
+                        break
+                    continue
+                # SHARP side: long standard-radius turn arc.  A hook at a
+                # fraction of the standard radius is paint that does not
+                # exist — skip rather than shrink below half standard.
                 r, arc, t, loc = r_std, None, 0.0, None
-                while r >= _MIN_ARC_FIT * r_std:
+                while r >= 0.5 * r_std:
                     arc, t = _fillet(tuple(tip), u_in, u_out, r,
                                      gamma_max=162.0)
                     if arc is not None:
-                        loc = _walk_locate(g, ei, at_a, t)
+                        loc = _walk_locate(g, cei, cat_a, t)
                         if loc is not None \
                                 and allow_rwy.contains(LineString(arc)):
                             break
@@ -796,7 +893,6 @@ def _add_runway_turns(g: _Graph, runway_union, pav_eff):
                 cs = np.asarray(arc)
                 cs[0] = g.nodes[na]
                 g.add_edge(cs, "rwy_turn", e["size"], e["w"])
-                break                      # one sharp turn per tip
             if not e["alive"]:
                 break
     return
@@ -956,6 +1052,9 @@ def synthesize_spine(
     axes = _runway_axes(runway_union)
     paths = _assemble_through_paths(g)
     _straighten_paths(g, paths, chord_ok, axes, pav_eff)
+
+    # 2b: collapse kinks left by node reconciliation
+    _collapse_straight_edges(g, pav_ok)
 
     # 3: sizes (routes = attribute lookup only) → standard radii
     _attribute_sizes(g, routes)
