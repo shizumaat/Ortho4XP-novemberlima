@@ -630,17 +630,28 @@ def _straighten_paths(g: _Graph, paths, chord_ok, axes, pav_eff):
         if info["d"] is not None:
             d = np.asarray(info["d"])
             nvec = np.asarray((-d[1], d[0]))
-            c = info["c"]
-            t_all = coords @ d
-            probe = LineString([tuple(d * t_all.min() + nvec * c),
-                                tuple(d * t_all.max() + nvec * c)])
-            import os as _os
-            if _os.environ.get("O4_SNAP_DEBUG"):
-                mid = coords[len(coords) // 2]
-                if abs(mid[0] + 450) < 60 and abs(mid[1] - 1340) < 60:
-                    print(f"[snapdbg] apply c={c:.1f} chord_ok="
-                          f"{chord_ok(probe)} allow={allow.contains(probe)}")
-            if chord_ok(probe) or allow.contains(probe):
+            c_all = coords @ nvec
+            arc_pos = np.concatenate([[0.0], np.cumsum(
+                np.hypot(*(coords[1:] - coords[:-1]).T))])
+            # A parallel can JOG mid-path: the lateral offset steps between
+            # two plateaus (two design lines joined by a short S-turn).
+            best_gap, best_k = 0.0, None
+            if arc_pos[-1] > 400.0 and len(info["path"]) >= 2:
+                for k in range(3, len(coords) - 3):
+                    if arc_pos[k] < 150.0 or arc_pos[-1] - arc_pos[k] < 150.0:
+                        continue
+                    gap = abs(np.median(c_all[:k]) - np.median(c_all[k:]))
+                    if gap > best_gap:
+                        best_gap, best_k = gap, k
+
+            def _try_single():
+                sel = _narrow_sel(rr)
+                c = float(np.median(c_all[sel]))
+                t_all = coords @ d
+                probe = LineString([tuple(d * t_all.min() + nvec * c),
+                                    tuple(d * t_all.max() + nvec * c)])
+                if not (chord_ok(probe) or allow.contains(probe)):
+                    return False
                 for ni in node_seq:
                     node_lines[ni].append((nvec, c))
                 for ni in node_seq:
@@ -648,10 +659,85 @@ def _straighten_paths(g: _Graph, paths, chord_ok, axes, pav_eff):
                     g.move_node(ni, d * t + nvec * c)
                 for (ei, _at_a) in info["path"]:
                     e = g.edges[ei]
-                    e["cs"] = np.asarray([g.nodes[e["a"]],
-                                          g.nodes[e["b"]]])
+                    e["cs"] = np.asarray([g.nodes[e["a"]], g.nodes[e["b"]]])
                     snapped_edges.append(ei)
-                applied = True
+                return True
+
+            def _try_jog():
+                # cut at the interior node nearest the step
+                node_arc = [float(arc_pos[int(np.argmin(
+                    np.hypot(*(coords - g.nodes[ni]).T)))])
+                    for ni in node_seq]
+                s_step = arc_pos[best_k]
+                interior = list(range(1, len(node_seq) - 1))
+                if not interior:
+                    return False
+                cut = min(interior, key=lambda kk: abs(node_arc[kk] - s_step))
+                g1 = list(range(0, cut))
+                g2 = list(range(cut, len(info["path"])))
+                if not g1 or not g2:
+                    return False
+                m1 = arc_pos <= node_arc[cut] + 1.0
+                m2 = arc_pos >= node_arc[cut] - 1.0
+                cs_ = []
+                for m in (m1, m2):
+                    if m.sum() < 3:
+                        return False
+                    sel = _narrow_sel(rr[m])
+                    cs_.append(float(np.median((c_all[m])[sel])))
+                c1, c2 = cs_
+                if abs(c1 - c2) < 3.0:
+                    return False
+                for m, c in ((m1, c1), (m2, c2)):
+                    t_sub = (coords[m]) @ d
+                    probe = LineString([tuple(d * t_sub.min() + nvec * c),
+                                        tuple(d * t_sub.max() + nvec * c)])
+                    if not (chord_ok(probe) or allow.contains(probe)):
+                        return False
+                ni_cut = node_seq[cut]
+                t_cut = float(g.nodes[ni_cut] @ d)
+                p1 = d * t_cut + nvec * c1
+                p2 = d * t_cut + nvec * c2
+                # group 1 keeps ni_cut on line 1
+                for ni in node_seq[:cut + 1]:
+                    t = float(g.nodes[ni] @ d)
+                    cc = c1
+                    g.move_node(ni, d * t + nvec * cc)
+                    node_lines[ni].append((nvec, c1))
+                # group 2 gets a NEW node on line 2 + jog edge
+                ni_new = g.add_node(p2)
+                g.no_through.add(ni_cut)
+                g.no_through.add(ni_new)
+                first2 = info["path"][cut]
+                e2 = g.edges[first2[0]]
+                if first2[1]:
+                    e2["a"] = ni_new
+                    e2["cs"][0] = g.nodes[ni_new]
+                else:
+                    e2["b"] = ni_new
+                    e2["cs"][-1] = g.nodes[ni_new]
+                for ni in node_seq[cut + 1:]:
+                    t = float(g.nodes[ni] @ d)
+                    g.move_node(ni, d * t + nvec * c2)
+                    node_lines[ni].append((nvec, c2))
+                node_lines[ni_new].append((nvec, c2))
+                g.add_edge(np.asarray([p1, p2]), "lane", "", 10.0)
+                for gi in g1:
+                    (ei, _a) = info["path"][gi]
+                    e = g.edges[ei]
+                    e["cs"] = np.asarray([g.nodes[e["a"]], g.nodes[e["b"]]])
+                    snapped_edges.append(ei)
+                for gi in g2:
+                    (ei, _a) = info["path"][gi]
+                    e = g.edges[ei]
+                    e["cs"] = np.asarray([g.nodes[e["a"]], g.nodes[e["b"]]])
+                    snapped_edges.append(ei)
+                return True
+
+            if best_gap > 4.0 and best_k is not None:
+                applied = _try_jog() or _try_single()
+            else:
+                applied = _try_single()
         if applied:
             continue
         # fallback: chord-straighten (curved paths)
