@@ -86,7 +86,7 @@ def _dominant_halfwidth(chains) -> float:
     hist, edges = np.histogram(a, bins=np.arange(_W_BAND[0], _W_BAND[1] + 1.0,
                                                  1.0), weights=wt)
     k = int(hist.argmax())
-    sel = (a >= edges[k] - 1.5) & (a <= edges[k] + 2.5)
+    sel = (a >= edges[k] - 2.0) & (a <= edges[k] + 2.0)
     return float(np.average(a[sel], weights=wt[sel])) if sel.any() \
         else float(edges[k] + 0.5)
 
@@ -977,16 +977,18 @@ def _refit_chain(cs, d_orig_fn, w, r_std, allow, bnd):
     return new_line
 
 
-def _straighten_paths(g: _Graph, pav_eff, w: float, r_std: float = 30.0):
+def _straighten_paths(g: _Graph, pav_eff, w: float, r_std: float = 30.0,
+                      axes=None):
     """BIG-PICTURE STRAIGHT (user rule i) applied to THROUGH-PATHS: target
     straights run through junction after junction, so chords must span
     node-to-node fragments.  Interior junction nodes are moved onto the
     straightened line (side branches follow via move_node)."""
-    _straighten_path_list(g, _assemble_through_paths(g), pav_eff, w, r_std)
+    _straighten_path_list(g, _assemble_through_paths(g), pav_eff, w, r_std,
+                          axes)
 
 
 def _straighten_path_list(g: _Graph, paths, pav_eff, w: float,
-                          r_std: float = 30.0):
+                          r_std: float = 30.0, axes=None):
     from shapely.ops import substring
     bnd = pav_eff.boundary
     allow = shapely.buffer(pav_eff, 0.5)
@@ -1000,7 +1002,54 @@ def _straighten_path_list(g: _Graph, paths, pav_eff, w: float,
             new_line = _refit_chain(cs, None, w, r_std, allow, bnd)
         if new_line is None:
             keep = _max_chords(cs, d_orig, w, allow, bnd)
-            new_line = LineString(cs[keep])
+            pts = cs[keep].astype(float).copy()
+            # re-center each long chord by LSQ over ALL spanned medial
+            # vertices — a chord through two endpoint vertices inherits
+            # their sampling noise, the fitted axis does not (alignment);
+            # a fit within 3° of the runway grid snaps EXACTLY to it
+            # (taxiways are surveyed parallel/perpendicular to runways —
+            # residual angular error over a long corridor is what keeps
+            # the matched median above the gate)
+            fits = []
+            for k in range(len(keep) - 1):
+                i, j = keep[k], keep[k + 1]
+                span = LineString(cs[i:j + 1]).length if j > i else 0.0
+                f = _fit_line(cs[i:j + 1]) \
+                    if span >= 60.0 and j - i >= 4 else None
+                if f is not None and axes:
+                    from .spine_synthesis import _snap_direction
+                    snapped = _snap_direction(tuple(f[1]), axes,
+                                              tol_deg=3.0)
+                    if snapped is not None:
+                        f = (f[0], np.asarray(snapped))
+                fits.append(f)
+
+            def _proj(f, q):
+                p0, u = f
+                return p0 + u * float((q - p0) @ u)
+            for k in range(1, len(pts) - 1):
+                fa, fb = fits[k - 1], fits[k]
+                if fa is not None and fb is not None:
+                    ang = _angle_deg(tuple(fa[1]), tuple(fb[1]))
+                    ang = min(ang, 180.0 - ang)
+                    if ang > 5.0:
+                        den = fa[1][0] * fb[1][1] - fa[1][1] * fb[1][0]
+                        dp = fb[0] - fa[0]
+                        s1 = (dp[0] * fb[1][1] - dp[1] * fb[1][0]) / den
+                        cand = fa[0] + fa[1] * s1
+                    else:
+                        cand = 0.5 * (_proj(fa, pts[k]) + _proj(fb, pts[k]))
+                elif fa is not None:
+                    cand = _proj(fa, pts[k])
+                elif fb is not None:
+                    cand = _proj(fb, pts[k])
+                else:
+                    continue
+                if float(np.hypot(*(cand - pts[k]))) <= 3.0:
+                    pts[k] = cand
+            cand_line = LineString(pts)
+            new_line = cand_line if allow.contains(cand_line) \
+                else LineString(cs[keep])
         # each edge boundary index in cs: recompute by walking the path
         idx = [0]
         pos = 0
@@ -1176,7 +1225,7 @@ def synthesize_spine_v8(
         for e in g.edges:
             e["kind"] = "lane"
     g.consolidate()
-    _straighten_paths(g, pav_eff, w, R90_BY_SIZE.get(size, 30.0))
+    _straighten_paths(g, pav_eff, w, R90_BY_SIZE.get(size, 30.0), axes)
     g.consolidate()
 
     # standard mirrored arcs at junction turns + runway diagonal hooks
