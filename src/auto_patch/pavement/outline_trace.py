@@ -36,7 +36,7 @@ import os
 import numpy as np
 import shapely
 from shapely.geometry import LineString, Point
-from shapely.ops import unary_union
+from shapely.ops import nearest_points, unary_union
 
 from .pav_skeleton import (
     _extend_tip, _fair_chain, _polygons, build_pavement_skeleton,
@@ -74,6 +74,138 @@ def _widest_documented_size(routes) -> str:
     return best
 
 
+def _project_lane_continuations(g: _Graph, pav_eff, w: float):
+    """User rule: a corridor centerline continues STRAIGHT through a
+    junction opening.  The junction bulge (clearance > 2w) splits the
+    medial, and both ends promptly weld into the surrounding trace ring
+    — no tip remains for the bridges, so the through line detours around
+    the opening.  Pair FACING LANE ENDS (welded or not) across openings
+    and connect them straight.  (The ray-projection variant sprayed
+    false straights from every legitimate arc turn — a turn also has no
+    on-axis lane continuation; requiring a facing partner is the
+    discriminator.)"""
+    inc = g.incident()
+    allow = shapely.buffer(pav_eff, 0.5)
+    lane_ends = []                       # (node, axis-arriving, ei)
+    for ni, ends in inc.items():
+        for ei, aa in ends:
+            e = g.edges[ei]
+            if not e["alive"] or e["kind"] != "lane":
+                continue
+            if LineString(e["cs"]).length < 40.0:
+                continue
+            u = g.edge_dir_at(ei, aa, back_m=55.0)
+            if u == (0.0, 0.0):
+                continue
+            # an on-axis lane continuation at this node = not an end
+            cont = False
+            for ej, ab in ends:
+                if ej == ei or not g.edges[ej]["alive"] \
+                        or g.edges[ej]["kind"] != "lane":
+                    continue
+                v = g.edge_dir_at(ej, ab, back_m=55.0)
+                if _angle((-u[0], -u[1]), (-v[0], -v[1])) > 150.0:
+                    cont = True
+                    break
+            if not cont:
+                lane_ends.append((ni, u, ei))
+    cands = []
+    for i in range(len(lane_ends)):
+        for j in range(i + 1, len(lane_ends)):
+            (na, ua, ea), (nb, ub, eb) = lane_ends[i], lane_ends[j]
+            if na == nb or ea == eb:
+                continue
+            A, B = g.nodes[na], g.nodes[nb]
+            d = float(np.hypot(*(B - A)))
+            if not 8.0 <= d <= 6.0 * w:
+                continue
+            v = ((B[0] - A[0]) / d, (B[1] - A[1]) / d)
+            angA = _angle((-ua[0], -ua[1]), v)
+            angB = _angle((-ub[0], -ub[1]), (-v[0], -v[1]))
+            if angA > 25.0 or angB > 25.0:
+                continue
+            seg = LineString([tuple(A), tuple(B)])
+            if not allow.contains(seg):
+                continue
+            cands.append((d * (1.0 + (angA + angB) / 25.0), na, nb))
+    used = set()
+    added = 0
+    for _s, na, nb in sorted(cands):
+        if (na, nb) in used or (nb, na) in used:
+            continue
+        used.add((na, nb))
+        g.add_edge(np.asarray([g.nodes[na], g.nodes[nb]]), "lane", "", 0.0)
+        added += 1
+    if os.environ.get("O4_ET_DEBUG"):
+        print(f"[outline] lane continuations connected: {added}",
+              flush=True)
+
+
+def _uncurl_lane_tips(g: _Graph, runway_union, max_curl: float = 30.0):
+    """A medial entering a junction opening CURLS off-axis around the
+    bulge; the curled tail is not through-line geometry (the target
+    draws the through line straight and joins turns with separate arcs)
+    and it defeats every facing/extension test.  Trim tip vertices that
+    veer >18 deg off the chain axis (runway-contact tips keep their
+    deliberate geometry)."""
+    from collections import Counter
+    deg = Counter()
+    for e in g.edges:
+        if e["alive"]:
+            deg[e["a"]] += 1
+            deg[e["b"]] += 1
+    trimmed = 0
+    for e in g.edges:
+        if not e["alive"] or e["kind"] != "lane":
+            continue
+        cs = e["cs"]
+        if LineString(cs).length < 70.0:
+            continue
+        for tip_first in (True, False):
+            ni = e["a"] if tip_first else e["b"]
+            if deg[ni] != 1:
+                continue
+            if runway_union is not None and not runway_union.is_empty \
+                    and runway_union.distance(
+                        Point(tuple(g.nodes[ni]))) < 30.0:
+                continue
+            pts = cs if tip_first else cs[::-1]
+            # chain axis from 25-70 m back
+            acc, k0, k1 = 0.0, None, None
+            for k in range(1, len(pts)):
+                acc += float(np.hypot(*(pts[k] - pts[k - 1])))
+                if k0 is None and acc >= 25.0:
+                    k0 = k
+                if acc >= 70.0:
+                    k1 = k
+                    break
+            if k0 is None or k1 is None or k1 <= k0:
+                continue
+            axis = pts[k1] - pts[k0]
+            na_ = float(np.hypot(*axis))
+            if na_ < 1e-6:
+                continue
+            axis = axis / na_
+            cut = 0
+            acc = 0.0
+            for k in range(min(k0, len(pts) - 2)):
+                seg = pts[k + 1] - pts[k]
+                ns = float(np.hypot(*seg))
+                acc += ns
+                if acc > max_curl:
+                    break
+                if ns > 1e-6 and _angle(tuple(seg / ns),
+                                        tuple(axis)) > 18.0:
+                    cut = k + 1
+            if cut:
+                new = pts[cut:]
+                e["cs"] = new if tip_first else new[::-1]
+                g.move_node(ni, new[0] if tip_first else new[-1])
+                trimmed += 1
+    if os.environ.get("O4_ET_DEBUG"):
+        print(f"[outline] uncurled tips: {trimmed}", flush=True)
+
+
 def _bridge_facing_tips(g: _Graph, pav_eff, reach: float):
     """Corridor lines continue STRAIGHT through junction openings (rules
     2/7): a free tip whose tangent faces another free tip across open
@@ -87,14 +219,17 @@ def _bridge_facing_tips(g: _Graph, pav_eff, reach: float):
         if e["alive"]:
             deg[e["a"]] += 1
             deg[e["b"]] += 1
-    tips = []                                   # (node, unit tangent OUT)
+    tips = []                                   # (node, unit AXIS arriving)
     for ei, e in enumerate(g.edges):
         if not e["alive"]:
             continue
         for ni, at_a in ((e["a"], True), (e["b"], False)):
             if deg[ni] != 1:
                 continue
-            u = g.edge_dir_at(ei, at_a)         # direction ARRIVING at tip
+            # the chain AXIS (55 m back), not the local tangent — the
+            # medial curls off-axis entering a junction opening and the
+            # facing test misses the continuation otherwise
+            u = g.edge_dir_at(ei, at_a, back_m=55.0)
             tips.append((ni, u))
     cands = []
     for i in range(len(tips)):
@@ -105,12 +240,25 @@ def _bridge_facing_tips(g: _Graph, pav_eff, reach: float):
             if not 1.0 <= d <= reach:
                 continue
             v = ((B[0] - A[0]) / d, (B[1] - A[1]) / d)
-            # A's outgoing tangent must continue toward B, and B's back
-            if _angle(ua, v) > 30.0 or _angle(ub, (-v[0], -v[1])) > 30.0:
+            # A's outgoing axis must continue toward B, and B's back
+            angA = _angle(ua, v)
+            angB = _angle(ub, (-v[0], -v[1]))
+            if angA > 35.0 or angB > 35.0:
                 continue
             if not allow.contains(LineString([tuple(A), tuple(B)])):
                 continue
-            cands.append((d, na, nb))
+            # COLLINEAR continuation beats raw proximity: a tip must not
+            # be consumed by a short sideways connector when its true
+            # continuation waits across the junction opening
+            score = d * (1.0 + (angA + angB) / 30.0)
+            cands.append((score, na, nb))
+    tip_edge = {}
+    for ei, e in enumerate(g.edges):
+        if not e["alive"]:
+            continue
+        for ni in (e["a"], e["b"]):
+            if deg[ni] == 1:
+                tip_edge[ni] = ei
     used = set()
     added = 0
     for d, na, nb in sorted(cands):
@@ -118,6 +266,44 @@ def _bridge_facing_tips(g: _Graph, pav_eff, reach: float):
             continue
         used.add(na)
         used.add(nb)
+        # near-collinear chains are ONE interrupted line (user: "pick the
+        # average and merge") — align both tails onto the common fitted
+        # line so the bridge continues STRAIGHT instead of jogging
+        # between laterally-offset tips
+        ea, eb = tip_edge.get(na), tip_edge.get(nb)
+        if ea is not None and eb is not None:
+            ua = g.edge_dir_at(ea, g.edges[ea]["a"] == na)
+            ub = g.edge_dir_at(eb, g.edges[eb]["a"] == nb)
+            if _angle(ua, (-ub[0], -ub[1])) < 12.0:
+                tail = []
+                for ei2, ni2 in ((ea, na), (eb, nb)):
+                    cs2 = g.edges[ei2]["cs"]
+                    pts = cs2 if np.allclose(cs2[0], g.nodes[ni2]) \
+                        else cs2[::-1]
+                    acc = 0.0
+                    for k in range(min(len(pts), 12)):
+                        tail.append(pts[k])
+                        if k > 0:
+                            acc += float(np.hypot(*(pts[k] - pts[k - 1])))
+                        if acc > 40.0:
+                            break
+                T = np.asarray(tail)
+                cen = T.mean(axis=0)
+                u_, s_, _v = np.linalg.svd(T - cen)
+                axis = _v[0]
+
+                def proj(p):
+                    return cen + axis * float((np.asarray(p) - cen) @ axis)
+                for ei2, ni2 in ((ea, na), (eb, nb)):
+                    cs2 = g.edges[ei2]["cs"]
+                    at_a = bool(np.allclose(cs2[0], g.nodes[ni2]))
+                    idx = range(0, min(len(cs2), 6)) if at_a else \
+                        range(len(cs2) - 1, max(-1, len(cs2) - 7), -1)
+                    for k in idx:
+                        p2 = proj(cs2[k])
+                        if float(np.hypot(*(p2 - cs2[k]))) <= 0.35 * reach:
+                            cs2[k] = p2
+                    g.move_node(ni2, proj(g.nodes[ni2]))
         g.add_edge(np.asarray([g.nodes[na], g.nodes[nb]]), "lane", "", 0.0)
         added += 1
     if os.environ.get("O4_ET_DEBUG"):
@@ -208,21 +394,24 @@ def _merge_coincident(g: _Graph, gap: float = 8.0):
         n = max(3, int(ln.length / 8.0))
         pts = [ln.interpolate(t, normalized=True)
                for t in np.linspace(0.1, 0.9, n)]
-        for j in tree.query(ln.buffer(gap)):
+        my_gap = gap if ln.length >= 50.0 else 1.35 * gap
+        for j in tree.query(ln.buffer(my_gap)):
             j = int(j)
             if j == i or j in dead:
                 continue
             oj, eo = alive[j]
-            if eo["kind"] != e["kind"] and "arc" in (e["kind"], eo["kind"]):
-                continue
-            if lines[j].length < ln.length:
+            both_ends = {e["a"], e["b"]} == {eo["a"], eo["b"]}
+            if "arc" in (e["kind"], eo["kind"]):
+                # same-node arc+lane alternates: the ARC is the designed
+                # join, the chord lane dies (user junction review); any
+                # other arc pairing is left alone
+                if not (both_ends and e["kind"] != eo["kind"]):
+                    continue
+                if e["kind"] == "arc":
+                    continue                # never kill the arc
+            elif lines[j].length < ln.length:
                 continue                    # only the longer twin absorbs
-            # only both-endpoint pairs are true alternates (arc vs line);
-            # a wishbone sharing ONE node still duplicates — a genuine
-            # V-connection diverges and fails the gap test on its own
-            if {e["a"], e["b"]} == {eo["a"], eo["b"]}:
-                continue
-            if all(lines[j].distance(p) <= gap for p in pts):
+            if all(lines[j].distance(p) <= my_gap for p in pts):
                 e["alive"] = False
                 dead.add(i)
                 killed += 1
@@ -281,6 +470,39 @@ def _trim_corner_deaths(g: _Graph, pav_eff, runway_union,
                     break
         if not changed:
             break
+
+
+def _prune_midfield_dead_ends(g: _Graph, pav_eff, runway_union):
+    """Rule 4, final form: after every closer has run, a leaf tip still
+    hanging mid-pavement is an unfixable dead end — the leaf chain walks
+    back to its junction and dies, whatever its length (the 135 m apron
+    medial whisker class survives the short-stub trim)."""
+    from collections import Counter
+    bnd = pav_eff.boundary
+    rwy_b = runway_union.boundary if runway_union is not None \
+        and not runway_union.is_empty else None
+    changed = True
+    while changed:
+        changed = False
+        deg = Counter()
+        for e in g.edges:
+            if e["alive"]:
+                deg[e["a"]] += 1
+                deg[e["b"]] += 1
+        for e in g.edges:
+            if not e["alive"]:
+                continue
+            for tip in (e["a"], e["b"]):
+                if deg[tip] != 1:
+                    continue
+                p = Point(tuple(g.nodes[tip]))
+                if bnd.distance(p) < 6.0:
+                    continue                    # ends on the pavement edge
+                if rwy_b is not None and rwy_b.distance(p) < 3.0:
+                    continue                    # runway contact
+                e["alive"] = False
+                changed = True
+                break
 
 
 def _prune_unreachable(g: _Graph, runway_union, tol: float = 3.0):
@@ -469,16 +691,64 @@ def synthesize_spine_v10(
                         and runway_union.distance(q) <= w_trace + 3.0:
                     keep[k] = False
                     continue
-                # merge rule: a trace riding a corridor the centerline
-                # already carries is the same line — drop it there
-                if center_union is not None \
-                        and center_union.distance(q) <= 1.2 * w:
+                # merge rule: a trace RIDING a corridor the centerline
+                # already carries is the same line — drop it there.
+                # PARALLEL courses only: a converging/crossing centerline
+                # (junction throat) must not erase the trace, or the ring
+                # stops short of the junction with nothing to weld to
+                # (user review: the apron trace must continue around the
+                # corner INTO the junction)
+                if center_union is None \
+                        or center_union.distance(q) > 1.2 * w:
+                    continue
+                k0, k1 = max(0, k - 1), min(len(cs) - 1, k + 1)
+                u = cs[k1] - cs[k0]
+                nu = float(np.hypot(*u))
+                np_, _q2 = nearest_points(center_union, q)
+                # local tangent of the claiming centerline
+                best = None
+                for cl in center_lines:
+                    d2 = cl.distance(np_)
+                    if best is None or d2 < best[1]:
+                        best = (cl, d2)
+                cl = best[0]
+                s0 = cl.project(np_)
+                a2 = cl.interpolate(max(0.0, s0 - 4.0))
+                b2 = cl.interpolate(min(cl.length, s0 + 4.0))
+                v = np.asarray([b2.x - a2.x, b2.y - a2.y])
+                nv = float(np.hypot(*v))
+                if nu < 1e-6 or nv < 1e-6 \
+                        or _angle(tuple(u / nu), tuple(v / nv)) < 30.0 \
+                        or _angle(tuple(u / nu), tuple(-v / nv)) < 30.0:
                     keep[k] = False
             for piece in _split_line_by_mask(cs, keep):
                 # sub-corridor-length scraps are junction-flare noise, not
                 # traceable edges (they read as ticks along the corridors)
-                if LineString(piece).length >= 28.0:
-                    trace_runs.append(np.asarray(piece))
+                if LineString(piece).length < 28.0:
+                    continue
+                piece = np.asarray(piece, dtype=float)
+                # a cut made by the CENTERLINE claim must reconnect: the
+                # trace continues to the line that claimed it (user
+                # review: the apron-edge trace stops mid-corner and gets
+                # a perpendicular hook otherwise) — overshoot 2.5 m past
+                # the centerline so planarize welds the crossing
+                if center_union is not None:
+                    for end in (0, -1):
+                        pt = Point(tuple(piece[end]))
+                        d = center_union.distance(pt)
+                        if not (2.0 < d <= 1.4 * w):
+                            continue
+                        np_, _q = nearest_points(center_union, pt)
+                        v = np.asarray([np_.x - pt.x, np_.y - pt.y])
+                        nv = float(np.hypot(*v))
+                        if nv < 1e-6:
+                            continue
+                        tgt = np.asarray([np_.x, np_.y]) + v / nv * 2.5
+                        if end == 0:
+                            piece = np.vstack([[tgt], piece])
+                        else:
+                            piece = np.vstack([piece, [tgt]])
+                trace_runs.append(piece)
     if dbg:
         print(f"[outline] centers={len(center_runs)} traces={len(trace_runs)} "
               f"rings_dropped={n_ring_drop}", flush=True)
@@ -501,6 +771,7 @@ def synthesize_spine_v10(
         g.add_edge(np.asarray(cs, dtype=float), "trace", "", w_trace)
 
     _planarize_crossings(g)
+    _uncurl_lane_tips(g, runway_union)
     _bridge_facing_tips(g, pav_eff, reach=4.0 * w)
     _connect_free_ends(g, pav_eff)
     _weld_components(g, pav_eff, max_gap=3.0 * w)
@@ -508,6 +779,7 @@ def synthesize_spine_v10(
     # welds — projecting first sprayed center-to-edge spurs from tips the
     # network already continues (user review: way-104 class)
     _add_mouth_projections(g, pav_eff)
+    _project_lane_continuations(g, pav_eff, w)
     _planarize_crossings(g)
     _bridge_facing_tips(g, pav_eff, reach=4.0 * w)
     _connect_free_ends(g, pav_eff)
@@ -524,7 +796,12 @@ def synthesize_spine_v10(
 
     if not os.environ.get("O4_ET_KINDS"):
         for e in g.edges:
-            e["kind"] = "lane"
+            # traces KEEP their kind: the through-path straightener
+            # chords their curves into angle pairs otherwise (user
+            # review: the 90-degree pavement corner became two straight
+            # angles) — their faired curve geometry is already right
+            if e["kind"] != "trace":
+                e["kind"] = "lane"
     g.consolidate()
     # rule 2 + user review item 4: long runs parallel/perpendicular to a
     # runway snap to ONE dead-straight axis line; curves connect into it
@@ -547,5 +824,9 @@ def synthesize_spine_v10(
     _add_runway_turns(g, runway_union, pav_eff)
     _fix_dangles(g, pav_eff)
     _close_floating_tips(g, pav_eff, building_union)
+    # the closer can re-create corner hooks the trims removed (its
+    # nearest-boundary extension lands on corner apexes) — rule 3 last
+    _trim_corner_deaths(g, pav_eff, runway_union)
+    _prune_midfield_dead_ends(g, pav_eff, runway_union)
     g.consolidate()
     return g.ways()
