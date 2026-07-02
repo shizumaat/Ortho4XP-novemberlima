@@ -1261,15 +1261,24 @@ def synthesize_spine(
     rwy_zone = shapely.buffer(runway_union, 25.0) \
         if runway_union is not None and not runway_union.is_empty else None
     g = _Graph()
+    chains_all = []
     for ch in build_pavement_skeleton(pav_nav, runway_union=runway_union):
         w = float(np.median(ch.radii)) if ch.radii else 8.0
+        chains_all.append((ch, w))
+    kept_tips = []
+    dropped_bay = []                       # bay-mouth chains → spur candidates
+    for ch, w in chains_all:
         # COVERAGE POLICY (user 2026-07-01, from the hand-edited target):
         # open pavement stays EMPTY — the spine covers the taxiway system,
         # rides holes at half-width for its turns, and crosses small apron
         # openings to their edge.  The medial clearance radius IS the
         # openness measure: corridor lanes, hole-riding turns and small-bay
         # spurs all have small clearance; big-apron medial does not.
-        if w > _OPEN_HALFWIDTH_M or w < _SVC_HALFWIDTH_M:
+        if w < _SVC_HALFWIDTH_M:
+            continue
+        if w > _OPEN_HALFWIDTH_M:
+            if w <= 80.0 and ch.line.length <= 240.0:
+                dropped_bay.append(ch)
             continue
         if rwy_zone is not None and ch.line.length > 1.0:
             n = max(2, int(ch.line.length / 10))
@@ -1290,6 +1299,53 @@ def synthesize_spine(
                 if is_par:
                     continue
         g.add_edge(np.asarray(ch.line.coords), "lane", "", w)
+        cs0 = np.asarray(ch.line.coords)
+        kept_tips.append(cs0[0])
+        kept_tips.append(cs0[-1])
+
+    # 1c: BAY SPURS — an opening into a small apron gets the spine drawn
+    # straight ACROSS to its far edge (user).  A dropped wide-mouth chain
+    # that attached to the kept network marks such an opening: cast a
+    # straight ray from the attachment point along the chain's initial
+    # direction to the pavement boundary.
+    if kept_tips:
+        tip_arr = np.asarray(kept_tips)
+        bnd0 = pav_eff.boundary
+        allow0 = shapely.buffer(pav_eff, 0.5)
+        for ch in dropped_bay:
+            cs0 = np.asarray(ch.line.coords)
+            for at_start in (True, False):
+                tip = cs0[0] if at_start else cs0[-1]
+                if float(np.min(np.hypot(*(tip_arr - tip).T))) > 1.0:
+                    continue               # not attached to the kept network
+                ref = cs0[min(len(cs0) - 1, 4)] if at_start \
+                    else cs0[max(0, len(cs0) - 5)]
+                u = _unit(*(np.asarray(ref) - tip)) if at_start \
+                    else _unit(*(tip - np.asarray(ref)))
+                u = _unit(*(np.asarray(ch.line.interpolate(
+                    min(30.0, ch.line.length)).coords[0]) - tip)) \
+                    if at_start else _unit(*(tip - np.asarray(
+                        ch.line.interpolate(
+                            max(0.0, ch.line.length - 30.0)).coords[0])))
+                if u == (0.0, 0.0):
+                    continue
+                start = tip if at_start else tip
+                ray = LineString([tuple(start),
+                                  (start[0] + u[0] * 240.0,
+                                   start[1] + u[1] * 240.0)])
+                hit = ray.intersection(bnd0)
+                pts = [q for q in getattr(hit, "geoms", [hit])
+                       if q.geom_type == "Point"]
+                if not pts:
+                    continue
+                q = min(pts, key=lambda q: q.distance(Point(tuple(start))))
+                if q.distance(Point(tuple(start))) < 15.0:
+                    continue
+                spur = LineString([tuple(start), (q.x - u[0] * 0.1,
+                                                  q.y - u[1] * 0.1)])
+                if allow0.contains(spur):
+                    g.add_edge(np.asarray(spur.coords), "lane", "", 12.0)
+                break
 
     # 1b: drop networks that never reach a runway (target leaves them empty)
     _prune_components(g, runway_union, pav_eff)
