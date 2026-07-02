@@ -196,10 +196,10 @@ def main(argv=None) -> int:
     if pav is None or pav.is_empty:
         print("NO pav_union", file=sys.stderr)
         return 1
-    if os.environ.get("O4_PT_THRU_RWY") and rwy is not None:
-        # experiment (user 2026-07-02): runway rects unioned into
-        # pav_union at the TOP — one continuous pavement, no runway
-        # edges anywhere in the pipeline or the emitted _pavement.osm
+    if (args.v12 or os.environ.get("O4_PT_THRU_RWY")) and rwy is not None:
+        # v12 model (user ruling 2026-07-02): the spine is traced as if
+        # the runway does not exist — rects unioned into pav_union at
+        # the TOP, one continuous pavement; _pavement.osm reflects it
         pav = unary_union([pav, rwy])
         rwy = None
     # working pavement = buildings subtracted (user 2026-07-02: chords must

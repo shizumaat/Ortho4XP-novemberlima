@@ -162,21 +162,15 @@ def synthesize_spine_v12(
             pav_nav = pav.difference(shapely.buffer(building_union, 0.5))
         except Exception:
             pav_nav = pav
+    # the spine is traced AS IF THE RUNWAY DOES NOT EXIST (user ruling
+    # 2026-07-02): runway rects union into the pavement — one continuous
+    # footprint, no runway edges, no contact logic.  (The rects are NOT
+    # part of source_pavement_union on their own.)  Spine-vs-runway
+    # elevation authority is a wiring-time question, out of scope here.
     pav_eff = pav_nav
-    thru_rwy = bool(os.environ.get("O4_PT_THRU_RWY"))
-    if thru_rwy:
-        # experiment (user 2026-07-02): trace the WHOLE pavement with
-        # runways left in — the spine passes through them like any
-        # other pavement; no contact logic at all.  The runway strips
-        # are NOT part of source_pavement_union, so union them in.
-        if runway_union is not None and not runway_union.is_empty:
-            pav_eff = unary_union([pav_nav, runway_union])
-        runway_union = None
-    elif runway_union is not None and not runway_union.is_empty:
-        try:
-            pav_eff = pav_nav.difference(runway_union)
-        except Exception:
-            pass
+    if runway_union is not None and not runway_union.is_empty:
+        pav_eff = unary_union([pav_nav, runway_union])
+    runway_union = None
 
     chains = build_pavement_skeleton(pav_nav, runway_union=runway_union)
     w = _dominant_halfwidth(chains)
