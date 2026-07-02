@@ -42,9 +42,9 @@ from shapely.ops import nearest_points, unary_union
 
 from .pav_skeleton import build_pavement_skeleton, _polygons
 from .spine_synthesis import (
-    SpineWay, _Graph, _angle_deg, _assemble_through_paths, _collect_path,
-    _fix_dangles, _runway_axes, _size_for_halfwidth, _unit,
-    _SVC_HALFWIDTH_M,
+    SpineWay, _Graph, _add_junction_arcs, _add_runway_turns, _angle_deg,
+    _assemble_through_paths, _attribute_sizes, _collect_path, _fix_dangles,
+    _runway_axes, _size_for_halfwidth, _unit, _SVC_HALFWIDTH_M,
 )
 
 # ICAO Annex 14 taxiway/taxiway centreline separation by code letter
@@ -174,56 +174,43 @@ def _circulation_pieces(core, corridors, w: float, sep: float):
     return circ, bays
 
 
-def _edge_traces(core, pav_eff, w: float, h: float, runway_union,
-                 building_union):
+def _edge_traces(core, pav_eff, w: float, runway_union, building_union,
+                 trunk_union):
     """The trace regime of the V8 model: boundary of the pavement eroded by
-    ``w``, kept only where the traced pavement edge is a HOLE ring (grass
-    island — the spine rides holes for its turns) or a BUILDING frontage
-    (stand/terminal lead lanes).  Plain outer pavement edges get NO trace
-    (open aprons stay empty; corridors + straight crossings serve them),
-    and a stretch at ``w`` from a runway cut is the runway's own shoulder,
-    never spine.  Two-sided tracing only where the eroded space is wide
-    enough for separated lanes (clearance > h) — thinner eroded space is
-    centered by the core medial instead."""
-    if core.is_empty or h <= 0.5:
+    ``w``, split by the pavement edge it traces.  HOLE rings (grass
+    islands — the spine rides holes for its turns) become ROUTING
+    candidates ("ring", kept only where a route uses them); BUILDING
+    frontage (stand/terminal lead lanes) is kept as spine ("front").
+    Plain outer pavement edges get NO trace (open aprons stay empty), a
+    stretch at ``w`` from a runway cut is the runway's own shoulder, and
+    anything riding an existing corridor centerline is that corridor's own
+    edge trace, already represented by the centerline."""
+    if core.is_empty:
         return []
-    fat = shapely.buffer(shapely.buffer(core, -h), h + 0.05)
-    if fat.is_empty:
-        return []
-    near_fat = shapely.buffer(fat, 0.15)
-    # pavement edges that legitimately carry a frontage/hole trace
-    holes = [LineString(r.coords) for poly in _polygons(pav_eff)
-             for r in poly.interiors]
-    hole_union = unary_union(holes) if holes else None
     traces = []
     bnd = core.boundary
     for ring in getattr(bnd, "geoms", [bnd]):
         if ring.geom_type != "LineString" or ring.length < 8.0:
             continue
-        piece = ring.intersection(near_fat)
-        for seg in getattr(piece, "geoms", [piece]):
-            if seg.geom_type != "LineString" or seg.length < 8.0:
-                continue
-            dense = seg.segmentize(4.0)
-            cs = np.asarray(dense.coords)
-            keep = np.zeros(len(cs), bool)
-            slack = w + _RWY_TRACE_SLACK_M
-            for i, p in enumerate(cs):
-                q = Point(tuple(p))
-                if runway_union is not None \
-                        and runway_union.distance(q) <= slack:
-                    continue                    # runway shoulder line
-                if hole_union is not None and hole_union.distance(q) <= slack:
-                    keep[i] = True
-                elif building_union is not None \
-                        and building_union.distance(q) <= slack + 0.5:
-                    keep[i] = True
-            for run in _split_line_by_mask(cs, keep):
-                if LineString(run).length >= 12.0:
-                    traces.append(LineString(run).simplify(0.4))
+        dense = ring.segmentize(4.0)
+        cs = np.asarray(dense.coords)
+        keep = []
+        slack = w + _RWY_TRACE_SLACK_M
+        for p in cs:
+            q = Point(tuple(p))
+            if runway_union is not None \
+                    and runway_union.distance(q) <= slack:
+                keep.append(False)              # runway shoulder line
+            elif trunk_union is not None and trunk_union.distance(q) <= 4.0:
+                keep.append(False)              # corridor lane already there
+            else:
+                keep.append(True)
+        for run in _split_line_by_mask(cs, keep):
+            if LineString(run).length >= 12.0:
+                traces.append(("ring", LineString(run).simplify(0.4)))
     if os.environ.get("O4_ET_DEBUG"):
         print(f"[edge_trace] trace segs={len(traces)} "
-              f"len={sum(t.length for t in traces):.0f}", flush=True)
+              f"len={sum(t.length for _k, t in traces):.0f}", flush=True)
     return traces
 
 
@@ -369,6 +356,74 @@ def _connect_free_ends(g: _Graph, pav_eff):
             changed = True
         if not changed:
             break
+
+
+def _select_routes(g: _Graph, runway_union,
+                   keep_kinds=("lane",),
+                   center_bonus: float = 0.9):
+    """ANCHOR-ROUTED NETWORK (R1/R3): corridor trunk lanes and building
+    frontage are the spine's fixed anchoring structure; everything else
+    (hole rings, centered opening lines, welds) exists only as ROUTING
+    material.  A conditional edge survives iff it lies on the shortest
+    path between some pair of anchors — the taut connections an aircraft
+    actually rolls; the rest of the candidate field is discarded.
+    Centered lines get a small weight bonus so a route through an opening
+    prefers the center over hugging one side (user rule h)."""
+    import networkx as nx
+    G = nx.Graph()
+    cond = set()
+    for ei, e in enumerate(g.edges):
+        if not e["alive"]:
+            continue
+        L = float(LineString(e["cs"]).length)
+        wgt = L * (center_bonus if e["kind"] == "center" else 1.0)
+        if G.has_edge(e["a"], e["b"]) \
+                and G[e["a"]][e["b"]]["weight"] <= wgt:
+            pass
+        else:
+            G.add_edge(e["a"], e["b"], weight=wgt, ei=ei)
+        if e["kind"] not in keep_kinds:
+            cond.add(ei)
+    if not cond:
+        return
+    # anchors: nodes owned by anchoring structure that also touch routing
+    # material, plus runway-contact tips (rule b: the spine meets the
+    # runway at every pavement intersection).
+    kind_at = {}
+    for e in g.edges:
+        if not e["alive"]:
+            continue
+        for ni in (e["a"], e["b"]):
+            kind_at.setdefault(ni, set()).add(e["kind"])
+    rwy_b = runway_union.boundary if runway_union is not None \
+        and not runway_union.is_empty else None
+    anchors = []
+    for ni, ks in kind_at.items():
+        if ks & set(keep_kinds) and ks - set(keep_kinds):
+            anchors.append(ni)
+        elif rwy_b is not None and len(ks) == 1 \
+                and rwy_b.distance(Point(tuple(g.nodes[ni]))) < 2.5:
+            anchors.append(ni)
+    used = set()
+    for k, src in enumerate(anchors):
+        if src not in G:
+            continue
+        _dist, paths = nx.single_source_dijkstra(G, src, weight="weight")
+        for dst in anchors[k + 1:]:
+            path = paths.get(dst)
+            if not path:
+                continue
+            for a, b in zip(path, path[1:]):
+                used.add(G[a][b]["ei"])
+    killed = 0
+    for ei in cond:
+        if ei not in used:
+            g.edges[ei]["alive"] = False
+            killed += 1
+    if os.environ.get("O4_ET_DEBUG"):
+        print(f"[edge_trace] route selection: anchors={len(anchors)} "
+              f"conditional={len(cond)} kept={len(cond) - killed}",
+              flush=True)
 
 
 def _prune_leaf_kinds(g: _Graph, kinds=("center", "weld")):
@@ -553,44 +608,66 @@ def synthesize_spine_v8(
 
     # regime B — openings wider than 2w but narrower than the separation
     # standard get ONE spine at the CENTER of the opening = medial of the
-    # eroded space where it is thinner than 2h.
+    # eroded space where it is thinner than 2h.  Only genuine PARALLEL
+    # gaps qualify (run much longer than the opening is wide); short
+    # oblique core-medial scraps in junction interiors are not openings —
+    # routing hugs the islands there instead (user junction evidence).
     center_runs = []
     if not core.is_empty:
         for ch in build_pavement_skeleton(core, runway_union=None):
             for keep, cs, rr in _split_by_clearance(ch, h):
                 if not keep:
                     continue
-                if LineString(cs).length < 4.0:
+                run = LineString(cs)
+                opening = 2.0 * (float(np.median(rr)) + w)
+                if run.length < max(1.5 * opening, 30.0):
                     continue
                 center_runs.append((cs, rr))
 
     g = _Graph()
+    trunk_lines = []
     for cs, rr, w_med in kept_runs:
         if bay_union is not None and bay_union.contains(
                 LineString(cs).interpolate(0.5, normalized=True)):
             continue                            # bay-interior medial
         g.add_edge(cs, "lane", "", w_med)
+        trunk_lines.append(LineString(cs))
+    trunk_union = unary_union(trunk_lines) if trunk_lines else None
     for cs, rr in center_runs:
         if bay_union is not None and bay_union.contains(
                 LineString(cs).interpolate(0.5, normalized=True)):
             continue
         g.add_edge(cs, "center", "", w + float(np.median(rr)))
 
-    # regime C — edge traces along holes and building frontage.
-    for t in _edge_traces(core, pav_eff, w, h, runway_union, building_union):
+    # regime C — edge traces: building frontage (kept) + hole rings
+    # (routing candidates).
+    for kind, t in _edge_traces(core, pav_eff, w, runway_union,
+                                building_union, trunk_union):
         if bay_union is not None and bay_union.contains(
                 t.interpolate(0.5, normalized=True)):
             continue
-        g.add_edge(np.asarray(t.coords), "trace", "", w)
+        g.add_edge(np.asarray(t.coords), kind, "", w)
 
     _connect_free_ends(g, pav_eff)
+    _select_routes(g, runway_union)
     _prune_no_runway_components(g, runway_union, pav_eff)
-    _prune_leaf_kinds(g)
     _fix_dangles(g, pav_eff)
     if not os.environ.get("O4_ET_KINDS"):        # keep kinds for debug only
         for e in g.edges:
             e["kind"] = "lane"
     g.consolidate()
     _straighten_paths(g, pav_eff, w)
+    g.consolidate()
+
+    # standard mirrored arcs at junction turns + runway diagonal hooks
+    allow = shapely.buffer(pav_eff, 0.5)
+
+    def pav_ok(line: LineString) -> bool:
+        return allow.contains(line)
+
+    _attribute_sizes(g, routes)
+    _add_junction_arcs(g, pav_ok, runway_union)
+    _add_runway_turns(g, runway_union, pav_eff)
+    _fix_dangles(g, pav_eff)
     g.consolidate()
     return g.ways()
