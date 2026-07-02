@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import math
 import os
-from collections import Counter
+from collections import Counter, defaultdict
 
 import numpy as np
 import shapely
@@ -376,8 +376,14 @@ def _select_routes(g: _Graph, runway_union,
     for ei, e in enumerate(g.edges):
         if not e["alive"]:
             continue
-        L = float(LineString(e["cs"]).length)
-        wgt = L * (center_bonus if e["kind"] == "center" else 1.0)
+        cs = np.asarray(e["cs"])
+        L = float(LineString(cs).length)
+        chord = float(np.hypot(*(cs[-1] - cs[0])))
+        # taxi routes are straight-by-design: a wiggly edge (boundary hug)
+        # costs more than its length, so straights win where both exist
+        curvy = min(2.0, L / max(chord, 1e-6))
+        wgt = L * curvy * curvy \
+            * (center_bonus if e["kind"] == "center" else 1.0)
         if G.has_edge(e["a"], e["b"]) \
                 and G[e["a"]][e["b"]]["weight"] <= wgt:
             pass
@@ -460,6 +466,208 @@ def _select_routes(g: _Graph, runway_union,
               f"conditional={len(cond)} kept={len(cond) - killed}",
               flush=True)
     return accepted_paths
+
+
+def _add_mouth_projections(g: _Graph, pav_eff, max_len: float = 650.0):
+    """Rule (j)/R5 candidates: where a corridor centerline ends at open
+    space (its mouth), PROJECT it straight across the opening to the far
+    pavement edge — the user's look-ahead/access-lane geometry ('the
+    longest straight route ... parallel to the taxiway we fed from' is
+    this projection once routing keeps it).  Conditional routing material
+    like the rings; selection decides which projections are real lanes."""
+    bnd = pav_eff.boundary
+    allow = shapely.buffer(pav_eff, 0.5)
+    added = 0
+    for ni, ends in list(g.incident().items()):
+        live = [(ei, aa) for ei, aa in ends if g.edges[ei]["alive"]]
+        if len(live) != 1 or g.edges[live[0][0]]["kind"] != "lane":
+            continue
+        ei, at_a = live[0]
+        tip = g.nodes[ni]
+        if bnd.distance(Point(tuple(tip))) <= 2.0:
+            continue                    # already ends on the pavement edge
+        u = g.edge_dir_at(ei, at_a)
+        if u == (0.0, 0.0):
+            continue
+        u = (-u[0], -u[1])
+        ray = LineString([tuple(tip), (tip[0] + u[0] * max_len,
+                                       tip[1] + u[1] * max_len)])
+        hit = ray.intersection(bnd)
+        pts = [q for q in getattr(hit, "geoms", [hit])
+               if q.geom_type == "Point"]
+        if not pts:
+            continue
+        q = min(pts, key=lambda q: q.distance(Point(tuple(tip))))
+        d = q.distance(Point(tuple(tip)))
+        if d < 30.0:
+            continue                    # a dangle-fix job, not a projection
+        seg = LineString([tuple(tip), (q.x - u[0] * 0.1, q.y - u[1] * 0.1)])
+        if not allow.contains(seg):
+            continue
+        g.add_edge(np.asarray(seg.coords), "proj", g.edges[ei]["size"],
+                   g.edges[ei]["w"])
+        added += 1
+    if os.environ.get("O4_ET_DEBUG"):
+        print(f"[edge_trace] mouth projections: {added}", flush=True)
+
+
+def _planarize_crossings(g: _Graph):
+    """Node every geometric crossing between candidate edges so routes can
+    turn there and the junction-arc pass can fire (target evidence: X
+    crossings carry four mirrored arcs).  Both edges are split at the
+    crossing; the split point welds via the node-key quantum."""
+    from shapely.strtree import STRtree
+    for _round in range(4):
+        alive = [(ei, LineString(e["cs"])) for ei, e in enumerate(g.edges)
+                 if e["alive"]]
+        tree = STRtree([ln for _ei, ln in alive])
+        crossed = False
+        done_pairs = set()
+        for k, (ei, ln) in enumerate(alive):
+            if not g.edges[ei]["alive"]:
+                continue
+            for j in tree.query(ln):
+                j = int(j)
+                if j <= k:
+                    continue
+                ej = alive[j][0]
+                if ej == ei or not g.edges[ej]["alive"] \
+                        or (ei, ej) in done_pairs:
+                    continue
+                lnj = alive[j][1]
+                if not ln.crosses(lnj):
+                    continue
+                inter = ln.intersection(lnj)
+                pts = [q for q in getattr(inter, "geoms", [inter])
+                       if q.geom_type == "Point"]
+                for q in pts[:1]:
+                    sa = ln.project(q)
+                    sb = lnj.project(q)
+                    if min(sa, ln.length - sa) < 1.5 \
+                            or min(sb, lnj.length - sb) < 1.5:
+                        continue        # endpoint touch, not a crossing
+                    g.split_edge(ei, sa)
+                    g.split_edge(ej, sb)
+                    crossed = True
+                done_pairs.add((ei, ej))
+                if not g.edges[ei]["alive"]:
+                    break
+        if not crossed:
+            break
+
+
+def _area_access_hugs(g: _Graph, circ_pieces, w: float, sep: float,
+                      pav_eff):
+    """R5 (user ruling 2026-07-02): a corridor mouth opening into a LARGE
+    open area gets an access lane — trace through the mouth, then hug the
+    area's edge/holes at half-width in BOTH directions until the hug
+    merges with another centerline (topologically, or by coming closer
+    than the separation standard to one — rule h kills the parallel
+    duplicate) or reaches the pavement edge.  After big-picture
+    straightening this is the longest straight route through the area,
+    parallel to the feeding taxiway.  Fires only where route selection
+    left the area EMPTY (junction pieces already carry routes)."""
+    # network as selected so far (alive edges) — merge/separation datum
+    alive_lines = [LineString(e["cs"]) for e in g.edges if e["alive"]]
+    if not alive_lines:
+        return
+    net = unary_union(alive_lines)
+    inc_all = defaultdict(list)                  # over ALL edges, dead too
+    for ei, e in enumerate(g.edges):
+        inc_all[e["a"]].append(ei)
+        inc_all[e["b"]].append(ei)
+    revived = 0
+    n_big = n_ringed = n_empty = n_started = 0
+    for piece in circ_pieces:
+        if piece.area < 5000.0:
+            continue
+        n_big += 1
+        near = piece.buffer(3.0)
+        ring_eis = [ei for ei, e in enumerate(g.edges)
+                    if e["kind"] == "ring" and near.intersects(
+                        Point(tuple(np.asarray(e["cs"])[len(e["cs"]) // 2])))]
+        if not ring_eis:
+            continue
+        n_ringed += 1
+        len_alive = sum(LineString(g.edges[ei]["cs"]).length
+                        for ei in ring_eis if g.edges[ei]["alive"])
+        len_all = sum(LineString(g.edges[ei]["cs"]).length
+                      for ei in ring_eis)
+        if len_alive > 0.25 * len_all:
+            continue                             # area already served
+        n_empty += 1
+        ring_set = set(ring_eis)
+        ring_nodes = set()
+        for ei in ring_eis:
+            ring_nodes.add(g.edges[ei]["a"])
+            ring_nodes.add(g.edges[ei]["b"])
+        # mouths: alive nodes welded (via a dead conditional link) to the
+        # area's ring candidates
+        starts = []
+        for ni in ring_nodes:
+            for ej in inc_all[ni]:
+                e2 = g.edges[ej]
+                if e2["alive"] or ej in ring_set:
+                    continue
+                other = e2["b"] if e2["a"] == ni else e2["a"]
+                if any(g.edges[ek]["alive"]
+                       and g.edges[ek]["kind"] == "lane"
+                       for ek in inc_all[other]):
+                    starts.append((ni, ej))
+                    break
+        n_started += 1 if starts else 0
+        revived_lines = []                       # hugs see each other
+        for start_node, link_ei in starts:
+            walked = False
+            for first_ei in inc_all[start_node]:
+                if first_ei not in ring_set or g.edges[first_ei]["alive"]:
+                    continue
+                # walk this direction until merge/separation/end
+                cur_node, cur_ei = start_node, first_ei
+                dist_walked = 0.0
+                while True:
+                    e2 = g.edges[cur_ei]
+                    ln2 = LineString(e2["cs"])
+                    mid = ln2.interpolate(0.5, normalized=True)
+                    d_near = net.distance(mid)
+                    for rl in revived_lines:
+                        d2 = rl.distance(mid)
+                        if d2 < d_near:
+                            d_near = d2
+                    if dist_walked > 0.5 * sep and d_near < 0.9 * sep:
+                        # rule h: parallel duplicate — connect back & stop
+                        tipn = cur_node
+                        q = nearest_points(net, Point(
+                            tuple(g.nodes[tipn])))[0]
+                        conn = LineString([tuple(g.nodes[tipn]),
+                                           (q.x, q.y)])
+                        if conn.length > 0.5 and shapely.buffer(
+                                pav_eff, 0.5).contains(conn):
+                            g.add_edge(np.asarray(conn.coords), "weld",
+                                       e2["size"], e2["w"])
+                        break
+                    e2["alive"] = True
+                    revived += 1
+                    walked = True
+                    revived_lines.append(ln2)
+                    nxt_node = e2["b"] if e2["a"] == cur_node else e2["a"]
+                    if any(g.edges[ek]["alive"] and ek != cur_ei
+                           and g.edges[ek]["kind"] not in ("ring",)
+                           for ek in inc_all[nxt_node]):
+                        break                    # merged with the network
+                    dist_walked += ln2.length
+                    nxt = [ek for ek in inc_all[nxt_node]
+                           if ek in ring_set and not g.edges[ek]["alive"]]
+                    if not nxt:
+                        break                    # pavement edge / ring end
+                    cur_node, cur_ei = nxt_node, nxt[0]
+            if walked and not g.edges[link_ei]["alive"]:
+                g.edges[link_ei]["alive"] = True
+                revived += 1
+    if os.environ.get("O4_ET_DEBUG"):
+        print(f"[edge_trace] R5 area hugs: big={n_big} ringed={n_ringed} "
+              f"empty={n_empty} with-mouth={n_started} "
+              f"revived {revived} edges", flush=True)
 
 
 def _prune_leaf_kinds(g: _Graph, kinds=("center", "weld")):
@@ -762,12 +970,17 @@ def synthesize_spine_v8(
         if runway_union is not None and not runway_union.is_empty else None
 
     # regime A — corridor centerlines: pavement medial where the pavement
-    # is corridor-width (the trace's two sides coincide there).
+    # is corridor-width (the trace's two sides coincide there).  The
+    # service cutoff SCALES with the airport: a strip much narrower than
+    # the dominant taxiway width is a service road / stand row, whatever
+    # its absolute width (fixed 5.5 m let stand-row strips at an E-width
+    # airport spawn trunk anchors and outline every pocket).
+    svc_cut = max(_SVC_HALFWIDTH_M, 0.35 * w)
     kept_runs = []                              # (coords, radii, w_med)
     corridors = []                              # unambiguous corridor arms
     for ch in chains:
         w_med = float(np.median(ch.radii)) if ch.radii else 8.0
-        if w_med < _SVC_HALFWIDTH_M:
+        if w_med < svc_cut:
             continue                            # service road, not taxi spine
         if _is_runway_shoulder(ch, w_med, rwy_zone, axes):
             continue
@@ -831,8 +1044,19 @@ def synthesize_spine_v8(
             continue
         g.add_edge(np.asarray(t.coords), kind, "", w)
 
+    _add_mouth_projections(g, pav_eff)
+    _planarize_crossings(g)
     _connect_free_ends(g, pav_eff)
-    _select_routes(g, runway_union)
+    if not os.environ.get("O4_ET_NO_SELECT"):
+        _select_routes(g, runway_union)
+    # R5 granularity: open-space BODIES = core opened at h (necks between
+    # sub-separation connections cut), so a big apron is its own area even
+    # when the eroded space is globally connected.
+    area_bodies = []
+    if not core.is_empty and h > 0.5:
+        area_bodies = _polygons(shapely.buffer(
+            shapely.buffer(core, -h), h + 0.05))
+    _area_access_hugs(g, area_bodies, w, sep, pav_eff)
     # NOTE: straightening each accepted route as one unit (endpoints at
     # anchors) was tried and is NET-NEGATIVE (coverage 60.8->59.1,
     # alignment 1.21->1.43): chords cut curves the target keeps.  The
