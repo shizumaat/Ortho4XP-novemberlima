@@ -42,9 +42,10 @@ from shapely.ops import nearest_points, unary_union
 
 from .pav_skeleton import build_pavement_skeleton, _polygons
 from .spine_synthesis import (
-    SpineWay, _Graph, _add_junction_arcs, _add_runway_turns, _angle_deg,
-    _assemble_through_paths, _attribute_sizes, _collect_path, _fix_dangles,
-    _runway_axes, _size_for_halfwidth, _unit, _SVC_HALFWIDTH_M,
+    R90_BY_SIZE, SpineWay, _Graph, _add_junction_arcs, _add_runway_turns,
+    _angle_deg, _assemble_through_paths, _attribute_sizes, _collect_path,
+    _fillet, _fix_dangles, _runway_axes, _size_for_halfwidth, _unit,
+    _SVC_HALFWIDTH_M,
 )
 
 # ICAO Annex 14 taxiway/taxiway centreline separation by code letter
@@ -543,15 +544,134 @@ def _straighten_routes(g: _Graph, accepted_paths, pav_eff, w: float):
     _straighten_path_list(g, paths, pav_eff, w)
 
 
-def _straighten_paths(g: _Graph, pav_eff, w: float):
+def _fit_line(pts):
+    """PCA line fit → (centroid, unit direction oriented along the run)."""
+    p0 = pts.mean(axis=0)
+    q = pts - p0
+    cov = q.T @ q
+    evals, evecs = np.linalg.eigh(cov)
+    u = evecs[:, -1]
+    if u @ (pts[-1] - pts[0]) < 0:
+        u = -u
+    return p0, u
+
+
+def _refit_chain(cs, d_orig_fn, w, r_std, allow, bnd):
+    """N1 FILLET-CHAIN REFIT: replace a path polyline with fitted tangent
+    geometry — least-squares straights on its low-curvature runs, one
+    tangent arc per turn (radius = the route's own curvature clamped to
+    the standards band, standard as fallback).  This is design fitting,
+    not vertex decimation: chords that merely connect existing vertices
+    displace arcs into corners and lose alignment (measured net-negative).
+    Returns the new LineString or None (caller falls back to chords)."""
+    ln = LineString(cs)
+    if ln.length < 60.0:
+        return None
+    n = int(ln.length / 4.0)
+    P = np.asarray([ln.interpolate(k * ln.length / n).coords[0]
+                    for k in range(n + 1)])
+    d = P[1:] - P[:-1]
+    th = np.unwrap(np.arctan2(d[:, 1], d[:, 0]))
+    dth = np.abs(np.diff(th)) / 4.0             # curvature rad/m
+    turn = dth > 1.0 / (3.0 * r_std)
+    # the refit is for paths with real turn content (edge-hugging rings,
+    # junction curves); straight corridors keep the chord treatment that
+    # already matches (blanket refit measured net-negative there)
+    if float(turn.mean()) < 0.12:
+        return None
+    # straight runs = maximal non-turn stretches (indices into P)
+    runs = []
+    i = 0
+    m = len(turn)
+    while i < m:
+        if turn[i]:
+            i += 1
+            continue
+        j = i
+        while j < m and not turn[j]:
+            j += 1
+        if (j - i) * 4.0 >= max(24.0, 1.2 * r_std):
+            runs.append((i, j + 1))             # P[i..j+1] inclusive
+        i = j
+    if len(runs) < 2:
+        return None
+    fits = [(_fit_line(P[a:b]), a, b) for a, b in runs]
+    out = [P[0]]
+    ok_all = True
+    for k in range(len(fits) - 1):
+        (p1, u1), a1, b1 = fits[k]
+        (p2, u2), a2, b2 = fits[k + 1]
+        den = u1[0] * u2[1] - u1[1] * u2[0]
+        gamma = _angle_deg(tuple(u1), tuple(u2))
+        if abs(den) < math.sin(math.radians(8.0)) or gamma > 155.0:
+            # near-parallel jog or fold-back: keep original geometry
+            out.extend(P[b1 - 1:a2 + 1])
+            continue
+        dp = p2 - p1
+        s1 = (dp[0] * u2[1] - dp[1] * u2[0]) / den
+        corner = p1 + u1 * s1
+        # radius: the route's own turn curvature, clamped to standards
+        zone = dth[max(0, b1 - 1):min(m, a2 + 1)]
+        r_est = 1.0 / max(float(np.median(zone)), 1e-6) if len(zone) else \
+            r_std
+        placed = False
+        for r in (min(max(r_est, 0.4 * r_std), 3.0 * r_std), r_std):
+            rr = r
+            while rr >= 0.35 * r_std:
+                arc, t = _fillet(tuple(corner), tuple(u1), tuple(u2), rr)
+                if arc is None:
+                    break
+                # tangent points must stay within each run's extent (slack)
+                ta = corner - u1 * t
+                tb = corner + u2 * t
+                if np.hypot(*(ta - out[-1])) < 2.0 \
+                        or (ta - out[-1]) @ u1 < 0.0:
+                    rr *= 0.8
+                    continue
+                if allow.contains(LineString(arc)) \
+                        and allow.contains(LineString([tuple(out[-1]),
+                                                       tuple(ta)])):
+                    out.append(ta)
+                    out.extend(np.asarray(arc)[1:-1])
+                    out.append(tb)
+                    placed = True
+                    break
+                rr *= 0.8
+            if placed:
+                break
+        if not placed:
+            out.extend(P[b1 - 1:a2 + 1])
+            ok_all = False
+    out.append(P[-1])
+    pts = np.asarray([p for p in out], dtype=float)
+    keep = [0]
+    for k in range(1, len(pts)):
+        if np.hypot(*(pts[k] - pts[keep[-1]])) > 0.05:
+            keep.append(k)
+    if len(keep) < 2:
+        return None
+    new_line = LineString(pts[keep])
+    if not allow.contains(new_line):
+        return None
+    # the refit must stay a refit: bounded deviation from the original
+    md = max(ln.distance(Point(tuple(pts[k])))
+             for k in keep[:: max(1, len(keep) // 40)])
+    if md > 0.8 * w:
+        return None
+    return new_line
+
+
+def _straighten_paths(g: _Graph, pav_eff, w: float, r_std: float = 30.0):
     """BIG-PICTURE STRAIGHT (user rule i) applied to THROUGH-PATHS: target
     straights run through junction after junction, so chords must span
     node-to-node fragments.  Interior junction nodes are moved onto the
     straightened line (side branches follow via move_node)."""
-    _straighten_path_list(g, _assemble_through_paths(g), pav_eff, w)
+    _straighten_path_list(g, _assemble_through_paths(g), pav_eff, w, r_std)
 
 
-def _straighten_path_list(g: _Graph, paths, pav_eff, w: float):
+def _straighten_path_list(g: _Graph, paths, pav_eff, w: float,
+                          r_std: float = 30.0):
+    from shapely.ops import substring
     bnd = pav_eff.boundary
     allow = shapely.buffer(pav_eff, 0.5)
     for path in paths:
@@ -559,35 +679,41 @@ def _straighten_path_list(g: _Graph, paths, pav_eff, w: float):
         if len(cs) < 3:
             continue
         d_orig = np.asarray([bnd.distance(Point(tuple(p))) for p in cs])
-        keep = _max_chords(cs, d_orig, w, allow, bnd)
-        new_line = LineString(cs[keep])
-        # node arc-length positions along the ORIGINAL path
-        seg = np.hypot(*(cs[1:] - cs[:-1]).T)
-        acc = np.concatenate([[0.0], np.cumsum(seg)])
+        new_line = None
+        if not os.environ.get("O4_ET_NO_REFIT"):
+            new_line = _refit_chain(cs, None, w, r_std, allow, bnd)
+        if new_line is None:
+            keep = _max_chords(cs, d_orig, w, allow, bnd)
+            new_line = LineString(cs[keep])
         # each edge boundary index in cs: recompute by walking the path
         idx = [0]
         pos = 0
         for (ei, at_a) in path:
             pos += len(g.edges[ei]["cs"]) - 1
             idx.append(pos)
+        proj_s = [new_line.project(Point(tuple(cs[k]))) for k in idx]
+        if any(proj_s[k + 1] < proj_s[k] - 1.0
+               for k in range(len(proj_s) - 1)):
+            continue                    # refit folded relative to the nodes
         # move interior nodes onto the straightened line, then rebuild each
         # edge's polyline as the straightened portion between its nodes
-        proj_s = [new_line.project(Point(tuple(cs[k]))) for k in idx]
         for k, ni in enumerate(node_seq):
             p = new_line.interpolate(proj_s[k])
             if float(np.hypot(p.x - g.nodes[ni][0],
                               p.y - g.nodes[ni][1])) > 0.01:
                 g.move_node(ni, [p.x, p.y])
-        keep_s = [float(acc[k]) for k in keep]   # unused; chord vertices below
-        chord_s = [new_line.project(Point(tuple(cs[k]))) for k in keep]
-        for m, (ei, at_a) in enumerate(path):
-            s0, s1 = proj_s[m], proj_s[m + 1]
+        for m2, (ei, at_a) in enumerate(path):
+            s0, s1 = proj_s[m2], proj_s[m2 + 1]
             if s1 < s0:
                 s0, s1 = s1, s0
-            mids = [s for s in chord_s if s0 + 0.5 < s < s1 - 0.5]
-            pts = [list(g.nodes[node_seq[m]])] + \
-                [list(new_line.interpolate(s).coords[0]) for s in
-                 sorted(mids)] + [list(g.nodes[node_seq[m + 1]])]
+            if s1 - s0 < 0.2:
+                mid_pts = []
+            else:
+                piece = substring(new_line, s0 + 0.1, s1 - 0.1)
+                mid_pts = [list(c) for c in piece.coords] \
+                    if piece.geom_type == "LineString" else []
+            pts = [list(g.nodes[node_seq[m2]])] + mid_pts + \
+                [list(g.nodes[node_seq[m2 + 1]])]
             if not at_a:
                 pts = pts[::-1]
             e = g.edges[ei]
@@ -717,7 +843,7 @@ def synthesize_spine_v8(
         for e in g.edges:
             e["kind"] = "lane"
     g.consolidate()
-    _straighten_paths(g, pav_eff, w)
+    _straighten_paths(g, pav_eff, w, R90_BY_SIZE.get(size, 30.0))
     g.consolidate()
 
     # standard mirrored arcs at junction turns + runway diagonal hooks
