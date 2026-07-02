@@ -854,6 +854,7 @@ def _straighten_routes(g: _Graph, accepted_paths, pav_eff, w: float,
     attachments (deg>=3 splitting chopped weld geometry and measured
     net-negative; unsplit chopping cut real turns and measured
     net-negative; route-use is the discriminator both needed)."""
+    _visibility_reroute(g, accepted_paths, pav_eff, w)
     from collections import Counter as _Counter
     node_use: _Counter = _Counter()
     for node_path, _eis in accepted_paths:
@@ -883,6 +884,157 @@ def _straighten_routes(g: _Graph, accepted_paths, pav_eff, w: float,
             paths.append(cur)
     _straighten_path_list(g, [p for p in paths if p], pav_eff, w, r_std,
                           taut=True)
+
+
+def _visibility_reroute(g: _Graph, accepted_paths, pav_eff, w: float):
+    """PER-SEGMENT VISIBILITY ROUTER: wherever an accepted route crosses
+    a free-space component (pavement eroded by the full half-width w, so
+    splices land at the TARGET's offset), the stretch between entry and
+    exit is replaced by the taut visibility path — but only on a STRONG
+    gain (<=0.90x), so borderline reroutes never nudge matched geometry
+    at the 5m/1m tolerances (the 0.9w/0.97x variant measured negative)."""
+    import networkx as nx
+    from shapely.prepared import prep
+    from shapely.strtree import STRtree
+    F = shapely.buffer(pav_eff, -w)
+    pieces = [p for p in _polygons(F) if p.area > 2500.0]
+    if not pieces:
+        return
+    tree = STRtree(pieces)
+    prepped = [prep(p) for p in pieces]
+    allow = shapely.buffer(pav_eff, 0.5)
+    cache: dict = {}
+
+    def vis_graph(pi):
+        if pi in cache:
+            return cache[pi]
+        poly = pieces[pi]
+        verts = []
+        for r in [poly.exterior] + list(poly.interiors):
+            rl = LineString(r.coords).simplify(2.0)
+            verts.extend(tuple(c) for c in list(rl.coords)[:-1])
+        pp = prep(poly.buffer(0.1))
+        G = nx.Graph()
+        n = len(verts)
+        for i in range(n):
+            G.add_node(i)
+            for j in range(i + 1, n):
+                d = math.hypot(verts[i][0] - verts[j][0],
+                               verts[i][1] - verts[j][1])
+                if 0.5 < d <= 700.0 and pp.covers(
+                        LineString([verts[i], verts[j]])):
+                    G.add_edge(i, j, weight=d)
+        cache[pi] = (verts, G, pp)
+        return cache[pi]
+
+    def vis_path(pi, a, b):
+        verts, G, pp = vis_graph(pi)
+        euclid = math.hypot(a[0] - b[0], a[1] - b[1])
+        if pp.covers(LineString([a, b])):
+            return [a, b], euclid
+        for tag, pt in (("A", a), ("B", b)):
+            G.add_node(tag)
+            for i, v in enumerate(verts):
+                d = math.hypot(pt[0] - v[0], pt[1] - v[1])
+                if 0.5 < d <= 700.0 and pp.covers(LineString([pt, v])):
+                    G.add_edge(tag, i, weight=d)
+        try:
+            vp = nx.shortest_path(G, "A", "B", weight="weight")
+            coords = [a] + [verts[i] for i in vp[1:-1]] + [b]
+            L = sum(math.hypot(coords[k + 1][0] - coords[k][0],
+                               coords[k + 1][1] - coords[k][1])
+                    for k in range(len(coords) - 1))
+        except Exception:
+            coords, L = None, None
+        finally:
+            G.remove_node("A")
+            G.remove_node("B")
+        return coords, L
+
+    from shapely.ops import substring
+    rerouted = 0
+    for node_path, eis in accepted_paths:
+        if any(not g.edges[ei]["alive"] for ei in eis):
+            continue
+        pts = [list(g.nodes[node_path[0]])]
+        for k, ei in enumerate(eis):
+            e = g.edges[ei]
+            cs = e["cs"] if e["a"] == node_path[k] else e["cs"][::-1]
+            pts.extend([list(p) for p in cs[1:]])
+        ln = LineString(pts)
+        if ln.length < 100.0:
+            continue
+        n = max(4, int(ln.length / 6.0))
+        P = [list(ln.interpolate(k * ln.length / n).coords[0])
+             for k in range(n + 1)]
+        pid = []
+        for p in P:
+            q = Point(tuple(p))
+            hit = -1
+            for i in tree.query(q):
+                if prepped[int(i)].covers(q):
+                    hit = int(i)
+                    break
+            pid.append(hit)
+        runs = []
+        i = 0
+        while i <= n:
+            if pid[i] < 0:
+                i += 1
+                continue
+            j = i
+            while j + 1 <= n and pid[j + 1] == pid[i]:
+                j += 1
+            if (j - i) * 6.0 >= 90.0:
+                runs.append((i, j, pid[i]))
+            i = j + 1
+        changed = False
+        for (i0, i1, pi) in reversed(runs):
+            a, b = tuple(P[i0]), tuple(P[i1])
+            run_len = (i1 - i0) * (ln.length / n)
+            coords, L = vis_path(pi, a, b)
+            if coords is None or L >= 0.90 * run_len:
+                continue
+            P[i0:i1 + 1] = [list(c) for c in coords]
+            changed = True
+        if not changed:
+            continue
+        new_line = LineString(P)
+        if not allow.contains(new_line):
+            continue
+        proj_s = [new_line.project(Point(tuple(g.nodes[ni])))
+                  for ni in node_path]
+        if any(proj_s[k + 1] < proj_s[k] - 1.0
+               for k in range(len(proj_s) - 1)):
+            continue
+        for k, ni in enumerate(node_path):
+            p = new_line.interpolate(proj_s[k])
+            if math.hypot(p.x - g.nodes[ni][0],
+                          p.y - g.nodes[ni][1]) > 0.01:
+                g.move_node(ni, [p.x, p.y])
+        for k, ei in enumerate(eis):
+            s0, s1 = proj_s[k], proj_s[k + 1]
+            if s1 < s0:
+                s0, s1 = s1, s0
+            if s1 - s0 < 0.2:
+                mid_pts = []
+            else:
+                piece2 = substring(new_line, s0 + 0.1, s1 - 0.1)
+                mid_pts = [list(c) for c in piece2.coords] \
+                    if piece2.geom_type == "LineString" else []
+            e = g.edges[ei]
+            pts2 = [list(g.nodes[node_path[k]])] + mid_pts + \
+                [list(g.nodes[node_path[k + 1]])]
+            if e["a"] != node_path[k]:
+                pts2 = pts2[::-1]
+            if len(pts2) >= 2:
+                cs_new = np.asarray(pts2, dtype=float)
+                cs_new[0] = g.nodes[e["a"]]
+                cs_new[-1] = g.nodes[e["b"]]
+                e["cs"] = cs_new
+        rerouted += 1
+    if os.environ.get("O4_ET_DEBUG"):
+        print(f"[edge_trace] visibility reroutes: {rerouted}", flush=True)
 
 
 def _taut_tighten(cs, w, bnd, max_iters: int = 30):
