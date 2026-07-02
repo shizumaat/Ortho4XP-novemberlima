@@ -69,7 +69,7 @@ _NODE_KEY_M = 0.05        # node weld quantum
 _DIAG_MIN_DEG = 20.0      # runway diagonal band
 _DIAG_MAX_DEG = 65.0
 
-_OPEN_HALFWIDTH_M = 32.0  # lanes with more clearance than this are open-
+_OPEN_HALFWIDTH_M = 38.0  # lanes with more clearance than this are open-
 #                            pavement medial, not taxiway spine — dropped
 _SVC_HALFWIDTH_M = 5.5    # ...and lanes NARROWER than this are service roads,
 #                            not aircraft taxiways (target keeps none)
@@ -221,6 +221,8 @@ class _Graph:
         self._key2node: dict = {}
         # edge: dict(a, b, cs Nx2, kind, size, w, alive)
         self.edges: list[dict] = []
+        # nodes where through-path pairing is forbidden (regime changes)
+        self.no_through: set = set()
 
     def _key(self, xy):
         return (round(xy[0] / _NODE_KEY_M), round(xy[1] / _NODE_KEY_M))
@@ -360,12 +362,60 @@ class _Graph:
 
 # ── through-path assembly + straightening (graph-preserving) ─────────────────
 
+def _split_curvature_regimes(g: _Graph):
+    """Insert nodes where a lane changes CHARACTER — a chain that carries a
+    straight corridor plus a curved end hook must not straighten as one
+    piece (the full-extent snap fails containment and the whole chain falls
+    back to corner-cutting chords).  Split at bends >20° between successive
+    ~straight runs so each regime is its own edge/path."""
+    for ei in range(len(g.edges)):
+        e = g.edges[ei]
+        if not e["alive"] or e["kind"] != "lane":
+            continue
+        ln = LineString(e["cs"])
+        if ln.length < 120.0:
+            continue
+        simp = np.asarray(ln.simplify(2.5).coords)
+        if len(simp) < 3:
+            continue
+        # arc positions of split candidates (interior DP vertices with a
+        # real bend and substantial runs on both sides)
+        splits = []
+        acc = 0.0
+        for k in range(1, len(simp) - 1):
+            acc += float(np.hypot(*(simp[k] - simp[k - 1])))
+            u = _unit(*(simp[k] - simp[k - 1]))
+            v = _unit(*(simp[k + 1] - simp[k]))
+            if _angle_deg(u, v) > 20.0:
+                run_prev = float(np.hypot(*(simp[k] - simp[k - 1])))
+                run_next = float(np.hypot(*(simp[k + 1] - simp[k])))
+                if run_prev >= 40.0 or run_next >= 40.0:
+                    splits.append(acc)
+        cur_ei, consumed = ei, 0.0
+        for s in splits:
+            e_cur = g.edges[cur_ei]
+            if not e_cur["alive"]:
+                break
+            L = LineString(e_cur["cs"]).length
+            s_local = s - consumed
+            if not (8.0 <= s_local <= L - 8.0):
+                continue
+            mid_node = g.split_edge(cur_ei, s_local)
+            g.no_through.add(mid_node)
+            # the second half is the last edge appended
+            cur_ei = len(g.edges) - 1
+            consumed = s
+    return
+
+
 def _assemble_through_paths(g: _Graph):
     """Pair edge-ends at every node by BEST continuation angle (body axis,
     45 m back); paths of lane edges linked by pairs are the taxiway lanes."""
     inc = g.incident()
     partner: dict = {}                     # (ei, at_a) -> (ej, at_a_j)
     for ni, ends in inc.items():
+        if ni in g.no_through:
+            continue          # a curvature-regime boundary, never a through
         lane_ends = [(ei, at_a) for (ei, at_a) in ends
                      if g.edges[ei]["kind"] == "lane"]
         if len(lane_ends) < 2:
@@ -440,9 +490,15 @@ def _collect_path(g: _Graph, path):
 
 
 def _narrow_sel(rr):
+    """Vertices at the corridor's MODAL clearance — its uniform-width body.
+    (The minimum-clearance vertices are junction pinches that sit off the
+    corridor axis; the target lanes ride the uniform sections' center,
+    measured ~20 m from each edge on SPJC's big taxiways.)"""
     if len(rr) >= 5:
-        thr = np.percentile(rr, 40.0)
-        sel = rr <= thr + 1e-6
+        hist, edges = np.histogram(rr, bins=max(4, int((rr.max() - rr.min())
+                                                       / 1.5) + 1))
+        w_mode = 0.5 * (edges[np.argmax(hist)] + edges[np.argmax(hist) + 1])
+        sel = np.abs(rr - w_mode) <= max(1.8, 0.15 * w_mode)
         if sel.sum() >= 3:
             return sel
     return np.ones(len(rr), dtype=bool)
@@ -578,6 +634,12 @@ def _straighten_paths(g: _Graph, paths, chord_ok, axes, pav_eff):
             t_all = coords @ d
             probe = LineString([tuple(d * t_all.min() + nvec * c),
                                 tuple(d * t_all.max() + nvec * c)])
+            import os as _os
+            if _os.environ.get("O4_SNAP_DEBUG"):
+                mid = coords[len(coords) // 2]
+                if abs(mid[0] + 450) < 60 and abs(mid[1] - 1340) < 60:
+                    print(f"[snapdbg] apply c={c:.1f} chord_ok="
+                          f"{chord_ok(probe)} allow={allow.contains(probe)}")
             if chord_ok(probe) or allow.contains(probe):
                 for ni in node_seq:
                     node_lines[ni].append((nvec, c))
@@ -748,6 +810,7 @@ def _prune_components(g: _Graph, runway_union, pav_eff):
             adj[e["a"]].add(e["b"])
             adj[e["b"]].add(e["a"])
     seen: set = set()
+    comps: list = []
     for start in list(adj.keys()):
         if start in seen:
             continue
@@ -767,11 +830,24 @@ def _prune_components(g: _Graph, runway_union, pav_eff):
         length = sum(LineString(e["cs"]).length for e in g.edges
                      if e["alive"] and e["kind"] == "lane"
                      and e["a"] in comp_set)
-        if not touches and length < 400.0:
-            for e in g.edges:
-                if e["alive"] and e["kind"] == "lane" \
-                        and e["a"] in comp_set:
-                    e["alive"] = False
+        comps.append((comp_set, touches, length))
+    # keep: touches a runway, or big, or the biggest network on its own
+    # pavement piece (isolated islands still get their spine)
+    pieces = _polygons(pav_eff)
+    best_on_piece: dict = {}
+    for idx, (comp_set, touches, length) in enumerate(comps):
+        anyn = g.nodes[next(iter(comp_set))]
+        pi = next((k for k, pc in enumerate(pieces)
+                   if pc.distance(Point(tuple(anyn))) < 2.0), -1)
+        if pi >= 0 and length > best_on_piece.get(pi, (0.0, -1))[0]:
+            best_on_piece[pi] = (length, idx)
+    keep_idx = {v[1] for v in best_on_piece.values()}
+    for idx, (comp_set, touches, length) in enumerate(comps):
+        if touches or length >= 400.0 or idx in keep_idx:
+            continue
+        for e in g.edges:
+            if e["alive"] and e["kind"] == "lane" and e["a"] in comp_set:
+                e["alive"] = False
 
 
 def _fix_dangles(g: _Graph, pav_eff):
@@ -1277,8 +1353,7 @@ def synthesize_spine(
         if w < _SVC_HALFWIDTH_M:
             continue
         if w > _OPEN_HALFWIDTH_M:
-            if w <= 80.0 and ch.line.length <= 240.0:
-                dropped_bay.append(ch)
+            dropped_bay.append(ch)
             continue
         if rwy_zone is not None and ch.line.length > 1.0:
             n = max(2, int(ch.line.length / 10))
@@ -1296,7 +1371,7 @@ def synthesize_spine(
                     if min(ang, 180.0 - ang) <= 15.0:
                         is_par = True
                         break
-                if is_par:
+                if is_par and w < 9.0:
                     continue
         g.add_edge(np.asarray(ch.line.coords), "lane", "", w)
         cs0 = np.asarray(ch.line.coords)
@@ -1309,14 +1384,80 @@ def synthesize_spine(
     # straight ray from the attachment point along the chain's initial
     # direction to the pavement boundary.
     if kept_tips:
-        tip_arr = np.asarray(kept_tips)
+        kept_union = unary_union(
+            [LineString(e["cs"]) for e in g.edges
+             if e["alive"] and e["kind"] == "lane"])
         bnd0 = pav_eff.boundary
         allow0 = shapely.buffer(pav_eff, 0.5)
+        # STRAIGHT BRIDGES across open pavement (user: the spine is drawn
+        # ACROSS; their hand-drawn crossings are straight lines).  PORTS =
+        # points where dropped open-area chains attach to the kept network;
+        # any port pair with a clear straight line over pavement gets a
+        # bridge, greedily, skipping redundant ones.
+        ports = []
+        for ch in dropped_bay:
+            cs0 = np.asarray(ch.line.coords)
+            for tip in (cs0[0], cs0[-1]):
+                if kept_union.distance(Point(tuple(tip))) <= 1.5:
+                    if all(np.hypot(*(np.asarray(q) - tip)) > 8.0
+                           for q in ports):
+                        ports.append(tuple(tip))
+        strict0 = shapely.buffer(pav_eff, -2.0)
+        bridges = []
+        cand = []
+        for a in range(len(ports)):
+            for b in range(a + 1, len(ports)):
+                pa, pb = np.asarray(ports[a]), np.asarray(ports[b])
+                d = float(np.hypot(*(pb - pa)))
+                if 90.0 <= d <= 650.0:
+                    cand.append((d, ports[a], ports[b]))
+        for d, pa, pb in sorted(cand, key=lambda t: t[0]):
+            ln0 = LineString([pa, pb])
+            if not strict0.contains(ln0):
+                continue
+            mid = ln0.interpolate(0.5, normalized=True)
+            if any(b0.distance(mid) < 60.0 for b0 in bridges):
+                continue
+            if kept_union.distance(mid) < 30.0:
+                continue                   # runs beside an existing lane
+            bridges.append(ln0)
+            g.add_edge(np.asarray(ln0.coords), "lane", "", 15.0)
+
+        # HOLE-OFFSET RINGS: a large hole in OPEN pavement guides the turn
+        # around it at even distance from its edge (the medial sits far too
+        # deep in open pavement to serve).  Ring = hole buffered by the
+        # airport's typical lane half-width, clipped to pavement.
+        w_lane = float(np.median([wk for (_c, wk) in chains_all
+                                  if _SVC_HALFWIDTH_M <= wk
+                                  <= _OPEN_HALFWIDTH_M]) or 12.0)
+        for poly in _polygons(pav_eff):
+            for hole in poly.interiors:
+                hp = Polygon(hole)
+                if hp.area < 1500.0:
+                    continue
+                ring0 = LineString(hp.buffer(w_lane, quad_segs=10)
+                                   .exterior.coords)
+                if kept_union.distance(ring0) < 8.0 \
+                        and kept_union.distance(
+                            ring0.interpolate(0.5, normalized=True)) < 60.0:
+                    continue               # corridor lanes already ride it
+                clip = ring0.intersection(shapely.buffer(pav_eff, -1.0))
+                segs = [s0 for s0 in getattr(clip, "geoms", [clip])
+                        if s0.geom_type == "LineString" and s0.length > 30.0]
+                keep_len = sum(s0.length for s0 in segs)
+                if keep_len < 0.5 * ring0.length:
+                    continue
+                for s0 in segs:
+                    g.add_edge(np.asarray(s0.coords), "lane", "", w_lane)
+
+        dropped_bay = [ch for ch in dropped_bay
+                       if float(np.median(ch.radii) if ch.radii else 99)
+                       <= 80.0 and ch.line.length <= 240.0]
         for ch in dropped_bay:
             cs0 = np.asarray(ch.line.coords)
             for at_start in (True, False):
                 tip = cs0[0] if at_start else cs0[-1]
-                if float(np.min(np.hypot(*(tip_arr - tip).T))) > 1.0:
+                if kept_union.distance(Point(tuple(tip))) > 1.5:
                     continue               # not attached to the kept network
                 ref = cs0[min(len(cs0) - 1, 4)] if at_start \
                     else cs0[max(0, len(cs0) - 5)]
@@ -1349,6 +1490,9 @@ def synthesize_spine(
 
     # 1b: drop networks that never reach a runway (target leaves them empty)
     _prune_components(g, runway_union, pav_eff)
+
+    # 1d: separate straight corridors from curved hooks before snapping
+    _split_curvature_regimes(g)
 
     # 2: through paths + runway-grid straightening (graph-preserving)
     axes = _runway_axes(runway_union)

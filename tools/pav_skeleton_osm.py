@@ -286,11 +286,16 @@ def main(argv=None) -> int:
                     tot += seg
                     if tgt_u.distance(p0) > 10.0:
                         over += seg
-            print(f"  GATE vs TARGET fixture : miss median "
-                  f"{np.median(a):.2f}  p95 {np.percentile(a, 95):.2f}  "
-                  f"max {a.max():.1f} m | overgeneration "
-                  f"{100.0 * over / max(tot, 1e-9):.1f}% of spine >10 m "
-                  f"from target")
+            cov = sum(1 for d in ds if d <= 5.0) / max(len(ds), 1)
+            matched = [d for d in ds if d <= 5.0]
+            med_aligned = float(np.median(matched)) if matched else 99.0
+            print(f"  GATE coverage          : {100*cov:.1f}%  "
+                  f"(target within 5 m of spine; goal >=98%)")
+            print(f"  GATE economy           : {100*(1-over/max(tot,1e-9)):.1f}%  "
+                  f"(spine within 10 m of target; goal >=98%)")
+            print(f"  GATE alignment         : median {med_aligned:.2f} m on "
+                  f"matched portions (goal <=1 m) | all-median "
+                  f"{np.median(a):.2f}  p95 {np.percentile(a,95):.2f}")
 
     # GATE 3b — diff vs the approved target KML, when present.
     kml_path = f"/Users/noah/Ortho4XP-troubleshoot/{args.icao}_curved_spine.kml"
