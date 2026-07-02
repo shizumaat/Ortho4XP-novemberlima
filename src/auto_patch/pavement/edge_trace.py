@@ -819,14 +819,18 @@ def _max_chords(cs, d_orig, w, allow, bnd):
             dev = float((np.abs(rel[:, 0] * ab[1] - rel[:, 1] * ab[0]) / L)
                         .max())
             ln = LineString([tuple(a), tuple(b)])
-            ok = dev <= 1.5 * w and allow.contains(ln)
+            ok = allow.contains(ln)
             if ok:
                 m = max(2, int(L / 6.0))
                 clear = min(bnd.distance(ln.interpolate(k * L / m))
                             for k in range(1, m)) if L > 6.0 else \
                     bnd.distance(ln.interpolate(0.5, normalized=True))
                 if clear >= 0.9 * w:
-                    pass                       # full-clearance chord: take it
+                    # full-clearance chord: STRAIGHT WINS with no deviation
+                    # cap — user rule (i) verbatim ("straight whenever the
+                    # line keeps >=w clearance everywhere"); capping it
+                    # was what blocked the big apron sweeps
+                    pass
                 elif dev <= 3.0 and clear >= max(
                         1.0, float(d_orig[i:j + 1].min()) - 0.5):
                     pass                       # tight chord through a pinch
@@ -1000,6 +1004,14 @@ def _straighten_path_list(g: _Graph, paths, pav_eff, w: float,
         new_line = None
         if not os.environ.get("O4_ET_NO_REFIT"):
             new_line = _refit_chain(cs, None, w, r_std, allow, bnd)
+        if new_line is not None:
+            # rule (i) arbiter: if the pure chord route is MUCH shorter
+            # than the curve-following refit, the "curves" were obstacle
+            # detour, not design — straight wins (big apron sweeps)
+            keep_c = _max_chords(cs, d_orig, w, allow, bnd)
+            chord_line = LineString(cs[keep_c])
+            if chord_line.length < 0.92 * new_line.length:
+                new_line = chord_line
         if new_line is None:
             keep = _max_chords(cs, d_orig, w, allow, bnd)
             pts = cs[keep].astype(float).copy()
