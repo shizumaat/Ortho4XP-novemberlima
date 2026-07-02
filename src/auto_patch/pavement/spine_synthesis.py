@@ -1016,13 +1016,18 @@ def _radius_for(size: str) -> float:
     return R90_BY_SIZE.get(size or "", R90_BY_SIZE[""])
 
 
-def _add_junction_arcs(g: _Graph, pav_ok, runway_union=None):
+def _add_junction_arcs(g: _Graph, pav_ok, runway_union=None,
+                       r_start_for=None):
     """At every node, STANDARD arcs for every branch pair with a real turn —
     all arcs of one junction share ONE radius (user: where arcs come
     together they are the same size, mirrored), so symmetric pairs land on
     shared tangent nodes.  Tangent points split the branch edges (endpoint
     reuse welds coincident tangents), keeping the graph coherent.  An H
-    junction is a straight rung + four EQUAL quarter-circles."""
+    junction is a straight rung + four EQUAL quarter-circles.
+
+    ``r_start_for(P, r_std)`` (optional) sets the LARGEST radius to try at
+    a node — wide-open junction crossings take the biggest mirrored arcs
+    that fit (v8 target evidence), corridor junctions stay standard."""
     rwy_b = runway_union.boundary \
         if runway_union is not None and not runway_union.is_empty else None
     node_ids = list(g.incident().keys())
@@ -1060,7 +1065,8 @@ def _add_junction_arcs(g: _Graph, pav_ok, runway_union=None):
                 len_a = LineString(g.edges[ea]["cs"]).length
                 len_b = LineString(g.edges[eb]["cs"]).length
                 r_fit = None
-                r = r_std
+                r = r_std if r_start_for is None \
+                    else max(r_std, float(r_start_for(P, r_std)))
                 while r >= _MIN_ARC_FIT * r_std:
                     arc, t = _fillet(tuple(P), u, u_out, r)
                     if arc is None:

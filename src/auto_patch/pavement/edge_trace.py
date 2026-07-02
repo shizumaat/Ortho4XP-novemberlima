@@ -385,7 +385,7 @@ def _select_routes(g: _Graph, runway_union,
         if e["kind"] not in keep_kinds:
             cond.add(ei)
     if not cond:
-        return
+        return []
     # anchors: nodes owned by anchoring structure that also touch routing
     # material, plus runway-contact tips (rule b: the spine meets the
     # runway at every pavement intersection).
@@ -404,17 +404,50 @@ def _select_routes(g: _Graph, runway_union,
         elif rwy_b is not None and len(ks) == 1 \
                 and rwy_b.distance(Point(tuple(g.nodes[ni]))) < 2.5:
             anchors.append(ni)
-    used = set()
+    # candidate pairs: local direct connections (distant anchors reuse the
+    # trunk network; two anchors closer than a mouth are the same mouth)
+    max_direct = 8.0 * 80.0                     # ~ a few openings
+    pairs = []
     for k, src in enumerate(anchors):
         if src not in G:
             continue
-        _dist, paths = nx.single_source_dijkstra(G, src, weight="weight")
+        dist, paths = nx.single_source_dijkstra(G, src, weight="weight",
+                                                cutoff=max_direct)
         for dst in anchors[k + 1:]:
-            path = paths.get(dst)
-            if not path:
+            d = dist.get(dst)
+            if d is None or d < 30.0:
                 continue
-            for a, b in zip(path, path[1:]):
-                used.add(G[a][b]["ei"])
+            pairs.append((d, src, dst, paths[dst]))
+    pairs.sort(key=lambda t: t[0])
+    # GREEDY SPANNER (minimal network, no duplicate parallels): accept a
+    # direct path only if the network built so far makes the pair detour
+    # more than beta x direct.
+    beta = 1.35
+    S = nx.Graph()
+    for ei, e in enumerate(g.edges):
+        if e["alive"] and e["kind"] in keep_kinds:
+            L = float(LineString(e["cs"]).length)
+            if not S.has_edge(e["a"], e["b"]) \
+                    or S[e["a"]][e["b"]]["weight"] > L:
+                S.add_edge(e["a"], e["b"], weight=L)
+    used = set()
+    accepted = 0
+    accepted_paths = []
+    for d, src, dst, path in pairs:
+        try:
+            d_net = nx.shortest_path_length(S, src, dst, weight="weight")
+        except Exception:
+            d_net = None
+        if d_net is not None and d_net <= beta * d:
+            continue                            # already served
+        accepted += 1
+        accepted_paths.append(
+            (path, [G[a][b]["ei"] for a, b in zip(path, path[1:])]))
+        for a, b in zip(path, path[1:]):
+            used.add(G[a][b]["ei"])
+            wgt = G[a][b]["weight"]
+            if not S.has_edge(a, b) or S[a][b]["weight"] > wgt:
+                S.add_edge(a, b, weight=wgt)
     killed = 0
     for ei in cond:
         if ei not in used:
@@ -422,8 +455,10 @@ def _select_routes(g: _Graph, runway_union,
             killed += 1
     if os.environ.get("O4_ET_DEBUG"):
         print(f"[edge_trace] route selection: anchors={len(anchors)} "
+              f"pairs={len(pairs)} accepted={accepted} "
               f"conditional={len(cond)} kept={len(cond) - killed}",
               flush=True)
+    return accepted_paths
 
 
 def _prune_leaf_kinds(g: _Graph, kinds=("center", "weld")):
@@ -489,14 +524,36 @@ def _max_chords(cs, d_orig, w, allow, bnd):
     return out
 
 
+def _straighten_routes(g: _Graph, accepted_paths, pav_eff, w: float):
+    """Rule (i) applied to each accepted anchor-to-anchor ROUTE as one
+    unit: chords span ring wiggles and weld kinks across every node of the
+    route, producing the tangent straights the target draws through open
+    space (through-path assembly alone stays pinned at ring junctions)."""
+    paths = []
+    for node_path, eis in accepted_paths:
+        path = []
+        for k, ei in enumerate(eis):
+            e = g.edges[ei]
+            if not e["alive"]:
+                path = None
+                break
+            path.append((ei, bool(e["a"] == node_path[k])))
+        if path:
+            paths.append(path)
+    _straighten_path_list(g, paths, pav_eff, w)
+
+
 def _straighten_paths(g: _Graph, pav_eff, w: float):
     """BIG-PICTURE STRAIGHT (user rule i) applied to THROUGH-PATHS: target
     straights run through junction after junction, so chords must span
     node-to-node fragments.  Interior junction nodes are moved onto the
     straightened line (side branches follow via move_node)."""
+    _straighten_path_list(g, _assemble_through_paths(g), pav_eff, w)
+
+
+def _straighten_path_list(g: _Graph, paths, pav_eff, w: float):
     bnd = pav_eff.boundary
     allow = shapely.buffer(pav_eff, 0.5)
-    paths = _assemble_through_paths(g)
     for path in paths:
         cs, _rr, node_seq = _collect_path(g, path)
         if len(cs) < 3:
@@ -650,6 +707,10 @@ def synthesize_spine_v8(
 
     _connect_free_ends(g, pav_eff)
     _select_routes(g, runway_union)
+    # NOTE: straightening each accepted route as one unit (endpoints at
+    # anchors) was tried and is NET-NEGATIVE (coverage 60.8->59.1,
+    # alignment 1.21->1.43): chords cut curves the target keeps.  The
+    # through-path straightener below is the keeper.
     _prune_no_runway_components(g, runway_union, pav_eff)
     _fix_dangles(g, pav_eff)
     if not os.environ.get("O4_ET_KINDS"):        # keep kinds for debug only
@@ -666,7 +727,14 @@ def synthesize_spine_v8(
         return allow.contains(line)
 
     _attribute_sizes(g, routes)
-    _add_junction_arcs(g, pav_ok, runway_union)
+    bnd_arc = pav_eff.boundary
+
+    def r_start_for(P, r_std):
+        # wide-open junction crossings take the biggest mirrored arcs that
+        # fit; the local clearance at the node is the openness measure
+        return min(2.5 * r_std, max(r_std, bnd_arc.distance(Point(tuple(P)))))
+
+    _add_junction_arcs(g, pav_ok, runway_union, r_start_for=r_start_for)
     _add_runway_turns(g, runway_union, pav_eff)
     _fix_dangles(g, pav_eff)
     g.consolidate()
