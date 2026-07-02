@@ -414,79 +414,177 @@ def _assemble_through_paths(g: _Graph):
     return paths
 
 
+def _collect_path(g: _Graph, path):
+    seq, radii, node_seq = [], [], []
+    for k, (ei, at_a) in enumerate(path):
+        e = g.edges[ei]
+        cs = e["cs"] if at_a else e["cs"][::-1]
+        node_seq.append(e["a"] if at_a else e["b"])
+        if k == 0:
+            seq.extend(cs.tolist())
+        else:
+            seq.extend(cs[1:].tolist())
+        radii.extend([e["w"]] * (len(cs) - (0 if k == 0 else 1)))
+    last = path[-1]
+    node_seq.append(g.edges[last[0]]["b"] if last[1]
+                    else g.edges[last[0]]["a"])
+    return np.asarray(seq), np.asarray(radii, dtype=float), node_seq
+
+
+def _narrow_sel(rr):
+    if len(rr) >= 5:
+        thr = np.percentile(rr, 40.0)
+        sel = rr <= thr + 1e-6
+        if sel.sum() >= 3:
+            return sel
+    return np.ones(len(rr), dtype=bool)
+
+
+def _free_fit(coords, rr):
+    """Best-fit straight direction for a diagonal lane, weighted toward the
+    NARROW cross-sections (the lane keeps half-width from its pavement
+    edges; widenings must not swing it).  None if the path is not straight
+    enough to be a line."""
+    sel = _narrow_sel(rr)
+    pts = coords[sel]
+    if len(pts) < 3:
+        return None
+    mu = pts.mean(axis=0)
+    X = pts - mu
+    cov = X.T @ X
+    evals, evecs = np.linalg.eigh(cov)
+    d = evecs[:, -1]
+    d = _unit(float(d[0]), float(d[1]))
+    if d == (0.0, 0.0):
+        return None
+    nvec = np.asarray((-d[1], d[0]))
+    dev = np.abs((coords - mu) @ nvec)
+    w_med = float(np.median(rr))
+    if float(dev.max()) > max(3.0, 0.9 * w_med):
+        return None                        # genuinely curved — keep chords
+    return np.asarray(d)
+
+
 def _straighten_paths(g: _Graph, paths, chord_ok, axes, pav_eff):
-    """Straighten each through path, preferring the RUNWAY GRID: a path whose
-    end-to-end direction is within ~15° of a runway axis (or its
-    perpendicular) becomes an EXACT axis-aligned line, offset so it passes
-    through the corridor's NARROWEST cross-sections evenly (user 2026-07-01:
-    parallels are one dead-straight full-length line; perpendiculars run
-    exactly perpendicular; centering is set at the pinch points, never by
-    widenings).  Junction nodes are then reconciled onto the LINE
-    INTERSECTIONS of their incident snapped lanes, so perpendicular taxiways
-    extend all the way to the parallel's line and every crossing is a true
-    90° ready for a quarter-circle arc.  Diagonal paths keep the chord
-    treatment.  All welds survive: geometry moves only via node moves."""
-    node_lines: dict = defaultdict(list)   # node -> [(n_vec, c)] line: p·n = c
+    """Straighten through paths onto DESIGN LINES.
+
+    Grid lanes (within 15° of a runway axis or its perpendicular) snap to
+    EXACTLY that direction; diagonals snap to their own best-fit line — in
+    both cases the offset comes from the NARROW cross-sections, i.e. the
+    lane keeps half-width from its pavement edges (user 2026-07-01).
+    Collinear snapped paths that SHARE a node are then unified onto ONE
+    line (a full-length parallel must never fragment into offset pieces),
+    junction nodes land on the line intersections, and dead-end tips extend
+    to the pavement boundary.  Curved paths keep the chord treatment."""
+    node_lines: dict = defaultdict(list)   # node -> [(n_vec, c)]
     snapped_edges: list = []
     bnd = pav_eff.boundary
 
+    infos = []
     for path in paths:
-        seq = []
-        radii = []
-        node_seq = []                      # nodes along the path, in order
-        for k, (ei, at_a) in enumerate(path):
-            e = g.edges[ei]
-            cs = e["cs"] if at_a else e["cs"][::-1]
-            node_seq.append(e["a"] if at_a else e["b"])
-            if k == 0:
-                seq.extend(cs.tolist())
-            else:
-                seq.extend(cs[1:].tolist())
-            radii.extend([e["w"]] * (len(cs) - (0 if k == 0 else 1)))
-        last = path[-1]
-        node_seq.append(g.edges[last[0]]["b"] if last[1]
-                        else g.edges[last[0]]["a"])
-        coords = np.asarray(seq)
-        rr = np.asarray(radii, dtype=float)
-
+        coords, rr, node_seq = _collect_path(g, path)
+        if len(coords) < 2:
+            continue
         d_chord = _unit(*(coords[-1] - coords[0]))
-        snap = _snap_direction(d_chord, axes) if len(coords) >= 2 else None
         path_len = float(LineString(coords).length)
+        d = None
+        if path_len > 12.0:
+            snap = _snap_direction(d_chord, axes)
+            if snap is not None:
+                d = np.asarray(snap)
+            elif path_len > 60.0:
+                d = _free_fit(coords, rr)
+        infos.append(dict(path=path, coords=coords, rr=rr,
+                          node_seq=node_seq, d=d, c=None))
 
-        if snap is not None and path_len > 12.0:
-            # axis-aligned lane: offset from the NARROW cross-sections
-            d = np.asarray(snap)
-            nvec = np.asarray((-snap[1], snap[0]))
-            c_all = coords @ nvec
-            if len(rr) >= 5:
-                thr = np.percentile(rr, 40.0)
-                sel = rr <= thr + 1e-6
-                if sel.sum() >= 3:
-                    c = float(np.median(c_all[sel]))
-                else:
-                    c = float(np.median(c_all))
-            else:
-                c = float(np.median(c_all))
-            # candidate line accepted only if it stays on pavement
+    # per-path offset from the narrow cross-sections
+    for info in infos:
+        if info["d"] is None:
+            continue
+        nvec = np.asarray((-info["d"][1], info["d"][0]))
+        sel = _narrow_sel(info["rr"])
+        info["c"] = float(np.median((info["coords"] @ nvec)[sel]))
+
+    # ── unify collinear snapped paths that share a node ─────────────────────
+    snapped = [i for i, info in enumerate(infos) if info["d"] is not None]
+    parent = {i: i for i in snapped}
+
+    def _find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    node_of = defaultdict(set)
+    for i in snapped:
+        for ni in infos[i]["node_seq"]:
+            node_of[ni].add(i)
+    for members in node_of.values():
+        mem = sorted(members)
+        for a in range(len(mem)):
+            for b in range(a + 1, len(mem)):
+                ia, ib = mem[a], mem[b]
+                da, db = infos[ia]["d"], infos[ib]["d"]
+                ang = _angle_deg(tuple(da), tuple(db))
+                ang = min(ang, 180.0 - ang)
+                if ang > 3.0:
+                    continue
+                na = np.asarray((-da[1], da[0]))
+                sel_b = _narrow_sel(infos[ib]["rr"])
+                cb_in_a = float(np.median(
+                    (infos[ib]["coords"] @ na)[sel_b]))
+                if abs(infos[ia]["c"] - cb_in_a) <= 6.0:
+                    ra, rb = _find(ia), _find(ib)
+                    if ra != rb:
+                        parent[ra] = rb
+    clusters = defaultdict(list)
+    for i in snapped:
+        clusters[_find(i)].append(i)
+    for members in clusters.values():
+        if len(members) < 2:
+            continue
+        # one line for the whole taxiway: direction of the longest member,
+        # offset over ALL members' narrow vertices
+        longest = max(members,
+                      key=lambda i: LineString(infos[i]["coords"]).length)
+        d = infos[longest]["d"]
+        nvec = np.asarray((-d[1], d[0]))
+        cs_all = []
+        for i in members:
+            sel = _narrow_sel(infos[i]["rr"])
+            cs_all.extend((infos[i]["coords"] @ nvec)[sel].tolist())
+        c = float(np.median(cs_all))
+        for i in members:
+            infos[i]["d"] = d
+            infos[i]["c"] = c
+
+    # ── apply geometry ───────────────────────────────────────────────────────
+    allow = shapely.buffer(pav_eff, 0.3)
+    for info in infos:
+        coords, rr, node_seq = info["coords"], info["rr"], info["node_seq"]
+        applied = False
+        if info["d"] is not None:
+            d = np.asarray(info["d"])
+            nvec = np.asarray((-d[1], d[0]))
+            c = info["c"]
             t_all = coords @ d
             probe = LineString([tuple(d * t_all.min() + nvec * c),
                                 tuple(d * t_all.max() + nvec * c)])
-            if chord_ok(probe) or shapely.buffer(pav_eff, 0.3).contains(probe):
+            if chord_ok(probe) or allow.contains(probe):
                 for ni in node_seq:
                     node_lines[ni].append((nvec, c))
-                # relocate ALL nodes (incl. ends) onto the line for now;
-                # reconciliation refines shared nodes to intersections
                 for ni in node_seq:
-                    pcur = g.nodes[ni]
-                    t = float(pcur @ d)
+                    t = float(g.nodes[ni] @ d)
                     g.move_node(ni, d * t + nvec * c)
-                for (ei, at_a) in path:
+                for (ei, _at_a) in info["path"]:
                     e = g.edges[ei]
-                    e["cs"] = np.asarray([g.nodes[e["a"]], g.nodes[e["b"]]])
+                    e["cs"] = np.asarray([g.nodes[e["a"]],
+                                          g.nodes[e["b"]]])
                     snapped_edges.append(ei)
-                continue
-
-        # fallback: chord-straighten as before (diagonals, curved paths)
+                applied = True
+        if applied:
+            continue
+        # fallback: chord-straighten (curved paths)
         straight, _r = _chord_straighten(coords, rr, chord_ok)
         path_ln = LineString(straight)
         s_of_node = [0.0]
@@ -498,7 +596,7 @@ def _straighten_paths(g: _Graph, paths, chord_ok, axes, pav_eff):
         for k, ni in enumerate(node_seq[1:-1], start=1):
             p = path_ln.interpolate(min(s_of_node[k], path_ln.length))
             g.move_node(ni, [p.x, p.y])
-        for k, (ei, at_a) in enumerate(path):
+        for k, (ei, at_a) in enumerate(info["path"]):
             s0, s1 = s_of_node[k], s_of_node[k + 1]
             n_pts = max(2, int((s1 - s0) / 5) + 1)
             pts = [path_ln.interpolate(s).coords[0]
@@ -515,7 +613,6 @@ def _straighten_paths(g: _Graph, paths, chord_ok, axes, pav_eff):
     inc = g.incident()
     for ni, lines in node_lines.items():
         if len(lines) >= 2:
-            # the two most-perpendicular lines define the crossing
             best = None
             for x in range(len(lines)):
                 for y in range(x + 1, len(lines)):
@@ -525,14 +622,12 @@ def _straighten_paths(g: _Graph, paths, chord_ok, axes, pav_eff):
                     if best is None or det > best[0]:
                         best = (det, (n1, c1), (n2, c2))
             det, (n1, c1), (n2, c2) = best
-            if det > 0.5:                  # ≥ ~30° apart: true crossing
+            if det > 0.5:
                 D = n1[0] * n2[1] - n1[1] * n2[0]
                 x = (c1 * n2[1] - c2 * n1[1]) / D
                 y = (n1[0] * c2 - n2[0] * c1) / D
                 if math.hypot(x - g.nodes[ni][0], y - g.nodes[ni][1]) < 40.0:
                     g.move_node(ni, [x, y])
-        # dead-end tips of snapped lanes: extend along the lane to the
-        # pavement boundary so runway-edge/stub ends stay legitimate
         if len(inc.get(ni, [])) == 1 and len(lines) >= 1:
             (ei, at_a) = inc[ni][0]
             e = g.edges[ei]
@@ -551,7 +646,6 @@ def _straighten_paths(g: _Graph, paths, chord_ok, axes, pav_eff):
                         if q.distance(Point(tuple(g.nodes[ni]))) < 45.0:
                             g.move_node(ni, [q.x - u[0] * 0.1,
                                              q.y - u[1] * 0.1])
-    # snapped edges stay exactly straight between their (moved) nodes
     for ei in snapped_edges:
         e = g.edges[ei]
         if e["alive"]:
@@ -667,7 +761,7 @@ def _radius_for(size: str) -> float:
     return R90_BY_SIZE.get(size or "", R90_BY_SIZE[""])
 
 
-def _add_junction_arcs(g: _Graph, pav_ok):
+def _add_junction_arcs(g: _Graph, pav_ok, runway_union=None):
     """At every node, one STANDARD arc per branch-direction pair with a real
     turn between them.  Tangent points split the branch edges, so the arc is
     welded into the graph at real shared nodes.  This turns an H junction
@@ -676,9 +770,13 @@ def _add_junction_arcs(g: _Graph, pav_ok):
     Splitting an edge retires it and re-creates its halves, so the incident
     edge list is re-resolved after every placement; pairs already handled
     (or judged unplaceable) are remembered by their direction signature."""
+    rwy_b = runway_union.boundary \
+        if runway_union is not None and not runway_union.is_empty else None
     node_ids = list(g.incident().keys())
     for ni in node_ids:
         P = g.nodes[ni]
+        if rwy_b is not None and rwy_b.distance(Point(tuple(P))) < 3.0:
+            continue        # square runway contact: straight line, no arcs
         done: set = set()
         for _guard in range(24):           # max arcs per node, safety bound
             ends = [(ei, at_a) for (ei, at_a) in g.incident().get(ni, [])
@@ -1042,10 +1140,34 @@ def synthesize_spine(
     def chord_ok(line: LineString) -> bool:
         return strict.contains(line)
 
-    # 1: medial skeleton → graph (welded by construction)
+    # 1: medial skeleton → graph (welded by construction).  Runway SHOULDER
+    # strips (pav − runway leaves thin flankers along the edge) get no lane:
+    # the runway profile owns them, and their medial otherwise junction-arcs
+    # into every square taxiway contact (user: a 90° contact is a bare
+    # straight line stopping at the edge).
+    rwy_zone = shapely.buffer(runway_union, 25.0) \
+        if runway_union is not None and not runway_union.is_empty else None
     g = _Graph()
     for ch in build_pavement_skeleton(pav_nav, runway_union=runway_union):
         w = float(np.median(ch.radii)) if ch.radii else 8.0
+        if rwy_zone is not None and ch.line.length > 1.0:
+            n = max(2, int(ch.line.length / 10))
+            inside = sum(1 for k in range(n + 1)
+                         if rwy_zone.contains(
+                             ch.line.interpolate(k * ch.line.length / n)))
+            if inside / (n + 1) >= 0.6:
+                # only a PARALLEL rider is a shoulder lane — perpendicular
+                # and diagonal contacts legitimately live near the edge
+                cs0 = np.asarray(ch.line.coords)
+                d_ch = _unit(*(cs0[-1] - cs0[0]))
+                is_par = False
+                for a in _runway_axes(runway_union):
+                    ang = _angle_deg(d_ch, a)
+                    if min(ang, 180.0 - ang) <= 15.0:
+                        is_par = True
+                        break
+                if is_par:
+                    continue
         g.add_edge(np.asarray(ch.line.coords), "lane", "", w)
 
     # 2: through paths + runway-grid straightening (graph-preserving)
@@ -1063,7 +1185,7 @@ def synthesize_spine(
     _fair_edge_bends(g, pav_ok)
 
     # 4: standard arcs at every junction (welded; H = rung + 4 equal arcs)
-    _add_junction_arcs(g, pav_ok)
+    _add_junction_arcs(g, pav_ok, runway_union)
 
     # 5: runway diagonal sharp-turn arcs
     _add_runway_turns(g, runway_union, pav_eff)
