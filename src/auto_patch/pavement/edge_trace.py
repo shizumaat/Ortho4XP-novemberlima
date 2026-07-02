@@ -706,6 +706,78 @@ def _trim_proj_tails(g: _Graph, runway_union):
                 changed = True
 
 
+def _close_floating_tips(g: _Graph, pav_eff, building_union):
+    """FLOATING-ENDS GATE = 0: any degree-1 tip that is not a legitimate
+    termination (pavement edge, building face) welds straight onto the
+    nearest way (splitting it — topological, like every weld), and a tip
+    with nothing reachable trims back.  Runs LAST, after arcs."""
+    allow = shapely.buffer(pav_eff, 0.5)
+    bnd = pav_eff.boundary
+    for _round in range(3):
+        changed = False
+        for ni in range(len(g.nodes)):
+            ends = [(ei, aa) for ei, aa in g.incident().get(ni, [])
+                    if g.edges[ei]["alive"]]
+            if len(ends) != 1:
+                continue
+            ei, at_a = ends[0]
+            tip = g.nodes[ni]
+            p = Point(tuple(tip))
+            if bnd.distance(p) <= 2.0:
+                continue
+            if building_union is not None \
+                    and building_union.distance(p) <= 2.0:
+                continue
+            best = None
+            for ej, e2 in enumerate(g.edges):
+                if ej == ei or not e2["alive"]:
+                    continue
+                ln2 = LineString(e2["cs"])
+                d = ln2.distance(p)
+                if d <= 70.0 and (best is None or d < best[0]):
+                    best = (d, ej, ln2)
+            done = False
+            if best is not None and best[0] > 0.5:
+                d, ej, ln2 = best
+                q = nearest_points(ln2, p)[0]
+                seg = LineString([tuple(tip), (q.x, q.y)])
+                if allow.contains(seg):
+                    mid = g.split_edge(ej, ln2.project(q))
+                    qn = g.nodes[mid]
+                    if float(np.hypot(qn[0] - tip[0],
+                                      qn[1] - tip[1])) > 0.5:
+                        g.add_edge(np.vstack([[tip], [qn]]), "lane",
+                                   g.edges[ei]["size"], g.edges[ei]["w"])
+                    done = True
+                    changed = True
+            elif best is not None:
+                # touching but unnoded: split there so the weld is real
+                d, ej, ln2 = best
+                q = nearest_points(ln2, p)[0]
+                mid = g.split_edge(ej, ln2.project(q))
+                if mid != ni:
+                    g.move_node(ni, list(g.nodes[mid]))
+                done = True
+                changed = True
+            if not done:
+                # the straight run to the NEAREST boundary point never
+                # leaves the pavement — draw the tip out to the edge
+                qb = nearest_points(bnd, p)[0]
+                db = qb.distance(p)
+                if 0.5 < db <= 40.0:
+                    g.add_edge(np.vstack([[tip], [[qb.x, qb.y]]]), "lane",
+                               g.edges[ei]["size"], g.edges[ei]["w"])
+                    done = True
+                    changed = True
+            if not done:
+                e = g.edges[ei]
+                if LineString(e["cs"]).length < 120.0:
+                    e["alive"] = False
+                    changed = True
+        if not changed:
+            break
+
+
 def _prune_leaf_kinds(g: _Graph, kinds=("center", "weld")):
     """Center lines and edge traces are BRIDGES by definition (an opening
     between spaces, a frontage between corridors) — a dead-end branch made
@@ -1124,5 +1196,6 @@ def synthesize_spine_v8(
     _add_junction_arcs(g, pav_ok, runway_union, r_start_for=r_start_for)
     _add_runway_turns(g, runway_union, pav_eff)
     _fix_dangles(g, pav_eff)
+    _close_floating_tips(g, pav_eff, building_union)
     g.consolidate()
     return g.ways()
