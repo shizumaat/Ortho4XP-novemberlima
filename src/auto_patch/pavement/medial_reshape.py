@@ -421,6 +421,13 @@ def synthesize_spine_v11(
         print(f"[reshape] thin={n_thin} fat_runs={n_fat_runs} "
               f"forks={n_forks} w={w:.1f}", flush=True)
 
+    if os.environ.get("O4_MR_RAW"):
+        # review escape hatch: the pure construction (thin chains +
+        # rings + forks), no stitching/straightening/arcs — judge the
+        # MODEL's geometry, not the finishing passes
+        g.consolidate()
+        return g.ways()
+
     from .edge_trace import _planarize_crossings, _straighten_paths
     from .outline_trace import (
         _merge_coincident, _prune_unreachable, _trim_corner_deaths,
@@ -439,7 +446,10 @@ def synthesize_spine_v11(
     from .outline_trace import _weld_components
     _weld_components(g, pav_eff, max_gap=12.0)
     _merge_coincident(g)
-    _prune_unreachable(g, runway_union)
+    if not os.environ.get("O4_MR_NO_PRUNE"):
+        # review escape hatch: keep unreachable fabric so the geometry
+        # can be judged in JOSM while connectivity work is in flight
+        _prune_unreachable(g, runway_union)
     _fix_dangles(g, pav_eff)
     _trim_interior_stubs(g, pav_eff, runway_union)
 
