@@ -38,7 +38,7 @@ from shapely import wkb
 from shapely.geometry import LineString, Point
 from shapely.ops import unary_union
 
-_CACHE_VERSION = 3
+_CACHE_VERSION = 4
 
 
 class _Frame:
@@ -109,6 +109,45 @@ def _extract(icao: str, xplane: str):
     except Exception:
         pass
 
+    # Shoulder-inclusive runway union for the thru-runway trace (user
+    # 2026-07-02: "full runway rect" incl. shoulders).  The pipeline's
+    # three shoulder passes (whole-polygon absorption, coded row-100
+    # width, DSF extent) already widened layout.runway_union where they
+    # fire; for runways whose shoulder is declared only as an XP12
+    # surface-type code (SPJC: 27/28 — exists, no width digit) X-Plane
+    # renders it procedurally at 25% of runway width per side — widen
+    # by that here, capped at 75 m total (CS-ADR-DSN.B.080).
+    rwy_full = getattr(layout, "runway_union", None)
+    try:
+        from auto_patch.apt_dat_reader import (
+            find_airport_apt_dat, load_airport)
+        from auto_patch.pavement.runways import _widen_runway_rect
+        lat0, lon0 = layout.anchor
+        cos0 = math.cos(math.radians(lat0))
+        R = 6378137.0
+
+        def to_m(lon, lat):
+            return (math.radians(lon - lon0) * R * cos0,
+                    math.radians(lat - lat0) * R)
+
+        apt = load_airport(find_airport_apt_dat(xplane, icao), icao)
+        extra = []
+        for r in apt.runways:
+            code = r.shoulder_code or 0
+            if code <= 0:
+                continue
+            per_side = max(code // 100, 0.25 * r.width_m)
+            total = min(r.width_m + 2.0 * per_side, 75.0)
+            half = total / 2.0
+            rect = _widen_runway_rect(r, layout.anchor, -half, half, to_m)
+            if rect is not None and not rect.is_empty:
+                extra.append(rect)
+        if extra:
+            rwy_full = unary_union(
+                ([rwy_full] if rwy_full is not None else []) + extra)
+    except Exception:
+        pass
+
     # apt.dat parking positions (rows 1300/15) — the movement-demand
     # endpoints: paint that only distributes into stands is parking
     # guidance, not taxi spine (user deletion criterion 2026-07-02)
@@ -142,6 +181,7 @@ def _extract(icao: str, xplane: str):
         "buildings": [(wkb.dumps(b), r) for (b, r) in buildings],
         "recog": [wkb.dumps(r) for r in recog],
         "ramps": ramps,
+        "rwy_full": wkb.dumps(rwy_full) if rwy_full is not None else None,
     }
 
 
@@ -198,9 +238,11 @@ def main(argv=None) -> int:
         return 1
     if (args.v12 or os.environ.get("O4_PT_THRU_RWY")) and rwy is not None:
         # v12 model (user ruling 2026-07-02): the spine is traced as if
-        # the runway does not exist — rects unioned into pav_union at
-        # the TOP, one continuous pavement; _pavement.osm reflects it
-        pav = unary_union([pav, rwy])
+        # the runway does not exist — the FULL rects (shoulders
+        # included) unioned into pav_union at the TOP, one continuous
+        # pavement; _pavement.osm reflects it
+        rwy_full = wkb.loads(c["rwy_full"]) if c.get("rwy_full") else rwy
+        pav = unary_union([pav, rwy_full])
         rwy = None
     # working pavement = buildings subtracted (user 2026-07-02: chords must
     # never pass through buildings; this is the deciding footprint)
