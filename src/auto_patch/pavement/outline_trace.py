@@ -38,9 +38,11 @@ import shapely
 from shapely.geometry import LineString, Point
 from shapely.ops import unary_union
 
-from .pav_skeleton import _fair_chain, _polygons, build_pavement_skeleton
+from .pav_skeleton import (
+    _extend_tip, _fair_chain, _polygons, build_pavement_skeleton,
+)
 from .spine_synthesis import (
-    SpineWay, _Graph, _add_junction_arcs, _add_runway_turns,
+    R90_BY_SIZE, SpineWay, _Graph, _add_junction_arcs, _add_runway_turns,
     _attribute_sizes, _fix_dangles, _runway_axes, _SVC_HALFWIDTH_M,
 )
 from .edge_trace import (
@@ -187,6 +189,100 @@ def _weld_components(g: _Graph, pav_eff, max_gap: float):
         print(f"[outline] component welds: {welded}", flush=True)
 
 
+def _merge_coincident(g: _Graph, gap: float = 8.0):
+    """User merge rule at the dedup scale: two lines running the same
+    course (sustained parallel, closer than ``gap``, no shared node)
+    are ONE line — the shorter dies, welds re-attach its stubs."""
+    from shapely.strtree import STRtree
+    alive = [(ei, e) for ei, e in enumerate(g.edges) if e["alive"]]
+    lines = [LineString(e["cs"]) for _ei, e in alive]
+    tree = STRtree(lines)
+    order = sorted(range(len(alive)), key=lambda i: lines[i].length)
+    dead = set()
+    killed = 0
+    for i in order:
+        ei, e = alive[i]
+        if i in dead or lines[i].length < 4.0:
+            continue
+        ln = lines[i]
+        n = max(3, int(ln.length / 8.0))
+        pts = [ln.interpolate(t, normalized=True)
+               for t in np.linspace(0.1, 0.9, n)]
+        for j in tree.query(ln.buffer(gap)):
+            j = int(j)
+            if j == i or j in dead:
+                continue
+            oj, eo = alive[j]
+            if eo["kind"] != e["kind"] and "arc" in (e["kind"], eo["kind"]):
+                continue
+            if lines[j].length < ln.length:
+                continue                    # only the longer twin absorbs
+            # only both-endpoint pairs are true alternates (arc vs line);
+            # a wishbone sharing ONE node still duplicates — a genuine
+            # V-connection diverges and fails the gap test on its own
+            if {e["a"], e["b"]} == {eo["a"], eo["b"]}:
+                continue
+            if all(lines[j].distance(p) <= gap for p in pts):
+                e["alive"] = False
+                dead.add(i)
+                killed += 1
+                break
+    if os.environ.get("O4_ET_DEBUG"):
+        print(f"[outline] coincident merges: {killed}", flush=True)
+
+
+def _trim_corner_deaths(g: _Graph, pav_eff, runway_union,
+                        max_len: float = 45.0):
+    """Rule 3: never die INTO a corner.  A leaf edge whose free tip lands
+    where the pavement boundary turns sharply (a corner apex, not a flat
+    edge) is trimmed — legitimate terminations end on straight edge
+    stretches or the runway edge (user review: way-525/531 class)."""
+    from collections import Counter
+    rings = []
+    bnd = pav_eff.boundary
+    for geom in getattr(bnd, "geoms", [bnd]):
+        rings.append(geom)
+    rwy_b = runway_union.boundary if runway_union is not None \
+        and not runway_union.is_empty else None
+
+    def at_corner(p: Point) -> bool:
+        ring = min(rings, key=lambda r: r.distance(p))
+        if ring.distance(p) > 4.0:
+            return False
+        s = ring.project(p)
+        a = ring.interpolate(max(0.0, s - 6.0))
+        m = ring.interpolate(s)
+        b = ring.interpolate(min(ring.length, s + 6.0))
+        u = (m.x - a.x, m.y - a.y)
+        v = (b.x - m.x, b.y - m.y)
+        if np.hypot(*u) < 1e-6 or np.hypot(*v) < 1e-6:
+            return False
+        return _angle(u, v) > 35.0
+
+    for _ in range(3):
+        deg = Counter()
+        for e in g.edges:
+            if e["alive"]:
+                deg[e["a"]] += 1
+                deg[e["b"]] += 1
+        changed = False
+        for e in g.edges:
+            if not e["alive"] or LineString(e["cs"]).length > max_len:
+                continue
+            for tip in (e["a"], e["b"]):
+                if deg[tip] != 1:
+                    continue
+                p = Point(tuple(g.nodes[tip]))
+                if rwy_b is not None and rwy_b.distance(p) < 3.0:
+                    continue                    # runway contact, legit
+                if at_corner(p):
+                    e["alive"] = False
+                    changed = True
+                    break
+        if not changed:
+            break
+
+
 def _prune_unreachable(g: _Graph, runway_union, tol: float = 3.0):
     """Rule 4, strict form: a component with no runway contact has no
     path to a runway — no lines there, whatever its size (the v8 prune's
@@ -269,19 +365,27 @@ def synthesize_spine_v10(
     chains = build_pavement_skeleton(pav_nav, runway_union=runway_union)
     w = _dominant_halfwidth(chains)                # measured (two-sided)
     size_doc = _widest_documented_size(routes)
-    w_doc = 0.5 * TAXIWAY_WIDTH_BY_SIZE.get(size_doc, 2.0 * 11.5) \
-        if size_doc else 0.5 * min(23.0, 2.0 * w)  # one-sided fallback
+    # one-sided trace offset = the MEASURED half-width too (user review
+    # 2026-07-02: the documented 12.5 m rode too close to every edge);
+    # documented width only as fallback where nothing was measurable
+    w_trace = w if w > 0 else 0.5 * TAXIWAY_WIDTH_BY_SIZE.get(
+        size_doc, 23.0)
     a_skip = TAXIWAY_WIDTH_BY_SIZE["A"]            # rule-6 opening scale
     dbg = bool(os.environ.get("O4_ET_DEBUG"))
     if dbg:
         print(f"[outline] w_meas={w:.1f} widest_doc={size_doc or '?'} "
-              f"w_doc={w_doc:.1f} a_skip={a_skip}", flush=True)
+              f"w_trace={w_trace:.1f} a_skip={a_skip}", flush=True)
 
     axes = _runway_axes(runway_union)
     rwy_zone = shapely.buffer(runway_union, 25.0) \
         if runway_union is not None and not runway_union.is_empty else None
 
     # ── rule 1 — corridor centerlines (merge-when-overlapping) ────────────
+    # two edge-following corridors at offset w OVERLAP wherever the strip
+    # is narrower than 4w (two full corridors side by side) — everything
+    # below that merges to ONE centered line, i.e. the medial holds up to
+    # clearance 2w (user review: the 1.1w threshold left twin flanking
+    # lines through every mid-width strip)
     svc_cut = max(_SVC_HALFWIDTH_M, 0.35 * w)
     center_runs = []
     center_lines = []
@@ -291,8 +395,43 @@ def synthesize_spine_v10(
             continue                    # service-road width (prior rulings)
         if _is_runway_shoulder(ch, w_med, rwy_zone, axes):
             continue
-        for keep, cs, rr in _split_by_clearance(ch, 1.1 * w):
+        for keep, cs, rr in _split_by_clearance(ch, 2.0 * w):
             if not keep or LineString(cs).length < 4.0:
+                continue
+            # user review item 6/7: a diagonal approaching the runway must
+            # NOT chase the narrowing wedge into its corner — trim the
+            # sub-width dive near the runway, then re-extend the tip
+            # STRAIGHT along its tangent to the runway edge (rule 2; the
+            # clearance at every cut end goes to zero, so the extension
+            # must follow every trim or all contacts are lost)
+            cs = np.asarray(cs, dtype=float)
+            rr = np.asarray(rr, dtype=float)
+            if runway_union is not None and not runway_union.is_empty:
+                def in_wedge(k):
+                    return rr[k] < 0.6 * w and runway_union.distance(
+                        Point(tuple(cs[k]))) < 2.5 * w
+                lo, hi = 0, len(cs)
+                while lo < hi and in_wedge(lo):
+                    lo += 1
+                while hi > lo and in_wedge(hi - 1):
+                    hi -= 1
+                if hi - lo < 2 or LineString(cs[lo:hi]).length < 8.0:
+                    continue            # the whole chain is wedge dive
+                if lo > 0 or hi < len(cs):
+                    cut_lo, cut_hi = lo > 0, hi < len(cs)
+                    cs, rr = cs[lo:hi], rr[lo:hi]
+                    pieces = _polygons(pav_eff)
+                    if cut_lo:
+                        pc = min(pieces, key=lambda p: p.distance(
+                            Point(tuple(cs[0]))))
+                        cs = _extend_tip(cs, pc, at_start=True)
+                    if cut_hi:
+                        pc = min(pieces, key=lambda p: p.distance(
+                            Point(tuple(cs[-1]))))
+                        cs = _extend_tip(cs, pc, at_start=False)
+                    rr = np.interp(np.linspace(0, 1, len(cs)),
+                                   np.linspace(0, 1, len(rr)), rr)
+            if len(cs) < 2 or LineString(cs).length < 4.0:
                 continue
             center_runs.append((cs, float(np.median(rr))))
             center_lines.append(LineString(cs))
@@ -303,18 +442,18 @@ def synthesize_spine_v10(
     # cannot use simply do not exist for the trace
     r_close = 0.5 * a_skip
     pav_closed = shapely.buffer(shapely.buffer(pav_eff, r_close), -r_close)
-    core = shapely.buffer(pav_closed, -w_doc)
+    core = shapely.buffer(pav_closed, -w_trace)
 
     trace_runs = []
     n_ring_drop = 0
     for poly in _polygons(core):
         # rule 7: an interior ring must never self-overlap — its own
-        # corridor (w_doc each side) must fit; a pocket core thinner than
-        # 2*w_doc is served by the centerline regime / straight-through
-        ring_ok = not shapely.buffer(poly, -w_doc).is_empty
+        # corridor (w each side) must fit; a pocket core thinner than
+        # 2*w is served by the centerline regime / straight-through
+        ring_ok = not shapely.buffer(poly, -w_trace).is_empty
         rings = [poly.exterior, *list(poly.interiors)]
         for ring in rings:
-            if not ring_ok and poly.area < (4.0 * w_doc) ** 2:
+            if not ring_ok and poly.area < (4.0 * w_trace) ** 2:
                 n_ring_drop += 1
                 continue
             ln = LineString(ring)
@@ -327,13 +466,13 @@ def synthesize_spine_v10(
                 q = Point(tuple(p))
                 # never trace along the runway edge (rule 2 family)
                 if runway_union is not None and not runway_union.is_empty \
-                        and runway_union.distance(q) <= w_doc + 3.0:
+                        and runway_union.distance(q) <= w_trace + 3.0:
                     keep[k] = False
                     continue
                 # merge rule: a trace riding a corridor the centerline
                 # already carries is the same line — drop it there
                 if center_union is not None \
-                        and center_union.distance(q) <= 1.0 * w:
+                        and center_union.distance(q) <= 1.2 * w:
                     keep[k] = False
             for piece in _split_line_by_mask(cs, keep):
                 # sub-corridor-length scraps are junction-flare noise, not
@@ -349,7 +488,7 @@ def synthesize_spine_v10(
     allow = shapely.buffer(pav_eff, 0.5)
     faired = []
     for cs in trace_runs:
-        rr = np.full(len(cs), w_doc)
+        rr = np.full(len(cs), w_trace)
         out, _r = _fair_chain(np.asarray(cs, dtype=float), rr, allow,
                               step=6.0, sigma=0.35)
         faired.append(out)
@@ -359,14 +498,15 @@ def synthesize_spine_v10(
     for cs, w_med in center_runs:
         g.add_edge(np.asarray(cs, dtype=float), "lane", "", w_med)
     for cs in faired:
-        g.add_edge(np.asarray(cs, dtype=float), "trace", "", w_doc)
+        g.add_edge(np.asarray(cs, dtype=float), "trace", "", w_trace)
 
     _planarize_crossings(g)
     _bridge_facing_tips(g, pav_eff, reach=4.0 * w)
     _connect_free_ends(g, pav_eff)
-    # rule 7 straight-through: corridor mouths project straight across
-    # open space to the far pavement edge (serves pockets whose ring was
-    # dropped and dead-end wings)
+    _weld_components(g, pav_eff, max_gap=3.0 * w)
+    # rule 7 straight-through, ONLY for tips still dead-ended after the
+    # welds — projecting first sprayed center-to-edge spurs from tips the
+    # network already continues (user review: way-104 class)
     _add_mouth_projections(g, pav_eff)
     _planarize_crossings(g)
     _bridge_facing_tips(g, pav_eff, reach=4.0 * w)
@@ -375,13 +515,22 @@ def synthesize_spine_v10(
     # rule 4 — unbroken trace to a runway for every line
     _weld_components(g, pav_eff, max_gap=3.0 * w)
     _close_floating_tips(g, pav_eff, building_union)
+    _merge_coincident(g)
+    _weld_components(g, pav_eff, max_gap=3.0 * w)
     _prune_unreachable(g, runway_union)
     _fix_dangles(g, pav_eff)
     _trim_interior_stubs(g, pav_eff, runway_union)
+    _trim_corner_deaths(g, pav_eff, runway_union)
 
     if not os.environ.get("O4_ET_KINDS"):
         for e in g.edges:
             e["kind"] = "lane"
+    g.consolidate()
+    # rule 2 + user review item 4: long runs parallel/perpendicular to a
+    # runway snap to ONE dead-straight axis line; curves connect into it
+    from .edge_trace import _straighten_paths
+    _straighten_paths(g, pav_eff, w, R90_BY_SIZE.get(size_doc or "E", 30.0),
+                      axes)
     g.consolidate()
 
     # ── rules 2 + 5 — arcs at joins, runway hooks ─────────────────────────
