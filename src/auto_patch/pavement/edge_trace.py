@@ -854,7 +854,7 @@ def _straighten_routes(g: _Graph, accepted_paths, pav_eff, w: float,
     attachments (deg>=3 splitting chopped weld geometry and measured
     net-negative; unsplit chopping cut real turns and measured
     net-negative; route-use is the discriminator both needed)."""
-    _visibility_reroute(g, accepted_paths, pav_eff, w)
+    _visibility_reroute(g, accepted_paths, pav_eff, w, r_std)
     from collections import Counter as _Counter
     node_use: _Counter = _Counter()
     for node_path, _eis in accepted_paths:
@@ -886,7 +886,8 @@ def _straighten_routes(g: _Graph, accepted_paths, pav_eff, w: float,
                           taut=True)
 
 
-def _visibility_reroute(g: _Graph, accepted_paths, pav_eff, w: float):
+def _visibility_reroute(g: _Graph, accepted_paths, pav_eff, w: float,
+                        r_std: float = 30.0):
     """PER-SEGMENT VISIBILITY ROUTER: wherever an accepted route crosses
     a free-space component (pavement eroded by the full half-width w, so
     splices land at the TARGET's offset), the stretch between entry and
@@ -941,15 +942,43 @@ def _visibility_reroute(g: _Graph, accepted_paths, pav_eff, w: float):
         try:
             vp = nx.shortest_path(G, "A", "B", weight="weight")
             coords = [a] + [verts[i] for i in vp[1:-1]] + [b]
-            L = sum(math.hypot(coords[k + 1][0] - coords[k][0],
-                               coords[k + 1][1] - coords[k][1])
-                    for k in range(len(coords) - 1))
         except Exception:
-            coords, L = None, None
+            coords = None
         finally:
             G.remove_node("A")
             G.remove_node("B")
-        return coords, L
+        if coords is None:
+            return None, None
+        # standard mirrored arcs at the visibility corners (sharp corners
+        # nudged matched geometry off at the 5m/1m tolerances)
+        out = [coords[0]]
+        for k in range(1, len(coords) - 1):
+            p0 = np.asarray(out[-1])
+            pc = np.asarray(coords[k])
+            p1 = np.asarray(coords[k + 1])
+            u_in = _unit(*(pc - p0))
+            u_out = _unit(*(p1 - pc))
+            seg_in = float(np.hypot(*(pc - p0)))
+            seg_out = float(np.hypot(*(p1 - pc)))
+            placed = False
+            rr = r_std
+            while rr >= 0.3 * r_std:
+                arc, t = _fillet(tuple(pc), u_in, u_out, rr)
+                if arc is None:
+                    break
+                if t <= 0.5 * seg_in and t <= 0.5 * seg_out \
+                        and allow.contains(LineString(arc)):
+                    out.extend(list(arc))
+                    placed = True
+                    break
+                rr *= 0.8
+            if not placed:
+                out.append(tuple(pc))
+        out.append(coords[-1])
+        L = sum(math.hypot(out[k + 1][0] - out[k][0],
+                           out[k + 1][1] - out[k][1])
+                for k in range(len(out) - 1))
+        return out, L
 
     from shapely.ops import substring
     rerouted = 0
@@ -993,7 +1022,7 @@ def _visibility_reroute(g: _Graph, accepted_paths, pav_eff, w: float):
             a, b = tuple(P[i0]), tuple(P[i1])
             run_len = (i1 - i0) * (ln.length / n)
             coords, L = vis_path(pi, a, b)
-            if coords is None or L >= 0.90 * run_len:
+            if coords is None or L >= 0.95 * run_len:
                 continue
             P[i0:i1 + 1] = [list(c) for c in coords]
             changed = True
