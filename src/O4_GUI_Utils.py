@@ -843,14 +843,24 @@ class Ortho4XP_AutoPatch_Progress(tk.Toplevel):
     All public methods run on the Tk main thread (they are called only from
     ``Ortho4XP_GUI.autopatch_update``, the queue-drain ``after`` loop), so
     they may touch widgets directly.
+
+    Sizing (user 2026-07-02): with up to ``MAX_VISIBLE_ROWS`` airports the
+    window is sized to fit the rows EXACTLY (no empty space below — a
+    2-airport tile gets a 2-row-tall window); with more, it shows
+    ``MAX_VISIBLE_ROWS`` rows and the rest scroll.  When every airport has
+    finished successfully the window closes itself after a short beat; if
+    any airport FAILED it stays open so the red row is seen.
     """
+
+    MAX_VISIBLE_ROWS = 6
+    AUTOCLOSE_DELAY_MS = 1500
 
     def __init__(self, parent):
         tk.Toplevel.__init__(self)
         self.parent = parent
         self.title("Auto-patch progress")
-        self.geometry("470x420")
-        self.minsize(320, 160)
+        self.geometry("470x120")
+        self.minsize(320, 40)
         self.protocol("WM_DELETE_WINDOW", self.exit)
         self.configure(bg="light green")
         self.rowconfigure(0, weight=1)
@@ -858,6 +868,7 @@ class Ortho4XP_AutoPatch_Progress(tk.Toplevel):
 
         # One row-widget bundle per ICAO.
         self.rows = {}
+        self._closing = False
 
         # Scrollable body: Canvas + inner Frame + vertical Scrollbar (the
         # standard Tkinter scrolling-frame idiom).
@@ -891,12 +902,15 @@ class Ortho4XP_AutoPatch_Progress(tk.Toplevel):
         for r in self.rows.values():
             r["frame"].destroy()
         self.rows.clear()
+        self._closing = False
         for icao in icaos:
             self._ensure_row(icao)
+        self._fit_to_rows()
 
     def update_airport(self, icao, done, total, label, status="run"):
         """Advance one airport's bar + detail line."""
         row = self._ensure_row(icao)
+        row["status"] = status
         if status == "done":
             row["var"].set(100)
             row["detail"].configure(
@@ -910,6 +924,8 @@ class Ortho4XP_AutoPatch_Progress(tk.Toplevel):
             row["detail"].configure(
                 text="[{}/{}] {}".format(done, total, label), fg="black")
         row["frame"].update_idletasks()
+        if status in ("done", "fail"):
+            self._maybe_autoclose()
 
     # -- helpers ----------------------------------------------------------
     def _ensure_row(self, icao):
@@ -934,8 +950,57 @@ class Ortho4XP_AutoPatch_Progress(tk.Toplevel):
             font=("TkDefaultFont", 8))
         detail.grid(row=1, column=1, sticky=W, padx=(0, 6), pady=(0, 4))
         self.rows[icao] = {
-            "frame": frame, "var": var, "bar": bar, "detail": detail}
+            "frame": frame, "var": var, "bar": bar, "detail": detail,
+            "status": "run"}
+        # A row created lazily (event for an ICAO the begin didn't list)
+        # grows the window like set_airports would have.
+        self._fit_to_rows()
         return self.rows[icao]
+
+    def _fit_to_rows(self):
+        """Size the window so its rows fit EXACTLY — no empty space below
+        the last row.  Up to ``MAX_VISIBLE_ROWS`` rows are shown at full
+        height (a 2-airport tile gets a 2-row-tall window); with more
+        airports the window shows ``MAX_VISIBLE_ROWS`` and the rest
+        scroll.  Never raises: sizing is cosmetic."""
+        try:
+            self.body.update_idletasks()
+            n = max(1, len(self.rows))
+            body_h = self.body.winfo_reqheight()
+            row_h = body_h / float(n)
+            visible = min(n, self.MAX_VISIBLE_ROWS)
+            # +4: the body frame's own top/bottom slack inside the canvas.
+            height = int(row_h * visible) + 4
+            width = self.winfo_width()
+            if width < 320:            # not yet mapped → keep the default
+                width = 470
+            self.geometry("{}x{}".format(width, height))
+        except Exception:
+            pass
+
+    def _maybe_autoclose(self):
+        """Close the window a beat after EVERY airport finished
+        successfully.  Any FAILED row keeps it open (the red row is the
+        only trace of the failure the user would otherwise miss)."""
+        if self._closing or not self.rows:
+            return
+        statuses = [r.get("status") for r in self.rows.values()]
+        if any(s not in ("done", "fail") for s in statuses):
+            return
+        if any(s == "fail" for s in statuses):
+            return
+        self._closing = True
+        try:
+            self.after(self.AUTOCLOSE_DELAY_MS, self._autoclose)
+        except Exception:
+            pass
+
+    def _autoclose(self):
+        try:
+            if self.winfo_exists():
+                self.exit()
+        except Exception:
+            pass
 
     def exit(self):
         self.parent.autopatch_window = None

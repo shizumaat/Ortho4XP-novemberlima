@@ -1157,7 +1157,17 @@ class PavementLayout:
         and over-flags every spine/blend-relaxed pair.  The sidecar is
         invisible to Ortho4XP (the patch loader only globs
         ``*.patch.osm``).  Best-effort: a sidecar failure never fails
-        an emit."""
+        an emit.
+
+        DEBUG-ONLY (user 2026-07-02): written only when
+        ``config.LOG_VERBOSITY > 0``, so production-release patch dirs
+        stay clean.  Dev iteration raises the verbosity (the suite is
+        unaffected — it passes axes to ``run_checks`` directly); a
+        production patch checked with the CLI reverts to the
+        context-free numbers."""
+        from . import config as _cfg
+        if getattr(_cfg, "LOG_VERBOSITY", 0) <= 0:
+            return
         try:
             import json as _json
             from .verification import taxi_axes_ll, taxi_routes_ll

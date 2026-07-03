@@ -121,7 +121,15 @@ __all__ = [
 #   0 = critical: only verification PROBLEMS + errors — the default, so
 #                 a normal Ortho4XP run's output window stays quiet
 #                 except when an airport patch has issues.
-LOG_VERBOSITY = 0
+# Also gates DEBUG ARTIFACTS: the ``<patch>.axes.json`` grade-law sidecar
+# is only written when > 0 (user 2026-07-02 — production patch dirs stay
+# clean).  Env override O4_LOG_VERBOSITY for dev builds.
+# (``import os as _os`` only enters scope further down this file.)
+import os as _os_early  # noqa: E402
+try:
+    LOG_VERBOSITY = int(_os_early.environ.get("O4_LOG_VERBOSITY", "0"))
+except ValueError:
+    LOG_VERBOSITY = 0
 
 
 # ── Junction-refinement rule constants (user 2026-05-01) ─────────
