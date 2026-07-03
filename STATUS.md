@@ -1,109 +1,101 @@
-# STATUS — handover (2026-07-01) — HECA F→05R FIXED; **T5→05C spine FIXED**
+# STATUS — handover (2026-07-02) — **V13 ROUTE-ARC SPINE wired (gate OFF); next: default ON + solver audit**
 
-> Everything below is **committed on `dev`** and the tree is clean. Both runway-contact
-> spine complaints are now fixed: **F→05R** (edge-contact anchor `5ca42e7`) and
-> **T5→05C** (junction interior-stitch — see SHIPPED, newest first).
-> ⚠ Ortho4XP caches `auto_patch.*` — after any commit you must **restart Ortho4XP**,
-> not just rebuild the tile, or it runs stale modules (this masked the F fix for a while).
+> Everything is **committed on `dev`** (HEAD `5ba1970`), tree clean. This session replaced
+> the spine-synthesis experiments (v8–v12) with the **route-arc spine**: the apt.dat
+> 1201/1202 route graph **verbatim** (metric-true taxi distances — the feasibility/anchor
+> math depends on them) plus standard-radius fillet arcs at every junction turn, bend and
+> runway contact. User verdict on the geometry: *"this is the solution"* (4 JOSM review
+> rounds, all items closed).
+> ⚠ Ortho4XP caches `auto_patch.*` — restart Ortho4XP after any commit.
 
-Build/verify (no system python): `venv/bin/python`. Single build
-`build_airport_pavement("HECA", xplane_root(), compute_elevations=True, tile_dem=<dem>,
-current_tile_lat=30, current_tile_lon=31)` (~2 min). Suite
-`venv/bin/python -m pytest tests/ -q` (~4–7 min). Fixtures: CYXY, SPJC, SPLP, HECA.
-⚠ shapeIDs are build-specific — identify shapes by **ref/coord**, not index.
-
-**Fast iteration (learned the hard way this session):**
-- DEM load+smooth is only ~1 s — NOT the bottleneck. A build is ~2 min (solver+geometry).
-  Cache the smoothed DEM once (`elevation._load_airport_dem(30.5,31.5)` → pickle) and pass
-  `tile_dem=dem` to skip the reload.
-- `compute_elevations=False` (~44 s) SKIPS Phase 2 — so it also **skips the junction-spine
-  slice**; use it only for pre-slice geometry (centerline/node positions), never spine work.
-- Run gate A/B builds as TWO parallel background commands (~2 min wall, not 4).
-- ⚠ Geometric probes were repeatedly MISLEADING here (measured adjacent shapes / wrong
-  junctions → a long wrong diagnosis). Cross-check the emitted ride profile and the sim.
+Build/verify: `venv/bin/python` (no system python; `venv/bin/pip` broken → `python -m pip`).
+Suite `venv/bin/python -m pytest tests/ -q` (~3.5 min). Full single build script used this
+session: `venv/bin/python <scratchpad>/full_build.py` pattern —
+`build_airport_pavement("SPJC", xplane_root(), compute_elevations=True)` → `to_osm`.
+Grade check: `venv/bin/python tools/check_grade.py <patch.osm>`.
 
 ---
-## ✅ RESOLVED — T5→05C taxiway spine now reaches the runway (HECA)
+## WHERE THINGS ARE
 
-**Root cause (confirmed via a T4-works-vs-T5-broken differential):** T5 and T4 are
-near-identical diagonal taxiways curving into 05C, but their runway-contact *neighbourhood*
-differs. T4 joins through LARGE multi-taxiway junctions (5–6 crossing centerlines) that
-slice into a spine regardless. T5 joins through ONE small junction (5794 m², only the 2
-bend-split pieces of T5 crossing it), and its only qualifying piece **dead-ends 1.46 m
-INSIDE** the polygon: the apt.dat route bends ~6 m from the runway edge, so the 77 m piece
-stops at that interior bend and the 4.8 m runway-reaching remainder is dropped by the 6 m
-min-cut-length gate. A cut that dead-ends inside a polygon can't split it → `single_face`
-→ no spine node planted at the contact → T5 grade drapes to DEM.
+- **Model + production wiring**: `src/auto_patch/pavement/route_arcs.py`
+  - `_build_route_arc_graph(routes, pav_all, runway_union)` — the core (shared).
+  - `synthesize_spine_v13(...)` — standalone tool path.
+  - `apply_route_arc_spine(layout, icao)` — **production entry**, called from
+    `pipeline.py` at the pre-slice hook (next to `taxi_route_fillets`; skipped when
+    `O4_RECOGNIZED_CENTERLINES=1`). Replaces non-service `apt_taxi_centerlines` with
+    `TaxiCenterline` entries named `route` / `route_arc`; service routes untouched.
+  - **Gate `O4_ROUTE_ARC_SPINE` — DEFAULT OFF.** Flip: `O4_ROUTE_ARC_SPINE=1`.
+- **Iteration tool**: `tools/pav_skeleton_osm.py SPJC --cache` (route-arc spine is the
+  default; `--v7` old heuristic, `--medial-only` raw skeleton). Writes
+  `/tmp/<ICAO>_skel_skeleton.osm` + `_pavement.osm` for JOSM. Cache v4 carries
+  `rwy_full` (shoulder-inclusive runway rects) + `ramps`.
+- **Deleted experiments** (in git history only): `edge_trace.py` (v8/v9 paint-primary,
+  parked at `28d706d`), `outline_trace.py` (v10), `medial_reshape.py` (v11),
+  `pure_trace.py` (v12 wall-trace — best pavement-only fallback, `294a81d`/`f98e3e0`).
+- **Deep handover / all user rulings**: session memory
+  `~/.claude/projects/-Users-noah-Ortho4XP-novemberlima/memory/pav_skeleton_medial_axis_spine.md`
+  (every model, ruling, dead end and gotcha from v2→v13).
 
-⚠ The earlier "geometric probes show T5 forms spine boundaries" note was a CONFOUND — those
-probes re-sliced the FINAL `layout.shapes` (already spine pieces → trivially `single_face`).
-Instrument the REAL slice by monkeypatching `_partition_junction` during the build.
+## MODEL INVARIANTS (user-ruled, do not regress)
 
-**Fix (`junction_spine._partition_junction`, gate `O4_JCT_SPINE_INTERIOR_STITCH`, default-on):**
-try the plain per-piece slice FIRST (byte-identical for junctions that already split); only
-when it fails to split, retry with the crossing pieces stitched at their shared INTERIOR
-bends (`_stitch_interior_joints`, degree-2 interior joints only — never on the boundary, so
-no shared neighbour corner is absorbed into a cut interior). Verified: T5 contact junction
-`single_face`→`ok_stitched` (2 pieces); T5 emitted profile grades smooth through the junction
-(114.44→114.80 m @ ~1.2%) and MEETS 05C at 0.05% — no step. Full suite: **0 new failures**
-(failed-set identical to HEAD baseline). An always-on stitch (no plain-first gate) instead
-broke `neighbour_corners_shared[SPJC]`; the adaptive plain-first fallback is what avoids it.
+1. **No route edge is ever deleted; every smoothing is in place** (same endpoints/nodes) —
+   distance calculations must never lose a link.
+2. In-place turn smoothing is **strictly interior** (first/last segments = junction
+   tangents, never bent) with a **bidirectional 4 m follow-the-route cap**.
+3. Junction arcs: standard R90 radii, mirrored per junction, **walk-mode placement**
+   (`r_start_for=lambda P,r: r` → `_walk_locate`; without it, a branch hosting two arcs
+   loses its second quadrant), **`gamma_max=120°`** (sharper pairs bulge across the
+   junction; that's runway-turn territory).
+4. Deg-2 route nodes merge first → corners become tight interior fillets
+   ("arc at the corner, straights to the runway").
+5. Duplicate ADDED arcs die (`_drop_duplicate_arcs`) — the route is authoritative.
 
-Files: `junction_spine.py` (`_partition_junction`, `_stitch_interior_joints`, `_slice`),
-`config.py` (`JUNCTION_SPINE_INTERIOR_STITCH`). Memory: `curved_runway_crossing_spine.md`,
-`runway_join_edge_contact.md`.
+## VERIFIED STATE (SPJC)
 
----
-## 🟡 DEFERRED quality lever (real, not tied to T5)
+- Tool: route-graph coverage **100.0%**, 121 arcs, floating 19 = stand ends (route
+  endpoints at stands are the building-side anchors, NOT defects — gate semantics still
+  to update).
+- Full production build with gate ON: **481 route-arc centerlines (132 arcs) flow through
+  slice + solver + to_osm** cleanly.
+- **check_grade A/B (SPJC, full patch): baseline 1242 within-shape violations → 2533 with
+  route-arc spine ON.** This is why the gate defaults OFF.
+- Suite: **19 failures with AND without all of this** (stash-atomic A/B; this work added
+  0). List: `/tmp/suite_failures_20260702.txt`. NOTE: 19 vs the documented "7" baseline
+  (20260701) — growth accrued earlier, unattributed; `test_pavement_grade` is *red by
+  design* (universal-zero policy), so part of the delta may be threshold/policy shifts,
+  not breakage. Bisect (`test_pavement_grade[CYXY]` is cheap) before chasing.
 
-Slicing junctions along the **chained route** (`junction_spine._full_centerlines` →
-continuous `route_line` / `linemerge(pieces)` instead of bend-split pieces) cut HECA
-within-shape violations **4144 → 3479 (−16%)** — curved crossings grade sub-optimally in
-many junctions network-wide. BUT it breaks per-junction invariants
-(`test_junction_vertices_have_source`, `test_junction_neighbour_corners_shared` on
-CYXY/SPLP/SPJC): a cut spanning junction A→B conflicts with the per-junction slice model.
-Needs a per-junction-LOCAL formulation (or fix the A/B-boundary corner sharing) to capture
-the win safely. Gate idea `O4_SLICE_CHAINED_ROUTE`.
+## NEXT SESSION (user-stated intent): default ON + SOLVER AUDIT
 
----
-## ✅ SHIPPED THIS SESSION (committed on `dev`, newest first)
+The user believed anisotropic grading was already implemented — **it is**:
+aniso-edges phase 3 is default-on since `e463b02` (`cL·Δs∥ + cT·Δs⊥` per-edge in
+`shape_constraints`; memory `aniso_edges_phase3.md`). So the audit question is:
+**why does the existing aniso solver report 2× violations on the route-arc spine?**
+Suspects, in order:
+1. **Slice interaction**: route-arc centerlines are LONG continuous ways spanning many
+   junctions. The known DEFERRED item (2026-07-01) found chained-route slicing cuts HECA
+   violations −16% but breaks per-junction invariants — the route-arc spine hits the same
+   per-junction slice model. Check how `junction_spine._partition_junction` digests the
+   new ways vs the old bend-split pieces.
+2. **Aniso coefficients on arcs**: per-edge ∥/⊥ decomposition assumes a local axis — check
+   what axis arc-sliced pieces get (`shape_constraints`), whether `route_arc` pieces are
+   classified like taxi centerlines, and whether `seg_sizes`/names feed any table.
+3. **Denominator effect**: more spine → more slicing → more constrained vertex pairs;
+   2533 may partly be MORE pairs, not worse grading. Compare violation *rate* and the
+   emitted ride profiles (the T5 lesson: probes mislead, check profiles/sim).
+4. **Rect interplay**: the hook is post-rects — rect axes were built from ORIGINAL
+   centerlines; spine now differs slightly (smoothed turns). Probably benign; verify.
 
-- **junction interior-stitch — FIXES T5→05C** (default-on, `O4_JCT_SPINE_INTERIOR_STITCH`).
-  A taxi route bend-split INSIDE a small runway-contact junction left every crossing piece
-  dead-ending in the interior → the slice never split → no spine (HECA T5→05C).
-  `_partition_junction` now tries the plain per-piece slice first and, only on failure,
-  retries with pieces stitched at their shared INTERIOR bends (`_stitch_interior_joints`).
-  Junctions that already slice stay byte-identical; T5 now grades smooth to 05C (0.05% at
-  contact). 0 new suite failures. See RESOLVED section above for the full differential.
-- `5ca42e7` **grade: anchor taxi↔runway joins at the runway EDGE** (default-on,
-  `O4_RUNWAY_EDGE_CONTACT`). A taxi route joins at the runway CENTERLINE, so on a wide
-  (shoulder-widened 86 m) runway its endpoint is ~43 m inside — beyond the 18/30 m anchor
-  radius, so the join was never anchored/checked → junction grades to DEM. Shared law
-  `grade_law.runway_join_contact` resolves the contact to the runway EDGE crossing; solver
-  anchor + validator both use it (lockstep). HECA within 4351→4152; **FIXED F→05R.**
-- `44b5688` + `e337000` **junction within-shape grade = spine + triangle-mesh edges**
-  (default-on, `O4_JUNCTION_MESH_CONSTRAINTS`). Body CHORDS (81–97% of the count, phantom)
-  retired from solver+validator; APRON visibility-geodesic kept. HECA within 6950→4351,
-  junction −64%, solve −37%. Lockstep via shared `shape_constraints`.
-- `527c4be` **rects: short taxi rects (<100 m) stay junction** (default-on,
-  `O4_MIN_RECT_LENGTH_M=100`) so the spine curves through tight climbing turns smoothly.
-  Within-pair count regresses (junction fill = many facets); that metric scores facets, not
-  the ride — visual in-sim is the judge.
-- `3b93fef` **painted centerlines return `TaxiCenterline`, not legacy `(line,ref)` tuples.**
-  Root cause of a tile emitting only ONE airport's patch: `painted_taxi_centerlines`
-  (airports with no apt.dat taxi network, e.g. HEAZ) still returned tuples post-connectivity-
-  refactor → `AttributeError` in `densify_junction_edges` → HEAZ build crashed.
-- `f6eec8c` **driver: contain per-airport build failures.** Now catches broad `Exception`
-  per-airport with traceback to the tile's `auto_patch_verify_debug.log`; one bad airport
-  never aborts the tile or vanishes as a parallel "worker died hard".
-
-(Earlier this session, also committed: parallel per-airport builds default-on
-`2729650`/`9861f6a`, worker progress→main window `f314ea7`, solver byte-ident −26% `667a514`,
-solver/validator canonical identity `20265a7`, grade-audit gating + small-apron anchor
-`6aab784`, xdist grouping fixes `281ef9e`/`de9a911`.)
+Suggested kickoff prompt for the new session:
+> "Continue the route-arc spine work (STATUS.md + memory
+> pav_skeleton_medial_axis_spine.md). Set O4_ROUTE_ARC_SPINE=1 as default and audit the
+> solver: aniso-edges is already default-on (e463b02), yet the route-arc spine doubles
+> check_grade within-shape violations on SPJC (1242→2533). Find why — start with the
+> junction-slice interaction (see the deferred chained-route-slicing note) and the aniso
+> axis classification of arc pieces — and drive violations BELOW the 1242 baseline."
 
 ## Pre-existing suite reds (baseline, NOT from this session)
-`test_pavement_grade` (universal-zero, RED by design until the solver drives misses to 0),
-`test_junction_boundary_near_centerline[CYXY]`, `test_apron_..._one_percent_body` (stale
-flat-1% assert vs blend 0.0133 — chip spawned), `route_band` XFAILs. Confirm any "new" red
-is truly new by stashing the change and re-running on HEAD.
+19 at `dev@5ba1970` — list in `/tmp/suite_failures_20260702.txt`. Includes the by-design
+`test_pavement_grade` universal-zero reds, 2 stale `TaxiCenterline`-tuple tests, dsf
+cluster-bridge, SPJC/SPLP compare-targets, junction invariants (CYXY/SPLP/SPJC). Confirm
+any "new" red by stash + rerun on HEAD before attributing.
