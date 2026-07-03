@@ -249,15 +249,40 @@ def build_context(layout, bucket_to_idx=None) -> "GradeContext":
     cls: list[Centerline] = []
     routes: list[RouteChain] = []
     route_key_to_idx: dict = {}
+    # GLOBAL-SLICE spine (user 2026-07-02): service ROADS are spines too —
+    # narrow truck routes are sliced like taxiways and their faces grade
+    # LONGITUDINALLY along the road at the road cap ("two roughly parallel
+    # spines with the right grade cap").  Rect model keeps the legacy skip
+    # (service roads have their own 4-corner rect role there).
+    from .config import (CURVE_NATIVE_SPINE as _CNS, ROUTE_ARC_SPINE as _RAS,
+                         SERVICE_ROAD_MAX_GRADE as _SVC_CAP)
+    _svc_spines = _CNS or _RAS
     for tcl in (getattr(layout, "apt_taxi_centerlines", []) or []):
         ln = getattr(tcl, "line", tcl)
         if ln is None or getattr(ln, "is_empty", True):
             continue
-        if getattr(tcl, "is_service", False):
-            continue            # service roads are NOT taxi spines (own role)
+        _is_svc = getattr(tcl, "is_service", False)
+        if _is_svc and not _svc_spines:
+            continue            # rect model: service roads are NOT taxi spines
         try:
             pts = list(ln.coords)
         except Exception:
+            continue
+        if _is_svc and len(pts) >= 2:
+            # road spine: own cap, own chain (no per-letter table).
+            seg_caps = [_SVC_CAP] * (len(pts) - 1)
+            rline = getattr(tcl, "route_line", None)
+            rkey = id(rline) if rline is not None else ("self", id(ln))
+            ridx = route_key_to_idx.get(rkey)
+            if ridx is None:
+                try:
+                    rpts = list(rline.coords) if rline is not None else pts
+                except Exception:
+                    rpts = pts
+                ridx = len(routes)
+                routes.append(RouteChain(pts=rpts))
+                route_key_to_idx[rkey] = ridx
+            cls.append(Centerline(pts=pts, seg_caps=seg_caps, route_idx=ridx))
             continue
         if len(pts) >= 2:
             # Per-segment cap from the route's per-segment ICAO size (no name→

@@ -863,12 +863,21 @@ def taxi_axes_ll(layout):
     def _cLcT(letter):
         return ((0.03, 0.02) if letter in ("A", "B") else (0.015, 0.015))
 
+    from .config import SERVICE_ROAD_MAX_GRADE as _SVC_CAP
     axes = []
     for _cl in (getattr(layout, "apt_taxi_centerlines", []) or []):
         ln, name = _cl.line, _cl.name
         if ln is None or ln.is_empty:
             continue
         cs = list(ln.coords)
+        # Service ROADS carry the road cap, not the taxi per-letter cap —
+        # they were never 1.5 % taxiways (matches grade_graph.build_context's
+        # road-spine caps under the global slice).
+        if getattr(_cl, "is_service", False):
+            if len(cs) >= 2:
+                axes.append(([layout.m_to_ll(x, y) for (x, y) in cs],
+                             _SVC_CAP, _SVC_CAP))
+            continue
         sizes = list(getattr(_cl, "seg_sizes", []) or [])
         if not sizes or len(cs) < 2:
             cL, cT = _cLcT(_cl.dominant_size()

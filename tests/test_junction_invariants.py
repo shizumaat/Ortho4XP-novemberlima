@@ -69,10 +69,25 @@ def _xplane_available() -> bool:
     return xplane_available()
 
 
-pytestmark = pytest.mark.skipif(
-    not _xplane_available(),
-    reason="X-Plane install not found (set XPLANE_ROOT to override)",
-)
+from auto_patch.config import ROUTE_ARC_SPINE as _ROUTE_ARC_SPINE
+
+pytestmark = [
+    pytest.mark.skipif(
+        not _xplane_available(),
+        reason="X-Plane install not found (set XPLANE_ROOT to override)",
+    ),
+    # RECT-MODEL invariants: these rules describe junctions as the RESIDUE
+    # between manufactured taxi rects (small, centerline-hugging, corners
+    # shared with rect neighbours).  Under the route-arc GLOBAL SLICE
+    # (default 2026-07-02) no rects are emitted and faces are conformant
+    # by construction, so the residue rules no longer apply.  Kept for
+    # the legacy path (O4_ROUTE_ARC_SPINE=0).
+    pytest.mark.skipif(
+        _ROUTE_ARC_SPINE,
+        reason="rect-residue junction invariants — no taxi rects under "
+               "the route-arc global slice (O4_ROUTE_ARC_SPINE=1)",
+    ),
+]
 
 
 # Hard invariant thresholds — global, no per-airport relaxation.

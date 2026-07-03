@@ -3378,16 +3378,24 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 _cn_pav = _cn_pav.difference(terminal_union)
             except _GEOM_EXC:
                 _cn_pav = pav_union
-        _cn_cls, _cn_seen = [], set()
+        _cn_cls, _cn_svc, _cn_seen = [], [], set()
         for _it in (getattr(layout, "apt_taxi_centerlines", []) or []):
-            if getattr(_it, "is_service", False):
-                continue
             _ln = getattr(_it, "chained_line", None) or getattr(_it, "line", None)
             if (_ln is None or _ln.is_empty or _ln.length < 1.0
                     or id(_ln) in _cn_seen):
                 continue
             _cn_seen.add(id(_ln))
-            _cn_cls.append(_ln)
+            # SERVICE ROADS (user 2026-07-02): narrow truck routes are
+            # sliced too — the road centerline cuts its strip out of the
+            # surrounding pavement and the resulting narrow faces emit as
+            # ROLE_SERVICE_JUNCTION at the road grade cap (4 %), which also
+            # feeds the law's road_zone carve relaxation.  Kept in a
+            # SEPARATE list so face classification can tell taxi spine
+            # from truck path (a face touching both is taxi territory).
+            if getattr(_it, "is_service", False):
+                _cn_svc.append(_ln)
+            else:
+                _cn_cls.append(_ln)
         # De-dup once here so classification indexes the SAME effective set the
         # slice tagged faces against (coincident lines bury duplicates).
         # ROUTE-ARC source: NO dedup — the route-arc graph is planarized,
@@ -3405,19 +3413,56 @@ def build_airport_pavement(icao: str, xplane_root: str,
             from .pavement.global_slice import dump_slice_inputs_osm
             dump_slice_inputs_osm(layout, _cn_pav, _cn_eff, _cn_dump,
                                   runway_union=layout.runway_union)
+        # Taxi centerlines first, service roads appended — a face's
+        # ``centerline_ids`` >= len(_cn_eff) are truck routes.
+        _cn_all = list(_cn_eff) + _cn_svc
         _cn_faces = build_global_slice_faces(
-            _cn_pav, _cn_eff, runway_union=layout.runway_union, dedup=False)
-        classify_faces(_cn_faces, _cn_eff)
-        _cn_roles = {"corridor": 0, "junction": 0, "apron": 0}
-        for _f in _cn_faces:
+            _cn_pav, _cn_all, runway_union=layout.runway_union, dedup=False)
+        _svc_base = len(_cn_eff)
+        _svc_faces = set()
+        for _fi, _f in enumerate(_cn_faces):
+            _taxi_ids = [i for i in _f.centerline_ids if i < _svc_base]
+            _svc_ids = [i for i in _f.centerline_ids if i >= _svc_base]
+            if _svc_ids and not _taxi_ids:
+                # Only a NARROW strip riding its road becomes a service
+                # face (the road corridor itself, ~half the road width per
+                # side).  A big apron a truck route merely crosses stays
+                # apron — all-pair 4 % on wide pavement was the measured
+                # net-negative of the rect-era SVC carve (2026-06-29).
+                try:
+                    _buf = unary_union(
+                        [_cn_all[i].buffer(1.0, cap_style=2)
+                         for i in _svc_ids])
+                    _shared = _f.polygon.exterior.intersection(_buf).length
+                except _GEOM_EXC:
+                    _shared = 0.0
+                _w = (_f.polygon.area / _shared) if _shared > 1.0 else 1e9
+                if _w <= 25.0:
+                    _svc_faces.add(_fi)
+            # classification below reasons over TAXI spine only; a face
+            # touching both taxi and truck lines is taxi territory.
+            _f.centerline_ids = _taxi_ids
+        classify_faces(_cn_faces, _cn_all)
+        from .layout import ROLE_SERVICE_JUNCTION as _ROLE_SVC_JCT
+        _cn_roles = {"corridor": 0, "junction": 0, "apron": 0, "service": 0}
+        for _fi, _f in enumerate(_cn_faces):
+            if _fi in _svc_faces:
+                _f.kind = "service"
+                _f.axis = None
             _cn_roles[_f.kind] = _cn_roles.get(_f.kind, 0) + 1
-            _role = ROLE_APRON if _f.kind == "apron" else ROLE_JUNCTION
+            if _f.kind == "service":
+                _role = _ROLE_SVC_JCT
+            elif _f.kind == "apron":
+                _role = ROLE_APRON
+            else:
+                _role = ROLE_JUNCTION
             layout.shapes.append(BuiltShape(
                 polygon=_f.polygon, role=_role, ref="", source_axis=_f.axis))
         UI.vprint(1, f"  [pav-builder] {icao}: curve-native global slice — "
-                  f"{len(_cn_faces)} face(s) from {len(_cn_eff)} centerline(s) "
+                  f"{len(_cn_faces)} face(s) from {len(_cn_all)} centerline(s) "
                   f"({_cn_roles['corridor']} corridor / "
-                  f"{_cn_roles['junction']} junction / {_cn_roles['apron']} apron; "
+                  f"{_cn_roles['junction']} junction / {_cn_roles['apron']} apron / "
+                  f"{_cn_roles['service']} service; "
                   f"rects/junction-emit/spine bypassed).")
     else:
         # Emit taxi rects (already trimmed to narrow-width portion).
@@ -4017,11 +4062,19 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # the seam (user 2026-05-20) so the final solver below can grade
         # the junction.  Detectable only here — the stub is created by
         # tile_cut, after runway-profile redistribution.
-        n_rwy_nudged = nudge_runway_corners_at_seam_junctions(layout)
-        if n_rwy_nudged:
-            UI.vprint(1,
-                f"  [pav-builder] {icao}: nudged {n_rwy_nudged} runway "
-                f"sub-rect(s) toward seam pavement at junction bridges.")
+        # GLOBAL-SLICE spine: SKIP.  The rule assumes a seam piece is a
+        # SMALL stub whose whole body carries the seam DEM — a sliced
+        # face can reach the tile line from hundreds of metres away, so
+        # the nudge dragged SPLP's runway 02 threshold 5.4 m off its FAA
+        # profile through a face vertex 480 m from the seam (cap x 480 m
+        # = 7.2 m of legal spread — the slice solver grades the drop
+        # across the network; the runway keeps its profile).
+        if not _global_slice_spine:
+            n_rwy_nudged = nudge_runway_corners_at_seam_junctions(layout)
+            if n_rwy_nudged:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: nudged {n_rwy_nudged} runway "
+                    f"sub-rect(s) toward seam pavement at junction bridges.")
 
         # THE single per-surface solver pass (session 51) — runs ONCE,
         # against the FULLY-FINALIZED geometry (all stitch / split /
