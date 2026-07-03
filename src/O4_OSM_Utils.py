@@ -3,6 +3,8 @@ import time
 import io
 import bz2
 import random
+import re
+from concurrent.futures import ThreadPoolExecutor
 import requests
 import numpy
 from shapely import geometry, ops
@@ -581,6 +583,129 @@ def build_overpass_query(query_statements, bounding_box) -> str:
     )
 
 
+status_probe_timeout_seconds = 5
+
+
+def _parse_overpass_status_text(status_text: str) -> dict:
+    """Extract slot availability from an Overpass /api/status answer.
+
+    The status page is plain text of the form::
+
+        Connected as: 1256987296
+        Current time: 2026-07-03T23:40:01Z
+        Rate limit: 6
+        5 slots available now.
+        Slot available after: 2026-07-03T23:40:20Z, in 19 seconds.
+        Currently running queries (pid, space limit, time limit, ...):
+
+    "Rate limit: 0" means the server does not rate-limit at all.  When
+    every slot is busy the "slots available now" line is absent and only
+    "Slot available after" lines remain.
+    """
+    slots_match = re.search(r"(\d+) slots? available now", status_text)
+    slots_available_now = int(slots_match.group(1)) if slots_match else 0
+    rate_limit_match = re.search(r"Rate limit: (\d+)", status_text)
+    if rate_limit_match and int(rate_limit_match.group(1)) == 0:
+        slots_available_now = max(slots_available_now, 1)
+    slot_wait_matches = re.findall(r"in (-?\d+) seconds", status_text)
+    if slots_available_now:
+        seconds_until_next_free_slot = 0.0
+    elif slot_wait_matches:
+        seconds_until_next_free_slot = max(
+            0.0, min(float(seconds) for seconds in slot_wait_matches)
+        )
+    else:
+        seconds_until_next_free_slot = float("inf")
+    return {
+        "slots_available_now": slots_available_now,
+        "seconds_until_next_free_slot": seconds_until_next_free_slot,
+    }
+
+
+def _read_overpass_server_status(server_key: str):
+    """Probe one server's /api/status endpoint.
+
+    Returns the parsed availability report augmented with the probe's
+    round-trip time, or None when the server is unreachable or does not
+    expose a standard status endpoint.  The probe is nearly free for the
+    server, unlike a real query which costs it a scheduling slot and
+    actual computation.
+    """
+    interpreter_url = overpass_servers[server_key].rstrip("/")
+    if not interpreter_url.endswith("/interpreter"):
+        return None
+    status_url = interpreter_url.rsplit("/", 1)[0] + "/status"
+    probe_started_at = time.time()
+    try:
+        response = _get_http_session().get(
+            status_url,
+            timeout=(status_probe_timeout_seconds, status_probe_timeout_seconds),
+        )
+    except requests.RequestException:
+        return None
+    if response.status_code != 200:
+        return None
+    availability_report = _parse_overpass_status_text(response.text)
+    availability_report["probe_round_trip_seconds"] = (
+        time.time() - probe_started_at
+    )
+    return availability_report
+
+
+def _select_most_available_server_key(candidate_keys) -> str:
+    """Probe every candidate server's status in parallel and pick the
+    most available one: a server with a free slot for our IP (fastest
+    probe answer wins), else the one whose next slot frees up soonest.
+    Falls back to a random pick when no candidate answers its probe.
+    """
+    with ThreadPoolExecutor(max_workers=len(candidate_keys)) as executor:
+        availability_by_key = dict(
+            zip(
+                candidate_keys,
+                executor.map(_read_overpass_server_status, candidate_keys),
+            )
+        )
+    UI.vprint(
+        2,
+        "      OSM server availability:",
+        ", ".join(
+            f"{key}: "
+            + (
+                f"{report['slots_available_now']} slot(s) now "
+                f"({report['probe_round_trip_seconds']:.2f}s)"
+                if report and report["slots_available_now"]
+                else f"next slot in {report['seconds_until_next_free_slot']:.0f}s"
+                if report
+                else "no status answer"
+            )
+            for key, report in availability_by_key.items()
+        ),
+    )
+    keys_with_free_slot = [
+        key
+        for key, report in availability_by_key.items()
+        if report and report["slots_available_now"]
+    ]
+    if keys_with_free_slot:
+        return min(
+            keys_with_free_slot,
+            key=lambda key: availability_by_key[key][
+                "probe_round_trip_seconds"
+            ],
+        )
+    reachable_keys = [
+        key for key, report in availability_by_key.items() if report
+    ]
+    if reachable_keys:
+        return min(
+            reachable_keys,
+            key=lambda key: availability_by_key[key][
+                "seconds_until_next_free_slot"
+            ],
+        )
+    return random.choice(list(candidate_keys))
+
+
 def _select_overpass_server_key(server_keys, failed_server_key=None) -> str:
     """Choose which Overpass server the next request attempt goes to.
 
@@ -588,8 +713,10 @@ def _select_overpass_server_key(server_keys, failed_server_key=None) -> str:
     overpass_servers.txt) is always honoured.  In "random" mode the
     selection is sticky: keep using the server that last answered
     successfully — stickiness preserves the HTTP keep-alive connection
-    and the server-side rate-limit slot we already hold — and only
-    switch to a different server after a failed attempt.
+    and the server-side rate-limit slot we already hold.  Only when
+    there is no proven-good server (first download of the session, or
+    right after a failed attempt) are the candidates' status endpoints
+    probed to find the most available one.
     """
     if overpass_server_choice in server_keys:
         return overpass_server_choice
@@ -601,7 +728,9 @@ def _select_overpass_server_key(server_keys, failed_server_key=None) -> str:
         candidate_keys = server_keys
     if sticky_server_key in candidate_keys:
         return sticky_server_key
-    return random.choice(candidate_keys)
+    if len(candidate_keys) == 1:
+        return candidate_keys[0]
+    return _select_most_available_server_key(candidate_keys)
 
 
 def _describe_overpass_response_problem(response):
