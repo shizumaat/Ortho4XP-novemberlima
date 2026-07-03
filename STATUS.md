@@ -1,101 +1,105 @@
-# STATUS — handover (2026-07-02) — **V13 ROUTE-ARC SPINE wired (gate OFF); next: default ON + solver audit**
+# STATUS — handover (2026-07-02, session 2) — **V14: route-arc spine → GLOBAL SLICE (no rects); SPJC beats baseline; default still OFF**
 
-> Everything is **committed on `dev`** (HEAD `5ba1970`), tree clean. This session replaced
-> the spine-synthesis experiments (v8–v12) with the **route-arc spine**: the apt.dat
-> 1201/1202 route graph **verbatim** (metric-true taxi distances — the feasibility/anchor
-> math depends on them) plus standard-radius fillet arcs at every junction turn, bend and
-> runway contact. User verdict on the geometry: *"this is the solution"* (4 JOSM review
-> rounds, all items closed).
+> Everything committed on `dev` (HEAD `2f828e1`), tree clean. Suite: **the same 19
+> pre-existing failures** (list-diff identical to `/tmp/suite_failures_20260702.txt`;
+> this session added 0).
 > ⚠ Ortho4XP caches `auto_patch.*` — restart Ortho4XP after any commit.
 
-Build/verify: `venv/bin/python` (no system python; `venv/bin/pip` broken → `python -m pip`).
-Suite `venv/bin/python -m pytest tests/ -q` (~3.5 min). Full single build script used this
-session: `venv/bin/python <scratchpad>/full_build.py` pattern —
-`build_airport_pavement("SPJC", xplane_root(), compute_elevations=True)` → `to_osm`.
-Grade check: `venv/bin/python tools/check_grade.py <patch.osm>`.
+## What happened this session
 
----
-## WHERE THINGS ARE
+1. **Audit of the 1242→2533 doubling** (the old rect-path A/B): NOT worse grading —
+   the violation *rate* went DOWN (5.64%→5.11%); the count doubled because the arcs +
+   their corner legs were both sliced per-junction → 2.25× constrained pairs
+   (sliver faces, dense cut nodes). The metric itself was also off: the CLI
+   `check_grade` ran context-free (no axes/routes → no spine/blend/aniso credit).
+2. **USER RULING mid-session: with the full spine, disable taxi-RECT creation — the
+   spine runs everywhere.** Implemented: `O4_ROUTE_ARC_SPINE=1` now implies the
+   curve-native **global slice** (`apply_route_arc_spine` runs at the slice stage;
+   pav_union cut once by route+arc ways; rect emit / junction_emit / fillet /
+   synthetic-spine / junction_spine all bypassed). `2f828e1`.
+3. **Axes sidecar** (`10eb088`): `layout.to_osm` writes `<patch>.axes.json`;
+   `tools/check_grade.py` auto-loads it → the standalone CLI now applies the SAME
+   within-shape law as the solver/suite. Context-free numbers (1242 etc.) are
+   obsolete; compare law-true only.
+4. **Solver adaptations** (found via `tools/grade_feasibility_audit.py` — all
+   violations were 0-fundamental/all-unenforced, POCS→0):
+   * **No dedup for route-arc slice input** — the 3.5 m paint-dedup ate short
+     junction connector fragments (481→399), disconnecting spine chains: PHASE A
+     froze adjacent route chains up to 2.6 m apart (frozen-spine walls).
+   * **`classify_faces` v2** — corridor by geometry (width = area/shared-edge), not
+     centerline count; big multi-CL faces are JUNCTION when ≥55% of area is within
+     25 m of their centerlines; only true stand/terminal pavement keeps 1 % apron law.
+   * **SPINE-YIELD projection** (`route_profile/solve.py`, global-slice only, LAST
+     before writeback): most nodes are spine under the slice, so "both-hard =
+     genuine step" is wrong; re-project with only truth anchors hard (runway/CIFP,
+     tile-seam pins, building seats, groundside pins).
 
-- **Model + production wiring**: `src/auto_patch/pavement/route_arcs.py`
-  - `_build_route_arc_graph(routes, pav_all, runway_union)` — the core (shared).
-  - `synthesize_spine_v13(...)` — standalone tool path.
-  - `apply_route_arc_spine(layout, icao)` — **production entry**, called from
-    `pipeline.py` at the pre-slice hook (next to `taxi_route_fillets`; skipped when
-    `O4_RECOGNIZED_CENTERLINES=1`). Replaces non-service `apt_taxi_centerlines` with
-    `TaxiCenterline` entries named `route` / `route_arc`; service routes untouched.
-  - **Gate `O4_ROUTE_ARC_SPINE` — DEFAULT OFF.** Flip: `O4_ROUTE_ARC_SPINE=1`.
-- **Iteration tool**: `tools/pav_skeleton_osm.py SPJC --cache` (route-arc spine is the
-  default; `--v7` old heuristic, `--medial-only` raw skeleton). Writes
-  `/tmp/<ICAO>_skel_skeleton.osm` + `_pavement.osm` for JOSM. Cache v4 carries
-  `rwy_full` (shoulder-inclusive runway rects) + `ramps`.
-- **Deleted experiments** (in git history only): `edge_trace.py` (v8/v9 paint-primary,
-  parked at `28d706d`), `outline_trace.py` (v10), `medial_reshape.py` (v11),
-  `pure_trace.py` (v12 wall-trace — best pavement-only fallback, `294a81d`/`f98e3e0`).
-- **Deep handover / all user rulings**: session memory
-  `~/.claude/projects/-Users-noah-Ortho4XP-novemberlima/memory/pav_skeleton_medial_axis_spine.md`
-  (every model, ruling, dead end and gotcha from v2→v13).
+## Scoreboard (law-true `tools/check_grade.py <patch>` with sidecar, within-shape)
 
-## MODEL INVARIANTS (user-ruled, do not regress)
+| fixture | rect baseline (gate OFF) | route-arc global slice (ON) |
+|---|---|---|
+| SPJC | 198 | **185 ✓ below baseline** |
+| CYXY | 138 | 300 ✗ |
+| SPLP | 0 | 24 ✗ |
+| HECA | 4138 | 5275 ✗ (+4 cross-shape desyncs) |
 
-1. **No route edge is ever deleted; every smoothing is in place** (same endpoints/nodes) —
-   distance calculations must never lose a link.
-2. In-place turn smoothing is **strictly interior** (first/last segments = junction
-   tangents, never bent) with a **bidirectional 4 m follow-the-route cap**.
-3. Junction arcs: standard R90 radii, mirrored per junction, **walk-mode placement**
-   (`r_start_for=lambda P,r: r` → `_walk_locate`; without it, a branch hosting two arcs
-   loses its second quadrant), **`gamma_max=120°`** (sharper pairs bulge across the
-   junction; that's runway-turn territory).
-4. Deg-2 route nodes merge first → corners become tight interior fillets
-   ("arc at the corner, straights to the runway").
-5. Duplicate ADDED arcs die (`_drop_duplicate_arcs`) — the route is authoritative.
+**Default stays OFF** (project bar: new ≤ old ×4 fixtures). SPJC (the mission
+target) is below baseline; the other three have *named, diagnosed* residuals:
 
-## VERIFIED STATE (SPJC)
+- **CYXY 300**: building-frontage seat conflicts — pairs between/next to building
+  pads seated at incompatible levels 1–2 m apart (production pins seats; the audit
+  proves a compliant field exists if seats could move → the building-FEASIBILITY
+  seat solver must pick frontage-compatible levels). Worst: apron/-10061 (88,-399),
+  apron/-10045 + building-10002 (117,-533), (-243,914).
+- **SPLP 24**: ONE ~5 m wall on runway 02/20 + apron -10004 at the tile seam —
+  seam DEM pins vs FAA runway profile disagree under the new face geometry
+  (seam-anchor keys land differently without rects). All 24 pairs are that wall.
+- **HECA 5275 vs 4138**: not yet dissected (dense-junction monster; builds clean,
+  deterministic pipeline held). Suspect same building-seat class as CYXY + scale.
+- **Service roads have NO shapes under the slice** (`road_zone`/`service_road`
+  dead → 4 % road-carve relaxation lost; truck-route lots may not reclassify
+  groundside). Phase-5-class work; likely part of CYXY's delta.
+- `node_altitudes` are written at 0.1 m resolution — at sub-metre pair distances the
+  rounding alone can eat the budget; part of the <0.5%-over tail is noise
+  (`ELEV_ROUNDING_NOISE_M` covers half of it).
 
-- Tool: route-graph coverage **100.0%**, 121 arcs, floating 19 = stand ends (route
-  endpoints at stands are the building-side anchors, NOT defects — gate semantics still
-  to update).
-- Full production build with gate ON: **481 route-arc centerlines (132 arcs) flow through
-  slice + solver + to_osm** cleanly.
-- **check_grade A/B (SPJC, full patch): baseline 1242 within-shape violations → 2533 with
-  route-arc spine ON.** This is why the gate defaults OFF.
-- Suite: **19 failures with AND without all of this** (stash-atomic A/B; this work added
-  0). List: `/tmp/suite_failures_20260702.txt`. NOTE: 19 vs the documented "7" baseline
-  (20260701) — growth accrued earlier, unattributed; `test_pavement_grade` is *red by
-  design* (universal-zero policy), so part of the delta may be threshold/policy shifts,
-  not breakage. Bisect (`test_pavement_grade[CYXY]` is cheap) before chasing.
+## Where things are
 
-## NEXT SESSION (user-stated intent): default ON + SOLVER AUDIT
+- Wiring: `pipeline.py` (`_global_slice_spine = CURVE_NATIVE_SPINE or
+  ROUTE_ARC_SPINE`, slice branch ~line 3360; the old pre-slice hook is gone).
+- Gate: `config.ROUTE_ARC_SPINE` (env `O4_ROUTE_ARC_SPINE`, default OFF).
+- Solver: `route_profile/solve.py` — `truth_hard` captured pre-freeze; SPINE-YIELD
+  block right before `_writeback`.
+- Faces: `pavement/global_slice.py::classify_faces` (route-territory rule).
+- Sidecar: `layout._write_axes_sidecar` + `tools/check_grade.py::main`.
+- Iteration tools (session scratchpad patterns worth recreating): full-build script
+  (`build_airport_pavement` → `to_osm` → CLI check); law-true probe = build →
+  `verification.taxi_axes_ll/taxi_routes_ll` → `check_grade._check_within_shape`;
+  `tools/grade_feasibility_audit.py <ICAO>` classifies fundamental vs unenforced
+  (env gates apply — run with `O4_ROUTE_ARC_SPINE=1`).
+- Debug: `O4_STEP_DEBUG=1` prints one_solve residuals by node type ("seam" there
+  = any base_hard node incl. frozen spine, NOT just tile seams).
 
-The user believed anisotropic grading was already implemented — **it is**:
-aniso-edges phase 3 is default-on since `e463b02` (`cL·Δs∥ + cT·Δs⊥` per-edge in
-`shape_constraints`; memory `aniso_edges_phase3.md`). So the audit question is:
-**why does the existing aniso solver report 2× violations on the route-arc spine?**
-Suspects, in order:
-1. **Slice interaction**: route-arc centerlines are LONG continuous ways spanning many
-   junctions. The known DEFERRED item (2026-07-01) found chained-route slicing cuts HECA
-   violations −16% but breaks per-junction invariants — the route-arc spine hits the same
-   per-junction slice model. Check how `junction_spine._partition_junction` digests the
-   new ways vs the old bend-split pieces.
-2. **Aniso coefficients on arcs**: per-edge ∥/⊥ decomposition assumes a local axis — check
-   what axis arc-sliced pieces get (`shape_constraints`), whether `route_arc` pieces are
-   classified like taxi centerlines, and whether `seg_sizes`/names feed any table.
-3. **Denominator effect**: more spine → more slicing → more constrained vertex pairs;
-   2533 may partly be MORE pairs, not worse grading. Compare violation *rate* and the
-   emitted ride profiles (the T5 lesson: probes mislead, check profiles/sim).
-4. **Rect interplay**: the hook is post-rects — rect axes were built from ORIGINAL
-   centerlines; spine now differs slightly (smoothed turns). Probably benign; verify.
+## NEXT SESSION
 
-Suggested kickoff prompt for the new session:
-> "Continue the route-arc spine work (STATUS.md + memory
-> pav_skeleton_medial_axis_spine.md). Set O4_ROUTE_ARC_SPINE=1 as default and audit the
-> solver: aniso-edges is already default-on (e463b02), yet the route-arc spine doubles
-> check_grade within-shape violations on SPJC (1242→2533). Find why — start with the
-> junction-slice interaction (see the deferred chained-route-slicing note) and the aniso
-> axis classification of arc pieces — and drive violations BELOW the 1242 baseline."
+1. **CYXY building-seat frontage coupling**: make `building_feasibility` seat
+   neighbouring pads/frontage at within-cap-compatible levels (or let the yield
+   projection treat each building as a movable FLAT group like the audit does).
+   Target: CYXY ≤ 138.
+2. **SPLP runway seam wall**: reconcile tile-seam DEM pins with the runway FAA
+   profile under the global slice (find where the 74.4 pin lands on the 79.8
+   profile; likely `_seed_elevations` seam override vs `runway_regrade`).
+3. **HECA dissection** (rate + audit + forensics — same playbook as this session).
+4. Service-road shapes under the slice (slice service routes too, or emit their
+   corridors as `service_road` faces) → restores road_zone + groundside reclassify.
+5. Then flip `O4_ROUTE_ARC_SPINE` default ON + re-baseline the suite (recut
+   compare-targets where geometry legitimately shifted).
 
-## Pre-existing suite reds (baseline, NOT from this session)
-19 at `dev@5ba1970` — list in `/tmp/suite_failures_20260702.txt`. Includes the by-design
-`test_pavement_grade` universal-zero reds, 2 stale `TaxiCenterline`-tuple tests, dsf
-cluster-bridge, SPJC/SPLP compare-targets, junction invariants (CYXY/SPLP/SPJC). Confirm
-any "new" red by stash + rerun on HEAD before attributing.
+Suggested kickoff:
+> "Continue V14 (STATUS.md + memory pav_skeleton_medial_axis_spine.md): route-arc
+> global slice is wired, SPJC 185<198 ✓. Drive CYXY (300 vs 138, building-seat
+> frontage conflicts), SPLP (one runway seam wall, 24 vs 0) and HECA (5275 vs 4138)
+> to ≤ baseline, then flip the gate default ON."
+
+## Pre-existing suite reds (unchanged)
+19 at `dev@2f828e1` — identical list to `/tmp/suite_failures_20260702.txt`.
