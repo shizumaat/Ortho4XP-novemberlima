@@ -675,9 +675,20 @@ def get_overpass_data(query, bbox) -> bytes:
                 return response.content
             if response.status_code == 429:
                 # 429 is the overpass software rate limiting us; it tells
-                # us in the Retry-After header how long to back off.
+                # us in the Retry-After header how long to back off.  The
+                # header may also be an HTTP-date (or absent), so parse
+                # defensively, and cap the honoured value: the next
+                # attempt rotates to a DIFFERENT server, so serving one
+                # server's full rate-limit penalty would stall the build
+                # for nothing.
+                try:
+                    retry_after_seconds = int(
+                        response.headers.get("Retry-After", 0)
+                    )
+                except ValueError:
+                    retry_after_seconds = 0
                 wait_seconds = max(
-                    int(response.headers.get("Retry-After", 0)), wait_seconds
+                    min(retry_after_seconds, 120), wait_seconds
                 )
             UI.vprint(
                 1,
