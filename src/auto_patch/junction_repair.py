@@ -1145,11 +1145,73 @@ def _merge_sliver_junctions_into_neighbours(
             return True
         return False
 
+    # SPINE-EDGE VETO (user 2026-07-03, global slice): the slice cuts pav_union
+    # ALONG the spine, so two adjacent faces' shared edge often IS a spine line;
+    # unioning them dissolves that edge and its vertices, and the emitted patch
+    # loses the spine nodes there (skeleton fidelity — a raw-slice face vertex
+    # on the spine ended up 9 m from any emitted node).  A merge whose shared
+    # boundary runs along a spine centerline is vetoed; merges across NON-spine
+    # cuts (hole keyhole spurs, _decompose_polygon_with_holes cuts, tile-seam
+    # edges) still clean up.  Rect model: no slice cuts, veto never applies.
+    from .config import CURVE_NATIVE_SPINE as _CNS, ROUTE_ARC_SPINE as _RAS
+    import os as _os_v
+    _veto_on = _os_v.environ.get("O4_SLIVER_SPINE_VETO", "1") == "1"
+    _spine_tree = None
+    _spine_lines: list = []
+    if (_CNS or _RAS) and _veto_on:
+        _spine_lines = [
+            cl.line for cl in (getattr(layout, "apt_taxi_centerlines", None)
+                               or [])
+            if getattr(cl, "line", None) is not None
+            and not cl.line.is_empty]
+        if _spine_lines:
+            from shapely.strtree import STRtree
+            _spine_tree = STRtree(_spine_lines)
+
+    def _shared_edge_carries_spine(a, b) -> bool:
+        """True when a spine centerline runs along the shared boundary of the
+        two polygons (any shared segment midpoint within SPINE_PERP_TOL_M).
+        An OVERLAPPING pair is exempt (never vetoed): duplicate coverage
+        violates the one-owner invariant and the merge is the fix — the veto
+        protects only clean-abutting faces whose shared edge is a spine cut."""
+        if _spine_tree is None:
+            return False
+        try:
+            if a.intersection(b).area > 0.25:
+                return False             # overlap → merge is the invariant fix
+        except _GEOM_EXC:
+            pass
+        from .grade_graph import SPINE_PERP_TOL_M
+        try:
+            shared = a.exterior.intersection(b.exterior.buffer(0.1))
+        except _GEOM_EXC:
+            return True                  # can't prove the edge is safe → veto
+        segs = ([shared] if shared.geom_type == "LineString"
+                else [g for g in getattr(shared, "geoms", [])
+                      if g.geom_type == "LineString"])
+        for seg in segs:
+            if seg.length < 0.2:
+                continue
+            mid = seg.interpolate(0.5, normalized=True)
+            try:
+                cand = _spine_tree.query(mid.buffer(SPINE_PERP_TOL_M))
+            except _GEOM_EXC:
+                cand = []
+            for k in cand:
+                if _spine_lines[int(k)].distance(mid) <= SPINE_PERP_TOL_M:
+                    return True
+        return False
+
+    n_spine_veto = 0
     merged_slivers: set[int] = set()
     for sliver_i, target_j in merge_into.items():
         try:
             target_shape = layout.shapes[target_j]
             sliver_shape = layout.shapes[sliver_i]
+            if _shared_edge_carries_spine(sliver_shape.polygon,
+                                          target_shape.polygon):
+                n_spine_veto += 1
+                continue
             merged = unary_union([
                 target_shape.polygon,
                 sliver_shape.polygon])
@@ -1251,7 +1313,9 @@ def _merge_sliver_junctions_into_neighbours(
         UI.vprint(1,
             f"  [pav-builder] {icao}: merged "
             f"{len(merged_slivers)} sliver junction(s) into "
-            f"adjacent larger junctions.")
+            f"adjacent larger junctions"
+            + (f" ({n_spine_veto} vetoed on spine-carrying edges)."
+               if n_spine_veto else "."))
     except _GEOM_EXC:
         pass
     return len(merged_slivers)

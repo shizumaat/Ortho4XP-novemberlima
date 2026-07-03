@@ -94,7 +94,8 @@ def _project_vectorized(elev, iter_edges, n, max_iters, tol):
 
 
 def feasibility_project(elev, shape_constraints, hard, *,
-                        max_iters=4000, tol=1e-3):
+                        max_iters=4000, tol=1e-3, force_scalar=False,
+                        flat_groups=None):
     """Drive EVERY grade-graph edge to ``|Δelev| ≤ budget`` by iterative
     constraint projection (user 2026-06-25: nothing may violate a grade cap).
 
@@ -107,15 +108,70 @@ def feasibility_project(elev, shape_constraints, hard, *,
     repeated sweeps converge to a cap-Lipschitz surface whenever the anchors admit
     one.  Edges between two hard nodes are genuinely infeasible and reported, not
     forced.  Mutates ``elev`` in place; returns ``(remaining_over_cap, both_hard)``.
+
+    ``flat_groups`` — optional list of node-index sets, each a RIGID FLAT group
+    (a building pad): its members share ONE elevation that the projection may
+    move as a unit (the feasibility-audit model — buildings are movable flat
+    groups; holding every pad hard at its pre-picked seat makes the polytope
+    infeasible through chained paths even when no single edge is both-hard).
+    Each group collapses to a representative node; member↔member edges vanish,
+    member↔outside edges re-anchor to the representative with their own budget,
+    and the representative's final level is broadcast back to all members.  A
+    group containing a ``hard`` node stays entirely hard (never moved).
     """
     import heapq
     n = len(elev)
+
+    # ── flat groups → representative mapping ─────────────────────────────
+    gmap: dict = {}
+    groups_eff: list = []
+    if flat_groups:
+        # merge overlapping groups (two touching pads sharing a ring node act
+        # as one rigid unit), then map member → representative.
+        pool = [set(g) for g in flat_groups if g]
+        merged: list = []
+        for g in pool:
+            attached = None
+            for mg in merged:
+                if mg & g:
+                    mg |= g
+                    attached = mg
+                    break
+            if attached is None:
+                merged.append(set(g))
+        for g in merged:
+            g = {i for i in g if 0 <= i < n}
+            if len(g) < 2:
+                continue
+            if g & hard:
+                continue                      # runway/seam-welded pad: stays hard
+            rep = min(g)
+            groups_eff.append((rep, g))
+            for m in g:
+                if m != rep:
+                    gmap[m] = rep
+        # a skipped (hard-welded) group must stay rigid: hold all its members.
+        hard = set(hard)
+        for g in merged:
+            g = {i for i in g if 0 <= i < n}
+            if len(g) >= 2 and (g & hard):
+                hard |= g
+        # seed each representative at the group's current (flat) level.
+        for rep, g in groups_eff:
+            elev[rep] = sum(elev[m] for m in g) / len(g)
+
+    def _r(i):
+        return gmap.get(i, i)
+
     edges = []
     seen = set()
     adj: dict = {}
     for sc in shape_constraints:
         for (i, j, lim) in sc["edges"]:
-            if lim is None or lim < 0 or i >= n or j >= n or i == j:
+            if lim is None or lim < 0 or i >= n or j >= n:
+                continue
+            i, j = _r(i), _r(j)
+            if i == j:
                 continue
             e = (i, j) if i < j else (j, i)
             if e in seen:
@@ -183,18 +239,29 @@ def feasibility_project(elev, shape_constraints, hard, *,
     # (SPJC 110k edges) and the scalar loop costs ~60 s/build across its
     # call sites — the vectorised Jacobi is the default there (the
     # byte-identity concern only ever applied to the legacy rect path).
-    _vec = _FP_VECTORIZE
-    if not _vec:
+    # ``force_scalar`` (the FINAL projection): degree-normalised Jacobi has
+    # no convergence guarantee on a difference-constraint system — it stalls
+    # with thousands of edges marginally over cap, while the scalar loop is
+    # cyclic Gauss-Seidel POCS, which converges to a point of the (non-empty)
+    # polytope (the feasibility audit measures 0-fundamental and its own POCS
+    # reaches residual ~0 in <100 sweeps).  The last projection before
+    # writeback therefore runs scalar — seeded by the fast Jacobi passes, so
+    # it needs few sweeps.
+    _vec = not force_scalar and _FP_VECTORIZE
+    if not _vec and not force_scalar:
         try:
             from auto_patch.config import (CURVE_NATIVE_SPINE as _CNS,
                                            ROUTE_ARC_SPINE as _RAS)
             _vec = _CNS or _RAS
         except Exception:
             _vec = False
+    _sweeps_run = 0
+    _last_worst = 0.0
     if _vec and iter_edges:
         _project_vectorized(elev, iter_edges, n, max_iters, tol)
     else:
         for _it in range(max_iters):
+            _sweeps_run = _it + 1
             worst = 0.0
             for (i, j, budget, kind) in iter_edges:
                 d = elev[i] - elev[j]
@@ -212,15 +279,26 @@ def feasibility_project(elev, shape_constraints, hard, *,
                     elev[i] -= s * ex                      # j fixed → move i
                 if ex > worst:
                     worst = ex
+            _last_worst = worst
             if worst < tol:
                 break
+    # broadcast each flat group's representative level back to its members.
+    for rep, g in (groups_eff if flat_groups else ()):
+        for m in g:
+            elev[m] = elev[rep]
     # final tally
     rem = bh = 0
+    worst_ex = 0.0
     for (i, j, budget) in edges:
-        if abs(elev[i] - elev[j]) > budget + tol:
+        ex = abs(elev[i] - elev[j]) - budget
+        if ex > tol:
             rem += 1
+            worst_ex = max(worst_ex, ex)
             if i in hard and j in hard:
                 bh += 1
+    if _os.environ.get("O4_STEP_DEBUG") == "1" and force_scalar:
+        print(f"    [fp-scalar] sweeps={_sweeps_run} last_worst={_last_worst:.4f} "
+              f"rem={rem} worst_ex={worst_ex:.3f} groups={len(groups_eff)}")
     return rem, bh
 
 

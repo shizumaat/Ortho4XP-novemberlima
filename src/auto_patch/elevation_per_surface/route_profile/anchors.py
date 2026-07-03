@@ -130,12 +130,14 @@ def build_building_seats(layout, bucket_to_idx, band, dem_fn, runway_pts):
                else 0.5 * (ceils[m // 2 - 1] + ceils[m // 2]))
         return min(de, med) if de is not None else med
 
-    def _frontage_level(ring, de):
-        """Lowest band ceiling among the centres of the building's apron-shared
-        edges (both endpoints shared with an apron) — the most-constrained
-        frontage.  None when no edge is apron-shared (→ caller falls back)."""
+    def _frontage_box(ring):
+        """Feasible seat interval from the centres of the building's apron-shared
+        edges (both endpoints shared with an apron): ``(max floor, min ceiling)``
+        — the ceiling is the most-constrained frontage (the legacy seat rule),
+        the floor the highest any frontage must stay above.  None when no edge
+        is apron-shared (→ caller falls back)."""
         n = len(ring)
-        best = None
+        flo, fhi = None, None
         for i in range(n):
             a = (round(ring[i][0], 2), round(ring[i][1], 2))
             b = (round(ring[(i + 1) % n][0], 2), round(ring[(i + 1) % n][1], 2))
@@ -143,13 +145,18 @@ def build_building_seats(layout, bucket_to_idx, band, dem_fn, runway_pts):
                 cx = 0.5 * (ring[i][0] + ring[(i + 1) % n][0])
                 cy = 0.5 * (ring[i][1] + ring[(i + 1) % n][1])
                 bc = band(cx, cy)
-                if bc is not None and (best is None or bc[1] < best):
-                    best = bc[1]
-        if best is None:
+                if bc is not None:
+                    flo = bc[0] if flo is None else max(flo, bc[0])
+                    fhi = bc[1] if fhi is None else min(fhi, bc[1])
+        if fhi is None:
             return None
-        return min(de, best) if de is not None else best
+        return (min(flo, fhi) if flo is not None else -_INF, fhi)
 
-    seats: dict = {}
+    # ── Per-pad independent target + feasible box ────────────────────────────
+    # target = the legacy independent seat (DEM biased into the frontage band);
+    # box    = the reach-band interval the seat may move within when the JOINT
+    #          projection below reconciles neighbouring pads.
+    pads: list = []             # (shape, ring, target_level, lo, hi)
     for s in layout.shapes:
         lv = levels.get(id(s))
         if lv is None or s.polygon is None or s.polygon.is_empty:
@@ -157,14 +164,126 @@ def build_building_seats(layout, bucket_to_idx, band, dem_fn, runway_pts):
         ring = _open_ring(list(s.polygon.exterior.coords))
         de = dem_fn(s.polygon.centroid.x, s.polygon.centroid.y)
         if building_requires_full_frontage(s.polygon.area):
-            # ``lv`` IS the full-frontage feasible level for a large building.
+            # ``lv`` IS the full-frontage feasible level for a large building;
+            # its box is the frontage-band intersection ``lv`` was clamped into.
+            from auto_patch.grade_law import BUILDING_REACH_CORRIDOR_M
+            from auto_patch.elevation_per_surface.building_feasibility import (
+                _frontage_band, _pavement_visibility)
+            from auto_patch.config import VISIBLE_CHORD_CONNECT
             level = float(lv)
+            _cls = [cl.line for cl in
+                    (getattr(layout, "apt_taxi_centerlines", None) or [])
+                    if cl.line is not None and not cl.line.is_empty
+                    and not cl.is_service]
+            _vis = _pavement_visibility(layout) if VISIBLE_CHORD_CONNECT else None
+            fb = (_frontage_band(s.polygon, band, _cls, _vis,
+                                 BUILDING_REACH_CORRIDOR_M) if _cls else None)
+            if fb is None:
+                fb = band(s.polygon.centroid.x, s.polygon.centroid.y)
+            lo, hi = (min(*fb), max(*fb)) if fb is not None else (level, level)
         else:
-            level = _frontage_level(ring, de) if _frontage else None
-            if level is None:                        # no apron-shared edge / off
+            box = _frontage_box(ring) if _frontage else None
+            if box is not None:
+                lo, hi = box
+                level = min(de, hi) if de is not None else hi
+            else:                                    # no apron-shared edge / off
                 level = _median(ring, de)
-            if level is None:
-                level = float(lv)                    # off-network → fallback
+                if level is None:
+                    level = float(lv)                # off-network → fallback
+                # Box = the band intersected over the pad's own ring, so the
+                # coupling can still move a fallback pad within its reachable
+                # range (an immovable DEM-low seat forced the serving spine
+                # 5 m below its own profile — building26).
+                blos = [b[0] for (x, y) in ring
+                        if (b := band(x, y)) is not None]
+                bhis = [b[1] for (x, y) in ring
+                        if (b := band(x, y)) is not None]
+                if bhis:
+                    lo, hi = min(max(blos), min(bhis)), min(bhis)
+                else:
+                    lo = hi = level                  # off-network: immovable
+        pads.append((s, ring, float(level), lo, hi))
+
+    # ── SEAT COUPLING (user 2026-07-03): jointly-feasible pad levels ─────────
+    # Each pad pins nearby spine/apron nodes to ``seat ± 1%·d`` (the building↔
+    # spine law, never blended/relaxed), so two pads across shared pavement must
+    # satisfy ``|L_i − L_j| ≤ APRON_MAX_GRADE · gap`` — independent seats left
+    # neighbouring pads ≤2.6 m apart and made the surrounding faces infeasible
+    # (the SPJC >3% class; the feasibility audit proves joint levels exist).
+    # Project the independent targets onto the coupled polytope (POCS, same
+    # solver as the no-building apron seats).  Straight-line gap is a LOWER
+    # bound on the in-pavement route, so the coupling is conservative; pairs
+    # couple only within the reach corridor and over a pavement-visible chord
+    # (pads separated by grass/roads never constrain each other).
+    _couple = _os.environ.get("O4_BUILDING_SEAT_COUPLING", "1") == "1"
+    if _couple and len(pads) >= 2:
+        from shapely.geometry import LineString
+        from shapely.ops import nearest_points
+        from auto_patch.config import APRON_MAX_GRADE, VISIBLE_CHORD_CONNECT
+        from auto_patch.grade_law import BUILDING_REACH_CORRIDOR_M
+        from auto_patch.elevation_per_surface.building_feasibility import (
+            _pavement_visibility, _VIS_ON_PAV_FRAC)
+        vis = _pavement_visibility(layout) if VISIBLE_CHORD_CONNECT else None
+        pairs: dict = {}
+        for i in range(len(pads)):
+            pi = pads[i][0].polygon
+            for j in range(i + 1, len(pads)):
+                pj = pads[j][0].polygon
+                gap = pi.distance(pj)
+                if gap > BUILDING_REACH_CORRIDOR_M:
+                    continue
+                if vis is not None and gap > 1e-6:
+                    a, b = nearest_points(pi, pj)
+                    chord = LineString([(a.x, a.y), (b.x, b.y)])
+                    if not vis.contains(chord):
+                        try:    # tolerate tiny weld-seam gaps
+                            frac = (chord.intersection(vis.context).length
+                                    / chord.length)
+                        except Exception:           # pragma: no cover
+                            frac = 0.0
+                        if frac < _VIS_ON_PAV_FRAC:
+                            continue                # across grass → uncoupled
+                pairs[(i, j)] = APRON_MAX_GRADE * gap
+        if pairs:
+            targets = [p[2] for p in pads]
+            boxes = [(p[3], p[4]) for p in pads]
+            L = _pocs_project_levels(targets, boxes, pairs)
+            _dbg = _os.environ.get("O4_SEAT_DEBUG") == "1"
+            if _dbg:
+                pre = sorted(
+                    ((abs(targets[i] - targets[j]) - lim, i, j, lim)
+                     for (i, j), lim in pairs.items()), reverse=True)
+                print(f"  [seats] {len(pads)} pads, {len(pairs)} coupled "
+                      f"pairs, polytope "
+                      f"{'FEASIBLE' if L is not None else 'EMPTY'}")
+                for ex, i, j, lim in pre[:8]:
+                    if ex <= 0:
+                        break
+                    print(f"    pre-conflict {ex:+.2f}m over lim {lim:.2f}: "
+                          f"{pads[i][0].ref or '?'} t={targets[i]:.2f} "
+                          f"box=({pads[i][3]:.2f},{pads[i][4]:.2f})  vs  "
+                          f"{pads[j][0].ref or '?'} t={targets[j]:.2f} "
+                          f"box=({pads[j][3]:.2f},{pads[j][4]:.2f})")
+            if L is not None:
+                moved = sum(1 for k in range(len(pads))
+                            if abs(L[k] - targets[k]) > 0.01)
+                if moved:
+                    try:
+                        import O4_UI_Utils as _UI
+                        _UI.vprint(1, f"  [seats] coupled {len(pads)} pads / "
+                                      f"{len(pairs)} pairs: moved {moved}, max "
+                                      f"{max(abs(L[k] - targets[k]) for k in range(len(pads))):.2f} m")
+                    except Exception:
+                        pass
+                pads = [(s, ring, L[k], lo, hi)
+                        for k, (s, ring, _t, lo, hi) in enumerate(pads)]
+            elif _dbg:
+                print("  [seats] EMPTY polytope -> independent seats kept")
+            # L is None (empty polytope) → keep independent targets: no
+            # regression vs the uncoupled model, conflicts stay as they were.
+
+    seats: dict = {}
+    for (s, ring, level, _lo, _hi) in pads:
         for (x, y) in ring:
             i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
             if i is not None:
@@ -172,46 +291,52 @@ def build_building_seats(layout, bucket_to_idx, band, dem_fn, runway_pts):
     return seats
 
 
-def _project_apron_contacts(targets, boxes, positions, cap,
-                            max_iter=300, tol=1e-4):
-    """Project per-feeder target levels onto (box ∩ apron-cap polytope).
+def _pocs_project_levels(targets, boxes, pairs, max_iter=300, tol=1e-4):
+    """Project per-item target levels onto (box ∩ pairwise-coupling polytope).
 
-    Find ``L_i`` minimising ``Σ(L_i − t_i)²`` s.t. ``|L_i − L_j| ≤ cap·d_ij`` (the
-    apron grades between contacts at ≤cap) and ``f_i ≤ L_i ≤ ce_i`` (each feeder's
-    reach band).  ``d_ij`` = straight gap (a LOWER bound on the in-apron route, so
-    the cap constraint is conservative).  Cyclic projection (POCS): push each
-    violated pair together by half the excess, then re-clamp to the boxes; repeat.
-    Returns ``[L_i]`` on convergence, or ``None`` when the polytope is EMPTY (boxes
-    incompatible with the cap couplings = the FUNDAMENTAL case)."""
-    import math
+    Find ``L_i`` minimising ``Σ(L_i − t_i)²`` s.t. ``|L_i − L_j| ≤ pairs[(i,j)]``
+    and ``f_i ≤ L_i ≤ ce_i``.  Cyclic projection (POCS): push each violated pair
+    together by half the excess, then re-clamp to the boxes; repeat.  Returns
+    ``[L_i]`` on convergence, or ``None`` when the polytope is EMPTY (boxes
+    incompatible with the couplings = the FUNDAMENTAL case)."""
     n = len(targets)
     L = [min(max(targets[i], boxes[i][0]), boxes[i][1]) for i in range(n)]
-    cij = [[cap * math.hypot(positions[i][0] - positions[j][0],
-                             positions[i][1] - positions[j][1])
-            for j in range(n)] for i in range(n)]
     for _ in range(max_iter):
         worst = 0.0
-        for i in range(n):
-            for j in range(i + 1, n):
-                d = L[i] - L[j]
-                lim = cij[i][j]
-                if d > lim:
-                    e = 0.5 * (d - lim)
-                    L[i] -= e
-                    L[j] += e
-                    worst = max(worst, d - lim)
-                elif -d > lim:
-                    e = 0.5 * (-d - lim)
-                    L[i] += e
-                    L[j] -= e
-                    worst = max(worst, -d - lim)
+        for (i, j), lim in pairs.items():
+            d = L[i] - L[j]
+            if d > lim:
+                e = 0.5 * (d - lim)
+                L[i] -= e
+                L[j] += e
+                worst = max(worst, d - lim)
+            elif -d > lim:
+                e = 0.5 * (-d - lim)
+                L[i] += e
+                L[j] -= e
+                worst = max(worst, -d - lim)
         for i in range(n):
             L[i] = min(max(L[i], boxes[i][0]), boxes[i][1])
         if worst <= tol:
             break
-    ok = all(abs(L[i] - L[j]) <= cij[i][j] + 1e-3
-             for i in range(n) for j in range(i + 1, n))
+    ok = all(abs(L[i] - L[j]) <= lim + 1e-3
+             for (i, j), lim in pairs.items())
     return L if ok else None
+
+
+def _project_apron_contacts(targets, boxes, positions, cap,
+                            max_iter=300, tol=1e-4):
+    """Project per-feeder target levels onto (box ∩ apron-cap polytope):
+    ``|L_i − L_j| ≤ cap·d_ij`` with ``d_ij`` = straight gap (a LOWER bound on
+    the in-apron route, so the cap constraint is conservative).  See
+    :func:`_pocs_project_levels` for the projection itself."""
+    import math
+    n = len(targets)
+    pairs = {(i, j): cap * math.hypot(positions[i][0] - positions[j][0],
+                                      positions[i][1] - positions[j][1])
+             for i in range(n) for j in range(i + 1, n)}
+    return _pocs_project_levels(targets, boxes, pairs,
+                                max_iter=max_iter, tol=tol)
 
 
 # Minimum apron area to ANCHOR a no-building apron (user 2026-06-30).  A

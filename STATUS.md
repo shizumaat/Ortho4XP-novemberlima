@@ -1,3 +1,67 @@
+# STATUS — SPJC drive-to-zero, round 3 (2026-07-03) — law-true **1165 → 406**
+
+> Suite **17F/328P/17S** — my changes add 0 (`test_no_self_overlap[SPJC]` is
+> PRE-EXISTING at bc9cc61, stash-A/B verified; it was missing from the round-2
+> "16F" tally).  Dev checks still need `O4_LOG_VERBOSITY=1`.
+>
+> ## Round-3 fixes (queue items a, b, d + hole trace)
+> 1. **MOVABLE FLAT PADS (the big one, ≥5% 261→11)**: holding every building
+>    seat HARD makes the final polytope INFEASIBLE through chained paths
+>    (pad↔spine↔pad) even with ~0 both-hard edges — the audit only proves
+>    feasibility when buildings can MOVE.  The final spine-yield projection now
+>    treats each pad as a rigid flat GROUP (`feasibility_project(flat_groups=…)`,
+>    ring collapses to a representative; member↔member edges vanish; broadcast
+>    back after) with pads REMOVED from `yield_hard`.  Pads emit flat (verified
+>    0 non-flat).  Gate `O4_YIELD_MOVABLE_PADS=0`.
+> 2. **GS FINAL PROJECTION**: the vectorised Jacobi stalls (no convergence
+>    guarantee); the final pass runs the scalar Gauss-Seidel POCS on the JOINT
+>    edge set (shape_constraints + u_edges), 800 sweeps (`force_scalar=True`).
+> 3. **SEAT COUPLING** (`build_building_seats`): pad targets projected onto
+>    the pairwise polytope `|L_i−L_j| ≤ 1%·gap` (pavement-visible pairs within
+>    the 200 m corridor) with reach-band boxes; fallback pads get a ring-band
+>    box (immovable DEM-low seats forced the spine 5 m under its profile —
+>    building26).  Gate `O4_BUILDING_SEAT_COUPLING=0`.  SPJC: 26 pads/18 pairs,
+>    14 moved.  (Now partially superseded by 1 — kept: it seeds phases A/B.)
+> 4. **SLIVER-MERGE SPINE VETO** (`junction_repair`): merges across
+>    spine-carrying shared edges are vetoed (105/105 at SPJC — the user's spine
+>    node at (-12.0334639,-77.1065028) is now 0.01 m from an emitted node, was
+>    9.03 m).  Overlapping pairs are EXEMPT (duplicate coverage must merge);
+>    gate `O4_SLIVER_SPINE_VETO=0`.  Post-solve subdivision was confirmed
+>    already dead under `USE_PER_SURFACE_SOLVER`; the simple-shapes invariant
+>    STAYS (fired 6× from non-sliver merge passes).
+> 5. **HOLE PROBE (-12.03309,-77.10638) ANSWERED — no bug**: NO input covers it
+>    (custom apt.dat 8.7 m away, ALL custom+Global DSF polys/objects/agp, OSM =
+>    aerodrome boundary only, bezier res irrelevant).  It is a 2,521 m² island
+>    ENCLOSED by the source union; the "pavement" the user sees in the sim is
+>    the ORTHO PHOTO.  Fix would need a fill heuristic (contradicts V17
+>    hole-preservation) or a scenery edit — user ruling required.
+>
+> ## Remaining 406 (all audit-unenforced, 0 fundamental) — next levers
+> a. **PHANTOM HARD ANCHORS (named, evidenced)**: 38 of 162 `yield_hard`
+>    members exist in NO emitted way (e.g. idx-407 @(-12.006983,-77.121437)
+>    pinned 13.00 while every neighbour needs 14.2+) — they cause the ~1 m
+>    POCS oscillation (last_worst≈1.005).  Blanket-freeing them measures WORSE
+>    (406→506): fix at the SOURCE (why are runway-join / seam-spine anchors
+>    landing on non-emitted nodes?).  Enrich `O4_DUMP_SOLVE_STATE` with hard
+>    CATEGORIES to name each phantom's class.
+> b. 342 of the 406 violated pairs ARE in the solver graph (left over by the
+>    oscillation, → fixed by a); 13 missing long apron chords (100-190 m,
+>    building-frontage class) + 51 endpoints unmapped (created POST-solve:
+>    T-weld inserts etc.) are the true coverage gap — small, do after a.
+> c. Perf: build 92 s → ~105 s (GS pass + envelope Dijkstras) — active-set
+>    sweeps would reclaim most; also the standing 2× shape_constraints build.
+>
+> ## Fast iteration harness (NEW — use this, not full rebuilds)
+> `O4_DUMP_SOLVE_STATE=/tmp/spjc_solve_state.pkl` (solve.py) dumps the
+> final-projection inputs; scratchpad `proj_lab.py` re-runs projection variants
+> OFFLINE (~3 s vs 117 s) and scores them with the TRUE law
+> (`check_grade._check_within_shape` on the emitted patch geometry + sidecar,
+> patch nids → solver idx by KD-tree in the patch meter frame, 95.3% airside
+> coverage).  Lab reproduces production exactly (406 = 406).  Modes:
+> baseline / diagnose / gapcheck / nophantom / freehards / who "lat,lon".
+
+---
+
 # STATUS — SPJC drive-to-zero, round 2 (2026-07-03) — HEAD `9399d9c`
 
 > Suite **16F/329P/17S** (−1 vs baseline).  Dev checks: `O4_LOG_VERBOSITY=1`.

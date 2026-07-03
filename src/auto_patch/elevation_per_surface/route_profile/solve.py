@@ -275,9 +275,69 @@ def solve_route_profile(layout, icao: str,
                           | {i for i in runway_nodes if i < n}
                           | {i for i in building_seats if i < n}
                           | {i for i in _gs_hard if i < n})
+            # Fast Jacobi first (bulk of the correction), then the FINAL pass
+            # as scalar Gauss-Seidel POCS on the joint edge set — Jacobi has no
+            # convergence guarantee and stalls with ~2.5k edges marginally over
+            # cap (the audit's POCS on the same polytope reaches ~0 in <100
+            # sweeps).  Joint set: projecting the two graphs alternately
+            # un-does one with the other.
             rem, bh = feasibility_project(elev, shape_constraints, yield_hard)
             rem, bh = feasibility_project(elev, [{"edges": u_edges}],
                                           yield_hard)
+            # MOVABLE FLAT PADS (user 2026-07-03): building pads leave the
+            # hard set and become rigid flat GROUPS the projection may move —
+            # the audit proves the polytope is feasible ONLY when buildings
+            # can move (holding every pre-picked seat hard is infeasible
+            # through chained paths: pad↔spine↔pad, even with 0 both-hard
+            # edges).  Each pad stays FLAT (the invariant) at a level the
+            # projection chooses jointly with the field.
+            from auto_patch.layout import ROLE_BUILDING as _RB
+            pad_groups = []
+            _cps = layout.canonical_points
+            if _os.environ.get("O4_YIELD_MOVABLE_PADS", "1") == "1":
+                for _s in layout.shapes:
+                    if (_s.role != _RB or _s.polygon is None
+                            or _s.polygon.is_empty):
+                        continue
+                    _ring = list(_s.polygon.exterior.coords)
+                    _g = {bucket_to_idx.get(_cps.get_or_add(float(x), float(y)))
+                          for (x, y) in _ring}
+                    _g = {i for i in _g
+                          if i is not None and i < n and i in building_seats}
+                    if len(_g) >= 2:
+                        pad_groups.append(_g)
+            if pad_groups:
+                _pad_nodes = set().union(*pad_groups)
+                yield_hard = yield_hard - _pad_nodes
+            joint = list(shape_constraints) + [{"edges": u_edges}]
+            # DEBUG snapshot (O4_DUMP_SOLVE_STATE=<path>): pickle the final-
+            # projection inputs so projection variants iterate OFFLINE (~1 s)
+            # instead of via full rebuilds (~115 s).  Node lat/lon included so
+            # an offline scorer can map emitted-patch nids to solver indices.
+            _dump = _os.environ.get("O4_DUMP_SOLVE_STATE")
+            if _dump:
+                import pickle
+                _ll = [layout.m_to_ll(x, y) for (x, y) in nodes]
+                with open(_dump, "wb") as _fh:
+                    pickle.dump({
+                        "elev": list(elev),
+                        "joint_edges": [tuple(e) for sc in joint
+                                        for e in sc["edges"]],
+                        "yield_hard": set(yield_hard),
+                        "pad_groups": [set(g) for g in pad_groups],
+                        "nodes_m": list(nodes),
+                        "nodes_ll": _ll,
+                        "dem_elev": list(dem_elev),
+                        "node_band": list(node_band),
+                    }, _fh)
+                print(f"    [dump] solve state -> {_dump}")
+            # 800 sweeps: the pass reaches its plateau well before that (the
+            # residual is an OSCILLATION between the remaining conflicting
+            # hard anchors, not slow convergence — measured identical law-true
+            # at 800 vs 4000; fixing the phantom-anchor class is the lever).
+            rem, bh = feasibility_project(elev, joint, yield_hard,
+                                          force_scalar=True, max_iters=800,
+                                          flat_groups=pad_groups or None)
         n_terms, n_rects, n_juncs = _writeback(layout, elev, bucket_to_idx)
         if _os.environ.get("O4_STEP_DEBUG") == "1":
             print(f"  [unified] {icao}: {len(frozen)} spine node(s) solved, "
