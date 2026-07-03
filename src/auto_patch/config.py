@@ -1252,7 +1252,10 @@ CURVE_NATIVE_SPINE = _os.environ.get("O4_CURVE_NATIVE_SPINE", "0") == "1"
 # creation is disabled so the spine can run everywhere — pav_union is cut
 # once by the route-arc ways; no rect build, no junction emit, no
 # per-junction spine slice).  Env O4_ROUTE_ARC_SPINE.
-ROUTE_ARC_SPINE = _os.environ.get("O4_ROUTE_ARC_SPINE", "0") == "1"
+# DEFAULT ON in dev (user 2026-07-02 — for JOSM / in-sim review; SPJC
+# law-true 185 < rect baseline 198, CYXY/SPLP/HECA residuals named in
+# STATUS.md).  Set O4_ROUTE_ARC_SPINE=0 for the legacy rect pipeline.
+ROUTE_ARC_SPINE = _os.environ.get("O4_ROUTE_ARC_SPINE", "1") == "1"
 
 # (20260620) SPINE PIECE ROLE RE-EVALUATION — apron-spine grade model.
 # ``_reclassify_apron_junctions`` (junction_repair) runs BEFORE the spine
