@@ -1,3 +1,26 @@
+# STATUS — ROUND-4 STEP-1 FINDING (2026-07-03, `9448201`): the 178 are
+# READER-DIVERGENT, not unenforced
+
+> The step-1 "building-key mismatch" hypothesis was WRONG (pads map fine).
+> Proof chain: (a) the new `final_grade_projection` (final-geometry law graph,
+> GS, movable pads) CONVERGES on its own graph (31 residual) yet the validator
+> count stays exactly 178 — the solver law is satisfied; (b) instrumented
+> `classify_pair` on BOTH readers for the same physical pairs: solver
+> `crosses_spine=True→SKIP`, validator `False→ALLOW` for twin chords 1 cm
+> apart — the crossing predicate flips on epsilon endpoint contact and the
+> readers feed it mm-different inputs (layout meters + layout centerlines vs
+> re-projected lat/lon + sidecar axes).  (c) DEAD END, measured, don't retry:
+> trimming the chord ends (crosses or intersects) → 178→325.
+>
+> **REVISED STEP 1**: unify the reader INPUTS — sidecar carries the solver's
+> exact spine geometry/frame (and possibly the per-shape skip verdicts), so
+> the two readings cannot diverge; then flip `O4_FINAL_GRADE_PROJECTION=1`
+> (ships gated off, ~12-15 s) to close post-solve mutations.  Steps 2-4 of the
+> round-4 queue below unchanged.  Tools: scratchpad `law_diff.py` (solver
+> reader, instrumented) + `law_diff_validator.py` (validator reader, no build).
+
+---
+
 # STATUS — ROUND-4 QUEUE (user-approved 2026-07-03): SPJC 178 → 0
 
 > 1. **Solver-graph coverage gap** (whole ≥1% tail, ~54): 13 long
