@@ -94,14 +94,67 @@ def _pavement_visibility(layout):
         return None
 
 
-def _nearest_visible_centerline(c, cls, vis):
+def _cl_by_distance(c, cls, tree=None, max_r=None):
+    """Iterate centerlines in true-distance order from ``c`` — STRtree-backed
+    when a ``tree`` (``STRtree(cls)``) is given, so a query touches the
+    handful of nearby lines instead of distance-scanning the whole list (the
+    reach band runs ~10k queries × ~500 lines; the full scans were ~half the
+    solve time).  With ``max_r`` only lines within that distance are yielded.
+    Without a tree this is the plain full sort, so behaviour is identical."""
+    if tree is None:
+        for L in sorted(cls, key=lambda L: L.distance(c)):
+            if max_r is not None and L.distance(c) > max_r:
+                break
+            yield L
+        return
+    if max_r is not None:
+        try:
+            idxs = tree.query(c.buffer(max_r))
+        except Exception:                                  # pragma: no cover
+            idxs = range(len(cls))
+        cand = sorted((cls[int(k)].distance(c), int(k)) for k in idxs)
+        for d, k in cand:
+            if d <= max_r:
+                yield cls[k]
+        return
+    # expanding rings: everything within r is in the candidate set, so the
+    # ≤r prefix of each round is exact global distance order.
+    seen: set = set()
+    r = 60.0
+    while True:
+        try:
+            idxs = tree.query(c.buffer(r))
+        except Exception:                                  # pragma: no cover
+            for L in sorted(cls, key=lambda L: L.distance(c)):
+                yield L
+            return
+        cand = sorted((cls[int(k)].distance(c), int(k))
+                      for k in idxs if int(k) not in seen)
+        for d, k in cand:
+            if d <= r:
+                seen.add(k)
+                yield cls[k]
+        if r > 1e5:                    # exhausted: yield any stragglers
+            rest = sorted((cls[k].distance(c), k)
+                          for k in range(len(cls)) if k not in seen)
+            for _d, k in rest:
+                yield cls[k]
+            return
+        r *= 4.0
+
+
+def _nearest_visible_centerline(c, cls, vis, tree=None):
     """The nearest centerline to point ``c`` whose connecting chord stays within
     pavement (``vis``).  Falls back to the straight-line nearest if none is
     visible (e.g. a building wholly off pavement — the caller's touch test has
-    already gated that out)."""
+    already gated that out).  ``tree``: optional ``STRtree(cls)`` (see
+    :func:`_cl_by_distance`)."""
     from shapely.geometry import LineString
     from shapely.ops import nearest_points
-    for ln in sorted(cls, key=lambda L: L.distance(c)):
+    first = None
+    for ln in _cl_by_distance(c, cls, tree):
+        if first is None:
+            first = ln
         foot = nearest_points(ln, c)[0]
         chord = LineString([(c.x, c.y), (foot.x, foot.y)])
         if chord.length < 1e-6 or vis.contains(chord):
@@ -113,7 +166,8 @@ def _nearest_visible_centerline(c, cls, vis):
                 return ln
         except Exception:                                  # pragma: no cover
             pass
-    return min(cls, key=lambda L: L.distance(c))
+    return first if first is not None else min(
+        cls, key=lambda L: L.distance(c))
 
 
 def _chord_on_pavement(c, foot, vis):
@@ -307,6 +361,14 @@ def reach_band_unified(layout, G):
     cls = [cl.line for cl in cls_tcl]
     cap_of = {id(cl.line): cl for cl in cls_tcl}
     vis = _pavement_visibility(layout) if VISIBLE_CHORD_CONNECT else None
+    # STRtree over the centerlines: every band query needs them in distance
+    # order (nearest-visible + the multi-route widening); the naive per-query
+    # full sort was ~half the solve time (~10k queries × ~500 lines).
+    try:
+        from shapely.strtree import STRtree as _STRtree
+        cl_tree = _STRtree(cls) if len(cls) > 8 else None
+    except Exception:                                      # pragma: no cover
+        cl_tree = None
 
     # ANISOTROPIC EDGES: a JUNCTION is graded UNIFORMLY at the taxi cap (its body
     # is the spine's per-letter cap, not 1 %), so a junction foot point beyond the
@@ -387,8 +449,10 @@ def reach_band_unified(layout, G):
 
     def band(x, y):
         c = Point(x, y)
-        ln = (_nearest_visible_centerline(c, cls, vis) if vis is not None
-              else min(cls, key=lambda L: L.distance(c)))
+        ln = (_nearest_visible_centerline(c, cls, vis, tree=cl_tree)
+              if vis is not None
+              else next(_cl_by_distance(c, cls, cl_tree),
+                        min(cls, key=lambda L: L.distance(c))))
         perp = c.distance(ln)
         if vis is not None and perp > _PHANTOM_MIN_PERP_M:
             from shapely.ops import nearest_points
@@ -416,9 +480,9 @@ def reach_band_unified(layout, G):
         # agree without over-loosening.
         if junc_zone is not None:
             from shapely.ops import nearest_points
-            others = sorted((L for L in cls if L is not ln
-                             and L.distance(c) <= _MULTI_ROUTE_M),
-                            key=lambda L: L.distance(c))[:3]
+            others = [L for L in _cl_by_distance(c, cls, cl_tree,
+                                                 max_r=_MULTI_ROUTE_M)
+                      if L is not ln][:3]
             for L in others:
                 if vis is not None:
                     foot = nearest_points(L, c)[0]

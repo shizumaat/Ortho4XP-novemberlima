@@ -15,6 +15,7 @@ docs/curve_native_spine_v2_plan.md.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 from shapely import union_all
@@ -135,21 +136,82 @@ def classify_faces(faces: list[SliceFace], centerlines: list[LineString]
         face.axis = None
 
 
+# Straight spine runs take a WIDER node step (user 2026-07-03, node-count
+# optimization): nodes exist to carry the VERTICAL profile, and on a straight
+# run 24 m still resolves a 1.5 % grade to ~0.36 m per segment — while curves
+# keep the tight step so arcs stay arcs.  59 % of SPJC's airside ring vertices
+# were near-collinear at the uniform 12 m step; every dropped node removes
+# solver edges (superlinear: within-face pair candidates) AND mesh triangles.
+# Measured at 24 m: SPJC build 86.8→77.3 s, law-true 178→155 (fewer sub-noise
+# pairs), airside verts −8.5%.  ⚠ DEFAULT OFF: at CYXY the sparser cut lines
+# flip a borderline POST-slice merge and apron #120 (2k m², 27% on source)
+# fails the genuine ``rests_on_source`` guard (18 m too) — re-enable once the
+# off-source post-slice merge class (STATUS item B provenance work) is fixed.
+# 0 disables (uniform ``step`` everywhere).
+_STRAIGHT_STEP_M = float(os.environ.get("O4_SPINE_STEP_STRAIGHT_M", "0"))
+# a vertex deflecting less than this is "straight" for step selection.
+_STRAIGHT_DEFLECT_DEG = 3.0
+
+
 def _resample(line: LineString, step: float) -> LineString:
     """Densify ``line`` to ≤``step`` m node spacing PRESERVING every original
     vertex (shapely ``segmentize``).  The old even-respacing MOVED original
     vertices (bends / arc points) off the design line unless a sample landed
     exactly on them — the skeleton no longer translated cleanly to the
     emitted spine (user 2026-07-03: an input spine node ended up 10 m from
-    any emitted node)."""
+    any emitted node).
+
+    ADAPTIVE step: a segment whose BOTH endpoints are straight-through
+    vertices (deflection < ``_STRAIGHT_DEFLECT_DEG``) densifies at the wider
+    ``_STRAIGHT_STEP_M``; segments at/next to bends keep ``step``.  Original
+    vertices are always preserved either way."""
     L = line.length
-    if L <= step or step <= 0:
+    if L <= min(step, _STRAIGHT_STEP_M or step) or step <= 0:
         return line
     try:
-        import shapely
-        return shapely.segmentize(line, step)
+        import math as _m
+        coords = list(line.coords)
+        wide = _STRAIGHT_STEP_M
+        if wide <= step:                     # gate off / misconfigured
+            import shapely
+            return shapely.segmentize(line, step)
+
+        def _deflect(i):
+            """Deflection angle (deg) at interior vertex ``i``.  Endpoints
+            carry no curvature information → 0 (straight), so a plain
+            2-point straight segment takes the wide step."""
+            if i <= 0 or i >= len(coords) - 1:
+                return 0.0
+            ax, ay = coords[i - 1]
+            bx, by = coords[i]
+            cx, cy = coords[i + 1]
+            v1x, v1y = bx - ax, by - ay
+            v2x, v2y = cx - bx, cy - by
+            n1 = _m.hypot(v1x, v1y)
+            n2 = _m.hypot(v2x, v2y)
+            if n1 < 1e-9 or n2 < 1e-9:
+                return 0.0
+            d = max(-1.0, min(1.0, (v1x * v2x + v1y * v2y) / (n1 * n2)))
+            return _m.degrees(_m.acos(d))
+
+        out = [coords[0]]
+        for k in range(len(coords) - 1):
+            (ax, ay), (bx, by) = coords[k], coords[k + 1]
+            seg = _m.hypot(bx - ax, by - ay)
+            s = (wide if _deflect(k) < _STRAIGHT_DEFLECT_DEG
+                 and _deflect(k + 1) < _STRAIGHT_DEFLECT_DEG else step)
+            n = int(_m.ceil(seg / s)) if seg > s else 1
+            for t in range(1, n):
+                f = t / n
+                out.append((ax + f * (bx - ax), ay + f * (by - ay)))
+            out.append((bx, by))
+        return LineString(out)
     except Exception:
-        return line
+        try:
+            import shapely
+            return shapely.segmentize(line, step)
+        except Exception:
+            return line
 
 
 def _as_lines(geom) -> list[LineString]:

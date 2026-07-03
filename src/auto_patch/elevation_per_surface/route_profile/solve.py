@@ -54,7 +54,14 @@ def solve_route_profile(layout, icao: str,
     # and the rigid flat-across-width coupling — both elevation-neutral.
     from auto_patch.progress import substep as _psub
     _psub(0.20, "Solving elevations — grade graph built")
-    shape_constraints = _build_shape_constraints(layout, bucket_to_idx)
+    # ONE grade context for the whole solve: _build_shape_constraints and
+    # build_unified_graph construct identical per-shape GradeShapes, so with a
+    # shared ctx the law's pair generation memoises across the two consumers
+    # (grade_graph.shape_constraints_cached) instead of running twice.
+    from auto_patch import grade_graph as _GG
+    _gg_ctx = _GG.build_context(layout, bucket_to_idx)
+    shape_constraints = _build_shape_constraints(layout, bucket_to_idx,
+                                                 ctx=_gg_ctx)
     coupling = _build_level_coupling(shape_constraints)
 
     # ── THE ONE GRAPH (user 2026-06-27) ──────────────────────────────────────
@@ -66,8 +73,7 @@ def solve_route_profile(layout, icao: str,
     # route graph, no ``spine_adjacency`` re-derivation, no ceiling-consistency
     # bridge.  ``G.spine_adj`` already covers every spine node + edge the old
     # ``spine_adjacency`` produced (verified redundant), so the merge is gone.
-    from auto_patch import grade_graph as _GG
-    G = _GG.build_unified_graph(layout, bucket_to_idx)
+    G = _GG.build_unified_graph(layout, bucket_to_idx, ctx=_gg_ctx)
     u_spine_adj = G.spine_adj
     band, dem_fn, runway_pts, _G = reach_band_for(
         layout, elev, bucket_to_idx, dem, tile_lat, tile_lon, unified_graph=G)

@@ -556,7 +556,7 @@ def _grade_graph_edges(s, coords, idx, ctx):
     from auto_patch import grade_graph as GG
     keys = [i if i is not None else ("_n", p) for p, i in enumerate(idx)]
     gs = GG.GradeShape(role=s.role, ring=list(coords), keys=keys)
-    sc = GG.shape_constraints(gs, ctx)
+    sc = GG.shape_constraints_cached(id(s.polygon), gs, ctx)
     pos = {i: coords[p] for p, i in enumerate(idx) if i is not None}
     out = []
     for (a, b, cap) in sc.edges:
@@ -569,14 +569,18 @@ def _grade_graph_edges(s, coords, idx, ctx):
     return out
 
 
-def _build_shape_constraints(layout, bucket_to_idx):
+def _build_shape_constraints(layout, bucket_to_idx, ctx=None):
     """Per-shape grade constraints for the directional relief: one entry per
     soft pavement shape with ``{nodes, edges, flat}`` — its node indices, its
     OWN internal grade edges ``(i, j, cap_m)``, and whether it must stay flat
     (terminal).  Rects use flat-cross (cap≈0) + axial edges; aprons use the
     in-pavement VISIBILITY graph (geodesic, see ``_visible_grade_edges``);
     junction/seam-rect use all-pair; terminal is flat.  Runway/seam are HARD,
-    not included."""
+    not included.
+
+    ``ctx``: optionally a prebuilt ``grade_graph.build_context`` — pass the
+    SAME one ``build_unified_graph`` will use so the per-shape law memo
+    (``grade_graph.shape_constraints_cached``) computes each shape once."""
     out = []
     # Airside-pavement union, prepared, for JUNCTION chord-visibility (see
     # ``_visible_grade_edges``): junction chords may cross neighbouring
@@ -605,7 +609,7 @@ def _build_shape_constraints(layout, bucket_to_idx):
     # within-shape constraints from the ONE shared generator the validator also
     # uses.  Built once per solve; gate OFF → legacy _visible_grade_edges branch.
     from auto_patch import grade_graph as _GG
-    _gg_ctx = _GG.build_context(layout, bucket_to_idx)
+    _gg_ctx = ctx if ctx is not None else _GG.build_context(layout, bucket_to_idx)
     back_scale = (APRON_BACK_EDGE_GRADE / APRON_MAX_GRADE
                   if APRON_MAX_GRADE > 0 else 1.0)
     # Node indices on a clean sloping-rect PLANE (4-corner, altitude_high/low).

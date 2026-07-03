@@ -1030,20 +1030,46 @@ class UnifiedGraph:
         return s
 
 
-def build_unified_graph(layout, bucket_to_idx) -> "UnifiedGraph":
+def shape_constraints_cached(polygon_key, gs: GradeShape,
+                             ctx: GradeContext) -> "ShapeConstraints":
+    """Memoised :func:`shape_constraints` — keyed by ``(polygon_key, role)``
+    on the CONTEXT, so the two per-solve law consumers
+    (``solver_primitives._build_shape_constraints`` and
+    :func:`build_unified_graph`, which construct identical ``GradeShape``s
+    from the same polygons) run the expensive pair generation ONCE when they
+    share a ctx (measured ~11 s/solve of duplicate work at SPJC).  Results
+    are shared, never mutated by either consumer."""
+    memo = getattr(ctx, "_sc_memo", None)
+    if memo is None:
+        memo = {}
+        ctx._sc_memo = memo
+    key = (polygon_key, gs.role)
+    sc = memo.get(key)
+    if sc is None:
+        sc = shape_constraints(gs, ctx)
+        memo[key] = sc
+    return sc
+
+
+def build_unified_graph(layout, bucket_to_idx, ctx=None) -> "UnifiedGraph":
     """Assemble THE one graph on geometry node indices.
 
     This is the SINGLE graph the route-profile solver sets elevations on and the
     validator (``grade_graph_validate.within_violations``) checks — the same
     nodes, edges, per-letter caps and runway anchors, so build and validate can
     never drift (the whole point of docs/goal_merge_one_graph.md).
+
+    ``ctx``: optionally a prebuilt :func:`build_context` — pass the SAME one
+    ``solver_primitives._build_shape_constraints`` used so the per-shape law
+    memo (:func:`shape_constraints_cached`) is shared instead of recomputed.
     """
     from .layout import taxi_shape_code_letter
     from .junction_rules import SLOPING_RECT_ROLES
     from .config import taxi_grade_cap_for_letter
 
     cps = layout.canonical_points
-    ctx = build_context(layout, bucket_to_idx)
+    if ctx is None:
+        ctx = build_context(layout, bucket_to_idx)
     G = UnifiedGraph()
 
     def _idx(x, y):
@@ -1063,7 +1089,7 @@ def build_unified_graph(layout, bucket_to_idx) -> "UnifiedGraph":
             if i is not None:
                 G.pos[i] = ring[p]
         gs = GradeShape(role=s.role, ring=list(ring), keys=keys)
-        sc = shape_constraints(gs, ctx)
+        sc = shape_constraints_cached(id(s.polygon), gs, ctx)
         spine_pairs = set()
         for chain in sc.spine_chains:
             for u, v in zip(chain, chain[1:]):
