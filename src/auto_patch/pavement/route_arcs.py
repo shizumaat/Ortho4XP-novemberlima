@@ -423,7 +423,13 @@ def synthesize_spine_v13(
     # it bent END tangents and the junction arcs fitted off the bent
     # directions — the user's way-276/424 bulges.)
     _replace_polyline_turns(g, pav_ok)
-    _add_junction_arcs(g, pav_ok, runway_union=None, gamma_max=120.0)
+    # r_start_for at exactly r_std keeps the standard radii but switches
+    # placement to _walk_locate: a branch hosting TWO arcs gets split by
+    # the first, and the second's tangent point must walk across the
+    # split fragment (the missing-quadrant bug — all pairs fit the dry
+    # run, then t exceeded the stub by 1.6m at placement)
+    _add_junction_arcs(g, pav_ok, runway_union=None, gamma_max=120.0,
+                       r_start_for=lambda P, r_std: r_std)
     _add_runway_turns(g, runway_union, pav_all)
     # an ADDED arc duplicating route geometry dies, never the route
     _drop_duplicate_arcs(g)
