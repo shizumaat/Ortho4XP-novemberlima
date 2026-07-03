@@ -1,3 +1,54 @@
+# STATUS — SPJC drive-to-zero, round 1 (2026-07-03) — HEAD `783d349`
+
+> Suite 17F/329P/16S (stable baseline).  `O4_ROUTE_ARC_SPINE` default ON.
+> **Reminder: dev grade checks need `O4_LOG_VERBOSITY=1`** (sidecar gate).
+>
+> ## Findings + fixes (user JOSM round 2, SPJC)
+> 1. **Building↔spine 1 % now ENFORCED** — the reported 3.5 % chord
+>    (building-10031 ↔ spine, 86 m) was *legalised* by two relaxations: the
+>    4 % road-frontage carve (service road hugs the terminal) and the
+>    apron↔taxi blend (which since v14.1 also blends against 4 % service
+>    spines).  Both now exclude building-endpoint pairs (`grade_law`), and
+>    service spines never blend aprons (`grade_graph`).  The pair solves to
+>    exactly **1.00 %**.
+> 2. **SPJC law-true 174 → 961 — the law got honest, the surface didn't get
+>    worse.**  Audit: 0 fundamental / 961 unenforced, POCS→0 in 77 sweeps.
+>    The >3 % class (~380) = pre-existing PER-PAD SEAT CONFLICTS
+>    (neighbouring pads seated up to 2.6 m apart — building26 class) that the
+>    blend had waived; the 1.06 %-ramp class = projection residual around
+>    raised aprons.  **NEXT BIG ITEM: seat COUPLING in building_feasibility —
+>    choose jointly-feasible pad levels (audit proves they exist), then the
+>    yield projection converges.**
+> 3. **Slice coverage is SOUND** — faces ≡ slice input exactly (verified
+>    standalone AND in-pipeline via new `debug_pts` tracing).  The
+>    user-visible holes are SOURCE-level: `pav_union` never had that
+>    pavement.  One cause fixed: the DSF overlay gate dropped WHOLE polygons
+>    ≥80 % inside apt.dat — their outside strips (real pavement) are now
+>    kept (≥50 m², SPJC +5 polys).  At least one reported hole remains
+>    unexplained at source level (probe -12.03309,-77.10638; rect model
+>    identical) — trace which apt.dat/DSF/OSM input should cover it.
+> 4. **"Dropped through-line" at -12.0332845,-77.106591 is NOT a bug** — the
+>    apt.dat route network genuinely ends at that stand (tool + production
+>    agree); v13 route-verbatim = no route, no spine.  The area LOOKS broken
+>    because of the source-level pavement hole next to it (see 3).
+> 5. **Apron-scope architecture ANSWERED (user question)**: no geometry
+>    refinement needed — grading scope comes from BUILDING PROXIMITY via the
+>    law: building-endpoint pairs are 1 % (never blended/relaxed), the rest
+>    of a mixed face grades at taxi law with spine credit.  shapeID-70-style
+>    mixed faces are fine under this model once seats are coupled.
+> 6. Debug infra: `O4_COVERAGE_PROBE="lat,lon;…"` prints probe owners after
+>    each post-slice pass; `build_global_slice_faces(debug_pts=…)`;
+>    `O4_SLICE_SOURCE_CLIP=0`.
+>
+> ## SPJC to zero — remaining queue
+> a. Building seat coupling (the 961 → small; biggest lever).
+> b. Source-level pavement holes (item 3 probe).
+> c. Hairline projection residual (~1.06 % ramps) — tighten the yield
+>    projection once seats stop conflicting.
+> d. Then the localized 0.2-0.45 m solver dips (STATUS v15 item C).
+
+---
+
 # STATUS — handover (2026-07-02, session 2) — **V15: JOSM-review fixes round 1 done (waviness/buildings/welds/bridges/groundside)**
 
 > HEAD `d852f5a`+docs, tree clean, `O4_ROUTE_ARC_SPINE` default ON.
