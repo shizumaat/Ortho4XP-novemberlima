@@ -205,6 +205,9 @@ def main(argv=None) -> int:
     ap.add_argument("--v12", action="store_true",
                     help="pure wall-trace model (pure_trace."
                          "synthesize_spine_v12; clamped offset walk)")
+    ap.add_argument("--v13", action="store_true",
+                    help="apt.dat route graph + fillet arcs (route_arcs."
+                         "synthesize_spine_v13; metric-true distances)")
     ap.add_argument("--setback", type=float, default=100.0,
                     help="terminal/large-building ring setback (m)")
     ap.add_argument("--cache", action="store_true",
@@ -267,6 +270,9 @@ def main(argv=None) -> int:
     else:
         if args.v7:
             from auto_patch.pavement.spine_synthesis import synthesize_spine
+        elif args.v13:
+            from auto_patch.pavement.route_arcs import (
+                synthesize_spine_v13 as synthesize_spine)
         elif args.v12:
             from auto_patch.pavement.pure_trace import (
                 synthesize_spine_v12 as synthesize_spine)
@@ -281,6 +287,9 @@ def main(argv=None) -> int:
                 synthesize_spine_v8 as synthesize_spine)
         kwargs = {} if args.v7 else {"recognized": recog,
                                      "ramps": c.get("ramps") or []}
+        if args.v13:
+            kwargs["rwy_full"] = wkb.loads(c["rwy_full"]) \
+                if c.get("rwy_full") else None
         ways = synthesize_spine(pav, runway_union=rwy, buildings=buildings,
                                 routes=routes,  # size letters ONLY
                                 terminal_setback=args.setback, **kwargs)
