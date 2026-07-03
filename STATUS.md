@@ -1,3 +1,23 @@
+# STATUS — SPJC U-hole + rect-era pass retirement (2026-07-03) — `c31c15e`
+
+> USER-reported paved-over hole FIXED: the 7,025 m² U-shaped pav_union hole
+> between two parallel spines (bbox -12.0284..-12.0258 / -77.1212..-77.1196)
+> was filled by `_snap_polygon_vertices_to_rect_corners` (rect-era, 5 m,
+> exterior-only rebuild) — NOT by the slice (keyholes preserved it,
+> face-verified).  Pass retired under the slice; defect rect now mirrors its
+> twin (pavement + hole).  Law-true 178 unchanged, suite 17F identical.
+>
+> **Architecture ruling direction (user)**: with the slice cutting everything
+> at once, rect-era geometry passes are dead weight or hazards — retire on
+> measurement.  Retired so far: sliver-merge (105/105 vetoed), rect-corner
+> snap (this).  Flagged, likely load-bearing: `_push_junction_vertices_off_
+> taxi_rect_edges` (guards RUNWAY sloped rects, which still exist under the
+> slice).  Permanent env-gated coverage probes now sit at every
+> finalize/elevation geometry pass — the next coverage loss bisects in ONE
+> build (`O4_COVERAGE_PROBE="lat,lon;…"`).
+
+---
+
 # STATUS — SPJC drive-to-zero, round 3b (2026-07-03) — law-true **1165 → 178**
 
 > Follow-up to round 3 below (406 → 178): the "phantom anchor" thread
