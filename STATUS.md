@@ -1,3 +1,37 @@
+# STATUS — SPJC drive-to-zero, round 2 (2026-07-03) — HEAD `9399d9c`
+
+> Suite **16F/329P/17S** (−1 vs baseline).  Dev checks: `O4_LOG_VERBOSITY=1`.
+>
+> ## Round-2 fixes (user: holes + skeleton fidelity)
+> 1. **HOLE KEYHOLES** (`global_slice`): TWO spur cuts per interior ring
+>    (nearest spine, else boundary; second from the antipodal ring point) —
+>    ONE cut makes a SLIT polygon whose doubled edge collapses under vertex
+>    dedup and paves the hole over.  SPJC: 19 of 36 holes paved-over → **1**
+>    (28 open ✓, 7 under building pads ✓).
+> 2. **SIMPLE-SHAPES INVARIANT** (pipeline, pre-solve): airside shapes with
+>    interior rings (merge passes can rebuild an annulus) are decomposed via
+>    the rect-era `_decompose_polygon_with_holes` (its old home junction_emit
+>    is bypassed under the slice).
+> 3. **`_resample` → `shapely.segmentize`**: even respacing MOVED original
+>    spine vertices (bends/arcs); densify now preserves every input vertex.
+> 4. **DIAGNOSED, next round**: the user's missing spine node
+>    (-12.0334639,-77.1065028) IS a face vertex at raw slice output (0.01 m)
+>    and is destroyed downstream — the rect-era SLIVER-JUNCTION MERGE unions
+>    adjacent faces and dissolves spine-carrying shared edges.  Fix: exempt
+>    merges across spine edges, or retire the sliver merge under the slice
+>    (conformant faces don't produce the decomposition slivers it targets).
+> 5. SPJC law-true 539 → 1165 = the SAME classes (per-pad seat conflicts >3 %
+>    + projection hairline) over newly-SURVIVING stand pavement — all funnels
+>    into the seat-coupling work (round-1 item a).
+>
+> ## SPJC queue (updated)
+> a. Building seat coupling (biggest, unchanged).
+> b. Sliver-merge vs spine edges (item 4 above — restores skeleton fidelity).
+> c. Source-level pavement hole probe (-12.03309,-77.10638).
+> d. Projection hairline once (a) lands.
+
+---
+
 # STATUS — SPJC drive-to-zero, round 1 (2026-07-03) — HEAD `783d349`
 
 > Suite 17F/329P/16S (stable baseline).  `O4_ROUTE_ARC_SPINE` default ON.
