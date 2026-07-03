@@ -231,7 +231,8 @@ def find_conformance_violations(shapes, tol=CONFORMANCE_TOL_M):
 
 def enforce_conformance(layout: "PavementLayout",
                         tol=CONFORMANCE_TOL_M,
-                        owner_roles: "set[str] | None" = None
+                        owner_roles: "set[str] | None" = None,
+                        include_overlay_refs: bool = False,
                         ) -> tuple[int, int]:
     """Make the emitted shapes a conforming partition by inserting, into
     each shape's edges, every NEIGHBOUR vertex that lies on that edge
@@ -248,10 +249,35 @@ def enforce_conformance(layout: "PavementLayout",
     solver assigns altitudes).
 
     Returns ``(shapes_modified, vertices_inserted)``.  Idempotent: a second
-    call inserts nothing.  Overlay roles (boundary ribbon) are skipped.
+    call inserts nothing.  Overlay refs (DEM bridge / clearance) are skipped
+    unless ``include_overlay_refs`` — their "built-in gap" premise does not
+    always hold (a bridge vertex CAN land exactly on a pavement edge, and an
+    unwelded on-edge node tears Triangle4XP's triangulation), so the FINAL
+    post-solve weld pass includes them.
     """
-    elig = [s for s in layout.shapes if _eligible(s)]
+    elig = [s for s in layout.shapes
+            if (_eligible(s) or (include_overlay_refs
+                                 and getattr(s, "polygon", None) is not None
+                                 and not s.polygon.is_empty
+                                 and s.polygon.geom_type == "Polygon"))]
     cell, grid = _build_vertex_index(elig)
+    # Donor altitudes, for OVERLAY receivers only: a vertex welded into a
+    # DEM-bridge / clearance edge must ADOPT the donor's altitude (the two
+    # coincident nodes would otherwise emit metres apart — the very tear the
+    # weld exists to fix).  Airside receivers keep edge interpolation
+    # (surface-neutral; the solver is authoritative there).
+    donor_alt: dict = {}
+    if include_overlay_refs:
+        for s2 in elig:
+            ring2 = _open_ring(s2.polygon)
+            if ring2 is None:
+                continue
+            alts2 = _vertex_alts(s2, len(ring2))
+            if alts2 is None:
+                continue
+            for (dx, dy), da in zip(ring2, alts2):
+                if da is not None:
+                    donor_alt[(dx, dy)] = float(da)
     shapes_modified = 0
     vertices_inserted = 0
     from shapely.geometry import Polygon
@@ -290,12 +316,18 @@ def enforce_conformance(layout: "PavementLayout",
                         grid, cell, ax, ay, bx, by, tol)
                      if pt not in ownset]
             tjs = _tjunctions_on_edge(ax, ay, bx, by, cands, tol)
+            _recv_overlay = getattr(s, "ref", None) in _OVERLAY_REFS
             for t, (px, py) in tjs:
                 new_ring.append((px, py))
                 if new_alts is not None:
-                    a_i = alts[i]
-                    a_j = alts[(i + 1) % n]
-                    new_alts.append(a_i + t * (a_j - a_i))
+                    _da = (donor_alt.get((px, py))
+                           if _recv_overlay else None)
+                    if _da is not None:
+                        new_alts.append(_da)
+                    else:
+                        a_i = alts[i]
+                        a_j = alts[(i + 1) % n]
+                        new_alts.append(a_i + t * (a_j - a_i))
                 inserted_here += 1
         if not inserted_here:
             continue

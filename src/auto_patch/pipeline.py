@@ -3373,11 +3373,30 @@ def build_airport_pavement(icao: str, xplane_root: str,
             build_global_slice_faces, classify_faces, dedup_centerlines)
         from .layout import ROLE_APRON, ROLE_JUNCTION
         _cn_pav = pav_union
+        # SOURCE FIDELITY (user 2026-07-02, test_pavement_rests_on_source):
+        # the slice emits EVERY face of its input, so the input must be
+        # real source pavement (apt.dat row-110 ∪ DSF ∪ runway).  The
+        # working pav_union accretes non-source area downstream of the
+        # early source snapshot (lot merges, closing, absorbed residue) —
+        # under the rect model those regions never became shapes (rect
+        # residue rules dropped them), but the slice would emit them as
+        # pavement over grass (SPLP faces at 20-24 % on source) AND their
+        # bulk displaces/clips the boundary→DEM bridges.
+        _src = getattr(layout, "source_pavement_union", None)
+        if _src is not None and not _src.is_empty:
+            try:
+                _src_all = _src
+                if (layout.runway_union is not None
+                        and not layout.runway_union.is_empty):
+                    _src_all = _src_all.union(layout.runway_union)
+                _cn_pav = _cn_pav.intersection(_src_all.buffer(0.5))
+            except _GEOM_EXC:
+                _cn_pav = pav_union
         if terminal_union is not None and not terminal_union.is_empty:
             try:
                 _cn_pav = _cn_pav.difference(terminal_union)
             except _GEOM_EXC:
-                _cn_pav = pav_union
+                pass
         _cn_cls, _cn_svc, _cn_seen = [], [], set()
         for _it in (getattr(layout, "apt_taxi_centerlines", []) or []):
             _ln = getattr(_it, "chained_line", None) or getattr(_it, "line", None)
@@ -3424,21 +3443,14 @@ def build_airport_pavement(icao: str, xplane_root: str,
             _taxi_ids = [i for i in _f.centerline_ids if i < _svc_base]
             _svc_ids = [i for i in _f.centerline_ids if i >= _svc_base]
             if _svc_ids and not _taxi_ids:
-                # Only a NARROW strip riding its road becomes a service
-                # face (the road corridor itself, ~half the road width per
-                # side).  A big apron a truck route merely crosses stays
-                # apron — all-pair 4 % on wide pavement was the measured
-                # net-negative of the rect-era SVC carve (2026-06-29).
-                try:
-                    _buf = unary_union(
-                        [_cn_all[i].buffer(1.0, cap_style=2)
-                         for i in _svc_ids])
-                    _shared = _f.polygon.exterior.intersection(_buf).length
-                except _GEOM_EXC:
-                    _shared = 0.0
-                _w = (_f.polygon.area / _shared) if _shared > 1.0 else 1e9
-                if _w <= 25.0:
-                    _svc_faces.add(_fi)
+                # A face whose ONLY centerlines are truck routes is road
+                # territory (user 2026-07-02: service roads between aprons
+                # and parking lots) — ROLE_SERVICE_JUNCTION at any width.
+                # This also SEVERS the runway touch-chain there, so lot
+                # faces beyond it demote to groundside (DEM-follow) via
+                # _reclassify_runway_disconnected_to_groundside, matching
+                # the rect model where the road CARVE separated the lots.
+                _svc_faces.add(_fi)
             # classification below reasons over TAXI spine only; a face
             # touching both taxi and truck lines is taxi territory.
             _f.centerline_ids = _taxi_ids
@@ -4791,6 +4803,37 @@ def build_airport_pavement(icao: str, xplane_root: str,
     if os.environ.get("O4_PLANARIZE_AIRSIDE", "1") == "1":
         from .conformance import planarize_airside
         planarize_airside(layout, icao=icao)
+
+    # LAST-WORD bridge re-clip: drop_flatedge_nodes / planarize above can
+    # STRAIGHTEN a pavement edge that the emit-time bridge clip followed,
+    # re-creating a pavement∩bridge overlap (CYXY apron#25: 6.7 m²).  Run
+    # the re-clip again on the final geometry (idempotent).
+    n_bclip2 = _clip_boundary_bridges_against_pavement(layout)
+    if n_bclip2:
+        UI.vprint(1,
+            f"  [pav-builder] {icao}: final DEM-bridge re-clip — "
+            f"{n_bclip2} shape(s).")
+
+    # FINAL T-vertex weld (user 2026-07-02): a node lying ON another
+    # shape's edge interior without a weld tears Triangle4XP's
+    # triangulation (stretched textures).  Two classes escape the passes
+    # above: (a) a FEATURE vertex on an AIRSIDE edge — the one-sided
+    # feature conformance only inserts into feature edges, and
+    # planarize_airside covers airside↔airside only; (b) DEM-bridge /
+    # clearance overlay vertices — conformance-exempt on a "built-in
+    # gap" premise that does not always hold (CYXY: bridge vertices
+    # exactly on apron/boundary edges).  Insert-only at interpolated
+    # altitudes (surface-neutral), so it is safe post-solve.  TIGHT
+    # tolerance: only truly-ON-edge nodes (the tearing class sits at
+    # 0.000-0.003 m); the full 0.5 m weld tolerance would bow an edge
+    # outward by up to the tolerance and mint hairline overlaps
+    # (zero-tolerance test_no_self_overlap).
+    _n_ws, _n_wv = enforce_conformance(layout, tol=0.01,
+                                       include_overlay_refs=True)
+    if _n_wv:
+        UI.vprint(1,
+            f"  [pav-builder] {icao}: final T-vertex weld — inserted "
+            f"{_n_wv} vertex(es) into {_n_ws} shape(s).")
 
     tjs, crossings = find_conformance_violations(layout.shapes)
     if tjs or crossings:

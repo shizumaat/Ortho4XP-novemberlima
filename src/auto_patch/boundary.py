@@ -2096,7 +2096,15 @@ def _emit_boundary_dem_bridge(
                 f"no clamped DEM.  Investigate why this point has no "
                 f"resolvable altitude.")
 
+        _bdbg = os.environ.get("O4_BRIDGE_DEBUG") == "1"
+        _emitted_bridge_union = None
         for run in runs:
+            if _bdbg:
+                _c0 = per_vert[run[0]]
+                _c1 = per_vert[run[-1]]
+                print(f"  [bridge-dbg] run len={len(run)} "
+                      f"start=({_c0[0]:.0f},{_c0[1]:.0f}) "
+                      f"end=({_c1[0]:.0f},{_c1[1]:.0f})")
             if len(run) < 2:
                 continue
             # Outer side of the bridge sits at the airport_boundary
@@ -2380,14 +2388,18 @@ def _emit_boundary_dem_bridge(
                     # ``len(fc) != len(ring_pts)`` check dropped the
                     # entire run here — the root cause of CYXY only
                     # bridging 2 of its 3 gap runs.)
-                    if fixed.geom_type == "MultiPolygon":
-                        fixed = max(fixed.geoms, key=lambda g: g.area)
-                    if fixed.geom_type != "Polygon" or fixed.is_empty:
+                    # Keep EVERY healed part — a run that turns a
+                    # sharp corner (CYXY north tip) self-overlaps in
+                    # the synth inner edge; buffer(0) splits it into
+                    # lobes and keeping only the largest DISCARDED the
+                    # whole north wedge (the user-visible terrain hole).
+                    # Parts are emitted individually below.
+                    if fixed.geom_type not in ("Polygon", "MultiPolygon")                             or fixed.is_empty:
                         continue
                     bridge_poly = fixed
                 if bridge_poly.is_empty:
                     continue
-                if bridge_poly.geom_type != "Polygon":
+                if bridge_poly.geom_type not in ("Polygon", "MultiPolygon"):
                     continue
                 if bridge_poly.area < 100.0:
                     continue
@@ -2437,6 +2449,8 @@ def _emit_boundary_dem_bridge(
                         cleanup_subs.append(sr_union.buffer(1.0))
                 except _GEOM_EXC:
                     pass
+            if _bdbg:
+                print(f"  [bridge-dbg]   pre-subtract area {bridge_poly.area:,.0f}")
             for sub in cleanup_subs:
                 try:
                     trimmed = bridge_poly.difference(sub)
@@ -2444,19 +2458,17 @@ def _emit_boundary_dem_bridge(
                     trimmed = None
                 if trimmed is None or trimmed.is_empty:
                     continue
-                if trimmed.geom_type == "Polygon":
+                if trimmed.geom_type in ("Polygon", "MultiPolygon"):
+                    if _bdbg and trimmed.geom_type == "MultiPolygon":
+                        print(f"  [bridge-dbg]   subtract -> MULTI "
+                              f"{[round(g.area) for g in sorted(trimmed.geoms, key=lambda g: -g.area)[:5]]}")
                     bridge_poly = trimmed
-                elif trimmed.geom_type == "MultiPolygon":
-                    parts = sorted(trimmed.geoms,
-                                   key=lambda g: -g.area)
-                    if parts and parts[0].area >= 100.0:
-                        bridge_poly = parts[0]
-                    else:
-                        bridge_poly = None
-                        break
                 else:
                     bridge_poly = None
                     break
+            if _bdbg:
+                print(f"  [bridge-dbg]   post-subtract "
+                      f"{'DROPPED' if bridge_poly is None or bridge_poly.is_empty else f'area {bridge_poly.area:,.0f}'}")
             if bridge_poly is None or bridge_poly.is_empty:
                 continue
             if bridge_poly.area < 100.0:
@@ -2476,32 +2488,83 @@ def _emit_boundary_dem_bridge(
                 contained = None
             if contained is None or contained.is_empty:
                 continue
-            if contained.geom_type == "MultiPolygon":
-                contained = max(contained.geoms, key=lambda g: g.area)
-            if contained.geom_type != "Polygon" or contained.is_empty:
+            if contained.geom_type not in ("Polygon", "MultiPolygon") \
+                    or contained.is_empty:
                 continue
             if contained.area < 100.0:
                 continue
             bridge_poly = contained
-            # Resample altitudes for the (possibly reshaped) ring.
-            new_coords = list(bridge_poly.exterior.coords)
-            if new_coords and new_coords[0] == new_coords[-1]:
+            # Emit EVERY substantial part (a healed/subtracted run can be
+            # a MultiPolygon; dropping the non-largest lobes left the CYXY
+            # north boundary unbridged over faulty DEM).
+            _bridge_parts = [g for g in getattr(bridge_poly, "geoms",
+                                                [bridge_poly])
+                             if g.geom_type == "Polygon"
+                             and g.area >= 100.0]
+            if _bdbg:
+                print(f"  [bridge-dbg]   emitting {len(_bridge_parts)} "
+                      f"part(s) {[round(g.area) for g in _bridge_parts]}")
+            for bridge_poly in _bridge_parts:
+              # No part may overlap an already-emitted bridge (two runs can
+              # both reach a corner) or pavement (small lobes the old
+              # keep-largest silently discarded) — zero-tolerance
+              # ``test_no_self_overlap``.
+              try:
+                  _subs2 = list(cleanup_subs)
+                  if _emitted_bridge_union is not None:
+                      _subs2.append(_emitted_bridge_union)
+                  for _s2 in _subs2:
+                      bridge_poly = bridge_poly.difference(_s2)
+                      if bridge_poly.is_empty:
+                          break
+                  if bridge_poly.is_empty:
+                      continue
+                  if bridge_poly.geom_type == "MultiPolygon":
+                      bridge_poly = max(bridge_poly.geoms,
+                                        key=lambda g: g.area)
+                  if (bridge_poly.geom_type != "Polygon"
+                          or bridge_poly.area < 100.0):
+                      continue
+              except _GEOM_EXC:
+                  continue
+              # Resample altitudes for the (possibly reshaped) ring.
+              new_coords = list(bridge_poly.exterior.coords)
+              if new_coords and new_coords[0] == new_coords[-1]:
                 new_coords_open = new_coords[:-1]
-            else:
+              else:
                 new_coords_open = new_coords
-            if len(new_coords_open) < 3:
+              if len(new_coords_open) < 3:
                 continue
-            canon_alt: dict[tuple[int, int], float] = {}
-            for (cx, cy), ca in zip(
+              canon_alt: dict[tuple[int, int], float] = {}
+              for (cx, cy), ca in zip(
                     list(outer_pts) + list(inner_pts),
                     list(outer_alts) + list(inner_alts)):
                 ck = (int(round(cx * 10)), int(round(cy * 10)))
                 canon_alt[ck] = ca
-            ring_alts = []
-            for (cx, cy) in new_coords_open:
+              ring_alts = []
+              for (cx, cy) in new_coords_open:
                 ck = (int(round(cx * 10)),
                       int(round(cy * 10)))
                 ca = canon_alt.get(ck)
+                # Boundary-side vertex: ALWAYS use the SAME clamp the
+                # ribbon uses, so the bridge stays flush with the ribbon
+                # at shared vertices.  This must override even a canon-
+                # bucket hit — at a sharp boundary corner (CYXY north
+                # tip) a synthesized INNER vertex from one leg lands on
+                # the OTHER leg's ribbon carrying a nearest-pavement
+                # altitude 5.5 m above it (vertical-wall regression).
+                try:
+                    # 10 m: generous outer zone (healed corner vertices
+                    # land up to ~7 m off the line); inner vertices sit
+                    # ~bridge_depth_m (100 m) in, far outside it.
+                    _on_bnd = (boundary_poly.exterior.distance(
+                        _Point(cx, cy)) <= 10.0)
+                except _GEOM_EXC:
+                    _on_bnd = False
+                if _on_bnd:
+                    _cl = _clamped_alt(cx, cy)
+                    if _cl is not None:
+                        ca = round(float(_cl), 1)
                 if ca is None:
                     # The 0.1 m bucket can miss because the cleanup
                     # subtractions above run buffer(0)/difference and
@@ -2528,14 +2591,20 @@ def _emit_boundary_dem_bridge(
                         ca = round(float(clamped), 1)
                 ring_alts.append(ca)
 
-            node_alts = list(ring_alts) + [ring_alts[0]]
-            layout.shapes.append(BuiltShape(
+              node_alts = list(ring_alts) + [ring_alts[0]]
+              layout.shapes.append(BuiltShape(
                 polygon=bridge_poly,
                 role=ROLE_BOUNDARY,
                 ref="boundary_dem_bridge",
                 node_altitudes=node_alts,
-            ))
-            n_emitted += 1
+              ))
+              n_emitted += 1
+              try:
+                  _emitted_bridge_union = (
+                      bridge_poly if _emitted_bridge_union is None
+                      else _emitted_bridge_union.union(bridge_poly))
+              except _GEOM_EXC:
+                  pass
 
     return n_emitted
 

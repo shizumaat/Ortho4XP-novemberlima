@@ -106,8 +106,17 @@ def build_building_seats(layout, bucket_to_idx, band, dem_fn, runway_pts):
     from auto_patch.grade_law import building_requires_full_frontage
     apron_keys: set = set()
     if _frontage:
+        # Frontage = a building edge shared with any SOFT pavement ring.
+        # Under the route-arc GLOBAL SLICE the face a building fronts onto
+        # is usually ROLE_JUNCTION (a corridor face), not ROLE_APRON —
+        # apron-only keys silently dropped every such frontage back to the
+        # legacy whole-ring MEDIAN seat, re-creating the over-pinned
+        # frontage conflicts the frontage seat was built to fix (CYXY
+        # pads seated 1-2 m apart at close quarters).
+        from auto_patch.layout import (
+            ROLE_JUNCTION as _RJ, ROLE_SERVICE_JUNCTION as _RSJ)
         for a in layout.shapes:
-            if (a.role == ROLE_APRON and a.polygon is not None
+            if (a.role in (ROLE_APRON, _RJ, _RSJ) and a.polygon is not None
                     and not a.polygon.is_empty):
                 for (x, y) in _open_ring(list(a.polygon.exterior.coords)):
                     apron_keys.add((round(x, 2), round(y, 2)))

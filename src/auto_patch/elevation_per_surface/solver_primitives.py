@@ -1370,8 +1370,8 @@ def _writeback(layout, elev, bucket_to_idx):
                         if _nc9 is not None:
                             if _nc9 != _rc_check:
                                 s.polygon = Polygon(_nc9 + [_nc9[0]])
-                            s.altitude_high = round(float(_hi9), 1)
-                            s.altitude_low = round(float(_lo9), 1)
+                            s.altitude_high = round(float(_hi9), 2)
+                            s.altitude_low = round(float(_lo9), 2)
                             s.altitude = None
                             n_rects += 1
                 continue
@@ -1394,7 +1394,7 @@ def _writeback(layout, elev, bucket_to_idx):
             # a defensive round.  When TERMINAL_MAX_GRADE > 0 the terminal grades
             # like an apron and falls through to the per-corner branch below.
             avg = sum(corner_elevs) / len(corner_elevs)
-            s.altitude = round(float(avg), 1)
+            s.altitude = round(float(avg), 2)
             s.altitude_high = None
             s.altitude_low = None
             s.node_altitudes = None
@@ -1407,7 +1407,7 @@ def _writeback(layout, elev, bucket_to_idx):
             # adjacent aprons that share corners don't end up at
             # 4-8 m cliff steps (each apron previously averaged to
             # its own single altitude → adjacent aprons diverged).
-            alts = [round(float(e), 1) for e in corner_elevs]
+            alts = [round(float(e), 2) for e in corner_elevs]
             if ring_closed:
                 alts.append(alts[0])
             s.node_altitudes = alts
@@ -1435,13 +1435,13 @@ def _writeback(layout, elev, bucket_to_idx):
                     continue
                 if new_coords != coords_open:
                     s.polygon = Polygon(new_coords + [new_coords[0]])
-                s.altitude_high = round(float(hi), 1)
-                s.altitude_low = round(float(lo), 1)
+                s.altitude_high = round(float(hi), 2)
+                s.altitude_low = round(float(lo), 2)
                 s.altitude = None
                 s.node_altitudes = None
                 n_rects += 1
             else:
-                alts = [round(float(e), 1) for e in corner_elevs]
+                alts = [round(float(e), 2) for e in corner_elevs]
                 if ring_closed:
                     alts.append(alts[0])
                 s.node_altitudes = alts
@@ -1452,7 +1452,7 @@ def _writeback(layout, elev, bucket_to_idx):
         elif s.role in (ROLE_JUNCTION, ROLE_SERVICE_JUNCTION):
             # Junction + service-road-network junction: per-corner
             # node_altitudes (all-pair shapes, irregular polygons).
-            alts = [round(float(e), 1) for e in corner_elevs]
+            alts = [round(float(e), 2) for e in corner_elevs]
             if ring_closed:
                 alts.append(alts[0])
             s.node_altitudes = alts
@@ -1463,7 +1463,7 @@ def _writeback(layout, elev, bucket_to_idx):
             # altitudes (the only runway shapes that reach here have
             # node_altitudes pre-set; the skip-guard above filters
             # the CIFP-only altitude_high/low ones).
-            alts = [round(float(e), 1) for e in corner_elevs]
+            alts = [round(float(e), 2) for e in corner_elevs]
             if ring_closed:
                 alts.append(alts[0])
             s.node_altitudes = alts

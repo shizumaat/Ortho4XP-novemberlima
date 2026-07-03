@@ -265,8 +265,8 @@ def test_to_osm_sloped_rect_emits_high_low_cell_profile():
         altitude_high=100.5, altitude_low=99.0))
     _, ways, _ = _emit_and_parse(layout)
     tags = ways[0][2]
-    assert tags["altitude_high"] == "100.5"
-    assert tags["altitude_low"] == "99.0"
+    assert tags["altitude_high"] == "100.50"
+    assert tags["altitude_low"] == "99.00"
     # cell_size / profile are now configurable knobs (mesh-density
     # tuning), so assert against the config constants rather than the
     # historical hardcoded "2"/"spline".
@@ -412,7 +412,7 @@ def test_to_osm_flat_altitude_emits_single_tag():
         altitude=42.7))
     _, ways, _ = _emit_and_parse(layout)
     tags = ways[0][2]
-    assert tags["altitude"] == "42.7"
+    assert tags["altitude"] == "42.70"
     assert "altitude_high" not in tags
     assert "altitude_low" not in tags
 

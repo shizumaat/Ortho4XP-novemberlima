@@ -962,7 +962,7 @@ class PavementLayout:
                 if (s.role != ROLE_BOUNDARY
                         and shape_node_altitudes is None
                         and shape_altitude is not None):
-                    tags["altitude"] = f"{float(shape_altitude):.1f}"
+                    tags["altitude"] = f"{float(shape_altitude):.2f}"
                 elif (n_open == 4
                         and s.role in _RECT_PLANAR_ROLES
                         and abs(open_alts[0] - open_alts[3])
@@ -984,12 +984,12 @@ class PavementLayout:
                     # through to node_altitudes.
                     eh, el = high_low_from_corner_alts(open_alts)
                     if abs(eh - el) <= _CANON_EQ_TOL:
-                        tags["altitude"] = f"{(eh + el) / 2.0:.1f}"
+                        tags["altitude"] = f"{(eh + el) / 2.0:.2f}"
                     else:
                         ext_nids, eh, el = canonicalize_high_low_ring(
                             ext_nids, eh, el)
-                        tags["altitude_high"] = f"{eh:.1f}"
-                        tags["altitude_low"] = f"{el:.1f}"
+                        tags["altitude_high"] = f"{eh:.2f}"
+                        tags["altitude_low"] = f"{el:.2f}"
                         tags["cell_size"] = str(
     RUNWAY_CELL_SIZE_M if s.role == ROLE_RUNWAY
     else PATCH_SLOPE_CELL_SIZE_M)
@@ -997,7 +997,7 @@ class PavementLayout:
                 # Try flat first.
                 elif all_max - all_min <= _CANON_EQ_TOL:
                     tags["altitude"] = (
-                        f"{sum(open_alts) / n_open:.1f}")
+                        f"{sum(open_alts) / n_open:.2f}")
                 # Then 4-corner [H, L, L, H] sloping rect.
                 elif (n_open == 4
                       and abs(open_alts[0] - open_alts[3])
@@ -1008,8 +1008,8 @@ class PavementLayout:
                     eh, el = high_low_from_corner_alts(open_alts)
                     ext_nids, eh, el = canonicalize_high_low_ring(
                         ext_nids, eh, el)
-                    tags["altitude_high"] = f"{eh:.1f}"
-                    tags["altitude_low"] = f"{el:.1f}"
+                    tags["altitude_high"] = f"{eh:.2f}"
+                    tags["altitude_low"] = f"{el:.2f}"
                     tags["cell_size"] = str(
     RUNWAY_CELL_SIZE_M if s.role == ROLE_RUNWAY
     else PATCH_SLOPE_CELL_SIZE_M)
@@ -1045,17 +1045,17 @@ class PavementLayout:
                         ext_nids, eh, el = canonicalize_high_low_ring(
                             ext_nids,
                             float(s.altitude_high), float(s.altitude_low))
-                        tags["altitude_high"] = f"{eh:.1f}"
-                        tags["altitude_low"] = f"{el:.1f}"
+                        tags["altitude_high"] = f"{eh:.2f}"
+                        tags["altitude_low"] = f"{el:.2f}"
                         tags["cell_size"] = str(
     RUNWAY_CELL_SIZE_M if s.role == ROLE_RUNWAY
     else PATCH_SLOPE_CELL_SIZE_M)
                         tags["profile"] = _slope_profile_for(s.polygon)
                     else:
                         tags["altitude"] = (
-                            f"{(float(s.altitude_high) + float(s.altitude_low)) / 2.0:.1f}")
+                            f"{(float(s.altitude_high) + float(s.altitude_low)) / 2.0:.2f}")
                 elif s.altitude is not None:
-                    tags["altitude"] = f"{s.altitude:.1f}"
+                    tags["altitude"] = f"{s.altitude:.2f}"
             way_blocks.append((next_wid[0], ext_nids, tags))
             next_wid[0] -= 1
         rel_blocks: list[tuple[int, list[tuple[int, str]],
@@ -1121,7 +1121,7 @@ class PavementLayout:
                     f"  <node id='{nid}' action='modify' visible='true' "
                     f"lat='{lat:.11f}' lon='{lon:.11f}'>"
                 )
-                lines.append(f"    <tag k='alt_abs' v='{alt_abs:.1f}' />")
+                lines.append(f"    <tag k='alt_abs' v='{alt_abs:.2f}' />")
                 lines.append("  </node>")
         for wid, nids, tags in way_blocks:
             lines.append(
