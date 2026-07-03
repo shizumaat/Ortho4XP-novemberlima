@@ -947,7 +947,15 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
                 blend_cap_fn=blend_fn, both_road=both_road))
             if allow is None:
                 continue
-            if vert_route is not None:
+            # NEVER bake a route-arc budget into a BUILDING-endpoint pair
+            # (user 2026-07-03, extending the 2026-07-02 ruling that already
+            # excludes building pairs from the blend and the road carve:
+            # buildings are the HEAVIEST constraint).  The arc credit
+            # (Δs∥ = route arc ≫ chord) legalised pad-frontage chords at
+            # 2-3× the flat 1 %·d — the SPJC residual-178 class: the solver
+            # graph was satisfied at the baked budgets while the validator's
+            # flat reading (correctly) flagged the same chords.
+            if vert_route is not None and not (ki_bld or kj_bld):
                 allow = _bake_edge(allow, shape.role, (xi, yi), (xj, yj),
                                    shared, ctx, vert_route[i], vert_route[j])
             sc.edges.append((ki, kj, allow))

@@ -398,7 +398,7 @@ def _build_taxi_rects(
         # as primary_parallel, not stub).  Threshold 150 m: longer
         # than typical apron-edge fragments, shorter than any real
         # named-taxi stub at SPJC / SPLP / CYXY / KBNA / HECA.
-        from ..layout import ROLE_STUB, ROLE_SERVICE_ROAD
+        from ..layout import ROLE_STUB
         # SHORT-RECT → JUNCTION (user 2026-06-30, gate O4_MIN_RECT_LENGTH_M):
         # an AIRCRAFT taxi rect below this length is a rigid sloping PLANE where
         # the spine wants to curve through smoothly (HECA's curved taxiways).
