@@ -1,8 +1,16 @@
-# STATUS — handover (2026-07-02, session 2) — **V14: route-arc spine → GLOBAL SLICE (no rects); SPJC beats baseline; default still OFF**
+# STATUS — handover (2026-07-02, session 2) — **V14: route-arc spine → GLOBAL SLICE (no rects); DEFAULT ON in dev for JOSM/in-sim review**
 
-> Everything committed on `dev` (HEAD `2f828e1`), tree clean. Suite: **the same 19
-> pre-existing failures** (list-diff identical to `/tmp/suite_failures_20260702.txt`;
-> this session added 0).
+> Everything committed on `dev` (HEAD `33fde86`), tree clean.
+> **`O4_ROUTE_ARC_SPINE` DEFAULT ON** (user 2026-07-02, for JOSM / X-Plane review;
+> `O4_ROUTE_ARC_SPINE=0` restores the legacy rect pipeline).
+> Suite with default ON: **25 failed / 333 passed** (was 19/342 on the rect
+> default; gate-off list-diff identical to `/tmp/suite_failures_20260702.txt`).
+> The delta is the expected architecture re-baseline: +9 (`rests_on_source`
+> ×3 — slice faces are cut from pav_union so the rect-provenance invariant
+> needs re-stating; CYXY spine-zero/route-reach acceptance ×3 — the CYXY
+> building-seat residual below; SPLP/SPJC junction invariants ×2; HECA runway
+> longitudinal ×1), −3 (CYXY junction-rules reds resolved by the slice).
+> New-baseline list: `/tmp/suite_failures_20260702_routearc_on.txt`.
 > ⚠ Ortho4XP caches `auto_patch.*` — restart Ortho4XP after any commit.
 
 ## What happened this session
