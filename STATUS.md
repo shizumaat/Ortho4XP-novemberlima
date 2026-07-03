@@ -1,3 +1,25 @@
+# STATUS — perf round (2026-07-03) — `bb8dd16`: SPJC build **105.6 → 86.8 s**
+
+> Profile-driven (cProfile ranked it; scratchpad profile_build.py):
+> 1. **Reach band was ~half the solve** — every `band()` query full-sorted
+>    ~500 centerlines twice.  `_cl_by_distance` = STRtree expanding-ring
+>    iterator in exact distance order.  −11.5 s, patch identical.
+> 2. **Double law build** — `_build_shape_constraints` + `build_unified_graph`
+>    each ran the per-shape pair generation.  One shared ctx +
+>    `shape_constraints_cached` (memo by `(id(polygon), role)`).  −7.3 s,
+>    patch identical.
+> 3. **Adaptive spine densify** (`O4_SPINE_STEP_STRAIGHT_M`, **default OFF**):
+>    straights at 24 m / curves tight → 77.3 s, SPJC law-true 178→155,
+>    verts −8.5% — but at CYXY the sparser cut lines flip a borderline
+>    post-slice merge into the `rests_on_source` guard (apron #120, 27 % on
+>    source; 18 m fails too, A/B-attributed).  Re-enable after the item-B
+>    off-source post-slice-merge provenance fix; the knob is ready.
+> Suite 17F/328P (pre-existing list), runtime 547→461 s.  Remaining perf
+> levers (profiled): `_band_via` anchors loop (~11 s), `_solve_spine_profile`
+> (10.9 s tottime), `_enforce_shared_vertices` (8 s ×2), projections (~15 s).
+
+---
+
 # STATUS — SPJC U-hole + rect-era pass retirement (2026-07-03) — `c31c15e`
 
 > USER-reported paved-over hole FIXED: the 7,025 m² U-shaped pav_union hole
