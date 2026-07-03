@@ -439,6 +439,40 @@ def _project(cl, x: float, y: float):
     return best_a, best_d, best_foot
 
 
+def _polyline_tree(ctx: "GradeContext", which: str):
+    """Lazy STRtree over ``ctx.centerlines`` (`which='cl'`) or ``ctx.routes``
+    (`which='routes'`), cached ON the ctx object and invalidated when the
+    list length changes (the blend builds a filtered shallow copy).
+
+    The linear nearest-scan was O(vertices x lines x line_pts): with the
+    route-arc global slice there are ~500 UNCHAINED lines, and profiling
+    showed 25M ``_project`` calls / ~90 s per SPJC build in these lookups.
+    Returns ``(tree, idx_list, geom_list)`` (tree None when no geometry)."""
+    from shapely.geometry import LineString
+    from shapely.strtree import STRtree
+    items = ctx.centerlines if which == "cl" else ctx.routes
+    cache_attr = "_tree_" + which
+    n_attr = cache_attr + "_n"
+    cached = getattr(ctx, cache_attr, None)
+    if cached is not None and getattr(ctx, n_attr, -1) == len(items):
+        return cached
+    geoms, idxs = [], []
+    for i, it in enumerate(items):
+        if len(it.pts) >= 2:
+            try:
+                geoms.append(LineString(it.pts))
+                idxs.append(i)
+            except Exception:
+                continue
+    cached = (STRtree(geoms) if geoms else None, idxs, geoms)
+    try:
+        setattr(ctx, cache_attr, cached)
+        setattr(ctx, n_attr, len(items))
+    except Exception:
+        pass
+    return cached
+
+
 def ds_decompose(pa: tuple[float, float], pb: tuple[float, float],
                  route) -> tuple[float, float]:
     """Decompose the separation of two points into ``(Δs∥, Δs⊥)`` w.r.t. a route
@@ -470,13 +504,20 @@ def _spine_membership(shape: GradeShape, ctx: GradeContext
     """For each ring index, the list of (centerline-index, arc_pos) it lies on
     (within ``SPINE_PERP_TOL_M``)."""
     out: dict[int, list[tuple[int, float]]] = {}
+    tree, idxs, _geoms = _polyline_tree(ctx, "cl")
+    if tree is None:
+        return out
+    from shapely.geometry import Point as _Pt
     for ri, (x, y) in enumerate(shape.ring):
         hits = []
-        for ci, cl in enumerate(ctx.centerlines):
-            a, d, _ = _project(cl, x, y)
+        # bbox candidates within the tolerance, exact test via _project
+        for k in tree.query(_Pt(x, y).buffer(SPINE_PERP_TOL_M)):
+            ci = idxs[int(k)]
+            a, d, _ = _project(ctx.centerlines[ci], x, y)
             if d <= SPINE_PERP_TOL_M:
                 hits.append((ci, a))
         if hits:
+            hits.sort()
             out[ri] = hits
     return out
 
@@ -553,7 +594,13 @@ def _nearest_centerline(x: float, y: float, ctx: GradeContext):
     """``(dist, cap, (tx, ty))`` — the nearest taxi centerline to ``(x, y)``: its
     perpendicular distance, per-letter cap, and unit tangent at the foot point."""
     best_d, best_cap, best_t = float("inf"), APRON_MAX_GRADE, (1.0, 0.0)
-    for cl in ctx.centerlines:
+    tree, idxs, geoms = _polyline_tree(ctx, "cl")
+    if tree is None:
+        return best_d, best_cap, best_t
+    from shapely.geometry import Point as _Pt
+    k = tree.nearest(_Pt(x, y))
+    cands = [ctx.centerlines[idxs[int(k)]]] if k is not None else []
+    for cl in cands:
         pts = cl.pts
         for i in range(len(pts) - 1):
             ax, ay = pts[i]
@@ -620,14 +667,16 @@ def _apron_edge_cap(xi, yi, xj, yj, ni, nj, body_cap, twist, boundary=False,
 def _nearest_route(x: float, y: float, ctx: GradeContext):
     """``(route_idx, perp)`` — the nearest chained route to ``(x, y)`` and its
     perpendicular distance.  ``(-1, inf)`` if there are no routes."""
-    best_ri, best_d = -1, float("inf")
-    for ri, r in enumerate(ctx.routes):
-        if len(r.pts) < 2:
-            continue
-        _a, d, _f = _project(r, x, y)
-        if d < best_d:
-            best_d, best_ri = d, ri
-    return best_ri, best_d
+    tree, idxs, geoms = _polyline_tree(ctx, "routes")
+    if tree is None:
+        return -1, float("inf")
+    from shapely.geometry import Point as _Pt
+    pt = _Pt(x, y)
+    k = tree.nearest(pt)
+    if k is None:
+        return -1, float("inf")
+    k = int(k)
+    return idxs[k], geoms[k].distance(pt)
 
 
 def _edge_route(role, shared, ctx, vr_i, vr_j, di_perp, dj_perp):

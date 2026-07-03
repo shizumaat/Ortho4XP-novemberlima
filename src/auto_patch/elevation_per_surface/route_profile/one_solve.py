@@ -179,7 +179,19 @@ def feasibility_project(elev, shape_constraints, hard, *,
             continue
         iter_edges.append((i, j, budget, 1 if hi else (2 if hj else 0)))
 
-    if _FP_VECTORIZE and iter_edges:
+    # Under the GLOBAL-SLICE spine the graph is ~4x the rect model's
+    # (SPJC 110k edges) and the scalar loop costs ~60 s/build across its
+    # call sites — the vectorised Jacobi is the default there (the
+    # byte-identity concern only ever applied to the legacy rect path).
+    _vec = _FP_VECTORIZE
+    if not _vec:
+        try:
+            from auto_patch.config import (CURVE_NATIVE_SPINE as _CNS,
+                                           ROUTE_ARC_SPINE as _RAS)
+            _vec = _CNS or _RAS
+        except Exception:
+            _vec = False
+    if _vec and iter_edges:
         _project_vectorized(elev, iter_edges, n, max_iters, tol)
     else:
         for _it in range(max_iters):
