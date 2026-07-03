@@ -208,6 +208,7 @@ def compute_elevations_and_repair_geometry(layout: PavementLayout, icao: str, xp
     Ortho4XP is currently generating).  Default ``None`` falls back
     to ``floor(layout.anchor)`` for direct test runs.
     """
+    from .geom_guard import coverage_probe as _covp0
     _compute_elevations(
         layout, icao, xplane_root, apt,
         osm_nodes=nodes, osm_ways=ways, to_m=to_m,
@@ -215,15 +216,19 @@ def compute_elevations_and_repair_geometry(layout: PavementLayout, icao: str, xp
         tile_dem=tile_dem,
         current_tile_lat=current_tile_lat,
         current_tile_lon=current_tile_lon)
+    _covp0(layout, "post-compute-elev")
     # Elevation phase can subdivide junctions, decompose holed
     # polygons, and otherwise modify polygon geometry — re-run
     # the shared-vertex collapse + overlap-clip so the
     # invariants survive into the final layout.
     _enforce_shared_vertices(
         layout, tol=SHARED_VERTEX_CLUSTER_TOL_M)
+    _covp0(layout, "post-shared-verts-1")
     _drop_overlap_against_fixed_shapes(layout, icao=icao)
+    _covp0(layout, "post-overlap-clip")
     _enforce_shared_vertices(
         layout, tol=SHARED_VERTEX_CLUSTER_TOL_M)
+    _covp0(layout, "post-shared-verts-2")
     # The overlap-clip pass introduces new vertices at
     # intersection points that may land on a taxi rect's
     # edge interior (would split the rect's altitude_high/

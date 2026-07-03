@@ -948,6 +948,8 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
                         new_shapes.append(_dc_replace(
                             shape, polygon=extra, source_axis=None))
                 layout.shapes = new_shapes
+                from .geom_guard import coverage_probe as _covpe
+                _covpe(layout, "ce-post-runway-clip")
 
                 # Per user 2026-04-28: junction polygon vertices
                 # cannot land on a sloping rect's edge interior —
@@ -965,24 +967,38 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
                                    ROLE_CROSS_CONNECTOR)
                     and s.polygon is not None
                     and not s.polygon.is_empty]
-                for shape in layout.shapes:
-                    if shape.role != ROLE_JUNCTION:
-                        continue
-                    if (shape.polygon is None
-                            or shape.polygon.is_empty):
-                        continue
-                    # 5 m tolerance is enough to catch overlay-
-                    # precision drift after the (no-buffer)
-                    # runway difference; tighter than the legacy
-                    # 2 m buffer's 5 m margin in cases where the
-                    # junction's exact boundary should remain
-                    # flush with the runway side.
-                    snapped = _snap_polygon_vertices_to_rect_corners(
-                        shape.polygon,
-                        sloping_rect_polys_for_snap,
-                        snap_tol_m=5.0)
-                    if snapped is not None and not snapped.is_empty:
-                        shape.polygon = snapped
+                # RECT-ERA PASS — RETIRED UNDER THE GLOBAL SLICE (user
+                # 2026-07-03): with no taxi rects, this snapped slice-face
+                # vertices up to 5 m onto RUNWAY corners, and the helper
+                # rebuilds from ``poly.exterior`` ONLY — a conformant
+                # keyhole-cut face wrapping a pav_union hole came back with
+                # its cut topology collapsed and the hole PAVED OVER (the
+                # SPJC 7,025 m² U-hole between two parallel spines; the
+                # slice itself preserved it, measured face-by-face).  The
+                # runway seam is owned by planarize_airside + the stitch
+                # passes under the slice.  Rect model keeps the snap (its
+                # rect-corner altitude convention still needs it).
+                from .config import (CURVE_NATIVE_SPINE as _CNS9,
+                                     ROUTE_ARC_SPINE as _RAS9)
+                if not (_CNS9 or _RAS9):
+                    for shape in layout.shapes:
+                        if shape.role != ROLE_JUNCTION:
+                            continue
+                        if (shape.polygon is None
+                                or shape.polygon.is_empty):
+                            continue
+                        # 5 m tolerance is enough to catch overlay-
+                        # precision drift after the (no-buffer)
+                        # runway difference; tighter than the legacy
+                        # 2 m buffer's 5 m margin in cases where the
+                        # junction's exact boundary should remain
+                        # flush with the runway side.
+                        snapped = _snap_polygon_vertices_to_rect_corners(
+                            shape.polygon,
+                            sloping_rect_polys_for_snap,
+                            snap_tol_m=5.0)
+                        if snapped is not None and not snapped.is_empty:
+                            shape.polygon = snapped
 
     # ── Terminal pad elevations ─────────────────────────────────
     # Per user 2026-05-03: only runway corners are HARD; terminals
@@ -1304,17 +1320,22 @@ def _apply_geometric_finalization(
         the final FAA-compliant elevation field.
     """
     # Phase 1: pre-solve geometry.
+    from .geom_guard import coverage_probe as _covpg
+    _covpg(layout, "gf-entry")
     _push_junction_vertices_off_taxi_rect_edges(layout)
+    _covpg(layout, "gf-post-push")
     # The push/snap machinery is vertex-based; a junction EDGE grazing
     # past a rect/runway CORNER with no junction vertex nearby never
     # shares a node with the rect (the SPJC/HECA 0.6 m grade-gate
     # steps) — route the edge THROUGH the corner.
     _insert_rect_corners_into_grazing_junction_edges(layout)
+    _covpg(layout, "gf-post-graze-insert")
     # Triangulate junctions — initial node_altitudes come from
     # the corner-elev map + DEM fallback.  These are placeholders
     # for the first unified-solver pass below.
     _triangulate_junctions(
         layout, dem, tile_lat, tile_lon, m_to_ll)
+    _covpg(layout, "gf-post-triangulate")
 
     # Phase 2: first solver pass (real elevations on the
     # current geometry — clamp + subdivide need these to detect
