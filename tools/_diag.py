@@ -234,7 +234,7 @@ def geom_to_osm(geom, m_to_ll, path: str, tag_k: str = "diag",
     lines = ['<?xml version="1.0" encoding="UTF-8"?>',
              '<osm version="0.6" generator="auto_patch.diag">']
 
-    def emit_ring(coords):
+    def emit_ring(coords, hole=False):
         ids = []
         for x, y in coords:
             lat, lon = m_to_ll(x, y)
@@ -246,6 +246,11 @@ def geom_to_osm(geom, m_to_ll, path: str, tag_k: str = "diag",
         for n in ids:
             lines.append(f'    <nd ref="{n}"/>')
         lines.append(f'    <tag k="{tag_k}" v="{tag_v}"/>')
+        if hole:
+            # An interior ring is a HOLE — without this tag it renders in
+            # JOSM exactly like a pavement outline and reads as coverage
+            # (an authored apt.dat hole was mistaken for union pavement).
+            lines.append('    <tag k="hole" v="yes"/>')
         lines.append('  </way>')
         wid[0] -= 1
 
@@ -254,7 +259,7 @@ def geom_to_osm(geom, m_to_ll, path: str, tag_k: str = "diag",
         emit_ring(list(poly.exterior.coords))
         nrings += 1
         for interior in poly.interiors:
-            emit_ring(list(interior.coords))
+            emit_ring(list(interior.coords), hole=True)
             nrings += 1
     lines.append('</osm>')
     with open(path, "w") as f:

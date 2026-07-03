@@ -1673,6 +1673,28 @@ def build_airport_pavement(icao: str, xplane_root: str,
             _osm_terminal_buildings, nodes, ways, to_m,
             apt_pavement_seeds=runway_polys,
             apt_pavement_polys=apt_only_pav_polys)
+        # O4_COVERAGE_PROBE at the ground-zone boundary: report, per probe
+        # point, whether the PRE-subtraction pav_union covers it and whether
+        # the ground zone claims it — the earliest coverage handoff, before
+        # the slice ever sees the union (a point can only be lost downstream
+        # of wherever this says it still exists).
+        _cpz = os.environ.get("O4_COVERAGE_PROBE")
+        if _cpz:
+            try:
+                from shapely.geometry import Point as _CpPt
+                for _tok in _cpz.split(";"):
+                    _la, _lo = (float(v) for v in _tok.split(","))
+                    _px, _py = to_m(_lo, _la)
+                    _in_pu = (pav_union is not None
+                              and pav_union.covers(_CpPt(_px, _py)))
+                    _in_gz = (_ground_zone is not None
+                              and not _ground_zone.is_empty
+                              and _ground_zone.covers(_CpPt(_px, _py)))
+                    print(f"  [gz-probe] ({_la:.5f},{_lo:.5f}): "
+                          f"pav_union(pre-subtract)={_in_pu} "
+                          f"ground_zone={_in_gz}")
+            except Exception as _e:
+                print(f"  [gz-probe] ERROR {_e!r}")
         if (_ground_zone is not None and not _ground_zone.is_empty
                 and pav_union is not None and not pav_union.is_empty):
             # ``pav_union`` is None when the airport has no apt.dat
