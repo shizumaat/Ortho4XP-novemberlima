@@ -1,5 +1,12 @@
 # STATUS — ROUND-4 STEP 1 DONE (`6e0f0c5`): SPJC **178 → 153** (≥1% = 12)
 
+> **LAB TOOLS for the next session: `/tmp/spjc_lab/`** — full_build.py
+> (build+law-true check), proj_lab.py (offline projection lab; needs a fresh
+> `O4_DUMP_SOLVE_STATE` snapshot + patch since budgets changed),
+> vio_forensics.py, node_probe.py, law_diff.py / law_diff_validator.py
+> (instrumented law readers), profile_build.py.  Latest patch:
+> /tmp/SPJC_round4i.osm (153).
+
 > THE BUDGET DIVERGENCE closed: `_bake_edge` gave apron pairs in the blend
 > zone route-ARC budgets with NO building exclusion — pad-frontage chords
 > earned 2-3× the flat 1%·d, so the solver graph was satisfied while the
