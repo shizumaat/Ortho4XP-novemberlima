@@ -1,3 +1,22 @@
+# STATUS — ROUND-4 STEP 1 DONE (`6e0f0c5`): SPJC **178 → 153** (≥1% = 12)
+
+> THE BUDGET DIVERGENCE closed: `_bake_edge` gave apron pairs in the blend
+> zone route-ARC budgets with NO building exclusion — pad-frontage chords
+> earned 2-3× the flat 1%·d, so the solver graph was satisfied while the
+> validator (flat, correct per the buildings-heaviest ruling) flagged them.
+> Building-endpoint pairs are now NEVER baked (mirrors the blend + road-carve
+> exclusions).  The movable-pad GS then enforces the chords directly:
+> 178→153; ≥0.5% 54→30; ≥1% 26→12.  A/B: `final_grade_projection` adds
+> nothing on top (161 vs 153) — stays gated off.  Pads flat, spine node
+> 0.01 m, suite 17F/328P pre-existing.
+>
+> REMAINING (the step-3 tail): 123 sub-0.5% hairline (rounding class —
+> test 3-decimal emit in a fresh proj_lab snapshot) + 30 real pairs
+> (forensics next).  Then item B (off-source merges) → adaptive step ON →
+> recut → CYXY/HECA propagation, per the approved queue.
+
+---
+
 # STATUS — READER UNIFICATION ROUND 1 (`dd5e6f9`): frame + splitting closed;
 # BUDGET divergence remains — SPJC still 178
 
