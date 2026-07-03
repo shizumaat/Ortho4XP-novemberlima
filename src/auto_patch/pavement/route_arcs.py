@@ -41,7 +41,51 @@ from .spine_synthesis import (
     R90_BY_SIZE, SpineWay, _Graph, _add_junction_arcs, _add_runway_turns,
     _angle_deg, _fillet, _unit,
 )
-from .edge_trace import _planarize_crossings
+
+
+def _planarize_crossings(g: _Graph):
+    """Node every geometric crossing between edges so routes can turn
+    there and the junction-arc pass can fire.  Both edges are split at
+    the crossing; the split point welds via the node-key quantum.
+    (Moved from the retired edge_trace experiment module.)"""
+    from shapely.strtree import STRtree
+    for _round in range(4):
+        alive = [(ei, LineString(e["cs"])) for ei, e in enumerate(g.edges)
+                 if e["alive"]]
+        tree = STRtree([ln for _ei, ln in alive])
+        crossed = False
+        done_pairs = set()
+        for k, (ei, ln) in enumerate(alive):
+            if not g.edges[ei]["alive"]:
+                continue
+            for j in tree.query(ln):
+                j = int(j)
+                if j <= k:
+                    continue
+                ej = alive[j][0]
+                if ej == ei or not g.edges[ej]["alive"] \
+                        or (ei, ej) in done_pairs:
+                    continue
+                lnj = alive[j][1]
+                if not ln.crosses(lnj):
+                    continue
+                inter = ln.intersection(lnj)
+                pts = [q for q in getattr(inter, "geoms", [inter])
+                       if q.geom_type == "Point"]
+                for q in pts[:1]:
+                    sa = ln.project(q)
+                    sb = lnj.project(q)
+                    if min(sa, ln.length - sa) < 1.5 \
+                            or min(sb, lnj.length - sb) < 1.5:
+                        continue        # endpoint touch, not a crossing
+                    g.split_edge(ei, sa)
+                    g.split_edge(ej, sb)
+                    crossed = True
+                done_pairs.add((ei, ej))
+                if not g.edges[ei]["alive"]:
+                    break
+        if not crossed:
+            break
 
 
 def _replace_polyline_turns(g: _Graph, pav_ok, min_turn_deg: float = 15.0):
@@ -358,32 +402,11 @@ def _drop_duplicate_arcs(g: _Graph, gap: float = 3.0):
         print(f"[routearc] duplicate arcs dropped: {killed}", flush=True)
 
 
-def synthesize_spine_v13(
-    pav, runway_union=None, buildings=None, routes=None, *,
-    terminal_setback: float = 100.0, recognized=None, ramps=None,
-    rwy_full=None,
-) -> list[SpineWay]:
-    del recognized, ramps, terminal_setback
-    buildings = [(b, r) for (b, r) in (buildings or [])
-                 if b is not None and not b.is_empty]
-    building_union = unary_union([b for b, _ in buildings]) \
-        if buildings else None
-    pav_nav = pav
-    if building_union is not None:
-        try:
-            pav_nav = pav.difference(shapely.buffer(building_union, 0.5))
-        except Exception:
-            pav_nav = pav
-    # thru-runway pavement (user ruling): arcs may live anywhere on the
-    # continuous footprint, runway included
-    parts = [pav_nav]
-    if rwy_full is not None and not rwy_full.is_empty:
-        parts.append(rwy_full)
-    elif runway_union is not None and not runway_union.is_empty:
-        parts.append(runway_union)
-    pav_all = unary_union(parts)
-    dbg = bool(os.environ.get("O4_ET_DEBUG"))
-
+def _build_route_arc_graph(routes, pav_all, runway_union, dbg=False):
+    """The v13 core: route graph verbatim + welds + in-place turn
+    smoothing + walk-mode standard-radius junction arcs + runway turns.
+    Distances are preserved by construction — no route edge is ever
+    deleted; every smoothing keeps its endpoints."""
     g = _Graph()
     n_routes = 0
     for tc in routes or []:
@@ -419,15 +442,12 @@ def synthesize_spine_v13(
                      for e in g.edges if e["alive"])
     # turns INSIDE polylines are smoothed IN PLACE — strictly interior,
     # endpoints/nodes/junction-tangents untouched, connectivity
-    # preserved by construction.  (Whole-connector smoothing is retired:
-    # it bent END tangents and the junction arcs fitted off the bent
-    # directions — the user's way-276/424 bulges.)
+    # preserved by construction
     _replace_polyline_turns(g, pav_ok)
     # r_start_for at exactly r_std keeps the standard radii but switches
     # placement to _walk_locate: a branch hosting TWO arcs gets split by
     # the first, and the second's tangent point must walk across the
-    # split fragment (the missing-quadrant bug — all pairs fit the dry
-    # run, then t exceeded the stub by 1.6m at placement)
+    # split fragment (the missing-quadrant bug)
     _add_junction_arcs(g, pav_ok, runway_union=None, gamma_max=120.0,
                        r_start_for=lambda P, r_std: r_std)
     _add_runway_turns(g, runway_union, pav_all)
@@ -442,4 +462,118 @@ def synthesize_spine_v13(
         print(f"[routearc] arcs={n_arc} length {len_before/1000:.2f} -> "
               f"{len_after/1000:.2f} km (corner rounding only)",
               flush=True)
+    return g
+
+
+def synthesize_spine_v13(
+    pav, runway_union=None, buildings=None, routes=None, *,
+    terminal_setback: float = 100.0, recognized=None, ramps=None,
+    rwy_full=None,
+) -> list[SpineWay]:
+    del recognized, ramps, terminal_setback
+    buildings = [(b, r) for (b, r) in (buildings or [])
+                 if b is not None and not b.is_empty]
+    building_union = unary_union([b for b, _ in buildings]) \
+        if buildings else None
+    pav_nav = pav
+    if building_union is not None:
+        try:
+            pav_nav = pav.difference(shapely.buffer(building_union, 0.5))
+        except Exception:
+            pav_nav = pav
+    # thru-runway pavement (user ruling): arcs may live anywhere on the
+    # continuous footprint, runway included
+    parts = [pav_nav]
+    if rwy_full is not None and not rwy_full.is_empty:
+        parts.append(rwy_full)
+    elif runway_union is not None and not runway_union.is_empty:
+        parts.append(runway_union)
+    pav_all = unary_union(parts)
+    g = _build_route_arc_graph(routes, pav_all, runway_union,
+                               dbg=bool(os.environ.get("O4_ET_DEBUG")))
     return g.ways()
+
+
+def apply_route_arc_spine(layout, icao: str = "") -> int:
+    """PRODUCTION wiring (user 2026-07-02): rebuild the non-service taxi
+    centerlines as the route-arc spine — the apt.dat route graph
+    verbatim (metric-true distances for the feasibility/anchor math)
+    plus standard-radius arcs at every junction turn, bend and runway
+    contact — right before the junction-centerline-spine slice consumes
+    them.  Service routes pass through untouched.
+
+    Gate O4_ROUTE_ARC_SPINE, default OFF: the geometry flows end to end
+    (SPJC full build verified), but the un-adapted solver reports 2x
+    within-shape grade violations vs baseline (1242 -> 2533) — the
+    anisotropic-curve solver adaptation is the next phase; flip the
+    gate on with it."""
+    if os.environ.get("O4_ROUTE_ARC_SPINE", "0") != "1":
+        return 0
+    cls = list(getattr(layout, "apt_taxi_centerlines", None) or [])
+    if not cls:
+        return 0
+    keep = [t for t in cls if getattr(t, "is_service", False)]
+    # one entry per CONTINUOUS chained route (pieces share the parent)
+    routes, seen = [], set()
+    for tc in cls:
+        if getattr(tc, "is_service", False):
+            continue
+        ln = getattr(tc, "chained_line", None) or getattr(tc, "line", None)
+        if ln is None or ln.is_empty or id(ln) in seen:
+            continue
+        seen.add(id(ln))
+        routes.append(tc)
+    if not routes:
+        return 0
+
+    building_union = None
+    try:
+        polys = [s.polygon for s in getattr(layout, "shapes", []) or []
+                 if getattr(s, "role", "") in ("building", "terminal")
+                 and getattr(s, "polygon", None) is not None
+                 and not s.polygon.is_empty]
+        if polys:
+            building_union = unary_union(polys)
+    except Exception:
+        building_union = None
+    pav = getattr(layout, "source_pavement_union", None)
+    rwy = getattr(layout, "runway_union", None)
+    parts = []
+    if pav is not None and not pav.is_empty:
+        if building_union is not None:
+            try:
+                pav = pav.difference(shapely.buffer(building_union, 0.5))
+            except Exception:
+                pass
+        parts.append(pav)
+    if rwy is not None and not rwy.is_empty:
+        parts.append(rwy)
+    if not parts:
+        return 0
+    pav_all = unary_union(parts)
+
+    g = _build_route_arc_graph(routes, pav_all, rwy,
+                               dbg=bool(os.environ.get("O4_ET_DEBUG")))
+    from ..apt_dat_reader import TaxiCenterline
+    new_cls = []
+    for w in g.ways():
+        if w.line is None or w.line.is_empty or w.line.length < 1.0:
+            continue
+        nseg = max(1, len(w.line.coords) - 1)
+        new_cls.append(TaxiCenterline(
+            line=w.line, seg_sizes=[w.size or ""] * nseg,
+            is_service=False,
+            name="route_arc" if w.kind != "lane" else "route",
+            route_line=None))
+    if not new_cls:
+        return 0
+    layout.apt_taxi_centerlines = keep + new_cls
+    try:
+        import O4_UI_Utils as UI
+        n_arc = sum(1 for t in new_cls if t.name == "route_arc")
+        UI.vprint(1, f"  [pav-builder] {icao}: route-arc spine — "
+                     f"{len(new_cls)} centerline(s), {n_arc} arc(s), "
+                     f"{len(keep)} service route(s) kept.")
+    except Exception:
+        pass
+    return len(new_cls)

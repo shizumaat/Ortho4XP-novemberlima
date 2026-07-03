@@ -196,18 +196,6 @@ def main(argv=None) -> int:
     ap.add_argument("--v7", action="store_true",
                     help="previous-generation heuristic synthesis "
                          "(spine_synthesis.synthesize_spine)")
-    ap.add_argument("--v10", action="store_true",
-                    help="outline-trace model (outline_trace."
-                         "synthesize_spine_v10; pavement-only 7-rule set)")
-    ap.add_argument("--v11", action="store_true",
-                    help="medial-tree reshape model (medial_reshape."
-                         "synthesize_spine_v11; single connected object)")
-    ap.add_argument("--v12", action="store_true",
-                    help="pure wall-trace model (pure_trace."
-                         "synthesize_spine_v12; clamped offset walk)")
-    ap.add_argument("--v13", action="store_true",
-                    help="apt.dat route graph + fillet arcs (route_arcs."
-                         "synthesize_spine_v13; metric-true distances)")
     ap.add_argument("--setback", type=float, default=100.0,
                     help="terminal/large-building ring setback (m)")
     ap.add_argument("--cache", action="store_true",
@@ -239,14 +227,6 @@ def main(argv=None) -> int:
     if pav is None or pav.is_empty:
         print("NO pav_union", file=sys.stderr)
         return 1
-    if (args.v12 or os.environ.get("O4_PT_THRU_RWY")) and rwy is not None:
-        # v12 model (user ruling 2026-07-02): the spine is traced as if
-        # the runway does not exist — the FULL rects (shoulders
-        # included) unioned into pav_union at the TOP, one continuous
-        # pavement; _pavement.osm reflects it
-        rwy_full = wkb.loads(c["rwy_full"]) if c.get("rwy_full") else rwy
-        pav = unary_union([pav, rwy_full])
-        rwy = None
     # working pavement = buildings subtracted (user 2026-07-02: chords must
     # never pass through buildings; this is the deciding footprint)
     bldg_union = unary_union([b for b, _r in buildings]) if buildings else None
@@ -270,26 +250,15 @@ def main(argv=None) -> int:
     else:
         if args.v7:
             from auto_patch.pavement.spine_synthesis import synthesize_spine
-        elif args.v13:
+            kwargs = {}
+        else:
+            # DEFAULT = the route-arc spine (v13, production model)
             from auto_patch.pavement.route_arcs import (
                 synthesize_spine_v13 as synthesize_spine)
-        elif args.v12:
-            from auto_patch.pavement.pure_trace import (
-                synthesize_spine_v12 as synthesize_spine)
-        elif args.v11:
-            from auto_patch.pavement.medial_reshape import (
-                synthesize_spine_v11 as synthesize_spine)
-        elif args.v10:
-            from auto_patch.pavement.outline_trace import (
-                synthesize_spine_v10 as synthesize_spine)
-        else:
-            from auto_patch.pavement.edge_trace import (
-                synthesize_spine_v8 as synthesize_spine)
-        kwargs = {} if args.v7 else {"recognized": recog,
-                                     "ramps": c.get("ramps") or []}
-        if args.v13:
-            kwargs["rwy_full"] = wkb.loads(c["rwy_full"]) \
-                if c.get("rwy_full") else None
+            kwargs = {"recognized": recog,
+                      "ramps": c.get("ramps") or [],
+                      "rwy_full": wkb.loads(c["rwy_full"])
+                      if c.get("rwy_full") else None}
         ways = synthesize_spine(pav, runway_union=rwy, buildings=buildings,
                                 routes=routes,  # size letters ONLY
                                 terminal_setback=args.setback, **kwargs)

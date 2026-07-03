@@ -4271,6 +4271,19 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # into the pav_union, so the fillet/synthetic/slice feeders are all
         # bypassed (the faces are the spine).
         if not CURVE_NATIVE_SPINE:
+            # ROUTE-ARC SPINE (user 2026-07-02, gate O4_ROUTE_ARC_SPINE,
+            # default OFF until the anisotropic-curve solver adaptation
+            # lands — measured 2x within-shape grade violations on the
+            # un-adapted solver): rebuild the non-service centerlines
+            # as the apt.dat route graph + standard-radius arcs at every
+            # junction turn / bend / runway contact — route distances
+            # preserved verbatim (the feasibility/anchor math depends on
+            # them), curves added only where turns happen.  Skipped when
+            # recognized painted centerlines are the spine.
+            if os.environ.get("O4_RECOGNIZED_CENTERLINES", "0") != "1":
+                from .pavement.route_arcs import apply_route_arc_spine
+                apply_route_arc_spine(layout, icao)
+
             from .taxi_route_fillets import add_junction_fillet_arcs
             add_junction_fillet_arcs(layout, icao)
 
