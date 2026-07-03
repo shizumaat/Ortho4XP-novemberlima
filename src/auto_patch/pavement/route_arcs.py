@@ -124,15 +124,29 @@ def _replace_polyline_turns(g: _Graph, pav_ok, min_turn_deg: float = 15.0):
                 leg_out = float(np.hypot(*(B - P)))
                 if s1 <= 1.0 or leg_in < 1.0 or leg_out < 1.0:
                     continue
+                # start from the window's OWN radius (arc length /
+                # turn) so a long gentle sweep is reproduced, not cut
+                # inside by a standard-radius corner (user: the route
+                # 'pushed well past' the real one) — sharp segmented
+                # turns give r_fit ~ r_std and behave as before
+                win_len = float(LineString(cs[k0 - 1:k1 + 2]).length)
+                r_fit = win_len / math.radians(max(total, 1.0))
+                old_win = cs[k0 - 1:k1 + 2]
                 placed = None
-                rr = r_std
+                rr = min(max(r_fit, 0.25 * r_std), 400.0)
                 while rr >= 0.25 * r_std:
                     arc, t = _fillet(tuple(P), u_in, u_out, rr)
                     if arc is not None and t <= leg_in - 0.5 \
                             and t <= leg_out - 0.5 \
                             and pav_ok(LineString(arc)):
-                        placed = arc
-                        break
+                        # the replacement must FOLLOW the route: every
+                        # old window vertex within 4 m of the new path
+                        cand = LineString(np.vstack(
+                            [[A], np.asarray(arc), [B]]))
+                        if max(cand.distance(Point(tuple(q)))
+                               for q in old_win) <= 4.0:
+                            placed = arc
+                            break
                     rr *= 0.8
                 if placed is None:
                     continue
@@ -200,40 +214,94 @@ def _weld_touching_tips(g: _Graph, reach: float = 1.5):
         print(f"[routearc] T-stem tips welded: {welded}", flush=True)
 
 
-def _absorb_turn_chords(g: _Graph, gap: float = 6.0):
-    """Kill short LANE edges that duplicate an arc — the apt.dat
-    chord-connector variant of a segmented turn, where the chords are a
-    separate edge between two routes rather than vertices inside one.
-    The arc's tangent welds carry the connection afterwards."""
-    from shapely.strtree import STRtree
-    arcs = [e for e in g.edges
-            if e["alive"] and e["kind"] in ("arc", "blend", "rwy_turn")]
-    if not arcs:
-        return
-    arc_lines = [LineString(e["cs"]) for e in arcs]
-    tree = STRtree(arc_lines)
-    killed = 0
+def _smooth_connector_edges(g: _Graph, pav_ok):
+    """The chord-connector variant of a segmented turn: a short LANE
+    edge between two junction nodes whose interior is all chords.  It
+    is smoothed IN PLACE — same endpoints, same nodes, the interior
+    chords replaced by one fillet between the edge's end tangents.
+    CONNECTIVITY IS NEVER TOUCHED (user: routes must not disconnect;
+    the earlier absorb-and-reweld variant broke through lines)."""
+    n_sm = 0
     for e in g.edges:
         if not e["alive"] or e["kind"] != "lane":
             continue
-        ln = LineString(e["cs"])
-        if ln.length > 90.0:
+        cs = e["cs"]
+        ln = LineString(cs)
+        if len(cs) < 3 or ln.length > 120.0:
             continue
-        n = max(3, int(ln.length / 6.0))
+        u_in = _unit(*(cs[1] - cs[0]))
+        u_out = _unit(*(cs[-1] - cs[-2]))
+        total = _angle_deg(u_in, u_out)
+        if total < 15.0:
+            continue
+        A, B = cs[0], cs[-1]
+        den = u_in[0] * u_out[1] - u_in[1] * u_out[0]
+        if abs(den) < 1e-9:
+            continue
+        dp = B - A
+        s1 = (dp[0] * u_out[1] - dp[1] * u_out[0]) / den
+        P = A + np.asarray(u_in) * s1
+        leg_in = float(np.hypot(*(P - A)))
+        leg_out = float(np.hypot(*(B - P)))
+        if s1 <= 1.0 or leg_in < 1.0 or leg_out < 1.0:
+            continue
+        r_fit = ln.length / math.radians(max(total, 1.0))
+        placed = None
+        rr = min(max(r_fit, 4.0), 400.0)
+        while rr >= 3.0:
+            arc, t = _fillet(tuple(P), u_in, u_out, rr)
+            if arc is not None and t <= leg_in - 0.25 \
+                    and t <= leg_out - 0.25:
+                cand_cs = np.vstack([[A], np.asarray(arc), [B]])
+                cand = LineString(cand_cs)
+                if pav_ok(cand) and max(
+                        cand.distance(Point(tuple(q)))
+                        for q in cs) <= 4.0:
+                    placed = cand_cs
+                    break
+            rr *= 0.8
+        if placed is None:
+            continue
+        placed[0] = g.nodes[e["a"]]
+        placed[-1] = g.nodes[e["b"]]
+        e["cs"] = placed
+        n_sm += 1
+    if os.environ.get("O4_ET_DEBUG"):
+        print(f"[routearc] connector edges smoothed in place: {n_sm}",
+              flush=True)
+
+
+def _drop_duplicate_arcs(g: _Graph, gap: float = 3.0):
+    """ADDED arcs that duplicate existing route geometry die — the
+    route is authoritative for distance, the arc was only ever a
+    smoothness addition (inverse of the retired absorb pass, which
+    deleted route edges and broke through lines)."""
+    from shapely.strtree import STRtree
+    lanes = [e for e in g.edges if e["alive"] and e["kind"] == "lane"]
+    if not lanes:
+        return
+    lane_lines = [LineString(e["cs"]) for e in lanes]
+    tree = STRtree(lane_lines)
+    killed = 0
+    for e in g.edges:
+        if not e["alive"] or e["kind"] not in ("arc", "blend"):
+            continue
+        ln = LineString(e["cs"])
+        n = max(3, int(ln.length / 5.0))
         pts = [ln.interpolate(t, normalized=True)
-               for t in np.linspace(0.05, 0.95, n)]
+               for t in np.linspace(0.1, 0.9, n)]
         for i in tree.query(ln.buffer(gap)):
             i = int(i)
-            if not arcs[i]["alive"]:
+            if not lanes[i]["alive"]:
                 continue
-            near = sum(1 for p in pts if arc_lines[i].distance(p) <= gap)
-            if near >= 0.8 * n:
+            near = sum(1 for p in pts
+                       if lane_lines[i].distance(p) <= gap)
+            if near >= 0.85 * n:
                 e["alive"] = False
                 killed += 1
                 break
     if os.environ.get("O4_ET_DEBUG"):
-        print(f"[routearc] turn chords absorbed into arcs: {killed}",
-              flush=True)
+        print(f"[routearc] duplicate arcs dropped: {killed}", flush=True)
 
 
 def synthesize_spine_v13(
@@ -294,16 +362,15 @@ def synthesize_spine_v13(
 
     len_before = sum(LineString(e["cs"]).length
                      for e in g.edges if e["alive"])
-    # turns INSIDE polylines (single corners and chord-approximated
-    # curves alike) are replaced in place — the overlap merge
+    # turns INSIDE polylines and chord-connector edges are smoothed IN
+    # PLACE — endpoints and nodes untouched, connectivity preserved by
+    # construction (user: routes must never disconnect)
     _replace_polyline_turns(g, pav_ok)
+    _smooth_connector_edges(g, pav_ok)
     _add_junction_arcs(g, pav_ok, runway_union=None)
     _add_runway_turns(g, runway_union, pav_all)
-    # chord-connector edges duplicating a junction arc yield to it;
-    # their neighbor legs then dead-end a few metres from the arc —
-    # weld those tips onto it (same exact-touch machinery, wider reach)
-    _absorb_turn_chords(g)
-    _weld_touching_tips(g, reach=8.0)
+    # an ADDED arc duplicating route geometry dies, never the route
+    _drop_duplicate_arcs(g)
     g.consolidate()
     if dbg:
         n_arc = sum(1 for e in g.edges if e["alive"]
