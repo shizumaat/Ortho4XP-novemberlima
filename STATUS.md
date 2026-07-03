@@ -40,6 +40,17 @@
 >    each post-slice pass; `build_global_slice_faces(debug_pts=…)`;
 >    `O4_SLICE_SOURCE_CLIP=0`.
 >
+> ## Perf (user report: build time ~doubled) — FIXED at `7c6d33c`
+> Measured SPJC: rect 51.6 s vs global slice **160 s** (solve 25.7→140 s,
+> 5.4×).  Root: ~500 UNCHAINED route pieces made the solver's nearest-line
+> scans quadratic (25 M `_project` calls / ~90 s).  Fixes: STRtree caches on
+> GradeContext for nearest-route/centerline/spine-membership; vectorised
+> Jacobi `feasibility_project` under the slice (was gated off).  Now
+> **92 s** total (solve 75 s) — and the better projector also dropped SPJC
+> law-true 961 → **681**.  Suite runtime 8 min → 4.5 min.  Remaining solve
+> budget if needed: shape_constraints is built twice per shape
+> (build_unified_graph + _build_shape_constraints), node_bands ~36 s.
+>
 > ## SPJC to zero — remaining queue
 > a. Building seat coupling (the 961 → small; biggest lever).
 > b. Source-level pavement holes (item 3 probe).
