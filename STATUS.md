@@ -1,3 +1,28 @@
+# STATUS — READER UNIFICATION ROUND 1 (`dd5e6f9`): frame + splitting closed;
+# BUDGET divergence remains — SPJC still 178
+
+> Landed: (1) sidecar carries the builder's projection ANCHOR; check_grade
+> uses it → validator/solver meter frames identical to float precision.
+> (2) `_spine_crossing_predicate` tests ALL ctx centerlines (STRtree, cached
+> on ctx) — split-agnostic (sidecar axes are split per segment-cap letter;
+> membership-gated geoms diverged between readers).
+>
+> MEASURED: count unchanged at 178 (mix: ≥5% 4→2) — necessary, not
+> sufficient.  The flagged pairs are now consistently READ but differently
+> BUDGETED: with `O4_FINAL_GRADE_PROJECTION=1` the final-geometry projection
+> converges (31 residual on its own graph) while the validator still flags
+> ~150 pairs — pointing at ANISO ROUTE-CREDIT divergence (Allowance
+> evaluation: solver bakes arc Δs∥ budgets; the validator's route wiring for
+> the same pairs must differ).  NEXT PROBE (cheap, offline): extend proj_lab
+> gapcheck to print solver budget vs validator allowance per flagged pair —
+> the pairs are known (recurring pad-corner vertex near building30,
+> b≈local(739,-16), chords 100-125 m at 1-3%).
+>
+> Suite 17F/328P (pre-existing).  Forensics of the current 178: top clusters
+> all building30/31 pad-corner chords — ONE mechanism, budget-level.
+
+---
+
 # STATUS — ROUND-4 STEP-1 FINDING (2026-07-03, `9448201`): the 178 are
 # READER-DIVERGENT, not unenforced
 
