@@ -524,27 +524,53 @@ def _spine_membership(shape: GradeShape, ctx: GradeContext
 
 def _spine_crossing_predicate(shape: GradeShape, ctx: GradeContext,
                               membership: dict):
-    """Return ``crosses(xa,ya,xb,yb)->bool``: True iff the chord crosses one of
-    the shape's spine centerlines (so the real grade path between the two sides
-    is via the spine, not the direct diagonal).  ``None`` if shapely is
-    unavailable or the shape has no spine."""
-    if not membership:
+    """Return ``crosses(xa,ya,xb,yb)->bool``: True iff the chord crosses a
+    spine centerline (so the real grade path between the two sides is via the
+    spine, not the direct diagonal).  ``None`` if shapely is unavailable or
+    the context has no centerlines.
+
+    Tested against ALL context centerlines, not only the shape's MEMBER ones
+    (user 2026-07-03): the two law readers carry the same spine geometry
+    SPLIT DIFFERENTLY (the solver has whole polylines; the validator's
+    sidecar axes are split per segment-cap letter), so membership-gated geoms
+    diverged — a chord crossing a non-member PIECE of a line whose other
+    piece held the members was skipped by one reader and flagged by the
+    other (the SPJC ≥1% residual tail).  The union of all centerlines is
+    identical on both sides regardless of splitting, and the rule's physics
+    ("the climb between the two sides is carried by the spine") holds for
+    any spine the chord crosses, member or not."""
+    if not ctx.centerlines:
         return None
-    cl_idx = {c for hits in membership.values() for (c, _a) in hits}
-    if not cl_idx:
-        return None
+    _ = membership          # kept in the signature for call-site stability
     try:
         from shapely.geometry import LineString
     except ImportError:  # pragma: no cover
         return None
-    geoms = []
-    for ci in cl_idx:
-        pts = ctx.centerlines[ci].pts
-        if len(pts) >= 2:
+    # ALL-centerline geoms + STRtree, built once per CONTEXT (cached): the
+    # per-shape member subset used to keep this list short; the full set
+    # needs the tree to stay cheap.
+    cached = getattr(ctx, "_crossing_tree", None)
+    if cached is None:
+        geoms = []
+        for cl in ctx.centerlines:
+            if len(cl.pts) >= 2:
+                try:
+                    geoms.append(LineString(cl.pts))
+                except Exception:
+                    pass
+        tree = None
+        if geoms:
             try:
-                geoms.append(LineString(pts))
-            except Exception:
-                pass
+                from shapely.strtree import STRtree
+                tree = STRtree(geoms)
+            except Exception:               # pragma: no cover
+                tree = None
+        cached = (geoms, tree)
+        try:
+            ctx._crossing_tree = cached
+        except Exception:                   # pragma: no cover
+            pass
+    geoms, tree = cached
     if not geoms:
         return None
 
@@ -561,6 +587,14 @@ def _spine_crossing_predicate(shape: GradeShape, ctx: GradeContext,
             ch = LineString(((xa, ya), (xb, yb)))
         except Exception:
             return False
+        if tree is not None:
+            try:
+                for k in tree.query(ch):
+                    if ch.crosses(geoms[int(k)]):
+                        return True
+                return False
+            except Exception:               # pragma: no cover
+                pass
         for g in geoms:
             if ch.crosses(g):
                 return True

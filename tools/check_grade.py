@@ -211,13 +211,26 @@ def _derive_per_vertex_elevations(nids: List[str], tags: Dict[str, str],
 
 # ── Coordinate space ────────────────────────────────────────────
 
-def _ll_to_m_factory(nodes: Dict[str, Tuple[float, float]]):
-    if not nodes:
+def _ll_to_m_factory(nodes: Dict[str, Tuple[float, float]],
+                     anchor: "Optional[Tuple[float, float]]" = None):
+    """Equirectangular lat/lon→meter factory.
+
+    ``anchor`` (lat, lon): use the BUILDER's projection anchor (from the axes
+    sidecar) instead of the mean of nodes — the two frames differ in x-scale
+    via ``cos(lat0)``, millimetres over a chord, enough to flip epsilon
+    contact predicates (the crossing-skip rule) and make the validator read
+    the law differently from the solver.  Same formula and R_EARTH as
+    ``auto_patch.layout._projection``, so with the anchor the frames are
+    identical to float precision."""
+    if anchor is not None:
+        lat0, lon0 = float(anchor[0]), float(anchor[1])
+    elif nodes:
+        lats = [v[0] for v in nodes.values()]
+        lons = [v[1] for v in nodes.values()]
+        lat0 = sum(lats) / len(lats)
+        lon0 = sum(lons) / len(lons)
+    else:
         return lambda lat, lon: (0.0, 0.0)
-    lats = [v[0] for v in nodes.values()]
-    lons = [v[1] for v in nodes.values()]
-    lat0 = sum(lats) / len(lats)
-    lon0 = sum(lons) / len(lons)
     cos0 = math.cos(math.radians(lat0))
 
     def _f(lat: float, lon: float) -> Tuple[float, float]:
@@ -1273,6 +1286,7 @@ def run_checks(
     taxi_axes_ll: Optional[list] = None,
     routes_ll: Optional[list] = None,
     quiet: bool = False,
+    anchor: Optional[Tuple[float, float]] = None,
 ) -> Tuple[List[Violation], List[Violation], List[EdgeStep]]:
     """``taxi_axes_ll`` (the builder's APT.DAT taxi centerlines as
     ``[(latlon_points, cL, cT), …]``) supplies the within-shape grade graph's
@@ -1284,7 +1298,7 @@ def run_checks(
     actually used — do not.
     """
     nodes, ways = _parse_osm(osm_path)
-    ll_to_m = _ll_to_m_factory(nodes)
+    ll_to_m = _ll_to_m_factory(nodes, anchor=anchor)
     vertices, edges = _build_vertex_edge_tables(nodes, ways, ll_to_m)
     max_grade = max_grade_pct / 100.0
     seam_nids = _seam_nids(nodes)
@@ -1395,7 +1409,7 @@ def main(argv=None) -> int:
     # membership, per-letter caps, anisotropic Δs∥ credit).  Auto-loaded
     # when present; without it the check is context-free and over-flags
     # every spine/blend-relaxed pair.
-    taxi_axes_ll = routes_ll = None
+    taxi_axes_ll = routes_ll = anchor = None
     sidecar = Path(str(args.osm) + ".axes.json")
     if sidecar.exists():
         try:
@@ -1403,8 +1417,11 @@ def main(argv=None) -> int:
             _data = _json.loads(sidecar.read_text())
             taxi_axes_ll = _data.get("axes") or None
             routes_ll = _data.get("routes") or None
+            anchor = _data.get("anchor") or None
             print(f"  (axes sidecar loaded: {len(taxi_axes_ll or [])} axes, "
-                  f"{len(routes_ll or [])} routes — law-true check)")
+                  f"{len(routes_ll or [])} routes"
+                  + (", builder anchor frame" if anchor else "")
+                  + " — law-true check)")
         except Exception as ex:
             print(f"  (axes sidecar unreadable, context-free check: {ex})")
     within, cross, steps = run_checks(
@@ -1416,6 +1433,7 @@ def main(argv=None) -> int:
         top_n=args.top_n,
         taxi_axes_ll=taxi_axes_ll,
         routes_ll=routes_ll,
+        anchor=tuple(anchor) if anchor else None,
     )
     if args.strict and (within or cross or steps):
         return 1

@@ -1175,6 +1175,14 @@ class PavementLayout:
                 "axes": [[pts, cL, cT]
                          for (pts, cL, cT) in taxi_axes_ll(self)],
                 "routes": taxi_routes_ll(self),
+                # The SOLVER's projection anchor: with it the validator
+                # evaluates the law in the SAME meter frame the solver
+                # built in (its default mean-of-nodes frame differs in
+                # x-scale via cos(lat0) — millimetres over a chord,
+                # enough to flip epsilon contact predicates and diverge
+                # crossing verdicts between the two law readers).
+                "anchor": ([self.anchor[0], self.anchor[1]]
+                           if self.anchor is not None else None),
             }
             Path(str(path) + ".axes.json").write_text(_json.dumps(data))
         except Exception:
