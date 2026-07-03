@@ -1,17 +1,33 @@
-# STATUS — handover (2026-07-02, session 2) — **V14: route-arc spine → GLOBAL SLICE (no rects); DEFAULT ON in dev for JOSM/in-sim review**
+# STATUS — handover (2026-07-02, session 2) — **V14.1: route-arc GLOBAL SLICE default ON; SPJC+SPLP at/below baseline, CYXY close, HECA open**
 
-> Everything committed on `dev` (HEAD `33fde86`), tree clean.
+> Everything committed on `dev` (HEAD `fa69b21`), tree clean.
 > **`O4_ROUTE_ARC_SPINE` DEFAULT ON** (user 2026-07-02, for JOSM / X-Plane review;
 > `O4_ROUTE_ARC_SPINE=0` restores the legacy rect pipeline).
-> Suite with default ON: **25 failed / 333 passed** (was 19/342 on the rect
-> default; gate-off list-diff identical to `/tmp/suite_failures_20260702.txt`).
-> The delta is the expected architecture re-baseline: +9 (`rests_on_source`
-> ×3 — slice faces are cut from pav_union so the rect-provenance invariant
-> needs re-stating; CYXY spine-zero/route-reach acceptance ×3 — the CYXY
-> building-seat residual below; SPLP/SPJC junction invariants ×2; HECA runway
-> longitudinal ×1), −3 (CYXY junction-rules reds resolved by the slice).
-> New-baseline list: `/tmp/suite_failures_20260702_routearc_on.txt`.
+> Suite at v14.1: **17 failed / 329 passed / 16 skipped**
+> (list: `/tmp/suite_failures_20260702_v14_1.txt`).  Rect-residue junction
+> invariants SKIP under the gate (they describe rect-residue geometry);
+> `test_pavement_rests_on_source` deliberately NOT skipped (genuine guard,
+> red ×3 — see open items).  SPLP compare-targets red = geometry
+> legitimately shifted, recut when v14 settles.
 > ⚠ Ortho4XP caches `auto_patch.*` — restart Ortho4XP after any commit.
+
+## v14.1 fixes (this session, after the default flip)
+
+1. **SPLP seam cliff (user-reported regression) — FIXED, 24 → 0.**
+   `nudge_runway_corners_at_seam_junctions` assumed a seam piece is a SMALL
+   terrain-pinned stub; a sliced face reaches the tile line from 480 m away, so
+   it dragged runway 02/20's threshold 5.4 m off its FAA profile.  Skipped under
+   the global slice (`pipeline.py` call site) — seam pins stay truth-hard and the
+   solver spreads the drop (cap × 480 m ≫ 5.4 m).
+2. **Service roads = road-cap spines (user ruling) — CYXY 300 → 174.**
+   Service centerlines are sliced; NARROW faces riding only a truck route
+   (width ≤ 25 m) emit `ROLE_SERVICE_JUNCTION` (restores `road_zone`); wide
+   pavement crossed by a truck route stays apron.  `grade_graph.build_context`
+   adds service lines as SPINES at `SERVICE_ROAD_MAX_GRADE` under the slice
+   (longitudinal 4 % solve along the road); `taxi_axes_ll` exports service axes
+   at the road cap (was accidentally 1.5 %).
+3. **Rect-era test triage**: `test_junction_invariants` + `test_junction_rules`
+   skip under `ROUTE_ARC_SPINE` (rect-residue semantics, kept for legacy path).
 
 ## What happened this session
 
@@ -44,32 +60,32 @@
 
 ## Scoreboard (law-true `tools/check_grade.py <patch>` with sidecar, within-shape)
 
-| fixture | rect baseline (gate OFF) | route-arc global slice (ON) |
-|---|---|---|
-| SPJC | 198 | **185 ✓ below baseline** |
-| CYXY | 138 | 300 ✗ |
-| SPLP | 0 | 24 ✗ |
-| HECA | 4138 | 5275 ✗ (+4 cross-shape desyncs) |
+| fixture | rect baseline (gate OFF) | v14.0 | **v14.1 (HEAD)** |
+|---|---|---|---|
+| SPJC | 198 | 185 | **175 ✓ below** |
+| CYXY | 138 | 300 | **174** (1.26× — building seats remain) |
+| SPLP | 0 | 24 | **0 ✓ = baseline** |
+| HECA | 4138 | 5275 | 5184 ✗ (+4 cross-shape desyncs) |
 
-**Default stays OFF** (project bar: new ≤ old ×4 fixtures). SPJC (the mission
-target) is below baseline; the other three have *named, diagnosed* residuals:
+Open items (named, diagnosed):
 
-- **CYXY 300**: building-frontage seat conflicts — pairs between/next to building
-  pads seated at incompatible levels 1–2 m apart (production pins seats; the audit
-  proves a compliant field exists if seats could move → the building-FEASIBILITY
-  seat solver must pick frontage-compatible levels). Worst: apron/-10061 (88,-399),
-  apron/-10045 + building-10002 (117,-533), (-243,914).
-- **SPLP 24**: ONE ~5 m wall on runway 02/20 + apron -10004 at the tile seam —
-  seam DEM pins vs FAA runway profile disagree under the new face geometry
-  (seam-anchor keys land differently without rects). All 24 pairs are that wall.
-- **HECA 5275 vs 4138**: not yet dissected (dense-junction monster; builds clean,
-  deterministic pipeline held). Suspect same building-seat class as CYXY + scale.
-- **Service roads have NO shapes under the slice** (`road_zone`/`service_road`
-  dead → 4 % road-carve relaxation lost; truck-route lots may not reclassify
-  groundside). Phase-5-class work; likely part of CYXY's delta.
-- `node_altitudes` are written at 0.1 m resolution — at sub-metre pair distances the
-  rounding alone can eat the budget; part of the <0.5%-over tail is noise
-  (`ELEV_ROUNDING_NOISE_M` covers half of it).
+- **CYXY 174 vs 138**: building-frontage seat conflicts — pads seated at
+  incompatible levels 1–2 m apart (production pins seats; the audit proves a
+  compliant field exists if seats could move → the building-FEASIBILITY seat
+  solver must pick frontage-compatible levels, or the spine-yield should treat
+  each building as a movable FLAT group like the audit does). Worst spots:
+  (88,-399), (117,-533) + building-10002, (-243,914).
+- **HECA 5184 vs 4138**: not yet dissected (builds clean end-to-end; suspect the
+  same building-seat class at scale + 4 cross-shape desyncs).
+- **`test_pavement_rests_on_source` red ×3 (CYXY/SPJC/SPLP)** — GENUINE: the
+  slice emits every face of the local `pav_union`, which contains area that is
+  NOT apt.dat/DSF source (SPLP faces #19/#20: 82k/34k m² at 20-24 % on source —
+  pavement over grass in the sim). The rect pipeline separated/dropped that
+  area (groundside separation, residue rules). Fix direction: intersect the
+  slice input with `source_pavement_union`, or run the groundside/clearance
+  separation before the slice. **This is the top JOSM-visible defect.**
+- `node_altitudes` are written at 0.1 m resolution — at sub-metre pair distances
+  rounding alone can eat the budget; part of the <0.5 %-over tail is noise.
 
 ## Where things are
 
@@ -90,24 +106,23 @@ target) is below baseline; the other three have *named, diagnosed* residuals:
 
 ## NEXT SESSION
 
-1. **CYXY building-seat frontage coupling**: make `building_feasibility` seat
-   neighbouring pads/frontage at within-cap-compatible levels (or let the yield
-   projection treat each building as a movable FLAT group like the audit does).
-   Target: CYXY ≤ 138.
-2. **SPLP runway seam wall**: reconcile tile-seam DEM pins with the runway FAA
-   profile under the global slice (find where the 74.4 pin lands on the 79.8
-   profile; likely `_seed_elevations` seam override vs `runway_regrade`).
-3. **HECA dissection** (rate + audit + forensics — same playbook as this session).
-4. Service-road shapes under the slice (slice service routes too, or emit their
-   corridors as `service_road` faces) → restores road_zone + groundside reclassify.
-5. Then flip `O4_ROUTE_ARC_SPINE` default ON + re-baseline the suite (recut
-   compare-targets where geometry legitimately shifted).
+1. **`rests_on_source` fix** (top JOSM-visible defect): stop emitting faces over
+   non-source pavement — intersect the slice input with
+   `source_pavement_union` (+ runway), or run groundside/clearance separation
+   before the slice. Then re-check the invariant ×4.
+2. **CYXY building-seat frontage coupling** (174 → ≤138): frontage-compatible
+   seat levels in `building_feasibility`, or movable-flat-group buildings in the
+   spine-yield projection.
+3. **HECA dissection** (rate + audit + forensics — the session-1 playbook) +
+   its 4 cross-shape desyncs.
+4. Recut SPLP/SPJC compare-target fixtures once v14 geometry settles; re-baseline
+   `test_pavement_grade` counts.
 
 Suggested kickoff:
-> "Continue V14 (STATUS.md + memory pav_skeleton_medial_axis_spine.md): route-arc
-> global slice is wired, SPJC 185<198 ✓. Drive CYXY (300 vs 138, building-seat
-> frontage conflicts), SPLP (one runway seam wall, 24 vs 0) and HECA (5275 vs 4138)
-> to ≤ baseline, then flip the gate default ON."
+> "Continue V14.1 (STATUS.md + memory pav_skeleton_medial_axis_spine.md):
+> route-arc global slice default ON; SPJC 175<198 ✓, SPLP 0 ✓, CYXY 174 vs 138,
+> HECA 5184 vs 4138. Fix rests_on_source (slice emits pav_union area that isn't
+> apt.dat/DSF source — pavement over grass), then CYXY building seats, then HECA."
 
 ## Pre-existing suite reds (unchanged)
 19 at `dev@2f828e1` — identical list to `/tmp/suite_failures_20260702.txt`.
