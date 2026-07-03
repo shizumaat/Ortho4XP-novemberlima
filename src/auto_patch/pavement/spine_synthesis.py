@@ -1017,7 +1017,7 @@ def _radius_for(size: str) -> float:
 
 
 def _add_junction_arcs(g: _Graph, pav_ok, runway_union=None,
-                       r_start_for=None):
+                       r_start_for=None, gamma_max=None):
     """At every node, STANDARD arcs for every branch pair with a real turn —
     all arcs of one junction share ONE radius (user: where arcs come
     together they are the same size, mirrored), so symmetric pairs land on
@@ -1027,7 +1027,12 @@ def _add_junction_arcs(g: _Graph, pav_ok, runway_union=None,
 
     ``r_start_for(P, r_std)`` (optional) sets the LARGEST radius to try at
     a node — wide-open junction crossings take the biggest mirrored arcs
-    that fit (v8 target evidence), corridor junctions stay standard."""
+    that fit (v8 target evidence), corridor junctions stay standard.
+    ``gamma_max`` (optional) caps the pair turn angle below the module
+    default — the route model uses ~120°: at standard radius a sharper
+    pair sweeps a long arc across the junction interior (v13 user
+    review, the way-276 bulge), and those movements are runway-turn
+    territory, not ordinary junction fillets."""
     rwy_b = runway_union.boundary \
         if runway_union is not None and not runway_union.is_empty else None
     node_ids = list(g.incident().keys())
@@ -1057,7 +1062,9 @@ def _add_junction_arcs(g: _Graph, pav_ok, runway_union=None,
                 v = g.edge_dir_at(eb, ab)
                 u_out = (-v[0], -v[1])
                 gamma = _angle_deg(u, u_out)
-                if gamma < _TURN_MIN_DEG or gamma > _TURN_MAX_DEG:
+                if gamma < _TURN_MIN_DEG or gamma > (
+                        gamma_max if gamma_max is not None
+                        else _TURN_MAX_DEG):
                     continue
                 size = min(g.edges[ea]["size"] or "C",
                            g.edges[eb]["size"] or "C")

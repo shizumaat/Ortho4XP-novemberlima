@@ -71,8 +71,12 @@ def _replace_polyline_turns(g: _Graph, pav_ok, min_turn_deg: float = 15.0):
             cs = e["cs"]
             if len(cs) < 3:
                 break
-            # per-vertex signed deflection
-            for k0 in range(1, len(cs) - 1):
+            # per-vertex signed deflection.  STRICTLY INTERIOR windows
+            # only (k0-1 >= 1, k1+1 <= len-2): the first and last
+            # segments of an edge are its junction tangents — bending
+            # them made the arc pass fit bulging arcs off corrupted
+            # directions (user re-test: ways 276/424)
+            for k0 in range(2, len(cs) - 2):
                 if _key(cs[k0]) in protected:
                     continue
                 a = cs[k0] - cs[k0 - 1]
@@ -90,7 +94,7 @@ def _replace_polyline_turns(g: _Graph, pav_ok, min_turn_deg: float = 15.0):
                 # grow the window over consecutive same-sign deflections
                 k1 = k0
                 total = d0
-                while k1 + 2 < len(cs):
+                while k1 + 3 < len(cs):
                     if _key(cs[k1 + 1]) in protected:
                         break
                     u = cs[k1 + 1] - cs[k1]
@@ -129,22 +133,40 @@ def _replace_polyline_turns(g: _Graph, pav_ok, min_turn_deg: float = 15.0):
                 # inside by a standard-radius corner (user: the route
                 # 'pushed well past' the real one) — sharp segmented
                 # turns give r_fit ~ r_std and behave as before
-                win_len = float(LineString(cs[k0 - 1:k1 + 2]).length)
-                r_fit = win_len / math.radians(max(total, 1.0))
+                # multi-vertex windows are chord-approximated CURVES —
+                # start from their own radius so the curve is
+                # reproduced; single/double corners have no own radius,
+                # start standard and let the follow-the-route cap
+                # shrink to a tight corner fillet
                 old_win = cs[k0 - 1:k1 + 2]
+                if k1 - k0 >= 2:
+                    win_len = float(LineString(old_win).length)
+                    r_fit = win_len / math.radians(max(total, 1.0))
+                    rr = min(max(r_fit, 0.25 * r_std), 400.0)
+                else:
+                    rr = r_std
                 placed = None
-                rr = min(max(r_fit, 0.25 * r_std), 400.0)
-                while rr >= 0.25 * r_std:
+                while rr >= 0.12 * r_std:
                     arc, t = _fillet(tuple(P), u_in, u_out, rr)
                     if arc is not None and t <= leg_in - 0.5 \
                             and t <= leg_out - 0.5 \
                             and pav_ok(LineString(arc)):
-                        # the replacement must FOLLOW the route: every
-                        # old window vertex within 4 m of the new path
+                        # the replacement must FOLLOW the route — BOTH
+                        # ways: every old vertex near the new path AND
+                        # every new sample near the old path (route
+                        # vertices are ~75 m apart; a big-radius arc
+                        # can sag unseen between them otherwise)
                         cand = LineString(np.vstack(
                             [[A], np.asarray(arc), [B]]))
-                        if max(cand.distance(Point(tuple(q)))
-                               for q in old_win) <= 4.0:
+                        old_line = LineString(old_win)
+                        ns = max(4, int(cand.length / 5.0))
+                        ok_dev = max(
+                            cand.distance(Point(tuple(q)))
+                            for q in old_win) <= 4.0 and max(
+                            old_line.distance(cand.interpolate(
+                                t2, normalized=True))
+                            for t2 in np.linspace(0, 1, ns)) <= 4.0
+                        if ok_dev:
                             placed = arc
                             break
                     rr *= 0.8
@@ -161,6 +183,38 @@ def _replace_polyline_turns(g: _Graph, pav_ok, min_turn_deg: float = 15.0):
     if os.environ.get("O4_ET_DEBUG"):
         print(f"[routearc] polyline turns replaced in place: {n_repl}",
               flush=True)
+
+
+def _merge_deg2_lane_nodes(g: _Graph):
+    """Merge the two lane edges at every pure degree-2 node, whatever
+    the angle — a corner between two route edges becomes an INTERIOR
+    vertex, so the in-place smoothing handles it as a tight corner
+    fillet under the follow-the-route cap ('just at the corner, then
+    straight segments' — user SE-end review), instead of the junction
+    pass decorating it with a standard-radius arc plus kept legs."""
+    changed = True
+    while changed:
+        changed = False
+        for ni, ends in list(g.incident().items()):
+            live = [(ei, aa) for ei, aa in ends if g.edges[ei]["alive"]]
+            if len(live) != 2:
+                continue
+            (ea, aa), (eb, ab) = live
+            if ea == eb:
+                continue
+            A, B = g.edges[ea], g.edges[eb]
+            if A["kind"] != "lane" or B["kind"] != "lane":
+                continue
+            a_cs = A["cs"][::-1] if aa else A["cs"]     # node LAST
+            b_cs = B["cs"] if ab else B["cs"][::-1]     # node FIRST
+            merged = np.vstack([a_cs, b_cs[1:]])
+            A["alive"] = False
+            B["alive"] = False
+            g.add_edge(merged, "lane",
+                       max(A["size"] or "", B["size"] or ""),
+                       max(A["w"], B["w"]))
+            changed = True
+            break
 
 
 def _weld_touching_tips(g: _Graph, reach: float = 1.5):
@@ -349,6 +403,7 @@ def synthesize_spine_v13(
     # weld crossings and stem-on-interior T junctions into real nodes
     _planarize_crossings(g)
     _weld_touching_tips(g)
+    _merge_deg2_lane_nodes(g)
     if dbg:
         alive = sum(1 for e in g.edges if e["alive"])
         L = sum(LineString(e["cs"]).length for e in g.edges if e["alive"])
@@ -362,12 +417,13 @@ def synthesize_spine_v13(
 
     len_before = sum(LineString(e["cs"]).length
                      for e in g.edges if e["alive"])
-    # turns INSIDE polylines and chord-connector edges are smoothed IN
-    # PLACE — endpoints and nodes untouched, connectivity preserved by
-    # construction (user: routes must never disconnect)
+    # turns INSIDE polylines are smoothed IN PLACE — strictly interior,
+    # endpoints/nodes/junction-tangents untouched, connectivity
+    # preserved by construction.  (Whole-connector smoothing is retired:
+    # it bent END tangents and the junction arcs fitted off the bent
+    # directions — the user's way-276/424 bulges.)
     _replace_polyline_turns(g, pav_ok)
-    _smooth_connector_edges(g, pav_ok)
-    _add_junction_arcs(g, pav_ok, runway_union=None)
+    _add_junction_arcs(g, pav_ok, runway_union=None, gamma_max=120.0)
     _add_runway_turns(g, runway_union, pav_all)
     # an ADDED arc duplicating route geometry dies, never the route
     _drop_duplicate_arcs(g)
