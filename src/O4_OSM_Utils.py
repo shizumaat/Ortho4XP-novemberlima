@@ -654,7 +654,14 @@ def get_overpass_data(query, bbox) -> bytes:
         current_server_key = _select_overpass_server_key(
             server_keys, failed_server_key
         )
-        UI.vprint(2, f"      Using OSM server {current_server_key}")
+        # Announce the attempt BEFORE sending it: a busy server can hold
+        # the connection open for minutes before failing, and without
+        # this line the console would show no sign of life until then.
+        UI.vprint(
+            1,
+            f"      Querying OSM server {current_server_key} "
+            f"(attempt {tentative}/{max_osm_tentatives})...",
+        )
         UI.vprint(3, overpass_query)
         wait_seconds = 2**tentative
         try:
@@ -702,9 +709,12 @@ def get_overpass_data(query, bbox) -> bytes:
                 f"new tentative in {wait_seconds} sec...",
             )
         failed_server_key = current_server_key
-        if UI.red_flag:
-            return 0
-        time.sleep(wait_seconds)
+        # Sleep in one-second slices so the GUI stop button stays
+        # responsive during a long backoff wait.
+        for _ in range(wait_seconds):
+            if UI.red_flag:
+                return 0
+            time.sleep(1)
     return 0
 
 
