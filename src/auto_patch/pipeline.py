@@ -1099,6 +1099,13 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     # area lies inside the existing apt.dat pavement
                     # union (it's a decorative overlay rather than
                     # new pavement).
+                    # The dropped polygon's OUTSIDE remainder is real
+                    # pavement though (user 2026-07-02, SPJC: a mostly-
+                    # overlapping DSF apron's outside strip was dropped
+                    # with it, leaving terrain holes beside the stands)
+                    # — keep any remainder piece above the sliver floor;
+                    # a true tinted overlay is ~100 % inside and still
+                    # drops entirely.
                     if apt_pav_union is not None:
                         try:
                             inter_area = pm.intersection(
@@ -1107,6 +1114,16 @@ def build_airport_pavement(icao: str, xplane_root: str,
                                     and inter_area / pm.area
                                     >= DSF_OVERLAY_FRAC):
                                 n_dsf_dropped_overlay += 1
+                                rem = pm.difference(apt_pav_union)
+                                for g in (rem.geoms
+                                          if rem.geom_type
+                                          == "MultiPolygon"
+                                          else [rem]):
+                                    if (g.geom_type == "Polygon"
+                                            and not g.is_empty
+                                            and g.area >= 50.0):
+                                        pav_polys.append(g)
+                                        n_dsf_kept += 1
                                 continue
                         except _GEOM_EXC:
                             pass
@@ -3383,6 +3400,8 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # pavement over grass (SPLP faces at 20-24 % on source) AND their
         # bulk displaces/clips the boundary→DEM bridges.
         _src = getattr(layout, "source_pavement_union", None)
+        if os.environ.get("O4_SLICE_SOURCE_CLIP", "1") != "1":
+            _src = None
         if _src is not None and not _src.is_empty:
             try:
                 _src_all = _src
@@ -3435,8 +3454,18 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # Taxi centerlines first, service roads appended — a face's
         # ``centerline_ids`` >= len(_cn_eff) are truck routes.
         _cn_all = list(_cn_eff) + _cn_svc
+        _cn_dbg_pts = None
+        _cp_spec = os.environ.get("O4_COVERAGE_PROBE")
+        if _cp_spec:
+            from .layout import _projection as _cp_proj
+            _cp_to_m = _cp_proj(layout.anchor)
+            _cn_dbg_pts = []
+            for _part in _cp_spec.split(";"):
+                _la, _lo = (float(v) for v in _part.split(","))
+                _cn_dbg_pts.append(_cp_to_m(_lo, _la))
         _cn_faces = build_global_slice_faces(
-            _cn_pav, _cn_all, runway_union=layout.runway_union, dedup=False)
+            _cn_pav, _cn_all, runway_union=layout.runway_union, dedup=False,
+            debug_pts=_cn_dbg_pts)
         _svc_base = len(_cn_eff)
         _svc_faces = set()
         for _fi, _f in enumerate(_cn_faces):
@@ -3484,6 +3513,8 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 polygon=rect, role=role, ref=ref, source_axis=axis,
                 is_bridge=(ri in bridge_rect_indices)))
 
+    from .geom_guard import coverage_probe as _covp
+    _covp(layout, "post-slice")
     # ── Rectless SVC connector → service_junction ────────────────
     # A service-road (SVC) centerline piece too CURVED/short for the rect
     # builder produces NO rect (the bend-split chops it into sub-min-length /
@@ -3665,6 +3696,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
     _airside_unified_presolve = False
     if compute_elevations:
         _progress.step()  # [5] Solving elevations (FAA grade compliance)
+        _covp(layout, "pre-finalize-repair")
         finalize.compute_elevations_and_repair_geometry(
             layout, icao, xplane_root, apt,
             nodes=nodes, ways=ways, to_m=to_m,
@@ -3999,11 +4031,13 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # re-role above so road-only junctions are already ``service_
         # junction`` (excluded here) rather than being demoted to a DEM
         # groundside blob that splits the road network.
+        _covp(layout, "post-road-lots")
         from .junction_repair import (
             _reclassify_runway_disconnected_to_groundside)
         _reclassify_runway_disconnected_to_groundside(
             layout, icao=icao, dem=dem,
             tile_lat=tile_lat, tile_lon=tile_lon)
+        _covp(layout, "post-rwy-disconnected")
 
         # Single-pass sloping-edge absorption (user 2026-05-17): dissolve
         # a sloping rect that shares a sloping edge with a genuine
@@ -4154,6 +4188,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # there is no post-solve step to reconcile (a post-solve merge just
         # relocated the cliff).  Runs AFTER the overlap-clip, which itself
         # creates small clipped apron fragments.  Hole-slice safe.
+        _covp(layout, "pre-apron-frag-merge")
         from .groundside import merge_small_apron_fragments
         _n_frag = merge_small_apron_fragments(layout)
         if _n_frag:
@@ -4229,6 +4264,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     f"pavement polygon(s) with DEM altitudes (pre-solve).")
         except _GEOM_EXC:
             pass
+        _covp(layout, "post-groundside-emit")
         try:
             _n_abs = _absorb_gs(layout)
             if _n_abs:

@@ -250,7 +250,12 @@ def classify_pair(p: PairContext) -> Optional[Allowance]:
     if p.spine_caps:
         cap = max(p.spine_caps)
     # — an apron body edge near a taxiway earns the route's blended cap.
-    elif p.blend_cap_fn is not None:
+    #   NEVER for a pair touching a BUILDING pad: the building↔spine 1 %
+    #   rule is the binding constraint (user 2026-07-02) — blending it to
+    #   the route cap (or a 4 % service route) silently legalised a 3.5 %
+    #   frontage chord at SPJC building-10031.
+    elif (p.blend_cap_fn is not None
+          and not p.a_building and not p.b_building):
         cap = p.blend_cap_fn()
     # — otherwise the shape's body cap (apron 1%, junction the taxi cap, …).
     else:
@@ -261,8 +266,13 @@ def classify_pair(p: PairContext) -> Optional[Allowance]:
     # it, the validator confirms it) — never a test-only fudge: the carve corners
     # lie ON the host ring, so without this the host law would wrongly regulate
     # the carved feature's own descent.  Relax only (raise the cap).
-    # — both endpoints on a service-road carve → the road's cap.
-    if p.both_road and SERVICE_ROAD_MAX_GRADE > cap:
+    # — both endpoints on a service-road carve → the road's cap.  NEVER for a
+    #   pair touching a BUILDING pad: service roads hug terminal frontages, so
+    #   the road zone otherwise swallows the building↔spine 1 % rule (SPJC
+    #   building-10031: a 3.5 % frontage chord read as a legal 4 % road pair —
+    #   user 2026-07-02, buildings are the heaviest constraint).
+    if (p.both_road and SERVICE_ROAD_MAX_GRADE > cap
+            and not p.a_building and not p.b_building):
         cap = SERVICE_ROAD_MAX_GRADE
 
     return Allowance.flat(cap)

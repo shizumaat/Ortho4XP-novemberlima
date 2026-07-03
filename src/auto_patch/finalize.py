@@ -283,13 +283,17 @@ def compute_elevations_and_repair_geometry(layout: PavementLayout, icao: str, xp
     # with a much larger neighbour (HECA -10244 = 485 m²
     # adjacent to -10243 = 30 k m²).  Merge them back so
     # JOSM doesn't show two near-duplicate polygons.
+    from .geom_guard import coverage_probe as _covp
+    _covp(layout, "pre-sliver-merge")
     _merge_sliver_junctions_into_neighbours(layout, icao=icao)
+    _covp(layout, "post-sliver-merge")
     # Per user 2026-06-12: a wedge rect whose narrow end cannot carry
     # its plane differential dissolves into the adjacent junction so
     # per-vertex node_altitudes + twist smooth the transition (KPHL
     # stub K5: 0.2 m across a 3.3 m end = 6 %).
     from .junction_repair import _absorb_wedge_rects_into_junctions
     _absorb_wedge_rects_into_junctions(layout, icao=icao)
+    _covp(layout, "post-wedge-absorb")
     # Per user 2026-05-12: drop thin orphan sliver junctions that
     # form residue along a stub / parallel rect's long edge.  These
     # appear when the apt.dat row-110 pavement boundary curves
@@ -299,6 +303,7 @@ def compute_elevations_and_repair_geometry(layout: PavementLayout, icao: str, xp
     # the merge pass above can't catch it.  Visible as a thin
     # residue strip along diagonal-stub sloping edges.
     _drop_thin_orphan_slivers(layout, icao=icao)
+    _covp(layout, "post-orphan-drop")
     # Note: _split_sloped_rects_at_violations runs from pipeline.py
     # AFTER per_surface_solve has populated altitude_high/_low on
     # rect shapes.  Calling it here (before solver) would find
@@ -391,8 +396,11 @@ def emit_terrain_transition_features(layout: PavementLayout, icao: str, xplane_r
         except _GEOM_EXC:
             pass
         try:
+            from .geom_guard import coverage_probe as _covp2
+            _covp2(layout, "pre-groundside-sep")
             n_sep = _separate_groundside_from_airside(
                 layout, _dem, _tile_lat, _tile_lon)
+            _covp2(layout, "post-groundside-sep")
             if n_sep:
                 UI.vprint(1,
                     f"  [pav-builder] separated {n_sep} groundside "

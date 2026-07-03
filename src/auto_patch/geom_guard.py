@@ -178,3 +178,39 @@ def report_post_solve_changes(layout: PavementLayout, snapshot: dict | None,
             f"  [geom-guard] {icao}: 0 airside shapes changed geometry "
             f"post-solve — invariant HOLDS.")
     return total
+
+
+# ── Coverage probe (env O4_COVERAGE_PROBE, debug aid) ────────────────
+def coverage_probe(layout, tag: str) -> None:
+    """Print which pavement shapes own each probe point, labelled ``tag``.
+
+    ``O4_COVERAGE_PROBE="lat,lon;lat,lon"`` — call sites sprinkle this
+    after each post-slice pipeline pass, so a point that LOSES its owner
+    between two tags names the pass that deleted the coverage (the SPJC
+    service-strip loss took a day to bisect by hand).  No-op without the
+    env var; never raises.
+    """
+    spec = os.environ.get("O4_COVERAGE_PROBE")
+    if not spec:
+        return
+    try:
+        from shapely.geometry import Point
+        from .layout import _projection
+        to_m = _projection(layout.anchor)
+        _ROLES = ("apron", "junction", "service_junction", "service_road",
+                  "building", "groundside_pavement", "runway",
+                  "runway_crossing")
+        out = []
+        for part in spec.split(";"):
+            la, lo = (float(v) for v in part.split(","))
+            x, y = to_m(lo, la)
+            pt = Point(x, y)
+            owners = [
+                f"{s.role}#{i}"
+                for i, s in enumerate(layout.shapes)
+                if s.role in _ROLES and s.polygon is not None
+                and not s.polygon.is_empty and s.polygon.contains(pt)]
+            out.append(f"({la:.5f},{lo:.5f})→{owners or ['LOST']}")
+        print(f"  [coverage-probe] {tag}: " + " | ".join(out))
+    except Exception as _e:                          # pragma: no cover
+        print(f"  [coverage-probe] {tag}: ERROR {_e!r}")

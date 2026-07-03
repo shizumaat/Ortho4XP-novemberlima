@@ -759,7 +759,18 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
     near = None
     if (APRON_TAXI_BLEND and shape.role == APRON_ROLE
             and ctx.centerlines and body_cap < TAXI_MAX_GRADE):
-        near = [_nearest_centerline(x, y, ctx) for (x, y) in ring]
+        # SERVICE roads never blend an apron: a truck route's 4 % cap
+        # belongs to its own strip faces, not to the apron around it
+        # (service lines entered ctx.centerlines as road-cap spines with
+        # the global slice, 2026-07-02).
+        from .config import SERVICE_ROAD_MAX_GRADE as _SVC_CAP_BL
+        _blend_ctx = ctx
+        if any(c.cap >= _SVC_CAP_BL - 1e-9 for c in ctx.centerlines):
+            import copy as _copy
+            _blend_ctx = _copy.copy(ctx)
+            _blend_ctx.centerlines = [
+                c for c in ctx.centerlines if c.cap < _SVC_CAP_BL - 1e-9]
+        near = [_nearest_centerline(x, y, _blend_ctx) for (x, y) in ring]
 
     # Per-vertex service-road-carve membership (O(n) once; the pair rule is then
     # ``both endpoints on a carve`` → road cap, via grade_law.classify_pair).

@@ -225,6 +225,7 @@ def build_global_slice_faces(
     dedup: bool = True,
     extra_cuts: list[LineString] | None = None,
     collect_spurs: list | None = None,
+    debug_pts: list | None = None,
 ) -> list[SliceFace]:
     """Cut ``pav_union`` by ``centerlines`` into conformant grading faces.
 
@@ -237,13 +238,25 @@ def build_global_slice_faces(
     pavement, each tagged with the (effective, post-dedup) centerline indices
     it touches; ``effective_centerlines`` returns that same list.
     """
+    def _dbg(tag, geom):
+        if not debug_pts:
+            return
+        try:
+            for (dx, dy) in debug_pts:
+                print(f"  [slice-dbg] {tag}: ({dx:.0f},{dy:.0f}) "
+                      f"covered={geom.intersects(Point(dx, dy).buffer(0.2))}")
+        except Exception as _e:
+            print(f"  [slice-dbg] {tag}: ERROR {_e!r}")
+
     if pav_union is None or pav_union.is_empty:
         return []
     pav = pav_union
+    _dbg("input-pav", pav)
     if runway_union is not None and not runway_union.is_empty:
         pav = pav.difference(runway_union)
     if pav.is_empty:
         return []
+    _dbg("pav-minus-runway", pav)
 
     if dedup:
         centerlines = dedup_centerlines(centerlines)
@@ -354,6 +367,9 @@ def build_global_slice_faces(
     # Final grid-snapped, re-noded arrangement → conformant faces by construction.
     faces: list[SliceFace] = [
         SliceFace(polygon=f, centerline_ids=[]) for f in _polygonize(cut_lines)]
+    if debug_pts:
+        from shapely.ops import unary_union as _uu2
+        _dbg("final-faces", _uu2([f.polygon for f in faces]))
 
     # Tag each face with the centerlines that run along its boundary.
     for face in faces:
