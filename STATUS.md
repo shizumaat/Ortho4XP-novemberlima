@@ -1,3 +1,60 @@
+# STATUS — handover (2026-07-02, session 2) — **V15: JOSM-review fixes round 1 done (waviness/buildings/welds/bridges/groundside)**
+
+> HEAD `d852f5a`+docs, tree clean, `O4_ROUTE_ARC_SPINE` default ON.
+> Suite: **17 failed / 329 passed / 16 skipped** — identical list to the v14.1
+> baseline (`/tmp/suite_failures_20260702_v14_1.txt`); the v15 fixes added 0.
+>
+> ## V15 (user JOSM/in-sim review round)
+> 1. **Waviness**: elevations were 0.1 m-quantized at writeback + emit → 1-4 %
+>    grade stairs every ~5 m.  Now 2 decimals end-to-end; worst-ring kink
+>    counts −60 %.  Remaining: localized 0.2-0.45 m solver dips (below).
+> 2. **Building 1 % rule**: frontage-seat keys were ROLE_APRON-only — under the
+>    slice buildings front ROLE_JUNCTION corridor faces, so seats fell back to
+>    the legacy whole-ring median.  Fixed → **CYXY 174 → 114 (< 138 rect
+>    baseline)**.
+> 3. **Unwelded T-vertices** (user's 60.7220178,-135.0806001): final
+>    insert-only weld (tol 0.01, overlays included, overlay receivers ADOPT
+>    donor altitude) → CYXY 7 → 0.  SPJC has 1 left (apron node 0.03 m off a
+>    building edge — beyond the tight weld tol, kept to avoid hairline-overlap
+>    regressions).
+> 4. **Boundary bridges**: keep-largest after buffer(0)/subtraction discarded
+>    the CYXY north wedge (terrain hole over faulty DEM).  Now every part
+>    ≥100 m² emits (overlap-guarded, last-word re-clip, boundary-proximate
+>    vertices take the ribbon clamp) → bridge area 210k → 252k m², north wedge
+>    back.  Rect baseline 333k — the delta is inner-edge DEPTH (100 m
+>    perpendicular vs the rect-era pavement-walk); tune if the sim still shows
+>    a gap >100 m from the boundary.
+> 5. **Groundside via service roads**: svc-only faces are service_junction at
+>    ANY width → the runway touch-chain severs at roads and lots demote via
+>    the existing reclassifier → CYXY groundside 31.8k → 73.6k m² (baseline
+>    76.5k); road-only lots 2 (was 1).
+>
+> ## Outstanding (categorized)
+> **A. Grade (law-true)** — CYXY 114 ✓(<138), SPJC 174 ✓(<198), SPLP 0 ✓,
+> **HECA 5061 vs 4138 ✗ undissected** (+4 cross-shape desyncs, runway
+> longitudinal red; suspect building seats at scale — run the session-1
+> playbook: rate → audit → forensics).  SPJC's worst = pre-existing
+> building26 2.6 m relief (10 pairs).
+> **B. Geometry** — `rests_on_source` red ×3 (SPLP #19/#20 82k/34k m² at
+> 20-24 % on source, CYXY #141 3.9k m²): NOT slice faces — the slice input is
+> now source-clipped, so these are created/merged by a POST-slice pass
+> (provenance tracing next; likely lot/fragment merges or reclassifies).
+> 1 residual T-junction at CYXY (pre-existing class).
+> **C. Visual** — localized solver dips (SPJC apron -10036 one 0.45 m jog,
+> -10054 0.2-0.35 m dips at ~(395-435) ring arc) = envelope clamps in the
+> body solve; bridge inner-edge depth (C above).
+> **D. Test debt** — compare-target recuts (SPJC, SPLP ×2) once v15 geometry
+> settles; test_pavement_grade universal-zero reds (by design); 2 stale
+> apt_dat_reader tuple tests; dsf cluster-bridge; CYXY spine-zero /
+> route-reach acceptance thresholds are rect-era — CYXY now beats baseline,
+> so re-baseline them.
+>
+> Debug helpers added: `O4_BRIDGE_DEBUG=1` (per-run bridge emit trace);
+> scratchpad tools worth recreating: tvertex_scan.py, edge_profile.py
+> (ring-roughness), vio_forensics.py, bridge_dump.py.
+
+---
+
 # STATUS — handover (2026-07-02, session 2) — **V14.1: route-arc GLOBAL SLICE default ON; SPJC+SPLP at/below baseline, CYXY close, HECA open**
 
 > Everything committed on `dev` (HEAD `fa69b21`), tree clean.
