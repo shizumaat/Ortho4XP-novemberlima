@@ -309,6 +309,10 @@ def compute_elevations_and_repair_geometry(layout: PavementLayout, icao: str, xp
     # residue strip along diagonal-stub sloping edges.
     _drop_thin_orphan_slivers(layout, icao=icao)
     _covp(layout, "post-orphan-drop")
+    # Progress: end of the pre-solve repair block — the per-surface solve
+    # (the bulk of the elevation phase) takes the bar from here.
+    from .progress import substep as _psub
+    _psub(0.15, "Solving elevations — geometry repairs done")
     # Note: _split_sloped_rects_at_violations runs from pipeline.py
     # AFTER per_surface_solve has populated altitude_high/_low on
     # rect shapes.  Calling it here (before solver) would find

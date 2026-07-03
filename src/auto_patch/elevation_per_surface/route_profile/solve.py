@@ -52,6 +52,8 @@ def solve_route_profile(layout, icao: str,
 
     # The within-shape grade graph (per-edge cap budgets + rect flat-end pairs)
     # and the rigid flat-across-width coupling — both elevation-neutral.
+    from auto_patch.progress import substep as _psub
+    _psub(0.20, "Solving elevations — grade graph built")
     shape_constraints = _build_shape_constraints(layout, bucket_to_idx)
     coupling = _build_level_coupling(shape_constraints)
 
@@ -70,6 +72,7 @@ def solve_route_profile(layout, icao: str,
     band, dem_fn, runway_pts, _G = reach_band_for(
         layout, elev, bucket_to_idx, dem, tile_lat, tile_lon, unified_graph=G)
     node_band = node_bands(nodes, band)
+    _psub(0.55, "Solving elevations — reach bands computed")
     building_seats = build_building_seats(
         layout, bucket_to_idx, band, dem_fn, runway_pts)
     # FEEDER CONVERGENCE (user directive #3): seat each NO-BUILDING apron flat at a
@@ -193,6 +196,7 @@ def solve_route_profile(layout, icao: str,
         for i in frozen:
             if i < n:
                 base_hard[i] = True
+        _psub(0.62, "Solving elevations — spine profile solved")
 
         # Seat every sloping taxi RECT as a flat-ended tilted plane (read from the
         # solved spine), freezing its corners so the body grades to it.  Returns
@@ -209,6 +213,7 @@ def solve_route_profile(layout, icao: str,
             elev, shape_constraints, base_hard, nodes, dem_elev,
             runway_nodes, building_seats, apron_body, u_spine_nodes, u_spine_adj,
             node_band, u_spine_floor, coupling, apron_smooth=True)
+        _psub(0.78, "Solving elevations — body fill solved")
         # Guarantee compliance: project EVERY grade-graph edge ≤cap with the
         # spine + runway + buildings + seams HARD; only the apron/junction body
         # flexes.  Edges left over cap have both ends hard = genuine steps.
@@ -263,6 +268,7 @@ def solve_route_profile(layout, icao: str,
                 print(f"  [groundside-reach] {icao}: re-levelled {_nrl} "
                       f"groundside piece(s); pinned {len(_gs_hard)} route node(s); "
                       f"DEM-followed {len(_svc_moved)} service node(s).")
+        _psub(0.88, "Solving elevations — feasibility projection")
         # SPINE-YIELD projection (global-slice spine adaptation, 2026-07-02).
         # Under the global slice most graph nodes ARE spine (every face is
         # born from a centerline cut), so "both ends frozen = genuine step"
@@ -369,6 +375,7 @@ def solve_route_profile(layout, icao: str,
             rem, bh = feasibility_project(elev, joint, yield_hard,
                                           force_scalar=True, max_iters=800,
                                           flat_groups=pad_groups or None)
+        _psub(0.97, "Solving elevations — writing back")
         n_terms, n_rects, n_juncs = _writeback(layout, elev, bucket_to_idx)
         if _os.environ.get("O4_STEP_DEBUG") == "1":
             print(f"  [unified] {icao}: {len(frozen)} spine node(s) solved, "
