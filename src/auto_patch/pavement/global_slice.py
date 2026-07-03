@@ -136,14 +136,20 @@ def classify_faces(faces: list[SliceFace], centerlines: list[LineString]
 
 
 def _resample(line: LineString, step: float) -> LineString:
-    """Even node spacing along ``line`` at ``step`` m so the shared edge a
-    through-centerline creates carries nodes ~``step`` apart (matching the
-    spine densification the solver expects)."""
+    """Densify ``line`` to ≤``step`` m node spacing PRESERVING every original
+    vertex (shapely ``segmentize``).  The old even-respacing MOVED original
+    vertices (bends / arc points) off the design line unless a sample landed
+    exactly on them — the skeleton no longer translated cleanly to the
+    emitted spine (user 2026-07-03: an input spine node ended up 10 m from
+    any emitted node)."""
     L = line.length
     if L <= step or step <= 0:
         return line
-    n = max(2, int(round(L / step)) + 1)
-    return LineString([line.interpolate(i * L / (n - 1)) for i in range(n)])
+    try:
+        import shapely
+        return shapely.segmentize(line, step)
+    except Exception:
+        return line
 
 
 def _as_lines(geom) -> list[LineString]:
@@ -318,6 +324,84 @@ def build_global_slice_faces(
                 cut_lines.append(spur)
                 if collect_spurs is not None:
                     collect_spurs.append(("deadend", spur))
+
+    # ── HOLE KEYHOLES (user 2026-07-03) ──────────────────────────────
+    # polygonize assigns an unconnected hole ring as an INTERIOR ring of
+    # the surrounding face; the OSM emit drops interior rings (rect-era
+    # X-Plane compat — the rects that used to punch the holes covered
+    # them), and the rect-era hole decomposer runs in junction_emit,
+    # which the slice bypasses.  ONE cut from each hole ring to the
+    # nearest SPINE line (else the outer boundary) splits every annulus
+    # into SIMPLE faces that wrap the hole — the hole survives as
+    # unpaved ground and the surrounding pavement emits correctly.
+    from shapely.ops import nearest_points as _np2
+    _live_cl = [c for c in clipped if c is not None]
+    try:
+        _cl_union = unary_union(_live_cl) if _live_cl else None
+    except Exception:
+        _cl_union = None
+    def _hole_spur(_hole_ls, _from_pt, _piece):
+        """Shortest in-pavement connection from ``_from_pt`` (on the hole
+        ring) to the nearest spine line, else the piece exterior."""
+        for _target in (_cl_union, _piece.exterior):
+            if _target is None or _target.is_empty:
+                continue
+            try:
+                _b = _np2(_from_pt, _target)[1]
+            except Exception:
+                continue
+            if _from_pt.distance(_b) <= 0.05:
+                return False                      # already touches/noded
+            _cand = LineString([(_from_pt.x, _from_pt.y), (_b.x, _b.y)])
+            try:
+                if _piece.buffer(0.05).covers(_cand):
+                    return _cand
+            except Exception:
+                continue
+        return None
+
+    for _piece in (pav.geoms if pav.geom_type == "MultiPolygon" else [pav]):
+        if _piece.geom_type != "Polygon":
+            continue
+        for _hole in _piece.interiors:
+            try:
+                _hole_ls = LineString(_hole.coords)
+            except Exception:
+                continue
+            # TWO spurs per hole, from (near-)opposite sides of the ring:
+            # a single cut opens the annulus into a SLIT polygon whose
+            # doubled zero-width edge collapses under vertex dedup and
+            # paves the hole over again (measured: 19 SPJC holes covered
+            # by "simple" slit junctions).  Two cuts split it into two
+            # clean simple faces — same as the rect-era guillotine.
+            try:
+                _a1 = _np2(_hole_ls,
+                           _cl_union if _cl_union is not None
+                           and not _cl_union.is_empty
+                           else _piece.exterior)[0]
+            except Exception:
+                continue
+            _s1 = _hole_spur(_hole_ls, _a1, _piece)
+            if _s1 is False:
+                # ring already touches the arrangement once; still add the
+                # SECOND cut so no slit forms.
+                _s1 = None
+            elif _s1 is not None:
+                cut_lines.append(_s1)
+                if collect_spurs is not None:
+                    collect_spurs.append(("hole", _s1))
+            # antipodal point along the ring from the first attachment
+            try:
+                _arc0 = _hole_ls.project(_a1)
+                _a2 = _hole_ls.interpolate(
+                    (_arc0 + 0.5 * _hole_ls.length) % _hole_ls.length)
+            except Exception:
+                continue
+            _s2 = _hole_spur(_hole_ls, _a2, _piece)
+            if _s2 not in (None, False):
+                cut_lines.append(_s2)
+                if collect_spurs is not None:
+                    collect_spurs.append(("hole", _s2))
 
     if extra_cuts:
         cut_lines.extend(c for c in extra_cuts if c is not None and not c.is_empty)

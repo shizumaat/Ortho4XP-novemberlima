@@ -4578,6 +4578,45 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # build_nobuilding_apron_seats, so the shape keeps role=apron — correct
         # geometry that passes the junction invariants (HECA #455 stays an apron).
 
+        # ── SIMPLE-SHAPES INVARIANT (user 2026-07-03) ─────────────────────
+        # No airside shape may reach the solver/emit with INTERIOR rings:
+        # the OSM emit drops them (rect-era X-Plane compat), which paves
+        # over the grass hole.  Slice-level hole keyholes handle most; the
+        # post-slice MERGE passes can re-create an annulus by unioning the
+        # faces around a hole.  Decompose any survivor with the (modernised)
+        # hole slicer — the same _decompose_polygon_with_holes the rect
+        # model ran in junction_emit, which the global slice bypasses.
+        if _global_slice_spine:
+            from .pavement.junctions import _decompose_polygon_with_holes
+            from .layout import ROLE_SERVICE_JUNCTION as _RSJ2
+            _new_shapes = []
+            _n_decomp = 0
+            for _s in layout.shapes:
+                _p = _s.polygon
+                if (_s.role in (ROLE_APRON, ROLE_JUNCTION, _RSJ2)
+                        and _p is not None and not _p.is_empty
+                        and _p.geom_type == "Polygon" and _p.interiors):
+                    try:
+                        _pieces = _decompose_polygon_with_holes(_p)
+                    except Exception:
+                        _pieces = [_p]
+                    if _pieces and (len(_pieces) > 1
+                                    or not _pieces[0].interiors):
+                        _n_decomp += 1
+                        for _pc in _pieces:
+                            _new_shapes.append(BuiltShape(
+                                polygon=_pc, role=_s.role, ref=_s.ref,
+                                source_axis=_s.source_axis,
+                                is_bridge=_s.is_bridge))
+                        continue
+                _new_shapes.append(_s)
+            if _n_decomp:
+                layout.shapes[:] = _new_shapes
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: decomposed {_n_decomp} "
+                    f"holed airside shape(s) into simple pieces "
+                    f"(pre-solve).")
+
         if USE_PER_SURFACE_SOLVER and layout.anchor is not None:
             # Runway CIFP thresholds are LOCKED — the solver never moves them.
             # The old runway-threshold-relief passes (step 3
