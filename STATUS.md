@@ -1,3 +1,25 @@
+# STATUS — ROUND-4 QUEUE (user-approved 2026-07-03): SPJC 178 → 0
+
+> 1. **Solver-graph coverage gap** (whole ≥1% tail, ~54): 13 long
+>    building-frontage chords in the validator but NOT the solver joint graph
+>    — building-key detection mismatch on the solver side (V15 apron_keys
+>    family, likely grade_graph.build_context).  Diagnose OFFLINE (proj_lab
+>    gapcheck pair → step through classify_pair).  Fix identity, not geometry.
+> 2. **Item B — off-source post-slice merges**: probe CYXY apron #120 centroid
+>    (60.71179,-135.07152) through the coverage probes (one build), fix the
+>    guilty pass (clip to source_pavement_union / veto), then flip
+>    `O4_SPINE_STEP_STRAIGHT_M=24` ON (banked: −23 law-true, −9.5 s, SPLP
+>    rests_on_source clears).
+> 3. **Hairline floor (~124 <0.5%)**: (a) 51 endpoints inserted POST-solve
+>    (T-weld adoptions etc.) → final micro-projection on the emitted node set
+>    before to_osm; (b) 2-decimal rounding eats sub-metre budgets — test
+>    3-decimals offline in proj_lab first.
+> 4. **Lock + propagate**: recut SPJC compare-target; re-measure CYXY (expect
+>    big free drop from movable pads); HECA by playbook (rate → audit →
+>    gapcheck) LAST so only HECA-shaped classes remain.
+
+---
+
 # STATUS — perf round (2026-07-03) — `bb8dd16`: SPJC build **105.6 → 86.8 s**
 
 > Profile-driven (cProfile ranked it; scratchpad profile_build.py):

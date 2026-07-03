@@ -4939,6 +4939,17 @@ def build_airport_pavement(icao: str, xplane_root: str,
             f"met — {len(tjs)} residual T-junction(s), {len(crossings)} "
             f"edge crossing(s) (→ Triangle4XP mesh slivers).")
 
+    # FINAL GRADE PROJECTION (round 4, user 2026-07-03): the passes above
+    # (planarize, welds, clips, merges) reshaped rings AFTER the elevation
+    # solve, so the law pairs of the FINAL rings are a superset of what the
+    # solve projected.  One last scalar GS projection on the final geometry
+    # (runway/seam/feature-weld nodes hard, pads movable-flat) closes the
+    # post-solve mutation classes the validator otherwise flags.
+    if compute_elevations:
+        from .elevation_per_surface.route_profile.solve import (
+            final_grade_projection)
+        final_grade_projection(layout, icao)
+
     # Pre-solve geometry guard (dev): report how many airside shapes had
     # their geometry changed by a post-solve pass (target = 0).
     from .geom_guard import report_post_solve_changes

@@ -549,6 +549,14 @@ def _spine_crossing_predicate(shape: GradeShape, ctx: GradeContext,
         return None
 
     def _crosses(xa, ya, xb, yb):
+        # ⚠ MEASURED DEAD END (2026-07-03, do not retry as-is): trimming ~1 m
+        # off the chord ends (with either ``crosses`` or ``intersects``) to fix
+        # the endpoint-contact instability made SPJC WORSE (178→325): the trim
+        # flips verdicts for the common chords that START next to a spine cut
+        # node, and the two readers' mm-different inputs then diverge on MORE
+        # pairs, not fewer.  The real fix is upstream: give both readers
+        # IDENTICAL inputs (sidecar carries the solver's exact spine geometry /
+        # frame), not a more forgiving predicate.
         try:
             ch = LineString(((xa, ya), (xb, yb)))
         except Exception:

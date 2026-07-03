@@ -392,6 +392,115 @@ def solve_route_profile(layout, icao: str,
         return
 
 
+def final_grade_projection(layout, icao: str = "") -> None:
+    """LAST-WORD grade projection on the FINAL emitted geometry (round 4,
+    user 2026-07-03).
+
+    Post-solve passes (planarize inserts, final T-vertex weld adoptions,
+    merges, clip rebuilds) reshape rings AFTER the elevation solve, so the
+    law pairs of the FINAL rings are a superset of what the solve projected
+    — measured at SPJC: 13 whole long chords + 51 inserted endpoints, most
+    of the residual law-true violations.  Rebuild the law graph on the
+    final shapes and run one scalar GS projection: runway/CIFP corners,
+    tile-seam nodes and nodes welded to already-emitted FEATURE shapes
+    (boundary ribbon / bridges / clearance adopted pavement values earlier)
+    are HARD; building pads move as rigid flat groups; everything else
+    flexes minimally from its solved value (warm seed → only violated
+    neighbourhoods move).  Gate ``O4_FINAL_GRADE_PROJECTION=0`` disables.
+    Global-slice only (the rect path keeps its byte-identical emit)."""
+    from auto_patch.config import CURVE_NATIVE_SPINE, ROUTE_ARC_SPINE
+    if not (CURVE_NATIVE_SPINE or ROUTE_ARC_SPINE):
+        return
+    # ⚠ DEFAULT OFF (measured 2026-07-03): on SPJC the final-geometry law
+    # graph is already satisfied at seed (31 residual edges, validator count
+    # UNCHANGED at 178) — the residual violations are READER-DIVERGENT pairs
+    # (validator-only verdicts, crossing-predicate input asymmetry), which no
+    # projection over the solver's own graph can fix.  Costs ~12-15 s.  Keep
+    # for when the reader inputs are unified (then this pass closes whatever
+    # post-solve mutations reopen).
+    if _os.environ.get("O4_FINAL_GRADE_PROJECTION", "0") != "1":
+        return
+    from auto_patch.elevation_per_surface.solver_primitives import (
+        PAVEMENT_ROLES, _build_node_list, _build_shape_constraints,
+        _runway_node_set, _seed_elevations, _writeback)
+    from auto_patch import grade_graph as _GG
+    from auto_patch.layout import ROLE_BUILDING
+    from .one_solve import feasibility_project
+
+    t0 = _time.time()
+    nodes, b2i = _build_node_list(layout)
+    if not nodes:
+        return
+    elev, base_hard, _have = _seed_elevations(layout, nodes, b2i)
+    n = len(elev)
+
+    ctx = _GG.build_context(layout, b2i)
+    shape_constraints = _build_shape_constraints(layout, b2i, ctx=ctx)
+    G = _GG.build_unified_graph(layout, b2i, ctx=ctx)
+    u_edges = [(a, b, cap.at(_GG._dist(G.pos.get(a), G.pos.get(b)), 0.0))
+               for (a, b, cap, _sp) in G.edges
+               if a in G.pos and b in G.pos]
+    joint = list(shape_constraints) + [{"edges": u_edges}]
+
+    hard = {i for i in range(n) if base_hard[i]}
+    hard |= {i for i in _runway_node_set(layout, b2i) if i < n}
+    # tile-seam nodes: terrain-pinned for cross-tile stitching.
+    try:
+        for i, (x, y) in enumerate(nodes):
+            la, lo = layout.m_to_ll(x, y)
+            if (abs(la - round(la)) < 1e-7 or abs(lo - round(lo)) < 1e-7):
+                hard.add(i)
+    except Exception:
+        pass
+    # nodes welded to already-emitted FEATURE shapes (ribbon/bridge/
+    # clearance/groundside copied pavement values BEFORE this pass — moving
+    # the pavement side now would tear those welds open).
+    feat_keys: set = set()
+    for s in layout.shapes:
+        if (s.role in PAVEMENT_ROLES or s.polygon is None
+                or s.polygon.is_empty):
+            continue
+        try:
+            for (x, y) in s.polygon.exterior.coords:
+                feat_keys.add((round(x, 3), round(y, 3)))
+        except Exception:
+            continue
+    if feat_keys:
+        for i, (x, y) in enumerate(nodes):
+            if (round(x, 3), round(y, 3)) in feat_keys:
+                hard.add(i)
+
+    # building pads: rigid movable FLAT groups (same model as the yield).
+    cps = layout.canonical_points
+    pad_groups = []
+    pad_nodes: set = set()
+    if _os.environ.get("O4_YIELD_MOVABLE_PADS", "1") == "1":
+        for s in layout.shapes:
+            if (s.role != ROLE_BUILDING or s.polygon is None
+                    or s.polygon.is_empty):
+                continue
+            g = {b2i.get(cps.get_or_add(float(x), float(y)))
+                 for (x, y) in s.polygon.exterior.coords}
+            g = {i for i in g if i is not None and i < n}
+            if len(g) >= 2:
+                pad_groups.append(g)
+                pad_nodes |= g
+        hard -= pad_nodes
+
+    rem, bh = feasibility_project(elev, joint, hard, force_scalar=True,
+                                  max_iters=400,
+                                  flat_groups=pad_groups or None)
+    _writeback(layout, elev, b2i)
+    try:
+        import O4_UI_Utils as _UI
+        _UI.vprint(1, f"  [final-projection] {icao}: {len(nodes)} nodes, "
+                      f"{len(hard)} hard, {len(pad_groups)} pad group(s) → "
+                      f"{rem} edge(s) over cap ({bh} both-hard) "
+                      f"in {_time.time() - t0:.1f}s.")
+    except Exception:
+        pass
+
+
 def _open4(poly):
     c = list(poly.exterior.coords)
     return c[:-1] if c and c[0] == c[-1] else c
