@@ -1145,6 +1145,30 @@ class PavementLayout:
             lines.append("  </relation>")
         lines.append("</osm>")
         Path(path).write_text("\n".join(lines) + "\n")
+        self._write_axes_sidecar(path)
+
+    def _write_axes_sidecar(self, path: str) -> None:
+        """Write the taxi AXES + chained ROUTES next to the patch as
+        ``<path>.axes.json`` — the within-shape grade law's centerline
+        context (spine membership, per-letter caps, anisotropic Δs∥
+        decomposition).  ``tools/check_grade.py`` auto-loads it so the
+        STANDALONE check applies the SAME law the solver and the suite
+        use; without it the CLI falls back to the context-free check
+        and over-flags every spine/blend-relaxed pair.  The sidecar is
+        invisible to Ortho4XP (the patch loader only globs
+        ``*.patch.osm``).  Best-effort: a sidecar failure never fails
+        an emit."""
+        try:
+            import json as _json
+            from .verification import taxi_axes_ll, taxi_routes_ll
+            data = {
+                "axes": [[pts, cL, cT]
+                         for (pts, cL, cT) in taxi_axes_ll(self)],
+                "routes": taxi_routes_ll(self),
+            }
+            Path(str(path) + ".axes.json").write_text(_json.dumps(data))
+        except Exception:
+            pass
 
 
 _PATCH_SOURCE_APT_RE = re.compile(r"o4_apt_dat='([^']*)'")

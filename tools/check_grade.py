@@ -1389,6 +1389,24 @@ def main(argv=None) -> int:
     p.add_argument("--strict", action="store_true",
                    help="Exit 1 if any check has any violation.")
     args = p.parse_args(argv)
+    # AXES SIDECAR (2026-07-02): ``layout.to_osm`` writes the taxi axes +
+    # chained routes to ``<patch>.axes.json`` so the STANDALONE check can
+    # apply the SAME within-shape law the solver and the suite use (spine
+    # membership, per-letter caps, anisotropic Δs∥ credit).  Auto-loaded
+    # when present; without it the check is context-free and over-flags
+    # every spine/blend-relaxed pair.
+    taxi_axes_ll = routes_ll = None
+    sidecar = Path(str(args.osm) + ".axes.json")
+    if sidecar.exists():
+        try:
+            import json as _json
+            _data = _json.loads(sidecar.read_text())
+            taxi_axes_ll = _data.get("axes") or None
+            routes_ll = _data.get("routes") or None
+            print(f"  (axes sidecar loaded: {len(taxi_axes_ll or [])} axes, "
+                  f"{len(routes_ll or [])} routes — law-true check)")
+        except Exception as ex:
+            print(f"  (axes sidecar unreadable, context-free check: {ex})")
     within, cross, steps = run_checks(
         args.osm,
         max_grade_pct=args.max_grade,
@@ -1396,6 +1414,8 @@ def main(argv=None) -> int:
         edge_search_m=args.edge_search_m,
         edge_step_m=args.edge_step_m,
         top_n=args.top_n,
+        taxi_axes_ll=taxi_axes_ll,
+        routes_ll=routes_ll,
     )
     if args.strict and (within or cross or steps):
         return 1
