@@ -171,6 +171,11 @@ def solve_route_profile(layout, icao: str,
             _seam_spine_anchors(layout, G, u_spine_adj, elev, base_hard,
                                 dem, tile_lat, tile_lon, _cut_lines)
 
+        # TRUTH anchors — everything hard BEFORE the phase-A spine freeze
+        # (runway/CIFP + tile-seam DEM pins + runway joins + building spine
+        # seats).  The spine-yield projection below may move any node NOT in
+        # this set.
+        truth_hard = {i for i in range(n) if base_hard[i]}
         # PHASE A — dedicated SMOOTH spine solve on the unified graph (geometry
         # nodes), runway/seam HARD at their LOCAL value, building floors honoured.
         # The spine is min-curvature and ≤cap by construction, then FROZEN so the
@@ -226,6 +231,7 @@ def solve_route_profile(layout, icao: str,
         #   2. Weld each service-road connector mouth to the (re-levelled) groundside
         #      altitude, so connector and groundside emit as ONE node (no cliff).
         # Gate off → elev + groundside untouched → byte-identical.
+        _gs_hard = set()
         if _os.environ.get("O4_GROUNDSIDE_MOUTH_ANCHOR", "1") == "1":
             from auto_patch.config import SERVICE_ROAD_MAX_GRADE
             from .anchors import apply_groundside_reach
@@ -249,6 +255,29 @@ def solve_route_profile(layout, icao: str,
                 print(f"  [groundside-reach] {icao}: re-levelled {_nrl} "
                       f"groundside piece(s); pinned {len(_gs_hard)} route node(s); "
                       f"DEM-followed {len(_svc_moved)} service node(s).")
+        # SPINE-YIELD projection (global-slice spine adaptation, 2026-07-02).
+        # Under the global slice most graph nodes ARE spine (every face is
+        # born from a centerline cut), so "both ends frozen = genuine step"
+        # no longer holds: two route chains solved independently in PHASE A
+        # can freeze 2.6 m apart one ring-edge from each other (SPJC measured
+        # 1622→3034 frozen-spine/spine residual edges).  Re-project with only
+        # the TRUTH anchors hard — runway/CIFP, tile-seam DEM pins, building
+        # seats, groundside truck-route pins — so the frozen profiles yield
+        # minimally where they disagree.  Runs LAST (after the groundside
+        # reach block, whose own re-projections hold the full frozen spine
+        # and would otherwise re-wall what an earlier yield fixed), right
+        # before writeback.  The phase-A profile is the seed, so smooth
+        # spines stay smooth wherever they were already feasible.
+        # Rect-model builds keep the legacy behaviour (global-slice only).
+        from auto_patch.config import CURVE_NATIVE_SPINE, ROUTE_ARC_SPINE
+        if CURVE_NATIVE_SPINE or ROUTE_ARC_SPINE:
+            yield_hard = (truth_hard
+                          | {i for i in runway_nodes if i < n}
+                          | {i for i in building_seats if i < n}
+                          | {i for i in _gs_hard if i < n})
+            rem, bh = feasibility_project(elev, shape_constraints, yield_hard)
+            rem, bh = feasibility_project(elev, [{"edges": u_edges}],
+                                          yield_hard)
         n_terms, n_rects, n_juncs = _writeback(layout, elev, bucket_to_idx)
         if _os.environ.get("O4_STEP_DEBUG") == "1":
             print(f"  [unified] {icao}: {len(frozen)} spine node(s) solved, "

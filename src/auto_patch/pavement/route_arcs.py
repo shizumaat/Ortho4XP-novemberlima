@@ -499,15 +499,15 @@ def apply_route_arc_spine(layout, icao: str = "") -> int:
     centerlines as the route-arc spine — the apt.dat route graph
     verbatim (metric-true distances for the feasibility/anchor math)
     plus standard-radius arcs at every junction turn, bend and runway
-    contact — right before the junction-centerline-spine slice consumes
-    them.  Service routes pass through untouched.
+    contact — right before the global slice consumes them.  Service
+    routes pass through untouched.
 
-    Gate O4_ROUTE_ARC_SPINE, default OFF: the geometry flows end to end
-    (SPJC full build verified), but the un-adapted solver reports 2x
-    within-shape grade violations vs baseline (1242 -> 2533) — the
-    anisotropic-curve solver adaptation is the next phase; flip the
-    gate on with it."""
-    if os.environ.get("O4_ROUTE_ARC_SPINE", "0") != "1":
+    Gate ``config.ROUTE_ARC_SPINE`` (env O4_ROUTE_ARC_SPINE).  Called from
+    the pipeline's GLOBAL-SLICE stage (user ruling 2026-07-02): with the
+    full route-arc spine the taxi-rect pipeline is disabled and pav_union
+    is cut once by these ways — the spine runs everywhere."""
+    from ..config import ROUTE_ARC_SPINE
+    if not ROUTE_ARC_SPINE:
         return 0
     cls = list(getattr(layout, "apt_taxi_centerlines", None) or [])
     if not cls:

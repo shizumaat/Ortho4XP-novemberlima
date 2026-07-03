@@ -1244,6 +1244,16 @@ JUNCTION_SPINE_INTERIOR_STITCH = _os.environ.get(
 # OFF; gate-OFF byte-identical to the rect pipeline.  Env O4_CURVE_NATIVE_SPINE.
 CURVE_NATIVE_SPINE = _os.environ.get("O4_CURVE_NATIVE_SPINE", "0") == "1"
 
+# (20260702) ROUTE-ARC SPINE — the apt.dat 1201/1202 route graph VERBATIM
+# (metric-true taxi distances, the feasibility/anchor math depends on them)
+# plus standard-radius fillet arcs at every junction turn, bend and runway
+# contact (pavement/route_arcs.py).  The spine feeds the curve-native GLOBAL
+# SLICE above (user ruling 2026-07-02: with the full spine, taxi-RECT
+# creation is disabled so the spine can run everywhere — pav_union is cut
+# once by the route-arc ways; no rect build, no junction emit, no
+# per-junction spine slice).  Env O4_ROUTE_ARC_SPINE.
+ROUTE_ARC_SPINE = _os.environ.get("O4_ROUTE_ARC_SPINE", "0") == "1"
+
 # (20260620) SPINE PIECE ROLE RE-EVALUATION — apron-spine grade model.
 # ``_reclassify_apron_junctions`` (junction_repair) runs BEFORE the spine
 # slice and demotes a WIDE pavement blob (boundary > 55 m from any

@@ -77,39 +77,61 @@ _CORRIDOR_MAX_WIDTH_M = 50.0
 # gentle apron body model, not junction all-pair at 1.5%.  Matches the rect
 # model, where junctions are small residue pieces and aprons are the big blobs.
 _JUNCTION_MAX_AREA_M2 = 2500.0
+# Route-territory test for BIG multi-centerline faces: the fraction of the
+# face's area within a taxi-corridor half-width of its own centerlines.  A
+# junction complex (however large) is mostly within reach of the routes that
+# cross it; a stand/terminal apron with one taxilane along its edge is not.
+# Half-width ~ICAO-E/F corridor (route-arc ways carry no per-face width here).
+_ROUTE_TERRITORY_HALF_W_M = 25.0
+_ROUTE_TERRITORY_MIN_FRAC = 0.55
 
 
 def classify_faces(faces: list[SliceFace], centerlines: list[LineString]
                    ) -> None:
     """Tag each face corridor / junction / apron from spine topology, in place.
 
-    * **junction** — ≥2 centerlines meet/cross AND the face is small
-      (≤ ``_JUNCTION_MAX_AREA_M2``); a bigger multi-centerline face is an apron.
-    * **corridor** — exactly 1 centerline, and the face is narrow (mean width
-      = area / shared-edge length ≤ ``_CORRIDOR_MAX_WIDTH_M``); ``axis`` is set.
-    * **apron** — everything else (0 centerlines, wide 1-CL, or big multi-CL)."""
+    * **corridor** — the face is narrow (mean width = area / shared-edge
+      length ≤ ``_CORRIDOR_MAX_WIDTH_M``); ``axis`` is the longest touching
+      centerline.  Piece COUNT is deliberately not used: a noded route graph
+      (route-arc spine) borders one corridor with many consecutive fragments.
+    * **junction** — small multi-centerline face (≤ ``_JUNCTION_MAX_AREA_M2``)
+      OR a big face that is ROUTE TERRITORY (≥ ``_ROUTE_TERRITORY_MIN_FRAC``
+      of its area within ``_ROUTE_TERRITORY_HALF_W_M`` of its centerlines) —
+      an aircraft-movement surface graded with the taxi law, not the 1 %
+      stand-apron law.
+    * **apron** — everything else (no centerlines, or open stand/terminal
+      pavement beyond route reach)."""
     for face in faces:
         ids = face.centerline_ids
-        if len(ids) >= 2:
-            if face.polygon.area <= _JUNCTION_MAX_AREA_M2:
-                face.kind = "junction"
-                face.axis = None
-                continue
-            # big multi-centerline pavement → apron (handled below)
-        elif len(ids) == 1:
-            cl = centerlines[ids[0]]
+        if not ids:
+            face.kind = "apron"
+            face.axis = None
+            continue
+        cls = [centerlines[i] for i in ids]
+        shared = 0.0
+        try:
+            buf = unary_union([c.buffer(_ON_TOL_M, cap_style=2) for c in cls])
+            shared = face.polygon.exterior.intersection(buf).length
+        except Exception:
             shared = 0.0
-            try:
-                shared = face.polygon.exterior.intersection(
-                    cl.buffer(_ON_TOL_M, cap_style=2)).length
-            except Exception:
-                shared = 0.0
-            width = (face.polygon.area / shared) if shared > 1.0 else 1e9
-            if width <= _CORRIDOR_MAX_WIDTH_M:
-                face.kind = "corridor"
-                face.axis = cl
-                continue
-        face.kind = "apron"
+        width = (face.polygon.area / shared) if shared > 1.0 else 1e9
+        if width <= _CORRIDOR_MAX_WIDTH_M:
+            face.kind = "corridor"
+            face.axis = max(cls, key=lambda c: c.length)
+            continue
+        if face.polygon.area <= _JUNCTION_MAX_AREA_M2:
+            face.kind = "junction"
+            face.axis = None
+            continue
+        frac = 0.0
+        try:
+            reach = unary_union(
+                [c.buffer(_ROUTE_TERRITORY_HALF_W_M) for c in cls])
+            frac = face.polygon.intersection(reach).area / face.polygon.area
+        except Exception:
+            frac = 0.0
+        face.kind = ("junction" if frac >= _ROUTE_TERRITORY_MIN_FRAC
+                     else "apron")
         face.axis = None
 
 

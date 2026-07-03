@@ -3355,9 +3355,20 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # arrangement.  The faces are conformant by construction, so the rect
     # build, junction emit and spine slice are all bypassed under the gate.
     # docs/curve_native_spine_v2_plan.md.
-    from .config import CURVE_NATIVE_SPINE
+    from .config import CURVE_NATIVE_SPINE, ROUTE_ARC_SPINE
     emitted_taxi_rects: List[Polygon] = []
-    if CURVE_NATIVE_SPINE:
+    # ROUTE-ARC SPINE (user ruling 2026-07-02): with the full route-arc spine
+    # the taxi-rect pipeline is disabled entirely — the spine feeds the SAME
+    # global slice, so it runs everywhere (rects would otherwise confine it
+    # to junction/apron residue and double-cut every junction: arcs + their
+    # corner legs sliced separately measured 2.25x the constrained pairs).
+    # Recognized painted centerlines, when on, stay the spine source.
+    _global_slice_spine = CURVE_NATIVE_SPINE or ROUTE_ARC_SPINE
+    if _global_slice_spine:
+        if (ROUTE_ARC_SPINE
+                and os.environ.get("O4_RECOGNIZED_CENTERLINES", "0") != "1"):
+            from .pavement.route_arcs import apply_route_arc_spine
+            apply_route_arc_spine(layout, icao)
         from .pavement.global_slice import (
             build_global_slice_faces, classify_faces, dedup_centerlines)
         from .layout import ROLE_APRON, ROLE_JUNCTION
@@ -3379,7 +3390,14 @@ def build_airport_pavement(icao: str, xplane_root: str,
             _cn_cls.append(_ln)
         # De-dup once here so classification indexes the SAME effective set the
         # slice tagged faces against (coincident lines bury duplicates).
-        _cn_eff = dedup_centerlines(_cn_cls)
+        # ROUTE-ARC source: NO dedup — the route-arc graph is planarized,
+        # noded and arc-deduped by construction, and the 3.5 m paint-dedup
+        # eats the SHORT junction connector fragments (SPJC 481→399), which
+        # disconnects the spine chains through junctions: PHASE A then solves
+        # adjacent route chains to different levels and freezes both (the
+        # 2.6 m frozen-spine walls, 1622 spine/spine residual edges).
+        _cn_eff = (list(_cn_cls) if ROUTE_ARC_SPINE
+                   else dedup_centerlines(_cn_cls))
         # Diagnostic (O4_DUMP_SLICE_INPUT=<prefix>): dump the exact pav_union +
         # spine fed to the slice as two JOSM layers, to verify inputs.
         _cn_dump = os.environ.get("O4_DUMP_SLICE_INPUT")
@@ -3486,10 +3504,10 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 f"connector(s) as service_junction (rectless, between shapes).")
 
     # ── Junction emission (finalize/repair runs downstream) ──────
-    # Under the curve-native gate the global slice already produced the
-    # junction/apron faces from pav_union, so there is no rect residue to
-    # carve — skip junction emit entirely.
-    if not CURVE_NATIVE_SPINE:
+    # Under the curve-native / route-arc gates the global slice already
+    # produced the junction/apron faces from pav_union, so there is no rect
+    # residue to carve — skip junction emit entirely.
+    if not _global_slice_spine:
         junction_emit.emit_junctions(
             layout,
             pav_union=pav_union,
@@ -4267,23 +4285,13 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # sparse 1201/1202 network has no arc where two taxi routes meet, so add
         # the standard-radius fillet to the ROUTE GRAPH here — BEFORE the spine
         # slice — and it is cut into the junctions like any taxiway centerline.
-        # Curve-native gate: the global slice already cut every centerline
-        # into the pav_union, so the fillet/synthetic/slice feeders are all
-        # bypassed (the faces are the spine).
-        if not CURVE_NATIVE_SPINE:
-            # ROUTE-ARC SPINE (user 2026-07-02, gate O4_ROUTE_ARC_SPINE,
-            # default OFF until the anisotropic-curve solver adaptation
-            # lands — measured 2x within-shape grade violations on the
-            # un-adapted solver): rebuild the non-service centerlines
-            # as the apt.dat route graph + standard-radius arcs at every
-            # junction turn / bend / runway contact — route distances
-            # preserved verbatim (the feasibility/anchor math depends on
-            # them), curves added only where turns happen.  Skipped when
-            # recognized painted centerlines are the spine.
-            if os.environ.get("O4_RECOGNIZED_CENTERLINES", "0") != "1":
-                from .pavement.route_arcs import apply_route_arc_spine
-                apply_route_arc_spine(layout, icao)
-
+        # Curve-native / route-arc gates: the global slice already cut every
+        # centerline into the pav_union, so the fillet/synthetic/slice feeders
+        # are all bypassed (the faces are the spine).  NOTE the route-arc
+        # spine itself now runs at the GLOBAL-SLICE stage (user ruling
+        # 2026-07-02: with the full spine, no taxi rects — the spine runs
+        # everywhere), not at this per-junction pre-slice hook.
+        if not _global_slice_spine:
             from .taxi_route_fillets import add_junction_fillet_arcs
             add_junction_fillet_arcs(layout, icao)
 
