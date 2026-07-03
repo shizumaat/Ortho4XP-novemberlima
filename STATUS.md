@@ -1,3 +1,31 @@
+# STATUS — SPJC drive-to-zero, round 3b (2026-07-03) — law-true **1165 → 178**
+
+> Follow-up to round 3 below (406 → 178): the "phantom anchor" thread
+> resolved.  All 38 phantoms AGREE with the emitted surface (≤0.2 m) — not
+> stale; the REAL oscillation source was the NON-PAD SEAT anchors
+> (nobuild-apron tilt seats + contact seats) still hard in the final GS pass.
+> Freeing them (they still anchor phases A/B, like pads) converges the pass
+> (last_worst 1.005 → 0.019) and law-true drops 406 → **178**
+> (124/28/19/3/4 by class; ≥2% = 7 total).  Gate `O4_YIELD_FREE_APRON_SEATS`.
+> Suite 17F/328P/17S unchanged (same pre-existing list); pads flat ×0
+> non-flat; spine node still 0.01 m.
+>
+> **NEXT LEVER (named, evidenced)**: the remaining ≥1.5% class (54) is ONE
+> pattern — long building-frontage chords (pad-corner ↔ apron interior,
+> 107–145 m, e.g. every worst pair ends at building30's ring vertex local
+> (736,-19)) that gapcheck proves are MISSING from the solver's joint graph
+> (13 pairs): a solver-vs-validator building-KEY detection mismatch (the V15
+> `apron_keys` class of bug, now on the grade_graph side).  Close that and
+> the movable-pad GS should take SPJC under ~100.  Then the sub-0.5%
+> hairline (124).
+>
+> **Scorer note (proj_lab.py)**: unmapped airside nids must ADOPT the
+> nearest solver node's candidate value — with stale patch values the scorer
+> manufactures walls under large moves (three experiments mis-read WORSE
+> before this fix; only small-perturbation scores were valid).
+
+---
+
 # STATUS — SPJC drive-to-zero, round 3 (2026-07-03) — law-true **1165 → 406**
 
 > Suite **17F/328P/17S** — my changes add 0 (`test_no_self_overlap[SPJC]` is

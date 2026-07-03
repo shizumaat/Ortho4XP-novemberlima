@@ -117,10 +117,15 @@ def solve_route_profile(layout, icao: str,
         # that contacts ONE of them must meet THAT runway's surface (695.3).  ``re``
         # is the runway profile, so this is a no-op for a true runway-end node and
         # only corrects the intersection-compromised crossing node.
+        # hard-anchor CATEGORY map (debug: names each hard node's origin in the
+        # O4_DUMP_SOLVE_STATE snapshot — the phantom-anchor forensics).
+        _hard_cat = {i for i in range(n) if base_hard[i]}
+        _hard_cat = {i: "seed_rwy_seam" for i in _hard_cat}
         for i, re in G.runway_anchor.items():
             if i < n:
                 elev[i] = float(re)
                 base_hard[i] = True
+                _hard_cat.setdefault(i, "rwy_join")
         u_spine_nodes = set(u_spine_adj) | G.spine_nodes()
         # Building-frontage spine floor (the serving arm climbs to its pads),
         # cap-Lipschitz on the unified spine chain.
@@ -156,6 +161,7 @@ def solve_route_profile(layout, icao: str,
             if i < n and lv is not None and i in u_spine_adj:
                 elev[i] = float(lv)
                 base_hard[i] = True
+                _hard_cat.setdefault(i, "seat_on_spine")
 
         # SEAM SPINE ANCHORS (user 2026-06-28): where a taxi centerline crosses a
         # tile seam, pin the nearest SPINE node to the SMOOTHED seam DEM as a HARD
@@ -176,6 +182,8 @@ def solve_route_profile(layout, icao: str,
         # seats).  The spine-yield projection below may move any node NOT in
         # this set.
         truth_hard = {i for i in range(n) if base_hard[i]}
+        for i in truth_hard:
+            _hard_cat.setdefault(i, "seam_spine_anchor")
         # PHASE A — dedicated SMOOTH spine solve on the unified graph (geometry
         # nodes), runway/seam HARD at their LOCAL value, building floors honoured.
         # The spine is min-curvature and ≤cap by construction, then FROZEN so the
@@ -309,6 +317,18 @@ def solve_route_profile(layout, icao: str,
             if pad_groups:
                 _pad_nodes = set().union(*pad_groups)
                 yield_hard = yield_hard - _pad_nodes
+            # NON-PAD SEAT ANCHORS (nobuild-apron tilt seats + contact seats,
+            # and seat nodes not on any pad ring) also leave the hard set for
+            # the FINAL pass: held hard they oscillate against the runway
+            # profile exactly like pads did (measured: worst residual 1.0 m →
+            # 0.02, SPJC law-true 406 → ~180).  They still anchored phases
+            # A/B, so the surface is already shaped by them; the final GS
+            # only relaxes the last-mile conflicts.  Same gate as pads.
+            if (pad_groups
+                    and _os.environ.get("O4_YIELD_FREE_APRON_SEATS", "1")
+                    == "1"):
+                yield_hard = yield_hard - (
+                    {i for i in building_seats if i < n} - _pad_nodes)
             joint = list(shape_constraints) + [{"edges": u_edges}]
             # DEBUG snapshot (O4_DUMP_SOLVE_STATE=<path>): pickle the final-
             # projection inputs so projection variants iterate OFFLINE (~1 s)
@@ -318,6 +338,16 @@ def solve_route_profile(layout, icao: str,
             if _dump:
                 import pickle
                 _ll = [layout.m_to_ll(x, y) for (x, y) in nodes]
+                _cat = dict(_hard_cat)
+                for i in runway_nodes:
+                    if i < n:
+                        _cat.setdefault(i, "runway_node")
+                for i in building_seats:
+                    if i < n:
+                        _cat.setdefault(i, "seat")
+                for i in _gs_hard:
+                    if i < n:
+                        _cat.setdefault(i, "gs_pin")
                 with open(_dump, "wb") as _fh:
                     pickle.dump({
                         "elev": list(elev),
@@ -329,6 +359,7 @@ def solve_route_profile(layout, icao: str,
                         "nodes_ll": _ll,
                         "dem_elev": list(dem_elev),
                         "node_band": list(node_band),
+                        "hard_cat": _cat,
                     }, _fh)
                 print(f"    [dump] solve state -> {_dump}")
             # 800 sweeps: the pass reaches its plateau well before that (the
