@@ -49,6 +49,11 @@
 > route-reach acceptance thresholds are rect-era — CYXY now beats baseline,
 > so re-baseline them.
 >
+> **Sidecar is now DEBUG-gated** (`6c65a30`): `<patch>.axes.json` is written
+> only when `config.LOG_VERBOSITY > 0` (env `O4_LOG_VERBOSITY=1`) — set it for
+> any dev build whose patch you want to check law-true with the CLI; production
+> patch dirs stay clean.  Progress window: content-fit ≤6 rows / scroll >6 /
+> auto-close on all-done (failures keep it open).
 > Debug helpers added: `O4_BRIDGE_DEBUG=1` (per-run bridge emit trace);
 > scratchpad tools worth recreating: tvertex_scan.py, edge_profile.py
 > (ring-roughness), vio_forensics.py, bridge_dump.py.
