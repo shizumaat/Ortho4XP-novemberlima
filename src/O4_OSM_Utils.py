@@ -4,6 +4,7 @@ import io
 import bz2
 import random
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
 import requests
 import numpy
@@ -754,6 +755,61 @@ def _describe_overpass_response_problem(response):
     return None
 
 
+# How often to reassure the user that a slow request is still alive.
+progress_update_interval_seconds = 10
+
+
+def _post_overpass_query_reporting_progress(server_key, overpass_query):
+    """Send one Overpass request, reporting progress while it runs.
+
+    The HTTP POST itself happens in a helper thread so this thread can
+    print a reassurance line every few seconds — a busy server may
+    legitimately spend minutes computing before the first byte arrives,
+    and a silent console reads as a crash — and honour the GUI stop
+    button mid-request.  Returns the requests.Response, or None when
+    the user interrupted the wait (the helper thread is then abandoned;
+    it ends on its own once the server answers or the timeout fires).
+    Network failures raise requests.RequestException exactly as a
+    direct requests call would.
+    """
+    request_outcome = {}
+
+    def send_request():
+        try:
+            # POST keeps the query out of the URL: no length limit and
+            # no characters for intermediaries to mangle, as recommended
+            # by the Overpass API documentation for generated queries.
+            request_outcome["response"] = _get_http_session().post(
+                overpass_servers[server_key],
+                data={"data": overpass_query},
+                timeout=(
+                    http_connect_timeout_seconds,
+                    http_read_timeout_seconds,
+                ),
+            )
+        except Exception as request_error:
+            request_outcome["error"] = request_error
+
+    request_thread = threading.Thread(target=send_request, daemon=True)
+    request_thread.start()
+    seconds_waited = 0
+    while True:
+        request_thread.join(timeout=progress_update_interval_seconds)
+        if not request_thread.is_alive():
+            break
+        seconds_waited += progress_update_interval_seconds
+        if UI.red_flag:
+            return None
+        UI.vprint(
+            1,
+            f"      OSM server {server_key} is working on our request "
+            f"({seconds_waited}s), waiting for the answer...",
+        )
+    if "error" in request_outcome:
+        raise request_outcome["error"]
+    return request_outcome["response"]
+
+
 def get_overpass_data(query, bbox) -> bytes:
     """Fetch data for one or more Overpass statements in one transaction.
 
@@ -777,7 +833,6 @@ def get_overpass_data(query, bbox) -> bytes:
             server_keys[0],
         )
     overpass_query = build_overpass_query(query, bbox)
-    session = _get_http_session()
     failed_server_key = None
     for tentative in range(1, max_osm_tentatives + 1):
         current_server_key = _select_overpass_server_key(
@@ -794,17 +849,12 @@ def get_overpass_data(query, bbox) -> bytes:
         UI.vprint(3, overpass_query)
         wait_seconds = 2**tentative
         try:
-            # POST keeps the query out of the URL: no length limit and no
-            # characters for intermediaries to mangle, as recommended by
-            # the Overpass API documentation for generated queries.
-            response = session.post(
-                overpass_servers[current_server_key],
-                data={"data": overpass_query},
-                timeout=(
-                    http_connect_timeout_seconds,
-                    http_read_timeout_seconds,
-                ),
+            response = _post_overpass_query_reporting_progress(
+                current_server_key, overpass_query
             )
+            if response is None:
+                # The user interrupted the build while we were waiting.
+                return 0
             problem_description = _describe_overpass_response_problem(response)
             if problem_description is None:
                 get_overpass_data.last_successful_server_key = current_server_key
