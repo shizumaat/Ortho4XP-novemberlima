@@ -1,3 +1,37 @@
+# STATUS — SESSION 20260704 (part 3): implied tunnels @KCLT; SPLP seam
+# tension NAMED; CYXY centered service strips (`1b94fba` `48ef440`)
+
+> **IMPLIED TUNNELS SHIPPED (1b94fba)**: unmarked road/rail crossing
+> taxi/runway pavement ⇒ synthetic tunnel=yes bore split at the
+> pavement-edge crossings; whole portal machinery applies.  KCLT (user
+> test): twin-track rail detected under TWO taxiways (5 bores, 33 m) →
+> 4 portal clusters; delta 100 % inside tunnel_ramp shapes.  Gate
+> O4_IMPLIED_TUNNELS.  Inert at all other fixtures.
+> **SPLP SEAM TENSION (analysis, no code)**: ALL 225 broken nodes share
+> ONE anchor pair — runway vertex 74.0 (285 m inland, profile-true) vs
+> band-edge seam pin C 63.5 (terrain): 10.5 m drop over ~520 m = 2.0 %
+> average (6 % at the ravine wall) vs the 1.5 % cap ⇒ 3.84 m deficit.
+> Both anchors are "legit" given the emitted footprint BUT (a) the pin
+> values are coarse smoothed-SRTM reading the RAVINE at the tile line
+> (real pavement there is likely elevated fill the 90 m posts can't
+> see), and (b) the pavement REACHING the seam there is largely apron
+> #29 = 19 % ON SOURCE (the known rests_on_source over-emission,
+> junction #24 at 99 % also touches).  Levers: rests_on_source fix
+> (queued since V14) shrinks the tension region; the break-blend
+> renders what remains as the least-bad contained ramp.
+> **CYXY CENTERED SERVICE STRIPS (48ef440)**: all four user rulings
+> measured green (P1 pad → groundside; old-31 → groundside; the 5-7 m
+> narrow strip → service_road whole-width; road end touches groundside
+> 542).  carve_narrow_service_strips + traversable-edge chain rule
+> (≥1 m) + apron-lot demotion (truck-through skip now junction-only) +
+> final scoped sweep + last separation.  Conformance WARN gone;
+> within-shape 94→72.  OPEN: P4 road mouth emits 3.1 m below the lot —
+> the mouth lands MID-EDGE on the lot ring so the key-based groundside
+> mouth weld can't bind (needs edge-interpolated weld; blanket pinning
+> measured +215).
+
+---
+
 # STATUS — SESSION 20260704 (part 2): seam-as-anchor ruling + tasks 3/4/6
 # CLOSED (`5c23ff1` `f559ae5` `3997755` + coverage tool + `3a3dfd7`)
 
