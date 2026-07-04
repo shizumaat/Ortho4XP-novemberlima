@@ -465,7 +465,8 @@ def OSM_queries_to_OSM_layer(
             ", ".join(statements_to_download),
         )
         response = get_overpass_data(
-            statements_to_download, (lat, lon, lat + 1, lon + 1)
+            statements_to_download, (lat, lon, lat + 1, lon + 1),
+            request_description=cached_suffix,
         )
         if UI.red_flag:
             return 0
@@ -759,7 +760,8 @@ def _describe_overpass_response_problem(response):
 progress_update_interval_seconds = 10
 
 
-def _post_overpass_query_reporting_progress(server_key, overpass_query):
+def _post_overpass_query_reporting_progress(server_key, overpass_query,
+                                            request_label=""):
     """Send one Overpass request, reporting progress while it runs.
 
     The HTTP POST itself happens in a helper thread so this thread can
@@ -802,15 +804,15 @@ def _post_overpass_query_reporting_progress(server_key, overpass_query):
             return None
         UI.vprint(
             1,
-            f"      OSM server {server_key} is working on our request "
-            f"({seconds_waited}s), waiting for the answer...",
+            f"      OSM server {server_key}{request_label} is working on "
+            f"our request ({seconds_waited}s), waiting for the answer...",
         )
     if "error" in request_outcome:
         raise request_outcome["error"]
     return request_outcome["response"]
 
 
-def get_overpass_data(query, bbox) -> bytes:
+def get_overpass_data(query, bbox, request_description="") -> bytes:
     """Fetch data for one or more Overpass statements in one transaction.
 
     ``query`` is a single Overpass statement or an iterable of statements;
@@ -818,6 +820,11 @@ def get_overpass_data(query, bbox) -> bytes:
     build_overpass_query, so callers should pass ALL the statements they
     need at once rather than calling this once per statement.  Returns the
     raw XML answer as bytes, or 0 after max_osm_tentatives failures.
+
+    ``request_description`` (e.g. the layer name "big_roads") is woven
+    into every console line about this request, so that when several
+    downloads interleave in the log — the background prefetch runs while
+    other work prints — each line is attributable to its request.
     """
     if not overpass_servers:
         UI.lvprint(1, "No overpass servers configured. Check overpass_servers.txt.")
@@ -833,6 +840,7 @@ def get_overpass_data(query, bbox) -> bytes:
             server_keys[0],
         )
     overpass_query = build_overpass_query(query, bbox)
+    request_label = f" ({request_description})" if request_description else ""
     failed_server_key = None
     for tentative in range(1, max_osm_tentatives + 1):
         current_server_key = _select_overpass_server_key(
@@ -843,14 +851,14 @@ def get_overpass_data(query, bbox) -> bytes:
         # this line the console would show no sign of life until then.
         UI.vprint(
             1,
-            f"      Querying OSM server {current_server_key} "
+            f"      Querying OSM server {current_server_key}{request_label} "
             f"(attempt {tentative}/{max_osm_tentatives})...",
         )
         UI.vprint(3, overpass_query)
         wait_seconds = 2**tentative
         try:
             response = _post_overpass_query_reporting_progress(
-                current_server_key, overpass_query
+                current_server_key, overpass_query, request_label
             )
             if response is None:
                 # The user interrupted the build while we were waiting.
@@ -878,14 +886,15 @@ def get_overpass_data(query, bbox) -> bytes:
                 )
             UI.vprint(
                 1,
-                f"      OSM server {current_server_key} {problem_description}, "
+                f"      OSM server {current_server_key}{request_label} "
+                f"{problem_description}, "
                 f"new tentative in {wait_seconds} sec...",
             )
         except requests.RequestException:
             UI.vprint(
                 1,
-                f"      OSM server {current_server_key} was too busy, "
-                f"new tentative in {wait_seconds} sec...",
+                f"      OSM server {current_server_key}{request_label} "
+                f"was too busy, new tentative in {wait_seconds} sec...",
             )
         failed_server_key = current_server_key
         # Sleep in one-second slices so the GUI stop button stays
