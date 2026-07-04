@@ -4374,6 +4374,19 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     f"  [pav-builder] {icao}: re-roled {_n_cr} groundside-connector "
                     f"service_junction(s) → service_road (axial ramp).")
 
+        # The road↔lot connection is FIRST-CLASS shared geometry (user
+        # 2026-07-04, CYXY P4): insert shared vertices into groundside
+        # lot rings at every service-shape mouth so the two emit welded
+        # nodes and the groundside mouth-anchor weld binds by canonical
+        # key (a mouth landing mid-edge on the lot ring had no key to
+        # weld to, and the road emitted 3.1 m below the lot it serves).
+        from .groundside import conform_service_mouths_to_groundside
+        _n_mouth = conform_service_mouths_to_groundside(layout)
+        if _n_mouth:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: conformed {_n_mouth} service-road "
+                f"mouth vertex(es) into groundside lot ring(s).")
+
         # (refactor Phase 5) The boundary ribbon + boundary→DEM bridge emit
         # and their airside vertex touches (_snap_bridge_vertices_to_runway_
         # corners, _insert_bridge_contacts_into_junctions) CANNOT move
@@ -4700,6 +4713,18 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 layout, icao=icao, dem=dem,
                 tile_lat=tile_lat, tile_lon=tile_lon,
                 require_service_adjacency=True)
+            # A lot and the demoted connector piece serving it are ONE
+            # groundside surface (user 2026-07-04, CYXY P4: two
+            # independently DEM-followed pieces met at coincident nodes
+            # 2.6 m apart).  Merge BEFORE the solve so the road-mouth
+            # weld binds against the single merged lot.
+            from .groundside import _merge_touching_groundside
+            _n_gsm = _merge_touching_groundside(
+                layout, dem, tile_lat, tile_lon)
+            if _n_gsm:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: merged {_n_gsm} touching "
+                    f"groundside piece(s) (pre-solve).")
 
         if USE_PER_SURFACE_SOLVER and layout.anchor is not None:
             # Runway CIFP thresholds are LOCKED — the solver never moves them.

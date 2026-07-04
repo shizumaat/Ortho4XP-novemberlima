@@ -1002,9 +1002,14 @@ def apply_groundside_reach(layout, bucket_to_idx, elev, cap):
             (a + delta) if a is not None else None for a in g.node_altitudes]
         n += 1
 
-    # (now-shifted) groundside altitude per key, for the weld.
+    # (now-shifted) groundside altitude per key, for the weld.  LARGEST
+    # piece first: where a big lot and a sliver connector piece share a
+    # mouth key with different altitudes, the mouth serves the LOT
+    # (user 2026-07-04, CYXY P4: welding to the 100 m² demoted
+    # connector at 698.5 left the road 3 m under the 49 k m² lot).
     gs_key_alt: dict = {}
-    for (g, _kalt) in gs_pieces:
+    for (g, _kalt) in sorted(gs_pieces,
+                             key=lambda t: -t[0].polygon.area):
         gcoords = list(g.polygon.exterior.coords)
         galts = list(g.node_altitudes)
         for k in range(min(len(gcoords), len(galts))):
@@ -1047,13 +1052,33 @@ def apply_groundside_reach(layout, bucket_to_idx, elev, cap):
                 hard.add(pi)
 
     # ── WELD each connector's groundside mouth to the shifted groundside ─────
-    for si in reachable:
+    # Reachable connectors weld as before.  An UNREACHABLE connector still
+    # welds where its truck ROUTE ENDS at the lot — a destination road must
+    # CLIMB to the lot it serves (user 2026-07-04, CYXY P4: the road emitted
+    # 3.1 m below the lot at coincident nodes).  Blanket-welding every
+    # unreachable lot-touching connector measured +215 within-shape pairs
+    # (mouth pins fighting DEM-followed road surfaces mid-network); the
+    # route-END scope pins only the served destination mouth.
+    route_end_points = []
+    for ln in centerlines:
+        try:
+            route_end_points.append(Point(*ln.coords[0]))
+            route_end_points.append(Point(*ln.coords[-1]))
+        except (ValueError, IndexError):
+            continue
+    for si in range(len(svc)):
         c, _ks = svc[si]
+        is_reachable = si in reachable
         for (x, y) in _open_ring(list(c.polygon.exterior.coords)):
             k = _key(x, y)
             a = gs_key_alt.get(k)
             if a is None:
                 continue
+            if not is_reachable:
+                p = Point(x, y)
+                if not any(p.distance(ep) <= 15.0
+                           for ep in route_end_points):
+                    continue
             i = bucket_to_idx.get(k)
             if i is not None and i < len(elev):
                 elev[i] = a

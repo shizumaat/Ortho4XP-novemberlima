@@ -433,6 +433,93 @@ def carve_narrow_service_strips(
     return n_carved
 
 
+def conform_service_mouths_to_groundside(
+        layout: "PavementLayout",
+        touch_tol_m: float = 0.5,
+        ) -> int:
+    """Insert shared vertices into groundside lot rings where a SERVICE
+    shape's ring vertex lies on the lot boundary — the road↔lot
+    connection is identified EARLY and becomes first-class shared
+    geometry (user 2026-07-04, CYXY P4): the lot is served BY the road,
+    so the two must emit welded nodes there, and the groundside
+    mouth-anchor machinery can bind by canonical key instead of failing
+    on a mouth that lands mid-edge (the road then CLIMBS to the lot).
+
+    The inserted vertex takes the lot edge's interpolated DEM altitude,
+    so the lot's surface is unchanged — only its ring gains a node.
+    Returns the number of vertices inserted.
+    """
+    service_shapes = [s for s in layout.shapes
+                      if s.role in (ROLE_SERVICE_ROAD,
+                                    ROLE_SERVICE_JUNCTION)
+                      and s.polygon is not None
+                      and not s.polygon.is_empty]
+    if not service_shapes:
+        return 0
+    n_inserted = 0
+    for lot in layout.shapes:
+        if lot.role != ROLE_GROUNDSIDE_PAVEMENT or lot.polygon is None \
+                or lot.polygon.is_empty or not lot.node_altitudes:
+            continue
+        near = [s for s in service_shapes
+                if s.polygon.distance(lot.polygon) <= touch_tol_m]
+        if not near:
+            continue
+        ring = list(lot.polygon.exterior.coords)
+        closed = len(ring) > 1 and ring[0] == ring[-1]
+        if closed:
+            ring = ring[:-1]
+        alts = list(lot.node_altitudes[:len(ring)])
+        if len(alts) < len(ring):
+            alts += [alts[-1] if alts else None] * (len(ring) - len(alts))
+        changed = False
+        for s in near:
+            s_ring = list(s.polygon.exterior.coords)
+            if len(s_ring) > 1 and s_ring[0] == s_ring[-1]:
+                s_ring = s_ring[:-1]
+            boundary = lot.polygon.exterior
+            for (vx, vy) in s_ring:
+                p = Point(vx, vy)
+                if boundary.distance(p) > touch_tol_m:
+                    continue
+                if any(math.hypot(vx - rx, vy - ry) <= touch_tol_m
+                       for (rx, ry) in ring):
+                    continue          # a lot vertex is already there
+                # insert into the lot edge nearest the mouth vertex
+                best = None
+                for k in range(len(ring)):
+                    ax, ay = ring[k]
+                    bx, by = ring[(k + 1) % len(ring)]
+                    dx, dy = bx - ax, by - ay
+                    seg2 = dx * dx + dy * dy
+                    if seg2 < 1e-9:
+                        continue
+                    t = ((vx - ax) * dx + (vy - ay) * dy) / seg2
+                    t = min(1.0, max(0.0, t))
+                    px, py = ax + t * dx, ay + t * dy
+                    d = math.hypot(vx - px, vy - py)
+                    if best is None or d < best[0]:
+                        best = (d, k, t, px, py)
+                if best is None or best[0] > touch_tol_m:
+                    continue
+                _d, k, t, px, py = best
+                a0 = alts[k]
+                a1 = alts[(k + 1) % len(ring)]
+                new_alt = (round(a0 + t * (a1 - a0), 2)
+                           if a0 is not None and a1 is not None else a0)
+                ring.insert(k + 1, (px, py))
+                alts.insert(k + 1, new_alt)
+                changed = True
+                n_inserted += 1
+        if changed:
+            try:
+                lot.polygon = Polygon(ring)
+            except _GEOM_EXC:
+                continue
+            lot.node_altitudes = alts + [alts[0]]
+    return n_inserted
+
+
 def _grade_limit_groundside_chords(layout) -> int:
     """Pull every groundside shape's altitude field down to the largest
     ``GROUNDSIDE_MAX_GRADE``-Lipschitz field ≤ its current (DEM) values,
