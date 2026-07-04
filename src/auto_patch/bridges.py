@@ -635,7 +635,15 @@ def _emit_tunnel_portals(
     # service roads; parallel carriageway > dist away).
     _other_road_lines: list = []   # (LineString, frozenset(nodes), wid)
     _other_road_tree = None
+    # Every node of ANY tunnel-tagged way (any tunnel value): a bore's
+    # covered middle sections may carry different tags than the portal
+    # candidates, and the twin continuation shares nodes with THOSE —
+    # a per-candidate node set misses them (CYUL).
+    _tunnel_all_nodes: set = set()
     if skip_if_adjacent_road:
+        for _w2, _n2, _t2 in ways_r:
+            if _t2.get("tunnel") in TUNNEL_VALUES:
+                _tunnel_all_nodes.update(_n2)
         try:
             from shapely.strtree import STRtree as _STRtree
             for _w2, _n2, _t2 in ways_r:
@@ -659,7 +667,8 @@ def _emit_tunnel_portals(
         except _GEOM_EXC:
             _other_road_tree = None
 
-    def _tunnel_has_adjacent_road(tw_id2, t_nrefs2) -> bool:
+    def _tunnel_has_adjacent_road(tw_id2, t_nrefs2,
+                                  system_nodes=None) -> bool:
         if _other_road_tree is None:
             return False
         _pts = [nodes_m[n] for n in t_nrefs2 if n in nodes_m]
@@ -676,13 +685,88 @@ def _emit_tunnel_portals(
             if _owid == tw_id2 or (_tnodes & _onodes):
                 continue
             try:
-                if (_tline.crosses(_oline)
-                        or _tline.distance(_oline)
-                        < adjacent_road_dist_m):
-                    return True
+                _crosses = _tline.crosses(_oline)
+                if not _crosses and _tline.distance(_oline) \
+                        >= adjacent_road_dist_m:
+                    continue
+                # Parallel continuation of a twin bore in THIS way's own
+                # underpass system: not a veto (crossing roads always
+                # veto; a continuation of a FOREIGN tunnel still vetoes —
+                # exempting those half-emitted the LMML tangle).
+                if (not _crosses and system_nodes is not None
+                        and (_onodes & system_nodes)):
+                    continue
+                if os.environ.get("O4_TUNNEL_DEBUG") == "1":
+                    _mx, _my = _pts[len(_pts) // 2]
+                    print(f"    [tunnel-skip] way {tw_id2} blocked by "
+                          f"road {_owid} (crosses={_crosses}, "
+                          f"d={_tline.distance(_oline):.0f}m) "
+                          f"mid local ({_mx:.0f},{_my:.0f})")
+                return True
             except _GEOM_EXC:
                 continue
         return False
+
+    # ── SYSTEM-LEVEL veto propagation (user 2026-07-04) ──────────────
+    # The per-way twin-bore exemption alone half-emits an interchange:
+    # at LMML the parallel bores of a tangle were exempted while their
+    # CROSSING mates stayed vetoed, and the emitted ramps overlapped the
+    # vetoed roads (baseline 0 → 8 vertex + 25 mid-edge steps,
+    # measured).  Group tunnel candidates into SYSTEMS by geometric
+    # proximity (twin carriageways never share nodes) and veto ALL
+    # members when ANY member is vetoed — a clean divided-highway
+    # underpass (CYUL runway-24 end: parallel twins only, no crossing
+    # road) emits whole, an interchange tangle stays out whole.
+    _system_veto: dict = {}      # tw_id -> True (skip) / False (emit)
+    if skip_if_adjacent_road:
+        _cands = []              # (tw_id, t_nrefs, LineString)
+        for _tw, _tn, _tt in ways_r:
+            if _tt.get("tunnel") not in PORTAL_TUNNEL_VALUES:
+                continue
+            if not _tunnelable(_tt):
+                continue
+            if _tw in excluded or len(_tn) < 2:
+                continue
+            _p = [nodes_m[nn] for nn in _tn if nn in nodes_m]
+            if len(_p) < 2:
+                continue
+            try:
+                _cands.append((_tw, _tn, LineString(_p)))
+            except _GEOM_EXC:
+                continue
+        parent = list(range(len(_cands)))
+
+        def _find(a):
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]
+                a = parent[a]
+            return a
+
+        for a in range(len(_cands)):
+            for b in range(a + 1, len(_cands)):
+                try:
+                    if _cands[a][2].distance(_cands[b][2]) \
+                            < adjacent_road_dist_m * 1.5:
+                        ra, rb = _find(a), _find(b)
+                        if ra != rb:
+                            parent[rb] = ra
+                except _GEOM_EXC:
+                    continue
+        _sys_bad: dict = {}
+        _raw = [_tunnel_has_adjacent_road(
+                    _cands[k][0], _cands[k][1], _tunnel_all_nodes)
+                for k in range(len(_cands))]
+        for k in range(len(_cands)):
+            r = _find(k)
+            _sys_bad[r] = _sys_bad.get(r, False) or _raw[k]
+        for k, (_tw, _tn, _ln) in enumerate(_cands):
+            _system_veto[_tw] = _sys_bad[_find(k)]
+            if (not _sys_bad[_find(k)]
+                    and os.environ.get("O4_TUNNEL_DEBUG") == "1"):
+                _mx, _my = list(_ln.coords)[len(list(_ln.coords)) // 2]
+                print(f"    [tunnel-emit] way {_tw} len={_ln.length:.0f}m "
+                      f"under_pav={_sys_under_pav.get(_find(k))} "
+                      f"raw_veto={_raw[k]} mid local ({_mx:.0f},{_my:.0f})")
 
     _n_adj_skip = 0
     for tw_id, t_nrefs, t_tags in ways_r:
@@ -713,8 +797,11 @@ def _emit_tunnel_portals(
             continue
         # Skip tunnels running under / alongside other roads — their
         # surface walk traces a dense interchange whose ramps overlap
-        # (user 2026-06-12, LMML).  Both portals are skipped.
-        if _tunnel_has_adjacent_road(tw_id, t_nrefs):
+        # (user 2026-06-12, LMML).  Both portals are skipped.  The
+        # verdict is SYSTEM-level (``_system_veto`` above): a clean
+        # divided-highway underpass emits whole, a tangle stays out
+        # whole (user 2026-07-04, CYUL runway-24 end).
+        if _system_veto.get(tw_id, False):
             _n_adj_skip += 1
             continue
         for portal_idx in (0, len(t_nrefs) - 1):
@@ -854,6 +941,43 @@ def _emit_tunnel_portals(
                 f"an adjacent/crossing road (ramps not modelled).")
         except _GEOM_EXC:
             pass
+    if not portal_data:
+        return 0
+    # WALK DEDUP (user 2026-07-04): twin carriageways that MERGE beyond
+    # their portals give two portals the SAME surface walk — two ramps
+    # emitted on one stretch of road, one per bore profile (LMML:
+    # coincident tunnel_ramp pieces 4.3 m apart in z).  Drop a portal
+    # whose walk substantially overlaps a kept one from ANOTHER way.
+    # The 4 m buffer keeps genuinely PARALLEL twin walks (≥ 8 m apart —
+    # each carriageway its own ramp / merged by the portal clustering
+    # below) while catching same-road walks at ~0 m.  A way's own two
+    # portals never dedup (opposite tunnel mouths, user 2026-05-03).
+    _kept_portals: list = []
+    _kept_walk_lines: list = []       # (LineString, tw_id)
+    for _pd in portal_data:
+        _walk_pts = _pd[2]
+        _wline = (LineString(_walk_pts) if len(_walk_pts) >= 2 else None)
+        _dup = False
+        if _wline is not None:
+            for (_kl, _kw) in _kept_walk_lines:
+                if _kw == _pd[1]:
+                    continue
+                try:
+                    _ov = _wline.buffer(4.0).intersection(_kl).length
+                    if _ov > 0.5 * min(_wline.length, _kl.length):
+                        _dup = True
+                        break
+                except _GEOM_EXC:
+                    continue
+        if _dup:
+            if os.environ.get("O4_TUNNEL_DEBUG") == "1":
+                print(f"    [tunnel-walk-dedup] dropped portal of way "
+                      f"{_pd[1]} (walk overlaps a kept ramp)")
+            continue
+        _kept_portals.append(_pd)
+        if _wline is not None:
+            _kept_walk_lines.append((_wline, _pd[1]))
+    portal_data = _kept_portals
     if not portal_data:
         return 0
     # Cluster portals by node-coord proximity (divided highways
