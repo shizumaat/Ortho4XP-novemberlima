@@ -20,8 +20,9 @@ import os as _os
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from shapely.errors import GEOSException, TopologicalError
-from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, Polygon
-from shapely.ops import linemerge, nearest_points, unary_union
+from shapely.geometry import (
+    LineString, MultiLineString, MultiPolygon, Point, Polygon, box)
+from shapely.ops import linemerge, nearest_points, snap, unary_union
 
 from .layout import (
     AEROWAY_FOR_ROLE,
@@ -1482,7 +1483,17 @@ def _merge_touching_groundside(
             try:
                 if polys[i].distance(polys[j]) > touch_tol:
                     continue
-                shared = polys[i].exterior.intersection(polys[j].exterior)
+                # NEAR-coincident flush runs count as shared boundary
+                # (user 2026-07-04, CYXY P4): a demoted connector meets
+                # the lot it serves within millimetres but rarely
+                # EXACTLY, so the exact ring∩ring length reads 0 while
+                # the pieces are physically one surface — left unmerged,
+                # their independent DEM-follow/shift left coincident
+                # nodes 2.6 m apart.  Measure the run of ring i within
+                # ``touch_tol`` of ring j instead (identity on exactly-
+                # shared boundaries).
+                shared = polys[i].exterior.intersection(
+                    polys[j].exterior.buffer(touch_tol))
                 if getattr(shared, "length", 0.0) < min_shared_m:
                     continue            # point/sliver touch — not a split seam
             except _GEOM_EXC:
@@ -1503,7 +1514,15 @@ def _merge_touching_groundside(
         if len(idxs) < 2:
             continue
         try:
-            u = unary_union([polys[k] for k in idxs])
+            # Snap each piece onto the accumulated union before
+            # unioning: near-coincident flush pairs (see above) stay
+            # TWO polygons under a plain union — the sub-tolerance
+            # hairline between them never dissolves.  ``snap`` moves
+            # only vertices already within ``touch_tol`` of the other
+            # ring; exactly-shared boundaries are untouched.
+            u = polys[idxs[0]]
+            for k in idxs[1:]:
+                u = unary_union([u, snap(polys[k], u, touch_tol)])
         except _GEOM_EXC:
             continue
         if u.is_empty:
@@ -1557,6 +1576,35 @@ def _separate_groundside_from_airside(
     _share_svc = _os.environ.get("O4_GROUNDSIDE_SHARE_SVC", "1") == "1"
     if not _share_svc:
         AIRSIDE_ROLES |= {ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION}
+    # Truck-route END mouths (user ruling 2026-07-04, CYXY P4): a lot is
+    # groundside BECAUSE its connection is a service road — the connection
+    # is identified EARLY and the clearance gap is never cut across it.
+    # Apron/junction pavement carrying a truck-route END abuts the lot
+    # that route serves; the demotion sweeps later re-role that connector
+    # to groundside, but a gap cut now is never re-closed, leaving the
+    # connector and its lot two disjoint DEM-followed surfaces (CYXY
+    # route N: 165 m² connector 1.00 m from its 6.8 k m² lot).  Such a
+    # shape keeps the shared edge inside a mouth window around the route
+    # end: its clearance buffer is subtracted there and the RAW polygon
+    # joins the clip instead (overlap still trimmed, touching edge
+    # survives — the same treatment service shapes get below).
+    _keep_route_end_edge = _os.environ.get(
+        "O4_GROUNDSIDE_ROUTE_END_EDGE", "1") == "1"
+    _MOUTH_END_ON_PAVEMENT_TOL_M = 1.0
+    _MOUTH_WINDOW_RADIUS_M = 15.0
+    _DEMOTABLE_ROLES = {ROLE_APRON, ROLE_JUNCTION}
+    route_end_points: list = []
+    if _keep_route_end_edge:
+        for centerline in (getattr(layout, "apt_service_centerlines", None)
+                           or []):
+            line = getattr(centerline, "line", None)
+            if line is None or line.is_empty:
+                continue
+            try:
+                route_end_points.append(Point(*line.coords[0]))
+                route_end_points.append(Point(*line.coords[-1]))
+            except (ValueError, IndexError):
+                continue
     clip_polys = []
     for s in layout.shapes:
         if s.role in AIRSIDE_ROLES and s.polygon is not None \
@@ -1566,7 +1614,25 @@ def _separate_groundside_from_airside(
                 # (no rounded-corner arc segments), so the clip cut
                 # doesn't introduce sub-metre edges that would inflate the
                 # per-vertex grade after altitude rounding.
-                clip_polys.append(s.polygon.buffer(clearance, join_style=2))
+                buffered = s.polygon.buffer(clearance, join_style=2)
+                mouth_ends = ([ep for ep in route_end_points
+                               if s.polygon.distance(ep)
+                               <= _MOUTH_END_ON_PAVEMENT_TOL_M]
+                              if s.role in _DEMOTABLE_ROLES else [])
+                if mouth_ends:
+                    # Square windows (shapely ``box``), not point buffers:
+                    # the window edge is part of the clip boundary and
+                    # must stay arc-free for the same reason as the mitre
+                    # join above.
+                    windows = unary_union([
+                        box(ep.x - _MOUTH_WINDOW_RADIUS_M,
+                            ep.y - _MOUTH_WINDOW_RADIUS_M,
+                            ep.x + _MOUTH_WINDOW_RADIUS_M,
+                            ep.y + _MOUTH_WINDOW_RADIUS_M)
+                        for ep in mouth_ends])
+                    buffered = buffered.difference(windows)
+                    clip_polys.append(s.polygon)
+                clip_polys.append(buffered)
             except _GEOM_EXC:
                 continue
     # Groundside may TOUCH a service road (shared edge, kept above) but must not
