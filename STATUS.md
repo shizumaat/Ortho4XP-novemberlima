@@ -1,3 +1,38 @@
+# STATUS — SESSION 20260704 (part 7): SPLP seam edge anchors + ramp-start
+# trim + spike cleaner + twin-rail bores (`246384f`)
+
+> **SPLP runway west seam (user)**: Ortho4XP preserve_boundary pins the
+> tile LINE to raw HGT; the profile anchored only at the CENTERLINE
+> crossing (whose alt_strict sample often fails at the tile's own edge)
+> → west edge contact 2.5 m under the render line.
+> `redistribute_runway_profile` now anchors at the runway EDGE
+> crossings (hump-class only — a ravine-side anchor measured −2 m drag
+> on neighbouring interior samples → taxi stub ceiling fell 0.8).  West
+> edge 58.50→60.30 (raw line 61.0); stub band pins now EXACTLY at DEM.
+> Gate `O4_RUNWAY_SEAM_EDGE_ANCHORS`.
+> **OPEN (stub, user finding 2)**: interior nodes still top at the
+> runway-reach band ceiling ~1 m under the seam pins (milder
+> rise-then-dip persists).  A node_band override (pin−cap·d floor +
+> ceiling raise) measured INEFFECTIVE — solved values ignore it; a
+> later pass (phase-A frozen spine suspected) writes 61.46 last.
+> Band-vs-pin precedence = its own round; REJECTED so far: band
+> override at solve.py level, one_solve-internal floor (phase-A misses
+> both).
+> **RAMP-START TRIM (user, all airports)**: apt.dat row 1300 parses;
+> `taxi_centerlines` drops LEAF chains ≤80 m ending within 30 m of a
+> ramp start — CYUL 887→720 pieces (−167 lead-ins).
+> **CYUL stray node**: apron #233 carried a 251 m ZERO-AREA out-and-back
+> needle (ring visits far point, returns to the same coord) —
+> `_dedup_coincident_ring_vertices` now removes spike tips whose
+> neighbours coincide.  Node gone.
+> **KCLT twin rails**: two parallel railway=rail lines <10 m apart = ONE
+> `railway_twin` 14 m bore (user: 12-15 m for two rails); twin's portals
+> suppressed.  Ramps now ~16-17 m chains, portals 0.5-1.6 m from the
+> taxi edge.
+> Suite 21F/325P identical list.
+
+---
+
 # STATUS — SESSION 20260704 (part 6): CYXY findings 1-3 CLOSED
 # (`cc5a4ad`) — lots at DEM, corridors as roads, final projection ON
 
