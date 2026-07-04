@@ -1,3 +1,44 @@
+# STATUS — SESSION 20260704: task 5 (SPLP seam dips) CLOSED (`0a0284d`)
+
+> **DONE 5**: the "still-unidentified path" was the SOLVER's seam
+> hard-anchor block (solver_primitives ~1200) — it RE-SAMPLES the smoothed
+> DEM per seam vertex and overrides every earlier hard value ("seam wins"),
+> which is why clamping the two node_altitudes writers was byte-identical.
+> Fix set (one principle: seam pins come from jointly-graded,
+> CUT-INDEPENDENT surfaces, never per-vertex terrain reads):
+> 1. runway_redistribute persists the gated per-ref profile
+>    (`layout._runway_redistributed_profiles`) +
+>    `sample_redistributed_profile(x,y)`.
+> 2. tile_cut `_pin_runway_piece_to_profile`: cut runway pieces take the
+>    profile at EVERY vertex — replaces BOTH the NN-resample (the 4.6 m
+>    cross-seam step of 2026-06-20) and the per-vertex DEM pin that fixed
+>    it (which carved the ravine into the runway at SPLP's 18° oblique
+>    crossing: corners 141 m of station apart pinned 4.2 m apart = 2× cap).
+> 3. Solver seam block now 3-phase: runway-owned buckets keep profile
+>    hard-anchors (fixed sources); airside pins take runway_clamp_floor;
+>    ring-ADJACENT seam-pin pairs (the law-exempt both-hard class) are
+>    POCS-projected onto |Δz| ≤ cap·d — fills the mirrored 1.2-1.3 m
+>    terrain-trace dips, identity on cap-legal DEM adherence.  Two
+>    REJECTED (measured) operators: geometric band-edge chains + one-sided
+>    max envelope (9 m walls on hillsides, couples across grass);
+>    ring-run depression fill (endpoints never lift; runs of 2 do nothing).
+> 4. runway_clamp_floor evaluates the persisted profiles, NEVER surviving
+>    shapes — post-cut each tile keeps only its own pieces, so the shape
+>    walk gave 65.7 vs 62.4 across the 10 m gap (3.3 m step, caught by
+>    test_cross_tile_cut_edge_elevations_consistent).
+> MEASURED: dips 7→6; every ≥1 m dip resolved; the remaining 2.3 m runway
+> seam sag (was 4.2) = the FAA-GATED OPTIMUM (cap-grade descent to the
+> centerline seam anchor — profile can't legally hold 61.7 over a ravine
+> whose seam anchor is ~56).  Cross-tile mismatches 0; parity tests pass;
+> SPLP law-true unchanged (1 pre-existing hairline, A/B); suite 21F/325P
+> IDENTICAL list to baseline (A/B).  Probes: splp_seam_probe.py +
+> dip_writer_probe.py in /tmp/spjc_lab.
+> NEXT (queue below): task 3 (vertical-curvature fairing law — also the
+> RESIDUAL WAVINESS lever), task 4 (service-road corridors), task 6 (CYUL
+> tunnels — check the "skipped 17 tunnel(s) adjacent/crossing road" print).
+
+---
+
 # STATUS — SESSION 20260703 (cont.): user's 6-task list — state
 
 > **DONE 1 (7a19216)**: at-DEM boundary ribbon SKIPPED
