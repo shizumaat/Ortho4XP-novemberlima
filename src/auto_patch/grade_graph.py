@@ -374,10 +374,23 @@ def build_context(layout, bucket_to_idx=None) -> "GradeContext":
             except Exception:                                 # pragma: no cover
                 route_zone = None
 
+    # Tile-seam pin keys (user 2026-07-04, "treat the seam like a runway
+    # edge or building"): the solver-side law was running with NO seam
+    # concept (empty default) while the validator zone-flagged 400 m —
+    # the one place the two readers disagreed on the LAW itself.  The
+    # solver's key space is node indices, so the pin set published by
+    # ``solver_primitives._seed_elevations`` (which runs before every
+    # ``build_context`` call in the solve) is used verbatim; callers
+    # without a solve in flight (no attribute) get an empty set = the old
+    # behaviour.  The validator builds its own nid-space set from the
+    # sidecar's ``seam_pins`` export.
+    seam_pin_idx = getattr(layout, "_seam_pin_idx", None) or ()
+
     return GradeContext(centerlines=cls, routes=routes,
                         inherited_junction_cap=_inherited,
                         building_keys=frozenset(bld_keys), road_zone=road_zone,
-                        route_zone=route_zone)
+                        route_zone=route_zone,
+                        seam_keys=frozenset(seam_pin_idx))
 
 
 # ── visibility ──────────────────────────────────────────────────────────────

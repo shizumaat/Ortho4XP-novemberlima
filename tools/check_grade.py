@@ -431,6 +431,27 @@ def _seam_lines(nodes: Dict[str, Tuple[float, float]]) -> Tuple[set, set]:
     return seam_lats, seam_lons
 
 
+def _seam_nids_from_pins(nodes: Dict[str, Tuple[float, float]],
+                         seam_pins_ll: list) -> set:
+    """Nids coincident (≤ ``SHARED_VERTEX_TOL_M``) with a sidecar seam-PIN
+    vertex — the exact DEM-pinned anchors the solver graded to.  Replaces
+    the 400 m zone of :func:`_seam_nids` when the sidecar carries pins."""
+    if not seam_pins_ll:
+        return set()
+    out: set = set()
+    for nid, (lat, lon) in nodes.items():
+        mlon = _M_PER_DEG_LAT * max(0.05, math.cos(math.radians(lat)))
+        for (pla, plo) in seam_pins_ll:
+            d_lat = abs(lat - pla) * _M_PER_DEG_LAT
+            if d_lat > SHARED_VERTEX_TOL_M:
+                continue
+            if math.hypot(d_lat, abs(lon - plo) * mlon) \
+                    <= SHARED_VERTEX_TOL_M:
+                out.add(nid)
+                break
+    return out
+
+
 def _seam_nids(nodes: Dict[str, Tuple[float, float]]) -> set:
     """Set of nids in the seam terrain-matching zone: within ``_SEAM_ZONE_M``
     of a tile boundary the airport CROSSES (lat/lon line carrying an exact seam
@@ -1319,6 +1340,7 @@ def run_checks(
     routes_ll: Optional[list] = None,
     quiet: bool = False,
     anchor: Optional[Tuple[float, float]] = None,
+    seam_pins_ll: Optional[list] = None,
 ) -> Tuple[List[Violation], List[Violation], List[EdgeStep]]:
     """``taxi_axes_ll`` (the builder's APT.DAT taxi centerlines as
     ``[(latlon_points, cL, cT), …]``) supplies the within-shape grade graph's
@@ -1328,12 +1350,22 @@ def run_checks(
     for the anisotropic spine-arc decomposition (``grade_graph``).  Re-deriving
     centerlines from the OSM would diverge from the apt.dat geometry the builder
     actually used — do not.
+
+    ``seam_pins_ll`` (sidecar ``seam_pins``, ``[[lat, lon], …]``): the exact
+    tile-seam DEM-pin vertices the solver graded to.  When given, ONLY nodes
+    coincident with a pin are seam-flagged — pin↔pin pairs skip, pin↔free
+    pairs check at the shape's body cap — matching the solver's law reading
+    (user 2026-07-04, "treat the seam like a runway edge or building").
+    Without it the legacy 400 m blanket zone applies (old patches).
     """
     nodes, ways = _parse_osm(osm_path)
     ll_to_m = _ll_to_m_factory(nodes, anchor=anchor)
     vertices, edges = _build_vertex_edge_tables(nodes, ways, ll_to_m)
     max_grade = max_grade_pct / 100.0
-    seam_nids = _seam_nids(nodes)
+    if seam_pins_ll is not None:
+        seam_nids = _seam_nids_from_pins(nodes, seam_pins_ll)
+    else:
+        seam_nids = _seam_nids(nodes)
 
     # Convert apt.dat centerlines (lat/lon) into the audit's meter frame.
     taxi_axes = None
@@ -1444,7 +1476,7 @@ def main(argv=None) -> int:
     # membership, per-letter caps, anisotropic Δs∥ credit).  Auto-loaded
     # when present; without it the check is context-free and over-flags
     # every spine/blend-relaxed pair.
-    taxi_axes_ll = routes_ll = anchor = None
+    taxi_axes_ll = routes_ll = anchor = seam_pins_ll = None
     sidecar = Path(str(args.osm) + ".axes.json")
     if sidecar.exists():
         try:
@@ -1460,10 +1492,13 @@ def main(argv=None) -> int:
                 taxi_axes_ll = _data.get("axes") or None
                 routes_ll = _data.get("routes") or None
             anchor = _data.get("anchor") or None
+            seam_pins_ll = _data.get("seam_pins")
             print(f"  (axes sidecar loaded: {len(taxi_axes_ll or [])} axes"
                   + (" [exact]" if _exact else "")
                   + f", {len(routes_ll or [])} routes"
                   + (", builder anchor frame" if anchor else "")
+                  + (f", {len(seam_pins_ll)} seam pins" if seam_pins_ll
+                     is not None else "")
                   + " — law-true check)")
         except Exception as ex:
             print(f"  (axes sidecar unreadable, context-free check: {ex})")
@@ -1477,6 +1512,7 @@ def main(argv=None) -> int:
         taxi_axes_ll=taxi_axes_ll,
         routes_ll=routes_ll,
         anchor=tuple(anchor) if anchor else None,
+        seam_pins_ll=seam_pins_ll,
     )
     if args.strict and (within or cross or steps):
         return 1

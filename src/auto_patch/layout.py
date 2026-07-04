@@ -1193,6 +1193,15 @@ class PavementLayout:
                 # crossing verdicts between the two law readers).
                 "anchor": ([self.anchor[0], self.anchor[1]]
                            if self.anchor is not None else None),
+                # Tile-seam PIN vertices (user 2026-07-04): the exact
+                # DEM-pinned anchors the solver graded to.  The
+                # validator flags only these as seam (pin-pair pairs
+                # skip, one-pin pairs check at body cap) instead of its
+                # legacy 400 m blanket zone — the two readers share one
+                # seam definition.
+                "seam_pins": [[round(la, 7), round(lo, 7)]
+                              for (la, lo) in
+                              (getattr(self, "_seam_pin_ll", None) or [])],
             }
             Path(str(path) + ".axes.json").write_text(_json.dumps(data))
         except Exception:

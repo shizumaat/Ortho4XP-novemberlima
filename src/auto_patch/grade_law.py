@@ -294,6 +294,18 @@ def classify_pair(p: PairContext) -> Optional[Allowance]:
     if (p.a_building or p.b_building) and cap > BUILDING_FRONTAGE_MAX_GRADE:
         cap = BUILDING_FRONTAGE_MAX_GRADE
 
+    # SEAM PINS ARE GRADED-TO HARD ANCHORS (user 2026-07-04, "treat the
+    # seam like a runway edge or building"): a pair with a seam-pinned
+    # endpoint never earns spine/blend credit — those credits describe
+    # travel ALONG a route, but the approach to an immovable terrain pin
+    # is the shape's own grading problem at its own body cap (SPLP: spine
+    # credit legalised a 2.5-2.8 % V-notch approach to a band-edge pin
+    # the projection had left 0.7-1.1 m below its neighbours).  The road
+    # carve below still relaxes (a service road descends to ITS seam pin
+    # at the road grade).
+    if (p.a_seam or p.b_seam) and cap > p.body_cap:
+        cap = p.body_cap
+
     # RELAXATIONS — a feature CARVED INTO the host that legitimately grades
     # steeper than the host body.  Applied by BOTH readers (the solver builds to
     # it, the validator confirms it) — never a test-only fudge: the carve corners

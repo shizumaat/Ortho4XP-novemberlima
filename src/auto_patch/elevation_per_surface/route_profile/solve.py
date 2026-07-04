@@ -160,14 +160,28 @@ def solve_route_profile(layout, icao: str,
         # earlier FLAT hard seat forced unreachable levels → regressed
         # cyxy_spine_zero + HECA runway; the per-contact tilt level does not).
         building_seats.update(apron_seats)
+        # SEAM PINS ARE NEVER SEATS (user 2026-07-04, "treat the seam like
+        # a runway edge or building"): a seat level computed at a tile-seam
+        # terrain pin overwrites the pin everywhere seats are applied
+        # (spine stamp, body fill) and detaches the boundary from the
+        # terrain it must meet — SPLP's band-edge corner was seated 66.3
+        # over its 63.5 pin.  The pin anchors that node; the apron's other
+        # contacts still seat, and the surface grades between them.
+        _seam_pin_idx = getattr(layout, "_seam_pin_idx", None) or set()
+        for _i in list(building_seats):
+            if _i in _seam_pin_idx:
+                del building_seats[_i]
         # A building seat that IS a spine node (a pad node on a taxi centerline)
         # is anchored at its ACTUAL seat level DURING the spine solve — so the
         # spine grades its neighbours to within cap of the building (buildings are
         # heaviest).  Otherwise the spine grades to the softer floor (715.35) and
         # PHASE B then slams the seat to its real level (715.63), breaking the cap
         # to the neighbour (the 5.4% junction).  The seat and the spine now agree.
+        # (Seam pins were already removed from ``building_seats`` above —
+        # the extra guard here is belt-and-braces.)
         for i, lv in building_seats.items():
-            if i < n and lv is not None and i in u_spine_adj:
+            if i < n and lv is not None and i in u_spine_adj \
+                    and i not in _seam_pin_idx:
                 elev[i] = float(lv)
                 base_hard[i] = True
                 _hard_cat.setdefault(i, "seat_on_spine")
@@ -322,8 +336,11 @@ def solve_route_profile(layout, icao: str,
                     _ring = list(_s.polygon.exterior.coords)
                     _g = {bucket_to_idx.get(_cps.get_or_add(float(x), float(y)))
                           for (x, y) in _ring}
+                    # Seam pins never join a movable group (they are
+                    # immovable terrain anchors — see yield_hard below).
                     _g = {i for i in _g
-                          if i is not None and i < n and i in building_seats}
+                          if i is not None and i < n and i in building_seats
+                          and i not in _seam_pin_idx}
                     if len(_g) >= 2:
                         pad_groups.append(_g)
             if pad_groups:
@@ -341,6 +358,13 @@ def solve_route_profile(layout, icao: str,
                     == "1"):
                 yield_hard = yield_hard - (
                     {i for i in building_seats if i < n} - _pad_nodes)
+            # SEAM PINS NEVER LEAVE THE HARD SET (user 2026-07-04): the
+            # movable-pads / free-apron-seats relaxations above may have
+            # freed a node that is ALSO a tile-seam terrain pin — but the
+            # seam is a graded-TO anchor exactly like a runway edge; a
+            # freed pin lets the final GS park the boundary off the
+            # terrain it must meet (SPLP: 0.7 m float at the band edge).
+            yield_hard |= {i for i in _seam_pin_idx if i < n}
             joint = list(shape_constraints) + [{"edges": u_edges}]
             # DEBUG snapshot (O4_DUMP_SOLVE_STATE=<path>): pickle the final-
             # projection inputs so projection variants iterate OFFLINE (~1 s)

@@ -1262,28 +1262,33 @@ def _seed_elevations(layout, nodes, bucket_to_idx,
                     v = f
             pin_vals[idx] = v
 
-        # ── Phase 2: grade-project ADJACENT seam pins (pin↔pin law) ──
+        # ── Phase 2: grade-project seam pins along the ring (pin↔pin law) ──
         # Raw per-pin DEM pins trace every terrain bump into the pavement
-        # at the seam.  A pair of ring-ADJACENT seam pins is exactly the
-        # class the within-shape law exempts (both endpoints hard), so a
-        # local terrain notch at the band edge emits as a pavement dip
-        # (SPLP: mirrored 1.2 m junction dips at 2.9 % over 45 m, 0.5-0.7
-        # m apron dips) — and cap-violating pins also make the interior
-        # solve infeasible (each pin pulls its soft neighbours toward
-        # itself; the GS midpoints the conflict).  Project the pin values
-        # onto the pairwise polytope ``|v_i − v_j| ≤ cap·d`` over every
-        # ring-adjacent pin pair (POCS, violation split equally — the
-        # minimum-movement projection; runway pins are IMMOVABLE profile
-        # authority, their neighbour takes the whole move).  Ring
-        # adjacency keeps the coupling inside one pavement shape — no
-        # reach across grass gaps — and terrain adherence is preserved
-        # wherever the DEM trace is already cap-legal (the projection is
-        # identity there).  Deterministic: same rings, same DEM, same
-        # sweep order on both tile builds.
+        # at the seam.  Pin↔pin pairs are exactly the class the
+        # within-shape law exempts (both endpoints hard), so a local
+        # terrain notch at the band edge emits as a pavement dip (SPLP:
+        # mirrored 1.2 m junction dips at 2.9 % over 45 m) — and
+        # cap-violating pins also make the interior solve infeasible
+        # (each pin pulls its soft neighbours toward itself; the GS
+        # midpoints the conflict).  Project the pin values onto the
+        # pairwise polytope ``|v_i − v_j| ≤ cap·path`` over CONSECUTIVE
+        # pins along each ring — soft intermediate vertices are skipped
+        # but their path length counts: the law grades them onto the
+        # pin-to-pin line, so the pins themselves must be mutually
+        # cap-feasible over that path (adjacent-vertex-only pairs missed
+        # pins separated by soft nodes — SPLP emitted a 2.5 % straight
+        # line between two band-edge pins 45 m apart).  POCS, violation
+        # split equally (the minimum-movement projection); runway pins
+        # are IMMOVABLE profile authority, their neighbour takes the
+        # whole move.  Ring paths keep the coupling inside one pavement
+        # shape — no reach across grass gaps — and terrain adherence is
+        # preserved wherever the DEM trace is already cap-legal (the
+        # projection is identity there).  Deterministic: same rings,
+        # same DEM, same sweep order on both tile builds.
         cap = SEAM_CLAMP_GRADE
         _PIN_PAIR_ROLES = SEAM_CLAMP_ROLES | {ROLE_RUNWAY,
                                               ROLE_RUNWAY_CROSSING}
-        pin_edges: dict = {}     # (idx_lo, idx_hi) -> distance
+        pin_edges: dict = {}     # (idx_lo, idx_hi) -> ring-path distance
         for s in layout.shapes:
             if s.role not in _PIN_PAIR_ROLES:
                 continue
@@ -1297,24 +1302,40 @@ def _seed_elevations(layout, nodes, bucket_to_idx,
             for (x, y) in coords:
                 idx = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
                 ring_idx.append(idx if idx in pin_vals else None)
-            for k in range(n_ring):
-                idx_a = ring_idx[k]
-                idx_b = ring_idx[(k + 1) % n_ring]
-                if idx_a is None or idx_b is None or idx_a == idx_b:
+            pin_positions = [k for k in range(n_ring)
+                             if ring_idx[k] is not None]
+            if len(pin_positions) < 2:
+                continue
+            segment_lengths = [
+                math.hypot(coords[(k + 1) % n_ring][0] - coords[k][0],
+                           coords[(k + 1) % n_ring][1] - coords[k][1])
+                for k in range(n_ring)]
+            for pi in range(len(pin_positions)):
+                k_a = pin_positions[pi]
+                k_b = pin_positions[(pi + 1) % len(pin_positions)]
+                idx_a = ring_idx[k_a]
+                idx_b = ring_idx[k_b]
+                if idx_a == idx_b:
                     continue
-                xa, ya = coords[k]
-                xb, yb = coords[(k + 1) % n_ring]
-                dist = math.hypot(xa - xb, ya - yb)
-                if dist < 0.5:
+                path = 0.0
+                k = k_a
+                while k != k_b:
+                    path += segment_lengths[k]
+                    k = (k + 1) % n_ring
+                if path < 0.5:
                     continue
                 key = (idx_a, idx_b) if idx_a < idx_b else (idx_b, idx_a)
                 prev = pin_edges.get(key)
-                if prev is None or dist < prev:
-                    pin_edges[key] = dist
+                if prev is None or path < prev:
+                    pin_edges[key] = path
         if pin_edges:
-            edge_list = sorted(pin_edges.items())
             def _movable(idx: int) -> bool:
                 return not (seam_pins[idx][4] and is_hard[idx])
+            # Both-immovable edges (runway↔runway: the FAA profile) can
+            # never be projected — drop them so they don't block
+            # convergence.
+            edge_list = [(key, dist) for key, dist in sorted(pin_edges.items())
+                         if _movable(key[0]) or _movable(key[1])]
             for _sweep in range(200):
                 worst = 0.0
                 for (idx_a, idx_b), dist in edge_list:
@@ -1326,8 +1347,6 @@ def _seed_elevations(layout, nodes, bucket_to_idx,
                     worst = max(worst, slack)
                     move_a = _movable(idx_a)
                     move_b = _movable(idx_b)
-                    if not (move_a or move_b):
-                        continue
                     hi_idx, lo_idx = ((idx_a, idx_b) if va > vb
                                       else (idx_b, idx_a))
                     hi_mov = _movable(hi_idx)
@@ -1341,6 +1360,19 @@ def _seed_elevations(layout, nodes, bucket_to_idx,
                         pin_vals[lo_idx] += slack
                 if worst <= 1e-4:
                     break
+            if _os.environ.get("O4_SEAM_DEBUG") == "1":
+                n_bad = 0
+                for (idx_a, idx_b), dist in edge_list:
+                    slack = (abs(pin_vals[idx_a] - pin_vals[idx_b])
+                             - cap * dist)
+                    if slack > 1e-3:
+                        n_bad += 1
+                        xa, ya = seam_pins[idx_a][:2]
+                        print(f"    [seam-pins] RESIDUAL {slack:.2f} m over "
+                              f"{dist:.1f} m at local ({xa:.1f},{ya:.1f})")
+                print(f"    [seam-pins] {len(pin_vals)} pin(s), "
+                      f"{len(edge_list)} edge(s), final worst residual "
+                      f"{worst:.3f} m, {n_bad} edge(s) still over cap")
 
         # ── Phase 3: write ────────────────────────────────────────────
         for idx, v in pin_vals.items():
@@ -1351,6 +1383,21 @@ def _seed_elevations(layout, nodes, bucket_to_idx,
             elev[idx] = v
             is_hard[idx] = True
             have_initial[idx] = True
+        # Publish the pinned indices: seam pins are GRADED-TO hard anchors
+        # (user 2026-07-04, "treat the seam like a runway edge or
+        # building") — downstream passes that re-stamp or free anchor
+        # classes (apron seat-on-spine stamps, the yield pass's
+        # movable-pads / free-apron-seats relaxations) must NEVER touch a
+        # seam pin: SPLP C-pin was seat-stamped 63.5 → 66.3, then freed
+        # from yield_hard, and the final GS parked it 0.7 m above the
+        # terrain pin — a bump the law never saw (seam-zone exemption).
+        layout._seam_pin_idx = set(pin_vals)  # type: ignore[attr-defined]
+        # Lat/lon twin of the pin set for the axes sidecar → the
+        # validator flags the SAME vertices (nid space) instead of its
+        # legacy 400 m blanket zone.
+        layout._seam_pin_ll = [  # type: ignore[attr-defined]
+            layout.m_to_ll(seam_pins[i][0], seam_pins[i][1])
+            for i in pin_vals]
 
     # Warm-start soft nodes.
     for s in layout.shapes:
