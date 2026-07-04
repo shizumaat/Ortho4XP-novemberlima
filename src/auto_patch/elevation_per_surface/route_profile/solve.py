@@ -417,6 +417,20 @@ def solve_route_profile(layout, icao: str,
             rem, bh = feasibility_project(elev, joint, yield_hard,
                                           force_scalar=True, max_iters=2400,
                                           flat_groups=pad_groups or None)
+            # EDGE FAIRING (user 2026-07-04, CYXY taxiway E): the spine
+            # fairing law covers spine CHAINS only — a corridor's ring
+            # EDGE still tracks noise in legal ±cap wiggles (E's edge
+            # alternated +2.3 %/+0.8 % every 12 m around a 1.55 % mean).
+            # Apply the same second-difference POCS to STRAIGHT boundary
+            # runs of airside rings (corners are real grade breaks —
+            # skipped by the bend test; anchors never move; band-clamped).
+            if _os.environ.get("O4_EDGE_FAIRING", "1") == "1":
+                from auto_patch.config import TAXIWAY_MAX_GRADE_CHANGE_PER_M
+                _n_ekink = _fair_ring_edges(
+                    layout, elev, bucket_to_idx, yield_hard, node_band,
+                    TAXIWAY_MAX_GRADE_CHANGE_PER_M)
+                if _os.environ.get("O4_STEP_DEBUG") == "1":
+                    print(f"    [edge-fairing] residual kinks={_n_ekink}")
         _psub(0.97, "Solving elevations — writing back")
         n_terms, n_rects, n_juncs = _writeback(layout, elev, bucket_to_idx)
         if _os.environ.get("O4_STEP_DEBUG") == "1":
@@ -527,6 +541,14 @@ def final_grade_projection(layout, icao: str = "") -> None:
     rem, bh = feasibility_project(elev, joint, hard, force_scalar=True,
                                   max_iters=400,
                                   flat_groups=pad_groups or None)
+    # Re-fair the ring edges the projection just perturbed (the GS
+    # distributes a cap-grade climb as a sawtooth between alternate
+    # nodes; a linear cap-grade profile satisfies the same pairs) —
+    # same second-difference law as the solve-time pass.
+    if _os.environ.get("O4_EDGE_FAIRING", "1") == "1":
+        from auto_patch.config import TAXIWAY_MAX_GRADE_CHANGE_PER_M
+        _fair_ring_edges(layout, elev, b2i, hard, None,
+                         TAXIWAY_MAX_GRADE_CHANGE_PER_M)
     _writeback(layout, elev, b2i)
     try:
         import O4_UI_Utils as _UI
@@ -783,6 +805,110 @@ def _fair_spine_chains(elev, spine_adj, anchors, node_band, nodes_xy,
                 continue
             g1 = (elev[c[t]] - elev[c[t - 1]]) / l1
             g2 = (elev[c[t + 1]] - elev[c[t]]) / l2
+            if abs(g2 - g1) - k_rate * 0.5 * (l1 + l2) > 1e-4:
+                n_over += 1
+    return n_over
+
+
+def _fair_ring_edges(layout, elev, bucket_to_idx, anchors, node_band,
+                     k_rate, *, max_bend_deg=25.0, min_seg_m=3.0,
+                     max_sweeps=200, tol=1e-4):
+    """Second-difference fairing on STRAIGHT airside boundary runs (user
+    2026-07-04, CYXY taxiway E edge): the ``_fair_spine_chains`` law
+    covers spine chains only, so a corridor's ring EDGE still tracks DEM
+    noise in legal ±cap sawtooth (±0.8 % grade alternation every 12 m).
+    Same POCS: a too-sharp sag lifts its centre, a crest lowers it,
+    stiffness-split, band-clamped, anchors fixed.  Ring CORNERS are real
+    grade breaks — a triple only fairs when the boundary is straight
+    through it (bend ≤ ``max_bend_deg``).  Runways/buildings excluded
+    (own profile / flat).  Mutates ``elev``; returns residual kinks."""
+    import math as _math
+    from auto_patch.layout import (ROLE_RUNWAY, ROLE_BUILDING,
+                                   ROLE_BOUNDARY, ROLE_GROUNDSIDE_PAVEMENT)
+    _SKIP_ROLES = {ROLE_RUNWAY, "runway_crossing", ROLE_BUILDING,
+                   ROLE_BOUNDARY, ROLE_GROUNDSIDE_PAVEMENT,
+                   "retaining_wall", "tunnel_ramp", "clearance",
+                   "taxiway_clearance",
+                   # Service roads are DEM-follow ramps with genuine
+                   # grade breaks at mouths/portals whose weld pins are
+                   # not in every caller's hard set — fairing them
+                   # minted 0.2-0.9 m bumps against the welds (CYXY
+                   # #201: 132 %).  The waviness law is an AIRCRAFT
+                   # taxiway ride-quality rule; roads keep their ramps.
+                   "service_road", "service_junction"}
+    cps = layout.canonical_points
+    n = len(elev)
+    rings = []
+    for s in layout.shapes:
+        if s.role in _SKIP_ROLES or s.polygon is None \
+                or s.polygon.is_empty or s.polygon.geom_type != "Polygon":
+            continue
+        coords = list(s.polygon.exterior.coords)
+        if coords and coords[0] == coords[-1]:
+            coords = coords[:-1]
+        if len(coords) < 4:
+            continue
+        idx = [bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+               for (x, y) in coords]
+        rings.append((coords, idx))
+
+    def _fairable(coords, idx, t):
+        m = len(coords)
+        a, b, d = idx[(t - 1) % m], idx[t], idx[(t + 1) % m]
+        if b is None or a is None or d is None:
+            return None
+        if b >= n or a >= n or d >= n or b in anchors:
+            return None
+        (xa, ya), (xb, yb) = coords[(t - 1) % m], coords[t]
+        (xd, yd) = coords[(t + 1) % m]
+        l1 = _math.hypot(xb - xa, yb - ya)
+        l2 = _math.hypot(xd - xb, yd - yb)
+        if l1 < min_seg_m or l2 < min_seg_m:
+            return None
+        dot = ((xb - xa) * (xd - xb) + (yb - ya) * (yd - yb)) / (l1 * l2)
+        if dot < _math.cos(_math.radians(max_bend_deg)):
+            return None                       # corner — real grade break
+        return a, b, d, l1, l2
+
+    n_band = len(node_band) if node_band is not None else 0
+    for _sweep in range(max_sweeps):
+        worst = 0.0
+        for coords, idx in rings:
+            for t in range(len(coords)):
+                f = _fairable(coords, idx, t)
+                if f is None:
+                    continue
+                a, b, d, l1, l2 = f
+                g1 = (elev[b] - elev[a]) / l1
+                g2 = (elev[d] - elev[b]) / l2
+                dg = g2 - g1
+                lim = k_rate * 0.5 * (l1 + l2)
+                ex = abs(dg) - lim
+                if ex <= 1e-6:
+                    continue
+                delta = _math.copysign(ex, dg) / (1.0 / l1 + 1.0 / l2)
+                nb = elev[b] + delta
+                band = node_band[b] if b < n_band else None
+                if band is not None:
+                    lo, hi = band
+                    if lo <= hi:
+                        nb = min(max(nb, lo), hi)
+                moved = abs(nb - elev[b])
+                if moved:
+                    elev[b] = nb
+                    if moved > worst:
+                        worst = moved
+        if worst < tol:
+            break
+    n_over = 0
+    for coords, idx in rings:
+        for t in range(len(coords)):
+            f = _fairable(coords, idx, t)
+            if f is None:
+                continue
+            a, b, d, l1, l2 = f
+            g1 = (elev[b] - elev[a]) / l1
+            g2 = (elev[d] - elev[b]) / l2
             if abs(g2 - g1) - k_rate * 0.5 * (l1 + l2) > 1e-4:
                 n_over += 1
     return n_over

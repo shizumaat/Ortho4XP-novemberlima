@@ -1799,6 +1799,152 @@ def taxi_centerlines(
     return out
 
 
+def snap_parallel_service_runs(
+        centerlines: "list[TaxiCenterline]",
+        *,
+        max_sep_m: float = 9.0,
+        self_arc_min_m: float = 60.0,
+        min_dot: float = 0.8,
+        min_run_m: float = 20.0,
+) -> int:
+    """Collapse PARALLEL truck-route runs onto ONE shared line (user
+    2026-07-04, CYXY 'Crew cars'): a two-lane service road is mapped as
+    two one-way routes (or one out-and-back LOOP whose legs run side by
+    side).  Each leg used to cut its own spine a few metres from the
+    other — the road solved two profiles meeting at a RIDGE down the
+    middle, falling off steeply at the edges.
+
+    Where two route lines (or a loop's two legs) run within
+    ``max_sep_m`` of each other and roughly parallel for ≥``min_run_m``:
+    the FIRST line's run deforms to the pair's midline, then the
+    SECOND's run is replaced by the exact SUBSTRING of the first — the
+    two carry IDENTICAL geometry until they naturally diverge, so the
+    slice cuts one edge and the spine solves one profile (a single
+    spine down the middle, per the user's ruling).
+
+    Mutates ``centerlines`` in place; returns the number of runs merged.
+    """
+    from shapely.geometry import LineString, Point
+    from shapely.ops import substring
+
+    def _direction_at(line, arc):
+        a = line.interpolate(max(0.0, arc - 0.5))
+        b = line.interpolate(min(line.length, arc + 0.5))
+        dx, dy = b.x - a.x, b.y - a.y
+        dn = math.hypot(dx, dy) or 1.0
+        return dx / dn, dy / dn
+
+    def _twin_mask(line_a, line_b, same_line):
+        """Per-vertex-of-``line_a``: (is_twin, projected_arc_on_b)."""
+        coords = list(line_a.coords)
+        out = []
+        arc = 0.0
+        for k, (x, y) in enumerate(coords):
+            if k:
+                px, py = coords[k - 1]
+                arc += math.hypot(x - px, y - py)
+            p = Point(x, y)
+            u = line_b.project(p)
+            if same_line and abs(u - arc) < self_arc_min_m:
+                out.append((False, u))
+                continue
+            q = line_b.interpolate(u)
+            if p.distance(q) > max_sep_m:
+                out.append((False, u))
+                continue
+            da = _direction_at(line_a, arc)
+            db = _direction_at(line_b, u)
+            if abs(da[0] * db[0] + da[1] * db[1]) < min_dot:
+                out.append((False, u))
+                continue
+            # loops: only the LATER leg rewrites onto the earlier one
+            if same_line and u >= arc:
+                out.append((False, u))
+                continue
+            out.append((True, u))
+        return coords, out
+
+    def _runs(coords, mask):
+        """Contiguous twin vertex runs [(k1, k2)] spanning ≥min_run_m."""
+        spans = []
+        k = 0
+        while k < len(coords):
+            if not mask[k][0]:
+                k += 1
+                continue
+            k2 = k
+            while k2 + 1 < len(coords) and mask[k2 + 1][0]:
+                k2 += 1
+            run_m = sum(math.hypot(coords[t + 1][0] - coords[t][0],
+                                   coords[t + 1][1] - coords[t][1])
+                        for t in range(k, k2))
+            if k2 > k and run_m >= min_run_m:
+                spans.append((k, k2))
+            k = k2 + 1
+        return spans
+
+    n_merged = 0
+    n = len(centerlines)
+    for i in range(n):
+        for j in range(i, n):
+            same = i == j
+            line_i = centerlines[i].line
+            line_j = centerlines[j].line
+            if line_i is None or line_j is None \
+                    or line_i.is_empty or line_j.is_empty:
+                continue
+            if not same and line_i.distance(line_j) > max_sep_m:
+                continue
+            if not same:
+                # Step A: deform line_i's twin run to the pair MIDLINE.
+                coords_i, mask_i = _twin_mask(line_i, line_j, False)
+                spans_i = _runs(coords_i, mask_i)
+                if not spans_i:
+                    continue
+                new_i = list(coords_i)
+                for (k1, k2) in spans_i:
+                    for k in range(k1, k2 + 1):
+                        q = line_j.interpolate(mask_i[k][1])
+                        new_i[k] = (0.5 * (coords_i[k][0] + q.x),
+                                    0.5 * (coords_i[k][1] + q.y))
+                try:
+                    line_i = LineString(new_i)
+                except (ValueError, TypeError):
+                    continue
+                centerlines[i].line = line_i
+            # Step B: replace line_j's twin run with the exact SUBSTRING
+            # of (possibly deformed) line_i — identical geometry.
+            coords_j, mask_j = _twin_mask(line_j, line_i, same)
+            spans_j = _runs(coords_j, mask_j)
+            if not spans_j:
+                continue
+            new_coords = []
+            cursor = 0
+            for (k1, k2) in spans_j:
+                new_coords.extend(coords_j[cursor:k1])
+                u1, u2 = mask_j[k1][1], mask_j[k2][1]
+                try:
+                    seg = substring(line_i, u1, u2)
+                except (ValueError, TypeError):
+                    new_coords.extend(coords_j[k1:k2 + 1])
+                    cursor = k2 + 1
+                    continue
+                seg_coords = list(getattr(seg, "coords", ()))
+                if len(seg_coords) < 2:
+                    new_coords.extend(coords_j[k1:k2 + 1])
+                else:
+                    new_coords.extend(seg_coords)
+                    n_merged += 1
+                cursor = k2 + 1
+            new_coords.extend(coords_j[cursor:])
+            if len(new_coords) >= 2:
+                try:
+                    centerlines[j].line = LineString(new_coords)
+                except (ValueError, TypeError):
+                    pass
+    return n_merged
+
+
 def service_road_centerlines(
         airport: Airport,
         to_m: Callable[[float, float], tuple[float, float]],

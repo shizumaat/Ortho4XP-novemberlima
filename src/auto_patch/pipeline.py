@@ -1661,6 +1661,17 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # merged 1206 centerlines for its ON-pavement road detection.
     if ENABLE_SERVICE_ROADS or SERVICE_ROAD_CARVE:
         layout.apt_service_centerlines = APR.service_road_centerlines(apt, to_m)
+        # Two one-way truck routes on ONE road (or a loop's out-and-back
+        # legs) collapse onto a single shared line until they diverge —
+        # one spine down the middle instead of a per-leg ridge (user
+        # 2026-07-04, CYXY 'Crew cars').
+        if os.environ.get("O4_MERGE_PARALLEL_SVC", "1") == "1":
+            _n_par = APR.snap_parallel_service_runs(
+                layout.apt_service_centerlines)
+            if _n_par:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: merged {_n_par} parallel "
+                    f"truck-route run(s) onto a single line.")
         if layout.apt_service_centerlines:
             UI.vprint(1,
                 f"  [pav-builder] {icao}: "
