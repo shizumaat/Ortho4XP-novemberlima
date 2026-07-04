@@ -40,8 +40,13 @@ _GEOM_EXC = (GEOSException, TopologicalError, ValueError, AttributeError)
 # Max perpendicular XY deviation of a removed vertex from the kept chord.
 XY_TOL_M = 0.02
 # Max |z - z_interpolated| of a removed vertex against the kept chord.
-Z_TOL_AIRSIDE_M = 0.02
-Z_TOL_BOUNDARY_M = 0.10
+# The Z band is the SMOOTHING knob (user 2026-07-03): any elevation wiggle
+# whose amplitude fits inside the band collapses into one straight segment
+# — "graded smooth, long gentle slopes" — while larger transitions keep
+# their nodes.  (Rounding elevations to coarse steps would do the OPPOSITE:
+# the V15 waviness root cause WAS 0.1 m quantization stairs.)
+Z_TOL_AIRSIDE_M = float(os.environ.get("O4_DECIMATE_Z_M", "0.02"))
+Z_TOL_BOUNDARY_M = float(os.environ.get("O4_DECIMATE_Z_BOUNDARY_M", "0.10"))
 
 # Roles whose exterior rings are decimated (everything else only VOTES KEEP
 # through shared vertices).  Buildings/terminals are excluded — pads are
