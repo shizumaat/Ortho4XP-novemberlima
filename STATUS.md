@@ -1,3 +1,44 @@
+# STATUS — SESSION 20260703 (cont.): user's 6-task list — state
+
+> **DONE 1 (7a19216)**: at-DEM boundary ribbon SKIPPED
+> (O4_BOUNDARY_SKIP_AT_DEM, ±0.05 m; keep within 30 m of pavement for the
+> seam-adoption interface).  SPJC 1,074 rects skipped → patch 477 ways /
+> 8,330 verts; SPLP ~488; CYXY 221.  NOTE: unmasked
+> test_cyxy_taxi_e_south_apron_follows_terrain — that test's bbox counted
+> the DEM-following RIBBON as "pavement"; airside there truly tops at
+> 710.7 vs required 714 = the KNOWN "hill aprons flat at band ceiling"
+> open item, now honestly red.
+> **DONE 2 (7a19216)**: CYXY bridges were computed then 100 % silently
+> dropped — containment ∩ boundary returns a GeometryCollection on
+> tangency and the geom_type guard rejected it wholesale.  Polygonal-part
+> extraction → 4 bridges emitted, valley probe 78/80 covered (was 0/80).
+> Probes: valley_probe.py in /tmp/spjc_lab.
+> **OPEN 5 (82c2699, deep diagnosis banked)**: SPLP seam dips confirmed —
+> 7 nodes, worst 4.2 m runway V-notch + mirrored 1.2-1.3 m junction dips.
+> Pin IS hard pre-solve with law edge present; emitted 63.3 = envelope
+> MIDPOINT signature (floor>ceiling ⇒ infeasible pin↔runway chain).
+> THREE pin writers found; clamping seam_anchors + _terrain_pin_slice_
+> nodes left patches BYTE-IDENTICAL → the junction's 62.0 flows through
+> a still-unidentified path.  NEXT: altitude-write tracer on the vertex
+> bucket at SPLP local (-132.3, 41.2) tile −13/−77 (dip node), then apply
+> the runway_clamp_floor rule at THAT writer; runway notch additionally
+> needs redistribute_runway_profile to see the tile_cut band-edge pins.
+> Landed groundwork (verified non-regressive): one-seam-endpoint pairs
+> stay in the law; runway_clamp_floor shared helper (taxi-cap reachable-
+> by-construction pins).  splp_seam_probe.py in /tmp/spjc_lab.
+> **QUEUED 3**: tunable vertical-curvature law (fairing) — design agreed
+> earlier in session (second-difference limit on spine chains, K-factor
+> analog, solver+validator shared).
+> **QUEUED 4**: service roads as road-cap corridors, airside↔groundside
+> connectors never severed, groundside at DEM grading smoothly up (CYXY
+> examples).
+> **QUEUED 6**: CYUL tunnels — note SPLP log prints "skipped 17 tunnel(s)
+> with an adjacent/crossing road (ramps not modelled)" — the CYUL
+> runway-24-end tunnel is likely skipped by the same adjacent-road guard;
+> check that print in a CYUL build first.
+
+---
+
 # STATUS — RESIDUAL WAVINESS: rounding rejected; decimation band saturates;
 # NEXT LEVER = solver-side FAIRING
 
