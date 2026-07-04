@@ -1,3 +1,25 @@
+# STATUS — RESIDUAL WAVINESS: rounding rejected; decimation band saturates;
+# NEXT LEVER = solver-side FAIRING
+
+> USER: small waves/variations that real grading would smooth into long
+> gentle slopes; proposed rounding elevations to 0.5/1 m.  REJECTED with
+> evidence: quantization creates terraced STAIRS (0.5 m level change over a
+> 24 m segment = 2.1 % grade spike at every boundary) — the V15 waviness
+> root cause WAS 0.1 m quantization (fixed by 2-decimal emit).
+> MEASURED instead: emit-decimation Z band ±0.02 → ±0.10 m
+> (O4_DECIMATE_Z_M knob, committed) removes only ~700 more vertices
+> (7,781 vs 7,079) — the residual waves live on CURVES and face interiors
+> where XY keeps the nodes, out of decimation's reach.  Default stays 2 cm.
+> THE REAL FIX (next session): SPINE-PROFILE FAIRING — the law bounds the
+> FIRST derivative (grade) but nothing penalizes grade CHANGES, so the
+> solve tracks DEM noise in legal ±1.5 % wiggles.  Add a curvature
+> (second-difference) objective on spine chains subject to law + anchors
+> (the s63 "vertical-curve extrema design" item, never built) — long
+> linear/parabolic profiles = real-world grading.  Alternative form:
+> post-solve vertical-curve fit per chain + law re-projection.
+
+---
+
 # STATUS — CYUL 15-MIN BUILD: bug-class scaling, FIXED (861 → 217 s; SPJC
 # 89 → 69 s)
 

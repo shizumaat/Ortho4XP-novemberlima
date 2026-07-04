@@ -1029,11 +1029,53 @@ def _emit_airport_boundary_shape(
     # their flat (cross) edge nodes exactly — and reproduce the SAME band
     # the pre-solve clip (``_compute_boundary_ribbon_interior``) used.
     n_emitted = 0
+    n_at_dem = 0
     band_union = None    # running union of emitted rects (overlap guard)
+    # AT-DEM SUPPRESSION (user 2026-07-03): the ribbon exists to ADJUST
+    # terrain where the airport was graded/excavated/filled (the clamp
+    # lifted it off raw DEM).  Where both rect ends sit AT raw DEM the rect
+    # merely restates the terrain X-Plane already renders — skip it (the
+    # boundary ribbon was 24 % of SPJC's emitted vertices).  Rects near
+    # pavement are always kept: the ribbon-seam pass adopts pavement
+    # altitudes onto them (the pavement↔terrain interface).
+    _skip_at_dem = os.environ.get("O4_BOUNDARY_SKIP_AT_DEM", "1") == "1"
+    _AT_DEM_TOL_M = 0.05
+    _KEEP_NEAR_PAV_M = 30.0
+    _pav_u_prep = None
+    if _skip_at_dem:
+        try:
+            from shapely.prepared import prep as _prep
+            _pav_u = unary_union(
+                [s.polygon for s in pavement_shapes
+                 if s.polygon is not None and not s.polygon.is_empty])
+            _pav_u_prep = (_prep(_pav_u.buffer(_KEEP_NEAR_PAV_M))
+                           if _pav_u is not None and not _pav_u.is_empty
+                           else None)
+        except _GEOM_EXC:
+            _pav_u_prep = None
+
+    def _raw_dem_at(x: float, y: float):
+        try:
+            lat, lon = m_to_ll(x, y)
+            return _sample_dem(dem, tile_lat, tile_lon, lat, lon)
+        except _GEOM_EXC:
+            return None
+
     for p0, p1, perp0, perp1 in _ribbon_segment_geometry(
             boundary_geom, strip_half_width_m, densify_step_m):
         a0 = _runway_clamped_alt(p0[0], p0[1])
         a1 = _runway_clamped_alt(p1[0], p1[1])
+        if (_skip_at_dem and a0 is not None and a1 is not None):
+            d0 = _raw_dem_at(p0[0], p0[1])
+            d1 = _raw_dem_at(p1[0], p1[1])
+            if (d0 is not None and d1 is not None
+                    and abs(float(a0) - float(d0)) <= _AT_DEM_TOL_M
+                    and abs(float(a1) - float(d1)) <= _AT_DEM_TOL_M):
+                from shapely.geometry import Point as _MidPt
+                mid = _MidPt(0.5 * (p0[0] + p1[0]), 0.5 * (p0[1] + p1[1]))
+                if _pav_u_prep is None or not _pav_u_prep.intersects(mid):
+                    n_at_dem += 1
+                    continue
         if a0 is None or a1 is None:
             # Both DEM and runway-clamp returned None for at least one
             # endpoint — we genuinely don't know the altitude here.  Per
@@ -1113,6 +1155,10 @@ def _emit_airport_boundary_shape(
                             open_ring, seg_high, seg_low, eh, el))
             layout.shapes.append(shape)
             n_emitted += 1
+    if n_at_dem:
+        UI.vprint(1,
+            f"  [pav-builder] boundary ribbon: skipped {n_at_dem} "
+            f"at-DEM rect(s) (terrain already there; ±{_AT_DEM_TOL_M} m).")
     return n_emitted
 
 
@@ -2484,12 +2530,41 @@ def _emit_boundary_dem_bridge(
             # inside, the run is dropped rather than emitted outside.
             try:
                 contained = bridge_poly.intersection(boundary_poly)
-            except _GEOM_EXC:
+            except _GEOM_EXC as _cx:
+                if _bdbg:
+                    print(f"  [bridge-dbg]   containment EXC: {_cx!r} "
+                          f"(boundary valid={boundary_poly.is_valid})")
                 contained = None
             if contained is None or contained.is_empty:
+                if _bdbg and contained is not None:
+                    print(f"  [bridge-dbg]   containment EMPTY "
+                          f"(boundary valid={boundary_poly.is_valid} "
+                          f"area={boundary_poly.area:,.0f})")
                 continue
+            if contained.geom_type == "GeometryCollection":
+                # Tangencies between the bridge and the perimeter add stray
+                # line/point fragments to the intersection; rejecting the
+                # whole collection here silently dropped CYXY's ENTIRE
+                # 373 k m² bridge (zero bridges emitted, no debug path —
+                # the east/north ribbon↔pavement valleys).  Keep the
+                # polygonal parts.
+                _polys = [g for g in contained.geoms
+                          if g.geom_type in ("Polygon", "MultiPolygon")
+                          and not g.is_empty]
+                if _bdbg:
+                    print(f"  [bridge-dbg]   containment GC -> "
+                          f"{len(_polys)} polygonal part(s)")
+                if not _polys:
+                    continue
+                try:
+                    contained = unary_union(_polys)
+                except _GEOM_EXC:
+                    continue
             if contained.geom_type not in ("Polygon", "MultiPolygon") \
                     or contained.is_empty:
+                if _bdbg:
+                    print(f"  [bridge-dbg]   containment non-poly "
+                          f"type={contained.geom_type}")
                 continue
             if contained.area < 100.0:
                 continue
