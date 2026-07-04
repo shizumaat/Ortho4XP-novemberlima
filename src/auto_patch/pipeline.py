@@ -4973,6 +4973,16 @@ def build_airport_pavement(icao: str, xplane_root: str,
     from .geom_guard import report_post_solve_changes
     report_post_solve_changes(layout, _geom_guard_snap, icao)
 
+    # EMIT DECIMATION (user design 2026-07-03): drop 3D-collinear ring
+    # vertices — node density follows the SOLVED profile (straights emit as
+    # single segments; vertical transitions and curves keep their nodes).
+    # LAST pass by design: it must see the final welded/conformant geometry,
+    # and a vertex may only vanish when every ring sharing it agrees (no
+    # T-vertices minted).  Gate O4_EMIT_DECIMATE.
+    if compute_elevations:
+        from .emit_decimate import decimate_emit_nodes
+        decimate_emit_nodes(layout, icao)
+
     return layout
 
 

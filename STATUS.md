@@ -1,3 +1,27 @@
+# STATUS — EMIT DECIMATION SHIPPED (user design): node density now follows
+# the SOLVED profile
+
+> ``emit_decimate.decimate_emit_nodes`` (gate O4_EMIT_DECIMATE, default ON,
+> last pipeline pass): removes ring vertices 3D-collinear with their kept
+> neighbours (XY ≤ 2 cm of the chord AND Z on the interpolated line —
+> airside ±2 cm, boundary ±10 cm, justified by the DEM floor: 3-arc-sec
+> SRTM ~90 m posts smoothed ~700 m at airports).  Straight runs emit as
+> single segments (rect-era economy); vertical transitions/curves keep
+> their nodes automatically (off the 3D line).  CONFORMANCE BY
+> CONSTRUCTION: a vertex vanishes only if EVERY ring containing it agrees
+> (global vote across all shapes, exteriors + holes); tile-seam vertices
+> (exact integer lat/lon, minted by tile_cut) force-kept.
+> SPJC: **19,665 → 12,441 emitted vertices (−37 %)**, plane/cross/steps
+> unchanged.  Law count 13 → 52: NOT new ground — decimation merges short
+> segments whose +0.03 noise headroom (proportionally huge at 4-12 m) was
+> masking genuinely ~1.6-1.9 % junction runs + the pre-existing 4.0-4.35 %
+> tunnel_ramp class; solver-side enforcement of those = queue (same
+> post-solve-insert family as junction #166).  NOTE: the 40 T-junctions +
+> 1 crossing conformance WARN predates decimation (appeared with the law
+> tightening — separate open item).  Suite re-baseline pending.
+
+---
+
 # STATUS — LAW REVIEW (user: "reports 0 but I see violations") — FOUR
 # leniencies found + fixed; SPJC honest count = 13 hairline
 
