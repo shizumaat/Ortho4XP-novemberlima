@@ -1,3 +1,26 @@
+# STATUS — SESSION 20260704 (part 4): CYXY dropped intersections + CYUL
+# flipped wall FIXED (`602264b`)
+
+> **CYXY dropped taxi-intersection pieces (user, 3 coords)**: coverage
+> probe named `ce-post-runway-clip` — the runway clip drops remainders
+> <50 m²; the strip carve shrank parent junctions so real 20-50 m²
+> intersection remainders fell under the floor.  Now compact small
+> pieces KEEP (≥4 m² + survives buffer(−1)); hairline slivers still
+> drop.  Restoring them exposed a carve defect: mutually-overlapping
+> post-slice faces emitted the same corridor area as service (face A)
+> AND kept it as apron (face B) — carve now subtracts the FULL corridor
+> from every remainder + dedupes emitted pieces.
+> **CYUL east tunnel wall flipped (user)**: the perimeter band annulus
+> crosses the road at BOTH ends; the hole-slit knife cut the band at
+> its NARROWEST point = the true portal cap → only the far-end crossing
+> survived (wall across the live road).  Band now cut OPEN at every
+> arm's far end (also makes it simply connected → the cap survives).
+> Crossings: portal-only ✓; SPJC tunnels byte-stable.
+> Suite 21F/325P identical.  OPEN (carried): P4 road-mouth climb weld
+> (mid-edge, needs edge-interpolated weld).
+
+---
+
 # STATUS — SESSION 20260704 (part 3): implied tunnels @KCLT; SPLP seam
 # tension NAMED; CYXY centered service strips (`1b94fba` `48ef440`)
 
