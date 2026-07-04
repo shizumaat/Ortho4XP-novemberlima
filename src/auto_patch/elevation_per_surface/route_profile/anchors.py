@@ -823,6 +823,7 @@ def apply_groundside_reach(layout, bucket_to_idx, elev, cap):
     groundside lot shares no nodes with airside (a clearance gap separates them) —
     only the connector mouth, which is welded to the shifted level."""
     import math
+    import os as _os
     from auto_patch.layout import (
         ROLE_GROUNDSIDE_PAVEMENT, ROLE_APRON,
         ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION)
@@ -989,6 +990,13 @@ def apply_groundside_reach(layout, bucket_to_idx, elev, cap):
                            (gmx, gmy)))
 
     n = 0
+    # Groundside-mouth points per piece (stashed with each route above) —
+    # the anchor geometry for the mouth-decay relevel below.
+    mouth_pts: dict = {}
+    for (gid, _ln, _gm_s, _dir, _rl, _dm, (gmx, gmy)) in routes:
+        mouth_pts.setdefault(gid, []).append((gmx, gmy))
+    _mouth_decay = _os.environ.get(
+        "O4_GROUNDSIDE_MOUTH_DECAY", "1") == "1"
     deltas: dict = {}
     for gid, (g, lo, hi) in bounds.items():
         # Closest-to-DEM shift inside the feasible band; if the connectors'
@@ -998,9 +1006,54 @@ def apply_groundside_reach(layout, bucket_to_idx, elev, cap):
         deltas[gid] = delta
         if abs(delta) < 1e-6:
             continue
-        g.node_altitudes = [
-            (a + delta) if a is not None else None for a in g.node_altitudes]
+        mpts = mouth_pts.get(gid) or []
+        if _mouth_decay and mpts:
+            # MOUTH-DECAY relevel (user 2026-07-04, CYXY lot #35): the
+            # UNIFORM shift sank a 12 k m² lot 3.8 m below terrain
+            # everywhere because its 53 m route can only climb
+            # ``cap·53`` — but only the MOUTH must meet the road; the
+            # lot interior is existing terrain-level pavement.  Each
+            # node takes the shift the mouth needs, decayed toward zero
+            # at ``cap`` per metre of distance from the nearest mouth —
+            # the mouth still sits exactly at the reachable level (the
+            # weld + RAISE below read the shifted ring), the interior
+            # stays at DEM, and the in-between ramps at ≤cap.  A small
+            # piece (everything within ``|delta|/cap`` of its mouth)
+            # degenerates to the uniform shift.
+            coords = list(g.polygon.exterior.coords)
+            new_alts = []
+            for k, a in enumerate(g.node_altitudes):
+                if a is None:
+                    new_alts.append(None)
+                    continue
+                x, y = coords[min(k, len(coords) - 1)]
+                d = min(math.hypot(x - mx, y - my) for (mx, my) in mpts)
+                mag = max(0.0, abs(delta) - cap * d)
+                new_alts.append(a + math.copysign(mag, delta)
+                                if mag > 0.0 else a)
+            g.node_altitudes = new_alts
+        else:
+            g.node_altitudes = [
+                (a + delta) if a is not None else None
+                for a in g.node_altitudes]
         n += 1
+
+    # CHORD-LIMIT every welded piece BEFORE the weld reads it (lockstep
+    # with the post-solve ``_grade_limit_groundside_chords``): the weld
+    # pins service-road nodes to these ring values, and the late limiter
+    # rewrites the LOT ring only — two writers for the same physical
+    # node left the road pinned 1.5 m off the emitted lot (CYXY #41,
+    # 15 % road chords after emit consensus).  Limiting here makes the
+    # solve-time field the FINAL field (the late pass is idempotent on
+    # an already-limited ring).
+    from auto_patch.groundside import chord_limit_ring_altitudes
+    from auto_patch.config import GROUNDSIDE_MAX_GRADE
+    for (g, _lo, _hi) in bounds.values():
+        if not g.node_altitudes:
+            continue
+        g.node_altitudes = chord_limit_ring_altitudes(
+            list(g.polygon.exterior.coords), g.node_altitudes,
+            cap=GROUNDSIDE_MAX_GRADE)
 
     # (now-shifted) groundside altitude per key, for the weld.  LARGEST
     # piece first: where a big lot and a sliver connector piece share a
@@ -1008,14 +1061,25 @@ def apply_groundside_reach(layout, bucket_to_idx, elev, cap):
     # (user 2026-07-04, CYXY P4: welding to the 100 m² demoted
     # connector at 698.5 left the road 3 m under the 49 k m² lot).
     gs_key_alt: dict = {}
+    gs_key_owner: dict = {}
     for (g, _kalt) in sorted(gs_pieces,
                              key=lambda t: -t[0].polygon.area):
         gcoords = list(g.polygon.exterior.coords)
         galts = list(g.node_altitudes)
         for k in range(min(len(gcoords), len(galts))):
             if galts[k] is not None:
-                gs_key_alt.setdefault(_key(*gcoords[k]), float(galts[k]))
+                kk = _key(*gcoords[k])
+                if kk not in gs_key_alt:
+                    gs_key_alt[kk] = float(galts[k])
+                    gs_key_owner[kk] = id(g)
 
+    # ``hard`` = the returned truth-pin set.  Only WELDS go in it (shared
+    # road/apron↔lot geometry takes the lot's value — physical identity).
+    # The RAISE below writes elevation SEEDS but does NOT pin: a raised
+    # taper value is a heuristic floor, and pinning it hard froze arm
+    # nodes 1.3 m under the adjacent welded mouth (CYXY route D, 61 %
+    # chord after planarize mixed the two fields into one ring) — the
+    # post-reach projections grade the arm into the welds instead.
     hard: set = set()
 
     # ── RAISE the apron arm + connector along the truck route ────────────────
@@ -1049,7 +1113,8 @@ def apply_groundside_reach(layout, bucket_to_idx, elev, cap):
             tgt = gs_level - cap * straight
             if tgt > elev[pi] + 1e-3:
                 elev[pi] = tgt
-                hard.add(pi)
+                if _os.environ.get("O4_GS_RAISE_HARD", "0") == "1":
+                    hard.add(pi)      # legacy: raised taper values pinned
 
     # ── WELD each connector's groundside mouth to the shifted groundside ─────
     # Reachable connectors weld as before.  An UNREACHABLE connector still
@@ -1066,6 +1131,11 @@ def apply_groundside_reach(layout, bucket_to_idx, elev, cap):
             route_end_points.append(Point(*ln.coords[-1]))
         except (ValueError, IndexError):
             continue
+    # Coordinate keys this pass welded (rounded like the emit consensus) —
+    # persisted on the layout so the POST-solve groundside chord limiter
+    # can re-adopt its re-limited values onto exactly these nodes (and no
+    # others: a road passing a DEM-stay lot keeps its by-design seam).
+    weld_coord_keys: set = set()
     for si in range(len(svc)):
         c, _ks = svc[si]
         is_reachable = si in reachable
@@ -1083,6 +1153,32 @@ def apply_groundside_reach(layout, bucket_to_idx, elev, cap):
             if i is not None and i < len(elev):
                 elev[i] = a
                 hard.add(i)
+                weld_coord_keys.add((round(x, 2), round(y, 2)))
+
+    # ── WELD every pavement node ON a re-levelled lot ring ───────────────────
+    # The svc-ring weld above misses the MOUTH vertex when it lives on the
+    # APRON arm instead of a service shape (CYXY route D: the shared lot
+    # vertex belonged to the apron at solve time, the RAISE floored it
+    # 1.3 m under the lot's welded level, and post-solve planarize copied
+    # that value into the road ring → 15 % mixed-field chords).  The
+    # road↔lot connection is FIRST-CLASS shared geometry no matter which
+    # role carries the vertex: any solver node whose canonical key lies on
+    # a re-levelled piece's ring takes that ring's value.  Scoped to
+    # pieces the reach actually processed (``bounds``) — pieces with no
+    # reachable connector stay DEM and pin nothing (the blanket-weld
+    # regression class, +215).
+    relevelled_gids = {gid for gid in bounds}
+    if _os.environ.get("O4_GS_PAV_WELD", "1") == "1":
+        for (px, py, pi) in pav_pts:
+            k = _key(px, py)
+            a = gs_key_alt.get(k)
+            if a is None or gs_key_owner.get(k) not in relevelled_gids:
+                continue
+            if pi < len(elev):
+                elev[pi] = a
+                hard.add(pi)
+                weld_coord_keys.add((round(px, 2), round(py, 2)))
+    layout._groundside_weld_keys = weld_coord_keys
     return n, hard
 
 

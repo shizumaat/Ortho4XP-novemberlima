@@ -4346,6 +4346,21 @@ def build_airport_pavement(icao: str, xplane_root: str,
         except _GEOM_EXC:
             pass
 
+        # GROUNDSIDE ROUTE CORRIDORS → service_road (user 2026-07-04, CYXY
+        # #206): an OSM-captured groundside piece that IS a truck-route
+        # road corridor (route runs through it end-to-end) grades as a
+        # ROAD along its route, never as a re-levelled destination lot.
+        try:
+            from .groundside import reclassify_groundside_route_corridors
+            _n_corr = reclassify_groundside_route_corridors(layout)
+            if _n_corr:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: re-roled {_n_corr} groundside "
+                    f"route-corridor piece(s) → service_road (rides a truck "
+                    f"route).")
+        except _GEOM_EXC:
+            pass
+
         # GROUNDSIDE-CONNECTOR re-role (user 2026-06-27): a narrow service_junction
         # that links a service road to a groundside lot is a CONNECTOR corridor, not
         # an intersection — re-role it ``service_road`` so it grades AXIALLY (a ramp
@@ -4988,6 +5003,20 @@ def build_airport_pavement(icao: str, xplane_root: str,
         from .conformance import planarize_airside
         planarize_airside(layout, icao=icao)
 
+    # SERVICE lens deconfliction (user 2026-07-04): the canonical vertex
+    # weld can cross two near-coincident service boundaries whose contact
+    # chains carry different vertex sequences (corridor-converted road vs
+    # the strip-carved junction it was trimmed against — 0.38 m² lens).
+    # Runs BEFORE the final T-vertex weld so the clip's new on-edge
+    # vertices get welded (running after left a residual T-junction).
+    if compute_elevations:
+        from .groundside import _deconflict_service_overlaps
+        _n_svc_ov = _deconflict_service_overlaps(layout)
+        if _n_svc_ov:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: deconflicted {_n_svc_ov} "
+                f"overlapping service shape(s) (lens clip).")
+
     # LAST-WORD bridge re-clip: drop_flatedge_nodes / planarize above can
     # STRAIGHTEN a pavement edge that the emit-time bridge clip followed,
     # re-creating a pavement∩bridge overlap (CYXY apron#25: 6.7 m²).  Run
@@ -5037,7 +5066,14 @@ def build_airport_pavement(icao: str, xplane_root: str,
                    else int(math.floor(layout.anchor[0])))
             _tn = (current_tile_lon if current_tile_lon is not None
                    else int(math.floor(layout.anchor[1])))
-            _separate_groundside_from_airside(layout, _dem_last, _tl, _tn)
+            _separate_groundside_from_airside(layout, _dem_last, _tl, _tn,
+                                              preserve_field=True)
+            # The separation re-derives DEM altitudes for any piece it
+            # clipped — AFTER the finalize-stage chord limiter ran, so a
+            # rebuilt hillside piece reads >4 % across its interior again
+            # (CYXY #207: 8 % over 7.8 m).  Re-limit (idempotent).
+            from .groundside import _grade_limit_groundside_chords
+            _grade_limit_groundside_chords(layout)
         except _GEOM_EXC:
             pass
 

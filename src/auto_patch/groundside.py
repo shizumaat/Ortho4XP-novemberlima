@@ -235,9 +235,11 @@ def _dem_follow_polygon(p, _dem_at, densify_step_m: float = 15.0,
     else:
         alts = [float(a) for a in alts]
     # Grade-limit the DEM profile to GROUNDSIDE_MAX_GRADE (ramp-graded,
-    # user 2026-05-22) before rounding.
+    # user 2026-05-22) before rounding.  2 decimals, matching the emit
+    # resolution — 0.1 m quantization on sub-metre groundside chords
+    # reads as 10-15 % stairs (the V15 waviness class).
     alts = _grade_limit_ring(rebuilt, alts, GROUNDSIDE_MAX_GRADE)
-    alts = [round(float(a), 1) for a in alts]
+    alts = [round(float(a), 2) for a in alts]
     return new_poly, alts + [alts[0]]
 
 
@@ -434,6 +436,99 @@ def carve_narrow_service_strips(
     return n_carved
 
 
+def reclassify_groundside_route_corridors(
+        layout: "PavementLayout",
+        *,
+        corridor_halfwidth_m: float = 13.5,
+        min_cover_frac: float = 0.70,
+        min_run_m: float = 30.0,
+        ) -> int:
+    """Re-role a groundside piece that IS a truck-route road corridor to
+    ``ROLE_SERVICE_ROAD`` (user 2026-07-04, CYXY #206): OSM-captured
+    groundside pavement (curbside / parking capture) can coincide with an
+    apt.dat ground-truck route end-to-end — an 835 m road emitted as a
+    DEM "lot", which ``apply_groundside_reach`` then rigid-shifted 9 m
+    below terrain to satisfy its apron connector.  A piece whose area
+    lies ≥``min_cover_frac`` within ``corridor_halfwidth_m`` of the
+    service centerlines AND that carries ≥``min_run_m`` of route is ROAD
+    pavement: as ``service_road`` it grades AXIALLY along the route
+    (DEM-following ramp at the road cap) instead of being re-levelled as
+    a destination lot.  A genuine lot only meets its route at the mouth
+    (coverage ≪ ``min_cover_frac``), so it never converts.  Short mouth
+    pieces DO convert (measured: leaving CYXY's three 100-250 m² mouth
+    pieces groundside re-opens the 40-80 % road-weld cliffs — the
+    original 414-count disease).
+
+    Returns the number of shapes re-roled."""
+    if _os.environ.get("O4_GROUNDSIDE_ROUTE_CORRIDOR", "1") != "1":
+        return 0
+    service_lines = [c.line for c in
+                     (getattr(layout, "apt_service_centerlines", None) or [])
+                     if c.line is not None and not c.line.is_empty]
+    if not service_lines:
+        return 0
+    try:
+        line_union = unary_union(service_lines)
+        corridor = line_union.buffer(corridor_halfwidth_m)
+    except _GEOM_EXC:
+        return 0
+    # Existing pavement union (any non-groundside, non-feature role):
+    # groundside was allowed to OVERLAP service pavement until the
+    # separation pass trimmed it — a converted piece leaves that regime,
+    # so trim the overlap NOW or it emits as service∩service
+    # (zero-tolerance test_no_self_overlap, CYXY 0.4 m²).
+    _FEATURE_ROLES = {ROLE_BOUNDARY, ROLE_GROUNDSIDE_PAVEMENT}
+    try:
+        pav_union = unary_union(
+            [t.polygon for t in layout.shapes
+             if t.polygon is not None and not t.polygon.is_empty
+             and t.role not in _FEATURE_ROLES
+             and not str(t.role).endswith("clearance")])
+    except _GEOM_EXC:
+        pav_union = None
+    n_reroled = 0
+    extra_shapes: list = []
+    for s in layout.shapes:
+        if s.role != ROLE_GROUNDSIDE_PAVEMENT or s.polygon is None \
+                or s.polygon.is_empty:
+            continue
+        try:
+            run_m = line_union.intersection(s.polygon).length
+            cover = s.polygon.intersection(corridor).area / s.polygon.area
+        except _GEOM_EXC:
+            continue
+        if run_m < min_run_m or cover < min_cover_frac:
+            continue
+        parts = [s.polygon]
+        if pav_union is not None:
+            try:
+                trimmed = s.polygon.difference(pav_union)
+            except _GEOM_EXC:
+                trimmed = None
+            parts = ([] if trimmed is None or trimmed.is_empty
+                     else [trimmed] if trimmed.geom_type == "Polygon"
+                     else [g for g in getattr(trimmed, "geoms", ())
+                           if g.geom_type == "Polygon"])
+            parts = [g for g in parts if g.area >= _GROUNDSIDE_MIN_AREA_M2]
+            if not parts:
+                continue                  # fully covered — nothing to convert
+            parts.sort(key=lambda g: -g.area)
+        s.polygon = parts[0]
+        s.role = ROLE_SERVICE_ROAD
+        s.ref = ""
+        s.node_altitudes = None
+        s.altitude = None
+        s.altitude_high = None
+        s.altitude_low = None
+        for extra in parts[1:]:
+            extra_shapes.append(BuiltShape(
+                polygon=extra, role=ROLE_SERVICE_ROAD, ref=""))
+        n_reroled += 1
+    if extra_shapes:
+        layout.shapes.extend(extra_shapes)
+    return n_reroled
+
+
 def conform_service_mouths_to_groundside(
         layout: "PavementLayout",
         touch_tol_m: float = 0.5,
@@ -521,6 +616,55 @@ def conform_service_mouths_to_groundside(
     return n_inserted
 
 
+def chord_limit_ring_altitudes(coords, alts,
+                               cap: float = GROUNDSIDE_MAX_GRADE,
+                               sweeps: int = 4):
+    """Largest ``cap``-Lipschitz field ≤ ``alts`` over straight-line CHORD
+    pairs of ONE ring (the within-shape validator metric) — the single-ring
+    core of ``_grade_limit_groundside_chords``, callable at SOLVE time.
+
+    ``apply_groundside_reach`` welds service-road nodes to the groundside
+    ring values it computes, but the post-solve chord limiter used to
+    rewrite the LOT ring only — two writers for the same physical nodes
+    (CYXY road #41: pinned 698.15/699.66 at solve time while the emitted
+    lot said 699.5/699.4 → 15 % road chords after emit consensus).
+    Limiting the ring BEFORE the weld reads it makes the solve-time field
+    identical to the post-solve one (the late limiter is idempotent on an
+    already-limited ring).
+
+    ``coords`` may be closed (last == first); ``alts`` may carry ``None``
+    (skipped).  Returns a new list shaped like ``alts``."""
+    m = min(len(coords), len(alts))
+    vals = [None if alts[k] is None else float(alts[k]) for k in range(m)]
+    live = [k for k in range(m) if vals[k] is not None]
+    for _sweep in range(sweeps):
+        changed = False
+        for a in live:
+            xa, ya = coords[a]
+            best = vals[a]
+            for b in live:
+                if b == a:
+                    continue
+                xb, yb = coords[b]
+                lim = vals[b] + cap * math.hypot(xa - xb, ya - yb)
+                if lim < best:
+                    best = lim
+            if best < vals[a] - 1e-6:
+                vals[a] = best
+                changed = True
+        if not changed:
+            break
+    out = list(alts)
+    for k in range(m):
+        if vals[k] is not None:
+            out[k] = round(vals[k], 2)
+    # keep a closed ring closed
+    if len(out) == len(coords) and len(coords) > 1 \
+            and tuple(coords[0]) == tuple(coords[-1]) and out[0] is not None:
+        out[-1] = out[0]
+    return out
+
+
 def _grade_limit_groundside_chords(layout) -> int:
     """Pull every groundside shape's altitude field down to the largest
     ``GROUNDSIDE_MAX_GRADE``-Lipschitz field ≤ its current (DEM) values,
@@ -583,11 +727,49 @@ def _grade_limit_groundside_chords(layout) -> int:
     n_changed = 0
     for i, keys in rings.items():
         s = layout.shapes[i]
-        alts = [round(node_alt[k], 1) for k in keys]
+        # 2 decimals, matching the emit resolution end-to-end — 0.1 m
+        # quantization on sub-metre groundside chords reads as 10-15 %
+        # stairs (the V15 waviness class).
+        alts = [round(node_alt[k], 2) for k in keys]
         closed = alts + [alts[0]]
         if closed != list(s.node_altitudes):
             s.node_altitudes = closed
             n_changed += 1
+    # ADOPT the limited values onto coincident SERVICE nodes AT THE SOLVE-
+    # TIME WELD KEYS (the road↔lot shared geometry): the roads were welded
+    # to the lot's SOLVE-time ring, and re-limiting only the lot re-splits
+    # the two writers — the emit consensus then averages them and the lot
+    # reads over-cap chords again (CYXY #207: 8 % over 7.8 m from
+    # 0.3-0.4 m road-vs-lot disagreements).  The lot is senior at its own
+    # ring (the mouth serves the LOT).  Scoped STRICTLY to the keys
+    # ``apply_groundside_reach`` welded — a road passing a DEM-stay lot
+    # merely shares geometry and keeps its by-design road-vs-lot seam
+    # (blanket adoption measured 5 m road yanks, 125 % chords).
+    weld_keys = getattr(layout, "_groundside_weld_keys", None) or ()
+    for s in layout.shapes:
+        if s.role not in (ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION):
+            continue
+        if (s.polygon is None or s.polygon.is_empty
+                or s.polygon.geom_type != "Polygon"
+                or not s.node_altitudes):
+            continue
+        try:
+            ring = list(s.polygon.exterior.coords)
+        except _GEOM_EXC:
+            continue
+        alts = list(s.node_altitudes)
+        changed = False
+        for k in range(min(len(ring), len(alts))):
+            kxy = (round(ring[k][0], 2), round(ring[k][1], 2))
+            if kxy not in weld_keys:
+                continue
+            v = node_alt.get(kxy)
+            if v is not None and alts[k] is not None \
+                    and abs(alts[k] - v) > 1e-6:
+                alts[k] = round(v, 2)
+                changed = True
+        if changed:
+            s.node_altitudes = alts
     return n_changed
 
 
@@ -1551,7 +1733,8 @@ def _merge_touching_groundside(
 
 def _separate_groundside_from_airside(
         layout: "PavementLayout", dem, tile_lat: int, tile_lon: int,
-        clearance: float = GROUNDSIDE_CLEARANCE_M) -> int:
+        clearance: float = GROUNDSIDE_CLEARANCE_M,
+        preserve_field: bool = False) -> int:
     """Clip every groundside polygon so it keeps ``clearance`` from all
     terminal / airside pavement — enforcing the invariant that groundside
     shares no node or edge with terminal or airside (it is separate
@@ -1561,6 +1744,14 @@ def _separate_groundside_from_airside(
     Robust to the non-conformance case the apron-seed rule can't catch:
     a groundside polygon that *overlaps* airside without sharing a vertex
     is still cut back to the clearance gap.
+
+    ``preserve_field=True`` (the POST-solve call sites): a clipped piece
+    keeps its existing altitude FIELD — each rebuilt vertex takes
+    ``DEM + deviation-of-nearest-original-vertex`` instead of a raw
+    DEM re-follow.  Post-solve, groundside carries the reach re-level /
+    chord-limit / weld field; resetting a clipped piece to raw DEM
+    detached it from every road welded to it at solve time (CYXY: a
+    mouth lot reset 695.8 → 700.6 = 5 m road↔lot yanks).
     """
     AIRSIDE_ROLES = {
         ROLE_RUNWAY, ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
@@ -1671,6 +1862,19 @@ def _separate_groundside_from_airside(
             continue
         parts = ([diff] if diff.geom_type == "Polygon"
                  else list(getattr(diff, "geoms", [])))
+        # Original per-vertex DEVIATION field (alt − DEM), for the
+        # preserve_field rebuild below.
+        orig_field = []
+        if preserve_field and s.node_altitudes:
+            orig_ring = list(s.polygon.exterior.coords)
+            for kv in range(min(len(orig_ring), len(s.node_altitudes))):
+                a = s.node_altitudes[kv]
+                if a is None:
+                    continue
+                ox, oy = orig_ring[kv]
+                dv = _dem_at(ox, oy)
+                if dv is not None:
+                    orig_field.append((ox, oy, float(a) - dv))
         changed = False
         kept = []
         for part in parts:
@@ -1689,6 +1893,23 @@ def _separate_groundside_from_airside(
             if built is None:
                 continue
             np_, na = built
+            if orig_field:
+                # Preserve the solved field: DEM here + the deviation of
+                # the nearest ORIGINAL vertex (a rigid local carry of the
+                # reach shift / chord limit across the clip rebuild).
+                new_ring = list(np_.exterior.coords)
+                for kv in range(min(len(new_ring), len(na))):
+                    nx, ny = new_ring[kv]
+                    dv = _dem_at(nx, ny)
+                    if dv is None:
+                        continue
+                    dev = min(orig_field,
+                              key=lambda t: (t[0] - nx) ** 2
+                              + (t[1] - ny) ** 2)[2]
+                    na[kv] = round(dv + dev, 2)
+                if len(na) == len(new_ring) and len(new_ring) > 1 \
+                        and new_ring[0] == new_ring[-1]:
+                    na[-1] = na[0]
             kept.append(BuiltShape(
                 polygon=np_, role=ROLE_GROUNDSIDE_PAVEMENT,
                 ref="groundside", node_altitudes=na))
@@ -1697,6 +1918,122 @@ def _separate_groundside_from_airside(
         if changed:
             n_clipped += 1
     layout.shapes = out_shapes
+    return n_clipped
+
+
+def _deconflict_service_overlaps(
+        layout: "PavementLayout", min_overlap_m2: float = 1e-3) -> int:
+    """Clip lens-scale overlaps between SERVICE shapes (last word, before
+    emit).  The canonical vertex weld can cross two near-coincident
+    service boundaries whose contact chains carry different vertex
+    sequences (CYXY: a corridor-converted road hugging the strip-carved
+    junction it was trimmed against — 0.38 m² lens after welding), and no
+    earlier pass owns service↔service overlap.  Larger piece is
+    canonical; the smaller piece yields the overlap.  Altitudes for the
+    rebuilt ring carry over from the nearest original vertex (the
+    surfaces are welded along the contact, so the values agree there).
+    Returns the number of shapes clipped."""
+    svc = [(i, s) for i, s in enumerate(layout.shapes)
+           if s.role in (ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION)
+           and s.polygon is not None and not s.polygon.is_empty
+           and s.polygon.geom_type == "Polygon"]
+    if len(svc) < 2:
+        return 0
+    from shapely.strtree import STRtree
+    polys = [s.polygon for _i, s in svc]
+    tree = STRtree(polys)
+    n_clipped = 0
+    for a in range(len(svc)):
+        ia, sa = svc[a]
+        try:
+            cand = tree.query(sa.polygon)
+        except _GEOM_EXC:
+            continue
+        for qb in cand:
+            b = int(qb)
+            if b <= a:
+                continue
+            ib, sb = svc[b]
+            try:
+                overlap = sa.polygon.intersection(sb.polygon).area
+            except _GEOM_EXC:
+                continue
+            if overlap <= min_overlap_m2:
+                continue
+            # smaller yields
+            yi, ys = (ia, sa) if sa.polygon.area < sb.polygon.area \
+                else (ib, sb)
+            ki, ks = (ib, sb) if ys is sa else (ia, sa)
+            try:
+                # Snap the yielding ring onto the kept ring first so the
+                # clipped contact chain passes EXACTLY through the kept
+                # shape's vertices — a plain difference leaves the kept
+                # vertices ~0.1 m off the new edge (residual T-junction).
+                diff = snap(ys.polygon, ks.polygon, 0.25).difference(
+                    ks.polygon)
+            except _GEOM_EXC:
+                continue
+            parts = ([diff] if diff.geom_type == "Polygon"
+                     else [g for g in getattr(diff, "geoms", ())
+                           if g.geom_type == "Polygon"])
+            parts = [g for g in parts if g.area >= 1.0]
+            if not parts:
+                continue
+            new_poly = max(parts, key=lambda g: g.area)
+            # T-vertex conformance with the KEPT ring: a kept-shape
+            # vertex can sit near the new ring's edge INTERIOR (the
+            # near-gap wedge left where the two boundaries crossed) —
+            # flagged as a residual T-junction.  Insert the vertex's
+            # PROJECTION onto the edge (a true on-edge insert; inserting
+            # the kept vertex itself would bow the edge and can re-mint
+            # an overlap sliver).
+            new_ring = list(new_poly.exterior.coords)
+            if new_ring and new_ring[0] == new_ring[-1]:
+                new_ring = new_ring[:-1]
+            kept_ring = list(ks.polygon.exterior.coords)
+            inserts = []          # (segment index, u along segment, point)
+            for (kx, ky) in kept_ring:
+                if any(math.hypot(kx - nx, ky - ny) <= 0.02
+                       for (nx, ny) in new_ring):
+                    continue
+                best = None
+                for t in range(len(new_ring)):
+                    ax, ay = new_ring[t]
+                    bx, by = new_ring[(t + 1) % len(new_ring)]
+                    dx, dy = bx - ax, by - ay
+                    seg2 = dx * dx + dy * dy
+                    if seg2 < 1e-9:
+                        continue
+                    u = ((kx - ax) * dx + (ky - ay) * dy) / seg2
+                    u = min(1.0, max(0.0, u))
+                    px, py = ax + u * dx, ay + u * dy
+                    d = math.hypot(kx - px, ky - py)
+                    if best is None or d < best[0]:
+                        best = (d, t, u, (px, py))
+                if best is not None and best[0] <= 0.25:
+                    inserts.append(best[1:])
+            for (t, u, pt) in sorted(inserts, key=lambda e: (-e[0], -e[1])):
+                new_ring.insert(t + 1, pt)
+            try:
+                new_poly = Polygon(new_ring)
+            except _GEOM_EXC:
+                pass
+            old_ring = list(ys.polygon.exterior.coords)
+            old_alts = list(ys.node_altitudes or [])
+            ys.polygon = new_poly
+            if old_alts and len(old_alts) >= len(old_ring) - 1:
+                out_ring = list(new_poly.exterior.coords)
+                new_alts = []
+                for (nx, ny) in out_ring:
+                    best_k = min(
+                        range(min(len(old_ring), len(old_alts))),
+                        key=lambda t: (old_ring[t][0] - nx) ** 2
+                        + (old_ring[t][1] - ny) ** 2)
+                    new_alts.append(old_alts[best_k])
+                ys.node_altitudes = new_alts
+            # keep the STRtree list coherent for later pairs
+            polys[a if ys is sa else b] = new_poly
+            n_clipped += 1
     return n_clipped
 
 

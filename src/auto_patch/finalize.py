@@ -408,7 +408,8 @@ def emit_terrain_transition_features(layout: PavementLayout, icao: str, xplane_r
             from .geom_guard import coverage_probe as _covp2
             _covp2(layout, "pre-groundside-sep")
             n_sep = _separate_groundside_from_airside(
-                layout, _dem, _tile_lat, _tile_lon)
+                layout, _dem, _tile_lat, _tile_lon,
+                preserve_field=True)
             _covp2(layout, "post-groundside-sep")
             if n_sep:
                 UI.vprint(1,

@@ -397,6 +397,15 @@ def solve_route_profile(layout, icao: str,
                         "dem_elev": list(dem_elev),
                         "node_band": list(node_band),
                         "hard_cat": _cat,
+                        # Spine graph (per-edge cap budgets) + runway
+                        # anchors: lets an offline probe audit whether a
+                        # node's solved level equals its cap-reachable
+                        # ceiling (Dijkstra over budgets from anchors).
+                        "spine_adj": {int(i): [(int(j), float(b))
+                                               for (j, b) in lst]
+                                      for i, lst in u_spine_adj.items()},
+                        "runway_anchor": {int(i): float(a) for i, a
+                                          in G.runway_anchor.items()},
                     }, _fh)
                 print(f"    [dump] solve state -> {_dump}")
             # 2400 sweeps: with tightest-budget edge dedup the polytope is
@@ -438,14 +447,15 @@ def final_grade_projection(layout, icao: str = "") -> None:
     from auto_patch.config import CURVE_NATIVE_SPINE, ROUTE_ARC_SPINE
     if not (CURVE_NATIVE_SPINE or ROUTE_ARC_SPINE):
         return
-    # ⚠ DEFAULT OFF (measured 2026-07-03): on SPJC the final-geometry law
-    # graph is already satisfied at seed (31 residual edges, validator count
-    # UNCHANGED at 178) — the residual violations are READER-DIVERGENT pairs
-    # (validator-only verdicts, crossing-predicate input asymmetry), which no
-    # projection over the solver's own graph can fix.  Costs ~12-15 s.  Keep
-    # for when the reader inputs are unified (then this pass closes whatever
-    # post-solve mutations reopen).
-    if _os.environ.get("O4_FINAL_GRADE_PROJECTION", "0") != "1":
+    # DEFAULT ON (2026-07-04): the 2026-07-03 "no change at SPJC"
+    # measurement predated the EXACT-AXES sidecar — the residuals then
+    # were reader-divergent pairs no projection could fix.  With unified
+    # readers this pass closes exactly the post-solve mutation classes
+    # (planarize/T-weld inserts, clip rebuilds, service DEM-follow noise):
+    # CYXY within-shape 299 → 97, worst 8.35 % → 6.07 % (one rounding
+    # pair).  Costs ~12-15 s.  ``O4_FINAL_GRADE_PROJECTION=0`` restores
+    # the previous behaviour.
+    if _os.environ.get("O4_FINAL_GRADE_PROJECTION", "1") != "1":
         return
     from auto_patch.elevation_per_surface.solver_primitives import (
         PAVEMENT_ROLES, _build_node_list, _build_shape_constraints,
