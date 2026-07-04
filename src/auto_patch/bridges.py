@@ -111,7 +111,17 @@ HIGHWAY_CARRIAGEWAY_WIDTH_M = {
     # 10 m (double-track, user 2026-06-12); a 9 m tertiary road is now
     # ~2× this.
     "railway":          5.0,
+    # TWIN parallel rails emitted as ONE bore (user 2026-07-04, KCLT):
+    # OSM maps each track as its own ``railway=rail`` line; two lines
+    # side by side are one double-track corridor — ~5 m per rail plus
+    # margin, "12 m to 15 m for two rails".
+    "railway_twin":    14.0,
 }
+
+# Two rail tunnel lines closer than this run in ONE corridor — the pair
+# emits a single ``railway_twin`` bore (the other line's portals are
+# suppressed).
+TWIN_RAIL_NEAR_M = 10.0
 
 
 def _carriageway_width_for(highway_type: str | None,
@@ -922,6 +932,22 @@ def _emit_tunnel_portals(
                 print(f"    [tunnel-emit] way {_tw} len={_ln.length:.0f}m "
                       f"raw_veto={_raw[k]} mid local ({_mx:.0f},{_my:.0f})")
 
+    # Rail tunnel lines, for the TWIN-corridor pairing below (user
+    # 2026-07-04, KCLT: two parallel ``railway=rail`` tracks are one
+    # double-track corridor — one wide bore, not two overlapping ones).
+    _rail_tunnel_lines: dict = {}
+    for _rw_id, _rw_refs, _rw_tags in ways_r:
+        if (_rw_tags.get("tunnel") in PORTAL_TUNNEL_VALUES
+                and _rw_tags.get("highway") is None
+                and _rw_tags.get("railway") in RAIL_TUNNEL_TYPES):
+            _rw_pts = [nodes_m[nn] for nn in _rw_refs if nn in nodes_m]
+            if len(_rw_pts) >= 2:
+                try:
+                    from shapely.geometry import LineString as _RLS
+                    _rail_tunnel_lines[_rw_id] = _RLS(_rw_pts)
+                except _GEOM_EXC:
+                    continue
+
     _n_adj_skip = 0
     for tw_id, t_nrefs, t_tags in ways_r:
         if t_tags.get("tunnel") not in PORTAL_TUNNEL_VALUES:
@@ -934,6 +960,20 @@ def _emit_tunnel_portals(
             # (10 m double-track vs the 22 m road default).  Never in
             # HW_TUNNEL_TYPES, so rail stays NEW-class for the gates.
             hw = "railway"
+            _my_rail = _rail_tunnel_lines.get(tw_id)
+            if _my_rail is not None:
+                _twins = sorted(
+                    _oid for _oid, _ol in _rail_tunnel_lines.items()
+                    if _oid != tw_id
+                    and _ol.distance(_my_rail) < TWIN_RAIL_NEAR_M)
+                if _twins:
+                    # Canonical member (smallest id) carries the ONE
+                    # wide corridor bore; the twin's portals are
+                    # suppressed entirely.
+                    if str(tw_id) > min(str(tw_id),
+                                        *[str(t) for t in _twins]):
+                        continue
+                    hw = "railway_twin"
         # OLD candidates (big_roads + highway type — the only ways the
         # emitter saw before 2026-06-12) keep the original behaviour
         # verbatim: no new gates (SPJC's user-approved tunnels emit

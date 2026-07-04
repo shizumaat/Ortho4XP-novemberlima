@@ -280,6 +280,24 @@ def _dedup_coincident_ring_vertices(layout, icao: str, tol_m: float = 0.05):
             new_coords.append((x, y))
             if aligned:
                 new_na.append(na_list[k])
+        # OUT-AND-BACK SPIKES (user 2026-07-04, CYUL apron #233): a ring
+        # that visits a far vertex and RETURNS to the same point
+        # (…A → S → A…) carries a zero-area needle — the "node out in
+        # the grass" 251 m from its shape.  Remove the spike tip and the
+        # returning duplicate (repeat until stable: nested spikes).
+        changed_spike = True
+        while changed_spike and len(new_coords) >= 4:
+            changed_spike = False
+            m = len(new_coords) - 1                 # closing repeat at [-1]
+            for k in range(1, m):
+                ax, ay = new_coords[k - 1]
+                bx, by = new_coords[(k + 1) % m]
+                if _math.hypot(ax - bx, ay - by) < tol_m:
+                    del new_coords[k:k + 2]
+                    if aligned:
+                        del new_na[k:k + 2]
+                    changed_spike = True
+                    break
         if len(new_coords) == len(coords):
             continue                                # nothing removed
         # keep the ring closed

@@ -95,6 +95,7 @@ ROW_BOUNDARY_HEADER = 130
 ROW_TAXI_NODE = 1201
 ROW_TAXI_EDGE = 1202
 ROW_TRUCK_EDGE = 1206          # ground-vehicle (service-road) route edge
+ROW_RAMP_START = 1300          # startup location (parking position)
 
 # Row-120 painted-line type codes that mark a TAXIWAY CENTERLINE:
 # 1 = solid yellow, 7 = centerline in non-movement area; 51/57 = the
@@ -211,6 +212,11 @@ class Airport:
     # ``TaxiEdge`` shape with ``kind == "truck"``; share the 1201 nodes
     # in ``taxi_nodes``.  Drive the 4 %-grade ``service_road`` rects.
     truck_edges: list[TaxiEdge] = field(default_factory=list)
+    # Ramp-start (startup location, row 1300) positions ``(lat, lon)`` —
+    # used to TRIM the last dead-end taxi-route piece leading onto a
+    # stand (user 2026-07-04: the lead-in line to a parking position
+    # needs no spine; the apron covers the pavement).
+    ramp_starts: list = field(default_factory=list)
     # Painted linear features (row 120) — taxiway centerlines, edge
     # lines, hold bars.  Carries the authored bezier curves; airports
     # without a 1201/1202 taxi network often have ONLY these.
@@ -540,6 +546,13 @@ def load_airport(
             te = _parse_taxi_edge(toks)
             if te is not None:
                 airport.taxi_edges.append(te)
+        elif row_type == ROW_RAMP_START:
+            # ``1300 lat lon heading type traffic name`` — position only.
+            try:
+                airport.ramp_starts.append(
+                    (float(toks[1]), float(toks[2])))
+            except (ValueError, IndexError):
+                pass
         elif row_type == ROW_TRUCK_EDGE:
             tk = _parse_truck_edge(toks)
             if tk is not None:
@@ -1723,6 +1736,43 @@ def taxi_centerlines(
         return [parent.size_at_point(0.5 * (cs[i][0] + cs[i + 1][0]),
                                      0.5 * (cs[i][1] + cs[i + 1][1]))
                 for i in range(len(cs) - 1)]
+
+    # ── Trim ramp-start lead-ins (user 2026-07-04, CYUL) ─────────────────
+    # The last dead-end route piece onto a parking position (its free end
+    # within ``RAMP_START_TRIM_M`` of an apt.dat row-1300 startup
+    # location) carries a stand lead-in line, not a taxi spine — drop the
+    # whole leaf chain so the spine stays simple; the apron still covers
+    # the pavement.  Only LEAF chains qualify (one end degree-1): a
+    # through-route passing near a stand is untouched.
+    RAMP_START_TRIM_M = 30.0
+    ramp_pts = [to_m(lon, lat)
+                for (lat, lon) in getattr(airport, "ramp_starts", ())]
+    if ramp_pts:
+        def _near_ramp_start(nid: int) -> bool:
+            x, y = _pos(nid)
+            return any((x - rx) ** 2 + (y - ry) ** 2
+                       <= RAMP_START_TRIM_M ** 2
+                       for (rx, ry) in ramp_pts)
+
+        RAMP_LEADIN_MAX_M = 80.0    # only the LITTLE lead-ins drop
+        kept_routes = []
+        for r in routes:
+            node_seq = r[0]
+            if len(node_seq) >= 2:
+                head, tail = node_seq[0], node_seq[-1]
+                head_leaf = deg[head] == 1 and head not in runway_contact
+                tail_leaf = deg[tail] == 1 and tail not in runway_contact
+                if ((head_leaf and _near_ramp_start(head))
+                        or (tail_leaf and _near_ramp_start(tail))):
+                    pts = [_pos(nid) for nid in node_seq]
+                    chain_m = sum(
+                        math.hypot(pts[k + 1][0] - pts[k][0],
+                                   pts[k + 1][1] - pts[k][1])
+                        for k in range(len(pts) - 1))
+                    if chain_m <= RAMP_LEADIN_MAX_M:
+                        continue
+            kept_routes.append(r)
+        routes = kept_routes
 
     # ── Build a continuous route, then bend-split it for the rect decomposition ──
     out: list[TaxiCenterline] = []

@@ -58,6 +58,7 @@ Public API: ``redistribute_runway_profile``.
 from __future__ import annotations
 
 import math
+import os
 from collections import defaultdict
 from typing import Dict, List, Tuple
 
@@ -323,6 +324,109 @@ def _find_centerline_boundary_crossings(
     return crossings
 
 
+def _find_edge_boundary_crossings(
+        layout,
+        runway_shapes,
+        phys_end_a_ll: Tuple[float, float],
+        phys_end_b_ll: Tuple[float, float],
+        dem,
+        tile_lat: int,
+        tile_lon: int) -> List[Tuple[float, float]]:
+    """Sample DEM where the runway EDGES cross each integer lat/lon
+    line — two anchors per boundary crossing instead of the single
+    centerline sample (user 2026-07-04, SPLP west edge).
+
+    The tile cut leaves a ~10 m unpaved strip at the boundary whose
+    mesh spans the two patch edges — so the runway's VISIBLE terrain
+    contacts at a seam are the points where its edges meet the line,
+    not the centerline midpoint.  At SPLP's 18° oblique crossing the
+    edges meet the line ~141 m of station apart, and the single
+    centerline anchor left the west edge 2 m under the local terrain
+    (profile 58.5 vs DEM 60.6 — the reported dip).  Anchoring the
+    profile at each edge crossing's own DEM (the stations differ, so
+    the profile can hold both within grade) puts the pavement exactly
+    on the terrain at both visible contacts.
+
+    Returns ``[(t, altitude), ...]`` like the centerline variant;
+    empty when geometry/DEM makes no crossing usable (caller falls
+    back to the centerline samples).
+    """
+    if dem is None or not runway_shapes:
+        return []
+    from shapely.geometry import LineString as _LS
+    from shapely.ops import unary_union as _uu
+    try:
+        union = _uu([s.polygon for s in runway_shapes])
+        min_x, min_y, max_x, max_y = union.bounds
+    except _GEOM_EXC:
+        return []
+
+    lat_a, lon_a = phys_end_a_ll
+    lat_b, lon_b = phys_end_b_ll
+    ax_a_x, ax_a_y = layout.ll_to_m(lat_a, lon_a)
+    ax_b_x, ax_b_y = layout.ll_to_m(lat_b, lon_b)
+    ax_dx, ax_dy = ax_b_x - ax_a_x, ax_b_y - ax_a_y
+    ax_len2 = ax_dx * ax_dx + ax_dy * ax_dy
+    if ax_len2 < 1.0:
+        return []
+    nodata = getattr(dem, "nodata", -32768)
+
+    def _sample(lat_c: float, lon_c: float):
+        try:
+            v = float(dem.alt_strict(
+                (lon_c - tile_lon, lat_c - tile_lat)))
+        except _GEOM_EXC:
+            return None
+        if v != v or v == nodata:
+            return None
+        return v
+
+    # Integer lat/lon lines in LOCAL METERS across the runway bbox.
+    lines = []
+    lat_lo, lon_lo = layout.m_to_ll(min_x, min_y)
+    lat_hi, lon_hi = layout.m_to_ll(max_x, max_y)
+    for n in range(int(math.ceil(min(lat_lo, lat_hi))),
+                   int(math.floor(max(lat_lo, lat_hi))) + 1):
+        p0 = layout.ll_to_m(float(n), min(lon_lo, lon_hi) - 1e-3)
+        p1 = layout.ll_to_m(float(n), max(lon_lo, lon_hi) + 1e-3)
+        lines.append(_LS([p0, p1]))
+    for n in range(int(math.ceil(min(lon_lo, lon_hi))),
+                   int(math.floor(max(lon_lo, lon_hi))) + 1):
+        p0 = layout.ll_to_m(min(lat_lo, lat_hi) - 1e-3, float(n))
+        p1 = layout.ll_to_m(max(lat_lo, lat_hi) + 1e-3, float(n))
+        lines.append(_LS([p0, p1]))
+
+    crossings: List[Tuple[float, float]] = []
+    for line in lines:
+        try:
+            inter = union.intersection(line)
+        except _GEOM_EXC:
+            continue
+        if inter.is_empty:
+            continue
+        pts = []
+        parts = ([inter] if inter.geom_type == "LineString"
+                 else list(getattr(inter, "geoms", ())))
+        for part in parts:
+            coords = list(getattr(part, "coords", ()))
+            if coords:
+                pts.extend([coords[0], coords[-1]])
+        if len(pts) < 2:
+            continue
+        # The OUTER edge contacts = the two extreme points along the line.
+        pts.sort(key=lambda c: (c[0], c[1]))
+        for (ex, ey) in (pts[0], pts[-1]):
+            t = ((ex - ax_a_x) * ax_dx + (ey - ax_a_y) * ax_dy) / ax_len2
+            if not (0.001 < t < 0.999):
+                continue
+            lat_c, lon_c = layout.m_to_ll(ex, ey)
+            v = _sample(lat_c, lon_c)
+            if v is not None:
+                crossings.append((t, v))
+    crossings.sort(key=lambda c: c[0])
+    return crossings
+
+
 _GEOM_EXC = (ValueError, TypeError, IndexError)
 
 
@@ -391,12 +495,31 @@ def redistribute_runway_profile(
         anchored = list(state['anchored'])
         phys_dist = state['phys_dist_m']
 
-        # Find per-boundary centerline crossings.  One DEM sample per
-        # boundary line crossed (not per polygon vertex) — the value
-        # at the centerline-boundary intersection.
-        seam_samples = _find_centerline_boundary_crossings(
-            state['phys_end_a_ll'], state['phys_end_b_ll'],
-            dem, tile_lat, tile_lon)
+        # Anchor at the runway EDGE crossings of each boundary line
+        # (two DEM samples per crossing — the runway's VISIBLE terrain
+        # contacts at the seam strip; user 2026-07-04, SPLP west edge:
+        # the tile line renders at raw HGT via Ortho4XP preserve_boundary,
+        # and the profile sat 2.5 m UNDER it — a terrain hump across the
+        # runway).  Only crossings where the terrain line pokes ABOVE the
+        # current profile anchor (the hump class): anchoring the ravine
+        # side too dragged the neighbouring interior samples down ~2 m
+        # (measured: the taxiway stub's reach ceiling fell 0.8 m).  Fall
+        # back to the single centerline crossing when the edge walk
+        # yields nothing (or the gate is off).
+        seam_samples = []
+        if os.environ.get("O4_RUNWAY_SEAM_EDGE_ANCHORS", "1") == "1":
+            edge_samples = _find_edge_boundary_crossings(
+                layout, shapes,
+                state['phys_end_a_ll'], state['phys_end_b_ll'],
+                dem, tile_lat, tile_lon)
+            seam_samples = [
+                (t, v) for (t, v) in edge_samples
+                if v > _interp_profile(state['fractions'],
+                                       state['elevs'], t) + 0.05]
+        if not seam_samples:
+            seam_samples = _find_centerline_boundary_crossings(
+                state['phys_end_a_ll'], state['phys_end_b_ll'],
+                dem, tile_lat, tile_lon)
 
         # Step 1: if any new HARD interior anchor entered the profile
         # (centerline-boundary DEMs), the existing CIFP thresholds
