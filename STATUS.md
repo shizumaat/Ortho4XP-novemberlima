@@ -1,3 +1,29 @@
+# STATUS — SESSION 20260704 (part 8): CYXY ridge + waviness CLOSED
+# (`c220e66`) — parallel truck legs merge; airside ring-edge fairing
+
+> **RIDGE (user)**: two-lane road = two one-way truck routes (CYXY
+> 'Crew cars' is one out-and-back LOOP) → a spine per leg → two
+> profiles meeting at a center ridge.
+> `apt_dat_reader.snap_parallel_service_runs` (gate
+> O4_MERGE_PARALLEL_SVC): parallel runs ≤9 m for ≥20 m → first line
+> deforms to the MIDLINE, second's run replaced by the exact SUBSTRING
+> of the first (identical geometry until divergence) → one spine down
+> the middle (user ruling).  Cross-section now flat, ridge gone.
+> **WAVINESS (user, taxiway E edge)**: ring EDGES aren't spine chains —
+> the fairing law never covered them; the GS distributes a cap-grade
+> climb as a ±0.8 % sawtooth every 12 m.  `_fair_ring_edges` = the
+> second-difference POCS on STRAIGHT boundary runs (bend-tested;
+> anchors fixed; band-clamped), at solve end AND after
+> final_grade_projection (which re-perturbed it).  Service/groundside
+> EXCLUDED (fairing their mouth-weld ramps minted 0.9 m bumps,
+> measured).  Gate O4_EDGE_FAIRING.  E now emits long smooth segments.
+> CYXY law-true 182 (≥5 % = 0, steps/cross 0): fairing converts hidden
+> below-cap sawtooth pairs into honest sub-0.5 % hairlines on cap-grade
+> climbs (127/182) — long gentle slopes win per the standing ruling.
+> Suite 21F/325P identical.
+
+---
+
 # STATUS — SESSION 20260704 (part 7): SPLP seam edge anchors + ramp-start
 # trim + spike cleaner + twin-rail bores (`246384f`)
 
