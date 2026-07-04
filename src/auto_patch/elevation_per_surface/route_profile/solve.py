@@ -212,7 +212,8 @@ def solve_route_profile(layout, icao: str,
         # The spine is min-curvature and ≤cap by construction, then FROZEN so the
         # body grades to it (the body twists to meet the spine, never the reverse).
         frozen = _solve_spine_profile(
-            elev, base_hard, u_spine_adj, u_spine_floor, node_band)
+            elev, base_hard, u_spine_adj, u_spine_floor, node_band,
+            nodes_xy=nodes)
         for i in frozen:
             if i < n:
                 base_hard[i] = True
@@ -672,8 +673,113 @@ def _seam_spine_anchors(layout, G, spine_adj, elev, base_hard,
     return pinned
 
 
+def _fair_spine_chains(elev, spine_adj, anchors, node_band, nodes_xy,
+                       k_rate, *, max_sweeps=400, tol=1e-4):
+    """FAIRING (user 2026-07-04, task 3): bound the grade CHANGE between
+    consecutive spine segments along every chain —
+    ``|g2 − g1| ≤ k_rate·(L1 + L2)/2`` — the taxiway vertical-curve
+    K-factor analog (``config.TAXIWAY_MAX_GRADE_CHANGE_PER_M``,
+    tunable via ``O4_TAXIWAY_CURVE_RUN_M``).
+
+    The grade law bounds only the FIRST derivative, so the spine solve
+    tracks DEM noise in legal ±cap wiggles (the residual-waviness
+    class); real grading is long linear/parabolic profiles.  This is a
+    POCS pass on second-difference constraints: a too-sharp sag raises
+    its centre vertex, a crest lowers it, split by segment stiffness
+    (``δ/(1/L1 + 1/L2)``), clamped into the reach band.  Anchors
+    (runway contacts, seam pins) never move — the curve fits BETWEEN
+    them.  Chains are maximal degree-2 runs of the spine graph; the
+    profile through a junction node (degree ≠ 2) is left to the
+    junction's own solve.
+
+    Mutates ``elev``; returns the number of triples still over the
+    rate (honest residual — anchors can force a kink)."""
+    import math
+    deg = {i: len(lst) for i, lst in spine_adj.items()}
+    visited_edges: set = set()
+    chains = []
+    for start, lst in spine_adj.items():
+        if deg.get(start, 0) == 2:
+            continue                       # chains start at break nodes
+        for (j, _w) in lst:
+            e = (start, j) if start < j else (j, start)
+            if e in visited_edges:
+                continue
+            visited_edges.add(e)
+            chain = [start, j]
+            prev, cur = start, j
+            while deg.get(cur, 0) == 2:
+                nxt = [k for (k, _w2) in spine_adj[cur] if k != prev]
+                if not nxt:
+                    break
+                nxt = nxt[0]
+                e2 = (cur, nxt) if cur < nxt else (nxt, cur)
+                if e2 in visited_edges:
+                    break
+                visited_edges.add(e2)
+                chain.append(nxt)
+                prev, cur = cur, nxt
+            if len(chain) >= 3:
+                chains.append(chain)
+    if not chains:
+        return 0
+
+    def _seg_len(a, b):
+        (xa, ya), (xb, yb) = nodes_xy[a], nodes_xy[b]
+        return math.hypot(xa - xb, ya - yb)
+
+    chain_lens = [[_seg_len(c[k], c[k + 1]) for k in range(len(c) - 1)]
+                  for c in chains]
+    n_band = len(node_band) if node_band is not None else 0
+    for _sweep in range(max_sweeps):
+        worst_move = 0.0
+        for c, lens in zip(chains, chain_lens):
+            for t in range(1, len(c) - 1):
+                b = c[t]
+                if b in anchors:
+                    continue
+                l1 = lens[t - 1]
+                l2 = lens[t]
+                if l1 < 0.5 or l2 < 0.5:
+                    continue
+                a, d = c[t - 1], c[t + 1]
+                g1 = (elev[b] - elev[a]) / l1
+                g2 = (elev[d] - elev[b]) / l2
+                dg = g2 - g1
+                lim = k_rate * 0.5 * (l1 + l2)
+                ex = abs(dg) - lim
+                if ex <= 1e-6:
+                    continue
+                delta = math.copysign(ex, dg) / (1.0 / l1 + 1.0 / l2)
+                nb = elev[b] + delta
+                band = node_band[b] if b < n_band else None
+                if band is not None:
+                    lo, hi = band
+                    if lo <= hi:
+                        nb = min(max(nb, lo), hi)
+                moved = abs(nb - elev[b])
+                if moved:
+                    elev[b] = nb
+                    if moved > worst_move:
+                        worst_move = moved
+        if worst_move < tol:
+            break
+    # honest residual count (anchor- or band-forced kinks)
+    n_over = 0
+    for c, lens in zip(chains, chain_lens):
+        for t in range(1, len(c) - 1):
+            l1, l2 = lens[t - 1], lens[t]
+            if l1 < 0.5 or l2 < 0.5:
+                continue
+            g1 = (elev[c[t]] - elev[c[t - 1]]) / l1
+            g2 = (elev[c[t + 1]] - elev[c[t]]) / l2
+            if abs(g2 - g1) - k_rate * 0.5 * (l1 + l2) > 1e-4:
+                n_over += 1
+    return n_over
+
+
 def _solve_spine_profile(elev, base_hard, spine_adj, spine_floor,
-                         node_band=None,
+                         node_band=None, nodes_xy=None,
                          *, max_sweeps=5000, tol=1e-3, curvature=0.25):
     """Dedicated SMOOTH spine solve on the unified graph's geometry nodes.
 
@@ -738,6 +844,20 @@ def _solve_spine_profile(elev, base_hard, spine_adj, spine_floor,
                     moved = abs(d)
         if moved < tol:
             break
+    # FAIRING (task 3): bound the grade CHANGE along every spine chain by
+    # the taxiway vertical-curve rate — runs after the harmonic solve
+    # (which minimises grade, not grade CHANGE, so it still tracks DEM
+    # noise in legal ±cap wiggles) and before the exact cap projection.
+    if nodes_xy is not None and _os.environ.get("O4_SPINE_FAIRING",
+                                                "1") == "1":
+        from auto_patch.config import TAXIWAY_MAX_GRADE_CHANGE_PER_M
+        n_kink = _fair_spine_chains(elev, spine_adj, anchors, node_band,
+                                    nodes_xy,
+                                    TAXIWAY_MAX_GRADE_CHANGE_PER_M)
+        if n_kink and _os.environ.get("O4_STEP_DEBUG") == "1":
+            print(f"    [fairing] {n_kink} spine triple(s) over the "
+                  f"vertical-curve rate after fairing (anchor/band-forced)")
+
     # Final EXACT cap-Lipschitz projection on the spine edges (only the runway/
     # seam anchors are hard) — the Gauss-Seidel's harmonic compromise can leave a
     # ~cap residual where several centerlines meet at a junction node; this drives

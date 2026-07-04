@@ -1327,6 +1327,99 @@ def _print_steps(title: str, steps: List[EdgeStep], top_n: int,
               f"edge={_label(s.way_e)} (proj {s.elev_proj:.1f})")
 
 
+def _check_spine_curvature(ways, nodes, ll_to_m, taxi_axes,
+                           noise_m: float = 0.03,
+                           min_seg_m: float = 5.0):
+    """Grade-CHANGE rate along each taxi axis' emitted profile —
+    ``|g2 − g1| ≤ TAXIWAY_MAX_GRADE_CHANGE_PER_M·(L1+L2)/2`` plus a
+    2-decimal-emit noise allowance ``noise_m·(1/L1 + 1/L2)`` (on short
+    segments rounding alone swamps the rate; the rule is meaningful at
+    vertical-curve scale).  The SAME constant the solver's
+    ``_fair_spine_chains`` enforces.  Returns ``(count, worst_excess)``.
+    """
+    try:
+        from auto_patch.config import TAXIWAY_MAX_GRADE_CHANGE_PER_M
+    except Exception:                                  # pragma: no cover
+        return 0, 0.0
+    k_rate = TAXIWAY_MAX_GRADE_CHANGE_PER_M
+    _AIR = {"apron", "junction", "service_junction", "runway",
+            "runway_crossing", "primary_parallel", "secondary_parallel",
+            "stub", "cross_connector"}
+    # emitted airside vertices with elevation, deduped by position
+    pts = {}
+    for w in ways:
+        if w.tags.get("role") not in _AIR:
+            continue
+        ring = (w.nids[:-1] if len(w.nids) > 1 and w.nids[0] == w.nids[-1]
+                else w.nids)
+        for k, nid in enumerate(ring):
+            if nid not in nodes or k >= len(w.elevs):
+                continue
+            e = w.elevs[k]
+            if e is None:
+                continue
+            lat, lon = nodes[nid]
+            x, y = ll_to_m(lat, lon)
+            pts[(round(x, 1), round(y, 1))] = (x, y, float(e))
+    pt_list = list(pts.values())
+    n_kinks = 0
+    worst = 0.0
+    for entry in taxi_axes:
+        poly = entry[0]
+        if len(poly) < 2:
+            continue
+        # cumulative arc + per-point projection onto the axis
+        arcs = [0.0]
+        for i in range(1, len(poly)):
+            arcs.append(arcs[-1] + math.hypot(poly[i][0] - poly[i - 1][0],
+                                              poly[i][1] - poly[i - 1][1]))
+        on_axis = []
+        for (x, y, e) in pt_list:
+            best_d = 0.6
+            best_arc = None
+            for i in range(len(poly) - 1):
+                x1, y1 = poly[i]
+                x2, y2 = poly[i + 1]
+                dx, dy = x2 - x1, y2 - y1
+                seg2 = dx * dx + dy * dy
+                if seg2 < 1e-9:
+                    continue
+                t = ((x - x1) * dx + (y - y1) * dy) / seg2
+                t = min(1.0, max(0.0, t))
+                px, py = x1 + t * dx, y1 + t * dy
+                d = math.hypot(x - px, y - py)
+                if d < best_d:
+                    best_d = d
+                    best_arc = arcs[i] + t * math.sqrt(seg2)
+            if best_arc is not None:
+                on_axis.append((best_arc, e))
+        if len(on_axis) < 3:
+            continue
+        on_axis.sort()
+        # dedupe coincident arc positions
+        prof = []
+        for (a, e) in on_axis:
+            if prof and a - prof[-1][0] < 0.5:
+                continue
+            prof.append((a, e))
+        for t in range(1, len(prof) - 1):
+            l1 = prof[t][0] - prof[t - 1][0]
+            l2 = prof[t + 1][0] - prof[t][0]
+            if l1 < min_seg_m or l2 < min_seg_m:
+                continue
+            g1 = (prof[t][1] - prof[t - 1][1]) / l1
+            g2 = (prof[t + 1][1] - prof[t][1]) / l2
+            allowance = (k_rate * 0.5 * (l1 + l2)
+                         + noise_m * (1.0 / l1 + 1.0 / l2))
+            ex = abs(g2 - g1) - allowance
+            if ex > 0:
+                n_kinks += 1
+                rate_ex = ex / (0.5 * (l1 + l2))
+                if rate_ex > worst:
+                    worst = rate_ex
+    return n_kinks, worst
+
+
 # ── Main ────────────────────────────────────────────────────────
 
 def run_checks(
@@ -1405,6 +1498,18 @@ def run_checks(
     _pv(f"PLANE GRADIENT (triangle surface) > {max_grade_pct}%",
         plane, top_n)
     within = within + plane
+
+    # SPINE-PROFILE VERTICAL CURVE (task 3, user 2026-07-04): the same
+    # grade-change rate the solver's fairing pass enforces
+    # (``config.TAXIWAY_MAX_GRADE_CHANGE_PER_M``), validated on the
+    # emitted profile along each sidecar axis.  Reporter-only (not part
+    # of the returned violation lists yet — counts calibrate first).
+    if taxi_axes and not quiet:
+        n_kinks, worst_kink = _check_spine_curvature(
+            ways, nodes, ll_to_m, taxi_axes)
+        print(f"\nSPINE PROFILE grade-change (vertical curve, "
+              f"noise-aware): {n_kinks} kink(s)"
+              + (f", worst excess {worst_kink:.4f}/m" if n_kinks else ""))
 
     # ROUTE-BAND: NOT checked on the OSM patch.  route_field (a parallel
     # per-vertex band on a SEPARATE centerline graph) was retired; the

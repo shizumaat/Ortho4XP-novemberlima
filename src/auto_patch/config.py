@@ -501,10 +501,20 @@ TERMINAL_PADS_SLOPE = False
 # the runway-flex arbitration, not a corridor bug.  False restores the
 # pre-corridor surfaces byte-identically.
 TAXI_CORRIDOR_PROFILE = True
-# Taxiway vertical-curve rate (rise/run change per metre) used by the
-# corridor profile - the taxi sibling of RUNWAY_MAX_GRADE_CHANGE_PER_M
-# (driver.py re-exports it as MAX_TAXIWAY_GRADE_CHANGE_PER_M).
-TAXIWAY_MAX_GRADE_CHANGE_PER_M = 1.0 / 3000.0
+# Taxiway vertical-curve rate (rise/run change per metre) — the taxi
+# sibling of RUNWAY_MAX_GRADE_CHANGE_PER_M (driver.py re-exports it as
+# MAX_TAXIWAY_GRADE_CHANGE_PER_M).  1/3000 ⇒ a full 1 % grade change
+# needs ≥ 30 m of run (FAA AC 150/5300-13 taxiway vertical-curve
+# guidance).  ENFORCED as the spine-profile FAIRING law (user
+# 2026-07-04, task 3): the spine solve bounds every grade CHANGE along
+# a route chain by it (``_fair_spine_chains``), and
+# ``tools/check_grade.py`` validates the same rate on the emitted
+# profile — the grade law alone lets the solve track DEM noise in
+# legal ±cap wiggles (the residual-waviness class).  TUNABLE:
+# ``O4_TAXIWAY_CURVE_RUN_M`` = metres of run required per unit grade
+# change (default 3000; larger ⇒ flatter, longer vertical curves).
+TAXIWAY_MAX_GRADE_CHANGE_PER_M = 1.0 / float(
+    _os_early.environ.get("O4_TAXIWAY_CURVE_RUN_M", "3000"))
 # ── Corridor-profile DAMPING (user 2026-06-14) ──────────────────
 # The taxi-corridor field SEEDS at the DEM and projects onto the legal
 # band, so wherever the DEM is locally legal the profile sits ON the
