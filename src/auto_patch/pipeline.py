@@ -3537,6 +3537,30 @@ def build_airport_pavement(icao: str, xplane_root: str,
 
     from .geom_guard import coverage_probe as _covp
     _covp(layout, "post-slice")
+
+    # ── NARROW truck-route strips → centered service corridors ────────
+    # (user 2026-07-04, CYXY): the truck route is a SPINE in the CENTER
+    # of its road — where the contiguous pavement cross-section at the
+    # spine is narrow, the WHOLE strip is service pavement.  The slice
+    # cuts pavement ALONG the route, so each half of a narrow strip
+    # merges into the big face it touches and no narrow face ever exists
+    # for classify_faces — one side (or neither) read as road.  Carving
+    # the centered corridor also severs the aircraft touch-chain, so
+    # lots/pads beyond it demote to groundside downstream.  Gate
+    # O4_SERVICE_STRIP_CARVE=0 restores the sliced-halves behaviour.
+    _n_strip = 0
+    if _global_slice_spine and os.environ.get(
+            "O4_SERVICE_STRIP_CARVE", "1") == "1":
+        from .groundside import carve_narrow_service_strips
+        _n_strip = carve_narrow_service_strips(
+            layout, pav_union, terminal_union)
+        if _n_strip:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: carved {_n_strip} narrow "
+                f"truck-route strip piece(s) as centered service "
+                f"corridor(s).")
+        _covp(layout, "post-service-strip-carve")
+
     # ── Rectless SVC connector → service_junction ────────────────
     # A service-road (SVC) centerline piece too CURVED/short for the rect
     # builder produces NO rect (the bend-split chops it into sub-min-length /
@@ -4603,7 +4627,12 @@ def build_airport_pavement(icao: str, xplane_root: str,
             # demote those orphans to groundside.  ``require_service_adjacency``
             # keeps the post-tile_cut re-run from false-positiving an apron
             # whose aircraft-pavement chain was merely severed by the seam gap.
-            if _n_sl:
+            # ... and the narrow-strip CARVE orphans the same way (user
+            # 2026-07-04, CYXY): a lot/pad severed from the aircraft
+            # chain by a carved service corridor — plus the apron
+            # neck-split above can mint the orphan fragment only after
+            # the first classifier run.
+            if _n_sl or _n_strip:
                 from .junction_repair import (
                     _reclassify_runway_disconnected_to_groundside)
                 _reclassify_runway_disconnected_to_groundside(
@@ -4656,6 +4685,21 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     f"  [pav-builder] {icao}: decomposed {_n_decomp} "
                     f"holed airside shape(s) into simple pieces "
                     f"(pre-solve).")
+
+        # FINAL scoped runway-disconnection sweep (user 2026-07-04): the
+        # narrow-strip carve + the passes after the 2nd classifier run
+        # (simple-shapes decomposition, overlap clips) can leave an apron
+        # fragment whose ONLY remaining touches are service shapes —
+        # orphaned too late for the earlier runs (CYXY: the 692 m² pad at
+        # (60.710421,-135.0725738) that is only accessed via the Crew-cars
+        # road).  Service-adjacency scoping keeps seam-gapped aprons safe.
+        if _n_strip:
+            from .junction_repair import (
+                _reclassify_runway_disconnected_to_groundside)
+            _reclassify_runway_disconnected_to_groundside(
+                layout, icao=icao, dem=dem,
+                tile_lat=tile_lat, tile_lon=tile_lon,
+                require_service_adjacency=True)
 
         if USE_PER_SURFACE_SOLVER and layout.anchor is not None:
             # Runway CIFP thresholds are LOCKED — the solver never moves them.
@@ -4949,6 +4993,28 @@ def build_airport_pavement(icao: str, xplane_root: str,
         UI.vprint(1,
             f"  [pav-builder] {icao}: final T-vertex weld — inserted "
             f"{_n_wv} vertex(es) into {_n_ws} shape(s).")
+
+    # LAST groundside↔airside separation (user 2026-07-04): the strip
+    # carve + the late runway-disconnection sweeps demote shapes AFTER
+    # the earlier separation runs, and a demoted lot's DEM-follow
+    # rebuild can leave a hairline overlap with the service road it
+    # abuts (CYXY: 0.6 m² lot∩road — zero-tolerance
+    # test_no_self_overlap).  The pass is idempotent and keeps touching
+    # service edges (share-svc), so a clean layout is unchanged.
+    if compute_elevations:
+        try:
+            from .groundside import _separate_groundside_from_airside
+            _dem_last = tile_dem if tile_dem is not None else None
+            if _dem_last is None:
+                from .elevation import _load_airport_dem as _lad_last
+                _dem_last = _lad_last(layout.anchor[0], layout.anchor[1])
+            _tl = (current_tile_lat if current_tile_lat is not None
+                   else int(math.floor(layout.anchor[0])))
+            _tn = (current_tile_lon if current_tile_lon is not None
+                   else int(math.floor(layout.anchor[1])))
+            _separate_groundside_from_airside(layout, _dem_last, _tl, _tn)
+        except _GEOM_EXC:
+            pass
 
     tjs, crossings = find_conformance_violations(layout.shapes)
     if tjs or crossings:

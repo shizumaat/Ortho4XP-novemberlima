@@ -240,6 +240,184 @@ def _dem_follow_polygon(p, _dem_at, densify_step_m: float = 15.0,
     return new_poly, alts + [alts[0]]
 
 
+def carve_narrow_service_strips(
+        layout: "PavementLayout",
+        pav_union,
+        terminal_union=None,
+        *,
+        narrow_width_m: float = 25.0,
+        sample_step_m: float = 5.0,
+        min_run_m: float = 12.0,
+        mouth_extension_m: float = 2.5,
+        min_piece_m2: float = 25.0,
+        ) -> int:
+    """Carve NARROW ground-truck-route strips out of apron/junction faces
+    as ``ROLE_SERVICE_JUNCTION`` corridors CENTERED on the truck spine
+    (user 2026-07-04, CYXY): where the CONTIGUOUS pavement cross-section
+    at a service centerline is ≤ ``narrow_width_m``, the WHOLE strip is
+    service-road pavement.  The global slice cuts pavement ALONG the
+    route line, so each half of a narrow strip merges into whatever big
+    face it touches at its ends and no "narrow face" ever exists for
+    ``classify_faces`` — one side (or neither) read as road while the
+    strip physically IS the road.
+
+    Downstream this cascades through the existing classifiers: the
+    service corridor severs the aircraft touch-chain, so lots and pads
+    beyond it (reachable only via the road) demote to DEM-following
+    groundside in ``_reclassify_runway_disconnected_to_groundside``.
+    Wide pavement crossed by a truck route stays apron (standing user
+    ruling 2026-07-02) — the carve happens only where the contiguous
+    cross-section is narrow.
+
+    Corridor intervals that reach a route END are extended by
+    ``mouth_extension_m`` so a road that stops at a groundside lot's
+    edge (the pre-slice groundside subtraction leaves a ~1 m gap)
+    touches the lot again — the groundside mouth-anchor machinery then
+    grades the road to CLIMB to the lot (user ruling 4).
+
+    Supersedes the retired ``O4_SVC_CURVED_JUNCTION`` experiment
+    (2026-06-29, net-negative): its corridors graded all-pair 4 %,
+    while these faces ride the v14.1 service SPINES (longitudinal 4 %
+    along the route).
+
+    Returns the number of carved service pieces added.
+    """
+    from shapely.ops import substring
+    service_lines = getattr(layout, "apt_service_centerlines", None) or []
+    if not service_lines or pav_union is None or pav_union.is_empty:
+        return 0
+
+    def _contiguous_width(line, arc, probe=60.0):
+        p = line.interpolate(arc)
+        q = line.interpolate(min(arc + 1.0, line.length))
+        dx, dy = q.x - p.x, q.y - p.y
+        dn = math.hypot(dx, dy) or 1.0
+        nx, ny = -dy / dn, dx / dn
+        cross = LineString([(p.x - nx * probe, p.y - ny * probe),
+                            (p.x + nx * probe, p.y + ny * probe)])
+        try:
+            inter = cross.intersection(pav_union)
+        except _GEOM_EXC:
+            return None
+        parts = ([inter] if inter.geom_type == "LineString"
+                 else list(getattr(inter, "geoms", ())))
+        for part in parts:
+            if part.geom_type == "LineString" and part.distance(p) < 2.0:
+                return part.length
+        return 0.0
+
+    corridors = []
+    for centerline in service_lines:
+        line = getattr(centerline, "line", None)
+        if line is None or line.is_empty or line.length < min_run_m:
+            continue
+        n_stations = max(2, int(line.length / sample_step_m) + 1)
+        arcs = [line.length * k / (n_stations - 1)
+                for k in range(n_stations)]
+        narrow = []
+        for arc in arcs:
+            w = _contiguous_width(line, arc)
+            narrow.append(w is not None and 0.0 < w <= narrow_width_m)
+        # group consecutive narrow stations into intervals
+        k = 0
+        while k < len(arcs):
+            if not narrow[k]:
+                k += 1
+                continue
+            k2 = k
+            while k2 + 1 < len(arcs) and narrow[k2 + 1]:
+                k2 += 1
+            a1, a2 = arcs[k], arcs[k2]
+            k = k2 + 1
+            if a2 - a1 < min_run_m:
+                continue
+            try:
+                seg = substring(line, a1, a2)
+                coords = list(seg.coords)
+                # extend intervals that reach a route END so the road
+                # mouth re-touches the groundside lot it feeds
+                if a1 <= sample_step_m and len(coords) >= 2:
+                    (x1, y1), (x2, y2) = coords[0], coords[1]
+                    d = math.hypot(x2 - x1, y2 - y1) or 1.0
+                    coords[0] = (x1 - (x2 - x1) / d * mouth_extension_m,
+                                 y1 - (y2 - y1) / d * mouth_extension_m)
+                if a2 >= line.length - sample_step_m and len(coords) >= 2:
+                    (x1, y1), (x2, y2) = coords[-2], coords[-1]
+                    d = math.hypot(x2 - x1, y2 - y1) or 1.0
+                    coords[-1] = (x2 + (x2 - x1) / d * mouth_extension_m,
+                                  y2 + (y2 - y1) / d * mouth_extension_m)
+                # mitre joins: arc-free carve edges, so the pre-solve
+                # conformance passes can stitch neighbours cleanly
+                corridors.append(LineString(coords).buffer(
+                    narrow_width_m / 2.0 + 1.0, cap_style=2,
+                    join_style=2))
+            except _GEOM_EXC:
+                continue
+    if not corridors:
+        return 0
+    try:
+        corridor_union = unary_union(corridors)
+        if terminal_union is not None and not terminal_union.is_empty:
+            corridor_union = corridor_union.difference(terminal_union)
+    except _GEOM_EXC:
+        return 0
+    if corridor_union.is_empty:
+        return 0
+
+    n_carved = 0
+    new_shapes = []
+    for shape in layout.shapes:
+        if shape.role not in (ROLE_APRON, ROLE_JUNCTION) \
+                or shape.polygon is None or shape.polygon.is_empty:
+            new_shapes.append(shape)
+            continue
+        try:
+            carved = shape.polygon.intersection(corridor_union)
+        except _GEOM_EXC:
+            new_shapes.append(shape)
+            continue
+        carved_parts = [g for g in
+                        ([carved] if carved.geom_type == "Polygon"
+                         else list(getattr(carved, "geoms", ())))
+                        if g.geom_type == "Polygon"
+                        and g.area >= min_piece_m2]
+        if not carved_parts:
+            new_shapes.append(shape)
+            continue
+        try:
+            remainder = shape.polygon.difference(
+                unary_union(carved_parts))
+        except _GEOM_EXC:
+            new_shapes.append(shape)
+            continue
+        rem_parts = [g for g in
+                     ([remainder] if remainder.geom_type == "Polygon"
+                      else list(getattr(remainder, "geoms", ())))
+                     if g.geom_type == "Polygon"
+                     and g.area >= min_piece_m2]
+        if not rem_parts:
+            # whole face is road territory
+            shape.role = ROLE_SERVICE_JUNCTION
+            new_shapes.append(shape)
+            n_carved += 1
+            continue
+        rem_parts.sort(key=lambda g: -g.area)
+        shape.polygon = rem_parts[0]
+        new_shapes.append(shape)
+        for extra in rem_parts[1:]:
+            new_shapes.append(BuiltShape(
+                polygon=extra, role=shape.role, ref=shape.ref,
+                source_axis=shape.source_axis))
+        for piece in carved_parts:
+            new_shapes.append(BuiltShape(
+                polygon=piece, role=ROLE_SERVICE_JUNCTION, ref="",
+                source_axis=None))
+            n_carved += 1
+    if n_carved:
+        layout.shapes = new_shapes
+    return n_carved
+
+
 def _grade_limit_groundside_chords(layout) -> int:
     """Pull every groundside shape's altitude field down to the largest
     ``GROUNDSIDE_MAX_GRADE``-Lipschitz field ≤ its current (DEM) values,

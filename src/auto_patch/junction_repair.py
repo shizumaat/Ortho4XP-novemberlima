@@ -3395,6 +3395,18 @@ def _reclassify_runway_disconnected_to_groundside(
                 if m == k:
                     continue
                 if p.distance(polys[m]) <= touch_tol_m:
+                    # A chain link needs a TRAVERSABLE shared edge — a
+                    # corner/point contact cannot carry taxiing aircraft
+                    # (user 2026-07-04, CYXY: a carved service strip left
+                    # a ~point contact between the severed apron and its
+                    # neighbour, keeping the whole lot "connected").
+                    try:
+                        shared = p.buffer(touch_tol_m).intersection(
+                            polys[m].boundary).length
+                    except _GEOM_EXC:
+                        shared = 0.0
+                    if shared < 1.0:
+                        continue
                     adj[k].add(m)
                     adj[m].add(k)
         except _GEOM_EXC:
@@ -3486,12 +3498,31 @@ def _reclassify_runway_disconnected_to_groundside(
         if s.role in (ROLE_APRON, ROLE_JUNCTION):
             if _svc_lines:
                 try:
-                    _truck = sum(ln.intersection(s.polygon).length
-                                 for ln in _svc_lines
-                                 if ln.intersects(s.polygon))
+                    _truck = 0.0
+                    _route_ends_inside = False
+                    for ln in _svc_lines:
+                        if not ln.intersects(s.polygon):
+                            continue
+                        _truck += ln.intersection(s.polygon).length
+                        _c = list(ln.coords)
+                        from shapely.geometry import Point as _EndPt
+                        if (s.polygon.buffer(1.0).contains(_EndPt(*_c[0]))
+                                or s.polygon.buffer(1.0).contains(
+                                    _EndPt(*_c[-1]))):
+                            _route_ends_inside = True
                 except _GEOM_EXC:
                     _truck = 0.0
-                if _truck >= 15.0:         # a truck road → not groundside
+                    _route_ends_inside = False
+                # A JUNCTION with a truck route running THROUGH it = road
+                # carriage — keep airside; the junction→service_road
+                # re-role owns it (that re-role never takes aprons, so
+                # deferring an APRON here just leaves it stuck).  An
+                # unreachable APRON on/at the road — route through it or
+                # ending inside it — is a ground-vehicle LOT, groundside
+                # (user 2026-07-04, CYXY: the crew-car pad is only
+                # ACCESSED via its road).
+                if (_truck >= 15.0 and not _route_ends_inside
+                        and s.role == ROLE_JUNCTION):
                     continue
             if _dem_at is not None:
                 # simplify_tol=0: these boundaries come out of the
