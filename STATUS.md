@@ -16,8 +16,21 @@
 > survived (wall across the live road).  Band now cut OPEN at every
 > arm's far end (also makes it simply connected → the cap survives).
 > Crossings: portal-only ✓; SPJC tunnels byte-stable.
-> Suite 21F/325P identical.  OPEN (carried): P4 road-mouth climb weld
-> (mid-edge, needs edge-interpolated weld).
+> Suite 21F/325P identical.
+> **P4 GROUNDWORK (093a1e7, USER RULING: connection identified EARLY,
+> lot classified BY its service-road connection, gap never cut)**:
+> conform_service_mouths_to_groundside (shared vertices into lot rings
+> at service mouths) + route-END mouth welds for apron-unreachable
+> connectors + largest-lot key preference + pre-solve groundside merge.
+> Road now welds flush to the demoted connector (698.5 = 698.5 ✓).
+> REMAINING at P4: connector piece ↔ LOT still two groundside surfaces
+> 2.6 m apart — the 1 m clearance gap was cut while the connector
+> pavement was still AIRSIDE vs the lot; demotion doesn't re-close it,
+> so the pre-solve merge sees disjoint pieces.  NEXT: bridge the
+> historical gap at demotion (extend the demoted piece to the lot
+> across ≤ GROUNDSIDE_CLEARANCE_M), or teach the separation to keep
+> the shared edge where the abutting pavement carries a truck-route
+> END (the "identify the connection first" ordering, fully realized).
 
 ---
 
