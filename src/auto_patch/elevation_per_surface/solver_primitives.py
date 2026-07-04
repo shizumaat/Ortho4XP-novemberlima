@@ -1328,6 +1328,47 @@ def _seed_elevations(layout, nodes, bucket_to_idx,
                 prev = pin_edges.get(key)
                 if prev is None or path < prev:
                     pin_edges[key] = path
+        # ALSO couple CONSECUTIVE pins along each seam band edge across
+        # shape boundaries: two pins a few metres apart owned by
+        # DIFFERENT shapes get no ring edge, and the emitted surface
+        # stepped 1.9 m between them (SPLP: 34 % across a junction↔apron
+        # boundary on the band edge).  Pairwise POCS is inert at
+        # distance (budget grows with separation), so grouping by
+        # boundary line cannot re-create the one-sided-envelope hillside
+        # lift.  Group key: boundary axis + integer line + side.
+        pin_chains: dict = {}
+        for idx, (x, y, fallback, airside, runway) in seam_pins.items():
+            if idx not in pin_vals:
+                continue
+            try:
+                lat, lon = layout.m_to_ll(x, y)
+            except Exception:                              # pragma: no cover
+                continue
+            d_lat = lat - round(lat)
+            d_lon = lon - round(lon)
+            near_deg = 0.0003                # ~33 m: band edges sit ~5 m off
+            if abs(d_lon) <= abs(d_lat) and abs(d_lon) <= near_deg:
+                key = ('lon', int(round(lon)),
+                       0 if d_lon == 0 else (1 if d_lon > 0 else -1))
+                pin_chains.setdefault(key, []).append((y, idx))
+            elif abs(d_lat) < abs(d_lon) and abs(d_lat) <= near_deg:
+                key = ('lat', int(round(lat)),
+                       0 if d_lat == 0 else (1 if d_lat > 0 else -1))
+                pin_chains.setdefault(key, []).append((x, idx))
+        for chain in pin_chains.values():
+            chain.sort()
+            for (_, idx_a), (_, idx_b) in zip(chain, chain[1:]):
+                if idx_a == idx_b:
+                    continue
+                xa, ya = seam_pins[idx_a][:2]
+                xb, yb = seam_pins[idx_b][:2]
+                dist = math.hypot(xa - xb, ya - yb)
+                if dist < 0.5:
+                    continue
+                key = (idx_a, idx_b) if idx_a < idx_b else (idx_b, idx_a)
+                prev = pin_edges.get(key)
+                if prev is None or dist < prev:
+                    pin_edges[key] = dist
         if pin_edges:
             def _movable(idx: int) -> bool:
                 return not (seam_pins[idx][4] and is_hard[idx])

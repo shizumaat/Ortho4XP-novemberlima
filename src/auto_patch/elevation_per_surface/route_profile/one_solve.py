@@ -203,44 +203,77 @@ def feasibility_project(elev, shape_constraints, hard, *,
 
     def _reach(sign):                       # sign +1 → ceil, −1 → floor
         best: dict = {}
-        pq = [((elev[a] if sign > 0 else -elev[a]), a) for a in hard if a < n]
+        dist: dict = {}                     # budget-metric distance to the
+        pq = [((elev[a] if sign > 0 else -elev[a]), 0.0, a)
+              for a in hard if a < n]       # value-optimal anchor
         heapq.heapify(pq)
         while pq:
-            val, k = heapq.heappop(pq)
+            val, dk, k = heapq.heappop(pq)
             t = val if sign > 0 else -val
             if k in best and ((sign > 0 and t >= best[k])
                               or (sign < 0 and t <= best[k])):
                 continue
             best[k] = t
+            dist[k] = dk
             for (j, lim) in adj.get(k, ()):
                 nt = t + sign * lim
                 pj = best.get(j)
                 if pj is None or (sign > 0 and nt < pj) or (sign < 0 and nt > pj):
-                    heapq.heappush(pq, ((nt if sign > 0 else -nt), j))
-        return best
+                    heapq.heappush(pq, ((nt if sign > 0 else -nt),
+                                        dk + lim, j))
+        return best, dist
 
+    broken: set = set()
     if hard:
-        ceil = _reach(+1)
-        floor = _reach(-1)
+        ceil, ceil_dist = _reach(+1)
+        floor, floor_dist = _reach(-1)
         for i in range(n):
             if i in hard:
                 continue
             lo = floor.get(i, -INF)
             hi = ceil.get(i, INF)
             if lo > hi:
-                elev[i] = 0.5 * (lo + hi)            # genuine: minimise the break
+                # GENUINE break: the hard anchors contradict through this
+                # node (e.g. a tile-seam terrain pin below a plateau the
+                # runway anchors hold up).  Distance-weighted blend
+                # (user 2026-07-04, "the seam is a hard anchor the solver
+                # GRADES to"): ``t = d_ceil/(d_ceil + d_floor)`` puts the
+                # surface ON the pin-descent field at the pins (t→0 ⇒
+                # z=hi: smooth, seamless transition), ON the floor field
+                # at the high anchors (t→1 ⇒ z=lo), and spreads the
+                # deficit between them as a gentle over-cap ramp
+                # (cap + deficit/path — e.g. 2.2 % instead of a 1.9 m
+                # wall).  Continuous at the break-region boundary for any
+                # ``t`` (lo = hi there).  A plain midpoint instead parks
+                # HALF the deficit as a wall at the pin interface — the
+                # exact bump the user reported at the SPLP band edge.
+                dc = ceil_dist.get(i, 0.0)
+                df = floor_dist.get(i, 0.0)
+                t = dc / (dc + df) if (dc + df) > 1e-9 else 0.5
+                elev[i] = hi + (lo - hi) * t
+                broken.add(i)
             else:
                 elev[i] = min(max(elev[i], lo), hi)  # clamp into the envelope
 
+    # BROKEN nodes stay AT their blended value and never move in the
+    # sweeps.  Both reach envelopes are cap-Lipschitz along the edge graph
+    # and the blend is continuous, so the break region is a smooth,
+    # contained ramp.  Sweeping their edges instead cycles POCS on an
+    # infeasible system and smears the break as ±1 m NOISE across the
+    # whole region (SPLP seam approach: 10-14 % wiggles between ring
+    # neighbours).  Their over-cap edges are reported in the final tally
+    # like both-hard edges — infeasibility is never hidden.
+    immovable = hard | broken if broken else hard
+
     # Pre-split the edges ONCE by hard-membership.  The inner loop otherwise ran
     # two ``in hard`` set lookups PER edge PER iteration (up to ~0.5 B lookups on
-    # a big airport).  Both-hard edges can never move, so drop them from the
+    # a big airport).  Both-immovable edges can never move, so drop them from the
     # iteration entirely (they are only counted in the final tally below).
-    # ``kind``: 0 = both free (split the excess), 1 = i hard (move j), 2 = j hard.
+    # ``kind``: 0 = both free (split the excess), 1 = i fixed (move j), 2 = j fixed.
     iter_edges = []
     for (i, j, budget) in edges:
-        hi = i in hard
-        hj = j in hard
+        hi = i in immovable
+        hj = j in immovable
         if hi and hj:
             continue
         iter_edges.append((i, j, budget, 1 if hi else (2 if hj else 0)))
@@ -308,7 +341,8 @@ def feasibility_project(elev, shape_constraints, hard, *,
                 bh += 1
     if _os.environ.get("O4_STEP_DEBUG") == "1" and force_scalar:
         print(f"    [fp-scalar] sweeps={_sweeps_run} last_worst={_last_worst:.4f} "
-              f"rem={rem} worst_ex={worst_ex:.3f} groups={len(groups_eff)}")
+              f"rem={rem} worst_ex={worst_ex:.3f} groups={len(groups_eff)} "
+              f"broken={len(broken)}")
     return rem, bh
 
 

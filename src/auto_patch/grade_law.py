@@ -256,7 +256,15 @@ def classify_pair(p: PairContext) -> Optional[Allowance]:
         return SKIP
     # — the climb between the two sides is carried by the SPINE at the taxi cap;
     #   the straight diagonal across it is not an independent grade path.
-    if p.crosses_spine_fn is not None and p.crosses_spine_fn():
+    #   NEVER for a RING-ADJACENT pair (user 2026-07-04): a ring edge is a
+    #   physical stretch of pavement surface, not a chord — skipping it
+    #   leaves adjacent emitted vertices with NO law edge, so the final
+    #   projection's anchor-reach envelope clamps them independently and
+    #   imprints its per-node reach noise on the surface (SPLP seam
+    #   approach: ±1 m wiggles at 10-14 % between ring neighbours whose
+    #   pin-derived ceilings differed by more than any legal edge).
+    if (not p.ring_adjacent
+            and p.crosses_spine_fn is not None and p.crosses_spine_fn()):
         return SKIP
     # — a long apron body↔body chord grades to its spine, not to a far interior
     #   point (decouples building frontages from the route-maxed-low interior).
