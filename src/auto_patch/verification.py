@@ -857,13 +857,40 @@ def check_rect_short_edges(layout):
 
 # ── Grade invariants (reuse the check_grade engine) ─────────────────
 def taxi_axes_ll(layout):
-    """The builder's APT.DAT taxi centerlines as ``[(latlon_pts, cL, cT), …]`` —
-    the within-shape grade test's CENTERLINE source (spine membership + per-letter
-    cap), the SAME centerlines the build used."""
+    """The builder's APT.DAT taxi centerlines as
+    ``[(latlon_pts, cL, cT, route_ordinal), …]`` — the within-shape grade
+    test's CENTERLINE source (spine membership + per-letter cap), the SAME
+    centerlines the build used.  ``route_ordinal`` indexes
+    ``taxi_routes_ll(layout)`` (−1 = no route): the validator binds each axis
+    to its route BY IDENTITY, exactly like ``grade_graph.build_context`` —
+    the old nearest-route-by-midpoint re-derivation mis-bound axes near
+    junctions and the two readers baked different anisotropic budgets for
+    the same pair (SPJC: 91 apron chords at 1.7 % solver credit vs the
+    validator's flat 1.5 %)."""
     def _cLcT(letter):
         return ((0.03, 0.02) if letter in ("A", "B") else (0.015, 0.015))
 
     from .config import SERVICE_ROAD_MAX_GRADE as _SVC_CAP
+    # Route ordinals in taxi_routes_ll's exact iteration/dedup order.
+    route_ord: dict = {}
+    for tcl in (getattr(layout, "apt_taxi_centerlines", []) or []):
+        if getattr(tcl, "is_service", False):
+            continue
+        rl = getattr(tcl, "route_line", None)
+        if rl is None:
+            rl = getattr(tcl, "line", None)
+        if rl is None or getattr(rl, "is_empty", True):
+            continue
+        route_ord.setdefault(id(rl), len(route_ord))
+
+    def _ridx(_cl):
+        rl = getattr(_cl, "route_line", None)
+        if rl is None:
+            rl = getattr(_cl, "line", None)
+        if rl is None:
+            return -1
+        return route_ord.get(id(rl), -1)
+
     axes = []
     for _cl in (getattr(layout, "apt_taxi_centerlines", []) or []):
         ln, name = _cl.line, _cl.name
@@ -872,17 +899,19 @@ def taxi_axes_ll(layout):
         cs = list(ln.coords)
         # Service ROADS carry the road cap, not the taxi per-letter cap —
         # they were never 1.5 % taxiways (matches grade_graph.build_context's
-        # road-spine caps under the global slice).
+        # road-spine caps under the global slice).  Routes exclude service
+        # chains, so a road axis carries no route binding (isotropic).
         if getattr(_cl, "is_service", False):
             if len(cs) >= 2:
                 axes.append(([layout.m_to_ll(x, y) for (x, y) in cs],
-                             _SVC_CAP, _SVC_CAP))
+                             _SVC_CAP, _SVC_CAP, -1))
             continue
         sizes = list(getattr(_cl, "seg_sizes", []) or [])
         if not sizes or len(cs) < 2:
             cL, cT = _cLcT(_cl.dominant_size()
                            if hasattr(_cl, "dominant_size") else None)
-            axes.append(([layout.m_to_ll(x, y) for (x, y) in cs], cL, cT))
+            axes.append(([layout.m_to_ll(x, y) for (x, y) in cs], cL, cT,
+                         _ridx(_cl)))
             continue
         # Split the route into PER-SIZE sub-axes (group consecutive same-size
         # segments) so each gets its own cL/cT — a route may change width.
@@ -896,9 +925,71 @@ def taxi_axes_ll(layout):
                 j += 1
             cL, cT = _cLcT(sz)
             pts = [layout.m_to_ll(cs[k][0], cs[k][1]) for k in range(i, j + 2)]
-            axes.append((pts, cL, cT))
+            axes.append((pts, cL, cT, _ridx(_cl)))
             i = j + 1
     return axes
+
+
+def taxi_axes_exact_ll(layout):
+    """EXACT mirror of ``grade_graph.build_context``'s centerline construction,
+    exported for the sidecar: the validator reconstructs the solver's
+    ``Centerline`` objects verbatim, so the two law readers cannot diverge on
+    spine geometry, per-segment caps, splitting, or route binding.
+
+    Returns ``(axes, routes)``: ``axes`` = ``[(latlon_pts, seg_caps,
+    route_ordinal), …]`` (UNSPLIT polylines — the per-size splitting the old
+    ``taxi_axes_ll`` export did broke shared-centerline pair membership: a
+    long chord whose endpoints projected onto different split pieces lost the
+    anisotropic budget on the validator side only — SPJC's 91-pair class);
+    ``routes`` = ``[latlon_pts, …]`` deduped by ``route_line`` identity in
+    encounter order, INCLUDING service chains, exactly like build_context."""
+    from .config import (CURVE_NATIVE_SPINE as _CNS, ROUTE_ARC_SPINE as _RAS,
+                         SERVICE_ROAD_MAX_GRADE as _SVC_CAP,
+                         taxi_grade_cap_for_letter)
+    _svc_spines = _CNS or _RAS
+    axes = []
+    routes = []
+    route_key_to_idx: dict = {}
+
+    def _route_ordinal(tcl, ln, pts):
+        rline = getattr(tcl, "route_line", None)
+        rkey = id(rline) if rline is not None else ("self", id(ln))
+        ridx = route_key_to_idx.get(rkey)
+        if ridx is None:
+            try:
+                rpts = list(rline.coords) if rline is not None else pts
+            except Exception:
+                rpts = pts
+            ridx = len(routes)
+            routes.append([layout.m_to_ll(x, y) for (x, y) in rpts])
+            route_key_to_idx[rkey] = ridx
+        return ridx
+
+    for tcl in (getattr(layout, "apt_taxi_centerlines", []) or []):
+        ln = getattr(tcl, "line", tcl)
+        if ln is None or getattr(ln, "is_empty", True):
+            continue
+        _is_svc = getattr(tcl, "is_service", False)
+        if _is_svc and not _svc_spines:
+            continue
+        try:
+            pts = list(ln.coords)
+        except Exception:
+            continue
+        if len(pts) < 2:
+            continue
+        if _is_svc:
+            seg_caps = [_SVC_CAP] * (len(pts) - 1)
+        else:
+            sizes = list(getattr(tcl, "seg_sizes", []) or [])
+            seg_caps = [
+                taxi_grade_cap_for_letter(sizes[i]) if i < len(sizes)
+                else taxi_grade_cap_for_letter(sizes[-1] if sizes else None)
+                for i in range(len(pts) - 1)]
+        ridx = _route_ordinal(tcl, ln, pts)
+        axes.append(([layout.m_to_ll(x, y) for (x, y) in pts],
+                     seg_caps, ridx))
+    return axes, routes
 
 
 def taxi_routes_ll(layout):

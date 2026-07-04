@@ -731,17 +731,43 @@ def _grade_context_from_osm(ways, nodes, ll_to_m, taxi_axes, seam_nids,
     from auto_patch import grade_graph as GG
     from auto_patch.config import TAXI_MAX_GRADE
 
-    centerlines = [GG.Centerline(pts=poly, seg_caps=[cL] * (len(poly) - 1))
-                   for (poly, cL, _cT) in (taxi_axes or []) if len(poly) >= 2]
+    centerlines = []
+    axis_ridx = []
+    for entry in (taxi_axes or []):
+        poly, cL = entry[0], entry[1]
+        if len(poly) < 2:
+            continue
+        # ``cL`` is a scalar (legacy split axes: one cap for the whole piece)
+        # or a per-SEGMENT cap list (exact build_context mirror).
+        if isinstance(cL, (list, tuple)):
+            seg_caps = list(cL)[:len(poly) - 1]
+            if len(seg_caps) < len(poly) - 1:
+                pad = seg_caps[-1] if seg_caps else TAXI_MAX_GRADE
+                seg_caps += [pad] * (len(poly) - 1 - len(seg_caps))
+        else:
+            seg_caps = [cL] * (len(poly) - 1)
+        centerlines.append(GG.Centerline(pts=poly, seg_caps=seg_caps))
+        # 4th element = the BUILDER's route ordinal (identity binding);
+        # legacy 3-tuple sidecars fall back to nearest-route below.
+        axis_ridx.append(entry[3] if len(entry) > 3 else None)
 
     # ANISOTROPIC EDGES (gate O4_ANISO_EDGES): chained ROUTES (meter polylines)
     # for the spine-arc decomposition, so the standalone grade TEST uses the SAME
     # anisotropic budget the solver built to (else a curve the solver arc-credited
-    # would false-flag here).  Each centerline is bound to its nearest route.  Gate
-    # OFF / no routes ⇒ ``routes`` empty, ``route_idx`` -1, isotropic (byte-ident).
-    routes = [GG.RouteChain(pts=list(r)) for r in (routes_m or []) if len(r) >= 2]
+    # would false-flag here).  Each centerline carries the builder's OWN route
+    # binding when the sidecar provides it (identity, like build_context);
+    # nearest-route-by-midpoint is only the legacy-sidecar fallback — it
+    # mis-binds axes near junctions and the readers then bake different
+    # anisotropic budgets for the same pair.  Gate OFF / no routes ⇒ ``routes``
+    # empty, ``route_idx`` -1, isotropic (byte-ident).
+    # index-preserving (axis ordinals are positional — see routes_m note)
+    routes = [GG.RouteChain(pts=list(r)) for r in (routes_m or [])]
     if routes:
-        for cl in centerlines:
+        for cl, ridx in zip(centerlines, axis_ridx):
+            if ridx is not None:
+                cl.route_idx = (int(ridx)
+                                if 0 <= int(ridx) < len(routes) else -1)
+                continue
             mx = 0.5 * (cl.pts[0][0] + cl.pts[-1][0])
             my = 0.5 * (cl.pts[0][1] + cl.pts[-1][1])
             best_i, best_d = -1, float("inf")
@@ -838,8 +864,14 @@ def iter_shape_grade_constraints(
     # layer ON TOP (they only RELAX a cap).  Non-soft shapes (rects / runway /
     # terminal) keep their per-role all-pair handling further down.
     from auto_patch import grade_graph as _GG
-    routes_m = ([[ll_to_m(la, lo) for (la, lo) in pts]
-                 for pts in routes_ll if pts and len(pts) >= 2]
+    # INDEX-PRESERVING: axis route ordinals index this list positionally, so a
+    # degenerate route must keep its slot (never filter — that shifts every
+    # later ordinal).  A <2-point route becomes a 2-point degenerate chain.
+    routes_m = ([([(ll_to_m(la, lo)) for (la, lo) in pts] if pts
+                  and len(pts) >= 2 else
+                  [ll_to_m(*pts[0]), ll_to_m(*pts[0])] if pts else
+                  [(0.0, 0.0), (0.0, 0.0)])
+                 for pts in routes_ll]
                 if routes_ll else None)
     _law_ctx = _grade_context_from_osm(ways, nodes, ll_to_m, taxi_axes,
                                        seam_nids, max_grade, road_zone=road_zone,
@@ -1307,10 +1339,13 @@ def run_checks(
     taxi_axes = None
     if taxi_axes_ll:
         taxi_axes = []
-        for latlon_pts, cL, cT in taxi_axes_ll:
+        for entry in taxi_axes_ll:
+            latlon_pts, cL, cT = entry[0], entry[1], entry[2]
             poly = [ll_to_m(lat, lon) for (lat, lon) in latlon_pts]
             if len(poly) >= 2:
-                taxi_axes.append((poly, cL, cT))
+                # keep the builder's route ordinal (4th element) when present
+                taxi_axes.append((poly, cL, cT) if len(entry) < 4
+                                 else (poly, cL, cT, entry[3]))
 
     def _pv(*a, **k):
         if not quiet:
@@ -1415,11 +1450,19 @@ def main(argv=None) -> int:
         try:
             import json as _json
             _data = _json.loads(sidecar.read_text())
-            taxi_axes_ll = _data.get("axes") or None
-            routes_ll = _data.get("routes") or None
+            _exact = _data.get("axes_exact") or None
+            if _exact:
+                # exact build_context mirror: (pts, seg_caps, route_ordinal)
+                taxi_axes_ll = [(pts, caps, None, ridx)
+                                for (pts, caps, ridx) in _exact]
+                routes_ll = _data.get("routes_exact") or None
+            else:
+                taxi_axes_ll = _data.get("axes") or None
+                routes_ll = _data.get("routes") or None
             anchor = _data.get("anchor") or None
-            print(f"  (axes sidecar loaded: {len(taxi_axes_ll or [])} axes, "
-                  f"{len(routes_ll or [])} routes"
+            print(f"  (axes sidecar loaded: {len(taxi_axes_ll or [])} axes"
+                  + (" [exact]" if _exact else "")
+                  + f", {len(routes_ll or [])} routes"
                   + (", builder anchor frame" if anchor else "")
                   + " — law-true check)")
         except Exception as ex:

@@ -199,7 +199,8 @@ def coverage_probe(layout, tag: str) -> None:
         to_m = _projection(layout.anchor)
         _ROLES = ("apron", "junction", "service_junction", "service_road",
                   "building", "groundside_pavement", "runway",
-                  "runway_crossing")
+                  "runway_crossing", "terminal", "stub", "primary_parallel",
+                  "secondary_parallel", "cross_connector")
         out = []
         for part in spec.split(";"):
             la, lo = (float(v) for v in part.split(","))

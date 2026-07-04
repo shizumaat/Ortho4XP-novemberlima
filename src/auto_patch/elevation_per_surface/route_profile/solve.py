@@ -374,12 +374,14 @@ def solve_route_profile(layout, icao: str,
                         "hard_cat": _cat,
                     }, _fh)
                 print(f"    [dump] solve state -> {_dump}")
-            # 800 sweeps: the pass reaches its plateau well before that (the
-            # residual is an OSCILLATION between the remaining conflicting
-            # hard anchors, not slow convergence — measured identical law-true
-            # at 800 vs 4000; fixing the phantom-anchor class is the lever).
+            # 2400 sweeps: with tightest-budget edge dedup the polytope is
+            # consistent and the scalar GS CONVERGES (SPJC: worst residual
+            # 0.025 at 800 sweeps → 0.0000 at 1702; the old "oscillation
+            # plateau" was the first-edge-wins dedup enforcing conflicting
+            # duplicate budgets).  Cap with headroom; the loop exits early
+            # at tol.
             rem, bh = feasibility_project(elev, joint, yield_hard,
-                                          force_scalar=True, max_iters=800,
+                                          force_scalar=True, max_iters=2400,
                                           flat_groups=pad_groups or None)
         _psub(0.97, "Solving elevations — writing back")
         n_terms, n_rects, n_juncs = _writeback(layout, elev, bucket_to_idx)

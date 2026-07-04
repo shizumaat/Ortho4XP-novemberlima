@@ -22,6 +22,7 @@ Rule 3.  Stubs raise ``NotImplementedError`` until landed.
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Sequence
 
 from shapely.errors import GEOSException, TopologicalError
@@ -1048,6 +1049,12 @@ def _widen_runway_shared_corners(
     except _GEOM_EXC:
         runway_union = None
     pav_union = getattr(layout, "_source_pav_union", None)
+    if pav_union is None or getattr(pav_union, "is_empty", True):
+        # ``_source_pav_union`` is only stamped by junction_emit, which the
+        # global slice bypasses — without the fallback the widen ran with NO
+        # pavement guard there (CYXY item B: junction #91 swept ~1.5 k m² of
+        # off-source yard toward the runway corners at a 24 m spine step).
+        pav_union = getattr(layout, "source_pavement_union", None)
     return _do_widen(
         layout, chain, corner_index, corner_alt,
         runway_union, pav_union)
@@ -1253,6 +1260,19 @@ def _do_widen(
                     abandoned = original_body.difference(trial_poly)
                     if (abandoned.intersection(pav_union).area
                             > WIDEN_MAX_ABANDONED_PAVEMENT_M2):
+                        return False
+                    # …and never PAVE ground either: the re-routed ring can
+                    # sweep in the region between the old edge and the
+                    # inserted runway corner.  On the rect model that region
+                    # is real pavement; under the global slice it can be an
+                    # off-source yard (CYXY item B).  Reject an insert whose
+                    # ADDED area is meaningfully off pavement ∪ runway.
+                    added = trial_poly.difference(original_body)
+                    off_src = added.difference(pav_union)
+                    if runway_union is not None and not getattr(
+                            runway_union, "is_empty", True):
+                        off_src = off_src.difference(runway_union)
+                    if off_src.area > WIDEN_MAX_ABANDONED_PAVEMENT_M2:
                         return False
                 except _GEOM_EXC:
                     pass
@@ -1861,12 +1881,44 @@ def _enforce_runway_1to1_sharing(layout: PavementLayout) -> None:
                     trimmed = new_poly.difference(unary_union(big_off))
                 except _GEOM_EXC:
                     trimmed = None
+                # A carve that SPLITS the junction (the off-source piece
+                # crossed the whole body — CYXY #91: a 1.5 k m² yard) used
+                # to fall back to the UNCARVED rewrite, re-paving the yard
+                # (the item-B rests_on_source failure).  Keep the split
+                # instead: the largest part stays on this shape, the other
+                # real-pavement parts become their own junction shapes.
+                _extra_parts: list = []
                 if (trimmed is not None
-                        and trimmed.geom_type == "Polygon"
-                        and not trimmed.is_empty
-                        and trimmed.is_valid and trimmed.is_simple
-                        and trimmed.area >= 0.5 * poly.area):
+                        and trimmed.geom_type == "MultiPolygon"):
+                    _cand = sorted(
+                        (g for g in trimmed.geoms
+                         if g.geom_type == "Polygon" and not g.is_empty
+                         and g.is_valid and g.area >= 25.0),
+                        key=lambda g: g.area, reverse=True)
+                    if _cand:
+                        trimmed = _cand[0]
+                        _extra_parts = _cand[1:]
+                _carved_ok = (trimmed is not None
+                              and trimmed.geom_type == "Polygon"
+                              and not trimmed.is_empty
+                              and trimmed.is_valid and trimmed.is_simple
+                              and (trimmed.area
+                                   + sum(g.area for g in _extra_parts))
+                              >= 0.5 * poly.area)
+                if os.environ.get("O4_1TO1_DEBUG") == "1":
+                    print(f"    [1to1-carve] junction #{shape_idx}: "
+                          f"off_gain parts={len(big_off)} "
+                          f"area={sum(g.area for g in big_off):.0f}m2 "
+                          f"carved={'OK' if _carved_ok else 'FALLBACK'} "
+                          f"split_extras={len(_extra_parts)} "
+                          f"trimmed_type="
+                          f"{getattr(trimmed, 'geom_type', None)}")
+                if _carved_ok:
                     new_poly = trimmed
+                    for _g in _extra_parts:
+                        layout.shapes.append(
+                            BuiltShape(polygon=_g, role=ROLE_JUNCTION,
+                                       ref=shape.ref))
                     # The carve changed the ring — the rewritten
                     # per-vertex altitude mapping no longer applies.
                     new_alts_out = None

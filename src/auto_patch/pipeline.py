@@ -3757,6 +3757,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # split/absorb/reclassify), on the settled junction set — the
         # same place the 2-solve order ran them effectively.
         _enforce_runway_1to1_sharing(layout)
+        _covp(layout, "post-rwy-1to1")
         # Rule 1 v6 widening (user 2026-05-02): runs ONLY here,
         # post-elevation, after the runway is segmented.  Inserts
         # outboard runway corners as new junction vertices with
@@ -3764,6 +3765,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # because the cascade with Rule 4 + segmentation re-run
         # over-grew junctions past the 4-node cap.
         widen_junctions_to_runway_corners(layout)
+        _covp(layout, "post-widen-to-rwy-corners")
         # Stitch pavement to flat runway shapes (user 2026-05-09):
         # for blast pads / flat-interior runway segments, insert a
         # shared vertex on the runway boundary at the projection of
@@ -3775,6 +3777,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # of metres — adjacent junctions / stubs lift toward the
         # runway elevation instead of stalling at terrain.
         stitch_pavement_to_flat_runways(layout)
+        _covp(layout, "post-stitch-flat-rwys")
 
         # Per user 2026-05-03: per-surface solver runs AS THE LAST
         # STEP of the pipeline, after every junction rule and
@@ -3868,6 +3871,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
             stitch_pavement_to_terminals,
         )
         stitch_pavement_to_terminals(layout)
+        _covp(layout, "post-stitch-terminals")
         # Adjacent junction polygons whose rings have parallel-but-
         # near-coincident edges should share OSM nids on every shared
         # boundary segment.  Inserts vertices into the other polygon's
@@ -3878,6 +3882,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # ``_enforce_shared_vertex_altitudes`` can average shared-
         # bucket altitudes the stitch makes coincident.
         stitch_pavement_polygons(layout)
+        _covp(layout, "post-stitch-polygons")
 
         # (session 51 single-solve) The cross-shape ALTITUDE
         # reconciliation chain (`_snap_junction_altitudes_to_rect_corners`
@@ -3898,6 +3903,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # the solver then gives both the same value (no step).
         from .junction_repair import _split_sloped_rects_at_violations
         _split_sloped_rects_at_violations(layout, icao=icao)
+        _covp(layout, "post-split-sloped")
         # Re-run flat-edge corner snap: the rect split above introduces
         # new sub-rect corners that may not align with adjacent junction
         # vertices.  Snap "almost-at-the-corner" junction vertices
@@ -3912,6 +3918,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # and cannot see these sub-rects.
         from .junction_repair import _absorb_wedge_rects_into_junctions
         _absorb_wedge_rects_into_junctions(layout, icao=icao)
+        _covp(layout, "post-wedge-absorb-2")
         # Single-pass sloping-edge absorption at end of pipeline
         # (user 2026-05-17).  At this point all post-elevation
         # junction-refinement passes have run, so the FINAL
@@ -3943,6 +3950,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # ROLE_APRON so absorb only targets genuine final junctions.
         from .junction_repair import _reclassify_apron_junctions
         _reclassify_apron_junctions(layout, icao=icao)
+        _covp(layout, "post-apron-reclass")
         # (s79) SERVICE-JUNCTION re-role (docs/service_road_carve.md):
         # a junction OR apron whose pavement neighbours are EXCLUSIVELY
         # ``service_road`` rects (the #198 U-turn bulge between the two
@@ -4038,6 +4046,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # component extracts the 2-D lot core and reclassifies it to
         # groundside, leaving the narrow connector strips as service_road.
         from .config import ROAD_ONLY_LOT_GROUNDSIDE
+        _covp(layout, "pre-road-lots")
         if ROAD_ONLY_LOT_GROUNDSIDE:
             from .junction_repair import (
                 _reclassify_road_only_lots_to_groundside)

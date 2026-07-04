@@ -143,12 +143,14 @@ def classify_faces(faces: list[SliceFace], centerlines: list[LineString]
 # were near-collinear at the uniform 12 m step; every dropped node removes
 # solver edges (superlinear: within-face pair candidates) AND mesh triangles.
 # Measured at 24 m: SPJC build 86.8→77.3 s, law-true 178→155 (fewer sub-noise
-# pairs), airside verts −8.5%.  ⚠ DEFAULT OFF: at CYXY the sparser cut lines
-# flip a borderline POST-slice merge and apron #120 (2k m², 27% on source)
-# fails the genuine ``rests_on_source`` guard (18 m too) — re-enable once the
-# off-source post-slice merge class (STATUS item B provenance work) is fixed.
+# pairs), airside verts −8.5%.  DEFAULT ON at 24 m since item B closed
+# (2026-07-03): the CYXY apron-#120 rests_on_source failure this was banked
+# behind was ``_enforce_runway_1to1_sharing``'s off-source carve falling back
+# to the UNCARVED ring whenever the carve split the junction — fixed with
+# split-keep (largest part stays, real-pavement extras become their own
+# junctions); 0 off-source shapes at step 24, probe point lands in clearance.
 # 0 disables (uniform ``step`` everywhere).
-_STRAIGHT_STEP_M = float(os.environ.get("O4_SPINE_STEP_STRAIGHT_M", "0"))
+_STRAIGHT_STEP_M = float(os.environ.get("O4_SPINE_STEP_STRAIGHT_M", "24"))
 # a vertex deflecting less than this is "straight" for step selection.
 _STRAIGHT_DEFLECT_DEG = 3.0
 
@@ -316,12 +318,27 @@ def build_global_slice_faces(
         except Exception as _e:
             print(f"  [slice-dbg] {tag}: ERROR {_e!r}")
 
+    def _polygonal_parts(geometry):
+        """Reduce a GeometryCollection to its polygonal parts.
+
+        difference()/intersection() return a GeometryCollection carrying
+        line/point crumbs wherever the operands are exactly tangent
+        (CYUL: pavement tangent to the runway union).  The slice only
+        ever means AREA pavement — and shapely's boundary of a
+        collection is None, which would crash the keyhole/spur passes.
+        """
+        if geometry.geom_type != "GeometryCollection":
+            return geometry
+        return unary_union([part for part in geometry.geoms
+                            if part.geom_type in ("Polygon",
+                                                  "MultiPolygon")])
+
     if pav_union is None or pav_union.is_empty:
         return []
-    pav = pav_union
+    pav = _polygonal_parts(pav_union)
     _dbg("input-pav", pav)
     if runway_union is not None and not runway_union.is_empty:
-        pav = pav.difference(runway_union)
+        pav = _polygonal_parts(pav.difference(runway_union))
     if pav.is_empty:
         return []
     _dbg("pav-minus-runway", pav)

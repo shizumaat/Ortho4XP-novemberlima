@@ -417,6 +417,7 @@ def _clean_merge(merged):
             merged = max(merged.geoms, key=lambda g: g.area)
         if merged.geom_type != "Polygon" or merged.is_empty:
             return None
+        base = merged        # exact intended coverage of the kept part
         ring = list(merged.exterior.coords)
         if ring and ring[0] == ring[-1]:
             ring = ring[:-1]
@@ -436,6 +437,25 @@ def _clean_merge(merged):
             cleaned = cleaned.buffer(0)
         if cleaned.geom_type != "Polygon" or cleaned.is_empty:
             return None
+        # The sliver-corner drop may CHORD the ring across a DEEP concave
+        # notch and pave ground that was in NEITHER input (CYXY item B: at
+        # a 24 m spine step the wedge-absorb chorded ~1.5 k m² of yard into
+        # junction #91 → the emitted apron rested 27 % on source).  Needle
+        # cleanup only ever changes sliver-scale area, so subtract any
+        # ADDED part big enough to be real ground.
+        from shapely.ops import unary_union as _uu
+        added = cleaned.difference(base)
+        big = [g for g in getattr(added, "geoms", [added])
+               if g.geom_type == "Polygon" and g.area > 5.0]
+        if big:
+            reclipped = cleaned.difference(_uu(big))
+            if not reclipped.is_valid:
+                reclipped = reclipped.buffer(0)
+            if reclipped.geom_type == "MultiPolygon":
+                reclipped = max(reclipped.geoms, key=lambda g: g.area)
+            if reclipped.geom_type != "Polygon" or reclipped.is_empty:
+                return None
+            cleaned = reclipped
         return cleaned
     except _GEOM_EXC:
         return None

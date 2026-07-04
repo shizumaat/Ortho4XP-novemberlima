@@ -1170,11 +1170,21 @@ class PavementLayout:
             return
         try:
             import json as _json
-            from .verification import taxi_axes_ll, taxi_routes_ll
+            from .verification import (taxi_axes_ll, taxi_routes_ll,
+                                       taxi_axes_exact_ll)
+            _axes_exact, _routes_exact = taxi_axes_exact_ll(self)
             data = {
-                "axes": [[pts, cL, cT]
-                         for (pts, cL, cT) in taxi_axes_ll(self)],
+                # legacy per-size-split axes (older tools); entries may carry
+                # a 4th element (route ordinal into "routes")
+                "axes": [list(entry) for entry in taxi_axes_ll(self)],
                 "routes": taxi_routes_ll(self),
+                # EXACT build_context mirror: unsplit polylines, per-SEGMENT
+                # caps, route ordinal into "routes_exact" — the validator
+                # reconstructs the solver's Centerline objects verbatim
+                # (readers cannot drift on splitting/caps/binding).
+                "axes_exact": [[pts, caps, ridx]
+                               for (pts, caps, ridx) in _axes_exact],
+                "routes_exact": _routes_exact,
                 # The SOLVER's projection anchor: with it the validator
                 # evaluates the law in the SAME meter frame the solver
                 # built in (its default mean-of-nodes frame differs in

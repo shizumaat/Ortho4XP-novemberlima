@@ -163,9 +163,16 @@ def feasibility_project(elev, shape_constraints, hard, *,
     def _r(i):
         return gmap.get(i, i)
 
-    edges = []
-    seen = set()
-    adj: dict = {}
+    # TIGHTEST budget wins across duplicate (remapped) pairs.  Every raw edge
+    # is a constraint that must hold, so when several land on the same index
+    # pair the binding one is the minimum.  This matters most under
+    # ``flat_groups``: the group collapse aliases MANY physical chords (every
+    # pad-ring vertex ↔ one apron node, budgets spanning 10-25×) onto ONE
+    # representative pair — first-edge-wins enforced an arbitrary (usually
+    # loose) budget while the validator checks each physical chord at its own
+    # allowance (SPJC round 4: 138 of the 153 residual law-true violations
+    # were exactly this; min-wins takes SPJC to 0).
+    edge_lim: dict = {}
     for sc in shape_constraints:
         for (i, j, lim) in sc["edges"]:
             if lim is None or lim < 0 or i >= n or j >= n:
@@ -174,14 +181,17 @@ def feasibility_project(elev, shape_constraints, hard, *,
             if i == j:
                 continue
             e = (i, j) if i < j else (j, i)
-            if e in seen:
-                continue
-            seen.add(e)
-            edges.append((e[0], e[1], lim))
-            adj.setdefault(i, []).append((j, lim))
-            adj.setdefault(j, []).append((i, lim))
-    if not edges:
+            prev = edge_lim.get(e)
+            if prev is None or lim < prev:
+                edge_lim[e] = lim
+    if not edge_lim:
         return 0, 0
+    edges = []
+    adj: dict = {}
+    for (i, j), lim in edge_lim.items():
+        edges.append((i, j, lim))
+        adj.setdefault(i, []).append((j, lim))
+        adj.setdefault(j, []).append((i, lim))
 
     # EXACT reachability envelope: ceil_i = min over hard anchors a of
     # (z_a + capdist(a→i)), floor_i = max of (z_a − capdist).  ``budget`` is the

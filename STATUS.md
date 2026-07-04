@@ -1,3 +1,59 @@
+# STATUS — ROUND 4 COMPLETE: SPJC **0** law-true (from 1165 at round-1 start)
+
+> **THE FIX THAT KILLED THE 153**: `feasibility_project`'s edge dedup was
+> FIRST-EDGE-WINS while the movable-pad flat-group collapse aliases MANY
+> physical chords (every pad-ring vertex ↔ one apron node, budgets 10–25×
+> apart) onto ONE representative pair — the GS enforced an arbitrary (usually
+> loose) duplicate budget while the validator checks each chord at its own
+> allowance.  Min-budget-wins dedup (one_solve.py) = correct constraint
+> semantics → SPJC 153 → 0 (offline proj_lab proof first, production
+> confirmed).  With consistent budgets the GS **converges** (worst 0.025 @
+> 800 sweeps → 0.0000 @ 1702; the "oscillation plateau" was this bug) —
+> final-pass cap now 2400.
+>
+> ALSO LANDED THIS SESSION:
+> * **3-decimal emit REFUTED** (153→161 — 2-dec rounding was HIDING 8 pairs);
+>   hairline tail was never rounding.  Steps 3a/3b + 30-pair forensics all
+>   obsoleted by the dedup fix.
+> * **Endpoint-on-spine skip** (grade_graph `_ENDPOINT_ON_SPINE_TOL_M` 0.05):
+>   a chord endpoint ON a centerline (spine cut/junction node) grades via the
+>   spine — same physics as crossing, but a DISTANCE test is mm-stable where
+>   `crosses` parity flipped between reader frames (killed the last 122 m pad
+>   chord; unmasked the 91-pair aniso class below).
+> * **EXACT-AXES SIDECAR** (`axes_exact`/`routes_exact`): to_osm now exports
+>   build_context's Centerline objects verbatim (UNSPLIT pts + per-SEGMENT
+>   caps + route ordinal); check_grade reconstructs them 1:1.  The legacy
+>   per-size-split axes broke shared-centerline membership for long chords →
+>   validator refused aniso budgets the solver baked (91 pairs at 1.7 % vs
+>   flat 1.5 %).  Readers can no longer drift on splitting/caps/binding.
+> * **ITEM B SOLVED**: CYXY apron #120 off-source = `_enforce_runway_1to1_
+>   sharing`'s off-source carve FALLING BACK to the uncarved ring whenever
+>   the carve split the junction (O4_1TO1_DEBUG prints per-junction carve
+>   verdicts).  Fix = split-keep (largest part stays, ≥25 m² real-pavement
+>   extras become own junctions).  Also: widen_junctions pav_union fallback
+>   (`_source_pav_union` only exists under junction_emit — slice had NO
+>   guard) + never-pave-added-ground veto; `_clean_merge` >5 m² notch-chord
+>   guard.  Probe point now lands in clearance; 0 off-source shapes.
+> * **ADAPTIVE SPINE STEP DEFAULT ON** (`O4_SPINE_STEP_STRAIGHT_M=24`):
+>   SPJC ~77-80 s, verts −8.5 %.
+> * Coverage probes extended (pipeline post-finalize passes + sloped-rect
+>   roles in geom_guard `_ROLES`).
+>
+> SCOREBOARD (all at new defaults, steps/plane/cross/off-source 0 unless
+> noted): SPJC **0**; CYXY **17** (one service_road↔groundside cluster on
+> the ~700 m hillside — next round's class); SPLP **0** grade (1 known
+> pre-existing source-level off-source apron); HECA **874** (from ~4–5k,
+> undissected — playbook next).  SUITE **15F/330P**: two pre-existing CYXY
+> failures now PASS (test_cyxy_spine_zero, test_cyxy_spine_zero_no_bowl),
+> ZERO new (list diff vs 17F baseline is exactly those two).
+>
+> NEXT: CYXY 17 (road/groundside solve coupling), HECA by playbook (rate →
+> audit → gapcheck), recut SPJC compare-target, modernize
+> test_pavement_grade to consume the exact sidecar (it hand-rolls pre-sidecar
+> axes and flags 31 junction pairs the law-true check clears).
+
+---
+
 # STATUS — ROUND-4 STEP 1 DONE (`6e0f0c5`): SPJC **178 → 153** (≥1% = 12)
 
 > **LAB TOOLS for the next session: `/tmp/spjc_lab/`** — full_build.py

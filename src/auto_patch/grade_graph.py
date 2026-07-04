@@ -522,6 +522,13 @@ def _spine_membership(shape: GradeShape, ctx: GradeContext
     return out
 
 
+# A chord endpoint within this distance of a centerline counts as ON the
+# spine for the crossing skip (see _crosses).  Big enough to absorb the
+# solver-frame vs emitted-lat/lon rounding (~5 mm at 7 decimals), far below
+# any real vertex-to-spine offset.
+_ENDPOINT_ON_SPINE_TOL_M = 0.05
+
+
 def _spine_crossing_predicate(shape: GradeShape, ctx: GradeContext,
                               membership: dict):
     """Return ``crosses(xa,ya,xb,yb)->bool``: True iff the chord crosses a
@@ -587,6 +594,29 @@ def _spine_crossing_predicate(shape: GradeShape, ctx: GradeContext,
             ch = LineString(((xa, ya), (xb, yb)))
         except Exception:
             return False
+        # ENDPOINT ON THE SPINE ⇒ treat as crossing (skip the chord).  A
+        # vertex sitting on a centerline (a spine cut/junction node on the
+        # ring) grades VIA the spine — the same physics as a crossing — and
+        # for such chords the ``crosses`` parity below is knife-edge: the
+        # readers' mm-different frames flip it (SPJC's last residual pair:
+        # a 122 m pad chord starting 4 mm from three axes read True in the
+        # solver frame, False in the validator frame).  A DISTANCE test is
+        # stable at mm input noise.
+        try:
+            from shapely.geometry import Point as _Pt
+            for (px, py) in ((xa, ya), (xb, yb)):
+                pt = _Pt(px, py)
+                if tree is not None:
+                    for k in tree.query(pt.buffer(_ENDPOINT_ON_SPINE_TOL_M)):
+                        if geoms[int(k)].distance(pt) \
+                                <= _ENDPOINT_ON_SPINE_TOL_M:
+                            return True
+                else:
+                    for g in geoms:
+                        if g.distance(pt) <= _ENDPOINT_ON_SPINE_TOL_M:
+                            return True
+        except Exception:                   # pragma: no cover
+            pass
         if tree is not None:
             try:
                 for k in tree.query(ch):
