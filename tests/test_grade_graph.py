@@ -132,18 +132,24 @@ def test_ds_decompose_straight_route_is_isotropic():
     assert dperp3 == pytest.approx(12.0, abs=1e-6)
 
 
-def test_ds_decompose_curved_route_credits_arc():
-    """A CURVED (L-bend) route → Δs∥ is the spine ARC (> chord), Δs⊥ ≈ 0 for two
-    points ON the route.  This is the rising-curve fix: the climb is budgeted
-    against the route's arc length, not its shorter chord."""
-    # up 100 m then right 100 m: total arc 200, chord (0,0)->(100,100) = 141.42
+def test_ds_decompose_never_inflates():
+    """The decomposition is a ROTATION of the direct separation, never an
+    inflation: ``Δs∥² + Δs⊥² == sep²`` exactly, including on a CURVED route.
+
+    (The original arc-credit form — Δs∥ = along-route arc between the
+    projections — was measured WRONG 2026-07-03: near curves two
+    physically-close points earned budgets far beyond any surface cap, so
+    12 %+ surface cliffs perpendicular to the spine were ruled legal.  The
+    pavement between two nearby points is continuous; the standards regulate
+    the SURFACE gradient, so the budget derives from the direct separation,
+    only rotated into (∥, ⊥) for the cL/cT anisotropy.)"""
+    # up 100 m then right 100 m: arc 200, chord (0,0)->(100,100) = 141.42
     route = GG.RouteChain(pts=[(0.0, 0.0), (0.0, 100.0), (100.0, 100.0)])
-    chord = math.hypot(100.0, 100.0)
+    sep = math.hypot(100.0, 100.0)
     dpar, dperp = GG.ds_decompose((0.0, 0.0), (100.0, 100.0), route)
-    assert dpar == pytest.approx(200.0, abs=1e-6)      # full arc
-    assert dpar > chord + 50.0                          # arc >> chord
-    assert dperp < 0.5                                  # both ON the route
-    # mid-leg pair: (0,40)->(0,90) is 50 m of pure arc on the first leg
+    assert math.hypot(dpar, dperp) == pytest.approx(sep, abs=1e-6)
+    assert dpar <= sep + 1e-9                           # never > direct
+    # mid-leg pair: (0,40)->(0,90) is 50 m of pure along-route separation
     dpar2, dperp2 = GG.ds_decompose((0.0, 40.0), (0.0, 90.0), route)
     assert dpar2 == pytest.approx(50.0, abs=1e-6)
     assert dperp2 == pytest.approx(0.0, abs=1e-6)

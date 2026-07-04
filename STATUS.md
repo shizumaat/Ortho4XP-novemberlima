@@ -29,9 +29,13 @@
 > MEASURED after all four: SPJC 13 within-shape (all <0.5 % excess), plane
 > 0, cross 0; remaining "legal steep" pairs are sub-metre chords where the
 > 0.03 noise dominates (cm steps); legal frontage >1 % is 6 (short pairs).
-> ⚠ PENDING: suite A/B + CYXY/SPLP/HECA re-measure under the tightened law
-> (counts will rise everywhere — that is the point), compare-target
-> effects unknown.
+> SUITE UNDER THE TIGHTENED LAW: 20F/325P.  vs the 15F baseline: +1 stale
+> unit test (asserted the old arc credit — REWRITTEN as
+> test_ds_decompose_never_inflates, green) and +4 expected count-rise
+> acceptance regressions = the next drive-to-zero queue: CYXY spine-zero
+> ×2 (back red), test_pavement_grade[SPLP], and route_band_zero[SPJC]
+> (10 sub-0.4 m ceiling exceedances, ONE junction cluster @(1800,-948)).
+> CYXY/SPLP/HECA law-true re-measures also pending.
 
 ---
 
