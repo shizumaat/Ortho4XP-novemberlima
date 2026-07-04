@@ -1,3 +1,61 @@
+# STATUS — SESSION 20260704 (part 2): seam-as-anchor ruling + tasks 3/4/6
+# CLOSED (`5c23ff1` `f559ae5` `3997755` + coverage tool + `3a3dfd7`)
+
+> **USER RULING**: the seam is a hard anchor the solver GRADES to (like a
+> runway edge or building) — smooth, seamless transition.
+> **SEAM-AS-ANCHOR (5c23ff1)**: the reported bump (-12.1592847,-76.999938)
+> was a seam pin trampled twice — apron SEAT stamped over the pin (63.5→
+> 66.3) then O4_YIELD_FREE_APRON_SEATS freed it for the final GS.  Now:
+> seam pins are NEVER seats, never in movable pad groups, always re-added
+> to yield_hard.  ONE seam definition in both readers (solver had NONE —
+> build_context never set seam_keys; validator blanket-exempted a 400 m
+> ZONE): ctx.seam_keys = the published pin set (layout._seam_pin_idx);
+> sidecar exports seam_pins; check_grade flags only pin-coincident nids.
+> grade_law: one-seam pairs never earn spine/blend credit (body cap).
+> Pin-pair projection couples consecutive pins along ring PATHS + across
+> shapes along each band edge.
+> **BREAK CONTAINMENT (f559ae5)**: the honest pin-based validator exposed
+> a GENUINELY infeasible pocket (seam terrain 62-66 vs runway-held plateau
+> 70-72 over too little path).  The final GS cycled POCS on it → ±1 m
+> noise at 10-14 %.  feasibility_project now detects break regions
+> (reach-envelope floor>ceiling), freezes them out of the sweeps, and
+> fills them with the DISTANCE-WEIGHTED BLEND t=d_ceil/(d_ceil+d_floor),
+> z=hi+(lo−hi)·t — ON the pin-descent field at the seam, ON the floor
+> field at the high anchors, continuous at the region boundary, deficit
+> spread as a gentle over-cap ramp.  REJECTED (measured): plain midpoint
+> (parks half the deficit as a 1.9 m/34 % wall AT the pin).  Also:
+> ring-adjacent pairs are never crosses-spine-skipped (a ring edge is
+> physical pavement).  Worst seam-approach pair 36 %/1.9 m → 5.1 %/0.58 m;
+> at the user's point only a 2.2 % ramp over 36 m remains.
+> **TASK 3 FAIRING (3997755)**: TAXIWAY_MAX_GRADE_CHANGE_PER_M (1/3000,
+> tunable O4_TAXIWAY_CURVE_RUN_M) is now the spine-profile vertical-curve
+> LAW: _fair_spine_chains POCS on second differences along degree-2 spine
+> chains (sag lifts, crest lowers, band-clamped, anchors fixed), gate
+> O4_SPINE_FAIRING default ON; check_grade validates the same rate along
+> sidecar axes (noise-aware).  SPJC 30 solver-residual triples / 48
+> validator kinks (calibration baseline).
+> **TASK 4 (coverage tool commit)**: service-road corridors measured green
+> at CYXY — 30/30 truck routes covered (tools/check_connector_coverage.py
+> = the severed-connector detector), 0 steps at service↔groundside
+> boundaries, road-cap 4 % spines.  If the user still sees defects,
+> concrete coordinates needed.
+> **TASK 6 (3a3dfd7)**: CYUL runway-24-end underpass emitted — divided
+> highways SELF-VETOED (each twin bore blocked by the other's surface
+> continuation).  Twin-bore exemption (non-crossing + shares a node with
+> any tunnel way) + SYSTEM-level veto propagation (union-find by
+> proximity; any crossing vetoes the whole system) + walk dedup (4 m).
+> CYUL 2 underpasses, LMML emits its genuine Luqa runway underpass
+> (tunnel_ramp "steps" there = design ramp↔wall faces), SPJC identical,
+> SPLP 0 emitted (20 skipped).  O4_TUNNEL_DEBUG=1 prints verdicts.
+> SUITE after all: 21F/325P — identical failure list to session baseline
+> (every commit A/B'd).  SPJC 51-55 law-true (hairline wobble, 53 at
+> HEAD); SPJC seam-free → seam changes inert there.
+> NOTE for next session: the fairing + honest seam validator open two
+> drive-to-zero queues (SPJC 48 kinks; SPLP 225 seam-ramp flags = mostly
+> the honest <1 %-excess over-cap ramp of the infeasible pocket).
+
+---
+
 # STATUS — SESSION 20260704: task 5 (SPLP seam dips) CLOSED (`0a0284d`)
 
 > **DONE 5**: the "still-unidentified path" was the SOLVER's seam
