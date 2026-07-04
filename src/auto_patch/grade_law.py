@@ -227,8 +227,22 @@ def classify_pair(p: PairContext) -> Optional[Allowance]:
 
     Rules in precedence order (first match wins).  ELIGIBILITY (skip) rules:
     """
-    # — a seam endpoint is DEM-controlled, not solver-controlled.
-    if p.a_seam or p.b_seam:
+    # — an ALONG-SEAM pair (both endpoints DEM-pinned) is terrain-controlled.
+    #   A pair with ONE seam endpoint stays IN the law (2026-07-03, user
+    #   SPLP report): the blanket skip left the APPROACH to the seam pin
+    #   ungraded on both readers — the solver never spread the drop and the
+    #   validator never flagged it, so a taxiway crossing a tile line dove
+    #   into a V-notch at the pin (SPLP: mirrored 1.2-1.3 m dips both tile
+    #   sides, law-true 0).  With the pair kept, the seam node is a hard
+    #   anchor the surface must RAMP to at the shape's own cap.
+    #   RUNWAY-family pairs keep the full exemption for now: the FAA
+    #   profile is solved separately and a mid-runway seam pin can
+    #   contradict it locally (SPLP: 4.2 m notch) — the profile-side fix
+    #   (seam anchor as a regrade target) is queued.
+    if p.a_seam and p.b_seam:
+        return SKIP
+    if ((p.a_seam or p.b_seam)
+            and p.role in ("runway", "runway_crossing")):
         return SKIP
     # — both ends on building pads ⇒ inter-pad frontage = an allowed building
     #   ↔building step, not an apron grade path.

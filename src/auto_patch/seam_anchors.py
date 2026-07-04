@@ -555,6 +555,46 @@ def _insert_seam_vertices(
     return new_shape
 
 
+# Clamp grade for AIRSIDE seam pins: the TAXI cap, so every pin is
+# REACHABLE from the runway by construction (straight-line distance is a
+# lower bound on any taxi path, so ``runway_e − cap·d_straight`` is the
+# highest floor any path could require — a raw-DEM pin below it made the
+# pin↔runway chain infeasible by inches and the final GS midpointed the
+# conflict into a V-notch: the SPLP seam dips).  The boundary RIBBON keeps
+# its own separate 3 % rule.
+SEAM_CLAMP_GRADE = 0.015
+
+
+def runway_clamp_floor(layout, x: float, y: float):
+    """``max`` over CIFP-profiled runways of ``runway_elev_at_nearest_point −
+    SEAM_CLAMP_GRADE·d`` — the deterministic cross-tile floor for AIRSIDE
+    seam pins (both tiles share the same runways + profile, so both compute
+    the same value without seeing each other).  ``None`` when no runway has
+    an elevation yet."""
+    best = None
+    from shapely.geometry import Point as _P
+    from shapely.ops import nearest_points as _np
+    from .pavement.runways import _sample_runway_segment_elev
+    from .layout import ROLE_RUNWAY
+    p = _P(x, y)
+    for s in layout.shapes:
+        if s.role != ROLE_RUNWAY or s.polygon is None \
+                or s.polygon.is_empty:
+            continue
+        try:
+            q = _np(s.polygon, p)[0]
+            d = p.distance(q)
+            e = _sample_runway_segment_elev(s, q.x, q.y)
+        except _GEOM_EXC:
+            continue
+        if e is None:
+            continue
+        f = float(e) - SEAM_CLAMP_GRADE * d
+        if best is None or f > best:
+            best = f
+    return best
+
+
 def apply_seam_dem_anchors(
     layout: PavementLayout,
     dem,
@@ -586,6 +626,28 @@ def apply_seam_dem_anchors(
     if dem is None:
         return 0
     nodata = getattr(dem, "nodata", -32768)
+
+    # AIRSIDE seam pins are RUNWAY-CLAMPED (user SPLP report 2026-07-03):
+    # pinning pavement to RAW seam DEM created a both-hard chain conflict
+    # wherever the design surface sits above terrain — a taxiway crossing
+    # the SPLP seam 45 m from the runway needed an infeasible 8.7 % drop,
+    # so the final GS split the violation into a V-notch (mirrored on both
+    # tiles, invisible to the law because seam pairs were exempt).  The
+    # clamp floor ``runway_e − 3 %·d`` is computed from CIFP-profiled
+    # RUNWAYS ONLY, which BOTH tiles share identically — cross-tile
+    # continuity is preserved without either tile seeing the other.
+    # Boundary / groundside / feature shapes keep the raw-DEM pin (they
+    # follow terrain by design).
+    from .layout import (ROLE_APRON, ROLE_JUNCTION, ROLE_RUNWAY,
+                         ROLE_SERVICE_JUNCTION)
+    _AIRSIDE_CLAMP_ROLES = {
+        ROLE_APRON, ROLE_JUNCTION, ROLE_SERVICE_JUNCTION,
+        "primary_parallel", "secondary_parallel", "stub",
+        "cross_connector", "runway_crossing",
+    }
+    def _runway_floor(x: float, y: float):
+        return runway_clamp_floor(layout, x, y)
+
     n_updated = 0
     for shape in layout.shapes:
         if not shape.node_altitudes:
@@ -597,6 +659,7 @@ def apply_seam_dem_anchors(
             ring = ring[:-1]
         alts = list(shape.node_altitudes[:len(ring)])
         changed = False
+        clamp = shape.role in _AIRSIDE_CLAMP_ROLES
         for i, (x, y) in enumerate(ring):
             if _bucket_key(x, y) not in anchor_keys:
                 continue
@@ -607,6 +670,11 @@ def apply_seam_dem_anchors(
                 continue
             if v is None or v != v or v == nodata:  # None / NaN / no-data
                 continue
+            v = float(v)
+            if clamp:
+                f = _runway_floor(x, y)
+                if f is not None and f > v:
+                    v = f
             alts[i] = round(v, 1)
             changed = True
             n_updated += 1

@@ -1144,6 +1144,15 @@ def _terrain_pin_slice_nodes(fs, cut_union, clip_pts, layout,
         seam_keys = set()
         layout._seam_anchor_keys = seam_keys  # type: ignore[attr-defined]
     changed = False
+    # AIRSIDE pins are RUNWAY-CLAMPED (user SPLP report 2026-07-03): the
+    # raw-DEM pin sat metres below the design surface next to a runway,
+    # making the pin↔runway chain infeasible — the solve split the
+    # violation into a V-notch at the seam (mirrored on both tiles).  The
+    # clamp floor comes from CIFP-profiled runways, identical on both
+    # tiles, so cross-tile continuity is preserved.  Runway pieces keep
+    # their own gated pin path (profile authority; see RUNWAY_SEAM_DEM_PIN).
+    from .seam_anchors import runway_clamp_floor
+    _clamp = (fs.role in _PIN_SLICE_ROLES)
     for i, (x, y) in enumerate(coords):
         # Skip the corners shared with the clean rect (the flat join).
         if any(math.hypot(x - cp[0], y - cp[1]) < 0.5 for cp in clip_pts):
@@ -1156,6 +1165,13 @@ def _terrain_pin_slice_nodes(fs, cut_union, clip_pts, layout,
         v = _dem_at(x, y)
         if v is None:
             continue
+        if _clamp:
+            try:
+                f = runway_clamp_floor(layout, x, y)
+            except _GEOM_EXC:
+                f = None
+            if f is not None and f > v:
+                v = f
         alts[i] = round(v, 1)
         seam_keys.add(vertex_bucket(float(x), float(y)))
         changed = True
