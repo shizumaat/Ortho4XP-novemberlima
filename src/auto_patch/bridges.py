@@ -1322,6 +1322,11 @@ def _emit_tunnel_portals(
         # perimeter wall band (emitted at cluster end) unions every
         # tunnel_ramp from here on.
         _cl_start_idx = len(layout.shapes)
+        # Far (surface) end of every ramp arm this cluster emits —
+        # the perimeter wall band must be cut OPEN there (the road
+        # continues at grade; a band crossing it walls off the live
+        # roadway).  (endpoint, previous point, half width) per arm.
+        _cl_arm_ends: list = []
         cap_half_len = combined_half + wall_gap_m
         cap_centre = walk_pts[0]
         c0 = (cap_centre[0] + first_perp[0] * cap_half_len,
@@ -1759,6 +1764,9 @@ def _emit_tunnel_portals(
         if s_div is None:
             _emit_chain(walk_pts, combined_half,
                         elev_low, elev_high, True)
+            if len(walk_pts) >= 2:
+                _cl_arm_ends.append((walk_pts[-1], walk_pts[-2],
+                                     combined_half))
         else:
             # Per-member branches (widest first).
             ordered = []
@@ -1870,6 +1878,8 @@ def _emit_tunnel_portals(
                                   apt_elev, arm_specs, _cl_start_idx)
             for branch, half_k, far_k in arm_specs:
                 _emit_chain(branch, half_k, e_div, far_k, False)
+                if len(branch) >= 2:
+                    _cl_arm_ends.append((branch[-1], branch[-2], half_k))
             # WALL OPENINGS: a diverging branch must cross the
             # throat's (or a sibling's) side wall — clip every wall
             # piece of THIS cluster against the cluster's ramp
@@ -1928,6 +1938,30 @@ def _emit_tunnel_portals(
                              and not g.is_empty]
                 _g0 = wall_gap_m
                 _g1 = wall_gap_m + retaining_wall_width_m
+                # Openings at every arm's FAR (surface) end: the annulus
+                # crosses the roadway at BOTH ends, but only the PORTAL
+                # crossing is the cap — at the far end the road continues
+                # at grade and the crossing walls it off (user 2026-07-04,
+                # CYUL east: the slit knife then severed the true cap at
+                # the narrow portal, leaving the wall "flipped" with the
+                # cap at the high end).  Cutting the far ends open also
+                # makes the band simply connected, so the portal cap
+                # survives the hole-slitting untouched.
+                _openings = []
+                for (_ep, _pp, _hk) in _cl_arm_ends:
+                    _odx, _ody = _ep[0] - _pp[0], _ep[1] - _pp[1]
+                    _odl = math.hypot(_odx, _ody) or 1.0
+                    _oux, _ouy = _odx / _odl, _ody / _odl
+                    _open_line = LineString([
+                        (_ep[0] - _oux * 1.0, _ep[1] - _ouy * 1.0),
+                        (_ep[0] + _oux * (_g1 + 2.0),
+                         _ep[1] + _ouy * (_g1 + 2.0))])
+                    try:
+                        _openings.append(_open_line.buffer(
+                            max(_hk + _g0 - 0.05, 0.5), cap_style=2))
+                    except _GEOM_EXC:
+                        continue
+                _open_u = _uuB(_openings) if _openings else None
                 for _rp in _ru_polys:
                     try:
                         _outer = _rp.buffer(_g1, join_style=2,
@@ -1935,6 +1969,8 @@ def _emit_tunnel_portals(
                         _inner = _rp.buffer(_g0, join_style=2,
                                             mitre_limit=2.0)
                         _band = _outer.difference(_inner)
+                        if _open_u is not None:
+                            _band = _band.difference(_open_u)
                     except _GEOM_EXC:
                         continue
                     for _bp in getattr(_band, 'geoms', [_band]):

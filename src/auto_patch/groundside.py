@@ -366,6 +366,14 @@ def carve_narrow_service_strips(
 
     n_carved = 0
     new_shapes = []
+    # Post-slice faces can still OVERLAP each other slightly (the
+    # overlap-clip pass runs later) — an overlap region inside the
+    # corridor must be emitted as service ONCE, and EVERY face loses
+    # its full corridor intersection (else face B keeps pavement face
+    # A already emitted as road: cross-role overlap, zero-tolerance
+    # test).  ``emitted_corridor`` accumulates the pieces emitted so
+    # far; each face's carve dedupes against it.
+    emitted_corridor = []
     for shape in layout.shapes:
         if shape.role not in (ROLE_APRON, ROLE_JUNCTION) \
                 or shape.polygon is None or shape.polygon.is_empty:
@@ -373,6 +381,8 @@ def carve_narrow_service_strips(
             continue
         try:
             carved = shape.polygon.intersection(corridor_union)
+            if emitted_corridor and not carved.is_empty:
+                carved = carved.difference(unary_union(emitted_corridor))
         except _GEOM_EXC:
             new_shapes.append(shape)
             continue
@@ -381,25 +391,29 @@ def carve_narrow_service_strips(
                          else list(getattr(carved, "geoms", ())))
                         if g.geom_type == "Polygon"
                         and g.area >= min_piece_m2]
-        if not carved_parts:
-            new_shapes.append(shape)
-            continue
         try:
-            remainder = shape.polygon.difference(
-                unary_union(carved_parts))
+            remainder = shape.polygon.difference(corridor_union)
         except _GEOM_EXC:
             new_shapes.append(shape)
             continue
         rem_parts = [g for g in
                      ([remainder] if remainder.geom_type == "Polygon"
                       else list(getattr(remainder, "geoms", ())))
-                     if g.geom_type == "Polygon"
-                     and g.area >= min_piece_m2]
-        if not rem_parts:
+                     if g.geom_type == "Polygon" and g.area >= 1.0]
+        if not carved_parts and remainder.area \
+                >= shape.polygon.area - min_piece_m2:
+            # corridor barely grazes this face — leave it whole
+            new_shapes.append(shape)
+            continue
+        if not rem_parts and carved_parts:
             # whole face is road territory
             shape.role = ROLE_SERVICE_JUNCTION
             new_shapes.append(shape)
+            emitted_corridor.append(shape.polygon)
             n_carved += 1
+            continue
+        if not rem_parts:
+            new_shapes.append(shape)
             continue
         rem_parts.sort(key=lambda g: -g.area)
         shape.polygon = rem_parts[0]
@@ -412,6 +426,7 @@ def carve_narrow_service_strips(
             new_shapes.append(BuiltShape(
                 polygon=piece, role=ROLE_SERVICE_JUNCTION, ref="",
                 source_axis=None))
+            emitted_corridor.append(piece)
             n_carved += 1
     if n_carved:
         layout.shapes = new_shapes

@@ -931,9 +931,27 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
                     pieces = ([clipped]
                               if clipped.geom_type == "Polygon"
                               else list(getattr(clipped, "geoms", [])))
-                    pieces = [p for p in pieces
-                              if p.geom_type == "Polygon"
-                              and p.area >= 50.0]
+
+                    def _keep_piece(p) -> bool:
+                        # "No pavement is lost": a COMPACT small piece is
+                        # real pavement (user 2026-07-04, CYXY: 20-50 m²
+                        # taxi-intersection remainders vanished once the
+                        # service-strip carve made their parents smaller
+                        # — visible holes at every affected junction).
+                        # Only genuine hairline slivers (nothing survives
+                        # a 1 m inward buffer) stay dropped below 50 m².
+                        if p.geom_type != "Polygon":
+                            return False
+                        if p.area >= 50.0:
+                            return True
+                        if p.area < 4.0:
+                            return False
+                        try:
+                            return not p.buffer(-1.0).is_empty
+                        except _GEOM_EXC:
+                            return False
+
+                    pieces = [p for p in pieces if _keep_piece(p)]
                     if not pieces:
                         continue
                     # Keep the shape metadata on the largest piece,
