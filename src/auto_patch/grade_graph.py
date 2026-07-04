@@ -1397,9 +1397,28 @@ def _build_global_spine(G, ctx):
     A node may lie on several centerlines (a junction crossing) — it is linked on
     each, so the chains fuse into one connected spine network."""
     items = list(G.pos.items())
+    # Spatial prefilter (CYUL: the naive centerlines × nodes double loop was
+    # 52 M ``_project`` calls / 140 s — 2,473 fragmented route pieces × 21 k
+    # nodes).  Only nodes inside the centerline's tolerance-inflated bbox can
+    # be on it; everything else skips the exact projection.
+    node_tree = None
+    try:
+        from shapely.geometry import Point as _NPt, box as _nbox
+        from shapely.strtree import STRtree as _NTree
+        node_tree = _NTree([_NPt(x, y) for (_i, (x, y)) in items])
+    except Exception:                                  # pragma: no cover
+        node_tree = None
     for cl in ctx.centerlines:
+        if node_tree is not None:
+            xs = [p[0] for p in cl.pts]
+            ys = [p[1] for p in cl.pts]
+            q = _nbox(min(xs) - SPINE_PERP_TOL_M, min(ys) - SPINE_PERP_TOL_M,
+                      max(xs) + SPINE_PERP_TOL_M, max(ys) + SPINE_PERP_TOL_M)
+            cand = [items[int(k)] for k in node_tree.query(q)]
+        else:                                          # pragma: no cover
+            cand = items
         on_line = []
-        for (i, (x, y)) in items:
+        for (i, (x, y)) in cand:
             a, d, _ = _project(cl, x, y)
             if d <= SPINE_PERP_TOL_M:
                 on_line.append((a, i))

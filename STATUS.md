@@ -1,3 +1,30 @@
+# STATUS — CYUL 15-MIN BUILD: bug-class scaling, FIXED (861 → 217 s; SPJC
+# 89 → 69 s)
+
+> USER: CYUL took 15+ min vs SPJC ~80 s but isn't 15× bigger.  CONFIRMED —
+> CYUL pavement is only 1.17× SPJC's AREA (3.5 vs 3.0 km²) but its apt.dat
+> route network is 5× more FRAGMENTED (902 vs 171 pieces → 2,455 vs 491
+> route-arc pieces → 1,324 vs 268 slice faces).  Geometry scales linearly
+> (58 vs 13 s); the ELEVATION phase was superlinear.  cProfile (1,158 s
+> instrumented) named two hot spots, both fragment-count-driven:
+> 1. **reach-band visible-chord walk** (60 % of the build): ~54 failing
+>    candidates per node × 23k nodes, each paying an exact line∩polygon
+>    overlay (1.27 M calls, 650 s) in `_nearest_visible_centerline` /
+>    `_chord_on_pavement`.  FIX: `_paved_frac` — VECTORIZED point sampling
+>    (`shapely.prepare` + `contains_xy`, one C call per chord).  ⚠ a
+>    per-point Python-shapely sampler is NOT faster (call overhead ≈
+>    overlay cost — measured 861 s, no win); the batch call is the win.
+> 2. **`_build_global_spine`**: naive centerlines × nodes = 52 M `_project`
+>    calls / 140 s.  FIX: node STRtree + tolerance-inflated bbox prefilter
+>    per centerline.
+> Output byte-comparable quality: CYUL 7 within-shape / 0 steps (identical
+> pre/post fix); SPJC 53 (±1 borderline visibility flip from sampling).
+> The final scalar GS was NOT the problem (29 s).  NEXT PERF LEVER if
+> needed: line-centric bulk node→centerline binding (corridor nodes bind
+> to their own line trivially; only apron interiors need the walk).
+
+---
+
 # STATUS — EMIT DECIMATION SHIPPED (user design): node density now follows
 # the SOLVED profile
 

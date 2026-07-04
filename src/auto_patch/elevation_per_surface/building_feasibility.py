@@ -143,6 +143,39 @@ def _cl_by_distance(c, cls, tree=None, max_r=None):
         r *= 4.0
 
 
+
+def _paved_frac(chord, vis) -> float:
+    """Fraction of ``chord`` on pavement, by VECTORIZED point sampling
+    (``shapely.contains_xy`` on the prepared pavement — one C call) instead
+    of an exact line∩polygon overlay (~0.5 ms each).  The overlay was 60 %
+    of the whole CYUL build: the visible-chord walk tries ~50 candidates
+    per node on a fragmented centerline network and paid it on every miss
+    (1.27 M calls, 650 s).  Per-point *Python* shapely calls are no cheaper
+    than the overlay (call overhead dominates) — the batch call is.
+    Sampling at ≤1 m (capped 96 points) resolves ``_VIS_ON_PAV_FRAC``
+    comfortably (a 3 % gap on a 30 m chord is ~1 m)."""
+    import numpy as _np
+    import shapely as _sh
+    coords = list(chord.coords)
+    (ax, ay), (bx, by) = coords[0], coords[-1]
+    L = chord.length
+    if L < 1e-9:
+        return 1.0
+    n = min(96, max(8, int(L)))
+    t = (_np.arange(n) + 0.5) / n
+    geom = getattr(vis, "context", vis)
+    try:
+        _sh.prepare(geom)          # idempotent; cached on the geometry
+        hits = _sh.contains_xy(geom, ax + (bx - ax) * t, ay + (by - ay) * t)
+        return float(hits.mean())
+    except Exception:              # pragma: no cover — old shapely fallback
+        from shapely.geometry import Point as _P
+        hit = sum(1 for k in range(n)
+                  if vis.contains(_P(ax + (bx - ax) * t[k],
+                                     ay + (by - ay) * t[k])))
+        return hit / n
+
+
 def _nearest_visible_centerline(c, cls, vis, tree=None):
     """The nearest centerline to point ``c`` whose connecting chord stays within
     pavement (``vis``).  Falls back to the straight-line nearest if none is
@@ -161,8 +194,7 @@ def _nearest_visible_centerline(c, cls, vis, tree=None):
             return ln
         # tolerate tiny seam gaps: accept when ≥ _VIS_ON_PAV_FRAC is paved
         try:
-            inside = chord.intersection(vis.context).length
-            if inside / chord.length >= _VIS_ON_PAV_FRAC:
+            if _paved_frac(chord, vis) >= _VIS_ON_PAV_FRAC:
                 return ln
         except Exception:                                  # pragma: no cover
             pass
@@ -181,8 +213,7 @@ def _chord_on_pavement(c, foot, vis):
     if chord.length < 1e-6 or vis.contains(chord):
         return True
     try:
-        return (chord.intersection(vis.context).length
-                / chord.length) >= _VIS_ON_PAV_FRAC
+        return _paved_frac(chord, vis) >= _VIS_ON_PAV_FRAC
     except Exception:                                      # pragma: no cover
         return False
 
@@ -516,8 +547,7 @@ def _has_visible_corridor(px, py, cls, vis, max_m):
         if chord.length < 1e-6 or vis.contains(chord):
             return True
         try:                                 # tolerate tiny weld-seam gaps
-            inside = chord.intersection(vis.context).length
-            if inside / chord.length >= _VIS_ON_PAV_FRAC:
+            if _paved_frac(chord, vis) >= _VIS_ON_PAV_FRAC:
                 return True
         except Exception:                                  # pragma: no cover
             pass
