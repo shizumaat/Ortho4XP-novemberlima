@@ -461,6 +461,12 @@ def generate_auto_patches(tile, cifp_path: str,
     auto_patched: list[str] = []
     reused: list[str] = []
     tasks: list[dict] = []          # per-airport build tasks, executed post-loop
+    # 1°×1° tiles whose ``airports`` OSM cache the collected builds will
+    # read — prefetched in one place before the workers start, so
+    # parallel worker processes never issue duplicate Overpass queries
+    # for the same tile (each worker would otherwise download any
+    # missing tile itself).
+    airports_osm_tiles_needed: set[tuple[int, int]] = set()
 
     # Apply the auto-patch log-verbosity knob for the build (restored
     # after the loop).  Build-time verification still runs at every
@@ -620,6 +626,35 @@ def generate_auto_patches(tile, cifp_path: str,
         # derives its outline from apt.dat row-130 until a source-of-truth is
         # chosen).  ``current_tile_*`` is the CURRENT tile (not the airport anchor)
         # so tile_cut drops the right pieces for cross-tile airports.
+        # Which ``airports`` OSM tile(s) will this build read?  The build
+        # anchors at the apt.dat first-runway midpoint; the CIFP
+        # threshold mean estimates it to within tens of metres, so the
+        # natural tile is floor(mean) — plus the adjacent tile(s) when
+        # the estimate sits within EPSILON of a tile boundary, where the
+        # two anchors could legitimately floor differently.
+        threshold_latitudes = [d["lat"] for d in runways.values()]
+        threshold_longitudes = [d["lon"] for d in runways.values()]
+        estimated_anchor_latitude = (
+            sum(threshold_latitudes) / len(threshold_latitudes))
+        estimated_anchor_longitude = (
+            sum(threshold_longitudes) / len(threshold_longitudes))
+        TILE_BOUNDARY_EPSILON_DEG = 0.02
+
+        def _tile_coordinates_near(estimate: float) -> set[int]:
+            coordinates = {int(floor(estimate))}
+            coordinates.add(
+                int(floor(estimate - TILE_BOUNDARY_EPSILON_DEG)))
+            coordinates.add(
+                int(floor(estimate + TILE_BOUNDARY_EPSILON_DEG)))
+            return coordinates
+
+        for candidate_latitude in _tile_coordinates_near(
+                estimated_anchor_latitude):
+            for candidate_longitude in _tile_coordinates_near(
+                    estimated_anchor_longitude):
+                airports_osm_tiles_needed.add(
+                    (candidate_latitude, candidate_longitude))
+
         tasks.append({
             "icao": icao,
             "xp_root": xp_root,
@@ -631,6 +666,29 @@ def generate_auto_patches(tile, cifp_path: str,
             "auto_patch_file": auto_patch_file,
             "verify_log_path": _verify_debug_path + "." + icao + ".part",
         })
+
+    # ── Prefetch the OSM data every collected build will read ────────────
+    # Done HERE, in the main process, before any worker starts: each
+    # missing tile is downloaded exactly once (one batched Overpass
+    # request per tile).  Workers then only ever read cache — without
+    # this, workers for airports sharing a tile would race to download
+    # it, issuing duplicate Overpass queries.  A failed prefetch is not
+    # fatal: the per-airport loader keeps its own download fallback.
+    if tasks and airports_osm_tiles_needed:
+        from .osm_load import ensure_airports_osm_tile_cached
+        missing_tiles = sorted(
+            tile_coordinates
+            for tile_coordinates in airports_osm_tiles_needed
+            if not os.path.isfile(FNAMES.osm_cached(
+                tile_coordinates[0], tile_coordinates[1], "airports"))
+        )
+        if missing_tiles:
+            UI.lvprint(
+                0, "   Auto-patch: prefetching airports OSM data for",
+                len(missing_tiles), "tile(s) before building.")
+            for tile_latitude, tile_longitude in missing_tiles:
+                ensure_airports_osm_tile_cached(tile_latitude,
+                                                tile_longitude)
 
     # ── Execute the collected build tasks ────────────────────────────────
     # Each airport is independent, so with O4_PARALLEL_AIRPORTS they run across a

@@ -115,6 +115,39 @@ def _load_osm_tile(path: str) -> tuple[dict[str, tuple[float, float]],
 # `FNAMES.osm_cached` directly.
 
 
+def ensure_airports_osm_tile_cached(tile_latitude: int,
+                                    tile_longitude: int) -> bool:
+    """Download the ``airports`` OSM cache for one 1°×1° tile if absent.
+
+    Shared by the per-airport loader below (which keeps
+    build_airport_pavement self-sufficient for standalone use, e.g.
+    tests) and by the tile driver's prefetch, which downloads every
+    tile the airport builds will need ONCE, up front, so the parallel
+    airport worker processes never issue duplicate Overpass queries
+    for the same tile.  Returns True when the cache file exists on
+    return.
+    """
+    cache_path = FNAMES.osm_cached(tile_latitude, tile_longitude,
+                                   "airports")
+    if os.path.isfile(cache_path):
+        return True
+    try:
+        import O4_OSM_Utils as _OSM
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        layer = _OSM.OSM_layer()
+        queries = [('node["aeroway"]', 'way["aeroway"]',
+                    'rel["aeroway"]')]
+        _OSM.OSM_queries_to_OSM_layer(
+            queries, layer, tile_latitude, tile_longitude,
+            tags_of_interest=["all"],
+            cached_suffix="airports")
+    except _GEOM_EXC as exc:
+        UI.vprint(1,
+            f"  [pav-builder] WARN: airport OSM download error: "
+            f"{exc}")
+    return os.path.isfile(cache_path)
+
+
 def _load_osm_airports(xplane_root: str, icao: str,
                        apt_lat: float, apt_lon: float,
                        radius_deg: float = 0.05
@@ -132,32 +165,17 @@ def _load_osm_airports(xplane_root: str, icao: str,
     # tile — try the natural tile + all 8 neighbours and merge.
     base_lat = int(math.floor(apt_lat))
     base_lon = int(math.floor(apt_lon))
-    # If the natural tile's airport-OSM cache is missing, download it
-    # via the same Overpass query Ortho4XP's main pipeline uses.  This
-    # makes build_airport_pavement self-sufficient when called outside
-    # the full Ortho4XP run (e.g. for standalone testing of new
-    # airports like CYXY whose OSM tile hasn't been pre-cached).
-    natural_path = _tile_path(base_lat, base_lon)
-    if not os.path.isfile(natural_path):
-        try:
-            import O4_OSM_Utils as _OSM
-            os.makedirs(os.path.dirname(natural_path), exist_ok=True)
-            layer = _OSM.OSM_layer()
-            queries = [('node["aeroway"]', 'way["aeroway"]',
-                        'rel["aeroway"]')]
-            ok = _OSM.OSM_queries_to_OSM_layer(
-                queries, layer, base_lat, base_lon,
-                tags_of_interest=["all"],
-                cached_suffix="airports")
-            if not ok:
-                UI.vprint(1,
-                    f"  [pav-builder] WARN: Overpass download failed "
-                    f"for airports tile +{base_lat}{base_lon:+04d}; "
-                    f"junctions/rects will be empty.")
-        except _GEOM_EXC as exc:
-            UI.vprint(1,
-                f"  [pav-builder] WARN: airport OSM download error: "
-                f"{exc}")
+    # If the natural tile's airport-OSM cache is missing, download it.
+    # In a full Ortho4XP run the driver has normally prefetched it
+    # already; this fallback keeps build_airport_pavement
+    # self-sufficient when called outside the full run (e.g. for
+    # standalone testing of new airports whose OSM tile hasn't been
+    # pre-cached).
+    if not ensure_airports_osm_tile_cached(base_lat, base_lon):
+        UI.vprint(1,
+            f"  [pav-builder] WARN: Overpass download failed "
+            f"for airports tile +{base_lat}{base_lon:+04d}; "
+            f"junctions/rects will be empty.")
     # Per user 2026-04-29: OSM Overpass exports use locally-
     # generated NEGATIVE IDs that aren't globally unique.  At
     # HECA (and any airport with adjacent OSM tiles), tile A's
