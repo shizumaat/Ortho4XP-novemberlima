@@ -567,6 +567,19 @@ TUNNEL_RAMP_MAX_GRADE = 0.040   # navigable ramp grade for tunnel portals (user 
 # ramps (SPJC's user-approved tunnels are kept; all 6 LMML tunnels skip).
 SKIP_TUNNEL_RAMPS_NEAR_ROADS = True
 TUNNEL_ADJACENT_ROAD_DIST_M = 15.0
+# IMPLIED CROSSING TUNNELS (user 2026-07-04): a PUBLIC through-road or a
+# railway that crosses taxiway/runway pavement cannot do so at grade —
+# assume a tunnel under the pavement even when OSM carries no tunnel
+# tag, and emit the standard portal ramps on either side.  The crossing
+# way is split at the pavement-edge intersection points into
+# approach + (synthetic ``tunnel=yes``) bore + approach pieces, so the
+# whole existing tunnel machinery (portal walks, ramps, retaining
+# walls, twin-bore clustering, adjacent-road system veto) applies
+# unchanged.  Airport service and residential roads are EXCLUDED —
+# those legitimately cross taxi routes at grade.  ``O4_IMPLIED_TUNNELS=0``
+# restores tag-only tunnel detection.
+IMPLIED_CROSSING_TUNNELS = _os_early.environ.get(
+    "O4_IMPLIED_TUNNELS", "1") == "1"
 # Y-fork throat junction (user 2026-06-12, KPHL RWY 26 north portal:
 # road+rail share a bore then fork outside).  When True, the diverging
 # end of a Y-split tunnel is modelled like a taxiway sloping-rect +

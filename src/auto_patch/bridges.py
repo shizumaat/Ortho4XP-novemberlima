@@ -70,6 +70,7 @@ from .pavement.vertices import _snap_polygon_vertices_to_rect_corners
 from .pavement.runways import _sample_runway_segment_elev
 from .elevation import _resample_node_altitudes_nn, _sample_dem
 from .config import (
+    IMPLIED_CROSSING_TUNNELS,
     SKIP_TUNNEL_RAMPS_NEAR_ROADS,
     TUNNEL_ADJACENT_ROAD_DIST_M,
     TUNNEL_FORK_THROAT,
@@ -295,6 +296,160 @@ def _emit_tunnel_portals(
     # TUNNEL_VALUES set stays for the surface-walk exclusions — a
     # ramp should not continue INTO a passage either way.
     PORTAL_TUNNEL_VALUES = {"yes"}
+
+    # ── IMPLIED CROSSING TUNNELS (user 2026-07-04) ────────────────────
+    # A PUBLIC through-road or railway that crosses taxiway/runway
+    # pavement cannot do so at grade — assume a tunnel under the
+    # pavement even when OSM carries no tunnel tag.  The way is SPLIT at
+    # the pavement-edge crossing points into approach + synthetic
+    # ``tunnel=yes`` bore + approach pieces; everything downstream
+    # (portal walks, ramps, retaining walls, twin-bore clustering, the
+    # adjacent-road system veto) then treats the bore exactly like a
+    # mapped tunnel, so ramps emit on either side of the pavement.
+    # Service/residential roads are excluded — airport service roads
+    # legitimately cross taxi routes at grade.
+    if IMPLIED_CROSSING_TUNNELS:
+        _IMPLIED_HW_TYPES = {
+            "motorway", "trunk", "primary", "secondary", "tertiary",
+            "motorway_link", "trunk_link", "primary_link",
+        }
+        _IMPLIED_CROSS_ROLES = (
+            "runway", "runway_crossing", "primary_parallel",
+            "secondary_parallel", "stub", "cross_connector", "junction")
+        _IMPLIED_MIN_BORE_M = 6.0      # narrower = a sliver graze
+        _IMPLIED_MAX_BORE_M = 500.0    # longer = through-airport road
+        _IMPLIED_END_MARGIN_M = 2.0    # way must CROSS, not END inside
+        _IMPLIED_MAPPED_NEAR_M = 40.0  # a mapped tunnel already covers it
+        try:
+            from shapely.ops import unary_union as _uu9
+            from shapely.geometry import (LineString as _LS9,
+                                          Point as _P9)
+            _cross_pav_u = _uu9(
+                [s.polygon for s in layout.shapes
+                 if s.polygon is not None and not s.polygon.is_empty
+                 and s.role in _IMPLIED_CROSS_ROLES])
+            if _cross_pav_u.is_empty:
+                _cross_pav_u = None
+        except _GEOM_EXC:
+            _cross_pav_u = None
+        _mapped_tunnel_lines = []
+        if _cross_pav_u is not None:
+            for _wid, _nrefs, _tags in ways_r:
+                if _tags.get("tunnel") not in TUNNEL_VALUES:
+                    continue
+                _pts = [nodes_m[n] for n in _nrefs if n in nodes_m]
+                if len(_pts) >= 2:
+                    try:
+                        _mapped_tunnel_lines.append(_LS9(_pts))
+                    except _GEOM_EXC:
+                        continue
+        _excluded_early = excluded_way_ids or set()
+        _n_implied = 0
+        if _cross_pav_u is not None:
+            _split_ways: list = []
+            for _wid, _nrefs, _tags in ways_r:
+                _eligible = (
+                    _tags.get("tunnel") not in TUNNEL_VALUES
+                    and not _tags.get("bridge")
+                    and _wid not in _excluded_early
+                    and (_tags.get("highway") in _IMPLIED_HW_TYPES
+                         or _tags.get("railway") in RAIL_TUNNEL_TYPES))
+                _present = ([(n, nodes_m[n]) for n in _nrefs
+                             if n in nodes_m] if _eligible else [])
+                if not _eligible or len(_present) < 2:
+                    _split_ways.append((_wid, _nrefs, _tags))
+                    continue
+                try:
+                    _line = _LS9([p for (_n, p) in _present])
+                    if not _line.intersects(_cross_pav_u):
+                        _split_ways.append((_wid, _nrefs, _tags))
+                        continue
+                    _inter = _line.intersection(_cross_pav_u)
+                except _GEOM_EXC:
+                    _split_ways.append((_wid, _nrefs, _tags))
+                    continue
+                _parts = ([_inter] if _inter.geom_type == "LineString"
+                          else [g for g in getattr(_inter, "geoms", ())
+                                if g.geom_type == "LineString"])
+                _intervals: list = []
+                for _part in _parts:
+                    if not (_IMPLIED_MIN_BORE_M <= _part.length
+                            <= _IMPLIED_MAX_BORE_M):
+                        continue
+                    try:
+                        _s1 = _line.project(_P9(*_part.coords[0]))
+                        _s2 = _line.project(_P9(*_part.coords[-1]))
+                    except _GEOM_EXC:
+                        continue
+                    if _s2 < _s1:
+                        _s1, _s2 = _s2, _s1
+                    # must CROSS the pavement (extend beyond both sides)
+                    if (_s1 < _IMPLIED_END_MARGIN_M
+                            or _s2 > _line.length - _IMPLIED_END_MARGIN_M):
+                        continue
+                    # a mapped tunnel already models this underpass
+                    if any(_part.distance(_tl) < _IMPLIED_MAPPED_NEAR_M
+                           for _tl in _mapped_tunnel_lines):
+                        continue
+                    _intervals.append((_s1, _s2))
+                if not _intervals:
+                    _split_ways.append((_wid, _nrefs, _tags))
+                    continue
+                _intervals.sort()
+                # split the way: approach | bore | approach | bore | ...
+                _arcs = [0.0]
+                for _k in range(1, len(_present)):
+                    _arcs.append(_arcs[-1] + math.hypot(
+                        _present[_k][1][0] - _present[_k - 1][1][0],
+                        _present[_k][1][1] - _present[_k - 1][1][1]))
+                _pieces: list = []      # (nref list, is_bore)
+                _cur: list = []
+                _idx = 0
+                _syn = 0
+                for (_s1, _s2) in _intervals:
+                    while _idx < len(_present) and _arcs[_idx] <= _s1 - 0.01:
+                        _cur.append(_present[_idx][0])
+                        _idx += 1
+                    _pin = _line.interpolate(_s1)
+                    _sid_in = f"IMP|{_wid}|{_syn}"
+                    _syn += 1
+                    nodes_m[_sid_in] = (_pin.x, _pin.y)
+                    _cur.append(_sid_in)
+                    if len(_cur) >= 2:
+                        _pieces.append((_cur, False))
+                    _bore = [_sid_in]
+                    while _idx < len(_present) and _arcs[_idx] < _s2 - 0.01:
+                        _bore.append(_present[_idx][0])
+                        _idx += 1
+                    _pout = _line.interpolate(_s2)
+                    _sid_out = f"IMP|{_wid}|{_syn}"
+                    _syn += 1
+                    nodes_m[_sid_out] = (_pout.x, _pout.y)
+                    _bore.append(_sid_out)
+                    _pieces.append((_bore, True))
+                    _cur = [_sid_out]
+                while _idx < len(_present):
+                    _cur.append(_present[_idx][0])
+                    _idx += 1
+                if len(_cur) >= 2:
+                    _pieces.append((_cur, False))
+                for _j, (_refs, _is_bore) in enumerate(_pieces):
+                    _ptags = dict(_tags)
+                    if _is_bore:
+                        _ptags["tunnel"] = "yes"
+                        _ptags["o4_implied_tunnel"] = "1"
+                        _n_implied += 1
+                    _split_ways.append((f"{_wid}|IMP{_j}", _refs, _ptags))
+            ways_r = _split_ways
+        if _n_implied:
+            try:
+                UI.vprint(1,
+                    f"  [pav-builder] implied {_n_implied} tunnel bore(s) "
+                    f"under taxi/runway pavement (unmarked road/rail "
+                    f"crossings).")
+            except _GEOM_EXC:
+                pass
+
     # Build node-to-way and way-by-id indices for surface-road walking.
     way_by_id: dict[str, tuple[list[str], dict[str, str]]] = {}
     node_to_ways: dict[str, list[str]] = {}
@@ -765,7 +920,6 @@ def _emit_tunnel_portals(
                     and os.environ.get("O4_TUNNEL_DEBUG") == "1"):
                 _mx, _my = list(_ln.coords)[len(list(_ln.coords)) // 2]
                 print(f"    [tunnel-emit] way {_tw} len={_ln.length:.0f}m "
-                      f"under_pav={_sys_under_pav.get(_find(k))} "
                       f"raw_veto={_raw[k]} mid local ({_mx:.0f},{_my:.0f})")
 
     _n_adj_skip = 0
