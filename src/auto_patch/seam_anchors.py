@@ -564,14 +564,56 @@ def _insert_seam_vertices(
 # its own separate 3 % rule.
 SEAM_CLAMP_GRADE = 0.015
 
+# Roles whose seam pins take the runway clamp floor.  Boundary /
+# groundside / feature shapes keep the raw-DEM pin (they follow terrain
+# by design); RUNWAY keeps profile authority via
+# ``redistribute_runway_profile``.  Shared by every seam-pin writer
+# (``apply_seam_dem_anchors``, ``tile_cut._pin_slice_edge_to_dem``, and
+# the solver's seam hard-anchor block in ``solver_primitives``).
+SEAM_CLAMP_ROLES = frozenset({
+    "apron", "junction", "service_junction",
+    "primary_parallel", "secondary_parallel", "stub",
+    "cross_connector", "runway_crossing",
+})
+
 
 def runway_clamp_floor(layout, x: float, y: float):
     """``max`` over CIFP-profiled runways of ``runway_elev_at_nearest_point −
     SEAM_CLAMP_GRADE·d`` — the deterministic cross-tile floor for AIRSIDE
     seam pins (both tiles share the same runways + profile, so both compute
     the same value without seeing each other).  ``None`` when no runway has
-    an elevation yet."""
+    an elevation yet.
+
+    Post-redistribute callers (tile_cut pins, the solver's seam block)
+    evaluate the PERSISTED redistributed profiles — axis projection +
+    sample-list interpolation — NEVER the surviving runway shapes: after
+    ``cut_layout_at_tile_boundaries`` each tile build keeps only ITS
+    pieces, so a shape walk computes different floors on the two sides of
+    a seam (SPLP: the −77 build lifted a junction pin to 65.7 against a
+    runway the −78 build had dropped, whose twin pin stayed at 62.4 — a
+    3.3 m step across the 10 m gap).  The axis distance is measured to
+    the CENTERLINE (no lateral half-width credit), so the profile floor
+    is slightly conservative.  Shape walk remains as the fallback for
+    pre-redistribute callers (``apply_seam_dem_anchors``) and refs with
+    no CIFP state.
+    """
     best = None
+    profiles = getattr(layout, "_runway_redistributed_profiles", None)
+    if profiles:
+        from .runway_redistribute import _interp_profile
+        for p in profiles.values():
+            ax_x, ax_y = p['axis_a']
+            dx, dy = p['axis_d']
+            t = ((x - ax_x) * dx + (y - ax_y) * dy) / p['axis_len2']
+            t = min(1.0, max(0.0, t))
+            px = ax_x + t * dx
+            py = ax_y + t * dy
+            d = math.hypot(x - px, y - py)
+            e = _interp_profile(p['fractions'], p['elevs'], t)
+            f = float(e) - SEAM_CLAMP_GRADE * d
+            if best is None or f > best:
+                best = f
+        return best
     from shapely.geometry import Point as _P
     from shapely.ops import nearest_points as _np
     from .pavement.runways import _sample_runway_segment_elev
@@ -633,18 +675,11 @@ def apply_seam_dem_anchors(
     # the SPLP seam 45 m from the runway needed an infeasible 8.7 % drop,
     # so the final GS split the violation into a V-notch (mirrored on both
     # tiles, invisible to the law because seam pairs were exempt).  The
-    # clamp floor ``runway_e − 3 %·d`` is computed from CIFP-profiled
+    # clamp floor ``runway_e − 1.5 %·d`` is computed from CIFP-profiled
     # RUNWAYS ONLY, which BOTH tiles share identically — cross-tile
     # continuity is preserved without either tile seeing the other.
     # Boundary / groundside / feature shapes keep the raw-DEM pin (they
     # follow terrain by design).
-    from .layout import (ROLE_APRON, ROLE_JUNCTION, ROLE_RUNWAY,
-                         ROLE_SERVICE_JUNCTION)
-    _AIRSIDE_CLAMP_ROLES = {
-        ROLE_APRON, ROLE_JUNCTION, ROLE_SERVICE_JUNCTION,
-        "primary_parallel", "secondary_parallel", "stub",
-        "cross_connector", "runway_crossing",
-    }
     def _runway_floor(x: float, y: float):
         return runway_clamp_floor(layout, x, y)
 
@@ -659,7 +694,7 @@ def apply_seam_dem_anchors(
             ring = ring[:-1]
         alts = list(shape.node_altitudes[:len(ring)])
         changed = False
-        clamp = shape.role in _AIRSIDE_CLAMP_ROLES
+        clamp = shape.role in SEAM_CLAMP_ROLES
         for i, (x, y) in enumerate(ring):
             if _bucket_key(x, y) not in anchor_keys:
                 continue

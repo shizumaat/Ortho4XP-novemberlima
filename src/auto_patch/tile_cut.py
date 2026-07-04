@@ -288,13 +288,31 @@ def cut_layout_at_tile_boundaries(
                 # fully soft and diverge between adjacent-tile builds
                 # (test_cross_tile_cut_edge_elevations_consistent).  The
                 # pin makes both tiles compute the same DEM value there.
-                if s.role in _PIN_SLICE_ROLES or (
-                        RUNWAY_SEAM_DEM_PIN and s.role == ROLE_RUNWAY):
-                    # Runways join the terrain-pin per the user 2026-06-20
-                    # seam model: the seam (+ setback) is a THRESHOLD at
-                    # DEM, so each runway setback node sits at its own
-                    # terrain altitude (the FAA profile grades up to it from
-                    # the real threshold).  Gated by RUNWAY_SEAM_DEM_PIN.
+                if RUNWAY_SEAM_DEM_PIN and s.role == ROLE_RUNWAY:
+                    # Runway pieces take the REDISTRIBUTED FAA PROFILE at
+                    # every vertex (user SPLP seam-dip report 2026-07-03).
+                    # The profile already folds the seam DEM at the
+                    # centerline-boundary crossing (the one point where
+                    # "seam = threshold at DEM" is well-defined — user
+                    # 2026-06-20), so per-vertex DEM pins added nothing at
+                    # benign seams and carved a terrain notch into the
+                    # runway at oblique ones: SPLP's seam crosses RW02/20
+                    # at 18°, its two band-edge corners span 141 m of
+                    # station, and their raw-DEM values (55.5 / 59.7 —
+                    # a ravine wall) violate the 1.5 % cap by 2×, so the
+                    # emitted surface V-notched 4.2 m and every
+                    # ``runway_clamp_floor`` computed from it was poisoned
+                    # (the mirrored junction dips).  Profile evaluation is
+                    # deterministic across adjacent tile builds (same CIFP
+                    # + same boundary HGT pixels), which is all the
+                    # 2026-06-20 pin actually needed.  Falls back to the
+                    # DEM pin when no CIFP profile exists for the ref.
+                    if not _pin_runway_piece_to_profile(
+                            new_s, cut_union, layout):
+                        _terrain_pin_slice_nodes(
+                            new_s, cut_union, (), layout, dem,
+                            cur_tile_lat, cur_tile_lon)
+                elif s.role in _PIN_SLICE_ROLES:
                     _terrain_pin_slice_nodes(
                         new_s, cut_union, (), layout, dem,
                         cur_tile_lat, cur_tile_lon)
@@ -1091,6 +1109,59 @@ def _clip_sloping_rect_piece(
                 fs, cut_union, (P1, P2), layout, dem, tile_lat, tile_lon)
             out.append(fs)
     return out
+
+
+def _pin_runway_piece_to_profile(fs, cut_union, layout) -> bool:
+    """Rewrite a cut runway piece's ``node_altitudes`` from the runway's
+    REDISTRIBUTED FAA profile and record its slice-edge vertex buckets as
+    seam anchors.
+
+    The profile (``runway_redistribute.sample_redistributed_profile``) is
+    laterally flat and already anchored to the seam DEM at the
+    centerline-boundary crossing, so every piece vertex — including the
+    band-edge corners an oblique seam fans across the runway's width —
+    lands on one FAA-compliant, cross-tile-deterministic surface.
+    Replaces both the nearest-neighbour resample from the parent ring
+    (which grabbed whichever vertex was closest — the SPLP 4.6 m
+    cross-seam step of 2026-06-20) and the per-vertex raw-DEM pin that
+    fixed it (which carved the terrain into the runway — the SPLP 4.2 m
+    seam V-notch of 2026-07-03).
+
+    Returns ``False`` (caller falls back to the DEM pin) when no
+    redistributed profile exists for the piece's ref.
+    """
+    from .runway_redistribute import sample_redistributed_profile
+    if (fs.ref is None or fs.polygon is None or fs.polygon.is_empty
+            or layout is None):
+        return False
+    try:
+        coords = list(fs.polygon.exterior.coords)
+        cut_boundary = cut_union.boundary
+    except _GEOM_EXC:
+        return False
+    if sample_redistributed_profile(layout, fs.ref,
+                                    *coords[0][:2]) is None:
+        return False
+    seam_keys = getattr(layout, "_seam_anchor_keys", None)
+    if seam_keys is None:
+        seam_keys = set()
+        layout._seam_anchor_keys = seam_keys  # type: ignore[attr-defined]
+    alts = []
+    for (x, y) in coords:
+        v = sample_redistributed_profile(layout, fs.ref, x, y)
+        if v is None:
+            return False
+        alts.append(round(float(v), 1))
+        try:
+            if Point(x, y).distance(cut_boundary) < 0.75:
+                seam_keys.add(vertex_bucket(float(x), float(y)))
+        except _GEOM_EXC:
+            continue
+    fs.node_altitudes = alts
+    fs.altitude = None
+    fs.altitude_high = None
+    fs.altitude_low = None
+    return True
 
 
 def _terrain_pin_slice_nodes(fs, cut_union, clip_pts, layout,

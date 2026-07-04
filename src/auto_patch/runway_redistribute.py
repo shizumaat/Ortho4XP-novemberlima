@@ -213,6 +213,32 @@ def _insert_seam_anchors(fractions: List[float], elevs: List[float],
         anchored.insert(insert_at, True)
 
 
+def sample_redistributed_profile(layout, ref: str,
+                                 x: float, y: float) -> "float | None":
+    """Elevation of runway ``ref``'s redistributed FAA profile at
+    metre-frame point ``(x, y)`` — projection onto the physical-end
+    axis, linear interpolation over the gated sample list.
+
+    This is the runway's AUTHORITATIVE elevation surface (CIFP
+    thresholds + seam DEM anchors, smoothed through the FAA grade and
+    K-factor gates), laterally flat by construction.  Deterministic
+    across adjacent tile builds: both tiles derive it from the same
+    CIFP geometry and the same boundary HGT pixels.  Returns ``None``
+    when ``redistribute_runway_profile`` has not stored a profile for
+    ``ref`` (no CIFP state).
+    """
+    profiles = getattr(layout, "_runway_redistributed_profiles", None)
+    if not profiles:
+        return None
+    p = profiles.get(ref)
+    if not p:
+        return None
+    ax_x, ax_y = p['axis_a']
+    dx, dy = p['axis_d']
+    t = ((x - ax_x) * dx + (y - ax_y) * dy) / p['axis_len2']
+    return _interp_profile(p['fractions'], p['elevs'], t)
+
+
 def _find_centerline_boundary_crossings(
         phys_end_a_ll: Tuple[float, float],
         phys_end_b_ll: Tuple[float, float],
@@ -407,6 +433,24 @@ def redistribute_runway_profile(
             grade_cap=MAX_RUNWAY_GRADE,
             end_grade_cap=RUNWAY_END_GRADE,
             max_dg_per_m=MAX_RUNWAY_GRADE_CHANGE_PER_M)
+
+        # Persist the gated profile so later passes can evaluate the
+        # runway's authoritative elevation at any point (``tile_cut``
+        # rewrites cut-piece vertices from it — per-vertex DEM pins at
+        # an oblique seam crossing fan across the runway's width and
+        # carve terrain notches into the FAA profile; see
+        # ``sample_redistributed_profile``).
+        profiles = getattr(layout, "_runway_redistributed_profiles", None)
+        if profiles is None:
+            profiles = {}
+            layout._runway_redistributed_profiles = profiles
+        profiles[ref] = {
+            'axis_a': (ax_a_x, ax_a_y),
+            'axis_d': (ax_dx, ax_dy),
+            'axis_len2': ax_len2,
+            'fractions': list(fractions),
+            'elevs': list(elevs),
+        }
 
         # Evaluate the new profile at every runway sub-rect's vertex.
         for s in shapes:

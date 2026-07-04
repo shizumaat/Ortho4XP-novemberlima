@@ -1172,9 +1172,15 @@ def _seed_elevations(layout, nodes, bucket_to_idx,
     if seam_keys:
         from ..layout import SHARED_VERTEX_TOL_M
         from ..elevation import _sample_dem
+        from ..seam_anchors import (SEAM_CLAMP_GRADE, SEAM_CLAMP_ROLES,
+                                    runway_clamp_floor)
         bk_s = 1.0 / SHARED_VERTEX_TOL_M
         cps = layout.canonical_points
-        seam_done: set = set()
+        # Gather every seam vertex FIRST (idx → position, stored-altitude
+        # fallback, and which roles own it), THEN pin — the runway
+        # skip/clamp below must not depend on which shape happens to
+        # visit a shared bucket first.
+        seam_pins: dict = {}     # idx -> [x, y, fallback_alt, airside, runway]
         for s in layout.shapes:
             if s.polygon is None or s.polygon.is_empty:
                 continue
@@ -1190,37 +1196,161 @@ def _seed_elevations(layout, nodes, bucket_to_idx,
             # while tile-78's apron at the same seam stayed at the DEM → 2.4 m
             # cross-tile step).
             alts = list(s.node_altitudes[:len(coords)]) if s.node_altitudes else None
+            airside = s.role in SEAM_CLAMP_ROLES
+            runway = s.role in (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING)
             for vi, (x, y) in enumerate(coords):
                 seam_bk = (int(round(x * bk_s)), int(round(y * bk_s)))
                 if seam_bk not in seam_keys:
                     continue
                 idx = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
-                if idx is None or idx in seam_done:
+                if idx is None:
                     continue
-                # Seam vertex = the SMOOTHED DEM HARD anchor (user 2026-06-28,
-                # never raw HGT): the surface meets terrain at the tile edge so
-                # BOTH tiles pin the same seam point to the same value → cross-tile
-                # continuity.  Re-sampled HERE (not trusted from node_altitudes) so
-                # a seam vertex created by a LATE geometry pass is pinned too.
-                v = None
-                if dem is not None:
-                    try:
-                        lat, lon = layout.m_to_ll(x, y)
-                        sv = _sample_dem(dem, tile_lat, tile_lon, lat, lon)
-                        if sv is not None and sv == sv:
-                            v = float(sv)
-                    except Exception:                          # pragma: no cover
-                        v = None
-                if v is None and alts is not None and vi < len(alts) \
+                fallback = None
+                if alts is not None and vi < len(alts) \
                         and alts[vi] is not None:
-                    v = float(alts[vi])      # DEM unavailable → stored fallback
-                if v is None:
+                    fallback = float(alts[vi])
+                rec = seam_pins.get(idx)
+                if rec is None:
+                    seam_pins[idx] = [x, y, fallback, airside, runway]
+                else:
+                    if rec[2] is None:
+                        rec[2] = fallback
+                    rec[3] = rec[3] or airside
+                    rec[4] = rec[4] or runway
+        # ── Phase 1: raw pin values ──────────────────────────────────
+        # Seam vertex = the SMOOTHED DEM HARD anchor (user 2026-06-28,
+        # never raw HGT): the surface meets terrain at the tile edge so
+        # BOTH tiles pin the same seam point to the same value → cross-tile
+        # continuity.  Re-sampled HERE (not trusted from node_altitudes) so
+        # a seam vertex created by a LATE geometry pass is pinned too.
+        # RUNWAY-owned buckets keep their hard-anchor values instead (the
+        # redistributed FAA profile, already anchored to the seam DEM at
+        # the centerline-boundary crossing) — re-sampling the DEM per
+        # vertex carved the terrain into the runway at oblique seam
+        # crossings (the SPLP 4.2 m V-notch; see
+        # ``tile_cut._pin_runway_piece_to_profile``); they still act as
+        # fixed SOURCES for the fairing envelope below.
+        pin_vals: dict = {}      # idx -> value to write
+        for idx, (x, y, fallback, airside, runway) in seam_pins.items():
+            if runway and is_hard[idx]:
+                pin_vals[idx] = float(elev[idx])
+                continue
+            v = None
+            if dem is not None:
+                try:
+                    lat, lon = layout.m_to_ll(x, y)
+                    sv = _sample_dem(dem, tile_lat, tile_lon, lat, lon)
+                    if sv is not None and sv == sv:
+                        v = float(sv)
+                except Exception:                          # pragma: no cover
+                    v = None
+            if v is None:
+                v = fallback             # DEM unavailable → stored fallback
+            if v is None:
+                continue
+            # AIRSIDE pins take the runway clamp floor (user SPLP report
+            # 2026-07-03): a raw-DEM pin below ``runway_e − cap·d`` makes
+            # the pin↔runway chain infeasible and the final GS midpoints
+            # the conflict into a V-notch.  Both tiles share the same
+            # runways + profile → same floor → cross-tile continuity.
+            if airside:
+                try:
+                    f = runway_clamp_floor(layout, x, y)
+                except Exception:                          # pragma: no cover
+                    f = None
+                if f is not None and f > v:
+                    v = f
+            pin_vals[idx] = v
+
+        # ── Phase 2: grade-project ADJACENT seam pins (pin↔pin law) ──
+        # Raw per-pin DEM pins trace every terrain bump into the pavement
+        # at the seam.  A pair of ring-ADJACENT seam pins is exactly the
+        # class the within-shape law exempts (both endpoints hard), so a
+        # local terrain notch at the band edge emits as a pavement dip
+        # (SPLP: mirrored 1.2 m junction dips at 2.9 % over 45 m, 0.5-0.7
+        # m apron dips) — and cap-violating pins also make the interior
+        # solve infeasible (each pin pulls its soft neighbours toward
+        # itself; the GS midpoints the conflict).  Project the pin values
+        # onto the pairwise polytope ``|v_i − v_j| ≤ cap·d`` over every
+        # ring-adjacent pin pair (POCS, violation split equally — the
+        # minimum-movement projection; runway pins are IMMOVABLE profile
+        # authority, their neighbour takes the whole move).  Ring
+        # adjacency keeps the coupling inside one pavement shape — no
+        # reach across grass gaps — and terrain adherence is preserved
+        # wherever the DEM trace is already cap-legal (the projection is
+        # identity there).  Deterministic: same rings, same DEM, same
+        # sweep order on both tile builds.
+        cap = SEAM_CLAMP_GRADE
+        _PIN_PAIR_ROLES = SEAM_CLAMP_ROLES | {ROLE_RUNWAY,
+                                              ROLE_RUNWAY_CROSSING}
+        pin_edges: dict = {}     # (idx_lo, idx_hi) -> distance
+        for s in layout.shapes:
+            if s.role not in _PIN_PAIR_ROLES:
+                continue
+            if s.polygon is None or s.polygon.is_empty:
+                continue
+            coords = _open_ring(list(s.polygon.exterior.coords))
+            n_ring = len(coords)
+            if n_ring < 3:
+                continue
+            ring_idx = []
+            for (x, y) in coords:
+                idx = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+                ring_idx.append(idx if idx in pin_vals else None)
+            for k in range(n_ring):
+                idx_a = ring_idx[k]
+                idx_b = ring_idx[(k + 1) % n_ring]
+                if idx_a is None or idx_b is None or idx_a == idx_b:
                     continue
-                # Seam wins: override any existing HARD value too.
-                elev[idx] = v
-                is_hard[idx] = True
-                have_initial[idx] = True
-                seam_done.add(idx)
+                xa, ya = coords[k]
+                xb, yb = coords[(k + 1) % n_ring]
+                dist = math.hypot(xa - xb, ya - yb)
+                if dist < 0.5:
+                    continue
+                key = (idx_a, idx_b) if idx_a < idx_b else (idx_b, idx_a)
+                prev = pin_edges.get(key)
+                if prev is None or dist < prev:
+                    pin_edges[key] = dist
+        if pin_edges:
+            edge_list = sorted(pin_edges.items())
+            def _movable(idx: int) -> bool:
+                return not (seam_pins[idx][4] and is_hard[idx])
+            for _sweep in range(200):
+                worst = 0.0
+                for (idx_a, idx_b), dist in edge_list:
+                    va = pin_vals[idx_a]
+                    vb = pin_vals[idx_b]
+                    slack = abs(va - vb) - cap * dist
+                    if slack <= 1e-4:
+                        continue
+                    worst = max(worst, slack)
+                    move_a = _movable(idx_a)
+                    move_b = _movable(idx_b)
+                    if not (move_a or move_b):
+                        continue
+                    hi_idx, lo_idx = ((idx_a, idx_b) if va > vb
+                                      else (idx_b, idx_a))
+                    hi_mov = _movable(hi_idx)
+                    lo_mov = _movable(lo_idx)
+                    if hi_mov and lo_mov:
+                        pin_vals[hi_idx] -= slack / 2.0
+                        pin_vals[lo_idx] += slack / 2.0
+                    elif hi_mov:
+                        pin_vals[hi_idx] -= slack
+                    else:
+                        pin_vals[lo_idx] += slack
+                if worst <= 1e-4:
+                    break
+
+        # ── Phase 3: write ────────────────────────────────────────────
+        for idx, v in pin_vals.items():
+            runway = seam_pins[idx][4]
+            if runway and is_hard[idx]:
+                continue     # runway hard-anchor value already in place
+            # Seam wins: override any existing HARD value too.
+            elev[idx] = v
+            is_hard[idx] = True
+            have_initial[idx] = True
 
     # Warm-start soft nodes.
     for s in layout.shapes:
