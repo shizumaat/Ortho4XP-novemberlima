@@ -1,3 +1,74 @@
+# STATUS — LAW REVIEW (user: "reports 0 but I see violations") — FOUR
+# leniencies found + fixed; SPJC honest count = 13 hairline
+
+> USER was right: 7,040 SPJC pairs steeper than 1.5 % were LEGAL under the
+> old law (worst: 12.5 % over 5.2 m ruled legal at a nominal 1.5 % cap).
+> The four leniencies, all fixed in shared law code (both readers + solver
+> inherit):
+> 1. **Δs∥ = along-route ARC** (grade_graph.ds_decompose): near curves two
+>    physically-close points project far apart along the route → budgets far
+>    beyond any surface cap (the perpendicular-to-spine cliffs).  NOW: Δs∥ =
+>    foot-point CHORD, so Δs∥²+Δs⊥² = sep² exactly — anisotropy is a
+>    rotation, never an inflation.
+> 2. **L1 allowance** (`cL·Δs∥ + cT·Δs⊥`) over-allowed diagonals ×√2
+>    (4 % road pairs legal at 5.6 %).  NOW: L2 ellipse
+>    √((cL·Δs∥)² + (cT·Δs⊥)²) in Allowance.at AND _bake_edge.
+> 3. **ELEV_ROUNDING_NOISE_M 0.15 was stale** (sized for 1-decimal emit;
+>    on a 5 m edge it allowed cap + 3 %).  NOW 0.03 (2-decimal emit + GS
+>    tolerance).
+> 4. **Building-frontage pairs inside service_junction faces** took the
+>    host's 4 % BODY cap (blend/road-relax exclusions never fired) — the
+>    >1 % terminal-side ramps.  NOW: any pair touching a building pad is
+>    clamped to config.BUILDING_FRONTAGE_MAX_GRADE (= APRON_MAX_GRADE 1 %)
+>    in classify_pair, regardless of host role.
+> ALSO: the endpoint-on-spine skip (same-day) was WRONG (unbounded
+> side-to-spine differentials) — replaced by INTERIOR-CLEARANCE crossing:
+> an intersection within 0.5 m of a chord endpoint is contact, not a
+> crossing (distance-thresholded ⇒ reader-stable; also split-agnostic since
+> ANY hit point counts, incl. at a sidecar split node).
+> MEASURED after all four: SPJC 13 within-shape (all <0.5 % excess), plane
+> 0, cross 0; remaining "legal steep" pairs are sub-metre chords where the
+> 0.03 noise dominates (cm steps); legal frontage >1 % is 6 (short pairs).
+> ⚠ PENDING: suite A/B + CYXY/SPLP/HECA re-measure under the tightened law
+> (counts will rise everywhere — that is the point), compare-target
+> effects unknown.
+
+---
+
+# STATUS — RUNWAY-CONTACT VEER: root cause found + retired under the slice
+
+> USER REPORT (post-round-4 test): spine runway connections veer at the very
+> end to a runway SEGMENT corner instead of the edge-contact node.
+> MEASURED (scratchpad veer_probe.py, centerline×runway-edge crossings on
+> the emitted patch): with the pass on, only **2/18** crossings kept an
+> emitted node at the contact and the airside faces touched the runway
+> ONLY at segment corners (nearest on-edge vertex = a corner at ALL 18,
+> 8–37 m off) — the seam has nowhere to land but a corner.
+> CULPRIT (clean A/B attribution): **`_enforce_runway_1to1_sharing`** —
+> the rect-era Rule-1 pass replaces every ring-vertex run within 20 m of
+> the runway with nearest-segment-CORNER sequences.
+> `widen_junctions_to_runway_corners` measured INNOCENT (add-only).
+> FIX (v2 — blanket retirement measured WORSE: SPLP's junction↔runway
+> seam NEEDS the pass, 4 new >0.5 m steps without it): the pass now
+> SPARES SPINE NODES — a ring vertex within 0.5 m of a non-service taxi
+> centerline never joins a snap run (same spare mechanism as rect
+> corners).  Verified: SPJC contacts keep their nodes (14/25), SPLP back
+> to 0 grade + 0 steps.  `widen_junctions_to_runway_corners` measured
+> INNOCENT (add-only; debug gates O4_RWY_1TO1 / O4_WIDEN_RWY_CORNERS
+> kept).  Remaining non-veer gaps: 3 crossings at 1–1.8 m (grid
+> placement, minor) + 3 with NO airside face at the crossing at all
+> (source/coverage class — routes crossing the edge over unpaved ground).
+>
+> OPEN (1 pair, characterized): SPJC law-true 1 — junction #166 chord
+> (657,-671)↔(650,-680), 3.94 % over 11.4 m.  b sits 0.028 m ON route-arc
+> axis #503 (the slice cut chain -3792..-3798, smooth 27.07-27.14) but is
+> NOT in the solver graph; a (=idx 3637, 27.6) never got the tight
+> spine-credit pair enforced.  A junction-mesh/spine-credit lockstep edge
+> case at a runway-contact arc — NOT the veer mechanism.  proj_lab
+> residual1 + veer_probe.py in /tmp/spjc_lab reproduce it offline.
+
+---
+
 # STATUS — ROUND 4 COMPLETE: SPJC **0** law-true (from 1165 at round-1 start)
 
 > **THE FIX THAT KILLED THE 153**: `feasibility_project`'s edge dedup was

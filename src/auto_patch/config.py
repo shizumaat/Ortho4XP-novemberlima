@@ -43,6 +43,7 @@ __all__ = [
     "ROLE_GRADE_LIMITS",
     "TAXI_MAX_GRADE",
     "APRON_MAX_GRADE",
+    "BUILDING_FRONTAGE_MAX_GRADE",
     "TERMINAL_MAX_GRADE",
     "TERMINAL_PADS_SLOPE",
     "TAXI_CORRIDOR_PROFILE",
@@ -430,6 +431,10 @@ TAXI_MAX_TRANSVERSE_NARROW = 0.020   # ICAO Annex 14 Table 3-2 code A/B transver
 # JUNCTIONS stay at the TAXI rate (1.5%): they are part of the moving network
 # where 1.5% taxiways flow through, not parking surface (decoupled below).
 APRON_MAX_GRADE = 0.01          # apron + building pad, all directions
+# The building-frontage rule (user 2026-07-02/03, buildings-heaviest):
+# ANY within-shape pair touching a building pad is capped here no matter
+# which face role hosts it (grade_law.classify_pair binds it last).
+BUILDING_FRONTAGE_MAX_GRADE = APRON_MAX_GRADE
 # APRON↔TAXI GRADE BLEND (user 2026-06-25) — defined below, where ``import os as
 # _os`` is in scope: APRON_TAXI_BLEND / APRON_TAXI_TRANSITION_M.
 # (2026-06-13) APRON BACK-EDGE RAMPS — docs/apron_back_edge_ramps.md.  The
@@ -593,9 +598,14 @@ RUNWAY_DEM_FOLLOW_BAND_M = 0.0
 #     LOCAL law only: pairs longer than ``ROUTE_FIELD_LOCAL_WINDOW_M`` are not
 #     graded against each other (ring-adjacent pairs — the physical edge —
 #     always are); the LONG-RANGE law is the route-band check instead.
-#   * ``ELEV_ROUNDING_NOISE_M`` absorbs single-decimal (0.1 m) altitude rounding.
+#   * ``ELEV_ROUNDING_NOISE_M`` absorbs the EMIT rounding (2-decimal since
+#     the V15 quantization fix: +/-0.005 per endpoint) plus the final GS
+#     convergence tolerance.  The old 0.15 was sized for 1-decimal emit and
+#     on short pairs it dwarfed the cap itself (a 5 m edge could legally
+#     step 0.15 m + cap ~ 4.5 % -- user-visible steep edges at 0 reported
+#     violations, 2026-07-03).
 GRADE_VISIBILITY_BUFFER_M = 1.0
-ELEV_ROUNDING_NOISE_M = 0.15
+ELEV_ROUNDING_NOISE_M = 0.03
 
 # ── ROUTE-FIELD MODEL (#3, user-approved s73-p3, built s75; see
 # docs/route_field_model.md) ─────────────────────────────────────────────

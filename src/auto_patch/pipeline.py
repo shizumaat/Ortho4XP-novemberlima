@@ -3756,7 +3756,13 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # their real work in the post-geometry block below (after
         # split/absorb/reclassify), on the settled junction set — the
         # same place the 2-solve order ran them effectively.
-        _enforce_runway_1to1_sharing(layout)
+        # VEER FIX 2026-07-03 (user report "spines veer to a runway corner
+        # at the very end"): the pass now SPARES spine cut/contact nodes
+        # (ring vertices ON a taxi centerline) — blanket retirement under
+        # the slice was measured WORSE (SPLP junction↔runway seam needs the
+        # corner sharing: 4 new >0.5 m steps without it).  Debug gate only.
+        if os.environ.get("O4_RWY_1TO1", "1") == "1":
+            _enforce_runway_1to1_sharing(layout)
         _covp(layout, "post-rwy-1to1")
         # Rule 1 v6 widening (user 2026-05-02): runs ONLY here,
         # post-elevation, after the runway is segmented.  Inserts
@@ -3764,7 +3770,10 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # matching altitudes.  Pre-elevation widening was disabled
         # because the cascade with Rule 4 + segmentation re-run
         # over-grew junctions past the 4-node cap.
-        widen_junctions_to_runway_corners(layout)
+        # (measured innocent in the veer investigation — it only ADDS
+        # adjacent runway corners next to shared vertices; debug gate kept)
+        if os.environ.get("O4_WIDEN_RWY_CORNERS", "1") == "1":
+            widen_junctions_to_runway_corners(layout)
         _covp(layout, "post-widen-to-rwy-corners")
         # Stitch pavement to flat runway shapes (user 2026-05-09):
         # for blast pads / flat-interior runway segments, insert a

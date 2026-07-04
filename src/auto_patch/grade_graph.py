@@ -478,24 +478,35 @@ def ds_decompose(pa: tuple[float, float], pb: tuple[float, float],
     """Decompose the separation of two points into ``(Δs∥, Δs⊥)`` w.r.t. a route
     (a :class:`RouteChain` or :class:`Centerline`):
 
-    * ``Δs∥`` = the along-route spine ARC between the two projections
-      (``|arc_a − arc_b|``) — it follows the route's CURVE, so a climbing turn
-      earns its full longitudinal budget, not just its chord;
+    * ``Δs∥`` = the CHORD between the two projection foot points — the pair's
+      along-route component measured on the SURFACE;
     * ``Δs⊥`` = the residual transverse offset, ``√(max(0, sep² − long_chord²))``
-      where ``sep`` is the straight pair distance and ``long_chord`` the chord
-      between the two foot points.
+      — so ``Δs∥² + Δs⊥² = sep²`` exactly: the decomposition is a rotation of
+      the direct pair separation, never an inflation.
+
+    ⚠ Δs∥ was originally the along-route ARC (``|arc_a − arc_b|``, "a climbing
+    turn earns its full longitudinal budget").  MEASURED WRONG (user JOSM/sim
+    review 2026-07-03): near curves two physically-CLOSE points project far
+    apart along the route, so the arc form granted budgets far beyond any
+    surface cap — 7,040 SPJC pairs steeper than 1.5 % were "legal" (worst
+    12.5 % over 5.2 m ruled legal at a nominal 1.5 % cap): visible cliffs
+    perpendicular to the spine and >1 % terminal-frontage ramps at ZERO
+    reported violations.  The pavement between two nearby points is
+    continuous — the surface gradient between them is what the standards
+    regulate, so the budget must be built from the direct separation, only
+    ROTATED into (∥, ⊥) so ``cL``/``cT`` anisotropy still applies.
 
     THE single decomposition primitive — the anisotropic allowance is then
     ``Allowance.at(Δs∥, Δs⊥) = cL·Δs∥ + cT·Δs⊥`` (``grade_law``); the solver and
     validator both call it, so the built and checked surfaces use identical math.
     For a STRAIGHT route this returns ``(sep, 0)`` (the isotropic ``cap·dist``
     case), so straight taxiways/aprons are unaffected."""
-    arc_a, _da, qa = _project(route, pa[0], pa[1])
-    arc_b, _db, qb = _project(route, pb[0], pb[1])
-    ds_par = abs(arc_a - arc_b)
+    _arc_a, _da, qa = _project(route, pa[0], pa[1])
+    _arc_b, _db, qb = _project(route, pb[0], pb[1])
     sep = math.hypot(pa[0] - pb[0], pa[1] - pb[1])
     long_chord = math.hypot(qa[0] - qb[0], qa[1] - qb[1])
-    ds_perp = math.sqrt(max(0.0, sep * sep - long_chord * long_chord))
+    ds_par = min(long_chord, sep)
+    ds_perp = math.sqrt(max(0.0, sep * sep - ds_par * ds_par))
     return ds_par, ds_perp
 
 
@@ -522,11 +533,12 @@ def _spine_membership(shape: GradeShape, ctx: GradeContext
     return out
 
 
-# A chord endpoint within this distance of a centerline counts as ON the
-# spine for the crossing skip (see _crosses).  Big enough to absorb the
-# solver-frame vs emitted-lat/lon rounding (~5 mm at 7 decimals), far below
-# any real vertex-to-spine offset.
-_ENDPOINT_ON_SPINE_TOL_M = 0.05
+# An intersection point within this distance of a chord endpoint is
+# CONTACT, not a crossing (see _crosses): far enough from the mm-scale
+# solver-frame vs emitted-lat/lon differences that both readers give the
+# same verdict, small enough that a genuine crossing a metre into the
+# chord still skips it.
+_CROSS_ENDPOINT_CLEARANCE_M = 0.5
 
 
 def _spine_crossing_predicate(shape: GradeShape, ctx: GradeContext,
@@ -594,39 +606,63 @@ def _spine_crossing_predicate(shape: GradeShape, ctx: GradeContext,
             ch = LineString(((xa, ya), (xb, yb)))
         except Exception:
             return False
-        # ENDPOINT ON THE SPINE ⇒ treat as crossing (skip the chord).  A
-        # vertex sitting on a centerline (a spine cut/junction node on the
-        # ring) grades VIA the spine — the same physics as a crossing — and
-        # for such chords the ``crosses`` parity below is knife-edge: the
-        # readers' mm-different frames flip it (SPJC's last residual pair:
-        # a 122 m pad chord starting 4 mm from three axes read True in the
-        # solver frame, False in the validator frame).  A DISTANCE test is
-        # stable at mm input noise.
-        try:
-            from shapely.geometry import Point as _Pt
-            for (px, py) in ((xa, ya), (xb, yb)):
-                pt = _Pt(px, py)
-                if tree is not None:
-                    for k in tree.query(pt.buffer(_ENDPOINT_ON_SPINE_TOL_M)):
-                        if geoms[int(k)].distance(pt) \
-                                <= _ENDPOINT_ON_SPINE_TOL_M:
-                            return True
-                else:
-                    for g in geoms:
-                        if g.distance(pt) <= _ENDPOINT_ON_SPINE_TOL_M:
-                            return True
-        except Exception:                   # pragma: no cover
-            pass
+        # INTERIOR-CLEARANCE crossing (2026-07-03, replaces both the bare
+        # ``crosses`` parity AND the short-lived endpoint-on-spine skip):
+        # the chord crosses a spine iff SOME intersection point lies at
+        # least ``_CROSS_ENDPOINT_CLEARANCE_M`` from BOTH chord endpoints.
+        #   * endpoint CONTACT is not a crossing — a chord touching the
+        #     spine at its own endpoint (a spine cut/junction node on the
+        #     ring) stays IN the law, so side-to-spine and pad-frontage
+        #     differentials remain regulated (the blanket endpoint skip
+        #     let faces tilt steeply perpendicular to the spine and waived
+        #     terminal-frontage chords — user-visible violations at 0
+        #     reported).  The verdict is DISTANCE-thresholded, so the two
+        #     readers' mm-different frames agree (bare ``crosses`` flipped
+        #     on epsilon endpoint contact — the SPJC 122 m pad-chord class).
+        #   * ANY hit point counts, including one AT a centerline endpoint
+        #     — split-agnostic (``crosses`` needed an interior hit on the
+        #     line side too, so a chord passing exactly through a sidecar
+        #     split node was invisible to one reader).
+        def _hit_points(inter):
+            stack = [inter]
+            while stack:
+                q = stack.pop()
+                if q.is_empty:
+                    continue
+                gt = q.geom_type
+                if gt == "Point":
+                    yield (q.x, q.y)
+                elif gt in ("LineString", "LinearRing"):
+                    # collinear overlap: its midpoint stands in for the run
+                    m = q.interpolate(0.5, normalized=True)
+                    yield (m.x, m.y)
+                elif hasattr(q, "geoms"):
+                    stack.extend(q.geoms)
+
+        def _crosses_one(g):
+            if not ch.intersects(g):
+                return False
+            try:
+                inter = ch.intersection(g)
+            except Exception:
+                return False
+            for (px, py) in _hit_points(inter):
+                da = math.hypot(px - xa, py - ya)
+                db = math.hypot(px - xb, py - yb)
+                if min(da, db) > _CROSS_ENDPOINT_CLEARANCE_M:
+                    return True
+            return False
+
         if tree is not None:
             try:
                 for k in tree.query(ch):
-                    if ch.crosses(geoms[int(k)]):
+                    if _crosses_one(geoms[int(k)]):
                         return True
                 return False
             except Exception:               # pragma: no cover
                 pass
         for g in geoms:
-            if ch.crosses(g):
+            if _crosses_one(g):
                 return True
         return False
 
@@ -781,11 +817,13 @@ def _bake_edge(allow, role, pa, pb, shared, ctx, vr_i, vr_j):
     """Replace a live ``Allowance`` with its route-decomposed BAKED budget (when
     the pair has a route, §3c); otherwise return it unchanged (isotropic).
 
-    The budget is the anisotropic ``cL·Δs∥ + cT·Δs⊥`` against the pair's route —
-    the correct max |Δz| on a surface that grades ``cL`` along the route and ``cT``
-    across it (for a straight route this is the L1 norm ``cL·(along+across)``,
-    which the legacy Euclidean ``cap·dist`` UNDER-budgets; for a curve Δs∥ is the
-    arc, crediting the climbing turn)."""
+    The budget is the anisotropic ``√((cL·Δs∥)² + (cT·Δs⊥)²)`` against the
+    pair's route — the max |Δz| in an oblique direction on a surface with
+    principal gradient limits ``cL`` along the route and ``cT`` across it.
+    (Two former inflations, both measured wrong 2026-07-03: Δs∥ used to be
+    the along-route ARC — near curves physically-close pairs earned budgets
+    far beyond any surface cap — and the L1 sum ``cL·Δs∥ + cT·Δs⊥``
+    over-allowed diagonals by up to √2.)"""
     route = _edge_route(role, shared, ctx, vr_i[0], vr_j[0], vr_i[1], vr_j[1])
     if route is None:
         return allow
@@ -796,7 +834,8 @@ def _bake_edge(allow, role, pa, pb, shared, ctx, vr_i, vr_j):
     # service 4 %, apron-blend gradients) stays isotropic cT == cL.
     cT = (TAXI_MAX_TRANSVERSE_NARROW
           if abs(cL - TAXI_MAX_GRADE_NARROW) < 1e-9 else cL)
-    return GL.Allowance.baked(cL, cT, cL * dp + cT * dt)
+    return GL.Allowance.baked(
+        cL, cT, math.hypot(cL * dp, cT * dt))
 
 
 # ── junction mesh edges (O4_JUNCTION_MESH_CONSTRAINTS) ───────────────────────

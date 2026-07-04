@@ -39,7 +39,8 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from .config import (
-    APRON_MAX_GRADE, BUILDING_FULL_FRONTAGE, BUILDING_FULL_FRONTAGE_AREA_M2,
+    APRON_MAX_GRADE, BUILDING_FRONTAGE_MAX_GRADE, BUILDING_FULL_FRONTAGE,
+    BUILDING_FULL_FRONTAGE_AREA_M2,
     BUILDING_REACH_CORRIDOR_M, SERVICE_ROAD_MAX_GRADE, TAXI_MAX_GRADE)
 
 # ── Law constants (the adjustable knobs of the law) ──────────────────────────
@@ -156,7 +157,14 @@ class Allowance:
     def at(self, ds_parallel: float, ds_perp: float = 0.0) -> float:
         if self.budget is not None:
             return self.budget
-        return self.cL * ds_parallel + self.cT * ds_perp
+        # L2 (ellipse) composition: a surface with principal gradient limits
+        # (cL, cT) allows |Δz| = √((cL·Δs∥)² + (cT·Δs⊥)²) in an oblique
+        # direction.  The old L1 sum over-allowed diagonals by up to √2 —
+        # measured: 4 % road-carve pairs read LEGAL at 5.6 % (user-visible
+        # steep edges at zero reported violations, 2026-07-03).
+        a = self.cL * ds_parallel
+        b = self.cT * ds_perp
+        return (a * a + b * b) ** 0.5
 
     @property
     def is_flat(self) -> bool:
@@ -260,6 +268,17 @@ def classify_pair(p: PairContext) -> Optional[Allowance]:
     # — otherwise the shape's body cap (apron 1%, junction the taxi cap, …).
     else:
         cap = p.body_cap
+
+    # BUILDINGS ARE THE HEAVIEST CONSTRAINT (user 2026-07-02/03): a pair
+    # touching a building pad is the frontage 1 % rule regardless of the
+    # HOST face's role.  The blend / road-carve relaxations above already
+    # exclude building pairs, but a frontage chord inside a
+    # ``service_junction`` face (service roads hug terminals) never took
+    # those branches — it inherited the host's 4 % BODY cap and legalised
+    # the >1 % terminal-side ramps the user sees in the sim (SPJC: 15
+    # frontage pairs up to 3.8 % read legal at "cap 4.0%").
+    if (p.a_building or p.b_building) and cap > BUILDING_FRONTAGE_MAX_GRADE:
+        cap = BUILDING_FRONTAGE_MAX_GRADE
 
     # RELAXATIONS — a feature CARVED INTO the host that legitimately grades
     # steeper than the host body.  Applied by BOTH readers (the solver builds to

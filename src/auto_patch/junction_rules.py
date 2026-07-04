@@ -1682,6 +1682,43 @@ def _enforce_runway_1to1_sharing(layout: PavementLayout) -> None:
     # (collision = unintended dedupe).
     shrink_collision_tol = SHARED_VERTEX_TOL_M * 2.0
 
+    # SPINE-CONTACT GUARD (2026-07-03 veer fix): a ring vertex lying ON a
+    # taxi centerline is a spine cut node — under the global slice the
+    # vertex at the centerline×runway-edge crossing IS the spine's runway
+    # contact, and replacing it with segment corners dragged nearly every
+    # runway connection sideways to a corner (user report; measured: only
+    # 2/18 SPJC crossings kept their contact node with the old behaviour,
+    # 12/18 with the guard — while SPLP's junction↔runway seam continuity,
+    # which NEEDS this pass, stays intact).  Same mechanism as the
+    # rect-corner spare: a guarded vertex simply never joins a snap run.
+    _spine_lines = []
+    for _tcl in (getattr(layout, "apt_taxi_centerlines", []) or []):
+        if getattr(_tcl, "is_service", False):
+            continue
+        _ln = getattr(_tcl, "line", None)
+        if _ln is not None and not getattr(_ln, "is_empty", True):
+            _spine_lines.append(_ln)
+    _spine_tree = None
+    if _spine_lines:
+        try:
+            from shapely.strtree import STRtree as _STRtree
+            _spine_tree = _STRtree(_spine_lines)
+        except _GEOM_EXC:
+            _spine_tree = None
+    _SPINE_NODE_TOL_M = 0.5
+
+    def _on_spine(vx, vy):
+        if _spine_tree is None:
+            return False
+        try:
+            p = Point(vx, vy)
+            for k in _spine_tree.query(p.buffer(_SPINE_NODE_TOL_M)):
+                if _spine_lines[int(k)].distance(p) <= _SPINE_NODE_TOL_M:
+                    return True
+        except _GEOM_EXC:
+            return False
+        return False
+
     # Global "claimed runway corners" set (Rule 1 v5, user 2026-05-02):
     # accumulates runway corner positions that previously-processed
     # junctions have snapped to.  Used by the cross-junction shrink
@@ -1765,6 +1802,8 @@ def _enforce_runway_1to1_sharing(layout: PavementLayout) -> None:
             bk = (round(vx / bucket_size), round(vy / bucket_size))
             if bk in rect_corner_buckets:
                 continue
+            if _on_spine(vx, vy):
+                continue        # spine cut/contact node — never dragged
             best_d = adjacency_tol
             best_endpoints = None
             for ax, ay, bx, by, c1, c2 in rwy_segs:

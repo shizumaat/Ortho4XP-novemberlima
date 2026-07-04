@@ -80,7 +80,7 @@ except Exception:
     # validator still runs if the package import fails.
     SHARED_VERTEX_TOL_M = 0.5
     _GRADE_VISIBILITY_BUFFER_M = 1.0
-    ELEV_ROUNDING_NOISE_M = 0.15
+    ELEV_ROUNDING_NOISE_M = 0.03
     ROUTE_FIELD_MODEL = False
     ROUTE_FIELD_LOCAL_WINDOW_M = 80.0
     ROAD_FRONTAGE_TOL_M = 3.0
