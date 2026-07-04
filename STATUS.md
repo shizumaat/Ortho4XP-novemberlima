@@ -1,3 +1,34 @@
+# STATUS — SESSION 20260704 (part 5): P4 CLOSED (`468a7c6`) — route-END
+# mouth edges kept + flush groundside merge
+
+> **P4 CLOSED (user directive: teach the separation to keep the shared
+> edge wherever the abutting pavement carries a truck-route END)** —
+> two mechanisms, both in groundside.py:
+> 1. `_separate_groundside_from_airside`: apron/junction pavement
+>    carrying a truck-route END (≤1 m) joins the clip UNBUFFERED inside
+>    a 15 m square mouth window around the end (clearance buffer
+>    subtracted there; overlap still trimmed).  Gate
+>    O4_GROUNDSIDE_ROUTE_END_EDGE default ON.  Fixed a sibling instance
+>    outright: 165 m² demoted connector exactly 1.00 m
+>    (= GROUNDSIDE_CLEARANCE_M) from its 6,776 m² lot — the source of
+>    CYXY's worst violations (service roads spanning a 9 m cliff, 740 %).
+> 2. THE P4 RESIDUAL WAS ONE LAYER DEEPER: connector #76 and the
+>    49.5k m² lot were already FLUSH along ~13 m, but
+>    `_merge_touching_groundside` measured shared boundary by EXACT
+>    ring∩ring length ≈ 0 on mm-offset runs → merge refused →
+>    independent DEM-follow/shift left coincident nodes 2.6 m apart
+>    (the status-line "2.6 m apart" was ELEVATION).  Now: shared
+>    boundary = run of one ring within touch_tol of the other, and
+>    group members SNAP onto the accumulated union pre-union so the
+>    hairline dissolves.
+> CYXY law-true A/B: within-shape 414→103 (rest = pre-existing
+> sub-metre hairline tail), cross-shape 5→0, steps 10→0, mid-edge
+> 35→0, coincident-node groundside mismatches 4→0, groundside pieces
+> 15→11 (connector+lot complexes = single surfaces).  Suite 21F/325P
+> failure list IDENTICAL to baseline.
+
+---
+
 # STATUS — SESSION 20260704 (part 4): CYXY dropped intersections + CYUL
 # flipped wall FIXED (`602264b`)
 
