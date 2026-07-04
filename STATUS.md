@@ -1,3 +1,47 @@
+# STATUS — SESSION 20260704 (part 6): CYXY findings 1-3 CLOSED
+# (`cc5a4ad`) — lots at DEM, corridors as roads, final projection ON
+
+> **User findings**: (1) lot #35 at apron level + road #40 no rise;
+> (2) taxiway G 3 % allowance suspect; (3) #206 groundside but rides a
+> truck route; (4) then drive CYXY within-shape to zero.
+> **CYXY law-true 414 → 97** (residual = sub-1 % hairline: 72 pairs
+> <0.5 % excess, worst 6.07 % on a 0.10 m rounding chord), steps/cross/
+> mid-edge/self-overlap 0.  SPJC 72 → 67 (stash-A/B: the 72+15-step
+> baseline is PRE-EXISTING at part-5 HEAD, the "53" note was stale).
+> (1) **MOUTH-DECAY relevel**: the reach's uniform shift sank the 12 k
+> lot 3.8 m under terrain (53 m route × 4 % can't span the rise).  Now
+> each node takes the mouth's delta decayed at cap/metre from the
+> nearest mouth — mouth meets road exactly, interior at DEM (+0.00).
+> (2) **G is law-true**: code-A segments earn 3.0 %; the ceiling comes
+> from the code-D feeder (1.5 % per ICAO) + runway anchor 694.3 →
+> ~705.2 vs DEM 711.9.  Verified by Dijkstra over the dumped spine_adj
+> (O4_DUMP_SOLVE_STATE now includes spine_adj + runway_anchor).
+> Buildings 5/7 seat off the same band — correct.
+> (3) **reclassify_groundside_route_corridors**: OSM groundside riding
+> a truck route ≥30 m at ≥70 % corridor cover → service_road pre-solve
+> (route N's 835 m corridor was rigid-shifted −9 m; now grades axially
+> and REACHES DEM).  Converted pieces trim against existing pavement;
+> new last-word `_deconflict_service_overlaps` (before the final
+> T-weld) clips the canonical-weld lens class (0.38 m²) with
+> projection-inserts (no residual T-junction).
+> **Lockstep fixes en route (one field, one writer)**: solve-time chord
+> limit on re-levelled lots BEFORE welds read them; welds = the ONLY
+> reach truth-pins (RAISE writes seeds, hard-pinning froze arm nodes
+> 1.3 m under welded mouths → 61 % chords); pavement-node weld (mouth
+> vertex often lives on the APRON arm — svc-ring weld missed it), keys
+> persisted for the post-solve limiter to re-adopt; post-solve
+> separations PRESERVE the altitude field of clipped pieces (raw-DEM
+> resets detached welded roads by 5 m); groundside rounding 0.1→0.01 m
+> (the V15 stairs class); **final_grade_projection DEFAULT ON** (the
+> "no change" verdict predated the exact-axes sidecar; closes the
+> post-solve mutation classes, CYXY 299→97, SPJC −5).
+> Suite 21F/325P identical list.  NEXT (task 4 continues): the CYXY
+> sub-1 % tail (95 pairs — service DEM-follow noise + rounding on
+> sub-metre chords), the SPJC 67 + 15 pre-existing steps
+> (building16↔building30 1.95 m @0.6 m), HECA.
+
+---
+
 # STATUS — SESSION 20260704 (part 5): P4 CLOSED (`468a7c6`) — route-END
 # mouth edges kept + flush groundside merge
 
