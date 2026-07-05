@@ -21,9 +21,16 @@ soft-airside pairs ≤60 m is EMPTY.
 from __future__ import annotations
 
 import math
+import os
 import sys
 import tempfile
 from pathlib import Path
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
+for _p in (os.path.join(_ROOT, "src"), _ROOT, os.path.join(_ROOT, "tests")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 SOFT_ROLES = {"apron", "junction"}
 
@@ -66,6 +73,7 @@ def _set_b(layout, osm_path):
     the grade test does (taxi_axes from the build, seam nids from the OSM)."""
     import check_grade as CG
     from auto_patch.verification import taxi_axes_ll as _taxi_axes_ll
+    from auto_patch.verification import taxi_routes_ll as _taxi_routes_ll
     nodes, ways = CG._parse_osm(Path(osm_path))
     ll_to_m = CG._ll_to_m_factory(nodes)
     seam = CG._seam_nids(nodes)
@@ -73,13 +81,17 @@ def _set_b(layout, osm_path):
     taxi_axes = None
     if axes_ll:
         taxi_axes = []
-        for latlon_pts, cL, cT in axes_ll:
+        # 4th element = the builder's route ordinal into taxi_routes_ll —
+        # kept so check_grade binds each axis to its route BY IDENTITY
+        # (the nearest-route fallback is retired).
+        for latlon_pts, cL, cT, route_ordinal in axes_ll:
             poly = [ll_to_m(lat, lon) for (lat, lon) in latlon_pts]
             if len(poly) >= 2:
-                taxi_axes.append((poly, cL, cT))
+                taxi_axes.append((poly, cL, cT, route_ordinal))
     out = {}
     for c in CG.iter_shape_grade_constraints(
-            ways, nodes, ll_to_m, 0.015, seam, taxi_axes):
+            ways, nodes, ll_to_m, 0.015, seam, taxi_axes,
+            _taxi_routes_ll(layout)):
         role = c.way.tags.get("role")
         if role not in SOFT_ROLES:
             continue
