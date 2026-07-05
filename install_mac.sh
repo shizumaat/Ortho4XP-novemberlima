@@ -20,7 +20,11 @@ echo " "
 echo "Setting up Ortho4XP...."
 echo " "
 
-# Install software dependencies from brew
+# Install software dependencies from brew.  Unversioned 'python' floats
+# to Homebrew's newest (3.13+) — recommended for ~5-10% faster builds;
+# any Python >= 3.11 works (numpy 2.4 sets the floor), never required
+# newer (user 2026-07-05: newer Python = a performance gain, not a
+# requirement).
 brew install python python-tk spatialindex p7zip proj gdal
 
 # Create a Python virtual environment

@@ -3,6 +3,7 @@ echo Setting up Ortho4XP...
 echo:
 
 echo Setting up a Python virtual environment
+REM Any Python 3.11+ works; 3.13+ recommended (~5-10%% faster builds).
 python -m venv venv
 echo:
 

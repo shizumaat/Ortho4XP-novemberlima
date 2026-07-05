@@ -35,6 +35,11 @@ X-Plane.**
 ## First setup
 - The project lives at `/Users/noah/Ortho4XP-novemberlima`.
 - Use the bundled virtualenv: **`venv/bin/python`** (there's no system `python`).
+- Python **3.11+ supported, 3.13+ recommended** (~5-10% faster builds; verified
+  2026-07-05 — same outputs, all dependency wheels present).  Newer Python is a
+  performance gain, never a requirement.
+- Inner-loop dev: `tools/fast_suite.sh` runs the suite on the cheap airports
+  only (~80s vs ~3.5min) — the FULL suite remains the gate before committing.
 - `venv/bin/pip` is broken — if you need to install, use `venv/bin/python -m pip`.
 - Dependencies are in `requirements.txt` (the platform install scripts
   `install_mac.sh` / `install_windows.bat` both install from it); shapely is the
