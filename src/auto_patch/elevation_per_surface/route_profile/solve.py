@@ -422,9 +422,21 @@ def solve_route_profile(layout, icao: str,
             # plateau" was the first-edge-wins dedup enforcing conflicting
             # duplicate budgets).  Cap with headroom; the loop exits early
             # at tol.
+            _scoped_gate = (_os.environ.get(
+                "O4_SCOPED_FINAL_PROJECTION", "1") == "1")
+            # Capture the BROKEN quarantine (genuine anchor contradictions,
+            # full-graph detection) for the scoped final projection — its
+            # sparser graph can miss the same contradictions and grind POCS
+            # on the infeasible pockets instead (measured: CYXY 66 k → 11.5 M
+            # worklist visits).  Keys, not indices: the projection rebuilds
+            # its own node list.
+            _solve_broken_idx: set = set()
             rem, bh = feasibility_project(elev, joint, yield_hard,
                                           force_scalar=True, max_iters=2400,
-                                          flat_groups=pad_groups or None)
+                                          flat_groups=pad_groups or None,
+                                          broken_out=(_solve_broken_idx
+                                                      if _scoped_gate
+                                                      else None))
             # EDGE FAIRING (user 2026-07-04, CYXY taxiway E): the spine
             # fairing law covers spine CHAINS only — a corridor's ring
             # EDGE still tracks noise in legal ±cap wiggles (E's edge
@@ -432,6 +444,13 @@ def solve_route_profile(layout, icao: str,
             # Apply the same second-difference POCS to STRAIGHT boundary
             # runs of airside rings (corners are real grade breaks —
             # skipped by the bend test; anchors never move; band-clamped).
+            # SCOPED FINAL PROJECTION (user 2026-07-05): the edge fairing is
+            # the ONE pass between the yield projection (which enforced every
+            # pair) and the writeback that moves nodes WITHOUT re-enforcing
+            # their pairs — record which nodes it moved so the scoped
+            # projection treats their shapes as changed (the "unchanged ⇒
+            # already enforced" proof does not cover fairing-perturbed nodes).
+            _pre_fairing_elev = list(elev) if _scoped_gate else None
             if _os.environ.get("O4_EDGE_FAIRING", "1") == "1":
                 from auto_patch.config import TAXIWAY_MAX_GRADE_CHANGE_PER_M
                 _n_ekink = _fair_ring_edges(
@@ -439,8 +458,27 @@ def solve_route_profile(layout, icao: str,
                     TAXIWAY_MAX_GRADE_CHANGE_PER_M)
                 if _os.environ.get("O4_STEP_DEBUG") == "1":
                     print(f"    [edge-fairing] residual kinks={_n_ekink}")
+            _fairing_moved_keys = None
+            if _pre_fairing_elev is not None:
+                _fairing_moved_keys = {
+                    key for key, i in bucket_to_idx.items()
+                    if elev[i] != _pre_fairing_elev[i]}
         _psub(0.97, "Solving elevations — writing back")
         n_terms, n_rects, n_juncs = _writeback(layout, elev, bucket_to_idx)
+        # SCOPED FINAL PROJECTION snapshot (user 2026-07-05): capture the
+        # post-writeback state (per-canonical-node values as the projection
+        # will re-read them + per-shape ring identities) so
+        # ``final_grade_projection`` can prove which shapes nothing touched
+        # and skip regenerating their law pairs.  Gate off → no snapshot →
+        # the projection takes its full-rebuild path (byte-identical).
+        # ``_fairing_moved_keys``/``_scoped_gate`` are bound iff the
+        # global-slice branch above ran — the same condition
+        # ``final_grade_projection`` requires, re-checked here.
+        if ((CURVE_NATIVE_SPINE or ROUTE_ARC_SPINE) and _scoped_gate):
+            _solve_broken_keys = {key for key, i in bucket_to_idx.items()
+                                  if i in _solve_broken_idx}
+            _capture_projection_snapshot(layout, _fairing_moved_keys,
+                                         _solve_broken_keys)
         if _os.environ.get("O4_STEP_DEBUG") == "1":
             print(f"  [unified] {icao}: {len(frozen)} spine node(s) solved, "
                   f"{n_free} body node(s); feasibility-project → {rem} edge(s) "
@@ -456,6 +494,305 @@ def solve_route_profile(layout, icao: str,
         _report(icao, n_free, n_free, _time.time() - t0,
                 n_terms, n_rects, n_juncs)
         return
+
+
+# ── SCOPED FINAL PROJECTION (user 2026-07-05, O4_SCOPED_FINAL_PROJECTION) ────
+# Shapely-domain exceptions only (project rule: never catch built-ins here).
+def _snapshot_geom_exceptions():
+    from shapely.errors import GEOSException, TopologicalError
+    return (ValueError, GEOSException, TopologicalError)
+
+
+def _canonical_ring_key(coords):
+    """Rotation- and reflection-invariant identity of a ring's mm-rounded
+    geometry — the ``geom_guard._canonical_ring`` comparison (same 3-decimal
+    rounding, same invariances) in O(n log n) instead of that helper's
+    O(n²) minimal-rotation scan: a simple closed ring IS its undirected
+    edge multiset over its vertex cycle, so ``(vertex_count, sorted
+    undirected edges)`` changes exactly when a vertex is moved / inserted /
+    dropped and never on a ring rotation or direction flip."""
+    pts = [(round(x, 3), round(y, 3)) for (x, y) in coords]
+    if pts and pts[0] == pts[-1]:
+        pts = pts[:-1]
+    count = len(pts)
+    if count == 0:
+        return (0, ())
+    edges = tuple(sorted(
+        (pts[k], pts[(k + 1) % count])
+        if pts[k] <= pts[(k + 1) % count]
+        else (pts[(k + 1) % count], pts[k])
+        for k in range(count)))
+    return (count, edges)
+
+
+# Roles whose ring geometry feeds the final projection's law graph or the
+# grade context's classification inputs (building keys, rect-cap inheritance,
+# road-carve / route-contact zones).  ``service_road`` is NOT a pavement role
+# but its geometry builds the road-carve zone, so it must be snapshotted too.
+def _snapshot_roles():
+    from auto_patch.elevation_per_surface.solver_primitives import (
+        PAVEMENT_ROLES)
+    return set(PAVEMENT_ROLES) | {"service_road"}
+
+
+# Roles whose geometry feeds a BUFFERED point-membership zone in the grade
+# context (``build_context``): road-carve zone (service_road/service_junction,
+# buffer ROAD_FRONTAGE_TOL_M) and route-contact zone (taxi-route pavements,
+# buffer _ROUTE_CONTACT_TOL_M).  A change to one of these rings can flip the
+# zone membership — and therefore the law budget — of an apron/junction node
+# that sits NEAR the changed geometry without sharing a vertex with it.
+_ZONE_ROLES = frozenset({
+    "service_road", "service_junction",
+    "junction", "primary_parallel", "secondary_parallel",
+    "stub", "cross_connector",
+})
+
+
+def _capture_projection_snapshot(layout, fairing_moved_keys=None,
+                                 broken_keys=None):
+    """Record the post-writeback state ``final_grade_projection`` scopes
+    against (user 2026-07-05):
+
+    * ``values`` — per-canonical-node elevation EXACTLY as the projection
+      will re-read it (same ``_build_node_list`` + ``_seed_elevations`` pair,
+      no dem — identical readback semantics), keyed by canonical point key.
+    * ``rings`` — multiset of ``(role, canonical_ring_key)`` for every shape
+      whose geometry feeds the projection graph or the law context (see
+      ``_snapshot_roles``); ring identity via ``_canonical_ring_key``
+      (mm-rounded, rotation/reflection-invariant — the geom_guard comparison
+      in O(n log n)).
+    * ``fairing_moved`` — canonical keys the solve's post-projection edge
+      fairing moved (their pairs were NOT re-enforced afterwards, so the
+      "unchanged ⇒ already enforced" proof excludes them).
+    * ``broken`` — canonical keys of the solve's BROKEN quarantine (genuine
+      anchor contradictions, blended + immovable — detected on the FULL
+      graph).  The scoped projection re-quarantines the unchanged ones so
+      its sparser envelope cannot un-quarantine an infeasible pocket.
+
+    ``_seed_elevations`` republishes ``layout._seam_pin_idx``/``_seam_pin_ll``
+    in ITS node-index space; the solve's published sets are restored so
+    downstream passes see exactly the state they see with the gate off."""
+    from auto_patch.elevation_per_surface.solver_primitives import (
+        _build_node_list, _seed_elevations)
+
+    geom_exc = _snapshot_geom_exceptions()
+    saved_pins = [(attr, getattr(layout, attr, None))
+                  for attr in ("_seam_pin_idx", "_seam_pin_ll")]
+    values: dict = {}
+    try:
+        nodes, bucket_to_idx = _build_node_list(layout)
+        if nodes:
+            elev, _is_hard, _have = _seed_elevations(layout, nodes,
+                                                     bucket_to_idx)
+            for key, idx in bucket_to_idx.items():
+                values[key] = elev[idx]
+    finally:
+        for attr, saved in saved_pins:
+            if saved is not None:
+                setattr(layout, attr, saved)
+            elif hasattr(layout, attr):
+                delattr(layout, attr)
+
+    rings: dict = {}
+    roles = _snapshot_roles()
+    for s in layout.shapes:
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        if not (s.role in roles or getattr(s, "is_rect_cap", False)):
+            continue
+        if s.polygon.geom_type != "Polygon":
+            continue        # never matches at projection time → stays changed
+        try:
+            ring_key = (s.role,
+                        _canonical_ring_key(s.polygon.exterior.coords))
+        except geom_exc:
+            continue
+        rings[ring_key] = rings.get(ring_key, 0) + 1
+
+    layout._final_projection_snapshot = {  # type: ignore[attr-defined]
+        "values": values,
+        "rings": rings,
+        "fairing_moved": set(fairing_moved_keys or ()),
+        "broken": set(broken_keys or ()),
+    }
+
+
+def _scoped_projection_defer_ids(layout, nodes, bucket_to_idx, elev,
+                                 snapshot):
+    """The apron/junction shapes ``final_grade_projection`` may DEFER (pure
+    lazy stubs): proven untouched since the solve's writeback.  Returns
+    ``(defer_shape_ids, pre_broken_idx)`` — the deferrable shapes (by
+    ``id(shape)``) and the solve's broken-quarantine nodes still at their
+    blended values (to re-quarantine in the projection).
+
+    A shape is deferrable only when ALL of:
+      1. its ring geometry is unchanged (same ``(role, canonical_ring)``
+         present in the snapshot, count-aware — the geom_guard comparison);
+      2. none of its node VALUES changed (the projection's own seed vs the
+         snapshot values, bitwise — same readback path both times);
+      3. no node was moved by the solve's edge fairing (pairs not re-enforced
+         after that pass);
+      4. no law-context input touching it changed:
+           * a node shared with ANY geometry-changed/new shape (building-key
+             gains, rect-cap inheritance, shared-vertex writes) — marked via
+             the changed shapes' current rings;
+           * a node at a coordinate a VANISHED ring used to hold (building-
+             key/rect-cap LOSSES — old geometry known only mm-rounded, exact
+             coordinate match);
+           * a node inside the BUFFERED dirty region of changed zone-role
+             geometry (road-carve / route-contact membership flips reach
+             ``max(ROAD_FRONTAGE_TOL_M, _ROUTE_CONTACT_TOL_M)`` beyond the
+             changed ring, old and new).
+    Everything the solve's final joint projection enforced on identical
+    rings, values and budgets is provably still satisfied — deferring it
+    skips regeneration; any node the projection later moves expands the
+    shape's full pair set through the lazy machinery (tolerance 0)."""
+    from auto_patch.layout import ROLE_APRON, ROLE_JUNCTION
+
+    geom_exc = _snapshot_geom_exceptions()
+    cps = layout.canonical_points
+    snap_values = snapshot["values"]
+    snap_rings = snapshot["rings"]
+
+    # (2) + (3): value drift and fairing-moved nodes.  ``contaminated``
+    # collects every changed/contaminated node EXCEPT the broken quarantine
+    # (tracked separately: broken nodes contaminate deferral but only the
+    # UNcontaminated ones re-quarantine).
+    contaminated: set = set()
+    for key, i in bucket_to_idx.items():
+        previous = snap_values.get(key)
+        if previous is None or previous != elev[i]:
+            contaminated.add(i)
+    for key in snapshot.get("fairing_moved", ()):
+        i = bucket_to_idx.get(key)
+        if i is not None:
+            contaminated.add(i)
+
+    # Solve-broken quarantine: an untouched broken node keeps the solve's
+    # blend and stays immovable (``pre_broken`` — the sparser scoped
+    # envelope may not re-detect the contradiction; un-quarantined pockets
+    # grind the worklist and smear, measured CYXY 66 k → 11.5 M visits).  A
+    # touched (value-changed or geometry-contaminated) broken node re-solves
+    # normally.  Either way NOTHING touching a pocket defers — the pocket's
+    # pairs must be generated, tallied and blended exactly like the full
+    # rebuild's.
+    broken_idx: set = set()
+    for key in snapshot.get("broken", ()):
+        i = bucket_to_idx.get(key)
+        if i is not None:
+            broken_idx.add(i)
+
+    # (1): ring-identity comparison, count-aware.
+    current = []        # (shape, ring_key | None, open_coords | None)
+    ring_count: dict = {}
+    roles = _snapshot_roles()
+    for s in layout.shapes:
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        if not (s.role in roles or getattr(s, "is_rect_cap", False)):
+            continue
+        ring_key = None
+        coords = None
+        if s.polygon.geom_type == "Polygon":
+            try:
+                coords = _open4(s.polygon)
+                ring_key = (s.role,
+                            _canonical_ring_key(s.polygon.exterior.coords))
+            except geom_exc:
+                ring_key = None
+        current.append((s, ring_key, coords))
+        if ring_key is not None:
+            ring_count[ring_key] = ring_count.get(ring_key, 0) + 1
+
+    geom_changed_ids: set = set()
+    for (s, ring_key, _coords) in current:
+        if ring_key is None \
+                or snap_rings.get(ring_key, 0) < ring_count[ring_key]:
+            geom_changed_ids.add(id(s))
+
+    # Rings that VANISHED since the snapshot (mutated in place or removed).
+    old_missing = [ring_key for ring_key, old_count in snap_rings.items()
+                   if ring_count.get(ring_key, 0) < old_count]
+
+    # (4a): nodes of geometry-changed shapes contaminate.
+    for (s, _ring_key, coords) in current:
+        if id(s) not in geom_changed_ids or not coords:
+            continue
+        for (x, y) in coords:
+            i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+            if i is not None:
+                contaminated.add(i)
+
+    # (4b): exact-coordinate contamination from vanished rings (their
+    # geometry survives only as the canonical edge multiset — mm-rounded).
+    old_points: set = set()
+    for (_role, (_count, canonical_edges)) in old_missing:
+        for (point_a, point_b) in canonical_edges:
+            old_points.add(point_a)
+            old_points.add(point_b)
+    if old_points:
+        for i, (x, y) in enumerate(nodes):
+            if (round(x, 3), round(y, 3)) in old_points:
+                contaminated.add(i)
+
+    # (4c): buffered dirty region of changed zone-role geometry (old + new):
+    # every ring SEGMENT of a vanished/new zone-role ring, node membership by
+    # vectorised dwithin query.
+    zone_segments = []
+    for (role, (_count, canonical_edges)) in old_missing:
+        if role in _ZONE_ROLES:
+            zone_segments.extend(canonical_edges)
+    for (s, _ring_key, coords) in current:
+        if (id(s) in geom_changed_ids and s.role in _ZONE_ROLES
+                and coords and len(coords) >= 2):
+            closed = list(coords) + [coords[0]]
+            zone_segments.extend(zip(closed, closed[1:]))
+    if zone_segments:
+        from shapely.geometry import LineString, Point
+        from shapely.strtree import STRtree
+        from auto_patch.config import ROAD_FRONTAGE_TOL_M
+        from auto_patch.grade_graph import _ROUTE_CONTACT_TOL_M
+        zone_tol = max(ROAD_FRONTAGE_TOL_M, _ROUTE_CONTACT_TOL_M) + 0.01
+        segment_tree = STRtree(
+            [LineString(seg) for seg in zone_segments])
+        node_points = [Point(x, y) for (x, y) in nodes]
+        near_pairs = segment_tree.query(node_points, predicate="dwithin",
+                                        distance=zone_tol)
+        for node_index in near_pairs[0]:
+            contaminated.add(int(node_index))
+
+    pre_broken = broken_idx - contaminated
+    changed_idx = contaminated | broken_idx
+
+    if _os.environ.get("O4_STEP_DEBUG") == "1":
+        _n_value = sum(1 for key, i in bucket_to_idx.items()
+                       if snap_values.get(key) is None
+                       or snap_values.get(key) != elev[i])
+        _n_fair = sum(1 for key in snapshot.get("fairing_moved", ())
+                      if key in bucket_to_idx)
+        print(f"    [scoped-scope] nodes={len(nodes)} value_changed={_n_value} "
+              f"fairing_moved={_n_fair} broken={len(broken_idx)} "
+              f"geom_changed_shapes={len(geom_changed_ids)} "
+              f"vanished_rings={len(old_missing)} "
+              f"zone_segments={len(zone_segments)} "
+              f"contaminated_total={len(changed_idx)}")
+
+    # Deferrable = unchanged apron/junction with no changed node.
+    defer_ids: set = set()
+    for (s, _ring_key, coords) in current:
+        if s.role not in (ROLE_APRON, ROLE_JUNCTION):
+            continue
+        if id(s) in geom_changed_ids or not coords:
+            continue
+        touched = False
+        for (x, y) in coords:
+            i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+            if i is None or i in changed_idx:
+                touched = True
+                break
+        if not touched:
+            defer_ids.add(id(s))
+    return defer_ids, pre_broken
 
 
 def final_grade_projection(layout, icao: str = "", dem=None,
@@ -496,30 +833,75 @@ def final_grade_projection(layout, icao: str = "", dem=None,
     from .one_solve import feasibility_project
 
     t0 = _time.time()
+    _stage_t = {}
+    _stage_prev = [t0]
+
+    def _stage(name):
+        now = _time.time()
+        _stage_t[name] = _stage_t.get(name, 0.0) + (now - _stage_prev[0])
+        _stage_prev[0] = now
+
     nodes, b2i = _build_node_list(layout)
     if not nodes:
         return
     elev, base_hard, _have = _seed_elevations(layout, nodes, b2i)
     n = len(elev)
+    _stage("seed")
 
     ctx = _GG.build_context(layout, b2i)
-    # FLATNESS-CERTIFIED LAZY TIER (user 2026-07-05): here ``elev`` is the
-    # SOLVED surface (warm seed), so a certified shape stays lazy only when
-    # the whole pipeline left every one of its nodes exactly at the DEM seed
-    # (bitwise — the entry check compares against the same sampler's values);
-    # anything the solve touched expands at projection entry.  ``dem`` comes
-    # from the pipeline caller (same tile frame as the elevation solve).
+    _stage("ctx")
     runway_idx = _runway_node_set(layout, b2i)
-    _hard_for_certificate = ({i for i in range(n) if base_hard[i]}
-                             | {i for i in runway_idx if i < n})
-    shape_constraints = _build_shape_constraints(
-        layout, b2i, ctx=ctx, dem=dem, tile_lat=tile_lat, tile_lon=tile_lon,
-        hard_nodes=_hard_for_certificate)
-    G = _GG.build_unified_graph(layout, b2i, ctx=ctx)
+    # SCOPED PROJECTION (user 2026-07-05, gate ``O4_SCOPED_FINAL_PROJECTION``
+    # default ON; off = full rebuild): a shape needs re-projection only if
+    # its ring geometry changed after the solve, any of its node values
+    # changed after the solve's writeback, or a law-context input touching it
+    # changed (see ``_scoped_projection_defer_ids``).  Everything else was
+    # already projected during the solve on identical rings/values — provably
+    # nothing to do; deferred shapes become zero-cost lazy stubs that expand
+    # the moment the projection moves one of their nodes.
+    snapshot = getattr(layout, "_final_projection_snapshot", None)
+    scoped = (snapshot is not None and _os.environ.get(
+        "O4_SCOPED_FINAL_PROJECTION", "1") == "1")
+    defer_ids: set = set()
+    pre_broken: set = set()
+    if scoped:
+        try:
+            defer_ids, pre_broken = _scoped_projection_defer_ids(
+                layout, nodes, b2i, elev, snapshot)
+        except _snapshot_geom_exceptions():
+            defer_ids = set()
+            pre_broken = set()
+            scoped = False        # geometry hiccup → sound full rebuild
+    _stage("scope")
+    if scoped:
+        shape_constraints = _build_shape_constraints(
+            layout, b2i, ctx=ctx, defer_shape_ids=defer_ids)
+        for _entry in shape_constraints:
+            if _entry.get("lazy_scoped"):
+                _entry["lazy_seed"] = [elev[i] for i in _entry["lazy_nodes"]]
+        _stage("constraints")
+        G = _GG.build_unified_graph(layout, b2i, ctx=ctx,
+                                    skip_edge_shape_ids=defer_ids,
+                                    include_spine=False)
+    else:
+        # FLATNESS-CERTIFIED LAZY TIER (user 2026-07-05): here ``elev`` is the
+        # SOLVED surface (warm seed), so a certified shape stays lazy only when
+        # the whole pipeline left every one of its nodes exactly at the DEM seed
+        # (bitwise — the entry check compares against the same sampler's values);
+        # anything the solve touched expands at projection entry.  ``dem`` comes
+        # from the pipeline caller (same tile frame as the elevation solve).
+        _hard_for_certificate = ({i for i in range(n) if base_hard[i]}
+                                 | {i for i in runway_idx if i < n})
+        shape_constraints = _build_shape_constraints(
+            layout, b2i, ctx=ctx, dem=dem, tile_lat=tile_lat,
+            tile_lon=tile_lon, hard_nodes=_hard_for_certificate)
+        _stage("constraints")
+        G = _GG.build_unified_graph(layout, b2i, ctx=ctx)
     u_edges = [(a, b, cap.at(_GG._dist(G.pos.get(a), G.pos.get(b)), 0.0))
                for (a, b, cap, _sp) in G.edges
                if a in G.pos and b in G.pos]
     joint = list(shape_constraints) + [{"edges": u_edges}]
+    _stage("graph")
 
     hard = {i for i in range(n) if base_hard[i]}
     hard |= {i for i in runway_idx if i < n}
@@ -566,9 +948,30 @@ def final_grade_projection(layout, icao: str = "", dem=None,
                 pad_nodes |= g
         hard -= pad_nodes
 
+    _stage("hard")
     rem, bh = feasibility_project(elev, joint, hard, force_scalar=True,
                                   max_iters=400,
-                                  flat_groups=pad_groups or None)
+                                  flat_groups=pad_groups or None,
+                                  pre_broken=(pre_broken or None))
+    _stage("project")
+    _n_deferred = _n_expanded = 0
+    if scoped:
+        _n_deferred = sum(1 for _sc in shape_constraints
+                          if _sc.get("lazy_scoped"))
+        _n_expanded = sum(1 for _sc in shape_constraints
+                          if _sc.get("lazy_scoped")
+                          and "lazy_expand" not in _sc)
+        if _os.environ.get("O4_STEP_DEBUG") == "1":
+            for _sc in shape_constraints:
+                if not _sc.get("lazy_scoped"):
+                    continue
+                _first = _sc["nodes"][0] if _sc["nodes"] else None
+                _at = (f"({nodes[_first][0]:.0f},{nodes[_first][1]:.0f})"
+                       if _first is not None else "?")
+                print(f"    [scoped] deferred {_sc['role']} "
+                      f"ref={_sc['ref'] or '-'} area={_sc['area']:.0f} "
+                      f"at={_at} "
+                      f"{'EXPANDED' if 'lazy_expand' not in _sc else 'kept'}")
     if _os.environ.get("O4_STEP_DEBUG") == "1":
         _lazy_certified = sum(1 for _sc in shape_constraints
                               if _sc.get("lazy_certified"))
@@ -587,13 +990,25 @@ def final_grade_projection(layout, icao: str = "", dem=None,
         from auto_patch.config import TAXIWAY_MAX_GRADE_CHANGE_PER_M
         _fair_ring_edges(layout, elev, b2i, hard, None,
                          TAXIWAY_MAX_GRADE_CHANGE_PER_M)
+    _stage("fairing")
     _writeback(layout, elev, b2i)
+    _stage("writeback")
     try:
         import O4_UI_Utils as _UI
+        _scope_note = ""
+        if scoped:
+            _scope_note = (f" [scoped: {_n_deferred} deferred, "
+                           f"{_n_expanded} expanded]")
         _UI.vprint(1, f"  [final-projection] {icao}: {len(nodes)} nodes, "
                       f"{len(hard)} hard, {len(pad_groups)} pad group(s) → "
                       f"{rem} edge(s) over cap ({bh} both-hard) "
-                      f"in {_time.time() - t0:.1f}s.")
+                      f"in {_time.time() - t0:.1f}s.{_scope_note}")
+        if _os.environ.get("O4_PROJ_TIMING") == "1":
+            _UI.vprint(1, "  [final-projection-timing] " + " ".join(
+                f"{name}={_stage_t.get(name, 0.0):.1f}s"
+                for name in ("seed", "ctx", "scope", "constraints",
+                             "graph", "hard", "project", "fairing",
+                             "writeback")))
     except Exception:
         pass
 

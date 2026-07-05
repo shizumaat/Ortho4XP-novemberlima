@@ -1206,7 +1206,9 @@ def shape_constraints_cached(polygon_key, gs: GradeShape,
     return sc
 
 
-def build_unified_graph(layout, bucket_to_idx, ctx=None) -> "UnifiedGraph":
+def build_unified_graph(layout, bucket_to_idx, ctx=None, *,
+                        skip_edge_shape_ids=None,
+                        include_spine=True) -> "UnifiedGraph":
     """Assemble THE one graph on geometry node indices.
 
     This is the SINGLE graph the route-profile solver sets elevations on and the
@@ -1217,6 +1219,17 @@ def build_unified_graph(layout, bucket_to_idx, ctx=None) -> "UnifiedGraph":
     ``ctx``: optionally a prebuilt :func:`build_context` — pass the SAME one
     ``solver_primitives._build_shape_constraints`` used so the per-shape law
     memo (:func:`shape_constraints_cached`) is shared instead of recomputed.
+
+    SCOPED FINAL PROJECTION (user 2026-07-05, ``O4_SCOPED_FINAL_PROJECTION``):
+    ``skip_edge_shape_ids`` — apron/junction shapes (by ``id(s)``) whose
+    within-shape ``G.edges`` contribution is SKIPPED (their positions are
+    still registered).  Only ``final_grade_projection`` passes this, for
+    shapes it proved unchanged since the solve — their identical pair set is
+    carried by that caller's lazy entries instead, so law coverage is
+    unchanged.  ``include_spine=False`` additionally skips the global spine /
+    rect-weave / cap-weave / runway-anchor stages (``spine_adj`` and
+    ``runway_anchor`` consumers), which that caller never reads — it uses
+    ``G.edges`` only.  Defaults reproduce the full graph exactly.
     """
     from .layout import taxi_shape_code_letter
     from .junction_rules import SLOPING_RECT_ROLES
@@ -1243,6 +1256,8 @@ def build_unified_graph(layout, bucket_to_idx, ctx=None) -> "UnifiedGraph":
         for p, i in enumerate(idx):
             if i is not None:
                 G.pos[i] = ring[p]
+        if skip_edge_shape_ids is not None and id(s) in skip_edge_shape_ids:
+            continue    # scoped projection: pairs live in the caller's lazy entry
         gs = GradeShape(role=s.role, ring=list(ring), keys=keys)
         sc = shape_constraints_cached(id(s.polygon), gs, ctx)
         spine_pairs = set()
@@ -1299,27 +1314,32 @@ def build_unified_graph(layout, bucket_to_idx, ctx=None) -> "UnifiedGraph":
         _add_plane_edges(G, getattr(s, "role", "rect_cap"), ring, idxs, ctx, cap)
         cap_shapes.append(([i for i in idxs if i is not None], parent, cap))
 
-    # ── GLOBAL spine chains: per centerline, all on-line geometry nodes ordered
-    # by arc and linked consecutive (budget = cap·arc-gap).  This connects the
-    # spine ACROSS shape boundaries (junction→apron→junction) and SPANS each rect
-    # (the rect interior has no on-line node, so its two flanking junction nodes
-    # are consecutive at budget cap·rect-length) — one connected, ≤cap profile,
-    # exactly what the route graph gave but on the geometry nodes themselves.
-    _build_global_spine(G, ctx)
+    if include_spine:
+        # ── GLOBAL spine chains: per centerline, all on-line geometry nodes
+        # ordered by arc and linked consecutive (budget = cap·arc-gap).  This
+        # connects the spine ACROSS shape boundaries (junction→apron→junction)
+        # and SPANS each rect (the rect interior has no on-line node, so its
+        # two flanking junction nodes are consecutive at budget
+        # cap·rect-length) — one connected, ≤cap profile, exactly what the
+        # route graph gave but on the geometry nodes themselves.
+        _build_global_spine(G, ctx)
 
-    # ── weave each sloping RECT into the spine network as a connected sub-chain
-    # (flat ends + axial + links to the flanking on-line nodes) so the ONE spine
-    # solve produces rect-end elevations consistent with the junctions they abut.
-    _add_rects_to_spine(G, layout, bucket_to_idx)
+        # ── weave each sloping RECT into the spine network as a connected
+        # sub-chain (flat ends + axial + links to the flanking on-line nodes)
+        # so the ONE spine solve produces rect-end elevations consistent with
+        # the junctions they abut.
+        _add_rects_to_spine(G, layout, bucket_to_idx)
 
-    # ── weave each end-CAP in too: its INNER corners (shared with the parent rect)
-    # link to its OUTER corners at the cap rate, and the outer corners (junction
-    # spine nodes) ride the same profile — so a cap can't be a steep plane that
-    # conflicts with the junction it abuts.
-    _add_caps_to_spine(G, cap_shapes)
+        # ── weave each end-CAP in too: its INNER corners (shared with the
+        # parent rect) link to its OUTER corners at the cap rate, and the
+        # outer corners (junction spine nodes) ride the same profile — so a
+        # cap can't be a steep plane that conflicts with the junction it
+        # abuts.
+        _add_caps_to_spine(G, cap_shapes)
 
-    # ── runway anchors: every geometry node a taxi spine joins the runway at ──
-    _runway_anchors(layout, G, bucket_to_idx)
+        # ── runway anchors: every geometry node a taxi spine joins the runway
+        # at ──
+        _runway_anchors(layout, G, bucket_to_idx)
     return G
 
 

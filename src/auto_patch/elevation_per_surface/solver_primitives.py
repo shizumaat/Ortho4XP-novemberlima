@@ -714,7 +714,8 @@ def _certify_flat_shape(layout, shape, coords, dem, tile_lat, tile_lon,
 
 
 def _build_shape_constraints(layout, bucket_to_idx, ctx=None, dem=None,
-                             tile_lat=0, tile_lon=0, hard_nodes=None):
+                             tile_lat=0, tile_lon=0, hard_nodes=None,
+                             defer_shape_ids=None):
     """Per-shape grade constraints for the directional relief: one entry per
     soft pavement shape with ``{nodes, edges, flat}`` — its node indices, its
     OWN internal grade edges ``(i, j, cap_m)``, and whether it must stay flat
@@ -742,6 +743,18 @@ def _build_shape_constraints(layout, bucket_to_idx, ctx=None, dem=None,
     nodes moves off the seed; until then the certificate proves every body
     pair satisfied.  Shapes touching a ``hard_nodes`` member (runway / seam /
     join — they sit at profile values, not the DEM seed) are never certified.
+
+    SCOPED FINAL PROJECTION (user 2026-07-05, ``O4_SCOPED_FINAL_PROJECTION``):
+    ``defer_shape_ids`` — apron/junction shapes (by ``id(s)``) the caller has
+    PROVED unchanged since the solve's writeback (ring geometry identical +
+    every node value identical + no law-context input touching them changed —
+    see ``route_profile.solve._scoped_projection_defer_ids``).  Their full
+    pair set was already enforced by the solve on identical rings/values, so
+    the entry is a pure lazy stub: NO eager edges, ``lazy_expand`` = the same
+    full generation, movement tolerance 0 (any node the projection moves
+    voids the proof and expands the entry through the standard lazy
+    machinery).  The caller MUST fill ``lazy_seed`` with its own seed values
+    before projecting (left ``None`` here so an unfilled stub fails loudly).
     Terminals, rects and service junctions keep their eager branches (they are
     flat / cheap / all-pair-small; the O(n²) cost lives in apron/junction).
     NOTE: ``one_solve._build_adjacency`` consequently sees only the ring edges
@@ -868,7 +881,36 @@ def _build_shape_constraints(layout, bucket_to_idx, ctx=None, dem=None,
         is_rect = s.role in SLOPING_RECT_ROLES and len(coords) == 4 \
             and all(i is not None for i in idx) \
             and s.node_altitudes is None
-        if flat:
+        if (defer_shape_ids is not None and id(s) in defer_shape_ids
+                and s.role in (ROLE_APRON, ROLE_JUNCTION)):
+            # SCOPED FINAL PROJECTION deferral (see docstring): proven-
+            # unchanged shape → lazy stub with only its O(n) RING-ADJACENT
+            # pairs eager (same shape as the certificate tier: the ring pairs
+            # keep the reach envelope's paths and the worklist's edge order
+            # near the changed/unchanged interfaces close to the full
+            # rebuild's).  The thunk is the exact eager generation (memoised
+            # via grade_graph.shape_constraints_cached on the shared ctx), so
+            # an expansion enforces the identical pair set.
+            edges.extend(_grade_graph_edges(s, coords, idx, _gg_ctx,
+                                            ring_only=True))
+            deferred_node_indices = []
+            seen_deferred_nodes = set()
+            for node_index in idx:
+                if node_index is None or node_index in seen_deferred_nodes:
+                    continue
+                seen_deferred_nodes.add(node_index)
+                deferred_node_indices.append(node_index)
+            lazy_extras = {
+                "lazy_expand": (lambda _shape=s, _coords=coords, _idx=idx,
+                                _law_ctx=_gg_ctx:
+                                _grade_graph_edges(_shape, _coords, _idx,
+                                                   _law_ctx)),
+                "lazy_nodes": deferred_node_indices,
+                "lazy_seed": None,       # caller fills from ITS seed values
+                "lazy_move_tolerance": 0.0,
+                "lazy_scoped": True,
+            }
+        elif flat:
             pass                                  # handled by _project_shape
         elif is_rect:
             # Identify the two AXIS-END (flat-cross, cap 0) edges and the two

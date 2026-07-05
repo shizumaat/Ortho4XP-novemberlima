@@ -131,7 +131,7 @@ def _project_vectorized(elev, iter_edges, n, max_iters, tol):
 
 def feasibility_project(elev, shape_constraints, hard, *,
                         max_iters=4000, tol=1e-3, force_scalar=False,
-                        flat_groups=None):
+                        flat_groups=None, broken_out=None, pre_broken=None):
     """Drive EVERY grade-graph edge to ``|Δelev| ≤ budget`` by iterative
     constraint projection (user 2026-06-25: nothing may violate a grade cap).
 
@@ -160,6 +160,18 @@ def feasibility_project(elev, shape_constraints, hard, *,
     member↔outside edges re-anchor to the representative with their own budget,
     and the representative's final level is broadcast back to all members.  A
     group containing a ``hard`` node stays entirely hard (never moved).
+
+    ``broken_out`` — optional set the caller passes to receive the BROKEN
+    node indices this call quarantined (genuine anchor contradictions,
+    blended + immovable — see below).  ``pre_broken`` — node indices to
+    quarantine AT THEIR CURRENT VALUES in addition to the envelope's own
+    detections (scoped final projection, user 2026-07-05: the solve's FULL
+    graph proved these nodes sit in infeasible pockets; the scoped graph's
+    sparser envelope can miss the contradiction and the worklist then grinds
+    POCS on the infeasible subsystem to the visit cap, smearing the pocket —
+    the exact failure the broken quarantine exists to prevent).  Quarantining
+    extra nodes is always law-safe: their over-cap pairs are reported, never
+    hidden.
     """
     import heapq
     n = len(elev)
@@ -381,6 +393,21 @@ def feasibility_project(elev, shape_constraints, hard, *,
     # whole region (SPLP seam approach: 10-14 % wiggles between ring
     # neighbours).  Their over-cap edges are reported in the final tally
     # like both-hard edges — infeasibility is never hidden.
+    if pre_broken:
+        # Caller-supplied quarantine (scoped final projection): the solve's
+        # FULL graph proved these nodes sit in infeasible pockets.  Merged
+        # AFTER the envelope pass: the envelope may first clamp them into
+        # its own (sparser) [floor, ceil] exactly as the full rebuild's
+        # envelope re-blends its broken set — measured at CYXY this
+        # ordering reproduces the full rebuild's surface exactly, while
+        # quarantining before the clamp diverges (the final projection's
+        # anchor set differs from the solve's, so holding the solve's
+        # blend values is NOT what the full rebuild does).
+        for _pb in pre_broken:
+            if 0 <= _pb < n and _pb not in hard:
+                broken.add(_pb)
+    if broken_out is not None:
+        broken_out.update(broken)
     immovable = hard | broken if broken else hard
 
     # Pre-split the edges ONCE by hard-membership.  The inner loop otherwise ran
