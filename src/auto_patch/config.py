@@ -69,6 +69,7 @@ __all__ = [
     "RUNWAY_DEM_FOLLOW_BAND_M",
     "GRADE_VISIBILITY_BUFFER_M",
     "ELEV_ROUNDING_NOISE_M",
+    "EMIT_QUANTIZATION_MARGIN_M",
     "ROUTE_FIELD_MODEL",
     "ROUTE_FIELD_LOCAL_WINDOW_M",
     "SURFACE_FAIRING",
@@ -629,6 +630,26 @@ RUNWAY_DEM_FOLLOW_BAND_M = 0.0
 #     violations, 2026-07-03).
 GRADE_VISIBILITY_BUFFER_M = 1.0
 ELEV_ROUNDING_NOISE_M = 0.03
+# ── Emit-quantization grade margin (2026-07-04) ──────────────────────────
+# ``to_osm`` emits elevations rounded to 0.01 m (2-decimal), so each endpoint
+# moves up to ±0.005 m and a pair's |Δelev| can grow by up to 0.01 m — ONE
+# full emit grid step (two worst-case half-step roundings in opposite
+# directions) — between the solved float field and the emitted file.  On a
+# short chord at cap that headroom does not exist: a 2 m chord at 1.5 % has a
+# 0.03 m legal delta, so a pair the solver drives exactly TO its budget can
+# read over the law in the emitted patch (the "rounding hairline" class —
+# CYXY: 126 sub-0.5 % + 38 sub-1 % excesses on 1-4 m chords).  The SOLVER's
+# feasibility projection therefore SWEEPS every pair to
+# ``budget − EMIT_QUANTIZATION_MARGIN_M`` so the rounded values still fit the
+# raw law, while its over-cap TALLY keeps the raw budget (violations are
+# reported against the true law; a both-hard pair can never move, so a
+# margined tally would manufacture phantom both-hard violations).  3-decimal
+# emit was tested and REFUTED (rounding was HIDING pairs — it exposed more
+# than it fixed; see status notes 2026-07-03).  Env override
+# ``O4_QUANT_MARGIN`` (metres); "0" disables → byte-identical pre-margin
+# behaviour.
+EMIT_QUANTIZATION_MARGIN_M = float(
+    _os_early.environ.get("O4_QUANT_MARGIN", "0.01"))
 
 # ── ROUTE-FIELD MODEL (#3, user-approved s73-p3, built s75; see
 # docs/route_field_model.md) ─────────────────────────────────────────────

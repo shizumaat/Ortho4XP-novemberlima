@@ -38,6 +38,42 @@ _INF = float("inf")
 # delta small, residual violations equivalent-or-better) and re-baselined.
 _FP_VECTORIZE = _os.environ.get("O4_FP_VECTORIZE", "0") == "1"
 
+# Floor for the emit-quantization margin (see ``_margined_budget``): a budget
+# at or below this is NEVER reduced.  Rect flat-cross edges are budget 0 BY
+# DESIGN (the two corners stay equal) and must stay 0; and margining a
+# coincident / sub-0.1 m chord's already-tiny budget toward 0 would make the
+# projection try to FLATTEN genuinely-distinct close vertices, fighting the
+# hard anchors.
+_QUANT_MARGIN_FLOOR_M = 0.005
+
+
+def _emit_quantization_margin():
+    """The solver-side emit-quantization margin (metres) — lazy config read
+    (one_solve keeps config imports call-time, matching the module style)."""
+    try:
+        from auto_patch.config import EMIT_QUANTIZATION_MARGIN_M
+        return EMIT_QUANTIZATION_MARGIN_M
+    except Exception:
+        return 0.0
+
+
+def _margined_budget(lim, margin):
+    """SWEEP budget for a raw edge budget ``lim``: ``lim − margin``, floored.
+
+    ``to_osm`` rounds each emitted elevation to the 0.01 m grid, so a pair's
+    emitted |Δelev| can exceed the solved one by up to one full grid step —
+    a pair solved exactly AT its budget then reads over the law in the
+    emitted file (config.EMIT_QUANTIZATION_MARGIN_M has the full story).
+    Enforcing ``lim − margin`` in the sweeps keeps the ROUNDED values inside
+    the raw law.  Budgets at or below ``_QUANT_MARGIN_FLOOR_M`` pass through
+    unchanged (0-budget flat-cross edges stay 0), and no budget is ever
+    reduced below that floor.  ``margin ≤ 0`` (O4_QUANT_MARGIN=0) returns
+    ``lim`` → byte-identical pre-margin behaviour."""
+    if margin <= 0.0 or lim <= _QUANT_MARGIN_FLOOR_M:
+        return lim
+    reduced = lim - margin
+    return reduced if reduced > _QUANT_MARGIN_FLOOR_M else _QUANT_MARGIN_FLOOR_M
+
 
 def _build_adjacency(shape_constraints, n):
     """``adj[i] = [(j, budget), ...]`` where ``budget = cap·length`` (the max
@@ -108,6 +144,12 @@ def feasibility_project(elev, shape_constraints, hard, *,
     repeated sweeps converge to a cap-Lipschitz surface whenever the anchors admit
     one.  Edges between two hard nodes are genuinely infeasible and reported, not
     forced.  Mutates ``elev`` in place; returns ``(remaining_over_cap, both_hard)``.
+
+    EMIT-QUANTIZATION MARGIN: the sweeps (and the reach envelope) enforce
+    ``budget − config.EMIT_QUANTIZATION_MARGIN_M`` (floored, see
+    ``_margined_budget``) so the 0.01 m-rounded emitted elevations still satisfy
+    the raw law; the returned over-cap tally is measured against the RAW budget
+    (the true law — reporting is never tightened).
 
     ``flat_groups`` — optional list of node-index sets, each a RIGID FLAT group
     (a building pad): its members share ONE elevation that the projection may
@@ -186,12 +228,21 @@ def feasibility_project(elev, shape_constraints, hard, *,
                 edge_lim[e] = lim
     if not edge_lim:
         return 0, 0
+    # EMIT-QUANTIZATION MARGIN: the SWEEP (and the reach envelope + break
+    # detection, so the enforced system stays self-consistent) runs on
+    # ``budget − margin`` — the rounded emit still fits the raw law — while
+    # the final TALLY below keeps the RAW budget: violations are reported
+    # against the true law, and a both-hard pair (never movable) can not be
+    # tipped into a phantom violation by the margin.  ``edges`` carries both:
+    # ``(i, j, raw_budget, sweep_budget)``.
+    quant_margin = _emit_quantization_margin()
     edges = []
     adj: dict = {}
     for (i, j), lim in edge_lim.items():
-        edges.append((i, j, lim))
-        adj.setdefault(i, []).append((j, lim))
-        adj.setdefault(j, []).append((i, lim))
+        sweep_lim = _margined_budget(lim, quant_margin)
+        edges.append((i, j, lim, sweep_lim))
+        adj.setdefault(i, []).append((j, sweep_lim))
+        adj.setdefault(j, []).append((i, sweep_lim))
 
     # EXACT reachability envelope: ceil_i = min over hard anchors a of
     # (z_a + capdist(a→i)), floor_i = max of (z_a − capdist).  ``budget`` is the
@@ -270,13 +321,14 @@ def feasibility_project(elev, shape_constraints, hard, *,
     # a big airport).  Both-immovable edges can never move, so drop them from the
     # iteration entirely (they are only counted in the final tally below).
     # ``kind``: 0 = both free (split the excess), 1 = i fixed (move j), 2 = j fixed.
+    # The iteration enforces the MARGINED (sweep) budget — see above.
     iter_edges = []
-    for (i, j, budget) in edges:
+    for (i, j, _raw_budget, sweep_budget) in edges:
         hi = i in immovable
         hj = j in immovable
         if hi and hj:
             continue
-        iter_edges.append((i, j, budget, 1 if hi else (2 if hj else 0)))
+        iter_edges.append((i, j, sweep_budget, 1 if hi else (2 if hj else 0)))
 
     # Under the GLOBAL-SLICE spine the graph is ~4x the rect model's
     # (SPJC 110k edges) and the scalar loop costs ~60 s/build across its
@@ -358,10 +410,11 @@ def feasibility_project(elev, shape_constraints, hard, *,
     for rep, g in (groups_eff if flat_groups else ()):
         for m in g:
             elev[m] = elev[rep]
-    # final tally
+    # final tally — against the RAW budget (the true law), NOT the margined
+    # sweep budget: the margin tightens enforcement only, never reporting.
     rem = bh = 0
     worst_ex = 0.0
-    for (i, j, budget) in edges:
+    for (i, j, budget, _sweep_budget) in edges:
         ex = abs(elev[i] - elev[j]) - budget
         if ex > tol:
             rem += 1
