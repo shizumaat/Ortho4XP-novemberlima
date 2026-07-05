@@ -1834,6 +1834,26 @@ def snap_parallel_service_runs(
         dn = math.hypot(dx, dy) or 1.0
         return dx / dn, dy / dn
 
+    def _project_excluding(line, p, arc, window):
+        """Nearest point on ``line`` OUTSIDE ``arc ± window`` — for a
+        LOOP's vertex, plain ``project`` returns the vertex itself
+        (distance 0 at its own arc), never the opposite leg."""
+        best = None                      # (dist, global_arc)
+        if arc - window > 1.0:
+            seg = substring(line, 0.0, arc - window)
+            if seg.length > 0.5:
+                u = seg.project(p)
+                best = (p.distance(seg.interpolate(u)), u)
+        if arc + window < line.length - 1.0:
+            seg = substring(line, arc + window, line.length)
+            if seg.length > 0.5:
+                u = seg.project(p)
+                cand = (p.distance(seg.interpolate(u)),
+                        arc + window + u)
+                if best is None or cand[0] < best[0]:
+                    best = cand
+        return best
+
     def _twin_mask(line_a, line_b, same_line):
         """Per-vertex-of-``line_a``: (is_twin, projected_arc_on_b)."""
         coords = list(line_a.coords)
@@ -1844,12 +1864,16 @@ def snap_parallel_service_runs(
                 px, py = coords[k - 1]
                 arc += math.hypot(x - px, y - py)
             p = Point(x, y)
-            u = line_b.project(p)
-            if same_line and abs(u - arc) < self_arc_min_m:
-                out.append((False, u))
-                continue
-            q = line_b.interpolate(u)
-            if p.distance(q) > max_sep_m:
+            if same_line:
+                hit = _project_excluding(line_b, p, arc, self_arc_min_m)
+                if hit is None:
+                    out.append((False, 0.0))
+                    continue
+                dist, u = hit
+            else:
+                u = line_b.project(p)
+                dist = p.distance(line_b.interpolate(u))
+            if dist > max_sep_m:
                 out.append((False, u))
                 continue
             da = _direction_at(line_a, arc)
