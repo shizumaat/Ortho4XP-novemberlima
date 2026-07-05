@@ -203,6 +203,13 @@ class GradeContext:
     # off the route PAVEMENT, so it fires even at a wide junction whose painted
     # centerline is far from the contact.  ``None`` ⇒ off.
     route_zone: object = None
+    # EXACT-MESH sidecar (user 2026-07-05): the SOLVER's junction triangle-mesh
+    # edge set (a ``MeshEdgesExact``), consumed 1:1 by the emitted-OSM reader so
+    # emit-time ring repairs (buffer(0), needle-vertex removal, canonical-point
+    # interning) cannot mint a DIFFERENT Delaunay than the one the solver graded
+    # to (the SPJC cm-noise junction class).  ``None`` ⇒ the reader triangulates
+    # its own ring (the solver path, and legacy sidecars).
+    mesh_edges_exact: object = None
 
 
 @dataclass
@@ -895,6 +902,95 @@ def mesh_edge_keys(ring: Sequence[tuple[float, float]],
     return out
 
 
+class MeshEdgesExact:
+    """The SOLVER's junction triangle-mesh edge set (sidecar ``mesh_edges``),
+    indexed so an emitted-OSM reader can consume the solver's mesh 1:1 instead
+    of re-triangulating the EMITTED ring.
+
+    Why: ``layout.to_osm`` repairs rings at emit (buffer(0), needle-vertex
+    removal, ~0.5 m canonical-point interning), so the emitted junction ring
+    can differ from the ring the solver triangulated — GEOS Delaunay then
+    facets it DIFFERENTLY, and the validator checks mesh chords the solver
+    never constrained (SPJC 2026-07-05: 44 genuine mesh/ring pairs a median
+    1.8 cm over allowance).  With this structure the validator asks "was this
+    pair a SOLVER mesh edge" by matching each emitted ring vertex to the
+    nearest exported mesh vertex within ``SHARED_VERTEX_TOL_M`` (the one
+    canonical node identity, 2026-06-30).
+
+    An emitted vertex with NO solver counterpart within tolerance (e.g. a
+    buffer(0) self-touch vertex minted at emit) matches nothing, so its body
+    chords skip as phantom — the solver never constrained them, and checking
+    them against a mesh the solver never built is exactly the noise class this
+    removes.  Ring-adjacent pairs are unaffected (the law never consults the
+    mesh for them).
+
+    Vertex identity is the exact meter-coordinate tuple: both endpoints of a
+    shared solver vertex serialize to the same rounded lat/lon, so they
+    convert to bit-identical meters."""
+
+    def __init__(self, edge_endpoints_m):
+        from .layout import SHARED_VERTEX_TOL_M
+        self._match_tolerance_m = float(SHARED_VERTEX_TOL_M)
+        self._vertex_ordinal: dict = {}      # exact (x, y) → ordinal
+        self._grid_cells: dict = {}          # grid cell → [(x, y, ordinal)]
+        self.edge_pairs: set = set()         # frozenset({ordinal_a, ordinal_b})
+        for (point_a, point_b) in edge_endpoints_m:
+            ordinal_a = self._intern(point_a)
+            ordinal_b = self._intern(point_b)
+            if ordinal_a != ordinal_b:
+                self.edge_pairs.add(frozenset((ordinal_a, ordinal_b)))
+
+    def _intern(self, point) -> int:
+        key = (float(point[0]), float(point[1]))
+        ordinal = self._vertex_ordinal.get(key)
+        if ordinal is None:
+            ordinal = len(self._vertex_ordinal)
+            self._vertex_ordinal[key] = ordinal
+            cell = (int(math.floor(key[0] / self._match_tolerance_m)),
+                    int(math.floor(key[1] / self._match_tolerance_m)))
+            self._grid_cells.setdefault(cell, []).append(
+                (key[0], key[1], ordinal))
+        return ordinal
+
+    def _nearest_vertex(self, x: float, y: float):
+        """Nearest exported mesh vertex within the match tolerance, or None.
+        Deterministic: ties break to the lowest ordinal."""
+        cell_x = int(math.floor(x / self._match_tolerance_m))
+        cell_y = int(math.floor(y / self._match_tolerance_m))
+        best_ordinal = None
+        best_distance = self._match_tolerance_m
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for (vx, vy, ordinal) in self._grid_cells.get(
+                        (cell_x + dx, cell_y + dy), ()):
+                    distance = math.hypot(x - vx, y - vy)
+                    if (distance < best_distance
+                            or (distance == best_distance
+                                and best_ordinal is not None
+                                and ordinal < best_ordinal)):
+                        best_distance = distance
+                        best_ordinal = ordinal
+        return best_ordinal
+
+    def mesh_keys_for_ring(self, ring, keys) -> set:
+        """The solver-mesh membership set for one emitted ring, in the ring's
+        own key space — same contract as :func:`mesh_edge_keys`."""
+        matched = [self._nearest_vertex(x, y) for (x, y) in ring]
+        out: set = set()
+        n = len(ring)
+        for i in range(n):
+            ordinal_i = matched[i]
+            if ordinal_i is None:
+                continue
+            for j in range(i + 1, n):
+                ordinal_j = matched[j]
+                if ordinal_j is None or ordinal_j == ordinal_i:
+                    continue
+                if frozenset((ordinal_i, ordinal_j)) in self.edge_pairs:
+                    out.add(frozenset((keys[i], keys[j])))
+        return out
+
+
 # ── main ────────────────────────────────────────────────────────────────────
 
 def shape_constraints(shape: GradeShape, ctx: GradeContext,
@@ -929,9 +1025,14 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext,
     # mirroring the visibility / spine-crossing predicates.  APRONS keep their
     # full visibility graph (the geodesic flatness model catches aggregate slope a
     # mesh edge misses), so this is junction/service_junction only.
-    mesh_keys = (mesh_edge_keys(ring, keys)
-                 if (JUNCTION_MESH_CONSTRAINTS and not ring_only
-                     and shape.role in JUNCTION_ROLES) else None)
+    # ``ctx.mesh_edges_exact`` (exact-mesh sidecar) supplies the SOLVER's mesh
+    # 1:1; without it the reader triangulates its own ring (the solver path).
+    mesh_keys = None
+    if (JUNCTION_MESH_CONSTRAINTS and not ring_only
+            and shape.role in JUNCTION_ROLES):
+        mesh_keys = (ctx.mesh_edges_exact.mesh_keys_for_ring(ring, keys)
+                     if ctx.mesh_edges_exact is not None
+                     else mesh_edge_keys(ring, keys))
     # The shape's spine centerline geometries (those it has nodes on) — a body
     # chord that CROSSES one is NOT a real grade path: the climb between the two
     # sides is carried by the SPINE at the taxiway cap (the apron grades 1% to

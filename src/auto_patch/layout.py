@@ -1171,7 +1171,8 @@ class PavementLayout:
         try:
             import json as _json
             from .verification import (taxi_axes_ll, taxi_routes_ll,
-                                       taxi_axes_exact_ll)
+                                       taxi_axes_exact_ll,
+                                       junction_mesh_edges_ll)
             _axes_exact, _routes_exact = taxi_axes_exact_ll(self)
             data = {
                 # legacy per-size-split axes (older tools); entries may carry
@@ -1209,6 +1210,11 @@ class PavementLayout:
                                 for (la, lo) in
                                 (getattr(self, "_break_node_ll", None)
                                  or [])],
+                # EXACT-MESH sidecar (user 2026-07-05): the solver's
+                # junction triangle-mesh edges, consumed 1:1 by the
+                # validator so emit-time ring repairs cannot mint a
+                # different Delaunay than the one the solver graded to.
+                "mesh_edges": junction_mesh_edges_ll(self),
             }
             Path(str(path) + ".axes.json").write_text(_json.dumps(data))
         except Exception:

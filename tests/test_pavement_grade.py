@@ -143,8 +143,13 @@ def test_pavement_grade(tmp_path, icao):
         # tile-seam PIN vertices — so this test measures through the SAME
         # frame as the standalone CLI and cannot drift from the solver's law
         # reading.  NEVER re-derive centerlines from the OSM.
-        from auto_patch.verification import taxi_axes_exact_ll
+        from auto_patch.verification import (taxi_axes_exact_ll,
+                                             junction_mesh_edges_ll)
         axes_exact, routes_exact = taxi_axes_exact_ll(layout)
+        # EXACT-MESH sidecar mirror: the solver's junction mesh, consumed
+        # 1:1 (emit-time ring repairs otherwise make the validator's
+        # Delaunay differ from the solver's — the cm-noise junction class).
+        mesh_edges_ll = junction_mesh_edges_ll(layout) or None
         # Same 4-tuple shape check_grade's sidecar loader passes to
         # run_checks: (latlon_pts, seg_caps, None, route_ordinal).
         taxi_axes_ll = [(pts, caps, None, ridx)
@@ -165,6 +170,7 @@ def test_pavement_grade(tmp_path, icao):
             anchor=(tuple(layout.anchor)
                     if layout.anchor is not None else None),
             seam_pins_ll=seam_pins_ll,
+            mesh_edges_ll=mesh_edges_ll,
         )
         within += w
         cross += c

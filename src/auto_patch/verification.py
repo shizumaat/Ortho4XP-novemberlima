@@ -992,6 +992,44 @@ def taxi_axes_exact_ll(layout):
     return axes, routes
 
 
+def junction_mesh_edges_ll(layout):
+    """The SOLVER's junction triangle-mesh EDGE set (the grade law's JUNCTION
+    MESH RULE), as lat/lon endpoint pairs — the sidecar's ``mesh_edges`` key.
+
+    Computed from the layout's IN-MEMORY rings, i.e. the same rings the last
+    law-graph build (the solve / ``final_grade_projection``) triangulated —
+    ``to_osm`` is a pure emitter and never mutates them.  The EMITTED ring can
+    differ (emit repairs: buffer(0), needle-vertex removal, canonical-point
+    interning), so a validator that triangulates the emitted ring gets a
+    DIFFERENT Delaunay than the solver graded to — cm-scale false junction
+    violations (SPJC 2026-07-05, 44 pairs a median 1.8 cm over allowance).
+    The validator consumes this set 1:1 instead
+    (``grade_graph.MeshEdgesExact``).  Edges are sorted for a byte-stable
+    sidecar; empty when the junction-mesh gate is off."""
+    from .config import JUNCTION_MESH_CONSTRAINTS
+    from .grade_graph import JUNCTION_ROLES, _open_ring, mesh_edge_keys
+    if not JUNCTION_MESH_CONSTRAINTS:
+        return []
+    edges_ll = []
+    for shape in layout.shapes:
+        if (shape.role not in JUNCTION_ROLES or shape.polygon is None
+                or shape.polygon.is_empty):
+            continue
+        ring = _open_ring(list(shape.polygon.exterior.coords))
+        if len(ring) < 3:
+            continue
+        index_pairs = sorted(
+            (min(pair), max(pair))
+            for pair in mesh_edge_keys(ring, list(range(len(ring))))
+            if len(pair) == 2)
+        for (index_a, index_b) in index_pairs:
+            lat_a, lon_a = layout.m_to_ll(*ring[index_a])
+            lat_b, lon_b = layout.m_to_ll(*ring[index_b])
+            edges_ll.append([[round(lat_a, 7), round(lon_a, 7)],
+                             [round(lat_b, 7), round(lon_b, 7)]])
+    return edges_ll
+
+
 def taxi_routes_ll(layout):
     """The WHOLE chained taxi routes (one per distinct ``route_line``) as lat/lon
     polylines, for the anisotropic-edge grade test: the standalone ``check_grade``

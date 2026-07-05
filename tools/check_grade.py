@@ -741,7 +741,8 @@ _SLOPING_RECT_OSM_ROLES = frozenset({
 
 
 def _grade_context_from_osm(ways, nodes, ll_to_m, taxi_axes, seam_nids,
-                            max_grade, road_zone=None, routes_m=None):
+                            max_grade, road_zone=None, routes_m=None,
+                            mesh_edges_m=None):
     """Build the SAME ``grade_graph.GradeContext`` the solver uses, but from the
     emitted OSM — so the grade TEST reads the one shared within-shape LAW
     (``grade_law.classify_pair`` via ``grade_graph.shape_constraints``).  Keys are
@@ -826,7 +827,12 @@ def _grade_context_from_osm(ways, nodes, ll_to_m, taxi_axes, seam_nids,
         seam_keys=frozenset(seam_nids or ()),
         inherited_junction_cap=_inherited,
         building_keys=frozenset(bld_keys),
-        road_zone=road_zone)
+        road_zone=road_zone,
+        # EXACT-MESH sidecar: the solver's junction mesh, consumed 1:1
+        # (emit-time ring repairs otherwise make this reader's Delaunay
+        # differ from the one the solver graded to).
+        mesh_edges_exact=(GG.MeshEdgesExact(mesh_edges_m)
+                          if mesh_edges_m else None))
 
 
 def iter_shape_grade_constraints(
@@ -837,6 +843,7 @@ def iter_shape_grade_constraints(
         seam_nids: Optional[set] = None,
         taxi_axes: Optional[list] = None,
         routes_ll: Optional[list] = None,
+        mesh_edges_m: Optional[list] = None,
         ) -> "list[ShapePairConstraint]":
     """Yield every within-shape vertex-pair the grade check constrains.
 
@@ -896,7 +903,8 @@ def iter_shape_grade_constraints(
                 if routes_ll else None)
     _law_ctx = _grade_context_from_osm(ways, nodes, ll_to_m, taxi_axes,
                                        seam_nids, max_grade, road_zone=road_zone,
-                                       routes_m=routes_m)
+                                       routes_m=routes_m,
+                                       mesh_edges_m=mesh_edges_m)
     _SOFT_ROLES = _GG.SOFT_VISIBILITY_ROLES
     for w in ways:
         grade_cap = _role_grade_limit(w, max_grade)
@@ -979,6 +987,7 @@ def _check_within_shape(ways: List[Way],
                         seam_nids: Optional[set] = None,
                         taxi_axes: Optional[list] = None,
                         routes_ll: Optional[list] = None,
+                        mesh_edges_m: Optional[list] = None,
                         ) -> List[Violation]:
     """Grade check between vertex pairs on the same way.  Consumes
     ``iter_shape_grade_constraints`` (the single source of constrained pairs)
@@ -987,7 +996,8 @@ def _check_within_shape(ways: List[Way],
     rounding doesn't produce spurious sub-metre flags."""
     out: List[Violation] = []
     for c in iter_shape_grade_constraints(
-            ways, nodes, ll_to_m, max_grade, seam_nids, taxi_axes, routes_ll):
+            ways, nodes, ll_to_m, max_grade, seam_nids, taxi_axes, routes_ll,
+            mesh_edges_m=mesh_edges_m):
         de = abs(c.ea - c.eb)
         if de <= c.allowance:
             continue
@@ -1435,6 +1445,7 @@ def run_checks(
     anchor: Optional[Tuple[float, float]] = None,
     seam_pins_ll: Optional[list] = None,
     break_nodes_ll: Optional[list] = None,
+    mesh_edges_ll: Optional[list] = None,
 ) -> Tuple[List[Violation], List[Violation], List[EdgeStep]]:
     """``taxi_axes_ll`` (the builder's APT.DAT taxi centerlines as
     ``[(latlon_points, cL, cT), …]``) supplies the within-shape grade graph's
@@ -1451,6 +1462,13 @@ def run_checks(
     pairs check at the shape's body cap — matching the solver's law reading
     (user 2026-07-04, "treat the seam like a runway edge or building").
     Without it the legacy 400 m blanket zone applies (old patches).
+
+    ``mesh_edges_ll`` (sidecar ``mesh_edges``, ``[[[lat, lon], [lat, lon]],
+    …]``): the SOLVER's junction triangle-mesh edges, consumed 1:1 for the
+    JUNCTION MESH RULE so emit-time ring repairs can't make this reader's
+    Delaunay differ from the one the solver graded to.  Without it the mesh
+    is re-triangulated from the emitted ring (old patches — stricter, and
+    cm-noisy where emit repaired a junction ring).
     """
     nodes, ways = _parse_osm(osm_path)
     ll_to_m = _ll_to_m_factory(nodes, anchor=anchor)
@@ -1488,9 +1506,18 @@ def run_checks(
               f"({n_with_elev} with elevation) | edges: {len(edges)} "
               f"| seam vertices: {len(seam_nids)}")
 
+    # Sidecar mesh edges arrive as lat/lon; convert to this audit's meter
+    # frame (both endpoints of a shared solver vertex serialize to the same
+    # rounded lat/lon, so vertex identity survives the conversion).
+    mesh_edges_m = None
+    if mesh_edges_ll:
+        mesh_edges_m = [(ll_to_m(*edge[0]), ll_to_m(*edge[1]))
+                        for edge in mesh_edges_ll]
+
     within = _check_within_shape(
         ways, nodes, ll_to_m, max_grade, seam_nids=seam_nids,
-        taxi_axes=taxi_axes, routes_ll=routes_ll)
+        taxi_axes=taxi_axes, routes_ll=routes_ll,
+        mesh_edges_m=mesh_edges_m)
     # BREAK-REGION split (user 2026-07-05): pairs touching a node the
     # SOLVER declared broken (genuine anchor contradiction, rendered as
     # the contained distance-weighted blend) are the pocket's designed
@@ -1611,7 +1638,7 @@ def main(argv=None) -> int:
     # when present; without it the check is context-free and over-flags
     # every spine/blend-relaxed pair.
     taxi_axes_ll = routes_ll = anchor = seam_pins_ll = None
-    break_nodes_ll = None
+    break_nodes_ll = mesh_edges_ll = None
     sidecar = Path(str(args.osm) + ".axes.json")
     if sidecar.exists():
         try:
@@ -1629,12 +1656,15 @@ def main(argv=None) -> int:
             anchor = _data.get("anchor") or None
             seam_pins_ll = _data.get("seam_pins")
             break_nodes_ll = _data.get("break_nodes")
+            mesh_edges_ll = _data.get("mesh_edges") or None
             print(f"  (axes sidecar loaded: {len(taxi_axes_ll or [])} axes"
                   + (" [exact]" if _exact else "")
                   + f", {len(routes_ll or [])} routes"
                   + (", builder anchor frame" if anchor else "")
                   + (f", {len(seam_pins_ll)} seam pins" if seam_pins_ll
                      is not None else "")
+                  + (f", {len(mesh_edges_ll)} solver mesh edges"
+                     if mesh_edges_ll else "")
                   + " — law-true check)")
         except Exception as ex:
             print(f"  (axes sidecar unreadable, context-free check: {ex})")
@@ -1650,6 +1680,7 @@ def main(argv=None) -> int:
         anchor=tuple(anchor) if anchor else None,
         seam_pins_ll=seam_pins_ll,
         break_nodes_ll=break_nodes_ll,
+        mesh_edges_ll=mesh_edges_ll,
     )
     if args.strict and (within or cross or steps):
         return 1
