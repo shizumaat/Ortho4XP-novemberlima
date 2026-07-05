@@ -84,7 +84,7 @@ except Exception:
     ROUTE_FIELD_MODEL = False
     ROUTE_FIELD_LOCAL_WINDOW_M = 80.0
     ROAD_FRONTAGE_TOL_M = 3.0
-    SERVICE_ROAD_MAX_GRADE = 0.04
+    SERVICE_ROAD_MAX_GRADE = 0.05
     TAXI_GRADE_BY_WIDTH = True
     TAXI_GRADE_WIDTH_ROLES = frozenset({
         "primary_parallel", "secondary_parallel", "stub", "cross_connector",
@@ -655,7 +655,7 @@ _ROAD_FAMILY_ROLES = {"service_road", "service_junction"}
 def _airside_groundside_pair(way_a: "Way", way_b: "Way") -> bool:
     """True iff a designed wall separates the two ways: exactly one is
     groundside, OR exactly one is ROAD-family (s79 Step D) — a
-    ground-vehicle road grades at 4 % from its apron mouth down to
+    ground-vehicle road grades at 5 % from its apron mouth down to
     terrain, so where it runs beside curbside groundside (the CYXY
     pav[1] ramp: a 6.5 m retaining wall vs the parking lot) or beside
     airside pavement, the vertical seam is by design.  Road↔road pairs
@@ -853,7 +853,7 @@ def iter_shape_grade_constraints(
     out: List[ShapePairConstraint] = []
     # ROAD-FRONTAGE zone (config.ROAD_FRONTAGE_TOL_M): an apron/junction
     # pair with BOTH endpoints welded to a service-road carve carries the
-    # ROAD's 4 % law, not the shape's 1.5 % — the carve corners sit ON
+    # ROAD's 5 % law, not the shape's 1.5 % — the carve corners sit ON
     # the host ring, so the host's law would otherwise regulate the
     # road's own descent (CYXY road #30: the apron-ring frontage edge
     # read the road's drop as a 3.13 % apron violation; the squeeze is

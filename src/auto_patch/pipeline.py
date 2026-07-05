@@ -28,6 +28,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from shapely.errors import GEOSException, TopologicalError
@@ -392,6 +393,23 @@ def build_airport_pavement(icao: str, xplane_root: str,
     apt = APR.load_airport(apt_path, icao)
     if apt is None:
         raise RuntimeError(f"Could not load airport block for {icao}")
+
+    # Complexity-based build-time prior (progress display only): the
+    # apt.dat counts predict total time from past recorded builds, so
+    # the window can show a ballpark "About m:ss remaining" from the
+    # start and refine it phase by phase.  Full builds only — a
+    # geometry-only build is a different (much shorter) animal.
+    _build_started_at = time.time()
+    _build_features = None
+    if compute_elevations:
+        try:
+            from . import build_time_model as _time_model
+            _build_features = _time_model.complexity_features(apt)
+            _progress.set_time_model(
+                _time_model.predict_total_seconds(icao, _build_features),
+                _time_model.predict_phase_seconds(icao, _build_features))
+        except Exception:
+            pass
 
     anchor = _airport_anchor(apt)
     to_m = _projection(anchor)
@@ -5138,6 +5156,21 @@ def build_airport_pavement(icao: str, xplane_root: str,
     if compute_elevations:
         from .emit_decimate import decimate_emit_nodes
         decimate_emit_nodes(layout, icao)
+
+    # Record this build's actual per-phase and total wall time so the
+    # NEXT build of this (or a similarly-sized) airport starts with a
+    # trustworthy remaining-time estimate.  Skipped under pytest — the
+    # xdist workers run airports under heavy parallel load, which would
+    # poison the calibration with inflated times.
+    if (compute_elevations and _build_features is not None
+            and os.environ.get("PYTEST_CURRENT_TEST") is None):
+        try:
+            from . import build_time_model as _time_model
+            _time_model.record_build(
+                icao, _build_features, _progress.phase_seconds(),
+                time.time() - _build_started_at)
+        except Exception:
+            pass
 
     return layout
 

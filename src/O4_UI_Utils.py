@@ -44,17 +44,23 @@ def auto_patch_begin(icaos):
 
 
 ################################################################################
-def auto_patch_progress(icao, done, total, label, status="run"):
+def auto_patch_progress(icao, done, total, label, status="run",
+                        eta_total_s=None):
     """Update one airport's row in the auto-patch progress window.
 
     ``done``/``total`` drive the progress bar (percent = done/total); ``label``
     is the small detail line under the bar.  ``status`` is ``"run"`` for a
     phase transition, ``"done"`` when the airport finished (bar → 100 %), or
-    ``"fail"`` when its build failed (row flagged red).  No-op without a GUI
-    and never raises — progress is cosmetic."""
+    ``"fail"`` when its build failed (row flagged red).  ``eta_total_s`` is
+    the build's current best TOTAL-time estimate in seconds (complexity
+    prior refined per phase, ``auto_patch.build_time_model``) — the window
+    blends it with its own elapsed-time extrapolation for the "About m:ss
+    remaining" label.  No-op without a GUI and never raises — progress is
+    cosmetic."""
     if gui:
         try:
-            gui.autopatch_event(icao, done, total, label, status)
+            gui.autopatch_event(icao, done, total, label, status,
+                                eta_total_s)
         except Exception:
             pass
 

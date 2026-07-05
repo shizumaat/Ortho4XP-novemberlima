@@ -444,9 +444,11 @@ class Ortho4XP_GUI(tk.Tk):
         airport.  Thread-safe: called from the build worker thread."""
         self.autopatch_queue.put(("begin", list(icaos), None, None, None))
 
-    def autopatch_event(self, icao, done, total, label, status="run"):
+    def autopatch_event(self, icao, done, total, label, status="run",
+                        eta_total_s=None):
         """Queue a per-airport progress update.  Thread-safe."""
-        self.autopatch_queue.put(("event", icao, done, total, label, status))
+        self.autopatch_queue.put(
+            ("event", icao, done, total, label, status, eta_total_s))
 
     def autopatch_update(self):
         try:
@@ -456,12 +458,13 @@ class Ortho4XP_GUI(tk.Tk):
                     _, icaos, _a, _b, _c = item
                     self._ensure_autopatch_window().set_airports(icaos)
                 elif item[0] == "event":
-                    _, icao, done, total, label, status = item
+                    _, icao, done, total, label, status, eta_total_s = item
                     # Only update an OPEN window — if the user closed it we
                     # leave it closed until the next build's begin re-opens it.
                     win = self.autopatch_window
                     if win is not None and win.winfo_exists():
-                        win.update_airport(icao, done, total, label, status)
+                        win.update_airport(icao, done, total, label, status,
+                                           eta_total_s=eta_total_s)
         except queue.Empty:
             pass
         self.callback_autopatch = self.after(100, self.autopatch_update)
@@ -858,21 +861,37 @@ class Ortho4XP_AutoPatch_Progress(tk.Toplevel):
     between them.  The remaining estimate must be TRUSTWORTHY (user
     2026-07-04): the raw ``elapsed x remaining-fraction`` extrapolation
     jumps with every phase transition and grows during long sub-steps.
-    Instead the row keeps an exponential moving average of the
-    total-time estimate (slightly conservative via ``ESTIMATE_MARGIN``)
-    and the DISPLAYED remaining value is monotone non-increasing: it
-    counts down with the wall clock while the smoothed estimate holds,
-    drops when the estimate improves, and FREEZES (never rises) when
-    the build stalls.
+
+    ESTIMATE MODEL (user 2026-07-04, second pass — the strictly-monotone
+    display LOCKED an early optimistic guess: KDFW showed "About 0:06"
+    for minutes because the fast early phases extrapolated a tiny total
+    and the min-clamp never let it rise again):
+
+    * the BUILD sends a complexity-based total-time estimate with every
+      progress event (``auto_patch.build_time_model``: past recorded
+      builds of this airport, or a per-complexity rate across recorded
+      airports, refined each phase) — trustworthy from the first
+      seconds, long before the bar has moved;
+    * the row keeps its own smoothed ``elapsed / fraction-done``
+      extrapolation and BLENDS the two, weighting the extrapolation in
+      quadratically as the bar advances (early bar positions
+      extrapolate garbage; late ones are ground truth);
+    * the DISPLAYED value counts down with the wall clock and drops
+      immediately when the estimate improves; it may RISE — but only
+      when the estimate has genuinely slipped past a hysteresis band
+      (``RISE_THRESHOLD``), so it never flickers upward on noise and
+      never freezes on a stale low guess.
     """
 
     MAX_VISIBLE_ROWS = 6
     AUTOCLOSE_DELAY_MS = 1500
     DONE_ROW_LINGER_MS = 900       # let the user see the bar hit 100 %
     TIMER_TICK_MS = 500
-    ESTIMATE_MIN_PCT = 3           # below this the estimate is noise
-    ESTIMATE_EMA_ALPHA = 0.15      # smoothing of the total-time estimate
+    ESTIMATE_MIN_PCT = 3           # below this the extrapolation is noise
+    ESTIMATE_EMA_ALPHA = 0.15      # smoothing of the extrapolated total
     ESTIMATE_MARGIN = 1.10         # 10 % conservative headroom
+    RISE_THRESHOLD_S = 10          # revise upward only past BOTH of these
+    RISE_THRESHOLD_FRAC = 0.15     # (absolute seconds / fraction of shown)
 
     def __init__(self, parent):
         tk.Toplevel.__init__(self)
@@ -928,10 +947,14 @@ class Ortho4XP_AutoPatch_Progress(tk.Toplevel):
             self._ensure_row(icao)
         self._fit_to_rows()
 
-    def update_airport(self, icao, done, total, label, status="run"):
-        """Advance one airport's bar + detail line."""
+    def update_airport(self, icao, done, total, label, status="run",
+                       eta_total_s=None):
+        """Advance one airport's bar + detail line.  ``eta_total_s`` is the
+        build's own complexity-based total-time estimate (may be None)."""
         row = self._ensure_row(icao)
         row["status"] = status
+        if eta_total_s and eta_total_s > 0:
+            row["build_total_estimate_s"] = eta_total_s
         if status == "done":
             row["var"].set(100)
             row["detail"].configure(
@@ -1025,25 +1048,47 @@ class Ortho4XP_AutoPatch_Progress(tk.Toplevel):
                 elapsed = now - row["t0"]
                 row["elapsed"].configure(text=self._fmt_mmss(elapsed))
                 pct = row["var"].get()
-                if pct < self.ESTIMATE_MIN_PCT:
+                # Smoothed extrapolated total (only once the bar has
+                # moved enough for elapsed/fraction to mean anything).
+                ema = row.get("total_ema")
+                if pct >= self.ESTIMATE_MIN_PCT:
+                    raw_total = elapsed * 100.0 / pct
+                    if ema is None:
+                        ema = raw_total
+                    else:
+                        a = self.ESTIMATE_EMA_ALPHA
+                        ema = (1.0 - a) * ema + a * raw_total
+                    row["total_ema"] = ema
+                # Blend with the build's complexity-based estimate: the
+                # extrapolation weighs in quadratically with the bar
+                # (at 20 % it is still mostly noise, at 80 % it is
+                # ground truth); without a prior it stands alone.
+                prior = row.get("build_total_estimate_s")
+                if prior and ema is not None:
+                    w = (pct / 100.0) ** 2
+                    total = (1.0 - w) * prior + w * ema
+                elif prior:
+                    total = prior
+                elif ema is not None:
+                    total = ema
+                else:
                     row["remaining"].configure(text="estimating…")
                     continue
-                # Smoothed, conservative total-time estimate.
-                raw_total = elapsed * 100.0 / pct
-                ema = row.get("total_ema")
-                if ema is None:
-                    ema = raw_total
-                else:
-                    a = self.ESTIMATE_EMA_ALPHA
-                    ema = (1.0 - a) * ema + a * raw_total
-                row["total_ema"] = ema
                 target = max(
-                    0.0, ema * self.ESTIMATE_MARGIN - elapsed)
-                # Monotone display: counts down with the wall clock
-                # while the estimate holds, drops when it improves,
-                # freezes (never rises) on stalls.
+                    0.0, total * self.ESTIMATE_MARGIN - elapsed)
+                # Display: counts down with the wall clock (the target
+                # shrinks as elapsed grows while the estimate holds),
+                # drops immediately when the estimate improves, and
+                # rises ONLY when it has genuinely slipped past the
+                # hysteresis band — no upward flicker, but no freezing
+                # on a stale low guess either.
                 shown = row.get("remaining_s")
-                shown = target if shown is None else min(shown, target)
+                if shown is None or target <= shown:
+                    shown = target
+                elif target - shown > max(
+                        self.RISE_THRESHOLD_S,
+                        self.RISE_THRESHOLD_FRAC * shown):
+                    shown = target
                 row["remaining_s"] = shown
                 row["remaining"].configure(
                     text="About {} remaining".format(

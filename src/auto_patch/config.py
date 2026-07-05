@@ -531,12 +531,12 @@ TAXIWAY_MAX_GRADE_CHANGE_PER_M = 1.0 / float(
 # gentler / more DEM-near).  Gate ``CORRIDOR_PROFILE_DAMPING``
 # (``O4_CORRIDOR_DAMP``) — OFF restores the pure DEM-follow.
 CORRIDOR_DAMP_ALPHA = 0.5
-SERVICE_ROAD_MAX_GRADE = 0.040  # ground-vehicle route (apt.dat 1206 + OSM small roads) — cars handle 4%
-# Ground-vehicle 4%-grade ``service_road`` rect geometry (session 47).
+SERVICE_ROAD_MAX_GRADE = 0.050  # ground-vehicle route (apt.dat 1206 + OSM small roads) — cars handle 5% (user 2026-07-04, was 4%)
+# Ground-vehicle ``service_road`` rect geometry (session 47).
 SERVICE_ROAD_WIDTH_M = 6.0          # corridor width for a service-road rect
 MIN_SERVICE_STRIP_LEN_M = 25.0      # min dedicated-strip length to emit a rect
 # OSM small-road inputs: which highway= types count as drivable "small
-# roads" (graded with car logic, 4%).  Inside the airport boundary + a
+# roads" (graded with car logic, SERVICE_ROAD_MAX_GRADE).  Inside the airport boundary + a
 # small outside buffer.  Excludes major roads (motorway/trunk/primary/
 # secondary) and non-car ways (footway/path/cycleway/steps/pedestrian).
 OSM_SMALL_ROAD_HIGHWAY_TYPES = frozenset((
@@ -767,11 +767,11 @@ ROLE_GRADE_LIMITS = {
     # (per user 2026-05-08).
     "tunnel_ramp":        TUNNEL_RAMP_MAX_GRADE,
     # Ground-vehicle service roads (apt.dat 1206) grade along their
-    # axis like a taxiway but at 4% — service vehicles handle steeper
+    # axis like a taxiway but at 5% — service vehicles handle steeper
     # terrain than aircraft (session 47).
     "service_road":       SERVICE_ROAD_MAX_GRADE,
     # Service-road network junctions (bends / intersections) — graded
-    # all-direction at the same 4% car-logic cap as the rects.
+    # all-direction at the same 5% car-logic cap as the rects.
     "service_junction":   SERVICE_ROAD_MAX_GRADE,
     # ── Skip-list (no grade enforcement) ─────────────────────────
     # Airport boundary is a footprint outline that traces real
@@ -1396,7 +1396,7 @@ MIN_RECT_LENGTH_M = float(_os.environ.get("O4_MIN_RECT_LENGTH_M", "100.0"))
 # cap is classified; nothing near a terminal; roads WORK LIKE TAXIWAYS
 # — qualifying runs join the centerline set as ``SVC*`` refs and ride
 # the single rect → junction → absorption decomposition with role
-# ``service_road`` (4 %).  Independent of ``ENABLE_SERVICE_ROADS`` (the
+# ``service_road`` (5 %).  Independent of ``ENABLE_SERVICE_ROADS`` (the
 # deferred OSM small-road / off-pavement builder).  DEFAULT ON for the
 # user's in-sim evaluation (2026-06-12; Steps C/D landed @b391e27 —
 # CYXY roads-on 0/0/0, HECA 57/0/0 invariants held);
@@ -1424,7 +1424,7 @@ ROAD_CARVE_MIN_RUN_M = 20.0         # min qualifying run to become road
 ROAD_CARVE_EDGE_HUG_MAX_M = 8.5
 # (s80) ROAD-FRONTAGE GRADE LAW — a within-shape pair (apron/junction)
 # whose BOTH endpoints sit within this of a service-road polygon is
-# governed by the ROAD's 4 % law, not the shape's 1.5 %: the carve
+# governed by the ROAD's 5 % law, not the shape's 1.5 %: the carve
 # welds its corners into the host ring, so the strip alongside the
 # road is physically part of the road's descent (CYXY road #30: the
 # apron-ring frontage edge read the road's 2.5 % drop as a 3.13 %

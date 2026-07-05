@@ -280,7 +280,7 @@ def carve_narrow_service_strips(
 
     Supersedes the retired ``O4_SVC_CURVED_JUNCTION`` experiment
     (2026-06-29, net-negative): its corridors graded all-pair 4 %,
-    while these faces ride the v14.1 service SPINES (longitudinal 4 %
+    while these faces ride the v14.1 service SPINES (longitudinal 5 %
     along the route).
 
     Returns the number of carved service pieces added.

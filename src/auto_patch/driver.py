@@ -289,14 +289,15 @@ def _run_build_tasks(tasks: list, tile, auto_patched: list,
                 # the window alive while airports build in the background.
                 while True:
                     try:
-                        _icao, _step, _tot, _lab = pq.get_nowait()
+                        _icao, _step, _tot, _lab, _eta = pq.get_nowait()
                     except _queue.Empty:
                         break
                     except Exception:
                         break
                     UI.lvprint(0, "   Auto-patch: {} [{}/{}] {}".format(
                         _icao, _step, _tot, _lab))
-                    UI.auto_patch_progress(_icao, _step, _tot, _lab)
+                    UI.auto_patch_progress(_icao, _step, _tot, _lab,
+                                           eta_total_s=_eta)
 
             with _cf.ProcessPoolExecutor(
                     max_workers=n, mp_context=ctx,

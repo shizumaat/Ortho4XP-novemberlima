@@ -22,7 +22,7 @@ Model (user, authoritative 2026-06-23) — a soft airside shape is **spine + bod
     - junction → the taxiway per-letter cap of its spine (so a junction is uniform
       at the taxiway cap; a junction with NO spine inherits the cap from the
       nearest connected taxiway-sized shape),
-    - service_junction → ``SERVICE_ROAD_MAX_GRADE`` (4 %).
+    - service_junction → ``SERVICE_ROAD_MAX_GRADE`` (5 %).
 
 Rects (4-corner sloping planes), terminals (flat pads), runways (FAA profile) and
 groundside (DEM) are NOT handled here — the solver keeps their plane/flat/profile
@@ -844,7 +844,7 @@ def _bake_edge(allow, role, pa, pb, shared, ctx, vr_i, vr_j):
     cL = allow.cL
     # Transverse cap: only A/B taxiways (cL == narrow 3 %) earn the tighter 2 %
     # transverse (ICAO Annex 14 Table 3-2); every other cap (C–F 1.5 %, apron 1 %,
-    # service 4 %, apron-blend gradients) stays isotropic cT == cL.
+    # service 5 %, apron-blend gradients) stays isotropic cT == cL.
     cT = (TAXI_MAX_TRANSVERSE_NARROW
           if abs(cL - TAXI_MAX_GRADE_NARROW) < 1e-9 else cL)
     return GL.Allowance.baked(
@@ -932,7 +932,7 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
     near = None
     if (APRON_TAXI_BLEND and shape.role == APRON_ROLE
             and ctx.centerlines and body_cap < TAXI_MAX_GRADE):
-        # SERVICE roads never blend an apron: a truck route's 4 % cap
+        # SERVICE roads never blend an apron: a truck route's 5 % cap
         # belongs to its own strip faces, not to the apron around it
         # (service lines entered ctx.centerlines as road-cap spines with
         # the global slice, 2026-07-02).

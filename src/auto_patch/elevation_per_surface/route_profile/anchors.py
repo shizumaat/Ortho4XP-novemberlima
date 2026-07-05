@@ -1246,26 +1246,35 @@ def apply_service_road_dem_follow(layout, bucket_to_idx, elev, dem_elev, cap,
             anchors[i] = elev[i]
 
     def _reach(sign):                       # +1 → ceil, −1 → floor
+        # Lazy Dijkstra over the (positive) cap·distance metric: the heap
+        # pops each node first at its OPTIMAL value, so every later pop
+        # is skipped (>= / <=, NO epsilon — an epsilon-tolerant skip lets
+        # equal-value duplicates re-expand, which goes combinatorial on
+        # service networks with many equal-length parallel paths: CYXY
+        # hung for 27 min here).  Each node therefore expands exactly
+        # once and pushes are bounded by the edge count.
         best: dict = {}
-        pq = [((av if sign > 0 else -av), a) for a, av in anchors.items()]
+        dist: dict = {}                     # graph distance to the
+        pq = [((av if sign > 0 else -av), 0.0, a)   # value-optimal anchor
+              for a, av in anchors.items()]
         heapq.heapify(pq)
         while pq:
-            v, k = heapq.heappop(pq)
+            v, dk, k = heapq.heappop(pq)
             t = v if sign > 0 else -v
-            if k in best and ((sign > 0 and t >= best[k] + 1e-9)
-                              or (sign < 0 and t <= best[k] - 1e-9)):
+            if k in best:
                 continue
-            best.setdefault(k, t)
+            best[k] = t
+            dist[k] = dk
             for (j, dd) in adj[k]:
+                if j in best:
+                    continue
                 nt = t + sign * cap * dd
-                pj = best.get(j)
-                if pj is None or (sign > 0 and nt < pj) or (sign < 0 and nt > pj):
-                    best[j] = nt
-                    heapq.heappush(pq, ((nt if sign > 0 else -nt), j))
-        return best
+                heapq.heappush(pq, ((nt if sign > 0 else -nt),
+                                    dk + dd, j))
+        return best, dist
 
-    ceil = _reach(+1) if anchors else {}
-    floor = _reach(-1) if anchors else {}
+    ceil, ceil_dist = _reach(+1) if anchors else ({}, {})
+    floor, floor_dist = _reach(-1) if anchors else ({}, {})
     changed: set = set()
     for i in svc_nodes:
         if i in anchors:
@@ -1277,6 +1286,23 @@ def apply_service_road_dem_follow(layout, bucket_to_idx, elev, dem_elev, cap,
         f = floor.get(i)
         if c is None:                       # unreachable from any anchor → DEM
             tgt = de
+        elif f is not None and f > c + 1e-9:
+            # GENUINE break: the road's welded anchors (airside mouth vs
+            # groundside/other weld) contradict through this node — no
+            # <=cap profile connects them (user 2026-07-04: break-blend
+            # support for service roads).  Same operator as
+            # ``feasibility_project``'s broken-node fill: the
+            # distance-weighted blend puts the surface ON the descent
+            # field of each anchor at that anchor (t→0 ⇒ z=ceil field,
+            # t→1 ⇒ z=floor field, continuous at the region boundary)
+            # and spreads the deficit between them as one gentle
+            # over-cap ramp.  Ceiling-clamping instead (the previous
+            # behaviour, silently) parked the WHOLE deficit as a wall
+            # at the floor-side anchor — typically the groundside mouth.
+            dc = ceil_dist.get(i, 0.0)
+            df = floor_dist.get(i, 0.0)
+            t = dc / (dc + df) if (dc + df) > 1e-9 else 0.5
+            tgt = c + (f - c) * t
         else:
             lo = f if f is not None else -float("inf")
             tgt = min(max(de, lo), c)

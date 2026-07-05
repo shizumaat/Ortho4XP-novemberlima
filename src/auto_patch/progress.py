@@ -24,6 +24,8 @@ enabled.  ``config.BUILD_PROGRESS`` (env ``O4_BUILD_PROGRESS``, default
 on) silences it without removing the call sites.
 """
 
+import time as _time
+
 import O4_UI_Utils as UI
 
 from . import config
@@ -63,6 +65,16 @@ class BuildProgress:
     phase (the solve calls it at its internal boundaries), moving the
     bar smoothly through the long phase.
 
+    TIME ESTIMATE (user 2026-07-04): once the apt.dat is parsed the
+    pipeline hands the reporter a complexity-based prediction from
+    past recorded builds (:meth:`set_time_model`,
+    ``build_time_model``).  Every progress event then carries the
+    current best TOTAL-time estimate: predicted phase times, with
+    finished phases replaced by their actual times and the remaining
+    phases rescaled by how far the build is running ahead of/behind
+    the prediction ("refine as we go").  The GUI blends this with its
+    own elapsed-time extrapolation.
+
     A reporter never raises out of :meth:`step`: progress is cosmetic,
     so a build must not fail because a banner could not be printed.
     """
@@ -77,6 +89,76 @@ class BuildProgress:
         self.enabled = enabled and config.BUILD_PROGRESS
         self._done = 0
         self._pct = 0          # last reported percent (monotonic guard)
+        self._started_at = _time.time()
+        self._phase_started_at = None   # wall time the current phase began
+        self._phase_seconds = {}        # finished phases: label → seconds
+        self._predicted_total_s = None      # from build_time_model
+        self._predicted_phase_s = None      # {label: seconds} or None
+        self._estimate_total_s = None       # current best, sent with events
+
+    def set_time_model(self, predicted_total_s, predicted_phase_s=None):
+        """Attach the complexity-based prediction (both may be ``None``)."""
+        self._predicted_total_s = predicted_total_s
+        self._predicted_phase_s = dict(predicted_phase_s or {}) or None
+        self._refresh_estimate(0.0)
+
+    def phase_seconds(self):
+        """Measured per-phase wall times, including the phase still
+        running (so the recorder called right before the build returns
+        captures the final phase too)."""
+        result = dict(self._phase_seconds)
+        if self._done and self._phase_started_at is not None:
+            label = self.labels[self._done - 1]
+            if label not in result:
+                result[label] = _time.time() - self._phase_started_at
+        return result
+
+    def _refresh_estimate(self, frac_in_phase):
+        """Recompute the best current TOTAL-time estimate.
+
+        Predicted per-phase times, with the finished prefix replaced by
+        its ACTUAL elapsed time and the remaining phases rescaled by the
+        observed ahead/behind ratio (clamped — one anomalous phase must
+        not blow up the whole estimate).  Falls back to the flat
+        predicted total, then to ``None`` (GUI extrapolates alone).
+        """
+        try:
+            elapsed = _time.time() - self._started_at
+            predicted = self._predicted_phase_s
+            if predicted:
+                done_labels = self.labels[:max(0, self._done - 1)]
+                current_label = (self.labels[self._done - 1]
+                                 if self._done else None)
+                predicted_done = sum(
+                    predicted.get(label, 0.0) for label in done_labels)
+                if current_label is not None:
+                    predicted_done += (frac_in_phase
+                                       * predicted.get(current_label, 0.0))
+                predicted_rest = sum(
+                    predicted.get(label, 0.0)
+                    for label in self.labels[max(0, self._done - 1):])
+                if current_label is not None:
+                    predicted_rest -= (frac_in_phase
+                                       * predicted.get(current_label, 0.0))
+                predicted_rest = max(0.0, predicted_rest)
+                predicted_total = sum(
+                    predicted.get(label, 0.0) for label in self.labels)
+                if predicted_done > 3.0:
+                    ratio = min(4.0, max(0.5, elapsed / predicted_done))
+                    # Trust the ahead/behind ratio in proportion to how
+                    # much of the predicted build has actually run — one
+                    # quick early phase must not halve the estimate.
+                    confidence = min(
+                        1.0, predicted_done / max(1.0, 0.3 * predicted_total))
+                    ratio = 1.0 + (ratio - 1.0) * confidence
+                else:
+                    ratio = 1.0
+                self._estimate_total_s = elapsed + ratio * predicted_rest
+            elif self._predicted_total_s:
+                self._estimate_total_s = max(
+                    self._predicted_total_s, elapsed)
+        except Exception:
+            pass
 
     def _report(self, pct, label, *, console=None):
         """Send ``pct`` (0-100) + ``label`` to the GUI bar (and optionally a
@@ -87,7 +169,7 @@ class BuildProgress:
         if q is not None:
             # In a pool worker: hand the event to the main process to print.
             try:
-                q.put((self.icao, pct, 100, label))
+                q.put((self.icao, pct, 100, label, self._estimate_total_s))
             except Exception:
                 pass
             return
@@ -97,7 +179,8 @@ class BuildProgress:
             # Serial builds run in the main process, so the phase event can go
             # straight to the second progress window (parallel builds route it
             # through the pool queue + driver._drain_progress instead).
-            UI.auto_patch_progress(self.icao, pct, 100, label)
+            UI.auto_patch_progress(self.icao, pct, 100, label,
+                                   eta_total_s=self._estimate_total_s)
         except Exception:
             # Never let a logging hiccup abort an airport build.
             pass
@@ -112,9 +195,15 @@ class BuildProgress:
         if self._done >= self.total:
             return
         label = self.labels[self._done]
+        now = _time.time()
+        if self._done and self._phase_started_at is not None:
+            self._phase_seconds[self.labels[self._done - 1]] = (
+                now - self._phase_started_at)
+        self._phase_started_at = now
         self._done += 1
         if not self.enabled:
             return
+        self._refresh_estimate(0.0)
         pct = 100.0 * sum(self.weights[: self._done - 1])
         self._report(
             pct, label,
@@ -133,6 +222,7 @@ class BuildProgress:
         if not self.enabled or self._done == 0:
             return
         frac = max(0.0, min(1.0, float(frac)))
+        self._refresh_estimate(frac)
         base = sum(self.weights[: self._done - 1])
         pct = 100.0 * (base + frac * self.weights[self._done - 1])
         self._report(pct, detail or self.labels[self._done - 1])

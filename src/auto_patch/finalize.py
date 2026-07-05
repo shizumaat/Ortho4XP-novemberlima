@@ -437,13 +437,14 @@ def emit_terrain_transition_features(layout: PavementLayout, icao: str, xplane_r
         # interior).  Must follow the separation above, which re-derives
         # DEM altitudes for clipped results.
         try:
+            from .config import GROUNDSIDE_MAX_GRADE as _GS_CAP
             from .groundside import _grade_limit_groundside_chords
             n_gl = _grade_limit_groundside_chords(layout)
             if n_gl:
                 UI.vprint(1,
                     f"  [pav-builder] chord-grade-limited {n_gl} "
                     f"groundside polygon(s) to "
-                    f"{100 * 0.04:.0f}%.")
+                    f"{100 * _GS_CAP:.0f}%.")
         except _GEOM_EXC:
             pass
         # Then emit DEM-bridge polygons inside the boundary
