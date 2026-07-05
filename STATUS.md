@@ -1,3 +1,27 @@
+# STATUS — SESSION 20260704 (part 12): monotone ETA (`0055c85`); CYXY
+# turnaround pad (`c5f5a2d`); SPJC production tunnels = rebuild needed
+
+> **ETA (user)**: EMA of the total-time estimate (α .15, +10 % margin);
+> DISPLAYED remaining is monotone non-increasing (counts down with the
+> clock, drops on improvement, FREEZES on stalls — never rises).
+> **CYXY #56 turnaround pad**: cover 1.00 but run 14 m < min_run 30 —
+> a fully-corridor-contained piece (cover ≥.95, run ≥5 m) now converts
+> regardless of run: pad at DEM 706, road descends the straight to the
+> flat roundabout 705.3-706.1, cliff gone.  CYXY 180 law-true
+> (≥5 % = 0, steps/cross/overlap 0).
+> **SPJC user patch (17:59)** predates f7bb741 — production tile path
+> verified at HEAD: 4 clusters / 41 ramps incl. both terminal bores.
+> Rebuild the tile.
+> **CYXY remaining 180 (drive-to-zero queue)**: 126 sub-0.5 % excess
+> hairlines + 38 sub-1 % (2-decimal rounding on 1-4 m chords — |Δe|
+> 0.05-0.18 m; worst 6.18 % over 2.1 m) + 16 pairs 1-5 % (service-road
+> DEM-follow tails: #40's 4.8 % over 26-40 m at the mouth ramp class).
+> Next levers: rounding-noise allowance on sub-4 m chords OR 3-decimal
+> groundside/service emit; service mouth-ramp law treatment.
+> Suite 21F/325P identical.
+
+---
+
 # STATUS — SESSION 20260704 (part 11): KDFW tunnels FIXED (`f7bb741`)
 # — ROLE_BOUNDARY portal gate retired (sparse-ribbon false veto)
 
