@@ -135,23 +135,24 @@ def test_pavement_grade(tmp_path, icao):
         out = tmp_path / f"{icao}_tile{tlat:+d}{tlon:+d}.osm"
         layout.to_osm(str(out))
 
-        # When the solver grades junctions PER-AXIS, the audit must
-        # match — using the SAME apt.dat centerlines the build used
-        # (layout.apt_taxi_centerlines), passed as lat/lon so the
-        # audit's mean-centred meter frame lines up.  NEVER re-derive
-        # from the OSM.
-        taxi_axes_ll = []
-        for tcl in (getattr(layout, "apt_taxi_centerlines", []) or []):
-            ln = tcl.line
-            if ln is None or ln.is_empty:
-                continue
-            letter = tcl.dominant_size()
-            cL = 0.03 if letter in ("A", "B") else 0.015
-            cT = 0.02 if letter in ("A", "B") else 0.015
-            pts = [layout.m_to_ll(x, y) for (x, y) in ln.coords]
-            taxi_axes_ll.append((pts, cL, cT))
+        # LAW-TRUE frame (2026-07-05): mirror EXACTLY what ``layout.to_osm``'s
+        # ``_write_axes_sidecar`` exports for ``tools/check_grade.py`` — the
+        # EXACT-AXES mirror of ``grade_graph.build_context``
+        # (``verification.taxi_axes_exact_ll``: unsplit polylines, per-SEGMENT
+        # caps, route ordinal), the builder's projection ANCHOR, and the
+        # tile-seam PIN vertices — so this test measures through the SAME
+        # frame as the standalone CLI and cannot drift from the solver's law
+        # reading.  NEVER re-derive centerlines from the OSM.
+        from auto_patch.verification import taxi_axes_exact_ll
+        axes_exact, routes_exact = taxi_axes_exact_ll(layout)
+        # Same 4-tuple shape check_grade's sidecar loader passes to
+        # run_checks: (latlon_pts, seg_caps, None, route_ordinal).
+        taxi_axes_ll = [(pts, caps, None, ridx)
+                        for (pts, caps, ridx) in axes_exact]
+        seam_pins_ll = [[round(la, 7), round(lo, 7)]
+                        for (la, lo) in
+                        (getattr(layout, "_seam_pin_ll", None) or [])]
 
-        from auto_patch.verification import taxi_routes_ll as _trll
         w, c, s = check_grade.run_checks(
             out,
             max_grade_pct=1.5,
@@ -160,7 +161,10 @@ def test_pavement_grade(tmp_path, icao):
             edge_step_m=0.5,
             top_n=5,
             taxi_axes_ll=taxi_axes_ll,
-            routes_ll=_trll(layout),
+            routes_ll=routes_exact,
+            anchor=(tuple(layout.anchor)
+                    if layout.anchor is not None else None),
+            seam_pins_ll=seam_pins_ll,
         )
         within += w
         cross += c

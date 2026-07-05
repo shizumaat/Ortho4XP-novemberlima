@@ -71,53 +71,59 @@ def test_validator_detects_spine_step():
                "the checker is too weak; do not relax it to fake spine=0.")
 
 
-def test_solver_and_validator_same_nodes():
-    """STRUCTURAL (Step 2): the graph the SOLVER builds and sets elevations on
-    (``grade_graph.build_unified_graph`` — geometry node indices) must cover the
-    EXACT spine the VALIDATOR checks (``grade_graph_validate.within_violations``,
-    via ``checked_spine_geometry``).
+def test_solver_and_validator_same_nodes(tmp_path):
+    """STRUCTURAL (rewritten 2026-07-05, user-approved semantics change):
+    post-solve vertex inserts (planarize inserts, final T-vertex weld
+    adoptions) are ACCEPTED architecture, so exact solver-graph ↔
+    emitted-node equality can never pass again — the pass that exists to
+    grade the FINAL geometry is ``final_grade_projection``
+    (``elevation_per_surface/route_profile/solve.py``), which rebuilds the
+    law graph on the final rings via ``_build_node_list`` +
+    ``build_unified_graph``.
 
-    Compared in coordinate space so it is NOT a derivative of one source: the
-    solver graph is keyed by node index, the validator by per-shape ring index,
-    and they are built by independent code paths — equality proves there is one
-    graph in effect (the route-graph/``geo_key`` bridge could never satisfy this,
-    because it sets on nodes the validator does not check)."""
-    from auto_patch import grade_graph as GG
-    from auto_patch.grade_graph_validate import checked_spine_geometry
-    from auto_patch.elevation_per_surface.solver_primitives import _build_node_list
+    The invariant now: every EMITTED airside vertex (what X-Plane renders,
+    read back from the OSM patch through the same canonical-point registry
+    the projection keys on) must be a node of THAT law graph — i.e. no
+    airside pavement vertex escapes the last-word grade projection."""
+    import xml.etree.ElementTree as ET
+    from auto_patch.elevation_per_surface.solver_primitives import (
+        PAVEMENT_ROLES, _build_node_list)
 
     layout = _cyxy()
-    nodes, b2i = _build_node_list(layout)
-    G = GG.build_unified_graph(layout, b2i)
+    # The law graph's node registry EXACTLY as final_grade_projection builds
+    # it on the final (post-planarize / post-T-weld) rings.
+    _nodes, b2i = _build_node_list(layout)
+    cps = layout.canonical_points
 
-    # Key both sides through the SAME canonical registry the solver welds on,
-    # so a sub-SHARED_VERTEX_TOL_M vertex pair is one node to both (matches
-    # grade_graph_validate.checked_spine_geometry).
-    _reg = getattr(layout, "canonical_points", None)
+    out = tmp_path / "CYXY_final.osm"
+    layout.to_osm(str(out))
+    root = ET.parse(str(out)).getroot()
+    node_ll = {nd.get("id"): (float(nd.get("lat")), float(nd.get("lon")))
+               for nd in root.iter("node")}
 
-    def _k(i):
-        x, y = G.pos[i]
-        if _reg is not None:
-            cp = _reg.find_nearest(x, y, _reg.tol_m)
-            if cp is not None:
-                x, y = cp
-        return (round(x, 2), round(y, 2))
-    solver_nodes = {_k(i) for i in G.spine_nodes()}
-    # drop self-loops: an edge between two vertices that canonicalize to the
-    # SAME node is not a real spine edge (checked_spine_geometry skips a == b).
-    solver_edges = {tuple(sorted((_k(a), _k(b)))) for (a, b) in G.spine_edge_set()
-                    if _k(a) != _k(b)}
+    missing = []
+    checked = 0
+    for way in root.iter("way"):
+        tags = {t.get("k"): t.get("v") for t in way.findall("tag")}
+        role = tags.get("role")
+        if role not in PAVEMENT_ROLES:
+            continue
+        for nd in way.findall("nd"):
+            la, lo = node_ll[nd.get("ref")]
+            x, y = layout.ll_to_m(la, lo)
+            checked += 1
+            k = cps.find_nearest(x, y, cps.tol_m)
+            if k is None or k not in b2i:
+                missing.append((role, round(x, 1), round(y, 1)))
 
-    val_nodes, val_edges = checked_spine_geometry(layout)
-
-    assert solver_nodes == val_nodes, (
-        f"solver graph and validator check DIFFERENT spine nodes: "
-        f"solver-only={len(solver_nodes - val_nodes)}, "
-        f"validator-only={len(val_nodes - solver_nodes)}")
-    assert solver_edges == val_edges, (
-        f"solver graph and validator check DIFFERENT spine edges: "
-        f"solver-only={len(solver_edges - val_edges)}, "
-        f"validator-only={len(val_edges - solver_edges)}")
+    assert checked > 1000, (
+        f"too few emitted airside vertices checked ({checked}) — "
+        f"role tags / parse broke?")
+    assert not missing, (
+        f"{len(missing)}/{checked} emitted airside vertices are NOT nodes of "
+        f"final_grade_projection's law graph — they were emitted without the "
+        f"last-word grade projection ever grading them.  First 10: "
+        f"{missing[:10]}")
 
 
 def test_cyxy_spine_zero():

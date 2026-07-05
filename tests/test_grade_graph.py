@@ -85,11 +85,46 @@ def test_apron_with_spine_taxi_on_spine_one_percent_body():
 
 
 def test_seam_endpoint_drops_pair():
+    """Seam-pin law (2026-07-03/04 seam architecture — ``grade_law.classify_pair``
+    lines ~242-246 / ~314-315):
+
+    * a pair with BOTH endpoints seam-pinned (an along-seam pair) is
+      terrain-controlled → dropped from the law;
+    * a pair with ONE seam endpoint STAYS in the law but never earns
+      spine/blend credit — the seam pin is a graded-TO hard anchor, so the
+      approach is clamped to the shape's own BODY cap;
+    * RUNWAY-family shapes keep the full one-seam exemption (the FAA profile
+      is solved separately; a mid-runway seam pin can contradict it locally).
+    """
+    # (1) BOTH-seam pair dropped; the one-seam pairs of the same shape stay.
     ring, keys = _square()
     s = GG.GradeShape(role="apron", ring=ring, keys=keys)
-    ctx = GG.GradeContext(centerlines=[], seam_keys=frozenset({0}))
+    ctx = GG.GradeContext(centerlines=[], seam_keys=frozenset({0, 1}))
     sc = GG.shape_constraints(s, ctx)
-    assert all(0 not in {a, b} for (a, b, _c) in sc.edges)
+    assert _cap_of(sc, 0, 1) is None          # seam↔seam: terrain-controlled
+    assert _cap_of(sc, 0, 3) is not None      # seam↔free: kept in the law
+
+    # (2) ONE-seam pair clamped to the body cap: seam node 4 lies ON the taxi
+    # centerline, so without the clamp the (4,5) spine pair would earn
+    # TAXI_MAX_GRADE — the seam-pin approach grades at the apron body cap.
+    ring2 = [(0.0, 0.0), (20.0, 0.0), (20.0, 80.0), (0.0, 80.0),
+             (0.0, 40.0), (20.0, 40.0)]      # 4,5 ON the centerline y=40
+    keys2 = list(range(len(ring2)))
+    cl = GG.Centerline(pts=[(0.0, 40.0), (20.0, 40.0)],
+                       seg_caps=[TAXI_MAX_GRADE])
+    s2 = GG.GradeShape(role="apron", ring=ring2, keys=keys2)
+    sc2 = GG.shape_constraints(
+        s2, GG.GradeContext(centerlines=[cl], seam_keys=frozenset({4})))
+    assert _cap_of(sc2, 4, 5) == pytest.approx(APRON_MAX_GRADE)
+
+    # (3) runway-role one-seam exemption: every pair touching the seam pin
+    # leaves the law entirely; the rest of the shape is still graded.
+    s3 = GG.GradeShape(role="runway", ring=ring, keys=keys)
+    sc3 = GG.plane_constraints(
+        s3, GG.GradeContext(centerlines=[], seam_keys=frozenset({0})),
+        cap=TAXI_MAX_GRADE)
+    assert sc3.edges, "runway plane must still grade its seam-free pairs"
+    assert all(0 not in (a, b) for (a, b, _c) in sc3.edges)
 
 
 def test_service_junction_four_percent():

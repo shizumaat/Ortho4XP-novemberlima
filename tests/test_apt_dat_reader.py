@@ -367,10 +367,14 @@ class TestTruckEdgeParsing:
             return (lon * 1e5, lat * 1e5)
         cls = APR.service_road_centerlines(apt, to_m)
         assert len(cls) == 1                 # both edges share one name
-        line, name = cls[0]
-        assert name == "Terminal fuel truck"
+        tcl = cls[0]
+        assert tcl.name == "Terminal fuel truck"
+        # Ground-vehicle route: marked OUT of the aircraft taxi spine.
+        assert tcl.is_service
         # Merged across the two edges -> 3 vertices (nodes 0,1,2).
-        assert len(line.coords) == 3
+        assert len(tcl.line.coords) == 3
+        # No ICAO taxi size on a truck route: one empty letter per segment.
+        assert tcl.seg_sizes == ["", ""]
 
     def test_service_road_centerlines_empty_without_trucks(self, tmp_path):
         # Reuse the runway-only ZZZZ-style block: no 1206 rows.
@@ -444,9 +448,13 @@ class TestPaintedLines:
         # filters apply -> exactly the open centerline survives.
         out = APR.painted_taxi_centerlines(apt, to_m)
         assert len(out) == 1
-        line, name = out[0]
-        assert name == "P1"
-        assert line.length > 8.0
+        tcl = out[0]
+        assert tcl.name == "P1"
+        assert tcl.line.length > 8.0
+        # Painted lines carry no apt.dat ICAO size (default taxi cap) and are
+        # aircraft centerlines, not ground-vehicle routes.
+        assert not tcl.is_service
+        assert tcl.seg_sizes == [""] * (len(tcl.line.coords) - 1)
 
     def test_no_painted_lines_block(self, tmp_path):
         p = tmp_path / "apt_plain.dat"

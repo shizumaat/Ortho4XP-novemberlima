@@ -116,12 +116,14 @@ def _sq(x0, y0, w, h):
 
 
 def test_cluster_bridge_merges_two_buildings():
-    # Two 20x20 buildings, 4 m apart.  A bridge slab spanning the gap is
-    # admitted into the SAME facade pool (the caller's gate decides) and
-    # unions the run into one flat group.
+    # Two 20x20 buildings, 10 m apart — comfortably past the proximity-merge
+    # reach (2 × DSF_FACADE_MERGE_GAP_M = 4 m; the old 4 m gap sat EXACTLY on
+    # that threshold and flapped with the buffer arithmetic).  A bridge slab
+    # spanning the gap is admitted into the SAME facade pool (the caller's
+    # gate decides) and unions the run into one flat group.
     a = _sq(0, 0, 20, 20)
-    b = _sq(24, 0, 20, 20)
-    bridge = _sq(19, 8, 6, 4)   # spans the 4 m gap, overlaps both
+    b = _sq(30, 0, 20, 20)
+    bridge = _sq(19, 8, 12, 4)   # spans the 10 m gap, overlaps both
     assert len(_cluster_dsf_building_facades([a, b])) == 2     # gap → 2
     assert len(_cluster_dsf_building_facades([a, b, bridge])) == 1
 

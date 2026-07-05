@@ -1,8 +1,9 @@
 """Structural-fidelity gates against the reference fixture outputs.
 
-``tests/fixtures/SPJC_target.osm`` and ``tests/fixtures/SPLP_target.osm``
-are the canonical builds (regenerated 2026-05-13 with the seam-anchor
-+ diagonal-stub trapezoid pipeline).  Every code change must continue
+``tests/fixtures/SPJC_target.osm`` and the per-tile
+``tests/fixtures/SPLP_target_tile*.osm`` are the canonical builds
+(regenerated 2026-07-05 with the curve-native / route-arc global-slice
+pipeline).  Every code change must continue
 to reproduce these outputs: the tests compare the produced layout
 against each target shape-for-shape via
 ``tools/compare_target.match_by_role`` and assert that each role's
@@ -103,28 +104,33 @@ pytestmark = [
 # single-hole slit left it filled-into-a-disc and the wall-vs-ramp clip
 # dropped it -> only 3 emitted.  FIXED 2026-06-20 (bridges.py: slit EVERY
 # hole) so all 4 clusters emit a valid hole-free wall.  Walls are
-# DETERMINISTIC (DEM-driven cluster geometry), so the floor is the exact 4 —
-# no -5% slack — to guard the fork wall against re-regression.  The fixture's
-# 4 walls were transplanted from a fresh build (apron/junction left at the
-# committed 86/180 partition, which a full recut perturbs nondeterministically).
+# DETERMINISTIC (DEM-driven cluster geometry), so the floor is the exact
+# count — no -5% slack — to guard the fork wall against re-regression.
+#
+# RE-CUT 2026-07-05 (both SPJC and SPLP, tools/build_target_osm.py from
+# repo root): the previous fixtures dated 2026-06-21, FOUR airside
+# partition reshapes ago.  The curve-native / route-arc global slice is
+# now the default pipeline (rects / junction_emit bypassed), so the
+# rect-family roles (primary_parallel, secondary_parallel, stub,
+# cross_connector) no longer exist in the partition; the boundary ribbon
+# skips at-DEM rects (SPJC emits 0 boundary pieces, SPLP far fewer); SPJC
+# now emits 6 retaining walls and a service_junction role.  Floors =
+# int(0.95 * current fixture count) — the same "current − 5 %" convention
+# as every previous re-cut — except retaining_wall (deterministic, exact).
 SPJC_BASELINE: Dict[str, int] = {
-    "apron":              81,   # of  86 current
-    "boundary":          976,   # of 1028 current
+    "apron":             105,   # of 111 current
     "building":           29,   # of  31 current
-    "cross_connector":     7,   # of   8 current
-    "groundside_pavement": 15,  # of  16 current
-    "junction":          171,   # of 180 current
-    "primary_parallel":   27,   # of  29 current
-    "retaining_wall":      4,   # of   4 current (one per tunnel cluster incl. NW Y-fork; deterministic, exact floor)
-    "runway":             28,   # of  30 current
+    "groundside_pavement": 9,   # of  10 current
+    "junction":          190,   # of 200 current
+    "retaining_wall":      6,   # of   6 current (one per tunnel cluster; deterministic, exact floor)
+    "runway":             33,   # of  35 current
     "runway_clearance":    6,   # of   7 current
-    "secondary_parallel":  3,   # of   4 current
-    "service_road":        5,   # of   6 current
-    "stub":               16,   # of  17 current
-    "taxiway_clearance":  19,   # of  21 current
+    "service_junction":   20,   # of  22 current
+    "service_road":        4,   # of   5 current
+    "taxiway_clearance":  17,   # of  18 current
     "tunnel_ramp":        38,   # of  41 current
 }
-SPJC_BASELINE_TOTAL = 1432  # of 1508 current (emitted)
+SPJC_BASELINE_TOTAL = 461  # int(0.95 * 486) of 486 current (emitted)
 
 # SPLP is cross-tile (spans -13/-77 and -13/-78).  Each tile-half has
 # its own baseline; a regression in either half trips the gate.
@@ -143,33 +149,31 @@ SPJC_BASELINE_TOTAL = 1432  # of 1508 current (emitted)
 # SPLP's TX53/TX54 (437/1,994 m², on the landside parking island whose
 # two big aprons were ALREADY groundside in the previous target) moved
 # secondary_parallel → groundside_pavement.  Same total shape count.
-# RE-CUT 2026-06-20 (seam/spine/cap work) — floors = current count - 5%.
+# RE-CUT 2026-07-05 (curve-native global slice default; see the SPJC
+# re-cut note above) — floors = int(0.95 * current fixture count).
 SPLP_BASELINE_TILE_M77: Dict[str, int] = {
-    "apron":              13,   # of  14 current
-    "boundary":          200,   # of 211 current
-    "junction":           11,   # of  12 current
-    "primary_parallel":    1,   # of   2 current
-    "runway":              8,   # of   9 current
-    "stub":                2,   # of   3 current
-    "taxiway_clearance":   7,   # of   8 current
+    "apron":              12,   # of  13 current
+    "boundary":           37,   # of  39 current
     "building":            2,   # of   3 current
+    "junction":           10,   # of  11 current
+    "runway":              8,   # of   9 current
+    "taxiway_clearance":   5,   # of   6 current
 }
-SPLP_BASELINE_TILE_M77_TOTAL = 249  # of 263 current (emitted)
+SPLP_BASELINE_TILE_M77_TOTAL = 76  # int(0.95 * 81) of 81 current (emitted)
 
-# RE-CUT 2026-06-20 (seam/spine/cap work) — floors = current count - 5%.
+# RE-CUT 2026-07-05 (curve-native global slice default; see the SPJC
+# re-cut note above) — floors = int(0.95 * current fixture count).
 SPLP_BASELINE_TILE_M78: Dict[str, int] = {
-    "apron":              29,   # of  31 current
-    "boundary":          281,   # of 296 current
-    "groundside_pavement": 3,   # of   4 current
-    "junction":           46,   # of  49 current
-    "primary_parallel":    3,   # of   4 current
+    "apron":              40,   # of  43 current
+    "boundary":           20,   # of  22 current
+    "building":            7,   # of   8 current
+    "groundside_pavement": 2,   # of   3 current
+    "junction":           15,   # of  16 current
     "runway":              7,   # of   8 current
-    "secondary_parallel":  1,   # of   2 current
-    "stub":               12,   # of  13 current
-    "taxiway_clearance":   8,   # of   9 current
-    "building":            6,   # of   7 current
+    "runway_clearance":    0,   # of   1 current
+    "taxiway_clearance":  18,   # of  19 current
 }
-SPLP_BASELINE_TILE_M78_TOTAL = 403  # of 425 current (emitted)
+SPLP_BASELINE_TILE_M78_TOTAL = 114  # int(0.95 * 120) of 120 current (emitted)
 
 
 def _build_layout(icao: str, tile_lat=None, tile_lon=None):
