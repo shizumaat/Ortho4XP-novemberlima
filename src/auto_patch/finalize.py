@@ -23,6 +23,7 @@ Two public entry points:
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -525,6 +526,14 @@ def emit_terrain_transition_features(layout: PavementLayout, icao: str, xplane_r
             # depressed-road emit completed cleanly, so the
             # exclusion set is trustworthy.
             if _depressed_ok:
+                _pre_tun_dump = os.environ.get("O4_DUMP_PRE_TUNNEL_LAYOUT")
+                if _pre_tun_dump:
+                    import pickle as _pk
+                    try:
+                        with open(_pre_tun_dump, "wb") as _fh:
+                            _pk.dump(layout, _fh)
+                    except Exception:
+                        pass
                 try:
                     n_tun = _emit_tunnel_portals(
                         layout, _dem, _tile_lat, _tile_lon,
@@ -534,8 +543,14 @@ def emit_terrain_transition_features(layout: PavementLayout, icao: str, xplane_r
                             f"  [pav-builder] emitted "
                             f"{n_tun} tunnel-portal cluster(s) "
                             f"(ramp + walls along approach).")
-                except _GEOM_EXC:
-                    pass
+                except _GEOM_EXC as exc:
+                    # A swallowed failure here silently loses EVERY
+                    # tunnel at the airport (KDFW: 14 portal clusters
+                    # gone with no trace) — log loudly.
+                    UI.vprint(1,
+                        f"  [pav-builder] WARN: {icao}: tunnel-portal "
+                        f"emit FAILED ({type(exc).__name__}: {exc}) — "
+                        f"tunnels not emitted.")
             # Per user 2026-04-29: emit retaining walls along
             # taxi bridges (KBNA Taxiway A, KPHX taxis over
             # Sky Harbor Blvd) and road-following approach

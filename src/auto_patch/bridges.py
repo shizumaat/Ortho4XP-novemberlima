@@ -749,24 +749,8 @@ def _emit_tunnel_portals(
     # are skipped — they don't affect the airport mesh and the chained
     # surface walk would otherwise emit ramps along urban roads far
     # from the airport.
-    boundary_line = None
-    try:
-        from shapely.geometry import LineString as _LS, MultiLineString
-        from shapely.ops import unary_union as _uu
-        b_lines = []
-        for s in layout.shapes:
-            if s.role != ROLE_BOUNDARY:
-                continue
-            try:
-                rcoords = list(s.polygon.exterior.coords)
-            except _GEOM_EXC:
-                continue
-            if len(rcoords) >= 2:
-                b_lines.append(_LS(rcoords))
-        if b_lines:
-            boundary_line = _uu(b_lines)
-    except _GEOM_EXC:
-        boundary_line = None
+    # (The old ROLE_BOUNDARY-distance portal gate lived here — retired
+    # 2026-07-04, see the airside-pavement gate in the portal loop.)
 
     # Collect portal data: (portal_node_id, tunnel_wid, walk_pts,
     # hw_type, apt_elev_at_portal, dem_at_far_end).
@@ -972,6 +956,9 @@ def _emit_tunnel_portals(
                     # suppressed entirely.
                     if str(tw_id) > min(str(tw_id),
                                         *[str(t) for t in _twins]):
+                        if os.environ.get("O4_TUNNEL_DEBUG") == "1":
+                            print(f"    [tunnel-drop] way {tw_id}: "
+                                  f"rail twin of {min(_twins)}")
                         continue
                     hw = "railway_twin"
         # OLD candidates (big_roads + highway type — the only ways the
@@ -1001,33 +988,40 @@ def _emit_tunnel_portals(
         for portal_idx in (0, len(t_nrefs) - 1):
             portal_nid = t_nrefs[portal_idx]
             if portal_nid not in nodes_m:
+                if os.environ.get("O4_TUNNEL_DEBUG") == "1":
+                    print(f"    [tunnel-drop] way {tw_id}: portal node "
+                          f"{portal_nid} not in nodes_m")
                 continue
             # Airport-proximity gate against the AIRSIDE PAVEMENT
-            # union (user 2026-06-12, KPHL): the boundary_line gate
-            # below is DEAD in production — the boundary ribbon is
-            # emitted AFTER this pass, so ROLE_BOUNDARY is empty and
-            # far portals sailed through (caps at 19-62 km once
-            # small_roads/rail widened the candidate set; the latent
-            # bug never fired from big_roads alone).  The pavement
-            # union exists at this point and scales with the airport.
-            if _is_new_cand and _airside_gate_u is not None:
+            # union (user 2026-06-12, KPHL; ALL candidate classes
+            # 2026-07-04): distant urban strays are skipped by their
+            # distance to the airport's PAVEMENT.  The old
+            # ROLE_BOUNDARY-distance gate is RETIRED: since the at-DEM
+            # ribbon skip (2026-07-03) only a few ribbon scraps
+            # survive, and at KDFW the 3 leftovers sat >1 km from the
+            # central underpass corridor — the gate silently dropped
+            # every portal of a 5x7 km airport's main tunnels.  The
+            # pavement union always exists here and scales with the
+            # airport.
+            if _airside_gate_u is not None:
                 _ppx, _ppy = nodes_m[portal_nid]
                 try:
                     if _airside_gate_u.distance(
                             Point(_ppx, _ppy)) > max_boundary_dist_m:
-                        continue
-                except _GEOM_EXC:
-                    pass
-            if boundary_line is not None:
-                px, py = nodes_m[portal_nid]
-                try:
-                    if boundary_line.distance(
-                            Point(px, py)) > max_boundary_dist_m:
+                        if os.environ.get("O4_TUNNEL_DEBUG") == "1":
+                            print(f"    [tunnel-drop] way {tw_id} portal "
+                                  f"({_ppx:.0f},{_ppy:.0f}): "
+                                  f"{_airside_gate_u.distance(Point(_ppx, _ppy)):.0f} m "
+                                  f"from airside pavement")
                         continue
                 except _GEOM_EXC:
                     pass
             walk = _walk_surface(portal_nid, tw_id, arm_walk_max_m)
             if walk is None or len(walk) < 2:
+                if os.environ.get("O4_TUNNEL_DEBUG") == "1":
+                    _px, _py = nodes_m[portal_nid]
+                    print(f"    [tunnel-drop] way {tw_id} portal "
+                          f"({_px:.0f},{_py:.0f}): no surface walk")
                 continue
             # Merge very short consecutive segments so altitude
             # rounding to 0.1 m can't push the per-segment grade
@@ -1070,6 +1064,10 @@ def _emit_tunnel_portals(
             portal_xy = walk[0]
             apt_elev = _airport_elevation_at(*portal_xy)
             if apt_elev is None:
+                if os.environ.get("O4_TUNNEL_DEBUG") == "1":
+                    print(f"    [tunnel-drop] way {tw_id} portal "
+                          f"({portal_xy[0]:.0f},{portal_xy[1]:.0f}): "
+                          f"no airport elevation")
                 continue
             elev_low = apt_elev - tunnel_depth_m
             # Find the truncation point that keeps grade ≤
@@ -1135,6 +1133,9 @@ def _emit_tunnel_portals(
                 f"an adjacent/crossing road (ramps not modelled).")
         except _GEOM_EXC:
             pass
+    if os.environ.get("O4_TUNNEL_DEBUG") == "1":
+        print(f"    [tunnel-portals] {len(portal_data)} portal walk(s) "
+              f"built")
     if not portal_data:
         return 0
     # WALK DEDUP (user 2026-07-04): twin carriageways that MERGE beyond
@@ -1239,6 +1240,10 @@ def _emit_tunnel_portals(
                 walk_pts[i][1] - walk_pts[i - 1][1]))
         total_walk = cum_dists[-1]
         if total_walk < 5.0:
+            if os.environ.get("O4_TUNNEL_DEBUG") == "1":
+                print(f"    [tunnel-drop] cluster at "
+                      f"({walk_pts[0][0]:.0f},{walk_pts[0][1]:.0f}): "
+                      f"walk only {total_walk:.1f} m")
             continue
         # Cluster spread for combined width: project each cluster
         # member's portal node onto the perpendicular at the head
@@ -1348,6 +1353,11 @@ def _emit_tunnel_portals(
                 from shapely.ops import unary_union as _uu9
                 if _uu9(exclusion_zones).buffer(2.0).contains(
                         Point(walk_pts[0])):
+                    if os.environ.get("O4_TUNNEL_DEBUG") == "1":
+                        print(f"    [tunnel-drop] cluster at "
+                              f"({walk_pts[0][0]:.0f},"
+                              f"{walk_pts[0][1]:.0f}): inside an "
+                              f"emitted portal's exclusion zone")
                     continue
         except _GEOM_EXC:
             pass
