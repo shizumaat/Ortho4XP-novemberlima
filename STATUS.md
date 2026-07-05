@@ -1,3 +1,35 @@
+# STATUS — SESSION 20260704 (part 9): fairing precompute (`a7c5848`);
+# chord-fit REJECTED; SPJC tunnels NOT reproducible; perf audit
+
+> **Chord fit (user suggestion) MEASURED + REJECTED**: assigning each
+> straight run the chord between endpoint values (band-projected,
+> 0.15-0.3 m move guard) raised CYXY within-shape 182→237-256 with no
+> visible gain — band clamps + cross-run pairs make the chord
+> not-quite-feasible; POCS-from-seed already converges in a few sweeps.
+> Kept: triples PRECOMPUTED once (per-sweep geometry work eliminated,
+> fairing runs 2×/build).
+> **SPJC "tunnels 4→2" (user)**: NOT reproducible at HEAD standalone —
+> 4 portal clusters emitted, both ~1270 m twin terminal bores present
+> (7+13 tunnel_ramp shapes).  Twin-rail suppression only touches
+> railway ways (SPJC bores are highway).  Likely stale Ortho4XP module
+> cache (RESTART Ortho4XP — the standing gotcha) or a mid-session
+> build.  If fresh production tile still shows 2: get the tile build
+> log with O4_TUNNEL_DEBUG=1.
+> **PERF (user: tile creation slowed)**: standalone SPJC 68.3 s vs
+> ~80 s at session start (net FASTER).  Session adds:
+> final_grade_projection ON = 7-22 s/airport (SPJC 7.4, CYUL 22.1) —
+> the one real new cost, buys the post-solve mutation-class closure
+> (CYXY 299→97 back then); edge fairing + corridor/lens/merge passes
+> <1 s each.  Remaining big line items (pre-existing): per-surface
+> solver hits its 3019-iter cap at SPJC (29.5 s), final projection's
+> full law-graph rebuild on final geometry (can't reuse solve ctx —
+> node indices differ).  NEXT perf levers if wanted: scope final
+> projection to post-solve-CHANGED shapes (geom_guard tokens), solver
+> iteration-cap convergence.
+> Suite 21F/325P identical.
+
+---
+
 # STATUS — SESSION 20260704 (part 8): CYXY ridge + waviness CLOSED
 # (`c220e66`) — parallel truck legs merge; airside ring-edge fairing
 
