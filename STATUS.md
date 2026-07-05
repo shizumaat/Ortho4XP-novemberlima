@@ -44,15 +44,39 @@
 > KCLT 174 unchanged, CYUL restored 5 clusters/29.  Suite 21F/325P
 > identical list.  Offline iteration: O4_DUMP_PRE_TUNNEL_LAYOUT pkl +
 > /tmp/spjc_lab/tunnel_replay.py (seconds per iteration).
-> **PERF ROUND (user-approved, in flight)**: stack verified native
-> (arm64 python, Accelerate-BLAS numpy 2.4.3, GEOS 3.13; M5 Max 6P+12E).
-> KDFW relief = 37.7 m over 7.8 km = 0.485 % avg → plan: (1) cProfile
-> KDFW (running), (2) conservative anchor envelope pre-filter
-> (min over anchors of alt ± min_cap·euclid — chord bound makes
-> DEM-inside-band nodes provably skip band walks/building reach; user's
-> building-chord idea generalized), (3) worklist Gauss-Seidel
-> (violated-edge queue, ordered = deterministic).  Acceptance: law-true
-> counts IDENTICAL (shortcuts are exact), suite list identical.
+> **PERF ROUND SHIPPED (b783501 + 0e425c1): KDFW 668 → 529 s (−21 %)**.
+> Stack verified native (arm64 python, Accelerate-BLAS numpy 2.4.3,
+> GEOS 3.13; M5 Max 6P+12E).  KDFW relief 37.7 m/7.8 km = 0.485 % avg.
+> cProfile-driven: (1) grid-bucket `_enforce_shared_vertices` (the
+> O(n²) "n is typically 200-2000" scan hit 47k verts = 1.1e9 pairs ×2);
+> (2) ANCHOR COLLAPSE in reach_band_unified + _build_skeleton_band —
+> per-anchor cap-Dijkstras (550 at KDFW, 140 s) → 2 value-seeded
+> multi-source fields (min(ae+dist)/max(ae−dist) commute; fields carry
+> (dist, ae) so floats form with the original association).  Both
+> BYTE-IDENTICAL at SPJC/CYUL/KDFW.  (3) WORKLIST Gauss-Seidel in
+> feasibility_project scalar path (FIFO violated-edge queue,
+> deterministic, visit cap = old bound): solve 393→326 s; different
+> legal fixpoint — CYXY 251→251, SPJC 99→97, KDFW 447→351, suite
+> identical.  NEXT PERF TIER (user wants ~5×): flatness-gated
+> CONSTRUCTION skipping — per-shape conservative envelope BEFORE pair
+> generation (shape_constraints 108 s instr., clearance 144 s,
+> final_grade_projection rebuild 89 s); geometry/emit (~210 s real) has
+> its own ordinary queue.
+> **QUANTIZATION MARGIN SHIPPED (ca97485, agent-implemented)**:
+> EMIT_QUANTIZATION_MARGIN_M = 0.01 (env O4_QUANT_MARGIN) — sweeps/
+> envelope/break detection enforce budget−1 cm at feasibility_project's
+> edge_lim choke point, tally reports vs RAW law, floor 5 mm (0-budget
+> flat-cross edges untouched).  The emit-rounding hairline class
+> collapses: CYXY 251→152, SPJC 97→61, SPLP 193→179 (seam pockets fine
+> — blend lands on the raw-cap ramp).  Suite 21F/325P identical.
+> **OPEN**: CYXY 169→251 (+82) came from the UNDERPASS commit
+> (discovered in the worklist A/B; margin now masks it at 152 — still
+> uninvestigated: which CYXY ways now synthesize bores; check
+> _IMPLIED_MAPPED_NEAR_M 40→6 admits; consider a tunnel-count
+> acceptance test).  SPJC 96→99 shift came from the CYUL grass-fix
+> branch refinement (built-over retag now requires building/apron
+> cover).  Tunnel cleanup landed byte-identical (42bf218, −47 lines);
+> deferred: fork-throat off-paths, _is_new_cand class, walk-logic dedup.
 
 ---
 
