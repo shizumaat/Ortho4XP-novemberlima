@@ -451,6 +451,205 @@ def check_runway_profile(layout, end_grade_cap="default",
     return out
 
 
+def check_runway_end_skirt(layout, dem, tile_lat, tile_lon,
+                           source_runways=None,
+                           tolerance_m: float = 1.5,
+                           step_m: float = 5.0):
+    """Invariant: within the governed length beyond each runway end, the
+    RENDERED surface (clearance patches where emitted, pavement or
+    natural DEM elsewhere) must not drop below the runway-end-skirt law
+    floor (``grade_law.runway_end_skirt_floor_profile`` — FAA 0…−3 % in
+    the first 61 m, −5 % beyond, grade-change rate-limited).  Beyond the
+    governed length a drop is LAWFUL, so nothing out there is checked.
+
+    Marches the extended centerline of each runway end (the same anchor
+    geometry, entry-grade window and governed length the Pass D emitter
+    uses — clearance/grade_law are the single source) and reports the
+    WORST station per end.  ``tolerance_m`` absorbs the emitter's fill
+    trigger (1 m — terrain within 1 m of the floor is deliberately left
+    unfilled), emit rounding (0.1 m) and DEM interpolation.
+
+    Pure reporter (verification-architecture ruling): returns
+    ``[("end_drop", "<ref>:<desig>", metres_below_floor, tolerance_m,
+    "lat,lon"), …]`` worst-first; empty when every end is lawful or when
+    ``dem`` is None.  With the ``O4_RUNWAY_END_SKIRT`` gate off this
+    reports the cliffs the skirt WOULD govern — the motivating defect —
+    so fixture baselines can be captured before flipping the gate.
+    """
+    import math
+    from shapely.ops import unary_union
+    from shapely.prepared import prep
+    from . import clearance as CL
+    from .config import runway_end_approach_class
+    from .grade_law import (
+        runway_end_governed_length_m, runway_end_skirt_floor_profile)
+    from .layout import R_EARTH
+
+    if dem is None:
+        return []
+    lat0, lon0 = layout.anchor
+    cos0 = math.cos(math.radians(lat0))
+
+    def _ll_to_m(lat, lon):
+        return (math.radians(lon - lon0) * R_EARTH * cos0,
+                math.radians(lat - lat0) * R_EARTH)
+
+    def _sample(x, y):
+        from .elevation import _sample_dem
+        try:
+            lat = lat0 + math.degrees(y / R_EARTH)
+            lon = lon0 + math.degrees(x / (R_EARTH * cos0))
+            return _sample_dem(dem, tile_lat, tile_lon, lat, lon)
+        except (ValueError, ArithmeticError):
+            return None
+
+    airside = [s for s in layout.shapes
+               if s.role in CL._AIRSIDE_PAVEMENT_ROLES
+               and s.polygon is not None and not s.polygon.is_empty]
+    if not airside:
+        return []
+    try:
+        prep_pav = prep(unary_union([s.polygon for s in airside]))
+    except CL._GEOM_EXC:
+        return []
+    # Shapes whose surface can lawfully COVER a drop: clearance patches
+    # (the skirt itself / RESA cuts) and any other elevation-carrying
+    # emitted shape (a crossing taxiway, apron, groundside lot…).
+    covering = [s for s in layout.shapes
+                if s.polygon is not None and not s.polygon.is_empty
+                and (s.node_altitudes or s.altitude is not None
+                     or (s.altitude_high is not None
+                         and s.altitude_low is not None))]
+
+    def _surface_alt(x, y, direction):
+        """Rendered surface altitude at ``(x, y)``: the covering
+        shape's ruled interior along ``direction`` (linear between the
+        two boundary crossings bracketing the point — how a two-row
+        ``node_altitudes`` band triangulates), else the natural DEM."""
+        from shapely.geometry import LineString, Point
+        pt = Point(x, y)
+        nx, ny = direction
+        for s in covering:
+            try:
+                if not s.polygon.covers(pt):
+                    continue
+            except CL._GEOM_EXC:
+                continue
+            if s.node_altitudes:
+                try:
+                    probe = LineString([
+                        (x - nx * 500.0, y - ny * 500.0),
+                        (x + nx * 500.0, y + ny * 500.0)])
+                    xing = probe.intersection(s.polygon.boundary)
+                    pts = ([xing] if xing.geom_type == "Point"
+                           else [g for g in getattr(xing, "geoms", [])
+                                 if g.geom_type == "Point"])
+                except CL._GEOM_EXC:
+                    pts = []
+                behind, ahead = None, None
+                for g in pts:
+                    t = (g.x - x) * nx + (g.y - y) * ny
+                    if t <= 0.0 and (behind is None or t > behind[0]):
+                        behind = (t, g)
+                    if t >= 0.0 and (ahead is None or t < ahead[0]):
+                        ahead = (t, g)
+                if behind is not None and ahead is not None:
+                    eb = CL._edge_interp_alt(s, behind[1].x, behind[1].y)
+                    ea = CL._edge_interp_alt(s, ahead[1].x, ahead[1].y)
+                    if eb is not None and ea is not None:
+                        span = ahead[0] - behind[0]
+                        if span < 1e-9:
+                            return 0.5 * (eb + ea)
+                        return eb + (ea - eb) * (-behind[0]) / span
+            e = CL._edge_interp_alt(s, x, y)
+            if e is not None:
+                return e
+        return _sample(x, y)
+
+    # Enumerate runway ends exactly as the Pass D emitter does.
+    ends = []
+    if source_runways:
+        for r in source_runways:
+            try:
+                ax, ay = _ll_to_m(r.lat_a, r.lon_a)
+                bx, by = _ll_to_m(r.lat_b, r.lon_b)
+            except CL._GEOM_EXC:
+                continue
+            dx, dy = bx - ax, by - ay
+            full_len = math.hypot(dx, dy)
+            if full_len < 1.0:
+                continue
+            ux, uy = dx / full_len, dy / full_len
+            ends.append((
+                (ax, ay), (-ux, -uy), full_len, r.desig_a,
+                runway_end_approach_class(
+                    getattr(r, "markings_a", 0),
+                    getattr(r, "approach_lights_a", 0))))
+            ends.append((
+                (bx, by), (ux, uy), full_len, r.desig_b,
+                runway_end_approach_class(
+                    getattr(r, "markings_b", 0),
+                    getattr(r, "approach_lights_b", 0))))
+    else:
+        runway_shapes = [s for s in layout.shapes if s.role == "runway"
+                         and s.polygon is not None
+                         and not s.polygon.is_empty]
+        for s, a, b, full_len in CL._runway_end_edges(runway_shapes):
+            outward = CL._outward_normal(s.polygon, a, b)
+            if outward is None:
+                continue
+            mid = (0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]))
+            ends.append((mid, outward, full_len, s.ref,
+                         runway_end_approach_class(0, 0)))
+
+    out = []
+    for end_pt, outward, full_len, desig, approach_class in ends:
+        nx, ny = outward
+        seed = (end_pt[0] - nx * CL._RESA_SEED_INSET_M,
+                end_pt[1] - ny * CL._RESA_SEED_INSET_M)
+        start = CL._pavement_exit_along(
+            prep_pav, seed[0], seed[1], nx, ny,
+            CL._RESA_PAVEMENT_PROBE_MAX_M, step_m)
+        p0 = (seed[0] + nx * start, seed[1] + ny * start)
+        ref = CL._pav_alt(airside, p0[0] - nx * 1.0, p0[1] - ny * 1.0)
+        if ref is None:
+            continue
+        inside = CL._pav_alt(
+            airside,
+            p0[0] - nx * (1.0 + CL._SKIRT_END_GRADE_WINDOW_M),
+            p0[1] - ny * (1.0 + CL._SKIRT_END_GRADE_WINDOW_M))
+        entry_grade = 0.0
+        if inside is not None:
+            entry_grade = max(-0.05, min(0.05, (
+                float(ref) - float(inside))
+                / CL._SKIRT_END_GRADE_WINDOW_M))
+        governed = runway_end_governed_length_m(full_len, approach_class)
+        # Check stations strictly INSIDE the governed length: the
+        # governed endpoint itself is the crest of the lawful
+        # beyond-zone face — a cap-truncated skirt lawfully ends there
+        # in a steep engineered face (Madeira-style), and sampling that
+        # exact boundary would flag every such skirt at its own edge.
+        n_stations = max(1, int(math.floor(
+            (governed - 0.5 * step_m) / step_m)))
+        distances = [float(k) * step_m for k in range(1, n_stations + 1)]
+        depths = runway_end_skirt_floor_profile(distances, entry_grade)
+        worst = None
+        for d, depth in zip(distances, depths):
+            qx, qy = p0[0] + nx * d, p0[1] + ny * d
+            surface = _surface_alt(qx, qy, (nx, ny))
+            if surface is None:
+                continue
+            below = (float(ref) - depth) - float(surface)
+            if below > tolerance_m and (
+                    worst is None or below > worst[0]):
+                worst = (below, qx, qy)
+        if worst is not None:
+            out.append(("end_drop", f"{desig}", worst[0], tolerance_m,
+                        _ll(layout, worst[1], worst[2])))
+    out.sort(key=lambda r: -r[2])
+    return out
+
+
 def check_terminal_flat(layout):
     """Invariant H26: a terminal moves as one rigid flat unit — a single
     ``altitude`` tag, never per-vertex ``node_altitudes`` or two-end

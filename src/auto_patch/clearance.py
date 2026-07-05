@@ -67,6 +67,7 @@ from .config import (
 from .grade_law import (
     runway_end_governed_length_m,
     runway_end_skirt_floor_profile,
+    runway_end_skirt_profile_breakpoints,
 )
 from .layout import (
     BuiltShape,
@@ -155,6 +156,11 @@ _RESA_PAVEMENT_PROBE_MAX_M = 300.0
 # interior — seed the outward pavement-exit march this far INSIDE so it
 # starts on pavement.
 _RESA_SEED_INSET_M = 3.0
+# Window (m) over which the runway's own end grade is measured for the
+# Pass D skirt, so a DESCENDING runway hands its grade to the skirt
+# without a crease.  Module-level so the ``verification`` reader
+# measures the entry grade EXACTLY as the emitter does (lockstep).
+_SKIRT_END_GRADE_WINDOW_M = 30.0
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -573,8 +579,8 @@ def _build_graded_strips(edge_stations, edge_alts, outwards,
 # Core: build FILL skirts off one edge (the inverse of the cut strips)
 # ──────────────────────────────────────────────────────────────────
 def _build_filled_skirts(edge_stations, edge_alts, outwards,
-                         band_caps, floor_depth, trigger, step,
-                         sample_dem):
+                         band_caps, floor_depth, band_edges, trigger,
+                         step, sample_dem):
     """Fill-direction twin of ``_build_graded_strips``: at each station a
     FLOOR descends from the pavement-end altitude,
 
@@ -590,15 +596,28 @@ def _build_filled_skirts(edge_stations, edge_alts, outwards,
     below the floor; flat or rising terrain is left untouched (that is
     the cut passes' domain).
 
-    Same run-grouping / ring construction as the cut twin: inner edge a
-    small gap outside the pavement at the floor's start altitude, outer
-    edge at the daylight point on the floor (= DEM there), so the skirt
-    meets natural ground with no step.  Returns ``(ring_open,
-    alts_open)`` pairs.
+    Unlike the cut twin (whose linear ceiling a two-row ring renders
+    exactly), the floor is CURVED (piecewise quadratic), and a
+    ``node_altitudes`` polygon renders as a ruled surface between its
+    rows — a single inner/outer ring would sag metres below the law
+    floor mid-span.  So the skirt is emitted as ABUTTING BANDS split at
+    ``band_edges`` (the law's own grade breakpoints,
+    ``grade_law.runway_end_skirt_profile_breakpoints``): within a band
+    the floor is one quadratic, bounding the chord sagitta at
+    ``rate·L²/8`` (≤ 0.31 m) — far inside the fill trigger.  Adjacent
+    bands share their boundary row vertices (same positions, same
+    rounded altitudes), so they render as one continuous surface.
+
+    Returns ``(ring_open, alts_open)`` pairs, one per (band × station
+    run); the first band's inner edge sits a small gap outside the
+    pavement at the floor's start altitude, each band's outer edge at
+    the band boundary — or earlier, at the daylight point on the floor
+    (= DEM there), so the fill meets natural ground with no step.
     """
     n = len(edge_stations)
     outer: list[float] = [0.0] * n
     dropped: list[bool] = [False] * n
+    cap_max = 0.0
     for i, (sx, sy) in enumerate(edge_stations):
         ref = edge_alts[i]
         if ref is None:
@@ -607,6 +626,7 @@ def _build_filled_skirts(edge_stations, edge_alts, outwards,
         cap = band_caps[i]
         if cap <= _PAVEMENT_GAP_M:
             continue
+        cap_max = max(cap_max, cap)
         nst = max(1, int(math.ceil(cap / step)))
         last = 0.0
         for k in range(1, nst + 1):
@@ -618,52 +638,66 @@ def _build_filled_skirts(edge_stations, edge_alts, outwards,
         if last > 0.0:
             dropped[i] = True
             outer[i] = min(cap, last + step)
-    # Group consecutive dropped stations into runs (1-station slack).
-    idx = [i for i in range(n) if dropped[i]]
-    if not idx:
+    if not any(dropped):
         return []
-    runs: list[list[int]] = []
-    cur = [idx[0]]
-    for j in idx[1:]:
-        if j - cur[-1] <= 2:
-            cur.append(j)
-        else:
-            runs.append(cur)
-            cur = [j]
-    runs.append(cur)
+    # Band boundaries: pavement gap → law breakpoints → governed cap.
+    edges = [_PAVEMENT_GAP_M]
+    for b in sorted(band_edges):
+        if _PAVEMENT_GAP_M + 1.0 < b < cap_max - 1.0:
+            edges.append(float(b))
+    edges.append(cap_max)
 
     out: list[tuple[list, list]] = []
-    for run in runs:
-        i0, i1 = run[0], run[-1]
-        # Widen the run by one station each side so the fill tapers
-        # longitudinally to its neighbours instead of ending in a wall.
-        lo = max(0, i0 - 1)
-        hi = min(n - 1, i1 + 1)
-        inner_pts, inner_alts = [], []
-        outer_pts, outer_alts = [], []
-        for i in range(lo, hi + 1):
-            ref = edge_alts[i]
-            if ref is None:
-                continue
-            nx, ny = outwards[i]
-            off = outer[i] if outer[i] > 0.0 else step
-            sx, sy = edge_stations[i]
-            # Inner edge: a small gap outside the pavement, at the
-            # floor's start altitude (clean pavement-end tie-in).
-            ix, iy = sx + nx * _PAVEMENT_GAP_M, sy + ny * _PAVEMENT_GAP_M
-            inner_alts.append(round(
-                float(ref - floor_depth(_PAVEMENT_GAP_M)), 1))
-            inner_pts.append((ix, iy))
-            # Outer edge: at the daylight point, on the floor (= DEM
-            # there), so the fill meets natural ground, no cliff.
-            ox, oy = sx + nx * off, sy + ny * off
-            outer_pts.append((ox, oy))
-            outer_alts.append(round(float(ref - floor_depth(off)), 1))
-        if len(inner_pts) < 2:
+    for b in range(len(edges) - 1):
+        d0, d1 = edges[b], edges[b + 1]
+        # Stations whose fill reaches into this band.
+        idx = [i for i in range(n) if dropped[i] and outer[i] > d0]
+        if not idx:
             continue
-        ring = inner_pts + outer_pts[::-1]
-        alts = inner_alts + outer_alts[::-1]
-        out.append((ring, alts))
+        runs: list[list[int]] = []
+        cur = [idx[0]]
+        for j in idx[1:]:
+            if j - cur[-1] <= 2:
+                cur.append(j)
+            else:
+                runs.append(cur)
+                cur = [j]
+        runs.append(cur)
+        for run in runs:
+            i0, i1 = run[0], run[-1]
+            # Widen the FIRST band's runs by one station each side so
+            # the fill tapers longitudinally to its neighbours instead
+            # of ending in a wall; deeper bands end where their
+            # stations do (their width-wise taper is the daylight).
+            lo = max(0, i0 - 1) if b == 0 else i0
+            hi = min(n - 1, i1 + 1) if b == 0 else i1
+            inner_pts, inner_alts = [], []
+            outer_pts, outer_alts = [], []
+            for i in range(lo, hi + 1):
+                ref = edge_alts[i]
+                if ref is None:
+                    continue
+                nx, ny = outwards[i]
+                if outer[i] > d0:
+                    off = min(d1, outer[i])
+                elif b == 0:
+                    # Taper neighbour of a first-band run.
+                    off = step
+                else:
+                    continue
+                sx, sy = edge_stations[i]
+                ix, iy = sx + nx * d0, sy + ny * d0
+                inner_alts.append(round(
+                    float(ref - floor_depth(d0)), 1))
+                inner_pts.append((ix, iy))
+                ox, oy = sx + nx * off, sy + ny * off
+                outer_pts.append((ox, oy))
+                outer_alts.append(round(float(ref - floor_depth(off)), 1))
+            if len(inner_pts) < 2:
+                continue
+            ring = inner_pts + outer_pts[::-1]
+            alts = inner_alts + outer_alts[::-1]
+            out.append((ring, alts))
     return out
 
 
@@ -1406,11 +1440,14 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
     # lawful ≤3 %/≤5 % descent instead of a cliff at the pavement edge
     # (FAA AC 150/5300-13B §3.16.5 / ICAO Annex 14 §4.7 — the law lives
     # in ``grade_law``; plan: docs/runway_end_skirt_plan.md).  Both
-    # passes can fire on one end across rolling terrain; the shared
-    # ``_finalize`` resolves them into one region.
-    # Window (m) over which the runway's own end grade is measured, so
-    # a DESCENDING runway hands its grade to the skirt without a crease.
-    _SKIRT_END_GRADE_WINDOW_M = 30.0
+    # passes can fire on one end across rolling terrain (on disjoint
+    # stations — their triggers are mutually exclusive at a point).
+    # Skirts do NOT share the cuts' union finalize: unioning would
+    # dissolve the interior band rows that keep the rendered surface on
+    # the curved law floor — they get their own ``_finalize_skirts``,
+    # with per-vertex altitudes recomputed ANALYTICALLY from the outward
+    # projection so clipping can introduce vertices freely.
+    skirt_strips: list[tuple] = []
 
     def _emit_resa_skirt(mid, outward, runway_width, full_len, seed,
                          elev_fallback, approach_class):
@@ -1455,10 +1492,12 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
         eb = (p0[0] + perp[0] * half, p0[1] + perp[1] * half)
         stations = _stations(ea, eb, step)
         m = len(stations)
-        for ring, ralts in _build_filled_skirts(
+        band_edges = runway_end_skirt_profile_breakpoints(entry_grade)
+        for ring, _ralts in _build_filled_skirts(
                 stations, [ref] * m, [outward] * m, [governed] * m,
-                _floor_depth, rw_threshold, step, sample_dem):
-            _collect(ring, ralts, ROLE_RUNWAY_CLEARANCE)
+                _floor_depth, band_edges, rw_threshold, step, sample_dem):
+            skirt_strips.append(
+                (ring, p0, outward, float(ref), _floor_depth, governed))
 
     if source_runways:
         # AUTHORITATIVE: anchor each end at the apt.dat row-100 centreline
@@ -1516,6 +1555,72 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                     _sample_runway_segment_elev(s, mid[0], mid[1]),
                     runway_end_approach_class(0, 0))
 
+    def _finalize_skirts() -> int:
+        """Emit the collected skirt bands as individual shapes.  Each
+        band is clipped against the pavement/static geometry, the cut
+        strips (cut wins where both claim ground) and previously-emitted
+        skirt pieces (crossing-runway ends may overlap; first wins),
+        then its per-vertex altitudes are recomputed from the law floor
+        at each vertex's outward projection — exact regardless of what
+        vertices the clipping introduced."""
+        if not skirt_strips:
+            return 0
+        cut_block = None
+        if raw_strips:
+            try:
+                cut_block = unary_union(
+                    [p for p, _r, _a, _ro in raw_strips])
+            except _GEOM_EXC:
+                cut_block = None
+        emitted_fill = None
+        n = 0
+        for ring, p0, out_vec, ref, floor_depth, cap in skirt_strips:
+            try:
+                poly = Polygon(ring)
+                if not poly.is_valid:
+                    poly = poly.buffer(0)
+                for block in (static_block, cut_block, emitted_fill):
+                    if block is not None and not block.is_empty:
+                        poly = poly.difference(block)
+                if poly.is_empty:
+                    continue
+            except _GEOM_EXC:
+                continue
+            if poly.geom_type == "Polygon":
+                components = [poly]
+            elif poly.geom_type in ("MultiPolygon", "GeometryCollection"):
+                components = [g for g in poly.geoms
+                              if g.geom_type == "Polygon"]
+            else:
+                continue
+            nx, ny = out_vec
+            for comp in components:
+                for simple in _decompose_polygon_with_holes(
+                        comp, min_area_m2=_MIN_CUT_AREA_M2):
+                    if simple.is_empty or simple.area < _MIN_CUT_AREA_M2:
+                        continue
+                    piece_ring = _open_coords(simple)
+                    if len(piece_ring) < 3:
+                        continue
+                    alts = []
+                    for vx, vy in piece_ring:
+                        d = (vx - p0[0]) * nx + (vy - p0[1]) * ny
+                        d = max(_PAVEMENT_GAP_M, min(cap, d))
+                        alts.append(round(float(ref - floor_depth(d)), 1))
+                    layout.shapes.append(BuiltShape(
+                        polygon=simple, role=ROLE_RUNWAY_CLEARANCE,
+                        ref="runway_end_skirt",
+                        node_altitudes=alts + [alts[0]]))
+                    try:
+                        emitted_fill = (
+                            simple if emitted_fill is None
+                            else unary_union([emitted_fill, simple]))
+                    except _GEOM_EXC:
+                        pass
+                    n += 1
+        return n
+
     # Resolve all collected strips into minimal geometry in one pass.
     n_emitted = _finalize()
+    n_emitted += _finalize_skirts()
     return n_emitted

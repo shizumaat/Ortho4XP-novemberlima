@@ -188,11 +188,14 @@ def _law_floor_depth(distance_m):
 
 
 class TestBuildFilledSkirts:
-    def _build(self, sample_dem):
+    def _build(self, sample_dem, cap=_CAP):
         from auto_patch.clearance import _build_filled_skirts
-        stations, alts, outwards, caps = _edge()
+        from auto_patch.grade_law import (
+            runway_end_skirt_profile_breakpoints)
+        stations, alts, outwards, _caps = _edge()
         return _build_filled_skirts(
-            stations, alts, outwards, caps, _law_floor_depth,
+            stations, alts, outwards, [cap] * len(stations),
+            _law_floor_depth, runway_end_skirt_profile_breakpoints(),
             1.0, _STEP, sample_dem)
 
     def test_flat_terrain_leaves_no_skirt(self):
@@ -207,34 +210,59 @@ class TestBuildFilledSkirts:
         3 %/5 % caps) needs no fill."""
         assert self._build(lambda x, y: _REF - 0.02 * x) == []
 
-    def test_cliff_produces_skirt_on_law_floor(self):
-        """A sheer drop 10 m beyond the edge is filled: inner ring
-        vertices tie to the pavement-end altitude, outer vertices sit on
-        the law floor, and every altitude stays within the floor
-        envelope (never below the deepest lawful point, never above the
-        reference)."""
+    def test_cliff_produces_banded_skirt_on_law_floor(self):
+        """A sheer drop 10 m beyond the edge is filled as ABUTTING BANDS
+        split at the law's grade breakpoints (a single two-row ring
+        would render a straight chord sagging metres below the curved
+        floor).  Inner vertices tie to the pavement-end altitude, outer
+        vertices sit on the law floor, every altitude stays within the
+        floor envelope, and adjacent bands agree at their shared rows."""
         skirts = self._build(lambda x, y: _REF if x <= 10.0 else 60.0)
-        assert len(skirts) == 1
-        ring, alts = skirts[0]
-        assert len(ring) == len(alts)
+        assert len(skirts) >= 3   # near-zone splits + the linear tail
         deepest = _law_floor_depth(_CAP)
-        assert max(alts) <= _REF + 1e-9
-        assert min(alts) >= _REF - deepest - 0.1   # 0.1 m emit rounding
-        # The floor never reaches the 60 m terrain within the governed
-        # cap, so the skirt runs the full cap length.
-        assert max(x for x, _y in ring) == pytest.approx(_CAP)
-        # Outer-edge altitudes actually descend well below the reference
+        shared: dict = {}
+        for ring, alts in skirts:
+            assert len(ring) == len(alts)
+            assert max(alts) <= _REF + 1e-9
+            assert min(alts) >= _REF - deepest - 0.1  # emit rounding
+            for (x, y), a in zip(ring, alts):
+                key = (round(x, 2), round(y, 2))
+                assert shared.setdefault(key, a) == a, (
+                    f"band boundary altitude mismatch at {key}")
+        # Bands tile the full governed cap with no longitudinal gap.
+        assert max(x for ring, _a in skirts
+                   for x, _y in ring) == pytest.approx(_CAP)
+        # The deepest band actually descends well below the reference
         # (the skirt is a ramp, not a shelf).
-        assert min(alts) < _REF - 0.8 * deepest
+        assert min(a for _r, alts in skirts
+                   for a in alts) < _REF - 0.8 * deepest
+
+    def test_band_chords_stay_near_the_law_floor(self):
+        """Within each band the floor is one quadratic, so the ruled
+        chord between the band's rows sags at most rate·L²/8 ≈ 0.31 m
+        below the true floor — the whole point of banding."""
+        from auto_patch.grade_law import (
+            RUNWAY_END_SKIRT_MAX_GRADE_CHANGE_PER_M as RATE)
+        skirts = self._build(lambda x, y: _REF if x <= 10.0 else 60.0)
+        # Reconstruct each band's (d0, d1, alt0, alt1) from its ring on
+        # the y=0 centerline row and compare the chord midpoint.
+        for ring, alts in skirts:
+            xs = [x for x, _y in ring]
+            d0, d1 = min(xs), max(xs)
+            a0 = _REF - _law_floor_depth(d0)
+            a1 = _REF - _law_floor_depth(d1)
+            mid_chord = 0.5 * (a0 + a1)
+            mid_floor = _REF - _law_floor_depth(0.5 * (d0 + d1))
+            sag = mid_floor - mid_chord
+            assert sag <= RATE * (d1 - d0) ** 2 / 8.0 + 0.05
 
     def test_shallow_drop_daylights_before_the_cap(self):
         """Terrain 3 m below the reference: the floor overtakes it
-        within ~150 m, so the skirt daylights there instead of running
+        within ~85 m, so the skirt daylights there instead of running
         the full governed length."""
         skirts = self._build(lambda x, y: _REF if x <= 10.0 else _REF - 3.0)
-        assert len(skirts) == 1
-        ring, _alts = skirts[0]
-        reach = max(x for x, _y in ring)
+        assert skirts
+        reach = max(x for ring, _a in skirts for x, _y in ring)
         # Stations stop contributing once the floor is within the 1 m
         # trigger of the terrain, i.e. depth(d) ≥ 2 m, which the faired
         # profile reaches near d ≈ 85 m; one station of overshoot is by
@@ -244,15 +272,11 @@ class TestBuildFilledSkirts:
     def test_respects_governed_length_cap(self):
         """A shorter cap truncates the same cliff's skirt: beyond the
         governed footprint a drop is lawful and stays untouched."""
-        from auto_patch.clearance import _build_filled_skirts
-        stations, alts, outwards, _caps = _edge()
-        skirts = _build_filled_skirts(
-            stations, alts, outwards, [90.0] * len(stations),
-            _law_floor_depth, 1.0, _STEP,
-            lambda x, y: _REF if x <= 10.0 else 60.0)
-        assert len(skirts) == 1
-        ring, _alts = skirts[0]
-        assert max(x for x, _y in ring) == pytest.approx(90.0)
+        skirts = self._build(
+            lambda x, y: _REF if x <= 10.0 else 60.0, cap=90.0)
+        assert skirts
+        reach = max(x for ring, _a in skirts for x, _y in ring)
+        assert reach == pytest.approx(90.0)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -334,7 +358,11 @@ class TestEmitPassD:
         for s in cuts:
             assert s.node_altitudes
             assert max(s.node_altitudes) <= self._RUNWAY_ALT + 0.5
-            assert min(s.node_altitudes) < self._RUNWAY_ALT - 2.0
+        # The banded skirt descends as a whole (the near band alone
+        # lawfully drops < 1 m; the deep bands carry the ramp).
+        for side in (east, west):
+            assert min(a for s in side
+                       for a in s.node_altitudes) < self._RUNWAY_ALT - 2.0
 
     def test_governed_length_scales_with_approach_class(self, monkeypatch):
         """Same cliff on both ends; end a (west) is explicitly VISUAL,
@@ -352,3 +380,94 @@ class TestEmitPassD:
         assert west_reach > 60.0
         assert east_reach > 290.0
         assert east_reach <= 305.0 + _STEP + 1.0
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Validator: verification.check_runway_end_skirt (lockstep with Pass D)
+# ──────────────────────────────────────────────────────────────────────
+class TestSkirtValidator(TestEmitPassD):
+    def _validate(self, monkeypatch, layout, runway):
+        import math
+        from auto_patch import elevation, verification
+        from auto_patch.layout import R_EARTH
+
+        def _fake_sample_dem(dem, tile_lat, tile_lon, lat, lon):
+            x = math.radians(lon) * R_EARTH
+            if -10.0 <= x <= self._RUNWAY_LEN + 10.0:
+                return self._RUNWAY_ALT
+            return self._RUNWAY_ALT - 30.0
+
+        monkeypatch.setattr(elevation, "_sample_dem", _fake_sample_dem)
+        return verification.check_runway_end_skirt(
+            layout, dem=object(), tile_lat=0, tile_lon=0,
+            source_runways=[runway])
+
+    def test_ungoverned_cliffs_are_reported(self, monkeypatch):
+        """Gate OFF: nothing fills the drops, so the validator reports
+        both ends, worst-first, ~29 m below the law floor (30 m cliff
+        minus the shallow floor descent near its start)."""
+        layout = self._make_layout()
+        runway = self._make_runway()
+        self._emit(monkeypatch, layout, runway, gate_on=False)
+        findings = self._validate(monkeypatch, layout, runway)
+        assert len(findings) == 2
+        kinds = {f[0] for f in findings}
+        assert kinds == {"end_drop"}
+        desigs = {f[1] for f in findings}
+        assert desigs == {"09", "27"}
+        for _kind, _desig, below, tolerance, _latlon in findings:
+            assert tolerance == 1.5
+            assert 20.0 < below < 30.0
+        # worst-first ordering
+        assert findings[0][2] >= findings[1][2]
+
+    def test_emitted_skirts_satisfy_the_validator(self, monkeypatch):
+        """Gate ON: Pass D fills both drops up to the law floor, so the
+        same validator comes back clean — the emitter and the reader
+        share one law (no drift possible)."""
+        layout = self._make_layout()
+        runway = self._make_runway()
+        self._emit(monkeypatch, layout, runway, gate_on=True)
+        findings = self._validate(monkeypatch, layout, runway)
+        assert findings == []
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Fixture airports: validator smoke + gate-off baseline capture
+# ──────────────────────────────────────────────────────────────────────
+class TestSkirtValidatorAtFixtures:
+    @staticmethod
+    def _fixture_airports():
+        from conftest import baseline_airports, xplane_available
+        if not xplane_available():
+            return []
+        return baseline_airports()
+
+    def test_baseline_report(self):
+        """Reporter-only at the fixture airports (gate currently off in
+        default builds): the validator must RUN everywhere; its counts
+        are the M4 calibration baseline, printed for capture, never
+        asserted zero here."""
+        import math
+        airports = self._fixture_airports()
+        if not airports:
+            pytest.skip("X-Plane fixtures not available")
+        from conftest import cached_airport_layout
+        from auto_patch.elevation import _load_airport_dem
+        from auto_patch.verification import check_runway_end_skirt
+        for icao in airports:
+            layout = cached_airport_layout(icao)
+            lat0, lon0 = layout.anchor
+            dem = _load_airport_dem(lat0, lon0)
+            if dem is None:
+                continue
+            findings = check_runway_end_skirt(
+                layout, dem,
+                int(math.floor(lat0)), int(math.floor(lon0)))
+            assert isinstance(findings, list)
+            for kind, desig, below, tolerance, latlon in findings:
+                assert kind == "end_drop"
+                assert below > tolerance
+            print(f"[skirt-baseline] {icao}: {len(findings)} end(s) "
+                  + "; ".join(f"{f[1]} −{f[2]:.1f} m @{f[4]}"
+                              for f in findings))

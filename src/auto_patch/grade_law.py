@@ -180,6 +180,27 @@ def _runway_end_skirt_signed_grade(
     return max(lawful, reachable)
 
 
+def runway_end_skirt_profile_breakpoints(
+        start_grade: float = 0.0) -> list[float]:
+    """Distances (m, ascending) where the floor profile's GRADE LAW
+    changes — the boundaries of its piecewise-linear-grade segments.
+    Between consecutive breakpoints the floor is a single quadratic, so
+    an emitter rendering it as ruled bands split at these breakpoints
+    bounds the chord-vs-floor sagitta at ``rate · L² / 8`` (≤ 0.31 m for
+    the 61 m near zone) — far inside the fill trigger.  Single source
+    for the Pass D band edges AND the floor integration below."""
+    start_grade = min(0.0, start_grade)
+    rate = RUNWAY_END_SKIRT_MAX_GRADE_CHANGE_PER_M
+    return sorted({
+        RUNWAY_END_SKIRT_NEAR_ZONE_M,
+        RUNWAY_END_SKIRT_NEAR_ZONE_M
+        + (RUNWAY_END_SKIRT_MAX_DOWN_GRADE
+           - RUNWAY_END_SKIRT_NEAR_MAX_DOWN_GRADE) / rate,
+        (start_grade + RUNWAY_END_SKIRT_NEAR_MAX_DOWN_GRADE) / rate,
+        (start_grade + RUNWAY_END_SKIRT_MAX_DOWN_GRADE) / rate,
+    })
+
+
 def runway_end_skirt_floor_profile(
         distances_m: list[float], start_grade: float = 0.0) -> list[float]:
     """THE lowest lawful surface beyond a runway end, as DEPTHS (m, ≥ 0)
@@ -201,18 +222,10 @@ def runway_end_skirt_floor_profile(
     evaluate identical floors.
     """
     start_grade = min(0.0, start_grade)
-    rate = RUNWAY_END_SKIRT_MAX_GRADE_CHANGE_PER_M
     # Breakpoints of the piecewise-linear signed-grade function: the
     # near-zone boundary, the cap's own −3 %→−5 % easing end, and where
     # the curvature-reachable line meets each cap level.
-    breakpoints = sorted({
-        RUNWAY_END_SKIRT_NEAR_ZONE_M,
-        RUNWAY_END_SKIRT_NEAR_ZONE_M
-        + (RUNWAY_END_SKIRT_MAX_DOWN_GRADE
-           - RUNWAY_END_SKIRT_NEAR_MAX_DOWN_GRADE) / rate,
-        (start_grade + RUNWAY_END_SKIRT_NEAR_MAX_DOWN_GRADE) / rate,
-        (start_grade + RUNWAY_END_SKIRT_MAX_DOWN_GRADE) / rate,
-    })
+    breakpoints = runway_end_skirt_profile_breakpoints(start_grade)
 
     def _depth(distance_m: float) -> float:
         drop = 0.0
