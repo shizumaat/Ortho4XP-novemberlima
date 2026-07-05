@@ -1,3 +1,31 @@
+# STATUS — SESSION 20260704 (part 10): loop-route merge FIXED
+# (`41e2fa8`); progress window rework (`514dfd5`); honest solver banner
+
+> **LOOP-ROUTE MERGE BUG (user: hump still there after rebuild)**: for
+> a LOOP route, plain project() onto its own line returns the vertex
+> itself (distance 0) — the out-and-back legs NEVER merged (only
+> cross-route pairs did; the part-8 verification hit one of those).
+> `_project_excluding` splits the line at arc±60 m and projects onto
+> the remainders → the opposite leg.  Verified at the user's point
+> (60.7095257,-135.0734434): legs coincide within 0.5 m, cross-section
+> flat 703.12 across ±12 m.  CYXY merged runs 2→3, law-true 180.
+> NO separate worktree was ever involved — the user's rebuild had
+> simply picked up the mid-fix state.
+> **PROGRESS WINDOW (user spec, `514dfd5`)**: finished rows LEAVE the
+> list (shrinks as the tile completes; fails stay red; window closes
+> when the last row leaves); detail centered under the bar, [x/x]
+> numbering dropped; per-row timers — elapsed left, "About m:ss
+> remaining" right (elapsed × remaining fraction, "estimating…" <3 %);
+> window 470→560 wide.  Smoke-tested headed.
+> **SOLVER BANNER (`d799d03`)**: "per-surface Jacobi converged in
+> N/N iters" passed the FREE-NODE count as both numbers — NOT an
+> iteration cap (part-9 perf note corrected).  Active solve = ONE
+> route-profile solve on the single unified graph; "per-surface" is
+> only the package name now.
+> Suite at `41e2fa8` 21F/325P identical.
+
+---
+
 # STATUS — SESSION 20260704 (part 9): fairing precompute (`a7c5848`);
 # chord-fit REJECTED; SPJC tunnels NOT reproducible; perf audit
 
