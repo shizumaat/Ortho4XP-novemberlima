@@ -41,7 +41,8 @@ from typing import Callable, Optional
 from .config import (
     APRON_MAX_GRADE, BUILDING_FRONTAGE_MAX_GRADE, BUILDING_FULL_FRONTAGE,
     BUILDING_FULL_FRONTAGE_AREA_M2,
-    BUILDING_REACH_CORRIDOR_M, SERVICE_ROAD_MAX_GRADE, TAXI_MAX_GRADE)
+    BUILDING_REACH_CORRIDOR_M, RUNWAY_END_CLEARANCE_LENGTH_BY_CODE,
+    SERVICE_ROAD_MAX_GRADE, TAXI_MAX_GRADE, runway_code_number)
 
 # ── Law constants (the adjustable knobs of the law) ──────────────────────────
 APRON_ROLE = "apron"
@@ -115,6 +116,118 @@ def building_requires_full_frontage(area_m2: float) -> bool:
     local anchors; large frontages stay route-reach-checked) — so the level we
     BUILD a building at and the reach we CHECK it against come from one rule."""
     return bool(BUILDING_FULL_FRONTAGE) and area_m2 >= BUILDING_FULL_FRONTAGE_AREA_M2
+
+# ── Runway end skirt law (inverse RESA — downward terrain governance) ────────
+# Terrain beyond a runway end may not DROP away arbitrarily: FAA AC
+# 150/5300-13B §3.16.5 caps the RSA longitudinal grade at 0…−3 % for the
+# first 200 ft (61 m) beyond the end and −5 % beyond, with grade changes
+# limited to ±2 % per 100 ft (30.5 m); ICAO Annex 14 §4.7 caps RESA
+# downward slopes at 5 %.  Beyond the governed footprint a drop is LAWFUL
+# (Madeira-style), so the governed length is also the hard cap on emitted
+# fill.  Single source for the Pass D skirt EMITTER
+# (``clearance._emit_resa_skirt``) and the ``check_grade`` validator —
+# regulatory basis and plan: ``docs/runway_end_skirt_plan.md``.
+RUNWAY_END_SKIRT_NEAR_ZONE_M = 61.0             # FAA "first 200 feet"
+RUNWAY_END_SKIRT_NEAR_MAX_DOWN_GRADE = 0.03     # 0…−3 % in the near zone
+RUNWAY_END_SKIRT_MAX_DOWN_GRADE = 0.05          # −5 % beyond
+RUNWAY_END_SKIRT_MAX_GRADE_CHANGE_PER_M = 0.02 / 30.5   # ±2 % per 100 ft
+
+# Governed-length scaling by approach class (per-end, from
+# ``config.runway_end_approach_class``).  Visual ends clamp to the ICAO
+# 90 m minimum; precision ends extend to the FAA C/D/E footprint
+# (1,000 ft ≈ 305 m for code 3/4, the 240 m ICAO recommendation for
+# smaller precision runways).  Non-precision uses the by-code base.
+RUNWAY_END_SKIRT_VISUAL_MAX_LENGTH_M = 90.0
+RUNWAY_END_SKIRT_PRECISION_MIN_LENGTH_M = 240.0
+RUNWAY_END_SKIRT_PRECISION_CODE34_LENGTH_M = 305.0
+
+
+def runway_end_governed_length_m(
+        runway_length_m: float, approach_class: str) -> float:
+    """THE distance beyond the pavement end within which the down-slope
+    floor applies (and beyond which a drop is lawful).  Base footprint by
+    ICAO code number (``RUNWAY_END_CLEARANCE_LENGTH_BY_CODE``), scaled by
+    the end's approach class — better approaches earn a longer governed
+    apron of terrain, per FAA AC 150/5300-13B Appendix G."""
+    code = runway_code_number(runway_length_m)
+    base = RUNWAY_END_CLEARANCE_LENGTH_BY_CODE[code]
+    if approach_class == "visual":
+        return min(base, RUNWAY_END_SKIRT_VISUAL_MAX_LENGTH_M)
+    if approach_class == "precision":
+        if code >= 3:
+            return max(base, RUNWAY_END_SKIRT_PRECISION_CODE34_LENGTH_M)
+        return max(base, RUNWAY_END_SKIRT_PRECISION_MIN_LENGTH_M)
+    return base
+
+
+def _runway_end_skirt_signed_grade(
+        distance_m: float, start_grade: float) -> float:
+    """Signed grade (positive = climbing) of the LOWEST lawful surface at
+    ``distance_m`` beyond the runway end.  The steepest permissible
+    descent is bounded by BOTH what the grade-change rate can reach from
+    the runway's own end grade AND the zone's down-grade cap; the cap
+    itself eases from −3 % to −5 % at the near-zone boundary under the
+    same rate limit, so the floor has no curvature kink anywhere."""
+    rate = RUNWAY_END_SKIRT_MAX_GRADE_CHANGE_PER_M
+    reachable = start_grade - rate * distance_m
+    if distance_m <= RUNWAY_END_SKIRT_NEAR_ZONE_M:
+        lawful = -RUNWAY_END_SKIRT_NEAR_MAX_DOWN_GRADE
+    else:
+        lawful = max(
+            -RUNWAY_END_SKIRT_MAX_DOWN_GRADE,
+            -RUNWAY_END_SKIRT_NEAR_MAX_DOWN_GRADE
+            - rate * (distance_m - RUNWAY_END_SKIRT_NEAR_ZONE_M))
+    return max(lawful, reachable)
+
+
+def runway_end_skirt_floor_profile(
+        distances_m: list[float], start_grade: float = 0.0) -> list[float]:
+    """THE lowest lawful surface beyond a runway end, as DEPTHS (m, ≥ 0)
+    below the runway-end elevation at each requested distance.
+
+    The floor starts at the runway's own end grade (``start_grade``,
+    signed, positive = the runway climbs toward its end) so a DESCENDING
+    runway carries no grade discontinuity into the skirt, then steepens
+    under the grade-change rate limit to the near-zone cap (−3 %) and the
+    far cap (−5 %).  A CLIMBING end grade clamps to 0 at the pavement
+    end: the FAA near zone permits only downward slopes ("between 0 and
+    3.0 percent, with any slope being downward from the ends"), so a
+    crest legally terminates AT the runway end — and the skirt is
+    FILL-only; terrain above the pavement-end elevation is Pass C's
+    (cut) domain.
+
+    The grade function is piecewise linear, so trapezoid integration
+    between its breakpoints is EXACT — the emitter and the validator
+    evaluate identical floors.
+    """
+    start_grade = min(0.0, start_grade)
+    rate = RUNWAY_END_SKIRT_MAX_GRADE_CHANGE_PER_M
+    # Breakpoints of the piecewise-linear signed-grade function: the
+    # near-zone boundary, the cap's own −3 %→−5 % easing end, and where
+    # the curvature-reachable line meets each cap level.
+    breakpoints = sorted({
+        RUNWAY_END_SKIRT_NEAR_ZONE_M,
+        RUNWAY_END_SKIRT_NEAR_ZONE_M
+        + (RUNWAY_END_SKIRT_MAX_DOWN_GRADE
+           - RUNWAY_END_SKIRT_NEAR_MAX_DOWN_GRADE) / rate,
+        (start_grade + RUNWAY_END_SKIRT_NEAR_MAX_DOWN_GRADE) / rate,
+        (start_grade + RUNWAY_END_SKIRT_MAX_DOWN_GRADE) / rate,
+    })
+
+    def _depth(distance_m: float) -> float:
+        drop = 0.0
+        previous = 0.0
+        for cut in [b for b in breakpoints if 0.0 < b < distance_m] \
+                + [distance_m]:
+            segment = cut - previous
+            drop -= 0.5 * segment * (
+                _runway_end_skirt_signed_grade(previous, start_grade)
+                + _runway_end_skirt_signed_grade(cut, start_grade))
+            previous = cut
+        return max(0.0, drop)
+
+    return [_depth(d) for d in distances_m]
+
 
 # Pairs closer than this are ring/relative noise — not a grade constraint.
 MIN_PAIR_DIST_M = 0.5
