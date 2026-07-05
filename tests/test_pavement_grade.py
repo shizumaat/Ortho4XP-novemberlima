@@ -157,6 +157,15 @@ def test_pavement_grade(tmp_path, icao):
         seam_pins_ll = [[round(la, 7), round(lo, 7)]
                         for (la, lo) in
                         (getattr(layout, "_seam_pin_ll", None) or [])]
+        # BREAK-REGION quarantine, exactly like the CLI (user 2026-07-05,
+        # e2031ff): pairs touching a solver-declared broken node are the
+        # pocket's designed over-cap blend — reported separately by
+        # run_checks and excluded from the ACTIONABLE within count this
+        # test gates.  Passing the export (even empty) keeps the split
+        # semantics identical to the sidecar path.
+        break_nodes_ll = [[round(la, 7), round(lo, 7)]
+                          for (la, lo) in
+                          (getattr(layout, "_break_node_ll", None) or [])]
 
         w, c, s = check_grade.run_checks(
             out,
@@ -171,6 +180,7 @@ def test_pavement_grade(tmp_path, icao):
                     if layout.anchor is not None else None),
             seam_pins_ll=seam_pins_ll,
             mesh_edges_ll=mesh_edges_ll,
+            break_nodes_ll=break_nodes_ll,
         )
         within += w
         cross += c
