@@ -164,3 +164,191 @@ class TestFloorProfile:
         forward = runway_end_skirt_floor_profile([50.0, 100.0, 200.0])
         backward = runway_end_skirt_floor_profile([200.0, 100.0, 50.0])
         assert forward == list(reversed(backward))
+
+
+# ──────────────────────────────────────────────────────────────────────
+# _build_filled_skirts — the fill-direction twin of the cut builder
+# ──────────────────────────────────────────────────────────────────────
+_STEP = 5.0
+_REF = 100.0
+_CAP = 240.0
+
+
+def _edge(n_stations=9):
+    """A straight pavement-end edge along y, filling outward along +x."""
+    stations = [(0.0, float(i) * _STEP) for i in range(n_stations)]
+    outwards = [(1.0, 0.0)] * n_stations
+    alts = [_REF] * n_stations
+    caps = [_CAP] * n_stations
+    return stations, alts, outwards, caps
+
+
+def _law_floor_depth(distance_m):
+    return runway_end_skirt_floor_profile([distance_m])[0]
+
+
+class TestBuildFilledSkirts:
+    def _build(self, sample_dem):
+        from auto_patch.clearance import _build_filled_skirts
+        stations, alts, outwards, caps = _edge()
+        return _build_filled_skirts(
+            stations, alts, outwards, caps, _law_floor_depth,
+            1.0, _STEP, sample_dem)
+
+    def test_flat_terrain_leaves_no_skirt(self):
+        assert self._build(lambda x, y: _REF) == []
+
+    def test_rising_terrain_leaves_no_skirt(self):
+        """Rising terrain is the CUT passes' domain."""
+        assert self._build(lambda x, y: _REF + 0.02 * x) == []
+
+    def test_lawful_gentle_descent_leaves_no_skirt(self):
+        """Terrain already descending within the law floor (2 % ≤ the
+        3 %/5 % caps) needs no fill."""
+        assert self._build(lambda x, y: _REF - 0.02 * x) == []
+
+    def test_cliff_produces_skirt_on_law_floor(self):
+        """A sheer drop 10 m beyond the edge is filled: inner ring
+        vertices tie to the pavement-end altitude, outer vertices sit on
+        the law floor, and every altitude stays within the floor
+        envelope (never below the deepest lawful point, never above the
+        reference)."""
+        skirts = self._build(lambda x, y: _REF if x <= 10.0 else 60.0)
+        assert len(skirts) == 1
+        ring, alts = skirts[0]
+        assert len(ring) == len(alts)
+        deepest = _law_floor_depth(_CAP)
+        assert max(alts) <= _REF + 1e-9
+        assert min(alts) >= _REF - deepest - 0.1   # 0.1 m emit rounding
+        # The floor never reaches the 60 m terrain within the governed
+        # cap, so the skirt runs the full cap length.
+        assert max(x for x, _y in ring) == pytest.approx(_CAP)
+        # Outer-edge altitudes actually descend well below the reference
+        # (the skirt is a ramp, not a shelf).
+        assert min(alts) < _REF - 0.8 * deepest
+
+    def test_shallow_drop_daylights_before_the_cap(self):
+        """Terrain 3 m below the reference: the floor overtakes it
+        within ~150 m, so the skirt daylights there instead of running
+        the full governed length."""
+        skirts = self._build(lambda x, y: _REF if x <= 10.0 else _REF - 3.0)
+        assert len(skirts) == 1
+        ring, _alts = skirts[0]
+        reach = max(x for x, _y in ring)
+        # Stations stop contributing once the floor is within the 1 m
+        # trigger of the terrain, i.e. depth(d) ≥ 2 m, which the faired
+        # profile reaches near d ≈ 85 m; one station of overshoot is by
+        # construction (last + step).
+        assert 60.0 < reach < 120.0
+
+    def test_respects_governed_length_cap(self):
+        """A shorter cap truncates the same cliff's skirt: beyond the
+        governed footprint a drop is lawful and stays untouched."""
+        from auto_patch.clearance import _build_filled_skirts
+        stations, alts, outwards, _caps = _edge()
+        skirts = _build_filled_skirts(
+            stations, alts, outwards, [90.0] * len(stations),
+            _law_floor_depth, 1.0, _STEP,
+            lambda x, y: _REF if x <= 10.0 else 60.0)
+        assert len(skirts) == 1
+        ring, _alts = skirts[0]
+        assert max(x for x, _y in ring) == pytest.approx(90.0)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Pass D end-to-end: emit_surface_clearance_cuts with a synthetic layout
+# ──────────────────────────────────────────────────────────────────────
+class TestEmitPassD:
+    _RUNWAY_LEN = 1500.0   # ICAO code 3
+    _RUNWAY_ALT = 100.0
+
+    def _make_layout(self):
+        from shapely.geometry import Polygon
+        from auto_patch.layout import BuiltShape, PavementLayout
+        half_width = 22.5
+        rect = Polygon([
+            (0.0, -half_width), (self._RUNWAY_LEN, -half_width),
+            (self._RUNWAY_LEN, half_width), (0.0, half_width)])
+        layout = PavementLayout(icao="ZZZZ", anchor=(0.0, 0.0))
+        layout.shapes.append(BuiltShape(
+            polygon=rect, role="runway", ref="09-27",
+            altitude_high=self._RUNWAY_ALT,
+            altitude_low=self._RUNWAY_ALT))
+        return layout
+
+    def _make_runway(self, markings_a=0, lights_a=0,
+                     markings_b=0, lights_b=0):
+        import math
+        from auto_patch.apt_dat_reader import Runway
+        from auto_patch.layout import R_EARTH
+        lon_b = math.degrees(self._RUNWAY_LEN / R_EARTH)
+        return Runway(
+            desig_a="09", desig_b="27",
+            lat_a=0.0, lon_a=0.0, lat_b=0.0, lon_b=lon_b,
+            width_m=45.0, surface_code=1,
+            displaced_a_m=0.0, displaced_b_m=0.0,
+            markings_a=markings_a, approach_lights_a=lights_a,
+            markings_b=markings_b, approach_lights_b=lights_b)
+
+    def _emit(self, monkeypatch, layout, runway, gate_on=True):
+        """Run the clearance emitter over a synthetic DEM: flat at
+        runway level everywhere except sheer 30 m drops starting 10 m
+        beyond BOTH runway ends (x < −10 and x > length + 10)."""
+        import math
+        from auto_patch import clearance
+        from auto_patch.layout import R_EARTH
+
+        def _fake_sample_dem(dem, tile_lat, tile_lon, lat, lon):
+            x = math.radians(lon) * R_EARTH
+            if -10.0 <= x <= self._RUNWAY_LEN + 10.0:
+                return self._RUNWAY_ALT
+            return self._RUNWAY_ALT - 30.0
+
+        monkeypatch.setattr(clearance, "_sample_dem", _fake_sample_dem)
+        monkeypatch.setattr(
+            clearance, "RUNWAY_END_SKIRT_ENABLED", gate_on)
+        return clearance.emit_surface_clearance_cuts(
+            layout, dem=object(), tile_lat=0, tile_lon=0,
+            source_runways=[runway])
+
+    @staticmethod
+    def _clearance_shapes(layout):
+        return [s for s in layout.shapes if s.role == "runway_clearance"]
+
+    def test_gate_off_emits_nothing(self, monkeypatch):
+        layout = self._make_layout()
+        n = self._emit(monkeypatch, layout, self._make_runway(),
+                       gate_on=False)
+        assert n == 0
+        assert self._clearance_shapes(layout) == []
+
+    def test_cliffs_beyond_both_ends_get_skirts(self, monkeypatch):
+        layout = self._make_layout()
+        n = self._emit(monkeypatch, layout, self._make_runway())
+        assert n >= 2
+        cuts = self._clearance_shapes(layout)
+        east = [s for s in cuts
+                if s.polygon.centroid.x > self._RUNWAY_LEN]
+        west = [s for s in cuts if s.polygon.centroid.x < 0.0]
+        assert east and west
+        for s in cuts:
+            assert s.node_altitudes
+            assert max(s.node_altitudes) <= self._RUNWAY_ALT + 0.5
+            assert min(s.node_altitudes) < self._RUNWAY_ALT - 2.0
+
+    def test_governed_length_scales_with_approach_class(self, monkeypatch):
+        """Same cliff on both ends; end a (west) is explicitly VISUAL,
+        end b (east) is PRECISION (ALSF-II) — the west skirt stops at
+        the 90 m visual clamp while the east one runs to the 305 m
+        precision footprint."""
+        layout = self._make_layout()
+        self._emit(monkeypatch, layout,
+                   self._make_runway(markings_a=1, lights_b=2))
+        cuts = self._clearance_shapes(layout)
+        west_reach = -min(s.polygon.bounds[0] for s in cuts)
+        east_reach = (max(s.polygon.bounds[2] for s in cuts)
+                      - self._RUNWAY_LEN)
+        assert west_reach <= 90.0 + _STEP + 1.0
+        assert west_reach > 60.0
+        assert east_reach > 290.0
+        assert east_reach <= 305.0 + _STEP + 1.0

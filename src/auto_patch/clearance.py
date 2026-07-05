@@ -58,9 +58,15 @@ from .config import (
     CLEARANCE_STATION_STEP_M,
     CLEARANCE_LATERAL_MAX_SLOPE,
     RUNWAY_END_RESA_MAX_SLOPE,
+    RUNWAY_END_SKIRT_ENABLED,
+    runway_end_approach_class,
     runway_strip_half_width_m,
     taxiway_clearance_half_width_for_letter,
     taxiway_clearance_half_width_m,
+)
+from .grade_law import (
+    runway_end_governed_length_m,
+    runway_end_skirt_floor_profile,
 )
 from .layout import (
     BuiltShape,
@@ -555,6 +561,104 @@ def _build_graded_strips(edge_stations, edge_alts, outwards,
             ox, oy = sx + nx * off, sy + ny * off
             outer_pts.append((ox, oy))
             outer_alts.append(round(float(ref + slope * off), 1))
+        if len(inner_pts) < 2:
+            continue
+        ring = inner_pts + outer_pts[::-1]
+        alts = inner_alts + outer_alts[::-1]
+        out.append((ring, alts))
+    return out
+
+
+# ──────────────────────────────────────────────────────────────────
+# Core: build FILL skirts off one edge (the inverse of the cut strips)
+# ──────────────────────────────────────────────────────────────────
+def _build_filled_skirts(edge_stations, edge_alts, outwards,
+                         band_caps, floor_depth, trigger, step,
+                         sample_dem):
+    """Fill-direction twin of ``_build_graded_strips``: at each station a
+    FLOOR descends from the pavement-end altitude,
+
+        floor(d) = edge_alt − floor_depth(d)
+
+    (``floor_depth`` is the law's lowest-lawful-surface profile,
+    ``grade_law.runway_end_skirt_floor_profile``, as a per-distance
+    callable).  Terrain BELOW the floor is filled up to it, and the fill
+    DAYLIGHTS where the floor meets the DEM — so the skirt is only as
+    long as it needs to be, capped at ``band_caps[i]`` (the governed
+    length; beyond it a drop is lawful).  Fill-only: a station
+    contributes ONLY where the terrain falls more than ``trigger`` m
+    below the floor; flat or rising terrain is left untouched (that is
+    the cut passes' domain).
+
+    Same run-grouping / ring construction as the cut twin: inner edge a
+    small gap outside the pavement at the floor's start altitude, outer
+    edge at the daylight point on the floor (= DEM there), so the skirt
+    meets natural ground with no step.  Returns ``(ring_open,
+    alts_open)`` pairs.
+    """
+    n = len(edge_stations)
+    outer: list[float] = [0.0] * n
+    dropped: list[bool] = [False] * n
+    for i, (sx, sy) in enumerate(edge_stations):
+        ref = edge_alts[i]
+        if ref is None:
+            continue
+        nx, ny = outwards[i]
+        cap = band_caps[i]
+        if cap <= _PAVEMENT_GAP_M:
+            continue
+        nst = max(1, int(math.ceil(cap / step)))
+        last = 0.0
+        for k in range(1, nst + 1):
+            d = min(cap, k * step)
+            floor = ref - floor_depth(d)
+            dd = sample_dem(sx + nx * d, sy + ny * d)
+            if dd is not None and dd < floor - trigger:
+                last = d
+        if last > 0.0:
+            dropped[i] = True
+            outer[i] = min(cap, last + step)
+    # Group consecutive dropped stations into runs (1-station slack).
+    idx = [i for i in range(n) if dropped[i]]
+    if not idx:
+        return []
+    runs: list[list[int]] = []
+    cur = [idx[0]]
+    for j in idx[1:]:
+        if j - cur[-1] <= 2:
+            cur.append(j)
+        else:
+            runs.append(cur)
+            cur = [j]
+    runs.append(cur)
+
+    out: list[tuple[list, list]] = []
+    for run in runs:
+        i0, i1 = run[0], run[-1]
+        # Widen the run by one station each side so the fill tapers
+        # longitudinally to its neighbours instead of ending in a wall.
+        lo = max(0, i0 - 1)
+        hi = min(n - 1, i1 + 1)
+        inner_pts, inner_alts = [], []
+        outer_pts, outer_alts = [], []
+        for i in range(lo, hi + 1):
+            ref = edge_alts[i]
+            if ref is None:
+                continue
+            nx, ny = outwards[i]
+            off = outer[i] if outer[i] > 0.0 else step
+            sx, sy = edge_stations[i]
+            # Inner edge: a small gap outside the pavement, at the
+            # floor's start altitude (clean pavement-end tie-in).
+            ix, iy = sx + nx * _PAVEMENT_GAP_M, sy + ny * _PAVEMENT_GAP_M
+            inner_alts.append(round(
+                float(ref - floor_depth(_PAVEMENT_GAP_M)), 1))
+            inner_pts.append((ix, iy))
+            # Outer edge: at the daylight point, on the floor (= DEM
+            # there), so the fill meets natural ground, no cliff.
+            ox, oy = sx + nx * off, sy + ny * off
+            outer_pts.append((ox, oy))
+            outer_alts.append(round(float(ref - floor_depth(off)), 1))
         if len(inner_pts) < 2:
             continue
         ring = inner_pts + outer_pts[::-1]
@@ -1295,6 +1399,67 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                 RUNWAY_END_RESA_MAX_SLOPE, rw_threshold, step, sample_dem):
             _collect(ring, ralts, ROLE_RUNWAY_CLEARANCE)
 
+    # ── Pass D: runway-end down-slope SKIRT (inverse RESA) ──
+    # The exact mirror of Pass C: where Pass C cuts terrain that RISES
+    # above the 5 % up-ramp, the skirt fills terrain that DROPS away
+    # beyond the end, so a runway ending at a hillside brow meets a
+    # lawful ≤3 %/≤5 % descent instead of a cliff at the pavement edge
+    # (FAA AC 150/5300-13B §3.16.5 / ICAO Annex 14 §4.7 — the law lives
+    # in ``grade_law``; plan: docs/runway_end_skirt_plan.md).  Both
+    # passes can fire on one end across rolling terrain; the shared
+    # ``_finalize`` resolves them into one region.
+    # Window (m) over which the runway's own end grade is measured, so
+    # a DESCENDING runway hands its grade to the skirt without a crease.
+    _SKIRT_END_GRADE_WINDOW_M = 30.0
+
+    def _emit_resa_skirt(mid, outward, runway_width, full_len, seed,
+                         elev_fallback, approach_class):
+        """Build the down-slope skirt off one runway end.  Same anchor
+        geometry as ``_emit_resa``; the governed length scales with the
+        end's approach class (better approaches earn a longer smoothed
+        apron of terrain)."""
+        nx, ny = outward
+        start = _pavement_exit_along(prep_pav, seed[0], seed[1], nx, ny,
+                                     _RESA_PAVEMENT_PROBE_MAX_M, step)
+        p0 = (seed[0] + nx * start, seed[1] + ny * start)
+        ref = _pav_alt(airside, p0[0] - nx * 1.0, p0[1] - ny * 1.0)
+        if ref is None and elev_fallback is not None:
+            ref = elev_fallback()
+        if ref is None:
+            return
+        # The runway's own end grade (signed, positive = climbing toward
+        # the end), sampled over a short window inside the pavement.
+        inside = _pav_alt(
+            airside,
+            p0[0] - nx * (1.0 + _SKIRT_END_GRADE_WINDOW_M),
+            p0[1] - ny * (1.0 + _SKIRT_END_GRADE_WINDOW_M))
+        entry_grade = 0.0
+        if inside is not None:
+            entry_grade = (float(ref) - float(inside)) \
+                / _SKIRT_END_GRADE_WINDOW_M
+            entry_grade = max(-0.05, min(0.05, entry_grade))
+        governed = runway_end_governed_length_m(full_len, approach_class)
+        depth_cache: dict[float, float] = {}
+
+        def _floor_depth(distance_m: float) -> float:
+            depth = depth_cache.get(distance_m)
+            if depth is None:
+                depth = runway_end_skirt_floor_profile(
+                    [distance_m], entry_grade)[0]
+                depth_cache[distance_m] = depth
+            return depth
+
+        half = max(runway_width, runway_strip_half_width_m(full_len))
+        perp = (-ny, nx)
+        ea = (p0[0] - perp[0] * half, p0[1] - perp[1] * half)
+        eb = (p0[0] + perp[0] * half, p0[1] + perp[1] * half)
+        stations = _stations(ea, eb, step)
+        m = len(stations)
+        for ring, ralts in _build_filled_skirts(
+                stations, [ref] * m, [outward] * m, [governed] * m,
+                _floor_depth, rw_threshold, step, sample_dem):
+            _collect(ring, ralts, ROLE_RUNWAY_CLEARANCE)
+
     if source_runways:
         # AUTHORITATIVE: anchor each end at the apt.dat row-100 centreline
         # endpoint + width, so the RESA position/size never depends on the
@@ -1311,12 +1476,24 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
             if full_len < 1.0 or width <= 0.0:
                 continue
             ux, uy = dx / full_len, dy / full_len
-            for end_pt, outward in (((ax, ay), (-ux, -uy)),
-                                    ((bx, by), (ux, uy))):
+            end_metadata = (
+                (getattr(r, "markings_a", 0),
+                 getattr(r, "approach_lights_a", 0)),
+                (getattr(r, "markings_b", 0),
+                 getattr(r, "approach_lights_b", 0)),
+            )
+            for (end_pt, outward), (markings, lights) in zip(
+                    (((ax, ay), (-ux, -uy)), ((bx, by), (ux, uy))),
+                    end_metadata):
                 seed = (end_pt[0] - outward[0] * _RESA_SEED_INSET_M,
                         end_pt[1] - outward[1] * _RESA_SEED_INSET_M)
                 _emit_resa(end_pt, outward, width, full_len, seed,
                            lambda s=seed: _pav_alt(airside, s[0], s[1]))
+                if RUNWAY_END_SKIRT_ENABLED:
+                    _emit_resa_skirt(
+                        end_pt, outward, width, full_len, seed,
+                        lambda s=seed: _pav_alt(airside, s[0], s[1]),
+                        runway_end_approach_class(markings, lights))
     else:
         # FALLBACK: detect ends from the emitted runway rects.
         for s, a, b, full_len in _runway_end_edges(runway_shapes):
@@ -1330,6 +1507,14 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
             _emit_resa(mid, outward, runway_width, full_len, mid,
                        lambda s=s, mid=mid:
                        _sample_runway_segment_elev(s, mid[0], mid[1]))
+            if RUNWAY_END_SKIRT_ENABLED:
+                # No apt.dat metadata on this path — the blank-data
+                # ladder classifies the end non_precision (errs long).
+                _emit_resa_skirt(
+                    mid, outward, runway_width, full_len, mid,
+                    lambda s=s, mid=mid:
+                    _sample_runway_segment_elev(s, mid[0], mid[1]),
+                    runway_end_approach_class(0, 0))
 
     # Resolve all collected strips into minimal geometry in one pass.
     n_emitted = _finalize()

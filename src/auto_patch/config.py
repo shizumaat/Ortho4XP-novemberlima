@@ -108,6 +108,7 @@ __all__ = [
     "runway_strip_half_width_m",
     "runway_end_clearance_length_m",
     "runway_end_approach_class",
+    "RUNWAY_END_SKIRT_ENABLED",
     "PRECISION_APPROACH_LIGHT_CODES",
     "PRECISION_MARKINGS_CODES",
     "NON_PRECISION_MARKINGS_CODES",
@@ -1562,6 +1563,15 @@ CLEARANCE_OBSTRUCTION_THRESHOLD_M = {
     "taxiway": 1.0,
     "runway":  1.0,
 }
+
+# Runway end skirt (inverse RESA): govern terrain that DROPS beyond a
+# runway end, mirroring the cut-only RESA ramp that governs terrain that
+# rises.  The law itself (down-grade caps, grade-change rate, governed
+# length by approach class) lives in ``grade_law`` — this is only the
+# feature gate.  Default OFF until calibrated at the fixture airports
+# (docs/runway_end_skirt_plan.md M4 flips it on).
+RUNWAY_END_SKIRT_ENABLED = (
+    _os.environ.get("O4_RUNWAY_END_SKIRT", "0") == "1")
 
 # Safety cap (m) on how far a clearance band reaches outward from the
 # pavement edge, bounding earthwork.  Must be >= the largest band we
