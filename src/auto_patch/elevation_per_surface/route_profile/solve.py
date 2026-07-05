@@ -1293,6 +1293,27 @@ def _fair_ring_edges(layout, elev, bucket_to_idx, anchors, node_band,
     n = len(elev)
     n_band = len(node_band) if node_band is not None else 0
 
+    # Building pads are FLAT by ruling — fairing must never move a node
+    # a pad ring OWNS, even when that node is encountered on a
+    # NEIGHBOUR's ring (CYXY building9: fairing the adjacent junction
+    # ring dragged the shared corner 0.16 m off the pad level; the pad
+    # flat group ran BEFORE this pass and could not restore it).  Pad
+    # ring nodes therefore join the anchor set for every caller.
+    building_ring_nodes: set = set()
+    for s in layout.shapes:
+        if (s.role != ROLE_BUILDING or s.polygon is None
+                or s.polygon.is_empty):
+            continue
+        try:
+            for (x, y) in s.polygon.exterior.coords:
+                i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+                if i is not None and i < n:
+                    building_ring_nodes.add(i)
+        except Exception:
+            continue
+    if building_ring_nodes:
+        anchors = set(anchors or ()) | building_ring_nodes
+
     # ── Precompute fairable TRIPLES once (geometry never changes) —
     # the sweeps then run on plain tuples, no per-sweep geometry work.
     triples = []          # (a, b, d, l1, l2) — flat list, for the sweeps
