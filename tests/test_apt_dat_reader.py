@@ -93,6 +93,43 @@ class TestRunwayParsing:
         assert rwy.blast_a_m == 60.0
         assert rwy.blast_b_m == 60.0
 
+    def test_runway_approach_metadata_defaults(self):
+        """The synthetic fixture's end blocks carry zeros for markings
+        and approach lights — the parsed fields mirror that."""
+        apt = APR.load_airport(_FIXTURE, "ZZZZ")
+        rwy = apt.runways[0]
+        assert rwy.markings_a == 0
+        assert rwy.markings_b == 0
+        assert rwy.approach_lights_a == 0
+        assert rwy.approach_lights_b == 0
+
+    def test_runway_approach_metadata_fields(self):
+        """Markings (end-block index 5) and approach lights (index 6)
+        are retained per end: precision markings + ALSF-II on end a,
+        visual markings + ODALS on end b."""
+        row = ("100 45.00 1 0 0.25 1 1 0 "
+               "09 -12.0 -77.1 0 60 3 2 1 1 "
+               "27 -12.0 -77.09 0 60 1 11 0 0")
+        rwy = APR._parse_runway(row.split())
+        assert rwy is not None
+        assert rwy.markings_a == 3
+        assert rwy.approach_lights_a == 2
+        assert rwy.markings_b == 1
+        assert rwy.approach_lights_b == 11
+
+    def test_runway_approach_metadata_bad_tokens_read_zero(self):
+        """Non-numeric markings / approach-light tokens degrade to 0
+        instead of rejecting the whole runway row."""
+        row = ("100 45.00 1 0 0.25 1 1 0 "
+               "09 -12.0 -77.1 0 60 x y 1 1 "
+               "27 -12.0 -77.09 0 60 1 11 0 0")
+        rwy = APR._parse_runway(row.split())
+        assert rwy is not None
+        assert rwy.markings_a == 0
+        assert rwy.approach_lights_a == 0
+        assert rwy.markings_b == 1
+        assert rwy.approach_lights_b == 11
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Pavement parsing

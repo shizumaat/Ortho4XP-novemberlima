@@ -150,6 +150,15 @@ class Runway:
     # width in whole metres per side; < 100 ⇒ bare surface code (no
     # explicit width); 0 ⇒ no shoulder.
     shoulder_code: int = 0
+    # Per-end runway markings code (apt.dat 1000 spec: 0 none, 1 visual,
+    # 2 non-precision, 3 precision, 4 UK non-precision, 5 UK precision).
+    markings_a: int = 0
+    markings_b: int = 0
+    # Per-end approach-lighting code (0 none, 1 ALSF-I, 2 ALSF-II,
+    # 3 Calvert, 4 Calvert ILS Cat II/III, 5 SSALR, 6 SSALF, 7 SALS,
+    # 8 MALSR, 9 MALSF, 10 MALS, 11 ODALS, 12 RAIL).
+    approach_lights_a: int = 0
+    approach_lights_b: int = 0
 
 
 @dataclass
@@ -962,6 +971,19 @@ def _parse_runway(toks: list[str]) -> Runway | None:
         lon_b = float(end_b[2])
         displaced_b_m = float(end_b[3])
         blast_b_m = float(end_b[4])
+
+        def _end_code(end_block: list[str], index: int) -> int:
+            """Optional trailing end-block field (markings / approach
+            lights); rows trimmed short of the full 9 tokens read 0."""
+            try:
+                return int(float(end_block[index]))
+            except (ValueError, IndexError):
+                return 0
+
+        markings_a = _end_code(end_a, 5)
+        approach_lights_a = _end_code(end_a, 6)
+        markings_b = _end_code(end_b, 5)
+        approach_lights_b = _end_code(end_b, 6)
     except (ValueError, IndexError):
         return None
 
@@ -972,6 +994,9 @@ def _parse_runway(toks: list[str]) -> Runway | None:
         displaced_a_m=displaced_a_m, displaced_b_m=displaced_b_m,
         blast_a_m=blast_a_m, blast_b_m=blast_b_m,
         shoulder_code=shoulder_code,
+        markings_a=markings_a, markings_b=markings_b,
+        approach_lights_a=approach_lights_a,
+        approach_lights_b=approach_lights_b,
     )
 
 

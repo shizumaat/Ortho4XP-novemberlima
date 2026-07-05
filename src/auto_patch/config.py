@@ -107,6 +107,11 @@ __all__ = [
     "runway_code_number",
     "runway_strip_half_width_m",
     "runway_end_clearance_length_m",
+    "runway_end_approach_class",
+    "PRECISION_APPROACH_LIGHT_CODES",
+    "PRECISION_MARKINGS_CODES",
+    "NON_PRECISION_MARKINGS_CODES",
+    "VISUAL_MARKINGS_CODE",
     "taxiway_code_letter",
     "taxiway_clearance_half_width_m",
     "taxiway_clearance_half_width_for_letter",
@@ -1638,6 +1643,44 @@ def runway_strip_half_width_m(length_m: float) -> float:
 def runway_end_clearance_length_m(length_m: float) -> float:
     """RESA / runway-end graded distance (m) beyond the runway end."""
     return RUNWAY_END_CLEARANCE_LENGTH_BY_CODE[runway_code_number(length_m)]
+
+
+# Approach-lighting systems (apt.dat row-100 end field) that imply a
+# precision instrument approach: ALSF-I (1), ALSF-II (2), Calvert (3),
+# Calvert ILS Cat II/III (4), SSALR (5), MALSR (8).  The remaining
+# codes (SSALF/SALS/MALSF/MALS/ODALS/RAIL) also serve non-precision
+# approaches, so they do not upgrade the class on their own.
+PRECISION_APPROACH_LIGHT_CODES = frozenset((1, 2, 3, 4, 5, 8))
+
+# apt.dat row-100 runway markings codes (per end): 0 none, 1 visual,
+# 2 non-precision, 3 precision, 4 UK non-precision, 5 UK precision.
+PRECISION_MARKINGS_CODES = frozenset((3, 5))
+NON_PRECISION_MARKINGS_CODES = frozenset((2, 4))
+VISUAL_MARKINGS_CODE = 1
+
+
+def runway_end_approach_class(
+        markings_code: int, approach_lights_code: int) -> str:
+    """Approach class of ONE runway end: ``"visual"``,
+    ``"non_precision"`` or ``"precision"``.
+
+    Classification ladder: explicit precision markings, else a
+    precision-grade approach lighting system, else explicit
+    non-precision / visual markings.  Gateway apt.dat data frequently
+    leaves both fields 0 on runways that plainly have instrument
+    approaches, so a blank row defaults to ``"non_precision"`` — never
+    let missing data pick the SHORT end-clearance footprint; only an
+    explicit visual marking does that.
+    """
+    if markings_code in PRECISION_MARKINGS_CODES:
+        return "precision"
+    if approach_lights_code in PRECISION_APPROACH_LIGHT_CODES:
+        return "precision"
+    if markings_code in NON_PRECISION_MARKINGS_CODES:
+        return "non_precision"
+    if markings_code == VISUAL_MARKINGS_CODE:
+        return "visual"
+    return "non_precision"
 
 
 def taxiway_code_letter(width_m: float) -> str:
