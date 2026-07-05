@@ -1,6 +1,41 @@
 # Runway-end down-slope skirt ("inverse RESA") — plan
 
-**Status: PLAN (2026-07-05). Nothing implemented.**
+**Status (2026-07-05, branch `runway-end-skirt`): M0–M3 IMPLEMENTED,
+gate `O4_RUNWAY_END_SKIRT` default OFF.  M4 (calibration + default-on)
+and M5 (pre-threshold smoothness) remain.**
+
+Implementation deltas vs the original design (§3):
+
+* **Banded emission.**  The law floor is piecewise QUADRATIC, and a
+  two-row `node_altitudes` ring renders as a ruled chord that sags up
+  to ~3.5 m below the curved floor mid-span (found by the lockstep
+  test).  The skirt therefore emits as abutting BANDS split at the
+  law's own grade breakpoints (`runway_end_skirt_profile_breakpoints`),
+  bounding the chord sagitta at `rate·L²/8` ≈ 0.31 m.
+* **Own finalize.**  Bands bypass the cuts' union `_finalize` (union
+  dissolves the interior band rows) — `_finalize_skirts` clips each
+  band against pavement/static geometry, the cut strips (cut wins) and
+  previously emitted skirt pieces (crossing runways; first wins), then
+  recomputes per-vertex altitudes ANALYTICALLY from the outward
+  projection, so clipping can introduce vertices freely.  Skirt shapes
+  carry `ref="runway_end_skirt"`.
+* **Validator (`verification.check_runway_end_skirt`)** marches each
+  end's extended centerline with the emitter's own anchor geometry /
+  entry-grade window / law functions; samples the rendered surface by
+  ruled RAY interpolation across covering patches (edge-projection
+  sampling would read the nearest row, not the surface) and the DEM
+  elsewhere; checks stations strictly INSIDE the governed length (the
+  endpoint is the crest of the lawful beyond-zone face on
+  cap-truncated skirts).  Tolerance 1.5 m = fill trigger 1 m + emit
+  rounding + interpolation.
+* **check_grade OSM-only profile check: deferred.**  The verification
+  reader validates law conformance directly against the DEM and covers
+  both un-governed drops and unlawful emitted profiles; an OSM-only
+  check without DEM adds little — revisit at M4 if the CI shape needs
+  it.
+* **Gate-off fixture baselines (2026-07-05)**: CYXY 4 ends flagged,
+  worst −25.5 m below the law floor (the plateau cliffs — the
+  motivating defect); SPLP 2 ends at −1.5/−1.6 m (marginal); SPJC 0.
 
 Today the runway-end safety area (Pass C in `clearance.py`) is *cut-only*: terrain
 that rises above the 5 % up-ramp is cut down to it, but terrain that **drops away**
