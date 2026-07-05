@@ -995,10 +995,36 @@ def final_grade_projection(layout, icao: str = "", dem=None,
     # distributes a cap-grade climb as a sawtooth between alternate
     # nodes; a linear cap-grade profile satisfies the same pairs) —
     # same second-difference law as the solve-time pass.
+    #
+    # LAW-GUARDED (user 2026-07-05): this is the LAST pass before
+    # writeback — nothing re-enforces the pairs it perturbs, and the
+    # unguarded POCS moved junction ring nodes over their MESH-chord
+    # budgets (pairs crossing between two ring runs, invisible to the
+    # ring triples) by a median 1.8 cm — the SPJC 43-pair cm-noise
+    # class.  Every move is now clamped into the interval its node's
+    # law edges allow, at the same margined budgets the projection just
+    # enforced (``_margined_budget``); nodes of shapes whose body pairs
+    # are still lazy (never expanded ⇒ the projection proved them
+    # untouched, so there is no sawtooth to re-fair there) are anchored.
     if _os.environ.get("O4_EDGE_FAIRING", "1") == "1":
         from auto_patch.config import TAXIWAY_MAX_GRADE_CHANGE_PER_M
-        _fair_ring_edges(layout, elev, b2i, hard, None,
-                         TAXIWAY_MAX_GRADE_CHANGE_PER_M)
+        from .one_solve import (_build_adjacency, _emit_quantization_margin,
+                                _margined_budget)
+        _quant_margin = _emit_quantization_margin()
+        _law_adjacency = {
+            node: [(other, _margined_budget(budget, _quant_margin))
+                   for (other, budget) in incident]
+            for node, incident in _build_adjacency(joint, n).items()}
+        _lazy_guard_nodes: set = set()
+        for _sc in shape_constraints:
+            if "lazy_expand" in _sc:
+                for _node in (_sc.get("lazy_nodes")
+                              or _sc.get("nodes") or ()):
+                    if isinstance(_node, int):
+                        _lazy_guard_nodes.add(_node)
+        _fair_ring_edges(layout, elev, b2i, hard | _lazy_guard_nodes, None,
+                         TAXIWAY_MAX_GRADE_CHANGE_PER_M,
+                         law_adjacency=_law_adjacency)
     _stage("fairing")
     _writeback(layout, elev, b2i)
     _stage("writeback")
@@ -1274,7 +1300,7 @@ def _fair_spine_chains(elev, spine_adj, anchors, node_band, nodes_xy,
 
 def _fair_ring_edges(layout, elev, bucket_to_idx, anchors, node_band,
                      k_rate, *, max_bend_deg=25.0, min_seg_m=3.0,
-                     max_sweeps=200, tol=1e-4):
+                     max_sweeps=200, tol=1e-4, law_adjacency=None):
     """Second-difference fairing on STRAIGHT airside boundary runs (user
     2026-07-04, CYXY taxiway E edge): the ``_fair_spine_chains`` law
     covers spine chains only, so a corridor's ring EDGE still tracks DEM
@@ -1283,7 +1309,18 @@ def _fair_ring_edges(layout, elev, bucket_to_idx, anchors, node_band,
     stiffness-split, band-clamped, anchors fixed.  Ring CORNERS are real
     grade breaks — a triple only fairs when the boundary is straight
     through it (bend ≤ ``max_bend_deg``).  Runways/buildings excluded
-    (own profile / flat).  Mutates ``elev``; returns residual kinks."""
+    (own profile / flat).  Mutates ``elev``; returns residual kinks.
+
+    ``law_adjacency`` (``{node: [(other, budget_m), …]}``) makes the pass
+    LAW-GUARDED: every move is clamped into the interval the node's law
+    edges allow around the CURRENT neighbour values, and a node already
+    outside that interval (a projection-declared residual) or with an
+    infeasible interval never moves.  Required when the caller runs this
+    AFTER its last feasibility projection — the unguarded pass left
+    junction MESH chords (pairs crossing between two ring runs, which no
+    triple sees) a median 1.8 cm over budget (SPJC 2026-07-05, the
+    43-pair cm-noise class).  ``None`` ⇒ unguarded (solve-time call: the
+    final projection re-enforces every pair the fairing perturbs)."""
     import math as _math
     from auto_patch.layout import (ROLE_RUNWAY, ROLE_BUILDING,
                                    ROLE_BOUNDARY, ROLE_GROUNDSIDE_PAVEMENT)
@@ -1384,6 +1421,25 @@ def _fair_ring_edges(layout, elev, bucket_to_idx, anchors, node_band,
                 lo, hi = band
                 if lo <= hi:
                     nb = min(max(nb, lo), hi)
+            if law_adjacency is not None:
+                incident = law_adjacency.get(b)
+                if incident:
+                    law_low = law_high = None
+                    for (other, budget) in incident:
+                        if other >= n:
+                            continue
+                        other_value = elev[other]
+                        low = other_value - budget
+                        high = other_value + budget
+                        if law_low is None or low > law_low:
+                            law_low = low
+                        if law_high is None or high < law_high:
+                            law_high = high
+                    if law_low is not None:
+                        if (law_low > law_high
+                                or not (law_low <= elev[b] <= law_high)):
+                            continue    # infeasible / already-outside: never move
+                        nb = min(max(nb, law_low), law_high)
             moved = abs(nb - elev[b])
             if moved:
                 elev[b] = nb
