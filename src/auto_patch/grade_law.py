@@ -41,10 +41,15 @@ from typing import Callable, Optional
 from .config import (
     APRON_MAX_GRADE, BUILDING_FRONTAGE_MAX_GRADE, BUILDING_FULL_FRONTAGE,
     BUILDING_FULL_FRONTAGE_AREA_M2,
-    BUILDING_REACH_CORRIDOR_M, SERVICE_ROAD_MAX_GRADE, TAXI_MAX_GRADE)
+    BUILDING_REACH_CORRIDOR_M, JUNCTION_MESH_CONSTRAINTS,
+    SERVICE_ROAD_MAX_GRADE, TAXI_MAX_GRADE)
 
 # ── Law constants (the adjustable knobs of the law) ──────────────────────────
 APRON_ROLE = "apron"
+# The junction-family roles the JUNCTION MESH rule in ``classify_pair`` applies
+# to.  Defined HERE (the law) and re-exported by ``grade_graph`` so the law and
+# its readers share one definition.
+JUNCTION_ROLES = ("junction", "service_junction")
 
 # THE single reach/grade rules, surfaced here so every site refers to ONE value
 # and cannot drift into local copies (user 2026-06-29).
@@ -196,6 +201,12 @@ class PairContext:
                          (the climb is via the spine, not this diagonal); the
                          reader sets it to None unless the pair is non-spine and
                          non-ring-adjacent (where the rule can apply).
+    ``mesh_member_fn``   returns whether the pair is a triangle-mesh edge of the
+                         shape's ring (junction mesh rule); the reader sets it to
+                         None unless the rule can apply (gate on, junction role,
+                         non-spine, non-ring-adjacent).  None ⇒ no mesh
+                         restriction — a reader that cannot triangulate stays
+                         STRICTER (checks every body chord), never looser.
     ``blend_cap_fn``     lazy apron↔taxi blend cap (evaluated ONLY for a surviving
                          non-spine apron pair), or None.
     ``spine_caps``       caps of the centerline(s) BOTH endpoints lie on; () ⇒ not
@@ -212,6 +223,7 @@ class PairContext:
     body_cap: float
     visible_fn: Optional[Callable[[], bool]] = None
     crosses_spine_fn: Optional[Callable[[], bool]] = None
+    mesh_member_fn: Optional[Callable[[], bool]] = None
     blend_cap_fn: Optional[Callable[[], float]] = None
     # ``both_road``: both endpoints sit on a service-road carve through the host
     # (so the pair descends at the ROAD cap, not the host body cap).
@@ -250,6 +262,21 @@ def classify_pair(p: PairContext) -> Optional[Allowance]:
         return SKIP
     # — sub-noise separation is not a grade constraint.
     if p.dist < MIN_PAIR_DIST_M:
+        return SKIP
+    # — JUNCTION MESH RULE (O4_JUNCTION_MESH_CONSTRAINTS, user 2026-06-30): a
+    #   junction's only real grade paths are its SPINE and the triangle-mesh
+    #   edges of its ring (what X-Plane's mesh renders); every other body
+    #   chord is phantom — an aircraft follows the spine, not the diagonal —
+    #   and mesh compliance already implies straight-chord compliance.  So a
+    #   junction-role pair that is not ring-adjacent, shares no spine
+    #   centerline, and is not a mesh edge is not a regulated grade path.
+    #   APRONS are NOT mesh-restricted (their geodesic flatness model catches
+    #   aggregate slope a mesh edge misses) — the reader never supplies the
+    #   thunk for them.  Sits BEFORE the visibility skip so a phantom chord
+    #   never pays for the polygon-containment test.
+    if (JUNCTION_MESH_CONSTRAINTS and p.role in JUNCTION_ROLES
+            and not p.ring_adjacent and not p.spine_caps
+            and p.mesh_member_fn is not None and not p.mesh_member_fn()):
         return SKIP
     # — a non-adjacent chord that leaves the pavement is not a surface path.
     if not p.ring_adjacent and p.visible_fn is not None and not p.visible_fn():

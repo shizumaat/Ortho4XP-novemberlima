@@ -60,8 +60,10 @@ from .config import (
 )
 
 # Roles this module owns (the visibility-graph soft airside shapes).
+# ``JUNCTION_ROLES`` is defined by THE LAW (``grade_law`` — the junction mesh
+# rule applies to these roles) and re-exported here for the readers.
 APRON_ROLE = "apron"
-JUNCTION_ROLES = ("junction", "service_junction")
+JUNCTION_ROLES = GL.JUNCTION_ROLES
 SOFT_VISIBILITY_ROLES = (APRON_ROLE,) + JUNCTION_ROLES
 
 # A ring vertex counts as a SPINE node of a centerline when it lies within this
@@ -919,11 +921,12 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext,
     membership = _spine_membership(shape, ctx)
     body_cap = _body_cap(shape, ctx, membership)
     vis = None if ring_only else _visibility_predicate(ring)
-    # JUNCTION MESH CONSTRAINTS (O4_JUNCTION_MESH_CONSTRAINTS): for a junction the
-    # only real grade paths are the spine + the triangle-mesh edges; the remaining
-    # body chords are phantom (an aircraft follows the spine, not the diagonal) and
-    # mesh compliance already implies straight-chord compliance.  Keep the mesh-edge
-    # key set here and drop any non-spine, non-mesh pair below.  APRONS keep their
+    # JUNCTION MESH CONSTRAINTS (O4_JUNCTION_MESH_CONSTRAINTS): the RULE — a
+    # junction's only real grade paths are the spine + the triangle-mesh edges,
+    # the remaining body chords are phantom — lives in ``grade_law.classify_pair``
+    # (the JUNCTION MESH RULE skip).  This reader only computes the mesh-edge key
+    # set and supplies the per-pair lazy membership thunk (``mesh_member_fn``),
+    # mirroring the visibility / spine-crossing predicates.  APRONS keep their
     # full visibility graph (the geodesic flatness model catches aggregate slope a
     # mesh edge misses), so this is junction/service_junction only.
     mesh_keys = (mesh_edge_keys(ring, keys)
@@ -1010,12 +1013,14 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext,
             spine_caps = tuple(ctx.centerlines[c].cap for c in shared)
             kj_bld = kj in bld
 
-            # Junction: drop a pair that is neither a spine path nor a mesh edge
-            # (a phantom body chord) before the expensive visibility/law work.
-            if (mesh_keys is not None and not spine_caps
-                    and not ring_adjacent
-                    and frozenset((ki, kj)) not in mesh_keys):
-                continue
+            # Junction mesh membership thunk for THE LAW's JUNCTION MESH RULE
+            # (``grade_law.classify_pair`` skips a non-spine, non-ring,
+            # non-mesh junction body chord as a phantom).  Supplied only where
+            # the rule can apply, like ``crosses_fn`` below.
+            mesh_fn = None
+            if mesh_keys is not None and not spine_caps and not ring_adjacent:
+                mesh_fn = (lambda _k=frozenset((ki, kj)), _m=mesh_keys:
+                           _k in _m)
 
             visible_fn = (None if vis is None
                           else (lambda _a=xi, _b=yi, _c=xj, _d=yj:
@@ -1042,6 +1047,7 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext,
                 a_building=ki_bld, b_building=kj_bld,
                 spine_caps=spine_caps, body_cap=body_cap,
                 visible_fn=visible_fn, crosses_spine_fn=crosses_fn,
+                mesh_member_fn=mesh_fn,
                 blend_cap_fn=blend_fn, both_road=both_road))
             if allow is None:
                 continue
