@@ -92,13 +92,13 @@ __all__ = [
 # numbers below match typical FAA-relevant standards (single
 # carriageway including shoulders).
 HIGHWAY_CARRIAGEWAY_WIDTH_M = {
-    "motorway":         24.0,  # 6+ lanes per direction in some places
+    "motorway":         25.0,  # 25 m corridor per user 2026-07-04 (KDFW)
     "motorway_link":     8.0,
     "trunk":            22.0,
     "trunk_link":        8.0,
     "primary":          18.0,
     "primary_link":      7.0,
-    "secondary":        11.0,  # ~half of trunk per user 2026-05-03
+    "secondary":        15.0,  # 15 m corridor per user 2026-07-04 (KDFW)
     "secondary_link":    7.0,
     "tertiary":          9.0,
     "tertiary_link":     6.0,
@@ -122,6 +122,19 @@ HIGHWAY_CARRIAGEWAY_WIDTH_M = {
 # emits a single ``railway_twin`` bore (the other line's portals are
 # suppressed).
 TWIN_RAIL_NEAR_M = 10.0
+
+# Every tunnel break (portal split point) lands this far OUTSIDE the
+# taxiway pavement edge (user 2026-07-04, KDFW): the portal's 1 m-thick
+# retaining-wall cap then occupies exactly [pavement edge, edge + 1 m],
+# with the ramp's low end right behind it.
+TAXI_EDGE_BREAK_MARGIN_M = 1.0
+
+# OSM ways less than this far apart group into a SINGLE underpass
+# corridor (user 2026-07-04, KDFW): a motorway + its frontage road +
+# a rail line running together get one combined ramp, never
+# overlapping per-way ramps.  KDFW's two motorway carriageways run
+# ~113 m apart and correctly stay separate corridors.
+UNDERPASS_GROUP_DIST_M = 35.0
 
 
 def _carriageway_width_for(highway_type: str | None,
@@ -200,11 +213,39 @@ def _synthesize_implied_crossing_bores(
         layout: "PavementLayout",
         nodes_m: dict,
         ways_r: list,
-        excluded_way_ids: set | None) -> list:
-    """Split unmarked public through-roads / railways that cross
-    taxi/runway pavement into approach + synthetic ``tunnel=yes``
-    bore pieces.  Mutates ``nodes_m`` (synthetic split nodes) and
-    returns the updated ways list.
+        excluded_way_ids: set | None,
+        low_connector_max_gap_m: float = 0.0) -> tuple:
+    """Split public through-roads / railways that cross taxi/runway
+    pavement into approach + synthetic ``tunnel=yes`` bore pieces.
+    Mutates ``nodes_m`` (synthetic split nodes) and returns
+    ``(ways_r, low_connector_gaps)``.
+
+    User 2026-07-04 (KDFW wide underpasses), three behaviours on top
+    of the original implied-bore split:
+
+    * MAPPED ``tunnel=yes`` ways of the same public classes are
+      RE-SPLIT by the same pavement intersections (gate
+      ``O4_TUNNEL_TAXI_BREAKS``): the OSM mapper's tunnel-segment
+      endpoints land wherever they were drawn, so breaks came at the
+      taxiway edge for implied bores but at arbitrary spots for
+      mapped ones ("some seem to be doing that, and others not").
+      Deriving every break from OUR pavement makes them uniform.  A
+      mapped tunnel that crosses NO taxi/runway pavement is a road
+      built over (terminal buildings, aprons) — retagged
+      ``building_passage``: no trench, no ramps, but ramp walks
+      still refuse to route through it.
+    * Every break lands ``TAXI_EDGE_BREAK_MARGIN_M`` (1 m) OUTSIDE
+      the pavement edge, so the portal's 1 m retaining-wall cap
+      occupies exactly [edge, edge+1 m] — wall at the taxiway edge,
+      ramp low end right behind it.
+    * Consecutive bores along one way whose surface gap is shorter
+      than ``low_connector_max_gap_m`` (too short to ramp up to DEM
+      and back — the double-parallel-taxiway case) MERGE into one
+      long bore and the gap is recorded in ``low_connector_gaps``
+      as ``(gap_line, corridor_width_m)``: the caller emits it as a
+      single flat rect at the low elevation with retaining walls,
+      instead of two facing overlapping ramps.  Gate
+      ``O4_TUNNEL_LOW_CONNECTORS``.
     """
     # ── IMPLIED CROSSING TUNNELS (user 2026-07-04) ────────────────────
     # A PUBLIC through-road or railway that crosses taxiway/runway
@@ -217,6 +258,7 @@ def _synthesize_implied_crossing_bores(
     # mapped tunnel, so ramps emit on either side of the pavement.
     # Service/residential roads are excluded — airport service roads
     # legitimately cross taxi routes at grade.
+    low_connector_gaps: list = []
     if IMPLIED_CROSSING_TUNNELS:
         _IMPLIED_HW_TYPES = {
             "motorway", "trunk", "primary", "secondary", "tertiary",
@@ -228,7 +270,19 @@ def _synthesize_implied_crossing_bores(
         _IMPLIED_MIN_BORE_M = 6.0      # narrower = a sliver graze
         _IMPLIED_MAX_BORE_M = 500.0    # longer = through-airport road
         _IMPLIED_END_MARGIN_M = 2.0    # way must CROSS, not END inside
-        _IMPLIED_MAPPED_NEAR_M = 40.0  # a mapped tunnel already covers it
+        # Only a near-COINCIDENT mapped tunnel suppresses an implied
+        # bore (a duplicate line of the same physical feature).  Was
+        # 40 m — but parallel carriageways/frontage roads within 35 m
+        # now GROUP into one corridor (user 2026-07-04), so a mapped
+        # motorway tunnel must not silently swallow the frontage
+        # road's own crossing.
+        _IMPLIED_MAPPED_NEAR_M = 6.0
+        # Gate: derive mapped-tunnel breaks from OUR pavement too.
+        _taxi_breaks = os.environ.get(
+            "O4_TUNNEL_TAXI_BREAKS", "1") == "1"
+        _low_connectors = (low_connector_max_gap_m > 0.0
+                           and os.environ.get(
+                               "O4_TUNNEL_LOW_CONNECTORS", "1") == "1")
         try:
             from shapely.ops import unary_union as _uu9
             from shapely.geometry import (LineString as _LS9,
@@ -241,11 +295,35 @@ def _synthesize_implied_crossing_bores(
                 _cross_pav_u = None
         except _GEOM_EXC:
             _cross_pav_u = None
+        # Built-over cover (buildings / apron pads): a mapped tunnel
+        # under THESE is a road built up and over — no trench, no
+        # ramps.  A mapped tunnel under mere grass/RESA (CYUL's
+        # runway-24-end underpass, KPHL's hill bore) is a REAL trench
+        # and keeps its mapped portals when it crosses no taxiway.
+        try:
+            _built_over_u = _uu9(
+                [s.polygon for s in layout.shapes
+                 if s.polygon is not None and not s.polygon.is_empty
+                 and s.role in ("building", "apron")])
+            if _built_over_u.is_empty:
+                _built_over_u = None
+        except _GEOM_EXC:
+            _built_over_u = None
+
+        def _resplittable(_tags) -> bool:
+            # A mapped ``tunnel=yes`` way of the public classes gets its
+            # breaks re-derived from pavement like an unmarked way.
+            return (_taxi_breaks
+                    and _tags.get("tunnel") == "yes"
+                    and (_tags.get("highway") in _IMPLIED_HW_TYPES
+                         or _tags.get("railway") in RAIL_TUNNEL_TYPES))
         _mapped_tunnel_lines = []
         if _cross_pav_u is not None:
             for _wid, _nrefs, _tags in ways_r:
                 if _tags.get("tunnel") not in TUNNEL_VALUES:
                     continue
+                if _resplittable(_tags):
+                    continue    # re-split below — must not self-suppress
                 _pts = [nodes_m[n] for n in _nrefs if n in nodes_m]
                 if len(_pts) >= 2:
                     try:
@@ -257,8 +335,10 @@ def _synthesize_implied_crossing_bores(
         if _cross_pav_u is not None:
             _split_ways: list = []
             for _wid, _nrefs, _tags in ways_r:
+                _had_tunnel = _resplittable(_tags)
                 _eligible = (
-                    _tags.get("tunnel") not in TUNNEL_VALUES
+                    (_tags.get("tunnel") not in TUNNEL_VALUES
+                     or _had_tunnel)
                     and not _tags.get("bridge")
                     and _wid not in _excluded_early
                     and (_tags.get("highway") in _IMPLIED_HW_TYPES
@@ -271,7 +351,21 @@ def _synthesize_implied_crossing_bores(
                 try:
                     _line = _LS9([p for (_n, p) in _present])
                     if not _line.intersects(_cross_pav_u):
-                        _split_ways.append((_wid, _nrefs, _tags))
+                        if (_had_tunnel and _built_over_u is not None
+                                and _line.intersects(_built_over_u)):
+                            # Mapped tunnel crossing NO taxi/runway
+                            # pavement but running under a BUILDING /
+                            # apron pad = a road built up and over
+                            # (KDFW terminals): no trench, no ramps —
+                            # but ramp walks still must not route
+                            # through it (user 2026-07-04).  A mapped
+                            # tunnel under mere grass keeps its mapped
+                            # portals (CYUL runway-24 end).
+                            _ptags = dict(_tags)
+                            _ptags["tunnel"] = "building_passage"
+                            _split_ways.append((_wid, _nrefs, _ptags))
+                        else:
+                            _split_ways.append((_wid, _nrefs, _tags))
                         continue
                     _inter = _line.intersection(_cross_pav_u)
                 except _GEOM_EXC:
@@ -292,19 +386,73 @@ def _synthesize_implied_crossing_bores(
                         continue
                     if _s2 < _s1:
                         _s1, _s2 = _s2, _s1
-                    # must CROSS the pavement (extend beyond both sides)
-                    if (_s1 < _IMPLIED_END_MARGIN_M
+                    # must CROSS the pavement (extend beyond both
+                    # sides).  A previously-MAPPED tunnel is a KNOWN
+                    # underpass — it may legitimately start/end right
+                    # at (or under) the pavement, so it skips this.
+                    if not _had_tunnel and (
+                            _s1 < _IMPLIED_END_MARGIN_M
                             or _s2 > _line.length - _IMPLIED_END_MARGIN_M):
                         continue
                     # a mapped tunnel already models this underpass
-                    if any(_part.distance(_tl) < _IMPLIED_MAPPED_NEAR_M
-                           for _tl in _mapped_tunnel_lines):
+                    if not _had_tunnel and any(
+                            _part.distance(_tl) < _IMPLIED_MAPPED_NEAR_M
+                            for _tl in _mapped_tunnel_lines):
                         continue
                     _intervals.append((_s1, _s2))
                 if not _intervals:
-                    _split_ways.append((_wid, _nrefs, _tags))
+                    if (_had_tunnel and _built_over_u is not None
+                            and _line.intersects(_built_over_u)):
+                        # Its only pavement contacts were slivers /
+                        # over-long grazes and it runs under a
+                        # building/apron — treat as built-over.
+                        _ptags = dict(_tags)
+                        _ptags["tunnel"] = "building_passage"
+                        _split_ways.append((_wid, _nrefs, _ptags))
+                    else:
+                        _split_ways.append((_wid, _nrefs, _tags))
                     continue
                 _intervals.sort()
+                # The break lands TAXI_EDGE_BREAK_MARGIN_M outside the
+                # pavement edge (user 2026-07-04): the portal's 1 m wall
+                # cap then occupies exactly [edge, edge+1 m].
+                _intervals = [
+                    (max(0.05, _s1 - TAXI_EDGE_BREAK_MARGIN_M),
+                     min(_line.length - 0.05,
+                         _s2 + TAXI_EDGE_BREAK_MARGIN_M),
+                     _s1, _s2)
+                    for (_s1, _s2) in _intervals]
+                # Merge overlapping bores, and — when the surface gap
+                # between consecutive bores is too short for a ramp
+                # pair to reach DEM and come back — merge ACROSS the
+                # gap into one long bore, recording the gap for the
+                # flat low-connector emit (user 2026-07-04: the area
+                # between double parallel taxiways is all at the low
+                # elevation).
+                _merged: list = [list(_intervals[0])]
+                for _iv in _intervals[1:]:
+                    _prev = _merged[-1]
+                    _gap = _iv[0] - _prev[1]
+                    if _gap <= 0.0:
+                        _prev[1] = max(_prev[1], _iv[1])
+                        _prev[3] = max(_prev[3], _iv[3])
+                    elif _low_connectors and _gap < low_connector_max_gap_m:
+                        try:
+                            from shapely.ops import substring as _substr
+                            _gline = _substr(_line, _prev[3], _iv[2])
+                        except _GEOM_EXC:
+                            _gline = None
+                        if (_gline is not None
+                                and _gline.geom_type == "LineString"
+                                and _gline.length > 1.0):
+                            _gw = _carriageway_width_for(
+                                _tags.get("highway") or "railway", 22.0)
+                            low_connector_gaps.append((_gline, _gw))
+                        _prev[1] = _iv[1]
+                        _prev[3] = _iv[3]
+                    else:
+                        _merged.append(list(_iv))
+                _intervals = [(_a, _b) for (_a, _b, _r1, _r2) in _merged]
                 # split the way: approach | bore | approach | bore | ...
                 _arcs = [0.0]
                 for _k in range(1, len(_present)):
@@ -348,6 +496,11 @@ def _synthesize_implied_crossing_bores(
                         _ptags["tunnel"] = "yes"
                         _ptags["o4_implied_tunnel"] = "1"
                         _n_implied += 1
+                    elif _had_tunnel:
+                        # A re-split mapped tunnel's leftover pieces
+                        # are surface approaches — drop the tunnel tag
+                        # so portal walks can route along them.
+                        _ptags.pop("tunnel", None)
                     _split_ways.append((f"{_wid}|IMP{_j}", _refs, _ptags))
             ways_r = _split_ways
         if _n_implied:
@@ -358,7 +511,7 @@ def _synthesize_implied_crossing_bores(
                     f"crossings).")
             except _GEOM_EXC:
                 pass
-    return ways_r
+    return ways_r, low_connector_gaps
 
 
 def _build_surface_way_indices(ways_r: list):
@@ -1319,6 +1472,13 @@ def _emit_portal_cluster(
     # by offsetting the FIRST ramp segment's near corners
     # individually below; ``walk_pts`` itself stays at the portal.
 
+    # Y-split throat polygons emitted for THIS cluster: a branch ramp
+    # segment mostly covered by the throat is redundant pavement at
+    # the same elevation — skip it rather than emit an overlapping
+    # sloped rect (user 2026-07-04: ramps must not overlap; a sloped
+    # ``altitude_high/low`` rect cannot be clipped without breaking
+    # its two-corner elevation semantics).
+    cluster_throat_polys: list = []
 
     def _emit_chain(chain_pts, chain_half, e_lo_c, e_hi_c,
                     cap_gap):
@@ -1496,6 +1656,14 @@ def _emit_portal_cluster(
                 if (rp.geom_type == "Polygon"
                         and not rp.is_empty
                         and rp.area > 0.5):
+                    covered = 0.0
+                    for tp in cluster_throat_polys:
+                        try:
+                            covered += rp.intersection(tp).area
+                        except _GEOM_EXC:
+                            continue
+                    if covered > 0.5 * rp.area:
+                        continue    # throat already paves this spot
                     if abs(eh - el) >= 0.1:
                         layout.shapes.append(BuiltShape(
                             polygon=rp,
@@ -1650,6 +1818,7 @@ def _emit_portal_cluster(
             polygon=poly, role=ROLE_TUNNEL_RAMP,
             ref="tunnel_ramp", node_altitudes=na))
         exclusion_zones.append(poly)
+        cluster_throat_polys.append(poly)
 
         # No walls here — the continuous perimeter wall band is traced
         # around the whole cluster ramp union after all ramps emit
@@ -1996,6 +2165,226 @@ def _emit_portal_cluster(
     return 1
 
 
+def _low_connector_corridors(low_connector_gaps: list) -> list:
+    """Dissolve the recorded per-way gap rects into corridor polygons.
+
+    Each gap is ``(gap_line, corridor_width_m)``; gaps of grouped
+    parallel ways (< ``UNDERPASS_GROUP_DIST_M`` apart) dissolve into
+    ONE corridor via a morphological closing, so the group renders as
+    a single depressed trench spanning its combined width.
+    """
+    if not low_connector_gaps:
+        return []
+    try:
+        from shapely.ops import unary_union as _uuL
+    except _GEOM_EXC:
+        return []
+    rects = []
+    for (gap_line, corridor_width_m) in low_connector_gaps:
+        try:
+            r = gap_line.buffer(corridor_width_m / 2.0,
+                                cap_style=2, join_style=2)
+            if not r.is_empty:
+                rects.append(r)
+        except _GEOM_EXC:
+            continue
+    if not rects:
+        return []
+    try:
+        merged = _uuL(rects)
+        close_r = UNDERPASS_GROUP_DIST_M / 2.0
+        merged = (merged.buffer(close_r, join_style=2)
+                        .buffer(-close_r, join_style=2))
+    except _GEOM_EXC:
+        merged = _uuL(rects)
+    return ([merged] if merged.geom_type == "Polygon"
+            else [g for g in getattr(merged, "geoms", ())
+                  if g.geom_type == "Polygon"])
+
+
+def _suppress_portals_in_low_corridors(
+        portal_data: list, corridors: list) -> list:
+    """Drop portals whose mouth sits INSIDE a low-connector corridor.
+
+    OSM splits ways at intersections, so a frontage road's crossings
+    of taxiway A and taxiway B often live on DIFFERENT ways — the
+    per-way gap merge cannot see across them, and both leftover
+    portals would ramp INTO the flat low corridor (overlapping it and
+    each other).  The corridor covers the whole grouped surface, so
+    any portal starting inside it is superseded by the flat rect.
+    """
+    if not corridors or not portal_data:
+        return portal_data
+    kept = []
+    for pd in portal_data:
+        walk_pts = pd[2]
+        px, py = walk_pts[0]
+        inside = False
+        for corridor in corridors:
+            try:
+                if corridor.buffer(2.0).contains(Point(px, py)):
+                    inside = True
+                    break
+            except _GEOM_EXC:
+                continue
+        if inside:
+            if os.environ.get("O4_TUNNEL_DEBUG") == "1":
+                print(f"    [tunnel-drop] way {pd[1]} portal "
+                      f"({px:.0f},{py:.0f}): inside a flat "
+                      f"low-connector corridor")
+            continue
+        kept.append(pd)
+    return kept
+
+
+def _emit_low_corridor_connectors(
+        layout: "PavementLayout",
+        corridors: list,
+        exclusion_zones: list,
+        airside_gate_union,
+        airport_elevation_at,
+        dem_at,
+        tunnel_depth_m: float,
+        wall_gap_m: float,
+        retaining_wall_width_m: float) -> int:
+    """Emit the depressed surface BETWEEN two merged bores.
+
+    User 2026-07-04 (KDFW double parallel taxiways): when the surface
+    gap between two taxiway underpasses is too short for a ramp pair
+    to climb to DEM and come back, the whole area between them stays
+    at the LOW elevation — a single corridor-width flat
+    ``ROLE_TUNNEL_RAMP`` rect at ``apt_elev − tunnel_depth_m`` with a
+    retaining wall around its open sides.  Gaps of grouped parallel
+    ways (< ``UNDERPASS_GROUP_DIST_M`` apart) dissolve into ONE
+    corridor via a morphological closing, so the group renders as a
+    single depressed trench, never overlapping per-way rects.
+
+    Walls follow the DEM per vertex like every other tunnel wall
+    (user 2026-06-13); the strip under the taxiways themselves is
+    NOT walled or paved here — the bores continue beneath.  All
+    emitted pieces join ``exclusion_zones`` so the boundary ribbon
+    and DEM bridges avoid them.  Takes the dissolved ``corridors``
+    from :func:`_low_connector_corridors` (also used to suppress
+    superseded portals).  Returns the number of corridor rects
+    emitted.
+    """
+    if not corridors:
+        return 0
+    n_rects = 0
+    for corridor in corridors:
+        if corridor.is_empty or corridor.area < 20.0:
+            continue
+        try:
+            centre = corridor.centroid
+            apt_elev = airport_elevation_at(centre.x, centre.y)
+        except _GEOM_EXC:
+            apt_elev = None
+        if apt_elev is None:
+            continue
+        elev_low = float(apt_elev) - tunnel_depth_m
+        # The visible depressed surface: the corridor minus airside
+        # pavement (a graze against a service road / building pad
+        # must not put a −8 m rect under real pavement).
+        try:
+            open_part = (corridor if airside_gate_union is None
+                         else corridor.difference(
+                             airside_gate_union.buffer(0.5)))
+        except _GEOM_EXC:
+            open_part = corridor
+        surf_parts = ([open_part] if open_part.geom_type == "Polygon"
+                      else [g for g in getattr(open_part, "geoms", ())
+                            if g.geom_type == "Polygon"])
+        for part in surf_parts:
+            if part.is_empty or part.area < 4.0:
+                continue
+            simple = part.simplify(0.05)
+            if simple.geom_type != "Polygon" or simple.is_empty:
+                simple = part
+            n_vertices = len(simple.exterior.coords)
+            layout.shapes.append(BuiltShape(
+                polygon=simple, role=ROLE_TUNNEL_RAMP,
+                ref="tunnel_low_connector",
+                node_altitudes=[round(elev_low, 2)] * n_vertices))
+            exclusion_zones.append(simple)
+            n_rects += 1
+        # Retaining wall around the corridor's open sides: a 1 m band
+        # offset by the standard wall gap, minus airside pavement (the
+        # bores continue under the taxiways — no wall across the road).
+        try:
+            band = (corridor.buffer(
+                        wall_gap_m + retaining_wall_width_m,
+                        join_style=2)
+                    .difference(corridor.buffer(wall_gap_m,
+                                                join_style=2)))
+            if airside_gate_union is not None:
+                band = band.difference(airside_gate_union.buffer(0.5))
+        except _GEOM_EXC:
+            band = None
+        band_parts = ([] if band is None else
+                      ([band] if band.geom_type == "Polygon"
+                       else [g for g in getattr(band, "geoms", ())
+                             if g.geom_type == "Polygon"]))
+        for wall in band_parts:
+            if wall.is_empty or wall.area < 1.0:
+                continue
+            # to_osm drops interior rings — slit any annulus open at
+            # its narrowest point (same trick as the perimeter wall).
+            slit = wall
+            guard = 0
+            while (slit is not None and slit.geom_type == "Polygon"
+                   and slit.interiors and guard < 8):
+                guard += 1
+                try:
+                    pa, pb = nearest_points(
+                        slit.interiors[0], slit.exterior)
+                    kdx, kdy = pb.x - pa.x, pb.y - pa.y
+                    kl = math.hypot(kdx, kdy) or 1.0
+                    kux, kuy = kdx / kl, kdy / kl
+                    knife = LineString([
+                        (pa.x - kux * 0.1, pa.y - kuy * 0.1),
+                        (pb.x + kux * 0.1, pb.y + kuy * 0.1),
+                    ]).buffer(0.02, cap_style=2, join_style=2)
+                    cut = slit.difference(knife)
+                    if cut.geom_type == "MultiPolygon":
+                        cut = max(cut.geoms, key=lambda g: g.area)
+                    slit = (cut if cut.geom_type == "Polygon"
+                            and not cut.is_empty else None)
+                except _GEOM_EXC:
+                    slit = None
+            if (slit is None or slit.geom_type != "Polygon"
+                    or slit.is_empty or slit.interiors):
+                continue
+            ring = list(slit.exterior.coords)
+            if ring and ring[0] == ring[-1]:
+                ring = ring[:-1]
+            if len(ring) < 4:
+                continue
+            wall_alts = []
+            for (vx, vy) in ring:
+                ground = dem_at(vx, vy)
+                wall_alts.append(round(
+                    ground if ground is not None else float(apt_elev), 1))
+            wall_alts.append(wall_alts[0])
+            try:
+                wall_poly = Polygon(ring)
+                if wall_poly.is_empty:
+                    continue
+                layout.shapes.append(BuiltShape(
+                    polygon=wall_poly, role=ROLE_RETAINING_WALL,
+                    ref="tunnel_wall", node_altitudes=wall_alts))
+                exclusion_zones.append(wall)
+            except _GEOM_EXC:
+                continue
+    if n_rects:
+        try:
+            UI.vprint(1,
+                f"  [pav-builder] emitted {n_rects} flat low-corridor "
+                f"connector(s) between close taxiway underpasses.")
+        except _GEOM_EXC:
+            pass
+    return n_rects
+
+
 def _finalize_tunnel_emission(
         layout: "PavementLayout", exclusion_zones: list,
         boundary_clearance_m: float, airside_gate_union,
@@ -2186,10 +2575,11 @@ def _emit_tunnel_portals(
         # Divided-highway carriageways with two parallel ways
         # cluster into a single combined entrance.  User 2026-05-03:
         # one entrance per end of the tunnel, not one per
-        # carriageway.  40 m is wide enough for typical separated
-        # carriageways; tighter values would split them into
-        # separate caps which is wrong.
-        portal_cluster_dist_m: float = 40.0,
+        # carriageway.  User 2026-07-04 (KDFW): ways less than 35 m
+        # apart group into ONE corridor (motorway + frontage road +
+        # rail together); KDFW's two motorway carriageways at ~113 m
+        # correctly stay separate.
+        portal_cluster_dist_m: float = UNDERPASS_GROUP_DIST_M,
         boundary_clearance_m: float = 0.5,
         # Per user 2026-05-04: skip portals more than this far from
         # any airport boundary edge.  Tunnels far from the airport
@@ -2287,9 +2677,6 @@ def _emit_tunnel_portals(
             _airside_gate_u = None
     except _GEOM_EXC:
         _airside_gate_u = None
-    ways_r = _synthesize_implied_crossing_bores(
-        layout, nodes_m, ways_r, excluded_way_ids)
-    way_by_id, node_to_ways = _build_surface_way_indices(ways_r)
     # We walk a generous maximum, then truncate per-portal based
     # on actual DEM at the far end so the resulting grade never
     # exceeds ``max_ramp_grade``.  The truncated length is at
@@ -2300,6 +2687,15 @@ def _emit_tunnel_portals(
     # ~4.4 % when the design grade is exactly 4 %.
     grade_safety_margin = 0.005
     plan_grade = max(max_ramp_grade - grade_safety_margin, 1e-3)
+    # A surface gap between two bores shorter than a full down+up ramp
+    # pair cannot reach DEM and return — it merges into one bore and
+    # emits as a flat low-elevation connector (user 2026-07-04, KDFW
+    # double parallel taxiways).
+    low_connector_max_gap_m = 2.0 * tunnel_depth_m / plan_grade
+    ways_r, low_connector_gaps = _synthesize_implied_crossing_bores(
+        layout, nodes_m, ways_r, excluded_way_ids,
+        low_connector_max_gap_m=low_connector_max_gap_m)
+    way_by_id, node_to_ways = _build_surface_way_indices(ways_r)
     arm_walk_max_m = max(arm_max_length_m,
                          ramp_min_length_m,
                          tunnel_depth_m / plan_grade)
@@ -2383,6 +2779,12 @@ def _emit_tunnel_portals(
         max_boundary_dist_m, arm_walk_max_m, carriageway_width_m,
         _airport_elevation_at, _m_to_ll, dem, tile_lat, tile_lon,
         tunnel_depth_m, plan_grade, ramp_min_length_m)
+    # Flat low-connector corridors supersede any portal starting
+    # inside them (cross-way facing portals the per-way gap merge
+    # cannot see — user 2026-07-04, KDFW).
+    _low_corridors = _low_connector_corridors(low_connector_gaps)
+    portal_data = _suppress_portals_in_low_corridors(
+        portal_data, _low_corridors)
     if not portal_data:
         return 0
     portal_data = _dedup_portal_walks(portal_data)
@@ -2399,6 +2801,10 @@ def _emit_tunnel_portals(
             cl, portal_data, nodes_m, layout, exclusion_zones,
             carriageway_width_m, tunnel_depth_m, wall_gap_m,
             retaining_wall_width_m, half_wall_w, _dem_at)
+    _emit_low_corridor_connectors(
+        layout, _low_corridors, exclusion_zones,
+        _airside_gate_u, _airport_elevation_at, _dem_at,
+        tunnel_depth_m, wall_gap_m, retaining_wall_width_m)
     return _finalize_tunnel_emission(
         layout, exclusion_zones, boundary_clearance_m,
         _airside_gate_u, _pre_emit_ids, n_emitted)
