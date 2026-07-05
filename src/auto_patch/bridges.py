@@ -38,7 +38,8 @@ import O4_UI_Utils as UI
 from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point, Polygon
 from shapely.geometry.base import BaseGeometry
-from shapely.ops import linemerge, nearest_points, unary_union
+from shapely.ops import linemerge, nearest_points, substring, unary_union
+from shapely.strtree import STRtree
 
 # Narrow exception tuple for shapely / numeric-geometry failure
 # modes + file I/O.  Programming errors propagate so they surface
@@ -147,6 +148,26 @@ def _carriageway_width_for(highway_type: str | None,
     return HIGHWAY_CARRIAGEWAY_WIDTH_M.get(highway_type, default_m)
 
 
+def _local_meter_projections(anchor: tuple[float, float]):
+    """Return ``(to_meters, meters_to_lat_lon)`` closures converting
+    between (lon, lat) degrees and the local-meter frame anchored at
+    ``anchor`` — the one equirectangular projection every emitter in
+    this module shares.
+    """
+    anchor_lat, anchor_lon = anchor
+    cos_anchor = math.cos(math.radians(anchor_lat))
+
+    def to_meters(lon: float, lat: float) -> tuple[float, float]:
+        return (math.radians(lon - anchor_lon) * R_EARTH * cos_anchor,
+                math.radians(lat - anchor_lat) * R_EARTH)
+
+    def meters_to_lat_lon(x: float, y: float) -> tuple[float, float]:
+        return (anchor_lat + math.degrees(y / R_EARTH),
+                anchor_lon + math.degrees(x / (R_EARTH * cos_anchor)))
+
+    return to_meters, meters_to_lat_lon
+
+
 HW_TUNNEL_TYPES = {
     "motorway", "trunk", "primary", "secondary",
     "tertiary", "motorway_link", "trunk_link",
@@ -179,7 +200,7 @@ def _load_tunnel_road_network(layout: "PavementLayout"):
     ways_r, big_way_ids)`` where ``big_way_ids`` is the id set of
     the big-roads ways (pre-2026-06-12 candidate class).
     """
-    from .pipeline import _load_osm_airports, _load_osm_big_roads
+    from .pipeline import _load_osm_big_roads
     # Load big-roads OSM cache for this tile — AND small_roads (user
     # 2026-06-12, KPHL): the big/small highway split puts tertiary /
     # residential / service ways in small_roads, so a minor-road
@@ -284,10 +305,7 @@ def _synthesize_implied_crossing_bores(
                            and os.environ.get(
                                "O4_TUNNEL_LOW_CONNECTORS", "1") == "1")
         try:
-            from shapely.ops import unary_union as _uu9
-            from shapely.geometry import (LineString as _LS9,
-                                          Point as _P9)
-            _cross_pav_u = _uu9(
+            _cross_pav_u = unary_union(
                 [s.polygon for s in layout.shapes
                  if s.polygon is not None and not s.polygon.is_empty
                  and s.role in _IMPLIED_CROSS_ROLES])
@@ -301,7 +319,7 @@ def _synthesize_implied_crossing_bores(
         # runway-24-end underpass, KPHL's hill bore) is a REAL trench
         # and keeps its mapped portals when it crosses no taxiway.
         try:
-            _built_over_u = _uu9(
+            _built_over_u = unary_union(
                 [s.polygon for s in layout.shapes
                  if s.polygon is not None and not s.polygon.is_empty
                  and s.role in ("building", "apron")])
@@ -327,7 +345,7 @@ def _synthesize_implied_crossing_bores(
                 _pts = [nodes_m[n] for n in _nrefs if n in nodes_m]
                 if len(_pts) >= 2:
                     try:
-                        _mapped_tunnel_lines.append(_LS9(_pts))
+                        _mapped_tunnel_lines.append(LineString(_pts))
                     except _GEOM_EXC:
                         continue
         _excluded_early = excluded_way_ids or set()
@@ -349,7 +367,7 @@ def _synthesize_implied_crossing_bores(
                     _split_ways.append((_wid, _nrefs, _tags))
                     continue
                 try:
-                    _line = _LS9([p for (_n, p) in _present])
+                    _line = LineString([p for (_n, p) in _present])
                     if not _line.intersects(_cross_pav_u):
                         if (_had_tunnel and _built_over_u is not None
                                 and _line.intersects(_built_over_u)):
@@ -380,8 +398,8 @@ def _synthesize_implied_crossing_bores(
                             <= _IMPLIED_MAX_BORE_M):
                         continue
                     try:
-                        _s1 = _line.project(_P9(*_part.coords[0]))
-                        _s2 = _line.project(_P9(*_part.coords[-1]))
+                        _s1 = _line.project(Point(*_part.coords[0]))
+                        _s2 = _line.project(Point(*_part.coords[-1]))
                     except _GEOM_EXC:
                         continue
                     if _s2 < _s1:
@@ -438,8 +456,7 @@ def _synthesize_implied_crossing_bores(
                         _prev[3] = max(_prev[3], _iv[3])
                     elif _low_connectors and _gap < low_connector_max_gap_m:
                         try:
-                            from shapely.ops import substring as _substr
-                            _gline = _substr(_line, _prev[3], _iv[2])
+                            _gline = substring(_line, _prev[3], _iv[2])
                         except _GEOM_EXC:
                             _gline = None
                         if (_gline is not None
@@ -747,8 +764,6 @@ def _walk_surface(portal_nid: str,
         # Skip refs[0]; it's the connecting node already in pts.
         current_refs = best_refs[1:]
 
-    if len(pts) >= 2 and cum > 5.0:
-        return pts
     if len(pts) >= 2:
         return pts
     return None
@@ -784,7 +799,6 @@ def _build_adjacent_road_index(ways_r: list, nodes_m: dict,
             if _t2.get("tunnel") in TUNNEL_VALUES:
                 _tunnel_all_nodes.update(_n2)
         try:
-            from shapely.strtree import STRtree as _STRtree
             for _w2, _n2, _t2 in ways_r:
                 if _t2.get("highway") is None:
                     continue
@@ -801,7 +815,7 @@ def _build_adjacent_road_index(ways_r: list, nodes_m: dict,
                 except _GEOM_EXC:
                     continue
             if _other_road_lines:
-                _other_road_tree = _STRtree(
+                _other_road_tree = STRtree(
                     [ln for ln, _, _ in _other_road_lines])
         except _GEOM_EXC:
             _other_road_tree = None
@@ -944,9 +958,9 @@ def _gather_portal_walks(
     per-portal gates, walk merge / densify / grade truncation).
     """
     # Collect portal data: (portal_node_id, tunnel_wid, walk_pts,
-    # hw_type, apt_elev_at_portal, dem_at_far_end).
+    # hw_type, apt_elev_at_portal, dem_at_far_end, is_new_candidate).
     portal_data: list[tuple[str, str, list[tuple[float, float]],
-                              str, float, float]] = []
+                              str, float, float, bool]] = []
     # Rail tunnel lines, for the TWIN-corridor pairing below (user
     # 2026-07-04, KCLT: two parallel ``railway=rail`` tracks are one
     # double-track corridor — one wide bore, not two overlapping ones).
@@ -958,8 +972,7 @@ def _gather_portal_walks(
             _rw_pts = [nodes_m[nn] for nn in _rw_refs if nn in nodes_m]
             if len(_rw_pts) >= 2:
                 try:
-                    from shapely.geometry import LineString as _RLS
-                    _rail_tunnel_lines[_rw_id] = _RLS(_rw_pts)
+                    _rail_tunnel_lines[_rw_id] = LineString(_rw_pts)
                 except _GEOM_EXC:
                     continue
 
@@ -1403,8 +1416,7 @@ def _emit_portal_cluster(
     # of one tunnel cluster emitting twice).
     try:
         if _cl_all_new and exclusion_zones:
-            from shapely.ops import unary_union as _uu9
-            if _uu9(exclusion_zones).buffer(2.0).contains(
+            if unary_union(exclusion_zones).buffer(2.0).contains(
                     Point(walk_pts[0])):
                 if os.environ.get("O4_TUNNEL_DEBUG") == "1":
                     print(f"    [tunnel-drop] cluster at "
@@ -1683,7 +1695,7 @@ def _emit_portal_cluster(
                 pass
 
     def _emit_fork_throat(throat_pts, throat_half, e_throat,
-                          wall_alt, arms, cl_start_idx):
+                          arms):
         """Bridge the shared bore (ending at the fork point ``F``)
         to the per-arm sloping rects with ONE ``node_altitudes``
         "throat" polygon carrying a V-notch, then trace the whole Y
@@ -1994,7 +2006,7 @@ def _emit_portal_cluster(
         # the bore's far edge.
         if TUNNEL_FORK_THROAT and len(arm_specs) >= 2:
             _emit_fork_throat(throat, combined_half, e_div,
-                              apt_elev, arm_specs, _cl_start_idx)
+                              arm_specs)
         for branch, half_k, far_k in arm_specs:
             _emit_chain(branch, half_k, e_div, far_k, False)
             if len(branch) >= 2:
@@ -2009,8 +2021,7 @@ def _emit_portal_cluster(
                       if getattr(s9, 'ref', '') == 'tunnel_ramp'
                       and s9.polygon is not None]
             if ramps9:
-                from shapely.ops import unary_union as _uu7
-                ramp_u9 = _uu7(ramps9).buffer(0.3)
+                ramp_u9 = unary_union(ramps9).buffer(0.3)
                 for s9 in layout.shapes[_cl_start_idx:]:
                     if getattr(s9, 'ref', '') != 'tunnel_wall' \
                             or s9.polygon is None:
@@ -2044,13 +2055,12 @@ def _emit_portal_cluster(
     # per-segment / cap / throat walls entirely.
     if TUNNEL_FORK_THROAT:
         try:
-            from shapely.ops import unary_union as _uuB
             _ramps_b = [
                 s.polygon for s in layout.shapes[_cl_start_idx:]
                 if getattr(s, 'ref', '') == 'tunnel_ramp'
                 and s.polygon is not None
                 and not s.polygon.is_empty]
-            _ru = _uuB(_ramps_b) if _ramps_b else None
+            _ru = unary_union(_ramps_b) if _ramps_b else None
             _ru_polys = [g for g in getattr(_ru, 'geoms', [_ru] if _ru
                                             else [])
                          if g.geom_type == 'Polygon'
@@ -2080,7 +2090,7 @@ def _emit_portal_cluster(
                         max(_hk + _g0 - 0.05, 0.5), cap_style=2))
                 except _GEOM_EXC:
                     continue
-            _open_u = _uuB(_openings) if _openings else None
+            _open_u = unary_union(_openings) if _openings else None
             for _rp in _ru_polys:
                 try:
                     _outer = _rp.buffer(_g1, join_style=2,
@@ -2175,10 +2185,6 @@ def _low_connector_corridors(low_connector_gaps: list) -> list:
     """
     if not low_connector_gaps:
         return []
-    try:
-        from shapely.ops import unary_union as _uuL
-    except _GEOM_EXC:
-        return []
     rects = []
     for (gap_line, corridor_width_m) in low_connector_gaps:
         try:
@@ -2191,12 +2197,12 @@ def _low_connector_corridors(low_connector_gaps: list) -> list:
     if not rects:
         return []
     try:
-        merged = _uuL(rects)
+        merged = unary_union(rects)
         close_r = UNDERPASS_GROUP_DIST_M / 2.0
         merged = (merged.buffer(close_r, join_style=2)
                         .buffer(-close_r, join_style=2))
     except _GEOM_EXC:
-        merged = _uuL(rects)
+        merged = unary_union(rects)
     return ([merged] if merged.geom_type == "Polygon"
             else [g for g in getattr(merged, "geoms", ())
                   if g.geom_type == "Polygon"])
@@ -2513,8 +2519,7 @@ def _finalize_tunnel_emission(
                    and not s9.polygon.is_empty]
     if _ramp_polys:
         try:
-            from shapely.ops import unary_union as _uuR
-            _ramp_u = _uuR(_ramp_polys)
+            _ramp_u = unary_union(_ramp_polys)
         except _GEOM_EXC:
             _ramp_u = None
         if _ramp_u is not None and not _ramp_u.is_empty:
@@ -2646,17 +2651,7 @@ def _emit_tunnel_portals(
     if not ways_r:
         return 0
     # Project nodes to meter space.
-    lat0, lon0 = layout.anchor
-    cos0 = math.cos(math.radians(lat0))
-    R = R_EARTH
-
-    def _to_m(lon: float, lat: float) -> tuple[float, float]:
-        return (math.radians(lon - lon0) * R * cos0,
-                math.radians(lat - lat0) * R)
-
-    def _m_to_ll(x: float, y: float) -> tuple[float, float]:
-        return (lat0 + math.degrees(y / R),
-                lon0 + math.degrees(x / (R * cos0)))
+    _to_m, _m_to_ll = _local_meter_projections(layout.anchor)
     nodes_m: dict[str, tuple[float, float]] = {}
     for nid, (lat, lon) in nodes_r.items():
         nodes_m[nid] = _to_m(lon, lat)
@@ -2668,8 +2663,7 @@ def _emit_tunnel_portals(
         "apron", "building", "groundside_pavement", "service_road",
         "service_junction")
     try:
-        from shapely.ops import unary_union as _uu8
-        _airside_gate_u = _uu8(
+        _airside_gate_u = unary_union(
             [s.polygon for s in layout.shapes
              if s.polygon is not None and not s.polygon.is_empty
              and s.role in _AIRSIDE_GATE_ROLES])
@@ -2745,12 +2739,6 @@ def _emit_tunnel_portals(
             return _sample_dem(dem, tile_lat, tile_lon, lat, lon)
         except _GEOM_EXC:
             return None
-    # Build a boundary line (union of all ROLE_BOUNDARY shapes' rings)
-    # for the per-portal proximity filter.  Tunnels whose portal lies
-    # more than ``max_boundary_dist_m`` from any airport-boundary edge
-    # are skipped — they don't affect the airport mesh and the chained
-    # surface walk would otherwise emit ramps along urban roads far
-    # from the airport.
     # (The old ROLE_BOUNDARY-distance portal gate lived here — retired
     # 2026-07-04, see the airside-pavement gate in the portal loop.)
     excluded = excluded_way_ids or set()
@@ -2910,13 +2898,7 @@ def _scenery_has_bridge_objects(
     # rects' polygons are in meter space anchored at the layout —
     # convert each placement to meters and test against the
     # buffered rect union.
-    lat0, lon0 = layout.anchor
-    cos0 = math.cos(math.radians(lat0))
-    R = R_EARTH
-
-    def _to_m(lon_v: float, lat_v: float) -> tuple[float, float]:
-        return (math.radians(lon_v - lon0) * R * cos0,
-                math.radians(lat_v - lat0) * R)
+    _to_m, _m_to_ll = _local_meter_projections(layout.anchor)
     try:
         bridge_buf = unary_union(bridge_rects).buffer(
             bridge_proximity_m)
@@ -2969,7 +2951,7 @@ def _emit_taxi_bridges(
     Returns the number of bridge rects whose walls were emitted
     (0 when the scenery already has bridge OBJs).
     """
-    from .pipeline import _load_osm_airports, _load_osm_big_roads
+    from .pipeline import _load_osm_big_roads
     bridge_shapes = [s for s in layout.shapes
                      if getattr(s, "is_bridge", False)
                      and s.polygon is not None
@@ -3072,12 +3054,7 @@ def _emit_taxi_bridges(
                 layout.anchor[0], layout.anchor[1])
         except _GEOM_EXC:
             nodes_r, ways_r = {}, []
-        lat0, lon0 = layout.anchor
-        cos0 = math.cos(math.radians(lat0))
-
-        def _to_m(lon: float, lat: float) -> tuple[float, float]:
-            return (math.radians(lon - lon0) * R_EARTH * cos0,
-                    math.radians(lat - lat0) * R_EARTH)
+        _to_m, _m_to_ll = _local_meter_projections(layout.anchor)
 
         tunnel_lines: list[LineString] = []
         for _wid, nrefs, tags in ways_r:
@@ -3289,7 +3266,7 @@ def _emit_underpass_road_approaches(
 
     Returns the number of UNDERPASS surfaces processed.
     """
-    from .pipeline import _load_osm_airports, _load_osm_big_roads
+    from .pipeline import _load_osm_big_roads
     # Collect underpass surfaces.
     bridge_shapes = [s for s in layout.shapes
                      if getattr(s, "is_bridge", False)
@@ -3301,15 +3278,7 @@ def _emit_underpass_road_approaches(
         layout.anchor[0], layout.anchor[1])
     if not ways_r:
         return 0
-    lat0, lon0 = layout.anchor
-    cos0 = math.cos(math.radians(lat0))
-    R = R_EARTH
-    def _to_m(lon: float, lat: float) -> tuple[float, float]:
-        return (math.radians(lon - lon0) * R * cos0,
-                math.radians(lat - lat0) * R)
-    def _m_to_ll(x: float, y: float) -> tuple[float, float]:
-        return (lat0 + math.degrees(y / R),
-                lon0 + math.degrees(x / (R * cos0)))
+    _to_m, _m_to_ll = _local_meter_projections(layout.anchor)
     nodes_m: dict[str, tuple[float, float]] = {}
     for nid, (lat, lon) in nodes_r.items():
         nodes_m[nid] = _to_m(lon, lat)
@@ -3563,13 +3532,7 @@ def _discover_depressed_roads(
     if not ways_a:
         return (None, None, None)
 
-    lat0, lon0 = layout.anchor
-    cos0 = math.cos(math.radians(lat0))
-    R = R_EARTH
-
-    def _to_m(lon: float, lat: float) -> tuple[float, float]:
-        return (math.radians(lon - lon0) * R * cos0,
-                math.radians(lat - lat0) * R)
+    _to_m, _m_to_ll = _local_meter_projections(layout.anchor)
 
     # ── Bridge LineStrings (airport-layer OSM) ─────────────────
     bridge_lines: list[LineString] = []
@@ -3828,17 +3791,7 @@ def _emit_through_airport_depressed_roads(
     arm_walk_max_m = max(arm_max_length_m, ramp_min_length_m,
                          depression_depth_m / plan_grade)
 
-    lat0, lon0 = layout.anchor
-    cos0 = math.cos(math.radians(lat0))
-    R = R_EARTH
-
-    def _to_m(lon: float, lat: float) -> tuple[float, float]:
-        return (math.radians(lon - lon0) * R * cos0,
-                math.radians(lat - lat0) * R)
-
-    def _m_to_ll(x: float, y: float) -> tuple[float, float]:
-        return (lat0 + math.degrees(y / R),
-                lon0 + math.degrees(x / (R * cos0)))
+    _to_m, _m_to_ll = _local_meter_projections(layout.anchor)
 
     def _airport_elevation_at(cx: float, cy: float) -> float | None:
         # Reuse pattern from _emit_tunnel_portals: prefer the
