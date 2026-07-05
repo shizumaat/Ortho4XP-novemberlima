@@ -3,6 +3,7 @@ import logging
 import os
 import sys
 import shutil
+import time
 from math import floor, cos, pi
 import queue
 import threading
@@ -847,20 +848,28 @@ class Ortho4XP_AutoPatch_Progress(tk.Toplevel):
     Sizing (user 2026-07-02): with up to ``MAX_VISIBLE_ROWS`` airports the
     window is sized to fit the rows EXACTLY (no empty space below — a
     2-airport tile gets a 2-row-tall window); with more, it shows
-    ``MAX_VISIBLE_ROWS`` rows and the rest scroll.  When every airport has
-    finished successfully the window closes itself after a short beat; if
-    any airport FAILED it stays open so the red row is seen.
+    ``MAX_VISIBLE_ROWS`` rows and the rest scroll.  A finished airport's
+    row LEAVES the list after a short beat (user 2026-07-04: the list
+    shrinks as the tile completes); a FAILED row stays red so the
+    failure is seen.  When the last row leaves, the window closes.
+
+    Under each bar (user 2026-07-04): elapsed build time on the left,
+    "About m:ss remaining" on the right (elapsed scaled by the bar's
+    remaining fraction), the current phase text centered between them.
     """
 
     MAX_VISIBLE_ROWS = 6
     AUTOCLOSE_DELAY_MS = 1500
+    DONE_ROW_LINGER_MS = 900       # let the user see the bar hit 100 %
+    TIMER_TICK_MS = 500
+    ESTIMATE_MIN_PCT = 3           # below this the estimate is noise
 
     def __init__(self, parent):
         tk.Toplevel.__init__(self)
         self.parent = parent
         self.title("Auto-patch progress")
-        self.geometry("470x120")
-        self.minsize(320, 40)
+        self.geometry("560x120")
+        self.minsize(360, 40)
         self.protocol("WM_DELETE_WINDOW", self.exit)
         self.configure(bg="light green")
         self.rowconfigure(0, weight=1)
@@ -869,6 +878,8 @@ class Ortho4XP_AutoPatch_Progress(tk.Toplevel):
         # One row-widget bundle per ICAO.
         self.rows = {}
         self._closing = False
+        self._timer_job = None
+        self._start_timer_loop()
 
         # Scrollable body: Canvas + inner Frame + vertical Scrollbar (the
         # standard Tkinter scrolling-frame idiom).
@@ -915,14 +926,24 @@ class Ortho4XP_AutoPatch_Progress(tk.Toplevel):
             row["var"].set(100)
             row["detail"].configure(
                 text=label or "Done", fg="#0a6b0a")
+            row["remaining"].configure(text="")
+            # The list SHRINKS as airports finish (user 2026-07-04): the
+            # row leaves after a short beat so the 100 % bar registers.
+            try:
+                self.after(self.DONE_ROW_LINGER_MS,
+                           lambda i=icao: self._remove_row(i))
+            except Exception:
+                pass
         elif status == "fail":
             row["detail"].configure(
                 text=label or "FAILED", fg="red")
+            row["remaining"].configure(text="")
         else:
+            if row["t0"] is None:
+                row["t0"] = time.time()   # the build just started
             pct = int(100 * done / total) if total else 0
             row["var"].set(pct)
-            row["detail"].configure(
-                text="[{}/{}] {}".format(done, total, label), fg="black")
+            row["detail"].configure(text=label, fg="black")
         row["frame"].update_idletasks()
         if status in ("done", "fail"):
             self._maybe_autoclose()
@@ -945,17 +966,84 @@ class Ortho4XP_AutoPatch_Progress(tk.Toplevel):
             frame, mode="determinate", orient=HORIZONTAL,
             variable=var, maximum=100)
         bar.grid(row=0, column=1, sticky=E + W, padx=(0, 6), pady=(4, 0))
-        detail = tk.Label(
-            frame, text="waiting…", bg="light green", anchor=W,
+        # Under the bar: elapsed (left) | phase detail (centered) |
+        # remaining estimate (right).
+        under = tk.Frame(frame, bg="light green")
+        under.grid(row=1, column=1, sticky=E + W, padx=(0, 6), pady=(0, 4))
+        under.columnconfigure(0, minsize=48)
+        under.columnconfigure(1, weight=1)
+        under.columnconfigure(2, minsize=132)
+        elapsed = tk.Label(
+            under, text="", bg="light green", anchor=W,
             font=("TkDefaultFont", 8))
-        detail.grid(row=1, column=1, sticky=W, padx=(0, 6), pady=(0, 4))
+        elapsed.grid(row=0, column=0, sticky=W)
+        detail = tk.Label(
+            under, text="waiting…", bg="light green", anchor="center",
+            font=("TkDefaultFont", 8))
+        detail.grid(row=0, column=1, sticky=E + W)
+        remaining = tk.Label(
+            under, text="", bg="light green", anchor=E,
+            font=("TkDefaultFont", 8))
+        remaining.grid(row=0, column=2, sticky=E)
         self.rows[icao] = {
             "frame": frame, "var": var, "bar": bar, "detail": detail,
-            "status": "run"}
+            "elapsed": elapsed, "remaining": remaining,
+            "t0": None, "status": "run"}
         # A row created lazily (event for an ICAO the begin didn't list)
         # grows the window like set_airports would have.
         self._fit_to_rows()
         return self.rows[icao]
+
+    @staticmethod
+    def _fmt_mmss(seconds):
+        seconds = max(0, int(round(seconds)))
+        return "{}:{:02d}".format(seconds // 60, seconds % 60)
+
+    def _start_timer_loop(self):
+        try:
+            self._timer_job = self.after(self.TIMER_TICK_MS, self._tick)
+        except Exception:
+            self._timer_job = None
+
+    def _tick(self):
+        """Refresh every running row's elapsed / remaining labels."""
+        try:
+            now = time.time()
+            for row in self.rows.values():
+                if row.get("status") != "run" or row.get("t0") is None:
+                    continue
+                elapsed = now - row["t0"]
+                row["elapsed"].configure(text=self._fmt_mmss(elapsed))
+                pct = row["var"].get()
+                if pct >= self.ESTIMATE_MIN_PCT:
+                    rem = elapsed * (100.0 - pct) / max(pct, 1)
+                    row["remaining"].configure(
+                        text="About {} remaining".format(
+                            self._fmt_mmss(rem)))
+                else:
+                    row["remaining"].configure(text="estimating…")
+        except Exception:
+            pass
+        self._start_timer_loop()
+
+    def _remove_row(self, icao):
+        """Drop a finished airport's row and re-pack the survivors — the
+        list gets smaller and smaller as the tile completes."""
+        row = self.rows.pop(icao, None)
+        if row is None:
+            return
+        try:
+            row["frame"].destroy()
+        except Exception:
+            pass
+        # Re-grid the survivors at consecutive indices (no gaps).
+        for idx, r in enumerate(self.rows.values()):
+            try:
+                r["frame"].grid_configure(row=idx)
+            except Exception:
+                pass
+        self._fit_to_rows()
+        self._maybe_autoclose()
 
     def _fit_to_rows(self):
         """Size the window so its rows fit EXACTLY — no empty space below
@@ -972,23 +1060,26 @@ class Ortho4XP_AutoPatch_Progress(tk.Toplevel):
             # +4: the body frame's own top/bottom slack inside the canvas.
             height = int(row_h * visible) + 4
             width = self.winfo_width()
-            if width < 320:            # not yet mapped → keep the default
-                width = 470
+            if width < 360:            # not yet mapped → keep the default
+                width = 560
             self.geometry("{}x{}".format(width, height))
         except Exception:
             pass
 
     def _maybe_autoclose(self):
-        """Close the window a beat after EVERY airport finished
-        successfully.  Any FAILED row keeps it open (the red row is the
-        only trace of the failure the user would otherwise miss)."""
-        if self._closing or not self.rows:
+        """Close the window a beat after the LAST row has left the list
+        (finished rows remove themselves).  Any FAILED row keeps it open
+        (the red row is the only trace of the failure the user would
+        otherwise miss)."""
+        if self._closing:
             return
         statuses = [r.get("status") for r in self.rows.values()]
         if any(s not in ("done", "fail") for s in statuses):
             return
         if any(s == "fail" for s in statuses):
             return
+        if statuses:
+            return          # done rows still lingering — removal re-checks
         self._closing = True
         try:
             self.after(self.AUTOCLOSE_DELAY_MS, self._autoclose)
@@ -1003,6 +1094,12 @@ class Ortho4XP_AutoPatch_Progress(tk.Toplevel):
             pass
 
     def exit(self):
+        if self._timer_job is not None:
+            try:
+                self.after_cancel(self._timer_job)
+            except Exception:
+                pass
+            self._timer_job = None
         self.parent.autopatch_window = None
         self.destroy()
 
