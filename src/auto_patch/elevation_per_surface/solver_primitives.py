@@ -548,15 +548,20 @@ def _visible_grade_edges(coords, idx, cap, polygon, container=None,
     return out
 
 
-def _grade_graph_edges(s, coords, idx, ctx):
+def _grade_graph_edges(s, coords, idx, ctx, ring_only=False):
     """Adapter: the single grade graph's per-edge ``(key, key, cap)`` for one
     apron/junction shape, converted to the solver's ``(i, j, cap*dist)`` edge
     contract.  Keys are node indices; a ring vertex with no index gets a unique
-    sentinel key so it stays distinct and is filtered out of the result."""
+    sentinel key so it stays distinct and is filtered out of the result.
+
+    ``ring_only`` (user 2026-07-05 flatness tier): ring-adjacent pairs only —
+    the eager O(n) share of a flatness-certified shape; the full set is the
+    shape's ``lazy_expand`` thunk (this same call without ``ring_only``)."""
     from auto_patch import grade_graph as GG
     keys = [i if i is not None else ("_n", p) for p, i in enumerate(idx)]
     gs = GG.GradeShape(role=s.role, ring=list(coords), keys=keys)
-    sc = GG.shape_constraints_cached(id(s.polygon), gs, ctx)
+    sc = GG.shape_constraints_cached(id(s.polygon), gs, ctx,
+                                     ring_only=ring_only)
     pos = {i: coords[p] for p, i in enumerate(idx) if i is not None}
     out = []
     for (a, b, cap) in sc.edges:
@@ -569,7 +574,111 @@ def _grade_graph_edges(s, coords, idx, ctx):
     return out
 
 
-def _build_shape_constraints(layout, bucket_to_idx, ctx=None):
+# ── Flatness-certified lazy tier (user 2026-07-05) ───────────────────────────
+# Grid pitch for the certificate's DEM sweep.  The production DEM is
+# airport-smoothed BEFORE patch generation (Ortho4XP apt_smoothing_pix=8, a
+# ~700 m blur; the standalone/test path replicates the exact same smoothing in
+# elevation.py) — so a 25 m grid cannot straddle a terrain feature the blur has
+# not already spread across many samples.  That smoothing premise is what makes
+# SAMPLING a valid gradient bound here.
+_FLAT_CERTIFICATE_GRID_M = 25.0
+# Refuse to certify a shape whose bounding box would need more samples than
+# this (certificate cost stays bounded; refusal just means eager generation).
+_FLAT_CERTIFICATE_MAX_SAMPLES = 20000
+
+
+def _certify_flat_shape(layout, shape, coords, dem, tile_lat, tile_lon,
+                        rate_min):
+    """Flatness CERTIFICATE for one soft shape (user 2026-07-05 flatness
+    tier).  Returns the per-ring-vertex DEM seed values when the local DEM
+    gradient is provably ≤ ``rate_min`` everywhere over the shape, else
+    ``None`` (not certified → the caller generates the pair set eagerly).
+
+    Soundness: every within-shape law budget for an apron/junction pair is at
+    least ``APRON_MAX_GRADE · dist`` (aprons/frontage are the tightest 1 %
+    class; ``grade_law.classify_pair`` only relaxes upward from there, and an
+    anisotropic baked budget is ≥ the flat one).  ``rate_min`` is
+    ``0.6 · APRON_MAX_GRADE`` — the 0.6 safety factor covers estimation slack,
+    and the validator's ELEV_ROUNDING_NOISE_M (0.03 m) absorbs emit rounding
+    on the sub-3 m chords this leaves near the cap.  So a DEM whose gradient
+    is ≤ ``rate_min`` satisfies EVERY body pair at the seed, and the pairs
+    need not exist until a node moves off that seed.
+
+    Estimation = the shape's ring-adjacent vertex pairs (exact — these ARE law
+    pairs) plus a ~25 m grid over the bounding box, both through the SAME
+    sampler the node seeds use (``elevation._sample_dem`` with the layout
+    anchor frame), so the returned seed values are bit-identical to what
+    ``_seed_elevations`` / ``_sample_node_dem`` produce.  ANY sampling gap
+    (off-tile, DEM error, oversized bbox) refuses the certificate — failing
+    toward correctness, never toward a skipped constraint."""
+    from auto_patch.elevation import _sample_dem
+
+    ring_seed = []
+    for (x, y) in coords:
+        try:
+            lat, lon = layout.m_to_ll(x, y)
+            value = _sample_dem(dem, tile_lat, tile_lon, lat, lon)
+        except _GEOM_EXC:
+            return None
+        if value is None or value != value:
+            return None
+        ring_seed.append(float(value))
+
+    # Ring-adjacent vertex pairs — exact (these are the eager law pairs; the
+    # certificate must be at least as strict as what it stands in for).
+    count = len(coords)
+    for p in range(count):
+        q = (p + 1) % count
+        (xa, ya), (xb, yb) = coords[p], coords[q]
+        dist = math.hypot(xa - xb, ya - yb)
+        if dist < 1e-6:
+            continue
+        if abs(ring_seed[p] - ring_seed[q]) > rate_min * dist:
+            return None
+
+    # ~25 m grid over the shape's bounding box (axis-neighbour gradients).
+    try:
+        min_x, min_y, max_x, max_y = shape.polygon.bounds
+    except _GEOM_EXC:
+        return None
+    width, height = max_x - min_x, max_y - min_y
+    steps_x = max(1, int(math.ceil(width / _FLAT_CERTIFICATE_GRID_M)))
+    steps_y = max(1, int(math.ceil(height / _FLAT_CERTIFICATE_GRID_M)))
+    if (steps_x + 1) * (steps_y + 1) > _FLAT_CERTIFICATE_MAX_SAMPLES:
+        return None
+    spacing_x = width / steps_x
+    spacing_y = height / steps_y
+    grid = []
+    for grid_row in range(steps_y + 1):
+        row_values = []
+        y = min_y + grid_row * spacing_y
+        for grid_col in range(steps_x + 1):
+            x = min_x + grid_col * spacing_x
+            try:
+                lat, lon = layout.m_to_ll(x, y)
+                value = _sample_dem(dem, tile_lat, tile_lon, lat, lon)
+            except _GEOM_EXC:
+                return None
+            if value is None or value != value:
+                return None
+            row_values.append(float(value))
+        grid.append(row_values)
+    for grid_row in range(steps_y + 1):
+        for grid_col in range(steps_x + 1):
+            here = grid[grid_row][grid_col]
+            if grid_col < steps_x and spacing_x > 1e-6:
+                if abs(grid[grid_row][grid_col + 1] - here) \
+                        > rate_min * spacing_x:
+                    return None
+            if grid_row < steps_y and spacing_y > 1e-6:
+                if abs(grid[grid_row + 1][grid_col] - here) \
+                        > rate_min * spacing_y:
+                    return None
+    return ring_seed
+
+
+def _build_shape_constraints(layout, bucket_to_idx, ctx=None, dem=None,
+                             tile_lat=0, tile_lon=0, hard_nodes=None):
     """Per-shape grade constraints for the directional relief: one entry per
     soft pavement shape with ``{nodes, edges, flat}`` — its node indices, its
     OWN internal grade edges ``(i, j, cap_m)``, and whether it must stay flat
@@ -580,7 +689,29 @@ def _build_shape_constraints(layout, bucket_to_idx, ctx=None):
 
     ``ctx``: optionally a prebuilt ``grade_graph.build_context`` — pass the
     SAME one ``build_unified_graph`` will use so the per-shape law memo
-    (``grade_graph.shape_constraints_cached``) computes each shape once."""
+    (``grade_graph.shape_constraints_cached``) computes each shape once.
+
+    FLATNESS-CERTIFIED LAZY TIER (user 2026-07-05, gate ``O4_FLAT_SHAPE_LAZY``
+    default on; needs ``dem``/``tile_lat``/``tile_lon`` + ``hard_nodes`` from
+    the caller): an apron/junction shape whose local DEM gradient is provably
+    below ``0.6 · APRON_MAX_GRADE`` (see ``_certify_flat_shape``) gets only
+    its O(n) ring-adjacent pairs eagerly; its entry additionally carries
+      * ``lazy_expand`` — thunk returning the FULL ``(i, j, budget)`` list
+        (the exact eager generation, memoised via
+        ``grade_graph.shape_constraints_cached``),
+      * ``lazy_nodes`` / ``lazy_seed`` — the node indices and their DEM seed
+        values at certificate time,
+      * ``lazy_certified`` — permanent marker (hit-rate reporting).
+    ``one_solve.feasibility_project`` expands the entry the moment any of its
+    nodes moves off the seed; until then the certificate proves every body
+    pair satisfied.  Shapes touching a ``hard_nodes`` member (runway / seam /
+    join — they sit at profile values, not the DEM seed) are never certified.
+    Terminals, rects and service junctions keep their eager branches (they are
+    flat / cheap / all-pair-small; the O(n²) cost lives in apron/junction).
+    NOTE: ``one_solve._build_adjacency`` consequently sees only the ring edges
+    of a certified shape for its neighbour-cap slabs — acceptable: that is a
+    heuristic bound and every node is re-projected against the full law
+    afterwards (the projection expands on first movement)."""
     out = []
     # Airside-pavement union, prepared, for JUNCTION chord-visibility (see
     # ``_visible_grade_edges``): junction chords may cross neighbouring
@@ -612,6 +743,21 @@ def _build_shape_constraints(layout, bucket_to_idx, ctx=None):
     _gg_ctx = ctx if ctx is not None else _GG.build_context(layout, bucket_to_idx)
     back_scale = (APRON_BACK_EDGE_GRADE / APRON_MAX_GRADE
                   if APRON_MAX_GRADE > 0 else 1.0)
+    # FLATNESS-CERTIFIED LAZY TIER (user 2026-07-05): active only when the
+    # caller supplies the DEM (certificate source) and the hard node set (a
+    # shape touching a runway/seam/join member is never certified — those
+    # nodes sit at profile values, not the DEM seed).  ``O4_FLAT_SHAPE_LAZY=0``
+    # → exact old behaviour (everything generated eagerly).
+    flat_lazy_enabled = (
+        _os.environ.get("O4_FLAT_SHAPE_LAZY", "1") == "1"
+        and dem is not None and hard_nodes is not None)
+    # Globally conservative certificate rate: aprons/frontage are the tightest
+    # 1 % within-shape class, 0.6 the safety factor; the validator's
+    # ELEV_ROUNDING_NOISE_M (0.03 m) absorbs emit rounding on the sub-3 m
+    # chords this leaves near the cap (see _certify_flat_shape).
+    flat_rate_min = 0.6 * APRON_MAX_GRADE
+    flat_certified_count = 0
+    flat_candidate_count = 0
     # Node indices on a clean sloping-rect PLANE (4-corner, altitude_high/low).
     # Used to grade a rect end-cap as a PLANAR EXTENSION of its parent rect
     # (O4_CAP_PLANAR): the cap's inner edge sits on these nodes.
@@ -671,6 +817,7 @@ def _build_shape_constraints(layout, bucket_to_idx, ctx=None):
         flat = (cap <= 0.0)
         edges: list[tuple[int, int, float]] = []
         flat_pairs: list[tuple[int, int]] = []   # rect flat-end coupled pairs
+        lazy_extras = None                       # flatness-certified lazy keys
         # A clean PLANAR rect (altitude_high/low) gets the flat-cross + axial
         # constraints.  A per-vertex ``node_altitudes`` piece is NOT planar —
         # e.g. the tile-cut seam WEDGE that follows the seam terrain's cross-
@@ -747,7 +894,50 @@ def _build_shape_constraints(layout, bucket_to_idx, ctx=None):
             # spine+body model at the taxiway per-letter cap (no legacy per-axis
             # diagonal-skip).  GRADED terminals (ROLE_BUILDING) + service_junction
             # stay on the legacy branches below for now.
-            edges.extend(_grade_graph_edges(s, coords, idx, _gg_ctx))
+            #
+            # FLATNESS-CERTIFIED LAZY TIER (user 2026-07-05): if the DEM is
+            # provably flat under this shape, generate only the O(n)
+            # ring-adjacent pairs now and defer the O(n²) body pairs to the
+            # ``lazy_expand`` thunk (soundness invariant: the body pairs are
+            # satisfied AT the DEM seed; ``feasibility_project`` generates
+            # them the moment any node moves off it).  Certificate failure of
+            # ANY kind — including an exception — falls back to eager
+            # generation: a lazy bookkeeping error must never silently drop
+            # law coverage.
+            lazy_seed_by_vertex = None
+            if flat_lazy_enabled:
+                flat_candidate_count += 1
+                if not any(i in hard_nodes for i in nodes):
+                    try:
+                        lazy_seed_by_vertex = _certify_flat_shape(
+                            layout, s, coords, dem, tile_lat, tile_lon,
+                            flat_rate_min)
+                    except _GEOM_EXC:
+                        lazy_seed_by_vertex = None
+            if lazy_seed_by_vertex is not None:
+                flat_certified_count += 1
+                edges.extend(_grade_graph_edges(s, coords, idx, _gg_ctx,
+                                                ring_only=True))
+                lazy_node_indices = []
+                lazy_node_seeds = []
+                seen_node_indices = set()
+                for vertex_position, node_index in enumerate(idx):
+                    if node_index is None or node_index in seen_node_indices:
+                        continue
+                    seen_node_indices.add(node_index)
+                    lazy_node_indices.append(node_index)
+                    lazy_node_seeds.append(lazy_seed_by_vertex[vertex_position])
+                lazy_extras = {
+                    "lazy_expand": (lambda _shape=s, _coords=coords, _idx=idx,
+                                    _law_ctx=_gg_ctx:
+                                    _grade_graph_edges(_shape, _coords, _idx,
+                                                       _law_ctx)),
+                    "lazy_nodes": lazy_node_indices,
+                    "lazy_seed": lazy_node_seeds,
+                    "lazy_certified": True,
+                }
+            else:
+                edges.extend(_grade_graph_edges(s, coords, idx, _gg_ctx))
         elif s.role == ROLE_BUILDING:
             # In-pavement VISIBILITY graph for GRADED terminals (when
             # TERMINAL_MAX_GRADE > 0 — large near-flat pads, same as an apron).
@@ -803,11 +993,18 @@ def _build_shape_constraints(layout, bucket_to_idx, ctx=None):
                                    coords[a][1] - coords[b][1])
                     if d >= 0.5:
                         edges.append((idx[a], idx[b], cap * d))
-        out.append({"nodes": nodes, "edges": edges, "flat": flat,
-                    "flat_pairs": flat_pairs,
-                    "area": float(s.polygon.area),
-                    "role": s.role,
-                    "ref": s.ref or ""})
+        entry = {"nodes": nodes, "edges": edges, "flat": flat,
+                 "flat_pairs": flat_pairs,
+                 "area": float(s.polygon.area),
+                 "role": s.role,
+                 "ref": s.ref or ""}
+        if lazy_extras is not None:
+            entry.update(lazy_extras)
+        out.append(entry)
+    if flat_lazy_enabled and _os.environ.get("O4_STEP_DEBUG") == "1":
+        print(f"  [flat-lazy] certified {flat_certified_count} of "
+              f"{flat_candidate_count} apron/junction shape(s) "
+              f"(rate_min {flat_rate_min * 100.0:.2f}%)")
     return out
 
 

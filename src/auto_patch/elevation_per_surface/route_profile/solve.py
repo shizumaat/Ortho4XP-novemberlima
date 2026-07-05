@@ -60,8 +60,16 @@ def solve_route_profile(layout, icao: str,
     # (grade_graph.shape_constraints_cached) instead of running twice.
     from auto_patch import grade_graph as _GG
     _gg_ctx = _GG.build_context(layout, bucket_to_idx)
-    shape_constraints = _build_shape_constraints(layout, bucket_to_idx,
-                                                 ctx=_gg_ctx)
+    # FLATNESS-CERTIFIED LAZY TIER (user 2026-07-05): pass the DEM (the
+    # certificate source) and the currently-hard nodes (runway/seam seeds +
+    # runway nodes — a shape touching one sits at profile values, never the
+    # DEM seed, so it is never certified).
+    _hard_for_certificate = ({i for i in range(len(elev)) if base_hard[i]}
+                             | {i for i in runway_nodes if i < len(elev)})
+    shape_constraints = _build_shape_constraints(
+        layout, bucket_to_idx, ctx=_gg_ctx, dem=dem,
+        tile_lat=tile_lat, tile_lon=tile_lon,
+        hard_nodes=_hard_for_certificate)
     coupling = _build_level_coupling(shape_constraints)
 
     # ── THE ONE GRAPH (user 2026-06-27) ──────────────────────────────────────
@@ -437,12 +445,21 @@ def solve_route_profile(layout, icao: str,
             print(f"  [unified] {icao}: {len(frozen)} spine node(s) solved, "
                   f"{n_free} body node(s); feasibility-project → {rem} edge(s) "
                   f"over cap ({bh} both-hard = genuine).")
+            _lazy_certified = sum(1 for _sc in shape_constraints
+                                  if _sc.get("lazy_certified"))
+            if _lazy_certified:
+                _still_lazy = sum(1 for _sc in shape_constraints
+                                  if "lazy_expand" in _sc)
+                print(f"  [flat-lazy] {icao}: {_lazy_certified} certified, "
+                      f"{_lazy_certified - _still_lazy} expanded during the "
+                      f"solve, {_still_lazy} never expanded")
         _report(icao, n_free, n_free, _time.time() - t0,
                 n_terms, n_rects, n_juncs)
         return
 
 
-def final_grade_projection(layout, icao: str = "") -> None:
+def final_grade_projection(layout, icao: str = "", dem=None,
+                           tile_lat: int = 0, tile_lon: int = 0) -> None:
     """LAST-WORD grade projection on the FINAL emitted geometry (round 4,
     user 2026-07-03).
 
@@ -486,7 +503,18 @@ def final_grade_projection(layout, icao: str = "") -> None:
     n = len(elev)
 
     ctx = _GG.build_context(layout, b2i)
-    shape_constraints = _build_shape_constraints(layout, b2i, ctx=ctx)
+    # FLATNESS-CERTIFIED LAZY TIER (user 2026-07-05): here ``elev`` is the
+    # SOLVED surface (warm seed), so a certified shape stays lazy only when
+    # the whole pipeline left every one of its nodes exactly at the DEM seed
+    # (bitwise — the entry check compares against the same sampler's values);
+    # anything the solve touched expands at projection entry.  ``dem`` comes
+    # from the pipeline caller (same tile frame as the elevation solve).
+    runway_idx = _runway_node_set(layout, b2i)
+    _hard_for_certificate = ({i for i in range(n) if base_hard[i]}
+                             | {i for i in runway_idx if i < n})
+    shape_constraints = _build_shape_constraints(
+        layout, b2i, ctx=ctx, dem=dem, tile_lat=tile_lat, tile_lon=tile_lon,
+        hard_nodes=_hard_for_certificate)
     G = _GG.build_unified_graph(layout, b2i, ctx=ctx)
     u_edges = [(a, b, cap.at(_GG._dist(G.pos.get(a), G.pos.get(b)), 0.0))
                for (a, b, cap, _sp) in G.edges
@@ -494,7 +522,7 @@ def final_grade_projection(layout, icao: str = "") -> None:
     joint = list(shape_constraints) + [{"edges": u_edges}]
 
     hard = {i for i in range(n) if base_hard[i]}
-    hard |= {i for i in _runway_node_set(layout, b2i) if i < n}
+    hard |= {i for i in runway_idx if i < n}
     # tile-seam nodes: terrain-pinned for cross-tile stitching.
     try:
         for i, (x, y) in enumerate(nodes):
@@ -541,6 +569,16 @@ def final_grade_projection(layout, icao: str = "") -> None:
     rem, bh = feasibility_project(elev, joint, hard, force_scalar=True,
                                   max_iters=400,
                                   flat_groups=pad_groups or None)
+    if _os.environ.get("O4_STEP_DEBUG") == "1":
+        _lazy_certified = sum(1 for _sc in shape_constraints
+                              if _sc.get("lazy_certified"))
+        if _lazy_certified:
+            _still_lazy = sum(1 for _sc in shape_constraints
+                              if "lazy_expand" in _sc)
+            print(f"  [flat-lazy] {icao} final projection: "
+                  f"{_lazy_certified} certified, "
+                  f"{_lazy_certified - _still_lazy} expanded, "
+                  f"{_still_lazy} never expanded")
     # Re-fair the ring edges the projection just perturbed (the GS
     # distributes a cap-grade climb as a sawtooth between alternate
     # nodes; a linear cap-grade profile satisfies the same pairs) —

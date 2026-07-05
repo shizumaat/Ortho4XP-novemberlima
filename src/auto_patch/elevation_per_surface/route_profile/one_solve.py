@@ -205,6 +205,61 @@ def feasibility_project(elev, shape_constraints, hard, *,
     def _r(i):
         return gmap.get(i, i)
 
+    # ── FLATNESS-CERTIFIED LAZY SHAPES (user 2026-07-05 flatness tier) ───
+    # A certified entry carries only its O(n) ring-adjacent pairs eagerly;
+    # its O(n²) body pairs are proven satisfied AT THE DEM SEED
+    # (``solver_primitives._certify_flat_shape``).  Soundness invariant: the
+    # moment any of the shape's nodes moves off that seed — BEFORE this call
+    # (checked right here) or DURING it (checked in the scalar worklist /
+    # after each vectorised pass) — the full pair set is generated and
+    # enforced exactly like an eager shape's.  Expansion mutates the entry in
+    # place (full edges merged, lazy keys dropped), so every LATER projection
+    # call sees the expanded set too.  Final state either way: every
+    # generated edge satisfied + every never-expanded shape satisfied by its
+    # certificate ⇒ the same law coverage as eager generation.
+    lazy_movement_tolerance = 1e-6
+
+    def _lazy_nodes_moved(entry):
+        # A flat-group member's live value is carried by its REPRESENTATIVE
+        # during this call (members are only broadcast back at the end), so
+        # the effective elevation to compare against the certificate seed is
+        # ``elev[_r(node_index)]``.
+        for node_index, seed_value in zip(entry["lazy_nodes"],
+                                          entry["lazy_seed"]):
+            if 0 <= node_index < n and \
+                    abs(elev[_r(node_index)] - seed_value) \
+                    > lazy_movement_tolerance:
+                return True
+        return False
+
+    def _expand_lazy_entry(entry):
+        """Generate the entry's FULL pair set and merge it in; the lazy keys
+        are dropped, so the entry is an ordinary eager entry from now on
+        (``lazy_certified`` stays as the hit-rate marker).  A thunk failure
+        PROPAGATES: a lazy bookkeeping error must never silently skip
+        constraints, and the thunk is the same generation call the eager
+        path would have made — it cannot be worked around, only heard."""
+        thunk = entry.pop("lazy_expand")
+        entry.pop("lazy_nodes", None)
+        entry.pop("lazy_seed", None)
+        full_edges = list(thunk())
+        # Ring pairs come back again inside the full set — the
+        # min-budget-wins dedup below absorbs the duplicates.
+        entry["edges"] = list(entry["edges"]) + full_edges
+        return full_edges
+
+    lazy_entries_pending = []
+    for sc in shape_constraints:
+        if sc.get("lazy_expand") is None:
+            continue
+        if _lazy_nodes_moved(sc):
+            # Pre-call movement (an earlier pass moved a node off its seed):
+            # expand NOW, before edge_lim is built, so the full set flows
+            # through the ordinary min-budget-wins + margin pipeline.
+            _expand_lazy_entry(sc)
+        else:
+            lazy_entries_pending.append(sc)
+
     # TIGHTEST budget wins across duplicate (remapped) pairs.  Every raw edge
     # is a constraint that must hold, so when several land on the same index
     # pair the binding one is the minimum.  This matters most under
@@ -250,6 +305,12 @@ def feasibility_project(elev, shape_constraints, hard, *,
     # Both envelopes are cap-Lipschitz, so clamping into [floor, ceil] removes all
     # gross (anchor-driven) infeasibility in ONE shot — the iterative pass then
     # only resolves free↔free edges, which converges fast.
+    # LAZY SHAPES: the envelope + break detection run ONCE, here, on the
+    # initial adjacency.  Still-lazy shapes contribute their RING edges to it,
+    # so anchor-contradiction paths THROUGH a certified flat zone still exist
+    # — at slightly looser ring-path budgets than the direct body chords would
+    # give (the residual; fixtures gate it).  Mid-call expansions do NOT
+    # recompute the envelope.
     INF = float("inf")
 
     def _reach(sign):                       # sign +1 → ceil, −1 → floor
@@ -330,6 +391,70 @@ def feasibility_project(elev, shape_constraints, hard, *,
             continue
         iter_edges.append((i, j, sweep_budget, 1 if hi else (2 if hj else 0)))
 
+    # ── lazy expansion plumbing for the projection loops ─────────────────
+    # node → still-lazy entries, REPRESENTATIVE-keyed (a pad-group member's
+    # movement shows on its representative).  Determinism: entries appear in
+    # ``shape_constraints`` order and are expanded in that order; each
+    # expansion appends edges in thunk order — no set is iterated anywhere.
+    lazy_entries_by_node: dict = {}
+    for lazy_entry in lazy_entries_pending:
+        for node_index in lazy_entry["lazy_nodes"]:
+            if 0 <= node_index < n:
+                lazy_entries_by_node.setdefault(
+                    _r(node_index), []).append(lazy_entry)
+
+    def _expand_lazy_entry_into_projection(entry):
+        """MID-CALL expansion: merge the entry's full pair set into the live
+        projection state (``edge_lim`` / ``edges`` / ``iter_edges``).
+        Returns the new ``iter_edges`` indices so the scalar worklist can
+        wire them into ``incident``/``pending`` (the vectorised path instead
+        re-runs on the grown ``iter_edges``).  A pair already present at a
+        tighter-or-equal budget is skipped; a TIGHTER duplicate is appended
+        alongside the looser one — both are enforced, the tightest binds.
+        Both-immovable pairs are tallied (``edges``) but never swept, exactly
+        like the entry-time path.  The reach envelope is NOT recomputed (see
+        the envelope comment above)."""
+        new_edge_indices = []
+        for (raw_a, raw_b, raw_budget) in _expand_lazy_entry(entry):
+            if raw_budget is None or raw_budget < 0 \
+                    or raw_a >= n or raw_b >= n:
+                continue
+            node_a, node_b = _r(raw_a), _r(raw_b)
+            if node_a == node_b:
+                continue
+            pair = (node_a, node_b) if node_a < node_b else (node_b, node_a)
+            previous_budget = edge_lim.get(pair)
+            if previous_budget is not None and previous_budget <= raw_budget:
+                continue
+            edge_lim[pair] = raw_budget
+            sweep_budget = _margined_budget(raw_budget, quant_margin)
+            edges.append((pair[0], pair[1], raw_budget, sweep_budget))
+            a_immovable = pair[0] in immovable
+            b_immovable = pair[1] in immovable
+            if a_immovable and b_immovable:
+                continue
+            iter_edges.append((pair[0], pair[1], sweep_budget,
+                               1 if a_immovable else (2 if b_immovable else 0)))
+            new_edge_indices.append(len(iter_edges) - 1)
+        return new_edge_indices
+
+    # POST-ENVELOPE movement check: the reachability clamp (and the broken-
+    # node blend) above moves band-infeasible nodes BEFORE any sweep — the
+    # worklist only reacts to edge-driven moves and would never see those, so
+    # a certified shape whose node was clamped off its seed must expand NOW.
+    # New edges land in ``iter_edges`` before either projection path builds
+    # its queue, so they are swept from the start.
+    if lazy_entries_pending:
+        _still_pending_entries = []
+        for lazy_entry in lazy_entries_pending:
+            if "lazy_expand" not in lazy_entry:
+                continue
+            if _lazy_nodes_moved(lazy_entry):
+                _expand_lazy_entry_into_projection(lazy_entry)
+            else:
+                _still_pending_entries.append(lazy_entry)
+        lazy_entries_pending = _still_pending_entries
+
     # Under the GLOBAL-SLICE spine the graph is ~4x the rect model's
     # (SPJC 110k edges) and the scalar loop costs ~60 s/build across its
     # call sites — the vectorised Jacobi is the default there (the
@@ -354,6 +479,29 @@ def feasibility_project(elev, shape_constraints, hard, *,
     _last_worst = 0.0
     if _vec and iter_edges:
         _project_vectorized(elev, iter_edges, n, max_iters, tol)
+        # Lazy shapes under the vectorised Jacobi: only the FINAL state
+        # matters for the certificate (a shape whose nodes END at their seed
+        # has its body pairs satisfied at that seed, transient wiggles
+        # notwithstanding), so movement is checked after each pass and the
+        # projection re-run on the grown edge set until no further shape
+        # expands — the same fixpoint the scalar worklist reaches
+        # edge-by-edge.  Bounded: each round expands ≥1 entry, entries are
+        # finite.
+        while lazy_entries_pending:
+            still_pending = []
+            expanded_any = False
+            for lazy_entry in lazy_entries_pending:
+                if "lazy_expand" not in lazy_entry:
+                    continue
+                if _lazy_nodes_moved(lazy_entry):
+                    _expand_lazy_entry_into_projection(lazy_entry)
+                    expanded_any = True
+                else:
+                    still_pending.append(lazy_entry)
+            lazy_entries_pending = still_pending
+            if not expanded_any:
+                break
+            _project_vectorized(elev, iter_edges, n, max_iters, tol)
     else:
         # WORKLIST Gauss-Seidel (perf 2026-07-04): the cyclic sweep
         # re-examined EVERY edge up to ``max_iters`` times even when
@@ -405,6 +553,31 @@ def feasibility_project(elev, shape_constraints, hard, *,
                     if not in_pending[neighbour_edge]:
                         in_pending[neighbour_edge] = 1
                         pending.append(neighbour_edge)
+            # MID-CALL lazy expansion: this node just moved off wherever it
+            # was — if it belongs to still-certified shapes, their seed
+            # premise is gone; generate their full pair sets and enqueue the
+            # new edges (kind recomputed against the SAME ``immovable`` set).
+            # ``pop`` retires the trigger node; entries reached through
+            # another of their nodes later are skipped by the
+            # ``lazy_expand``-gone guard.
+            if lazy_entries_by_node:
+                for moved_node in moved:
+                    entries_here = lazy_entries_by_node.pop(moved_node, None)
+                    if not entries_here:
+                        continue
+                    for lazy_entry in entries_here:
+                        if "lazy_expand" not in lazy_entry:
+                            continue
+                        for new_edge_index in \
+                                _expand_lazy_entry_into_projection(lazy_entry):
+                            edge_a, edge_b, _b2, _k2 = \
+                                iter_edges[new_edge_index]
+                            incident.setdefault(edge_a, []) \
+                                .append(new_edge_index)
+                            incident.setdefault(edge_b, []) \
+                                .append(new_edge_index)
+                            in_pending.append(1)
+                            pending.append(new_edge_index)
         _sweeps_run = visits
     # broadcast each flat group's representative level back to its members.
     for rep, g in (groups_eff if flat_groups else ()):

@@ -5140,7 +5140,31 @@ def build_airport_pavement(icao: str, xplane_root: str,
     if compute_elevations:
         from .elevation_per_surface.route_profile.solve import (
             final_grade_projection)
-        final_grade_projection(layout, icao)
+        # DEM + tile frame for the flatness-certificate tier (user
+        # 2026-07-05) — the SAME dem/tile pairing rule the elevation solve
+        # uses (current tile when the driver provided tile_dem, else the
+        # anchor tile that _load_airport_dem covers), so certificate seeds
+        # are bit-identical to the solve's node seeds.  Failure to load a
+        # DEM just disables certification (eager generation).
+        _projection_dem = None
+        _projection_tile_lat = _projection_tile_lon = 0
+        if layout.anchor is not None:
+            try:
+                from .elevation import _load_airport_dem as _projection_load
+                _projection_dem = (tile_dem if tile_dem is not None
+                                   else _projection_load(layout.anchor[0],
+                                                         layout.anchor[1]))
+                if tile_dem is not None and current_tile_lat is not None:
+                    _projection_tile_lat = current_tile_lat
+                    _projection_tile_lon = current_tile_lon
+                else:
+                    _projection_tile_lat = int(math.floor(layout.anchor[0]))
+                    _projection_tile_lon = int(math.floor(layout.anchor[1]))
+            except _GEOM_EXC:
+                _projection_dem = None
+        final_grade_projection(layout, icao, dem=_projection_dem,
+                               tile_lat=_projection_tile_lat,
+                               tile_lon=_projection_tile_lon)
 
     # Pre-solve geometry guard (dev): report how many airside shapes had
     # their geometry changed by a post-solve pass (target = 0).

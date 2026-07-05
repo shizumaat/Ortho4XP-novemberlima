@@ -895,8 +895,21 @@ def mesh_edge_keys(ring: Sequence[tuple[float, float]],
 
 # ── main ────────────────────────────────────────────────────────────────────
 
-def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
-    """The grade constraints of ONE soft airside shape (apron / junction)."""
+def shape_constraints(shape: GradeShape, ctx: GradeContext,
+                      ring_only: bool = False) -> ShapeConstraints:
+    """The grade constraints of ONE soft airside shape (apron / junction).
+
+    ``ring_only`` (user 2026-07-05 flatness tier): generate ONLY the
+    ring-adjacent pairs — the O(n) physical boundary edges — through the SAME
+    ``classify_pair`` path, so ring budgets are identical to the full run's.
+    Used exclusively by ``solver_primitives._build_shape_constraints`` for
+    shapes holding a flatness certificate (their O(n²) body pairs are
+    satisfied at the DEM seed and are generated lazily the first time any of
+    the shape's nodes moves off it — see ``one_solve.feasibility_project``).
+    The mesh / visibility / spine-crossing predicates only ever gate
+    NON-ring pairs (``grade_law.classify_pair`` never consults them for a
+    ring-adjacent pair), so skipping their setup here cannot change a ring
+    budget."""
     sc = ShapeConstraints(role=shape.role)
     ring = shape.ring
     keys = shape.keys
@@ -905,7 +918,7 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
         return sc
     membership = _spine_membership(shape, ctx)
     body_cap = _body_cap(shape, ctx, membership)
-    vis = _visibility_predicate(ring)
+    vis = None if ring_only else _visibility_predicate(ring)
     # JUNCTION MESH CONSTRAINTS (O4_JUNCTION_MESH_CONSTRAINTS): for a junction the
     # only real grade paths are the spine + the triangle-mesh edges; the remaining
     # body chords are phantom (an aircraft follows the spine, not the diagonal) and
@@ -914,7 +927,7 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
     # full visibility graph (the geodesic flatness model catches aggregate slope a
     # mesh edge misses), so this is junction/service_junction only.
     mesh_keys = (mesh_edge_keys(ring, keys)
-                 if (JUNCTION_MESH_CONSTRAINTS
+                 if (JUNCTION_MESH_CONSTRAINTS and not ring_only
                      and shape.role in JUNCTION_ROLES) else None)
     # The shape's spine centerline geometries (those it has nodes on) — a body
     # chord that CROSSES one is NOT a real grade path: the climb between the two
@@ -922,7 +935,8 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
     # its local spine, plan §2), so the straight 1%-diagonal across the spine
     # would falsely declare a wide apron infeasible.  Drop it; the constraint
     # holds transitively through the spine.
-    crosses_spine = _spine_crossing_predicate(shape, ctx, membership)
+    crosses_spine = (None if ring_only
+                     else _spine_crossing_predicate(shape, ctx, membership))
     seam = ctx.seam_keys
     bld = ctx.building_keys
 
@@ -982,12 +996,14 @@ def shape_constraints(shape: GradeShape, ctx: GradeContext) -> ShapeConstraints:
         mi = membership.get(i)
         ki_bld = ki in bld
         for j in range(i + 1, n):
+            ring_adjacent = (j == i + 1) or (i == 0 and j == n - 1)
+            if ring_only and not ring_adjacent:
+                continue
             kj = keys[j]
             if ki == kj:
                 continue
             xj, yj = ring[j]
             d = math.hypot(xi - xj, yi - yj)
-            ring_adjacent = (j == i + 1) or (i == 0 and j == n - 1)
             mj = membership.get(j)
             shared = (({c for (c, _a) in mi} & {c for (c, _a) in mj})
                       if (mi is not None and mj is not None) else set())
@@ -1163,22 +1179,29 @@ class UnifiedGraph:
 
 
 def shape_constraints_cached(polygon_key, gs: GradeShape,
-                             ctx: GradeContext) -> "ShapeConstraints":
-    """Memoised :func:`shape_constraints` — keyed by ``(polygon_key, role)``
-    on the CONTEXT, so the two per-solve law consumers
+                             ctx: GradeContext,
+                             ring_only: bool = False) -> "ShapeConstraints":
+    """Memoised :func:`shape_constraints` — keyed by ``(polygon_key, role,
+    ring_only)`` on the CONTEXT, so the two per-solve law consumers
     (``solver_primitives._build_shape_constraints`` and
     :func:`build_unified_graph`, which construct identical ``GradeShape``s
     from the same polygons) run the expensive pair generation ONCE when they
     share a ctx (measured ~11 s/solve of duplicate work at SPJC).  Results
-    are shared, never mutated by either consumer."""
+    are shared, never mutated by either consumer.
+
+    ``ring_only`` is part of the key (user 2026-07-05 flatness tier): the
+    certified-lazy branch's ring-only result and ``build_unified_graph``'s
+    FULL result (which feeds the validator-parity ``u_edges`` projection and
+    the reach fields, so it must never be thinned) coexist without either
+    consumer seeing the other's set."""
     memo = getattr(ctx, "_sc_memo", None)
     if memo is None:
         memo = {}
         ctx._sc_memo = memo
-    key = (polygon_key, gs.role)
+    key = (polygon_key, gs.role, ring_only)
     sc = memo.get(key)
     if sc is None:
-        sc = shape_constraints(gs, ctx)
+        sc = shape_constraints(gs, ctx, ring_only=ring_only)
         memo[key] = sc
     return sc
 
