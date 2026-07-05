@@ -854,8 +854,16 @@ class Ortho4XP_AutoPatch_Progress(tk.Toplevel):
     failure is seen.  When the last row leaves, the window closes.
 
     Under each bar (user 2026-07-04): elapsed build time on the left,
-    "About m:ss remaining" on the right (elapsed scaled by the bar's
-    remaining fraction), the current phase text centered between them.
+    "About m:ss remaining" on the right, the current phase text centered
+    between them.  The remaining estimate must be TRUSTWORTHY (user
+    2026-07-04): the raw ``elapsed x remaining-fraction`` extrapolation
+    jumps with every phase transition and grows during long sub-steps.
+    Instead the row keeps an exponential moving average of the
+    total-time estimate (slightly conservative via ``ESTIMATE_MARGIN``)
+    and the DISPLAYED remaining value is monotone non-increasing: it
+    counts down with the wall clock while the smoothed estimate holds,
+    drops when the estimate improves, and FREEZES (never rises) when
+    the build stalls.
     """
 
     MAX_VISIBLE_ROWS = 6
@@ -863,6 +871,8 @@ class Ortho4XP_AutoPatch_Progress(tk.Toplevel):
     DONE_ROW_LINGER_MS = 900       # let the user see the bar hit 100 %
     TIMER_TICK_MS = 500
     ESTIMATE_MIN_PCT = 3           # below this the estimate is noise
+    ESTIMATE_EMA_ALPHA = 0.15      # smoothing of the total-time estimate
+    ESTIMATE_MARGIN = 1.10         # 10 % conservative headroom
 
     def __init__(self, parent):
         tk.Toplevel.__init__(self)
@@ -1015,13 +1025,29 @@ class Ortho4XP_AutoPatch_Progress(tk.Toplevel):
                 elapsed = now - row["t0"]
                 row["elapsed"].configure(text=self._fmt_mmss(elapsed))
                 pct = row["var"].get()
-                if pct >= self.ESTIMATE_MIN_PCT:
-                    rem = elapsed * (100.0 - pct) / max(pct, 1)
-                    row["remaining"].configure(
-                        text="About {} remaining".format(
-                            self._fmt_mmss(rem)))
-                else:
+                if pct < self.ESTIMATE_MIN_PCT:
                     row["remaining"].configure(text="estimating…")
+                    continue
+                # Smoothed, conservative total-time estimate.
+                raw_total = elapsed * 100.0 / pct
+                ema = row.get("total_ema")
+                if ema is None:
+                    ema = raw_total
+                else:
+                    a = self.ESTIMATE_EMA_ALPHA
+                    ema = (1.0 - a) * ema + a * raw_total
+                row["total_ema"] = ema
+                target = max(
+                    0.0, ema * self.ESTIMATE_MARGIN - elapsed)
+                # Monotone display: counts down with the wall clock
+                # while the estimate holds, drops when it improves,
+                # freezes (never rises) on stalls.
+                shown = row.get("remaining_s")
+                shown = target if shown is None else min(shown, target)
+                row["remaining_s"] = shown
+                row["remaining"].configure(
+                    text="About {} remaining".format(
+                        self._fmt_mmss(shown)))
         except Exception:
             pass
         self._start_timer_loop()
