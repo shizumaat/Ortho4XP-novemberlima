@@ -497,7 +497,14 @@ def reclassify_groundside_route_corridors(
             cover = s.polygon.intersection(corridor).area / s.polygon.area
         except _GEOM_EXC:
             continue
-        if run_m < min_run_m or cover < min_cover_frac:
+        # A piece ENTIRELY inside the truck corridor with the route
+        # genuinely through it is road pavement no matter how short the
+        # run — a loop's turnaround pad (CYXY #56: 98 m², cover 1.00,
+        # 14 m of 'Crew cars' through it) sat as groundside one
+        # clearance-gap cliff off its own road.
+        _full_corridor = cover >= 0.95 and run_m >= 5.0
+        if (run_m < min_run_m and not _full_corridor) \
+                or cover < min_cover_frac:
             continue
         parts = [s.polygon]
         if pav_union is not None:
