@@ -315,9 +315,11 @@ class TestEmitPassD:
             markings_b=markings_b, approach_lights_b=lights_b)
 
     def _emit(self, monkeypatch, layout, runway, gate_on=True):
-        """Run the clearance emitter over a synthetic DEM: flat at
-        runway level everywhere except sheer 30 m drops starting 10 m
-        beyond BOTH runway ends (x < −10 and x > length + 10)."""
+        """Run the clearance emitter + the Pass D skirt emitter (which
+        the pipeline calls separately, after the final grade projection)
+        over a synthetic DEM: flat at runway level everywhere except
+        sheer 30 m drops starting 10 m beyond BOTH runway ends
+        (x < −10 and x > length + 10)."""
         import math
         from auto_patch import clearance
         from auto_patch.layout import R_EARTH
@@ -331,9 +333,13 @@ class TestEmitPassD:
         monkeypatch.setattr(clearance, "_sample_dem", _fake_sample_dem)
         monkeypatch.setattr(
             clearance, "RUNWAY_END_SKIRT_ENABLED", gate_on)
-        return clearance.emit_surface_clearance_cuts(
+        n = clearance.emit_surface_clearance_cuts(
             layout, dem=object(), tile_lat=0, tile_lon=0,
             source_runways=[runway])
+        n += clearance.emit_runway_end_skirts(
+            layout, dem=object(), tile_lat=0, tile_lon=0,
+            source_runways=[runway])
+        return n
 
     @staticmethod
     def _clearance_shapes(layout):

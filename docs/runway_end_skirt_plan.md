@@ -37,6 +37,37 @@ Implementation deltas vs the original design (§3):
   worst −25.5 m below the law floor (the plateau cliffs — the
   motivating defect); SPLP 2 ends at −1.5/−1.6 m (marginal); SPJC 0.
 
+M4 calibration at KCLT (2026-07-05, user-requested):
+
+* **Gate-off baseline: 5 of 6 ends below the law floor** (18R −8.2 m,
+  36R −3.9, 36C −3.2, 18C −2.7, 18L −2.5); all three runways classify
+  precision/precision from real apt.dat metadata (markings 3 +
+  ALSF-II/MALSR/Calvert lights) → 305 m governed footprints.
+  **Gate-on: 0 findings**, 28 skirt shapes (136k m² fill),
+  self-overlaps unchanged from baseline (12).
+* Two fixes shaken out by the 18L residual (blast-pad end, 140 m pad):
+  1. **Skirts emit LAST in the pipeline** —
+     `clearance.emit_runway_end_skirts` extracted from Pass D and
+     called after `final_grade_projection` AND `decimate_emit_nodes`:
+     the skirt bakes its floor from edge-interpolated pavement reads,
+     and earlier placements read rings that later passes rewrite.
+     Emitting last, the emitter reads exactly what renders — the same
+     reads the validator makes.  Skirt pieces clip to the airport
+     boundary and slice at tile lines like other post-solve features.
+  2. **Containment-free end reads** (`clearance._nearest_pav_alt`,
+     shared verbatim by emitter and validator): the containment-based
+     `_pav_alt` returned None on a hairline gap at the 31 m
+     entry-grade sample, silently flattening the validator's entry
+     grade → its floor diverged from the emitter's (phantom −1.6 m).
+  Plus **narrow-seam bridging** in the validator: a station bracketed
+  by two constraint surfaces (blast-pad end vs skirt inner edge) reads
+  the lower surface, not the DEM dip inside a notch the mesh never
+  renders.
+
+Remaining for M4 default-on: recut fixture scoreboards with the gate
+on, KDFW tunnel-clip regression pass, SPLP seam-crossing skirt check,
+then flip `O4_RUNWAY_END_SKIRT` to "1".
+
 Today the runway-end safety area (Pass C in `clearance.py`) is *cut-only*: terrain
 that rises above the 5 % up-ramp is cut down to it, but terrain that **drops away**
 beyond a runway end is left untouched — a runway ending at a hillside brow gets a

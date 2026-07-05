@@ -5181,6 +5181,44 @@ def build_airport_pavement(icao: str, xplane_root: str,
         from .emit_decimate import decimate_emit_nodes
         decimate_emit_nodes(layout, icao)
 
+        # Runway-end down-slope SKIRTS (Pass D, gate O4_RUNWAY_END_SKIRT):
+        # the ABSOLUTE LAST emission, after the final projection and
+        # decimation, because the skirt bakes the law floor from
+        # edge-interpolated pavement reads (end elevation + entry grade)
+        # and any earlier placement reads rings that later passes may
+        # rewrite (the projection moves pad altitudes; decimation
+        # rewrites rings).  Emitting here, the emitter reads exactly the
+        # geometry that renders — the same reads the verification
+        # checker makes.  Skirts are freshly minted with a pavement gap
+        # (no shared vertices), so skipping their own decimation mints
+        # no T-vertices.
+        try:
+            from .clearance import emit_runway_end_skirts
+            n_sk = emit_runway_end_skirts(
+                layout, _projection_dem,
+                _projection_tile_lat, _projection_tile_lon,
+                source_runways=apt.runways)
+            if n_sk:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: emitted {n_sk} "
+                    f"runway-end skirt polygon(s).")
+                # A skirt reaches up to ~305 m off a runway end and can
+                # cross an integer tile line — slice it like every other
+                # post-solve feature (no-op single-tile).
+                from .geom_guard import _AIRSIDE_ROLES as _skirt_skip
+                from .tile_cut import cut_layout_at_tile_boundaries as \
+                    _skirt_tile_cut
+                _skirt_tile_cut(
+                    layout,
+                    current_tile_lat=current_tile_lat,
+                    current_tile_lon=current_tile_lon,
+                    dem=_projection_dem,
+                    skip_roles=_skirt_skip,
+                )
+        except _GEOM_EXC as exc:
+            UI.vprint(1, f"  [pav-builder] {icao}: runway-end skirt "
+                         f"emission FAILED: {exc!r}")
+
     # Record this build's actual per-phase and total wall time so the
     # NEXT build of this (or a similarly-sized) airport starts with a
     # trustworthy remaining-time estimate.  Skipped under pytest — the

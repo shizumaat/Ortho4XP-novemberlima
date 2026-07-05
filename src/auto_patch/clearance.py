@@ -90,7 +90,7 @@ from .elevation import _sample_dem
 from .pavement.junctions import _decompose_polygon_with_holes
 from .pavement.runways import _sample_runway_segment_elev
 
-__all__ = ["emit_surface_clearance_cuts"]
+__all__ = ["emit_surface_clearance_cuts", "emit_runway_end_skirts"]
 
 
 _TAXIWAY_ROLES = (
@@ -838,6 +838,31 @@ def _edge_interp_alt(shape, x, y) -> float | None:
     return best if best is not None else _sample_runway_segment_elev(shape, x, y)
 
 
+def _nearest_pav_alt(pav_shapes, x, y,
+                     max_distance_m: float = 5.0) -> float | None:
+    """Pavement altitude at ``(x, y)`` via the NEAREST shape's
+    edge-interpolated read — containment-free.  ``_pav_alt`` requires a
+    shape to CONTAIN the point, so a hairline inter-shape gap (or a
+    decimated ring grazing the sample) flips the read to ``None`` and a
+    caller's fallback silently changes the answer — the Pass D skirt and
+    its ``verification`` reader measure the runway END GRADE from two
+    such samples and MUST agree (a lost sample flattened the validator's
+    entry grade at KCLT 18L and phantom-flagged a lawful skirt).  Points
+    farther than ``max_distance_m`` from any pavement return ``None``."""
+    pt = Point(x, y)
+    best, best_distance = None, max_distance_m
+    for s in pav_shapes:
+        try:
+            d = s.polygon.distance(pt)
+        except _GEOM_EXC:
+            continue
+        if d < best_distance or (best is None and d <= best_distance):
+            best_distance, best = d, s
+    if best is None:
+        return None
+    return _edge_interp_alt(best, x, y)
+
+
 def _pav_alt(pav_shapes, x, y) -> float | None:
     """Altitude of the airside pavement at ``(x, y)`` — the shape
     containing the point, edge-interpolated (see :func:`_edge_interp_alt`)
@@ -1433,40 +1458,145 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                 RUNWAY_END_RESA_MAX_SLOPE, rw_threshold, step, sample_dem):
             _collect(ring, ralts, ROLE_RUNWAY_CLEARANCE)
 
-    # ── Pass D: runway-end down-slope SKIRT (inverse RESA) ──
-    # The exact mirror of Pass C: where Pass C cuts terrain that RISES
-    # above the 5 % up-ramp, the skirt fills terrain that DROPS away
-    # beyond the end, so a runway ending at a hillside brow meets a
-    # lawful ≤3 %/≤5 % descent instead of a cliff at the pavement edge
-    # (FAA AC 150/5300-13B §3.16.5 / ICAO Annex 14 §4.7 — the law lives
-    # in ``grade_law``; plan: docs/runway_end_skirt_plan.md).  Both
-    # passes can fire on one end across rolling terrain (on disjoint
-    # stations — their triggers are mutually exclusive at a point).
-    # Skirts do NOT share the cuts' union finalize: unioning would
-    # dissolve the interior band rows that keep the rendered surface on
-    # the curved law floor — they get their own ``_finalize_skirts``,
-    # with per-vertex altitudes recomputed ANALYTICALLY from the outward
-    # projection so clipping can introduce vertices freely.
+    if source_runways:
+        # AUTHORITATIVE: anchor each end at the apt.dat row-100 centreline
+        # endpoint + width, so the RESA position/size never depends on the
+        # emitted runway segmentation (user 2026-05-31).
+        for r in source_runways:
+            try:
+                ax, ay = _ll_to_m(r.lat_a, r.lon_a)
+                bx, by = _ll_to_m(r.lat_b, r.lon_b)
+            except _GEOM_EXC:
+                continue
+            dx, dy = bx - ax, by - ay
+            full_len = math.hypot(dx, dy)
+            width = float(getattr(r, "width_m", 0.0) or 0.0)
+            if full_len < 1.0 or width <= 0.0:
+                continue
+            ux, uy = dx / full_len, dy / full_len
+            for end_pt, outward in (((ax, ay), (-ux, -uy)),
+                                    ((bx, by), (ux, uy))):
+                seed = (end_pt[0] - outward[0] * _RESA_SEED_INSET_M,
+                        end_pt[1] - outward[1] * _RESA_SEED_INSET_M)
+                _emit_resa(end_pt, outward, width, full_len, seed,
+                           lambda s=seed: _pav_alt(airside, s[0], s[1]))
+    else:
+        # FALLBACK: detect ends from the emitted runway rects.
+        for s, a, b, full_len in _runway_end_edges(runway_shapes):
+            outward = _outward_normal(s.polygon, a, b)
+            if outward is None:
+                continue
+            mid = (0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]))
+            info = _rect_long_short_edges(_open_coords(s.polygon))
+            runway_width = (info[1] if info
+                            else math.hypot(b[0] - a[0], b[1] - a[1]))
+            _emit_resa(mid, outward, runway_width, full_len, mid,
+                       lambda s=s, mid=mid:
+                       _sample_runway_segment_elev(s, mid[0], mid[1]))
+
+    # Resolve all collected strips into minimal geometry in one pass.
+    n_emitted = _finalize()
+    return n_emitted
+
+
+# ──────────────────────────────────────────────────────────────────
+# Pass D: runway-end down-slope SKIRT (inverse RESA)
+# ──────────────────────────────────────────────────────────────────
+def emit_runway_end_skirts(layout: PavementLayout, dem,
+                           tile_lat: int, tile_lon: int,
+                           source_runways=None) -> int:
+    """Emit the runway-end down-slope skirts (gate ``O4_RUNWAY_END_SKIRT``).
+    Mutates ``layout.shapes``; returns the number of skirt shapes emitted.
+
+    The exact mirror of the Pass C RESA cut: where Pass C cuts terrain
+    that RISES above the 5 % up-ramp, the skirt fills terrain that DROPS
+    away beyond the end, so a runway ending at a hillside brow meets a
+    lawful ≤3 %/≤5 % descent instead of a cliff at the pavement edge
+    (FAA AC 150/5300-13B §3.16.5 / ICAO Annex 14 §4.7 — the law lives in
+    ``grade_law``; plan: docs/runway_end_skirt_plan.md).
+
+    Called SEPARATELY from (and AFTER) ``emit_surface_clearance_cuts``,
+    once ``final_grade_projection`` has settled the pavement profile:
+    the skirt bakes the law floor from the pavement-end elevation and
+    entry grade, and the final projection may move pad/junction
+    altitudes at a blast-pad end AFTER the cuts are emitted (KCLT 18L
+    rose 0.4 m, leaving an emit-time skirt too short under the settled
+    floor).  Emitting here also means the static clip below sees every
+    earlier shape — cuts, boundary ribbon, groundside, tunnels.
+
+    The skirt is emitted as ABUTTING BANDS split at the law's grade
+    breakpoints: the floor is piecewise quadratic and a two-row
+    ``node_altitudes`` ring renders as a ruled chord that would sag
+    metres below it mid-span; per-band the sagitta is ≤ rate·L²/8
+    (≈ 0.31 m).  Bands are clipped against the static geometry and
+    previously-emitted skirt pieces (crossing-runway ends; first wins),
+    with per-vertex altitudes recomputed ANALYTICALLY from the outward
+    projection so clipping can introduce vertices freely.
+    """
+    if not RUNWAY_END_SKIRT_ENABLED or dem is None:
+        return 0
+    lat0, lon0 = layout.anchor
+    cos0 = math.cos(math.radians(lat0))
+    R = R_EARTH
+    step = CLEARANCE_STATION_STEP_M
+    trigger = CLEARANCE_OBSTRUCTION_THRESHOLD_M["runway"]
+
+    def _ll_to_m(lat: float, lon: float) -> tuple[float, float]:
+        return (math.radians(lon - lon0) * R * cos0,
+                math.radians(lat - lat0) * R)
+
+    def sample_dem(x: float, y: float) -> float | None:
+        try:
+            lat = lat0 + math.degrees(y / R)
+            lon = lon0 + math.degrees(x / (R * cos0))
+            return _sample_dem(dem, tile_lat, tile_lon, lat, lon)
+        except _GEOM_EXC:
+            return None
+
+    airside = [s for s in layout.shapes
+               if s.role in _AIRSIDE_PAVEMENT_ROLES
+               and s.polygon is not None and not s.polygon.is_empty]
+    if not airside:
+        return 0
+    try:
+        prep_pav = prep(unary_union([s.polygon for s in airside]))
+    except _GEOM_EXC:
+        return 0
+    # Every existing shape (pavement, cuts, ribbon, groundside, …),
+    # buffered so skirt vertices stay clear of their edges.
+    static_block = None
+    try:
+        static_block = unary_union(
+            [s.polygon for s in layout.shapes
+             if s.polygon is not None and not s.polygon.is_empty]
+        ).buffer(_PAVEMENT_GAP_M)
+    except _GEOM_EXC:
+        static_block = None
+
     skirt_strips: list[tuple] = []
 
-    def _emit_resa_skirt(mid, outward, runway_width, full_len, seed,
-                         elev_fallback, approach_class):
-        """Build the down-slope skirt off one runway end.  Same anchor
-        geometry as ``_emit_resa``; the governed length scales with the
-        end's approach class (better approaches earn a longer smoothed
-        apron of terrain)."""
+    def _emit_one_end(outward, runway_width, full_len, seed,
+                      elev_fallback, approach_class):
+        """Collect the down-slope skirt bands off one runway end.  Same
+        anchor geometry as Pass C's ``_emit_resa``; the governed length
+        scales with the end's approach class (better approaches earn a
+        longer smoothed apron of terrain)."""
         nx, ny = outward
         start = _pavement_exit_along(prep_pav, seed[0], seed[1], nx, ny,
                                      _RESA_PAVEMENT_PROBE_MAX_M, step)
         p0 = (seed[0] + nx * start, seed[1] + ny * start)
-        ref = _pav_alt(airside, p0[0] - nx * 1.0, p0[1] - ny * 1.0)
+        # Containment-free reads (``_nearest_pav_alt``): the skirt's law
+        # floor and the verification reader MUST measure the same end
+        # elevation and entry grade — a containment miss on a hairline
+        # gap would silently flatten one side's entry grade.
+        ref = _nearest_pav_alt(airside, p0[0] - nx * 1.0, p0[1] - ny * 1.0)
         if ref is None and elev_fallback is not None:
             ref = elev_fallback()
         if ref is None:
             return
         # The runway's own end grade (signed, positive = climbing toward
         # the end), sampled over a short window inside the pavement.
-        inside = _pav_alt(
+        inside = _nearest_pav_alt(
             airside,
             p0[0] - nx * (1.0 + _SKIRT_END_GRADE_WINDOW_M),
             p0[1] - ny * (1.0 + _SKIRT_END_GRADE_WINDOW_M))
@@ -1495,14 +1625,13 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
         band_edges = runway_end_skirt_profile_breakpoints(entry_grade)
         for ring, _ralts in _build_filled_skirts(
                 stations, [ref] * m, [outward] * m, [governed] * m,
-                _floor_depth, band_edges, rw_threshold, step, sample_dem):
+                _floor_depth, band_edges, trigger, step, sample_dem):
             skirt_strips.append(
                 (ring, p0, outward, float(ref), _floor_depth, governed))
 
     if source_runways:
-        # AUTHORITATIVE: anchor each end at the apt.dat row-100 centreline
-        # endpoint + width, so the RESA position/size never depends on the
-        # emitted runway segmentation (user 2026-05-31).
+        # AUTHORITATIVE: anchor each end at the apt.dat row-100
+        # centreline endpoint + width (as Pass C does).
         for r in source_runways:
             try:
                 ax, ay = _ll_to_m(r.lat_a, r.lon_a)
@@ -1526,15 +1655,25 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                     end_metadata):
                 seed = (end_pt[0] - outward[0] * _RESA_SEED_INSET_M,
                         end_pt[1] - outward[1] * _RESA_SEED_INSET_M)
-                _emit_resa(end_pt, outward, width, full_len, seed,
-                           lambda s=seed: _pav_alt(airside, s[0], s[1]))
-                if RUNWAY_END_SKIRT_ENABLED:
-                    _emit_resa_skirt(
-                        end_pt, outward, width, full_len, seed,
-                        lambda s=seed: _pav_alt(airside, s[0], s[1]),
-                        runway_end_approach_class(markings, lights))
+                _emit_one_end(
+                    outward, width, full_len, seed,
+                    lambda s=seed: _pav_alt(airside, s[0], s[1]),
+                    runway_end_approach_class(markings, lights))
     else:
-        # FALLBACK: detect ends from the emitted runway rects.
+        # FALLBACK: detect ends from the emitted runway rects.  No
+        # apt.dat metadata on this path — the blank-data ladder
+        # classifies the end non_precision (errs long).
+        def _usable(s) -> bool:
+            if s.polygon is None or s.polygon.is_empty:
+                return False
+            if len(_open_coords(s.polygon)) != 4:
+                return False
+            return (s.altitude is not None
+                    or (s.altitude_high is not None
+                        and s.altitude_low is not None))
+
+        runway_shapes = [s for s in layout.shapes
+                         if s.role == ROLE_RUNWAY and _usable(s)]
         for s, a, b, full_len in _runway_end_edges(runway_shapes):
             outward = _outward_normal(s.polygon, a, b)
             if outward is None:
@@ -1543,84 +1682,63 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
             info = _rect_long_short_edges(_open_coords(s.polygon))
             runway_width = (info[1] if info
                             else math.hypot(b[0] - a[0], b[1] - a[1]))
-            _emit_resa(mid, outward, runway_width, full_len, mid,
-                       lambda s=s, mid=mid:
-                       _sample_runway_segment_elev(s, mid[0], mid[1]))
-            if RUNWAY_END_SKIRT_ENABLED:
-                # No apt.dat metadata on this path — the blank-data
-                # ladder classifies the end non_precision (errs long).
-                _emit_resa_skirt(
-                    mid, outward, runway_width, full_len, mid,
-                    lambda s=s, mid=mid:
-                    _sample_runway_segment_elev(s, mid[0], mid[1]),
-                    runway_end_approach_class(0, 0))
+            _emit_one_end(
+                outward, runway_width, full_len, mid,
+                lambda s=s, mid=mid:
+                _sample_runway_segment_elev(s, mid[0], mid[1]),
+                runway_end_approach_class(0, 0))
 
-    def _finalize_skirts() -> int:
-        """Emit the collected skirt bands as individual shapes.  Each
-        band is clipped against the pavement/static geometry, the cut
-        strips (cut wins where both claim ground) and previously-emitted
-        skirt pieces (crossing-runway ends may overlap; first wins),
-        then its per-vertex altitudes are recomputed from the law floor
-        at each vertex's outward projection — exact regardless of what
-        vertices the clipping introduced."""
-        if not skirt_strips:
-            return 0
-        cut_block = None
-        if raw_strips:
-            try:
-                cut_block = unary_union(
-                    [p for p, _r, _a, _ro in raw_strips])
-            except _GEOM_EXC:
-                cut_block = None
-        emitted_fill = None
-        n = 0
-        for ring, p0, out_vec, ref, floor_depth, cap in skirt_strips:
-            try:
-                poly = Polygon(ring)
-                if not poly.is_valid:
-                    poly = poly.buffer(0)
-                for block in (static_block, cut_block, emitted_fill):
-                    if block is not None and not block.is_empty:
-                        poly = poly.difference(block)
-                if poly.is_empty:
+    if not skirt_strips:
+        return 0
+    boundary = layout.airport_boundary
+    emitted_fill = None
+    n = 0
+    for ring, p0, out_vec, ref, floor_depth, cap in skirt_strips:
+        try:
+            poly = Polygon(ring)
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            for block in (static_block, emitted_fill):
+                if block is not None and not block.is_empty:
+                    poly = poly.difference(block)
+            if boundary is not None and not boundary.is_empty:
+                # No emitted shape may cross the airport boundary (the
+                # post-clearance boundary clip has already run by now).
+                poly = poly.intersection(boundary)
+            if poly.is_empty:
+                continue
+        except _GEOM_EXC:
+            continue
+        if poly.geom_type == "Polygon":
+            components = [poly]
+        elif poly.geom_type in ("MultiPolygon", "GeometryCollection"):
+            components = [g for g in poly.geoms
+                          if g.geom_type == "Polygon"]
+        else:
+            continue
+        nx, ny = out_vec
+        for comp in components:
+            for simple in _decompose_polygon_with_holes(
+                    comp, min_area_m2=_MIN_CUT_AREA_M2):
+                if simple.is_empty or simple.area < _MIN_CUT_AREA_M2:
                     continue
-            except _GEOM_EXC:
-                continue
-            if poly.geom_type == "Polygon":
-                components = [poly]
-            elif poly.geom_type in ("MultiPolygon", "GeometryCollection"):
-                components = [g for g in poly.geoms
-                              if g.geom_type == "Polygon"]
-            else:
-                continue
-            nx, ny = out_vec
-            for comp in components:
-                for simple in _decompose_polygon_with_holes(
-                        comp, min_area_m2=_MIN_CUT_AREA_M2):
-                    if simple.is_empty or simple.area < _MIN_CUT_AREA_M2:
-                        continue
-                    piece_ring = _open_coords(simple)
-                    if len(piece_ring) < 3:
-                        continue
-                    alts = []
-                    for vx, vy in piece_ring:
-                        d = (vx - p0[0]) * nx + (vy - p0[1]) * ny
-                        d = max(_PAVEMENT_GAP_M, min(cap, d))
-                        alts.append(round(float(ref - floor_depth(d)), 1))
-                    layout.shapes.append(BuiltShape(
-                        polygon=simple, role=ROLE_RUNWAY_CLEARANCE,
-                        ref="runway_end_skirt",
-                        node_altitudes=alts + [alts[0]]))
-                    try:
-                        emitted_fill = (
-                            simple if emitted_fill is None
-                            else unary_union([emitted_fill, simple]))
-                    except _GEOM_EXC:
-                        pass
-                    n += 1
-        return n
-
-    # Resolve all collected strips into minimal geometry in one pass.
-    n_emitted = _finalize()
-    n_emitted += _finalize_skirts()
-    return n_emitted
+                piece_ring = _open_coords(simple)
+                if len(piece_ring) < 3:
+                    continue
+                alts = []
+                for vx, vy in piece_ring:
+                    d = (vx - p0[0]) * nx + (vy - p0[1]) * ny
+                    d = max(_PAVEMENT_GAP_M, min(cap, d))
+                    alts.append(round(float(ref - floor_depth(d)), 1))
+                layout.shapes.append(BuiltShape(
+                    polygon=simple, role=ROLE_RUNWAY_CLEARANCE,
+                    ref="runway_end_skirt",
+                    node_altitudes=alts + [alts[0]]))
+                try:
+                    emitted_fill = (
+                        simple if emitted_fill is None
+                        else unary_union([emitted_fill, simple]))
+                except _GEOM_EXC:
+                    pass
+                n += 1
+    return n

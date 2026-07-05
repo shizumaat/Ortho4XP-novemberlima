@@ -564,6 +564,31 @@ def check_runway_end_skirt(layout, dem, tile_lat, tile_lon,
             e = CL._edge_interp_alt(s, x, y)
             if e is not None:
                 return e
+        # Narrow-seam bridging: the finalize keeps a small clearance
+        # notch (pavement gap + clip buffer, ≤ a station step) between
+        # abutting patches — e.g. a blast-pad end and the skirt's inner
+        # edge.  The mesh spans it with constraint edges on BOTH sides,
+        # so a DEM dip inside the notch never renders.  A station
+        # bracketed by two surfaces along the march direction reads the
+        # lower of the two instead of the raw DEM; a genuine unfilled
+        # drop has pavement on ONE side only and still flags.
+        from shapely.ops import nearest_points
+        bracketing = []
+        for s in covering:
+            try:
+                if s.polygon.distance(pt) > step_m:
+                    continue
+                np_pt = nearest_points(s.polygon, pt)[0]
+            except CL._GEOM_EXC:
+                continue
+            t = (np_pt.x - x) * nx + (np_pt.y - y) * ny
+            e = CL._edge_interp_alt(s, np_pt.x, np_pt.y)
+            if e is not None:
+                bracketing.append((t, e))
+        if (bracketing
+                and min(t for t, _e in bracketing) <= 0.0
+                and max(t for t, _e in bracketing) >= 0.0):
+            return min(e for _t, e in bracketing)
         return _sample(x, y)
 
     # Enumerate runway ends exactly as the Pass D emitter does.
@@ -611,10 +636,15 @@ def check_runway_end_skirt(layout, dem, tile_lat, tile_lon,
             prep_pav, seed[0], seed[1], nx, ny,
             CL._RESA_PAVEMENT_PROBE_MAX_M, step_m)
         p0 = (seed[0] + nx * start, seed[1] + ny * start)
-        ref = CL._pav_alt(airside, p0[0] - nx * 1.0, p0[1] - ny * 1.0)
+        # Containment-free reads, IDENTICAL to the emitter's (see
+        # ``clearance._nearest_pav_alt``) — a containment miss on one
+        # side silently flattens its entry grade and the two floors
+        # diverge (KCLT 18L phantom-flag).
+        ref = CL._nearest_pav_alt(
+            airside, p0[0] - nx * 1.0, p0[1] - ny * 1.0)
         if ref is None:
             continue
-        inside = CL._pav_alt(
+        inside = CL._nearest_pav_alt(
             airside,
             p0[0] - nx * (1.0 + CL._SKIRT_END_GRADE_WINDOW_M),
             p0[1] - ny * (1.0 + CL._SKIRT_END_GRADE_WINDOW_M))
