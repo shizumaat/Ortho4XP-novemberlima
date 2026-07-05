@@ -1202,6 +1202,13 @@ class PavementLayout:
                 "seam_pins": [[round(la, 7), round(lo, 7)]
                               for (la, lo) in
                               (getattr(self, "_seam_pin_ll", None) or [])],
+                # Solver-declared BREAK regions (genuine anchor
+                # contradictions, blended): the validator reports their
+                # over-cap ramp pairs separately (user 2026-07-05).
+                "break_nodes": [[round(la, 7), round(lo, 7)]
+                                for (la, lo) in
+                                (getattr(self, "_break_node_ll", None)
+                                 or [])],
             }
             Path(str(path) + ".axes.json").write_text(_json.dumps(data))
         except Exception:

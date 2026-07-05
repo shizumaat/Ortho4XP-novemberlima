@@ -474,6 +474,15 @@ def solve_route_profile(layout, icao: str,
         # ``_fairing_moved_keys``/``_scoped_gate`` are bound iff the
         # global-slice branch above ran — the same condition
         # ``final_grade_projection`` requires, re-checked here.
+        # BREAK-REGION export (user 2026-07-05, drive-to-zero): the solver's
+        # broken quarantine = genuine anchor contradictions rendered as the
+        # contained distance-weighted blend.  Persist their lat/lon so the
+        # sidecar can tag them and the validator reports their over-cap
+        # ramp pairs in a SEPARATE section — honest, never hidden, but not
+        # mixed into the actionable within-shape count (SPLP seam pockets).
+        layout._break_node_ll = [
+            layout.m_to_ll(nodes[i][0], nodes[i][1])
+            for i in sorted(_solve_broken_idx) if i < len(nodes)]
         if ((CURVE_NATIVE_SPINE or ROUTE_ARC_SPINE) and _scoped_gate):
             _solve_broken_keys = {key for key, i in bucket_to_idx.items()
                                   if i in _solve_broken_idx}

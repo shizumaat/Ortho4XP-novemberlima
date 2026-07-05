@@ -1434,6 +1434,7 @@ def run_checks(
     quiet: bool = False,
     anchor: Optional[Tuple[float, float]] = None,
     seam_pins_ll: Optional[list] = None,
+    break_nodes_ll: Optional[list] = None,
 ) -> Tuple[List[Violation], List[Violation], List[EdgeStep]]:
     """``taxi_axes_ll`` (the builder's APT.DAT taxi centerlines as
     ``[(latlon_points, cL, cT), …]``) supplies the within-shape grade graph's
@@ -1490,8 +1491,36 @@ def run_checks(
     within = _check_within_shape(
         ways, nodes, ll_to_m, max_grade, seam_nids=seam_nids,
         taxi_axes=taxi_axes, routes_ll=routes_ll)
+    # BREAK-REGION split (user 2026-07-05): pairs touching a node the
+    # SOLVER declared broken (genuine anchor contradiction, rendered as
+    # the contained distance-weighted blend) are the pocket's designed
+    # over-cap ramp — reported HONESTLY in their own section, excluded
+    # from the actionable within-shape count.  Sidecar ``break_nodes``.
+    break_region: List[Violation] = []
+    if break_nodes_ll:
+        break_points_m = [ll_to_m(la, lo) for (la, lo) in break_nodes_ll]
+
+        def _touches_break_node(violation):
+            for (px, py) in (violation.pt_a, violation.pt_b):
+                for (bx, by) in break_points_m:
+                    if (abs(px - bx) <= SHARED_VERTEX_TOL_M
+                            and abs(py - by) <= SHARED_VERTEX_TOL_M
+                            and math.hypot(px - bx, py - by)
+                            <= SHARED_VERTEX_TOL_M):
+                        return True
+            return False
+
+        kept = []
+        for violation in within:
+            (break_region if _touches_break_node(violation)
+             else kept).append(violation)
+        within = kept
     _pv(f"WITHIN-SHAPE vertex-pair grade > {max_grade_pct}%",
         within, top_n)
+    if break_nodes_ll is not None and not quiet:
+        print(f"\nBREAK-REGION over-cap (solver-declared infeasible "
+              f"pocket, contained blend — by design): "
+              f"{len(break_region)} pair(s)")
 
     plane = _check_plane_gradient(
         ways, nodes, ll_to_m, max_grade, seam_nids=seam_nids)
@@ -1582,6 +1611,7 @@ def main(argv=None) -> int:
     # when present; without it the check is context-free and over-flags
     # every spine/blend-relaxed pair.
     taxi_axes_ll = routes_ll = anchor = seam_pins_ll = None
+    break_nodes_ll = None
     sidecar = Path(str(args.osm) + ".axes.json")
     if sidecar.exists():
         try:
@@ -1598,6 +1628,7 @@ def main(argv=None) -> int:
                 routes_ll = _data.get("routes") or None
             anchor = _data.get("anchor") or None
             seam_pins_ll = _data.get("seam_pins")
+            break_nodes_ll = _data.get("break_nodes")
             print(f"  (axes sidecar loaded: {len(taxi_axes_ll or [])} axes"
                   + (" [exact]" if _exact else "")
                   + f", {len(routes_ll or [])} routes"
@@ -1618,6 +1649,7 @@ def main(argv=None) -> int:
         routes_ll=routes_ll,
         anchor=tuple(anchor) if anchor else None,
         seam_pins_ll=seam_pins_ll,
+        break_nodes_ll=break_nodes_ll,
     )
     if args.strict and (within or cross or steps):
         return 1
