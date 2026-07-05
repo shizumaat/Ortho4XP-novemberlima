@@ -107,6 +107,10 @@ pytestmark = [
 # DETERMINISTIC (DEM-driven cluster geometry), so the floor is the exact
 # count — no -5% slack — to guard the fork wall against re-regression.
 #
+# RE-CUT 2026-07-05b: adaptive sparse tessellation (O4_ADAPTIVE_BEZIER —
+# sagitta-capped bezier subdivision + Douglas-Peucker source-ring
+# resampling) reshaped the partition again; fixtures + floors recut the
+# same day.  Same 0.95 floor convention.
 # RE-CUT 2026-07-05 (both SPJC and SPLP, tools/build_target_osm.py from
 # repo root): the previous fixtures dated 2026-06-21, FOUR airside
 # partition reshapes ago.  The curve-native / route-arc global slice is
@@ -118,19 +122,19 @@ pytestmark = [
 # int(0.95 * current fixture count) — the same "current − 5 %" convention
 # as every previous re-cut — except retaining_wall (deterministic, exact).
 SPJC_BASELINE: Dict[str, int] = {
-    "apron":             105,   # of 111 current
+    "apron":              94,   # of  99 current
     "building":           29,   # of  31 current
     "groundside_pavement": 9,   # of  10 current
-    "junction":          190,   # of 200 current
+    "junction":          189,   # of 199 current
     "retaining_wall":      6,   # of   6 current (one per tunnel cluster; deterministic, exact floor)
     "runway":             33,   # of  35 current
     "runway_clearance":    6,   # of   7 current
     "service_junction":   20,   # of  22 current
     "service_road":        4,   # of   5 current
-    "taxiway_clearance":  17,   # of  18 current
+    "taxiway_clearance":  18,   # of  19 current
     "tunnel_ramp":        38,   # of  41 current
 }
-SPJC_BASELINE_TOTAL = 461  # int(0.95 * 486) of 486 current (emitted)
+SPJC_BASELINE_TOTAL = 450  # int(0.95 * 474) of 474 current (emitted)
 
 # SPLP is cross-tile (spans -13/-77 and -13/-78).  Each tile-half has
 # its own baseline; a regression in either half trips the gate.
@@ -152,28 +156,28 @@ SPJC_BASELINE_TOTAL = 461  # int(0.95 * 486) of 486 current (emitted)
 # RE-CUT 2026-07-05 (curve-native global slice default; see the SPJC
 # re-cut note above) — floors = int(0.95 * current fixture count).
 SPLP_BASELINE_TILE_M77: Dict[str, int] = {
-    "apron":              12,   # of  13 current
+    "apron":               9,   # of  10 current
     "boundary":           37,   # of  39 current
     "building":            2,   # of   3 current
-    "junction":           10,   # of  11 current
+    "junction":           11,   # of  12 current
     "runway":              8,   # of   9 current
-    "taxiway_clearance":   5,   # of   6 current
+    "taxiway_clearance":   6,   # of   7 current
 }
-SPLP_BASELINE_TILE_M77_TOTAL = 76  # int(0.95 * 81) of 81 current (emitted)
+SPLP_BASELINE_TILE_M77_TOTAL = 76  # int(0.95 * 80) of 80 current (emitted)
 
 # RE-CUT 2026-07-05 (curve-native global slice default; see the SPJC
 # re-cut note above) — floors = int(0.95 * current fixture count).
 SPLP_BASELINE_TILE_M78: Dict[str, int] = {
-    "apron":              40,   # of  43 current
-    "boundary":           20,   # of  22 current
+    "apron":              36,   # of  38 current
+    "boundary":           17,   # of  18 current
     "building":            7,   # of   8 current
     "groundside_pavement": 2,   # of   3 current
     "junction":           15,   # of  16 current
     "runway":              7,   # of   8 current
     "runway_clearance":    0,   # of   1 current
-    "taxiway_clearance":  18,   # of  19 current
+    "taxiway_clearance":  17,   # of  18 current
 }
-SPLP_BASELINE_TILE_M78_TOTAL = 114  # int(0.95 * 120) of 120 current (emitted)
+SPLP_BASELINE_TILE_M78_TOTAL = 104  # int(0.95 * 110) of 110 current (emitted)
 
 
 def _build_layout(icao: str, tile_lat=None, tile_lon=None):

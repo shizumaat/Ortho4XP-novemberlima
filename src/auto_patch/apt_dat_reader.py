@@ -57,8 +57,31 @@ FT_TO_M = 0.3048
 # Default number of straight-line segments to sample each Bezier curve
 # into.  4 produces a visibly smooth corner without exploding the
 # vertex count.  Tunable via the load_airport(..., bezier_segments=N)
-# parameter.
+# parameter.  With O4_ADAPTIVE_BEZIER on (default) this is only the
+# LEGACY fallback — the per-span adaptive rule below decides.
 DEFAULT_BEZIER_SEGMENTS = 4
+
+# ADAPTIVE curve tessellation (user 2026-07-05: optimise for the MINIMUM
+# node count that still yields a smooth profile — short curve chords are
+# the "hairline factory": a pair's grade budget is rate·distance, so a
+# 1.5 m tessellation chord turns millimetres of elevation into percents
+# of grade, while the vertical-curve law never lets the profile wiggle
+# between 4 m nodes anyway).  Per bezier span:
+#   k_sagitta = ceil(sqrt(deviation_m / CURVE_SAGITTA_MAX_M))
+#       — subdivision error shrinks ~quadratically; keeps the polyline
+#         within the sagitta cap of the true curve where spacing allows.
+#   k_spacing = floor(span_m / CURVE_MIN_VERTEX_SPACING_M)
+#       — vertices never closer than the spacing floor: 0.2·rate·d ≥ the
+#         ~1 cm system noise floor at d ≥ 4-5 m (1 % class), so every
+#         minted pair is robust to rounding/smoothing.
+#   k = max(1, min(k_sagitta, k_spacing))   — SPACING DOMINATES (the
+#         user ruling); small corner fillets collapse to 1-2 chords.
+# Deterministic per span, so every shape sharing a curve derives the
+# same vertices (conformance holds by construction).
+ADAPTIVE_BEZIER = os.environ.get("O4_ADAPTIVE_BEZIER", "1") == "1"
+CURVE_SAGITTA_MAX_M = float(os.environ.get("O4_CURVE_SAGITTA_M", "0.4"))
+CURVE_MIN_VERTEX_SPACING_M = float(
+    os.environ.get("O4_CURVE_MIN_SPACING_M", "4.0"))
 
 # Per user 2026-05-04: collapse Bezier to a straight line when the
 # curve's max chord deviation falls below this threshold (in degrees,
@@ -1044,6 +1067,8 @@ def _parse_pavement(rows: list[list[str]],
     rings = []
     for contour in contours:
         ring = _interpolate_contour(contour, bezier_segments)
+        if ring:
+            ring = _sparsify_ring_points(ring, True, ring[0][1])
         if len(ring) >= 3:
             # Close the ring explicitly.
             if ring[0] != ring[-1]:
@@ -1101,6 +1126,8 @@ def _parse_boundary(rows: list[list[str]],
     rings = []
     for contour in contours:
         ring = _interpolate_contour(contour, bezier_segments)
+        if ring:
+            ring = _sparsify_ring_points(ring, True, ring[0][1])
         if len(ring) >= 3:
             if ring[0] != ring[-1]:
                 ring.append(ring[0])
@@ -1159,10 +1186,14 @@ def _parse_painted_line(rows: list[list[str]],
         return None
     if closed:
         pts = _interpolate_contour(node_rows, bezier_segments)
+        if pts:
+            pts = _sparsify_ring_points(pts, True, pts[0][1])
         if len(pts) >= 3 and pts[0] != pts[-1]:
             pts.append(pts[0])
     else:
         pts = _interpolate_open_polyline(node_rows, bezier_segments)
+        if pts:
+            pts = _sparsify_ring_points(pts, False, pts[0][1])
     if len(pts) < 2:
         return None
     try:
@@ -1210,7 +1241,9 @@ def _interpolate_open_polyline(
             if 0.5 * max(d1, d2) < BEZIER_FLATTEN_DEV_DEG:
                 continue
             for pt in _cubic_bezier(a_xy, a_ctrl, mirrored, b_xy,
-                                    bezier_segments)[1:-1]:
+                                    _effective_bezier_segments(
+                                        a_xy, (a_ctrl, mirrored), b_xy,
+                                        bezier_segments))[1:-1]:
                 if not out or out[-1] != pt:
                     out.append(pt)
             continue
@@ -1221,7 +1254,9 @@ def _interpolate_open_polyline(
                 < BEZIER_FLATTEN_DEV_DEG:
             continue
         for pt in _quadratic_bezier(a_xy, ctrl_eff, b_xy,
-                                    bezier_segments)[1:-1]:
+                                    _effective_bezier_segments(
+                                        a_xy, (ctrl_eff,), b_xy,
+                                        bezier_segments))[1:-1]:
             if not out or out[-1] != pt:
                 out.append(pt)
     b_last = _node_xy(node_rows[-1])
@@ -1282,6 +1317,112 @@ def _node_ctrl(row: list[str]) -> tuple[float, float] | None:
         return (float(row[4]), float(row[3]))
     except (IndexError, ValueError):
         return None
+
+
+def _sparsify_ring_points(points, closed, latitude):
+    """Resample a tessellated ring/polyline to the MINIMUM vertex set
+    that keeps its shape within ``CURVE_SAGITTA_MAX_M`` (user 2026-07-05:
+    minimum nodes for a smooth profile).  The bezier rule alone barely
+    moves the node count — most apt.dat density is AUTHORED as dense
+    plain-node chains (HECA hand-tessellates its curves), so the same
+    sagitta bound is applied to the assembled points via Douglas-Peucker.
+    Endpoints (and for a ring, the first vertex and its antipode) are
+    always kept, so a closed ring stays closed and abutting-shape
+    conformance derives downstream from the same resampled geometry.
+    Coordinates are (lon, lat) degrees; the tolerance converts at this
+    ring's latitude."""
+    if not ADAPTIVE_BEZIER or len(points) < (4 if closed else 3):
+        return points
+    lat_scale = 111320.0
+    lon_scale = 111320.0 * math.cos(math.radians(latitude))
+    tolerance_m = CURVE_SAGITTA_MAX_M
+
+    def _perpendicular_m(point, start, end):
+        sx = (end[0] - start[0]) * lon_scale
+        sy = (end[1] - start[1]) * lat_scale
+        px = (point[0] - start[0]) * lon_scale
+        py = (point[1] - start[1]) * lat_scale
+        seg_len = math.hypot(sx, sy)
+        if seg_len < 1e-9:
+            return math.hypot(px, py)
+        return abs(px * sy - py * sx) / seg_len
+
+    def _douglas_peucker(section):
+        if len(section) <= 2:
+            return section
+        worst_index = 0
+        worst_dev = -1.0
+        for k in range(1, len(section) - 1):
+            dev = _perpendicular_m(section[k], section[0], section[-1])
+            if dev > worst_dev:
+                worst_dev = dev
+                worst_index = k
+        if worst_dev <= tolerance_m:
+            return [section[0], section[-1]]
+        left = _douglas_peucker(section[:worst_index + 1])
+        right = _douglas_peucker(section[worst_index:])
+        return left[:-1] + right
+
+    try:
+        if closed:
+            # Split at the first vertex and its antipode so the recursion
+            # has two stable anchors; both survive, keeping the ring
+            # closed and the result deterministic in the source geometry.
+            half = len(points) // 2
+            first = _douglas_peucker(points[:half + 1])
+            second = _douglas_peucker(points[half:] + points[:1])
+            out = first[:-1] + second[:-1]
+            return out if len(out) >= 3 else points
+        return _douglas_peucker(points)
+    except RecursionError:
+        # A pathological ring must degrade to the dense original, never
+        # kill the airport build.
+        return points
+
+
+def _effective_bezier_segments(a_xy, control_points, b_xy,
+                               legacy_segments):
+    """Per-span ADAPTIVE segment count (see the ADAPTIVE_BEZIER constant
+    block), or ``legacy_segments`` with the gate off.  Coordinates are
+    (lon, lat) degrees; thresholds are metres, converted at this span's
+    latitude.  Deterministic in the span's control points alone, so
+    every shape sharing the curve tessellates identically."""
+    if not ADAPTIVE_BEZIER:
+        return legacy_segments
+    lat_scale = 111320.0
+    lon_scale = 111320.0 * math.cos(math.radians(a_xy[1]))
+
+    def _meters(p, q):
+        return math.hypot((p[0] - q[0]) * lon_scale,
+                          (p[1] - q[1]) * lat_scale)
+
+    control_list = list(control_points)
+    span_m = 0.0
+    previous = a_xy
+    for point in control_list + [b_xy]:
+        span_m += _meters(previous, point)
+        previous = point
+    chord_m = _meters(a_xy, b_xy)
+    if chord_m < 1e-9:
+        return max(1, legacy_segments)
+    # Deviation bound: the curve never strays farther from the chord
+    # than its control polygon does.
+    unit_x = (b_xy[0] - a_xy[0]) * lon_scale / chord_m
+    unit_y = (b_xy[1] - a_xy[1]) * lat_scale / chord_m
+    deviation_m = 0.0
+    for (cx, cy) in control_list:
+        wx = (cx - a_xy[0]) * lon_scale
+        wy = (cy - a_xy[1]) * lat_scale
+        perpendicular = abs(wx * unit_y - wy * unit_x)
+        if perpendicular > deviation_m:
+            deviation_m = perpendicular
+    if deviation_m <= 1e-9:
+        return 1
+    segments_for_sagitta = math.ceil(math.sqrt(
+        deviation_m / max(1e-6, CURVE_SAGITTA_MAX_M)))
+    segments_for_spacing = int(
+        span_m // max(0.5, CURVE_MIN_VERTEX_SPACING_M))
+    return max(1, min(segments_for_sagitta, segments_for_spacing))
 
 
 def _quadratic_bezier(p0, p1, p2, n_segments):
@@ -1406,7 +1547,9 @@ def _interpolate_contour(contour: list[list[str]],
                 # Treat as straight line A→B.
                 continue
             curve = _cubic_bezier(a_xy, a_ctrl, mirrored, b_xy,
-                                  bezier_segments)
+                                  _effective_bezier_segments(
+                                      a_xy, (a_ctrl, mirrored), b_xy,
+                                      bezier_segments))
             for pt in curve[1:-1]:
                 if not out or out[-1] != pt:
                     out.append(pt)
@@ -1420,7 +1563,10 @@ def _interpolate_contour(contour: list[list[str]],
         if quad_dev < BEZIER_FLATTEN_DEV_DEG:
             # Treat as straight line A→B.
             continue
-        curve = _quadratic_bezier(a_xy, ctrl_eff, b_xy, bezier_segments)
+        curve = _quadratic_bezier(
+            a_xy, ctrl_eff, b_xy,
+            _effective_bezier_segments(a_xy, (ctrl_eff,), b_xy,
+                                       bezier_segments))
         # Drop the first point (= a_xy, already in out) and the last
         # (= b_xy, will be appended next iteration).  Append only the
         # interior curve samples.
