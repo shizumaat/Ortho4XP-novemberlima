@@ -4114,6 +4114,26 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     f"  [pav-builder] {icao}: re-roled road-only junction/apron(s) "
                     f"→ {_n_svc_r} service_road + {_n_svc_j} service_junction (4 %).")
 
+        # ── FULL-WIDTH SERVICE CORRIDOR consolidation, pass 1 ────────
+        # (user 2026-07-05 full-width corridor): a service road is ONE
+        # corridor — the truck-route spine has pavement on BOTH sides
+        # and the two half-strips are the same surface.  The slice cut
+        # each road in half along its own spine and the carve/re-role
+        # passes left along-route fragment chains; merge them into
+        # full-width corridor pieces NOW, before the road-lot /
+        # runway-disconnection classifiers below, so any conversion of
+        # road pavement to groundside decides over the full-width slab
+        # (whole-shape membership on a full-width shape), never a
+        # half-strip notch.  Gate O4_FULL_WIDTH_SERVICE_CORRIDOR.
+        from .groundside import consolidate_full_width_service_corridors
+        _n_fw = consolidate_full_width_service_corridors(layout)
+        if _n_fw:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: consolidated service-corridor "
+                f"fragments into full-width corridor(s) "
+                f"(−{_n_fw} shape(s)).")
+            _covp(layout, "post-full-width-corridor-1")
+
         # A wide paved LOT reachable only via a service road is landside —
         # ONE groundside surface, not a road carved through it.  The
         # on-pavement 1206 carve shreds such a lot into a service_road rect
@@ -4787,6 +4807,22 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 UI.vprint(1,
                     f"  [pav-builder] {icao}: merged {_n_gsm} touching "
                     f"groundside piece(s) (pre-solve).")
+
+        # ── FULL-WIDTH SERVICE CORRIDOR consolidation, pass 2 ────────
+        # (user 2026-07-05 full-width corridor): the groundside
+        # route-corridor conversion, groundside-connector re-role and
+        # the final road-only junction re-role above all mint NEW
+        # service_road pieces after pass 1 ran — fold them into their
+        # corridor now, at final pre-solve geometry, so the solver
+        # grades each service corridor as ONE full-width surface.
+        from .groundside import consolidate_full_width_service_corridors
+        _n_fw2 = consolidate_full_width_service_corridors(layout)
+        if _n_fw2:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: consolidated service-corridor "
+                f"fragments into full-width corridor(s) "
+                f"(−{_n_fw2} shape(s), final pre-solve).")
+            _covp(layout, "post-full-width-corridor-2")
 
         if USE_PER_SURFACE_SOLVER and layout.anchor is not None:
             # Runway CIFP thresholds are LOCKED — the solver never moves them.
