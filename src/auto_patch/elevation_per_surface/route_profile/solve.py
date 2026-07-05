@@ -958,11 +958,33 @@ def final_grade_projection(layout, icao: str = "", dem=None,
         hard -= pad_nodes
 
     _stage("hard")
+    # Capture the pockets THIS projection declares broken: they are excluded
+    # from the sweeps by design (contained blend), so they must join the
+    # sidecar's break_nodes export below or the validator reports their
+    # over-cap ramps as ACTIONABLE (the solve-time export alone missed any
+    # pocket only the final geometry manufactures).
+    _projection_broken_idx: set = set()
     rem, bh = feasibility_project(elev, joint, hard, force_scalar=True,
                                   max_iters=400,
                                   flat_groups=pad_groups or None,
-                                  pre_broken=(pre_broken or None))
+                                  pre_broken=(pre_broken or None),
+                                  broken_out=_projection_broken_idx)
     _stage("project")
+    if _projection_broken_idx:
+        try:
+            _existing_break_ll = list(
+                getattr(layout, "_break_node_ll", None) or [])
+            _seen_break = {(round(la, 7), round(lo, 7))
+                           for (la, lo) in _existing_break_ll}
+            for i in sorted(_projection_broken_idx):
+                if i >= len(nodes):
+                    continue
+                la, lo = layout.m_to_ll(nodes[i][0], nodes[i][1])
+                if (round(la, 7), round(lo, 7)) not in _seen_break:
+                    _existing_break_ll.append((la, lo))
+            layout._break_node_ll = _existing_break_ll
+        except Exception:
+            pass
     _n_deferred = _n_expanded = 0
     if scoped:
         _n_deferred = sum(1 for _sc in shape_constraints

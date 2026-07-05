@@ -16,10 +16,15 @@ vertices are 3D-collinear at a 2 cm band.
 CONFORMANCE BY CONSTRUCTION: a vertex is removed only if EVERY ring that
 contains it (across all shapes, exteriors and holes, processed or not) agrees
 it is removable — so a shared-edge chain drops the same nodes on both sides
-and no T-vertices are minted.  The LAW can only improve: the grade of the
-pair between two kept neighbours is the length-weighted mean of the removed
-sub-segments' grades, and removed vertices only remove already-satisfied
-pairs.
+and no T-vertices are minted.  Along the RING the law can only improve: the
+grade of the pair between two kept neighbours is the length-weighted mean of
+the removed sub-segments' grades.  BUT a junction's MESH is re-triangulated
+by the removals — the decimated ring's Delaunay has interior chords the
+pre-decimation law never contained, so this pass MUST run BEFORE
+final_grade_projection (which then enforces the decimated-ring law — the
+mesh X-Plane actually renders).  Discovered 2026-07-05: with decimation
+last, SPJC carried 18 junction mesh chords at 1.5-1.8 % nobody ever
+enforced.
 
 Gate ``O4_EMIT_DECIMATE`` (default on).  Z tolerances: airside 0.02 m; the
 BOUNDARY ribbon 0.10 m — its per-station altitudes carry raw DEM jitter, and
