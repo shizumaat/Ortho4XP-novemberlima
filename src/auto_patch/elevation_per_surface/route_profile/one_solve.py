@@ -303,28 +303,57 @@ def feasibility_project(elev, shape_constraints, hard, *,
     if _vec and iter_edges:
         _project_vectorized(elev, iter_edges, n, max_iters, tol)
     else:
-        for _it in range(max_iters):
-            _sweeps_run = _it + 1
-            worst = 0.0
-            for (i, j, budget, kind) in iter_edges:
-                d = elev[i] - elev[j]
-                ad = -d if d < 0.0 else d                  # inline abs() (hot path)
-                if ad <= budget + tol:
-                    continue
-                ex = ad - budget
-                s = 1.0 if d > 0 else -1.0
-                if kind == 0:
-                    elev[i] -= s * ex * 0.5
-                    elev[j] += s * ex * 0.5
-                elif kind == 1:
-                    elev[j] += s * ex                      # i fixed → move j up to i
-                else:
-                    elev[i] -= s * ex                      # j fixed → move i
-                if ex > worst:
-                    worst = ex
-            _last_worst = worst
-            if worst < tol:
-                break
+        # WORKLIST Gauss-Seidel (perf 2026-07-04): the cyclic sweep
+        # re-examined EVERY edge up to ``max_iters`` times even when
+        # 99 % start satisfied (flat airports: KDFW relief 0.485 % —
+        # nearly the whole graph is law-true at the DEM seed).  An
+        # edge only needs re-checking after one of its endpoints
+        # MOVED, so the queue shrinks to the violation neighbourhoods
+        # and the work scales with terrain difficulty, not graph
+        # size.  Deterministic: initial order = edge order, FIFO
+        # requeue.  The visit cap equals the old worst-case work
+        # bound (max_iters full sweeps), so pathological cyclic
+        # systems terminate exactly as before.
+        incident: dict = {}
+        for edge_index, (i, j, _budget, _kind) in enumerate(iter_edges):
+            incident.setdefault(i, []).append(edge_index)
+            incident.setdefault(j, []).append(edge_index)
+        from collections import deque
+        pending = deque(range(len(iter_edges)))
+        in_pending = bytearray(len(iter_edges))
+        for edge_index in pending:
+            in_pending[edge_index] = 1
+        visits = 0
+        visit_cap = max_iters * max(1, len(iter_edges))
+        while pending and visits < visit_cap:
+            edge_index = pending.popleft()
+            in_pending[edge_index] = 0
+            visits += 1
+            i, j, budget, kind = iter_edges[edge_index]
+            d = elev[i] - elev[j]
+            ad = -d if d < 0.0 else d                  # inline abs() (hot path)
+            if ad <= budget + tol:
+                continue
+            ex = ad - budget
+            s = 1.0 if d > 0 else -1.0
+            if kind == 0:
+                elev[i] -= s * ex * 0.5
+                elev[j] += s * ex * 0.5
+                moved = (i, j)
+            elif kind == 1:
+                elev[j] += s * ex                      # i fixed → move j up to i
+                moved = (j,)
+            else:
+                elev[i] -= s * ex                      # j fixed → move i
+                moved = (i,)
+            if ex > _last_worst:
+                _last_worst = ex
+            for moved_node in moved:
+                for neighbour_edge in incident.get(moved_node, ()):
+                    if not in_pending[neighbour_edge]:
+                        in_pending[neighbour_edge] = 1
+                        pending.append(neighbour_edge)
+        _sweeps_run = visits
     # broadcast each flat group's representative level back to its members.
     for rep, g in (groups_eff if flat_groups else ()):
         for m in g:
