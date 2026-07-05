@@ -1,3 +1,13 @@
+# STATUS — 20260705 ADDENDUM: the "build-concurrency corruption" was a
+# LIVE INPUT — the user's Custom Scenery CYXY apt.dat was being edited
+# between measurement windows (o4_apt_dat_mtime provenance proves it:
+# 3 mtimes = the 251/176/257 count eras exactly).  Builds deterministic
+# given inputs.  PROTOCOL: verify o4_apt_dat_mtime matches across any
+# compared patches (full_build.py prints it now).  Full-width service
+# corridor rule SHIPPED (68e77d9, user ruling): half-strips consolidate
+# pre-solve, conversions span the spine — CYXY 28+218, SPJC 56+0,
+# SPLP 15+37 at apt_mtime 1783275372.
+
 # STATUS — SESSION 20260705 (part 14): tests realigned 21F→12F
 # (`56e19fd`); sparse tessellation verdict (`df15809`); py3.13 + fast
 # lane (`e06498e`); scoped final projection (`370b0ed`)
