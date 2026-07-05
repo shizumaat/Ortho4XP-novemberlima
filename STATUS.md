@@ -1,3 +1,22 @@
+# STATUS — SESSION 20260704 (part 11): KDFW tunnels FIXED (`f7bb741`)
+# — ROLE_BOUNDARY portal gate retired (sparse-ribbon false veto)
+
+> **KDFW zero tunnels (user)**: 19 implied bores formed, ALL passed the
+> adjacent-road system veto — then the SILENT boundary-distance portal
+> gate dropped all 38 portals: since the at-DEM ribbon skip
+> (2026-07-03) only 3 ribbon scraps survive at KDFW, all >1 km from the
+> central corridor.  Final-layout replays MASKED it (post-tunnel
+> boundary→DEM bridges land near the corridor and satisfy the gate) —
+> order-dependent state; the O4_DUMP_PRE_TUNNEL_LAYOUT mid-finalize
+> dump reproduced it offline.  FIX: boundary gate retired; the
+> airside-PAVEMENT distance gate now covers every candidate class.
+> KDFW 0 → 14 portal clusters / 151 ramps; SPJC unchanged (4/41).
+> Also: finalize no longer swallows tunnel-emit failures (loud WARN);
+> per-portal drop reasons under O4_TUNNEL_DEBUG.
+> Suite 21F/325P identical.
+
+---
+
 # STATUS — SESSION 20260704 (part 10): loop-route merge FIXED
 # (`41e2fa8`); progress window rework (`514dfd5`); honest solver banner
 
