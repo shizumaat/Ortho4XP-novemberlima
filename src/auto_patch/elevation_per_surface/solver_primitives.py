@@ -1789,11 +1789,16 @@ def _rotation_for_high_pair(high_pair) -> int:
     return 0
 
 
-def _report(icao, iters_used, max_iters, elapsed,
+def _report(icao, n_free, _unused, elapsed,
              n_terms, n_rects, n_juncs):
+    # NAME NOTE: "per-surface" survives only as this package's name —
+    # the active solve is ONE route-profile solve on the single unified
+    # grade graph (route_profile.solve_route_profile).  The old print
+    # said "converged in N/N iters" where N was actually the FREE-NODE
+    # count, which read as an iteration cap; say what it means.
     import O4_UI_Utils as UI
     UI.vprint(1,
-        f"  [pav-builder] {icao}: per-surface Jacobi solver "
-        f"converged in {iters_used}/{max_iters} iters "
-        f"({elapsed:.2f} s); applied to {n_terms} terminal/apron(s), "
-        f"{n_rects} rect(s), {n_juncs} junction(s).")
+        f"  [pav-builder] {icao}: route-profile solve — "
+        f"{n_free} free node(s) in {elapsed:.2f} s; applied to "
+        f"{n_terms} terminal/apron(s), {n_rects} rect(s), "
+        f"{n_juncs} junction(s).")
