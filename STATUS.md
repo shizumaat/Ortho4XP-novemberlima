@@ -1,3 +1,61 @@
+# STATUS — SESSION 20260704 (part 13): service 5% + break blends +
+# learned ETA (`8495328`); tunnel refactor (`d85db1d`); KDFW underpass
+# corridors (`14f1da4`); perf round IN FLIGHT
+
+> **SERVICE ROADS (user)**: SERVICE_ROAD_MAX_GRADE 4→5 %;
+> apply_service_road_dem_follow floor>ceiling contradictions now fill
+> with the distance-weighted break blend (was: silent ceiling clamp =
+> wall at the groundside mouth).  ⚠ the first cut of the reach walk
+> HUNG CYXY 27 min (epsilon-tolerant pop guard + lazy pushes re-expand
+> equal-value duplicates — parallel merged legs have many equal paths);
+> fixed = strict `if k in best` guard, memory file written.  A/B:
+> CYXY 180→169, SPJC 107→104 (the "67" note was stale), suite 21F/325P
+> identical list.
+> **ETA (user: KDFW stuck at "About 0:06")**: the monotone min-clamp
+> LOCKED an early optimistic guess.  New `build_time_model`: every full
+> build records complexity features + per-phase/total wall times
+> (~/.ortho4xp/auto_patch_build_times/); rebuilds predict from own
+> history, first builds from a cross-airport per-complexity rate;
+> BuildProgress refines per phase (finished phases replace predictions,
+> rest rescaled by ahead/behind ratio, confidence-weighted); GUI blends
+> prior with elapsed extrapolation (quadratic weight) and the display
+> may now RISE past a hysteresis band (10 s / 15 %).  KDFW recorded:
+> 668 s (solve 457, emit 143), 1,519 taxi edges — next rebuild shows a
+> calibrated ~11 min from the first seconds.
+> **TUNNEL REFACTOR (`d85db1d`, user: "excessively large — audit")**:
+> _emit_tunnel_portals (2,100 lines) → orchestrator + 14 stage helpers,
+> byte-identical at SPJC/KCLT/CYUL.  Audit list (numbered import
+> aliases, fork-throat off-paths, duplicated projection helpers, dead
+> params, stale comments) in the session transcript — cleanup queued.
+> **KDFW UNDERPASSES (`14f1da4`, four user rulings)**: motorway 25 m /
+> secondary 15 m; <35 m grouping = ONE corridor ramp
+> (UNDERPASS_GROUP_DIST_M; KDFW motorway pair at ~113 m stays separate);
+> ALL breaks pavement-derived at taxi edge +1 m (mapped tunnels re-split,
+> O4_TUNNEL_TAXI_BREAKS; wall cap = [edge, edge+1 m]); building/apron-
+> covered mapped tunnels → building_passage (no ramps), grass/RESA ones
+> KEEP mapped portals (CYUL regression caught + fixed); gaps too short
+> for a ramp pair (<2·depth/grade) merge bores + emit corridor-width
+> flat rect at −8 m with DEM-following wall band
+> (O4_TUNNEL_LOW_CONNECTORS); portals inside corridors suppressed;
+> fork branches >50 % throat-covered skipped.  KDFW 546→447 law-true
+> (facing-ramp 82 % overlap class GONE, ramp overlaps 9→0, bore ends
+> exactly 1.0 m from taxi edges), SPJC 104→96 (4 clusters kept — user
+> should eyeball Elmer Faucett in sim: ramps 82→39 + 1 flat connector),
+> KCLT 174 unchanged, CYUL restored 5 clusters/29.  Suite 21F/325P
+> identical list.  Offline iteration: O4_DUMP_PRE_TUNNEL_LAYOUT pkl +
+> /tmp/spjc_lab/tunnel_replay.py (seconds per iteration).
+> **PERF ROUND (user-approved, in flight)**: stack verified native
+> (arm64 python, Accelerate-BLAS numpy 2.4.3, GEOS 3.13; M5 Max 6P+12E).
+> KDFW relief = 37.7 m over 7.8 km = 0.485 % avg → plan: (1) cProfile
+> KDFW (running), (2) conservative anchor envelope pre-filter
+> (min over anchors of alt ± min_cap·euclid — chord bound makes
+> DEM-inside-band nodes provably skip band walks/building reach; user's
+> building-chord idea generalized), (3) worklist Gauss-Seidel
+> (violated-edge queue, ordered = deterministic).  Acceptance: law-true
+> counts IDENTICAL (shortcuts are exact), suite list identical.
+
+---
+
 # STATUS — SESSION 20260704 (part 12): monotone ETA (`0055c85`); CYXY
 # turnaround pad (`c5f5a2d`); SPJC production tunnels = rebuild needed
 

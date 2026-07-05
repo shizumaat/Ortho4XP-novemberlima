@@ -274,28 +274,37 @@ def _build_skeleton_band(layout, G):
     if not anchor_elev:
         return lambda x, y: None
 
-    def _capdist(src):
-        dist = {src: 0.0}
-        pq = [(0.0, src)]
+    # Value-seeded reach FIELDS (perf 2026-07-04): the per-anchor loop
+    # ran a full Dijkstra PER anchor (550 at KDFW → 140 s of the build,
+    # cProfile) yet only ever consumed ``min(ae + dist)`` /
+    # ``max(ae − dist)`` across anchors.  ONE multi-source pass per
+    # field — every anchor seeded at its own elevation — settles each
+    # node at its optimal (anchor, path) pair: the same min/max by
+    # commutation.  ``dist`` is accumulated separately and the field
+    # value formed as ``ae + dist`` (one addition, exactly the
+    # per-anchor expression) so patches stay byte-identical.  Strict
+    # settled-set pop guard — see the lazy-Dijkstra re-expand hang.
+    def _anchor_value_field(sign):
+        best: dict = {}
+        pq = [((ae if sign > 0 else -ae), 0.0, ae, k)
+              for k, ae in anchor_elev.items() if k in adj]
+        heapq.heapify(pq)
         while pq:
-            d, u = heapq.heappop(pq)
-            if d > dist.get(u, _INF):
+            _key, dd, ae, u = heapq.heappop(pq)
+            if u in best:
                 continue
+            best[u] = (ae + dd) if sign > 0 else (ae - dd)
             for (v, budget) in adj.get(u, ()):
-                nd = d + budget
-                if nd < dist.get(v, _INF):
-                    dist[v] = nd
-                    heapq.heappush(pq, (nd, v))
-        return dist
+                if v in best:
+                    continue
+                nd = dd + budget
+                heapq.heappush(
+                    pq, (((ae + nd) if sign > 0 else -(ae - nd)),
+                         nd, ae, v))
+        return best
 
-    node_floor: dict = {}
-    node_ceil: dict = {}
-    for k, ae in anchor_elev.items():
-        if k not in adj:
-            continue
-        for v, dd in _capdist(k).items():
-            node_ceil[v] = min(node_ceil.get(v, _INF), ae + dd)
-            node_floor[v] = max(node_floor.get(v, -_INF), ae - dd)
+    node_ceil = _anchor_value_field(+1)
+    node_floor = _anchor_value_field(-1)
     if not node_ceil:
         return lambda x, y: None
 
@@ -338,22 +347,37 @@ def reach_band_unified(layout, G):
     if not getattr(G, "runway_anchor", None) or not getattr(G, "spine_adj", None):
         return lambda x, y: None
 
-    def _capdist(src):
-        dist = {src: 0.0}
-        pq = [(0.0, src)]
+    # Value-seeded reach FIELDS (perf 2026-07-04, same collapse as the
+    # skeleton band above): the per-anchor Dijkstras were only ever
+    # consumed as ``min over anchors (ae + dist + extras)`` /
+    # ``max over anchors (ae − dist − extras)`` with anchor-independent
+    # extras, so ONE multi-source pass per field replaces |anchors|
+    # full-graph passes.  Each field stores the winning ``(dist, ae)``
+    # PAIR so ``_band_via`` can form its candidate values with exactly
+    # the original float expression (ae + ((dist + foot) + perp)) —
+    # patches stay byte-identical.
+    def _runway_value_field(sign):
+        best: dict = {}
+        pq = [((float(ae) if sign > 0 else -float(ae)), 0.0, float(ae), k)
+              for (k, ae) in G.runway_anchor.items()]
+        heapq.heapify(pq)
         while pq:
-            d, u = heapq.heappop(pq)
-            if d > dist.get(u, _INF):
+            _key, dd, ae, u = heapq.heappop(pq)
+            if u in best:
                 continue
+            best[u] = (dd, ae)
             for (v, budget) in G.spine_adj.get(u, ()):
-                nd = d + budget
-                if nd < dist.get(v, _INF):
-                    dist[v] = nd
-                    heapq.heappush(pq, (nd, v))
-        return dist
+                if v in best:
+                    continue
+                nd = dd + budget
+                heapq.heappush(
+                    pq, (((ae + nd) if sign > 0 else -(ae - nd)),
+                         nd, ae, v))
+        return best
 
-    anchors = [(float(ae), _capdist(k)) for (k, ae) in G.runway_anchor.items()]
-    if not anchors:
+    ceiling_field = _runway_value_field(+1)
+    floor_field = _runway_value_field(-1)
+    if not ceiling_field:
         return lambda x, y: None
 
     # Unified spine-node positions for the perp-foot → reachable-node lookup.
@@ -462,18 +486,21 @@ def reach_band_unified(layout, G):
         beyond_cap = ecap if in_junc else APRON_MAX_GRADE
         perp_climb = (ecap * min(perp, _TAXI_HALF_W_M)
                       + beyond_cap * max(0.0, perp - _TAXI_HALF_W_M))
+        # Candidate values from the collapsed fields: each field entry is
+        # the winning (dist, ae) pair for its node, and for fixed foot
+        # extras the same anchor wins with the extras added — so forming
+        # ``ae + ((dist + foot) + perp)`` here reproduces the per-anchor
+        # loop's minima to the float bit.
         floor, ceil = -_INF, _INF
-        for (ae, cdm) in anchors:
-            cands = []
-            if kA in cdm:
-                cands.append(cdm[kA] + ecap * A[1])
-            if kB in cdm:
-                cands.append(cdm[kB] + ecap * B[1])
-            if not cands:
-                continue
-            budget = min(cands) + perp_climb
-            ceil = min(ceil, ae + budget)
-            floor = max(floor, ae - budget)
+        for (k, foot) in ((kA, A[1]), (kB, B[1])):
+            fc = ceiling_field.get(k)
+            if fc is not None:
+                dd, ae = fc
+                ceil = min(ceil, ae + ((dd + ecap * foot) + perp_climb))
+            ff = floor_field.get(k)
+            if ff is not None:
+                dd, ae = ff
+                floor = max(floor, ae - ((dd + ecap * foot) + perp_climb))
         if ceil >= _INF:
             return None
         return (floor, ceil)

@@ -1195,9 +1195,14 @@ def _enforce_shared_vertices(layout: "PavementLayout",
 
     from collections import defaultdict
 
-    # Union-find with O(n²) pair scan.  n is typically 200-2000
-    # across both airports, well within millisecond range, and the
-    # simpler code eliminates any spatial-index off-by-one bugs.
+    # Union-find over a tol-sized GRID.  The original O(n²) pair scan
+    # ("n is typically 200-2000") predates the global slice: at KDFW
+    # n ≈ 47k vertices → ~1.1 BILLION pair checks per call, 190 s of
+    # the build (cProfile 2026-07-04).  Hashing vertices into
+    # tol-sized cells and comparing only the 3×3 neighbourhood visits
+    # exactly the pairs the old |dx|,|dy| ≤ tol prefilter kept, so the
+    # union COMPONENTS — and therefore the cluster means and the
+    # rewritten rings — are byte-identical.
     n = len(handles)
     parent = list(range(n))
 
@@ -1213,16 +1218,28 @@ def _enforce_shared_vertices(layout: "PavementLayout",
             parent[ra] = rb
 
     coords_only = [h[4] for h in handles]
-    for i in range(n):
-        ix, iy = coords_only[i]
-        for j in range(i + 1, n):
-            jx, jy = coords_only[j]
-            dx = ix - jx
-            dy = iy - jy
-            if dx > tol or dx < -tol or dy > tol or dy < -tol:
-                continue
-            if math.hypot(dx, dy) <= tol:
-                _union(i, j)
+    cell_size = tol if tol > 0 else 1.0
+    grid_buckets: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for i, (ix, iy) in enumerate(coords_only):
+        grid_buckets[(int(ix // cell_size), int(iy // cell_size))].append(i)
+    for (cell_x, cell_y), members in grid_buckets.items():
+        neighbourhood: list[int] = []
+        for offset_x in (-1, 0, 1):
+            for offset_y in (-1, 0, 1):
+                neighbourhood.extend(grid_buckets.get(
+                    (cell_x + offset_x, cell_y + offset_y), ()))
+        for i in members:
+            ix, iy = coords_only[i]
+            for j in neighbourhood:
+                if j <= i:
+                    continue
+                jx, jy = coords_only[j]
+                dx = ix - jx
+                dy = iy - jy
+                if dx > tol or dx < -tol or dy > tol or dy < -tol:
+                    continue
+                if math.hypot(dx, dy) <= tol:
+                    _union(i, j)
 
     # Compute cluster centroids (mean of member coords).
     cluster_members: dict[int, list[int]] = defaultdict(list)
