@@ -1,3 +1,47 @@
+# STATUS — SESSION 20260705 (part 14): tests realigned 21F→12F
+# (`56e19fd`); sparse tessellation verdict (`df15809`); py3.13 + fast
+# lane (`e06498e`); scoped final projection (`370b0ed`)
+
+> **CYXY "underpass regression" RESOLVED = MEASUREMENT ANOMALY**: full
+> bisect 8495328→0e425c1 all = 176; CYXY emits ZERO tunnel shapes; the
+> 169/251 readings came from two irreproducible windows (concurrent-
+> build suspect; incident + protocol in memory nondeterminism-cause).
+> True chain: 176 flat → 152 at the quant margin.
+> **TESTS (`56e19fd`, agent)**: 21F→13F; instruments UNIFIED —
+> test_pavement_grade now consumes taxi_axes_exact_ll + anchor + seam
+> pins and agrees BYTE-EXACTLY with check_grade everywhere (HECA true
+> baseline = 9,739); same_nodes rewritten to the approved invariant
+> (emitted verts ⊆ final-projection graph, GREEN); compare-targets
+> recut; vacuous junction test deleted; CYXY terrain-following
+> threshold re-derived from the reach band (710.1 vs permitted 714 —
+> honestly red).
+> **SPARSE TESSELLATION (`df15809`)**: adaptive bezier (sagitta 0.4 m
+> + 4 m spacing floor) + Douglas-Peucker source-ring resampling,
+> O4_ADAPTIVE_BEZIER.  VERDICT: node-count lever REFUTED at fixtures
+> (HECA 8800→8800 — density is minted DOWNSTREAM by slice/junction/
+> welds); kept for the real wins: SPLP off-source class CLEARED
+> (rests_on_source[SPLP] green) + SPLP 179→52.  Suite 12F/334P
+> (/tmp/base12.txt).  Counts now CYXY 164 / SPJC 66 / SPLP 52.
+> **PY3.13 + FAST LANE (`e06498e`)**: 3.13 verified compatible
+> (wheels ✓, counts equivalent, ~5-10 % faster — C libs dominate);
+> RECOMMENDED NOT REQUIRED (floor stays 3.11 via numpy 2.4; installers
+> float; ONBOARDING documents).  tools/fast_suite.sh = cheap-airport
+> suite 83 s vs 208 s (full suite stays the merge gate).
+> **SCOPED FINAL PROJECTION (`370b0ed`, agent + integrator gates)**:
+> law graph rebuilt only for post-solve geometry/value-changed shapes
+> (writeback + fairing snapshots, shared-vertex aware).  Gate-off
+> byte-identical; counts exact; suite identical.  KDFW timing pending.
+> **OPEN**: (1) smoothing-aware lazy certificates — agent ran out of
+> credits; needs the soundness analysis (clamps/anchors vs certified
+> interiors) first; certificates currently all expand.  (2) KDFW
+> timing re-measure with scoped projection.  (3) DRIVE-TO-ZERO
+> campaign (class plan + per-violation JSON in session scratchpad):
+> SPLP-52 break-region tagging, CYXY hillside corridor blend, SPJC
+> junction #158 probe, shared-corner wobble co-location, CYXY building
+> pad tilt ×2; HECA 9,624 campaign after.
+
+---
+
 # STATUS — SESSION 20260704 (part 13): service 5% + break blends +
 # learned ETA (`8495328`); tunnel refactor (`d85db1d`); KDFW underpass
 # corridors (`14f1da4`); perf round IN FLIGHT
