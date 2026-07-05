@@ -838,7 +838,11 @@ def _fair_ring_edges(layout, elev, bucket_to_idx, anchors, node_band,
                    "service_road", "service_junction"}
     cps = layout.canonical_points
     n = len(elev)
-    rings = []
+    n_band = len(node_band) if node_band is not None else 0
+
+    # ── Precompute fairable TRIPLES once (geometry never changes) —
+    # the sweeps then run on plain tuples, no per-sweep geometry work.
+    triples = []          # (a, b, d, l1, l2) — flat list, for the sweeps
     for s in layout.shapes:
         if s.role in _SKIP_ROLES or s.polygon is None \
                 or s.polygon.is_empty or s.polygon.geom_type != "Polygon":
@@ -846,71 +850,70 @@ def _fair_ring_edges(layout, elev, bucket_to_idx, anchors, node_band,
         coords = list(s.polygon.exterior.coords)
         if coords and coords[0] == coords[-1]:
             coords = coords[:-1]
-        if len(coords) < 4:
+        m = len(coords)
+        if m < 4:
             continue
         idx = [bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
                for (x, y) in coords]
-        rings.append((coords, idx))
+        for t in range(m):
+            a, b, d = idx[(t - 1) % m], idx[t], idx[(t + 1) % m]
+            if b is None or a is None or d is None:
+                continue
+            if b >= n or a >= n or d >= n or b in anchors:
+                continue
+            (xa, ya), (xb, yb) = coords[(t - 1) % m], coords[t]
+            (xd, yd) = coords[(t + 1) % m]
+            l1 = _math.hypot(xb - xa, yb - ya)
+            l2 = _math.hypot(xd - xb, yd - yb)
+            if l1 < min_seg_m or l2 < min_seg_m:
+                continue
+            dot = ((xb - xa) * (xd - xb)
+                   + (yb - ya) * (yd - yb)) / (l1 * l2)
+            if dot < _math.cos(_math.radians(max_bend_deg)):
+                continue                      # corner — real grade break
+            triples.append((a, b, d, l1, l2))
 
-    def _fairable(coords, idx, t):
-        m = len(coords)
-        a, b, d = idx[(t - 1) % m], idx[t], idx[(t + 1) % m]
-        if b is None or a is None or d is None:
-            return None
-        if b >= n or a >= n or d >= n or b in anchors:
-            return None
-        (xa, ya), (xb, yb) = coords[(t - 1) % m], coords[t]
-        (xd, yd) = coords[(t + 1) % m]
-        l1 = _math.hypot(xb - xa, yb - ya)
-        l2 = _math.hypot(xd - xb, yd - yb)
-        if l1 < min_seg_m or l2 < min_seg_m:
-            return None
-        dot = ((xb - xa) * (xd - xb) + (yb - ya) * (yd - yb)) / (l1 * l2)
-        if dot < _math.cos(_math.radians(max_bend_deg)):
-            return None                       # corner — real grade break
-        return a, b, d, l1, l2
+    if not triples:
+        return 0
 
-    n_band = len(node_band) if node_band is not None else 0
+    # A direct straight-line fit per run was MEASURED and rejected
+    # (2026-07-04, user suggestion): assigning the chord between run
+    # endpoints (band-projected, small-move-guarded) reads smoother in
+    # theory, but band clamps and cross-run neighbour pairs make the
+    # chord not-quite-feasible in practice — CYXY within-shape rose
+    # 182 → 237-256 for no visible gain over POCS-from-seed (the solved
+    # seed is already near-linear; the POCS converges in a few cheap
+    # sweeps on the precomputed triples).
     for _sweep in range(max_sweeps):
         worst = 0.0
-        for coords, idx in rings:
-            for t in range(len(coords)):
-                f = _fairable(coords, idx, t)
-                if f is None:
-                    continue
-                a, b, d, l1, l2 = f
-                g1 = (elev[b] - elev[a]) / l1
-                g2 = (elev[d] - elev[b]) / l2
-                dg = g2 - g1
-                lim = k_rate * 0.5 * (l1 + l2)
-                ex = abs(dg) - lim
-                if ex <= 1e-6:
-                    continue
-                delta = _math.copysign(ex, dg) / (1.0 / l1 + 1.0 / l2)
-                nb = elev[b] + delta
-                band = node_band[b] if b < n_band else None
-                if band is not None:
-                    lo, hi = band
-                    if lo <= hi:
-                        nb = min(max(nb, lo), hi)
-                moved = abs(nb - elev[b])
-                if moved:
-                    elev[b] = nb
-                    if moved > worst:
-                        worst = moved
+        for (a, b, d, l1, l2) in triples:
+            g1 = (elev[b] - elev[a]) / l1
+            g2 = (elev[d] - elev[b]) / l2
+            dg = g2 - g1
+            lim = k_rate * 0.5 * (l1 + l2)
+            ex = abs(dg) - lim
+            if ex <= 1e-6:
+                continue
+            delta = _math.copysign(ex, dg) / (1.0 / l1 + 1.0 / l2)
+            nb = elev[b] + delta
+            band = node_band[b] if b < n_band else None
+            if band is not None:
+                lo, hi = band
+                if lo <= hi:
+                    nb = min(max(nb, lo), hi)
+            moved = abs(nb - elev[b])
+            if moved:
+                elev[b] = nb
+                if moved > worst:
+                    worst = moved
         if worst < tol:
             break
     n_over = 0
-    for coords, idx in rings:
-        for t in range(len(coords)):
-            f = _fairable(coords, idx, t)
-            if f is None:
-                continue
-            a, b, d, l1, l2 = f
-            g1 = (elev[b] - elev[a]) / l1
-            g2 = (elev[d] - elev[b]) / l2
-            if abs(g2 - g1) - k_rate * 0.5 * (l1 + l2) > 1e-4:
-                n_over += 1
+    for (a, b, d, l1, l2) in triples:
+        g1 = (elev[b] - elev[a]) / l1
+        g2 = (elev[d] - elev[b]) / l2
+        if abs(g2 - g1) - k_rate * 0.5 * (l1 + l2) > 1e-4:
+            n_over += 1
     return n_over
 
 
