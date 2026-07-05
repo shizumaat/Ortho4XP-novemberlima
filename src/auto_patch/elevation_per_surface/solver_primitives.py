@@ -636,6 +636,42 @@ def _certify_flat_shape(layout, shape, coords, dem, tile_lat, tile_lon,
         if abs(ring_seed[p] - ring_seed[q]) > rate_min * dist:
             return None
 
+    # Minimum BODY-pair distance (non-adjacent vertices), grid-bucketed
+    # O(n): it sizes the slack-aware movement tolerance — a certified
+    # pair at ≤ rate_min·d keeps 0.4·rate_full·d of slack, so both
+    # endpoints may drift (tolerance) each before any body pair can
+    # reach its budget (user 2026-07-05 tuning: the 1e-6 tolerance made
+    # every certified shape expand on the first mm of apron smoothing).
+    minimum_body_distance = float("inf")
+    bucket_cell = 4.0
+    vertex_buckets: dict = {}
+    for p, (x, y) in enumerate(coords):
+        vertex_buckets.setdefault(
+            (int(x // bucket_cell), int(y // bucket_cell)), []).append(p)
+    for (cell_x, cell_y), members in vertex_buckets.items():
+        neighbourhood = []
+        for off_x in (-1, 0, 1):
+            for off_y in (-1, 0, 1):
+                neighbourhood.extend(vertex_buckets.get(
+                    (cell_x + off_x, cell_y + off_y), ()))
+        for p in members:
+            xa, ya = coords[p]
+            for q in neighbourhood:
+                if q <= p:
+                    continue
+                gap = q - p
+                if gap == 1 or gap == count - 1:
+                    continue    # ring-adjacent pairs are eager, not body
+                xb, yb = coords[q]
+                dist = math.hypot(xa - xb, ya - yb)
+                if dist < minimum_body_distance:
+                    minimum_body_distance = dist
+    if minimum_body_distance > 3.0 * bucket_cell:
+        # No body pair inside the bucket horizon → every body pair is
+        # at least the horizon apart; the horizon is a valid (smaller)
+        # lower bound and keeps the tolerance computation sound.
+        minimum_body_distance = 3.0 * bucket_cell
+
     # ~25 m grid over the shape's bounding box (axis-neighbour gradients).
     try:
         min_x, min_y, max_x, max_y = shape.polygon.bounds
@@ -674,7 +710,7 @@ def _certify_flat_shape(layout, shape, coords, dem, tile_lat, tile_lon,
                 if abs(grid[grid_row + 1][grid_col] - here) \
                         > rate_min * spacing_y:
                     return None
-    return ring_seed
+    return ring_seed, minimum_body_distance
 
 
 def _build_shape_constraints(layout, bucket_to_idx, ctx=None, dem=None,
@@ -751,11 +787,16 @@ def _build_shape_constraints(layout, bucket_to_idx, ctx=None, dem=None,
     flat_lazy_enabled = (
         _os.environ.get("O4_FLAT_SHAPE_LAZY", "1") == "1"
         and dem is not None and hard_nodes is not None)
-    # Globally conservative certificate rate: aprons/frontage are the tightest
-    # 1 % within-shape class, 0.6 the safety factor; the validator's
-    # ELEV_ROUNDING_NOISE_M (0.03 m) absorbs emit rounding on the sub-3 m
-    # chords this leaves near the cap (see _certify_flat_shape).
-    flat_rate_min = 0.6 * APRON_MAX_GRADE
+    # Certificate rate is PER SHAPE (user 2026-07-05 tuning): aprons and any
+    # shape hosting building-pad keys certify against the tightest 1 % class;
+    # a JUNCTION with no pad keys can never earn a pair budget below the
+    # 1.5 % taxi body cap (frontage clamp needs a pad key; one-seam pairs
+    # take the body cap; road-carve/aniso only relax upward), so it
+    # certifies at 0.6 · 1.5 % = 0.9 % — at KDFW the global 0.6 % threshold
+    # sat below the field's local gradients and certified almost nothing.
+    # 0.6 = safety factor; the validator's ELEV_ROUNDING_NOISE_M (0.03 m)
+    # absorbs emit rounding near the cap (see _certify_flat_shape).
+    flat_safety_factor = 0.6
     flat_certified_count = 0
     flat_candidate_count = 0
     # Node indices on a clean sloping-rect PLANE (4-corner, altitude_high/low).
@@ -905,16 +946,32 @@ def _build_shape_constraints(layout, bucket_to_idx, ctx=None, dem=None,
             # generation: a lazy bookkeeping error must never silently drop
             # law coverage.
             lazy_seed_by_vertex = None
+            lazy_certificate = None
+            shape_rate_full = APRON_MAX_GRADE
             if flat_lazy_enabled:
                 flat_candidate_count += 1
                 if not any(i in hard_nodes for i in nodes):
+                    if (s.role != ROLE_APRON
+                            and not any(i in _gg_ctx.building_keys
+                                        for i in nodes)):
+                        shape_rate_full = TAXI_MAX_GRADE
                     try:
-                        lazy_seed_by_vertex = _certify_flat_shape(
+                        lazy_certificate = _certify_flat_shape(
                             layout, s, coords, dem, tile_lat, tile_lon,
-                            flat_rate_min)
+                            flat_safety_factor * shape_rate_full)
                     except _GEOM_EXC:
-                        lazy_seed_by_vertex = None
-            if lazy_seed_by_vertex is not None:
+                        lazy_certificate = None
+            if lazy_certificate is not None:
+                lazy_seed_by_vertex, minimum_body_distance = lazy_certificate
+                # Slack-aware movement tolerance: certified pairs sit at
+                # ≤ 0.6·rate·d, leaving 0.4·rate·d of slack; two endpoints
+                # drifting ``tolerance`` each consume at most 2·tolerance,
+                # so tolerance = 0.2·rate·d_min keeps EVERY body pair
+                # inside its budget without expansion.  The 1e-6 tolerance
+                # made apron-smoothing's mm nudges expand every certificate.
+                lazy_move_tolerance = min(
+                    0.02, max(1e-6, 0.2 * shape_rate_full
+                              * minimum_body_distance))
                 flat_certified_count += 1
                 edges.extend(_grade_graph_edges(s, coords, idx, _gg_ctx,
                                                 ring_only=True))
@@ -934,6 +991,7 @@ def _build_shape_constraints(layout, bucket_to_idx, ctx=None, dem=None,
                                                        _law_ctx)),
                     "lazy_nodes": lazy_node_indices,
                     "lazy_seed": lazy_node_seeds,
+                    "lazy_move_tolerance": lazy_move_tolerance,
                     "lazy_certified": True,
                 }
             else:
@@ -1004,7 +1062,7 @@ def _build_shape_constraints(layout, bucket_to_idx, ctx=None, dem=None,
     if flat_lazy_enabled and _os.environ.get("O4_STEP_DEBUG") == "1":
         print(f"  [flat-lazy] certified {flat_certified_count} of "
               f"{flat_candidate_count} apron/junction shape(s) "
-              f"(rate_min {flat_rate_min * 100.0:.2f}%)")
+              f"(safety factor {flat_safety_factor:.2f}, per-role rates)")
     return out
 
 

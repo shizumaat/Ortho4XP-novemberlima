@@ -217,18 +217,23 @@ def feasibility_project(elev, shape_constraints, hard, *,
     # call sees the expanded set too.  Final state either way: every
     # generated edge satisfied + every never-expanded shape satisfied by its
     # certificate ⇒ the same law coverage as eager generation.
-    lazy_movement_tolerance = 1e-6
-
     def _lazy_nodes_moved(entry):
         # A flat-group member's live value is carried by its REPRESENTATIVE
         # during this call (members are only broadcast back at the end), so
         # the effective elevation to compare against the certificate seed is
         # ``elev[_r(node_index)]``.
+        # The movement tolerance is the certificate's SLACK-AWARE bound
+        # (user 2026-07-05 tuning): certified pairs sit at ≤ 0.6·rate·d,
+        # so both endpoints may drift 0.2·rate·d_min before any body pair
+        # can reach its budget — mm-scale smoothing nudges no longer
+        # expand every certificate.  Entries from older callers without
+        # the field keep the strict 1e-6.
+        movement_tolerance = entry.get("lazy_move_tolerance", 1e-6)
         for node_index, seed_value in zip(entry["lazy_nodes"],
                                           entry["lazy_seed"]):
             if 0 <= node_index < n and \
                     abs(elev[_r(node_index)] - seed_value) \
-                    > lazy_movement_tolerance:
+                    > movement_tolerance:
                 return True
         return False
 
@@ -242,6 +247,7 @@ def feasibility_project(elev, shape_constraints, hard, *,
         thunk = entry.pop("lazy_expand")
         entry.pop("lazy_nodes", None)
         entry.pop("lazy_seed", None)
+        entry.pop("lazy_move_tolerance", None)
         full_edges = list(thunk())
         # Ring pairs come back again inside the full set — the
         # min-budget-wins dedup below absorbs the duplicates.
@@ -553,21 +559,25 @@ def feasibility_project(elev, shape_constraints, hard, *,
                     if not in_pending[neighbour_edge]:
                         in_pending[neighbour_edge] = 1
                         pending.append(neighbour_edge)
-            # MID-CALL lazy expansion: this node just moved off wherever it
-            # was — if it belongs to still-certified shapes, their seed
-            # premise is gone; generate their full pair sets and enqueue the
-            # new edges (kind recomputed against the SAME ``immovable`` set).
-            # ``pop`` retires the trigger node; entries reached through
-            # another of their nodes later are skipped by the
-            # ``lazy_expand``-gone guard.
+            # MID-CALL lazy expansion: this node just moved — if it belongs
+            # to still-certified shapes AND the move exceeds the entry's
+            # slack-aware tolerance, the seed premise is gone; generate the
+            # full pair set and enqueue the new edges (kind recomputed
+            # against the SAME ``immovable`` set).  A move WITHIN the slack
+            # keeps the entry lazy and still watched (the mapping is only
+            # dropped once expanded), so a later larger drift re-triggers.
             if lazy_entries_by_node:
                 for moved_node in moved:
-                    entries_here = lazy_entries_by_node.pop(moved_node, None)
+                    entries_here = lazy_entries_by_node.get(moved_node)
                     if not entries_here:
                         continue
+                    still_watching = []
                     for lazy_entry in entries_here:
                         if "lazy_expand" not in lazy_entry:
-                            continue
+                            continue        # expanded via another node
+                        if not _lazy_nodes_moved(lazy_entry):
+                            still_watching.append(lazy_entry)
+                            continue        # within certificate slack
                         for new_edge_index in \
                                 _expand_lazy_entry_into_projection(lazy_entry):
                             edge_a, edge_b, _b2, _k2 = \
@@ -578,6 +588,10 @@ def feasibility_project(elev, shape_constraints, hard, *,
                                 .append(new_edge_index)
                             in_pending.append(1)
                             pending.append(new_edge_index)
+                    if still_watching:
+                        lazy_entries_by_node[moved_node] = still_watching
+                    else:
+                        lazy_entries_by_node.pop(moved_node, None)
         _sweeps_run = visits
     # broadcast each flat group's representative level back to its members.
     for rep, g in (groups_eff if flat_groups else ()):
