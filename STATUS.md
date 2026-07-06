@@ -1,3 +1,19 @@
+# STATUS — SESSION 20260706 (part 23): runways UNIFIED to per-vertex
+# node_altitudes mid-pipeline (`acd254a`)
+
+> **USER QUESTION ('still rects on runways?')**: taxi network was
+> already unified; runways were the holdout.  Now per-vertex
+> EVERYWHERE mid-pipeline: _apply_profile_to_shapes always per-vertex;
+> normalize_runway_altitudes sweeps stragglers + clears stale dual
+> attrs; _sample_runway_segment_elev PLANE-FITS per-vertex pieces (old
+> nearest-vertex degraded clearance/anchors).  EMIT unchanged by
+> design: to_osm still compacts near-planar quads to hi/lo TAGS (user
+> 2026-05-23 'keep rects at emit' ruling; canonicalize_high_low_ring
+> rotates inverted rings correctly).  SPJC + SPLP-77 fixtures recut.
+> Suite 10F==base10; HECA flex 11/2,759 holds.
+
+---
+
 # STATUS — SESSION 20260706 (part 22): flex tear = [H,L,L,H] slope-
 # INVERSION bug (`558e000`) — HECA quarantine −75 %, READY FOR SIM TEST
 
