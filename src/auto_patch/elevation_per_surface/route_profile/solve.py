@@ -319,14 +319,12 @@ def solve_route_profile(layout, icao: str,
     # MINIMUM (deficit split by available certain-anchor slack), through
     # the same FAA gates the seam redistribute uses.  Runway node seeds
     # and the runway-join anchors are re-derived from the flexed shapes.
-    # GATE OFF (2026-07-06 first measurement): contact-pair flexing
-    # drained HECA's full 8.50 m contact deficit but the quarantine only
-    # moved 11,265->10,838 — the pocket contradictions press against the
-    # WHOLE profile length (every runway node is a hard anchor), not
-    # just the taxi-join contacts, and 7 small new residuals appeared
-    # near the flexed spots.  Stage B2 = envelope-level demands along
-    # the full profile (see docs/runway_flex_plan.md).
-    if _os.environ.get("O4_RUNWAY_FLEX", "0") == "1" and G.runway_anchor:
+    # DEFAULT ON (user 2026-07-06, for in-sim evaluation): Stage B2
+    # envelope demands + the inversion fix measured clean at HECA
+    # (actionable 11 with ZERO runway pairs; quarantine 11,265 → 2,762)
+    # and the flex is a structural no-op on single-runway airports.
+    # O4_RUNWAY_FLEX=0 restores frozen profiles.
+    if _os.environ.get("O4_RUNWAY_FLEX", "1") == "1" and G.runway_anchor:
         try:
             _n_flexed = _apply_runway_flex_hook(
                 layout, icao, nodes, bucket_to_idx, elev, base_hard,
