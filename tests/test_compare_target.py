@@ -162,15 +162,19 @@ SPJC_BASELINE_TOTAL = 443  # int(0.95 * 467) of 467 current (emitted)
 # secondary_parallel → groundside_pavement.  Same total shape count.
 # RE-CUT 2026-07-05 (curve-native global slice default; see the SPJC
 # re-cut note above) — floors = int(0.95 * current fixture count).
+# RE-CUT 2026-07-06 (seam values sample the SMOOTHED DEM per the user
+# ruling — runway seam anchors moved cm-scale, flipping six boundary
+# ribbon at-DEM skips).  Floors = int(0.95 * current fixture count).
 SPLP_BASELINE_TILE_M77: Dict[str, int] = {
     "apron":               9,   # of  10 current
-    "boundary":           37,   # of  39 current
+    "boundary":           31,   # of  33 current
     "building":            2,   # of   3 current
     "junction":           11,   # of  12 current
     "runway":              8,   # of   9 current
-    "taxiway_clearance":   6,   # of   7 current
+    "runway_clearance":    5,   # of   6 current
+    "taxiway_clearance":   8,   # of   9 current
 }
-SPLP_BASELINE_TILE_M77_TOTAL = 76  # int(0.95 * 80) of 80 current (emitted)
+SPLP_BASELINE_TILE_M77_TOTAL = 77  # int(0.95 * 82) of 82 current (emitted)
 
 # RE-CUT 2026-07-05 (curve-native global slice default; see the SPJC
 # re-cut note above) — floors = int(0.95 * current fixture count).

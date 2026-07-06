@@ -1145,7 +1145,7 @@ JUNCTION_RIPPLE_SMOOTH = _os.environ.get("O4_JCT_RIPPLE", "1") == "1"
 FIELD_RUNWAY_ROUTE_BANDS = _os.environ.get("O4_FIELD_RW_ROUTE", "1") == "1"
 
 # SEAM FIELD ANCHORS (user 2026-06-20).  On a tile-seam, pavement vertices
-# are pinned to the raw HGT DEM for cross-tile continuity
+# are pinned to the smoothed DEM for cross-tile continuity
 # (seam_anchors.apply_seam_dem_anchors).  But the NETWORK PROFILE field only
 # solves to the CIFP runway anchors — it never knew the seam DEM values — so
 # it graded a route to the runway, and the seam DEM pin was slapped on AFTER,

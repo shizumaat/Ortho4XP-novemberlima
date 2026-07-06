@@ -3897,8 +3897,9 @@ def build_airport_pavement(icao: str, xplane_root: str,
             # ── Seam-anchor pipeline (user 2026-05-13) ────────────
             # 1) Insert ring vertices at integer lat/lon line crossings
             #    and convert sloped rects to node_altitudes.
-            # 2) Sample DEM at each seam vertex via dem.alt_strict
-            #    (deterministic across tiles via SRTM overlap).
+            # 2) Sample the SMOOTHED DEM at each seam vertex
+            #    (elevation._sample_dem, per the seam ruling;
+            #    deterministic across tiles via preserve_boundary).
             # 3) Redistribute the runway profile (user 2026-05-19):
             #    fold seam DEM altitudes into the FAA-compliant
             #    profile that ``runway_segments.generate_patch_osm``

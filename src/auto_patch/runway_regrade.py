@@ -344,9 +344,12 @@ def regrade_runways_in_layout(
             x, y = ring[i]
             t = _project(x, y)
             lat, lon = layout.m_to_ll(x, y)
+            # SMOOTHED-DEM sampler per the seam ruling (2026-06-28 /
+            # 2026-07-06): dem.alt via _sample_dem, never alt_strict.
             try:
-                dem_alt = float(dem.alt_strict(
-                    (lon - tile_lon, lat - tile_lat)))
+                from .elevation import _sample_dem
+                _v = _sample_dem(dem, tile_lat, tile_lon, lat, lon)
+                dem_alt = float("nan") if _v is None else float(_v)
             except (IndexError, ValueError, TypeError):
                 dem_alt = float("nan")
             if dem_alt != dem_alt or dem_alt == dem.nodata:   # NaN or NODATA

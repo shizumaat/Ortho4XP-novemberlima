@@ -9,8 +9,9 @@ projection anchors, and centerline-crossing reconciliation, all passed
 through the parabolic envelope clamp + hard-cap + rate-of-change
 gates.  But it knows nothing about tile-boundary seams: the seam
 pipeline runs later, identifies which runway vertices sit on integer
-lat/lon lines, and pins them HARD to ``dem.alt_strict`` (the raw HGT
-pixel — required for cross-tile parity / preserve_boundary).
+lat/lon lines, and pins them HARD to the SMOOTHED DEM value there
+(``elevation._sample_dem`` — the seam ruling; cross-tile parity holds
+because preserve_boundary makes neighbouring tiles agree at the line).
 
 The old ``runway_regrade`` only adjusted the two threshold corners
 when seam altitudes were added.  Interior segment-boundary corners
@@ -48,7 +49,7 @@ taxiways) anchor to the runway-emitted altitudes via shared corners
 exactly as before.
 
 Cross-tile parity: deterministic from layout geometry + the seam
-DEM samples (which preserve_boundary keeps identical between
+SMOOTHED-DEM samples (which preserve_boundary keeps identical between
 neighbouring tiles).  Both tile builds compute the same augmented
 sample list and run the same iterative passes, so they converge to
 the same profile values at every vertex.
@@ -268,9 +269,15 @@ def _find_centerline_boundary_crossings(
     actually has where its centerline meets the contour line in the
     real world.
 
-    Cross-tile parity: deterministic from CIFP centerline geometry
-    plus the boundary HGT pixel, both of which preserve_boundary
-    keeps identical between neighbouring tile builds.
+    Cross-tile parity: deterministic from CIFP centerline geometry plus
+    the SMOOTHED DEM at the boundary line (``preserve_boundary`` blends
+    the smoothing toward the shared edge row, so neighbouring tile
+    builds interpolate the same values there).
+
+    USER RULING (2026-06-28, re-affirmed 2026-07-06): seam values sample
+    the SMOOTHED DEM through the same interpolating sampler the rest of
+    the build uses (``elevation._sample_dem`` → ``dem.alt``) — never
+    ``dem.alt_strict`` (nearest-pixel; nodata exactly ON the tile edge).
     """
     if dem is None:
         return []
@@ -281,14 +288,14 @@ def _find_centerline_boundary_crossings(
     crossings: List[Tuple[float, float]] = []
 
     def _sample(lat_c: float, lon_c: float):
+        from .elevation import _sample_dem
         try:
-            v = float(dem.alt_strict(
-                (lon_c - tile_lon, lat_c - tile_lat)))
+            v = _sample_dem(dem, tile_lat, tile_lon, lat_c, lon_c)
         except _GEOM_EXC:
             return None
-        if v != v or v == nodata:
+        if v is None or v != v or v == nodata:
             return None
-        return v
+        return float(v)
 
     # Integer LATITUDE lines crossed by the centerline (constant-lat).
     if abs(lat_b - lat_a) > 1e-12:
@@ -371,15 +378,17 @@ def _find_edge_boundary_crossings(
         return []
     nodata = getattr(dem, "nodata", -32768)
 
+    # SMOOTHED-DEM sampler per the seam ruling (2026-06-28 / 2026-07-06)
+    # — see _find_centerline_boundary_crossings.
     def _sample(lat_c: float, lon_c: float):
+        from .elevation import _sample_dem
         try:
-            v = float(dem.alt_strict(
-                (lon_c - tile_lon, lat_c - tile_lat)))
+            v = _sample_dem(dem, tile_lat, tile_lon, lat_c, lon_c)
         except _GEOM_EXC:
             return None
-        if v != v or v == nodata:
+        if v is None or v != v or v == nodata:
             return None
-        return v
+        return float(v)
 
     # Integer lat/lon lines in LOCAL METERS across the runway bbox.
     lines = []
@@ -498,7 +507,7 @@ def redistribute_runway_profile(
         # Anchor at the runway EDGE crossings of each boundary line
         # (two DEM samples per crossing — the runway's VISIBLE terrain
         # contacts at the seam strip; user 2026-07-04, SPLP west edge:
-        # the tile line renders at raw HGT via Ortho4XP preserve_boundary,
+        # the tile line renders from the smoothed DEM (preserve_boundary),
         # and the profile sat 2.5 m UNDER it — a terrain hump across the
         # runway).  Only crossings where the terrain line pokes ABOVE the
         # current profile anchor (the hump class): anchoring the ravine
