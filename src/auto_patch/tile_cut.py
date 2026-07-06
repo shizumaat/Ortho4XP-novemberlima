@@ -1051,10 +1051,22 @@ def _clip_sloping_rect_piece(
 
     clean_s = copy.copy(orig)
     clean_s.polygon = clean_poly
-    clean_s.altitude_high = round(alt_hi, 2)
-    clean_s.altitude_low = round(alt_lo, 2)
-    clean_s.altitude = None
-    clean_s.node_altitudes = None
+    if orig.role == ROLE_RUNWAY:
+        # Runways are per-vertex from birth (user 2026-07-06); the
+        # clean ring is built in the canonical [H, L, L, H] corner
+        # order (see the _rect_from_axis_extended note below), so the
+        # values map directly.
+        _corner_values = [round(alt_hi, 2), round(alt_lo, 2),
+                          round(alt_lo, 2), round(alt_hi, 2)]
+        clean_s.node_altitudes = _corner_values + [_corner_values[0]]
+        clean_s.altitude_high = None
+        clean_s.altitude_low = None
+        clean_s.altitude = None
+    else:
+        clean_s.altitude_high = round(alt_hi, 2)
+        clean_s.altitude_low = round(alt_lo, 2)
+        clean_s.altitude = None
+        clean_s.node_altitudes = None
     out: list[BuiltShape] = [clean_s]
 
     # Filler = the slice-side remainder of the kept piece — the wedge

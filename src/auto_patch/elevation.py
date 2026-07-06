@@ -705,10 +705,15 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
             shape = BuiltShape(
                 polygon=poly, role=ROLE_RUNWAY, ref=seg_ref)
             if abs(eh - el) >= 0.1:
-                shape.altitude_high = round(eh, 1)
-                shape.altitude_low = round(el, 1)
+                # Per-vertex from BIRTH (user 2026-07-06): runways
+                # never carry the positional [H, L, L, H] hi/lo form —
+                # the corner order above is [HIGH, LOW, LOW, HIGH] by
+                # construction, so the values map directly.
+                corner_values = [round(eh, 2), round(el, 2),
+                                 round(el, 2), round(eh, 2)]
+                shape.node_altitudes = corner_values + [corner_values[0]]
             else:
-                shape.altitude = round((eh + el) / 2.0, 1)
+                shape.altitude = round((eh + el) / 2.0, 2)
             layout.shapes.append(shape)
             new_runway_polys.append(poly)
 

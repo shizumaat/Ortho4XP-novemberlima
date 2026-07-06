@@ -965,6 +965,14 @@ class PavementLayout:
                     tags["altitude"] = f"{float(shape_altitude):.2f}"
                 elif (n_open == 4
                         and s.role in _RECT_PLANAR_ROLES
+                        # RUNWAY family always emits PER-NODE altitudes
+                        # (user 2026-07-06, superseding the 2026-05-23
+                        # keep-rects preference for runways): per-node
+                        # values are exact and human-editable in the
+                        # OSM, and a planar quad renders identically
+                        # with or without the hi/lo cell subdivision.
+                        and s.role not in (ROLE_RUNWAY,
+                                           ROLE_RUNWAY_CROSSING)
                         and abs(open_alts[0] - open_alts[3])
                                 <= _RECT_COLLAPSE_TOL_M
                         and abs(open_alts[1] - open_alts[2])
@@ -998,8 +1006,11 @@ class PavementLayout:
                 elif all_max - all_min <= _CANON_EQ_TOL:
                     tags["altitude"] = (
                         f"{sum(open_alts) / n_open:.2f}")
-                # Then 4-corner [H, L, L, H] sloping rect.
+                # Then 4-corner [H, L, L, H] sloping rect (never for
+                # the runway family — per-node by the 2026-07-06 ruling).
                 elif (n_open == 4
+                      and s.role not in (ROLE_RUNWAY,
+                                         ROLE_RUNWAY_CROSSING)
                       and abs(open_alts[0] - open_alts[3])
                               <= _CANON_EQ_TOL
                       and abs(open_alts[1] - open_alts[2])

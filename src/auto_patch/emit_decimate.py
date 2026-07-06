@@ -85,11 +85,16 @@ def normalize_runway_altitudes(layout, icao: str = "") -> int:
         shape.altitude_low = None
         n_converted += 1
     if n_converted:
+        # INVARIANT ALARM (user 2026-07-06): runways are per-vertex
+        # from CREATION — this sweep converting anything means a
+        # creator regressed to the retired hi/lo form.  Fix the
+        # creator; this pass only contains the damage.
         try:
             import O4_UI_Utils as UI
-            UI.vprint(1, f"  [pav-builder] {icao}: normalized "
-                         f"{n_converted} runway rect(s) to per-vertex "
-                         f"altitudes.")
+            UI.vprint(1, f"  [pav-builder] WARN: {icao}: "
+                         f"{n_converted} runway shape(s) were CREATED "
+                         f"in the retired hi/lo rect form (converted "
+                         f"to per-vertex here) — fix the creator.")
         except Exception:
             pass
     return n_converted
