@@ -821,6 +821,35 @@ def _grade_context_from_osm(ways, nodes, ll_to_m, taxi_axes, seam_nids,
                 best = c
         return best if best is not None else TAXI_MAX_GRADE
 
+    # Taxi-ROUTE pavement zone (O4_APRON_ROUTE_CONTACT), mirroring
+    # ``grade_graph.build_context``: an apron ring edge welded to a taxi-route
+    # pavement is a contact ramp and earns the taxi cap in its climbing
+    # direction.  This reader previously never built the zone, so it refused
+    # contact budgets the solver lawfully granted (SPJC apron #188:
+    # ring-adjacent 1.46 % flagged against the 1.17 % blend while the solver
+    # graded the contact at 1.5 %).
+    route_zone = None
+    if GG.APRON_ROUTE_CONTACT:
+        try:
+            from shapely.geometry import Polygon as _RzPoly
+            from shapely.ops import unary_union as _rz_union
+            from shapely.prepared import prep as _rz_prep
+            _route_polys = []
+            for w in ways:
+                if w.tags.get("role") not in (
+                        "junction", "primary_parallel",
+                        "secondary_parallel", "stub", "cross_connector"):
+                    continue
+                ring = [ll_to_m(*nodes[nid]) for nid in w.nids
+                        if nid in nodes]
+                if len(ring) >= 3:
+                    _route_polys.append(_RzPoly(ring).buffer(0))
+            if _route_polys:
+                route_zone = _rz_prep(_rz_union(_route_polys)
+                                      .buffer(GG._ROUTE_CONTACT_TOL_M))
+        except Exception:
+            route_zone = None
+
     return GG.GradeContext(
         centerlines=centerlines,
         routes=routes,
@@ -828,6 +857,7 @@ def _grade_context_from_osm(ways, nodes, ll_to_m, taxi_axes, seam_nids,
         inherited_junction_cap=_inherited,
         building_keys=frozenset(bld_keys),
         road_zone=road_zone,
+        route_zone=route_zone,
         # EXACT-MESH sidecar: the solver's junction mesh, consumed 1:1
         # (emit-time ring repairs otherwise make this reader's Delaunay
         # differ from the one the solver graded to).

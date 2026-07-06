@@ -1568,6 +1568,29 @@ def _emit_portal_cluster(
             scaled = off * verts_scale[idx]
             return (px + nx * scaled, py + ny * scaled)
 
+        # Station elevations lerp over EFFECTIVE cumulative length: each
+        # segment weighs min(centerline, both road-edge lengths).  On a
+        # bend the miter join shortens the INNER quad edge below the
+        # centerline arc, so a centerline-proportional Δe read as an
+        # over-cap grade along that edge (SPJC 2026-07-06: 0.70 m over a
+        # 15.25 m inner edge on a ~20 m segment = 4.59 % vs the 4 % ramp
+        # law).  Weighting by the shortest edge caps every quad-edge
+        # grade at ~total_de/Σeffective, which the walk sizing keeps at
+        # the plan grade (the safety margin absorbs the tiny Σ shrink).
+        effective_cums = [0.0]
+        for i in range(n_c - 1):
+            seg_len = c_cums[i + 1] - c_cums[i]
+            edge_plus = math.dist(_vertex_offset(i, +chain_half),
+                                  _vertex_offset(i + 1, +chain_half))
+            edge_minus = math.dist(_vertex_offset(i, -chain_half),
+                                   _vertex_offset(i + 1, -chain_half))
+            effective_cums.append(
+                effective_cums[-1]
+                + min(seg_len, edge_plus, edge_minus))
+        effective_total = effective_cums[-1]
+        if effective_total < 1.0:
+            return
+
         for i in range(n_c - 1):
             p_a = chain_pts[i]
             p_b = chain_pts[i + 1]
@@ -1576,8 +1599,8 @@ def _emit_portal_cluster(
             seg_len = d_b - d_a
             if seg_len < 0.5:
                 continue
-            frac_a = d_a / c_total
-            frac_b = d_b / c_total
+            frac_a = effective_cums[i] / effective_total
+            frac_b = effective_cums[i + 1] / effective_total
             e_a = (1 - frac_a) * e_lo_c + frac_a * e_hi_c
             e_b = (1 - frac_b) * e_lo_c + frac_b * e_hi_c
             # Legacy per-segment flat walls (gate OFF only — byte-
@@ -1681,15 +1704,15 @@ def _emit_portal_cluster(
                             polygon=rp,
                             role=ROLE_TUNNEL_RAMP,
                             ref="tunnel_ramp",
-                            altitude_high=round(eh, 1),
-                            altitude_low=round(el, 1)))
+                            altitude_high=round(eh, 2),
+                            altitude_low=round(el, 2)))
                     else:
                         layout.shapes.append(BuiltShape(
                             polygon=rp,
                             role=ROLE_TUNNEL_RAMP,
                             ref="tunnel_ramp",
                             altitude=round(
-                                0.5 * (eh + el), 1)))
+                                0.5 * (eh + el), 2)))
                     exclusion_zones.append(rp)
             except _GEOM_EXC:
                 pass
@@ -4113,14 +4136,32 @@ def _emit_through_airport_depressed_roads(
                 scaled = off * verts_scale[idx]
                 return (px + nx * scaled, py + ny * scaled)
 
+            # Same EFFECTIVE-length lerp as ``_emit_chain``: the miter
+            # join shortens the inner quad edge on bends, so a
+            # centerline-proportional Δe reads over the ramp cap along
+            # that edge.
+            effective_cums = [0.0]
+            for i in range(n_w - 1):
+                seg_len = cum_dists[i + 1] - cum_dists[i]
+                edge_plus = math.dist(_vertex_offset(i, +half_w),
+                                      _vertex_offset(i + 1, +half_w))
+                edge_minus = math.dist(_vertex_offset(i, -half_w),
+                                       _vertex_offset(i + 1, -half_w))
+                effective_cums.append(
+                    effective_cums[-1]
+                    + min(seg_len, edge_plus, edge_minus))
+            effective_total = effective_cums[-1]
+            if effective_total < 1.0:
+                continue
+
             for i in range(n_w - 1):
                 d_a = cum_dists[i]
                 d_b = cum_dists[i + 1]
                 seg_len = d_b - d_a
                 if seg_len < 0.5:
                     continue
-                frac_a = d_a / total_walk if total_walk > 0 else 0.0
-                frac_b = d_b / total_walk if total_walk > 0 else 0.0
+                frac_a = effective_cums[i] / effective_total
+                frac_b = effective_cums[i + 1] / effective_total
                 e_a = (1 - frac_a) * elev_low + frac_a * elev_high
                 e_b = (1 - frac_b) * elev_low + frac_b * elev_high
                 ra = _vertex_offset(i, +half_w)
@@ -4149,14 +4190,14 @@ def _emit_through_airport_depressed_roads(
                         polygon=rp,
                         role=ROLE_TUNNEL_RAMP,
                         ref="depressed_approach",
-                        altitude_high=round(eh, 1),
-                        altitude_low=round(el, 1)))
+                        altitude_high=round(eh, 2),
+                        altitude_low=round(el, 2)))
                 else:
                     layout.shapes.append(BuiltShape(
                         polygon=rp,
                         role=ROLE_TUNNEL_RAMP,
                         ref="depressed_approach",
-                        altitude=round(0.5 * (eh + el), 1)))
+                        altitude=round(0.5 * (eh + el), 2)))
                 exclusion_zones.append(rp)
 
     # ── Boundary coordination ─────────────────────────────────
