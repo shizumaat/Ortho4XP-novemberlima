@@ -72,7 +72,8 @@ from .pavement.runway_segments import (
 from .runway_regrade import regrade_runway, DEFAULT_ARC_K_M
 
 
-__all__ = ["redistribute_runway_profile"]
+__all__ = ["redistribute_runway_profile", "apply_runway_flex",
+           "flex_slack_at"]
 
 
 def _bucket_key(x: float, y: float) -> Tuple[int, int]:
@@ -597,61 +598,191 @@ def redistribute_runway_profile(
             'half_width_m': half_width,
             'fractions': list(fractions),
             'elevs': list(elevs),
+            # anchor provenance for the RUNWAY FLEX pass
+            # (docs/runway_flex_plan.md): the flex must respect the
+            # CERTAIN anchors (thresholds + seams) while treating the
+            # rest as negotiable.
+            'anchored': list(anchored),
+            'seam_t': [t for (t, _e) in seam_samples],
+            'blast_a_m': state['blast_a_m'],
+            'blast_b_m': state['blast_b_m'],
         }
 
         # Evaluate the new profile at every runway sub-rect's vertex.
-        for s in shapes:
-            ring = list(s.polygon.exterior.coords)
-            ring_closed = bool(ring) and ring[0] == ring[-1]
-            ring_open = ring[:-1] if ring_closed else ring
-            if len(ring_open) < 3:
-                continue
-            new_alts: List[float] = []
-            for x, y in ring_open:
-                vx = x - ax_a_x
-                vy = y - ax_a_y
-                t = (vx * ax_dx + vy * ax_dy) / ax_len2
-                e_new = _interp_profile(fractions, elevs, t)
-                new_alts.append(round(e_new, 2))
-
-            # Detect whether the new altitudes still form a canonical
-            # ``[H, L, L, H]`` 4-corner sloped rect.  If so AND the
-            # shape was originally that form, preserve it (keeps the
-            # ``sloping_rect_canonical_form`` invariants happy and
-            # avoids unnecessary node_altitudes conversions when
-            # nothing actually moved).
-            keep_canonical = False
-            if (len(ring_open) == 4
-                    and s.altitude_high is not None
-                    and s.altitude_low is not None
-                    and not s.node_altitudes):
-                if (abs(new_alts[0] - new_alts[3]) < 0.05
-                        and abs(new_alts[1] - new_alts[2]) < 0.05):
-                    new_hi, new_lo = high_low_from_corner_alts(new_alts)
-                    # Ensure ``hi`` is actually the higher pair (preserve
-                    # the canonical convention).
-                    if new_hi < new_lo:
-                        new_hi, new_lo = new_lo, new_hi
-                    if (abs(new_hi - s.altitude_high) < 0.05
-                            and abs(new_lo - s.altitude_low) < 0.05):
-                        # No-op: emit-time values already match.
-                        continue
-                    s.altitude_high = round(new_hi, 2)
-                    s.altitude_low = round(new_lo, 2)
-                    keep_canonical = True
-                    n_touched += 1
-            if keep_canonical:
-                continue
-
-            # Non-canonical (any moved corner or already
-            # node_altitudes): write per-vertex.
-            closed_alts = new_alts + ([new_alts[0]]
-                                       if ring_closed else [])
-            s.node_altitudes = closed_alts
-            s.altitude = None
-            s.altitude_high = None
-            s.altitude_low = None
-            n_touched += 1
+        n_touched += _apply_profile_to_shapes(
+            shapes, ax_a_x, ax_a_y, ax_dx, ax_dy, ax_len2,
+            fractions, elevs)
 
     return n_touched
+
+
+def _apply_profile_to_shapes(shapes, ax_a_x, ax_a_y, ax_dx, ax_dy,
+                             ax_len2, fractions, elevs) -> int:
+    """Evaluate ``(fractions, elevs)`` at every runway sub-rect vertex
+    (projected onto the axis) and write the altitudes back — shared by
+    the seam redistribute and the RUNWAY FLEX pass."""
+    n_touched = 0
+    for s in shapes:
+        ring = list(s.polygon.exterior.coords)
+        ring_closed = bool(ring) and ring[0] == ring[-1]
+        ring_open = ring[:-1] if ring_closed else ring
+        if len(ring_open) < 3:
+            continue
+        new_alts: List[float] = []
+        for x, y in ring_open:
+            vx = x - ax_a_x
+            vy = y - ax_a_y
+            t = (vx * ax_dx + vy * ax_dy) / ax_len2
+            e_new = _interp_profile(fractions, elevs, t)
+            new_alts.append(round(e_new, 2))
+
+        # Detect whether the new altitudes still form a canonical
+        # ``[H, L, L, H]`` 4-corner sloped rect.  If so AND the
+        # shape was originally that form, preserve it (keeps the
+        # ``sloping_rect_canonical_form`` invariants happy and
+        # avoids unnecessary node_altitudes conversions when
+        # nothing actually moved).
+        keep_canonical = False
+        if (len(ring_open) == 4
+                and s.altitude_high is not None
+                and s.altitude_low is not None
+                and not s.node_altitudes):
+            if (abs(new_alts[0] - new_alts[3]) < 0.05
+                    and abs(new_alts[1] - new_alts[2]) < 0.05):
+                new_hi, new_lo = high_low_from_corner_alts(new_alts)
+                # Ensure ``hi`` is actually the higher pair (preserve
+                # the canonical convention).
+                if new_hi < new_lo:
+                    new_hi, new_lo = new_lo, new_hi
+                if (abs(new_hi - s.altitude_high) < 0.05
+                        and abs(new_lo - s.altitude_low) < 0.05):
+                    # No-op: emit-time values already match.
+                    continue
+                s.altitude_high = round(new_hi, 2)
+                s.altitude_low = round(new_lo, 2)
+                keep_canonical = True
+                n_touched += 1
+        if keep_canonical:
+            continue
+
+        # Non-canonical (any moved corner or already
+        # node_altitudes): write per-vertex.
+        closed_alts = new_alts + ([new_alts[0]]
+                                   if ring_closed else [])
+        s.node_altitudes = closed_alts
+        s.altitude = None
+        s.altitude_high = None
+        s.altitude_low = None
+        n_touched += 1
+
+    return n_touched
+
+
+def flex_slack_at(profile: dict, t: float, direction: float) -> float:
+    """How far the profile value at fraction ``t`` may move in
+    ``direction`` (+1 up / −1 down) before violating the grade-cap
+    envelope of a CERTAIN anchor (threshold ends + tile-seam samples —
+    docs/runway_flex_plan.md; intermediate anchors are negotiable by
+    the user ruling and impose no slack limit here).
+
+    Conservative pairwise-envelope bound: for every certain anchor i,
+    the flexed value v must satisfy ``|v − e_i| ≤ cap·|s_t − s_i|``.
+    The K-factor is enforced afterwards by ``faa_joint_solve``'s gates
+    on the free samples; the longitudinal-grade validator is the
+    backstop."""
+    fractions = profile['fractions']
+    elevs = profile['elevs']
+    anchored = profile.get('anchored') or [False] * len(fractions)
+    seam_t = set(profile.get('seam_t') or ())
+    axis_len = math.sqrt(profile['axis_len2'])
+    current = _interp_profile(fractions, elevs, t)
+
+    # certain anchors: FIRST/LAST anchored samples (threshold ends,
+    # incl. displaced positions when they are the extremes) + seams.
+    anchored_positions = [k for k, a in enumerate(anchored) if a]
+    certain: List[int] = []
+    if anchored_positions:
+        certain.append(anchored_positions[0])
+        certain.append(anchored_positions[-1])
+    for k, frac in enumerate(fractions):
+        if any(abs(frac - st) < 1e-6 for st in seam_t):
+            certain.append(k)
+
+    slack = float("inf")
+    for k in set(certain):
+        distance = abs(t - fractions[k]) * axis_len
+        budget = MAX_RUNWAY_GRADE * distance
+        current_diff = (current - elevs[k]) * direction
+        slack = min(slack, budget - current_diff)
+    return max(0.0, slack if slack != float("inf") else 0.0)
+
+
+def apply_runway_flex(layout, demands: Dict[str, list]) -> Dict[str, list]:
+    """RUNWAY FLEX Stage B (docs/runway_flex_plan.md): move each runway's
+    profile at the given contact positions by the requested amounts,
+    re-run the FAA gates, and write the flexed profile back to the
+    runway shapes + the persisted profile registry.
+
+    ``demands``: ``{ref: [(t_contact, flexed_value), …]}`` — the caller
+    (the solve's flex hook) has already clamped each value into the
+    certain-anchor envelope via :func:`flex_slack_at`.  The contact
+    samples are inserted ANCHORED so the surrounding free samples
+    re-smooth around them under the same grade/K gates the seam
+    redistribute uses.  Returns ``{ref: [(t, achieved_value), …]}``.
+    """
+    from .layout import ROLE_RUNWAY
+    profiles = getattr(layout, "_runway_redistributed_profiles", None)
+    if not profiles:
+        return {}
+    shapes_by_ref: Dict[str, list] = defaultdict(list)
+    for s in layout.shapes:
+        if (s.role == ROLE_RUNWAY and s.polygon is not None
+                and not s.polygon.is_empty and s.ref):
+            shapes_by_ref[s.ref].append(s)
+
+    achieved: Dict[str, list] = {}
+    for ref, contact_list in demands.items():
+        profile = profiles.get(ref)
+        shapes = shapes_by_ref.get(ref)
+        if profile is None or not shapes or not contact_list:
+            continue
+        fractions = list(profile['fractions'])
+        elevs = list(profile['elevs'])
+        anchored = list(profile.get('anchored')
+                        or [False] * len(fractions))
+        axis_len = math.sqrt(profile['axis_len2'])
+        _insert_flex = [(t, v) for (t, v) in contact_list
+                        if 0.0 < t < 1.0]
+        for t, v in sorted(_insert_flex):
+            placed = False
+            for k, frac in enumerate(fractions):
+                if abs(frac - t) < 1e-3:
+                    elevs[k] = v
+                    anchored[k] = True
+                    placed = True
+                    break
+            if not placed:
+                insert_at = next((k for k, frac in enumerate(fractions)
+                                  if frac > t), len(fractions))
+                fractions.insert(insert_at, t)
+                elevs.insert(insert_at, v)
+                anchored.insert(insert_at, True)
+        faa_joint_solve(
+            fractions, elevs, anchored, axis_len,
+            blast_a=float(profile.get('blast_a_m') or 0.0),
+            blast_b=float(profile.get('blast_b_m') or 0.0),
+            grade_cap=MAX_RUNWAY_GRADE,
+            end_grade_cap=RUNWAY_END_GRADE,
+            max_dg_per_m=MAX_RUNWAY_GRADE_CHANGE_PER_M)
+        profile['fractions'] = list(fractions)
+        profile['elevs'] = list(elevs)
+        profile['anchored'] = list(anchored)
+        ax_a_x, ax_a_y = profile['axis_a']
+        ax_dx, ax_dy = profile['axis_d']
+        _apply_profile_to_shapes(
+            shapes, ax_a_x, ax_a_y, ax_dx, ax_dy,
+            profile['axis_len2'], fractions, elevs)
+        achieved[ref] = [(t, _interp_profile(fractions, elevs, t))
+                         for (t, _v) in contact_list]
+    return achieved
 

@@ -72,7 +72,23 @@ per-contact deficit (current profile value vs interval).  Measured at
 HECA this maps which pockets a flex can drain and by how much; it also
 quantifies the SPLP displaced-threshold case.
 
-**Stage B — two-pass profile flex.**
+**Stage B v1 MEASURED (2026-07-06, gate `O4_RUNWAY_FLEX` default
+OFF)**: contact-pair flexing implemented (hook in
+`solve_route_profile` + `runway_redistribute.apply_runway_flex` /
+`flex_slack_at`).  At HECA it drains the full 8.50 m contact deficit
+(2 pairs, 4 contacts, 05C/23C + 05L/23R) — but the quarantine only
+moves 11,265 → 10,838 and 7 small new actionable residuals appear.
+FINDING: the pocket contradictions press against the WHOLE profile
+(every runway node is a hard envelope anchor), not just the taxi-join
+contacts.  **Stage B2**: demands must be ENVELOPE-LEVEL along the full
+profile — for each runway profile sample, the [floor, ceil] the rest
+of the field's certain anchors impose through the max-cap graph; the
+profile then re-solves against those interval targets (still through
+`faa_joint_solve`, certain anchors hard).  Equivalently: runway
+interior nodes become interval-constrained members of the field solve
+with runway-law edges along the axis.
+
+**Stage B (original sketch) — two-pass profile flex.**
 1. Field pre-solve (current pipeline) → contact demand intervals.
 2. Per runway (or crossing-coupled runway GROUP): re-run
    `faa_joint_solve` with contact demands folded in as SOFT targets
