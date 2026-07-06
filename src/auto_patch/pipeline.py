@@ -5187,7 +5187,14 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # values for the geometry X-Plane actually renders (SPJC 18-pair
     # 1.5-1.8 % junction class).  Gate O4_EMIT_DECIMATE.
     if compute_elevations:
-        from .emit_decimate import decimate_emit_nodes
+        from .emit_decimate import decimate_emit_nodes, repair_sliver_corners
+        # Sliver-needle repair BEFORE decimation + the final projection
+        # (user 2026-07-06): the emit-time repair removed needle vertices
+        # AFTER the last law projection, merging two enforced ring edges
+        # into one nobody enforced (SPJC apron 77 m blend pair).  The
+        # emit-time scan remains as the backstop for quantization-born
+        # needles.
+        repair_sliver_corners(layout, icao)
         decimate_emit_nodes(layout, icao)
 
     # FINAL GRADE PROJECTION (round 4, user 2026-07-03): the passes above

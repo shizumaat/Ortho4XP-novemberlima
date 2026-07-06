@@ -925,19 +925,51 @@ def final_grade_projection(layout, icao: str = "", dem=None,
     # nodes welded to already-emitted FEATURE shapes (ribbon/bridge/
     # clearance/groundside copied pavement values BEFORE this pass — moving
     # the pavement side now would tear those welds open).
-    feat_keys: set = set()
+    #
+    # AGREEMENT GATE (user 2026-07-06, HECA service-road cliffs): a weld is
+    # only a weld when the two sides AGREE — the feature adopted the
+    # pavement's value.  A coincident vertex whose values already DISAGREE
+    # is a torn weld or a mere contact (HECA: road nodes the solve's
+    # envelope had lifted 3.4 m above their ring sat mm-coincident with
+    # raw-DEM groundside verts 5 m below; hardening froze the damage and
+    # the projection reported the resulting walls as 16 "genuine" both-hard
+    # edges).  Freezing preserves nothing there — leave the pavement node
+    # FREE so the projection solves it lawfully.  A feature vertex whose
+    # altitude cannot be derived keeps the conservative hardening.
+    feat_alt_by_key: dict = {}
     for s in layout.shapes:
         if (s.role in PAVEMENT_ROLES or s.polygon is None
                 or s.polygon.is_empty):
             continue
         try:
-            for (x, y) in s.polygon.exterior.coords:
-                feat_keys.add((round(x, 3), round(y, 3)))
+            ring = list(s.polygon.exterior.coords)
+            per_vertex = None
+            if s.node_altitudes and len(s.node_altitudes) >= len(ring) - 1:
+                per_vertex = [float(a) for a in
+                              s.node_altitudes[:len(ring)]]
+            elif s.altitude is not None:
+                per_vertex = [float(s.altitude)] * len(ring)
+            for k, (x, y) in enumerate(ring):
+                key = (round(x, 3), round(y, 3))
+                value = (per_vertex[k] if per_vertex is not None
+                         and k < len(per_vertex) else None)
+                if key in feat_alt_by_key and feat_alt_by_key[key] is None:
+                    continue          # an unverifiable weld stays hard
+                if value is None:
+                    feat_alt_by_key[key] = None
+                elif key not in feat_alt_by_key:
+                    feat_alt_by_key[key] = value
         except Exception:
             continue
-    if feat_keys:
+    _WELD_AGREE_TOL_M = 0.05
+    if feat_alt_by_key:
         for i, (x, y) in enumerate(nodes):
-            if (round(x, 3), round(y, 3)) in feat_keys:
+            feature_value = feat_alt_by_key.get((round(x, 3), round(y, 3)),
+                                                "absent")
+            if feature_value == "absent":
+                continue
+            if (feature_value is None
+                    or abs(feature_value - elev[i]) <= _WELD_AGREE_TOL_M):
                 hard.add(i)
 
     # building pads: rigid movable FLAT groups (same model as the yield).
