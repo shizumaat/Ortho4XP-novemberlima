@@ -362,11 +362,11 @@ def regrade_runways_in_layout(
             grade_cap=grade_cap, arc_K_m=arc_K_m)
         # Write back: thresholds at axial ends, seam vertices at DEM.
         for i in A_idxs:
-            alts[i] = round(result.threshold_A, 1)
+            alts[i] = round(result.threshold_A, 2)
         for i in B_idxs:
-            alts[i] = round(result.threshold_B, 1)
+            alts[i] = round(result.threshold_B, 2)
         for i, dem_alt in seam_dem_alts:
-            alts[i] = round(dem_alt, 1)
+            alts[i] = round(dem_alt, 2)
         s.node_altitudes = alts + [alts[0]]  # close ring
         n_regraded += 1
         if result.warnings:

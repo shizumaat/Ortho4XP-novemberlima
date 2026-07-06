@@ -567,10 +567,25 @@ def redistribute_runway_profile(
         if profiles is None:
             profiles = {}
             layout._runway_redistributed_profiles = profiles
+        # Half-width for the clamp floor's cross-section distance
+        # (``seam_anchors.runway_clamp_floor``): max lateral offset of any
+        # runway ring vertex from the axis.  Computed BEFORE the tile cut
+        # from the whole-runway sub-rects, so both tile builds persist the
+        # same value (cross-tile determinism).
+        axis_len = math.sqrt(ax_len2)
+        unit_x, unit_y = ax_dx / axis_len, ax_dy / axis_len
+        half_width = 0.0
+        for s in shapes:
+            for (vx, vy) in s.polygon.exterior.coords:
+                lateral = abs(-(vx - ax_a_x) * unit_y
+                              + (vy - ax_a_y) * unit_x)
+                if lateral > half_width:
+                    half_width = lateral
         profiles[ref] = {
             'axis_a': (ax_a_x, ax_a_y),
             'axis_d': (ax_dx, ax_dy),
             'axis_len2': ax_len2,
+            'half_width_m': half_width,
             'fractions': list(fractions),
             'elevs': list(elevs),
         }
@@ -588,7 +603,7 @@ def redistribute_runway_profile(
                 vy = y - ax_a_y
                 t = (vx * ax_dx + vy * ax_dy) / ax_len2
                 e_new = _interp_profile(fractions, elevs, t)
-                new_alts.append(round(e_new, 1))
+                new_alts.append(round(e_new, 2))
 
             # Detect whether the new altitudes still form a canonical
             # ``[H, L, L, H]`` 4-corner sloped rect.  If so AND the
@@ -612,8 +627,8 @@ def redistribute_runway_profile(
                             and abs(new_lo - s.altitude_low) < 0.05):
                         # No-op: emit-time values already match.
                         continue
-                    s.altitude_high = round(new_hi, 1)
-                    s.altitude_low = round(new_lo, 1)
+                    s.altitude_high = round(new_hi, 2)
+                    s.altitude_low = round(new_lo, 2)
                     keep_canonical = True
                     n_touched += 1
             if keep_canonical:

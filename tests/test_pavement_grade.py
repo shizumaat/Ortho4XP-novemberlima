@@ -143,8 +143,13 @@ def test_pavement_grade(tmp_path, icao):
         # tile-seam PIN vertices — so this test measures through the SAME
         # frame as the standalone CLI and cannot drift from the solver's law
         # reading.  NEVER re-derive centerlines from the OSM.
-        from auto_patch.verification import taxi_axes_exact_ll
+        from auto_patch.verification import (taxi_axes_exact_ll,
+                                             junction_mesh_edges_ll)
         axes_exact, routes_exact = taxi_axes_exact_ll(layout)
+        # EXACT-MESH sidecar mirror: the solver's junction mesh, consumed
+        # 1:1 (emit-time ring repairs otherwise make the validator's
+        # Delaunay differ from the solver's — the cm-noise junction class).
+        mesh_edges_ll = junction_mesh_edges_ll(layout) or None
         # Same 4-tuple shape check_grade's sidecar loader passes to
         # run_checks: (latlon_pts, seg_caps, None, route_ordinal).
         taxi_axes_ll = [(pts, caps, None, ridx)
@@ -152,6 +157,15 @@ def test_pavement_grade(tmp_path, icao):
         seam_pins_ll = [[round(la, 7), round(lo, 7)]
                         for (la, lo) in
                         (getattr(layout, "_seam_pin_ll", None) or [])]
+        # BREAK-REGION quarantine, exactly like the CLI (user 2026-07-05,
+        # e2031ff): pairs touching a solver-declared broken node are the
+        # pocket's designed over-cap blend — reported separately by
+        # run_checks and excluded from the ACTIONABLE within count this
+        # test gates.  Passing the export (even empty) keeps the split
+        # semantics identical to the sidecar path.
+        break_nodes_ll = [[round(la, 7), round(lo, 7)]
+                          for (la, lo) in
+                          (getattr(layout, "_break_node_ll", None) or [])]
 
         w, c, s = check_grade.run_checks(
             out,
@@ -165,6 +179,8 @@ def test_pavement_grade(tmp_path, icao):
             anchor=(tuple(layout.anchor)
                     if layout.anchor is not None else None),
             seam_pins_ll=seam_pins_ll,
+            mesh_edges_ll=mesh_edges_ll,
+            break_nodes_ll=break_nodes_ll,
         )
         within += w
         cross += c

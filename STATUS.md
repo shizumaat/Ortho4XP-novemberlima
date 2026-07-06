@@ -1,3 +1,108 @@
+# STATUS — SESSION 20260705 (part 15c): **SPLP per-tile = 0, CYXY = 0** —
+# runway 0.1 m rounding retired + exact clamp-floor geometry (`d6d4284`);
+# test break-quarantine (`51dcbf4`)
+
+> **USER FLAGGED SPLP-14 AS SUSPECT — CONFIRMED, two real causes**:
+> (1) the runway family still emitted on the LEGACY 0.1 m grid (20 sites:
+> redistribute/regrade/runway_segments/tile_cut/seam_anchors) — ±5 cm per
+> endpoint = the whole 1.55-1.57 % class; all → 0.01 m.  (2)
+> runway_clamp_floor guaranteed pins vs the NEAREST axis point only (L1
+> vs L2 gap → lawful-floored pin 2.17 % from a runway-edge weld, both-
+> hard, unfixable); floor now = max over axis samples of profile(t) −
+> cap·distance(P, cross_section(t)) with half-width credit (persisted
+> per-profile pre-cut, cross-tile deterministic).
+> **SPLP SCOREBOARD NOTE**: measure SPLP PER-TILE (production path) —
+> the whole-airport lab build pins seams through a writer production
+> never uses.  Per-tile: 0 within both tiles.
+> **KDFW quiet re-measure (task 4b)**: 840.5 s at HEAD~ (solve 362.7,
+> final projection 21.1 s @ 22,740 nodes decimation-first), 41
+> actionable + 0 break, apt_mtime 1783220791.  NOT comparable to the
+> old 529 s (many feature commits between); no post-build hang
+> (watchdog clean).
+> **SCOREBOARD at d6d4284 (matching apt_mtimes)**: CYXY **0**+320 ·
+> SPJC 5+0 · SPLP **0** per-tile (2 cross 9 cm hairlines newly EXPOSED
+> by honest rounding; profile 1.61 % pre-existing) · HECA 17+11356 ·
+> KDFW 41+0.  Suite 11F/335P == base11; fast lane 7F.
+> **REMAINING CLASSES**: SPJC 3 tunnel_ramp (curved ramp chord-vs-arc
+> — ramp law anisotropy) + 2 apron small-excess; SPLP profile
+> anchors-as-floors reconciliation (longitudinal 1.61 %) + seam-cut
+> 0.85 m hairline corners; HECA 17 + break-region design review
+> (sampler script in session scratchpad); smoothing-aware lazy
+> certificates (soundness analysis first).
+
+---
+
+# STATUS — SESSION 20260705 (part 15b): **CYXY = 0 ACTIONABLE** — emit
+# decimation moved BEFORE final projection (`8ca25a3`)
+
+> **THE RESIDUAL JUNCTION CLASS WAS DECIMATION-MINTED MESH**: emit
+> decimation ran AFTER final_grade_projection; removing ~7k boundary
+> vertices re-triangulates junction interiors, so the decimated ring's
+> MESH holds chords the projection never enforced (probe: every residual
+> pair present in a fresh joint at the validator's own budget,
+> seed-violated, endpoints free).  The old docstring claim "removed
+> vertices only remove already-satisfied pairs" is FALSE for the mesh.
+> **FIX (`8ca25a3`)**: decimation → final projection (now truly the last
+> word on the rendered geometry); geom_guard stays pre-decimation;
+> final projection's OWN broken pockets now exported to break_nodes
+> (they previously leaked into the actionable count).  BONUS: the
+> projection runs on the decimated node set — SPJC 8243→4207 nodes,
+> 8.5→3.4 s, converges 0 over-cap (KDFW should benefit more — re-measure
+> queued).
+> **SCOREBOARD (matching apt_mtimes)**: CYXY **0**+320 · SPJC 5+0
+> (3 tunnel_ramp over their 4 % cap + 2 apron small-excess) · SPLP
+> 14+36 · HECA 20+11205.  Session start was 28/56/15/104.  Suite
+> 12F/334P == base12 (both commits).
+> **NEXT**: test_pavement_grade should consume break_nodes like the CLI
+> (CYXY test would go green at 0 actionable); SPLP-14 composition; SPJC
+> tunnel_ramp 4.3-4.6 % class; HECA break-region design review at 11 k
+> scale; KDFW quiet re-measure (decimation-first projection win).
+
+---
+
+# STATUS — SESSION 20260705 (part 15): cm-noise class CLOSED — exact-mesh
+# sidecar (`f1392e9`) + LAW-GUARDED post-projection fairing (`665597c`)
+
+> **MESH-DRIFT PREMISE REFUTED, REAL CAUSE FOUND**: the SPJC 43-pair
+> cm-noise class was NOT solver-ring vs emitted-ring Delaunay drift —
+> forensics (scratchpad mesh_pair_forensics.py) showed 43/44 pairs
+> violated at FULL PRECISION in-memory (in-mem de == emitted de).  Root
+> cause: `final_grade_projection`'s `_fair_ring_edges` call runs AFTER
+> the last feasibility projection with nothing re-enforcing the pairs it
+> perturbs; junction MESH chords (crossing between ring runs, invisible
+> to the ring triples) got pushed a median 1.8 cm over.  A/B
+> O4_EDGE_FAIRING=0: SPJC 57→29.
+> **FIX (`665597c`)**: fairing moves clamp into the node's law-edge
+> interval (one_solve._build_adjacency over `joint`, margined budgets);
+> already-outside/infeasible ⇒ never move; never-expanded lazy shapes'
+> nodes anchored.  Solve-time call stays unguarded (projection re-enforces).
+> **EXACT-MESH SIDECAR (`f1392e9`)**: sidecar "mesh_edges" = solver's
+> junction mesh 1:1 (grade_graph.MeshEdgesExact, SHARED_VERTEX_TOL_M
+> match); build byte-identical; honest +1 at SPJC (emitted-ring Delaunay
+> had hidden a real pair).
+> **SCOREBOARD (matching apt_mtimes)**: CYXY 28→14 (+breaks 218→222),
+> SPJC 56→24, SPLP 15→15 (37→40), HECA 104→66 (9527→9555).  Suite
+> 12F/334P == base12.
+> **NEXT — residual SPJC junction class (18)**: 1.54–1.79 % on 28–175 m
+> chords at flat budgets = pairs the projection never saw; suspect emit
+> DECIMATION (7,115 collinear verts removed ±0.02 m) minting long
+> ring-adjacent edges spanning many solver segments.
+> ⚠ MACHINE: /usr/bin/git hits an unaccepted Xcode license (new Xcode);
+> use /Library/Developer/CommandLineTools/usr/bin/git or have the user
+> run `sudo xcodebuild -license accept`.
+
+---
+
+# STATUS — 20260705 ADDENDUM: the "build-concurrency corruption" was a
+# LIVE INPUT — the user's Custom Scenery CYXY apt.dat was being edited
+# between measurement windows (o4_apt_dat_mtime provenance proves it:
+# 3 mtimes = the 251/176/257 count eras exactly).  Builds deterministic
+# given inputs.  PROTOCOL: verify o4_apt_dat_mtime matches across any
+# compared patches (full_build.py prints it now).  Full-width service
+# corridor rule SHIPPED (68e77d9, user ruling): half-strips consolidate
+# pre-solve, conversions span the spine — CYXY 28+218, SPJC 56+0,
+# SPLP 15+37 at apt_mtime 1783275372.
+
 # STATUS — SESSION 20260705 (part 14): tests realigned 21F→12F
 # (`56e19fd`); sparse tessellation verdict (`df15809`); py3.13 + fast
 # lane (`e06498e`); scoped final projection (`370b0ed`)

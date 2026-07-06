@@ -4114,6 +4114,26 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     f"  [pav-builder] {icao}: re-roled road-only junction/apron(s) "
                     f"→ {_n_svc_r} service_road + {_n_svc_j} service_junction (4 %).")
 
+        # ── FULL-WIDTH SERVICE CORRIDOR consolidation, pass 1 ────────
+        # (user 2026-07-05 full-width corridor): a service road is ONE
+        # corridor — the truck-route spine has pavement on BOTH sides
+        # and the two half-strips are the same surface.  The slice cut
+        # each road in half along its own spine and the carve/re-role
+        # passes left along-route fragment chains; merge them into
+        # full-width corridor pieces NOW, before the road-lot /
+        # runway-disconnection classifiers below, so any conversion of
+        # road pavement to groundside decides over the full-width slab
+        # (whole-shape membership on a full-width shape), never a
+        # half-strip notch.  Gate O4_FULL_WIDTH_SERVICE_CORRIDOR.
+        from .groundside import consolidate_full_width_service_corridors
+        _n_fw = consolidate_full_width_service_corridors(layout)
+        if _n_fw:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: consolidated service-corridor "
+                f"fragments into full-width corridor(s) "
+                f"(−{_n_fw} shape(s)).")
+            _covp(layout, "post-full-width-corridor-1")
+
         # A wide paved LOT reachable only via a service road is landside —
         # ONE groundside surface, not a road carved through it.  The
         # on-pavement 1206 carve shreds such a lot into a service_road rect
@@ -4788,6 +4808,22 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     f"  [pav-builder] {icao}: merged {_n_gsm} touching "
                     f"groundside piece(s) (pre-solve).")
 
+        # ── FULL-WIDTH SERVICE CORRIDOR consolidation, pass 2 ────────
+        # (user 2026-07-05 full-width corridor): the groundside
+        # route-corridor conversion, groundside-connector re-role and
+        # the final road-only junction re-role above all mint NEW
+        # service_road pieces after pass 1 ran — fold them into their
+        # corridor now, at final pre-solve geometry, so the solver
+        # grades each service corridor as ONE full-width surface.
+        from .groundside import consolidate_full_width_service_corridors
+        _n_fw2 = consolidate_full_width_service_corridors(layout)
+        if _n_fw2:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: consolidated service-corridor "
+                f"fragments into full-width corridor(s) "
+                f"(−{_n_fw2} shape(s), final pre-solve).")
+            _covp(layout, "post-full-width-corridor-2")
+
         if USE_PER_SURFACE_SOLVER and layout.anchor is not None:
             # Runway CIFP thresholds are LOCKED — the solver never moves them.
             # The old runway-threshold-relief passes (step 3
@@ -5131,12 +5167,35 @@ def build_airport_pavement(icao: str, xplane_root: str,
             f"met — {len(tjs)} residual T-junction(s), {len(crossings)} "
             f"edge crossing(s) (→ Triangle4XP mesh slivers).")
 
+    # Pre-solve geometry guard (dev): report how many airside shapes had
+    # their geometry changed by a post-solve pass (target = 0).  Runs BEFORE
+    # decimation so the report keeps measuring the unintended reshapes, not
+    # the deliberate emit thinning.
+    from .geom_guard import report_post_solve_changes
+    report_post_solve_changes(layout, _geom_guard_snap, icao)
+
+    # EMIT DECIMATION (user design 2026-07-03): drop 3D-collinear ring
+    # vertices — node density follows the SOLVED profile (straights emit as
+    # single segments; vertical transitions and curves keep their nodes).
+    # Must see the final welded/conformant geometry, and a vertex may only
+    # vanish when every ring sharing it agrees (no T-vertices minted).
+    # BEFORE the final grade projection (user 2026-07-05): decimating a
+    # junction ring re-triangulates its interior, so the decimated ring's
+    # MESH has chords the pre-decimation law never contained — running the
+    # projection on the decimated rings makes it the true last word on
+    # values for the geometry X-Plane actually renders (SPJC 18-pair
+    # 1.5-1.8 % junction class).  Gate O4_EMIT_DECIMATE.
+    if compute_elevations:
+        from .emit_decimate import decimate_emit_nodes
+        decimate_emit_nodes(layout, icao)
+
     # FINAL GRADE PROJECTION (round 4, user 2026-07-03): the passes above
-    # (planarize, welds, clips, merges) reshaped rings AFTER the elevation
-    # solve, so the law pairs of the FINAL rings are a superset of what the
-    # solve projected.  One last scalar GS projection on the final geometry
-    # (runway/seam/feature-weld nodes hard, pads movable-flat) closes the
-    # post-solve mutation classes the validator otherwise flags.
+    # (planarize, welds, clips, merges, emit decimation) reshaped rings
+    # AFTER the elevation solve, so the law pairs of the FINAL rings differ
+    # from what the solve projected.  One last scalar GS projection on the
+    # final geometry (runway/seam/feature-weld nodes hard, pads movable-
+    # flat) closes the post-solve mutation classes the validator otherwise
+    # flags.
     if compute_elevations:
         from .elevation_per_surface.route_profile.solve import (
             final_grade_projection)
@@ -5166,32 +5225,17 @@ def build_airport_pavement(icao: str, xplane_root: str,
                                tile_lat=_projection_tile_lat,
                                tile_lon=_projection_tile_lon)
 
-    # Pre-solve geometry guard (dev): report how many airside shapes had
-    # their geometry changed by a post-solve pass (target = 0).
-    from .geom_guard import report_post_solve_changes
-    report_post_solve_changes(layout, _geom_guard_snap, icao)
-
-    # EMIT DECIMATION (user design 2026-07-03): drop 3D-collinear ring
-    # vertices — node density follows the SOLVED profile (straights emit as
-    # single segments; vertical transitions and curves keep their nodes).
-    # LAST pass by design: it must see the final welded/conformant geometry,
-    # and a vertex may only vanish when every ring sharing it agrees (no
-    # T-vertices minted).  Gate O4_EMIT_DECIMATE.
-    if compute_elevations:
-        from .emit_decimate import decimate_emit_nodes
-        decimate_emit_nodes(layout, icao)
-
         # Runway-end down-slope SKIRTS (Pass D, gate O4_RUNWAY_END_SKIRT):
-        # the ABSOLUTE LAST emission, after the final projection and
-        # decimation, because the skirt bakes the law floor from
-        # edge-interpolated pavement reads (end elevation + entry grade)
-        # and any earlier placement reads rings that later passes may
-        # rewrite (the projection moves pad altitudes; decimation
-        # rewrites rings).  Emitting here, the emitter reads exactly the
-        # geometry that renders — the same reads the verification
-        # checker makes.  Skirts are freshly minted with a pavement gap
-        # (no shared vertices), so skipping their own decimation mints
-        # no T-vertices.
+        # the ABSOLUTE LAST emission — after decimation and the final
+        # grade projection (which, since 8ca25a3, runs after decimation
+        # and is the last word on values) — because the skirt bakes the
+        # law floor from edge-interpolated pavement reads (end elevation
+        # + entry grade) and any earlier placement reads rings/values
+        # that later passes rewrite.  Emitting here, the emitter reads
+        # exactly the geometry that renders — the same reads the
+        # verification checker makes.  Skirts are freshly minted with a
+        # pavement gap (no shared vertices), so arriving after
+        # decimation mints no T-vertices.
         try:
             from .clearance import emit_runway_end_skirts
             n_sk = emit_runway_end_skirts(

@@ -107,6 +107,13 @@ pytestmark = [
 # DETERMINISTIC (DEM-driven cluster geometry), so the floor is the exact
 # count — no -5% slack — to guard the fork wall against re-regression.
 #
+# RE-CUT 2026-07-05c: full-width service-corridor consolidation (user
+# 2026-07-05 full-width corridor, O4_FULL_WIDTH_SERVICE_CORRIDOR) merges
+# the half-strips flanking each truck-route spine + along-route fragment
+# chains into single full-width corridor shapes — SPJC's service
+# partition intentionally coarsened (service_junction 22 → 14,
+# service_road 5 → 6); every other role's count unchanged.  Fixture +
+# floors recut the same day, same 0.95 convention.
 # RE-CUT 2026-07-05b: adaptive sparse tessellation (O4_ADAPTIVE_BEZIER —
 # sagitta-capped bezier subdivision + Douglas-Peucker source-ring
 # resampling) reshaped the partition again; fixtures + floors recut the
@@ -129,12 +136,12 @@ SPJC_BASELINE: Dict[str, int] = {
     "retaining_wall":      6,   # of   6 current (one per tunnel cluster; deterministic, exact floor)
     "runway":             33,   # of  35 current
     "runway_clearance":    6,   # of   7 current
-    "service_junction":   20,   # of  22 current
-    "service_road":        4,   # of   5 current
+    "service_junction":   13,   # of  14 current
+    "service_road":        5,   # of   6 current
     "taxiway_clearance":  18,   # of  19 current
     "tunnel_ramp":        38,   # of  41 current
 }
-SPJC_BASELINE_TOTAL = 450  # int(0.95 * 474) of 474 current (emitted)
+SPJC_BASELINE_TOTAL = 443  # int(0.95 * 467) of 467 current (emitted)
 
 # SPLP is cross-tile (spans -13/-77 and -13/-78).  Each tile-half has
 # its own baseline; a regression in either half trips the gate.

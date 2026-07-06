@@ -64,6 +64,7 @@ __all__ = [
     "_emit_groundside_pavement_dem",
     "_separate_groundside_from_airside",
     "_merge_touching_groundside",
+    "consolidate_full_width_service_corridors",
 ]
 
 
@@ -434,6 +435,260 @@ def carve_narrow_service_strips(
     if n_carved:
         layout.shapes = new_shapes
     return n_carved
+
+
+def consolidate_full_width_service_corridors(
+        layout: "PavementLayout",
+        *,
+        touch_tol_m: float = 0.5,
+        min_shared_m: float = 1.0,
+        max_corridor_halfwidth_m: float = 15.0,
+        route_through_min_m: float = 2.0,
+        absorb_fragment_area_m2: float = 60.0,
+        ) -> int:
+    """Merge the shattered pieces of ONE service-road corridor into
+    full-width corridor shapes (user 2026-07-05 full-width corridor):
+    a service road is ONE corridor — its spine (the apt.dat truck-route
+    centerline) has pavement on BOTH sides, and the two half-strips are
+    the same surface.  The global slice cuts pavement by every
+    centerline INCLUDING the road's own spine, so each road is born as
+    two half-strips flanking the spine, and the carve / re-role /
+    conversion passes add along-route fragment chains on top (CYXY
+    around (60.70588, -135.07070): five sub-100 m² pieces for one
+    ~30 m corridor run).  Solved independently they cannot grade as
+    one surface.
+
+    A shape is a corridor MEMBER when it is service pavement ridden by
+    exactly ONE truck route (≥ ``route_through_min_m`` of the route
+    inside/along it — a piece carrying two routes' interiors is a
+    genuine road↔road intersection and is left alone) and its whole
+    ring lies within ``max_corridor_halfwidth_m`` of that route (a wide
+    lot only meets its route at the mouth and never qualifies).
+    Members of the SAME route whose rings share a ≥ ``min_shared_m``
+    boundary run merge — this joins both opposite-side half-strips
+    (they share the spine seam itself) and along-route fragment chains.
+    Small junction / service_junction slivers (≤
+    ``absorb_fragment_area_m2``) that sit ON the route inside the
+    corridor width DERIVED FROM THE MEMBERS BEING MERGED (never a
+    constant — the road's actual pavement extent) are absorbed too
+    (CYXY: the 8 m² full-width junction sliver at the corridor mouth).
+
+    The merged shapes carry ``ROLE_SERVICE_ROAD`` (a corridor with one
+    route through it grades AXIALLY along that route) and no altitudes
+    — this runs PRE-solve so the corridor grades as one surface.
+
+    Gate ``O4_FULL_WIDTH_SERVICE_CORRIDOR`` (default ON); off restores
+    the old shattered-pieces behaviour byte-identically.  Returns the
+    net number of shapes eliminated by merging.
+    """
+    if _os.environ.get("O4_FULL_WIDTH_SERVICE_CORRIDOR", "1") != "1":
+        return 0
+    routes = [centerline.line for centerline in
+              (getattr(layout, "apt_service_centerlines", None) or [])
+              if centerline.line is not None
+              and not centerline.line.is_empty]
+    if not routes:
+        return 0
+
+    def _max_lateral_extent_m(polygon, route_line):
+        """Farthest ring vertex from the route spine — the half-width
+        this piece actually spans (user 2026-07-05 full-width corridor:
+        corridor width is derived from the faces, never a constant)."""
+        try:
+            return max(route_line.distance(Point(x, y))
+                       for (x, y) in polygon.exterior.coords)
+        except _GEOM_EXC:
+            return float("inf")
+
+    _debug_at = None
+    _debug_spec = _os.environ.get("O4_FW_DEBUG_LL", "")
+    if _debug_spec and layout.anchor is not None:
+        try:
+            _dbg_lat, _dbg_lon = (float(v) for v in _debug_spec.split(","))
+            _lat0, _lon0 = layout.anchor
+            _debug_at = (
+                math.radians(_dbg_lon - _lon0) * R_EARTH
+                * math.cos(math.radians(_lat0)),
+                math.radians(_dbg_lat - _lat0) * R_EARTH)
+        except ValueError:
+            _debug_at = None
+
+    def _debug_near(polygon):
+        return (_debug_at is not None
+                and polygon.distance(Point(*_debug_at)) <= 60.0)
+
+    # ── corridor members: service pavement riding exactly ONE route ──
+    member_indices: List[int] = []
+    member_route: Dict[int, int] = {}
+    member_lateral: Dict[int, float] = {}
+    for index, shape in enumerate(layout.shapes):
+        if shape.role not in (ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION):
+            continue
+        if shape.polygon is None or shape.polygon.is_empty \
+                or shape.polygon.geom_type != "Polygon":
+            continue
+        if getattr(shape, "is_bridge", False):
+            continue
+        # Measure each route's run along the piece against the piece
+        # BUFFERED by the touch tolerance: a half-strip's spine seam IS
+        # the route line, running exactly ON the ring — the unbuffered
+        # polygon∩line length reads ~0 there whenever a weld/snap moved
+        # a seam vertex by millimetres, and the flanking half never
+        # qualified (user 2026-07-05 full-width corridor: pavement on
+        # BOTH sides of the spine is the same surface, so both flanks
+        # must ride the route).
+        try:
+            reach_polygon = shape.polygon.buffer(touch_tol_m)
+        except _GEOM_EXC:
+            continue
+        riding_routes = []
+        for route_index, route_line in enumerate(routes):
+            try:
+                run_m = route_line.intersection(reach_polygon).length
+            except _GEOM_EXC:
+                run_m = 0.0
+            if run_m >= route_through_min_m:
+                riding_routes.append((route_index, run_m))
+        if _debug_near(shape.polygon):
+            print(f"[fw-debug] shape#{index} role={shape.role} "
+                  f"area={shape.polygon.area:.1f} riding={riding_routes}")
+        if not riding_routes:
+            continue          # routeless piece — not corridor pavement
+        riding_routes.sort(key=lambda entry: -entry[1])
+        primary_route, primary_run_m = riding_routes[0]
+        # A piece is a genuine road↔road INTERSECTION — left alone —
+        # only when a SECOND route runs through it comparably to the
+        # first.  A side-route MOUTH poking a few metres into a long
+        # corridor to meet the spine must not disqualify the corridor
+        # (CYXY: an 81 m route-7 corridor touched by 4.7 m of route 2).
+        if len(riding_routes) > 1 and riding_routes[1][1] \
+                >= max(route_through_min_m, 0.25 * primary_run_m):
+            continue          # comparable second route → intersection
+        lateral = _max_lateral_extent_m(shape.polygon,
+                                        routes[primary_route])
+        if _debug_near(shape.polygon):
+            print(f"[fw-debug]   lateral={lateral:.1f}")
+        if lateral > max_corridor_halfwidth_m:
+            continue          # lot-like piece, not a corridor flank
+        member_indices.append(index)
+        member_route[index] = primary_route
+        member_lateral[index] = lateral
+    if len(member_indices) < 2:
+        return 0
+
+    def _shared_boundary_run_m(polygon_a, polygon_b):
+        """Length of ring A running within ``touch_tol_m`` of ring B
+        (identity on exactly-shared boundaries; 0 for point touches)."""
+        try:
+            shared = polygon_a.exterior.intersection(
+                polygon_b.exterior.buffer(touch_tol_m))
+            return getattr(shared, "length", 0.0)
+        except _GEOM_EXC:
+            return 0.0
+
+    # ── union-find: same-route members sharing a real boundary run ──
+    parent = {index: index for index in member_indices}
+
+    def _find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for position, index_a in enumerate(member_indices):
+        polygon_a = layout.shapes[index_a].polygon
+        for index_b in member_indices[position + 1:]:
+            if member_route[index_a] != member_route[index_b]:
+                continue      # only pieces flanking the SAME spine merge
+            polygon_b = layout.shapes[index_b].polygon
+            try:
+                if polygon_a.distance(polygon_b) > touch_tol_m:
+                    continue
+            except _GEOM_EXC:
+                continue
+            if _shared_boundary_run_m(polygon_a, polygon_b) \
+                    < min_shared_m:
+                continue      # point / sliver touch — not one corridor
+            root_a, root_b = _find(index_a), _find(index_b)
+            if root_a != root_b:
+                parent[root_a] = root_b
+
+    groups: Dict[int, List[int]] = {}
+    for index in member_indices:
+        groups.setdefault(_find(index), []).append(index)
+
+    # ── absorb tiny on-route slivers into the corridor they shatter ──
+    # (junction / service_junction fragments spanning the corridor —
+    # CYXY's 8 m² mouth sliver.)  The lateral cap comes from the GROUP
+    # being merged: the corridor's own measured half-width, +1 m slack.
+    absorbed: Dict[int, List[int]] = {}
+    claimed: Set[int] = set(member_indices)
+    for index, shape in enumerate(layout.shapes):
+        if index in claimed:
+            continue
+        if shape.role not in (ROLE_JUNCTION, ROLE_SERVICE_JUNCTION):
+            continue
+        if shape.polygon is None or shape.polygon.is_empty \
+                or shape.polygon.geom_type != "Polygon":
+            continue
+        if getattr(shape, "is_bridge", False) \
+                or shape.polygon.area > absorb_fragment_area_m2:
+            continue
+        for root, group in groups.items():
+            route_line = routes[member_route[group[0]]]
+            try:
+                if route_line.distance(shape.polygon) > touch_tol_m:
+                    continue          # not on this corridor's spine
+            except _GEOM_EXC:
+                continue
+            group_halfwidth = max(member_lateral[member]
+                                  for member in group)
+            if _max_lateral_extent_m(shape.polygon, route_line) \
+                    > group_halfwidth + 1.0:
+                continue              # pokes past the corridor width
+            if not any(_shared_boundary_run_m(
+                        shape.polygon, layout.shapes[member].polygon)
+                       >= min_shared_m for member in group):
+                continue              # doesn't actually abut the group
+            absorbed.setdefault(root, []).append(index)
+            claimed.add(index)
+            break
+
+    # ── merge each group into full-width corridor shape(s) ──────────
+    removed_indices: Set[int] = set()
+    merged_shapes: List[BuiltShape] = []
+    n_eliminated = 0
+    for root, group in groups.items():
+        piece_indices = group + absorbed.get(root, [])
+        if len(piece_indices) < 2:
+            continue
+        try:
+            union = unary_union([layout.shapes[index].polygon
+                                 for index in piece_indices])
+        except _GEOM_EXC:
+            continue
+        union_pieces = ([union] if union.geom_type == "Polygon"
+                        else [g for g in getattr(union, "geoms", ())
+                              if g.geom_type == "Polygon"])
+        union_pieces = [g for g in union_pieces if not g.is_empty]
+        if not union_pieces or len(union_pieces) >= len(piece_indices):
+            continue                  # nothing actually merged
+        if any(any(Polygon(ring).area > 0.05 for ring in g.interiors)
+               for g in union_pieces):
+            continue    # a real hole appeared — keep the pieces as-is
+        for g in union_pieces:
+            if g.interiors:           # drop numeric-noise micro holes
+                g = Polygon(g.exterior)
+            merged_shapes.append(BuiltShape(
+                polygon=g, role=ROLE_SERVICE_ROAD, ref="",
+                source_axis=None))
+        removed_indices.update(piece_indices)
+        n_eliminated += len(piece_indices) - len(union_pieces)
+    if not removed_indices:
+        return 0
+    layout.shapes = [shape for index, shape in enumerate(layout.shapes)
+                     if index not in removed_indices] + merged_shapes
+    return n_eliminated
 
 
 def reclassify_groundside_route_corridors(

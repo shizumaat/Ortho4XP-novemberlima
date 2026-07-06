@@ -603,8 +603,8 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
             n2 = add_node(corners[2][0], corners[2][1])
             n3 = add_node(corners[3][0], corners[3][1])
             tags = {
-                "altitude_high": "{:.1f}".format(eh),
-                "altitude_low": "{:.1f}".format(el),
+                "altitude_high": "{:.2f}".format(eh),
+                "altitude_low": "{:.2f}".format(el),
                 "cell_size": str(int(DEFAULT_CELL_SIZE)),
                 "profile": DEFAULT_PROFILE,
             }
@@ -616,8 +616,8 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
             n1 = add_node(corners[1][0], corners[1][1])
             n2 = add_node(corners[2][0], corners[2][1])
             n3 = add_node(corners[3][0], corners[3][1])
-            avg = round((elev_a + elev_b) / 2.0, 1)
-            tags = {"altitude": "{:.1f}".format(avg)}
+            avg = round((elev_a + elev_b) / 2.0, 2)
+            tags = {"altitude": "{:.2f}".format(avg)}
         add_way([n0, n1, n2, n3, n0], tags)
 
     def add_flat_multi_rect(samples_ll, elev, width):
@@ -652,7 +652,7 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
             ring.append((s_lat - perp_dlat, s_lon - perp_dlon))
         node_ids = [add_node(la, lo) for la, lo in ring]
         node_ids.append(node_ids[0])
-        tags = {"altitude": "{:.1f}".format(round(float(elev), 1))}
+        tags = {"altitude": "{:.2f}".format(round(float(elev), 2))}
         add_way(node_ids, tags)
 
     def _sample_dem_ll(lat, lon):
