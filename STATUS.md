@@ -1,3 +1,20 @@
+# STATUS — SESSION 20260706 (part 24): runways per-vertex from BIRTH +
+# per-node OSM emission (`a7de0f6`, user rulings)
+
+> (1) Creators fixed (elevation.py segment emit — also legacy 0.1 m
+> rounding retired — + tile_cut clean-rect): node_altitudes from
+> construction; normalize sweep = INVARIANT ALARM only.  (2) to_osm's
+> hi/lo compaction skips the runway family — all sloped runway pieces
+> emit per-node alt_abs (exact + human-editable; parser renders planar
+> quads identically).  Supersedes 2026-05-23 keep-rects for runways.
+> GATES: HECA flex 11/2,762 holds; CYXY 0, SPJC 0; suite 10F==base10.
+> HECA honest state with flex ON: 11 actionable (= pre-existing
+> service-road weld cluster + small aprons, task #14 — NOT flex
+> fallout) + 2,762 quarantined (genuine residual terrain demand;
+> Stage C + provenance next).
+
+---
+
 # STATUS — SESSION 20260706 (part 23): runways UNIFIED to per-vertex
 # node_altitudes mid-pipeline (`acd254a`)
 
