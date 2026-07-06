@@ -165,6 +165,29 @@ def runway_end_governed_length_m(
     return base
 
 
+# Stop the skirt this far short of a constraining feature (road /
+# water) so the feature keeps its own approach embankment.
+RUNWAY_END_SKIRT_CONSTRAINT_MARGIN_M = 5.0
+
+
+def runway_end_constrained_length_m(
+        governed_length_m: float,
+        constraint_distance_m: float | None) -> float:
+    """Clamp the governed length when real infrastructure crosses the
+    end zone.  No reliable EMAS data source exists (user ruling
+    2026-07-05), but a road, service road or water body close beyond a
+    runway end IS the fingerprint of a non-standard end — the real
+    world did not build a full-length RSA there (EMAS / declared
+    distances instead, e.g. KCLT 18L: perimeter road at the blast-pad
+    end).  The skirt ends a margin short of the first constraint; with
+    the constraint at the pavement end the skirt vanishes entirely."""
+    if constraint_distance_m is None:
+        return governed_length_m
+    return max(0.0, min(
+        governed_length_m,
+        constraint_distance_m - RUNWAY_END_SKIRT_CONSTRAINT_MARGIN_M))
+
+
 def _runway_end_skirt_signed_grade(
         distance_m: float, start_grade: float) -> float:
     """Signed grade (positive = climbing) of the LOWEST lawful surface at

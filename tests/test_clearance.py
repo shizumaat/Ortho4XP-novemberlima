@@ -75,6 +75,10 @@ def test_clearance_within_terrain_envelope(icao):
       * outer vertices = the DEM at their own location,
     both bounded by the max above.  A vertex floating well above both
     the local terrain and the pavement would indicate a ramp/DEM bug.
+
+    Runway-end SKIRTS are exempt: they are deliberate FILL above the
+    natural terrain (the inverse-RESA down-slope law), so the cut
+    envelope invariant does not apply to them.
     """
     import math as _m
     from auto_patch.config import CLEARANCE_MAX_REACH_M
@@ -86,7 +90,7 @@ def test_clearance_within_terrain_envelope(icao):
     layout = _build(icao)
     cuts = [s for s in layout.shapes if s.role in _CLEARANCE_ROLES
             and s.polygon is not None and not s.polygon.is_empty
-            and s.node_altitudes]
+            and s.node_altitudes and s.ref != "runway_end_skirt"]
     if not cuts:
         pytest.skip(f"{icao}: no clearance cuts emitted")
     lat0, lon0 = layout.anchor

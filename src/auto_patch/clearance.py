@@ -65,6 +65,7 @@ from .config import (
     taxiway_clearance_half_width_m,
 )
 from .grade_law import (
+    runway_end_constrained_length_m,
     runway_end_governed_length_m,
     runway_end_skirt_floor_profile,
     runway_end_skirt_profile_breakpoints,
@@ -1567,6 +1568,94 @@ def _surface_road_corridors(layout, ll_to_m):
         return None
 
 
+# Emitted-shape roles that mark a runway end as constrained the same
+# way a mapped road does (the perimeter road may reach the layout as a
+# service_road / groundside shape rather than an OSM way).
+_SKIRT_CONSTRAINT_ROLES = frozenset({
+    "service_road", "service_junction", "groundside_pavement",
+    "tunnel_ramp",
+})
+
+
+def _end_constraint_block(layout, ll_to_m):
+    """Geometry whose presence in a runway end zone marks the end as
+    NON-STANDARD (EMAS inference, user ruling 2026-07-05): surface
+    road / railway corridors (big + small OSM caches — service roads
+    included), OSM WATER polygons, and emitted road-like infrastructure
+    shapes.  One source for the Pass D emitter AND the ``verification``
+    reader.  ``None`` when nothing is available."""
+    parts = []
+    road_block = _surface_road_corridors(layout, ll_to_m)
+    if road_block is not None and not road_block.is_empty:
+        parts.append(road_block)
+    # OSM water polygons (closed natural=water / riverbank ways from
+    # the tile ``water`` cache; multipolygon relations are not carried
+    # by the layer loader — acceptable, the primary constraint class is
+    # the pond/river beside the overrun).
+    try:
+        from .osm_load import _load_osm_road_layer
+        nodes_w, ways_w = _load_osm_road_layer(
+            "water", layout.anchor[0], layout.anchor[1])
+    except _GEOM_EXC:
+        nodes_w, ways_w = {}, []
+    for _wid, node_refs, _tags in ways_w:
+        if len(node_refs) < 4 or node_refs[0] != node_refs[-1]:
+            continue
+        points = []
+        for node_ref in node_refs[:-1]:
+            ll = nodes_w.get(node_ref)
+            if ll is not None:
+                points.append(ll_to_m(ll[0], ll[1]))
+        if len(points) < 3:
+            continue
+        try:
+            poly = Polygon(points)
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            if not poly.is_empty:
+                parts.append(poly)
+        except _GEOM_EXC:
+            continue
+    for s in layout.shapes:
+        if (s.role in _SKIRT_CONSTRAINT_ROLES
+                and s.polygon is not None and not s.polygon.is_empty):
+            parts.append(s.polygon)
+    if not parts:
+        return None
+    try:
+        return unary_union(parts)
+    except _GEOM_EXC:
+        return None
+
+
+def _end_constraint_distance(p0, outward, max_distance_m,
+                             constraint_block) -> float | None:
+    """Distance from the pavement exit ``p0`` along ``outward`` to the
+    FIRST constraint crossing of the extended centerline, or ``None``
+    when nothing constrains within ``max_distance_m``."""
+    if constraint_block is None or constraint_block.is_empty:
+        return None
+    nx, ny = outward
+    try:
+        ray = LineString([
+            (p0[0], p0[1]),
+            (p0[0] + nx * max_distance_m, p0[1] + ny * max_distance_m)])
+        crossing = ray.intersection(constraint_block)
+    except _GEOM_EXC:
+        return None
+    if crossing.is_empty:
+        return None
+    nearest = None
+    geoms = (list(crossing.geoms)
+             if hasattr(crossing, "geoms") else [crossing])
+    for geom in geoms:
+        for x, y in getattr(geom, "coords", []):
+            t = (x - p0[0]) * nx + (y - p0[1]) * ny
+            if t >= 0.0 and (nearest is None or t < nearest):
+                nearest = t
+    return nearest
+
+
 def emit_runway_end_skirts(layout: PavementLayout, dem,
                            tile_lat: int, tile_lon: int,
                            source_runways=None) -> int:
@@ -1644,6 +1733,11 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
     # along the outward axis; FLANK strips (alongside the blast pad /
     # stopway between the runway end and the pavement exit) descend
     # from a per-station pavement-EDGE altitude along the side normal.
+    # Constraint geometry for the EMAS inference (roads / water /
+    # emitted road-like infrastructure) — built once, shared by every
+    # end (and identically by the verification reader).
+    constraint_block = _end_constraint_block(layout, _ll_to_m)
+
     skirt_strips: list[tuple] = []
 
     def _floor_depth_for(entry_grade: float):
@@ -1689,6 +1783,14 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
                 / _SKIRT_END_GRADE_WINDOW_M
             entry_grade = max(-0.05, min(0.05, entry_grade))
         governed = runway_end_governed_length_m(full_len, approach_class)
+        # EMAS inference (user 2026-07-05): a road / service road /
+        # water crossing the end zone marks a NON-standard end — the
+        # skirt stops short of the first constraint (or vanishes when
+        # the constraint sits at the pavement end, KCLT 18L).
+        governed = runway_end_constrained_length_m(
+            governed,
+            _end_constraint_distance(
+                p0, outward, governed, constraint_block))
         _floor_depth = _floor_depth_for(entry_grade)
 
         half = max(runway_width, runway_strip_half_width_m(full_len))
@@ -1869,7 +1971,22 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
     emitted_fill = None
     n = 0
     skirt_debug = os.environ.get("O4_SKIRT_DEBUG") == "1"
+    # Lab forensics (O4_SKIRT_DEBUG_DUMP=<path>): record every raw
+    # strip ring, every emitted piece and every DROPPED piece from THIS
+    # in-pipeline run, so sliver analysis overlays like-for-like
+    # geometry (post-hoc probe rebuilds have shown per-process
+    # divergence in pavement-exit anchoring — never compare across
+    # builds).
+    skirt_dump_path = os.environ.get("O4_SKIRT_DEBUG_DUMP")
+    skirt_dump = None
+    if skirt_dump_path:
+        skirt_dump = {"anchor": list(layout.anchor),
+                      "strips": [], "pieces": [], "dropped": []}
     for strip_index, (ring, alt_at) in enumerate(skirt_strips):
+        if skirt_dump is not None:
+            skirt_dump["strips"].append(
+                {"index": strip_index,
+                 "ring": [[float(x), float(y)] for x, y in ring]})
         try:
             poly = Polygon(ring)
             if not poly.is_valid:
@@ -1903,9 +2020,31 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
             continue
         for comp in components:
             for simple in _decompose_polygon_with_holes(
-                    comp, min_area_m2=_MIN_CUT_AREA_M2):
-                if simple.is_empty or simple.area < _MIN_CUT_AREA_M2:
+                    comp, min_area_m2=1.0):
+                if simple.is_empty:
                     continue
+                if simple.area < _MIN_CUT_AREA_M2:
+                    # The min-area gate exists to reject freestanding
+                    # confetti — but a small fragment ATTACHED to the
+                    # pavement or existing geometry is a legitimate
+                    # corner patch of a continuous fill (the pad-corner
+                    # wedges at KCLT are 9–21 m² and dropping them left
+                    # validator-visible notches).  Keep attached
+                    # fragments; drop isolated ones.
+                    attached = False
+                    if simple.area >= 1.0 and static_block is not None:
+                        try:
+                            attached = simple.distance(static_block) <= 1.0
+                        except _GEOM_EXC:
+                            attached = False
+                    if not attached:
+                        if skirt_dump is not None:
+                            skirt_dump["dropped"].append(
+                                {"strip": strip_index,
+                                 "area": float(simple.area),
+                                 "ring": [[float(x), float(y)] for x, y
+                                          in _open_coords(simple)]})
+                        continue
                 piece_ring = _open_coords(simple)
                 if len(piece_ring) < 3:
                     continue
@@ -1915,6 +2054,12 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
                     polygon=simple, role=ROLE_RUNWAY_CLEARANCE,
                     ref="runway_end_skirt",
                     node_altitudes=alts + [alts[0]]))
+                if skirt_dump is not None:
+                    skirt_dump["pieces"].append(
+                        {"strip": strip_index,
+                         "area": float(simple.area),
+                         "ring": [[float(x), float(y)]
+                                  for x, y in piece_ring]})
                 try:
                     emitted_fill = (
                         simple if emitted_fill is None
@@ -1922,4 +2067,11 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
                 except _GEOM_EXC:
                     pass
                 n += 1
+    if skirt_dump is not None:
+        import json
+        try:
+            with open(skirt_dump_path, "w") as handle:
+                json.dump(skirt_dump, handle)
+        except OSError:
+            pass
     return n

@@ -547,8 +547,8 @@ class TestRoadAwareness(SkirtHarness):
 
     def _road_network(self):
         """A surface secondary road crossing the east skirt zone at
-        x = 1700, running north–south, plus a TUNNEL way at x = 1750
-        that must NOT carve the skirt."""
+        x = 1700, running north–south, plus a TUNNEL way NEARER the
+        end (x = 1600) that must neither carve nor constrain."""
         import math
         from auto_patch.layout import R_EARTH
 
@@ -558,8 +558,8 @@ class TestRoadAwareness(SkirtHarness):
         nodes = {
             "r1": _ll(self._ROAD_X, -400.0),
             "r2": _ll(self._ROAD_X, 400.0),
-            "t1": _ll(1750.0, -400.0),
-            "t2": _ll(1750.0, 400.0),
+            "t1": _ll(1600.0, -400.0),
+            "t2": _ll(1600.0, 400.0),
         }
         ways = [
             ("road", ["r1", "r2"], {"highway": "secondary"}),
@@ -574,26 +574,32 @@ class TestRoadAwareness(SkirtHarness):
                             lambda _layout: self._road_network())
         return super()._emit(monkeypatch, layout, runway, gate_on)
 
-    def test_surface_road_corridor_stays_unfilled(self, monkeypatch):
+    def test_surface_road_truncates_and_tunnel_does_not(self, monkeypatch):
+        """EMAS-inference semantics (user 2026-07-05): a surface road
+        across the end zone TRUNCATES the skirt (non-standard end);
+        fill runs up to the road and nothing beyond.  A tunnel-tagged
+        way neither carves nor constrains — fill covers it."""
         from shapely.geometry import Point
+        from auto_patch.grade_law import (
+            RUNWAY_END_SKIRT_CONSTRAINT_MARGIN_M)
         layout = self._make_layout()
-        # East end precision → 305 m governed, reaching past the road.
+        # East end precision → 305 m unconstrained footprint.
         self._emit(monkeypatch, layout, self._make_runway(lights_b=2))
         skirts = self._clearance_shapes(layout)
         east = [s for s in skirts
                 if s.polygon.centroid.x > self._RUNWAY_LEN]
         assert east
-        on_road = [s for s in east
-                   if s.polygon.covers(Point(self._ROAD_X, 0.0))]
-        assert on_road == [], "skirt filled over a surface road"
-        # The corridor is a hole, not a truncation: fill exists on
-        # both sides of the road.
-        assert any(s.polygon.covers(Point(self._ROAD_X - 15.0, 0.0))
-                   for s in east)
-        assert any(s.polygon.covers(Point(self._ROAD_X + 15.0, 0.0))
-                   for s in east)
-        # The TUNNEL way did not carve the skirt.
-        assert any(s.polygon.covers(Point(1750.0, 0.0)) for s in east)
+        assert not any(s.polygon.covers(Point(self._ROAD_X, 0.0))
+                       for s in east), "skirt filled over a surface road"
+        assert not any(s.polygon.covers(Point(self._ROAD_X + 15.0, 0.0))
+                       for s in east), "fill beyond the constraining road"
+        east_reach = max(s.polygon.bounds[2] for s in east)
+        assert east_reach <= (self._ROAD_X
+                              - RUNWAY_END_SKIRT_CONSTRAINT_MARGIN_M
+                              + 1.0)
+        # The TUNNEL way (nearer than the road) did not carve or
+        # constrain the fill.
+        assert any(s.polygon.covers(Point(1600.0, 0.0)) for s in east)
 
     def test_validator_exempts_the_same_corridor(self, monkeypatch):
         layout = self._make_layout()
@@ -604,6 +610,111 @@ class TestRoadAwareness(SkirtHarness):
         self._emit(monkeypatch, layout, runway, gate_on=True)
         findings = self._validate(monkeypatch, layout, runway)
         assert findings == []
+
+
+# ──────────────────────────────────────────────────────────────────────
+# EMAS inference: a road / water crossing the end zone shortens the
+# governed length (no reliable EMAS data — nearby infrastructure IS the
+# fingerprint of a non-standard end, user ruling 2026-07-05)
+# ──────────────────────────────────────────────────────────────────────
+class TestConstraintInference(SkirtHarness):
+    _ROAD_X = 1580.0   # 80 m beyond the east end (precision → 305 m)
+
+    def _road_network(self):
+        import math
+        from auto_patch.layout import R_EARTH
+
+        def _ll(x, y):
+            return (math.degrees(y / R_EARTH), math.degrees(x / R_EARTH))
+
+        nodes = {"r1": _ll(self._ROAD_X, -400.0),
+                 "r2": _ll(self._ROAD_X, 400.0)}
+        return nodes, [("road", ["r1", "r2"],
+                        {"highway": "service"})], {"road"}
+
+    def _emit(self, monkeypatch, layout, runway, gate_on=True):
+        from auto_patch import bridges
+        monkeypatch.setattr(bridges, "_load_tunnel_road_network",
+                            lambda _layout: self._road_network())
+        return super()._emit(monkeypatch, layout, runway, gate_on)
+
+    def test_road_across_the_end_shortens_the_skirt(self, monkeypatch):
+        """Service road 80 m beyond the east end: the east skirt stops
+        a margin short of it instead of running the 305 m precision
+        footprint (KCLT 18L class); the unconstrained west end keeps
+        its full footprint."""
+        from auto_patch.grade_law import (
+            RUNWAY_END_SKIRT_CONSTRAINT_MARGIN_M)
+        layout = self._make_layout()
+        self._emit(monkeypatch, layout,
+                   self._make_runway(lights_a=2, lights_b=2))
+        cuts = self._clearance_shapes(layout)
+        east_reach = (max(s.polygon.bounds[2] for s in cuts)
+                      - self._RUNWAY_LEN)
+        west_reach = -min(s.polygon.bounds[0] for s in cuts)
+        road_offset = self._ROAD_X - self._RUNWAY_LEN
+        assert east_reach <= (road_offset
+                              - RUNWAY_END_SKIRT_CONSTRAINT_MARGIN_M
+                              + 1.0)
+        assert east_reach > 40.0          # still fills up to the road
+        assert west_reach > 290.0         # unconstrained precision end
+
+    def test_validator_agrees_with_the_constrained_end(self, monkeypatch):
+        layout = self._make_layout()
+        runway = self._make_runway(lights_a=2, lights_b=2)
+        self._emit(monkeypatch, layout, runway, gate_on=True)
+        findings = self._validate(monkeypatch, layout, runway)
+        assert findings == []
+
+    def test_constraint_at_the_pavement_end_suppresses_the_skirt(
+            self, monkeypatch):
+        """Road right at the end (KCLT 18L ground truth): no skirt at
+        all on that end."""
+        self._ROAD_X = self._RUNWAY_LEN + 6.0
+        try:
+            layout = self._make_layout()
+            self._emit(monkeypatch, layout,
+                       self._make_runway(lights_b=2))
+            cuts = [s for s in self._clearance_shapes(layout)
+                    if s.polygon.centroid.x > self._RUNWAY_LEN]
+            assert cuts == []
+        finally:
+            self._ROAD_X = type(self)._ROAD_X
+
+    def test_water_across_the_end_shortens_the_skirt(self, monkeypatch):
+        """A water polygon 100 m beyond the east end constrains it the
+        same way a road does."""
+        import math
+        from auto_patch import osm_load
+        from auto_patch.grade_law import (
+            RUNWAY_END_SKIRT_CONSTRAINT_MARGIN_M)
+        from auto_patch.layout import R_EARTH
+
+        def _ll(x, y):
+            return (math.degrees(y / R_EARTH), math.degrees(x / R_EARTH))
+
+        pond_west = self._RUNWAY_LEN + 100.0
+        nodes = {"w1": _ll(pond_west, -200.0),
+                 "w2": _ll(pond_west + 300.0, -200.0),
+                 "w3": _ll(pond_west + 300.0, 200.0),
+                 "w4": _ll(pond_west, 200.0)}
+        water_ways = [("pond", ["w1", "w2", "w3", "w4", "w1"],
+                       {"natural": "water"})]
+        monkeypatch.setattr(
+            osm_load, "_load_osm_road_layer",
+            lambda layer, lat, lon, radius_deg=0.05:
+            (nodes, water_ways) if layer == "water" else ({}, []))
+        layout = self._make_layout()
+        SkirtHarness._emit(self, monkeypatch, layout,
+                           self._make_runway(lights_b=2))
+        cuts = [s for s in self._clearance_shapes(layout)
+                if s.polygon.centroid.x > self._RUNWAY_LEN]
+        assert cuts
+        east_reach = (max(s.polygon.bounds[2] for s in cuts)
+                      - self._RUNWAY_LEN)
+        assert east_reach <= (100.0
+                              - RUNWAY_END_SKIRT_CONSTRAINT_MARGIN_M
+                              + 1.0)
 
 
 # ──────────────────────────────────────────────────────────────────────

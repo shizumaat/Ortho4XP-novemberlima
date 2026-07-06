@@ -482,7 +482,8 @@ def check_runway_end_skirt(layout, dem, tile_lat, tile_lon,
     from . import clearance as CL
     from .config import runway_end_approach_class
     from .grade_law import (
-        runway_end_governed_length_m, runway_end_skirt_floor_profile)
+        runway_end_constrained_length_m, runway_end_governed_length_m,
+        runway_end_skirt_floor_profile)
     from .layout import R_EARTH
 
     if dem is None:
@@ -609,6 +610,32 @@ def check_runway_end_skirt(layout, dem, tile_lat, tile_lon,
                 src == "pavement" for _t, _e, src in bracketing)
                 else "clearance")
             return alt, source
+        # One-sided edge snap: a station within HALF a station step of a
+        # covering shape sits inside that fill's own discretization cell
+        # — the rendered mesh is dominated by the constraint edge there,
+        # so a sub-half-step DEM notch at a jagged fill edge never
+        # renders (KCLT pad-corner stations 0.3–2.2 m off the emitted
+        # skirt edges).  Genuinely open ground still flags: an
+        # un-governed drop spans many stations ≥ half a step from any
+        # fill.
+        best = None
+        for s in covering:
+            try:
+                d = s.polygon.distance(pt)
+            except CL._GEOM_EXC:
+                continue
+            if d <= 0.5 * step_m and (best is None or d < best[0]):
+                best = (d, s)
+        if best is not None:
+            s = best[1]
+            try:
+                np_pt = nearest_points(s.polygon, pt)[0]
+                e = CL._edge_interp_alt(s, np_pt.x, np_pt.y)
+            except CL._GEOM_EXC:
+                e = None
+            if e is not None:
+                return e, ("clearance" if s.role in _CLEARANCE_ROLES
+                           else "pavement")
         dem_alt = _sample(x, y)
         return (None, "dem") if dem_alt is None else (dem_alt, "dem")
 
@@ -664,6 +691,8 @@ def check_runway_end_skirt(layout, dem, tile_lat, tile_lon,
     #   * ground beyond the airport boundary (the skirt is clipped to
     #     the boundary interior).
     road_block = CL._surface_road_corridors(layout, _ll_to_m)
+    # EMAS-inference constraint geometry, IDENTICAL to the emitter's.
+    constraint_block = CL._end_constraint_block(layout, _ll_to_m)
     _INFRASTRUCTURE_ROLES = frozenset({
         "service_road", "service_junction", "groundside_pavement",
         "tunnel_ramp", "retaining_wall", "building",
@@ -721,30 +750,45 @@ def check_runway_end_skirt(layout, dem, tile_lat, tile_lon,
                 float(ref) - float(inside))
                 / CL._SKIRT_END_GRADE_WINDOW_M))
         governed = runway_end_governed_length_m(full_len, approach_class)
+        # EMAS inference, IDENTICAL to the emitter: a road / service
+        # road / water crossing the end zone marks a NON-standard end
+        # and shortens the governed length (shared constraint geometry
+        # + law clamp).
+        governed = runway_end_constrained_length_m(
+            governed,
+            CL._end_constraint_distance(
+                p0, (nx, ny), governed, constraint_block))
         # Check stations strictly INSIDE the governed length: the
         # governed endpoint itself is the crest of the lawful
         # beyond-zone face — a cap-truncated skirt lawfully ends there
         # in a steep engineered face (Madeira-style), and sampling that
         # exact boundary would flag every such skirt at its own edge.
-        n_stations = max(1, int(math.floor(
-            (governed - 0.5 * step_m) / step_m)))
-        distances = [float(k) * step_m for k in range(1, n_stations + 1)]
-        depths = runway_end_skirt_floor_profile(distances, entry_grade)
-        worst = None
-        for d, depth in zip(distances, depths):
-            qx, qy = p0[0] + nx * d, p0[1] + ny * d
-            if _station_exempt(qx, qy):
-                continue
-            surface, source = _surface_alt(qx, qy, (nx, ny))
-            if surface is None or source == "pavement":
-                continue
-            below = (float(ref) - depth) - float(surface)
-            if below > tolerance_m and (
-                    worst is None or below > worst[0]):
-                worst = (below, qx, qy)
-        if worst is not None:
-            out.append(("end_drop", f"{desig}", worst[0], tolerance_m,
-                        _ll(layout, worst[1], worst[2])))
+        # A fully constrained end (governed < one station) skips the
+        # end march; the FLANKS below are still checked (the overrun
+        # pavement exists regardless of what sits beyond it).
+        if governed >= step_m:
+            n_stations = max(1, int(math.floor(
+                (governed - 0.5 * step_m) / step_m)))
+            distances = [float(k) * step_m
+                         for k in range(1, n_stations + 1)]
+            depths = runway_end_skirt_floor_profile(
+                distances, entry_grade)
+            worst = None
+            for d, depth in zip(distances, depths):
+                qx, qy = p0[0] + nx * d, p0[1] + ny * d
+                if _station_exempt(qx, qy):
+                    continue
+                surface, source = _surface_alt(qx, qy, (nx, ny))
+                if surface is None or source == "pavement":
+                    continue
+                below = (float(ref) - depth) - float(surface)
+                if below > tolerance_m and (
+                        worst is None or below > worst[0]):
+                    worst = (below, qx, qy)
+            if worst is not None:
+                out.append(("end_drop", f"{desig}", worst[0],
+                            tolerance_m,
+                            _ll(layout, worst[1], worst[2])))
 
         # ── Blast-pad / stopway FLANKS (same governed end zone) ──
         # Between the runway end point and the pavement exit, the

@@ -1578,10 +1578,10 @@ CLEARANCE_OBSTRUCTION_THRESHOLD_M = {
 # runway end, mirroring the cut-only RESA ramp that governs terrain that
 # rises.  The law itself (down-grade caps, grade-change rate, governed
 # length by approach class) lives in ``grade_law`` — this is only the
-# feature gate.  Default OFF until calibrated at the fixture airports
-# (docs/runway_end_skirt_plan.md M4 flips it on).
+# feature gate.  DEFAULT ON since 2026-07-05 (M4: KCLT calibration 0
+# findings, flank slivers resolved, EMAS constraint inference in).
 RUNWAY_END_SKIRT_ENABLED = (
-    _os.environ.get("O4_RUNWAY_END_SKIRT", "0") == "1")
+    _os.environ.get("O4_RUNWAY_END_SKIRT", "1") == "1")
 
 # Safety cap (m) on how far a clearance band reaches outward from the
 # pavement edge, bounding earthwork.  Must be >= the largest band we
