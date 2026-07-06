@@ -42,6 +42,90 @@ from shapely.geometry import Polygon
 
 _GEOM_EXC = (GEOSException, TopologicalError, ValueError, AttributeError)
 
+
+def repair_sliver_corners(layout, icao: str = "") -> int:
+    """Remove needle-tip ring vertices (interior angle below
+    ``config.SLIVER_ANGLE_THRESHOLD_DEG``) from airside shapes BEFORE the
+    final grade projection.
+
+    ``to_osm`` has always done this repair at emit — but that runs AFTER
+    the last law projection, so removing the needle merges two ring edges
+    into one the projection never enforced (SPJC 2026-07-06: two lawful
+    blend sub-edges became one 77 m ring edge at 1.21 % vs its 1.03 %
+    blend — the last actionable pair).  Same ordering law as emit
+    decimation: geometry passes precede the projection.  The emit-time
+    repair stays as the backstop for needles BORN at emit (canonical
+    interning + .11f truncation can sharpen a legal corner — KPHX 9.3°
+    → 0.36°); those still diverge, but the raw-geometry needles no
+    longer do.
+
+    ``node_altitudes`` stay index-aligned (the removed vertex's altitude
+    is dropped with it).  A ring that would degenerate below 4 vertices
+    is left alone.  Returns the number of vertices removed."""
+    from .config import SLIVER_ANGLE_THRESHOLD_DEG
+    cos_threshold = math.cos(math.radians(SLIVER_ANGLE_THRESHOLD_DEG))
+    n_removed = 0
+    for shape in layout.shapes:
+        if (shape.role not in _AIRSIDE_ROLES or shape.polygon is None
+                or shape.polygon.is_empty
+                or shape.polygon.geom_type != "Polygon"):
+            continue
+        ring = list(shape.polygon.exterior.coords)
+        ring_closed = bool(ring) and ring[0] == ring[-1]
+        if ring_closed:
+            ring = ring[:-1]
+        altitudes = None
+        if shape.node_altitudes and len(shape.node_altitudes) >= len(ring):
+            altitudes = list(shape.node_altitudes[:len(ring)])
+        changed = False
+        for _attempt in range(len(ring)):
+            m = len(ring)
+            if m < 4:
+                break
+            worst_vertex = None
+            worst_cos = cos_threshold
+            for k in range(m):
+                ax, ay = ring[(k - 1) % m]
+                bx, by = ring[k]
+                cx, cy = ring[(k + 1) % m]
+                v1x, v1y = ax - bx, ay - by
+                v2x, v2y = cx - bx, cy - by
+                n1 = math.hypot(v1x, v1y)
+                n2 = math.hypot(v2x, v2y)
+                if n1 < 1e-9 or n2 < 1e-9:
+                    continue
+                cos = (v1x * v2x + v1y * v2y) / (n1 * n2)
+                if cos > worst_cos:
+                    worst_cos = cos
+                    worst_vertex = k
+            if worst_vertex is None:
+                break
+            del ring[worst_vertex]
+            if altitudes is not None:
+                del altitudes[worst_vertex]
+            changed = True
+            n_removed += 1
+        if not changed:
+            continue
+        try:
+            repaired = Polygon(ring)
+            if not repaired.is_valid or repaired.is_empty:
+                continue    # emit-time backstop handles it
+        except _GEOM_EXC:
+            continue
+        shape.polygon = repaired
+        if altitudes is not None:
+            shape.node_altitudes = altitudes + [altitudes[0]]
+    if n_removed:
+        try:
+            import O4_UI_Utils as UI
+            UI.vprint(1, f"  [pav-builder] {icao}: pre-projection sliver "
+                         f"repair — removed {n_removed} needle "
+                         f"vertex(es).")
+        except Exception:
+            pass
+    return n_removed
+
 # Max perpendicular XY deviation of a removed vertex from the kept chord.
 XY_TOL_M = 0.02
 # Max |z - z_interpolated| of a removed vertex against the kept chord.
