@@ -1,3 +1,25 @@
+# STATUS — SESSION 20260706 (part 22): flex tear = [H,L,L,H] slope-
+# INVERSION bug (`558e000`) — HECA quarantine −75 %, READY FOR SIM TEST
+
+> **USER CORRECTION**: HECA has no crossings — the 'crossing seam'
+> attribution was wrong.  Trace found the real bug: the canonical-rect
+> 'ensure hi is higher' swap MIRRORS a piece whose slope the profile
+> inverted (flex dips do this routinely; latent since the seam
+> redistribute).  Inverted pieces now convert to node_altitudes.
+> **FLEX SCOREBOARD (O4_RUNWAY_FLEX=1 at HECA)**: actionable 11 (ZERO
+> runway pairs; the 11 = pre-existing service-road weld cluster),
+> quarantine 11,265→2,759 (−75 %), 57 demands / 200 m drained.
+> Gate-off: CYXY 0, suite 10F==base10.  Patch for the user's X-Plane
+> eyeball: /tmp/HECA_flexb2f.osm; production = O4_RUNWAY_FLEX=1 +
+> restart Ortho4XP + rebuild HECA tile.  In-sim spots: 05L↔05C corridor
+> aprons (30.131691,31.410624; 30.126324,31.413003), the flexed 05C
+> midfield (~30.1073,31.4077 — was the worst tear, now clean profile).
+> NEXT (Stage C, after visual sign-off): intermediate anchors join the
+> solve properly (SPLP displaced-threshold; remaining 2.7 k quarantine),
+> then default-on gates at KDFW/CYUL/SPLP.
+
+---
+
 # STATUS — SESSION 20260706 (part 21): FLEX B2 SHIPPED gate-off
 # (`cddd950`) — HECA quarantine −60 %, awaiting in-sim visual test
 
