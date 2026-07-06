@@ -1,3 +1,37 @@
+# STATUS — SESSION 20260705 (part 15c): **SPLP per-tile = 0, CYXY = 0** —
+# runway 0.1 m rounding retired + exact clamp-floor geometry (`d6d4284`);
+# test break-quarantine (`51dcbf4`)
+
+> **USER FLAGGED SPLP-14 AS SUSPECT — CONFIRMED, two real causes**:
+> (1) the runway family still emitted on the LEGACY 0.1 m grid (20 sites:
+> redistribute/regrade/runway_segments/tile_cut/seam_anchors) — ±5 cm per
+> endpoint = the whole 1.55-1.57 % class; all → 0.01 m.  (2)
+> runway_clamp_floor guaranteed pins vs the NEAREST axis point only (L1
+> vs L2 gap → lawful-floored pin 2.17 % from a runway-edge weld, both-
+> hard, unfixable); floor now = max over axis samples of profile(t) −
+> cap·distance(P, cross_section(t)) with half-width credit (persisted
+> per-profile pre-cut, cross-tile deterministic).
+> **SPLP SCOREBOARD NOTE**: measure SPLP PER-TILE (production path) —
+> the whole-airport lab build pins seams through a writer production
+> never uses.  Per-tile: 0 within both tiles.
+> **KDFW quiet re-measure (task 4b)**: 840.5 s at HEAD~ (solve 362.7,
+> final projection 21.1 s @ 22,740 nodes decimation-first), 41
+> actionable + 0 break, apt_mtime 1783220791.  NOT comparable to the
+> old 529 s (many feature commits between); no post-build hang
+> (watchdog clean).
+> **SCOREBOARD at d6d4284 (matching apt_mtimes)**: CYXY **0**+320 ·
+> SPJC 5+0 · SPLP **0** per-tile (2 cross 9 cm hairlines newly EXPOSED
+> by honest rounding; profile 1.61 % pre-existing) · HECA 17+11356 ·
+> KDFW 41+0.  Suite 11F/335P == base11; fast lane 7F.
+> **REMAINING CLASSES**: SPJC 3 tunnel_ramp (curved ramp chord-vs-arc
+> — ramp law anisotropy) + 2 apron small-excess; SPLP profile
+> anchors-as-floors reconciliation (longitudinal 1.61 %) + seam-cut
+> 0.85 m hairline corners; HECA 17 + break-region design review
+> (sampler script in session scratchpad); smoothing-aware lazy
+> certificates (soundness analysis first).
+
+---
+
 # STATUS — SESSION 20260705 (part 15b): **CYXY = 0 ACTIONABLE** — emit
 # decimation moved BEFORE final projection (`8ca25a3`)
 
