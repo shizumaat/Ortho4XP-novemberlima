@@ -48,6 +48,16 @@ between two contacts is infeasible at the current profiles, the
 profiles flex — strictly within the runway law (1.5 % / end zones /
 K-factor) and never past the certain anchors.
 
+**FLEX-LAST RULE (user 2026-07-06)**: the runway is the STIFFEST
+member and flexes ONLY when the connecting taxiways are already at
+their max caps.  Operationally: a contact's demand interval is the
+reach envelope computed with every route edge at its FULL legal
+budget — the envelope IS "taxiways at max cap" — and the profile
+flexes only to the NEAREST edge of that interval (zero when the
+current value is inside it).  The runway never moves to make taxi
+grades gentler, only to make an otherwise-infeasible connection
+feasible, by the minimum amount.
+
 Single-runway airports with no infeasible contacts: byte-identical
 behaviour (the flex solve is a no-op when all demands are satisfiable
 at the seeded profile).
