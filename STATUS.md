@@ -1,3 +1,78 @@
+# STATUS — SESSION 20260706 (part 26): HANDOVER — HECA-to-zero plan
+# (session end; pick up here)
+
+## State at HEAD (all gates green, suite 10F == /tmp/base10.txt)
+
+Actionable scoreboard (gate-off defaults): **CYXY 0 · SPJC 0 · SPLP 0
+per-tile · HECA 2 within + 2 plane**.  With `O4_RUNWAY_FLEX=1` at
+HECA: 11 actionable + 2,762 break-region (was 11,265 frozen).  KDFW 41
+(not re-measured since the runway rework — remeasure before trusting).
+ONE altitude representation end to end: per-vertex from creation,
+per-node in the OSM (hi/lo + cell_size retired, `3383040`); base
+Ortho4XP src untouched.
+
+## AWAITING USER: in-sim visual of flexed HECA
+`O4_RUNWAY_FLEX=1` + restart Ortho4XP + rebuild the tile.  Spots:
+05L↔05C corridor aprons (30.131691,31.410624; 30.126324,31.413003 —
+former 2 % quarantine blends), 05C midfield dip (~30.1073,31.4077).
+Verdict gates Stage C + default-on.
+
+## HECA-TO-ZERO PLAN (test_pavement_grade[HECA] measures GATE-OFF)
+
+The 4 gate-off pairs, fully diagnosed this session:
+1. **service_road #541 weld-authority conflict ×2** (18 %/2.78 m,
+   98.87↔99.38): building22 pad weld vs groundside mouth weld, both
+   values-AGREED (hard by the weld gate) but mutually conflicting — a
+   0.51 m ramp needs 10 m at 5 %, the sliver has 2.78.  FIRST PROBE:
+   why didn't `apply_service_road_dem_follow`'s break blend fire (both
+   ends are its anchors; floor>ceil should blend + export)?  Fix
+   ranked: (a) mouth reconciliation — ONE authority per mouth (the P4
+   flush-weld machinery should make the lot adopt the pad-adjacent
+   level); (b) road-graph break blend + export (honest quarantine);
+   (c) re-role/merge the sliver.
+2. **2 plane-gradient pairs** (apron 2.4 % @78.55 by building7;
+   junction 6.8 % @115.81 at runway 05C corners): triangle-surface
+   check — read `_check_plane_gradient` semantics first; likely shared-
+   corner consensus/co-location at the same weld neighborhoods.
+Then: green test → recut /tmp/base10.txt → base9.
+
+## FLEX ARC (after in-sim sign-off)
+- **Stage C**: intermediate anchors JOIN the solve — the fold-in
+  currently freezes crossing/shape-vert anchors at old values;
+  release them iteratively within the runway law.  Covers the SPLP
+  displaced-02-threshold (fixes test_runway_longitudinal[SPLP]) and
+  should eat into HECA's 2,762.
+- Provenance tool for remaining pockets (which anchors bind).
+- Default-on gates: KDFW/CYUL/SPLP counts + suite; flip
+  O4_RUNWAY_FLEX default; then reconcile the flex-on HECA 11.
+- Machinery map: docs/runway_flex_plan.md; hook =
+  solve.py::_apply_runway_flex_hook; profile ops =
+  runway_redistribute.apply_runway_flex / flex_slack_at (greedy-keep +
+  verify-and-relax are load-bearing — see commit cddd950/558e000).
+
+## TEST-ZERO CAMPAIGN REMAINDER (tasks #9-13, exact assertions in
+## the 2026-07-06 inventory)
+- CYXY spine-47 (5.9 % vs 5 % junction spines) — clears 2 tests.
+- CYXY budget lockstep (6/6919 edges, all at one vertex, ~2 % drift).
+- CYXY route-reach 4 + terrain-following (SW region 708.4 vs 714 —
+  the OPEN spine-rise-to-region item).
+- SPJC self-overlap (2 pairs, 9.6 m²) + route-band 3.
+- SPLP seam-cut conformance hairline (parallel chains 0.8 m apart,
+  9 cm) + the longitudinal red (→ Stage C).
+
+## GOTCHAS FOR THE NEW SESSION
+- /tmp gets purged: recreate /tmp/spjc_lab/full_build.py (template in
+  this session's transcript) + /tmp/base10.txt (regenerate: full suite
+  → FAILED lines sorted).  SPLP is measured PER-TILE.
+- Probe frames: check_grade._ll_to_m_factory without anchor= is the
+  MEAN frame; layout probes convert lat/lon via layout.ll_to_m.
+- solver_primitives.SLOPING_RECT_ROLES ≠ junction_rules' same-named
+  tuple (solver's includes service_road).
+- ORDERING LAW (×3 now): every value-moving or geometry pass runs
+  BEFORE final_grade_projection; anything after must be law-guarded.
+
+---
+
 # STATUS — SESSION 20260706 (part 25): hi/lo + cell_size emission
 # RETIRED entirely (`3383040`) — one altitude representation everywhere
 
