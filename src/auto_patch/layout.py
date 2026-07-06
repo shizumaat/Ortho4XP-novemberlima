@@ -41,9 +41,6 @@ from .pavement import strips as PS
 
 from .config import (
     SLIVER_ANGLE_THRESHOLD_DEG,
-    PATCH_SLOPE_CELL_SIZE_M,
-    RUNWAY_CELL_SIZE_M,
-    PATCH_SLOPE_PROFILE,
     TAXI_GRADE_BY_WIDTH,
     TAXI_GRADE_WIDTH_ROLES,
     taxiway_code_letter,
@@ -146,39 +143,6 @@ def high_low_from_corner_alts(corner_alts) -> "tuple[float, float]":
     return ((a[0] + a[3]) / 2.0, (a[1] + a[2]) / 2.0)
 
 
-def canonicalize_high_low_ring(
-    ext_nids: "list[int]", eh: float, el: float,
-) -> "tuple[list[int], float, float]":
-    """Return ``(ext_nids, high, low)`` with ``high >= low`` for a
-    4-corner sloped-rect emission, rotating the closed node ring by two
-    corners when the slope runs the "wrong" way.
-
-    The X-Plane patch parser reads ``altitude_high`` at corner pair
-    (0, 3) and ``altitude_low`` at (1, 2) PURELY BY POSITION
-    (``O4_Vector_Map.include_patches``: ``short_high = way[-2:]``,
-    ``short_low = way[1:3]``).  :func:`high_low_from_corner_alts` derives
-    ``(eh, el)`` from those same corners, so a rect whose (0, 3) end is
-    the LOWER one yields ``eh < el``.  That happens whenever a rect keeps
-    a fixed geometric corner order but its profile is non-monotonic —
-    e.g. a runway segment climbing out of an inter-runway-flex dip.  It
-    renders correctly (the interpolation ``high - profile(x)·(high-low)``
-    is sign-symmetric) but violates the documented ``[H, L, L, H]``
-    "high at corners 0,3" convention and is confusing to read.
-
-    Rotating a closed 4-corner ring by two corners
-    (``[n0,n1,n2,n3,n0] -> [n2,n3,n0,n1,n2]``) swaps which cross-edge
-    sits at the (0, 3) position while leaving the polygon — its
-    vertices, winding, area, and shared node ids — completely unchanged.
-    After the rotation the higher cross-edge is at (0, 3); emit the
-    swapped ``(el, eh)`` so ``altitude_high`` lands on it.  No-op when
-    already canonical or when the ring is not a single closed 4-corner
-    quad (the only form X-Plane accepts for ``altitude_high/low``).
-    """
-    if eh >= el or len(ext_nids) != 5:
-        return ext_nids, eh, el
-    corners = list(ext_nids[:4])
-    rotated = corners[2:] + corners[:2]
-    return rotated + [rotated[0]], el, eh
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -875,16 +839,6 @@ class PavementLayout:
             ROLE_STUB, ROLE_CROSS_CONNECTOR, ROLE_RUNWAY,
             ROLE_RUNWAY_CROSSING)
 
-        # (user 2026-06-04) A long sloping rect rendered with the linear "plane"
-        # Long-rect "spline" easing evaluated and REVERTED (user 2026-06-09):
-        # every sloping rect emits with the configured profile (plane).  The
-        # spline (3x²−2x³, flat at BOTH ends) is the wrong shape for
-        # slope→slope joints — it left residual kinks at the boundaries; the
-        # proper smoothing is the vertical-curve design (parabola micro-
-        # cascade at extrema, see vertical_curve_extrema).
-        def _slope_profile_for(poly) -> str:
-            return PATCH_SLOPE_PROFILE
-
         # Per-node altitude: nids of compound sloping shapes whose per-corner
         # altitudes are carried as per-NODE ``alt_abs`` tags (which stock
         # Ortho4XP reads), in place of a fork-only single-way tag.
@@ -963,105 +917,64 @@ class PavementLayout:
                         and shape_node_altitudes is None
                         and shape_altitude is not None):
                     tags["altitude"] = f"{float(shape_altitude):.2f}"
-                elif (n_open == 4
-                        and s.role in _RECT_PLANAR_ROLES
-                        # RUNWAY family always emits PER-NODE altitudes
-                        # (user 2026-07-06, superseding the 2026-05-23
-                        # keep-rects preference for runways): per-node
-                        # values are exact and human-editable in the
-                        # OSM, and a planar quad renders identically
-                        # with or without the hi/lo cell subdivision.
-                        and s.role not in (ROLE_RUNWAY,
-                                           ROLE_RUNWAY_CROSSING)
-                        and abs(open_alts[0] - open_alts[3])
-                                <= _RECT_COLLAPSE_TOL_M
-                        and abs(open_alts[1] - open_alts[2])
-                                <= _RECT_COLLAPSE_TOL_M):
-                    # A 4-corner RECT-role shape (boundary / taxi / runway)
-                    # stays a rect (user 2026-05-23: "rects stay rects;
-                    # node_altitudes only for compound sloping polygons").
-                    # The solver / per-node consensus can leave the
-                    # [H,L,L,H] axis-end pairs a few cm unequal (e.g. CYXY
-                    # taxiway G: high corners 713.3 vs 713.2) — which demotes
-                    # the planar rect to node_altitudes whether it was stored
-                    # as altitude_high/low OR already as node_altitudes.
-                    # When the corners still match [H,L,L,H] within
-                    # _RECT_COLLAPSE_TOL_M, collapse each axis-end pair (0&3
-                    # high, 1&2 low) to its mean and emit altitude_high/low
-                    # (or flat).  Genuinely twisted quads (0≉3 or 1≉2) fall
-                    # through to node_altitudes.
-                    eh, el = high_low_from_corner_alts(open_alts)
-                    if abs(eh - el) <= _CANON_EQ_TOL:
-                        tags["altitude"] = f"{(eh + el) / 2.0:.2f}"
-                    else:
-                        ext_nids, eh, el = canonicalize_high_low_ring(
-                            ext_nids, eh, el)
-                        tags["altitude_high"] = f"{eh:.2f}"
-                        tags["altitude_low"] = f"{el:.2f}"
-                        tags["cell_size"] = str(
-    RUNWAY_CELL_SIZE_M if s.role == ROLE_RUNWAY
-    else PATCH_SLOPE_CELL_SIZE_M)
-                        tags["profile"] = _slope_profile_for(s.polygon)
-                # Try flat first.
-                elif all_max - all_min <= _CANON_EQ_TOL:
-                    tags["altitude"] = (
-                        f"{sum(open_alts) / n_open:.2f}")
-                # Then 4-corner [H, L, L, H] sloping rect (never for
-                # the runway family — per-node by the 2026-07-06 ruling).
-                elif (n_open == 4
-                      and s.role not in (ROLE_RUNWAY,
-                                         ROLE_RUNWAY_CROSSING)
-                      and abs(open_alts[0] - open_alts[3])
-                              <= _CANON_EQ_TOL
-                      and abs(open_alts[1] - open_alts[2])
-                              <= _CANON_EQ_TOL
-                      and abs(open_alts[0] - open_alts[1]) > _CANON_EQ_TOL):
-                    eh, el = high_low_from_corner_alts(open_alts)
-                    ext_nids, eh, el = canonicalize_high_low_ring(
-                        ext_nids, eh, el)
-                    tags["altitude_high"] = f"{eh:.2f}"
-                    tags["altitude_low"] = f"{el:.2f}"
-                    tags["cell_size"] = str(
-    RUNWAY_CELL_SIZE_M if s.role == ROLE_RUNWAY
-    else PATCH_SLOPE_CELL_SIZE_M)
-                    tags["profile"] = _slope_profile_for(s.polygon)
                 else:
-                    # Compound sloping polygon: carry the per-corner altitudes
-                    # as per-NODE ``alt_abs`` tags (read by stock / older
-                    # Ortho4XP).  This way emits NO altitude way-tag; every one
-                    # of its vertices is stamped with its consensus altitude in
-                    # the node-writing pass below, so the upstream per-node
-                    # override (include_patches, applied to every non-
-                    # ``altitude_high/low`` way) fully specifies the ring.
-                    node_alt_abs_nids.update(ext_nids)
+                    # HI/LO EMISSION RETIRED (user 2026-07-06): every
+                    # sloped shape ships PER-NODE altitudes — exact,
+                    # human-editable, and rendering-identical for planar
+                    # quads (cell_size cross-cuts only re-interpolated
+                    # the plane two triangles already define).  The
+                    # near-planar rect-role VALUE COLLAPSE survives as
+                    # smoothing: cm-drifted [H,L,L,H] cross-edge pairs
+                    # (consensus / solver noise) still collapse to their
+                    # means so strip chains keep flat cross-edges — the
+                    # 'jagged boundary slope' artifact fix — but the
+                    # collapsed values now emit per-node like everything
+                    # else.
+                    if (n_open == 4
+                            and s.role in _RECT_PLANAR_ROLES
+                            and abs(open_alts[0] - open_alts[3])
+                                    <= _RECT_COLLAPSE_TOL_M
+                            and abs(open_alts[1] - open_alts[2])
+                                    <= _RECT_COLLAPSE_TOL_M):
+                        high_mean = (open_alts[0] + open_alts[3]) / 2.0
+                        low_mean = (open_alts[1] + open_alts[2]) / 2.0
+                        open_alts = [high_mean, low_mean,
+                                     low_mean, high_mean]
+                        for k, nid in enumerate(ext_nids[:-1]):
+                            node_id_to_consensus[nid] = open_alts[k]
+                    all_max = max(open_alts)
+                    all_min = min(open_alts)
+                    if all_max - all_min <= _CANON_EQ_TOL:
+                        tags["altitude"] = (
+                            f"{sum(open_alts) / n_open:.2f}")
+                    else:
+                        # Sloping polygon: carry the per-corner altitudes
+                        # as per-NODE ``alt_abs`` tags (read by stock /
+                        # older Ortho4XP).  This way emits NO altitude
+                        # way-tag; every one of its vertices is stamped
+                        # with its consensus altitude in the node-writing
+                        # pass below, so the upstream per-node override
+                        # (include_patches, applied to every non-
+                        # ``altitude_high/low`` way) fully specifies the
+                        # ring.
+                        node_alt_abs_nids.update(ext_nids)
             else:
                 # No per-corner consensus available (no shape
                 # contributed altitudes to these nodes).  Fall
                 # back to the source shape's own tags.
                 if (s.altitude_high is not None
                         and s.altitude_low is not None):
-                    # ``altitude_high``/``altitude_low`` is ONLY valid on
-                    # a 4-corner quad: Ortho4XP's encoder requires the
-                    # way to be exactly 5 node refs (4 corners + closing
-                    # repeat) and rejects anything else ("Wrong number
-                    # of nodes or non closed way for a altitude_high/
-                    # altitude_low polygon, skipped"), dropping the whole
-                    # shape.  If an upstream pass reshaped this sloped
-                    # rect into a non-quad without converting it to
-                    # ``node_altitudes``, emitting the slope tags here
-                    # would crash/skip the way in X-Plane.  Flatten to
-                    # the mean altitude instead — a valid, renderable
-                    # approximation that keeps the surface anchored.
+                    # hi/lo emission RETIRED (user 2026-07-06): a
+                    # 4-corner source rect carries its per-corner values
+                    # in the way-level ``node_altitudes`` tag (the
+                    # include_patches per-node form); a reshaped
+                    # non-quad flattens to the mean, as before.
                     if n_open == 4:
-                        ext_nids, eh, el = canonicalize_high_low_ring(
-                            ext_nids,
+                        corner_values = corner_alts_from_high_low(
                             float(s.altitude_high), float(s.altitude_low))
-                        tags["altitude_high"] = f"{eh:.2f}"
-                        tags["altitude_low"] = f"{el:.2f}"
-                        tags["cell_size"] = str(
-    RUNWAY_CELL_SIZE_M if s.role == ROLE_RUNWAY
-    else PATCH_SLOPE_CELL_SIZE_M)
-                        tags["profile"] = _slope_profile_for(s.polygon)
+                        tags["node_altitudes"] = ",".join(
+                            f"{value:.2f}" for value in
+                            corner_values + [corner_values[0]])
                     else:
                         tags["altitude"] = (
                             f"{(float(s.altitude_high) + float(s.altitude_low)) / 2.0:.2f}")
