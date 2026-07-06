@@ -1,3 +1,26 @@
+# STATUS — SESSION 20260706 (part 21): FLEX B2 SHIPPED gate-off
+# (`cddd950`) — HECA quarantine −60 %, awaiting in-sim visual test
+
+> **B2 (envelope demands over the whole profile)**: 59 demands drain
+> 250 of 360 m across all three 05-families; HECA break-region
+> 11,265→4,498; projection over-cap 12,086→6,160.  Three hard-won
+> mechanisms: GREEDY-KEEP target consistency (forcing dragged small
+> flexes past their slack → 2.8 m runway-internal steps), VERIFY-AND-
+> RELAX (jointly-infeasible target sets midpoint through
+> faa_hard_cap_pass → drop nearest target, re-solve from originals),
+> shape-vert fold-in as anchored intermediates.  Actionable 2→32 —
+> concentrated at RUNWAY-CROSSING seams: _resolve_runway_crossings
+> (elevation.py, pre-solve) interpolates crossing junctions from
+> PRE-flex profiles; shared verts re-impose post-flex.  **Stage C =
+> crossing values join the solve** (the ruling already covers this).
+> Test patch: /tmp/HECA_flexb2e.osm.  Gate O4_RUNWAY_FLEX default OFF;
+> enable for the in-sim build (restart Ortho4XP first — module cache).
+> In-sim look: the 05L↔05C corridor aprons (previous break spots
+> 30.131691,31.410624 / 30.126324,31.413003) and the crossing area
+> (~30.1073,31.4077 worst-tear neighborhood).
+
+---
+
 # STATUS — SESSION 20260706 (part 20): RUNWAY FLEX Stage B v1 built +
 # measured (`3a3d761`, gate OFF) — Stage B2 = envelope-level demands
 
