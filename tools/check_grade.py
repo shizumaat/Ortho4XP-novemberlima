@@ -1010,6 +1010,58 @@ def iter_shape_grade_constraints(
     return out
 
 
+def _check_runway_end_skirt_edges(ways: List[Way],
+                                  nodes: Dict[str, Tuple[float, float]],
+                                  ll_to_m) -> List[Violation]:
+    """DEM-free skirt-law reader on the EMITTED patch: every ring edge
+    of a ``runway_end_skirt`` way must stay within the law's maximum
+    down-grade (``grade_law.RUNWAY_END_SKIRT_MAX_DOWN_GRADE``).  By
+    construction the skirt surface never exceeds it in ANY direction —
+    band rows are level and the descent is rate-limited — so a steeper
+    emitted edge means the patch was corrupted after emission.  The
+    full DEM-aware floor/curvature law lives in
+    ``verification.check_runway_end_skirt``; this is the always-on
+    lockstep reader for emitted patches."""
+    from auto_patch.grade_law import RUNWAY_END_SKIRT_MAX_DOWN_GRADE
+    # Skirt altitudes emit at 0.1 m quantization — a pair carries up to
+    # ~0.1 m of rounding; padded slightly for float noise.
+    skirt_edge_noise_m = 0.15
+    out: List[Violation] = []
+    for w in ways:
+        if w.ref != "runway_end_skirt":
+            continue
+        ring = w.nids
+        for i in range(len(ring) - 1):
+            nid_a, nid_b = ring[i], ring[i + 1]
+            if nid_a not in nodes or nid_b not in nodes:
+                continue
+            ea = w.elevs[i] if i < len(w.elevs) else None
+            eb = w.elevs[i + 1] if i + 1 < len(w.elevs) else None
+            if ea is None or eb is None:
+                continue
+            xa, ya = ll_to_m(*nodes[nid_a])
+            xb, yb = ll_to_m(*nodes[nid_b])
+            dist = math.hypot(xb - xa, yb - ya)
+            if dist < 0.5:
+                continue
+            de = abs(float(ea) - float(eb))
+            allowance = (RUNWAY_END_SKIRT_MAX_DOWN_GRADE * dist
+                         + skirt_edge_noise_m)
+            if de <= allowance:
+                continue
+            grade = de / dist
+            out.append(Violation(
+                grade_pct=grade * 100,
+                excess_pct=(grade - RUNWAY_END_SKIRT_MAX_DOWN_GRADE) * 100,
+                distance_m=dist,
+                de_m=de,
+                way_a=w, way_b=w,
+                pt_a=(xa, ya), pt_b=(xb, yb),
+                elev_a=float(ea), elev_b=float(eb)))
+    out.sort(key=lambda v: -v.excess_pct)
+    return out
+
+
 def _check_within_shape(ways: List[Way],
                         nodes: Dict[str, Tuple[float, float]],
                         ll_to_m,
@@ -1603,6 +1655,11 @@ def run_checks(
     # grade_graph_validate.route_band_violations (see
     # docs/grade_law_consolidation_handover.md).  Reconstructing G from the
     # shipped OSM to confirm it here is the remaining "purist OSM-path" follow-up.
+
+    skirt_edges = _check_runway_end_skirt_edges(ways, nodes, ll_to_m)
+    _pv("RUNWAY-END SKIRT edge grade > law max down-grade",
+        skirt_edges, top_n)
+    within = within + skirt_edges
 
     cross = _check_cross_shape_proximity(
         vertices, ways, proximity_m, max_grade)

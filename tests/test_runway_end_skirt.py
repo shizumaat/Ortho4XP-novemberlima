@@ -718,6 +718,72 @@ class TestConstraintInference(SkirtHarness):
 
 
 # ──────────────────────────────────────────────────────────────────────
+# check_grade DEM-free skirt edge reader
+# ──────────────────────────────────────────────────────────────────────
+class TestCheckGradeSkirtReader:
+    @staticmethod
+    def _import_check_grade():
+        import os
+        import sys
+        tools_directory = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "tools")
+        if tools_directory not in sys.path:
+            sys.path.insert(0, tools_directory)
+        import check_grade
+        return check_grade
+
+    def _skirt_way(self, elevations):
+        check_grade = self._import_check_grade()
+        n = len(elevations)
+        nids = [f"n{i}" for i in range(n)] + ["n0"]
+        return check_grade.Way(
+            wid="w1", role="runway_clearance", ref="runway_end_skirt",
+            aeroway="aerodrome", nids=nids,
+            elevs=list(elevations) + [elevations[0]], tags={})
+
+    @staticmethod
+    def _nodes(points):
+        import math
+        from auto_patch.layout import R_EARTH
+        return {f"n{i}": (math.degrees(y / R_EARTH),
+                          math.degrees(x / R_EARTH))
+                for i, (x, y) in enumerate(points)}
+
+    @staticmethod
+    def _ll_to_m(lat, lon):
+        import math
+        from auto_patch.layout import R_EARTH
+        return (math.radians(lon) * R_EARTH, math.radians(lat) * R_EARTH)
+
+    def test_lawful_skirt_ring_passes(self):
+        check_grade = self._import_check_grade()
+        # 20 m wide band descending 5 % along +x over 20 m: Δz = 1.0.
+        way = self._skirt_way([100.0, 99.0, 99.0, 100.0])
+        nodes = self._nodes([(0, 0), (20, 0), (20, 30), (0, 30)])
+        assert check_grade._check_runway_end_skirt_edges(
+            [way], nodes, self._ll_to_m) == []
+
+    def test_over_steep_edge_flags(self):
+        check_grade = self._import_check_grade()
+        # 8 % over 20 m — beyond the 5 % law cap + noise.
+        way = self._skirt_way([100.0, 98.4, 98.4, 100.0])
+        nodes = self._nodes([(0, 0), (20, 0), (20, 30), (0, 30)])
+        violations = check_grade._check_runway_end_skirt_edges(
+            [way], nodes, self._ll_to_m)
+        assert len(violations) == 2   # both long edges
+        assert violations[0].grade_pct == pytest.approx(8.0, abs=0.1)
+
+    def test_non_skirt_ways_ignored(self):
+        check_grade = self._import_check_grade()
+        way = self._skirt_way([100.0, 90.0, 90.0, 100.0])
+        way.ref = "surface_clearance"
+        nodes = self._nodes([(0, 0), (20, 0), (20, 30), (0, 30)])
+        assert check_grade._check_runway_end_skirt_edges(
+            [way], nodes, self._ll_to_m) == []
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Fixture airports: validator smoke + gate-off baseline capture
 # ──────────────────────────────────────────────────────────────────────
 class TestSkirtValidatorAtFixtures:
