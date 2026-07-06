@@ -697,19 +697,18 @@ def flex_slack_at(profile: dict, t: float, direction: float) -> float:
     axis_len = math.sqrt(profile['axis_len2'])
     current = _interp_profile(fractions, elevs, t)
 
-    # certain anchors: FIRST/LAST anchored samples (threshold ends,
-    # incl. displaced positions when they are the extremes) + seams.
-    anchored_positions = [k for k, a in enumerate(anchored) if a]
-    certain: List[int] = []
-    if anchored_positions:
-        certain.append(anchored_positions[0])
-        certain.append(anchored_positions[-1])
-    for k, frac in enumerate(fractions):
-        if any(abs(frac - st) < 1e-6 for st in seam_t):
-            certain.append(k)
+    # Bound against EVERY anchored sample — not only the certain ones
+    # (thresholds + seams).  Intermediate anchors (crossing
+    # reconciliations) are negotiable by the ruling, but until Stage C
+    # solves them jointly they stay ANCHORED through the flex re-solve,
+    # and a target that contradicts one bakes a step INSIDE the runway
+    # (HECA B2 first cut: 75 runway-internal pairs, 2.8 m over 17 m,
+    # where flexed targets sat beside frozen crossing anchors).
+    del seam_t  # certain/intermediate distinction returns in Stage C
+    bounding: List[int] = [k for k, a in enumerate(anchored) if a]
 
     slack = float("inf")
-    for k in set(certain):
+    for k in set(bounding):
         distance = abs(t - fractions[k]) * axis_len
         budget = MAX_RUNWAY_GRADE * distance
         current_diff = (current - elevs[k]) * direction
@@ -746,34 +745,112 @@ def apply_runway_flex(layout, demands: Dict[str, list]) -> Dict[str, list]:
         shapes = shapes_by_ref.get(ref)
         if profile is None or not shapes or not contact_list:
             continue
-        fractions = list(profile['fractions'])
-        elevs = list(profile['elevs'])
-        anchored = list(profile.get('anchored')
-                        or [False] * len(fractions))
+        original_fractions = list(profile['fractions'])
+        original_elevs = list(profile['elevs'])
+        original_anchored = list(profile.get('anchored')
+                                 or [False] * len(original_fractions))
         axis_len = math.sqrt(profile['axis_len2'])
-        _insert_flex = [(t, v) for (t, v) in contact_list
-                        if 0.0 < t < 1.0]
-        for t, v in sorted(_insert_flex):
-            placed = False
-            for k, frac in enumerate(fractions):
-                if abs(frac - t) < 1e-3:
-                    elevs[k] = v
-                    anchored[k] = True
-                    placed = True
-                    break
-            if not placed:
-                insert_at = next((k for k, frac in enumerate(fractions)
-                                  if frac > t), len(fractions))
-                fractions.insert(insert_at, t)
-                elevs.insert(insert_at, v)
-                anchored.insert(insert_at, True)
-        faa_joint_solve(
-            fractions, elevs, anchored, axis_len,
-            blast_a=float(profile.get('blast_a_m') or 0.0),
-            blast_b=float(profile.get('blast_b_m') or 0.0),
-            grade_cap=MAX_RUNWAY_GRADE,
-            end_grade_cap=RUNWAY_END_GRADE,
-            max_dg_per_m=MAX_RUNWAY_GRADE_CHANGE_PER_M)
+        ax_a_x, ax_a_y = profile['axis_a']
+        ax_dx, ax_dy = profile['axis_d']
+        # CROSSING-RECONCILED verts live only in the SHAPES (the
+        # reconciliation pass runs after the profile persists): any ring
+        # vertex whose value deviates from the profile is such an
+        # intermediate anchor.  Fold each into the arrays as ANCHORED
+        # (dedup by t) so the flex respects it and the shape re-eval
+        # can't stomp it — the 05C×crossing tear (HECA B2: profile
+        # evaluation wrote 99.03 over the reconciled 106.49 while the
+        # partner kept it → an 8 m tear).  Stage C makes these solvable.
+        for s in shapes:
+            ring = list(s.polygon.exterior.coords)
+            ring_open = (ring[:-1] if ring and ring[0] == ring[-1]
+                         else ring)
+            alts = s.node_altitudes or []
+            if not alts or len(alts) < len(ring_open):
+                continue
+            for k, (x, y) in enumerate(ring_open):
+                t = ((x - ax_a_x) * ax_dx + (y - ax_a_y) * ax_dy)                     / profile['axis_len2']
+                if not (0.0 < t < 1.0):
+                    continue
+                value = float(alts[k])
+                if abs(value - _interp_profile(original_fractions,
+                                               original_elevs, t)) <= 0.05:
+                    continue
+                matched = False
+                for j, frac in enumerate(original_fractions):
+                    if abs(frac - t) < 1e-3:
+                        original_elevs[j] = value
+                        original_anchored[j] = True
+                        matched = True
+                        break
+                if not matched:
+                    insert_at = next(
+                        (j for j, frac in enumerate(original_fractions)
+                         if frac > t), len(original_fractions))
+                    original_fractions.insert(insert_at, t)
+                    original_elevs.insert(insert_at, value)
+                    original_anchored.insert(insert_at, True)
+        pending = sorted((t, v) for (t, v) in contact_list
+                         if 0.0 < t < 1.0)
+
+        def _solve_with(target_list):
+            fractions = list(original_fractions)
+            elevs = list(original_elevs)
+            anchored = list(original_anchored)
+            for t, v in target_list:
+                placed = False
+                for k, frac in enumerate(fractions):
+                    if abs(frac - t) < 1e-3:
+                        elevs[k] = v
+                        anchored[k] = True
+                        placed = True
+                        break
+                if not placed:
+                    insert_at = next(
+                        (k for k, frac in enumerate(fractions)
+                         if frac > t), len(fractions))
+                    fractions.insert(insert_at, t)
+                    elevs.insert(insert_at, v)
+                    anchored.insert(insert_at, True)
+            faa_joint_solve(
+                fractions, elevs, anchored, axis_len,
+                blast_a=float(profile.get('blast_a_m') or 0.0),
+                blast_b=float(profile.get('blast_b_m') or 0.0),
+                grade_cap=MAX_RUNWAY_GRADE,
+                end_grade_cap=RUNWAY_END_GRADE,
+                max_dg_per_m=MAX_RUNWAY_GRADE_CHANGE_PER_M)
+            return fractions, elevs, anchored
+
+        def _worst_over_cap(fractions, elevs):
+            worst = None
+            for k in range(1, len(fractions)):
+                run = (fractions[k] - fractions[k - 1]) * axis_len
+                if run < 0.5:
+                    continue
+                grade = abs(elevs[k] - elevs[k - 1]) / run
+                excess = grade - MAX_RUNWAY_GRADE - 1e-4
+                if excess > 0 and (worst is None or excess > worst[0]):
+                    midpoint = 0.5 * (fractions[k] + fractions[k - 1])
+                    worst = (excess, midpoint)
+            return worst
+
+        # VERIFY-AND-RELAX (2026-07-06): a jointly-infeasible target set
+        # leaves faa_hard_cap_pass midpointing squeezed free samples —
+        # over-cap segments INSIDE the runway (HECA B2: 05L +7.5 %/2.5 m,
+        # 05C +2.0 %/538 m).  The flex must never trade taxi feasibility
+        # for runway law: while the re-solved profile has any over-cap
+        # segment, drop the target nearest the worst violation and
+        # re-solve from the ORIGINAL arrays.  Worst case = no flex.
+        while True:
+            fractions, elevs, anchored = _solve_with(pending)
+            worst = _worst_over_cap(fractions, elevs)
+            if worst is None or not pending:
+                break
+            _excess, midpoint = worst
+            drop_index = min(range(len(pending)),
+                             key=lambda k: abs(pending[k][0] - midpoint))
+            pending.pop(drop_index)
+        if _worst_over_cap(fractions, elevs) is not None:
+            continue        # even target-free re-solve over cap: keep as-was
         profile['fractions'] = list(fractions)
         profile['elevs'] = list(elevs)
         profile['anchored'] = list(anchored)

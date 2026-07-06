@@ -25,18 +25,19 @@ from .one_solve import one_profile_solve
 
 def _apply_runway_flex_hook(layout, icao, nodes, bucket_to_idx, elev,
                             base_hard, shape_constraints, G) -> int:
-    """RUNWAY FLEX Stage B (docs/runway_flex_plan.md).  Returns the
-    number of contacts flexed (0 = nothing to do, graph untouched).
+    """RUNWAY FLEX Stage B2 (docs/runway_flex_plan.md).  Returns the
+    number of envelope demands flexed (0 = nothing to do).
 
-    1. Budget-metric Dijkstra between all runway-contact anchors over
-       the law graph at FULL legal budgets (taxiways at max cap).
-    2. Pairs whose value gap exceeds the path budget are infeasible by
-       declaration; the DEFICIT is split between the two runways in
-       proportion to each profile's certain-anchor slack
-       (``runway_redistribute.flex_slack_at``) and applied through
-       ``apply_runway_flex`` (FAA gates re-run per profile).
-    3. Runway node seed values + the runway-join anchor map are
-       re-derived from the flexed shapes.
+    Per runway: seed a value-propagating envelope from ALL OTHER hard
+    anchors (other runways' nodes + tile-seam pins) through the law
+    graph at FULL legal budgets — the FLEX-LAST condition (taxiways at
+    max cap).  Every own node outside its [floor, ceil] is a DEMAND at
+    the interval edge (the minimum move); demands thin to ~80 m axis
+    bins, clamp to the profile's certain-anchor slack
+    (``flex_slack_at``), stay runway-law-consistent between bins, and
+    apply through ``apply_runway_flex`` (FAA gates re-run).  Profiles
+    iterate toward mutual feasibility (≤3 rounds); runway node seeds +
+    the runway-join anchor map re-derive from the flexed shapes.
     """
     import heapq as _heapq
     from auto_patch import grade_graph as _GGf
@@ -52,27 +53,6 @@ def _apply_runway_flex_hook(layout, icao, nodes, bucket_to_idx, elev,
     contacts = {i: float(v) for i, v in G.runway_anchor.items() if i < n}
     if len(contacts) < 2:
         return 0
-
-    # contact → owning profile ref + axis fraction (nearest axis within
-    # the runway's half-width).
-    contact_owner: dict = {}
-    for i in contacts:
-        x, y = nodes[i]
-        best = None
-        for ref, p in profiles.items():
-            ax_x, ax_y = p['axis_a']
-            dx, dy = p['axis_d']
-            axis_len2 = p['axis_len2']
-            t = ((x - ax_x) * dx + (y - ax_y) * dy) / axis_len2
-            t_clamped = min(1.0, max(0.0, t))
-            px = ax_x + t_clamped * dx
-            py = ax_y + t_clamped * dy
-            lateral = _math.hypot(x - px, y - py)
-            margin = float(p.get('half_width_m', 30.0)) + 25.0
-            if lateral <= margin and (best is None or lateral < best[0]):
-                best = (lateral, ref, t_clamped)
-        if best is not None:
-            contact_owner[i] = (best[1], best[2])
 
     # full-budget adjacency (the law graph = taxiways at max cap).
     adjacency: dict = {}
@@ -91,101 +71,182 @@ def _apply_runway_flex_hook(layout, icao, nodes, bucket_to_idx, elev,
             d = _GGf._dist(G.pos.get(a), G.pos.get(b))
             _add_edge(a, b, cap.at(d, 0.0))
 
-    def _budget_reach(source):
-        best = {source: 0.0}
-        pq = [(0.0, source)]
-        while pq:
-            cost, k = _heapq.heappop(pq)
-            if cost > best.get(k, float("inf")):
+    # ── STAGE B2: envelope-level demands along the WHOLE profile ─────
+    # (contact-pair flex drained the contact deficit but the pockets
+    # press against every runway node — 2026-07-06 measurement).
+    from auto_patch.runway_redistribute import _interp_profile
+    from auto_patch.pavement.runway_segments import (
+        MAX_RUNWAY_GRADE as _RWY_CAP)
+
+    cps = layout.canonical_points
+
+    def _runway_nodes_for(ref):
+        node_set = set()
+        for s in layout.shapes:
+            if (s.role != ROLE_RUNWAY or (s.ref or "") != ref
+                    or s.polygon is None or s.polygon.is_empty):
                 continue
+            ring = list(s.polygon.exterior.coords)
+            for (x, y) in (ring[:-1] if ring and ring[0] == ring[-1]
+                           else ring):
+                i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+                if i is not None and i < n:
+                    node_set.add(i)
+        return node_set
+
+    runway_nodes_by_ref = {ref: _runway_nodes_for(ref)
+                           for ref in profiles}
+
+    def _reseed_runway_values(ref):
+        for s in layout.shapes:
+            if (s.role != ROLE_RUNWAY or (s.ref or "") != ref
+                    or s.polygon is None or s.polygon.is_empty):
+                continue
+            ring = list(s.polygon.exterior.coords)
+            ring_open = (ring[:-1] if ring and ring[0] == ring[-1]
+                         else ring)
+            if s.node_altitudes and len(s.node_altitudes) >= len(ring_open):
+                per_vertex = s.node_altitudes
+            elif (s.altitude_high is not None
+                    and s.altitude_low is not None
+                    and len(ring_open) == 4):
+                per_vertex = [s.altitude_high, s.altitude_low,
+                              s.altitude_low, s.altitude_high]
+            elif s.altitude is not None:
+                per_vertex = [float(s.altitude)] * len(ring_open)
+            else:
+                continue
+            for (x, y), value in zip(ring_open, per_vertex):
+                i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+                if i is not None and i < n and base_hard[i]:
+                    elev[i] = float(value)
+
+    def _value_envelope(seeds, sign):
+        """ceil (sign=+1): min over seeds of value + path budget;
+        floor (sign=−1): max of value − path budget.  Strict pop guard
+        (no epsilon) — the lazy-Dijkstra re-expansion lesson."""
+        best: dict = {}
+        pq = [((v if sign > 0 else -v), i) for i, v in seeds.items()]
+        _heapq.heapify(pq)
+        while pq:
+            key, k = _heapq.heappop(pq)
+            if k in best:
+                continue
+            best[k] = key if sign > 0 else -key
             for (j, budget) in adjacency.get(k, ()):
-                nc = cost + budget
-                if nc < best.get(j, float("inf")):
-                    best[j] = nc
-                    _heapq.heappush(pq, (nc, j))
+                if j in best:
+                    continue
+                nt = best[k] + sign * budget
+                _heapq.heappush(pq, ((nt if sign > 0 else -nt), j))
         return best
 
-    contact_list = sorted(contacts)
-    demands: dict = {}
-    n_pairs = 0
+    _BIN_M = 80.0
+    _DEMAND_TOL_M = 0.05
     total_deficit = total_drained = 0.0
-    for si, source in enumerate(contact_list):
-        if source not in contact_owner:
-            continue
-        reach = _budget_reach(source)
-        for target in contact_list[si + 1:]:
-            if target not in reach or target not in contact_owner:
+    n_demands = 0
+    flexed_refs: set = set()
+    for _round in range(3):
+        round_flexed = False
+        for ref, own_nodes in runway_nodes_by_ref.items():
+            if not own_nodes:
                 continue
-            ref_a, t_a = contact_owner[source]
-            ref_b, t_b = contact_owner[target]
-            if ref_a == ref_b:
-                continue     # same profile: the runway law covers it
-            deficit = abs(contacts[source] - contacts[target]) \
-                - reach[target]
-            if deficit <= 0.05:
+            profile = profiles.get(ref)
+            if profile is None:
                 continue
-            n_pairs += 1
-            total_deficit += deficit
-            # split by certain-anchor slack; higher side moves DOWN.
-            va, vb = contacts[source], contacts[target]
-            direction_a = -1.0 if va > vb else 1.0
-            slack_a = flex_slack_at(profiles[ref_a], t_a, direction_a)
-            slack_b = flex_slack_at(profiles[ref_b], t_b, -direction_a)
-            available = slack_a + slack_b
-            if available <= 0.01:
+            seeds = {i: elev[i] for i in range(n)
+                     if base_hard[i] and i not in own_nodes}
+            if not seeds:
                 continue
-            drain = min(deficit, available)
-            move_a = drain * (slack_a / available)
-            move_b = drain - move_a
-            total_drained += drain
-            demands.setdefault(ref_a, []).append(
-                (t_a, va + direction_a * move_a))
-            demands.setdefault(ref_b, []).append(
-                (t_b, vb - direction_a * move_b))
+            ceil_env = _value_envelope(seeds, +1)
+            floor_env = _value_envelope(seeds, -1)
+            ax_x, ax_y = profile['axis_a']
+            dx, dy = profile['axis_d']
+            axis_len2 = profile['axis_len2']
+            axis_len = _math.sqrt(axis_len2)
+            # per-bin worst demand: (deficit, t, target_value)
+            bins: dict = {}
+            for i in own_nodes:
+                value = elev[i]
+                hi = ceil_env.get(i)
+                lo = floor_env.get(i)
+                target = None
+                if hi is not None and value > hi + _DEMAND_TOL_M:
+                    target = hi
+                elif lo is not None and value < lo - _DEMAND_TOL_M:
+                    target = lo
+                if target is None:
+                    continue
+                x, y = nodes[i]
+                t = ((x - ax_x) * dx + (y - ax_y) * dy) / axis_len2
+                if not (0.0 < t < 1.0):
+                    continue
+                deficit = abs(value - target)
+                bin_key = int(t * axis_len / _BIN_M)
+                if (bin_key not in bins
+                        or deficit > bins[bin_key][0]):
+                    bins[bin_key] = (deficit, t, target)
+            if not bins:
+                continue
+            # slack-clamp each target, then make consecutive targets
+            # runway-law-consistent (anchoring mutually-infeasible
+            # targets would bake an over-cap profile).
+            candidates = []
+            for (deficit, t, target) in bins.values():
+                current = _interp_profile(profile['fractions'],
+                                          profile['elevs'], t)
+                direction = 1.0 if target > current else -1.0
+                slack = flex_slack_at(profile, t, direction)
+                move = min(abs(target - current), slack)
+                if move <= 0.01:
+                    continue
+                candidates.append((deficit, t,
+                                   current + direction * move, move))
+            if not candidates:
+                continue
+            # Mutual consistency by GREEDY KEEP, largest deficit first:
+            # a target inconsistent with an already-kept one (over the
+            # runway cap between their axis positions) is DROPPED, not
+            # forced — forcing dragged a small flex metres past its own
+            # slack (HECA B2 first cut: a 2.8 m step INSIDE 05L/23R).
+            # Dropped demands retry next round against moved profiles.
+            candidates.sort(reverse=True)
+            kept = []
+            for (deficit, t, value, move) in candidates:
+                consistent = all(
+                    abs(value - kept_value)
+                    <= _RWY_CAP * abs(t - kept_t) * axis_len + 1e-6
+                    for (kept_t, kept_value) in kept)
+                if not consistent:
+                    continue
+                kept.append((t, value))
+                total_deficit += deficit
+                total_drained += move
+            if not kept:
+                continue
+            targets = sorted(kept)
+            n_demands += len(targets)
+            apply_runway_flex(layout, {ref: targets})
+            _reseed_runway_values(ref)
+            flexed_refs.add(ref)
+            round_flexed = True
+        if not round_flexed:
+            break
 
-    if not demands:
+    if not flexed_refs:
         return 0
 
-    achieved = apply_runway_flex(layout, demands)
-    n_contacts = sum(len(v) for v in achieved.values())
-
-    # Re-seed runway node values from the flexed shapes, then re-derive
-    # the runway-join anchor map (values changed; positions did not).
-    cps = layout.canonical_points
-    for s in layout.shapes:
-        if (s.role != ROLE_RUNWAY or s.polygon is None
-                or s.polygon.is_empty):
-            continue
-        ring = list(s.polygon.exterior.coords)
-        ring_open = (ring[:-1] if ring and ring[0] == ring[-1]
-                     else ring)
-        if s.node_altitudes and len(s.node_altitudes) >= len(ring_open):
-            per_vertex = s.node_altitudes
-        elif (s.altitude_high is not None and s.altitude_low is not None
-                and len(ring_open) == 4):
-            per_vertex = [s.altitude_high, s.altitude_low,
-                          s.altitude_low, s.altitude_high]
-        elif s.altitude is not None:
-            per_vertex = [float(s.altitude)] * len(ring_open)
-        else:
-            continue
-        for (x, y), value in zip(ring_open, per_vertex):
-            i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
-            if i is not None and i < n and base_hard[i]:
-                elev[i] = float(value)
     G.runway_anchor.clear()
     _GGf._runway_anchors(layout, G, bucket_to_idx)
 
     try:
         import O4_UI_Utils as _UIf
-        _UIf.vprint(1, f"  [pav-builder] {icao}: runway flex — "
-                       f"{n_pairs} infeasible contact pair(s), "
+        _UIf.vprint(1, f"  [pav-builder] {icao}: runway flex (B2) — "
+                       f"{n_demands} envelope demand(s), "
                        f"{total_drained:.2f} of {total_deficit:.2f} m "
-                       f"drained across {n_contacts} contact(s) "
-                       f"({', '.join(sorted(achieved))}).")
+                       f"drained on {', '.join(sorted(flexed_refs))}.")
     except Exception:
         pass
-    return n_contacts
+    return n_demands
 
 
 def solve_route_profile(layout, icao: str,
