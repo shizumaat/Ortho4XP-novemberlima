@@ -1,3 +1,17 @@
+# STATUS — SESSION 20260706 (part 25): hi/lo + cell_size emission
+# RETIRED entirely (`3383040`) — one altitude representation everywhere
+
+> to_osm's last hi/lo emitters (boundary ribbons, tunnel ramps,
+> taxiway_clearance, stray 4-corner aprons) now ship per-node alt_abs;
+> no-consensus fallback = way-level node_altitudes tag; near-planar
+> VALUE collapse kept as smoothing (emitted per-node);
+> canonicalize_high_low_ring / _slope_profile_for / cell_size+profile
+> imports deleted; test_layout invariants flipped (no legacy slope
+> way-tags, per-node values preserved).  Zero legacy tags in patches.
+> GATES: CYXY 0 / SPJC 0 / HECA flex 11+2,762 hold; suite 10F==base10.
+
+---
+
 # STATUS — SESSION 20260706 (part 24): runways per-vertex from BIRTH +
 # per-node OSM emission (`a7de0f6`, user rulings)
 
