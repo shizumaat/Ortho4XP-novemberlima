@@ -345,6 +345,16 @@ BUILDING_CLOSE_MIN_PIECE_M2 = 2000.0
 # DSF slabs (true 4-corner rects) stay ~5 verts regardless.
 TERMINAL_SIMPLIFY_TOL_M = 1.0
 
+# SURFACE-attribute classification of DSF draped polygons (user
+# 2026-07-05): resolve each POLYGON_DEF ``.pol`` resource (pack file,
+# else the library.txt virtual→physical map) and read its declared
+# ``SURFACE`` — asphalt/concrete is pavement REGARDLESS of the resource
+# name, a declared soft surface (grass/dirt/gravel/…) vetoes it, and
+# resources with no SURFACE fall back to the material-token name
+# heuristics below.  See ``dsf_reader._classify_pavement_def``.
+DSF_SURFACE_POLYGONS = (
+    _os_early.environ.get("O4_DSF_SURFACE_POLYGONS", "1") == "1")
+
 # Third-party DSF pavement descriptors (user 2026-06-10, KPHX south
 # aprons): a third-party ``.pol`` is trusted as BASE pavement when its
 # path contains one of these material descriptors — the common naming

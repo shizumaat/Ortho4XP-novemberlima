@@ -1060,7 +1060,8 @@ def build_airport_pavement(icao: str, xplane_root: str,
             if dsf is None or dsf in seen_dsf:
                 continue
             seen_dsf.add(dsf)
-            for outer, holes, def_path in _DSFR.read_dsf_pavements(dsf):
+            for outer, holes, def_path in _DSFR.read_dsf_pavements(
+                    dsf, xplane_root=xplane_root):
                 if len(outer) < 3:
                     continue
                 try:

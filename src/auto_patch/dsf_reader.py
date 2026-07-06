@@ -157,6 +157,115 @@ def _is_pavement_def(path: str) -> bool:
     return False
 
 
+# ── SURFACE-attribute classification (user 2026-07-05) ───────────────
+# The NAME heuristics above miss real pavement whose resource path
+# carries no material token — but the ``.pol`` resource ITSELF declares
+# what it is: a draped polygon with ``SURFACE asphalt`` / ``SURFACE
+# concrete`` is hard pavement to X-Plane's own physics, and one with
+# ``SURFACE grass|dirt|gravel|…`` is ground texture no matter how its
+# path reads.  So the classifier now resolves the POLYGON_DEF resource
+# (pack-relative file, else the ``library.txt`` virtual→physical map)
+# and reads its SURFACE attribute:
+#
+#   * SURFACE asphalt/concrete  → pavement (regardless of the name);
+#   * SURFACE anything-else    → NOT pavement (declared soft — vetoes
+#     even a material-token name like ``.../concrete_edge_grass.pol``);
+#   * no SURFACE / unresolvable → fall back to the name heuristics.
+#
+# The pipeline's geometric overlay gate (≥ 80 % inside the apt.dat
+# union → dropped) still applies afterwards, so a tinted overlay ON
+# apt.dat pavement that declares SURFACE asphalt (they often do) never
+# duplicates the layout.  Gate: O4_DSF_SURFACE_POLYGONS (default on).
+_HARD_SURFACE_VALUES = frozenset({"asphalt", "concrete"})
+
+# Decorative namespaces/tokens veto BEFORE the SURFACE attribute is
+# consulted: painted overlays (runway signs, safety-area stripes,
+# taxi lines) routinely declare ``SURFACE asphalt|concrete`` because
+# their authors match the pavement they sit on — admitting them mints
+# 4 m² "pavement" sign patches on grass shoulders (KCLT ships 56
+# DrapedRwySigns placements with SURFACE concrete).  These are the
+# decorative tokens of the name filter WITHOUT the terrain words —
+# a terrain-worded path with a declared hard surface is trusted.
+_DECORATIVE_SKIP_TOKENS = _PAVEMENT_SKIP + (
+    "sign", "line", "marking", "decal", "paint", "logo",
+    "grunge", "stain", "skid", "crack_line",
+)
+
+# Memoized per (def_path, pack_root, xplane_root): parsing the same
+# ``.pol`` once per process, not once per POLYGON_DEF reference.
+_surface_attribute_cache: dict[tuple[str, str, str], str | None] = {}
+
+
+def _resource_surface_attribute(def_path: str,
+                                pack_root: str | None,
+                                xplane_root: str | None) -> str | None:
+    """The ``SURFACE`` value declared by a draped-polygon ``.pol``
+    resource, lower-cased — or ``None`` when the resource is not a
+    ``.pol``, cannot be resolved to a file, or declares no SURFACE.
+
+    Resolution order mirrors X-Plane: a pack-relative file wins, else
+    the ``library.txt`` virtual→physical map (``agp_reader``'s memoized
+    index)."""
+    key = (def_path, pack_root or "", xplane_root or "")
+    if key in _surface_attribute_cache:
+        return _surface_attribute_cache[key]
+    value: str | None = None
+    if def_path.lower().endswith(".pol"):
+        physical = None
+        if pack_root:
+            candidate = os.path.join(pack_root, def_path)
+            if os.path.isfile(candidate):
+                physical = candidate
+        if physical is None and xplane_root:
+            try:
+                from .agp_reader import resolve_library_path
+                physical = resolve_library_path(def_path, xplane_root)
+            except (OSError, ValueError):
+                physical = None
+        if physical is not None and os.path.isfile(physical):
+            try:
+                with open(physical, "r", errors="ignore") as handle:
+                    for line in handle:
+                        tokens = line.split()
+                        if tokens and tokens[0].upper() == "SURFACE" \
+                                and len(tokens) > 1:
+                            value = tokens[1].lower()
+                            break
+            except OSError:
+                value = None
+    _surface_attribute_cache[key] = value
+    return value
+
+
+def _classify_pavement_def(def_path: str,
+                           pack_root: str | None = None,
+                           xplane_root: str | None = None) -> bool:
+    """SURFACE-attribute-first pavement classification (falls back to
+    the ``_is_pavement_def`` name heuristics — see the section comment
+    above).  Decorative-namespace defs are vetoed before SURFACE is
+    consulted (painted overlays declare the surface they sit ON)."""
+    from .config import DSF_SURFACE_POLYGONS
+    if DSF_SURFACE_POLYGONS:
+        p = def_path.lower()
+        if any(t in p for t in _DECORATIVE_SKIP_TOKENS):
+            return False
+        surface = _resource_surface_attribute(
+            def_path, pack_root, xplane_root)
+        if surface is not None:
+            return surface in _HARD_SURFACE_VALUES
+    return _is_pavement_def(def_path)
+
+
+def _pack_root_for_dsf(dsf_path: str) -> str | None:
+    """Scenery-pack directory a DSF belongs to
+    (``<pack>/Earth nav data/<subdir>/<tile>.dsf`` → ``<pack>``)."""
+    try:
+        pack = os.path.dirname(os.path.dirname(os.path.dirname(dsf_path)))
+        return pack if os.path.isdir(pack) else None
+    except (OSError, ValueError):
+        return None
+
+
 def _interpolate_dsf_ring(
     nodes: list[tuple[tuple[float, float], tuple[float, float] | None]],
     bezier_segments: int,
@@ -502,18 +611,26 @@ def read_dsf_pavements(
     dsf_path: str,
     cache_dir: str | None = None,
     bezier_segments: int = DEFAULT_BEZIER_SEGMENTS,
+    xplane_root: str | None = None,
 ) -> list[tuple[list[tuple[float, float]],
                 list[list[tuple[float, float]]],
                 str]]:
     """Extract draped pavement polygons from a DSF file.
 
     Thin wrapper over ``_read_dsf_polys`` admitting only pavement
-    ``POLYGON_DEF`` paths (see ``_is_pavement_def``).  Return shape and
-    semantics are unchanged from before the building reader was added:
-    ``(outer_ring, holes, def_path)`` per polygon, rings unclosed.
+    ``POLYGON_DEF`` paths — classified SURFACE-attribute-first when
+    ``xplane_root`` is given (``_classify_pavement_def``), by the name
+    heuristics alone otherwise (``_is_pavement_def``).  Return shape
+    and semantics are unchanged from before the building reader was
+    added: ``(outer_ring, holes, def_path)`` per polygon, rings
+    unclosed.
     """
-    return _read_dsf_polys(dsf_path, _is_pavement_def,
-                           cache_dir, bezier_segments)
+    pack_root = _pack_root_for_dsf(dsf_path)
+
+    def _accept(def_path: str) -> bool:
+        return _classify_pavement_def(def_path, pack_root, xplane_root)
+
+    return _read_dsf_polys(dsf_path, _accept, cache_dir, bezier_segments)
 
 
 # Building-facade detector: X-Plane places airport TERMINAL and HANGAR
