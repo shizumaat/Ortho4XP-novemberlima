@@ -591,11 +591,20 @@ def runway_clamp_floor(layout, x: float, y: float):
     pieces, so a shape walk computes different floors on the two sides of
     a seam (SPLP: the −77 build lifted a junction pin to 65.7 against a
     runway the −78 build had dropped, whose twin pin stayed at 62.4 — a
-    3.3 m step across the 10 m gap).  The axis distance is measured to
-    the CENTERLINE (no lateral half-width credit), so the profile floor
-    is slightly conservative.  Shape walk remains as the fallback for
-    pre-redistribute callers (``apply_seam_dem_anchors``) and refs with
-    no CIFP state.
+    3.3 m step across the 10 m gap).
+
+    The profile floor is the MAX over sampled axis positions of
+    ``profile(t) − SEAM_CLAMP_GRADE · distance(P, cross_section(t))``,
+    with the runway's half-width credited (the profile value spans the
+    full width).  The earlier nearest-axis-point-only floor guaranteed
+    the pin within cap of ONE profile point but let the straight chord
+    to a runway-welded node farther ALONG the axis read over cap — the
+    L1-vs-L2 gap (SPLP 2026-07-05: junction seam pin 62.9 vs the
+    runway-edge weld at 64.3, a both-hard 2.17 % pair no projection can
+    fix).  With the cross-section distance the triangle inequality
+    bounds the pin against EVERY point of the runway surface in both
+    directions.  Shape walk remains as the fallback for pre-redistribute
+    callers (``apply_seam_dem_anchors``) and refs with no CIFP state.
     """
     best = None
     profiles = getattr(layout, "_runway_redistributed_profiles", None)
@@ -604,15 +613,25 @@ def runway_clamp_floor(layout, x: float, y: float):
         for p in profiles.values():
             ax_x, ax_y = p['axis_a']
             dx, dy = p['axis_d']
-            t = ((x - ax_x) * dx + (y - ax_y) * dy) / p['axis_len2']
-            t = min(1.0, max(0.0, t))
-            px = ax_x + t * dx
-            py = ax_y + t * dy
-            d = math.hypot(x - px, y - py)
-            e = _interp_profile(p['fractions'], p['elevs'], t)
-            f = float(e) - SEAM_CLAMP_GRADE * d
-            if best is None or f > best:
-                best = f
+            axis_len = math.sqrt(p['axis_len2'])
+            if axis_len < 1.0:
+                continue
+            half_width = float(p.get('half_width_m', 0.0))
+            # P in axis coordinates: s = along-axis metres, r = lateral.
+            ux, uy = dx / axis_len, dy / axis_len
+            s = (x - ax_x) * ux + (y - ax_y) * uy
+            r = abs(-(x - ax_x) * uy + (y - ax_y) * ux)
+            lateral = max(0.0, r - half_width)
+            step = 2.0
+            n_samples = max(2, int(axis_len / step) + 1)
+            for k in range(n_samples + 1):
+                u = min(axis_len, k * step)
+                d = math.hypot(abs(s - u), lateral)
+                e = _interp_profile(p['fractions'], p['elevs'],
+                                    u / axis_len)
+                f = float(e) - SEAM_CLAMP_GRADE * d
+                if best is None or f > best:
+                    best = f
         return best
     from shapely.geometry import Point as _P
     from shapely.ops import nearest_points as _np
@@ -710,7 +729,7 @@ def apply_seam_dem_anchors(
                 f = _runway_floor(x, y)
                 if f is not None and f > v:
                     v = f
-            alts[i] = round(v, 1)
+            alts[i] = round(v, 2)
             changed = True
             n_updated += 1
         if changed:

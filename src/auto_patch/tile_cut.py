@@ -823,7 +823,7 @@ def nudge_runway_corners_at_seam_junctions(layout: PavementLayout) -> int:
             # restrictive (largest required move).
             prev = targets.get(rb)
             if prev is None or abs(tgt - relev) > abs(prev - relev):
-                targets[rb] = round(tgt, 1)
+                targets[rb] = round(tgt, 2)
     if not targets:
         return 0
 
@@ -1051,8 +1051,8 @@ def _clip_sloping_rect_piece(
 
     clean_s = copy.copy(orig)
     clean_s.polygon = clean_poly
-    clean_s.altitude_high = round(alt_hi, 1)
-    clean_s.altitude_low = round(alt_lo, 1)
+    clean_s.altitude_high = round(alt_hi, 2)
+    clean_s.altitude_low = round(alt_lo, 2)
     clean_s.altitude = None
     clean_s.node_altitudes = None
     out: list[BuiltShape] = [clean_s]
@@ -1151,7 +1151,7 @@ def _pin_runway_piece_to_profile(fs, cut_union, layout) -> bool:
         v = sample_redistributed_profile(layout, fs.ref, x, y)
         if v is None:
             return False
-        alts.append(round(float(v), 1))
+        alts.append(round(float(v), 2))
         try:
             if Point(x, y).distance(cut_boundary) < 0.75:
                 seam_keys.add(vertex_bucket(float(x), float(y)))
@@ -1206,7 +1206,7 @@ def _terrain_pin_slice_nodes(fs, cut_union, clip_pts, layout,
         alts = list(fs.node_altitudes)
     elif (fs.node_altitudes is None and fs.altitude is None
           and fs.altitude_high is None and fs.altitude_low is None):
-        alts = [round(_dem_at(x, y) or 0.0, 1) for (x, y) in coords]
+        alts = [round(_dem_at(x, y) or 0.0, 2) for (x, y) in coords]
         created_from_dem = True
     else:
         return
@@ -1243,7 +1243,7 @@ def _terrain_pin_slice_nodes(fs, cut_union, clip_pts, layout,
                 f = None
             if f is not None and f > v:
                 v = f
-        alts[i] = round(v, 1)
+        alts[i] = round(v, 2)
         seam_keys.add(vertex_bucket(float(x), float(y)))
         changed = True
     if changed or created_from_dem:
@@ -1329,7 +1329,7 @@ def _grade_feature_piece_to_seam_dem(
     new_alts: list[float] = []
     for i, (x, y) in enumerate(coords):
         if i in seam_alt_by_idx:
-            new_alts.append(round(seam_alt_by_idx[i], 1))
+            new_alts.append(round(seam_alt_by_idx[i], 2))
             continue
         lo = float("-inf")
         hi = float("inf")
@@ -1338,9 +1338,9 @@ def _grade_feature_piece_to_seam_dem(
             hi = min(hi, sv + grade_cap * d)
             lo = max(lo, sv - grade_cap * d)
         if lo > hi:                      # conflicting seam anchors
-            new_alts.append(round(0.5 * (lo + hi), 1))
+            new_alts.append(round(0.5 * (lo + hi), 2))
             continue
-        new_alts.append(round(min(max(design[i], lo), hi), 1))
+        new_alts.append(round(min(max(design[i], lo), hi), 2))
     fs.node_altitudes = new_alts
     fs.altitude = None
     fs.altitude_high = None
@@ -1381,7 +1381,7 @@ def _build_piece_shape(
             coords = list(piece.exterior.coords)
         except _GEOM_EXC:
             return None
-        alts = [round(float(slope_sampler(x, y)), 1)
+        alts = [round(float(slope_sampler(x, y)), 2)
                 for (x, y) in coords]
         new_s.node_altitudes = alts
         new_s.altitude = None
