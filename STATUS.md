@@ -1,3 +1,30 @@
+# STATUS — SESSION 20260706 (part 16): **SPJC 5→1** — validator
+# route_zone gap + tunnel-ramp inner-edge lerp (`52fff98`)
+
+> **VALIDATOR ROUTE-CONTACT GAP**: _grade_context_from_osm never built
+> route_zone, so the emitted-OSM reader refused APRON_ROUTE_CONTACT
+> budgets the solver lawfully granted (SPJC apron #188).  Now mirrored
+> from the emitted route-role ways.
+> **TUNNEL RAMP INNER EDGE**: both ramp chain emitters lerped stations
+> by CENTERLINE distance; the miter join shortens bend quads' inner
+> edges → 4 %-planned descents read 4.3-4.6 % along them.  Stations now
+> lerp over effective length (min of centerline/both edges); sloped
+> ramp values 0.1→0.01 m.
+> **SCOREBOARD at 52fff98**: CYXY 0+320 · SPJC 1+0 (the apron 77 m
+> emit-repair divergence — architectural: move to_osm's buffer(0)/
+> needle repairs pre-projection like decimation) · SPLP 0 per-tile ·
+> HECA 16+11351.  Suite 11F/391P == base11 across the runway-end-skirt
+> merge (+56 skirt tests green).  ⚠ /tmp was purged: lab full_build.py
+> + base11.txt recreated; old baseline patches gone.
+> **HECA BREAK REVIEW (design)**: 14 pockets, med ~2 %, p90 ~2.5 % =
+> designed gentle blends; worst spike 255 %/1.4 m (one service_road
+> step, probe-worthy).  92 % of broken nodes are pocket INTERIORS —
+> anchor attribution needs floor/ceil provenance in feasibility_project
+> (proj_lab + solve-state dump are the base).  Decision pending: accept
+> ~2 % quarantine ramps vs fund the provenance tool.
+
+---
+
 # STATUS — SESSION 20260705 (part 15c): **SPLP per-tile = 0, CYXY = 0** —
 # runway 0.1 m rounding retired + exact clamp-floor geometry (`d6d4284`);
 # test break-quarantine (`51dcbf4`)
