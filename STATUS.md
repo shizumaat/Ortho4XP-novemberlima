@@ -12,7 +12,8 @@ per-node in the OSM (hi/lo + cell_size retired, `3383040`); base
 Ortho4XP src untouched.
 
 ## AWAITING USER: in-sim visual of flexed HECA
-`O4_RUNWAY_FLEX=1` + restart Ortho4XP + rebuild the tile.  Spots:
+FLEX IS NOW DEFAULT ON (part 27) — just restart Ortho4XP + rebuild
+the tile.  Spots:
 05L↔05C corridor aprons (30.131691,31.410624; 30.126324,31.413003 —
 former 2 % quarantine blends), 05C midfield dip (~30.1073,31.4077).
 Verdict gates Stage C + default-on.
