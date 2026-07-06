@@ -64,9 +64,54 @@ M4 calibration at KCLT (2026-07-05, user-requested):
   the lower surface, not the DEM dip inside a notch the mesh never
   renders.
 
-Remaining for M4 default-on: recut fixture scoreboards with the gate
-on, KDFW tunnel-clip regression pass, SPLP seam-crossing skirt check,
-then flip `O4_RUNWAY_END_SKIRT` to "1".
+Road awareness + blast-pad flank wrap (2026-07-05, user items 1–2):
+
+* **Road awareness**: `clearance._surface_road_corridors` — union of
+  SURFACE road/railway corridors from the big+small OSM road caches
+  (per-class carriageway widths + 1 m shoulder; tunnel-tagged ways
+  excluded on purpose — filling over a tunnel is lawful, and the
+  tunnel emitter's own shapes are already respected via the static
+  clip).  Subtracted from every skirt band; the validator exempts the
+  SAME corridors (shared helper).  NOTE: inert in lab builds without
+  the tile's OSM road caches (KCLT lab worktree has none); engages in
+  real tile builds.  Emitted infrastructure (service roads, groundside
+  lots, tunnel ramps, buildings) is protected by the static clip and
+  exempted in the validator by the JURISDICTION rule: a station whose
+  rendered surface belongs to any non-clearance emitted shape is the
+  solver's business, not this law's (KCLT 18L's flank apron sits 4 m
+  below the pad, correctly).
+* **Flank wrap**: fill strips along the overrun pavement's SIDE edges
+  between the runway end point and the pavement exit, out to the
+  end-zone corridor (± max(width, strip half-width)), flat-entry law
+  floor, banded like the end strips; per-strip analytic altitude
+  closures (edge altitude interpolated along the flank) so clipping
+  can introduce vertices.  Validator marches the flanks the same way
+  (``end_drop_flank`` findings).
+* **Lab debug**: ``O4_SKIRT_DEBUG=1`` prints per-end anchor/entry
+  numbers, per-flank ring extents in end-local coordinates, and
+  per-strip clip-stage area accounting in the finalize.
+
+OPEN (KCLT flank slivers): 4 ``end_drop_flank`` findings remain at
+KCLT (0.3–3.4 m outside the emitted pieces, 2.8–4.3 m below floor).
+Everything measurable has been exonerated: the law wants fill there
+(trigger fires), the raw band rings COVER the finding points, no
+finalize stage (static / road / prior-fill / boundary) removes >2 % of
+the affected strips, and no other shape lies within 6 m of three of
+the four points.  The discrepancy is a sub-metre mismatch between one
+emitted band piece and its raw ring that out-of-process probes cannot
+reproduce (in-pipeline vs post-hoc ``_pavement_exit_along`` start
+values also differ systematically by one 5 m step — worth
+understanding while debugging this).  Needs a LOCAL overlay of the
+emitted piece ring vs the raw ring (dump both under O4_SKIRT_DEBUG) —
+do this before flipping the gate on.
+
+Remaining for M4 default-on: resolve the KCLT flank slivers, recut
+fixture scoreboards with the gate on, KDFW tunnel-clip regression
+pass, SPLP seam-crossing skirt check, then flip `O4_RUNWAY_END_SKIRT`
+to "1".  Separate follow-up (task chip): FAA NASR arresting-system
+reader — EMAS ends (KCLT 18L is one, per user ground truth) should
+get the shorter EMAS-equivalent governed footprint instead of full
+fill.
 
 Today the runway-end safety area (Pass C in `clearance.py`) is *cut-only*: terrain
 that rises above the 5 % up-ramp is cut down to it, but terrain that **drops away**

@@ -280,9 +280,10 @@ class TestBuildFilledSkirts:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Pass D end-to-end: emit_surface_clearance_cuts with a synthetic layout
+# Pass D end-to-end: synthetic-layout harness shared by the emit,
+# validator, blast-pad-flank and road-awareness test classes
 # ──────────────────────────────────────────────────────────────────────
-class TestEmitPassD:
+class SkirtHarness:
     _RUNWAY_LEN = 1500.0   # ICAO code 3
     _RUNWAY_ALT = 100.0
 
@@ -345,6 +346,24 @@ class TestEmitPassD:
     def _clearance_shapes(layout):
         return [s for s in layout.shapes if s.role == "runway_clearance"]
 
+    def _validate(self, monkeypatch, layout, runway):
+        import math
+        from auto_patch import elevation, verification
+        from auto_patch.layout import R_EARTH
+
+        def _fake_sample_dem(dem, tile_lat, tile_lon, lat, lon):
+            x = math.radians(lon) * R_EARTH
+            if -10.0 <= x <= self._RUNWAY_LEN + 10.0:
+                return self._RUNWAY_ALT
+            return self._RUNWAY_ALT - 30.0
+
+        monkeypatch.setattr(elevation, "_sample_dem", _fake_sample_dem)
+        return verification.check_runway_end_skirt(
+            layout, dem=object(), tile_lat=0, tile_lon=0,
+            source_runways=[runway])
+
+
+class TestEmitPassD(SkirtHarness):
     def test_gate_off_emits_nothing(self, monkeypatch):
         layout = self._make_layout()
         n = self._emit(monkeypatch, layout, self._make_runway(),
@@ -391,23 +410,7 @@ class TestEmitPassD:
 # ──────────────────────────────────────────────────────────────────────
 # Validator: verification.check_runway_end_skirt (lockstep with Pass D)
 # ──────────────────────────────────────────────────────────────────────
-class TestSkirtValidator(TestEmitPassD):
-    def _validate(self, monkeypatch, layout, runway):
-        import math
-        from auto_patch import elevation, verification
-        from auto_patch.layout import R_EARTH
-
-        def _fake_sample_dem(dem, tile_lat, tile_lon, lat, lon):
-            x = math.radians(lon) * R_EARTH
-            if -10.0 <= x <= self._RUNWAY_LEN + 10.0:
-                return self._RUNWAY_ALT
-            return self._RUNWAY_ALT - 30.0
-
-        monkeypatch.setattr(elevation, "_sample_dem", _fake_sample_dem)
-        return verification.check_runway_end_skirt(
-            layout, dem=object(), tile_lat=0, tile_lon=0,
-            source_runways=[runway])
-
+class TestSkirtValidator(SkirtHarness):
     def test_ungoverned_cliffs_are_reported(self, monkeypatch):
         """Gate OFF: nothing fills the drops, so the validator reports
         both ends, worst-first, ~29 m below the law floor (30 m cliff
@@ -433,6 +436,171 @@ class TestSkirtValidator(TestEmitPassD):
         share one law (no drift possible)."""
         layout = self._make_layout()
         runway = self._make_runway()
+        self._emit(monkeypatch, layout, runway, gate_on=True)
+        findings = self._validate(monkeypatch, layout, runway)
+        assert findings == []
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Blast-pad flank wrap: lateral drops inside the governed end zone
+# ──────────────────────────────────────────────────────────────────────
+class TestBlastPadFlanks(SkirtHarness):
+    _BLAST_PAD_LEN = 140.0
+
+    def _make_layout(self):
+        from shapely.geometry import Polygon
+        from auto_patch.layout import BuiltShape
+        layout = super()._make_layout()
+        half_width = 22.5
+        pad = Polygon([
+            (self._RUNWAY_LEN, -half_width),
+            (self._RUNWAY_LEN + self._BLAST_PAD_LEN, -half_width),
+            (self._RUNWAY_LEN + self._BLAST_PAD_LEN, half_width),
+            (self._RUNWAY_LEN, half_width)])
+        layout.shapes.append(BuiltShape(
+            polygon=pad, role="runway", ref="27-blastpad",
+            altitude_high=self._RUNWAY_ALT,
+            altitude_low=self._RUNWAY_ALT))
+        return layout
+
+    def _pad_sample_dem(self):
+        """Cliffs west of the runway, along the blast pad FLANKS
+        (|y| > 30 between the runway end and the pad end) and beyond
+        the pad end; flat at runway level elsewhere."""
+        import math
+        from auto_patch.layout import R_EARTH
+        pad_end = self._RUNWAY_LEN + self._BLAST_PAD_LEN
+
+        def _fake_sample_dem(dem, tile_lat, tile_lon, lat, lon):
+            x = math.radians(lon) * R_EARTH
+            y = math.radians(lat) * R_EARTH
+            if x < -10.0:
+                return self._RUNWAY_ALT - 30.0
+            if x <= self._RUNWAY_LEN:
+                return self._RUNWAY_ALT
+            if x <= pad_end + 5.0:
+                return (self._RUNWAY_ALT if abs(y) <= 30.0
+                        else self._RUNWAY_ALT - 30.0)
+            return self._RUNWAY_ALT - 30.0
+        return _fake_sample_dem
+
+    def _emit(self, monkeypatch, layout, runway, gate_on=True):
+        from auto_patch import clearance, elevation
+        fake = self._pad_sample_dem()
+        monkeypatch.setattr(clearance, "_sample_dem", fake)
+        monkeypatch.setattr(elevation, "_sample_dem", fake)
+        monkeypatch.setattr(
+            clearance, "RUNWAY_END_SKIRT_ENABLED", gate_on)
+        n = clearance.emit_surface_clearance_cuts(
+            layout, dem=object(), tile_lat=0, tile_lon=0,
+            source_runways=[runway])
+        n += clearance.emit_runway_end_skirts(
+            layout, dem=object(), tile_lat=0, tile_lon=0,
+            source_runways=[runway])
+        return n
+
+    def _validate(self, monkeypatch, layout, runway):
+        from auto_patch import elevation, verification
+        monkeypatch.setattr(
+            elevation, "_sample_dem", self._pad_sample_dem())
+        return verification.check_runway_end_skirt(
+            layout, dem=object(), tile_lat=0, tile_lon=0,
+            source_runways=[runway])
+
+    def test_flank_cliffs_get_wrapped(self, monkeypatch):
+        layout = self._make_layout()
+        self._emit(monkeypatch, layout, self._make_runway())
+        pad_zone = (self._RUNWAY_LEN + 5.0,
+                    self._RUNWAY_LEN + self._BLAST_PAD_LEN - 5.0)
+        flanks = [s for s in self._clearance_shapes(layout)
+                  if pad_zone[0] < s.polygon.centroid.x < pad_zone[1]
+                  and abs(s.polygon.centroid.y) > 24.0]
+        north = [s for s in flanks if s.polygon.centroid.y > 0]
+        south = [s for s in flanks if s.polygon.centroid.y < 0]
+        assert north and south, (
+            f"expected flank skirts both sides of the blast pad, got "
+            f"{len(north)} north / {len(south)} south")
+        for s in flanks:
+            assert s.node_altitudes
+            assert max(s.node_altitudes) <= self._RUNWAY_ALT + 0.5
+
+    def test_flank_validator_lockstep(self, monkeypatch):
+        """Gate OFF: the validator reports the flank drops
+        (end_drop_flank).  Gate ON: the wrap satisfies it."""
+        layout = self._make_layout()
+        runway = self._make_runway()
+        self._emit(monkeypatch, layout, runway, gate_on=False)
+        findings = self._validate(monkeypatch, layout, runway)
+        assert any(k == "end_drop_flank" for k, *_rest in findings)
+
+        layout_on = self._make_layout()
+        self._emit(monkeypatch, layout_on, runway, gate_on=True)
+        findings_on = self._validate(monkeypatch, layout_on, runway)
+        assert findings_on == []
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Road awareness: surface roads through the governed zone stay unfilled
+# ──────────────────────────────────────────────────────────────────────
+class TestRoadAwareness(SkirtHarness):
+    _ROAD_X = 1700.0   # crosses the east end zone (precision → 305 m)
+
+    def _road_network(self):
+        """A surface secondary road crossing the east skirt zone at
+        x = 1700, running north–south, plus a TUNNEL way at x = 1750
+        that must NOT carve the skirt."""
+        import math
+        from auto_patch.layout import R_EARTH
+
+        def _ll(x, y):
+            return (math.degrees(y / R_EARTH), math.degrees(x / R_EARTH))
+
+        nodes = {
+            "r1": _ll(self._ROAD_X, -400.0),
+            "r2": _ll(self._ROAD_X, 400.0),
+            "t1": _ll(1750.0, -400.0),
+            "t2": _ll(1750.0, 400.0),
+        }
+        ways = [
+            ("road", ["r1", "r2"], {"highway": "secondary"}),
+            ("bore", ["t1", "t2"], {"highway": "secondary",
+                                    "tunnel": "yes"}),
+        ]
+        return nodes, ways, {"road", "bore"}
+
+    def _emit(self, monkeypatch, layout, runway, gate_on=True):
+        from auto_patch import bridges
+        monkeypatch.setattr(bridges, "_load_tunnel_road_network",
+                            lambda _layout: self._road_network())
+        return super()._emit(monkeypatch, layout, runway, gate_on)
+
+    def test_surface_road_corridor_stays_unfilled(self, monkeypatch):
+        from shapely.geometry import Point
+        layout = self._make_layout()
+        # East end precision → 305 m governed, reaching past the road.
+        self._emit(monkeypatch, layout, self._make_runway(lights_b=2))
+        skirts = self._clearance_shapes(layout)
+        east = [s for s in skirts
+                if s.polygon.centroid.x > self._RUNWAY_LEN]
+        assert east
+        on_road = [s for s in east
+                   if s.polygon.covers(Point(self._ROAD_X, 0.0))]
+        assert on_road == [], "skirt filled over a surface road"
+        # The corridor is a hole, not a truncation: fill exists on
+        # both sides of the road.
+        assert any(s.polygon.covers(Point(self._ROAD_X - 15.0, 0.0))
+                   for s in east)
+        assert any(s.polygon.covers(Point(self._ROAD_X + 15.0, 0.0))
+                   for s in east)
+        # The TUNNEL way did not carve the skirt.
+        assert any(s.polygon.covers(Point(1750.0, 0.0)) for s in east)
+
+    def test_validator_exempts_the_same_corridor(self, monkeypatch):
+        layout = self._make_layout()
+        runway = self._make_runway(lights_b=2)
+        # _emit patches the road network; the patch stays active for
+        # the validator below (same monkeypatch scope), so both read
+        # the same corridors.
         self._emit(monkeypatch, layout, runway, gate_on=True)
         findings = self._validate(monkeypatch, layout, runway)
         assert findings == []
@@ -472,7 +640,7 @@ class TestSkirtValidatorAtFixtures:
                 int(math.floor(lat0)), int(math.floor(lon0)))
             assert isinstance(findings, list)
             for kind, desig, below, tolerance, latlon in findings:
-                assert kind == "end_drop"
+                assert kind in ("end_drop", "end_drop_flank")
                 assert below > tolerance
             print(f"[skirt-baseline] {icao}: {len(findings)} end(s) "
                   + "; ".join(f"{f[1]} −{f[2]:.1f} m @{f[4]}"

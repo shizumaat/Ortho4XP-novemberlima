@@ -1502,6 +1502,71 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
 # ──────────────────────────────────────────────────────────────────
 # Pass D: runway-end down-slope SKIRT (inverse RESA)
 # ──────────────────────────────────────────────────────────────────
+# Corridor clearance around SURFACE roads/railways crossing the skirt
+# footprint: half the class carriageway width plus this shoulder, each
+# side — the skirt must not bury real infrastructure (user 2026-07-05).
+_SKIRT_ROAD_SHOULDER_M = 1.0
+# OSM railway ways carry no carriageway-width class; a single-track
+# corridor with ballast shoulders.
+_SKIRT_RAILWAY_CORRIDOR_M = 8.0
+
+
+def _surface_road_corridors(layout, ll_to_m):
+    """Union of SURFACE road / railway corridors near the airport, in
+    the layout meter frame — the ground the runway-end skirt must not
+    fill over.  One source for the Pass D emitter AND the
+    ``verification`` reader (the validator exempts the same corridors
+    the emitter leaves unfilled, or every road through a governed zone
+    reads as a violation).
+
+    Tunnel-tagged ways are EXCLUDED on purpose: filling over a tunnel
+    is lawful and correct (the tunnel emitter owns its portals and
+    trenches, and those shapes are already in ``layout.shapes``, which
+    the skirt's static clip respects).  Returns ``None`` when the tile
+    has no road caches or nothing is near.
+    """
+    try:
+        from .bridges import (
+            _carriageway_width_for, _load_tunnel_road_network)
+        nodes_r, ways_r, _big_way_ids = _load_tunnel_road_network(layout)
+    except _GEOM_EXC:
+        return None
+    if not ways_r:
+        return None
+    corridors = []
+    for _wid, node_refs, tags in ways_r:
+        highway_type = tags.get("highway")
+        railway_type = tags.get("railway")
+        if highway_type is None and railway_type is None:
+            continue
+        tunnel_tag = tags.get("tunnel", "no")
+        if tunnel_tag not in ("", "no"):
+            continue
+        points = []
+        for node_ref in node_refs:
+            ll = nodes_r.get(node_ref)
+            if ll is not None:
+                points.append(ll_to_m(ll[0], ll[1]))
+        if len(points) < 2:
+            continue
+        if railway_type is not None:
+            width = _SKIRT_RAILWAY_CORRIDOR_M
+        else:
+            width = _carriageway_width_for(highway_type, 6.0)
+        try:
+            corridors.append(
+                LineString(points).buffer(
+                    0.5 * width + _SKIRT_ROAD_SHOULDER_M))
+        except _GEOM_EXC:
+            continue
+    if not corridors:
+        return None
+    try:
+        return unary_union(corridors)
+    except _GEOM_EXC:
+        return None
+
+
 def emit_runway_end_skirts(layout: PavementLayout, dem,
                            tile_lat: int, tile_lon: int,
                            source_runways=None) -> int:
@@ -1573,7 +1638,25 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
     except _GEOM_EXC:
         static_block = None
 
+    # Each collected strip carries its own analytic altitude function
+    # (``alt_at(x, y)``), so clipping in the finalize below can
+    # introduce vertices freely: END strips descend from one reference
+    # along the outward axis; FLANK strips (alongside the blast pad /
+    # stopway between the runway end and the pavement exit) descend
+    # from a per-station pavement-EDGE altitude along the side normal.
     skirt_strips: list[tuple] = []
+
+    def _floor_depth_for(entry_grade: float):
+        depth_cache: dict[float, float] = {}
+
+        def _floor_depth(distance_m: float) -> float:
+            depth = depth_cache.get(distance_m)
+            if depth is None:
+                depth = runway_end_skirt_floor_profile(
+                    [distance_m], entry_grade)[0]
+                depth_cache[distance_m] = depth
+            return depth
+        return _floor_depth
 
     def _emit_one_end(outward, runway_width, full_len, seed,
                       elev_fallback, approach_class):
@@ -1606,15 +1689,7 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
                 / _SKIRT_END_GRADE_WINDOW_M
             entry_grade = max(-0.05, min(0.05, entry_grade))
         governed = runway_end_governed_length_m(full_len, approach_class)
-        depth_cache: dict[float, float] = {}
-
-        def _floor_depth(distance_m: float) -> float:
-            depth = depth_cache.get(distance_m)
-            if depth is None:
-                depth = runway_end_skirt_floor_profile(
-                    [distance_m], entry_grade)[0]
-                depth_cache[distance_m] = depth
-            return depth
+        _floor_depth = _floor_depth_for(entry_grade)
 
         half = max(runway_width, runway_strip_half_width_m(full_len))
         perp = (-ny, nx)
@@ -1623,11 +1698,106 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
         stations = _stations(ea, eb, step)
         m = len(stations)
         band_edges = runway_end_skirt_profile_breakpoints(entry_grade)
+
+        def _end_alt_at(vx, vy, p0=p0, nx=nx, ny=ny,
+                        ref=float(ref), floor_depth=_floor_depth,
+                        cap=governed):
+            d = (vx - p0[0]) * nx + (vy - p0[1]) * ny
+            return ref - floor_depth(max(_PAVEMENT_GAP_M, min(cap, d)))
+
         for ring, _ralts in _build_filled_skirts(
                 stations, [ref] * m, [outward] * m, [governed] * m,
                 _floor_depth, band_edges, trigger, step, sample_dem):
-            skirt_strips.append(
-                (ring, p0, outward, float(ref), _floor_depth, governed))
+            skirt_strips.append((ring, _end_alt_at))
+
+        if os.environ.get("O4_SKIRT_DEBUG") == "1":
+            print(f"  [skirt-debug] end at ({seed[0]:.1f},{seed[1]:.1f}) "
+                  f"outward ({nx:.3f},{ny:.3f}) start={start:.1f} "
+                  f"ref={ref} entry={entry_grade:.4f} "
+                  f"governed={governed} strips_so_far={len(skirt_strips)}")
+
+        # ── Blast-pad / stopway FLANK wrap (user 2026-07-05) ──
+        # The end strip governs beyond the pavement exit; the FLANKS of
+        # the overrun pavement between the runway end point and that
+        # exit sit inside the same governed end zone, and a lateral drop
+        # there is the same violation.  Fill strips hug the pavement
+        # side edges out to the end-zone corridor (± ``half``), with a
+        # flat-entry law floor (lateral cross-grades are small and a
+        # climbing entry clamps to flat anyway).
+        if start < 2.0 * step:
+            return   # no meaningful overrun pavement — nothing to wrap
+        flank_floor_depth = _floor_depth_for(0.0)
+        flank_band_edges = runway_end_skirt_profile_breakpoints(0.0)
+        n_axis = max(2, int(math.floor(start / step)) + 1)
+        axis_distances = [min(start, float(k) * step)
+                          for k in range(n_axis)]
+        for side in (perp, (-perp[0], -perp[1])):
+            sxn, syn = side
+            edge_stations, edge_alts, edge_offsets, caps = [], [], [], []
+            axis_kept = []
+            for t in axis_distances:
+                cx, cy = seed[0] + nx * t, seed[1] + ny * t
+                lateral_exit = _pavement_exit_along(
+                    prep_pav, cx, cy, sxn, syn, half, step)
+                if lateral_exit >= half - 2.0 * _PAVEMENT_GAP_M:
+                    continue   # pavement fills the corridor here
+                ex, ey = cx + sxn * lateral_exit, cy + syn * lateral_exit
+                edge_alt = _nearest_pav_alt(
+                    airside, ex - sxn * 1.0, ey - syn * 1.0)
+                if edge_alt is None:
+                    continue
+                edge_stations.append((ex, ey))
+                edge_alts.append(float(edge_alt))
+                edge_offsets.append(lateral_exit)
+                caps.append(half - lateral_exit)
+                axis_kept.append(t)
+            if len(edge_stations) < 2:
+                continue
+
+            def _flank_alt_at(vx, vy, seed=seed, nx=nx, ny=ny,
+                              sxn=sxn, syn=syn,
+                              axis_kept=axis_kept,
+                              edge_offsets=edge_offsets,
+                              edge_alts=edge_alts,
+                              floor_depth=flank_floor_depth,
+                              half=half):
+                # Along-axis position → interpolate the pavement edge
+                # offset and altitude between the two nearest stations.
+                s = (vx - seed[0]) * nx + (vy - seed[1]) * ny
+                s = max(axis_kept[0], min(axis_kept[-1], s))
+                j = 1
+                while j < len(axis_kept) - 1 and axis_kept[j] < s:
+                    j += 1
+                span = axis_kept[j] - axis_kept[j - 1]
+                w = 0.0 if span <= 0.0 else (s - axis_kept[j - 1]) / span
+                offset = (edge_offsets[j - 1]
+                          + (edge_offsets[j] - edge_offsets[j - 1]) * w)
+                edge_alt = (edge_alts[j - 1]
+                            + (edge_alts[j] - edge_alts[j - 1]) * w)
+                lateral = (vx - seed[0]) * sxn + (vy - seed[1]) * syn
+                d = max(_PAVEMENT_GAP_M,
+                        min(half - offset, lateral - offset))
+                return edge_alt - floor_depth(d)
+
+            flank_rings = _build_filled_skirts(
+                edge_stations, edge_alts, [side] * len(edge_stations),
+                caps, flank_floor_depth, flank_band_edges,
+                trigger, step, sample_dem)
+            if os.environ.get("O4_SKIRT_DEBUG") == "1":
+                print(f"  [skirt-debug]   flank side ({sxn:.3f},{syn:.3f})"
+                      f" stations={len(edge_stations)} "
+                      f"caps={min(caps):.1f}..{max(caps):.1f} "
+                      f"rings={len(flank_rings)}")
+                for ring, _ralts in flank_rings:
+                    ts = [(vx - seed[0]) * nx + (vy - seed[1]) * ny
+                          for vx, vy in ring]
+                    ls = [(vx - seed[0]) * sxn + (vy - seed[1]) * syn
+                          for vx, vy in ring]
+                    print(f"  [skirt-debug]     ring t "
+                          f"{min(ts):.1f}..{max(ts):.1f} lateral "
+                          f"{min(ls):.1f}..{max(ls):.1f}")
+            for ring, _ralts in flank_rings:
+                skirt_strips.append((ring, _flank_alt_at))
 
     if source_runways:
         # AUTHORITATIVE: anchor each end at the apt.dat row-100
@@ -1691,20 +1861,35 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
     if not skirt_strips:
         return 0
     boundary = layout.airport_boundary
+    # SURFACE roads / railways crossing the governed zones stay at
+    # their own grade — the skirt clears their corridors instead of
+    # burying them (the validator exempts the same corridors, via the
+    # shared ``_surface_road_corridors``).
+    road_block = _surface_road_corridors(layout, _ll_to_m)
     emitted_fill = None
     n = 0
-    for ring, p0, out_vec, ref, floor_depth, cap in skirt_strips:
+    skirt_debug = os.environ.get("O4_SKIRT_DEBUG") == "1"
+    for strip_index, (ring, alt_at) in enumerate(skirt_strips):
         try:
             poly = Polygon(ring)
             if not poly.is_valid:
                 poly = poly.buffer(0)
-            for block in (static_block, emitted_fill):
+            stage_areas = [("raw", poly.area)]
+            for name, block in (("static", static_block),
+                                ("road", road_block),
+                                ("prior_fill", emitted_fill)):
                 if block is not None and not block.is_empty:
                     poly = poly.difference(block)
+                    stage_areas.append((name, poly.area))
             if boundary is not None and not boundary.is_empty:
                 # No emitted shape may cross the airport boundary (the
                 # post-clearance boundary clip has already run by now).
                 poly = poly.intersection(boundary)
+                stage_areas.append(("boundary", poly.area))
+            if skirt_debug and stage_areas[-1][1] < 0.98 * stage_areas[0][1]:
+                print(f"  [skirt-debug] strip {strip_index} clip: "
+                      + " -> ".join(f"{nm} {ar:.0f}"
+                                    for nm, ar in stage_areas))
             if poly.is_empty:
                 continue
         except _GEOM_EXC:
@@ -1716,7 +1901,6 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
                           if g.geom_type == "Polygon"]
         else:
             continue
-        nx, ny = out_vec
         for comp in components:
             for simple in _decompose_polygon_with_holes(
                     comp, min_area_m2=_MIN_CUT_AREA_M2):
@@ -1725,11 +1909,8 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
                 piece_ring = _open_coords(simple)
                 if len(piece_ring) < 3:
                     continue
-                alts = []
-                for vx, vy in piece_ring:
-                    d = (vx - p0[0]) * nx + (vy - p0[1]) * ny
-                    d = max(_PAVEMENT_GAP_M, min(cap, d))
-                    alts.append(round(float(ref - floor_depth(d)), 1))
+                alts = [round(float(alt_at(vx, vy)), 1)
+                        for vx, vy in piece_ring]
                 layout.shapes.append(BuiltShape(
                     polygon=simple, role=ROLE_RUNWAY_CLEARANCE,
                     ref="runway_end_skirt",

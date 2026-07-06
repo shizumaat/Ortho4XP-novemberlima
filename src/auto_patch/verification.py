@@ -521,11 +521,21 @@ def check_runway_end_skirt(layout, dem, tile_lat, tile_lon,
                      or (s.altitude_high is not None
                          and s.altitude_low is not None))]
 
+    _CLEARANCE_ROLES = frozenset(
+        {"runway_clearance", "taxiway_clearance"})
+
     def _surface_alt(x, y, direction):
-        """Rendered surface altitude at ``(x, y)``: the covering
-        shape's ruled interior along ``direction`` (linear between the
-        two boundary crossings bracketing the point — how a two-row
-        ``node_altitudes`` band triangulates), else the natural DEM."""
+        """Rendered surface at ``(x, y)`` as ``(altitude, source)``:
+        the covering shape's ruled interior along ``direction`` (linear
+        between the two boundary crossings bracketing the point — how a
+        two-row ``node_altitudes`` band triangulates), else the natural
+        DEM.  ``source`` is ``"clearance"`` (skirt / clearance patch —
+        this law's own subject), ``"pavement"`` (any OTHER emitted
+        shape: an apron, taxiway, groundside lot, service road … graded
+        by the SOLVER under its own laws — the skirt lawfully clips
+        around it and this check has no jurisdiction there — KCLT 18L's
+        flank apron sits 4 m below the pad, correctly), or ``"dem"``
+        (un-governed natural terrain — the law's target)."""
         from shapely.geometry import LineString, Point
         pt = Point(x, y)
         nx, ny = direction
@@ -535,6 +545,8 @@ def check_runway_end_skirt(layout, dem, tile_lat, tile_lon,
                     continue
             except CL._GEOM_EXC:
                 continue
+            source = ("clearance" if s.role in _CLEARANCE_ROLES
+                      else "pavement")
             if s.node_altitudes:
                 try:
                     probe = LineString([
@@ -559,11 +571,12 @@ def check_runway_end_skirt(layout, dem, tile_lat, tile_lon,
                     if eb is not None and ea is not None:
                         span = ahead[0] - behind[0]
                         if span < 1e-9:
-                            return 0.5 * (eb + ea)
-                        return eb + (ea - eb) * (-behind[0]) / span
+                            return 0.5 * (eb + ea), source
+                        return (eb + (ea - eb) * (-behind[0]) / span,
+                                source)
             e = CL._edge_interp_alt(s, x, y)
             if e is not None:
-                return e
+                return e, source
         # Narrow-seam bridging: the finalize keeps a small clearance
         # notch (pavement gap + clip buffer, ≤ a station step) between
         # abutting patches — e.g. a blast-pad end and the skirt's inner
@@ -571,7 +584,8 @@ def check_runway_end_skirt(layout, dem, tile_lat, tile_lon,
         # so a DEM dip inside the notch never renders.  A station
         # bracketed by two surfaces along the march direction reads the
         # lower of the two instead of the raw DEM; a genuine unfilled
-        # drop has pavement on ONE side only and still flags.
+        # drop has pavement on ONE side only and still flags.  A notch
+        # abutting NON-clearance pavement inherits that jurisdiction.
         from shapely.ops import nearest_points
         bracketing = []
         for s in covering:
@@ -584,12 +598,19 @@ def check_runway_end_skirt(layout, dem, tile_lat, tile_lon,
             t = (np_pt.x - x) * nx + (np_pt.y - y) * ny
             e = CL._edge_interp_alt(s, np_pt.x, np_pt.y)
             if e is not None:
-                bracketing.append((t, e))
+                bracketing.append(
+                    (t, e, "clearance" if s.role in _CLEARANCE_ROLES
+                     else "pavement"))
         if (bracketing
-                and min(t for t, _e in bracketing) <= 0.0
-                and max(t for t, _e in bracketing) >= 0.0):
-            return min(e for _t, e in bracketing)
-        return _sample(x, y)
+                and min(t for t, _e, _src in bracketing) <= 0.0
+                and max(t for t, _e, _src in bracketing) >= 0.0):
+            alt = min(e for _t, e, _src in bracketing)
+            source = ("pavement" if any(
+                src == "pavement" for _t, _e, src in bracketing)
+                else "clearance")
+            return alt, source
+        dem_alt = _sample(x, y)
+        return (None, "dem") if dem_alt is None else (dem_alt, "dem")
 
     # Enumerate runway ends exactly as the Pass D emitter does.
     ends = []
@@ -605,13 +626,14 @@ def check_runway_end_skirt(layout, dem, tile_lat, tile_lon,
             if full_len < 1.0:
                 continue
             ux, uy = dx / full_len, dy / full_len
+            width = float(getattr(r, "width_m", 0.0) or 0.0)
             ends.append((
-                (ax, ay), (-ux, -uy), full_len, r.desig_a,
+                (ax, ay), (-ux, -uy), full_len, width, r.desig_a,
                 runway_end_approach_class(
                     getattr(r, "markings_a", 0),
                     getattr(r, "approach_lights_a", 0))))
             ends.append((
-                (bx, by), (ux, uy), full_len, r.desig_b,
+                (bx, by), (ux, uy), full_len, width, r.desig_b,
                 runway_end_approach_class(
                     getattr(r, "markings_b", 0),
                     getattr(r, "approach_lights_b", 0))))
@@ -624,11 +646,56 @@ def check_runway_end_skirt(layout, dem, tile_lat, tile_lon,
             if outward is None:
                 continue
             mid = (0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]))
-            ends.append((mid, outward, full_len, s.ref,
+            info = CL._rect_long_short_edges(CL._open_coords(s.polygon))
+            runway_width = (info[1] if info
+                            else math.hypot(b[0] - a[0], b[1] - a[1]))
+            ends.append((mid, outward, full_len, runway_width, s.ref,
                          runway_end_approach_class(0, 0)))
 
+    # Stations the EMITTER lawfully cannot fill are exempt (lockstep
+    # with its clip list — flagging them would demand the impossible):
+    #   * OSM SURFACE road / railway corridors (shared source:
+    #     ``clearance._surface_road_corridors``);
+    #   * EMITTED infrastructure at its own grade — service roads,
+    #     groundside lots, tunnel ramps, retaining walls, building pads
+    #     (the static clip keeps the skirt off them, so the rendered
+    #     surface next to a runway end can be a perimeter road metres
+    #     below the law floor and that is CORRECT — KCLT 18L);
+    #   * ground beyond the airport boundary (the skirt is clipped to
+    #     the boundary interior).
+    road_block = CL._surface_road_corridors(layout, _ll_to_m)
+    _INFRASTRUCTURE_ROLES = frozenset({
+        "service_road", "service_junction", "groundside_pavement",
+        "tunnel_ramp", "retaining_wall", "building",
+    })
+    infrastructure = [s for s in layout.shapes
+                      if s.role in _INFRASTRUCTURE_ROLES
+                      and s.polygon is not None
+                      and not s.polygon.is_empty]
+    boundary_polygon = layout.airport_boundary
+
+    def _station_exempt(x, y):
+        from shapely.geometry import Point
+        pt = Point(x, y)
+        try:
+            if (road_block is not None and not road_block.is_empty
+                    and road_block.covers(pt)):
+                return True
+            if (boundary_polygon is not None
+                    and not boundary_polygon.is_empty
+                    and not boundary_polygon.covers(pt)):
+                return True
+            for s in infrastructure:
+                # Covering, or inside the emitter's clip gap around it.
+                if s.polygon.distance(pt) <= 2.0 * CL._PAVEMENT_GAP_M:
+                    return True
+        except CL._GEOM_EXC:
+            return False
+        return False
+
     out = []
-    for end_pt, outward, full_len, desig, approach_class in ends:
+    for end_pt, outward, full_len, runway_width, desig, approach_class \
+            in ends:
         nx, ny = outward
         seed = (end_pt[0] - nx * CL._RESA_SEED_INSET_M,
                 end_pt[1] - ny * CL._RESA_SEED_INSET_M)
@@ -666,8 +733,10 @@ def check_runway_end_skirt(layout, dem, tile_lat, tile_lon,
         worst = None
         for d, depth in zip(distances, depths):
             qx, qy = p0[0] + nx * d, p0[1] + ny * d
-            surface = _surface_alt(qx, qy, (nx, ny))
-            if surface is None:
+            if _station_exempt(qx, qy):
+                continue
+            surface, source = _surface_alt(qx, qy, (nx, ny))
+            if surface is None or source == "pavement":
                 continue
             below = (float(ref) - depth) - float(surface)
             if below > tolerance_m and (
@@ -676,6 +745,58 @@ def check_runway_end_skirt(layout, dem, tile_lat, tile_lon,
         if worst is not None:
             out.append(("end_drop", f"{desig}", worst[0], tolerance_m,
                         _ll(layout, worst[1], worst[2])))
+
+        # ── Blast-pad / stopway FLANKS (same governed end zone) ──
+        # Between the runway end point and the pavement exit, the
+        # overrun pavement's SIDE edges carry the same law: march each
+        # flank laterally out to the end-zone corridor (± half), floor
+        # measured from the local pavement-edge altitude with a flat
+        # entry (mirrors the emitter's flank wrap).
+        if start < 2.0 * step_m:
+            continue
+        half = max(runway_width, CL.runway_strip_half_width_m(full_len))
+        perp = (-ny, nx)
+        flank_worst = None
+        for side in (perp, (-perp[0], -perp[1])):
+            sxn, syn = side
+            axis_t = step_m
+            while axis_t < start - 0.5 * step_m:
+                cx = seed[0] + nx * axis_t
+                cy = seed[1] + ny * axis_t
+                lateral_exit = CL._pavement_exit_along(
+                    prep_pav, cx, cy, sxn, syn, half, step_m)
+                axis_t += step_m
+                room = half - lateral_exit
+                if room <= 2.0 * step_m:
+                    continue
+                edge_x = cx + sxn * lateral_exit
+                edge_y = cy + syn * lateral_exit
+                edge_alt = CL._nearest_pav_alt(
+                    airside, edge_x - sxn * 1.0, edge_y - syn * 1.0)
+                if edge_alt is None:
+                    continue
+                lateral_stations = max(1, int(math.floor(
+                    (room - 0.5 * step_m) / step_m)))
+                lateral_distances = [float(k) * step_m
+                                     for k in range(1, lateral_stations + 1)]
+                lateral_depths = runway_end_skirt_floor_profile(
+                    lateral_distances, 0.0)
+                for dl, depth in zip(lateral_distances, lateral_depths):
+                    qx = edge_x + sxn * dl
+                    qy = edge_y + syn * dl
+                    if _station_exempt(qx, qy):
+                        continue
+                    surface, source = _surface_alt(qx, qy, side)
+                    if surface is None or source == "pavement":
+                        continue
+                    below = (float(edge_alt) - depth) - float(surface)
+                    if below > tolerance_m and (
+                            flank_worst is None or below > flank_worst[0]):
+                        flank_worst = (below, qx, qy)
+        if flank_worst is not None:
+            out.append(("end_drop_flank", f"{desig}", flank_worst[0],
+                        tolerance_m,
+                        _ll(layout, flank_worst[1], flank_worst[2])))
     out.sort(key=lambda r: -r[2])
     return out
 
