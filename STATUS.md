@@ -1,3 +1,21 @@
+# STATUS — SESSION 20260706 (part 20): RUNWAY FLEX Stage B v1 built +
+# measured (`3a3d761`, gate OFF) — Stage B2 = envelope-level demands
+
+> **Stage B v1 (contact-pair flex)**: drains HECA's full 8.50 m contact
+> deficit (2 pairs, 4 contacts, 05C/23C+05L/23R) but quarantine only
+> 11,265→10,838 and actionable 2→9.  FINDING: pocket contradictions
+> press against the WHOLE profile (every runway node is a hard envelope
+> anchor), not just taxi-join contacts.  **Stage B2**: per-profile-
+> sample [floor,ceil] demands from the max-cap graph (rest-of-field
+> certain anchors), profile re-solves against interval targets through
+> faa_joint_solve — equivalently runway interiors join the field solve
+> interval-constrained with runway-law edges along the axis.
+> Machinery in place: apply_runway_flex / flex_slack_at (certain-anchor
+> slack) / _apply_runway_flex_hook (budget Dijkstra between contacts).
+> Gate O4_RUNWAY_FLEX default OFF until B2.
+
+---
+
 # STATUS — SESSION 20260706 (part 19): seam ruling landed (`95347fb`),
 # RUNWAY FLEX plan ratified + Stage A measured (docs/runway_flex_plan.md)
 
