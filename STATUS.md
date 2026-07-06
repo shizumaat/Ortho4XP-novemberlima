@@ -1,3 +1,24 @@
+# STATUS — SESSION 20260706 (part 19): seam ruling landed (`95347fb`),
+# RUNWAY FLEX plan ratified + Stage A measured (docs/runway_flex_plan.md)
+
+> **USER RULINGS**: (1) seam values sample the SMOOTHED DEM everywhere
+> — alt_strict retired from the runway path; memory entry
+> seam_values_smoothed_dem_ruling.md.  Honest exposure: SPLP -77
+> per-tile 0→16 (the anchor pair was always infeasible; sampler made it
+> visible); compare-target fixtures recut.  (2) RUNWAY FLEX approved:
+> only CIFP thresholds + seam anchors are CERTAIN; intermediate anchors
+> SOLVED; **FLEX-LAST** — the runway moves only when taxiways are at
+> max cap, by the minimum (= distance to the max-cap reach interval).
+> **STAGE A RESULT (flex-demand map, scratchpad flex_demand_map.py)**:
+> HECA has 12 runway-contact anchors and only **2 infeasible contact
+> pairs at max-cap budgets — both 05C/23C ↔ 05L/23R, worst deficit
+> 7.67 m** (contacts 115.77 vs 60.42) + one 0.20 m.  The entire 11k-pair
+> quarantine reduces to ~7.7 m of inter-runway deficit between two
+> profiles.  Stage B (two-pass profile flex, O4_RUNWAY_FLEX) targets
+> exactly this.  SPLP's displaced-threshold case = Stage C.
+
+---
+
 # STATUS — SESSION 20260706 (part 18): **SPJC = 0** — sliver-needle
 # repair moved pre-projection (`8716f88`); SPLP/HECA residuals mapped
 
