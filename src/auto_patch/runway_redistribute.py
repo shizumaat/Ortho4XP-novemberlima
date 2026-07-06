@@ -63,8 +63,7 @@ import os
 from collections import defaultdict
 from typing import Dict, List, Tuple
 
-from .layout import (
-    ROLE_RUNWAY, SHARED_VERTEX_TOL_M, high_low_from_corner_alts)
+from .layout import ROLE_RUNWAY, SHARED_VERTEX_TOL_M
 from .pavement.runway_segments import (
     MAX_RUNWAY_GRADE, MAX_RUNWAY_GRADE_CHANGE_PER_M, RUNWAY_END_GRADE,
     faa_joint_solve,
@@ -642,38 +641,17 @@ def _apply_profile_to_shapes(shapes, ax_a_x, ax_a_y, ax_dx, ax_dy,
         # ``sloping_rect_canonical_form`` invariants happy and
         # avoids unnecessary node_altitudes conversions when
         # nothing actually moved).
-        keep_canonical = False
-        if (len(ring_open) == 4
-                and s.altitude_high is not None
-                and s.altitude_low is not None
-                and not s.node_altitudes):
-            if (abs(new_alts[0] - new_alts[3]) < 0.05
-                    and abs(new_alts[1] - new_alts[2]) < 0.05):
-                new_hi, new_lo = high_low_from_corner_alts(new_alts)
-                # The canonical [H, L, L, H] form binds ``hi`` to ring
-                # corners 0/3.  A profile change can INVERT a piece's
-                # slope (a runway-flex dip does this routinely); the old
-                # "ensure hi is higher" SWAP silently mirrored the
-                # slope — every [hi, lo, lo, hi] consumer (seed, reseed,
-                # _sample_runway_segment_elev) then rebuilt the piece
-                # tilted the WRONG way (HECA flex: an 8 m tear at a
-                # piece whose corners 0/3 became the LOW end).  An
-                # inverted piece falls through to per-vertex
-                # node_altitudes, which is orientation-free.
-                if new_hi >= new_lo:
-                    if (abs(new_hi - s.altitude_high) < 0.05
-                            and abs(new_lo - s.altitude_low) < 0.05):
-                        # No-op: emit-time values already match.
-                        continue
-                    s.altitude_high = round(new_hi, 2)
-                    s.altitude_low = round(new_lo, 2)
-                    keep_canonical = True
-                    n_touched += 1
-        if keep_canonical:
-            continue
-
-        # Non-canonical (any moved corner or already
-        # node_altitudes): write per-vertex.
+        # RUNWAYS ARE ALWAYS PER-VERTEX from here on (user 2026-07-06,
+        # completing the unified representation: the taxi network moved
+        # to spine faces + node_altitudes long ago; runways were the
+        # holdout).  The canonical [H, L, L, H] form bound ``hi`` to
+        # ring corners 0/3 positionally, and every consumer that
+        # re-derived corners from [hi, lo, lo, hi] carried a silent
+        # orientation assumption — the third such bug (a flex dip
+        # inverts a piece's slope; the 'ensure hi is higher' swap then
+        # MIRRORED it into an 8 m tear).  node_altitudes carries the
+        # orientation explicitly and to_osm already ships it (23 of 56
+        # HECA runway pieces emitted per-vertex before this change).
         closed_alts = new_alts + ([new_alts[0]]
                                    if ring_closed else [])
         s.node_altitudes = closed_alts

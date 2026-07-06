@@ -111,15 +111,42 @@ def _sample_runway_segment_elev(
     """
     if shape.altitude is not None:
         return float(shape.altitude)
-    # Per-vertex node_altitudes (e.g. a sloped runway segment that
-    # was cut along a tile boundary — see ``tile_cut.py``).
-    # Nearest-neighbour vertex sample.
+    # Per-vertex node_altitudes — the UNIFIED runway representation
+    # (user 2026-07-06; previously only tile-cut pieces).  Least-squares
+    # PLANE FIT over the ring vertices, exact for the near-planar quads
+    # runways are built from and smooth for longer pieces — the old
+    # nearest-neighbour sample stepped between vertices, which degraded
+    # every runway-elevation consumer (clearance cuts, runway-join
+    # anchors, the clamp-floor fallback) once runways went per-vertex.
     if shape.node_altitudes and shape.polygon is not None:
         try:
             coords = list(shape.polygon.exterior.coords)
         except _GEOM_EXC:
             coords = []
         n = min(len(coords), len(shape.node_altitudes))
+        if n >= 3:
+            mean_x = sum(coords[i][0] for i in range(n)) / n
+            mean_y = sum(coords[i][1] for i in range(n)) / n
+            mean_v = sum(float(shape.node_altitudes[i])
+                         for i in range(n)) / n
+            sum_xx = sum_xy = sum_yy = sum_xv = sum_yv = 0.0
+            for i in range(n):
+                cx = coords[i][0] - mean_x
+                cy = coords[i][1] - mean_y
+                cv = float(shape.node_altitudes[i]) - mean_v
+                sum_xx += cx * cx
+                sum_xy += cx * cy
+                sum_yy += cy * cy
+                sum_xv += cx * cv
+                sum_yv += cy * cv
+            determinant = sum_xx * sum_yy - sum_xy * sum_xy
+            if abs(determinant) > 1e-9:
+                gradient_x = (sum_xv * sum_yy - sum_yv * sum_xy) \
+                    / determinant
+                gradient_y = (sum_yv * sum_xx - sum_xv * sum_xy) \
+                    / determinant
+                return (mean_v + gradient_x * (x - mean_x)
+                        + gradient_y * (y - mean_y))
         if n >= 1:
             best_d2 = float("inf")
             best_alt: float | None = None

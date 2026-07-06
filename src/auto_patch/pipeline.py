@@ -5188,7 +5188,14 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # values for the geometry X-Plane actually renders (SPJC 18-pair
     # 1.5-1.8 % junction class).  Gate O4_EMIT_DECIMATE.
     if compute_elevations:
-        from .emit_decimate import decimate_emit_nodes, repair_sliver_corners
+        from .emit_decimate import (decimate_emit_nodes,
+                                    normalize_runway_altitudes,
+                                    repair_sliver_corners)
+        # ONE runway representation (user 2026-07-06): any hi/lo
+        # canonical rect still alive (incl. pieces minted by post-solve
+        # splits) becomes per-vertex node_altitudes before the geometry
+        # passes and the final projection.
+        normalize_runway_altitudes(layout, icao)
         # Sliver-needle repair BEFORE decimation + the final projection
         # (user 2026-07-06): the emit-time repair removed needle vertices
         # AFTER the last law projection, merging two enforced ring edges

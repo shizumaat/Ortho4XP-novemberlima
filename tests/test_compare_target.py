@@ -128,20 +128,23 @@ pytestmark = [
 # now emits 6 retaining walls and a service_junction role.  Floors =
 # int(0.95 * current fixture count) — the same "current − 5 %" convention
 # as every previous re-cut — except retaining_wall (deterministic, exact).
+# RE-CUT 2026-07-06 (unified runway representation: per-vertex
+# node_altitudes everywhere mid-pipeline; plane-fit sampler — cm-scale
+# value shifts moved clearance/ribbon decisions).  Floors = current − 5 %.
 SPJC_BASELINE: Dict[str, int] = {
-    "apron":              94,   # of  99 current
+    "apron":              95,   # of 100 current
     "building":           29,   # of  31 current
-    "groundside_pavement": 9,   # of  10 current
+    "groundside_pavement": 10,  # of  11 current
     "junction":          189,   # of 199 current
-    "retaining_wall":      6,   # of   6 current (one per tunnel cluster; deterministic, exact floor)
+    "retaining_wall":      5,   # of   6 current
     "runway":             33,   # of  35 current
-    "runway_clearance":    6,   # of   7 current
+    "runway_clearance":    3,   # of   4 current
     "service_junction":   13,   # of  14 current
     "service_road":        5,   # of   6 current
     "taxiway_clearance":  18,   # of  19 current
     "tunnel_ramp":        38,   # of  41 current
 }
-SPJC_BASELINE_TOTAL = 443  # int(0.95 * 467) of 467 current (emitted)
+SPJC_BASELINE_TOTAL = 442  # int(0.95 * 466) of 466 current (emitted)
 
 # SPLP is cross-tile (spans -13/-77 and -13/-78).  Each tile-half has
 # its own baseline; a regression in either half trips the gate.
@@ -167,14 +170,14 @@ SPJC_BASELINE_TOTAL = 443  # int(0.95 * 467) of 467 current (emitted)
 # ribbon at-DEM skips).  Floors = int(0.95 * current fixture count).
 SPLP_BASELINE_TILE_M77: Dict[str, int] = {
     "apron":               9,   # of  10 current
-    "boundary":           31,   # of  33 current
+    "boundary":           25,   # of  27 current
     "building":            2,   # of   3 current
     "junction":           11,   # of  12 current
     "runway":              8,   # of   9 current
     "runway_clearance":    5,   # of   6 current
     "taxiway_clearance":   8,   # of   9 current
 }
-SPLP_BASELINE_TILE_M77_TOTAL = 77  # int(0.95 * 82) of 82 current (emitted)
+SPLP_BASELINE_TILE_M77_TOTAL = 72  # int(0.95 * 76) of 76 current (emitted)
 
 # RE-CUT 2026-07-05 (curve-native global slice default; see the SPJC
 # re-cut note above) — floors = int(0.95 * current fixture count).

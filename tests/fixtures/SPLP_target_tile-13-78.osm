@@ -4496,7 +4496,7 @@
     <nd ref='-745' />
     <tag k='aeroway' v='aerodrome' />
     <tag k='altitude_high' v='48.10' />
-    <tag k='altitude_low' v='48.00' />
+    <tag k='altitude_low' v='47.90' />
     <tag k='cell_size' v='10' />
     <tag k='profile' v='plane' />
     <tag k='ref' v='airport_boundary' />
@@ -4510,8 +4510,8 @@
     <nd ref='-748' />
     <nd ref='-747' />
     <tag k='aeroway' v='aerodrome' />
-    <tag k='altitude_high' v='48.00' />
-    <tag k='altitude_low' v='47.80' />
+    <tag k='altitude_high' v='47.90' />
+    <tag k='altitude_low' v='47.70' />
     <tag k='cell_size' v='10' />
     <tag k='profile' v='plane' />
     <tag k='ref' v='airport_boundary' />
@@ -4525,7 +4525,10 @@
     <nd ref='-750' />
     <nd ref='-749' />
     <tag k='aeroway' v='aerodrome' />
-    <tag k='altitude' v='47.80' />
+    <tag k='altitude_high' v='47.70' />
+    <tag k='altitude_low' v='47.60' />
+    <tag k='cell_size' v='10' />
+    <tag k='profile' v='plane' />
     <tag k='ref' v='airport_boundary' />
     <tag k='role' v='boundary' />
     <tag k='shapeID' v='88' />
@@ -4537,10 +4540,7 @@
     <nd ref='-752' />
     <nd ref='-751' />
     <tag k='aeroway' v='aerodrome' />
-    <tag k='altitude_high' v='47.80' />
-    <tag k='altitude_low' v='47.50' />
-    <tag k='cell_size' v='10' />
-    <tag k='profile' v='plane' />
+    <tag k='altitude' v='47.60' />
     <tag k='ref' v='airport_boundary' />
     <tag k='role' v='boundary' />
     <tag k='shapeID' v='89' />

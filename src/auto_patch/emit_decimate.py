@@ -43,6 +43,58 @@ from shapely.geometry import Polygon
 _GEOM_EXC = (GEOSException, TopologicalError, ValueError, AttributeError)
 
 
+def normalize_runway_altitudes(layout, icao: str = "") -> int:
+    """Convert every remaining runway ``altitude_high``/``altitude_low``
+    canonical rect to per-vertex ``node_altitudes`` (user 2026-07-06,
+    completing the unified representation — the taxi network moved to
+    spine faces + per-vertex long ago; runways were the holdout).
+
+    The canonical [H, L, L, H] form binds values to ring corners
+    POSITIONALLY, and every consumer that rebuilt corners from
+    ``[hi, lo, lo, hi]`` carried a silent orientation assumption — the
+    source of three bugs, most recently the runway-flex slope-inversion
+    tear.  ``corner_alts_from_high_low`` is the same derivation
+    ``to_osm`` used, so the emitted values are identical; only the
+    representation changes.  Runs late (before sliver repair /
+    decimation / final projection) so pieces minted by post-solve
+    splits are covered too.  Returns the number converted."""
+    from .layout import ROLE_RUNWAY, corner_alts_from_high_low
+    n_converted = 0
+    for shape in layout.shapes:
+        if shape.role != ROLE_RUNWAY:
+            continue
+        if shape.node_altitudes and shape.altitude_high is not None:
+            # dual representation: per-vertex is authoritative
+            # everywhere (readers prefer it) — clear the stale attrs.
+            shape.altitude_high = None
+            shape.altitude_low = None
+            continue
+        if (shape.altitude_high is None or shape.altitude_low is None
+                or shape.node_altitudes
+                or shape.polygon is None or shape.polygon.is_empty):
+            continue
+        ring = list(shape.polygon.exterior.coords)
+        ring_closed = bool(ring) and ring[0] == ring[-1]
+        ring_open = ring[:-1] if ring_closed else ring
+        if len(ring_open) != 4:
+            continue    # non-4-corner hi/lo is malformed; emit repairs it
+        corner_values = corner_alts_from_high_low(
+            float(shape.altitude_high), float(shape.altitude_low))
+        shape.node_altitudes = corner_values + [corner_values[0]]
+        shape.altitude_high = None
+        shape.altitude_low = None
+        n_converted += 1
+    if n_converted:
+        try:
+            import O4_UI_Utils as UI
+            UI.vprint(1, f"  [pav-builder] {icao}: normalized "
+                         f"{n_converted} runway rect(s) to per-vertex "
+                         f"altitudes.")
+        except Exception:
+            pass
+    return n_converted
+
+
 def repair_sliver_corners(layout, icao: str = "") -> int:
     """Remove needle-tip ring vertices (interior angle below
     ``config.SLIVER_ANGLE_THRESHOLD_DEG``) from airside shapes BEFORE the
