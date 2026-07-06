@@ -1,3 +1,31 @@
+# STATUS — SESSION 20260706 (part 18): **SPJC = 0** — sliver-needle
+# repair moved pre-projection (`8716f88`); SPLP/HECA residuals mapped
+
+> **SPJC LAST PAIR**: the emit-time needle repair ran AFTER the final
+> projection — two lawful blend sub-edges merged into one 77 m ring
+> edge nobody enforced.  repair_sliver_corners now runs pre-decimation;
+> emit scan stays as the quantization-born backstop.  SPJC 1→0,
+> test_pavement_grade[SPJC] GREEN — suite 10F/407P (base10 recut).
+> **SPLP RESIDUALS (mapped, parked)**: (1) longitudinal 1.61 % = two
+> IMMOVABLE anchors (interior anchor k=5@48.82 + seam raw-HGT anchor
+> k=8@61.00, 770 m apart = 1.58 % mean; threshold shifting can't touch
+> interior anchors; seam value non-negotiable per preserve_boundary) —
+> DESIGN DECISION: quarantine runway break segments vs renegotiate the
+> interior anchor.  (2) cross=2 hairline: two parallel boundary chains
+> 0.8 m apart (the logged SPLP residual T-junction) valued 9 cm apart —
+> conformance work at the seam cut.
+> **HECA RESIDUALS (mapped, parked)**: 2 within + 2 plane = agreed-weld
+> authority conflicts (building pad 99.38 vs groundside mouth 98.87
+> across a 2.78 m road sliver = 18 %/0.5 m; two groundside welds at
+> 5.3 % marginal) + 2 tiny plane-gradient pairs.  NOT auto-quarantining
+> both-hard pairs: the last two both-hard classes (SPLP clamp floor,
+> HECA weld gate) were REAL anchor bugs the actionable count exposed.
+> **SCOREBOARD at 8716f88**: CYXY **0**+320 · SPJC **0**+0 · SPLP
+> **0** per-tile (profile+hairline live in other tests) · HECA
+> 2+2plane+11265.  Campaign start: 28/56/15/104.
+
+---
+
 # STATUS — SESSION 20260706 (part 17): **HECA 16→2** — feature-weld
 # hardening requires value AGREEMENT (`2c7e561`)
 
