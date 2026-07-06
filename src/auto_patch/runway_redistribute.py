@@ -650,18 +650,25 @@ def _apply_profile_to_shapes(shapes, ax_a_x, ax_a_y, ax_dx, ax_dy,
             if (abs(new_alts[0] - new_alts[3]) < 0.05
                     and abs(new_alts[1] - new_alts[2]) < 0.05):
                 new_hi, new_lo = high_low_from_corner_alts(new_alts)
-                # Ensure ``hi`` is actually the higher pair (preserve
-                # the canonical convention).
-                if new_hi < new_lo:
-                    new_hi, new_lo = new_lo, new_hi
-                if (abs(new_hi - s.altitude_high) < 0.05
-                        and abs(new_lo - s.altitude_low) < 0.05):
-                    # No-op: emit-time values already match.
-                    continue
-                s.altitude_high = round(new_hi, 2)
-                s.altitude_low = round(new_lo, 2)
-                keep_canonical = True
-                n_touched += 1
+                # The canonical [H, L, L, H] form binds ``hi`` to ring
+                # corners 0/3.  A profile change can INVERT a piece's
+                # slope (a runway-flex dip does this routinely); the old
+                # "ensure hi is higher" SWAP silently mirrored the
+                # slope — every [hi, lo, lo, hi] consumer (seed, reseed,
+                # _sample_runway_segment_elev) then rebuilt the piece
+                # tilted the WRONG way (HECA flex: an 8 m tear at a
+                # piece whose corners 0/3 became the LOW end).  An
+                # inverted piece falls through to per-vertex
+                # node_altitudes, which is orientation-free.
+                if new_hi >= new_lo:
+                    if (abs(new_hi - s.altitude_high) < 0.05
+                            and abs(new_lo - s.altitude_low) < 0.05):
+                        # No-op: emit-time values already match.
+                        continue
+                    s.altitude_high = round(new_hi, 2)
+                    s.altitude_low = round(new_lo, 2)
+                    keep_canonical = True
+                    n_touched += 1
         if keep_canonical:
             continue
 
