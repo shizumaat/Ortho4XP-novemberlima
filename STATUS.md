@@ -1,3 +1,29 @@
+# STATUS — SESSION 20260706 (part 17): **HECA 16→2** — feature-weld
+# hardening requires value AGREEMENT (`2c7e561`)
+
+> **HECA CLIFF CHAIN (3 dynamic probes)**: solve-phase envelope lift
+> (uphill hard-anchor floor along the service network) left road nodes
+> +3.4 m; groundside minted mm-coincident raw-DEM verts; the final
+> projection's feature-weld rule FROZE the damaged nodes ("welded to
+> emitted features") → 16 both-hard walls reported "genuine".  The
+> rule's rationale (feature ADOPTED pavement value) only holds when the
+> sides AGREE — hardening now derives the feature vertex altitude and
+> requires |Δ| ≤ 0.05 m; torn welds stay FREE.  Unverifiable feature
+> altitudes stay conservatively hard.
+> **SCOREBOARD at 2c7e561**: CYXY **0**+320 · SPJC **1**+0 · SPLP
+> **0** per-tile · HECA **2**+11263 (one 0.5 m step ×2 on road #541 —
+> same neighborhood, small residual).  Suite 11F/406P == base11.
+> Campaign start (2026-07-05) was 28/56/15/104.
+> **PROBE-FRAME GOTCHA (again)**: check_grade._ll_to_m_factory without
+> anchor= is the MEAN-of-nodes frame — layout-frame probes must convert
+> via layout.ll_to_m from lat/lon.
+> **NOTE**: solver_primitives.SLOPING_RECT_ROLES ≠
+> junction_rules.SLOPING_RECT_ROLES (the solver's includes
+> service_road; the geometry one doesn't) — same name, different
+> contents, easy to misread.
+
+---
+
 # STATUS — SESSION 20260706 (part 16): **SPJC 5→1** — validator
 # route_zone gap + tunnel-ramp inner-edge lerp (`52fff98`)
 
