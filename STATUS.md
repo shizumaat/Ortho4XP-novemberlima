@@ -35,6 +35,29 @@
    cited in docs/STANDARDS.md (constants in config.py).  Symptom being
    fixed: ridges/valleys along service-road spines at several
    airports (lateral grading currently unconstrained there).
+   DESIGN GROUNDWORK (part 29, not yet implemented):
+   - **Mesh unlock**: ``include_patches`` (O4_Vector_Map ~line 1115)
+     inserts OPEN (non-closed) patch ways as constrained DUMMY
+     breakline edges honouring per-node ``alt_abs`` — so a TRUE crown
+     ridge needs NO polygon splitting: emit each spine as an open way
+     at ``surface_at(station) + crown_rate × local_half_width``,
+     tapered to 0 over the last ~half-width before shape ends (mouth
+     continuity).  Runway sub-rects are planes → spine alt = plane at
+     centerline + crown.
+   - **Law side**: the anisotropic machinery already exists —
+     ``grade_law.Allowance(cL, cT)`` + ``grade_graph._bake_edge``,
+     which today sets cT = TAXI_MAX_TRANSVERSE_NARROW (2 %) only for
+     A/B narrow taxi pairs and leaves everything else isotropic
+     (service roads laterally capped at their 5 % LONGITUDINAL cap =
+     25 cm across a 5 m road — the visible ridge/valley budget).
+     Extend cT per role;  OPEN QUESTION to trace first: how
+     service-road pairs actually flow through ``classify_pair`` /
+     ``_edge_route`` (the ``both_road`` relax path vs spine_caps) so
+     the transverse cap binds the RIGHT pairs on both readers.
+   - Constants to add (pending the research table below):
+     RUNWAY_{MIN,MAX}_TRANSVERSE, TAXI_{MIN,MAX}_TRANSVERSE (per
+     letter; NARROW A/B 2 % exists), SERVICE_ROAD_{MIN,MAX}_TRANSVERSE
+     + per-role CROWN rate; docs/STANDARDS.md rows with citations.
 4. **Service-road adoption extension (durable)**: like the apron-edge
    rule, the PORTION of a service road inside or sharing a LONG edge
    with a taxiway follows the more limiting (taxiway) grade law; only
