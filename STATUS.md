@@ -35,7 +35,28 @@
    cited in docs/STANDARDS.md (constants in config.py).  Symptom being
    fixed: ridges/valleys along service-road spines at several
    airports (lateral grading currently unconstrained there).
-   IMPLEMENTED (part 29b, user go-ahead 2026-07-07):
+   USER RULING (2026-07-07, after 29b review): the crown should NOT be
+   a special post-solve module — it belongs in the GRADING itself:
+   spine-vs-edge allowances.  AGREED DIRECTION for part 30 (the 29b
+   module is a working v1; its freeze/veto/valve machinery exists only
+   because it fights the solve after the fact):
+   1. Level-coupling: the solver already couples lateral corridor
+      nodes to their spine (the "8,548 lateral corridor node(s)" pass
+      + solver_primitives' level-coupling graph) at OFFSET 0 — couple
+      at −rate·lateral instead.  Welds then solve consistently by
+      construction (no freeze sets, no consensus tears).
+   2. Law: add an OFFSET field to grade_law.Allowance so spine↔edge
+      pairs budget |Δz − crown_offset| ≤ cap·d; solver and validator
+      read the same object → the validator CHECKS the crown;
+      infeasible pockets go through break-region, replacing the
+      revoke valve.
+   3. Emission: spine breaklines from the SOLVED route profiles
+      (routes already carry elevations — the axes sidecar) instead of
+      ring interpolation; crown.py shrinks to that emission step.
+   4. Runways: profile stays spine authority, edges derive inside the
+      solve → the runway_join/flex/skirt readers see law-consistent
+      values (the 29b runway exclusion should lift naturally).
+   IMPLEMENTED (part 29b, superseded-in-place by the above plan):
    - ``crown.py`` ``apply_spine_crown`` (pipeline, after the final
      projection, before skirts; gate ``O4_SPINE_CROWN`` default ON):
      taxi-family corridors/rects (1 %) + service roads (1.5 %) drop
