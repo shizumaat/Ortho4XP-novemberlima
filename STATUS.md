@@ -1,5 +1,71 @@
+# STATUS — SESSION 20260707 (part 29): KCLT terminal-ramp groundside
+# root cause — the airside/groundside EDGE CLASSIFIER was blind (pick up
+# here)
+
+## USER RULINGS + REPORTS (2026-07-07, in-sim eval — QUEUED part 30)
+1. **SPJC perfect; CYXY great; KCLT classification fix verified by the
+   part-29 rebuild** (see below).
+2. **SPLP BROKEN**: "something broke the anchor at the seam where it
+   crosses taxiways" — runway and apron OK.  NOTE the 2 pre-existing
+   ``test_compare_target_splp`` failures are plausibly the same defect
+   (in-suite repro).
+3. **Lateral crown law (NEW, durable)**: everything with a SPINE —
+   runways, taxiways, service roads — must crown for drainage: spine
+   slightly higher than the edges, with PER-ROLE transverse-grade
+   values researched from FAA AC 150/5300-13 / EASA CS-ADR-DSN and
+   cited in docs/STANDARDS.md (constants in config.py).  Symptom being
+   fixed: ridges/valleys along service-road spines at several
+   airports (lateral grading currently unconstrained there).
+4. **Service-road adoption extension (durable)**: like the apron-edge
+   rule, the PORTION of a service road inside or sharing a LONG edge
+   with a taxiway follows the more limiting (taxiway) grade law; only
+   isolated narrow-road stretches (nothing along the long edge) get
+   the full 4 % road cap.
+5. **Clearance coverage**: several spots at HECA show small terrain
+   spikes right next to pavement — the clearance cuts miss them.
+
+## USER REPORT (part 29)
+KCLT (in-sim/JOSM after part 28): complex mess of jagged shapes around
+the central terminals + spurious groundside that should not exist.
+HECA fine.  Root-caused to ``_terminal_groundside_zone`` (terminals.py)
+misclassifying concourse-facing RAMP edges as groundside → 482,579 m²
+subtracted (incl. the whole Concourse E ramp), which also SEVERED the
+pavement graph → 96 shapes demoted by the runway-disconnected pass.
+Three stacked blindnesses, each verified at KCLT:
+1. **Nimbus KCLT apt.dat has ZERO row-110 pavement** (all pavement is
+   DSF-draped) → ``apt_only_pav_polys`` empty → the airside-reachability
+   BFS degenerated to "within 100 m of a runway" — never true at a
+   terminal.  FIX (pipeline.py): fall back to the FULL pavement list
+   (incl. DSF polys) when the apt-only snapshot is empty; airports with
+   real row-110 keep the apt-only list bit-for-bit.
+2. **OSM aprons at KCLT are multipolygon RELATIONS** (member ways carry
+   no tags) → invisible to the ways-only aeroway catalog.  FIX
+   (terminals.py): reconstruct matching relations' rings (closed
+   members direct, open members polygonized — same pattern as
+   ``_extract_osm_terminals``) into the airside catalog; new
+   ``relations=`` param, single call site.
+3. **Tag-set gap**: the real OSM tag is ``taxilane`` (the set only had
+   ``taxi_lane``, which does not occur in OSM) and ``jet_bridge`` was
+   missing — 159 + 124 such ways at KCLT concourses alone.  With all
+   ramp edges UNKNOWN, the any-airside promotion turned them ALL
+   groundside (100 m rectangles = the jagged sawtooth).
+
+## VERIFIED (KCLT rebuild, gz-probe + coverage-probe instrumented)
+- ground-zone subtraction 482,579 → 110,312 m² (genuine curbside only);
+  all 7 probe points now airside end-to-end (1 stays groundside — a
+  REAL pavement island 7 m off the apron, correct per the 2026-06-09
+  island ruling).
+- runway-disconnected demotions 96 → 9 (rest are road-served pockets).
+- terminal zone (700 m): groundside 14 shapes/72.6 k m² → 1/2.6 k m²;
+  aprons 48 fragments (median 2.2 k m²) → 13 shapes (median 36.6 k m²).
+- check_grade: within 5 → 6 (all on one apron, worst +1.57 % excess,
+  apron -10074 — new terrain the restored ramp must now grade over),
+  break-region pairs 614 → 365, steps 4 → 3, plane/cross still 0.
+- fast_suite: identical 8 pre-existing failures on stashed HEAD and on
+  the fix — zero new failures.  HECA rebuilt: see scoreboard below.
+
 # STATUS — SESSION 20260706 (part 28): KCLT keep-all-pieces + apron-edge
-# service adoption + FLEX minimum-displacement (pick up here)
+# service adoption + FLEX minimum-displacement
 
 ## USER RULINGS (part 28)
 1. **Apron-edge service grading (PORTION-based, clarified)**: the portion

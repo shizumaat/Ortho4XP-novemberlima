@@ -168,6 +168,7 @@ def _terminal_groundside_zone(
     groundside_extent_m: float = 100.0,
     apt_pavement_seeds: Optional[List[Polygon]] = None,
     apt_pavement_polys: Optional[List[Polygon]] = None,
+    relations: Optional[List[Tuple[str, List[str], Dict[str, str]]]] = None,
 ) -> Optional[Polygon]:
     """Identify pavement strips on the GROUNDSIDE of terminal
     buildings — the road/curbside frontage where access roads,
@@ -209,9 +210,13 @@ def _terminal_groundside_zone(
     """
     if not buildings:
         return None
+    # NB: the real OSM tag for gate lead-in lanes is ``taxilane`` (one
+    # word) — ``taxi_lane`` never occurs in OSM but is kept for safety.
+    # KCLT has 159 taxilane + 124 jet_bridge ways at the concourses;
+    # missing both left every gate-facing edge UNKNOWN (2026-07-07).
     AIRSIDE_AEROWAY = {
-        "apron", "taxiway", "taxi_lane", "stand",
-        "runway", "gate", "parking_position",
+        "apron", "taxiway", "taxilane", "taxi_lane", "stand",
+        "runway", "gate", "parking_position", "jet_bridge",
     }
     # Highway road classes — exclude pedestrian-class tags
     # (footway / path / steps / pedestrian / corridor) which
@@ -258,6 +263,48 @@ def _terminal_groundside_zone(
             airside_geoms.append(g)
         else:
             groundside_geoms.append(g)
+    # Aeroway multipolygon RELATIONS (KCLT, 2026-07-07): big terminal
+    # ramps are commonly mapped as multipolygon relations whose member
+    # ways carry NO tags of their own, so the ways-only catalog above
+    # is blind to them — every ramp-facing edge classifies UNKNOWN and
+    # the any-airside promotion below subtracts 100 m groundside
+    # rectangles straight across the ramp (KCLT: 482 k m² including
+    # the whole Concourse E apron, demoted to DEM groundside).
+    # Reconstruct each matching relation's rings the same way
+    # ``_extract_osm_terminals`` does: closed members are rings
+    # already; open members are boundary segments that polygonize.
+    if relations:
+        _way_by_id = {wid: nrefs for wid, nrefs, _wt in ways}
+        for _rid, _member_wids, _rtags in relations:
+            if _rtags.get("aeroway") not in AIRSIDE_AEROWAY:
+                continue
+            _seglines: List[LineString] = []
+            _ring_polys: List[Polygon] = []
+            for _wid in _member_wids:
+                _nrefs = _way_by_id.get(_wid)
+                if not _nrefs:
+                    continue
+                _pts = [to_m(nodes[n][1], nodes[n][0])
+                        for n in _nrefs if n in nodes]
+                if len(_pts) < 2:
+                    continue
+                if len(_pts) >= 4 and _nrefs[0] == _nrefs[-1]:
+                    try:
+                        _p = Polygon(_pts).buffer(0)
+                    except _GEOM_EXC:
+                        continue
+                    if not _p.is_empty:
+                        _ring_polys.append(_p)
+                else:
+                    _seglines.append(LineString(_pts))
+            if _seglines:
+                try:
+                    _ring_polys.extend(
+                        g for g in polygonize(unary_union(_seglines))
+                        if not g.is_empty)
+                except _GEOM_EXC:
+                    pass
+            airside_geoms.extend(_ring_polys)
     # Approach 1: build the airside-reachable subset of apt.dat
     # pavement.  Two polygons are "connected" if their boundaries
     # are within ``TOUCH_TOL_M`` of each other.  Seeds are

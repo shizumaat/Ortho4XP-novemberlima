@@ -1717,10 +1717,19 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # touching a runway (e.g. the apron extends NW past the
         # terminal) classified UNKNOWN and got mis-promoted to
         # groundside.
+        # Connectivity indicator fallback (KCLT, 2026-07-07): payware
+        # packs that draw ALL pavement in the DSF ship an apt.dat with
+        # zero row-110 polygons, so the apt-only snapshot is empty and
+        # the airside-reachability BFS degenerates to "within 100 m of
+        # a runway" — never true at a terminal.  Fall back to the full
+        # pavement list (which includes the DSF polygons) so the BFS
+        # still has a chain to walk; airports with real row-110
+        # pavement keep the apt-only list, exactly as before.
         _ground_zone = _terminal_groundside_zone(
             _osm_terminal_buildings, nodes, ways, to_m,
             apt_pavement_seeds=runway_polys,
-            apt_pavement_polys=apt_only_pav_polys)
+            apt_pavement_polys=(apt_only_pav_polys or pav_polys),
+            relations=relations)
         # O4_COVERAGE_PROBE at the ground-zone boundary: report, per probe
         # point, whether the PRE-subtraction pav_union covers it and whether
         # the ground zone claims it — the earliest coverage handoff, before
