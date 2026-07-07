@@ -448,6 +448,15 @@ TAXI_MAX_TRANSVERSE_NARROW = 0.020   # ICAO Annex 14 Table 3-2 code A/B transver
 # JUNCTIONS stay at the TAXI rate (1.5%): they are part of the moving network
 # where 1.5% taxiways flow through, not parking surface (decoupled below).
 APRON_MAX_GRADE = 0.01          # apron + building pad, all directions
+# RUNWAY FLEX displacement budget (user 2026-07-06): the total distance a
+# flexed runway profile may move from its FAA-redistributed original,
+# summed over all flex rounds.  The flex law is minimum-displacement with
+# the deficit SPLIT across the runways pulling on it (envelope-origin
+# split in ``_apply_runway_flex_hook``); this cap is the safety net —
+# HECA 05C measured a 17.8 m one-sided drop before the split landed
+# (Stage A's whole-airport inter-runway deficit was only 7.67 m, so a
+# lawful per-runway share stays well under this).
+RUNWAY_FLEX_MAX_DISPLACEMENT_M = 4.0
 # USER RULING 2026-07-06: pavement within this distance of a taxi
 # centerline or a runway is NOT apron (it is maneuvering surface —
 # junction law); only the portion of a shape farther than this may carry

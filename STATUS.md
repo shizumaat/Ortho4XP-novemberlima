@@ -1,5 +1,68 @@
+# STATUS — SESSION 20260706 (part 28): KCLT keep-all-pieces + apron-edge
+# service adoption + FLEX minimum-displacement (pick up here)
+
+## USER RULINGS (part 28)
+1. **Apron-edge service grading (PORTION-based, clarified)**: the portion
+   of a service road/junction inside or alongside an apron follows APRON
+   grading; the portion beyond the mouth grades at service rules.
+   Implemented: apron-edge adoption pass (pipeline; split at the apron
+   band = SERVICE_ROAD_WIDTH_M + 2 m), ``BuiltShape.adopts_apron_grade``
+   → solver caps (_shape_grade / _body_cap / rect plane path) →
+   ``o4_grade_law='apron'`` tag → check_grade override + OSM GradeShape.
+2. **Flex = minimum displacement, taxi at max cap first** (user
+   directive after in-sim: runways bending/dipping too much).
+
+## FLEX FIX (root-caused end to end; tools/flex_audit.py verifies)
+Chain of defects fixed in ``_apply_runway_flex_hook``:
+- Sequential rounds let the FIRST runway absorb the whole inter-runway
+  deficit (HECA 05C measured **17.8 m** one-sided) → rounds are now
+  SNAPSHOT-SIMULTANEOUS.
+- Demands now carry envelope ORIGIN (which runway pulls); a demand whose
+  binding seed is another flexible runway moves **deficit/2** so the
+  profiles meet in the middle (user's deficit÷runways formula);
+  immovable origins (seam/CIFP) keep the full move.
+- **RUNWAY_FLEX_MAX_DISPLACEMENT_M = 4.0** (config): cumulative budget
+  per profile vs the pre-flex original.
+- Shared-vertex propagation: flexed runway values re-stamp coincident
+  vertices on neighbouring shapes + the solver seed (stale junction
+  values were re-imposed through the shared bucket at writeback).
+- The runway-join anchor loop no longer overrides flexed runway hard
+  nodes (comment said "never override", code did).
+- ``_sample_runway_segment_elev``: least-squares PLANE FIT replaced by
+  axis-projected interpolation (diameter axis, NOT the bbox diagonal —
+  that broke SE-heading runways, SPJC 16L 0.4 m anchor errors); the
+  plane fit extrapolated ~3 m wrong on flexed (curved) pieces.
+- GOTCHA that cost two diagnosis rounds: the pipeline wraps the hook in
+  a blanket ``except`` → an IndexError (interpolating ORIGINAL elevs
+  against the sample-mutated fractions) left builds HALF-FLEXED with
+  only a one-line WARN.  Grep ``flex pass failed`` before trusting any
+  flex measurement.
+- VERIFIED (HECA flex-on): 0 within/0 plane/0 cross; ±4.00 m max
+  displacement, bidirectional; audit shows zero taxi-not-at-cap
+  clusters; 110 of 441 m demand drained, rest quarantined on the taxi
+  side per FLEX-LAST.  SPJC 0 within (1 break), CYXY 1 within (the
+  known #29 open).
+
+## KCLT (user in-sim report) — fixed
+- ``_drop_overlap_against_fixed_shapes`` kept only the LARGEST clip
+  piece → the far side of every runway crossing was deleted (one-sided
+  spines, ~6.6 k m² true loss).  All pieces ≥5 m² now survive as their
+  own shapes and re-enter the fixed-point clip loop.
+- The 50 m cut's near-zone counted GATE LEAD-IN taxilanes → 63 stand
+  aprons re-roled whole → apron-island merges lost their hosts → the
+  terminal ramp demoted to DEM groundside.  Zone now uses THROUGH
+  routes only (each end joins another centerline or the runway).
+- Cut pieces exempt from ``_drop_off_source_residue``
+  (``from_route_proximity_cut`` flag).
+- All 7 user coordinates verified restored (2 were already missing in
+  the PRE-part-27 baseline and are now recovered); pt3 disc coverage
+  0.27 → 0.73 (small residual notch remains).
+
+## TOOLING RULING: persistent tools live in tools/ (NOT /tmp — it purged
+## twice mid-session).  tools/full_airport_build.py, tools/flex_audit.py.
+
 # STATUS — SESSION 20260706 (part 27): classification rulings landed;
-# weld-authority machinery built; 3 open residuals (pick up here)
+# weld-authority machinery built; 3 open residuals
 
 ## USER RULINGS THIS SESSION (durable law)
 1. **No apron may ever touch a runway** — memory
@@ -78,6 +141,12 @@
     flex Stage C), SPJC route-band/self-overlap, CYXY terrain-follow,
     solver_validator_same_edge_budgets.
   base10.txt kept for reference; do NOT recut until the 3 opens close.
+
+## TOOLING (user 2026-07-06: persistent tools live in tools/, NOT /tmp)
+- tools/full_airport_build.py — the lab build runner (replaces
+  /tmp/spjc_lab/full_build.py; regenerate-in-/tmp notes are obsolete).
+- tools/flex_audit.py — flex-on vs flex-off displacement map + binding
+  taxi-axis slack per flexed cluster (FLEX-LAST verification).
 
 ## GOTCHAS ADDED
 - Debug envs: O4_SLIVER_DEBUG (cut), O4_SVC_DEBUG_LL=lat,lon

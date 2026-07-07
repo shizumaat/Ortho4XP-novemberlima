@@ -3038,28 +3038,59 @@ def _drop_overlap_against_fixed_shapes(
                 return None
         return p
 
-    def _clip_keep_largest(p: Polygon, c: Polygon
-                           ) -> Polygon | None:
-        """Return ``p.difference(c)``, picking the largest piece if
-        the difference is a MultiPolygon.  Returns None if the
-        result is empty / below MIN_KEEP_AREA_M2."""
+    # A clip whose difference is a MultiPolygon used to keep ONLY the
+    # largest piece — silently deleting every other fragment.  Around
+    # runways a fixed rect/runway CROSSES a junction, so "keep largest"
+    # erased the entire far side of the crossing (KCLT 2026-07-06 user
+    # in-sim: disconnected runway stubs, spines with a junction one side
+    # and nothing on the other; measured 0.5-1.0 coverage loss at the
+    # reported spots in THIS pass).  All pieces above the floor now
+    # survive: the primary continues the clip chain, the rest re-enter
+    # the fixed-point loop as their own shapes and get clipped/kept on
+    # their own merits.
+    EXTRA_PIECE_MIN_AREA_M2 = 5.0
+
+    def _clip_pieces(p: Polygon, c: Polygon) -> list[Polygon]:
+        """``p.difference(c)`` as polygons sorted by area DESC (largest
+        first).  Empty list = nothing usable survives the clip."""
         try:
             d = p.difference(c)
         except _GEOM_EXC:
-            return p
+            return [p]
         if d.is_empty:
-            return None
+            return []
         if d.geom_type == "Polygon":
-            return d if d.area >= MIN_KEEP_AREA_M2 else None
-        if d.geom_type == "MultiPolygon":
+            return [d] if d.area >= MIN_KEEP_AREA_M2 else []
+        if d.geom_type in ("MultiPolygon", "GeometryCollection"):
             pieces = [g for g in d.geoms
                       if g.geom_type == "Polygon"
                       and g.area >= MIN_KEEP_AREA_M2]
-            if not pieces:
-                return None
             pieces.sort(key=lambda g: -g.area)
-            return pieces[0]
-        return None
+            return pieces
+        return []
+
+    # (source shape, polygon) fragments to append after the current
+    # pass — appended shapes re-enter the next fixed-point iteration.
+    extra_fragments: list = []
+
+    def _stash_extras(source_shape, pieces: list) -> None:
+        for piece in pieces[1:]:
+            if piece.area >= EXTRA_PIECE_MIN_AREA_M2:
+                extra_fragments.append((source_shape, piece))
+
+    def _flush_extras() -> None:
+        from .layout import BuiltShape as _BuiltShape
+        while extra_fragments:
+            source_shape, piece = extra_fragments.pop()
+            layout.shapes.append(_BuiltShape(
+                polygon=piece, role=source_shape.role,
+                ref=source_shape.ref,
+                reclassified_from_junction=getattr(
+                    source_shape, "reclassified_from_junction", False),
+                from_route_proximity_cut=getattr(
+                    source_shape, "from_route_proximity_cut", False),
+                adopts_apron_grade=getattr(
+                    source_shape, "adopts_apron_grade", False)))
 
     n_dropped = 0
     n_clipped = 0
@@ -3125,16 +3156,18 @@ def _drop_overlap_against_fixed_shapes(
                             any_change = True
                             continue
                         # Partial overlap — clip j against i.
-                        clipped = _clip_keep_largest(pj, pi)
-                        if clipped is None:
+                        pieces = _clip_pieces(pj, pi)
+                        if not pieces:
                             layout.shapes[j].polygon = None
                             n_dropped += 1
                         else:
-                            layout.shapes[j].polygon = clipped
+                            layout.shapes[j].polygon = pieces[0]
+                            _stash_extras(layout.shapes[j], pieces)
                             n_clipped += 1
                         any_change = True
                     except _GEOM_EXC:
                         continue
+            _flush_extras()
             if not any_change:
                 break
     layout.shapes = [s for s in layout.shapes
@@ -3217,11 +3250,12 @@ def _drop_overlap_against_fixed_shapes(
                                     or inter.area
                                     <= NOISE_OVERLAP_M2):
                                 continue
-                            clipped = _clip_keep_largest(new_p, fp)
-                            if clipped is None:
+                            pieces = _clip_pieces(new_p, fp)
+                            if not pieces:
                                 new_p = None
                                 break
-                            new_p = clipped
+                            new_p = pieces[0]
+                            _stash_extras(layout.shapes[i], pieces)
                             any_change = True
                             n_clipped += 1
                         except _GEOM_EXC:
@@ -3242,11 +3276,12 @@ def _drop_overlap_against_fixed_shapes(
                                     or inter.area
                                     <= NOISE_OVERLAP_M2):
                                 continue
-                            clipped = _clip_keep_largest(new_p, tp2)
-                            if clipped is None:
+                            pieces = _clip_pieces(new_p, tp2)
+                            if not pieces:
                                 new_p = None
                                 break
-                            new_p = clipped
+                            new_p = pieces[0]
+                            _stash_extras(layout.shapes[i], pieces)
                             any_change = True
                             n_clipped += 1
                         except _GEOM_EXC:
@@ -3257,6 +3292,7 @@ def _drop_overlap_against_fixed_shapes(
                     continue
                 if new_p is not tp:
                     layout.shapes[i].polygon = new_p
+        _flush_extras()
         if not any_change:
             break
 

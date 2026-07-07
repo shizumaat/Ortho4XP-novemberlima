@@ -4355,7 +4355,8 @@ def build_airport_pavement(icao: str, xplane_root: str,
             _near_zone = None
             try:
                 _zone_parts = []
-                _taxi_lines = []
+                _rwy_union = getattr(layout, "runway_union", None)
+                _candidate_lines = []
                 for _cl_item in (getattr(layout, "apt_taxi_centerlines",
                                          None) or []):
                     if getattr(_cl_item, "is_service", False):
@@ -4363,12 +4364,47 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     _ln = (getattr(_cl_item, "chained_line", None)
                            or getattr(_cl_item, "line", None))
                     if _ln is not None and not _ln.is_empty:
+                        _candidate_lines.append(_ln)
+                # THROUGH-ROUTES ONLY (KCLT terminal regression,
+                # 2026-07-06): a gate LEAD-IN taxilane dead-ends on the
+                # stand it serves — counting it toward the 50 m zone
+                # makes every stand "near-route" (KCLT: 63 stand aprons
+                # re-roled whole; the apron-island merges then lost
+                # their hosts and the terminal ramp demoted to DEM
+                # groundside).  A centerline joins the zone only when
+                # EACH end either joins another taxi centerline or
+                # reaches the runway union — dead-end spurs are the
+                # stand's own territory, not the movement network.
+                _JOIN_TOL_M = 2.0
+                _taxi_lines = []
+                for _k1, _ln in enumerate(_candidate_lines):
+                    try:
+                        _ends = (Point(*_ln.coords[0]),
+                                 Point(*_ln.coords[-1]))
+                    except Exception:
+                        continue
+                    _through = True
+                    for _end in _ends:
+                        _joined = (
+                            _rwy_union is not None
+                            and not _rwy_union.is_empty
+                            and _rwy_union.distance(_end) <= _JOIN_TOL_M)
+                        if not _joined:
+                            for _k2, _other in enumerate(_candidate_lines):
+                                if _k2 == _k1:
+                                    continue
+                                if _other.distance(_end) <= _JOIN_TOL_M:
+                                    _joined = True
+                                    break
+                        if not _joined:
+                            _through = False
+                            break
+                    if _through:
                         _taxi_lines.append(_ln)
                 if _taxi_lines:
                     _zone_parts.append(unary_union(_taxi_lines).buffer(
                         APRON_ROUTE_PROXIMITY_M, cap_style=2,
                         join_style=2))
-                _rwy_union = getattr(layout, "runway_union", None)
                 if _rwy_union is not None and not _rwy_union.is_empty:
                     _zone_parts.append(_rwy_union.buffer(
                         APRON_ROUTE_PROXIMITY_M, join_style=2))
@@ -4412,12 +4448,13 @@ def build_airport_pavement(icao: str, xplane_root: str,
                         _near_part, "geoms", [_near_part])
                         if g.geom_type == "Polygon" and g.area > 1.0]
                     for _g in _near_polys:
-                        _cut_shapes.append(_BS(polygon=_g,
-                                               role=_R_JCT_NEAR,
-                                               ref=_s.ref))
+                        _cut_shapes.append(_BS(
+                            polygon=_g, role=_R_JCT_NEAR, ref=_s.ref,
+                            from_route_proximity_cut=True))
                     for _g in _far_polys:
-                        _cut_shapes.append(_BS(polygon=_g, role=_R_APRON,
-                                               ref=_s.ref))
+                        _cut_shapes.append(_BS(
+                            polygon=_g, role=_R_APRON, ref=_s.ref,
+                            from_route_proximity_cut=True))
                     _n_cut += 1
                     if os.environ.get("O4_SLIVER_DEBUG") == "1":
                         _c = _s.polygon.representative_point()
@@ -4608,6 +4645,100 @@ def build_airport_pavement(icao: str, xplane_root: str,
             UI.vprint(1,
                 f"  [pav-builder] {icao}: conformed {_n_parallel} "
                 f"parallel service-road vertex(es) across narrow gaps.")
+
+        # APRON-EDGE GRADE ADOPTION (USER RULING 2026-07-06, clarified):
+        # "the portion of service road that is inside, or running along
+        # the edge of an apron follows apron grading.  A service road
+        # that leaves the apron ... the portion beyond the apron grades
+        # at service road rules."  PORTION-based, like the 50 m cut:
+        # eligible roads/junctions (≥ 1 m shared boundary with an apron)
+        # are SPLIT at the apron-adjacency band contour — the band =
+        # apron union buffered one road width (a road running alongside
+        # adopts across its full width; a road leaving the apron exits
+        # the band within ~a road width of the mouth).  Inside pieces
+        # set ``adopts_apron_grade`` (solver caps + o4_grade_law tag);
+        # outside pieces keep the service law.
+        from .config import SERVICE_ROAD_WIDTH_M as _SVC_W_ADOPT
+        from .layout import (ROLE_SERVICE_ROAD as _RSR_ADOPT,
+                             ROLE_SERVICE_JUNCTION as _RSJ_ADOPT,
+                             ROLE_APRON as _RAPR_ADOPT,
+                             BuiltShape as _BS_ADOPT)
+        _APRON_EDGE_BAND_M = float(_SVC_W_ADOPT) + 2.0
+        _apron_polys_adopt = [
+            _s.polygon for _s in layout.shapes
+            if _s.role == _RAPR_ADOPT and _s.polygon is not None
+            and not _s.polygon.is_empty
+            and _s.polygon.geom_type == "Polygon"]
+        _adopt_band = None
+        if _apron_polys_adopt:
+            try:
+                _adopt_band = unary_union(_apron_polys_adopt).buffer(
+                    _APRON_EDGE_BAND_M, join_style=2)
+            except _GEOM_EXC:
+                _adopt_band = None
+        _n_adopt_whole = _n_adopt_split = 0
+        if _adopt_band is not None and not _adopt_band.is_empty:
+            _adopt_boundary = unary_union(
+                [_p.exterior for _p in _apron_polys_adopt])
+            _adopt_shapes: list = []
+            for _s in layout.shapes:
+                if (_s.role not in (_RSR_ADOPT, _RSJ_ADOPT)
+                        or _s.polygon is None or _s.polygon.is_empty
+                        or _s.polygon.geom_type != "Polygon"):
+                    _adopt_shapes.append(_s)
+                    continue
+                try:
+                    _shares_edge = (
+                        _s.polygon.exterior.distance(_adopt_boundary)
+                        < 0.05
+                        and _s.polygon.exterior.buffer(0.05)
+                        .intersection(_adopt_boundary).length >= 1.0)
+                except _GEOM_EXC:
+                    _shares_edge = False
+                if not _shares_edge:
+                    _adopt_shapes.append(_s)
+                    continue
+                try:
+                    _outside = _s.polygon.difference(_adopt_band)
+                except _GEOM_EXC:
+                    _adopt_shapes.append(_s)
+                    continue
+                _outside_polys = [g for g in getattr(
+                    _outside, "geoms", [_outside])
+                    if g.geom_type == "Polygon" and g.area > 1.0]
+                if not _outside_polys:
+                    # wholly inside/alongside the apron → adopts whole
+                    _s.adopts_apron_grade = True
+                    _adopt_shapes.append(_s)
+                    _n_adopt_whole += 1
+                    continue
+                try:
+                    _inside = _s.polygon.intersection(_adopt_band)
+                except _GEOM_EXC:
+                    _adopt_shapes.append(_s)
+                    continue
+                _inside_polys = [g for g in getattr(
+                    _inside, "geoms", [_inside])
+                    if g.geom_type == "Polygon" and g.area > 1.0]
+                if not _inside_polys:
+                    _adopt_shapes.append(_s)
+                    continue
+                for _g in _inside_polys:
+                    _adopt_shapes.append(_BS_ADOPT(
+                        polygon=_g, role=_s.role, ref=_s.ref,
+                        adopts_apron_grade=True,
+                        from_route_proximity_cut=True))
+                for _g in _outside_polys:
+                    _adopt_shapes.append(_BS_ADOPT(
+                        polygon=_g, role=_s.role, ref=_s.ref,
+                        from_route_proximity_cut=True))
+                _n_adopt_split += 1
+            layout.shapes = _adopt_shapes
+        if _n_adopt_whole or _n_adopt_split:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: apron-edge grade adoption — "
+                f"{_n_adopt_whole} service shape(s) adopted whole, "
+                f"{_n_adopt_split} split at the apron band (user rule).")
 
         # (refactor Phase 5) The boundary ribbon + boundary→DEM bridge emit
         # and their airside vertex touches (_snap_bridge_vertices_to_runway_

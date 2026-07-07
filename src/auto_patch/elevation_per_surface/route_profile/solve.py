@@ -121,32 +121,73 @@ def _apply_runway_flex_hook(layout, icao, nodes, bucket_to_idx, elev,
                 if i is not None and i < n and base_hard[i]:
                     elev[i] = float(value)
 
+    # node index → owning runway ref, for envelope-origin attribution
+    # (which runway's value is PULLING a demand).
+    node_owner_ref = {}
+    for _ref, _ns in runway_nodes_by_ref.items():
+        for _i in _ns:
+            node_owner_ref[_i] = _ref
+
     def _value_envelope(seeds, sign):
         """ceil (sign=+1): min over seeds of value + path budget;
         floor (sign=−1): max of value − path budget.  Strict pop guard
-        (no epsilon) — the lazy-Dijkstra re-expansion lesson."""
+        (no epsilon) — the lazy-Dijkstra re-expansion lesson.
+
+        Returns ``{node: (value, origin_ref)}`` where ``origin_ref`` is
+        the runway owning the BINDING seed (None = a non-runway anchor:
+        seam pin / building seat / other immovable).  The origin decides
+        whether a demand may be SPLIT with the pulling runway (user
+        2026-07-06: the deficit divides across the runways pulling on
+        it) or must be absorbed in full."""
         best: dict = {}
-        pq = [((v if sign > 0 else -v), i) for i, v in seeds.items()]
+        _tie = 0                    # heap tiebreaker: origin is not orderable
+        pq = []
+        for i, v in seeds.items():
+            pq.append(((v if sign > 0 else -v), _tie, i,
+                       node_owner_ref.get(i)))
+            _tie += 1
         _heapq.heapify(pq)
         while pq:
-            key, k = _heapq.heappop(pq)
+            key, _t, k, origin = _heapq.heappop(pq)
             if k in best:
                 continue
-            best[k] = key if sign > 0 else -key
+            best[k] = ((key if sign > 0 else -key), origin)
             for (j, budget) in adjacency.get(k, ()):
                 if j in best:
                     continue
-                nt = best[k] + sign * budget
-                _heapq.heappush(pq, ((nt if sign > 0 else -nt), j))
+                nt = best[k][0] + sign * budget
+                _tie += 1
+                _heapq.heappush(
+                    pq, ((nt if sign > 0 else -nt), _tie, j, origin))
         return best
 
     _BIN_M = 80.0
     _DEMAND_TOL_M = 0.05
+    # HARD DISPLACEMENT BUDGET (user 2026-07-06: the flex was moving
+    # HECA 05C by 17.8 m — far past the minimum): each profile may move
+    # at most this far from its ORIGINAL (pre-flex) elevation, summed
+    # over all rounds.  The origin-split below is the real law (the
+    # deficit divides across the runways pulling on it); this is the
+    # safety net against pathological envelope chains.
+    from auto_patch.config import RUNWAY_FLEX_MAX_DISPLACEMENT_M
+    # matched (fractions, elevs) SNAPSHOT — apply_runway_flex INSERTS
+    # samples into the live profile arrays, so interpolating the old
+    # elevs against the new fractions indexes out of range.
+    original_profiles = {
+        ref: (list(profiles[ref]['fractions']),
+              list(profiles[ref]['elevs']))
+        for ref in profiles if profiles.get(ref)}
     total_deficit = total_drained = 0.0
     n_demands = 0
     flexed_refs: set = set()
     for _round in range(3):
-        round_flexed = False
+        # SNAPSHOT-SIMULTANEOUS round (user 2026-07-06): demands for ALL
+        # runways are computed against the SAME pre-round state, then
+        # applied together.  The previous sequential loop re-seeded after
+        # each runway, so the FIRST runway absorbed the entire
+        # inter-runway deficit (HECA: one-sided 16-17.8 m drops instead
+        # of the two profiles meeting in the middle).
+        round_targets: dict = {}
         for ref, own_nodes in runway_nodes_by_ref.items():
             if not own_nodes:
                 continue
@@ -163,17 +204,17 @@ def _apply_runway_flex_hook(layout, icao, nodes, bucket_to_idx, elev,
             dx, dy = profile['axis_d']
             axis_len2 = profile['axis_len2']
             axis_len = _math.sqrt(axis_len2)
-            # per-bin worst demand: (deficit, t, target_value)
+            # per-bin worst demand: (deficit, t, target_value, origin)
             bins: dict = {}
             for i in own_nodes:
                 value = elev[i]
-                hi = ceil_env.get(i)
-                lo = floor_env.get(i)
-                target = None
+                hi, hi_origin = ceil_env.get(i, (None, None))
+                lo, lo_origin = floor_env.get(i, (None, None))
+                target = origin = None
                 if hi is not None and value > hi + _DEMAND_TOL_M:
-                    target = hi
+                    target, origin = hi, hi_origin
                 elif lo is not None and value < lo - _DEMAND_TOL_M:
-                    target = lo
+                    target, origin = lo, lo_origin
                 if target is None:
                     continue
                 x, y = nodes[i]
@@ -184,19 +225,38 @@ def _apply_runway_flex_hook(layout, icao, nodes, bucket_to_idx, elev,
                 bin_key = int(t * axis_len / _BIN_M)
                 if (bin_key not in bins
                         or deficit > bins[bin_key][0]):
-                    bins[bin_key] = (deficit, t, target)
+                    bins[bin_key] = (deficit, t, target, origin)
             if not bins:
                 continue
             # slack-clamp each target, then make consecutive targets
             # runway-law-consistent (anchoring mutually-infeasible
             # targets would bake an over-cap profile).
             candidates = []
-            for (deficit, t, target) in bins.values():
+            for (deficit, t, target, origin) in bins.values():
                 current = _interp_profile(profile['fractions'],
                                           profile['elevs'], t)
+                # ORIGIN SPLIT (user 2026-07-06): when the binding
+                # anchor is ANOTHER FLEXIBLE RUNWAY, the deficit is a
+                # joint obligation — this profile moves only its share
+                # (deficit / number of runways pulling = 2 for a pair)
+                # and the other runway's own round moves the rest, so
+                # the profiles meet in the middle.  An immovable origin
+                # (seam pin, building seat, CIFP-adjacent) cannot yield
+                # — full move.
+                pull = abs(target - current)
+                if (origin is not None and origin != ref
+                        and origin in profiles):
+                    pull = pull / 2.0
                 direction = 1.0 if target > current else -1.0
                 slack = flex_slack_at(profile, t, direction)
-                move = min(abs(target - current), slack)
+                # cumulative displacement budget vs the ORIGINAL profile
+                orig_fr, orig_el = original_profiles.get(
+                    ref, (profile['fractions'], profile['elevs']))
+                original = _interp_profile(orig_fr, orig_el, t)
+                moved_already = abs(current - original)
+                budget_left = max(
+                    0.0, RUNWAY_FLEX_MAX_DISPLACEMENT_M - moved_already)
+                move = min(pull, slack, budget_left)
                 if move <= 0.01:
                     continue
                 candidates.append((deficit, t,
@@ -221,19 +281,80 @@ def _apply_runway_flex_hook(layout, icao, nodes, bucket_to_idx, elev,
                 kept.append((t, value))
                 total_deficit += deficit
                 total_drained += move
-            if not kept:
-                continue
-            targets = sorted(kept)
+            if kept:
+                round_targets[ref] = sorted(kept)
+        if not round_targets:
+            break
+        for ref, targets in round_targets.items():
             n_demands += len(targets)
             apply_runway_flex(layout, {ref: targets})
             _reseed_runway_values(ref)
             flexed_refs.add(ref)
-            round_flexed = True
-        if not round_flexed:
-            break
 
     if not flexed_refs:
         return 0
+
+    # SHARED-VERTEX PROPAGATION (user 2026-07-06 root-cause): the flex
+    # rewrites RUNWAY shapes only, but junctions/aprons stitched to the
+    # runway edge carry pre-flex values at the SHARED vertices (stamped
+    # by pre-solve reconciliation).  Left stale, the neighbour's value
+    # wins the shared bucket at seeding/writeback and re-imposes the
+    # pre-flex elevation INTO the flexed runway ring (HECA 05L: one
+    # 58.3 vertex in a 61.2 ring = a 24 % runway-internal step).  The
+    # flexed runway is the authority at its own edge: re-stamp every
+    # coincident vertex on every other shape, and the solver seed.
+    flexed_value_by_key: dict = {}
+    for ref in flexed_refs:
+        for s in layout.shapes:
+            if (s.role != ROLE_RUNWAY or (s.ref or "") != ref
+                    or s.polygon is None or s.polygon.is_empty
+                    or not s.node_altitudes):
+                continue
+            ring = list(s.polygon.exterior.coords)
+            for k in range(min(len(ring), len(s.node_altitudes))):
+                if s.node_altitudes[k] is None:
+                    continue
+                key = cps.get_or_add(float(ring[k][0]), float(ring[k][1]))
+                flexed_value_by_key[key] = float(s.node_altitudes[k])
+    # Flexed runway hard nodes: the join-anchor loop after this hook
+    # must not stamp a sampled "local runway elevation" over them — the
+    # sampler reads PIECE geometry and disagrees with the flexed profile
+    # at piece ends (HECA 05L: 58.30 stamped over the flexed 61.21 hard
+    # node → a 24 % runway-internal step).  The flexed profile IS the
+    # local runway surface.
+    layout._flexed_runway_node_idx = {
+        i for ref in flexed_refs
+        for i in runway_nodes_by_ref.get(ref, ()) if i < n}
+    n_propagated = 0
+    for s in layout.shapes:
+        if (s.role == ROLE_RUNWAY or s.polygon is None
+                or s.polygon.is_empty or not s.node_altitudes):
+            continue
+        ring = list(s.polygon.exterior.coords)
+        alts = list(s.node_altitudes)
+        changed = False
+        for k in range(min(len(ring), len(alts))):
+            key = cps.get_or_add(float(ring[k][0]), float(ring[k][1]))
+            value = flexed_value_by_key.get(key)
+            if (value is not None and alts[k] is not None
+                    and abs(float(alts[k]) - value) > 0.02):
+                alts[k] = value
+                changed = True
+                n_propagated += 1
+        if changed:
+            s.node_altitudes = alts
+    for key, value in flexed_value_by_key.items():
+        i = bucket_to_idx.get(key)
+        if i is not None and i < n:
+            elev[i] = value
+    if n_propagated:
+        try:
+            import O4_UI_Utils as _UIp
+            _UIp.vprint(1, f"  [pav-builder] {icao}: runway flex — "
+                           f"re-stamped {n_propagated} shared vertex(es) "
+                           f"on neighbouring shapes to the flexed edge.")
+        except Exception:
+            pass
 
     G.runway_anchor.clear()
     _GGf._runway_anchors(layout, G, bucket_to_idx)
@@ -389,8 +510,16 @@ def solve_route_profile(layout, icao: str,
         # O4_DUMP_SOLVE_STATE snapshot — the phantom-anchor forensics).
         _hard_cat = {i for i in range(n) if base_hard[i]}
         _hard_cat = {i: "seed_rwy_seam" for i in _hard_cat}
+        # FLEXED runway nodes keep the flexed profile value: the join
+        # anchor is SAMPLED from piece geometry and disagrees with the
+        # flexed profile at piece ends (user 2026-07-06 root-cause —
+        # 58.30 stamped over the flexed 61.21 → 24 % inside 05L).
+        _flexed_idx = getattr(layout, "_flexed_runway_node_idx", None) or ()
         for i, re in G.runway_anchor.items():
             if i < n:
+                if i in _flexed_idx and base_hard[i]:
+                    _hard_cat.setdefault(i, "rwy_flexed")
+                    continue
                 elev[i] = float(re)
                 base_hard[i] = True
                 _hard_cat.setdefault(i, "rwy_join")

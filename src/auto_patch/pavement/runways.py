@@ -112,12 +112,16 @@ def _sample_runway_segment_elev(
     if shape.altitude is not None:
         return float(shape.altitude)
     # Per-vertex node_altitudes — the UNIFIED runway representation
-    # (user 2026-07-06; previously only tile-cut pieces).  Least-squares
-    # PLANE FIT over the ring vertices, exact for the near-planar quads
-    # runways are built from and smooth for longer pieces — the old
-    # nearest-neighbour sample stepped between vertices, which degraded
-    # every runway-elevation consumer (clearance cuts, runway-join
-    # anchors, the clamp-floor fallback) once runways went per-vertex.
+    # (user 2026-07-06; previously only tile-cut pieces).  AXIS-PROJECTED
+    # linear interpolation over the ring's (t, value) pairs: project the
+    # query and every ring vertex onto the piece's long axis and
+    # interpolate value(t).  Exact for the near-planar quads runways are
+    # built from, and — unlike the earlier least-squares PLANE FIT —
+    # correct for CURVED pieces too: the runway FLEX re-writes a bent
+    # profile into pieces cut for the old breakpoints, and the plane fit
+    # extrapolated ~3 m wrong at a flexed piece's ends (HECA 05L: the
+    # runway-join anchor stamped 58.30 over the flexed 61.21 hard node
+    # → a 24 % step inside the runway).
     if shape.node_altitudes and shape.polygon is not None:
         try:
             coords = list(shape.polygon.exterior.coords)
@@ -125,28 +129,42 @@ def _sample_runway_segment_elev(
             coords = []
         n = min(len(coords), len(shape.node_altitudes))
         if n >= 3:
-            mean_x = sum(coords[i][0] for i in range(n)) / n
-            mean_y = sum(coords[i][1] for i in range(n)) / n
-            mean_v = sum(float(shape.node_altitudes[i])
-                         for i in range(n)) / n
-            sum_xx = sum_xy = sum_yy = sum_xv = sum_yv = 0.0
+            # long axis = the ring's DIAMETER (the farthest vertex pair).
+            # A bounding-box diagonal always points into the (+x, +y)
+            # quadrant and is perpendicular-ish to a SE-heading runway
+            # (SPJC 16L/34R: garbage interpolation → 0.4 m join-anchor
+            # errors); the diameter follows the true heading.
+            far_a = far_b = 0
+            far_d2 = -1.0
             for i in range(n):
-                cx = coords[i][0] - mean_x
-                cy = coords[i][1] - mean_y
-                cv = float(shape.node_altitudes[i]) - mean_v
-                sum_xx += cx * cx
-                sum_xy += cx * cy
-                sum_yy += cy * cy
-                sum_xv += cx * cv
-                sum_yv += cy * cv
-            determinant = sum_xx * sum_yy - sum_xy * sum_xy
-            if abs(determinant) > 1e-9:
-                gradient_x = (sum_xv * sum_yy - sum_yv * sum_xy) \
-                    / determinant
-                gradient_y = (sum_yv * sum_xx - sum_xv * sum_xy) \
-                    / determinant
-                return (mean_v + gradient_x * (x - mean_x)
-                        + gradient_y * (y - mean_y))
+                for j in range(i + 1, n):
+                    d2 = ((coords[i][0] - coords[j][0]) ** 2
+                          + (coords[i][1] - coords[j][1]) ** 2)
+                    if d2 > far_d2:
+                        far_d2 = d2
+                        far_a, far_b = i, j
+            span = math.sqrt(far_d2) if far_d2 > 0 else 0.0
+            if span > 1e-6:
+                axis_dx = (coords[far_b][0] - coords[far_a][0]) / span
+                axis_dy = (coords[far_b][1] - coords[far_a][1]) / span
+                samples = sorted(
+                    ((coords[i][0] * axis_dx + coords[i][1] * axis_dy,
+                      float(shape.node_altitudes[i]))
+                     for i in range(n)),
+                    key=lambda p: p[0])
+                tq = x * axis_dx + y * axis_dy
+                if tq <= samples[0][0]:
+                    return samples[0][1]
+                if tq >= samples[-1][0]:
+                    return samples[-1][1]
+                for k in range(1, len(samples)):
+                    t0, v0 = samples[k - 1]
+                    t1, v1 = samples[k]
+                    if tq <= t1:
+                        if t1 - t0 < 1e-9:
+                            return 0.5 * (v0 + v1)
+                        frac = (tq - t0) / (t1 - t0)
+                        return v0 + frac * (v1 - v0)
         if n >= 1:
             best_d2 = float("inf")
             best_alt: float | None = None

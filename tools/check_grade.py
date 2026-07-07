@@ -588,6 +588,14 @@ def _role_grade_limit(way: "Way",
       cap so behaviour stays compatible with un-tagged input).
     """
     role = way.tags.get("role")
+    # APRON-EDGE GRADE ADOPTION (USER RULING 2026-07-06): a service
+    # road/junction portion inside or alongside an apron follows the
+    # apron grading rules — the build stamps ``o4_grade_law='apron'``
+    # on exactly those pieces; validate them at that role's cap so both
+    # readers apply the same law.
+    _law_override = way.tags.get("o4_grade_law")
+    if _law_override and _law_override in ROLE_GRADE_LIMITS:
+        return ROLE_GRADE_LIMITS[_law_override]
     # Size-dependent taxiway cap (gate TAXI_GRADE_BY_WIDTH): a sized
     # taxiway carries the ICAO code letter the build stamped on it; code
     # A/B (narrow, <15 m) validate at 3 %, C–F at 1.5 % — ICAO Annex 14
@@ -961,7 +969,10 @@ def iter_shape_grade_constraints(
         role0 = w.tags.get("role")
         if role0 in _SOFT_ROLES:
             ring = [(p[0], p[1]) for p in pts]
-            gs = _GG.GradeShape(role=role0, ring=ring, keys=list(pnids))
+            gs = _GG.GradeShape(
+                role=role0, ring=ring, keys=list(pnids),
+                adopts_apron_grade=(
+                    w.tags.get("o4_grade_law") == "apron"))
             sc = _GG.shape_constraints(gs, _law_ctx)
             idx = {pnids[k]: k for k in range(n)}
             for (ka, kb, cap) in sc.edges:

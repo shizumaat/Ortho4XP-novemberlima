@@ -164,10 +164,15 @@ class GradeShape:
     ``ring``  open ring (no repeated closing vertex), LOCAL meter coords.
     ``keys``  stable per-vertex key parallel to ``ring`` (OSM nid | solver idx).
     ``role``  apron | junction | service_junction.
+    ``adopts_apron_grade``  USER RULING 2026-07-06: a service road /
+    service junction sharing an edge with an apron follows the APRON
+    grading rules.  Layout reader: from ``BuiltShape.adopts_apron_grade``;
+    OSM reader: from the ``o4_grade_law='apron'`` way tag.
     """
     role: str
     ring: list[tuple[float, float]]
     keys: list[Hashable]
+    adopts_apron_grade: bool = False
 
 
 @dataclass
@@ -710,6 +715,10 @@ def _spine_cap(membership: dict, ctx: GradeContext) -> float:
 
 def _body_cap(shape: GradeShape, ctx: GradeContext, membership: dict) -> float:
     if shape.role == APRON_ROLE:
+        return APRON_MAX_GRADE
+    # USER RULING 2026-07-06: a service road / junction sharing an edge
+    # with an apron follows the apron grading rules.
+    if shape.adopts_apron_grade:
         return APRON_MAX_GRADE
     if shape.role == "service_junction":
         return SERVICE_ROAD_MAX_GRADE
@@ -1365,7 +1374,9 @@ def build_unified_graph(layout, bucket_to_idx, ctx=None, *,
                 G.pos[i] = ring[p]
         if skip_edge_shape_ids is not None and id(s) in skip_edge_shape_ids:
             continue    # scoped projection: pairs live in the caller's lazy entry
-        gs = GradeShape(role=s.role, ring=list(ring), keys=keys)
+        gs = GradeShape(role=s.role, ring=list(ring), keys=keys,
+                        adopts_apron_grade=getattr(
+                            s, "adopts_apron_grade", False))
         sc = shape_constraints_cached(id(s.polygon), gs, ctx)
         spine_pairs = set()
         for chain in sc.spine_chains:
@@ -1387,7 +1398,11 @@ def build_unified_graph(layout, bucket_to_idx, ctx=None, *,
         ring = _open_ring(list(s.polygon.exterior.coords))
         if len(ring) < 3:
             continue
-        cap = float(taxi_grade_cap_for_letter(taxi_shape_code_letter(layout, s)))
+        if getattr(s, "adopts_apron_grade", False):
+            cap = float(APRON_MAX_GRADE)   # user 2026-07-06 apron-edge rule
+        else:
+            cap = float(taxi_grade_cap_for_letter(
+                taxi_shape_code_letter(layout, s)))
         idxs = []
         for (x, y) in ring:
             i = _idx(x, y)

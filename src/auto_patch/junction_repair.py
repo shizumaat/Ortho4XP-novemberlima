@@ -1606,6 +1606,12 @@ def _drop_off_source_residue(
     for i, s in enumerate(layout.shapes):
         if s.role not in (ROLE_APRON, ROLE_JUNCTION):
             continue
+        # Route-proximity CUT pieces are deliberate re-partitions of
+        # already-kept pavement: a near-band fragment can individually
+        # sit mostly off-source even though its PARENT passed this test
+        # (KCLT junction #255, 1.9 k m² dropped → user-visible hole).
+        if getattr(s, "from_route_proximity_cut", False):
+            continue
         if s.polygon is None or s.polygon.is_empty:
             continue
         try:

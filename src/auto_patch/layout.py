@@ -316,6 +316,21 @@ class BuiltShape:
     # treatment.  Born-apron shapes never carry the flag, so genuine stand
     # aprons are never promoted.
     reclassified_from_junction: bool = False
+    # Set on pieces minted by the apron route-proximity CUT (pipeline,
+    # user 2026-07-06 50 m ruling).  A cut piece is a deliberate
+    # re-partition of ALREADY-KEPT pavement — a near-band fragment can
+    # individually fall below the off-source residue thresholds even
+    # though its parent passed (KCLT junction #255, 1.9 k m² dropped),
+    # so ``_drop_off_source_residue`` must not judge it.
+    from_route_proximity_cut: bool = False
+    # USER RULING 2026-07-06: a service road / service junction that
+    # SHARES AN EDGE with an apron follows the APRON grading rules —
+    # the road is part of the stand surface there, and a 4-5 % ramp
+    # tearing along a 1 % stand edge is exactly the weld-conflict class.
+    # Set by the pipeline's apron-edge adoption pass; consumed by the
+    # solver cap resolvers and emitted as ``o4_grade_law='apron'`` for
+    # the validator (both readers stay lockstep).
+    adopts_apron_grade: bool = False
 
 
 
@@ -867,6 +882,12 @@ class PavementLayout:
             }
             if s.ref:
                 tags["ref"] = s.ref
+            # APRON-EDGE GRADE ADOPTION (USER RULING 2026-07-06): a
+            # service road/junction sharing an apron edge follows the
+            # apron grading rules — stamp the law override so the
+            # validator applies the same cap the solver used.
+            if getattr(s, "adopts_apron_grade", False):
+                tags["o4_grade_law"] = "apron"
             # Size-dependent taxiway grade cap (gate TAXI_GRADE_BY_WIDTH):
             # stamp the ICAO code letter so the grade validator can apply
             # the same width-dependent cap the solver used (A/B → 3 %,

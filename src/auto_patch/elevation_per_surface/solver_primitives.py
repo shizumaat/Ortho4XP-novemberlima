@@ -195,7 +195,15 @@ def _shape_grade(layout, s) -> float:
     instead of the uniform 1.5 % — ICAO Annex 14 §3.9.3.  The width class
     comes from :func:`taxi_shape_code_letter` (apt.dat letter, else measured
     rect width); gate off / non-taxiway roles fall straight back to the
-    role cap, so the solver stays byte-identical to the uniform baseline."""
+    role cap, so the solver stays byte-identical to the uniform baseline.
+
+    APRON-EDGE ADOPTION (USER RULING 2026-07-06): a service road /
+    service junction sharing an edge with an apron follows the APRON
+    grading rules — the flag is set by the pipeline's adoption pass and
+    overrides the role cap."""
+    if getattr(s, "adopts_apron_grade", False):
+        from auto_patch.config import APRON_MAX_GRADE
+        return float(APRON_MAX_GRADE)
     letter = taxi_shape_code_letter(layout, s)
     if letter is not None:
         return float(taxi_grade_cap_for_letter(letter))
