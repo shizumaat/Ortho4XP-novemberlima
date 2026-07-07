@@ -57,6 +57,9 @@ __all__ = [
     "RUNWAY_CROWN_TRANSVERSE",
     "TAXI_CROWN_TRANSVERSE",
     "ENABLE_SPINE_CROWN",
+    "CROWN_RUNWAYS",
+    "CROWN_TAXI",
+    "CROWN_SERVICE",
     "SERVICE_ROAD_WIDTH_M",
     "MIN_SERVICE_STRIP_LEN_M",
     "OSM_SMALL_ROAD_HIGHWAY_TYPES",
@@ -465,6 +468,17 @@ TAXI_MAX_TRANSVERSE_NARROW = 0.020   # ICAO Annex 14 Table 3-2 code A/B transver
 #   service  1.5 %  (AASHTO Green Book Exh. 4-4 normal crown, low end)
 # Gate: O4_SPINE_CROWN=0 disables (emission returns to flat sections).
 ENABLE_SPINE_CROWN = _os_early.environ.get("O4_SPINE_CROWN", "1") == "1"
+# Per-FAMILY crown scoping (user 2026-07-07, part 30c — in-sim crown eval).
+# ENABLE_SPINE_CROWN is the master gate; these three select WHICH spine
+# families contribute to the crown drop field.  Default = RUNWAYS ONLY for
+# the current in-sim evaluation iteration: the taxi/service crown code is
+# kept intact (evaluation scoping, not removal) but its drop contributions
+# and its crown_spine breaklines are gated OFF by default.  Env overrides:
+# O4_CROWN_TAXI=1 / O4_CROWN_SERVICE=1 re-enable them; O4_CROWN_RUNWAYS=0
+# would crown taxi/service only.
+CROWN_RUNWAYS = _os_early.environ.get("O4_CROWN_RUNWAYS", "1") == "1"
+CROWN_TAXI = _os_early.environ.get("O4_CROWN_TAXI", "0") == "1"
+CROWN_SERVICE = _os_early.environ.get("O4_CROWN_SERVICE", "0") == "1"
 RUNWAY_CROWN_TRANSVERSE = 0.010
 TAXI_CROWN_TRANSVERSE = 0.010
 SERVICE_ROAD_CROWN_TRANSVERSE = 0.015

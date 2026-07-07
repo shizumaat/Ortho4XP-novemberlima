@@ -53,6 +53,9 @@ from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, Point
 
 from .config import (
+    CROWN_RUNWAYS,
+    CROWN_SERVICE,
+    CROWN_TAXI,
     ENABLE_SPINE_CROWN,
     RUNWAY_CROWN_TRANSVERSE,
     SERVICE_ROAD_CROWN_TRANSVERSE,
@@ -104,6 +107,21 @@ _ON_SPINE_TOL_M = 1.0        # == grade_graph.SPINE_PERP_TOL_M
 # surface steps where the runway crowns and the shadow does not.
 _RWY_SHADOW_M = 2.5
 
+# Runway-crossing BLEND (part 30c): near a runway-runway crossing the uniform
+# per-ref drop is replaced by a per-node DRAINAGE DOME —
+#   drop(p) = min over member runways r of
+#             RUNWAY_CROWN_TRANSVERSE × min(perp_dist_to_axis_r(p), hw_cap_r)
+# so along EITHER centerline the drop is 0 (both ridges continue through the
+# intersection at profile level) and in the four quadrants the edges fall
+# away smoothly.  The formula is applied ONLY inside the crossing's influence
+# zone (the crossing polygon + any runway node within ``_XING_INFLUENCE_M`` of
+# a *foreign* member's centerline); on straight sections far from a crossing
+# the node keeps the plain uniform drop (keeps longitudinal profile
+# reconstruction simple).  The two regimes agree at the zone boundary: a node
+# at the edge of its own runway and ≥ hw_cap from every foreign axis evaluates
+# to its own uniform drop, so there is no step at the transition.
+_XING_INFLUENCE_M = 40.0     # foreign-centerline reach of the blend zone
+
 _SPINE_SAMPLE_STEP_M = 12.0  # breakline node spacing along the spine
 _SPINE_EDGE_CLEAR_M = 1.0    # keep spine samples ≥ this inside the pavement
 _SPINE_RING_CLEAR_M = 0.9    # and ≥ this from any pavement ring line
@@ -114,8 +132,13 @@ def runway_crown_drop_m(half_width_m: float) -> float:
     """THE runway edge drop: ``RUNWAY_CROWN_TRANSVERSE × half_width``,
     half-width capped (a shoulder-widened runway crowns its runway
     cross-section, not the shoulder span).  Rounded to the emit grid so
-    the stamped values and the exported drop agree exactly."""
-    if not ENABLE_SPINE_CROWN or not half_width_m or half_width_m <= 0.0:
+    the stamped values and the exported drop agree exactly.
+
+    Gated by ``CROWN_RUNWAYS`` (part 30c family scoping): when runways are
+    de-scoped this returns 0 and the persisted ``crown_drop_m`` is 0, so
+    the runway family carries no drop and emits no ridge."""
+    if (not ENABLE_SPINE_CROWN or not CROWN_RUNWAYS
+            or not half_width_m or half_width_m <= 0.0):
         return 0.0
     return round(RUNWAY_CROWN_TRANSVERSE
                  * min(float(half_width_m), _RUNWAY_HALFW_CAP_M), 2)
@@ -164,6 +187,74 @@ def _nearest_line_dist(tree, geoms, x: float, y: float,
     return d if d <= search_m else None
 
 
+def _crossing_blend_axes(layout):
+    """Build the per-runway-crossing member-axis geometry used by the
+    drainage-dome blend.  Returns ``(members_by_axis, all_member_refs)``:
+
+    * ``members_by_axis`` — ``[(ref, axis_LineString, hw_cap_m), …]`` for
+      every runway ref that participates in at least one crossing (its
+      persisted profile axis, half-width capped at ``_RUNWAY_HALFW_CAP_M``);
+    * ``all_member_refs`` — the set of those refs.
+
+    A node's dome drop is ``min`` over these axes of
+    ``RUNWAY_CROWN_TRANSVERSE × min(perp_dist_to_axis, hw_cap)``; the influence
+    test uses the SAME axes (a node is in-zone when a *foreign* member axis is
+    within ``_XING_INFLUENCE_M``).  Empty when the airport has no crossing."""
+    profiles = getattr(layout, "_runway_redistributed_profiles", None) or {}
+    member_refs: set = set()
+    for s in layout.shapes:
+        if s.role != ROLE_RUNWAY_CROSSING:
+            continue
+        for part in (getattr(s, "ref", "") or "").split("+"):
+            if part in profiles:
+                member_refs.add(part)
+    axes = []
+    for ref in member_refs:
+        p = profiles[ref]
+        ax_a = p["axis_a"]
+        dx, dy = p["axis_d"]
+        try:
+            ln = LineString([ax_a, (ax_a[0] + dx, ax_a[1] + dy)])
+        except _GEOM_EXC:                                   # pragma: no cover
+            continue
+        if ln.is_empty or ln.length < 1e-6:
+            continue
+        hw_cap = min(float(p.get("half_width_m") or 0.0), _RUNWAY_HALFW_CAP_M)
+        axes.append((ref, ln, hw_cap))
+    return axes, member_refs
+
+
+def _crossing_dome_drop(x, y, axes):
+    """The drainage-dome drop at ``(x, y)`` — ``min`` over member axes of
+    ``RUNWAY_CROWN_TRANSVERSE × min(perp_dist, hw_cap)`` — and whether the
+    node is INSIDE the blend influence zone (a foreign axis within
+    ``_XING_INFLUENCE_M``).  Returns ``(drop, in_zone, near_dist)`` where
+    ``near_dist`` is the smallest perpendicular distance to any member axis
+    (0 on a centerline → drop 0, both ridges pass through)."""
+    p = Point(x, y)
+    best = None
+    near = None
+    for (_ref, ln, hw_cap) in axes:
+        try:
+            d = ln.distance(p)
+        except _GEOM_EXC:                                   # pragma: no cover
+            continue
+        if near is None or d < near:
+            near = d
+        contrib = RUNWAY_CROWN_TRANSVERSE * min(d, hw_cap)
+        if best is None or contrib < best:
+            best = contrib
+    if best is None:
+        return 0.0, False, None
+    # in-zone when a *second* (foreign) axis is close: the nearest axis is the
+    # node's own runway edge, so a foreign axis within the influence reach means
+    # the node sits in the crossing's drainage region.
+    n_close = sum(1 for (_r, ln, _h) in axes
+                  if ln.distance(p) <= _XING_INFLUENCE_M)
+    in_zone = n_close >= 2
+    return best, in_zone, near
+
+
 def build_crown_drop_field(layout, nodes, bucket_to_idx,
                            freeze_idx) -> Dict[int, float]:
     """Compute the per-node crown drop ``c`` (metres, > 0).  Returns
@@ -189,7 +280,19 @@ def build_crown_drop_field(layout, nodes, bucket_to_idx,
       crown eases into the uncrowned seam pieces instead of stepping.
     * TAXI / SERVICE corridor: ``rate_family × min(lateral to the
       nearest same-family centerline, half_width_family)``, 0 on the
-      spine itself (≤ the spine tolerance); MIN over owning families."""
+      spine itself (≤ the spine tolerance); MIN over owning families.
+
+    FAMILY SCOPING (part 30c): ``CROWN_RUNWAYS`` / ``CROWN_TAXI`` /
+    ``CROWN_SERVICE`` gate which families contribute.  A de-scoped family's
+    nodes are simply not crowned (c = 0, held via the frozen-key set) — the
+    code path stays intact, it just registers no drop.  Default this
+    iteration = runways only.
+
+    RUNWAY-CROSSING BLEND (part 30c): a runway node inside a crossing's
+    influence zone takes the drainage-dome drop (``_crossing_dome_drop``)
+    instead of the uniform per-ref value — 0 on both centerlines, tapering to
+    the min member half-width in the quadrants — so the two ridges cross at
+    profile level and the edges blend smoothly."""
     cps = getattr(layout, "canonical_points", None)
     if cps is None or not ENABLE_SPINE_CROWN:
         layout._crown_drop_key = {}
@@ -209,14 +312,27 @@ def build_crown_drop_field(layout, nodes, bucket_to_idx,
     # ownership: runway drops (min across refs), taxi/service families,
     # frozen keys (any non-crown owner / degenerate crown shape).
     frozen_keys: set = set()
+    # Keys frozen ONLY because their crown family (taxi/junction/service) is
+    # de-scoped this iteration — held at c = 0 for the corridor readers, but a
+    # co-owning RUNWAY's drop overrides them (part 30c family scoping).
+    descoped_frozen: set = set()
     fam_by_key: Dict[object, set] = {}
     rwy_by_key: Dict[object, float] = {}
+    # Runway-SHADOW candidates: taxi/service ring nodes eligible to be
+    # value-tied to a crowned runway edge (the vertex-push standoff keeps them
+    # within ~2.5 m of the runway).  Collected INDEPENDENT of the taxi/service
+    # crown-family gating (part 30c): even when those families are de-scoped,
+    # a node hugging a crowned runway must carry the RUNWAY's drop or the
+    # emitted surface STEPS where the runway crowns and the neighbour does not.
+    shadow_cand_keys: set = set()
     for s in layout.shapes:
         if s.polygon is None or s.polygon.is_empty:
             continue
         is_runway = s.role in (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING)
+        _fam_on = ((s.role in _TAXI_FAMILY and CROWN_TAXI)
+                   or (s.role in _SERVICE_FAMILY and CROWN_SERVICE))
         eligible = (
-            (s.role in _TAXI_FAMILY or s.role in _SERVICE_FAMILY)
+            _fam_on
             and not getattr(s, "adopts_apron_grade", False)
             and s.polygon.geom_type == "Polygon"
             and not s.polygon.interiors)
@@ -243,13 +359,30 @@ def build_crown_drop_field(layout, nodes, bucket_to_idx,
                         prev = rwy_by_key.get(key)
                         rwy_by_key[key] = d if prev is None else min(prev, d)
             continue
+        _is_crown_family = (s.role in _TAXI_FAMILY or s.role in _SERVICE_FAMILY)
         fam = ("service" if s.role in _SERVICE_FAMILY else "taxi")
+        # A well-formed taxi/service polygon node is a runway-shadow candidate
+        # regardless of whether its own family is crowned this iteration.
+        _shadow_ok = (not getattr(s, "adopts_apron_grade", False)
+                      and s.polygon.geom_type == "Polygon"
+                      and not s.polygon.interiors)
         for ring in rings:
             for (x, y) in ring:
                 key = cps.get_or_add(float(x), float(y))
+                if _shadow_ok:
+                    shadow_cand_keys.add(key)
                 if eligible:
                     fam_by_key.setdefault(key, set()).add(fam)
+                elif _is_crown_family:
+                    # De-SCOPED crown family (taxi/junction/service off this
+                    # iteration): freeze at c = 0, but let a co-owning RUNWAY's
+                    # drop still WIN (else a runway edge vertex shared with a
+                    # de-scoped junction stays uncrowned and the runway's own
+                    # edge steps at the weld — part 30c).
+                    descoped_frozen.add(key)
                 else:
+                    # Genuinely non-crown owner (apron / terminal / building /
+                    # boundary / groundside): a hard c = 0 contract.
                     frozen_keys.add(key)
 
     seam_keys = getattr(layout, "_seam_anchor_keys", None) or set()
@@ -276,6 +409,12 @@ def build_crown_drop_field(layout, nodes, bucket_to_idx,
             drop_by_idx[idx] = c
             drop_by_key[key] = c
 
+    # Runway-crossing drainage-dome axes (empty when no crossing): a runway
+    # node inside a crossing influence zone takes the per-node dome drop in
+    # place of the uniform per-ref value, so the two centerlines meet at
+    # profile level and the quadrants blend (part 30c).
+    _xing_axes, _ = _crossing_blend_axes(layout)
+
     # RUNWAY-owned keys (runway wins over co-owning taxi families).
     for key, d in rwy_by_key.items():
         if key in frozen_keys:
@@ -286,6 +425,12 @@ def build_crown_drop_field(layout, nodes, bucket_to_idx,
         x, y = nodes[idx]
         if vertex_bucket(float(x), float(y)) in seam_keys:
             continue
+        if _xing_axes:
+            dome, in_zone, _near = _crossing_dome_drop(x, y, _xing_axes)
+            if in_zone:
+                # dome ≤ own uniform by construction (own-axis contribution
+                # caps at the node's uniform); take it as the blended drop.
+                d = min(d, dome)
         if seam_pts:
             d_seam = min(math.hypot(x - sx, y - sy)
                          for (sx, sy) in seam_pts)
@@ -309,9 +454,58 @@ def build_crown_drop_field(layout, nodes, bucket_to_idx,
         except _GEOM_EXC:                               # pragma: no cover
             rwy_shadow = None
 
+    def _shadow_drop(x, y):
+        """The crowned-runway edge drop this node must adopt (value-tied
+        within ``_RWY_SHADOW_M`` of a crowned runway), seam-tapered, or None.
+        Uses the crossing dome inside a crossing influence zone so a shadow
+        node at the crossing meets the blended runway edge, not the uniform
+        drop."""
+        if rwy_shadow is None:
+            return None
+        tree, items = rwy_shadow
+        p = Point(x, y)
+        try:
+            k = tree.nearest(p)
+        except _GEOM_EXC:                               # pragma: no cover
+            return None
+        if k is None:
+            return None
+        poly, d_ref = items[int(k)]
+        try:
+            if poly.distance(p) > _RWY_SHADOW_M:
+                return None
+        except _GEOM_EXC:
+            return None
+        best = d_ref
+        if _xing_axes:
+            dome, in_zone, _n = _crossing_dome_drop(x, y, _xing_axes)
+            if in_zone:
+                best = min(best, dome)
+        if seam_pts:
+            d_seam = min(math.hypot(x - sx, y - sy) for (sx, sy) in seam_pts)
+            best = min(best, TAXI_CROWN_TRANSVERSE * d_seam)
+        return best
+
+    # RUNWAY SHADOW pass (part 30c): value-tie every taxi/service ring node
+    # hugging a crowned runway to that runway's edge drop — RUN INDEPENDENT of
+    # the taxi/service crown-family gating so a de-scoped corridor still welds
+    # cleanly to the crowned runway (else a step appears at the join).
+    for key in shadow_cand_keys:
+        if key in frozen_keys or key in rwy_by_key or key in drop_by_key:
+            continue
+        idx = bucket_to_idx.get(key)
+        if idx is None or idx in freeze_idx:
+            continue
+        x, y = nodes[idx]
+        if vertex_bucket(float(x), float(y)) in seam_keys:
+            continue
+        best = _shadow_drop(x, y)
+        if best is not None:
+            _register(key, idx, best)
+
     # TAXI / SERVICE corridor keys.
     for key, fams in fam_by_key.items():
-        if key in frozen_keys or key in rwy_by_key:
+        if key in frozen_keys or key in rwy_by_key or key in drop_by_key:
             continue
         idx = bucket_to_idx.get(key)
         if idx is None or idx in freeze_idx:
@@ -320,28 +514,10 @@ def build_crown_drop_field(layout, nodes, bucket_to_idx,
         if vertex_bucket(float(x), float(y)) in seam_keys:
             continue
         # RUNWAY SHADOW: value-tied to the runway edge → the runway's drop.
-        if rwy_shadow is not None:
-            tree, items = rwy_shadow
-            p = Point(x, y)
-            best = None
-            try:
-                k = tree.nearest(p)
-            except _GEOM_EXC:                           # pragma: no cover
-                k = None
-            if k is not None:
-                poly, d_ref = items[int(k)]
-                try:
-                    if poly.distance(p) <= _RWY_SHADOW_M:
-                        best = d_ref
-                except _GEOM_EXC:
-                    best = None
-            if best is not None:
-                if seam_pts:
-                    d_seam = min(math.hypot(x - sx, y - sy)
-                                 for (sx, sy) in seam_pts)
-                    best = min(best, TAXI_CROWN_TRANSVERSE * d_seam)
-                _register(key, idx, best)
-                continue
+        best = _shadow_drop(x, y)
+        if best is not None:
+            _register(key, idx, best)
+            continue
         drops = []
         for fam in fams:
             if fam == "taxi":
@@ -489,11 +665,18 @@ def extend_field_to_new_ring_nodes(layout, bucket_to_idx) -> int:
                     break
             if not (found_b and found_f):
                 continue
+            c_max = max(field.get(keys[j], 0.0), field.get(keys[k2], 0.0))
+            # Both flanks uncrowned ⇒ the insert inherits NO crown; a nonzero
+            # z_interp−value here is just the ring's own non-planarity, not a
+            # drop (spurious ≤5 cm drops appeared on uncrowned junction rings
+            # once the taxi family was de-scoped).  Only a crowned flank can
+            # give a new vertex a drop.
+            if c_max <= 0.0:
+                continue
             zb = vals[j] + field.get(keys[j], 0.0)
             zf = vals[k2] + field.get(keys[k2], 0.0)
             tot = db + df
             z_interp = zb if tot <= 1e-9 else zb + (zf - zb) * (db / tot)
-            c_max = max(field.get(keys[j], 0.0), field.get(keys[k2], 0.0))
             c = min(max(0.0, z_interp - vals[i]), c_max + 0.05)
             key = keys[i]
             if c > new_c.get(key, 0.0):
@@ -643,10 +826,16 @@ def emit_crown_spines(layout, nodes, bucket_to_idx, elev,
     spine_ways: List[Tuple[list, list]] = []
 
     # ── taxi + service routes: solved on-line node profile ──
+    # FAMILY SCOPING (part 30c): only emit a family's ridge when that family
+    # is crowned; de-scoped taxi/service lines carry no drop, so a ridge there
+    # would sit at the flat surface and be a spurious breakline.
     seen_lines = set()
     for cl in (getattr(layout, "apt_taxi_centerlines", None) or []):
         ln = getattr(cl, "line", None)
         if ln is None or ln.is_empty or ln.length < _MIN_AXIS_LEN_M:
+            continue
+        _is_svc = bool(getattr(cl, "is_service", False))
+        if (_is_svc and not CROWN_SERVICE) or (not _is_svc and not CROWN_TAXI):
             continue
         if id(ln) in seen_lines:
             continue
@@ -704,16 +893,33 @@ def emit_crown_spines(layout, nodes, bucket_to_idx, elev,
     # ── runways: the persisted (post-flex) centerline profile IS the
     # spine — the pavement emits at profile − crown_drop (field), so the
     # breakline at profile renders the ridge.  Clip inside each piece.
+    #
+    # CROSSING CONTINUITY (part 30c, closes the v2 ridge gap): a runway ref's
+    # ridge must also run THROUGH any runway_crossing polygon it belongs to.
+    # We clip each ref's axis against the union of its ROLE_RUNWAY pieces AND
+    # every ROLE_RUNWAY_CROSSING whose members include this ref, so the ridge
+    # is one continuous breakline at the ref's own profile.  At the crossing
+    # both member profiles agree (runway_segments centerline-crossing
+    # reconciliation forces the same ``agreed`` altitude — probe: ≤ 2 cm), so
+    # the two ridges genuinely meet where the centerlines cross.
     from .runway_redistribute import _interp_profile
     profiles = getattr(layout, "_runway_redistributed_profiles", None) or {}
     pieces_by_ref: Dict[str, list] = {}
+    xing_by_ref: Dict[str, list] = {}
     for s in layout.shapes:
-        if (s.role == ROLE_RUNWAY and s.polygon is not None
-                and not s.polygon.is_empty and s.ref
-                and s.polygon.geom_type == "Polygon"):
-            pieces_by_ref.setdefault(s.ref, []).append(s)
-    for ref, pieces in pieces_by_ref.items():
+        if s.polygon is None or s.polygon.is_empty \
+                or s.polygon.geom_type != "Polygon":
+            continue
+        if s.role == ROLE_RUNWAY and s.ref:
+            pieces_by_ref.setdefault(s.ref, []).append(s.polygon)
+        elif s.role == ROLE_RUNWAY_CROSSING and s.ref:
+            for part in s.ref.split("+"):
+                if part in profiles:
+                    xing_by_ref.setdefault(part, []).append(s.polygon)
+    for ref in set(pieces_by_ref) | set(xing_by_ref):
         p = profiles.get(ref)
+        # Only crowned runways emit a ridge (crown_drop_m > 0 ⇒ CROWN_RUNWAYS
+        # on and the runway actually crowns); a flat runway has no ridge.
         if not p or not float(p.get("crown_drop_m") or 0.0):
             continue
         ax_a = p["axis_a"]
@@ -730,23 +936,31 @@ def emit_crown_spines(layout, nodes, bucket_to_idx, elev,
         def _alt_at_rwy(st, _fr=fr, _el=el, _L=ax_len):
             return _interp_profile(_fr, _el, st / max(_L, 1e-6))
 
-        for piece in pieces:
-            try:
-                p_inner = piece.polygon.buffer(-_SPINE_EDGE_CLEAR_M)
-                if p_inner.is_empty:
-                    continue
-                clipped = ax.intersection(p_inner)
-            except _GEOM_EXC:
+        # Union the ref's runway pieces + its crossing polygons, then clip the
+        # axis against the inner buffer of that union so the ridge is a single
+        # continuous line across the crossing rather than gapping at it.
+        parts = list(pieces_by_ref.get(ref, ())) + list(
+            xing_by_ref.get(ref, ()))
+        if not parts:
+            continue
+        try:
+            from shapely.ops import unary_union
+            body = unary_union(parts)
+            body_inner = body.buffer(-_SPINE_EDGE_CLEAR_M)
+            if body_inner.is_empty:
                 continue
-            segs = ([clipped] if clipped.geom_type == "LineString"
-                    else [g for g in getattr(clipped, "geoms", ())
-                          if g.geom_type == "LineString"])
-            for seg in segs:
-                if seg.length < 3.0:
-                    continue
-                spine_ways.extend(_emit_ways_for_profile(
-                    seg, ax, _alt_at_rwy, None, ring_tree, ring_geoms,
-                    layout))
+            clipped = ax.intersection(body_inner)
+        except _GEOM_EXC:
+            continue
+        segs = ([clipped] if clipped.geom_type == "LineString"
+                else [g for g in getattr(clipped, "geoms", ())
+                      if g.geom_type == "LineString"])
+        for seg in segs:
+            if seg.length < 3.0:
+                continue
+            spine_ways.extend(_emit_ways_for_profile(
+                seg, ax, _alt_at_rwy, None, ring_tree, ring_geoms,
+                layout))
 
     if spine_ways:
         existing = getattr(layout, "crown_spines", None) or []

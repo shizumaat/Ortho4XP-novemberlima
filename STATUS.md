@@ -1,5 +1,102 @@
-# STATUS — SESSION 20260707 (part 30): SPINE CROWN v2 — law-native,
-# built at construction (replaces the part-29b post-solve module)
+# STATUS — SESSION 20260707 (part 30c): CROWN runway-only scoping +
+# runway-crossing drainage-dome blend + continuous crossing ridge
+# (in-sim crown eval iteration; builds on part 30/30b crown v2)
+
+## LANDED (part 30c) — runway-only crown + crossing blend
+USER DIRECTIVE (in-sim, testing crowns): crown RUNWAYS ONLY this
+iteration; blend crowns at every runway intersection so centerlines
+cross at the same elevation and edges meet smoothly; emit BOTH ridges
+continuously through the crossing.  The taxi/service crown code is KEPT
+INTACT (evaluation scoping, not removal).
+
+1. **FAMILY SCOPING** (config.py: ``CROWN_RUNWAYS`` / ``CROWN_TAXI`` /
+   ``CROWN_SERVICE``, env ``O4_CROWN_{RUNWAYS,TAXI,SERVICE}``; default
+   runways-only = 1/0/0; ``ENABLE_SPINE_CROWN`` stays the master gate).
+   ``build_crown_drop_field`` gates each family's eligibility on its
+   flag; ``runway_crown_drop_m`` returns 0 when runways de-scoped.
+   A de-scoped family's nodes carry c = 0.  ``emit_crown_spines`` skips
+   a family's ridge when that family is off.  All taxi/service code
+   paths remain — re-enable with the env flags.
+2. **RUNWAY-CROSSING DRAINAGE DOME** (crown.py ``_crossing_blend_axes``
+   + ``_crossing_dome_drop``): inside a crossing influence zone (a
+   runway node with ≥2 member axes within ``_XING_INFLUENCE_M`` = 40 m)
+   the uniform per-ref drop is replaced by
+   ``drop(p) = min_r RUNWAY_CROWN_TRANSVERSE × min(perp_dist_to_axis_r,
+   hw_cap_r)`` — 0 on either centerline (both ridges pass through at
+   profile level), rising to the min member half-width in the quadrants.
+   Outside the zone the node keeps the plain uniform drop (profile
+   reconstruction stays simple); the two regimes agree at the boundary
+   (an own-edge node ≥ hw_cap from every foreign axis evaluates to its
+   own uniform drop → no transition step).  Runway-shadow adoption uses
+   the dome at the crossing so shadowed corridor nodes meet the blended
+   edge.
+3. **CONTINUOUS CROSSING RIDGE** (crown.py runway spine loop): each
+   runway ref's axis is now clipped against the UNION of its
+   ROLE_RUNWAY pieces + every ROLE_RUNWAY_CROSSING it belongs to, so the
+   ridge is ONE continuous breakline THROUGH the crossing (closes the
+   v2 gap item).  Both members' ridges meet where the centerlines cross
+   (equal altitude per the reconciliation, #4).
+4. **CENTERLINE EQUALITY VERIFIED, untouched**: the runway_segments
+   centerline-crossing reconciliation already forces both profiles to
+   the same ``agreed`` altitude at the crossing.  Probe (CYXY
+   02/20×14R/32L): profile[02/20] = profile[14R/32L] = 694.0769,
+   DELTA = 0.00 cm.  Not modified.
+5. **READERS** (part 30 field/sidecar unchanged): crossing-adjacent
+   nodes export their per-node dome value via ``_crown_drop_ll`` →
+   sidecar ``crown_drops`` (CYXY runway-only histogram: 0.081/0.113/
+   0.114/0.115/0.13/0.147 blended values alongside 0.12/0.15/0.23 per-
+   ref uniforms) and the in-memory ``_crown_drop_key`` both readers
+   share.  Invariant held: c single-valued per canonical node, 0 at
+   seam pins.
+6. **RUNWAY WINS over de-scoped-family freeze** (crown.py: new
+   ``descoped_frozen`` set): a runway edge vertex SHARED with a
+   de-scoped junction was frozen at c = 0 by the junction, leaving the
+   runway's own edge stepping at the weld (7.3 % at SPLP).  Now a
+   de-scoped crown-family freeze yields to a co-owning runway's drop
+   (genuine non-crown owners — apron/terminal/building/boundary/
+   groundside — still hard-freeze).  Runway now crowns ALL 22/23 of its
+   SPLP ring vertices (was 11).
+7. **``extend_field_to_new_ring_nodes`` bug fix**: a post-solve ring
+   insert with BOTH flanks uncrowned got a spurious ≤5 cm drop (ring
+   non-planarity read as crown; surfaced once taxi de-scoped).  Now
+   inserts with ``c_max == 0`` inherit no drop.
+
+## VERIFIED (gates, part 30c)
+* Crossing (CYXY, ``tools/full_airport_build.py`` + probes):
+  (a) both profiles at the crossing = 694.0769, ≤ 2 cm ✓;
+  (b) crown_spine ridge CONTINUOUS through both crossings on both
+  centerlines (crossing 1: 02/20 7 on-axis verts @694.06-694.11,
+  14R/32L 6 @694.07-694.09; crossing 2: 02/20 6 @693.68-693.73,
+  14L/32R 5 @693.72-693.73) ✓;
+  (c) quadrant edge nodes carry the min-formula dome (transect
+  perpendicular through the crossing: 0.06 cm on the crossed centerline,
+  rising smoothly and monotonically to the 11.5 cm cap at the edges) ✓;
+  (d) check_grade: within 1 (known apron-#29), cross 0, plane 0,
+  steps 0 ✓.
+* Runway-only gating: SPLP within 16 (IDENTICAL pairs to gate-off,
+  values uniformly lower by the drop), CYXY within 1, HECA within 0;
+  plane/cross 0 all three; HECA vertex-to-edge 3 + mid-edge 14 steps
+  IDENTICAL to gate-off; HECA break 5888 (gate-off 5824, all-crown
+  5895 — quarantined-by-design class).  taxi/service crowned-node count
+  drops CYXY 1170 → 112 (0 taxi/junction/service ring keys carry a drop
+  beyond runway shadows); only runway ridges emit.
+* O4_SPINE_CROWN=0: SPLP + CYXY patches BYTE-IDENTICAL to HEAD gate-off.
+* All-families path preserved (O4_CROWN_TAXI=1 O4_CROWN_SERVICE=1):
+  CYXY within 1, 1156 crowned nodes (was 1170; the extend-field fix
+  removed spurious inserts), taxi ridge emission unchanged (1 at CYXY —
+  narrow corridors eroded by the 1 m inner clearance, pre-existing);
+  runway ridges now 8 continuous ways (was 31 per-piece fragments).
+* fast_suite: EXACTLY the 8 pre-existing failures.  Full suite: the 13
+  pre-existing failures exactly.  Zero new.
+
+## OPEN (part 30c follow-ups)
+* ``_XING_INFLUENCE_M`` = 40 m is a fixed reach; if a future airport has
+  a very oblique or very wide crossing the zone may want to key off the
+  member half-widths instead of a constant.
+* Taxi/service ridge emission is sparse at narrow airports (the 1 m
+  ``_SPINE_EDGE_CLEAR_M`` inner buffer erodes thin corridors) — a
+  pre-existing property, only relevant when taxi/service crown is
+  re-enabled.
 
 ## LANDED (part 30) — crown v2, the agreed architecture
 The v1 post-solve edge-drop module is GONE (crown.py rewritten; the
