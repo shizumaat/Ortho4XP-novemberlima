@@ -77,9 +77,10 @@ The runway profile is built and re-checked by:
 | Rule | Value | Standard | Implemented in |
 |------|-------|----------|----------------|
 | Taxiway clearance half-width | ½ wingspan + 3 m margin | FAA AC 150/5300-13 TOFA; ICAO wingspan table | `config.py` `taxiway_clearance_half_width_m()`, `TAXIWAY_WINGTIP_MARGIN_M` |
-| Obstruction threshold (terrain rise above surface edge that triggers a cut) | 1.0 m (taxiway & runway) | design | `config.py` `CLEARANCE_OBSTRUCTION_THRESHOLD_M` |
+| Obstruction threshold (terrain rise above surface edge that triggers a cut) | 1.0 m (taxiway, runway & service road) | design | `config.py` `CLEARANCE_OBSTRUCTION_THRESHOLD_M` |
 | Lateral strip slope | 0 (flat shadow, cut-only) | design (a non-zero slope carves canyons where pavement sits below its surroundings) | `config.py` `CLEARANCE_LATERAL_MAX_SLOPE` |
 | Max outward reach (earthwork bound) | taxiway 100 m, runway 300 m | design (must exceed code-4 RESA 240 m) | `config.py` `CLEARANCE_MAX_REACH_M` |
+| Service-road roadside clearance band | 15 m beyond the road edge, cut-only | design (AASHTO Roadside Design Guide clear-zone-informed; a ground-vehicle road has no wingtip envelope, so the band is the reach) | `config.py` `CLEARANCE_MAX_REACH_M["service"]`, `CLEARANCE_OBSTRUCTION_THRESHOLD_M["service"]`; walker: `clearance.emit_surface_clearance_cuts` Pass A3 |
 
 The clearance pass is `clearance.emit_surface_clearance_cuts`: it samples the DEM inside the
 protected band and cuts terrain that rises above the adjacent surface-edge altitude down to a

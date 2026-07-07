@@ -25,8 +25,13 @@ The runway-end RESA is the exception: it RAMPS from the runway-end
 elevation at a gentle slope and daylights where it meets the DEM, so an
 over-run/undershoot meets a slope rather than a wall.
 
-Three passes share one strip builder:
-  * taxiway lateral strips   (ROLE_TAXIWAY_CLEARANCE) — flat shadow
+Four passes share one strip builder:
+  * taxiway lateral strips   (ROLE_TAXIWAY_CLEARANCE) — flat shadow,
+    traced from the apt.dat taxi centerline network (+ enclosed-pocket
+    perimeters, Pass A2)
+  * airside ring-edge sweep  (Pass A3) — flat shadow off every
+    TERRAIN-FACING pavement ring edge (junctions, aprons, per-node
+    runway pieces, service roads) at the local rendered edge altitude
   * runway lateral strips    (ROLE_RUNWAY_CLEARANCE)  — flat shadow
   * runway-end RESA areas     (ROLE_RUNWAY_CLEARANCE)  — ramp
 
@@ -82,6 +87,8 @@ from .layout import (
     ROLE_RUNWAY_CLEARANCE,
     ROLE_RUNWAY_CROSSING,
     ROLE_SECONDARY_PARALLEL,
+    ROLE_SERVICE_JUNCTION,
+    ROLE_SERVICE_ROAD,
     ROLE_STUB,
     ROLE_TAXIWAY_CLEARANCE,
     SHARED_VERTEX_TOL_M,
@@ -149,6 +156,16 @@ _AIRSIDE_PAVEMENT_ROLES = (
 # is skipped — no wingtip-obstruction risk in the middle of pavement.
 _RAY_STEP_M = 2.0
 _RAY_MAX_HALF_WIDTH_M = 35.0
+# Pass A3 ring-edge sweep: a ring-edge station only faces TERRAIN when
+# the point this far outward is not covered by any already-emitted
+# shape (adjacent pavement / ribbon / building / groundside all own
+# their band).  Just past ``_PAVEMENT_GAP_M`` so a shared shape edge is
+# reliably detected, well under the narrowest service-road width.
+_RING_PROBE_M = 2.0
+# Pass A3 skips a runway-family ring-edge station whose outward normal
+# points mostly ALONG the runway axis (an END edge): the runway end is
+# RESA / skirt territory (Pass C / D) and must stay exactly as it is.
+_RING_END_NORMAL_DOT = 0.7
 # How far past the runway end to search for the outer pavement edge
 # (blast-pad / stopway / apron) the RESA should anchor on.
 _RESA_PAVEMENT_PROBE_MAX_M = 300.0
@@ -339,26 +356,30 @@ def _drop_sharp_corners(coords: list[tuple[float, float]],
     return coords
 
 
-def _resample_alts_over_strips(ring_open, strips):
-    """Per-vertex altitude for ``ring_open`` sampled from the set of raw
-    graded ``strips`` (each ``(open_ring, open_alts)``).
+def _make_strip_alt_resampler(strips):
+    """Build the strip-edge / strip-vertex index ONCE over ``strips``
+    (each ``(open_ring, open_alts)``) and return a
+    ``resample(ring_open) -> alts`` closure.
 
-    For each vertex: the altitude interpolated along the NEAREST strip
-    edge within ``EDGE_TOL_M`` (where strips overlap, the nearest edge
-    wins — i.e. the closest pavement-edge profile governs), else the
-    altitude of the nearest strip vertex.  Lets a single polygon unioned
-    from many strips carry a faithful per-vertex elevation.
+    For each ring vertex: the altitude interpolated along the NEAREST
+    strip edge within ``EDGE_TOL_M`` (where strips overlap, the nearest
+    edge wins — i.e. the closest pavement-edge profile governs), else
+    the altitude of the nearest strip vertex.  Lets a single polygon
+    unioned from many strips carry a faithful per-vertex elevation.
 
     Vectorised: an STRtree ``dwithin`` query cuts each vertex's candidate
     edges to the handful within ``EDGE_TOL_M`` (instead of scanning every
     strip edge — the previous O(V·E) loop was the dominant build cost on
     apron-heavy airports), then the EXACT same perpendicular-foot
     projection + nearest-edge tie-break is applied over those candidates.
-    Points with no in-range edge fall back to the nearest strip vertex."""
+    Points with no in-range edge fall back to the nearest strip vertex.
+
+    The index is built ONCE here (not per call): ``_finalize`` resamples
+    every emitted piece twice, and rebuilding the segment STRtree per
+    piece made finalize the dominant build cost once the Pass A3 ring
+    sweep multiplied the strip count (HECA: ~39 s -> ~4 s)."""
     EDGE_TOL_M = 0.5
     EDGE_TOL2 = EDGE_TOL_M * EDGE_TOL_M
-    if not ring_open:
-        return []
 
     # Flatten strip segments (edge interpolation) and strip vertices
     # (nearest-vertex fallback) into parallel arrays.
@@ -386,72 +407,91 @@ def _resample_alts_over_strips(ring_open, strips):
             a0l.append(alts[k])
             a1l.append(alts[(k + 1) % m])
 
-    n = len(ring_open)
-    rx = np.fromiter((p[0] for p in ring_open), dtype=float, count=n)
-    ry = np.fromiter((p[1] for p in ring_open), dtype=float, count=n)
-    best_alt = np.full(n, np.nan)
-
-    if seg_geoms:
-        sx = np.asarray(sxl)
-        sy = np.asarray(syl)
-        dx = np.asarray(dxl)
-        dy = np.asarray(dyl)
-        seg2 = np.asarray(seg2l)
-        a0 = np.asarray(a0l)
-        a1 = np.asarray(a1l)
-        qpts = shapely.points(rx, ry)
-        tree = STRtree(seg_geoms)
-        # pairs[0] = ring-vertex index, pairs[1] = candidate segment index.
-        pairs = tree.query(qpts, predicate="dwithin", distance=EDGE_TOL_M)
-        if pairs.size:
-            pi = pairs[0]
-            si = pairs[1]
-            nx = rx[pi]
-            ny = ry[pi]
-            t = (((nx - sx[si]) * dx[si] + (ny - sy[si]) * dy[si])
-                 / seg2[si])
-            in_range = (t >= -1e-3) & (t <= 1.0 + 1e-3)
-            tc = np.clip(t, 0.0, 1.0)
-            px = sx[si] + tc * dx[si]
-            py = sy[si] + tc * dy[si]
-            d2 = (nx - px) ** 2 + (ny - py) ** 2
-            ok = in_range & (d2 < EDGE_TOL2)
-            if ok.any():
-                pio = pi[ok]
-                d2o = d2[ok]
-                sio = si[ok]
-                alto = a0[si][ok] + tc[ok] * (a1[si][ok] - a0[si][ok])
-                # Per vertex keep the nearest edge; break exact ties by
-                # lowest segment index (= the original's first-in-order
-                # ``if d2 < best_d2``).  lexsort orders by the LAST key
-                # first → primary vertex, then distance, then seg index.
-                order = np.lexsort((sio, d2o, pio))
-                pis = pio[order]
-                first = np.empty(pis.shape, dtype=bool)
-                first[0] = True
-                first[1:] = pis[1:] != pis[:-1]
-                best_alt[pis[first]] = alto[order][first]
-
-    # Fallback: nearest strip vertex for any ring vertex with no in-range
-    # edge match (matches the original unbounded nearest-vertex search,
-    # including its first-in-order tie-break — keep all tied nearest, then
-    # pick the lowest vertex index).
-    missing = np.isnan(best_alt)
-    if missing.any() and vxl:
+    sx = np.asarray(sxl)
+    sy = np.asarray(syl)
+    dx = np.asarray(dxl)
+    dy = np.asarray(dyl)
+    seg2 = np.asarray(seg2l)
+    a0 = np.asarray(a0l)
+    a1 = np.asarray(a1l)
+    tree = STRtree(seg_geoms) if seg_geoms else None
+    if vxl:
         vat = np.asarray(vatl)
         vtree = STRtree(shapely.points(np.asarray(vxl), np.asarray(vyl)))
-        mi = np.flatnonzero(missing)
-        nn = vtree.query_nearest(shapely.points(rx[mi], ry[mi]),
-                                 all_matches=True)
-        order = np.lexsort((nn[1], nn[0]))   # by input, then vertex index
-        inps = nn[0][order]
-        firstm = np.empty(inps.shape, dtype=bool)
-        firstm[0] = True
-        firstm[1:] = inps[1:] != inps[:-1]
-        best_alt[mi[inps[firstm]]] = vat[nn[1][order][firstm]]
+    else:
+        vat = None
+        vtree = None
 
-    return [round(float(a), 1) if not np.isnan(a) else 0.0
-            for a in best_alt]
+    def resample(ring_open):
+        if not ring_open:
+            return []
+        n = len(ring_open)
+        rx = np.fromiter((p[0] for p in ring_open), dtype=float, count=n)
+        ry = np.fromiter((p[1] for p in ring_open), dtype=float, count=n)
+        best_alt = np.full(n, np.nan)
+
+        if tree is not None:
+            qpts = shapely.points(rx, ry)
+            # pairs[0] = ring-vertex index, pairs[1] = candidate segment
+            # index.
+            pairs = tree.query(qpts, predicate="dwithin",
+                               distance=EDGE_TOL_M)
+            if pairs.size:
+                pi = pairs[0]
+                si = pairs[1]
+                nx = rx[pi]
+                ny = ry[pi]
+                t = (((nx - sx[si]) * dx[si] + (ny - sy[si]) * dy[si])
+                     / seg2[si])
+                in_range = (t >= -1e-3) & (t <= 1.0 + 1e-3)
+                tc = np.clip(t, 0.0, 1.0)
+                px = sx[si] + tc * dx[si]
+                py = sy[si] + tc * dy[si]
+                d2 = (nx - px) ** 2 + (ny - py) ** 2
+                ok = in_range & (d2 < EDGE_TOL2)
+                if ok.any():
+                    pio = pi[ok]
+                    d2o = d2[ok]
+                    sio = si[ok]
+                    alto = a0[si][ok] + tc[ok] * (a1[si][ok] - a0[si][ok])
+                    # Per vertex keep the nearest edge; break exact ties by
+                    # lowest segment index (= the original's first-in-order
+                    # ``if d2 < best_d2``).  lexsort orders by the LAST key
+                    # first → primary vertex, then distance, then seg index.
+                    order = np.lexsort((sio, d2o, pio))
+                    pis = pio[order]
+                    first = np.empty(pis.shape, dtype=bool)
+                    first[0] = True
+                    first[1:] = pis[1:] != pis[:-1]
+                    best_alt[pis[first]] = alto[order][first]
+
+        # Fallback: nearest strip vertex for any ring vertex with no
+        # in-range edge match (matches the original unbounded nearest-
+        # vertex search, including its first-in-order tie-break — keep
+        # all tied nearest, then pick the lowest vertex index).
+        missing = np.isnan(best_alt)
+        if missing.any() and vtree is not None:
+            mi = np.flatnonzero(missing)
+            nn = vtree.query_nearest(shapely.points(rx[mi], ry[mi]),
+                                     all_matches=True)
+            order = np.lexsort((nn[1], nn[0]))  # by input, then vertex idx
+            inps = nn[0][order]
+            firstm = np.empty(inps.shape, dtype=bool)
+            firstm[0] = True
+            firstm[1:] = inps[1:] != inps[:-1]
+            best_alt[mi[inps[firstm]]] = vat[nn[1][order][firstm]]
+
+        return [round(float(a), 1) if not np.isnan(a) else 0.0
+                for a in best_alt]
+
+    return resample
+
+
+def _resample_alts_over_strips(ring_open, strips):
+    """One-shot convenience wrapper over
+    :func:`_make_strip_alt_resampler` (kept for parity with older call
+    sites/tests; hot paths build the resampler once and reuse it)."""
+    return _make_strip_alt_resampler(strips)(ring_open)
 
 
 def _rect_long_short_edges(coords: list[tuple[float, float]]):
@@ -554,7 +594,18 @@ def _build_graded_strips(edge_stations, edge_alts, outwards,
         for i in range(lo, hi + 1):
             ref = edge_alts[i]
             if ref is None:
-                continue
+                # Widened taper neighbour beyond a skipped (pavement-
+                # facing / altitude-less) station: borrow the run-end
+                # station's edge altitude so a SHORT run still emits a
+                # strip.  A single obstructed station between two
+                # skipped ones used to yield a 1-vertex row and drop
+                # the whole cut (HECA apron/service-road corridors).
+                if i < i0:
+                    ref = edge_alts[i0]
+                elif i > i1:
+                    ref = edge_alts[i1]
+                if ref is None:
+                    continue
             nx, ny = outwards[i]
             off = outer[i] if outer[i] > 0.0 else step
             sx, sy = edge_stations[i]
@@ -1045,13 +1096,20 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
 
     # Existing geometry the cut must not overlap.  Buffer it so emitted
     # vertices stay clear of any pavement edge (sloping-rect-edge test).
+    # The UNbuffered union doubles as the Pass A3 terrain-facing test
+    # (a ring-edge station whose outward probe lands on ANY emitted
+    # shape — adjacent pavement, ribbon, building, groundside — is not
+    # facing terrain: that shape owns its own band).
     static_polys = [s.polygon for s in layout.shapes
                     if s.polygon is not None and not s.polygon.is_empty]
+    static_union = None
     static_block = None
     if static_polys:
         try:
-            static_block = unary_union(static_polys).buffer(_PAVEMENT_GAP_M)
+            static_union = unary_union(static_polys)
+            static_block = static_union.buffer(_PAVEMENT_GAP_M)
         except _GEOM_EXC:
+            static_union = None
             static_block = None
 
     # Collect every raw graded strip across all three passes, then
@@ -1064,17 +1122,31 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
     raw_strips: list[tuple[Polygon, list, list, str]] = []
 
     def _collect(ring, alts, role) -> None:
-        """Validate a raw strip ring and stash it for the finalize pass."""
+        """Validate a raw strip ring and stash it for the finalize pass.
+
+        A strip ring built along a CONCAVE pavement edge (the Pass A3
+        ring sweep; sharply bending centerline runs) can self-intersect,
+        and ``buffer(0)`` then yields a MultiPolygon.  Keep every
+        polygon part — each carries the SAME source ring/alts, which is
+        what the finalize resample consumes (nearest strip edge wins) —
+        instead of silently dropping the whole run (a junction-notch
+        spike at HECA survived exactly that way)."""
         try:
             raw = Polygon(ring)
             if not raw.is_valid:
                 raw = raw.buffer(0)
         except _GEOM_EXC:
             return
-        if (raw.is_empty or raw.geom_type != "Polygon"
-                or raw.area < _MIN_CUT_AREA_M2):
+        if raw.is_empty:
             return
-        raw_strips.append((raw, list(ring), list(alts), role))
+        parts = ([raw] if raw.geom_type == "Polygon"
+                 else [g for g in getattr(raw, "geoms", [])
+                       if g.geom_type == "Polygon" and not g.is_empty])
+        ring_l, alts_l = list(ring), list(alts)   # ONE copy for all parts
+        for part in parts:
+            if part.area < _MIN_CUT_AREA_M2:
+                continue
+            raw_strips.append((part, ring_l, alts_l, role))
 
     def _finalize() -> int:
         """Union all collected strips, subtract pavement once, and emit
@@ -1085,7 +1157,18 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
         instead of abutting slivers."""
         if not raw_strips:
             return 0
-        strips = [(ring, alts) for _p, ring, alts, _r in raw_strips]
+        # One resample source per RING (a multi-part strip shares its
+        # ring object across parts — do not multiply the edge tree).
+        strips = []
+        _seen_rings: set[int] = set()
+        for _p, ring, alts, _r in raw_strips:
+            if id(ring) in _seen_rings:
+                continue
+            _seen_rings.add(id(ring))
+            strips.append((ring, alts))
+        # ONE edge/vertex index over all strips; every piece resamples
+        # against it (twice) — see _make_strip_alt_resampler.
+        _resample = _make_strip_alt_resampler(strips)
         # Inner-edge snap: a cut vertex sitting at the pavement gap follows the
         # rendered edge altitude of the airside shape it ABUTS.  The strips of
         # runway + taxiway clearance are unioned into one region, so resampling
@@ -1093,8 +1176,14 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
         # and spike several metres (CYXY taxiway-A2 clearance sat 5 m above the
         # apron 1.5 m away).  Snapping to the nearest pavement makes the cut
         # follow the surface it protects, whatever that surface is.
+        # Service roads are not in the airside union but the Pass A3
+        # ring sweep cuts alongside them — include them so a cut vertex
+        # beside a road follows the ROAD edge (no step against it).
         _pav_list = [s for s in airside
                      if s.polygon is not None and not s.polygon.is_empty]
+        _pav_list += [s for s in layout.shapes
+                      if s.role in (ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION)
+                      and s.polygon is not None and not s.polygon.is_empty]
         _pav_tree = None
         if _pav_list:
             try:
@@ -1182,7 +1271,7 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                     continue
                 # Collapse redundant collinear+planar nodes, trim sharp
                 # corners, then sample the final ring's altitudes.
-                alts0 = _resample_alts_over_strips(ring, strips)
+                alts0 = _resample(ring)
                 dec_xy, _dec_a = _decimate(ring, alts0)
                 dec_xy = _drop_sharp_corners(dec_xy)
                 if len(dec_xy) < 3:
@@ -1198,7 +1287,7 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                         or poly.is_empty or poly.area < _MIN_CUT_AREA_M2):
                     continue
                 final_ring = _open_coords(poly)
-                node_open = _resample_alts_over_strips(final_ring, strips)
+                node_open = _resample(final_ring)
                 for vi, (vx, vy) in enumerate(final_ring):
                     a = _adopt_alt(vx, vy)
                     if a is not None:
@@ -1394,6 +1483,210 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                             stations, alts, outs, bws, tx_slope, tx_threshold,
                             step, sample_dem):
                         _collect(ring, ralts, ROLE_TAXIWAY_CLEARANCE)
+
+    # ── Pass A3: airside ring-edge sweep (part 30) ──────────────────
+    # Pass A traces the apt.dat taxi CENTERLINE network and Pass B walks
+    # 4-corner runway rects carrying ``altitude``/hi-lo — but since part
+    # 25 (hi/lo emission retired) every sloped shape, and since the
+    # unified runway representation most runway pieces, emits per-node
+    # ``node_altitudes`` polygons with arbitrary vertex counts.  So
+    # junction / apron / service-road edges away from a centerline (and
+    # per-node runway long edges) were INVISIBLE to the clearance
+    # builder — terrain spikes survived right beside pavement (HECA,
+    # user 2026-07-07: audit clusters beside exactly those roles).
+    # Walk every TERRAIN-FACING exterior-ring edge of airside pavement
+    # and service roads, sample the DEM outward at the same stations,
+    # and cut exactly the way Pass A does: flat shadow at the LOCAL
+    # rendered edge altitude (per-node altitudes interpolated along the
+    # edge — the crowned, solved values), cut-only, daylighting at the
+    # DEM.  Overlap with the Pass A/B strips resolves in the shared
+    # ``_finalize`` union; pavement/building/ribbon overlap is removed
+    # there by the ``static_block`` difference as for every other cut.
+    prep_static = None
+    if static_union is not None and not static_union.is_empty:
+        try:
+            prep_static = prep(static_union)
+        except _GEOM_EXC:
+            prep_static = None
+    if prep_static is not None:
+        # Local wingtip half-width beyond a taxi-family pavement edge:
+        # the nearest aircraft-taxi centerline's ICAO code letter (the
+        # Pass A2 pocket rule — an aircraft may occupy pavement right up
+        # to the edge, so the band is the full wingtip reach), else the
+        # capped-width fallback.
+        _a3_wing_default = taxiway_clearance_half_width_m(
+            _MAX_TAXIWAY_WIDTH_M)
+        _a3_cls = [e for e in (getattr(layout, "apt_taxi_centerlines",
+                                       None) or [])
+                   if getattr(e, "line", None) is not None
+                   and not e.line.is_empty
+                   and not getattr(e, "is_service", False)]
+        _a3_cl_tree = None
+        if _a3_cls:
+            try:
+                _a3_cl_tree = STRtree([e.line for e in _a3_cls])
+            except _GEOM_EXC:
+                _a3_cl_tree = None
+
+        def _a3_wing_half(poly) -> float:
+            if _a3_cl_tree is not None:
+                try:
+                    e = _a3_cls[int(_a3_cl_tree.nearest(poly.centroid))]
+                    letter = (e.dominant_size()
+                              if hasattr(e, "dominant_size") else "")
+                    if letter:
+                        return taxiway_clearance_half_width_for_letter(
+                            letter)
+                except (_GEOM_EXC + (IndexError, KeyError)):
+                    pass
+            return _a3_wing_default
+
+        # Row-100 runway centrelines (authoritative geometry — the same
+        # source the RESA anchors on) give each runway-family station
+        # its Annex-14 graded-strip band: the strip reaches
+        # ``runway_strip_half_width_m(full_len)`` from the CENTERLINE,
+        # so the band beyond the ring edge is that reach minus the
+        # station's centerline distance.  Without ``source_runways``
+        # the runway-family walk is skipped — Pass B still covers the
+        # flat 4-corner rects, and RESA/skirts are untouched either way.
+        _a3_rw_axes: list[tuple[LineString, tuple[float, float], float]] = []
+        if source_runways:
+            for r in source_runways:
+                try:
+                    rax, ray = _ll_to_m(r.lat_a, r.lon_a)
+                    rbx, rby = _ll_to_m(r.lat_b, r.lon_b)
+                except _GEOM_EXC:
+                    continue
+                rlen = math.hypot(rbx - rax, rby - ray)
+                if rlen < 1.0:
+                    continue
+                _a3_rw_axes.append(
+                    (LineString([(rax, ray), (rbx, rby)]),
+                     ((rbx - rax) / rlen, (rby - ray) / rlen),
+                     runway_strip_half_width_m(rlen)))
+
+        _a3_usable_rw = {id(s) for s in runway_shapes}
+        _a3_sv_threshold = CLEARANCE_OBSTRUCTION_THRESHOLD_M["service"]
+        _a3_sv_band = CLEARANCE_MAX_REACH_M["service"]
+        _a3_tx_reach = CLEARANCE_MAX_REACH_M["taxiway"]
+        _a3_rw_threshold = CLEARANCE_OBSTRUCTION_THRESHOLD_M["runway"]
+        _a3_rw_reach = CLEARANCE_MAX_REACH_M["runway"]
+        _a3_taxi_roles = (ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
+                          ROLE_STUB, ROLE_CROSS_CONNECTOR,
+                          ROLE_JUNCTION, ROLE_APRON)
+        for s in layout.shapes:
+            if (s.polygon is None or s.polygon.is_empty
+                    or s.polygon.geom_type != "Polygon"):
+                continue
+            role = s.role
+            rw_axis = None
+            if role in _a3_taxi_roles:
+                band_cap = min(_a3_wing_half(s.polygon), _a3_tx_reach)
+                threshold = tx_threshold
+                out_role = ROLE_TAXIWAY_CLEARANCE
+            elif role in (ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION):
+                band_cap = _a3_sv_band
+                threshold = _a3_sv_threshold
+                out_role = ROLE_TAXIWAY_CLEARANCE
+            elif role in (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING):
+                if not _a3_rw_axes or id(s) in _a3_usable_rw:
+                    continue    # Pass B owns the flat 4-corner rects
+                try:
+                    cen = s.polygon.centroid
+                    rw_axis = min(_a3_rw_axes,
+                                  key=lambda a: a[0].distance(cen))
+                except (_GEOM_EXC + (ValueError,)):
+                    continue
+                band_cap = min(rw_axis[2], _a3_rw_reach)
+                threshold = _a3_rw_threshold
+                out_role = ROLE_RUNWAY_CLEARANCE
+            else:
+                continue
+            if (not s.node_altitudes and s.altitude is None
+                    and (s.altitude_high is None or s.altitude_low is None)):
+                continue        # no rendered elevation to shadow
+            if band_cap <= _PAVEMENT_GAP_M + 1.0:
+                continue
+            try:
+                coords = list(s.polygon.exterior.coords)
+                ccw = bool(s.polygon.exterior.is_ccw)
+            except _GEOM_EXC:
+                continue
+            if len(coords) < 4:
+                continue
+            # Per-CLOSED-ring-node altitudes aligned with ``coords``
+            # (the ``node_altitudes`` contract — see _edge_interp_alt);
+            # flat / hi-lo shapes fall back to their plane sampler.
+            na = s.node_altitudes
+            if na:
+                nm = min(len(na), len(coords))
+                ring_alts: list[float | None] = [
+                    None if na[i] is None else float(na[i])
+                    for i in range(nm)]
+                ring_alts += [None] * (len(coords) - nm)
+            elif s.altitude is not None:
+                ring_alts = [float(s.altitude)] * len(coords)
+            else:
+                ring_alts = [_sample_runway_segment_elev(s, x, y)
+                             for x, y in coords]
+            stations, st_alts, outs, bws = [], [], [], []
+            for i in range(len(coords) - 1):
+                eax, eay = coords[i]
+                ebx, eby = coords[i + 1]
+                u = _unit(ebx - eax, eby - eay)
+                if u is None:
+                    continue
+                # Outward normal from the ring ORIENTATION (the centroid
+                # flip in ``_outward_normal`` is wrong on concave rings).
+                out = (u[1], -u[0]) if ccw else (-u[1], u[0])
+                a0 = ring_alts[i]
+                a1 = ring_alts[i + 1]
+                nseg = max(1, int(math.ceil(
+                    math.hypot(ebx - eax, eby - eay) / step)))
+                for k in range(nseg):   # next edge owns the far corner
+                    t = k / nseg
+                    sx = eax + (ebx - eax) * t
+                    sy = eay + (eby - eay) * t
+                    ref = None
+                    if (a0 is not None and a1 is not None
+                            # Runway END edges are RESA / skirt
+                            # territory (Pass C / D) — leave them be.
+                            and not (rw_axis is not None
+                                     and abs(out[0] * rw_axis[1][0]
+                                             + out[1] * rw_axis[1][1])
+                                     > _RING_END_NORMAL_DOT)
+                            # Terrain-facing only: any already-emitted
+                            # shape outward owns its own band.
+                            and not prep_static.contains(Point(
+                                sx + out[0] * _RING_PROBE_M,
+                                sy + out[1] * _RING_PROBE_M))):
+                        ref = a0 + t * (a1 - a0)
+                    band = band_cap
+                    if ref is not None and rw_axis is not None:
+                        # Annex-14 strip: reach measured from the
+                        # runway centerline, not the pavement edge.
+                        try:
+                            band = min(band_cap,
+                                       rw_axis[2] - rw_axis[0].distance(
+                                           Point(sx, sy)))
+                        except _GEOM_EXC:
+                            band = 0.0
+                        if band <= _PAVEMENT_GAP_M + 1.0:
+                            ref = None
+                            band = band_cap
+                    # Stations that face pavement / carry no altitude
+                    # stay in the list with ``ref=None`` so run-grouping
+                    # keeps true ring adjacency (dropping them would
+                    # bridge distant obstructed runs into one strip).
+                    stations.append((sx, sy))
+                    st_alts.append(ref)
+                    outs.append(out)
+                    bws.append(band)
+            if len(stations) >= 2:
+                for ring, ralts in _build_graded_strips(
+                        stations, st_alts, outs, bws, tx_slope,
+                        threshold, step, sample_dem):
+                    _collect(ring, ralts, out_role)
 
     # ── Pass B: runway lateral graded-strip cuts (rect long-edges) ──
     rw_threshold = CLEARANCE_OBSTRUCTION_THRESHOLD_M["runway"]

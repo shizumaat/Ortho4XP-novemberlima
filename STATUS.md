@@ -75,7 +75,78 @@ the construction, one mechanism for runways + taxiways + service roads:
     test_cyxy_spine_zero + test_cyxy_spine_zero_no_bowl PASS.
   - full suite: the 13 pre-existing failures exactly (see commit).
 
+## LANDED (part 30b) — clearance coverage: Pass A3 airside ring-edge
+## sweep (fixes USER RULING part-29 #5, HECA terrain spikes)
+ROOT CAUSE (recorded part 29): ``clearance.emit_surface_clearance_cuts``
+built cuts only off 4-corner rects carrying ``altitude``/hi-lo (Pass B)
+and off the taxi CENTERLINE trace (Pass A) — since part 25 every sloped
+shape (and, since the unified runway representation, 51 of HECA's 56
+runway pieces) emits per-node ``node_altitudes`` polygons, so junction /
+apron / service-road edges away from a centerline were INVISIBLE to the
+clearance builder.  FIX (clearance.py):
+1. **Pass A3 ring-edge sweep**: walk every TERRAIN-FACING exterior-ring
+   edge of airside pavement + service roads (station step, flat-shadow
+   ceiling, cut-only, daylight, merge/emit — all REUSED from the
+   existing strip builder).  Terrain-facing = the point 2 m outward
+   (``_RING_PROBE_M``) is not covered by ANY already-emitted shape (the
+   unbuffered static union — adjacent pavement / ribbon / building /
+   groundside own their band).  Outward normal from RING ORIENTATION
+   (the centroid flip is wrong on concave rings).  Per-role bands:
+   taxi-family/junction/apron = full wingtip half-width of the nearest
+   aircraft-taxi centerline's letter (Pass A2 pocket rule); runway
+   family (non-rect pieces only; Pass B/RESA/skirts untouched) =
+   Annex-14 strip reach from the row-100 centreline minus the station's
+   centreline distance, END edges skipped (``_RING_END_NORMAL_DOT`` —
+   RESA/skirt territory); service roads = NEW 15 m roadside band
+   (``CLEARANCE_MAX_REACH_M["service"]`` +
+   ``CLEARANCE_OBSTRUCTION_THRESHOLD_M["service"]``, STANDARDS.md row).
+2. **Shared-mechanics fixes found by the audit**: ``_collect`` keeps
+   the polygon PARTS when a self-intersecting strip ring buffers to a
+   MultiPolygon (concave rings — a junction-notch spike survived the
+   whole-run drop); ``_build_graded_strips`` run-taper borrows the
+   run-end altitude so a SINGLE obstructed station between skipped ones
+   still emits (apron/service corridors); ``_finalize``'s inner-edge
+   snap list now includes service roads.
+3. **Perf**: ``_make_strip_alt_resampler`` builds the strip edge/vertex
+   STRtree ONCE per finalize (was: rebuilt per emitted piece, twice —
+   finalize 38.9 s → 6.4 s once A3 multiplied the strip count).  HECA
+   build 143.2 s (HEAD, warm) → 139.5–146.0 s with the fix (±2%);
+   Pass A3 itself costs 0.6 s.
+VERIFIED (gates):
+* ``tools/clearance_spike_audit.py`` HECA: 1,372 samples / 461 clusters
+  worst +15.70 m (HEAD baseline this session; the 1,306/443 in the
+  part-29 note predates crown v2) → **203 / 119**.  Of the remaining
+  203 samples, 179 sit ≤ 1.6 m from an emitted grading surface (the
+  deliberate ``_PAVEMENT_GAP_M`` crack between pavement and cut inner
+  edge — mesh-constrained on both sides); only 2 exceed +2 m beyond
+  that: +7.97 m in ONE apron/service_junction corridor at
+  30.116375,31.410066 (strip lost somewhere in finalize — open below)
+  and +2.01 m at 1.6 m distance.  Worst baseline cluster
+  (30.126175,31.418247, +15.7): now INSIDE cut way -10759, surface
+  83.9 m ≤ apron edge 84.0 + 1.0 threshold.
+* check_grade: HECA IDENTICAL to baseline (within 0, plane 0, cross 0,
+  steps 3+14, break 5895); CYXY within 1 == baseline, rest 0; SPLP
+  within 16 == baseline, rest 0.  Clearance roles carry no grade law
+  (ROLE_GRADE_LIMITS → None) — unchanged.
+* fast suite: EXACTLY the 8 pre-existing failures.  Full suite: the 13
+  pre-existing exactly.  NOTE: the new cuts initially flipped
+  ``test_cyxy_taxi_e_south_apron_follows_terrain`` to a FALSE pass (its
+  bbox scan took a terrain-hugging clearance cut as "pavement
+  climbing") — the test now excludes clearance roles from candidates
+  and fails honestly again (the solver over-flattening it guards is
+  untouched).
+* Cut counts: HECA 105 → 114, CYXY 40, SPLP 10.
+
 ## OPEN (part 30 follow-ups)
+* ONE residual audit spot at HECA (+7.97 m, 30.116375,31.410066): the
+  apron/service_junction corridor stations are valid and obstructed
+  (verified by replay) but the strip vanishes in the finalize
+  union/clip chain — trace region → components → piece processing for
+  that corridor if it matters in-sim.
+* The 1.5 m pavement-gap crack band (179 audit samples) is bounded by
+  constrained edges on both sides; if in-sim needles ever show there,
+  the standoff convention (``_PAVEMENT_GAP_M`` + conformance) is the
+  thing to revisit, not the sweep.
 * Crossings emit no ridge (runway breaklines gap across the resolved
   crossing junction; its surface carries the min member drop) — a
   crossing-aware ridge weave is cosmetic follow-up.
@@ -197,7 +268,8 @@ the construction, one mechanism for runways + taxiways + service roads:
    with a taxiway follows the more limiting (taxiway) grade law; only
    isolated narrow-road stretches (nothing along the long edge) get
    the full 4 % road cap.
-5. **Clearance coverage**: several spots at HECA show small terrain
+5. **Clearance coverage** — LANDED part 30b (see above): several spots
+   at HECA show small terrain
    spikes right next to pavement — the clearance cuts miss them.
    ROOT CAUSE FOUND (part 29, fix queued): ``clearance.
    emit_surface_clearance_cuts`` builds cuts only off ``_usable``

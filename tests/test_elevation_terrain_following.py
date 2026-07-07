@@ -107,7 +107,13 @@ def test_cyxy_taxi_e_south_apron_follows_terrain():
     # (50..400, -1100..-700).  Taxi E's SW stub centroid is at
     # (124, -820); the DEM in this region is 715-718 m.
     bbox = (-100.0, 500.0, -1200.0, -700.0)
-    candidates = list(_shapes_in_bbox(layout, *bbox))
+    # PAVEMENT only: clearance cuts are terrain FEATURES (flat shadows
+    # of the edges they protect, no grade law) — since the part-30
+    # ring-edge sweep they exist in this bbox too, and their terrain-
+    # hugging altitudes must not satisfy a "pavement climbs" guard.
+    candidates = [s for s in _shapes_in_bbox(layout, *bbox)
+                  if s.role not in ("taxiway_clearance",
+                                    "runway_clearance")]
     assert candidates, (
         "CYXY: no shapes found in SW apron bbox "
         f"x∈[{bbox[0]},{bbox[1]}] y∈[{bbox[2]},{bbox[3]}]")

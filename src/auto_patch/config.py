@@ -1615,10 +1615,13 @@ PATCH_SLOPE_PROFILE = "plane"   # "plane" | "spline"
 #
 # A terrain point is an "obstruction" when it rises more than this
 # many metres above the adjacent surface edge altitude.  Keyed by
-# surface family ("taxiway" | "runway").
+# surface family ("taxiway" | "runway" | "service").
 CLEARANCE_OBSTRUCTION_THRESHOLD_M = {
     "taxiway": 1.0,
     "runway":  1.0,
+    # Service (ground-vehicle) roads: same rise test for the roadside
+    # band the ring-edge sweep protects (part 30).
+    "service": 1.0,
 }
 
 # Runway end skirt (inverse RESA): govern terrain that DROPS beyond a
@@ -1637,6 +1640,12 @@ RUNWAY_END_SKIRT_ENABLED = (
 CLEARANCE_MAX_REACH_M = {
     "taxiway": 100.0,
     "runway":  300.0,
+    # Service (ground-vehicle) roads have no wingtip envelope, so the
+    # band IS the reach: a fixed roadside clearance corridor beyond the
+    # road edge (AASHTO clear-zone-informed design value) inside which
+    # terrain rising above the road edge + threshold is cut down to the
+    # edge level (flat shadow, cut-only — the part-30 ring-edge sweep).
+    "service": 15.0,
 }
 
 # Vertex spacing (m) along a surface edge when sampling/building the
