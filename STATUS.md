@@ -91,6 +91,19 @@
    the full 4 % road cap.
 5. **Clearance coverage**: several spots at HECA show small terrain
    spikes right next to pavement — the clearance cuts miss them.
+   ROOT CAUSE FOUND (part 29, fix queued): ``clearance.
+   emit_surface_clearance_cuts`` builds cuts only off ``_usable``
+   shapes = 4-CORNER rects carrying ``altitude`` or hi/lo — but since
+   part 25 (hi/lo emission retired) every sloped shape emits per-node
+   polygons, so junctions, aprons, and service roads are INVISIBLE to
+   the clearance builder.  That matches the audit exactly (spikes
+   cluster beside apron/junction/service edges).  FIX SHAPE: extend
+   the pass to walk every airside ring edge with per-node altitudes
+   (generalising the two-long-edge rect walk), cut-only as today.
+   TOOLING: ``tools/clearance_spike_audit.py`` (committed) turns the
+   report into worst-first coordinates — HECA baseline 1,306 samples /
+   443 clusters, worst +15.7 m at 30.126175,31.418247; use it as the
+   before/after gate for the fix.
 
 ## USER REPORT (part 29)
 KCLT (in-sim/JOSM after part 28): complex mess of jagged shapes around
