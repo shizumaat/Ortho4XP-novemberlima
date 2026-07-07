@@ -96,3 +96,34 @@ and re-export them under their existing local names — there is no second copy:
 - `groundside.py` `GROUNDSIDE_MAX_GRADE` ← `config.py`.
 
 To change a rule value, edit the constant in `config.py` only.
+
+## Transverse (lateral / crown) grades — RESEARCHED 2026-07-07, pending implementation
+
+User ruling 2026-07-07: everything with a spine (runway, taxiway, service road) crowns
+for drainage — spine slightly higher than the edges, per-role values. Verified from the
+primary documents (FAA AC 150/5300-13B Chg 1; EASA CS-ADR-DSN Issue 7 — identical in
+Issue 4; ICAO Annex 14 Vol I 7th ed.; AASHTO Green Book). No `config.py` constants exist
+yet — this table is the source for them (planned names in the last column).
+
+| Feature | Min | Max | Crowned? | Standard | Planned constant |
+|------|-----|-----|----------|----------|------------------|
+| Runway, AAC A–B / code A–B | 1.0% | 2.0% | Yes (center crown standard) | FAA ¶3.16.2 + Table 3-6 (S-1); CS ADR-DSN.B.080(b)(2),(c); ICAO §3.1.19 | `RUNWAY_TRANSVERSE_{MIN,MAX}_NARROW` |
+| Runway, AAC C–E / code C–F | 1.0% | 1.5% | Yes | FAA Table 3-6; CS ADR-DSN.B.080(b)(1) | `RUNWAY_TRANSVERSE_{MIN,MAX}` |
+| Taxiway, FAA all ADGs | 1.0% | 1.5% (1–2% if only <30,000 lb) | Yes ("ideal configuration is a center crown") | FAA ¶4.14.2(1)(a)–(c) | `TAXI_TRANSVERSE_{MIN,MAX}` |
+| Taxiway, ICAO/EASA code A–B | drainage-sufficient | 2.0% | not mandated | CS ADR-DSN.D.280(b)(2); ICAO §3.9.11 | (covered by existing `TAXI_MAX_TRANSVERSE_NARROW`) |
+| Taxiway, ICAO/EASA code C–F | — | 1.5% | not mandated | CS ADR-DSN.D.280(b)(1) | — |
+| Apron / stand | FAA 0.5% min | ICAO/EASA 1% any direction; FAA rec. 1% stands | No (drain to inlets/edge) | FAA ¶5.9.1–5.9.2; CS ADR-DSN.E.360(b); ICAO §3.13.4–5 | (existing `APRON_MAX_GRADE`) |
+| Paved service/perimeter road | 1.5% | 2.0% (2.5% intense rainfall) | Yes (normal crown) | AASHTO Green Book Ch.4 "Cross Slope" / Exhibit 4-4 (high-type 1.5–2%); TxDOT RDM §4-10-4 cross-check | `SERVICE_ROAD_TRANSVERSE_{MIN,MAX}` |
+| Unpaved (low-type) road | 2% | 6% (3% desirable) | Yes | AASHTO Exhibit 4-4 | — |
+
+Adjacent-surface values (same research, for clearance/shoulder work): runway paved
+shoulder 1.5–5% (Table 3-6 S-2); RSA side slope 1.5–5% (A–B) / 1.5–3% (C–E, S-3);
+taxiway shoulder + TSA 1.5–5%; unpaved strip adjacent to any paved edge 5%±0.5% for the
+first 10 ft, edge drop-off 1.5in±0.5in (FAA Fig. 3-33 Detail A: 3–5% negative for 10 ft).
+FAA "Table 3-7 Transverse Grades Based on ADG" is the runway OFA (S-4 ≤0%, back slopes
+8:1/10:1/16:1 by ADG) — NOT taxiway pavement; FAA taxiway transverse is ADG-independent.
+
+Notable FAA-vs-EASA deltas: FAA keys runways to AAC, EASA/ICAO to code letter (numbers
+agree); FAA mandates a 1% taxiway minimum + centerline crown, EASA/ICAO have no taxiway
+minimum and don't mandate crown; ICAO/EASA allow single-crossfall runways where rain-wind
+justifies.
