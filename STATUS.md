@@ -5,10 +5,29 @@
 ## USER RULINGS + REPORTS (2026-07-07, in-sim eval — QUEUED part 30)
 1. **SPJC perfect; CYXY great; KCLT classification fix verified by the
    part-29 rebuild** (see below).
-2. **SPLP BROKEN**: "something broke the anchor at the seam where it
-   crosses taxiways" — runway and apron OK.  NOTE the 2 pre-existing
-   ``test_compare_target_splp`` failures are plausibly the same defect
-   (in-suite repro).
+2. **SPLP BROKEN → FIXED (part 29)**: "something broke the anchor at
+   the seam where it crosses taxiways" — runway and apron OK.
+   ROOT CAUSE (verified with per-tile probe builds): the THRESHOLD
+   uniform-lift reconciliation (runway_segments) samples each CIFP
+   threshold's surrounding DEM — for a cross-tile runway the far
+   threshold is OUTSIDE the current tile's raster and ``dem.alt``
+   silently CLAMPS to the edge column, so each tile build computed a
+   different mean lift (−77 build: +1.9 m, using seam-column terrain
+   for the west threshold 882 m into tile −78).  The divergent
+   profiles (5.05 m worst) fed ``runway_clamp_floor`` → taxiway/
+   junction seam pins 1.45 m apart across the 10 m gap = the in-sim
+   scarp.  The pokes-above (+0.05 m) seam-anchor filter amplified it
+   (one build kept the runway seam anchor, the other dropped it, so
+   thresholds shifted on one side only).
+   FIX: covering-raster rule in ``_sample_dem_ll`` — out-of-tile
+   points sample the raster that covers them (``_load_airport_dem``,
+   cached, graceful None fallback).  Profiles now bit-identical
+   across tile builds; worst cross-tile seam delta 1.48 m → 0.09 m.
+   Fast suite: same 8 pre-existing failures, zero new.
+   ``O4_SEAM_DEBUG=1`` dumps per-build seam-anchor decisions in
+   runway_redistribute (kept, env-gated).
+   NOTE: the 2 ``test_compare_target_splp`` failures are a DIFFERENT
+   (structural apron-matching, pre-existing) issue — not this.
 3. **Lateral crown law (NEW, durable)**: everything with a SPINE —
    runways, taxiways, service roads — must crown for drainage: spine
    slightly higher than the edges, with PER-ROLE transverse-grade

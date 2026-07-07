@@ -529,6 +529,17 @@ def redistribute_runway_profile(
             seam_samples = _find_centerline_boundary_crossings(
                 state['phys_end_a_ll'], state['phys_end_b_ll'],
                 dem, tile_lat, tile_lon)
+        if os.environ.get("O4_SEAM_DEBUG") == "1":
+            _es = _find_edge_boundary_crossings(
+                layout, shapes,
+                state['phys_end_a_ll'], state['phys_end_b_ll'],
+                dem, tile_lat, tile_lon)
+            print(f"    [seam-debug] tile=({tile_lat},{tile_lon}) "
+                  f"edge_samples={[(round(t,4), round(v,2)) for t, v in _es]}")
+            print(f"    [seam-debug] pre-shift profile at those t: "
+                  f"{[(round(t,4), round(_interp_profile(state['fractions'], state['elevs'], t), 2)) for t, _v in _es]}")
+            print(f"    [seam-debug] kept seam_samples="
+                  f"{[(round(t,4), round(v,2)) for t, v in seam_samples]}")
 
         # Step 1: if any new HARD interior anchor entered the profile
         # (centerline-boundary DEMs), the existing CIFP thresholds

@@ -656,9 +656,37 @@ def generate_patch_osm(icao, runway_pairs, runway_widths=None, tile=None,
         add_way(node_ids, tags)
 
     def _sample_dem_ll(lat, lon):
-        """Sample DEM elevation at a lat/lon, returning 0 on failure."""
+        """Sample DEM elevation at a lat/lon, returning None on failure.
+
+        COVERING-RASTER rule (SPLP cross-tile seam, 2026-07-07): a
+        point outside the current tile's 1°x1° square must be sampled
+        from the raster that COVERS it — ``dem.alt`` on out-of-range
+        coordinates silently CLAMPS to the edge column/row, so a
+        cross-tile runway's far threshold read the seam-column terrain
+        instead of its own.  The uniform-lift offset then diverged
+        between the two tile builds (SPLP: the −77 build clamped the
+        west threshold — 882 m into tile −78 — to the seam column,
+        lifting its whole profile +1.9 m vs the −78 build; the
+        divergent runway_clamp_floor values put a 1.45 m cross-tile
+        step on every taxiway seam pin, the in-sim "broken anchor at
+        the seam where it crosses taxiways").  Loading the covering
+        raster makes BOTH builds read the SAME terrain for the same
+        threshold → identical offsets → identical profiles → agreeing
+        floors.  ``_load_airport_dem`` caches per tile and returns
+        None when no elevation data is obtainable (sample excluded,
+        legacy behaviour).
+        """
         if tile is None or not hasattr(tile, "dem") or tile.dem is None:
             return None
+        if (tile.lat is not None and tile.lon is not None
+                and not (tile.lat <= lat <= tile.lat + 1.0
+                         and tile.lon <= lon <= tile.lon + 1.0)):
+            from ..elevation import _load_airport_dem, _sample_dem
+            cover = _load_airport_dem(lat, lon)
+            if cover is None:
+                return None
+            return _sample_dem(cover, int(lat // 1.0), int(lon // 1.0),
+                               lat, lon)
         try:
             return tile.dem.alt((lon - tile.lon, lat - tile.lat))
         except (IndexError, ValueError, ZeroDivisionError):
