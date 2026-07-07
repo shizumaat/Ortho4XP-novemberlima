@@ -5564,6 +5564,27 @@ def build_airport_pavement(icao: str, xplane_root: str,
         except _GEOM_EXC:
             pass
 
+        # SPINE CROWN (user ruling 2026-07-07): drop crowned shapes'
+        # edges below their spine and stash spine breaklines for
+        # ``to_osm``.  Runs AFTER the final grade projection (the crown
+        # is a designed sub-cap offset the projection must not undo)
+        # and BEFORE the skirts (which read edge-interpolated pavement
+        # and must see the crowned edges).  Weld-frozen: vertices shared
+        # with non-crowned shapes and tile-seam vertices never move.
+        from .config import ENABLE_SPINE_CROWN
+        if ENABLE_SPINE_CROWN:
+            try:
+                from .crown import apply_spine_crown
+                _n_cr, _n_sp = apply_spine_crown(layout, icao=icao)
+                if _n_cr or _n_sp:
+                    UI.vprint(1,
+                        f"  [pav-builder] {icao}: spine crown — "
+                        f"lowered edges on {_n_cr} shape(s), "
+                        f"{_n_sp} spine breakline(s) staged.")
+            except _GEOM_EXC as exc:
+                UI.vprint(1, f"  [pav-builder] {icao}: spine crown "
+                             f"FAILED: {exc!r}")
+
         # Runway-end down-slope SKIRTS (Pass D, gate O4_RUNWAY_END_SKIRT):
         # the ABSOLUTE LAST emission — after decimation and the final
         # grade projection (which, since 8ca25a3, runs after decimation

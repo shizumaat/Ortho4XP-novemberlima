@@ -35,7 +35,33 @@
    cited in docs/STANDARDS.md (constants in config.py).  Symptom being
    fixed: ridges/valleys along service-road spines at several
    airports (lateral grading currently unconstrained there).
-   DESIGN GROUNDWORK (part 29, not yet implemented):
+   IMPLEMENTED (part 29b, user go-ahead 2026-07-07):
+   - ``crown.py`` ``apply_spine_crown`` (pipeline, after the final
+     projection, before skirts; gate ``O4_SPINE_CROWN`` default ON):
+     taxi-family corridors/rects (1 %) + service roads (1.5 %) drop
+     their edges below the spine; spine breaklines emit as OPEN ways
+     with per-node alt_abs (+ ``o4_feature=crown_spine``; check_grade
+     skips them).  Axis fallback = longest apt.dat centerline through
+     the shape (clip passes strip source_axis).  SAFETY MODEL: freeze
+     everything not crowned (other roles, axis-less family shapes,
+     MultiPolygon/holed shapes, seam vertices), register ZERO drops so
+     near-axis owners veto neighbours' drops at shared vertices,
+     budget-aware all-pairs Lipschitz smoothing at min(cL,cT)·d (a
+     provable lower bound on any law allowance), and a revoke-valve
+     that un-crowns any shape whose final values would still violate.
+   - Law: ``_bake_edge`` cT — service-road-rate pairs now cap at
+     SERVICE_ROAD_MAX_TRANSVERSE (2 %) instead of tilting at their 5 %
+     longitudinal cap.
+   - VERIFIED: SPLP within 16 == baseline; CYXY 2 (known apron-#29 +
+     one at +0.16 %); HECA 2 (both ≤ +0.08 % over 60-95 m chords),
+     break 5822→5811; fast suite = the 8 pre-existing failures
+     exactly.  RUNWAYS EXCLUDED this slice: crowned runway corners
+     broke the runway_join spine check (23 % step at CYXY) — the
+     profile readers (join anchors, flex audit, skirts, seam pins)
+     must learn the crown offset first; profile-axis wiring in
+     crown.py is ready.  Also queued: SPLP corridors stage 0
+     breaklines (narrow shapes + the 0.9 m ring-clearance filter).
+   DESIGN GROUNDWORK (part 29, retained for the runway leg):
    - **Mesh unlock**: ``include_patches`` (O4_Vector_Map ~line 1115)
      inserts OPEN (non-closed) patch ways as constrained DUMMY
      breakline edges honouring per-node ``alt_abs`` — so a TRUE crown

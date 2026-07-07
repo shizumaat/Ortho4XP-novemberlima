@@ -52,6 +52,11 @@ __all__ = [
     "CORRIDOR_DAMP_ALPHA",
     "FIELD_RUNWAY_ROUTE_BANDS",
     "SERVICE_ROAD_MAX_GRADE",
+    "SERVICE_ROAD_MAX_TRANSVERSE",
+    "SERVICE_ROAD_CROWN_TRANSVERSE",
+    "RUNWAY_CROWN_TRANSVERSE",
+    "TAXI_CROWN_TRANSVERSE",
+    "ENABLE_SPINE_CROWN",
     "SERVICE_ROAD_WIDTH_M",
     "MIN_SERVICE_STRIP_LEN_M",
     "OSM_SMALL_ROAD_HIGHWAY_TYPES",
@@ -443,6 +448,32 @@ TAXI_MAX_GRADE_NARROW = 0.030   # ICAO Annex 14 code A/B taxiway-family
 # coincides with the longitudinal cap (isotropic) and only A/B is genuinely
 # anisotropic (cT 2 % < cL 3 %).
 TAXI_MAX_TRANSVERSE_NARROW = 0.020   # ICAO Annex 14 Table 3-2 code A/B transverse
+
+# ── SPINE CROWN (user ruling 2026-07-07) ─────────────────────────────
+# Everything with a spine — runways, taxiways, service roads — crowns
+# for drainage: the spine stays at the solved surface level and the
+# EDGES drop by ``rate × lateral distance`` (capped at the shape's
+# half-width, tapered to zero at welds to non-crowned shapes and at
+# spine ends).  The spine itself is emitted as an OPEN way with
+# per-node ``alt_abs`` — ``include_patches`` inserts open patch ways as
+# constrained DUMMY breakline edges, so the mesh renders the ridge with
+# no polygon splitting.  Values are the GENTLEST-LEGAL crown from
+# docs/STANDARDS.md ("Transverse grades", researched 2026-07-07):
+#   runway   1.0 %  (FAA AC 150/5300-13B Table 3-6 min, all AACs;
+#                    center crown standard per ¶3.16.2)
+#   taxiway  1.0 %  (FAA ¶4.14.2(1) min; center crown "ideal")
+#   service  1.5 %  (AASHTO Green Book Exh. 4-4 normal crown, low end)
+# Gate: O4_SPINE_CROWN=0 disables (emission returns to flat sections).
+ENABLE_SPINE_CROWN = _os_early.environ.get("O4_SPINE_CROWN", "1") == "1"
+RUNWAY_CROWN_TRANSVERSE = 0.010
+TAXI_CROWN_TRANSVERSE = 0.010
+SERVICE_ROAD_CROWN_TRANSVERSE = 0.015
+# Transverse LAW cap for service roads (AASHTO normal crown high end,
+# 2 %; up to 2.5 % only in intense-rainfall areas).  Used as the cT in
+# the anisotropic allowance so a service road's cross-section cannot
+# legally tilt at its 5 % LONGITUDINAL cap (25 cm across a 5 m road —
+# the user-visible ridge/valley budget this replaces).
+SERVICE_ROAD_MAX_TRANSVERSE = 0.020
 # Aprons + building pads grade at 1% (user 2026-06-18: "both builds and aprons
 # should be 1%") — flat is preferred 99% of the time, the cap is the fallback.
 # JUNCTIONS stay at the TAXI rate (1.5%): they are part of the moving network

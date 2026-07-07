@@ -1015,6 +1015,32 @@ class PavementLayout:
         rel_blocks: list[tuple[int, list[tuple[int, str]],
                                dict[str, str]]] = []
 
+        # Crown spine breaklines (user ruling 2026-07-07, see crown.py):
+        # each spine emits as an OPEN way whose nodes carry ``alt_abs``
+        # at the pre-crown surface level.  ``include_patches`` inserts
+        # open patch ways as constrained DUMMY edges, so the mesh
+        # renders the crown ridge inside the surrounding polygon.  The
+        # way carries NO ``role`` tag — every OSM reader in this repo
+        # (check_grade, compare_target) selects shapes by ``role`` and
+        # closed-ring geometry, so the breakline is invisible to them.
+        _spines = getattr(self, "crown_spines", None) or []
+        if _spines:
+            _next_spine_nid = (min(node_id_to_ll) - 1
+                               if node_id_to_ll else -1)
+            for _pts_ll, _alts in _spines:
+                _snids: list[int] = []
+                for (_sla, _slo), _sa in zip(_pts_ll, _alts):
+                    node_id_to_ll[_next_spine_nid] = (_sla, _slo)
+                    node_id_to_consensus[_next_spine_nid] = float(_sa)
+                    node_alt_abs_nids.add(_next_spine_nid)
+                    _snids.append(_next_spine_nid)
+                    _next_spine_nid -= 1
+                if len(_snids) >= 2:
+                    way_blocks.append(
+                        (next_wid[0], _snids,
+                         {"o4_feature": "crown_spine"}))
+                    next_wid[0] -= 1
+
         # Determine which interned nodes are actually referenced by
         # any emitted way (via ``way_blocks`` or ``rel_blocks``
         # member ways).  Per user 2026-04-29: discarded ring builds

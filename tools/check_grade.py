@@ -144,6 +144,13 @@ def _parse_osm(path: Path) -> Tuple[Dict[str, Tuple[float, float]],
         if len(nids) < 3:
             continue
         tags = dict(_TAG_RE.findall(body))
+        # Crown-spine breaklines (crown.py, user 2026-07-07) are OPEN
+        # ways carrying the PRE-crown spine profile as per-node
+        # ``alt_abs`` — mesh input only, not a pavement shape.  Grading
+        # them as a '?'-role ring produced phantom 10 % pairs (the
+        # closing pseudo-edge spans the whole spine).
+        if tags.get("o4_feature") == "crown_spine":
+            continue
         elevs = _derive_per_vertex_elevations(nids, tags, node_alt)
         ways.append(Way(
             wid=wid,

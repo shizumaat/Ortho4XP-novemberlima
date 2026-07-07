@@ -53,6 +53,7 @@ from .config import (
     GRADE_VISIBILITY_BUFFER_M as _VIS_BUF,
     JUNCTION_MESH_CONSTRAINTS,
     SERVICE_ROAD_MAX_GRADE,
+    SERVICE_ROAD_MAX_TRANSVERSE,
     TAXI_MAX_GRADE,
     TAXI_MAX_GRADE_NARROW,
     TAXI_MAX_TRANSVERSE_NARROW,
@@ -860,11 +861,19 @@ def _bake_edge(allow, role, pa, pb, shared, ctx, vr_i, vr_j):
         return allow
     dp, dt = ds_decompose(pa, pb, route)
     cL = allow.cL
-    # Transverse cap: only A/B taxiways (cL == narrow 3 %) earn the tighter 2 %
-    # transverse (ICAO Annex 14 Table 3-2); every other cap (C–F 1.5 %, apron 1 %,
-    # service 5 %, apron-blend gradients) stays isotropic cT == cL.
-    cT = (TAXI_MAX_TRANSVERSE_NARROW
-          if abs(cL - TAXI_MAX_GRADE_NARROW) < 1e-9 else cL)
+    # Transverse cap: A/B taxiways (cL == narrow 3 %) earn the tighter 2 %
+    # transverse (ICAO Annex 14 Table 3-2), and SERVICE-ROAD-rate pairs
+    # (cL == 5 %) earn the AASHTO 2 % normal-crown transverse (user crown
+    # ruling 2026-07-07 — laterally a road may not tilt at its
+    # longitudinal cap: 25 cm across a 5 m road was the visible
+    # ridge/valley budget).  Every other cap (C–F 1.5 %, apron 1 %,
+    # apron-blend gradients) stays isotropic cT == cL.
+    if abs(cL - TAXI_MAX_GRADE_NARROW) < 1e-9:
+        cT = TAXI_MAX_TRANSVERSE_NARROW
+    elif abs(cL - SERVICE_ROAD_MAX_GRADE) < 1e-9:
+        cT = SERVICE_ROAD_MAX_TRANSVERSE
+    else:
+        cT = cL
     return GL.Allowance.baked(
         cL, cT, math.hypot(cL * dp, cT * dt))
 
