@@ -1,5 +1,98 @@
+# STATUS — SESSION 20260706 (part 27): classification rulings landed;
+# weld-authority machinery built; 3 open residuals (pick up here)
+
+## USER RULINGS THIS SESSION (durable law)
+1. **No apron may ever touch a runway** — memory
+   apron_never_touches_runway_ruling.md.
+2. **50 m route-proximity law**: pavement within 50 m of a taxi
+   centerline or runway is NOT apron; beyond 50 m may be.  Enforced by
+   the APRON ROUTE-PROXIMITY CUT (pipeline.py, config
+   APRON_ROUTE_PROXIMITY_M): every ROLE_APRON shape is SPLIT at the
+   50 m contour (taxi non-service centerlines ∪ runway union, mitre
+   buffers) — near band → ROLE_JUNCTION, far part stays apron.  The
+   original report (30.1142593,31.4157106): slice-corridor cells were
+   flipping to apron via _reclassify_apron_junctions' whole-shape 55 m
+   rule + neck-split pieces inheriting apron unconditionally.
+
+## LANDED (all default-on; measure before trusting numbers elsewhere)
+- **reclassified_from_junction flag** (layout.py/junction_repair) +
+  neck-split piece re-eval (pipeline) — corridor cells return to
+  junction.  HECA break-region 11,243 → ~1,334 (gate-off, −88 %).
+- **Apron route-proximity cut** (pipeline, after neck-split).
+- **Lot↔lot weld reconciliation** at reach time (anchors.py,
+  O4_GS_MOUTH_RECONCILE): smaller lot adopts larger's ±cap·d band,
+  ABSOLUTE Lipschitz cone (relative cones under-raise at-cap rings —
+  measured 4.00 %→4.64 %).
+- **Mouth VERIFY-AND-RELAX** post-yield (solve.py,
+  O4_MOUTH_VERIFY_RELAX): pad/apron-conflicted mouth welds join the
+  joint solve (pads move AFTER the reach-time welds — reconciling
+  earlier chases stale values, measured +0.8 m WORSE); lots adopt the
+  solved profile (adopt_projected_mouths, NO chord-limit — the
+  downward limiter dragged an adopted mouth 2.1 m).  Freed mouths +
+  still-contradictory weld↔weld edges → break export.  HECA #541/#546
+  FIXED, #522 quarantined.
+- **Service-road proximity coupling** (anchors dem_follow,
+  O4_SVC_PROXIMITY_COUPLE, 2 m) + **parallel-edge conformance**
+  (groundside.conform_parallel_service_edges, O4_SVC_PARALLEL_CONFORM)
+  + DEM-follow break-blend export (layout._service_break_idx).
+- **Triangle-plane law** (solve._project_triangle_planes,
+  O4_TRIANGLE_PLANE_LAW): 3-vertex shapes' plane gradient clamped via
+  the freest vertex within its law-edge interval; unfixable → break
+  export; validator plane check + STEP checks now consume the break
+  quarantine (check_grade).  HECA plane 2 → 0.
+- **Terrain-pinned pair export** (final projection): violated edges
+  touching seam/feature-weld pins (incl. 0.5 m-tolerant weld-key grid +
+  torn-weld set) → quarantine.  Post-projection groundside re-limit +
+  ribbon/bridge re-adoption + moved-weld quarantine (pipeline).
+
+## SCOREBOARD at session end (gate-off, per-airport lab builds)
+- SPJC 0 within + 0 break + 0 steps ✓
+- HECA 0 within + 0 plane + 0 cross; ~1,334 break; **3+14 steps OPEN**
+  (#578↔#64: two parallel service roads 1 m apart, 0.9 m wall — the
+  DEM-follow blend did NOT fire there; O4_SVC_DEBUG_LL=30.102180,31.395020
+  instrumentation is in anchors.py, /tmp/heca_final1.log has the dump).
+- CYXY **1 within OPEN** (apron #29 pair 1.25 %, 0.25 % excess,
+  693.56↔692.85 over 57 m at 60.714896,-135.064193 / 60.715385,-135.064502).
+  DIAGNOSED DEEP: the 692.85 vertex is a boundary-bridge contact
+  inserted POST-SOLVE (absent from the solve node list — nearest solve
+  node 30 m away); at final-projection END the pair was LAWFUL
+  (693.56/693.00 = 0.98 %) — something between writeback and emit
+  restores 692.85 (bridge value).  The node has only 6 joint edges (a
+  41-vert apron ring should give ~40) — the projection's lazy tier
+  under-covers the shape in BOTH scoped and full paths
+  (O4_SCOPED_FINAL_PROJECTION=0 A/B identical).  Feature-weld agreement
+  gate never sees the bridge vertex (absent from feat_alt_by_key even
+  with the 0.5 m grid).  NEXT: find who writes 692.85 after writeback
+  (suspect emit consensus merging with the bridge ring vertex that the
+  post-projection cascade also cannot see), and why the apron's
+  constraint entry is ring-adjacent-only.
+- **SUITE 12F/409P** (base10 was 10F/407P) — composition:
+  * FIXED vs base10: test_cyxy_spine_zero, test_cyxy_route_reach_zero,
+    test_cyxy_spine_zero_no_bowl (all three CYXY spine gates GREEN).
+  * NEW: compare_target ×3 (SPJC + SPLP both tiles — the cut/
+    classification changed geometry; recut fixtures with
+    tools/build_target_osm.py ONCE the opens settle),
+    test_pavement_grade[CYXY] (open residual above),
+    test_pavement_grade[SPJC] (open 0.61 m pad step above).
+  * Still failing from base10: HECA/SPLP grade + longitudinal (SPLP =
+    flex Stage C), SPJC route-band/self-overlap, CYXY terrain-follow,
+    solver_validator_same_edge_budgets.
+  base10.txt kept for reference; do NOT recut until the 3 opens close.
+
+## GOTCHAS ADDED
+- Debug envs: O4_SLIVER_DEBUG (cut), O4_SVC_DEBUG_LL=lat,lon
+  (dem_follow reach state), O4_PROJ_DEBUG_LL=lat,lon;lat,lon (final
+  projection node state), O4_STEP_DEBUG prints [mouth-relax] /
+  [terrain-scan] / [triangle-plane].
+- _aeroway_centerlines_union carries runway axes ONLY for 4-corner
+  runway rects — HECA's multi-segment runways contribute none (the
+  cut uses runway_union directly for this reason).
+- check_grade: plane + STEP sections now quarantine via break_nodes
+  (same _touches_break_node as pairs; steps use vert_pt/proj_pt at
+  2 m tolerance).
+
 # STATUS — SESSION 20260706 (part 26): HANDOVER — HECA-to-zero plan
-# (session end; pick up here)
+# (superseded by part 27 above)
 
 ## State at HEAD (all gates green, suite 10F == /tmp/base10.txt)
 

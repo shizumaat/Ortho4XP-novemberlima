@@ -3257,6 +3257,11 @@ def _reclassify_apron_junctions(
     centers = _aeroway_centerlines_union(layout)
     if centers is None or centers.is_empty:
         return 0
+    # (USER RULING 2026-07-06 "no apron within 50 m of a centerline or
+    # runway" is enforced downstream by the apron route-proximity CUT in
+    # pipeline.py — a shape flipped here may legitimately contain BOTH
+    # apron territory and a near-route band; the cut splits it at the
+    # exact contour.)
     n_reclassified = 0
     for s in layout.shapes:
         if s.role != ROLE_JUNCTION:
@@ -3303,6 +3308,12 @@ def _reclassify_apron_junctions(
             # corners.  Preserving the solver's per-corner output
             # keeps shared corners consistent.
             s.role = ROLE_APRON
+            # Whole-shape flip: one far corner beyond the cap condemned
+            # the entire polygon.  Flag it so the apron neck-split can
+            # re-evaluate each piece — spine-hugging corridor pieces
+            # return to ROLE_JUNCTION (user 2026-07-06: strings of
+            # corridor cells along a spine were emitting as apron).
+            s.reclassified_from_junction = True
             n_reclassified += 1
     if n_reclassified:
         try:

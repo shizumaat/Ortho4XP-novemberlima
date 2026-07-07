@@ -307,6 +307,15 @@ class BuiltShape:
     # soft edge, 2 m clear of the rect's sloping edge), so the
     # sliver-junction merge pass must NOT absorb them back.
     is_rect_cap: bool = False
+    # Set by ``_reclassify_apron_junctions`` when a ROLE_JUNCTION shape is
+    # flipped to ROLE_APRON by the boundary-distance rule.  The flip is
+    # whole-shape (one far corner beyond the cap condemns the entire
+    # polygon), so downstream splitters (apron neck-split) re-evaluate each
+    # piece of a flagged parent: pieces that hug the taxi spine return to
+    # ROLE_JUNCTION instead of inheriting apron and its stand-apron grading
+    # treatment.  Born-apron shapes never carry the flag, so genuine stand
+    # aprons are never promoted.
+    reclassified_from_junction: bool = False
 
 
 

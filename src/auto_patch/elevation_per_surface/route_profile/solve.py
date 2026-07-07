@@ -688,6 +688,88 @@ def solve_route_profile(layout, icao: str,
                                           broken_out=(_solve_broken_idx
                                                       if _scoped_gate
                                                       else None))
+            # MOUTH VERIFY-AND-RELAX (user 2026-07-06, HECA #541/#546): the
+            # groundside mouth welds (``_gs_hard``) were pinned from lot
+            # rings computed BEFORE this movable-pad/free-seat yield — a
+            # building pad or apron body that settles at a different level
+            # leaves a road-ring edge pad↔mouth over-cap with BOTH ends
+            # effectively hard (mutually conflicting weld authorities; the
+            # DEM-follow break blend cannot fire on a sliver with no
+            # interior nodes).  Verify every welded mouth against the joint
+            # law edges; where violated, FREE the whole mouth cluster (ONE
+            # authority: the joint solve), re-project warm, and have the
+            # LOT adopt the projected mouth profile (exact at freed
+            # vertices, cap-decay fill, chord-limited) so road and lot
+            # still emit as one lawful welded surface.
+            if _gs_hard and _os.environ.get(
+                    "O4_MOUTH_VERIFY_RELAX", "1") == "1":
+                _VIOL_TOL_M = 0.03
+                _conflicted: set = set()
+                for _sc in joint:
+                    for _e in _sc["edges"]:
+                        _a, _b, _bud = _e[0], _e[1], _e[2]
+                        if (_a >= n or _b >= n
+                                or (_a not in _gs_hard
+                                    and _b not in _gs_hard)):
+                            continue
+                        # weld↔weld edges are the LOT↔LOT class — the
+                        # reach-time reconciliation owns those (both lots
+                        # are final there); freeing both welds here lets
+                        # the solve drag them apart (HECA #522: 0.8 m →
+                        # 2.1 m after a both-weld free).
+                        if _a in _gs_hard and _b in _gs_hard:
+                            continue
+                        if abs(elev[_a] - elev[_b]) > _bud + _VIOL_TOL_M:
+                            if _a in _gs_hard:
+                                _conflicted.add(_a)
+                            if _b in _gs_hard:
+                                _conflicted.add(_b)
+                if _conflicted:
+                    from .anchors import (adopt_projected_mouths,
+                                          expand_mouth_cluster)
+                    _freed = expand_mouth_cluster(
+                        layout, bucket_to_idx, _conflicted, _gs_hard)
+                    yield_hard = yield_hard - _freed
+                    rem, bh = feasibility_project(
+                        elev, joint, yield_hard, force_scalar=True,
+                        max_iters=1200, flat_groups=pad_groups or None)
+                    _n_adopted = adopt_projected_mouths(
+                        layout, bucket_to_idx, elev, _freed, _gs_hard)
+                    # A relaxed mouth is a solver-DECLARED authority-
+                    # conflict pocket: export it to the break quarantine
+                    # (a fully reconciled mouth has no over-cap pairs, so
+                    # the export is inert there; a residual blend — e.g.
+                    # the lot ring the adoption re-shaped around the
+                    # solved mouth — is quarantined honestly instead of
+                    # reading as an actionable solver miss).
+                    _solve_broken_idx |= {i for i in _freed if i < n}
+                    if _os.environ.get("O4_STEP_DEBUG") == "1":
+                        print(f"    [mouth-relax] {len(_conflicted)} "
+                              f"conflicted weld(s) → freed cluster "
+                              f"{len(_freed)}; {_n_adopted} lot ring(s) "
+                              f"adopted the solved profile")
+                # WELD↔WELD residuals (HECA #522): two lots' mouth welds on
+                # one road ring can still contradict after the reach-time
+                # lot↔lot reconciliation (later passes move the field the
+                # reconciliation measured against).  Both ends are truth
+                # welds — neither may yield — so a still-violated edge is
+                # a genuine break pocket: export both mouths.
+                _n_weld_pocket = 0
+                for _sc in joint:
+                    for _e in _sc["edges"]:
+                        _a, _b, _bud = _e[0], _e[1], _e[2]
+                        if (_a >= n or _b >= n
+                                or _a not in _gs_hard
+                                or _b not in _gs_hard):
+                            continue
+                        if abs(elev[_a] - elev[_b]) > _bud + _VIOL_TOL_M:
+                            _solve_broken_idx.add(_a)
+                            _solve_broken_idx.add(_b)
+                            _n_weld_pocket += 1
+                if _n_weld_pocket and _os.environ.get(
+                        "O4_STEP_DEBUG") == "1":
+                    print(f"    [mouth-relax] {_n_weld_pocket} weld↔weld "
+                          f"edge(s) still contradictory → break export")
             # EDGE FAIRING (user 2026-07-04, CYXY taxiway E): the spine
             # fairing law covers spine CHAINS only — a corridor's ring
             # EDGE still tracks noise in legal ±cap wiggles (E's edge
@@ -731,6 +813,13 @@ def solve_route_profile(layout, icao: str,
         # sidecar can tag them and the validator reports their over-cap
         # ramp pairs in a SEPARATE section — honest, never hidden, but not
         # mixed into the actionable within-shape count (SPLP seam pockets).
+        # Service DEM-follow break blends join the export (user 2026-07-06,
+        # handover fix (b)): contradictory welded anchors through a road
+        # node render the designed blend — same quarantine semantics as
+        # every other solver-declared pocket.
+        _solve_broken_idx |= {
+            i for i in (getattr(layout, "_service_break_idx", None) or ())
+            if i < len(nodes)}
         layout._break_node_ll = [
             layout.m_to_ll(nodes[i][0], nodes[i][1])
             for i in sorted(_solve_broken_idx) if i < len(nodes)]
@@ -1055,6 +1144,117 @@ def _scoped_projection_defer_ids(layout, nodes, bucket_to_idx, elev,
     return defer_ids, pre_broken
 
 
+def _project_triangle_planes(layout, bucket_to_idx, elev, immovable,
+                             joint, n):
+    """Clamp each 3-vertex sloped shape's PLANE gradient to its role cap.
+
+    A triangle renders as one plane; its gradient can exceed the role cap
+    while every vertex pair stays inside the pairwise rounding envelope
+    (``check_grade._check_plane_gradient``).  For each triangle over cap,
+    move ONE free vertex the minimal amount that brings the plane inside
+    the cap, clamped into the interval that vertex's own law edges allow
+    (margined like the projection).  Returns ``(n_fixed, anchored_idx,
+    broken_idx)`` — anchored vertices must not be re-perturbed by later
+    passes; broken = no free vertex could lawfully fix the plane (the
+    caller quarantines them)."""
+    import math as _math
+    from auto_patch.config import ROLE_GRADE_LIMITS
+    from .one_solve import (_build_adjacency, _emit_quantization_margin,
+                            _margined_budget)
+
+    adjacency = _build_adjacency(joint, n)
+    quant_margin = _emit_quantization_margin()
+    cps = layout.canonical_points
+    n_fixed = 0
+    anchored: set = set()
+    broken: set = set()
+
+    def _gradient(pts, zs):
+        (x1, y1), (x2, y2), (x3, y3) = pts
+        z1, z2, z3 = zs
+        nz = (x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1)
+        if abs(nz) < 1e-6:
+            return None
+        nx = (y2 - y1) * (z3 - z1) - (z2 - z1) * (y3 - y1)
+        ny = (z2 - z1) * (x3 - x1) - (x2 - x1) * (z3 - z1)
+        return (-nx / nz, -ny / nz)
+
+    for s in layout.shapes:
+        if s.polygon is None or s.polygon.is_empty \
+                or s.polygon.geom_type != "Polygon":
+            continue
+        cap = ROLE_GRADE_LIMITS.get(s.role)
+        if not cap:
+            continue
+        try:
+            ring = list(s.polygon.exterior.coords)
+        except Exception:
+            continue
+        if ring and ring[0] == ring[-1]:
+            ring = ring[:-1]
+        if len(ring) != 3:
+            continue
+        idxs = [bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+                for (x, y) in ring]
+        if any(i is None or i >= n for i in idxs):
+            continue
+        zs = [elev[i] for i in idxs]
+        g = _gradient(ring, zs)
+        if g is None:
+            continue
+        if _math.hypot(*g) <= cap:
+            continue
+        # Try each free vertex; pick the smallest lawful move.
+        best = None                    # (move_size, vertex_pos, new_value)
+        for k in range(3):
+            i_move = idxs[k]
+            if i_move in immovable:
+                continue
+            others = [(ring[m], zs[m]) for m in range(3) if m != k]
+            pts = [others[0][0], others[1][0], ring[k]]
+            fixed_z = [others[0][1], others[1][1]]
+            g0 = _gradient(pts, fixed_z + [0.0])
+            g1 = _gradient(pts, fixed_z + [1.0])
+            if g0 is None or g1 is None:
+                continue
+            bx, by = g1[0] - g0[0], g1[1] - g0[1]
+            a = bx * bx + by * by
+            if a < 1e-18:
+                continue               # gradient insensitive to this vertex
+            b = 2.0 * (g0[0] * bx + g0[1] * by)
+            c = g0[0] * g0[0] + g0[1] * g0[1] - cap * cap
+            disc = b * b - 4.0 * a * c
+            if disc < 0.0:
+                continue               # no value of this vertex fixes it
+            sq = _math.sqrt(disc)
+            t_lo, t_hi = (-b - sq) / (2.0 * a), (-b + sq) / (2.0 * a)
+            # law-edge interval for the moved vertex (margined budgets)
+            lo_b, hi_b = -float("inf"), float("inf")
+            for (other, budget) in adjacency.get(i_move, ()):
+                if other >= n:
+                    continue
+                m_budget = _margined_budget(budget, quant_margin)
+                lo_b = max(lo_b, elev[other] - m_budget)
+                hi_b = min(hi_b, elev[other] + m_budget)
+            lo = max(t_lo, lo_b)
+            hi = min(t_hi, hi_b)
+            if lo > hi:
+                continue               # law edges forbid the fix
+            cur = zs[k]
+            new_val = min(max(cur, lo), hi)
+            move = abs(new_val - cur)
+            if best is None or move < best[0]:
+                best = (move, k, new_val)
+        if best is None:
+            broken.update(i for i in idxs if i is not None)
+            continue
+        _move, k, new_val = best
+        elev[idxs[k]] = new_val
+        anchored.update(i for i in idxs if i is not None)
+        n_fixed += 1
+    return n_fixed, anchored, broken
+
+
 def final_grade_projection(layout, icao: str = "", dem=None,
                            tile_lat: int = 0, tile_lon: int = 0) -> None:
     """LAST-WORD grade projection on the FINAL emitted geometry (round 4,
@@ -1166,11 +1366,17 @@ def final_grade_projection(layout, icao: str = "", dem=None,
     hard = {i for i in range(n) if base_hard[i]}
     hard |= {i for i in runway_idx if i < n}
     # tile-seam nodes: terrain-pinned for cross-tile stitching.
+    # ``terrain_hard`` tracks the TERRAIN-dictated subset of the hard set
+    # (seam pins + agreeing feature welds below): a violated law edge
+    # between two terrain-pinned nodes is the terrain's own slope, not a
+    # solver miss — exported to the break quarantine after the projection.
+    terrain_hard: set = set()
     try:
         for i, (x, y) in enumerate(nodes):
             la, lo = layout.m_to_ll(x, y)
             if (abs(la - round(la)) < 1e-7 or abs(lo - round(lo)) < 1e-7):
                 hard.add(i)
+                terrain_hard.add(i)
     except Exception:
         pass
     # nodes welded to already-emitted FEATURE shapes (ribbon/bridge/
@@ -1213,15 +1419,51 @@ def final_grade_projection(layout, icao: str = "", dem=None,
         except Exception:
             continue
     _WELD_AGREE_TOL_M = 0.05
+    # WELD-KEY tolerance (user 2026-07-06, CYXY apron #29): a feature
+    # contact vertex inserted post-solve (boundary-bridge insert) can sit
+    # a few mm off the pavement ring vertex it welds — mm-exact keys miss
+    # it and the node wrongly stays free.  Match at the canonical 0.5 m
+    # registry tolerance via a coarse grid.
+    _WELD_KEY_TOL_M = 0.5
+    torn_feature_weld: set = set()
+    feat_grid: dict = {}
+    for (_kx, _ky), _v in feat_alt_by_key.items():
+        feat_grid.setdefault((int(_kx // _WELD_KEY_TOL_M),
+                              int(_ky // _WELD_KEY_TOL_M)),
+                             []).append((_kx, _ky, _v))
     if feat_alt_by_key:
         for i, (x, y) in enumerate(nodes):
             feature_value = feat_alt_by_key.get((round(x, 3), round(y, 3)),
                                                 "absent")
             if feature_value == "absent":
-                continue
+                _cx = int(x // _WELD_KEY_TOL_M)
+                _cy = int(y // _WELD_KEY_TOL_M)
+                _best = None
+                for _ox in (-1, 0, 1):
+                    for _oy in (-1, 0, 1):
+                        for (_fx, _fy, _fv) in feat_grid.get(
+                                (_cx + _ox, _cy + _oy), ()):
+                            _fd = ((x - _fx) ** 2 + (y - _fy) ** 2) ** 0.5
+                            if _fd <= _WELD_KEY_TOL_M and (
+                                    _best is None or _fd < _best[0]):
+                                _best = (_fd, _fv)
+                if _best is None:
+                    continue
+                feature_value = _best[1]
             if (feature_value is None
                     or abs(feature_value - elev[i]) <= _WELD_AGREE_TOL_M):
                 hard.add(i)
+                terrain_hard.add(i)
+            else:
+                # TORN WELD: the feature holds a different value than
+                # the pavement at the same coordinate — the emit
+                # consensus will merge the two nodes toward the feature
+                # side, so pairs through this vertex render the
+                # feature's terrain value regardless of what the
+                # projection solves (CYXY apron #29: bridge 692.85 vs
+                # pavement 693.00 emitted the bridge value).  Treated as
+                # terrain-dictated for the quarantine scan below.
+                torn_feature_weld.add(i)
 
     # building pads: rigid movable FLAT groups (same model as the yield).
     cps = layout.canonical_points
@@ -1252,6 +1494,129 @@ def final_grade_projection(layout, icao: str = "", dem=None,
                                   flat_groups=pad_groups or None,
                                   pre_broken=(pre_broken or None),
                                   broken_out=_projection_broken_idx)
+    # TERRAIN-PINNED PAIR EXPORT (user 2026-07-06, CYXY #26/#29 after the
+    # apron route-proximity cut): a violated law edge touching a
+    # terrain-dictated pin (tile-seam node, agreeing boundary/feature
+    # weld) after the projection has CONVERGED is the terrain's own slope
+    # winning over the shape law — the free end, had it any slack, would
+    # already have moved (a hillside strip welded to the boundary ribbon
+    # carries the terrain's 1.25 % between ground-truth pins no 1 % law
+    # can beat).  Export those endpoints to the break quarantine.  Scoped
+    # to TERRAIN pins only (part-18 ruling: blanket both-hard quarantine
+    # hides real anchor bugs — runway/pad/weld classes stay actionable).
+    _VIOL_TOL_M = 0.03
+    _terrain_like = terrain_hard | torn_feature_weld
+    if _terrain_like:
+        for _sc in joint:
+            for _e in _sc["edges"]:
+                _a, _b, _bud = _e[0], _e[1], _e[2]
+                if (_a >= n or _b >= n
+                        or (_a not in _terrain_like
+                            and _b not in _terrain_like)):
+                    continue
+                if abs(elev[_a] - elev[_b]) > _bud + _VIOL_TOL_M:
+                    _projection_broken_idx.add(_a)
+                    _projection_broken_idx.add(_b)
+        # DEFERRED shapes carry no edges in ``joint`` (the scoped
+        # projection proved them untouched), so a terrain-pinned pair
+        # inside one is invisible to the scan above (CYXY apron #29: a
+        # hillside strip welded to the boundary ribbon, deferred, its
+        # 57 m chord 0.25 % over the 1 % law).  Scan such rings directly:
+        # every (terrain vertex ↔ ring vertex) chord that stays inside
+        # the polygon at the shape's role cap.
+        from auto_patch.config import ROLE_GRADE_LIMITS as _RGL
+        from shapely.geometry import LineString as _LS
+        _cps_t = layout.canonical_points
+        for _s in layout.shapes:
+            _cap_role = _RGL.get(_s.role)
+            if (not _cap_role or _s.polygon is None or _s.polygon.is_empty
+                    or _s.polygon.geom_type != "Polygon"):
+                continue
+            try:
+                _ring_t = list(_s.polygon.exterior.coords)[:-1]
+            except Exception:
+                continue
+            _idx_t = [b2i.get(_cps_t.get_or_add(float(x), float(y)))
+                      for (x, y) in _ring_t]
+            _terrain_on_ring = [(k, i) for k, i in enumerate(_idx_t)
+                                if i is not None and i < n
+                                and i in _terrain_like]
+            if not _terrain_on_ring:
+                continue
+            _poly_buf = None
+            for (_kt, _it) in _terrain_on_ring:
+                for _ko, _io in enumerate(_idx_t):
+                    if _io is None or _io >= n or _io == _it:
+                        continue
+                    _dx = _ring_t[_kt][0] - _ring_t[_ko][0]
+                    _dy = _ring_t[_kt][1] - _ring_t[_ko][1]
+                    _dd = (_dx * _dx + _dy * _dy) ** 0.5
+                    if _dd < 0.5:
+                        continue
+                    if (abs(elev[_it] - elev[_io])
+                            <= _cap_role * _dd + _VIOL_TOL_M):
+                        continue
+                    if _poly_buf is None:
+                        try:
+                            _poly_buf = _s.polygon.buffer(0.1)
+                        except Exception:
+                            break
+                    try:
+                        if not _poly_buf.covers(_LS(
+                                [_ring_t[_kt], _ring_t[_ko]])):
+                            continue      # chord leaves the shape
+                    except Exception:
+                        continue
+                    _projection_broken_idx.add(_it)
+                    _projection_broken_idx.add(_io)
+        if _os.environ.get("O4_STEP_DEBUG") == "1":
+            print(f"    [terrain-scan] terrain_hard={len(terrain_hard)} "
+                  f"broken_now={len(_projection_broken_idx)}")
+    _dbg_ll = _os.environ.get("O4_PROJ_DEBUG_LL")
+    if _dbg_ll:
+        try:
+            for _part in _dbg_ll.split(";"):
+                _dla, _dlo = (float(v) for v in _part.split(","))
+                import math as _dbg_math
+                _bi = min(range(len(nodes)), key=lambda i: _dbg_math.hypot(
+                    (layout.m_to_ll(nodes[i][0], nodes[i][1])[0] - _dla)
+                    * 111320,
+                    (layout.m_to_ll(nodes[i][0], nodes[i][1])[1] - _dlo)
+                    * 54460))
+                _bla, _blo = layout.m_to_ll(nodes[_bi][0], nodes[_bi][1])
+                _dd = _dbg_math.hypot((_bla - _dla) * 111320,
+                                      (_blo - _dlo) * 54460)
+                _n_edges = sum(
+                    1 for _sc in joint for _e in _sc["edges"]
+                    if _e[0] == _bi or _e[1] == _bi)
+                print(f"    [proj-dbg] ({_dla},{_dlo}) -> idx={_bi} "
+                      f"d={_dd:.2f}m elev={elev[_bi]:.2f} "
+                      f"hard={_bi in hard} terrain={_bi in terrain_hard} "
+                      f"pad={_bi in pad_nodes} joint_edges={_n_edges} "
+                      f"broken={_bi in _projection_broken_idx}")
+        except Exception as _e:
+            print(f"    [proj-dbg] error {_e!r}")
+    # TRIANGLE-PLANE LAW (user 2026-07-06): a 3-vertex sloped shape
+    # renders as ONE plane, and can satisfy every vertex-PAIR budget yet
+    # tilt beyond its role cap along the plane gradient (skinny slivers:
+    # HECA junction #258 at the 05C corner 6.4 %, apron #41 by building7
+    # 2.4 % — pairwise all inside the rounding envelope).  The pairwise
+    # projection cannot see this, so clamp it here: move the triangle's
+    # freest vertex the minimum that brings the plane inside the cap,
+    # bounded by the interval its own law edges allow (ORDERING LAW —
+    # post-projection moves are law-guarded).  Unfixable triangles join
+    # the break quarantine below.  Fixed vertices are anchored through
+    # the later edge fairing so nothing re-tilts them.
+    _tri_anchor_idx: set = set()
+    if _os.environ.get("O4_TRIANGLE_PLANE_LAW", "1") == "1":
+        _n_tri_fixed, _tri_anchor_idx, _tri_broken = \
+            _project_triangle_planes(layout, b2i, elev,
+                                     hard | pad_nodes, joint, n)
+        _projection_broken_idx |= _tri_broken
+        if (_n_tri_fixed or _tri_broken) and _os.environ.get(
+                "O4_STEP_DEBUG") == "1":
+            print(f"    [triangle-plane] fixed {_n_tri_fixed}, "
+                  f"quarantined {len(_tri_broken)} vertex(es)")
     _stage("project")
     if _projection_broken_idx:
         try:
@@ -1327,7 +1692,8 @@ def final_grade_projection(layout, icao: str = "", dem=None,
                               or _sc.get("nodes") or ()):
                     if isinstance(_node, int):
                         _lazy_guard_nodes.add(_node)
-        _fair_ring_edges(layout, elev, b2i, hard | _lazy_guard_nodes, None,
+        _fair_ring_edges(layout, elev, b2i,
+                         hard | _lazy_guard_nodes | _tri_anchor_idx, None,
                          TAXIWAY_MAX_GRADE_CHANGE_PER_M,
                          law_adjacency=_law_adjacency)
     _stage("fairing")

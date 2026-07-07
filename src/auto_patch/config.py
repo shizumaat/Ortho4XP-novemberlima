@@ -448,6 +448,13 @@ TAXI_MAX_TRANSVERSE_NARROW = 0.020   # ICAO Annex 14 Table 3-2 code A/B transver
 # JUNCTIONS stay at the TAXI rate (1.5%): they are part of the moving network
 # where 1.5% taxiways flow through, not parking surface (decoupled below).
 APRON_MAX_GRADE = 0.01          # apron + building pad, all directions
+# USER RULING 2026-07-06: pavement within this distance of a taxi
+# centerline or a runway is NOT apron (it is maneuvering surface —
+# junction law); only the portion of a shape farther than this may carry
+# the apron/stand law.  Enforced by the apron route-proximity CUT in
+# pipeline.py (shapes are split at this contour) — "no apron should ever
+# touch a runway" follows as a corollary.
+APRON_ROUTE_PROXIMITY_M = 50.0
 # The building-frontage rule (user 2026-07-02/03, buildings-heaviest):
 # ANY within-shape pair touching a building pad is capped here no matter
 # which face role hosts it (grade_law.classify_pair binds it last).

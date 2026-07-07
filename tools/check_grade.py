@@ -1626,13 +1626,22 @@ def run_checks(
         within = kept
     _pv(f"WITHIN-SHAPE vertex-pair grade > {max_grade_pct}%",
         within, top_n)
+
+    plane = _check_plane_gradient(
+        ways, nodes, ll_to_m, max_grade, seam_nids=seam_nids)
+    # A triangle whose vertex the solver declared broken is the pocket's
+    # designed blend — quarantine it exactly like the vertex-pair split
+    # above (the triangle-plane law exports unfixable triangles).
+    if break_nodes_ll:
+        kept_plane = []
+        for violation in plane:
+            (break_region if _touches_break_node(violation)
+             else kept_plane).append(violation)
+        plane = kept_plane
     if break_nodes_ll is not None and not quiet:
         print(f"\nBREAK-REGION over-cap (solver-declared infeasible "
               f"pocket, contained blend — by design): "
               f"{len(break_region)} pair(s)")
-
-    plane = _check_plane_gradient(
-        ways, nodes, ll_to_m, max_grade, seam_nids=seam_nids)
     _pv(f"PLANE GRADIENT (triangle surface) > {max_grade_pct}%",
         plane, top_n)
     within = within + plane
@@ -1669,15 +1678,43 @@ def run_checks(
 
     steps = _check_vertex_to_edge_step(
         vertices, edges, ways, edge_search_m, edge_step_m)
+    mid_steps = _check_edge_midpoint_step(
+        edges, ways, edge_search_m, edge_step_m)
+    # BREAK-REGION split for steps (user 2026-07-06): a step whose
+    # location touches a solver-declared break node is the same pocket's
+    # cross-shape rendering — quarantined exactly like the pocket's
+    # vertex pairs (HECA #578↔#64: contradictory welded anchors 1 m
+    # apart; the DEM-follow blend contains the deficit by design).
+    n_break_steps = 0
+    if break_nodes_ll:
+        _STEP_BREAK_TOL_M = 2.0
+
+        def _step_touches_break(step):
+            for pt in (step.vert_pt, step.proj_pt):
+                if pt is None:
+                    continue
+                px, py = pt
+                for (bx, by) in break_points_m:
+                    if (abs(px - bx) <= _STEP_BREAK_TOL_M
+                            and abs(py - by) <= _STEP_BREAK_TOL_M):
+                        return True
+            return False
+        kept_steps = [s for s in steps if not _step_touches_break(s)]
+        kept_mid = [s for s in mid_steps if not _step_touches_break(s)]
+        n_break_steps = (len(steps) - len(kept_steps)
+                         + len(mid_steps) - len(kept_mid))
+        steps = kept_steps
+        mid_steps = kept_mid
     _ps(f"VERTEX-TO-EDGE step (within {edge_search_m}m of "
         f"another shape)",
         steps, top_n, edge_step_m)
 
-    mid_steps = _check_edge_midpoint_step(
-        edges, ways, edge_search_m, edge_step_m)
     _ps(f"MID-EDGE step (sample along each edge, compare to "
         f"nearest other-shape edge)",
         mid_steps, top_n, edge_step_m)
+    if n_break_steps and not quiet:
+        print(f"  ({n_break_steps} step(s) inside solver-declared break "
+              f"region(s) quarantined)")
 
     # Attach a geographic location (lat, lon) to each finding so callers
     # can point a user at the spot in their apt.dat / DSF.  nodes maps

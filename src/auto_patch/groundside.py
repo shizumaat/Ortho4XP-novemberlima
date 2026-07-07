@@ -878,6 +878,84 @@ def conform_service_mouths_to_groundside(
     return n_inserted
 
 
+def conform_parallel_service_edges(layout, window_m: float = 2.0,
+                                   min_gap_m: float = 0.05,
+                                   dedup_m: float = 0.75) -> int:
+    """Insert projected vertices where two SERVICE shapes run parallel
+    within ``window_m`` of each other (user 2026-07-06, HECA #578↔#64).
+
+    Two near-parallel roads carry no shared geometry, and their ring
+    nodes are offset along-track — the service DEM-follow's node↔node
+    proximity coupling then has nothing to bind (a 1 m gap emitted a
+    0.9 m mid-edge wall between a flat road and a climbing one).  For
+    every vertex of shape A within the window of shape B's boundary,
+    insert the projection foot into B's ring (skipped when a B vertex
+    already sits within ``dedup_m``), so matching nodes exist for the
+    coupling.  Runs PRE-SOLVE (no altitudes exist yet on service rings).
+    Returns the number of inserted vertices."""
+    import os as _os
+    if _os.environ.get("O4_SVC_PARALLEL_CONFORM", "1") != "1":
+        return 0
+    svc = [s for s in layout.shapes
+           if s.role in (ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION)
+           and s.polygon is not None and not s.polygon.is_empty
+           and s.polygon.geom_type == "Polygon"]
+    n_inserted = 0
+    for receiver in svc:
+        try:
+            ring = list(receiver.polygon.exterior.coords)
+        except _GEOM_EXC:
+            continue
+        closed = len(ring) > 1 and ring[0] == ring[-1]
+        if closed:
+            ring = ring[:-1]
+        changed = False
+        for donor in svc:
+            if donor is receiver:
+                continue
+            try:
+                if donor.polygon.distance(receiver.polygon) > window_m:
+                    continue
+            except _GEOM_EXC:
+                continue
+            try:
+                donor_ring = list(donor.polygon.exterior.coords)[:-1]
+            except _GEOM_EXC:
+                continue
+            for (vx, vy) in donor_ring:
+                # nearest point on the receiver ring
+                best = None
+                for k in range(len(ring)):
+                    ax, ay = ring[k]
+                    bx, by = ring[(k + 1) % len(ring)]
+                    dx, dy = bx - ax, by - ay
+                    seg2 = dx * dx + dy * dy
+                    if seg2 < 1e-9:
+                        continue
+                    t = ((vx - ax) * dx + (vy - ay) * dy) / seg2
+                    t = min(1.0, max(0.0, t))
+                    px, py = ax + t * dx, ay + t * dy
+                    d = math.hypot(vx - px, vy - py)
+                    if best is None or d < best[0]:
+                        best = (d, k, px, py)
+                if (best is None or best[0] > window_m
+                        or best[0] < min_gap_m):
+                    continue
+                _d, k, px, py = best
+                if any(math.hypot(px - rx, py - ry) <= dedup_m
+                       for (rx, ry) in ring):
+                    continue          # a receiver vertex is already there
+                ring.insert(k + 1, (px, py))
+                changed = True
+                n_inserted += 1
+        if changed:
+            try:
+                receiver.polygon = Polygon(ring)
+            except _GEOM_EXC:
+                continue
+    return n_inserted
+
+
 def chord_limit_ring_altitudes(coords, alts,
                                cap: float = GROUNDSIDE_MAX_GRADE,
                                sweeps: int = 4):
@@ -1008,6 +1086,17 @@ def _grade_limit_groundside_chords(layout) -> int:
     # merely shares geometry and keeps its by-design road-vs-lot seam
     # (blanket adoption measured 5 m road yanks, 125 % chords).
     weld_keys = getattr(layout, "_groundside_weld_keys", None) or ()
+    # Weld keys whose re-adoption MOVED the road value materially: the
+    # limiter re-levelled the lot around a weld the road's own law had
+    # placed elsewhere — residual multi-authority tension neither side
+    # may fully absorb (the projection cannot see lot rings or road
+    # diagonal chords).  Recorded so the caller can quarantine them
+    # (CYXY #26: a 4 cm re-adoption tore three road diagonals over cap).
+    moved_weld_xy: list = getattr(layout, "_weld_relimit_moved_xy", None)
+    if moved_weld_xy is None:
+        moved_weld_xy = []
+        layout._weld_relimit_moved_xy = moved_weld_xy
+    _MOVED_TOL_M = 0.02
     for s in layout.shapes:
         if s.role not in (ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION):
             continue
@@ -1028,6 +1117,8 @@ def _grade_limit_groundside_chords(layout) -> int:
             v = node_alt.get(kxy)
             if v is not None and alts[k] is not None \
                     and abs(alts[k] - v) > 1e-6:
+                if abs(alts[k] - v) > _MOVED_TOL_M:
+                    moved_weld_xy.append((ring[k][0], ring[k][1]))
                 alts[k] = round(v, 2)
                 changed = True
         if changed:

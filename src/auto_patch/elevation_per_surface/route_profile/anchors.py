@@ -1055,6 +1055,103 @@ def apply_groundside_reach(layout, bucket_to_idx, elev, cap):
             list(g.polygon.exterior.coords), g.node_altitudes,
             cap=GROUNDSIDE_MAX_GRADE)
 
+    # ── LOT↔LOT WELD RECONCILIATION on service rings ─────────────────────
+    # (user 2026-07-06, HECA service_road #522).  One road ring can weld to
+    # TWO different lots whose re-levelled mouth values disagree beyond the
+    # road cap * distance — an unfixable step between two hard welds (the
+    # DEM-follow break blend only evaluates INTERIOR nodes, and both ends
+    # are anchors).  Lots are FINAL at this point (only the connector reach
+    # above moves them), so reconciling here is sound: the SMALLER lot
+    # adopts the larger's ±cap·d band (largest-piece-first precedent
+    # below), applied as a decay cone (fading at the groundside cap toward
+    # the lot interior) so the ring stays Lipschitz and the chord limiter
+    # stays idempotent.  Conflicts against BUILDING PADS / APRON bodies are
+    # NOT handled here — those move later in the movable-pad yield
+    # projection, so they are verified and relaxed post-yield instead
+    # (``solve.py`` mouth verify-and-relax).
+    if _os.environ.get("O4_GS_MOUTH_RECONCILE", "1") == "1":
+        _BAND_MARGIN_M = 0.01      # stay inside the band after emit rounding
+        svc_ring_pts = []          # per service shape: [(key, (x, y)), ...]
+        for (_c, _ks) in svc:
+            _pts = [(_key(x, y), (x, y))
+                    for (x, y) in _open_ring(list(_c.polygon.exterior.coords))]
+            svc_ring_pts.append(_pts)
+        # Current (post-decay, post-limit) lot value per key; largest lot
+        # owns a shared key, mirroring the gs_key_alt precedence below.
+        lot_key_val: dict = {}     # key -> (area, lot shape, current value)
+        for (g, _kalt) in sorted(gs_pieces,
+                                 key=lambda t: -t[0].polygon.area):
+            gcoords = list(g.polygon.exterior.coords)
+            galts = list(g.node_altitudes or [])
+            for kidx in range(min(len(gcoords), len(galts))):
+                if galts[kidx] is None:
+                    continue
+                kk = _key(*gcoords[kidx])
+                if kk not in lot_key_val:
+                    lot_key_val[kk] = (g.polygon.area, g, float(galts[kidx]))
+        # Collect per-lot clamp deltas from lot↔lot pairs that share a
+        # service ring (the pair the within-shape law measures).
+        adjustments: dict = {}     # id(lot) -> [lot, [((x, y), delta)]]
+
+        def _clamp_into(target_list, pt, cur, lo_b, hi_b):
+            tgt = min(max(cur, lo_b), hi_b)
+            if abs(tgt - cur) > 1e-4:
+                target_list.append((pt, tgt, tgt - cur))
+
+        for _pts in svc_ring_pts:
+            lots = [(k, p, lot_key_val[k]) for (k, p) in _pts
+                    if k in lot_key_val]
+            if len({id(v[1]) for (_k, _p, v) in lots}) < 2:
+                continue
+            for ai in range(len(lots)):
+                for bi in range(ai + 1, len(lots)):
+                    (_ka, pa, (aa, ga, va)) = lots[ai]
+                    (_kb, pb, (ab, gb, vb)) = lots[bi]
+                    if ga is gb:
+                        continue   # same ring: its own chord limit governs
+                    d = math.hypot(pa[0] - pb[0], pa[1] - pb[1])
+                    band = max(0.0, cap * d - _BAND_MARGIN_M)
+                    if abs(va - vb) <= band:
+                        continue
+                    if aa >= ab:   # smaller lot adopts the larger's band
+                        entry = adjustments.setdefault(id(gb), [gb, []])
+                        _clamp_into(entry[1], pb, vb, va - band, va + band)
+                    else:
+                        entry = adjustments.setdefault(id(ga), [ga, []])
+                        _clamp_into(entry[1], pa, va, vb - band, vb + band)
+        n_reconciled = 0
+        for (g, adjs) in adjustments.values():
+            if not adjs:
+                continue
+            gcoords = list(g.polygon.exterior.coords)
+            new_alts = list(g.node_altitudes)
+            # ABSOLUTE Lipschitz support around each moved mouth (not a
+            # relative delta cone): the ring near a mouth typically sits
+            # exactly at the cap already, so ``old + (delta − cap·d)``
+            # under-raises neighbours by the pre-existing slope and leaves
+            # the mouth pair over cap (CYXY #184: an at-cap 4.00 % pair
+            # re-emitted at 4.64 %).  Support = the new mouth value minus
+            # (plus) cap·distance — the tightest field containing the
+            # adopted mouth.
+            for j in range(min(len(gcoords), len(new_alts))):
+                if new_alts[j] is None:
+                    continue
+                xj, yj = gcoords[j]
+                val = new_alts[j]
+                for ((ax, ay), tgt, dv) in adjs:
+                    dd = math.hypot(xj - ax, yj - ay)
+                    if dv > 0.0:
+                        val = max(val, tgt - GROUNDSIDE_MAX_GRADE * dd)
+                    else:
+                        val = min(val, tgt + GROUNDSIDE_MAX_GRADE * dd)
+                new_alts[j] = val
+            g.node_altitudes = chord_limit_ring_altitudes(
+                gcoords, new_alts, cap=GROUNDSIDE_MAX_GRADE)
+            n_reconciled += 1
+        if n_reconciled and _os.environ.get("O4_STEP_DEBUG") == "1":
+            print(f"  [groundside-reach] mouth reconciliation adjusted "
+                  f"{n_reconciled} lot ring(s).")
+
     # (now-shifted) groundside altitude per key, for the weld.  LARGEST
     # piece first: where a big lot and a sliver connector piece share a
     # mouth key with different altitudes, the mouth serves the LOT
@@ -1198,6 +1295,7 @@ def apply_service_road_dem_follow(layout, bucket_to_idx, elev, dem_elev, cap,
 
     Mutates ``elev`` in place; returns the set of node indices it moved."""
     import heapq
+    import os as _os
     from collections import defaultdict
     from auto_patch.layout import (
         ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION, ROLE_GROUNDSIDE_PAVEMENT)
@@ -1210,6 +1308,8 @@ def apply_service_road_dem_follow(layout, bucket_to_idx, elev, dem_elev, cap,
     SVC = (ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION)
     svc_nodes: set = set()
     adj = defaultdict(list)
+    node_pos: dict = {}
+    node_shape: dict = {}
     for s in layout.shapes:
         if s.role not in SVC or s.polygon is None or s.polygon.is_empty:
             continue
@@ -1220,6 +1320,8 @@ def apply_service_road_dem_follow(layout, bucket_to_idx, elev, dem_elev, cap,
             if i is None or i >= len(elev):
                 continue
             svc_nodes.add(i)
+            node_pos.setdefault(i, ring[k])
+            node_shape.setdefault(i, id(s))
             if j is not None and j != i and j < len(elev):
                 import math as _m
                 dd = _m.hypot(ring[k][0] - ring[(k + 1) % len(ring)][0],
@@ -1228,6 +1330,40 @@ def apply_service_road_dem_follow(layout, bucket_to_idx, elev, dem_elev, cap,
                 adj[j].append((i, dd))
     if not svc_nodes:
         return set()
+
+    # PROXIMITY COUPLING between near-parallel roads (user 2026-07-06,
+    # HECA #510↔#517): two service shapes whose free edges run < ~2 m
+    # apart carry NO shared node, so each grades to its OWN anchors and
+    # the pair can emit a metre-scale wall across an unrenderable sliver
+    # (measured 1.8 m over 0.9 m).  Couple nodes of DIFFERENT service
+    # shapes within the window into the reach graph — both roads then
+    # grade against the union of their anchors at ≤cap across the gap,
+    # and genuinely contradictory anchors resolve through the same
+    # break blend as any interior node.
+    if _os.environ.get("O4_SVC_PROXIMITY_COUPLE", "1") == "1":
+        import math as _m
+        _PROX_M = 2.0
+        _cell = _PROX_M
+        _grid: dict = {}
+        for i, (px, py) in node_pos.items():
+            _grid.setdefault((int(px // _cell), int(py // _cell)),
+                             []).append(i)
+        for (cx, cy), members in _grid.items():
+            neighbors = []
+            for ox in (-1, 0, 1):
+                for oy in (-1, 0, 1):
+                    neighbors.extend(_grid.get((cx + ox, cy + oy), ()))
+            for i in members:
+                (ix, iy) = node_pos[i]
+                for j in neighbors:
+                    if (j <= i
+                            or node_shape.get(j) == node_shape.get(i)):
+                        continue
+                    (jx, jy) = node_pos[j]
+                    dd = _m.hypot(ix - jx, iy - jy)
+                    if 1e-6 < dd <= _PROX_M:
+                        adj[i].append((j, dd))
+                        adj[j].append((i, dd))
 
     # Anchors = service nodes that are ALSO a corner of a NON-service pavement shape
     # (the road welds to the airside there), held at their solved elevation; plus
@@ -1275,7 +1411,32 @@ def apply_service_road_dem_follow(layout, bucket_to_idx, elev, dem_elev, cap,
 
     ceil, ceil_dist = _reach(+1) if anchors else ({}, {})
     floor, floor_dist = _reach(-1) if anchors else ({}, {})
+    _dbg_spec = _os.environ.get("O4_SVC_DEBUG_LL")
+    if _dbg_spec:
+        try:
+            import math as _dbg_m
+            _dla, _dlo = (float(v) for v in _dbg_spec.split(","))
+            _dx, _dy = layout.ll_to_m(_dla, _dlo)
+            for _i in sorted(svc_nodes):
+                _p = node_pos.get(_i)
+                if _p is None or _dbg_m.hypot(_p[0] - _dx,
+                                              _p[1] - _dy) > 8.0:
+                    continue
+                print(f"    [svc-dbg] i={_i} pos=({_p[0]:.1f},{_p[1]:.1f})"
+                      f" anchor={_i in anchors}"
+                      f" elev={elev[_i]:.2f}"
+                      f" dem={dem_elev[_i] if _i < len(dem_elev) else None}"
+                      f" ceil={ceil.get(_i)} floor={floor.get(_i)}")
+        except Exception as _e:
+            print(f"    [svc-dbg] error {_e!r}")
     changed: set = set()
+    # BREAK-BLEND EXPORT (user 2026-07-06, handover fix (b)): nodes whose
+    # welded anchors contradict (floor > ceil) render the designed blend
+    # below — persist them so the caller can quarantine their over-cap
+    # pairs/steps instead of reporting the contained blend as actionable
+    # (HECA #578↔#64: a junction weld 1 m from a road capped 0.8 m lower).
+    service_break: set = getattr(layout, "_service_break_idx", None) or set()
+    layout._service_break_idx = service_break
     for i in svc_nodes:
         if i in anchors:
             continue
@@ -1303,6 +1464,7 @@ def apply_service_road_dem_follow(layout, bucket_to_idx, elev, dem_elev, cap,
             df = floor_dist.get(i, 0.0)
             t = dc / (dc + df) if (dc + df) > 1e-9 else 0.5
             tgt = c + (f - c) * t
+            service_break.add(i)
         else:
             lo = f if f is not None else -float("inf")
             tgt = min(max(de, lo), c)
@@ -1310,6 +1472,108 @@ def apply_service_road_dem_follow(layout, bucket_to_idx, elev, dem_elev, cap,
             elev[i] = tgt
             changed.add(i)
     return changed
+
+
+def _groundside_lot_rings(layout, bucket_to_idx):
+    """Per groundside lot with per-vertex altitudes: the ring vertex list
+    ``[(ring_index, solver_index_or_None, (x, y)), ...]`` (open ring)."""
+    from auto_patch.layout import ROLE_GROUNDSIDE_PAVEMENT
+    cps = layout.canonical_points
+    out = []
+    for g in layout.shapes:
+        if (g.role != ROLE_GROUNDSIDE_PAVEMENT or g.polygon is None
+                or g.polygon.is_empty or not g.node_altitudes):
+            continue
+        coords = list(g.polygon.exterior.coords)
+        verts = []
+        for j in range(min(len(coords), len(g.node_altitudes))):
+            x, y = coords[j]
+            idx = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+            verts.append((j, idx, (float(x), float(y))))
+        out.append((g, verts))
+    return out
+
+
+def expand_mouth_cluster(layout, bucket_to_idx, conflicted, welded_idx,
+                         window_m: float = 12.0):
+    """Grow a conflicted-mouth set to the full mouth CLUSTER: every welded
+    solver node on the SAME groundside lot ring within ``window_m`` of a
+    conflicted node.  Freeing the whole cluster lets the joint solve place
+    one consistent mouth profile instead of wedging a single freed vertex
+    between its still-hard neighbours."""
+    import math as _m
+    freed = set(conflicted)
+    for (_g, verts) in _groundside_lot_rings(layout, bucket_to_idx):
+        ring_welded = [(j, idx, p) for (j, idx, p) in verts
+                       if idx is not None and idx in welded_idx]
+        seeds = [(j, idx, p) for (j, idx, p) in ring_welded
+                 if idx in conflicted]
+        if not seeds:
+            continue
+        for (_j, idx, p) in ring_welded:
+            if idx in freed:
+                continue
+            if any(_m.hypot(p[0] - sp[0], p[1] - sp[1]) <= window_m
+                   for (_sj, _si, sp) in seeds):
+                freed.add(idx)
+    return freed
+
+
+def adopt_projected_mouths(layout, bucket_to_idx, elev, freed, welded_idx):
+    """LOT ADOPTS THE SOLVED MOUTH (user 2026-07-06, HECA #541/#546): after
+    the mouth verify-and-relax re-projection, write the projected values of
+    the freed mouth vertices back onto their groundside lot rings — exact at
+    each freed vertex, cap-decay filled across non-welded ring vertices.
+    Non-freed welded vertices are held fixed during the fill (their solver
+    values did not move).  Deliberately NO chord-limit here: the downward-
+    only limiter would drag an adopted-high mouth toward the lot's low DEM
+    interior (measured: HECA #522 mouth 103.9 → 101.8, a 2.1 m weld tear);
+    ring lawfulness stays with the post-solve groundside chord limiter,
+    which re-adopts welded values properly.  Returns the count of adopted
+    lot rings."""
+    import math as _m
+    from auto_patch.config import GROUNDSIDE_MAX_GRADE
+    n_adopted = 0
+    for (g, verts) in _groundside_lot_rings(layout, bucket_to_idx):
+        alts = list(g.node_altitudes)
+        freed_verts = [(j, idx, p) for (j, idx, p) in verts
+                       if idx is not None and idx in freed
+                       and j < len(alts) and alts[j] is not None]
+        if not freed_verts:
+            continue
+        held = {j for (j, idx, _p) in verts
+                if idx is not None and idx in welded_idx
+                and idx not in freed}
+        # ABSOLUTE Lipschitz support around each adopted mouth (see the
+        # reach-time reconciliation for why a relative delta cone is
+        # wrong: an at-cap ring re-emits over cap).
+        sources = [(p, float(elev[idx]), float(elev[idx]) - float(alts[j]))
+                   for (j, idx, p) in freed_verts]
+        new_alts = list(alts)
+        for (j, _idx, p) in [(j, i, p) for (j, i, p) in verts
+                             if j < len(alts) and alts[j] is not None]:
+            if j in held:
+                continue
+            val = float(alts[j])
+            for (fp, tgt, dv) in sources:
+                dd = _m.hypot(p[0] - fp[0], p[1] - fp[1])
+                if dv > 0.0:
+                    val = max(val, tgt - GROUNDSIDE_MAX_GRADE * dd)
+                elif dv < 0.0:
+                    val = min(val, tgt + GROUNDSIDE_MAX_GRADE * dd)
+            new_alts[j] = val
+        # exact adoption at the freed vertices themselves
+        for (j, idx, _p) in freed_verts:
+            new_alts[j] = float(elev[idx])
+        # keep a closed ring closed (mirrors chord_limit's own handling)
+        coords = list(g.polygon.exterior.coords)
+        if (len(new_alts) == len(coords) and len(coords) > 1
+                and tuple(coords[0]) == tuple(coords[-1])
+                and new_alts[0] is not None):
+            new_alts[-1] = new_alts[0]
+        g.node_altitudes = new_alts
+        n_adopted += 1
+    return n_adopted
 
 
 def apron_body_nodes(layout, bucket_to_idx):

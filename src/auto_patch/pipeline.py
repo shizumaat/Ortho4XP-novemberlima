@@ -4284,7 +4284,26 @@ def build_airport_pavement(icao: str, xplane_root: str,
         if ENABLE_APRON_NECK_SPLIT:
             from .pavement.apron_necks import split_polygon_at_necks
             from .layout import ROLE_APRON as _R_APRON, BuiltShape as _BS
+            # Piece-role re-evaluation for RECLASSIFIED parents (user
+            # 2026-07-06): ``_reclassify_apron_junctions`` flips a whole
+            # junction to apron when ANY boundary corner strays past the
+            # 55 m cap — a 53 k m² spine corridor with one distant bulge
+            # (HECA 30.1143,31.4157) flips entirely, and the neck-split
+            # pieces inherited apron unconditionally, so strings of
+            # corridor cells along the spine emitted under the stand-apron
+            # law.  Re-test each piece of a FLIPPED parent with the same
+            # geometry rule (``_reeval_apron_piece_role``, promotion-only):
+            # pieces hugging a centerline return to ROLE_JUNCTION; open
+            # pavement beyond route reach stays apron.  Born-apron parents
+            # are NOT re-tested (a genuine stand apron beside a taxiway
+            # must keep the apron law).
+            from .junction_repair import (
+                _aeroway_centerlines_union,
+                _APRON_RECLASSIFY_MAX_DISTANCE_M as _RECLASS_CAP_M)
+            from .junction_spine import _reeval_apron_piece_role
+            _reeval_centerlines = None       # computed lazily, once
             _split_count = 0
+            _n_piece_promoted = 0
             _new_shapes: list = []
             for _s in layout.shapes:
                 if (_s.role != _R_APRON or _s.polygon is None
@@ -4298,13 +4317,122 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     continue
                 _split_count += 1
                 for _p in _pieces:
-                    _ns = _BS(polygon=_p, role=_R_APRON, ref=_s.ref)
+                    _piece_role = _R_APRON
+                    if getattr(_s, "reclassified_from_junction", False):
+                        if _reeval_centerlines is None:
+                            _reeval_centerlines = \
+                                _aeroway_centerlines_union(layout)
+                        _piece_role = _reeval_apron_piece_role(
+                            _p, _reeval_centerlines, _RECLASS_CAP_M)
+                        if _piece_role != _R_APRON:
+                            _n_piece_promoted += 1
+                    _ns = _BS(polygon=_p, role=_piece_role, ref=_s.ref)
                     _new_shapes.append(_ns)
             if _split_count:
                 layout.shapes = _new_shapes
+                _promo_note = (f"; {_n_piece_promoted} corridor piece(s) "
+                               f"re-evaluated back to junction"
+                               if _n_piece_promoted else "")
                 UI.vprint(1,
                     f"  [pav-builder] {icao}: neck-split "
-                    f"{_split_count} apron(s) at geometry-final.")
+                    f"{_split_count} apron(s) at geometry-final"
+                    f"{_promo_note}.")
+            # APRON ROUTE-PROXIMITY CUT (USER RULING 2026-07-06): "the
+            # portion of any shape more than 50 m from a centerline or
+            # runway COULD be apron, but anything less than 50 m from a
+            # centerline or runway is NOT apron."  Every ROLE_APRON shape
+            # is cut at the config.APRON_ROUTE_PROXIMITY_M contour around
+            # the taxi centerlines (service/truck routes excluded — a
+            # stand is legitimately served by a road) and the runway
+            # union: the near band becomes ROLE_JUNCTION (maneuvering
+            # surface, taxi law), the far part keeps the apron/stand law.
+            # "No apron ever touches a runway" follows as a corollary.
+            # An apron entirely inside the zone re-roles whole; entirely
+            # outside stays whole.  Mitre joins / flat caps keep the cut
+            # boundary arc-free (same reason as the groundside clip).
+            from .config import APRON_ROUTE_PROXIMITY_M
+            from .layout import ROLE_JUNCTION as _R_JCT_NEAR
+            _near_zone = None
+            try:
+                _zone_parts = []
+                _taxi_lines = []
+                for _cl_item in (getattr(layout, "apt_taxi_centerlines",
+                                         None) or []):
+                    if getattr(_cl_item, "is_service", False):
+                        continue
+                    _ln = (getattr(_cl_item, "chained_line", None)
+                           or getattr(_cl_item, "line", None))
+                    if _ln is not None and not _ln.is_empty:
+                        _taxi_lines.append(_ln)
+                if _taxi_lines:
+                    _zone_parts.append(unary_union(_taxi_lines).buffer(
+                        APRON_ROUTE_PROXIMITY_M, cap_style=2,
+                        join_style=2))
+                _rwy_union = getattr(layout, "runway_union", None)
+                if _rwy_union is not None and not _rwy_union.is_empty:
+                    _zone_parts.append(_rwy_union.buffer(
+                        APRON_ROUTE_PROXIMITY_M, join_style=2))
+                if _zone_parts:
+                    _near_zone = unary_union(_zone_parts)
+            except _GEOM_EXC:
+                _near_zone = None
+            _n_cut = _n_whole = 0
+            if _near_zone is not None and not _near_zone.is_empty:
+                _cut_shapes: list = []
+                for _s in layout.shapes:
+                    if (_s.role != _R_APRON or _s.polygon is None
+                            or _s.polygon.is_empty
+                            or _s.polygon.geom_type != "Polygon"):
+                        _cut_shapes.append(_s)
+                        continue
+                    try:
+                        _far = _s.polygon.difference(_near_zone)
+                    except _GEOM_EXC:
+                        _cut_shapes.append(_s)
+                        continue
+                    _far_polys = [g for g in getattr(
+                        _far, "geoms", [_far])
+                        if g.geom_type == "Polygon" and g.area > 1.0]
+                    if not _far_polys:
+                        # wholly inside the zone → maneuvering surface
+                        _s.role = _R_JCT_NEAR
+                        _cut_shapes.append(_s)
+                        _n_whole += 1
+                        continue
+                    if sum(g.area for g in _far_polys) \
+                            >= _s.polygon.area - 1.0:
+                        _cut_shapes.append(_s)      # wholly beyond → apron
+                        continue
+                    try:
+                        _near_part = _s.polygon.intersection(_near_zone)
+                    except _GEOM_EXC:
+                        _cut_shapes.append(_s)
+                        continue
+                    _near_polys = [g for g in getattr(
+                        _near_part, "geoms", [_near_part])
+                        if g.geom_type == "Polygon" and g.area > 1.0]
+                    for _g in _near_polys:
+                        _cut_shapes.append(_BS(polygon=_g,
+                                               role=_R_JCT_NEAR,
+                                               ref=_s.ref))
+                    for _g in _far_polys:
+                        _cut_shapes.append(_BS(polygon=_g, role=_R_APRON,
+                                               ref=_s.ref))
+                    _n_cut += 1
+                    if os.environ.get("O4_SLIVER_DEBUG") == "1":
+                        _c = _s.polygon.representative_point()
+                        print(f"    [apron-cut] area="
+                              f"{_s.polygon.area:.0f} at ({_c.x:.0f},"
+                              f"{_c.y:.0f}) -> {len(_near_polys)} "
+                              f"junction + {len(_far_polys)} apron "
+                              f"piece(s)")
+                layout.shapes = _cut_shapes
+            if _n_cut or _n_whole:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: apron route-proximity cut "
+                    f"— {_n_cut} apron(s) split at the "
+                    f"{APRON_ROUTE_PROXIMITY_M:.0f} m contour, "
+                    f"{_n_whole} re-roled whole (inside the zone).")
 
         # Reclassify-to-apron + neck-split (above) run AFTER the
         # mid-finalize overlap-clip, so they can leave aprons overlapping
@@ -4470,6 +4598,16 @@ def build_airport_pavement(icao: str, xplane_root: str,
             UI.vprint(1,
                 f"  [pav-builder] {icao}: conformed {_n_mouth} service-road "
                 f"mouth vertex(es) into groundside lot ring(s).")
+        # Parallel service roads within 2 m get matching projected
+        # vertices so the DEM-follow's proximity coupling can bind them
+        # (user 2026-07-06, HECA #578↔#64: offset nodes left a 0.9 m
+        # mid-edge wall across a 1 m gap).
+        from .groundside import conform_parallel_service_edges
+        _n_parallel = conform_parallel_service_edges(layout)
+        if _n_parallel:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: conformed {_n_parallel} "
+                f"parallel service-road vertex(es) across narrow gaps.")
 
         # (refactor Phase 5) The boundary ribbon + boundary→DEM bridge emit
         # and their airside vertex touches (_snap_bridge_vertices_to_runway_
@@ -5240,6 +5378,51 @@ def build_airport_pavement(icao: str, xplane_root: str,
         final_grade_projection(layout, icao, dem=_projection_dem,
                                tile_lat=_projection_tile_lat,
                                tile_lon=_projection_tile_lon)
+        # GROUNDSIDE RE-LIMIT after the projection (user 2026-07-06, CYXY
+        # #184): groundside lots are NOT in the projection's constraint
+        # roles, so enforcing a ROAD edge can nudge a welded mouth a few
+        # cm past the lot ring's 4 % Lipschitz field (measured: the
+        # limiter's lawful 699.80 pushed to 699.84 → a 4.64 % lot pair).
+        # The chord limiter is idempotent and its weld re-adoption keeps
+        # road and lot emitting one value — re-running it here re-levels
+        # the ring around the projected weld; the cm-scale road-side
+        # drift it re-introduces sits inside the validator's rounding
+        # envelope, unlike the lot-side tear it removes.
+        # RIBBON/BRIDGE RE-ADOPTION after the projection (user 2026-07-06,
+        # CYXY apron #29): the seam cascade ran before this projection —
+        # a pavement vertex the projection then moved leaves the ribbon/
+        # bridge holding the STALE adopted value, and the emit consensus
+        # drags the welded node back over the pavement law (693.00 lawful
+        # → 692.85 emitted, 1.25 % on a 1 % apron).  The cascade is
+        # altitude-only and idempotent — re-running it re-adopts the
+        # projected values.
+        try:
+            from .boundary import _conform_ribbon_to_pavement_seam
+            _conform_ribbon_to_pavement_seam(layout)
+        except _GEOM_EXC:
+            pass
+        try:
+            from .groundside import _grade_limit_groundside_chords
+            layout._weld_relimit_moved_xy = []
+            _grade_limit_groundside_chords(layout)
+            # Quarantine welds the re-adoption MOVED: the projection
+            # placed the road there, the lot law pulled it back — the
+            # residual tension has no lawful joint value (see the
+            # limiter's moved-weld note).  Their over-cap pairs report
+            # as break-region blends, not actionable misses.
+            _moved = getattr(layout, "_weld_relimit_moved_xy", None) or []
+            if _moved:
+                _existing_ll = list(
+                    getattr(layout, "_break_node_ll", None) or [])
+                _seen_ll = {(round(la, 7), round(lo, 7))
+                            for (la, lo) in _existing_ll}
+                for (_wx, _wy) in _moved:
+                    _la, _lo = layout.m_to_ll(_wx, _wy)
+                    if (round(_la, 7), round(_lo, 7)) not in _seen_ll:
+                        _existing_ll.append((_la, _lo))
+                layout._break_node_ll = _existing_ll
+        except _GEOM_EXC:
+            pass
 
         # Runway-end down-slope SKIRTS (Pass D, gate O4_RUNWAY_END_SKIRT):
         # the ABSOLUTE LAST emission — after decimation and the final
