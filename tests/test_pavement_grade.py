@@ -166,6 +166,11 @@ def test_pavement_grade(tmp_path, icao):
         break_nodes_ll = [[round(la, 7), round(lo, 7)]
                           for (la, lo) in
                           (getattr(layout, "_break_node_ll", None) or [])]
+        # SPINE CROWN drop field (part 30), exactly like the sidecar: the
+        # within-shape law re-centres each pair on the designed crown
+        # offset the solver built to (grade_law.crown_pair_offset).
+        crown_drops_ll = [[la, lo, c] for (la, lo, c) in
+                          (getattr(layout, "_crown_drop_ll", None) or [])]
 
         w, c, s = check_grade.run_checks(
             out,
@@ -181,6 +186,7 @@ def test_pavement_grade(tmp_path, icao):
             seam_pins_ll=seam_pins_ll,
             mesh_edges_ll=mesh_edges_ll,
             break_nodes_ll=break_nodes_ll,
+            crown_drops_ll=crown_drops_ll,
         )
         within += w
         cross += c

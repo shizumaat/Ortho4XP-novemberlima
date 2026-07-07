@@ -270,6 +270,28 @@ def runway_end_skirt_floor_profile(
     return [_depth(d) for d in distances_m]
 
 
+# ── Spine crown offset (user 2026-07-07, part 30) ────────────────────────────
+# Crowned pavement is a DESIGNED sub-cap offset: every node carries a crown
+# drop c ≥ 0 (``crown.build_crown_drop_field`` — the ONE field; runways get a
+# uniform per-piece drop stamped at profile evaluation), and a pair's grade
+# budget re-centres on the crown target:
+#
+#     |Δz − crown_pair_offset(c_a, c_b)| ≤ Allowance.at(Δs∥, Δs⊥)
+#
+# Both readers evaluate this with the SAME field: the SOLVER by running in
+# uncrowned space z′ = z + c (its writeback subtracts c — mathematically
+# identical to offset edges, and single-valued per canonical node so welds
+# can never tear), the VALIDATOR by reading the field from the axes sidecar
+# (``crown_drops``) / ``layout._crown_drop_key`` and re-centring here.  Since
+# every crown rate ≤ every transverse cap (1 % ≤ 1.5 %, service 1.5 % ≤ 2 %),
+# the re-centred band always still contains the FLAT surface — the offset can
+# only restore budget the crown consumed, never flag an uncrowned patch.
+def crown_pair_offset(drop_a: float, drop_b: float) -> float:
+    """THE crown target of ``z_a − z_b`` for a pair whose endpoints carry
+    crown drops ``drop_a`` / ``drop_b`` (0 when unknown/uncrowned)."""
+    return (drop_b or 0.0) - (drop_a or 0.0)
+
+
 # Pairs closer than this are ring/relative noise — not a grade constraint.
 MIN_PAIR_DIST_M = 0.5
 

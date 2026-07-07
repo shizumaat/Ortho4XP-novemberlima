@@ -926,7 +926,78 @@ def solve_route_profile(layout, icao: str,
                     key for key, i in bucket_to_idx.items()
                     if elev[i] != _pre_fairing_elev[i]}
         _psub(0.97, "Solving elevations — writing back")
-        n_terms, n_rects, n_juncs = _writeback(layout, elev, bucket_to_idx)
+        # ── SPINE CROWN v2 (user 2026-07-07, part 30) ────────────────────
+        # The whole solve above ran in UNCROWNED space z′.  The crown is a
+        # designed sub-cap offset field c (crown.build_crown_drop_field):
+        # writeback emits z = z′ − c.  Because c is single-valued per
+        # canonical node, welds stay consistent; because the law reads the
+        # pair offset o_ab = c_b − c_a (grade_law.crown_pair_offset), the
+        # emitted surface satisfies |Δz − o| ≤ budget exactly where the
+        # solve satisfied |Δz′| ≤ budget — solver and validator share ONE
+        # field (exported via the axes sidecar).  Terrain/value contracts
+        # (seam pins, building seats, groundside mouth welds, seam spine
+        # anchors) are frozen at c = 0.  RUNWAY ring nodes crown through
+        # this same transform (uniform per-ref drop) — every in-solve
+        # reader (flex, join anchors, crossings, seam pins) sees the one
+        # uncrowned profile space, and the emitted edges sit at
+        # profile − drop while the spine breakline carries the profile.
+        from auto_patch.config import ENABLE_SPINE_CROWN as _CROWN_ON
+        from shapely.errors import (GEOSException as _CrGE,
+                                    TopologicalError as _CrTE)
+        _GEOM_EXC = (ValueError, _CrGE, _CrTE)
+        _crown_drop_idx: dict = {}
+        if _CROWN_ON:
+            try:
+                from auto_patch.crown import (build_crown_drop_field,
+                                              emit_crown_spines)
+                # Frozen VALUE CONTRACTS: seam pins (cross-tile terrain),
+                # building seats, groundside mouth welds, seam spine
+                # anchors.  Runway nodes are NOT frozen — they crown
+                # through the field at their uniform per-ref drop.
+                _crown_freeze = (
+                    {i for i in building_seats if i < n}
+                    | {i for i in _gs_hard if i < n}
+                    | {i for i in _seam_pin_idx if i < n}
+                    | {i for i, _cat in _hard_cat.items()
+                       if _cat in ("seam_spine_anchor", "seat_on_spine",
+                                   "gs_pin")})
+                _crown_drop_idx = build_crown_drop_field(
+                    layout, nodes, bucket_to_idx, _crown_freeze)
+                # solve-time node registry: post-solve ring inserts are
+                # recognised (and field-interpolated) against this set.
+                layout._crown_solved_keys = set(bucket_to_idx)
+            except _GEOM_EXC as _crown_exc:
+                import O4_UI_Utils as _UIc
+                _UIc.vprint(1, f"  [pav-builder] WARN: {icao}: crown "
+                               f"field failed ({_crown_exc!r}) — flat "
+                               f"sections emitted.")
+                _crown_drop_idx = {}
+        if _crown_drop_idx:
+            _elev_emit = list(elev)
+            for _i, _c in _crown_drop_idx.items():
+                if _i < n:
+                    _elev_emit[_i] = _elev_emit[_i] - _c
+        else:
+            _elev_emit = elev
+        n_terms, n_rects, n_juncs = _writeback(layout, _elev_emit,
+                                               bucket_to_idx)
+        # Spine breaklines from the SOLVED route profiles (z′ ON the spine
+        # equals z — spine nodes never crown) + the crowned runway pieces.
+        if _CROWN_ON:
+            try:
+                _n_spine_ways = emit_crown_spines(
+                    layout, nodes, bucket_to_idx, elev, _crown_drop_idx)
+                if _n_spine_ways or _crown_drop_idx:
+                    import O4_UI_Utils as _UIs
+                    _UIs.vprint(1, f"  [pav-builder] {icao}: spine crown — "
+                                   f"{len(_crown_drop_idx)} node(s) crowned, "
+                                   f"{_n_spine_ways} spine breakline(s) "
+                                   f"staged.")
+            except _GEOM_EXC as _spine_exc:
+                import O4_UI_Utils as _UIs2
+                _UIs2.vprint(1, f"  [pav-builder] WARN: {icao}: spine "
+                                f"breakline emission failed "
+                                f"({_spine_exc!r}).")
         # SCOPED FINAL PROJECTION snapshot (user 2026-07-05): capture the
         # post-writeback state (per-canonical-node values as the projection
         # will re-read them + per-shape ring identities) so
@@ -1462,6 +1533,29 @@ def final_grade_projection(layout, icao: str = "", dem=None,
             pre_broken = set()
             scoped = False        # geometry hiccup → sound full rebuild
     _stage("scope")
+    # ── SPINE CROWN v2 transform (part 30): this projection enforces the
+    # law, and the law lives in UNCROWNED space z′ = z + c (the emitted
+    # crown is a designed sub-cap offset — see the solve's writeback).
+    # Post-solve ring inserts (planarize / T-welds) carry VALUES linearly
+    # interpolated along their ring edge, so they join the field at the
+    # SAME interpolation of the flanking solve-time drops first
+    # (crown.extend_field_to_new_ring_nodes) — value and field stay
+    # consistent, and the sidecar export the validator reads is complete.
+    # Then: add c, project, subtract before writeback.
+    _crown_by_key = getattr(layout, "_crown_drop_key", None) or {}
+    _crown_of: dict = {}
+    if _crown_by_key:
+        try:
+            from auto_patch.crown import extend_field_to_new_ring_nodes
+            extend_field_to_new_ring_nodes(layout, b2i)
+        except _snapshot_geom_exceptions():
+            pass
+        _crown_by_key = getattr(layout, "_crown_drop_key", None) or {}
+        for _key, _i in b2i.items():
+            _v = _crown_by_key.get(_key)
+            if _v:
+                _crown_of[_i] = _v
+                elev[_i] = elev[_i] + _v
     if scoped:
         shape_constraints = _build_shape_constraints(
             layout, b2i, ctx=ctx, defer_shape_ids=defer_ids)
@@ -1579,8 +1673,11 @@ def final_grade_projection(layout, icao: str = "", dem=None,
                 if _best is None:
                     continue
                 feature_value = _best[1]
+            # crown transform: elev is in z′ space here — lift the
+            # feature's z value by the node's crown drop before comparing.
             if (feature_value is None
-                    or abs(feature_value - elev[i]) <= _WELD_AGREE_TOL_M):
+                    or abs(feature_value + _crown_of.get(i, 0.0) - elev[i])
+                    <= _WELD_AGREE_TOL_M):
                 hard.add(i)
                 terrain_hard.add(i)
             else:
@@ -1826,6 +1923,10 @@ def final_grade_projection(layout, icao: str = "", dem=None,
                          TAXIWAY_MAX_GRADE_CHANGE_PER_M,
                          law_adjacency=_law_adjacency)
     _stage("fairing")
+    # crown transform back: z = z′ − c (see the entry transform above).
+    if _crown_of:
+        for _i, _v in _crown_of.items():
+            elev[_i] = elev[_i] - _v
     _writeback(layout, elev, b2i)
     _stage("writeback")
     try:

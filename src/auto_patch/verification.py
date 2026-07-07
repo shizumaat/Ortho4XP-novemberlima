@@ -1463,7 +1463,10 @@ def run_grade_checks(layout):
         return check_grade.run_checks(
             out, max_grade_pct=1.5, proximity_m=1.0, edge_search_m=5.0,
             edge_step_m=0.5, top_n=5, taxi_axes_ll=taxi_axes_ll(layout),
-            routes_ll=taxi_routes_ll(layout), quiet=True)
+            routes_ll=taxi_routes_ll(layout), quiet=True,
+            crown_drops_ll=[[la, lo, c] for (la, lo, c) in
+                            (getattr(layout, "_crown_drop_ll", None)
+                             or [])])
 
 
 

@@ -1195,6 +1195,14 @@ class PavementLayout:
                 # validator so emit-time ring repairs cannot mint a
                 # different Delaunay than the one the solver graded to.
                 "mesh_edges": junction_mesh_edges_ll(self),
+                # SPINE CROWN drop field (user 2026-07-07, part 30): the
+                # per-node designed crown drops the solve's writeback
+                # applied.  The validator re-centres each pair's budget
+                # on grade_law.crown_pair_offset from THIS field — one
+                # field, both readers.
+                "crown_drops": [[la, lo, c] for (la, lo, c) in
+                                (getattr(self, "_crown_drop_ll", None)
+                                 or [])],
             }
             Path(str(path) + ".axes.json").write_text(_json.dumps(data))
         except Exception:

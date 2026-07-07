@@ -601,11 +601,18 @@ def redistribute_runway_profile(
                               + (vy - ax_a_y) * unit_x)
                 if lateral > half_width:
                     half_width = lateral
+        # RUNWAY CROWN (user 2026-07-07 / part 30): the designed edge
+        # drop for this runway — the crown drop FIELD assigns it to every
+        # ring node (uniform per ref) and the solve's writeback applies
+        # it; the profile itself stays the centerline (spine) authority.
+        from .crown import runway_crown_drop_m
+        crown_drop = runway_crown_drop_m(half_width)
         profiles[ref] = {
             'axis_a': (ax_a_x, ax_a_y),
             'axis_d': (ax_dx, ax_dy),
             'axis_len2': ax_len2,
             'half_width_m': half_width,
+            'crown_drop_m': crown_drop,
             'fractions': list(fractions),
             'elevs': list(elevs),
             # anchor provenance for the RUNWAY FLEX pass
@@ -630,7 +637,14 @@ def _apply_profile_to_shapes(shapes, ax_a_x, ax_a_y, ax_dx, ax_dy,
                              ax_len2, fractions, elevs) -> int:
     """Evaluate ``(fractions, elevs)`` at every runway sub-rect vertex
     (projected onto the axis) and write the altitudes back — shared by
-    the seam redistribute and the RUNWAY FLEX pass."""
+    the seam redistribute and the RUNWAY FLEX pass.
+
+    NOTE (SPINE CROWN v2, part 30): shapes carry the PROFILE values —
+    the crown drop is NOT baked here.  Runway ring nodes join the crown
+    drop field (``crown.build_crown_drop_field``, uniform
+    ``profiles[ref]['crown_drop_m']`` per ref) and the SOLVE's writeback
+    subtracts it, so every in-solve reader (flex, join anchors, crossing
+    reconciliation, seam pins) keeps working in one profile space."""
     n_touched = 0
     for s in shapes:
         ring = list(s.polygon.exterior.coords)
@@ -764,7 +778,8 @@ def apply_runway_flex(layout, demands: Dict[str, list]) -> Dict[str, list]:
             if not alts or len(alts) < len(ring_open):
                 continue
             for k, (x, y) in enumerate(ring_open):
-                t = ((x - ax_a_x) * ax_dx + (y - ax_a_y) * ax_dy)                     / profile['axis_len2']
+                t = ((x - ax_a_x) * ax_dx + (y - ax_a_y) * ax_dy) \
+                    / profile['axis_len2']
                 if not (0.0 < t < 1.0):
                     continue
                 value = float(alts[k])

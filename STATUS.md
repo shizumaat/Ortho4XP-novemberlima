@@ -1,3 +1,90 @@
+# STATUS — SESSION 20260707 (part 30): SPINE CROWN v2 — law-native,
+# built at construction (replaces the part-29b post-solve module)
+
+## LANDED (part 30) — crown v2, the agreed architecture
+The v1 post-solve edge-drop module is GONE (crown.py rewritten; the
+pipeline "SPINE CROWN" block removed).  The crown is now built INSIDE
+the construction, one mechanism for runways + taxiways + service roads:
+
+1. **CROWN DROP FIELD** (``crown.build_crown_drop_field``, the single
+   source both readers consume): per-CANONICAL-NODE designed drop c ≥ 0.
+   * runway / runway_crossing rings: UNIFORM per-ref drop
+     ``profiles[ref]['crown_drop_m'] = RUNWAY_CROWN_TRANSVERSE ×
+     min(half_width, 30 m)`` (persisted by redistribute; crossings take
+     the min over member refs; shared keys min over refs — uniformity
+     keeps the reconstructed longitudinal profile untouched), axially
+     TAPERED at 1 % toward tile-seam vertices;
+   * taxi/service corridor nodes: ``rate × min(lateral-to-nearest-
+     same-family-centerline, half_width cap 12 m taxi / 4 m service)``,
+     0 on the spine itself (≤ 1 m tol), MIN over owning families;
+   * RUNWAY SHADOW: an eligible node ≤ 2.5 m from a crowned runway is
+     value-tied to its edge (vertex-push standoff, edge-plane stamps,
+     join anchors) → carries the RUNWAY's drop;
+   * frozen at c = 0: any non-crown owner (apron/terminal/building/
+     boundary/groundside/adopts_apron_grade), tile-seam buckets, seam
+     pins, building seats, groundside mouth welds, seam spine anchors;
+     4-corner rect rings equalize (min) so planes stay planes.
+2. **SOLVER**: the whole route-profile solve runs in UNCROWNED space
+   z' = z + c — byte-identical to the pre-crown solve — and the
+   WRITEBACK emits z = z' − c (solve.py; same transform wrapped around
+   ``final_grade_projection``: add c after seeding, subtract before its
+   writeback).  c is single-valued per canonical node ⇒ welds can never
+   tear; no freeze sets, no vetoes, no revoke valve.  Post-solve ring
+   inserts (planarize / T-welds) join the field VALUE-DERIVED
+   (``crown.extend_field_to_new_ring_nodes``: z'-lerp of solve-time
+   flanks minus the insert's value; a geometric nearest-node adoption
+   read a phantom 4.2 % pair at CYXY).
+3. **LAW** (``grade_law.crown_pair_offset`` + the field): every
+   within-shape pair re-centres its budget on the crown target —
+   ``|Δz − (c_b − c_a)| ≤ Allowance.at(...)`` — evaluated by
+   check_grade (sidecar ``crown_drops`` → per-nid map, offset on
+   ShapePairConstraint) and grade_graph_validate.within_violations /
+   route_band_violations (de-crowned band compare).  Since every crown
+   rate ≤ every transverse cap, the re-centred band still contains the
+   FLAT surface — the offset can only restore budget, never flag an
+   uncrowned patch.  The solver realises the same offsets via the z'
+   transform, so the two readers share ONE field and cannot drift.
+4. **RUNWAYS HAVE A SPINE**: ``crown.emit_crown_spines`` (called at the
+   end of the solve) repopulates ``layout.crown_spines`` from the
+   SOLVED route profiles (on-line graph-node elevations interpolated by
+   arc, every ~12 m, ≥1 m inside the crowned pavement, ≥0.9 m off any
+   ring) and from the persisted (post-flex) runway profiles clipped per
+   piece.  to_osm's OPEN-way ``o4_feature=crown_spine`` emission and
+   the check_grade skip are unchanged (KEEP list).
+5. Fixed in passing: check_grade's sidecar point→nid grid matching used
+   a per-point cos(lat) cell size — at lon −135 the integer cell index
+   shifted by whole cells and silently missed matches (seam-pin class
+   was too sparse to notice; the crown field exposed it).
+
+## VERIFIED (gates)
+* O4_SPINE_CROWN=0: SPLP and CYXY patches BYTE-IDENTICAL to HEAD
+  gate-off builds.
+* Crown ON (tools/full_airport_build.py → check_grade, law-true):
+  - SPLP: within 16 == baseline 16 (identical pairs, values uniformly
+    lower by the drop); cross/steps/plane 0; runway 02/20 crowned
+    ~0.23 m (seam pieces taper to the pins).
+  - CYXY: within 1 == baseline 1 (the known apron-#29 1.25 %); v1
+    shipped 2.  cross/steps/plane 0.  Probe: ridge-above-edge
+    14R/32L ≈ 0.21–0.24 m (1 % × 23 m), 14L/32R ≈ 0.14, 02/20 ≈ 0.09;
+    32 crown_spine ways.
+  - HECA: within 0 == baseline 0 (v1 shipped 2 marginal); plane/cross
+    0; vertex-to-edge 3 + mid-edge 14 steps IDENTICAL to gate-off
+    baseline (pre-existing service-road pair -10611/-10065); break
+    pairs 5895 vs 5824 baseline (quarantined-by-design class).
+  - fast_suite: EXACTLY the 8 pre-existing failures, zero new;
+    test_cyxy_spine_zero + test_cyxy_spine_zero_no_bowl PASS.
+  - full suite: the 13 pre-existing failures exactly (see commit).
+
+## OPEN (part 30 follow-ups)
+* Crossings emit no ridge (runway breaklines gap across the resolved
+  crossing junction; its surface carries the min member drop) — a
+  crossing-aware ridge weave is cosmetic follow-up.
+* grade_feasibility_audit.py consumes ShapePairConstraint but ignores
+  the new ``offset`` field (reads conservative-strict on crowned
+  pavement); teach it |Δz − offset| if its counts start mattering.
+* The in-sim eval should look at: corridor crown visibility, the
+  runway ridge at thresholds, seam-taper creases at SPLP.
+
 # STATUS — SESSION 20260707 (part 29): KCLT terminal-ramp groundside
 # root cause — the airside/groundside EDGE CLASSIFIER was blind (pick up
 # here)

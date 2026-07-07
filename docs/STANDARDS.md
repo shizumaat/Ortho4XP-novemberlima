@@ -97,13 +97,17 @@ and re-export them under their existing local names — there is no second copy:
 
 To change a rule value, edit the constant in `config.py` only.
 
-## Transverse (lateral / crown) grades — RESEARCHED 2026-07-07, pending implementation
+## Transverse (lateral / crown) grades — RESEARCHED 2026-07-07, IMPLEMENTED (part 30)
 
 User ruling 2026-07-07: everything with a spine (runway, taxiway, service road) crowns
 for drainage — spine slightly higher than the edges, per-role values. Verified from the
 primary documents (FAA AC 150/5300-13B Chg 1; EASA CS-ADR-DSN Issue 7 — identical in
-Issue 4; ICAO Annex 14 Vol I 7th ed.; AASHTO Green Book). No `config.py` constants exist
-yet — this table is the source for them (planned names in the last column).
+Issue 4; ICAO Annex 14 Vol I 7th ed.; AASHTO Green Book).  Implemented constants
+(`config.py`): crown RATES `RUNWAY_CROWN_TRANSVERSE` / `TAXI_CROWN_TRANSVERSE` (1%,
+gentlest-legal) and `SERVICE_ROAD_CROWN_TRANSVERSE` (1.5%); transverse LAW caps
+`TAXI_MAX_TRANSVERSE_NARROW` (2%) and `SERVICE_ROAD_MAX_TRANSVERSE` (2%); gate
+`ENABLE_SPINE_CROWN`.  Mechanism: `src/auto_patch/crown.py` (crown drop field + law
+offsets, solver+validator lockstep) — the planned-constant names below are historical.
 
 | Feature | Min | Max | Crowned? | Standard | Planned constant |
 |------|-----|-----|----------|----------|------------------|

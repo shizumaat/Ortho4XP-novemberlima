@@ -1,40 +1,46 @@
-"""Spine crown — lateral drainage curvature for spine-carrying pavement.
+"""Spine crown v2 — lateral drainage built INTO the solve (part 30).
 
-USER RULING 2026-07-07: everything with a spine (runways, taxiways,
-service roads) crowns for drainage — the spine stays at the solved
-surface level and the EDGES drop relative to it, each role at its own
-transverse rate (docs/STANDARDS.md "Transverse grades", researched from
-FAA AC 150/5300-13B / EASA CS-ADR-DSN / ICAO Annex 14 / AASHTO).
+USER RULING 2026-07-07: everything with a spine — runways, taxiways,
+service roads — crowns for drainage: the spine stays at the solved /
+FAA-profile level and the EDGES sit LOWER by ``rate × lateral distance``
+(capped at the corridor half-width).  Rates: ``config.py``
+(RUNWAY/TAXI/SERVICE_ROAD_CROWN_TRANSVERSE, cited in docs/STANDARDS.md
+"Transverse grades").
 
-Mechanism (two halves, both here):
+v1 (part 29b) applied the crown POST-solve as an edge-drop pass and
+needed freeze sets, zero-drop vetoes, all-pairs smoothing and a revoke
+valve to fight the already-projected surface — and still had to exclude
+runways (crowned corners broke the runway_join spine check).  v2 puts
+the crown INSIDE the construction:
 
-1. EDGE DROP.  For every crown-eligible shape (a shape that carries a
-   usable axis — corridor junctions / taxi rects / service roads with
-   ``source_axis``, runways via their persisted redistributed profile
-   axis), each ring vertex drops by ``rate × min(lateral, half_width)``,
-   tapered near the axis ends.  Pre-crown the solver leaves the whole
-   cross-section at the spine level (ring nodes follow the route
-   profile), so the drop turns the flat section into a crowned one.
+* RUNWAYS: ``runway_redistribute._apply_profile_to_shapes`` stamps every
+  ring vertex at ``profile(station) − RUNWAY_CROWN_TRANSVERSE ×
+  half_width`` (the ring is the pavement EDGE; the persisted profile
+  stays the centerline authority).  Every downstream reader — solver
+  hard seeds, runway_join anchors, the flex hook, skirts — samples the
+  same crowned shape values, so nothing disagrees by construction.
+  Seam-bucket vertices are exempt (tile-seam pins are cross-tile terrain
+  contracts).
 
-2. SPINE BREAKLINE.  The spine polyline is emitted as an OPEN way with
-   per-node ``alt_abs`` at the PRE-crown surface level —
-   ``O4_Vector_Map.include_patches`` inserts open patch ways as
-   constrained DUMMY edges, so the triangulation renders the ridge with
-   no polygon splitting (same mechanism as the legacy
-   ``altitude_high/low`` cross-cuts).
+* TAXI / SERVICE corridors: a per-node CROWN DROP FIELD ``c`` (this
+  module) — ``c = rate × min(lateral, half_width)`` against the nearest
+  same-family centerline, 0 for any node owned by a non-crowned shape,
+  a seam pin, or a solver anchor.  The route-profile solve runs in
+  UNCROWNED space ``z' = z + c`` (byte-identical to today's solve), and
+  the writeback emits ``z = z' − c``: because the field is single-valued
+  per canonical node, every weld stays consistent, and because the LAW
+  reads the pair offset ``o_ab = c_b − c_a`` (``grade_law.
+  crown_pair_offset``), the emitted surface satisfies
+  ``|Δz − o_ab| ≤ budget`` exactly wherever the uncrowned solve
+  satisfied ``|Δz'| ≤ budget`` — the solver and the validator share the
+  one field (exported per node via the axes sidecar ``crown_drops``).
 
-Safety rules (why the crown is a LATE, weld-aware pass):
-
-* a vertex whose canonical point is ALSO owned by a non-crowned shape
-  (apron, terminal, building, boundary, groundside, clearance…) never
-  moves — the crown tapers to zero at flush welds, so no tear is minted
-  (buildings hold the 1 % frontage law; aprons meet taxiways flush);
-* a TILE-SEAM vertex (within ``tile_cut._SEAM_LINE_TOL_M`` of an
-  integer lat/lon line) never moves — seam pins are cross-tile
-  contracts (see the part-29 SPLP scarp);
-* a canonical point shared by SEVERAL crowned shapes takes the MINIMUM
-  proposed drop, written into every owner, so the emit-time consensus
-  cannot split the node into a vertical tear.
+* EMISSION: the spine ridge is an OPEN way with per-node ``alt_abs``
+  (``layout.crown_spines`` → ``to_osm`` → ``include_patches`` inserts it
+  as constrained DUMMY breakline edges).  Taxi/service spines sample the
+  SOLVED route profiles; runway spines sample the crowned pieces + their
+  stamped drop (= the profile), so the breakline always agrees with the
+  emitted pavement.
 
 Gate: ``config.ENABLE_SPINE_CROWN`` (env ``O4_SPINE_CROWN``, default on).
 """
@@ -47,9 +53,9 @@ from shapely.errors import GEOSException, TopologicalError
 from shapely.geometry import LineString, Point
 
 from .config import (
+    ENABLE_SPINE_CROWN,
     RUNWAY_CROWN_TRANSVERSE,
     SERVICE_ROAD_CROWN_TRANSVERSE,
-    SERVICE_ROAD_MAX_TRANSVERSE,
     TAXI_CROWN_TRANSVERSE,
 )
 from .layout import (
@@ -57,583 +63,692 @@ from .layout import (
     ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL,
     ROLE_RUNWAY,
+    ROLE_RUNWAY_CROSSING,
     ROLE_SECONDARY_PARALLEL,
+    ROLE_SERVICE_JUNCTION,
     ROLE_SERVICE_ROAD,
     ROLE_STUB,
+    vertex_bucket,
 )
 
 _GEOM_EXC = (ValueError, GEOSException, TopologicalError)
 
-# role → crown rate.  Junction shapes are eligible ONLY when they carry a
-# ``source_axis`` (curve-native corridor faces); axis-less junction faces
-# (convergence areas) have no meaningful cross-section and stay flat.
-#
-# RUNWAYS EXCLUDED for now (part 29): dropping runway edge corners
-# breaks the FAA-profile readers that treat edge values as profile
-# authority — the runway_join spine check read a 23 % step at CYXY
-# where a crowned corner met its join anchor.  The runway crown needs
-# those readers (runway_join anchors, flex audit, skirt base reads,
-# seam pins) taught about the crown offset first — queued; the
-# profile-axis machinery below already supports it.
-_CROWN_RATES = {
-    ROLE_PRIMARY_PARALLEL: TAXI_CROWN_TRANSVERSE,
-    ROLE_SECONDARY_PARALLEL: TAXI_CROWN_TRANSVERSE,
-    ROLE_STUB: TAXI_CROWN_TRANSVERSE,
-    ROLE_CROSS_CONNECTOR: TAXI_CROWN_TRANSVERSE,
-    ROLE_JUNCTION: TAXI_CROWN_TRANSVERSE,
-    ROLE_SERVICE_ROAD: SERVICE_ROAD_CROWN_TRANSVERSE,
-}
-_ = RUNWAY_CROWN_TRANSVERSE      # part-2 wiring keeps the constant live
+# Crown-family roles and their governing centerline family.  Junction faces
+# ARE the corridor cross-sections under the curve-native global slice, so
+# they crown against the taxi (non-service) centerlines; the service network
+# crowns against the row-1206 service lines.
+_TAXI_FAMILY = frozenset({
+    ROLE_JUNCTION, ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
+    ROLE_STUB, ROLE_CROSS_CONNECTOR,
+})
+_SERVICE_FAMILY = frozenset({ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION})
 
-_SPINE_SAMPLE_STEP_M = 12.0     # breakline node spacing along the spine
-_SPINE_EDGE_CLEAR_M = 1.0       # keep spine nodes off the ring (no merge)
-_END_TAPER_M = 10.0             # crown ramps in over this from axis ends
-_MIN_AXIS_LEN_M = 8.0           # shorter axes: no meaningful crown
-# Half-width caps per role: the 75th-percentile lateral estimate blows
-# up on big junction faces crossed by a fallback centerline (CYXY: 60 m
-# laterals → 60 cm drops → 6 % mesh-edge pairs).  A crown is a
-# cross-SECTION feature; cap it at a plausible half-width.
-_HALFW_CAP_M = {
-    ROLE_SERVICE_ROAD: 4.0,     # ~8 m road
-    ROLE_RUNWAY: 30.0,          # profile half_width_m usually governs
-}
-_HALFW_CAP_DEFAULT_M = 12.0     # taxiway family (code E ~23 m wide)
+# Half-width caps: the crown is a cross-SECTION feature.  Taxi corridors cap
+# at a code-E half-width; service roads at ~an 8 m road; runways at the
+# profile half-width capped below (shoulder-widened runways like HECA's 86 m
+# 05C would otherwise crown 40+ cm).
+_TAXI_HALFW_CAP_M = 12.0
+_SERVICE_HALFW_CAP_M = 4.0
+_RUNWAY_HALFW_CAP_M = 30.0
 
+# On-spine tolerance: a node within this of its governing centerline IS a
+# spine node (grade_graph.SPINE_PERP_TOL_M) — it carries the solved profile
+# and must never crown (crowning it would shift the profile itself).
+_ON_SPINE_TOL_M = 1.0        # == grade_graph.SPINE_PERP_TOL_M
 
-def _seam_tol_deg(layout) -> Tuple[float, float]:
-    """(dlat, dlon) degree tolerances matching tile_cut._SEAM_LINE_TOL_M."""
-    from .tile_cut import _SEAM_LINE_TOL_M
-    lat0, _ = layout.anchor
-    dlat = _SEAM_LINE_TOL_M / 111320.0
-    cos0 = max(1e-6, math.cos(math.radians(lat0)))
-    dlon = _SEAM_LINE_TOL_M / (111320.0 * cos0)
-    return dlat, dlon
+# Runway SHADOW adoption: a taxi/service node this close to a crowned
+# runway's pavement is VALUE-TIED to the runway edge (the vertex-push pass
+# keeps a designed 1.0 m standoff, drift measured to ~1.8 m; the solver
+# stamps shadow vertices at the edge-plane altitude and anchors join nodes
+# at the edge sample) — it must carry the RUNWAY's drop or the emitted
+# surface steps where the runway crowns and the shadow does not.
+_RWY_SHADOW_M = 2.5
+
+_SPINE_SAMPLE_STEP_M = 12.0  # breakline node spacing along the spine
+_SPINE_EDGE_CLEAR_M = 1.0    # keep spine samples ≥ this inside the pavement
+_SPINE_RING_CLEAR_M = 0.9    # and ≥ this from any pavement ring line
+_MIN_AXIS_LEN_M = 8.0        # shorter spines: no meaningful crown ridge
 
 
-def _is_seam_vertex(layout, x: float, y: float,
-                    tol_deg: Tuple[float, float]) -> bool:
-    lat, lon = layout.m_to_ll(x, y)
-    return (abs(lat - round(lat)) <= tol_deg[0]
-            or abs(lon - round(lon)) <= tol_deg[1])
+def runway_crown_drop_m(half_width_m: float) -> float:
+    """THE runway edge drop: ``RUNWAY_CROWN_TRANSVERSE × half_width``,
+    half-width capped (a shoulder-widened runway crowns its runway
+    cross-section, not the shoulder span).  Rounded to the emit grid so
+    the stamped values and the exported drop agree exactly."""
+    if not ENABLE_SPINE_CROWN or not half_width_m or half_width_m <= 0.0:
+        return 0.0
+    return round(RUNWAY_CROWN_TRANSVERSE
+                 * min(float(half_width_m), _RUNWAY_HALFW_CAP_M), 2)
 
 
-def _shape_axis(layout, s) -> Optional[LineString]:
-    """The spine axis for shape ``s``, or None when it has no usable one.
+# ── the per-node crown drop field (taxi / service corridors) ────────────────
 
-    ``source_axis`` when the shape still carries one; runways fall back
-    to their persisted redistributed-profile axis; everything else falls
-    back to the longest matching apt.dat centerline crossing the shape —
-    the clip / decompose / tile-cut passes recreate ``BuiltShape``s
-    without ``source_axis``, so most corridor faces reach emission
-    bare (SPLP: only 9 of ~35 spine shapes kept an axis).
-    """
-    ax = getattr(s, "source_axis", None)
-    if ax is not None and not ax.is_empty and ax.length >= _MIN_AXIS_LEN_M:
-        return ax
-    if s.role == ROLE_RUNWAY:
-        profiles = getattr(layout, "_runway_redistributed_profiles", None)
-        p = (profiles or {}).get(s.ref)
-        if p:
-            ax_a = p["axis_a"]
-            dx, dy = p["axis_d"]
-            full = LineString([ax_a, (ax_a[0] + dx, ax_a[1] + dy)])
-            if full.length >= _MIN_AXIS_LEN_M:
-                return full
-        return None
-    want_service = (s.role == ROLE_SERVICE_ROAD)
-    best = None
-    best_len = _MIN_AXIS_LEN_M
+def _family_lines(layout, service: bool):
+    """All centerline geometries of one family, as shapely LineStrings +
+    an STRtree (or (None, []) when the family has none)."""
+    from shapely.strtree import STRtree
+    geoms = []
     for cl in (getattr(layout, "apt_taxi_centerlines", None) or []):
-        if bool(getattr(cl, "is_service", False)) != want_service:
+        if bool(getattr(cl, "is_service", False)) != service:
             continue
-        ln = (getattr(cl, "chained_line", None)
-              or getattr(cl, "line", None))
-        if ln is None or ln.is_empty:
+        ln = getattr(cl, "line", None)
+        if ln is None or ln.is_empty or ln.length < 1e-6:
             continue
-        try:
-            inter = ln.intersection(s.polygon)
-        except _GEOM_EXC:
-            continue
-        if inter.is_empty:
-            continue
-        parts = ([inter] if inter.geom_type == "LineString"
-                 else [g for g in getattr(inter, "geoms", ())
-                       if g.geom_type == "LineString"])
-        for g in parts:
-            if g.length > best_len:
-                best = g
-                best_len = g.length
-    return best
+        geoms.append(ln)
+    if not geoms:
+        return None, []
+    try:
+        return STRtree(geoms), geoms
+    except _GEOM_EXC:                                   # pragma: no cover
+        return None, []
 
 
-def _ring_alts(s, n_open: int) -> Optional[List[float]]:
-    """Open-ring altitude list for ``s`` (expanding a flat ``altitude``)."""
-    if s.node_altitudes is not None:
-        alts = list(s.node_altitudes)
-        if len(alts) >= n_open:
-            return alts[:n_open]
+def _nearest_line_dist(tree, geoms, x: float, y: float,
+                       search_m: float) -> Optional[float]:
+    """Distance to the nearest family line, or None when none is within
+    ``search_m`` (cheap bbox query first; exact distance on candidates)."""
+    if tree is None:
         return None
-    if s.altitude is not None:
-        return [float(s.altitude)] * n_open
-    return None
+    from shapely.geometry import Point as _Pt
+    p = _Pt(x, y)
+    try:
+        k = tree.nearest(p)
+    except _GEOM_EXC:                                   # pragma: no cover
+        return None
+    if k is None:
+        return None
+    try:
+        d = geoms[int(k)].distance(p)
+    except _GEOM_EXC:                                   # pragma: no cover
+        return None
+    return d if d <= search_m else None
 
 
-def apply_spine_crown(layout, icao: str = "") -> Tuple[int, int]:
-    """Drop crown-eligible shapes' edges below their spine and stash the
-    spine breaklines on ``layout.crown_spines`` for ``to_osm``.
+def build_crown_drop_field(layout, nodes, bucket_to_idx,
+                           freeze_idx) -> Dict[int, float]:
+    """Compute the per-node crown drop ``c`` (metres, > 0).  Returns
+    ``{node_idx: drop}`` (the writeback transform set) and persists:
 
-    Returns ``(n_shapes_crowned, n_spine_ways)``.
-    """
+    * ``layout._crown_drop_key``  — canonical (x, y) key → drop (consumed by
+      ``final_grade_projection``'s transform and the in-memory validators);
+    * ``layout._crown_drop_ll``   — ``[(lat, lon, drop), …]`` (the axes
+      sidecar export the OSM validator maps to nids).
+
+    Field law (single source, both readers), first match wins per node:
+
+    * FROZEN (c = 0): any owner is a non-crown shape (apron / terminal /
+      building / boundary / groundside / adopted / degenerate), the node
+      is a tile-seam bucket, or it is a solver value contract passed in
+      ``freeze_idx`` (seam pins, building seats, groundside mouth welds,
+      seam spine anchors).
+    * RUNWAY-owned (incl. runway_crossing): the UNIFORM per-ref drop
+      ``profiles[ref]['crown_drop_m']`` (crossings: min over member
+      refs; shared keys: min over owning refs — uniformity keeps the
+      reconstructed longitudinal profile untouched), axially TAPERED at
+      ``TAXI_CROWN_TRANSVERSE`` toward any seam-bucket vertex so the
+      crown eases into the uncrowned seam pieces instead of stepping.
+    * TAXI / SERVICE corridor: ``rate_family × min(lateral to the
+      nearest same-family centerline, half_width_family)``, 0 on the
+      spine itself (≤ the spine tolerance); MIN over owning families."""
     cps = getattr(layout, "canonical_points", None)
-    if cps is None:
-        return (0, 0)
-    tol_deg = _seam_tol_deg(layout)
+    if cps is None or not ENABLE_SPINE_CROWN:
+        layout._crown_drop_key = {}
+        layout._crown_drop_ll = []
+        return {}
 
-    # Pass 0: canonical key → owned-by-non-crowned-role?  A key owned by
-    # ANY shape outside the crown family freezes that vertex.
+    profiles = getattr(layout, "_runway_redistributed_profiles", None) or {}
+
+    def _ref_drop(ref: str) -> float:
+        drops = []
+        for part in (ref or "").split("+"):
+            p = profiles.get(part)
+            if p and p.get("crown_drop_m"):
+                drops.append(float(p["crown_drop_m"]))
+        return min(drops) if drops else 0.0
+
+    # ownership: runway drops (min across refs), taxi/service families,
+    # frozen keys (any non-crown owner / degenerate crown shape).
     frozen_keys: set = set()
-    ring_cache: Dict[int, Tuple[List[Tuple[float, float]], List]] = {}
-    def _all_rings(poly):
-        """Every ring (exterior + holes) of a Polygon/MultiPolygon."""
-        geoms = ([poly] if poly.geom_type == "Polygon"
-                 else list(getattr(poly, "geoms", ())))
-        for g in geoms:
-            if g.geom_type != "Polygon":
-                continue
-            try:
-                yield list(g.exterior.coords)
-                for hole in g.interiors:
-                    yield list(hole.coords)
-            except _GEOM_EXC:
-                continue
-
-    for si, s in enumerate(layout.shapes):
+    fam_by_key: Dict[object, set] = {}
+    rwy_by_key: Dict[object, float] = {}
+    for s in layout.shapes:
         if s.polygon is None or s.polygon.is_empty:
             continue
-        cached = False
-        if s.polygon.geom_type == "Polygon" and not s.polygon.interiors:
-            try:
-                closed = list(s.polygon.exterior.coords)
-            except _GEOM_EXC:
-                closed = []
-            if len(closed) >= 4:
-                coords = closed[:-1]
-                keys = [cps.get_or_add(float(x), float(y))
-                        for (x, y) in coords]
-                ring_cache[si] = (coords, keys)
-                cached = True
-                if s.role not in _CROWN_RATES:
-                    frozen_keys.update(keys)
-        if not cached:
-            # MultiPolygon / holed / degenerate shape: never crowned,
-            # and its vertices must not MOVE either — a drop leaking in
-            # through a shared canonical point mints a step inside a
-            # ring nobody smooths or valve-checks (CYXY -10116 +2.9 %).
-            for ring in _all_rings(s.polygon):
-                for (x, y) in ring:
-                    frozen_keys.add(cps.get_or_add(float(x), float(y)))
-
-    # Pass 1a: eligibility (axis + altitudes + half-width) only.
-    shape_axis: Dict[int, LineString] = {}
-    shape_halfw: Dict[int, float] = {}
-    shape_laterals: Dict[int, List[float]] = {}
-    eligible: List[int] = []
-    for si, s in enumerate(layout.shapes):
-        if s.role not in _CROWN_RATES or si not in ring_cache:
-            continue
-        # Corridor junctions need an axis of their own; other roles too.
-        ax = _shape_axis(layout, s)
-        if ax is None:
-            continue
-        coords, keys = ring_cache[si]
-        alts = _ring_alts(s, len(coords))
-        if alts is None or any(a is None for a in alts):
-            continue
-        laterals = []
-        for (x, y) in coords:
-            try:
-                laterals.append(ax.distance(Point(x, y)))
-            except _GEOM_EXC:
-                laterals.append(0.0)
-        # Half-width: runway from its persisted profile, else the 75th
-        # percentile of ring lateral distances (mitred corners exceed
-        # the true half-width; the cap keeps them from over-dropping).
-        halfw = None
-        if s.role == ROLE_RUNWAY:
-            p = (getattr(layout, "_runway_redistributed_profiles", None)
-                 or {}).get(s.ref)
-            if p:
-                halfw = float(p.get("half_width_m", 0.0)) or None
-        if halfw is None:
-            srt = sorted(laterals)
-            halfw = srt[int(0.75 * (len(srt) - 1))] if srt else 0.0
-        halfw = min(halfw,
-                    _HALFW_CAP_M.get(s.role, _HALFW_CAP_DEFAULT_M))
-        if halfw <= 0.1:
-            continue
-        eligible.append(si)
-        shape_axis[si] = ax
-        shape_halfw[si] = halfw
-        shape_laterals[si] = laterals
-
-    if not eligible:
-        return (0, 0)
-
-    # Pass 1b: freeze the rings of every NON-ELIGIBLE shape — including
-    # family-role shapes that just lack an axis.  A shared vertex
-    # dropped through a crowned neighbour but never smoothed in the
-    # axis-less owner's own ring minted a step INSIDE that owner (CYXY
-    # junction -10029: 13 cm over 1 m = a 13 % pair that no amount of
-    # neighbour-side smoothing could see).
-    eligible_set = set(eligible)
-    for si, (coords, keys) in ring_cache.items():
-        if si not in eligible_set:
-            frozen_keys.update(keys)
-
-    # Pass 1c: per-canonical proposed drops (MIN wins across owners).
-    proposals: Dict[object, float] = {}
-    for si in eligible:
-        s = layout.shapes[si]
-        coords, keys = ring_cache[si]
-        ax = shape_axis[si]
-        halfw = shape_halfw[si]
-        laterals = shape_laterals[si]
-        rate = _CROWN_RATES[s.role]
-        L = ax.length
-        for k, (x, y) in enumerate(coords):
-            key = keys[k]
-            if key in frozen_keys:
-                continue
-            if _is_seam_vertex(layout, x, y, tol_deg):
-                frozen_keys.add(key)
-                continue
-            try:
-                station = ax.project(Point(x, y))
-            except _GEOM_EXC:
-                continue
-            taper = 1.0
-            if s.role != ROLE_RUNWAY:      # runways crown to the ends
-                taper = max(0.0, min(1.0, min(station, L - station)
-                                     / _END_TAPER_M))
-            drop = max(0.0, rate * min(laterals[k], halfw) * taper)
-            # Register even a ZERO drop: the MIN reconcile must let a
-            # near-axis owner veto a far-lateral neighbour's big drop
-            # at a shared vertex (CYXY -10116: a runway-edge 23 cm drop
-            # stood at a junction-mouth node whose own crown was ~0 —
-            # a pit inside a ring nobody proposed for).
-            prev = proposals.get(key)
-            if prev is None or drop < prev:
-                proposals[key] = drop
-
-    # Pass 1.5: BUDGET-AWARE Lipschitz projection.  The crown drop
-    # stacks on whatever longitudinal grade the ring edge already
-    # carries, so smoothing the DROP field alone still minted pairs
-    # over cap where the surface was already near it (SPLP: 75 pairs
-    # 1.5–2.0 %).  Work in FINAL-value space instead: per ring, start
-    # from ``e = a − raw_drop`` (``a`` = pre-crown altitude; frozen
-    # vertices keep ``e = a``) and lift ``e`` until every ring-adjacent
-    # pair satisfies ``|e_i − e_j| ≤ cap·seg`` — lifting only (a lift
-    # can only shrink the drop, never overshoot ``a``).  Shared
-    # canonical points reconcile to the SMALLEST drop (largest ``e``)
-    # across owners each iteration.
-    from .config import ROLE_GRADE_LIMITS
-    for _ in range(4):
-        changed_any = False
-        for si in eligible:
-            s = layout.shapes[si]
-            coords, keys = ring_cache[si]
-            n = len(coords)
-            alts = _ring_alts(s, n)
-            if alts is None:
-                continue
-            cap = float(ROLE_GRADE_LIMITS.get(s.role, 0.015) or 0.015)
-            e = []
-            frozen_mask = []
-            for k in range(n):
-                key = keys[k]
-                fz = key in frozen_keys
-                d = 0.0 if fz else proposals.get(key, 0.0)
-                e.append(float(alts[k]) - d)
-                frozen_mask.append(fz)
-            # Constraint edges: ALL vertex pairs within a local window,
-            # budgeted at ``min(longitudinal cap, transverse cap) ×
-            # straight-line distance`` — a PROVABLE lower bound on every
-            # allowance the law can assign a pair (flat cap·d, and the
-            # anisotropic √((cL·Δs∥)²+(cT·Δs⊥)²) ≥ min(cL,cT)·d), so a
-            # drop field feasible here is feasible under the real law
-            # regardless of which rule classifies each pair.  Ring-only
-            # and even ring+mesh graphs under-covered (CYXY: a 13 cm
-            # crown step across a 1 m neck read at 13 % on a chord pair
-            # neither graph contained).  Conservative by design — it can
-            # only shrink the crown near already-steep geometry.
-            if s.role == ROLE_SERVICE_ROAD:
-                cap_pair = min(cap, SERVICE_ROAD_MAX_TRANSVERSE)
-            else:
-                cap_pair = cap
-            _WINDOW_M = 40.0
-            edge_list = []
-            for ia in range(n):
-                xa, ya = coords[ia]
-                for ib in range(ia + 1, n):
-                    xb, yb = coords[ib]
-                    dx = xb - xa
-                    if dx > _WINDOW_M or dx < -_WINDOW_M:
-                        continue
-                    d = math.hypot(dx, yb - ya)
-                    if d > _WINDOW_M:
-                        continue
-                    edge_list.append((ia, ib, cap_pair * max(0.05, d)))
-            for _sweep in range(6):
-                moved = False
-                for (ia, ib, budget) in edge_list:
-                    if not frozen_mask[ib] and e[ib] < e[ia] - budget:
-                        e[ib] = min(float(alts[ib]), e[ia] - budget)
-                        moved = True
-                    if not frozen_mask[ia] and e[ia] < e[ib] - budget:
-                        e[ia] = min(float(alts[ia]), e[ib] - budget)
-                        moved = True
-                if not moved:
-                    break
-            for k in range(n):
-                key = keys[k]
-                if key in frozen_keys:
-                    continue
-                new_drop = max(0.0, float(alts[k]) - e[k])
-                cur = proposals.get(key)
-                if cur is not None and new_drop < cur - 1e-4:
-                    proposals[key] = new_drop
-                    changed_any = True
-        if not changed_any:
-            break
-    # prune vanished drops
-    proposals = {k: v for k, v in proposals.items() if v > 0.005}
-
-    # Pass 1.6: SAFETY VALVE.  The projection above converges through
-    # shared-key reconciliation, but cross-owner interactions can leave
-    # residual over-cap pairs (CYXY: 14 after smoothing).  Verify each
-    # eligible shape's FINAL values against the conservative all-pairs
-    # bound; a shape that still violates gets its crown REVOKED (all
-    # its ring keys frozen — like an axis-less shape) and the field
-    # re-smoothed.  No new violation can ship; the cost is a flat
-    # cross-section on the few problem shapes.
-    for _valve_round in range(3):
-        revoked: List[int] = []
-        for si in list(eligible):
-            s = layout.shapes[si]
-            coords, keys = ring_cache[si]
-            n = len(coords)
-            alts = _ring_alts(s, n)
-            if alts is None:
-                continue
-            cap = float(ROLE_GRADE_LIMITS.get(s.role, 0.015) or 0.015)
-            cap_pair = (min(cap, SERVICE_ROAD_MAX_TRANSVERSE)
-                        if s.role == ROLE_SERVICE_ROAD else cap)
-            vals = []
-            moved_any = False
-            for k in range(n):
-                d = (0.0 if keys[k] in frozen_keys
-                     else proposals.get(keys[k], 0.0))
-                if d:
-                    moved_any = True
-                vals.append(float(alts[k]) - d)
-            if not moved_any:
-                continue
-            bad = False
-            for ia in range(n):
-                xa, ya = coords[ia]
-                base_a = float(alts[ia])
-                for ib in range(ia + 1, n):
-                    xb, yb = coords[ib]
-                    dxy = math.hypot(xb - xa, yb - ya)
-                    if dxy > 40.0 or dxy < 0.05:
-                        continue
-                    # only pairs the CROWN made worse can be charged
-                    # to the crown (pre-existing over-cap stays theirs)
-                    if (abs(vals[ia] - vals[ib])
-                            > cap_pair * dxy + 1e-6
-                            and abs(vals[ia] - vals[ib])
-                            > abs(base_a - float(alts[ib])) + 1e-6):
-                        bad = True
-                        break
-                if bad:
-                    break
-            if bad:
-                revoked.append(si)
-        if not revoked:
-            break
-        for si in revoked:
-            eligible.remove(si)
-            frozen_keys.update(ring_cache[si][1])
-        # re-smooth the survivors against the newly frozen keys
-        for si in eligible:
-            s = layout.shapes[si]
-            coords, keys = ring_cache[si]
-            n = len(coords)
-            alts = _ring_alts(s, n)
-            if alts is None:
-                continue
-            cap = float(ROLE_GRADE_LIMITS.get(s.role, 0.015) or 0.015)
-            cap_pair = (min(cap, SERVICE_ROAD_MAX_TRANSVERSE)
-                        if s.role == ROLE_SERVICE_ROAD else cap)
-            e = []
-            frozen_mask = []
-            for k in range(n):
-                fz = keys[k] in frozen_keys
-                d = 0.0 if fz else proposals.get(keys[k], 0.0)
-                e.append(float(alts[k]) - d)
-                frozen_mask.append(fz)
-            for _sweep in range(6):
-                moved = False
-                for ia in range(n):
-                    xa, ya = coords[ia]
-                    for ib in range(ia + 1, n):
-                        xb, yb = coords[ib]
-                        dxy = math.hypot(xb - xa, yb - ya)
-                        if dxy > 40.0:
-                            continue
-                        budget = cap_pair * max(0.05, dxy)
-                        if (not frozen_mask[ib]
-                                and e[ib] < e[ia] - budget):
-                            e[ib] = min(float(alts[ib]), e[ia] - budget)
-                            moved = True
-                        if (not frozen_mask[ia]
-                                and e[ia] < e[ib] - budget):
-                            e[ia] = min(float(alts[ia]), e[ib] - budget)
-                            moved = True
-                if not moved:
-                    break
-            for k in range(n):
-                if keys[k] in frozen_keys:
-                    continue
-                new_drop = max(0.0, float(alts[k]) - e[k])
-                cur = proposals.get(keys[k])
-                if cur is not None and new_drop < cur - 1e-4:
-                    proposals[keys[k]] = new_drop
-    proposals = {k: v for k, v in proposals.items() if v > 0.005}
-
-    # Pass 2: apply the agreed drop to every crowned owner + collect the
-    # PRE-crown ring samples the spine interpolation needs.
-    n_crowned = 0
-    spine_ways: List[Tuple[List[Tuple[float, float]], List[float]]] = []
-    for si in eligible:
-        s = layout.shapes[si]
-        coords, keys = ring_cache[si]
-        n_open = len(coords)
-        alts = _ring_alts(s, n_open)
-        if alts is None:
-            continue
-        pre_crown = list(alts)
-
-        # Spine breakline: sample the axis clipped ~1 m inside the ring,
-        # altitudes = inverse-distance interpolation of the PRE-crown
-        # ring values (pre-crown the section is flat at spine level, so
-        # this IS the spine profile).
-        ax = shape_axis[si]
+        is_runway = s.role in (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING)
+        eligible = (
+            (s.role in _TAXI_FAMILY or s.role in _SERVICE_FAMILY)
+            and not getattr(s, "adopts_apron_grade", False)
+            and s.polygon.geom_type == "Polygon"
+            and not s.polygon.interiors)
         try:
-            inner = s.polygon.buffer(-_SPINE_EDGE_CLEAR_M)
-            if inner.is_empty:
-                inner = s.polygon
-            clipped = ax.intersection(inner)
-            if clipped.is_empty:
-                clipped = ax.intersection(s.polygon)
-        except _GEOM_EXC:
-            clipped = None
-        segs = []
-        if clipped is not None and not clipped.is_empty:
-            if clipped.geom_type == "LineString":
-                segs = [clipped]
+            if s.polygon.geom_type == "Polygon":
+                rings = [list(s.polygon.exterior.coords)]
+                rings.extend(list(h.coords) for h in s.polygon.interiors)
             else:
-                segs = [g for g in getattr(clipped, "geoms", ())
-                        if g.geom_type == "LineString" and g.length >= 3.0]
-        # STATION → ALTITUDE profile from the PRE-crown ring: every ring
-        # node projects to its axis station; nodes at (nearly) the same
-        # station — the two edges of one cross-section — average.  The
-        # spine value at any station is the linear interpolation of that
-        # profile.  Handles both sparse 4-corner runway rects (corners
-        # at 0 and L → the plane) and dense corridors, and cannot mix
-        # parallel branches of a curving corridor (projection follows
-        # the curving axis).
-        prof: List[Tuple[float, float]] = []
-        for k, (x, y) in enumerate(coords):
+                rings = []
+                for g in getattr(s.polygon, "geoms", ()):
+                    if g.geom_type == "Polygon":
+                        rings.append(list(g.exterior.coords))
+                        rings.extend(list(h.coords) for h in g.interiors)
+        except _GEOM_EXC:
+            continue
+        if is_runway:
+            d = _ref_drop(getattr(s, "ref", "") or "")
+            for ring in rings:
+                for (x, y) in ring:
+                    key = cps.get_or_add(float(x), float(y))
+                    if d <= 0.0:
+                        frozen_keys.add(key)   # uncrowned runway: hold it
+                    else:
+                        prev = rwy_by_key.get(key)
+                        rwy_by_key[key] = d if prev is None else min(prev, d)
+            continue
+        fam = ("service" if s.role in _SERVICE_FAMILY else "taxi")
+        for ring in rings:
+            for (x, y) in ring:
+                key = cps.get_or_add(float(x), float(y))
+                if eligible:
+                    fam_by_key.setdefault(key, set()).add(fam)
+                else:
+                    frozen_keys.add(key)
+
+    seam_keys = getattr(layout, "_seam_anchor_keys", None) or set()
+    taxi_tree, taxi_geoms = _family_lines(layout, service=False)
+    svc_tree, svc_geoms = _family_lines(layout, service=True)
+
+    # Seam-bucket vertex positions (for the runway axial taper).
+    seam_pts: List[Tuple[float, float]] = []
+    if seam_keys:
+        for key in set(rwy_by_key) | set(fam_by_key):
+            idx = bucket_to_idx.get(key)
+            if idx is None:
+                continue
+            x, y = nodes[idx]
+            if vertex_bucket(float(x), float(y)) in seam_keys:
+                seam_pts.append((x, y))
+
+    drop_by_idx: Dict[int, float] = {}
+    drop_by_key: Dict[object, float] = {}
+
+    def _register(key, idx, c):
+        c = round(c, 3)
+        if c > 0.005:
+            drop_by_idx[idx] = c
+            drop_by_key[key] = c
+
+    # RUNWAY-owned keys (runway wins over co-owning taxi families).
+    for key, d in rwy_by_key.items():
+        if key in frozen_keys:
+            continue
+        idx = bucket_to_idx.get(key)
+        if idx is None or idx in freeze_idx:
+            continue
+        x, y = nodes[idx]
+        if vertex_bucket(float(x), float(y)) in seam_keys:
+            continue
+        if seam_pts:
+            d_seam = min(math.hypot(x - sx, y - sy)
+                         for (sx, sy) in seam_pts)
+            d = min(d, TAXI_CROWN_TRANSVERSE * d_seam)
+        _register(key, idx, d)
+
+    # Crowned-runway pavement (for the shadow-adoption rule below).
+    rwy_shadow = None
+    _rwy_shadow_items = []
+    for s in layout.shapes:
+        if (s.role in (ROLE_RUNWAY, ROLE_RUNWAY_CROSSING)
+                and s.polygon is not None and not s.polygon.is_empty):
+            d = _ref_drop(getattr(s, "ref", "") or "")
+            if d > 0.0:
+                _rwy_shadow_items.append((s.polygon, d))
+    if _rwy_shadow_items:
+        try:
+            from shapely.strtree import STRtree as _ShTree
+            rwy_shadow = (_ShTree([p for (p, _d) in _rwy_shadow_items]),
+                          _rwy_shadow_items)
+        except _GEOM_EXC:                               # pragma: no cover
+            rwy_shadow = None
+
+    # TAXI / SERVICE corridor keys.
+    for key, fams in fam_by_key.items():
+        if key in frozen_keys or key in rwy_by_key:
+            continue
+        idx = bucket_to_idx.get(key)
+        if idx is None or idx in freeze_idx:
+            continue
+        x, y = nodes[idx]
+        if vertex_bucket(float(x), float(y)) in seam_keys:
+            continue
+        # RUNWAY SHADOW: value-tied to the runway edge → the runway's drop.
+        if rwy_shadow is not None:
+            tree, items = rwy_shadow
+            p = Point(x, y)
+            best = None
             try:
-                prof.append((ax.project(Point(x, y)),
-                             float(pre_crown[k])))
+                k = tree.nearest(p)
+            except _GEOM_EXC:                           # pragma: no cover
+                k = None
+            if k is not None:
+                poly, d_ref = items[int(k)]
+                try:
+                    if poly.distance(p) <= _RWY_SHADOW_M:
+                        best = d_ref
+                except _GEOM_EXC:
+                    best = None
+            if best is not None:
+                if seam_pts:
+                    d_seam = min(math.hypot(x - sx, y - sy)
+                                 for (sx, sy) in seam_pts)
+                    best = min(best, TAXI_CROWN_TRANSVERSE * d_seam)
+                _register(key, idx, best)
+                continue
+        drops = []
+        for fam in fams:
+            if fam == "taxi":
+                lat = _nearest_line_dist(taxi_tree, taxi_geoms, x, y,
+                                         search_m=1e9)
+                if lat is None or lat <= _ON_SPINE_TOL_M:
+                    drops.append(0.0)
+                    continue
+                drops.append(TAXI_CROWN_TRANSVERSE
+                             * min(lat, _TAXI_HALFW_CAP_M))
+            else:
+                lat = _nearest_line_dist(svc_tree, svc_geoms, x, y,
+                                         search_m=1e9)
+                if lat is None or lat <= _ON_SPINE_TOL_M:
+                    drops.append(0.0)
+                    continue
+                drops.append(SERVICE_ROAD_CROWN_TRANSVERSE
+                             * min(lat, _SERVICE_HALFW_CAP_M))
+        if not drops:
+            continue
+        _register(key, idx, min(drops))
+
+    # Equalize over each crown-family RECT ring (and thereby its
+    # level-coupled flat ends): a rect emits as a tilted PLANE whose axial
+    # grade may sit exactly at cap (flex law: taxi at max cap first) — a
+    # corner-to-corner drop DIFFERENCE would tip it over.  MIN wins;
+    # runway-owned keys keep their (uniform) runway drop.
+    from .elevation_per_surface.solver_primitives import (
+        SLOPING_RECT_ROLES as _RECT_ROLES)
+    for s in layout.shapes:
+        if (s.role not in _RECT_ROLES or s.polygon is None
+                or s.polygon.is_empty or s.polygon.geom_type != "Polygon"):
+            continue
+        try:
+            ring = list(s.polygon.exterior.coords)[:-1]
+        except _GEOM_EXC:
+            continue
+        keys = [cps.get_or_add(float(x), float(y)) for (x, y) in ring]
+        own_keys = [k for k in keys if k not in rwy_by_key]
+        vals = [drop_by_key.get(k) for k in own_keys]
+        if not vals:
+            continue
+        if any(v is None for v in vals):
+            # a frozen / uncrowned corner ⇒ the whole rect stays flat-space
+            for k in own_keys:
+                if k in drop_by_key:
+                    idx = bucket_to_idx.get(k)
+                    drop_by_key.pop(k, None)
+                    if idx is not None:
+                        drop_by_idx.pop(idx, None)
+            continue
+        mn = min(vals)
+        for k in own_keys:
+            drop_by_key[k] = mn
+            idx = bucket_to_idx.get(k)
+            if idx is not None:
+                drop_by_idx[idx] = mn
+
+    layout._crown_drop_key = dict(drop_by_key)
+    layout._crown_drop_ll = []
+    for idx, c in drop_by_idx.items():
+        x, y = nodes[idx]
+        la, lo = layout.m_to_ll(x, y)
+        layout._crown_drop_ll.append((round(la, 7), round(lo, 7), c))
+    return drop_by_idx
+
+
+def extend_field_to_new_ring_nodes(layout, bucket_to_idx) -> int:
+    """Extend ``layout._crown_drop_key`` to ring vertices minted AFTER the
+    solve (planarize inserts, final T-vertex weld adoptions).
+
+    Such a vertex's VALUE was linearly interpolated along one owning
+    ring's edge, so its drop is VALUE-DERIVED: on each owning ring, lift
+    the flanking solve-time vertices into uncrowned space (value + their
+    field drop), interpolate z′ at the new vertex's arc position, and take
+    ``c = z′_interp − value`` — exact for the ring the insert was born on;
+    across rings the MAX wins (the born ring shows the full drop, the
+    other rings' interpolation can only under-read it).  A geometric
+    nearest-node adoption measured wrong at CYXY: a T-weld insert between
+    a crowned and an uncrowned runway vertex read a phantom 4.2 % pair.
+    Returns the number of nodes added; updates ``_crown_drop_ll``."""
+    if not ENABLE_SPINE_CROWN:
+        return 0
+    field = getattr(layout, "_crown_drop_key", None)
+    solved_keys = getattr(layout, "_crown_solved_keys", None)
+    cps = getattr(layout, "canonical_points", None)
+    if not field or not solved_keys or cps is None:
+        return 0
+    from .elevation_per_surface.solver_primitives import PAVEMENT_ROLES
+    new_c: Dict[object, float] = {}
+    new_pos: Dict[object, Tuple[float, float]] = {}
+    for s in layout.shapes:
+        if (s.role not in PAVEMENT_ROLES or s.polygon is None
+                or s.polygon.is_empty or s.polygon.geom_type != "Polygon"):
+            continue
+        try:
+            ring = list(s.polygon.exterior.coords)[:-1]
+        except _GEOM_EXC:
+            continue
+        n = len(ring)
+        if n < 3:
+            continue
+        keys = [cps.get_or_add(float(x), float(y)) for (x, y) in ring]
+        if all(k in solved_keys for k in keys):
+            continue
+        # per-vertex emitted values (open ring).
+        vals: Optional[List[float]] = None
+        if s.node_altitudes is not None:
+            na = list(s.node_altitudes)
+            if len(na) == n + 1:
+                na = na[:-1]
+            if len(na) == n and all(v is not None for v in na):
+                vals = [float(v) for v in na]
+        elif s.altitude is not None:
+            vals = [float(s.altitude)] * n
+        elif (s.altitude_high is not None and s.altitude_low is not None
+              and n == 4):
+            hi, lo = float(s.altitude_high), float(s.altitude_low)
+            vals = [hi, lo, lo, hi]
+        if vals is None:
+            continue
+        seg = [math.hypot(ring[(i + 1) % n][0] - ring[i][0],
+                          ring[(i + 1) % n][1] - ring[i][1])
+               for i in range(n)]
+        for i in range(n):
+            if keys[i] in solved_keys:
+                continue
+            # walk to the nearest SOLVE-TIME vertex on each side.
+            db = 0.0
+            j = i
+            found_b = found_f = False
+            for _ in range(n):
+                j = (j - 1) % n
+                db += seg[j]
+                if keys[j] in solved_keys:
+                    found_b = True
+                    break
+            df = 0.0
+            k2 = i
+            for _ in range(n):
+                df += seg[k2]
+                k2 = (k2 + 1) % n
+                if keys[k2] in solved_keys:
+                    found_f = True
+                    break
+            if not (found_b and found_f):
+                continue
+            zb = vals[j] + field.get(keys[j], 0.0)
+            zf = vals[k2] + field.get(keys[k2], 0.0)
+            tot = db + df
+            z_interp = zb if tot <= 1e-9 else zb + (zf - zb) * (db / tot)
+            c_max = max(field.get(keys[j], 0.0), field.get(keys[k2], 0.0))
+            c = min(max(0.0, z_interp - vals[i]), c_max + 0.05)
+            key = keys[i]
+            if c > new_c.get(key, 0.0):
+                new_c[key] = c
+                new_pos[key] = ring[i]
+    n_added = 0
+    if new_c:
+        ll_new = list(getattr(layout, "_crown_drop_ll", None) or [])
+        for key, c in new_c.items():
+            solved_keys.add(key)
+            c = round(c, 3)
+            if c > 0.005:
+                field[key] = c
+                x, y = new_pos[key]
+                la, lo = layout.m_to_ll(x, y)
+                ll_new.append((round(la, 7), round(lo, 7), c))
+                n_added += 1
+        layout._crown_drop_ll = ll_new
+    return n_added
+
+
+def crown_drop_at(layout, x: float, y: float) -> float:
+    """The crown drop at a coordinate, via the canonical-point registry —
+    the in-memory validators' lookup (same field both readers share)."""
+    field = getattr(layout, "_crown_drop_key", None)
+    if not field:
+        return 0.0
+    reg = getattr(layout, "canonical_points", None)
+    if reg is None:
+        return 0.0
+    try:
+        cp = reg.find_nearest(x, y, reg.tol_m)
+    except Exception:                                   # pragma: no cover
+        return 0.0
+    if cp is None:
+        return 0.0
+    return field.get(cp, 0.0)
+
+
+# ── spine breakline emission ─────────────────────────────────────────────────
+
+def _emit_ways_for_profile(seg, ax, alt_at, inner, ring_tree, ring_geoms,
+                           layout) -> List[Tuple[list, list]]:
+    """Sample one clipped spine segment every ~12 m; drop samples outside
+    the eligible inner buffer or within the ring clearance; split into ways
+    at gaps.  Returns ``[(latlon_pts, alts), …]``."""
+    out: List[Tuple[list, list]] = []
+    n_pts = max(2, int(seg.length / _SPINE_SAMPLE_STEP_M) + 1)
+    way_ll: list = []
+    way_alt: list = []
+
+    def _flush():
+        nonlocal way_ll, way_alt
+        if len(way_ll) >= 2:
+            out.append((way_ll, way_alt))
+        way_ll, way_alt = [], []
+
+    for j in range(n_pts):
+        p = seg.interpolate(j * seg.length / (n_pts - 1))
+        ok = True
+        try:
+            if inner is not None and not inner.covers(p):
+                ok = False
+        except _GEOM_EXC:
+            ok = False
+        if ok and ring_tree is not None:
+            try:
+                k = ring_tree.nearest(p)
+                if (k is not None
+                        and ring_geoms[int(k)].distance(p)
+                        < _SPINE_RING_CLEAR_M):
+                    ok = False
+            except _GEOM_EXC:
+                pass
+        if not ok:
+            _flush()
+            continue
+        try:
+            st = ax.project(p)
+        except _GEOM_EXC:
+            _flush()
+            continue
+        a = alt_at(st)
+        if a is None:
+            _flush()
+            continue
+        way_ll.append(layout.m_to_ll(p.x, p.y))
+        way_alt.append(round(float(a), 2))
+    _flush()
+    return out
+
+
+def emit_crown_spines(layout, nodes, bucket_to_idx, elev,
+                      drop_by_idx) -> int:
+    """Populate ``layout.crown_spines`` from the SOLVED route profiles
+    (taxi + service centerlines: the solved elevations of the graph nodes
+    ON each line, interpolated by arc) and from the crowned runway pieces
+    (edge sample + stamped drop = the centerline profile).  Returns the
+    number of spine ways staged."""
+    if not ENABLE_SPINE_CROWN:
+        return 0
+    from shapely.strtree import STRtree
+
+    # eligible pavement + its rings (clip + clearance geometry).
+    polys = []
+    ring_geoms = []
+    for s in layout.shapes:
+        if (s.polygon is None or s.polygon.is_empty
+                or s.polygon.geom_type != "Polygon"):
+            continue
+        if ((s.role in _TAXI_FAMILY or s.role in _SERVICE_FAMILY)
+                and not getattr(s, "adopts_apron_grade", False)):
+            polys.append(s.polygon)
+        if s.role in _TAXI_FAMILY or s.role in _SERVICE_FAMILY \
+                or s.role == ROLE_RUNWAY:
+            try:
+                ring_geoms.append(LineString(s.polygon.exterior.coords))
             except _GEOM_EXC:
                 continue
+    inner = None
+    if polys:
+        try:
+            from shapely.ops import unary_union
+            inner = unary_union(polys).buffer(-_SPINE_EDGE_CLEAR_M)
+            if inner.is_empty:
+                inner = None
+            else:
+                from shapely.prepared import prep
+                inner = prep(inner)
+        except _GEOM_EXC:
+            inner = None
+    ring_tree = None
+    if ring_geoms:
+        try:
+            ring_tree = STRtree(ring_geoms)
+        except _GEOM_EXC:                               # pragma: no cover
+            ring_tree = None
+
+    # node STRtree for on-line profile extraction.
+    from shapely.geometry import Point as _Pt, box as _box
+    try:
+        node_pts = [_Pt(x, y) for (x, y) in nodes]
+        node_tree = STRtree(node_pts)
+    except _GEOM_EXC:                                   # pragma: no cover
+        return 0
+
+    spine_ways: List[Tuple[list, list]] = []
+
+    # ── taxi + service routes: solved on-line node profile ──
+    seen_lines = set()
+    for cl in (getattr(layout, "apt_taxi_centerlines", None) or []):
+        ln = getattr(cl, "line", None)
+        if ln is None or ln.is_empty or ln.length < _MIN_AXIS_LEN_M:
+            continue
+        if id(ln) in seen_lines:
+            continue
+        seen_lines.add(id(ln))
+        try:
+            xs, ys = zip(*ln.coords)
+            q = _box(min(xs) - _ON_SPINE_TOL_M, min(ys) - _ON_SPINE_TOL_M,
+                     max(xs) + _ON_SPINE_TOL_M, max(ys) + _ON_SPINE_TOL_M)
+            cand = [int(k) for k in node_tree.query(q)]
+        except _GEOM_EXC:
+            continue
+        prof: List[Tuple[float, float]] = []
+        for k in cand:
+            p = node_pts[k]
+            try:
+                d = ln.distance(p)
+            except _GEOM_EXC:
+                continue
+            if d > _ON_SPINE_TOL_M:
+                continue
+            try:
+                prof.append((ln.project(p), float(elev[k])))
+            except _GEOM_EXC:
+                continue
+        if len(prof) < 2:
+            continue
         prof.sort()
-        merged: List[Tuple[float, float]] = []
+        merged: List[Tuple[float, float, int]] = []
         for st, a in prof:
             if merged and st - merged[-1][0] <= 3.0:
-                pst, pa, pn = merged[-1][0], merged[-1][1], merged[-1][2]
+                pst, pa, pn = merged[-1]
                 merged[-1] = (pst, (pa * pn + a) / (pn + 1), pn + 1)
             else:
                 merged.append((st, a, 1))
-        prof2 = [(st, a) for st, a, _n in merged]
+        prof2 = [(st, a) for (st, a, _n) in merged]
+        if len(prof2) < 2:
+            continue
 
-        def _alt_at(st: float) -> Optional[float]:
-            if not prof2:
-                return None
-            if st <= prof2[0][0]:
-                return prof2[0][1]
-            if st >= prof2[-1][0]:
-                return prof2[-1][1]
-            for j in range(1, len(prof2)):
-                if st <= prof2[j][0]:
-                    s0, a0 = prof2[j - 1]
-                    s1, a1 = prof2[j]
+        def _alt_at(st, _prof=prof2):
+            if st <= _prof[0][0]:
+                return _prof[0][1]
+            if st >= _prof[-1][0]:
+                return _prof[-1][1]
+            for j in range(1, len(_prof)):
+                if st <= _prof[j][0]:
+                    s0, a0 = _prof[j - 1]
+                    s1, a1 = _prof[j]
                     f = (st - s0) / max(1e-6, s1 - s0)
                     return a0 + f * (a1 - a0)
-            return prof2[-1][1]
+            return _prof[-1][1]
 
+        spine_ways.extend(_emit_ways_for_profile(
+            ln, ln, _alt_at, inner, ring_tree, ring_geoms, layout))
+
+    # ── runways: the persisted (post-flex) centerline profile IS the
+    # spine — the pavement emits at profile − crown_drop (field), so the
+    # breakline at profile renders the ridge.  Clip inside each piece.
+    from .runway_redistribute import _interp_profile
+    profiles = getattr(layout, "_runway_redistributed_profiles", None) or {}
+    pieces_by_ref: Dict[str, list] = {}
+    for s in layout.shapes:
+        if (s.role == ROLE_RUNWAY and s.polygon is not None
+                and not s.polygon.is_empty and s.ref
+                and s.polygon.geom_type == "Polygon"):
+            pieces_by_ref.setdefault(s.ref, []).append(s)
+    for ref, pieces in pieces_by_ref.items():
+        p = profiles.get(ref)
+        if not p or not float(p.get("crown_drop_m") or 0.0):
+            continue
+        ax_a = p["axis_a"]
+        dx, dy = p["axis_d"]
         try:
-            ring_line = s.polygon.exterior
+            ax = LineString([ax_a, (ax_a[0] + dx, ax_a[1] + dy)])
         except _GEOM_EXC:
-            ring_line = None
-        for seg in segs:
-            n_pts = max(2, int(seg.length / _SPINE_SAMPLE_STEP_M) + 1)
-            way_ll: List[Tuple[float, float]] = []
-            way_alt: List[float] = []
-            for j in range(n_pts):
-                p = seg.interpolate(j * seg.length / (n_pts - 1))
-                # Never place a spine node on/near the ring: a
-                # coincident vertex at the interpolated (un-crowned)
-                # level fights the ring vertex's crowned altitude in
-                # the mesh (the narrow-shape polygon fallback above
-                # can put the clipped axis on the boundary).
-                if ring_line is not None:
-                    try:
-                        if ring_line.distance(p) < 0.9:
-                            continue
-                    except _GEOM_EXC:
-                        pass
-                try:
-                    st = ax.project(p)
-                except _GEOM_EXC:
-                    continue
-                a = _alt_at(st)
-                if a is None:
-                    continue
-                way_ll.append(layout.m_to_ll(p.x, p.y))
-                way_alt.append(a)
-            if len(way_ll) >= 2:
-                spine_ways.append((way_ll, way_alt))
+            continue
+        if ax.length < _MIN_AXIS_LEN_M:
+            continue
+        fr, el = p["fractions"], p["elevs"]
+        ax_len = ax.length
 
-        # Edge drop.
-        changed = False
-        new_alts = list(pre_crown)
-        for k in range(n_open):
-            drop = proposals.get(keys[k])
-            if drop:
-                new_alts[k] = pre_crown[k] - drop
-                changed = True
-        if changed:
-            s.node_altitudes = new_alts + [new_alts[0]]
-            s.altitude = None
-            s.altitude_high = None
-            s.altitude_low = None
-            n_crowned += 1
+        def _alt_at_rwy(st, _fr=fr, _el=el, _L=ax_len):
+            return _interp_profile(_fr, _el, st / max(_L, 1e-6))
+
+        for piece in pieces:
+            try:
+                p_inner = piece.polygon.buffer(-_SPINE_EDGE_CLEAR_M)
+                if p_inner.is_empty:
+                    continue
+                clipped = ax.intersection(p_inner)
+            except _GEOM_EXC:
+                continue
+            segs = ([clipped] if clipped.geom_type == "LineString"
+                    else [g for g in getattr(clipped, "geoms", ())
+                          if g.geom_type == "LineString"])
+            for seg in segs:
+                if seg.length < 3.0:
+                    continue
+                spine_ways.extend(_emit_ways_for_profile(
+                    seg, ax, _alt_at_rwy, None, ring_tree, ring_geoms,
+                    layout))
 
     if spine_ways:
         existing = getattr(layout, "crown_spines", None) or []
         layout.crown_spines = existing + spine_ways
-    return (n_crowned, len(spine_ways))
+    return len(spine_ways)

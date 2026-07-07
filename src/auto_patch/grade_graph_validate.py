@@ -138,14 +138,30 @@ def within_violations(layout, noise=ELEV_ROUNDING_NOISE_M):
     """Return the apron/junction within-shape grade violations of the emitted
     ``layout``, as ``[(pct, cap, dist, role, is_spine, x, y), ...]`` (worst
     first).  Uses the unified grade graph — identical constraints to the solver.
-    """
+
+    SPINE CROWN (part 30): a pair's budget re-centres on the crown target
+    ``grade_law.crown_pair_offset`` — the same per-node drop field the
+    solver's writeback applied (``layout._crown_drop_key``), so a crowned
+    cross-section spends none of its longitudinal budget on the designed
+    drop.  Empty field (gate off / old layout) ⇒ byte-identical check."""
+    from .grade_law import crown_pair_offset
+    _crown_field = getattr(layout, "_crown_drop_key", None) or {}
+    if _crown_field:
+        from .crown import crown_drop_at
+
+        def _drop(x, y):
+            return crown_drop_at(layout, x, y)
+    else:
+        def _drop(x, y):
+            return 0.0
     viol = []
     for (role, is_spine, (xa, ya), za, (xb, yb), zb, cap) in \
             _iter_checked_pairs(layout):
         d = math.hypot(xa - xb, ya - yb)
         if d < 1e-6:
             continue
-        de = abs(za - zb)
+        de = abs((za - zb) - crown_pair_offset(_drop(xa, ya),
+                                               _drop(xb, yb)))
         # ``cap`` is a grade_law.Allowance; the per-pair budget is its anisotropic
         # evaluation ``cL·Δs∥ + cT·Δs⊥`` (today Δs∥=d, Δs⊥=0 → cL·d).  The reported
         # %-cap is the longitudinal cL (flat_cap while every rule is isotropic).
@@ -494,6 +510,16 @@ def route_band_violations(layout, noise=ELEV_ROUNDING_NOISE_M, G=None):
                 pass
         return False
 
+    # SPINE CROWN (part 30): the reach band was solved in UNCROWNED space —
+    # de-crown each vertex (e + drop) before the band comparison, or every
+    # crowned edge node reads up to its designed drop below the floor.
+    _crown_field = getattr(layout, "_crown_drop_key", None) or {}
+    if _crown_field:
+        from .crown import crown_drop_at as _crown_at
+    else:
+        def _crown_at(_l, _x, _y):
+            return 0.0
+
     out = []
     seen = set()
     for s in layout.shapes:
@@ -504,6 +530,7 @@ def route_band_violations(layout, noise=ELEV_ROUNDING_NOISE_M, G=None):
         if elevs is None:
             continue
         for (x, y), e in zip(ring, elevs):
+            e = e + _crown_at(layout, x, y)
             # dedupe by shared canonical node — the band is positional, so a
             # welded corner shared by N shapes is ONE band check, not N.
             key = (round(x, 2), round(y, 2))

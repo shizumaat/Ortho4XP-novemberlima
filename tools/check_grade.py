@@ -459,6 +459,46 @@ def _seam_nids_from_pins(nodes: Dict[str, Tuple[float, float]],
     return out
 
 
+def _crown_drops_by_nid(nodes: Dict[str, Tuple[float, float]],
+                        crown_drops_ll: list) -> Dict[str, float]:
+    """Map each nid to its solver crown drop (axes sidecar ``crown_drops``,
+    ``[[lat, lon, drop], …]``) — nids coincident (≤ ``SHARED_VERTEX_TOL_M``)
+    with an exported field node.  The within-shape law re-centres each
+    pair's budget on ``grade_law.crown_pair_offset`` from this field, so
+    the validator reads the SAME designed crown the solver built (part
+    30).  Empty/None ⇒ offset 0 everywhere (uncrowned/old patches)."""
+    if not crown_drops_ll:
+        return {}
+    # coarse lat/lon grid (~SHARED_VERTEX_TOL_M cells) for O(1) lookups.
+    # ONE cell size for build AND lookup (reference latitude): a per-point
+    # cos(lat) cell size shifts the integer cell index by whole cells at
+    # large |lon| (~14.6 M cells at lon −135), silently missing matches.
+    ref_lat = crown_drops_ll[0][0]
+    cell_lat = SHARED_VERTEX_TOL_M / _M_PER_DEG_LAT
+    mlon_ref = _M_PER_DEG_LAT * max(0.05, math.cos(math.radians(ref_lat)))
+    cell_lon = SHARED_VERTEX_TOL_M / mlon_ref
+    grid: Dict[Tuple[int, int], list] = defaultdict(list)
+    for (pla, plo, drop) in crown_drops_ll:
+        grid[(int(pla // cell_lat), int(plo // cell_lon))].append(
+            (pla, plo, float(drop)))
+    out: Dict[str, float] = {}
+    for nid, (lat, lon) in nodes.items():
+        mlon = _M_PER_DEG_LAT * max(0.05, math.cos(math.radians(lat)))
+        gx, gy = int(lat // cell_lat), int(lon // cell_lon)
+        best = None
+        for ox in (-1, 0, 1):
+            for oy in (-1, 0, 1):
+                for (pla, plo, drop) in grid.get((gx + ox, gy + oy), ()):
+                    d = math.hypot((lat - pla) * _M_PER_DEG_LAT,
+                                   (lon - plo) * mlon)
+                    if d <= SHARED_VERTEX_TOL_M and (best is None
+                                                     or d < best[0]):
+                        best = (d, drop)
+        if best is not None:
+            out[nid] = best[1]
+    return out
+
+
 def _seam_nids(nodes: Dict[str, Tuple[float, float]]) -> set:
     """Set of nids in the seam terrain-matching zone: within ``_SEAM_ZONE_M``
     of a tile boundary the airport CROSSES (lat/lon line carrying an exact seam
@@ -748,6 +788,10 @@ class ShapePairConstraint:
     dist: float
     cap: float          # decimal grade limit for this pair (role / road / ramp)
     allowance: float    # cap*dist + ELEV_ROUNDING_NOISE_M (validator tolerance)
+    # SPINE CROWN (part 30): the designed crown target of ``ea − eb``
+    # (``grade_law.crown_pair_offset`` over the sidecar drop field); the
+    # law is ``|(ea − eb) − offset| ≤ allowance``.  0 for uncrowned pairs.
+    offset: float = 0.0
 
 
 _SLOPING_RECT_OSM_ROLES = frozenset({
@@ -889,6 +933,7 @@ def iter_shape_grade_constraints(
         taxi_axes: Optional[list] = None,
         routes_ll: Optional[list] = None,
         mesh_edges_m: Optional[list] = None,
+        crown_by_nid: Optional[Dict[str, float]] = None,
         ) -> "list[ShapePairConstraint]":
     """Yield every within-shape vertex-pair the grade check constrains.
 
@@ -950,6 +995,10 @@ def iter_shape_grade_constraints(
                                        seam_nids, max_grade, road_zone=road_zone,
                                        routes_m=routes_m,
                                        mesh_edges_m=mesh_edges_m)
+    # SPINE CROWN (part 30): per-nid designed drops (sidecar field);
+    # every pair's law re-centres on grade_law.crown_pair_offset.
+    from auto_patch.grade_law import crown_pair_offset as _crown_off
+    crown_by_nid = crown_by_nid or {}
     _SOFT_ROLES = _GG.SOFT_VISIBILITY_ROLES
     for w in ways:
         grade_cap = _role_grade_limit(w, max_grade)
@@ -1001,7 +1050,9 @@ def iter_shape_grade_constraints(
                     way=w, nid_a=pnids[ia], nid_b=pnids[ib],
                     xa=xi, ya=yi, ea=ei, xb=xj, yb=yj, eb=ej,
                     dist=d, cap=cap.flat_cap(),
-                    allowance=cap.at(d, 0.0) + ELEV_ROUNDING_NOISE_M))
+                    allowance=cap.at(d, 0.0) + ELEV_ROUNDING_NOISE_M,
+                    offset=_crown_off(crown_by_nid.get(pnids[ia], 0.0),
+                                      crown_by_nid.get(pnids[ib], 0.0))))
             continue
         # PLANE shapes (rects / runway / terminal) → the SAME law: all vertex
         # pairs at the role cap, via grade_graph.plane_constraints (the single
@@ -1024,7 +1075,9 @@ def iter_shape_grade_constraints(
                 way=w, nid_a=pnids[ia], nid_b=pnids[ib],
                 xa=xi, ya=yi, ea=ei, xb=xj, yb=yj, eb=ej,
                 dist=d, cap=capp.flat_cap(),
-                allowance=capp.at(d, 0.0) + ELEV_ROUNDING_NOISE_M))
+                allowance=capp.at(d, 0.0) + ELEV_ROUNDING_NOISE_M,
+                offset=_crown_off(crown_by_nid.get(pnids[ia], 0.0),
+                                  crown_by_nid.get(pnids[ib], 0.0))))
     return out
 
 
@@ -1088,17 +1141,19 @@ def _check_within_shape(ways: List[Way],
                         taxi_axes: Optional[list] = None,
                         routes_ll: Optional[list] = None,
                         mesh_edges_m: Optional[list] = None,
+                        crown_by_nid: Optional[Dict[str, float]] = None,
                         ) -> List[Violation]:
     """Grade check between vertex pairs on the same way.  Consumes
     ``iter_shape_grade_constraints`` (the single source of constrained pairs)
     and flags any pair whose stored Δelev exceeds its allowance — a violation
-    requires ``|de| > cap*dist + ELEV_ROUNDING_NOISE_M`` so single-decimal
-    rounding doesn't produce spurious sub-metre flags."""
+    requires ``|de − crown_offset| > cap*dist + ELEV_ROUNDING_NOISE_M`` (the
+    crown offset is 0 for uncrowned pairs) so single-decimal rounding doesn't
+    produce spurious sub-metre flags."""
     out: List[Violation] = []
     for c in iter_shape_grade_constraints(
             ways, nodes, ll_to_m, max_grade, seam_nids, taxi_axes, routes_ll,
-            mesh_edges_m=mesh_edges_m):
-        de = abs(c.ea - c.eb)
+            mesh_edges_m=mesh_edges_m, crown_by_nid=crown_by_nid):
+        de = abs((c.ea - c.eb) - c.offset)
         if de <= c.allowance:
             continue
         grade = de / c.dist
@@ -1546,6 +1601,7 @@ def run_checks(
     seam_pins_ll: Optional[list] = None,
     break_nodes_ll: Optional[list] = None,
     mesh_edges_ll: Optional[list] = None,
+    crown_drops_ll: Optional[list] = None,
 ) -> Tuple[List[Violation], List[Violation], List[EdgeStep]]:
     """``taxi_axes_ll`` (the builder's APT.DAT taxi centerlines as
     ``[(latlon_points, cL, cT), …]``) supplies the within-shape grade graph's
@@ -1614,10 +1670,18 @@ def run_checks(
         mesh_edges_m = [(ll_to_m(*edge[0]), ll_to_m(*edge[1]))
                         for edge in mesh_edges_ll]
 
+    # SPINE CROWN drop field (sidecar ``crown_drops``, part 30): the
+    # within-shape law re-centres every pair's budget on the designed
+    # crown target (grade_law.crown_pair_offset) — the SAME field the
+    # solver built to.  Absent ⇒ offsets 0 (uncrowned/old patches).
+    crown_by_nid = _crown_drops_by_nid(nodes, crown_drops_ll or [])
+    if crown_by_nid and not quiet:
+        print(f"  crown drop field: {len(crown_by_nid)} node(s) crowned")
+
     within = _check_within_shape(
         ways, nodes, ll_to_m, max_grade, seam_nids=seam_nids,
         taxi_axes=taxi_axes, routes_ll=routes_ll,
-        mesh_edges_m=mesh_edges_m)
+        mesh_edges_m=mesh_edges_m, crown_by_nid=crown_by_nid)
     # BREAK-REGION split (user 2026-07-05): pairs touching a node the
     # SOLVER declared broken (genuine anchor contradiction, rendered as
     # the contained distance-weighted blend) are the pocket's designed
@@ -1780,7 +1844,7 @@ def main(argv=None) -> int:
     # when present; without it the check is context-free and over-flags
     # every spine/blend-relaxed pair.
     taxi_axes_ll = routes_ll = anchor = seam_pins_ll = None
-    break_nodes_ll = mesh_edges_ll = None
+    break_nodes_ll = mesh_edges_ll = crown_drops_ll = None
     sidecar = Path(str(args.osm) + ".axes.json")
     if sidecar.exists():
         try:
@@ -1799,6 +1863,7 @@ def main(argv=None) -> int:
             seam_pins_ll = _data.get("seam_pins")
             break_nodes_ll = _data.get("break_nodes")
             mesh_edges_ll = _data.get("mesh_edges") or None
+            crown_drops_ll = _data.get("crown_drops") or None
             print(f"  (axes sidecar loaded: {len(taxi_axes_ll or [])} axes"
                   + (" [exact]" if _exact else "")
                   + f", {len(routes_ll or [])} routes"
@@ -1807,6 +1872,8 @@ def main(argv=None) -> int:
                      is not None else "")
                   + (f", {len(mesh_edges_ll)} solver mesh edges"
                      if mesh_edges_ll else "")
+                  + (f", {len(crown_drops_ll)} crown drops"
+                     if crown_drops_ll else "")
                   + " — law-true check)")
         except Exception as ex:
             print(f"  (axes sidecar unreadable, context-free check: {ex})")
@@ -1823,6 +1890,7 @@ def main(argv=None) -> int:
         seam_pins_ll=seam_pins_ll,
         break_nodes_ll=break_nodes_ll,
         mesh_edges_ll=mesh_edges_ll,
+        crown_drops_ll=crown_drops_ll,
     )
     if args.strict and (within or cross or steps):
         return 1
