@@ -5014,6 +5014,22 @@ def build_airport_pavement(icao: str, xplane_root: str,
         from .pavement.vertices import _round_turnback_corners
         _round_turnback_corners(layout, icao)
 
+        # ── Formation-time SOURCE CLIP (KCLT off-source phantom, Fix C) ──
+        # An apron / junction face can acquire off-source area through
+        # DOWNSTREAM recuts (route-proximity cut, frontage straightening) even
+        # though the slice birthed it 100 % on source — KCLT #278 (8.3 k m² at
+        # 35 %) is the near-runway band carved off a real 18R-end apron.  Clip
+        # every < 50 %-on-source apron / junction back to the source pavement
+        # (∪ runway halo) HERE — after merge_small_apron_fragments / groundside
+        # emit / full-width-corridor consolidation (pass 1) have settled the
+        # apron/junction set, and BEFORE _unify_airside_geometry below so the
+        # clipped edges are re-noded, welded, and graded like any other pre-
+        # solve geometry.  Gate O4_SOURCE_CLIP → no-op (byte-identical) off.
+        if os.environ.get("O4_SOURCE_CLIP", "1") == "1":
+            from .junction_repair import source_clip_partial_coverage_shapes
+            source_clip_partial_coverage_shapes(layout, icao=icao)
+            _covp(layout, "post-source-clip")
+
         # ── Airside node-unification (refactor Phases 6+7, PRE-solve) ──
         # Weld + full conformance + final corner snaps, run HERE so the solver
         # sees the FINAL node-set and grades every shared vertex to ONE

@@ -1027,6 +1027,23 @@ APRON_TAXI_TRANSITION_M = float(_os.environ.get("O4_APRON_TAXI_TRANSITION_M", "4
 # law, byte-identical to the pre-feature build.
 ANISO_EDGES = _os.environ.get("O4_ANISO_EDGES", "1") == "1"
 
+# FORMATION-TIME SOURCE CLIP (KCLT off-source phantom, Fix C).  The global
+# slice births every face 100 % on source, but DOWNSTREAM recuts (the
+# route-proximity cut, frontage straightening) can sweep an apron / junction
+# face off the real source pavement (apt.dat row-110 ∪ DSF ∪ runway) — KCLT
+# junction #278 is 8.3 k m² at 35 % on source (a near-runway band the
+# route-proximity cut carved off a real 18R-end apron; the 65 % off-source
+# remainder is RESA grass).  When ON, a formation-time pass clips every
+# apron / junction shape whose on-source fraction < 0.5 back to the source
+# union (∪ runway, buffered by the runway-frontage halo so contact survives)
+# BEFORE the pre-solve node-unification, so the clipped edges are re-noded /
+# welded / solved normally.  The off-source remainder (grass, off-source by
+# construction) is DROPPED — re-minting it as groundside pavement would just
+# relocate the phantom onto a DEM-following surface.  O4_SOURCE_CLIP=0 reverts
+# byte-identically (the pass is inert — no shape is touched).
+SOURCE_CLIP_PARTIAL_COVERAGE = (
+    _os.environ.get("O4_SOURCE_CLIP", "1") == "1")
+
 # JUNCTION MESH CONSTRAINTS (user 2026-06-30).  A JUNCTION is taxi-centerline
 # fill: aircraft travel ALONG the spine through it, so the only grade paths that
 # physically exist are the spine (longitudinal) and the triangle-mesh EDGES X-Plane
