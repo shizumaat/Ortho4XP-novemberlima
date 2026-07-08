@@ -1252,7 +1252,7 @@ RUNWAY_SEAM_DEM_PIN = _os.environ.get("O4_RUNWAY_SEAM_PIN", "1") == "1"
 # all.  Tile-SEAM cuts stay (a seam-crossing runway is still split at the
 # seam band); refs participating in a runway-runway crossing keep the
 # legacy segmented path until the crossing-carve slice lands.
-RUNWAY_SINGLE_POLY = _os.environ.get("O4_RUNWAY_SINGLE_POLY", "0") == "1"
+RUNWAY_SINGLE_POLY = _os.environ.get("O4_RUNWAY_SINGLE_POLY", "1") == "1"
 
 # SEAM APRON COMPLEX POLISH (user 2026-06-20).  The per-apron isolated polish
 # (SPREAD_APRON_GRADE) holds every vertex an apron shares with ANOTHER shape, so

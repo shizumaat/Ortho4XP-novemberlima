@@ -131,20 +131,32 @@ pytestmark = [
 # RE-CUT 2026-07-06 (unified runway representation: per-vertex
 # node_altitudes everywhere mid-pipeline; plane-fit sampler — cm-scale
 # value shifts moved clearance/ribbon decisions).  Floors = current − 5 %.
+# RE-CUT 2026-07-08 (runway de-segmentation DEFAULT ON —
+# O4_RUNWAY_SINGLE_POLY, docs/runway_single_polygon_plan.md, Noah
+# sign-off): ONE polygon ring per runway ref (SPJC runway 35 → 2), no
+# interior profile-sampling cross-edges.  The previous fixture dated
+# 2026-07-06, three airside reshapes ago (30k clearance revert, 30l
+# service_junction drop, 30m spine-first service grading) — the
+# non-runway deltas (apron/junction repartition) are dev drift absorbed
+# by the same re-cut, attributed via a gate-off control build.  Floors =
+# int(0.95 * current) — EXCEPT runway (and retaining_wall, as before):
+# ring emission is deterministic and the ring COUNT is the de-seg
+# invariant itself (0.95 of 1-2 ways floors at 0-1 and guards nothing),
+# so runway floors are EXACT.
 SPJC_BASELINE: Dict[str, int] = {
-    "apron":              95,   # of 100 current
+    "apron":              41,   # of  44 current
     "building":           29,   # of  31 current
     "groundside_pavement": 10,  # of  11 current
-    "junction":          189,   # of 199 current
-    "retaining_wall":      5,   # of   6 current
-    "runway":             33,   # of  35 current
-    "runway_clearance":    3,   # of   4 current
-    "service_junction":   13,   # of  14 current
-    "service_road":        5,   # of   6 current
-    "taxiway_clearance":  18,   # of  19 current
+    "junction":          304,   # of 321 current
+    "retaining_wall":      6,   # of   6 current (deterministic, exact)
+    "runway":              2,   # of   2 current (deterministic, exact)
+    "runway_clearance":   10,   # of  11 current
+    "service_junction":   14,   # of  15 current
+    "service_road":        9,   # of  10 current
+    "taxiway_clearance":  22,   # of  24 current
     "tunnel_ramp":        38,   # of  41 current
 }
-SPJC_BASELINE_TOTAL = 442  # int(0.95 * 466) of 466 current (emitted)
+SPJC_BASELINE_TOTAL = 490  # int(0.95 * 516) of 516 current (emitted)
 
 # SPLP is cross-tile (spans -13/-77 and -13/-78).  Each tile-half has
 # its own baseline; a regression in either half trips the gate.
@@ -168,30 +180,36 @@ SPJC_BASELINE_TOTAL = 442  # int(0.95 * 466) of 466 current (emitted)
 # RE-CUT 2026-07-06 (seam values sample the SMOOTHED DEM per the user
 # ruling — runway seam anchors moved cm-scale, flipping six boundary
 # ribbon at-DEM skips).  Floors = int(0.95 * current fixture count).
+# RE-CUT 2026-07-08 (runway de-segmentation DEFAULT ON — see the SPJC
+# re-cut note above): one ring per (ref × seam piece), so each SPLP
+# tile-half emits exactly ONE runway way (9/8 → 1/1).  Runway floors
+# EXACT (deterministic ring count = the de-seg invariant; 0.95 of 1
+# floors at 0); everything else int(0.95 * current).
 SPLP_BASELINE_TILE_M77: Dict[str, int] = {
     "apron":               9,   # of  10 current
-    "boundary":           25,   # of  27 current
+    "boundary":           20,   # of  22 current
     "building":            2,   # of   3 current
-    "junction":           11,   # of  12 current
-    "runway":              8,   # of   9 current
+    "junction":           25,   # of  27 current
+    "runway":              1,   # of   1 current (deterministic, exact)
     "runway_clearance":    5,   # of   6 current
     "taxiway_clearance":   8,   # of   9 current
 }
-SPLP_BASELINE_TILE_M77_TOTAL = 72  # int(0.95 * 76) of 76 current (emitted)
+SPLP_BASELINE_TILE_M77_TOTAL = 74  # int(0.95 * 78) of 78 current (emitted)
 
 # RE-CUT 2026-07-05 (curve-native global slice default; see the SPJC
 # re-cut note above) — floors = int(0.95 * current fixture count).
+# RE-CUT 2026-07-08 (de-seg default ON; see above).
 SPLP_BASELINE_TILE_M78: Dict[str, int] = {
-    "apron":              36,   # of  38 current
+    "apron":              30,   # of  32 current
     "boundary":           17,   # of  18 current
     "building":            7,   # of   8 current
     "groundside_pavement": 2,   # of   3 current
-    "junction":           15,   # of  16 current
-    "runway":              7,   # of   8 current
-    "runway_clearance":    0,   # of   1 current
-    "taxiway_clearance":  17,   # of  18 current
+    "junction":           35,   # of  37 current
+    "runway":              1,   # of   1 current (deterministic, exact)
+    "runway_clearance":    1,   # of   2 current
+    "taxiway_clearance":   9,   # of  10 current
 }
-SPLP_BASELINE_TILE_M78_TOTAL = 104  # int(0.95 * 110) of 110 current (emitted)
+SPLP_BASELINE_TILE_M78_TOTAL = 105  # int(0.95 * 111) of 111 current (emitted)
 
 
 def _build_layout(icao: str, tile_lat=None, tile_lon=None):
