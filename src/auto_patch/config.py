@@ -113,6 +113,22 @@ __all__ = [
     "RUNWAY_STRIP_HALF_WIDTH_BY_CODE",
     "WINGSPAN_BY_CODE_LETTER",
     "TAXIWAY_WINGTIP_MARGIN_M",
+    "ADJACENT_GROUND_LIP_WIDTH_M",
+    "ADJACENT_GROUND_LIP_MIN_DOWN_SLOPE",
+    "ADJACENT_GROUND_LIP_MAX_DOWN_SLOPE",
+    "RUNWAY_STRIP_BAND_MIN_DOWN_SLOPE",
+    "RUNWAY_STRIP_BAND_MAX_DOWN_SLOPE_BY_CODE",
+    "TAXIWAY_STRIP_BAND_MIN_DOWN_SLOPE",
+    "TAXIWAY_STRIP_BAND_MAX_DOWN_SLOPE",
+    "TAXIWAY_STRIP_GRADED_HALF_WIDTH_BY_LETTER",
+    "taxiway_strip_graded_half_width_for_letter",
+    "ADJACENT_GROUND_UNGRADED_STRIP_MAX_UP_SLOPE",
+    "APRON_SHOULDER_WIDTH_M",
+    "APRON_SHOULDER_MIN_DOWN_SLOPE",
+    "APRON_SHOULDER_MAX_DOWN_SLOPE",
+    "APRON_BEYOND_SHOULDER_MIN_DOWN_SLOPE",
+    "APRON_BEYOND_SHOULDER_MAX_DOWN_SLOPE",
+    "APRON_EDGE_WALL_MIN_DROP_M",
     "runway_code_number",
     "runway_strip_half_width_m",
     "runway_end_clearance_length_m",
@@ -1763,6 +1779,113 @@ WINGSPAN_BY_CODE_LETTER = {
 
 # Margin (m) added beyond the wingtip (FAA-style wingtip clearance).
 TAXIWAY_WINGTIP_MARGIN_M = 3.0
+
+
+# ── Adjacent-ground grade law — lateral corridor off a pavement edge ──
+# (Fable design 2026-07-08, docs/adjacent_ground_grade_law_plan.md; the
+# LATERAL generalization of the runway-END skirt law.)  Ground next to a
+# paved surface is governed as a two-zone-plus-ungraded CORRIDOR off the
+# pavement EDGE: a signed-height [floor, ceiling] envelope relative to
+# the edge elevation, as a function of lateral distance d.  These are
+# the RULE VALUES; the zone MATH — accumulated so the corridor bounds
+# are CONTINUOUS functions of d — lives in
+# ``grade_law.adjacent_ground_envelope``.  Runway ENDS are NOT here: the
+# longitudinal runway-end skirt law (``grade_law.runway_end_skirt_*``)
+# owns them.
+#
+# NOAH RULED 2026-07-08 (ruling 1, ENFORCE FULLY): the envelope is a
+# corridor WITH DIRECTION — each graded zone is a mandatory-DOWN band
+# [min_slope, max_slope] exactly as the FAA writes it, so a FLAT surround
+# beside pavement is regraded to at least the minimum fall (a code-4
+# runway's graded band falls ≥1.1 m over its 75 m half-width).  Where FAA
+# mandates DOWN and ICAO merely permits UP, FAA wins (maximal conformance,
+# one blended global ruleset).
+
+# ZONE 1 — drainage lip, shared by the runway & taxiway strips.  The
+# first 3 m (FAA 10 ft) must fall AWAY from the edge at 3–5 % so water
+# sheds off the pavement: FAA AC 150/5300-13B Fig 3-33 Detail A (3–5 %
+# negative for the first 10 ft); FAA TSA §4.14.2 (5 %±0.5 %); ICAO
+# Annex 14 Vol I §3.4.15 (strip transverse negative ≤5 %); the strip
+# abuts flush (§3.4.10).  A flat lip (0 %) is UNLAWFUL here (mandatory
+# down) — this is what makes the envelope a corridor, not a bare cap.
+ADJACENT_GROUND_LIP_WIDTH_M = 3.0
+ADJACENT_GROUND_LIP_MIN_DOWN_SLOPE = 0.03
+ADJACENT_GROUND_LIP_MAX_DOWN_SLOPE = 0.05
+
+# ZONE 2 — RUNWAY graded strip.  Transverse fall bounded 1.5 % (FAA
+# MINIMUM — ICAO has none) … 3 % (AAC C–E) / 5 % (AAC A/B): FAA AC
+# 150/5300-13B Table 3-6 S-3 (RSA side slope 1.5–5 % A/B, 1.5–3 % C–E);
+# cross-checked against ICAO Annex 14 §3.4.15 (transverse ≤2.5 % code
+# 3/4, ≤3 % code 1/2).  Keyed by ICAO code NUMBER (ruling 2 — the repo's
+# runway keying; numbers agree with AAC): code 3/4 ≈ AAC C–E (3 % cap),
+# code 1/2 ≈ AAC A/B (5 % cap).  The graded WIDTH reuses
+# RUNWAY_STRIP_HALF_WIDTH_BY_CODE (do NOT duplicate) as the from-edge
+# band bound (a slight over-reach vs the strict from-centerline strip,
+# per the plan's "≤75 m at code 3/4").
+RUNWAY_STRIP_BAND_MIN_DOWN_SLOPE = 0.015
+RUNWAY_STRIP_BAND_MAX_DOWN_SLOPE_BY_CODE = {1: 0.05, 2: 0.05, 3: 0.03, 4: 0.03}
+
+# ZONE 2 — TAXIWAY graded strip.  Transverse DOWN ≤5 %, UP ≤2.5 % (C–F)
+# / 3 % (A/B): ICAO Annex 14 §3.11.5 / EASA CS-ADR-DSN.D.280; FAA TSA
+# grades 1.5–5 % (AC 150/5300-13B §4.5.3, §4.14.2).  Enforced as a
+# mandatory-DOWN band 1.5 % … 5 % (ruling 1).  The graded WIDTH is the
+# OMGWS-derived graded half-width of the taxiway strip, keyed by ICAO
+# code LETTER (ICAO Annex 14 §3.11.4 / EASA CS-ADR-DSN.D.325(b), current
+# editions): OMGWS <4.5 / 4.5–6 / 6–9 m → 10.25 / 11 / 12.5 m (letters
+# A/B/C), letters D/E/F → 18.5 / 19 / 22 m (ruling 2).  FAA's
+# TSA-wingspan width is deliberately NOT used — wingtip clearance governs
+# that envelope separately (``taxiway_clearance_half_width_*``).
+TAXIWAY_STRIP_BAND_MIN_DOWN_SLOPE = 0.015
+TAXIWAY_STRIP_BAND_MAX_DOWN_SLOPE = 0.05
+TAXIWAY_STRIP_GRADED_HALF_WIDTH_BY_LETTER = {
+    "A": 10.25, "B": 11.0, "C": 12.5, "D": 18.5, "E": 19.0, "F": 22.0,
+}
+
+
+def taxiway_strip_graded_half_width_for_letter(letter) -> float:
+    """OMGWS-derived graded half-width (m) of the taxiway strip for ICAO
+    code ``letter`` — the zone-2 outer bound of the adjacent-ground
+    corridor (``TAXIWAY_STRIP_GRADED_HALF_WIDTH_BY_LETTER``).  An
+    unknown / None letter (unclassified OSM taxiway) falls back to the
+    widest NARROW-band value (code C, 12.5 m) — never a wide-body D–F
+    width for a taxiway we could not size."""
+    return TAXIWAY_STRIP_GRADED_HALF_WIDTH_BY_LETTER.get(
+        str(letter).upper() if letter else "", 12.5)
+
+
+# ZONE 3 — ungraded portion (beyond the graded band, still inside the
+# reach).  NO downward mandate: a cliff beyond the graded portion is
+# LAWFUL (the boundary-bridge killer — the DEM wins below).  Only RISING
+# ground is capped, at ≤5 % upward toward the pavement: ICAO Annex 14
+# §3.4.16 (runway strip) / §3.11.6 (taxiway strip).  The outward reach
+# bound reuses CLEARANCE_MAX_REACH_M (runway 300 m / taxiway 100 m);
+# beyond it the ground is ungoverned here (the OLS transitional surface
+# takes over — docs/grade_law_gap_audit.md GAP 1).
+ADJACENT_GROUND_UNGRADED_STRIP_MAX_UP_SLOPE = 0.05
+
+# APRON edges.  NO code mandates grading beyond an apron edge (positive
+# research finding): the only governed band is the FAA-RECOMMENDED
+# shoulder — 10 ft (3 m) at 1–3 % down, then 3–5 % beyond (FAA AC
+# 150/5300-13B §5.9.2, a RECOMMENDATION, not a requirement; ICAO §3.13 /
+# EASA E.360 bound only apron-SURFACE slopes + rising stand-clearance
+# obstacles).  Beyond the shoulder the corridor takes zone-3 semantics
+# (rising ground ≤5 %, floor free); the tighter stand-clearance / wingtip
+# ceiling is applied separately where stricter.
+APRON_SHOULDER_WIDTH_M = 3.0
+APRON_SHOULDER_MIN_DOWN_SLOPE = 0.01
+APRON_SHOULDER_MAX_DOWN_SLOPE = 0.03
+# The FAA "then 3–5 %" continuation beyond the shoulder (§5.9.2): the
+# DOWN-fill RENDER TARGET the emitter (slice 3) uses inside the zone-3
+# free-floor region where the DEM has fallen away — analogous to the
+# zone-1 mid-band render target, NOT a mandatory corridor (the law's
+# zone-3 ceiling is the ≤5 % UP cap above; the floor stays free).
+APRON_BEYOND_SHOULDER_MIN_DOWN_SLOPE = 0.03
+APRON_BEYOND_SHOULDER_MAX_DOWN_SLOPE = 0.05
+# Retaining-WALL threshold (ruling 3): a vertical wall face replaces
+# graded fill where the DEM sits more than this many metres below the
+# apron shoulder edge (reuse the tunnel ``retaining_wall`` emitter; tune
+# at KSVH / KEXX — slice 3).
+APRON_EDGE_WALL_MIN_DROP_M = 1.5
 
 
 def runway_code_number(length_m: float) -> int:

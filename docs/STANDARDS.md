@@ -80,7 +80,7 @@ The runway profile is built and re-checked by:
 | Obstruction threshold (terrain rise above surface edge that triggers a cut) | 1.0 m (taxiway, runway & service road) | design | `config.py` `CLEARANCE_OBSTRUCTION_THRESHOLD_M` |
 | Lateral strip slope | 0 (flat shadow, cut-only) | design (a non-zero slope carves canyons where pavement sits below its surroundings) | `config.py` `CLEARANCE_LATERAL_MAX_SLOPE` |
 | Max outward reach (earthwork bound) | taxiway 100 m, runway 300 m | design (must exceed code-4 RESA 240 m) | `config.py` `CLEARANCE_MAX_REACH_M` |
-| Service-road roadside clearance band | 15 m beyond the road edge, cut-only | design (AASHTO Roadside Design Guide clear-zone-informed; a ground-vehicle road has no wingtip envelope, so the band is the reach) | `config.py` `CLEARANCE_MAX_REACH_M["service"]`, `CLEARANCE_OBSTRUCTION_THRESHOLD_M["service"]`; walker: `clearance.emit_surface_clearance_cuts` Pass A3 |
+| Service-road roadside clearance band | 15 m beyond the road edge, cut-only | **design choice, NOT an AASHTO mandate** — FAA sets no service-road grade/clear-zone numbers (width/marking only); the AASHTO Roadside Design Guide low-speed clear zone is only 2–3 m. Our 15 m band is a conservative design value (a ground-vehicle road has no wingtip envelope, so the band is the reach). Do not cite it to AASHTO as a requirement (2026-07-08 audit) | `config.py` `CLEARANCE_MAX_REACH_M["service"]`, `CLEARANCE_OBSTRUCTION_THRESHOLD_M["service"]`; walker: `clearance.emit_surface_clearance_cuts` Pass A3 |
 
 The clearance pass is `clearance.emit_surface_clearance_cuts`: it samples the DEM inside the
 protected band and cuts terrain that rises above the adjacent surface-edge altitude down to a
@@ -132,3 +132,41 @@ Notable FAA-vs-EASA deltas: FAA keys runways to AAC, EASA/ICAO to code letter (n
 agree); FAA mandates a 1% taxiway minimum + centerline crown, EASA/ICAO have no taxiway
 minimum and don't mandate crown; ICAO/EASA allow single-crossfall runways where rain-wind
 justifies.
+
+## Adjacent-ground grade law — lateral corridor off a pavement edge — RESEARCHED 2026-07-08
+
+The LATERAL generalization of the runway-end skirt (which is the LONGITUDINAL instance of
+the same idea): ground beside a paved surface is governed as a two-zone-plus-ungraded
+**corridor** off the pavement edge — a signed `(floor_offset, ceiling_offset)` envelope
+relative to the edge elevation, as a function of lateral distance `d`. Design, primary-
+verified regulatory model and the four Noah rulings: `docs/adjacent_ground_grade_law_plan.md`.
+Law function: `grade_law.adjacent_ground_envelope(role, code_number, code_letter, d)`
+(pure; the bounds ACCUMULATE across zones so they are continuous in `d`). Verified from
+FAA AC 150/5300-13B w/ Chg 1, ICAO Annex 14 Vol I 8th ed., EASA CS-ADR-DSN Issue 7
+(ICAO/EASA strip text is word-identical).
+
+**Ruling 1 (ENFORCE FULLY):** each graded zone is a mandatory-DOWN band `[min, max]` with
+direction, exactly as the FAA writes it — a FLAT surround (offset 0) is OUTSIDE the corridor
+in a down-mandatory band, so flat surrounds beside pavement are regraded to at least the
+minimum fall. Where FAA mandates DOWN and ICAO merely permits UP, FAA wins (maximal
+conformance; one blended global ruleset).
+
+| Rule | Value | Standard | Implemented in |
+|------|-------|----------|----------------|
+| Drainage lip width (zone 1, runway & taxiway strips) | 3 m (10 ft) | FAA AC 150/5300-13B Fig 3-33 Detail A; §4.14.2 (first 10 ft) | `config.py` `ADJACENT_GROUND_LIP_WIDTH_M` |
+| Drainage lip transverse slope (mandatory DOWN) | 3–5% down | FAA Fig 3-33 Detail A (3–5% negative for 10 ft); FAA TSA 5%±0.5% (§4.14.2); ICAO Annex 14 §3.4.15 (negative ≤5%) | `config.py` `ADJACENT_GROUND_LIP_{MIN,MAX}_DOWN_SLOPE` |
+| Runway graded strip — transverse fall (zone 2) | min 1.5%; max 3% (code 3/4 ≈ AAC C–E) / 5% (code 1/2 ≈ AAC A/B) | FAA AC 150/5300-13B Table 3-6 S-3 (RSA side slope 1.5–5% A/B, 1.5–3% C–E; FAA has a 1.5% MINIMUM, ICAO none); ICAO Annex 14 §3.4.15 | `config.py` `RUNWAY_STRIP_BAND_MIN_DOWN_SLOPE`, `RUNWAY_STRIP_BAND_MAX_DOWN_SLOPE_BY_CODE` |
+| Runway graded strip — width (zone-2 outer bound) | 30 / 40 / 75 / 75 m by ICAO code number | ICAO Annex 14 §3.4.8–9 (graded portion) — **reuses** the strip half-width, no duplicate | `config.py` `RUNWAY_STRIP_HALF_WIDTH_BY_CODE` (existing) |
+| Taxiway graded strip — transverse fall (zone 2) | 1.5–5% down (UP ≤2.5% C–F / 3% A/B) | ICAO Annex 14 §3.11.5 / EASA CS-ADR-DSN.D.280; FAA TSA 1.5–5% (§4.5.3, §4.14.2) | `config.py` `TAXIWAY_STRIP_BAND_{MIN,MAX}_DOWN_SLOPE` |
+| Taxiway graded strip — width (OMGWS-derived, by code letter) | A 10.25 / B 11 / C 12.5 / D 18.5 / E 19 / F 22 m | ICAO Annex 14 §3.11.4 / EASA CS-ADR-DSN.D.325(b) (OMGWS <4.5 / 4.5–6 / 6–9 m → 10.25/11/12.5; D/E/F → 18.5/19/22) | `config.py` `TAXIWAY_STRIP_GRADED_HALF_WIDTH_BY_LETTER`, `taxiway_strip_graded_half_width_for_letter()` |
+| Ungraded strip (zone 3) — rising-ground cap; NO downward mandate | ceiling ≤5% UP; floor unbounded (cliffs lawful) | ICAO Annex 14 §3.4.16 (runway strip) / §3.11.6 (taxiway strip) — open channels / drops permitted only in the non-graded strip | `config.py` `ADJACENT_GROUND_UNGRADED_STRIP_MAX_UP_SLOPE`; floor `None` in `grade_law.adjacent_ground_envelope` |
+| Adjacent-ground outward reach (earthwork bound) | runway 300 m / taxiway 100 m | design (must exceed code-4 RESA 240 m) — **reuses** the clearance reach | `config.py` `CLEARANCE_MAX_REACH_M` (existing) |
+| Apron shoulder (the only governed band beyond an apron edge) | 3 m at 1–3% down | FAA AC 150/5300-13B §5.9.2 (10 ft shoulder at 1–3%) — a RECOMMENDATION, not a requirement; no code mandates grading beyond an apron edge | `config.py` `APRON_SHOULDER_WIDTH_M`, `APRON_SHOULDER_{MIN,MAX}_DOWN_SLOPE` |
+| Apron beyond-shoulder fill render target (zone-3 free-floor region) | 3–5% down | FAA AC 150/5300-13B §5.9.2 ("then 3–5% beyond") — a render target, not a corridor | `config.py` `APRON_BEYOND_SHOULDER_{MIN,MAX}_DOWN_SLOPE` |
+| Apron edge retaining-wall threshold | 1.5 m drop below the shoulder edge | design (ruling 3; grade-to-edge + vertical drop/retaining wall is lawful where no RSA/OFA/TOFA overlaps — reuse the tunnel `retaining_wall` emitter) | `config.py` `APRON_EDGE_WALL_MIN_DROP_M` |
+| Edge drop-off tolerance, pavement↔unpaved | 1.5 in ± 0.5 in | FAA (all pavement types); ICAO "flush" (§3.4.10) | (documented; enforced via the flush edge = lip start) |
+
+Runway ENDS are OUT OF SCOPE of this lateral law — the longitudinal runway-end skirt law
+(above / `grade_law.runway_end_skirt_*`) owns terrain beyond a runway end. Service roads
+keep the unchanged 15 m cut-only flat shadow (see the corrected note in "Lateral (wingtip)
+clearance" — a design choice, not an AASHTO mandate).
