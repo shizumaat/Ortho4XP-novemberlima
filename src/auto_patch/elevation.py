@@ -576,7 +576,8 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
     # crossing-carve slice lifts this).
     single_poly_refs: set = set()
     _single_poly_candidates: dict = {}
-    _single_poly_crossing_refs: set = set()
+    _single_poly_crossing_specs: list = []
+    _single_poly_ring_pieces: dict = {}
     if RUNWAY_SINGLE_POLY and runway_profile_state:
         def _single_poly_ref(desig_pair) -> str:
             a, b = desig_pair
@@ -591,23 +592,42 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
                 _built = None
             if _built is not None:
                 _single_poly_candidates[_single_poly_ref(_pair)] = _built
+        # Runway-runway CROSSINGS (slice 5): pairs whose PHYSICAL AXES
+        # intersect and whose rings overlap non-trivially (the
+        # ``_resolve_runway_crossings`` pass-1 discriminator) are
+        # carved: the crossing junction = union of both refs' station
+        # slabs over the overlap, each ring loses that slab (the cut
+        # line passes through existing station vertices), and the
+        # junction takes the inverse-distance profile blend.  A
+        # close-pass overlap with NO axis meeting stays whole — that
+        # is the overlap-clip pass's job, exactly as with segments.
         _candidate_refs = list(_single_poly_candidates)
+        _crossing_sites = []
         for _i in range(len(_candidate_refs)):
+            _ra = _candidate_refs[_i]
+            _ga = _single_poly_candidates[_ra][2]
+            _axis_a = LineString([_ga['axis_a'], _ga['axis_b']])
             for _j in range(_i + 1, len(_candidate_refs)):
+                _rb = _candidate_refs[_j]
+                _gb = _single_poly_candidates[_rb][2]
                 try:
-                    _overlap = _single_poly_candidates[
-                        _candidate_refs[_i]][0].intersection(
-                        _single_poly_candidates[_candidate_refs[_j]][0])
+                    if not _axis_a.intersects(
+                            LineString([_gb['axis_a'], _gb['axis_b']])):
+                        continue
+                    _overlap = _single_poly_candidates[_ra][0].intersection(
+                        _single_poly_candidates[_rb][0])
                 except _GEOM_EXC:
                     continue
-                # 5 m² ignores shared-edge touches between abutting
-                # non-crossing runways; a genuine crossing overlaps by
-                # the full runway width.
-                if not _overlap.is_empty and _overlap.area > 5.0:
-                    _single_poly_crossing_refs.add(_candidate_refs[_i])
-                    _single_poly_crossing_refs.add(_candidate_refs[_j])
-        single_poly_refs = (set(_single_poly_candidates)
-                            - _single_poly_crossing_refs)
+                if _overlap.is_empty or _overlap.area < 20.0:
+                    continue
+                _crossing_sites.append((_ra, _rb, _overlap))
+        try:
+            (_single_poly_crossing_specs,
+             _single_poly_ring_pieces) = _carve_single_poly_crossings(
+                _single_poly_candidates, _crossing_sites)
+        except _GEOM_EXC:
+            _single_poly_crossing_specs, _single_poly_ring_pieces = [], {}
+        single_poly_refs = set(_single_poly_candidates)
 
     if runway_segment_chain:
         # Drop the single-rect runway shapes; replace with segments.
@@ -618,27 +638,42 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
         # skips their per-segment entries.  A fully-flat profile keeps
         # the flat ``altitude=`` form (same class as the MULTI_FLAT
         # consolidation — ``stitch_pavement_to_flat_runways`` keys off
-        # it); anything else is per-vertex from birth.
+        # it); anything else is per-vertex from birth.  A crossing-
+        # carved ref contributes its remainder PIECES instead of the
+        # whole ring; the crossing junction itself is appended below.
         for _ring_ref in sorted(single_poly_refs):
-            _ring_poly, _ring_alts = _single_poly_candidates[_ring_ref]
-            _ring_shape = BuiltShape(
-                polygon=_ring_poly, role=ROLE_RUNWAY, ref=_ring_ref,
-                from_single_poly=True)
-            if (max(_ring_alts) - min(_ring_alts)
-                    < _SINGLE_POLY_FLAT_TOL_M):
-                _ring_shape.altitude = round(
-                    sum(_ring_alts[:-1]) / (len(_ring_alts) - 1), 2)
+            if _ring_ref in _single_poly_ring_pieces:
+                _piece_list = _single_poly_ring_pieces[_ring_ref]
             else:
-                _ring_shape.node_altitudes = list(_ring_alts)
-            layout.shapes.append(_ring_shape)
-            new_runway_polys.append(_ring_poly)
+                _rp, _ra, _rg = _single_poly_candidates[_ring_ref]
+                _piece_list = [(_rp, _ra)]
+            for _ring_poly, _ring_alts in _piece_list:
+                _ring_shape = BuiltShape(
+                    polygon=_ring_poly, role=ROLE_RUNWAY, ref=_ring_ref,
+                    from_single_poly=True)
+                if (max(_ring_alts) - min(_ring_alts)
+                        < _SINGLE_POLY_FLAT_TOL_M):
+                    _ring_shape.altitude = round(
+                        sum(_ring_alts[:-1]) / (len(_ring_alts) - 1), 2)
+                else:
+                    _ring_shape.node_altitudes = list(_ring_alts)
+                layout.shapes.append(_ring_shape)
+                new_runway_polys.append(_ring_poly)
+        for _xing_poly, _xing_alts, _xing_ref in _single_poly_crossing_specs:
+            layout.shapes.append(BuiltShape(
+                polygon=_xing_poly, role=ROLE_RUNWAY_CROSSING,
+                ref=_xing_ref, node_altitudes=list(_xing_alts)))
+        if _single_poly_crossing_specs:
+            from .pavement.runways import (
+                _absorb_crossing_vertices_into_adjacent_rects)
+            _absorb_crossing_vertices_into_adjacent_rects(layout)
         if single_poly_refs:
             UI.vprint(1,
                 f"  [pav-builder] {icao}: de-seg — single-poly runway "
                 f"ring for {len(single_poly_refs)} ref(s)"
-                + (f", {len(_single_poly_crossing_refs)} crossing "
-                   f"ref(s) kept segmented"
-                   if _single_poly_crossing_refs else "")
+                + (f", {len(_single_poly_crossing_specs)} crossing "
+                   f"junction(s) carved"
+                   if _single_poly_crossing_specs else "")
                 + ".")
         # Fallback ref when a segment tuple doesn't carry a desig pair
         # (older chain entries before 2026-05-14 didn't tag the source
@@ -2729,7 +2764,203 @@ def _build_single_poly_runway_ring(state: dict, lat0: float, lon0: float,
         # A repaired/cleaned ring would break the vertex↔altitude
         # correspondence — fall back to the segmented path instead.
         return None
-    return poly, alts + [alts[0]]
+    geometry = {
+        'axis_a': (ax, ay), 'axis_b': (bx, by),
+        'length_m': length, 'width_m': width,
+        'unit': (ux, uy), 'perp': (px, py),
+        'stations': stations,          # kept (fraction, elev) pairs
+        'fractions': list(fractions),  # full profile sample list
+        'elevs': list(elevs),
+    }
+    return poly, alts + [alts[0]], geometry
+
+
+def _single_poly_profile_alt(geometry: dict, x: float, y: float) -> float:
+    """Profile value at the axis projection of ``(x, y)`` — the same
+    linear interpolation ``runway_redistribute._interp_profile`` uses,
+    against the ring's full profile sample list."""
+    ax, ay = geometry['axis_a']
+    ux, uy = geometry['unit']
+    length = geometry['length_m']
+    t = ((x - ax) * ux + (y - ay) * uy) / length
+    fractions = geometry['fractions']
+    elevs = geometry['elevs']
+    if t <= fractions[0]:
+        return float(elevs[0])
+    if t >= fractions[-1]:
+        return float(elevs[-1])
+    for k in range(len(fractions) - 1):
+        f0, f1 = fractions[k], fractions[k + 1]
+        if f0 <= t <= f1:
+            if f1 - f0 < 1e-12:
+                return float(elevs[k])
+            u = (t - f0) / (f1 - f0)
+            return float(elevs[k] + u * (elevs[k + 1] - elevs[k]))
+    return float(elevs[-1])
+
+
+def _single_poly_station_slab(geometry: dict, overlap) -> Polygon | None:
+    """The ring's axis-aligned SLAB between the kept stations bracketing
+    ``overlap`` — the de-seg equivalent of "the sub-rects of this ref
+    that overlap the other runway" (the legacy crossing junction is the
+    union of those; ``_resolve_runway_crossings`` pass 2).  Slab corners
+    are computed with the RING BUILDER's own lerp so the cut line passes
+    exactly through the ring's station vertices (shared corners, no
+    T-verts)."""
+    ax, ay = geometry['axis_a']
+    bx, by = geometry['axis_b']
+    ux, uy = geometry['unit']
+    px, py = geometry['perp']
+    length = geometry['length_m']
+    ts = []
+    try:
+        coords = list(overlap.exterior.coords)
+    except _GEOM_EXC:
+        return None
+    for x, y in coords:
+        ts.append(((x - ax) * ux + (y - ay) * uy) / length)
+    if not ts:
+        return None
+    t_lo, t_hi = min(ts), max(ts)
+    station_fractions = [f for f, _e in geometry['stations']]
+    f_lo = max((f for f in station_fractions if f <= t_lo + 1e-9),
+               default=station_fractions[0])
+    f_hi = min((f for f in station_fractions if f >= t_hi - 1e-9),
+               default=station_fractions[-1])
+    if f_hi - f_lo < 1e-9:
+        return None
+
+    def _at(f):
+        return (ax + f * (bx - ax), ay + f * (by - ay))
+
+    lo_x, lo_y = _at(f_lo)
+    hi_x, hi_y = _at(f_hi)
+    try:
+        slab = Polygon([
+            (lo_x + px, lo_y + py), (hi_x + px, hi_y + py),
+            (hi_x - px, hi_y - py), (lo_x - px, lo_y - py)])
+    except _GEOM_EXC:
+        return None
+    if slab.is_empty or not slab.is_valid:
+        return None
+    return slab
+
+
+def _carve_single_poly_crossings(candidates: dict, sites: list):
+    """Carve runway-runway crossings out of single-poly rings.
+
+    ``sites`` = [(ref_a, ref_b, overlap_polygon)] for pairs whose
+    physical axes intersect.  Returns ``(crossing_specs, ring_pieces)``:
+    crossing_specs = [(polygon, closed_alts, combined_ref)] to emit as
+    ROLE_RUNWAY_CROSSING; ring_pieces = {ref: [(polygon, closed_alts)]}
+    replacing the carved refs' whole rings.  A ref not in ring_pieces
+    keeps its original ring.  Mirrors the legacy resolution: crossing
+    polygon = union of both refs' station slabs over the overlap;
+    per-vertex altitudes = inverse-distance blend of the member
+    profiles; member surface between the bracketing stations is
+    REPLACED by the crossing junction."""
+    if not sites:
+        return [], {}
+    merged: list[tuple[set, Polygon]] = []
+    for ref_a, ref_b, overlap in sites:
+        slab_a = _single_poly_station_slab(candidates[ref_a][2], overlap)
+        slab_b = _single_poly_station_slab(candidates[ref_b][2], overlap)
+        if slab_a is None or slab_b is None:
+            continue
+        try:
+            site_poly = unary_union([slab_a, slab_b])
+        except _GEOM_EXC:
+            continue
+        refs = {ref_a, ref_b}
+        placed = False
+        for k, (mrefs, mpoly) in enumerate(merged):
+            try:
+                touches = site_poly.intersects(mpoly)
+            except _GEOM_EXC:
+                touches = False
+            if touches:
+                merged[k] = (mrefs | refs,
+                             unary_union([mpoly, site_poly]))
+                placed = True
+                break
+        if not placed:
+            merged.append((refs, site_poly))
+
+    crossing_specs = []
+    carve_by_ref: dict = {}
+    for mrefs, mpoly in merged:
+        if mpoly.geom_type != "Polygon":
+            parts = [g for g in getattr(mpoly, "geoms", [])
+                     if g.geom_type == "Polygon"]
+            parts.sort(key=lambda p: -p.area)
+            if not parts:
+                continue
+            mpoly = parts[0]
+        try:
+            coords = list(mpoly.exterior.coords)[:-1]
+        except _GEOM_EXC:
+            continue
+        if len(coords) < 3:
+            continue
+        # Inverse-distance blend of member profiles (legacy parity:
+        # the vertex on one runway's edge takes ~100% of that
+        # runway's profile; the seam between regimes is smooth).
+        ring_alts: list[float] = []
+        ok = True
+        for cx, cy in coords:
+            from shapely.geometry import Point as _Pt
+            pt = _Pt(cx, cy)
+            weighted_sum = 0.0
+            weight_sum = 0.0
+            for ref in mrefs:
+                poly_ref, _alts, geom_ref = candidates[ref]
+                try:
+                    d = poly_ref.distance(pt)
+                except _GEOM_EXC:
+                    continue
+                e = _single_poly_profile_alt(geom_ref, cx, cy)
+                d_eff = max(d, 0.1)
+                w = 1.0 / (d_eff ** 2)
+                weighted_sum += e * w
+                weight_sum += w
+            if weight_sum <= 0:
+                ok = False
+                break
+            ring_alts.append(round(weighted_sum / weight_sum, 1))
+        if not ok:
+            continue
+        crossing_specs.append(
+            (mpoly, ring_alts + [ring_alts[0]],
+             "+".join(sorted(mrefs))))
+        for ref in mrefs:
+            carve_by_ref.setdefault(ref, []).append(mpoly)
+
+    ring_pieces: dict = {}
+    for ref, carve_polys in carve_by_ref.items():
+        poly_ref, _alts, geom_ref = candidates[ref]
+        try:
+            remainder = poly_ref.difference(unary_union(carve_polys))
+        except _GEOM_EXC:
+            continue
+        parts = ([remainder] if remainder.geom_type == "Polygon"
+                 else [g for g in getattr(remainder, "geoms", [])
+                       if g.geom_type == "Polygon"])
+        pieces = []
+        for part in parts:
+            if part.is_empty or part.area < 5.0:
+                continue
+            try:
+                part_coords = list(part.exterior.coords)[:-1]
+            except _GEOM_EXC:
+                continue
+            alts = [round(_single_poly_profile_alt(geom_ref, x, y), 2)
+                    for (x, y) in part_coords]
+            if len(alts) < 3:
+                continue
+            pieces.append((part, alts + [alts[0]]))
+        if pieces:
+            ring_pieces[ref] = pieces
+    return crossing_specs, ring_pieces
 
 
 def _orient_rect_for_altitude(shape: "BuiltShape",
