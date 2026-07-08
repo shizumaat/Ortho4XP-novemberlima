@@ -73,18 +73,33 @@ pavement edge, and the asymmetry is explicit everywhere:
   stand clearance / wingtip envelope, floor free).
 - Ends: delegate to the existing runway_end_skirt law (unchanged).
 
-DECISIONS (recommend, Noah to confirm):
-1. Do NOT enforce FAA's 1.5% transverse MINIMUM (drainage floor):
-   enforcing minimum slopes on flat surrounds carves artificial
-   relief; ICAO has no minimum.  Encode max caps only.
-2. Key runway strip by ICAO code number (existing constants);
-   taxiway graded width by the OMGWS table, derived from our code
-   letter (mapping in config with the table above); skip FAA
-   TSA-wingspan width (it's the same order at letters D–F and our
-   wingspan tables already drive wingtip clearance separately).
-3. Apron wall: where DEM sits far below the apron edge beyond the
-   3 m shoulder, emit the existing retaining_wall feature along the
-   edge (visual face), gated separately — Noah question outstanding.
+DECISIONS — NOAH RULED 2026-07-08 (all four):
+1. DRAINAGE MINIMUMS: **ENFORCE FULLY** (overrides the earlier skip
+   recommendation).  The envelope is a CORRIDOR, not just caps:
+   per-zone [min_slope, max_slope] with direction, exactly as FAA
+   writes them — zone-1 lip 3-5% DOWN (not 0-5%); runway RSA band
+   transverse 1.5-3% DOWN (C-E; 1.5-5% A/B); taxiway TSA band
+   1.5-5%; apron shoulder 1-3% DOWN then 3-5%.  Flat surrounds
+   beside pavement get regraded to at least the minimum (a code-4
+   runway's band falls ≥1.1 m over 75 m).  Where FAA mandates DOWN
+   and ICAO merely permits UP, FAA wins (the ruling's spirit =
+   maximal conformance; the repo applies one blended ruleset
+   globally, as it already does for profiles).  Emission therefore
+   covers most of every graded band (DEM is rarely inside a sloped
+   corridor) — the emitter must be efficient and the triangle
+   budget watched (wedge/triangle audits per slice).
+2. Keying: ICAO code number for runway strip (existing constants);
+   taxiway graded width by the OMGWS table derived from code letter;
+   skip FAA TSA-wingspan width (wingtip clearance governs that
+   envelope separately).  (Implementation-owned.)
+3. APRON EDGES: 3 m FAA shoulder (1-3% down) + **retaining-wall
+   face** where DEM sits >~1.5 m below the shoulder edge (reuse the
+   tunnel retaining_wall emitter; threshold constant, tune at
+   KSVH/KEXX).
+4. SEQUENCING: law arc starts NOW; the named solver items interleave
+   in parallel agents (file-ownership discipline).  OLS (gap-audit
+   GAP 1) is the FOLLOW-ON arc reusing this envelope machinery —
+   zones 1-3 here, the transitional/approach/conical surfaces next.
 
 ## RISING vs FALLING (the two directions, explicitly)
 
