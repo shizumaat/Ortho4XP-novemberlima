@@ -1608,6 +1608,24 @@ def _do_widen(
             shape.node_altitudes = current_alts + [current_alts[0]]
 
 
+def _polygonal_parts(geometry):
+    """Reduce a GeometryCollection to its polygonal parts.
+
+    shapely-2 difference()/intersection() return a GeometryCollection
+    carrying line/point crumbs wherever the operands are exactly tangent
+    (the same shapely-2 family as the global-slice fix — see
+    ``_polygonal_parts`` inside ``pavement/global_slice.py``, CYUL:
+    pavement tangent to the runway union).  The off-source carve in
+    ``_enforce_runway_1to1_sharing`` only ever means AREA pavement, so
+    the 1-D crumbs are dropped and the polygonal parts unioned back to
+    a Polygon / MultiPolygon.  Non-collections pass through unchanged.
+    """
+    if geometry is None or geometry.geom_type != "GeometryCollection":
+        return geometry
+    return unary_union([part for part in geometry.geoms
+                        if part.geom_type in ("Polygon", "MultiPolygon")])
+
+
 def _enforce_runway_1to1_sharing(layout: PavementLayout) -> None:
     """Rule 1 v4 — surgical runway-edge rewrite (user 2026-05-02).
 
@@ -1932,6 +1950,21 @@ def _enforce_runway_1to1_sharing(layout: PavementLayout) -> None:
             if big_off:
                 try:
                     trimmed = new_poly.difference(unary_union(big_off))
+                except _GEOM_EXC:
+                    trimmed = None
+                # shapely-2 difference() can return a GeometryCollection
+                # (polygonal parts + line/point crumbs where the carve
+                # boundary is tangent to the operands).  The split-keep
+                # branch below only understood MultiPolygon, so a
+                # collection fell through to ``_carved_ok = False`` and
+                # the fallback kept the WHOLE off-source gain: KCLT 18L
+                # frontage, junction #336 — the straightening chord swept
+                # ~17 k m² of grass, the carve GC-fell-back, and the
+                # phantom emitted as a 24.7 k m² junction 31 % on source.
+                # Reduce to the polygonal parts first (crumbs carry no
+                # area); an empty/degenerate reduction still falls back.
+                try:
+                    trimmed = _polygonal_parts(trimmed)
                 except _GEOM_EXC:
                     trimmed = None
                 # A carve that SPLITS the junction (the off-source piece

@@ -1606,12 +1606,6 @@ def _drop_off_source_residue(
     for i, s in enumerate(layout.shapes):
         if s.role not in (ROLE_APRON, ROLE_JUNCTION):
             continue
-        # Route-proximity CUT pieces are deliberate re-partitions of
-        # already-kept pavement: a near-band fragment can individually
-        # sit mostly off-source even though its PARENT passed this test
-        # (KCLT junction #255, 1.9 k m² dropped → user-visible hole).
-        if getattr(s, "from_route_proximity_cut", False):
-            continue
         if s.polygon is None or s.polygon.is_empty:
             continue
         try:
@@ -1631,9 +1625,24 @@ def _drop_off_source_residue(
         # pockets, 688-2447 m², exposed once the hole decompose split
         # them out of the big apron).  The size-capped branch keeps
         # its tight fraction for genuine-residue judgement calls.
+        # ORDERING CONSTRAINT: this near-zero drop is judged BEFORE the
+        # route-proximity-cut exemption below — a ~0%-on-source fragment
+        # is phantom pavement whatever pass minted it (KCLT 18R-end
+        # cluster: five 74-498 m² grass pieces, all flagged
+        # ``from_route_proximity_cut`` and all 0 % on source, emitted as
+        # apron/junction pavement over the RESA grass).
         if on / area <= 0.02:
             to_drop.append(i)
-        elif area < max_area_m2 and on / area < min_on_source_frac:
+            continue
+        # Route-proximity CUT pieces ABOVE the near-zero floor are
+        # deliberate re-partitions of already-kept pavement: a near-band
+        # fragment can individually sit mostly off-source even though its
+        # PARENT passed this test (KCLT junction #255, 1.9 k m² dropped →
+        # user-visible hole), so the size-capped fraction judgement below
+        # must not apply to them.
+        if getattr(s, "from_route_proximity_cut", False):
+            continue
+        if area < max_area_m2 and on / area < min_on_source_frac:
             to_drop.append(i)
 
     if not to_drop:

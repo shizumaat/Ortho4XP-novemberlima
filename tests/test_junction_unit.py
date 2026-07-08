@@ -226,3 +226,146 @@ def test_cluster_far_from_runway_keeps_plain_mean():
     # its mean (300.5, -50).
     assert (300.5, -50.0) in _exterior(junction_a)
     assert (300.5, -50.0) in _exterior(junction_b)
+
+
+# ── _enforce_runway_1to1_sharing: off-source carve vs shapely-2
+#    GeometryCollection (KCLT #336) ────────────────────────────────
+#
+# 2026-07-08 diagnosis: the runway-frontage straightening chord can
+# sweep in a large OFF-SOURCE region (grass along the frontage); the
+# carve subtracts it back out, but shapely-2 difference() can return a
+# GeometryCollection (polygonal parts + line/point crumbs where the
+# carve boundary is tangent to the operands).  The split-keep branch
+# only understood MultiPolygon, so a collection fell through to
+# ``_carved_ok = False`` and the FALLBACK kept the whole gain — KCLT
+# 18L: junction #336, ~17 k m² of grass emitted as a 24.7 k m²
+# junction 31 % on source.  ``_polygonal_parts`` (same reduction as
+# the global-slice / CYUL GeometryCollection fixes) now runs first.
+
+
+def test_polygonal_parts_reduces_geometry_collection():
+    """A GeometryCollection of polygons + line/point crumbs reduces to
+    its polygonal union; non-collections pass through unchanged."""
+    from shapely.geometry import (
+        GeometryCollection, LineString, MultiPolygon, Point,
+    )
+
+    from auto_patch.junction_rules import _polygonal_parts
+
+    piece_a = _rect(0.0, 0.0, 10.0, 10.0)
+    piece_b = _rect(20.0, 0.0, 30.0, 10.0)
+    collection = GeometryCollection([
+        piece_a, piece_b,
+        LineString([(50.0, 0.0), (51.0, 0.0)]),   # tangency crumb
+        Point(60.0, 0.0),
+    ])
+    reduced = _polygonal_parts(collection)
+    assert reduced.geom_type in ("Polygon", "MultiPolygon")
+    assert math.isclose(reduced.area, piece_a.area + piece_b.area)
+
+    untouched = _rect(0.0, 0.0, 5.0, 5.0)
+    assert _polygonal_parts(untouched) is untouched
+    multi = MultiPolygon([piece_a, piece_b])
+    assert _polygonal_parts(multi) is multi
+
+
+def test_runway_rewrite_carves_off_source_gain_through_collection(
+        monkeypatch):
+    """Synthetic KCLT-#336: the frontage rewrite's straightening chord
+    sweeps two >500 m² grass triangles; every polygonal difference()
+    result is wrapped into a GeometryCollection (the shapely-2 tangency
+    behaviour observed in production), and the carve must STILL remove
+    the off-source gain instead of falling back uncarved.
+    """
+    from shapely.geometry import GeometryCollection, LineString, Point
+    from shapely.geometry.base import BaseGeometry
+
+    from auto_patch.junction_rules import _enforce_runway_1to1_sharing
+
+    real_difference = BaseGeometry.difference
+
+    def crumbed_difference(self, other, **kwargs):
+        result = real_difference(self, other, **kwargs)
+        if result.geom_type in ("Polygon", "MultiPolygon") \
+                and not result.is_empty:
+            parts = list(getattr(result, "geoms", [result]))
+            # A far-away hairline crumb: zero area, polygonal filters
+            # must ignore it — exactly the production tangency crumbs.
+            return GeometryCollection(
+                parts + [LineString([(-900.0, -900.0),
+                                     (-899.0, -900.0)])])
+        return result
+
+    monkeypatch.setattr(BaseGeometry, "difference", crumbed_difference)
+
+    runway = BuiltShape(polygon=_rect(0.0, 0.0, 200.0, 45.0),
+                        role=ROLE_RUNWAY)
+    # Junction strip hugging the runway frontage x∈[60,140]: the five
+    # y=45 vertices form ONE runway-adjacent run, replaced by the two
+    # runway corners (0,45)/(200,45) — the chord then sweeps two
+    # 750 m² off-source triangles (x∈[0,60] and x∈[140,200]).
+    junction = BuiltShape(
+        polygon=Polygon([(60.0, 45.0), (80.0, 45.0), (100.0, 45.0),
+                         (120.0, 45.0), (140.0, 45.0),
+                         (140.0, 70.0), (60.0, 70.0)]),
+        role=ROLE_JUNCTION)
+    layout = _layout(runway, junction)
+    layout.runway_union = runway.polygon
+    # Source pavement = exactly the junction body (the grass beyond it
+    # carries no source pavement).
+    layout.source_pavement_union = junction.polygon
+
+    _enforce_runway_1to1_sharing(layout)
+
+    carved = junction.polygon
+    assert carved.geom_type == "Polygon"
+    # The original on-source body is kept …
+    assert carved.covers(Point(100.0, 60.0))
+    # … and the swept grass triangles are carved back out (the
+    # uncarved fallback would keep both probe points).
+    assert not carved.covers(Point(30.0, 60.0))
+    assert not carved.covers(Point(170.0, 60.0))
+    # Majority of the carved shape rests on source pavement (only the
+    # runway-side halo strip may remain off-source).
+    on_source = carved.intersection(
+        layout.source_pavement_union).area / carved.area
+    assert on_source > 0.6
+
+
+# ── _drop_off_source_residue: near-zero drop vs the route-proximity
+#    exemption (KCLT 18R-end cluster) ───────────────────────────────
+#
+# 2026-07-08 diagnosis: pieces minted by the apron route-proximity CUT
+# carry ``from_route_proximity_cut`` and were exempted from the whole
+# off-source residue drop — including its near-zero branch, so five
+# 74-498 m² 0 %-on-source grass pieces at KCLT's 18R end emitted as
+# apron/junction pavement.  ORDERING CONSTRAINT: a ~0 %-on-source
+# fragment is phantom whatever its provenance, so the near-zero drop
+# is judged BEFORE the exemption; partial-coverage cut pieces above
+# the floor keep the exemption (they are re-partitions of pavement
+# their PARENT legitimately kept).
+
+
+def test_off_source_drop_near_zero_beats_route_proximity_exemption():
+    from auto_patch.junction_repair import _drop_off_source_residue
+
+    source = _rect(0.0, 0.0, 100.0, 100.0)
+    # 400 m² cut piece with ZERO source pavement under it → phantom,
+    # dropped despite the route-proximity flag.
+    phantom = BuiltShape(polygon=_rect(200.0, 200.0, 220.0, 220.0),
+                         role=ROLE_JUNCTION,
+                         from_route_proximity_cut=True)
+    # 400 m² cut piece 35 % on source (x∈[93,100] band): below the 50 %
+    # size-capped threshold, but a deliberate re-partition of kept
+    # pavement — the exemption must preserve it (Fix C territory).
+    partial = BuiltShape(polygon=_rect(93.0, 0.0, 113.0, 20.0),
+                         role=ROLE_JUNCTION,
+                         from_route_proximity_cut=True)
+    layout = _layout(phantom, partial)
+    layout.source_pavement_union = source
+
+    dropped = _drop_off_source_residue(layout)
+
+    assert dropped == 1
+    assert len(layout.shapes) == 1
+    assert layout.shapes[0] is partial
