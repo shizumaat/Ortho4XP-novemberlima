@@ -104,6 +104,33 @@
 * A7 NEW: HECA break growth 5891→6176 at gate-on is NOT A2's root
   (pair >1.5 km from any break region) — solver-time, own trace,
   after A3.
+* KCLT #336 PHANTOM (Noah in-sim report post-bake) FIXED (5782ab2):
+  slice EXONERATED (faces born 100% on-source); the 24.7k m² @31%
+  junction spanning 18L = _enforce_runway_1to1_sharing's
+  straightening chord sweeping grass + its off-source carve
+  FALLING BACK on a GeometryCollection (split-keep handled only
+  MultiPolygon — the recurring shapely-2 class); the 0%-source
+  sliver cluster = route-proximity-cut pieces shielded from
+  _drop_off_source_residue by the rpc flag.  Fix A: polygonal-parts
+  filter in the carve; Fix B: near-zero on-source drop precedes the
+  rpc exemption.  KCLT off-source 8→2 (#336 GONE; region now apron
+  @95% + junctions @100%); HECA off-source 1→0 (the 30l apron #220
+  phantom dead); all canaries byte-identical; suites 6/10; no
+  real-source piece dropped (all enumerated ≤0.2%).  Provenance:
+  the CLASS predates R1 but #336's face was R1-reshaped (R1 shrank
+  the old −80.966 giant and the chord moved to 18L).  REMAINING =
+  Fix C (formation-time source-clip for partial-coverage bands:
+  KCLT #278 8253 m²@35% + #763 383 m²@32%) — own gated slice,
+  candidate to bundle with the adjacent-ground law arc.
+* BOUNDARY-BRIDGE RETIREMENT design SHIPPED as
+  docs/adjacent_ground_grade_law_plan.md (0e085b8): primary-verified
+  regs research (two-zone profile: 3 m drainage lip falls AWAY,
+  bounded graded portion by role/code, then ≤5% UP cap only — NO
+  downward mandate beyond the graded band = cliffs lawful; aprons
+  have NO mandated area beyond the edge — wall lawful).  Law =
+  lateral generalization of the skirt; 3 decisions awaiting Noah in
+  the doc (FAA 1.5% minimum skipped, OMGWS keying, apron wall
+  rendering).
 * NOAH: bake after A1/A2 land (his call); restart Ortho4XP first
   (GUI caches auto_patch imports).
 * Section C cleanup unchanged (after in-sim soak, byte-identical
