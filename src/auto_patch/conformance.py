@@ -32,6 +32,7 @@ from .layout import (
     BuiltShape,
     PavementLayout,
     SHARED_VERTEX_TOL_M,
+    VERTEX_ALT_MERGE_TOL_M,
     corner_alts_from_high_low,
 )
 
@@ -99,6 +100,136 @@ def _vertex_alts(shape, n):
     if shape.altitude is not None:
         return [shape.altitude] * n
     return None
+
+
+def _make_insert_altitude(layout, elig):
+    """Build THE altitude rule for a vertex INSERTED on a shape's edge —
+    shared by all three insert passes (``enforce_conformance``,
+    ``_resolve_edge_crossings``, ``_resolve_yielding_tjunctions``).
+
+    The historical rule was a plain lerp of the host edge's emitted
+    altitudes.  That lerp is CROWN-UNAWARE: the spine crown (part 30)
+    emits ``z = z′ − c`` where ``c`` is a designed per-node drop, so a
+    host edge whose endpoints carry DIFFERENT drops is not linear in
+    emitted z — lerping across it re-derives a value the solver never
+    produced.  Measured at HECA (de-seg residual A2): the final weld
+    re-inserted a junction vertex the solver had placed at 136.298 into a
+    neighbour's crown-discontinuous edge, lerped 136.415, and the emit
+    consensus averaged the two claims to 136.36 — a 3.57 % within-shape
+    pair against the crowned runway-edge vertex 2.52 m away.
+
+    Resolution order:
+
+    1. COINCIDENT-ADOPT — the receiver is a SOFT airside shape (the
+       law's ``grade_graph.SOFT_VISIBILITY_ROLES`` family, the shapes the
+       solver value-welds) and the insert point interns — through the
+       canonical-point registry's own radius rule, the SAME rule
+       ``layout.to_osm`` assigns OSM node identity by — to a canonical
+       node carrying an already-emitted altitude on another eligible
+       ring: adopt that altitude, so the welded node keeps ONE value
+       (generalizes the overlay ``donor_alt`` path — a T-junction insert
+       IS another shape's vertex by construction).  Guards, measured at
+       KCLT (within 9 → 25 + runway_grade 0 → 5 without them):
+         * soft receivers only — a runway / rect / skirt ring is a value
+           AUTHORITY (profile plane / band law); it must keep its own
+           edge interpolation, never a neighbour's claim;
+         * a donor farther in VALUE than ``VERTEX_ALT_MERGE_TOL_M`` from
+           the edge's own interpolation is a deliberate wall/cliff (the
+           emitter's node-split rule) and is never adopted.
+    2. CROWN-AWARE INTERPOLATION — the host edge's endpoints carry
+       different crown drops: interpolate in uncrowned space
+       ``z′ = z + c`` and subtract the insert point's own drop (the same
+       transform ``crown.extend_field_to_new_ring_nodes`` applies to
+       post-solve ring inserts).  ALL drop lookups are EXACT-canonical
+       (a point that isn't a registered canonical node reads 0):
+         * ``z′`` lerp minus a linearly-INTERPOLATED drop is
+           algebraically the plain z lerp, so the transform only means
+           something when the insert IS a node with its OWN field entry;
+         * the validator assigns the emitted nid that same field value
+           (``check_grade._crown_drops_by_nid``), so exact lookups keep
+           the two readers consistent, while a radius lookup
+           (``crown_drop_at``'s 0.5 m nearest) stamps a neighbouring
+           node's FULL drop onto a mid-edge insert — measured at KCLT as
+           0.1–0.2 m dips on the 18L/36R ring near the crown taper.
+    3. Otherwise the plain lerp, expression-identical to the historical
+       code path — when the adopt guards don't all hold and the endpoint
+       drops are equal (``c`` cancels), the emit is byte-identical to the
+       pre-fix behaviour by construction.
+    """
+    # No import cycle: grade_graph never imports conformance.
+    from .grade_graph import SOFT_VISIBILITY_ROLES
+
+    soft_roles = frozenset(SOFT_VISIBILITY_ROLES)
+    registry = getattr(layout, "canonical_points", None)
+    donor_memo: dict = {"map": None}
+
+    def _donor_values():
+        """Canonical point → list of already-emitted altitudes at ring
+        vertices interning to it.  Built lazily (only when a pass
+        actually inserts a vertex).  Keyed through the registry's OWN
+        radius rule — the emit interns node identity the same way
+        (``layout.to_osm`` → ``registry.get_or_add``), so vertices that
+        will become ONE OSM node pool their claims here."""
+        if donor_memo["map"] is None:
+            by_cp: dict = {}
+            if registry is not None:
+                for s2 in elig:
+                    ring2 = _open_ring(s2.polygon)
+                    if ring2 is None:
+                        continue
+                    alts2 = _vertex_alts(s2, len(ring2))
+                    if alts2 is None:
+                        continue
+                    for (dx, dy), da in zip(ring2, alts2):
+                        if da is None:
+                            continue
+                        cp = registry.find_nearest(dx, dy, registry.tol_m)
+                        if cp is not None:
+                            by_cp.setdefault(cp, []).append(float(da))
+            donor_memo["map"] = by_cp
+        return donor_memo["map"]
+
+    def _is_canonical(x, y):
+        """True when (x, y) IS a registered canonical node (exact
+        identity — no radius matching; see the aliasing note)."""
+        return (registry is not None
+                and registry.find_nearest(x, y, registry.tol_m) == (x, y))
+
+    def insert_altitude(receiver_role, ax, ay, alt_a, bx, by, alt_b,
+                        t, px, py):
+        lerp = alt_a + t * (alt_b - alt_a)
+        # 1. coincident-adopt (soft receiver; node identity through the
+        # registry radius — the same rule the emit interns node ids by,
+        # so the adopted claim and the insert become ONE emitted node).
+        if receiver_role in soft_roles and registry is not None:
+            cp = registry.find_nearest(px, py, registry.tol_m)
+            if cp is not None:
+                donors = _donor_values().get(cp)
+                if donors:
+                    adopted = min(donors, key=lambda v: abs(v - lerp))
+                    if abs(adopted - lerp) <= VERTEX_ALT_MERGE_TOL_M:
+                        return adopted
+        # 2. crown-aware interpolation across a drop discontinuity — ONLY
+        # when all three points are provably canonical nodes, the one
+        # case where their field drops are exact for both readers.  Any
+        # non-canonical point falls through to the plain lerp (a radius
+        # drop lookup stamps a neighbouring node's FULL drop onto a
+        # mid-edge insert — measured at KCLT as 0.1-0.2 m dips on the
+        # 18L/36R ring near the crown taper; a false 0-drop reading
+        # would flip the discontinuity test the other way).
+        field = getattr(layout, "_crown_drop_key", None)
+        if (field and _is_canonical(ax, ay) and _is_canonical(bx, by)
+                and _is_canonical(px, py)):
+            c_a = field.get((ax, ay), 0.0)
+            c_b = field.get((bx, by), 0.0)
+            if c_a != c_b:
+                c_p = field.get((px, py), 0.0)
+                return (alt_a + c_a) + t * ((alt_b + c_b)
+                                            - (alt_a + c_a)) - c_p
+        # 3. plain lerp — byte-identical to the historical behaviour.
+        return lerp
+
+    return insert_altitude
 
 
 def _eligible(shape):
@@ -280,6 +411,7 @@ def enforce_conformance(layout: "PavementLayout",
                     donor_alt[(dx, dy)] = float(da)
     shapes_modified = 0
     vertices_inserted = 0
+    insert_altitude = _make_insert_altitude(layout, elig)
     from shapely.geometry import Polygon
 
     for s in elig:
@@ -325,9 +457,10 @@ def enforce_conformance(layout: "PavementLayout",
                     if _da is not None:
                         new_alts.append(_da)
                     else:
-                        a_i = alts[i]
-                        a_j = alts[(i + 1) % n]
-                        new_alts.append(a_i + t * (a_j - a_i))
+                        new_alts.append(insert_altitude(
+                            s.role, ax, ay, alts[i],
+                            bx, by, alts[(i + 1) % n],
+                            t, px, py))
                 inserted_here += 1
         if not inserted_here:
             continue
@@ -421,6 +554,7 @@ def _resolve_edge_crossings(layout: "PavementLayout") -> int:
         return 0
 
     n_inserted = 0
+    insert_altitude = _make_insert_altitude(layout, elig)
     for si, by_edge in inserts.items():
         shape = elig[si]
         ring = rings[si]
@@ -443,6 +577,8 @@ def _resolve_edge_crossings(layout: "PavementLayout") -> int:
                 seen: set = set()
                 a_i = alts[i] if alts is not None else None
                 a_j = alts[(i + 1) % n] if alts is not None else None
+                (ax, ay) = ring[i]
+                (bx, by) = ring[(i + 1) % n]
                 for t, X in sorted(by_edge[i]):
                     key = round(t, 4)
                     if key in seen:
@@ -450,7 +586,9 @@ def _resolve_edge_crossings(layout: "PavementLayout") -> int:
                     seen.add(key)
                     new_ring.append(X)
                     if new_alts is not None:
-                        new_alts.append(a_i + t * (a_j - a_i))
+                        new_alts.append(insert_altitude(
+                            shape.role, ax, ay, a_i, bx, by, a_j,
+                            t, X[0], X[1]))
                     added_here += 1
         if not added_here:
             continue
@@ -517,6 +655,7 @@ def _resolve_yielding_tjunctions(layout: "PavementLayout", tol: float) -> int:
             if t < vtx_tier.get(v, 99):
                 vtx_tier[v] = t
     n_inserted = 0
+    insert_altitude = _make_insert_altitude(layout, elig)
     for si, (shape, ring) in enumerate(zip(elig, rings)):
         if ring is None:
             continue
@@ -542,9 +681,10 @@ def _resolve_yielding_tjunctions(layout: "PavementLayout", tol: float) -> int:
             for t, (px, py) in _tjunctions_on_edge(ax, ay, bx, by, cands, tol):
                 new_ring.append((px, py))
                 if new_alts is not None:
-                    a_i = alts[i]
-                    a_j = alts[(i + 1) % n]
-                    new_alts.append(a_i + t * (a_j - a_i))
+                    new_alts.append(insert_altitude(
+                        shape.role, ax, ay, alts[i],
+                        bx, by, alts[(i + 1) % n],
+                        t, px, py))
                 added += 1
         if not added:
             continue
