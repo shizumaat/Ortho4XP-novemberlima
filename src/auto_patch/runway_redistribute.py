@@ -72,7 +72,7 @@ from .runway_regrade import regrade_runway, DEFAULT_ARC_K_M
 
 
 __all__ = ["redistribute_runway_profile", "apply_runway_flex",
-           "flex_slack_at"]
+           "flex_slack_at", "solve_profile_with_minimal_end_zone_cap"]
 
 
 def _bucket_key(x: float, y: float) -> Tuple[int, int]:
@@ -439,6 +439,106 @@ def _find_edge_boundary_crossings(
 _GEOM_EXC = (ValueError, TypeError, IndexError)
 
 
+def _worst_segment_over_main_cap(fractions: List[float],
+                                 elevs: List[float],
+                                 axis_length_m: float,
+                                 grade_cap: float = MAX_RUNWAY_GRADE):
+    """Worst consecutive-sample segment whose grade exceeds the MAIN
+    longitudinal cap, as ``(excess, midpoint_t)`` — or ``None`` when the
+    whole profile is law-compliant.  Shared by the minimal end-zone-cap
+    escalation and the flex VERIFY-AND-RELAX loop (same tolerance)."""
+    worst = None
+    for k in range(1, len(fractions)):
+        run = (fractions[k] - fractions[k - 1]) * axis_length_m
+        if run < 0.5:
+            continue
+        grade = abs(elevs[k] - elevs[k - 1]) / run
+        excess = grade - grade_cap - 1e-4
+        if excess > 0 and (worst is None or excess > worst[0]):
+            midpoint = 0.5 * (fractions[k] + fractions[k - 1])
+            worst = (excess, midpoint)
+    return worst
+
+
+def solve_profile_with_minimal_end_zone_cap(
+        fractions: List[float], elevs: List[float],
+        anchored: List[bool], phys_dist: float, *,
+        blast_a: float = 0.0, blast_b: float = 0.0) -> float:
+    """Run ``faa_joint_solve`` with the end-zone cap escalated MINIMALLY.
+
+    RELAXATION ORDER (user ruling 2026-07-08): the main longitudinal
+    grade cap (``MAX_RUNWAY_GRADE``, 1.5%) is LAW; the end-zone cap
+    (``RUNWAY_END_GRADE``, 0.8%, EASA/ICAO first/last-quarter comfort
+    rule) is a solver-internal PREFERENCE.  When hard anchors (CIFP
+    thresholds, tile-seam DEM pins) make both unsatisfiable, the
+    preference yields — and only by the minimum: the end-zone cap
+    escalates to the smallest value in (0.8%, 1.5%] whose solve leaves
+    no segment over the main cap.  Runways feasible at 0.8% keep 0.8%
+    verbatim (per-runway escalation only).
+
+    Without this, ``faa_hard_cap_pass`` midpoints the samples inside
+    the infeasible end-zone band and spills the anchor deficit into
+    the mid-runway as >1.5% segments (SPLP 02/20: CIFP threshold A
+    49.00 m at station 251 m → seam DEM pin 60.47 m at station 1023 m
+    needs +11.47 m, but the 0.8%-capped first quarter allows only
+    +8.68 m; the 2.78 m deficit emitted as a 1.52–1.97% mid-runway
+    ramp — a runway-LAW violation traded for the preference).
+
+    Escalation search: bisection on the end-zone cap over
+    (RUNWAY_END_GRADE, MAX_RUNWAY_GRADE], to 0.01%-grade granularity
+    (1e-4 absolute) — ceil(log2(0.007 / 1e-4)) = 7 joint-solve
+    attempts at most, each restarted from the SAME pre-solve sample
+    values (the joint solve is a mutating projection; its result is
+    path-dependent, so every attempt must start from identical
+    state).  If even the uniform main cap cannot satisfy the anchors,
+    the main-cap solve is kept as-was (least-bad; matches the
+    historical uniform-cap behaviour — the validator is the backstop).
+
+    Mutates ``elevs`` in place with the accepted solve.  Returns the
+    end-zone cap the accepted solve used.
+    """
+    initial_elevs = list(elevs)
+
+    def _attempt(end_zone_cap: float):
+        candidate = list(initial_elevs)
+        faa_joint_solve(
+            fractions, candidate, anchored, phys_dist,
+            blast_a=blast_a, blast_b=blast_b,
+            grade_cap=MAX_RUNWAY_GRADE,
+            end_grade_cap=end_zone_cap,
+            max_dg_per_m=MAX_RUNWAY_GRADE_CHANGE_PER_M)
+        compliant = _worst_segment_over_main_cap(
+            fractions, candidate, phys_dist) is None
+        return candidate, compliant
+
+    # The preference first: keep 0.8% verbatim whenever it is feasible.
+    candidate, compliant = _attempt(RUNWAY_END_GRADE)
+    if compliant:
+        elevs[:] = candidate
+        return RUNWAY_END_GRADE
+
+    # Preference infeasible with the hard anchors.  Escalate minimally:
+    # bisect for the smallest law-compliant end-zone cap.
+    infeasible_cap = RUNWAY_END_GRADE
+    accepted, compliant = _attempt(MAX_RUNWAY_GRADE)
+    if not compliant:
+        # Anchors infeasible even at the uniform LAW cap — keep the
+        # main-cap solve.
+        elevs[:] = accepted
+        return MAX_RUNWAY_GRADE
+    accepted_cap = MAX_RUNWAY_GRADE
+    while accepted_cap - infeasible_cap > 1e-4:
+        midpoint_cap = 0.5 * (accepted_cap + infeasible_cap)
+        candidate, compliant = _attempt(midpoint_cap)
+        if compliant:
+            accepted_cap = midpoint_cap
+            accepted = candidate
+        else:
+            infeasible_cap = midpoint_cap
+    elevs[:] = accepted
+    return accepted_cap
+
+
 def redistribute_runway_profile(
         layout,
         dem=None,
@@ -565,17 +665,28 @@ def redistribute_runway_profile(
         # Step 2: re-run the FAA gates on the full sample list.
         # Thresholds are still anchored (at their possibly-shifted
         # values from step 1), seams are anchored at their DEM
-        # altitudes, interior samples are free.  ``faa_joint_solve``
+        # altitudes, interior samples are free.  The joint solve
         # smooths the interior so every adjacent-edge grade stays
         # within ``MAX_RUNWAY_GRADE`` and every adjacent-triple ΔG
-        # stays within the K-factor cap.
-        faa_joint_solve(
+        # stays within the K-factor cap.  The end-zone cap (0.8%
+        # preference) escalates MINIMALLY when the hard anchors make
+        # it unsatisfiable alongside the main-cap LAW — see
+        # ``solve_profile_with_minimal_end_zone_cap``.
+        end_zone_cap = solve_profile_with_minimal_end_zone_cap(
             fractions, elevs, anchored, phys_dist,
             blast_a=state['blast_a_m'],
-            blast_b=state['blast_b_m'],
-            grade_cap=MAX_RUNWAY_GRADE,
-            end_grade_cap=RUNWAY_END_GRADE,
-            max_dg_per_m=MAX_RUNWAY_GRADE_CHANGE_PER_M)
+            blast_b=state['blast_b_m'])
+        if end_zone_cap > RUNWAY_END_GRADE + 1e-9:
+            try:
+                from O4_UI_Utils import vprint
+                vprint(1, f"  [pav-builder] runway {ref}: end-zone "
+                          f"grade preference "
+                          f"{RUNWAY_END_GRADE * 100:.1f}% infeasible "
+                          f"with hard anchors — escalated to "
+                          f"{end_zone_cap * 100:.2f}% (main "
+                          f"{MAX_RUNWAY_GRADE * 100:.1f}% cap is law).")
+            except ImportError:
+                pass
 
         # Persist the gated profile so later passes can evaluate the
         # runway's authoritative elevation at any point (``tile_cut``
@@ -623,6 +734,11 @@ def redistribute_runway_profile(
             'seam_t': [t for (t, _e) in seam_samples],
             'blast_a_m': state['blast_a_m'],
             'blast_b_m': state['blast_b_m'],
+            # The (possibly escalated) end-zone cap this profile was
+            # solved under.  The flex re-solve MUST reuse it — solving
+            # a ref under two different end-zone caps would make the
+            # flex re-stamp diverge from the redistributed profile.
+            'end_zone_cap': end_zone_cap,
         }
 
         # Evaluate the new profile at every runway sub-rect's vertex.
@@ -822,27 +938,23 @@ def apply_runway_flex(layout, demands: Dict[str, list]) -> Dict[str, list]:
                     fractions.insert(insert_at, t)
                     elevs.insert(insert_at, v)
                     anchored.insert(insert_at, True)
+            # Same end-zone cap the redistribute solve used for this
+            # ref (possibly escalated above 0.8% — see
+            # ``solve_profile_with_minimal_end_zone_cap``): the flexed
+            # profile must be gated identically or the flex re-stamp
+            # diverges from the redistributed profile.
             faa_joint_solve(
                 fractions, elevs, anchored, axis_len,
                 blast_a=float(profile.get('blast_a_m') or 0.0),
                 blast_b=float(profile.get('blast_b_m') or 0.0),
                 grade_cap=MAX_RUNWAY_GRADE,
-                end_grade_cap=RUNWAY_END_GRADE,
+                end_grade_cap=float(profile.get('end_zone_cap')
+                                    or RUNWAY_END_GRADE),
                 max_dg_per_m=MAX_RUNWAY_GRADE_CHANGE_PER_M)
             return fractions, elevs, anchored
 
         def _worst_over_cap(fractions, elevs):
-            worst = None
-            for k in range(1, len(fractions)):
-                run = (fractions[k] - fractions[k - 1]) * axis_len
-                if run < 0.5:
-                    continue
-                grade = abs(elevs[k] - elevs[k - 1]) / run
-                excess = grade - MAX_RUNWAY_GRADE - 1e-4
-                if excess > 0 and (worst is None or excess > worst[0]):
-                    midpoint = 0.5 * (fractions[k] + fractions[k - 1])
-                    worst = (excess, midpoint)
-            return worst
+            return _worst_segment_over_main_cap(fractions, elevs, axis_len)
 
         # VERIFY-AND-RELAX (2026-07-06): a jointly-infeasible target set
         # leaves faa_hard_cap_pass midpointing squeezed free samples —

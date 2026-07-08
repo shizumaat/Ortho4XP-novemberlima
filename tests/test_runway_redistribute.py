@@ -101,3 +101,75 @@ class TestInsertSeamAnchors:
         assert fractions == [0.0, 1.0]
         assert elevs == [10.0, 14.0]
         assert anchored == [True, True]
+
+
+class TestMinimalEndZoneCapEscalation:
+    """``solve_profile_with_minimal_end_zone_cap`` — the end-zone cap
+    (0.8% preference) yields MINIMALLY to the main-cap LAW (user ruling
+    2026-07-08): when hard anchors make the 0.8%-end-capped solve leave
+    a segment over the 1.5% main cap, the end-zone cap escalates to the
+    smallest law-compliant value in (0.8%, 1.5%]; a runway feasible at
+    0.8% keeps 0.8% verbatim."""
+
+    AXIS_LENGTH_M = 1000.0
+
+    def _profile(self, threshold_a: float, threshold_b: float):
+        """11 samples over [0, 1]: anchored thresholds at both ends,
+        free interior samples seeded on the straight line between."""
+        fractions = [k / 10.0 for k in range(11)]
+        elevs = [threshold_a
+                 + (threshold_b - threshold_a) * t for t in fractions]
+        anchored = [True] + [False] * 9 + [True]
+        return fractions, elevs, anchored
+
+    def _max_segment_grade(self, fractions, elevs):
+        return max(
+            abs(elevs[k] - elevs[k - 1])
+            / ((fractions[k] - fractions[k - 1]) * self.AXIS_LENGTH_M)
+            for k in range(1, len(fractions)))
+
+    def test_feasible_at_end_zone_preference_keeps_it_verbatim(self):
+        from auto_patch.runway_redistribute import (
+            RUNWAY_END_GRADE, solve_profile_with_minimal_end_zone_cap)
+        # 5 m over 1000 m = 0.5% uniform — comfortably inside 0.8%.
+        fractions, elevs, anchored = self._profile(0.0, 5.0)
+        cap = solve_profile_with_minimal_end_zone_cap(
+            fractions, elevs, anchored, self.AXIS_LENGTH_M)
+        assert cap == RUNWAY_END_GRADE
+        assert self._max_segment_grade(fractions, elevs) <= 0.008 + 1e-6
+
+    def test_escalates_minimally_when_preference_infeasible(self):
+        from auto_patch.runway_redistribute import (
+            MAX_RUNWAY_GRADE, RUNWAY_END_GRADE,
+            solve_profile_with_minimal_end_zone_cap)
+        # 13 m over 1000 m: feasible at the uniform 1.5% law (1.3%) but
+        # NOT at the 0.8% end zones (max rise 0.008*500 + 0.015*500 =
+        # 11.5 m < 13 m).  Closed-form minimal end cap ignoring the
+        # K-factor: 500*c + 0.015*500 = 13 → c = 1.1%; the vertical
+        # curve transitions push it slightly higher.
+        fractions, elevs, anchored = self._profile(0.0, 13.0)
+        cap = solve_profile_with_minimal_end_zone_cap(
+            fractions, elevs, anchored, self.AXIS_LENGTH_M)
+        # Escalated — but MINIMALLY (well below full relaxation to 1.5%).
+        assert cap > RUNWAY_END_GRADE
+        assert 0.0105 <= cap <= 0.0135
+        assert cap < MAX_RUNWAY_GRADE
+        # The accepted solve is law-compliant everywhere and keeps the
+        # hard anchors verbatim.
+        assert self._max_segment_grade(fractions, elevs) \
+            <= MAX_RUNWAY_GRADE + 1e-4 + 1e-9
+        assert elevs[0] == 0.0
+        assert elevs[-1] == 13.0
+
+    def test_infeasible_even_at_law_cap_keeps_main_cap_solve(self):
+        from auto_patch.runway_redistribute import (
+            MAX_RUNWAY_GRADE, solve_profile_with_minimal_end_zone_cap)
+        # 20 m over 1000 m = 2% between hard anchors: no end-zone cap
+        # can satisfy the law — the uniform main-cap solve is kept
+        # (best-effort; the validator is the backstop).
+        fractions, elevs, anchored = self._profile(0.0, 20.0)
+        cap = solve_profile_with_minimal_end_zone_cap(
+            fractions, elevs, anchored, self.AXIS_LENGTH_M)
+        assert cap == MAX_RUNWAY_GRADE
+        assert elevs[0] == 0.0
+        assert elevs[-1] == 20.0
