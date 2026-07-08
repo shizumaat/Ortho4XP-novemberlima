@@ -136,6 +136,76 @@ def test_service_junction_four_percent():
                for (_a, _b, cap) in sc.edges)
 
 
+def _deseg_runway_ring(length=800.0, width=40.0, stations=5):
+    """A de-segmented single-poly runway ring (length ≫ width): profile
+    stations as interior LONG-EDGE vertices, going up one edge and back the
+    other.  Keys are ring indices; vertex ``k`` and ``2*stations-1-k`` share a
+    station.  ``width²/length`` stays < the 5 m cluster tolerance so same-station
+    cross-edge vertices cluster (as they do on a real runway)."""
+    step = length / (stations - 1)
+    left = [(i * step, 0.0) for i in range(stations)]
+    right = [((stations - 1 - i) * step, width) for i in range(stations)]
+    ring = left + right
+    return ring, list(range(len(ring)))
+
+
+def test_runway_station_clustering_and_predicate():
+    """The station clusterer projects a de-seg ring's vertices onto the ref
+    axis and groups them at 5 m; same-cross-end vertices share a station, and
+    the domain predicate keeps only |Δstation| ≤ 1."""
+    from auto_patch import grade_law as GL
+    ring, _keys = _deseg_runway_ring(length=800.0, width=40.0, stations=5)
+    stations = GL.runway_axis_station_indices(ring)
+    # 5 stations, and the two long-edge vertices at each station share an index.
+    assert stations == [0, 1, 2, 3, 4, 4, 3, 2, 1, 0]
+    assert len(set(stations)) == 5
+    # A LEGACY 4-corner square is NOT length ≫ width, so its longest pair is a
+    # DIAGONAL that over-segments it — which is exactly why plane_constraints
+    # gates the scoping on ``single_poly`` (this ring is never scoped).
+    assert GL.runway_axis_station_indices(
+        [(0.0, 0.0), (45.0, 0.0), (45.0, 45.0), (0.0, 45.0)]) == [0, 1, 2, 1]
+    # Predicate: same / adjacent in domain, 2+ intervals out.
+    assert GL.runway_within_pair_in_domain(2, 2)
+    assert GL.runway_within_pair_in_domain(2, 3)
+    assert not GL.runway_within_pair_in_domain(2, 4)
+
+
+def test_plane_constraints_runway_single_poly_scopes_multistation():
+    """USER RULING 2026-07-08 — a de-segmented runway RING's within-shape pair
+    domain is scoped to LATERAL + same/adjacent-station; a pair spanning 2+
+    station intervals leaves it (the FAA profile law owns the longitudinal
+    grade).  The scoping is gated on ``single_poly`` so a LEGACY segmented rect
+    is a byte-identical no-op."""
+    ring, keys = _deseg_runway_ring(length=800.0, width=40.0, stations=5)
+    ctx = GG.GradeContext(centerlines=[])
+    n = len(ring)  # 10; vertex k and n-1-k share a station
+
+    def _has(sc, a, b):
+        return any({x, y} == {a, b} for (x, y, _c) in sc.edges)
+
+    # single_poly=True → scoped.
+    scoped = GG.plane_constraints(
+        GG.GradeShape(role="runway", ring=ring, keys=keys, single_poly=True),
+        ctx, cap=TAXI_MAX_GRADE)
+    assert _has(scoped, 0, 9)      # same station (0,0) ↔ station 0 — LATERAL
+    assert _has(scoped, 0, 1)      # adjacent station 0↔1
+    assert _has(scoped, 1, 8)      # same station 1
+    assert not _has(scoped, 0, 2)  # 2 intervals — longitudinal, dropped
+    assert not _has(scoped, 0, 4)  # far — dropped
+    assert not _has(scoped, 0, 5)  # opposite corner (station 0↔4) — dropped
+
+    # single_poly=False (legacy segmented rect) → NO scoping, full all-pair.
+    legacy = GG.plane_constraints(
+        GG.GradeShape(role="runway", ring=ring, keys=keys, single_poly=False),
+        ctx, cap=TAXI_MAX_GRADE)
+    assert _has(legacy, 0, 2) and _has(legacy, 0, 4) and _has(legacy, 0, 5)
+    assert len(legacy.edges) > len(scoped.edges)
+    # Every legacy edge sits at the plane cap (the scoping only DROPS pairs,
+    # never changes a surviving pair's budget).
+    assert all(abs(cap.flat_cap() - TAXI_MAX_GRADE) < 1e-9
+               for (_a, _b, cap) in scoped.edges)
+
+
 def test_nonconvex_visibility_drops_chord_across_notch():
     # an L-shaped apron; the chord between the two far tips leaves the pavement
     ring = [(0, 0), (30, 0), (30, 10), (10, 10), (10, 30), (0, 30)]

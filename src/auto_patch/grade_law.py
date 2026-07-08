@@ -292,6 +292,99 @@ def crown_pair_offset(drop_a: float, drop_b: float) -> float:
     return (drop_b or 0.0) - (drop_a or 0.0)
 
 
+# ── Runway within-shape LATERAL scoping (user 2026-07-08) ────────────────────
+# A de-segmented runway (``O4_RUNWAY_SINGLE_POLY``, default on) emits ONE polygon
+# ring per ref whose FAA profile stations live as interior LONG-EDGE vertices.
+# The within-shape all-pair grade check on that ring conflates two DISTINCT laws:
+#   * LATERAL — the within-shape check's real domain (cross-section crown / edge
+#     roll), measured by SAME-station and ADJACENT-station pairs; and
+#   * LONGITUDINAL — owned by the FAA profile law (``check_runway_profile``,
+#     ring-aware since ff332e9, + the spine-profile check), measured by a pair
+#     spanning 2+ station intervals.
+# A multi-station chord IS an at-cap longitudinal grade the profile law already
+# governs; counting it in the within-shape all-pair domain double-books it
+# against a check with no jurisdiction there (SPLP 02/20: ≤+0.11 % at-cap chords
+# spanning stations pushed within 18→31).  So a runway-ring vertex pair is IN the
+# within-shape domain iff its endpoints are same- or adjacent-station:
+# ``|station_index_a − station_index_b| <= 1``.  This extends the part-30i
+# crown-centerline exemption (the crown ridge is the profile's domain; so is the
+# whole longitudinal profile).  Stations cluster the ring's OWN vertices along the
+# ref axis at ``RUNWAY_STATION_CLUSTER_M`` — the SAME 5.0 m convention
+# ``verification._runway_single_poly_cross_stations`` uses to reconstruct the
+# profile, so the LATERAL within-shape domain and the LONGITUDINAL profile check
+# agree on what a "station" is.
+#
+# LEGACY INVARIANCE BY CONSTRUCTION: a segmented 4-corner runway piece projects
+# to exactly TWO extreme axis stations, so every pair is same- or adjacent-
+# station and the scoping is a NO-OP (gate-off within unchanged).  A crowned
+# sub-rect's inserted centerline vertex sits at the same station as its cross-edge
+# corners, so it stays two stations too.
+RUNWAY_STATION_CLUSTER_M = 5.0
+
+
+def runway_axis_station_indices(ring):
+    """Assign each vertex of a runway RING a longitudinal STATION index along the
+    runway's ref axis.
+
+    The ref axis is the ring's longest vertex pair (the runway diameter, origin
+    at one end); every vertex projects to a station distance along it; a vertex
+    more than ``RUNWAY_STATION_CLUSTER_M`` beyond the previous vertex in ascending
+    station order opens a new cluster.  Returns a list ``station[i]`` parallel to
+    ``ring`` (0 = the end at the axis origin, increasing along the axis), or
+    ``None`` when the ring is degenerate (<2 vertices or a zero-length axis — no
+    stations to scope by, so the caller keeps every pair).
+
+    Same 5.0 m chained clustering as
+    ``verification._runway_single_poly_cross_stations``: the lateral within-shape
+    domain and the longitudinal profile check must agree on what a station is.  A
+    legacy 4-corner runway piece has its corners at two extreme stations only, so
+    it yields station indices in {0, 1} — the adjacency predicate below then
+    passes every pair (no-op)."""
+    n = len(ring)
+    if n < 2:
+        return None
+    # Longest vertex pair = the runway ref axis (origin at A, unit direction A→B).
+    best = -1.0
+    ax = ay = bx = by = 0.0
+    for i in range(n):
+        xi, yi = ring[i]
+        for j in range(i + 1, n):
+            xj, yj = ring[j]
+            d2 = (xj - xi) ** 2 + (yj - yi) ** 2
+            if d2 > best:
+                best, ax, ay, bx, by = d2, xi, yi, xj, yj
+    if best <= 0.0:
+        return None
+    length = best ** 0.5
+    ux, uy = (bx - ax) / length, (by - ay) / length
+    stations = [((ring[i][0] - ax) * ux + (ring[i][1] - ay) * uy)
+                for i in range(n)]
+    order = sorted(range(n), key=lambda i: stations[i])
+    station_of = [0] * n
+    cluster = 0
+    previous = stations[order[0]]
+    for k in range(1, n):
+        i = order[k]
+        if stations[i] - previous > RUNWAY_STATION_CLUSTER_M:
+            cluster += 1
+        station_of[i] = cluster
+        previous = stations[i]
+    return station_of
+
+
+def runway_within_pair_in_domain(station_a: int, station_b: int) -> bool:
+    """A runway RING vertex pair is in the WITHIN-SHAPE (lateral) grade domain
+    iff its endpoints are the SAME station or ADJACENT stations
+    (``|Δ station index| <= 1``).  A pair spanning 2+ station intervals is a
+    LONGITUDINAL grade the FAA profile law owns (``check_runway_profile`` + the
+    spine-profile check), NOT the lateral within-shape check — counting it here
+    double-books an at-cap longitudinal chord against a check with no
+    jurisdiction over it (user ruling 2026-07-08; extends the part-30i
+    crown-centerline exemption).  On a legacy 4-corner runway piece (two
+    stations) every pair is same/adjacent → this is a no-op."""
+    return abs(station_a - station_b) <= 1
+
+
 # Pairs closer than this are ring/relative noise — not a grade constraint.
 MIN_PAIR_DIST_M = 0.5
 

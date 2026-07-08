@@ -931,6 +931,17 @@ class PavementLayout:
             }
             if s.ref:
                 tags["ref"] = s.ref
+            # Runway DE-SEGMENTATION marker (O4_RUNWAY_SINGLE_POLY): a
+            # de-segmented runway is ONE ring per ref whose FAA profile
+            # stations are interior long-edge vertices.  The grade TEST
+            # (``check_grade``) scopes such a ring's within-shape pair
+            # domain to LATERAL + same/adjacent-station (user ruling
+            # 2026-07-08, ``grade_law.runway_within_pair_in_domain``); a
+            # segmented rect carries no marker and keeps its full all-pair
+            # check.  Emitted only for the de-seg form → gate-off builds
+            # stay byte-identical.
+            if getattr(s, "from_single_poly", False):
+                tags["o4_single_poly"] = "1"
             # APRON-EDGE GRADE ADOPTION (USER RULING 2026-07-06): a
             # service road/junction sharing an apron edge follows the
             # apron grading rules — stamp the law override so the

@@ -197,6 +197,15 @@ class GradeShape:
     adopts_apron_grade: bool = False
     adopts_taxi_grade: bool = False
     adopted_taxi_letter: str | None = None
+    # Runway DE-SEGMENTATION (O4_RUNWAY_SINGLE_POLY): this is the ONE ring
+    # per runway ref whose FAA profile stations are interior long-edge
+    # vertices.  ``plane_constraints`` scopes such a ring's within-shape
+    # pair domain to LATERAL + same/adjacent-station (user ruling
+    # 2026-07-08); a segmented sub-rect leaves this False and keeps its full
+    # all-pair check (its short/wide axis would over-segment).  Layout
+    # reader: ``BuiltShape.from_single_poly``; OSM reader: the
+    # ``o4_single_poly='1'`` way tag.
+    single_poly: bool = False
 
 
 @dataclass
@@ -1275,12 +1284,36 @@ def plane_constraints(shape: GradeShape, ctx: GradeContext,
     if ctx.road_zone is not None:
         from shapely.geometry import Point as _RPt
         road_vert = [ctx.road_zone.contains(_RPt(x, y)) for (x, y) in ring]
+    # RUNWAY within-shape LATERAL scoping (user 2026-07-08): a de-segmented
+    # runway emits ONE ring whose FAA profile stations live as interior long-edge
+    # vertices, so its all-pair within-shape check conflates the LATERAL law
+    # (this check's real domain) with the LONGITUDINAL profile law
+    # (``check_runway_profile`` + the spine-profile check).  Scope the runway
+    # ring's pairs to SAME-/ADJACENT-station (``grade_law.runway_within_pair_in_
+    # domain``); a pair spanning 2+ stations leaves this domain to the profile
+    # law.  ONE predicate in ``grade_law``, applied HERE — ``plane_constraints``
+    # is the single plane-rule source both the OSM grade test (``check_grade``'s
+    # runway path) and any solver plane-edge build (``_add_plane_edges``) call —
+    # so BUILD and CHECK scope in lockstep.  ONLY the de-segmented single-poly
+    # ring (``shape.single_poly``) is scoped: its length ≫ width so the
+    # longest-pair ref axis IS the runway axis and same-cross-end vertices
+    # cluster to one station.  A legacy segmented sub-rect is left alone — it
+    # keeps its full all-pair check (a short/wide rect's longest pair is a
+    # DIAGONAL, which would spuriously split its two cross-ends into >2
+    # stations and drop real pairs), so gate-off stays byte-identical.
+    station_of = (GL.runway_axis_station_indices(ring)
+                  if (shape.role == "runway" and shape.single_poly)
+                  else None)
     for i in range(n):
         xi, yi = ring[i]
         ki = keys[i]
         for j in range(i + 1, n):
             kj = keys[j]
             if ki == kj:
+                continue
+            if (station_of is not None
+                    and not GL.runway_within_pair_in_domain(
+                        station_of[i], station_of[j])):
                 continue
             xj, yj = ring[j]
             d = math.hypot(xi - xj, yi - yj)

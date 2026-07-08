@@ -1107,8 +1107,13 @@ def iter_shape_grade_constraints(
         # rule source for every shape).  classify_pair owns the seam skip, the
         # min-pair-distance and the road-carve relaxation, so the old per-axis /
         # triangle / visibility branches here are gone.
+        # ``o4_single_poly`` marks a DE-SEGMENTED runway ring so
+        # ``plane_constraints`` scopes its within-shape pairs to LATERAL +
+        # same/adjacent-station (user ruling 2026-07-08); a segmented rect
+        # carries no marker and keeps its full all-pair check.
         gs = _GG.GradeShape(role=role0, ring=[(p[0], p[1]) for p in pts],
-                            keys=list(pnids))
+                            keys=list(pnids),
+                            single_poly=(w.tags.get("o4_single_poly") == "1"))
         sc = _GG.plane_constraints(gs, _law_ctx, grade_cap)
         idx = {pnids[k]: k for k in range(n)}
         _is_runway = role0 in ("runway", "runway_crossing")
