@@ -4994,6 +4994,19 @@ def build_airport_pavement(icao: str, xplane_root: str,
             from .lateral_spine_nodes import densify_junction_edges
             densify_junction_edges(layout, icao)
 
+        # SPINE-FIRST service roads (config.SVC_SPINE_FIRST, part 30m):
+        # project each SERVICE (truck-route) spine station onto the road /
+        # service-junction edges so the road's new within-shape law
+        # (grade_graph SOFT_VISIBILITY_ROLES gains service_road under the
+        # same gate) binds aligned cross-section pairs at station spacing —
+        # a road's long edges are otherwise vertex-free for 70-100 m and
+        # the 2 % transverse law has nothing to sample (the CYXY cross-road
+        # tear).  Same pre-conformance slot as the taxi lateral pass above.
+        from .config import SVC_SPINE_FIRST as _SVC_SPINE_FIRST
+        if _SVC_SPINE_FIRST:
+            from .lateral_spine_nodes import insert_service_lateral_nodes
+            insert_service_lateral_nodes(layout, icao)
+
         # Round tight pavement turn-backs (sharp tip / narrow flat end) into a
         # ~5-node half-circle so the boundary turns on a smooth arc (user
         # 2026-06-30, gate O4_ROUND_TURNBACK).  Pre-solve so the arc is graded;

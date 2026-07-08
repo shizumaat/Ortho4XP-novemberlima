@@ -54,6 +54,7 @@ __all__ = [
     "SERVICE_ROAD_MAX_GRADE",
     "SERVICE_ROAD_MAX_TRANSVERSE",
     "SERVICE_ROAD_CROWN_TRANSVERSE",
+    "SVC_SPINE_FIRST",
     "RUNWAY_CROWN_TRANSVERSE",
     "TAXI_CROWN_TRANSVERSE",
     "ENABLE_SPINE_CROWN",
@@ -1500,6 +1501,25 @@ MIN_RECT_LENGTH_M = float(_os.environ.get("O4_MIN_RECT_LENGTH_M", "100.0"))
 # CYXY roads-on 0/0/0, HECA 57/0/0 invariants held);
 # ``O4_SERVICE_ROAD_CARVE=0`` restores the road-less build.
 SERVICE_ROAD_CARVE = _os.environ.get("O4_SERVICE_ROAD_CARVE", "1") == "1"
+# SPINE-FIRST service-road grading (USER RULING 2026-07-07, part 30m): the
+# truck-route SPINE is graded at the road cap with DEM-follow as a SOFT seed
+# sampled at spine stations; the EDGES follow the spine (cross-section
+# derived, SERVICE_ROAD_MAX_TRANSVERSE cap), ends welded at mouths as before.
+# Three coordinated touch points read this gate: (1) ``service_road`` joins
+# ``grade_graph.SOFT_VISIBILITY_ROLES`` so the road gets within-shape LAW
+# edges on both readers (solver graph + validator — previously ZERO edges:
+# not soft, not a junction_rules sloping rect); (2) service centerlines
+# insert lateral cross-section vertices on road/service-junction rings
+# (``lateral_spine_nodes.insert_service_lateral_nodes``) so the law binds at
+# station spacing, not just at ring corners 70-100 m apart; (3) the
+# DEM-follow seed (``route_profile/anchors.apply_service_road_dem_follow``)
+# is computed per spine STATION and shared by the whole cross-section
+# instead of per-vertex (per-vertex let a road's two long edges bind to
+# different anchor regimes — the CYXY 2.49 m cross-road tear at
+# 60.7092306,-135.0738928).  Seeds are SOFT: the law edges are the
+# authority and the solve remains the sole writer.  ``O4_SVC_SPINE_FIRST=0``
+# restores the previous behaviour byte-identically.
+SVC_SPINE_FIRST = _os.environ.get("O4_SVC_SPINE_FIRST", "1") == "1"
 # Max perpendicular pavement cross-section for ROAD classification.
 # User rule "< 10 m"; measured at the HECA #198 switchback legs:
 # 8.2-9.4 m and 12.2 m (the fused DSF pavement includes shoulder) →

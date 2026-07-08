@@ -54,6 +54,7 @@ from .config import (
     JUNCTION_MESH_CONSTRAINTS,
     SERVICE_ROAD_MAX_GRADE,
     SERVICE_ROAD_MAX_TRANSVERSE,
+    SVC_SPINE_FIRST,
     TAXI_MAX_GRADE,
     TAXI_MAX_GRADE_NARROW,
     TAXI_MAX_TRANSVERSE_NARROW,
@@ -63,9 +64,21 @@ from .config import (
 # Roles this module owns (the visibility-graph soft airside shapes).
 # ``JUNCTION_ROLES`` is defined by THE LAW (``grade_law`` — the junction mesh
 # rule applies to these roles) and re-exported here for the readers.
+# SPINE-FIRST service roads (config.SVC_SPINE_FIRST, part 30m):
+# ``service_road`` joins the soft set so the road body gets within-shape LAW
+# edges on BOTH readers (this graph and the validator, which import the same
+# tuple) — previously a service_road emitted ZERO within-shape edges (not
+# soft, not a ``junction_rules.SLOPING_RECT_ROLES`` rect since it carries
+# per-node altitudes), so its two long edges could bind to different anchor
+# regimes with no law between them (the CYXY 2.49 m cross-road tear).  Its
+# pairs resolve through the SAME ``classify_pair``/``_bake_edge`` path as
+# service_junction: body cap SERVICE_ROAD_MAX_GRADE longitudinally,
+# SERVICE_ROAD_MAX_TRANSVERSE across the route — the cross-road tear becomes
+# unrepresentable, not merely illegal.
 APRON_ROLE = "apron"
 JUNCTION_ROLES = GL.JUNCTION_ROLES
-SOFT_VISIBILITY_ROLES = (APRON_ROLE,) + JUNCTION_ROLES
+SOFT_VISIBILITY_ROLES = ((APRON_ROLE,) + JUNCTION_ROLES
+                         + (("service_road",) if SVC_SPINE_FIRST else ()))
 
 # A ring vertex counts as a SPINE node of a centerline when it lies within this
 # perpendicular distance of it.  Post-slice the spine nodes sit exactly on the
@@ -737,7 +750,12 @@ def _body_cap(shape: GradeShape, ctx: GradeContext, membership: dict) -> float:
     if getattr(shape, "adopts_taxi_grade", False):
         return float(taxi_grade_cap_for_letter(
             getattr(shape, "adopted_taxi_letter", None)))
-    if shape.role == "service_junction":
+    # ``service_road`` reaches here only under SVC_SPINE_FIRST (it joins
+    # SOFT_VISIBILITY_ROLES there) — same road cap as service_junction.
+    # Without the explicit branch it would fall through to the junction
+    # spine/inheritance logic and could inherit a TAXI cap from a welded
+    # neighbour, which is not the road's law.
+    if shape.role in ("service_junction", "service_road"):
         return SERVICE_ROAD_MAX_GRADE
     # junction: taxiway cap of its spine, else inherited from the nearest
     # connected taxiway-sized shape.
