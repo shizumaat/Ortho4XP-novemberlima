@@ -108,9 +108,15 @@ _TAXIWAY_ROLES = (
 # Minimum emitted cut area; smaller residue is dropped as noise.
 _MIN_CUT_AREA_M2 = 25.0
 # Keep every emitted cut vertex this far OUTSIDE pavement so it never
-# lands on a sloping rect's edge (``test_no_vertex_on_sloping_rect_-
-# edge`` flags non-rect vertices within 1 m of a rect edge interior).
-_PAVEMENT_GAP_M = 1.5
+# lands on a sloping rect's edge (``check_vertex_on_sloping_edge`` /
+# ``test_no_vertex_on_sloping_rect_edge`` flag a non-rect vertex within
+# ``EDGE_PROX_M`` = 0.5 m of a rect edge interior) and never merges with
+# a pavement ring vertex (``SHARED_VERTEX_TOL_M`` = 0.5 m).  Reduced from
+# 1.5 → 1.0 m (user 2026-07-07: clearance cuts should hug the pavement
+# they follow) — still 2× the 0.5 m merge/edge-proximity floor, so the
+# inner edge never lands on or merges with pavement, but the visible
+# crack band between pavement and cut halves.
+_PAVEMENT_GAP_M = 1.0
 # Enclosed-pocket wingtip clearance (Pass A2, user 2026-06-30): ring the full
 # perimeter of a small NON-pavement pocket fully enclosed by taxi pavement, so
 # sharp terrain a wingtip overhangs is cut even where no centerline reaches it.
@@ -141,6 +147,20 @@ _DECIMATE_ALT_TOL_M = 0.15
 # ``_merge_coincident_ring_vertices``).  Well under ``_DECIMATE_GEOM_TOL_M``
 # so it never merges vertices ``_decimate`` keeps for genuine geometry.
 _COINCIDENT_MERGE_TOL_M = 0.1
+# An ALTITUDE needle: a single ring vertex whose altitude differs from
+# BOTH of its ring neighbours by more than this, while the two
+# neighbours agree with each other to within it.  The finalize resample
+# assigns each final-ring vertex the altitude of the NEAREST source
+# strip edge; where a cut is a thin corridor along sunk pavement (the
+# inner edge rides pavement level, the outer edge rides the standing
+# terrain it daylights against), the inner and outer strip edges pass
+# within ``EDGE_TOL_M`` of one another at a concave jog, so one vertex
+# flips to the far edge and spikes ~7 m above/below its neighbours — the
+# "terrain spike at a little jog" / "pointy cut" the user sees.  A real
+# daylight-contour ramp changes monotonically across several vertices;
+# an isolated single-vertex reversal is always this artifact, so it is
+# clamped to the neighbour mean.
+_NEEDLE_ALT_TOL_M = 3.0
 # Airside pavement a taxi centerline can run over — used to find the
 # pavement edge (raycast) and the edge altitude, regardless of whether
 # that pavement was emitted as a rect, junction, or apron.
@@ -161,7 +181,8 @@ _RAY_MAX_HALF_WIDTH_M = 35.0
 # shape (adjacent pavement / ribbon / building / groundside all own
 # their band).  Just past ``_PAVEMENT_GAP_M`` so a shared shape edge is
 # reliably detected, well under the narrowest service-road width.
-_RING_PROBE_M = 2.0
+# Tracks the reduced 1.0 m gap (user 2026-07-07 tighter standoff).
+_RING_PROBE_M = 1.5
 # Pass A3 skips a runway-family ring-edge station whose outward normal
 # points mostly ALONG the runway axis (an END edge): the runway end is
 # RESA / skirt territory (Pass C / D) and must stay exactly as it is.
@@ -354,6 +375,41 @@ def _drop_sharp_corners(coords: list[tuple[float, float]],
             break
         del coords[worst_i]
     return coords
+
+
+def _declaw_alt_needles(alts_open: list[float],
+                        tol: float = _NEEDLE_ALT_TOL_M) -> list[float]:
+    """Clamp isolated single-vertex altitude spikes to the neighbour mean.
+
+    Operates on an OPEN (unclosed) per-vertex altitude ring.  A vertex is
+    a needle when it differs from BOTH ring neighbours by more than
+    ``tol`` in the SAME direction while the neighbours agree to within
+    ``tol`` (see ``_NEEDLE_ALT_TOL_M``).  Such a vertex is a resample
+    flip between the cut's inner (pavement-level) and outer (terrain-
+    daylight) edges, not a real surface feature, so it is set to the mean
+    of its two neighbours.  Repeats until stable so a two-vertex flip
+    resolves.  Returns a new list; positions are untouched (geometry is
+    unchanged — only the altitude is corrected)."""
+    n = len(alts_open)
+    if n < 3:
+        return list(alts_open)
+    a = [float(v) for v in alts_open]
+    for _ in range(n):
+        changed = False
+        for i in range(n):
+            p = a[(i - 1) % n]
+            c = a[i]
+            q = a[(i + 1) % n]
+            d1 = c - p
+            d2 = c - q
+            if (d1 * d2 > 0.0
+                    and min(abs(d1), abs(d2)) > tol
+                    and abs(p - q) <= tol):
+                a[i] = round((p + q) / 2.0, 1)
+                changed = True
+        if not changed:
+            break
+    return a
 
 
 def _make_strip_alt_resampler(strips):
@@ -614,11 +670,29 @@ def _build_graded_strips(edge_stations, edge_alts, outwards,
             ix, iy = sx + nx * _PAVEMENT_GAP_M, sy + ny * _PAVEMENT_GAP_M
             inner_alts.append(round(float(ref + slope * _PAVEMENT_GAP_M), 1))
             inner_pts.append((ix, iy))
-            # Outer edge: at the daylight point, on the gentle ceiling
-            # (= DEM there), so the ramp meets natural ground, no cliff.
+            # Outer edge: at the daylight point, on the ceiling — normally
+            # the DEM has dropped back to (or below) the ceiling there, so
+            # placing the outer edge at the ceiling meets natural ground
+            # with no cliff.  But where the terrain NEVER daylights within
+            # the band cap (pavement sunk in a plateau: HECA service-road /
+            # apron corridors excavated ~14 m below grade), the ceiling
+            # would plant a flat shelf at pavement level under 14 m of
+            # standing terrain — a vertical wall at the band edge, the
+            # "terrain spike at a jog" the user sees.  Lift the outer edge
+            # to the HIGHER of the ceiling and the DEM (the exact mirror of
+            # the skirt's lift-only convention): where terrain has daylit
+            # this is the ceiling (unchanged); where it has not, the edge
+            # rides up to meet the standing terrain as a cut backslope
+            # instead of a wall.  Only ever RAISES the outer edge, so it can
+            # never carve a sub-surface canyon.
             ox, oy = sx + nx * off, sy + ny * off
+            ceil_off = ref + slope * off
+            dd_off = sample_dem(ox, oy)
             outer_pts.append((ox, oy))
-            outer_alts.append(round(float(ref + slope * off), 1))
+            if dd_off is not None and dd_off > ceil_off:
+                outer_alts.append(round(float(dd_off), 1))
+            else:
+                outer_alts.append(round(float(ceil_off), 1))
         if len(inner_pts) < 2:
             continue
         ring = inner_pts + outer_pts[::-1]
@@ -1345,6 +1419,13 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                         poly = cand
                         final_ring = merged_ring
                         node_open = merged_open
+                # Clamp isolated resample flips between the inner (pavement
+                # level) and outer (terrain daylight) edges — the single-
+                # vertex spikes at concave jogs of a sunk-pavement corridor.
+                # LAST altitude op before emit + seam store, so a spike from
+                # resample, sibling adoption OR the coincident-vertex merge
+                # is removed and never propagates through the ``adopt`` seam.
+                node_open = _declaw_alt_needles(node_open)
                 for (vx, vy), a in zip(final_ring, node_open):
                     adopt.setdefault(vertex_bucket(vx, vy), (vx, vy, a))
                 node_alts = node_open + [node_open[0]]

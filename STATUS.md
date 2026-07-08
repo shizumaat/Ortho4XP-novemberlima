@@ -1,5 +1,101 @@
-# STATUS — SESSION 20260707 (part 30e): runway-end SKIRT lift-only fix +
-# boundary→DEM BRIDGE ↔ skirt/RESA reconciliation (KCLT 18R in-sim ramp)
+# STATUS — SESSION 20260707 (part 30f): in-sim CLEARANCE defect fixes —
+# sunk-pavement outer-edge WALL + resample NEEDLES + tighter standoff
+# (HECA/CYXY in-sim eval: terrain spikes at jogs, pointy cuts, deep notch)
+
+## LANDED (part 30f) — clearance cuts hug pavement + daylight as a
+## backslope instead of walling off; single-vertex spikes clamped
+USER REPORTS (in-sim, HECA "looks great" otherwise; CYXY):
+ 1+2. HECA 30.1165887,31.4109619 / 30.1166179,31.4111917 — terrain
+    spikes at little jogs in clearance shapes.
+ 3.   HECA 30.0974775,31.4075072 — three POINTY cuts misaligned with the
+    pavement they follow.
+ 4.   CYXY 60.7121148,-135.0702708 — a strange DEEP NOTCH in a clearance
+    shape.
+ 5.   Cuts should hug the pavement — reduce the margin more.
+ 6.   CYXY 60.7092306,-135.0738928 — service-road spine "big ridge"
+    (DIAGNOSE ONLY).
+
+ROOT CAUSE (one class for 1–4).  The Pass A3 flat-shadow cut cuts terrain
+above the pavement-edge ceiling down to it and DAYLIGHTS where the DEM
+drops back to the ceiling.  But where the pavement is SUNK in a plateau
+(HECA apron/service-road corridors excavated ~14 m below grade; the CYXY
+14R/32L NW threshold at 694 m in 715 m terrain) the terrain NEVER drops
+back to the ceiling within the band cap.  The outer daylight edge then
+planted a FLAT shelf at pavement level under 14 m of standing terrain — a
+vertical WALL at the band edge (items 1/2/4, the "spike at a jog" / "deep
+notch") and a submerged shelf whose corners splay past the pavement at
+convex jogs (item 3, the "pointy cuts").
+
+FIX A — outer-edge lift-only (``_build_graded_strips``): the outer
+(daylight) row rides the HIGHER of the ceiling and the DEM — the exact
+mirror of the skirt's ``_skirt_lift_alt`` convention.  Where terrain has
+daylit this is the ceiling (unchanged); where it has not, the outer edge
+rides UP to meet the standing terrain as a cut BACKSLOPE instead of a
+wall.  Only ever RAISES the outer edge → never carves a sub-surface
+canyon (the CLEARANCE_LATERAL_MAX_SLOPE=0 canyon guard is preserved).
+
+FIX B — needle declaw (``_declaw_alt_needles``, ``_NEEDLE_ALT_TOL_M`` =
+3 m).  Fix A makes the inner edge ride pavement level and the outer edge
+ride terrain, so at a concave jog of a thin sunk-pavement corridor the
+inner and outer SOURCE strip edges pass within the resampler's
+``EDGE_TOL_M`` (0.5 m); one final-ring vertex flips to the far edge and
+spikes ~7 m above/below its neighbours (a single-vertex needle — the
+residual in-sim spike).  ``_finalize`` clamps any vertex differing from
+BOTH ring neighbours by > 3 m (neighbours agreeing to within 3 m) to the
+neighbour mean — the LAST altitude op before emit + the ``adopt`` seam
+store, so a spike from resample, sibling adoption OR the coincident-vertex
+merge is removed and never propagates.  (HECA: fix A alone introduced 6
+needles; declaw → 0.  CYXY had 3 needles at BASELINE → 0.)
+
+FIX C — item 5, tighter standoff: ``_PAVEMENT_GAP_M`` 1.5 → 1.0 m,
+``_RING_PROBE_M`` 2.0 → 1.5 m.  Still 2× the 0.5 m merge / edge-proximity
+floor (``SHARED_VERTEX_TOL_M`` = ``check_vertex_on_sloping_edge``
+``EDGE_PROX_M`` = 0.5), so the inner edge never lands on or merges with
+pavement.  Verified: HECA min cut-vertex-to-pavement 0.751 m, 0 vertices
+within 0.5 m; CROSS-SHAPE (≤0.5 m) grade = 0 at all airports.
+
+## VERIFIED (gates, part 30f — all at f9d5103 baselines)
+* ``clearance_spike_audit`` HECA **205 → 48 samples / 37 clusters** (well
+  under the 203/119 gate — the tighter standoff halves the deliberate
+  pavement-gap crack band).  CYXY **487/122 → 220/57**.  SPLP 19/7.  The
+  three reported HECA spots + the CYXY notch are covered (nearest residual
+  6.4 m from HECA coord-1, a 2-sample crack beside a service road sunk
+  6.5 m — mesh-constrained, inherent to sunk pavement).
+* Per-site: CYXY notch max cut ring-edge grade **38 % (1.4 m/3.7 m wall)
+  → 2 % (0.9 m/58.8 m smooth backslope)**; notch cut alt range 694–708 →
+  694–716 (rides up to terrain).  HECA coord-1 needle 6.9 m (fix-A only)
+  → 0.  All 4 coords inside clean cuts, 0 needles (thr 3 m) across HECA +
+  CYXY.
+* check_grade at f9d5103 baselines: WITHIN SPLP **16**, CYXY **1**, HECA
+  **0**; PLANE 0, CROSS 0, RUNWAY-END SKIRT edge 0 everywhere; HECA steps
+  3 + 14 (unchanged).
+* fast_suite.sh: exactly the 8 pre-existing failures (identical test IDs
+  to a stashed f9d5103 run).  Full suite: exactly the 13 pre-existing
+  (SPLP×4, SPJC×4, CYXY×4, HECA×1) — no new failures.
+
+## ITEM 6 VERDICT (DIAGNOSE ONLY) — STALE-BAKE ARTIFACT
+CYXY service-road spine "big ridge" at 60.7092306,-135.0738928: HEAD
+emits NOTHING elevated there.  ``CROWN_SERVICE`` defaults OFF (config.py:
+runway-only crown scoping since 1ed5cc6); all 8 ``crown_spine`` breaklines
+in the HEAD CYXY patch are RUNWAY spines (z 693–706, nearest 481 m from
+the site).  The service_road (-10204) at the site follows DEM (res ≈ 0,
+no transverse ridge); the service_junction (-10065) 4 m spread is
+LONGITUDINAL (road descends 709→705 along its length).  The user's tile
+predates the crown scoping — a RE-BAKE clears the ridge.
+
+## OPEN (part 30f follow-ups)
+* The sunk-pavement corridors (HECA 30.115–30.116, service roads/apron
+  ~14 m below a plateau; CYXY 14R/32L NW threshold) still carry a
+  mesh-constrained crack-band residual (a few 1–2-sample audit clusters)
+  where the pavement edge itself abuts 6–14 m of standing terrain — the
+  cut inner edge MUST sit at pavement level for wingtip protection, so the
+  step at the pavement/cut boundary is inherent, not a cut defect.  If it
+  ever needs closing, the pavement solver (not the clearance sweep) is the
+  place — the pavement is genuinely dug in.
+* Reducing ``_PAVEMENT_GAP_M`` below 1.0 m would approach the 0.5 m merge
+  floor; 1.0 is the practical minimum with the current tolerances.
+
+
 
 ## LANDED (part 30e) — skirt is FILL-only (never cuts), bridge matches skirt
 USER REPORT (in-sim, KCLT 18R): a ramp carved BELOW grade at a runway
