@@ -1134,3 +1134,29 @@ A10 roster and the contract test.
 the airport, so installing this pack may silently change which `apt.dat` the HECA build selects —
 the HECA grade-scoreboard baseline must be **re-cut before** M3 comparisons, or a shifted baseline
 will masquerade as a Phase 1 regression.
+
+### A12 — Third gate pack: LEMD (Aerosoft, FSX conversion) — the multi-anchor case at scale *(W4, W8)*
+
+User named LEMD as a sloped-field case with visibly floating buildings (2026-07-08). Pack:
+`Custom Scenery/Aerosoft - LEMD Madrid - 1 - Airport`, DSF `+40-004`, built mesh on disk. Audited:
+**356 definitions, 2,962 terrain-draped placements, 244 needing re-anchoring** (HECA: 201,
+KCLT: 57), reaches to **3.8 km**, base errors **−50.00 m to +28.33 m** — 142 definitions sunken,
+39 floating, exactly the two-sided signature of a genuinely sloped field (KCLT and HECA err
+one-way).
+
+**What LEMD alone provides:** two co-anchored families of **121 and 97 objects whose anchors sit
+roughly 6 m apart** (40.492764,−3.564788 vs 40.492820,−3.564793, both heading 0) at the same
+terminal complex. Their geometry will interleave into shared structures, making LEMD the first
+*production* instance of the spec-section-2.4 case — a structure spanning objects with different
+anchors, where the per-(structure, object) delta is not a theoretical nicety but the difference
+between seated buildings and sheared ones. The I-3/I-21 verification (equal post-bake rendered
+elevation, unequal deltas) has its real-world test here. KCLT's 41 terminal-layer objects were the
+hypothetical; LEMD ships 218.
+
+Also present: `LEMD_OBJ-Ground-FSX-*.obj` solid ground plates (~−10 m sunken), confirming the A11
+vertical-extent filter generalises beyond one pack; and a third authoring toolchain (FSX
+conversion) after Nimbus's native X-Plane workflow and Tai Models — the M4 generalisation question
+now spans three developers.
+
+**W8 gate set is now KCLT + HECA + LEMD.** Every measurement (per-component residual, hard-tear
+check, grade scoreboard) runs on all three. Same apt.dat baseline caution as A11.
