@@ -1,3 +1,109 @@
+# STATUS — SESSION 20260707 (part 30j): KJQF EPSILON-WEDGE triangle
+# explosion — final weld on the boundary↔groundside seam
+# (1,993,832 → 14,252 isolated tris; +to_osm zero-edge guard + verify tripwire)
+
+## LANDED (part 30j) — final epsilon-wedge weld + zero-length-edge guard
+## + always-on wedge detector in the verify pass
+
+THE DEFECT.  KJQF's fresh patch costs ~2.0M triangles (~55 % of tile
++35-081) via EPSILON WEDGES: two constrained edges share a node, run
+near-parallel (< 0.01°), and diverge by sub-millimetre.  Triangle4XP's
+Ruppert encroachment rule ping-pongs edge splits on the near-zero-area
+sliver down to machine epsilon, exploding the tile.  MEASURED source:
+the ``boundary`` ribbon and the ``groundside_pavement`` lots RE-DERIVE
+the same physical outline with DIFFERENT vertex sets — a groundside lot
+edge that runs ALONG the ribbon inner edge ends up with a ribbon vertex
+sitting ON it (perp 0.0001–0.5 mm, projecting mid-edge) WITHOUT a shared
+node.  21 such pairs at KJQF (way -10586 boundary ↔ -10177 groundside,
+shared node -2183; boundary vertex -3574 sits 8.5 m along the 15.06 m
+groundside edge -2183→-2184 at 0.00012 mm perpendicular).
+
+NOT THE 30e/30f REGRESSION IT WAS FRAMED AS.  Measured control: KJQF at
+787cb6a (pre-30e) = 26 wedges / 21 boundary~groundside, IDENTICAL to dev
+136c6a0.  The 30e/30f diff (``boundary.py`` bridge↔skirt reconcile,
+``clearance.py`` outer-edge lift + needle declaw) does NOT touch the
+boundary/groundside OUTLINE path — the wedge class is a LONGSTANDING
+structural issue, pre-dating 30d.  MECHANISM: the final T-vertex weld
+``enforce_conformance(tol=0.01, include_overlay_refs=True)`` runs at
+pipeline.py:5534, but THREE geometry-mutating passes run AFTER it —
+``_separate_groundside_from_airside`` (rebuilds lot rings by re-sampling
+the DEM-follow outline), ``decimate_emit_nodes`` (drops per-shape ring
+vertices independently), and the runway-end skirts.  Those RE-DERIVE a
+neighbour's outline with a fresh vertex set, DE-CONFORMING the seam the
+5534 weld just welded.  (Decimation OFF makes KJQF WORSE — 53 wedges —
+so decimation is not the cause; the independent outline re-sampling is.)
+
+THE FIX (three parts).
+ 1. **Final epsilon-wedge weld** (``pipeline.py``, after the skirt emit /
+    reconcile, before the O4_PROBE_NODES insert): re-run
+    ``enforce_conformance(tol=0.01, include_overlay_refs=True)`` on the
+    FINAL vertex sets so each on-edge foreign vertex is inserted into the
+    edge it lies on → shared node → the sliver vanishes.  TIGHT 0.01 m
+    tolerance (the wedge class sits at 0.000–0.003 m perp); a wider tol
+    would bow edges / mint hairline overlaps.  Insert-only at interpolated
+    altitudes (surface-neutral), safe as the last production geometry
+    touch.  KJQF: inserts 11 vertices, kills all 21 boundary~groundside
+    wedges.  No-op where there is no such seam (HECA 0, SPLP 0, CYXY 0).
+ 2. **Zero-length-edge guard** (``layout.py`` ``_ring_to_nids``): two ring
+    vertices at the SAME canonical XY but Δalt > VERTEX_ALT_MERGE_TOL_M
+    get DIFFERENT node ids (a wall/cliff) — but a wall cannot have zero
+    horizontal extent, so a 0.00 m constrained edge results (KJQF
+    taxiway_clearance -3870→-3871, Δalt 4.2 m).  Collapse consecutive
+    (and the wrap-around closing) same-coordinate nids to the first-kept
+    vertex.  KJQF near-zero segments 1 → 0.
+ 3. **Wedge detector in the verify pass** (``verification.py``
+    ``check_epsilon_wedges`` + wired into ``verify_and_log`` counts +
+    debug lines as ``epsilon_wedge`` / ``EPSILON-WEDGE``): the always-on
+    regression tripwire so a future emitter that mints a fresh unwelded
+    outline is flagged per-airport.  Mirrors ``tools/wedge_audit.py``
+    (committed, now CLI-capable: ``wedge_audit.py file.osm [--lat N]``).
+
+## VERIFIED (gates, part 30j)
+* WEDGE AUDIT (< 0.5°, < 20 cm, > 0), fresh builds in this worktree —
+  boundary~groundside class ELIMINATED everywhere:
+    KJQF  26 → 5   (was 21 boundary~groundside + 5 junction; now 5 junction)
+    KCLT  15 → 12  (junction~runway/junction — a DIFFERENT emitter)
+    HECA   5 → 5   (no boundary~groundside; unchanged, fix is a no-op)
+    SPLP   0 → 0
+    CYXY   2 → 2   (junction~runway 104 mm/0.11° — real geometry, unchanged)
+  The residual junction/​runway wedges are NOT the boundary/groundside
+  regression: they are bound to the solved slice-partition geometry (the
+  part-30g negative result — junction faces cannot be merged/moved without
+  breaking elevation neutrality) and the tight weld cannot reach them
+  without bowing solved constrained edges.  DOCUMENTED, not fixed, per
+  this task's "fix if weld-reuse covers them, else document" scope.
+* ISOLATED TRIANGULATION (/tmp/meshdiag, frame + patch + real tile .alt):
+    KJQF  1,993,832 → 14,252 tris   (gate < 15K — MET; −99.3 %)
+    KCLT    145,260 → 130,614 tris  (gate ≤ 200K — MET)
+    HECA     44,810 → 44,810 tris   (gate ≈ 40K — byte-identical, no-op)
+* check_grade at gate baselines: WITHIN-SHAPE SPLP **16**, CYXY **1**,
+  HECA **0**; RUNWAY-END SKIRT edge / PLANE GRADIENT / CROSS-SHAPE all
+  **0** everywhere; HECA steps **3 + 14** (unchanged).  (KJQF WITHIN
+  8 → 11: the 11 newly-welded T-vertices add a few sub-2 % within-shape
+  pairs — KJQF is not a check_grade gate airport; SPLP/CYXY/HECA gates
+  hold exactly.)
+* HECA clearance_spike_audit **48 samples / 37 clusters** (≤ 48/37 gate —
+  the 30f fixes stay fixed).
+* tools/fast_suite.sh: exactly the **8** pre-existing failures
+  (SPLP compare×2 + grade×2, CYXY×3, SPLP/CYXY grade — identical IDs).
+  Full suite: exactly the **13** pre-existing (SPLP×4, SPJC×4, CYXY×4,
+  HECA×1) — no new failures.  test_layout + test_verification_checks: 35
+  pass (the to_osm guard + verify wiring green).
+
+## OPEN (part 30j follow-ups)
+* Residual junction~junction / junction~runway wedges (KJQF 5, KCLT 12,
+  HECA 3–5) — a SEPARATE emitter (the curve-native global slice partition,
+  part 30g).  They do NOT explode the mesh at KCLT (130K, under gate) —
+  the boundary/groundside class was the only ~2M driver — but a
+  slice-partition fix (fewer/larger junction faces, per-face profiles
+  re-solved on the coarser partition) would clear them.  Out of this
+  task's "don't touch the solver/slice" scope; tracked as 30g's
+  recommended follow-up.
+* The final weld is the LAST production geometry touch.  O4_PROBE_NODES
+  (opt-in, normally unset) inserts vertices AFTER it and would re-introduce
+  on-edge nodes — acceptable, since probes are a diagnostic-only path.
+
+
 # STATUS — SESSION 20260707 (part 30f): in-sim CLEARANCE defect fixes —
 # sunk-pavement outer-edge WALL + resample NEEDLES + tighter standoff
 # (HECA/CYXY in-sim eval: terrain spikes at jogs, pointy cuts, deep notch)

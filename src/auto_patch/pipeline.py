@@ -5756,6 +5756,38 @@ def build_airport_pavement(icao: str, xplane_root: str,
             UI.vprint(1, f"  [pav-builder] {icao}: runway-end skirt "
                          f"emission FAILED: {exc!r}")
 
+    # FINAL EPSILON-WEDGE WELD (part 30j): the T-vertex weld at
+    # ``enforce_conformance(tol=0.01)`` above runs BEFORE the last three
+    # geometry-mutating passes — ``_separate_groundside_from_airside``
+    # (rebuilds groundside lot rings by re-sampling the DEM-follow
+    # outline), ``decimate_emit_nodes`` (drops per-shape ring vertices
+    # independently), and the runway-end skirts.  Those passes re-derive
+    # a neighbour's outline with a DIFFERENT vertex set, so a groundside
+    # lot edge that runs ALONG the boundary ribbon (or a junction edge
+    # along a longer neighbour) ends up with a foreign vertex sitting ON
+    # the edge WITHOUT a shared node — an EPSILON WEDGE: two constrained
+    # edges share one node, run near-parallel (<0.01°), and diverge by
+    # sub-millimetre.  Triangle4XP's Ruppert encroachment rule then
+    # ping-pongs splits on that near-zero-area sliver down to machine
+    # epsilon, exploding the tile (KJQF: the boundary↔groundside_pavement
+    # seam alone drove ~2.0M triangles / 55 % of the tile).  Re-running
+    # the tight T-vertex weld on the FINAL vertex sets inserts each such
+    # on-edge vertex into the edge it lies on, so the two shapes share
+    # the node and the sliver vanishes.  TIGHT tolerance (0.01 m): only
+    # truly-on-edge nodes (the wedge class sits at 0.000-0.003 m perp);
+    # a wider tolerance would bow an edge outward and mint hairline
+    # overlaps.  Insert-only at interpolated altitudes (surface-neutral),
+    # so it is safe as the last geometry touch.  Measured KJQF isolated
+    # triangulation: 1,993,832 → 14,252 tris.
+    if compute_elevations:
+        from .conformance import enforce_conformance as _enf_final
+        _n_ews, _n_ewv = _enf_final(layout, tol=0.01,
+                                    include_overlay_refs=True)
+        if _n_ewv:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: final epsilon-wedge weld — "
+                f"inserted {_n_ewv} vertex(es) into {_n_ews} shape(s).")
+
     # Diagnostic probe nodes (user 2026-07-07): O4_PROBE_NODES inserts
     # elevation-neutral ring vertices near given lat,lon points so
     # node-free straightaways carry inspectable altitudes in the patch.
