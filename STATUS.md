@@ -86,12 +86,21 @@
   BOTH gates) decided after R1's residual numbers.
 * A5 DONE: KCLT triangles 49,952 vs 130,468 (−61.7%), same-session
   A/B, runway ways 3 vs 7.
-* A3 RULING OBTAINED (Noah 2026-07-08): scope runway-ring
-  within-shape pairs to lateral + same/adjacent-station; longitudinal
-  law = ring-aware check_runway_profile + spine profile; BOTH readers
-  lockstep via one grade_law predicate.  Junction-way mirror pairs of
-  the runway chords are NOT covered — measure residue, checkpoint
-  before extending.  Runs after R1.
+* A3 DONE (2da0ce3): grade_law.runway_within_pair_in_domain
+  (station clustering 5.0 m, |Δstation| ≤ 1) applied ONCE in
+  grade_graph.plane_constraints — both readers lockstep by
+  construction (check_grade passes o4_single_poly from the new
+  additive way tag; solver/in-memory builders exclude runways so the
+  scoping is latent-but-identical there).  SPLP within gate-on
+  31→12 (19 multi-station chords left; check_runway_profile still
+  reports the real 1.78%/1.52% — the ruling's point); gate-off
+  18→18 byte-identical no-op (fresh baseline is 18 not the doc'd 16
+  — DEM-state dependent; predicate gated on single_poly because a
+  short/wide SEGMENTED rect's diameter axis is diagonal and would
+  mis-station).  Residue: 8 runway same/adjacent pairs (4 short
+  lateral + 4 long 485 m adjacent-station chords at sparse flat
+  ends) + 4 junction-way mirrors (out of ruling scope; does not
+  dominate → no checkpoint).
 * A7 NEW: HECA break growth 5891→6176 at gate-on is NOT A2's root
   (pair >1.5 km from any break region) — solver-time, own trace,
   after A3.
