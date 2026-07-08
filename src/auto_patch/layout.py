@@ -343,6 +343,14 @@ class BuiltShape:
     # flag is set only on portions NOT already apron-adopted.
     adopts_taxi_grade: bool = False
     adopted_taxi_letter: str | None = None
+    # Runway DE-SEGMENTATION (O4_RUNWAY_SINGLE_POLY, docs/
+    # runway_single_polygon_plan.md): this ROLE_RUNWAY shape is ONE ring
+    # per runway ref built from the persisted FAA profile (long-edge
+    # vertices at every profile station, per-vertex altitudes) instead of
+    # a chain of abutting sub-rects.  Consumers that special-case the
+    # segmented form (crossing resolution, cross-edge crown tenting,
+    # apron-merge whole-piece drops) key off this flag.
+    from_single_poly: bool = False
 
 
 

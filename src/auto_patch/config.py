@@ -1238,6 +1238,21 @@ SEAM_FIELD_ANCHORS = _os.environ.get("O4_SEAM_FIELD_ANCHORS", "1") == "1"
 # restores the old profile-through-seam behaviour.
 RUNWAY_SEAM_DEM_PIN = _os.environ.get("O4_RUNWAY_SEAM_PIN", "1") == "1"
 
+# RUNWAY DE-SEGMENTATION (user mandate 2026-07-07, docs/
+# runway_single_polygon_plan.md).  Segments are a hi/lo-era vestige: each
+# sub-rect was a 4-corner PLANE, so the curved FAA profile required cutting
+# the runway at every profile sample station — and every interior segment
+# CROSS-EDGE cut flat across the crowned surface (the centre-dip defect the
+# part-30i hotfix tents over).  With per-vertex node_altitudes from birth
+# the constraint is gone: emit ONE polygon ring per runway ref, the profile
+# carried by long-edge nodes at the SAME stations the segments used
+# (physical ends + CIFP thresholds + pav_intersections + crossing anchors;
+# seam samples join later via redistribute), no interior cross-edges at
+# all.  Tile-SEAM cuts stay (a seam-crossing runway is still split at the
+# seam band); refs participating in a runway-runway crossing keep the
+# legacy segmented path until the crossing-carve slice lands.
+RUNWAY_SINGLE_POLY = _os.environ.get("O4_RUNWAY_SINGLE_POLY", "0") == "1"
+
 # SEAM APRON COMPLEX POLISH (user 2026-06-20).  The per-apron isolated polish
 # (SPREAD_APRON_GRADE) holds every vertex an apron shares with ANOTHER shape, so
 # when a near-seam apron has been sliced into thin slivers (neck-split /

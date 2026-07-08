@@ -89,6 +89,7 @@ from .config import (
     ROUTE_FIELD_MODEL,
     RUNWAY_APRON_AREA_RATIO,
     RUNWAY_INSIDE_APRON_FRAC,
+    RUNWAY_SINGLE_POLY,
     SERVICE_ROAD_MAX_GRADE,
     TAXI_MAX_GRADE,
 )
@@ -562,10 +563,83 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
     layout._runway_profile_state = runway_profile_state
 
     new_runway_polys: list[Polygon] = []
+
+    # ── Runway DE-SEGMENTATION (O4_RUNWAY_SINGLE_POLY) ───────────────
+    # docs/runway_single_polygon_plan.md: ONE polygon ring per runway
+    # ref, built straight from the persisted FAA profile state — no
+    # interior cross-edges, so no flat full-width mesh constraint ever
+    # cuts across the crown (the part-30i tent hotfix becomes a
+    # structural no-op for these rings).  Refs whose rings OVERLAP
+    # another runway's ring (a runway-runway crossing) keep the legacy
+    # segmented path for now: ``_resolve_runway_crossings`` still
+    # carves the crossing junction from member sub-rect pieces (the
+    # crossing-carve slice lifts this).
+    single_poly_refs: set = set()
+    _single_poly_candidates: dict = {}
+    _single_poly_crossing_refs: set = set()
+    if RUNWAY_SINGLE_POLY and runway_profile_state:
+        def _single_poly_ref(desig_pair) -> str:
+            a, b = desig_pair
+            a = a[2:] if a and a.startswith("RW") else a
+            b = b[2:] if b and b.startswith("RW") else b
+            return f"{a}/{b}"
+        for _pair, _profile in runway_profile_state.items():
+            try:
+                _built = _build_single_poly_runway_ring(
+                    _profile, lat0, lon0, cos0)
+            except _GEOM_EXC:
+                _built = None
+            if _built is not None:
+                _single_poly_candidates[_single_poly_ref(_pair)] = _built
+        _candidate_refs = list(_single_poly_candidates)
+        for _i in range(len(_candidate_refs)):
+            for _j in range(_i + 1, len(_candidate_refs)):
+                try:
+                    _overlap = _single_poly_candidates[
+                        _candidate_refs[_i]][0].intersection(
+                        _single_poly_candidates[_candidate_refs[_j]][0])
+                except _GEOM_EXC:
+                    continue
+                # 5 m² ignores shared-edge touches between abutting
+                # non-crossing runways; a genuine crossing overlaps by
+                # the full runway width.
+                if not _overlap.is_empty and _overlap.area > 5.0:
+                    _single_poly_crossing_refs.add(_candidate_refs[_i])
+                    _single_poly_crossing_refs.add(_candidate_refs[_j])
+        single_poly_refs = (set(_single_poly_candidates)
+                            - _single_poly_crossing_refs)
+
     if runway_segment_chain:
         # Drop the single-rect runway shapes; replace with segments.
         old_runways = [s for s in layout.shapes if s.role == ROLE_RUNWAY]
         layout.shapes = [s for s in layout.shapes if s.role != ROLE_RUNWAY]
+
+        # Single-poly rings first (de-seg refs); the chain loop below
+        # skips their per-segment entries.  A fully-flat profile keeps
+        # the flat ``altitude=`` form (same class as the MULTI_FLAT
+        # consolidation — ``stitch_pavement_to_flat_runways`` keys off
+        # it); anything else is per-vertex from birth.
+        for _ring_ref in sorted(single_poly_refs):
+            _ring_poly, _ring_alts = _single_poly_candidates[_ring_ref]
+            _ring_shape = BuiltShape(
+                polygon=_ring_poly, role=ROLE_RUNWAY, ref=_ring_ref,
+                from_single_poly=True)
+            if (max(_ring_alts) - min(_ring_alts)
+                    < _SINGLE_POLY_FLAT_TOL_M):
+                _ring_shape.altitude = round(
+                    sum(_ring_alts[:-1]) / (len(_ring_alts) - 1), 2)
+            else:
+                _ring_shape.node_altitudes = list(_ring_alts)
+            layout.shapes.append(_ring_shape)
+            new_runway_polys.append(_ring_poly)
+        if single_poly_refs:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: de-seg — single-poly runway "
+                f"ring for {len(single_poly_refs)} ref(s)"
+                + (f", {len(_single_poly_crossing_refs)} crossing "
+                   f"ref(s) kept segmented"
+                   if _single_poly_crossing_refs else "")
+                + ".")
         # Fallback ref when a segment tuple doesn't carry a desig pair
         # (older chain entries before 2026-05-14 didn't tag the source
         # runway).  Keeps emit safe if a future segmenter path forgets
@@ -619,6 +693,8 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
                 width_m = seg[3]
                 desig_pair = seg[4] if len(seg) >= 5 else None
                 seg_ref = _ref_from_desig_pair(desig_pair)
+                if seg_ref in single_poly_refs:
+                    continue  # de-seg: this ref emitted as ONE ring above
                 width_m = max(1.0,
                                width_m - 2.0 * _LEGACY_RUNWAY_MARGIN)
                 samples_xy = [
@@ -658,6 +734,8 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
             lat_a, lon_a, elev_a, lat_b, lon_b, elev_b, width_m = seg[:7]
             desig_pair = seg[7] if len(seg) >= 8 else None
             seg_ref = _ref_from_desig_pair(desig_pair)
+            if seg_ref in single_poly_refs:
+                continue  # de-seg: this ref emitted as ONE ring above
             width_m = max(1.0, width_m - 2.0 * _LEGACY_RUNWAY_MARGIN)
             ax, ay = _latlon_to_m_local(lat_a, lon_a, lat0, lon0, cos0)
             bx, by = _latlon_to_m_local(lat_b, lon_b, lat0, lon0, cos0)
@@ -751,6 +829,17 @@ def _compute_elevations(layout: "PavementLayout", icao: str,
             for sh in layout.shapes:
                 if sh.role != ROLE_RUNWAY:
                     kept_shapes.append(sh)
+                    continue
+                if getattr(sh, "from_single_poly", False):
+                    # De-seg ring: the per-segment containment test is
+                    # meaningless on a whole-runway ring (an enclosing
+                    # apron is never RUNWAY_APRON_AREA_RATIO × the full
+                    # runway's area).  Apron-merge CARVING for single
+                    # rings lands with the crossing-carve slice; until
+                    # then the ring is kept whole.
+                    kept_shapes.append(sh)
+                    if sh.polygon is not None and not sh.polygon.is_empty:
+                        kept_polys.append(sh.polygon)
                     continue
                 drop = False
                 drop_apron: Polygon | None = None
@@ -2548,6 +2637,99 @@ def _latlon_to_m_local(lat: float, lon: float,
     x = math.radians(lon - lon0) * R_EARTH * cos0
     y = math.radians(lat - lat0) * R_EARTH
     return x, y
+
+
+# Flat-profile tolerance for the single-poly runway ring — the same
+# 5 cm FLAT_TOL the segment chain uses to consolidate consecutive flat
+# samples into a MULTI_FLAT polygon (runway_segments.py emit loop), so
+# a runway the legacy path emits flat also emits flat as one ring.
+_SINGLE_POLY_FLAT_TOL_M = 0.05
+
+# Legacy generate_patch_osm pads each runway side by RUNWAY_MARGIN=3 m
+# for imagery coverage; both conversion paths (segmented chain + the
+# single-poly ring) strip it to match the apt.dat width.
+_LEGACY_RUNWAY_MARGIN_M = 3.0
+
+
+def _build_single_poly_runway_ring(state: dict, lat0: float, lon0: float,
+                                   cos0: float):
+    """ONE runway polygon ring from the persisted FAA profile state
+    (runway de-segmentation, O4_RUNWAY_SINGLE_POLY — docs/
+    runway_single_polygon_plan.md).
+
+    The ring runs the left long edge physical-end-A → physical-end-B
+    with one vertex per profile sample station, then the right long
+    edge back B → A at the same stations, so the two end edges are the
+    former end cross-edges and there are NO interior cross-edges at
+    all.  Per-vertex altitudes are the profile value at each station
+    (both edges carry the profile; the crown drop field lowers edge
+    nodes later, in solve space).  Stations are exactly the profile's
+    sample list — physical ends + CIFP thresholds + pav_intersections
+    + cross-runway / crossing-reconciliation anchors — so junction
+    snap targets sit at the SAME positions the segment corners did.
+
+    Returns ``(polygon, node_altitudes)`` with ``node_altitudes``
+    including the closing repeat, or ``None`` when the geometry is
+    degenerate — the caller then falls back to the legacy segmented
+    chain for this ref.
+    """
+    phys_a = state.get('phys_end_a_ll')
+    phys_b = state.get('phys_end_b_ll')
+    fractions = state.get('fractions') or []
+    elevs = state.get('elevs') or []
+    width = state.get('patch_width_m')
+    if (phys_a is None or phys_b is None or width is None
+            or len(fractions) < 2 or len(fractions) != len(elevs)):
+        return None
+    ax, ay = _latlon_to_m_local(phys_a[0], phys_a[1], lat0, lon0, cos0)
+    bx, by = _latlon_to_m_local(phys_b[0], phys_b[1], lat0, lon0, cos0)
+    length = math.hypot(bx - ax, by - ay)
+    if length < 1.0:
+        return None
+    width = max(1.0, float(width) - 2.0 * _LEGACY_RUNWAY_MARGIN_M)
+    ux = (bx - ax) / length
+    uy = (by - ay) / length
+    px = -uy * width / 2.0
+    py = ux * width / 2.0
+    # Stations in axis order.  A station closer than SHARED_VERTEX_TOL_M
+    # to its predecessor would mint coincident ring vertices (the
+    # zero-length-edge class the to_osm guard collapses) — first wins,
+    # except the final physical end always survives.
+    stations: list[tuple[float, float]] = []
+    for f, e in sorted(zip(fractions, elevs)):
+        if stations and (f - stations[-1][0]) * length < SHARED_VERTEX_TOL_M:
+            continue
+        stations.append((float(f), float(e)))
+    if stations and (fractions[-1] - stations[-1][0]) * length >= 1e-9:
+        # The dedup above dropped the physical end B — put it back in
+        # place of the too-close predecessor so the ring spans the full
+        # physical extent.
+        stations[-1] = (float(fractions[-1]), float(elevs[-1]))
+    if len(stations) < 2:
+        return None
+    ring: list[tuple[float, float]] = []
+    alts: list[float] = []
+    for f, e in stations:
+        x = ax + f * (bx - ax)
+        y = ay + f * (by - ay)
+        ring.append((x + px, y + py))
+        alts.append(round(e, 2))
+    for f, e in reversed(stations):
+        x = ax + f * (bx - ax)
+        y = ay + f * (by - ay)
+        ring.append((x - px, y - py))
+        alts.append(round(e, 2))
+    try:
+        poly = Polygon(ring)
+    except _GEOM_EXC:
+        return None
+    if (not poly.is_valid or poly.is_empty
+            or poly.geom_type != "Polygon"
+            or len(poly.exterior.coords) != len(ring) + 1):
+        # A repaired/cleaned ring would break the vertex↔altitude
+        # correspondence — fall back to the segmented path instead.
+        return None
+    return poly, alts + [alts[0]]
 
 
 def _orient_rect_for_altitude(shape: "BuiltShape",

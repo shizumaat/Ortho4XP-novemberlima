@@ -992,6 +992,20 @@ def _build_runway_corner_altitudes(
             # sides).
             a = float(s.altitude)
             corner_alts = tuple((c, a) for c in coords)
+        elif (s.node_altitudes is not None
+                and getattr(s, "from_single_poly", False)):
+            # Single-poly runway ring (O4_RUNWAY_SINGLE_POLY): the
+            # per-vertex list IS the corner-altitude map.  Restricted
+            # to de-seg rings so the legacy (gate-off) path stays
+            # byte-identical — legacy per-vertex segment pieces were
+            # never mapped here.
+            alts = list(s.node_altitudes)
+            if len(alts) == len(coords) + 1:
+                alts = alts[:-1]
+            if len(alts) != len(coords):
+                continue
+            corner_alts = tuple(
+                (c, float(a)) for c, a in zip(coords, alts))
         else:
             continue
         for c, alt in corner_alts:
@@ -2478,7 +2492,27 @@ def stitch_pavement_to_flat_runways(
                     and s.altitude is not None
                     and s.altitude_high is None
                     and s.altitude_low is None]
-    if not flat_runways:
+    # Runway DE-SEGMENTATION (O4_RUNWAY_SINGLE_POLY): a single-poly
+    # runway ring carries per-vertex node_altitudes, so the whole-shape
+    # flat test above never fires — but its FLAT RUNS (consecutive ring
+    # vertices at the same altitude) are exactly the surface the legacy
+    # MULTI_FLAT / flat-rect pieces presented to this pass.  Without the
+    # stitch, junction frontage vertices within ``near_edge_snap_m`` of
+    # the ring edge never weld onto it (measured at SPJC 16L/34R: a
+    # 16 mm runway~junction epsilon wedge + a shifted junction
+    # partition).  Include the rings, restricting the snap to edges
+    # whose two endpoint altitudes agree (< 5 cm — the segment chain's
+    # FLAT_TOL), i.e. flat runs and the end cross-edges the flat blast
+    # pads used to present.
+    ring_runways = [s for s in layout.shapes
+                    if s.role == ROLE_RUNWAY
+                    and getattr(s, "from_single_poly", False)
+                    and s.polygon is not None
+                    and not s.polygon.is_empty
+                    and s.polygon.geom_type == "Polygon"
+                    and s.node_altitudes is not None]
+    stitch_runways = flat_runways + ring_runways
+    if not stitch_runways:
         return
     pavements = [s for s in layout.shapes
                  if s.role in STITCH_PAVEMENT_ROLES]
@@ -2487,9 +2521,34 @@ def stitch_pavement_to_flat_runways(
 
     corner_tol2 = corner_tol_m * corner_tol_m
     near_snap2 = near_edge_snap_m * near_edge_snap_m
+    _FLAT_EDGE_TOL_M = 0.05
+
+    def _open_ring_alts(s) -> list[float] | None:
+        """Per-vertex altitude list aligned to the OPEN ring, or None
+        for a flat (way-level ``altitude``) runway."""
+        alts = s.node_altitudes
+        if alts is None:
+            return None
+        try:
+            n_open = len(list(s.polygon.exterior.coords)) - 1
+        except _GEOM_EXC:
+            return None
+        if len(alts) == n_open + 1:
+            return list(alts[:-1])
+        if len(alts) == n_open:
+            return list(alts)
+        return None
+
+    rwy_open_alts: dict = {id(r): _open_ring_alts(r)
+                           for r in stitch_runways}
+    # A per-vertex ring whose altitude list is misaligned cannot be
+    # stitched safely — drop it from the pass.
+    stitch_runways = [r for r in stitch_runways
+                      if r.node_altitudes is None
+                      or rwy_open_alts.get(id(r)) is not None]
 
     # rwy id → ei → list of (t_along_edge, x, y) inserts
-    rwy_inserts: dict = {id(r): {} for r in flat_runways}
+    rwy_inserts: dict = {id(r): {} for r in stitch_runways}
 
     def _open_ring(coords):
         if coords and coords[0] == coords[-1]:
@@ -2531,7 +2590,7 @@ def stitch_pavement_to_flat_runways(
         for vi, (vx, vy) in enumerate(pav_coords):
             best_d2 = near_snap2
             best: tuple[object, int, float, float, float] | None = None
-            for rwy in flat_runways:
+            for rwy in stitch_runways:
                 try:
                     rcoords = _open_ring(list(
                         rwy.polygon.exterior.coords))
@@ -2539,6 +2598,9 @@ def stitch_pavement_to_flat_runways(
                     continue
                 m = len(rcoords)
                 if m < 3:
+                    continue
+                r_alts = rwy_open_alts.get(id(rwy))
+                if r_alts is not None and len(r_alts) != m:
                     continue
                 # Skip if vertex is already at a runway corner.
                 already_corner = False
@@ -2552,6 +2614,13 @@ def stitch_pavement_to_flat_runways(
                 for ei in range(m):
                     ax, ay = rcoords[ei]
                     bx, by = rcoords[(ei + 1) % m]
+                    if (r_alts is not None
+                            and abs(r_alts[ei] - r_alts[(ei + 1) % m])
+                            >= _FLAT_EDGE_TOL_M):
+                        # per-vertex ring: only FLAT runs are
+                        # stitchable (legacy parity — sloped segment
+                        # pieces were never stitched)
+                        continue
                     dx = bx - ax
                     dy = by - ay
                     seg2 = dx * dx + dy * dy
@@ -2606,7 +2675,7 @@ def stitch_pavement_to_flat_runways(
                 pass
 
     # Apply runway-side inserts.
-    for rwy in flat_runways:
+    for rwy in stitch_runways:
         inserts = rwy_inserts.get(id(rwy))
         if not inserts:
             continue
@@ -2617,6 +2686,9 @@ def stitch_pavement_to_flat_runways(
             continue
         m = len(rcoords_open)
         if m < 3:
+            continue
+        r_alts = rwy_open_alts.get(id(rwy))
+        if r_alts is not None and len(r_alts) != m:
             continue
         # Dedup inserts that land within DEDUP_INSERT_M of each other
         # on the same runway edge.  Phase A snaps each near-runway
@@ -2631,8 +2703,11 @@ def stitch_pavement_to_flat_runways(
         # corner per chart-level transition.
         DEDUP_INSERT_M = 3.0
         out: list[tuple[float, float]] = []
+        out_alts: list[float] = []
         for ei in range(m):
             out.append(rcoords_open[ei])
+            if r_alts is not None:
+                out_alts.append(r_alts[ei])
             if ei in inserts:
                 pts = sorted(inserts[ei], key=lambda x: x[0])
                 last_xy: tuple[float, float] | None = None
@@ -2643,6 +2718,12 @@ def stitch_pavement_to_flat_runways(
                         if ddx * ddx + ddy * ddy < DEDUP_INSERT_M ** 2:
                             continue
                     out.append((cx, cy))
+                    if r_alts is not None:
+                        # only flat edges take inserts (Phase A gate),
+                        # so lerp == both endpoints' shared value
+                        a0 = r_alts[ei]
+                        a1 = r_alts[(ei + 1) % m]
+                        out_alts.append(round(a0 + t * (a1 - a0), 2))
                     last_xy = (cx, cy)
         if len(out) < 3:
             continue
@@ -2653,11 +2734,19 @@ def stitch_pavement_to_flat_runways(
             if (new_poly.is_empty
                     or new_poly.geom_type != "Polygon"):
                 continue
+            if (r_alts is not None
+                    and len(list(new_poly.exterior.coords))
+                    != len(out) + 1):
+                # buffer(0) re-derived the ring — the per-vertex list
+                # would no longer align; skip the insert for this ring
+                continue
         except _GEOM_EXC:
             continue
         rwy.polygon = new_poly
-        # Flat runway carries a single ``s.altitude`` — uniform
-        # plane, no per-vertex node_altitudes to update.
+        if r_alts is not None:
+            rwy.node_altitudes = out_alts + [out_alts[0]]
+        # Flat runway (way-level ``s.altitude``) needs no per-vertex
+        # update.
 
 
 def stitch_pavement_polygons(

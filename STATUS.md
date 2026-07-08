@@ -1,3 +1,119 @@
+# STATUS — SESSION 20260707 (part 30k): CLEARANCE-EFFECTIVENESS
+# regression — the part-30f outer-edge DEM lift un-cut the cuts;
+# REVERTED (FIX B/C kept) + new conformance PROPERTY gate
+# (tools/clearance_conformance_audit.py)
+
+USER REPORTS (in-sim, fresh bake at HEAD; HECA):
+ 1. MOST clearance shapes ineffective — "just going to DEM".
+ 2. 05R end: a clearance shape MERGED with what should be the RESA.
+ 3. Right-side clearance tapers into the BLAST-PAD corner, not the
+    RESA corner → un-cut cliff beside the runway.
+ 4. Little triangle cuts in the clearance edge at runway SEGMENT nodes.
+
+## THE ESCAPE LESSON → NEW PROPERTY GATE
+The spike audit measures UNCOVERED terrain — a cut riding the DEM reads
+"covered" while protecting nothing, so the 30f regression was invisible
+to it (the lift even IMPROVED that number).  NEW
+``tools/clearance_conformance_audit.py``: for every lateral
+clearance-cut vertex, ``excess = alt − min(ceiling, DEM)``, ceiling =
+nearest airside pavement edge + 1 m threshold; excess > 0.5 m =
+DEM-RIDING (ineffective).  Two numbers: FLAT count (primary per-airport
+A/B — includes a bounded set of lawful RESA-ramp rows) and RAMP-ALLOWED
+count (above even ceiling + 5 %·d = unconditionally ineffective).
+
+## ROOT CAUSE (empirical A/B: HECA built at 787cb6a / f2bf4f3 / 773dcb9)
+DEM-riding 40/2232 (mean −0.88 m) → 508/2281 (+0.56 m) → 508 identical.
+The WHOLE regression is f2bf4f3 (30f FIX A outer-edge lift); no later
+commit touched cut-surface altitudes (confirms the wedge-investigation
+note that the 30e/30f→HEAD diff left the outline path alone).
+Mechanism: ``off = last + step`` is one station past the LAST
+OBSTRUCTION, not the true daylight point, so ``DEM(off) > ceiling``
+fires broadly (256 clusters airport-wide, not just sunk corridors),
+tilting each strip's ruled surface from pavement (inner) to DEM (outer)
+→ caps nothing.  CYXY was WORSE: 509/1337 = 38 % (ramp-allowed 480);
+SPLP 24/95.
+* A trapped-station-only lift (fire only when terrain never daylights
+  within the band cap) MEASURED INSUFFICIENT: 497/2275 still riding,
+  ramp-allowed 339 — HECA is broadly dug-in, so nearly every obstructed
+  station is obstructed at the cap itself.  (Stage-1 plan corrected
+  mid-flight on this measurement.)
+
+## FIX — revert FIX A (outer row back on the ceiling); FIX B/C KEPT
+The user's own item 3 settles the wall-vs-yield design tension: an
+UN-CUT cliff is the complaint — the excavation, with its cut face at
+the band edge, is wanted.  And the four 30f in-sim spots stay fixed
+WITHOUT the lift (probes below): the needle declaw (FIX B), tighter
+standoff (FIX C) and the run-taper/MultiPolygon fixes were what
+actually cleaned them.  ``_build_graded_strips`` outer row is back to
+``ceiling(off)`` unconditionally (pre-30e semantics, comment records
+the 30k measurements).
+
+## VERIFIED (gates; HECA/CYXY/SPLP rebuilt at the fix)
+* CONFORMANCE (primary): HECA **39/2149** (mean −0.87, ramp 3) ≤
+  pre-30e 40/2232 (−0.88, ramp 4) ✓.  CYXY 509 → **35**/1267 (ramp
+  480 → 25) ✓.  SPLP 24 → **0**/116 (ramp 13 → 0) ✓.  HECA's residual
+  39 ≈ the lawful 5 % RESA ramp rows (e.g. +13.74 m at
+  30.094494,31.416804 = 0.05 × 275 m exactly).
+* 30f spots STAY FIXED: 3 HECA coords inside cuts, 0 needles (3 m thr,
+  40 m radius), worst ring-edge grade 3 %/3 %/2 % (pre-fix HEAD was
+  4 %/4 %/16 %); CYXY notch inside cut, 0 needles, 2 % (pre-fix 3 %) ✓.
+* spike audit HECA **49/38** vs the ≤48/37 gate: net +1 borderline
+  sample — exact flip set identified (4 new / 3 gone, all inside the
+  two KNOWN sunk-corridor partial-coverage zones 30.1164,31.4101 and
+  30.1022–34,31.3946–58; 3 of the 4 new sit ≤0.64 m from an emitted
+  surface = the documented mesh-constrained pavement-gap crack band,
+  the 4th at 2.98 m in a zone that carried a +3.7 m sample at HEAD).
+  Cause: flat outer rows decimate differently → outline jitter, not a
+  new exposure class.  CYXY 224/61 (pre-fix 221/58; pre-30e 487/122 —
+  the FIX C gain retained), SPLP 18/6 (pre-fix 46/11 — improved).
+* check_grade: WITHIN SPLP **16** / CYXY **1** / HECA **0**; PLANE 0,
+  CROSS 0, RUNWAY-END SKIRT 0 everywhere; HECA vertex-to-edge 3 +
+  mid-edge 14, break 5891 — all == baselines ✓.
+* wedge_audit: HECA 5, CYXY 2, SPLP 0 == baselines (no growth) ✓.
+* verify_and_log HECA: identical finding CLASSES pre/post (overlap /
+  off-source / epsilon_wedge; wedge 9 == 9, source 1 == 1).  Overlap
+  4 → 5: one NEW 0.3 m² clearance∩clearance sliver at 30.11510,31.41375
+  — the same pre-existing class as the 3.2 m² clearance∩clearance at
+  30.09830,31.41876 (present both sides), outline-jitter scale ✓.
+* fast_suite: exactly the 8 pre-existing failures.  Full suite: exactly
+  the 13 pre-existing ✓.
+
+## ITEMS 2/3 (05R end) — measurables resolved by item 1; cosmetics handed off
+At the rebuilt HEAD the 05R box (30.093–30.102, 31.414–31.424) has ZERO
+uncovered obstructing spike samples; the runway_clearance region
+(-10775, 32 k m², 44 m from the 05R threshold 30.09716,31.41907)
+excavates properly (airport-wide ramp-allowed = 3, none at 05R).  The
+"un-cut cliff" WAS the DEM-riding cut — covered but not cutting.
+Residual (cosmetic): the right-flank taper anchors at the blast-pad
+corner (apt.dat 05R blast pad 65 m) rather than the RESA corner — the
+ownership boundary between the 30e skirt flank-wrap, Pass A3 (which
+skips END-normal stations, ``_RING_END_NORMAL_DOT``) and Pass C.  No
+measurable uncovered or unconformant terrain remains there, so
+reshaping that boundary is runway-end ownership work — deferred to the
+de-seg session (it rebuilds runway ends; revisit on a fresh bake after
+its Phase 2).
+
+## ITEM 4 — subsumed by de-seg (documented, not fixed here)
+The little triangle cuts at runway segment nodes are the per-sub-rect
+Pass A3 walks: each segment's flank run ends (and run-tapers) at the
+sub-rect seam, so adjacent same-ref strips meet in unmerged tapers.  A
+tactical fix needs a per-ref merged-outline walk with cross-piece
+altitude resampling — not cheap; the de-seg plan
+(docs/runway_single_polygon_plan.md, dedicated session) removes the
+seams themselves.
+
+## OPEN (part 30k follow-ups)
+* The conformance audit's FLAT count includes the lawful RESA ramp rows
+  (HECA 36-39 of its baseline flags); if per-regime attribution ever
+  matters, tag RESA-regime strips at emit so the audit can split them.
+* Deep sunk-pavement corridors (HECA 30.115–30.116 etc.) again render a
+  cut face at the band edge — by design (the cut working).  If the user
+  ever rules the face too harsh THERE, the answer is a bench+backslope
+  (protected band at ceiling to the cap, then a separate abutting
+  backslope band to daylight) — needs multi-row emission machinery
+  (today's finalize unions everything into two-row rings), NOT a return
+  of the outer-row lift.
+
 # STATUS — SESSION 20260707 (part 30i): RUNWAY SEGMENT-DIP HOTFIX —
 # crown the interior cross-edges (de-seg plan Phase 0, docs/
 # runway_single_polygon_plan.md).  User: "airports unusable as is".

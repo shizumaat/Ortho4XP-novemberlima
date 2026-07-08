@@ -151,15 +151,15 @@ _COINCIDENT_MERGE_TOL_M = 0.1
 # BOTH of its ring neighbours by more than this, while the two
 # neighbours agree with each other to within it.  The finalize resample
 # assigns each final-ring vertex the altitude of the NEAREST source
-# strip edge; where a cut is a thin corridor along sunk pavement (the
-# inner edge rides pavement level, the outer edge rides the standing
-# terrain it daylights against), the inner and outer strip edges pass
-# within ``EDGE_TOL_M`` of one another at a concave jog, so one vertex
-# flips to the far edge and spikes ~7 m above/below its neighbours — the
-# "terrain spike at a little jog" / "pointy cut" the user sees.  A real
-# daylight-contour ramp changes monotonically across several vertices;
-# an isolated single-vertex reversal is always this artifact, so it is
-# clamped to the neighbour mean.
+# strip edge; where strips from different bands (e.g. a low apron cut
+# beside a higher runway strip, or a thin corridor whose inner and
+# outer rows pass within ``EDGE_TOL_M`` of one another at a concave
+# jog) meet, one vertex can flip to the far edge and spike metres
+# above/below its neighbours — the "terrain spike at a little jog" /
+# "pointy cut" the user sees (CYXY carried 3 such needles before the
+# part-30f declaw).  A real daylight-contour ramp changes monotonically
+# across several vertices; an isolated single-vertex reversal is always
+# this artifact, so it is clamped to the neighbour mean.
 _NEEDLE_ALT_TOL_M = 3.0
 # Airside pavement a taxi centerline can run over — used to find the
 # pavement edge (raycast) and the edge altitude, regardless of whether
@@ -670,29 +670,26 @@ def _build_graded_strips(edge_stations, edge_alts, outwards,
             ix, iy = sx + nx * _PAVEMENT_GAP_M, sy + ny * _PAVEMENT_GAP_M
             inner_alts.append(round(float(ref + slope * _PAVEMENT_GAP_M), 1))
             inner_pts.append((ix, iy))
-            # Outer edge: at the daylight point, on the ceiling — normally
-            # the DEM has dropped back to (or below) the ceiling there, so
-            # placing the outer edge at the ceiling meets natural ground
-            # with no cliff.  But where the terrain NEVER daylights within
-            # the band cap (pavement sunk in a plateau: HECA service-road /
-            # apron corridors excavated ~14 m below grade), the ceiling
-            # would plant a flat shelf at pavement level under 14 m of
-            # standing terrain — a vertical wall at the band edge, the
-            # "terrain spike at a jog" the user sees.  Lift the outer edge
-            # to the HIGHER of the ceiling and the DEM (the exact mirror of
-            # the skirt's lift-only convention): where terrain has daylit
-            # this is the ceiling (unchanged); where it has not, the edge
-            # rides up to meet the standing terrain as a cut backslope
-            # instead of a wall.  Only ever RAISES the outer edge, so it can
-            # never carve a sub-surface canyon.
+            # Outer edge: at the daylight point, on the ceiling, so the
+            # whole band is graded to the protective surface and the cut
+            # meets natural ground where the terrain has daylit.  Where
+            # the terrain has NOT daylit within the band cap (pavement
+            # dug in below its surroundings) this leaves a cut FACE at
+            # the band edge — that is the cut doing its job, not a
+            # defect (part 30k, user in-sim ruling: an un-cut cliff
+            # beside pavement is the complaint; the excavation is
+            # wanted).  Part 30f briefly lifted this row to
+            # max(ceiling, DEM): that tilted whole cut surfaces up to
+            # the DEM so they capped nothing (HECA: 508/2281 cut
+            # vertices rode the DEM vs 40 before; a trapped-station-only
+            # lift still left 339 riding above even a 5% ramp allowance
+            # because HECA is broadly dug-in) — reverted.  The single-
+            # vertex spike class 30f also fixed stays fixed by
+            # ``_declaw_alt_needles`` (FIX B) and the tighter standoff
+            # (FIX C), both kept.
             ox, oy = sx + nx * off, sy + ny * off
-            ceil_off = ref + slope * off
-            dd_off = sample_dem(ox, oy)
             outer_pts.append((ox, oy))
-            if dd_off is not None and dd_off > ceil_off:
-                outer_alts.append(round(float(dd_off), 1))
-            else:
-                outer_alts.append(round(float(ceil_off), 1))
+            outer_alts.append(round(float(ref + slope * off), 1))
         if len(inner_pts) < 2:
             continue
         ring = inner_pts + outer_pts[::-1]
