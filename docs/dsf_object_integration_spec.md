@@ -1160,3 +1160,28 @@ now spans three developers.
 
 **W8 gate set is now KCLT + HECA + LEMD.** Every measurement (per-component residual, hard-tear
 check, grade scoreboard) runs on all three. Same apt.dat baseline caution as A11.
+
+**Oracle results (same day, `tools/obj8_partition_audit.py` on the OldTerminal pool, 1,638
+ground-touching parts):**
+
+| partition | structures | residual p50 | >0.5 m | abutment separations |
+|---|---|---|---|---|
+| no correction | – | **10.01** | 1638/1638 | – |
+| 2D gap 2 m (prototype) | 44 | 2.58 | 1334 | 0 |
+| contact graph ε 0.25 m | 624 | **0.76** | 1071 | 2658, max 7.25 m |
+
+Three findings, none blocking Wave 2:
+
+1. **The theorem holds on the multi-anchor pack**: 35,235 shared world positions, zero torn,
+   rendered-elevation spread 0.000000000 m — across the 6-metre-apart anchor families.
+2. **Phase 1 pads matter far more here than at KCLT.** Post-correction residual p50 is 0.76 m
+   against KCLT's 0.08 m: LEMD's ground genuinely varies *within* structures. This is the §7.3
+   mechanism at 10× the KCLT magnitude; M2's measurement is the main event at LEMD.
+3. **The V3 induced-separation question (partition document §6.2) is now urgent, and ε has no
+   universal knee.** 2,658 pairs of parts within a 25 cm box gap end in different structures and
+   separate by up to 7.25 m. On a slope, *some* of that is correct — adjacent separate buildings
+   must sit at different elevations, and opening that gap is the point of the fix — but pairs that
+   are really one building (FSX conversions abound in close-but-not-touching assembly) are visible
+   tears. The ε scan shows a smooth decline at LEMD (0.02 → 2,239; 0.25 → 624; 1.0 → 320) with no
+   KCLT-style knee. W8 must produce the V3 report per pack and decide between a larger default ε,
+   a per-pack ε, or weak-contact analysis — measured in-sim, not argued.
