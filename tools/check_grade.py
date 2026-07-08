@@ -1109,6 +1109,40 @@ def _check_runway_end_skirt_edges(ways: List[Way],
     # Skirt altitudes emit at 0.1 m quantization — a pair carries up to
     # ~0.1 m of rounding; padded slightly for float noise.
     skirt_edge_noise_m = 0.15
+    # LIFT-ONLY tolerance (2026-07-07): the skirt surface is
+    # ``max(analytic_floor, DEM)`` per vertex (clearance._skirt_lift_alt
+    # — the fill-only / flat-shadow convention: a fill never cuts).  A
+    # band that TRIGGERS on falling terrain can still SPAN a DEM bump
+    # that sits above the floor; that vertex lifts to the DEM instead of
+    # being graded DOWN to the floor.  So a band row is no longer level,
+    # and the surface can descend from a lifted bump back to the floor
+    # FASTER than the down-grade cap — this is LAWFUL (the law bounds how
+    # far BELOW the floor the surface may drop, not how it rides an
+    # existing bump back up; a vertex at/above the floor descending no
+    # lower than the floor is compliant).  DEM-free we cannot read the
+    # floor, but we CAN tell the two apart by SHAPE: a lift raises a
+    # vertex ABOVE its ring neighbours (a peak); post-emission corruption
+    # DROPS a vertex below its neighbours (a valley).  So an over-steep
+    # edge is flagged ONLY when its HIGHER endpoint is NOT a local lift
+    # peak — i.e. the steepness comes from the lower vertex dropping, the
+    # one signature ``max(floor, DEM)`` can never produce.  The DEM-aware
+    # floor/curvature law (verification.check_runway_end_skirt) remains
+    # the full below-floor check.
+
+    def _ring_neighbour_elevs(w, i):
+        """Elevations of the two ring-adjacent vertices of index ``i``
+        on the closed way ``w`` (its ring's last nid repeats the first)."""
+        m = len(w.nids) - 1  # distinct vertices (ring closes)
+        if m < 2:
+            return []
+        elevs = []
+        for j in (i - 1, i + 1):
+            k = j % m
+            e = w.elevs[k] if k < len(w.elevs) else None
+            if e is not None:
+                elevs.append(float(e))
+        return elevs
+
     out: List[Violation] = []
     for w in ways:
         if w.ref != "runway_end_skirt":
@@ -1131,6 +1165,15 @@ def _check_runway_end_skirt_edges(ways: List[Way],
             allowance = (RUNWAY_END_SKIRT_MAX_DOWN_GRADE * dist
                          + skirt_edge_noise_m)
             if de <= allowance:
+                continue
+            # Lift check: if the HIGHER endpoint is strictly above BOTH
+            # its ring neighbours, it is a lifted DEM bump and the steep
+            # descent off it is lawful (max(floor, DEM) riding terrain).
+            hi_idx = i if float(ea) >= float(eb) else i + 1
+            hi_elev = max(float(ea), float(eb))
+            neigh = _ring_neighbour_elevs(w, hi_idx)
+            if neigh and all(hi_elev > ne + skirt_edge_noise_m
+                             for ne in neigh):
                 continue
             grade = de / dist
             out.append(Violation(

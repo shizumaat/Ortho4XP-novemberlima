@@ -55,6 +55,7 @@ from .layout import (
     ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL,
     ROLE_RUNWAY,
+    ROLE_RUNWAY_CLEARANCE,
     ROLE_RUNWAY_CROSSING,
     ROLE_SECONDARY_PARALLEL,
     ROLE_STUB,
@@ -73,6 +74,7 @@ __all__ = [
     "_emit_airport_boundary_shape",
     "_emit_boundary_dem_bridge",
     "_clip_boundary_bridges_against_pavement",
+    "_reconcile_boundary_bridges_with_skirts",
     "_snap_bridge_vertices_to_runway_corners",
     "_insert_bridge_contacts_into_junctions",
     "_flatten_bridge_pinch_necks",
@@ -473,6 +475,174 @@ def _clip_boundary_bridges_against_pavement(
             if new_alts is not None:
                 new_s.node_altitudes = new_alts
         new_shapes.append(new_s)
+        n_modified += 1
+
+    layout.shapes = new_shapes
+    return n_modified
+
+
+def _reconcile_boundary_bridges_with_skirts(
+        layout: "PavementLayout",
+        overlap_min_m2: float = 1.0,
+        min_area_m2: float = 25.0,
+        reconcile_tol_m: float = 8.0) -> int:
+    """Make every ``boundary_dem_bridge`` MATCH the runway-end SKIRT /
+    RESA surface (role ``runway_clearance``) where the two meet.
+
+    The boundary→DEM bridge emits in the feature phase, BEFORE the final
+    grade projection and the runway-end skirts (the absolute-last
+    emission — they bake the law floor from the settled pavement
+    profile; see the skirt call site in ``pipeline.py``).  So a bridge
+    at a runway end anchors its inner edge to the RAW DEM and cannot
+    know the skirt/RESA surface emitted later: where the skirt fills a
+    hillside brow up to the law floor, the bridge still descends to bare
+    terrain, and the two meet in a step (KCLT 18R: a ~10 m bridge-vs-
+    skirt mismatch — the ramp the user sees in-sim).
+
+    Per the user's requirement ("if we determine a bridge is needed, it
+    has to match with the skirt or RESA"), and keeping the skirt LAST
+    (as it must be), this pass runs AFTER the skirt emits and does two
+    things per bridge:
+
+      1. **Subtract** any skirt/RESA area the bridge overlaps (>
+         ``overlap_min_m2``): inside a governed runway-end zone the
+         skirt/RESA is the authoritative graded surface, so the bridge
+         must not re-expose raw DEM there.
+      2. **Re-anchor** every surviving bridge vertex that lies within
+         ``reconcile_tol_m`` of a skirt/RESA surface to that surface's
+         edge-interpolated altitude, so the bridge and skirt meet flush
+         at their shared frontier instead of stepping.  (A bridge and a
+         skirt are separated by the skirt's pavement-gap / clip buffer,
+         so they typically ABUT rather than overlap — the re-anchor,
+         not the subtraction, is what closes the visible step.)
+
+    Mirror of ``_clip_boundary_bridges_against_pavement`` for the
+    subtraction + largest-piece + altitude-resample machinery.  Returns
+    the number of bridge shapes modified.
+    """
+    from .clearance import _edge_interp_alt as _skirt_edge_alt
+
+    obstacles = [s for s in layout.shapes
+                 if s.role == ROLE_RUNWAY_CLEARANCE
+                 and s.polygon is not None
+                 and not s.polygon.is_empty]
+    if not obstacles:
+        return 0
+    if not any(s.role == ROLE_BOUNDARY and s.ref == "boundary_dem_bridge"
+               and s.polygon is not None and not s.polygon.is_empty
+               for s in layout.shapes):
+        return 0
+
+    def _nearest_skirt_alt(x, y):
+        """Skirt/RESA surface altitude at ``(x, y)`` from the nearest
+        clearance shape within ``reconcile_tol_m`` (edge-interpolated,
+        the same read the skirt emits / the validator samples)."""
+        best = None
+        pt = Point(x, y)
+        for obs in obstacles:
+            try:
+                d = obs.polygon.distance(pt)
+            except _GEOM_EXC:
+                continue
+            if d <= reconcile_tol_m and (best is None or d < best[0]):
+                alt = _skirt_edge_alt(obs, x, y)
+                if alt is not None:
+                    best = (d, alt)
+        return None if best is None else best[1]
+
+    n_modified = 0
+    new_shapes: list[BuiltShape] = []
+    for s in layout.shapes:
+        if (s.role != ROLE_BOUNDARY
+                or s.ref != "boundary_dem_bridge"
+                or s.polygon is None
+                or s.polygon.is_empty):
+            new_shapes.append(s)
+            continue
+        bridge_poly = s.polygon
+        old_alts = s.node_altitudes
+        old_open = list(bridge_poly.exterior.coords)
+        if old_open and old_open[0] == old_open[-1]:
+            old_open = old_open[:-1]
+        # 1. Subtract overlapped skirt/RESA area.
+        modified = False
+        for obs in obstacles:
+            try:
+                if not bridge_poly.intersects(obs.polygon):
+                    continue
+                if bridge_poly.intersection(obs.polygon).area \
+                        <= overlap_min_m2:
+                    continue
+                bridge_poly = bridge_poly.difference(obs.polygon)
+                modified = True
+            except _GEOM_EXC:
+                continue
+            if bridge_poly.is_empty:
+                break
+            if bridge_poly.geom_type not in (
+                    "Polygon", "MultiPolygon", "GeometryCollection"):
+                bridge_poly = None
+                break
+        if bridge_poly is None or bridge_poly.is_empty:
+            n_modified += 1
+            continue
+        if modified:
+            if bridge_poly.geom_type == "Polygon":
+                pieces = [bridge_poly]
+            elif bridge_poly.geom_type == "MultiPolygon":
+                pieces = list(bridge_poly.geoms)
+            elif bridge_poly.geom_type == "GeometryCollection":
+                pieces = [g for g in bridge_poly.geoms
+                          if g.geom_type == "Polygon"]
+            else:
+                pieces = []
+            pieces = [p for p in pieces
+                      if p.is_valid and not p.is_empty
+                      and p.area >= min_area_m2]
+            if not pieces:
+                n_modified += 1
+                continue
+            pieces.sort(key=lambda g: -g.area)
+            keep = pieces[0]
+            # node_altitudes are stored CLOSED (first == last).
+            alts_closed = None
+            if old_alts is not None and old_open:
+                alts_closed = _resample_node_altitudes_nn(
+                    keep, old_open, old_alts)
+        else:
+            keep = bridge_poly
+            alts_closed = list(old_alts) if old_alts is not None else None
+
+        # 2. Re-anchor vertices near a skirt/RESA surface to it so the
+        #    bridge and skirt meet flush (closed-ring: keep first == last).
+        reanchored = False
+        if alts_closed is not None:
+            ring_closed = list(keep.exterior.coords)
+            m = min(len(ring_closed), len(alts_closed))
+            for i in range(m):
+                vx, vy = ring_closed[i]
+                sa = _nearest_skirt_alt(vx, vy)
+                if sa is not None and abs(sa - alts_closed[i]) > 0.05:
+                    alts_closed[i] = round(float(sa), 1)
+                    reanchored = True
+            # Preserve the closed-ring invariant if the shared vertex moved.
+            if len(alts_closed) >= 2:
+                alts_closed[-1] = alts_closed[0]
+
+        if not modified and not reanchored:
+            new_shapes.append(s)
+            continue
+        new_shapes.append(BuiltShape(
+            polygon=keep,
+            role=s.role,
+            ref=s.ref,
+            source_axis=s.source_axis,
+            altitude=s.altitude,
+            altitude_high=s.altitude_high,
+            altitude_low=s.altitude_low,
+            node_altitudes=alts_closed,
+            is_bridge=s.is_bridge,
+        ))
         n_modified += 1
 
     layout.shapes = new_shapes

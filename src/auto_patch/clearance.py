@@ -630,6 +630,29 @@ def _build_graded_strips(edge_stations, edge_alts, outwards,
 # ──────────────────────────────────────────────────────────────────
 # Core: build FILL skirts off one edge (the inverse of the cut strips)
 # ──────────────────────────────────────────────────────────────────
+def _skirt_lift_alt(analytic_floor: float, dem_alt) -> float:
+    """The lawful skirt altitude at a vertex: ``max(floor, DEM)``.
+
+    The skirt is FILL-only (the exact mirror of the cut passes'
+    flat-shadow convention — cuts never fill, fills never cut; see
+    docs/STANDARDS.md "Lateral (wingtip) clearance").  A band triggers
+    only where the terrain falls MORE than the trigger below the floor,
+    but the emitted band can still SPAN vertices whose DEM sits AT or
+    ABOVE the floor (a bump inside a hollow; the last+step overshoot at
+    a run's end).  Grading those DOWN to the analytic floor would carve
+    an unnecessary cut ramp — so every skirt vertex lifts to the higher
+    of the analytic floor and the DEM.  A vertex at/above the floor that
+    descends no lower than the floor profile is lawful; the down-grade
+    caps bound how far BELOW the floor is reachable, not how the surface
+    rides an existing bump back up.  Shared verbatim by the emitter's
+    ring altitudes and its analytic ``alt_at`` closures so shared band
+    boundary rows compute the SAME max'ed value and the surface never
+    tears."""
+    if dem_alt is None:
+        return analytic_floor
+    return max(analytic_floor, float(dem_alt))
+
+
 def _build_filled_skirts(edge_stations, edge_alts, outwards,
                          band_caps, floor_depth, band_edges, trigger,
                          step, sample_dem):
@@ -739,12 +762,18 @@ def _build_filled_skirts(edge_stations, edge_alts, outwards,
                     continue
                 sx, sy = edge_stations[i]
                 ix, iy = sx + nx * d0, sy + ny * d0
-                inner_alts.append(round(
-                    float(ref - floor_depth(d0)), 1))
+                # Lift-only: the ring rides the HIGHER of the analytic
+                # floor and the DEM at each vertex, so a triggered band
+                # spanning a bump above the floor never cuts it down.
+                inner_alts.append(round(_skirt_lift_alt(
+                    float(ref - floor_depth(d0)),
+                    sample_dem(ix, iy)), 1))
                 inner_pts.append((ix, iy))
                 ox, oy = sx + nx * off, sy + ny * off
                 outer_pts.append((ox, oy))
-                outer_alts.append(round(float(ref - floor_depth(off)), 1))
+                outer_alts.append(round(_skirt_lift_alt(
+                    float(ref - floor_depth(off)),
+                    sample_dem(ox, oy)), 1))
             if len(inner_pts) < 2:
                 continue
             ring = inner_pts + outer_pts[::-1]
@@ -2096,9 +2125,13 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
 
         def _end_alt_at(vx, vy, p0=p0, nx=nx, ny=ny,
                         ref=float(ref), floor_depth=_floor_depth,
-                        cap=governed):
+                        cap=governed, sample_dem=sample_dem):
             d = (vx - p0[0]) * nx + (vy - p0[1]) * ny
-            return ref - floor_depth(max(_PAVEMENT_GAP_M, min(cap, d)))
+            floor = ref - floor_depth(max(_PAVEMENT_GAP_M, min(cap, d)))
+            # Lift-only, exactly as _build_filled_skirts' ring altitudes
+            # (clip-introduced vertices ride the DEM where it is above
+            # the analytic floor rather than cutting it down).
+            return _skirt_lift_alt(floor, sample_dem(vx, vy))
 
         for ring, _ralts in _build_filled_skirts(
                 stations, [ref] * m, [outward] * m, [governed] * m,
@@ -2155,7 +2188,7 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
                               edge_offsets=edge_offsets,
                               edge_alts=edge_alts,
                               floor_depth=flank_floor_depth,
-                              half=half):
+                              half=half, sample_dem=sample_dem):
                 # Along-axis position → interpolate the pavement edge
                 # offset and altitude between the two nearest stations.
                 s = (vx - seed[0]) * nx + (vy - seed[1]) * ny
@@ -2172,7 +2205,10 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
                 lateral = (vx - seed[0]) * sxn + (vy - seed[1]) * syn
                 d = max(_PAVEMENT_GAP_M,
                         min(half - offset, lateral - offset))
-                return edge_alt - floor_depth(d)
+                # Lift-only (see _skirt_lift_alt): a flank vertex on a
+                # bump above the local floor rides the DEM, not a cut.
+                return _skirt_lift_alt(
+                    edge_alt - floor_depth(d), sample_dem(vx, vy))
 
             flank_rings = _build_filled_skirts(
                 edge_stations, edge_alts, [side] * len(edge_stations),

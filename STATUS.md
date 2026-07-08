@@ -1,3 +1,101 @@
+# STATUS — SESSION 20260707 (part 30e): runway-end SKIRT lift-only fix +
+# boundary→DEM BRIDGE ↔ skirt/RESA reconciliation (KCLT 18R in-sim ramp)
+
+## LANDED (part 30e) — skirt is FILL-only (never cuts), bridge matches skirt
+USER REPORT (in-sim, KCLT 18R): a ramp carved BELOW grade at a runway
+end.  Two causes, both fixed:
+
+### A. Skirt lift-only (fill never cuts — the flat-shadow mirror)
+The runway-end skirt (``clearance.emit_runway_end_skirts``) enforces a
+MINIMUM grade: it FILLS terrain that falls too steeply below the law
+floor (``grade_law.runway_end_skirt_floor_profile``); the RESA cut
+(Pass C) separately handles terrain that RISES.  The skirt must be
+FILL-ONLY, but it emitted vertex altitudes at the analytic floor
+UNCONDITIONALLY — so terrain inside a triggered band that sits ABOVE the
+floor (a bump in a hollow; the last+step daylight overshoot) was graded
+DOWN to the floor: an unnecessary cut ramp.
+
+FIX — per-vertex lift-only, ``skirt_alt = max(analytic_floor, DEM)``, via
+ONE shared helper ``clearance._skirt_lift_alt`` at all three emit sites:
+``_build_filled_skirts`` ring altitudes (inner + outer rows) AND the two
+analytic ``alt_at`` closures (``_end_alt_at``, ``_flank_alt_at``, now
+closing over ``sample_dem``) used when the finalize clip recomputes
+vertices.  Mirrors the cut passes' flat-shadow convention (cuts never
+fill; fills never cut — docs/STANDARDS.md "Lateral (wingtip) clearance").
+Shared band-boundary rows compute the SAME max'ed value at shared
+vertices (identical position + DEM sample + rounding) → no surface tear.
+
+VALIDATOR lockstep (``tools/check_grade._check_runway_end_skirt_edges``):
+the DEM-free edge-grade reader assumed level band rows and flagged any
+edge steeper than the down-grade cap.  Lift breaks levelness — a bump
+vertex descending to a floor vertex can exceed the cap LAWFULLY (the law
+bounds how far BELOW the floor, not how the surface rides a bump back
+up).  DEM-free we cannot read the floor, but we tell lawful-lift from
+corruption by SHAPE: a lift RAISES a vertex above its ring neighbours (a
+peak); post-emit corruption DROPS one below them (a valley).  The reader
+now skips an over-steep edge whose HIGHER endpoint is a local peak (a
+lifted DEM bump) and still flags genuine over-steep descents.  The
+DEM-aware ``verification.check_runway_end_skirt`` remains the full
+below-floor law check (unaffected by lift — lifting only RAISES the
+surface, which can never read as a below-floor drop).
+
+NOTE (measured): at SPLP (6 skirts) and KCLT (48 skirts, 4392 emit-time
+skirt vertices) NO skirt vertex has DEM above the analytic floor, so the
+lift is a no-op there (before == after == 0 down-cutting vertices).  The
+fix is a correctness guarantee for bump terrain; the VISIBLE 18R ramp was
+cause B.
+
+### B. Boundary→DEM bridge ↔ skirt/RESA reconciliation
+The boundary→DEM bridge emits in the feature phase, BEFORE the final
+grade projection and the skirts (which are the absolute-LAST emission —
+they bake the floor from the settled pavement profile; the KCLT 18L
++0.4 m case in the skirt call-site comment).  So a bridge at a runway
+end anchors its inner edge to RAW DEM and cannot match the skirt/RESA
+surface emitted later → the two meet in a step (KCLT 18R: **10.2 m**
+bridge-vs-skirt mismatch — the ramp the user saw).
+
+FIX (option b, contained — the skirt STAYS last): new
+``boundary._reconcile_boundary_bridges_with_skirts``, called right after
+the skirt emit + tile-cut in ``pipeline.py``.  Per bridge it (1)
+SUBTRACTS any overlapped skirt/RESA (role ``runway_clearance``) area —
+the skirt owns the graded terrain in its governed zone — then (2)
+RE-ANCHORS every surviving bridge vertex within 8 m of a skirt/RESA
+surface to that surface's edge-interpolated altitude, so bridge and
+skirt meet FLUSH.  (Bridge + skirt are separated by the skirt's
+pavement-gap/clip buffer, so they ABUT rather than overlap — the
+re-anchor, not the subtraction, closes the step.)  Reuses the
+``_clip_boundary_bridges_against_pavement`` difference + largest-piece +
+``_resample_node_altitudes_nn`` machinery.  Option (a) (move bridge emit
+after skirts) rejected: wide blast radius (bridge feeds snap-to-corner,
+junction-contact insertion, tile-cut, feature conformance) and it fights
+the skirt-must-be-last invariant.
+
+## VERIFIED (gates, part 30e — all at 787cb6a baselines)
+* KCLT **18R** (primary probe): bridge-vs-skirt mismatch **10.20 m → 0.00
+  m**; 2 bridges reconciled, all 8 bridges preserved (not destroyed).
+* Down-cutting skirt vertices (DEM−alt > 1 cm): SPLP 0→0, KCLT 0→0 (see
+  NOTE above — lift is a no-op at these airports; verified at emit time
+  over 4392 KCLT skirt vertices, 0 above-floor).
+* check_grade (gate-on builds, all fixes): WITHIN-SHAPE SPLP **16**, CYXY
+  **1**, HECA **0**; "RUNWAY-END SKIRT edge grade" **0** at SPLP / CYXY /
+  HECA / KCLT (checker updated, still flags genuine over-steep — 3
+  reader unit tests green).
+* ``verification.check_runway_end_skirt`` at KCLT: **0** findings (skirt
+  law conformance preserved; the KCLT M4 baseline holds).
+* fast_suite.sh: exactly the 8 pre-existing failures.
+* full suite: exactly the 13 pre-existing failures (SPLP ×4, SPJC ×4,
+  CYXY ×4, HECA ×1) — no new failures.
+
+## OPEN (part 30e follow-ups)
+* The lift-only fix has no observable effect at the current fixtures (no
+  above-floor skirt vertices).  A synthetic bump-in-band terrain confirms
+  the emitter lifts and the checker no longer false-flags (143.7 % edge
+  → 0 flags), but a REAL airport with a bump inside a triggered band
+  would be the true regression witness — none in the fixture set.
+* Bridge re-anchor tolerance is 8 m (one skirt station step + slack).  A
+  bridge vertex >8 m from any skirt edge keeps its DEM value; if a future
+  airport has a bridge frontier coarser than that, widen the tol.
+
 # STATUS — SESSION 20260707 (part 30d): TAXIWAY-EDGE grade adoption for
 # service roads (USER RULING part-29 item 4) — mirrors the apron-edge rule
 

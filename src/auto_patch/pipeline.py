@@ -5734,6 +5734,24 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     dem=_projection_dem,
                     skip_roles=_skirt_skip,
                 )
+                # BRIDGE ↔ SKIRT reconciliation (user 2026-07-07): the
+                # boundary→DEM bridge emitted in the feature phase
+                # anchors to RAW DEM at a runway end and cannot match
+                # the skirt/RESA surface emitted here (KCLT 18R: a ~10 m
+                # bridge-vs-skirt step).  The skirt MUST stay last (it
+                # bakes the floor from settled pavement), so instead of
+                # reordering emission we trim the bridges to the
+                # just-emitted skirt/RESA footprint — the skirt owns the
+                # terrain transition inside its governed zone; the
+                # bridge descends to the DEM only OUTSIDE it.
+                from .boundary import \
+                    _reconcile_boundary_bridges_with_skirts
+                n_bsk = _reconcile_boundary_bridges_with_skirts(layout)
+                if n_bsk:
+                    UI.vprint(1,
+                        f"  [pav-builder] {icao}: reconciled {n_bsk} "
+                        f"boundary→DEM bridge(s) with the skirt/RESA "
+                        f"surface (matched at the runway-end zone).")
         except _GEOM_EXC as exc:
             UI.vprint(1, f"  [pav-builder] {icao}: runway-end skirt "
                          f"emission FAILED: {exc!r}")
