@@ -36,6 +36,7 @@ from auto_patch.layout import (
     ROLE_JUNCTION,
     ROLE_RUNWAY,
 )
+from auto_patch.pavement.vertices import _enforce_shared_vertices
 
 
 def _rect(x0: float, y0: float, x1: float, y1: float) -> Polygon:
@@ -117,3 +118,111 @@ def test_sliver_merge_absorbs_edge_adjacent_sliver():
     # The surviving shape spans the union of both rects.
     minx, miny, maxx, maxy = layout.shapes[0].polygon.bounds
     assert math.isclose(maxx, 104.0, abs_tol=1e-6)
+
+
+# ── _enforce_shared_vertices: runway = geometry authority (R1) ──────
+#
+# 2026-07-08 formation diagnosis: the raw cluster MEAN detached runway
+# frontages from the runway contour (junction frontage chains cluster
+# among themselves; the mean lands 0.014-0.27 m off the runway edge —
+# the epsilon-wedge / sliver-overlap / mixed-value classes at KCLT 18L
+# and SPJC 16L, gate-on AND gate-off).  Three rules:
+#   1. cluster holds a runway vertex → canonical point IS that runway
+#      vertex (runway never moves); disagreeing runway authorities →
+#      whole cluster unmoved;
+#   2. runway-free cluster whose mean is within tol of a runway
+#      boundary → mean projects onto the boundary;
+#   3. anything else → plain mean (legacy behavior).
+
+
+def _exterior(shape: BuiltShape) -> set:
+    return {(round(x, 6), round(y, 6))
+            for x, y in shape.polygon.exterior.coords}
+
+
+def test_cluster_with_runway_vertex_snaps_to_it():
+    runway = BuiltShape(polygon=_rect(0.0, 0.0, 100.0, 30.0),
+                        role=ROLE_RUNWAY)
+    junction_a = BuiltShape(
+        polygon=Polygon([(0.0, -0.4), (10.0, -0.4),
+                         (10.0, -8.0), (0.0, -8.0)]),
+        role=ROLE_JUNCTION)
+    junction_b = BuiltShape(
+        polygon=Polygon([(1.0, -0.4), (1.0, -8.0),
+                         (-6.0, -8.0), (-6.0, -0.6)]),
+        role=ROLE_JUNCTION)
+    layout = _layout(runway, junction_a, junction_b)
+
+    _enforce_shared_vertices(layout, tol=1.5)
+
+    # Both junction frontage vertices land ON the runway corner …
+    assert (0.0, 0.0) in _exterior(junction_a)
+    assert (0.0, -0.4) not in _exterior(junction_a)
+    assert (0.0, 0.0) in _exterior(junction_b)
+    assert (1.0, -0.4) not in _exterior(junction_b)
+    # … and the runway itself is untouched (geometry authority).
+    assert _exterior(runway) >= {(0.0, 0.0), (100.0, 0.0),
+                                 (100.0, 30.0), (0.0, 30.0)}
+
+
+def test_disagreeing_runway_authorities_leave_cluster_unmoved():
+    runway_west = BuiltShape(polygon=_rect(0.0, 0.0, 100.0, 30.0),
+                             role=ROLE_RUNWAY)
+    runway_east = BuiltShape(polygon=_rect(100.5, 0.0, 200.0, 30.0),
+                             role=ROLE_RUNWAY)
+    junction = BuiltShape(
+        polygon=Polygon([(100.2, -0.3), (110.0, -0.3),
+                         (110.0, -8.0), (100.2, -8.0)]),
+        role=ROLE_JUNCTION)
+    layout = _layout(runway_west, runway_east, junction)
+
+    _enforce_shared_vertices(layout, tol=1.5)
+
+    # The (100,0) / (100.5,0) / (100.2,-0.3) cluster holds vertices of
+    # TWO runway shapes at materially different positions — nothing in
+    # it may move (never average two authorities).
+    assert (100.0, 0.0) in _exterior(runway_west)
+    assert (100.5, 0.0) in _exterior(runway_east)
+    assert (100.2, -0.3) in _exterior(junction)
+
+
+def test_runway_free_cluster_projects_onto_runway_boundary():
+    runway = BuiltShape(polygon=_rect(0.0, 0.0, 100.0, 30.0),
+                        role=ROLE_RUNWAY)
+    # Two frontage vertices mid-frontage (no runway vertex nearby);
+    # mean (40.3, -0.2) sits 0.2 m off the y=0 runway edge.
+    junction_a = BuiltShape(
+        polygon=Polygon([(40.0, -0.2), (50.0, -6.0), (30.0, -6.0)]),
+        role=ROLE_JUNCTION)
+    junction_b = BuiltShape(
+        polygon=Polygon([(40.6, -0.2), (55.0, -8.0), (58.0, -2.0)]),
+        role=ROLE_JUNCTION)
+    layout = _layout(runway, junction_a, junction_b)
+
+    _enforce_shared_vertices(layout, tol=1.5)
+
+    assert (40.3, 0.0) in _exterior(junction_a)
+    assert (40.3, 0.0) in _exterior(junction_b)
+    assert (40.0, -0.2) not in _exterior(junction_a)
+    assert (40.6, -0.2) not in _exterior(junction_b)
+
+
+def test_cluster_far_from_runway_keeps_plain_mean():
+    runway = BuiltShape(polygon=_rect(0.0, 0.0, 100.0, 30.0),
+                        role=ROLE_RUNWAY)
+    junction_a = BuiltShape(
+        polygon=Polygon([(300.0, -50.0), (310.0, -50.0),
+                         (310.0, -58.0), (300.0, -58.0)]),
+        role=ROLE_JUNCTION)
+    junction_b = BuiltShape(
+        polygon=Polygon([(301.0, -50.0), (301.0, -58.0),
+                         (294.0, -58.0), (294.0, -50.6)]),
+        role=ROLE_JUNCTION)
+    layout = _layout(runway, junction_a, junction_b)
+
+    _enforce_shared_vertices(layout, tol=1.5)
+
+    # Legacy behavior: the (300,-50)/(301,-50) cluster collapses to
+    # its mean (300.5, -50).
+    assert (300.5, -50.0) in _exterior(junction_a)
+    assert (300.5, -50.0) in _exterior(junction_b)

@@ -1241,22 +1241,100 @@ def _enforce_shared_vertices(layout: "PavementLayout",
                 if math.hypot(dx, dy) <= tol:
                     _union(i, j)
 
-    # Compute cluster centroids (mean of member coords).
+    # Compute the canonical point per cluster.  RUNWAY = GEOMETRY
+    # AUTHORITY (R1, 2026-07-08 formation diagnosis): the raw cluster
+    # MEAN detaches runway frontages from the runway contour — junction
+    # frontage chains cluster among themselves (the runway edge has no
+    # vertex mid-frontage), and the mean lands 0.014-0.27 m off the
+    # runway boundary, minting the epsilon-wedge / sliver-overlap /
+    # mixed-value classes at every runway frontage (measured at KCLT
+    # 18L + SPJC 16L, gate-on AND gate-off).  Three rules:
+    #   1. Cluster contains runway-owned vertices: the canonical point
+    #      IS the runway vertex position — runway vertices (profile
+    #      stations) never move.  Runway vertices at MATERIALLY
+    #      different positions in one cluster (crossing areas, or two
+    #      stations caught in one cluster) → leave the whole cluster
+    #      unmoved: never average two authorities (also prevents the
+    #      consecutive-dedup below from dropping a ring station and
+    #      misaligning its per-vertex altitudes).
+    #   2. No runway vertex, but the mean lies within ``tol`` of a
+    #      runway boundary: canonical point = the mean PROJECTED onto
+    #      the nearest runway boundary, so frontage clusters land ON
+    #      the runway contour and the weld/conformance chain can bind
+    #      them to the runway's nodes.
+    #   3. Anything else: the cluster mean, exactly as before.
+    _RUNWAY_AUTHORITY_AGREEMENT_M = 0.01
+    runway_shape_indices = {
+        shape_index for shape_index, shape in enumerate(layout.shapes)
+        if shape.role == ROLE_RUNWAY
+        and shape.polygon is not None
+        and not shape.polygon.is_empty
+        and shape.polygon.geom_type == "Polygon"}
+    runway_boundaries: list[tuple[tuple[float, float, float, float],
+                                  "LineString"]] = []
+    for shape_index in runway_shape_indices:
+        exterior = LineString(
+            layout.shapes[shape_index].polygon.exterior.coords)
+        min_x, min_y, max_x, max_y = exterior.bounds
+        runway_boundaries.append(
+            ((min_x - tol, min_y - tol, max_x + tol, max_y + tol),
+             exterior))
+
+    def _project_onto_runway_boundary(px: float, py: float):
+        """Nearest point on any runway boundary within ``tol`` of
+        (px, py), or None."""
+        best = None
+        for (min_x, min_y, max_x, max_y), exterior in runway_boundaries:
+            if not (min_x <= px <= max_x and min_y <= py <= max_y):
+                continue
+            point = Point(px, py)
+            distance = exterior.distance(point)
+            if distance <= tol and (best is None or distance < best[0]):
+                projected = exterior.interpolate(exterior.project(point))
+                best = (distance, (projected.x, projected.y))
+        return None if best is None else best[1]
+
     cluster_members: dict[int, list[int]] = defaultdict(list)
     for i in range(len(handles)):
         cluster_members[_find(i)].append(i)
-    canonical: dict[int, tuple[float, float]] = {}
+    canonical: dict[int, tuple[float, float] | None] = {}
+    n_mixed_authority_clusters = 0
     for root, members in cluster_members.items():
+        runway_positions = [
+            handles[m][4] for m in members
+            if handles[m][0] in runway_shape_indices]
+        if runway_positions:
+            anchor = runway_positions[0]
+            if any(math.hypot(px - anchor[0], py - anchor[1])
+                   > _RUNWAY_AUTHORITY_AGREEMENT_M
+                   for px, py in runway_positions[1:]):
+                # Two runway authorities disagree — leave the whole
+                # cluster untouched (rule 1 fallback).
+                canonical[root] = None
+                n_mixed_authority_clusters += 1
+            else:
+                canonical[root] = anchor
+            continue
         sx = sum(handles[m][4][0] for m in members) / len(members)
         sy = sum(handles[m][4][1] for m in members) / len(members)
-        canonical[root] = (sx, sy)
+        projected = _project_onto_runway_boundary(sx, sy)
+        canonical[root] = projected if projected is not None else (sx, sy)
+    if n_mixed_authority_clusters:
+        import O4_UI_Utils as UI
+        UI.vprint(2,
+            f"  [pav-builder] shared-vertex weld: left "
+            f"{n_mixed_authority_clusters} mixed-runway-authority "
+            f"cluster(s) unmoved.")
 
     # Rewrite each shape's rings with the canonical coords.
     new_coords_by_shape: dict[int, dict[tuple[int, int, int],
                                         tuple[float, float]]] = defaultdict(dict)
     for i, h in enumerate(handles):
         si, is_int, ri, vi, _orig = h
-        new_coords_by_shape[si][(is_int, ri, vi)] = canonical[_find(i)]
+        canonical_point = canonical[_find(i)]
+        if canonical_point is None:
+            continue  # mixed-authority cluster: every member stays put
+        new_coords_by_shape[si][(is_int, ri, vi)] = canonical_point
 
     for si, shape in enumerate(layout.shapes):
         poly = shape.polygon
