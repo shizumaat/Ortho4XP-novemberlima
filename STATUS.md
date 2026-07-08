@@ -1,3 +1,75 @@
+# STATUS — SESSION 20260707/08 (part 31): RUNWAY DE-SEGMENTATION —
+# single-poly rings behind O4_RUNWAY_SINGLE_POLY (branch runway-deseg,
+# docs/runway_single_polygon_plan.md; slices 1-5 landed, gate default OFF)
+
+## LANDED (part 31, branch runway-deseg @ 6880c8b, base dev 773dcb9)
+1. Phase 1 consumer inventory (cd5d3e4): table in the plan doc.
+   Measured corrections: NO 100 m uniform grid exists (removed
+   2026-05-22); the real emit surface is elevation.py's chain→
+   BuiltShape conversion; profile_state carries everything a ring
+   builder needs; crown rect-equalization + emit decimation are
+   already ring-safe.
+2. Emitter (4d41a40 + 00e68b3): ONE ring per runway ref from the
+   persisted FAA profile (elevation._build_single_poly_runway_ring)
+   — long-edge vertices at every profile station, per-node
+   altitudes = profile(station); fully-flat profile keeps the flat
+   altitude= form (MULTI_FLAT parity).  stitch_pavement_to_flat_
+   runways learned per-vertex FLAT RUNS; stitch_pavement_polygons
+   hosts the ring as a per-vertex peer; _build_runway_corner_
+   altitudes reads ring corners.  All new paths keyed on
+   BuiltShape.from_single_poly / the gate → gate-off byte-inert.
+3. Seam (verified, no code): per-tile SPLP gate-on = one ring per
+   tile (21+17 nodes vs legacy 9+8 pieces); worst cross-tile
+   seam-gap pair IDENTICAL to gate-off (0.27 m/11.8 m, same vertex).
+4. Joins/flex (26d9c4a): _runway_anchors on a ring samples the
+   runway surface at the ANCHORED NODE's boundary projection (the
+   ring's whole-profile interpolation otherwise pins the contact's
+   station value 5-15 m up-axis onto a node 2.5 m from the weld —
+   unlawful).  O4_DESEG_DEBUG=1 prints anchors.  flex_audit at
+   HECA: identical gate-on/off (0 clusters both).
+5. Crossings (6880c8b): axis-intersecting ring pairs carved at
+   candidate stage — crossing junction = union of both refs'
+   station SLABS over the overlap (cut lines pass exactly through
+   station vertices), rings contribute remainder pieces, junction
+   takes the legacy inverse-distance profile blend + '+' ref.
+   Close-pass overlaps (no axis meeting) stay whole for the
+   overlap-clip.  CYXY: 2 junctions carved, 02/20 → 3 pieces.
+
+## VERIFIED (gate-on unless said; gate-off fast_suite = the 8 exactly)
+* Runway way counts: SPJC 35→2 · HECA 56→3 · CYXY →7+2 crossings ·
+  SPLP per-tile 9/8→1/1 · KJQF →1.  All per-node alt_abs.
+* check_grade: CYXY within 1 == gate · HECA plane/cross/skirt 0,
+  steps 3+14 == baseline · SPJC within 0 · SPLP plane/cross/skirt 0.
+* WEDGES: CYXY 2→0 (junction~runway ELIMINATED) · HECA 5→4 ·
+  KJQF 5→5 (all junction~junction) · SPLP 0→0.
+* Part-30i tent machinery structurally no-op: HECA crown_centerline
+  53→0 (no interior cross-edges exist); crown_spine ridges emit
+  continuous (HECA 11→3 ways); crown_drops field intact.
+* Segment-dip class: DEAD BY CONSTRUCTION under the gate (no
+  interior cross-edge = no flat-across constraint anywhere).
+
+## OPEN (part 31 — before default-on)
+* HECA +2 within pairs @3.57% (9 cm/2.51 m beside 05R): junction
+  vert takes the NEXT station's value; NOT a runway anchor (debug
+  confirms) — suspect level/mesh coupling.  Break 5891→6176.
+* SPJC +1 junction plane pair (2.30%) + one 16 mm runway~junction
+  wedge: junction frontage vert 1.0 m from a ring corner (inside
+  stitch snap_corner guard) never welds; legacy welded via
+  canonical merges of per-station corners.
+* SPLP within 16→31: same marginal ≤+0.11% at-cap class, more
+  pairs (the ring exposes longer chords) — within-shape all-pair
+  conflates longitudinal law (profile checker's domain) with
+  lateral law on a ring.  Validator scoping decision WITH NOAH
+  (the 30i centerline-exemption argument, extended).
+* check_runway_profile clusters per-piece extreme stations → on a
+  ring it sees only the 2 runway ends; needs per-station clustering.
+* Fixture re-cut (compare-target counts) — AWAITING NOAH SIGN-OFF.
+* KCLT gate-on + isolated-triangle A/B vs 1655550 (30g method).
+* WORKING-TREE HAZARD: the parallel dev session commits in THIS
+  checkout — 4d41a40 carries its clearance 30k fix (same content as
+  dev 3d830ec; merge should auto-resolve); its 19feaec landed on
+  runway-deseg.  Stage explicitly, never git add -A.
+
 # STATUS — SESSION 20260707 (part 30k): CLEARANCE-EFFECTIVENESS
 # regression — the part-30f outer-edge DEM lift un-cut the cuts;
 # REVERTED (FIX B/C kept) + new conformance PROPERTY gate
