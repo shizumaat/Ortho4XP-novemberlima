@@ -307,22 +307,61 @@ def _longest_pair_axis(pts):
     return (A[0], A[1], (B[0] - A[0]) / ln, (B[1] - A[1]) / ln, ln)
 
 
-def _runway_rect_cross_ends(s, coords):
-    """The two flat cross-end edges of a 4-corner runway rect as
-    ``(mid_x, mid_y, elev)`` tuples.  ``coords`` = the 4 open-ring corners.
-    Corner elevations come from the shape's altitude tags (the solver orders a
-    sloped rect ring ``[high, low, low, high]``); the two SHORT ring edges are
-    the flat cross-ends."""
+def _runway_rect_cross_ends(s, coords, axis=None):
+    """The two flat cross-end edges of a runway rect as ``(mid_x, mid_y,
+    elev)`` tuples.  ``coords`` = the open-ring corners.  Corner elevations
+    come from the shape's altitude tags (the solver orders a sloped rect ring
+    ``[high, low, low, high]``); the two SHORT ring edges are the flat
+    cross-ends.
+
+    N-CORNER handling (Phase 0 hotfix, user 2026-07-07): the interior runway
+    cross-edge crown inserts a CENTERLINE vertex at the midpoint of an interior
+    cross-edge, so a crowned sub-rect has 5+ corners.  When ``axis`` (the
+    runway ``(ox, oy, ux, uy, L)`` tuple) is given, reconstruct the cross-ends
+    from the axis directly — cluster the corners at the two EXTREME axis
+    stations and average each cluster's elevation — so a crowned rect's profile
+    is reconstructed correctly (the centerline vertex sits at the same station
+    as its cross-edge corners and averages in cleanly).  Without an axis the
+    legacy 4-corner shortest-edge path runs (unchanged)."""
     import math
-    if s.node_altitudes and len(s.node_altitudes) >= 4:
-        ce = [float(s.node_altitudes[i]) for i in range(4)]
-    elif s.altitude_high is not None and s.altitude_low is not None:
+    n = len(coords)
+    if s.node_altitudes and len(s.node_altitudes) >= n:
+        ce = [float(s.node_altitudes[i]) for i in range(n)]
+    elif s.altitude_high is not None and s.altitude_low is not None and n == 4:
         ah, al = float(s.altitude_high), float(s.altitude_low)
         ce = [ah, al, al, ah]
     elif s.altitude is not None:
         a = float(s.altitude)
-        ce = [a, a, a, a]
+        ce = [a] * n
     else:
+        return []
+    if axis is not None and n >= 4:
+        ox, oy, ux, uy, _L = axis
+        # station of each corner along the axis
+        st = [((coords[i][0] - ox) * ux + (coords[i][1] - oy) * uy)
+              for i in range(n)]
+        s_lo, s_hi = min(st), max(st)
+        tol = max(1.0, 0.05 * (s_hi - s_lo))   # station cluster tolerance
+        out = []
+        for target in (s_lo, s_hi):
+            grp = [i for i in range(n) if abs(st[i] - target) <= tol]
+            if not grp:
+                continue
+            # Cross-end profile sample = the EDGE elevation (the two edge
+            # corners at this station, both at profile − crown_drop).  A
+            # crowned rect also carries the inserted CENTERLINE vertex at this
+            # station at profile level (higher) — exclude it (take the MIN) so
+            # the reconstructed longitudinal profile is the EDGE profile,
+            # exactly as for an uncrowned 4-corner rect (the crown drop is
+            # uniform per ref, so the edge profile carries the true grades).
+            e_end = min(ce[i] for i in grp)
+            out.append((sum(coords[i][0] for i in grp) / len(grp),
+                        sum(coords[i][1] for i in grp) / len(grp),
+                        e_end))
+        if len(out) == 2:
+            return out
+        # fall through to the legacy path on a degenerate cluster
+    if n != 4:
         return []
     edges = [(0, 1), (1, 2), (2, 3), (3, 0)]
     edges.sort(key=lambda ab: math.hypot(
@@ -387,8 +426,12 @@ def check_runway_profile(layout, end_grade_cap="default",
         cs = list(s.polygon.exterior.coords)
         if len(cs) > 1 and cs[0] == cs[-1]:
             cs = cs[:-1]
-        if len(cs) != 4:
-            continue              # clipped/irregular rect — no clean cross-ends
+        # ≥4 corners: a plain sub-rect (4) or a crowned sub-rect (5+ — the
+        # interior cross-edge crown inserted a centerline vertex).  The
+        # axis-clustered cross-end reconstruction below handles both; a
+        # clipped/irregular <4 rect has no clean cross-ends → skip.
+        if len(cs) < 4:
+            continue
         by_ref.setdefault(s.ref or "", []).append((s, cs))
 
     out = []
@@ -401,7 +444,7 @@ def check_runway_profile(layout, end_grade_cap="default",
             continue
         samples = []              # (dist_along_axis, elev, x, y)
         for s, cs in items:
-            for (mx, my, e) in _runway_rect_cross_ends(s, cs):
+            for (mx, my, e) in _runway_rect_cross_ends(s, cs, axis=ax):
                 samples.append(((mx - ox) * ux + (my - oy) * uy, e, mx, my))
         if len(samples) < 2:
             continue
@@ -1466,7 +1509,10 @@ def run_grade_checks(layout):
             routes_ll=taxi_routes_ll(layout), quiet=True,
             crown_drops_ll=[[la, lo, c] for (la, lo, c) in
                             (getattr(layout, "_crown_drop_ll", None)
-                             or [])])
+                             or [])],
+            crown_centerline_ll=[[la, lo] for (la, lo) in
+                                 (getattr(layout, "_crown_centerline_ll",
+                                          None) or [])])
 
 
 

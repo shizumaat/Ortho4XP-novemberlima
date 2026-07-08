@@ -1,3 +1,84 @@
+# STATUS — SESSION 20260707 (part 30i): RUNWAY SEGMENT-DIP HOTFIX —
+# crown the interior cross-edges (de-seg plan Phase 0, docs/
+# runway_single_polygon_plan.md).  User: "airports unusable as is".
+#
+# THE DEFECT: a crowned runway emits as abutting sub-rects; every interior
+# segment CROSS-EDGE is a constrained mesh edge whose ONLY nodes are the two
+# corner vertices — both carrying the full crown drop (profile − rate·hw).
+# The edge cuts FLAT ACROSS at the dropped altitude while the surface between
+# segments carries the centerline ridge (crown_spine at profile) → the mesh
+# dives from ridge to cross-edge and back at EVERY segment line = a visible
+# centre DIP on every crowned runway.  Probe (CYXY base): 24 flat full-width
+# interior cross-edges, 0 crowned.
+#
+# THE FIX (Phase 0 — does NOT de-segment): insert a CENTERLINE node at each
+# interior cross-edge's axis intersection at the runway PROFILE altitude (crown
+# drop 0 on the axis), into the rings of BOTH abutting sub-rects at the
+# IDENTICAL midpoint so the emit consensus WELDS them into one node (a one-
+# sided insert would mint a T-vertex/tear).  Each cross-section becomes a tent
+# (corner-low → centre-high → corner-low) matching the crown.  Centre altitude
+# = the persisted profile (runway_redistribute._interp_profile at the station)
+# — the SAME source the crown_spine breakline uses, so the two constraints
+# agree (no duplicate near-coincident constraint = the wedge class).
+#
+# ## LANDED (part 30i)
+# 1. crown.insert_runway_crossedge_crown_nodes(layout) — the whole fix; called
+#    as the ABSOLUTE-LAST geometry touch (pipeline, beside the probe-node hook,
+#    after decimation / final projection / skirts; a mid-edge tent vertex is
+#    the 3D-collinear class emit decimation removes, so it must arrive last).
+#    Groups ROLE_RUNWAY sub-rects by ref; a canonical-edge shared by exactly 2
+#    distinct sub-rects = an interior cross-edge (long / end edges belong to one
+#    sub-rect, never shared → skipped by construction — ends read by skirts/
+#    RESA are untouched).  Skips seam-band cross-edges (tile-seam pins are
+#    cross-tile terrain contracts; tile_cut._SEAM_LINE_TOL_M).  Runway↔crossing
+#    edges have <2 ROLE_RUNWAY owners → skipped (no one-sided insert; the
+#    crossing dome already puts drop 0 on the axis).  Gate O4_RUNWAY_XEDGE_CROWN
+#    (default 1); inherits ENABLE_SPINE_CROWN + CROWN_RUNWAYS.
+# 2. VALIDATOR: the centerline nodes are exported to the axes sidecar
+#    (layout.to_osm → "crown_centerline") and check_grade skips runway within-
+#    shape all-pairs plane pairs that touch one (_crown_centerline_nids) —
+#    exactly the crown_spine-breakline exemption class: a cross-station diagonal
+#    to a ridge node conflates the LONGITUDINAL profile (the SPINE PROFILE
+#    check's domain) with the sub-cap LATERAL crown.  Without this the extra
+#    centerline samples on SPLP's at-cap runway tripped within 16→31 (same
+#    marginal 1.6% class, just more pairs).  check_grade + verification.py +
+#    tests/test_pavement_grade.py all thread the new field.
+# 3. verification.check_runway_profile: reconstruct cross-ends from the runway
+#    AXIS (cluster corners at the two extreme stations, take the EDGE elevation
+#    = MIN of the cluster so the inserted ridge node is excluded) so a crowned
+#    5+-corner sub-rect's longitudinal profile is still measured — else the
+#    old ``len==4`` gate SKIPPED crowned rects and MASKED SPLP's real >1.5%
+#    profile (test_runway_longitudinal_grade[SPLP] flipped to a false PASS).
+#    Behaviour is byte-identical for uncrowned 4-corner rects (MIN==AVG at each
+#    flat cross-end).
+#
+# ## VERIFIED (gates, part 30i — all at 136c6a0 baselines)
+# * Cross-section probe (emitted OSM, sidecar-identified centerline nodes):
+#   CYXY 24 tents (+0.12/+0.15/+0.23 m = the per-ref crown drops exactly),
+#   SPLP 8 (+0.23), HECA 53 (+0.30), KCLT 4.  Baseline: 0 crowned, all flat.
+#   Every crowned segment centre lifts by the crown drop above its edge corners.
+# * check_grade: SPLP within 16 (== baseline), CYXY 1, HECA 0, KCLT 6; plane 0,
+#   cross 0 everywhere; HECA vertex-to-edge 3 + mid-edge 14, break 5891 (the
+#   quarantined-by-design class); SPINE PROFILE + skirt sections unchanged.
+# * wedge_audit (uncommitted; NOT committed by this task): ZERO new wedges —
+#   CYXY 2→2, SPLP 0→0, HECA 5→5.  No tear, no near-coincident duplicate.
+# * O4_SPINE_CROWN=0 / O4_RUNWAY_XEDGE_CROWN=0: 0 cross-edges crowned (gated).
+# * fast_suite: exactly the 8 pre-existing failures (identical set — the fix
+#   RESOLVED none by masking; the verification.py cross-end fix keeps
+#   test_runway_longitudinal_grade[SPLP] correctly RED).  Full suite: exactly
+#   the 13 pre-existing failures.  Zero new.
+# * Conformance invariant (SPLP 1 residual T-junction, HECA 13/3): IDENTICAL
+#   base vs fix — pre-existing (the crown runs after conformance), not worsened.
+#
+# ## OPEN (part 30i follow-ups)
+# * Runway↔runway_crossing interior cross-edges are NOT centre-crowned (only
+#   ROLE_RUNWAY↔ROLE_RUNWAY pairs are).  The crossing dome already puts drop 0
+#   on the axis, so a crossing-abutting cross-edge dips less; a full fix waits
+#   for de-seg Phase 2 (the crossing becomes one welded ring).
+# * The hotfix keeps segments; de-seg (Phases 1–3, docs/runway_single_polygon_
+#   plan.md) still removes the interior cross-edges entirely.  This de-risks the
+#   Monday deadline: the dips die now.
+
 # STATUS — SESSION 20260707 (part 30f): in-sim CLEARANCE defect fixes —
 # sunk-pavement outer-edge WALL + resample NEEDLES + tighter standoff
 # (HECA/CYXY in-sim eval: terrain spikes at jogs, pointy cuts, deep notch)

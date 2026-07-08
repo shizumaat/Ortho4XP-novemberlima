@@ -1226,6 +1226,16 @@ class PavementLayout:
                 "crown_drops": [[la, lo, c] for (la, lo, c) in
                                 (getattr(self, "_crown_drop_ll", None)
                                  or [])],
+                # CROWN CENTERLINE nodes (Phase 0 hotfix, user 2026-07-07):
+                # the lat/lon of every centerline vertex the interior runway
+                # cross-edge crown inserted at profile level.  A node on the
+                # runway ridge — its grade is bounded by the SPINE PROFILE
+                # (longitudinal) check + the sub-cap lateral crown by design,
+                # so the validator skips within-shape runway pairs touching
+                # one (a cross-station diagonal to it conflates the two).
+                "crown_centerline": [[la, lo] for (la, lo) in
+                                     (getattr(self, "_crown_centerline_ll",
+                                              None) or [])],
             }
             Path(str(path) + ".axes.json").write_text(_json.dumps(data))
         except Exception:

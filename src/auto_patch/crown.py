@@ -716,6 +716,215 @@ def crown_drop_at(layout, x: float, y: float) -> float:
     return field.get(cp, 0.0)
 
 
+# ── interior segment cross-edge crown (Phase 0 hotfix, 2026-07-07) ───────────
+#
+# THE DEFECT: a crowned runway emits as many abutting sub-rects (profile-
+# sampling segments).  Every INTERIOR cross-edge between two sub-rects is a
+# constrained mesh edge whose ONLY nodes are the two corner vertices — which
+# both carry the FULL crown drop (profile − rate·half_width).  The edge
+# therefore constrains the mesh FLAT ACROSS at the dropped altitude, while the
+# surface between segments carries the centerline ridge (the crown_spine
+# breakline at profile level).  Result: a visible centre DIP at every segment
+# line on every crowned runway (user: "airports unusable as is").
+#
+# THE HOTFIX (de-seg plan Phase 0 — does NOT de-segment): insert a CENTERLINE
+# node on every interior cross-edge at the runway PROFILE altitude (crown drop
+# 0 on the axis), into the rings of BOTH abutting sub-rects at the IDENTICAL
+# canonical point so the emit-time consensus welds them into one node (a
+# one-sided insert would mint a T-vertex/tear).  Each cross-section then reads
+# as a tent (corner-low → centre-high → corner-low) matching the crown instead
+# of a flat chord.  The centre altitude comes from the SAME persisted profile
+# the crown_spine breakline uses, so the two constraints agree (no near-
+# coincident duplicate constraint — the wedge class).
+#
+# Placement: the ABSOLUTE LAST geometry touch (with the probe-node hook, after
+# decimation / final projection / skirts).  Like a probe node, a mid-edge
+# vertex is exactly the 3D-collinear class emit decimation removes, so it must
+# arrive after everything.  End edges (thresholds) are NOT interior (they belong
+# to a single sub-rect, so they are never shared and are skipped by
+# construction); skirts / RESA read the ends.  Seam-band edges are skipped
+# (tile-seam pins are cross-tile terrain contracts — never inserted on/near).
+
+# Reuse tile_cut's seam-line tolerance so a cross-edge in the seam band is left
+# alone (its corners are pinned to the immutable seam DEM).
+_XEDGE_SEAM_TOL_M = 6.0     # == tile_cut._SEAM_LINE_TOL_M
+
+
+def _point_in_seam_band(layout, x: float, y: float) -> bool:
+    """True when ``(x, y)`` lies within the tile-seam band (≤ the seam-line
+    tolerance of an integer lat/lon line) — the same test tile_cut uses to
+    recognise a seam-cut piece.  Such a point is a cross-tile terrain
+    contract; never insert on/near it."""
+    R_EARTH = 6378137.0
+    lat, lon = layout.m_to_ll(x, y)
+    cos0 = math.cos(math.radians(lat))
+    m_lat = abs(lat - round(lat)) * R_EARTH * math.pi / 180.0
+    m_lon = abs(lon - round(lon)) * R_EARTH * cos0 * math.pi / 180.0
+    return min(m_lat, m_lon) <= _XEDGE_SEAM_TOL_M
+
+
+def insert_runway_crossedge_crown_nodes(layout) -> int:
+    """Crown every INTERIOR runway segment cross-edge by inserting a
+    centerline node at the runway PROFILE altitude into BOTH abutting
+    sub-rects (Phase 0 hotfix — see the module note above).  Returns the
+    number of cross-edges crowned.  No-op when the crown is gated off or
+    runways are de-scoped; never raises.
+
+    Mechanism:
+
+    * Group ``ROLE_RUNWAY`` sub-rects by ref.  Map each ring edge to its
+      canonical endpoint-key pair.  An edge shared by exactly two sub-rects
+      of the same ref is an interior cross-edge (long edges and end/threshold
+      edges belong to a single sub-rect, so they are never shared).
+    * The cross-edge midpoint lies on the runway axis (both corners are at the
+      same station, ± half-width), so it IS the centerline point at that
+      station.  Its altitude is the persisted profile evaluated at the
+      station — identical to the source the crown_spine breakline samples, so
+      the new node sits exactly on the ridge.
+    * Insert the node into both rings at the midpoint (identical XY → the
+      emit consensus welds them) with drop 0 (on the axis), lifting the
+      cross-section into a crown-matching tent.
+    """
+    import os as _os
+    if not ENABLE_SPINE_CROWN or not CROWN_RUNWAYS:
+        return 0
+    if _os.environ.get("O4_RUNWAY_XEDGE_CROWN", "1") != "1":
+        return 0     # A/B gate: off restores the flat-cross-edge emit
+    try:
+        from shapely.geometry import Polygon as _Poly
+        from .runway_redistribute import _interp_profile
+    except _GEOM_EXC:                                   # pragma: no cover
+        return 0
+    profiles = getattr(layout, "_runway_redistributed_profiles", None) or {}
+    if not profiles:
+        return 0
+    cps = getattr(layout, "canonical_points", None)
+    if cps is None:
+        return 0
+
+    # Per-ref profile axis samplers (only crowned runways participate).
+    axis_by_ref: Dict[str, tuple] = {}
+    for ref, p in profiles.items():
+        if not float(p.get("crown_drop_m") or 0.0):
+            continue                       # flat runway: no ridge, no dip
+        ax_a = p.get("axis_a")
+        ax_d = p.get("axis_d")
+        fr = p.get("fractions")
+        el = p.get("elevs")
+        if not (ax_a and ax_d and fr and el):
+            continue
+        ax_len2 = ax_d[0] * ax_d[0] + ax_d[1] * ax_d[1]
+        if ax_len2 < 1e-9:
+            continue
+        axis_by_ref[ref] = (ax_a[0], ax_a[1], ax_d[0], ax_d[1], ax_len2,
+                            fr, el)
+    if not axis_by_ref:
+        return 0
+
+    # Collect runway sub-rects per ref, with their canonical ring keys.
+    rects_by_ref: Dict[str, list] = {}
+    for s in layout.shapes:
+        if s.role != ROLE_RUNWAY or not s.ref or s.ref not in axis_by_ref:
+            continue
+        poly = s.polygon
+        if poly is None or poly.is_empty or poly.geom_type != "Polygon":
+            continue
+        try:
+            ring = list(poly.exterior.coords)
+        except _GEOM_EXC:
+            continue
+        if len(ring) < 4:
+            continue
+        rects_by_ref.setdefault(s.ref, []).append((s, ring))
+
+    n_crowned = 0
+    # Lat/lon of every inserted centerline node (exported to the axes sidecar
+    # as ``crown_centerline``): a crown-centerline node lies ON the runway
+    # ridge, so its grade is governed by the SPINE PROFILE (longitudinal) check
+    # and the sub-cap lateral crown by design — NOT the within-shape flat-cap
+    # all-pairs plane law (a cross-station diagonal to it conflates the
+    # longitudinal profile with the lateral crown).  check_grade skips runway
+    # within-pairs that touch one, exactly as it skips crown_spine breaklines.
+    _centerline_ll: List[Tuple[float, float]] = []
+    for ref, rects in rects_by_ref.items():
+        if len(rects) < 2:
+            continue                       # single-rect runway: no cross-edge
+        ax_ax, ax_ay, ax_dx, ax_dy, ax_len2, fr, el = axis_by_ref[ref]
+
+        # canonical edge (frozenset of 2 keys) -> list of (shape, seg_idx)
+        edge_owners: Dict[frozenset, list] = {}
+        for (s, ring) in rects:
+            n = len(ring) - 1          # open count (last == first)
+            keys = [cps.get_or_add(float(x), float(y))
+                    for (x, y) in ring[:-1]]
+            for i in range(n):
+                a, b = keys[i], keys[(i + 1) % n]
+                if a == b:
+                    continue
+                edge_owners.setdefault(frozenset((a, b)), []).append(
+                    (id(s), i))
+
+        # An interior cross-edge is shared by exactly two DISTINCT sub-rects.
+        # Insert once per (shape, seg_idx); accumulate then apply per shape so
+        # multiple inserts on one ring stay index-consistent.
+        inserts_by_shape: Dict[int, list] = {}   # id(s) -> [(seg_idx,(x,y),alt)]
+        shape_by_id = {id(s): (s, ring) for (s, ring) in rects}
+        for _edge, owners in edge_owners.items():
+            distinct = {oid for (oid, _i) in owners}
+            if len(distinct) != 2:
+                continue                   # boundary edge or degenerate fan
+            # midpoint from any owner's actual (unsnapped) ring coords.
+            per_shape = {}
+            for (oid, i) in owners:
+                per_shape.setdefault(oid, i)
+            # compute midpoint from the first owner's ring segment.
+            oid0 = next(iter(per_shape))
+            _s0, ring0 = shape_by_id[oid0]
+            i0 = per_shape[oid0]
+            (x1, y1) = ring0[i0]
+            (x2, y2) = ring0[i0 + 1]
+            mx, my = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+            # skip seam-band cross-edges (pinned to the immutable seam DEM).
+            if _point_in_seam_band(layout, mx, my):
+                continue
+            # station on the axis → profile altitude (drop 0 on the axis).
+            t = ((mx - ax_ax) * ax_dx + (my - ax_ay) * ax_dy) / ax_len2
+            t = min(1.0, max(0.0, t))
+            alt = round(_interp_profile(fr, el, t), 2)
+            for oid, i in per_shape.items():
+                inserts_by_shape.setdefault(oid, []).append((i, (mx, my), alt))
+            _centerline_ll.append(layout.m_to_ll(mx, my))
+            n_crowned += 1
+
+        # Apply inserts per shape (high seg_idx first so lower indices stay
+        # valid), rebuilding the ring + node_altitudes together.
+        for oid, ins in inserts_by_shape.items():
+            s, ring = shape_by_id[oid]
+            new_ring = list(ring)
+            alts = (list(s.node_altitudes)
+                    if s.node_altitudes is not None else None)
+            if alts is not None and len(alts) != len(ring):
+                alts = None                # malformed; emit geometry only
+            for (i, (mx, my), alt) in sorted(ins, reverse=True):
+                new_ring.insert(i + 1, (mx, my))
+                if alts is not None:
+                    alts.insert(i + 1, alt)
+            try:
+                np_poly = _Poly(new_ring)
+                if np_poly.is_empty or not np_poly.is_valid:
+                    continue
+            except _GEOM_EXC:
+                continue
+            s.polygon = np_poly
+            if alts is not None:
+                s.node_altitudes = alts
+    if _centerline_ll:
+        existing = list(getattr(layout, "_crown_centerline_ll", None) or [])
+        layout._crown_centerline_ll = existing + [
+            (round(la, 7), round(lo, 7)) for (la, lo) in _centerline_ll]
+    return n_crowned
+
+
 # ── spine breakline emission ─────────────────────────────────────────────────
 
 def _emit_ways_for_profile(seg, ax, alt_at, inner, ring_tree, ring_geoms,

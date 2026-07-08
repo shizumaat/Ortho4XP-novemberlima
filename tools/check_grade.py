@@ -499,6 +499,40 @@ def _crown_drops_by_nid(nodes: Dict[str, Tuple[float, float]],
     return out
 
 
+def _crown_centerline_nids(nodes: Dict[str, Tuple[float, float]],
+                           crown_centerline_ll: list) -> set:
+    """The nids coincident (≤ ``SHARED_VERTEX_TOL_M``) with a CROWN-CENTERLINE
+    vertex the interior runway cross-edge crown inserted (axes sidecar
+    ``crown_centerline``, ``[[lat, lon], …]``).  Such a node lies ON the
+    runway ridge, so its longitudinal grade is governed by the SPINE PROFILE
+    check and its lateral crown is sub-cap by design — the within-shape
+    flat-cap all-pairs plane law skips any runway pair touching one (a
+    cross-station diagonal to it would conflate the two).  Empty/None ⇒ no
+    skips (uncrowned / old patches)."""
+    if not crown_centerline_ll:
+        return set()
+    ref_lat = crown_centerline_ll[0][0]
+    cell_lat = SHARED_VERTEX_TOL_M / _M_PER_DEG_LAT
+    mlon_ref = _M_PER_DEG_LAT * max(0.05, math.cos(math.radians(ref_lat)))
+    cell_lon = SHARED_VERTEX_TOL_M / mlon_ref
+    grid: Dict[Tuple[int, int], list] = defaultdict(list)
+    for (pla, plo) in crown_centerline_ll:
+        grid[(int(pla // cell_lat), int(plo // cell_lon))].append((pla, plo))
+    out: set = set()
+    for nid, (lat, lon) in nodes.items():
+        mlon = _M_PER_DEG_LAT * max(0.05, math.cos(math.radians(lat)))
+        gx, gy = int(lat // cell_lat), int(lon // cell_lon)
+        for ox in (-1, 0, 1):
+            for oy in (-1, 0, 1):
+                for (pla, plo) in grid.get((gx + ox, gy + oy), ()):
+                    d = math.hypot((lat - pla) * _M_PER_DEG_LAT,
+                                   (lon - plo) * mlon)
+                    if d <= SHARED_VERTEX_TOL_M:
+                        out.add(nid)
+                        break
+    return out
+
+
 def _seam_nids(nodes: Dict[str, Tuple[float, float]]) -> set:
     """Set of nids in the seam terrain-matching zone: within ``_SEAM_ZONE_M``
     of a tile boundary the airport CROSSES (lat/lon line carrying an exact seam
@@ -941,6 +975,7 @@ def iter_shape_grade_constraints(
         routes_ll: Optional[list] = None,
         mesh_edges_m: Optional[list] = None,
         crown_by_nid: Optional[Dict[str, float]] = None,
+        crown_centerline_nids: Optional[set] = None,
         ) -> "list[ShapePairConstraint]":
     """Yield every within-shape vertex-pair the grade check constrains.
 
@@ -1006,6 +1041,7 @@ def iter_shape_grade_constraints(
     # every pair's law re-centres on grade_law.crown_pair_offset.
     from auto_patch.grade_law import crown_pair_offset as _crown_off
     crown_by_nid = crown_by_nid or {}
+    crown_centerline_nids = crown_centerline_nids or set()
     _SOFT_ROLES = _GG.SOFT_VISIBILITY_ROLES
     for w in ways:
         grade_cap = _role_grade_limit(w, max_grade)
@@ -1075,10 +1111,19 @@ def iter_shape_grade_constraints(
                             keys=list(pnids))
         sc = _GG.plane_constraints(gs, _law_ctx, grade_cap)
         idx = {pnids[k]: k for k in range(n)}
+        _is_runway = role0 in ("runway", "runway_crossing")
         for (ka, kb, capp) in sc.edges:
             ia = idx.get(ka)
             ib = idx.get(kb)
             if ia is None or ib is None:
+                continue
+            # CROWN CENTERLINE skip (Phase 0 hotfix): a runway pair touching a
+            # crown-centerline node lies on the ridge — its longitudinal grade
+            # is the SPINE PROFILE check's domain and its lateral crown is
+            # sub-cap by design; a cross-station diagonal to it conflates the
+            # two.  Same exemption class as the crown_spine breakline.
+            if _is_runway and (ka in crown_centerline_nids
+                               or kb in crown_centerline_nids):
                 continue
             xi, yi, ei, _sa = pts[ia]
             xj, yj, ej, _sb = pts[ib]
@@ -1197,6 +1242,7 @@ def _check_within_shape(ways: List[Way],
                         routes_ll: Optional[list] = None,
                         mesh_edges_m: Optional[list] = None,
                         crown_by_nid: Optional[Dict[str, float]] = None,
+                        crown_centerline_nids: Optional[set] = None,
                         ) -> List[Violation]:
     """Grade check between vertex pairs on the same way.  Consumes
     ``iter_shape_grade_constraints`` (the single source of constrained pairs)
@@ -1207,7 +1253,8 @@ def _check_within_shape(ways: List[Way],
     out: List[Violation] = []
     for c in iter_shape_grade_constraints(
             ways, nodes, ll_to_m, max_grade, seam_nids, taxi_axes, routes_ll,
-            mesh_edges_m=mesh_edges_m, crown_by_nid=crown_by_nid):
+            mesh_edges_m=mesh_edges_m, crown_by_nid=crown_by_nid,
+            crown_centerline_nids=crown_centerline_nids):
         de = abs((c.ea - c.eb) - c.offset)
         if de <= c.allowance:
             continue
@@ -1657,6 +1704,7 @@ def run_checks(
     break_nodes_ll: Optional[list] = None,
     mesh_edges_ll: Optional[list] = None,
     crown_drops_ll: Optional[list] = None,
+    crown_centerline_ll: Optional[list] = None,
 ) -> Tuple[List[Violation], List[Violation], List[EdgeStep]]:
     """``taxi_axes_ll`` (the builder's APT.DAT taxi centerlines as
     ``[(latlon_points, cL, cT), …]``) supplies the within-shape grade graph's
@@ -1732,11 +1780,20 @@ def run_checks(
     crown_by_nid = _crown_drops_by_nid(nodes, crown_drops_ll or [])
     if crown_by_nid and not quiet:
         print(f"  crown drop field: {len(crown_by_nid)} node(s) crowned")
+    # CROWN CENTERLINE nids (Phase 0 hotfix): runway ridge vertices the
+    # interior cross-edge crown inserted — skipped from the runway within-shape
+    # all-pairs plane law (governed by the spine profile check instead).
+    crown_centerline_nids = _crown_centerline_nids(
+        nodes, crown_centerline_ll or [])
+    if crown_centerline_nids and not quiet:
+        print(f"  crown centerline: {len(crown_centerline_nids)} ridge "
+              f"node(s) exempt from the runway plane all-pairs check")
 
     within = _check_within_shape(
         ways, nodes, ll_to_m, max_grade, seam_nids=seam_nids,
         taxi_axes=taxi_axes, routes_ll=routes_ll,
-        mesh_edges_m=mesh_edges_m, crown_by_nid=crown_by_nid)
+        mesh_edges_m=mesh_edges_m, crown_by_nid=crown_by_nid,
+        crown_centerline_nids=crown_centerline_nids)
     # BREAK-REGION split (user 2026-07-05): pairs touching a node the
     # SOLVER declared broken (genuine anchor contradiction, rendered as
     # the contained distance-weighted blend) are the pocket's designed
@@ -1900,6 +1957,7 @@ def main(argv=None) -> int:
     # every spine/blend-relaxed pair.
     taxi_axes_ll = routes_ll = anchor = seam_pins_ll = None
     break_nodes_ll = mesh_edges_ll = crown_drops_ll = None
+    crown_centerline_ll = None
     sidecar = Path(str(args.osm) + ".axes.json")
     if sidecar.exists():
         try:
@@ -1919,6 +1977,7 @@ def main(argv=None) -> int:
             break_nodes_ll = _data.get("break_nodes")
             mesh_edges_ll = _data.get("mesh_edges") or None
             crown_drops_ll = _data.get("crown_drops") or None
+            crown_centerline_ll = _data.get("crown_centerline") or None
             print(f"  (axes sidecar loaded: {len(taxi_axes_ll or [])} axes"
                   + (" [exact]" if _exact else "")
                   + f", {len(routes_ll or [])} routes"
@@ -1946,6 +2005,7 @@ def main(argv=None) -> int:
         break_nodes_ll=break_nodes_ll,
         mesh_edges_ll=mesh_edges_ll,
         crown_drops_ll=crown_drops_ll,
+        crown_centerline_ll=crown_centerline_ll,
     )
     if args.strict and (within or cross or steps):
         return 1

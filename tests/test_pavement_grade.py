@@ -171,6 +171,12 @@ def test_pavement_grade(tmp_path, icao):
         # offset the solver built to (grade_law.crown_pair_offset).
         crown_drops_ll = [[la, lo, c] for (la, lo, c) in
                           (getattr(layout, "_crown_drop_ll", None) or [])]
+        # CROWN CENTERLINE nodes (Phase 0 hotfix): the runway ridge vertices
+        # the interior cross-edge crown inserted, exempt from the runway
+        # within-shape all-pairs plane law (spine-profile governed).
+        crown_centerline_ll = [[la, lo] for (la, lo) in
+                               (getattr(layout, "_crown_centerline_ll", None)
+                                or [])]
 
         w, c, s = check_grade.run_checks(
             out,
@@ -187,6 +193,7 @@ def test_pavement_grade(tmp_path, icao):
             mesh_edges_ll=mesh_edges_ll,
             break_nodes_ll=break_nodes_ll,
             crown_drops_ll=crown_drops_ll,
+            crown_centerline_ll=crown_centerline_ll,
         )
         within += w
         cross += c

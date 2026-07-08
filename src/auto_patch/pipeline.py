@@ -5756,6 +5756,30 @@ def build_airport_pavement(icao: str, xplane_root: str,
             UI.vprint(1, f"  [pav-builder] {icao}: runway-end skirt "
                          f"emission FAILED: {exc!r}")
 
+    # INTERIOR RUNWAY CROSS-EDGE CROWN (Phase 0 hotfix, user 2026-07-07;
+    # docs/runway_single_polygon_plan.md): every interior segment cross-edge
+    # of a crowned runway is a flat full-width mesh constraint at the dropped
+    # (profile − rate·half_width) altitude, so the mesh dives from the
+    # centerline ridge to the cross-edge and back at every segment line — a
+    # visible centre DIP on every crowned runway.  Insert a centerline node at
+    # the runway PROFILE altitude into BOTH abutting sub-rects (same canonical
+    # point → the emit consensus welds them) so each cross-section reads as a
+    # crown-matching tent.  ABSOLUTE LAST geometry touch (with the probe hook):
+    # a mid-edge vertex on the crowned tent is the 3D-collinear class emit
+    # decimation removes, so it must arrive after decimation / final
+    # projection / skirts.  No-op when crown gated off or runways de-scoped.
+    if compute_elevations:
+        try:
+            from .crown import insert_runway_crossedge_crown_nodes
+            _n_xedge = insert_runway_crossedge_crown_nodes(layout)
+            if _n_xedge:
+                UI.vprint(1, f"  [pav-builder] {icao}: crowned {_n_xedge} "
+                             f"interior runway cross-edge(s) (centerline "
+                             f"node at profile level).")
+        except _GEOM_EXC as exc:
+            UI.vprint(1, f"  [pav-builder] {icao}: interior runway "
+                         f"cross-edge crown FAILED: {exc!r}")
+
     # Diagnostic probe nodes (user 2026-07-07): O4_PROBE_NODES inserts
     # elevation-neutral ring vertices near given lat,lon points so
     # node-free straightaways carry inspectable altitudes in the patch.
