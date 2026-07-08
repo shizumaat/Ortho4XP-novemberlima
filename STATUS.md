@@ -3,6 +3,50 @@
 # (Noah sign-off).  Gates green; to-zero worklist A1-A5 in flight
 # (docs/runway_single_polygon_plan.md Addendum 2 is the worklist).
 
+## SESSION WRAP (2026-07-08 end): FULL SUITE 13 → 8, all named
+Final tree c1c7a49.  Commits this session: 8c9fdc3 merge · 2a217d7
+flip+re-cut · ff332e9 A4 · ec7f632 A6 · f86d7ee A2 · 6ac66cd A1/R1 ·
+2da0ce3 A3 · 5782ab2 #336 A+B · 0388323 A8 crown-plane · 06b84aa B1
+end-cap escalation · cc45410 Fix C source-clip · c1c7a49 proximity ·
++ docs (0e085b8 adjacent-ground plan, f27d896 gap audit).
+* STANDALONE check_grade scoreboard: SPLP 0 · SPJC 0 · HECA 0 ·
+  CYXY 1 (apron #29 +0.25%).  KCLT within 3, off-source 8→1.
+* FULL SUITE 8 (was 13 at session start), every red precisely named:
+  - pavement_grade[SPLP]: 1 within pair 5 cm/0.8 m per-tile junction
+    #66 (unmasked by the proximity fix — cross assert no longer hides
+    it).  NEW, small, weld-value class.
+  - pavement_grade[HECA]: the 30m service-road parallel wall (27
+    steps; owner identified — station merge widen or cross-shape
+    service law).
+  - pavement_grade[SPJC]: 5 building↔apron steps (worst 0.66 m).
+  - no_self_overlap[SPJC]: 30l CHECKPOINT apron∩service clip
+    (awaiting coordinator approval round).
+  - route_band_zero[SPJC] (196) · pavement_grade[CYXY] (apron #29) ·
+    cyxy_route_reach · solver_validator_same_edge_budgets (CYXY
+    52/17649 apron/junction cm-noise) — the CYXY/SPJC solver arc.
+* LEGITIMATE GREEN FLIPS this session: compare-target ×3 (re-cut),
+  runway_longitudinal_grade[SPLP] (B1 — first since 30i unmasked),
+  pavement_rests_on_source[SPLP] (Fix C killed a hidden 34k m²
+  phantom #34), cyxy_taxi_e_south_apron (B1 flex-path cap threading,
+  cm-scale lawful), vertical-curve XPASS SPJC/CYXY (genuine,
+  gate-off-verified).
+* MYTHS RETIRED: "HECA fails in suite, never standalone" = the test's
+  proximity_m 1.0 vs the 0.5 weld tolerance (B2; surface
+  byte-identical); "EB-109 EMAS doc" does not exist (gap audit);
+  suite-context cache leakage (B2 checked all persistent caches —
+  clean).
+* A7 CLOSED benign accounting (99.6% break nodes identical; growth =
+  denser vertices on pre-existing junction pockets).
+* NEW DOCS: docs/adjacent_ground_grade_law_plan.md (boundary-bridge
+  retirement; 3 decisions await Noah) + docs/grade_law_gap_audit.md
+  (OLS/GS-plane/PVI-spacing/RSA-fine/helipad top-5).
+* QUEUE (named, ordered): SPJC building↔apron steps · HECA service
+  wall · SPLP #66 pair · KCLT #763 clearance remnant · 30l CHECKPOINT
+  approvals (apron∩service clip; hole-aware conformance) · CYXY
+  solver arc (route_reach, edge budgets, apron #29) · adjacent-ground
+  law build (post Noah rulings) · gap-audit top-5 · Section C
+  cleanup (post in-sim soak).
+
 ## LANDED (part 32)
 1. runway-deseg → dev FAST-FORWARD (dev @ 8c9fdc3; dev was a strict
    ancestor — merge conflict-free by construction, as verified in
