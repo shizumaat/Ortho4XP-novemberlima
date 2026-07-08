@@ -2785,9 +2785,19 @@ def stitch_pavement_polygons(
     polygons.
     """
     PAVEMENT_LIKE = (ROLE_JUNCTION, ROLE_APRON)
+    # Runway DE-SEGMENTATION (O4_RUNWAY_SINGLE_POLY): the single-poly
+    # ring joins the stitch as a per-vertex pavement peer — a junction
+    # frontage vertex within ``edge_tol_m`` of the ring's long edge is
+    # inserted INTO the ring at its projection with the PROFILE-lerped
+    # altitude (value-safe: the lerp along a station-to-station edge IS
+    # the redistributed profile).  Legacy segment pieces never needed
+    # this — their per-station corners canonically merged with the
+    # frontage — so the ring-only gate keeps gate-off byte-identical.
     pavements = [
         (i, s) for i, s in enumerate(layout.shapes)
-        if s.role in PAVEMENT_LIKE
+        if (s.role in PAVEMENT_LIKE
+            or (s.role == ROLE_RUNWAY
+                and getattr(s, "from_single_poly", False)))
         and s.polygon is not None
         and not s.polygon.is_empty
         and s.polygon.geom_type == "Polygon"
