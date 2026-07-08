@@ -47,6 +47,14 @@
   continuous (HECA 11→3 ways); crown_drops field intact.
 * Segment-dip class: DEAD BY CONSTRUCTION under the gate (no
   interior cross-edge = no flat-across constraint anywhere).
+* ISOLATED TRIANGLES (30g harness, /tmp/meshdiag): HECA 44,946 →
+  43,110 (−4.1%, same-session A/B); KCLT gate-on 49,810 vs the
+  130,614 recorded for dev at part 30j (−62%; same harness+tile —
+  re-run the gate-off KCLT emit for a same-session A/B).
+* KCLT gate-on: 3 rings (as many refs as profile_state pairs, same
+  as legacy), 48 skirts, plane/skirt/cross 0, within 8 (baseline 6
+  — the frontage weld class), wedges 12→10 (4 junction~runway of
+  the SPJC frontage class remain).
 
 ## OPEN (part 31 — before default-on)
 * HECA +2 within pairs @3.57% (9 cm/2.51 m beside 05R): junction
