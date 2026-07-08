@@ -551,6 +551,11 @@ def _insert_seam_vertices(
         altitude_low=None,
         node_altitudes=closed_alts,
         is_bridge=shape.is_bridge,
+        # A seam-split de-seg ring is still a de-seg ring: every
+        # from_single_poly consumer (join-anchor boundary projection,
+        # ring corner reads, per-station profile validation) must keep
+        # seeing it, or a seam-crossing runway builds half-legacy.
+        from_single_poly=shape.from_single_poly,
     )
     return new_shape
 
