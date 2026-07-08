@@ -57,7 +57,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field as dataclass_field, replace
 
 from . import obj8_partition, obj8_reader
 from .mesh_sampler import MeshElevationSampler
@@ -122,6 +122,11 @@ class RebakeDecision:
     delta_by_resource_and_vertex: dict[str, dict[int, float]]
     anchor_ground_by_resource: dict[str, float]
     skipped: list[tuple[str, str]]  # (resource_path, reason)
+    # Amendment A13: (latitude, longitude, heading_degrees) per resource,
+    # so the provenance sidecar can record each object's anchor on fresh
+    # bakes (workstream W5's escalation: ``apply`` has no placements).
+    anchor_by_resource: dict[str, tuple[float, float, float]] = (
+        dataclass_field(default_factory=dict))
 
 
 @dataclass(frozen=True)
@@ -874,4 +879,13 @@ def structure_deltas(
         delta_by_resource_and_vertex=delta_by_resource_and_vertex,
         anchor_ground_by_resource=anchor_ground_by_resource,
         skipped=skipped,
+        anchor_by_resource={
+            resource_path: (
+                placement.latitude,
+                placement.longitude,
+                placement.heading_degrees,
+            )
+            for resource_path, placement in placement_by_resource.items()
+            if resource_path in anchor_ground_by_resource
+        },
     )

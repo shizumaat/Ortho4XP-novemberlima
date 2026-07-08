@@ -615,8 +615,17 @@ def apply(
             backup_path, live_path, rewrite_plan_by_line, vertex_lines
         )
         objects_written.append(resource_path)
+        decision_anchor = getattr(decision, "anchor_by_resource", {}).get(
+            resource_path
+        )
         provenance["objects"][resource_path] = {
-            "anchor": recorded_entry.get("anchor"),
+            # Amendment A13: the decision carries each object's anchor;
+            # a prototype-era recorded anchor survives as the fallback.
+            "anchor": (
+                list(decision_anchor)
+                if decision_anchor is not None
+                else recorded_entry.get("anchor")
+            ),
             "anchor_ground_m": decision.anchor_ground_by_resource.get(
                 resource_path, recorded_entry.get("anchor_ground_m")
             ),

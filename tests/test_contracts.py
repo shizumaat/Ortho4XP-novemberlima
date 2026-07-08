@@ -269,6 +269,10 @@ def test_rebake_decision_fields():
         "delta_by_resource_and_vertex",
         "anchor_ground_by_resource",
         "skipped",
+        # Amendment A13: per-resource anchors so the provenance sidecar
+        # can record them on fresh bakes; defaults empty for
+        # hand-constructed decisions.
+        "anchor_by_resource",
     )
 
 

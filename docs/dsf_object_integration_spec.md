@@ -1185,3 +1185,23 @@ Three findings, none blocking Wave 2:
    tears. The ε scan shows a smooth decline at LEMD (0.02 → 2,239; 0.25 → 624; 1.0 → 320) with no
    KCLT-style knee. W8 must produce the V3 report per pack and decide between a larger default ε,
    a per-pack ε, or weak-contact analysis — measured in-sim, not argued.
+
+### A13 — Wave 2 escalation resolutions *(manager patch after W4/W5 merge)*
+
+Three items workstream W5 escalated rather than resolving unilaterally, settled here:
+
+1. **`RebakeDecision.anchor_by_resource`** (new field, `dict[str, (latitude, longitude,
+   heading_degrees)]`, default empty). `apply` has no placements, so the provenance sidecar's
+   per-object `anchor` was unobtainable on fresh bakes. `structure_deltas` populates it from the
+   pool's placements (one line — it holds them); `apply` records it, falling back to a
+   prototype-era recorded anchor during A2 migration. The contract-tripwire field list is updated
+   in the same commit, per the amendment protocol.
+2. **Invariant I-4's enforcement point is Phase 2 discovery (workstream W7), not the rebake
+   layer.** The decision carries no placement counts; `post_mesh` must exclude any resource with
+   more than one terrain-draped `OBJECT` placement before building decisions (mirroring
+   `read_dsf_object_buildings`'s singleton-pool handling on the Phase 1 side, where multi-placement
+   is *accepted*). `object_rebake` keeps its only-available defence: two decision resources
+   normalising to the same on-disk file are both skipped.
+3. **`check()` for a version-1 sidecar lacking the queried mesh's tile returns `"STALE"`**, not
+   `"NONE"`: a bake exists but not against this mesh, and under ruling R2 the cheap re-bake is
+   always the right response. Documented as the defined semantics.
