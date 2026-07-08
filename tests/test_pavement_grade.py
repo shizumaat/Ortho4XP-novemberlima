@@ -178,10 +178,19 @@ def test_pavement_grade(tmp_path, icao):
                                (getattr(layout, "_crown_centerline_ll", None)
                                 or [])]
 
+        # proximity_m = the solver's weld tolerance (one definition of
+        # "same point" everywhere — canonical registry, pre-solve weld,
+        # and this check).  Vertices farther apart are INDEPENDENT
+        # solver nodes whose relationship the vertex-to-edge/mid-edge
+        # step checks govern; a wider radius double-counts that class
+        # (the years-old "HECA fails in suite, never standalone"
+        # mystery was exactly this: the CLI defaults to 0.5, this call
+        # hardcoded 1.0).
+        from auto_patch.layout import SHARED_VERTEX_TOL_M
         w, c, s = check_grade.run_checks(
             out,
             max_grade_pct=1.5,
-            proximity_m=1.0,
+            proximity_m=SHARED_VERTEX_TOL_M,
             edge_search_m=5.0,
             edge_step_m=0.5,
             top_n=5,
