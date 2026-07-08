@@ -215,3 +215,87 @@ def coverage_probe(layout, tag: str) -> None:
         print(f"  [coverage-probe] {tag}: " + " | ".join(out))
     except Exception as _e:                          # pragma: no cover
         print(f"  [coverage-probe] {tag}: ERROR {_e!r}")
+
+
+def insert_probe_nodes(layout, spec: str, radius_m: float = 10.0) -> int:
+    """Insert DIAGNOSTIC ring vertices near probe points (user 2026-07-07).
+
+    ``O4_PROBE_NODES="lat,lon;lat,lon"`` — for each probe point, every
+    pavement ring EDGE passing within ``radius_m`` gains a vertex at the
+    point's perpendicular projection, with the altitude LINEARLY
+    INTERPOLATED along that edge — elevation-neutral by construction
+    (the rendered surface is unchanged; the mesh merely gains a
+    constraint there), but the emitted patch then carries an explicit
+    node + alt_abs at the spot, so long node-free straightaways become
+    verifiable in JOSM / in-sim (CYXY service-road "ridge" report: the
+    nearest emitted vertices were 71-107 m away — nothing to inspect).
+
+    Runs at the very END of the build (after decimation, projection,
+    and skirts — a lerped point on a straight edge is exactly the
+    3D-collinear class emit decimation removes, so it must be inserted
+    after).  Both shapes sharing an edge get the same XY and the same
+    lerp, so the emit-time consensus merges them into one node.
+    No-op without the env var; never raises.
+    """
+    try:
+        from shapely.geometry import Polygon as _Poly
+        from .layout import _projection
+        to_m = _projection(layout.anchor)
+        pts = []
+        for part in spec.split(";"):
+            la, lo = (float(v) for v in part.split(","))
+            pts.append(to_m(lo, la))
+        n_inserted = 0
+        for s in layout.shapes:
+            poly = s.polygon
+            if (poly is None or poly.is_empty
+                    or poly.geom_type != "Polygon"):
+                continue
+            ring = list(poly.exterior.coords)      # closed
+            alts = (list(s.node_altitudes)
+                    if s.node_altitudes is not None else None)
+            if alts is not None and len(alts) != len(ring):
+                continue                            # malformed; skip
+            insertions = []                         # (seg_idx, (x,y), alt)
+            for (px, py) in pts:
+                for i in range(len(ring) - 1):
+                    ax, ay = ring[i]
+                    bx, by = ring[i + 1]
+                    ex, ey = bx - ax, by - ay
+                    L2 = ex * ex + ey * ey
+                    if L2 < 4.0:                    # short seg: has nodes
+                        continue
+                    t = ((px - ax) * ex + (py - ay) * ey) / L2
+                    if not (0.05 < t < 0.95):       # off-end: node nearby
+                        continue
+                    qx, qy = ax + t * ex, ay + t * ey
+                    dx, dy = px - qx, py - qy
+                    if dx * dx + dy * dy > radius_m * radius_m:
+                        continue
+                    a = None
+                    if alts is not None:
+                        a = alts[i] + t * (alts[i + 1] - alts[i])
+                    insertions.append((i, (qx, qy), a))
+            if not insertions:
+                continue
+            for i, q, a in sorted(insertions, reverse=True):
+                ring.insert(i + 1, q)
+                if alts is not None:
+                    alts.insert(i + 1, a)
+            try:
+                new_poly = _Poly(ring)
+                if new_poly.is_empty or not new_poly.is_valid:
+                    continue
+            except Exception:
+                continue
+            s.polygon = new_poly
+            if alts is not None:
+                s.node_altitudes = alts
+            n_inserted += len(insertions)
+        if n_inserted:
+            print(f"  [probe-nodes] inserted {n_inserted} diagnostic "
+                  f"vertex(es) at {len(pts)} probe point(s).")
+        return n_inserted
+    except Exception as _e:                          # pragma: no cover
+        print(f"  [probe-nodes] ERROR {_e!r}")
+        return 0

@@ -5756,6 +5756,16 @@ def build_airport_pavement(icao: str, xplane_root: str,
             UI.vprint(1, f"  [pav-builder] {icao}: runway-end skirt "
                          f"emission FAILED: {exc!r}")
 
+    # Diagnostic probe nodes (user 2026-07-07): O4_PROBE_NODES inserts
+    # elevation-neutral ring vertices near given lat,lon points so
+    # node-free straightaways carry inspectable altitudes in the patch.
+    # ABSOLUTE LAST geometry touch: a lerped on-edge vertex is exactly
+    # what emit decimation removes, so it must come after everything.
+    _probe_spec = os.environ.get("O4_PROBE_NODES")
+    if _probe_spec:
+        from .geom_guard import insert_probe_nodes
+        insert_probe_nodes(layout, _probe_spec)
+
     # Record this build's actual per-phase and total wall time so the
     # NEXT build of this (or a similarly-sized) airport starts with a
     # trustworthy remaining-time estimate.  Skipped under pytest — the
