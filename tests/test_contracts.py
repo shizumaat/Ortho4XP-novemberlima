@@ -376,7 +376,7 @@ def test_unimplemented_stubs_raise_not_implemented():
         object_anchor.discover_object_pools([], {}, {}, epsilon_metres=0.25)
     with pytest.raises(NotImplementedError):
         object_rebake.restore("/nonexistent")
-    with pytest.raises(NotImplementedError):
-        object_footprints.structure_ring(None, {}, [])
+    # object_footprints landed in workstream W6;
+    # tests/test_dsf_object_buildings.py has taken over.
     with pytest.raises(NotImplementedError):
         post_mesh.rebake_dsf_objects(None)

@@ -325,6 +325,90 @@ def _dedup_coincident_ring_vertices(layout, icao: str, tol_m: float = 0.05):
     return n_fixed
 
 
+def _admit_dsf_building_footprint(
+        outer_ring_lonlat,
+        hole_rings_lonlat,
+        to_meters_transform,
+        airport_bounding_box_meters,
+        boundary_gate_meters,
+        building_polygons_meters) -> bool:
+    """Admit one DSF building ring into the DSF building pool.
+
+    The single downstream path shared by every DSF building source
+    (``.fac`` facades / ``.agp`` hangars via ``read_dsf_buildings``, and
+    OBJ8 structure footprints via ``read_dsf_object_buildings``):
+    Polygon, ``buffer(0)`` repair, to-metres transform, bounding-box
+    reject, boundary-CENTROID gate (keep the whole footprint rather than
+    clipping a building that grazes the boundary), then append to
+    ``building_polygons_meters``.  Returns True when the footprint was
+    appended.
+    """
+    try:
+        building_polygon_lonlat = Polygon(
+            [(lon, lat) for (lon, lat) in outer_ring_lonlat],
+            [[(lon, lat) for (lon, lat) in h]
+             for h in hole_rings_lonlat if len(h) >= 3],
+        )
+        if not building_polygon_lonlat.is_valid:
+            building_polygon_lonlat = building_polygon_lonlat.buffer(0)
+        if (building_polygon_lonlat.is_empty
+                or building_polygon_lonlat.geom_type != "Polygon"):
+            return False
+        building_polygon_meters = shp_transform(
+            to_meters_transform, building_polygon_lonlat)
+        if (building_polygon_meters.is_empty
+                or building_polygon_meters.geom_type != "Polygon"):
+            return False
+        if airport_bounding_box_meters is not None:
+            (bounds_min_x, bounds_min_y,
+             bounds_max_x, bounds_max_y) = building_polygon_meters.bounds
+            if (bounds_max_x < airport_bounding_box_meters[0]
+                    or bounds_min_x > airport_bounding_box_meters[2]
+                    or bounds_max_y < airport_bounding_box_meters[1]
+                    or bounds_min_y > airport_bounding_box_meters[3]):
+                return False
+        if boundary_gate_meters is not None:
+            try:
+                if not boundary_gate_meters.contains(
+                        building_polygon_meters.centroid):
+                    return False
+            except _GEOM_EXC:
+                return False
+        building_polygons_meters.append(building_polygon_meters)
+        return True
+    except _GEOM_EXC:
+        return False
+
+
+def _collect_dsf_object_building_footprints(
+        dsf_path, xplane_root, admit_footprint) -> int:
+    """Phase 1 of the DSF object integration: OBJ8 structure footprints
+    join the DSF building pool beside the ``.fac`` facades, through the
+    IDENTICAL downstream path (``admit_footprint`` =
+    ``_admit_dsf_building_footprint`` with the caller's gates bound).
+    Role ``"object"`` then flows through ``_cluster_dsf_building_facades``
+    and ``_combine_building_sources`` exactly like a facade — additive,
+    no overlap predicate (ruling R4; spec section 2.3).
+
+    Gated on ``DSF_OBJECT_BUILDINGS`` here (function-local import so
+    tests can monkeypatch the flag); the caller has already gated on
+    ``DSF_BUILDINGS`` (the object source shares the building path).
+    Returns the number of footprints admitted.
+    """
+    from .config import DSF_OBJECT_BUILDINGS
+    if not DSF_OBJECT_BUILDINGS:
+        return 0
+    from . import dsf_reader as _DSFR
+    admitted = 0
+    for outer_ring, hole_rings, _role in _DSFR.read_dsf_object_buildings(
+            dsf_path, xplane_root=xplane_root):
+        if len(outer_ring) < 3:
+            continue
+        if admit_footprint(outer_ring, hole_rings):
+            admitted += 1
+    return admitted
+
+
 # ──────────────────────────────────────────────────────────────────
 # Top-level builder
 # ──────────────────────────────────────────────────────────────────
@@ -1006,6 +1090,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # complex building and union into the same per-building outline.
     dsf_building_polys: List[Polygon] = []
     n_dsf_buildings = 0
+    n_dsf_object_buildings = 0
     try:
         if not LOAD_DSF_PAVEMENT:
             raise StopIteration  # skip the DSF block entirely
@@ -1175,6 +1260,10 @@ def build_airport_pavement(icao: str, xplane_root: str,
             # but a CENTROID-in-boundary gate (keep the whole footprint
             # rather than clipping a building that grazes the boundary).
             if DSF_BUILDINGS:
+                _admit = (lambda outer_ring, hole_rings:
+                          _admit_dsf_building_footprint(
+                              outer_ring, hole_rings, to_m, apt_bbox_m,
+                              boundary_gate_m, dsf_building_polys))
                 for b_outer, b_holes, _b_role in \
                         _DSFR.read_dsf_buildings(
                             dsf, xplane_root=xplane_root):
@@ -1185,38 +1274,15 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     # entirely (byte-identical to the pre-grouping read).
                     if _b_role == "bridge" and not TERM_BRIDGE_GROUPING:
                         continue
-                    try:
-                        bpoly_ll = Polygon(
-                            [(lon, lat) for (lon, lat) in b_outer],
-                            [[(lon, lat) for (lon, lat) in h]
-                             for h in b_holes if len(h) >= 3],
-                        )
-                        if not bpoly_ll.is_valid:
-                            bpoly_ll = bpoly_ll.buffer(0)
-                        if (bpoly_ll.is_empty
-                                or bpoly_ll.geom_type != "Polygon"):
-                            continue
-                        bm = shp_transform(to_m, bpoly_ll)
-                        if bm.is_empty or bm.geom_type != "Polygon":
-                            continue
-                        if apt_bbox_m is not None:
-                            bx0, by0, bx1, by1 = bm.bounds
-                            if (bx1 < apt_bbox_m[0]
-                                    or bx0 > apt_bbox_m[2]
-                                    or by1 < apt_bbox_m[1]
-                                    or by0 > apt_bbox_m[3]):
-                                continue
-                        if boundary_gate_m is not None:
-                            try:
-                                if not boundary_gate_m.contains(
-                                        bm.centroid):
-                                    continue
-                            except _GEOM_EXC:
-                                continue
-                        dsf_building_polys.append(bm)
+                    if _admit(b_outer, b_holes):
                         n_dsf_buildings += 1
-                    except _GEOM_EXC:
-                        continue
+                # OBJ8 structure footprints from the SAME DSF (Phase 1
+                # of the DSF object integration) join the pool through
+                # the IDENTICAL admission path.  Gated inside on
+                # DSF_OBJECT_BUILDINGS (default off).
+                n_dsf_object_buildings += \
+                    _collect_dsf_object_building_footprints(
+                        dsf, xplane_root, _admit)
         if (n_dsf_kept or n_dsf_dropped_overlay
                 or n_dsf_dropped_far):
             try:
@@ -1233,6 +1299,14 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     f"  [pav-builder] {icao}: DSF buildings: "
                     f"{n_dsf_buildings} terminal/hangar facade(s) "
                     f"inside boundary.")
+            except _GEOM_EXC:
+                pass
+        if n_dsf_object_buildings:
+            try:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: DSF object buildings: "
+                    f"{n_dsf_object_buildings} OBJ8 structure "
+                    f"footprint(s) inside boundary.")
             except _GEOM_EXC:
                 pass
     except StopIteration:

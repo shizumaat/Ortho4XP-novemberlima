@@ -26,8 +26,94 @@ y offset seats (spec section 7.3).
 
 from __future__ import annotations
 
+import math
+
+from shapely.geometry import MultiPoint, Polygon
+from shapely.ops import unary_union
+
+import O4_UI_Utils as UI
+
+# Imported as modules (not names) so tests can monkeypatch the
+# projection while workstream W2's implementation is still landing, and
+# so the real implementation is picked up the moment it does.
+from . import obj8_reader
 from .obj8_reader import ObjectGeometry, ObjectPlacement
 from .object_anchor import Structure
+
+# Douglas-Peucker tolerance for the triangle-union ring, in degrees of
+# longitude/latitude (~0.2 m at mid latitudes).  The union of thousands
+# of projected triangles carries collinear seam vertices that would
+# bloat the building pool for no geometric information; the hull path
+# never needs simplification.
+FOOTPRINT_SIMPLIFY_TOLERANCE_DEGREES = 2.0e-6
+
+# Exceptions the geometry combinators here may legitimately raise on
+# degenerate input (shapely domain only — never built-ins that would
+# mask a real bug).
+try:  # shapely 2
+    from shapely.errors import GEOSException as _GEOS_EXCEPTION
+except ImportError:  # pragma: no cover - shapely 1 fallback
+    from shapely.errors import TopologicalError as _GEOS_EXCEPTION
+
+
+def _footprint_area_square_metres(footprint_lonlat: Polygon) -> float:
+    """Approximate metric area of a small lon/lat polygon (local
+    equirectangular scale at the polygon's own latitude — exactly the
+    projection ``obj8_reader.local_offset_to_lonlat`` inverts)."""
+    centroid_latitude = footprint_lonlat.centroid.y
+    metres_per_degree_longitude = (
+        obj8_reader.METRES_PER_DEGREE_LATITUDE
+        * math.cos(math.radians(centroid_latitude)))
+    return (footprint_lonlat.area
+            * obj8_reader.METRES_PER_DEGREE_LATITUDE
+            * metres_per_degree_longitude)
+
+
+def _triangle_union_footprint(
+    triangle_corner_points: list[tuple[tuple[float, float],
+                                       tuple[float, float],
+                                       tuple[float, float]]],
+) -> Polygon | None:
+    """The ``DSF_OBJECT_FOOTPRINT_UNION`` ring: unary_union of the
+    projected triangles, ``buffer(0)``-repaired, exterior only (interior
+    rings are dropped in v1), DP-simplified.  Returns ``None`` when the
+    union degenerates."""
+    triangle_polygons = []
+    for corner_points in triangle_corner_points:
+        try:
+            triangle_polygon = Polygon(corner_points)
+            if not triangle_polygon.is_valid:
+                triangle_polygon = triangle_polygon.buffer(0)
+            if (not triangle_polygon.is_empty
+                    and triangle_polygon.geom_type == "Polygon"
+                    and triangle_polygon.area > 0.0):
+                triangle_polygons.append(triangle_polygon)
+        except (ValueError, _GEOS_EXCEPTION):
+            continue
+    if not triangle_polygons:
+        return None
+    try:
+        union = unary_union(triangle_polygons)
+        if not union.is_valid:
+            union = union.buffer(0)
+    except (ValueError, _GEOS_EXCEPTION):
+        return None
+    if union.geom_type == "MultiPolygon":
+        # Base-filtered triangles of one structure can form several
+        # disjoint ground patches (for example separate wall footings);
+        # one structure gets one pad, so keep the dominant patch.
+        union = max(union.geoms, key=lambda geometry: geometry.area)
+    if union.is_empty or union.geom_type != "Polygon":
+        return None
+    exterior_only = Polygon(union.exterior)
+    try:
+        simplified = exterior_only.simplify(
+            FOOTPRINT_SIMPLIFY_TOLERANCE_DEGREES, preserve_topology=True)
+    except (ValueError, _GEOS_EXCEPTION):
+        simplified = exterior_only
+    if simplified.is_empty or simplified.geom_type != "Polygon":
+        simplified = exterior_only
+    return simplified
 
 
 def structure_ring(
@@ -51,4 +137,104 @@ def structure_ring(
       silent — above ``DSF_OBJECT_MAX_FOOTPRINT_AREA_M2`` when that cap
       is enabled.
     """
-    raise NotImplementedError("workstream W6")
+    # Function-local flag imports so tests can monkeypatch the config
+    # module (the module-level idiom freezes the value — spec section
+    # 4-W1, "one trap").
+    from .config import (
+        DSF_OBJECT_FOOTPRINT_HEIGHT_M,
+        DSF_OBJECT_FOOTPRINT_UNION,
+        DSF_OBJECT_MAX_FOOTPRINT_AREA_M2,
+    )
+
+    if not structure.is_ground_touching:
+        return None
+    if (not structure.triangles_by_resource
+            or not structure.minimum_base_y_by_resource):
+        return None
+
+    placement_by_resource = {
+        placement.resource_path: placement for placement in placements}
+    minimum_base_y = min(structure.minimum_base_y_by_resource.values())
+    base_ceiling_y = minimum_base_y + DSF_OBJECT_FOOTPRINT_HEIGHT_M
+
+    base_points: list[tuple[float, float]] = []
+    all_points: list[tuple[float, float]] = []
+    base_triangle_corner_points: list = []
+    all_triangle_corner_points: list = []
+
+    for resource_path, triangles in structure.triangles_by_resource.items():
+        geometry = geometry_by_resource.get(resource_path)
+        placement = placement_by_resource.get(resource_path)
+        if geometry is None or placement is None or not triangles:
+            continue
+        # Project each vertex through its OWN object's placement (spec
+        # section 2.4: the anchor is a per-object property).
+        projected_by_vertex_index: dict[int, tuple[float, float]] = {}
+        is_base_vertex: dict[int, bool] = {}
+        for triangle in triangles:
+            for vertex_index in triangle:
+                if vertex_index in projected_by_vertex_index:
+                    continue
+                local_x, local_y, local_z = geometry.vertices[vertex_index]
+                latitude, longitude = obj8_reader.local_offset_to_lonlat(
+                    placement.latitude,
+                    placement.longitude,
+                    placement.heading_degrees,
+                    local_x,
+                    local_z,
+                )
+                point = (longitude, latitude)
+                projected_by_vertex_index[vertex_index] = point
+                is_base_vertex[vertex_index] = local_y <= base_ceiling_y
+                all_points.append(point)
+                if is_base_vertex[vertex_index]:
+                    base_points.append(point)
+        if DSF_OBJECT_FOOTPRINT_UNION:
+            for triangle in triangles:
+                corner_points = tuple(
+                    projected_by_vertex_index[vertex_index]
+                    for vertex_index in triangle)
+                all_triangle_corner_points.append(corner_points)
+                if all(is_base_vertex[vertex_index]
+                       for vertex_index in triangle):
+                    base_triangle_corner_points.append(corner_points)
+
+    if len(all_points) < 3:
+        return None
+    # Fewer than 3 base vertices → all solid vertices (low flat objects
+    # authored entirely above the height window).
+    use_base_vertices = len(base_points) >= 3
+
+    footprint: Polygon | None
+    if DSF_OBJECT_FOOTPRINT_UNION:
+        footprint = _triangle_union_footprint(
+            base_triangle_corner_points if use_base_vertices
+            else all_triangle_corner_points)
+    else:
+        try:
+            hull = MultiPoint(
+                base_points if use_base_vertices else all_points
+            ).convex_hull
+        except (ValueError, _GEOS_EXCEPTION):
+            return None
+        footprint = hull if (not hull.is_empty
+                             and hull.geom_type == "Polygon") else None
+    if footprint is None:
+        return None
+
+    if DSF_OBJECT_MAX_FOOTPRINT_AREA_M2 > 0.0:
+        area_square_metres = _footprint_area_square_metres(footprint)
+        if area_square_metres > DSF_OBJECT_MAX_FOOTPRINT_AREA_M2:
+            # Skip-and-report, never a quiet clip (spec section 2.3).
+            UI.vprint(
+                1,
+                "  [object-footprints] structure footprint "
+                f"{area_square_metres:.0f} m2 exceeds the "
+                f"{DSF_OBJECT_MAX_FOOTPRINT_AREA_M2:.0f} m2 cap "
+                "(O4_DSF_OBJECT_MAX_FOOTPRINT_AREA_M2) — skipped; "
+                "the structure needs a pad review.")
+            return None
+
+    ring = [(float(longitude), float(latitude))
+            for longitude, latitude in footprint.exterior.coords[:-1]]
+    return ring if len(ring) >= 3 else None
