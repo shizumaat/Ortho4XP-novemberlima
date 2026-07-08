@@ -1,3 +1,144 @@
+# STATUS — SESSION 20260707 (part 30l): VERIFY-LOG DRIVE-TO-ZERO across
+# the 14-airport loop (5 fixtures + KCLT satellite family).  1 emitter FIX
+# (fully-contained service_junction self-overlap); everything else
+# classified KNOWN-OPEN (solver/slice-owned) or CHECKPOINT (needs review).
+# Base: dev@3d830ec.  Fix committed on dev in the verifyloop worktree.
+
+## THE FIX (fix class 1 — LANDED)
+`groundside._deconflict_service_overlaps` clips the smaller of two
+overlapping SERVICE shapes against the larger, but when the yielder lies
+WHOLLY inside the kept shape the difference is empty, `parts` is empty, and
+the old `continue` left the fully-covered yielder in the layout — a
+100%-area self-overlap (KEQY service_junction #23, 109 m², entirely inside
+#21).  FIX: drop the redundant yielder in the empty-parts branch (a
+`drop_ids` set filters removed shapes at return; partial lenses still clip
+as before).  KEQY verify overlap 1 → 0, coverage unchanged (kept shape
+already covers the footprint at the same role).
+
+## SCOREBOARD (verify_and_log findings; BEFORE dev@3d830ec → AFTER fix)
+Columns: OVL=self-overlap  SRC=off-source  WDG=epsilon-wedge  RWG=runway_grade
+```
+airport   OVL      SRC     WDG      RWG     total      note
+SPLP      0        0       0        4→4     4→4        RWG KNOWN (runway solver)
+CYXY      0        0       2        0       0→0        (wedge audit only; verify 0)
+SPJC      2→2      0       10       0       12→12      all KNOWN (slice + carve)
+HECA      5→5      1       9        0       15→15      all KNOWN
+MMOX      0        0       0        0       0          clean
+KCLT      8→8      10      11       0       29→29      all KNOWN (slice + off-source)
+KJQF      3→3      0       3        0       6→6        all KNOWN (bld-hole + slice)
+KSVH      1→1      0       1        0       2→2        KNOWN
+KEXX      2→2      0       0        0       2→2        KNOWN
+KVUJ      2→2      0       0        0       2→2        KNOWN
+KEQY      1→0      0       4        0       5→4        OVL FIXED (this session)
+KRUQ      0        0       0        0       0          clean
+KAFP      0        0       0        0       0          clean (tile +35-081)
+```
+
+## CLASSIFICATION (every non-zero finding)
+FIX (landed): KEQY 109 m² service_junction∩service_junction full-containment.
+
+KNOWN-OPEN — SLICE-PARTITION wedges/overlaps (part 30g/30j; the curve-native
+global slice owns junction faces — cannot merge/move without breaking
+elevation neutrality; the tight final weld cannot reach them without bowing
+solved constrained edges).  Covers: ALL `junction~junction` /
+`runway~junction` / `junction~apron` epsilon-wedges (SPJC 10, KCLT 11 incl.
+runway~junction 100-163 mm, KSVH 1, KEQY junction~apron 2, HECA junction 4),
+and the small `junction∩junction` overlaps (KCLT #334/335/336∩#791 [1.8/0.6/
+2.3 m²], #327∩#328 [0.5], SPJC 0.2, KEXX 0.3) = task#16 KNOWN.
+
+KNOWN-OPEN — BOUNDARY/GROUNDSIDE outline class (part 30j): the boundary
+ribbon + groundside/service_road re-derive the same physical outline with
+different vertex sets → sub-mm `service_road~groundside_pavement` /
+`clearance~clearance` wedges (HECA service_road 2 + clearance 2, KEQY
+service_road 2) and the HECA clearance∩clearance slivers (3.2 + 0.3 m²).
+Longstanding structural, pre-dating 30d; the final epsilon-weld welds the
+insertable seams but cannot reach solved-surface wedges.
+
+KNOWN-OPEN — OFF-SOURCE phantom pavement (task#16): KCLT 6 large junctions
+(17206 m²@21% … 2665@41%, ~lon -80.966) + 4 zero-on-source apron/junction
+(496/278/135/112 m²); HECA apron #244 30 m²@0% (05R area).  Aircraft-pavement
+faces the slice emitted off real source — a classification/slice question
+(should be groundside, or dropped).  Rooted in the slice + pack classifier
+(off-limits this session); investigate what they SHOULD be under de-seg.
+
+KNOWN-OPEN — RUNWAY longitudinal grade: SPLP 4 findings 1.52–1.61% > 1.5%
+on runway 02/20 — the same at-cap runway class as the check_grade WITHIN
+SPLP=16 gate baseline (part 30i).  Emitted by the runway solver
+(runway_segments/regrade/redistribute) — off-limits (de-seg session owns
+runway emission).
+
+CHECKPOINT — BUILDING∩GROUNDSIDE overlap (NOT fixed; needs coordinator
+review).  KJQF building19/16 (1173+115 m²), KVUJ building8 (353 m²), HECA
+building17 (6210 m²): a terminal pad wholly inside a groundside lot is
+re-covered by the lot.  ROOT CAUSE (fully traced this session):
+`groundside._emit_groundside_pavement_dem` DOES subtract the building union,
+producing a groundside polygon with a building-shaped HOLE — but
+`_dem_follow_polygon` rebuilds from `p.exterior.coords` only, dropping the
+hole (verified: input holes 2 → output 0 before the fix, and 2 → 2 with a
+one-line hole-carry patch).  A hole-carry patch in `_dem_follow_polygon`
+ALONE is insufficient: `conformance.py` rebuilds `s.polygon = Polygon(
+new_ring)` (3 sites, exterior-only) on every weld/planarize, stripping the
+hole again on any groundside shape it touches (final #176 ended holes=0,
+area grown).  The OSM emit is exterior-only BY DESIGN (layout.to_osm drops
+all interiors for the X-Plane patch parser — same as holed junction rings,
+where the punching rect's tags prevail), so the honest fix is to make the
+geometry model hole-aware THROUGH conformance so check_self_overlap sees the
+subtracted hole (the emit is already correct — the pad's own way covers the
+hole).  That is a coordinated change to a broadly-shared pass (conformance,
+touches airside too) across >2 files → tripped the CHECKPOINT gate; STOPPED
+per directive.  PLAN for review: (a) `_dem_follow_polygon` carries `p.
+interiors` onto the rebuilt polygon (1-line, done+reverted, safe); (b) the
+three `conformance.py` `Polygon(new_ring)` rebuilds preserve `shape.polygon.
+interiors`; (c) gate: wedge_audit no growth (decomposition-free, so low
+risk), verify building∩groundside → 0 at KJQF/KVUJ/HECA, full suite 13.
+A decomposition alternative (split holed lot into hole-free pieces at emit)
+was REJECTED — the thin bridges around interior pads are prime epsilon-wedge
+/ sliver generators = the exact 30j mesh-explosion class.
+
+CHECKPOINT — APRON/JUNCTION∩SERVICE_JUNCTION overlap (NOT fixed).  SPJC
+apron#65∩service_junction#72 (9.4 m², eroded-0.25 m still 5.1 → mesh-scale),
+KCLT apron∩service_junction (4.3), KJQF junction∩service_junction (1.1).
+ROOT (traced): `groundside.consolidate_full_width_service_corridors`
+introduces it (0.0 → 9.4 m² immediately after that pass; conformance/slice do
+NOT) — it absorbs+unions junction/service slivers into the merged corridor
+and re-emits as service without subtracting the corridor back out of the
+overlapping apron/junction.  A service-vs-airside clip (extend
+`_deconflict_service_overlaps` to the service∩aircraft pair, clipping the
+DEM-graded service side like `_separate_groundside_from_airside` clips
+groundside) is the fix, but it perturbs the solved corridor extent/grade on
+SPJC + KCLT (both FULL-suite fixtures; SPJC already carries the pre-existing
+`test_no_self_overlap[SPJC]` failure that flags exactly this) → deferred for
+review rather than risk the fixture set.
+
+KNOWN-OPEN — GROUNDSIDE∩BOUNDARY overlap (task#16): KEXX groundside#17 ∩
+boundary_dem_bridge#350 (1215 m²), KCLT groundside∩airport_boundary
+(2.3/1.9), KVUJ apron∩airport_boundary (0.2), KSVH groundside∩groundside
+(0.2).  The boundary ribbon traces OVER everything by design
+(check_self_overlap's `_COVERAGE_FEATURE_ROLES` note) — the boundary/bridge
+is a feature overlay, not double pavement; the large KEXX case is a
+boundary_dem_bridge that co-locates with the groundside it bridges to.  Same
+exterior-only-emit tolerance as the junction-hole class; benign in-sim
+(overlay ribbon).  Left as KNOWN pending the same hole-aware-emit work.
+
+## GATES (all at the committed fix)
+* fast_suite: exactly the 8 pre-existing failures (2 SPLP compare + SPLP
+  grade×2 + CYXY grade + CYXY terrain + CYXY route-reach + CYXY single-graph).
+* FULL suite: exactly the 13 pre-existing (SPLP×4, SPJC×4, CYXY×4, HECA×1).
+  No new failures; `test_no_self_overlap[SPJC]` remains pre-existing (= the
+  KNOWN apron∩service class above).
+* check_grade: CYXY WITHIN 1, SKIRT/PLANE/CROSS 0 (== gate); SPLP WITHIN 16.
+* wedge_audit CYXY 2 (no growth).  conformance CYXY 35/1267 ramp 25 (== gate).
+* Every airport re-verified post-commit: byte-identical finding counts to
+  baseline except KEQY (overlap 1 → 0).
+
+## OPEN (part 30l follow-ups)
+* The two CHECKPOINT classes above (building∩groundside via hole-aware emit;
+  apron∩service via service∩airside clip) — both need coordinator sign-off
+  because the correct fix touches a shared pass / a full-suite fixture's
+  solved geometry.
+* OFF-SOURCE phantom pavement + the slice-partition wedges are de-seg's to
+  clear (fewer/larger junction faces re-solved on the coarser partition).
+
 # STATUS — SESSION 20260707 (part 30k): CLEARANCE-EFFECTIVENESS
 # regression — the part-30f outer-edge DEM lift un-cut the cuts;
 # REVERTED (FIX B/C kept) + new conformance PROPERTY gate
