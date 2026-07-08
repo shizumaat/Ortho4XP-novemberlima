@@ -49,22 +49,56 @@
 * Dip probe: dead by construction (part 31 — no interior cross-edges
   exist under the gate; 30i tent pass structurally no-op).
 
-## OPEN (part 32 = Addendum 2's OUTSTANDING list, in order)
-* A1 sloped-frontage weld (SPJC 1 plane pair + 16 mm wedge, KCLT
-  within 8/wedges +4, HECA +2 sub-mm wedges) — stitch_pavement_
-  polygons snap_corner guard; fix = move the near-corner foreign
-  vertex to the ring corner (pre-solve, canonical-bucket propagated).
-* A2 HECA 2 within pairs @3.57% beside 05R (level-coupling suspect).
-* A3 SPLP within-scoping RULING — question posed to Noah.
-* A4 check_runway_profile per-station clustering on rings — MUST
-  restore runway_longitudinal_grade[SPLP] to RED + flip the 3
-  vertical-curve XPASSes back (currently dark on 2-end rings).
-* A5 KCLT triangle A/B (same-session, /tmp/meshdiag) — in flight.
-* NOAH: restart Ortho4XP (GUI caches auto_patch imports) + bake for
-  in-sim testing.
-* Section C cleanup (tent machinery, legacy chain conversion,
-  sub-rect crossing resolution) ONLY after in-sim soak, byte-identical
-  per the dead-code rule.
+## OPEN (part 32 = Addendum 2's OUTSTANDING list) — MID-SESSION UPDATE
+* A4 DONE (ff332e9): check_runway_profile per-station on rings +
+  crossing-slab phantom exclusion (materialized at CYXY, excluded by
+  station not noise).  SPJC/CYXY vertical-curve XPASSes proved
+  GENUINE (gate-off ground truth 0) — only HECA's returns to xfail.
+* A6 DONE (ec7f632, found by A4's agent): seam split dropped
+  from_single_poly — SPLP built HALF-DE-SEG (join anchors +
+  corner reads + profile check all legacy).  One-line propagation;
+  fast_suite 6 = the 5 + runway_longitudinal_grade[SPLP] correctly
+  RED again.  A chip-spawned duplicate session may exist — the fix
+  is already in.
+* A2 DONE (f86d7ee): HECA within 2→0.  Root = the final
+  enforce_conformance weld interpolating crown-UNAWARELY across a
+  crown discontinuity (solver value was lawful); fix = shared
+  insert-altitude rule: coincident-ADOPT for soft receivers (value
+  authorities never adopt) + crown-aware z' lerp on exact canonical
+  nodes.  Bonus: KCLT within 9→5, SPJC suite cross 9→0.
+  pavement_grade[HECA] stays red on a PRE-EXISTING suite-context-only
+  cross divergence (byte-identical A/B at bare HEAD; the known
+  "standalone probes never reproduce" HECA gap) → section B.
+* A1 EVOLVED (5 diagnosis rounds, 2 designs measured-and-rejected):
+  ring≡legacy contour (cm); real root = _enforce_shared_vertices
+  cluster-MEAN placement (pavement/vertices.py:1166) — no runway
+  vertex anchors frontage clusters → merged verts land 0.27 m off
+  the ring chord (KCLT), 14 mm (SPJC, a 4→14 mm knife-edge flip past
+  the 10 mm weld tol), and ring stations drift 3 cm.  R1 IN FLIGHT:
+  runway-anchored canonical points (runway vertex wins; runway-near
+  cluster means project onto the runway boundary; two-authority
+  clusters freeze).  GATE-INDEPENDENT — fixes legacy too (gate-off
+  twin #792 same defect); suite-verified, byte-identity waived per
+  the correctness-work rule.  Emit-stage mop-up pass preserved in
+  session scratchpad ring_frontage_pass/ (superseded if R1 holds).
+  R2 (mixed-regime strip: KCLT #344 internal 0.2 m steps, SPJC #141
+  plane pair — slice-minted sliver, one shape/two value authorities,
+  BOTH gates) decided after R1's residual numbers.
+* A5 DONE: KCLT triangles 49,952 vs 130,468 (−61.7%), same-session
+  A/B, runway ways 3 vs 7.
+* A3 RULING OBTAINED (Noah 2026-07-08): scope runway-ring
+  within-shape pairs to lateral + same/adjacent-station; longitudinal
+  law = ring-aware check_runway_profile + spine profile; BOTH readers
+  lockstep via one grade_law predicate.  Junction-way mirror pairs of
+  the runway chords are NOT covered — measure residue, checkpoint
+  before extending.  Runs after R1.
+* A7 NEW: HECA break growth 5891→6176 at gate-on is NOT A2's root
+  (pair >1.5 km from any break region) — solver-time, own trace,
+  after A3.
+* NOAH: bake after A1/A2 land (his call); restart Ortho4XP first
+  (GUI caches auto_patch imports).
+* Section C cleanup unchanged (after in-sim soak, byte-identical
+  dead-code rule).
 
 # STATUS — SESSION 20260707/08 (part 31): RUNWAY DE-SEGMENTATION —
 # single-poly rings behind O4_RUNWAY_SINGLE_POLY (branch runway-deseg,
