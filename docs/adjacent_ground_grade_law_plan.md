@@ -86,6 +86,43 @@ DECISIONS (recommend, Noah to confirm):
    3 m shoulder, emit the existing retaining_wall feature along the
    edge (visual face), gated separately — Noah question outstanding.
 
+## RISING vs FALLING (the two directions, explicitly)
+
+RISING terrain (DEM above ceiling) → CUT at every distance: zone 1
+cuts to flush-then-falling; zone 2 cuts to the lawful up-slope
+(replacing today's FLAT clearance shadow with the sloped ceiling —
+a gentle bank lawfully survives); zone 3 cuts at the ≤5%
+ungraded-strip cap out to the reach limit; beyond that the OLS
+transitional surface (docs/grade_law_gap_audit.md GAP 1) is the
+full-scale rising model.  Wingtip clearance still applies where
+stricter.
+
+FALLING terrain (DEM below floor) → FILL only inside zones 1-2
+(the graded shelf at the lawful down rate; bounded by W(role) —
+≤75 m at code 3/4 runways); zone 3 floor = −∞ — cliffs/ravines
+beyond the graded band render as DEM, ALWAYS.  This asymmetry is
+the boundary-bridge killer and is straight from the regs (no
+downward mandate exists past the graded portion).
+
+## DRAINAGE (why the envelope has its shape)
+
+1. The zone-1 lip IS a drainage rule: mandatory fall-away in the
+   first 3 m (ICAO §3.4.15 negative ≤5%; FAA Fig 3-33 3-5%) so water
+   sheds off the pavement edge.
+2. Fill render target = the drainage slope (~−3% mid-band, never
+   flat), matching FAA Fig 3-33 Detail A.
+3. Ditches fall out for free: ICAO §3.4.16 permits open storm
+   channels only in the NON-graded strip, far from the runway — a
+   DEM ditch inside the graded band dips below the floor → FILLED
+   (correct: unlawful there); beyond the band the −∞ floor
+   preserves it (correct: lawful there).  No special case needed.
+4. Deliberately NOT enforced: FAA drainage MINIMUM slopes (1.5% RSA
+   transverse floor, 0.5% apron minimum).  X-Plane does not simulate
+   ponding; ICAO has no minimum; enforcing one would mutate flat
+   surrounds into artificial relief for zero visual benefit
+   (decision 1 above).  Revisit only on a user ruling.
+5. Pavement-surface drainage = the crown law (part 30, shipped).
+
 ## EMISSION + VALIDATION
 
 - Emitter: generalize the SKIRT's banded emission (not clearance —
