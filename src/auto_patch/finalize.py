@@ -455,8 +455,17 @@ def emit_terrain_transition_features(layout: PavementLayout, icao: str, xplane_r
         # the solve), so the bridge PLACEMENT (|clamp − DEM| > 5 m) is
         # genuinely solve-dependent — see the refactor Phase 5 note.
         try:
-            n_br = _emit_boundary_dem_bridge(
-                layout, _dem, _tile_lat, _tile_lon)
+            # Adjacent-ground grade law (slice 3): when ON, the lateral
+            # corridor law SUPERSEDES the boundary→DEM bridge (the law's
+            # graded strips carry the pavement-to-terrain transition, and
+            # zone-3's free floor leaves lawful cliffs alone instead of
+            # force-filling them).  The at-DEM boundary RIBBON path is
+            # untouched; the bridge machinery is only SKIPPED here (deleted
+            # in the final slice, after in-sim soak).
+            from .config import ADJACENT_GROUND_LAW_ENABLED
+            n_br = (0 if ADJACENT_GROUND_LAW_ENABLED
+                    else _emit_boundary_dem_bridge(
+                        layout, _dem, _tile_lat, _tile_lon))
             if n_br:
                 UI.vprint(1,
                     f"  [pav-builder] emitted "

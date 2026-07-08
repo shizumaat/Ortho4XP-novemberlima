@@ -204,6 +204,13 @@ ROLE_SERVICE_JUNCTION = "service_junction"
 # carry no within-shape grade rule.
 ROLE_TAXIWAY_CLEARANCE = "taxiway_clearance"
 ROLE_RUNWAY_CLEARANCE = "runway_clearance"
+# Adjacent-ground graded strip (adjacent_ground.py, gate
+# ADJACENT_GROUND_LAW_ENABLED): terrain-following node_altitudes polygons
+# emitted alongside pavement — the LATERAL generalization of the
+# runway-end skirt.  Like the clearance roles it traces/overrides terrain
+# to the lawful corridor bound, so it carries NO within-shape pavement
+# grade rule (ROLE_GRADE_LIMITS None) and is NOT airside pavement.
+ROLE_GRADED_STRIP = "graded_strip"
 
 AEROWAY_FOR_ROLE = {
     ROLE_RUNWAY: "runway",
@@ -223,6 +230,7 @@ AEROWAY_FOR_ROLE = {
     ROLE_SERVICE_JUNCTION: "taxiway",
     ROLE_TAXIWAY_CLEARANCE: "aerodrome",
     ROLE_RUNWAY_CLEARANCE: "aerodrome",
+    ROLE_GRADED_STRIP: "aerodrome",
 }
 
 
