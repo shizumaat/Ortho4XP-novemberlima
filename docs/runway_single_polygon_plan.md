@@ -146,3 +146,60 @@ dev-side agents own them tonight).
 4. Flex re-stamp + runway_join + skirts/RESA reads.
 5. Crossings as welded node-loops in the ring.
 6. Validators + fixture re-cut (SIGN-OFF) + full-airport A/Bs.
+
+# PHASE 1 — CONSUMER INVENTORY (2026-07-07, runway-deseg session)
+
+## Corrections to the phase text above (measured against HEAD)
+- **There is NO 100 m uniform grid.** Removed 2026-05-22 (HECA load
+  speed; runway_segments.py:1187-1196).  Stations today = physical
+  ends + CIFP thresholds + pav_intersections + cross-runway /
+  crossing-reconciliation anchors; redistribute later inserts
+  seam-crossing samples.  "Same stations as today" means THAT set.
+- **The runway "emitter" is two-stage**: runway_segments.
+  generate_patch_osm builds the profile + a segment chain (its XML
+  return is unused — `_xml`); elevation.py:550-718 converts the chain
+  to ROLE_RUNWAY BuiltShapes (drops the birth rects from pipeline.py:
+  451).  Sloped 4-corner pieces are per-vertex [H,L,L,H] from birth;
+  consecutive flat samples ALREADY consolidate into a multi-node
+  MULTI_FLAT ring — precedent that >4-node runway rings survive the
+  whole pipeline.  `profile_state[(a,b)]` carries phys ends, blast
+  lengths, patch width, fractions/elevs/anchored — everything a
+  single-ring builder needs; the chain need not change.
+- **Crown rect equalization is runway-safe**: crown.py:550-577
+  equalizes only SLOPING_RECT_ROLES and explicitly skips runway-owned
+  keys (line 559) — a single runway ring is untouched.
+- **Decimation is safe for the ring**: emit_decimate._ring_keep_set
+  drops only 3D-collinear vertices (z_tol 0.02 m airside) with
+  cross-shape consensus — profile nodes (varying Z) always survive;
+  flat-run station nodes shared with a junction are vetoed by the
+  junction's ring; seam vertices are force-kept.  Unshared flat-run
+  stations MAY be decimated — acceptable (fewer triangles), same as
+  MULTI_FLAT today.
+
+## Consumer → assumption → single-ring change
+| Consumer (file:line) | Assumes about sub-rects | Single-ring change |
+|---|---|---|
+| chain→BuiltShape convert (elevation.py:564-718) | one shape per chain entry; [H,L,L,H] per-vertex or flat `altitude` | REPLACE under gate: one ring per ref from profile_state (stations × 2 edges + blast-pad ends), node_altitudes per vertex |
+| apron-merged drop (elevation.py:738-827) | drops whole SEGMENTS ≥ frac inside big apron | subtract qualifying apron∩ring regions from the ring; keep pieces ≥5 m² (part-28 keep-all-pieces) |
+| _resolve_runway_crossings (pavement/runways.py:281) | overlapping SUB-RECTS union → ROLE_RUNWAY_CROSSING, members dropped | Slice 5: carve crossing poly from each ring + weld node loop.  Slice 2 interim: refs with ring-ring overlap fall back to legacy segmented path |
+| _insert_runway_chain_bridges (runways.py:710) | gaps in per-ref chain | dead code path (if False since 2026-04-30); no-op |
+| widen_junctions_to_runway_corners + snap passes (pipeline.py:3856+) | junction snap targets = sub-rect corners at pav_int stations | ring keeps vertices at the SAME stations — snap targets preserved |
+| split_pavement_at_seams (seam_anchors.py:246) | runways NOT in _TAXI_RECT_ROLES; seam-crossing runway → node_altitudes + inserted seam vertices | already generic per-vertex; single ring inherits unchanged |
+| apply_seam_dem_anchors (seam_anchors.py:659) | per-piece seam vertices DEM-pinned (smoothed DEM), runway_clamp_floor | unchanged — operates on seam-vertex buckets, not pieces |
+| redistribute_runway_profile (runway_redistribute.py:442) | groups shapes by ref; stamps EVERY piece via axis projection (_apply_profile_to_shapes:636) | unchanged — loop stamps 1 ring instead of N pieces |
+| _interp_profile / flex_slack_at / apply_runway_flex (runway_redistribute.py:100/691/729) | profile dict per ref; crossing-reconciled verts folded as anchors by scanning shapes of ref | unchanged — topology-independent.  Crossing-recon fold now scans one ring (Slice 5 must keep reconciled verts frozen) |
+| _apply_runway_flex_hook (route_profile/solve.py) | re-stamps pieces via _apply_profile_to_shapes; _reseed_runway_values from shapes | unchanged; blanket-except gotcha stands (grep "flex pass failed") |
+| _sample_runway_segment_elev (pavement/runways.py:95) | node_altitudes path = diameter-axis projected interpolation | unchanged — arbitrary polygons; MORE vertices = better interpolation |
+| runway_join_contact + _runway_anchors (grade_law.py:70, grade_graph.py:1679) | contact at runway EDGE crossing; samples via _sample_runway_segment_elev | unchanged — ring boundary is the same edge geometry |
+| enforce_conformance (conformance.py:232; pipeline 5534 + 5784 final weld) | inserts on-edge foreign vertices, interpolated altitude | unchanged — welds junction verts into the ring's long edge |
+| tile_cut (tile_cut.py:94; runways NOT in _SLOPING_RECT_ROLES) | generic difference + _pin_runway_piece_to_profile (1126) per cut piece | unchanged — seam-split ring pieces pinned to the same per-ref profile |
+| skirts/RESA (clearance.py:2062; _nearest_pav_alt:996; _edge_interp_alt:954) | containment-free nearest-edge interpolation on end pieces | unchanged — ring end edges present identical values |
+| crown field (crown.py:258 runway branch 419-438; dome 428-433; seam taper 434-437) | per-ref uniform drop on ROLE_RUNWAY ring keys; dome at crossings | unchanged — keys are canonical nodes, not pieces |
+| insert_runway_crossedge_crown_nodes (crown.py:766; pipeline:5805) | interior cross-edge = edge shared by exactly 2 sub-rects | targets vanish → structural no-op under gate; DELETE with its exports when de-seg is default (crown_centerline sidecar, check_grade._crown_centerline_nids, verification threading) |
+| emit_crown_spines (crown.py:981 runway loop 1102-1172) | clips ref axis against union of pieces + crossings | unchanged — union of 1 ring ∪ crossings |
+| normalize_runway_altitudes (emit_decimate.py:46) | invariant ALARM for hi/lo stragglers | unchanged — ring is per-vertex from birth (alarm stays silent) |
+| decimate_emit_nodes (emit_decimate.py:314) | 3D-collinear + consensus + seam force-keep | unchanged (see corrections above) |
+| check_runway_profile (verification.py:378, _runway_rect_cross_ends) | clusters corners at the 2 extreme stations PER PIECE (part-30i axis rewrite) | works per piece today; on one ring the extreme-station clustering sees only the 2 runway ENDS → interior profile unchecked.  Slice 6: cluster ring vertices per STATION along the axis instead |
+| check_grade runway paths (within all-pair, crown offsets, centerline exemption) | per-piece within-shape pairs | single ring = O(n²) pairs over ~2× stations — measure; SPLP 16 gate must hold.  Crown-centerline exemption becomes unreachable under gate |
+| compare-target fixtures (test_compare_target.py floors) | runway way counts (SPJC 33, SPLP 8/7 baselines) | counts DROP by construction — deliberate re-cut with Noah sign-off ONLY |
+| wedge_audit / check_epsilon_wedges | junction-family wedges at segment seams (KJQF 5, KCLT 12) | success metric: must not grow; segment-seam wedges should drop |
