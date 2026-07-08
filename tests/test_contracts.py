@@ -373,10 +373,9 @@ def test_unimplemented_stubs_raise_not_implemented():
     # per this test's docstring; tests/test_obj8_reader.py,
     # tests/test_obj8_partition.py and tests/test_mesh_sampler.py have
     # taken over.
-    with pytest.raises(NotImplementedError):
-        object_anchor.discover_object_pools([], {}, {}, epsilon_metres=0.25)
-    # object_rebake landed in workstream W5 and object_footprints in
-    # workstream W6; tests/test_object_rebake.py and
+    # object_anchor landed in workstream W4, object_rebake in workstream
+    # W5, and object_footprints in workstream W6;
+    # tests/test_object_anchor.py, tests/test_object_rebake.py and
     # tests/test_dsf_object_buildings.py have taken over.
     with pytest.raises(NotImplementedError):
         post_mesh.rebake_dsf_objects(None)
