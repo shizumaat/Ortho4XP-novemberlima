@@ -147,6 +147,34 @@ dev-side agents own them tonight).
 5. Crossings as welded node-loops in the ring.
 6. Validators + fixture re-cut (SIGN-OFF) + full-airport A/Bs.
 
+# SLICE STATUS (runway-deseg branch, 2026-07-07/08)
+- Slice 1 (inventory): DONE (cd5d3e4) — table below.
+- Slice 2 (emitter): DONE (4d41a40 + 00e68b3).  Gate default OFF;
+  fast_suite gate-off = the 8 pre-existing failures exactly.  Gate-on:
+  SPJC 35→2 runway ways, HECA 56→3 (one ring per ref, per-node
+  alt_abs).  Ring builder lives in elevation._build_single_poly_
+  runway_ring (from profile_state); refs with ring-ring overlap
+  (crossings) fall back to the legacy segmented path until Slice 5.
+  stitch_pavement_to_flat_runways learned per-vertex FLAT RUNS;
+  stitch_pavement_polygons hosts the ring as a per-vertex peer;
+  _build_runway_corner_altitudes reads ring corners (all gated on
+  from_single_poly).
+- GATE-ON RESIDUALS (the slice 3-4 worklist):
+  * HECA: +2 within pairs @3.57% — junction vert 2.51 m off the 05R
+    ring edge (just outside crown _RWY_SHADOW_M 2.5) welds 9 cm off
+    the ring edge value; gate-off both nodes solve identical.  The
+    join-anchor/shadow value-tie class (Slice 4).  Break 5891→6176.
+  * SPJC: +1 junction plane pair (2.30%) + one 16 mm runway~junction
+    wedge at sloped frontage — junction frontage vert 1.0 m from a
+    ring corner (inside stitch snap_corner_m guard) never welds;
+    legacy welded via canonical merges of per-station piece corners.
+  * HECA wedges 5→4 (runway wedge classes eliminated) — first
+    de-seg success metric confirmed.
+- WORKING-TREE HAZARD: the parallel dev session commits in THIS
+  checkout — 4d41a40 accidentally carries its clearance part-30k fix
+  (same content as dev 3d830ec; merge should auto-resolve), and its
+  19feaec landed on runway-deseg.  Stage files EXPLICITLY, never -A.
+
 # PHASE 1 — CONSUMER INVENTORY (2026-07-07, runway-deseg session)
 
 ## Corrections to the phase text above (measured against HEAD)
