@@ -331,6 +331,18 @@ class BuiltShape:
     # solver cap resolvers and emitted as ``o4_grade_law='apron'`` for
     # the validator (both readers stay lockstep).
     adopts_apron_grade: bool = False
+    # USER RULING 2026-07-07 (durable, STATUS part 29 item 4): the PORTION
+    # of a service road INSIDE or SHARING A LONG EDGE with a TAXIWAY
+    # follows the more limiting (taxiway) grade law — 1.5 % instead of the
+    # road's 5 %.  Mirrors ``adopts_apron_grade`` exactly (portion-based,
+    # split at the taxiway-adjacency band).  ``adopted_taxi_letter`` carries
+    # the adjacent taxiway's ICAO code letter so the solver + validator can
+    # apply the letter-aware cap (``taxi_grade_cap_for_letter``); None → the
+    # uniform 1.5 % ``TAXI_MAX_GRADE``.  APRON (1 %) is more limiting than
+    # taxi (1.5 %), so a road already adopting apron is left alone — this
+    # flag is set only on portions NOT already apron-adopted.
+    adopts_taxi_grade: bool = False
+    adopted_taxi_letter: str | None = None
 
 
 
@@ -888,6 +900,17 @@ class PavementLayout:
             # validator applies the same cap the solver used.
             if getattr(s, "adopts_apron_grade", False):
                 tags["o4_grade_law"] = "apron"
+            # TAXIWAY-EDGE GRADE ADOPTION (USER RULING 2026-07-07): a
+            # service-road portion inside or alongside a taxiway follows
+            # the taxiway (1.5 %, letter-aware) grade law.  Stamp the law
+            # override + the adjacent taxiway's code letter so the
+            # validator applies the same cap the solver used.  Apron (1 %)
+            # is more limiting, so it wins if both flags were set.
+            elif getattr(s, "adopts_taxi_grade", False):
+                tags["o4_grade_law"] = "taxi"
+                _adopted_let = getattr(s, "adopted_taxi_letter", None)
+                if _adopted_let:
+                    tags["code_letter"] = str(_adopted_let)
             # Size-dependent taxiway grade cap (gate TAXI_GRADE_BY_WIDTH):
             # stamp the ICAO code letter so the grade validator can apply
             # the same width-dependent cap the solver used (A/B → 3 %,

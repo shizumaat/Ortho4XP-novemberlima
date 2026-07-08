@@ -3090,7 +3090,11 @@ def _drop_overlap_against_fixed_shapes(
                 from_route_proximity_cut=getattr(
                     source_shape, "from_route_proximity_cut", False),
                 adopts_apron_grade=getattr(
-                    source_shape, "adopts_apron_grade", False)))
+                    source_shape, "adopts_apron_grade", False),
+                adopts_taxi_grade=getattr(
+                    source_shape, "adopts_taxi_grade", False),
+                adopted_taxi_letter=getattr(
+                    source_shape, "adopted_taxi_letter", None)))
 
     n_dropped = 0
     n_clipped = 0

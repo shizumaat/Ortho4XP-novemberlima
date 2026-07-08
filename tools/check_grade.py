@@ -641,6 +641,13 @@ def _role_grade_limit(way: "Way",
     # on exactly those pieces; validate them at that role's cap so both
     # readers apply the same law.
     _law_override = way.tags.get("o4_grade_law")
+    # TAXIWAY-EDGE ADOPTION (USER RULING 2026-07-07): a service-road
+    # portion inside/alongside a taxiway follows the taxiway grade law
+    # (1.5 %, letter-aware).  The build stamps ``o4_grade_law='taxi'`` +
+    # ``code_letter``; validate at the same letter-aware cap the solver
+    # used so both readers apply the same law.
+    if _law_override == "taxi":
+        return taxi_grade_cap_for_letter(way.tags.get("code_letter"))
     if _law_override and _law_override in ROLE_GRADE_LIMITS:
         return ROLE_GRADE_LIMITS[_law_override]
     # Size-dependent taxiway cap (gate TAXI_GRADE_BY_WIDTH): a sized
@@ -1028,7 +1035,12 @@ def iter_shape_grade_constraints(
             gs = _GG.GradeShape(
                 role=role0, ring=ring, keys=list(pnids),
                 adopts_apron_grade=(
-                    w.tags.get("o4_grade_law") == "apron"))
+                    w.tags.get("o4_grade_law") == "apron"),
+                adopts_taxi_grade=(
+                    w.tags.get("o4_grade_law") == "taxi"),
+                adopted_taxi_letter=(
+                    w.tags.get("code_letter")
+                    if w.tags.get("o4_grade_law") == "taxi" else None))
             sc = _GG.shape_constraints(gs, _law_ctx)
             idx = {pnids[k]: k for k in range(n)}
             for (ka, kb, cap) in sc.edges:

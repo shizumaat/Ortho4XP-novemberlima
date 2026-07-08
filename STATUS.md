@@ -1,3 +1,82 @@
+# STATUS — SESSION 20260707 (part 30d): TAXIWAY-EDGE grade adoption for
+# service roads (USER RULING part-29 item 4) — mirrors the apron-edge rule
+
+## LANDED (part 30d) — taxiway-edge service-road grade adoption
+USER RULING (2026-07-07, durable law, STATUS part 29 item 4): like the
+existing APRON-edge adoption, the PORTION of a service road that is
+INSIDE or SHARES A LONG EDGE with a TAXIWAY follows the more limiting
+(taxiway) grade law — 1.5 % (letter-aware) instead of the road's 5 %.
+Only isolated narrow-road stretches (nothing along their long edge) keep
+the full road cap.  PORTION-based: split at the band boundary, exactly
+like the apron-edge rule.
+
+MECHANISM (extended the part-28 apron-edge adoption end-to-end; same shape):
+1. **Pipeline pass** (``pipeline.py``, immediately AFTER the apron-edge
+   pass): taxiway band = union of the taxi family (``ROLE_JUNCTION`` +
+   the 4 taxi-rect roles: primary/secondary_parallel, stub,
+   cross_connector) buffered ``SERVICE_ROAD_WIDTH_M + 2 m`` (join_style=2)
+   — the SAME band construction the apron rule uses.  Eligible
+   ``service_road``/``service_junction`` shapes that SHARE ≥1 m of the
+   taxi boundary OR OVERLAP taxi pavement (inside) are split at the band:
+   inside pieces set ``adopts_taxi_grade=True`` + ``adopted_taxi_letter``
+   (the nearest taxi shape's ICAO code letter); outside pieces keep the
+   service law.  Wholly-inside/alongside → adopts whole.  APRON (1 %) is
+   MORE limiting than taxi (1.5 %), so the pass runs after the apron pass
+   and SKIPS any piece already ``adopts_apron_grade`` (apron wins).
+2. **Flag** (``layout.py`` ``BuiltShape``): new ``adopts_taxi_grade`` +
+   ``adopted_taxi_letter`` (parallel to ``adopts_apron_grade``; existing
+   apron flag + all its consumers untouched → backward compatible).
+3. **Solver caps**: ``_shape_grade`` (solver_primitives), ``_body_cap``
+   (grade_graph), the sloping-rect cap path, and the GradeShape
+   propagation all resolve ``adopts_taxi_grade`` →
+   ``taxi_grade_cap_for_letter(adopted_taxi_letter)`` (None → 1.5 %
+   ``TAXI_MAX_GRADE``).  Apron branch checked first so apron wins.
+4. **Emission tag** (``layout.to_osm``): ``o4_grade_law='taxi'`` (+
+   ``code_letter`` for the letter-aware cap) on adopted pieces.
+5. **Validator** (``tools/check_grade.py``): ``o4_grade_law='taxi'`` →
+   ``taxi_grade_cap_for_letter(code_letter)`` in ``get_grade_limit``, and
+   the OSM GradeShape reader propagates the flag + letter so solver and
+   validator read the SAME cap.
+6. **Fragment plumbing**: ``elevation.py`` extra-fragment rebuild carries
+   the new fields (mirrors the apron flag).
+
+## VERIFIED (gates, part 30d)
+* PROBE (CYXY + HECA, smoothed-DEM cached build = the test frame):
+  - CYXY: 1 adopted whole + 1 split; the 1 surviving adopted piece
+    (service_junction) emits ``o4_grade_law='taxi'`` and SOLVES at
+    1.46 % (≤ 1.5 %).  Its 15 ISOLATED sibling road pieces still grade up
+    to the full 5.00 % cap (portion split works).
+  - HECA: 5 adopted whole + 10 split; 6 surviving adopted pieces (4
+    service_junction + 2 service_road) all emit ``o4_grade_law='taxi'``
+    and SOLVE at 1.43 / 1.37 / 1.27 / 1.00 / 0.90 / 0.68 % (all ≤ 1.5 %).
+    40 isolated road pieces still grade to 5 %+ (max 13.6 % over steep
+    terrain — correctly UNcapped, no long taxi edge).
+* NON-REGRESSION (baseline 1ed5cc6 vs this change, same measurement):
+  within CYXY 1→1, HECA 0→0, SPLP 16→16; cross/steps IDENTICAL
+  (HECA cross 10, vertex-to-edge 3 + mid-edge 14).  Break-region
+  growth tiny: CYXY 772→779 (+0.9 %), HECA 11067→11084 (+0.15 %) — both
+  well under the +2 % watch threshold; NO new within violations on any
+  adopted road.  No infeasible pocket surfaced (adopted pieces sit inside
+  the already-flattened taxi solve; the apron rule's mouth/band
+  exemptions were NOT needed).
+* fast_suite: EXACTLY the 8 pre-existing failures, zero new.
+* FULL suite: EXACTLY the 13 pre-existing failures
+  (splp compare ×2, pavement_grade SPLP, runway_longitudinal SPLP,
+  compare_spjc, no_self_overlap SPJC, pavement_grade SPJC,
+  cyxy_taxi_e_south_apron, route_band_zero SPJC, pavement_grade CYXY,
+  cyxy_route_reach, solver_validator_same_edge_budgets,
+  pavement_grade HECA), zero new.
+
+## OPEN (part 30d follow-ups)
+* A standalone taxi-adopted ``service_road`` piece (not in PAVEMENT_ROLES
+  nor SOFT_VISIBILITY_ROLES) has no direct solver within-shape
+  constraint — like the apron rule, its 1.5 % is enforced at the
+  VALIDATOR (``o4_grade_law='taxi'``) and inherited from the flattened
+  taxi solve its vertices sit in.  Held at HECA (0.68-0.90 %); if a future
+  airport puts an adopted road over steep terrain WITHOUT a co-solved
+  taxi host it could read over-cap — same latent property the apron rule
+  carries.  Would need service_road in PAVEMENT_ROLES to solve-enforce.
+
 # STATUS — SESSION 20260707 (part 30c): CROWN runway-only scoping +
 # runway-crossing drainage-dome blend + continuous crossing ridge
 # (in-sim crown eval iteration; builds on part 30/30b crown v2)

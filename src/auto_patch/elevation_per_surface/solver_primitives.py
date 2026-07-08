@@ -204,6 +204,13 @@ def _shape_grade(layout, s) -> float:
     if getattr(s, "adopts_apron_grade", False):
         from auto_patch.config import APRON_MAX_GRADE
         return float(APRON_MAX_GRADE)
+    # TAXIWAY-EDGE ADOPTION (USER RULING 2026-07-07): a service-road
+    # portion inside/alongside a taxiway follows the taxiway cap (1.5 %,
+    # letter-aware via the adjacent taxiway's code letter).
+    if getattr(s, "adopts_taxi_grade", False):
+        from auto_patch.config import taxi_grade_cap_for_letter
+        return float(taxi_grade_cap_for_letter(
+            getattr(s, "adopted_taxi_letter", None)))
     letter = taxi_shape_code_letter(layout, s)
     if letter is not None:
         return float(taxi_grade_cap_for_letter(letter))

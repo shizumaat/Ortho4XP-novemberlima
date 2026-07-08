@@ -169,11 +169,21 @@ class GradeShape:
     service junction sharing an edge with an apron follows the APRON
     grading rules.  Layout reader: from ``BuiltShape.adopts_apron_grade``;
     OSM reader: from the ``o4_grade_law='apron'`` way tag.
+
+    ``adopts_taxi_grade`` / ``adopted_taxi_letter``  USER RULING 2026-07-07
+    (STATUS part 29 item 4): a service-road portion inside/alongside a
+    TAXIWAY follows the taxiway grade law (1.5 %, letter-aware via the
+    adjacent taxiway's code letter).  Layout reader: from
+    ``BuiltShape.adopts_taxi_grade`` / ``.adopted_taxi_letter``; OSM reader:
+    from the ``o4_grade_law='taxi'`` way tag (+ ``code_letter``).  Apron
+    (1 %) is more limiting than taxi (1.5 %); when both are set apron wins.
     """
     role: str
     ring: list[tuple[float, float]]
     keys: list[Hashable]
     adopts_apron_grade: bool = False
+    adopts_taxi_grade: bool = False
+    adopted_taxi_letter: str | None = None
 
 
 @dataclass
@@ -721,6 +731,12 @@ def _body_cap(shape: GradeShape, ctx: GradeContext, membership: dict) -> float:
     # with an apron follows the apron grading rules.
     if shape.adopts_apron_grade:
         return APRON_MAX_GRADE
+    # USER RULING 2026-07-07: a service road / junction inside or alongside
+    # a taxiway follows the taxiway cap (1.5 %, letter-aware).  Apron (1 %)
+    # is more limiting, so the apron branch above wins if both are set.
+    if getattr(shape, "adopts_taxi_grade", False):
+        return float(taxi_grade_cap_for_letter(
+            getattr(shape, "adopted_taxi_letter", None)))
     if shape.role == "service_junction":
         return SERVICE_ROAD_MAX_GRADE
     # junction: taxiway cap of its spine, else inherited from the nearest
@@ -1385,7 +1401,11 @@ def build_unified_graph(layout, bucket_to_idx, ctx=None, *,
             continue    # scoped projection: pairs live in the caller's lazy entry
         gs = GradeShape(role=s.role, ring=list(ring), keys=keys,
                         adopts_apron_grade=getattr(
-                            s, "adopts_apron_grade", False))
+                            s, "adopts_apron_grade", False),
+                        adopts_taxi_grade=getattr(
+                            s, "adopts_taxi_grade", False),
+                        adopted_taxi_letter=getattr(
+                            s, "adopted_taxi_letter", None))
         sc = shape_constraints_cached(id(s.polygon), gs, ctx)
         spine_pairs = set()
         for chain in sc.spine_chains:
@@ -1409,6 +1429,9 @@ def build_unified_graph(layout, bucket_to_idx, ctx=None, *,
             continue
         if getattr(s, "adopts_apron_grade", False):
             cap = float(APRON_MAX_GRADE)   # user 2026-07-06 apron-edge rule
+        elif getattr(s, "adopts_taxi_grade", False):
+            cap = float(taxi_grade_cap_for_letter(   # user 2026-07-07
+                getattr(s, "adopted_taxi_letter", None)))
         else:
             cap = float(taxi_grade_cap_for_letter(
                 taxi_shape_code_letter(layout, s)))

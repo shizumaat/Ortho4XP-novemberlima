@@ -4749,6 +4749,133 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 f"{_n_adopt_whole} service shape(s) adopted whole, "
                 f"{_n_adopt_split} split at the apron band (user rule).")
 
+        # TAXIWAY-EDGE GRADE ADOPTION (USER RULING 2026-07-07, durable —
+        # STATUS part 29 item 4): like the apron-edge rule, the PORTION of
+        # a service road that is INSIDE, or SHARES A LONG EDGE with, a
+        # TAXIWAY follows the more limiting (taxiway) grade law — 1.5 %
+        # (letter-aware) instead of the road's 5 %.  Only isolated narrow-
+        # road stretches (nothing along their long edge) keep the full road
+        # cap.  PORTION-based, split at the band exactly like the apron
+        # rule.  The taxiway band = union of the taxi family (ROLE_JUNCTION
+        # corridors + taxi rect roles) buffered one road width + 2 m; a road
+        # running alongside adopts across its width; a road leaving exits the
+        # band within ~a road width of the mouth.  APRON (1 %) is MORE
+        # limiting than taxi (1.5 %), so a piece already adopting apron is
+        # left untouched — this pass runs AFTER the apron pass and skips
+        # apron-adopted shapes.
+        from .layout import (taxi_shape_code_letter as _TAXI_LETTER,
+                             ROLE_JUNCTION as _RJ_TX,
+                             ROLE_PRIMARY_PARALLEL as _RPP_TX,
+                             ROLE_SECONDARY_PARALLEL as _RSP_TX,
+                             ROLE_STUB as _RSTUB_TX,
+                             ROLE_CROSS_CONNECTOR as _RCC_TX)
+        _TAXI_FAMILY_TX = frozenset({
+            _RJ_TX, _RPP_TX, _RSP_TX, _RSTUB_TX, _RCC_TX})
+        _TAXI_EDGE_BAND_M = float(_SVC_W_ADOPT) + 2.0
+        _taxi_shapes_tx = [
+            _s for _s in layout.shapes
+            if _s.role in _TAXI_FAMILY_TX and _s.polygon is not None
+            and not _s.polygon.is_empty
+            and _s.polygon.geom_type == "Polygon"]
+        _taxi_polys_tx = [_s.polygon for _s in _taxi_shapes_tx]
+        _taxi_band = None
+        if _taxi_polys_tx:
+            try:
+                _taxi_union_tx = unary_union(_taxi_polys_tx)
+                _taxi_band = _taxi_union_tx.buffer(
+                    _TAXI_EDGE_BAND_M, join_style=2)
+            except _GEOM_EXC:
+                _taxi_band = None
+
+        def _adjacent_taxi_letter(_road_poly):
+            """ICAO code letter of the taxi shape this road hugs (nearest
+            by boundary distance); None when unavailable → uniform 1.5 %."""
+            _best_d, _best_let = float("inf"), None
+            for _ts in _taxi_shapes_tx:
+                try:
+                    _d = _road_poly.distance(_ts.polygon)
+                except _GEOM_EXC:
+                    continue
+                if _d < _best_d:
+                    _best_d = _d
+                    _best_let = _TAXI_LETTER(layout, _ts)
+            return _best_let
+
+        _n_taxi_whole = _n_taxi_split = 0
+        if _taxi_band is not None and not _taxi_band.is_empty:
+            _taxi_boundary = unary_union(
+                [_p.exterior for _p in _taxi_polys_tx])
+            _taxi_adopt_shapes: list = []
+            for _s in layout.shapes:
+                if (_s.role not in (_RSR_ADOPT, _RSJ_ADOPT)
+                        or _s.polygon is None or _s.polygon.is_empty
+                        or _s.polygon.geom_type != "Polygon"
+                        # apron (1 %) already claimed this piece → keep it
+                        or getattr(_s, "adopts_apron_grade", False)):
+                    _taxi_adopt_shapes.append(_s)
+                    continue
+                try:
+                    _shares_edge = (
+                        _s.polygon.exterior.distance(_taxi_boundary)
+                        < 0.05
+                        and _s.polygon.exterior.buffer(0.05)
+                        .intersection(_taxi_boundary).length >= 1.0)
+                except _GEOM_EXC:
+                    _shares_edge = False
+                # INSIDE a taxiway (road overlapping taxi pavement) adopts
+                # whole even if it shares no boundary edge.
+                try:
+                    _inside_taxi = (
+                        _s.polygon.intersection(_taxi_union_tx).area > 1.0)
+                except _GEOM_EXC:
+                    _inside_taxi = False
+                if not _shares_edge and not _inside_taxi:
+                    _taxi_adopt_shapes.append(_s)
+                    continue
+                _let = _adjacent_taxi_letter(_s.polygon)
+                try:
+                    _outside = _s.polygon.difference(_taxi_band)
+                except _GEOM_EXC:
+                    _taxi_adopt_shapes.append(_s)
+                    continue
+                _outside_polys = [g for g in getattr(
+                    _outside, "geoms", [_outside])
+                    if g.geom_type == "Polygon" and g.area > 1.0]
+                if not _outside_polys:
+                    # wholly inside/alongside the taxiway → adopts whole
+                    _s.adopts_taxi_grade = True
+                    _s.adopted_taxi_letter = _let
+                    _taxi_adopt_shapes.append(_s)
+                    _n_taxi_whole += 1
+                    continue
+                try:
+                    _inside = _s.polygon.intersection(_taxi_band)
+                except _GEOM_EXC:
+                    _taxi_adopt_shapes.append(_s)
+                    continue
+                _inside_polys = [g for g in getattr(
+                    _inside, "geoms", [_inside])
+                    if g.geom_type == "Polygon" and g.area > 1.0]
+                if not _inside_polys:
+                    _taxi_adopt_shapes.append(_s)
+                    continue
+                for _g in _inside_polys:
+                    _taxi_adopt_shapes.append(_BS_ADOPT(
+                        polygon=_g, role=_s.role, ref=_s.ref,
+                        adopts_taxi_grade=True, adopted_taxi_letter=_let,
+                        from_route_proximity_cut=True))
+                for _g in _outside_polys:
+                    _taxi_adopt_shapes.append(_BS_ADOPT(
+                        polygon=_g, role=_s.role, ref=_s.ref,
+                        from_route_proximity_cut=True))
+                _n_taxi_split += 1
+            layout.shapes = _taxi_adopt_shapes
+        if _n_taxi_whole or _n_taxi_split:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: taxiway-edge grade adoption — "
+                f"{_n_taxi_whole} service shape(s) adopted whole, "
+                f"{_n_taxi_split} split at the taxi band (user rule).")
+
         # (refactor Phase 5) The boundary ribbon + boundary→DEM bridge emit
         # and their airside vertex touches (_snap_bridge_vertices_to_runway_
         # corners, _insert_bridge_contacts_into_junctions) CANNOT move
