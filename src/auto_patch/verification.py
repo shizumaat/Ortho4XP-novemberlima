@@ -1496,6 +1496,105 @@ def taxi_routes_ll(layout):
     return out
 
 
+def check_epsilon_wedges(layout,
+                         angle_deg_max: float = 0.5,
+                         div_max_m: float = 0.20,
+                         div_min_m: float = 1e-9,
+                         bucket_m: float = 0.5):
+    """Detect EPSILON WEDGES: two constrained edges that share a node, run
+    near-parallel (angle < ``angle_deg_max``), and whose shorter edge's far
+    endpoint sits ``div_min_m < d < div_max_m`` off the longer edge.
+
+    Such a sliver is the KJQF/​part-30j regression class: where one shape
+    RE-DERIVES a neighbour's outline with a slightly different vertex set,
+    a foreign vertex lands ON the neighbour's edge WITHOUT a shared node.
+    Triangle4XP's Ruppert encroachment rule then ping-pongs edge splits on
+    the near-zero-area sliver down to machine epsilon, exploding the tile
+    (KJQF: the boundary↔groundside_pavement seam alone drove ~2.0M tris).
+    The FINAL epsilon-wedge weld in ``pipeline`` welds these; this check
+    is the always-on regression tripwire so a future emitter that mints a
+    fresh unwelded outline is flagged per-airport in the verify log.
+
+    Operates on the in-memory layout (shapes share vertices by canonical
+    coordinate, not an explicit node id, so vertices are grouped by a
+    ``bucket_m`` XY bucket — the same tolerance the OSM emitter welds at).
+    Returns a list of ``(angle_deg, div_m, role_a, role_b, loc)`` tuples,
+    mirroring ``tools/wedge_audit.py``.
+    """
+    import math
+    from collections import defaultdict
+    from shapely.geometry import LineString, Point
+
+    def _bucket(x, y):
+        return (int(round(x / bucket_m)), int(round(y / bucket_m)))
+
+    # incident[bucket] -> list of (far_xy, shape_idx, role)
+    incident = defaultdict(list)
+    for s_idx, s in enumerate(layout.shapes):
+        poly = getattr(s, "polygon", None)
+        if poly is None or poly.is_empty or poly.geom_type != "Polygon":
+            continue
+        try:
+            ring = list(poly.exterior.coords)
+        except Exception:
+            continue
+        if len(ring) > 1 and ring[0] == ring[-1]:
+            ring = ring[:-1]
+        if len(ring) < 3:
+            continue
+        role = s.role or "?"
+        n = len(ring)
+        for i in range(n):
+            a = ring[i]
+            for b in (ring[(i - 1) % n], ring[(i + 1) % n]):
+                if b == a:
+                    continue
+                incident[_bucket(*a)].append((b, s_idx, role, a))
+
+    cos_max = math.cos(math.radians(angle_deg_max))
+    out = []
+    seen = set()
+    for _, inc in incident.items():
+        if len(inc) < 2:
+            continue
+        for i in range(len(inc)):
+            for j in range(i + 1, len(inc)):
+                (b1, si1, r1, a1), (b2, si2, r2, a2) = inc[i], inc[j]
+                if si1 == si2:
+                    continue                    # same shape: kink, fine
+                x0, y0 = a1                     # shared node (bucketed equal)
+                v1 = (b1[0] - x0, b1[1] - y0)
+                v2 = (b2[0] - x0, b2[1] - y0)
+                n1 = math.hypot(*v1)
+                n2 = math.hypot(*v2)
+                if not n1 or not n2:
+                    continue
+                # same far endpoint (shared edge) → not a wedge
+                if abs(b1[0] - b2[0]) < bucket_m \
+                        and abs(b1[1] - b2[1]) < bucket_m:
+                    continue
+                cosv = (v1[0] * v2[0] + v1[1] * v2[1]) / (n1 * n2)
+                if cosv < cos_max:
+                    continue
+                if n1 < n2:
+                    e = LineString([(x0, y0), b2])
+                    d = e.distance(Point(b1))
+                else:
+                    e = LineString([(x0, y0), b1])
+                    d = e.distance(Point(b2))
+                if not (div_min_m < d < div_max_m):
+                    continue
+                ang = math.degrees(math.acos(min(1.0, cosv)))
+                key = (round(x0, 2), round(y0, 2),
+                       tuple(sorted((r1, r2))))
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append((ang, d, r1, r2, _ll(layout, x0, y0)))
+    out.sort(key=lambda t: t[1])
+    return out
+
+
 def run_grade_checks(layout):
     """Run the grade engine on ``layout``.  Returns ``(within, cross,
     steps)`` with ``.lat`` / ``.lon`` + way labels populated."""
@@ -1528,7 +1627,8 @@ def run_grade_checks(layout):
 
 def _verify_debug_lines(layout, icao, taxi_index, gdesc, *,
                         overlaps, source, flat, edge_v, flat_v, axis_v,
-                        short_e, cross, within, steps, rwy_grade) -> list:
+                        short_e, wedges, cross, within, steps,
+                        rwy_grade) -> list:
     """Build the full per-category diagnostic lines for the verify debug
     log (no 5-item cap — this is for an engineer, not the console)."""
     def ds(idx):
@@ -1550,6 +1650,9 @@ def _verify_debug_lines(layout, icao, taxi_index, gdesc, *,
         out.append(f"  AXIS-TILT @ {loc}: {ds(idx)} — {detail}")
     for idx, detail, loc in short_e:
         out.append(f"  SHORT-EDGE @ {loc}: {ds(idx)} — {detail}")
+    for ang, div, ra, rb, loc in sorted(wedges, key=lambda w: w[1]):
+        out.append(f"  EPSILON-WEDGE {div * 1000:.3f} mm @ {ang:.4f}° "
+                   f"@ {loc}: {ra} ~ {rb}")
     for v in sorted(cross, key=lambda v: -v.de_m):
         loc = f"{v.lat:.5f},{v.lon:.5f}" if v.lat is not None else "?,?"
         out.append(f"  CROSS-SHAPE {v.de_m:.2f} m @ {loc}: "
@@ -1625,6 +1728,11 @@ def verify_and_log(layout, icao: str, debug_log_path: str | None = None) -> dict
         short_e = check_rect_short_edges(layout)
     except Exception:                              # pragma: no cover
         pass
+    wedges = []
+    try:
+        wedges = check_epsilon_wedges(layout)
+    except Exception:                              # pragma: no cover
+        pass
     # The OSM-patch grade validation (write the patch to a temp OSM and re-check
     # it with tools/check_grade) is DEBUG-ONLY: once the solver is proven there is
     # no reason to re-validate the shipped patch on every build — the grade test
@@ -1654,6 +1762,7 @@ def verify_and_log(layout, icao: str, debug_log_path: str | None = None) -> dict
               "terminal_flat": len(flat), "vertex_on_edge": len(edge_v),
               "vertex_on_flat_edge": len(flat_v),
               "axis_tilt": len(axis_v), "short_edge": len(short_e),
+              "epsilon_wedge": len(wedges),
               "cross": len(cross), "within": len(within),
               "steps": len(steps), "runway_grade": len(rwy_grade)}
     if not sum(counts.values()):
@@ -1680,8 +1789,8 @@ def verify_and_log(layout, icao: str, debug_log_path: str | None = None) -> dict
     lines = _verify_debug_lines(
         layout, icao, taxi_index, _gdesc,
         overlaps=overlaps, source=source, flat=flat, edge_v=edge_v,
-        flat_v=flat_v, axis_v=axis_v, short_e=short_e, cross=cross,
-        within=within, steps=steps, rwy_grade=rwy_grade)
+        flat_v=flat_v, axis_v=axis_v, short_e=short_e, wedges=wedges,
+        cross=cross, within=within, steps=steps, rwy_grade=rwy_grade)
     _write_verify_debug(debug_log_path, icao, counts, lines)
 
     # User console: one summary line only (suppressed at build verbosity 0);

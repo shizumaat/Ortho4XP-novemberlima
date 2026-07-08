@@ -551,17 +551,46 @@ class PavementLayout:
                         for k, (x, y) in enumerate(coords)]
             else:
                 nids = [_intern(x, y) for (x, y) in coords]
-            # Dedup any duplicate nid (consecutive OR not).
+            # Dedup any duplicate nid (consecutive OR not) AND collapse a
+            # ZERO-LENGTH edge between two DISTINCT nids sharing the same
+            # canonical coordinate.  ``_intern`` allocates two different
+            # node ids at one canonical (x, y) when their altitudes differ
+            # by more than ``VERTEX_ALT_MERGE_TOL_M`` (a wall / cliff), but
+            # a WALL cannot have zero horizontal extent: two consecutive
+            # ring vertices at the same XY emit a 0.00 m segment (KJQF
+            # taxiway_clearance way -3870→-3871, Δalt 4.2 m at one point).
+            # Triangle4XP degenerates on a zero-length constrained edge, so
+            # drop the later of any two consecutive same-coordinate nids
+            # (the first-kept altitude wins — matching the ``_intern``
+            # first-match convention).
             seen: set = set()
             deduped_nids: list[int] = []
             deduped_elevs: list[float] = []
+            prev_ll = None
             for k, nid in enumerate(nids):
                 if nid in seen:
                     continue
+                ll = node_id_to_ll.get(nid)
+                if prev_ll is not None and ll is not None and ll == prev_ll:
+                    # Zero-length edge (same canonical XY, different nid):
+                    # collapse to the already-kept vertex.
+                    continue
                 seen.add(nid)
                 deduped_nids.append(nid)
+                prev_ll = ll
                 if elevs is not None and k < len(elevs):
                     deduped_elevs.append(elevs[k])
+            # Closing edge: if the last kept vertex sits at the first's
+            # canonical coordinate (a zero-length CLOSING segment — the
+            # wrap-around mirror of the guard above), drop it so the ring
+            # closes on a real edge.
+            while (len(deduped_nids) >= 4
+                   and node_id_to_ll.get(deduped_nids[-1]) is not None
+                   and node_id_to_ll.get(deduped_nids[-1])
+                   == node_id_to_ll.get(deduped_nids[0])):
+                deduped_nids.pop()
+                if deduped_elevs:
+                    deduped_elevs.pop()
             if len(deduped_nids) < 3:
                 return None, None
             deduped_nids.append(deduped_nids[0])
