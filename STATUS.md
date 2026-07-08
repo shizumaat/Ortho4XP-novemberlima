@@ -97,6 +97,108 @@ predates the crown scoping — a RE-BAKE clears the ridge.
 
 
 
+# STATUS — SESSION 20260707 (part 30g): KCLT junction mesh-density — the
+# fix does NOT live emit-side; the triangles are bound to the solved
+# constrained-edge geometry (measured, negative result)
+
+## VERDICT
+KCLT's junction triangle load resists every EMIT-SIDE reduction that
+respects the elevation / law / conformance invariants.  The target
+(full patch 144K → <80K, junction class ~125K → <60K, HECA held at 40K)
+is NOT reachable by ring decimation or parallel-sliver merge as scoped.
+The triangles are inextricably bound to the constrained-edge geometry
+that ENCODES the solved elevation field: you cannot remove the tris
+without removing constrained edges, and removing them either changes the
+surface (breaks elevation neutrality) or breaks the conformance invariant
+the pipeline maintains at a delicate equilibrium.  No behavior-changing
+code was committed — this entry is the durable finding.
+
+## MECHANISM (isolated-triangulation harness, /tmp/meshdiag, f9d5103)
+Baselines (frame-box + patch through Triangle4XP with the tile's CLI
+params, real +35-081 / +30+031 .alt):
+
+    KCLT full 144,264 · no-junction 19,522 · JUNCTION CLASS 124,742
+    HECA full  40,098 · no-junction 23,420 · JUNCTION CLASS  16,678
+
+KCLT junctions IN COMPLETE ISOLATION (frame + junction ways only) cost
+47,070 tris (639 ways); HECA 20,948 (400 ways).  So of the 125K
+"junction-class" cost, only ~47K is the junctions' own triangulation —
+the other ~78K is refinement junctions INDUCE in the neighbours they
+squeeze against (apron / *_clearance / crown_spine).  Proof: dropping any
+ONE neighbour class alone barely moves the count (all ≈140K), but
+dropping junction + all its neighbours → 12,228.  It is a COUPLED
+constrained-edge system; the interfaces are the cost.
+
+WHY KCLT ≫ HECA: fragmentation + packing, not node count.  KCLT has 639
+junction faces in 1.6M m² (median 586 m²); HECA 400 faces in 2.5M m²
+(median 496).  KCLT packs 60% MORE faces into 36% LESS area, so its
+shared-boundary edges are shorter and denser (1397 shared-edge pairs vs
+HECA 899).  Triangle4XP's -q10 (10° min-angle) quality mesh refines every
+thin region between densely-interleaved constrained edges into needle
+triangles.  Top hotspot: one 55 m cell holds 14,709 tris where junction
+faces -10339/-10340 (542×79 m and 305×79 m, 55-59 nodes) run 2.8 m apart
+with a 30 m² filler sliver (-10719) wedged between; a second cell holds
+9,521 where two junctions sit 2.3 m apart.
+
+DEFINITIVE lever check: dissolving the 639 junction faces into their 14
+connected-component UNIONS (removing internal shared boundaries) drops
+junction-only cost 47,070 → 6,912 (nodes 7,967 → 1,339).  The internal
+constrained edges ARE the driver.  But those edges carry the per-face
+solved profiles — dissolving merges floors (violates elevation
+neutrality) and, in the full patch, the dissolved rings pinch against the
+un-merged neighbours → 3.16M tris (degenerate).
+
+## LEVERS MEASURED (all fall short or are unsafe)
+- Decimation Z band 0.02→0.15 m (global): 143,924 → 126,804 (−17K).  Far
+  short of 80K, and 0.15 m reintroduces the V15 waviness the 0.02 m band
+  was tuned to suppress.  Junction-SCOPED would yield even less.
+- Densification OFF (O4_DENSIFY_JUNCTION_EDGES=0): 143,924 → 142,388
+  (−1.5K).  Densification is NOT the driver.  Short edges (<12 m) already
+  get zero densification (densify_junction_edges k=0).
+- Coarser spine step (O4_JCT_SPINE_STEP_M=24): 183,172 — WORSE.  Fewer
+  edge nodes = bigger gaps for the interior refinement to fill.
+- apt-zone density WEIGHT off (harness weight_on=False): 140,140 (−4K).
+  The ×4 apt weight is not the driver; the constrained geometry is.
+- Elongated-sliver removal (77 faces, area<300, aspect≥3): 143,924 →
+  128,962 (−15K) but DESTRUCTIVE (uncovers pavement) — not a real fix.
+- Sliver-merge with SPINE VETO OFF (O4_SLIVER_SPINE_VETO=0): build HUNG
+  (killed after 8 min; normal build 140 s).  The veto is load-bearing:
+  unvetoed unions produce degenerate geometry a downstream pass thrashes
+  on.  With the veto ON, KCLT merges 0 (all 179 candidates spine-vetoed —
+  their shared edge IS a slice-cut spine line whose nodes carry the solved
+  profile; the veto guards exactly the elevation fidelity this task must
+  not break).
+- Post-hoc edge surgery (snap 3226 gap vertices onto foreign edges;
+  buffer-union merge): both → 3.16M tris.  Any edge op done OUTSIDE the
+  pipeline's weld/conformance machinery mints self-intersections /
+  zero-area slivers that triangulate catastrophically.  Confirms the
+  geometry sits at a conformance equilibrium.
+
+## WHERE THE TRIANGLES RESIST (one line)
+The 47K junction-own + 78K induced load lives in the shared-boundary and
+near-parallel-gap edges between KCLT's densely-packed junction faces.
+Collapsing them needs a SOURCE-side change — the curve-native global
+slice emitting FEWER, LARGER junction faces (KCLT 639 vs HECA 400 for
+less area), with per-face profiles re-solved on the coarser partition —
+NOT an emit-side ring/geometry edit.  That is a solver/slice-partition
+change (out of this task's "don't touch solver / re-solve elevations"
+scope) and would flip compare-target floor counts.  Recommend routing the
+real fix through the slice partition (pavement/global_slice.py +
+junction classification), gated, with the compare-target fixtures re-cut
+deliberately — tracked as a follow-up, not an emit hotfix.
+
+## HARNESS (rebuilt/verified this session — the gate)
+/tmp/meshdiag/isolate.py (+ isolate_file.py, isolate_only.py,
+isolate_noweight.py) replicate include_patches() insertion + the O4 mesh
+CLI against the real tile .alt.  patch_stats.py / needle2.py /
+parallel.py / subseg.py / coplanar.py / hotspot.py characterise the
+junction class.  ISO_LAT/ISO_LON/ISO_ALT env select the tile.
+
+---
+
+# STATUS — SESSION 20260707 (part 30e): runway-end SKIRT lift-only fix +
+# boundary→DEM BRIDGE ↔ skirt/RESA reconciliation (KCLT 18R in-sim ramp)
+
 ## LANDED (part 30e) — skirt is FILL-only (never cuts), bridge matches skirt
 USER REPORT (in-sim, KCLT 18R): a ramp carved BELOW grade at a runway
 end.  Two causes, both fixed:
