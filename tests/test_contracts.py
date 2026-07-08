@@ -366,20 +366,11 @@ def test_post_mesh_signature():
 # ---------------------------------------------------------------------------
 # stubs stay stubs until their workstream lands
 # ---------------------------------------------------------------------------
-
-def test_unimplemented_stubs_raise_not_implemented():
-    """Each contract body raises ``NotImplementedError`` until its owning
-    workstream replaces it.  When a workstream lands, DELETE its entry
-    here (its real tests take over) — a lingering entry that suddenly
-    fails is a reminder, not a defect."""
-    # obj8_reader and obj8_partition landed in workstream W2;
-    # mesh_sampler landed in workstream W3.  Their entries are deleted
-    # per this test's docstring; tests/test_obj8_reader.py,
-    # tests/test_obj8_partition.py and tests/test_mesh_sampler.py have
-    # taken over.
-    # object_anchor landed in workstream W4, object_rebake in workstream
-    # W5, and object_footprints in workstream W6;
-    # tests/test_object_anchor.py, tests/test_object_rebake.py and
-    # tests/test_dsf_object_buildings.py have taken over.
-    with pytest.raises(NotImplementedError):
-        post_mesh.rebake_dsf_objects(None)
+#
+# Retired 2026-07-08: every workstream (W2-W7) has landed and each
+# module's real test file has taken over — tests/test_obj8_reader.py,
+# tests/test_obj8_partition.py, tests/test_mesh_sampler.py,
+# tests/test_object_anchor.py, tests/test_object_rebake.py,
+# tests/test_dsf_object_buildings.py, tests/test_post_mesh.py.  The
+# signature and data-shape assertions above remain the permanent
+# contract tripwire.

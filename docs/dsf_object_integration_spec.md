@@ -1205,3 +1205,19 @@ Three items workstream W5 escalated rather than resolving unilaterally, settled 
 3. **`check()` for a version-1 sidecar lacking the queried mesh's tile returns `"STALE"`**, not
    `"NONE"`: a bake exists but not against this mesh, and under ruling R2 the cheap re-bake is
    always the right response. Documented as the defined semantics.
+
+### A14 — Discovery reads the backup, and two W7 findings *(post-W7)*
+
+1. **Phase 2 discovery parses `<name>.anchor_bak` when it exists, falling back to the live file.**
+   The section-4-W7 pipeline as literally written (resolve → parse the live `.obj`) is **not
+   idempotent on a live-baked pack**: the second run reads already-offset geometry, sees base
+   ``y ≈ +delta``, and misclassifies every corrected structure as elevated. This is ruling R1
+   applied consistently — geometry is *always* read from the backup — and `object_rebake.apply`
+   and the audit oracle already behaved this way; vertex ordering is identical in both files so
+   deltas line up. Locked in by W7's full-path idempotency test.
+2. **Per-pool sampler construction re-reads the whole `Data<tile>.mesh`.** Harmless at KCLT's pool
+   count; at HECA/LEMD (dozens of pools) it may dominate Phase 2 runtime. W8 measures; the fix, if
+   needed, is a per-mesh-path read cache under the sampler without touching its contract.
+3. The sampler retains only triangles with **a vertex** inside the query bounds, so a coarse mesh
+   whose giant triangles merely overlap the window yields "no triangles inside bounds".
+   Irrelevant on dense airport meshes; `post_mesh` treats it as a per-pool skip-and-report.

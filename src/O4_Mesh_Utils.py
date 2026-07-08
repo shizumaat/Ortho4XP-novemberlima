@@ -540,6 +540,25 @@ def extract_mesh_to_obj(
 
 
 ################################################################################
+def _auto_patch_post_mesh_rebake(tile):
+    # auto_patch Phase 2: re-anchor DSF scenery objects against the mesh
+    # just written (docs/dsf_object_integration_spec.md, amendment A4 —
+    # the hook lives at the END of build_mesh / sort_mesh, not in their
+    # callers, so the GUI's per-step Mesh button and Shift-click sort are
+    # covered too).  Lazy import: the long-running GUI caches auto_patch
+    # modules, so source edits need an Ortho4XP restart.  No-op unless
+    # O4_DSF_OBJECT_REANCHOR=1.  Must NEVER fail the tile.
+    try:
+        from auto_patch import post_mesh as AUTO_PATCH_POST_MESH
+
+        AUTO_PATCH_POST_MESH.rebake_dsf_objects(tile)
+    except Exception as exception:
+        UI.vprint(
+            1, "auto_patch post-mesh object re-anchor failed:", exception
+        )
+
+
+################################################################################
 def build_mesh(tile):
     if UI.is_working:
         return 0
@@ -791,6 +810,8 @@ def build_mesh(tile):
         except:
             pass
 
+    _auto_patch_post_mesh_rebake(tile)
+
     UI.timings_and_bottom_line(timer)
     UI.logprint(
         "Step 2 for tile lat=", tile.lat, ", lon=", tile.lon, ": normal exit."
@@ -824,6 +845,7 @@ def sort_mesh(tile):
             break
         else:
             print(line.decode("utf-8")[:-1])
+    _auto_patch_post_mesh_rebake(tile)
     UI.timings_and_bottom_line(timer)
     UI.logprint(
         "Moulinette applied for tile lat=",

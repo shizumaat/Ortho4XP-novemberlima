@@ -1,7 +1,7 @@
 """Post-mesh stage: re-anchor DSF objects against the freshly built mesh.
 
 Contract frozen by workstream W1 (``docs/dsf_object_integration_spec.md``
-section 4-W7, as amended by A4/A5); implementation lands in workstream W7.
+section 4-W7, as amended by A4/A5); implemented in workstream W7.
 
 Phase 2 of the DSF object integration cannot run before the mesh exists —
 the y offsets encode one specific built ``Data<tile>.mesh``.  The hook is
@@ -20,29 +20,435 @@ rebuild-skip gate, carrying identification only::
 
     {"version": 1, "tile": "+35-081", "xplane_root": ...,
      "airports": [{"icao": ..., "dsf_path": ..., "dsf_mtime": ...,
-                   "pack_root": ...}]}
+                   "pack_root": ..., "xplane_root": ...}]}
 
 Discovery (placements, pools, partition) happens here, post-mesh — the
 geometry caches key on (path, mtime), so repeat builds are cheap and
-there is no stale-groups special case.
+there is no stale-groups special case.  A worklist ``dsf_mtime`` that
+disagrees with disk is merely noted: discovery is authoritative, the
+worklist is identification only (amendment A5), and the CURRENT DSF is
+what discovery reads regardless.
+
+Invariant I-4's enforcement point is HERE (amendment A13, item 2): a
+resource with more than one terrain-draped ``OBJECT`` placement is
+excluded from Phase 2 before any decision is built — a shared ``.obj``
+file cannot carry per-placement offsets.  (Phase 1 ACCEPTS the same
+resources: N placements are N buildings, invariant I-5.)
 
 Reporting follows ``verification.verify_and_log``: runtime validators are
 pure reporters; an exception here must NEVER fail the tile (the caller
-wraps this in try/except).  Console gets one summary line per airport;
-full detail goes to the per-tile debug log, plus the "restart X-Plane,
-objects are cached" reminder once per corrected pack.
+wraps this in try/except, and the function additionally contains every
+per-airport failure itself).  Console gets one summary line per airport;
+full detail goes to verbosity level 2, plus the "restart X-Plane
+(objects are cached)" reminder once per corrected pack.
 """
 
 from __future__ import annotations
+
+import json
+import math
+import os
+
+import O4_UI_Utils as UI
+
+from . import dsf_reader, obj8_reader, object_anchor, object_rebake
+from .mesh_sampler import MeshElevationSampler
+
+# One file per tile, next to the tile's auto-patches.  The driver writes
+# it (main process only); this module and tools/reanchor_dsf_objects.py
+# read it.
+OBJECT_ANCHOR_WORKLIST_FILENAME = "o4_object_anchor_worklist.json"
+OBJECT_ANCHOR_WORKLIST_VERSION = 1
+
+# The counts returned by rebake_dsf_objects, all starting at zero.
+_COUNT_KEYS = (
+    "airports_processed",
+    "packs_corrected",
+    "structures_baked",
+    "structures_needing_pad",
+    "vertices_offset",
+    "objects_skipped",
+    "airports_failed",
+)
+
+
+def object_anchor_worklist_path(tile) -> str:
+    """The tile's worklist sidecar path, derived the same way the driver
+    derives its auto-patch paths (``FNAMES.patch_dir``)."""
+    import O4_File_Names as FNAMES
+
+    return os.path.join(
+        FNAMES.patch_dir(
+            int(math.floor(tile.lat)), int(math.floor(tile.lon))
+        ),
+        OBJECT_ANCHOR_WORKLIST_FILENAME,
+    )
+
+
+def _pool_world_bounds(
+    pool: object_anchor.ObjectPool,
+    geometry_by_resource: dict,
+) -> tuple[float, float, float, float]:
+    """``(minimum_longitude, minimum_latitude, maximum_longitude,
+    maximum_latitude)`` covering every pool member's anchor expanded by
+    its solid reach.  Reach bounds every solid vertex by definition, so
+    the sampler (which adds its own ~200 m ``margin_degrees``) retains
+    every triangle a structure or anchor sample can touch."""
+    minimum_longitude = minimum_latitude = math.inf
+    maximum_longitude = maximum_latitude = -math.inf
+    for placement in pool.placements:
+        geometry = geometry_by_resource.get(placement.resource_path)
+        reach_metres = (
+            geometry.solid_reach_metres() if geometry is not None else 0.0
+        )
+        latitude_degrees = (
+            reach_metres / obj8_reader.METRES_PER_DEGREE_LATITUDE
+        )
+        metres_per_degree_longitude = (
+            obj8_reader.METRES_PER_DEGREE_LATITUDE
+            * math.cos(math.radians(placement.latitude))
+        )
+        longitude_degrees = (
+            reach_metres / metres_per_degree_longitude
+            if metres_per_degree_longitude > 0.0
+            else 0.0
+        )
+        minimum_longitude = min(
+            minimum_longitude, placement.longitude - longitude_degrees
+        )
+        maximum_longitude = max(
+            maximum_longitude, placement.longitude + longitude_degrees
+        )
+        minimum_latitude = min(
+            minimum_latitude, placement.latitude - latitude_degrees
+        )
+        maximum_latitude = max(
+            maximum_latitude, placement.latitude + latitude_degrees
+        )
+    return (
+        minimum_longitude,
+        minimum_latitude,
+        maximum_longitude,
+        maximum_latitude,
+    )
+
+
+def discover_and_rebake_airport(
+    dsf_path: str,
+    mesh_path: str,
+    pack_root: str | None,
+    xplane_root: str | None,
+    *,
+    epsilon_metres: float | None = None,
+    write_changes: bool = True,
+) -> dict:
+    """Run the full Phase 2 discovery pipeline for one airport's DSF.
+
+    Discovery: ``_load_dsf_text`` → ``read_dsf_object_placements``
+    (``.obj`` only) → resolve (pack-relative wins) → parse geometry
+    (memoized ``dsf_reader._load_object_geometry``) → reach floor
+    ``DSF_OBJECT_MIN_REACH_M`` → **exclude any resource with more than
+    one terrain-draped placement, skip-and-report (invariant I-4,
+    enforced here per amendment A13)** → ``discover_object_pools`` →
+    per pool: one :class:`MeshElevationSampler` bounded by the pool's
+    world extent plus margin → ``partition_structures`` →
+    ``structure_deltas`` → ``object_rebake.apply``.
+
+    Shared by :func:`rebake_dsf_objects` and the command line
+    (``tools/reanchor_dsf_objects.py`` mode 2) so the two can never
+    drift.  With ``write_changes=False`` nothing on disk is touched; the
+    decisions are returned for reporting (the command line's
+    ``--dry-run``).
+
+    Returns a dict with ``objects_written`` (resource paths),
+    ``vertices_offset``, ``structures_baked``, ``structures_needing_pad``,
+    ``skipped`` (``(resource_path_or_dsf, reason)`` tuples, discovery and
+    rebake levels merged), and ``decisions``
+    (``(ObjectPool, RebakeDecision)`` pairs, for detailed reporting).
+    Pure data out — printing is the caller's business.
+    """
+    from .config import DSF_OBJECT_CONTACT_EPSILON_M, DSF_OBJECT_MIN_REACH_M
+
+    if epsilon_metres is None:
+        epsilon_metres = DSF_OBJECT_CONTACT_EPSILON_M
+
+    result: dict = {
+        "objects_written": [],
+        "vertices_offset": 0,
+        "structures_baked": 0,
+        "structures_needing_pad": 0,
+        "skipped": [],
+        "decisions": [],
+    }
+
+    lines = dsf_reader._load_dsf_text(dsf_path)
+    if not lines:
+        result["skipped"].append(
+            (dsf_path, "DSF text unavailable (missing file or DSFTool)")
+        )
+        return result
+    placements = obj8_reader.read_dsf_object_placements(
+        lines,
+        accept_resource=lambda resource: resource.lower().endswith(".obj"),
+    )
+    if not placements:
+        return result
+    if pack_root is None:
+        pack_root = dsf_reader._pack_root_for_dsf(dsf_path)
+
+    placement_count_by_resource: dict[str, int] = {}
+    for placement in placements:
+        placement_count_by_resource[placement.resource_path] = (
+            placement_count_by_resource.get(placement.resource_path, 0) + 1
+        )
+
+    resolved_paths: dict[str, str] = {}
+    geometry_by_resource: dict = {}
+    for resource_path in sorted(
+        {placement.resource_path for placement in placements}
+    ):
+        physical_path = obj8_reader.resolve_object_resource(
+            resource_path, pack_root, xplane_root
+        )
+        if physical_path is None:
+            continue
+        # Ruling R1: geometry is ALWAYS read from the backup when one
+        # exists — on a re-run the live file already carries baked
+        # offsets, and parsing it would misclassify every corrected
+        # structure as elevated (its base y is no longer 0).  The
+        # rebake writer makes the same choice (``object_rebake.apply``
+        # reads ``<name>.anchor_bak``); vertex ordering is identical in
+        # both files, so the per-vertex deltas line up.
+        backup_path = physical_path + object_rebake.BACKUP_SUFFIX
+        geometry_source_path = (
+            backup_path if os.path.isfile(backup_path) else physical_path
+        )
+        geometry = dsf_reader._load_object_geometry(geometry_source_path)
+        if geometry is None or not geometry.has_solid_geometry:
+            continue
+        if geometry.solid_reach_metres() < DSF_OBJECT_MIN_REACH_M:
+            continue
+        # Invariant I-4, enforced at Phase 2 discovery (amendment A13):
+        # a resource with several terrain-draped placements would need a
+        # different correction per placement, which one shared file
+        # cannot carry.  Phase 1 accepts the same resource (N placements
+        # = N buildings, invariant I-5); Phase 2 must not.
+        placement_count = placement_count_by_resource[resource_path]
+        if placement_count > 1:
+            result["skipped"].append(
+                (
+                    resource_path,
+                    f"{placement_count} terrain-draped OBJECT placements "
+                    "— a shared file cannot carry per-placement offsets "
+                    "(invariant I-4)",
+                )
+            )
+            continue
+        resolved_paths[resource_path] = physical_path
+        geometry_by_resource[resource_path] = geometry
+    if not resolved_paths:
+        return result
+
+    candidate_placements = [
+        placement
+        for placement in placements
+        if placement.resource_path in resolved_paths
+    ]
+    pools = object_anchor.discover_object_pools(
+        candidate_placements,
+        resolved_paths,
+        geometry_by_resource,
+        epsilon_metres=epsilon_metres,
+    )
+
+    for pool in pools:
+        pool_geometry_by_resource = {
+            resource_path: geometry_by_resource[resource_path]
+            for resource_path in pool.resolved_paths
+        }
+        bounds = _pool_world_bounds(pool, pool_geometry_by_resource)
+        try:
+            sampler = MeshElevationSampler(mesh_path, bounds)
+        except ValueError as error:
+            # No mesh triangles under this pool — a pool that walked off
+            # the tile.  Skip-and-report, never guess (invariant I-13).
+            for placement in pool.placements:
+                result["skipped"].append(
+                    (
+                        placement.resource_path,
+                        f"no mesh triangles under the pool ({error})",
+                    )
+                )
+            continue
+        structures = object_anchor.partition_structures(
+            pool,
+            pool_geometry_by_resource,
+            epsilon_metres=epsilon_metres,
+        )
+        decision = object_anchor.structure_deltas(
+            pool, pool_geometry_by_resource, structures, sampler
+        )
+        result["decisions"].append((pool, decision))
+        if write_changes:
+            report = object_rebake.apply(decision, pack_root, mesh_path)
+            result["objects_written"].extend(report.objects_written)
+            result["vertices_offset"] += report.vertices_offset_total
+            result["structures_baked"] += report.structures_baked
+            result["structures_needing_pad"] += (
+                report.structures_needing_pad
+            )
+            result["skipped"].extend(report.skipped)
+        else:
+            result["structures_baked"] += sum(
+                1
+                for structure in decision.structures
+                if structure.skip_reason is None
+            )
+            result["structures_needing_pad"] += sum(
+                1 for structure in decision.structures if structure.needs_pad
+            )
+            result["skipped"].extend(decision.skipped)
+    return result
 
 
 def rebake_dsf_objects(tile) -> dict:
     """Run Phase 2 for every airport in ``tile``'s worklist.
 
-    Returns a ``counts``-style dict (structures baked, vertices offset,
-    packs corrected, skipped, needing pads) for the caller's summary
+    Returns a counts dict (``airports_processed``, ``packs_corrected``,
+    ``structures_baked``, ``structures_needing_pad``, ``vertices_offset``,
+    ``objects_skipped``, ``airports_failed``) for the caller's summary
     line.  Returns immediately — before reading anything — unless
     ``DSF_OBJECT_REANCHOR`` is on (function-local config import so tests
     can drive the flag).  A missing worklist means nothing to do.
+
+    One airport's exception is caught, counted and logged; the loop
+    continues.  The function itself also never raises (the hook wraps it
+    in try/except anyway — belt and braces).
     """
-    raise NotImplementedError("workstream W7")
+    from .config import DSF_OBJECT_REANCHOR
+
+    if not DSF_OBJECT_REANCHOR:
+        return {}
+
+    counts = {key: 0 for key in _COUNT_KEYS}
+    try:
+        import O4_File_Names as FNAMES
+
+        worklist_path = object_anchor_worklist_path(tile)
+        if not os.path.isfile(worklist_path):
+            return {}
+        with open(worklist_path) as handle:
+            worklist = json.load(handle)
+
+        mesh_path = FNAMES.mesh_file(tile.build_dir, tile.lat, tile.lon)
+        if not os.path.isfile(mesh_path):
+            UI.vprint(
+                1,
+                f"  [object-anchor] mesh not found at {mesh_path}; "
+                "DSF object re-anchor skipped",
+            )
+            return counts
+
+        corrected_pack_roots: set[str] = set()
+        for airport in worklist.get("airports", []):
+            icao = airport.get("icao", "?")
+            try:
+                dsf_path = airport["dsf_path"]
+                pack_root = airport["pack_root"]
+                xplane_root = airport.get("xplane_root") or worklist.get(
+                    "xplane_root"
+                )
+                if not os.path.isfile(dsf_path):
+                    raise OSError(f"DSF not found: {dsf_path}")
+                recorded_mtime = airport.get("dsf_mtime")
+                if (
+                    recorded_mtime is not None
+                    and abs(os.path.getmtime(dsf_path) - recorded_mtime)
+                    > 1e-6
+                ):
+                    # Discovery is authoritative; the worklist is
+                    # identification only (amendment A5).  Note it and
+                    # proceed against the CURRENT DSF.
+                    UI.vprint(
+                        2,
+                        f"  [object-anchor] {icao}: DSF changed since the "
+                        "worklist was written; discovery proceeds against "
+                        "the current DSF",
+                    )
+                airport_result = discover_and_rebake_airport(
+                    dsf_path, mesh_path, pack_root, xplane_root
+                )
+            except Exception as exception:
+                # Per-airport containment: one broken airport never
+                # blocks the next (pure-reporter philosophy,
+                # verification.verify_and_log).
+                counts["airports_failed"] += 1
+                UI.vprint(
+                    1,
+                    f"  [object-anchor] {icao}: re-anchor failed "
+                    f"({exception}); continuing with the next airport",
+                )
+                continue
+
+            counts["airports_processed"] += 1
+            counts["structures_baked"] += airport_result["structures_baked"]
+            counts["structures_needing_pad"] += airport_result[
+                "structures_needing_pad"
+            ]
+            counts["vertices_offset"] += airport_result["vertices_offset"]
+            counts["objects_skipped"] += len(airport_result["skipped"])
+
+            for resource_path, reason in airport_result["skipped"]:
+                UI.vprint(
+                    2,
+                    f"  [object-anchor] {icao}: skipped {resource_path}: "
+                    f"{reason}",
+                )
+            had_work = (
+                airport_result["objects_written"]
+                or airport_result["skipped"]
+                or airport_result["decisions"]
+            )
+            if had_work:
+                UI.vprint(
+                    1,
+                    f"  [object-anchor] {icao}: "
+                    f"{airport_result['structures_baked']} structure(s) "
+                    f"re-baked across "
+                    f"{len(airport_result['objects_written'])} object "
+                    f"file(s), {airport_result['vertices_offset']} "
+                    f"vertices offset"
+                    + (
+                        f", {airport_result['structures_needing_pad']} "
+                        "structure(s) flagged as needing a pad"
+                        if airport_result["structures_needing_pad"]
+                        else ""
+                    )
+                    + (
+                        f", {len(airport_result['skipped'])} skipped"
+                        if airport_result["skipped"]
+                        else ""
+                    ),
+                )
+            if (
+                airport_result["objects_written"]
+                and pack_root not in corrected_pack_roots
+            ):
+                corrected_pack_roots.add(pack_root)
+                counts["packs_corrected"] += 1
+                UI.vprint(
+                    1,
+                    "  [object-anchor] restart X-Plane (objects are "
+                    f"cached): {os.path.basename(pack_root) or pack_root}",
+                )
+    except Exception as exception:
+        # Belt and braces: a reporter must never fail the tile.
+        try:
+            UI.vprint(
+                1,
+                "  [object-anchor] post-mesh DSF object re-anchor failed: "
+                f"{exception}",
+            )
+        except Exception:
+            pass
+    return counts
