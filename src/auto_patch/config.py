@@ -25,6 +25,7 @@ __all__ = [
     "DSF_OBJECT_FOOTPRINT_HEIGHT_M",
     "DSF_OBJECT_ELEVATED_BASE_M",
     "DSF_OBJECT_MAX_FOOTPRINT_AREA_M2",
+    "DSF_OBJECT_MIN_BUILDING_HEIGHT_M",
     "DSF_OBJECT_PAD_FLAG_SPAN_M",
     "DSF_BUILDING_OSM_OVERLAP_FRAC",
     "DSF_CLUSTER_SIMPLIFY_TOL_M",
@@ -1376,9 +1377,21 @@ DSF_OBJECT_MIN_REACH_M = float(
 # (amendment A10): two parts whose surfaces come within this distance are
 # one structure.  This is a modelling tolerance — "how large a gap did
 # the modeller leave between a wall and its roof" — not a
-# building-separation heuristic; measured plateau 0.02–0.25 m at KCLT.
+# building-separation heuristic.  Workstream W2's audit showed the count
+# IS epsilon-sensitive under the narrow phase (KCLT: 0.02 m -> 890
+# structures, 0.25 m -> 220, 1.0 m -> 175); 0.25 m is the knee of that
+# curve, with zero hard tears throughout.
 DSF_OBJECT_CONTACT_EPSILON_M = float(
     _os.environ.get("O4_DSF_OBJECT_CONTACT_EPSILON_M", "0.25"))
+
+# (amendment A11, from the HECA Tai Models pack) A building has walls; a
+# ground plate, sign or decal does not.  A structure whose vertical
+# extent is below this contributes NO Phase-1 building pad (Phase 2
+# still y-bakes it — a mis-elevated ground plate is exactly a float/sink
+# artifact).  HECA's ``heca_ground_polygon.obj`` spans 2.1 km and must
+# never become a 2 km flat pad.  0 disables the filter.
+DSF_OBJECT_MIN_BUILDING_HEIGHT_M = float(
+    _os.environ.get("O4_DSF_OBJECT_MIN_BUILDING_HEIGHT_M", "2.5"))
 
 # Vertices within this height of a structure's own base form its
 # footprint; above it, roof overhang would inflate the pad.

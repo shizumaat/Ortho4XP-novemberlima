@@ -144,6 +144,7 @@ def structure_ring(
         DSF_OBJECT_FOOTPRINT_HEIGHT_M,
         DSF_OBJECT_FOOTPRINT_UNION,
         DSF_OBJECT_MAX_FOOTPRINT_AREA_M2,
+        DSF_OBJECT_MIN_BUILDING_HEIGHT_M,
     )
 
     if not structure.is_ground_touching:
@@ -161,6 +162,7 @@ def structure_ring(
     all_points: list[tuple[float, float]] = []
     base_triangle_corner_points: list = []
     all_triangle_corner_points: list = []
+    maximum_local_y = minimum_base_y
 
     for resource_path, triangles in structure.triangles_by_resource.items():
         geometry = geometry_by_resource.get(resource_path)
@@ -176,6 +178,8 @@ def structure_ring(
                 if vertex_index in projected_by_vertex_index:
                     continue
                 local_x, local_y, local_z = geometry.vertices[vertex_index]
+                if local_y > maximum_local_y:
+                    maximum_local_y = local_y
                 latitude, longitude = obj8_reader.local_offset_to_lonlat(
                     placement.latitude,
                     placement.longitude,
@@ -200,6 +204,23 @@ def structure_ring(
                     base_triangle_corner_points.append(corner_points)
 
     if len(all_points) < 3:
+        return None
+    # Amendment A11 (from the HECA Tai Models pack): a building has
+    # walls; a ground plate, sign or decal does not.  A near-flat
+    # structure gets NO Phase-1 pad — Phase 2 still y-bakes it, since a
+    # mis-elevated ground plate is exactly a float/sink artifact.
+    # HECA's ``heca_ground_polygon.obj`` spans 2.1 km and must never
+    # become a 2 km flat building pad.
+    if (DSF_OBJECT_MIN_BUILDING_HEIGHT_M > 0.0
+            and (maximum_local_y - minimum_base_y)
+            < DSF_OBJECT_MIN_BUILDING_HEIGHT_M):
+        UI.vprint(
+            2,
+            "  [object-footprints] structure vertical extent "
+            f"{maximum_local_y - minimum_base_y:.2f} m is below the "
+            f"{DSF_OBJECT_MIN_BUILDING_HEIGHT_M:.2f} m building floor "
+            "(O4_DSF_OBJECT_MIN_BUILDING_HEIGHT_M) — ground plate or "
+            "decal, no pad.")
         return None
     # Fewer than 3 base vertices → all solid vertices (low flat objects
     # authored entirely above the height window).

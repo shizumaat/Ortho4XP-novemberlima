@@ -1103,3 +1103,34 @@ each downstream agent to merge §3 against §10 mentally. The deltas:
 
 `tests/test_contracts.py` (A8) asserts the *amended* signatures; where this list and any earlier
 section disagree, that test file is the tiebreak.
+
+### A11 — Second gate pack: HECA (Tai Models), and the ground-plate filter it forces *(W6-follow-up, W8)*
+
+User installed `Custom Scenery/c_EGY - 100_airport - HECA Cairo (Tai Models)` (2026-07-08) — a
+different developer, authored against one flat elevation, with a built `+30+031` mesh on disk.
+Audited: **341 object definitions, 3,222 terrain-draped placements, 201 definitions needing
+re-anchoring** (KCLT: 57), worst base error **+38 m**, reaches to 2.7 km. **189 objects share ONE
+anchor** — and the bakes are split **by material** (`door.obj`, `brick.obj`, `concrete_1/2/3.obj`,
+`black_glass_NOANPHA.obj`, `titles_1.obj`…), so a single terminal's structure will span *dozens* of
+resources, exercising pooling and multi-resource structures far harder than KCLT's eight
+texture-page bakes. Dozens of `no base` files (signs, ceilings, glass) hold no ground-level geometry
+at all and only make sense pooled — the real test of inheritance (I-8). Three anchor groups, one at
+heading 359.79° vs 0.00° — the world-frame pooling case (I-1, I-2). Multi-placement cases present
+(`redWhiteBarier_P2.obj` × 27, `jet_Blash_*` × 3 — I-4/I-5).
+
+M4 is therefore answered on installed packs: **HECA (Tai Models) joins KCLT as a mandatory W8 gate**,
+and every W8 measurement (M1-style per-component metric, M3 grade scoreboard) runs on both.
+
+**The design gap it exposes:** `Airport/ground/heca_ground_polygon.obj` — reach 2,139 m, base error
++26 m — is a *solid ground plate*, not a building. Phase 2 must y-bake it (a mis-elevated ground
+plate is exactly a float/sink artifact), but Phase 1 must **not** lay a 2 km building pad under it,
+and the area cap defaults to disabled. Principled fix, since a building has walls and a plate does
+not: `structure_ring` returns `None` for a structure whose vertical extent
+(`maximum_y − minimum_base_y`) is below `DSF_OBJECT_MIN_BUILDING_HEIGHT_M` (new flag, default
+`2.5`). Signs, decals and plates fall out naturally; every real building passes. Flag added to the
+A10 roster and the contract test.
+
+**Baseline caution:** `_pick_best_apt_dat_against_osm` prefers any Custom Scenery pack containing
+the airport, so installing this pack may silently change which `apt.dat` the HECA build selects —
+the HECA grade-scoreboard baseline must be **re-cut before** M3 comparisons, or a shifted baseline
+will masquerade as a Phase 1 regression.

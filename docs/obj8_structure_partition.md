@@ -100,12 +100,22 @@ structures, residual monotonically worse, tears zero throughout.
 The single parameter ε is not "how far apart are two buildings" — it is "how large a gap did the
 modeller leave between a wall and its roof". It is a manufacturing tolerance.
 
-### 2.3 ε is on a plateau
+### 2.3 ε: a knee, not a plateau *(corrected 2026-07-08 by the workstream-W2 audit)*
 
-AABB contact, structure count: ε = 0.02 m → 135, ε = 0.05 m → 135, ε = 0.25 m → 133, ε = 1.0 m → 113.
-Flat from 2 cm to 25 cm, then it starts eating real separations. **Default ε = 0.25 m**, comfortably
-above float noise and below any real building gap. Re-scan the plateau under narrow phase before
-locking it (§6).
+The original probe measured AABB contact only: ε = 0.02 m → 135, ε = 0.05 m → 135, ε = 0.25 m → 133 —
+apparently flat. **That plateau was an artifact**: broad-phase over-merging absorbed the sensitivity.
+Under the full narrow phase the count is genuinely ε-sensitive
+(`tools/obj8_partition_audit.py`, KCLT):
+
+| ε | 0.02 | 0.05 | 0.10 | 0.25 | 0.50 | 1.00 |
+|---|---|---|---|---|---|---|
+| structures | 890 | 571 | 387 | **220** | 198 | 175 |
+
+Hard tears are zero throughout (a coarser ε only merges). **Default ε = 0.25 m** stands as the knee
+of that curve — it flattens sharply beyond it — and remains comfortably above float noise and below
+any real building gap. The V3 induced-separation report is the instrument for judging whether a
+smaller ε opens visible gaps at real abutments; consult it before tuning, and answer §6's open
+question 2 before trusting ε below 0.10.
 
 ---
 
@@ -280,13 +290,13 @@ this is a nuisance, not a blocker — but measure before shipping, and cache by 
 
 ## 6. Open, and worth measuring
 
-1. **Re-scan the ε plateau under narrow phase.** The 2 cm–25 cm plateau was measured on AABB contact
-   (135/135/133). Narrow phase gives 216 structures at ε = 0.25 m; the plateau may sit elsewhere.
+1. **ANSWERED 2026-07-08 (workstream W2): the plateau does not survive the narrow phase.** See §2.3 —
+   the count is genuinely ε-sensitive (0.02 m → 890, 0.25 m → 220, 1.0 m → 175); 0.25 m is the knee.
 2. **V3's tail.** Nobody has looked at how much the parts separated by 0.25–0.5 m move relative to each
-   other. If it is large, ε is too small.
-3. **Does the contact graph generalise off this pack?** Everything here is one Nimbus bake. Run the
-   partition audit over KDFW, CYUL, HECA before believing the 43% narrow-phase prune rate or the
-   plateau.
+   other. If it is large, ε is too small. Now more pressing given answer 1.
+3. **Does the contact graph generalise off this pack?** Everything here is one Nimbus bake. The
+   audit's first target is the HECA Tai Models pack (spec amendment A11: 341 definitions, 189 sharing
+   one anchor, material-split bakes, base errors to +38 m), then KDFW, CYUL.
 4. **Hinge frequency.** No structure at KCLT needed a weak-contact cut. That is one pack, and jetbridges
    are usually separate placements. Do not build the cut machinery until a pack demands it — but do
    build the *detection*, because a silent 2 km chain is the failure that would ship.

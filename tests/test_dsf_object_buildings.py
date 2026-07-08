@@ -41,6 +41,16 @@ ANCHOR_LATITUDE = 35.0
 ANCHOR_LONGITUDE = -80.0
 
 
+@pytest.fixture(autouse=True)
+def disable_minimum_building_height(monkeypatch):
+    """The geometric fixtures in this file are deliberately FLAT slabs
+    (walls would obscure the ring-shape assertions), which the
+    amendment-A11 ground-plate filter would reject wholesale.  Default
+    it off for this file; ``TestStructureRingMinimumBuildingHeight``
+    re-enables it explicitly to test the filter itself."""
+    monkeypatch.setattr(config, "DSF_OBJECT_MIN_BUILDING_HEIGHT_M", 0.0)
+
+
 # ── shared construction helpers ──────────────────────────────────────
 
 def equirectangular_local_offset_to_lonlat(
@@ -221,6 +231,53 @@ class TestStructureRingHull:
         assert object_footprints.structure_ring(
             structure, {"a.obj": geometry},
             [make_placement("a.obj")]) is None
+
+
+class TestStructureRingMinimumBuildingHeight:
+    """Amendment A11 (HECA Tai Models pack): a building has walls; a
+    ground plate, sign or decal does not.  A near-flat structure gets no
+    Phase-1 pad — ``heca_ground_polygon.obj`` spans 2.1 km and must
+    never become a 2 km flat building pad."""
+
+    # A 20 x 20 plate: solid, ground-touching, 0.2 m of vertical extent.
+    PLATE_VERTICES = [
+        (0.0, 0.0, 0.0), (20.0, 0.0, 0.0),
+        (20.0, 0.2, 20.0), (0.0, 0.2, 20.0),
+    ]
+    PLATE_TRIANGLES = [(0, 1, 2), (0, 2, 3)]
+
+    def _plate_ring(self):
+        geometry = make_geometry(self.PLATE_VERTICES, self.PLATE_TRIANGLES)
+        structure = make_structure({"a.obj": self.PLATE_TRIANGLES},
+                                   {"a.obj": 0.0})
+        return object_footprints.structure_ring(
+            structure, {"a.obj": geometry}, [make_placement("a.obj")])
+
+    def test_flat_plate_gets_no_pad(self, fake_projection, monkeypatch):
+        monkeypatch.setattr(
+            config, "DSF_OBJECT_MIN_BUILDING_HEIGHT_M", 2.5)
+        assert self._plate_ring() is None
+
+    def test_zero_disables_the_filter(self, fake_projection, monkeypatch):
+        monkeypatch.setattr(
+            config, "DSF_OBJECT_MIN_BUILDING_HEIGHT_M", 0.0)
+        assert self._plate_ring() is not None
+
+    def test_walled_building_passes_the_filter(self, fake_projection,
+                                               monkeypatch):
+        monkeypatch.setattr(
+            config, "DSF_OBJECT_MIN_BUILDING_HEIGHT_M", 2.5)
+        # The same plate with an 8 m roof slab above it: real walls.
+        vertices = self.PLATE_VERTICES + [
+            (0.0, 8.0, 0.0), (20.0, 8.0, 0.0),
+            (20.0, 8.0, 20.0), (0.0, 8.0, 20.0),
+        ]
+        triangles = self.PLATE_TRIANGLES + [(4, 5, 6), (4, 6, 7)]
+        geometry = make_geometry(vertices, triangles)
+        structure = make_structure({"a.obj": triangles}, {"a.obj": 0.0})
+        assert object_footprints.structure_ring(
+            structure, {"a.obj": geometry},
+            [make_placement("a.obj")]) is not None
 
     def test_area_cap_returns_none_and_reports(self, fake_projection,
                                                monkeypatch):
