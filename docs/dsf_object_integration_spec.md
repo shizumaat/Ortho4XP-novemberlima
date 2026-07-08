@@ -1221,3 +1221,26 @@ Three items workstream W5 escalated rather than resolving unilaterally, settled 
 3. The sampler retains only triangles with **a vertex** inside the query bounds, so a coarse mesh
    whose giant triangles merely overlap the window yields "no triangles inside bounds".
    Irrelevant on dense airport meshes; `post_mesh` treats it as a per-pool skip-and-report.
+
+### A15 — Base and global scenery are never rebaked *(found live in the first production run)*
+
+The first KCLT production build revealed a policy gap: the tile's small airports resolve to the
+**Global Airports** DSF, whose static airliners and library hangars pass the 25 m reach floor —
+a large, *correctly anchored* object has a large reach; the metric conflates size with
+mis-anchoring — and Phase 2 attempted to pool objects inside the base simulator install. Only
+`apply`'s unwritable-directory precheck stopped a write into `Global Scenery`. On a writable
+install (common on macOS) that would have modified the base simulator, and baking a **shared
+library object** with one airport's offsets would corrupt it for every other airport using it.
+Permission luck is not policy. Two guards, both in the shared discovery function (so the
+command line inherits them):
+
+1. **Pack guard**: a `pack_root` with a `Global Scenery` or `Resources` path component is
+   skipped-and-reported wholesale. Only Custom Scenery packs are rebake candidates.
+2. **Containment guard**: a resource whose resolved physical path is not **inside** the pack that
+   owns the DSF (i.e. it resolved through `library.txt` into another pack) is skipped-and-reported;
+   pack-local siblings still bake.
+
+Corollary recorded for honesty: the reach floor is a *mis-anchoring detector* with false positives
+on large correctly-anchored objects. Inside a custom pack those false positives are benign — the
+centroid-to-anchor delta of a correctly anchored structure is approximately zero, so the bake is a
+no-op — which is why no further filtering is needed there.

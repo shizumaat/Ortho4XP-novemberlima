@@ -85,6 +85,30 @@ def object_anchor_worklist_path(tile) -> str:
     )
 
 
+def _is_protected_scenery_root(pack_root: str) -> bool:
+    """True when ``pack_root`` lies inside the base simulator — any path
+    with a ``Global Scenery`` or ``Resources`` component (amendment A15).
+    Only Custom Scenery packs are ever rebake candidates."""
+    components = os.path.normpath(pack_root).split(os.sep)
+    return "Global Scenery" in components or "Resources" in components
+
+
+def _resolved_path_is_inside_pack(physical_path: str, pack_root: str) -> bool:
+    """True when the resolved object file lives under the pack that owns
+    the DSF.  A ``library.txt``-resolved resource lands in ANOTHER pack:
+    a shared library object serves many airports and must never carry one
+    airport's offsets (amendment A15, guard 2)."""
+    try:
+        return (
+            os.path.commonpath(
+                [os.path.abspath(physical_path), os.path.abspath(pack_root)]
+            )
+            == os.path.abspath(pack_root)
+        )
+    except ValueError:  # different drives (Windows)
+        return False
+
+
 def _pool_world_bounds(
     pool: object_anchor.ObjectPool,
     geometry_by_resource: dict,
@@ -196,6 +220,22 @@ def discover_and_rebake_airport(
     if pack_root is None:
         pack_root = dsf_reader._pack_root_for_dsf(dsf_path)
 
+    # Amendment A15, guard 1: base and global scenery are NEVER rebaked.
+    # Small airports resolve to the Global Airports DSF, whose static
+    # airliners and library hangars pass the reach floor (a large,
+    # correctly anchored object has a large reach — the metric conflates
+    # size with mis-anchoring), and on a writable install Phase 2 would
+    # modify the base simulator.  Policy, not permission luck.
+    if pack_root is None or _is_protected_scenery_root(pack_root):
+        result["skipped"].append(
+            (
+                dsf_path,
+                "pack is base or global scenery — never rebaked "
+                "(amendment A15)",
+            )
+        )
+        return result
+
     placement_count_by_resource: dict[str, int] = {}
     for placement in placements:
         placement_count_by_resource[placement.resource_path] = (
@@ -211,6 +251,19 @@ def discover_and_rebake_airport(
             resource_path, pack_root, xplane_root
         )
         if physical_path is None:
+            continue
+        # Amendment A15, guard 2: a library-resolved resource lives in
+        # ANOTHER pack; baking it would push one airport's offsets into
+        # an object shared by many.  Skip-and-report.
+        if not _resolved_path_is_inside_pack(physical_path, pack_root):
+            result["skipped"].append(
+                (
+                    resource_path,
+                    "resolved through library.txt outside the pack — "
+                    "shared library objects are never rebaked "
+                    "(amendment A15)",
+                )
+            )
             continue
         # Ruling R1: geometry is ALWAYS read from the backup when one
         # exists — on a re-run the live file already carries baked

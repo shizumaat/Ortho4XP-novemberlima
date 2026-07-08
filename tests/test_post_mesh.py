@@ -608,3 +608,74 @@ def test_mesh_hook_is_wired_into_build_mesh_and_sort_mesh():
     sort_mesh_source = inspect.getsource(O4_Mesh_Utils.sort_mesh)
     assert "_auto_patch_post_mesh_rebake(tile)" in build_mesh_source
     assert "_auto_patch_post_mesh_rebake(tile)" in sort_mesh_source
+
+
+# ---------------------------------------------------------------------------
+# amendment A15: base/global scenery and library-resolved resources are
+# never rebaked (found live: Global Airports static airliners pass the
+# reach floor, and only an unwritable directory stopped a base-sim write)
+# ---------------------------------------------------------------------------
+
+def test_protected_scenery_root_is_never_rebaked(phase_two_harness):
+    harness = phase_two_harness
+    global_scenery = harness.tmp_path / "Global Scenery"
+    global_scenery.mkdir()
+    dsf_path, pack_root = _make_pack(
+        global_scenery, "Global Airports", SINGLE_PLACEMENT_DSF_BODY,
+        {"objects/offset_bake.obj": OFFSET_SLAB_OBJECT})
+
+    result = post_mesh.discover_and_rebake_airport(
+        dsf_path, harness.mesh_path, pack_root, None)
+
+    assert result["objects_written"] == []
+    assert result["structures_baked"] == 0
+    assert any("never rebaked" in reason for _, reason in result["skipped"])
+    live_path = os.path.join(pack_root, "objects", "offset_bake.obj")
+    assert not os.path.isfile(live_path + ".anchor_bak")
+    with open(live_path) as handle:
+        assert handle.read() == OFFSET_SLAB_OBJECT
+
+
+def test_library_resolved_resource_outside_the_pack_is_skipped(
+        phase_two_harness, monkeypatch):
+    harness = phase_two_harness
+    dsf_body = "\n".join([
+        "OBJECT_DEF objects/offset_bake.obj",
+        "OBJECT_DEF lib/airport/shared_hangar.obj",
+        f"OBJECT 0 {ANCHOR_LONGITUDE:.9f} {ANCHOR_LATITUDE:.9f} 0.000000",
+        f"OBJECT 1 {ANCHOR_LONGITUDE:.9f} {ANCHOR_LATITUDE:.9f} 0.000000",
+    ]) + "\n"
+    dsf_path, pack_root = _make_pack(
+        harness.tmp_path, "Fake Pack", dsf_body,
+        {"objects/offset_bake.obj": OFFSET_SLAB_OBJECT})
+    # The shared library object lives in ANOTHER pack entirely.
+    library_pack = harness.tmp_path / "Library Pack"
+    library_object = library_pack / "shared_hangar.obj"
+    library_object.parent.mkdir(parents=True)
+    library_object.write_text(OFFSET_SLAB_OBJECT)
+
+    real_resolve = post_mesh.obj8_reader.resolve_object_resource
+
+    def resolving_through_a_library(resource_path, pack, xplane):
+        if resource_path == "lib/airport/shared_hangar.obj":
+            return str(library_object)
+        return real_resolve(resource_path, pack, xplane)
+
+    monkeypatch.setattr(
+        post_mesh.obj8_reader, "resolve_object_resource",
+        resolving_through_a_library)
+
+    result = post_mesh.discover_and_rebake_airport(
+        dsf_path, harness.mesh_path, pack_root, None)
+
+    # The library resource is skipped with the A15 reason...
+    assert any(
+        resource == "lib/airport/shared_hangar.obj"
+        and "library.txt outside the pack" in reason
+        for resource, reason in result["skipped"])
+    # ...its file is untouched...
+    assert not os.path.isfile(str(library_object) + ".anchor_bak")
+    with open(library_object) as handle:
+        assert handle.read() == OFFSET_SLAB_OBJECT
+    # ...and the pack-local sibling still bakes.
+    assert result["objects_written"] == ["objects/offset_bake.obj"]
