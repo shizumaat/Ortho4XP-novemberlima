@@ -129,6 +129,11 @@ dev-side agents own them tonight).
   by construction; re-cut fixtures DELIBERATELY with Noah's sign-off
   (morning checkpoint), never silently.
 - check_grade: SPLP within 16 / CYXY 1 / HECA 0; skirt+plane+cross 0.
+  DEFAULT-ON (2026-07-08, measured): SPLP within 31 — the marginal
+  ≤+0.11% at-cap class over longer ring chords, NOT re-baselined as
+  accepted (awaiting the A3 validator-scoping ruling with Noah);
+  CYXY 1 (the pre-existing apron #29); HECA 2 (the A2 residual pair
+  @3.57% beside 05R); skirt+plane+cross 0 everywhere.
 - Dip probe (P0's method): centers == profile, corners == profile −
   rate×hw at former segment stations; NO interior flat cross-edges.
 - tools/wedge_audit.py: junction-family wedge counts must not grow
@@ -194,6 +199,39 @@ red-for-a-new-reason (runway way counts drop by construction — the
 DELIBERATE re-cut, Noah sign-off obtained when he asks for the flip)
 and the within-count gates shift (SPLP 16→31 marginal class).  Re-cut
 with tools/build_target_osm.py; floors at the 95% convention.
+
+## DEFAULT-ON EXECUTED (2026-07-08 session, dev)
+- Merged runway-deseg → dev as a fast-forward (dev @ 8c9fdc3); default
+  flipped + fixtures re-cut in 2a217d7 (SPJC 35→2, SPLP 9/8→1/1 runway
+  ways; gate-off control builds attribute every non-runway delta —
+  SPLP-78 runway-only, SPLP-77 junction 20→27 + SPJC junction 289→321
+  = the neck-split corridor re-evaluation cascade responding to the
+  one-ring runway; apron 100→44 vs the 07-06 fixture is 30k/30l/30m
+  dev drift absorbed by the same re-cut).  Runway floors set EXACT
+  (deterministic ring count = the de-seg invariant; 0.95 of 1-2 ways
+  floors at 0-1), everything else the 0.95 convention.
+- Gates at default-on (measured): compare-target 3/3 green; fast_suite
+  5 failures = the 8 minus compare×2 (legitimate re-cut absorb) minus
+  runway_longitudinal_grade[SPLP] — a FALSE absorb: check_runway_
+  profile's per-piece extreme-station clustering sees only a ring's 2
+  ends, so the real SPLP >1.5% profile went DARK at default-on (and
+  test_runway_vertical_curve[CYXY] flipped to a suspect XPASS the same
+  way).  A4 (per-station clustering) must flip both correctly RED
+  again — do NOT count them as fixed.
+- check_grade: see the gates bullet above (SPLP 31 pending A3 / CYXY 1
+  / HECA 2 = A2).  wedge_audit: CYXY 0, SPLP 0, HECA 4 (no growth).
+- Verify-log: SPLP + CYXY all-zero; HECA same-session gate-on vs
+  gate-off = +2 sub-mm junction~junction wedges (the A1 frontage
+  class — clear with A1), −1 clearance∩clearance sliver, −1
+  off-source phantom (the 30l apron #244 30 m² @05R ABSORBED by the
+  ring — the improvement 30l hoped for).  12 vs 12 total, no new
+  classes, ZERO runway-family findings.  NOTE verify runway_grade
+  SPLP 4→0 is the SAME A4 dark spot, not a fix.
+- flex_audit HECA parity (de-seg ON vs OFF, both flex-on): 4 of 158
+  matched runway nodes differ, ±0.41 m max, at the two inter-runway
+  reconciliation spots ("no taxi axis nearby") — the flex law behaves
+  equivalently; the ±4 m at-budget flexes with binding axes at/over
+  cap appear identically in the flex-on-vs-off map (flex-last holds).
 
 ## OUTSTANDING → ZERO FAILURES (ordered)
 A. De-seg residuals (all measured, all localized):

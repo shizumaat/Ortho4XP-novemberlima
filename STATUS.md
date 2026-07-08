@@ -1,3 +1,71 @@
+# STATUS — SESSION 20260708 (part 32): RUNWAY DE-SEG MERGED TO dev +
+# DEFAULT ON (O4_RUNWAY_SINGLE_POLY=1) + deliberate fixture re-cut
+# (Noah sign-off).  Gates green; to-zero worklist A1-A5 in flight
+# (docs/runway_single_polygon_plan.md Addendum 2 is the worklist).
+
+## LANDED (part 32)
+1. runway-deseg → dev FAST-FORWARD (dev @ 8c9fdc3; dev was a strict
+   ancestor — merge conflict-free by construction, as verified in
+   Addendum 2).
+2. DEFAULT FLIP + FIXTURE RE-CUT (2a217d7): config.py
+   RUNWAY_SINGLE_POLY default "0"→"1"; SPJC + SPLP compare-target
+   fixtures re-cut with tools/build_target_osm.py.  Runway ways
+   SPJC 35→2, SPLP 9/8→1/1 per tile.  Gate-off CONTROL builds
+   attribute every non-runway delta: SPLP-78 runway-only; SPLP-77
+   junction 20→27 + SPJC junction 289→321 / taxiway_clearance 27→24
+   = the neck-split corridor re-evaluation cascade responding to the
+   one-ring runway; the apron 100→44 / junction repartition vs the
+   07-06 fixture is 30k/30l/30m dev drift absorbed by the same
+   re-cut.  Floors 0.95×current EXCEPT runway = EXACT (deterministic
+   ring count IS the de-seg invariant; 0.95 of 1-2 ways guards
+   nothing).  compare-target 3/3 green.
+
+## VERIFIED (default-on gates, this session)
+* fast_suite: 5 = the 8 minus compare×2 (legitimate re-cut absorb)
+  minus runway_longitudinal_grade[SPLP] — a FALSE absorb (A4 below).
+  FULL suite: 9 = the 13 minus compare×3 minus the same false absorb;
+  ZERO new failures.  test_runway_vertical_curve XPASS at SPJC/CYXY/
+  HECA = the SAME A4 dark spot (2-end rings give the curvature check
+  nothing to measure); SPLP's stays correctly XFAIL (seam-split rings
+  carry interior seam vertices).
+* check_grade: SPLP within 31 (ALL ≤+0.11% at-cap marginal class —
+  awaiting the A3 scoping ruling, NOT re-baselined) · CYXY within 1
+  (pre-existing apron #29) · HECA within 2 (the A2 pair @3.57%,
+  junctions #215/#226 beside 05R) · plane/cross/skirt/steps 0
+  everywhere (HECA vertex/mid-edge steps = the known 30m service_road
+  classes, unchanged).
+* wedge_audit: CYXY 0 (target met) · SPLP 0 · HECA 4 (no growth).
+* Verify-log HECA same-session ON vs OFF: +2 sub-mm junction~junction
+  wedges (the A1 frontage class), −1 clearance∩clearance sliver, −1
+  OFF-SOURCE phantom (30l's apron #244 30 m² @05R ABSORBED by the
+  ring).  12 vs 12 total; no new classes; ZERO runway-family findings.
+  SPLP + CYXY verify all-zero (SPLP runway_grade 4→0 = A4 dark spot,
+  not a fix).
+* flex_audit HECA de-seg parity (ON vs OFF, both flex-on): 4/158
+  matched runway nodes differ, ±0.41 m max, at the two inter-runway
+  reconciliation spots — flex law equivalent.  Flex-on vs flex-off
+  map: ±4 m at-budget flexes, binding taxi axes at/over cap
+  (flex-last holds; the one "+0.06% slack" is sub-noise).
+* Dip probe: dead by construction (part 31 — no interior cross-edges
+  exist under the gate; 30i tent pass structurally no-op).
+
+## OPEN (part 32 = Addendum 2's OUTSTANDING list, in order)
+* A1 sloped-frontage weld (SPJC 1 plane pair + 16 mm wedge, KCLT
+  within 8/wedges +4, HECA +2 sub-mm wedges) — stitch_pavement_
+  polygons snap_corner guard; fix = move the near-corner foreign
+  vertex to the ring corner (pre-solve, canonical-bucket propagated).
+* A2 HECA 2 within pairs @3.57% beside 05R (level-coupling suspect).
+* A3 SPLP within-scoping RULING — question posed to Noah.
+* A4 check_runway_profile per-station clustering on rings — MUST
+  restore runway_longitudinal_grade[SPLP] to RED + flip the 3
+  vertical-curve XPASSes back (currently dark on 2-end rings).
+* A5 KCLT triangle A/B (same-session, /tmp/meshdiag) — in flight.
+* NOAH: restart Ortho4XP (GUI caches auto_patch imports) + bake for
+  in-sim testing.
+* Section C cleanup (tent machinery, legacy chain conversion,
+  sub-rect crossing resolution) ONLY after in-sim soak, byte-identical
+  per the dead-code rule.
+
 # STATUS — SESSION 20260707/08 (part 31): RUNWAY DE-SEGMENTATION —
 # single-poly rings behind O4_RUNWAY_SINGLE_POLY (branch runway-deseg,
 # docs/runway_single_polygon_plan.md; slices 1-5 landed, gate default OFF)
