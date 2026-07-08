@@ -367,12 +367,11 @@ def test_unimplemented_stubs_raise_not_implemented():
     workstream replaces it.  When a workstream lands, DELETE its entry
     here (its real tests take over) — a lingering entry that suddenly
     fails is a reminder, not a defect."""
-    with pytest.raises(NotImplementedError):
-        obj8_reader.load_object_file("/nonexistent")
-    with pytest.raises(NotImplementedError):
-        obj8_partition.weld_parts([], [])
-    # mesh_sampler landed in workstream W3 — its entry is deleted per this
-    # test's docstring; tests/test_mesh_sampler.py has taken over.
+    # obj8_reader and obj8_partition landed in workstream W2;
+    # mesh_sampler landed in workstream W3.  Their entries are deleted
+    # per this test's docstring; tests/test_obj8_reader.py,
+    # tests/test_obj8_partition.py and tests/test_mesh_sampler.py have
+    # taken over.
     with pytest.raises(NotImplementedError):
         object_anchor.discover_object_pools([], {}, {}, epsilon_metres=0.25)
     with pytest.raises(NotImplementedError):
