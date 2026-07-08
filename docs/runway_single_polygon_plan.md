@@ -175,6 +175,73 @@ dev-side agents own them tonight).
   (same content as dev 3d830ec; merge should auto-resolve), and its
   19feaec landed on runway-deseg.  Stage files EXPLICITLY, never -A.
 
+# HANDOVER ADDENDUM 2 — merge + default-on session (written 2026-07-08)
+
+MERGE STATE: dev merged INTO runway-deseg as 0492447 (only STATUS.md
+conflicted — three prepended session headers; resolved by stacking
+part 31 → 30m → 30l).  Verified on the merged branch: fast_suite
+gate-off = EXACTLY the 8 pre-existing failures; gate-on CYXY identical
+to pre-merge (3 rings + 2 carved crossings, within 1, plane/cross/
+skirt 0, wedges 0).  dev is now a strict ancestor → merging back is
+conflict-free by construction.
+
+DEFAULT-ON: flip the env default in config.py —
+`RUNWAY_SINGLE_POLY = _os.environ.get("O4_RUNWAY_SINGLE_POLY", "0")`
+→ default "1".  The Ortho4XP GUI caches auto_patch imports — Noah
+must RESTART Ortho4XP before baking (standing gotcha).  Flipping the
+default flips the SUITE to gate-on too: compare-target SPLP ×2 go
+red-for-a-new-reason (runway way counts drop by construction — the
+DELIBERATE re-cut, Noah sign-off obtained when he asks for the flip)
+and the within-count gates shift (SPLP 16→31 marginal class).  Re-cut
+with tools/build_target_osm.py; floors at the 95% convention.
+
+## OUTSTANDING → ZERO FAILURES (ordered)
+A. De-seg residuals (all measured, all localized):
+ 1. Sloped-frontage weld class — SPJC 1 plane pair (2.30%) + 16 mm
+    runway~junction wedge; KCLT within 8 (baseline 6) + 4 such
+    wedges.  A junction frontage vertex 0.5-1.0 m from a ring corner
+    sits inside stitch_pavement_polygons' snap_corner_m=1.0 guard and
+    never welds (legacy welded via canonical merges of per-station
+    piece corners).  Fix direction: for from_single_poly hosts, merge
+    the near-corner foreign vertex TO the ring corner (1to1-style
+    move) instead of skipping; or insert regardless of the guard.
+ 2. HECA 2 within pairs @3.57% (9 cm/2.51 m beside 05R low end):
+    junction vert takes the NEXT station's value; PROVEN not a
+    runway join anchor (O4_DESEG_DEBUG=1 shows correct anchors at
+    the ring verts).  Suspect: level-coupling / junction-mesh edge
+    pulling it to a node ~11 m up-axis.  Break 5891→6176 likely
+    same root.
+ 3. SPLP within 16→31 — the marginal ≤+0.11% at-cap class over
+    longer ring chords.  NEEDS A RULING: scope the runway ring's
+    within-shape all-pair to lateral/same-station+adjacent pairs
+    (longitudinal law = SPINE PROFILE + check_runway_profile's
+    domain — the part-30i exemption argument extended).  Solver and
+    validator must move in lockstep (grade_law single source).
+ 4. verification.check_runway_profile: per-piece extreme-station
+    clustering sees only a ring's 2 ends — rewrite to cluster ring
+    vertices per station along the axis (else the SPLP >1.5%
+    profile it correctly flags today goes dark again).
+ 5. Formalize KCLT triangle A/B same-session (gate-off emit →
+    /tmp/meshdiag isolate_file.py; gate-on measured 49,810 vs
+    130,614 recorded at 30j).
+B. Pre-existing 13 full-suite failures (NOT de-seg's — stash-verified
+   set, bisect before blaming): SPLP compare ×2 = structural
+   apron-matching (part-27 note) — absorbed by the re-cut above;
+   pavement_grade[SPLP] + runway_longitudinal_grade[SPLP] = the real
+   >1.5% profile 30i unmasked (profile solve fix, likely helped by
+   ring-aware check_runway_profile + flex Stage C); pavement_grade
+   [CYXY] + cyxy_taxi_e_south_apron + cyxy_route_reach_zero +
+   solver_validator_same_edge_budgets = CYXY solver items (memory:
+   spine_rise_to_building_region, cyxy open #29); SPJC ×4 (compare,
+   no_self_overlap, pavement_grade, route_band_zero) + pavement_grade
+   [HECA] = full-suite-only, see STATUS 30l scoreboard.
+C. Cleanup slice AFTER default-on soaks: delete the part-30i tent
+   machinery + crown_centerline exports, the legacy chain→rect
+   conversion + MULTI_FLAT consolidation, _resolve_runway_crossings'
+   sub-rect union-find, 4-corner-only helper branches (list in the
+   inventory table below).  Byte-identical gate-on verification per
+   the standing dead-code rule.
+
 # PHASE 1 — CONSUMER INVENTORY (2026-07-07, runway-deseg session)
 
 ## Corrections to the phase text above (measured against HEAD)
