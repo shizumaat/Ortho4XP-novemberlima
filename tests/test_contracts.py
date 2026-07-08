@@ -371,8 +371,8 @@ def test_unimplemented_stubs_raise_not_implemented():
         obj8_reader.load_object_file("/nonexistent")
     with pytest.raises(NotImplementedError):
         obj8_partition.weld_parts([], [])
-    with pytest.raises(NotImplementedError):
-        mesh_sampler.MeshElevationSampler("/nonexistent", (0, 0, 1, 1))
+    # mesh_sampler landed in workstream W3 — its entry is deleted per this
+    # test's docstring; tests/test_mesh_sampler.py has taken over.
     with pytest.raises(NotImplementedError):
         object_anchor.discover_object_pools([], {}, {}, epsilon_metres=0.25)
     with pytest.raises(NotImplementedError):
