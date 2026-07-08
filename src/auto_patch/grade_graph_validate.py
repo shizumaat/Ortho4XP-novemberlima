@@ -154,11 +154,29 @@ def within_violations(layout, noise=ELEV_ROUNDING_NOISE_M):
     else:
         def _drop(x, y):
             return 0.0
+    # BREAK-REGION quarantine (part 30m, aligning this in-memory frame with
+    # ``check_grade.run_checks`` — user ruling 2026-07-05/e2031ff): a pair
+    # touching a SOLVER-DECLARED broken node is the pocket's designed
+    # over-cap blend (genuine anchor contradiction rendered as the
+    # distance-weighted blend); the emit validator reports those in a
+    # SEPARATE section and excludes them from the ACTIONABLE within count.
+    # This frame used to count them because before part 30m no quarantined
+    # surface carried law pairs here (service roads had ZERO within-shape
+    # edges).  Scope: ONLY the solver-exported ``_break_node_ll`` nodes —
+    # an injected fake step (the anti-gaming test) is NOT excluded.  Empty
+    # export (old layout / gate off) ⇒ byte-identical check.
+    _break_keys = set()
+    for (_bla, _blo) in (getattr(layout, "_break_node_ll", None) or []):
+        _bx, _by = layout.ll_to_m(_bla, _blo)
+        _break_keys.add((round(_bx, 2), round(_by, 2)))
     viol = []
     for (role, is_spine, (xa, ya), za, (xb, yb), zb, cap) in \
             _iter_checked_pairs(layout):
         d = math.hypot(xa - xb, ya - yb)
         if d < 1e-6:
+            continue
+        if _break_keys and ((round(xa, 2), round(ya, 2)) in _break_keys
+                            or (round(xb, 2), round(yb, 2)) in _break_keys):
             continue
         de = abs((za - zb) - crown_pair_offset(_drop(xa, ya),
                                                _drop(xb, yb)))

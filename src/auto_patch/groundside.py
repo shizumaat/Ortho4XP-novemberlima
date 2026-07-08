@@ -2296,8 +2296,11 @@ def _deconflict_service_overlaps(
     polys = [s.polygon for _i, s in svc]
     tree = STRtree(polys)
     n_clipped = 0
+    drop_ids: set = set()   # yielders wholly inside a kept shape → removed
     for a in range(len(svc)):
         ia, sa = svc[a]
+        if id(sa) in drop_ids:
+            continue
         try:
             cand = tree.query(sa.polygon)
         except _GEOM_EXC:
@@ -2307,6 +2310,8 @@ def _deconflict_service_overlaps(
             if b <= a:
                 continue
             ib, sb = svc[b]
+            if id(sb) in drop_ids:
+                continue
             try:
                 overlap = sa.polygon.intersection(sb.polygon).area
             except _GEOM_EXC:
@@ -2331,6 +2336,15 @@ def _deconflict_service_overlaps(
                            if g.geom_type == "Polygon"])
             parts = [g for g in parts if g.area >= 1.0]
             if not parts:
+                # Nothing survives the difference → the yielder lies
+                # (essentially) WHOLLY inside the kept shape.  A plain
+                # ``continue`` here left the fully-covered yielder in place
+                # (KEQY: service_junction #23, 109 m², entirely inside #21) —
+                # a 100 %-area self-overlap.  Drop the redundant yielder: the
+                # kept shape already covers its footprint at the same role, so
+                # removing it loses no coverage and kills the overlap.
+                drop_ids.add(id(ys))
+                n_clipped += 1
                 continue
             new_poly = max(parts, key=lambda g: g.area)
             # T-vertex conformance with the KEPT ring: a kept-shape
@@ -2387,6 +2401,8 @@ def _deconflict_service_overlaps(
             # keep the STRtree list coherent for later pairs
             polys[a if ys is sa else b] = new_poly
             n_clipped += 1
+    if drop_ids:
+        layout.shapes = [s for s in layout.shapes if id(s) not in drop_ids]
     return n_clipped
 
 

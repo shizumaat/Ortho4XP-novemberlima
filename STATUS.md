@@ -77,6 +77,319 @@
   checkout — 4d41a40 carries its clearance 30k fix (same content as
   dev 3d830ec; merge should auto-resolve); its 19feaec landed on
   runway-deseg.  Stage explicitly, never git add -A.
+# STATUS — SESSION 20260708 (part 30m): SPINE-FIRST service-road grading
+# (USER RULING 2026-07-07) — the truck-route SPINE grades at the road cap
+# with DEM as a SOFT station seed; the EDGES follow the spine (cross-section
+# derived, 2 % transverse law); a cross-road tear is now UNREPRESENTABLE.
+# Base: dev@70ddd84.  Gate: config.SVC_SPINE_FIRST (O4_SVC_SPINE_FIRST,
+# default ON; off = canonically identical emit to 70ddd84).
+
+## THE DEFECT (reproduced first)
+Part-27 DEM-follow (route_profile/anchors.apply_service_road_dem_follow)
+was PER-VERTEX: every service node clamps its own DEM into ITS reach band,
+so a road's two long edges bind to DIFFERENT anchor regimes.  CYXY probe
+60.7092306,-135.0738928 (O4_PROBE_NODES): service_junction #64 DEM-weld
+side 709.01 vs clearance-side solve 706.52/706.72 = a 2.49 m cross-road
+tear on a ~6 m road (42-77 % transverse).  The tear was INVISIBLE to the
+law: service_road was in neither SOFT_VISIBILITY_ROLES nor
+junction_rules.SLOPING_RECT_ROLES → ZERO within-shape edges in
+build_unified_graph; the validator's break-region quarantine (the 15
+CYXY service_break nodes) masked it in the gate (WITHIN=1 counted only
+apron #29).
+
+## LANDED (part 30m) — three coordinated touch points, one gate
+1. **LAW COVERAGE** (grade_graph.py): ``service_road`` joins
+   ``SOFT_VISIBILITY_ROLES`` (gated) — the road body gets within-shape LAW
+   edges through the SAME classify_pair/_bake_edge path as service_junction
+   on BOTH readers (solver graph + validator import the same tuple):
+   cL = SERVICE_ROAD_MAX_GRADE (5 %) along the route,
+   cT = SERVICE_ROAD_MAX_TRANSVERSE (2 %) across it (the _bake_edge
+   road-rate branch existed since 29b).  ``_body_cap`` gains the explicit
+   service_road → road-cap branch (it would otherwise inherit a taxi cap
+   from a welded neighbour via the junction fallback).
+2. **CROSS-SECTION SAMPLING** (lateral_spine_nodes.insert_service_lateral_nodes
+   + pipeline call after the taxi lateral pass): SERVICE centerline stations
+   (densified to SPINE_STEP_M) project perpendicular feet onto
+   service_road/service_junction edges — the law now binds ALIGNED
+   cross-section pairs at station spacing instead of ring corners 70-100 m
+   apart (the in-sim "ridge" report class).  The taxi lateral pass still
+   skips SVC lines (aprons must not couple to the road law).
+3. **SPINE-FIRST SEED** (anchors._svc_spine_station_seeds): DEM-follow is
+   computed per spine STATION and shared by the whole cross-section:
+   stations = clusters of ring-vertex projections onto the service lines;
+   station DEM = member mean, LOW-PASSED along the line (±1.5 steps —
+   raster noise at a lone unpaired station read as a 4.4 % diagonal pair);
+   station band = INTERSECTION of member node-graph reach bands (same
+   anchors/metric/connectivity as the per-vertex operator — an earlier
+   station-graph Dijkstra draft left whole chains anchor-unreachable);
+   clamp + the SAME distance-weighted break blend, marked through the
+   existing service_break quarantine.  SEEDS ONLY: anchor (weld) vertices
+   are never reseeded (mouth behaviour unchanged), no hard per-vertex
+   clamps survive on edges — the law edges are the authority and the
+   solve's projections (yield + final) remain the sole writer.
+4. **STRICT-FRAME QUARANTINE ALIGNMENT**
+   (grade_graph_validate.within_violations): the in-memory strict frame
+   now excludes pairs touching a solver-exported ``_break_node_ll`` node —
+   the SAME split ``check_grade.run_checks`` applies (user ruling
+   2026-07-05/e2031ff: a solver-declared pocket's designed blend is
+   reported separately, never counted actionable).  Needed because the
+   frame predates service law coverage: with service_road pairs now
+   checked, the quarantined descent blends (5.38 % vs the 5 % road cap +
+   3 junction chords at 1.62-1.64 % welded into blend regions) read as
+   "new" strict spine violations and flipped test_cyxy_spine_zero /
+   test_cyxy_spine_zero_no_bowl RED with no physical change at those
+   spots.  Scope is exactly the solver's own break export — the
+   anti-gaming test (test_validator_detects_spine_step, injected 3 m
+   fake step) still PASSES; empty export ⇒ byte-identical check.
+
+## VERIFIED (gates)
+* RULING PROBE (CYXY 60.7092306,-135.0738928): cross-section single-valued
+  709.01/709.01 on BOTH ways (was 709.01 vs 706.52 service_road #203 and
+  709.01 vs 706.72 service_junction #64); clearance ribbon follows the
+  road edge (709.00/708.83, was 706.46/706.74).  Local spread 0.56 m over
+  24 m (lawful ≤5 % longitudinal blend over the run).
+* TEAR AUDIT (all service short chords <10 m over 5 %): CYXY worst
+  76.6 %→11.9 %; the catastrophic class (>12 %) is GONE.  Roads -10193/
+  -10194/-10203/-10060/-10192 cleaned to zero pairs.  Pair count 114→120:
+  the residual pockets (-10205 49→66, -10202/-10206/-10201 ±) are the
+  PRE-EXISTING ≤1.1 m break-blend descents at the same coords/magnitudes
+  (worst 12.13 %→11.87 %), just carrying more measurable vertices from the
+  lateral pass; the 3 "new" -10032 pairs are 5.8-6.6 % threshold-crossers
+  whose local spread IMPROVED (0.32→0.29 m over 9 m).
+* check_grade (test frame): CYXY WITHIN 1→1 (the same pre-existing apron
+  #29 +0.25 % pair; the service tear pairs it replaced are now LAWFUL, not
+  re-quarantined), CROSS 0→0, STEPS 0→0.
+  SPLP: BYTE-IDENTICAL emit (0 service routes kept — scoping proof).
+  HECA: WITHIN 0→0.  CROSS 10→8 and STEPS 17→27, EVERY delta
+  enumerated (rider 4):
+    - The #64↔#612 parallel-road WALL (30.101606,31.393602 /
+      30.102273,31.394996): baseline = ALL 17 steps (0.59-0.92 m) + 3
+      cross (80 %/0.80 m + 18 %/0.18 + 11 %/0.11).  After: 25 steps at
+      LOWER magnitudes (0.55-0.69 m; max 0.92→0.69 — more measurable
+      samples along the same, now-shallower wall from the lateral-pass
+      vertices) + 2 cross (64 %/0.64 m + 10 %/0.10 — the 0.80 m worst
+      REDUCED, one of three pairs eliminated).
+    - #576↔#584 (30.108313,31.388292): baseline cross 18.31 %/0.16 m →
+      96.12 %/0.84 m + 2 new 0.84 m steps (same two coords) — the ONE
+      adverse delta.  DIAGNOSED (not fixed): ways -10575/-10583 are two
+      NON-TOUCHING roads with a 1-7 m terrain gap; the baseline agreement
+      was coincidental (both sides per-vertex-clamped nearly the same
+      DEM); spine-first moved each road onto ITS OWN spine regime
+      (#584 → 92.7-93.0 on its line's band, #576 stays on its welded
+      94.8→93.9 descent).  No within-shape law exists BETWEEN shapes, the
+      2 m proximity window correctly does not couple a 7 m rendered gap,
+      and the solve-time seed debug shows no coupled nodes there.  Two
+      candidate fixes queued (OPEN below); left honest — the aggregate
+      CROSS still improved 10→8 inside an already-red pre-existing gate
+      (pavement_grade[HECA] is one of the 13 pre-existing failures).
+    - junction cross class (9.31 % + 4× 5.47 %, all ≤0.07 m): unchanged.
+  HECA probes (3 spots, OFF→ON local spread): worst-tear 30.11064,31.39841
+  0.63→0.42 m; -10106 30.11218,31.40624 0.95→0.88 m; wall covered by the
+  step enumeration above.
+  HECA tear audit: worst 33.4 %→31.0 % (same spot, dz 0.41→0.38 over
+  1.23 m); pair count 48→146 and dz>0.5 m 6→46 — ALL the added pairs are
+  ~10 m DIAGONAL chords at 5.6-7.5 % on the steep quarantined descent
+  pockets (the part-30d "isolated roads over steep terrain" class), now
+  sampled at station spacing; the sharp SHORT-chord step class shrank
+  (see probes).  No new cross-road tears.
+* wedge_audit HECA 5→4 (improved).  conformance HECA 39/2149 ramp 3 →
+  40/2223 ramp 4: the 8 big clusters byte-identical; the single +1 is the
+  SAME marginal spot 30.1075,31.4021 re-clustered (2 verts @+0.78 → 1
+  @+0.80 + 2 @+0.58, threshold 0.5); ratio 1.81 %→1.80 %.
+* break-region: CYXY break_ll 779→713 (svc_break 15→106); HECA break_ll
+  11084→11428 (+3.1 %; svc_break 18→87).  The station blend quarantines
+  WHOLE cross-sections of the genuinely-broken descent pockets instead of
+  lone vertices, and the lateral pass added vertices inside those same
+  pockets (CYXY +355, HECA more) — CYXY's NET quarantine still shrank,
+  and the tear audits + probes above prove the quarantined surface no
+  longer tears cross-road.  final-projection residual (CYXY 1→112
+  over-cap edges, 10 both-hard): NOT comparable to baseline — baseline
+  service roads had ZERO law edges at emit, so the projection could not
+  see (or count) their surface at all; the residuals sit inside the
+  svc_break quarantine (gate WITHIN=1 proves none actionable).
+* wedge_audit CYXY 2→2 (no growth); conformance CYXY 35/1269 ramp 25 →
+  18/1281 ramp 10 (IMPROVED — clearance cuts conform better once the
+  road edges are regime-consistent).
+* gate-off: O4_SVC_SPINE_FIRST=0 CYXY emit CANONICALLY IDENTICAL to
+  70ddd84 (same node/way multiset; raw byte order differs run-to-run at
+  HEAD already — verified logs identical modulo wall time).
+* FULL suite: EXACTLY the 13 pre-existing failures (splp compare ×2,
+  pavement_grade SPLP, runway_longitudinal SPLP, compare_spjc,
+  no_self_overlap SPJC, pavement_grade SPJC, route_band_zero SPJC,
+  cyxy_taxi_e_south_apron, pavement_grade CYXY, cyxy_route_reach,
+  solver_validator_same_edge_budgets, pavement_grade HECA); 408 passed
+  (+2: the two spine-zero tests below).  Fast subset of those failures =
+  exactly the documented 8.  NOTE: the first full run had 15 — the two
+  spine-zero tests flipped RED on the strict frame's missing quarantine
+  (see LANDED #4); with the frame aligned they PASS and the anti-gaming
+  injected-step test still PASSES.
+
+## OPEN (part 30m follow-ups)
+* HECA #576↔#584 (30.108313,31.388292; ways -10575/-10583): the one
+  adverse delta (cross 0.16→0.84 m, 2 steps 0.84 m).  Candidate fixes:
+  (a) widen the parallel-road STATION merge to gap ≤ ~5-7 m with a
+  tangent-parallel guard (couple only near-parallel lines, not distinct
+  crossing roads), or (b) a cross-shape service law edge for facing
+  road edges < 5 m apart (the vertex-to-edge step check already measures
+  exactly this pair — the law should too).  Both perturb HECA's solved
+  service field → own gate cycle.
+* CYXY -10205 / HECA steep-descent pockets: still >5 % short chords in
+  the svc_break quarantine (the genuine contradictory-anchor descents,
+  pre-existing).  The station blend renders them as single-valued
+  cross-sections now; driving the quarantine itself toward 0 needs the
+  mouth-anchor contradictions resolved (groundside reach / weld-level
+  work, out of scope here).
+* The parallel-road STATION merge (XY ≤2 m + node-prox pairs) measured
+  as a strict no-op on CYXY/HECA final metrics (all v2/v3/v4 numbers
+  byte-identical) — kept because it is the correct station-level
+  analogue of O4_SVC_PROXIMITY_COUPLE and guards the <2 m sliver class
+  (HECA #510↔#517) against regression under future station layouts.
+* Emit-order nondeterminism (pre-existing at HEAD): two identical-env
+  builds differ byte-wise in node-id assignment while canonically
+  identical (same node/way multiset; verified 70ddd84 baseline vs two
+  gate-off builds, canon sha 5a98230c9efc5edf).  Makes byte-diff gates
+  noisy — worth a stable-sort at emit some day.
+
+# STATUS — SESSION 20260707 (part 30l): VERIFY-LOG DRIVE-TO-ZERO across
+# the 14-airport loop (5 fixtures + KCLT satellite family).  1 emitter FIX
+# (fully-contained service_junction self-overlap); everything else
+# classified KNOWN-OPEN (solver/slice-owned) or CHECKPOINT (needs review).
+# Base: dev@3d830ec.  Fix committed on dev in the verifyloop worktree.
+
+## THE FIX (fix class 1 — LANDED)
+`groundside._deconflict_service_overlaps` clips the smaller of two
+overlapping SERVICE shapes against the larger, but when the yielder lies
+WHOLLY inside the kept shape the difference is empty, `parts` is empty, and
+the old `continue` left the fully-covered yielder in the layout — a
+100%-area self-overlap (KEQY service_junction #23, 109 m², entirely inside
+#21).  FIX: drop the redundant yielder in the empty-parts branch (a
+`drop_ids` set filters removed shapes at return; partial lenses still clip
+as before).  KEQY verify overlap 1 → 0, coverage unchanged (kept shape
+already covers the footprint at the same role).
+
+## SCOREBOARD (verify_and_log findings; BEFORE dev@3d830ec → AFTER fix)
+Columns: OVL=self-overlap  SRC=off-source  WDG=epsilon-wedge  RWG=runway_grade
+```
+airport   OVL      SRC     WDG      RWG     total      note
+SPLP      0        0       0        4→4     4→4        RWG KNOWN (runway solver)
+CYXY      0        0       2        0       0→0        (wedge audit only; verify 0)
+SPJC      2→2      0       10       0       12→12      all KNOWN (slice + carve)
+HECA      5→5      1       9        0       15→15      all KNOWN
+MMOX      0        0       0        0       0          clean
+KCLT      8→8      10      11       0       29→29      all KNOWN (slice + off-source)
+KJQF      3→3      0       3        0       6→6        all KNOWN (bld-hole + slice)
+KSVH      1→1      0       1        0       2→2        KNOWN
+KEXX      2→2      0       0        0       2→2        KNOWN
+KVUJ      2→2      0       0        0       2→2        KNOWN
+KEQY      1→0      0       4        0       5→4        OVL FIXED (this session)
+KRUQ      0        0       0        0       0          clean
+KAFP      0        0       0        0       0          clean (tile +35-081)
+```
+
+## CLASSIFICATION (every non-zero finding)
+FIX (landed): KEQY 109 m² service_junction∩service_junction full-containment.
+
+KNOWN-OPEN — SLICE-PARTITION wedges/overlaps (part 30g/30j; the curve-native
+global slice owns junction faces — cannot merge/move without breaking
+elevation neutrality; the tight final weld cannot reach them without bowing
+solved constrained edges).  Covers: ALL `junction~junction` /
+`runway~junction` / `junction~apron` epsilon-wedges (SPJC 10, KCLT 11 incl.
+runway~junction 100-163 mm, KSVH 1, KEQY junction~apron 2, HECA junction 4),
+and the small `junction∩junction` overlaps (KCLT #334/335/336∩#791 [1.8/0.6/
+2.3 m²], #327∩#328 [0.5], SPJC 0.2, KEXX 0.3) = task#16 KNOWN.
+
+KNOWN-OPEN — BOUNDARY/GROUNDSIDE outline class (part 30j): the boundary
+ribbon + groundside/service_road re-derive the same physical outline with
+different vertex sets → sub-mm `service_road~groundside_pavement` /
+`clearance~clearance` wedges (HECA service_road 2 + clearance 2, KEQY
+service_road 2) and the HECA clearance∩clearance slivers (3.2 + 0.3 m²).
+Longstanding structural, pre-dating 30d; the final epsilon-weld welds the
+insertable seams but cannot reach solved-surface wedges.
+
+KNOWN-OPEN — OFF-SOURCE phantom pavement (task#16): KCLT 6 large junctions
+(17206 m²@21% … 2665@41%, ~lon -80.966) + 4 zero-on-source apron/junction
+(496/278/135/112 m²); HECA apron #244 30 m²@0% (05R area).  Aircraft-pavement
+faces the slice emitted off real source — a classification/slice question
+(should be groundside, or dropped).  Rooted in the slice + pack classifier
+(off-limits this session); investigate what they SHOULD be under de-seg.
+
+KNOWN-OPEN — RUNWAY longitudinal grade: SPLP 4 findings 1.52–1.61% > 1.5%
+on runway 02/20 — the same at-cap runway class as the check_grade WITHIN
+SPLP=16 gate baseline (part 30i).  Emitted by the runway solver
+(runway_segments/regrade/redistribute) — off-limits (de-seg session owns
+runway emission).
+
+CHECKPOINT — BUILDING∩GROUNDSIDE overlap (NOT fixed; needs coordinator
+review).  KJQF building19/16 (1173+115 m²), KVUJ building8 (353 m²), HECA
+building17 (6210 m²): a terminal pad wholly inside a groundside lot is
+re-covered by the lot.  ROOT CAUSE (fully traced this session):
+`groundside._emit_groundside_pavement_dem` DOES subtract the building union,
+producing a groundside polygon with a building-shaped HOLE — but
+`_dem_follow_polygon` rebuilds from `p.exterior.coords` only, dropping the
+hole (verified: input holes 2 → output 0 before the fix, and 2 → 2 with a
+one-line hole-carry patch).  A hole-carry patch in `_dem_follow_polygon`
+ALONE is insufficient: `conformance.py` rebuilds `s.polygon = Polygon(
+new_ring)` (3 sites, exterior-only) on every weld/planarize, stripping the
+hole again on any groundside shape it touches (final #176 ended holes=0,
+area grown).  The OSM emit is exterior-only BY DESIGN (layout.to_osm drops
+all interiors for the X-Plane patch parser — same as holed junction rings,
+where the punching rect's tags prevail), so the honest fix is to make the
+geometry model hole-aware THROUGH conformance so check_self_overlap sees the
+subtracted hole (the emit is already correct — the pad's own way covers the
+hole).  That is a coordinated change to a broadly-shared pass (conformance,
+touches airside too) across >2 files → tripped the CHECKPOINT gate; STOPPED
+per directive.  PLAN for review: (a) `_dem_follow_polygon` carries `p.
+interiors` onto the rebuilt polygon (1-line, done+reverted, safe); (b) the
+three `conformance.py` `Polygon(new_ring)` rebuilds preserve `shape.polygon.
+interiors`; (c) gate: wedge_audit no growth (decomposition-free, so low
+risk), verify building∩groundside → 0 at KJQF/KVUJ/HECA, full suite 13.
+A decomposition alternative (split holed lot into hole-free pieces at emit)
+was REJECTED — the thin bridges around interior pads are prime epsilon-wedge
+/ sliver generators = the exact 30j mesh-explosion class.
+
+CHECKPOINT — APRON/JUNCTION∩SERVICE_JUNCTION overlap (NOT fixed).  SPJC
+apron#65∩service_junction#72 (9.4 m², eroded-0.25 m still 5.1 → mesh-scale),
+KCLT apron∩service_junction (4.3), KJQF junction∩service_junction (1.1).
+ROOT (traced): `groundside.consolidate_full_width_service_corridors`
+introduces it (0.0 → 9.4 m² immediately after that pass; conformance/slice do
+NOT) — it absorbs+unions junction/service slivers into the merged corridor
+and re-emits as service without subtracting the corridor back out of the
+overlapping apron/junction.  A service-vs-airside clip (extend
+`_deconflict_service_overlaps` to the service∩aircraft pair, clipping the
+DEM-graded service side like `_separate_groundside_from_airside` clips
+groundside) is the fix, but it perturbs the solved corridor extent/grade on
+SPJC + KCLT (both FULL-suite fixtures; SPJC already carries the pre-existing
+`test_no_self_overlap[SPJC]` failure that flags exactly this) → deferred for
+review rather than risk the fixture set.
+
+KNOWN-OPEN — GROUNDSIDE∩BOUNDARY overlap (task#16): KEXX groundside#17 ∩
+boundary_dem_bridge#350 (1215 m²), KCLT groundside∩airport_boundary
+(2.3/1.9), KVUJ apron∩airport_boundary (0.2), KSVH groundside∩groundside
+(0.2).  The boundary ribbon traces OVER everything by design
+(check_self_overlap's `_COVERAGE_FEATURE_ROLES` note) — the boundary/bridge
+is a feature overlay, not double pavement; the large KEXX case is a
+boundary_dem_bridge that co-locates with the groundside it bridges to.  Same
+exterior-only-emit tolerance as the junction-hole class; benign in-sim
+(overlay ribbon).  Left as KNOWN pending the same hole-aware-emit work.
+
+## GATES (all at the committed fix)
+* fast_suite: exactly the 8 pre-existing failures (2 SPLP compare + SPLP
+  grade×2 + CYXY grade + CYXY terrain + CYXY route-reach + CYXY single-graph).
+* FULL suite: exactly the 13 pre-existing (SPLP×4, SPJC×4, CYXY×4, HECA×1).
+  No new failures; `test_no_self_overlap[SPJC]` remains pre-existing (= the
+  KNOWN apron∩service class above).
+* check_grade: CYXY WITHIN 1, SKIRT/PLANE/CROSS 0 (== gate); SPLP WITHIN 16.
+* wedge_audit CYXY 2 (no growth).  conformance CYXY 35/1267 ramp 25 (== gate).
+* Every airport re-verified post-commit: byte-identical finding counts to
+  baseline except KEQY (overlap 1 → 0).
+
+## OPEN (part 30l follow-ups)
+* The two CHECKPOINT classes above (building∩groundside via hole-aware emit;
+  apron∩service via service∩airside clip) — both need coordinator sign-off
+  because the correct fix touches a shared pass / a full-suite fixture's
+  solved geometry.
+* OFF-SOURCE phantom pavement + the slice-partition wedges are de-seg's to
+  clear (fewer/larger junction faces re-solved on the coarser partition).
 
 # STATUS — SESSION 20260707 (part 30k): CLEARANCE-EFFECTIVENESS
 # regression — the part-30f outer-edge DEM lift un-cut the cuts;

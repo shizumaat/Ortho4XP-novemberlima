@@ -32,7 +32,8 @@ from .layout import ROLE_APRON, ROLE_JUNCTION, ROLE_SERVICE_JUNCTION
 
 _GEOM_EXC = (ValueError, GEOSException, TopologicalError)
 
-__all__ = ["insert_lateral_spine_nodes", "densify_junction_edges"]
+__all__ = ["insert_lateral_spine_nodes", "insert_service_lateral_nodes",
+           "densify_junction_edges"]
 
 # Body shapes that should sample the lateral corridor grade.
 _LATERAL_BODY_ROLES = frozenset({ROLE_APRON, ROLE_JUNCTION, ROLE_SERVICE_JUNCTION})
@@ -250,4 +251,135 @@ def insert_lateral_spine_nodes(layout, icao: str = "") -> int:
         UI.vprint(1, f"  [pav-builder] {icao}: inserted {n_added} lateral "
                   f"corridor node(s) on apron/junction edges within taxi-width "
                   f"of a spine.")
+    return n_added
+
+
+def insert_service_lateral_nodes(layout, icao: str = "") -> int:
+    """SPINE-FIRST service roads (config.SVC_SPINE_FIRST, part 30m): insert
+    lateral cross-section vertices on SERVICE shape edges from the SERVICE
+    (truck-route) centerlines, which :func:`insert_lateral_spine_nodes`
+    deliberately skips (SVC lines must not couple APRONS to the road law).
+
+    A service road's law edges (it joins ``grade_graph.SOFT_VISIBILITY_ROLES``
+    under the gate) are vertex-pair based, and a road's long edges can run
+    70-100 m with no intermediate vertex (the CYXY in-sim "ridge" report) —
+    the 2 % transverse law then binds only at the far-apart corners, whose
+    budget dwarfs the road width.  Projecting each spine STATION (centerline
+    vertices, densified to ~SPINE_STEP_M) onto both road edges gives the law
+    aligned cross-section pairs at station spacing: |Δz| across the road is
+    then capped at SERVICE_ROAD_MAX_TRANSVERSE × width everywhere — the
+    cross-road tear becomes unrepresentable.
+
+    Same foot-insertion mechanics as :func:`insert_lateral_spine_nodes`
+    (perpendicular foot, corner/merge tolerances); targets are the SERVICE
+    roles only.  Runs pre-solve immediately after the taxi lateral pass, so
+    conformance welds the new vertices into neighbouring shapes.  Returns the
+    number of vertices inserted."""
+    from .config import ROAD_CARVE_MAX_WIDTH_M, SPINE_STEP_M
+    from .layout import ROLE_SERVICE_ROAD
+    centerlines = getattr(layout, "apt_taxi_centerlines", None) or []
+    targets = [s for s in layout.shapes
+               if s.role in (ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION)
+               and s.polygon is not None and not s.polygon.is_empty
+               and s.polygon.geom_type == "Polygon"]
+    svc_lines = [cl for cl in centerlines
+                 if getattr(cl, "is_service", False)
+                 and getattr(cl, "line", None) is not None
+                 and not cl.line.is_empty]
+    if not targets or not svc_lines:
+        return 0
+
+    # Cross-section half-width: the widest pavement the road carve classifies
+    # (+ margin) so edge-hugging carved shapes still catch their feet.
+    hw = ROAD_CARVE_MAX_WIDTH_M / 2.0 + 2.0
+
+    polys = [s.polygon for s in targets]
+    tree = STRtree(polys)
+    inserts: dict = defaultdict(lambda: defaultdict(list))
+    rings = [_open(p) for p in polys]
+
+    def _stations(cs):
+        """Centerline vertices densified to ≤ SPINE_STEP_M spacing (a 1206
+        truck route can run long straight legs with sparse vertices — the
+        exact stretches that tear)."""
+        out = []
+        for k in range(len(cs) - 1):
+            ax, ay = cs[k]
+            bx, by = cs[k + 1]
+            out.append((ax, ay))
+            d = math.hypot(bx - ax, by - ay)
+            n_sub = max(0, int(math.ceil(d / SPINE_STEP_M)) - 1)
+            for j in range(1, n_sub + 1):
+                f = j / (n_sub + 1)
+                out.append((ax + f * (bx - ax), ay + f * (by - ay)))
+        out.append(cs[-1])
+        return out
+
+    for cl in svc_lines:
+        try:
+            cs = list(cl.line.coords)
+        except _GEOM_EXC:
+            continue
+        if len(cs) < 2:
+            continue
+        for (vx, vy) in _stations(cs):
+            P = Point(vx, vy)
+            try:
+                cand = tree.query(P.buffer(hw))
+            except _GEOM_EXC:
+                continue
+            for qi in cand:
+                si = int(qi)
+                ring = rings[si]
+                n = len(ring)
+                for ei in range(n):
+                    ax, ay = ring[ei]
+                    bx, by = ring[(ei + 1) % n]
+                    dx, dy = bx - ax, by - ay
+                    seg2 = dx * dx + dy * dy
+                    if seg2 < 1e-9:
+                        continue
+                    t = ((vx - ax) * dx + (vy - ay) * dy) / seg2
+                    if t <= 0.0 or t >= 1.0:
+                        continue
+                    fx, fy = ax + t * dx, ay + t * dy
+                    if math.hypot(fx - vx, fy - vy) > hw:
+                        continue
+                    L = math.sqrt(seg2)
+                    if t * L < _CORNER_TOL_M or (1.0 - t) * L < _CORNER_TOL_M:
+                        continue
+                    inserts[si][ei].append((t, (fx, fy)))
+
+    if not inserts:
+        return 0
+
+    n_added = 0
+    for si, by_edge in inserts.items():
+        ring = rings[si]
+        n = len(ring)
+        new_ring = []
+        for ei in range(n):
+            new_ring.append(ring[ei])
+            feet = sorted(by_edge.get(ei, []), key=lambda r: r[0])
+            last = None
+            for (_t, (fx, fy)) in feet:
+                if last is not None and math.hypot(fx - last[0],
+                                                   fy - last[1]) < _MERGE_TOL_M:
+                    continue
+                new_ring.append((fx, fy))
+                last = (fx, fy)
+                n_added += 1
+        if len(new_ring) <= n:
+            continue
+        try:
+            poly = Polygon(new_ring)
+            if poly.is_valid and not poly.is_empty:
+                targets[si].polygon = poly
+        except _GEOM_EXC:
+            continue
+
+    if n_added:
+        UI.vprint(1, f"  [pav-builder] {icao}: inserted {n_added} service "
+                  f"cross-section node(s) on road/service-junction edges from "
+                  f"the truck-route spine (spine-first law sampling).")
     return n_added

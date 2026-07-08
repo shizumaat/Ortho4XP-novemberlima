@@ -1279,6 +1279,274 @@ def apply_groundside_reach(layout, bucket_to_idx, elev, cap):
     return n, hard
 
 
+def _svc_spine_station_seeds(layout, svc_nodes, node_pos, anchors,
+                             dem_elev, cap, node_ceil, node_floor,
+                             node_ceil_dist, node_floor_dist,
+                             prox_pairs=()):
+    """SPINE-FIRST seed field (config.SVC_SPINE_FIRST, part 30m): the service
+    network's DEM-follow computed per spine STATION and shared by the whole
+    cross-section, instead of per ring vertex.
+
+    Per-vertex DEM-follow let a road's two long edges bind to DIFFERENT
+    anchor regimes (each side clamps into the reach band of ITS nearest
+    welds), which rendered a cross-road tear — CYXY 2.49 m at
+    60.7092306,-135.0738928.  Here the ROAD HUGS TERRAIN LONGITUDINALLY
+    within its cap along the spine, and every ring vertex of a cross-section
+    takes the SAME station value, so a tear across the road cannot even be
+    seeded.  These are SEEDS ONLY (soft): the road's within-shape law edges
+    (``grade_graph.SOFT_VISIBILITY_ROLES`` + the service lateral pass, same
+    gate) are the authority and the solve's final projections remain the
+    sole writer.
+
+    Mechanism, mirroring the per-vertex operator 1:1 but on stations:
+      * stations = clusters of the service ring vertices' perpendicular
+        projections onto the service (truck-route) centerlines — the spine
+        arclength is the station coordinate, so opposite-edge partners
+        (aligned by ``insert_service_lateral_nodes``) share one station;
+      * station DEM = mean vertex DEM of the cluster, LOW-PASSED along the
+        line (±~1.5 station steps) — the seed follows terrain at station
+        wavelength, not raster noise (a lone unpaired station otherwise
+        imprints its own DEM sample as a cross/diagonal step);
+      * station band = the INTERSECTION of the member vertices' node-graph
+        reach bands (``[max member floor, min member ceil]``) — the SAME
+        cap-Lipschitz reach the per-vertex operator used, so connectivity
+        to the mouth welds is inherited from the proven node graph (an
+        earlier separate station-graph Dijkstra left whole chains
+        anchor-unreachable), while the INTERSECTION makes both edges obey
+        BOTH sides' anchors at once;
+      * clamp + the SAME distance-weighted break blend as the per-vertex
+        path (an empty intersection is exactly the old two-regime
+        contradiction, now surfaced once per cross-section); broken
+        stations quarantine their members through the existing
+        ``service_break`` machinery.
+
+    Returns ``(node_target, broken_nodes)``: seed values for the non-anchor
+    vertices that found a station (vertices with no spine within reach — wide
+    service-junction yards — keep the legacy per-vertex path), and the subset
+    belonging to genuinely broken stations."""
+    import math as _m
+    from auto_patch.config import ROAD_CARVE_MAX_WIDTH_M, SPINE_STEP_M
+
+    try:
+        from shapely.geometry import LineString, Point
+        from shapely.strtree import STRtree
+    except Exception:                                   # pragma: no cover
+        return {}, set()
+
+    lines = []
+    for cl in (getattr(layout, "apt_taxi_centerlines", None) or []):
+        if not getattr(cl, "is_service", False):
+            continue
+        ln = getattr(cl, "line", None)
+        if ln is None or getattr(ln, "is_empty", True):
+            continue
+        try:
+            cs = list(ln.coords)
+        except Exception:
+            continue
+        if len(cs) >= 2:
+            lines.append(LineString(cs))
+    if not lines:
+        return {}, set()
+
+    R = ROAD_CARVE_MAX_WIDTH_M / 2.0 + 2.0
+    tree = STRtree(lines)
+
+    # node → (line_idx, arclength) for the nearest service line within R.
+    node_station_raw: dict = {}
+    for i in sorted(svc_nodes):
+        p = node_pos.get(i)
+        if p is None:
+            continue
+        P = Point(p)
+        try:
+            cand = tree.query(P.buffer(R))
+        except Exception:
+            continue
+        best = None
+        for qi in cand:
+            li = int(qi)
+            d = lines[li].distance(P)
+            if d <= R and (best is None or d < best[0]):
+                best = (d, li, lines[li].project(P))
+        if best is not None:
+            node_station_raw[i] = (best[1], best[2])
+    if not node_station_raw:
+        return {}, set()
+
+    # Cluster per-line arclengths into stations (cross-section partners
+    # project to near-identical s; 2.0 m absorbs foot/weld noise while
+    # staying far under the ~12 m station spacing).
+    _CLUSTER_GAP_M = 2.0
+    by_line: dict = {}
+    for i, (li, s) in node_station_raw.items():
+        by_line.setdefault(li, []).append((s, i))
+    stations: list = []          # station → dict(line, s, members)
+    node_station: dict = {}
+    for li, lst in by_line.items():
+        lst.sort()
+        cur = None
+        for (s, i) in lst:
+            if cur is None or s - cur["s_max"] > _CLUSTER_GAP_M:
+                cur = {"line": li, "s_sum": 0.0, "s_max": s, "n": 0,
+                       "members": []}
+                stations.append(cur)
+            cur["s_sum"] += s
+            cur["s_max"] = max(cur["s_max"], s)
+            cur["n"] += 1
+            cur["members"].append(i)
+            node_station[i] = len(stations) - 1
+    for st in stations:
+        st["s"] = st["s_sum"] / st["n"]
+
+    # Station XY + per-line ordered station lists.
+    st_xy = {}
+    for sid, st in enumerate(stations):
+        q = lines[st["line"]].interpolate(st["s"])
+        st_xy[sid] = (q.x, q.y)
+    by_line_sid: dict = {}
+    for sid, st in enumerate(stations):
+        by_line_sid.setdefault(st["line"], []).append(sid)
+
+    # PARALLEL-ROAD STATION MERGE — the station-level analogue of the node
+    # graph's O4_SVC_PROXIMITY_COUPLE (part 27, HECA #510↔#517): two service
+    # lines running < ~2 m apart carry separate station chains, so each
+    # road's cross-section would seed from ITS line alone and the pair can
+    # re-open the metre-scale wall the node coupling closed (measured at
+    # HECA #576↔#584: cross-shape 0.16 m → 0.84 m without this merge).
+    # Stations of DIFFERENT lines within the window share ONE merged member
+    # set → one DEM mean, one band intersection, one target.  Union-find;
+    # the merged station keeps the first sid as root.
+    _PROX_M = 2.0
+    parent = list(range(len(stations)))
+
+    def _find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    _grid: dict = {}
+    for sid, (x, y) in st_xy.items():
+        _grid.setdefault((int(x // _PROX_M), int(y // _PROX_M)),
+                         []).append(sid)
+    for (cx, cy), cell in _grid.items():
+        neigh = []
+        for ox in (-1, 0, 1):
+            for oy in (-1, 0, 1):
+                neigh.extend(_grid.get((cx + ox, cy + oy), ()))
+        for a in cell:
+            ax, ay = st_xy[a]
+            for b in neigh:
+                if b <= a or stations[b]["line"] == stations[a]["line"]:
+                    continue
+                bx, by = st_xy[b]
+                if _m.hypot(ax - bx, ay - by) <= _PROX_M:
+                    ra, rb = _find(a), _find(b)
+                    if ra != rb:
+                        parent[max(ra, rb)] = min(ra, rb)
+    # … and through the NODE couples (the exact part-27 proximity notion):
+    # two parallel lines' stations are longitudinally OFFSET in general, so
+    # the XY merge above can miss them (HECA #576↔#584 stayed 0.84 m apart
+    # with XY-merge alone) — but their RING nodes across the sliver are
+    # coupled, and coupled nodes' stations must share one cross-section.
+    for (i, j) in prox_pairs:
+        si, sj = node_station.get(i), node_station.get(j)
+        if si is None or sj is None or si == sj:
+            continue
+        ra, rb = _find(si), _find(sj)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+    _merged = 0
+    for sid in range(len(stations)):
+        r = _find(sid)
+        if r != sid:
+            stations[r]["members"].extend(stations[sid]["members"])
+            for i in stations[sid]["members"]:
+                node_station[i] = r
+            stations[sid]["members"] = []
+            _merged += 1
+
+    # Raw station DEM = mean member DEM; then LOW-PASS along each line so a
+    # lone unpaired station cannot imprint a raster-noise step on the seed
+    # (measured at CYXY -10193: adjacent raw stations 718.86/719.07/718.99
+    # → a 4.4 % diagonal pair the projections had already frozen into the
+    # clearance welds by emit time).
+    raw_de: dict = {}
+    for sid, st in enumerate(stations):
+        dems = [dem_elev[i] for i in st["members"]
+                if i < len(dem_elev) and dem_elev[i] is not None]
+        if dems:
+            raw_de[sid] = sum(dems) / len(dems)
+    _SMOOTH_M = 1.5 * SPINE_STEP_M
+    smooth_de: dict = {}
+    for li, sids in by_line_sid.items():
+        sids.sort(key=lambda k: stations[k]["s"])
+        with_de = [k for k in sids if k in raw_de]
+        for k in with_de:
+            s0 = stations[k]["s"]
+            window = [raw_de[j] for j in with_de
+                      if abs(stations[j]["s"] - s0) <= _SMOOTH_M]
+            smooth_de[k] = sum(window) / len(window)
+
+    # Station reach band = INTERSECTION of the member vertices' node-graph
+    # bands — the same anchors, the same cap-Lipschitz metric, the proven
+    # connectivity (ring edges + proximity couples), but binding BOTH edges
+    # of the cross-section to BOTH sides' anchors at once.
+    import os as _os
+    _dbg_spec = _os.environ.get("O4_SVC_SPINE_DEBUG_LL")
+    _dbg_xy = None
+    if _dbg_spec:
+        try:
+            _dla, _dlo = (float(v) for v in _dbg_spec.split(","))
+            _dbg_xy = layout.ll_to_m(_dla, _dlo)
+        except Exception:
+            _dbg_xy = None
+
+    node_target: dict = {}
+    broken_nodes: set = set()
+    for sid, st in enumerate(stations):
+        de = smooth_de.get(sid)
+        if de is None:
+            continue                    # no DEM sample → legacy per-vertex
+        m_ceil = [node_ceil[i] for i in st["members"] if i in node_ceil]
+        m_floor = [node_floor[i] for i in st["members"] if i in node_floor]
+        c = min(m_ceil) if m_ceil else None
+        f = max(m_floor) if m_floor else None
+        broken = False
+        if c is None:                   # unreachable from any anchor → DEM
+            tgt = de
+        elif f is not None and f > c + 1e-9:
+            # genuine break — SAME distance-weighted blend as the
+            # per-vertex operator, computed once for the cross-section
+            # (weights = mean member reach distances to each regime).
+            dcs = [node_ceil_dist[i] for i in st["members"]
+                   if i in node_ceil_dist]
+            dfs = [node_floor_dist[i] for i in st["members"]
+                   if i in node_floor_dist]
+            dc = (sum(dcs) / len(dcs)) if dcs else 0.0
+            df = (sum(dfs) / len(dfs)) if dfs else 0.0
+            t = dc / (dc + df) if (dc + df) > 1e-9 else 0.5
+            tgt = c + (f - c) * t
+            broken = True
+        else:
+            lo = f if f is not None else -float("inf")
+            tgt = min(max(de, lo), c)
+        for i in st["members"]:
+            node_target[i] = tgt
+            if broken:
+                broken_nodes.add(i)
+        if _dbg_xy is not None:
+            sx, sy = st_xy[sid]
+            if _m.hypot(sx - _dbg_xy[0], sy - _dbg_xy[1]) < 12.0:
+                print(f"    [svc-spine-dbg] sid={sid} line={st['line']} "
+                      f"s={st['s']:.1f} n={st['n']} de_raw={raw_de.get(sid)} "
+                      f"de={de:.2f} ceil={c} floor={f} "
+                      f"tgt={tgt:.2f} broken={broken} "
+                      f"members={sorted(st['members'])}")
+    return node_target, broken_nodes
+
+
 def apply_service_road_dem_follow(layout, bucket_to_idx, elev, dem_elev, cap,
                                   anchor_extra=()):
     """Grade the service-road network to FOLLOW DEM at <=cap (user 2026-06-27).
@@ -1292,6 +1560,11 @@ def apply_service_road_dem_follow(layout, bucket_to_idx, elev, dem_elev, cap,
     of being held flat in the bowl (SVC4 was ~6-11 m below terrain).  The
     road-vs-airside seam is by design (``check_grade._airside_groundside_pair``), so
     rising past a flat neighbour is not a step.
+
+    SPINE-FIRST (config.SVC_SPINE_FIRST, default ON, part 30m): the DEM target
+    is computed per spine STATION (shared by the whole cross-section) instead
+    of per vertex — see ``_svc_spine_station_seeds``.  ``O4_SVC_SPINE_FIRST=0``
+    restores the per-vertex behaviour below byte-identically.
 
     Mutates ``elev`` in place; returns the set of node indices it moved."""
     import heapq
@@ -1340,6 +1613,7 @@ def apply_service_road_dem_follow(layout, bucket_to_idx, elev, dem_elev, cap,
     # grade against the union of their anchors at ≤cap across the gap,
     # and genuinely contradictory anchors resolve through the same
     # break blend as any interior node.
+    prox_pairs: list = []       # (i, j) couples — also merges spine stations
     if _os.environ.get("O4_SVC_PROXIMITY_COUPLE", "1") == "1":
         import math as _m
         _PROX_M = 2.0
@@ -1364,6 +1638,7 @@ def apply_service_road_dem_follow(layout, bucket_to_idx, elev, dem_elev, cap,
                     if 1e-6 < dd <= _PROX_M:
                         adj[i].append((j, dd))
                         adj[j].append((i, dd))
+                        prox_pairs.append((i, j))
 
     # Anchors = service nodes that are ALSO a corner of a NON-service pavement shape
     # (the road welds to the airside there), held at their solved elevation; plus
@@ -1437,8 +1712,28 @@ def apply_service_road_dem_follow(layout, bucket_to_idx, elev, dem_elev, cap,
     # (HECA #578↔#64: a junction weld 1 m from a road capped 0.8 m lower).
     service_break: set = getattr(layout, "_service_break_idx", None) or set()
     layout._service_break_idx = service_break
+    # SPINE-FIRST (config.SVC_SPINE_FIRST, part 30m): DEM-follow computed per
+    # spine STATION and shared by the whole cross-section — see
+    # ``_svc_spine_station_seeds``.  Vertices with no station (wide
+    # service-junction yards beyond spine reach) keep the legacy per-vertex
+    # path below; anchor (weld) vertices are never reseeded on either path.
+    from auto_patch.config import SVC_SPINE_FIRST as _SPINE_FIRST
+    spine_target: dict = {}
+    spine_broken: set = set()
+    if _SPINE_FIRST:
+        spine_target, spine_broken = _svc_spine_station_seeds(
+            layout, svc_nodes, node_pos, anchors, dem_elev, cap,
+            ceil, floor, ceil_dist, floor_dist, prox_pairs)
     for i in svc_nodes:
         if i in anchors:
+            continue
+        if i in spine_target:
+            tgt = spine_target[i]
+            if i in spine_broken:
+                service_break.add(i)
+            if abs(tgt - elev[i]) > 1e-3:
+                elev[i] = tgt
+                changed.add(i)
             continue
         de = dem_elev[i] if i < len(dem_elev) else None
         if de is None:
