@@ -375,6 +375,58 @@ def _runway_rect_cross_ends(s, coords, axis=None):
     return out
 
 
+def _runway_single_poly_cross_stations(shape, coords, axis):
+    """Longitudinal-profile samples for a DE-SEGMENTED single-poly runway
+    ring (``O4_RUNWAY_SINGLE_POLY``).
+
+    A de-segmented runway emits as ONE polygon ring per ref whose profile
+    stations live as interior LONG-EDGE vertices, not as separate sub-rect
+    ends.  ``_runway_rect_cross_ends`` clusters a shape's corners at its two
+    EXTREME axis stations (correct for a segmented sub-rect, where every
+    segment boundary was a distinct rect end) — but on a single ring that
+    sees ONLY the runway's two physical ends, so the whole interior profile
+    goes dark.  Here we cluster the RING'S OWN vertices by axis station:
+    project every vertex onto the ref axis, sort by station, group vertices
+    within the same 5.0 m tolerance the downstream sample merge uses (so a
+    station's two long-edge vertices — one per side — collapse to one
+    sample), and emit ``(mean_x, mean_y, MIN elevation)`` per cluster.
+
+    The MIN convention matches ``_runway_rect_cross_ends``: it takes the
+    EDGE profile and excludes a crown-ridge / crossing-dome-lifted vertex
+    that sits higher at the same station.  Per-vertex elevations are read
+    from ``node_altitudes`` (same accessor as ``_runway_rect_cross_ends``);
+    a fully-flat ring carrying a single ``altitude`` tag yields equal
+    elevations → zero grades.
+    """
+    n = len(coords)
+    if shape.node_altitudes and len(shape.node_altitudes) >= n:
+        cluster_elevations = [float(shape.node_altitudes[i]) for i in range(n)]
+    elif shape.altitude is not None:
+        cluster_elevations = [float(shape.altitude)] * n
+    else:
+        return []
+    ox, oy, ux, uy, _length = axis
+    stations = [((coords[i][0] - ox) * ux + (coords[i][1] - oy) * uy)
+                for i in range(n)]
+    order = sorted(range(n), key=lambda i: stations[i])
+    out = []
+    group: list = []          # vertex indices in the current station cluster
+
+    def _emit(group_indices):
+        return (sum(coords[j][0] for j in group_indices) / len(group_indices),
+                sum(coords[j][1] for j in group_indices) / len(group_indices),
+                min(cluster_elevations[j] for j in group_indices))
+
+    for i in order:
+        if group and stations[i] - stations[group[-1]] > 5.0:
+            out.append(_emit(group))
+            group = []
+        group.append(i)
+    if group:
+        out.append(_emit(group))
+    return out
+
+
 def check_runway_profile(layout, end_grade_cap="default",
                          check_curvature: bool = True, noise_m: float = 0.10):
     """Invariant: the EMITTED runway longitudinal profile must obey the
@@ -442,9 +494,56 @@ def check_runway_profile(layout, end_grade_cap="default",
         ox, oy, ux, uy, L = ax
         if L <= 0:
             continue
+        # Crossing-influence exclusion (de-segmented single-poly rings only —
+        # a gate-off runway carries no ``from_single_poly`` shape, so
+        # ``crossing_zones`` stays empty and the legacy path below is
+        # byte-identical).  A single-poly ring is CARVED at each runway-runway
+        # crossing: the crossing slab is removed from the ring and emitted as a
+        # separate ``runway_crossing`` shape (not role=="runway", so it is
+        # invisible to this check).  That leaves a GAP in the sample chain; the
+        # segment spanning the gap — and the carve-edge segment on either side,
+        # where the crossing crown DOME perturbs the MIN-per-station edge value
+        # — reconstruct a phantom grade/curvature kink the ground-truth (fully
+        # segmented) profile does not carry (measured at CYXY: gate-off 0
+        # findings, gate-on 2 phantom curvature findings on ``14R/32L`` at its
+        # ``02/20+14R/32L`` crossing).  The crossing's OWN longitudinal profile
+        # is governed by the crossing junction, not this runway check, so
+        # exclude any profile segment whose station interval touches a crossing
+        # slab (expanded by the 5 m merge tolerance for float robustness).  Do
+        # NOT widen ``noise_m`` for this — the wobble is localized to the
+        # crossing, not a global quantization effect.
+        crossing_zones: list = []
+        if any(getattr(s, "from_single_poly", False) for s, _ in items):
+            ref_tokens = set((ref or "").split("+"))
+            for xs in layout.shapes:
+                if (xs.role or "") != "runway_crossing":
+                    continue
+                if not (set((xs.ref or "").split("+")) & ref_tokens):
+                    continue
+                if xs.polygon is None or xs.polygon.is_empty:
+                    continue
+                xstations = [((x - ox) * ux + (y - oy) * uy)
+                             for x, y in xs.polygon.exterior.coords]
+                if xstations:
+                    crossing_zones.append(
+                        (min(xstations) - 5.0, max(xstations) + 5.0))
+
+        def _touches_crossing(station_lo, station_hi):
+            return any(station_lo <= hi and station_hi >= lo
+                       for lo, hi in crossing_zones)
+
         samples = []              # (dist_along_axis, elev, x, y)
         for s, cs in items:
-            for (mx, my, e) in _runway_rect_cross_ends(s, cs, axis=ax):
+            # De-segmented single-poly rings carry their profile as interior
+            # long-edge vertices — cluster the ring's OWN vertices per station
+            # (the extreme-station cross-end reconstruction below sees only the
+            # two physical ends on a ring and misses the interior profile).
+            # Legacy segmented sub-rects keep the exact current path.
+            if getattr(s, "from_single_poly", False):
+                station_samples = _runway_single_poly_cross_stations(s, cs, ax)
+            else:
+                station_samples = _runway_rect_cross_ends(s, cs, axis=ax)
+            for (mx, my, e) in station_samples:
                 samples.append(((mx - ox) * ux + (my - oy) * uy, e, mx, my))
         if len(samples) < 2:
             continue
@@ -461,28 +560,34 @@ def check_runway_profile(layout, end_grade_cap="default",
                 merged.append((d, e, mx, my, 1))
         if len(merged) < 2:
             continue
-        grades = []               # (g, seg_len, mid_x, mid_y)
+        grades = []               # (g, seg_len, mid_x, mid_y, at_crossing)
         for i in range(len(merged) - 1):
             d0, e0, x0, y0, _ = merged[i]
             d1, e1, x1, y1, _ = merged[i + 1]
             seg = d1 - d0
             if seg < 0.5:
                 continue
+            at_crossing = _touches_crossing(d0, d1)
             fi, fj = d0 / L, d1 / L
             in_end = (min(fi, fj) < RUNWAY_END_FRACTION
                       or max(fi, fj) > 1.0 - RUNWAY_END_FRACTION)
             cap = (end_grade_cap if (in_end and end_grade_cap is not None)
                    else RUNWAY_MAX_GRADE)
-            if abs(e1 - e0) - cap * seg > noise_m:
+            if (not at_crossing) and abs(e1 - e0) - cap * seg > noise_m:
                 out.append(("grade", ref, abs(e1 - e0) / seg, cap,
                             _ll(layout, 0.5 * (x0 + x1), 0.5 * (y0 + y1))))
             grades.append(((e1 - e0) / seg, seg,
-                           0.5 * (x0 + x1), 0.5 * (y0 + y1)))
+                           0.5 * (x0 + x1), 0.5 * (y0 + y1), at_crossing))
         if not check_curvature:
             continue
         for i in range(len(grades) - 1):
-            gl, Ll, _xl, _yl = grades[i]
-            gr, Lr, mx, my = grades[i + 1]
+            gl, Ll, _xl, _yl, xl_cross = grades[i]
+            gr, Lr, mx, my, xr_cross = grades[i + 1]
+            # A grade change straddling a carved crossing (either segment
+            # touches the crossing slab) is a crown-dome artifact, not a real
+            # runway kink — the crossing junction owns that transition.  Skip.
+            if xl_cross or xr_cross:
+                continue
             max_dg = RUNWAY_MAX_GRADE_CHANGE_PER_M * 0.5 * (Ll + Lr)
             # Altitude-noise floor on the grade difference (each grade carries
             # ~noise_m/seg sampling noise).
