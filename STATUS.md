@@ -3,6 +3,28 @@
 # (Noah sign-off).  Gates green; to-zero worklist A1-A5 in flight
 # (docs/runway_single_polygon_plan.md Addendum 2 is the worklist).
 
+## POST-WRAP CONTINUATION (same day): FULL SUITE 8 → 6
+* 1ccd29f near-miss building frontage (S2): the SPJC pad↔apron 0.68 m
+  DSF-vs-apt.dat source offset sat just past SHARED_VERTEX_TOL_M in
+  ALL THREE reconcilers; fix = raise-biased soft anchors + law edges
+  toward the already-chosen pad seat (per-EDGE recognition — the
+  solve-time apron ring is sparse; stitch-tolerance widening REJECTED
+  to keep the 0.5 canonical identity).  SPJC steps 5→0,
+  pavement_grade[SPJC] GREEN; HECA building25 (0.81 m) also fixed →
+  pavement_grade[HECA] GREEN — verified standalone: the 27-step
+  service wall was NEVER test-visible (svc_break quarantine); the
+  test's real blockers were the proximity radius + this one step.
+  The wall stays open as an IN-SIM item (physical gates), agent on it.
+* 03dc527 adjacent-ground law slices 1+2 (behavior-inert): corridor
+  constants + STANDARDS rows + grade_law.adjacent_ground_envelope
+  (enforce-fully corridor semantics per Noah ruling 1) + 33 tests.
+  Slice 3 emitter in flight (gated OFF, phased CYXY-first, HECA
+  flat-airport corridor-cost checkpoint before any default talk).
+* Remaining full-suite 6: no_self_overlap[SPJC] + route_band_zero
+  [SPJC] (30l CHECKPOINT class) · pavement_grade[SPLP] (#66 5 cm/
+  0.8 m pair) · pavement_grade[CYXY] · cyxy_route_reach ·
+  solver_validator_same_edge_budgets.
+
 ## SESSION WRAP (2026-07-08 end): FULL SUITE 13 → 8, all named
 Final tree c1c7a49.  Commits this session: 8c9fdc3 merge · 2a217d7
 flip+re-cut · ff332e9 A4 · ec7f632 A6 · f86d7ee A2 · 6ac66cd A1/R1 ·
