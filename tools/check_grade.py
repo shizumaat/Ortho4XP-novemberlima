@@ -559,6 +559,7 @@ def _check_plane_gradient(ways: List[Way],
                           ll_to_m,
                           max_grade: float,
                           seam_nids: Optional[set] = None,
+                          crown_by_nid: Optional[Dict[str, float]] = None,
                           ) -> List[Violation]:
     """For each 3-vertex polygon (a triangle, which X-Plane renders
     as a planar surface), compute the plane's elevation gradient
@@ -573,8 +574,25 @@ def _check_plane_gradient(ways: List[Way],
 
     Triangles that touch any seam vertex are skipped — their plane
     is dictated by DEM-pinned corners the solver cannot move.
+
+    SPINE CROWN (part 30): ``crown_by_nid`` is the solver's designed
+    crown-drop field (sidecar ``crown_drops`` → ``_crown_drops_by_nid``).
+    The plane is evaluated in UNCROWNED space ``z' = z + crown_drop`` —
+    the SAME space the solver grades in (``grade_law`` crown block) and
+    the within-shape pair check re-centres to via
+    ``grade_law.crown_pair_offset``.  Without the lift this check was
+    the one crown-blind reader of the three (solver / within-pair /
+    plane): a lawful crowned triangle spanning a ridge node and dropped
+    edge nodes false-flagged whenever the raw resultant tilt
+    (longitudinal grade ⊕ transverse crown) exceeded the cap — SPJC
+    junction #141 read 2.30 % raw vs 1.10 % designed.  Since every
+    crown rate ≤ every transverse cap, the lift can only remove the
+    designed-crown component — a genuinely over-cap surface still
+    flags — and an empty field (uncrowned / old patches) leaves
+    ``z' = z``, byte-identical to the unlifted check.
     """
     seam_nids = seam_nids or set()
+    crown_by_nid = crown_by_nid or {}
     out: List[Violation] = []
     for w in ways:
         grade_cap = _role_grade_limit(w, max_grade)
@@ -598,7 +616,9 @@ def _check_plane_gradient(ways: List[Way],
             e = w.elevs[k]
             if e is None:
                 continue
-            pts.append((x, y, e))
+            # Crown lift: evaluate the plane in the solver's UNCROWNED
+            # space (see the docstring) — 0 for nodes off the field.
+            pts.append((x, y, e + crown_by_nid.get(nid, 0.0)))
         if len(pts) != 3:
             continue  # only check triangles
         (x1, y1, z1), (x2, y2, z2), (x3, y3, z3) = pts
@@ -1827,7 +1847,8 @@ def run_checks(
         within, top_n)
 
     plane = _check_plane_gradient(
-        ways, nodes, ll_to_m, max_grade, seam_nids=seam_nids)
+        ways, nodes, ll_to_m, max_grade, seam_nids=seam_nids,
+        crown_by_nid=crown_by_nid)
     # A triangle whose vertex the solver declared broken is the pocket's
     # designed blend — quarantine it exactly like the vertex-pair split
     # above (the triangle-plane law exports unfixable triangles).
