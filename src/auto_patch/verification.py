@@ -41,6 +41,10 @@ _NON_SOURCE_PAVEMENT_ROLES = frozenset({
     "boundary", "taxiway_clearance", "runway_clearance",
     "retaining_wall", "tunnel_ramp", "groundside_pavement",
     "service_road", "service_junction", "building",
+    # Adjacent-ground graded strips (adjacent_ground.py) are terrain
+    # earthwork beside the pavement edge — off the apt.dat/DSF source
+    # by construction, exactly like the boundary/clearance features.
+    "graded_strip",
 })
 
 def _ll(layout, x, y) -> str:

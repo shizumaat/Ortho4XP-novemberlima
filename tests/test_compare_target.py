@@ -185,31 +185,42 @@ SPJC_BASELINE_TOTAL = 490  # int(0.95 * 516) of 516 current (emitted)
 # tile-half emits exactly ONE runway way (9/8 → 1/1).  Runway floors
 # EXACT (deterministic ring count = the de-seg invariant; 0.95 of 1
 # floors at 0); everything else int(0.95 * current).
+# RE-CUT 2026-07-08b (adjacent-ground grade law DEFAULT ON — Noah
+# directive, docs/adjacent_ground_grade_law_plan.md; sanctioned
+# supersession re-cut): the lateral corridor law REPLACES the boundary
+# ribbon + boundary→DEM bridge, so the ``boundary`` role is GONE from
+# both tile halves (22/18 → 0 — rows removed, not floored at 0) and
+# ``graded_strip`` corridor bands are NEW (64 / 90).  tile-78
+# taxiway_clearance 10 → 13: the law's sloped clearance ceiling
+# re-shapes the cut pieces.  Every other role's count is IDENTICAL to
+# the previous fixture.  Floors = int(0.95 * current), runway EXACT,
+# same convention.
 SPLP_BASELINE_TILE_M77: Dict[str, int] = {
     "apron":               9,   # of  10 current
-    "boundary":           20,   # of  22 current
     "building":            2,   # of   3 current
+    "graded_strip":       60,   # of  64 current
     "junction":           25,   # of  27 current
     "runway":              1,   # of   1 current (deterministic, exact)
     "runway_clearance":    5,   # of   6 current
     "taxiway_clearance":   8,   # of   9 current
 }
-SPLP_BASELINE_TILE_M77_TOTAL = 74  # int(0.95 * 78) of 78 current (emitted)
+SPLP_BASELINE_TILE_M77_TOTAL = 114  # int(0.95 * 120) of 120 current (emitted)
 
 # RE-CUT 2026-07-05 (curve-native global slice default; see the SPJC
 # re-cut note above) — floors = int(0.95 * current fixture count).
 # RE-CUT 2026-07-08 (de-seg default ON; see above).
+# RE-CUT 2026-07-08b (adjacent-ground law default ON; see above).
 SPLP_BASELINE_TILE_M78: Dict[str, int] = {
     "apron":              30,   # of  32 current
-    "boundary":           17,   # of  18 current
     "building":            7,   # of   8 current
+    "graded_strip":       85,   # of  90 current
     "groundside_pavement": 2,   # of   3 current
     "junction":           35,   # of  37 current
     "runway":              1,   # of   1 current (deterministic, exact)
     "runway_clearance":    1,   # of   2 current
-    "taxiway_clearance":   9,   # of  10 current
+    "taxiway_clearance":  12,   # of  13 current
 }
-SPLP_BASELINE_TILE_M78_TOTAL = 105  # int(0.95 * 111) of 111 current (emitted)
+SPLP_BASELINE_TILE_M78_TOTAL = 176  # int(0.95 * 186) of 186 current (emitted)
 
 
 def _build_layout(icao: str, tile_lat=None, tile_lon=None):

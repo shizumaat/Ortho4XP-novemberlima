@@ -1721,12 +1721,15 @@ RUNWAY_END_SKIRT_ENABLED = (
     _os.environ.get("O4_RUNWAY_END_SKIRT", "1") == "1")
 
 # Adjacent-ground LATERAL grade law feature gate (slice 3, Fable
-# 2026-07-08; docs/adjacent_ground_grade_law_plan.md).  DEFAULT OFF —
-# the emitter (adjacent_ground.emit_adjacent_ground_bands) and the
-# boundary-bridge supersession are behind this while the law is soaked
-# in-sim.  With the gate off the emitter is never imported (byte-inert).
+# 2026-07-08; docs/adjacent_ground_grade_law_plan.md).  DEFAULT ON
+# (Noah directive 2026-07-08, flipped after the emitter round-2
+# battery — see the flip commit): graded_strip corridor bands replace
+# BOTH the boundary→DEM bridge and the full boundary ribbon (the
+# at-DEM ribbon path included — the terrain transition beside pavement
+# is the per-role lateral law everywhere).  Set
+# O4_ADJACENT_GROUND_LAW=0 to restore the ribbon/bridge model.
 ADJACENT_GROUND_LAW_ENABLED = (
-    _os.environ.get("O4_ADJACENT_GROUND_LAW", "0") == "1")
+    _os.environ.get("O4_ADJACENT_GROUND_LAW", "1") == "1")
 
 # Safety cap (m) on how far a clearance band reaches outward from the
 # pavement edge, bounding earthwork.  Must be >= the largest band we
