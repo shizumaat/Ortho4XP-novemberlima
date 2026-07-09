@@ -153,6 +153,13 @@ def _point_triangle_minimum_distances(
     dot_6 = from_c @ edge_ac
     distances = numpy.full(len(points), numpy.inf)
 
+    # Degenerate-edge guard (found live at HECA): the edge branches below
+    # divide by |edge| squared, so a zero-length edge (duplicate triangle
+    # corners) yields 0/0 = not-a-number, and ndarray.min() PROPAGATES it —
+    # one degenerate triangle would poison the whole pair's minimum and
+    # flip "in contact" to "proved apart", the exact tear invariant I-20
+    # forbids.  Sanitised to 0.0 (contact) before returning; the caller
+    # silences the noise-only warning.
     in_corner_a = (dot_1 <= 0) & (dot_2 <= 0)
     distances[in_corner_a] = numpy.linalg.norm(from_a[in_corner_a], axis=1)
     in_corner_b = (dot_3 >= 0) & (dot_4 <= dot_3) & ~in_corner_a
@@ -213,6 +220,12 @@ def _point_triangle_minimum_distances(
                 if normal_length > 1e-12
                 else 0.0
             )
+    # Degenerate-edge guard: 0/0 in the edge branches yields not-a-number,
+    # which would otherwise poison ndarray.min() for the whole pair and
+    # flip contact to proved-apart.  Numerical doubt is CONTACT (I-20).
+    non_finite = ~numpy.isfinite(distances)
+    if non_finite.any():
+        distances[non_finite] = 0.0
     return distances
 
 
@@ -295,12 +308,16 @@ def _vertex_to_triangle_proof(
     ):
         return False, False
     for triangle_index in candidate_triangles:
-        distances = _point_triangle_minimum_distances(
-            points,
-            other.corner_a[triangle_index],
-            other.corner_b[triangle_index],
-            other.corner_c[triangle_index],
-        )
+        # errstate: a degenerate edge divides 0/0 inside; the function
+        # sanitises the resulting not-a-number to 0.0 (contact), so the
+        # warning is noise.
+        with numpy.errstate(invalid="ignore", divide="ignore"):
+            distances = _point_triangle_minimum_distances(
+                points,
+                other.corner_a[triangle_index],
+                other.corner_b[triangle_index],
+                other.corner_c[triangle_index],
+            )
         if distances.min() <= epsilon_metres:
             return True, True
     return False, True

@@ -250,3 +250,33 @@ def test_connected_structures_transitive_chain():
 
 def test_connected_structures_no_edges():
     assert connected_structures(3, set()) == [[0], [1], [2]]
+
+
+def test_degenerate_edge_not_a_number_is_contact_not_separation():
+    """Found live at HECA: a triangle with a duplicated corner makes the
+    edge branches of the point-triangle test divide 0/0, and the
+    resulting not-a-number used to poison ``ndarray.min()`` for the whole
+    pair — flipping genuine contact to "proved apart" (the tear
+    invariant I-20 forbids).  A degenerate sliver whose spine passes
+    through a neighbouring part's vertex must merge with it."""
+    from auto_patch.obj8_partition import contact_graph, weld_parts
+
+    vertices = [
+        # Part 1: degenerate sliver — corners 0 and 1 are the SAME
+        # position, so edge_ab has zero length.
+        (0.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        (2.0, 0.0, 0.0),
+        # Part 2: a real triangle with one vertex exactly on the
+        # sliver's spine midpoint (true distance 0).
+        (1.0, 0.0, 0.0),
+        (1.0, 5.0, 0.0),
+        (1.0, 0.0, 5.0),
+    ]
+    triangles = [(0, 1, 2), (3, 4, 5)]
+    parts = weld_parts(vertices, triangles)
+    assert len(parts) == 2
+    edges = contact_graph(vertices, parts, epsilon_metres=0.25)
+    assert edges, (
+        "degenerate-edge not-a-number separated two parts in true contact"
+    )
