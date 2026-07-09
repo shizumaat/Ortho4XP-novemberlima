@@ -278,6 +278,61 @@ def runway_end_skirt_floor_profile(
     return [_depth(d) for d in distances_m]
 
 
+def runway_end_governed_length_beyond_pavement_m(
+        governed_length_m: float, pavement_beyond_end_m: float) -> float:
+    """Governed length REMAINING beyond the overrun-pavement exit.
+
+    The FAA runway safety area is measured from the RUNWAY END, and any
+    blast pad / stopway pavement past the end sits INSIDE it (AC
+    150/5300-13B §3.16 — the safety area encompasses the stopway), so
+    overrun pavement CONSUMES the first ``pavement_beyond_end_m`` of the
+    governed footprint.  Before 2026-07-09 the emitter applied the full
+    governed length from the pavement exit instead, extending every
+    skirt by its blast-pad length (KCLT 18R: 124 m pad → fill to 429 m
+    past the end vs the lawful 305 m; user report 'about 70 m too long'
+    = the 59-71 m HECA pads).  Returns 0 when pavement covers the whole
+    footprint (the skirt vanishes; the KCLT-18L EMAS-end class)."""
+    return max(0.0, governed_length_m - max(0.0, pavement_beyond_end_m))
+
+
+def runway_end_skirt_profile_breakpoints_beyond_pavement(
+        start_grade: float = 0.0,
+        pavement_beyond_end_m: float = 0.0) -> list[float]:
+    """``runway_end_skirt_profile_breakpoints`` re-expressed as distances
+    beyond the PAVEMENT EXIT when that exit sits ``pavement_beyond_end_m``
+    past the runway end: the law profile is anchored at the runway end,
+    so its grade-law breakpoints shift inward by the overrun length
+    (breakpoints the pavement already consumed drop out)."""
+    advance = max(0.0, pavement_beyond_end_m)
+    return sorted({
+        b - advance
+        for b in runway_end_skirt_profile_breakpoints(start_grade)
+        if b > advance + 1e-9})
+
+
+def runway_end_skirt_floor_profile_beyond_pavement(
+        distances_m: list[float], start_grade: float = 0.0,
+        pavement_beyond_end_m: float = 0.0) -> list[float]:
+    """Floor DEPTHS (m, ≥ 0) below the pavement-EXIT elevation at each
+    distance beyond the exit, for an exit ``pavement_beyond_end_m`` past
+    the runway end.
+
+    The descent law is anchored at the RUNWAY END (see
+    ``runway_end_governed_length_beyond_pavement_m``), so by the exit the
+    profile is already ``pavement_beyond_end_m`` into its descent — the
+    fill starts FLUSH at the exit-edge elevation (the overrun pavement
+    carries its own solved profile) but falls at the ADVANCED profile's
+    grade immediately, instead of restarting the gentle 0→−3 % easing a
+    second time.  With no overrun pavement this IS
+    ``runway_end_skirt_floor_profile``."""
+    advance = max(0.0, pavement_beyond_end_m)
+    if advance <= 0.0:
+        return runway_end_skirt_floor_profile(distances_m, start_grade)
+    depths = runway_end_skirt_floor_profile(
+        [advance] + [advance + d for d in distances_m], start_grade)
+    return [d - depths[0] for d in depths[1:]]
+
+
 # ── Adjacent-ground LATERAL grade law (Fable 2026-07-08) ─────────────────────
 # The lateral generalization of the runway-END skirt: ground beside a paved
 # surface is a two-zone-plus-ungraded CORRIDOR off the pavement EDGE.  The

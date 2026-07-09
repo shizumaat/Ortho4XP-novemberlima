@@ -4,6 +4,23 @@
 gate `O4_RUNWAY_END_SKIRT` default OFF.  M4 (calibration + default-on)
 and M5 (pre-threshold smoothness) remain.**
 
+## AMENDMENT 2026-07-09 — governed footprint anchored at the RUNWAY END
+
+User report: skirts ran "about 70 m too long past the end of the
+runway" at multiple airports.  Root cause: the emitter applied the full
+governed length from the PAVEMENT EXIT (end of the blast pad /
+stopway), but FAA AC 150/5300-13B §3.16 measures the safety area from
+the RUNWAY END with the stopway INSIDE it — so every skirt ran long by
+its overrun-pavement length (KCLT 18R: 124 m pad → fill to 429 m past
+the end vs the lawful 305; HECA pads 59–71 m = the observed ~70 m).
+Fix (lockstep emitter `clearance._emit_one_end` + validator
+`verification.check_runway_end_skirt`): overrun pavement consumes
+governed length (`runway_end_governed_length_beyond_pavement_m`) and
+the floor profile arrives at the exit already `pavement_beyond_end`
+into its descent (`runway_end_skirt_floor_profile_beyond_pavement` —
+the fill still starts FLUSH at the exit-edge elevation, but falls at
+the advanced profile's grade instead of restarting the 0→−3 % easing).
+
 Implementation deltas vs the original design (§3):
 
 * **Banded emission.**  The law floor is piecewise QUADRATIC, and a

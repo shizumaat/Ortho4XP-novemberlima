@@ -71,9 +71,12 @@ from .config import (
 )
 from .grade_law import (
     runway_end_constrained_length_m,
+    runway_end_governed_length_beyond_pavement_m,
     runway_end_governed_length_m,
     runway_end_skirt_floor_profile,
+    runway_end_skirt_floor_profile_beyond_pavement,
     runway_end_skirt_profile_breakpoints,
+    runway_end_skirt_profile_breakpoints_beyond_pavement,
 )
 from .layout import (
     BuiltShape,
@@ -2140,14 +2143,15 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
 
     skirt_strips: list[tuple] = []
 
-    def _floor_depth_for(entry_grade: float):
+    def _floor_depth_for(entry_grade: float,
+                         pavement_beyond_end_m: float = 0.0):
         depth_cache: dict[float, float] = {}
 
         def _floor_depth(distance_m: float) -> float:
             depth = depth_cache.get(distance_m)
             if depth is None:
-                depth = runway_end_skirt_floor_profile(
-                    [distance_m], entry_grade)[0]
+                depth = runway_end_skirt_floor_profile_beyond_pavement(
+                    [distance_m], entry_grade, pavement_beyond_end_m)[0]
                 depth_cache[distance_m] = depth
             return depth
         return _floor_depth
@@ -2182,7 +2186,18 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
             entry_grade = (float(ref) - float(inside)) \
                 / _SKIRT_END_GRADE_WINDOW_M
             entry_grade = max(-0.05, min(0.05, entry_grade))
-        governed = runway_end_governed_length_m(full_len, approach_class)
+        # The governed footprint is anchored at the RUNWAY END (FAA: the
+        # safety area is measured from the end, blast pad / stopway
+        # INSIDE it), so the overrun pavement between the end and the
+        # exit consumes its first ``pavement_beyond_end`` metres and the
+        # floor profile arrives at the exit already that far into its
+        # descent (user 2026-07-09: skirts ran ~70 m long — the pad
+        # length — at HECA/KCLT when the full length restarted at the
+        # exit).
+        pavement_beyond_end = max(0.0, start - _RESA_SEED_INSET_M)
+        governed = runway_end_governed_length_beyond_pavement_m(
+            runway_end_governed_length_m(full_len, approach_class),
+            pavement_beyond_end)
         # EMAS inference (user 2026-07-05): a road / service road /
         # water crossing the end zone marks a NON-standard end — the
         # skirt stops short of the first constraint (or vanishes when
@@ -2191,7 +2206,7 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
             governed,
             _end_constraint_distance(
                 p0, outward, governed, constraint_block))
-        _floor_depth = _floor_depth_for(entry_grade)
+        _floor_depth = _floor_depth_for(entry_grade, pavement_beyond_end)
 
         half = max(runway_width, runway_strip_half_width_m(full_len))
         perp = (-ny, nx)
@@ -2199,7 +2214,8 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
         eb = (p0[0] + perp[0] * half, p0[1] + perp[1] * half)
         stations = _stations(ea, eb, step)
         m = len(stations)
-        band_edges = runway_end_skirt_profile_breakpoints(entry_grade)
+        band_edges = runway_end_skirt_profile_breakpoints_beyond_pavement(
+            entry_grade, pavement_beyond_end)
 
         def _end_alt_at(vx, vy, p0=p0, nx=nx, ny=ny,
                         ref=float(ref), floor_depth=_floor_depth,

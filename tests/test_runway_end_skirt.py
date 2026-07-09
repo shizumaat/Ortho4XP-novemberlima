@@ -12,8 +12,12 @@ from auto_patch.grade_law import (
     RUNWAY_END_SKIRT_MAX_GRADE_CHANGE_PER_M,
     RUNWAY_END_SKIRT_NEAR_MAX_DOWN_GRADE,
     RUNWAY_END_SKIRT_NEAR_ZONE_M,
+    runway_end_governed_length_beyond_pavement_m,
     runway_end_governed_length_m,
     runway_end_skirt_floor_profile,
+    runway_end_skirt_floor_profile_beyond_pavement,
+    runway_end_skirt_profile_breakpoints,
+    runway_end_skirt_profile_breakpoints_beyond_pavement,
 )
 
 
@@ -164,6 +168,70 @@ class TestFloorProfile:
         forward = runway_end_skirt_floor_profile([50.0, 100.0, 200.0])
         backward = runway_end_skirt_floor_profile([200.0, 100.0, 50.0])
         assert forward == list(reversed(backward))
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Overrun-pavement anchoring: the governed footprint is measured from
+# the RUNWAY END, blast pad / stopway pavement INSIDE it (FAA AC
+# 150/5300-13B §3.16), so pavement past the end consumes governed
+# length and advances the floor profile.
+# ──────────────────────────────────────────────────────────────────────
+class TestOverrunPavementAnchoring:
+    def test_pavement_consumes_governed_length(self):
+        assert runway_end_governed_length_beyond_pavement_m(
+            305.0, 61.0) == 244.0
+
+    def test_no_pavement_keeps_full_length(self):
+        assert runway_end_governed_length_beyond_pavement_m(
+            305.0, 0.0) == 305.0
+
+    def test_pavement_covering_footprint_zeroes_the_skirt(self):
+        """A blast pad longer than the governed footprint leaves nothing
+        to govern (the KCLT-18L EMAS-end class)."""
+        assert runway_end_governed_length_beyond_pavement_m(
+            90.0, 148.0) == 0.0
+
+    def test_negative_pavement_never_extends(self):
+        assert runway_end_governed_length_beyond_pavement_m(
+            240.0, -5.0) == 240.0
+
+    def test_advanced_profile_is_a_translation(self):
+        """depth_beyond_exit(d) = depth_from_end(pad + d) −
+        depth_from_end(pad): the profile continues where the pavement
+        left it, starting flush (depth 0) at the exit."""
+        pad = 61.0
+        stations = [0.0, 10.0, 50.0, 120.0, 244.0]
+        advanced = runway_end_skirt_floor_profile_beyond_pavement(
+            stations, 0.0, pad)
+        full = runway_end_skirt_floor_profile(
+            [pad] + [pad + d for d in stations], 0.0)
+        assert advanced[0] == 0.0
+        for got, want in zip(advanced, full[1:]):
+            assert got == pytest.approx(want - full[0], abs=1e-12)
+
+    def test_advanced_profile_descends_steeper_than_fresh(self):
+        """Past a long pad the profile is already at its caps, so the
+        first stations fall FASTER than a fresh 0→−3 % easing — the
+        pre-fix behavior restarted the easing at the exit and pushed the
+        daylight point ~a pad-length too far out."""
+        fresh = runway_end_skirt_floor_profile([30.0], 0.0)[0]
+        advanced = runway_end_skirt_floor_profile_beyond_pavement(
+            [30.0], 0.0, 100.0)[0]
+        assert advanced > fresh
+
+    def test_zero_pavement_is_the_identity(self):
+        stations = [0.0, 5.0, 61.0, 200.0]
+        assert runway_end_skirt_floor_profile_beyond_pavement(
+            stations, -0.01, 0.0) == runway_end_skirt_floor_profile(
+            stations, -0.01)
+
+    def test_breakpoints_shift_inward_and_drop_consumed(self):
+        pad = 100.0
+        base = runway_end_skirt_profile_breakpoints(0.0)
+        shifted = runway_end_skirt_profile_breakpoints_beyond_pavement(
+            0.0, pad)
+        assert shifted == sorted(b - pad for b in base if b > pad + 1e-9)
+        assert all(b > 0.0 for b in shifted)
 
 
 # ──────────────────────────────────────────────────────────────────────

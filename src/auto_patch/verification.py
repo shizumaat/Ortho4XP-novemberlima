@@ -634,8 +634,11 @@ def check_runway_end_skirt(layout, dem, tile_lat, tile_lon,
     from . import clearance as CL
     from .config import runway_end_approach_class
     from .grade_law import (
-        runway_end_constrained_length_m, runway_end_governed_length_m,
-        runway_end_skirt_floor_profile)
+        runway_end_constrained_length_m,
+        runway_end_governed_length_beyond_pavement_m,
+        runway_end_governed_length_m,
+        runway_end_skirt_floor_profile,
+        runway_end_skirt_floor_profile_beyond_pavement)
     from .layout import R_EARTH
 
     if dem is None:
@@ -901,7 +904,15 @@ def check_runway_end_skirt(layout, dem, tile_lat, tile_lon,
             entry_grade = max(-0.05, min(0.05, (
                 float(ref) - float(inside))
                 / CL._SKIRT_END_GRADE_WINDOW_M))
-        governed = runway_end_governed_length_m(full_len, approach_class)
+        # Governed footprint anchored at the RUNWAY END, overrun
+        # pavement inside it — IDENTICAL to the emitter (the pavement
+        # past the end consumes the first ``pavement_beyond_end`` metres
+        # and the floor arrives at the exit already that far into its
+        # descent).
+        pavement_beyond_end = max(0.0, start - CL._RESA_SEED_INSET_M)
+        governed = runway_end_governed_length_beyond_pavement_m(
+            runway_end_governed_length_m(full_len, approach_class),
+            pavement_beyond_end)
         # EMAS inference, IDENTICAL to the emitter: a road / service
         # road / water crossing the end zone marks a NON-standard end
         # and shortens the governed length (shared constraint geometry
@@ -923,8 +934,8 @@ def check_runway_end_skirt(layout, dem, tile_lat, tile_lon,
                 (governed - 0.5 * step_m) / step_m)))
             distances = [float(k) * step_m
                          for k in range(1, n_stations + 1)]
-            depths = runway_end_skirt_floor_profile(
-                distances, entry_grade)
+            depths = runway_end_skirt_floor_profile_beyond_pavement(
+                distances, entry_grade, pavement_beyond_end)
             worst = None
             for d, depth in zip(distances, depths):
                 qx, qy = p0[0] + nx * d, p0[1] + ny * d
