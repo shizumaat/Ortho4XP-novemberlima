@@ -159,6 +159,82 @@ def _auto_patch_is_current(auto_patch_file: str, xp_root: str,
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# DSF object re-anchor worklist (Phase 2 identification — see
+# docs/dsf_object_integration_spec.md, section 4-W7 as amended by A5)
+# ──────────────────────────────────────────────────────────────────────────────
+def _object_anchor_worklist_entry(icao: str, xp_root: str,
+                                  runways: dict) -> dict | None:
+    """Identification for one airport's Phase 2 pass: the DSF the
+    selected apt.dat belongs to and its scenery-pack root.  Returns None
+    when the airport has no associated DSF or pack (it then simply does
+    not appear in the worklist)."""
+    from .osm_load import _pick_best_apt_dat_against_osm
+    from .dsf_reader import find_associated_dsf, _pack_root_for_dsf
+    apt_dat_path = _pick_best_apt_dat_against_osm(xp_root, icao)
+    if not apt_dat_path:
+        return None
+    threshold_latitudes = [data["lat"] for data in runways.values()]
+    threshold_longitudes = [data["lon"] for data in runways.values()]
+    if not threshold_latitudes:
+        return None
+    dsf_path = find_associated_dsf(
+        apt_dat_path,
+        sum(threshold_latitudes) / len(threshold_latitudes),
+        sum(threshold_longitudes) / len(threshold_longitudes),
+    )
+    if not dsf_path:
+        return None
+    pack_root = _pack_root_for_dsf(dsf_path)
+    if not pack_root:
+        return None
+    return {
+        "icao": icao,
+        "dsf_path": dsf_path,
+        "dsf_mtime": os.path.getmtime(dsf_path),
+        "pack_root": pack_root,
+        "xplane_root": xp_root,
+    }
+
+
+def _write_object_anchor_worklist(patch_dir: str, tile_lat: int,
+                                  tile_lon: int, entries: list,
+                                  xplane_root: str | None) -> None:
+    """Atomically write the tile's Phase 2 worklist sidecar.
+
+    Called from the MAIN process only — airports build in a ProcessPool
+    and workers must never write it (amendment A5).  Written even when
+    every airport's patch is current: ``post_mesh.rebake_dsf_objects``
+    must run after a mesh rebuild regardless of patch freshness.  An
+    existing worklist is refreshed to empty (rather than left stale)
+    when the tile no longer yields entries.
+    """
+    import json
+    from .post_mesh import (
+        OBJECT_ANCHOR_WORKLIST_FILENAME,
+        OBJECT_ANCHOR_WORKLIST_VERSION,
+    )
+    worklist_path = os.path.join(patch_dir, OBJECT_ANCHOR_WORKLIST_FILENAME)
+    if not entries and not os.path.isfile(worklist_path):
+        return
+    try:
+        os.makedirs(patch_dir, exist_ok=True)
+        worklist = {
+            "version": OBJECT_ANCHOR_WORKLIST_VERSION,
+            "tile": FNAMES.short_latlon(tile_lat, tile_lon),
+            "xplane_root": xplane_root,
+            "airports": entries,
+        }
+        temporary_path = worklist_path + ".tmp"
+        with open(temporary_path, "w") as handle:
+            json.dump(worklist, handle, indent=2)
+            handle.write("\n")
+        os.replace(temporary_path, worklist_path)
+    except _DRIVER_EXC as exc:
+        UI.vprint(1, "   Auto-patch: object-anchor worklist write "
+                     "failed:", exc)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Per-airport build worker (shared by the serial and parallel paths)
 # ──────────────────────────────────────────────────────────────────────────────
 # The tile DEM is the ONE big shared input across a tile's airports.  In the
@@ -491,6 +567,13 @@ def generate_auto_patches(tile, cifp_path: str,
     # airport's verify-log part into it (safe under parallel builds).
     _verify_debug_path = os.path.join(patch_dir, "auto_patch_verify_debug.log")
 
+    # Phase 2 (DSF object re-anchor) worklist entries, collected per
+    # airport BEFORE the rebuild-skip gate below — an all-current tile
+    # must still produce a worklist, or post_mesh silently no-ops after
+    # a mesh rebuild (spec section 2.2 / amendment A5).
+    object_anchor_worklist_entries: list[dict] = []
+    object_anchor_worklist_xplane_root: str | None = None
+
     # Lazy tile-level inputs: callables resolve on the FIRST airport
     # that needs a rebuild, at the tile's own verbosity so their log
     # output matches the eager-path chatter exactly.  All-current tiles
@@ -559,6 +642,20 @@ def generate_auto_patches(tile, cifp_path: str,
                 1, "   Auto-patch: Skipping", icao,
                 "(cannot resolve X-Plane root from CIFP path).")
             continue
+
+        # Collect the airport's Phase 2 (DSF object re-anchor) worklist
+        # entry now, BEFORE the rebuild-skip gate below can `continue`
+        # past it.  Airports with no associated DSF or scenery pack
+        # simply do not appear.
+        try:
+            worklist_entry = _object_anchor_worklist_entry(
+                icao, xp_root, runways)
+            if worklist_entry is not None:
+                object_anchor_worklist_entries.append(worklist_entry)
+                object_anchor_worklist_xplane_root = xp_root
+        except _DRIVER_EXC as exc:
+            UI.vprint(2, "   Auto-patch:", icao,
+                      "object-anchor worklist entry failed:", exc)
 
         # Reuse the existing auto-patch when it was built from the
         # apt.dat that would be selected today and that apt.dat is
@@ -674,6 +771,13 @@ def generate_auto_patches(tile, cifp_path: str,
             "auto_patch_file": auto_patch_file,
             "verify_log_path": _verify_debug_path + "." + icao + ".part",
         })
+
+    # ── Write the Phase 2 worklist sidecar (main process ONLY) ──────────
+    # Workers have not started yet; they never write it (amendment A5).
+    _write_object_anchor_worklist(
+        patch_dir, tile_lat, tile_lon,
+        object_anchor_worklist_entries,
+        object_anchor_worklist_xplane_root)
 
     # ── Prefetch the OSM data every collected build will read ────────────
     # Done HERE, in the main process, before any worker starts: each

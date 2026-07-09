@@ -16,6 +16,17 @@ __all__ = [
     "LOAD_DSF_PAVEMENT",
     "DSF_BUILDINGS",
     "AGP_BUILDINGS",
+    "DSF_OBJECT_BUILDINGS",
+    "DSF_OBJECT_FOOTPRINT_UNION",
+    "DSF_OBJECT_REANCHOR",
+    "DSF_OBJECT_ALLOW_ANIM",
+    "DSF_OBJECT_MIN_REACH_M",
+    "DSF_OBJECT_CONTACT_EPSILON_M",
+    "DSF_OBJECT_FOOTPRINT_HEIGHT_M",
+    "DSF_OBJECT_ELEVATED_BASE_M",
+    "DSF_OBJECT_MAX_FOOTPRINT_AREA_M2",
+    "DSF_OBJECT_MIN_BUILDING_HEIGHT_M",
+    "DSF_OBJECT_PAD_FLAG_SPAN_M",
     "DSF_BUILDING_OSM_OVERLAP_FRAC",
     "DSF_CLUSTER_SIMPLIFY_TOL_M",
     "BUILDING_OUTLINE_FILL_R",
@@ -1351,6 +1362,100 @@ AGP_BUILDINGS = _os.environ.get("O4_AGP_BUILDINGS", "1") == "1"
 # (the prior behaviour, byte-identical to DSF_BUILDINGS alone).  Has
 # no effect unless DSF_BUILDINGS is also ON.
 TERM_BRIDGE_GROUPING = _os.environ.get("O4_TERM_BRIDGE_GROUPING", "1") == "1"
+
+# (20260708) DSF OBJECT BUILDINGS (user 2026-07-08, ruling R4 in
+# docs/dsf_object_integration_spec.md): scenery authors bake many
+# buildings into one ``.obj`` whose DSF placement anchor may sit hundreds
+# of metres from any geometry.  auto_patch cannot see those buildings at
+# all today (``_building_role_for_def`` requires ``.fac`` and
+# ``is_agp_building_def`` whitelists ``.agp``) — roughly 105 of them at
+# KCLT.  ``dsf_reader.read_dsf_object_buildings`` parses the OBJ8,
+# partitions it into structures (connected components of the
+# epsilon-contact graph — docs/obj8_structure_partition.md), and feeds
+# their footprints into the SAME building pool as the ``.fac`` facades
+# (role ``"object"``).  Additive: no source is overridden; the existing
+# facade clustering unions any overlap.  Default OFF until measured on
+# the gate airports.  Has no effect unless DSF_BUILDINGS is also ON
+# (shares the building path).  OFF is byte-identical to the prior build.
+DSF_OBJECT_BUILDINGS = _os.environ.get("O4_DSF_OBJECT_BUILDINGS", "1") == "1"
+
+# Convex hull is the shipped footprint ring (user 2026-07-08, ruling R3:
+# measure the pad interaction before paying for fidelity).  The union of
+# the projected solid triangles is faithful for L-shaped terminals but
+# needs a simplify tolerance and a hole policy.  OFF restores the hull.
+DSF_OBJECT_FOOTPRINT_UNION = (
+    _os.environ.get("O4_DSF_OBJECT_FOOTPRINT_UNION", "0") == "1")
+
+# (20260708) DSF OBJECT RE-ANCHOR (user 2026-07-08, rulings R1 + R2):
+# post-mesh, rewrite the ``y`` column of each structure's vertices by
+# ``ground_under(structure) - ground_under(anchor of its own object)`` so
+# every structure sits on its own terrain (the offset is per
+# (structure, object) pair — spec section 2.4).  Writes IN PLACE into the
+# scenery pack, keeping ``<name>.anchor_bak`` originals; geometry is
+# always re-read from the backup, so the operation is byte-idempotent and
+# cannot stack.  Re-runs after every mesh build (the offsets encode one
+# specific built mesh).  Corrected packs MUST NOT be redistributed.
+# DEFAULT ON after the three-pack verification (2026-07-08);
+# O4_DSF_OBJECT_REANCHOR=0 leaves every pack byte-identical.
+DSF_OBJECT_REANCHOR = _os.environ.get("O4_DSF_OBJECT_REANCHOR", "1") == "1"
+
+# Refuse (and report) objects containing ``ANIM_begin``: a per-structure
+# offset applied inside an animation block can break its rotation pivot.
+# ON gives each animation block the single offset of the structure
+# containing its geometry.  The 41 KCLT terminal-layer objects are the
+# first real test.
+DSF_OBJECT_ALLOW_ANIM = (
+    _os.environ.get("O4_DSF_OBJECT_ALLOW_ANIM", "0") == "1")
+
+# Detector floor.  A compact, correctly anchored object has a solid reach
+# of a few metres; 57 of KCLT's 334 definitions exceed 25 m.
+DSF_OBJECT_MIN_REACH_M = float(
+    _os.environ.get("O4_DSF_OBJECT_MIN_REACH_M", "25"))
+
+# Contact tolerance for the structure partition AND the pooling margin
+# (amendment A10): two parts whose surfaces come within this distance are
+# one structure.  This is a modelling tolerance — "how large a gap did
+# the modeller leave between a wall and its roof" — not a
+# building-separation heuristic.  Workstream W2's audit showed the count
+# IS epsilon-sensitive under the narrow phase (KCLT: 0.02 m -> 890
+# structures, 0.25 m -> 220, 1.0 m -> 175); 0.25 m is the knee of that
+# curve, with zero hard tears throughout.
+DSF_OBJECT_CONTACT_EPSILON_M = float(
+    _os.environ.get("O4_DSF_OBJECT_CONTACT_EPSILON_M", "0.25"))
+
+# (amendment A11, from the HECA Tai Models pack) A building has walls; a
+# ground plate, sign or decal does not.  A structure whose vertical
+# extent is below this contributes NO Phase-1 building pad (Phase 2
+# still y-bakes it — a mis-elevated ground plate is exactly a float/sink
+# artifact).  HECA's ``heca_ground_polygon.obj`` spans 2.1 km and must
+# never become a 2 km flat pad.  0 disables the filter.
+DSF_OBJECT_MIN_BUILDING_HEIGHT_M = float(
+    _os.environ.get("O4_DSF_OBJECT_MIN_BUILDING_HEIGHT_M", "2.5"))
+
+# Vertices within this height of a structure's own base form its
+# footprint; above it, roof overhang would inflate the pad.
+DSF_OBJECT_FOOTPRINT_HEIGHT_M = float(
+    _os.environ.get("O4_DSF_OBJECT_FOOTPRINT_HEIGHT_M", "1.5"))
+
+# A structure whose lowest vertex sits above this rests on something
+# else — rooftop clutter, a canopy, a jetbridge.  It contributes no
+# footprint; if the contact graph left it unattached, it inherits the
+# offset of the ground-touching structure supporting it.
+DSF_OBJECT_ELEVATED_BASE_M = float(
+    _os.environ.get("O4_DSF_OBJECT_ELEVATED_BASE_M", "0.5"))
+
+# Skip-and-report a footprint larger than this rather than laying a flat
+# pad across half an airfield.  0 disables the cap.  KCLT's terminal
+# complex is 112,230 square metres — spec section 2.3.
+DSF_OBJECT_MAX_FOOTPRINT_AREA_M2 = float(
+    _os.environ.get("O4_DSF_OBJECT_MAX_FOOTPRINT_AREA_M2", "0"))
+
+# (amendment A3) A baked structure whose ground elevation span across its
+# ground-touching parts exceeds this is still baked with the best single
+# offset, but reported ``needs_pad`` — one rigid offset cannot seat it,
+# and a Phase-1 building pad is the actual fix (spec section 7.3).
+DSF_OBJECT_PAD_FLAG_SPAN_M = float(
+    _os.environ.get("O4_DSF_OBJECT_PAD_FLAG_SPAN_M", "2"))
 
 # (s80) Extent-based runway shoulder widening — tuning constants and
 # rationale with the other RUNWAY_SHOULDER_EXTENT_* values near the

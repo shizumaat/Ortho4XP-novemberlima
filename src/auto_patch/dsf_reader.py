@@ -775,6 +775,174 @@ def read_dsf_buildings(
     return out
 
 
+# ── OBJ8 scenery objects as buildings (Phase 1 of the DSF object
+# integration — docs/dsf_object_integration_spec.md section 4-W6) ────
+#
+# Resolved OBJ8 geometry, keyed on (absolute path, mtime).  Unlike the
+# legacy ``_surface_attribute_cache`` / ``_LIB_INDEX_CACHE`` / ``_AGP_CACHE``
+# — which have NO invalidation — a replaced ``.obj`` file re-parses here,
+# matching the ``_DSF_LINES_CACHE`` idiom above.
+_OBJECT_GEOMETRY_CACHE: dict = {}
+
+
+def _load_object_geometry(physical_path: str):
+    """Parse an OBJ8 file through ``obj8_reader.load_object_file``,
+    memoized on ``(absolute path, mtime)``.  Returns ``None`` when the
+    file is missing or unparsable."""
+    from . import obj8_reader as _OBJ8
+    try:
+        cache_key = (os.path.abspath(physical_path),
+                     os.path.getmtime(physical_path))
+    except OSError:
+        return None
+    cached = _OBJECT_GEOMETRY_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        geometry = _OBJ8.load_object_file(physical_path)
+    except (OSError, ValueError):
+        return None
+    _OBJECT_GEOMETRY_CACHE[cache_key] = geometry
+    return geometry
+
+
+def read_dsf_object_buildings(
+    dsf_path: str,
+    cache_dir: str | None = None,
+    xplane_root: str | None = None,
+) -> list[tuple[list[tuple[float, float]],
+                list[list[tuple[float, float]]],
+                str]]:
+    """Extract OBJ8 scenery-object structure footprints from a DSF file.
+
+    Scenery authors bake many buildings into one ``.obj`` whose DSF
+    placement anchor may sit hundreds of metres from any geometry, so
+    ``read_dsf_buildings`` (which requires ``.fac`` facades or ``.agp``
+    hangars) cannot see them at all — roughly 105 buildings at KCLT.
+    This reader walks the terrain-draped ``OBJECT`` placements, resolves
+    and parses each ``.obj`` resource, partitions the solid geometry
+    into structures (the SAME contact-graph partition Phase 2 bakes
+    against — amendment A1), and emits one footprint ring per structure.
+
+    Returns the same building-tuple shape as ``read_dsf_buildings``:
+    ``(outer_ring, holes, role)`` with ``role = "object"`` and
+    ``holes = []`` (the hull has none; the union ring drops interiors in
+    v1).  Rings are unclosed, in ``(longitude, latitude)``.  Returns
+    ``[]`` on any failure to load the DSF text.
+
+    Multi-placement definitions are ACCEPTED here — N placements of one
+    ``.obj`` are N buildings, each with its own footprint (invariant
+    I-5).  The refusal of multi-placement definitions (invariant I-4)
+    applies only to the Phase 2 y-bake, where a correction differs per
+    placement and cannot be baked into one shared file.
+
+    Resource resolution is pack-relative-wins, then ``library.txt``
+    (``obj8_reader.resolve_object_resource``) — the order X-Plane itself
+    uses; ``read_dsf_buildings`` never needed ``_pack_root_for_dsf``
+    but pack-local resources such as
+    ``Terminals/Hangar/Charlotte_Airport_007_ALB.obj`` do.
+    """
+    # Function-local config imports so tests can monkeypatch the values
+    # (the module-level idiom at the top of this file freezes them —
+    # spec section 4-W1, "one trap").
+    from .config import (
+        DSF_OBJECT_CONTACT_EPSILON_M,
+        DSF_OBJECT_MIN_REACH_M,
+    )
+    from . import obj8_reader as _OBJ8
+    from . import object_anchor as _ANCHOR
+    from . import object_footprints as _FOOTPRINTS
+
+    lines = _load_dsf_text(dsf_path, cache_dir)
+    if not lines:
+        return []
+    placements = _OBJ8.read_dsf_object_placements(
+        lines,
+        accept_resource=lambda resource: resource.lower().endswith(".obj"),
+    )
+    if not placements:
+        return []
+    pack_root = _pack_root_for_dsf(dsf_path)
+
+    # Resolve and parse each distinct resource once; keep only the
+    # correction candidates (solid geometry whose reach exceeds the
+    # detector floor — a compact, correctly anchored object is X-Plane's
+    # business, not ours).
+    resolved_paths: dict[str, str] = {}
+    geometry_by_resource: dict = {}
+    for resource_path in sorted({p.resource_path for p in placements}):
+        physical_path = _OBJ8.resolve_object_resource(
+            resource_path, pack_root, xplane_root)
+        if physical_path is None:
+            continue
+        geometry = _load_object_geometry(physical_path)
+        if geometry is None or not geometry.has_solid_geometry:
+            continue
+        if geometry.solid_reach_metres() < DSF_OBJECT_MIN_REACH_M:
+            continue
+        resolved_paths[resource_path] = physical_path
+        geometry_by_resource[resource_path] = geometry
+    if not resolved_paths:
+        return []
+    kept_placements = [p for p in placements
+                       if p.resource_path in resolved_paths]
+
+    # An ObjectPool carries exactly one placement per resource, so a
+    # multi-placement definition cannot enter the shared pooling — each
+    # of its placements becomes its own single-object pool (N placements
+    # = N buildings, invariant I-5).  Single-placement resources pool
+    # together by world bounding-box overlap so structures spanning
+    # several co-baked objects merge (invariant I-1).
+    placement_count_by_resource: dict[str, int] = {}
+    for placement in kept_placements:
+        placement_count_by_resource[placement.resource_path] = (
+            placement_count_by_resource.get(placement.resource_path, 0) + 1)
+    single_placements = [
+        p for p in kept_placements
+        if placement_count_by_resource[p.resource_path] == 1]
+    multi_placements = [
+        p for p in kept_placements
+        if placement_count_by_resource[p.resource_path] > 1]
+
+    pools = []
+    if single_placements:
+        single_resources = {p.resource_path for p in single_placements}
+        pools.extend(_ANCHOR.discover_object_pools(
+            single_placements,
+            {resource: resolved_paths[resource]
+             for resource in single_resources},
+            {resource: geometry_by_resource[resource]
+             for resource in single_resources},
+            epsilon_metres=DSF_OBJECT_CONTACT_EPSILON_M,
+        ))
+    for placement in multi_placements:
+        pools.append(_ANCHOR.ObjectPool(
+            placements=[placement],
+            resolved_paths={
+                placement.resource_path:
+                    resolved_paths[placement.resource_path]},
+        ))
+
+    out: list[tuple[list[tuple[float, float]],
+                    list[list[tuple[float, float]]],
+                    str]] = []
+    for pool in pools:
+        pool_geometry_by_resource = {
+            resource: geometry_by_resource[resource]
+            for resource in pool.resolved_paths}
+        structures = _ANCHOR.partition_structures(
+            pool,
+            pool_geometry_by_resource,
+            epsilon_metres=DSF_OBJECT_CONTACT_EPSILON_M,
+        )
+        for structure in structures:
+            ring = _FOOTPRINTS.structure_ring(
+                structure, pool_geometry_by_resource, pool.placements)
+            if ring is not None and len(ring) >= 3:
+                out.append((ring, [], "object"))
+    return out
+
+
 def find_associated_dsf(apt_dat_path: str,
                         apt_lat: float,
                         apt_lon: float) -> str | None:
