@@ -1244,3 +1244,33 @@ Corollary recorded for honesty: the reach floor is a *mis-anchoring detector* wi
 on large correctly-anchored objects. Inside a custom pack those false positives are benign — the
 centroid-to-anchor delta of a correctly anchored structure is approximately zero, so the bake is a
 no-op — which is why no further filtering is needed there.
+
+### A16 — First in-sim findings at KCLT, diagnosed *(follow-up work toward the dev merge)*
+
+The user's in-sim pass found two defects; both are diagnosed with production data, neither blocks
+the merge, both are recorded here with fix designs.
+
+1. **Detached buildings float above their groundside pavement** (user report at
+   35.205352, −80.9300188; measured: three building pads pinned flat at 213.3–213.6 m beside a
+   groundside surface spanning 204.6–212.6 m). Now that Phase 1 supplies buildings completely
+   separated from airside pavement, a `ROLE_BUILDING` pad with no airside/terminal coupling takes
+   its flat altitude from a source that ignores the groundside surface it abuts, and no route
+   profile reaches it. **Fix design:** a building pad whose boundary abuts groundside pavement and
+   which has no airside coupling welds its flat altitude to the groundside surface along the shared
+   edge (minimum or contact-length-weighted mean), and the groundside solve treats the pad edge as
+   an anchor so the two agree exactly. Solver work in the groundside/building-frontage area — the
+   existing "spine does not rise to serve a building across an apron" family.
+2. **A valid footprint was dropped at pipeline admission** (user report at 35.2172031, −80.927082).
+   The structure exists, is ground-touching, 12 m tall, and `structure_ring` returns a 15-vertex
+   ring — but no pad reaches the patch. The admission path's one silent dropper is the
+   boundary-CENTROID gate, and the location sits at the airport's edge among boundary ribbons.
+   **Fix design:** for the OBJ8 source, admit when the footprint polygon *intersects* the boundary
+   gate rather than requiring centroid containment (parameter on the shared admission helper —
+   `.fac` behavior unchanged), and report per-source admission counts so gate drops are visible.
+3. **Degenerate-edge not-a-number in the narrow phase** (found live during the HECA build,
+   fixed same day): a duplicated triangle corner made the point-triangle edge test divide 0/0, and
+   the not-a-number propagated through the pair's minimum — flipping genuine contact to
+   proved-apart, in violation of I-20. Sanitised to contact; regression-tested. The KCLT
+   eight-bake pool was unaffected (byte-identical partition), but minor pools changed: the pack
+   was re-applied with fixed code, and **KCLT owes one fresh full cycle** so Phase 1 pads and the
+   Phase 2 bake share one partition again (amendment A1's invariant).
