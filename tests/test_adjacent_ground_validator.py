@@ -171,6 +171,54 @@ def test_verify_and_log_counts_adjacent_when_gate_on(monkeypatch):
     assert counts["adjacent_ground"] == 0
 
 
+# ── source_runways=None fallback (the production verify path) ──────────
+def test_none_runways_fallback_reads_runways_without_crashing(monkeypatch):
+    """The production ``verify_and_log`` path has no apt.dat runway rows
+    (the driver threads only the DEM), so the runway family must key its
+    code number from the runway SHAPE's own geometry (minimum-rotated-
+    rectangle long side) — the round-1 fallback fed the long-edges LIST
+    from ``_rect_long_short_edges`` to ``runway_code_number`` and crashed
+    with TypeError on every 4-corner runway ring (swallowed to a false 0
+    by the old broad except).  Same below-floor drop as the flagged case,
+    no runways: must still flag, never crash."""
+    layout = _make_layout()
+    _patch_dem(monkeypatch,
+               lambda d: _RUNWAY_ALT - 10.0 if d < 60.0 else _RUNWAY_ALT)
+    findings = verification.check_adjacent_ground(
+        layout, dem=object(), tile_lat=0, tile_lon=0, source_runways=None)
+    assert findings, "the None-runways fallback must still read runways"
+    assert {f[0] for f in findings} == {"should_fill"}
+
+
+def test_verify_and_log_counter_is_live_without_runways(monkeypatch):
+    """Gate on, NO explicit runways (the driver's production call shape):
+    a synthetic below-floor drop must show up in the counter — a live
+    count, not the swallowed 0 the old broad except produced."""
+    import auto_patch.config as cfg
+    monkeypatch.setattr(cfg, "ADJACENT_GROUND_LAW_ENABLED", True)
+    _patch_dem(monkeypatch,
+               lambda d: _RUNWAY_ALT - 10.0 if d < 60.0 else _RUNWAY_ALT)
+    counts = verification.verify_and_log(
+        _make_layout(), "ZZZZ", dem=object(), tile_lat=0, tile_lon=0)
+    assert counts.get("adjacent_ground", 0) > 0
+
+
+def test_verify_and_log_surfaces_programming_errors(monkeypatch):
+    """A TypeError inside the check must PROPAGATE out of verify_and_log
+    (the _GEOM_EXC rule: shapely-domain failures may be contained,
+    built-in errors never — the old broad except read every crash as a
+    false 0 count)."""
+    import auto_patch.config as cfg
+    monkeypatch.setattr(cfg, "ADJACENT_GROUND_LAW_ENABLED", True)
+
+    def _boom(*args, **kwargs):
+        raise TypeError("programming error must surface")
+    monkeypatch.setattr(verification, "check_adjacent_ground", _boom)
+    with pytest.raises(TypeError):
+        verification.verify_and_log(
+            _make_layout(), "ZZZZ", dem=object(), tile_lat=0, tile_lon=0)
+
+
 # ── OSM-side tear sentinel (tools/check_grade) ──────────────────────────
 def _make_graded_way(elevs):
     """A synthetic closed ``adjacent_ground`` way whose ring runs along the

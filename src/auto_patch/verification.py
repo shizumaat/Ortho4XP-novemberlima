@@ -1151,11 +1151,16 @@ def check_adjacent_ground(layout, dem, tile_lat, tile_lon,
             rw_axes.append((LineString([(rax, ray), (rbx, rby)]),
                             ((rbx - rax) / rlen, (rby - ray) / rlen), rlen))
 
-    def _long_edge_unit(poly):
+    def _long_edge_length_and_unit(poly):
+        """``(long_side_length_m, (ux, uy))`` of the polygon's minimum
+        rotated rectangle — the runway shape's own length + axis, the
+        ``source_runways=None`` fallback for code-number keying and
+        END-edge skipping.  ``(0.0, None)`` when degenerate (never raises;
+        ``runway_code_number(0.0)`` keys the smallest code)."""
         try:
             xs = list(poly.minimum_rotated_rectangle.exterior.coords)
         except CL._GEOM_EXC:
-            return None
+            return (0.0, None)
         best = None
         for i in range(len(xs) - 1):
             dx = xs[i + 1][0] - xs[i][0]
@@ -1163,11 +1168,17 @@ def check_adjacent_ground(layout, dem, tile_lat, tile_lon,
             length = math.hypot(dx, dy)
             if length > 0.0 and (best is None or length > best[0]):
                 best = (length, dx / length, dy / length)
-        return None if best is None else (best[1], best[2])
+        return (0.0, None) if best is None else (best[0], (best[1], best[2]))
 
     def _params(s):
         """(env_role, code_number, code_letter, reach, axis) for one shape;
-        mirrors ``adjacent_ground._family_params``."""
+        mirrors ``adjacent_ground._family_params``.  Where the emitter
+        SKIPS runway shapes without ``rw_axes`` (the pipeline always
+        threads apt.runways), the validator must still read them —
+        production ``verify_and_log`` has no runway rows — so it falls
+        back to the runway shape's OWN geometry (minimum-rotated-rectangle
+        long side = length for the code number, its direction for the
+        END-edge skip)."""
         role = s.role
         if role in _ADJACENT_RUNWAY_ROLES:
             code_number = None
@@ -1181,9 +1192,8 @@ def check_adjacent_ground(layout, dem, tile_lat, tile_lon,
                 except (CL._GEOM_EXC + (ValueError,)):
                     code_number = None
             if code_number is None:
-                info = CL._rect_long_short_edges(CL._open_coords(s.polygon))
-                code_number = runway_code_number(info[0] if info else 0.0)
-                axis = _long_edge_unit(s.polygon)
+                length_m, axis = _long_edge_length_and_unit(s.polygon)
+                code_number = runway_code_number(length_m)
             return (role, code_number, None,
                     CLEARANCE_MAX_REACH_M["runway"], axis)
         if role in _ADJACENT_TAXIWAY_ROLES:
@@ -2188,24 +2198,25 @@ def verify_and_log(layout, icao: str, debug_log_path: str | None = None,
     # Adjacent-ground LATERAL grade law — DEM-based, gate-guarded so a
     # law-off build has ZERO overhead and byte-identical verify output.
     adjacent = []
-    try:
-        from .config import ADJACENT_GROUND_LAW_ENABLED
-    except Exception:                              # pragma: no cover
-        ADJACENT_GROUND_LAW_ENABLED = False
+    from .config import ADJACENT_GROUND_LAW_ENABLED
     if ADJACENT_GROUND_LAW_ENABLED:
+        import math as _math
+        from .clearance import _GEOM_EXC as _shapely_domain_exceptions
+        _dem = dem
+        _tlat, _tlon = tile_lat, tile_lon
+        if _dem is None:
+            from .elevation import _load_airport_dem
+            _dem = _load_airport_dem(layout.anchor[0], layout.anchor[1])
+        if _tlat is None or _tlon is None:
+            _tlat = int(_math.floor(layout.anchor[0]))
+            _tlon = int(_math.floor(layout.anchor[1]))
+        # Shapely-domain failures only (the repo's _GEOM_EXC rule): a
+        # geometry-degeneracy may skip the check, but a programming error
+        # (TypeError & co.) must SURFACE, never read as a false 0 count.
         try:
-            import math as _math
-            _dem = dem
-            _tlat, _tlon = tile_lat, tile_lon
-            if _dem is None:
-                from .elevation import _load_airport_dem
-                _dem = _load_airport_dem(layout.anchor[0], layout.anchor[1])
-            if _tlat is None or _tlon is None:
-                _tlat = int(_math.floor(layout.anchor[0]))
-                _tlon = int(_math.floor(layout.anchor[1]))
             adjacent = check_adjacent_ground(
                 layout, _dem, _tlat, _tlon, source_runways=source_runways)
-        except Exception:                          # pragma: no cover
+        except _shapely_domain_exceptions:         # pragma: no cover
             adjacent = []
 
     counts = {"overlap": len(overlaps), "source": len(source),
