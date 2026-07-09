@@ -43,9 +43,9 @@ def _parameter_names(callable_object) -> list[str]:
 # ---------------------------------------------------------------------------
 
 FLAG_EXPECTATIONS = [
-    ("DSF_OBJECT_BUILDINGS", bool, False),
+    ("DSF_OBJECT_BUILDINGS", bool, True),
     ("DSF_OBJECT_FOOTPRINT_UNION", bool, False),
-    ("DSF_OBJECT_REANCHOR", bool, False),
+    ("DSF_OBJECT_REANCHOR", bool, True),
     ("DSF_OBJECT_ALLOW_ANIM", bool, False),
     ("DSF_OBJECT_MIN_REACH_M", float, 25.0),
     ("DSF_OBJECT_CONTACT_EPSILON_M", float, 0.25),

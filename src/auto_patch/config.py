@@ -1339,7 +1339,7 @@ TERM_BRIDGE_GROUPING = _os.environ.get("O4_TERM_BRIDGE_GROUPING", "1") == "1"
 # facade clustering unions any overlap.  Default OFF until measured on
 # the gate airports.  Has no effect unless DSF_BUILDINGS is also ON
 # (shares the building path).  OFF is byte-identical to the prior build.
-DSF_OBJECT_BUILDINGS = _os.environ.get("O4_DSF_OBJECT_BUILDINGS", "0") == "1"
+DSF_OBJECT_BUILDINGS = _os.environ.get("O4_DSF_OBJECT_BUILDINGS", "1") == "1"
 
 # Convex hull is the shipped footprint ring (user 2026-07-08, ruling R3:
 # measure the pad interaction before paying for fidelity).  The union of
@@ -1357,8 +1357,9 @@ DSF_OBJECT_FOOTPRINT_UNION = (
 # always re-read from the backup, so the operation is byte-idempotent and
 # cannot stack.  Re-runs after every mesh build (the offsets encode one
 # specific built mesh).  Corrected packs MUST NOT be redistributed.
-# OFF leaves every pack byte-identical.
-DSF_OBJECT_REANCHOR = _os.environ.get("O4_DSF_OBJECT_REANCHOR", "0") == "1"
+# DEFAULT ON after the three-pack verification (2026-07-08);
+# O4_DSF_OBJECT_REANCHOR=0 leaves every pack byte-identical.
+DSF_OBJECT_REANCHOR = _os.environ.get("O4_DSF_OBJECT_REANCHOR", "1") == "1"
 
 # Refuse (and report) objects containing ``ANIM_begin``: a per-structure
 # offset applied inside an animation block can break its rotation pivot.
