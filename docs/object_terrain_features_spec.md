@@ -669,3 +669,31 @@ at the calibrated 0.95 threshold it classifies TUNNEL, at 0.90 INTERIOR_CUTOUT. 
 for v1; both sides of the band now carry real data. **W-T note:** the negative-`OBJECT_AGL`
 tunnel limb needs a minimum-footprint guard before consumption (KDEN jetway slack would
 otherwise produce false tunnel records — pinned in the tests with a flag comment).
+
+**A10 (2026-07-09, KBNA three-way calibration — author mesh | hand patch | object model).**
+The GloballArt author mesh is the aligned reference (user-confirmed, measured): the
+object-derived values match it **exactly** at every site — taxiway-L abutments 167.0 both ends,
+corridor floor 161.0, depth 6.0 m, girder clearance 4.2 m — while the user's hand patch runs
++3 to +10 m high at all four crossings (independent DEM-faithful treatment predating the pack;
+its 172 m causeway would bury the fixture-pinned deck). No case exists where both references
+agree against the object model. Calibrations now normative for feature B:
+(i) **corridor floor = absolute deck elevation − hard-deck height** (geometry-driven; the
+clearance constant is a *check*, not the driver — a clearance-driven floor over-digs by ~0.9 m
+here); (ii) `BRIDGE_ROAD_CLEARANCE_M`: the validated in-the-wild minimum is **4.2 m**; 5.1 m is
+retained only for the crossing-floor law where we choose the vertical split (EDDF class), and
+the deck-carried corridor *validator* accepts ≥ 4.2; (iii) **cosmetic decks get the identical
+causeway-plus-corridor treatment as hard decks** (author: same 167/161/6.0 at both Murfreesboro
+bridges); (iv) **no taxiway-side terrain ramp** — causeway flat at datum to the abutment lip,
+near-vertical across-road walls (node-split, R2), along-road grades 1.5–3%, depressed road
+extends ≥ 240 m per side (open question 4 datum); (v) the author hand-flattens the field core
+at exactly 167 m (67% of samples), the EGLL 21 m pattern repeated — open question 1 gains a
+second datum point. Oracle validated at a second airport: the structure pass found all bridge
+corridors EXPOSED with exact floors, and the first end-to-end `--depressions` run scored 100%
+recall on the four true corridors but ~5% precision on contoured terrain (creek valleys read as
+interior depressions; the enclosure claim is untested; object association is bounding-box) —
+needs a real enclosure test and footprint intersection before auto-confirmation. Classifier
+worklist from this pass: taxiway-L itself returns AMBIGUOUS under standalone drape-coverage
+evidence (the flagship exemplar refuses; the in-pipeline solved-pavement union is the intended
+evidence — expose the coverage fraction on the record so tools can print it); Crossing_Bridge
+is silently absent from classification (suspect the 50-placement clutter filter or footprint
+gates — must at least surface as a refusal); plus the A9/W-V mega-pool defect.
