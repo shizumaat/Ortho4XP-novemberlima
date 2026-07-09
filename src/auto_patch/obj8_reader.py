@@ -28,8 +28,21 @@ each silently corrupts a naive implementation — plan section 8.8):
   Always split on whitespace (invariant I-17).
 * ``ATTR_draped`` triangles conform to the terrain mesh and are immune to
   the anchor problem; they are kept apart from solid triangles (I-9).
-* ``OBJECT_MSL`` / ``OBJECT_AGL`` carry an explicit elevation and shift
-  the heading column; only a plain ``OBJECT`` is terrain-draped.
+* ``OBJECT_AGL`` / ``OBJECT_MSL`` carry an explicit elevation in a
+  column that plain ``OBJECT`` does not have, which SHIFTS THE HEADING
+  ONE COLUMN RIGHT.  Verified against DSFTool text dumps on 2026-07-09
+  (EGLL TaiModels, Nimbus KBNA); the whitespace-token layout is::
+
+      OBJECT     <def_index> <lon> <lat>              <heading>
+      OBJECT_AGL <def_index> <lon> <lat> <agl_offset> <heading>
+      OBJECT_MSL <def_index> <lon> <lat> <msl_elev>   <heading>
+
+  so heading is token 4 for ``OBJECT`` but token 5 for the other two
+  (reading it from token 4 there silently swaps heading for elevation).
+  The AGL offset is SIGNED (negative = below grade); the MSL value is an
+  absolute elevation above sea level, never terrain-relative.  Only plain
+  ``OBJECT`` is terrain-draped; ``OBJECT_AGL`` is terrain-relative at its
+  anchor (A18) and ``OBJECT_MSL`` is absolute.
 * Objects declaring ``POINT_COUNTS 0 0 0 0`` are light-only.
 * ``LIGHT_*`` / ``VLIGHT`` / ``SMOKE_*`` / ``EMITTER`` / ``MAGNET`` carry
   their own y coordinates and must move with their structure (I-10) —
@@ -100,15 +113,38 @@ POSITIONAL_COMMAND_COORDINATE_TOKEN_INDICES: dict[str, tuple[int, int, int]] = {
 
 
 class ObjectPlacement(NamedTuple):
-    """One terrain-relative object placement from a DSF text dump.
+    """One object placement from a DSF text dump.
 
-    Covers plain ``OBJECT`` rows AND ``OBJECT_AGL`` rows (amendment A18):
-    an AGL placement resolves to ``terrain(anchor) + elevation`` —
+    Covers plain ``OBJECT`` rows, ``OBJECT_AGL`` rows (amendment A18) and
+    — opt-in only — ``OBJECT_MSL`` rows.  ``placement_kind`` records which
+    of the three the row was (``"OBJECT"`` / ``"OBJECT_AGL"`` /
+    ``"OBJECT_MSL"``) so a caller need not re-derive it from which field
+    is set.
+
+    ``OBJECT`` / ``OBJECT_AGL`` are terrain-relative.  An AGL placement
+    resolves to ``terrain(anchor) + above_ground_level_metres`` —
     terrain-relative AT THE ANCHOR ONLY, so far-flung geometry inherits
     the anchor's terrain exactly like a plain ``OBJECT`` does, offset by
     ``above_ground_level_metres`` (zero for plain ``OBJECT``).  HECA
-    ships 183 of its 216 AGL placements on one shared anchor.  Only
-    ``OBJECT_MSL`` (absolute elevation) remains outside this type.
+    ships 183 of its 216 AGL placements on one shared anchor.
+
+    ``above_ground_level_metres`` is the SIGNED above-ground offset (the
+    field the object-terrain-features spec calls ``above_ground_offset_m``
+    downstream — same value, no separate field): a NEGATIVE value is a
+    below-grade signal, above-grade geometry authored below the terrain.
+    EGLL places tunnels 6/7/10 as ``OBJECT_AGL`` at −1.0 / −7.0 / −7.5 m,
+    invisible to a vertex-depth filter that ignores the placement offset.
+    Never take ``abs()`` of this field: the sign is load-bearing.
+
+    ``OBJECT_MSL`` rows carry an ABSOLUTE elevation in metres above sea
+    level, not a terrain-relative offset; that value lands in
+    ``mean_sea_level_elevation_m`` (``None`` for the terrain-relative
+    kinds) and ``above_ground_level_metres`` stays ``0.0``.  These rows
+    are skipped unless the reader is called with ``include_object_msl=
+    True`` — at KBNA the twelve taxiway-bridge-deck fixtures at
+    166.9994 m are the only absolute deck-elevation source in the pack,
+    so downstream code opts in to read them; every existing caller that
+    does not opt in sees exactly the pre-change behaviour (no MSL rows).
     """
 
     definition_index: int
@@ -117,6 +153,8 @@ class ObjectPlacement(NamedTuple):
     latitude: float
     heading_degrees: float
     above_ground_level_metres: float = 0.0
+    placement_kind: str = "OBJECT"
+    mean_sea_level_elevation_m: float | None = None
 
 
 class PositionalCommand(NamedTuple):
@@ -146,6 +184,35 @@ class ObjectGeometry(NamedTuple):
     ``vertex_line_indices`` is parallel to ``vertices`` and gives each
     ``VT`` line's 0-based index in the source file, so the rebake writer
     can rewrite the y token in place (invariant I-16).
+
+    ``solid_triangle_hardness`` is parallel to ``solid_triangles``: entry
+    ``i`` records the collision state in force when ``solid_triangles[i]``
+    was emitted, one of ``""`` (not hard), ``"hard"`` (``ATTR_hard`` — a
+    surface solid from every side) or ``"hard_deck"`` (``ATTR_hard_deck``
+    — hard from ABOVE only; the deck carries collision while the space
+    beneath stays passable, which is exactly why taxiway bridges and
+    cut-and-cover tunnel decks use it: taxi on top, drive underneath).
+    This is the object-terrain-features feature: it lets the tunnel/bridge
+    classifier recover which triangles form a drivable deck without
+    re-reading the file.  The field is a tuple so it can carry an
+    immutable default of ``()`` (hand-constructed geometry in existing
+    callers passes no hardness and reads back "unknown, treat as not
+    hard"); ``load_object_file`` always populates it in full.
+
+    OBJ8 hardness semantics (verified 2026-07-09 against the EGLL
+    ``Airport/Tunnel/*.obj`` shells + decks, the KBNA
+    ``KBNA_Bridge_Taxiway-L_p6.obj`` deck and the EDDF
+    ``Bridge_*_hard.obj`` decks): ``ATTR_hard`` / ``ATTR_hard_deck`` set
+    the state (each may carry a trailing surface-type token that is
+    ignored here), ``ATTR_no_hard`` clears it, and the state persists
+    across the following ``TRIS`` commands until changed — the same
+    simple, non-stacked flag model this reader already uses for
+    ``ATTR_draped`` (invariant I-9).  In the three exemplar packs every
+    hard command seen is ``ATTR_hard_deck``: EGLL/EDDF set it once before
+    all geometry (the whole object is a deck), while KBNA taxiway-L emits
+    one plain ``TRIS`` (railing, not hard) and then ``ATTR_hard_deck``
+    before the deck ``TRIS`` — so per-triangle tracking, not a
+    whole-object flag, is required.
     """
 
     vertices: list[tuple[float, float, float]]
@@ -155,6 +222,20 @@ class ObjectGeometry(NamedTuple):
     animation_block_count: int
     level_of_detail_count: int
     vertex_line_indices: list[int]
+    solid_triangle_hardness: tuple[str, ...] = ()
+
+    def hard_deck_solid_triangles(self) -> list[tuple[int, int, int]]:
+        """The subset of ``solid_triangles`` emitted under ``ATTR_hard_deck``
+        — the drivable deck of a bridge or tunnel.  Defensive against a
+        hardness tuple shorter than ``solid_triangles`` (hand-constructed
+        geometry with the default empty tuple): a missing entry reads as
+        not hard."""
+        return [
+            triangle
+            for index, triangle in enumerate(self.solid_triangles)
+            if index < len(self.solid_triangle_hardness)
+            and self.solid_triangle_hardness[index] == "hard_deck"
+        ]
 
     @property
     def has_solid_geometry(self) -> bool:
@@ -194,18 +275,22 @@ def load_object_file(path: str) -> ObjectGeometry:
     """Parse an OBJ8 file.
 
     Whitespace-tolerant (space- and tab-separated exports, invariant
-    I-17); tracks ``ATTR_draped`` / ``ATTR_no_draped`` state across the
-    ``TRIS`` commands; collects :class:`PositionalCommand` entries and
-    counts ``ANIM_begin`` / ``ATTR_LOD``.
+    I-17); tracks ``ATTR_draped`` / ``ATTR_no_draped`` state and — for the
+    object-terrain-features feature — ``ATTR_hard`` / ``ATTR_hard_deck`` /
+    ``ATTR_no_hard`` state across the ``TRIS`` commands (see
+    :class:`ObjectGeometry` for the verified hardness semantics); collects
+    :class:`PositionalCommand` entries and counts ``ANIM_begin`` /
+    ``ATTR_LOD``.
     """
     vertices: list[tuple[float, float, float]] = []
     vertex_line_indices: list[int] = []
     indices: list[int] = []
-    triangle_ranges: list[tuple[int, int, bool]] = []
+    triangle_ranges: list[tuple[int, int, bool, str]] = []
     positional_commands: list[PositionalCommand] = []
     animation_block_count = 0
     level_of_detail_count = 0
     currently_draped = False
+    currently_hard = ""  # "" | "hard" | "hard_deck"
 
     with open(path, errors="replace") as handle:
         for line_index, line in enumerate(handle):
@@ -224,9 +309,20 @@ def load_object_file(path: str) -> ObjectGeometry:
                 currently_draped = True
             elif keyword == "ATTR_no_draped":
                 currently_draped = False
+            elif keyword == "ATTR_hard_deck":
+                currently_hard = "hard_deck"
+            elif keyword == "ATTR_hard":
+                currently_hard = "hard"
+            elif keyword == "ATTR_no_hard":
+                currently_hard = ""
             elif keyword == "TRIS":
                 triangle_ranges.append(
-                    (int(tokens[1]), int(tokens[2]), currently_draped)
+                    (
+                        int(tokens[1]),
+                        int(tokens[2]),
+                        currently_draped,
+                        currently_hard,
+                    )
                 )
             elif keyword == "ANIM_begin":
                 animation_block_count += 1
@@ -249,17 +345,22 @@ def load_object_file(path: str) -> ObjectGeometry:
 
     solid: list[tuple[int, int, int]] = []
     draped: list[tuple[int, int, int]] = []
+    solid_hardness: list[str] = []
     index_count = len(indices)
-    for offset, count, is_draped in triangle_ranges:
-        target = draped if is_draped else solid
+    for offset, count, is_draped, hardness in triangle_ranges:
         for position in range(offset, min(offset + count, index_count - 2), 3):
-            target.append(
-                (
-                    indices[position],
-                    indices[position + 1],
-                    indices[position + 2],
-                )
+            triangle = (
+                indices[position],
+                indices[position + 1],
+                indices[position + 2],
             )
+            if is_draped:
+                draped.append(triangle)
+            else:
+                solid.append(triangle)
+                # Parallel to ``solid``: the hardness in force for this
+                # triangle.  Draped triangles never carry hardness.
+                solid_hardness.append(hardness)
     return ObjectGeometry(
         vertices=vertices,
         solid_triangles=solid,
@@ -268,6 +369,7 @@ def load_object_file(path: str) -> ObjectGeometry:
         animation_block_count=animation_block_count,
         level_of_detail_count=level_of_detail_count,
         vertex_line_indices=vertex_line_indices,
+        solid_triangle_hardness=tuple(solid_hardness),
     )
 
 
@@ -373,18 +475,27 @@ def lonlat_to_local_offset(
 def read_dsf_object_placements(
     dsf_text_lines: Iterable[str],
     accept_resource: Callable[[str], bool] | None = None,
+    include_object_msl: bool = False,
 ) -> list[ObjectPlacement]:
-    """Collect terrain-draped ``OBJECT`` placements from a DSF text dump.
+    """Collect ``OBJECT`` placements from a DSF text dump.
 
-    ``OBJECT`` rows and — amendment A18 — ``OBJECT_AGL`` rows are both
+    ``OBJECT`` rows and — amendment A18 — ``OBJECT_AGL`` rows are always
     collected: an AGL placement is terrain-relative at its ANCHOR only,
     so it carries the distant-anchor disease with a constant vertical
-    offset (``above_ground_level_metres``; the heading moves to the
-    fifth column).  Only ``OBJECT_MSL`` (absolute elevation, zero
-    instances across the three gate packs) is skipped — callers report
-    its presence rather than silently ignoring it.  Takes lines, not a
-    path, so tests feed synthetic text (harness pattern (a),
-    ``tests/test_agp_reader.py``).
+    offset (``above_ground_level_metres``, signed; the heading moves to
+    the fifth column — see the module docstring's verified column table).
+
+    ``OBJECT_MSL`` rows carry an ABSOLUTE elevation above sea level and
+    are skipped by default (``include_object_msl=False``), preserving the
+    historical behaviour exactly: existing callers that do not opt in
+    receive no MSL rows.  Pass ``include_object_msl=True`` to receive them
+    with ``placement_kind == "OBJECT_MSL"`` and their absolute elevation
+    in ``mean_sea_level_elevation_m`` — at KBNA these are the only
+    absolute deck-elevation source (twelve taxiway-bridge fixtures at
+    166.9994 m), so bridge classification opts in.
+
+    Takes lines, not a path, so tests feed synthetic text (harness
+    pattern (a), ``tests/test_agp_reader.py``).
     """
     definitions: list[str] = []
     placements: list[ObjectPlacement] = []
@@ -394,26 +505,38 @@ def read_dsf_object_placements(
             continue
         if tokens[0] == "OBJECT_DEF":
             definitions.append(line.split(None, 1)[1].strip())
-        elif tokens[0] in ("OBJECT", "OBJECT_AGL"):
+        elif tokens[0] in ("OBJECT", "OBJECT_AGL", "OBJECT_MSL"):
+            keyword = tokens[0]
+            if keyword == "OBJECT_MSL" and not include_object_msl:
+                continue
             index = int(tokens[1])
             if index >= len(definitions):
                 continue
             resource = definitions[index]
             if accept_resource is not None and not accept_resource(resource):
                 continue
-            is_above_ground_level = tokens[0] == "OBJECT_AGL"
+            # OBJECT_AGL / OBJECT_MSL have an elevation column that plain
+            # OBJECT lacks, so the heading is token 5 there, token 4 here.
+            has_elevation_column = keyword in ("OBJECT_AGL", "OBJECT_MSL")
+            heading_degrees = float(
+                tokens[5] if has_elevation_column else tokens[4]
+            )
+            above_ground_level_metres = (
+                float(tokens[4]) if keyword == "OBJECT_AGL" else 0.0
+            )
+            mean_sea_level_elevation_m = (
+                float(tokens[4]) if keyword == "OBJECT_MSL" else None
+            )
             placements.append(
                 ObjectPlacement(
                     definition_index=index,
                     resource_path=resource,
                     longitude=float(tokens[2]),
                     latitude=float(tokens[3]),
-                    heading_degrees=float(
-                        tokens[5] if is_above_ground_level else tokens[4]
-                    ),
-                    above_ground_level_metres=(
-                        float(tokens[4]) if is_above_ground_level else 0.0
-                    ),
+                    heading_degrees=heading_degrees,
+                    above_ground_level_metres=above_ground_level_metres,
+                    placement_kind=keyword,
+                    mean_sea_level_elevation_m=mean_sea_level_elevation_m,
                 )
             )
     return placements

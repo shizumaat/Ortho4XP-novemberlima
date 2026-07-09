@@ -134,6 +134,7 @@ __all__ = [
     "TAXIWAY_STRIP_GRADED_HALF_WIDTH_BY_LETTER",
     "taxiway_strip_graded_half_width_for_letter",
     "ADJACENT_GROUND_UNGRADED_STRIP_MAX_UP_SLOPE",
+    "ADJACENT_GROUND_DAYLIGHT_SLOPE_LIMIT",
     "APRON_SHOULDER_WIDTH_M",
     "APRON_SHOULDER_MIN_DOWN_SLOPE",
     "APRON_SHOULDER_MAX_DOWN_SLOPE",
@@ -145,6 +146,8 @@ __all__ = [
     "runway_end_clearance_length_m",
     "runway_end_approach_class",
     "RUNWAY_END_SKIRT_ENABLED",
+    "OBJECT_BRIDGE_TERRAIN",
+    "BRIDGE_ROAD_CLEARANCE_M",
     "PRECISION_APPROACH_LIGHT_CODES",
     "PRECISION_MARKINGS_CODES",
     "NON_PRECISION_MARKINGS_CODES",
@@ -1836,6 +1839,56 @@ RUNWAY_END_SKIRT_ENABLED = (
 ADJACENT_GROUND_LAW_ENABLED = (
     _os.environ.get("O4_ADJACENT_GROUND_LAW", "1") == "1")
 
+# Gap-fill + drainage spine (user design ruling 2026-07-09,
+# docs/chain_identity_one_solve_plan.md "GAP-FILL + DRAINAGE SPINE").
+# Ground ENCLOSED between pavements (an interior ring of the airside
+# pavement union — e.g. the hole bounded by a runway, a parallel taxiway
+# and two connector stubs) is graded as ONE unit: the boundary is the
+# pavement chains VERBATIM (zero new boundary geometry) and the interior
+# is a single drainage SPINE that splits the gap into two half-gap faces.
+# DEFAULT ON (env O4_GAP_FILL_SPINE); set 0 to leave enclosed gaps to the
+# corridor-band emitter.
+GAP_FILL_SPINE_ENABLED = (
+    _os.environ.get("O4_GAP_FILL_SPINE", "1") == "1")
+# Spine station step (m).  The spine is the ONLY new geometry the gap-fill
+# mints, so the step is deliberately coarse — node economy per the
+# 2026-07-09 performance ruling (one sub-µm near-parallel pair Ruppert-
+# explodes the tile, so every avoided node counts).
+GAP_FILL_SPINE_STEP_M = 15.0
+# Widest enclosed gap the drainage-spine emitter claims (m), measured as
+# the SHORT side of the gap's minimum rotated rectangle.  Wider gaps stay
+# with the corridor-band emitter (user design ruling 2026-07-09).
+GAP_FILL_MAX_WIDTH_M = 160.0
+# Smallest enclosed gap worth grading (m²); below this the ring is clip
+# residue, not a real hole (user design ruling 2026-07-09).
+GAP_FILL_MIN_AREA_M2 = 100.0
+
+# Object-derived BRIDGE terrain feature (feature B of
+# docs/object_terrain_features_spec.md).  DEFAULT OFF — the classifier
+# assembler, the classifier-driven replacement of the
+# ``_scenery_has_bridge_objects`` name-grep, and the object-sourced
+# depressed-road corridor all stay dormant until the three-pack audits
+# (KBNA / EDDF / KMCO, workstream W-V) are green and the user flips the
+# flag (project lockstep discipline, spec section 4).  With the gate OFF
+# no classifier runs and every legacy bridge/underpass path is
+# byte-identical to today.
+OBJECT_BRIDGE_TERRAIN = (
+    _os.environ.get("O4_OBJECT_BRIDGE_TERRAIN", "0") == "1")
+
+# Vertical clearance (m) a draped road needs beneath a bridge deck's
+# lowest clearance-limiting girder — the margin subtracted below the
+# girder underside to set the depressed-corridor floor for a
+# DECK_CARRIED span, and the deck-to-road separation the
+# ``grade_law.bridge_crossing_floor`` law adds above a road surface for a
+# TERRAIN/PROFILE_CARRIED span that must rise (spec sections 3.2 / open
+# question 6).  5.1 m is the upper end of the "real road corridor wants
+# 4.5-5.1 m" band the spec cites and clears the legacy underpass
+# emitter's 8 m depth (``bridges._emit_underpass_road_approaches``
+# ``clearance_depth_m``) comfortably; the object's own measured
+# girder-underside height governs where the pack supplies it, so this
+# constant only sets the road-surface-to-structure gap.
+BRIDGE_ROAD_CLEARANCE_M = 5.1
+
 # Safety cap (m) on how far a clearance band reaches outward from the
 # pavement edge, bounding earthwork.  Must be >= the largest band we
 # actually want: a code-4 runway-end RESA is 240 m, so the runway cap
@@ -1983,6 +2036,22 @@ def taxiway_strip_graded_half_width_for_letter(letter) -> float:
 # beyond it the ground is ungoverned here (the OLS transitional surface
 # takes over — docs/grade_law_gap_audit.md GAP 1).
 ADJACENT_GROUND_UNGRADED_STRIP_MAX_UP_SLOPE = 0.05
+
+# DAYLIGHT slope-limit — the along-frontage benching rule (user ruling
+# 2026-07-09, CYXY shapeID 417 knife-slot report).  The obstruction scan
+# marches each 5 m station outward INDEPENDENTLY, so one or two stations
+# can lawfully reach ~156 m to a terrain violation no neighbour
+# corroborates — rendered as a 156 m × 7 m blade cutting a knife slot
+# into terrain.  Physically, grading BENCHES into a hillside: the
+# daylight line (where the graded surface meets terrain) cannot jump
+# discontinuously along the frontage.  The governed (daylight) DEPTH may
+# therefore grow by at most this factor times the along-frontage distance
+# between neighbouring stations.  Engineering judgment, not a cited
+# regulatory number (see docs/STANDARDS.md).  Rule VALUE lives here per
+# the config doctrine; the LAW lives in
+# ``grade_law.adjacent_ground_supported_depths`` (one source, emitter +
+# validator in lockstep).
+ADJACENT_GROUND_DAYLIGHT_SLOPE_LIMIT = 2.0
 
 # APRON edges.  NO code mandates grading beyond an apron edge (positive
 # research finding): the only governed band is the FAA-RECOMMENDED

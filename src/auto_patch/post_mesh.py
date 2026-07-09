@@ -165,6 +165,7 @@ def discover_and_rebake_airport(
     *,
     epsilon_metres: float | None = None,
     write_changes: bool = True,
+    excluded_resources: set[tuple[str, str]] | None = None,
 ) -> dict:
     """Run the full Phase 2 discovery pipeline for one airport's DSF.
 
@@ -183,6 +184,15 @@ def discover_and_rebake_airport(
     drift.  With ``write_changes=False`` nothing on disk is touched; the
     decisions are returned for reporting (the command line's
     ``--dry-run``).
+
+    ``excluded_resources`` (ruling R4, object terrain features spec):
+    ``(pack_root, resource_path)`` pairs whose terrain was carved or
+    seated to match the object (a structure consumed by terrain feature
+    A or B).  Terrain-to-object and object-to-terrain corrections must
+    never stack, so these placements are dropped BEFORE discovery, each
+    with a skip-and-report entry.  ``None`` / empty means no exclusions
+    (the pre-change behaviour, and the only behaviour while the
+    ``O4_OBJECT_BRIDGE_TERRAIN`` / tunnel gates are off).
 
     Returns a dict with ``objects_written`` (resource paths),
     ``vertices_offset``, ``structures_baked``, ``structures_needing_pad``,
@@ -235,6 +245,35 @@ def discover_and_rebake_airport(
             )
         )
         return result
+
+    # Ruling R4: objects whose terrain was adapted TO them (feature A/B)
+    # are excluded from the Phase 2 y-bake — the two corrections must
+    # never stack.  Filter before discovery, skip-and-report each drop.
+    if excluded_resources:
+        dropped = sorted({
+            placement.resource_path
+            for placement in placements
+            if (pack_root or "", placement.resource_path)
+            in excluded_resources
+        })
+        if dropped:
+            placements = [
+                placement
+                for placement in placements
+                if (pack_root or "", placement.resource_path)
+                not in excluded_resources
+            ]
+            for resource_path in dropped:
+                result["skipped"].append(
+                    (
+                        resource_path,
+                        "terrain adapted to this object (object terrain "
+                        "feature A/B) — excluded from the Phase 2 y-bake "
+                        "(ruling R4)",
+                    )
+                )
+            if not placements:
+                return result
 
     placement_count_by_resource: dict[str, int] = {}
     for placement in placements:
@@ -428,8 +467,21 @@ def rebake_dsf_objects(tile) -> dict:
                         "worklist was written; discovery proceeds against "
                         "the current DSF",
                     )
+                # Ruling R4: feature-A/B-consumed objects (terrain
+                # adapted TO them) never receive the Phase 2 y-bake.
+                # Empty set — read nothing — while the object-terrain
+                # gates are off.
+                from .object_terrain_assembly import exclusion_set_for_dsf
+
+                excluded_resources = exclusion_set_for_dsf(
+                    dsf_path, xplane_root, pack_root=pack_root
+                )
                 airport_result = discover_and_rebake_airport(
-                    dsf_path, mesh_path, pack_root, xplane_root
+                    dsf_path,
+                    mesh_path,
+                    pack_root,
+                    xplane_root,
+                    excluded_resources=excluded_resources,
                 )
             except Exception as exception:
                 # Per-airport containment: one broken airport never

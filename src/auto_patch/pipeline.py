@@ -5371,6 +5371,18 @@ def build_airport_pavement(icao: str, xplane_root: str,
 
         _progress.step()  # [6] Emitting terrain features & finalizing
 
+        # Feature B (O4_OBJECT_BRIDGE_TERRAIN, docs/object_terrain_features_
+        # spec.md): classify the airport pack's bridge/tunnel objects and
+        # cache the result on the layout for the bridge emitters below.
+        # No-op (nothing read, nothing attached) with the gate off.
+        try:
+            from . import object_terrain_assembly
+            object_terrain_assembly.attach_bridge_classification(
+                layout, xplane_root)
+        except Exception as _object_bridge_error:  # never fail the build
+            UI.vprint(1, "   [object-bridge] classification skipped:",
+                      _object_bridge_error)
+
         # ── Terrain-transition feature emit (POST-solve) ──────────────
         # Boundary ribbon, boundary→DEM bridge and taxi/road bridges emit
         # HERE, after the single solve, so each mirrors the FINAL pavement

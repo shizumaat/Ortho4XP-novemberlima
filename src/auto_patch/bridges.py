@@ -70,12 +70,23 @@ from .layout import (
 from .pavement.vertices import _snap_polygon_vertices_to_rect_corners
 from .pavement.runways import _sample_runway_segment_elev
 from .elevation import _resample_node_altitudes_nn, _sample_dem
+from . import config as _CFG
+from . import dsf_road_network
 from .config import (
     IMPLIED_CROSSING_TUNNELS,
     SKIP_TUNNEL_RAMPS_NEAR_ROADS,
     TUNNEL_ADJACENT_ROAD_DIST_M,
     TUNNEL_FORK_THROAT,
 )
+
+# Feature B (object-derived bridge terrain, docs/object_terrain_features_
+# spec.md).  The two layout attributes the assembler
+# (``object_terrain_assembly``) caches the classifier output under; read
+# here at emission time.  Read the live ``_CFG.OBJECT_BRIDGE_TERRAIN`` /
+# ``_CFG.BRIDGE_ROAD_CLEARANCE_M`` (never a bound copy) so the gate and
+# the clearance constant honour env + monkeypatch at call time.
+_OBJECT_BRIDGE_CLASSIFICATION_ATTRIBUTE = "_object_bridge_classification"
+_OBJECT_BRIDGE_ROAD_NETWORKS_ATTRIBUTE = "_object_bridge_road_networks"
 
 
 __all__ = [
@@ -2852,7 +2863,20 @@ def _scenery_has_bridge_objects(
               the bridge taxi rect → True.
       KPHX  — only ``lib/g10/roadsigns/SignBridge*`` defs which
               the exclude regex drops → False.
+
+    Feature B gate replacement (``O4_OBJECT_BRIDGE_TERRAIN``): when the
+    object-terrain classifier has run (its result cached on the layout by
+    ``object_terrain_assembly.attach_bridge_classification``), that
+    geometry-based bridge recognition supersedes the name-grep below — it
+    catches the EDDF crossings and the Spanish-named KMCO "puente" objects
+    the ``bridge|elevated|viaduct|overpass`` regex misses entirely (spec
+    section 3.2, step 4).  A pack is treated as carrying its own 3D bridge
+    structure when the classifier found ANY bridge record; the legacy
+    name-grep runs unchanged whenever the gate is off (no cached result).
     """
+    classification = _object_bridge_classification(layout)
+    if classification is not None:
+        return bool(classification.bridges)
     if not layout.apt_dat_path:
         return False
     bridge_rects = [s.polygon for s in layout.shapes
@@ -3242,6 +3266,454 @@ def _emit_taxi_bridges(
     return n_emitted
 
 
+# ---------------------------------------------------------------------------
+# Feature B — object-derived depressed-road corridors (spec section 3.2)
+#
+# When the object-terrain classifier has run (gate O4_OBJECT_BRIDGE_TERRAIN,
+# result cached on the layout), the depressed corridor under a DECK_CARRIED
+# taxiway bridge is re-sourced from the OBJECT'S OWN geometry — deck
+# footprint, deck elevation, girder clearance — rather than inferred from an
+# ``is_bridge`` taxi rect + OSM proximity.  TERRAIN_CARRIED and
+# PROFILE_CARRIED spans (pavement drapes across, solved continuous) SUPPRESS
+# corridor emission inside their footprints.  All of this is dormant with
+# the gate off (no cached classification ⇒ every path below is skipped and
+# the legacy emitter is byte-identical).
+# ---------------------------------------------------------------------------
+
+def _object_bridge_classification(layout):
+    """The cached :class:`object_terrain_features.ClassificationResult`, or
+    ``None`` when feature B is off or the assembler did not run.  Gated on
+    the live config flag so a flipped env/monkeypatched gate is honoured."""
+    if not _CFG.OBJECT_BRIDGE_TERRAIN:
+        return None
+    return getattr(layout, _OBJECT_BRIDGE_CLASSIFICATION_ATTRIBUTE, None)
+
+
+def _object_bridge_road_networks(layout):
+    """The cached sibling DSF road networks (``[]`` when none discovered)."""
+    return getattr(layout, _OBJECT_BRIDGE_ROAD_NETWORKS_ATTRIBUTE, None) or []
+
+
+def _bridge_deck_elevation_m(bridge, dem, tile_lat, tile_lon):
+    """Absolute deck-top elevation for a bridge record.
+
+    ``absolute_deck_elevation_m`` (KBNA's OBJECT_MSL fixtures) when present;
+    otherwise the terrain elevation sampled at the anchor plus the deck's
+    effective crest height ``deck_top_y_m`` (spec section 3.2 step 1).
+
+    **Anchor-datum caveat:** with no MSL fixture the datum is the DEM value
+    at the single placement anchor — a proxy for the solved terrain there.
+    The solved pavement network may differ by the solver's grading; this is
+    the same one-sampled-anchor-point datum every object-terrain family
+    lives with (spec section 3.4 anchor caution).  ``None`` when the DEM
+    cannot be sampled."""
+    if bridge.absolute_deck_elevation_m is not None:
+        return float(bridge.absolute_deck_elevation_m)
+    anchor_longitude, anchor_latitude = bridge.anchor_longitude_latitude
+    try:
+        datum = _sample_dem(
+            dem, tile_lat, tile_lon, anchor_latitude, anchor_longitude
+        )
+    except _GEOM_EXC:
+        return None
+    if datum is None or datum != datum:
+        return None
+    return float(datum) + float(bridge.deck_top_y_m)
+
+
+def _bridge_corridor_floor_m(bridge, deck_elevation_m):
+    """The depressed-corridor floor elevation under a deck-carried span
+    (spec section 3.2 step 3): the girder underside (deck elevation minus
+    the deck-top-to-clearance-underside structure thickness) minus the
+    road clearance margin ``config.BRIDGE_ROAD_CLEARANCE_M``.
+
+    ``clearance_underside_y_m`` is the LOWEST clearance-limiting plane
+    (girder line, +4.2 at KBNA — the value the corridor must clear, not
+    the +4.8 slab underside).  When the object exposes no underside plane
+    the structure thickness is unknown and taken as zero, so the floor is
+    the deck elevation minus the clearance margin (a safe over-estimate of
+    headroom — the corridor sits lower, never higher)."""
+    underside = bridge.clearance_underside_y_m
+    if underside is None:
+        underside = bridge.ceiling_y_m
+    structure_thickness = 0.0
+    if underside is not None:
+        structure_thickness = max(0.0, float(bridge.deck_top_y_m) - float(underside))
+    girder_underside_absolute = deck_elevation_m - structure_thickness
+    return girder_underside_absolute - float(_CFG.BRIDGE_ROAD_CLEARANCE_M)
+
+
+def _partition_bridges_for_corridors(classification):
+    """Split the classifier's bridge records into the corridor set, the
+    suppression set and the refused (ambiguous) set (spec section 3.2).
+
+    * corridor — DECK_CARRIED spans, plus every cosmetic (``hard_deck``-less
+      Murfreesboro-class) deck regardless of its coverage contract: trucks
+      ride the terrain there so the causeway-plus-corridor is mandatory.
+    * suppress — TERRAIN_CARRIED / PROFILE_CARRIED spans (pavement drapes
+      across and is already solved continuous; a corridor would break it).
+    * refused — AMBIGUOUS spans (ruling R5: reported, never guessed)."""
+    from .object_terrain_features import (
+        DECK_CARRIED, TERRAIN_CARRIED, PROFILE_CARRIED, AMBIGUOUS,
+        DECK_HARDNESS_COSMETIC,
+    )
+    corridor: list = []
+    suppress: list = []
+    refused: list = []
+    for bridge in classification.bridges:
+        is_cosmetic = bridge.deck_hardness == DECK_HARDNESS_COSMETIC
+        if is_cosmetic or bridge.contract == DECK_CARRIED:
+            corridor.append(bridge)
+        elif bridge.contract in (TERRAIN_CARRIED, PROFILE_CARRIED):
+            suppress.append(bridge)
+        elif bridge.contract == AMBIGUOUS:
+            refused.append(bridge)
+    return corridor, suppress, refused
+
+
+def _bridge_footprint_meters(bridge, to_meters):
+    """Project a bridge's deck footprint to a local-meter shapely polygon
+    (``None`` on degenerate geometry)."""
+    if bridge.deck_polygon is None:
+        return None
+    from .object_terrain_features import frame_polygon_to_longitude_latitude
+    footprint_longitude_latitude = frame_polygon_to_longitude_latitude(
+        bridge.deck_polygon, bridge.frame_origin_longitude_latitude
+    )
+    parts = (
+        list(footprint_longitude_latitude.geoms)
+        if footprint_longitude_latitude.geom_type == "MultiPolygon"
+        else [footprint_longitude_latitude]
+    )
+    meter_polygons: list[Polygon] = []
+    for part in parts:
+        ring = [to_meters(lon, lat) for lon, lat in part.exterior.coords]
+        if len(ring) < 3:
+            continue
+        try:
+            polygon = Polygon(ring)
+            if not polygon.is_valid:
+                polygon = polygon.buffer(0)
+            if polygon.geom_type == "Polygon" and not polygon.is_empty:
+                meter_polygons.append(polygon)
+        except _GEOM_EXC:
+            continue
+    if not meter_polygons:
+        return None
+    try:
+        union = unary_union(meter_polygons)
+    except _GEOM_EXC:
+        return meter_polygons[0]
+    if union.geom_type == "MultiPolygon":
+        union = max(union.geoms, key=lambda geometry: geometry.area)
+    return union if union.geom_type == "Polygon" else None
+
+
+def _draped_road_centerlines_meters(bridge, road_networks, to_meters):
+    """Fully-draped (level-0) road centerlines crossing a bridge footprint,
+    from the sibling DSF road networks, as local-meter LineStrings (spec
+    section 3.2 step 3 — an elevated ramp flies over on its own structure
+    and is left alone; only draped roads want a depressed corridor)."""
+    if bridge.deck_polygon is None or not road_networks:
+        return []
+    from .object_terrain_features import frame_polygon_to_longitude_latitude
+    footprint_longitude_latitude = frame_polygon_to_longitude_latitude(
+        bridge.deck_polygon, bridge.frame_origin_longitude_latitude
+    )
+    if footprint_longitude_latitude.geom_type == "MultiPolygon":
+        footprint_longitude_latitude = max(
+            footprint_longitude_latitude.geoms,
+            key=lambda geometry: geometry.area,
+        )
+    ring = list(footprint_longitude_latitude.exterior.coords)
+    lines: list[LineString] = []
+    for network in road_networks:
+        for segment in dsf_road_network.segments_crossing(network, ring):
+            if not segment.is_fully_draped:
+                continue
+            points = [
+                to_meters(point.longitude, point.latitude)
+                for point in segment.shape_points
+            ]
+            if len(points) < 2:
+                continue
+            try:
+                line = LineString(points)
+            except _GEOM_EXC:
+                continue
+            if not line.is_empty and line.length >= 5.0:
+                lines.append(line)
+    return lines
+
+
+def _emit_object_sourced_bridge_corridors(
+        layout, dem, tile_lat, tile_lon, classification, road_networks,
+        road_width_m, ramp_step_m, approach_length_m):
+    """Emit depressed-road corridors under DECK_CARRIED bridge spans from
+    the object records, and return ``(count, suppression_polygons_meters,
+    covered_polygons_meters)`` for the legacy emitter to honour.
+
+    Road source per span (spec section 3.2 step 3): the sibling DSF road
+    network's fully-draped segments crossing the footprint, else the OSM
+    big-roads fallback (unchanged from legacy).  The corridor floor comes
+    from the object (``_bridge_corridor_floor_m``); approach ramps step the
+    road surface from the floor up to the DEM outside the footprint."""
+    to_meters, meters_to_lat_lon = _local_meter_projections(layout.anchor)
+    corridor_bridges, suppress_bridges, refused_bridges = (
+        _partition_bridges_for_corridors(classification)
+    )
+    suppression_polygons: list[Polygon] = []
+    covered_polygons: list[Polygon] = []
+    for bridge in suppress_bridges:
+        footprint = _bridge_footprint_meters(bridge, to_meters)
+        if footprint is not None:
+            suppression_polygons.append(footprint)
+            UI.vprint(
+                2,
+                "   [object-bridge] corridor suppressed inside "
+                f"{bridge.contract} span {bridge.object_resources}",
+            )
+    for bridge in refused_bridges:
+        UI.vprint(
+            2,
+            "   [object-bridge] AMBIGUOUS span refused a corridor "
+            f"(ruling R5): {bridge.object_resources}",
+        )
+
+    osm_road_lines: list[LineString] | None = None
+    n_emitted = 0
+    for bridge in corridor_bridges:
+        footprint = _bridge_footprint_meters(bridge, to_meters)
+        if footprint is None:
+            continue
+        covered_polygons.append(footprint)
+        deck_elevation = _bridge_deck_elevation_m(
+            bridge, dem, tile_lat, tile_lon
+        )
+        if deck_elevation is None:
+            UI.vprint(
+                2,
+                "   [object-bridge] no deck datum (DEM unsampled, no MSL) "
+                f"for {bridge.object_resources} — corridor skipped",
+            )
+            continue
+        floor_elevation = _bridge_corridor_floor_m(bridge, deck_elevation)
+
+        road_lines = _draped_road_centerlines_meters(
+            bridge, road_networks, to_meters
+        )
+        road_source = "dsf-road-network"
+        if not road_lines:
+            if osm_road_lines is None:
+                osm_road_lines = _load_underpass_osm_road_lines(
+                    layout, to_meters
+                )
+            road_lines = [
+                line for line in osm_road_lines
+                if line.intersects(footprint)
+            ]
+            road_source = "openstreetmap"
+        if not road_lines:
+            UI.vprint(
+                2,
+                "   [object-bridge] no draped road under "
+                f"{bridge.object_resources} — corridor skipped",
+            )
+            continue
+
+        emitted_here = _emit_corridor_for_footprint(
+            layout, dem, tile_lat, tile_lon, meters_to_lat_lon,
+            footprint, floor_elevation, road_lines,
+            road_width_m, ramp_step_m, approach_length_m,
+        )
+        if emitted_here:
+            n_emitted += 1
+            UI.vprint(
+                2,
+                "   [object-bridge] corridor floor "
+                f"{floor_elevation:.1f} m under {bridge.object_resources} "
+                f"(deck {deck_elevation:.1f} m, road source {road_source})",
+            )
+    return n_emitted, suppression_polygons, covered_polygons
+
+
+def _load_underpass_osm_road_lines(layout, to_meters):
+    """OSM big-road LineStrings (local meters) eligible to pass under a
+    bridge — the same filter the legacy underpass emitter applies (skip
+    ways tagged ``bridge`` or ``tunnel``)."""
+    from .pipeline import _load_osm_big_roads
+    nodes_raw, ways_raw = _load_osm_big_roads(
+        layout.anchor[0], layout.anchor[1]
+    )
+    if not ways_raw:
+        return []
+    nodes_meters: dict[str, tuple[float, float]] = {}
+    for node_id, (latitude, longitude) in nodes_raw.items():
+        nodes_meters[node_id] = to_meters(longitude, latitude)
+    highway_types = {
+        "motorway", "trunk", "primary", "secondary", "tertiary",
+        "motorway_link", "trunk_link", "primary_link", "residential",
+        "service",
+    }
+    lines: list[LineString] = []
+    for _way_id, node_refs, tags in ways_raw:
+        if tags.get("highway") not in highway_types:
+            continue
+        if tags.get("bridge") and tags.get("bridge") != "no":
+            continue
+        if tags.get("tunnel") and tags.get("tunnel") != "no":
+            continue
+        points = [nodes_meters[n] for n in node_refs if n in nodes_meters]
+        if len(points) < 2:
+            continue
+        try:
+            line = LineString(points)
+        except _GEOM_EXC:
+            continue
+        if not line.is_empty and line.length >= 5.0:
+            lines.append(line)
+    return lines
+
+
+def _emit_corridor_for_footprint(
+        layout, dem, tile_lat, tile_lon, meters_to_lat_lon,
+        footprint, floor_elevation, road_lines,
+        road_width_m, ramp_step_m, approach_length_m):
+    """Emit the flat under-deck plate at ``floor_elevation`` plus stepped
+    approach ramps from the floor up to the DEM for each road crossing a
+    bridge footprint.  Returns True when at least one polygon was emitted.
+
+    Mirrors the legacy underpass emitter's per-step ramp shape (a sloped
+    ``ROLE_TUNNEL_RAMP`` rect per ``ramp_step_m`` interpolating floor→DEM),
+    driven by the object footprint rather than a taxi rect.  Deconfliction
+    against airport pavement is the shared downstream
+    ``deconflict_road_features`` pass, exactly as for the legacy shapes."""
+    emitted = False
+    half_width = road_width_m / 2.0
+    for road_line in road_lines:
+        try:
+            inside = road_line.intersection(footprint)
+        except _GEOM_EXC:
+            continue
+        if not inside.is_empty:
+            inside_line = None
+            if hasattr(inside, "geoms"):
+                candidates = [
+                    g for g in inside.geoms
+                    if g.geom_type == "LineString" and g.length > 1.0
+                ]
+                if candidates:
+                    inside_line = max(candidates, key=lambda g: g.length)
+            elif inside.geom_type == "LineString":
+                inside_line = inside
+            if inside_line is not None:
+                try:
+                    plate = inside_line.buffer(
+                        half_width, cap_style=2, join_style=2
+                    )
+                    if plate.geom_type == "Polygon" and not plate.is_empty:
+                        layout.shapes.append(BuiltShape(
+                            polygon=plate,
+                            role=ROLE_TUNNEL_RAMP,
+                            ref="object_bridge_corridor",
+                            altitude=round(floor_elevation, 1)))
+                        emitted = True
+                except _GEOM_EXC:
+                    pass
+        try:
+            outside = road_line.difference(footprint)
+        except _GEOM_EXC:
+            outside = None
+        if outside is None or outside.is_empty:
+            continue
+        pieces = (
+            list(outside.geoms) if hasattr(outside, "geoms") else [outside]
+        )
+        for piece in pieces:
+            if piece.is_empty or piece.geom_type != "LineString":
+                continue
+            coordinates = list(piece.coords)
+            if len(coordinates) < 2:
+                continue
+            distance_start = footprint.distance(Point(coordinates[0]))
+            distance_end = footprint.distance(Point(coordinates[-1]))
+            if distance_start <= distance_end:
+                walk = LineString(coordinates)
+            else:
+                walk = LineString(list(reversed(coordinates)))
+            walk_length = min(walk.length, approach_length_m)
+            if _emit_corridor_ramp_chain(
+                layout, dem, tile_lat, tile_lon, meters_to_lat_lon,
+                walk, walk_length, floor_elevation, half_width, ramp_step_m,
+            ):
+                emitted = True
+    return emitted
+
+
+def _emit_corridor_ramp_chain(
+        layout, dem, tile_lat, tile_lon, meters_to_lat_lon,
+        walk, walk_length, floor_elevation, half_width, ramp_step_m):
+    """Step ``walk`` from the bridge edge (``floor_elevation``) out to the
+    DEM in ``ramp_step_m`` increments, emitting one sloped
+    ``ROLE_TUNNEL_RAMP`` rect per step.  Returns True when any rect was
+    emitted."""
+    emitted = False
+    previous = 0.0
+    while previous < walk_length - 1.0:
+        current = min(walk_length, previous + ramp_step_m)
+        p0 = walk.interpolate(previous)
+        p1 = walk.interpolate(current)
+        segment_length = math.hypot(p1.x - p0.x, p1.y - p0.y)
+        if segment_length < 1.0:
+            break
+        tangent_x = (p1.x - p0.x) / segment_length
+        tangent_y = (p1.y - p0.y) / segment_length
+        normal_x = -tangent_y
+        normal_y = tangent_x
+        fraction0 = previous / walk_length
+        fraction1 = current / walk_length
+        try:
+            lat0, lon0 = meters_to_lat_lon(p0.x, p0.y)
+            lat1, lon1 = meters_to_lat_lon(p1.x, p1.y)
+            dem0 = _sample_dem(dem, tile_lat, tile_lon, lat0, lon0)
+            dem1 = _sample_dem(dem, tile_lat, tile_lon, lat1, lon1)
+        except _GEOM_EXC:
+            dem0 = dem1 = None
+        if dem0 is None or dem1 is None:
+            break
+        elevation0 = (1.0 - fraction0) * floor_elevation + fraction0 * dem0
+        elevation1 = (1.0 - fraction1) * floor_elevation + fraction1 * dem1
+        corners = [
+            (p0.x + normal_x * half_width, p0.y + normal_y * half_width),
+            (p1.x + normal_x * half_width, p1.y + normal_y * half_width),
+            (p1.x - normal_x * half_width, p1.y - normal_y * half_width),
+            (p0.x - normal_x * half_width, p0.y - normal_y * half_width),
+        ]
+        try:
+            polygon = Polygon(corners)
+            if not polygon.is_valid:
+                polygon = polygon.buffer(0)
+            if polygon.geom_type == "Polygon" and not polygon.is_empty:
+                if abs(elevation0 - elevation1) >= 0.1:
+                    layout.shapes.append(BuiltShape(
+                        polygon=polygon,
+                        role=ROLE_TUNNEL_RAMP,
+                        ref="object_bridge_approach",
+                        altitude_high=round(max(elevation0, elevation1), 1),
+                        altitude_low=round(min(elevation0, elevation1), 1)))
+                else:
+                    layout.shapes.append(BuiltShape(
+                        polygon=polygon,
+                        role=ROLE_TUNNEL_RAMP,
+                        ref="object_bridge_approach",
+                        altitude=round(0.5 * (elevation0 + elevation1), 1)))
+                emitted = True
+        except _GEOM_EXC:
+            pass
+        previous = current
+    return emitted
+
+
 def _emit_underpass_road_approaches(
         layout: "PavementLayout",
         dem,
@@ -3288,19 +3760,44 @@ def _emit_underpass_road_approaches(
     (22 m by default; matches tunnel-ramp width).
 
     Returns the number of UNDERPASS surfaces processed.
+
+    Feature B re-source (``O4_OBJECT_BRIDGE_TERRAIN``, spec section 3.2):
+    when the object-terrain classifier has run, DECK_CARRIED spans get
+    their corridor from the OBJECT'S geometry (footprint, deck elevation,
+    girder clearance) and the sibling DSF road network, computed FIRST;
+    TERRAIN_CARRIED / PROFILE_CARRIED footprints then SUPPRESS the legacy
+    OSM-driven corridor beneath them, and object-handled footprints are not
+    re-emitted by the legacy path.  With the gate off there is no cached
+    classification and the whole block below is byte-identical to today.
     """
     from .pipeline import _load_osm_big_roads
+    # Feature-B object-sourced corridors (gated; no-op when off).
+    object_corridor_count = 0
+    object_suppression_polygons: list[Polygon] = []
+    object_covered_polygons: list[Polygon] = []
+    _classification = _object_bridge_classification(layout)
+    if _classification is not None:
+        (object_corridor_count,
+         object_suppression_polygons,
+         object_covered_polygons) = _emit_object_sourced_bridge_corridors(
+            layout, dem, tile_lat, tile_lon, _classification,
+            _object_bridge_road_networks(layout),
+            road_width_m, ramp_step_m, approach_length_m,
+        )
+    _object_footprints = (
+        object_suppression_polygons + object_covered_polygons
+    )
     # Collect underpass surfaces.
     bridge_shapes = [s for s in layout.shapes
                      if getattr(s, "is_bridge", False)
                      and s.polygon is not None
                      and not s.polygon.is_empty]
     if not bridge_shapes:
-        return 0
+        return object_corridor_count
     nodes_r, ways_r = _load_osm_big_roads(
         layout.anchor[0], layout.anchor[1])
     if not ways_r:
-        return 0
+        return object_corridor_count
     _to_m, _m_to_ll = _local_meter_projections(layout.anchor)
     nodes_m: dict[str, tuple[float, float]] = {}
     for nid, (lat, lon) in nodes_r.items():
@@ -3337,9 +3834,20 @@ def _emit_underpass_road_approaches(
             continue
         road_lines.append(ls)
     if not road_lines:
-        return 0
+        return object_corridor_count
     n_processed = 0
     for s in bridge_shapes:
+        # Feature B: skip a bridge rect already handled by an
+        # object-sourced corridor (DECK_CARRIED) or lying inside a
+        # suppressed TERRAIN/PROFILE_CARRIED span footprint — the object
+        # geometry, not the OSM inference, governs there (spec section 3.2).
+        if _object_footprints:
+            try:
+                if any(s.polygon.intersects(footprint)
+                       for footprint in _object_footprints):
+                    continue
+            except _GEOM_EXC:
+                pass
         # Bridge deck elevation.
         if (s.altitude_high is not None
                 and s.altitude_low is not None):
@@ -3507,7 +4015,7 @@ def _emit_underpass_road_approaches(
                         pass
                     u_prev = u_next
         n_processed += 1
-    return n_processed
+    return n_processed + object_corridor_count
 
 
 def _discover_depressed_roads(

@@ -101,12 +101,26 @@ def test_object_placement_fields():
         # disease with a constant vertical offset; plain OBJECT rows
         # default to zero.
         "above_ground_level_metres",
+        # W-R1 (object-terrain-features spec): the source keyword and the
+        # absolute elevation of opt-in OBJECT_MSL rows.
+        "placement_kind",
+        "mean_sea_level_elevation_m",
     )
     assert (
         obj8_reader.ObjectPlacement._field_defaults[
             "above_ground_level_metres"
         ]
         == 0.0
+    )
+    assert (
+        obj8_reader.ObjectPlacement._field_defaults["placement_kind"]
+        == "OBJECT"
+    )
+    assert (
+        obj8_reader.ObjectPlacement._field_defaults[
+            "mean_sea_level_elevation_m"
+        ]
+        is None
     )
 
 
@@ -130,7 +144,16 @@ def test_object_geometry_fields():
         "animation_block_count",
         "level_of_detail_count",
         "vertex_line_indices",
+        # W-R3 (object-terrain-features spec, Part 1): per-solid-triangle
+        # ATTR_hard / ATTR_hard_deck state, parallel to solid_triangles;
+        # immutable "" default so pre-change callers are unaffected.
+        "solid_triangle_hardness",
     )
+    assert (
+        obj8_reader.ObjectGeometry._field_defaults["solid_triangle_hardness"]
+        == ()
+    )
+    assert callable(obj8_reader.ObjectGeometry.hard_deck_solid_triangles)
     assert isinstance(
         inspect.getattr_static(
             obj8_reader.ObjectGeometry, "has_solid_geometry"
@@ -170,7 +193,10 @@ OBJ8_READER_SIGNATURES = [
             "longitude",
         ],
     ),
-    ("read_dsf_object_placements", ["dsf_text_lines", "accept_resource"]),
+    (
+        "read_dsf_object_placements",
+        ["dsf_text_lines", "accept_resource", "include_object_msl"],
+    ),
     (
         "resolve_object_resource",
         ["resource_path", "pack_root", "xplane_root"],
