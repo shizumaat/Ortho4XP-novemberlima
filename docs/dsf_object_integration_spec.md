@@ -1274,3 +1274,35 @@ the merge, both are recorded here with fix designs.
    eight-bake pool was unaffected (byte-identical partition), but minor pools changed: the pack
    was re-applied with fixed code, and **KCLT owes one fresh full cycle** so Phase 1 pads and the
    Phase 2 bake share one partition again (amendment A1's invariant).
+
+### A17 — Building districts as graded surfaces *(design, user-initiated after the HECA in-sim pass)*
+
+HECA's groundside carries practically a small town of buildings on a slope. Per-building flat pads
+at per-building elevations produce a terraced patchwork: steps between neighbouring pads, buildings
+seated consistently *within* a pad but discontinuously *across* them. The user proposes larger pads
+or another smoothing technique. A single large flat pad is ruled out by measurement (plan section
+4.2: one elevation across sloped ground = perimeter retaining walls, up to 15 m in the original
+test). The design that fits the existing solver:
+
+**District surfaces.** Cluster building pads whose spacing is below a district gap (~30–50 m,
+measured, not guessed) into a *district*: one groundside-role surface spanning the cluster's
+union region, solved with the existing groundside grade rules (smooth, 4% caps, welded to adjacent
+groundside pavement per A16.1). Individual building pads then sit FLAT at their *local district
+elevation* — inset into a gently graded town surface instead of terraced against raw terrain.
+Phase 2 samples the district surface, so every structure in the town seats consistently and the
+ground between buildings flows.
+
+One mechanism then covers three open concerns:
+* A16.1 — detached buildings weld to groundside (a district IS the weld, generalised);
+* the V3 abutment-separation worry — neighbouring structures' grounds become continuous, so
+  adjacent buildings stop stepping;
+* this A17 town case.
+
+Alternative considered: keep per-building pads and couple neighbouring pads in the grade graph
+(maximum step between adjacent pads, in the spine-fairing style). Cheaper, but it smooths pad
+elevations without smoothing the terrain BETWEEN pads, so the town still looks terraced from the
+ground. District surfaces are the recommendation.
+
+Separate, unresolved by this: the elevated-railway mega-chain (hinge cut, I-19) and the
+authored-buried-base fork (base-seating delta variant) — both pending in-sim calibration
+coordinates.
