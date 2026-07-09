@@ -1175,6 +1175,18 @@ class TestEgllSmoke:
         assert len(tunnel_two.mouth_polygons) >= 2
         for mouth in tunnel_two.mouth_polygons:
             assert 800.0 < mouth.area < 5200.0
+        # Round-5 mega-pool regression: per-tunnel records, undiluted
+        # metrics (the pooled run had body-depth medians 0.94-1.93 m),
+        # and exclusions carrying only tunnel resources.
+        assert tunnel_two.body_depth_m == pytest.approx(5.0, abs=0.3)
+        assert tunnel_two.object_resources == [
+            "Airport/Tunnel/2.obj",
+            "Airport/Tunnel/2a.obj",
+        ]
+        assert all(
+            resource.startswith("Airport/Tunnel/")
+            for _pack, resource in result.exclusions
+        )
 
     # The below-grade buildings the author-mesh correlation proved BURIED
     # (supervisor addendum): T2_T3_3 is the deepest object in the pack
@@ -1574,4 +1586,258 @@ class TestLfpgTerminalTwoSmoke:
         assert spine.below_grade_footprint is not None
         assert spine.below_grade_footprint.area >= (
             otf.TRENCH_SPINE_MIN_FOOTPRINT_AREA_M2
+        )
+
+
+# ---------------------------------------------------------------------------
+# round 5 — mega-pool refinement, coverage exposure, no silent absence
+# ---------------------------------------------------------------------------
+
+class TestMegaPoolRefinement:
+    def _tunnel_geometry(self) -> ObjectGeometry:
+        builder = _GeometryBuilder()
+        builder.add_horizontal_rectangle(
+            -30, 30, -10, 10, -5.0, hardness="hard_deck", segments=6
+        )
+        builder.add_horizontal_rectangle(
+            -10, 10, -10, 10, 0.0, hardness="hard_deck", segments=2
+        )
+        return builder.build()
+
+    def test_chained_pool_yields_per_tunnel_records(self):
+        """Two tunnels chained into ONE pool by an overlapping clutter
+        slab: records stay per tunnel (undiluted body depth), and the
+        chain slab never reaches the R4 exclusion list."""
+        chain = _GeometryBuilder()
+        chain.add_horizontal_rectangle(-50, 350, -2, 2, 0.5, segments=8)
+        east_latitude, east_longitude = local_offset_to_lonlat(
+            ANCHOR_LATITUDE, ANCHOR_LONGITUDE, 0.0, 300.0, 0.0
+        )
+        placements = [
+            _placement("tunnel/west.obj"),
+            _placement(
+                "tunnel/east.obj",
+                longitude=east_longitude,
+                latitude=east_latitude,
+            ),
+            _placement("clutter/chain_slab.obj"),
+        ]
+        geometry = {
+            "tunnel/west.obj": self._tunnel_geometry(),
+            "tunnel/east.obj": self._tunnel_geometry(),
+            "clutter/chain_slab.obj": chain.build(),
+        }
+        result = otf.classify_object_terrain_features(
+            placements, geometry, pack_root="PACK"
+        )
+        assert len(result.tunnels) == 2
+        for tunnel in result.tunnels:
+            assert len(tunnel.object_resources) == 1
+            assert tunnel.object_resources[0].startswith("tunnel/")
+            assert tunnel.body_depth_m == pytest.approx(5.0, abs=0.3)
+            assert len(tunnel.mouth_polygons) == 2
+        excluded = {resource for _pack, resource in result.exclusions}
+        assert excluded == {"tunnel/west.obj", "tunnel/east.obj"}
+
+    def test_bridge_in_pool_with_far_building_still_classifies(self):
+        """The Crossing_Bridge defect: a freestanding bridge chained into
+        the same pool as a large building must still classify — never
+        silently absent — and only its own parts are excluded."""
+        bridge_geometry = _hard_deck_bridge_geometry()
+        building = _GeometryBuilder()
+        building.add_horizontal_rectangle(100, 180, -40, 40, 0.0, segments=4)
+        for x in range(100, 181, 3):
+            building.add_vertical_wall(float(x), -40, 40, 0.0, 12.0)
+        chain = _GeometryBuilder()
+        chain.add_horizontal_rectangle(-30, 110, -2, 2, 0.2, segments=4)
+        building_latitude, building_longitude = local_offset_to_lonlat(
+            ANCHOR_LATITUDE, ANCHOR_LONGITUDE, 0.0, 140.0, 0.0
+        )
+        placements = [
+            _placement("bridge/free_standing.obj"),
+            _placement(
+                "objects/big_building.obj",
+                longitude=building_longitude,
+                latitude=building_latitude,
+            ),
+            _placement("clutter/chain_slab.obj"),
+        ]
+        geometry = {
+            "bridge/free_standing.obj": bridge_geometry,
+            "objects/big_building.obj": building.build(),
+            "clutter/chain_slab.obj": chain.build(),
+        }
+        result = otf.classify_object_terrain_features(
+            placements, geometry, pack_root="PACK"
+        )
+        assert len(result.bridges) == 1
+        bridge = result.bridges[0]
+        assert bridge.object_resources == ["bridge/free_standing.obj"]
+        excluded = {resource for _pack, resource in result.exclusions}
+        assert excluded == {"bridge/free_standing.obj"}
+        # The building still surfaces through feature C.
+        assert any(
+            "objects/big_building.obj" in interface.object_resources
+            for interface in result.ground_interfaces
+        )
+
+    def test_building_carried_roadway_still_routes_to_feature_c(self):
+        """ELLX pattern under the per-component gate: a drivable roadway
+        within the building's evidence radius stays feature C."""
+        building = _GeometryBuilder()
+        building.add_horizontal_rectangle(-40, 40, -30, 30, 0.0, segments=4)
+        # A dense facade/pillar grid: real terminals carry thousands of
+        # wall columns (ELLX 6,752); the building gate needs >= 500.
+        for x in range(-40, 41, 4):
+            for z in range(-30, 31, 5):
+                building.add_vertical_wall(
+                    float(x), float(z), z + 1.0, 0.0, 12.0
+                )
+        ramp = _GeometryBuilder()
+        ramp.add_sloped_rectangle(
+            -40, 40, 32, 40, 0.0, 8.0, hardness="hard", segments=8
+        )
+        placements = [
+            _placement("objects/terminal.obj"),
+            _placement("objects/ramp.obj"),
+        ]
+        geometry = {
+            "objects/terminal.obj": building.build(),
+            "objects/ramp.obj": ramp.build(),
+        }
+        result = otf.classify_object_terrain_features(placements, geometry)
+        assert result.bridges == []
+        assert result.refusals == []
+        assert len(result.ground_interfaces) == 1
+        assert (
+            result.ground_interfaces[0].interface_class
+            == otf.INTERFACE_FLAT_CONFIRMED
+        )
+
+
+class TestCoverageExposure:
+    def test_coverage_fraction_and_evidence_on_record(self):
+        builder = _GeometryBuilder()
+        builder.add_horizontal_rectangle(
+            -20, 20, -5, 5, -0.02, hardness="hard_deck", segments=8
+        )
+        pavement = _frame_rectangle_to_pavement_polygon(-25, 25, -8, 8)
+        result = otf.classify_object_terrain_features(
+            [_placement("bridge/flush.obj")],
+            {"bridge/flush.obj": builder.build()},
+            pavement_polygons_longitude_latitude=[pavement],
+        )
+        bridge = result.bridges[0]
+        assert bridge.pavement_coverage_fraction == pytest.approx(
+            1.0, abs=0.05
+        )
+        assert (
+            bridge.contract_evidence
+            == otf.CONTRACT_EVIDENCE_PAVEMENT_COVERAGE
+        )
+
+    def test_no_pavement_marks_deck_profile_fallback(self):
+        result = otf.classify_object_terrain_features(
+            [_placement("bridge/hard.obj")],
+            {"bridge/hard.obj": _hard_deck_bridge_geometry()},
+        )
+        bridge = result.bridges[0]
+        assert bridge.pavement_coverage_fraction is None
+        assert bridge.contract_evidence == otf.CONTRACT_EVIDENCE_DECK_PROFILE
+
+    def test_lateral_pavement_lap_is_not_span_crossing_evidence(self):
+        """The round-5 KBNA calibration: at-grade pavement lapping the
+        deck's lateral edge must not push a cut-at-abutments bridge into
+        the dead band — the coverage band spans only the central half of
+        the deck width."""
+        geometry = _hard_deck_bridge_geometry()  # deck z in [-5, 5]
+        # Pavement strip along one lateral edge, full deck length.
+        lateral_lap = _frame_rectangle_to_pavement_polygon(-20, 20, 3.5, 12)
+        result = otf.classify_object_terrain_features(
+            [_placement("bridge/hard.obj")],
+            {"bridge/hard.obj": geometry},
+            pavement_polygons_longitude_latitude=[lateral_lap],
+        )
+        bridge = result.bridges[0]
+        assert bridge.pavement_coverage_fraction == pytest.approx(
+            0.0, abs=0.02
+        )
+        assert bridge.contract == otf.DECK_CARRIED
+
+
+@pytest.mark.skipif(
+    not (
+        os.path.isfile(os.path.join(_SCRATCH, "kbna_airport.txt"))
+        and os.path.isdir(_KBNA_PACK)
+    ),
+    reason="KBNA dump/pack not present",
+)
+class TestKbnaStandaloneDrapeEvidence:
+    def test_taxiway_l_deck_carried_under_raw_drape_coverage(self):
+        """Round-5 defect 2: the flagship deck-carried exemplar must
+        classify DECK_CARRIED under STANDALONE raw-DSF drape evidence.
+        The measured failure mode was lateral at-grade taxiways lapping
+        the deck's side edges (14.5% of the full-width band); the
+        central-half coverage band reads the true mid-span: 0%."""
+        import glob as _glob
+        import tempfile as _tempfile
+
+        from auto_patch import dsf_reader
+
+        dsf_candidates = _glob.glob(
+            os.path.join(_KBNA_PACK, "Earth nav data", "*", "*.dsf")
+        )
+        if not dsf_candidates:
+            pytest.skip("KBNA DSF not found")
+        pavements = dsf_reader.read_dsf_pavements(
+            dsf_candidates[0],
+            cache_dir=_tempfile.gettempdir(),
+            xplane_root=os.path.dirname(_CUSTOM_SCENERY),
+        )
+        pavement_polygons = []
+        for outer_ring, _holes, _definition in pavements:
+            try:
+                polygon = Polygon(outer_ring)
+                if not polygon.is_valid:
+                    polygon = polygon.buffer(0)
+                if not polygon.is_empty:
+                    pavement_polygons.append(polygon)
+            except (ValueError, Exception):
+                continue
+        lines = open(
+            os.path.join(_SCRATCH, "kbna_airport.txt"), errors="replace"
+        ).read().splitlines()
+        placements = obj8_reader.read_dsf_object_placements(
+            lines,
+            accept_resource=lambda resource: resource.startswith(
+                "Objects/KBNA Bridges/"
+            ),
+        )
+        geometry = _load_geometry(placements, _KBNA_PACK)
+        result = otf.classify_object_terrain_features(
+            placements,
+            geometry,
+            pavement_polygons_longitude_latitude=pavement_polygons,
+            pack_root=_KBNA_PACK,
+        )
+        taxiway_l = next(
+            bridge
+            for bridge in result.bridges
+            if any(
+                "Taxiway-L" in resource
+                for resource in bridge.object_resources
+            )
+        )
+        assert taxiway_l.pavement_coverage_fraction is not None
+        assert taxiway_l.pavement_coverage_fraction <= 0.05
+        assert (
+            taxiway_l.contract_evidence
+            == otf.CONTRACT_EVIDENCE_PAVEMENT_COVERAGE
+        )
+        assert taxiway_l.contract == otf.DECK_CARRIED
+        # Crossing_Bridge present too — never silently absent.
+        assert any(
+            "Crossing_Bridge" in resource
+            for bridge in result.bridges
+            for resource in bridge.object_resources
         )

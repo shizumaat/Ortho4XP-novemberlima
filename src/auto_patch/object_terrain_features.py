@@ -122,6 +122,19 @@ TUNNEL_MIN_BELOW_GRADE_DECK_AREA_M2 = 200.0
 # −1.0 m, so the threshold is 1.0, not the body-depth 2.0.
 TUNNEL_MIN_BELOW_GRADE_AGL_OFFSET_M = 1.0
 
+# The AGL limb applies only to SINGLE-placement resources (spec section
+# 2.1 lists "single placement" among the tunnel signatures) that carry at
+# least this much near-horizontal solid area below effective grade.
+# Round-5 measurement over every AGL ≤ −1 resource at EGLL: the three
+# true AGL tunnels (6/7/10) are single-placement with 50/90/55 m² of
+# below-grade deck; the false positives are `Docking_fit_wall_5m5` (36
+# placements, offsets mixed −1.0 to +2.0 — the SAME resource above and
+# below grade) and three `fit_wall_24x` walls (single placement, 0 m²
+# below-grade horizontal area — pure vertical geometry).  Without the
+# guard the docking wall seeded a component spanning every gate line and
+# cascaded 280+ jetways/marks/terminal pieces onto the R4 exclusion list.
+TUNNEL_AGL_MIN_BELOW_GRADE_DECK_AREA_M2 = 25.0
+
 # A roof/deck face counts as "at grade" when its effective height is within
 # this tolerance of the grade plane; the deck is everything below it.
 TUNNEL_ROOF_TOP_TOLERANCE_M = 0.5
@@ -201,6 +214,34 @@ GROUND_CONTACT_TOLERANCE_M = 0.5
 # into one structure (module docstring, "Grouping").
 STRUCTURE_GROUPING_EPSILON_M = 2.0
 
+# ---------------------------------------------------------------------------
+# Round-5 mega-pool refinement (A9/A10 worklist).  discover_object_pools
+# merges everything whose bounding boxes chain-overlap — at EGLL the 20
+# tunnel objects pooled with terminals and clutter into 5 mega-pools,
+# diluting every tunnel metric (pool body-depth medians 0.94-1.93 m versus
+# the true 4-7 m decks) and ballooning the R4 exclusion list to 812
+# objects.  Features are therefore classified per CONTRIBUTING COMPONENT
+# inside each pool, and records/exclusions carry only contributing
+# resources.
+# ---------------------------------------------------------------------------
+
+# Below-grade drivable seeds whose footprints come within this distance
+# join one tunnel/cutout component (a shell and its deck overlap; distinct
+# tunnels are hundreds of metres apart).
+TUNNEL_COMPONENT_JOIN_BUFFER_M = 2.0
+
+# Hard-face seeds within this distance join one bridge component (the six
+# KBNA taxiway-L part objects abut within metres; distinct bridges are
+# hundreds of metres apart).
+BRIDGE_COMPONENT_JOIN_BUFFER_M = 10.0
+
+# A non-seed resource joins a tunnel/cutout component when at least this
+# fraction of its own footprint lies over the component's below-grade deck
+# (buffered by the join buffer) — the roof SHELL over its deck.  A
+# terminal standing over a small tunnel overlaps only fractionally and
+# stays out.
+TUNNEL_COVER_CONTAINMENT_MIN_FRACTION = 0.5
+
 # Effective heights are clustered into bins of this size to find a
 # dominant plane (deck top, girder ceiling).
 PLANE_HEIGHT_BIN_M = 0.5
@@ -236,6 +277,23 @@ DECK_CARRIED = "DECK_CARRIED"
 TERRAIN_CARRIED = "TERRAIN_CARRIED"
 PROFILE_CARRIED = "PROFILE_CARRIED"
 AMBIGUOUS = "AMBIGUOUS"
+
+# Which evidence path produced the contract (BridgeStructure.contract_evidence,
+# A10 worklist: tools must be able to print it).
+CONTRACT_EVIDENCE_PAVEMENT_COVERAGE = "pavement_coverage"
+CONTRACT_EVIDENCE_DECK_PROFILE = "deck_profile_fallback"
+
+# The contract coverage band spans the middle third of the deck ALONG the
+# axis and — A10 round-5 calibration — the central HALF of the deck ACROSS
+# the axis.  Measured at KBNA taxiway-L (the deck-carried flagship): every
+# draped-pavement overlap with the 131 × 55 m deck footprint hugs a lateral
+# edge (across-axis positions [−15, 0] and [−55, −43] on a [−55, 0] deck) —
+# adjacent AT-GRADE taxiways lapping the deck's side, not span-crossing
+# pavement — and the full-width band read them as 14.5% coverage, landing
+# the flagship in the refusal dead band.  The carried surface runs the deck
+# CENTER; the central-half band measures 0% there while keeping the
+# genuinely continuous EDDF/KMCO drapes (centered along the deck) intact.
+BRIDGE_COVERAGE_BAND_WIDTH_FRACTION = 0.5
 
 # Deck hardness kinds (BridgeStructure.deck_hardness): which OBJ8 collision
 # attribute carries the drivable surface.  Ruling R8's flush-seating cut
@@ -305,8 +363,13 @@ BOWL_MAX_GROUND_CONTACT_FRACTION = 0.10
 BOWL_MAX_AT_GRADE_BASE_SHARE = 0.10
 
 # ...and the structure carries a below-grade interface level at least
-# this deep (LFPG T1 shell base −3.43 m).
-BOWL_MIN_BELOW_GRADE_LEVEL_DEPTH_M = 1.0
+# this deep.  Round-5 calibration against the EGLL full-pack run: every
+# TRUE bowl measures −3.41 m or deeper (LFPG T1 shell −3.42, satellite
+# ring pools −3.4/−3.9/−4.5), while every false positive is buried
+# library-clutter slack between −1.03 and −2.47 (fuel tank −1.50, sheds
+# −2.08, truck/factory pair −2.47) — sunk-object slack the A6 oracle says
+# to bury under flat terrain.  3.0 sits between the measured sets.
+BOWL_MIN_BELOW_GRADE_LEVEL_DEPTH_M = 3.0
 
 # Bowl and trench records are only emitted for structures at least this
 # large, guarding against small AGL-placed clutter (jetway slack, sunk
@@ -324,12 +387,25 @@ TRENCH_SPINE_MIN_DEPTH_M = 2.5
 # is not a spine)...
 TRENCH_SPINE_MIN_CONTRIBUTING_OBJECTS = 2
 
-# ...and the below-grade content footprint must reach this area.  A
-# trench the terrain must open is a real corridor, not scattered basement
-# pockets: measured below-grade footprints are 48 m² for the EGLL T2_3
-# buried-basement group (must NOT fire; A6 oracle) versus 8,885 m² for
-# the smallest true LFPG trench pool and far more for the T2A spine —
-# two orders of magnitude of separation around this floor.
+# ...and the trench LEVEL itself must hold at least this perimeter share:
+# a spine is the structure's defining below-grade interface, not a
+# minority stagger.  Measured: true trench levels hold 0.50 (LFPG K5
+# pool) and 0.639 (T2A spine) of their occupied sectors; the false
+# positives hold 0.033-0.067 (EGLL basement parasites) and 0.057 (the
+# KBNA Metropolitan downtown-skyline bake, whose building bases stagger
+# 0 to -2.56 down a real city slope).  0.25 sits a factor of two from
+# both measured sets.
+TRENCH_SPINE_MIN_LEVEL_PERIMETER_SHARE = 0.25
+
+# ...and the below-grade content footprint's LARGEST CONNECTED PART must
+# reach this area.  A trench the terrain must open is one COHERENT
+# corridor (the LFPG T2A spine is a single contiguous ribbon over 3 km;
+# the smallest true LFPG trench pool measures 8,885 m²), never scattered
+# pockets: summing disjoint pieces let 276 EGLL jetway-leg slack specks
+# plus hotel basements masquerade as a "multi-object trench" in the
+# round-5 full-pack run (the EGLL T2_3 buried-basement group alone is
+# 48 m² — A6 oracle: buried, flat).  Largest-part gating, not sum
+# gating.
 TRENCH_SPINE_MIN_FOOTPRINT_AREA_M2 = 1000.0
 
 # Interior cutout (ruling R10, guards calibrated by amendment A8): the
@@ -477,6 +553,11 @@ class BridgeStructure:
     absolute_deck_elevation_m: float | None
     hard_deck: bool
     deck_hardness: str
+    # A10 worklist: the measured coverage fraction (None when no pavement
+    # evidence was supplied) and which evidence path produced the
+    # contract, so audit tools can print both.
+    pavement_coverage_fraction: float | None = None
+    contract_evidence: str = CONTRACT_EVIDENCE_DECK_PROFILE
 
 
 @dataclass(frozen=True)
@@ -621,8 +702,8 @@ class _StructureFrame:
     """One pool's projected geometry: the usable frame triangles, the
     ground-contact evidence, and the frame origin.
 
-    ``grounded_vertices_xz`` holds the frame ``(x, z)`` of every solid
-    vertex whose effective height is at or below
+    ``grounded_vertices_xz`` holds the frame ``(x, z, resource_path)``
+    of every solid vertex whose effective height is at or below
     :data:`GROUND_CONTACT_TOLERANCE_M` — collected from the RAW vertex
     list, not the triangle list, because a perfectly vertical
     pier/abutment face collapses to a zero-area horizontal footprint and
@@ -640,7 +721,7 @@ class _StructureFrame:
     origin_longitude: float
     triangles: list[_FrameTriangle]
     minimum_effective_height_m: float
-    grounded_vertices_xz: list[tuple[float, float]]
+    grounded_vertices_xz: list[tuple[float, float, str]]
     vertex_columns: dict[
         tuple[int, int], tuple[float, float, frozenset[str]]
     ]
@@ -710,7 +791,7 @@ def _build_structure_frame(
     see (see :class:`_StructureFrame`)."""
     origin_latitude, origin_longitude = _placements_mean_origin(placements)
     triangles: list[_FrameTriangle] = []
-    grounded_vertices_xz: list[tuple[float, float]] = []
+    grounded_vertices_xz: list[tuple[float, float, str]] = []
     column_accumulator: dict[tuple[int, int], list] = {}
     minimum_effective_height = math.inf
     for placement in placements:
@@ -744,7 +825,9 @@ def _build_structure_frame(
                 world_longitude,
             )
             if effective_y <= GROUND_CONTACT_TOLERANCE_M:
-                grounded_vertices_xz.append((frame_x, frame_z))
+                grounded_vertices_xz.append(
+                    (frame_x, frame_z, placement.resource_path)
+                )
             column_key = (
                 int(round(frame_x / WALL_COLUMN_GRID_M)),
                 int(round(frame_z / WALL_COLUMN_GRID_M)),
@@ -949,6 +1032,41 @@ def frame_polygon_to_longitude_latitude(
 # Tunnel recognition (feature A)
 # ---------------------------------------------------------------------------
 
+def _agl_tunnel_seed_resources(
+    placements: Sequence[ObjectPlacement],
+    triangles: Sequence[_FrameTriangle],
+) -> set[str]:
+    """Resources whose below-grade ``OBJECT_AGL`` placement is a credible
+    tunnel signal (the guarded AGL limb — see
+    :data:`TUNNEL_AGL_MIN_BELOW_GRADE_DECK_AREA_M2`): single placement,
+    offset at or below −:data:`TUNNEL_MIN_BELOW_GRADE_AGL_OFFSET_M`, and
+    real below-effective-grade horizontal deck area."""
+    placement_count: dict[str, int] = {}
+    for placement in placements:
+        placement_count[placement.resource_path] = (
+            placement_count.get(placement.resource_path, 0) + 1
+        )
+    below_grade_area: dict[str, float] = {}
+    for triangle in triangles:
+        if (
+            triangle.horizontality >= NEAR_HORIZONTAL_NORMAL_Y_MIN
+            and triangle.height_m <= -TUNNEL_ROOF_TOP_TOLERANCE_M
+        ):
+            below_grade_area[triangle.resource_path] = (
+                below_grade_area.get(triangle.resource_path, 0.0)
+                + triangle.area_m2
+            )
+    return {
+        placement.resource_path
+        for placement in placements
+        if placement.above_ground_level_metres
+        <= -TUNNEL_MIN_BELOW_GRADE_AGL_OFFSET_M
+        and placement_count[placement.resource_path] == 1
+        and below_grade_area.get(placement.resource_path, 0.0)
+        >= TUNNEL_AGL_MIN_BELOW_GRADE_DECK_AREA_M2
+    }
+
+
 def _is_tunnel_signature(
     placements: Sequence[ObjectPlacement],
     triangles: Sequence[_FrameTriangle],
@@ -983,11 +1101,7 @@ def _is_tunnel_signature(
     )
     if below_grade_drivable_area >= TUNNEL_MIN_BELOW_GRADE_DECK_AREA_M2:
         return True
-    return any(
-        placement.above_ground_level_metres
-        <= -TUNNEL_MIN_BELOW_GRADE_AGL_OFFSET_M
-        for placement in placements
-    )
+    return bool(_agl_tunnel_seed_resources(placements, triangles))
 
 
 def _classify_tunnel(
@@ -1234,7 +1348,7 @@ def _deck_top_profile(
 
 def _abutment_reaches_grade_per_end(
     axis: _DeckAxis,
-    grounded_vertices_xz: Sequence[tuple[float, float]],
+    grounded_vertices_xz: Sequence[tuple[float, float, str]],
 ) -> tuple[bool, bool]:
     """Amendment A4's viaduct guard, per deck end: does solid geometry of
     ANY hardness reach effective grade within
@@ -1253,7 +1367,7 @@ def _abutment_reaches_grade_per_end(
         reaches = any(
             math.hypot(grounded_x - midpoint_x, grounded_z - midpoint_z)
             <= ABUTMENT_GRADE_SEARCH_RADIUS_M
-            for grounded_x, grounded_z in grounded_vertices_xz
+            for grounded_x, grounded_z, _resource in grounded_vertices_xz
         )
         results.append(reaches)
     while len(results) < 2:
@@ -1263,42 +1377,48 @@ def _abutment_reaches_grade_per_end(
 
 def _pavement_coverage_of_mid_deck(
     deck_polygon: Polygon,
+    axis: _DeckAxis,
     pavement_frame_union: Polygon | None,
 ) -> float | None:
-    """Fraction of the deck's mid-span box covered by pavement (spec section
-    2.3).  ``None`` when no pavement is supplied."""
+    """Fraction of the deck's mid-span band covered by pavement (spec
+    section 2.3).  ``None`` when no pavement is supplied.
+
+    The band is the middle THIRD along the deck axis and the central
+    :data:`BRIDGE_COVERAGE_BAND_WIDTH_FRACTION` of the deck ACROSS it —
+    the across-axis narrowing is the round-5 KBNA calibration (see the
+    constant's comment: lateral at-grade taxiways lap the deck's side
+    edges and are not span-crossing evidence)."""
     if pavement_frame_union is None:
         return None
     try:
-        rectangle = _minimum_rotated_rectangle(deck_polygon)
-        corners = list(rectangle.exterior.coords)[:4]
-        edges = [
-            (corners[index], corners[(index + 1) % 4]) for index in range(4)
-        ]
-        lengths = [
-            math.hypot(end[0] - start[0], end[1] - start[1])
-            for start, end in edges
-        ]
-        long_index = max(range(4), key=lambda index: lengths[index])
-        start, end = edges[long_index]
-        long_axis = (
-            (end[0] - start[0]) / lengths[long_index],
-            (end[1] - start[1]) / lengths[long_index],
-        )
+        along_center = axis.length_m / 2.0
+        along_half = axis.length_m / 6.0
+        unit = axis.axis_unit_xz
+        perpendicular = (-unit[1], unit[0])
+        origin = axis.axis_origin_xz
+        # Centre the band's across coordinate on the deck centroid — the
+        # axis origin is a rectangle corner and the deck may extend to
+        # either perpendicular side of it.
         centroid = deck_polygon.centroid
-        center = (centroid.x, centroid.y)
-        # Middle third along the long axis, full width via deck clipping.
-        half = lengths[long_index] / 6.0
+        across_center = (centroid.x - origin[0]) * perpendicular[0] + (
+            centroid.y - origin[1]
+        ) * perpendicular[1]
+        across_half = (
+            axis.width_m * BRIDGE_COVERAGE_BAND_WIDTH_FRACTION / 2.0
+        )
         band_corners = []
-        perpendicular = (-long_axis[1], long_axis[0])
-        width = lengths[(long_index + 1) % 4]
-        for along in (-half, half):
-            for across in (-width, width):
+        for along in (along_center - along_half, along_center + along_half):
+            for across in (
+                across_center - across_half,
+                across_center + across_half,
+            ):
                 band_corners.append(
                     (
-                        center[0] + along * long_axis[0]
+                        origin[0]
+                        + along * unit[0]
                         + across * perpendicular[0],
-                        center[1] + along * long_axis[1]
+                        origin[1]
+                        + along * unit[1]
                         + across * perpendicular[1],
                     )
                 )
@@ -1535,10 +1655,15 @@ def _classify_bridge(
     clearance_underside_y_m = _lowest_underside_plane(underside_candidates)
 
     coverage_fraction = _pavement_coverage_of_mid_deck(
-        deck_polygon, pavement_frame_union
+        deck_polygon, axis, pavement_frame_union
     )
     contract = _classify_contract(
         crest_y_m, deck_end_elevations_y_m, coverage_fraction
+    )
+    contract_evidence = (
+        CONTRACT_EVIDENCE_PAVEMENT_COVERAGE
+        if coverage_fraction is not None
+        else CONTRACT_EVIDENCE_DECK_PROFILE
     )
 
     absolute_deck_elevation_m = _median_msl_on_deck(
@@ -1548,12 +1673,39 @@ def _classify_bridge(
         mean_sea_level_placements,
     )
 
-    reference_placement = placements[0]
+    # Round-5 mega-pool refinement: the record carries — and the R4
+    # exclusion list receives — ONLY the resources whose geometry actually
+    # contributes to the bridge: the deck faces and the underside planes
+    # (the latter capture the trench cladding lining the corridor beneath
+    # the span — EDDF's Tunnel_N).  Pool co-members (jetways, clutter,
+    # passing ground slabs near the abutments) never ride along; grounded
+    # geometry stays abutment-test EVIDENCE without becoming a record
+    # member, because any grounded clutter within the search radius of an
+    # end would otherwise be excluded from the Phase 2 y-bake.
+    contributing_resources = {face.resource_path for face in deck_faces}
+    contributing_resources.update(
+        triangle.resource_path
+        for triangle in underside_candidates
+        # Structure undersides only: girder/slab planes above the opening
+        # (elevated decks) or below-grade trench cladding (flush decks,
+        # EDDF Tunnel_N floors at −1).  The band between is at-grade
+        # ground furniture passing beneath the span — terrain, not
+        # structure, and it must stay y-bakeable.
+        if triangle.height_m > CLEARANCE_MINIMUM_OPENING_HEIGHT_M
+        or triangle.height_m < -GROUND_CONTACT_TOLERANCE_M
+    )
+
+    reference_placement = next(
+        (
+            placement
+            for placement in placements
+            if placement.resource_path in contributing_resources
+        ),
+        placements[0],
+    )
     return (
         BridgeStructure(
-            object_resources=sorted(
-                {placement.resource_path for placement in placements}
-            ),
+            object_resources=sorted(contributing_resources),
             anchor_longitude_latitude=(
                 reference_placement.longitude,
                 reference_placement.latitude,
@@ -1577,6 +1729,8 @@ def _classify_bridge(
             absolute_deck_elevation_m=absolute_deck_elevation_m,
             hard_deck=deck_hardness == DECK_HARDNESS_HARD_DECK,
             deck_hardness=deck_hardness,
+            pavement_coverage_fraction=coverage_fraction,
+            contract_evidence=contract_evidence,
         ),
         None,
     )
@@ -1945,6 +2099,8 @@ def _classify_structure_ground_interface(
     for level_y_m, sector_indices, perimeter_share in interface_levels:
         if level_y_m > -TRENCH_SPINE_MIN_DEPTH_M:
             continue
+        if perimeter_share < TRENCH_SPINE_MIN_LEVEL_PERIMETER_SHARE:
+            continue
         contributing_resources = {
             resource
             for base_y, resources in wall_column_bases
@@ -1965,13 +2121,21 @@ def _classify_structure_ground_interface(
             close_m=AT_GRADE_FOOTPRINT_CLOSE_M,
             keep_all_parts=True,
         )
-        if (
-            candidate_footprint is None
-            or candidate_footprint.area < TRENCH_SPINE_MIN_FOOTPRINT_AREA_M2
-        ):
+        if candidate_footprint is None:
+            continue
+        # Largest CONNECTED part, never the sum: a coherent corridor is
+        # the trench signature; scattered below-grade specks (EGLL jetway
+        # slack) summed past the floor in the round-5 full-pack run.
+        candidate_parts = (
+            list(candidate_footprint.geoms)
+            if candidate_footprint.geom_type == "MultiPolygon"
+            else [candidate_footprint]
+        )
+        largest_part = max(candidate_parts, key=lambda part: part.area)
+        if largest_part.area < TRENCH_SPINE_MIN_FOOTPRINT_AREA_M2:
             continue
         trench_level = (level_y_m, sector_indices, perimeter_share)
-        trench_footprint = candidate_footprint
+        trench_footprint = largest_part
         break  # levels are sorted deepest first
 
     if cutout_triggered:
@@ -2046,6 +2210,207 @@ def _classify_structure_ground_interface(
 
 
 # ---------------------------------------------------------------------------
+# Round-5 mega-pool component refinement
+# ---------------------------------------------------------------------------
+
+def _per_resource_face_footprints(
+    triangles: Sequence[_FrameTriangle],
+    face_predicate,
+) -> dict[str, object]:
+    """Union footprint of the faces passing ``face_predicate``, per
+    resource.  Resources with no passing face are absent."""
+    polygons_by_resource: dict[str, list] = {}
+    for triangle in triangles:
+        if face_predicate(triangle):
+            polygons_by_resource.setdefault(
+                triangle.resource_path, []
+            ).append(triangle.horizontal_polygon)
+    footprints: dict[str, object] = {}
+    for resource, polygons in polygons_by_resource.items():
+        try:
+            union = unary_union(polygons)
+            if not union.is_valid:
+                union = union.buffer(0)
+        except (ValueError, _GEOS_EXCEPTION):
+            continue
+        if not union.is_empty:
+            footprints[resource] = union
+    return footprints
+
+
+def _footprint_components(
+    footprint_by_resource: dict[str, object],
+    join_buffer_m: float,
+) -> list[set[str]]:
+    """Union-find components over resources whose footprints come within
+    ``join_buffer_m`` of each other."""
+    resources = sorted(footprint_by_resource)
+    parent = list(range(len(resources)))
+
+    def find(node: int) -> int:
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[left_root] = right_root
+
+    buffered = {}
+    for resource in resources:
+        try:
+            buffered[resource] = footprint_by_resource[resource].buffer(
+                join_buffer_m
+            )
+        except (ValueError, _GEOS_EXCEPTION):
+            buffered[resource] = footprint_by_resource[resource]
+    for first_index in range(len(resources)):
+        for second_index in range(first_index + 1, len(resources)):
+            try:
+                touches = buffered[resources[first_index]].intersects(
+                    footprint_by_resource[resources[second_index]]
+                )
+            except (ValueError, _GEOS_EXCEPTION):
+                touches = True  # doubt merges, never tears (I-20 spirit)
+            if touches:
+                union(first_index, second_index)
+
+    members_by_root: dict[int, set[str]] = {}
+    for index, resource in enumerate(resources):
+        members_by_root.setdefault(find(index), set()).add(resource)
+    return list(members_by_root.values())
+
+
+def _below_grade_drivable_components(
+    placements: Sequence[ObjectPlacement],
+    frame: _StructureFrame,
+) -> list[set[str]]:
+    """Tunnel/interior-cutout candidate components inside one pool.
+
+    Seeds: resources owning near-horizontal HARD faces below
+    :data:`TUNNEL_MIN_BODY_DEPTH_M` (their below-grade deck footprints),
+    plus resources placed with a below-grade ``OBJECT_AGL`` offset (whole
+    footprint — the EGLL AGL shells carry no hard).  Non-seed resources
+    are attached when at least
+    :data:`TUNNEL_COVER_CONTAINMENT_MIN_FRACTION` of their own footprint
+    lies over the component's seed footprint — the roof shell over its
+    deck — so mouths (deck − roof) still compute per tunnel."""
+    below_grade_agl_resources = _agl_tunnel_seed_resources(
+        placements, frame.triangles
+    )
+    seed_footprints = _per_resource_face_footprints(
+        frame.triangles,
+        lambda triangle: (
+            triangle.is_hard
+            and triangle.horizontality >= NEAR_HORIZONTAL_NORMAL_Y_MIN
+            and triangle.height_m <= -TUNNEL_MIN_BODY_DEPTH_M
+        )
+        or triangle.resource_path in below_grade_agl_resources,
+    )
+    if not seed_footprints:
+        return []
+    components = _footprint_components(
+        seed_footprints, TUNNEL_COMPONENT_JOIN_BUFFER_M
+    )
+
+    # Attach cover (roof shell) resources.
+    full_footprints = _per_resource_face_footprints(
+        frame.triangles, lambda triangle: True
+    )
+    attached_components: list[set[str]] = []
+    for component in components:
+        try:
+            component_footprint = unary_union(
+                [seed_footprints[resource] for resource in component]
+            ).buffer(TUNNEL_COMPONENT_JOIN_BUFFER_M)
+        except (ValueError, _GEOS_EXCEPTION):
+            attached_components.append(component)
+            continue
+        attached = set(component)
+        for resource, footprint in full_footprints.items():
+            if resource in attached or footprint.area <= 0.0:
+                continue
+            try:
+                contained = footprint.intersection(component_footprint).area
+            except (ValueError, _GEOS_EXCEPTION):
+                continue
+            if (
+                contained / footprint.area
+                >= TUNNEL_COVER_CONTAINMENT_MIN_FRACTION
+            ):
+                attached.add(resource)
+        attached_components.append(attached)
+    return attached_components
+
+
+def _hard_face_components(frame: _StructureFrame) -> list[set[str]]:
+    """Bridge candidate components: resources owning near-horizontal hard
+    faces, grouped by footprint adjacency
+    (:data:`BRIDGE_COMPONENT_JOIN_BUFFER_M`)."""
+    seed_footprints = _per_resource_face_footprints(
+        frame.triangles,
+        lambda triangle: (
+            triangle.is_hard
+            and triangle.horizontality >= NEAR_HORIZONTAL_NORMAL_Y_MIN
+        ),
+    )
+    if not seed_footprints:
+        return []
+    return _footprint_components(
+        seed_footprints, BRIDGE_COMPONENT_JOIN_BUFFER_M
+    )
+
+
+def _bridge_evidence_resources(
+    component: set[str],
+    frame: _StructureFrame,
+) -> set[str]:
+    """The component plus every pool resource whose footprint intersects
+    the component's hard footprint buffered by the abutment search radius
+    — the grounding cladding the per-end test must see (EDDF's Tunnel_N
+    trench walls belong to their Bridge_N deck)."""
+    component_hard = _per_resource_face_footprints(
+        frame.triangles,
+        lambda triangle: (
+            triangle.resource_path in component
+            and triangle.is_hard
+            and triangle.horizontality >= NEAR_HORIZONTAL_NORMAL_Y_MIN
+        ),
+    )
+    if not component_hard:
+        return set(component)
+    try:
+        buffered = unary_union(list(component_hard.values())).buffer(
+            ABUTMENT_GRADE_SEARCH_RADIUS_M
+        )
+    except (ValueError, _GEOS_EXCEPTION):
+        return set(component)
+    evidence = set(component)
+    full_footprints = _per_resource_face_footprints(
+        frame.triangles, lambda triangle: True
+    )
+    for resource, footprint in full_footprints.items():
+        if resource in evidence:
+            continue
+        try:
+            if footprint.intersects(buffered):
+                evidence.add(resource)
+        except (ValueError, _GEOS_EXCEPTION):
+            evidence.add(resource)
+    return evidence
+
+
+def _wall_column_count(frame: _StructureFrame) -> int:
+    return sum(
+        1
+        for minimum_y, maximum_y, _resources in frame.vertex_columns.values()
+        if maximum_y - minimum_y >= WALL_COLUMN_MIN_VERTICAL_EXTENT_M
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -2055,15 +2420,25 @@ def _pavement_union_in_frame(
     origin_longitude: float,
 ) -> Polygon | None:
     """Project caller-supplied lon/lat pavement polygons into the structure
-    frame and union them (for the contract coverage test)."""
+    frame and union them (for the contract coverage test).
+
+    Accepts shapely Polygons, MultiPolygons (a self-crossing draped ring
+    repaired by ``buffer(0)`` upstream arrives as one — real KBNA input),
+    or raw ``(longitude, latitude)`` rings."""
     if not pavement_polygons_longitude_latitude:
         return None
-    frame_polygons = []
+    exterior_rings: list[list[tuple[float, float]]] = []
     for polygon in pavement_polygons_longitude_latitude:
-        try:
-            ring = list(polygon.exterior.coords)
-        except AttributeError:
-            ring = list(polygon)
+        geometry_type = getattr(polygon, "geom_type", None)
+        if geometry_type == "MultiPolygon":
+            for part in polygon.geoms:
+                exterior_rings.append(list(part.exterior.coords))
+        elif geometry_type == "Polygon":
+            exterior_rings.append(list(polygon.exterior.coords))
+        else:
+            exterior_rings.append(list(polygon))
+    frame_polygons = []
+    for ring in exterior_rings:
         frame_ring = []
         for longitude, latitude in ring:
             frame_x, frame_z = obj8_reader.lonlat_to_local_offset(
@@ -2133,82 +2508,191 @@ def classify_object_terrain_features(
         frame = _build_structure_frame(pool.placements, geometry_by_resource)
         if not frame.triangles:
             continue
+        consumed_resources: set[str] = set()
 
-        # R10/A8 precedence: the same drivable-below-grade signature fires
-        # on both cut-and-cover tunnels and enclosed train halls, and
-        # ENCLOSURE is the discriminator — a structure whose below-grade
-        # hard content is fully enclosed within its own at-grade footprint
-        # is an INTERIOR_CUTOUT building, never a tunnel (and never a
-        # bridge: its hard planes are the buried platforms).  Open-to-sky
-        # structures keep the tunnel rule.
-        enclosure = _below_grade_hard_enclosure(frame)
-        enclosed_interior = (
-            enclosure is not None
-            and enclosure.enclosure_fraction
-            >= INTERIOR_CUTOUT_ENCLOSURE_MIN_FRACTION
-        )
-
-        if not enclosed_interior and _is_tunnel_signature(
-            pool.placements, frame.triangles
+        # --- stage 1: below-grade drivable components (round 5) ---------
+        # Tunnels and interior cutouts are classified per contributing
+        # component, never per pool: mega-pools diluted every tunnel
+        # metric and ballooned the R4 exclusion list (812 at EGLL).
+        # Within a component, R10/A8 precedence holds: ENCLOSURE
+        # discriminates the interior cutout from the tunnel.
+        for component in _below_grade_drivable_components(
+            pool.placements, frame
         ):
-            tunnel = _classify_tunnel(
-                pool.placements,
-                frame.origin_latitude,
-                frame.origin_longitude,
-                frame.triangles,
+            component_placements = [
+                placement
+                for placement in pool.placements
+                if placement.resource_path in component
+            ]
+            if not component_placements:
+                continue
+            component_frame = _build_structure_frame(
+                component_placements, geometry_by_resource
             )
-            tunnels.append(tunnel)
-            for resource in tunnel.object_resources:
-                exclusions.append((pack_root, resource))
+            if not component_frame.triangles:
+                continue
+            component_enclosure = _below_grade_hard_enclosure(
+                component_frame
+            )
+            if (
+                component_enclosure is not None
+                and component_enclosure.enclosure_fraction
+                >= INTERIOR_CUTOUT_ENCLOSURE_MIN_FRACTION
+            ):
+                ground_interface = _classify_structure_ground_interface(
+                    component_placements,
+                    component_frame,
+                    component_enclosure,
+                )
+                if ground_interface is not None:
+                    ground_interfaces.append(ground_interface)
+                    consumed_resources |= component
+                    for resource in ground_interface.object_resources:
+                        exclusions.append((pack_root, resource))
+                continue
+            if _is_tunnel_signature(
+                component_placements, component_frame.triangles
+            ):
+                tunnel = _classify_tunnel(
+                    component_placements,
+                    component_frame.origin_latitude,
+                    component_frame.origin_longitude,
+                    component_frame.triangles,
+                )
+                tunnels.append(tunnel)
+                consumed_resources |= component
+                for resource in tunnel.object_resources:
+                    exclusions.append((pack_root, resource))
+
+        remaining_placements = [
+            placement
+            for placement in pool.placements
+            if placement.resource_path not in consumed_resources
+        ]
+        if not remaining_placements:
+            continue
+        remaining_frame = (
+            frame
+            if not consumed_resources
+            else _build_structure_frame(
+                remaining_placements, geometry_by_resource
+            )
+        )
+        if not remaining_frame.triangles:
             continue
 
-        # Building-likeness gate for the BRIDGE path only (see
-        # BUILDING_MIN_WALL_COLUMN_COUNT): a terminal with a drivable
-        # elevated roadway must reach feature C, not die in the viaduct
-        # guard.
-        wall_column_count = sum(
-            1
-            for minimum_y, maximum_y, _resources in (
-                frame.vertex_columns.values()
-            )
-            if maximum_y - minimum_y >= WALL_COLUMN_MIN_VERTICAL_EXTENT_M
+        # --- stage 2: bridge components ----------------------------------
+        # Each hard-face component is tried separately (a mega-pool can
+        # hold several bridges).  The evidence sub-frame adds the nearby
+        # grounding cladding; the building-likeness gate applies per
+        # EVIDENCE set, so a terminal's own drivable roadway (ELLX) routes
+        # to feature C while a freestanding bridge next to clutter
+        # (KBNA Crossing_Bridge) is classified — never silently absent.
+        pavement_frame_union = _pavement_union_in_frame(
+            pavement_polygons_longitude_latitude,
+            remaining_frame.origin_latitude,
+            remaining_frame.origin_longitude,
         )
-        building_like = wall_column_count >= BUILDING_MIN_WALL_COLUMN_COUNT
-
-        if not enclosed_interior and not building_like:
-            pavement_frame_union = _pavement_union_in_frame(
-                pavement_polygons_longitude_latitude,
-                frame.origin_latitude,
-                frame.origin_longitude,
+        bridge_components = _hard_face_components(remaining_frame)
+        for component in bridge_components:
+            evidence_resources = _bridge_evidence_resources(
+                component, remaining_frame
             )
+            evidence_placements = [
+                placement
+                for placement in remaining_placements
+                if placement.resource_path in evidence_resources
+            ]
+            if not evidence_placements:
+                continue
+            evidence_frame = _build_structure_frame(
+                evidence_placements, geometry_by_resource
+            )
+            if not evidence_frame.triangles:
+                continue
+            if (
+                _wall_column_count(evidence_frame)
+                >= BUILDING_MIN_WALL_COLUMN_COUNT
+            ):
+                # Building-carried drivable surface: feature C's domain
+                # (the pool remainder below emits the interface record).
+                continue
             bridge, refusal_reason = _classify_bridge(
-                pool.placements,
-                frame,
+                evidence_placements,
+                evidence_frame,
                 pavement_frame_union,
                 mean_sea_level_placements,
             )
             if bridge is not None:
                 bridges.append(bridge)
+                consumed_resources |= set(bridge.object_resources)
                 for resource in bridge.object_resources:
                     exclusions.append((pack_root, resource))
-                continue
-            if refusal_reason is not None:
+            elif refusal_reason is not None:
+                refusals.append(
+                    RefusedStructure(
+                        object_resources=sorted(component),
+                        reason=refusal_reason,
+                    )
+                )
+                consumed_resources |= component
+
+        # Cosmetic bridges carry no hard faces at all (Murfreesboro):
+        # when the remaining pool has no hard components and is not a
+        # building, the whole-pool cosmetic path still applies.
+        if not bridge_components and (
+            _wall_column_count(remaining_frame)
+            < BUILDING_MIN_WALL_COLUMN_COUNT
+        ):
+            bridge, refusal_reason = _classify_bridge(
+                remaining_placements,
+                remaining_frame,
+                pavement_frame_union,
+                mean_sea_level_placements,
+            )
+            if bridge is not None:
+                bridges.append(bridge)
+                consumed_resources |= set(bridge.object_resources)
+                for resource in bridge.object_resources:
+                    exclusions.append((pack_root, resource))
+            elif refusal_reason is not None:
                 refusals.append(
                     RefusedStructure(
                         object_resources=sorted(
                             {
                                 placement.resource_path
-                                for placement in pool.placements
+                                for placement in remaining_placements
                             }
                         ),
                         reason=refusal_reason,
                     )
                 )
-                continue
+                consumed_resources |= {
+                    placement.resource_path
+                    for placement in remaining_placements
+                }
 
-        # Neither tunnel nor bridge: a building structure — feature C.
+        # --- stage 3: feature C on what remains --------------------------
+        building_placements = [
+            placement
+            for placement in pool.placements
+            if placement.resource_path not in consumed_resources
+        ]
+        if not building_placements:
+            continue
+        building_frame = (
+            remaining_frame
+            if len(building_placements) == len(remaining_placements)
+            else _build_structure_frame(
+                building_placements, geometry_by_resource
+            )
+        )
+        if not building_frame.triangles:
+            continue
         ground_interface = _classify_structure_ground_interface(
-            pool.placements, frame, enclosure
+            building_placements,
+            building_frame,
+            _below_grade_hard_enclosure(building_frame),
         )
         if ground_interface is not None:
             ground_interfaces.append(ground_interface)
