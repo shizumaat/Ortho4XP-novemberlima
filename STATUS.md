@@ -3,6 +3,39 @@
 # (Noah sign-off).  Gates green; to-zero worklist A1-A5 in flight
 # (docs/runway_single_polygon_plan.md Addendum 2 is the worklist).
 
+## ADJACENT-GROUND LAW ARC COMPLETE — DEFAULT ON (babf296): SUITE 5
+Full arc same-day: 03dc527 law (corridor constants + envelope, 33
+tests) · 895dc4e emitter slice 3 (gate off) · d2f8f8c validator
+(DEM transect reader + OSM tear sentinel; DEM-free corridor check
+measured UNSOUND 200-1100 false flags → tear-scoped) · 2e2df5b
+emitter round 2 (clamp-INTO-corridor replacing the skirt FLOOR
+convention — 108-145% band internals → 0; triangle diet KCLT
+283.8k→75.6k / HECA 235.4k→203.9k accepted <210k; strip declaw;
+coverage 0; tears 0; + Noah directive: FULL boundary-ribbon
+supersession gate-on) · 430c60a 30m parallel-merge shipped OFF
+(over-couples genuine terrain; HECA wall RESOLVED at HEAD, tear
+worst 31%→4.2%) · 5b88720 validator live-counter fix (driver
+swallowed a TypeError → production adjacent_ground read 0
+unconditionally; _GEOM_EXC narrowing) · babf296 DEFAULT ON + SPLP
+fixture re-cut (boundary rows removed by construction, graded_strip
+64/90, floors 0.95/runway-EXACT).
+* FIRST FLIP ATTEMPT BLOCKED correctly (triangles 283.8k KCLT /
+  wedges +3 / corridor violations) — the round-1 emitter used the
+  skirt convention; the day-old validator caught it. Lockstep works.
+* Suite gate-on 5 = the 6 MINUS pavement_grade[CYXY] (the law
+  resolved apron #29 — CYXY within 1→0). Gate-on improvements:
+  KJQF within 104→88, KSVH 5→0, KCLT break 8→2, KEXX 1215 m²
+  bridge-overlap class DEAD, boundary+bridge 0 at all 8 airports.
+* Follow-ups queued: KCLT/KEXX 1 un-filled junction-band residual
+  each · cross-tile seam-column reader limitation (SPLP 5 per-tile
+  findings at lon −77.000, not missing earthwork) · SPJC fixture
+  re-cut to guard graded_strip · test_boundary 2 permanent skips
+  retire with the bridge-deletion slice · enforce-fully trigger
+  tuning (1 m under-enforces) awaits Noah in-sim · slice 5 deletion
+  (bridges + ribbon + 30i tents + legacy chain + sub-rect crossing
+  resolution) after in-sim soak · OLS follow-on arc.
+* NOAH: restart Ortho4XP + bake +60-136 (CYXY plateau) — no env var.
+
 ## POST-WRAP CONTINUATION (same day): FULL SUITE 8 → 6
 * 1ccd29f near-miss building frontage (S2): the SPJC pad↔apron 0.68 m
   DSF-vs-apt.dat source offset sat just past SHARED_VERTEX_TOL_M in
