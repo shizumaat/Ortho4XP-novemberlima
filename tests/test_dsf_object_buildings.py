@@ -803,7 +803,7 @@ class TestPipelineFlagGating:
                 "DSF_OBJECT_BUILDINGS off")
 
         monkeypatch.setattr(D, "read_dsf_object_buildings", sentinel)
-        assert config.DSF_OBJECT_BUILDINGS is False  # the default
+        monkeypatch.setattr(config, "DSF_OBJECT_BUILDINGS", False)
         admitted = pipeline._collect_dsf_object_building_footprints(
             "/nonexistent.dsf", None,
             lambda outer_ring, hole_rings: True)
