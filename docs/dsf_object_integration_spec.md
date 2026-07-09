@@ -1306,3 +1306,37 @@ ground. District surfaces are the recommendation.
 Separate, unresolved by this: the elevated-railway mega-chain (hinge cut, I-19) and the
 authored-buried-base fork (base-seating delta variant) — both pending in-sim calibration
 coordinates.
+
+### A18 — OBJECT_AGL is subject to the distant-anchor disease; the plan's exclusion was wrong *(found by user in-sim calibration at HECA)*
+
+The plan (section 2 and section 8.8) and every reader built on it deliberately skip ``OBJECT_AGL``:
+"carries an explicit elevation and so is not subject to the distant anchor problem." **False.** An
+AGL placement resolves to ``terrain(anchor) + elevation`` — terrain-relative *at the anchor only*.
+Geometry a kilometre from the anchor inherits the anchor's terrain exactly like a plain ``OBJECT``,
+offset by a constant. HECA ships **183 of its 216 AGL placements on the single 189-object family
+anchor** (user's floaters measured 2/10/20 m; predicted ``anchor_ground − local_ground − 0.52``
+matches). KCLT's 2,480 AGL placements are ≤3 per anchor, compact — which is why the assumption
+survived every KCLT gate. LEMD has zero.
+
+Fix: ``ObjectPlacement`` gains ``above_ground_level_metres`` (default ``0.0``; plain ``OBJECT``
+rows keep it zero); the reader accepts ``OBJECT_AGL`` rows (heading in column five); the delta
+becomes ``ground(S) − (ground(anchor(O)) + above_ground_level_metres)``; Phase 1 and Phase 2
+discovery accept AGL placements under the same reach floor and I-4 counting. ``OBJECT_MSL``
+remains excluded (zero instances across all three packs) but is now *reported* when present,
+never silent. Contract tripwire updated in the same commit per protocol.
+
+### A19 — Structure-skip visibility and the A3 guard on mega-structures *(same calibration)*
+
+Forty-nine plain-OBJECT HECA resources (reaches 1.2–1.9 km) were absent from decisions AND from
+the skip report — structure-level skips (A3 arithmetic, blocking-resource, outside-mesh) never
+surfaced at the resource level, a no-silent-caps violation. And the A3 do-not-bake guard evaluated
+a mega-structure's correction using the ground at its *centroid* — one unrepresentative sample for
+a kilometre-wide web — rather than the best available single offset. Fix bundle:
+
+1. A structure's seating elevation, when it has ground-touching parts, is the **median of those
+   parts' grounds** (the optimal single rigid offset), not the centroid sample. Centroid remains
+   the fallback for part-less and inherited structures.
+2. Every structure-level skip surfaces into the skip report with the affected resources.
+3. The A3 guard applies only below a structure-diameter bound (a mega-web always bakes with its
+   best offset and flags ``needs_pad``); the full mega-web fix remains the hinge cut (A16/A17
+   queue, now demanded by both HECA's terminal web and LEMD's railway chain).
