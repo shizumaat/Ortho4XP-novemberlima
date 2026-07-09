@@ -5088,6 +5088,22 @@ def build_airport_pavement(icao: str, xplane_root: str,
         from .pavement.vertices import _round_turnback_corners
         _round_turnback_corners(layout, icao)
 
+        # ── Formation-time SOURCE CLIP (KCLT off-source phantom, Fix C) ──
+        # An apron / junction face can acquire off-source area through
+        # DOWNSTREAM recuts (route-proximity cut, frontage straightening) even
+        # though the slice birthed it 100 % on source — KCLT #278 (8.3 k m² at
+        # 35 %) is the near-runway band carved off a real 18R-end apron.  Clip
+        # every < 50 %-on-source apron / junction back to the source pavement
+        # (∪ runway halo) HERE — after merge_small_apron_fragments / groundside
+        # emit / full-width-corridor consolidation (pass 1) have settled the
+        # apron/junction set, and BEFORE _unify_airside_geometry below so the
+        # clipped edges are re-noded, welded, and graded like any other pre-
+        # solve geometry.  Gate O4_SOURCE_CLIP → no-op (byte-identical) off.
+        if os.environ.get("O4_SOURCE_CLIP", "1") == "1":
+            from .junction_repair import source_clip_partial_coverage_shapes
+            source_clip_partial_coverage_shapes(layout, icao=icao)
+            _covp(layout, "post-source-clip")
+
         # ── Airside node-unification (refactor Phases 6+7, PRE-solve) ──
         # Weld + full conformance + final corner snaps, run HERE so the solver
         # sees the FINAL node-set and grades every shared vertex to ONE
@@ -5842,6 +5858,44 @@ def build_airport_pavement(icao: str, xplane_root: str,
         except _GEOM_EXC as exc:
             UI.vprint(1, f"  [pav-builder] {icao}: runway-end skirt "
                          f"emission FAILED: {exc!r}")
+
+        # ── Adjacent-ground LATERAL grade law (slice 3, gate
+        # O4_ADJACENT_GROUND_LAW, default OFF) ──────────────────────────
+        # The lateral generalization of the runway-end skirt: graded
+        # `graded_strip` bands off every terrain-facing airside pavement
+        # edge, cut/filled to the lawful corridor
+        # (grade_law.adjacent_ground_envelope).  ORDERING: MUST run AFTER
+        # emit_runway_end_skirts + its tile_cut (the skirt shapes are in
+        # the static block, so the bands clip against them at runway ends
+        # and never double-write) and BEFORE the final epsilon-wedge weld
+        # (its new constrained edges get welded like every other feature).
+        # Imported inside the gate so the module has NO import side effect
+        # when the law is off (byte-inert).
+        from .config import ADJACENT_GROUND_LAW_ENABLED
+        if ADJACENT_GROUND_LAW_ENABLED:
+            try:
+                from .adjacent_ground import emit_adjacent_ground_bands
+                n_ag = emit_adjacent_ground_bands(
+                    layout, _projection_dem,
+                    _projection_tile_lat, _projection_tile_lon,
+                    source_runways=apt.runways)
+                if n_ag:
+                    UI.vprint(1,
+                        f"  [pav-builder] {icao}: emitted {n_ag} "
+                        f"adjacent-ground graded-strip/wall polygon(s).")
+                    from .geom_guard import _AIRSIDE_ROLES as _ag_skip
+                    from .tile_cut import cut_layout_at_tile_boundaries \
+                        as _ag_tile_cut
+                    _ag_tile_cut(
+                        layout,
+                        current_tile_lat=current_tile_lat,
+                        current_tile_lon=current_tile_lon,
+                        dem=_projection_dem,
+                        skip_roles=_ag_skip,
+                    )
+            except _GEOM_EXC as exc:
+                UI.vprint(1, f"  [pav-builder] {icao}: adjacent-ground "
+                             f"band emission FAILED: {exc!r}")
 
     # FINAL EPSILON-WEDGE WELD (part 30j): the T-vertex weld at
     # ``enforce_conformance(tol=0.01)`` above runs BEFORE the last three

@@ -3,6 +3,124 @@
 # (Noah sign-off).  Gates green; to-zero worklist A1-A5 in flight
 # (docs/runway_single_polygon_plan.md Addendum 2 is the worklist).
 
+## ADJACENT-GROUND LAW ARC COMPLETE — DEFAULT ON (babf296): SUITE 5
+Full arc same-day: 03dc527 law (corridor constants + envelope, 33
+tests) · 895dc4e emitter slice 3 (gate off) · d2f8f8c validator
+(DEM transect reader + OSM tear sentinel; DEM-free corridor check
+measured UNSOUND 200-1100 false flags → tear-scoped) · 2e2df5b
+emitter round 2 (clamp-INTO-corridor replacing the skirt FLOOR
+convention — 108-145% band internals → 0; triangle diet KCLT
+283.8k→75.6k / HECA 235.4k→203.9k accepted <210k; strip declaw;
+coverage 0; tears 0; + Noah directive: FULL boundary-ribbon
+supersession gate-on) · 430c60a 30m parallel-merge shipped OFF
+(over-couples genuine terrain; HECA wall RESOLVED at HEAD, tear
+worst 31%→4.2%) · 5b88720 validator live-counter fix (driver
+swallowed a TypeError → production adjacent_ground read 0
+unconditionally; _GEOM_EXC narrowing) · babf296 DEFAULT ON + SPLP
+fixture re-cut (boundary rows removed by construction, graded_strip
+64/90, floors 0.95/runway-EXACT).
+* FIRST FLIP ATTEMPT BLOCKED correctly (triangles 283.8k KCLT /
+  wedges +3 / corridor violations) — the round-1 emitter used the
+  skirt convention; the day-old validator caught it. Lockstep works.
+* Suite gate-on 5 = the 6 MINUS pavement_grade[CYXY] (the law
+  resolved apron #29 — CYXY within 1→0). Gate-on improvements:
+  KJQF within 104→88, KSVH 5→0, KCLT break 8→2, KEXX 1215 m²
+  bridge-overlap class DEAD, boundary+bridge 0 at all 8 airports.
+* Follow-ups queued: KCLT/KEXX 1 un-filled junction-band residual
+  each · cross-tile seam-column reader limitation (SPLP 5 per-tile
+  findings at lon −77.000, not missing earthwork) · SPJC fixture
+  re-cut to guard graded_strip · test_boundary 2 permanent skips
+  retire with the bridge-deletion slice · enforce-fully trigger
+  tuning (1 m under-enforces) awaits Noah in-sim · slice 5 deletion
+  (bridges + ribbon + 30i tents + legacy chain + sub-rect crossing
+  resolution) after in-sim soak · OLS follow-on arc.
+* NOAH: restart Ortho4XP + bake +60-136 (CYXY plateau) — no env var.
+
+## POST-WRAP CONTINUATION (same day): FULL SUITE 8 → 6
+* 1ccd29f near-miss building frontage (S2): the SPJC pad↔apron 0.68 m
+  DSF-vs-apt.dat source offset sat just past SHARED_VERTEX_TOL_M in
+  ALL THREE reconcilers; fix = raise-biased soft anchors + law edges
+  toward the already-chosen pad seat (per-EDGE recognition — the
+  solve-time apron ring is sparse; stitch-tolerance widening REJECTED
+  to keep the 0.5 canonical identity).  SPJC steps 5→0,
+  pavement_grade[SPJC] GREEN; HECA building25 (0.81 m) also fixed →
+  pavement_grade[HECA] GREEN — verified standalone: the 27-step
+  service wall was NEVER test-visible (svc_break quarantine); the
+  test's real blockers were the proximity radius + this one step.
+  The wall stays open as an IN-SIM item (physical gates), agent on it.
+* PARALLEL-ROAD WALL (part 30m OPEN (a)) — RESOLVED + candidate shipped
+  OFF (anchors._parallel_station_merge_pairs, O4_SVC_PARALLEL_STATION_MERGE,
+  default OFF; +12 tests).  Re-baselined at HEAD: the documented #576↔#584
+  site is GONE (off-source SOURCE CLIP + adjacent-ground reshaped HECA's
+  service net); the equivalent HECA pair is now 0.19 m (< the 0.5 m step
+  threshold — 0 check_grade steps/cross airport-wide; the 0.845 m only
+  survives O4_SVC_SPINE_FIRST=0 per-vertex).  Candidate (a) (widen the
+  spine-station merge to ≤7 m with a tangent-parallel guard) FIRES only at
+  CYXY -10045↔-10195 (6.7 m apart) where the two roads differ ~1.5 m for
+  GENUINE terrain reasons (non-overlapping reach bands — the SAME physics
+  part-30m recorded for #576↔#584) → forcing a shared seed REGRESSED CYXY
+  (service tear 22.2→23.2 %, facing step 1.523→1.587 m).  Proximity+parallel
+  can't tell "coincidental wall that should be flat" from "terrain genuinely
+  holds them apart" (identical geometry), so no guard makes it both effective
+  and non-regressing; kept gated off for a future revisit carrying a co-level
+  signal (shared groundside).  Default byte-identical (HECA/SPLP/CYXY alt
+  multiset unchanged; fast suite = the same 4 reds).  Candidate (b) (<5 m
+  cross-shape law) not pursued: the live pair is 6.7 m (out of its window)
+  and a hard law would over-couple the same terrain more rigidly.
+* 03dc527 adjacent-ground law slices 1+2 (behavior-inert): corridor
+  constants + STANDARDS rows + grade_law.adjacent_ground_envelope
+  (enforce-fully corridor semantics per Noah ruling 1) + 33 tests.
+  Slice 3 emitter in flight (gated OFF, phased CYXY-first, HECA
+  flat-airport corridor-cost checkpoint before any default talk).
+* Remaining full-suite 6: no_self_overlap[SPJC] + route_band_zero
+  [SPJC] (30l CHECKPOINT class) · pavement_grade[SPLP] (#66 5 cm/
+  0.8 m pair) · pavement_grade[CYXY] · cyxy_route_reach ·
+  solver_validator_same_edge_budgets.
+
+## SESSION WRAP (2026-07-08 end): FULL SUITE 13 → 8, all named
+Final tree c1c7a49.  Commits this session: 8c9fdc3 merge · 2a217d7
+flip+re-cut · ff332e9 A4 · ec7f632 A6 · f86d7ee A2 · 6ac66cd A1/R1 ·
+2da0ce3 A3 · 5782ab2 #336 A+B · 0388323 A8 crown-plane · 06b84aa B1
+end-cap escalation · cc45410 Fix C source-clip · c1c7a49 proximity ·
++ docs (0e085b8 adjacent-ground plan, f27d896 gap audit).
+* STANDALONE check_grade scoreboard: SPLP 0 · SPJC 0 · HECA 0 ·
+  CYXY 1 (apron #29 +0.25%).  KCLT within 3, off-source 8→1.
+* FULL SUITE 8 (was 13 at session start), every red precisely named:
+  - pavement_grade[SPLP]: 1 within pair 5 cm/0.8 m per-tile junction
+    #66 (unmasked by the proximity fix — cross assert no longer hides
+    it).  NEW, small, weld-value class.
+  - pavement_grade[HECA]: the 30m service-road parallel wall (27
+    steps; owner identified — station merge widen or cross-shape
+    service law).
+  - pavement_grade[SPJC]: 5 building↔apron steps (worst 0.66 m).
+  - no_self_overlap[SPJC]: 30l CHECKPOINT apron∩service clip
+    (awaiting coordinator approval round).
+  - route_band_zero[SPJC] (196) · pavement_grade[CYXY] (apron #29) ·
+    cyxy_route_reach · solver_validator_same_edge_budgets (CYXY
+    52/17649 apron/junction cm-noise) — the CYXY/SPJC solver arc.
+* LEGITIMATE GREEN FLIPS this session: compare-target ×3 (re-cut),
+  runway_longitudinal_grade[SPLP] (B1 — first since 30i unmasked),
+  pavement_rests_on_source[SPLP] (Fix C killed a hidden 34k m²
+  phantom #34), cyxy_taxi_e_south_apron (B1 flex-path cap threading,
+  cm-scale lawful), vertical-curve XPASS SPJC/CYXY (genuine,
+  gate-off-verified).
+* MYTHS RETIRED: "HECA fails in suite, never standalone" = the test's
+  proximity_m 1.0 vs the 0.5 weld tolerance (B2; surface
+  byte-identical); "EB-109 EMAS doc" does not exist (gap audit);
+  suite-context cache leakage (B2 checked all persistent caches —
+  clean).
+* A7 CLOSED benign accounting (99.6% break nodes identical; growth =
+  denser vertices on pre-existing junction pockets).
+* NEW DOCS: docs/adjacent_ground_grade_law_plan.md (boundary-bridge
+  retirement; 3 decisions await Noah) + docs/grade_law_gap_audit.md
+  (OLS/GS-plane/PVI-spacing/RSA-fine/helipad top-5).
+* QUEUE (named, ordered): SPJC building↔apron steps · HECA service
+  wall · SPLP #66 pair · KCLT #763 clearance remnant · 30l CHECKPOINT
+  approvals (apron∩service clip; hole-aware conformance) · CYXY
+  solver arc (route_reach, edge budgets, apron #29) · adjacent-ground
+  law build (post Noah rulings) · gap-audit top-5 · Section C
+  cleanup (post in-sim soak).
+
 ## LANDED (part 32)
 1. runway-deseg → dev FAST-FORWARD (dev @ 8c9fdc3; dev was a strict
    ancestor — merge conflict-free by construction, as verified in

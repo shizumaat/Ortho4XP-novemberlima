@@ -72,6 +72,7 @@ __all__ = [
     "_clamp_junction_free_vertices",
     "_merge_sliver_junctions_into_neighbours",
     "_subdivide_violating_junctions",
+    "source_clip_partial_coverage_shapes",
 ]
 
 
@@ -1658,6 +1659,156 @@ def _drop_off_source_residue(
     except _GEOM_EXC:
         pass
     return len(to_drop)
+
+
+# The junction sliver floor (MIN_JUNCTION_AREA, documented in junction_rules
+# next to WIDEN_MAX_ABANDONED_PAVEMENT_M2): a clipped piece smaller than this
+# has no mesh-scale presence and is dropped, exactly as the residue passes
+# discard sub-floor apron / junction fragments.
+SOURCE_CLIP_MIN_PIECE_AREA_M2 = 50.0
+
+
+def source_clip_partial_coverage_shapes(
+        layout: "PavementLayout",
+        icao: str = "",
+        min_on_source_frac: float = 0.5,
+        ) -> int:
+    """Formation-time SOURCE CLIP for partial-coverage apron / junction shapes.
+
+    The global slice births every face 100 % on source
+    (``pipeline._SLICE_SOURCE_CLIP``), but DOWNSTREAM recuts — the apron
+    route-proximity cut, the ``_enforce_runway_1to1_sharing`` frontage
+    straightening — can leave an apron / junction whose polygon is mostly OFF
+    the real source pavement (apt.dat row-110 ∪ DSF ∪ runway).  KCLT junction
+    #278 is 8.3 k m² at 35 % on source (the near-runway band carved off a real
+    18R-end apron; the 65 % off-source remainder is RESA grass); #763 is a
+    383 m² frontage split piece at 32 %.
+
+    For each apron / junction shape whose on-source fraction <
+    ``min_on_source_frac`` (judged by ``verification.check_source_adjacency`` —
+    the SAME source union and on-source method the verify pass uses, so there
+    is ONE definition of "on source"), clip the polygon to the source union
+    (∪ runway) buffered by ``RUNWAY_REWRITE_CARVE_RUNWAY_HALO_M`` (the 1to1
+    carve's runway-frontage halo — a small margin so the shape's near-runway
+    contact strip survives).  The largest clipped piece replaces the shape's
+    polygon; other pieces ≥ ``SOURCE_CLIP_MIN_PIECE_AREA_M2`` become their own
+    shapes of the same role.
+
+    Never touches runway / runway_crossing / groundside / boundary / clearance
+    / service shapes (apron / junction only).  The clip only removes area from
+    the ORIGINAL polygon, and aprons / junctions are already cut away from the
+    runway upstream, so the runway-inclusive clip target can never introduce a
+    runway overlap — it only preserves frontage CONTACT.
+
+    ORDERING CONSTRAINT: this runs PRE-solve (before the per-surface elevation
+    assignment), immediately before ``_unify_airside_geometry``, so the clipped
+    edges are re-noded / welded / graded normally.  Apron / junction shapes
+    carry no solved ``node_altitudes`` at this point; a clip changes the vertex
+    count, so any (unexpected) pre-existing per-vertex list cannot be realigned
+    and is cleared — the solver reassigns it.
+
+    REMAINDER TRADEOFF: the clipped-away off-source remainder is off source BY
+    CONSTRUCTION (it failed the source test), so it is DROPPED rather than
+    handed to groundside DEM-follow — re-minting RESA grass as groundside
+    pavement would merely relocate the phantom onto a DEM-following surface,
+    and dropping it uncovers no real source (coverage-safe: the dual
+    ``check_source_coverage`` invariant only guards INTERIOR source gaps).
+
+    Gated by ``config.SOURCE_CLIP_PARTIAL_COVERAGE`` (O4_SOURCE_CLIP, default
+    ON); OFF is byte-identical (the pass returns 0 without touching a shape).
+    Returns the number of shapes clipped.
+    """
+    from .config import SOURCE_CLIP_PARTIAL_COVERAGE
+    if not SOURCE_CLIP_PARTIAL_COVERAGE:
+        return 0
+    src = getattr(layout, "source_pavement_union", None)
+    if src is None or src.is_empty:
+        return 0
+    rwy = getattr(layout, "runway_union", None)
+    src_union = src
+    if rwy is not None and not rwy.is_empty:
+        try:
+            src_union = src.union(rwy)
+        except _GEOM_EXC:
+            pass
+    from .junction_rules import (
+        RUNWAY_REWRITE_CARVE_RUNWAY_HALO_M, _polygonal_parts)
+    try:
+        clip_target = src_union.buffer(RUNWAY_REWRITE_CARVE_RUNWAY_HALO_M)
+    except _GEOM_EXC:
+        return 0
+    if clip_target is None or clip_target.is_empty:
+        return 0
+    # Reuse the verifier's on-source method EXACTLY (one definition of
+    # "on source"); filter its below-threshold list to apron / junction.
+    from .verification import check_source_adjacency
+    try:
+        candidates = check_source_adjacency(layout, min_on_source_frac)
+    except _GEOM_EXC:
+        return 0
+    idxs = [idx for (idx, _a, _f, _l) in candidates
+            if 0 <= idx < len(layout.shapes)
+            and layout.shapes[idx].role in (ROLE_APRON, ROLE_JUNCTION)]
+    if not idxs:
+        return 0
+    new_shapes: list[BuiltShape] = []
+    n_clipped = 0
+    for i in idxs:
+        s = layout.shapes[i]
+        poly = s.polygon
+        if poly is None or poly.is_empty:
+            continue
+        try:
+            clipped = poly.intersection(clip_target)
+        except _GEOM_EXC:
+            continue
+        clipped = _polygonal_parts(clipped)
+        if clipped is None or clipped.is_empty:
+            # No source under this shape at all — leave it to the near-zero
+            # branch of _drop_off_source_residue; never null a shape here.
+            continue
+        if clipped.geom_type == "Polygon":
+            raw_pieces = [clipped]
+        elif clipped.geom_type == "MultiPolygon":
+            raw_pieces = list(clipped.geoms)
+        else:
+            raw_pieces = []
+        pieces = sorted(
+            (p for p in raw_pieces
+             if p.geom_type == "Polygon" and not p.is_empty and p.is_valid
+             and p.area >= SOURCE_CLIP_MIN_PIECE_AREA_M2),
+            key=lambda p: p.area, reverse=True)
+        if not pieces:
+            # The whole on-source portion is below the sliver floor.  Do NOT
+            # drop the shape here — whole-shape phantom removal is
+            # ``_drop_off_source_residue``'s job, which HONOURS the
+            # route-proximity-cut exemption that protects a real-pavement
+            # parent from the KCLT #255 rests-on-source hole.  This pass only
+            # ever CLIPS a shape that has a genuine on-source piece to keep;
+            # it never nulls a shape (so gate-off equivalence holds trivially
+            # for every non-clipped shape).
+            continue
+        s.polygon = pieces[0]
+        s.node_altitudes = None          # solver reassigns (geometry changed)
+        for extra in pieces[1:]:
+            new_shapes.append(BuiltShape(
+                polygon=extra, role=s.role, ref=s.ref,
+                source_axis=s.source_axis, is_bridge=s.is_bridge,
+                from_route_proximity_cut=getattr(
+                    s, "from_route_proximity_cut", False)))
+        n_clipped += 1
+    if new_shapes:
+        layout.shapes.extend(new_shapes)
+    if n_clipped:
+        try:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: source-clipped {n_clipped} "
+                f"partial-coverage apron/junction shape(s) to the source "
+                f"pavement (< {min_on_source_frac*100:.0f}% on source; "
+                f"off-source remainder dropped).")
+        except _GEOM_EXC:
+            pass
+    return n_clipped
 
 
 def _decompose_airside_holed_shapes(

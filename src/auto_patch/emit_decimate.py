@@ -311,6 +311,108 @@ def _ring_keep_set(ring, alts, z_tol, forced=None):
     return keep
 
 
+def decimate_shape_group(shapes, z_tol: float) -> int:
+    """3D-collinear decimation over an ISOLATED group of shapes — the same
+    vote discipline as :func:`decimate_emit_nodes` (a vertex vanishes only
+    when EVERY ring in the group that contains it agrees), scoped to
+    ``shapes`` with one uniform ``z_tol``.
+
+    For late-emitted feature families that arrive AFTER the pipeline's
+    layout-wide decimation pass and keep a standoff gap from all earlier
+    geometry (so their vertices are shared only within the group): the
+    adjacent-ground graded strips (slice 3 round 2 — their 5 m-stationed
+    corridor rows are piecewise-linear and decimate heavily).  The group
+    caller owns the guarantee that no vertex is shared outside the group.
+
+    UNANIMITY BY FIXED POINT (round 2): abutting group shapes trace each
+    other's rings coordinate-exactly, so a vertex dropped from one ring
+    but kept by its twin diverges the two runs by millimetres — past the
+    final epsilon-weld's 0.01 m insert tolerance, minting zero-angle
+    wedges (HECA round-2: 36).  ``decimate_emit_nodes``' single
+    re-verification round can re-ADD a vertex per-ring asymmetrically, so
+    here the keep-set recursion iterates to a FIXED POINT: any vertex ANY
+    ring re-adds becomes forced for ALL rings and the vote repeats, until
+    no ring disagrees.  Convergence is guaranteed (the removable set
+    shrinks monotonically).  Mutates polygons + node_altitudes in place;
+    returns count removed."""
+    shapes = [s for s in shapes
+              if s.polygon is not None and not s.polygon.is_empty
+              and s.polygon.geom_type == "Polygon"]
+    if not shapes:
+        return 0
+    membership: dict = {}
+    for s in shapes:
+        try:
+            rings = [list(s.polygon.exterior.coords)[:-1]] + \
+                    [list(r.coords)[:-1] for r in s.polygon.interiors]
+        except _GEOM_EXC:
+            continue
+        for ring in rings:
+            for (x, y) in ring:
+                k = _key(x, y)
+                membership[k] = membership.get(k, 0) + 1
+    votes: dict = {}
+    prepared = []
+    for s in shapes:
+        try:
+            ring, alts, closed_alts = _ring_and_alts(s)
+        except _GEOM_EXC:
+            continue
+        if len(ring) < 5:
+            continue
+        keep = _ring_keep_set(ring, alts, z_tol)
+        prepared.append((s, ring, alts, closed_alts))
+        for idx, (x, y) in enumerate(ring):
+            if idx not in keep:
+                k = _key(x, y)
+                votes[k] = votes.get(k, 0) + 1
+    removable = {k for k, v in votes.items() if v == membership.get(k, -1)}
+    if not removable:
+        return 0
+    # Fixed point: re-verify every ring against the CURRENT removable set;
+    # any vertex a ring re-adds leaves the set for everyone, repeat.  At
+    # convergence every ring's recursion keeps EXACTLY the non-removable
+    # vertices, so the rebuild below is unanimous by construction.
+    for _ in range(len(prepared) + 1):
+        changed = False
+        for (s, ring, alts, closed_alts) in prepared:
+            forced = {i for i, (x, y) in enumerate(ring)
+                      if _key(x, y) not in removable}
+            keep = (_ring_keep_set(ring, alts, z_tol, forced=forced)
+                    | forced)
+            readded = {_key(*ring[i]) for i in keep} & removable
+            if readded:
+                removable -= readded
+                changed = True
+        if not changed:
+            break
+    if not removable:
+        return 0
+    removed = 0
+    for (s, ring, alts, closed_alts) in prepared:
+        n = len(ring)
+        # Final keep = everything not in the converged removable set.
+        keep = {i for i in range(n) if _key(*ring[i]) not in removable}
+        if len(keep) == n or len(keep) < 3:
+            continue
+        order = sorted(keep)
+        new_ring = [ring[i] for i in order]
+        new_alts = ([alts[i] for i in order] if alts is not None else None)
+        try:
+            new_poly = Polygon(new_ring, [list(r.coords)
+                                          for r in s.polygon.interiors])
+            if not new_poly.is_valid or new_poly.is_empty:
+                continue
+        except _GEOM_EXC:
+            continue
+        s.polygon = new_poly
+        if new_alts is not None:
+            s.node_altitudes = (new_alts + [new_alts[0]] if closed_alts
+                                else new_alts)
+        removed += n - len(keep)
+    return removed
+
+
 def decimate_emit_nodes(layout, icao: str = "") -> int:
     """Remove 3D-collinear ring vertices across the layout (see module doc).
     Mutates shape polygons + node_altitudes in place.  Returns count removed."""

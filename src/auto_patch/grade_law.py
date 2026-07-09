@@ -39,11 +39,19 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from .config import (
-    APRON_MAX_GRADE, BUILDING_FRONTAGE_MAX_GRADE, BUILDING_FULL_FRONTAGE,
+    ADJACENT_GROUND_LIP_MAX_DOWN_SLOPE, ADJACENT_GROUND_LIP_MIN_DOWN_SLOPE,
+    ADJACENT_GROUND_LIP_WIDTH_M, ADJACENT_GROUND_UNGRADED_STRIP_MAX_UP_SLOPE,
+    APRON_MAX_GRADE, APRON_SHOULDER_MAX_DOWN_SLOPE,
+    APRON_SHOULDER_MIN_DOWN_SLOPE, APRON_SHOULDER_WIDTH_M,
+    BUILDING_FRONTAGE_MAX_GRADE, BUILDING_FULL_FRONTAGE,
     BUILDING_FULL_FRONTAGE_AREA_M2,
-    BUILDING_REACH_CORRIDOR_M, JUNCTION_MESH_CONSTRAINTS,
-    RUNWAY_END_CLEARANCE_LENGTH_BY_CODE,
-    SERVICE_ROAD_MAX_GRADE, TAXI_MAX_GRADE, runway_code_number)
+    BUILDING_REACH_CORRIDOR_M, CLEARANCE_LATERAL_MAX_SLOPE,
+    CLEARANCE_MAX_REACH_M, JUNCTION_MESH_CONSTRAINTS,
+    RUNWAY_END_CLEARANCE_LENGTH_BY_CODE, RUNWAY_STRIP_BAND_MIN_DOWN_SLOPE,
+    RUNWAY_STRIP_BAND_MAX_DOWN_SLOPE_BY_CODE, RUNWAY_STRIP_HALF_WIDTH_BY_CODE,
+    SERVICE_ROAD_MAX_GRADE, TAXI_MAX_GRADE, TAXIWAY_STRIP_BAND_MAX_DOWN_SLOPE,
+    TAXIWAY_STRIP_BAND_MIN_DOWN_SLOPE, runway_code_number,
+    taxiway_strip_graded_half_width_for_letter)
 
 # ── Law constants (the adjustable knobs of the law) ──────────────────────────
 APRON_ROLE = "apron"
@@ -268,6 +276,161 @@ def runway_end_skirt_floor_profile(
         return max(0.0, drop)
 
     return [_depth(d) for d in distances_m]
+
+
+# ── Adjacent-ground LATERAL grade law (Fable 2026-07-08) ─────────────────────
+# The lateral generalization of the runway-END skirt: ground beside a paved
+# surface is a two-zone-plus-ungraded CORRIDOR off the pavement EDGE.  The
+# regulatory model, the four Noah rulings and the slice plan live in
+# docs/adjacent_ground_grade_law_plan.md; the rule VALUES live in config.py
+# (single source).  Only the zone MATH — accumulated so the corridor bounds are
+# CONTINUOUS functions of the distance d — lives here.
+#
+# Ruling 1 (ENFORCE FULLY): each graded zone is a mandatory-DOWN band with
+# DIRECTION, so a FLAT surface (offset 0) is OUTSIDE the corridor within zones
+# 1-2 (its ceiling is strictly below 0).  This is what lets the emitter regrade
+# flat surrounds to the lawful drainage slope, and it is the boundary-bridge
+# killer: zone-3's floor is UNBOUNDED down, so a cliff beyond the graded band
+# renders as DEM (never force-filled).
+
+# Role → strip FAMILY.  Runway ENDS are NOT a family here (the skirt law owns
+# them); "runway"/"runway_crossing" mean the LATERAL runway strip.
+_ADJACENT_RUNWAY_ROLES = frozenset({"runway", "runway_crossing"})
+_ADJACENT_APRON_ROLES = frozenset({"apron", "stand", "terminal"})
+_ADJACENT_SERVICE_ROLES = frozenset({"service_road", "service_junction"})
+_ADJACENT_TAXIWAY_ROLES = frozenset({
+    "taxiway", "primary_parallel", "secondary_parallel", "stub",
+    "cross_connector", "junction",
+})
+
+
+def _adjacent_strip_envelope(
+        graded_half_width_m: float, band_min_down: float,
+        band_max_down: float, reach_m: float,
+        distance_m: float) -> tuple[Optional[float], Optional[float]]:
+    """The shared runway/taxiway two-zone-plus-ungraded corridor, given the
+    family's graded WIDTH, its zone-2 min/max DOWN slopes and its outward reach.
+
+    Returns ``(floor_offset, ceiling_offset)`` in metres relative to the
+    pavement-edge elevation (positive = above the edge).  The bounds ACCUMULATE
+    across zone boundaries so they are continuous in ``distance_m``:
+
+      * Zone 1 (0 .. lip): mandatory-down lip 3-5 %.
+          ceiling = -lip_min_down · d ,  floor = -lip_max_down · d
+      * Zone 2 (lip .. W): mandatory-down graded band, continuing from the lip's
+        endpoint values (NOT restarted at 0):
+          ceiling = ceiling(lip) - band_min_down · (d - lip)
+          floor   = floor(lip)   - band_max_down · (d - lip)
+      * Zone 3 (W .. reach): ungraded strip — ceiling continues UP at ≤5 % from
+        the band's endpoint ceiling, floor = None (cliffs lawful).
+      * d ≥ reach: (None, None) — ungoverned (OLS territory / earthwork bound).
+    """
+    lip = ADJACENT_GROUND_LIP_WIDTH_M
+    lip_min = ADJACENT_GROUND_LIP_MIN_DOWN_SLOPE
+    lip_max = ADJACENT_GROUND_LIP_MAX_DOWN_SLOPE
+    if distance_m <= 0.0:
+        return (0.0, 0.0)                       # flush at the edge
+    if distance_m >= reach_m:
+        return (None, None)
+    if distance_m <= lip:                       # ZONE 1 — drainage lip
+        return (-lip_max * distance_m, -lip_min * distance_m)
+    lip_ceiling = -lip_min * lip
+    lip_floor = -lip_max * lip
+    if distance_m <= graded_half_width_m:       # ZONE 2 — graded band
+        ceiling = lip_ceiling - band_min_down * (distance_m - lip)
+        floor = lip_floor - band_max_down * (distance_m - lip)
+        return (floor, ceiling)
+    band_ceiling = lip_ceiling - band_min_down * (graded_half_width_m - lip)
+    up = ADJACENT_GROUND_UNGRADED_STRIP_MAX_UP_SLOPE
+    ceiling = band_ceiling + up * (distance_m - graded_half_width_m)  # ZONE 3
+    return (None, ceiling)
+
+
+def adjacent_ground_envelope(
+        role: str, code_number: Optional[int], code_letter: Optional[str],
+        distance_from_pavement_edge_m: float,
+) -> tuple[Optional[float], Optional[float]]:
+    """THE lawful corridor for ground adjacent to a paved surface, as a signed
+    ``(floor_offset_m, ceiling_offset_m)`` relative to the pavement-EDGE
+    elevation (positive = above the edge), at lateral distance
+    ``distance_from_pavement_edge_m`` (``d``) out from the edge.
+
+    A terrain point is lawful iff ``floor_offset ≤ (point − edge) ≤ ceiling``.
+    ``None`` for a bound means UNBOUNDED in that direction: a ``None`` ceiling
+    permits any rise (never cut here); a ``None`` floor permits any drop (never
+    filled — a cliff is lawful).
+
+    The corridor is the two-zone-plus-ungraded profile of
+    docs/adjacent_ground_grade_law_plan.md, ENFORCED FULLY (ruling 1) as
+    mandatory-DOWN graded bands, so within zones 1-2 the ceiling is strictly
+    below 0 and a FLAT surround (offset 0) is OUTSIDE the corridor — the emitter
+    regrades it to the lawful drainage slope.  All bounds ACCUMULATE across zone
+    boundaries, so both are CONTINUOUS functions of ``d`` (no step at the lip
+    edge or the band edge; the floor's finite→None transition at the band edge
+    only OPENS the corridor downward).  Pure, deterministic, no geometry deps.
+
+    Roles:
+      * runway / runway_crossing — LATERAL runway strip.  Keyed by ICAO code
+        NUMBER (ruling 2): graded WIDTH = ``RUNWAY_STRIP_HALF_WIDTH_BY_CODE``;
+        band down-cap 3 % (code 3/4 ≈ AAC C-E) / 5 % (code 1/2 ≈ AAC A/B),
+        min 1.5 % (FAA RSA minimum).  ``code_letter`` is ignored.
+      * taxiway family (taxiway, parallels, stub, cross_connector, junction) —
+        taxiway strip.  Keyed by ICAO code LETTER (ruling 2): graded WIDTH =
+        OMGWS table (``taxiway_strip_graded_half_width_for_letter``); band down
+        1.5-5 %.  ``code_number`` is ignored.
+      * apron family (apron, stand, terminal) — a 3 m FAA-recommended shoulder
+        (1-3 % down), then zone-3 semantics immediately (ceiling ≤5 % up, floor
+        free).  Both code args ignored.  The retaining-wall face for a deep drop
+        (``APRON_EDGE_WALL_MIN_DROP_M``) is the emitter's job (slice 3).
+      * service_road / service_junction — UNCHANGED 15 m cut-only flat shadow
+        (ceiling 0 out to ``CLEARANCE_MAX_REACH_M["service"]``, floor free): a
+        conservative design choice EXCEEDING the AASHTO 2-3 m low-speed clear
+        zone (documented in docs/STANDARDS.md), not a regulatory mandate.
+
+    Runway ENDS are explicitly OUT OF SCOPE: the longitudinal runway-end skirt
+    law (``runway_end_skirt_floor_profile`` / ``runway_end_governed_length_m``)
+    owns terrain beyond a runway end.  This function is the LATERAL law only.
+
+    Raises ``ValueError`` for an unrecognised role (a law must not silently pick
+    a corridor for a surface it does not model).
+    """
+    d = distance_from_pavement_edge_m
+    if role in _ADJACENT_RUNWAY_ROLES:
+        if code_number is None:
+            raise ValueError("runway adjacent-ground envelope needs code_number")
+        return _adjacent_strip_envelope(
+            RUNWAY_STRIP_HALF_WIDTH_BY_CODE[code_number],
+            RUNWAY_STRIP_BAND_MIN_DOWN_SLOPE,
+            RUNWAY_STRIP_BAND_MAX_DOWN_SLOPE_BY_CODE[code_number],
+            CLEARANCE_MAX_REACH_M["runway"], d)
+    if role in _ADJACENT_TAXIWAY_ROLES:
+        return _adjacent_strip_envelope(
+            taxiway_strip_graded_half_width_for_letter(code_letter),
+            TAXIWAY_STRIP_BAND_MIN_DOWN_SLOPE,
+            TAXIWAY_STRIP_BAND_MAX_DOWN_SLOPE,
+            CLEARANCE_MAX_REACH_M["taxiway"], d)
+    if role in _ADJACENT_APRON_ROLES:
+        # Aprons ride the maneuvering-network reach (taxiway); the only governed
+        # band is the 3 m shoulder, then zone-3 semantics immediately.
+        reach = CLEARANCE_MAX_REACH_M["taxiway"]
+        if d <= 0.0:
+            return (0.0, 0.0)
+        if d >= reach:
+            return (None, None)
+        if d <= APRON_SHOULDER_WIDTH_M:
+            return (-APRON_SHOULDER_MAX_DOWN_SLOPE * d,
+                    -APRON_SHOULDER_MIN_DOWN_SLOPE * d)
+        shoulder_ceiling = -APRON_SHOULDER_MIN_DOWN_SLOPE * APRON_SHOULDER_WIDTH_M
+        up = ADJACENT_GROUND_UNGRADED_STRIP_MAX_UP_SLOPE
+        return (None, shoulder_ceiling + up * (d - APRON_SHOULDER_WIDTH_M))
+    if role in _ADJACENT_SERVICE_ROLES:
+        # UNCHANGED cut-only flat shadow: cut anything above the edge within the
+        # 15 m band, never fill (floor free).  CLEARANCE_LATERAL_MAX_SLOPE == 0
+        # ⇒ the ceiling stays at the edge level across the whole band.
+        if d >= CLEARANCE_MAX_REACH_M["service"]:
+            return (None, None)
+        return (None, CLEARANCE_LATERAL_MAX_SLOPE * d)
+    raise ValueError(f"adjacent_ground_envelope: unmodelled role {role!r}")
 
 
 # ── Spine crown offset (user 2026-07-07, part 30) ────────────────────────────

@@ -16,6 +16,8 @@ construction.  This module never builds a second graph.
 """
 from __future__ import annotations
 
+import os as _os
+
 from auto_patch.layout import (
     ROLE_APRON, ROLE_BUILDING, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL, ROLE_SERVICE_JUNCTION,
@@ -23,6 +25,40 @@ from auto_patch.layout import (
 )
 
 _INF = float("inf")
+
+# ── Parallel-road station coupling (part 30m OPEN item (a), DEFAULT OFF) ──
+# The queued fix for the "two NON-touching parallel service roads seat a
+# metre-scale wall across the gap" defect (#576↔#584): widen the spine-station
+# merge past its 2 m sliver window (the O4_SVC_PROXIMITY_COUPLE analogue, which
+# misses a several-metre gap) so a near-parallel pair a few metres apart shares
+# ONE DEM seed + ONE reach-band intersection — a single-valued cross-section the
+# wall cannot be seeded on.  A TANGENT guard (|cos∠(tangent_a, tangent_b)| above
+# the threshold — antiparallel loop returns count, a crossing road ≈90° never
+# does) keeps it to genuine parallel pairs.
+#
+# SHIPPED OFF (measured 2026-07-08).  The documented #576↔#584 site no longer
+# exists at HEAD (intervening commits — the off-source SOURCE CLIP and adjacent-
+# ground work — reshaped HECA's service net; the equivalent HECA pair is now
+# 0.19 m, resolved).  Where this coupling actually FIRES (CYXY -10045↔-10195,
+# 6.7 m apart) the two roads differ by ~1.5 m for GENUINE terrain reasons
+# (non-overlapping reach bands — the SAME physics part-30m recorded for
+# #576↔#584: "each road on its OWN spine regime"); forcing a shared seed there
+# REGRESSED CYXY (worst service tear 22.2→23.2 %, facing step 1.523→1.587 m).
+# Proximity + parallelism alone cannot tell a "coincidental wall that should be
+# flat" from "two roads terrain genuinely holds apart" — they are identical
+# geometry — so no guard makes the coupling both effective and non-regressing.
+# Kept behind the gate (idiomatic default-off experiment) for a future revisit
+# that carries the missing signal (e.g. a shared groundside connection proving
+# the pair SHOULD be co-level).  ``O4_SVC_PARALLEL_STATION_MERGE=1`` enables it;
+# default (unset / 0) ⇒ byte-identical to the 2 m window.  Standalone tuning
+# knobs (not aerodrome standards; anchors.py owns them per the part-32 split).
+PARALLEL_SERVICE_STATION_MERGE = (
+    _os.environ.get("O4_SVC_PARALLEL_STATION_MERGE", "0") == "1")
+# Max XY gap between the two lines' stations to couple them (m).
+PARALLEL_SERVICE_STATION_MERGE_MAX_GAP_M = 7.0
+# Near-parallel guard: |cos(angle between the host-line tangents)| must be at
+# least this (cos 25° ≈ 0.906) — a crossing road (≈90°, cos≈0) never couples.
+PARALLEL_SERVICE_STATION_MERGE_MIN_ABS_COS = 0.906
 
 # The TAXI ROUTE (smoothness target, bounded by the reach band): taxi rects +
 # junctions.  A node shared by an apron AND a route shape is a route node.
@@ -441,6 +477,216 @@ def build_nobuilding_apron_seats(layout, bucket_to_idx, band, dem_fn):
     return seats
 
 
+# NEAR-MISS building-frontage recognition tolerance (2026-07-08).  A DSF
+# building-pad outline and the apt.dat apron edge it fronts can be offset by a
+# sub-metre source mismatch (SPJC building29 vs its SW apron: 0.68 m measured),
+# leaving a thin unpaved sliver that defeats EVERY exact-identity reconciler
+# (pre-solve weld, stitch_pavement_to_terminals, the 2-dp frontage-key match) —
+# all of which correctly key off ``SHARED_VERTEX_TOL_M`` (0.5 m, the ONE
+# canonical identity; never widened per the solver+validator single-registry
+# ruling).  This constant is a VALUE-side recognition radius only: greater than
+# observed DSF-vs-apt.dat source offsets (~0.68 m measured at SPJC), well below
+# any real landscaped setback, and it moves no geometry and mints no identity.
+# NOTE: rule-value constants belong in ``config.py`` (the standards single
+# source); it lives here only because config.py is owned by a concurrent change
+# this round — migrate it to config.py in a follow-up.
+BUILDING_FRONTAGE_NEAR_MISS_M = 1.0
+
+
+def near_miss_building_frontage_floors(layout, bucket_to_idx, band,
+                                       building_seats):
+    """``{apron_node_idx: floor_level}`` for soft-pavement edges that face a
+    building pad across a NEAR-MISS gap — so the pavement grades UP to the flat
+    pad instead of cliffing ~0.5–1 m below it across a thin unpaved sliver.
+
+    THE DEFECT (SPJC pavement_grade step gate, 2026-07-08): building29's flat
+    pad (seat 25.56) runs parallel to a large apron 0.68 m away at ~24.9 — a
+    0.66 m visible step.  The 0.68 m source offset (DSF pad outline vs apt.dat
+    apron edge) is just over ``SHARED_VERTEX_TOL_M`` (0.5 m), so no vertices
+    are shared: the pre-solve weld and ``stitch_pavement_to_terminals`` never
+    fire, the pad's frontage-seat recognition (exact 2-dp key match in
+    ``build_building_seats``) never sees the edge, and
+    ``build_nobuilding_apron_seats`` SKIPS the apron ("a building anchors the
+    level" — within 1 m of a pad) even though the pad anchors nothing there.
+    The apron falls through every regime and solves to its own low DEM.
+
+    THE FIX is raise-biased and value-side only, and it is per-EDGE: the
+    solve-time ring is SPARSE along a long frontage (SPJC's apron faces the
+    90 m pad with one 49 m straight edge whose endpoints sit 1.5 m and 10 m
+    away — no ring vertex lies inside any sub-metre radius; the near-pad OSM
+    vertices are post-solve planarize/T-weld inserts that INTERPOLATE along
+    that edge).  So the value-controlling nodes are the near-miss edge's
+    ENDPOINTS.  For every soft-pavement ring edge whose segment passes within
+    ``BUILDING_FRONTAGE_NEAR_MISS_M`` of a pad and whose endpoints are BOTH
+    canonically unshared with the pad (a true near-miss run — an edge with a
+    pad-shared endpoint is already reconciled by weld/stitch/seat identity
+    and legitimately grades away from the seat), floor BOTH endpoints at
+    ``seat − APRON_MAX_GRADE·d`` with ``d`` each endpoint's own distance to
+    the pad (the building↔apron law: the level the pavement must reach to
+    grade ≤cap up to the flat pad; the floor decays at the apron-law rate, so
+    a far endpoint gets a proportionally lower floor and the interpolated
+    near-pad run lands at ~seat), clamped to the endpoint's reach-band
+    ceiling so it stays runway-reachable.  ORDERING: the pad seat is read from
+    ``building_seats`` AS ALREADY CHOSEN by ``build_building_seats`` (seats +
+    POCS coupling run first; ``solve.py`` calls this afterwards, before the
+    no-building apron seats merge) — the near-miss edge must NEVER feed the
+    pad's ``_frontage_box`` ceiling, so the pad seat cannot be pulled DOWN by
+    the lower apron (which would just move the step to the pad's other,
+    genuinely-shared frontage).  SOFT floors through the one ``spine_floor``
+    channel (never hard seats): one raise-biased regime the solver resolves
+    with its neighbour cap slabs — per-vertex hard anchors from a second
+    regime are the documented unresolvable-tear pattern.  Feasibility is not
+    at risk: floors are ≤ seat by construction (cap·d ≥ 0), decay at the
+    apron-law rate, and are band-ceiling-clamped.
+
+    Gate ``O4_BUILDING_FRONTAGE_NEAR_MISS=0`` disables (no floors,
+    byte-identical)."""
+    from auto_patch.config import APRON_MAX_GRADE
+    floors: dict = {}
+    for contact in _near_miss_frontage_contacts(layout, bucket_to_idx,
+                                                building_seats):
+        (i, _pad_node, d, seat, x, y) = contact
+        floor_level = seat - APRON_MAX_GRADE * d    # ≤ seat by construction
+        bnd = band(x, y)
+        if bnd is not None:                         # stay runway-reachable
+            floor_level = min(floor_level, bnd[1])
+        if floor_level > floors.get(i, -_INF):
+            floors[i] = float(floor_level)
+    return floors
+
+
+def near_miss_building_frontage_edges(layout, bucket_to_idx, building_seats):
+    """``[(apron_node_idx, pad_node_idx, budget_m)]`` — the near-miss frontage
+    relationship as LAW EDGES for the joint feasibility projections.
+
+    The floors above shape phases A/B, but every ``feasibility_project`` pass
+    (cap edges only, floors unknown) resolves by MINIMUM DISPLACEMENT — one
+    floor-lifted endpoint against several low free neighbours loses, and the
+    lift is projected away before writeback (measured at SPJC: phase B honours
+    the floor at 25.30, the first projection pulls it to 25.05, the final
+    yield GS lands back at 24.84).  The durable expression of "feature-weld
+    needs VALUE AGREEMENT" is therefore an EDGE in the projections' own edge
+    set: ``|z(apron_endpoint) − z(pad_node)| ≤ APRON_MAX_GRADE·d`` with ``d``
+    the endpoint's distance to the pad polygon (the building↔apron law across
+    the sliver).  The pad node is the pad's nearest ring node — pads are hard
+    through phases A/B and MOVABLE FLAT GROUPS in the final yield GS, so the
+    joint projection settles pad level and apron edge together (min
+    displacement, pad stays flat) instead of un-doing the floor.
+
+    Same recognition and gate as :func:`near_miss_building_frontage_floors`
+    (``O4_BUILDING_FRONTAGE_NEAR_MISS=0`` → no edges, byte-identical)."""
+    from auto_patch.config import APRON_MAX_GRADE
+    edges: list = []
+    for contact in _near_miss_frontage_contacts(layout, bucket_to_idx,
+                                                building_seats,
+                                                log_firings=True):
+        (i, pad_node, d, _seat, _x, _y) = contact
+        if pad_node is None:
+            continue
+        edges.append((i, pad_node, float(APRON_MAX_GRADE * d)))
+    return edges
+
+
+def _near_miss_frontage_contacts(layout, bucket_to_idx, building_seats,
+                                 log_firings=False):
+    """The shared NEAR-MISS recognition (see the two consumers above).
+
+    Yields one contact per (soft-pavement near-miss edge endpoint, pad):
+    ``(endpoint_node_idx, nearest_pad_node_idx, distance_to_pad_m,
+    pad_seat_level, endpoint_x, endpoint_y)``.  ``log_firings`` prints the
+    per-pad firing line (the EDGES consumer passes True — it runs once per
+    solve, so each recognized pad↔pavement pair logs once)."""
+    import os as _os
+    if _os.environ.get("O4_BUILDING_FRONTAGE_NEAR_MISS", "1") != "1":
+        return
+    from shapely.geometry import LineString, Point
+    cps = layout.canonical_points
+    near_miss_m = BUILDING_FRONTAGE_NEAR_MISS_M
+
+    # Building pads with a CHOSEN seat (post-coupling), with their canonical
+    # ring-node index sets for the shared-vertex (already-reconciled) test.
+    pads: list = []       # (shape, pad_node_idx_set, seat_level, ring_nodes)
+    for b in layout.shapes:
+        if (b.role != ROLE_BUILDING or b.polygon is None
+                or b.polygon.is_empty):
+            continue
+        ring = _open_ring(list(b.polygon.exterior.coords))
+        ring_nodes = [((x, y), bucket_to_idx.get(
+            cps.get_or_add(float(x), float(y)))) for (x, y) in ring]
+        idxs = {i for (_pt, i) in ring_nodes if i is not None}
+        seat = next((building_seats[i] for i in idxs
+                     if building_seats.get(i) is not None), None)
+        if seat is not None:
+            pads.append((b, idxs, float(seat), ring_nodes))
+    if not pads:
+        return
+
+    # The frontage-bearing soft-pavement roles (the same set
+    # ``build_building_seats``' frontage recognition keys on).
+    soft_roles = (ROLE_APRON, ROLE_JUNCTION, ROLE_SERVICE_JUNCTION)
+    for s in layout.shapes:
+        if (s.role not in soft_roles or s.polygon is None
+                or s.polygon.is_empty):
+            continue
+        ring = None
+        ring_idx = None
+        for (pad, pad_idx_set, seat, pad_ring_nodes) in pads:
+            if pad.polygon.distance(s.polygon) > near_miss_m:
+                continue
+            if ring is None:
+                ring = _open_ring(list(s.polygon.exterior.coords))
+                ring_idx = [bucket_to_idx.get(
+                    cps.get_or_add(float(x), float(y))) for (x, y) in ring]
+            fired: list = []
+            emitted: set = set()
+            ring_length = len(ring)
+            for edge_start in range(ring_length):
+                edge_end = (edge_start + 1) % ring_length
+                # A near-miss FRONTAGE edge: passes within the radius, with
+                # BOTH endpoints canonically unshared with the pad.  A
+                # pad-shared endpoint means identity already reconciles that
+                # corner (weld / stitch / seat anchor) and the edge
+                # legitimately grades away from the seat — not a near miss.
+                if (ring_idx[edge_start] in pad_idx_set
+                        or ring_idx[edge_end] in pad_idx_set):
+                    continue
+                segment = LineString([ring[edge_start], ring[edge_end]])
+                if segment.distance(pad.polygon) > near_miss_m:
+                    continue
+                for endpoint in (edge_start, edge_end):
+                    i = ring_idx[endpoint]
+                    if (i is None or i in building_seats
+                            or (i, id(pad)) in emitted):
+                        continue    # unregistered / hard-anchored / done
+                    emitted.add((i, id(pad)))
+                    x, y = ring[endpoint]
+                    point = Point(x, y)
+                    d = pad.polygon.distance(point)
+                    pad_node = min(
+                        (pn for pn in pad_ring_nodes if pn[1] is not None),
+                        key=lambda pn: ((pn[0][0] - x) ** 2
+                                        + (pn[0][1] - y) ** 2),
+                        default=(None, None))[1]
+                    if _os.environ.get("O4_NEAR_MISS_DEBUG") == "1":
+                        print(f"    [near-miss dbg] node {i} ({x:.1f},{y:.1f})"
+                              f" d={d:.2f} seat={seat:.3f}"
+                              f" pad_node={pad_node}")
+                    fired.append(d)
+                    yield (i, pad_node, d, seat, x, y)
+            if fired and log_firings:
+                try:
+                    import O4_UI_Utils as _UI
+                    _UI.vprint(
+                        1, f"  [near-miss frontage] pad "
+                        f"{pad.ref or '?'} seat {seat:.2f} <-> "
+                        f"{s.role} ({s.polygon.area:.0f} m2) gap "
+                        f"{pad.polygon.distance(s.polygon):.2f} m: "
+                        f"{len(fired)} edge endpoint(s), d "
+                        f"{min(fired):.2f}..{max(fired):.2f} m")
+                except Exception:               # pragma: no cover
+                    pass
+
+
 def build_apron_contact_floors(layout, bucket_to_idx, band, dem_fn, building_seats):
     """``{feeder_contact_node_idx: floor_level}`` for taxiways/junctions that meet a
     BUILDING-ANCHORED apron's edge — so the feeder SPINE grades UP to the apron
@@ -464,10 +710,16 @@ def build_apron_contact_floors(layout, bucket_to_idx, band, dem_fn, building_sea
     runway-reachable; never below the band floor).  A FLOOR (not a hard seat) so the
     feeder spine still grades smoothly up from its runway anchor and the apron body
     flexes — the taxi yields UP, the apron keeps its cap.  Gate
-    ``O4_APRON_CONTACT_FLOOR=0`` disables (no floors, byte-identical)."""
+    ``O4_APRON_CONTACT_FLOOR=0`` disables (no floors, byte-identical).
+
+    Also carries the NEAR-MISS building-frontage floors
+    (:func:`near_miss_building_frontage_floors`, its own gate) — the same soft
+    ``spine_floor`` channel, merged max-wise like every floor."""
     import os as _os
+    near_miss_floors = near_miss_building_frontage_floors(
+        layout, bucket_to_idx, band, building_seats)
     if _os.environ.get("O4_APRON_CONTACT_FLOOR", "1") != "1":
-        return {}
+        return near_miss_floors
     from shapely.geometry import Point
     from auto_patch.layout import ROLE_APRON, ROLE_BUILDING, ROLE_JUNCTION
     from auto_patch.junction_rules import SLOPING_RECT_ROLES
@@ -490,7 +742,7 @@ def build_apron_contact_floors(layout, bucket_to_idx, band, dem_fn, building_sea
         if lv is not None:
             bseats.append((b.polygon, float(lv)))
     if not bseats:
-        return {}
+        return near_miss_floors
 
     route_roles = set(SLOPING_RECT_ROLES) | {ROLE_JUNCTION}
     routes = [t for t in layout.shapes
@@ -498,7 +750,7 @@ def build_apron_contact_floors(layout, bucket_to_idx, band, dem_fn, building_sea
               and not t.polygon.is_empty
               and not str(t.ref or "").upper().startswith("SVC")]
 
-    floors: dict = {}
+    floors: dict = dict(near_miss_floors)
     for s in layout.shapes:
         if (s.role != ROLE_APRON or s.polygon is None or s.polygon.is_empty):
             continue
@@ -1279,6 +1531,63 @@ def apply_groundside_reach(layout, bucket_to_idx, elev, cap):
     return n, hard
 
 
+def _line_unit_tangent(line, s):
+    """Unit tangent (dx, dy) of a shapely ``LineString`` at arclength ``s``,
+    from a symmetric ±(¼-length, capped 1 m) difference; ``None`` for a
+    degenerate line.  Used by the parallel-road station merge's tangent guard."""
+    import math
+    length = line.length
+    if length <= 1e-6:
+        return None
+    eps = min(1.0, length * 0.25)
+    a = line.interpolate(max(0.0, s - eps))
+    b = line.interpolate(min(length, s + eps))
+    dx, dy = b.x - a.x, b.y - a.y
+    norm = math.hypot(dx, dy)
+    return (dx / norm, dy / norm) if norm > 1e-9 else None
+
+
+def _parallel_station_merge_pairs(st_xy, station_line, tangent_at,
+                                  max_gap, min_abs_cos):
+    """Station-id pairs ``[(a, b), …]`` to couple for the WIDE parallel-road
+    station merge (part 30m follow-up, candidate (a)).
+
+    A pair qualifies iff the two stations are on DIFFERENT host lines, their XY
+    gap is ``<= max_gap``, and their host-line tangents are NEAR-PARALLEL
+    (``|cos∠(tangent_a, tangent_b)| >= min_abs_cos``).  The absolute cosine
+    admits an antiparallel loop-return leg (|cos|≈1) while a distinct crossing
+    road (≈90°, |cos|≈0) never qualifies — the guard that keeps the coupling to
+    genuine parallel pairs.  Pure: no elevation, no I/O — unit-testable."""
+    import math
+    pairs = []
+    grid: dict = {}
+    for sid, (x, y) in st_xy.items():
+        grid.setdefault((int(x // max_gap), int(y // max_gap)), []).append(sid)
+    for (cx, cy), cell in grid.items():
+        neigh = []
+        for ox in (-1, 0, 1):
+            for oy in (-1, 0, 1):
+                neigh.extend(grid.get((cx + ox, cy + oy), ()))
+        for a in cell:
+            ax, ay = st_xy[a]
+            ta = tangent_at.get(a)
+            if ta is None:
+                continue
+            for b in neigh:
+                if b <= a or station_line[b] == station_line[a]:
+                    continue
+                bx, by = st_xy[b]
+                if math.hypot(ax - bx, ay - by) > max_gap:
+                    continue
+                tb = tangent_at.get(b)
+                if tb is None:
+                    continue
+                if abs(ta[0] * tb[0] + ta[1] * tb[1]) < min_abs_cos:
+                    continue                # crossing / divergent → distinct
+                pairs.append((a, b))
+    return pairs
+
+
 def _svc_spine_station_seeds(layout, svc_nodes, node_pos, anchors,
                              dem_elev, cap, node_ceil, node_floor,
                              node_ceil_dist, node_floor_dist,
@@ -1457,6 +1766,32 @@ def _svc_spine_station_seeds(layout, svc_nodes, node_pos, anchors,
         ra, rb = _find(si), _find(sj)
         if ra != rb:
             parent[max(ra, rb)] = min(ra, rb)
+
+    # WIDE PARALLEL-ROAD STATION MERGE (part 30m follow-up, candidate (a)):
+    # the 2 m XY window and the node proximity couple (both ~2 m) MISS a
+    # several-metre rendered gap, so two NON-touching but near-parallel service
+    # ways a few metres apart still seed from SEPARATE spine regimes and seat a
+    # metre-scale wall across the gap (HECA -10494 service_road ↔ -10108
+    # service_junction, ~6.7 m gap: per-vertex 0.845 m).  Couple their stations
+    # out to ``PARALLEL_SERVICE_STATION_MERGE_MAX_GAP_M`` when the two host
+    # lines run NEAR-PARALLEL at those stations — a TANGENT guard so a distinct
+    # crossing road (≈90°) never couples, only a genuine parallel pair (a loop
+    # road's return leg counts: antiparallel, |cos|≈1).  The merge shares one
+    # DEM seed + one band INTERSECTION across the cross-section, so the wall is
+    # single-valued (unseedable), not merely reduced.  Gate off ⇒ untouched.
+    if PARALLEL_SERVICE_STATION_MERGE and len(stations) > 1:
+        tangent_at = {
+            sid: _line_unit_tangent(lines[st["line"]], st["s"])
+            for sid, st in enumerate(stations)}
+        station_line = {sid: st["line"] for sid, st in enumerate(stations)}
+        for (a, b) in _parallel_station_merge_pairs(
+                st_xy, station_line, tangent_at,
+                PARALLEL_SERVICE_STATION_MERGE_MAX_GAP_M,
+                PARALLEL_SERVICE_STATION_MERGE_MIN_ABS_COS):
+            ra, rb = _find(a), _find(b)
+            if ra != rb:
+                parent[max(ra, rb)] = min(ra, rb)
+
     _merged = 0
     for sid in range(len(stations)):
         r = _find(sid)

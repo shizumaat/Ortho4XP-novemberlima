@@ -313,7 +313,14 @@ def _build_write_verify_one(task: dict) -> dict:
     verify_err = None
     try:
         from .verification import verify_and_log
-        verify_and_log(layout, icao, debug_log_path=task["verify_log_path"])
+        # The adjacent-ground law check (gate-guarded inside) reads the SAME
+        # smoothed tile DEM + tile coordinates the build itself used, so the
+        # production counter is live and in lockstep with the emitter
+        # (source_runways stays None — the check derives runway code numbers
+        # from the layout's own runway shapes).
+        verify_and_log(layout, icao, debug_log_path=task["verify_log_path"],
+                       dem=_WORKER_DEM, tile_lat=task["tile_lat"],
+                       tile_lon=task["tile_lon"])
     except Exception as _ve:
         verify_err = str(_ve)
     return {"icao": icao, "ok": True, "summary": summary, "build_s": build_s,

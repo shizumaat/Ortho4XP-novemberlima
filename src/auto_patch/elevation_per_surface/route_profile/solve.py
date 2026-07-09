@@ -637,6 +637,19 @@ def solve_route_profile(layout, icao: str,
         u_edges = [(a, b, cap.at(_GG._dist(G.pos.get(a), G.pos.get(b)), 0.0))
                    for (a, b, cap, _sp) in G.edges
                    if a in G.pos and b in G.pos]
+        # NEAR-MISS BUILDING-FRONTAGE LAW EDGES (2026-07-08): pad ↔ apron
+        # near-miss edge endpoints, budget = APRON_MAX_GRADE·d — the value-
+        # agreement law across a sub-metre unpaved source-offset sliver (SPJC
+        # building29).  The phase-A/B floors alone don't survive the
+        # projections (min-displacement POCS knows caps, not floors, and
+        # projects the lift away); as u_edges members these pairs are
+        # enforced by every projection INCLUDING the movable-pad final yield
+        # GS, which settles pad level and apron edge JOINTLY (pad stays a
+        # rigid flat group).  Gate O4_BUILDING_FRONTAGE_NEAR_MISS=0 → no
+        # edges, byte-identical.  See anchors.near_miss_building_frontage_edges.
+        from .anchors import near_miss_building_frontage_edges
+        u_edges.extend(near_miss_building_frontage_edges(
+            layout, bucket_to_idx, building_seats))
         rem, bh = feasibility_project(elev, [{"edges": u_edges}], hard)
         # FINAL re-stamp: continue each end-cap as a planar extension of its
         # parent rect's FINAL plane (rect ends may have flexed in feasibility),
