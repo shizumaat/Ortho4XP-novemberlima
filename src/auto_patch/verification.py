@@ -993,6 +993,311 @@ def check_runway_end_skirt(layout, dem, tile_lat, tile_lon,
     return out
 
 
+def check_adjacent_ground(layout, dem, tile_lat, tile_lon,
+                          source_runways=None,
+                          tolerance_m: float = 1.5,
+                          step_m: float = 5.0):
+    """Invariant (adjacent-ground LATERAL grade law): the RENDERED surface
+    beside every terrain-facing airside pavement edge must stay inside the
+    lawful corridor ``grade_law.adjacent_ground_envelope`` — the LATERAL
+    generalization of the runway-end skirt reader, in lockstep with the
+    ``adjacent_ground`` emitter (both consume the ONE law function).
+
+    Marches perpendicular transects outward from every terrain-facing
+    airside edge (runway / taxiway family / apron — the SAME scope, edge
+    selection, END-edge skip and terrain-facing probe the emitter uses),
+    and at each outward distance ``d`` reads the corridor
+    ``(floor_offset, ceiling_offset)`` relative to the local pavement-edge
+    altitude.  A station's rendered surface is:
+
+      * EXEMPT when it is covered by the emitter's own static clip — any
+        shape (INCLUDING the emitted ``graded_strip`` bands, so a lawfully
+        graded column is exempt) buffered by the pavement gap — or lies
+        outside the airport boundary.  This is byte-for-byte the emitter's
+        clip (``adjacent_ground`` builds bands by differencing the same
+        ``static_union.buffer(_PAVEMENT_GAP_M)`` and intersecting the
+        boundary), so a covered / clamped column is never flagged.
+      * otherwise OPEN GROUND rendered by the smoothed DEM.  It violates
+        the law when the DEM sits BELOW a finite floor (zones 1-2 — a fill
+        band was owed but not emitted; zone-3's ``None`` floor makes a
+        cliff LAWFUL, never flagged — the boundary-bridge killer) or ABOVE
+        a finite ceiling (a cut band was owed but not emitted) by more
+        than ``tolerance_m``.
+
+    ``tolerance_m`` (1.5 m) sits ABOVE the emitter's 1 m fill/cut trigger
+    (``CLEARANCE_OBSTRUCTION_THRESHOLD_M``) so terrain the emitter
+    deliberately left ungraded (deviation ≤ 1 m) is never flagged, plus
+    emit rounding (0.1 m) and DEM interpolation.  ``step_m`` follows the
+    emitter's / skirt's 5 m station convention.
+
+    Pure reporter (verification-architecture ruling): returns
+    ``[("should_fill"|"should_cut", "<ref>", metres_outside_corridor,
+    tolerance_m, "lat,lon"), …]`` worst-first, ONE worst station per shape
+    per kind; empty when ``dem`` is None or there is no airside pavement.
+    With the ``O4_ADJACENT_GROUND_LAW`` gate OFF (no bands emitted) this
+    reports the columns the law WOULD govern — the pre-flip baseline, like
+    the skirt reader's off-gate behaviour.
+    """
+    import math
+    from shapely.geometry import box, LineString, Point
+    from shapely.prepared import prep
+    from shapely.strtree import STRtree
+    from . import clearance as CL
+    from .config import CLEARANCE_MAX_REACH_M, runway_code_number
+    from .grade_law import (
+        adjacent_ground_envelope, _ADJACENT_RUNWAY_ROLES,
+        _ADJACENT_TAXIWAY_ROLES)
+    from .layout import R_EARTH, taxi_shape_code_letter
+    from .pavement.runways import _sample_runway_segment_elev
+    from .elevation import _sample_dem
+
+    if dem is None:
+        return []
+    lat0, lon0 = layout.anchor
+    cos0 = math.cos(math.radians(lat0))
+    _deg = math.degrees
+    _rad = math.radians
+
+    def _ll_to_m(lat, lon):
+        return (_rad(lon - lon0) * R_EARTH * cos0,
+                _rad(lat - lat0) * R_EARTH)
+
+    def _sample(x, y):
+        try:
+            lat = lat0 + _deg(y / R_EARTH)
+            lon = lon0 + _deg(x / (R_EARTH * cos0))
+            return _sample_dem(dem, tile_lat, tile_lon, lat, lon)
+        except (ValueError, ArithmeticError):
+            return None
+
+    # Scope = the SAME airside pavement roles the emitter marches
+    # (``clearance._AIRSIDE_PAVEMENT_ROLES`` IS the emitter's in_scope set:
+    # runway/runway_crossing + taxiway family + apron).
+    scoped = [s for s in layout.shapes
+              if s.role in CL._AIRSIDE_PAVEMENT_ROLES
+              and s.polygon is not None and not s.polygon.is_empty
+              and s.polygon.geom_type == "Polygon"]
+    if not scoped:
+        return []
+
+    # The emitter's clip mirrored EXACTLY but indexed for point queries: a
+    # station is exempt when it sits within ``_PAVEMENT_GAP_M`` of ANY
+    # shape (== inside the emitter's ``static_union.buffer(gap)`` clip,
+    # incl. an emitted band) or outside the boundary.  An STRtree over the
+    # INDIVIDUAL polygons + a per-candidate distance test is ~orders faster
+    # than ``.covers`` on the single buffered union at a plateau airport
+    # where nearly every marched point is out-of-corridor.
+    static_geoms = [s.polygon for s in layout.shapes
+                    if s.polygon is not None and not s.polygon.is_empty]
+    if not static_geoms:
+        return []
+    try:
+        tree = STRtree(static_geoms)
+    except CL._GEOM_EXC:
+        return []
+    gap = CL._PAVEMENT_GAP_M
+
+    def _covered(px, py):
+        """True when ``(px, py)`` is within the pavement gap of any shape —
+        the emitter's static clip (``static_union.buffer(gap)``).  Queried
+        against a small box around the point (gap-inflated) so a shape whose
+        bbox does not literally contain the point but lies within the gap is
+        still a candidate."""
+        p = Point(px, py)
+        try:
+            cand = tree.query(box(px - gap, py - gap, px + gap, py + gap))
+        except CL._GEOM_EXC:
+            return False
+        for gi in cand:
+            if static_geoms[gi].distance(p) <= gap:
+                return True
+        return False
+
+    def _inside_shape(px, py):
+        """True when ``(px, py)`` lies inside any shape — the emitter's
+        terrain-facing probe (``prep_static.contains``)."""
+        p = Point(px, py)
+        try:
+            cand = tree.query(p)
+        except CL._GEOM_EXC:
+            return False
+        for gi in cand:
+            if static_geoms[gi].covers(p):
+                return True
+        return False
+
+    boundary = layout.airport_boundary
+    prep_boundary = None
+    if boundary is not None and not boundary.is_empty:
+        try:
+            prep_boundary = prep(boundary)
+        except CL._GEOM_EXC:
+            prep_boundary = None
+
+    # Runway axes for code-number keying + END-edge skipping, IDENTICAL to
+    # the emitter: from ``source_runways`` when available, else the runway
+    # shapes' own long extent as the standalone fallback.
+    rw_axes = []
+    if source_runways:
+        for r in source_runways:
+            try:
+                rax, ray = _ll_to_m(r.lat_a, r.lon_a)
+                rbx, rby = _ll_to_m(r.lat_b, r.lon_b)
+            except CL._GEOM_EXC:
+                continue
+            rlen = math.hypot(rbx - rax, rby - ray)
+            if rlen < 1.0:
+                continue
+            rw_axes.append((LineString([(rax, ray), (rbx, rby)]),
+                            ((rbx - rax) / rlen, (rby - ray) / rlen), rlen))
+
+    def _long_edge_unit(poly):
+        try:
+            xs = list(poly.minimum_rotated_rectangle.exterior.coords)
+        except CL._GEOM_EXC:
+            return None
+        best = None
+        for i in range(len(xs) - 1):
+            dx = xs[i + 1][0] - xs[i][0]
+            dy = xs[i + 1][1] - xs[i][1]
+            length = math.hypot(dx, dy)
+            if length > 0.0 and (best is None or length > best[0]):
+                best = (length, dx / length, dy / length)
+        return None if best is None else (best[1], best[2])
+
+    def _params(s):
+        """(env_role, code_number, code_letter, reach, axis) for one shape;
+        mirrors ``adjacent_ground._family_params``."""
+        role = s.role
+        if role in _ADJACENT_RUNWAY_ROLES:
+            code_number = None
+            axis = None
+            if rw_axes:
+                try:
+                    cen = s.polygon.centroid
+                    ax = min(rw_axes, key=lambda a: a[0].distance(cen))
+                    code_number = runway_code_number(ax[2])
+                    axis = ax[1]
+                except (CL._GEOM_EXC + (ValueError,)):
+                    code_number = None
+            if code_number is None:
+                info = CL._rect_long_short_edges(CL._open_coords(s.polygon))
+                code_number = runway_code_number(info[0] if info else 0.0)
+                axis = _long_edge_unit(s.polygon)
+            return (role, code_number, None,
+                    CLEARANCE_MAX_REACH_M["runway"], axis)
+        if role in _ADJACENT_TAXIWAY_ROLES:
+            return (role, None, taxi_shape_code_letter(layout, s),
+                    CLEARANCE_MAX_REACH_M["taxiway"], None)
+        # apron family
+        return (role, None, None, CLEARANCE_MAX_REACH_M["taxiway"], None)
+
+    out = []
+    for s in scoped:
+        env_role, code_number, code_letter, reach, axis = _params(s)
+        try:
+            coords = list(s.polygon.exterior.coords)
+            ccw = bool(s.polygon.exterior.is_ccw)
+        except CL._GEOM_EXC:
+            continue
+        if len(coords) < 4:
+            continue
+        na = s.node_altitudes
+        if na:
+            nm = min(len(na), len(coords))
+            ring_alts = [None if na[i] is None else float(na[i])
+                         for i in range(nm)]
+            ring_alts += [None] * (len(coords) - nm)
+        elif s.altitude is not None:
+            ring_alts = [float(s.altitude)] * len(coords)
+        else:
+            ring_alts = [_sample_runway_segment_elev(s, x, y)
+                         for x, y in coords]
+
+        n_out = max(1, int(math.ceil(reach / step_m)))
+        worst = {}                     # kind -> (magnitude, x, y)
+        for i in range(len(coords) - 1):
+            eax, eay = coords[i]
+            ebx, eby = coords[i + 1]
+            u = CL._unit(ebx - eax, eby - eay)
+            if u is None:
+                continue
+            outn = (u[1], -u[0]) if ccw else (-u[1], u[0])
+            a0 = ring_alts[i]
+            a1 = ring_alts[i + 1]
+            if a0 is None or a1 is None:
+                continue
+            # Runway END edges: the runway-end skirt law owns terrain
+            # beyond an end (its own governed length + lawful beyond-drop).
+            if (axis is not None
+                    and abs(outn[0] * axis[0] + outn[1] * axis[1])
+                    > CL._RING_END_NORMAL_DOT):
+                continue
+            seglen = math.hypot(ebx - eax, eby - eay)
+            nseg = max(1, int(math.ceil(seglen / step_m)))
+            for k in range(nseg):
+                t = k / nseg
+                sx = eax + (ebx - eax) * t
+                sy = eay + (eby - eay) * t
+                # Terrain-facing only (the emitter's own probe): an outward
+                # point already covered by a shape owns its own band.
+                if _inside_shape(sx + outn[0] * CL._RING_PROBE_M,
+                                 sy + outn[1] * CL._RING_PROBE_M):
+                    continue
+                ref = a0 + t * (a1 - a0)
+                # March outward sampling only the DEM (cheap) to find this
+                # transect's WORST below-floor and above-ceiling deviation;
+                # the expensive point-in-polygon exemption then runs ONLY at
+                # those ≤2 candidates (bands are contiguous from the edge, so
+                # the deepest deviation is the representative one).
+                worst_below = None
+                worst_above = None
+                for j in range(1, n_out + 1):
+                    d = min(reach - 1e-3, j * step_m)
+                    floor_off, ceil_off = adjacent_ground_envelope(
+                        env_role, code_number, code_letter, d)
+                    if floor_off is None and ceil_off is None:
+                        break          # at/beyond the reach — ungoverned
+                    qx = sx + outn[0] * d
+                    qy = sy + outn[1] * d
+                    dd = _sample(qx, qy)
+                    if dd is None:
+                        continue
+                    offset = float(dd) - ref
+                    if (floor_off is not None
+                            and offset < floor_off - tolerance_m):
+                        mag = floor_off - offset      # metres below floor
+                        if worst_below is None or mag > worst_below[0]:
+                            worst_below = (mag, qx, qy)
+                    if (ceil_off is not None
+                            and offset > ceil_off + tolerance_m):
+                        mag = offset - ceil_off        # metres above ceiling
+                        if worst_above is None or mag > worst_above[0]:
+                            worst_above = (mag, qx, qy)
+                for kind, cand in (("should_fill", worst_below),
+                                   ("should_cut", worst_above)):
+                    if cand is None:
+                        continue
+                    mag, qx, qy = cand
+                    # Out of corridor — is this column the emitter's to
+                    # grade?  Covered (incl. by an emitted band) or outside
+                    # the boundary ⇒ nothing to flag (the emitter's clip).
+                    if _covered(qx, qy):
+                        continue
+                    if (prep_boundary is not None
+                            and not prep_boundary.covers(Point(qx, qy))):
+                        continue
+                    cur = worst.get(kind)
+                    if cur is None or mag > cur[0]:
+                        worst[kind] = (mag, qx, qy)
+        ident = (s.ref or "").strip() or s.role
+        for kind, (mag, qx, qy) in worst.items():
+            out.append((kind, ident, mag, tolerance_m,
+                        _ll(layout, qx, qy)))
+    out.sort(key=lambda r: -r[2])
+    return out
+
+
 def check_terminal_flat(layout):
     """Invariant H26: a terminal moves as one rigid flat unit — a single
     ``altitude`` tag, never per-vertex ``node_altitudes`` or two-end
@@ -1733,7 +2038,7 @@ def run_grade_checks(layout):
 def _verify_debug_lines(layout, icao, taxi_index, gdesc, *,
                         overlaps, source, flat, edge_v, flat_v, axis_v,
                         short_e, wedges, cross, within, steps,
-                        rwy_grade) -> list:
+                        rwy_grade, adjacent=()) -> list:
     """Build the full per-category diagnostic lines for the verify debug
     log (no 5-item cap — this is for an engineer, not the console)."""
     def ds(idx):
@@ -1773,6 +2078,11 @@ def _verify_debug_lines(layout, icao, taxi_index, gdesc, *,
     for kind, ref, val, cap, loc in rwy_grade:
         out.append(f"  RUNWAY-GRADE {val*100:.2f}% > {cap*100:.1f}% @ {loc}: "
                    f"runway {ref}")
+    for kind, ref, mag, tol, loc in sorted(adjacent, key=lambda r: -r[2]):
+        verb = "un-filled below floor" if kind == "should_fill" \
+            else "un-cut above ceiling"
+        out.append(f"  ADJACENT-GROUND {mag:.1f} m {verb} "
+                   f"(tol {tol:.1f} m) @ {loc}: {ref}")
     return out
 
 
@@ -1792,10 +2102,22 @@ def _write_verify_debug(path, icao, counts, lines) -> None:
 
 
 # ── Build-time entry point ──────────────────────────────────────────
-def verify_and_log(layout, icao: str, debug_log_path: str | None = None) -> dict:
+def verify_and_log(layout, icao: str, debug_log_path: str | None = None,
+                   *, dem=None, tile_lat: int | None = None,
+                   tile_lon: int | None = None,
+                   source_runways=None) -> dict:
     """Run every verification check on a freshly-built layout and route the
     diagnostics to the per-tile verify DEBUG log (never raises).  Returns a
     counts dict.
+
+    The adjacent-ground LATERAL grade law (``check_adjacent_ground``) is a
+    DEM-based reader, so it runs ONLY when its gate (config.
+    ADJACENT_GROUND_LAW_ENABLED) is on — with the gate off it is neither
+    called nor counted, so the counts dict, the console summary and the
+    debug file are byte-identical to a pre-law build.  When on, the DEM is
+    reloaded from ``dem`` if provided (tests/lockstep) or via
+    ``elevation._load_airport_dem`` at the layout anchor (production
+    verify) — the same smoothed raster the standalone build path samples.
 
     EVERY finding is an auto-patch bug to be tracked down — none is a
     user-fixable source-data problem (user ruling 2026-06-16) — so nothing is
@@ -1863,6 +2185,29 @@ def verify_and_log(layout, icao: str, debug_log_path: str | None = None) -> dict
     except Exception:                              # pragma: no cover
         pass
 
+    # Adjacent-ground LATERAL grade law — DEM-based, gate-guarded so a
+    # law-off build has ZERO overhead and byte-identical verify output.
+    adjacent = []
+    try:
+        from .config import ADJACENT_GROUND_LAW_ENABLED
+    except Exception:                              # pragma: no cover
+        ADJACENT_GROUND_LAW_ENABLED = False
+    if ADJACENT_GROUND_LAW_ENABLED:
+        try:
+            import math as _math
+            _dem = dem
+            _tlat, _tlon = tile_lat, tile_lon
+            if _dem is None:
+                from .elevation import _load_airport_dem
+                _dem = _load_airport_dem(layout.anchor[0], layout.anchor[1])
+            if _tlat is None or _tlon is None:
+                _tlat = int(_math.floor(layout.anchor[0]))
+                _tlon = int(_math.floor(layout.anchor[1]))
+            adjacent = check_adjacent_ground(
+                layout, _dem, _tlat, _tlon, source_runways=source_runways)
+        except Exception:                          # pragma: no cover
+            adjacent = []
+
     counts = {"overlap": len(overlaps), "source": len(source),
               "terminal_flat": len(flat), "vertex_on_edge": len(edge_v),
               "vertex_on_flat_edge": len(flat_v),
@@ -1870,6 +2215,8 @@ def verify_and_log(layout, icao: str, debug_log_path: str | None = None) -> dict
               "epsilon_wedge": len(wedges),
               "cross": len(cross), "within": len(within),
               "steps": len(steps), "runway_grade": len(rwy_grade)}
+    if ADJACENT_GROUND_LAW_ENABLED:
+        counts["adjacent_ground"] = len(adjacent)
     if not sum(counts.values()):
         UI.vprint(1, f"  [verify] {icao}: OK — no patch issues.")
         return counts
@@ -1895,7 +2242,8 @@ def verify_and_log(layout, icao: str, debug_log_path: str | None = None) -> dict
         layout, icao, taxi_index, _gdesc,
         overlaps=overlaps, source=source, flat=flat, edge_v=edge_v,
         flat_v=flat_v, axis_v=axis_v, short_e=short_e, wedges=wedges,
-        cross=cross, within=within, steps=steps, rwy_grade=rwy_grade)
+        cross=cross, within=within, steps=steps, rwy_grade=rwy_grade,
+        adjacent=adjacent)
     _write_verify_debug(debug_log_path, icao, counts, lines)
 
     # User console: one summary line only (suppressed at build verbosity 0);

@@ -1258,6 +1258,74 @@ def _check_runway_end_skirt_edges(ways: List[Way],
     return out
 
 
+def _check_adjacent_ground_edges(ways: List[Way],
+                                 nodes: Dict[str, Tuple[float, float]],
+                                 ll_to_m) -> List[Violation]:
+    """DEM-free TEAR sentinel on the EMITTED patch: an ``adjacent_ground``
+    graded-strip must not carry a near-vertical SUB-METRE edge (a clip /
+    weld discontinuity — the epsilon-wedge corruption class).
+
+    Why not a corridor-grade check (the skirt's approach).  The runway-end
+    skirt is a fill-ONLY ramp with a single bounded down-grade, so its
+    OSM-side reader can flag any over-steep edge that is not a lawful DEM
+    lift-peak (``_check_runway_end_skirt_edges``).  A LATERAL band is a
+    two-directional corridor whose FILL rides ``max(floor, DEM)`` and whose
+    CUT rides the ceiling: it lawfully follows terrain UP a bump (a peak)
+    AND down a pit (a valley) AND along a monotonic hillside — DEM-free NONE
+    of those are distinguishable from a real over-steep edge, so a
+    corridor-grade check false-flags every terrain-riding band edge
+    (measured: ~200-1100 at CYXY/HECA, nearly all lawful).  The DEM-aware
+    corridor law — coverage + floor/ceiling — is
+    ``verification.check_adjacent_ground`` (the authoritative reader); the
+    ONE thing a DEM-free reader CAN prove wrong here is a TEAR: a band edge
+    far shorter than the emitter's station step carrying an altitude jump no
+    lawful graded slope produces, i.e. a vertical face the clip/weld
+    introduced.  Real band edges span ~one station step (5 m) or the
+    pavement gap (~1 m); a sub-gap edge with a metre-plus jump is a tear.
+
+    Returns ``Violation`` rows (``grade_pct`` = the tear's near-vertical
+    grade), worst-jump first — the LATERAL twin of
+    ``_check_runway_end_skirt_edges``, narrowed to what DEM-free is sound."""
+    from auto_patch.config import CLEARANCE_STATION_STEP_M
+    # A lawful band edge spans ~a station step; anything under a fifth of it
+    # is a clip sliver, not a graded row.  A jump exceeding this over so
+    # short a span is a vertical face (> ~100 % grade) — no lawful ≤5 %
+    # corridor slope reaches it.
+    tear_max_edge_m = 0.2 * CLEARANCE_STATION_STEP_M      # 1.0 m
+    tear_min_jump_m = 1.0
+
+    out: List[Violation] = []
+    for w in ways:
+        if w.ref != "adjacent_ground":
+            continue
+        ring = w.nids
+        for i in range(len(ring) - 1):
+            nid_a, nid_b = ring[i], ring[i + 1]
+            if nid_a not in nodes or nid_b not in nodes:
+                continue
+            ea = w.elevs[i] if i < len(w.elevs) else None
+            eb = w.elevs[i + 1] if i + 1 < len(w.elevs) else None
+            if ea is None or eb is None:
+                continue
+            xa, ya = ll_to_m(*nodes[nid_a])
+            xb, yb = ll_to_m(*nodes[nid_b])
+            dist = math.hypot(xb - xa, yb - ya)
+            de = abs(float(ea) - float(eb))
+            if not (dist < tear_max_edge_m and de > tear_min_jump_m):
+                continue
+            grade = de / dist if dist > 1e-9 else float("inf")
+            out.append(Violation(
+                grade_pct=grade * 100,
+                excess_pct=grade * 100,
+                distance_m=dist,
+                de_m=de,
+                way_a=w, way_b=w,
+                pt_a=(xa, ya), pt_b=(xb, yb),
+                elev_a=float(ea), elev_b=float(eb)))
+    out.sort(key=lambda v: -v.de_m)
+    return out
+
+
 def _check_within_shape(ways: List[Way],
                         nodes: Dict[str, Tuple[float, float]],
                         ll_to_m,
@@ -1889,6 +1957,11 @@ def run_checks(
     _pv("RUNWAY-END SKIRT edge grade > law max down-grade",
         skirt_edges, top_n)
     within = within + skirt_edges
+
+    adjacent_edges = _check_adjacent_ground_edges(ways, nodes, ll_to_m)
+    _pv("ADJACENT-GROUND graded-strip TEAR (sub-metre near-vertical edge)",
+        adjacent_edges, top_n)
+    within = within + adjacent_edges
 
     cross = _check_cross_shape_proximity(
         vertices, ways, proximity_m, max_grade)
