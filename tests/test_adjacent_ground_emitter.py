@@ -100,14 +100,15 @@ class TestCutBands:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# FILL direction (reused clearance._build_filled_skirts) + no zone-3 fill
+# FILL direction (_build_fill_bands, the skirt fill builder's lateral twin)
+# + no zone-3 fill
 # ──────────────────────────────────────────────────────────────────────
 class TestFillBands:
     def test_falling_terrain_is_filled_within_the_graded_width(self):
         stations, alts, outs = _straight_edge()
         _, floor_depth, width, _ = _taxi_c_fns()
         m = len(stations)
-        bands = AG._build_filled_skirts(
+        bands = AG._build_fill_bands(
             stations, alts, outs, [width] * m, floor_depth,
             {ADJACENT_GROUND_LIP_WIDTH_M}, TRIGGER, STEP,
             lambda x, y: EDGE_ALT - 8.0)
@@ -142,7 +143,7 @@ def test_dem_inside_corridor_emits_nothing():
     cut = AG._build_cut_bands(
         stations, alts, outs, [reach] * m, ceil_off,
         {ADJACENT_GROUND_LIP_WIDTH_M, width}, TRIGGER, STEP, dem)
-    fill = AG._build_filled_skirts(
+    fill = AG._build_fill_bands(
         stations, alts, outs, [width] * m, floor_depth,
         {ADJACENT_GROUND_LIP_WIDTH_M}, TRIGGER, STEP, dem)
     assert cut == []
@@ -173,6 +174,89 @@ def test_adjacent_cut_bands_share_boundary_row_values():
     assert at_lip, "expected vertices on the lip boundary row"
     for vx, vals in at_lip.items():
         assert len(vals) == 1, f"tear at x={vx}: {vals}"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# CLAMP-INTO-CORRIDOR value rule (round 2 — the law-alignment fix): an
+# emitted band vertex is the DEM clamped into [edge+floor(d),
+# edge+ceiling(d)]; unlike the skirt FLOOR law, the corridor bounds BOTH
+# sides, so a DEM bump above the ceiling is cut to it.
+# ──────────────────────────────────────────────────────────────────────
+class TestClampIntoCorridor:
+    def _resampler(self, dem_value):
+        # A 40 m square pavement ring, flat at EDGE_ALT.
+        ring = [(0.0, 0.0), (40.0, 0.0), (40.0, -40.0), (0.0, -40.0),
+                (0.0, 0.0)]
+        alts = [EDGE_ALT] * 5
+        width = taxiway_strip_graded_half_width_for_letter("C")
+
+        def envelope_at(d):
+            return adjacent_ground_envelope("taxiway", None, "C", d)
+
+        return AG._make_edge_projection_resampler(
+            ring, alts, envelope_at, width, lambda x, y: dem_value)
+
+    def test_dem_above_ceiling_is_cut_to_the_ceiling(self):
+        resample = self._resampler(EDGE_ALT + 10.0)
+        d = 8.0     # zone 2, off the top edge (outward normal +y)
+        _, ceiling_offset = adjacent_ground_envelope(
+            "taxiway", None, "C", d)
+        assert resample(20.0, d, "cut") == pytest.approx(
+            EDGE_ALT + ceiling_offset, abs=0.06)
+
+    def test_dem_below_floor_is_filled_to_the_floor(self):
+        resample = self._resampler(EDGE_ALT - 10.0)
+        d = 8.0
+        floor_offset, _ = adjacent_ground_envelope("taxiway", None, "C", d)
+        assert resample(20.0, d, "fill") == pytest.approx(
+            EDGE_ALT + floor_offset, abs=0.06)
+
+    def test_dem_inside_corridor_passes_through(self):
+        # d = 12 m: the taxi-C corridor spread there (~0.38 m) exceeds
+        # twice the snap-to-bound band, so a mid-corridor DEM is far
+        # enough from both bounds to pass through unsnapped.  (In the
+        # narrower near-edge corridor a mid value lawfully snaps to the
+        # nearest bound — the triangle-diet rule.)
+        d = 12.0
+        floor_offset, ceiling_offset = adjacent_ground_envelope(
+            "taxiway", None, "C", d)
+        assert (ceiling_offset - floor_offset) > 2 * AG._CORRIDOR_SNAP_TOL_M
+        mid = EDGE_ALT + 0.5 * (floor_offset + ceiling_offset)
+        resample = self._resampler(mid)
+        assert resample(20.0, d, "fill") == pytest.approx(mid, abs=0.06)
+        assert resample(20.0, d, "cut") == pytest.approx(mid, abs=0.06)
+
+    def test_near_bound_dem_snaps_to_the_bound(self):
+        """Triangle diet: a DEM within the snap band of a corridor bound
+        emits the bound itself (piecewise-linear, decimates away)."""
+        d = 12.0
+        _, ceiling_offset = adjacent_ground_envelope(
+            "taxiway", None, "C", d)
+        near_ceiling = EDGE_ALT + ceiling_offset - 0.05
+        resample = self._resampler(near_ceiling)
+        assert resample(20.0, d, "cut") == pytest.approx(
+            EDGE_ALT + ceiling_offset, abs=0.06)
+
+    def test_zone3_free_floor_keeps_deep_dem(self):
+        """Beyond the graded width the floor is None — a deep DEM under a
+        cut piece stays (never filled); only the rising ceiling clips."""
+        width = taxiway_strip_graded_half_width_for_letter("C")
+        d = width + 10.0
+        resample = self._resampler(EDGE_ALT - 30.0)
+        assert resample(20.0, d, "cut") == pytest.approx(
+            EDGE_ALT - 30.0, abs=0.06)
+
+    def test_fill_piece_never_crosses_the_width_discontinuity(self):
+        """A fill vertex whose projection jitters past W stays on the
+        shelf edge (floor at W), not 30 m down on the DEM — the round-2
+        CYXY in-piece cliff class."""
+        width = taxiway_strip_graded_half_width_for_letter("C")
+        floor_at_width, _ = adjacent_ground_envelope(
+            "taxiway", None, "C", width)
+        resample = self._resampler(EDGE_ALT - 30.0)
+        just_past = width + 0.05
+        assert resample(20.0, just_past, "fill") == pytest.approx(
+            EDGE_ALT + floor_at_width, abs=0.06)
 
 
 # ──────────────────────────────────────────────────────────────────────

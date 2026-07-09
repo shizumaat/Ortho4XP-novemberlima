@@ -375,12 +375,27 @@ def emit_terrain_transition_features(layout: PavementLayout, icao: str, xplane_r
         _tile_lon = (current_tile_lon if current_tile_lon is not None
                      else int(math.floor(_lon0)))
         _dem = _load_airport_dem(_lat0, _lon0, override_dem=tile_dem)
-        n_b = _emit_airport_boundary_shape(
-            layout, _dem, _tile_lat, _tile_lon)
-        if n_b:
+        # Adjacent-ground grade law (Noah 2026-07-08): when ON, the
+        # per-role lateral corridor law is the ONLY terrain-transition
+        # model beside pavement.  The boundary ribbon was clamping
+        # perimeter altitudes near runways to force-fill terrain — that
+        # fights the new model, whose zone-3 free floor leaves lawful
+        # cliffs as DEM.  Skip the ENTIRE ribbon emission (not just the
+        # DEM bridge below); terrain near the boundary is then pure DEM
+        # + the pavement-edge strip law.  The ribbon CODE stays (deleted
+        # with the bridge in the final slice, after in-sim soak).
+        from .config import ADJACENT_GROUND_LAW_ENABLED
+        if ADJACENT_GROUND_LAW_ENABLED:
             UI.vprint(1,
-                f"  [pav-builder] emitted "
-                f"{n_b} airport-boundary shape piece(s).")
+                "  [pav-builder] boundary ribbon: superseded by the "
+                "adjacent-ground law.")
+        else:
+            n_b = _emit_airport_boundary_shape(
+                layout, _dem, _tile_lat, _tile_lon)
+            if n_b:
+                UI.vprint(1,
+                    f"  [pav-builder] emitted "
+                    f"{n_b} airport-boundary shape piece(s).")
         # (refactor Phase 4) Groundside pavement EMIT + apron-island
         # absorption (``_absorb_apron_enclosed_groundside``) + orphan-junction
         # reclassification (``_reclassify_groundside_orphan_junctions``) moved
