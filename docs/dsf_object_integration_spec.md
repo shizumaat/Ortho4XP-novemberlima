@@ -1340,3 +1340,22 @@ a kilometre-wide web — rather than the best available single offset. Fix bundl
 3. The A3 guard applies only below a structure-diameter bound (a mega-web always bakes with its
    best offset and flags ``needs_pad``); the full mega-web fix remains the hinge cut (A16/A17
    queue, now demanded by both HECA's terminal web and LEMD's railway chain).
+
+### A20 — Normalize elevation mode to on-ground *(user ruling 2026-07-08, refined by measurement)*
+
+User ruling: adapted airports must not inherit manual ``OBJECT_AGL`` / ``OBJECT_MSL`` elevation
+values from the old airport's terrain assumptions. Measurement refines "all": KCLT carries 1,938
+AGL placements above +3 m (to +22.8 m) — deliberately elevated mast and rooftop objects that
+on-ground forcing would sink through their hosts — while the ±1 m band (HECA 187, KCLT 449) is
+exactly the hand-tweaked-against-old-terrain class.
+
+Design: for everything the pipeline BAKES, amendment A18's delta already cancels the authored
+offset exactly; normalization targets the un-bakeable residue (multi-placement, animation-refused,
+sub-reach objects). Transform ``OBJECT_AGL idx lon lat elev heading`` to ``OBJECT idx lon lat
+heading`` when ``|elev|`` is within ``DSF_OBJECT_ON_GROUND_BAND_M`` (default 1 m); keep larger
+offsets; report any ``OBJECT_MSL`` loudly (zero instances across the gate packs). This crosses the
+DSF-rewrite line for the first time: DSFTool text round-trip (measured ~7 cm pool quantization,
+plan section 4.3) with the full safety kit — DSF backup, provenance hashes, byte-idempotent
+re-derivation from the backup, ``--restore`` — behind a default-off flag
+(``O4_DSF_OBJECT_NORMALIZE_ELEVATION_MODE``), soak-tested per pack. Queued with A17 and the hinge
+cut; pull forward only if the un-bakeable ±1 m residue proves visually significant in-sim.
