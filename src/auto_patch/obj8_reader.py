@@ -100,13 +100,23 @@ POSITIONAL_COMMAND_COORDINATE_TOKEN_INDICES: dict[str, tuple[int, int, int]] = {
 
 
 class ObjectPlacement(NamedTuple):
-    """One terrain-draped ``OBJECT`` command from a DSF text dump."""
+    """One terrain-relative object placement from a DSF text dump.
+
+    Covers plain ``OBJECT`` rows AND ``OBJECT_AGL`` rows (amendment A18):
+    an AGL placement resolves to ``terrain(anchor) + elevation`` —
+    terrain-relative AT THE ANCHOR ONLY, so far-flung geometry inherits
+    the anchor's terrain exactly like a plain ``OBJECT`` does, offset by
+    ``above_ground_level_metres`` (zero for plain ``OBJECT``).  HECA
+    ships 183 of its 216 AGL placements on one shared anchor.  Only
+    ``OBJECT_MSL`` (absolute elevation) remains outside this type.
+    """
 
     definition_index: int
     resource_path: str
     longitude: float
     latitude: float
     heading_degrees: float
+    above_ground_level_metres: float = 0.0
 
 
 class PositionalCommand(NamedTuple):
@@ -366,10 +376,15 @@ def read_dsf_object_placements(
 ) -> list[ObjectPlacement]:
     """Collect terrain-draped ``OBJECT`` placements from a DSF text dump.
 
-    ``OBJECT_MSL`` and ``OBJECT_AGL`` are deliberately skipped: they carry
-    an explicit elevation and are not subject to the distant-anchor
-    problem.  Takes lines, not a path, so tests feed synthetic text
-    (harness pattern (a), ``tests/test_agp_reader.py``).
+    ``OBJECT`` rows and — amendment A18 — ``OBJECT_AGL`` rows are both
+    collected: an AGL placement is terrain-relative at its ANCHOR only,
+    so it carries the distant-anchor disease with a constant vertical
+    offset (``above_ground_level_metres``; the heading moves to the
+    fifth column).  Only ``OBJECT_MSL`` (absolute elevation, zero
+    instances across the three gate packs) is skipped — callers report
+    its presence rather than silently ignoring it.  Takes lines, not a
+    path, so tests feed synthetic text (harness pattern (a),
+    ``tests/test_agp_reader.py``).
     """
     definitions: list[str] = []
     placements: list[ObjectPlacement] = []
@@ -379,20 +394,26 @@ def read_dsf_object_placements(
             continue
         if tokens[0] == "OBJECT_DEF":
             definitions.append(line.split(None, 1)[1].strip())
-        elif tokens[0] == "OBJECT":
+        elif tokens[0] in ("OBJECT", "OBJECT_AGL"):
             index = int(tokens[1])
             if index >= len(definitions):
                 continue
             resource = definitions[index]
             if accept_resource is not None and not accept_resource(resource):
                 continue
+            is_above_ground_level = tokens[0] == "OBJECT_AGL"
             placements.append(
                 ObjectPlacement(
                     definition_index=index,
                     resource_path=resource,
                     longitude=float(tokens[2]),
                     latitude=float(tokens[3]),
-                    heading_degrees=float(tokens[4]),
+                    heading_degrees=float(
+                        tokens[5] if is_above_ground_level else tokens[4]
+                    ),
+                    above_ground_level_metres=(
+                        float(tokens[4]) if is_above_ground_level else 0.0
+                    ),
                 )
             )
     return placements

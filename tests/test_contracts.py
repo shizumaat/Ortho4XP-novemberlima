@@ -97,6 +97,16 @@ def test_object_placement_fields():
         "longitude",
         "latitude",
         "heading_degrees",
+        # Amendment A18: OBJECT_AGL placements carry the distant-anchor
+        # disease with a constant vertical offset; plain OBJECT rows
+        # default to zero.
+        "above_ground_level_metres",
+    )
+    assert (
+        obj8_reader.ObjectPlacement._field_defaults[
+            "above_ground_level_metres"
+        ]
+        == 0.0
     )
 
 

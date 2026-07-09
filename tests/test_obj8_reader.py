@@ -338,14 +338,17 @@ SYNTHETIC_DSF_TEXT_LINES = [
     "OBJECT 1 -80.940000000 35.210000000 0.000000\n",    # kept
     "OBJECT 1 -80.941000000 35.211000000 10.000000\n",   # kept (2nd placement)
     "OBJECT_MSL 0 -80.935041390 35.207360571 220.0 86.095674\n",  # skipped
-    "OBJECT_AGL 0 -80.935041390 35.207360571 5.0 86.095674\n",    # skipped
+    # Amendment A18: OBJECT_AGL is terrain-relative at the ANCHOR only —
+    # it carries the distant-anchor disease with a constant offset, so
+    # the reader ACCEPTS it (heading in the fifth column).
+    "OBJECT_AGL 0 -80.935041390 35.207360571 5.0 86.095674\n",    # kept
     "OBJECT 99 -80.0 35.0 0.0\n",                        # index out of range
 ]
 
 
-def test_read_dsf_object_placements_skips_explicit_elevation_commands():
+def test_read_dsf_object_placements_accepts_agl_and_skips_msl():
     placements = read_dsf_object_placements(SYNTHETIC_DSF_TEXT_LINES)
-    assert len(placements) == 3
+    assert len(placements) == 4
     first = placements[0]
     assert first.definition_index == 0
     assert first.resource_path == (
@@ -354,10 +357,20 @@ def test_read_dsf_object_placements_skips_explicit_elevation_commands():
     assert first.longitude == pytest.approx(-80.935041390)
     assert first.latitude == pytest.approx(35.207360571)
     assert first.heading_degrees == pytest.approx(86.095674)
-    assert [p.resource_path for p in placements[1:]] == [
+    assert first.above_ground_level_metres == 0.0
+    assert [p.resource_path for p in placements[1:3]] == [
         "otros/cone_short.obj",
         "otros/cone_short.obj",
     ]
+    above_ground = placements[3]
+    assert above_ground.above_ground_level_metres == pytest.approx(5.0)
+    assert above_ground.heading_degrees == pytest.approx(86.095674)
+    # OBJECT_MSL (absolute elevation) remains excluded.
+    assert all(
+        placement.resource_path
+        != "lib/airport/Ramp_Equipment/Stair_Truck.obj"
+        for placement in placements
+    )
 
 
 def test_read_dsf_object_placements_accept_resource_filter():
@@ -365,8 +378,13 @@ def test_read_dsf_object_placements_accept_resource_filter():
         SYNTHETIC_DSF_TEXT_LINES,
         accept_resource=lambda resource: resource.endswith("_ALB.obj"),
     )
-    assert len(placements) == 1
-    assert placements[0].definition_index == 0
+    # The plain OBJECT row and the amendment-A18 AGL row of the same
+    # definition both pass the filter.
+    assert len(placements) == 2
+    assert {placement.definition_index for placement in placements} == {0}
+    assert sorted(
+        placement.above_ground_level_metres for placement in placements
+    ) == [0.0, 5.0]
 
 
 # ---------------------------------------------------------------------------

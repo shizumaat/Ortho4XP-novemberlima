@@ -713,9 +713,12 @@ class TestOutsideMeshSkips:
         assert decision.structures[0].skip_reason is not None
         assert "outside the built mesh" in decision.structures[0].skip_reason
         assert "walker.obj" not in decision.delta_by_resource_and_vertex
-        # The anchor itself was fine, so this is a structure-level skip:
-        # no object-level skipped entry.
-        assert decision.skipped == []
+        # Amendment A19: structure-level skips are VISIBLE at the
+        # resource level — one aggregated entry naming the resource.
+        assert any(
+            resource == "walker.obj" and "left unbaked" in reason
+            for resource, reason in decision.skipped
+        )
         assert "walker.obj" in decision.anchor_ground_by_resource
 
     def test_anchor_outside_mesh_skips_every_structure_of_that_object(
@@ -752,9 +755,14 @@ class TestOutsideMeshSkips:
         decision = structure_deltas(
             pool, geometry_by_resource, structures, plane_sampler
         )
-        assert len(decision.skipped) == 1
+        # Two entries: the anchor-level skip, and the amendment-A19
+        # aggregated structure-skip visibility entry.
+        assert len(decision.skipped) == 2
         skipped_resource, skipped_reason = decision.skipped[0]
         assert skipped_resource == "orphan.obj"
+        assert all(
+            resource == "orphan.obj" for resource, _ in decision.skipped
+        )
         assert "anchor" in skipped_reason
         assert decision.structures[0].skip_reason is not None
         assert decision.delta_by_resource_and_vertex == {}
@@ -850,14 +858,15 @@ class TestAmendmentA3:
             decision.delta_by_resource_and_vertex["span.obj"]
         ) == set(range(24))
 
-    def test_correction_worse_than_uncorrected_is_skipped_with_arithmetic(
-        self, pit_sampler
-    ):
-        # The pathological case: a symmetric structure whose ground
-        # parts sit at the anchor's own elevation (uncorrected residual
-        # ~0) while its centroid hangs over the pit centre (correction
-        # would push both parts ~2.8 m down).  Arithmetic, not a
-        # threshold, decides the skip.
+    def test_pit_centroid_no_longer_tricks_the_seating(self, pit_sampler):
+        # Before amendment A19 this was the do-not-bake case: a
+        # symmetric structure whose ground parts sit at the anchor's own
+        # elevation while its CENTROID hangs over the pit centre — the
+        # centroid-sampled seating would have pushed both slabs ~2.8 m
+        # down, so the A3 arithmetic skipped the whole structure.  With
+        # the seating elevation taken as the MEDIAN of the ground parts'
+        # grounds, the pit centroid no longer misleads: the structure
+        # BAKES with a near-zero offset and no skip fires.
         metres_per_degree = metres_per_degree_longitude_at(
             PIT_CENTRE_LATITUDE
         )
@@ -900,17 +909,16 @@ class TestAmendmentA3:
             pool, geometry_by_resource, structures, pit_sampler
         )
         updated = decision.structures[0]
-        assert updated.skip_reason is not None
-        assert "amendment A3" in updated.skip_reason
-        assert "corrected" in updated.skip_reason
-        assert "uncorrected" in updated.skip_reason
-        # Both numbers are in the reason, and the corrected one is the
-        # larger.
-        assert (
-            "pathological.obj" not in decision.delta_by_resource_and_vertex
+        assert updated.skip_reason is None
+        assert "pathological.obj" in decision.delta_by_resource_and_vertex
+        # Median seating: the offset lands the slabs on THEIR ground,
+        # not the pit's — near zero, since the slab grounds bracket the
+        # anchor's own elevation.
+        deltas = set(
+            decision.delta_by_resource_and_vertex["pathological.obj"].values()
         )
-        # This is a structure-level arithmetic skip, not an object-level
-        # refusal.
+        assert len(deltas) == 1
+        assert abs(next(iter(deltas))) < 1.0
         assert decision.skipped == []
 
 

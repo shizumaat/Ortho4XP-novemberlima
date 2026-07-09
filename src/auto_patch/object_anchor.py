@@ -73,6 +73,13 @@ Triangle = tuple[int, int, int]
 # flip to skipped on a nanometre.
 RESIDUAL_COMPARISON_TOLERANCE_METRES = 1e-6
 
+# Amendment A19: the A3 do-not-bake guard applies only to structures
+# smaller than this diameter.  A mega-structure (HECA's kilometre-wide
+# chained terminal web) always bakes with its best single offset and
+# flags ``needs_pad`` — judging it by mean residual and silently
+# skipping left 49 resources floating at anchor minus local ground.
+A3_GUARD_MAXIMUM_DIAMETER_METRES = 100.0
+
 
 @dataclass(frozen=True)
 class ObjectPool:
@@ -593,7 +600,14 @@ def structure_deltas(
             unusable_reason_by_resource[resource_path] = reason
             skipped.append((resource_path, reason))
         else:
-            anchor_ground_by_resource[resource_path] = anchor_ground
+            # Amendment A18: an OBJECT_AGL placement puts the object's
+            # ``y = 0`` plane at ``terrain(anchor) + elevation``, so the
+            # effective anchor elevation carries the offset (zero for a
+            # plain ``OBJECT``).  Everything downstream — deltas, the
+            # rendered-elevation identity, provenance — uses this sum.
+            anchor_ground_by_resource[resource_path] = (
+                anchor_ground + placement.above_ground_level_metres
+            )
 
     # Per-structure pool-frame geometry: shared-index triangles, the
     # horizontal bounding box, and the frame-coordinate centroid.
@@ -797,14 +811,43 @@ def structure_deltas(
         if ground_part_records:
             part_grounds = [record[0] for record in ground_part_records]
             ground_span_metres = max(part_grounds) - min(part_grounds)
+            # Amendment A19: the seating elevation of a structure with
+            # ground-touching parts is the MEDIAN of those parts'
+            # grounds — the best single rigid offset — not the ground at
+            # the area-weighted centroid, which is one unrepresentative
+            # sample for a large structure (a kilometre-wide chained web
+            # at HECA was judged, and wrongly skipped, by it).
+            sorted_grounds = sorted(part_grounds)
+            middle = len(sorted_grounds) // 2
+            structure_ground = (
+                sorted_grounds[middle]
+                if len(sorted_grounds) % 2 == 1
+                else (sorted_grounds[middle - 1] + sorted_grounds[middle])
+                / 2.0
+            )
         else:
             ground_span_metres = 0.0
         needs_pad = ground_span_metres > DSF_OBJECT_PAD_FLAG_SPAN_M
 
-        # Amendment A3: always bake the best single offset; do-not-bake
-        # ONLY when the arithmetic says correction worsens the seating.
+        # Amendment A3, bounded by amendment A19: always bake the best
+        # single offset; do-not-bake ONLY when the arithmetic says
+        # correction worsens the seating AND the structure is small
+        # enough for that judgment to be meaningful.  A mega-structure
+        # (a chained web) always bakes and flags ``needs_pad`` — its
+        # real fix is the hinge cut, never a silent skip.
         a3_skip_reason = None
-        if ground_part_records:
+        bounding_box = bounding_box_by_structure[structure_index]
+        structure_diameter_metres = (
+            math.hypot(
+                bounding_box[1] - bounding_box[0],
+                bounding_box[3] - bounding_box[2],
+            )
+            if bounding_box is not None
+            else 0.0
+        )
+        if ground_part_records and (
+            structure_diameter_metres <= A3_GUARD_MAXIMUM_DIAMETER_METRES
+        ):
             corrected_residuals = [
                 abs(structure_ground + part_base_y - part_ground)
                 for part_ground, part_base_y, _base_resource in (
@@ -871,6 +914,39 @@ def structure_deltas(
                 inherited_from_structure_index=inherited_from_by_index.get(
                     structure_index
                 ),
+            )
+        )
+
+    # Amendment A19: structure-level skips must be VISIBLE at the
+    # resource level.  Forty-nine HECA resources vanished from the bake
+    # because every structure carrying their geometry was skipped and
+    # nothing said so.  One aggregated entry per affected resource.
+    skip_count_by_resource: dict[str, int] = {}
+    first_skip_reason_by_resource: dict[str, str] = {}
+    for updated_structure in updated_structures:
+        if not updated_structure.skip_reason:
+            continue
+        for resource_path in updated_structure.triangles_by_resource:
+            skip_count_by_resource[resource_path] = (
+                skip_count_by_resource.get(resource_path, 0) + 1
+            )
+            first_skip_reason_by_resource.setdefault(
+                resource_path, updated_structure.skip_reason
+            )
+    for resource_path in sorted(skip_count_by_resource):
+        count = skip_count_by_resource[resource_path]
+        fully_unbaked = resource_path not in delta_by_resource_and_vertex
+        skipped.append(
+            (
+                resource_path,
+                (
+                    f"ALL {count} structure(s) carrying this resource "
+                    "were skipped — resource left unbaked"
+                    if fully_unbaked
+                    else f"{count} structure(s) skipped (others baked)"
+                )
+                + f"; first reason: "
+                + first_skip_reason_by_resource[resource_path],
             )
         )
 
