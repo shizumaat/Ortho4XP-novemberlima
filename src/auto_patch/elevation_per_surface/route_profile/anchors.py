@@ -16,6 +16,8 @@ construction.  This module never builds a second graph.
 """
 from __future__ import annotations
 
+import os as _os
+
 from auto_patch.layout import (
     ROLE_APRON, ROLE_BUILDING, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL, ROLE_SERVICE_JUNCTION,
@@ -23,6 +25,40 @@ from auto_patch.layout import (
 )
 
 _INF = float("inf")
+
+# ── Parallel-road station coupling (part 30m OPEN item (a), DEFAULT OFF) ──
+# The queued fix for the "two NON-touching parallel service roads seat a
+# metre-scale wall across the gap" defect (#576↔#584): widen the spine-station
+# merge past its 2 m sliver window (the O4_SVC_PROXIMITY_COUPLE analogue, which
+# misses a several-metre gap) so a near-parallel pair a few metres apart shares
+# ONE DEM seed + ONE reach-band intersection — a single-valued cross-section the
+# wall cannot be seeded on.  A TANGENT guard (|cos∠(tangent_a, tangent_b)| above
+# the threshold — antiparallel loop returns count, a crossing road ≈90° never
+# does) keeps it to genuine parallel pairs.
+#
+# SHIPPED OFF (measured 2026-07-08).  The documented #576↔#584 site no longer
+# exists at HEAD (intervening commits — the off-source SOURCE CLIP and adjacent-
+# ground work — reshaped HECA's service net; the equivalent HECA pair is now
+# 0.19 m, resolved).  Where this coupling actually FIRES (CYXY -10045↔-10195,
+# 6.7 m apart) the two roads differ by ~1.5 m for GENUINE terrain reasons
+# (non-overlapping reach bands — the SAME physics part-30m recorded for
+# #576↔#584: "each road on its OWN spine regime"); forcing a shared seed there
+# REGRESSED CYXY (worst service tear 22.2→23.2 %, facing step 1.523→1.587 m).
+# Proximity + parallelism alone cannot tell a "coincidental wall that should be
+# flat" from "two roads terrain genuinely holds apart" — they are identical
+# geometry — so no guard makes the coupling both effective and non-regressing.
+# Kept behind the gate (idiomatic default-off experiment) for a future revisit
+# that carries the missing signal (e.g. a shared groundside connection proving
+# the pair SHOULD be co-level).  ``O4_SVC_PARALLEL_STATION_MERGE=1`` enables it;
+# default (unset / 0) ⇒ byte-identical to the 2 m window.  Standalone tuning
+# knobs (not aerodrome standards; anchors.py owns them per the part-32 split).
+PARALLEL_SERVICE_STATION_MERGE = (
+    _os.environ.get("O4_SVC_PARALLEL_STATION_MERGE", "0") == "1")
+# Max XY gap between the two lines' stations to couple them (m).
+PARALLEL_SERVICE_STATION_MERGE_MAX_GAP_M = 7.0
+# Near-parallel guard: |cos(angle between the host-line tangents)| must be at
+# least this (cos 25° ≈ 0.906) — a crossing road (≈90°, cos≈0) never couples.
+PARALLEL_SERVICE_STATION_MERGE_MIN_ABS_COS = 0.906
 
 # The TAXI ROUTE (smoothness target, bounded by the reach band): taxi rects +
 # junctions.  A node shared by an apron AND a route shape is a route node.
@@ -1495,6 +1531,63 @@ def apply_groundside_reach(layout, bucket_to_idx, elev, cap):
     return n, hard
 
 
+def _line_unit_tangent(line, s):
+    """Unit tangent (dx, dy) of a shapely ``LineString`` at arclength ``s``,
+    from a symmetric ±(¼-length, capped 1 m) difference; ``None`` for a
+    degenerate line.  Used by the parallel-road station merge's tangent guard."""
+    import math
+    length = line.length
+    if length <= 1e-6:
+        return None
+    eps = min(1.0, length * 0.25)
+    a = line.interpolate(max(0.0, s - eps))
+    b = line.interpolate(min(length, s + eps))
+    dx, dy = b.x - a.x, b.y - a.y
+    norm = math.hypot(dx, dy)
+    return (dx / norm, dy / norm) if norm > 1e-9 else None
+
+
+def _parallel_station_merge_pairs(st_xy, station_line, tangent_at,
+                                  max_gap, min_abs_cos):
+    """Station-id pairs ``[(a, b), …]`` to couple for the WIDE parallel-road
+    station merge (part 30m follow-up, candidate (a)).
+
+    A pair qualifies iff the two stations are on DIFFERENT host lines, their XY
+    gap is ``<= max_gap``, and their host-line tangents are NEAR-PARALLEL
+    (``|cos∠(tangent_a, tangent_b)| >= min_abs_cos``).  The absolute cosine
+    admits an antiparallel loop-return leg (|cos|≈1) while a distinct crossing
+    road (≈90°, |cos|≈0) never qualifies — the guard that keeps the coupling to
+    genuine parallel pairs.  Pure: no elevation, no I/O — unit-testable."""
+    import math
+    pairs = []
+    grid: dict = {}
+    for sid, (x, y) in st_xy.items():
+        grid.setdefault((int(x // max_gap), int(y // max_gap)), []).append(sid)
+    for (cx, cy), cell in grid.items():
+        neigh = []
+        for ox in (-1, 0, 1):
+            for oy in (-1, 0, 1):
+                neigh.extend(grid.get((cx + ox, cy + oy), ()))
+        for a in cell:
+            ax, ay = st_xy[a]
+            ta = tangent_at.get(a)
+            if ta is None:
+                continue
+            for b in neigh:
+                if b <= a or station_line[b] == station_line[a]:
+                    continue
+                bx, by = st_xy[b]
+                if math.hypot(ax - bx, ay - by) > max_gap:
+                    continue
+                tb = tangent_at.get(b)
+                if tb is None:
+                    continue
+                if abs(ta[0] * tb[0] + ta[1] * tb[1]) < min_abs_cos:
+                    continue                # crossing / divergent → distinct
+                pairs.append((a, b))
+    return pairs
+
+
 def _svc_spine_station_seeds(layout, svc_nodes, node_pos, anchors,
                              dem_elev, cap, node_ceil, node_floor,
                              node_ceil_dist, node_floor_dist,
@@ -1673,6 +1766,32 @@ def _svc_spine_station_seeds(layout, svc_nodes, node_pos, anchors,
         ra, rb = _find(si), _find(sj)
         if ra != rb:
             parent[max(ra, rb)] = min(ra, rb)
+
+    # WIDE PARALLEL-ROAD STATION MERGE (part 30m follow-up, candidate (a)):
+    # the 2 m XY window and the node proximity couple (both ~2 m) MISS a
+    # several-metre rendered gap, so two NON-touching but near-parallel service
+    # ways a few metres apart still seed from SEPARATE spine regimes and seat a
+    # metre-scale wall across the gap (HECA -10494 service_road ↔ -10108
+    # service_junction, ~6.7 m gap: per-vertex 0.845 m).  Couple their stations
+    # out to ``PARALLEL_SERVICE_STATION_MERGE_MAX_GAP_M`` when the two host
+    # lines run NEAR-PARALLEL at those stations — a TANGENT guard so a distinct
+    # crossing road (≈90°) never couples, only a genuine parallel pair (a loop
+    # road's return leg counts: antiparallel, |cos|≈1).  The merge shares one
+    # DEM seed + one band INTERSECTION across the cross-section, so the wall is
+    # single-valued (unseedable), not merely reduced.  Gate off ⇒ untouched.
+    if PARALLEL_SERVICE_STATION_MERGE and len(stations) > 1:
+        tangent_at = {
+            sid: _line_unit_tangent(lines[st["line"]], st["s"])
+            for sid, st in enumerate(stations)}
+        station_line = {sid: st["line"] for sid, st in enumerate(stations)}
+        for (a, b) in _parallel_station_merge_pairs(
+                st_xy, station_line, tangent_at,
+                PARALLEL_SERVICE_STATION_MERGE_MAX_GAP_M,
+                PARALLEL_SERVICE_STATION_MERGE_MIN_ABS_COS):
+            ra, rb = _find(a), _find(b)
+            if ra != rb:
+                parent[max(ra, rb)] = min(ra, rb)
+
     _merged = 0
     for sid in range(len(stations)):
         r = _find(sid)

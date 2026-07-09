@@ -15,6 +15,25 @@
   service wall was NEVER test-visible (svc_break quarantine); the
   test's real blockers were the proximity radius + this one step.
   The wall stays open as an IN-SIM item (physical gates), agent on it.
+* PARALLEL-ROAD WALL (part 30m OPEN (a)) — RESOLVED + candidate shipped
+  OFF (anchors._parallel_station_merge_pairs, O4_SVC_PARALLEL_STATION_MERGE,
+  default OFF; +12 tests).  Re-baselined at HEAD: the documented #576↔#584
+  site is GONE (off-source SOURCE CLIP + adjacent-ground reshaped HECA's
+  service net); the equivalent HECA pair is now 0.19 m (< the 0.5 m step
+  threshold — 0 check_grade steps/cross airport-wide; the 0.845 m only
+  survives O4_SVC_SPINE_FIRST=0 per-vertex).  Candidate (a) (widen the
+  spine-station merge to ≤7 m with a tangent-parallel guard) FIRES only at
+  CYXY -10045↔-10195 (6.7 m apart) where the two roads differ ~1.5 m for
+  GENUINE terrain reasons (non-overlapping reach bands — the SAME physics
+  part-30m recorded for #576↔#584) → forcing a shared seed REGRESSED CYXY
+  (service tear 22.2→23.2 %, facing step 1.523→1.587 m).  Proximity+parallel
+  can't tell "coincidental wall that should be flat" from "terrain genuinely
+  holds them apart" (identical geometry), so no guard makes it both effective
+  and non-regressing; kept gated off for a future revisit carrying a co-level
+  signal (shared groundside).  Default byte-identical (HECA/SPLP/CYXY alt
+  multiset unchanged; fast suite = the same 4 reds).  Candidate (b) (<5 m
+  cross-shape law) not pursued: the live pair is 6.7 m (out of its window)
+  and a hard law would over-couple the same terrain more rigidly.
 * 03dc527 adjacent-ground law slices 1+2 (behavior-inert): corridor
   constants + STANDARDS rows + grade_law.adjacent_ground_envelope
   (enforce-fully corridor semantics per Noah ruling 1) + 33 tests.
