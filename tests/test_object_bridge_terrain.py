@@ -72,10 +72,25 @@ class _FakeDem:
 
 
 class _FakeLayout:
+    """Minimal layout stand-in: anchor, shapes, and the projection /
+    canonical-registry surface the pin writers and the solver seeding
+    touch (stage 2)."""
+
     def __init__(self) -> None:
         self.anchor = ANCHOR
         self.shapes: list = []
         self.icao = "TEST"
+        self._to_meters, self._meters_to_lat_lon = (
+            bridges._local_meter_projections(ANCHOR)
+        )
+        from auto_patch.canonical_points import CanonicalPointRegistry
+        self.canonical_points = CanonicalPointRegistry()
+
+    def ll_to_m(self, latitude: float, longitude: float):
+        return self._to_meters(longitude, latitude)
+
+    def m_to_ll(self, x: float, y: float):
+        return self._meters_to_lat_lon(x, y)
 
 
 def _deck_rectangle_frame(
@@ -173,26 +188,48 @@ def _draped_road_network_across_deck(length_m: float = 131.0) -> RoadNetwork:
 
 class TestCorridorFloor:
     def test_deck_carried_floor_from_msl_and_girder(self):
+        # Amendment A10: the floor is GEOMETRY-DRIVEN — absolute deck
+        # elevation minus the hard-deck height above anchor terrain (the
+        # anchor-terrain datum), never clearance-driven.
         bridge = _bridge()  # deck 167.0, top +5.99, girder +4.2
         floor = bridges._bridge_corridor_floor_m(bridge, 167.0)
-        # girder underside = 167 - (5.99 - 4.2) = 165.21; minus 5.1 margin.
-        assert floor == pytest.approx(165.21 - 5.1, abs=1e-6)
+        assert floor == pytest.approx(167.0 - 5.99, abs=1e-6)
 
-    def test_missing_underside_treats_thickness_as_zero(self):
-        bridge = _bridge(clearance_underside_y_m=None, ceiling_y_m=None)
+    def test_kbna_calibration_regression_a10(self):
+        # The A10 three-way calibration numbers: deck 167.0, floor ~161.0
+        # (author mesh 161.0), girder underside 165.21, clearance 4.2 —
+        # at or above the acceptance bound, never below.
+        bridge = _bridge()
         floor = bridges._bridge_corridor_floor_m(bridge, 167.0)
-        assert floor == pytest.approx(167.0 - config.BRIDGE_ROAD_CLEARANCE_M)
+        assert floor == pytest.approx(161.01, abs=0.01)
+        girder = bridges._bridge_girder_underside_m(bridge, 167.0)
+        assert girder == pytest.approx(165.21, abs=1e-6)
+        clearance = girder - floor
+        assert clearance == pytest.approx(4.2, abs=1e-6)
+        assert clearance >= config.BRIDGE_ROAD_CLEARANCE_MINIMUM_M - 1e-9
 
-    def test_ceiling_used_when_no_clearance_underside(self):
-        bridge = _bridge(clearance_underside_y_m=None, ceiling_y_m=4.8)
-        floor = bridges._bridge_corridor_floor_m(bridge, 167.0)
-        assert floor == pytest.approx(167.0 - (5.99 - 4.8) - 5.1, abs=1e-6)
+    def test_floor_ignores_underside_planes(self):
+        # Geometry-driven: the same deck height gives the same floor with
+        # or without underside data (the clearance is a check, not the
+        # driver).
+        with_girder = bridges._bridge_corridor_floor_m(_bridge(), 167.0)
+        without_girder = bridges._bridge_corridor_floor_m(
+            _bridge(clearance_underside_y_m=None, ceiling_y_m=None), 167.0
+        )
+        assert with_girder == pytest.approx(without_girder)
 
-    def test_clearance_margin_is_config_driven(self, monkeypatch):
-        monkeypatch.setattr(config, "BRIDGE_ROAD_CLEARANCE_M", 4.5)
-        bridge = _bridge(clearance_underside_y_m=None, ceiling_y_m=None)
-        floor = bridges._bridge_corridor_floor_m(bridge, 100.0)
-        assert floor == pytest.approx(100.0 - 4.5)
+    def test_girder_underside_fallbacks(self):
+        # clearance_underside preferred, ceiling as fallback, None when
+        # the object exposes no underside plane at all.
+        assert bridges._bridge_girder_underside_m(
+            _bridge(), 167.0
+        ) == pytest.approx(167.0 - (5.99 - 4.2), abs=1e-6)
+        assert bridges._bridge_girder_underside_m(
+            _bridge(clearance_underside_y_m=None, ceiling_y_m=4.8), 167.0
+        ) == pytest.approx(167.0 - (5.99 - 4.8), abs=1e-6)
+        assert bridges._bridge_girder_underside_m(
+            _bridge(clearance_underside_y_m=None, ceiling_y_m=None), 167.0
+        ) is None
 
 
 class TestDeckElevation:
@@ -272,8 +309,9 @@ class TestObjectSourcedCorridors:
         assert count == 1
         assert not suppression
         assert len(covered) == 1
-        # A flat under-deck plate at the object floor (160.11) was emitted.
-        floor = round(165.21 - 5.1, 1)
+        # A flat under-deck plate at the A10 geometry-driven floor
+        # (167.0 − 5.99 ≈ 161.0, the anchor-terrain datum) was emitted.
+        floor = round(167.0 - 5.99, 1)
         plates = [
             s for s in layout.shapes
             if s.ref == "object_bridge_corridor"
@@ -587,3 +625,344 @@ class TestExclusionWiringR4:
         assert assembly.exclusion_set_for_dsf(
             str(dsf_path), None, pack_root="PACK"
         ) == {("PACK", _BRIDGE_RESOURCE)}
+
+
+# ---------------------------------------------------------------------------
+# stage 2 — bridge laws (grade_law lockstep source)
+# ---------------------------------------------------------------------------
+
+from auto_patch import grade_law  # noqa: E402
+from auto_patch.layout import (  # noqa: E402
+    BuiltShape,
+    ROLE_JUNCTION,
+    vertex_bucket,
+)
+
+
+class TestBridgeLaws:
+    def test_deck_end_pin_elevation_kbna(self):
+        # KBNA: datum = 167.0 − 5.99; flat deck end at +5.99 → pin 167.0.
+        datum = 167.0 - 5.99
+        assert grade_law.bridge_deck_end_pin_elevation_m(
+            datum, 5.99
+        ) == pytest.approx(167.0)
+
+    def test_profile_pin_interpolates_and_clamps(self):
+        profile = [(5.0, 0.0), (15.0, 2.0), (25.0, 6.0)]
+        # Interior: linear between bins.
+        assert grade_law.bridge_profile_pin_elevation_m(
+            100.0, profile, 10.0
+        ) == pytest.approx(101.0)
+        assert grade_law.bridge_profile_pin_elevation_m(
+            100.0, profile, 20.0
+        ) == pytest.approx(104.0)
+        # Clamped outside the sampled range.
+        assert grade_law.bridge_profile_pin_elevation_m(
+            100.0, profile, -50.0
+        ) == pytest.approx(100.0)
+        assert grade_law.bridge_profile_pin_elevation_m(
+            100.0, profile, 500.0
+        ) == pytest.approx(106.0)
+        # Empty profile degrades to the datum.
+        assert grade_law.bridge_profile_pin_elevation_m(
+            100.0, [], 10.0
+        ) == pytest.approx(100.0)
+
+    def test_crossing_floor_law(self):
+        floor = grade_law.bridge_crossing_floor_m(100.0, 2.3)
+        assert floor == pytest.approx(
+            100.0 + config.BRIDGE_ROAD_CLEARANCE_M + 2.3
+        )
+        # Negative thickness (degenerate object) never LOWERS the floor.
+        assert grade_law.bridge_crossing_floor_m(
+            100.0, -3.0
+        ) == pytest.approx(100.0 + config.BRIDGE_ROAD_CLEARANCE_M)
+
+
+# ---------------------------------------------------------------------------
+# stage 2 — deck-end pin insertion (seam-anchor idiom)
+# ---------------------------------------------------------------------------
+
+def _junction_rect_across_start_abutment() -> BuiltShape:
+    """A junction rect straddling the bridge's START abutment line.  The
+    frame start abutment runs x=0, z −27.5..27.5; in layout meters that
+    is the segment x≈0, y ∓27.5.  This rect spans x −30..30, y −5..5, so
+    the extended abutment line cuts its two long edges at (0, ±5).
+
+    Carries warm-start ``node_altitudes`` (the post-seam-pipeline state
+    of a junction) so the pin writer's node-altitude stamping path — the
+    solver's fallback and the validator's read — is exercised; a shape
+    with NO altitude representation still gets registry pins (the solver
+    reads those directly) but nothing to stamp."""
+    polygon = Polygon([(-30.0, -5.0), (30.0, -5.0), (30.0, 5.0),
+                       (-30.0, 5.0)])
+    return BuiltShape(polygon=polygon, role=ROLE_JUNCTION, ref="J1",
+                      node_altitudes=[150.0] * 4 + [150.0])
+
+
+def _gate_on_layout_with_bridge(monkeypatch, bridge) -> _FakeLayout:
+    monkeypatch.setattr(config, "OBJECT_BRIDGE_TERRAIN", True)
+    layout = _FakeLayout()
+    setattr(
+        layout, bridges._OBJECT_BRIDGE_CLASSIFICATION_ATTRIBUTE,
+        _Classification([bridge]),
+    )
+    return layout
+
+
+class TestDeckEndPins:
+    def test_ring_vertices_inserted_and_pinned_at_deck_end(
+        self, monkeypatch
+    ):
+        layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
+        layout.shapes.append(_junction_rect_across_start_abutment())
+        pinned = bridges.insert_bridge_deck_end_pins(layout, None, 36, -87)
+        assert pinned >= 2, "both long-edge crossings must be pinned"
+        # The ring gained the two crossing vertices at x≈0.
+        ring = list(layout.shapes[0].polygon.exterior.coords)[:-1]
+        crossing_vertices = [
+            (x, y) for x, y in ring if abs(x) < 0.01 and abs(abs(y) - 5.0) < 0.1
+        ]
+        assert len(crossing_vertices) == 2
+        # The pin registry carries the KBNA deck-end value (MSL 167.0).
+        pin_values = getattr(layout, "_object_bridge_pin_values")
+        assert pin_values, "pin registry must be populated"
+        for value in pin_values.values():
+            assert value == pytest.approx(167.0, abs=0.01)
+        # node_altitudes at the pinned vertices carry the pin value.
+        node_altitudes = layout.shapes[0].node_altitudes
+        assert node_altitudes is not None
+        pinned_alts = [
+            node_altitudes[index]
+            for index, (x, y) in enumerate(ring)
+            if abs(x) < 0.01 and abs(abs(y) - 5.0) < 0.1
+        ]
+        assert pinned_alts and all(
+            a == pytest.approx(167.0, abs=0.01) for a in pinned_alts
+        )
+
+    def test_gate_off_inserts_nothing(self):
+        assert config.OBJECT_BRIDGE_TERRAIN is False
+        layout = _FakeLayout()
+        setattr(
+            layout, bridges._OBJECT_BRIDGE_CLASSIFICATION_ATTRIBUTE,
+            _Classification([_bridge()]),
+        )
+        layout.shapes.append(_junction_rect_across_start_abutment())
+        assert bridges.insert_bridge_deck_end_pins(
+            layout, None, 36, -87
+        ) == 0
+        assert not hasattr(layout, "_object_bridge_pin_values")
+        assert len(
+            list(layout.shapes[0].polygon.exterior.coords)
+        ) == 5  # untouched 4-corner ring
+
+    def test_no_ring_crossing_logs_and_pins_zero(self, monkeypatch):
+        layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
+        # A rect far away from both abutments.
+        far_polygon = Polygon([(500.0, 500.0), (560.0, 500.0),
+                               (560.0, 510.0), (500.0, 510.0)])
+        layout.shapes.append(
+            BuiltShape(polygon=far_polygon, role=ROLE_JUNCTION, ref="FAR")
+        )
+        assert bridges.insert_bridge_deck_end_pins(
+            layout, None, 36, -87
+        ) == 0
+
+
+# ---------------------------------------------------------------------------
+# stage 2 — solver seeding honours the bridge pin registry
+# ---------------------------------------------------------------------------
+
+class TestSolverBridgePins:
+    def test_seed_elevations_hard_pins_bridge_buckets(self):
+        from auto_patch.elevation_per_surface.solver_primitives import (
+            _seed_elevations,
+        )
+        layout = _FakeLayout()
+        corners = [(-30.0, -5.0), (30.0, -5.0), (30.0, 5.0), (-30.0, 5.0)]
+        polygon = Polygon(corners)
+        layout.shapes.append(BuiltShape(
+            polygon=polygon, role=ROLE_JUNCTION, ref="J1",
+            node_altitudes=[150.0] * 4 + [150.0],
+        ))
+        # Pin ONE corner via the bridge registry.
+        layout._object_bridge_pin_values = {
+            vertex_bucket(-30.0, -5.0): 167.0
+        }
+        nodes = list(corners)
+        bucket_to_idx = {
+            layout.canonical_points.get_or_add(x, y): index
+            for index, (x, y) in enumerate(corners)
+        }
+        elev, is_hard, have_initial = _seed_elevations(
+            layout, nodes, bucket_to_idx, dem=None,
+            tile_lat=36, tile_lon=-87,
+        )
+        assert is_hard[0] is True
+        assert elev[0] == pytest.approx(167.0)
+        assert have_initial[0] is True
+        # Other corners stay soft (warm-started at 150).
+        assert not any(is_hard[1:])
+        # Pinned indices are protected like seam pins.
+        assert 0 in getattr(layout, "_seam_pin_idx")
+
+    def test_seed_elevations_without_registry_is_untouched(self):
+        from auto_patch.elevation_per_surface.solver_primitives import (
+            _seed_elevations,
+        )
+        layout = _FakeLayout()
+        corners = [(-30.0, -5.0), (30.0, -5.0), (30.0, 5.0), (-30.0, 5.0)]
+        layout.shapes.append(BuiltShape(
+            polygon=Polygon(corners), role=ROLE_JUNCTION, ref="J1",
+            node_altitudes=[150.0] * 4 + [150.0],
+        ))
+        nodes = list(corners)
+        bucket_to_idx = {
+            layout.canonical_points.get_or_add(x, y): index
+            for index, (x, y) in enumerate(corners)
+        }
+        elev, is_hard, _have_initial = _seed_elevations(
+            layout, nodes, bucket_to_idx, dem=None,
+            tile_lat=36, tile_lon=-87,
+        )
+        assert not any(is_hard)
+        assert not hasattr(layout, "_seam_pin_idx")
+
+
+# ---------------------------------------------------------------------------
+# stage 2 — crossing floor producer + validator lockstep
+# ---------------------------------------------------------------------------
+
+def _elevated_terrain_carried_bridge() -> BridgeStructure:
+    """The EDDF-elevated-span class: pavement-continuous (TERRAIN_CARRIED)
+    with a crest well above grade and a girder underside — the crossing
+    must rise over the draped road beneath."""
+    return _bridge(
+        contract=TERRAIN_CARRIED,
+        deck_top_y_m=6.5,
+        clearance_underside_y_m=4.2,
+        ceiling_y_m=4.8,
+        absolute_deck_elevation_m=None,
+        deck_hardness=DECK_HARDNESS_HARD,
+        hard_deck=False,
+    )
+
+
+class TestCrossingFloor:
+    def _floors(self, monkeypatch, bridge, nodes, dem):
+        layout = _gate_on_layout_with_bridge(monkeypatch, bridge)
+        setattr(
+            layout, bridges._OBJECT_BRIDGE_ROAD_NETWORKS_ATTRIBUTE,
+            [_draped_road_network_across_deck()],
+        )
+        return layout, bridges.bridge_crossing_floor_nodes(
+            layout, nodes, dem, 36, -87
+        )
+
+    def test_floor_applied_inside_footprint(self, monkeypatch):
+        inside_node = (65.0, 0.0)
+        outside_node = (500.0, 500.0)
+        _layout, floors = self._floors(
+            monkeypatch, _elevated_terrain_carried_bridge(),
+            [inside_node, outside_node], _FakeDem(100.0),
+        )
+        # floor = road (DEM 100) + clearance 5.1 + thickness (6.5 − 4.2).
+        expected = 100.0 + config.BRIDGE_ROAD_CLEARANCE_M + (6.5 - 4.2)
+        assert 0 in floors and floors[0] == pytest.approx(expected)
+        assert 1 not in floors
+
+    def test_flush_deck_gets_restraint_not_floor(self, monkeypatch):
+        flush = _bridge(
+            contract=TERRAIN_CARRIED, deck_top_y_m=0.0,
+            clearance_underside_y_m=None, ceiling_y_m=None,
+            absolute_deck_elevation_m=None,
+            deck_hardness=DECK_HARDNESS_HARD, hard_deck=False,
+        )
+        _layout, floors = self._floors(
+            monkeypatch, flush, [(65.0, 0.0)], _FakeDem(100.0)
+        )
+        assert floors == {}
+
+    def test_deck_carried_gets_no_crossing_floor(self, monkeypatch):
+        _layout, floors = self._floors(
+            monkeypatch, _bridge(), [(65.0, 0.0)], _FakeDem(100.0)
+        )
+        assert floors == {}
+
+    def test_validator_agrees_with_producer(self, monkeypatch):
+        bridge = _elevated_terrain_carried_bridge()
+        layout = _gate_on_layout_with_bridge(monkeypatch, bridge)
+        setattr(
+            layout, bridges._OBJECT_BRIDGE_ROAD_NETWORKS_ATTRIBUTE,
+            [_draped_road_network_across_deck()],
+        )
+        expected_floor = (
+            100.0 + config.BRIDGE_ROAD_CLEARANCE_M + (6.5 - 4.2)
+        )
+        # A pavement rect inside the footprint SOLVED BELOW the floor.
+        low_polygon = Polygon([(50.0, -4.0), (80.0, -4.0), (80.0, 4.0),
+                               (50.0, 4.0)])
+        layout.shapes.append(BuiltShape(
+            polygon=low_polygon, role=ROLE_JUNCTION, ref="LOW",
+            altitude=100.0,
+        ))
+        from auto_patch import verification
+        findings = verification.check_bridge_crossing_floor(
+            layout, _FakeDem(100.0), 36, -87
+        )
+        assert findings, "a node below the floor must be reported"
+        kind, _reference, below, _tolerance, _location = findings[0]
+        assert kind == "crossing_floor"
+        assert below == pytest.approx(expected_floor - 100.0, abs=0.01)
+        # Raise the pavement to the floor: the validator goes quiet.
+        layout.shapes[-1] = BuiltShape(
+            polygon=low_polygon, role=ROLE_JUNCTION, ref="OK",
+            altitude=expected_floor,
+        )
+        assert verification.check_bridge_crossing_floor(
+            layout, _FakeDem(100.0), 36, -87
+        ) == []
+
+    def test_validators_gate_off_return_empty(self):
+        from auto_patch import verification
+        assert config.OBJECT_BRIDGE_TERRAIN is False
+        layout = _FakeLayout()
+        assert verification.check_bridge_crossing_floor(
+            layout, None, 36, -87
+        ) == []
+        assert verification.check_bridge_deck_end_pins(
+            layout, None, 36, -87
+        ) == []
+
+
+class TestDeckEndPinValidator:
+    def test_solved_at_law_value_passes_perturbed_fails(self, monkeypatch):
+        layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
+        layout.shapes.append(_junction_rect_across_start_abutment())
+        pinned = bridges.insert_bridge_deck_end_pins(layout, None, 36, -87)
+        assert pinned >= 2
+        from auto_patch import verification
+        # The writer stamped node_altitudes at the pin value, simulating
+        # a solve that held the pins: the validator agrees.
+        assert verification.check_bridge_deck_end_pins(
+            layout, None, 36, -87
+        ) == []
+        # Perturb one pinned vertex: exactly that deviation is reported.
+        shape = layout.shapes[0]
+        ring = list(shape.polygon.exterior.coords)[:-1]
+        node_altitudes = list(shape.node_altitudes[:len(ring)])
+        for index, (x, y) in enumerate(ring):
+            if abs(x) < 0.01 and abs(abs(y) - 5.0) < 0.1:
+                node_altitudes[index] = 165.0  # 2 m below the law value
+                break
+        shape.node_altitudes = node_altitudes + [node_altitudes[0]]
+        findings = verification.check_bridge_deck_end_pins(
+            layout, None, 36, -87
+        )
+        assert len(findings) == 1
+        kind, reference, deviation, tolerance, _location = findings[0]
+        assert kind == "deck_end_pin"
+        assert "end0" in reference or "end1" in reference
+        assert deviation == pytest.approx(2.0, abs=0.02)
+        assert tolerance == pytest.approx(0.25)

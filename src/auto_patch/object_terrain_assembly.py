@@ -187,9 +187,17 @@ def attach_bridge_classification(layout, xplane_root: str):
 
     Returns the :class:`object_terrain_features.ClassificationResult` (also
     cached on ``layout``) or ``None`` when the gate is off or no overlay
-    DSF could be located."""
+    DSF could be located.
+
+    Idempotent: stage 2 attaches PRE-solve (the pin writers need the
+    records before the seam hook), and the post-solve emitter hook calls
+    this again as a fallback — a result already cached on the layout is
+    returned as-is, never recomputed."""
     if not config.OBJECT_BRIDGE_TERRAIN:
         return None
+    cached = getattr(layout, CLASSIFICATION_ATTRIBUTE, None)
+    if cached is not None:
+        return cached
     apt_dat_path = getattr(layout, "apt_dat_path", None)
     anchor = getattr(layout, "anchor", None)
     if not apt_dat_path or anchor is None:

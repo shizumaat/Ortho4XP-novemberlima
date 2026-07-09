@@ -4014,6 +4014,34 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     f"{n_seam} DEM-anchored, "
                     f"{n_redistributed} runway shape(s) redistributed.")
 
+            # Feature B stage 2 (O4_OBJECT_BRIDGE_TERRAIN, docs/object_
+            # terrain_features_spec.md section 3.2): classify the pack's
+            # bridge objects NOW (pre-solve; the same cached result feeds
+            # the post-solve corridor emitters) and hard-pin pavement at
+            # the deck ends / across profile-carried spans using the
+            # seam-anchor idiom above.  Gate off ⇒ attach is a no-op and
+            # both pin writers return 0 without touching a shape.
+            try:
+                from . import object_terrain_assembly
+                object_terrain_assembly.attach_bridge_classification(
+                    layout, xplane_root)
+                from .bridges import (
+                    insert_bridge_deck_end_pins,
+                    insert_bridge_profile_pins)
+                n_bridge_deck_pins = insert_bridge_deck_end_pins(
+                    layout, dem, tile_lat, tile_lon)
+                n_bridge_profile_pins = insert_bridge_profile_pins(
+                    layout, dem, tile_lat, tile_lon)
+                if n_bridge_deck_pins or n_bridge_profile_pins:
+                    UI.vprint(1,
+                        f"  [pav-builder] {icao}: object-bridge pins — "
+                        f"{n_bridge_deck_pins} deck-end, "
+                        f"{n_bridge_profile_pins} profile.")
+            except Exception as _object_bridge_error:  # never fail the build
+                UI.vprint(1,
+                          "   [object-bridge] solve-side pins skipped:",
+                          _object_bridge_error)
+
             # (session 51 single-solve) The first solver pass + the
             # grade-based `_subdivide_violating_junctions` loop were
             # REMOVED here.  The pipeline now finalizes ALL geometry

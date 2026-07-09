@@ -838,3 +838,93 @@ def classify_pair(p: PairContext) -> Optional[Allowance]:
         cap = SERVICE_ROAD_MAX_GRADE
 
     return Allowance.flat(cap)
+
+
+# ── Object-derived bridge law (feature B, docs/object_terrain_features_spec.md)
+# Single source for the solve-side writers in ``bridges.py`` (deck-end pin
+# values, crossing-floor producer) and the ``verification.py`` checks
+# (``check_bridge_deck_end_pins`` / ``check_bridge_crossing_floor``) — the
+# lockstep pattern of the runway-end skirt above.  Pure functions of the
+# classified object geometry and a datum; the config constants carry the
+# clearance values (amendment A10 narrowed ``BRIDGE_ROAD_CLEARANCE_M`` to
+# the crossing-floor law; the deck-carried corridor floor is
+# geometry-driven and lives in ``bridges._bridge_corridor_floor_m``).
+
+def bridge_deck_end_pin_elevation_m(
+        datum_elevation_m: float,
+        deck_end_elevation_y_m: float) -> float:
+    """THE hard-pin elevation at a bridge deck end (spec section 3.2
+    step 2): the anchor-terrain datum plus the deck-top profile value at
+    that end.
+
+    ``datum_elevation_m`` is the absolute elevation of the object's
+    anchor-terrain plane: ``absolute_deck_elevation_m − deck_top_y_m``
+    when OBJECT_MSL fixtures pin the deck (KBNA: 167.0 − 5.99), else the
+    solved/DEM terrain at the anchor.  ``deck_end_elevation_y_m`` is the
+    profile value at the end (effective metres above that datum) — for a
+    flat KBNA-class deck both ends equal the crest, giving 167.0
+    exactly; for a PROFILE_CARRIED ramp the two ends differ.  Pavement
+    ring vertices inserted on the abutment line are pinned to this value
+    and the network grades up to them under the existing edge budgets."""
+    return float(datum_elevation_m) + float(deck_end_elevation_y_m)
+
+
+def bridge_profile_pin_elevation_m(
+        datum_elevation_m: float,
+        deck_top_profile: list[tuple[float, float]],
+        along_axis_m: float) -> float:
+    """THE per-vertex pin elevation across a PROFILE_CARRIED span (spec
+    section 3.2, amendment A4): datum plus the deck-top profile linearly
+    interpolated at ``along_axis_m``, clamped to the profile's end
+    values outside its sampled range.  The object is the authority for
+    the vertical shape; pavement nodes inside the deck footprint are
+    pinned to this so the rendered object and the solved pavement meet
+    exactly (the runway-profile per-vertex mechanism)."""
+    if not deck_top_profile:
+        return float(datum_elevation_m)
+    positions = [along for along, _height in deck_top_profile]
+    heights = [height for _along, height in deck_top_profile]
+    if along_axis_m <= positions[0]:
+        profile_height = heights[0]
+    elif along_axis_m >= positions[-1]:
+        profile_height = heights[-1]
+    else:
+        profile_height = heights[-1]
+        for index in range(1, len(positions)):
+            if along_axis_m <= positions[index]:
+                span = positions[index] - positions[index - 1]
+                fraction = (
+                    (along_axis_m - positions[index - 1]) / span
+                    if span > 0.0 else 0.0
+                )
+                profile_height = (
+                    heights[index - 1]
+                    + fraction * (heights[index] - heights[index - 1])
+                )
+                break
+    return float(datum_elevation_m) + float(profile_height)
+
+
+def bridge_crossing_floor_m(
+        road_surface_elevation_m: float,
+        structure_thickness_m: float) -> float:
+    """THE floor under pavement nodes inside a TERRAIN/PROFILE_CARRIED
+    span footprint whose road beneath is not (or only partially)
+    lowered (spec section 3.2, amendment A2): the crossing must clear
+    the traffic under it, so its floor is the road surface plus the
+    road-corridor clearance plus the deck's own structural thickness
+    (deck top − clearance underside, measured from the object; 0 when
+    the object exposes no underside plane).
+
+    Wired as a per-node solver floor (``node_band``/``spine_floor``
+    idiom): the one-solve raises the crossing to the floor and the
+    existing grade caps and curvature law shape the approach ramps —
+    no ramp geometry is authored.  Both the solve-side producer
+    (``bridges.bridge_crossing_floor_nodes``) and the validator
+    (``verification.check_bridge_crossing_floor``) call THIS function."""
+    from .config import BRIDGE_ROAD_CLEARANCE_M
+    return (
+        float(road_surface_elevation_m)
+        + float(BRIDGE_ROAD_CLEARANCE_M)
+        + max(0.0, float(structure_thickness_m))
+    )

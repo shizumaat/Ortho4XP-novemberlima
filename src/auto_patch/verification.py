@@ -1323,6 +1323,175 @@ def check_adjacent_ground(layout, dem, tile_lat, tile_lon,
     return out
 
 
+def _shape_vertex_altitudes(shape, vertex_count):
+    """Per-vertex solved altitudes for a shape's open ring, or ``None``
+    when the shape carries no elevation representation yet.  Mirrors the
+    solver's own seeding priority: ``node_altitudes`` (per-vertex) →
+    flat ``altitude`` → 4-corner ``altitude_high/low`` ([H, L, L, H])."""
+    if shape.node_altitudes:
+        values = [float(a) for a in shape.node_altitudes[:vertex_count]]
+        if len(values) < vertex_count:
+            values += [values[-1]] * (vertex_count - len(values))
+        return values
+    if shape.altitude is not None:
+        return [float(shape.altitude)] * vertex_count
+    if (shape.altitude_high is not None
+            and shape.altitude_low is not None and vertex_count == 4):
+        return [float(shape.altitude_high), float(shape.altitude_low),
+                float(shape.altitude_low), float(shape.altitude_high)]
+    return None
+
+
+def check_bridge_deck_end_pins(layout, dem, tile_lat, tile_lon,
+                               tolerance_m: float = 0.25):
+    """Object-bridge deck-end pin law reader (feature B stage 2,
+    lockstep with ``bridges.insert_bridge_deck_end_pins``): every
+    pavement ring vertex on a DECK_CARRIED (or cosmetic) bridge's
+    abutment line must sit at ``grade_law.bridge_deck_end_pin_elevation_
+    m`` — the same function the writer used.  The acceptance number is
+    the spec's ±0.25 m (KBNA: abutment terrain = 167.0 ± 0.25).
+
+    Pure reporter.  Returns ``[("deck_end_pin", ref, deviation_m,
+    tolerance_m, "lat,lon"), …]`` worst-first; empty when the gate is
+    off or nothing is classified."""
+    from .config import OBJECT_BRIDGE_TERRAIN
+    if not OBJECT_BRIDGE_TERRAIN:
+        return []
+    from shapely.geometry import Point as _Point
+    from .bridges import (
+        _BRIDGE_PIN_ON_LINE_TOLERANCE_M,
+        _BRIDGE_PIN_ROLES,
+        _abutment_lines_layout_meters,
+        _bridge_datum_elevation_m,
+        _object_bridge_classification,
+        _partition_bridges_for_corridors,
+    )
+    from .grade_law import bridge_deck_end_pin_elevation_m
+    classification = _object_bridge_classification(layout)
+    if classification is None:
+        return []
+    corridor_bridges, _suppress, _refused = (
+        _partition_bridges_for_corridors(classification)
+    )
+    out = []
+    for bridge in corridor_bridges:
+        datum = _bridge_datum_elevation_m(bridge, dem, tile_lat, tile_lon)
+        if datum is None:
+            continue
+        abutment_lines = _abutment_lines_layout_meters(bridge, layout)
+        reference = ",".join(bridge.object_resources)
+        for end_index, line in enumerate(abutment_lines):
+            end_y = (
+                bridge.deck_end_elevations_y_m[end_index]
+                if end_index < len(bridge.deck_end_elevations_y_m)
+                else bridge.deck_top_y_m
+            )
+            law_value = bridge_deck_end_pin_elevation_m(datum, end_y)
+            for shape in layout.shapes:
+                if shape.role not in _BRIDGE_PIN_ROLES:
+                    continue
+                if shape.polygon is None or shape.polygon.is_empty:
+                    continue
+                ring = list(shape.polygon.exterior.coords)
+                if ring and ring[0] == ring[-1]:
+                    ring = ring[:-1]
+                solved = _shape_vertex_altitudes(shape, len(ring))
+                if solved is None:
+                    continue
+                for (x, y), value in zip(ring, solved):
+                    try:
+                        on_line = (
+                            line.distance(_Point(x, y))
+                            <= _BRIDGE_PIN_ON_LINE_TOLERANCE_M
+                        )
+                    except Exception:
+                        continue
+                    if not on_line:
+                        continue
+                    deviation = abs(float(value) - law_value)
+                    if deviation > tolerance_m:
+                        out.append((
+                            "deck_end_pin",
+                            f"{reference}:end{end_index}",
+                            deviation,
+                            tolerance_m,
+                            _ll(layout, x, y),
+                        ))
+    out.sort(key=lambda r: -r[2])
+    return out
+
+
+def check_bridge_crossing_floor(layout, dem, tile_lat, tile_lon,
+                                tolerance_m: float = 0.25):
+    """Object-bridge crossing-floor law reader (feature B stage 2,
+    lockstep with the solve-side producer): every pavement ring vertex
+    inside a TERRAIN/PROFILE_CARRIED span footprint whose road beneath
+    is un-lowered must sit AT or ABOVE ``grade_law.bridge_crossing_
+    floor_m``.  The floor value and every guard come from the SHARED
+    ``bridges._bridge_crossing_floor_for_bridge`` — the identical
+    decision the solver consumed.
+
+    Pure reporter.  Returns ``[("crossing_floor", ref,
+    metres_below_floor, tolerance_m, "lat,lon"), …]`` worst-first."""
+    from .config import OBJECT_BRIDGE_TERRAIN
+    if not OBJECT_BRIDGE_TERRAIN:
+        return []
+    from shapely.geometry import Point as _Point
+    from .bridges import (
+        _BRIDGE_PIN_ROLES,
+        _bridge_crossing_floor_for_bridge,
+        _local_meter_projections,
+        _object_bridge_classification,
+        _object_bridge_road_networks,
+    )
+    classification = _object_bridge_classification(layout)
+    if classification is None:
+        return []
+    road_networks = _object_bridge_road_networks(layout)
+    if not road_networks:
+        return []
+    to_meters, meters_to_lat_lon = _local_meter_projections(layout.anchor)
+    out = []
+    for bridge in classification.bridges:
+        crossing = _bridge_crossing_floor_for_bridge(
+            bridge, road_networks, dem, tile_lat, tile_lon,
+            to_meters, meters_to_lat_lon,
+        )
+        if crossing is None:
+            continue
+        floor_value, footprint = crossing
+        reference = ",".join(bridge.object_resources)
+        for shape in layout.shapes:
+            if shape.role not in _BRIDGE_PIN_ROLES:
+                continue
+            if shape.polygon is None or shape.polygon.is_empty:
+                continue
+            ring = list(shape.polygon.exterior.coords)
+            if ring and ring[0] == ring[-1]:
+                ring = ring[:-1]
+            solved = _shape_vertex_altitudes(shape, len(ring))
+            if solved is None:
+                continue
+            for (x, y), value in zip(ring, solved):
+                try:
+                    inside = footprint.contains(_Point(x, y))
+                except Exception:
+                    continue
+                if not inside:
+                    continue
+                below = floor_value - float(value)
+                if below > tolerance_m:
+                    out.append((
+                        "crossing_floor",
+                        reference,
+                        below,
+                        tolerance_m,
+                        _ll(layout, x, y),
+                    ))
+    out.sort(key=lambda r: -r[2])
+    return out
+
+
 def check_terminal_flat(layout):
     """Invariant H26: a terminal moves as one rigid flat unit — a single
     ``altitude`` tag, never per-vertex ``node_altitudes`` or two-end
@@ -2063,7 +2232,8 @@ def run_grade_checks(layout):
 def _verify_debug_lines(layout, icao, taxi_index, gdesc, *,
                         overlaps, source, flat, edge_v, flat_v, axis_v,
                         short_e, wedges, cross, within, steps,
-                        rwy_grade, adjacent=()) -> list:
+                        rwy_grade, adjacent=(), bridge_pins=(),
+                        bridge_floor=()) -> list:
     """Build the full per-category diagnostic lines for the verify debug
     log (no 5-item cap — this is for an engineer, not the console)."""
     def ds(idx):
@@ -2108,6 +2278,14 @@ def _verify_debug_lines(layout, icao, taxi_index, gdesc, *,
             else "un-cut above ceiling"
         out.append(f"  ADJACENT-GROUND {mag:.1f} m {verb} "
                    f"(tol {tol:.1f} m) @ {loc}: {ref}")
+    for _kind, ref, mag, tol, loc in sorted(
+            bridge_pins, key=lambda r: -r[2]):
+        out.append(f"  BRIDGE-DECK-PIN {mag:.2f} m off the deck-end law "
+                   f"value (tol {tol:.2f} m) @ {loc}: {ref}")
+    for _kind, ref, mag, tol, loc in sorted(
+            bridge_floor, key=lambda r: -r[2]):
+        out.append(f"  BRIDGE-CROSSING-FLOOR {mag:.2f} m below floor "
+                   f"(tol {tol:.2f} m) @ {loc}: {ref}")
     return out
 
 
@@ -2234,6 +2412,35 @@ def verify_and_log(layout, icao: str, debug_log_path: str | None = None,
         except _shapely_domain_exceptions:         # pragma: no cover
             adjacent = []
 
+    # Object-bridge law readers (feature B stage 2) — gate-guarded like
+    # the adjacent-ground law: a gate-off build has ZERO overhead and
+    # byte-identical verify output.  Shapely-domain failures only may
+    # skip a check (the _GEOM_EXC rule); programming errors surface.
+    bridge_pins = []
+    bridge_floor = []
+    from .config import OBJECT_BRIDGE_TERRAIN
+    if OBJECT_BRIDGE_TERRAIN:
+        import math as _math
+        from .clearance import _GEOM_EXC as _shapely_domain_exceptions
+        _dem = dem
+        _tlat, _tlon = tile_lat, tile_lon
+        if _dem is None:
+            from .elevation import _load_airport_dem
+            _dem = _load_airport_dem(layout.anchor[0], layout.anchor[1])
+        if _tlat is None or _tlon is None:
+            _tlat = int(_math.floor(layout.anchor[0]))
+            _tlon = int(_math.floor(layout.anchor[1]))
+        try:
+            bridge_pins = check_bridge_deck_end_pins(
+                layout, _dem, _tlat, _tlon)
+        except _shapely_domain_exceptions:         # pragma: no cover
+            bridge_pins = []
+        try:
+            bridge_floor = check_bridge_crossing_floor(
+                layout, _dem, _tlat, _tlon)
+        except _shapely_domain_exceptions:         # pragma: no cover
+            bridge_floor = []
+
     counts = {"overlap": len(overlaps), "source": len(source),
               "terminal_flat": len(flat), "vertex_on_edge": len(edge_v),
               "vertex_on_flat_edge": len(flat_v),
@@ -2243,6 +2450,9 @@ def verify_and_log(layout, icao: str, debug_log_path: str | None = None,
               "steps": len(steps), "runway_grade": len(rwy_grade)}
     if ADJACENT_GROUND_LAW_ENABLED:
         counts["adjacent_ground"] = len(adjacent)
+    if OBJECT_BRIDGE_TERRAIN:
+        counts["bridge_deck_pins"] = len(bridge_pins)
+        counts["bridge_crossing_floor"] = len(bridge_floor)
     if not sum(counts.values()):
         UI.vprint(1, f"  [verify] {icao}: OK — no patch issues.")
         return counts
@@ -2269,7 +2479,8 @@ def verify_and_log(layout, icao: str, debug_log_path: str | None = None,
         overlaps=overlaps, source=source, flat=flat, edge_v=edge_v,
         flat_v=flat_v, axis_v=axis_v, short_e=short_e, wedges=wedges,
         cross=cross, within=within, steps=steps, rwy_grade=rwy_grade,
-        adjacent=adjacent)
+        adjacent=adjacent, bridge_pins=bridge_pins,
+        bridge_floor=bridge_floor)
     _write_verify_debug(debug_log_path, icao, counts, lines)
 
     # User console: one summary line only (suppressed at build verbosity 0);

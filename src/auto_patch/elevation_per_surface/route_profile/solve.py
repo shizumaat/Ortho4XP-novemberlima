@@ -540,6 +540,20 @@ def solve_route_profile(layout, icao: str,
                 layout, bucket_to_idx, band, dem_fn, building_seats).items():
             if _fl > u_spine_floor.get(_i, -float("inf")):
                 u_spine_floor[_i] = _fl
+        # OBJECT-BRIDGE CROSSING FLOOR (feature B stage 2, gated by
+        # O4_OBJECT_BRIDGE_TERRAIN via the cached classification — with
+        # the gate off the producer returns {} without reading anything):
+        # a TERRAIN/PROFILE_CARRIED span over an un-lowered draped road
+        # gets per-node floors = road + clearance + structure thickness
+        # (``grade_law.bridge_crossing_floor_m``) so the hump solves
+        # itself under the existing grade and curvature caps (spec
+        # section 3.2, amendment A2).  Merged by max like the apron
+        # floors above.
+        from ...bridges import bridge_crossing_floor_nodes
+        for _i, _fl in bridge_crossing_floor_nodes(
+                layout, nodes, dem, tile_lat, tile_lon).items():
+            if _fl > u_spine_floor.get(_i, -float("inf")):
+                u_spine_floor[_i] = _fl
         # FEEDER CONVERGENCE (tilt model): a no-building apron is ANCHORED like a
         # building so its feeder SPINES grade to meet it — but at the per-feeder
         # feasible level L_i (the apron tilts ≤cap between contacts, see

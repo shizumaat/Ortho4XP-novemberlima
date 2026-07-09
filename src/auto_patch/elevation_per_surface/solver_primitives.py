@@ -1752,6 +1752,53 @@ def _seed_elevations(layout, nodes, bucket_to_idx,
             layout.m_to_ll(seam_pins[i][0], seam_pins[i][1])
             for i in pin_vals]
 
+    # ── Object-bridge deck pins (feature B stage 2, gated) ───────────
+    # ``layout._object_bridge_pin_values`` maps vertex-bucket keys →
+    # FIXED absolute elevations (deck-end / profile pins written by
+    # ``bridges.insert_bridge_deck_end_pins`` /
+    # ``insert_bridge_profile_pins`` from ``grade_law`` values; only ever
+    # populated under O4_OBJECT_BRIDGE_TERRAIN — absent ⇒ this block is
+    # dead and seeding is byte-identical).  Unlike tile-seam pins these
+    # are NEVER DEM re-sampled: the pin IS the object's deck elevation
+    # (the pavement must meet the rendered deck exactly, spec section
+    # 3.2 step 2).  Runs after the seam block so a deck pin coinciding
+    # with a seam vertex wins (pavement/deck value beats terrain — the
+    # weld ruling's "pavement value always wins").
+    bridge_pin_values = getattr(
+        layout, "_object_bridge_pin_values", None)
+    if bridge_pin_values:
+        from ..layout import SHARED_VERTEX_TOL_M as _BRIDGE_TOL
+        _bridge_bucket_scale = 1.0 / _BRIDGE_TOL
+        _bridge_cps = layout.canonical_points
+        bridge_pinned_idx: set = set()
+        for s in layout.shapes:
+            if s.polygon is None or s.polygon.is_empty:
+                continue
+            coords = _open_ring(list(s.polygon.exterior.coords))
+            if len(coords) < 3:
+                continue
+            for (x, y) in coords:
+                bucket = (int(round(x * _bridge_bucket_scale)),
+                          int(round(y * _bridge_bucket_scale)))
+                pin_value = bridge_pin_values.get(bucket)
+                if pin_value is None:
+                    continue
+                idx = bucket_to_idx.get(
+                    _bridge_cps.get_or_add(float(x), float(y)))
+                if idx is None:
+                    continue
+                elev[idx] = float(pin_value)
+                is_hard[idx] = True
+                have_initial[idx] = True
+                bridge_pinned_idx.add(idx)
+        if bridge_pinned_idx:
+            # Deck pins share the seam pins' protection: downstream
+            # re-stamp / relaxation passes must never move them.
+            existing_pin_idx = getattr(layout, "_seam_pin_idx", None)
+            layout._seam_pin_idx = (  # type: ignore[attr-defined]
+                set(existing_pin_idx) if existing_pin_idx else set()
+            ) | bridge_pinned_idx
+
     # Warm-start soft nodes.
     for s in layout.shapes:
         if s.role not in PAVEMENT_ROLES or s.role == ROLE_RUNWAY:

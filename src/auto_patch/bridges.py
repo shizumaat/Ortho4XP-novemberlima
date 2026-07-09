@@ -3322,25 +3322,36 @@ def _bridge_deck_elevation_m(bridge, dem, tile_lat, tile_lon):
 
 
 def _bridge_corridor_floor_m(bridge, deck_elevation_m):
-    """The depressed-corridor floor elevation under a deck-carried span
-    (spec section 3.2 step 3): the girder underside (deck elevation minus
-    the deck-top-to-clearance-underside structure thickness) minus the
-    road clearance margin ``config.BRIDGE_ROAD_CLEARANCE_M``.
+    """The depressed-corridor floor elevation under a deck-carried span —
+    GEOMETRY-DRIVEN per amendment A10: **floor = absolute deck elevation −
+    hard-deck height above anchor terrain** (`deck_top_y_m`), which is the
+    anchor-terrain datum the object was authored against.  KBNA
+    calibration: 167.0 − 5.99 ≈ 161.0, matching the author mesh exactly;
+    the previous clearance-driven floor (girder − 5.1) over-dug by ~0.9 m.
 
-    ``clearance_underside_y_m`` is the LOWEST clearance-limiting plane
-    (girder line, +4.2 at KBNA — the value the corridor must clear, not
-    the +4.8 slab underside).  When the object exposes no underside plane
-    the structure thickness is unknown and taken as zero, so the floor is
-    the deck elevation minus the clearance margin (a safe over-estimate of
-    headroom — the corridor sits lower, never higher)."""
+    The clearance constant is a CHECK, not the driver:
+    ``config.BRIDGE_ROAD_CLEARANCE_MINIMUM_M`` (4.2, the measured
+    in-the-wild girder clearance) is the validator's acceptance bound on
+    floor-to-girder — see :func:`_bridge_girder_underside_m` and the
+    emission-time warning in the corridor emitter."""
+    return float(deck_elevation_m) - float(bridge.deck_top_y_m)
+
+
+def _bridge_girder_underside_m(bridge, deck_elevation_m):
+    """Absolute elevation of the clearance-limiting underside plane
+    (girder line; the slab-underside ``ceiling_y_m`` as fallback), or
+    ``None`` when the object exposes no underside plane.  Used by the
+    corridor clearance CHECK (amendment A10: floor-to-girder must reach
+    ``config.BRIDGE_ROAD_CLEARANCE_MINIMUM_M``), never by the floor
+    computation."""
     underside = bridge.clearance_underside_y_m
     if underside is None:
         underside = bridge.ceiling_y_m
-    structure_thickness = 0.0
-    if underside is not None:
-        structure_thickness = max(0.0, float(bridge.deck_top_y_m) - float(underside))
-    girder_underside_absolute = deck_elevation_m - structure_thickness
-    return girder_underside_absolute - float(_CFG.BRIDGE_ROAD_CLEARANCE_M)
+    if underside is None:
+        return None
+    return float(deck_elevation_m) - (
+        float(bridge.deck_top_y_m) - float(underside)
+    )
 
 
 def _partition_bridges_for_corridors(classification):
@@ -3455,9 +3466,13 @@ def _emit_object_sourced_bridge_corridors(
 
     Road source per span (spec section 3.2 step 3): the sibling DSF road
     network's fully-draped segments crossing the footprint, else the OSM
-    big-roads fallback (unchanged from legacy).  The corridor floor comes
-    from the object (``_bridge_corridor_floor_m``); approach ramps step the
-    road surface from the floor up to the DEM outside the footprint."""
+    big-roads fallback (unchanged from legacy).  The corridor floor is
+    geometry-driven (``_bridge_corridor_floor_m``, amendment A10 —
+    the anchor-terrain datum, with the girder clearance CHECKED against
+    ``config.BRIDGE_ROAD_CLEARANCE_MINIMUM_M``); the depressed approach
+    walks extend ``config.BRIDGE_CORRIDOR_DEPRESSED_LENGTH_M`` (240 m,
+    the author-mesh measurement) per side — the caller's
+    ``approach_length_m`` acts only as a wider override."""
     to_meters, meters_to_lat_lon = _local_meter_projections(layout.anchor)
     corridor_bridges, suppress_bridges, refused_bridges = (
         _partition_bridges_for_corridors(classification)
@@ -3498,6 +3513,23 @@ def _emit_object_sourced_bridge_corridors(
             )
             continue
         floor_elevation = _bridge_corridor_floor_m(bridge, deck_elevation)
+        # Amendment A10 clearance CHECK (never the floor driver): the
+        # floor-to-girder gap must reach the measured in-the-wild minimum.
+        girder_underside = _bridge_girder_underside_m(bridge, deck_elevation)
+        if girder_underside is not None:
+            girder_clearance = girder_underside - floor_elevation
+            if girder_clearance < float(
+                _CFG.BRIDGE_ROAD_CLEARANCE_MINIMUM_M
+            ) - 1e-6:
+                UI.vprint(
+                    1,
+                    "   [object-bridge] WARNING: corridor clearance "
+                    f"{girder_clearance:.2f} m under "
+                    f"{bridge.object_resources} is below the "
+                    f"{_CFG.BRIDGE_ROAD_CLEARANCE_MINIMUM_M} m acceptance "
+                    "bound (amendment A10) — emitting anyway, audit "
+                    "required",
+                )
 
         road_lines = _draped_road_centerlines_meters(
             bridge, road_networks, to_meters
@@ -3521,10 +3553,16 @@ def _emit_object_sourced_bridge_corridors(
             )
             continue
 
+        # A10 point (iv): the depressed road runs >= 240 m per side
+        # before rejoining grade; a caller may only widen that.
+        depressed_length_m = max(
+            float(approach_length_m),
+            float(_CFG.BRIDGE_CORRIDOR_DEPRESSED_LENGTH_M),
+        )
         emitted_here = _emit_corridor_for_footprint(
             layout, dem, tile_lat, tile_lon, meters_to_lat_lon,
             footprint, floor_elevation, road_lines,
-            road_width_m, ramp_step_m, approach_length_m,
+            road_width_m, ramp_step_m, depressed_length_m,
         )
         if emitted_here:
             n_emitted += 1
@@ -3712,6 +3750,445 @@ def _emit_corridor_ramp_chain(
             pass
         previous = current
     return emitted
+
+
+# ---------------------------------------------------------------------------
+# Feature B stage 2 — solve-side deck-end / profile pins + crossing floor
+# (spec section 3.2 steps 1-2 and the bridge_crossing_floor law; all law
+# values come from grade_law so the writers here and the verification
+# checks can never drift — the lockstep pattern of the runway-end skirt.)
+# ---------------------------------------------------------------------------
+
+# Pavement roles eligible for bridge pins: the solved airside network the
+# deck couples to.  Boundary / retaining walls / tunnel ramps / buildings
+# are feature shapes, not the graded network the abutment meets.
+_BRIDGE_PIN_ROLES = frozenset({
+    ROLE_RUNWAY, ROLE_RUNWAY_CROSSING, ROLE_PRIMARY_PARALLEL,
+    ROLE_SECONDARY_PARALLEL, ROLE_STUB, ROLE_CROSS_CONNECTOR,
+    ROLE_APRON, ROLE_JUNCTION,
+})
+
+# A ring vertex within this distance (m) of an abutment line counts as
+# lying ON it (inserted crossings are exact intersections; pre-existing
+# deck-cut end vertices sit within layout snapping tolerance).
+_BRIDGE_PIN_ON_LINE_TOLERANCE_M = 0.25
+
+# Abutment lines are exactly deck-width; extend each end by this fraction
+# of its own length so a ring crossing at the deck corner is still cut.
+_ABUTMENT_LINE_EXTENSION_FRACTION = 0.25
+
+
+def _bridge_datum_elevation_m(bridge, dem, tile_lat, tile_lon):
+    """Absolute elevation of the object's anchor-terrain plane (the datum
+    every effective height is measured from): ``absolute_deck_elevation_m
+    − deck_top_y_m`` when OBJECT_MSL fixtures pin the deck, else the DEM
+    at the anchor.  ``None`` when neither source is available."""
+    deck_elevation = _bridge_deck_elevation_m(bridge, dem, tile_lat, tile_lon)
+    if deck_elevation is None:
+        return None
+    return float(deck_elevation) - float(bridge.deck_top_y_m)
+
+
+def _abutment_lines_layout_meters(bridge, layout):
+    """The bridge's two abutment lines as layout-meter LineStrings,
+    ordered [start end, far end] and extended by
+    :data:`_ABUTMENT_LINE_EXTENSION_FRACTION` per side.  Empty list on
+    degenerate geometry."""
+    from . import obj8_reader
+    origin_longitude, origin_latitude = (
+        bridge.frame_origin_longitude_latitude
+    )
+    lines: list[LineString] = []
+    for (start_point, end_point) in bridge.abutment_lines:
+        meter_points = []
+        for frame_x, frame_z in (start_point, end_point):
+            latitude, longitude = obj8_reader.local_offset_to_lonlat(
+                origin_latitude, origin_longitude, 0.0, frame_x, frame_z
+            )
+            meter_points.append(layout.ll_to_m(latitude, longitude))
+        (ax, ay), (bx, by) = meter_points
+        length = math.hypot(bx - ax, by - ay)
+        if length < 1.0:
+            continue
+        extension = _ABUTMENT_LINE_EXTENSION_FRACTION
+        ux = (bx - ax) / length
+        uy = (by - ay) / length
+        reach = length * extension
+        lines.append(LineString([
+            (ax - ux * reach, ay - uy * reach),
+            (bx + ux * reach, by + uy * reach),
+        ]))
+    return lines
+
+
+def _record_pin(layout, x, y, value):
+    """Record one bucket→elevation hard pin for the solver
+    (``layout._object_bridge_pin_values``; consumed by the additive
+    bridge-pin block in ``solver_primitives._seed_elevations``).  The
+    bucket scheme is ``layout.vertex_bucket`` — the single source of
+    truth, arithmetically identical to the solver's inline key."""
+    from .layout import vertex_bucket
+    pin_values = getattr(layout, "_object_bridge_pin_values", None)
+    if pin_values is None:
+        pin_values = {}
+        setattr(layout, "_object_bridge_pin_values", pin_values)
+    pin_values[vertex_bucket(float(x), float(y))] = float(value)
+
+
+def _pin_shape_vertices_on_line(layout, shape_index, line, pin_value):
+    """Insert ring vertices where the shape crosses ``line`` (seam-anchor
+    idiom, reusing ``seam_anchors._insert_seam_vertices``), then hard-pin
+    every ring vertex lying on the line at ``pin_value`` — both into the
+    shape's ``node_altitudes`` (the solver's fallback and downstream
+    readers) and into the solver pin registry.  Returns the number of
+    vertices pinned."""
+    from .seam_anchors import _insert_seam_vertices
+    shape = layout.shapes[shape_index]
+    inserted_keys: set = set()
+    try:
+        new_shape = _insert_seam_vertices(shape, [line], inserted_keys)
+    except _GEOM_EXC:
+        new_shape = None
+    if new_shape is not None:
+        layout.shapes[shape_index] = new_shape
+        shape = new_shape
+    if shape.polygon is None or shape.polygon.is_empty:
+        return 0
+    ring = list(shape.polygon.exterior.coords)
+    if ring and ring[0] == ring[-1]:
+        ring = ring[:-1]
+    node_altitudes = (
+        list(shape.node_altitudes[:len(ring)])
+        if shape.node_altitudes else None
+    )
+    pinned = 0
+    changed = False
+    for vertex_index, (x, y) in enumerate(ring):
+        try:
+            if line.distance(Point(x, y)) > _BRIDGE_PIN_ON_LINE_TOLERANCE_M:
+                continue
+        except _GEOM_EXC:
+            continue
+        _record_pin(layout, x, y, pin_value)
+        if node_altitudes is not None and vertex_index < len(node_altitudes):
+            node_altitudes[vertex_index] = round(float(pin_value), 2)
+            changed = True
+        pinned += 1
+    if changed and node_altitudes is not None:
+        shape.node_altitudes = node_altitudes + [node_altitudes[0]]
+    return pinned
+
+
+def insert_bridge_deck_end_pins(layout, dem, tile_lat, tile_lon) -> int:
+    """Feature B stage 2, step 1 (spec section 3.2): insert ring vertices
+    where pavement rings cross a DECK_CARRIED (or cosmetic) bridge's
+    abutment lines and hard-pin them at the deck-end elevation —
+    ``grade_law.bridge_deck_end_pin_elevation_m`` (MSL-first datum).  The
+    solved network grades up to the pins under the existing edge budgets.
+
+    Runs pre-solve (called from the pipeline's seam-anchor hook region).
+    No-op without a cached classification (gate off).  Returns the number
+    of pinned vertices; abutment ends that pin NO vertex (pavement cut
+    short of the abutment) are logged — the analytic causeway/approach
+    emitters own that gap and take the same pin value (audited by W-V)."""
+    classification = _object_bridge_classification(layout)
+    if classification is None:
+        return 0
+    from .grade_law import bridge_deck_end_pin_elevation_m
+    corridor_bridges, _suppress, _refused = (
+        _partition_bridges_for_corridors(classification)
+    )
+    total_pinned = 0
+    for bridge in corridor_bridges:
+        datum = _bridge_datum_elevation_m(bridge, dem, tile_lat, tile_lon)
+        if datum is None:
+            UI.vprint(
+                2,
+                "   [object-bridge] no datum for deck-end pins of "
+                f"{bridge.object_resources} — skipped",
+            )
+            continue
+        abutment_lines = _abutment_lines_layout_meters(bridge, layout)
+        for end_index, line in enumerate(abutment_lines):
+            end_y = (
+                bridge.deck_end_elevations_y_m[end_index]
+                if end_index < len(bridge.deck_end_elevations_y_m)
+                else bridge.deck_top_y_m
+            )
+            pin_value = bridge_deck_end_pin_elevation_m(datum, end_y)
+            pinned_here = 0
+            for shape_index, shape in enumerate(list(layout.shapes)):
+                if shape.role not in _BRIDGE_PIN_ROLES:
+                    continue
+                if shape.polygon is None or shape.polygon.is_empty:
+                    continue
+                try:
+                    near = shape.polygon.exterior.distance(line) \
+                        <= _BRIDGE_PIN_ON_LINE_TOLERANCE_M \
+                        or shape.polygon.exterior.intersects(line)
+                except _GEOM_EXC:
+                    continue
+                if not near:
+                    continue
+                pinned_here += _pin_shape_vertices_on_line(
+                    layout, shape_index, line, pin_value
+                )
+            if pinned_here:
+                UI.vprint(
+                    2,
+                    f"   [object-bridge] {pinned_here} deck-end pin(s) at "
+                    f"{pin_value:.2f} m (end {end_index}) for "
+                    f"{bridge.object_resources}",
+                )
+            else:
+                UI.vprint(
+                    2,
+                    "   [object-bridge] no pavement ring reaches abutment "
+                    f"end {end_index} of {bridge.object_resources} — the "
+                    "analytic approach carries the pin value "
+                    f"({pin_value:.2f} m)",
+                )
+            total_pinned += pinned_here
+    return total_pinned
+
+
+def insert_bridge_profile_pins(layout, dem, tile_lat, tile_lon) -> int:
+    """Feature B stage 2, step 2 (spec section 3.2, amendment A4):
+    per-vertex profile pins across each PROFILE_CARRIED span — pavement
+    ring vertices inside the deck footprint are hard-pinned to
+    ``grade_law.bridge_profile_pin_elevation_m`` (datum + profile at the
+    vertex's along-axis position), the runway-profile per-vertex
+    mechanism.  Ring vertices are also inserted where rings cross the
+    span-end abutment lines so the pins start exactly at the deck tips.
+    Returns the number of pinned vertices."""
+    classification = _object_bridge_classification(layout)
+    if classification is None:
+        return 0
+    from .grade_law import (
+        bridge_deck_end_pin_elevation_m,
+        bridge_profile_pin_elevation_m,
+    )
+    from .object_terrain_features import PROFILE_CARRIED
+    to_meters, _meters_to_lat_lon = _local_meter_projections(layout.anchor)
+    total_pinned = 0
+    for bridge in classification.bridges:
+        if bridge.contract != PROFILE_CARRIED:
+            continue
+        datum = _bridge_datum_elevation_m(bridge, dem, tile_lat, tile_lon)
+        if datum is None:
+            continue
+        footprint = _bridge_footprint_meters(bridge, to_meters)
+        if footprint is None:
+            continue
+        abutment_lines = _abutment_lines_layout_meters(bridge, layout)
+        # Axis for along-position: start-end abutment midpoint → far-end
+        # abutment midpoint (the profile's along coordinates are measured
+        # from the deck rectangle's start edge; the law clamps outside the
+        # sampled range).
+        if len(abutment_lines) < 2:
+            continue
+        start_mid = abutment_lines[0].interpolate(0.5, normalized=True)
+        far_mid = abutment_lines[1].interpolate(0.5, normalized=True)
+        axis_length = math.hypot(
+            far_mid.x - start_mid.x, far_mid.y - start_mid.y
+        )
+        if axis_length < 1.0:
+            continue
+        axis_unit = (
+            (far_mid.x - start_mid.x) / axis_length,
+            (far_mid.y - start_mid.y) / axis_length,
+        )
+        # Span-end insertion first (deck-tip pins).
+        for end_index, line in enumerate(abutment_lines):
+            end_y = (
+                bridge.deck_end_elevations_y_m[end_index]
+                if end_index < len(bridge.deck_end_elevations_y_m)
+                else bridge.deck_top_y_m
+            )
+            end_pin = bridge_deck_end_pin_elevation_m(datum, end_y)
+            for shape_index, shape in enumerate(list(layout.shapes)):
+                if shape.role not in _BRIDGE_PIN_ROLES:
+                    continue
+                if shape.polygon is None or shape.polygon.is_empty:
+                    continue
+                try:
+                    if not shape.polygon.exterior.intersects(line):
+                        continue
+                except _GEOM_EXC:
+                    continue
+                total_pinned += _pin_shape_vertices_on_line(
+                    layout, shape_index, line, end_pin
+                )
+        # Interior per-vertex profile pins.
+        pinned_interior = 0
+        for shape in layout.shapes:
+            if shape.role not in _BRIDGE_PIN_ROLES:
+                continue
+            if shape.polygon is None or shape.polygon.is_empty:
+                continue
+            try:
+                if not shape.polygon.intersects(footprint):
+                    continue
+            except _GEOM_EXC:
+                continue
+            ring = list(shape.polygon.exterior.coords)
+            if ring and ring[0] == ring[-1]:
+                ring = ring[:-1]
+            node_altitudes = (
+                list(shape.node_altitudes[:len(ring)])
+                if shape.node_altitudes else None
+            )
+            changed = False
+            for vertex_index, (x, y) in enumerate(ring):
+                try:
+                    if not footprint.contains(Point(x, y)):
+                        continue
+                except _GEOM_EXC:
+                    continue
+                along = (
+                    (x - start_mid.x) * axis_unit[0]
+                    + (y - start_mid.y) * axis_unit[1]
+                )
+                pin_value = bridge_profile_pin_elevation_m(
+                    datum, bridge.deck_top_profile, along
+                )
+                _record_pin(layout, x, y, pin_value)
+                if (node_altitudes is not None
+                        and vertex_index < len(node_altitudes)):
+                    node_altitudes[vertex_index] = round(pin_value, 2)
+                    changed = True
+                pinned_interior += 1
+            if changed and node_altitudes is not None:
+                shape.node_altitudes = node_altitudes + [node_altitudes[0]]
+        if pinned_interior:
+            UI.vprint(
+                2,
+                f"   [object-bridge] {pinned_interior} profile pin(s) "
+                f"across PROFILE_CARRIED span {bridge.object_resources}",
+            )
+        total_pinned += pinned_interior
+    return total_pinned
+
+
+def _bridge_crossing_floor_for_bridge(
+        bridge, road_networks, dem, tile_lat, tile_lon,
+        to_meters, meters_to_lat_lon):
+    """The crossing-floor decision for ONE bridge record: ``(floor_value,
+    footprint_meters)`` when the span must rise over an un-lowered draped
+    road, else ``None``.  Shared verbatim by the solve-side producer
+    (:func:`bridge_crossing_floor_nodes`) and the validator
+    (``verification.check_bridge_crossing_floor``) so their guards, road
+    sampling and law evaluation can never drift (lockstep beyond the law
+    function itself).
+
+    Guards: TERRAIN/PROFILE_CARRIED contracts only; flush decks
+    (crest below ``config.BRIDGE_ROAD_CLEARANCE_M``) encode "the pack
+    handles the road" and get restraint, never a floor (ruling R9); a
+    fully-draped DSF road segment must cross the footprint.  Road
+    surface = median DEM sample of the draped polyline inside the
+    footprint (the road-untouched case; pack-trench and solved-corridor
+    sources land with the W-V audits)."""
+    from .grade_law import bridge_crossing_floor_m
+    from .object_terrain_features import TERRAIN_CARRIED, PROFILE_CARRIED
+    if bridge.contract not in (TERRAIN_CARRIED, PROFILE_CARRIED):
+        return None
+    if float(bridge.deck_top_y_m) < float(_CFG.BRIDGE_ROAD_CLEARANCE_M):
+        return None  # flush deck: pack-handled road, restraint only
+    footprint = _bridge_footprint_meters(bridge, to_meters)
+    if footprint is None:
+        return None
+    road_lines = _draped_road_centerlines_meters(
+        bridge, road_networks, to_meters
+    )
+    if not road_lines:
+        return None
+    road_samples: list[float] = []
+    for line in road_lines:
+        for x, y in line.coords:
+            try:
+                if not footprint.contains(Point(x, y)):
+                    continue
+                latitude, longitude = meters_to_lat_lon(x, y)
+                sample = _sample_dem(
+                    dem, tile_lat, tile_lon, latitude, longitude
+                )
+            except _GEOM_EXC:
+                continue
+            if sample is not None and sample == sample:
+                road_samples.append(float(sample))
+    if not road_samples:
+        return None
+    road_samples.sort()
+    road_surface = road_samples[len(road_samples) // 2]
+    underside = bridge.clearance_underside_y_m
+    if underside is None:
+        underside = bridge.ceiling_y_m
+    structure_thickness = (
+        max(0.0, float(bridge.deck_top_y_m) - float(underside))
+        if underside is not None else 0.0
+    )
+    return bridge_crossing_floor_m(road_surface, structure_thickness), \
+        footprint
+
+
+def bridge_crossing_floor_nodes(layout, nodes, dem, tile_lat, tile_lon):
+    """Feature B stage 2, step 3: per-node floors for TERRAIN/
+    PROFILE_CARRIED spans whose road beneath is NOT lowered — the
+    crossing must rise, and ``grade_law.bridge_crossing_floor_m`` (road
+    surface + clearance + structure thickness) is merged into the
+    one-solve's floor dict by max so the hump solves itself under the
+    existing grade caps (spec section 3.2, amendment A2).
+
+    Returns ``{node_index: floor_elevation_m}``.  Guards:
+
+    * only spans with a fully-draped DSF road segment crossing the
+      footprint (an elevated ramp flies over on its own structure);
+    * only decks whose own crest stands at least the road clearance
+      above the datum (``deck_top_y_m >= BRIDGE_ROAD_CLEARANCE_M``) —
+      a flush deck (EDDF Bridge_2/3/4, crest ≈ 0) encodes "the pack
+      handles the road" and gets restraint, never a floor (ruling R9:
+      the vertical split is read from the object, not assumed).
+
+    Road surface elevation source (spec order, stage-2 subset): the
+    draped road polyline's DEM samples inside the footprint (median) —
+    the road-untouched case; the pack-trench and solved-corridor
+    sources land with the audits (W-V) once a measured record carries
+    them."""
+    classification = _object_bridge_classification(layout)
+    if classification is None:
+        return {}
+    road_networks = _object_bridge_road_networks(layout)
+    if not road_networks:
+        return {}
+    to_meters, meters_to_lat_lon = _local_meter_projections(layout.anchor)
+    floors: dict = {}
+    for bridge in classification.bridges:
+        crossing = _bridge_crossing_floor_for_bridge(
+            bridge, road_networks, dem, tile_lat, tile_lon,
+            to_meters, meters_to_lat_lon,
+        )
+        if crossing is None:
+            continue
+        floor_value, footprint = crossing
+        applied = 0
+        for node_index, (x, y) in enumerate(nodes):
+            try:
+                if not footprint.contains(Point(x, y)):
+                    continue
+            except _GEOM_EXC:
+                continue
+            known = floors.get(node_index)
+            if known is None or floor_value > known:
+                floors[node_index] = floor_value
+                applied += 1
+        if applied:
+            UI.vprint(
+                2,
+                f"   [object-bridge] crossing floor {floor_value:.2f} m "
+                f"on {applied} node(s) inside {bridge.contract} span "
+                f"{bridge.object_resources}",
+            )
+    return floors
 
 
 def _emit_underpass_road_approaches(

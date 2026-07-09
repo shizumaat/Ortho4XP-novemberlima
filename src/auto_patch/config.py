@@ -148,6 +148,8 @@ __all__ = [
     "RUNWAY_END_SKIRT_ENABLED",
     "OBJECT_BRIDGE_TERRAIN",
     "BRIDGE_ROAD_CLEARANCE_M",
+    "BRIDGE_ROAD_CLEARANCE_MINIMUM_M",
+    "BRIDGE_CORRIDOR_DEPRESSED_LENGTH_M",
     "PRECISION_APPROACH_LIGHT_CODES",
     "PRECISION_MARKINGS_CODES",
     "NON_PRECISION_MARKINGS_CODES",
@@ -1875,19 +1877,30 @@ GAP_FILL_MIN_AREA_M2 = 100.0
 OBJECT_BRIDGE_TERRAIN = (
     _os.environ.get("O4_OBJECT_BRIDGE_TERRAIN", "0") == "1")
 
-# Vertical clearance (m) a draped road needs beneath a bridge deck's
-# lowest clearance-limiting girder — the margin subtracted below the
-# girder underside to set the depressed-corridor floor for a
-# DECK_CARRIED span, and the deck-to-road separation the
-# ``grade_law.bridge_crossing_floor`` law adds above a road surface for a
-# TERRAIN/PROFILE_CARRIED span that must rise (spec sections 3.2 / open
-# question 6).  5.1 m is the upper end of the "real road corridor wants
-# 4.5-5.1 m" band the spec cites and clears the legacy underpass
-# emitter's 8 m depth (``bridges._emit_underpass_road_approaches``
-# ``clearance_depth_m``) comfortably; the object's own measured
-# girder-underside height governs where the pack supplies it, so this
-# constant only sets the road-surface-to-structure gap.
+# Vertical clearance (m) the ``grade_law.bridge_crossing_floor`` law adds
+# above a road surface for a TERRAIN/PROFILE_CARRIED span that must RISE
+# (the EDDF class, where WE choose the vertical split — spec section 3.2).
+# Amendment A10 narrowed this constant to the crossing-floor law ONLY:
+# the DECK_CARRIED corridor floor is GEOMETRY-DRIVEN (absolute deck
+# elevation − hard-deck height above anchor terrain = the anchor-terrain
+# datum; a clearance-driven floor over-digs by ~0.9 m at the KBNA
+# calibration site).  5.1 m is the upper end of the "real road corridor
+# wants 4.5-5.1 m" band (open question 6).
 BRIDGE_ROAD_CLEARANCE_M = 5.1
+
+# Validator acceptance bound (m) for the DECK_CARRIED corridor: the
+# floor-to-girder-underside clearance must reach at least this.  4.2 m is
+# the measured in-the-wild value at the KBNA taxiway-L calibration site
+# (deck 167.0, girder line +4.2 over the 161.0 corridor floor — amendment
+# A10): the check constant, not the floor driver.
+BRIDGE_ROAD_CLEARANCE_MINIMUM_M = 4.2
+
+# How far (m) the depressed road corridor extends per side beyond a
+# DECK_CARRIED span before rejoining grade — the approach-walk extent for
+# object-sourced corridors.  240 m is the author-mesh measurement at the
+# KBNA calibration site (amendment A10 point iv; also the open-question-4
+# datum for the corridor-versus-adjacent-ground handoff).
+BRIDGE_CORRIDOR_DEPRESSED_LENGTH_M = 240.0
 
 # Safety cap (m) on how far a clearance band reaches outward from the
 # pavement edge, bounding earthwork.  Must be >= the largest band we
