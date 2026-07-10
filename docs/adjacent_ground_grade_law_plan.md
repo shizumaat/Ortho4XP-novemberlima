@@ -1,5 +1,36 @@
 # Adjacent-ground grade law — boundary-bridge retirement (Fable design, 2026-07-08)
 
+## AMENDMENT — WELD RULING (Noah, 2026-07-09)
+
+The bands FULLY WELD to the pavement they grade next to — no standoff.
+In-sim CYXY showed knife-edge walls/trenches (2.5–12 m) along pavement:
+the 1 m clip standoff (`_PAVEMENT_GAP_M`) between bands and every other
+constrained surface left grooves of RAW DEM that the mesh rendered as
+blades (measured against the baked +60-136 mesh: 225 cross-shape-groove
++ 119 pavement↔strip-groove near-vertical edges of 620 total).
+Implemented 2026-07-09:
+
+- Band inner boundary at d = 0 ON the parent ring; weld-row vertices
+  carry the pavement edge value VERBATIM (unrounded — emit consensus is
+  a no-op; value authorities never move, the band adopts).
+- ALL band clips are EXACT (static union, cross-shape, walls): shared
+  boundaries share coordinates; guarded adoption welds agreeing values,
+  genuine disagreement emits the deliberate node-split wall — never a
+  groove.  (The round-2 groove clip is SUPERSEDED: its wedge risk is
+  handled by adoption + the preloaded pavement-vertex value registry.)
+- The runway-end skirt welds identically (its pavement↔skirt groove was
+  the single worst CYXY cliff, 11.9 m).
+- Mesh safety: `O4_Vector_Utils.insert_edge` splits constrained edges at
+  encroaching nodes (parallel encroachment) with z interpolated along
+  the old edge, so mid-edge weld vertices are safe by construction.
+
+Still OPEN after the weld: the legacy `surface_clearance` strips keep
+their 1 m standoff (their grooves remain where no band covers them —
+the legacy chain is slated for deletion in slice 5 anyway), and the
+zone-3 band OUTER edge still ends in a lawful vertical face where the
+DEM is far below (193 mesh edges, up to 10 m — raise with Noah whether
+the fill face should daylight at a render slope instead).
+
 USER MANDATE (Noah, 2026-07-08): boundary bridges were built to solve
 CYXY-class DEM under-modeling (plateau cliff edge) and force-fill
 terrain at airports where the ground legitimately falls away.  Replace

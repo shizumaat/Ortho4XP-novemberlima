@@ -1037,7 +1037,20 @@ def check_adjacent_ground(layout, dem, tile_lat, tile_lon,
         band was owed but not emitted; zone-3's ``None`` floor makes a
         cliff LAWFUL, never flagged — the boundary-bridge killer) or ABOVE
         a finite ceiling (a cut band was owed but not emitted) by more
-        than ``tolerance_m``.
+        than ``tolerance_m`` — AND lies WITHIN the daylight-supported depth.
+
+    DAYLIGHT slope-limit lockstep (``grade_law.adjacent_ground_supported_depths``,
+    user 2026-07-09): the emitter marches each station outward independently,
+    then CLAMPS the per-station daylight depths so the daylight line benches
+    along the frontage (an isolated deep ray no neighbour corroborates is
+    clamped to a shallow bench, not a knife-slot blade — CYXY 417).  A column
+    BEYOND that supported depth is therefore not the emitter's to grade, so
+    the validator EXEMPTS it (flagging it would mint findings against the
+    emitter's own lawful clamp).  This reader reproduces the emitter's raw
+    outward scan per station (breach beyond the emitter's
+    ``CLEARANCE_OBSTRUCTION_THRESHOLD_M`` trigger, one step out), applies the
+    ONE law over the SAME station sequence, and flags only columns within the
+    supported depth.
 
     ``tolerance_m`` (1.5 m) sits ABOVE the emitter's 1 m fill/cut trigger
     (``CLEARANCE_OBSTRUCTION_THRESHOLD_M``) so terrain the emitter
@@ -1058,10 +1071,12 @@ def check_adjacent_ground(layout, dem, tile_lat, tile_lon,
     from shapely.prepared import prep
     from shapely.strtree import STRtree
     from . import clearance as CL
-    from .config import CLEARANCE_MAX_REACH_M, runway_code_number
+    from .config import (
+        CLEARANCE_MAX_REACH_M, CLEARANCE_OBSTRUCTION_THRESHOLD_M,
+        runway_code_number)
     from .grade_law import (
-        adjacent_ground_envelope, _ADJACENT_RUNWAY_ROLES,
-        _ADJACENT_TAXIWAY_ROLES)
+        adjacent_ground_envelope, adjacent_ground_supported_depths,
+        _ADJACENT_RUNWAY_ROLES, _ADJACENT_TAXIWAY_ROLES)
     from .layout import R_EARTH, taxi_shape_code_letter
     from .pavement.runways import _sample_runway_segment_elev
     from .elevation import _sample_dem
@@ -1095,13 +1110,16 @@ def check_adjacent_ground(layout, dem, tile_lat, tile_lon,
     if not scoped:
         return []
 
-    # The emitter's clip mirrored EXACTLY but indexed for point queries: a
-    # station is exempt when it sits within ``_PAVEMENT_GAP_M`` of ANY
-    # shape (== inside the emitter's ``static_union.buffer(gap)`` clip,
-    # incl. an emitted band) or outside the boundary.  An STRtree over the
-    # INDIVIDUAL polygons + a per-candidate distance test is ~orders faster
-    # than ``.covers`` on the single buffered union at a plateau airport
-    # where nearly every marched point is out-of-corridor.
+    # Coverage exemption, indexed for point queries: a station is exempt
+    # when it sits within ``_PAVEMENT_GAP_M`` of ANY shape (incl. an
+    # emitted band) or outside the boundary.  The emitter clips EXACTLY
+    # since the 2026-07-09 weld ruling (no standoff), so the 1 m here is
+    # pure READ-side slack around shape edges — the march samples at 5 m
+    # stations, so it never decides more than a band-edge-adjacent
+    # column.  An STRtree over the INDIVIDUAL polygons + a per-candidate
+    # distance test is ~orders faster than ``.covers`` on a single
+    # buffered union at a plateau airport where nearly every marched
+    # point is out-of-corridor.
     static_geoms = [s.polygon for s in layout.shapes
                     if s.polygon is not None and not s.polygon.is_empty]
     if not static_geoms:
@@ -1240,7 +1258,27 @@ def check_adjacent_ground(layout, dem, tile_lat, tile_lon,
                          for x, y in coords]
 
         n_out = max(1, int(math.ceil(reach / step_m)))
-        worst = {}                     # kind -> (magnitude, x, y)
+        # Emitter obstruction TRIGGER for this family (the raw-scan gate, NOT
+        # the flagging tolerance): runway strips use the runway threshold, the
+        # taxiway + apron families the taxiway one — exactly
+        # ``adjacent_ground``'s ``trigger_by_family``.
+        trigger = (CLEARANCE_OBSTRUCTION_THRESHOLD_M["runway"]
+                   if env_role in _ADJACENT_RUNWAY_ROLES
+                   else CLEARANCE_OBSTRUCTION_THRESHOLD_M["taxiway"])
+
+        # STATION SEQUENCE — built exactly as the emitter's non-fan station
+        # generation so the daylight slope-limit law couples the SAME stations
+        # in both readers.  Every (edge, k) sample is a station; ``flag`` marks
+        # the ones the emitter would actually scan/grade (terrain-facing,
+        # non-END, both edge alts known).  END-edge and inside-facing stations
+        # stay in the sequence as depth-0 COUPLING nodes (the emitter carries
+        # them too, with a None edge reference) but are never flagged —
+        # dropping them would loosen the slope clamp at run boundaries near a
+        # runway end and flag columns the emitter's own clamp already benched
+        # away (lockstep).  Corner FANS are omitted: they share the corner
+        # coordinate (dist 0), so they never change a non-fan station's
+        # supported depth (see grade_law).
+        st_x, st_y, st_outn, st_ref, st_flag = [], [], [], [], []
         for i in range(len(coords) - 1):
             eax, eay = coords[i]
             ebx, eby = coords[i + 1]
@@ -1250,71 +1288,116 @@ def check_adjacent_ground(layout, dem, tile_lat, tile_lon,
             outn = (u[1], -u[0]) if ccw else (-u[1], u[0])
             a0 = ring_alts[i]
             a1 = ring_alts[i + 1]
-            if a0 is None or a1 is None:
-                continue
-            # Runway END edges: the runway-end skirt law owns terrain
-            # beyond an end (its own governed length + lawful beyond-drop).
-            if (axis is not None
-                    and abs(outn[0] * axis[0] + outn[1] * axis[1])
-                    > CL._RING_END_NORMAL_DOT):
-                continue
+            # Runway END edges: the runway-end skirt law owns terrain beyond
+            # an end (its own governed length + lawful beyond-drop).
+            end_edge = (axis is not None
+                        and abs(outn[0] * axis[0] + outn[1] * axis[1])
+                        > CL._RING_END_NORMAL_DOT)
             seglen = math.hypot(ebx - eax, eby - eay)
             nseg = max(1, int(math.ceil(seglen / step_m)))
             for k in range(nseg):
                 t = k / nseg
                 sx = eax + (ebx - eax) * t
                 sy = eay + (eby - eay) * t
-                # Terrain-facing only (the emitter's own probe): an outward
-                # point already covered by a shape owns its own band.
-                if _inside_shape(sx + outn[0] * CL._RING_PROBE_M,
-                                 sy + outn[1] * CL._RING_PROBE_M):
+                ref = None
+                flag = False
+                # Terrain-facing, non-END, alts known → a scanned/flagged
+                # station; otherwise a depth-0 coupling node (the emitter's
+                # own probe: an outward point covered by a shape owns its band).
+                if (not end_edge and a0 is not None and a1 is not None
+                        and not _inside_shape(
+                            sx + outn[0] * CL._RING_PROBE_M,
+                            sy + outn[1] * CL._RING_PROBE_M)):
+                    ref = a0 + t * (a1 - a0)
+                    flag = True
+                st_x.append(sx)
+                st_y.append(sy)
+                st_outn.append(outn)
+                st_ref.append(ref)
+                st_flag.append(flag)
+
+        # RAW OUTWARD SCAN — the emitter's ``outer[i]``: the furthest distance
+        # the DEM breaches the corridor by more than the emitter TRIGGER, one
+        # step out, capped at the reach (fill breaches exist only inside the
+        # graded width, where the floor is finite).  One DEM march per station,
+        # cached so the tolerance flagging below re-samples nothing.
+        n_st = len(st_x)
+        fill_raw = [0.0] * n_st
+        cut_raw = [0.0] * n_st
+        marched = [None] * n_st        # station → [(d, offset, fo, co, qx, qy)]
+        for idx in range(n_st):
+            if not st_flag[idx]:
+                continue
+            sx, sy, outn, ref = (st_x[idx], st_y[idx],
+                                 st_outn[idx], st_ref[idx])
+            samples = []
+            last_fill = last_cut = 0.0
+            for j in range(1, n_out + 1):
+                d = min(reach - 1e-3, j * step_m)
+                floor_off, ceil_off = adjacent_ground_envelope(
+                    env_role, code_number, code_letter, d)
+                if floor_off is None and ceil_off is None:
+                    break              # at/beyond the reach — ungoverned
+                qx = sx + outn[0] * d
+                qy = sy + outn[1] * d
+                dd = _sample(qx, qy)
+                if dd is None:
                     continue
-                ref = a0 + t * (a1 - a0)
-                # March outward sampling only the DEM (cheap) to find this
-                # transect's WORST below-floor and above-ceiling deviation;
-                # the expensive point-in-polygon exemption then runs ONLY at
-                # those ≤2 candidates (bands are contiguous from the edge, so
-                # the deepest deviation is the representative one).
-                worst_below = None
-                worst_above = None
-                for j in range(1, n_out + 1):
-                    d = min(reach - 1e-3, j * step_m)
-                    floor_off, ceil_off = adjacent_ground_envelope(
-                        env_role, code_number, code_letter, d)
-                    if floor_off is None and ceil_off is None:
-                        break          # at/beyond the reach — ungoverned
-                    qx = sx + outn[0] * d
-                    qy = sy + outn[1] * d
-                    dd = _sample(qx, qy)
-                    if dd is None:
-                        continue
-                    offset = float(dd) - ref
-                    if (floor_off is not None
-                            and offset < floor_off - tolerance_m):
-                        mag = floor_off - offset      # metres below floor
-                        if worst_below is None or mag > worst_below[0]:
-                            worst_below = (mag, qx, qy)
-                    if (ceil_off is not None
-                            and offset > ceil_off + tolerance_m):
-                        mag = offset - ceil_off        # metres above ceiling
-                        if worst_above is None or mag > worst_above[0]:
-                            worst_above = (mag, qx, qy)
-                for kind, cand in (("should_fill", worst_below),
-                                   ("should_cut", worst_above)):
-                    if cand is None:
-                        continue
-                    mag, qx, qy = cand
-                    # Out of corridor — is this column the emitter's to
-                    # grade?  Covered (incl. by an emitted band) or outside
-                    # the boundary ⇒ nothing to flag (the emitter's clip).
-                    if _covered(qx, qy):
-                        continue
-                    if (prep_boundary is not None
-                            and not prep_boundary.covers(Point(qx, qy))):
-                        continue
-                    cur = worst.get(kind)
-                    if cur is None or mag > cur[0]:
-                        worst[kind] = (mag, qx, qy)
+                offset = float(dd) - ref
+                samples.append((d, offset, floor_off, ceil_off, qx, qy))
+                if floor_off is not None and offset < floor_off - trigger:
+                    last_fill = d
+                if ceil_off is not None and offset > ceil_off + trigger:
+                    last_cut = d
+            marched[idx] = samples
+            if last_fill > 0.0:
+                fill_raw[idx] = min(reach - 1e-3, last_fill + step_m)
+            if last_cut > 0.0:
+                cut_raw[idx] = min(reach - 1e-3, last_cut + step_m)
+
+        # DAYLIGHT slope-limit (the ONE law, in lockstep with the emitter's
+        # ``_build_*_bands`` clamp): a column BEYOND the supported depth is not
+        # the emitter's to grade, so it is EXEMPT; columns within it keep the
+        # tolerance flagging.
+        positions = list(zip(st_x, st_y))
+        supported_fill = adjacent_ground_supported_depths(fill_raw, positions)
+        supported_cut = adjacent_ground_supported_depths(cut_raw, positions)
+
+        worst = {}                     # kind -> (magnitude, x, y)
+        for idx in range(n_st):
+            if not st_flag[idx] or marched[idx] is None:
+                continue
+            sf = supported_fill[idx]
+            sc = supported_cut[idx]
+            worst_below = None
+            worst_above = None
+            for d, offset, floor_off, ceil_off, qx, qy in marched[idx]:
+                if (floor_off is not None and d <= sf
+                        and offset < floor_off - tolerance_m):
+                    mag = floor_off - offset          # metres below floor
+                    if worst_below is None or mag > worst_below[0]:
+                        worst_below = (mag, qx, qy)
+                if (ceil_off is not None and d <= sc
+                        and offset > ceil_off + tolerance_m):
+                    mag = offset - ceil_off            # metres above ceiling
+                    if worst_above is None or mag > worst_above[0]:
+                        worst_above = (mag, qx, qy)
+            for kind, cand in (("should_fill", worst_below),
+                               ("should_cut", worst_above)):
+                if cand is None:
+                    continue
+                mag, qx, qy = cand
+                # Out of corridor — is this column the emitter's to grade?
+                # Covered (incl. by an emitted band) or outside the boundary
+                # ⇒ nothing to flag (the emitter's clip).
+                if _covered(qx, qy):
+                    continue
+                if (prep_boundary is not None
+                        and not prep_boundary.covers(Point(qx, qy))):
+                    continue
+                cur = worst.get(kind)
+                if cur is None or mag > cur[0]:
+                    worst[kind] = (mag, qx, qy)
         ident = (s.ref or "").strip() or s.role
         for kind, (mag, qx, qy) in worst.items():
             out.append((kind, ident, mag, tolerance_m,

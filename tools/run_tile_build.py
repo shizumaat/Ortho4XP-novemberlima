@@ -8,7 +8,11 @@ KCLT cycle).  This runner mirrors Ortho4XP.py's initialisation, loads
 the tile config explicitly, verifies the provider resolves, and runs
 all four steps.
 
-Usage: run_tile_build.py <latitude> <longitude>   (from the checkout root)
+Usage: run_tile_build.py <latitude> <longitude> [first_step] [build_dir]
+(from the checkout root).  ``build_dir`` = the tile's custom build
+directory — pass it when the tile lives outside ``Tiles/`` (e.g. a
+GUI-built tile in X-Plane's Custom Scenery); the per-tile config is
+read from there.
 """
 import os
 import sys
@@ -39,7 +43,8 @@ if __name__ == "__main__":
     latitude = int(sys.argv[1])
     longitude = int(sys.argv[2])
     first_step = int(sys.argv[3]) if len(sys.argv) > 3 else 1
-    tile = CFG.Tile(latitude, longitude, "")
+    custom_build_dir = sys.argv[4] if len(sys.argv) > 4 else ""
+    tile = CFG.Tile(latitude, longitude, custom_build_dir)
     tile.read_from_config()
     print("build directory:", tile.build_dir)
     print("default_website:", tile.default_website, "default_zl:", tile.default_zl)

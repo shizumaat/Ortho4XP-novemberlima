@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from .config import (
+    ADJACENT_GROUND_DAYLIGHT_SLOPE_LIMIT,
     ADJACENT_GROUND_LIP_MAX_DOWN_SLOPE, ADJACENT_GROUND_LIP_MIN_DOWN_SLOPE,
     ADJACENT_GROUND_LIP_WIDTH_M, ADJACENT_GROUND_UNGRADED_STRIP_MAX_UP_SLOPE,
     APRON_MAX_GRADE, APRON_SHOULDER_MAX_DOWN_SLOPE,
@@ -486,6 +487,72 @@ def adjacent_ground_envelope(
             return (None, None)
         return (None, CLEARANCE_LATERAL_MAX_SLOPE * d)
     raise ValueError(f"adjacent_ground_envelope: unmodelled role {role!r}")
+
+
+# ── Adjacent-ground DAYLIGHT slope-limit law (user 2026-07-09) ───────────────
+# The obstruction scan of the adjacent-ground emitter marches each 5 m station
+# outward INDEPENDENTLY: ``outer[i]`` is the furthest lateral distance at which
+# the DEM breaches the corridor for that one station.  Nothing couples the
+# stations, so one or two stations can lawfully march ~156 m to a terrain
+# violation NO neighbouring station corroborates — an ISOLATED DEEP RAY,
+# rendered as a 156 m × 7 m blade cutting a knife slot into terrain (CYXY
+# shapeID 417, user in-sim report 2026-07-09).  Physical grading BENCHES into a
+# hillside: the daylight line (where the graded surface meets terrain) is a
+# continuous curve along the frontage — it cannot step discontinuously from one
+# station to the next.  This law couples the per-station depths so the emitted
+# daylight line obeys that continuity, and — being defined ONCE here — is
+# consumed by BOTH the emitter (which clamps ``outer[]`` before laying bands)
+# and the validator (which exempts columns beyond the supported depth), in
+# lockstep.
+def adjacent_ground_supported_depths(depths, positions):
+    """Slope-limit the per-station adjacent-ground daylight ``depths`` so the
+    daylight line benches along the frontage instead of jumping.
+
+    THE LAW: a station's governed (daylight) depth may exceed a neighbour's by
+    at most ``ADJACENT_GROUND_DAYLIGHT_SLOPE_LIMIT`` times the ALONG-FRONTAGE
+    distance between them.  Two symmetric passes enforce it:
+
+        forward   d[i] = min(d[i], d[i-1] + LIMIT * dist(p[i-1], p[i]))
+        backward  d[i] = min(d[i], d[i+1] + LIMIT * dist(p[i+1], p[i]))
+
+    ``depths`` are the raw per-station governed depths (metres, 0.0 where the
+    station is unobstructed); ``positions`` are the matching per-station
+    ``(x, y)`` (same length, same order).  Returns a new list of the limited
+    depths (the input is never mutated).
+
+    THE BLADE CLASS IT KILLS: an isolated ray at ~156 m among 0-depth
+    neighbours 5 m away is clamped to ``LIMIT * 5 m`` (≈ 10 m at LIMIT = 2) —
+    a shallow bench, not a knife slot.  DISTANCE WEIGHTING is deliberate: a
+    corner-fan inserts extra stations that all SHARE the corner coordinate
+    (dist = 0), so a fan ray gets NO extra allowance over the corner's own
+    depth — a fan sweeping toward an unobstructed flank is suppressed to that
+    flank's depth (the CYXY 417 fan-blade class).
+
+    TAPER-IN AT RUN BOUNDARIES: a genuine abrupt ridge (a real deep violation
+    with truly shallow neighbours) is not erased — it is given a BENCHED ENTRY,
+    the depth ramping in at the slope limit from each side.  That is the
+    desired physical behaviour (you cannot bench a full cut in one station);
+    the ridge is still cut, just entered on a grade.
+
+    LOCKSTEP (mandatory): the validator ``verification.check_adjacent_ground``
+    flags any un-covered corridor breach, so an emitter-only clamp would leave
+    the clamped-away deep columns still breaching and mint findings.  Both
+    readers therefore call THIS function over the SAME station sequence — the
+    emitter to bound the bands it lays, the validator to treat columns beyond
+    the supported depth as EXEMPT.
+    """
+    limit = ADJACENT_GROUND_DAYLIGHT_SLOPE_LIMIT
+    n = len(depths)
+    supported = [float(d) for d in depths]
+    for i in range(1, n):
+        (ax, ay), (bx, by) = positions[i - 1], positions[i]
+        span = ((bx - ax) ** 2 + (by - ay) ** 2) ** 0.5
+        supported[i] = min(supported[i], supported[i - 1] + limit * span)
+    for i in range(n - 2, -1, -1):
+        (ax, ay), (bx, by) = positions[i + 1], positions[i]
+        span = ((bx - ax) ** 2 + (by - ay) ** 2) ** 0.5
+        supported[i] = min(supported[i], supported[i + 1] + limit * span)
+    return supported
 
 
 # ── Spine crown offset (user 2026-07-07, part 30) ────────────────────────────

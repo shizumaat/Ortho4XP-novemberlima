@@ -134,6 +134,11 @@ __all__ = [
     "TAXIWAY_STRIP_GRADED_HALF_WIDTH_BY_LETTER",
     "taxiway_strip_graded_half_width_for_letter",
     "ADJACENT_GROUND_UNGRADED_STRIP_MAX_UP_SLOPE",
+    "ADJACENT_GROUND_DAYLIGHT_SLOPE_LIMIT",
+    "GAP_FILL_SPINE_ENABLED",
+    "GAP_FILL_SPINE_STEP_M",
+    "GAP_FILL_MAX_WIDTH_M",
+    "GAP_FILL_MIN_AREA_M2",
     "APRON_SHOULDER_WIDTH_M",
     "APRON_SHOULDER_MIN_DOWN_SLOPE",
     "APRON_SHOULDER_MAX_DOWN_SLOPE",
@@ -1983,6 +1988,31 @@ def taxiway_strip_graded_half_width_for_letter(letter) -> float:
 # beyond it the ground is ungoverned here (the OLS transitional surface
 # takes over — docs/grade_law_gap_audit.md GAP 1).
 ADJACENT_GROUND_UNGRADED_STRIP_MAX_UP_SLOPE = 0.05
+
+# DAYLIGHT SLOPE LIMIT (user ruling 2026-07-09; engineering judgment,
+# no external citation): the governed (daylight) depth of the
+# adjacent-ground march may grow by at most this factor times the
+# along-frontage distance between neighbouring stations — physical
+# grading benches into terrain; an isolated deep ray would cut a
+# 150 m knife slot no bench could build (CYXY shape 417).  Consumed
+# by grade_law.adjacent_ground_supported_depths (emitter + validator
+# in lockstep).
+ADJACENT_GROUND_DAYLIGHT_SLOPE_LIMIT = 2.0
+
+# GAP-FILL + DRAINAGE SPINE (user design ruling 2026-07-09,
+# docs/chain_identity_one_solve_plan.md): ground ENCLOSED between
+# pavements grades as ONE unit — boundary = the pavement chains
+# verbatim, interior = a drainage spine emitted as an open
+# constrained way.  Node economy per the performance ruling: the
+# spine is the only new geometry.
+GAP_FILL_SPINE_ENABLED = (
+    _os.environ.get("O4_GAP_FILL_SPINE", "1") == "1")
+GAP_FILL_SPINE_STEP_M = 15.0
+# Gaps wider than this stay with the corridor-band emitter (the
+# facing graded corridors no longer overlap — the middle is
+# legitimately ungoverned terrain).
+GAP_FILL_MAX_WIDTH_M = 175.0
+GAP_FILL_MIN_AREA_M2 = 100.0
 
 # APRON edges.  NO code mandates grading beyond an apron edge (positive
 # research finding): the only governed band is the FAA-RECOMMENDED

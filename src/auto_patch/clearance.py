@@ -49,7 +49,7 @@ import shapely
 import O4_UI_Utils as UI
 from shapely import STRtree
 from shapely.errors import GEOSException, TopologicalError
-from shapely.geometry import LineString, Point, Polygon
+from shapely.geometry import box, LineString, Point, Polygon
 from shapely.ops import unary_union
 from shapely.prepared import prep
 
@@ -254,7 +254,8 @@ def _stations(a: tuple[float, float], b: tuple[float, float],
              a[1] + (b[1] - a[1]) * k / n) for k in range(n + 1)]
 
 
-def _decimate(coords: list[tuple[float, float]], alts: list[float]):
+def _decimate(coords: list[tuple[float, float]], alts: list[float],
+              keep_predicate=None):
     """Collapse ring vertices that are redundant in BOTH geometry
     (collinear with their neighbours) AND altitude (on the linear
     interpolation between them).  Returns ``(coords, alts)`` open-form.
@@ -263,6 +264,12 @@ def _decimate(coords: list[tuple[float, float]], alts: list[float]):
     arc isn't collapsed to its chord in one sweep) and repeats until
     stable, keeping detail only where the daylight contour bends or the
     cut surface follows curving terrain.
+
+    ``keep_predicate(x, y) -> bool`` (optional) protects vertices from
+    removal — the weld rule (2026-07-09): a vertex ON the pavement
+    boundary the cut welds to must never be chord-cut (the 0.3 m
+    geometry band would swing the welded edge off the pavement ring,
+    minting a cm-scale sliver against it).
     """
     coords = [(float(x), float(y)) for x, y in coords]
     alts = [float(a) for a in alts]
@@ -278,6 +285,9 @@ def _decimate(coords: list[tuple[float, float]], alts: list[float]):
             p0 = coords[(i - 1) % n]
             p1 = coords[i]
             p2 = coords[(i + 1) % n]
+            if keep_predicate is not None and keep_predicate(*p1):
+                i += 1
+                continue
             dx, dy = p2[0] - p0[0], p2[1] - p0[1]
             seg2 = dx * dx + dy * dy
             if seg2 > 1e-9:
@@ -302,7 +312,8 @@ def _decimate(coords: list[tuple[float, float]], alts: list[float]):
 def _merge_coincident_ring_vertices(
         coords: list[tuple[float, float]],
         alts: list[float],
-        tol_m: float = _COINCIDENT_MERGE_TOL_M):
+        tol_m: float = _COINCIDENT_MERGE_TOL_M,
+        frozen_predicate=None):
     """Collapse consecutive near-coincident ring vertices into one.
 
     ``_decimate`` keeps a vertex sitting a few mm from its neighbour
@@ -312,6 +323,13 @@ def _merge_coincident_ring_vertices(
     renders as a torn vertical micro-cliff.  Below ``tol_m`` the edge has
     no real length, so merge each coincident run to a single vertex at the
     GROUP-MEAN altitude (open-form ``(coords, alts)`` in, same out).
+
+    ``frozen_predicate(x, y)`` marks welded chain vertices sitting on a
+    shared (pavement) boundary; the merge must never move such a vertex.
+    When supplied: a coincident pair with BOTH ends frozen is left intact
+    (distinct chain nodes); with exactly ONE end frozen the pair collapses
+    onto the frozen vertex VERBATIM (its coordinates and altitude win,
+    never the mean); with NEITHER end frozen the group-mean merge applies.
     """
     coords = [(float(x), float(y)) for x, y in coords]
     alts = [float(a) for a in alts]
@@ -324,14 +342,30 @@ def _merge_coincident_ring_vertices(
             j = (i + 1) % n
             dx = coords[i][0] - coords[j][0]
             dy = coords[i][1] - coords[j][1]
-            if dx * dx + dy * dy <= tol2:
+            if dx * dx + dy * dy > tol2:
+                continue
+            if frozen_predicate is not None:
+                fi = frozen_predicate(coords[i][0], coords[i][1])
+                fj = frozen_predicate(coords[j][0], coords[j][1])
+                if fi and fj:
+                    continue     # both welded: distinct chain vertices
+                if fi:
+                    pass         # survivor coords[i]/alts[i] are frozen
+                elif fj:
+                    coords[i] = coords[j]     # frozen coords win verbatim
+                    alts[i] = alts[j]         # frozen altitude wins
+                else:
+                    coords[i] = ((coords[i][0] + coords[j][0]) / 2.0,
+                                 (coords[i][1] + coords[j][1]) / 2.0)
+                    alts[i] = round((alts[i] + alts[j]) / 2.0, 1)
+            else:
                 coords[i] = ((coords[i][0] + coords[j][0]) / 2.0,
                              (coords[i][1] + coords[j][1]) / 2.0)
                 alts[i] = round((alts[i] + alts[j]) / 2.0, 1)
-                del coords[j]
-                del alts[j]
-                changed = True
-                break
+            del coords[j]
+            del alts[j]
+            changed = True
+            break
     return coords, alts
 
 
@@ -350,19 +384,28 @@ def _largest_poly(geom):
 
 
 def _drop_sharp_corners(coords: list[tuple[float, float]],
-                        min_deg: float = 3.0) -> list[tuple[float, float]]:
+                        min_deg: float = 3.0,
+                        keep_predicate=None) -> list[tuple[float, float]]:
     """Remove ring vertices whose interior angle is below ``min_deg``.
 
     Decimation / daylight-contour clipping can leave needle-tip corners
     that to_osm would reject (sub-2° → X-Plane mesh-builder crash),
     dropping the whole cut.  Trim the sharpest offending vertex and
-    repeat so the shape survives emission."""
+    repeat so the shape survives emission.
+
+    ``keep_predicate(x, y) -> bool`` (optional) protects vertices from
+    removal — same semantics as ``_decimate``: a welded / shared-seam
+    vertex is never dropped, so a corner two sibling pieces share stays
+    coincident (dropping it on only one side mints a T-vertex)."""
     coords = [(float(x), float(y)) for x, y in coords]
     while len(coords) > 3:
         n = len(coords)
         worst_i, worst_ang = -1, min_deg
         for i in range(n):
-            a, b, c = coords[(i - 1) % n], coords[i], coords[(i + 1) % n]
+            b = coords[i]
+            if keep_predicate is not None and keep_predicate(*b):
+                continue
+            a, c = coords[(i - 1) % n], coords[(i + 1) % n]
             v1 = (a[0] - b[0], a[1] - b[1])
             v2 = (c[0] - b[0], c[1] - b[1])
             n1, n2 = math.hypot(*v1), math.hypot(*v2)
@@ -574,8 +617,83 @@ def _rect_long_short_edges(coords: list[tuple[float, float]]):
 # ──────────────────────────────────────────────────────────────────
 # Core: build cut strips off one edge
 # ──────────────────────────────────────────────────────────────────
+_WELD_RING_VERTEX_SEARCH_LIMIT = 64   # stations (~320 m at the 5 m step)
+
+
+def _thin_weld_row_to_ring_vertices(inner_pts, inner_alts, inner_idx,
+                                    edge_stations, edge_alts,
+                                    is_ring_vertex):
+    """Thin a graded strip's inner weld row to EXACT pavement ring
+    vertices (user ruling 2026-07-09: a grading shape never MINTS a
+    node on a pavement edge).
+
+    Between ring vertices the pavement edge is straight and its rendered
+    value profile linear (``node_altitudes`` interpolate along the
+    edge), so interior weld stations add nodes without information — the
+    mesh lerp reproduces them exactly.  The row keeps only the stations
+    the caller marked as exact ring vertices; where a run's end station
+    is NOT a ring vertex the weld chain EXTENDS outward along the
+    station list to the nearest bracketing ring-vertex station (the far
+    corner of the ring edge the run ends on — the stations between are
+    collinear subdivisions of that edge, so the extended chain stays
+    exactly on the pavement edge), searching up to
+    ``_WELD_RING_VERTEX_SEARCH_LIMIT`` stations.  Extension is the SAFE
+    direction: shrinking the row to interior ring vertices would chord
+    the closing cap across obstructed terrain right at the pavement
+    edge (the knife-edge class the weld ruling removed); extending only
+    widens the benign taper wedge.  When no bracketing ring vertex is
+    within reach, the run-endpoint station is kept as before (a minted
+    mid-edge node — the pre-thinning behaviour, the mandated fallback).
+
+    ``inner_idx`` maps each inner-row entry to its station index in
+    ``edge_stations``.  Returns the thinned ``(inner_pts, inner_alts)``.
+    """
+    n = len(edge_stations)
+
+    def _bracket_station(start, direction):
+        j = start + direction
+        remaining = _WELD_RING_VERTEX_SEARCH_LIMIT
+        while 0 <= j < n and remaining > 0:
+            if is_ring_vertex[j]:
+                return j
+            j += direction
+            remaining -= 1
+        return None
+
+    def _station_entry(j, borrow_alt):
+        # An extension station beyond the run may carry no edge altitude
+        # (a pavement-facing / skipped station); borrow the nearest
+        # run-end value exactly as the taper neighbours do.
+        alt = edge_alts[j]
+        return (edge_stations[j],
+                round(float(alt if alt is not None else borrow_alt), 1))
+
+    kept = [(inner_pts[k], inner_alts[k])
+            for k in range(len(inner_idx))
+            if is_ring_vertex[inner_idx[k]]]
+    if not is_ring_vertex[inner_idx[0]]:
+        j = _bracket_station(inner_idx[0], -1)
+        kept.insert(0, _station_entry(j, inner_alts[0])
+                    if j is not None else (inner_pts[0], inner_alts[0]))
+    if not is_ring_vertex[inner_idx[-1]]:
+        j = _bracket_station(inner_idx[-1], +1)
+        kept.append(_station_entry(j, inner_alts[-1])
+                    if j is not None else (inner_pts[-1], inner_alts[-1]))
+    # Collapse coincident neighbours (insurance — a degenerate station
+    # list could keep two copies of one corner as a zero-length edge).
+    pts: list[tuple[float, float]] = []
+    alts: list[float] = []
+    for p, a in kept:
+        if pts and pts[-1] == p:
+            continue
+        pts.append(p)
+        alts.append(a)
+    return pts, alts
+
+
 def _build_graded_strips(edge_stations, edge_alts, outwards,
-                         band_caps, slope, trigger, step, sample_dem):
+                         band_caps, slope, trigger, step, sample_dem,
+                         is_ring_vertex=None):
     """Build clearance cut-strip rings off an edge / pavement-edge
     polyline.  At each station the ceiling rises from the pavement edge
     altitude at ``slope`` (rise/run):
@@ -604,6 +722,15 @@ def _build_graded_strips(edge_stations, edge_alts, outwards,
     ``edge_stations`` / ``edge_alts`` / ``outwards`` / ``band_caps`` are
     matched per-station lists (so the edge may curve, e.g. a centerline).
     Returns ``(ring_open, alts_open)`` pairs.
+
+    ``is_ring_vertex`` (optional, per-station bools) marks the stations
+    that are EXACT pavement ring vertices (a ring-edge subdivision's
+    ``k == 0`` points); when supplied, the inner weld row is thinned to
+    those vertices via ``_thin_weld_row_to_ring_vertices`` (no minted
+    mid-edge pavement nodes; user ruling 2026-07-09).  When ``None``,
+    full density (unchanged behaviour) — callers whose stations are NOT
+    ring-edge subdivisions (centerline raycasts, the RESA end line)
+    must pass ``None``.  Outer (daylight) rows always keep full density.
     """
     n = len(edge_stations)
     outer: list[float] = [0.0] * n
@@ -648,7 +775,7 @@ def _build_graded_strips(edge_stations, edge_alts, outwards,
         # longitudinally to its neighbours instead of ending in a wall.
         lo = max(0, i0 - 1)
         hi = min(n - 1, i1 + 1)
-        inner_pts, inner_alts = [], []
+        inner_pts, inner_alts, inner_idx = [], [], []
         outer_pts, outer_alts = [], []
         for i in range(lo, hi + 1):
             ref = edge_alts[i]
@@ -668,11 +795,13 @@ def _build_graded_strips(edge_stations, edge_alts, outwards,
             nx, ny = outwards[i]
             off = outer[i] if outer[i] > 0.0 else step
             sx, sy = edge_stations[i]
-            # Inner edge: a small gap outside the pavement, at the
-            # pavement edge altitude (clean shoulder tie-in).
-            ix, iy = sx + nx * _PAVEMENT_GAP_M, sy + ny * _PAVEMENT_GAP_M
-            inner_alts.append(round(float(ref + slope * _PAVEMENT_GAP_M), 1))
-            inner_pts.append((ix, iy))
+            # Inner edge AT the pavement edge, at the pavement edge
+            # altitude — the cut WELDS to the surface it protects (weld
+            # ruling 2026-07-09; the former 1 m standoff left a groove
+            # of raw DEM rendered as a knife-edge blade along the edge).
+            inner_alts.append(round(float(ref), 1))
+            inner_pts.append((sx, sy))
+            inner_idx.append(i)
             # Outer edge: at the daylight point, on the ceiling, so the
             # whole band is graded to the protective surface and the cut
             # meets natural ground where the terrain has daylit.  Where
@@ -695,6 +824,12 @@ def _build_graded_strips(edge_stations, edge_alts, outwards,
             outer_alts.append(round(float(ref + slope * off), 1))
         if len(inner_pts) < 2:
             continue
+        if is_ring_vertex is not None:
+            inner_pts, inner_alts = _thin_weld_row_to_ring_vertices(
+                inner_pts, inner_alts, inner_idx,
+                edge_stations, edge_alts, is_ring_vertex)
+            if len(inner_pts) < 2:
+                continue
         ring = inner_pts + outer_pts[::-1]
         alts = inner_alts + outer_alts[::-1]
         out.append((ring, alts))
@@ -729,7 +864,8 @@ def _skirt_lift_alt(analytic_floor: float, dem_alt) -> float:
 
 def _build_filled_skirts(edge_stations, edge_alts, outwards,
                          band_caps, floor_depth, band_edges, trigger,
-                         step, sample_dem):
+                         step, sample_dem, weld_predicate=None,
+                         pav_vertex_at=None):
     """Fill-direction twin of ``_build_graded_strips``: at each station a
     FLOOR descends from the pavement-end altitude,
 
@@ -762,6 +898,28 @@ def _build_filled_skirts(edge_stations, edge_alts, outwards,
     pavement at the floor's start altitude, each band's outer edge at
     the band boundary — or earlier, at the daylight point on the floor
     (= DEM there), so the fill meets natural ground with no step.
+
+    ``weld_predicate`` (optional, ``(x, y) -> bool``) thins the
+    innermost band's inner weld row (``d0 == 0``): between its run
+    endpoints only the weld TRANSITIONS survive — the row's value
+    profile is piecewise-linear with breakpoints only at run ends and
+    the points where the predicate FLIPS, so the mesh lerp reproduces
+    the dropped interior stations exactly (mirror of the adjacent-ground
+    diet, ``adjacent_ground._build_fill_bands``).  When ``None`` the row
+    keeps full density (unchanged behaviour).  Deeper bands (``d0 > 0``)
+    and every outer row always keep full density.
+
+    A grading shape must never MINT a node on a pavement edge (user
+    ruling 2026-07-09): wherever the inner row touches pavement its
+    vertices must be EXISTING pavement ring vertices.  So at each weld
+    transition, instead of keeping the two bracketing stations, the row
+    takes the single EXACT pavement ring vertex nearest the flip
+    (``pav_vertex_at(x, y) -> (x, y) | None``, within one station
+    spacing); run endpoints that lie ON pavement are snapped the same
+    way, endpoints OFF pavement (the ±half ref-floor stretch) stay as
+    station points.  If the exact-vertex lookup fails for a transition
+    (no pavement vertex within one station spacing) the row falls back
+    to keeping the two bracketing stations and the miss is reported.
     """
     n = len(edge_stations)
     outer: list[float] = [0.0] * n
@@ -789,14 +947,17 @@ def _build_filled_skirts(edge_stations, edge_alts, outwards,
             outer[i] = min(cap, last + step)
     if not any(dropped):
         return []
-    # Band boundaries: pavement gap → law breakpoints → governed cap.
-    edges = [_PAVEMENT_GAP_M]
+    # Band boundaries: pavement edge (weld, d = 0) → law breakpoints →
+    # governed cap.  The first band's inner row sits ON the pavement it
+    # fills off (weld ruling 2026-07-09 — no standoff groove).
+    edges = [0.0]
     for b in sorted(band_edges):
-        if _PAVEMENT_GAP_M + 1.0 < b < cap_max - 1.0:
+        if 1.0 < b < cap_max - 1.0:
             edges.append(float(b))
     edges.append(cap_max)
 
     out: list[tuple[list, list]] = []
+    corner_fallbacks = 0    # weld transitions with no exact pavement vertex
     for b in range(len(edges) - 1):
         d0, d1 = edges[b], edges[b + 1]
         # Stations whose fill reaches into this band.
@@ -820,7 +981,13 @@ def _build_filled_skirts(edge_stations, edge_alts, outwards,
             # stations do (their width-wise taper is the daylight).
             lo = max(0, i0 - 1) if b == 0 else i0
             hi = min(n - 1, i1 + 1) if b == 0 else i1
-            inner_pts, inner_alts = [], []
+            # Thin only the innermost band's inner weld row (see the
+            # ``weld_predicate`` docstring); deeper bands and every outer
+            # row keep full density.  ``inner_row`` carries each surviving
+            # station's (point, altitude, weld-flag) so the thinning can
+            # look across neighbours after the sweep.
+            thin_inner = d0 == 0.0 and weld_predicate is not None
+            inner_row: list[tuple[tuple[float, float], float, bool]] = []
             outer_pts, outer_alts = [], []
             for i in range(lo, hi + 1):
                 ref = edge_alts[i]
@@ -839,20 +1006,87 @@ def _build_filled_skirts(edge_stations, edge_alts, outwards,
                 # Lift-only: the ring rides the HIGHER of the analytic
                 # floor and the DEM at each vertex, so a triggered band
                 # spanning a bump above the floor never cuts it down.
-                inner_alts.append(round(_skirt_lift_alt(
+                inner_alt = round(_skirt_lift_alt(
                     float(ref - floor_depth(d0)),
-                    sample_dem(ix, iy)), 1))
-                inner_pts.append((ix, iy))
+                    sample_dem(ix, iy)), 1)
+                weld = bool(weld_predicate(ix, iy)) if thin_inner else False
+                inner_row.append(((ix, iy), inner_alt, weld))
                 ox, oy = sx + nx * off, sy + ny * off
                 outer_pts.append((ox, oy))
                 outer_alts.append(round(_skirt_lift_alt(
                     float(ref - floor_depth(off)),
                     sample_dem(ox, oy)), 1))
-            if len(inner_pts) < 2:
+            if len(inner_row) < 2:
                 continue
+            if thin_inner:
+                m2 = len(inner_row)
+                inner_pts, inner_alts = [], []
+
+                def _emit_inner(pt, alt):
+                    # Never mint a duplicate vertex (a snapped endpoint
+                    # can coincide with a transition corner).
+                    if inner_pts and inner_pts[-1] == pt:
+                        return
+                    inner_pts.append(pt)
+                    inner_alts.append(alt)
+
+                def _resolve_on_pav(a):
+                    # A kept vertex ON pavement must be an EXISTING
+                    # pavement ring vertex, never a freshly minted node.
+                    pt, alt, _w = inner_row[a]
+                    if pav_vertex_at is not None:
+                        snap = pav_vertex_at(pt[0], pt[1])
+                        if snap is not None:
+                            return snap, alt
+                    return pt, alt
+
+                def _endpoint(a):
+                    return (_resolve_on_pav(a) if inner_row[a][2]
+                            else (inner_row[a][0], inner_row[a][1]))
+
+                # Run's first surviving station (square cap).
+                p, a0 = _endpoint(0)
+                _emit_inner(p, a0)
+                for a in range(1, m2):
+                    if inner_row[a][2] == inner_row[a - 1][2]:
+                        continue    # no flip — interior redundant station
+                    # WELD TRANSITION.  The flip point IS a pavement
+                    # corner: take the single EXACT pavement vertex
+                    # nearest it (within one station spacing) and drop
+                    # the two bracketing stations — no minted edge node.
+                    (x0, y0), _al0, _w0 = inner_row[a - 1]
+                    (x1, y1), _al1, _w1 = inner_row[a]
+                    snap = (pav_vertex_at(0.5 * (x0 + x1), 0.5 * (y0 + y1))
+                            if pav_vertex_at is not None else None)
+                    if snap is not None:
+                        # The corner rides the pavement bracket's value
+                        # (recomputed analytically at emission anyway).
+                        alt = (inner_row[a - 1][1] if inner_row[a - 1][2]
+                               else inner_row[a][1])
+                        _emit_inner(snap, alt)
+                    else:
+                        # No pavement vertex in reach — keep BOTH
+                        # bracketing stations (reported below).
+                        corner_fallbacks += 1
+                        b0 = _endpoint(a - 1)
+                        _emit_inner(b0[0], b0[1])
+                        b1 = _endpoint(a)
+                        _emit_inner(b1[0], b1[1])
+                # Run's last surviving station (square cap).
+                p, aL = _endpoint(m2 - 1)
+                _emit_inner(p, aL)
+                if len(inner_pts) < 2:
+                    continue
+            else:
+                inner_pts = [p for p, _a, _w in inner_row]
+                inner_alts = [a for _p, a, _w in inner_row]
             ring = inner_pts + outer_pts[::-1]
             alts = inner_alts + outer_alts[::-1]
             out.append((ring, alts))
+    if corner_fallbacks:
+        UI.lvprint(1, "  [skirt] weld-transition exact-vertex lookup "
+                   f"missed {corner_fallbacks} time(s); kept bracketing "
+                   "stations (mid-edge weld nodes) there.")
     return out
 
 
@@ -1197,23 +1431,40 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
     def _runway_full_len(s, fallback) -> float:
         return runway_len_by_ref.get(s.ref, fallback) or fallback
 
-    # Existing geometry the cut must not overlap.  Buffer it so emitted
-    # vertices stay clear of any pavement edge (sloping-rect-edge test).
-    # The UNbuffered union doubles as the Pass A3 terrain-facing test
-    # (a ring-edge station whose outward probe lands on ANY emitted
-    # shape — adjacent pavement, ribbon, building, groundside — is not
-    # facing terrain: that shape owns its own band).
+    # Existing geometry the cut must not overlap — clipped EXACTLY, so
+    # the cut WELDS to the pavement edge it protects (weld ruling
+    # 2026-07-09; the former 1 m buffer standoff left a groove of raw
+    # DEM along every edge).  The union doubles as the Pass A3
+    # terrain-facing test (a ring-edge station whose outward probe
+    # lands on ANY emitted shape — adjacent pavement, ribbon, building,
+    # groundside — is not facing terrain: that shape owns its own band).
+    # GROUNDSIDE EXCLUSION (user ruling 2026-07-09): clearance strips
+    # never touch groundside pavement — it follows the DEM, welding a
+    # law strip onto its ring imports conflicting values (CYXY south-
+    # hangar violations).  Exact clips exclude it; a 1 m buffered
+    # block keeps strips clear instead.
     static_polys = [s.polygon for s in layout.shapes
-                    if s.polygon is not None and not s.polygon.is_empty]
+                    if s.polygon is not None and not s.polygon.is_empty
+                    and s.role != "groundside_pavement"]
+    # Buildings join the standoff (user in-sim finding 2026-07-09:
+    # a legacy strip vertex 1 m from a hangar pad corner carried a
+    # 3.69 m foreign value — flat building pads are value authorities
+    # a shadow strip must not weld to).
+    _gs = [s.polygon for s in layout.shapes
+           if s.role in ("groundside_pavement", "building")
+           and s.polygon is not None and not s.polygon.is_empty]
+    groundside_block = None
+    if _gs:
+        try:
+            groundside_block = unary_union(_gs).buffer(1.0)
+        except _GEOM_EXC:
+            groundside_block = None
     static_union = None
-    static_block = None
     if static_polys:
         try:
             static_union = unary_union(static_polys)
-            static_block = static_union.buffer(_PAVEMENT_GAP_M)
         except _GEOM_EXC:
             static_union = None
-            static_block = None
 
     # Collect every raw graded strip across all three passes, then
     # resolve them ONCE into minimal geometry.  Building per-strip and
@@ -1293,11 +1544,53 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                 _pav_tree = STRtree([s.polygon for s in _pav_list])
             except _GEOM_EXC:
                 _pav_tree = None
-        # Inner vertices sit at the 1.5 m pavement gap; corners pulled in by
-        # decimation/merge can reach ~2.5 m.  The OUTER (daylight) edge is a
-        # full station step (5 m) out, so a 3.5 m window snaps every inner
-        # vertex without ever catching the daylight edge.
+        # Inner vertices sit AT the pavement edge (weld); corners pulled in
+        # by decimation/merge can reach ~2.5 m.  The OUTER (daylight) edge
+        # is a full station step (5 m) out, so a 3 m window snaps every
+        # inner vertex without ever catching the daylight edge.
         _SNAP_TOL_M = _PAVEMENT_GAP_M + 2.0
+
+        # WELD-EDGE KEEP predicate (2026-07-09): a ring vertex sitting ON
+        # the static boundary (the pavement/feature edge the cut welds to)
+        # is protected from the 0.3 m decimation chord — chord-cutting a
+        # welded run swings the cut edge off the pavement ring and mints a
+        # cm-scale sliver against it (the epsilon-wedge class).
+        _static_tree = None
+        if static_polys:
+            try:
+                _static_tree = STRtree(static_polys)
+            except _GEOM_EXC:
+                _static_tree = None
+
+        def _on_static_boundary_within(
+                x: float, y: float, tol_m: float) -> bool:
+            if _static_tree is None:
+                return False
+            pt = Point(x, y)
+            pad = tol_m + 0.01
+            try:
+                cand = _static_tree.query(
+                    box(x - pad, y - pad, x + pad, y + pad))
+            except _GEOM_EXC:
+                return False
+            for gi in cand:
+                try:
+                    if static_polys[gi].exterior.distance(pt) <= tol_m:
+                        return True
+                except _GEOM_EXC:
+                    continue
+            return False
+
+        def _on_static_boundary(x: float, y: float) -> bool:
+            # 0.3 m decimation-chord keep (pre-re-cut): a welded run may
+            # sit up to the decimation band off the exact boundary.
+            return _on_static_boundary_within(x, y, 0.05)
+
+        def _frozen_static_vertex(x: float, y: float) -> bool:
+            # Coincident-merge freeze (post-re-cut): welded vertices sit
+            # EXACTLY on the static boundary, so exact-identity tolerance
+            # freezes only those and never a near-but-off neighbour.
+            return _on_static_boundary_within(x, y, 1e-6)
 
         def _adjacent_pav_alt(x: float, y: float):
             if _pav_tree is None:
@@ -1312,8 +1605,15 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
             return _edge_interp_alt(s, x, y)
         try:
             region = unary_union([p for p, _r, _a, _ro in raw_strips])
-            if static_block is not None and not static_block.is_empty:
-                region = region.difference(static_block)
+            # EXACT pavement clip (weld ruling 2026-07-09): the cut
+            # abuts the pavement edge with shared coordinates; the
+            # inner-row altitudes already snap to the abutting pavement
+            # edge (``_adjacent_pav_alt``), so the seam welds.
+            if static_union is not None and not static_union.is_empty:
+                region = region.difference(static_union)
+            if (groundside_block is not None
+                    and not groundside_block.is_empty):
+                region = region.difference(groundside_block)
         except _GEOM_EXC:
             return 0
         if region.is_empty:
@@ -1353,7 +1653,18 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                         best = ea
             return best
 
-        n = 0
+        # ── PHASE 1 (collect): decompose every component and take each
+        # surviving piece's OPEN ring WITHOUT decimating yet.  Two pieces
+        # born from the same union across a pavement hole share a seam;
+        # decimating each independently (the old per-piece loop) let one
+        # side keep a seam vertex the other chord-cut, minting a mm-scale
+        # T-vertex lens that Ruppert-refined into a million-triangle cell
+        # (CYXY, 2026-07-09).  Collect first, then protect the seam.
+        def _mm_key(x: float, y: float) -> tuple[int, int]:
+            # Millimetre-rounded coincidence key (shared-vertex identity).
+            return (int(round(x * 1000)), int(round(y * 1000)))
+
+        pieces: list[list[tuple[float, float]]] = []
         for comp in components:
             for simple in _decompose_polygon_with_holes(
                     comp, min_area_m2=_MIN_CUT_AREA_M2):
@@ -1372,76 +1683,137 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                 ring = _open_coords(simple)
                 if len(ring) < 3:
                     continue
-                # Collapse redundant collinear+planar nodes, trim sharp
-                # corners, then sample the final ring's altitudes.
-                alts0 = _resample(ring)
-                dec_xy, _dec_a = _decimate(ring, alts0)
-                dec_xy = _drop_sharp_corners(dec_xy)
-                if len(dec_xy) < 3:
-                    continue
+                pieces.append(ring)
+
+        # SHARED-VERTEX key set: a mm-key present in TWO OR MORE collected
+        # piece rings is a seam vertex two siblings share — every geometry
+        # mutation below must keep it coincident on both sides.
+        _key_pieces: dict[tuple[int, int], int] = defaultdict(int)
+        for ring in pieces:
+            for k in {_mm_key(vx, vy) for vx, vy in ring}:
+                _key_pieces[k] += 1
+        _shared_keys = {k for k, c in _key_pieces.items() if c >= 2}
+
+        def _shared_seam_vertex(x: float, y: float) -> bool:
+            return _mm_key(x, y) in _shared_keys
+
+        def _keep_vertex(x: float, y: float) -> bool:
+            # Decimation / corner-trim keep: on the welded static boundary
+            # OR on a shared seam between sibling pieces.
+            return _on_static_boundary(x, y) or _shared_seam_vertex(x, y)
+
+        def _frozen_vertex(x: float, y: float) -> bool:
+            # Coincident-merge freeze: welded static vertex OR shared seam
+            # (the merge must not slide a seam vertex off either sibling).
+            return _frozen_static_vertex(x, y) or _shared_seam_vertex(x, y)
+
+        # ── PHASE 2 (mutate): per piece, in the SAME order as collected,
+        # so the ``adopt`` first-sibling-wins seam is unchanged.
+        n = 0
+        for ring in pieces:
+            # Collapse redundant collinear+planar nodes, trim sharp
+            # corners, then sample the final ring's altitudes.
+            alts0 = _resample(ring)
+            dec_xy, _dec_a = _decimate(
+                ring, alts0, keep_predicate=_keep_vertex)
+            dec_xy = _drop_sharp_corners(
+                dec_xy, keep_predicate=_keep_vertex)
+            if len(dec_xy) < 3:
+                continue
+            try:
+                poly = Polygon(dec_xy)
+                if not poly.is_valid:
+                    poly = poly.buffer(0)
+                poly = _largest_poly(poly)
+            except _GEOM_EXC:
+                continue
+            if (poly is None or poly.geom_type != "Polygon"
+                    or poly.is_empty or poly.area < _MIN_CUT_AREA_M2):
+                continue
+            # RE-CUT against the exact static union: with the inner
+            # edge welded to the pavement (d = 0), the decimation's
+            # 0.3 m XY band and the morphological open above can
+            # bulge the ring ONTO pavement (a 100 m welded edge cut
+            # 0.3 m across = a 30 m² overlap — the 1 m standoff used
+            # to absorb this).  Differencing the final piece pushes
+            # the inner edge back onto the exact pavement boundary,
+            # which is also precisely the weld geometry we want.
+            if static_union is not None and not static_union.is_empty:
                 try:
-                    poly = Polygon(dec_xy)
-                    if not poly.is_valid:
-                        poly = poly.buffer(0)
-                    poly = _largest_poly(poly)
+                    recut = _largest_poly(poly.difference(static_union))
+                    if (recut is not None and not recut.is_empty
+                            and recut.geom_type == "Polygon"
+                            and recut.area >= _MIN_CUT_AREA_M2):
+                        poly = recut
                 except _GEOM_EXC:
-                    continue
-                if (poly is None or poly.geom_type != "Polygon"
-                        or poly.is_empty or poly.area < _MIN_CUT_AREA_M2):
-                    continue
-                final_ring = _open_coords(poly)
-                node_open = _resample(final_ring)
-                for vi, (vx, vy) in enumerate(final_ring):
-                    a = _adopt_alt(vx, vy)
-                    if a is not None:
-                        node_open[vi] = a
-                # Inner edge follows the pavement it abuts (overrides the strip
-                # resample / sibling adoption for pavement-adjacent vertices).
-                for vi, (vx, vy) in enumerate(final_ring):
-                    pa = _adjacent_pav_alt(vx, vy)
-                    if pa is not None:
-                        node_open[vi] = round(float(pa), 1)
-                # Collapse degenerate zero-length edges across an altitude
-                # step (the torn vertical micro-cliff — see
-                # ``_merge_coincident_ring_vertices``).  Only adopt the
-                # collapsed ring if it stays a valid cut of real area.
-                merged_ring, merged_open = _merge_coincident_ring_vertices(
-                    final_ring, node_open)
-                if (len(merged_ring) >= 3
-                        and len(merged_ring) < len(final_ring)):
+                    pass
+            final_ring = _open_coords(poly)
+            node_open = _resample(final_ring)
+            for vi, (vx, vy) in enumerate(final_ring):
+                a = _adopt_alt(vx, vy)
+                if a is not None:
+                    node_open[vi] = a
+            # Inner edge follows the pavement it abuts (overrides the strip
+            # resample / sibling adoption for pavement-adjacent vertices).
+            for vi, (vx, vy) in enumerate(final_ring):
+                pa = _adjacent_pav_alt(vx, vy)
+                if pa is not None:
+                    node_open[vi] = round(float(pa), 1)
+            # Collapse degenerate zero-length edges across an altitude
+            # step (the torn vertical micro-cliff — see
+            # ``_merge_coincident_ring_vertices``).  Only adopt the
+            # collapsed ring if it stays a valid cut of real area.
+            merged_ring, merged_open = _merge_coincident_ring_vertices(
+                final_ring, node_open,
+                frozen_predicate=_frozen_vertex)
+            if (len(merged_ring) >= 3
+                    and len(merged_ring) < len(final_ring)):
+                try:
+                    cand = Polygon(merged_ring)
+                except _GEOM_EXC:
+                    cand = None
+                # With the inner edge WELDED to pavement (d = 0), a
+                # merge that moves a ring vertex even 0.1 m can bulge
+                # the cut ONTO pavement — reject a merge that mints
+                # real overlap (touching is area 0; the guard costs
+                # one intersection per accepted merge).
+                if (cand is not None and static_union is not None
+                        and not static_union.is_empty):
                     try:
-                        cand = Polygon(merged_ring)
+                        if cand.intersection(
+                                static_union).area > 1e-4:
+                            cand = None
                     except _GEOM_EXC:
                         cand = None
-                    if (cand is not None and cand.is_valid
-                            and not cand.is_empty
-                            and cand.area >= _MIN_CUT_AREA_M2):
-                        poly = cand
-                        final_ring = merged_ring
-                        node_open = merged_open
-                # Clamp isolated resample flips between the inner (pavement
-                # level) and outer (terrain daylight) edges — the single-
-                # vertex spikes at concave jogs of a sunk-pavement corridor.
-                # LAST altitude op before emit + seam store, so a spike from
-                # resample, sibling adoption OR the coincident-vertex merge
-                # is removed and never propagates through the ``adopt`` seam.
-                node_open = _declaw_alt_needles(node_open)
-                for (vx, vy), a in zip(final_ring, node_open):
-                    adopt.setdefault(vertex_bucket(vx, vy), (vx, vy, a))
-                node_alts = node_open + [node_open[0]]
-                # Classify by the band that covers most of the piece.
-                role = ROLE_TAXIWAY_CLEARANCE
-                if runway_block is not None and not runway_block.is_empty:
-                    try:
-                        if (poly.intersection(runway_block).area
-                                > 0.5 * poly.area):
-                            role = ROLE_RUNWAY_CLEARANCE
-                    except _GEOM_EXC:
-                        pass
-                layout.shapes.append(BuiltShape(
-                    polygon=poly, role=role, ref="surface_clearance",
-                    node_altitudes=node_alts))
-                n += 1
+                if (cand is not None and cand.is_valid
+                        and not cand.is_empty
+                        and cand.area >= _MIN_CUT_AREA_M2):
+                    poly = cand
+                    final_ring = merged_ring
+                    node_open = merged_open
+            # Clamp isolated resample flips between the inner (pavement
+            # level) and outer (terrain daylight) edges — the single-
+            # vertex spikes at concave jogs of a sunk-pavement corridor.
+            # LAST altitude op before emit + seam store, so a spike from
+            # resample, sibling adoption OR the coincident-vertex merge
+            # is removed and never propagates through the ``adopt`` seam.
+            node_open = _declaw_alt_needles(node_open)
+            for (vx, vy), a in zip(final_ring, node_open):
+                adopt.setdefault(vertex_bucket(vx, vy), (vx, vy, a))
+            node_alts = node_open + [node_open[0]]
+            # Classify by the band that covers most of the piece.
+            role = ROLE_TAXIWAY_CLEARANCE
+            if runway_block is not None and not runway_block.is_empty:
+                try:
+                    if (poly.intersection(runway_block).area
+                            > 0.5 * poly.area):
+                        role = ROLE_RUNWAY_CLEARANCE
+                except _GEOM_EXC:
+                    pass
+            layout.shapes.append(BuiltShape(
+                polygon=poly, role=role, ref="surface_clearance",
+                node_altitudes=node_alts))
+            n += 1
         return n
 
     n_emitted = 0
@@ -1478,6 +1850,11 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
             letter = entry.dominant_size() if hasattr(entry, "dominant_size") else None
             for e_pts, e_alts, e_out, e_bw in _centerline_edge_runs(
                     line, prep_pav, airside, step, letter=letter):
+                # No ``is_ring_vertex``: these stations are RAYCAST hit
+                # points on the pavement edge (perpendiculars from
+                # centerline stations), not ring-edge subdivisions — no
+                # station corresponds to an exact ring vertex, so the
+                # weld-row thinning cannot apply here.
                 for ring, ralts in _build_graded_strips(
                         e_pts, e_alts, e_out, e_bw, tx_slope,
                         tx_threshold, step, sample_dem):
@@ -1505,9 +1882,14 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                 m = len(pts)
                 alts = [_sample_runway_segment_elev(s, px, py)
                         for px, py in pts]
+                # Stations subdivide the rect long edge a→b (inclusive):
+                # only its two endpoints are exact ring vertices.
+                edge_corners = [False] * m
+                edge_corners[0] = edge_corners[-1] = True
                 for ring, ralts in _build_graded_strips(
                         pts, alts, [outward] * m, [band_w] * m,
-                        tx_slope, tx_threshold, step, sample_dem):
+                        tx_slope, tx_threshold, step, sample_dem,
+                        is_ring_vertex=edge_corners):
                     _collect(ring, ralts, ROLE_TAXIWAY_CLEARANCE)
 
     # ── Pass A2: ENCLOSED-POCKET wingtip clearance (user 2026-06-30) ──
@@ -1575,6 +1957,7 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                 ring_open = _open_coords(pocket)
                 m = len(ring_open)
                 stations, outs, alts, bws = [], [], [], []
+                corner_flags = []   # k == 0 subdivision point = ring vertex
                 for i in range(m):
                     a = ring_open[i]
                     b = ring_open[(i + 1) % m]
@@ -1582,16 +1965,17 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                     if out is None:
                         continue
                     into = (-out[0], -out[1])             # INTO pocket → terrain
-                    for (sx, sy) in _stations(a, b, step)[:-1]:
+                    for k, (sx, sy) in enumerate(_stations(a, b, step)[:-1]):
                         ref = _pocket_edge_alt(sx + out[0] * 0.5, sy + out[1] * 0.5)
                         stations.append((sx, sy))
                         outs.append(into)
                         alts.append(ref)
                         bws.append(pk_half)
+                        corner_flags.append(k == 0)
                 if len(stations) >= 2:
                     for ring, ralts in _build_graded_strips(
                             stations, alts, outs, bws, tx_slope, tx_threshold,
-                            step, sample_dem):
+                            step, sample_dem, is_ring_vertex=corner_flags):
                         _collect(ring, ralts, ROLE_TAXIWAY_CLEARANCE)
 
     # ── Pass A3: airside ring-edge sweep (part 30) ──────────────────
@@ -1611,7 +1995,7 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
     # edge — the crowned, solved values), cut-only, daylighting at the
     # DEM.  Overlap with the Pass A/B strips resolves in the shared
     # ``_finalize`` union; pavement/building/ribbon overlap is removed
-    # there by the ``static_block`` difference as for every other cut.
+    # there by the exact ``static_union`` difference as for every cut.
     prep_static = None
     if static_union is not None and not static_union.is_empty:
         try:
@@ -1740,6 +2124,7 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                 ring_alts = [_sample_runway_segment_elev(s, x, y)
                              for x, y in coords]
             stations, st_alts, outs, bws = [], [], [], []
+            corner_flags = []   # k == 0 subdivision point = ring vertex
             for i in range(len(coords) - 1):
                 eax, eay = coords[i]
                 ebx, eby = coords[i + 1]
@@ -1792,10 +2177,12 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                     st_alts.append(ref)
                     outs.append(out)
                     bws.append(band)
+                    corner_flags.append(k == 0)
             if len(stations) >= 2:
                 for ring, ralts in _build_graded_strips(
                         stations, st_alts, outs, bws, tx_slope,
-                        threshold, step, sample_dem):
+                        threshold, step, sample_dem,
+                        is_ring_vertex=corner_flags):
                     _collect(ring, ralts, out_role)
 
     # ── Pass B: runway lateral graded-strip cuts (rect long-edges) ──
@@ -1821,9 +2208,14 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
             pts = _stations(a, b, step)
             m = len(pts)
             alts = [_sample_runway_segment_elev(s, px, py) for px, py in pts]
+            # Stations subdivide the rect long edge a→b (inclusive):
+            # only its two endpoints are exact ring vertices.
+            edge_corners = [False] * m
+            edge_corners[0] = edge_corners[-1] = True
             for ring, ralts in _build_graded_strips(
                     pts, alts, [outward] * m, [band_w] * m,
-                    rw_slope, rw_threshold, step, sample_dem):
+                    rw_slope, rw_threshold, step, sample_dem,
+                    is_ring_vertex=edge_corners):
                 _collect(ring, ralts, ROLE_RUNWAY_CLEARANCE)
 
     # ── Pass C: runway-end safety area (RESA) ──
@@ -1857,6 +2249,10 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
         eb = (p0[0] + perp[0] * half, p0[1] + perp[1] * half)
         stations = _stations(ea, eb, step)
         m = len(stations)
+        # No ``is_ring_vertex``: the RESA inner row is the SYNTHETIC
+        # line ea→eb across the runway end at the pavement exit, not a
+        # ring-edge subdivision — its stations have no exact-ring-vertex
+        # correspondence, so the weld-row thinning cannot apply here.
         for ring, ralts in _build_graded_strips(
                 stations, [ref] * m, [outward] * m, [rw_max_reach] * m,
                 RUNWAY_END_RESA_MAX_SLOPE, rw_threshold, step, sample_dem):
@@ -2116,17 +2512,56 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
     if not airside:
         return 0
     try:
-        prep_pav = prep(unary_union([s.polygon for s in airside]))
+        pav_union = unary_union([s.polygon for s in airside])
+        prep_pav = prep(pav_union)
     except _GEOM_EXC:
         return 0
+
+    def _pav_weld_at(vx: float, vy: float) -> bool:
+        # The pavement-proximity half of ``_end_alt_at``'s weld predicate
+        # (its axial ``d <= 0.02`` half is satisfied by construction for
+        # every inner-row point — those lie in the p0-perpendicular plane
+        # at d = 0 on the end strip, and on the pavement exit edge at
+        # d = 0 on the flanks — so only the on-pavement test drives the
+        # weld transition that thins the inner row).
+        return pav_union.distance(Point(vx, vy)) <= 0.05
+
+    # Existing pavement ring vertices (verbatim coordinates).  A grading
+    # shape must never MINT a node on a pavement edge (user ruling
+    # 2026-07-09): where the skirt's inner weld row touches pavement it
+    # snaps to the nearest EXISTING vertex within one station spacing.
+    def _iter_ring_xy(geom):
+        gt = geom.geom_type
+        if gt == "Polygon":
+            yield from geom.exterior.coords
+            for r in geom.interiors:
+                yield from r.coords
+        elif gt in ("MultiPolygon", "GeometryCollection"):
+            for g in geom.geoms:
+                yield from _iter_ring_xy(g)
+
+    _pav_vx = np.array(
+        [(float(x), float(y)) for s in airside
+         for x, y in _iter_ring_xy(s.polygon)], dtype=float)
+
+    def _pav_vertex_at(vx: float, vy: float):
+        if _pav_vx.size == 0:
+            return None
+        d2 = ((_pav_vx[:, 0] - vx) ** 2 + (_pav_vx[:, 1] - vy) ** 2)
+        j = int(np.argmin(d2))
+        if d2[j] <= step * step:
+            return (float(_pav_vx[j, 0]), float(_pav_vx[j, 1]))
+        return None
     # Every existing shape (pavement, cuts, ribbon, groundside, …),
-    # buffered so skirt vertices stay clear of their edges.
+    # clipped EXACTLY (weld ruling 2026-07-09): the skirt WELDS to the
+    # pavement it fills off — the former 1 m standoff left a groove of
+    # raw DEM that rendered as a knife-edge wall/trench at the runway
+    # end (the worst CYXY cliffs, 11.9 m, were pavement↔skirt grooves).
     static_block = None
     try:
         static_block = unary_union(
             [s.polygon for s in layout.shapes
-             if s.polygon is not None and not s.polygon.is_empty]
-        ).buffer(_PAVEMENT_GAP_M)
+             if s.polygon is not None and not s.polygon.is_empty])
     except _GEOM_EXC:
         static_block = None
 
@@ -2221,15 +2656,32 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
                         ref=float(ref), floor_depth=_floor_depth,
                         cap=governed, sample_dem=sample_dem):
             d = (vx - p0[0]) * nx + (vy - p0[1]) * ny
-            floor = ref - floor_depth(max(_PAVEMENT_GAP_M, min(cap, d)))
+            if d <= 0.02 and pav_union.distance(Point(vx, vy)) <= 0.05:
+                # WELD ROW (user ruling 2026-07-09): a vertex ON the
+                # pavement exit edge carries the LOCAL pavement edge
+                # value verbatim (containment-free read 1 m inside, the
+                # shared reader) — never lifted onto the DEM, so the
+                # skirt abuts the pavement with zero step.  ONLY where
+                # the vertex actually touches pavement: the inner row
+                # spans the full strip half-width, and its off-pavement
+                # stretch must keep the ref-anchored floor (a nearest-
+                # pavement read there imports a FOREIGN shape's value —
+                # the 63 % skirt-edge spikes of the first weld round).
+                pav = _nearest_pav_alt(
+                    airside, vx - nx * 1.0, vy - ny * 1.0)
+                if pav is not None:
+                    return float(pav)
+            floor = ref - floor_depth(max(0.0, min(cap, d)))
             # Lift-only, exactly as _build_filled_skirts' ring altitudes
             # (clip-introduced vertices ride the DEM where it is above
             # the analytic floor rather than cutting it down).
-            return _skirt_lift_alt(floor, sample_dem(vx, vy))
+            return round(_skirt_lift_alt(floor, sample_dem(vx, vy)), 1)
 
         for ring, _ralts in _build_filled_skirts(
                 stations, [ref] * m, [outward] * m, [governed] * m,
-                _floor_depth, band_edges, trigger, step, sample_dem):
+                _floor_depth, band_edges, trigger, step, sample_dem,
+                weld_predicate=_pav_weld_at,
+                pav_vertex_at=_pav_vertex_at):
             skirt_strips.append((ring, _end_alt_at))
 
         if os.environ.get("O4_SKIRT_DEBUG") == "1":
@@ -2297,17 +2749,22 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
                 edge_alt = (edge_alts[j - 1]
                             + (edge_alts[j] - edge_alts[j - 1]) * w)
                 lateral = (vx - seed[0]) * sxn + (vy - seed[1]) * syn
-                d = max(_PAVEMENT_GAP_M,
-                        min(half - offset, lateral - offset))
+                d = max(0.0, min(half - offset, lateral - offset))
+                if d <= 0.02:
+                    # WELD ROW: a vertex on the flank pavement edge
+                    # carries the interpolated edge value verbatim
+                    # (weld ruling 2026-07-09).
+                    return float(edge_alt)
                 # Lift-only (see _skirt_lift_alt): a flank vertex on a
                 # bump above the local floor rides the DEM, not a cut.
-                return _skirt_lift_alt(
-                    edge_alt - floor_depth(d), sample_dem(vx, vy))
+                return round(_skirt_lift_alt(
+                    edge_alt - floor_depth(d), sample_dem(vx, vy)), 1)
 
             flank_rings = _build_filled_skirts(
                 edge_stations, edge_alts, [side] * len(edge_stations),
                 caps, flank_floor_depth, flank_band_edges,
-                trigger, step, sample_dem)
+                trigger, step, sample_dem, weld_predicate=_pav_weld_at,
+                pav_vertex_at=_pav_vertex_at)
             if os.environ.get("O4_SKIRT_DEBUG") == "1":
                 print(f"  [skirt-debug]   flank side ({sxn:.3f},{syn:.3f})"
                       f" stations={len(edge_stations)} "
@@ -2471,8 +2928,11 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
                 piece_ring = _open_coords(simple)
                 if len(piece_ring) < 3:
                     continue
-                alts = [round(float(alt_at(vx, vy)), 1)
-                        for vx, vy in piece_ring]
+                # ``alt_at`` returns final values: weld-row vertices
+                # carry the pavement edge value UNROUNDED (so the emit
+                # consensus at a shared node is a no-op — the pavement
+                # value never moves), interior vertices arrive rounded.
+                alts = [float(alt_at(vx, vy)) for vx, vy in piece_ring]
                 layout.shapes.append(BuiltShape(
                     polygon=simple, role=ROLE_RUNWAY_CLEARANCE,
                     ref="runway_end_skirt",

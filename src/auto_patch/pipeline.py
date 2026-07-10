@@ -235,6 +235,23 @@ def _unify_airside_geometry(layout, icao: str) -> None:
             f"  [pav-builder] {icao}: pre-solve conformance — inserted "
             f"{n_verts} shared-boundary vertex(es) into {n_shapes} shape(s).")
 
+    # PRE-SOLVE EDGE DENSIFY (user in-sim finding 2026-07-09): a
+    # construction-born over-long pavement edge (CYXY: a 1,279 m
+    # junction chord) gives the SOLVER nothing to hold the edge
+    # profile with — the mesh then interpolates the pavement between
+    # far-apart nodes and it sags against the graded strips beside it.
+    # Inserted here the new vertices are solver nodes: the edge is
+    # LAW-solved, not lerped.  60 m spacing matches the emit
+    # decimators' MAX_CHORD, so the nodes survive to the mesh.
+    from .conformance import densify_long_edges
+    from .clearance import _AIRSIDE_PAVEMENT_ROLES as _DENSIFY_ROLES
+    n_dense = densify_long_edges(layout, _DENSIFY_ROLES, 60.0)
+    if n_dense:
+        UI.vprint(1,
+            f"  [pav-builder] {icao}: pre-solve edge densify — "
+            f"inserted {n_dense} vertex(es) on over-60 m pavement "
+            f"edges.")
+
     # FINAL near-corner snap: a non-rect vertex left on a sloped rect's edge
     # near a corner is snapped onto the corner so the two SHARE it; companion
     # share-neighbour-corners handles the 0.10–0.5 m junction case.
@@ -5428,15 +5445,26 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # clearance pinned ~6 m under the post-solve taxiway → a trench).
         # Because clearance is emitted here, no later solver touches it —
         # its node_altitudes are final by construction.
+        # LEGACY-CHAIN RETIREMENT GATE (user in-sim review 2026-07-09):
+        # the adjacent-ground bands + runway-end skirts supersede the
+        # legacy surface_clearance strips, whose 5 m stationing (plus
+        # every neighbour vertex the final weld inserts) is now the
+        # dominant patch-density cost (CYXY shape 261).  Default ON
+        # until the cross-airport coverage verification signs off;
+        # O4_LEGACY_SURFACE_CLEARANCE=0 builds without the chain.
+        _legacy_clearance = os.environ.get(
+            "O4_LEGACY_SURFACE_CLEARANCE", "1") == "1"
         try:
             from .clearance import emit_surface_clearance_cuts
             _cl_tl = (current_tile_lat if current_tile_lat is not None
                       else math.floor(layout.anchor[0]))
             _cl_tn = (current_tile_lon if current_tile_lon is not None
                       else math.floor(layout.anchor[1]))
-            n_cl = emit_surface_clearance_cuts(
-                layout, dem, _cl_tl, _cl_tn,
-                source_runways=apt.runways)
+            n_cl = 0
+            if _legacy_clearance:
+                n_cl = emit_surface_clearance_cuts(
+                    layout, dem, _cl_tl, _cl_tn,
+                    source_runways=apt.runways)
             if n_cl:
                 UI.vprint(1,
                     f"  [pav-builder] {icao}: emitted {n_cl} "
@@ -5711,6 +5739,21 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # emit-time scan remains as the backstop for quantization-born
         # needles.
         repair_sliver_corners(layout, icao)
+        # LATE EDGE DENSIFY (user in-sim finding 2026-07-09): shapes
+        # reshaped post-solve (junction merges / slice re-cuts) can be
+        # born with over-long edges the pre-solve densify never saw
+        # (CYXY: a 1,057 m junction chord).  Inserted here — BEFORE
+        # decimation and the final grade projection (the ordering law)
+        # — the lerped vertices are law-projected onto the mesh the
+        # sim renders, and the 60 m spacing survives the decimators'
+        # MAX_CHORD.
+        from .conformance import densify_long_edges as _dle
+        from .clearance import _AIRSIDE_PAVEMENT_ROLES as _dle_roles
+        _n_dense2 = _dle(layout, _dle_roles, 60.0)
+        if _n_dense2:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: late edge densify — inserted "
+                f"{_n_dense2} vertex(es) on over-60 m pavement edges.")
         decimate_emit_nodes(layout, icao)
 
     # FINAL GRADE PROJECTION (round 4, user 2026-07-03): the passes above
@@ -5859,6 +5902,28 @@ def build_airport_pavement(icao: str, xplane_root: str,
             UI.vprint(1, f"  [pav-builder] {icao}: runway-end skirt "
                          f"emission FAILED: {exc!r}")
 
+        # ── GAP-FILL + DRAINAGE SPINE (slice B pilot, user design
+        # 2026-07-09; docs/chain_identity_one_solve_plan.md) ────────────
+        # Ground ENCLOSED between pavements grades as ONE unit: boundary
+        # = the pavement chains verbatim, interior = a drainage spine
+        # splitting the gap into two faces sharing the spine chain.
+        # ORDERING: after the skirts (their shapes bound end-adjacent
+        # gaps) and BEFORE the adjacent-ground bands — the gap shapes
+        # join the bands' static union, so the corridor march skips
+        # gap-covered frontage and only true outer edges keep bands.
+        try:
+            from .gap_fill import emit_gap_fill_spines
+            n_gap = emit_gap_fill_spines(
+                layout, _projection_dem,
+                _projection_tile_lat, _projection_tile_lon)
+            if n_gap:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: emitted {n_gap} gap-fill "
+                    f"spine face(s) (enclosed between-pavement ground).")
+        except _GEOM_EXC as exc:
+            UI.vprint(1, f"  [pav-builder] {icao}: gap-fill spine "
+                         f"emission FAILED: {exc!r}")
+
         # ── Adjacent-ground LATERAL grade law (slice 3, gate
         # O4_ADJACENT_GROUND_LAW, default OFF) ──────────────────────────
         # The lateral generalization of the runway-end skirt: graded
@@ -5921,13 +5986,30 @@ def build_airport_pavement(icao: str, xplane_root: str,
     # so it is safe as the last geometry touch.  Measured KJQF isolated
     # triangulation: 1,993,832 → 14,252 tris.
     if compute_elevations:
-        from .conformance import enforce_conformance as _enf_final
+        from .conformance import (enforce_conformance as _enf_final,
+                                  find_conformance_violations as _fcv)
         _n_ews, _n_ewv = _enf_final(layout, tol=0.01,
                                     include_overlay_refs=True)
         if _n_ewv:
             UI.vprint(1,
                 f"  [pav-builder] {icao}: final epsilon-wedge weld — "
                 f"inserted {_n_ewv} vertex(es) into {_n_ews} shape(s).")
+        # RESIDUAL REPORT (chain identity, 2026-07-09): anything the
+        # weld could NOT unify is a divergent chain the tile mesh will
+        # Ruppert-refine — name each site so the build log localizes
+        # the mint source instead of the bake discovering it.
+        try:
+            _res_tj, _res_x = _fcv(layout.shapes, tol=0.005)
+            if _res_tj or _res_x:
+                UI.vprint(1,
+                    f"  [pav-builder] WARN {icao}: post-weld residual "
+                    f"divergence — {len(_res_tj)} T-junction(s), "
+                    f"{len(_res_x)} crossing(s):")
+                for _x, _y in (_res_tj + _res_x)[:10]:
+                    _la, _lo = layout.m_to_ll(_x, _y)
+                    UI.vprint(1, f"      @ {_la:.7f},{_lo:.7f}")
+        except _GEOM_EXC:
+            pass
 
     # INTERIOR RUNWAY CROSS-EDGE CROWN (Phase 0 hotfix, user 2026-07-07;
     # docs/runway_single_polygon_plan.md): every interior segment cross-edge
@@ -5976,6 +6058,27 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 icao, _build_features, _progress.phase_seconds(),
                 time.time() - _build_started_at)
         except Exception:
+            pass
+
+    # ABSOLUTE-LAST EDGE DENSIFY (user in-sim finding 2026-07-09): a
+    # post-solve pass after the mid-pipeline densifies still mints
+    # over-long pavement chords (CYXY: 1,057 m on junction #101 —
+    # minted between the emit-stage densify and here).  Run once more
+    # as the LAST geometry touch: lerped vertices on a straight solved
+    # edge are surface-neutral, both emit decimators are MAX_CHORD-
+    # capped so nothing downstream re-thins, and the mesh gets a node
+    # every <= 60 m to hold the pavement edge (the user's ruling).
+    if compute_elevations:
+        try:
+            from .conformance import densify_long_edges as _dle3
+            from .clearance import _AIRSIDE_PAVEMENT_ROLES as _dle3_r
+            _n_dense3 = _dle3(layout, _dle3_r, 60.0)
+            if _n_dense3:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: final edge densify — "
+                    f"inserted {_n_dense3} vertex(es) on over-60 m "
+                    f"pavement edges.")
+        except _GEOM_EXC:
             pass
 
     return layout

@@ -20,6 +20,10 @@ the floor profile arrives at the exit already `pavement_beyond_end`
 into its descent (`runway_end_skirt_floor_profile_beyond_pavement` —
 the fill still starts FLUSH at the exit-edge elevation, but falls at
 the advanced profile's grade instead of restarting the 0→−3 % easing).
+Also 2026-07-09: the skirt WELDS to the pavement (inner row at d = 0
+with per-station pavement-edge values, exact static clip) — see the
+adjacent-ground plan's weld amendment; the 1 m standoff groove rendered
+as the worst CYXY cliff (11.9 m).
 
 Implementation deltas vs the original design (§3):
 
