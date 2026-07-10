@@ -3658,6 +3658,46 @@ def _emit_object_sourced_bridge_corridors(
             f"(ruling R5): {bridge.object_resources}",
         )
 
+    # Iteration 5 (audit 5): approach step rects must NEVER intrude
+    # into a deck box or a causeway zone — the 240 m walks follow curved
+    # interchange roads that loop BACK over the span (measured: approach
+    # rects at 161-167.4 covered half the J/R centerline and both lip
+    # lines, fighting the trench/causeway surfaces in the mesh).  The
+    # keep-out is every corridor bridge's footprint plus its two
+    # causeway zones at full cap length.
+    keep_out_zones = []
+    for bridge in corridor_bridges:
+        footprint = _bridge_deck_box_meters(bridge, layout)
+        if footprint is None:
+            footprint = _bridge_footprint_meters(bridge, to_meters)
+        if footprint is None:
+            continue
+        keep_out_zones.append(footprint)
+        centroid = footprint.centroid
+        for line in _abutment_lines_layout_meters(
+                bridge, layout, extension_fraction=0.0):
+            midpoint = line.interpolate(0.5, normalized=True)
+            outward_x = midpoint.x - centroid.x
+            outward_y = midpoint.y - centroid.y
+            norm = math.hypot(outward_x, outward_y)
+            if norm < 1.0:
+                continue
+            outward_x /= norm
+            outward_y /= norm
+            (ax, ay), (bx, by) = list(line.coords)[0], list(line.coords)[-1]
+            reach = float(_CFG.BRIDGE_CAUSEWAY_MAX_LENGTH_M)
+            keep_out_zones.append(Polygon([
+                (ax, ay), (bx, by),
+                (bx + outward_x * reach, by + outward_y * reach),
+                (ax + outward_x * reach, ay + outward_y * reach),
+            ]))
+    try:
+        approach_keep_out = (
+            unary_union(keep_out_zones) if keep_out_zones else None
+        )
+    except _GEOM_EXC:
+        approach_keep_out = None
+
     osm_road_lines: list[LineString] | None = None
     n_emitted = 0
     for bridge in corridor_bridges:
@@ -3732,6 +3772,7 @@ def _emit_object_sourced_bridge_corridors(
             layout, dem, tile_lat, tile_lon, meters_to_lat_lon,
             footprint, floor_elevation, road_lines,
             road_width_m, ramp_step_m, depressed_length_m,
+            keep_out=approach_keep_out,
         )
         n_emitted += 1
         UI.vprint(
@@ -3784,7 +3825,8 @@ def _load_underpass_osm_road_lines(layout, to_meters):
 def _emit_corridor_for_footprint(
         layout, dem, tile_lat, tile_lon, meters_to_lat_lon,
         footprint, floor_elevation, road_lines,
-        road_width_m, ramp_step_m, approach_length_m):
+        road_width_m, ramp_step_m, approach_length_m,
+        keep_out=None):
     """Emit stepped approach ramps from ``floor_elevation`` up to the DEM
     for each road crossing a bridge footprint (the under-deck trench
     plate itself is emitted by the caller as the FULL footprint, stage
@@ -3823,6 +3865,7 @@ def _emit_corridor_for_footprint(
             if _emit_corridor_ramp_chain(
                 layout, dem, tile_lat, tile_lon, meters_to_lat_lon,
                 walk, walk_length, floor_elevation, half_width, ramp_step_m,
+                keep_out=keep_out,
             ):
                 emitted = True
     return emitted
@@ -3830,7 +3873,8 @@ def _emit_corridor_for_footprint(
 
 def _emit_corridor_ramp_chain(
         layout, dem, tile_lat, tile_lon, meters_to_lat_lon,
-        walk, walk_length, floor_elevation, half_width, ramp_step_m):
+        walk, walk_length, floor_elevation, half_width, ramp_step_m,
+        keep_out=None):
     """Step ``walk`` from the bridge edge (``floor_elevation``) out to the
     DEM in ``ramp_step_m`` increments, emitting one sloped
     ``ROLE_TUNNEL_RAMP`` rect per step.  Returns True when any rect was
@@ -3871,6 +3915,13 @@ def _emit_corridor_ramp_chain(
             polygon = Polygon(corners)
             if not polygon.is_valid:
                 polygon = polygon.buffer(0)
+            if keep_out is not None and not polygon.is_empty:
+                try:
+                    if polygon.intersection(keep_out).area > 0.5:
+                        previous = current
+                        continue
+                except _GEOM_EXC:
+                    pass
             if polygon.geom_type == "Polygon" and not polygon.is_empty:
                 if abs(elevation0 - elevation1) >= 0.1:
                     layout.shapes.append(BuiltShape(
@@ -3917,6 +3968,23 @@ _BRIDGE_PIN_ON_LINE_TOLERANCE_M = 0.25
 # of its own length so a ring crossing at the deck corner is still cut.
 _ABUTMENT_LINE_EXTENSION_FRACTION = 0.25
 
+# ── Stage 2b iteration 5: coverage-extent geometry (KBNA audit 5) ──
+# The trench rim is inset this far inside the deck footprint; the
+# causeway plate extends _CAUSEWAY_INWARD_OVERLAP_M INWARD past the
+# abutment lip so a mesh sample exactly ON the lip line lands INSIDE
+# the 167-flat plate even after to_osm's 0.5 m node interning wobbles
+# the written edge (audit 5: on-line samples read the wall slope or
+# raw terrain).  The remaining trench-to-causeway gap is the R2
+# node-split wall and MUST stay above the 0.5 m weld tolerance:
+# 1.2 − 0.6 = 0.6 m.
+_TRENCH_INSET_M = 1.2
+_CAUSEWAY_INWARD_OVERLAP_M = 0.6
+
+# The causeway lip is widened this much per side beyond the deck width
+# so the audit's line-END samples (t = 0 and t = 1, exactly at the deck
+# corners) stay inside the plate under coordinate wobble.
+_CAUSEWAY_WIDTH_MARGIN_M = 1.0
+
 
 def _bridge_datum_elevation_m(bridge, dem, tile_lat, tile_lon):
     """Absolute elevation of the object's anchor-terrain plane (the datum
@@ -3961,6 +4029,31 @@ def _abutment_lines_layout_meters(
             (bx + ux * reach, by + uy * reach),
         ]))
     return lines
+
+
+def _bridge_deck_box_meters(bridge, layout):
+    """The abutment-to-abutment deck BOX in layout meters — the convex
+    hull of the two (unextended) abutment lines' endpoints.  Iteration 5:
+    the classified ``deck_polygon`` is the union of HARD FACES and can be
+    a partial, multi-lobe shape (KBNA taxiway-L pools parts p1/p4/p5/p6
+    only — the under-deck trench built from it had a mid-deck gap that
+    approach ramps legally filled at 162-165 m, breaking the <= 161.25
+    corridor acceptance).  The physical under-deck corridor is the FULL
+    box between the abutments — the author-mesh treatment.  ``None`` on
+    degenerate geometry."""
+    from shapely.geometry import MultiPoint
+    lines = _abutment_lines_layout_meters(
+        bridge, layout, extension_fraction=0.0)
+    if len(lines) < 2:
+        return None
+    corners = [c for line in lines for c in line.coords]
+    try:
+        box = MultiPoint(corners).convex_hull
+    except _GEOM_EXC:
+        return None
+    if box.geom_type != "Polygon" or box.is_empty:
+        return None
+    return box
 
 
 def _record_pin(layout, x, y, value):
@@ -4378,6 +4471,11 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
         footprint = _bridge_footprint_meters(bridge, to_meters)
         if footprint is None:
             continue
+        # The under-deck working area is the abutment-to-abutment BOX
+        # (iteration 5) — the hard-face union can be partial/multi-lobe.
+        deck_box = _bridge_deck_box_meters(bridge, layout)
+        if deck_box is None:
+            deck_box = footprint
         deck_elevation = _bridge_deck_elevation_m(
             bridge, dem, tile_lat, tile_lon
         )
@@ -4386,7 +4484,7 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
         # Ruling R8 flush seat (hard decks) / pavement wins (cosmetic).
         pavement_kept_union = None
         if bridge.hard_deck:
-            n_cut = _cut_pavement_over_hard_deck(layout, footprint)
+            n_cut = _cut_pavement_over_hard_deck(layout, deck_box)
             if n_cut:
                 UI.vprint(
                     1,
@@ -4400,7 +4498,7 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                 if shape.role in weld_roles
                 and shape.polygon is not None
                 and not shape.polygon.is_empty
-                and shape.polygon.intersects(footprint)
+                and shape.polygon.intersects(deck_box)
             ]
             try:
                 pavement_kept_union = (
@@ -4410,9 +4508,9 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
             except _GEOM_EXC:
                 pavement_kept_union = None
 
-        # Trench (born flat at the law floor).
+        # Trench (born flat at the law floor) — spans the deck BOX.
         try:
-            trench = footprint.buffer(-0.6)
+            trench = deck_box.buffer(-_TRENCH_INSET_M)
             if pavement_kept_union is not None:
                 trench = trench.difference(pavement_kept_union)
             if trench.geom_type == "MultiPolygon" and not trench.is_empty:
@@ -4453,13 +4551,30 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
             outward_x /= outward_norm
             outward_y /= outward_norm
             (ax, ay), (bx, by) = list(line.coords)[0], list(line.coords)[-1]
+            # Iteration 5 (audit 5): widen the lip beyond the deck
+            # corners and start the plate INWARD of the lip so on-line
+            # and corner samples stay inside the 167-flat surface under
+            # the 0.5 m node-interning wobble; the trench inset grows in
+            # step so the R2 node-split wall gap stays 0.6 m.
+            line_length = math.hypot(bx - ax, by - ay)
+            direction_x = (bx - ax) / line_length
+            direction_y = (by - ay) / line_length
+            ax -= direction_x * _CAUSEWAY_WIDTH_MARGIN_M
+            ay -= direction_y * _CAUSEWAY_WIDTH_MARGIN_M
+            bx += direction_x * _CAUSEWAY_WIDTH_MARGIN_M
+            by += direction_y * _CAUSEWAY_WIDTH_MARGIN_M
+            ax -= outward_x * _CAUSEWAY_INWARD_OVERLAP_M
+            ay -= outward_y * _CAUSEWAY_INWARD_OVERLAP_M
+            bx -= outward_x * _CAUSEWAY_INWARD_OVERLAP_M
+            by -= outward_y * _CAUSEWAY_INWARD_OVERLAP_M
 
             def _outward_rectangle(length_m):
+                reach = length_m + _CAUSEWAY_INWARD_OVERLAP_M
                 return Polygon([
                     (ax, ay),
                     (bx, by),
-                    (bx + outward_x * length_m, by + outward_y * length_m),
-                    (ax + outward_x * length_m, ay + outward_y * length_m),
+                    (bx + outward_x * reach, by + outward_y * reach),
+                    (ax + outward_x * reach, ay + outward_y * reach),
                 ])
 
             plate_length = maximum_length

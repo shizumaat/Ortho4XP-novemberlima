@@ -157,12 +157,15 @@ class _Classification:
 
 
 def _draped_road_network_across_deck(length_m: float = 131.0) -> RoadNetwork:
-    """A single fully-draped (level 0) road segment running along the deck
-    axis, from x=-40 to x=length+40 at z=0, in the structure frame."""
+    """A single fully-draped (level 0) road segment crossing UNDER the
+    deck perpendicular to its axis (the physical reality — Donelson Pike
+    crosses the taxiway-L deck width and exits through the LONG sides,
+    clear of the causeway zones off the short ends): x = length/2, z
+    from -80 to +80 in the structure frame."""
     shape_points = []
-    for along in (-40.0, length_m / 2.0, length_m + 40.0):
+    for across in (-80.0, 0.0, 80.0):
         latitude, longitude = local_offset_to_lonlat(
-            ANCHOR_LATITUDE, ANCHOR_LONGITUDE, 0.0, along, 0.0
+            ANCHOR_LATITUDE, ANCHOR_LONGITUDE, 0.0, length_m / 2.0, across
         )
         shape_points.append(
             RoadShapePoint(longitude, latitude, 0.0, True)
@@ -1365,3 +1368,97 @@ class TestR12PassImmunityByConstruction:
         refs = {s.ref for s in layout.shapes}
         assert "object_bridge_corridor" in refs
         assert "portal_ramp" not in refs
+
+
+# ---------------------------------------------------------------------------
+# stage 2b iteration 5 — approach keep-out + lip coverage geometry
+# ---------------------------------------------------------------------------
+
+class TestApproachKeepOut:
+    def test_no_approach_rect_intrudes_into_the_deck_box(self, monkeypatch):
+        from shapely.geometry import Polygon as _Polygon
+        layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
+        layout.shapes.append(_deck_route_shape())
+        count, _s, _c = bridges._emit_object_sourced_bridge_corridors(
+            layout, _FakeDem(150.0), 36, -87,
+            _Classification([_bridge()]),
+            [_draped_road_network_across_deck()],
+            road_width_m=22.0, ramp_step_m=20.0, approach_length_m=80.0,
+        )
+        assert count == 1
+        footprint = _Polygon([(0.0, -27.5), (131.0, -27.5),
+                              (131.0, 27.5), (0.0, 27.5)])
+        approaches = [s for s in layout.shapes
+                      if s.ref == "object_bridge_approach"]
+        assert approaches, "perpendicular road must produce approaches"
+        for approach in approaches:
+            assert approach.polygon.intersection(footprint).area <= 0.5, \
+                "approach rect intrudes into the deck box"
+
+    def test_road_through_causeway_zone_is_suppressed(self, monkeypatch):
+        # A road exiting through the SHORT (abutment) ends runs straight
+        # through the causeway zones — every step is keep-out territory
+        # and the walk emits nothing there (the causeway owns that
+        # ground; audit 5 measured these loop-back rects fighting the
+        # 167 plates in the mesh).
+        axis_points = []
+        for along in (-40.0, 65.0, 171.0):
+            latitude, longitude = local_offset_to_lonlat(
+                ANCHOR_LATITUDE, ANCHOR_LONGITUDE, 0.0, along, 0.0
+            )
+            axis_points.append(RoadShapePoint(longitude, latitude, 0.0, True))
+        axis_network = RoadNetwork(
+            network_definitions=["lib/g10/roads_EU.net"],
+            segments=[RoadSegment(0, "lib/g10/roads_EU.net", 20, 1, 2,
+                                  axis_points)],
+            skipped_line_count=0,
+        )
+        layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
+        layout.shapes.append(_deck_route_shape())
+        bridges._emit_object_sourced_bridge_corridors(
+            layout, _FakeDem(150.0), 36, -87,
+            _Classification([_bridge()]), [axis_network],
+            road_width_m=22.0, ramp_step_m=20.0, approach_length_m=80.0,
+        )
+        assert not [s for s in layout.shapes
+                    if s.ref == "object_bridge_approach"]
+
+
+class TestLipCoverageGeometry:
+    def test_lip_line_samples_inside_the_causeway(self, monkeypatch):
+        # Audit-5 regression: mesh samples exactly ON the abutment line
+        # read the wall slope / raw terrain because the plate boundary
+        # WAS the line (node wobble pushes samples off).  The plate now
+        # overlaps the lip inward and past both corners: all 9 audit
+        # sample positions (including t=0 and t=1) lie strictly INSIDE.
+        from shapely.geometry import Point as _Point
+        layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
+        layout.shapes.append(_kbna_gap_rect())
+        bridges.build_bridge_layout_shapes(layout, None, 36, -87)
+        plates = [s for s in layout.shapes
+                  if s.ref == "object_bridge_causeway"]
+        start_plate = min(plates, key=lambda s: s.polygon.centroid.x)
+        # Start abutment line: x = 0, y -27.5..27.5 (frame south = -y).
+        for i in range(9):
+            t = i / 8.0
+            sample = _Point(0.0, -27.5 + t * 55.0)
+            assert start_plate.polygon.buffer(1e-9).contains(sample) or \
+                start_plate.polygon.covers(sample), f"t={t} off-plate"
+        # And strictly interior points 0.3 m inward of the lip.
+        assert start_plate.polygon.covers(_Point(0.3, 0.0))
+
+    def test_wall_gap_stays_above_weld_tolerance(self, monkeypatch):
+        # Trench rim (inset 1.2) to causeway inner edge (lip - 0.6):
+        # the node-split wall gap is 0.6 m > the 0.5 m weld tolerance.
+        layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
+        layout.shapes.append(_deck_route_shape())
+        bridges.build_bridge_layout_shapes(layout, None, 36, -87)
+        trench = [s for s in layout.shapes
+                  if s.ref == "object_bridge_corridor"][0]
+        plates = [s for s in layout.shapes
+                  if s.ref == "object_bridge_causeway"]
+        from auto_patch.layout import SHARED_VERTEX_TOL_M
+        for plate in plates:
+            gap = trench.polygon.distance(plate.polygon)
+            assert gap > SHARED_VERTEX_TOL_M + 0.05, \
+                f"wall gap {gap:.2f} m would weld shut"
