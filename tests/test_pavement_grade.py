@@ -351,3 +351,96 @@ def test_runway_vertical_curve(icao):
     assert not vios, (
         f"{icao}: {len(vios)} runway end-grade/vertical-curve violation(s).  "
         f"Worst:\n  {_fmt_rwy(vios)}")
+
+
+def _synthetic_clipped_runway_layout(displace_station=None, displace_dz=0.0):
+    """A synthetic single-poly runway ring that reproduces the SPLP failure
+    shape, for a pure-geometry unit test of ``check_runway_profile``'s
+    edge-aware reconstruction.
+
+    A tilted rectangle (heading 25°, 850 m usable, 45 m wide) with:
+
+    * densification vertices on EVERY edge (~20 m spacing);
+    * a normal flat cross-cap at the high end; and
+    * an OBLIQUE tile-clipped cap at the low end that spans ~150 m of station
+      — LONGER than the runway is wide — with vertices sweeping across the
+      centerline (exactly the SPLP 02/20 clipped end).
+
+    Per-vertex altitudes follow a compliant 0.5 % along-axis slope.  When
+    ``displace_station`` is given, that plus-rail vertex's altitude is shifted
+    by ``displace_dz`` to inject a REAL mid-edge profile defect.  Returned as a
+    lightweight layout stand-in (``check_runway_profile`` only needs
+    ``shapes`` + the per-shape ``polygon``/``ref``/``role``/``node_altitudes``/
+    ``from_single_poly`` fields; ``_ll`` degrades to ``"?,?"`` without
+    ``m_to_ll``)."""
+    import math
+    from types import SimpleNamespace
+    from shapely.geometry import Polygon
+
+    theta = math.radians(25.0)
+    ux, uy = math.cos(theta), math.sin(theta)
+    vx, vy = -uy, ux
+    half_w = 22.5
+    slope = 0.005           # 0.5 % along-axis — well under the 1.5 % cap
+    base = 100.0
+    spacing = 20.0
+    clip = 150.0            # plus rail starts here (low end clipped off)
+    top = 1000.0
+
+    ring = []               # (x, y)
+    alt = []                # per-vertex altitude
+
+    def add(station, lateral):
+        ring.append((station * ux + lateral * vx, station * uy + lateral * vy))
+        z = base + slope * station
+        if (displace_station is not None
+                and abs(station - displace_station) < 1e-6
+                and abs(lateral - half_w) < 1e-6):
+            z += displace_dz
+        alt.append(z)
+
+    station = clip                       # plus rail, low -> high
+    while station < top - 1e-6:
+        add(station, +half_w)
+        station += spacing
+    add(top, +half_w)
+    for lateral in (11.0, 0.0, -11.0):   # normal cross-cap (densified)
+        add(top, lateral)
+    add(top, -half_w)
+    station = top - spacing              # minus rail, high -> low
+    while station > 1e-6:
+        add(station, -half_w)
+        station -= spacing
+    add(0.0, -half_w)
+    add(50.0, -7.5)                      # oblique clipped cap (sweeps center)
+    add(100.0, +7.5)
+
+    shape = SimpleNamespace(
+        role="runway", ref="09/27", polygon=Polygon(ring),
+        node_altitudes=list(alt), altitude=None, from_single_poly=True)
+    return SimpleNamespace(shapes=[shape])
+
+
+def test_runway_profile_edge_aware_oblique_clip():
+    """The edge-aware single-poly reconstruction must (a) NOT fabricate a
+    phantom violation from an oblique tile-clipped end-cap (the cap edges are
+    excluded from the longitudinal profile), yet (b) still catch a REAL
+    mid-edge profile defect — edge-awareness must not blind the checker.
+
+    Pure geometry, no build required (guards the reconstruction itself)."""
+    from auto_patch.verification import check_runway_profile
+
+    compliant = check_runway_profile(
+        _synthetic_clipped_runway_layout(),
+        end_grade_cap=None, check_curvature=False)
+    assert not compliant, (
+        f"synthetic compliant runway: {len(compliant)} phantom violation(s) "
+        f"(oblique clipped cap must be excluded): {compliant}")
+
+    defect = check_runway_profile(
+        _synthetic_clipped_runway_layout(
+            displace_station=510.0, displace_dz=0.5),
+        end_grade_cap=None, check_curvature=False)
+    assert any(kind == "grade" for kind, *_ in defect), (
+        "synthetic +0.5 m mid-edge displacement not flagged — edge-awareness "
+        f"must still catch real profile defects (got {defect})")

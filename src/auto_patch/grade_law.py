@@ -504,7 +504,8 @@ def adjacent_ground_envelope(
 # consumed by BOTH the emitter (which clamps ``outer[]`` before laying bands)
 # and the validator (which exempts columns beyond the supported depth), in
 # lockstep.
-def adjacent_ground_supported_depths(depths, positions):
+def adjacent_ground_supported_depths(depths, positions,
+                                     at_continuation_seam=None):
     """Slope-limit the per-station adjacent-ground daylight ``depths`` so the
     daylight line benches along the frontage instead of jumping.
 
@@ -534,6 +535,26 @@ def adjacent_ground_supported_depths(depths, positions):
     desired physical behaviour (you cannot bench a full cut in one station);
     the ridge is still cut, just entered on a grade.
 
+    SEAM-AWARE (user 2026-07-10, cross-shape run-end taper): a run boundary
+    that exists ONLY because of the pavement PARTITION — one airside shape's
+    terrain-facing frontage ends at a corner it shares with an abutting airside
+    shape whose frontage CONTINUES the graded run — must NOT bench in.  Left
+    alone, the terminal station of the ending shape is pulled inward toward its
+    own locally-unobstructed neighbour while the abutting shape's band stands at
+    full depth, and the two terminal stations (a fraction of a metre apart
+    across the seam) form an inward outer-edge NOTCH — a lawful-value but
+    artefact jog that mints a post-weld T-junction (CYXY seam dips
+    60.7203854,-135.0788903 / 60.7208756,-135.0791845).  ``at_continuation_seam``
+    (per-station, aligned with ``depths``; None = off, every station benched
+    as before) marks the terminal stations that sit at such a continuation
+    seam; a marked station is NEVER lowered by either sweep, so it holds its
+    raw scanned depth and BOTH abutting shapes' terminal stations agree on
+    outer depth (they read the SAME terrain across the seam).  The marked deep
+    station still SUPPORTS its interior neighbours (its high depth is the seed
+    the sweeps ramp down from), so the daylight line stays continuous into the
+    shape.  At a TRUE frontage end — no abutting airside continuation — no
+    station is marked and the bench-in is exactly the daylight law above.
+
     LOCKSTEP (mandatory): the validator ``verification.check_adjacent_ground``
     flags any un-covered corridor breach, so an emitter-only clamp would leave
     the clamped-away deep columns still breaching and mint findings.  Both
@@ -544,11 +565,21 @@ def adjacent_ground_supported_depths(depths, positions):
     limit = ADJACENT_GROUND_DAYLIGHT_SLOPE_LIMIT
     n = len(depths)
     supported = [float(d) for d in depths]
+
+    def _pinned(i):
+        return (at_continuation_seam is not None
+                and i < len(at_continuation_seam)
+                and bool(at_continuation_seam[i]))
+
     for i in range(1, n):
+        if _pinned(i):
+            continue        # continuation seam: hold the raw scanned depth
         (ax, ay), (bx, by) = positions[i - 1], positions[i]
         span = ((bx - ax) ** 2 + (by - ay) ** 2) ** 0.5
         supported[i] = min(supported[i], supported[i - 1] + limit * span)
     for i in range(n - 2, -1, -1):
+        if _pinned(i):
+            continue
         (ax, ay), (bx, by) = positions[i + 1], positions[i]
         span = ((bx - ax) ** 2 + (by - ay) ** 2) ** 0.5
         supported[i] = min(supported[i], supported[i + 1] + limit * span)

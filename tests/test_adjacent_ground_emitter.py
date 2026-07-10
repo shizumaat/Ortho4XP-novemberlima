@@ -451,3 +451,38 @@ class TestDaylightSupportedDepths:
         rev = adjacent_ground_supported_depths(
             depths[::-1], pos[::-1])
         assert fwd == pytest.approx(rev[::-1])
+
+    def test_continuation_seam_terminal_holds_raw_depth(self):
+        """A deep terminal station at a pavement-PARTITION seam (the run ends
+        because an abutting airside shape continues the frontage, not because
+        the frontage ends) is pinned to its raw depth — it must NOT bench in
+        toward its own locally-unobstructed interior neighbour, so it agrees
+        with the abutting shape's full-depth terminal (no seam notch)."""
+        from auto_patch.grade_law import adjacent_ground_supported_depths
+        # Stations march inward → seam.  The interior shallows to 0; the
+        # terminal (index 3) sits at the seam at full depth 12.5.
+        depths = [0.0, 4.0, 8.0, 12.5]
+        pos = self._line_positions(len(depths))
+        seam = [False, False, False, True]
+        out = adjacent_ground_supported_depths(depths, pos, seam)
+        # Pinned terminal holds full depth (unpinned it would bench toward the
+        # interior ramp).
+        assert out[3] == pytest.approx(12.5)
+        # The interior stays supported (the deep seam seeds the ramp), not
+        # dragged below its raw values.
+        assert out == pytest.approx(depths)
+
+    def test_continuation_seam_default_off_still_benches(self):
+        """With no seam flags (the default / a TRUE frontage end) the deep
+        terminal benches exactly as the daylight law — the pin is opt-in."""
+        from auto_patch.grade_law import adjacent_ground_supported_depths
+        from auto_patch.config import ADJACENT_GROUND_DAYLIGHT_SLOPE_LIMIT
+        depths = [0.0, 0.0, 0.0, 12.5]
+        pos = self._line_positions(len(depths))
+        unpinned = adjacent_ground_supported_depths(depths, pos)
+        # The isolated deep terminal benches toward its 0-depth neighbour.
+        assert unpinned[3] == pytest.approx(
+            ADJACENT_GROUND_DAYLIGHT_SLOPE_LIMIT * STEP)
+        # A None flag list is identical to omitting it.
+        assert adjacent_ground_supported_depths(
+            depths, pos, None) == pytest.approx(unpinned)

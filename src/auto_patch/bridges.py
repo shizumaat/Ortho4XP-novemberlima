@@ -75,6 +75,7 @@ from .config import (
     SKIP_TUNNEL_RAMPS_NEAR_ROADS,
     TUNNEL_ADJACENT_ROAD_DIST_M,
     TUNNEL_FORK_THROAT,
+    TUNNEL_LOW_CONNECTOR_MAX_OPEN_GAP_M,
 )
 
 
@@ -455,21 +456,53 @@ def _synthesize_implied_crossing_bores(
                         _prev[1] = max(_prev[1], _iv[1])
                         _prev[3] = max(_prev[3], _iv[3])
                     elif _low_connectors and _gap < low_connector_max_gap_m:
-                        try:
-                            _gline = substring(_line, _prev[3], _iv[2])
-                        except _GEOM_EXC:
-                            _gline = None
-                        if (_gline is not None
-                                and _gline.geom_type == "LineString"
-                                and _gline.length > 1.0):
-                            _gw = _carriageway_width_for(
-                                _tags.get("highway") or "railway", 22.0)
-                            low_connector_gaps.append((_gline, _gw))
+                        # The road cannot surface and return within this
+                        # gap, so the bores merge either way.  The gap's
+                        # VISIBLE form depends on its width (user
+                        # 2026-07-10, SPJC big NW crossing): a narrow gap
+                        # (KDFW double-parallel-taxiway median, 30-70 m)
+                        # is dug open as a flat low connector; anything
+                        # wider stays COVERED — no trench recorded, no
+                        # mid-gap portals, ground bridged over the bore.
+                        if _gap < TUNNEL_LOW_CONNECTOR_MAX_OPEN_GAP_M:
+                            try:
+                                _gline = substring(_line, _prev[3], _iv[2])
+                            except _GEOM_EXC:
+                                _gline = None
+                            if (_gline is not None
+                                    and _gline.geom_type == "LineString"
+                                    and _gline.length > 1.0):
+                                _gw = _carriageway_width_for(
+                                    _tags.get("highway") or "railway",
+                                    22.0)
+                                low_connector_gaps.append((_gline, _gw))
                         _prev[1] = _iv[1]
                         _prev[3] = _iv[3]
                     else:
                         _merged.append(list(_iv))
                 _intervals = [(_a, _b) for (_a, _b, _r1, _r2) in _merged]
+                # MAPPED-END PRESERVATION (user 2026-07-10, SPJC big NW
+                # tunnel): the re-split derives a mapped tunnel's breaks
+                # from OUR pavement (KDFW mapper-break cleanup), which
+                # plants portals at the pavement edges INSIDE the real
+                # bore when the mapped tunnel extends far beyond the
+                # crossing (SPJC: 1.27 km mapped trunk bores with the
+                # crossings mid-way — ramps emitted inside the tunnel).
+                # A mapped end stretch longer than the open-gap design
+                # cap is genuine covered tunnel, not mapper sloppiness:
+                # keep it BORE by clamping the outermost interval to the
+                # way end, so the portal (and the approach ramps walked
+                # beyond it) sit at the TRUE mapped mouth.  Short end
+                # stretches keep the re-split cleanup (KDFW-validated:
+                # portal cap at [pavement edge, edge + 1 m]).
+                if _had_tunnel and _intervals:
+                    if _intervals[0][0] \
+                            > TUNNEL_LOW_CONNECTOR_MAX_OPEN_GAP_M:
+                        _intervals[0] = (0.05, _intervals[0][1])
+                    if (_line.length - _intervals[-1][1]
+                            > TUNNEL_LOW_CONNECTOR_MAX_OPEN_GAP_M):
+                        _intervals[-1] = (_intervals[-1][0],
+                                          _line.length - 0.05)
                 # split the way: approach | bore | approach | bore | ...
                 _arcs = [0.0]
                 for _k in range(1, len(_present)):
@@ -826,11 +859,20 @@ def _tunnel_has_adjacent_road(tw_id2, t_nrefs2, system_nodes,
                               nodes_m: dict,
                               adjacent_road_dist_m: float,
                               other_road_lines: list,
-                              other_road_tree) -> bool:
+                              other_road_tree,
+                              parent_nodes: set | None = None) -> bool:
     """True when the tunnel way is crossed by — or runs within
     ``adjacent_road_dist_m`` of — a foreign (non-service) road;
     see the adjacent-road skip comment in
     ``_build_adjacent_road_index``.
+
+    ``parent_nodes``: every node of the candidate's ORIGINAL
+    (pre-re-split) way.  The share-a-node exemption must evaluate at
+    that scope — the re-split moves a way's original end nodes into
+    its approach pieces, so a bore clamped to the mapped tunnel end
+    no longer shares a node with the surface continuation it hands
+    off to, and the veto read the continuation as a foreign road at
+    0 m (SPJC true-mouth clamp, 2026-07-10).
     """
     if other_road_tree is None:
         return False
@@ -842,7 +884,7 @@ def _tunnel_has_adjacent_road(tw_id2, t_nrefs2, system_nodes,
         _buf = _tline.buffer(adjacent_road_dist_m)
     except _GEOM_EXC:
         return False
-    _tnodes = set(t_nrefs2)
+    _tnodes = set(t_nrefs2) | (parent_nodes or set())
     for _qi in other_road_tree.query(_buf):
         _oline, _onodes, _owid = other_road_lines[int(_qi)]
         if _owid == tw_id2 or (_tnodes & _onodes):
@@ -926,10 +968,20 @@ def _compute_tunnel_system_veto(
                 except _GEOM_EXC:
                     continue
         _sys_bad: dict = {}
+        # Node sets of the candidates' ORIGINAL ways (the re-split
+        # appends pieces as ``<parent>|IMP<j>``) — the share-a-node
+        # exemption evaluates at whole-original-way scope, see
+        # ``_tunnel_has_adjacent_road``.
+        _parent_nodes: dict = {}
+        for _tw9, _tn9, _tt9 in ways_r:
+            _pid9 = _tw9.split("|IMP", 1)[0]
+            _parent_nodes.setdefault(_pid9, set()).update(_tn9)
         _raw = [_tunnel_has_adjacent_road(
                     _cands[k][0], _cands[k][1], tunnel_all_nodes,
                     nodes_m, adjacent_road_dist_m,
-                    other_road_lines, other_road_tree)
+                    other_road_lines, other_road_tree,
+                    parent_nodes=_parent_nodes.get(
+                        _cands[k][0].split("|IMP", 1)[0]))
                 for k in range(len(_cands))]
         for k in range(len(_cands)):
             r = _find(k)
@@ -2414,6 +2466,57 @@ def _emit_low_corridor_connectors(
     return n_rects
 
 
+# Clearance kept between a graze-clipped tunnel piece and the airside
+# pavement that grazed it.  Must exceed the OSM-emit shared-vertex
+# bucket (SHARED_VERTEX_TOL_M = 0.5 m) so a clipped ramp/wall edge
+# never hashes onto a pavement node — same rationale as ``wall_gap_m``
+# (user 2026-05-03: one node with two altitudes renders as a vertical
+# glitch).
+_TUNNEL_GRAZE_CLEARANCE_M = 0.6
+
+
+def _sloped_rect_clipped_altitudes(orig_poly, alt_high, alt_low,
+                                   new_poly):
+    """Per-vertex altitudes for a clipped ``altitude_high/low`` rect.
+
+    A sloped rect encodes its gradient by RING ORDER (corners 0,3 =
+    high edge, corners 1,2 = low edge — the ``_rect_from_axis_extended``
+    convention), which any polygon clip destroys.  Convert to explicit
+    ``node_altitudes``: project every new ring vertex onto the rect's
+    slope axis (low-edge midpoint → high-edge midpoint) and lerp.
+    Returns the closed altitude list for ``new_poly``'s exterior ring,
+    or None when the original ring is not the 4-corner rect the
+    convention promises (caller should then drop the piece).
+    """
+    try:
+        ring = list(orig_poly.exterior.coords)
+    except _GEOM_EXC:
+        return None
+    if ring and ring[0] == ring[-1]:
+        ring = ring[:-1]
+    if len(ring) != 4:
+        return None
+    c0, c1, c2, c3 = ring
+    mid_high = ((c0[0] + c3[0]) / 2.0, (c0[1] + c3[1]) / 2.0)
+    mid_low = ((c1[0] + c2[0]) / 2.0, (c1[1] + c2[1]) / 2.0)
+    ax = mid_high[0] - mid_low[0]
+    ay = mid_high[1] - mid_low[1]
+    axis_len_sq = ax * ax + ay * ay
+    if axis_len_sq < 1e-6:
+        return None
+    alts = []
+    try:
+        new_ring = list(new_poly.exterior.coords)
+    except _GEOM_EXC:
+        return None
+    for (vx, vy) in new_ring:
+        t = ((vx - mid_low[0]) * ax + (vy - mid_low[1]) * ay) \
+            / axis_len_sq
+        t = max(0.0, min(1.0, t))
+        alts.append(round(alt_low + t * (alt_high - alt_low), 2))
+    return alts
+
+
 def _finalize_tunnel_emission(
         layout: "PavementLayout", exclusion_zones: list,
         boundary_clearance_m: float, airside_gate_union,
@@ -2501,29 +2604,101 @@ def _finalize_tunnel_emission(
     # Pieces are short, so dropping the overlapping ones lets the
     # trench dive under a taxiway and re-emerge on the far side.
     if airside_gate_union is not None:
+        # COVERED vs GRAZE discriminator (2026-07-10, SPJC big NW
+        # crossing): the drop is meant for pieces UNDER pavement (a
+        # covered stretch has no visible structure — overlap ≈ the
+        # whole piece).  An implied bore crossing pavement OBLIQUELY
+        # grazes the pavement corner with the piece nearest its portal
+        # (SPJC: ~6 % of the piece area against the shoulder-widened
+        # runway edge) — the old absolute 0.25 m² threshold wholesale-
+        # dropped exactly the mouth descent and the perimeter wall
+        # band, so the tunnel had no visible entrances.  Now: mostly-
+        # covered pieces (≥ 50 %) still drop whole; grazes are CLIPPED
+        # off the pavement instead, converting sloped rects to
+        # node_altitudes (ring-order slope semantics do not survive a
+        # clip) and NN-resampling clipped node_altitudes rings.
+        _graze_clip = os.environ.get(
+            "O4_TUNNEL_GRAZE_CLIP", "1") == "1"
+        _gate_buf = None
         _kept9 = []
         _n_clip = 0
+        _n_graze = 0
         for _k9, s9 in enumerate(layout.shapes):
-            if (id(s9) not in pre_emit_shape_ids
+            if not (id(s9) not in pre_emit_shape_ids
                     and getattr(s9, "ref", "") in
                     ("tunnel_cap", "tunnel_wall", "tunnel_ramp")
                     and s9.polygon is not None
                     and not s9.polygon.is_empty):
+                _kept9.append(s9)
+                continue
+            try:
+                _ov = s9.polygon.intersection(
+                    airside_gate_union).area
+            except _GEOM_EXC:
+                _ov = 0.0
+            if _ov <= 0.25:
+                _kept9.append(s9)
+                continue
+            if not _graze_clip or _ov >= 0.5 * s9.polygon.area:
+                _n_clip += 1    # covered stretch — no visible structure
+                continue
+            # A graze — clip the piece off the pavement (with vertex-
+            # bucket clearance) and keep the visible remainder.
+            if _gate_buf is None:
                 try:
-                    if s9.polygon.intersection(
-                            airside_gate_union).area > 0.25:
-                        _n_clip += 1
-                        continue
+                    _gate_buf = airside_gate_union.buffer(
+                        _TUNNEL_GRAZE_CLEARANCE_M)
                 except _GEOM_EXC:
-                    pass
+                    _gate_buf = airside_gate_union
+            try:
+                _cutg = s9.polygon.difference(_gate_buf)
+            except _GEOM_EXC:
+                _n_clip += 1
+                continue
+            if _cutg.geom_type == "MultiPolygon":
+                _cutg = max(_cutg.geoms, key=lambda g: g.area)
+            if (_cutg.geom_type != "Polygon" or _cutg.is_empty
+                    or _cutg.area < 1.0):
+                _n_clip += 1
+                continue
+            if s9.node_altitudes:
+                try:
+                    _oring = list(s9.polygon.exterior.coords)
+                except _GEOM_EXC:
+                    _oring = []
+                if _oring and _oring[0] == _oring[-1]:
+                    _oring = _oring[:-1]
+                _res = _resample_node_altitudes_nn(
+                    _cutg, _oring, list(s9.node_altitudes))
+                if _res is None:
+                    _n_clip += 1
+                    continue
+                s9.node_altitudes = _res
+            elif (s9.altitude_high is not None
+                    and s9.altitude_low is not None):
+                _res = _sloped_rect_clipped_altitudes(
+                    s9.polygon, s9.altitude_high, s9.altitude_low,
+                    _cutg)
+                if _res is None:
+                    _n_clip += 1
+                    continue
+                s9.altitude_high = None
+                s9.altitude_low = None
+                s9.node_altitudes = _res
+            # (flat ``altitude`` pieces keep their altitude verbatim)
+            s9.polygon = _cutg
+            _n_graze += 1
             _kept9.append(s9)
-        if _n_clip:
+        if _n_clip or _n_graze:
             layout.shapes = _kept9
             try:
                 UI.vprint(1,
                     f"  [pav-builder] dropped {_n_clip} tunnel "
                     f"piece(s) under pavement (covered stretch — no "
-                    f"visible structure).")
+                    f"visible structure)"
+                    + (f"; graze-clipped {_n_graze} portal piece(s) "
+                       f"off the pavement edge." if _n_graze
+                       else "."))
             except _GEOM_EXC:
                 pass
     # WALL-vs-RAMP CLIP (user 2026-06-12, LMML): a retaining wall / cap
@@ -2705,9 +2880,14 @@ def _emit_tunnel_portals(
     grade_safety_margin = 0.005
     plan_grade = max(max_ramp_grade - grade_safety_margin, 1e-3)
     # A surface gap between two bores shorter than a full down+up ramp
-    # pair cannot reach DEM and return — it merges into one bore and
-    # emits as a flat low-elevation connector (user 2026-07-04, KDFW
-    # double parallel taxiways).
+    # pair cannot reach DEM and return — the bores MERGE across it (the
+    # road stays below grade the whole way), so this threshold stays
+    # purely KINEMATIC.  The DESIGN limit on the open-trench form
+    # (``TUNNEL_LOW_CONNECTOR_MAX_OPEN_GAP_M``, user 2026-07-10, SPJC
+    # big tunnel) applies inside the synthesizer at gap-RECORD time:
+    # capping the merge threshold itself un-merged SPJC's bores and
+    # minted phantom mid-gap portals whose ramps dug grooves into the
+    # covered ground between the crossings.
     low_connector_max_gap_m = 2.0 * tunnel_depth_m / plan_grade
     ways_r, low_connector_gaps = _synthesize_implied_crossing_bores(
         layout, nodes_m, ways_r, excluded_way_ids,

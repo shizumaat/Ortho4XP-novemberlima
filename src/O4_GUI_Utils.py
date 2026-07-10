@@ -1063,7 +1063,14 @@ class Ortho4XP_AutoPatch_Progress(tk.Toplevel):
                 # extrapolation weighs in quadratically with the bar
                 # (at 20 % it is still mostly noise, at 80 % it is
                 # ground truth); without a prior it stands alone.
+                # A prior the wall clock has FALSIFIED (elapsed already
+                # past it) is dropped rather than blended — measured
+                # 2026-07-10: a stale low prior held "About 0:00
+                # remaining" for two minutes because the bar-weighted
+                # blend let it dominate the truthful extrapolation.
                 prior = row.get("build_total_estimate_s")
+                if prior and elapsed > prior * self.ESTIMATE_MARGIN:
+                    prior = None
                 if prior and ema is not None:
                     w = (pct / 100.0) ** 2
                     total = (1.0 - w) * prior + w * ema
@@ -1090,9 +1097,14 @@ class Ortho4XP_AutoPatch_Progress(tk.Toplevel):
                         self.RISE_THRESHOLD_FRAC * shown):
                     shown = target
                 row["remaining_s"] = shown
-                row["remaining"].configure(
-                    text="About {} remaining".format(
-                        self._fmt_mmss(shown)))
+                if shown < 1.0 and pct < 97:
+                    # The estimate ran out while the build visibly has
+                    # work left — say so instead of freezing at 0:00.
+                    row["remaining"].configure(text="still working…")
+                else:
+                    row["remaining"].configure(
+                        text="About {} remaining".format(
+                            self._fmt_mmss(shown)))
         except Exception:
             pass
         self._start_timer_loop()

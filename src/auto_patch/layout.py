@@ -98,6 +98,15 @@ SHARED_VERTEX_TOL_M = 0.5    # snap vertices closer than this together
 # must stay as distinct vertices so X-Plane renders the step.
 VERTEX_ALT_MERGE_TOL_M = 1.0
 
+# PAVEMENT-NODE RULE (user 2026-07-09): a pavement edge keeps a node
+# every ~60 m so the elevation solver holds the edge at its solved
+# grade — a longer chord lets the pavement sag visibly between distant
+# nodes.  The emit-time decimation must never leave an airside-pavement
+# chord longer than this (a fine-densified straight run collapsed a CYXY
+# junction edge to 1,056 m before this bound was enforced across the
+# whole run, not just per single-vertex removal).
+PAVEMENT_NODE_MAX_CHORD_M = 60.0
+
 
 def vertex_bucket(x: float, y: float,
                   tol: float = SHARED_VERTEX_TOL_M) -> "tuple[int, int]":
@@ -691,7 +700,18 @@ class PavementLayout:
             # strips are SOFT receivers, everything else is a value
             # authority (see node_id_to_authority_alts above).
             current_shape_is_soft[0] = s.role in _SOFT_RECEIVER_ROLES
-            current_shape_is_strip[0] = s.role == ROLE_GRADED_STRIP
+            # Legacy surface_clearance strips share the graded-strip
+            # adoption path: their inner row is defined to sit AT the
+            # pavement edge with pavement values verbatim, so a
+            # >VERTEX_ALT_MERGE_TOL_M foreign terrain read must adopt
+            # the authority node, not mint a cliff twin.  Skirts
+            # (ref runway_end_skirt) and deliberate walls keep the
+            # twin path.
+            current_shape_is_strip[0] = (
+                s.role == ROLE_GRADED_STRIP
+                or (s.ref == "surface_clearance"
+                    and s.role in (ROLE_TAXIWAY_CLEARANCE,
+                                   ROLE_RUNWAY_CLEARANCE)))
             # Validate the polygon's geometry before emission.
             # Upstream pipeline stages (decomposition, seam-point
             # injection, shared-vertex enforcement) can occasionally
@@ -1151,13 +1171,16 @@ class PavementLayout:
         # ruling (grading under pavement, no centimetre fidelity).
         _DEC_PERP_M = 0.02
         _DEC_ALT_M = 0.10
-        # Max chord a removal may leave (user in-sim finding
-        # 2026-07-09): iterative sweeps COMPOUND the per-removal
-        # altitude tolerance against the already-moved chord — a CYXY
-        # junction edge collapsed to 1,056 m and the pavement sagged
-        # visibly between distant nodes.  Long straights keep a node
-        # every ~30 m to hold the edge at its solved grade.
-        _DEC_MAX_CHORD_M = 60.0
+        # Max chord a removal may leave (pavement-node rule, module
+        # constant PAVEMENT_NODE_MAX_CHORD_M).  The per-single-vertex
+        # check below is necessary but NOT sufficient: a bulk sweep
+        # removes an entire fine-densified straight run at once — each
+        # vertex passes the check against its ~2 m immediate neighbours,
+        # yet the run collapses to one chord far longer than the cap
+        # (a CYXY junction edge reached 1,056 m).  The retention pass
+        # after the redundancy scan enforces the cap over the whole run.
+        _DEC_MAX_CHORD_M = PAVEMENT_NODE_MAX_CHORD_M
+        _n_chord_retained = 0
         for _sweep in range(4):
             # Group by COORDINATE, not nid: coincident twin nids (wall
             # splits, the weld's coordinate-twins) must be removed
@@ -1249,6 +1272,62 @@ class PavementLayout:
                     _removable_ll.add(_ll)
             if not _removable_ll:
                 break
+            # MAX-CHORD RETENTION (pavement-node rule).  The redundancy
+            # scan above admits an entire fine-densified straight run
+            # (each vertex is near-collinear with its IMMEDIATE
+            # neighbours), but the bulk removal below drops the whole run
+            # in one sweep — compounding into a chord far longer than any
+            # single-vertex check saw.  Walk every referencing way and,
+            # wherever consecutive KEPT vertices would sit more than
+            # PAVEMENT_NODE_MAX_CHORD_M apart, retain intermediate
+            # removable COORDINATES.  Retention is by coordinate, so every
+            # way that references it keeps the vertex and the constrained
+            # chains stay identical (a per-nid retention would be the
+            # one-sided-removal lens class).
+            _retain_ll: set[tuple] = set()
+            for _si, _s, _enids, _sa, _sna in pending:
+                _open = _enids[:-1]
+                _m = len(_open)
+                if _m < 3:
+                    continue
+                _start = None
+                for _k, _nid in enumerate(_open):
+                    if node_id_to_ll[_nid] not in _removable_ll:
+                        _start = _k
+                        break
+                if _start is None:
+                    # Whole ring removable — the degeneracy veto below
+                    # handles it; no chord to hold.
+                    continue
+                _anchor = self.ll_to_m(*node_id_to_ll[_open[_start]])
+                _prev_ll = None
+                _prev_xy = None
+                _prev_removable = False
+                for _step in range(1, _m + 1):
+                    _idx = (_start + _step) % _m
+                    _ll2 = node_id_to_ll[_open[_idx]]
+                    _xy = self.ll_to_m(_ll2[0], _ll2[1])
+                    _removable_here = (_ll2 in _removable_ll
+                                       and _ll2 not in _retain_ll)
+                    if math.hypot(_xy[0] - _anchor[0],
+                                  _xy[1] - _anchor[1]) \
+                            > PAVEMENT_NODE_MAX_CHORD_M:
+                        # Retain the PREVIOUS vertex to hold the chord: it
+                        # is within the cap of the current anchor (every
+                        # ORIGINAL step is), so both resulting sub-chords
+                        # stay under the cap.
+                        if _prev_removable:
+                            _retain_ll.add(_prev_ll)
+                            _n_chord_retained += 1
+                        _anchor = _prev_xy
+                    if not _removable_here:
+                        _anchor = _xy
+                    _prev_ll = _ll2
+                    _prev_xy = _xy
+                    _prev_removable = _removable_here
+            _removable_ll -= _retain_ll
+            if not _removable_ll:
+                break
             _removable: set[int] = set()
             for _ll in _removable_ll:
                 for _p_i, _pos, _nid in _occ[_ll]:
@@ -1278,6 +1357,13 @@ class PavementLayout:
                 if len(_open) >= 3 and len(_open) < len(_enids) - 1:
                     pending[_p_i] = (_si, _s, _open + [_open[0]],
                                      _sa, _sna)
+
+        if _n_chord_retained:
+            UI.vprint(1,
+                f"  [pav-builder] emit decimation: retained "
+                f"{_n_chord_retained} vertex(es) so no pavement chord "
+                f"exceeds {PAVEMENT_NODE_MAX_CHORD_M:.0f} m "
+                f"(pavement-node rule).")
 
         # ── Tag-writing pass ────────────────────────────────────
         # Each shape's altitude tags are derived from the consensus

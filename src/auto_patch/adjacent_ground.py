@@ -130,6 +130,12 @@ _CORRIDOR_SNAP_TOL_M = 0.15
 # residual chord sagitta at the runway reach, R·(1−cos(θ/2)) ≈ 2.6 m at
 # 15° / R=300, is inside one band step of coverage).
 _FAN_MAX_STEP_RAD = math.radians(15.0)
+# Cross-shape run-end taper seam pin (user 2026-07-10, default ON): suppress
+# the daylight bench-in at pavement-PARTITION seams so abutting shapes' terminal
+# stations agree on outer depth (no seam notch).  O4_SEAM_TAPER_PIN=0 disables
+# it (A/B lever); the validator reads the SAME env so the lockstep pair stays
+# aligned.
+_SEAM_TAPER_PIN = os.environ.get("O4_SEAM_TAPER_PIN", "1") != "0"
 # Lab forensics: O4_ADJACENT_GROUND_DEBUG=1 logs per-shape band counts and
 # every dropped piece, for chasing validator coverage findings.
 _ADJACENT_DEBUG = os.environ.get("O4_ADJACENT_GROUND_DEBUG") == "1"
@@ -162,6 +168,40 @@ _TAXIWAY_ROLES = (
     ROLE_STUB, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
 )
 _APRON_ROLES = (ROLE_APRON,)
+
+
+def airside_seam_vertex_keys(layout):
+    """Millimetre vertex keys shared between TWO OR MORE airside pavement
+    shapes — the CONTINUATION SEAMS where one shape's terrain-facing frontage
+    hands off to an abutting shape (user 2026-07-10, cross-shape run-end
+    taper).  A band station adjacent to one of these corners sits at a run
+    boundary that exists because of the pavement PARTITION, not because the
+    frontage ends, so the daylight bench-in is suppressed there (see
+    ``grade_law.adjacent_ground_supported_depths``).
+
+    Computed over the SAME airside pavement roles the emitter marches
+    (``_RUNWAY_ROLES + _TAXIWAY_ROLES + _APRON_ROLES`` ==
+    ``clearance._AIRSIDE_PAVEMENT_ROLES``); the emitted ``graded_strip`` bands
+    are NOT counted, so the emitter (pre-emit) and the validator (post-emit)
+    derive the identical seam set — lockstep by construction.  A shape's ring
+    is de-duplicated first so its own closing vertex is not miscounted as a
+    second shape."""
+    from collections import Counter
+    in_scope = _RUNWAY_ROLES + _TAXIWAY_ROLES + _APRON_ROLES
+    counts: "Counter[tuple[int, int]]" = Counter()
+    for s in layout.shapes:
+        if s.role not in in_scope:
+            continue
+        if s.polygon is None or s.polygon.is_empty \
+                or s.polygon.geom_type != "Polygon":
+            continue
+        try:
+            ring = list(s.polygon.exterior.coords)[:-1]
+        except _GEOM_EXC:
+            continue
+        for k in {_vertex_key(vx, vy) for vx, vy in ring}:
+            counts[k] += 1
+    return {k for k, c in counts.items() if c >= 2}
 
 
 def _dedup_ring(ring, alts):
@@ -252,7 +292,8 @@ def _repair_self_lenses(g):
 
 def _build_cut_bands(edge_stations, edge_alts, outwards, band_caps,
                      ceiling_offset, band_edges, trigger, step,
-                     sample_dem, is_ring_vertex=None):
+                     sample_dem, is_ring_vertex=None,
+                     at_continuation_seam=None):
     """CUT-direction mirror of ``clearance._build_filled_skirts``.
 
     At each station a CEILING sits at ``edge_alt + ceiling_offset(d)``
@@ -323,8 +364,12 @@ def _build_cut_bands(edge_stations, edge_alts, outwards, band_caps,
     # ``outer[i] > d0`` tests below (``obstructed[i]`` stays True, but the run
     # membership test already gates on the clamped ``outer``).  Fan stations
     # share the corner coordinate (dist = 0), so a fan ray earns no allowance
-    # and is suppressed to the corner's depth.
-    outer = adjacent_ground_supported_depths(outer, edge_stations)
+    # and is suppressed to the corner's depth.  Continuation-seam terminal
+    # stations (``at_continuation_seam``) are pinned to their raw depth so the
+    # daylight line stays continuous across a pavement partition (user
+    # 2026-07-10; see grade_law).
+    outer = adjacent_ground_supported_depths(
+        outer, edge_stations, at_continuation_seam)
     # Inner boundary AT the pavement edge (d = 0): the band WELDS to the
     # pavement ring it grades off (user ruling 2026-07-09 — no standoff
     # gap; a 1 m groove of raw DEM rendered as a knife-edge wall/trench
@@ -490,7 +535,7 @@ def _build_cut_bands(edge_stations, edge_alts, outwards, band_caps,
 
 def _build_fill_bands(edge_stations, edge_alts, outwards, band_caps,
                       floor_depth, band_edges, trigger, step, sample_dem,
-                      is_ring_vertex=None):
+                      is_ring_vertex=None, at_continuation_seam=None):
     """FILL-direction band geometry — clearance._build_filled_skirts,
     inline-duplicated MINIMALLY (flagged for the cleanup slice) with two
     lateral-law differences the shared skirt builder must not inherit:
@@ -541,7 +586,9 @@ def _build_fill_bands(edge_stations, edge_alts, outwards, band_caps,
     # isolated deep fill ray no neighbour corroborates drops out of the deep
     # slabs' runs via the ``outer[i] > d0`` tests below (``dropped[i]`` stays
     # True; the run membership already gates on the clamped ``outer``).
-    outer = adjacent_ground_supported_depths(outer, edge_stations)
+    # Continuation-seam terminal stations are pinned (see _build_cut_bands).
+    outer = adjacent_ground_supported_depths(
+        outer, edge_stations, at_continuation_seam)
     # Inner boundary AT the pavement edge — the fill welds to the ring
     # (see _build_cut_bands; same user ruling).
     edges = [0.0]
@@ -752,19 +799,30 @@ def _make_edge_projection_resampler(coords, ring_alts, envelope_at,
                                         pts[i + 1][1] - pts[i][1]))
     alt = [ring_alts[i] if i < len(ring_alts) else None
            for i in range(len(pts))]
-    # Forward- then back-fill None so every arc position resolves.
-    last = None
-    for i in range(len(alt)):
-        if alt[i] is not None:
-            last = alt[i]
-        elif last is not None:
-            alt[i] = last
-    nxt = None
-    for i in range(len(alt) - 1, -1, -1):
-        if alt[i] is not None:
-            nxt = alt[i]
-        elif nxt is not None:
-            alt[i] = nxt
+    # Fill None entries (pavement-facing / unsampled ring vertices) so every
+    # arc position resolves.  An INTERIOR None run is the LOCAL pavement-edge
+    # read: LINEARLY interpolated by arc length between the bracketing known
+    # vertices, NOT the previous known value carried forward.  A constant
+    # carry-forward borrows the run-END reference across the whole None run,
+    # so a band vertex whose foot lands there steps off the pavement line at
+    # a seam (shadow rows must mirror the pavement line).  Leading/trailing
+    # None runs have no bracket and extend the nearest known value.
+    known = [i for i in range(len(alt)) if alt[i] is not None]
+    if known:
+        lo_ptr = 0
+        for i in range(len(alt)):
+            if alt[i] is not None:
+                continue
+            while lo_ptr + 1 < len(known) and known[lo_ptr + 1] < i:
+                lo_ptr += 1
+            lo = known[lo_ptr] if known[lo_ptr] < i else None
+            hi = next((j for j in known if j > i), None)
+            if lo is not None and hi is not None:
+                span = cum[hi] - cum[lo]
+                t = 0.0 if span <= 0 else (cum[i] - cum[lo]) / span
+                alt[i] = alt[lo] + t * (alt[hi] - alt[lo])
+            else:
+                alt[i] = alt[lo if lo is not None else hi]
 
     def _edge_alt_at(s):
         # Locate the ring segment containing arc length s.
@@ -1154,6 +1212,13 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
             elif k not in vertex_value_registry:
                 vertex_value_registry[k] = value
 
+    # CONTINUATION-SEAM keys (user 2026-07-10): vertices shared between two
+    # airside pavement shapes.  A terminal band station adjacent to one is a
+    # run boundary from the pavement PARTITION, not a frontage end, so the
+    # daylight bench-in is suppressed there (grade_law) — the two abutting
+    # runs' terminal stations then agree on outer depth (no seam notch).
+    seam_keys = airside_seam_vertex_keys(layout) if _SEAM_TAPER_PIN else set()
+
     for s in scoped:
         current_shape_union = None
         params = _family_params(layout, s, rw_axes)
@@ -1223,6 +1288,10 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
         # endpoints, so mid-edge stations stop minting T-vertices the
         # conformance pass would have to insert into the pavement ring.
         is_ring_vertex: list[bool] = []
+        # Per-station continuation-seam flag: True for the station adjacent to
+        # a corner shared with an abutting airside shape (its terrain-facing
+        # edge ends there, so its terminal run station must not bench in).
+        at_seam: list[bool] = []
         previous_out = None
         for i in range(len(coords) - 1):
             eax, eay = coords[i]
@@ -1281,9 +1350,16 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
                             eax, eay, fan_out, a0))
                         outs.append(fan_out)
                         is_ring_vertex.append(True)
+                        # Fan rays share the corner coordinate (dist 0) and
+                        # never change a non-fan station's supported depth, so
+                        # leave them subject to normal suppression (the 417
+                        # fan-blade fix); the validator omits them entirely.
+                        at_seam.append(False)
             previous_out = out
             nseg = max(1, int(math.ceil(
                 math.hypot(ebx - eax, eby - eay) / step)))
+            edge_a_seam = _vertex_key(eax, eay) in seam_keys
+            edge_b_seam = _vertex_key(ebx, eby) in seam_keys
             for k in range(nseg):    # next edge owns the far corner
                 t = k / nseg
                 sx = eax + (ebx - eax) * t
@@ -1296,6 +1372,11 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
                 st_alts.append(ref)
                 outs.append(out)
                 is_ring_vertex.append(k == 0)
+                # The station adjacent to a continuation-seam corner: k == 0
+                # sits on ``coords[i]``; k == nseg-1 is the last station before
+                # ``coords[i+1]`` (its terrain-facing edge ends at the seam).
+                at_seam.append((k == 0 and edge_a_seam)
+                               or (k == nseg - 1 and edge_b_seam))
         if len(stations) < 2:
             continue
         m = len(stations)
@@ -1307,13 +1388,13 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
         fill_bands = _build_fill_bands(
             stations, st_alts, outs, [width] * m, floor_depth,
             {ADJACENT_GROUND_LIP_WIDTH_M}, trigger, step, sample_dem,
-            is_ring_vertex)
+            is_ring_vertex, at_seam)
         # CUT (DEM above ceiling): the corridor's piecewise ceiling out to
         # the family reach, split at the lip + graded-width kinks.
         cut_bands = _build_cut_bands(
             stations, st_alts, outs, [reach] * m, ceil_off,
             {ADJACENT_GROUND_LIP_WIDTH_M, width}, trigger, step, sample_dem,
-            is_ring_vertex)
+            is_ring_vertex, at_seam)
         if not fill_bands and not cut_bands:
             continue
 

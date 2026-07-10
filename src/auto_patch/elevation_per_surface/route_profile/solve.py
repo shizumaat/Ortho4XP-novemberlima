@@ -1722,6 +1722,26 @@ def final_grade_projection(layout, icao: str = "", dem=None,
         hard -= pad_nodes
 
     _stage("hard")
+    # BROKEN-NODE EDGE COUPLING (config.SVC_SPINE_EDGE_COUPLE, round-6 site-4):
+    # this pass hardens the road's DEM-following adjacent-ground welds into a
+    # wide staircase, so the reach envelope can falsely call a service-road
+    # SPINE station broken and the blend drapes the centreline below its own
+    # welded edges (CYXY service_road #201: −2.4 m).  Pass the service-road /
+    # service-junction ring nodes so ``feasibility_project`` re-clamps only
+    # THOSE broken nodes into the interval their hard welded neighbours admit
+    # (the within-shape law); every other broken node keeps the untouched
+    # blend.  Empty set / gate off ⇒ no-op.
+    _svc_couple_nodes: set = set()
+    from auto_patch.config import SVC_SPINE_EDGE_COUPLE as _SVC_EC
+    if _SVC_EC:
+        _cps_ec = layout.canonical_points
+        for _s in layout.shapes:
+            if (_s.role in ("service_road", "service_junction")
+                    and _s.polygon is not None and not _s.polygon.is_empty):
+                for (_x, _y) in _s.polygon.exterior.coords:
+                    _k = b2i.get(_cps_ec.get_or_add(float(_x), float(_y)))
+                    if _k is not None and _k < n:
+                        _svc_couple_nodes.add(_k)
     # Capture the pockets THIS projection declares broken: they are excluded
     # from the sweeps by design (contained blend), so they must join the
     # sidecar's break_nodes export below or the validator reports their
@@ -1732,7 +1752,8 @@ def final_grade_projection(layout, icao: str = "", dem=None,
                                   max_iters=400,
                                   flat_groups=pad_groups or None,
                                   pre_broken=(pre_broken or None),
-                                  broken_out=_projection_broken_idx)
+                                  broken_out=_projection_broken_idx,
+                                  edge_couple_nodes=(_svc_couple_nodes or None))
     # TERRAIN-PINNED PAIR EXPORT (user 2026-07-06, CYXY #26/#29 after the
     # apron route-proximity cut): a violated law edge touching a
     # terrain-dictated pin (tile-seam node, agreeing boundary/feature

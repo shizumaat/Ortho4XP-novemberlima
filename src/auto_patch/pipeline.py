@@ -5394,6 +5394,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # profile (the runway-distance clamp anchors to settled apron/taxi
         # altitudes — see refactor Phase 5).  None are airside pavement
         # roles, so the solver never touched them.
+        _progress.substep(0.02, "Emitting terrain transition features")
         finalize.emit_terrain_transition_features(
             layout, icao, xplane_root,
             tile_dem=tile_dem,
@@ -5462,6 +5463,11 @@ def build_airport_pavement(icao: str, xplane_root: str,
                       else math.floor(layout.anchor[1]))
             n_cl = 0
             if _legacy_clearance:
+                # Fractions are measured shares of the emit phase
+                # (CYXY 2026-07-10 trace): the clearance + conformance
+                # block below runs ~95% of the phase, so the later
+                # emitters cluster near the end.
+                _progress.substep(0.05, "Emitting clearance cuts")
                 n_cl = emit_surface_clearance_cuts(
                     layout, dem, _cl_tl, _cl_tn,
                     source_runways=apt.runways)
@@ -5754,6 +5760,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
             UI.vprint(1,
                 f"  [pav-builder] {icao}: late edge densify — inserted "
                 f"{_n_dense2} vertex(es) on over-60 m pavement edges.")
+        _progress.substep(0.90, "Decimating emitted geometry")
         decimate_emit_nodes(layout, icao)
 
     # FINAL GRADE PROJECTION (round 4, user 2026-07-03): the passes above
@@ -5791,6 +5798,24 @@ def build_airport_pavement(icao: str, xplane_root: str,
         final_grade_projection(layout, icao, dem=_projection_dem,
                                tile_lat=_projection_tile_lat,
                                tile_lon=_projection_tile_lon)
+        # PAD-IN-SOLVED-PAVEMENT HOST LEVEL (user 2026-07-10, round 6 site 3):
+        # a building pad embedded in / abutting SOLVED pavement must sit FLAT at
+        # the level the HOST pavement solved to at the contact, not at its
+        # raw-DEM frontage seat.  The initial solve already lifts a movable-flat
+        # pad to its host, but ``final_grade_projection`` re-runs
+        # ``build_building_seats`` (DEM-biased) and re-stamps the pit value
+        # (CYXY building8 → 705.0 while apron #129 solved 708.65; a -333 %/1.1 m
+        # step, "a big hump in this apron").  Runs AFTER the projection so it
+        # reads the FINAL host solution and nothing re-seats the pad afterwards;
+        # it also lifts the shared apron lip so pad and host weld at one flat
+        # level (no emit cliff).  Gate off → no-op / byte-identical.
+        from .elevation_per_surface.route_profile.anchors import (
+            relevel_pads_to_host_pavement)
+        _n_padhost = relevel_pads_to_host_pavement(layout)
+        if _n_padhost:
+            UI.vprint(1,
+                f"  [pav-builder] {icao}: pad-host level — {_n_padhost} "
+                f"embedded pad(s) re-levelled to the host pavement solution.")
         # GROUNDSIDE RE-LIMIT after the projection (user 2026-07-06, CYXY
         # #184): groundside lots are NOT in the projection's constraint
         # roles, so enforcing a ROAD edge can nudge a welded mouth a few
@@ -5859,6 +5884,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # decimation mints no T-vertices.
         try:
             from .clearance import emit_runway_end_skirts
+            _progress.substep(0.92, "Emitting runway-end skirts")
             n_sk = emit_runway_end_skirts(
                 layout, _projection_dem,
                 _projection_tile_lat, _projection_tile_lon,
@@ -5913,6 +5939,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # gap-covered frontage and only true outer edges keep bands.
         try:
             from .gap_fill import emit_gap_fill_spines
+            _progress.substep(0.94, "Emitting gap-fill drainage spines")
             n_gap = emit_gap_fill_spines(
                 layout, _projection_dem,
                 _projection_tile_lat, _projection_tile_lon)
@@ -5940,6 +5967,7 @@ def build_airport_pavement(icao: str, xplane_root: str,
         if ADJACENT_GROUND_LAW_ENABLED:
             try:
                 from .adjacent_ground import emit_adjacent_ground_bands
+                _progress.substep(0.96, "Emitting adjacent-ground bands")
                 n_ag = emit_adjacent_ground_bands(
                     layout, _projection_dem,
                     _projection_tile_lat, _projection_tile_lon,

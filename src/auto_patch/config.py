@@ -66,6 +66,7 @@ __all__ = [
     "SERVICE_ROAD_MAX_TRANSVERSE",
     "SERVICE_ROAD_CROWN_TRANSVERSE",
     "SVC_SPINE_FIRST",
+    "SVC_SPINE_EDGE_COUPLE",
     "RUNWAY_CROWN_TRANSVERSE",
     "TAXI_CROWN_TRANSVERSE",
     "ENABLE_SPINE_CROWN",
@@ -139,6 +140,8 @@ __all__ = [
     "GAP_FILL_SPINE_STEP_M",
     "GAP_FILL_MAX_WIDTH_M",
     "GAP_FILL_MIN_AREA_M2",
+    "OPEN_FRONTAGE_SPINE_ENABLED",
+    "OPEN_FRONTAGE_CLOSE_M",
     "APRON_SHOULDER_WIDTH_M",
     "APRON_SHOULDER_MIN_DOWN_SLOPE",
     "APRON_SHOULDER_MAX_DOWN_SLOPE",
@@ -702,6 +705,17 @@ IMPLIED_CROSSING_TUNNELS = _os_early.environ.get(
 # the crotch bare) is byte-identical — only the FORK path is affected;
 # parallel-bore clusters (SPJC divided highways) are untouched either way.
 TUNNEL_FORK_THROAT = True
+# LOW-CONNECTOR OPEN-TRENCH DESIGN CAP (user 2026-07-10, SPJC big
+# tunnel): the kinematic bore-merge threshold (2·depth/grade ≈ 457 m —
+# "a ramp pair cannot surface and return within the gap") says when the
+# road CANNOT surface, not when an OPEN TRENCH is the right built form.
+# An open flat low-connector is real-world correct only for narrow
+# slots between close parallel pavements (the KDFW double-taxiway
+# median, 30-70 m); a wide covered stretch stays COVERED (ground
+# bridges over the still-depressed bore, portal mouths at the ends).
+# SPJC's ~230 m runway spacing was being dug open into an 8-10 m
+# trench.  Gaps above this cap keep the covered/portal form.
+TUNNEL_LOW_CONNECTOR_MAX_OPEN_GAP_M = 100.0
 GROUNDSIDE_MAX_GRADE = 0.040    # groundside pavement ramp grade (user 2026-05-22)
 # FAA vertical-curve rule L = K × |Δg|.  K = 305 m for ARC C/D (lighter
 # A/B ≈ 76 m, heavy E ≈ 610 m).  ``RUNWAY_MAX_GRADE_CHANGE_PER_M`` is the
@@ -1683,6 +1697,27 @@ SERVICE_ROAD_CARVE = _os.environ.get("O4_SERVICE_ROAD_CARVE", "1") == "1"
 # authority and the solve remains the sole writer.  ``O4_SVC_SPINE_FIRST=0``
 # restores the previous behaviour byte-identically.
 SVC_SPINE_FIRST = _os.environ.get("O4_SVC_SPINE_FIRST", "1") == "1"
+# BROKEN-NODE EDGE COUPLING (round-6 site-4, user 2026-07-10): when the
+# feasibility projection declares a node BROKEN (the cap-Lipschitz reach
+# envelope's floor > ceil — genuinely contradictory hard anchors), it drapes
+# the node onto a distance-weighted blend between the contradicting anchors
+# and then FREEZES it (broken nodes skip the relaxation sweeps, by design, so
+# a real terrain contradiction does not smear as POCS noise).  But that blend
+# never re-checks the node's OWN within-shape welded edges: at CYXY
+# service_road #201 the final projection hardens the road's DEM-following
+# adjacent-ground welds into a wide staircase (apron end 709.9 m down to the
+# far service-junction node 705.5 m), the spine stations between them read as
+# broken, and the blend drapes the CENTERLINE ~2.4 m BELOW its own edge nodes
+# (which sit at 709.5 m, welded, hard) — a −55 % within-shape ravine that the
+# elevation solve itself never produced (its writeback is coherent).  THE LAW
+# (no shape may trench below the edges it is welded to): a broken node's
+# blended value is clamped into the interval its HARD welded neighbours admit
+# (∩ over hard neighbours h of [z_h − budget, z_h + budget]) whenever that
+# interval is non-empty; an EMPTY interval is the genuine contradiction the
+# break machinery exists for (e.g. a tile-seam pin below a plateau), so the
+# blend stands untouched there — no regression to the seam/plateau blends.
+# ``O4_SVC_SPINE_EDGE_COUPLE=0`` restores the pre-clamp blend byte-identically.
+SVC_SPINE_EDGE_COUPLE = _os.environ.get("O4_SVC_SPINE_EDGE_COUPLE", "1") == "1"
 # Max perpendicular pavement cross-section for ROAD classification.
 # User rule "< 10 m"; measured at the HECA #198 switchback legs:
 # 8.2-9.4 m and 12.2 m (the fused DSF pavement includes shoulder) →
@@ -2013,6 +2048,28 @@ GAP_FILL_SPINE_STEP_M = 15.0
 # legitimately ungoverned terrain).
 GAP_FILL_MAX_WIDTH_M = 175.0
 GAP_FILL_MIN_AREA_M2 = 100.0
+
+# OPEN-FRONTAGE DRAINAGE SPINE (slice B pilot, user design ruling 3
+# 2026-07-09; docs/chain_identity_one_solve_plan.md §Slice B).  The
+# OPEN corridor generalization of the enclosed-gap spine: ground BETWEEN
+# two facing airside pavement chains that is bounded on its long sides by
+# pavement but OPEN at the ends (a runway ↔ parallel-taxiway corridor and
+# similar) — NOT an interior ring, so the enclosed-gap path never owns it.
+# Emit ONE face per corridor (long sides = the two pavement chains
+# verbatim, ends = straight closures across the mouth — TRUE outer edges)
+# + ONE drainage spine (the crown/valley), superseding the per-pavement
+# corridor-band march there (which tears at band-vs-band clip seams once
+# the legacy strips vacate the open frontage).  DEFAULT OFF — this is a
+# pilot Noah has not reviewed in-sim; every emission must be a no-op with
+# the gate off.
+OPEN_FRONTAGE_SPINE_ENABLED = (
+    _os.environ.get("O4_OPEN_FRONTAGE_SPINE", "0") == "1")
+# Morphological-closing radius used to DETECT open corridors: a closing
+# of the airside union (buffer out then back in) bridges any open channel
+# up to 2*radius wide.  Half the gap-fill max width, so a corridor up to
+# GAP_FILL_MAX_WIDTH_M across is detected; wider regions are legitimately
+# ungoverned terrain and stay with the corridor-band / daylight law.
+OPEN_FRONTAGE_CLOSE_M = GAP_FILL_MAX_WIDTH_M / 2.0
 
 # APRON edges.  NO code mandates grading beyond an apron edge (positive
 # research finding): the only governed band is the FAA-RECOMMENDED
@@ -2345,6 +2402,44 @@ BUILDING_FULL_FRONTAGE = _os.environ.get(
 # anchor needs the REGION it serves lifted consistently (see the handover), not a
 # point anchor or a wider corridor.
 BUILDING_REACH_CORRIDOR_M = 200.0
+
+# (20260710) PAD-IN-SOLVED-PAVEMENT HOST LEVEL (in-sim round 6 site 3): a
+# building pad embedded in / abutting SOLVED pavement (apron, junction, taxi
+# rect) must sit FLAT at the level the HOST PAVEMENT solved to at the contact —
+# NOT at the raw-DEM frontage seat.  The frontage seat is a route-reachability
+# envelope; when the apron around a pad solves ABOVE that envelope (its own DEM
+# is higher / its body couples up), a DEM-low seat leaves the flat pad in a pit
+# and the apron humps around it (CYXY apron #129 solved 708.65 while building8's
+# pad pinned a run of shared ring nodes to the 705.0 DEM seat — a -333 % step
+# over 1.1 m; "a big hump in this apron").  User ruling unchanged (buildings are
+# FLAT at an authoritative value) — this only changes WHICH flat value an
+# embedded pad carries: after the solve, re-level such a pad to the MEDIAN of
+# the host pavement's solved values at the nearest non-shared boundary nodes.
+# ARBITRATION: the pad adopts FROM the host, never the reverse; a pad NOT near
+# solved pavement, or already within ``PAD_HOST_LEVEL_TRIGGER_M`` of its host,
+# keeps today's behaviour (no-op).  Gate off → byte-identical.
+PAD_HOST_PAVEMENT_LEVEL = _os.environ.get(
+    "O4_PAD_HOST_PAVEMENT_LEVEL", "1") == "1"
+# Radius (m) around a pad ring node within which host-pavement nodes are sampled
+# — for the host-BODY median (nodes that differ from the pad by more than the
+# trigger) and for the shared-LIP lift (nodes at the pad's pit value).  Must
+# reach the apron's first non-shared body ring (CYXY building8: nearest body
+# apron node ~2 m off the pad boundary).
+PAD_HOST_LEVEL_CONTACT_M = 2.5
+# Reach (m) of the shared-LIP lift: a wider skirt than the body-detection radius
+# so the WHOLE local pit region the old seat dragged down (the pad's shared lip
+# AND the apron transition nodes stepping toward it) rises to the body level
+# before the adjacent-ground band re-drapes from it — otherwise a left-behind
+# pit node steps against the lifted pad / tears the graded strip.  Only nodes AT
+# the pit value (within the trigger of the pad's old level) inside this reach are
+# lifted, so a legitimately-lower apron elsewhere is untouched.
+PAD_HOST_LEVEL_LIFT_M = 6.0
+# A host node within the contact radius counts as the BODY (triggers a re-level)
+# when it differs from the current pad level by more than this (m); a node at or
+# below it is a shared-boundary lip that carries the pad's own value.  Well above
+# the sub-decimetre agreement of a normally-seated pad (CYXY residual deltas
+# ≤ 0.14 m) and far below a genuine pit/hump (building8 = 3.67 m).
+PAD_HOST_LEVEL_TRIGGER_M = 0.5
 
 
 def taxi_grade_cap_for_letter(letter, *, enabled: bool = None) -> float:

@@ -44,12 +44,14 @@ from .config import (
     GAP_FILL_MIN_AREA_M2,
     GAP_FILL_SPINE_ENABLED,
     GAP_FILL_SPINE_STEP_M,
+    OPEN_FRONTAGE_CLOSE_M,
     runway_code_number,
 )
 from .grade_law import adjacent_ground_envelope
 from .layout import (
     BuiltShape,
     ROLE_APRON,
+    ROLE_BUILDING,
     ROLE_CROSS_CONNECTOR,
     ROLE_GRADED_STRIP,
     ROLE_JUNCTION,
@@ -71,6 +73,19 @@ from .emit_decimate import _key
 __all__ = ["emit_gap_fill_spines"]
 
 _GAP_FILL_REF = "gap_fill_spine"
+# Open-frontage corridor faces carry their OWN ref so they are
+# distinguishable from enclosed-gap faces and from the legacy
+# ``adjacent_ground`` bands they supersede (the DEM-free tear sentinel
+# in tools/check_grade.py keys on ref=="adjacent_ground", so a corridor
+# face is never mis-flagged as a band tear — and, having no band-vs-band
+# clip seams, it produces none).
+_OPEN_FRONTAGE_REF = "open_frontage_spine"
+# Standoff buffered around every foreign shape before it is subtracted
+# from the corridor closing (the groundside no-weld ruling, 2026-07-09:
+# grading strips keep >= 1 m off groundside pavement + buildings).  A
+# corridor slab therefore never welds onto a foreign shape; the corridor
+# band / daylight law owns the 1 m collar.
+_OPEN_FRONTAGE_FOREIGN_STANDOFF_M = 1.0
 # A cross-section thinner than this is not a gradeable half-gap — the
 # station is a pinch of the ring, not the drainage body.
 _MIN_CROSS_WIDTH_M = 2.0
@@ -136,6 +151,138 @@ def _parent_family_code(layout, shape):
     if role in _TAXIWAY_ROLES:
         return (role, None, taxi_shape_code_letter(layout, shape))
     return (role, None, None)
+
+
+def _parent_flat_value(parent):
+    """A gap parent's FLAT value — the primary representation for
+    building pads (user ruling: buildings are flat; the ROLE_BUILDING
+    writeback stores avg of corners → ``altitude``) and the FALLBACK for
+    any parent whose per-vertex ``node_altitudes`` do not align with the
+    ring being registered (per-vertex values are preferred at the call
+    site — runway-end skirts carry the governed runway-end profile
+    per vertex)."""
+    if getattr(parent, "altitude", None) is not None:
+        return float(parent.altitude)
+    na = getattr(parent, "node_altitudes", None)
+    if na:
+        vals = [v for v in na if v is not None]
+        if vals:
+            return float(sum(vals) / len(vals))
+    return None
+
+
+def _face_is_verbatim(face_poly, chain_keys) -> bool:
+    """True when EVERY boundary vertex of ``face_poly`` (exterior and any
+    interior parent ring) is a VERBATIM pavement-or-parent ring vertex —
+    chain identity.  A residual difference that mints a foreign crossing
+    point (a parent edge cutting a pavement edge mid-span) fails this:
+    that vertex is new boundary geometry and would Ruppert-explode, so
+    the part is blocked."""
+    try:
+        rings = [face_poly.exterior] + list(face_poly.interiors)
+    except _GEOM_EXC:
+        return False
+    for ring in rings:
+        for vx, vy in ring.coords:
+            if _key(vx, vy) not in chain_keys:
+                return False
+    return True
+
+
+def _parent_residual_faces(gap_poly, parents, chain_keys):
+    """The gradeable face(s) for one enclosed gap.  With no bounding
+    parent inside it is the gap itself.  With parent shape(s) inside —
+    a BUILDING PAD (flat value authority, user design 2026-07-09 queue
+    item 5) or a RUNWAY-END SKIRT (NON-flat value authority whose ring
+    vertices carry the governed inverse-RESA runway-end profile,
+    supervisor follow-up 2026-07-09) — the parent BOUNDS the gap the
+    way pavement does, and the gradeable ground is the RESIDUAL
+    ``gap minus parent_union``, split into its chain-safe parts:
+
+      * a parent that FILLS its hole leaves no residual above
+        ``GAP_FILL_MIN_AREA_M2`` → the gap lawfully vanishes (the
+        parent surface IS the ground there — nothing left to drain);
+      * a wholly-interior parent leaves an ANNULAR residual whose inner
+        ring is the parent chain VERBATIM (the emitted face covers the
+        parent footprint; the parent's own way prevails there by
+        X-Plane seed-region processing, the junction-hole precedent in
+        to_osm — the parent shape itself still emits exactly as today);
+      * a residual part whose boundary is NOT verbatim (a
+        difference-minted crossing vertex — e.g. a parent ring cutting
+        a pavement edge mid-span) is blocked (zero-lens law).
+
+    Every candidate + skip is logged (no silent skip)."""
+    parents_in = []
+    for p in parents:
+        try:
+            if gap_poly.intersection(p.polygon).area > 1.0:
+                parents_in.append(p)
+        except _GEOM_EXC:
+            continue
+    if not parents_in:
+        return [gap_poly]
+    try:
+        parent_union = unary_union([p.polygon for p in parents_in])
+        residual = gap_poly.difference(parent_union)
+    except _GEOM_EXC:
+        residual = None
+    parts = ([] if residual is None or residual.is_empty
+             else [residual] if residual.geom_type == "Polygon"
+             else [g for g in getattr(residual, "geoms", [])
+                   if g.geom_type == "Polygon"])
+    refs = ",".join(str(getattr(p, "ref", None) or p.role)
+                    for p in parents_in)
+    residual_area = sum(g.area for g in parts)
+    _c = gap_poly.centroid
+    if residual_area < GAP_FILL_MIN_AREA_M2:
+        UI.vprint(1, f"  [gap-fill] parent fills gap (residual "
+                     f"{residual_area:.0f} < {GAP_FILL_MIN_AREA_M2:.0f} m2, "
+                     f"parent(s)={refs}) — the parent IS the surface; "
+                     f"centroid=({_c.x:.0f},{_c.y:.0f}) skipped.")
+        return []
+    faces = []
+    for g in parts:
+        if g.is_empty or g.area < GAP_FILL_MIN_AREA_M2:
+            continue
+        if not _face_is_verbatim(g, chain_keys):
+            _cc = g.centroid
+            UI.vprint(1, f"  [gap-fill] parent-residual part non-verbatim "
+                         f"boundary (parent(s)={refs}) area={g.area:.0f} m2 "
+                         f"centroid=({_cc.x:.0f},{_cc.y:.0f}) — blocked.")
+            continue
+        faces.append(g)
+    UI.vprint(1, f"  [gap-fill] parent-bounded gap (parent(s)={refs}): "
+                 f"{len(faces)} residual face(s) of {residual_area:.0f} m2 "
+                 f"centroid=({_c.x:.0f},{_c.y:.0f}).")
+    return faces
+
+
+def _grade_face(layout, airside, face_poly, step, registry) -> int:
+    """Area/width-gate ONE gradeable face (a whole enclosed gap, or a
+    pad-residual part) and emit its drainage spine.  Logs the candidate
+    and any lawful width/area skip.  Returns the emitted face count."""
+    if face_poly.is_empty or not face_poly.is_valid:
+        return 0
+    if face_poly.area < GAP_FILL_MIN_AREA_M2:
+        return 0
+    try:
+        axes = _mrr_axes(face_poly.minimum_rotated_rectangle)
+    except _GEOM_EXC:
+        return 0
+    if axes is None or axes[1] is None:
+        return 0
+    short_side, long_dir, long_len = axes
+    _c = face_poly.centroid
+    UI.vprint(1, f"  [gap-fill] candidate area="
+                 f"{face_poly.area:.0f} m2 short="
+                 f"{short_side:.0f} centroid=({_c.x:.0f},{_c.y:.0f})")
+    if short_side > GAP_FILL_MAX_WIDTH_M:
+        UI.vprint(1, f"  [gap-fill] skipped gap (width "
+                     f"{short_side:.0f} > {GAP_FILL_MAX_WIDTH_M:.0f})"
+                     f" area={face_poly.area:.0f} m2")
+        return 0
+    return _emit_one_gap(layout, airside, face_poly, long_dir, long_len,
+                         step, registry)
 
 
 def _mrr_axes(mrr):
@@ -231,12 +378,24 @@ def _build_spine(gap_poly, long_dir, long_len, step):
     # by construction), no polygon split, and U-shaped / partially
     # open gaps need no special casing.  Hold the spine ends >= 2 m
     # off the ring.
-    ring_ls = gap_poly.exterior
-    out = [p for p in mids]
-    while out and ring_ls.distance(Point(out[0])) < 2.0:
-        out = out[1:]
-    while out and ring_ls.distance(Point(out[-1])) < 2.0:
-        out = out[:-1]
+    if list(gap_poly.interiors):
+        # ANNULAR face (a gap parent — building pad / runway-end skirt
+        # — wholly inside): the parent's ring is a constrained chain
+        # too, so EVERY spine point keeps >= 2 m off the FULL boundary
+        # (exterior + parent rings) — a spine vertex hugging the parent
+        # ring would mint a near-parallel pair.  Segments that would
+        # cross the parent hole are handled by the sub-chain split at
+        # emission.  Faces WITHOUT interiors keep the original
+        # end-trim path byte-identical.
+        ring_ls = gap_poly.boundary
+        out = [p for p in mids if ring_ls.distance(Point(p)) >= 2.0]
+    else:
+        ring_ls = gap_poly.exterior
+        out = [p for p in mids]
+        while out and ring_ls.distance(Point(out[0])) < 2.0:
+            out = out[1:]
+        while out and ring_ls.distance(Point(out[-1])) < 2.0:
+            out = out[:-1]
     # De-duplicate consecutive coincident points.
     dedup: list[tuple[float, float]] = []
     for p in out:
@@ -338,6 +497,359 @@ def _interp_along_spine(spine_line, cum, vals, px, py):
     return vals[k] + t * (vals[k + 1] - vals[k])
 
 
+# ══════════════════════════════════════════════════════════════════════
+# OPEN-FRONTAGE CORRIDOR SPINE (slice B pilot, user design ruling 3
+# 2026-07-09; docs/chain_identity_one_solve_plan.md §Slice B)
+#
+# The OPEN generalization of the enclosed-gap spine.  An enclosed gap is
+# an INTERIOR RING of the airside union; a corridor between a runway and
+# a parallel taxiway is bounded by pavement on its two long sides but OPEN
+# at the ends, so it is NOT an interior ring and the enclosed path never
+# owns it.  With the legacy surface_clearance chain deleted the corridor
+# bands inherit that open frontage and are the WRONG tool there (facing
+# bands off different edge references disagree at the clip seam → tears +
+# coincident-twin lenses).  Emit instead ONE face per corridor:
+#   * long sides = the two facing pavement chains VERBATIM (a subsequence
+#     of existing pavement ring vertices — chain identity, zero new
+#     boundary geometry on pavement);
+#   * ends = STRAIGHT closures across the corridor mouth between two
+#     pavement ring vertices — TRUE outer edges facing free terrain (a
+#     lawful vertical face lives ONLY here, per ruling 3; the corridor-law
+#     march / daylight rules own everything beyond the mouth);
+#   * interior = ONE drainage spine (the crown/valley), emitted via the
+#     proven open-way crown mechanism (layout.gap_spines).
+# ══════════════════════════════════════════════════════════════════════
+
+
+def _poly_parts(geom):
+    """Polygon components of a shapely geometry (drops non-areal parts)."""
+    if geom is None or geom.is_empty:
+        return []
+    if geom.geom_type == "Polygon":
+        return [geom]
+    return [g for g in getattr(geom, "geoms", []) if g.geom_type == "Polygon"]
+
+
+def _touching_shapes(poly, airside, tol):
+    """The airside shapes whose exterior runs within ``tol`` of ``poly`` —
+    the pavement chains a candidate corridor is bounded by.  A genuine
+    corridor faces >= 2 DISTINCT shapes (a concave notch of ONE shape
+    faces only itself and is not a between-pavement corridor)."""
+    out = []
+    for s in airside:
+        try:
+            if s.polygon.exterior.distance(poly) <= tol:
+                out.append(s)
+        except _GEOM_EXC:
+            continue
+    return out
+
+
+def _detect_open_corridors(union, close_r, subtract):
+    """Morphological CLOSING of the airside union bridges every open
+    channel up to ``2 * close_r`` wide; the difference against the union
+    is the newly-covered ground — enclosed gaps (interior rings) AND open
+    corridors.  The closing-difference keeps the union's exact boundary on
+    every pavement-facing side VERBATIM (GEOS does not perturb ``union``'s
+    coordinates on a shared boundary — only the buffered end caps are new
+    geometry).  ``subtract`` (enclosed-gap union + a standoff-buffered union
+    of every foreign shape) is then removed so a single coarse closing blob
+    SPLITS into the individual corridor slabs between pavements instead of
+    being wholly blocked by one obstacle inside it; the subtraction only
+    touches the FOREIGN-facing side of a corridor (foreign shapes sit in the
+    corridor interior / far edge, never on the pavement-facing boundary),
+    so the pavement chains stay verbatim.  Returns the polygon parts."""
+    try:
+        closed = union.buffer(close_r, quad_segs=2,
+                              join_style=1).buffer(-close_r, quad_segs=2,
+                                                   join_style=1)
+        bridged = closed.difference(union)
+        if subtract is not None and not subtract.is_empty:
+            bridged = bridged.difference(subtract)
+    except _GEOM_EXC:
+        return []
+    return _poly_parts(bridged)
+
+
+def _corridor_verbatim_face(corridor_poly, airside, registry, air_ext,
+                            ring_verts):
+    """Rebuild a corridor region as a face whose PAVEMENT-facing boundary
+    is a verbatim pavement SUBSEQUENCE and whose ENDS are straight closures
+    across the mouth between two pavement ring vertices.  Walk the exterior
+    ring and classify each vertex:
+
+      * VERBATIM pavement ring vertex (in ``registry``) → keep, verbatim
+        value;
+      * a TRANSITION point ON a pavement edge (<= 0.15 m, mid-edge — where
+        the morphological-closing end cap crossed the pavement line): the
+        pavement-node rule (Noah, 2026-07-09 — grading shapes never mint a
+        node on a pavement edge) says extend to the BRACKETING ring vertex
+        — snap to the nearest pavement ring vertex within
+        ``OPEN_FRONTAGE_CLOSE_M`` (the buffer radius bounds how far the
+        cut sits from the true pavement end).  The corridor side then runs
+        to a real vertex and the mouth closure spans two real vertices
+        (zero new pavement-edge nodes).  A colinear on-edge FOOT is the
+        fallback if no ring vertex is in range;
+      * a FAR non-verbatim vertex (a buffered end-cap point facing free
+        terrain — a TRUE outer edge) → DROP it; the segment between the
+        flanking kept vertices is the straight mouth closure.
+
+    Returns ``(face_poly, ring_coords, ring_alts)`` or None."""
+    ring = _open_coords(corridor_poly)
+    if len(ring) < 3:
+        return None
+    new_ring: list[tuple[float, float]] = []
+    alts: list[float] = []
+    for vx, vy in ring:
+        k = _key(vx, vy)
+        if k in registry:
+            new_ring.append((vx, vy))
+            alts.append(registry[k])        # boundary vertex, verbatim
+            continue
+        pt = Point(vx, vy)
+        d_pav = None
+        for ext in air_ext:
+            try:
+                d = ext.distance(pt)
+            except _GEOM_EXC:
+                continue
+            if d_pav is None or d < d_pav:
+                d_pav = d
+        if d_pav is not None and d_pav <= 0.15:
+            # ON a pavement edge → a transition point.  Extend to the
+            # nearest pavement RING VERTEX (pavement-node rule).
+            best_vd, best_v = None, None
+            for rx, ry in ring_verts:
+                d = math.hypot(vx - rx, vy - ry)
+                if d <= OPEN_FRONTAGE_CLOSE_M and (
+                        best_vd is None or d < best_vd):
+                    best_vd, best_v = d, (rx, ry)
+            if best_v is not None:
+                rk = _key(best_v[0], best_v[1])
+                if rk in registry:
+                    new_ring.append((best_v[0], best_v[1]))
+                    alts.append(registry[rk])
+                    continue
+            # Fallback: keep the colinear on-edge foot (an exact T-vertex,
+            # the survivable class — never a near-parallel lens).
+            e = _nearest_pav_alt(airside, vx, vy, max_distance_m=5.0)
+            if e is not None:
+                new_ring.append((vx, vy))
+                alts.append(float(e))
+                continue
+        # FAR non-verbatim: an end-closure / true-outer-edge vertex — drop
+        # it (the flanking kept vertices close the mouth with a straight
+        # segment).
+        continue
+    # De-duplicate consecutive coincident kept vertices (the extension can
+    # pull two adjacent transition points onto the same ring vertex).
+    dr: list[tuple[float, float]] = []
+    da: list[float] = []
+    for (x, y), a in zip(new_ring, alts):
+        if not dr or math.hypot(x - dr[-1][0], y - dr[-1][1]) > 1e-6:
+            dr.append((x, y))
+            da.append(a)
+    if len(dr) < 3:
+        return None
+    try:
+        face_poly = Polygon(dr)
+    except _GEOM_EXC:
+        return None
+    if face_poly.is_empty or not face_poly.is_valid:
+        return None
+    return face_poly, dr, da
+
+
+def _emit_open_corridor(layout, airside, face_poly, ring, alts,
+                        step) -> int:
+    """Grade ONE clean corridor face (verbatim ring + straight closures):
+    build the drainage spine, solve its values, append the face + spine.
+    Returns 1 on emit, 0 on a lawful skip (logged)."""
+    try:
+        axes = _mrr_axes(face_poly.minimum_rotated_rectangle)
+    except _GEOM_EXC:
+        return 0
+    if axes is None or axes[1] is None:
+        return 0
+    short_side, long_dir, long_len = axes
+    _c = face_poly.centroid
+    UI.vprint(1, f"  [open-frontage] corridor face area="
+                 f"{face_poly.area:.0f} m2 short={short_side:.0f} "
+                 f"centroid=({_c.x:.0f},{_c.y:.0f})")
+    if short_side > GAP_FILL_MAX_WIDTH_M:
+        UI.vprint(1, f"  [open-frontage] skipped corridor (width "
+                     f"{short_side:.0f} > {GAP_FILL_MAX_WIDTH_M:.0f}) "
+                     f"area={face_poly.area:.0f} m2")
+        return 0
+    spine = _build_spine(face_poly, long_dir, long_len, step)
+    if spine is None:
+        UI.vprint(1, "  [open-frontage] no spine for corridor "
+                     f"(area={face_poly.area:.0f} m2) — skipped.")
+        return 0
+    intervals: list[tuple] = []
+    targets: list[float] = []
+    for px, py in spine:
+        lo, hi, edge_alts = _spine_interval(layout, airside, px, py)
+        target = _drain_target(lo, hi, edge_alts)
+        if target is None:
+            UI.vprint(1, "  [open-frontage] no pavement value at spine — "
+                         "skipped.")
+            return 0
+        intervals.append((lo, hi))
+        targets.append(target)
+    values = _smooth_spine(targets, intervals, _SMOOTH_SWEEPS)
+    values = [round(v, 1) for v in values]
+    layout.shapes.append(BuiltShape(
+        polygon=face_poly, role=ROLE_GRADED_STRIP, ref=_OPEN_FRONTAGE_REF,
+        node_altitudes=list(alts) + [alts[0]]))
+    if getattr(layout, "gap_spines", None) is None:
+        layout.gap_spines = []
+    pts_ll = [layout.m_to_ll(px, py) for px, py in spine]
+    layout.gap_spines.append((pts_ll, list(values)))
+    return 1
+
+
+def _emit_open_frontage(layout, airside, comps, union, registry,
+                        chain_keys, other_polys, parents, step) -> int:
+    """Detect + grade every OPEN corridor between facing pavement chains
+    (behind ``O4_OPEN_FRONTAGE_SPINE``, checked by the caller).  Every
+    candidate region is logged with an emit / skip reason — no silent
+    skips.  Returns the corridor-face count."""
+    # Enclosed gaps (interior rings) are owned by the enclosed-gap path;
+    # every foreign shape (groundside / service / retaining wall / building)
+    # carries a standoff (the groundside 1 m no-weld ruling).  Both are
+    # SUBTRACTED from the closing so one coarse blob splits into individual
+    # corridor slabs instead of being blocked whole by a single obstacle
+    # inside it.  The subtraction only touches a corridor's FOREIGN-facing
+    # side (foreign shapes sit in the interior / far edge, never on the
+    # pavement-facing boundary), so the pavement chains stay verbatim.
+    enclosed = []
+    for comp in comps:
+        for interior in comp.interiors:
+            try:
+                enclosed.append(Polygon(interior.coords))
+            except _GEOM_EXC:
+                continue
+    try:
+        enclosed_union = unary_union(enclosed) if enclosed else None
+    except _GEOM_EXC:
+        enclosed_union = None
+    subtract_geoms = []
+    if enclosed_union is not None and not enclosed_union.is_empty:
+        subtract_geoms.append(enclosed_union)
+    if other_polys:
+        try:
+            foreign_block = unary_union(
+                [op for _oid, op in other_polys]).buffer(
+                    _OPEN_FRONTAGE_FOREIGN_STANDOFF_M)
+            if not foreign_block.is_empty:
+                subtract_geoms.append(foreign_block)
+        except _GEOM_EXC:
+            pass
+    try:
+        subtract = unary_union(subtract_geoms) if subtract_geoms else None
+    except _GEOM_EXC:
+        subtract = None
+    corridors = _detect_open_corridors(
+        union, OPEN_FRONTAGE_CLOSE_M, subtract)
+    if not corridors:
+        return 0
+    region = layout.airport_boundary
+    air_ext = []
+    ring_verts: list[tuple[float, float]] = []
+    for _s in airside:
+        try:
+            _ext = _s.polygon.exterior
+        except _GEOM_EXC:
+            continue
+        air_ext.append(_ext)
+        ring_verts.extend((float(x), float(y)) for x, y in _ext.coords[:-1])
+    emitted = 0
+    for corr in corridors:
+        if corr.is_empty or corr.area < GAP_FILL_MIN_AREA_M2:
+            continue
+        _c = corr.centroid
+        # Enclosed-gap overlap → owned by the interior-ring path.
+        if enclosed_union is not None:
+            try:
+                if corr.intersection(enclosed_union).area > 0.5 * corr.area:
+                    UI.vprint(1, f"  [open-frontage] skipped region "
+                                 f"(enclosed gap — interior-ring path owns "
+                                 f"it) area={corr.area:.0f} m2 "
+                                 f"centroid=({_c.x:.0f},{_c.y:.0f})")
+                    continue
+            except _GEOM_EXC:
+                pass
+        # Outside the airport region → not our ground.
+        if region is not None:
+            try:
+                if not region.contains(corr.representative_point()):
+                    UI.vprint(1, f"  [open-frontage] skipped region "
+                                 f"(outside airport boundary) area="
+                                 f"{corr.area:.0f} m2 "
+                                 f"centroid=({_c.x:.0f},{_c.y:.0f})")
+                    continue
+            except _GEOM_EXC:
+                pass
+        # A genuine corridor faces >= 2 DISTINCT pavement shapes.
+        touching = _touching_shapes(corr, airside, tol=0.5)
+        if len(touching) < 2:
+            UI.vprint(1, f"  [open-frontage] skipped region (faces "
+                         f"{len(touching)} pavement shape(s), need >= 2 — "
+                         f"concave notch, not a corridor) area="
+                         f"{corr.area:.0f} m2 "
+                         f"centroid=({_c.x:.0f},{_c.y:.0f})")
+            continue
+        # A foreign shape inside (groundside / service / retaining wall)
+        # means the corridor-band / daylight law owns it — skip.
+        overlapped = False
+        for _oid, op in other_polys:
+            try:
+                if corr.intersection(op).area > 1.0:
+                    overlapped = True
+                    break
+            except _GEOM_EXC:
+                continue
+        if overlapped:
+            UI.vprint(1, f"  [open-frontage] skipped corridor (foreign "
+                         f"shape inside) area={corr.area:.0f} m2 "
+                         f"centroid=({_c.x:.0f},{_c.y:.0f})")
+            continue
+        # Parents (building pads / runway-end skirts) inside → reuse the
+        # enclosed-gap parent machinery (residual faces + annular spine).
+        parents_in = []
+        for p in parents:
+            try:
+                if corr.intersection(p.polygon).area > 1.0:
+                    parents_in.append(p)
+            except _GEOM_EXC:
+                continue
+        if parents_in:
+            faces = _parent_residual_faces(corr, parents, chain_keys)
+            n = 0
+            for face_poly in faces:
+                n += _grade_face(layout, airside, face_poly, step, registry)
+            emitted += n
+            continue
+        # Clean corridor: verbatim pavement long-sides + straight-closure
+        # ends, then the drainage spine.
+        built = _corridor_verbatim_face(
+            corr, airside, registry, air_ext, ring_verts)
+        if built is None:
+            UI.vprint(1, f"  [open-frontage] skipped corridor "
+                         f"(non-verbatim / degenerate face) area="
+                         f"{corr.area:.0f} m2 "
+                         f"centroid=({_c.x:.0f},{_c.y:.0f})")
+            continue
+        face_poly, face_ring, face_alts = built
+        emitted += _emit_open_corridor(
+            layout, airside, face_poly, face_ring, face_alts, step)
+    if emitted:
+        UI.vprint(1, f"  [open-frontage] emitted {emitted} open-corridor "
+                     f"drainage-spine face(s).")
+    return emitted
+
+
 def emit_gap_fill_spines(layout, dem, tile_lat, tile_lon) -> int:
     """Grade every enclosed gap of the airside pavement union as one unit
     (gate ``GAP_FILL_SPINE_ENABLED``).  Mutates ``layout.shapes``; returns
@@ -387,7 +899,69 @@ def emit_gap_fill_spines(layout, dem, tile_lat, tile_lon) -> int:
             if k not in registry:
                 registry[k] = value
 
+    # GAP PARENTS (user design 2026-07-09 queue item 5 + supervisor
+    # follow-up).  Two parent families, each behind its own sub-gate
+    # (separate gates keep each law independently A/B-able against the
+    # shipped gap-fill — a pad regression and a skirt regression bisect
+    # apart):
+    #   * BUILDING PADS (O4_GAP_FILL_PAD_PARENTS, default ON): FLAT with
+    #     an authoritative value (user ruling: buildings are flat) —
+    #     apron-family envelope members.
+    #   * RUNWAY-END SKIRTS (O4_GAP_FILL_SKIRT_PARENTS, default ON):
+    #     NON-flat — their ring vertices carry the governed inverse-RESA
+    #     runway-end profile (per-vertex node_altitudes; skirt anchored
+    #     at the runway end, dev 9345739).  The skirt shape itself keeps
+    #     emitting exactly as today; the gap fills AROUND it.
+    # A parent BOUNDS a gap the way pavement does, so it is NOT a
+    # blocker.  A hole with a parent inside is graded on the RESIDUAL
+    # ground only; the parent's value WINS at parent-ring nodes —
+    # per-vertex for skirts, flat for pads — registered here AFTER
+    # pavement (first-writer-wins keeps pavement winning at any shared
+    # node: the pavement-value-wins ruling) — and the parent ring is a
+    # VERBATIM boundary chain (zero new boundary vertices).
+    _pad_parents = os.environ.get("O4_GAP_FILL_PAD_PARENTS", "1") == "1"
+    _skirt_parents = os.environ.get(
+        "O4_GAP_FILL_SKIRT_PARENTS", "1") == "1"
+    pads = [s for s in layout.shapes
+            if s.role == ROLE_BUILDING and s.polygon is not None
+            and not s.polygon.is_empty
+            and s.polygon.geom_type in ("Polygon", "MultiPolygon")] \
+        if _pad_parents else []
+    skirts = [s for s in layout.shapes
+              if getattr(s, "ref", None) == "runway_end_skirt"
+              and s.polygon is not None and not s.polygon.is_empty
+              and s.polygon.geom_type == "Polygon"] \
+        if _skirt_parents else []
+    parents = pads + skirts
+    # Geometry-only key set for the verbatim gate: every pavement +
+    # parent ring vertex.  A residual boundary vertex outside this set
+    # is a difference-minted crossing point (not chain-safe).
+    chain_keys: set[tuple[int, int]] = set(registry)
+    for p in parents:
+        flat_value = _parent_flat_value(p)
+        geoms = ([p.polygon] if p.polygon.geom_type == "Polygon"
+                 else list(p.polygon.geoms))
+        for g in geoms:
+            try:
+                coords = list(g.exterior.coords)
+            except _GEOM_EXC:
+                continue
+            # Per-vertex values only when the altitude list aligns with
+            # THIS ring (single-Polygon shapes — skirts always; pads in
+            # synthetic fixtures); a MultiPolygon pad falls back to its
+            # flat value.
+            na = (p.node_altitudes
+                  if (g is p.polygon and p.node_altitudes) else None)
+            for i, (vx, vy) in enumerate(coords):
+                k = _key(vx, vy)
+                chain_keys.add(k)
+                if na and i < len(na) and na[i] is not None:
+                    registry.setdefault(k, float(na[i]))  # pavement wins
+                elif flat_value is not None:
+                    registry.setdefault(k, flat_value)    # pavement wins
+
     airside_ids = {id(s) for s in airside}
+    parent_ids = {id(s) for s in parents}
     # LEGACY SUPERSESSION (user 2026-07-09: 13 of 27 CYXY holes were
     # blocked ONLY by legacy surface_clearance strips — the chain the
     # gap-fill replaces).  A legacy strip lying WHOLLY inside a gap is
@@ -405,9 +979,14 @@ def emit_gap_fill_spines(layout, dem, tile_lat, tile_lon) -> int:
                      and s.polygon is not None
                      and not s.polygon.is_empty] if _supersede else []
     legacy_ids = {id(s) for s in legacy_strips}
+    # Gap parents (building pads / runway-end skirts, per their gates)
+    # are EXCLUDED from the blocker set — they bound the gap (handled in
+    # _parent_residual_faces), not block it.  Every other foreign shape
+    # (groundside, service, retaining wall …) still blocks.
     other_polys = [(id(s), s.polygon) for s in layout.shapes
                    if id(s) not in airside_ids
                    and id(s) not in legacy_ids
+                   and id(s) not in parent_ids
                    and s.polygon is not None and not s.polygon.is_empty
                    and s.polygon.geom_type in ("Polygon", "MultiPolygon")]
 
@@ -425,26 +1004,12 @@ def emit_gap_fill_spines(layout, dem, tile_lat, tile_lon) -> int:
                 continue
             if gap_poly.area < GAP_FILL_MIN_AREA_M2:
                 continue
-            try:
-                axes = _mrr_axes(gap_poly.minimum_rotated_rectangle)
-            except _GEOM_EXC:
-                continue
-            if axes is None or axes[1] is None:
-                continue
-            short_side, long_dir, long_len = axes
-            _c = gap_poly.centroid
-            UI.vprint(1, f"  [gap-fill] candidate area="
-                         f"{gap_poly.area:.0f} m2 short="
-                         f"{short_side:.0f} centroid="
-                         f"({_c.x:.0f},{_c.y:.0f})")
-            if short_side > GAP_FILL_MAX_WIDTH_M:
-                UI.vprint(1, f"  [gap-fill] skipped gap (width "
-                             f"{short_side:.0f} > {GAP_FILL_MAX_WIDTH_M:.0f})"
-                             f" area={gap_poly.area:.0f} m2")
-                continue                 # wide gaps stay with the bands
-            # A foreign shape inside the gap (building / groundside) means
-            # the corridor bands own it — skip.  Legacy surface_clearance
-            # strips are NOT blockers: wholly-inside ones are superseded
+            # A foreign shape inside the gap (groundside / service /
+            # retaining wall …) means the corridor bands own it — skip.
+            # Gap parents (building pads / runway-end skirts) are NOT in
+            # ``other_polys`` when their law is on: they bound the gap
+            # (handled below).  Legacy surface_clearance strips are NOT
+            # blockers either: wholly-inside ones are superseded
             # (removed) when the gap emits; a PARTIALLY-inside strip
             # blocks (cutting it would mutate a welded ring — only
             # whole-piece drops are chain-safe).
@@ -481,9 +1046,17 @@ def emit_gap_fill_spines(layout, dem, tile_lat, tile_lon) -> int:
                              f"{gap_poly.area:.0f} m2 "
                              f"centroid=({_c.x:.0f},{_c.y:.0f})")
                 continue
-            n_faces = _emit_one_gap(
-                layout, airside, gap_poly, long_dir, long_len, step,
-                registry)
+            # FACES to grade: the whole gap, or — when gap parent(s)
+            # (building pads / runway-end skirts) bound it — the
+            # RESIDUAL ground around the parent(s), each a chain-safe
+            # part (parent-fill → lawful vanish; non-verbatim →
+            # blocked; both logged in the helper).
+            faces = (_parent_residual_faces(gap_poly, parents, chain_keys)
+                     if parents else [gap_poly])
+            n_faces = 0
+            for face_poly in faces:
+                n_faces += _grade_face(
+                    layout, airside, face_poly, step, registry)
             if n_faces and superseded:
                 _sup_ids = {id(s) for s in superseded}
                 layout.shapes[:] = [s for s in layout.shapes
@@ -495,6 +1068,19 @@ def emit_gap_fill_spines(layout, dem, tile_lat, tile_lon) -> int:
                     f"{len(_sup_ids)} legacy surface_clearance "
                     f"strip(s) inside an emitted gap.")
             emitted += n_faces
+
+    # ── OPEN-FRONTAGE CORRIDOR SPINE (slice B pilot, ruling 3) ──────────
+    # The enclosed-gap loop above owns interior rings.  This pilot, behind
+    # its OWN sub-gate (default OFF — Noah has not reviewed it in-sim),
+    # additionally owns OPEN corridors between facing pavements (a runway ↔
+    # parallel-taxiway strip and similar): ground bounded by two pavement
+    # chains on its long sides but open at the ends, which the legacy
+    # surface_clearance chain used to grade and the corridor bands do
+    # badly once it is deleted.  A no-op with the gate off.
+    if os.environ.get("O4_OPEN_FRONTAGE_SPINE", "0") == "1":
+        emitted += _emit_open_frontage(
+            layout, airside, comps, union, registry, chain_keys,
+            other_polys, parents, step)
     return emitted
 
 
@@ -590,6 +1176,46 @@ def _emit_one_gap(layout, airside, gap_poly, long_dir, long_len, step,
         node_altitudes=alts + [alts[0]]))
     if getattr(layout, "gap_spines", None) is None:
         layout.gap_spines = []
-    pts_ll = [layout.m_to_ll(px, py) for px, py in spine]
-    layout.gap_spines.append((pts_ll, list(values)))
+    if list(gap_poly.interiors):
+        # ANNULAR face (gap parent wholly inside): a straight segment
+        # between two spine stations can cross the parent hole — that
+        # open constrained way would transversally cross the parent's
+        # ring (a fresh lens mint).  Split the spine into sub-chains of
+        # consecutive stations whose connecting segments stay COVERED
+        # by the face; each sub-chain (>= 2 points) emits as its own
+        # open way.  Faces without interiors keep the single-way path
+        # byte-identical.
+        chains: list[list[int]] = [[0]]
+        for i in range(len(spine) - 1):
+            seg = LineString([spine[i], spine[i + 1]])
+            covered = False
+            try:
+                covered = gap_poly.covers(seg)
+            except _GEOM_EXC:
+                covered = False
+            if covered:
+                chains[-1].append(i + 1)
+            else:
+                chains.append([i + 1])
+        emitted_ways = 0
+        for chain in chains:
+            if len(chain) < 2:
+                continue
+            pts_ll = [layout.m_to_ll(*spine[j]) for j in chain]
+            layout.gap_spines.append(
+                (pts_ll, [values[j] for j in chain]))
+            emitted_ways += 1
+        if emitted_ways == 0:
+            # No drainage way survived the parent hole — the face is
+            # already appended and keeps its boundary values; log it.
+            UI.vprint(1, "  [gap-fill] annular face emitted without a "
+                         "drainage spine (every spine segment crossed "
+                         "the parent ring).")
+        elif emitted_ways > 1:
+            UI.vprint(1, f"  [gap-fill] annular face spine split into "
+                         f"{emitted_ways} open ways around the parent "
+                         f"ring.")
+    else:
+        pts_ll = [layout.m_to_ll(px, py) for px, py in spine]
+        layout.gap_spines.append((pts_ll, list(values)))
     return 1

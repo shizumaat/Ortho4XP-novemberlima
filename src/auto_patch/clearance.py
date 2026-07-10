@@ -125,6 +125,43 @@ _PAVEMENT_GAP_M = 1.0
 # sharp terrain a wingtip overhangs is cut even where no centerline reaches it.
 # O4_POCKET_CLEARANCE=0 disables it (revert to centerline-only junction clearance).
 _POCKET_CLEARANCE = os.environ.get("O4_POCKET_CLEARANCE", "1") == "1"
+# LEGACY CLEARANCE CHARTER (Noah ruling 2026-07-10, in-sim round 6):
+# surface_clearance is WINGTIP clearance along TAXIWAYS and RUNWAYS ONLY —
+# never aprons, never service roads/groundside, never large terminal-area
+# pieces.  When ON, the source-edge collection is scoped:
+#   * the Pass-A3 airside ring-edge sweep does NOT run off APRON,
+#     SERVICE_ROAD, or SERVICE_JUNCTION edges (an apron/service road is
+#     not a taxiway or runway); and
+#   * the Pass-A centerline trace skips SERVICE centerlines.
+# Groundside/building never sourced clearance and keep their 1 m standoff
+# for what remains (see static_union).
+#
+# DEFAULT OFF — this gate does NOT ship on yet.  A 2026-07-10 A/B at CYXY
+# (this worktree) shows that turning it ON REGRESSES the build: removing
+# the apron/service clearance UNCOVERS steep terminal terrain, which the
+# adjacent-ground band-march then backfills with clip-seam artifacts —
+# adjacent-ground TEARS 0 → 10 (worst 8.98 m over 0.66 m), one NEW
+# apron~graded_strip near-parallel lens, coincident nodes 3 → 70.  That
+# is the SAME legacy-off flip blocker STATUS records (just smaller), and
+# it fails the charter's own acceptance gates (tears stay 0; zero new
+# near-parallel).  The apron/service pieces are, for now, HOLDING terrain
+# the adjacent-ground law cannot yet grade cleanly.
+#
+# NOTE (fresh provenance trace — overturns the handover hypothesis): the
+# large terminal blobs Noah flagged (CYXY site-1 notch, hangar) are NOT
+# apron-sourced.  They are dominated by JUNCTION ring sweeps (site-1 =
+# one 28,215 m² junction sweep) plus RESA and centerline strips; apron
+# edges were a minor contributor.  Dissolving the blobs therefore needs
+# the JUNCTION sweep gone too, which trips the FULL flip regression
+# (nodes +~1,900, coincident →~260).  Both the apron/service scope-shrink
+# AND the junction/RESA blob shrink are SLICE-B acceptance criteria
+# (adjacent-ground clip-seam coordination / solver absorption), not a
+# fix-now (pre-slice-B policy, Noah ruling 4).
+#
+# The gate exists so slice-B can A/B against the charter target.  It is
+# scope FILTERING at source-edge collection — no code path is deleted;
+# O4_CLEARANCE_CHARTER=1 enables the (currently regressing) filter.
+_CLEARANCE_CHARTER = os.environ.get("O4_CLEARANCE_CHARTER", "0") == "1"
 # Only build lateral strips for shapes that are genuinely elongated
 # (a taxiway / runway).  Chunky absorbed pieces (aspect < this) are
 # blob-like — "edge clearance" is ill-defined and they'd otherwise
@@ -1842,6 +1879,10 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
     # Authoritative ICAO size letter per taxiway name (apt.dat row 1202).
     if centerlines and prep_pav is not None:
         for entry in centerlines:
+            # CHARTER (O4_CLEARANCE_CHARTER, default OFF): service
+            # centerlines source NO clearance.
+            if _CLEARANCE_CHARTER and getattr(entry, "is_service", False):
+                continue
             line = entry.line if hasattr(entry, "line") else (entry[0] if isinstance(entry, tuple) else entry)
             ref = entry[1] if (isinstance(entry, tuple)
                                and len(entry) > 1) else ""
@@ -2065,9 +2106,25 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
         _a3_tx_reach = CLEARANCE_MAX_REACH_M["taxiway"]
         _a3_rw_threshold = CLEARANCE_OBSTRUCTION_THRESHOLD_M["runway"]
         _a3_rw_reach = CLEARANCE_MAX_REACH_M["runway"]
+        # CHARTER (O4_CLEARANCE_CHARTER, default OFF): APRON edges source
+        # NO A3 clearance — an
+        # apron is not a taxiway/runway, and its ring sweeps (with the
+        # service-road sweep below) built the parking-area union pieces
+        # Noah ruled out of scope.  JUNCTION and the other taxiway-family
+        # roles are RETAINED here: a fresh 2026-07-10 provenance trace
+        # showed the large terminal blobs are dominated by JUNCTION ring
+        # sweeps, but removing the junction sweep too uncovers terrain
+        # that the adjacent-ground bands then fill with clip-seam
+        # divergence — the documented legacy-off flip blocker (nodes
+        # +~1,900, coincident →~260) that awaits slice-B solver
+        # absorption.  So the junction A3 sweep stays until slice B; the
+        # oversized junction/RESA blobs are logged as a slice-B
+        # acceptance criterion, NOT patched here (pre-slice-B policy).
         _a3_taxi_roles = (ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
                           ROLE_STUB, ROLE_CROSS_CONNECTOR,
-                          ROLE_JUNCTION, ROLE_APRON)
+                          ROLE_JUNCTION)
+        if not _CLEARANCE_CHARTER:
+            _a3_taxi_roles = _a3_taxi_roles + (ROLE_APRON,)
         for s in layout.shapes:
             if (s.polygon is None or s.polygon.is_empty
                     or s.polygon.geom_type != "Polygon"):
@@ -2079,6 +2136,8 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                 threshold = tx_threshold
                 out_role = ROLE_TAXIWAY_CLEARANCE
             elif role in (ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION):
+                if _CLEARANCE_CHARTER:
+                    continue    # CHARTER: service roads source NO clearance
                 band_cap = _a3_sv_band
                 threshold = _a3_sv_threshold
                 out_role = ROLE_TAXIWAY_CLEARANCE
