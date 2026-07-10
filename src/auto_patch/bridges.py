@@ -3373,14 +3373,29 @@ def _bridge_is_road_carried(bridge, layout, to_meters):
     footprint = _bridge_footprint_meters(bridge, to_meters)
     if footprint is None:
         return False
-    # Route evidence = a shape crossing the deck footprint OR ending
-    # within the pin capture band of the footprint (the KBNA cut: the
-    # pack severs pavement 9.6 m short of the abutments, so the taxi
-    # route "reaches" the deck without geometrically crossing it —
-    # crossing-only would misread taxiway-L as a road overpass).
     reach_band = footprint.buffer(
         float(_CFG.BRIDGE_ABUTMENT_PIN_CAPTURE_BAND_M)
     )
+    # PRIMARY route evidence (stage 2b iteration 3): the apt.dat
+    # taxi/truck ROUTING polylines (``layout.apt_taxi_centerlines``,
+    # which carries the 1206-run service/truck centerlines with
+    # ``is_service=True``).  Shape proximity was the wrong evidence: the
+    # Murfreesboro truck-strip SHAPES sit 36.7-60.9 m short of the decks
+    # (outside any sane band) while the apt.dat truck-route EDGES
+    # genuinely cross them — the routing graph, not the emitted
+    # pavement, says what drives over the deck.
+    for centerline in getattr(layout, "apt_taxi_centerlines", None) or []:
+        line = getattr(centerline, "line", None)
+        if line is None or line.is_empty:
+            continue
+        try:
+            if line.intersects(reach_band):
+                return False
+        except _GEOM_EXC:
+            continue
+    # Secondary evidence: a pavement/service shape crossing or ending
+    # within the pin capture band of the footprint (the KBNA cut: the
+    # pack severs taxiway-L pavement 9.6 m short of the abutments).
     for shape in layout.shapes:
         if shape.role not in crossing_roles:
             continue
@@ -3442,6 +3457,78 @@ def _partition_bridges_for_corridors(classification, layout=None):
         elif bridge.contract == AMBIGUOUS:
             refused.append(bridge)
     return corridor, suppress, refused, road_carried
+
+
+def _cut_pavement_over_hard_deck(layout, footprint) -> int:
+    """Ruling R8 flush seating: cut every taxi/junction/apron/service
+    pavement shape by a genuine ``ATTR_hard_deck`` span footprint — the
+    object sits flush and carries the drivable surface between the
+    abutments (the pattern the KBNA author already uses in the source;
+    auto_patch rebuilds pavement from centerlines and must repeat the
+    cut).  Solved per-vertex values on the surviving pieces are
+    preserved by nearest-neighbour resampling (the boundary-cut pattern
+    above).  Returns the number of shapes cut."""
+    from .layout import ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION
+    cut_roles = _BRIDGE_PIN_ROLES | {
+        ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION,
+    }
+    n_cut = 0
+    kept_shapes: list[BuiltShape] = []
+    for shape in layout.shapes:
+        if (shape.role not in cut_roles
+                or shape.polygon is None
+                or shape.polygon.is_empty):
+            kept_shapes.append(shape)
+            continue
+        try:
+            if not shape.polygon.intersects(footprint):
+                kept_shapes.append(shape)
+                continue
+        except _GEOM_EXC:
+            kept_shapes.append(shape)
+            continue
+        try:
+            old_ring = list(shape.polygon.exterior.coords)
+        except _GEOM_EXC:
+            old_ring = []
+        if old_ring and old_ring[0] == old_ring[-1]:
+            old_ring = old_ring[:-1]
+        old_altitudes = (
+            list(shape.node_altitudes) if shape.node_altitudes else None
+        )
+        try:
+            remainder = shape.polygon.difference(footprint)
+        except _GEOM_EXC:
+            kept_shapes.append(shape)
+            continue
+        n_cut += 1
+        if remainder.is_empty:
+            continue  # the shape lay entirely on the deck — removed
+        parts = (
+            list(remainder.geoms)
+            if remainder.geom_type == "MultiPolygon" else [remainder]
+        )
+        for part in parts:
+            if (part.geom_type != "Polygon" or part.is_empty
+                    or part.area < 5.0):
+                continue
+            resampled = _resample_node_altitudes_nn(
+                part, old_ring, old_altitudes
+            )
+            kept_shapes.append(BuiltShape(
+                polygon=part,
+                role=shape.role,
+                ref=shape.ref,
+                altitude=(shape.altitude if resampled is None else None),
+                altitude_high=(
+                    None if resampled is not None else shape.altitude_high),
+                altitude_low=(
+                    None if resampled is not None else shape.altitude_low),
+                node_altitudes=resampled,
+                is_bridge=getattr(shape, "is_bridge", False)))
+    if n_cut:
+        layout.shapes = kept_shapes
+    return n_cut
 
 
 def _bridge_footprint_meters(bridge, to_meters):
@@ -3615,15 +3702,56 @@ def _emit_object_sourced_bridge_corridors(
             )
             continue
 
+        # Ruling R8 — hard-deck flush seating (stage 2b iteration 3):
+        # OUR pavement is CUT over a genuine ATTR_hard_deck span (the
+        # object carries the drivable surface between the abutments).
+        # This is also what lets the trench REACH THE MESH: the layout's
+        # own taxi/junction shapes span the deck box (auto_patch builds
+        # rects from centerlines, not from the source cut), and the
+        # deconflict pass seeds its running union with AIRSIDE pavement
+        # — an uncut deck box covered the 161.0 trench plate at ≥ 85 %
+        # and dropped it in BOTH gated KBNA builds, walk order
+        # notwithstanding.  A non-hard (cosmetic) deck gets NO cut —
+        # pavement wins (R8/R2) and the trench carves only outside it.
+        pavement_kept_union = None
+        if bridge.hard_deck:
+            n_cut = _cut_pavement_over_hard_deck(layout, footprint)
+            if n_cut:
+                UI.vprint(
+                    1,
+                    f"   [object-bridge] R8 flush seat: cut {n_cut} "
+                    "pavement shape(s) over the hard deck of "
+                    f"{bridge.object_resources}",
+                )
+        else:
+            crossing_polygons = [
+                shape.polygon for shape in layout.shapes
+                if shape.role in _BRIDGE_PIN_ROLES
+                and shape.polygon is not None
+                and not shape.polygon.is_empty
+                and shape.polygon.intersects(footprint)
+            ]
+            try:
+                pavement_kept_union = (
+                    unary_union(crossing_polygons)
+                    if crossing_polygons else None
+                )
+            except _GEOM_EXC:
+                pavement_kept_union = None
+
         # Under-deck trench plate: the FULL deck footprint at the floor
         # (the author-mesh treatment — the whole under-deck box is cut,
-        # stage 2b; the previous road-width-only plate left the rest of
-        # the box interpolating from the graded field).  Inset by 0.6 m
+        # stage 2b; a road-width-only plate left the rest of the box
+        # interpolating from the graded field).  Inset by 0.6 m
         # (> SHARED_VERTEX_TOL_M) so its rim nodes can NEVER weld into
         # the causeway-lip nodes at the abutment line — the deliberate
         # node-split vertical wall of ruling R2.
         try:
             trench = footprint.buffer(-0.6)
+            if pavement_kept_union is not None:
+                # Cosmetic deck: pavement value wins at any contact —
+                # the trench carves only outside it (rulings R8/R2).
+                trench = trench.difference(pavement_kept_union)
             if trench.geom_type == "MultiPolygon" and not trench.is_empty:
                 trench = max(trench.geoms, key=lambda g: g.area)
             if trench.geom_type == "Polygon" and not trench.is_empty:

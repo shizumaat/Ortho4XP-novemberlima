@@ -1152,3 +1152,121 @@ class TestDeconflictObjectSeniority:
         refs = {s.ref for s in remaining}
         assert "object_bridge_corridor" in refs
         assert "portal_ramp" not in refs
+
+
+# ---------------------------------------------------------------------------
+# stage 2b iteration 3 — routing-evidence discriminator + R8 flush seat
+# ---------------------------------------------------------------------------
+
+class _FakeRouteCenterline:
+    """The two fields the discriminator reads off a
+    ``apt_dat_reader.TaxiCenterline``: the polyline and the service flag."""
+
+    def __init__(self, line, is_service=True):
+        self.line = line
+        self.is_service = is_service
+
+
+class TestRoutingEvidenceDiscriminator:
+    def test_truck_route_polyline_across_deck_defeats_road_carried(
+        self, monkeypatch
+    ):
+        # The Murfreesboro reality: truck-strip SHAPES sit 36.7-60.9 m
+        # short of the deck (no shape evidence), but the apt.dat 1206
+        # ROUTE polyline crosses it — the routing graph is the primary
+        # evidence, so the bridge stays in the truck-bridge class.
+        from shapely.geometry import LineString as _LineString
+        layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
+        layout.apt_taxi_centerlines = [
+            _FakeRouteCenterline(
+                _LineString([(-80.0, 0.0), (210.0, 0.0)]), is_service=True)
+        ]
+        corridor, _s, _r, road_carried = (
+            bridges._partition_bridges_for_corridors(
+                _Classification([_bridge()]), layout)
+        )
+        assert len(corridor) == 1 and not road_carried
+
+    def test_no_routing_and_no_shapes_is_road_carried(self, monkeypatch):
+        layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
+        layout.apt_taxi_centerlines = [
+            # A route far away (never near the deck) is not evidence.
+            _FakeRouteCenterline(
+                __import__("shapely.geometry", fromlist=["LineString"])
+                .LineString([(4000.0, 4000.0), (4200.0, 4000.0)]))
+        ]
+        corridor, _s, _r, road_carried = (
+            bridges._partition_bridges_for_corridors(
+                _Classification([_bridge()]), layout)
+        )
+        assert not corridor and len(road_carried) == 1
+
+
+class TestR8FlushSeat:
+    def _emit(self, monkeypatch, bridge, spanning_shape):
+        layout = _gate_on_layout_with_bridge(monkeypatch, bridge)
+        layout.shapes.append(spanning_shape)
+        network = _draped_road_network_across_deck()
+        count, _sup, _cov = bridges._emit_object_sourced_bridge_corridors(
+            layout, _FakeDem(150.0), 36, -87,
+            _Classification([bridge]), [network],
+            road_width_m=22.0, ramp_step_m=20.0, approach_length_m=80.0,
+        )
+        return layout, count
+
+    def test_hard_deck_cuts_spanning_pavement(self, monkeypatch):
+        # A junction rect spanning the whole deck box (x -30..161 across
+        # the 0..131 footprint) is CUT at the abutments (ruling R8) and
+        # survives as two approach pieces; the trench plate exists.
+        spanning = BuiltShape(
+            polygon=Polygon([(-30.0, -5.0), (161.0, -5.0), (161.0, 5.0),
+                             (-30.0, 5.0)]),
+            role=ROLE_JUNCTION, ref="SPAN",
+            node_altitudes=[167.0] * 4 + [167.0],
+        )
+        layout, count = self._emit(monkeypatch, _bridge(), spanning)
+        assert count == 1
+        pieces = [s for s in layout.shapes if s.ref == "SPAN"]
+        assert len(pieces) == 2, "the deck cut must split the rect"
+        for piece in pieces:
+            maximum_reach = max(
+                min(x for x, _y in piece.polygon.exterior.coords),
+                -999.0,
+            )
+            # No piece extends into the footprint interior.
+            assert piece.polygon.buffer(-0.05).intersection(
+                Polygon([(0.0, -27.5), (131.0, -27.5), (131.0, 27.5),
+                         (0.0, 27.5)])
+            ).area < 1.0
+            # Solved values survived the cut (resampled 167).
+            assert piece.node_altitudes is not None
+        trench = [s for s in layout.shapes
+                  if s.ref == "object_bridge_corridor"]
+        assert len(trench) == 1
+        assert trench[0].altitude == pytest.approx(161.0, abs=0.05)
+
+    def test_cosmetic_deck_keeps_pavement_and_carves_around(
+        self, monkeypatch
+    ):
+        cosmetic = _bridge(
+            deck_hardness=DECK_HARDNESS_COSMETIC, hard_deck=False,
+            absolute_deck_elevation_m=None, deck_top_y_m=7.76,
+        )
+        spanning = BuiltShape(
+            polygon=Polygon([(-30.0, -5.0), (161.0, -5.0), (161.0, 5.0),
+                             (-30.0, 5.0)]),
+            role=ROLE_JUNCTION, ref="SPAN",
+            node_altitudes=[188.0] * 4 + [188.0],
+        )
+        layout, count = self._emit(monkeypatch, cosmetic, spanning)
+        assert count == 1
+        pieces = [s for s in layout.shapes if s.ref == "SPAN"]
+        assert len(pieces) == 1, "cosmetic deck: pavement wins, no cut"
+        assert pieces[0].polygon.area == pytest.approx(
+            191.0 * 10.0, rel=1e-6)
+        trench = [s for s in layout.shapes
+                  if s.ref == "object_bridge_corridor"]
+        assert len(trench) == 1
+        # The trench carves AROUND the kept pavement (R2 pavement wins).
+        assert trench[0].polygon.intersection(
+            pieces[0].polygon).area < 1e-6
