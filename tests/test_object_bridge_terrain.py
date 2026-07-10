@@ -1398,33 +1398,98 @@ class TestApproachKeepOut:
             assert approach.polygon.intersection(footprint).area <= 0.5, \
                 "approach rect intrudes into the deck box"
 
-    def test_road_through_causeway_zone_is_suppressed(self, monkeypatch):
-        # A road exiting through the SHORT (abutment) ends runs straight
-        # through the causeway zones — every step is keep-out territory
-        # and the walk emits nothing there (the causeway owns that
-        # ground; audit 5 measured these loop-back rects fighting the
-        # 167 plates in the mesh).
-        axis_points = []
-        for along in (-40.0, 65.0, 171.0):
-            latitude, longitude = local_offset_to_lonlat(
-                ANCHOR_LATITUDE, ANCHOR_LONGITUDE, 0.0, along, 0.0
-            )
-            axis_points.append(RoadShapePoint(longitude, latitude, 0.0, True))
-        axis_network = RoadNetwork(
-            network_definitions=["lib/g10/roads_EU.net"],
-            segments=[RoadSegment(0, "lib/g10/roads_EU.net", 20, 1, 2,
-                                  axis_points)],
-            skipped_line_count=0,
-        )
+    def test_axial_road_gets_an_exit_lane(self, monkeypatch):
+        # Round 10 (KBNA audit 11 — the overturned round-3 rule): a road
+        # exiting through the abutment ends must NOT be dammed by the
+        # causeway.  The exit lane through the keep-out stays open, so
+        # the approach walk emits its descending rects along the road,
+        # and none of them overlaps the (cut) plates or the trench.
         layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
         layout.shapes.append(_deck_route_shape())
+        # Persistent routing evidence (raw apt.dat polyline): the R8 cut
+        # removes the deck-spanning SHAPE, so the taxi-route line keeps
+        # the bridge in the corridor class for the post-solve partition.
+        from shapely.geometry import LineString as _LineString
+        layout._object_bridge_route_lines = [
+            _LineString([(65.0, -80.0), (65.0, 80.0)])]
+        # Road networks are read from the layout cache in round 10 (the
+        # builder and the keep-out both consult it).
+        setattr(layout, bridges._OBJECT_BRIDGE_ROAD_NETWORKS_ATTRIBUTE,
+                [_axial_road_network()])
+        bridges.build_bridge_layout_shapes(layout, _FakeDem(150.0), 36, -87)
         bridges._emit_object_sourced_bridge_corridors(
             layout, _FakeDem(150.0), 36, -87,
-            _Classification([_bridge()]), [axis_network],
+            _Classification([_bridge()]), [_axial_road_network()],
             road_width_m=22.0, ramp_step_m=20.0, approach_length_m=80.0,
         )
-        assert not [s for s in layout.shapes
-                    if s.ref == "object_bridge_approach"]
+        approaches = [s for s in layout.shapes
+                      if s.ref == "object_bridge_approach"]
+        assert approaches, "the exit lane must let the walk through"
+        plates = [s for s in layout.shapes
+                  if (s.ref or "").startswith("object_bridge_c")]
+        for approach in approaches:
+            for plate in plates:
+                assert approach.polygon.intersection(
+                    plate.polygon).area < 0.5, \
+                    "approach must not overlay a plate (cut, not overlay)"
+
+
+def _axial_road_network(length_m: float = 131.0) -> RoadNetwork:
+    """A fully-draped road ALONG the deck axis, exiting through both
+    abutment ends (the measured KBNA Donelson Pike geometry, segments
+    local x -64..+77)."""
+    axis_points = []
+    for along in (-80.0, length_m / 2.0, length_m + 80.0):
+        latitude, longitude = local_offset_to_lonlat(
+            ANCHOR_LATITUDE, ANCHOR_LONGITUDE, 0.0, along, 0.0
+        )
+        axis_points.append(RoadShapePoint(longitude, latitude, 0.0, True))
+    return RoadNetwork(
+        network_definitions=["lib/g10/roads_EU.net"],
+        segments=[RoadSegment(0, "lib/g10/roads_EU.net", 20, 1, 2,
+                              axis_points)],
+        skipped_line_count=0,
+    )
+
+
+class TestRoadExitCut:
+    def test_axial_road_splits_each_causeway_into_flanks(
+        self, monkeypatch
+    ):
+        # The author-mesh target shape (A10 / spec 2.2): the corridor
+        # runs THROUGH the span and out both ends, flanked by fill at
+        # deck-end elevation on BOTH sides.
+        from shapely.geometry import LineString as _LineString
+        layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
+        layout.shapes.append(_deck_route_shape())
+        setattr(layout, bridges._OBJECT_BRIDGE_ROAD_NETWORKS_ATTRIBUTE,
+                [_axial_road_network()])
+        _t, n_causeway, _p = bridges.build_bridge_layout_shapes(
+            layout, _FakeDem(150.0), 36, -87)
+        assert n_causeway == 4, "two flank parts per end"
+        plates = [s for s in layout.shapes
+                  if s.ref == "object_bridge_causeway"]
+        assert len(plates) == 4
+        # The road centerline crosses NO plate.
+        road = _LineString([(-80.0, 0.0), (211.0, 0.0)])
+        for plate in plates:
+            assert not plate.polygon.intersects(road.buffer(
+                bridges._ROAD_EXIT_CUT_HALF_WIDTH_M - 0.1)), \
+                "the exit lane must be clear of causeway fill"
+            assert all(a == pytest.approx(167.0, abs=0.01)
+                       for a in plate.node_altitudes)
+
+    def test_perpendicular_road_keeps_whole_causeways(self, monkeypatch):
+        # A road exiting through the LONG sides never crosses the
+        # causeway plates: no cut, one part per end (the pre-round-10
+        # shape preserved where physics does not demand a lane).
+        layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
+        layout.shapes.append(_deck_route_shape())
+        setattr(layout, bridges._OBJECT_BRIDGE_ROAD_NETWORKS_ATTRIBUTE,
+                [_draped_road_network_across_deck()])
+        _t, n_causeway, _p = bridges.build_bridge_layout_shapes(
+            layout, _FakeDem(150.0), 36, -87)
+        assert n_causeway == 2
 
 
 class TestLipCoverageGeometry:

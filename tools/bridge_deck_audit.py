@@ -255,6 +255,16 @@ def _frame_point_to_latitude_longitude(bridge, frame_x, frame_z):
     )
 
 
+# Under-girder trim (m) for the corridor-clearance sample line: the
+# corridor's clearance-relevant extent is strictly BETWEEN the abutment
+# faces — the sample line's endpoints otherwise land exactly on the
+# causeway lips (feature B overlaps the lip 0.6 m inward against node
+# wobble), reading headwall fill at deck-end elevation instead of
+# passage space (round 10: Murfreesboro corridors 'fouled' by their own
+# lip samples at -deck-thickness).
+CORRIDOR_UNDER_GIRDER_TRIM_M = 2.0
+
+
 def _sample_line(sampler, bridge, start_xz, end_xz, count):
     """Mesh elevations sampled at ``count`` equally spaced points along a
     frame-space segment; ``None`` entries where the point fell off the
@@ -385,10 +395,57 @@ def main() -> int:
             label = "start" if end_index == 0 else "far"
             line = f"  abutment {label}: terrain {_format_summary(summary)}"
             if summary is not None and expected is not None:
-                error = summary[1] - expected
-                line += f"   vs deck-end {expected:.2f} -> {error:+.2f} m"
-                if abs(error) > args.tolerance:
+                # Round 10, road-exit lanes: a road leaving the span
+                # THROUGH this abutment end runs at corridor level in
+                # its lane (the author-mesh through-corridor), so
+                # samples at or below the girder underside are lane
+                # ground, not causeway error.  Judge the deck-end match
+                # on the remaining (fill) samples.
+                girder_line = None
+                if (deck_absolute is not None
+                        and bridge.clearance_underside_y_m is not None):
+                    girder_line = (deck_absolute - bridge.deck_top_y_m
+                                   + bridge.clearance_underside_y_m)
+                # Sample classes across an abutment with a road-exit
+                # lane (round 10, the author-mesh through-corridor):
+                #   lane — at/below the girder underside: corridor
+                #          ground where the road leaves the span;
+                #   wall — between girder and deck-end: the 45-56
+                #          degree side wall between lane and fill;
+                #   fill — at deck-end (the causeway), judged strictly.
+                # ANY sample above deck-end + tolerance is unfinished
+                # ground and fails regardless of class.
+                fill_values = []
+                lane_count = 0
+                wall_count = 0
+                too_high = 0
+                for value in samples:
+                    if value > expected + args.tolerance:
+                        too_high += 1
+                    elif value >= expected - args.tolerance:
+                        fill_values.append(value)
+                    elif (girder_line is not None
+                          and value <= girder_line + 0.25):
+                        lane_count += 1
+                    else:
+                        wall_count += 1
+                if lane_count or wall_count:
+                    line += (f"   ({lane_count} road-lane, {wall_count} "
+                             "wall-face sample(s) excluded)")
+                if fill_values:
+                    error = (sum(fill_values) / len(fill_values)
+                             - expected)
+                    line += (f"   vs deck-end {expected:.2f} -> "
+                             f"{error:+.2f} m")
+                    if abs(error) > args.tolerance or too_high:
+                        abutment_pass = False
+                else:
+                    line += (f"   vs deck-end {expected:.2f} -> NO fill "
+                             "sample at deck-end")
                     abutment_pass = False
+                if too_high:
+                    line += (f"   ({too_high} sample(s) ABOVE "
+                             "deck-end!)")
             else:
                 abutment_pass = False
             print(line)
@@ -403,8 +460,16 @@ def main() -> int:
         corridor_pass = None
         girder_absolute = None
         if len(axis_midpoints) == 2 and deck_absolute is not None:
+            # Trim to the under-girder extent (see the constant above).
+            (sx, sz), (ex, ez) = axis_midpoints
+            axis_length = ((ex - sx) ** 2 + (ez - sz) ** 2) ** 0.5
+            trim = (CORRIDOR_UNDER_GIRDER_TRIM_M / axis_length
+                    if axis_length > 2 * CORRIDOR_UNDER_GIRDER_TRIM_M
+                    else 0.0)
+            trimmed_start = (sx + (ex - sx) * trim, sz + (ez - sz) * trim)
+            trimmed_end = (ex - (ex - sx) * trim, ez - (ez - sz) * trim)
             corridor_samples = _sample_line(
-                sampler, bridge, axis_midpoints[0], axis_midpoints[1],
+                sampler, bridge, trimmed_start, trimmed_end,
                 max(args.samples_per_line, 11),
             )
             corridor_summary = _summary(corridor_samples)

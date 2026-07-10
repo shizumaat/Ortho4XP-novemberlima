@@ -3672,7 +3672,7 @@ def _emit_object_sourced_bridge_corridors(
             footprint = _bridge_footprint_meters(bridge, to_meters)
         if footprint is None:
             continue
-        keep_out_zones.append(footprint)
+        bridge_zones = [footprint]
         centroid = footprint.centroid
         for line in _abutment_lines_layout_meters(
                 bridge, layout, extension_fraction=0.0):
@@ -3686,11 +3686,36 @@ def _emit_object_sourced_bridge_corridors(
             outward_y /= norm
             (ax, ay), (bx, by) = list(line.coords)[0], list(line.coords)[-1]
             reach = float(_CFG.BRIDGE_CAUSEWAY_MAX_LENGTH_M)
-            keep_out_zones.append(Polygon([
+            bridge_zones.append(Polygon([
                 (ax, ay), (bx, by),
                 (bx + outward_x * reach, by + outward_y * reach),
                 (ax + outward_x * reach, ay + outward_y * reach),
             ]))
+        try:
+            bridge_keep_out = unary_union(bridge_zones)
+        except _GEOM_EXC:
+            keep_out_zones.extend(bridge_zones)
+            continue
+        # Round 10: the road-exit lane stays OPEN — a road leaving the
+        # span through an abutment end descends through the causeway
+        # gap, so its approach rects must be allowed in the lane while
+        # the rest of the box/causeway zones stay excluded.  The trench
+        # is re-excluded afterwards (its plate owns the under-span
+        # ground; approaches begin outside it).
+        exit_corridor = _road_exit_corridor_meters(
+            bridge, layout, to_meters
+        )
+        if exit_corridor is not None:
+            try:
+                bridge_keep_out = bridge_keep_out.difference(
+                    exit_corridor.buffer(0.1)
+                )
+                trench_zone = footprint.buffer(-_TRENCH_INSET_M)
+                if not trench_zone.is_empty:
+                    bridge_keep_out = bridge_keep_out.union(trench_zone)
+            except _GEOM_EXC:
+                pass
+        keep_out_zones.append(bridge_keep_out)
     try:
         approach_keep_out = (
             unary_union(keep_out_zones) if keep_out_zones else None
@@ -3704,6 +3729,14 @@ def _emit_object_sourced_bridge_corridors(
         footprint = _bridge_footprint_meters(bridge, to_meters)
         if footprint is None:
             continue
+        # Round 10: the corridor works on the abutment-to-abutment BOX
+        # (the classified hard-face union can be multi-lobe; approach
+        # walks measured from the LOBE edge left the road-exit lane
+        # unconstrained between the lobe and the box at the J/R start
+        # lip — audit 12: lane samples at raw DEM 171-174).
+        deck_box = _bridge_deck_box_meters(bridge, layout)
+        if deck_box is not None:
+            footprint = deck_box
         covered_polygons.append(footprint)
         deck_elevation = _bridge_deck_elevation_m(
             bridge, dem, tile_lat, tile_lon
@@ -3984,6 +4017,38 @@ _CAUSEWAY_INWARD_OVERLAP_M = 0.6
 # so the audit's line-END samples (t = 0 and t = 1, exactly at the deck
 # corners) stay inside the plate under coordinate wobble.
 _CAUSEWAY_WIDTH_MARGIN_M = 1.0
+
+# Road-exit cut half-width (m) through a causeway plate (round 10): a
+# road that leaves the span THROUGH an abutment end (KBNA: Donelson
+# Pike runs along the deck axis, measured segments local x -64..+77)
+# must not be dammed by the 167-flat causeway — the author mesh runs
+# the 161 corridor ~144 m THROUGH the span and out both ends, flanked
+# by the fill (A10 / spec section 2.2; corridor 34-38 m wide overall).
+# Each fully-draped carriageway polyline is buffered by this half-width
+# and the union is cut out of the plate; the parallel carriageways at
+# KBNA (7 draped lines) union to the author's full corridor width.
+_ROAD_EXIT_CUT_HALF_WIDTH_M = 11.0
+
+
+def _road_exit_corridor_meters(bridge, layout, to_meters):
+    """The union of the fully-draped road carriageway corridors crossing
+    a bridge's deck footprint, buffered to carriageway width in layout
+    meters — the ground the causeway must YIELD (round 10).  ``None``
+    when no draped road crosses."""
+    road_networks = _object_bridge_road_networks(layout)
+    road_lines = _draped_road_centerlines_meters(
+        bridge, road_networks, to_meters
+    )
+    if not road_lines:
+        return None
+    try:
+        return unary_union([
+            line.buffer(_ROAD_EXIT_CUT_HALF_WIDTH_M,
+                        cap_style=2, join_style=2)
+            for line in road_lines
+        ])
+    except _GEOM_EXC:
+        return None
 
 
 def _bridge_datum_elevation_m(bridge, dem, tile_lat, tile_lon):
@@ -4492,6 +4557,11 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
             bridge, dem, tile_lat, tile_lon
         )
         floor_elevation = _bridge_corridor_floor_m(bridge, deck_elevation)
+        # Round 10: the road-exit corridor — where a draped road leaves
+        # the span through an abutment end, the causeway must yield.
+        road_exit_corridor = _road_exit_corridor_meters(
+            bridge, layout, to_meters
+        )
 
         # Ruling R8 flush seat (hard decks) / pavement wins (cosmetic).
         pavement_kept_union = None
@@ -4608,19 +4678,36 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                     plate = plate.buffer(0)
                 if pavement_union is not None:
                     plate = plate.difference(pavement_union)
-                if plate.geom_type == "MultiPolygon" and not plate.is_empty:
-                    plate = max(plate.geoms, key=lambda g: g.area)
-                if plate.geom_type != "Polygon" or plate.is_empty \
-                        or plate.area < 1.0:
+                # Round 10 road-exit cut: the road corridor passes
+                # THROUGH this end — cut it out of the plate; the
+                # remainders flank the road at the deck-end elevation
+                # (the author-mesh shape: 161 corridor out both ends,
+                # 167 fill on both sides).
+                if road_exit_corridor is not None:
+                    plate = plate.difference(road_exit_corridor)
+                parts = (
+                    list(plate.geoms)
+                    if plate.geom_type == "MultiPolygon" else [plate]
+                )
+                emitted_parts = 0
+                for part in parts:
+                    if (part.geom_type != "Polygon" or part.is_empty
+                            or part.area < 25.0):
+                        continue
+                    _born_flat(part, ROLE_BRIDGE_CAUSEWAY,
+                               "object_bridge_causeway", plate_elevation)
+                    emitted_parts += 1
+                if not emitted_parts:
                     continue
-                _born_flat(plate, ROLE_BRIDGE_CAUSEWAY,
-                           "object_bridge_causeway", plate_elevation)
-                n_causeway += 1
+                n_causeway += emitted_parts
                 UI.vprint(
                     1,
                     "   [object-bridge] causeway born at "
-                    f"{plate_elevation:.2f} m, {plate_length:.1f} m long "
-                    f"(end {end_index}) for {bridge.object_resources}",
+                    f"{plate_elevation:.2f} m, {plate_length:.1f} m long, "
+                    f"{emitted_parts} flank part(s)"
+                    + (" (road-exit cut)" if road_exit_corridor is not None
+                       and emitted_parts > 1 else "")
+                    + f" (end {end_index}) for {bridge.object_resources}",
                 )
             except _GEOM_EXC:
                 continue
