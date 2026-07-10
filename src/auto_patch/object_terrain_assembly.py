@@ -31,6 +31,12 @@ The two artefacts cached on the layout when the gate is on:
 
 The reader/loader APIs consumed here are all already merged and tested
 (W-R1/W-R2/W-R3); this module wires them together and adds no new parsing.
+
+ACCEPTANCE-LOOP RULE (round 6, measured the hard way): iteration builds
+must run with ``O4_DSF_OBJECT_REANCHOR=0``.  The Phase 2 y-bake mutates
+pack OBJ8 files; across repeated builds an unexcluded sibling part
+(KBNA Taxiway-L p3) drifted until it qualified into the classifier pool
+and moved the deck box.  The bake belongs after a FINAL mesh only.
 """
 
 from __future__ import annotations
@@ -61,6 +67,55 @@ ROUTE_LINES_ATTRIBUTE = "_object_bridge_route_lines"
 # tunnel/bridge object is placed a handful of times (EGLL: one placement
 # per tunnel; KBNA taxiway-L: six part objects).
 MAXIMUM_PLACEMENTS_PER_RESOURCE = 50
+
+# Ruling R4 exclusion breadth (round 6): every resource placed at the
+# SAME ANCHOR as a consumed structure belongs to that structure's part
+# family and must be excluded from the Phase 2 y-bake — the classifier's
+# ``object_resources`` lists only the parts that carried usable deck
+# geometry (KBNA taxiway-L pools p1/p4/p5/p6; p2/p3 have no qualifying
+# faces yet sit on the SAME anchor and got re-baked build after build
+# until their drifted geometry qualified into the pool and moved the
+# deck box).  MEASURED at KBNA: all six Taxiway-L parts (and every
+# Crossing / Murfreesboro part set) share ONE anchor to the millimetre
+# (max intra-family spread 0.00 m), while the nearest FOREIGN placement
+# (GPU_1.obj) sits 1.5 m from a bridge anchor — 0.5 m separates the
+# families from neighbours with a 3x margin both ways (the 2 m
+# structure-grouping epsilon would wrongly swallow the GPU).
+ANCHOR_FAMILY_RADIUS_M = 0.5
+
+
+def _expand_exclusions_to_anchor_families(result, placements, pack_root):
+    """Append to ``result.exclusions`` every resource with a placement
+    anchored within :data:`ANCHOR_FAMILY_RADIUS_M` of a consumed
+    structure's placements (the whole part family: p1..p6, shell+deck
+    pairs).  Returns the sorted list of newly excluded resource paths."""
+    consumed = {resource for _root, resource in result.exclusions}
+    if not consumed:
+        return []
+    family_anchors = [
+        (placement.longitude, placement.latitude)
+        for placement in placements
+        if placement.resource_path in consumed
+    ]
+    if not family_anchors:
+        return []
+    added = set()
+    for placement in placements:
+        if placement.resource_path in consumed:
+            continue
+        cosine = math.cos(math.radians(placement.latitude))
+        for anchor_longitude, anchor_latitude in family_anchors:
+            distance = math.hypot(
+                (placement.latitude - anchor_latitude) * 111320.0,
+                (placement.longitude - anchor_longitude)
+                * 111320.0 * cosine,
+            )
+            if distance <= ANCHOR_FAMILY_RADIUS_M:
+                added.add(placement.resource_path)
+                break
+    for resource_path in sorted(added):
+        result.exclusions.append((pack_root, resource_path))
+    return sorted(added)
 
 
 def _tile_dsf_path(earth_nav_data_dir: str, tile_lat: int, tile_lon: int) -> str:
@@ -266,6 +321,20 @@ def attach_bridge_classification(layout, xplane_root: str):
         pack_root=pack_root or "",
     )
 
+    # Ruling R4 breadth: pull the whole anchor family of every consumed
+    # structure onto the exclusion list (sibling parts the classifier's
+    # records do not carry — see ANCHOR_FAMILY_RADIUS_M).
+    family_added = _expand_exclusions_to_anchor_families(
+        result, terrain_placements, pack_root or ""
+    )
+    if family_added:
+        UI.vprint(
+            1,
+            f"   [object-bridge] R4 exclusions widened to {len(family_added)} "
+            f"anchor-family sibling resource(s): "
+            f"{[r.split('/')[-1] for r in family_added]}",
+        )
+
     setattr(layout, CLASSIFICATION_ATTRIBUTE, result)
 
     tile_lat = int(math.floor(anchor_latitude))
@@ -397,6 +466,9 @@ def exclusion_set_for_dsf(
         pavement_polygons_longitude_latitude=None,
         mean_sea_level_placements=mean_sea_level_placements,
         pack_root=pack_root or "",
+    )
+    _expand_exclusions_to_anchor_families(
+        result, terrain_placements, pack_root or ""
     )
     return set(result.exclusions)
 

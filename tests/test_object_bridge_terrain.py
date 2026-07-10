@@ -1462,3 +1462,55 @@ class TestLipCoverageGeometry:
             gap = trench.polygon.distance(plate.polygon)
             assert gap > SHARED_VERTEX_TOL_M + 0.05, \
                 f"wall gap {gap:.2f} m would weld shut"
+
+
+# ---------------------------------------------------------------------------
+# ruling R4 breadth (round 6) — anchor-family sibling exclusion
+# ---------------------------------------------------------------------------
+
+class TestAnchorFamilyExclusions:
+    def _placement(self, resource, longitude, latitude):
+        from auto_patch.obj8_reader import ObjectPlacement
+        return ObjectPlacement(
+            definition_index=0, resource_path=resource,
+            longitude=longitude, latitude=latitude, heading_degrees=0.0,
+        )
+
+    def test_same_anchor_siblings_join_the_exclusion_list(self):
+        # The KBNA round-6 defect, synthesized: the classifier consumed
+        # p1/p4/p5/p6; p2/p3 sit on the SAME anchor with no qualifying
+        # faces and were re-baked build after build until their drifted
+        # geometry moved the deck box.  A GPU cart 1.5 m away (the
+        # MEASURED nearest foreign placement) must stay bakeable.
+        class _Result:
+            exclusions = [("PACK", f"Objects/B/p{i}.obj")
+                          for i in (1, 4, 5, 6)]
+        anchor_lon, anchor_lat = ANCHOR_LONGITUDE, ANCHOR_LATITUDE
+        placements = [
+            self._placement(f"Objects/B/p{i}.obj", anchor_lon, anchor_lat)
+            for i in (1, 2, 3, 4, 5, 6)
+        ]
+        foreign_lon = anchor_lon + 1.5 / (
+            111320.0 * __import__("math").cos(
+                __import__("math").radians(anchor_lat))
+        )
+        placements.append(
+            self._placement("Objects/Misc/GPU_1.obj", foreign_lon,
+                            anchor_lat)
+        )
+        result = _Result()
+        added = assembly._expand_exclusions_to_anchor_families(
+            result, placements, "PACK")
+        assert added == ["Objects/B/p2.obj", "Objects/B/p3.obj"]
+        excluded = {r for _p, r in result.exclusions}
+        assert {f"Objects/B/p{i}.obj" for i in (1, 2, 3, 4, 5, 6)} \
+            <= excluded
+        assert "Objects/Misc/GPU_1.obj" not in excluded
+
+    def test_no_consumed_structures_is_a_no_op(self):
+        class _Result:
+            exclusions = []
+        placements = [self._placement("Objects/B/p1.obj",
+                                      ANCHOR_LONGITUDE, ANCHOR_LATITUDE)]
+        assert assembly._expand_exclusions_to_anchor_families(
+            _Result(), placements, "PACK") == []
