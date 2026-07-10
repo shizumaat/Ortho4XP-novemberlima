@@ -150,6 +150,9 @@ __all__ = [
     "BRIDGE_ROAD_CLEARANCE_M",
     "BRIDGE_ROAD_CLEARANCE_MINIMUM_M",
     "BRIDGE_CORRIDOR_DEPRESSED_LENGTH_M",
+    "BRIDGE_ABUTMENT_PIN_CAPTURE_BAND_M",
+    "BRIDGE_CAUSEWAY_MAX_LENGTH_M",
+    "BRIDGE_ROAD_CARRIED_PAVEMENT_PROXIMITY_M",
     "PRECISION_APPROACH_LIGHT_CODES",
     "PRECISION_MARKINGS_CODES",
     "NON_PRECISION_MARKINGS_CODES",
@@ -1901,6 +1904,38 @@ BRIDGE_ROAD_CLEARANCE_MINIMUM_M = 4.2
 # KBNA calibration site (amendment A10 point iv; also the open-question-4
 # datum for the corridor-versus-adjacent-ground handoff).
 BRIDGE_CORRIDOR_DEPRESSED_LENGTH_M = 240.0
+
+# Deck-end pin capture band (m): pavement ring vertices within this
+# distance of a bridge abutment line are hard-pinned at the deck-end
+# elevation.  MEASURED (KBNA 2026-07-09, DSF draped pavement versus the
+# classified abutment lines): the pack cuts pavement 9.62-9.69 m short
+# of the taxiway-L abutments at both ends, so the original 0.25 m
+# on-line tolerance captured NOTHING (the stage-2b silent-zero defect).
+# 12 m covers the measured cut with margin; amendment A10 makes the
+# pinned value exact anywhere in the band — the causeway is FLAT at
+# deck-end elevation to the abutment lip, so a vertex 10 m behind the
+# lip belongs at the lip's own elevation.
+BRIDGE_ABUTMENT_PIN_CAPTURE_BAND_M = 12.0
+
+# Longest flat causeway plate (m) emitted from an abutment line back
+# along the approach axis when NO pavement ring lies within the pin
+# capture band (the Murfreesboro class: MEASURED pavement gaps 36.7 /
+# 45.1 / 57.6 / 60.9 m at the four ends of the two bridges).  65 m
+# covers every measured gap; the plate is clipped at the first pavement
+# edge it meets (weld, ruling R2).
+BRIDGE_CAUSEWAY_MAX_LENGTH_M = 65.0
+
+# Audit-tool proxy for the road-carried-overpass discriminator (the
+# audit has no layout to read taxi/truck routes from): a bridge with no
+# draped-pavement polygon within this distance of its deck footprint
+# carries a ROAD on its deck, not a taxi/truck route.  MEASURED
+# separation (KBNA 2026-07-09): the largest pavement gap at a TRUE
+# taxi/truck bridge is 60.9 m (Murfreesboro Oeste; taxiway-L 9.6-9.7 m),
+# while the road overpass (Crossing_Bridge) sits 176.2 m from any
+# pavement — 100 m splits the families with ~40 % margin both ways.
+# The in-pipeline discriminator reads layout taxi/truck shapes instead
+# and does not use this constant.
+BRIDGE_ROAD_CARRIED_PAVEMENT_PROXIMITY_M = 100.0
 
 # Safety cap (m) on how far a clearance band reaches outward from the
 # pavement edge, bounding earthwork.  Must be >= the largest band we

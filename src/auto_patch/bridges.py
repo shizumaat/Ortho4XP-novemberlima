@@ -3354,32 +3354,94 @@ def _bridge_girder_underside_m(bridge, deck_elevation_m):
     )
 
 
-def _partition_bridges_for_corridors(classification):
+def _bridge_is_road_carried(bridge, layout, to_meters):
+    """Road-overpass discriminator (stage 2b; KBNA Crossing_Bridge class):
+    a deck-carried structure whose deck carries a ROAD, not a taxi/truck
+    route — NO layout pavement or service shape crosses its deck
+    footprint (measured: the nearest pavement to Crossing_Bridge is
+    176 m away; every true taxi/truck bridge has pavement or a truck
+    strip on the deck axis).  Terrain must NOT rise to a road deck: no
+    abutment pins, no causeway, no object-sourced corridor — the
+    existing road machinery owns the road beneath.  ``False`` when no
+    layout is available (pure-classifier contexts cannot discriminate)."""
+    if layout is None or to_meters is None:
+        return False
+    from .layout import ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION
+    crossing_roles = _BRIDGE_PIN_ROLES | {
+        ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION,
+    }
+    footprint = _bridge_footprint_meters(bridge, to_meters)
+    if footprint is None:
+        return False
+    # Route evidence = a shape crossing the deck footprint OR ending
+    # within the pin capture band of the footprint (the KBNA cut: the
+    # pack severs pavement 9.6 m short of the abutments, so the taxi
+    # route "reaches" the deck without geometrically crossing it —
+    # crossing-only would misread taxiway-L as a road overpass).
+    reach_band = footprint.buffer(
+        float(_CFG.BRIDGE_ABUTMENT_PIN_CAPTURE_BAND_M)
+    )
+    for shape in layout.shapes:
+        if shape.role not in crossing_roles:
+            continue
+        if shape.polygon is None or shape.polygon.is_empty:
+            continue
+        try:
+            if shape.polygon.intersects(reach_band):
+                return False
+        except _GEOM_EXC:
+            continue
+    return True
+
+
+def _partition_bridges_for_corridors(classification, layout=None):
     """Split the classifier's bridge records into the corridor set, the
-    suppression set and the refused (ambiguous) set (spec section 3.2).
+    suppression set, the refused (ambiguous) set and — with a layout to
+    read routes from — the road-carried overpass set (spec section 3.2,
+    stage 2b).
 
     * corridor — DECK_CARRIED spans, plus every cosmetic (``hard_deck``-less
       Murfreesboro-class) deck regardless of its coverage contract: trucks
       ride the terrain there so the causeway-plus-corridor is mandatory.
     * suppress — TERRAIN_CARRIED / PROFILE_CARRIED spans (pavement drapes
       across and is already solved continuous; a corridor would break it).
-    * refused — AMBIGUOUS spans (ruling R5: reported, never guessed)."""
+    * refused — AMBIGUOUS spans (ruling R5: reported, never guessed).
+    * road_carried — corridor-shaped spans with NO taxi/truck route
+      crossing the deck footprint (``_bridge_is_road_carried``): a road
+      overpass; excluded from pins, causeway and the object-sourced
+      corridor, logged, left to the existing road machinery."""
     from .object_terrain_features import (
         DECK_CARRIED, TERRAIN_CARRIED, PROFILE_CARRIED, AMBIGUOUS,
         DECK_HARDNESS_COSMETIC,
     )
+    to_meters = None
+    if layout is not None:
+        to_meters, _meters_to_lat_lon = (
+            _local_meter_projections(layout.anchor)
+        )
     corridor: list = []
     suppress: list = []
     refused: list = []
+    road_carried: list = []
     for bridge in classification.bridges:
         is_cosmetic = bridge.deck_hardness == DECK_HARDNESS_COSMETIC
         if is_cosmetic or bridge.contract == DECK_CARRIED:
-            corridor.append(bridge)
+            if _bridge_is_road_carried(bridge, layout, to_meters):
+                road_carried.append(bridge)
+                UI.vprint(
+                    1,
+                    "   [object-bridge] road-carried overpass (no "
+                    "taxi/truck route on the deck): "
+                    f"{bridge.object_resources} — no pins, no causeway, "
+                    "road machinery owns the corridor",
+                )
+            else:
+                corridor.append(bridge)
         elif bridge.contract in (TERRAIN_CARRIED, PROFILE_CARRIED):
             suppress.append(bridge)
         elif bridge.contract == AMBIGUOUS:
             refused.append(bridge)
-    return corridor, suppress, refused
+    return corridor, suppress, refused, road_carried
 
 
 def _bridge_footprint_meters(bridge, to_meters):
@@ -3474,8 +3536,8 @@ def _emit_object_sourced_bridge_corridors(
     the author-mesh measurement) per side — the caller's
     ``approach_length_m`` acts only as a wider override."""
     to_meters, meters_to_lat_lon = _local_meter_projections(layout.anchor)
-    corridor_bridges, suppress_bridges, refused_bridges = (
-        _partition_bridges_for_corridors(classification)
+    corridor_bridges, suppress_bridges, refused_bridges, _road_carried = (
+        _partition_bridges_for_corridors(classification, layout)
     )
     suppression_polygons: list[Polygon] = []
     covered_polygons: list[Polygon] = []
@@ -3547,11 +3609,31 @@ def _emit_object_sourced_bridge_corridors(
             road_source = "openstreetmap"
         if not road_lines:
             UI.vprint(
-                2,
+                1,
                 "   [object-bridge] no draped road under "
                 f"{bridge.object_resources} — corridor skipped",
             )
             continue
+
+        # Under-deck trench plate: the FULL deck footprint at the floor
+        # (the author-mesh treatment — the whole under-deck box is cut,
+        # stage 2b; the previous road-width-only plate left the rest of
+        # the box interpolating from the graded field).  Inset by 0.6 m
+        # (> SHARED_VERTEX_TOL_M) so its rim nodes can NEVER weld into
+        # the causeway-lip nodes at the abutment line — the deliberate
+        # node-split vertical wall of ruling R2.
+        try:
+            trench = footprint.buffer(-0.6)
+            if trench.geom_type == "MultiPolygon" and not trench.is_empty:
+                trench = max(trench.geoms, key=lambda g: g.area)
+            if trench.geom_type == "Polygon" and not trench.is_empty:
+                layout.shapes.append(BuiltShape(
+                    polygon=trench,
+                    role=ROLE_TUNNEL_RAMP,
+                    ref="object_bridge_corridor",
+                    altitude=round(floor_elevation, 1)))
+        except _GEOM_EXC:
+            pass
 
         # A10 point (iv): the depressed road runs >= 240 m per side
         # before rejoining grade; a caller may only widen that.
@@ -3559,19 +3641,18 @@ def _emit_object_sourced_bridge_corridors(
             float(approach_length_m),
             float(_CFG.BRIDGE_CORRIDOR_DEPRESSED_LENGTH_M),
         )
-        emitted_here = _emit_corridor_for_footprint(
+        _emit_corridor_for_footprint(
             layout, dem, tile_lat, tile_lon, meters_to_lat_lon,
             footprint, floor_elevation, road_lines,
             road_width_m, ramp_step_m, depressed_length_m,
         )
-        if emitted_here:
-            n_emitted += 1
-            UI.vprint(
-                2,
-                "   [object-bridge] corridor floor "
-                f"{floor_elevation:.1f} m under {bridge.object_resources} "
-                f"(deck {deck_elevation:.1f} m, road source {road_source})",
-            )
+        n_emitted += 1
+        UI.vprint(
+            1,
+            "   [object-bridge] corridor floor "
+            f"{floor_elevation:.1f} m under {bridge.object_resources} "
+            f"(deck {deck_elevation:.1f} m, road source {road_source})",
+        )
     return n_emitted, suppression_polygons, covered_polygons
 
 
@@ -3617,9 +3698,10 @@ def _emit_corridor_for_footprint(
         layout, dem, tile_lat, tile_lon, meters_to_lat_lon,
         footprint, floor_elevation, road_lines,
         road_width_m, ramp_step_m, approach_length_m):
-    """Emit the flat under-deck plate at ``floor_elevation`` plus stepped
-    approach ramps from the floor up to the DEM for each road crossing a
-    bridge footprint.  Returns True when at least one polygon was emitted.
+    """Emit stepped approach ramps from ``floor_elevation`` up to the DEM
+    for each road crossing a bridge footprint (the under-deck trench
+    plate itself is emitted by the caller as the FULL footprint, stage
+    2b).  Returns True when at least one polygon was emitted.
 
     Mirrors the legacy underpass emitter's per-step ramp shape (a sloped
     ``ROLE_TUNNEL_RAMP`` rect per ``ramp_step_m`` interpolating floor→DEM),
@@ -3629,35 +3711,6 @@ def _emit_corridor_for_footprint(
     emitted = False
     half_width = road_width_m / 2.0
     for road_line in road_lines:
-        try:
-            inside = road_line.intersection(footprint)
-        except _GEOM_EXC:
-            continue
-        if not inside.is_empty:
-            inside_line = None
-            if hasattr(inside, "geoms"):
-                candidates = [
-                    g for g in inside.geoms
-                    if g.geom_type == "LineString" and g.length > 1.0
-                ]
-                if candidates:
-                    inside_line = max(candidates, key=lambda g: g.length)
-            elif inside.geom_type == "LineString":
-                inside_line = inside
-            if inside_line is not None:
-                try:
-                    plate = inside_line.buffer(
-                        half_width, cap_style=2, join_style=2
-                    )
-                    if plate.geom_type == "Polygon" and not plate.is_empty:
-                        layout.shapes.append(BuiltShape(
-                            polygon=plate,
-                            role=ROLE_TUNNEL_RAMP,
-                            ref="object_bridge_corridor",
-                            altitude=round(floor_elevation, 1)))
-                        emitted = True
-                except _GEOM_EXC:
-                    pass
         try:
             outside = road_line.difference(footprint)
         except _GEOM_EXC:
@@ -3789,11 +3842,14 @@ def _bridge_datum_elevation_m(bridge, dem, tile_lat, tile_lon):
     return float(deck_elevation) - float(bridge.deck_top_y_m)
 
 
-def _abutment_lines_layout_meters(bridge, layout):
+def _abutment_lines_layout_meters(
+        bridge, layout,
+        extension_fraction=_ABUTMENT_LINE_EXTENSION_FRACTION):
     """The bridge's two abutment lines as layout-meter LineStrings,
-    ordered [start end, far end] and extended by
-    :data:`_ABUTMENT_LINE_EXTENSION_FRACTION` per side.  Empty list on
-    degenerate geometry."""
+    ordered [start end, far end] and extended by ``extension_fraction``
+    per side (default :data:`_ABUTMENT_LINE_EXTENSION_FRACTION`; the
+    causeway emitter passes 0.0 — its plate must be deck-width, not
+    band-width).  Empty list on degenerate geometry."""
     from . import obj8_reader
     origin_longitude, origin_latitude = (
         bridge.frame_origin_longitude_latitude
@@ -3810,10 +3866,9 @@ def _abutment_lines_layout_meters(bridge, layout):
         length = math.hypot(bx - ax, by - ay)
         if length < 1.0:
             continue
-        extension = _ABUTMENT_LINE_EXTENSION_FRACTION
         ux = (bx - ax) / length
         uy = (by - ay) / length
-        reach = length * extension
+        reach = length * extension_fraction
         lines.append(LineString([
             (ax - ux * reach, ay - uy * reach),
             (bx + ux * reach, by + uy * reach),
@@ -3835,14 +3890,25 @@ def _record_pin(layout, x, y, value):
     pin_values[vertex_bucket(float(x), float(y))] = float(value)
 
 
-def _pin_shape_vertices_on_line(layout, shape_index, line, pin_value):
+def _pin_shape_vertices_on_line(layout, shape_index, line, pin_value,
+                                capture_band_m=None):
     """Insert ring vertices where the shape crosses ``line`` (seam-anchor
     idiom, reusing ``seam_anchors._insert_seam_vertices``), then hard-pin
-    every ring vertex lying on the line at ``pin_value`` — both into the
-    shape's ``node_altitudes`` (the solver's fallback and downstream
-    readers) and into the solver pin registry.  Returns the number of
-    vertices pinned."""
+    every ring vertex within ``capture_band_m`` of the line at
+    ``pin_value`` — both into the shape's ``node_altitudes`` (the
+    solver's fallback and downstream readers) and into the solver pin
+    registry.  Returns the number of vertices pinned.
+
+    ``capture_band_m`` defaults to the tight on-line tolerance
+    (:data:`_BRIDGE_PIN_ON_LINE_TOLERANCE_M`, PROFILE_CARRIED span-end
+    pins on continuous pavement); DECK_CARRIED callers pass
+    ``config.BRIDGE_ABUTMENT_PIN_CAPTURE_BAND_M`` — the pack cuts
+    pavement up to ~10 m short of the abutment (measured, KBNA), and
+    amendment A10's flat causeway makes the deck-end value exact
+    anywhere in that band."""
     from .seam_anchors import _insert_seam_vertices
+    if capture_band_m is None:
+        capture_band_m = _BRIDGE_PIN_ON_LINE_TOLERANCE_M
     shape = layout.shapes[shape_index]
     inserted_keys: set = set()
     try:
@@ -3865,7 +3931,7 @@ def _pin_shape_vertices_on_line(layout, shape_index, line, pin_value):
     changed = False
     for vertex_index, (x, y) in enumerate(ring):
         try:
-            if line.distance(Point(x, y)) > _BRIDGE_PIN_ON_LINE_TOLERANCE_M:
+            if line.distance(Point(x, y)) > capture_band_m:
                 continue
         except _GEOM_EXC:
             continue
@@ -3895,15 +3961,20 @@ def insert_bridge_deck_end_pins(layout, dem, tile_lat, tile_lon) -> int:
     if classification is None:
         return 0
     from .grade_law import bridge_deck_end_pin_elevation_m
-    corridor_bridges, _suppress, _refused = (
-        _partition_bridges_for_corridors(classification)
+    corridor_bridges, _suppress, _refused, _road_carried = (
+        _partition_bridges_for_corridors(classification, layout)
     )
+    capture_band = float(_CFG.BRIDGE_ABUTMENT_PIN_CAPTURE_BAND_M)
     total_pinned = 0
     for bridge in corridor_bridges:
         datum = _bridge_datum_elevation_m(bridge, dem, tile_lat, tile_lon)
         if datum is None:
+            # Verbosity 1 ALWAYS: a silent skip here is the project's
+            # classic silent-zero failure (stage 2b diagnosis — the
+            # first gated KBNA build produced zero pins with every
+            # diagnostic below the log's verbosity).
             UI.vprint(
-                2,
+                1,
                 "   [object-bridge] no datum for deck-end pins of "
                 f"{bridge.object_resources} — skipped",
             )
@@ -3924,28 +3995,33 @@ def insert_bridge_deck_end_pins(layout, dem, tile_lat, tile_lon) -> int:
                     continue
                 try:
                     near = shape.polygon.exterior.distance(line) \
-                        <= _BRIDGE_PIN_ON_LINE_TOLERANCE_M \
+                        <= capture_band \
                         or shape.polygon.exterior.intersects(line)
                 except _GEOM_EXC:
                     continue
                 if not near:
                     continue
                 pinned_here += _pin_shape_vertices_on_line(
-                    layout, shape_index, line, pin_value
+                    layout, shape_index, line, pin_value,
+                    capture_band_m=capture_band,
                 )
+            # Verbosity 1 in BOTH branches (silent-zero rule): the
+            # zero-pin end is precisely the signal that the causeway
+            # plate must carry the coupling.
             if pinned_here:
                 UI.vprint(
-                    2,
+                    1,
                     f"   [object-bridge] {pinned_here} deck-end pin(s) at "
                     f"{pin_value:.2f} m (end {end_index}) for "
                     f"{bridge.object_resources}",
                 )
             else:
                 UI.vprint(
-                    2,
-                    "   [object-bridge] no pavement ring reaches abutment "
-                    f"end {end_index} of {bridge.object_resources} — the "
-                    "analytic approach carries the pin value "
+                    1,
+                    "   [object-bridge] ZERO deck-end pins at end "
+                    f"{end_index} of {bridge.object_resources} (no "
+                    f"pavement ring within {capture_band:.0f} m) — the "
+                    "causeway plate carries the pin value "
                     f"({pin_value:.2f} m)",
                 )
             total_pinned += pinned_here
@@ -4068,6 +4144,143 @@ def insert_bridge_profile_pins(layout, dem, tile_lat, tile_lon) -> int:
             )
         total_pinned += pinned_interior
     return total_pinned
+
+
+def emit_bridge_causeway_plates(layout, dem, tile_lat, tile_lon) -> int:
+    """Stage 2b: flat causeway plates behind DECK_CARRIED (and cosmetic)
+    bridge abutments — the terrain between the abutment lip and the
+    pavement the pack cut short of it (measured KBNA gaps: 9.6-9.7 m at
+    taxiway-L, 36.7-60.9 m at the Murfreesboro pair).
+
+    Amendment A10 point (iv): the causeway is FLAT at the deck-end
+    elevation (``grade_law.bridge_deck_end_pin_elevation_m`` — the SAME
+    law function as the pins and the validator, lockstep) all the way to
+    the abutment lip; no taxiway-side ramp.  The plate spans the deck
+    width, runs back along the outward approach axis to the first
+    pavement edge (+2 m weld overlap, then clipped BY the pavement union
+    — ruling R2, pavement wins at contact) and is capped at
+    ``config.BRIDGE_CAUSEWAY_MAX_LENGTH_M``.  Its lip edge sits ON the
+    abutment line while the under-deck trench plate is inset 0.6 m
+    (> the 0.5 m weld tolerance) — the coincident-but-unmergeable node
+    rows that make the near-vertical across-road wall (R2 node-split).
+
+    LATE emission (pipeline tail, with the runway-end skirts, after
+    final projection and decimation): the values are law constants, and
+    arriving after decimation mints no T-vertices — the skirt precedent
+    (docs/runway_end_skirt_plan.md).  Gate off ⇒ no classification ⇒
+    returns 0 having touched nothing."""
+    classification = _object_bridge_classification(layout)
+    if classification is None:
+        return 0
+    from .grade_law import bridge_deck_end_pin_elevation_m
+    from .layout import ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION
+    corridor_bridges, _suppress, _refused, _road_carried = (
+        _partition_bridges_for_corridors(classification, layout)
+    )
+    if not corridor_bridges:
+        return 0
+    to_meters, _meters_to_lat_lon = _local_meter_projections(layout.anchor)
+    weld_roles = _BRIDGE_PIN_ROLES | {
+        ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION,
+    }
+    pavement_polygons = [
+        shape.polygon for shape in layout.shapes
+        if shape.role in weld_roles
+        and shape.polygon is not None and not shape.polygon.is_empty
+    ]
+    try:
+        pavement_union = (
+            unary_union(pavement_polygons) if pavement_polygons else None
+        )
+    except _GEOM_EXC:
+        pavement_union = None
+    maximum_length = float(_CFG.BRIDGE_CAUSEWAY_MAX_LENGTH_M)
+    n_emitted = 0
+    for bridge in corridor_bridges:
+        datum = _bridge_datum_elevation_m(bridge, dem, tile_lat, tile_lon)
+        if datum is None:
+            UI.vprint(
+                1,
+                "   [object-bridge] no datum for causeway plates of "
+                f"{bridge.object_resources} — skipped",
+            )
+            continue
+        footprint = _bridge_footprint_meters(bridge, to_meters)
+        if footprint is None:
+            continue
+        centroid = footprint.centroid
+        abutment_lines = _abutment_lines_layout_meters(
+            bridge, layout, extension_fraction=0.0
+        )
+        for end_index, line in enumerate(abutment_lines):
+            end_y = (
+                bridge.deck_end_elevations_y_m[end_index]
+                if end_index < len(bridge.deck_end_elevations_y_m)
+                else bridge.deck_top_y_m
+            )
+            plate_elevation = bridge_deck_end_pin_elevation_m(datum, end_y)
+            midpoint = line.interpolate(0.5, normalized=True)
+            outward_x = midpoint.x - centroid.x
+            outward_y = midpoint.y - centroid.y
+            outward_norm = math.hypot(outward_x, outward_y)
+            if outward_norm < 1.0:
+                continue
+            outward_x /= outward_norm
+            outward_y /= outward_norm
+            # Plate length: to the first pavement edge ON THE OUTWARD
+            # side (+2 m weld overlap, clipped back below), capped —
+            # measured against pavement inside the full-length outward
+            # rectangle only, so a truck strip ON the deck (the
+            # Murfreesboro fixture) can never shorten the causeway.
+            (ax, ay), (bx, by) = list(line.coords)[0], list(line.coords)[-1]
+
+            def _outward_rectangle(length_m):
+                return Polygon([
+                    (ax, ay),
+                    (bx, by),
+                    (bx + outward_x * length_m, by + outward_y * length_m),
+                    (ax + outward_x * length_m, ay + outward_y * length_m),
+                ])
+
+            plate_length = maximum_length
+            if pavement_union is not None:
+                try:
+                    outward_pavement = pavement_union.intersection(
+                        _outward_rectangle(maximum_length)
+                    )
+                    if not outward_pavement.is_empty:
+                        gap = line.distance(outward_pavement)
+                        plate_length = min(gap + 2.0, maximum_length)
+                except _GEOM_EXC:
+                    pass
+            if plate_length < 1.0:
+                plate_length = 2.0
+            try:
+                plate = _outward_rectangle(plate_length)
+                if not plate.is_valid:
+                    plate = plate.buffer(0)
+                if pavement_union is not None:
+                    plate = plate.difference(pavement_union)
+                if plate.geom_type == "MultiPolygon" and not plate.is_empty:
+                    plate = max(plate.geoms, key=lambda g: g.area)
+                if plate.geom_type != "Polygon" or plate.is_empty \
+                        or plate.area < 1.0:
+                    continue
+                layout.shapes.append(BuiltShape(
+                    polygon=plate,
+                    role=ROLE_TUNNEL_RAMP,
+                    ref="object_bridge_causeway",
+                    altitude=round(float(plate_elevation), 2)))
+                n_emitted += 1
+                UI.vprint(
+                    1,
+                    "   [object-bridge] causeway plate at "
+                    f"{plate_elevation:.2f} m, {plate_length:.1f} m long "
+                    f"(end {end_index}) for {bridge.object_resources}",
+                )
+            except _GEOM_EXC:
+                continue
+    return n_emitted
 
 
 def _bridge_crossing_floor_for_bridge(

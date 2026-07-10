@@ -132,12 +132,28 @@ def deconflict_road_features(layout, icao: str = "") -> None:
             _run_u = None
         _n_drop = 0
         _n_clip = 0
-        for s in layout.shapes:
-            if (s.role not in (_R_TR, _R_RW)
-                    or s.polygon is None
-                    or s.polygon.is_empty
-                    or s.polygon.area <= 0):
-                continue
+        # Object-derived bridge features (feature B, gate
+        # O4_OBJECT_BRIDGE_TERRAIN) walk FIRST: the classifier's corridor
+        # plates/approaches are measured object geometry, senior to the
+        # OSM-inference emitters (portals / implied bores / connectors)
+        # that fire around the same roads — earlier-wins then keeps the
+        # object values and drops the inference overlaps (stage 2b: the
+        # taxiway-L 161.0 m plate was 85 %-covered by earlier portal
+        # pieces and silently dropped).  With the gate off no
+        # ``object_bridge*`` refs exist and the order — and behaviour —
+        # is byte-identical.
+        _road_features = [
+            s for s in layout.shapes
+            if s.role in (_R_TR, _R_RW)
+            and s.polygon is not None
+            and not s.polygon.is_empty
+            and s.polygon.area > 0]
+        _object_first = (
+            [s for s in _road_features
+             if (s.ref or "").startswith("object_bridge")]
+            + [s for s in _road_features
+               if not (s.ref or "").startswith("object_bridge")])
+        for s in _object_first:
             try:
                 if _run_u is not None \
                         and s.polygon.intersects(_run_u):

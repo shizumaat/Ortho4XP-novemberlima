@@ -254,7 +254,7 @@ class TestDeckElevation:
 
 class TestContractPartition:
     def test_deck_carried_is_a_corridor(self):
-        corridor, suppress, refused = bridges._partition_bridges_for_corridors(
+        corridor, suppress, refused, _road_carried = bridges._partition_bridges_for_corridors(
             _Classification([_bridge(contract=DECK_CARRIED)])
         )
         assert len(corridor) == 1 and not suppress and not refused
@@ -266,13 +266,13 @@ class TestContractPartition:
             _bridge(contract=PROFILE_CARRIED, deck_hardness=DECK_HARDNESS_HARD,
                     hard_deck=False),
         ])
-        corridor, suppress, refused = bridges._partition_bridges_for_corridors(
+        corridor, suppress, refused, _road_carried = bridges._partition_bridges_for_corridors(
             classification
         )
         assert not corridor and len(suppress) == 2 and not refused
 
     def test_ambiguous_is_refused(self):
-        corridor, suppress, refused = bridges._partition_bridges_for_corridors(
+        corridor, suppress, refused, _road_carried = bridges._partition_bridges_for_corridors(
             _Classification([_bridge(contract=AMBIGUOUS)])
         )
         assert not corridor and not suppress and len(refused) == 1
@@ -285,7 +285,7 @@ class TestContractPartition:
             _bridge(contract=TERRAIN_CARRIED,
                     deck_hardness=DECK_HARDNESS_COSMETIC, hard_deck=False),
         ])
-        corridor, suppress, refused = bridges._partition_bridges_for_corridors(
+        corridor, suppress, refused, _road_carried = bridges._partition_bridges_for_corridors(
             classification
         )
         assert len(corridor) == 1 and not suppress
@@ -295,9 +295,24 @@ class TestContractPartition:
 # object-sourced corridor emission
 # ---------------------------------------------------------------------------
 
+
+def _deck_route_shape() -> "BuiltShape":
+    """A junction rect crossing the deck footprint (x 0..131, y ∓27.5 in
+    layout meters) so the stage-2b road-carried discriminator reads the
+    span as a taxi/truck bridge, not a road overpass."""
+    from auto_patch.layout import BuiltShape as _BuiltShape
+    from auto_patch.layout import ROLE_JUNCTION as _ROLE_JUNCTION
+    return _BuiltShape(
+        polygon=Polygon([(40.0, -3.0), (90.0, -3.0), (90.0, 3.0),
+                         (40.0, 3.0)]),
+        role=_ROLE_JUNCTION, ref="DECK-ROUTE",
+    )
+
+
 class TestObjectSourcedCorridors:
     def test_deck_carried_emits_corridor_at_object_floor(self):
         layout = _FakeLayout()
+        layout.shapes.append(_deck_route_shape())
         classification = _Classification([_bridge()])
         network = _draped_road_network_across_deck()
         count, suppression, covered = (
@@ -352,6 +367,7 @@ class TestObjectSourcedCorridors:
 
         monkeypatch.setattr(bridges, "_load_underpass_osm_road_lines", _boom)
         layout = _FakeLayout()
+        layout.shapes.append(_deck_route_shape())
         classification = _Classification([_bridge()])
         network = _draped_road_network_across_deck()
         count, _suppression, _covered = (
@@ -388,6 +404,7 @@ class TestObjectSourcedCorridors:
             skipped_line_count=0,
         )
         layout = _FakeLayout()
+        layout.shapes.append(_deck_route_shape())
         classification = _Classification([_bridge()])
         count, _s, _c = bridges._emit_object_sourced_bridge_corridors(
             layout, _FakeDem(150.0), 36, -87, classification, [elevated],
@@ -966,3 +983,172 @@ class TestDeckEndPinValidator:
         assert "end0" in reference or "end1" in reference
         assert deviation == pytest.approx(2.0, abs=0.02)
         assert tolerance == pytest.approx(0.25)
+
+
+# ---------------------------------------------------------------------------
+# stage 2b — capture band, causeway plates, road-carried, deconflict order
+# ---------------------------------------------------------------------------
+
+def _kbna_gap_rect(gap_m: float = 9.6) -> BuiltShape:
+    """The measured KBNA geometry: a junction rect whose edge stops
+    ``gap_m`` short of the START abutment line (x = 0), on the approach
+    side (negative x).  KBNA taxiway-L measures 9.62-9.69 m at both
+    ends."""
+    polygon = Polygon([(-40.0, -5.0), (-gap_m, -5.0), (-gap_m, 5.0),
+                       (-40.0, 5.0)])
+    return BuiltShape(polygon=polygon, role=ROLE_JUNCTION, ref="APPROACH",
+                      node_altitudes=[150.0] * 4 + [150.0])
+
+
+class TestCaptureBand:
+    def test_kbna_gap_vertices_pinned_at_deck_end(self, monkeypatch):
+        # The stage-2b defect fixture: pavement cut 9.6 m short of the
+        # abutment captured ZERO pins under the old 0.25 m tolerance;
+        # the measured 12 m band must pin the two facing edge vertices.
+        layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
+        layout.shapes.append(_kbna_gap_rect())
+        pinned = bridges.insert_bridge_deck_end_pins(layout, None, 36, -87)
+        assert pinned == 2
+        pin_values = getattr(layout, "_object_bridge_pin_values")
+        assert len(pin_values) == 2
+        for value in pin_values.values():
+            assert value == pytest.approx(167.0, abs=0.01)
+        # The pinned vertices are the gap-facing edge pair at x = -9.6.
+        ring = list(layout.shapes[-1].polygon.exterior.coords)[:-1]
+        node_altitudes = layout.shapes[-1].node_altitudes
+        pinned_positions = [
+            ring[i] for i in range(len(ring))
+            if node_altitudes[i] == pytest.approx(167.0, abs=0.01)
+        ]
+        assert len(pinned_positions) == 2
+        assert all(abs(x + 9.6) < 0.01 for x, _y in pinned_positions)
+
+    def test_vertex_beyond_band_not_pinned(self, monkeypatch):
+        layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
+        layout.shapes.append(_kbna_gap_rect(gap_m=15.0))  # beyond 12 m
+        pinned = bridges.insert_bridge_deck_end_pins(layout, None, 36, -87)
+        assert pinned == 0
+
+
+class TestCausewayPlates:
+    def test_gap_plate_flat_at_deck_end_value(self, monkeypatch):
+        layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
+        layout.shapes.append(_kbna_gap_rect())
+        emitted = bridges.emit_bridge_causeway_plates(layout, None, 36, -87)
+        assert emitted == 2  # one plate per end
+        plates = [s for s in layout.shapes
+                  if s.ref == "object_bridge_causeway"]
+        assert len(plates) == 2
+        for plate in plates:
+            assert plate.altitude == pytest.approx(167.0, abs=0.01)
+        # The start-end plate spans the measured gap (9.6 m + 2 m weld
+        # overlap) and the overlap is CLIPPED by the pavement (ruling
+        # R2 — pavement wins at contact): zero residual intersection,
+        # and the dirt-gap midpoint is covered at the deck-end value.
+        start_plate = min(plates, key=lambda s: s.polygon.centroid.x)
+        minimum_x = min(x for x, _y in start_plate.polygon.exterior.coords)
+        assert minimum_x == pytest.approx(-11.6, abs=0.5)
+        pavement = _kbna_gap_rect().polygon
+        assert start_plate.polygon.intersection(pavement).area < 1e-6
+        from shapely.geometry import Point as _Point
+        assert start_plate.polygon.covers(_Point(-4.8, 0.0))
+
+    def test_no_pavement_plate_capped_at_named_constant(self, monkeypatch):
+        # Murfreesboro class: no pavement anywhere near — the plate runs
+        # the full capped length back from the lip.
+        bridge = _bridge(absolute_deck_elevation_m=None, deck_top_y_m=7.76)
+        layout = _gate_on_layout_with_bridge(monkeypatch, bridge)
+        # A truck route crossing the DECK keeps it out of road-carried,
+        # but sits entirely inside the footprint (no pavement behind
+        # either abutment).
+        from auto_patch.layout import ROLE_SERVICE_ROAD
+        layout.shapes.append(BuiltShape(
+            polygon=Polygon([(40.0, -2.0), (90.0, -2.0), (90.0, 2.0),
+                             (40.0, 2.0)]),
+            role=ROLE_SERVICE_ROAD, ref="TRUCK",
+        ))
+        emitted = bridges.emit_bridge_causeway_plates(
+            layout, _FakeDem(180.66), 36, -87)
+        assert emitted == 2
+        plates = [s for s in layout.shapes
+                  if s.ref == "object_bridge_causeway"]
+        expected = 180.66 + 7.76  # datum + deck end (flat deck fixture)
+        for plate in plates:
+            assert plate.altitude == pytest.approx(expected, abs=0.01)
+        start_plate = min(plates, key=lambda s: s.polygon.centroid.x)
+        minimum_x = min(x for x, _y in start_plate.polygon.exterior.coords)
+        assert minimum_x == pytest.approx(
+            -config.BRIDGE_CAUSEWAY_MAX_LENGTH_M, abs=1.0)
+
+    def test_gate_off_emits_nothing(self):
+        assert config.OBJECT_BRIDGE_TERRAIN is False
+        layout = _FakeLayout()
+        setattr(layout, bridges._OBJECT_BRIDGE_CLASSIFICATION_ATTRIBUTE,
+                _Classification([_bridge()]))
+        assert bridges.emit_bridge_causeway_plates(
+            layout, None, 36, -87) == 0
+        assert not layout.shapes
+
+
+class TestRoadCarriedOverpass:
+    def test_no_route_on_deck_is_road_carried(self, monkeypatch):
+        layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
+        # No shape crosses the deck footprint at all.
+        corridor, _s, _r, road_carried = (
+            bridges._partition_bridges_for_corridors(
+                _Classification([_bridge()]), layout)
+        )
+        assert not corridor and len(road_carried) == 1
+
+    def test_road_carried_gets_no_pins_no_causeway_no_corridor(
+        self, monkeypatch
+    ):
+        layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
+        assert bridges.insert_bridge_deck_end_pins(
+            layout, None, 36, -87) == 0
+        assert bridges.emit_bridge_causeway_plates(
+            layout, None, 36, -87) == 0
+        count, _sup, covered = bridges._emit_object_sourced_bridge_corridors(
+            layout, _FakeDem(150.0), 36, -87,
+            _Classification([_bridge()]),
+            [_draped_road_network_across_deck()],
+            road_width_m=22.0, ramp_step_m=20.0, approach_length_m=80.0,
+        )
+        assert count == 0 and not covered
+        assert not [s for s in layout.shapes
+                    if (s.ref or "").startswith("object_bridge")]
+
+    def test_route_on_deck_is_not_road_carried(self, monkeypatch):
+        layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
+        layout.shapes.append(_deck_route_shape())
+        corridor, _s, _r, road_carried = (
+            bridges._partition_bridges_for_corridors(
+                _Classification([_bridge()]), layout)
+        )
+        assert len(corridor) == 1 and not road_carried
+
+
+class TestDeconflictObjectSeniority:
+    def test_object_corridor_survives_earlier_legacy_piece(self):
+        # Stage-2b root cause: legacy portal pieces emitted EARLIER
+        # covered the object plate and earlier-wins dropped it.  The
+        # object-first walk order must keep the object plate and drop
+        # the covered legacy piece instead — with no object refs the
+        # order is the emission order (gate-off byte identity).
+        from auto_patch import finalize
+        from auto_patch.layout import ROLE_TUNNEL_RAMP
+        area = Polygon([(0.0, 0.0), (30.0, 0.0), (30.0, 10.0), (0.0, 10.0)])
+        layout = _FakeLayout()
+        legacy = BuiltShape(polygon=area, role=ROLE_TUNNEL_RAMP,
+                            ref="portal_ramp", altitude=163.0)
+        object_plate = BuiltShape(polygon=Polygon(area.exterior.coords),
+                                  role=ROLE_TUNNEL_RAMP,
+                                  ref="object_bridge_corridor",
+                                  altitude=161.0)
+        layout.shapes.extend([legacy, object_plate])  # legacy FIRST
+        finalize.deconflict_road_features(layout, "TEST")
+        remaining = [s for s in layout.shapes
+                     if s.role == ROLE_TUNNEL_RAMP]
+        refs = {s.ref for s in remaining}
+        assert "object_bridge_corridor" in refs
+        assert "portal_ramp" not in refs

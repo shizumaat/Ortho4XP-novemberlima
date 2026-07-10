@@ -1370,8 +1370,9 @@ def check_bridge_deck_end_pins(layout, dem, tile_lat, tile_lon,
     classification = _object_bridge_classification(layout)
     if classification is None:
         return []
-    corridor_bridges, _suppress, _refused = (
-        _partition_bridges_for_corridors(classification)
+    from .config import BRIDGE_ABUTMENT_PIN_CAPTURE_BAND_M
+    corridor_bridges, _suppress, _refused, _road_carried = (
+        _partition_bridges_for_corridors(classification, layout)
     )
     out = []
     for bridge in corridor_bridges:
@@ -1388,9 +1389,36 @@ def check_bridge_deck_end_pins(layout, dem, tile_lat, tile_lon,
             )
             law_value = bridge_deck_end_pin_elevation_m(datum, end_y)
             for shape in layout.shapes:
-                if shape.role not in _BRIDGE_PIN_ROLES:
+                is_causeway = (
+                    getattr(shape, "ref", "") == "object_bridge_causeway"
+                )
+                if shape.role not in _BRIDGE_PIN_ROLES and not is_causeway:
                     continue
                 if shape.polygon is None or shape.polygon.is_empty:
+                    continue
+                if is_causeway:
+                    # Causeway plate sub-check (stage 2b): a plate at
+                    # this end must carry the SAME law value it was
+                    # emitted from (flat at the deck-end elevation,
+                    # amendment A10) — same law import, lockstep.
+                    try:
+                        near_end = shape.polygon.distance(
+                            line.interpolate(0.5, normalized=True)
+                        ) <= BRIDGE_ABUTMENT_PIN_CAPTURE_BAND_M
+                    except Exception:
+                        continue
+                    if not near_end or shape.altitude is None:
+                        continue
+                    deviation = abs(float(shape.altitude) - law_value)
+                    if deviation > tolerance_m:
+                        centroid = shape.polygon.centroid
+                        out.append((
+                            "causeway_plate",
+                            f"{reference}:end{end_index}",
+                            deviation,
+                            tolerance_m,
+                            _ll(layout, centroid.x, centroid.y),
+                        ))
                     continue
                 ring = list(shape.polygon.exterior.coords)
                 if ring and ring[0] == ring[-1]:
@@ -1400,9 +1428,12 @@ def check_bridge_deck_end_pins(layout, dem, tile_lat, tile_lon,
                     continue
                 for (x, y), value in zip(ring, solved):
                     try:
+                        # The capture band is the pin writer's own reach
+                        # (stage 2b): every vertex the writer pinned is
+                        # law-bound, wherever in the band it sits.
                         on_line = (
                             line.distance(_Point(x, y))
-                            <= _BRIDGE_PIN_ON_LINE_TOLERANCE_M
+                            <= BRIDGE_ABUTMENT_PIN_CAPTURE_BAND_M
                         )
                     except Exception:
                         continue

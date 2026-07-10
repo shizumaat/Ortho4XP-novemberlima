@@ -180,7 +180,70 @@ def _classify_pack(dsf_path: str, xplane_root: str | None):
         mean_sea_level_placements=mean_sea_level_placements,
         pack_root=pack_root,
     )
-    return result, terrain_placements
+    return result, terrain_placements, pavement_polygons
+
+
+def _bridge_is_road_carried_proxy(bridge, pavement_polygons) -> bool:
+    """Road-overpass discriminator, audit-side proxy (stage 2b): no
+    draped pavement within ``BRIDGE_ROAD_CARRIED_PAVEMENT_PROXIMITY_M``
+    of the deck footprint means the deck carries a ROAD, not a
+    taxi/truck route (KBNA Crossing_Bridge: nearest pavement 176 m) —
+    terrain must not rise to it, so the abutment check is skipped.  The
+    in-pipeline discriminator reads the layout's taxi/truck shapes
+    instead; this proxy exists because the audit has only the pack."""
+    import math as _math
+
+    from auto_patch.config import BRIDGE_ROAD_CARRIED_PAVEMENT_PROXIMITY_M
+    from auto_patch import obj8_reader as _obj8
+    from auto_patch.object_terrain_features import (
+        frame_polygon_to_longitude_latitude,
+    )
+    from shapely.geometry import LineString as _LineString
+    from shapely.geometry import Polygon as _Polygon
+
+    if bridge.deck_polygon is None or not pavement_polygons:
+        return False
+    origin_longitude, origin_latitude = (
+        bridge.frame_origin_longitude_latitude
+    )
+    cosine = _math.cos(_math.radians(origin_latitude))
+    earth_radius = 6378137.0
+
+    def _to_meters(longitude, latitude):
+        return (
+            _math.radians(longitude - origin_longitude)
+            * earth_radius * cosine,
+            _math.radians(latitude - origin_latitude) * earth_radius,
+        )
+
+    footprint = frame_polygon_to_longitude_latitude(
+        bridge.deck_polygon, bridge.frame_origin_longitude_latitude
+    )
+    if footprint.geom_type == "MultiPolygon":
+        footprint = max(footprint.geoms, key=lambda g: g.area)
+    footprint_meters = _Polygon(
+        [_to_meters(lon, lat) for lon, lat in footprint.exterior.coords]
+    )
+    nearest = None
+    for polygon in pavement_polygons:
+        try:
+            ring = [
+                _to_meters(lon, lat) for lon, lat in polygon.exterior.coords
+            ]
+        except (AttributeError, TypeError):
+            continue
+        if len(ring) < 2:
+            continue
+        # Cheap locality reject: skip pavement far outside the frame.
+        if min(abs(x) + abs(y) for x, y in ring) > 3000.0:
+            continue
+        distance = footprint_meters.distance(_LineString(ring))
+        if nearest is None or distance < nearest:
+            nearest = distance
+    return (
+        nearest is None
+        or nearest > BRIDGE_ROAD_CARRIED_PAVEMENT_PROXIMITY_M
+    )
 
 
 def _frame_point_to_latitude_longitude(bridge, frame_x, frame_z):
@@ -241,7 +304,8 @@ def main() -> int:
         return 2
     xplane_root = args.xplane_root or _default_xplane_root(dsf_path)
 
-    result, placements = _classify_pack(dsf_path, xplane_root)
+    result, placements, pavement_polygons = _classify_pack(
+        dsf_path, xplane_root)
     print(f"DSF:  {dsf_path}")
     print(f"mesh: {args.mesh}")
     print(f"{len(result.bridges)} bridge(s) classified\n")
@@ -298,6 +362,16 @@ def main() -> int:
             print(f"  expected deck top: {deck_absolute:.2f} m MSL   "
                   f"deck ends: {deck_end_absolute[0]:.2f} / "
                   f"{deck_end_absolute[1]:.2f} m")
+
+        # Road-carried overpass (stage 2b): the deck carries a road, not
+        # a taxi/truck route — terrain must NOT rise to it, so the
+        # abutment coupling is not required and its check is skipped.
+        road_carried = _bridge_is_road_carried_proxy(
+            bridge, pavement_polygons)
+        if road_carried:
+            print("  road-carried overpass (no pavement within proximity "
+                  "of the deck footprint) — abutment check skipped; the "
+                  "road machinery owns the corridor")
 
         # Abutment terrain versus deck-end elevation.
         abutment_pass = True
@@ -358,17 +432,27 @@ def main() -> int:
                   f"{KBNA_ABUTMENT_ELEVATION_M} +/- {args.tolerance} m, "
                   f"corridor ceiling <= {KBNA_CORRIDOR_CEILING_M} m")
 
-        verdict = "PASS" if abutment_pass and (corridor_pass in (True, None)) \
-            else "FAIL"
-        print(f"  --> {verdict}"
-              + ("" if abutment_pass else "  (abutment terrain off deck)")
-              + ("" if corridor_pass in (True, None)
-                 else "  (corridor fouls girder)"))
+        if road_carried:
+            verdict = "SKIPPED (road-carried overpass)"
+            print(f"  --> {verdict}")
+        else:
+            verdict = "PASS" if abutment_pass \
+                and (corridor_pass in (True, None)) else "FAIL"
+            print(f"  --> {verdict}"
+                  + ("" if abutment_pass
+                     else "  (abutment terrain off deck)")
+                  + ("" if corridor_pass in (True, None)
+                     else "  (corridor fouls girder)"))
         print()
 
-    print("NOTE: feature B is default OFF.  Against an ungraded Ortho4XP "
-          "mesh a FAIL is expected — the terrain has not been graded to the "
-          "deck.  A feature-B build is the real acceptance target.")
+    if os.environ.get("O4_OBJECT_BRIDGE_TERRAIN", "0") == "1":
+        print("NOTE: O4_OBJECT_BRIDGE_TERRAIN is ON — this audit is a "
+              "real acceptance check against a feature-B build.")
+    else:
+        print("NOTE: feature B (O4_OBJECT_BRIDGE_TERRAIN) is OFF in this "
+              "environment.  Against an ungraded Ortho4XP mesh a FAIL is "
+              "expected — the terrain has not been graded to the deck.  A "
+              "feature-B build is the real acceptance target.")
     return 0
 
 

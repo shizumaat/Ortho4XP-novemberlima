@@ -4023,8 +4023,9 @@ def build_airport_pavement(icao: str, xplane_root: str,
             # both pin writers return 0 without touching a shape.
             try:
                 from . import object_terrain_assembly
-                object_terrain_assembly.attach_bridge_classification(
-                    layout, xplane_root)
+                _bridge_classification = (
+                    object_terrain_assembly.attach_bridge_classification(
+                        layout, xplane_root))
                 from .bridges import (
                     insert_bridge_deck_end_pins,
                     insert_bridge_profile_pins)
@@ -4032,7 +4033,12 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     layout, dem, tile_lat, tile_lon)
                 n_bridge_profile_pins = insert_bridge_profile_pins(
                     layout, dem, tile_lat, tile_lon)
-                if n_bridge_deck_pins or n_bridge_profile_pins:
+                # ALWAYS print the summary when the classifier ran —
+                # a zero here is the coupling-failure signal, and a
+                # silent zero is this project's classic failure mode
+                # (stage 2b: the first gated KBNA build pinned nothing
+                # and said nothing at verbosity 1).
+                if _bridge_classification is not None:
                     UI.vprint(1,
                         f"  [pav-builder] {icao}: object-bridge pins — "
                         f"{n_bridge_deck_pins} deck-end, "
@@ -5897,6 +5903,27 @@ def build_airport_pavement(icao: str, xplane_root: str,
                         f"surface (matched at the runway-end zone).")
         except _GEOM_EXC as exc:
             UI.vprint(1, f"  [pav-builder] {icao}: runway-end skirt "
+                         f"emission FAILED: {exc!r}")
+
+        # Object-bridge CAUSEWAY plates (feature B stage 2b, gate
+        # O4_OBJECT_BRIDGE_TERRAIN via the cached classification): flat
+        # plates at the deck-end law elevation between each abutment lip
+        # and the pavement the pack cut short of it.  LATE like the
+        # skirts (values are law constants; post-decimation arrival
+        # mints no T-vertices) and BEFORE the adjacent-ground bands so
+        # the bands clip against the causeway like every other static
+        # feature.  Gate off ⇒ returns 0 having touched nothing.
+        try:
+            from .bridges import emit_bridge_causeway_plates
+            n_causeway = emit_bridge_causeway_plates(
+                layout, _projection_dem,
+                _projection_tile_lat, _projection_tile_lon)
+            if n_causeway:
+                UI.vprint(1,
+                    f"  [pav-builder] {icao}: emitted {n_causeway} "
+                    f"object-bridge causeway plate(s).")
+        except _GEOM_EXC as exc:
+            UI.vprint(1, f"  [pav-builder] {icao}: object-bridge causeway "
                          f"emission FAILED: {exc!r}")
 
         # ── Adjacent-ground LATERAL grade law (slice 3, gate
