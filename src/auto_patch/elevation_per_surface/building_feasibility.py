@@ -37,6 +37,8 @@ import math
 import os
 from typing import Callable, Dict, List, Tuple
 
+from shapely.errors import GEOSException
+
 from auto_patch.config import (
     ANISO_EDGES,
     BUILDING_FULL_FRONTAGE,
@@ -644,7 +646,14 @@ def building_feasible_levels(
              and not s.polygon.is_empty]
     if not polys:
         return {}
-    airside = unary_union(polys)
+    try:
+        airside = unary_union(polys)
+    except GEOSException:
+        # GEOS can hit a non-noded intersection on nearly-collinear
+        # sliver edges (KDFW 2026-07-10, two ~0.1 m-apart parallel
+        # segments).  buffer(0) renodes each input; the union of the
+        # repaired polygons is geometrically the same airside region.
+        airside = unary_union([p.buffer(0) for p in polys])
 
     # Buildings ≥ this footprint must clear their ENTIRE frontage, not just a
     # single central chord (user 2026-06-27); small buildings keep the centroid

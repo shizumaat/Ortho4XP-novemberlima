@@ -297,24 +297,160 @@ def check_source_coverage(layout, min_gap_area_m2: float = 5.0,
                 layout, min_gap_area_m2, min_enclosed_frac)]
 
 
-def _longest_pair_axis(pts):
-    """``(ox, oy, ux, uy, length)`` of the longest vertex pair in ``pts`` —
-    the runway centerline axis (origin at one end, unit direction, length).
-    ``None`` if fewer than 2 points or degenerate."""
+def _runway_principal_axis(pts):
+    """``(ox, oy, ux, uy, length)`` of the runway CENTERLINE axis — the
+    principal (largest-variance) direction of the vertex cloud ``pts``, with
+    the origin at the low-projection end and ``length`` = the projected extent.
+    ``None`` if fewer than 2 points or degenerate.
+
+    This replaces the former longest-vertex-PAIR axis, which picked the
+    corner-to-corner DIAGONAL of a runway rectangle — skewed ~1–2° off the true
+    centerline (worse the wider/shorter the rect, and worse still on a
+    tile-clipped ring whose oblique end-cap pulls the extreme pair off-axis).
+    The principal axis is parallel to the runway centerline by construction (a
+    long thin rectangle's dominant variance is along its length), so station
+    fractions and end-zone tests are assigned from a true centerline-parallel
+    frame."""
     import math
-    best = -1.0
-    A = B = None
     n = len(pts)
-    for i in range(n):
-        xa, ya = pts[i]
-        for j in range(i + 1, n):
-            d2 = (pts[j][0] - xa) ** 2 + (pts[j][1] - ya) ** 2
-            if d2 > best:
-                best, A, B = d2, pts[i], pts[j]
-    if A is None or best <= 0:
+    if n < 2:
         return None
-    ln = math.sqrt(best)
-    return (A[0], A[1], (B[0] - A[0]) / ln, (B[1] - A[1]) / ln, ln)
+    cx = sum(p[0] for p in pts) / n
+    cy = sum(p[1] for p in pts) / n
+    sxx = syy = sxy = 0.0
+    for x, y in pts:
+        dx, dy = x - cx, y - cy
+        sxx += dx * dx
+        syy += dy * dy
+        sxy += dx * dy
+    tr = sxx + syy
+    det = sxx * syy - sxy * sxy
+    disc = max(0.0, (0.5 * tr) ** 2 - det)
+    lam = 0.5 * tr + math.sqrt(disc)              # largest eigenvalue
+    if abs(sxy) > 1e-9:
+        ux, uy = lam - syy, sxy
+    else:
+        ux, uy = (1.0, 0.0) if sxx >= syy else (0.0, 1.0)
+    norm = math.hypot(ux, uy)
+    if norm < 1e-12:
+        return None
+    ux, uy = ux / norm, uy / norm
+    ts = [(x - cx) * ux + (y - cy) * uy for x, y in pts]
+    t_lo = min(ts)
+    length = max(ts) - t_lo
+    if length <= 0:
+        return None
+    return (cx + t_lo * ux, cy + t_lo * uy, ux, uy, length)
+
+
+def _runway_vertex_elevations(shape, n):
+    """Per-vertex elevations for a runway ring's ``n`` open-ring corners, using
+    the same accessor as ``_runway_rect_cross_ends`` /
+    ``_runway_single_poly_cross_stations``: ``node_altitudes`` when present,
+    else a flat ``altitude`` tag, else ``None`` (unknown → caller skips)."""
+    if shape.node_altitudes and len(shape.node_altitudes) >= n:
+        return [float(shape.node_altitudes[i]) for i in range(n)]
+    if shape.altitude is not None:
+        return [float(shape.altitude)] * n
+    return None
+
+
+def _longest_same_sign_run(signs, target, n):
+    """Indices of the longest CYCLIC run of ``target`` in ``signs`` (length
+    ``n``, treated as a closed ring).  ``[]`` if ``target`` is absent."""
+    if all(s == target for s in signs):
+        return list(range(n))
+    start = None
+    for k in range(n):
+        if signs[k] == target and signs[(k - 1) % n] != target:
+            start = k
+            break
+    if start is None:
+        return []
+    best: list = []
+    cur: list = []
+    for step in range(n):
+        idx = (start + step) % n
+        if signs[idx] == target:
+            cur.append(idx)
+        else:
+            if len(cur) > len(best):
+                best = cur
+            cur = []
+    if len(cur) > len(best):
+        best = cur
+    return best
+
+
+def _runway_long_edge_chains(coords, elevations, axis, coalesce_m: float = 2.0):
+    """Split a single-poly runway ring into its two LONG-EDGE chains and return
+    ``[chain_plus, chain_minus]``, each a list of ``(station, elev, x, y)``
+    sorted by ascending axis station; ``None`` if the ring does not split into
+    two clean, runway-length rails (caller falls back to the legacy
+    station-sample reconstruction).
+
+    The longitudinal profile of a runway lives on its two long edges — the two
+    monotone runs of ring vertices that hug either side of the centerline.  The
+    END-CAP edges (the flat cross-ends, an OBLIQUE tile-clipped cap that can be
+    LONGER than the runway is wide, and any densification vertices along those
+    caps) are CROSS-runway boundary vertices, not longitudinal stations, and
+    must be excluded — projecting them onto the axis and clustering by station
+    (the former single-poly reconstruction) fabricates a phantom jog near an
+    oblique clipped end.
+
+    Rails are separated by LATERAL offset from the centerline axis: a
+    long-edge vertex sits near ``±half_width`` (one side), while a cap vertex
+    sweeps ACROSS the centerline, so its |offset| is small.  Vertices with
+    |lateral − mid| ≥ ½·half_width on the positive / negative side form the two
+    rails; near-duplicate consecutive vertices (corner doublings, T-weld /
+    crossing-vertex clusters) within ``coalesce_m`` are collapsed so a
+    quantization-level step across two coincident corners cannot fabricate a
+    huge grade.  Validation requires each rail to span ≥ 50 % of the ring's own
+    longitudinal extent (both rails run nearly the full piece length); a
+    carved-out crossing PIECE validates on its own partial extent."""
+    import math
+    ox, oy, ux, uy, _length = axis
+    vx, vy = -uy, ux
+    n = len(coords)
+    if n < 4 or len(elevations) < n:
+        return None
+    station = [(coords[i][0] - ox) * ux + (coords[i][1] - oy) * uy
+               for i in range(n)]
+    lateral = [(coords[i][0] - ox) * vx + (coords[i][1] - oy) * vy
+               for i in range(n)]
+    half_w = max(abs(l) for l in lateral)
+    if half_w <= 0:
+        return None
+    mid = sum(lateral) / n
+    thresh = 0.5 * half_w
+    signs = [(+1 if (lateral[i] - mid) >= thresh
+              else (-1 if (lateral[i] - mid) <= -thresh else 0))
+             for i in range(n)]
+    piece_extent = max(station) - min(station)
+    if piece_extent <= 0:
+        return None
+    chains = []
+    for target in (+1, -1):
+        arc = _longest_same_sign_run(signs, target, n)
+        if len(arc) < 2:
+            return None
+        kept = []
+        for idx in arc:
+            if kept:
+                px, py = coords[kept[-1]]
+                if math.hypot(coords[idx][0] - px,
+                              coords[idx][1] - py) < coalesce_m:
+                    continue
+            kept.append(idx)
+        if len(kept) < 2:
+            return None
+        chain = sorted(
+            ((station[i], elevations[i], coords[i][0], coords[i][1])
+             for i in kept), key=lambda t: t[0])
+        if chain[-1][0] - chain[0][0] < 0.5 * piece_extent:
+            return None
+        chains.append(chain)
+    return chains
 
 
 def _runway_rect_cross_ends(s, coords, axis=None):
@@ -444,10 +580,18 @@ def check_runway_profile(layout, end_grade_cap="default",
     elevation solver (or a runway-flex MOVE) must never pull a runway out of
     compliance.
 
-    Each runway emits as a chain of sloped ``ROLE_RUNWAY`` rects sharing their
-    flat cross-end edges.  Reconstruct each runway's centerline profile (one
-    elevation sample per rect cross-end, ordered along the runway axis) and
-    check, per consecutive segment:
+    Reconstruct each runway's longitudinal profile and check, per consecutive
+    segment, the caps below.  A de-segmented single-poly ring is measured
+    EDGE-AWARE: it is split into its two LONG-EDGE chains (the monotone runs of
+    ring vertices hugging either side of the centerline) and each rail is
+    checked independently with true 2D horizontal segment distances; the
+    end-cap edges — the flat cross-ends, an OBLIQUE tile-clipped cap that can be
+    longer than the runway is wide, and any densification vertices on those caps
+    — are excluded, so they cannot fabricate a phantom jog (the earlier
+    per-station cluster mixed both rails and jogged near an oblique clipped
+    end).  A legacy segmented runway (one flat cross-end sample per sub-rect,
+    ordered along the axis) and any ring whose chain split fails validation keep
+    the station-sample reconstruction.  Checks:
 
       * longitudinal grade ≤ ``end_grade_cap`` inside the first/last
         ``RUNWAY_END_FRACTION`` of the length, ``RUNWAY_MAX_GRADE`` (1.5%)
@@ -498,7 +642,7 @@ def check_runway_profile(layout, end_grade_cap="default",
 
     out = []
     for ref, items in by_ref.items():
-        ax = _longest_pair_axis([p for _s, cs in items for p in cs])
+        ax = _runway_principal_axis([p for _s, cs in items for p in cs])
         if ax is None:
             continue
         ox, oy, ux, uy, L = ax
@@ -542,13 +686,73 @@ def check_runway_profile(layout, end_grade_cap="default",
             return any(station_lo <= hi and station_hi >= lo
                        for lo, hi in crossing_zones)
 
-        samples = []              # (dist_along_axis, elev, x, y)
+        # Partition the ref's shapes.  A de-segmented single-poly ring that
+        # splits cleanly into its two long-edge chains is measured EDGE-AWARE:
+        # the longitudinal grade is checked ALONG each rail independently with
+        # true 2D horizontal distances (exactly the measurement that proves a
+        # tile-clipped runway compliant), with the end-cap edges — including an
+        # OBLIQUE clipped cap and its densification vertices — excluded so they
+        # cannot fabricate a phantom jog.  Everything else — a legacy segmented
+        # sub-rect (gate-off), or a single-poly ring whose chain split fails
+        # validation — falls through to the unchanged station-sample
+        # reconstruction.
+        edge_aware = []           # (shape, [chain_plus, chain_minus])
+        legacy_items = []         # (shape, coords)
         for s, cs in items:
-            # De-segmented single-poly rings carry their profile as interior
-            # long-edge vertices — cluster the ring's OWN vertices per station
-            # (the extreme-station cross-end reconstruction below sees only the
-            # two physical ends on a ring and misses the interior profile).
-            # Legacy segmented sub-rects keep the exact current path.
+            chains = None
+            if getattr(s, "from_single_poly", False):
+                elevs = _runway_vertex_elevations(s, len(cs))
+                if elevs is not None:
+                    chains = _runway_long_edge_chains(cs, elevs, ax)
+            if chains is not None:
+                edge_aware.append((s, chains))
+            else:
+                legacy_items.append((s, cs))
+
+        # --- edge-aware long-edge rails ---------------------------------
+        for _s, chains in edge_aware:
+            for chain in chains:      # (station, elev, x, y), station-sorted
+                chain_grades = []     # (g, seg_len, mid_x, mid_y, at_crossing)
+                for i in range(len(chain) - 1):
+                    d0, e0, x0, y0 = chain[i]
+                    d1, e1, x1, y1 = chain[i + 1]
+                    seg = math.hypot(x1 - x0, y1 - y0)   # true 2D horiz. run
+                    if seg < 0.5:
+                        continue
+                    at_crossing = _touches_crossing(min(d0, d1), max(d0, d1))
+                    fi, fj = d0 / L, d1 / L
+                    in_end = (min(fi, fj) < RUNWAY_END_FRACTION
+                              or max(fi, fj) > 1.0 - RUNWAY_END_FRACTION)
+                    cap = (end_grade_cap
+                           if (in_end and end_grade_cap is not None)
+                           else RUNWAY_MAX_GRADE)
+                    if (not at_crossing) and abs(e1 - e0) - cap * seg > noise_m:
+                        out.append(("grade", ref, abs(e1 - e0) / seg, cap,
+                                    _ll(layout, 0.5 * (x0 + x1),
+                                        0.5 * (y0 + y1))))
+                    chain_grades.append(((e1 - e0) / seg, seg,
+                                         0.5 * (x0 + x1), 0.5 * (y0 + y1),
+                                         at_crossing))
+                if not check_curvature:
+                    continue
+                for i in range(len(chain_grades) - 1):
+                    gl, Ll, _xl, _yl, xl_cross = chain_grades[i]
+                    gr, Lr, mx, my, xr_cross = chain_grades[i + 1]
+                    if xl_cross or xr_cross:
+                        continue
+                    max_dg = RUNWAY_MAX_GRADE_CHANGE_PER_M * 0.5 * (Ll + Lr)
+                    noise_dg = noise_m * (1.0 / Ll + 1.0 / Lr)
+                    if abs(gr - gl) - max_dg > noise_dg:
+                        out.append(("curvature", ref, abs(gr - gl), max_dg,
+                                    _ll(layout, mx, my)))
+
+        # --- legacy station-sample reconstruction (unchanged) -----------
+        if not legacy_items:
+            continue
+        samples = []              # (dist_along_axis, elev, x, y)
+        for s, cs in legacy_items:
+            # A single-poly ring that failed the chain split still uses the
+            # per-station cluster; segmented sub-rects use the cross-end path.
             if getattr(s, "from_single_poly", False):
                 station_samples = _runway_single_poly_cross_stations(s, cs, ax)
             else:
@@ -1043,7 +1247,20 @@ def check_adjacent_ground(layout, dem, tile_lat, tile_lon,
         band was owed but not emitted; zone-3's ``None`` floor makes a
         cliff LAWFUL, never flagged — the boundary-bridge killer) or ABOVE
         a finite ceiling (a cut band was owed but not emitted) by more
-        than ``tolerance_m``.
+        than ``tolerance_m`` — AND lies WITHIN the daylight-supported depth.
+
+    DAYLIGHT slope-limit lockstep (``grade_law.adjacent_ground_supported_depths``,
+    user 2026-07-09): the emitter marches each station outward independently,
+    then CLAMPS the per-station daylight depths so the daylight line benches
+    along the frontage (an isolated deep ray no neighbour corroborates is
+    clamped to a shallow bench, not a knife-slot blade — CYXY 417).  A column
+    BEYOND that supported depth is therefore not the emitter's to grade, so
+    the validator EXEMPTS it (flagging it would mint findings against the
+    emitter's own lawful clamp).  This reader reproduces the emitter's raw
+    outward scan per station (breach beyond the emitter's
+    ``CLEARANCE_OBSTRUCTION_THRESHOLD_M`` trigger, one step out), applies the
+    ONE law over the SAME station sequence, and flags only columns within the
+    supported depth.
 
     ``tolerance_m`` (1.5 m) sits ABOVE the emitter's 1 m fill/cut trigger
     (``CLEARANCE_OBSTRUCTION_THRESHOLD_M``) so terrain the emitter
@@ -1064,10 +1281,14 @@ def check_adjacent_ground(layout, dem, tile_lat, tile_lon,
     from shapely.prepared import prep
     from shapely.strtree import STRtree
     from . import clearance as CL
-    from .config import CLEARANCE_MAX_REACH_M, runway_code_number
+    from .config import (
+        CLEARANCE_MAX_REACH_M, CLEARANCE_OBSTRUCTION_THRESHOLD_M,
+        runway_code_number)
     from .grade_law import (
-        adjacent_ground_envelope, _ADJACENT_RUNWAY_ROLES,
-        _ADJACENT_TAXIWAY_ROLES)
+        adjacent_ground_envelope, adjacent_ground_supported_depths,
+        _ADJACENT_RUNWAY_ROLES, _ADJACENT_TAXIWAY_ROLES)
+    from .adjacent_ground import airside_seam_vertex_keys
+    from .emit_decimate import _key as _vertex_key
     from .layout import R_EARTH, taxi_shape_code_letter
     from .pavement.runways import _sample_runway_segment_elev
     from .elevation import _sample_dem
@@ -1101,13 +1322,26 @@ def check_adjacent_ground(layout, dem, tile_lat, tile_lon,
     if not scoped:
         return []
 
-    # The emitter's clip mirrored EXACTLY but indexed for point queries: a
-    # station is exempt when it sits within ``_PAVEMENT_GAP_M`` of ANY
-    # shape (== inside the emitter's ``static_union.buffer(gap)`` clip,
-    # incl. an emitted band) or outside the boundary.  An STRtree over the
-    # INDIVIDUAL polygons + a per-candidate distance test is ~orders faster
-    # than ``.covers`` on the single buffered union at a plateau airport
-    # where nearly every marched point is out-of-corridor.
+    # CONTINUATION-SEAM keys (user 2026-07-10, cross-shape run-end taper):
+    # vertices shared between two airside pavement shapes.  Computed exactly as
+    # the emitter (over the SAME airside roles, graded_strip bands excluded) so
+    # the daylight bench-in is suppressed at the identical terminal stations in
+    # both readers — lockstep (the emitter reads the SAME O4_SEAM_TAPER_PIN).
+    import os as _os
+    seam_keys = (airside_seam_vertex_keys(layout)
+                 if _os.environ.get("O4_SEAM_TAPER_PIN", "1") != "0"
+                 else set())
+
+    # Coverage exemption, indexed for point queries: a station is exempt
+    # when it sits within ``_PAVEMENT_GAP_M`` of ANY shape (incl. an
+    # emitted band) or outside the boundary.  The emitter clips EXACTLY
+    # since the 2026-07-09 weld ruling (no standoff), so the 1 m here is
+    # pure READ-side slack around shape edges — the march samples at 5 m
+    # stations, so it never decides more than a band-edge-adjacent
+    # column.  An STRtree over the INDIVIDUAL polygons + a per-candidate
+    # distance test is ~orders faster than ``.covers`` on a single
+    # buffered union at a plateau airport where nearly every marched
+    # point is out-of-corridor.
     static_geoms = [s.polygon for s in layout.shapes
                     if s.polygon is not None and not s.polygon.is_empty]
     if not static_geoms:
@@ -1246,7 +1480,28 @@ def check_adjacent_ground(layout, dem, tile_lat, tile_lon,
                          for x, y in coords]
 
         n_out = max(1, int(math.ceil(reach / step_m)))
-        worst = {}                     # kind -> (magnitude, x, y)
+        # Emitter obstruction TRIGGER for this family (the raw-scan gate, NOT
+        # the flagging tolerance): runway strips use the runway threshold, the
+        # taxiway + apron families the taxiway one — exactly
+        # ``adjacent_ground``'s ``trigger_by_family``.
+        trigger = (CLEARANCE_OBSTRUCTION_THRESHOLD_M["runway"]
+                   if env_role in _ADJACENT_RUNWAY_ROLES
+                   else CLEARANCE_OBSTRUCTION_THRESHOLD_M["taxiway"])
+
+        # STATION SEQUENCE — built exactly as the emitter's non-fan station
+        # generation so the daylight slope-limit law couples the SAME stations
+        # in both readers.  Every (edge, k) sample is a station; ``flag`` marks
+        # the ones the emitter would actually scan/grade (terrain-facing,
+        # non-END, both edge alts known).  END-edge and inside-facing stations
+        # stay in the sequence as depth-0 COUPLING nodes (the emitter carries
+        # them too, with a None edge reference) but are never flagged —
+        # dropping them would loosen the slope clamp at run boundaries near a
+        # runway end and flag columns the emitter's own clamp already benched
+        # away (lockstep).  Corner FANS are omitted: they share the corner
+        # coordinate (dist 0), so they never change a non-fan station's
+        # supported depth (see grade_law).
+        st_x, st_y, st_outn, st_ref, st_flag = [], [], [], [], []
+        st_seam = []
         for i in range(len(coords) - 1):
             eax, eay = coords[i]
             ebx, eby = coords[i + 1]
@@ -1256,71 +1511,125 @@ def check_adjacent_ground(layout, dem, tile_lat, tile_lon,
             outn = (u[1], -u[0]) if ccw else (-u[1], u[0])
             a0 = ring_alts[i]
             a1 = ring_alts[i + 1]
-            if a0 is None or a1 is None:
-                continue
-            # Runway END edges: the runway-end skirt law owns terrain
-            # beyond an end (its own governed length + lawful beyond-drop).
-            if (axis is not None
-                    and abs(outn[0] * axis[0] + outn[1] * axis[1])
-                    > CL._RING_END_NORMAL_DOT):
-                continue
+            # Runway END edges: the runway-end skirt law owns terrain beyond
+            # an end (its own governed length + lawful beyond-drop).
+            end_edge = (axis is not None
+                        and abs(outn[0] * axis[0] + outn[1] * axis[1])
+                        > CL._RING_END_NORMAL_DOT)
             seglen = math.hypot(ebx - eax, eby - eay)
             nseg = max(1, int(math.ceil(seglen / step_m)))
+            # Continuation-seam flags for this edge's stations — the SAME rule
+            # the emitter uses (k == 0 on ``coords[i]`` / k == nseg-1 before
+            # ``coords[i+1]``); mirrored so the daylight pins land identically.
+            edge_a_seam = _vertex_key(eax, eay) in seam_keys
+            edge_b_seam = _vertex_key(ebx, eby) in seam_keys
             for k in range(nseg):
                 t = k / nseg
                 sx = eax + (ebx - eax) * t
                 sy = eay + (eby - eay) * t
-                # Terrain-facing only (the emitter's own probe): an outward
-                # point already covered by a shape owns its own band.
-                if _inside_shape(sx + outn[0] * CL._RING_PROBE_M,
-                                 sy + outn[1] * CL._RING_PROBE_M):
+                ref = None
+                flag = False
+                # Terrain-facing, non-END, alts known → a scanned/flagged
+                # station; otherwise a depth-0 coupling node (the emitter's
+                # own probe: an outward point covered by a shape owns its band).
+                if (not end_edge and a0 is not None and a1 is not None
+                        and not _inside_shape(
+                            sx + outn[0] * CL._RING_PROBE_M,
+                            sy + outn[1] * CL._RING_PROBE_M)):
+                    ref = a0 + t * (a1 - a0)
+                    flag = True
+                st_x.append(sx)
+                st_y.append(sy)
+                st_outn.append(outn)
+                st_ref.append(ref)
+                st_flag.append(flag)
+                st_seam.append((k == 0 and edge_a_seam)
+                               or (k == nseg - 1 and edge_b_seam))
+
+        # RAW OUTWARD SCAN — the emitter's ``outer[i]``: the furthest distance
+        # the DEM breaches the corridor by more than the emitter TRIGGER, one
+        # step out, capped at the reach (fill breaches exist only inside the
+        # graded width, where the floor is finite).  One DEM march per station,
+        # cached so the tolerance flagging below re-samples nothing.
+        n_st = len(st_x)
+        fill_raw = [0.0] * n_st
+        cut_raw = [0.0] * n_st
+        marched = [None] * n_st        # station → [(d, offset, fo, co, qx, qy)]
+        for idx in range(n_st):
+            if not st_flag[idx]:
+                continue
+            sx, sy, outn, ref = (st_x[idx], st_y[idx],
+                                 st_outn[idx], st_ref[idx])
+            samples = []
+            last_fill = last_cut = 0.0
+            for j in range(1, n_out + 1):
+                d = min(reach - 1e-3, j * step_m)
+                floor_off, ceil_off = adjacent_ground_envelope(
+                    env_role, code_number, code_letter, d)
+                if floor_off is None and ceil_off is None:
+                    break              # at/beyond the reach — ungoverned
+                qx = sx + outn[0] * d
+                qy = sy + outn[1] * d
+                dd = _sample(qx, qy)
+                if dd is None:
                     continue
-                ref = a0 + t * (a1 - a0)
-                # March outward sampling only the DEM (cheap) to find this
-                # transect's WORST below-floor and above-ceiling deviation;
-                # the expensive point-in-polygon exemption then runs ONLY at
-                # those ≤2 candidates (bands are contiguous from the edge, so
-                # the deepest deviation is the representative one).
-                worst_below = None
-                worst_above = None
-                for j in range(1, n_out + 1):
-                    d = min(reach - 1e-3, j * step_m)
-                    floor_off, ceil_off = adjacent_ground_envelope(
-                        env_role, code_number, code_letter, d)
-                    if floor_off is None and ceil_off is None:
-                        break          # at/beyond the reach — ungoverned
-                    qx = sx + outn[0] * d
-                    qy = sy + outn[1] * d
-                    dd = _sample(qx, qy)
-                    if dd is None:
-                        continue
-                    offset = float(dd) - ref
-                    if (floor_off is not None
-                            and offset < floor_off - tolerance_m):
-                        mag = floor_off - offset      # metres below floor
-                        if worst_below is None or mag > worst_below[0]:
-                            worst_below = (mag, qx, qy)
-                    if (ceil_off is not None
-                            and offset > ceil_off + tolerance_m):
-                        mag = offset - ceil_off        # metres above ceiling
-                        if worst_above is None or mag > worst_above[0]:
-                            worst_above = (mag, qx, qy)
-                for kind, cand in (("should_fill", worst_below),
-                                   ("should_cut", worst_above)):
-                    if cand is None:
-                        continue
-                    mag, qx, qy = cand
-                    # Out of corridor — is this column the emitter's to
-                    # grade?  Covered (incl. by an emitted band) or outside
-                    # the boundary ⇒ nothing to flag (the emitter's clip).
-                    if _covered(qx, qy):
-                        continue
-                    if (prep_boundary is not None
-                            and not prep_boundary.covers(Point(qx, qy))):
-                        continue
-                    cur = worst.get(kind)
-                    if cur is None or mag > cur[0]:
-                        worst[kind] = (mag, qx, qy)
+                offset = float(dd) - ref
+                samples.append((d, offset, floor_off, ceil_off, qx, qy))
+                if floor_off is not None and offset < floor_off - trigger:
+                    last_fill = d
+                if ceil_off is not None and offset > ceil_off + trigger:
+                    last_cut = d
+            marched[idx] = samples
+            if last_fill > 0.0:
+                fill_raw[idx] = min(reach - 1e-3, last_fill + step_m)
+            if last_cut > 0.0:
+                cut_raw[idx] = min(reach - 1e-3, last_cut + step_m)
+
+        # DAYLIGHT slope-limit (the ONE law, in lockstep with the emitter's
+        # ``_build_*_bands`` clamp): a column BEYOND the supported depth is not
+        # the emitter's to grade, so it is EXEMPT; columns within it keep the
+        # tolerance flagging.
+        positions = list(zip(st_x, st_y))
+        supported_fill = adjacent_ground_supported_depths(
+            fill_raw, positions, st_seam)
+        supported_cut = adjacent_ground_supported_depths(
+            cut_raw, positions, st_seam)
+
+        worst = {}                     # kind -> (magnitude, x, y)
+        for idx in range(n_st):
+            if not st_flag[idx] or marched[idx] is None:
+                continue
+            sf = supported_fill[idx]
+            sc = supported_cut[idx]
+            worst_below = None
+            worst_above = None
+            for d, offset, floor_off, ceil_off, qx, qy in marched[idx]:
+                if (floor_off is not None and d <= sf
+                        and offset < floor_off - tolerance_m):
+                    mag = floor_off - offset          # metres below floor
+                    if worst_below is None or mag > worst_below[0]:
+                        worst_below = (mag, qx, qy)
+                if (ceil_off is not None and d <= sc
+                        and offset > ceil_off + tolerance_m):
+                    mag = offset - ceil_off            # metres above ceiling
+                    if worst_above is None or mag > worst_above[0]:
+                        worst_above = (mag, qx, qy)
+            for kind, cand in (("should_fill", worst_below),
+                               ("should_cut", worst_above)):
+                if cand is None:
+                    continue
+                mag, qx, qy = cand
+                # Out of corridor — is this column the emitter's to grade?
+                # Covered (incl. by an emitted band) or outside the boundary
+                # ⇒ nothing to flag (the emitter's clip).
+                if _covered(qx, qy):
+                    continue
+                if (prep_boundary is not None
+                        and not prep_boundary.covers(Point(qx, qy))):
+                    continue
+                cur = worst.get(kind)
+                if cur is None or mag > cur[0]:
+                    worst[kind] = (mag, qx, qy)
         ident = (s.ref or "").strip() or s.role
         for kind, (mag, qx, qy) in worst.items():
             out.append((kind, ident, mag, tolerance_m,

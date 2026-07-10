@@ -126,6 +126,71 @@ class TestFillBands:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Weld to pavement (user ruling 2026-07-09): the first band's inner row
+# sits AT the pavement edge (d = 0), and a vertex on the ring carries
+# the pavement edge value verbatim — no standoff groove, no rounding.
+# ──────────────────────────────────────────────────────────────────────
+class TestWeldToPavement:
+    def test_fill_band_inner_row_sits_on_the_ring(self):
+        stations, alts, outs = _straight_edge()
+        _, floor_depth, width, _ = _taxi_c_fns()
+        m = len(stations)
+        bands = AG._build_fill_bands(
+            stations, alts, outs, [width] * m, floor_depth,
+            {ADJACENT_GROUND_LIP_WIDTH_M}, TRIGGER, STEP,
+            lambda x, y: EDGE_ALT - 8.0)
+        assert bands
+        inner_ys = [vy for ring, _ in bands for _, vy in ring
+                    if abs(vy) < 1e-9]
+        assert inner_ys, "expected inner-row vertices AT the pavement edge"
+
+    def test_cut_band_inner_row_sits_on_the_ring(self):
+        stations, alts, outs = _straight_edge()
+        ceil_off, _, width, reach = _taxi_c_fns()
+        m = len(stations)
+        bands = AG._build_cut_bands(
+            stations, alts, outs, [reach] * m, ceil_off,
+            {ADJACENT_GROUND_LIP_WIDTH_M, width}, TRIGGER, STEP,
+            lambda x, y: EDGE_ALT + 6.0)
+        assert bands
+        at_edge = [(vy, a) for ring, ralts in bands
+                   for (_, vy), a in zip(ring, ralts) if abs(vy) < 1e-9]
+        assert at_edge, "expected inner-row vertices AT the pavement edge"
+        # The weld row carries the edge value (corridor at d=0 is [0,0]).
+        for _, a in at_edge:
+            assert a == pytest.approx(EDGE_ALT, abs=1e-6)
+
+    def test_weld_row_value_is_exact_and_flagged(self):
+        """A resampled vertex ON the ring returns the UNROUNDED edge
+        value with the weld flag set (emit consensus must be a no-op)."""
+        edge_alt = 99.87   # would round to 99.9 under the 0.1 band rule
+        ring = [(0.0, 0.0), (40.0, 0.0), (40.0, -40.0), (0.0, -40.0),
+                (0.0, 0.0)]
+        ring_alts = [edge_alt] * 5
+        width = taxiway_strip_graded_half_width_for_letter("C")
+
+        def envelope_at(d):
+            return adjacent_ground_envelope("taxiway", None, "C", d)
+
+        resample = AG._make_edge_projection_resampler(
+            ring, ring_alts, envelope_at, width,
+            lambda x, y: edge_alt - 8.0)
+        value, is_weld = resample(20.0, 0.0, "fill")
+        assert is_weld is True
+        assert value == pytest.approx(edge_alt, abs=1e-9)
+        off_value, off_weld = resample(20.0, 8.0, "fill")
+        assert off_weld is False
+
+    def test_dedup_ring_collapses_fan_corner_duplicates(self):
+        ring = [(0.0, 0.0), (0.0, 0.0), (0.0, 0.0),
+                (5.0, 3.0), (3.0, 5.0)]
+        alts = [1.0, 1.0, 1.0, 2.0, 3.0]
+        kept_ring, kept_alts = AG._dedup_ring(ring, alts)
+        assert kept_ring == [(0.0, 0.0), (5.0, 3.0), (3.0, 5.0)]
+        assert kept_alts == [1.0, 2.0, 3.0]
+
+
+# ──────────────────────────────────────────────────────────────────────
 # DEM inside the corridor → nothing
 # ──────────────────────────────────────────────────────────────────────
 def test_dem_inside_corridor_emits_nothing():
@@ -201,14 +266,14 @@ class TestClampIntoCorridor:
         d = 8.0     # zone 2, off the top edge (outward normal +y)
         _, ceiling_offset = adjacent_ground_envelope(
             "taxiway", None, "C", d)
-        assert resample(20.0, d, "cut") == pytest.approx(
+        assert resample(20.0, d, "cut")[0] == pytest.approx(
             EDGE_ALT + ceiling_offset, abs=0.06)
 
     def test_dem_below_floor_is_filled_to_the_floor(self):
         resample = self._resampler(EDGE_ALT - 10.0)
         d = 8.0
         floor_offset, _ = adjacent_ground_envelope("taxiway", None, "C", d)
-        assert resample(20.0, d, "fill") == pytest.approx(
+        assert resample(20.0, d, "fill")[0] == pytest.approx(
             EDGE_ALT + floor_offset, abs=0.06)
 
     def test_dem_inside_corridor_passes_through(self):
@@ -223,8 +288,8 @@ class TestClampIntoCorridor:
         assert (ceiling_offset - floor_offset) > 2 * AG._CORRIDOR_SNAP_TOL_M
         mid = EDGE_ALT + 0.5 * (floor_offset + ceiling_offset)
         resample = self._resampler(mid)
-        assert resample(20.0, d, "fill") == pytest.approx(mid, abs=0.06)
-        assert resample(20.0, d, "cut") == pytest.approx(mid, abs=0.06)
+        assert resample(20.0, d, "fill")[0] == pytest.approx(mid, abs=0.06)
+        assert resample(20.0, d, "cut")[0] == pytest.approx(mid, abs=0.06)
 
     def test_near_bound_dem_snaps_to_the_bound(self):
         """Triangle diet: a DEM within the snap band of a corridor bound
@@ -234,7 +299,7 @@ class TestClampIntoCorridor:
             "taxiway", None, "C", d)
         near_ceiling = EDGE_ALT + ceiling_offset - 0.05
         resample = self._resampler(near_ceiling)
-        assert resample(20.0, d, "cut") == pytest.approx(
+        assert resample(20.0, d, "cut")[0] == pytest.approx(
             EDGE_ALT + ceiling_offset, abs=0.06)
 
     def test_zone3_free_floor_keeps_deep_dem(self):
@@ -243,7 +308,7 @@ class TestClampIntoCorridor:
         width = taxiway_strip_graded_half_width_for_letter("C")
         d = width + 10.0
         resample = self._resampler(EDGE_ALT - 30.0)
-        assert resample(20.0, d, "cut") == pytest.approx(
+        assert resample(20.0, d, "cut")[0] == pytest.approx(
             EDGE_ALT - 30.0, abs=0.06)
 
     def test_fill_piece_never_crosses_the_width_discontinuity(self):
@@ -255,7 +320,7 @@ class TestClampIntoCorridor:
             "taxiway", None, "C", width)
         resample = self._resampler(EDGE_ALT - 30.0)
         just_past = width + 0.05
-        assert resample(20.0, just_past, "fill") == pytest.approx(
+        assert resample(20.0, just_past, "fill")[0] == pytest.approx(
             EDGE_ALT + floor_at_width, abs=0.06)
 
 
@@ -308,3 +373,116 @@ def test_apron_wall_fires_only_past_the_drop_threshold():
     assert deep.shapes
     from auto_patch.layout import ROLE_RETAINING_WALL
     assert all(s.role == ROLE_RETAINING_WALL for s in deep.shapes)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# DAYLIGHT slope-limit law (grade_law.adjacent_ground_supported_depths)
+# ──────────────────────────────────────────────────────────────────────
+class TestDaylightSupportedDepths:
+    """The along-frontage benching law that kills the isolated-ray knife
+    slot (CYXY 417).  Stations march at STEP (5 m) along y=0."""
+
+    @staticmethod
+    def _line_positions(n, spacing=STEP):
+        return [(k * spacing, 0.0) for k in range(n)]
+
+    def test_isolated_deep_spike_clamps_to_slope_limit_scale(self):
+        """A single 156 m ray among 0-depth neighbours one station (5 m)
+        away is benched to ~LIMIT * spacing — a shallow entry, not a
+        knife-slot blade."""
+        from auto_patch.grade_law import adjacent_ground_supported_depths
+        from auto_patch.config import ADJACENT_GROUND_DAYLIGHT_SLOPE_LIMIT
+        depths = [0.0, 0.0, 156.0, 0.0, 0.0]
+        pos = self._line_positions(len(depths))
+        out = adjacent_ground_supported_depths(depths, pos)
+        # The spike is clamped from BOTH flanking zeros at 5 m spacing.
+        expected = ADJACENT_GROUND_DAYLIGHT_SLOPE_LIMIT * STEP
+        assert out[2] == pytest.approx(expected)          # 2.0 * 5 = 10 m
+        # The 156 m blade is gone; the neighbours are untouched (0).
+        assert out[2] < 156.0
+        assert out[0] == out[1] == out[3] == out[4] == 0.0
+
+    def test_two_station_spike_benches_in_from_both_sides(self):
+        """Two adjacent deep stations among zeros: each is benched from its
+        nearer flank, so the pair ramps in at the slope limit rather than
+        standing as a 156 m twin blade."""
+        from auto_patch.grade_law import adjacent_ground_supported_depths
+        from auto_patch.config import ADJACENT_GROUND_DAYLIGHT_SLOPE_LIMIT
+        depths = [0.0, 156.0, 156.0, 0.0]
+        pos = self._line_positions(len(depths))
+        out = adjacent_ground_supported_depths(depths, pos)
+        step_allow = ADJACENT_GROUND_DAYLIGHT_SLOPE_LIMIT * STEP
+        # Station 1 benches up from the left zero, station 2 from the right.
+        assert out[1] == pytest.approx(step_allow)
+        assert out[2] == pytest.approx(step_allow)
+        assert max(out) < 156.0
+
+    def test_wide_hill_is_unchanged(self):
+        """A genuine hill rising 10 m of governed depth per 5 m station over
+        10 stations is a supported daylight line (slope 2.0 = the limit),
+        so the law leaves every depth untouched."""
+        from auto_patch.grade_law import adjacent_ground_supported_depths
+        depths = [10.0 * k for k in range(10)]        # 0, 10, 20, … 90
+        pos = self._line_positions(len(depths))       # 5 m apart → slope 2.0
+        out = adjacent_ground_supported_depths(depths, pos)
+        assert out == pytest.approx(depths)
+
+    def test_fan_stations_share_position_gain_no_allowance(self):
+        """Corner-fan stations share ONE coordinate (dist 0), so a fan ray
+        earns NO extra allowance over its corner — a deep fan flanked by a
+        0-depth corner is clamped straight to 0 (the CYXY 417 fan blade)."""
+        from auto_patch.grade_law import adjacent_ground_supported_depths
+        # Station 0 unobstructed corner; stations 1-2 fan rays at the SAME
+        # corner coordinate marching deep; station 3 back on the next edge.
+        depths = [0.0, 120.0, 120.0, 0.0]
+        pos = [(0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (STEP, 0.0)]
+        out = adjacent_ground_supported_depths(depths, pos)
+        # Zero-distance to the 0-depth corner ⇒ the fans clamp to 0.
+        assert out[1] == pytest.approx(0.0)
+        assert out[2] == pytest.approx(0.0)
+
+    def test_symmetric_under_reversal(self):
+        """The forward+backward sweep is reversal-invariant: limiting a
+        sequence then reversing equals reversing then limiting."""
+        from auto_patch.grade_law import adjacent_ground_supported_depths
+        depths = [0.0, 3.0, 156.0, 12.0, 0.0, 40.0]
+        pos = self._line_positions(len(depths))
+        fwd = adjacent_ground_supported_depths(depths, pos)
+        rev = adjacent_ground_supported_depths(
+            depths[::-1], pos[::-1])
+        assert fwd == pytest.approx(rev[::-1])
+
+    def test_continuation_seam_terminal_holds_raw_depth(self):
+        """A deep terminal station at a pavement-PARTITION seam (the run ends
+        because an abutting airside shape continues the frontage, not because
+        the frontage ends) is pinned to its raw depth — it must NOT bench in
+        toward its own locally-unobstructed interior neighbour, so it agrees
+        with the abutting shape's full-depth terminal (no seam notch)."""
+        from auto_patch.grade_law import adjacent_ground_supported_depths
+        # Stations march inward → seam.  The interior shallows to 0; the
+        # terminal (index 3) sits at the seam at full depth 12.5.
+        depths = [0.0, 4.0, 8.0, 12.5]
+        pos = self._line_positions(len(depths))
+        seam = [False, False, False, True]
+        out = adjacent_ground_supported_depths(depths, pos, seam)
+        # Pinned terminal holds full depth (unpinned it would bench toward the
+        # interior ramp).
+        assert out[3] == pytest.approx(12.5)
+        # The interior stays supported (the deep seam seeds the ramp), not
+        # dragged below its raw values.
+        assert out == pytest.approx(depths)
+
+    def test_continuation_seam_default_off_still_benches(self):
+        """With no seam flags (the default / a TRUE frontage end) the deep
+        terminal benches exactly as the daylight law — the pin is opt-in."""
+        from auto_patch.grade_law import adjacent_ground_supported_depths
+        from auto_patch.config import ADJACENT_GROUND_DAYLIGHT_SLOPE_LIMIT
+        depths = [0.0, 0.0, 0.0, 12.5]
+        pos = self._line_positions(len(depths))
+        unpinned = adjacent_ground_supported_depths(depths, pos)
+        # The isolated deep terminal benches toward its 0-depth neighbour.
+        assert unpinned[3] == pytest.approx(
+            ADJACENT_GROUND_DAYLIGHT_SLOPE_LIMIT * STEP)
+        # A None flag list is identical to omitting it.
+        assert adjacent_ground_supported_depths(
+            depths, pos, None) == pytest.approx(unpinned)

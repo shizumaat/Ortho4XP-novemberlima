@@ -352,6 +352,32 @@ def _run_build_tasks(tasks: list, tile, auto_patched: list,
     UI.auto_patch_begin([t["icao"] for t in tasks])
 
     results: list[dict] = []
+    # Airports whose done/fail row state was already sent as their build
+    # finished (the ordered results loop below must not send a second
+    # terminal event — update_airport would recreate the row a finished
+    # airport already vacated).
+    _progress_reported: set[str] = set()
+
+    def _report_terminal(r: dict) -> None:
+        # Send an airport's done/fail row state the moment its build
+        # ends — the ordered results loop only runs after EVERY airport
+        # finishes, and a completed row must not sit at its last phase
+        # until the slowest airport in the tile completes.
+        _ricao = r.get("icao")
+        if not _ricao:
+            return
+        _progress_reported.add(_ricao)
+        if r.get("ok"):
+            UI.auto_patch_progress(
+                _ricao, 1, 1,
+                "Done ({:.1f}s)".format(r.get("build_s", 0.0)),
+                status="done")
+        else:
+            UI.auto_patch_progress(
+                _ricao, 1, 1,
+                "FAILED ({})".format(r.get("stage", "?")),
+                status="fail")
+
     if _cfg.PARALLEL_AIRPORTS and len(tasks) > 1:
         import concurrent.futures as _cf
         import multiprocessing as _mp
@@ -394,15 +420,21 @@ def _run_build_tasks(tasks: list, tile, auto_patched: list,
                     _drain_progress()
                     for fut in done:
                         try:
-                            results.append(fut.result())
+                            r = fut.result()
                         except Exception as _e:         # a worker died hard
-                            results.append({"icao": None, "ok": False,
-                                            "stage": "worker", "error": str(_e)})
+                            r = {"icao": None, "ok": False,
+                                 "stage": "worker", "error": str(_e)}
+                        results.append(r)
+                        _report_terminal(r)
                 _drain_progress()                        # flush trailing events
         except Exception as _e:      # pool/manager setup failed → serial fallback
             UI.lvprint(0, "   Auto-patch: parallel build unavailable (",
                        str(_e), ") — falling back to serial.")
-            results = [_build_write_verify_one(t) for t in tasks]
+            results = []
+            for t in tasks:
+                r = _build_write_verify_one(t)
+                results.append(r)
+                _report_terminal(r)
         finally:
             if mgr is not None:
                 try:
@@ -410,7 +442,11 @@ def _run_build_tasks(tasks: list, tile, auto_patched: list,
                 except Exception:
                     pass
     else:
-        results = [_build_write_verify_one(t) for t in tasks]
+        results = []
+        for t in tasks:
+            r = _build_write_verify_one(t)
+            results.append(r)
+            _report_terminal(r)
 
     # Process results in TASK order (stable logs / auto_patched ordering).
     by_icao = {r.get("icao"): r for r in results if r.get("icao")}
@@ -420,8 +456,10 @@ def _run_build_tasks(tasks: list, tile, auto_patched: list,
         icao = t["icao"]
         if not r.get("ok"):
             stage = r.get("stage", "?")
-            UI.auto_patch_progress(icao, 1, 1, "FAILED ({})".format(stage),
-                                   status="fail")
+            if icao not in _progress_reported:
+                UI.auto_patch_progress(icao, 1, 1,
+                                       "FAILED ({})".format(stage),
+                                       status="fail")
             if stage == "write":
                 UI.lvprint(0, "   Auto-patch: Failed to write",
                            t["auto_patch_file"], ":", r.get("error"))
@@ -455,9 +493,10 @@ def _run_build_tasks(tasks: list, tile, auto_patched: list,
                 os.remove(part)
             except OSError:
                 pass
-        UI.auto_patch_progress(icao, 1, 1,
-                               "Done ({:.1f}s)".format(r["build_s"]),
-                               status="done")
+        if icao not in _progress_reported:
+            UI.auto_patch_progress(icao, 1, 1,
+                                   "Done ({:.1f}s)".format(r["build_s"]),
+                                   status="done")
         UI.lvprint(0, "   Auto-patch:", icao,
                    f"took {r['build_s']:.1f}s (verify {r['verify_s']:.1f}s)")
 

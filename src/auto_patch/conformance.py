@@ -450,6 +450,15 @@ def enforce_conformance(layout: "PavementLayout",
             tjs = _tjunctions_on_edge(ax, ay, bx, by, cands, tol)
             _recv_overlay = getattr(s, "ref", None) in _OVERLAY_REFS
             for t, (px, py) in tjs:
+                # A candidate near a shallow corner can qualify on TWO
+                # edges of this ring; inserting it twice self-touches
+                # the ring, the rebuild goes invalid, and the bail
+                # below used to discard EVERY insertion for the shape
+                # (the immortal-T-vertex class: dense welded rings
+                # never conformed).  First edge wins.
+                if (px, py) in ownset:
+                    continue
+                ownset.add((px, py))
                 new_ring.append((px, py))
                 if new_alts is not None:
                     _da = (donor_alt.get((px, py))
@@ -464,10 +473,18 @@ def enforce_conformance(layout: "PavementLayout",
                 inserted_here += 1
         if not inserted_here:
             continue
-        # Rebuild the polygon; bail (leave shape untouched) if invalid.
+        # Rebuild the polygon; bail (leave shape untouched) if invalid —
+        # LOUDLY: a bailed shape keeps every T-vertex it should have
+        # welded, and the un-welded nodes Ruppert-explode the tile mesh.
         try:
             new_poly = Polygon(new_ring)
             if not new_poly.is_valid or new_poly.is_empty:
+                import O4_UI_Utils as UI
+                UI.vprint(1,
+                    f"  [conformance] WARN: {s.role}/"
+                    f"{getattr(s, 'ref', None)}: rebuilt ring invalid "
+                    f"after {inserted_here} T-vertex insert(s) — shape "
+                    f"left UNWELDED (mesh-sliver risk).")
                 continue
         except Exception:
             continue
@@ -739,3 +756,70 @@ def planarize_airside(layout: "PavementLayout", icao: str = "",
         except Exception:
             pass
     return len(tj), len(cr)
+
+
+def densify_long_edges(layout, roles, max_edge_m: float = 60.0) -> int:
+    """Insert mid-edge vertices on over-long exterior-ring edges of the
+    given roles BEFORE the solve (user in-sim finding 2026-07-09: a
+    construction-born 1,279 m junction edge gave the solver nothing to
+    hold the pavement edge with, and the mesh sagged between the distant
+    nodes toward the neighbouring graded strips).  Pre-solve: inserted
+    vertices become solver nodes, so the edge profile is LAW-solved, not
+    interpolated.  ``node_altitudes``, when present, gain the linear
+    interpolation to stay index-aligned.  Returns vertices inserted."""
+    import math as _math
+    from shapely.geometry import Polygon as _Polygon
+    inserted = 0
+    for s in layout.shapes:
+        if (s.role not in roles or s.polygon is None
+                or s.polygon.is_empty
+                or s.polygon.geom_type != "Polygon"):
+            continue
+        ring = list(s.polygon.exterior.coords)
+        closed = bool(ring) and ring[0] == ring[-1]
+        if closed:
+            ring = ring[:-1]
+        n = len(ring)
+        if n < 3:
+            continue
+        alts = None
+        if s.node_altitudes and len(s.node_altitudes) >= n:
+            alts = list(s.node_altitudes[:n])
+        new_ring = []
+        new_alts = [] if alts is not None else None
+        changed = False
+        for i in range(n):
+            ax, ay = ring[i]
+            bx, by = ring[(i + 1) % n]
+            new_ring.append((ax, ay))
+            if new_alts is not None:
+                new_alts.append(alts[i])
+            L = _math.hypot(bx - ax, by - ay)
+            if L <= max_edge_m:
+                continue
+            cuts = int(_math.ceil(L / max_edge_m))
+            for k in range(1, cuts):
+                t = k / cuts
+                new_ring.append((ax + (bx - ax) * t,
+                                 ay + (by - ay) * t))
+                if new_alts is not None:
+                    a0 = alts[i]
+                    a1 = alts[(i + 1) % n]
+                    new_alts.append(
+                        a0 + (a1 - a0) * t
+                        if a0 is not None and a1 is not None
+                        else a0)
+                inserted += 1
+                changed = True
+        if not changed:
+            continue
+        try:
+            poly = _Polygon(new_ring)
+            if not poly.is_valid or poly.is_empty:
+                continue
+        except Exception:
+            continue
+        s.polygon = poly
+        if new_alts is not None:
+            s.node_altitudes = new_alts + [new_alts[0]]
+    return inserted

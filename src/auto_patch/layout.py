@@ -100,6 +100,15 @@ SHARED_VERTEX_TOL_M = 0.5    # snap vertices closer than this together
 # must stay as distinct vertices so X-Plane renders the step.
 VERTEX_ALT_MERGE_TOL_M = 1.0
 
+# PAVEMENT-NODE RULE (user 2026-07-09): a pavement edge keeps a node
+# every ~60 m so the elevation solver holds the edge at its solved
+# grade — a longer chord lets the pavement sag visibly between distant
+# nodes.  The emit-time decimation must never leave an airside-pavement
+# chord longer than this (a fine-densified straight run collapsed a CYXY
+# junction edge to 1,056 m before this bound was enforced across the
+# whole run, not just per single-vertex removal).
+PAVEMENT_NODE_MAX_CHORD_M = 60.0
+
 
 def vertex_bucket(x: float, y: float,
                   tol: float = SHARED_VERTEX_TOL_M) -> "tuple[int, int]":
@@ -224,6 +233,16 @@ ROLE_GRADED_STRIP = "graded_strip"
 # solver or any mutation pass — flat by law, no within-shape grade rule.
 ROLE_BRIDGE_TRENCH = "bridge_trench"
 ROLE_BRIDGE_CAUSEWAY = "bridge_causeway"
+
+# SOFT RECEIVERS (weld ruling 2026-07-09): terrain-grading roles whose
+# values ADOPT from pavement / solver-owned shapes at shared vertices —
+# value authorities never move (user ruling: the PAVEMENT value always
+# wins at a pavement node).  Single source for the emit consensus in
+# ``to_osm`` and the emitters' weld-value adoption.
+SOFT_RECEIVER_ROLES = frozenset({
+    ROLE_GRADED_STRIP, ROLE_RUNWAY_CLEARANCE,
+    ROLE_TAXIWAY_CLEARANCE, ROLE_RETAINING_WALL, ROLE_BOUNDARY,
+})
 
 AEROWAY_FOR_ROLE = {
     ROLE_RUNWAY: "runway",
@@ -518,7 +537,25 @@ class PavementLayout:
         # Accumulate every altitude contributed to each node so the
         # post-intern consensus pass can average them.
         node_id_to_alts: dict[int, list[float]] = {}
+        # VALUE-AUTHORITY claims (weld ruling 2026-07-09): altitudes
+        # contributed by pavement / solver-owned shapes.  A node with any
+        # authority claim takes the mean of the AUTHORITY claims only —
+        # terrain-grading strips (graded_strip / clearance / skirt /
+        # retaining_wall / boundary) now WELD onto pavement rings, and a
+        # plain all-claims mean would let a strip's near-miss value MOVE
+        # a runway ring vertex (the A2 doctrine at emit: authorities
+        # never adopt; soft receivers adopt).
+        node_id_to_authority_alts: dict[int, list[float]] = {}
+        _SOFT_RECEIVER_ROLES = SOFT_RECEIVER_ROLES
+        current_shape_is_soft = [False]
+        current_shape_is_strip = [False]
         next_nid = [-1]
+
+        def _record_claim(nid: int, alt: float) -> None:
+            node_id_to_alts.setdefault(nid, []).append(alt)
+            if not current_shape_is_soft[0]:
+                node_id_to_authority_alts.setdefault(
+                    nid, []).append(alt)
 
         def _intern(x: float, y: float,
                     alt: float | None = None) -> int:
@@ -530,13 +567,29 @@ class PavementLayout:
                 for nid, claimed in existing:
                     if alt is None or claimed is None:
                         if alt is not None:
-                            node_id_to_alts.setdefault(
-                                nid, []).append(alt)
+                            _record_claim(nid, alt)
                         return nid
                     if abs(claimed - alt) <= VERTEX_ALT_MERGE_TOL_M:
-                        node_id_to_alts.setdefault(
-                            nid, []).append(alt)
+                        _record_claim(nid, alt)
                         return nid
+                # PAVEMENT WINS at a pavement node (user ruling
+                # 2026-07-09): a graded strip NEVER emits a wall twin
+                # against an authority-claimed node — its vertex only
+                # coincides with the pavement corner through the
+                # canonical bucket (the layout-level coordinates can
+                # be decimetres apart, so the emitter's registry
+                # adoption cannot see it), and the fresh-nid path
+                # minted an unmerged-node cliff (CYXY junction #111,
+                # Δ1.71 m).  Adopt the authority node; the soft claim
+                # joins the plain mean only (the authority-aware
+                # consensus ignores it), so the strip surface bends
+                # to the pavement value.  Deliberate walls
+                # (retaining_wall, skirt lifts) keep the twin path.
+                if current_shape_is_strip[0]:
+                    for nid, _claimed in existing:
+                        if node_id_to_authority_alts.get(nid):
+                            _record_claim(nid, alt)
+                            return nid
                 # No altitude match: real wall / cliff.  Allocate
                 # a fresh node at the SAME canonical lat/lon so
                 # X-Plane renders the vertical step between
@@ -550,6 +603,8 @@ class PavementLayout:
             node_id_to_ll[nid] = self.m_to_ll(key[0], key[1])
             if alt is not None:
                 node_id_to_alts[nid] = [alt]
+                if not current_shape_is_soft[0]:
+                    node_id_to_authority_alts[nid] = [alt]
             return nid
 
         def _ring_to_nids(ring_coords, ring_elevs=None):
@@ -654,7 +709,26 @@ class PavementLayout:
         # the validation loop's last iteration.
         pending: list = []
         next_wid = [-10001]
+        # Node ids removed by the per-shape sliver-corner repair below —
+        # consumed by the chain-consistent post-pass after the loop.
+        emit_removed_nids: set = set()
         for s_idx, s in enumerate(self.shapes):
+            # Authority flag for the value-consensus pass: terrain
+            # strips are SOFT receivers, everything else is a value
+            # authority (see node_id_to_authority_alts above).
+            current_shape_is_soft[0] = s.role in _SOFT_RECEIVER_ROLES
+            # Legacy surface_clearance strips share the graded-strip
+            # adoption path: their inner row is defined to sit AT the
+            # pavement edge with pavement values verbatim, so a
+            # >VERTEX_ALT_MERGE_TOL_M foreign terrain read must adopt
+            # the authority node, not mint a cliff twin.  Skirts
+            # (ref runway_end_skirt) and deliberate walls keep the
+            # twin path.
+            current_shape_is_strip[0] = (
+                s.role == ROLE_GRADED_STRIP
+                or (s.ref == "surface_clearance"
+                    and s.role in (ROLE_TAXIWAY_CLEARANCE,
+                                   ROLE_RUNWAY_CLEARANCE)))
             # Validate the polygon's geometry before emission.
             # Upstream pipeline stages (decomposition, seam-point
             # injection, shared-vertex enforcement) can occasionally
@@ -793,6 +867,23 @@ class PavementLayout:
                             worst_vi = vi
                     if worst_vi is None:
                         break
+                    # Record for the chain-consistent post-pass (weld
+                    # ruling 2026-07-09): welded seams share vertex
+                    # chains coordinate-exactly, so a needle removed
+                    # from ONE way must also leave every partner way
+                    # where it is near-collinear — else the two chains
+                    # diverge by the needle height (≤9 cm) and the
+                    # near-parallel constrained pair Ruppert-explodes
+                    # the tile (CYXY weld bake: 26.7k → 1.55M airport
+                    # triangles, hotspots at the repair sites).
+                    # (A projection-onto-chord repair was measured and
+                    # REJECTED 2026-07-09: most needle tips sit on a
+                    # welded HOST edge whose ring does not reference
+                    # the nid, and moving the tip pulls the chain off
+                    # the host — near-parallel pairs 136 → 200.
+                    # Removal keeps the surviving chord ON a straight
+                    # host edge.)
+                    emit_removed_nids.add(work_nids[worst_vi])
                     del ring_m[worst_vi]
                     del work_ring[worst_vi]
                     del work_nids[worst_vi]
@@ -903,19 +994,393 @@ class PavementLayout:
             pending.append((s_idx, s, ext_nids,
                             shape_altitude, shape_node_altitudes))
 
+        # ── Chain-consistent needle removal (weld ruling 2026-07-09) ──
+        # A vertex the sliver-corner repair removed from one way must
+        # also leave every OTHER way that passes through it NEAR-
+        # COLLINEARLY (within the needle height, 0.09 m of its
+        # neighbour chord) — welded seams share vertex chains, and a
+        # one-sided removal diverges the two constrained chains into a
+        # near-parallel sliver lens that Ruppert-refines to machine
+        # epsilon.  A partner where the vertex is a REAL corner keeps
+        # it (never deform genuine geometry; that seam keeps its
+        # sliver — rare, logged by the epsilon-wedge tripwire).
+        if emit_removed_nids:
+            n_chain = 0
+            for p_i, (s_idx, s, ext_nids, sa, sna) in enumerate(pending):
+                open_nids = ext_nids[:-1]
+                if not any(nid in emit_removed_nids for nid in open_nids):
+                    continue
+                kept = list(open_nids)
+                changed = True
+                while changed and len(kept) > 3:
+                    changed = False
+                    m = len(kept)
+                    for k in range(m):
+                        nid = kept[k]
+                        if nid not in emit_removed_nids:
+                            continue
+                        la0, lo0 = node_id_to_ll[kept[(k - 1) % m]]
+                        la1, lo1 = node_id_to_ll[nid]
+                        la2, lo2 = node_id_to_ll[kept[(k + 1) % m]]
+                        ax, ay = self.ll_to_m(la0, lo0)
+                        bx, by = self.ll_to_m(la1, lo1)
+                        cx, cy = self.ll_to_m(la2, lo2)
+                        dx, dy = cx - ax, cy - ay
+                        seg2 = dx * dx + dy * dy
+                        if seg2 < 1e-12:
+                            continue
+                        t = ((bx - ax) * dx + (by - ay) * dy) / seg2
+                        t = min(1.0, max(0.0, t))
+                        perp = math.hypot(bx - (ax + t * dx),
+                                          by - (ay + t * dy))
+                        if perp <= 0.09:
+                            del kept[k]
+                            n_chain += 1
+                            changed = True
+                            break
+                if len(kept) >= 3 and len(kept) < len(open_nids):
+                    pending[p_i] = (s_idx, s, kept + [kept[0]], sa, sna)
+            if n_chain:
+                UI.vprint(1,
+                    f"  [pav-builder] chain-consistent needle removal: "
+                    f"dropped {n_chain} partner vertex(es) so welded "
+                    f"seam chains stay identical.")
+
+        # ── NID-LEVEL FINAL WELD (chain identity, 2026-07-09) ────
+        # The canonical-point interning above can move a vertex
+        # SIDEWAYS (0.5 m bucket) after the layout-level conformance
+        # weld ran, and the needle/dedup repairs mutate ways per-
+        # shape — so the T-vertex weld re-runs HERE, on the final nid
+        # rings at the final coordinates: any nid lying on another
+        # way's edge interior is inserted into that way.  Nid-level:
+        # no new geometry is minted and the node's consensus altitude
+        # rides along, so the constrained chains Triangle4XP sees are
+        # identical by construction (one unwelded on-edge node
+        # Ruppert-refines to ~10⁵-10⁶ tile triangles — measured at
+        # CYXY 2026-07-09).  This must stay the LAST geometry-
+        # affecting step of emission.
+        _WELD_TOL_M = 0.005
+        _cell_m = 1.0
+        _nid_xy: dict[int, tuple[float, float]] = {}
+        _grid: dict[tuple[int, int], list[int]] = {}
+        for _p_i, (_si, _s, _enids, _sa, _sna) in enumerate(pending):
+            for _nid in _enids[:-1]:
+                if _nid in _nid_xy:
+                    continue
+                _la, _lo = node_id_to_ll[_nid]
+                _xy = self.ll_to_m(_la, _lo)
+                _nid_xy[_nid] = _xy
+                _ck = (int(_xy[0] // _cell_m), int(_xy[1] // _cell_m))
+                _grid.setdefault(_ck, []).append(_nid)
+        _n_weld = 0
+        for _p_i, (_si, _s, _enids, _sa, _sna) in enumerate(pending):
+            open_nids = _enids[:-1]
+            member = set(open_nids)
+            out: list[int] = []
+            changed = False
+            m_open = len(open_nids)
+            for k in range(m_open):
+                n0 = open_nids[k]
+                n1 = open_nids[(k + 1) % m_open]
+                out.append(n0)
+                ax, ay = _nid_xy[n0]
+                bx, by = _nid_xy[n1]
+                dx, dy = bx - ax, by - ay
+                L2 = dx * dx + dy * dy
+                if L2 < 1e-12:
+                    continue
+                L = math.sqrt(L2)
+                # collect grid cells along the segment
+                cand: set[int] = set()
+                steps = max(1, int(L / _cell_m) + 1)
+                for st in range(steps + 1):
+                    qx = ax + dx * st / steps
+                    qy = ay + dy * st / steps
+                    c0 = int(qx // _cell_m)
+                    c1 = int(qy // _cell_m)
+                    for oi in (-1, 0, 1):
+                        for oj in (-1, 0, 1):
+                            cand.update(
+                                _grid.get((c0 + oi, c1 + oj), ()))
+                hits = []
+                for nid in cand:
+                    px, py = _nid_xy[nid]
+                    t = ((px - ax) * dx + (py - ay) * dy) / L2
+                    if t <= 0.0 or t >= 1.0:
+                        continue
+                    if t * L < _WELD_TOL_M or (1.0 - t) * L < _WELD_TOL_M:
+                        continue
+                    perp = abs((px - ax) * dy - (py - ay) * dx) / L
+                    if perp >= _WELD_TOL_M:
+                        continue
+                    hits.append((t, nid))
+                for _t, nid in sorted(hits):
+                    if nid in member:
+                        # The way already passes through this node
+                        # ELSEWHERE (a multi-way collinear seam that
+                        # revisits the coordinate).  A repeated nid is
+                        # a figure-8 the ring dedup forbids — but
+                        # SKIPPING leaves the exact T-vertex that
+                        # Ruppert-explodes (measured: one such seam =
+                        # 673k triangles).  Insert a COORDINATE-TWIN
+                        # nid instead: same canonical lat/lon and the
+                        # same claims, so the mesh (which keys nodes
+                        # by exact coordinates) welds the chains into
+                        # one vertex while the OSM ring stays
+                        # duplicate-free.
+                        twin = next_nid[0]
+                        next_nid[0] -= 1
+                        node_id_to_ll[twin] = node_id_to_ll[nid]
+                        if nid in node_id_to_alts:
+                            node_id_to_alts[twin] = list(
+                                node_id_to_alts[nid])
+                        if nid in node_id_to_authority_alts:
+                            node_id_to_authority_alts[twin] = list(
+                                node_id_to_authority_alts[nid])
+                        _nid_xy[twin] = _nid_xy[nid]
+                        out.append(twin)
+                        member.add(twin)
+                    else:
+                        out.append(nid)
+                        member.add(nid)
+                    changed = True
+                    _n_weld += 1
+            if changed and len(out) >= 3:
+                pending[_p_i] = (_si, _s, out + [out[0]], _sa, _sna)
+        if _n_weld:
+            UI.vprint(1,
+                f"  [pav-builder] nid-level final weld: inserted "
+                f"{_n_weld} on-edge node reference(s) into welded "
+                f"partner ways.")
+
         # ── Consensus pass ──────────────────────────────────────
         # For each node id we now have every altitude any shape
         # contributed.  The consensus altitude is the mean — used
         # by the tag-writing pass below to enforce that every shape
-        # touching a node agrees on the corner's altitude.
+        # touching a node agrees on the corner's altitude.  AUTHORITY
+        # claims win (weld ruling 2026-07-09): when pavement / solver
+        # shapes claimed the node, soft terrain-strip claims are
+        # excluded from the mean, so a welded strip ADOPTS the pavement
+        # corner value and never moves it.
         node_id_to_consensus: dict[int, float | None] = {}
         for nid, alts in node_id_to_alts.items():
-            if alts:
+            authority = node_id_to_authority_alts.get(nid)
+            chosen = authority if authority else alts
+            if chosen:
                 node_id_to_consensus[nid] = (
-                    sum(alts) / float(len(alts)))
+                    sum(chosen) / float(len(chosen)))
 
         def _corner_alt(nid: int) -> float | None:
             return node_id_to_consensus.get(nid)
+
+        # ── CHAIN-AWARE FINAL DECIMATION (slice C, 2026-07-09) ────
+        # After the welds/adoptions, pavement rings carry thousands of
+        # 3D-REDUNDANT vertices (collinear in XY AND on the altitude
+        # lerp — measured 4,470 of 4,687 mid-edge pavement vertices at
+        # CYXY): emit decimation runs BEFORE the welds pin them via
+        # shared references, and nothing decimated after.  A vertex is
+        # removed ONLY when it is redundant in EVERY pending way that
+        # references it, and then removed from ALL of them in the same
+        # sweep — shared chains stay identical by construction (a
+        # one-sided removal is the Ruppert lens class).  Real profile
+        # nodes (crown drops, solver stations) fail the altitude-lerp
+        # test and stay.  Tolerances per the 2026-07-09 precision
+        # ruling (grading under pavement, no centimetre fidelity).
+        _DEC_PERP_M = 0.02
+        _DEC_ALT_M = 0.10
+        # Max chord a removal may leave (pavement-node rule, module
+        # constant PAVEMENT_NODE_MAX_CHORD_M).  The per-single-vertex
+        # check below is necessary but NOT sufficient: a bulk sweep
+        # removes an entire fine-densified straight run at once — each
+        # vertex passes the check against its ~2 m immediate neighbours,
+        # yet the run collapses to one chord far longer than the cap
+        # (a CYXY junction edge reached 1,056 m).  The retention pass
+        # after the redundancy scan enforces the cap over the whole run.
+        _DEC_MAX_CHORD_M = PAVEMENT_NODE_MAX_CHORD_M
+        _n_chord_retained = 0
+        for _sweep in range(4):
+            # Group by COORDINATE, not nid: coincident twin nids (wall
+            # splits, the weld's coordinate-twins) must be removed
+            # unanimously or kept unanimously — dropping one twin's
+            # ways while another's keep the coordinate leaves a chord
+            # passing exactly through the survivor (an exact T-vertex,
+            # the lens class).
+            _occ: dict[tuple, list[tuple[int, int, int]]] = {}
+            _multi: set[tuple] = set()
+            for _p_i, (_si, _s, _enids, _sa, _sna) in enumerate(pending):
+                _open = _enids[:-1]
+                _seen_local: set[tuple] = set()
+                for _pos, _nid in enumerate(_open):
+                    _ll = node_id_to_ll[_nid]
+                    if _ll in _seen_local:
+                        _multi.add(_ll)
+                    _seen_local.add(_ll)
+                    _occ.setdefault(_ll, []).append((_p_i, _pos, _nid))
+            _removable_ll: set[tuple] = set()
+            for _ll, _sites in _occ.items():
+                if _ll in _multi:
+                    continue
+                _a1 = None
+                for _p_i, _pos, _nid in _sites:
+                    _v = node_id_to_consensus.get(_nid)
+                    if _v is None:
+                        _a1 = None
+                        break
+                    if _a1 is None:
+                        _a1 = _v
+                    elif abs(_v - _a1) > _DEC_ALT_M:
+                        # Genuine wall twins (different levels): a
+                        # deliberate vertical feature — keep.
+                        _a1 = None
+                        break
+                if _a1 is None:
+                    continue
+                _ok = True
+                _chord = None
+                for _p_i, _pos, _nid in _sites:
+                    _open = pending[_p_i][2][:-1]
+                    _m = len(_open)
+                    if _m <= 3:
+                        _ok = False
+                        break
+                    _npr = _open[(_pos - 1) % _m]
+                    _nnx = _open[(_pos + 1) % _m]
+                    # ALL referencing ways must agree on the chord the
+                    # removal leaves behind (the same neighbour
+                    # COORDINATES): ways sharing the vertex with
+                    # different neighbours (partial chain overlap)
+                    # would diverge into two chords — the lens class.
+                    _cend = frozenset((node_id_to_ll[_npr],
+                                       node_id_to_ll[_nnx]))
+                    if _chord is None:
+                        _chord = _cend
+                    elif _cend != _chord:
+                        _ok = False
+                        break
+                    _la0, _lo0 = node_id_to_ll[_npr]
+                    _la1, _lo1 = node_id_to_ll[_nid]
+                    _la2, _lo2 = node_id_to_ll[_nnx]
+                    _ax, _ay = self.ll_to_m(_la0, _lo0)
+                    _bx, _by = self.ll_to_m(_la1, _lo1)
+                    _cx, _cy = self.ll_to_m(_la2, _lo2)
+                    _dx, _dy = _cx - _ax, _cy - _ay
+                    _L2 = _dx * _dx + _dy * _dy
+                    if _L2 < 1e-9 or _L2 > _DEC_MAX_CHORD_M ** 2:
+                        _ok = False
+                        break
+                    _t = ((_bx - _ax) * _dx + (_by - _ay) * _dy) / _L2
+                    if _t <= 0.0 or _t >= 1.0:
+                        _ok = False
+                        break
+                    _perp = abs((_bx - _ax) * _dy
+                                - (_by - _ay) * _dx) / math.sqrt(_L2)
+                    if _perp > _DEC_PERP_M:
+                        _ok = False
+                        break
+                    _a0 = node_id_to_consensus.get(_npr)
+                    _a2 = node_id_to_consensus.get(_nnx)
+                    if _a0 is None or _a2 is None:
+                        _ok = False
+                        break
+                    if abs(_a1 - (_a0 + (_a2 - _a0) * _t)) > _DEC_ALT_M:
+                        _ok = False
+                        break
+                if _ok:
+                    _removable_ll.add(_ll)
+            if not _removable_ll:
+                break
+            # MAX-CHORD RETENTION (pavement-node rule).  The redundancy
+            # scan above admits an entire fine-densified straight run
+            # (each vertex is near-collinear with its IMMEDIATE
+            # neighbours), but the bulk removal below drops the whole run
+            # in one sweep — compounding into a chord far longer than any
+            # single-vertex check saw.  Walk every referencing way and,
+            # wherever consecutive KEPT vertices would sit more than
+            # PAVEMENT_NODE_MAX_CHORD_M apart, retain intermediate
+            # removable COORDINATES.  Retention is by coordinate, so every
+            # way that references it keeps the vertex and the constrained
+            # chains stay identical (a per-nid retention would be the
+            # one-sided-removal lens class).
+            _retain_ll: set[tuple] = set()
+            for _si, _s, _enids, _sa, _sna in pending:
+                _open = _enids[:-1]
+                _m = len(_open)
+                if _m < 3:
+                    continue
+                _start = None
+                for _k, _nid in enumerate(_open):
+                    if node_id_to_ll[_nid] not in _removable_ll:
+                        _start = _k
+                        break
+                if _start is None:
+                    # Whole ring removable — the degeneracy veto below
+                    # handles it; no chord to hold.
+                    continue
+                _anchor = self.ll_to_m(*node_id_to_ll[_open[_start]])
+                _prev_ll = None
+                _prev_xy = None
+                _prev_removable = False
+                for _step in range(1, _m + 1):
+                    _idx = (_start + _step) % _m
+                    _ll2 = node_id_to_ll[_open[_idx]]
+                    _xy = self.ll_to_m(_ll2[0], _ll2[1])
+                    _removable_here = (_ll2 in _removable_ll
+                                       and _ll2 not in _retain_ll)
+                    if math.hypot(_xy[0] - _anchor[0],
+                                  _xy[1] - _anchor[1]) \
+                            > PAVEMENT_NODE_MAX_CHORD_M:
+                        # Retain the PREVIOUS vertex to hold the chord: it
+                        # is within the cap of the current anchor (every
+                        # ORIGINAL step is), so both resulting sub-chords
+                        # stay under the cap.
+                        if _prev_removable:
+                            _retain_ll.add(_prev_ll)
+                            _n_chord_retained += 1
+                        _anchor = _prev_xy
+                    if not _removable_here:
+                        _anchor = _xy
+                    _prev_ll = _ll2
+                    _prev_xy = _xy
+                    _prev_removable = _removable_here
+            _removable_ll -= _retain_ll
+            if not _removable_ll:
+                break
+            _removable: set[int] = set()
+            for _ll in _removable_ll:
+                for _p_i, _pos, _nid in _occ[_ll]:
+                    _removable.add(_nid)
+            if not _removable:
+                break
+            # A ring that simultaneous removals would degenerate below
+            # 3 vertices VETOES its removable nids GLOBALLY — skipping
+            # only that ring's update while partners drop the nid would
+            # be a one-sided removal (the lens class).
+            for _retry in range(4):
+                _veto: set[int] = set()
+                for _si, _s, _enids, _sa, _sna in pending:
+                    _open = _enids[:-1]
+                    if (len([_n for _n in _open
+                             if _n not in _removable]) < 3):
+                        _veto.update(_n for _n in _open
+                                     if _n in _removable)
+                if not _veto:
+                    break
+                _removable -= _veto
+            if not _removable:
+                break
+            for _p_i, (_si, _s, _enids, _sa, _sna) in enumerate(pending):
+                _open = [_n for _n in _enids[:-1]
+                         if _n not in _removable]
+                if len(_open) >= 3 and len(_open) < len(_enids) - 1:
+                    pending[_p_i] = (_si, _s, _open + [_open[0]],
+                                     _sa, _sna)
+
+        if _n_chord_retained:
+            UI.vprint(1,
+                f"  [pav-builder] emit decimation: retained "
+                f"{_n_chord_retained} vertex(es) so no pavement chord "
+                f"exceeds {PAVEMENT_NODE_MAX_CHORD_M:.0f} m "
+                f"(pavement-node rule).")
 
         # ── Tag-writing pass ────────────────────────────────────
         # Each shape's altitude tags are derived from the consensus
@@ -1148,6 +1613,29 @@ class PavementLayout:
                     way_blocks.append(
                         (next_wid[0], _snids,
                          {"o4_feature": "crown_spine"}))
+                    next_wid[0] -= 1
+
+        # Gap-fill drainage spines (user design 2026-07-09, open-way
+        # variant): the spine floats INSIDE the gap polygon as an open
+        # constrained way — no boundary landing, no polygon split, no
+        # second rail (the keyhole's slit would itself be a
+        # near-parallel pair).  Same mechanism as the crown spines.
+        _gspines = getattr(self, "gap_spines", None) or []
+        if _gspines:
+            _next_gs_nid = (min(node_id_to_ll) - 1
+                            if node_id_to_ll else -1)
+            for _pts_ll, _alts in _gspines:
+                _gnids: list[int] = []
+                for (_sla, _slo), _sa in zip(_pts_ll, _alts):
+                    node_id_to_ll[_next_gs_nid] = (_sla, _slo)
+                    node_id_to_consensus[_next_gs_nid] = float(_sa)
+                    node_alt_abs_nids.add(_next_gs_nid)
+                    _gnids.append(_next_gs_nid)
+                    _next_gs_nid -= 1
+                if len(_gnids) >= 2:
+                    way_blocks.append(
+                        (next_wid[0], _gnids,
+                         {"o4_feature": "gap_drainage_spine"}))
                     next_wid[0] -= 1
 
         # Determine which interned nodes are actually referenced by

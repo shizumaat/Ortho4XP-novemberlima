@@ -131,7 +131,8 @@ def _project_vectorized(elev, iter_edges, n, max_iters, tol):
 
 def feasibility_project(elev, shape_constraints, hard, *,
                         max_iters=4000, tol=1e-3, force_scalar=False,
-                        flat_groups=None, broken_out=None, pre_broken=None):
+                        flat_groups=None, broken_out=None, pre_broken=None,
+                        edge_couple_nodes=None):
     """Drive EVERY grade-graph edge to ``|Δelev| ≤ budget`` by iterative
     constraint projection (user 2026-06-25: nothing may violate a grade cap).
 
@@ -353,6 +354,23 @@ def feasibility_project(elev, shape_constraints, hard, *,
                                         dk + lim, j))
         return best, dist
 
+    from auto_patch.config import SVC_SPINE_EDGE_COUPLE as _EDGE_COUPLE
+
+    def _hard_neighbour_interval(i):
+        """The elevation interval node ``i`` may take while still obeying the
+        within-shape grade cap to every one of its HARD welded neighbours:
+        ``∩ over hard h of [z_h − budget_ih, z_h + budget_ih]``.  Returns
+        ``(lo, hi)``; ``lo > hi`` means the hard neighbours themselves
+        contradict (a genuine break the blend must own)."""
+        nlo, nhi = -INF, INF
+        for (h, lim) in adj.get(i, ()):
+            if h in hard:
+                if elev[h] - lim > nlo:
+                    nlo = elev[h] - lim
+                if elev[h] + lim < nhi:
+                    nhi = elev[h] + lim
+        return nlo, nhi
+
     broken: set = set()
     if hard:
         ceil, ceil_dist = _reach(+1)
@@ -381,6 +399,26 @@ def feasibility_project(elev, shape_constraints, hard, *,
                 df = floor_dist.get(i, 0.0)
                 t = dc / (dc + df) if (dc + df) > 1e-9 else 0.5
                 elev[i] = hi + (lo - hi) * t
+                # BROKEN-NODE EDGE COUPLING (config.SVC_SPINE_EDGE_COUPLE,
+                # round-6 site-4): the global reach envelope may call a node
+                # broken while its OWN hard welded neighbours still admit a
+                # feasible level — the CYXY service_road #201 spine, draped
+                # ~2.4 m below its 709.5 m edge welds by this blend.  Clamp the
+                # blend into the interval those hard neighbours allow whenever
+                # it is non-empty (the within-shape law: no spine below its
+                # welded edges); an EMPTY interval is the genuine anchor
+                # contradiction the blend is for (seam pin below a plateau) and
+                # is left untouched — so the seam/plateau blends never regress.
+                # SCOPED to ``edge_couple_nodes`` (the service-road / junction
+                # ring nodes the final projection passes): the ravine class is
+                # a road spine draped under its DEM-following adjacent-ground
+                # welds; other broken nodes (apron/junction/seam blends) keep
+                # the untouched blend so the pass stays a no-op for them.
+                if (_EDGE_COUPLE and edge_couple_nodes is not None
+                        and i in edge_couple_nodes):
+                    nlo, nhi = _hard_neighbour_interval(i)
+                    if nlo <= nhi:
+                        elev[i] = min(max(elev[i], nlo), nhi)
                 broken.add(i)
             else:
                 elev[i] = min(max(elev[i], lo), hi)  # clamp into the envelope

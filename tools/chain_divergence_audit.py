@@ -1,0 +1,218 @@
+"""Chain-divergence audit: measure how far a patch OSM is from a
+CONFORMING PLANAR PARTITION — the property that any boundary shared by
+two ways is the IDENTICAL vertex chain in both.
+
+Divergence classes reported (each one is Ruppert-refinement food for
+Triangle4XP — the CYXY weld bake exploded 26,727 -> 1,552,854
+airport-region triangles on exactly these):
+
+1. T-VERTEX: a node of way A lies ON (or near) the INTERIOR of a way-B
+   edge without being a node of way B.  Binned by perpendicular offset:
+     - exact  (< 0.1 mm): colinear overlap — Triangle4XP's colinear
+       re-dicing usually survives these, but they still mint duplicate
+       sub-segment constraints;
+     - sub-mm / mm-cm / cm+ : NEAR-parallel non-colinear constrained
+       pairs — the encroachment ping-pong class (the killers).
+2. NEAR-PARALLEL PAIR: two edges from different ways, angle < 0.5 deg,
+   with overlapping spans separated by 0 < d <= 15 cm (the sliver lens
+   itself, independent of whether the ways share a node).
+3. COINCIDENT NODES: distinct node ids at the same coordinates
+   (deliberate wall node-splits are lawful; a high count on non-wall
+   role pairs is a dedup failure).
+
+Usage:
+    venv/bin/python tools/chain_divergence_audit.py PATCH.osm [PATCH2.osm ...]
+        [--tol 0.15] [--top 12]
+
+Runs in seconds; prints per-class tables by way-role pair plus the worst
+individual sites with lat/lon for probing.  Companion to
+tools/wedge_audit.py (which only sees pairs sharing a node).
+"""
+import argparse
+import math
+import sys
+import xml.etree.ElementTree as ET
+from collections import Counter, defaultdict
+
+sys.path[:0] = ["/Users/noah/Ortho4XP-novemberlima/src"]
+from shapely import STRtree
+from shapely.geometry import LineString, Point
+
+
+def _load(path):
+    tree = ET.parse(path)
+    root = tree.getroot()
+    first_lat = None
+    nodes = {}
+    for n in root.findall("node"):
+        la, lo = float(n.get("lat")), float(n.get("lon"))
+        if first_lat is None:
+            first_lat = la
+        nodes[n.get("id")] = (la, lo)
+    mlat = 111320.0
+    mlon = 111320.0 * math.cos(math.radians(first_lat or 0.0))
+    xy = {nid: (lo * mlon, la * mlat) for nid, (la, lo) in nodes.items()}
+    ways = []
+    for w in root.findall("way"):
+        tags = {t.get("k"): t.get("v") for t in w.findall("tag")}
+        cls = tags.get("o4_feature") or tags.get("role") or "?"
+        refs = [nd.get("ref") for nd in w.findall("nd")]
+        ways.append((w.get("id"), cls, refs))
+    return nodes, xy, ways
+
+
+def analyze(path, tol=0.15, top=12):
+    nodes, xy, ways = _load(path)
+    _first_lat = next(iter(nodes.values()))[0] if nodes else 0.0
+    mlat = 111320.0
+    mlon = 111320.0 * math.cos(math.radians(_first_lat))
+    node_ways = defaultdict(set)          # nid -> set(way index)
+    edges = []                            # (wi, ax, ay, bx, by)
+    for wi, (_wid, _cls, refs) in enumerate(ways):
+        for nid in refs:
+            node_ways[nid].add(wi)
+        for a, b in zip(refs, refs[1:]):
+            ax, ay = xy[a]
+            bx, by = xy[b]
+            if (ax - bx) ** 2 + (ay - by) ** 2 < 1e-18:
+                continue
+            edges.append((wi, a, b, ax, ay, bx, by))
+    edge_geoms = [LineString([(e[3], e[4]), (e[5], e[6])]) for e in edges]
+    tree = STRtree(edge_geoms)
+
+    # ── 1. T-vertices ────────────────────────────────────────────────
+    BIN_EDGES = [(1e-4, "exact<0.1mm"), (1e-3, "0.1-1mm"),
+                 (1e-2, "1mm-1cm"), (5e-2, "1-5cm"), (1e9, "5cm+")]
+
+    def _bin(d):
+        for lim, name in BIN_EDGES:
+            if d < lim:
+                return name
+        return "5cm+"
+
+    tv_by_bin = Counter()
+    tv_by_pair = Counter()
+    tv_worst = []
+    for nid, owners in node_ways.items():
+        px, py = xy[nid]
+        pt = Point(px, py)
+        for gi in tree.query(pt.buffer(tol)):
+            wi, a, b, ax, ay, bx, by = edges[gi]
+            if wi in owners:
+                continue
+            if a == nid or b == nid:
+                continue
+            dx, dy = bx - ax, by - ay
+            L2 = dx * dx + dy * dy
+            t = ((px - ax) * dx + (py - ay) * dy) / L2
+            if t <= 0.0 or t >= 1.0:
+                continue
+            L = math.sqrt(L2)
+            # skip projections that land near an endpoint: those are
+            # near-coincident-node cases, class 3's territory
+            if t * L < 1e-3 or (1.0 - t) * L < 1e-3:
+                continue
+            perp = abs((px - ax) * dy - (py - ay) * dx) / L
+            if perp >= tol:
+                continue
+            # is there a node of way wi at the same spot? then the ways
+            # DO share the chain here (two nids one coord — class 3)
+            cls_owner = "+".join(sorted({ways[o][1] for o in owners}))
+            cls_edge = ways[wi][1]
+            key = tuple(sorted((cls_owner, cls_edge)))
+            tv_by_bin[_bin(perp)] += 1
+            tv_by_pair[(key, _bin(perp))] += 1
+            la, lo = nodes[nid]
+            tv_worst.append((perp, key, la, lo, nid))
+
+    # ── 2. near-parallel pairs (angle < 0.5deg, separation <= tol) ──
+    np_pairs = Counter()
+    np_worst = []
+    seen = set()
+    COS_LIM = 0.9999619   # cos(0.5 deg)
+    for gi, g in enumerate(edge_geoms):
+        wi, a, b, ax, ay, bx, by = edges[gi]
+        v1x, v1y = bx - ax, by - ay
+        n1 = math.hypot(v1x, v1y)
+        for gj in tree.query(g.buffer(tol)):
+            if gj <= gi:
+                continue
+            wj, c, d, cx, cy, dx_, dy_ = edges[gj]
+            if wj == wi:
+                continue
+            # shared node -> wedge_audit's domain; still count (it is
+            # the same lens) but mark shared
+            v2x, v2y = dx_ - cx, dy_ - cy
+            n2 = math.hypot(v2x, v2y)
+            cosv = abs(v1x * v2x + v1y * v2y) / (n1 * n2)
+            if cosv < COS_LIM:
+                continue
+            # separation: max over the shorter edge's endpoints of
+            # distance to the longer edge, requiring span overlap
+            if n1 >= n2:
+                lg, s0, s1 = g, (cx, cy), (dx_, dy_)
+            else:
+                lg = edge_geoms[gj]
+                s0, s1 = (ax, ay), (bx, by)
+            d0 = lg.distance(Point(s0))
+            d1 = lg.distance(Point(s1))
+            sep = max(d0, d1)
+            if not (1e-9 < sep <= tol):
+                continue
+            # projection overlap of the shorter onto the longer
+            key = tuple(sorted((ways[wi][1], ways[wj][1])))
+            pk = (min(gi, gj), max(gi, gj))
+            if pk in seen:
+                continue
+            seen.add(pk)
+            np_pairs[key] += 1
+            mx, my = (s0[0] + s1[0]) / 2, (s0[1] + s1[1]) / 2
+            np_worst.append((sep, key, my / mlat, mx / mlon))
+
+    # ── 3. coincident node ids ───────────────────────────────────────
+    by_coord = defaultdict(list)
+    for nid, (la, lo) in nodes.items():
+        by_coord[(la, lo)].append(nid)
+    co = {c: ids for c, ids in by_coord.items() if len(ids) > 1}
+
+    # ── report ───────────────────────────────────────────────────────
+    print(f"== {path}")
+    print(f"   nodes {len(nodes)}  ways {len(ways)}  edges {len(edges)}")
+    total_tv = sum(tv_by_bin.values())
+    print(f"   T-VERTICES (node on foreign edge interior, perp<{tol}m): "
+          f"{total_tv}")
+    for _lim, name in BIN_EDGES:
+        if tv_by_bin.get(name):
+            print(f"     {name:>12}: {tv_by_bin[name]}")
+    pair_tot = Counter()
+    for (key, _b), c in tv_by_pair.items():
+        pair_tot[key] += c
+    for key, c in pair_tot.most_common(top):
+        bins = {b: n for (k, b), n in tv_by_pair.items() if k == key}
+        print(f"     {key[0]} ~ {key[1]}: {c}   {bins}")
+    print(f"   NEAR-PARALLEL PAIRS (angle<0.5deg, 0<sep<={tol}m): "
+          f"{sum(np_pairs.values())}")
+    for key, c in np_pairs.most_common(top):
+        print(f"     {key[0]} ~ {key[1]}: {c}")
+    print(f"   COINCIDENT-NODE coords (>=2 nids): {len(co)}")
+    if np_worst:
+        print("   worst near-parallel pairs:")
+        for sep, key, la, lo in sorted(np_worst, reverse=True)[:top]:
+            print(f"     sep={sep * 1000:8.3f}mm {key[0]}~{key[1]} "
+                  f"@ {la:.7f},{lo:.7f}")
+    print("   worst T-vertices:")
+    for perp, key, la, lo, nid in sorted(tv_worst, reverse=True)[:top]:
+        print(f"     perp={perp * 1000:8.3f}mm {key[0]}~{key[1]} "
+              f"@ {la:.7f},{lo:.7f} nid={nid}")
+    print()
+    return total_tv, sum(np_pairs.values())
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("paths", nargs="+")
+    ap.add_argument("--tol", type=float, default=0.15)
+    ap.add_argument("--top", type=int, default=12)
+    args = ap.parse_args()
+    for p in args.paths:
+        analyze(p, tol=args.tol, top=args.top)

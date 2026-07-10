@@ -1,3 +1,820 @@
+# ══════════════════════════════════════════════════════════════════
+# HANDOVER QUEUE (part 35 END, 20260710) — START HERE
+# ══════════════════════════════════════════════════════════════════
+# ★ COMMITTED as the part-35 + round-6 milestone (one integrated
+# unit, Noah-approved in-sim: CYXY sites 3/4 healed, SPJC tunnel
+# restored to mapped-mouth form, version bumped to 1.50.0).
+# ★ NEXT SESSION = SLICE B SOLVER ABSORPTION (Noah's ruling, queue
+# item 1 below): open with docs/chain_identity_one_solve_plan.md
+# §Slice B + this file.  The slice-B acceptance criteria are
+# consolidated in queue item 1 and the ROUND-6 OUTCOMES section:
+# charter ON with zero new tears · hangar blob #210 + notch blob
+# #236 heal · taxiway-end wrap joins the skirt · legacy-off gate
+# table clears (tears 0, node diet real) · final_grade_projection
+# retires (it caused BOTH round-6 solver-side defects) · strips
+# stand off tunnel ramps like buildings · SPJC no_self_overlap and
+# within-shape reds burn down with absorption.
+# The day's arc: an 8-hour orchestrated session (supervisor + 8 Opus
+# work orders, parallel worktrees + serial main-checkout integration)
+# burned down the ENTIRE part-34 queue.  Headline: FOUR of the eight
+# queue items' diagnoses were WRONG while all eight targets were
+# right — every fix below began with a fresh trace that overturned or
+# confirmed the queued hypothesis before building.  ALL WORK IS
+# UNCOMMITTED in this working tree (one integrated unit, gates ON
+# unless noted); the 4 untracked DSF tools still belong to the
+# DSF-object arc.  Installed tile = today's integrated bake:
+# 15,037 airport triangles (part-34 milestone was 15,726); top
+# hotspot cells = only the 3 known legacy near-parallel sites.
+# Patch: nodes 4,420 / ways 388 / T-vertices 5 / near-parallel 3
+# (legacy) / coincident 3 (was 30).  Gap faces 14 → 17.
+#
+# LANDED TODAY (all verified by audit A/B + tests + forced re-bake):
+# 1. CHORD REMOVER (queue 1): the 1,057 m junction #101 chord came
+#    from the to_osm chain-aware decimation applying removals in BULK
+#    per sweep (each vertex passes the 60 m cap against its ~2 m
+#    neighbours; the whole straight run drops at once) — the queued
+#    suspect (chain-consistent needle removal) was INNOCENT, and
+#    capping it would have re-minted divergence lenses.  Fix: a
+#    coordinate-unanimous MAX-CHORD RETENTION pass + module constant
+#    PAVEMENT_NODE_MAX_CHORD_M (layout.py).  Airside chords >60 m:
+#    49 → 0 (+162 retained nodes; the pavement-node ruling's cost).
+# 2. SEAM DIPS (queue 2): the "run-end altitude borrow" hypothesis is
+#    DISPROVEN by direct resampler trace — emitted values were lawful
+#    drainage-floor reads off genuine LOCAL edge reads.  The visible
+#    0.72 m jog pairs = a GEOMETRIC cross-shape run-end taper pinch
+#    (grade_law.adjacent_ground_supported_depths bench-in at pavement
+#    partition seams).  Fix: O4_SEAM_TAPER_PIN (default ON) — seam
+#    stations are never lowered by the daylight sweeps, so abutting
+#    runs' outer rows align; true frontage ends unchanged; lockstep
+#    mirror in check_adjacent_ground; both round-4 notches GONE.
+#    Also hardened the one real borrow path (resampler None-fill →
+#    arc-length interpolation; CYXY byte-identical).
+# 3. HANGAR RESIDUAL (queue 3): NOT a standoff miss — the round-5
+#    standoff is perfect (zero pairs touch buildings/groundside).
+#    The cliffs were legacy surface_clearance vertices falling to the
+#    twin path because the to_osm pavement-wins adoption gate was
+#    graded_strip-only.  Fix: gate extended to ref="surface_clearance"
+#    clearance shapes ONLY (skirts + deliberate walls keep the twin
+#    path).  Hangar-area cliff pairs cured; coincident 30 → 26.
+# 4. HOLE 27 (queue 4): the "hairline enclosure leak" is DISPROVEN —
+#    pre-solve conformance ALREADY yields a clean partition (hole 27
+#    is a clean 71,972 m² interior ring pre-solve AND at gap-emit;
+#    zero open seams globally).  The real blocker was a 1,835 m²
+#    runway-end skirt wholly inside the gap.  Fixed via item 5.
+# 5. GAP PARENTS (queues 4+5, O4_GAP_FILL_PAD_PARENTS +
+#    O4_GAP_FILL_SKIRT_PARENTS, default ON): building pads (FLAT
+#    value authorities) and runway-end skirts (NON-FLAT inverse-RESA
+#    profile authorities) join the gap-bounding union; gradeable
+#    ground = gap.difference(parents), verbatim-chain gate
+#    (_face_is_verbatim) enforces zero minted boundary vertices.
+#    Census truth: 7 of 8 "pad-blocked" holes are 100% pad-filled
+#    (lawful skips); building8's residual face + hole 27 + the
+#    (-17,738) skirt hole all EMIT.  The two skirt faces superseded
+#    35 corridor band polygons (nodes/ways DOWN); with item 3 the
+#    coincident count collapsed 30 → 3.
+# 6. SPLP RUNWAY RED (queue 8): the runway is PROVABLY COMPLIANT
+#    (both edge chains ≤1.38% vs the 1.5% cap) — the red was the
+#    single-poly checker fabricating a jog from the oblique
+#    tile-clipped end-cap that 60 m densification populated.  Fix:
+#    EDGE-AWARE reconstruction in check_runway_profile (split the
+#    ring into two long-edge rails by LATERAL offset off a principal
+#    axis — turn-angle/edge-length heuristics fail on oblique caps
+#    longer than the width; grade along each rail with true 2D
+#    distances; caps excluded; synthetic test pins that real
+#    mid-edge defects are still caught).  SPLP red → GREEN; bonus:
+#    SPJC vertical-curve XFAIL → XPASS (phantom curvature died).
+#
+# LEGACY DELETION (queue 7): FLIP BLOCKED — measured gate table on
+# today's tree (O4_LEGACY_SURFACE_CLEARANCE=0): tears 13 · nodes
+# 6,351 vs 4,420 gate-on (the node diet INVERTS +1,931) · coincident
+# 344 (341 = band↔band twins at clip seams) · T-vertices 10 with new
+# sub-100 mm classes · new 15.1 mm graded_strip near-parallel at
+# 60.7065833,-135.0751807.  Attribution: corridor bands are the wrong
+# tool for legacy-vacated OPEN frontage.  The unblock is the ruling-3
+# OPEN-FRONTAGE DRAINAGE SPINE (one shape per corridor between facing
+# pavements, both chains verbatim, spine-only solver variables,
+# smooth blend, NO vertical faces between parallel pavements) — a
+# PILOT was dispatched at session end (O4_OPEN_FRONTAGE_SPINE,
+# default OFF); its outcome is recorded at the end of this block.
+#
+# SUITE RECORD (integrated state): 14 failed / 693 passed / 17
+# skipped / 6 xfailed / 1 xpassed (milestone was 13/683; +11 new
+# tests today; SPLP longitudinal flipped green; the 1 xpassed = SPJC
+# vertical-curve, a legitimate phantom-finding reduction).  Failure
+# detail: see the part-35 session section below.
+#
+# ★ NEW GOTCHAS (all bit this session):
+# * Tile bakes REUSE the stamped previous patch unless
+#   O4_AUTO_PATCH_REBUILD=1 — the freshness stamp keys on apt.dat,
+#   not source.  The tell: an IDENTICAL airport-triangle count.
+# * Agent worktrees spawn at upstream 3cff870 (no src/auto_patch) —
+#   first action in any worktree: verify HEAD, else
+#   `git checkout --detach fa335b9` (clean tree; never reset --hard).
+# * tools/full_airport_build.py's trailing check_grade subprocess
+#   hardcodes ROOT/venv/bin/python — tracebacks in venv-less
+#   worktrees AFTER the OSM is written; run check_grade manually.
+#
+# THE QUEUE (part 36, ordered):
+# 1. LEGACY-DELETION UNBLOCK, RE-ATTRIBUTED: the open-frontage spine
+#    pilot (built, integrated default-OFF, lens-clean) REFUTED the
+#    corridor premise — the legacy-off blockers are band clip
+#    residues at JUNCTIONS / the airport OUTER EDGE / pavement↔
+#    foreign seams, not corridors (pilot outcome in the part-35
+#    section below).  Next: either band clip-seam coordination for
+#    those three classes (chain-identity discipline at band↔band
+#    boundaries — the 341-twin class), or jump straight to slice B
+#    solver absorption which retires the band march entirely.
+#    ★ NOAH RULED (2026-07-10, end of part 35): build the OPTIMAL
+#    FULL solution — go to SLICE B SOLVER ABSORPTION.  Start the
+#    next session there: read docs/chain_identity_one_solve_plan.md
+#    §Slice B + this part-35 record, design the absorption slices
+#    (a shared vertex = ONE solver variable; graded_strip/skirt/gap
+#    roles join the one-solve graph; corridor envelope + floors as
+#    per-node bounds; band clip-seam classes die structurally), then
+#    orchestrate.  The legacy-off gate table in part 35 is the
+#    acceptance target; the band march and its clip residues retire
+#    with absorption rather than being patched.
+#    ROUND-6 ADDITION — THE CHARTER LEVER (implemented, default OFF,
+#    O4_CLEARANCE_CHARTER): Noah's clearance-charter ruling turned
+#    out to be slice-B work — the terminal blobs are JUNCTION/RESA/
+#    CENTERLINE unions (fresh provenance trace refuted the
+#    apron/service attribution), and removing ANY clearance today
+#    regresses (tears 0→10 at CYXY; clearance is HOLDING steep
+#    terminal terrain the band march cannot grade — the legacy-off
+#    blocker in miniature).  Slice-B acceptance criteria now
+#    include: charter ON · taxiway_clearance area −60% · ZERO new
+#    adjacent-ground tears · hangar blob #210 and notch blob #236
+#    heal · Noah's taxiway-end wrap-joins-skirt form.
+# 2. IN-SIM REVIEW ROUND 6 (Noah): the two round-4 seam sites (dips
+#    should be gone), hole 27 + the (-17,738) gap faces, the hangar
+#    area (cliff pairs cured), the skirt faces' surroundings.
+# 3. SLICE B PROPER (solver absorption): shared vertex = ONE solver
+#    variable; bands/skirts/gap spines join the one-solve graph;
+#    docs/chain_identity_one_solve_plan.md §Slice B.  Today's gap
+#    faces + seam pin shrank the problem but the absorption itself
+#    is unbuilt.
+# 4. SKIRT EDGE-GRADE COUNTERS: 6 pre-existing check_grade
+#    "RUNWAY-END SKIRT edge grade" violations at CYXY (worst 35.5%
+#    over ~1-4 m edges, skirts #271/#273/#282) — the documented
+#    slice-A "skirt check_grade counters" class; values not mesh.
+# 5. SITE-2 PRE-to_osm RESIDUAL: 6 mm graded_strip↔graded_strip
+#    divergence in the pipeline residual report at
+#    60.7208676,-135.0790956 — pre-existing, to_osm-interning
+#    resolves it, mesh-harmless; fix at source when convenient.
+# 6. INTERIOR EDGE CROSSINGS: ~18-20 in the final OSM, a class
+#    chain_divergence_audit does not yet track (the seam pin reduced
+#    20→18); add to the audit, then attribute.
+# 7. COMPARE-TARGET FIXTURES: recut ONLY after Noah approves the
+#    in-sim output (ruling stands; the compare-target reds are
+#    expected drift until then).
+# 8. HOUSEKEEPING: integrated unit COMMITTED (this milestone; the
+#    4 untracked DSF tools stay with the DSF-object arc).  Still
+#    open: full_airport_build.py check_grade subprocess →
+#    sys.executable (breaks in venv-less worktrees).
+# 9. (round 6 additions, 20260710 PM) SPJC TUNNEL FIXED, two-stage:
+#    (a) design cap TUNNEL_LOW_CONNECTOR_MAX_OPEN_GAP_M = 100.0 —
+#    applied at TRENCH-RECORD time inside the bore merge (the first
+#    attempt capped the MERGE itself, which un-merged bores and
+#    minted phantom mid-gap portals — supervisor hypothesis wrong,
+#    veto innocent); kinematic merge restored; SPJC's 230 m covered
+#    stretch stays BRIDGED, KDFW-style narrow medians still dig open.
+#    (b) THE REAL MOUTH-KILLER (pre-existing since KPHL 2026-06-12):
+#    the covered-stretch drop's absolute 0.25 m² pavement-overlap
+#    test deleted mouth pieces that obliquely GRAZED the widened
+#    runway corner (~6% of piece area) at all four SPJC entrances —
+#    masked by the old trench.  Now graze-aware: >=50% covered drops
+#    whole, lesser grazes CLIP off pavement with 0.6 m clearance
+#    (O4_TUNNEL_GRAZE_CLIP default ON; sloped rects convert to
+#    node_altitudes on clip).  All 4 NW mouths + walls restored;
+#    terminal system byte-identical; CYXY audit unchanged.
+#    LEDGERED: 2 new SPJC adjacent-ground tears (strip #646 welds
+#    onto the restored mouth-ramp floor — strips should stand off
+#    tunnel ramps like the 1 m building standoff; adjacent_ground
+#    scope) · latent wall-clip node_altitudes resample hazard
+#    (bridges.py ~2680).  KDFW BONUS: fixed a pre-existing solver
+#    CRASH (GEOS non-noded intersection in building_feasibility
+#    airside union → buffer(0) renode retry) — KDFW builds again.
+#    WATCH: KDFW synthesizes ZERO implied bores today (July-4
+#    "validated case" restructured by later underpass work); verify
+#    KDFW medians in-sim eventually.  Cap constant tunable (Noah).
+#
+# RULINGS LEDGER additions (2026-07-10, supervisor session — all
+# implemented behind default-ON gates, Noah review pending):
+# gap parents (pads flat / skirts profiled) extend the gap-fill
+# boundary-verbatim law · seam-taper pin: partition seams hold raw
+# scanned depth (daylight law applies only toward true frontage
+# ends) · adoption gate covers legacy surface_clearance (skirts and
+# deliberate walls keep the twin path) · runway profile checker
+# measures along edge rails (validator-only).
+#
+# ROUND-6 OUTCOMES (all six sites closed; every defect PRE-EXISTING
+# at fa335b9 — none were part-35 regressions):
+# * SITE 3 apron hump: FIXED (relevel_pads_to_host_pavement,
+#   O4_PAD_HOST_PAVEMENT_LEVEL ON) — final_grade_projection had
+#   re-stamped the DEM-biased pad seat (705.0) over the solver's
+#   correct 708.67.  -333% step gone; within-shape -21; one 1.79 m
+#   far-side tear ledgered (slice-B terrain family).
+# * SITE 4 service ravine: FIXED (break-blend hard-neighbour clamp,
+#   O4_SVC_SPINE_EDGE_COUPLE ON) — final_grade_projection's
+#   feasibility break-blend draped spine nodes to DEM ignoring their
+#   own welded edges.  2.06 m → 0.09 m; within-shape -95.  Siblings
+#   #59/#200 ledgered (genuine hardened-weld contradictions).
+# * ★ THE PROJECTION INDICTMENT: final_grade_projection caused BOTH
+#   site 3 AND site 4 by overriding coherent solves post-hoc — the
+#   strongest evidence yet for the one-solve doctrine's plan to
+#   delete it as an enforcement pass (slice C).
+# * SITES 1/2/5 (clearance blobs): LEDGERED to slice B with the
+#   charter lever (O4_CLEARANCE_CHARTER, implemented, DEFAULT OFF).
+#   Fresh provenance trace REFUTED the apron/service attribution —
+#   the blobs are JUNCTION/RESA/CENTERLINE unions, and removing ANY
+#   clearance today trades blobs for adjacent-ground tears (0→10).
+# * SITE 6 SPJC tunnel: FIXED (design cap, part-36 queue item 9) +
+#   KDFW crash bonus fix.
+#
+# USER RULINGS (Noah, 2026-07-10 in-sim review round 6 — charter
+# ruling now implemented as the DEFAULT-OFF slice-B lever above):
+# 1. LEGACY CLEARANCE CHARTER: surface_clearance = WINGTIP clearance
+#    along taxiways and runways ONLY — never aprons, never large-area
+#    pieces, never near groundside.  Where adjacent-ground rules are
+#    not yet solved and legacy pieces remain, they behave as they
+#    HISTORICALLY did.  The terminal/parking-area clearance pieces
+#    (e.g. shape #209) make output worse and leave the charter.
+# 2. TAXIWAY-END WRAP: adjacent-ground coverage should run the WHOLE
+#    taxiway, wrap around the taxiway end maintaining clearance
+#    distance, and join SMOOTHLY with the runway_end_skirt (site:
+#    60.6972471,-135.0608669).
+# 3. Round-6 defect sites (traces in flight): hangar hotspot shapes
+#    #211/#212 (worst; steep angles pull taxiway edges down) · apron
+#    hump 60.70889,-135.07304 · service-road spine-vs-edge ravine
+#    60.70870,-135.07463 · groundside cliffs at #209.
+# 4. Pre-slice-B policy (agreed): fix-now ONLY defects in surviving
+#    machinery or covered by ruling 1; coexistence artifacts go to
+#    the slice-B ledger as named acceptance criteria, not fixes.
+
+# STATUS — SESSION 20260710 (part 35): ORCHESTRATED QUEUE BURN-DOWN —
+# the whole part-34 queue, supervisor + 8 Opus work orders (parallel
+# worktree diagnosis/development, serial main-checkout integration
+# with audit A/B per step).  Full detail in the queue block above;
+# this section holds the records the block references.
+
+## SUITE RECORD (integrated state, this tree)
+Full run: 14 failed / 693 passed / 17 skipped / 6 xfailed / 1 xpassed
+(998 s, 18 xdist workers, under parallel agent load).  Milestone
+reference was 13 failed / 683 passed; +11 new tests were added today
+(8 gap-parent + 2 seam-taper + 1 edge-aware synthetic), and
+test_runway_longitudinal_grade[SPLP] flipped RED → GREEN.  The 1
+xpassed = test_runway_vertical_curve[SPJC] (strict=False): the old
+both-rails-MIN reconstruction fabricated phantom curvature; the
+edge-aware profile removed it — a finding reduction, not a mask.
+Ten failures re-confirmed by targeted foreground re-runs, all
+documented pre-existing families:
+  compare-target drift ×3 (spjc · splp baseline0-114 ·
+    splp baseline1-176) — EXPECTED until fixtures recut post-approval
+  test_pavement_grade[SPLP/CYXY/SPJC/HECA] ×4 — within-shape grade
+    via check_grade (not the runway profile)
+  test_cyxy_spine_zero_no_bowl — taxi-spine/building bowls
+  test_solver_validator_same_edge_budgets@CYXY
+  test_route_band_zero[SPJC] — 240 route-band violations (stash-A/B
+    confirmed pre-existing at the milestone by the seam-dip agent)
+CORRECTION (end-of-day full run, 14 failed / 709 passed — the set is
+STABLE, all 14 now named): the earlier "4 non-reproducers" were
+test_no_self_overlap[SPLP/SPJC/CYXY] and test_route_reach_zero[CYXY]
+— their FILES were simply not in the targeted re-run set (the
+junction/grade files that were re-run are green).  route_reach was
+A/B-confirmed byte-identical pre-existing during the site-4 fix;
+no_self_overlap ×3 provenance is UNVERIFIED pre-existing (suspected
+in the milestone 13; one stash A/B if purity is wanted).  End-of-day
+14 = compare-target ×3 (expected drift) · pavement_grade within-shape
+×4 · no_self_overlap ×3 · spine_zero_no_bowl · route_reach_zero ·
+solver_validator_same_edge_budgets · route_band_zero[SPJC].
+
+## VERIFICATION CHAIN (every integration step)
+chain_divergence_audit A/B per landing (gate: zero new near-parallel
+/ T-vertices) → CYXY full_airport_build → check_grade → forced warm
+re-bake (O4_AUTO_PATCH_REBUILD=1) + mesh_hotspot_cells at
+checkpoints.  Progression of the CYXY patch through the day:
+  milestone:   nodes 4,481 · coincident 30 · gaps 14 · bake 15,726
+  +chord fix:  nodes 4,643 (retention +162) · chords>60m 49→0
+  +adoption:   nodes 4,639 · coincident 26 (4 hangar cliffs cured)
+  +gap parents:nodes 4,435 · coincident 3 · gaps 17 · bands 106→71
+  +seam pin:   nodes 4,420 · ways 388 · bake 15,037 · T5/NP3
+              (audit floor = the 3 known legacy near-parallel sites)
+check_grade at the final state: tears 0 · cross-shape 0 ·
+vertex-to-edge 0 · mid-edge 0 · skirt edge-grade 6 (pre-existing
+class, queue item 4 above).
+
+## ORCHESTRATION NOTES (what worked, for repeat sessions)
+* 5 parallel worktree agents + serialized main-checkout landings; no
+  emission-edit collisions; foreground-only rule held (zero
+  background-wait violations across 8 work orders).
+* Work orders that carried NUMERIC baselines (audit counts, bake
+  triangle counts, exact coordinates) produced verifiable reports;
+  SendMessage mid-run corrections (wrong worktree commit, revised
+  bake reference) were picked up cleanly.
+* 4 of 5 worktrees spawned at upstream 3cff870 — the fix
+  (git checkout --detach fa335b9) is now a standard first action.
+* The day's meta-lesson, written into memory: the queue's TARGETS
+  were all right; four of its DIAGNOSES were wrong.  Fresh trace
+  before building the queued fix, every time.
+
+## OPEN-FRONTAGE SPINE PILOT (dispatched end of session)
+O4_OPEN_FRONTAGE_SPINE default OFF, developed in an isolated
+worktree seeded with today's integrated diff.  Target: the queue-7
+gate table (tears 13→0, nodes < 4,420, coincident ~single digits,
+zero new sub-100 mm classes).  Outcome recorded here when the pilot
+reports:
+* PILOT OUTCOME: BLOCKED (truthful) — and it REFUTES the corridor
+  premise, the day's FIFTH overturned diagnosis.  The pilot is
+  mechanically complete and lens-clean (10 genuine corridors emitted,
+  ZERO new near-parallel in both configs, gate-off = byte-identical
+  no-op, test-pinned; 18 gap + 104 adjacent/layout/conformance tests
+  green) and is INTEGRATED into this tree default-OFF
+  (O4_OPEN_FRONTAGE_SPINE; config.py + gap_fill.py + 5 tests).  But
+  the legacy-off gates are unreachable via corridors at CYXY: tears
+  13→12, nodes 6,351→6,114 (target < 4,420), coincident 344→291.
+  ROOT CAUSE: the residual tears/twins are within-shape band clip
+  residues at PAVEMENT JUNCTIONS, the AIRPORT OUTER EDGE, and
+  pavement↔foreign (groundside/service) seams — structurally NOT
+  wide open pavement↔pavement corridors; CYXY's between-pavement
+  frontage is not corridor-dominated.  Known small residual in the
+  pilot itself (unbuilt, does not change the verdict): corridor-spine
+  longitudinal jumps from _spine_interval's two-nearest-parent
+  switching (worst 7.33% over one 15 m station) — needs a
+  longitudinal slope-limiter if the pilot is ever promoted.
+
+# STATUS — SESSION 20260709 (part 34): CHAIN IDENTITY SLICE A —
+# VERDICT: THE ADJACENT-GROUND PROJECT FLIES.  CYXY tile bake with the
+# FULL WELD + BANDS: 24,333 airport-region triangles, BELOW the
+# pre-weld no-bands baseline (26,727; the naive weld exploded to
+# 1,552,854).  Total tile 633,530 vs 635,934 — welded bands are
+# triangle-NEGATIVE.  Doc: docs/chain_identity_one_solve_plan.md.
+
+## USER RULINGS (Noah, part 34)
+1. ONE-SOLVE DOCTRINE (architecture): all rules/laws live in
+   grade_law; the solver solves as many elevations as possible in ONE
+   pass; minimize/eliminate post-solve geometry or elevation mutation.
+   Approved slices: A chain identity (DONE, this session) → B solver
+   absorption (bands/skirts as solver nodes; a shared vertex = ONE
+   variable — the weld/consensus/conformance apparatus evaporates) →
+   C emit reduction.
+2. SOLVER PERFORMANCE is a first-class goal, architecture-level and
+   opportunistic.  Precision reframe: NO cm/mm fidelity needed — the
+   output is grading UNDER pavement, layered over; smooth required,
+   simplification fine.
+3. Zone-3 vertical faces lawful ONLY at a TRUE outer edge (no shapes
+   beyond); between parallel pavements the ground must smoothly blend
+   runway-drainage → taxiway-shoulder (NOT built yet — slice B work).
+4. Fixture recut ONLY after Noah approves final in-sim output.
+5. Corner arbitration: PAVEMENT value always wins at pavement nodes.
+6. Skirt anchor fix committed separately: dev 9345739.
+
+## THE METHOD (this is the durable lesson)
+* GATE = ZERO near-parallel constrained pairs.  ONE lens (mm-scale,
+  metres long) Ruppert-refines to 10⁵-10⁶ tile triangles — "only a
+  few sites left" is not a state, it is an explosion.  Slice A
+  round 1 REDUCED sites 136→36 and the bake got WORSE (3.0M).
+* The loop: tools/chain_divergence_audit.py (patch-level T-vertices
+  by perp bin + near-parallel pairs + coincident nids, by role pair;
+  seconds) → tools/full_airport_build.py (~8 min) → warm tile bake
+  ~3 min (tools/run_tile_build.py 60 -136 1 "<Custom Scenery
+  zOrtho4XP_+60-136>" — the runner now takes build_dir as arg 4) →
+  tools/mesh_hotspot_cells.py (25 m cells; hotspots map 1:1 to
+  audited lens sites; µm-scale medians = ping-pong, m² = lawful).
+* Pipeline now prints a post-weld residual-divergence report (any
+  conformance violation surviving the final weld, with lat/lon).
+
+## THE FIX CHAIN (landing order; all in the working tree, UNCOMMITTED)
+1. WELD-ROW DIET (adjacent_ground): band inner rows at d0=0 are the
+   PAVEMENT CHAIN SUBSEQUENCE (ring vertices — every k==0 station IS
+   a ring vertex — plus run endpoints); interior 5 m stations left
+   the weld row.  Final-weld insertions 3,527 → ~540; patch nodes
+   12,895 → 10,032.
+2. CONFORMANCE SILENT-BAIL BUG (conformance.py): a candidate landing
+   on TWO edges of one ring was inserted twice → invalid rebuild →
+   the shape silently kept ZERO welds (the immortal
+   junction~runway_clearance 53).  Fix: first-edge-wins ownset
+   dedup + loud bail WARN.
+3. Boundary-frozen `_merge_coincident` (clearance, Opus agent):
+   frozen_predicate at 1e-6 on the static boundary; frozen coords win
+   verbatim, never the mean.
+4. CONFORM-ADOPT (adjacent_ground): band ring edges SPLIT at static
+   vertices within 0.2 m, then all vertices SNAP onto the static
+   exterior — a soft ring adopts the static chain wherever it runs
+   within tolerance (kills the mid-span-edge-next-to-corner class).
+5. TWO-PHASE SEAM-SAFE legacy _finalize (clearance, Opus agent):
+   collect all piece rings first → mm-key shared-seam set → decimate/
+   drop-sharp/merge protect seam vertices.  (Per-piece independent
+   decimation had desynced sibling seams — ONE such lens at
+   60.7014,-135.0630 was 1.57M triangles.)
+6. ★ THE KEYSTONE — NID-LEVEL FINAL WELD in layout.to_osm: the 0.5 m
+   canonical interning MOVES vertices AFTER the layout-level weld
+   (the KPHX 9.3°→0.36° note admits it), so the T-vertex weld re-runs
+   on the FINAL nid rings at the FINAL coordinates (insert existing
+   nids into ways whose edges they lie on; consensus rides the nid —
+   no altitude bookkeeping).  15 insertions killed every sub-cm
+   divergence class.  Must stay the LAST geometry-affecting step.
+7. SELF-LENS REPAIR (adjacent_ground._repair_self_lenses): the snap
+   can collapse a thin cut residue into an out-and-back sub-µm pinch
+   INSIDE one ring (band -10391 doubling back along the runway line
+   = the last 182k-triangle hotspot).  Insert the ring's OWN vertices
+   into edges they graze (≤5 mm) → exact self-touch → buffer(0)
+   splits into clean lobes.
+* MEASURED NEGATIVE (kept in code comments): projection-onto-chord
+  needle repair is WRONG — near-parallel 136→200; most tips sit on a
+  welded HOST edge whose ring does not reference the nid, and moving
+  the tip pulls the chain off the host.  Removal + chain-consistent
+  partner removal stays.
+
+## VERIFIED (part 34)
+* chainid6 audit: near-parallel 136→1 (a legacy surface_clearance
+  pair; the healthy pre-weld baseline itself reads 1) · T-vertices
+  136→8 (all ≥1 cm legacy/wall classes).
+* CYXY bake (chainid6 patch installed at
+  Patches/+60-140/+60-136/CYXY_auto.patch.osm, tile BAKED and READY
+  TO FLY): airport bbox 24,333 tris (baseline 26,727, naive weld
+  1.55M, slice-A round 1 3.0M); worst hotspot cell 113 tris at
+  m²-scale medians.  Pre-weld patch + mesh preserved in the session
+  scratchpad (bake_ab/).
+* FULL suite: 14 failed / 672 passed — all mapped: the documented
+  pre-existing set (pavement_grade SPLP/SPJC/CYXY/HECA,
+  no_self_overlap[SPJC], route_band_zero[SPJC], cyxy_route_reach,
+  edge_budgets, dsf_object flag-gating, cyxy_spine_zero_no_bowl
+  22 cm) + compare-target ×3 weld drift (EXPECTED per ruling 4 —
+  recut awaits approval).  ⚠ test_solver_and_validator_same_nodes
+  attribution NOT A/B'd vs the pre-slice-A tree (likely the same
+  CYXY solver-arc family).
+* 68/68 skirt tests + 18/18 adjacent-ground emitter tests green.
+
+## IN-SIM REVIEW ROUND 2 (Noah flew the slice-A bake) + fixes
+Cliffs along runways CONFIRMED FIXED in-sim.  Three findings:
+1. DENSITY (shape 261, "a thousand nodes along the runway edge") =
+   the LEGACY surface_clearance chain (5 m stations + every neighbour
+   vertex the final weld inserts).  ANSWER: bands got the diet, the
+   legacy chain did not — it is the slice-5 deletion candidate, now
+   the largest remaining node diet.  NOAH'S DESIGN (endorsed, slice B
+   centerpiece — in the plan doc): for ENCLOSED gaps between
+   pavements, ONE shape whose boundary = the pavement chains verbatim
+   + ONE interior drainage SPINE (a swale with FAA min/max transverse
+   grades as solver constraints); a few dozen solver variables per
+   gap, chain identity structurally free, ruling-3 smooth blend by
+   construction.  Hybrid for gaps wider than the facing corridor
+   reaches; spine becomes a small tree for L/T/Y gaps (medial-axis
+   machinery exists).
+2. SPIKE TRIANGLES (447/448/449, 150-220 m): three mechanisms found
+   and fixed: index-gap run bridging → physical-distance bridge;
+   corner-fan outer-point chords across a skipped end sweep →
+   OUTER-JUMP FLUSH (>4 stations closes the ring) + NO FAN when
+   either flanking edge fails the station-reference test (the skirt
+   owns the end zone); crescent clip residues → buffer(-0.75) width
+   gate.  TWO of three shapes dead.  REMAINING (1): a 156 m × 7 m
+   "isolated deep ray" — two stations lawfully marching to a real
+   terrain violation near the reach limit that no neighbour
+   corroborates.  NEXT FIX (lockstep required): neighbour-support
+   clamp on the daylight march, defined once in grade_law/config and
+   mirrored in the corridor validator — an unmirrored emitter clamp
+   would mint validator findings.
+3. UNMERGED-NODE CLIFF (junction 111 @ 60.6971601,-135.0592654,
+   Δ1.71 m): a band vertex fused with the junction corner only inside
+   the 0.5 m emit-interning bucket, where the >1.0 m altitude split
+   minted a wall twin.  FIXED at _intern (pavement-wins, ruling 5): a
+   graded_strip NEVER emits a wall twin against an authority-claimed
+   node — it adopts the authority nid (soft claim joins the plain
+   mean only).  Deliberate walls (retaining_wall, skirt lifts) keep
+   the twin path.  VERIFIED: one node, 706.11.
+Audit after all fixes (chainid10): T-vertices 6, near-parallel 1
+(= the healthy baseline's own count); emitter tests 18/18.
+
+## ROUND 3 (Noah: "confirmed, proceed") — the three big pieces
+1. DAYLIGHT SLOPE-LIMIT LAW — DONE, lockstep (Opus-implemented):
+   config.ADJACENT_GROUND_DAYLIGHT_SLOPE_LIMIT (2.0) +
+   grade_law.adjacent_ground_supported_depths (distance-weighted
+   two-sweep limiter; fan stations share a coordinate → zero
+   allowance → fan rays fully suppressed) + both builders' outer
+   scans + check_adjacent_ground mirror (reproduces the raw scan,
+   applies the law, exempts columns beyond the supported depth;
+   END/inside-facing stations kept as depth-0 coupling nodes).
+   5 new law tests.  The 156 m blade is DEAD; adjacent-ground tears
+   0; nodes −331.
+2. ★GOTCHA PROVEN AGAIN (bake chainid11): TWO sub-µm pairs = 673k
+   triangles in one cell — sub-µm does NOT reliably collapse at .11f.
+   Root: a multi-way collinear seam (junction+apron+4 strips+wall on
+   one line, interleaved node subsets) where the nid-weld's figure-8
+   membership guard SKIPPED insertion.  FIX: COORDINATE-TWIN nid —
+   when the way already holds the node elsewhere, insert a twin at
+   the same canonical lat/lon with copied claims; the mesh keys nodes
+   by exact coordinates so the chains weld into one vertex, the OSM
+   ring stays duplicate-free.  Bake chainid12: 23,448 airport
+   triangles (healthy floor), near-parallel 1 (= baseline's own).
+   CURRENT INSTALLED TILE = chainid12.
+3. LEGACY DELETION — GATE LANDED (pipeline,
+   O4_LEGACY_SURFACE_CLEARANCE, default ON), FLIP BLOCKED: CYXY
+   gate-off measured nodes −2,242 BUT ways 460→817 (bands fragment
+   over the vacated terrain), tears 0→4, post-weld crossings 3→24,
+   within 77.  The bands' corridor march is the wrong tool for the
+   vacated between-pavement regions — SLICE B's gap-fill/spine must
+   own them first.  Sequencing confirmed: slice B → then deletion.
+
+## SLICE B PILOT — GAP-FILL + DRAINAGE SPINE: SHIPPED ("build it")
+* NEW MODULE src/auto_patch/gap_fill.py (Opus-implemented to spec) +
+  pipeline wiring AFTER skirts / BEFORE bands (gap shapes join the
+  bands' static union → corridor march skips covered frontage) +
+  config gates (O4_GAP_FILL_SPINE default ON, GAP_FILL_SPINE_STEP_M
+  15, GAP_FILL_MAX_WIDTH_M 160, GAP_FILL_MIN_AREA_M2 100) + 5
+  synthetic tests (tests/test_gap_fill_spine.py).
+* MECHANICS: enclosed gaps = INTERIOR RINGS of the airside pavement
+  union (boundaries are pavement chains VERBATIM — chain identity
+  free); spine = widest-cross-section midpoints every 15 m along the
+  long axis, split into two faces sharing the spine chain; spine
+  values = drainage solve inside the INTERSECTION of both parents'
+  grade_law.adjacent_ground_envelope corridors (target ceiling−25 %,
+  20 relaxation sweeps, endpoints pinned to pavement reads).
+* ★GOTCHA: shapely ops.split with a cutter ENDING exactly on the
+  ring returns 1 face (unsplit, all 3 CYXY gaps) — OVERSHOOT the
+  boundary by 2 m; the faces carry the exact GEOS crossing points.
+* CYXY: 3 gaps → 6 spine faces (38-84 verts each, mostly adopted
+  chains); band polygons 156→127; audit unchanged (6 T / 1
+  near-parallel = baseline).  BAKE: **23,052 airport triangles** —
+  best of the day (pre-weld baseline 26,727), zero hotspot cells.
+  INSTALLED TILE = gapfill2.
+* Known approximation (flagged in module): a parent runway's code
+  NUMBER derives from its longest vertex chord (no rw_axes plumbed) —
+  revisit when slice B moves construction pre-solve.
+
+## GAP-FILL EXTENSION ROUND (Noah: the 3 emitted gaps are PERFECT;
+## why not all of CYXY's holes?)
+* CENSUS (27 enclosed holes at CYXY): 3 emitted · 13 blocked ONLY by
+  legacy surface_clearance strips inside · 8 blocked by building pads
+  inside · 1 over the width cap by 4 m (163.9 vs 160) · 2 slivers.
+* SUPERSESSION EXTENSION BUILT (wholly-inside legacy strips removed
+  when their gap emits — whole-piece drop, chain-safe; partial
+  straddles still block): 8 more gaps emitted, ways 460→417 — BUT
+  near-parallel 1→4: (a) a 96 mm sliver between the spine's terminal
+  segment and the boundary at hole 22 (shallow-landing trim built,
+  did NOT clear it — root not yet confirmed), (b) 2× 7 mm pre-
+  existing junction~junction seam divergences that the legacy weld
+  insertions were incidentally pinning.  Per the zero-lens law the
+  extension shipped GATED OFF: O4_GAP_FILL_SUPERSEDE default 0.
+* SHIPPING CONFIG (installed tile): 3 gaps, near-parallel 1 (=
+  baseline), **23,038 airport triangles**.  Face-boundary divergence
+  snap + shallow-landing trim are in the module (harmless when the
+  gate is off).
+
+## OPEN-WAY SPINE REDESIGN (Noah's keyhole insight, round 2) — SHIPPED
+Noah: don't cut the spine to the pavement edge — stop it short.
+Evaluated: the keyhole variant works but its slit is a deliberate
+near-parallel pair (safe only >= 0.5 m); the OPEN-WAY variant is
+strictly better and uses the PROVEN crown-spine mechanism — the gap
+emits as ONE polygon (ring = pavement chains verbatim EVERYWHERE it
+touches pavement) + the spine as a floating interior OPEN constrained
+way (o4_feature=gap_drainage_spine, layout.gap_spines → the crown
+block in to_osm), ends held >= 2 m off the ring, ends take their own
+corridor target (no pavement pinning — the mesh lerps spine-end →
+boundary).  No split, no landing, no keyhole rails; U-shaped /
+partially-open gaps need nothing special.
+* RESULT: the 96 mm landing sliver died BY CONSTRUCTION and the two
+  7 mm junction~junction pairs vanished with the split-face geometry
+  — SUPERSESSION now audits at the absolute floor (near-parallel 1 =
+  the baseline's own legacy pair) → O4_GAP_FILL_SUPERSEDE flipped
+  DEFAULT ON.  CYXY: 11 gaps → 14 faces + spine ways, 10+ legacy
+  strips superseded, ways 416, nodes 9,373.
+* BAKE (installed tile): **22,836 airport triangles** — best of the
+  day (pre-weld baseline 26,727; the whole day's arc: 3.0M → 22.8k).
+* ⚠ PARALLEL-SESSION INCIDENT: config.py was reverted to HEAD by the
+  other session mid-round, deleting the DAYLIGHT_SLOPE_LIMIT +
+  GAP_FILL_* constant blocks (every import broke).  RESTORED from
+  the agents' reports.  The same-checkout hazard is real — commit
+  slice A+B soon, stage explicitly.
+
+## THE PAVEMENT-NODE RULE (Noah, round 3): grading shapes NEVER
+## create a node on a pavement edge — SHIPPED, plus chain-aware
+## final decimation.  BAKE: **12,652** airport triangles (LESS THAN
+## HALF the 26,727 pre-weld baseline, WITH full grading coverage).
+* THE RULE: wherever a grading shape touches pavement its chain is a
+  SUBSEQUENCE OF EXISTING PAVEMENT VERTICES — a mid-edge value is the
+  lerp between pavement vertices, identical on both sides by
+  definition.  Implemented: bands extend run-ends to bracketing ring
+  vertices (adjacent_ground, both builders); skirts keep exact
+  pavement corners at weld transitions (clearance, Opus — fallback +
+  live report when the corner lookup misses); legacy strips thinned
+  per-pass (Pass A fallback/A2/A3/B thinned; the Pass-A centerline
+  raycast rows + Pass-C RESA synthetic rows are NOT ring
+  subdivisions — left dense, documented).  105 tests green across
+  the four suites.
+* MID-EDGE CENSUS answered Noah's question: of 4,698 mid-edge
+  pavement vertices, 4,470 were 3D-REDUNDANT (XY-collinear AND on
+  the altitude lerp) — pinned by welds/adoptions AFTER emit
+  decimation ran.  NEW: CHAIN-AWARE FINAL DECIMATION in to_osm
+  (after the nid-weld, on final coordinates + consensus values): a
+  COORDINATE (grouping coincident twin nids — one-sided twin removal
+  is an exact-T-vertex mint, measured 43) is removed only when
+  3D-redundant in EVERY referencing way with ALL ways agreeing on
+  the leftover chord, then removed from all simultaneously;
+  ring-degeneration vetoes globally.  Genuine wall twins (Δalt >
+  0.1 m) and profile nodes stay.
+* RESULT: pavement vertices 6,468→2,055; total patch nodes
+  9,373→4,112; audit T=5 / near-parallel=1 (baseline's own); bake
+  12,652 airport tris, hotspots ≤84/cell.  INSTALLED TILE =
+  noderule5.
+* Legacy-off RE-TEST with gaps live: still blocked (tears 7,
+  crossings 40, ways 759 — the corridor bands fragment on vacated
+  OPEN-terrain frontage; enclosed holes are no longer the blocker).
+
+## IN-SIM REVIEW ROUND 4 (Noah: "definitely much better") — 3 questions
+1. TWO STRIPS along taxiway outer edges = THE LAW'S ZONES, by design:
+   the narrow strip is zone 1 (3 m drainage lip, 1.5-3 % down), the
+   larger is zone 2 (graded band to the strip half-width, ≤5 %) —
+   piecewise-linear corridor law → one two-row slab per linear piece.
+   Slice B (solver spine) can unify them into one shape later.
+2. SEAM DIPS (60.7203854,-135.0788903 + 60.7208756,-135.0791845):
+   DIAGNOSED not fixed — the first coordinate is exactly vertex -5167
+   (694.70) in a zone-2 band: a 0.72 m jog pair sitting ~25 cm below
+   the line the pavement edge implies, at an intra-band RUN SEAM.
+   Suspect: the run-end taper convention (borrowed run-end reference
+   altitude instead of the local edge read).  NEEDS an emitter-side
+   trace vs the corridor expectation — Noah's invariant stands: the
+   shadow rows must mirror the pavement line exactly.
+3. UN-FILLED HOLE at 60.7132799,-135.0645661 (census hole 27,
+   72k m²): TWO stacked causes.  (a) width 163.9 > the 160 cap —
+   FIXED, GAP_FILL_MAX_WIDTH_M 160→175.  (b) the REAL blocker: a
+   HAIRLINE ENCLOSURE LEAK — at gap-emit time a sub-mm seam gap
+   between two bounding pavement shapes leaves the hole topologically
+   OPEN (not an interior ring; the candidate log proves it never
+   reaches the gates), and the later nid-weld closes the seam so the
+   FINAL geometry shows a closed ring.  Same family as the
+   junction-seam pairs: a pavement-partition micro-defect; the
+   doctrinal fix is PRE-SOLVE pavement conformance (slice B), NOT a
+   detection buffer (which would perturb the verbatim boundary).
+   Gap-fill now logs every candidate + skip reason (no silent skips).
+
+## IN-SIM REVIEW ROUND 5 (pavement deformation + hangar violations +
+## groundside ruling) — fixes + one open remover hunt
+* USER RULING: no clearance/grading strips around GROUNDSIDE pavement
+  (it follows the DEM — it IS terrain; welding law strips onto its
+  rings imports conflicting values).  SHIPPED: groundside leaves the
+  exact static unions of bands + legacy strips (no welded coordinates
+  against it) and blocks them via a 1 m buffer instead; groundside
+  excluded from band snap targets + the value-registry preload.
+  BUILDINGS joined the standoff (measured: a legacy strip vertex 1 m
+  from the building8 pad corner carried a 3.69 m foreign value —
+  hangar-area worst pair now 1.40 m).
+* USER RULING: pavement edges keep nodes on straight sections so the
+  solver/mesh holds the edge grade.  SHIPPED in layers: MAX_CHORD
+  60 m caps in BOTH decimators (emit_decimate._span_ok — the
+  Douglas-Peucker span drop — and the to_osm chain-aware pass;
+  O4_DECIMATE_MAX_CHORD_M) + conformance.densify_long_edges called
+  PRE-SOLVE (226 vertices → real solver nodes at CYXY), at the emit
+  stage (before decimation/projection, ordering law) and as the
+  ABSOLUTE-LAST layout pass.  ⚠ OPEN: ONE 1,057 m junction chord
+  (junction #101, nids -1692→-1785) STILL survives — the layout ends
+  clean (final densify inserts 0) so the remover lives INSIDE to_osm;
+  suspects: the chain-consistent needle removal (no chord cap) or an
+  uncounted nid-drop path.  NEXT: instrument to_osm for removals on
+  that way.
+* Bake (installed): 15,726 airport triangles (the +3k vs 12,652 =
+  the densified pavement nodes — the point of the ruling); audit
+  T=5 / near-parallel=3 (the 3 = pre-existing legacy pairs).
+* Round-5 residuals: hangar 1.40 m pair (attribution pending — may
+  be a lawful apron↔groundside designed step) · seam dips (item 2,
+  round 4) still open.
+
+## OPEN (part 34)
+* to_osm remover of densified nodes on junction #101 (above) —
+  instrument, cap, re-verify the 60 m rule holds end-to-end.
+* SEAM-DIP TRACE (item 2 above): run-end taper values at intra-band
+  run seams — emitter trace, then the fix.
+* HAIRLINE ENCLOSURE LEAKS (item 3): find + close the sub-mm pavement
+  seam gaps pre-solve (the slice B pavement-conformance arc); hole 27
+  fills once its seam closes.
+* BUILDING-PAD PARENTS (8 holes): designed, not built.
+* Legacy deletion (blocked on open-frontage band quality) ·
+  full-suite re-triage · fixture recut after approval · spine nodes
+  into the ONE solver graph (docs/chain_identity_one_solve_plan.md).
+* 8 post-weld CROSSINGS (fixed coordinates, legacy classes — the
+  residual report lists them; slice-5 legacy deletion owns most).
+* Residual T-vertices 8 (legacy taxiway_clearance/groundside/wall
+  classes, 1-15 cm) — currently harmless at mesh level.
+* Skirt check_grade counters (within/skirt-edge from the advanced
+  profile + weld rows) — VALUES work, ruled by "pavement wins";
+  not mesh-blocking.
+* Zone-3 smooth-blend-between-parallel-pavements (ruling 3) — needs
+  the corridor-facing-corridor law; natural slice-B work.
+* Slice B: pre-solve construction + solver absorption + perf levers
+  (10 m stations candidate, coarser decimation, flatness skip).
+* NOAH: fly the baked +60-136 tile (already installed).  On visual
+  approval: commit slice A + recut fixtures.  ⚠ a parallel session
+  is active in this checkout (tunnel/bridge research) — stage
+  explicitly, never git add -A.
+
+# STATUS — SESSION 20260709 (part 33): WELD RULING (terrain strips
+# fully weld to pavement — the 1 m standoff grooves WERE the CYXY
+# in-sim cliffs) + SKIRT GOVERNED FOOTPRINT ANCHORED AT THE RUNWAY END
+# (blast pad inside it — the "~70 m too long" report).
+
+## THE TWO USER RULINGS (Noah, in-sim review of the 20260708 bakes)
+1. WELD: the adjacent-ground bands (and every terrain-grading strip)
+   fully weld to the pavement they grade next to — no standoff gap.
+2. SKIRT LENGTH: skirts read ~70 m too long past the runway end at
+   multiple airports.
+
+## DIAGNOSIS (measured against the BAKED +60-136 mesh, 21:18 bake)
+* 620 near-vertical mesh edges (>2 m drop over <3 m) around CYXY.
+  Families: 225 band↔strip cross-shape 1 m grooves · 193 band
+  outer/inner edges (zone-3 faces up to 10 m — lawful by design, open
+  question below) · 119 pavement↔strip grooves (worst 11.9 m =
+  pavement↔skirt at the 14L end) · 29 coverage misses · 24 open
+  terrain.  The 1 m `_PAVEMENT_GAP_M` standoffs left ribbons of RAW
+  DEM that render as knife-edge blades (transects show +2.6 m and
+  +5 m DEM spikes INSIDE 1 m grooves beside flat graded surfaces).
+* Skirt length root cause: governed length applied from the PAVEMENT
+  EXIT (blast-pad end); FAA AC 150/5300-13B §3.16 measures the safety
+  area from the RUNWAY END with the stopway INSIDE it.  KCLT 18R:
+  124 m pad → fill to 429 m past the end vs the lawful 305.  HECA
+  pads 59–71 m = the observed "~70 m".
+
+## LANDED (part 33)
+1. SKIRT ANCHOR (lockstep): grade_law.
+   runway_end_governed_length_beyond_pavement_m +
+   runway_end_skirt_floor_profile_beyond_pavement +
+   _breakpoints_beyond_pavement (profile ADVANCED by the overrun
+   length; fill starts flush at the exit, descends at the advanced
+   grade).  Consumers clearance._emit_one_end +
+   verification.check_runway_end_skirt.  A pad longer than the
+   footprint zeroes the skirt (CYXY 02/20 end 20: 154 m pavement past
+   a 60 m footprint → skirt gone).  7 new law tests; STANDARDS.md row.
+2. WELDS: adjacent-ground bands, runway-end skirt and legacy
+   surface_clearance strips emit their inner row AT the pavement edge
+   (d = 0) with the pavement edge values VERBATIM; ALL clips exact.
+   Mesh-safe: O4_Vector_Utils.insert_edge splits constrained edges at
+   encroaching nodes (z along the OLD edge) + the final
+   enforce_conformance(0.01) weld.  CYXY grooved 2 m frontage samples
+   6,473 → 119 (98% closed).
+3. FALLOUT FIXES (each found by the validator chain):
+   * legacy _finalize decimation (0.3 m band) + morphological open
+     bulged welded rings ONTO pavement (29 m² overlaps) → re-cut each
+     final piece against static_union post-decimation; overlap guard
+     on _merge_coincident; _decimate(keep_predicate=) protects
+     vertices ON the static boundary (wedges 168→92).
+   * to_osm consensus mean let strip values MOVE runway ring vertices
+     (within 0→661, worst 42% inside a runway) → AUTHORITY-AWARE
+     consensus in layout.to_osm: nodes with any pavement/solver claim
+     average AUTHORITY claims only; soft receivers (graded_strip,
+     clearances, retaining_wall, boundary) adopt.  Within 661→43.
+   * skirt end-strip weld rows span ±strip-half-width: only vertices
+     actually ON pavement take the local read; off-pavement keeps the
+     ref-anchored floor.
+
+## ⚠ WELDS NOT SHIPPABLE YET — TILE MESH RUPPERT EXPLOSION (the gate)
+* CYXY tile bake A/B: airport-region triangles 26,727 → 1,552,854
+  (58×; tile 636k → 2.16/2.24M across two fix rounds).  Hotspots
+  (25 m cells up to 263k tris): the 14R-end junction#90/strip#263
+  seam + the apron#61/building8 seam.  Hotspot triangles are µm-to-cm
+  scale with ZERO vertical steps → pure epsilon-GEOMETRY encroachment
+  ping-pong (the KJQF class), NOT curvature: welded seams share
+  vertex chains, and any post-clip mutation that moves/removes ONE
+  side's vertex (emit sliver repairs, decimation chord cuts,
+  _drop_sharp_corners, buffer(0) quantization repair, duplicate-nid
+  drops) leaves a near-parallel constrained pair that Triangle4XP
+  refines to machine epsilon.
+* Three mutation sources were fixed (legacy re-cut + merge guard +
+  decimate keep-predicates + chain-consistent needle removal in
+  to_osm) — the wedge tripwire still reads 27→55 across iterations:
+  patching mutations one-by-one does NOT converge.  NEXT SLICE (the
+  real fix): CHAIN IDENTITY BY CONSTRUCTION — every shared boundary
+  derives from ONE canonical vertex chain (the partition doctrine);
+  post-emit mutation of any welded ring is forbidden (repairs must be
+  chain-aware or pre-emit).  Until it lands the weld work stays
+  UNCOMMITTED in the working tree; the cached CYXY patch was
+  regenerated PRE-WELD (foreground-atomic stash A/B, wedge audit 0)
+  so tile bakes REUSE it safely.  DO NOT bake with
+  O4_AUTO_PATCH_REBUILD=1 on this tree.
+* check_grade at CYXY weld5: within 43 (was 0: ~4 runway pairs =
+  crown-domain bookkeeping at conformance-INSERTED nodes, the A2
+  crown-blind-insert class, checker-side; rest sub-0.5 m soft↔soft
+  seam steps) · skirt-edge 14 (law-vs-law CORNER ARBITRATION: skirt
+  lift value vs band corridor value at shared coordinates, ≤0.4 m —
+  needs the adoption rule: earlier strip's value wins) · steps 1+4 ·
+  patch vertices 9,261→19,602.
+* PATCH-LEVEL WINS (they survive once chain identity lands): grooved
+  frontage 6,473→119 samples (98% closed) · overlap 0 ·
+  adjacent_ground DEM reader 0 · tears 0 · authority values
+  protected by the emit consensus rule.
+* Zone-3 band outer edge still ends in a lawful VERTICAL face where
+  the DEM is far below (193 mesh edges, ≤10 m).  NEEDS NOAH RULING:
+  keep (regs: cliffs lawful beyond the graded band) or a render-only
+  daylight taper at a natural slope.
+* Legacy grooves not covered by any strip: 119 samples (~240 m).
+* Compare-target fixtures (SPJC/SPLP) will drift from the weld —
+  deliberate re-cut needed per policy (await sign-off).
+* Fast suite 8 red: 4 known named + compare_target_splp ×2 (weld
+  drift) + test_dsf_object_buildings flag-gating (PRE-EXISTING: the
+  4ad87b8 default flip without the test) + test_cyxy_spine_zero_
+  no_bowl building19 697.78 vs ≥698 (22 cm; attribution pending —
+  likely the DSF default flip: rerun with O4_DSF_OBJECT_BUILDINGS=0).
+* THE SKIRT ANCHOR FIX IS INDEPENDENT AND SAFE TO COMMIT SEPARATELY
+  (grade_law beyond-pavement functions + the governed/floor lines in
+  clearance._emit_one_end + the verification mirror + 7 law tests +
+  docs — no mesh-density interaction; 68/68 skirt tests green).
+
 # STATUS — SESSION 20260708 (part 32): RUNWAY DE-SEG MERGED TO dev +
 # DEFAULT ON (O4_RUNWAY_SINGLE_POLY=1) + deliberate fixture re-cut
 # (Noah sign-off).  Gates green; to-zero worklist A1-A5 in flight

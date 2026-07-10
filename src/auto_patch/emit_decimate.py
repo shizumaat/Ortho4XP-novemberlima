@@ -193,6 +193,10 @@ XY_TOL_M = 0.02
 # the V15 waviness root cause WAS 0.1 m quantization stairs.)
 Z_TOL_AIRSIDE_M = float(os.environ.get("O4_DECIMATE_Z_M", "0.02"))
 Z_TOL_BOUNDARY_M = float(os.environ.get("O4_DECIMATE_Z_BOUNDARY_M", "0.10"))
+# Longest edge a span collapse may leave (user ruling 2026-07-09: keep
+# a few nodes along straight pavement edges so the mesh holds the edge
+# at its solved grade between constraints).
+MAX_CHORD_M = float(os.environ.get("O4_DECIMATE_MAX_CHORD_M", "60.0"))
 
 # Roles whose exterior rings are decimated (everything else only VOTES KEEP
 # through shared vertices).  Buildings/terminals are excluded — pads are
@@ -234,6 +238,14 @@ def _span_ok(ring, alts, i, j, n, z_tol):
     cx, cy = bx - ax, by - ay
     cl = math.hypot(cx, cy)
     if cl < 1e-9:
+        return False
+    # MAX CHORD (user in-sim finding 2026-07-09): an uncapped span
+    # collapse left a 1,279 m junction edge, and the mesh interpolated
+    # the pavement between far-apart nodes — visible sag against the
+    # neighbouring graded strips.  Long straights keep a node every
+    # ~30 m to hold the edge at its solved grade; the recursion below
+    # splits an over-long span at its farthest vertex.
+    if cl > MAX_CHORD_M:
         return False
     k = (i + 1) % n
     while k != j % n:
@@ -311,7 +323,8 @@ def _ring_keep_set(ring, alts, z_tol, forced=None):
     return keep
 
 
-def decimate_shape_group(shapes, z_tol: float) -> int:
+def decimate_shape_group(shapes, z_tol: float,
+                         protect_predicate=None) -> int:
     """3D-collinear decimation over an ISOLATED group of shapes — the same
     vote discipline as :func:`decimate_emit_nodes` (a vertex vanishes only
     when EVERY ring in the group that contains it agrees), scoped to
@@ -360,8 +373,21 @@ def decimate_shape_group(shapes, z_tol: float) -> int:
             continue
         if len(ring) < 5:
             continue
-        keep = _ring_keep_set(ring, alts, z_tol)
-        prepared.append((s, ring, alts, closed_alts))
+        # ``protect_predicate(x, y) -> bool`` (weld ruling 2026-07-09):
+        # a group vertex lying ON a NON-group shape's boundary must not
+        # be chord-cut — the group ring traces that shape's constrained
+        # edge coordinate-exactly, and removing the vertex diverges the
+        # two chains by up to XY_TOL_M, minting a near-parallel sliver
+        # pair that Triangle4XP's Ruppert refinement explodes (CYXY
+        # weld round: airport-region triangles 26.7k → 1.55M).  Keeping
+        # it is triangle-FREE: a vertex on a constrained edge splits
+        # that edge anyway.
+        protected = (set() if protect_predicate is None else
+                     {i for i, (x, y) in enumerate(ring)
+                      if protect_predicate(x, y)})
+        keep = _ring_keep_set(ring, alts, z_tol, forced=protected) \
+            | protected
+        prepared.append((s, ring, alts, closed_alts, protected))
         for idx, (x, y) in enumerate(ring):
             if idx not in keep:
                 k = _key(x, y)
@@ -375,9 +401,9 @@ def decimate_shape_group(shapes, z_tol: float) -> int:
     # vertices, so the rebuild below is unanimous by construction.
     for _ in range(len(prepared) + 1):
         changed = False
-        for (s, ring, alts, closed_alts) in prepared:
+        for (s, ring, alts, closed_alts, protected) in prepared:
             forced = {i for i, (x, y) in enumerate(ring)
-                      if _key(x, y) not in removable}
+                      if _key(x, y) not in removable} | protected
             keep = (_ring_keep_set(ring, alts, z_tol, forced=forced)
                     | forced)
             readded = {_key(*ring[i]) for i in keep} & removable
@@ -389,7 +415,7 @@ def decimate_shape_group(shapes, z_tol: float) -> int:
     if not removable:
         return 0
     removed = 0
-    for (s, ring, alts, closed_alts) in prepared:
+    for (s, ring, alts, closed_alts, protected) in prepared:
         n = len(ring)
         # Final keep = everything not in the converged removable set.
         keep = {i for i in range(n) if _key(*ring[i]) not in removable}

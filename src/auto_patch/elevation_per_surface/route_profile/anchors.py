@@ -2227,3 +2227,198 @@ def apron_body_nodes(layout, bucket_to_idx):
             if i is not None:
                 tgt.add(i)
     return body - route
+
+
+# Solved-pavement roles a building pad may be embedded in / abut.  A pad's flat
+# value adopts the HOST level from any of these; buildings and terrain-follow
+# roles are excluded (a pad never adopts from another pad, and DEM-follow bodies
+# are the pad's own frontage terrain, not a solved host surface).
+_PAD_HOST_ROLES = frozenset({
+    ROLE_APRON, ROLE_JUNCTION, ROLE_SERVICE_JUNCTION,
+    ROLE_PRIMARY_PARALLEL, ROLE_SECONDARY_PARALLEL,
+    ROLE_STUB, ROLE_CROSS_CONNECTOR,
+})
+
+
+def _shape_vertex_alt(s, idx, n_open):
+    """Solved altitude at ring-vertex ``idx`` of a pavement shape, or None.
+
+    Reads whichever elevation representation the writeback left on the shape:
+    per-vertex ``node_altitudes`` (apron/junction), a single flat ``altitude``,
+    or a 4-corner ``altitude_high``/``altitude_low`` plane (mean is a sound
+    local proxy for a pad-adjacency reference — rects rarely embed a pad)."""
+    na = s.node_altitudes
+    if na:
+        na_open = na[:-1] if len(na) == n_open + 1 else na
+        if 0 <= idx < len(na_open) and na_open[idx] is not None:
+            return float(na_open[idx])
+    if s.altitude is not None:
+        return float(s.altitude)
+    if s.altitude_high is not None and s.altitude_low is not None:
+        return 0.5 * (float(s.altitude_high) + float(s.altitude_low))
+    return None
+
+
+def _building_flat_level(s):
+    """Current flat level of a building pad (post-writeback), or None."""
+    if s.altitude is not None:
+        return float(s.altitude)
+    na = s.node_altitudes
+    if na:
+        vals = [float(v) for v in na if v is not None]
+        if vals:
+            return sum(vals) / len(vals)
+    return None
+
+
+def relevel_pads_to_host_pavement(layout):
+    """POST-SOLVE: re-level every building pad embedded in / abutting SOLVED
+    pavement to the level the HOST pavement solved to at the contact.
+
+    The frontage seat (``build_building_seats``) is a route-reachability
+    envelope biased toward raw DEM.  When the host apron/junction around a pad
+    solves ABOVE that envelope, a DEM-low seat leaves the flat pad in a pit and
+    the host humps around it (CYXY apron #129 → building8, a -333 %/1.1 m step).
+
+    For each pad, sample the host pavement's solved vertex altitudes within
+    ``PAD_HOST_LEVEL_CONTACT_M`` of the pad ring and classify them BY VALUE: a
+    node whose level agrees with the pad's current (pit) level is a shared-
+    boundary lip (already carries the pad's own value — the contamination); a
+    node that DIFFERS by more than ``PAD_HOST_LEVEL_TRIGGER_M`` is the genuine
+    step partner = the HOST BODY.  When such a body exists, seat the pad FLAT at
+    its median and lift the pit-value lip (within ``PAD_HOST_LEVEL_LIFT_M``) to
+    the same level so pad and host weld at one flat level (no emit cliff).  The
+    pad adopts FROM the host, never the reverse; the host BODY is untouched.
+
+    Gate ``O4_PAD_HOST_PAVEMENT_LEVEL`` off → no-op (byte-identical).  Returns
+    the count of pads re-levelled."""
+    from auto_patch.config import (
+        PAD_HOST_PAVEMENT_LEVEL, PAD_HOST_LEVEL_CONTACT_M,
+        PAD_HOST_LEVEL_LIFT_M, PAD_HOST_LEVEL_TRIGGER_M,
+    )
+    if not (PAD_HOST_PAVEMENT_LEVEL
+            and _os.environ.get("O4_PAD_HOST_PAVEMENT_LEVEL", "1") == "1"):
+        return 0
+
+    # Host pavement vertices with a solved altitude: (x, y, alt).
+    host_verts: list = []
+    for s in layout.shapes:
+        if s.role not in _PAD_HOST_ROLES:
+            continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        try:
+            ring = _open_ring(list(s.polygon.exterior.coords))
+        except (ValueError, TypeError):
+            continue
+        n_open = len(ring)
+        for idx, (x, y) in enumerate(ring):
+            a = _shape_vertex_alt(s, idx, n_open)
+            if a is not None:
+                host_verts.append((float(x), float(y), a))
+    if not host_verts:
+        return 0
+
+    r = float(PAD_HOST_LEVEL_CONTACT_M)
+    r2 = r * r
+    lift_r2 = float(PAD_HOST_LEVEL_LIFT_M) ** 2
+    trigger = float(PAD_HOST_LEVEL_TRIGGER_M)
+
+    # Host shapes indexed by role for the shared-boundary lift below.
+    host_shapes = [s for s in layout.shapes
+                   if s.role in _PAD_HOST_ROLES
+                   and s.polygon is not None and not s.polygon.is_empty]
+
+    n_relevelled = 0
+    for s in layout.shapes:
+        if s.role != ROLE_BUILDING:
+            continue
+        if s.polygon is None or s.polygon.is_empty:
+            continue
+        cur = _building_flat_level(s)
+        if cur is None:
+            continue
+        try:
+            ring = _open_ring(list(s.polygon.exterior.coords))
+        except (ValueError, TypeError):
+            continue
+        if not ring:
+            continue
+        # Host pavement nodes within reach of the pad ring.  The pad ring and
+        # the host share a boundary, and after the post-solve welds/decimation
+        # a shared "lip" node may drift a few decimetres off the pad vertex —
+        # so a GEOMETRIC coincidence test is unreliable here.  Classify by
+        # VALUE instead: a host node whose level agrees with the pad's current
+        # (possibly pit) level is a shared-boundary lip (the contamination); a
+        # host node that DIFFERS by more than the trigger is the genuine step
+        # partner = the HOST BODY the pad must adopt.
+        body_vals: list = []
+        for (px, py) in ring:
+            for (hx, hy, ha) in host_verts:
+                dx = hx - px
+                dy = hy - py
+                if dx * dx + dy * dy > r2:
+                    continue
+                if abs(ha - cur) > trigger:
+                    body_vals.append(ha)
+        if not body_vals:                     # agrees with host / not adjacent
+            continue
+        body_vals.sort()
+        m = len(body_vals)
+        med = (body_vals[m // 2] if m % 2
+               else 0.5 * (body_vals[m // 2 - 1] + body_vals[m // 2]))
+        new_level = round(float(med), 2)
+        # (1) The pad seats FLAT at the host body level.
+        s.altitude = new_level
+        if s.node_altitudes:
+            closed = (s.node_altitudes[0] == s.node_altitudes[-1]
+                      and len(s.node_altitudes) > 1)
+            s.node_altitudes = [new_level] * len(s.node_altitudes)
+            if closed:
+                s.node_altitudes[-1] = new_level
+        s.altitude_high = None
+        s.altitude_low = None
+        n_relevelled += 1
+        # (2) Un-contaminate the host's SHARED boundary lip: every host ring
+        # vertex within reach of the pad ring that still carries the pad's old
+        # pit value is a shared-boundary node dragged down by the old DEM seat.
+        # Lift it to ``new_level`` (= the host body level) — otherwise the
+        # emit's per-bucket merge sees the pad's new value and the host's stale
+        # pit value disagree by > merge tol and mints a fresh cliff node at the
+        # shared lat/lon (a vertical wall at the pad edge).  Lifting the lip to
+        # the body level welds pad and host at one flat level — the step goes.
+        for h in host_shapes:
+            try:
+                hcoords = list(h.polygon.exterior.coords)
+            except (ValueError, TypeError):
+                continue
+            hring = hcoords[:-1] if (hcoords and hcoords[0] == hcoords[-1]) \
+                else hcoords
+            n_hopen = len(hring)
+            hna = h.node_altitudes
+            for hidx, (hx, hy) in enumerate(hring):
+                hval = _shape_vertex_alt(h, hidx, n_hopen)
+                if hval is None or abs(hval - cur) > trigger:
+                    continue                  # not a pit-lip node → leave it
+                near_pad = False
+                for (px, py) in ring:
+                    ddx = hx - px
+                    ddy = hy - py
+                    if ddx * ddx + ddy * ddy <= lift_r2:
+                        near_pad = True
+                        break
+                if not near_pad:
+                    continue
+                if hna and len(hna) >= n_hopen:
+                    hna[hidx] = new_level
+                    if len(hna) == n_hopen + 1 and hidx == 0:
+                        hna[-1] = new_level
+                elif h.altitude is not None:
+                    # Flat host shape: promote to per-vertex so the shared lip
+                    # carries the body level without flattening the whole host.
+                    base = [float(h.altitude)] * n_hopen
+                    base[hidx] = new_level
+                    h.node_altitudes = base + [base[0]]
+                    hna = h.node_altitudes
+                    h.altitude = None
+    return n_relevelled

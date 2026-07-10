@@ -16,7 +16,7 @@ from __future__ import annotations
 import math
 
 import pytest
-from shapely.geometry import Point
+from shapely.geometry import Point, Polygon
 
 from conftest import baseline_airports, xplane_available, xplane_root
 
@@ -206,3 +206,88 @@ def test_merge_coincident_ring_vertices_noop_on_clean_ring():
     out_xy, out_a = _merge_coincident_ring_vertices(coords, alts)
     assert out_xy == coords
     assert out_a == alts
+
+
+# ──────────────────────────────────────────────────────────────────
+# LEGACY CLEARANCE CHARTER (O4_CLEARANCE_CHARTER) — source-role scope
+# ──────────────────────────────────────────────────────────────────
+# Synthetic, X-Plane-independent: one square pavement shape sitting on a
+# plateau that drops away outside its footprint (so the Pass-A3 ring-edge
+# sweep sees terrain and cuts).  The charter gate scopes WHICH source
+# roles feed that sweep: OFF = historical (apron/service included), ON =
+# runway/taxiway-family only.
+class _ChartHarness:
+    _ALT = 700.0
+    _L = 200.0          # square side, metres
+    _RAISE = 15.0       # terrain lift OUTSIDE the footprint (obstruction)
+
+    def _layout(self, role):
+        from auto_patch.layout import BuiltShape, PavementLayout
+        L = self._L
+        sq = Polygon([(0.0, 0.0), (L, 0.0), (L, L), (0.0, L)])
+        layout = PavementLayout(icao="ZZZZ", anchor=(0.0, 0.0))
+        layout.shapes.append(BuiltShape(
+            polygon=sq, role=role, ref="X",
+            node_altitudes=[self._ALT] * len(sq.exterior.coords)))
+        return layout
+
+    def _fake_dem(self):
+        import math as _mm
+        from auto_patch.layout import R_EARTH
+
+        def _s(dem, tile_lat, tile_lon, lat, lon):
+            x = math.radians(lon) * R_EARTH
+            y = math.radians(lat) * R_EARTH
+            inside = (-0.01 <= x <= self._L + 0.01
+                      and -0.01 <= y <= self._L + 0.01)
+            return self._ALT if inside else self._ALT + self._RAISE
+        return _s
+
+    def _emit(self, monkeypatch, role, charter):
+        from auto_patch import clearance
+        monkeypatch.setattr(clearance, "_sample_dem", self._fake_dem())
+        monkeypatch.setattr(clearance, "_CLEARANCE_CHARTER", charter)
+        layout = self._layout(role)
+        clearance.emit_surface_clearance_cuts(
+            layout, dem=object(), tile_lat=0, tile_lon=0)
+        return [s for s in layout.shapes
+                if s.role in _CLEARANCE_ROLES
+                and s.polygon is not None and not s.polygon.is_empty]
+
+
+class TestClearanceCharter(_ChartHarness):
+    def test_apron_only_emits_zero_under_charter(self, monkeypatch):
+        """CHARTER ON: an apron sources NO clearance (apron is not a
+        taxiway/runway)."""
+        cuts = self._emit(monkeypatch, "apron", charter=True)
+        assert cuts == [], (
+            f"charter ON: apron sourced {len(cuts)} clearance shape(s)")
+
+    def test_apron_emits_without_charter(self, monkeypatch):
+        """Gate OFF restores the historical apron ring sweep — the same
+        apron/DEM DOES cut (proves the ON result is the gate, not the
+        geometry failing to trigger)."""
+        cuts = self._emit(monkeypatch, "apron", charter=False)
+        assert cuts, "charter OFF: apron should source the historical sweep"
+
+    def test_service_road_emits_zero_under_charter(self, monkeypatch):
+        """CHARTER ON: a service road sources NO clearance."""
+        assert self._emit(monkeypatch, "service_road", charter=True) == []
+        # gate off → historical sweep present
+        assert self._emit(monkeypatch, "service_road", charter=False)
+
+    def test_taxiway_family_keeps_wingtip_under_charter(self, monkeypatch):
+        """CHARTER ON: a junction (taxiway-family) KEEPS its wingtip
+        clearance — the charter scopes out aprons/service, not taxiways."""
+        cuts = self._emit(monkeypatch, "junction", charter=True)
+        assert cuts, "charter ON: taxiway-family junction lost its clearance"
+        assert all(s.role == "taxiway_clearance" for s in cuts)
+
+    def test_gate_default_is_off(self):
+        """The gate ships DEFAULT OFF (turning it ON currently regresses
+        the adjacent-ground backfill — see the module docstring); the
+        integrated build must be unaffected."""
+        import os
+        from auto_patch import clearance
+        assert clearance._CLEARANCE_CHARTER is (
+            os.environ.get("O4_CLEARANCE_CHARTER", "0") == "1")

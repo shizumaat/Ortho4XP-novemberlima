@@ -97,9 +97,27 @@ class BuildProgress:
         self._estimate_total_s = None       # current best, sent with events
 
     def set_time_model(self, predicted_total_s, predicted_phase_s=None):
-        """Attach the complexity-based prediction (both may be ``None``)."""
+        """Attach the complexity-based prediction (both may be ``None``).
+
+        When the prediction covers this build's phases it also REWEIGHTS
+        THE BAR: the static PHASE_WEIGHTS split drifts as the pipeline
+        evolves (2026-07-10: the elevation solve fell from ~70% to ~7%
+        of a CYXY build while the emit phase grew to ~90% — the bar
+        sprinted to the last phase in seconds and stalled there), while
+        recorded per-phase times from past builds are ground truth for
+        this airport's bar.  A small floor keeps every phase visible.
+        """
         self._predicted_total_s = predicted_total_s
         self._predicted_phase_s = dict(predicted_phase_s or {}) or None
+        if self._predicted_phase_s:
+            w = [max(0.0, self._predicted_phase_s.get(label, 0.0))
+                 for label in self.labels]
+            s = sum(w)
+            if s > 0:
+                floor = 0.005
+                w = [max(v / s, floor) for v in w]
+                s = sum(w)
+                self.weights = [v / s for v in w]
         self._refresh_estimate(0.0)
 
     def phase_seconds(self):
@@ -121,6 +139,17 @@ class BuildProgress:
         observed ahead/behind ratio (clamped — one anomalous phase must
         not blow up the whole estimate).  Falls back to the flat
         predicted total, then to ``None`` (GUI extrapolates alone).
+
+        The ahead/behind RATIO is computed from COMPLETED phases only
+        (their actual wall time versus their prediction is ground
+        truth).  Substep fractions are display hints with hard-coded
+        positions — measured 2026-07-10: feeding them into the ratio
+        let a substep that fires seconds into a long phase claim the
+        phase mostly done, halving the estimate ("About 0:00
+        remaining" for the final two minutes of a CYXY build).  The
+        fraction still SPLITS the current phase's prediction between
+        done and rest (arithmetic), but never inflates the evidence
+        the ratio is judged on.
         """
         try:
             elapsed = _time.time() - self._started_at
@@ -129,11 +158,8 @@ class BuildProgress:
                 done_labels = self.labels[:max(0, self._done - 1)]
                 current_label = (self.labels[self._done - 1]
                                  if self._done else None)
-                predicted_done = sum(
+                predicted_completed = sum(
                     predicted.get(label, 0.0) for label in done_labels)
-                if current_label is not None:
-                    predicted_done += (frac_in_phase
-                                       * predicted.get(current_label, 0.0))
                 predicted_rest = sum(
                     predicted.get(label, 0.0)
                     for label in self.labels[max(0, self._done - 1):])
@@ -143,17 +169,30 @@ class BuildProgress:
                 predicted_rest = max(0.0, predicted_rest)
                 predicted_total = sum(
                     predicted.get(label, 0.0) for label in self.labels)
-                if predicted_done > 3.0:
-                    ratio = min(4.0, max(0.5, elapsed / predicted_done))
+                elapsed_completed = (
+                    (self._phase_started_at - self._started_at)
+                    if self._phase_started_at is not None else elapsed)
+                if predicted_completed > 3.0:
+                    ratio = min(4.0, max(
+                        0.5, elapsed_completed / predicted_completed))
                     # Trust the ahead/behind ratio in proportion to how
                     # much of the predicted build has actually run — one
                     # quick early phase must not halve the estimate.
                     confidence = min(
-                        1.0, predicted_done / max(1.0, 0.3 * predicted_total))
+                        1.0,
+                        predicted_completed / max(1.0, 0.3 * predicted_total))
                     ratio = 1.0 + (ratio - 1.0) * confidence
                 else:
                     ratio = 1.0
-                self._estimate_total_s = elapsed + ratio * predicted_rest
+                # A running phase never counts as finished: while any
+                # phase is in progress the estimate keeps at least a
+                # sliver of the predicted total ahead of the clock, so
+                # the display cannot reach zero before the build does.
+                floor = elapsed + (0.02 * predicted_total
+                                   if self._done < self.total
+                                   or frac_in_phase < 1.0 else 0.0)
+                self._estimate_total_s = max(
+                    elapsed + ratio * predicted_rest, floor)
             elif self._predicted_total_s:
                 self._estimate_total_s = max(
                     self._predicted_total_s, elapsed)
@@ -241,13 +280,17 @@ PHASE_LABELS = [
     "Solving elevations (FAA grade compliance)",
     "Emitting terrain features & finalizing",
 ]
-# Typical share of build TIME per phase (measured SPJC/CYXY, 2026-07-03:
-# ~105 s total, elevation solve ~75-80 s).  Drives the GUI bar; only the
-# RATIOS matter, and airports of any size follow roughly this split (the
-# solve dominates because graph passes scale with the same node count
-# the geometry passes produce).  Re-measure with scratchpad
-# ``timed_build.py`` if the split drifts.
-PHASE_WEIGHTS = [2, 5, 7, 5, 70, 11]
+# Typical share of build TIME per phase (measured CYXY 2026-07-10:
+# ~175 s total — geometry phases ~3 s, elevation solve ~12 s, emit
+# ~160 s; the one-solve/node-diet work shrank the solve while the
+# terrain-feature emitters — bands, gap fill, weld, decimation — grew
+# the emit phase into the dominant cost).  This static split is only
+# the FALLBACK for an airport with no recorded builds:
+# ``set_time_model`` reweights the bar from recorded per-phase times
+# (``build_time_model``) as soon as they exist.  Re-measure here if
+# the pipeline's split drifts again (previous split 2026-07-03:
+# [2, 5, 7, 5, 70, 11] — solve-dominated).
+PHASE_WEIGHTS = [1, 1, 1, 1, 7, 89]
 
 
 def for_build(icao, *, compute_elevations):

@@ -166,6 +166,7 @@ conformance; one blended global ruleset).
 | Apron beyond-shoulder fill render target (zone-3 free-floor region) | 3–5% down | FAA AC 150/5300-13B §5.9.2 ("then 3–5% beyond") — a render target, not a corridor | `config.py` `APRON_BEYOND_SHOULDER_{MIN,MAX}_DOWN_SLOPE` |
 | Apron edge retaining-wall threshold | 1.5 m drop below the shoulder edge | design (ruling 3; grade-to-edge + vertical drop/retaining wall is lawful where no RSA/OFA/TOFA overlaps — reuse the tunnel `retaining_wall` emitter) | `config.py` `APRON_EDGE_WALL_MIN_DROP_M` |
 | Edge drop-off tolerance, pavement↔unpaved | 1.5 in ± 0.5 in | FAA (all pavement types); ICAO "flush" (§3.4.10) | (documented; enforced via the flush edge = lip start) |
+| Adjacent-ground daylight slope-limit (along-frontage benching) | governed depth grows ≤2.0 × the along-frontage station spacing | engineering judgment — NO external citation (grading benches into a hillside; the daylight line cannot jump discontinuously along the frontage); user ruling 2026-07-09 (CYXY shapeID 417 knife-slot report) | `config.py` `ADJACENT_GROUND_DAYLIGHT_SLOPE_LIMIT`; law `grade_law.adjacent_ground_supported_depths` (emitter + validator lockstep) |
 
 Runway ENDS are OUT OF SCOPE of this lateral law — the longitudinal runway-end skirt law
 (above / `grade_law.runway_end_skirt_*`) owns terrain beyond a runway end. Service roads
