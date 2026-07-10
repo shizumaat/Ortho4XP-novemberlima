@@ -546,9 +546,21 @@ class PavementLayout:
         # a runway ring vertex (the A2 doctrine at emit: authorities
         # never adopt; soft receivers adopt).
         node_id_to_authority_alts: dict[int, list[float]] = {}
+        # LAW-VALUE claims (feature B): the object-bridge plates carry
+        # grade-law constants (deck-end / corridor-floor elevations) —
+        # a node with a law claim takes the LAW value; other authority
+        # claims (approach-rect corners welded onto the causeway lip)
+        # yield to it, exactly as soft claims yield to authorities
+        # (post-merge audit delta: lip nodes averaged to 166.66-166.93
+        # against the 167.00 law).
+        node_id_to_law_alts: dict[int, list[float]] = {}
+        _LAW_VALUE_ROLES = frozenset({
+            ROLE_BRIDGE_TRENCH, ROLE_BRIDGE_CAUSEWAY,
+        })
         _SOFT_RECEIVER_ROLES = SOFT_RECEIVER_ROLES
         current_shape_is_soft = [False]
         current_shape_is_strip = [False]
+        current_shape_is_law = [False]
         next_nid = [-1]
 
         def _record_claim(nid: int, alt: float) -> None:
@@ -556,6 +568,8 @@ class PavementLayout:
             if not current_shape_is_soft[0]:
                 node_id_to_authority_alts.setdefault(
                     nid, []).append(alt)
+            if current_shape_is_law[0]:
+                node_id_to_law_alts.setdefault(nid, []).append(alt)
 
         def _intern(x: float, y: float,
                     alt: float | None = None) -> int:
@@ -605,6 +619,8 @@ class PavementLayout:
                 node_id_to_alts[nid] = [alt]
                 if not current_shape_is_soft[0]:
                     node_id_to_authority_alts[nid] = [alt]
+                if current_shape_is_law[0]:
+                    node_id_to_law_alts[nid] = [alt]
             return nid
 
         def _ring_to_nids(ring_coords, ring_elevs=None):
@@ -729,6 +745,7 @@ class PavementLayout:
                 or (s.ref == "surface_clearance"
                     and s.role in (ROLE_TAXIWAY_CLEARANCE,
                                    ROLE_RUNWAY_CLEARANCE)))
+            current_shape_is_law[0] = s.role in _LAW_VALUE_ROLES
             # Validate the polygon's geometry before emission.
             # Upstream pipeline stages (decomposition, seam-point
             # injection, shared-vertex enforcement) can occasionally
@@ -1164,8 +1181,9 @@ class PavementLayout:
         # corner value and never moves it.
         node_id_to_consensus: dict[int, float | None] = {}
         for nid, alts in node_id_to_alts.items():
+            law = node_id_to_law_alts.get(nid)
             authority = node_id_to_authority_alts.get(nid)
-            chosen = authority if authority else alts
+            chosen = law if law else (authority if authority else alts)
             if chosen:
                 node_id_to_consensus[nid] = (
                     sum(chosen) / float(len(chosen)))
@@ -1198,6 +1216,18 @@ class PavementLayout:
         # after the redundancy scan enforces the cap over the whole run.
         _DEC_MAX_CHORD_M = PAVEMENT_NODE_MAX_CHORD_M
         _n_chord_retained = 0
+        # LAW-PLATE protection (feature B): every coordinate referenced
+        # by an object-bridge plate way is exempt from the sweep — the
+        # plates' ~5 m densification is a deliberate Triangle4XP
+        # constraint (post-merge audit delta: the sweep took the trench
+        # ring 75 -> 17 nodes and the in-trench interpolation dipped
+        # 1.09 m below the law floor at Murfreesboro).
+        _law_plate_ll: set[tuple] = set()
+        for _si, _s, _enids, _sa, _sna in pending:
+            if getattr(_s, "role", None) in (ROLE_BRIDGE_TRENCH,
+                                             ROLE_BRIDGE_CAUSEWAY):
+                for _nid in _enids:
+                    _law_plate_ll.add(node_id_to_ll[_nid])
         for _sweep in range(4):
             # Group by COORDINATE, not nid: coincident twin nids (wall
             # splits, the weld's coordinate-twins) must be removed
@@ -1287,6 +1317,7 @@ class PavementLayout:
                         break
                 if _ok:
                     _removable_ll.add(_ll)
+            _removable_ll -= _law_plate_ll
             if not _removable_ll:
                 break
             # MAX-CHORD RETENTION (pavement-node rule).  The redundancy

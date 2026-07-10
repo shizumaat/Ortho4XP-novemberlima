@@ -1725,3 +1725,65 @@ class TestBridgePlateExclusivity:
             role=ROLE_TUNNEL_RAMP, ref="tunnel_ramp", altitude=170.0))
         assert bridges.enforce_bridge_plate_exclusivity(layout) == 0
         assert len(layout.shapes) == 1
+
+
+class TestLawValueEmissionExemptions:
+    def _emit(self, tmp_path, shapes):
+        from auto_patch.layout import PavementLayout
+        layout = PavementLayout(icao="TEST", anchor=ANCHOR)
+        layout.shapes.extend(shapes)
+        out = str(tmp_path / "law.osm")
+        layout.to_osm(out)
+        return open(out).read()
+
+    def test_lip_node_keeps_law_value_against_coincident_rect(
+        self, tmp_path
+    ):
+        # Post-merge delta 1: an approach-rect corner coinciding with a
+        # causeway lip node within the merge tolerance averaged the lip
+        # to 166.66-166.93.  The law tier wins: the shared node emits
+        # at EXACTLY the law value.
+        import re
+        from auto_patch.layout import (
+            ROLE_BRIDGE_CAUSEWAY, ROLE_TUNNEL_RAMP,
+        )
+        causeway = BuiltShape(
+            polygon=Polygon([(0.0, 0.0), (40.0, 0.0), (40.0, 20.0),
+                             (0.0, 20.0)]),
+            role=ROLE_BRIDGE_CAUSEWAY, ref="object_bridge_causeway",
+            node_altitudes=[167.0] * 5)
+        # Approach rect sharing the (0,0) corner at a near-miss value.
+        approach = BuiltShape(
+            polygon=Polygon([(0.0, 0.0), (-20.0, 0.0), (-20.0, 20.0),
+                             (0.0, 20.0)]),
+            role=ROLE_TUNNEL_RAMP, ref="object_bridge_approach",
+            node_altitudes=[166.3, 166.0, 166.0, 166.3, 166.3])
+        text = self._emit(tmp_path, [causeway, approach])
+        values = [float(m) for m in re.findall(
+            r"k='alt_abs' v='([-0-9.]+)'", text)]
+        # Every causeway node at exactly 167.00 — no 166.6x average.
+        assert 167.0 in values
+        assert not any(166.5 < v < 166.99 for v in values), values
+
+    def test_sweep_preserves_densified_plate_nodes(self, tmp_path):
+        # Post-merge delta 2: the to_osm decimation sweep took the
+        # densified trench ring 75 -> 17 nodes (all values equal =
+        # perfectly collinear in 3D).  The law-plate exemption keeps
+        # every densified vertex.
+        import re
+        from auto_patch.layout import ROLE_BRIDGE_TRENCH
+        polygon = Polygon([(0.0, 0.0), (120.0, 0.0), (120.0, 50.0),
+                           (0.0, 50.0)]).segmentize(5.0)
+        ring_count = len(list(polygon.exterior.coords)) - 1
+        assert ring_count > 60
+        trench = BuiltShape(
+            polygon=polygon, role=ROLE_BRIDGE_TRENCH,
+            ref="object_bridge_corridor",
+            node_altitudes=[161.01] * (ring_count + 1))
+        text = self._emit(tmp_path, [trench])
+        way = re.search(r"<way .*?</way>", text, re.S).group(0)
+        emitted_nodes = len(re.findall(r"<nd ref='(-?\d+)'", way)) - 1
+        assert emitted_nodes == ring_count, \
+            f"sweep removed {ring_count - emitted_nodes} plate node(s)"
+        assert len(re.findall(r"k='alt_abs' v='161\.01'", text)) \
+            == ring_count
