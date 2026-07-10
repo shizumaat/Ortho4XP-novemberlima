@@ -4441,13 +4441,25 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
             return None
 
     def _born_flat(polygon, role, ref, elevation):
-        """Append a densified flat plate with per-vertex law values."""
+        """Append a densified flat plate with per-vertex law values.
+
+        User directive (round 8): the plate is a FIRST-CLASS SOLVER
+        GRAPH MEMBER — its role is in the solver's PAVEMENT_ROLES, and
+        EVERY ring vertex is registered as a hard pin at the law value
+        (``_record_pin`` → ``layout._object_bridge_pin_values``), so
+        ``_seed_elevations`` pins it exactly like a deck-end pin and
+        protects it via the seam-pin index; the solve grades the
+        neighbouring pavement to meet it, the writeback is the
+        identity, and to_osm ships it per-node ``alt_abs`` (the one
+        encoding the mesh step demonstrably consumes)."""
         try:
             dense = polygon.segmentize(5.0)
         except (AttributeError, _GEOM_EXC):
             dense = polygon
         ring = list(dense.exterior.coords)
         vertex_count = len(ring) - 1 if ring[0] == ring[-1] else len(ring)
+        for x, y in ring[:vertex_count]:
+            _record_pin(layout, x, y, elevation)
         layout.shapes.append(BuiltShape(
             polygon=dense,
             role=role,

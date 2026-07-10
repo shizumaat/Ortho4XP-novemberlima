@@ -1322,11 +1322,14 @@ class TestR12PassImmunityByConstruction:
             ROLE_BRIDGE_TRENCH, ROLE_BRIDGE_CAUSEWAY,
         )
         new_roles = {ROLE_BRIDGE_TRENCH, ROLE_BRIDGE_CAUSEWAY}
-        # Solver: not pavement — the solve never reshapes them.
+        # Solver: FIRST-CLASS GRAPH MEMBERS (user directive, round 8) —
+        # ring vertices enter the canonical registry; immunity comes
+        # from every vertex being a HARD PIN at the law value, not from
+        # exclusion.
         from auto_patch.elevation_per_surface.solver_primitives import (
             PAVEMENT_ROLES,
         )
-        assert not (new_roles & set(PAVEMENT_ROLES))
+        assert new_roles <= set(PAVEMENT_ROLES)
         # Deconflict: not road features — never walked, never dropped.
         from auto_patch.layout import (
             ROLE_TUNNEL_RAMP, ROLE_RETAINING_WALL,
@@ -1514,3 +1517,94 @@ class TestAnchorFamilyExclusions:
                                       ANCHOR_LONGITUDE, ANCHOR_LATITUDE)]
         assert assembly._expand_exclusions_to_anchor_families(
             _Result(), placements, "PACK") == []
+
+
+# ---------------------------------------------------------------------------
+# round 8 — flat-by-law plates ship per-node alt_abs (mesh-consumer reality)
+# ---------------------------------------------------------------------------
+
+class TestPerNodeEmissionForBridgePlates:
+    def _write_patch(self, tmp_path, role, ref):
+        from auto_patch.layout import PavementLayout
+        layout = PavementLayout(icao="TEST", anchor=ANCHOR)
+        polygon = Polygon([(0.0, 0.0), (40.0, 0.0), (40.0, 20.0),
+                           (0.0, 20.0)])
+        layout.shapes.append(BuiltShape(
+            polygon=polygon, role=role, ref=ref,
+            node_altitudes=[161.01] * 5))
+        out = str(tmp_path / "plate.osm")
+        layout.to_osm(out)
+        return open(out).read()
+
+    def test_trench_emits_per_node_alt_abs_never_flat(self, tmp_path):
+        # Round-8 measured defect: to_osm collapsed all-equal
+        # node_altitudes into a way-level altitude tag, and the mesh
+        # consumer's flat-way branch demonstrably never landed (three
+        # fresh KBNA meshes kept DEM z at every trench vertex while
+        # per-node alt_abs ways landed exactly).
+        from auto_patch.layout import ROLE_BRIDGE_TRENCH
+        import re
+        text = self._write_patch(tmp_path, ROLE_BRIDGE_TRENCH,
+                                 "object_bridge_corridor")
+        way = re.search(r"<way .*?</way>", text, re.S).group(0)
+        assert "k='altitude'" not in way, "flat collapse must not happen"
+        alt_abs_nodes = re.findall(r"k='alt_abs' v='161\.01'", text)
+        assert len(alt_abs_nodes) >= 4, "every ring vertex carries alt_abs"
+
+    def test_causeway_emits_per_node_alt_abs(self, tmp_path):
+        from auto_patch.layout import ROLE_BRIDGE_CAUSEWAY
+        import re
+        text = self._write_patch(tmp_path, ROLE_BRIDGE_CAUSEWAY,
+                                 "object_bridge_causeway")
+        way = re.search(r"<way .*?</way>", text, re.S).group(0)
+        assert "k='altitude'" not in way
+        assert len(re.findall(r"k='alt_abs' v='161\.01'", text)) >= 4
+
+    def test_other_flat_roles_still_collapse(self, tmp_path):
+        # The collapse survives for every other role — byte-identical
+        # legacy behaviour (gate-off neutrality).
+        from auto_patch.layout import ROLE_TUNNEL_RAMP
+        import re
+        text = self._write_patch(tmp_path, ROLE_TUNNEL_RAMP, "legacy")
+        way = re.search(r"<way .*?</way>", text, re.S).group(0)
+        assert "k='altitude' v='161.01'" in way
+        assert "alt_abs" not in text
+
+
+class TestPlatesAreSolverGraphMembers:
+    def test_plate_vertices_hard_pinned_at_law_values_in_seeding(
+        self, monkeypatch
+    ):
+        # User directive (round 8): every plate ring vertex is a graph
+        # node hard-pinned at its law value, protected like a seam pin.
+        from auto_patch.elevation_per_surface.solver_primitives import (
+            _seed_elevations,
+        )
+        layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
+        layout.shapes.append(_deck_route_shape())
+        bridges.build_bridge_layout_shapes(layout, None, 36, -87)
+        plates = [s for s in layout.shapes
+                  if (s.ref or "").startswith("object_bridge_c")]
+        assert plates
+        nodes = []
+        bucket_to_idx = {}
+        expected = {}
+        for shape in plates:
+            ring = list(shape.polygon.exterior.coords)[:-1]
+            for (x, y), value in zip(ring, shape.node_altitudes):
+                key = layout.canonical_points.get_or_add(float(x), float(y))
+                if key not in bucket_to_idx:
+                    bucket_to_idx[key] = len(nodes)
+                    nodes.append((float(x), float(y)))
+                expected[bucket_to_idx[key]] = value
+        elev, is_hard, have_initial = _seed_elevations(
+            layout, nodes, bucket_to_idx, dem=None,
+            tile_lat=36, tile_lon=-87,
+        )
+        assert all(is_hard[i] for i in expected), \
+            "every plate vertex must seed HARD"
+        for index, value in expected.items():
+            assert elev[index] == pytest.approx(value, abs=0.01)
+        # Protected from downstream relax passes like seam pins.
+        protected = getattr(layout, "_seam_pin_idx")
+        assert set(expected) <= protected

@@ -1070,7 +1070,20 @@ class PavementLayout:
                             node_id_to_consensus[nid] = open_alts[k]
                     all_max = max(open_alts)
                     all_min = min(open_alts)
-                    if all_max - all_min <= _CANON_EQ_TOL:
+                    # Object-bridge terrain plates NEVER collapse to a
+                    # way-level ``altitude`` tag (round 8, measured):
+                    # across three fresh KBNA meshes the flat-way branch
+                    # of the mesh consumer demonstrably did not land —
+                    # the trench/causeway rings reached Data.node/.poly
+                    # correctly (74/74 constrained segments, INTERP_ALT
+                    # seeds inside) yet the built mesh kept raw DEM z at
+                    # every ring vertex, while per-node ``alt_abs`` ways
+                    # (the pinned junctions at 167.00) landed exactly.
+                    # Flat-by-law plates therefore ship per-node.
+                    force_per_node = s.role in (
+                        ROLE_BRIDGE_TRENCH, ROLE_BRIDGE_CAUSEWAY)
+                    if (all_max - all_min <= _CANON_EQ_TOL
+                            and not force_per_node):
                         tags["altitude"] = (
                             f"{sum(open_alts) / n_open:.2f}")
                     else:

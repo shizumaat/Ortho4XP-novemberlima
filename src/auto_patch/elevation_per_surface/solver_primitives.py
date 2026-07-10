@@ -36,7 +36,8 @@ from auto_patch.config import (
     taxi_grade_cap_for_letter, TAXI_MAX_GRADE_NARROW, JUNCTION_NARROW_GRADE,
     CORRIDOR_SPINE_CHAINS)
 from auto_patch.layout import (
-    ROLE_APRON, ROLE_BOUNDARY, ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
+    ROLE_APRON, ROLE_BOUNDARY, ROLE_BRIDGE_CAUSEWAY, ROLE_BRIDGE_TRENCH,
+    ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
     ROLE_PRIMARY_PARALLEL, ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
     ROLE_SECONDARY_PARALLEL, ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION,
     ROLE_STUB, ROLE_BUILDING, taxi_shape_code_letter,
@@ -70,6 +71,15 @@ PAVEMENT_ROLES = {
     # doesn't reshape elevations that the runway-interpolation
     # already established.
     ROLE_RUNWAY_CROSSING,
+    # Object-bridge terrain plates (feature B, user directive round 8):
+    # FIRST-CLASS graph members — their ring vertices enter the
+    # canonical node registry and every one is a HARD PIN at the grade
+    # law value (``layout._object_bridge_pin_values``, written at shape
+    # birth), the RUNWAY_CROSSING pattern: the solver grades the
+    # neighbouring pavement to meet them and never reshapes them.
+    # Gate off ⇒ no such shapes exist and membership is vacuous.
+    ROLE_BRIDGE_TRENCH,
+    ROLE_BRIDGE_CAUSEWAY,
 }
 
 
