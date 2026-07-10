@@ -5966,6 +5966,16 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 UI.vprint(1, f"  [pav-builder] {icao}: adjacent-ground "
                              f"band emission FAILED: {exc!r}")
 
+        # Round 9 (user ruling): re-run the non-overlap rule AFTER the
+        # adjacent-ground bands — the last feature emitters that can
+        # lap onto the object-bridge plates.  Gate off ⇒ no plates ⇒
+        # no-op.
+        try:
+            from .bridges import enforce_bridge_plate_exclusivity
+            enforce_bridge_plate_exclusivity(layout)
+        except _GEOM_EXC:
+            pass
+
     # FINAL EPSILON-WEDGE WELD (part 30j): the T-vertex weld at
     # ``enforce_conformance(tol=0.01)`` above runs BEFORE the last three
     # geometry-mutating passes — ``_separate_groundside_from_airside``

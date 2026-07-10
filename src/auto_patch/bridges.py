@@ -4627,6 +4627,127 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
     return n_trench, n_causeway, pads_removed
 
 
+def enforce_bridge_plate_exclusivity(layout) -> int:
+    """Round 9 (user ruling): the WRITTEN patch must contain strictly
+    non-overlapping rings over the bridge plates — the base mesh
+    machinery is never taught to tolerate our overlaps.  Every terrain
+    FEATURE shape (tunnel ramps/walls from the legacy portal emitters
+    that fire on the ``tunnel=yes`` OSM ways under a deck, clearance
+    cuts, adjacent-ground strips) is CUT against the trench/causeway
+    plate footprints; pieces mostly inside a plate are dropped whole
+    (measured at KBNA: 14 portal ramp/wall vertices constrained at
+    170.0-178.3 inside the 161.01 trench box kept the corridor off its
+    floor — Triangle interpolated the interior from them).
+
+    The plates themselves are already mutually exclusive by
+    construction (trench inset vs causeway lip, pavement weld clips).
+    Deconflict's sloped-quad exemption (small overlaps kept to preserve
+    the 4-corner altitude convention) does NOT apply here: a sloped
+    piece that loses corners is converted to resampled per-vertex
+    ``node_altitudes``, exactly like the boundary-cut pattern.
+
+    Called after the road-feature emitters (finalize) AND after the
+    adjacent-ground bands (pipeline tail).  Gate off ⇒ no plates ⇒ 0.
+    Returns the number of shapes cut or dropped."""
+    classification = _object_bridge_classification(layout)
+    if classification is None:
+        return 0
+    from .layout import (
+        ROLE_BRIDGE_CAUSEWAY,
+        ROLE_BRIDGE_TRENCH,
+        ROLE_GRADED_STRIP,
+        ROLE_RETAINING_WALL,
+        ROLE_TAXIWAY_CLEARANCE,
+        ROLE_RUNWAY_CLEARANCE,
+    )
+    plate_roles = (ROLE_BRIDGE_TRENCH, ROLE_BRIDGE_CAUSEWAY)
+    cut_roles = {
+        ROLE_TUNNEL_RAMP, ROLE_RETAINING_WALL, ROLE_GRADED_STRIP,
+        ROLE_TAXIWAY_CLEARANCE, ROLE_RUNWAY_CLEARANCE,
+    }
+    plate_polygons = [
+        shape.polygon for shape in layout.shapes
+        if shape.role in plate_roles
+        and shape.polygon is not None and not shape.polygon.is_empty
+    ]
+    if not plate_polygons:
+        return 0
+    try:
+        plate_union = unary_union(plate_polygons)
+    except _GEOM_EXC:
+        return 0
+    n_touched = 0
+    kept_shapes: list[BuiltShape] = []
+    for shape in layout.shapes:
+        if (shape.role not in cut_roles
+                or shape.polygon is None or shape.polygon.is_empty):
+            kept_shapes.append(shape)
+            continue
+        # Our own plates never cut each other here.
+        if (shape.ref or "").startswith("object_bridge"):
+            kept_shapes.append(shape)
+            continue
+        try:
+            overlap = shape.polygon.intersection(plate_union).area
+        except _GEOM_EXC:
+            kept_shapes.append(shape)
+            continue
+        if overlap < 0.5:
+            kept_shapes.append(shape)
+            continue
+        n_touched += 1
+        try:
+            old_ring = list(shape.polygon.exterior.coords)
+        except _GEOM_EXC:
+            old_ring = []
+        if old_ring and old_ring[0] == old_ring[-1]:
+            old_ring = old_ring[:-1]
+        old_altitudes = (
+            list(shape.node_altitudes) if shape.node_altitudes else None
+        )
+        try:
+            remainder = shape.polygon.difference(plate_union)
+        except _GEOM_EXC:
+            kept_shapes.append(shape)
+            continue
+        if remainder.is_empty:
+            UI.vprint(
+                2,
+                "   [object-bridge] dropped "
+                f"{shape.role}/{shape.ref!r} inside a bridge plate "
+                "(non-overlap rule)",
+            )
+            continue
+        parts = (
+            list(remainder.geoms)
+            if remainder.geom_type == "MultiPolygon" else [remainder]
+        )
+        from .elevation import _resample_node_altitudes_nn as _resample
+        for part in parts:
+            if (part.geom_type != "Polygon" or part.is_empty
+                    or part.area < 1.0):
+                continue
+            resampled = _resample(part, old_ring, old_altitudes)
+            kept_shapes.append(BuiltShape(
+                polygon=part,
+                role=shape.role,
+                ref=shape.ref,
+                altitude=(shape.altitude if resampled is None else None),
+                altitude_high=(
+                    None if resampled is not None else shape.altitude_high),
+                altitude_low=(
+                    None if resampled is not None else shape.altitude_low),
+                node_altitudes=resampled))
+    if n_touched:
+        layout.shapes = kept_shapes
+        UI.vprint(
+            1,
+            f"   [object-bridge] non-overlap rule: cut/dropped "
+            f"{n_touched} feature shape(s) against the bridge plates",
+        )
+    return n_touched
+
+
 def _bridge_crossing_floor_for_bridge(
         bridge, road_networks, dem, tile_lat, tile_lon,
         to_meters, meters_to_lat_lon):

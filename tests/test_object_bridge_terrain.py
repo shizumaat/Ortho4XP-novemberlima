@@ -1608,3 +1608,55 @@ class TestPlatesAreSolverGraphMembers:
         # Protected from downstream relax passes like seam pins.
         protected = getattr(layout, "_seam_pin_idx")
         assert set(expected) <= protected
+
+
+class TestBridgePlateExclusivity:
+    def test_portal_pieces_cut_out_of_plates(self, monkeypatch):
+        # The round-9 stray class: legacy tunnel-portal ramp/wall pieces
+        # (fired by tunnel=yes OSM ways under the deck) constrained at
+        # DEM values inside the trench box.  The non-overlap rule drops
+        # a piece fully inside and clips a straddler, converting its
+        # values to resampled per-vertex node_altitudes.
+        from auto_patch.layout import (
+            ROLE_BRIDGE_TRENCH, ROLE_TUNNEL_RAMP, ROLE_RETAINING_WALL,
+        )
+        layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
+        plate = Polygon([(10.0, -20.0), (120.0, -20.0), (120.0, 20.0),
+                         (10.0, 20.0)])
+        layout.shapes.append(BuiltShape(
+            polygon=plate, role=ROLE_BRIDGE_TRENCH,
+            ref="object_bridge_corridor", node_altitudes=[161.01] * 5))
+        # Fully-inside portal wall: dropped.
+        layout.shapes.append(BuiltShape(
+            polygon=Polygon([(40.0, -5.0), (60.0, -5.0), (60.0, 5.0),
+                             (40.0, 5.0)]),
+            role=ROLE_RETAINING_WALL, ref="tunnel_wall", altitude=178.3))
+        # Straddling sloped ramp: clipped to the outside remainder.
+        layout.shapes.append(BuiltShape(
+            polygon=Polygon([(100.0, -5.0), (140.0, -5.0), (140.0, 5.0),
+                             (100.0, 5.0)]),
+            role=ROLE_TUNNEL_RAMP, ref="tunnel_ramp",
+            altitude_high=172.0, altitude_low=170.0))
+        touched = bridges.enforce_bridge_plate_exclusivity(layout)
+        assert touched == 2
+        refs = [(s.ref, s.role) for s in layout.shapes]
+        assert ("tunnel_wall", ROLE_RETAINING_WALL) not in refs
+        ramps = [s for s in layout.shapes if s.ref == "tunnel_ramp"]
+        assert len(ramps) == 1
+        assert ramps[0].polygon.intersection(plate).area < 1e-6
+        minimum_x = min(x for x, _y in ramps[0].polygon.exterior.coords)
+        assert minimum_x >= 120.0 - 1e-6  # only the outside part remains
+        # The plate itself is untouched.
+        trench = [s for s in layout.shapes
+                  if s.ref == "object_bridge_corridor"][0]
+        assert trench.polygon.area == pytest.approx(plate.area)
+
+    def test_gate_off_touches_nothing(self):
+        from auto_patch.layout import ROLE_TUNNEL_RAMP
+        layout = _FakeLayout()
+        layout.shapes.append(BuiltShape(
+            polygon=Polygon([(0.0, 0.0), (10.0, 0.0), (10.0, 5.0),
+                             (0.0, 5.0)]),
+            role=ROLE_TUNNEL_RAMP, ref="tunnel_ramp", altitude=170.0))
+        assert bridges.enforce_bridge_plate_exclusivity(layout) == 0
+        assert len(layout.shapes) == 1

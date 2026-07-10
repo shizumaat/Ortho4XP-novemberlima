@@ -114,7 +114,19 @@ def deconflict_road_features(layout, icao: str = "") -> None:
     _AIRSIDE_SEED_ROLES = ("building", "runway", "runway_crossing",
                            "primary_parallel", "secondary_parallel",
                            "stub", "cross_connector", "junction",
-                           "apron")
+                           "apron",
+                           # Object-bridge law plates (feature B, round
+                           # 9): road features yield to them like to
+                           # pavement — the legacy tunnel-portal
+                           # emitters (tunnel=yes OSM ways under the
+                           # KBNA deck) dropped ramp/wall pieces INSIDE
+                           # the trench box at DEM-based values, and
+                           # Triangle interpolated the trench interior
+                           # from them (measured: 14 stray constrained
+                           # vertices at 170.0-178.3 kept the corridor
+                           # off its 161.01 floor).  Gate off => the
+                           # roles never exist => seed unchanged.
+                           "bridge_trench", "bridge_causeway")
     try:
         from shapely.ops import unary_union as _uu
         from .layout import (BuiltShape,
@@ -636,5 +648,11 @@ def emit_terrain_transition_features(layout: PavementLayout, icao: str, xplane_r
             except _GEOM_EXC:
                 pass
             deconflict_road_features(layout, icao)
+            # Round 9 (user ruling): the written patch must hold
+            # strictly NON-OVERLAPPING rings over the object-bridge
+            # plates — cut every road-feature remnant against them
+            # (gate off ⇒ no plates ⇒ no-op).
+            from .bridges import enforce_bridge_plate_exclusivity
+            enforce_bridge_plate_exclusivity(layout)
     except _GEOM_EXC:
         pass
