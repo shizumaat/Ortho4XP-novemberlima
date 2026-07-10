@@ -4,6 +4,7 @@ import threading
 from math import pi, sin, cos, sqrt, atan, exp
 import numpy
 from shapely import geometry, ops
+from shapely.prepared import prep
 
 # from PIL import Image, ImageDraw, ImageFilter
 import O4_DEM_Utils as DEM
@@ -845,6 +846,9 @@ def include_patches(vector_map, tile):
 
     patches_list = []
     patches_area = geometry.Polygon()
+    # Closed patch polygons, kept so that INTERP_ALT seeds can be placed
+    # per planar FACE after all patch files are read (see below).
+    interp_alt_patch_polygons = []
     patch_dir = FNAMES.patch_dir(tile.lat, tile.lon)
     if not os.path.exists(patch_dir):
         return (patches_area, patches_list)
@@ -1094,11 +1098,7 @@ def include_patches(vector_map, tile):
                             "INTERP_ALT",
                             check=True,
                         )
-                        seed = numpy.array(pol.representative_point().coords[0])
-                        if "INTERP_ALT" in vector_map.seeds:
-                            vector_map.seeds["INTERP_ALT"].append(seed)
-                        else:
-                            vector_map.seeds["INTERP_ALT"] = [seed]
+                        interp_alt_patch_polygons.append(pol)
                         if cplx_way and cuts_long:
                             for i in range(1, cuts_long):
                                 id0 = vector_map.dico_nodes[tuple(way[i])]
@@ -1116,6 +1116,40 @@ def include_patches(vector_map, tile):
                 vector_map.insert_way(
                     numpy.hstack([way, alti_way]), "DUMMY", check=True
                 )
+    # Seed every planar FACE of the patch coverage, not one point per ring.
+    # Triangle4XP spreads a regional attribute by plague, and the flood is
+    # blocked by ANY segment carrying the same attribute bit (see the
+    # preamble of O4_Vector_Utils and regionplague in Triangle4XP.c).  When
+    # closed patch ways overlap — a bridge trench crossing pavement rings, a
+    # retaining wall crossing an apron — their boundaries partition each
+    # other's interiors into several faces, and a single seed per ring
+    # leaves the other faces unmarked: their triangles keep the raw DEM
+    # altitude even though every ring vertex carries the intended one.
+    if interp_alt_patch_polygons:
+        try:
+            interp_alt_seeds = []
+            covered = prep(patches_area)
+            for face in ops.polygonize(
+                ops.unary_union(
+                    [pol.boundary for pol in interp_alt_patch_polygons]
+                )
+            ):
+                seed_point = face.representative_point()
+                if covered.contains(seed_point):
+                    interp_alt_seeds.append(
+                        numpy.array(seed_point.coords[0])
+                    )
+            if not interp_alt_seeds:
+                raise ValueError("face seeding produced no seeds")
+        except Exception:
+            # Fall back to the historical one-seed-per-ring placement.
+            interp_alt_seeds = [
+                numpy.array(pol.representative_point().coords[0])
+                for pol in interp_alt_patch_polygons
+            ]
+        vector_map.seeds.setdefault("INTERP_ALT", []).extend(
+            interp_alt_seeds
+        )
     for pdir_name in os.listdir(patch_dir):
         if not os.path.isdir(os.path.join(patch_dir, pdir_name)):
             continue
