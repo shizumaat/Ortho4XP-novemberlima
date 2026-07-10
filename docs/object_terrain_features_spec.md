@@ -697,3 +697,13 @@ evidence (the flagship exemplar refuses; the in-pipeline solved-pavement union i
 evidence — expose the coverage fraction on the record so tools can print it); Crossing_Bridge
 is silently absent from classification (suspect the 50-placement clutter filter or footprint
 gates — must at least surface as a refusal); plus the A9/W-V mega-pool defect.
+
+**R12 — Geometry at layout, elevation from the solver, nothing moves after (user, 2026-07-09).**
+Minimize mutation passes. Feature-B (and later feature-A/C) terrain shapes are BORN at the
+geometry phase as first-class layout shapes with their own roles (bridge trench, bridge
+causeway), the R8 pavement cut happens when shapes are built, and the solver owns all elevation
+(trench per-vertex alt_abs from birth — the runway precedent; causeway pinned at the deck-end
+law value). Post-solve plate emission and deconflict participation are retired for these
+features. Supersedes the iteration-3 post-solve cut/plate approach; W-B iteration 4 implements
+the restructure. Amendment recorded live during the KBNA build iterations (J/R abutments pass
+at 167.10/167.09; the trench plate's repeated loss to mutation passes is what this ruling ends).
