@@ -52,6 +52,7 @@ from . import config
 # never drift on a spelling.
 CLASSIFICATION_ATTRIBUTE = "_object_bridge_classification"
 ROAD_NETWORKS_ATTRIBUTE = "_object_bridge_road_networks"
+ROUTE_LINES_ATTRIBUTE = "_object_bridge_route_lines"
 
 # A resource placed more often than this is scenery clutter (trees, lamp
 # posts, fence posts) and is never a tunnel/bridge structure — skip it so
@@ -273,11 +274,57 @@ def attach_bridge_classification(layout, xplane_root: str):
         xplane_root, tile_lat, tile_lon
     )
     setattr(layout, ROAD_NETWORKS_ATTRIBUTE, road_networks)
+    setattr(
+        layout, ROUTE_LINES_ATTRIBUTE,
+        _raw_route_lines_layout_meters(layout),
+    )
 
     _log_classification_summary(
         getattr(layout, "icao", "?"), result, road_networks
     )
     return result
+
+
+def _raw_route_lines_layout_meters(layout) -> list:
+    """The RAW apt.dat routing polylines (row-1202 taxi edges + row-1206
+    truck edges) as layout-meter LineStrings — the road-carried
+    discriminator's primary evidence (stage 2b iteration 4).
+
+    The QUALIFIED centerline set (``layout.apt_taxi_centerlines``) is the
+    wrong evidence: at KBNA the Murfreesboro truck runs are disqualified
+    before reaching it (0 centerlines within the reach band of either
+    deck), while the raw 1206 rows genuinely cross — measured: 3 and 5
+    truck edges in the two decks' bands, 3 taxi edges at taxiway-L, zero
+    of anything at the Crossing_Bridge road overpass.  Empty list when
+    the apt.dat carries no routing rows or cannot be read."""
+    from shapely.geometry import LineString
+
+    apt_dat_path = getattr(layout, "apt_dat_path", None)
+    icao = getattr(layout, "icao", None)
+    if not apt_dat_path or not icao:
+        return []
+    try:
+        from .apt_dat_reader import load_airport
+        airport = load_airport(apt_dat_path, icao)
+    except (OSError, ValueError):
+        return []
+    if airport is None:
+        return []
+    nodes = airport.taxi_nodes  # dict id -> TaxiNode
+    lines: list = []
+    for edge in list(airport.taxi_edges) + list(airport.truck_edges):
+        node_a = nodes.get(edge.node_from)
+        node_b = nodes.get(edge.node_to)
+        if node_a is None or node_b is None:
+            continue
+        try:
+            lines.append(LineString([
+                layout.ll_to_m(node_a.lat, node_a.lon),
+                layout.ll_to_m(node_b.lat, node_b.lon),
+            ]))
+        except (ValueError, TypeError):
+            continue
+    return lines
 
 
 def exclusion_set_for_dsf(

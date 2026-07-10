@@ -77,6 +77,8 @@ __all__ = [
     "ROLE_GROUNDSIDE_PAVEMENT",
     "ROLE_SERVICE_ROAD",
     "ROLE_SERVICE_JUNCTION",
+    "ROLE_BRIDGE_TRENCH",
+    "ROLE_BRIDGE_CAUSEWAY",
     "AEROWAY_FOR_ROLE",
     "_airport_anchor",
     "_projection",
@@ -211,6 +213,17 @@ ROLE_RUNWAY_CLEARANCE = "runway_clearance"
 # to the lawful corridor bound, so it carries NO within-shape pavement
 # grade rule (ROLE_GRADE_LIMITS None) and is NOT airside pavement.
 ROLE_GRADED_STRIP = "graded_strip"
+# Object-derived bridge terrain (feature B, gate O4_OBJECT_BRIDGE_TERRAIN,
+# user ruling R12 — geometry-phase shapes, solver-immutable values):
+# ``bridge_trench`` is the depressed under-deck corridor floor of a
+# DECK_CARRIED span (flat at the law floor = the anchor-terrain datum,
+# amendment A10); ``bridge_causeway`` is the flat approach plate between
+# the abutment lip and the pavement the pack cut short of it (flat at the
+# deck-end law elevation).  Both are born at layout time with per-vertex
+# ``node_altitudes`` from the grade law and are never touched by the
+# solver or any mutation pass — flat by law, no within-shape grade rule.
+ROLE_BRIDGE_TRENCH = "bridge_trench"
+ROLE_BRIDGE_CAUSEWAY = "bridge_causeway"
 
 AEROWAY_FOR_ROLE = {
     ROLE_RUNWAY: "runway",
@@ -231,6 +244,10 @@ AEROWAY_FOR_ROLE = {
     ROLE_TAXIWAY_CLEARANCE: "aerodrome",
     ROLE_RUNWAY_CLEARANCE: "aerodrome",
     ROLE_GRADED_STRIP: "aerodrome",
+    # Bridge terrain plates (feature B, R12) override terrain like the
+    # clearance / graded-strip features — no taxiable aeroway semantics.
+    ROLE_BRIDGE_TRENCH: "aerodrome",
+    ROLE_BRIDGE_CAUSEWAY: "aerodrome",
 }
 
 

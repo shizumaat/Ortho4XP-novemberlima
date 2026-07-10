@@ -933,6 +933,14 @@ ROLE_GRADE_LIMITS = {
     # clearance cuts they carry no within-shape PAVEMENT grade rule — the
     # adjacent-ground validator (slice 4) checks them against the corridor.
     "graded_strip":       None,
+    # Object-derived bridge terrain (feature B, user ruling R12): the
+    # trench is the flat under-deck corridor floor, the causeway the flat
+    # abutment approach plate — both born at layout time with per-vertex
+    # node_altitudes at the grade-law value and FLAT by law (no
+    # within-shape grade rule; the lockstep bridge validators check them
+    # against the law functions instead).
+    "bridge_trench":      None,
+    "bridge_causeway":    None,
 }
 
 # Phase-1 emit-suppression toggles (kept from the pre-refactor

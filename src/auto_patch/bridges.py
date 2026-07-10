@@ -87,6 +87,7 @@ from .config import (
 # the clearance constant honour env + monkeypatch at call time.
 _OBJECT_BRIDGE_CLASSIFICATION_ATTRIBUTE = "_object_bridge_classification"
 _OBJECT_BRIDGE_ROAD_NETWORKS_ATTRIBUTE = "_object_bridge_road_networks"
+_OBJECT_BRIDGE_ROUTE_LINES_ATTRIBUTE = "_object_bridge_route_lines"
 
 
 __all__ = [
@@ -3376,14 +3377,27 @@ def _bridge_is_road_carried(bridge, layout, to_meters):
     reach_band = footprint.buffer(
         float(_CFG.BRIDGE_ABUTMENT_PIN_CAPTURE_BAND_M)
     )
-    # PRIMARY route evidence (stage 2b iteration 3): the apt.dat
-    # taxi/truck ROUTING polylines (``layout.apt_taxi_centerlines``,
-    # which carries the 1206-run service/truck centerlines with
-    # ``is_service=True``).  Shape proximity was the wrong evidence: the
-    # Murfreesboro truck-strip SHAPES sit 36.7-60.9 m short of the decks
-    # (outside any sane band) while the apt.dat truck-route EDGES
-    # genuinely cross them — the routing graph, not the emitted
-    # pavement, says what drives over the deck.
+    # PRIMARY route evidence (stage 2b iteration 4): the RAW apt.dat
+    # routing rows — 1202 taxi edges + 1206 truck edges — cached by the
+    # assembler as layout-meter polylines.  The routing GRAPH says what
+    # drives over the deck; neither emitted shapes (the Murfreesboro
+    # truck strips end 36.7-60.9 m short) nor the QUALIFIED centerline
+    # set (the Murfreesboro truck runs are disqualified before reaching
+    # ``apt_taxi_centerlines`` — measured: 0 qualified centerlines
+    # versus 3/5 raw truck edges in the two decks' reach bands, 3 raw
+    # taxi edges at taxiway-L, zero of anything at the Crossing_Bridge
+    # road overpass) carry the truth.
+    for line in getattr(
+            layout, _OBJECT_BRIDGE_ROUTE_LINES_ATTRIBUTE, None) or []:
+        if line is None or line.is_empty:
+            continue
+        try:
+            if line.intersects(reach_band):
+                return False
+        except _GEOM_EXC:
+            continue
+    # Secondary evidence: the qualified centerline set (for layouts
+    # whose apt.dat carries no routing rows but centerlines exist).
     for centerline in getattr(layout, "apt_taxi_centerlines", None) or []:
         line = getattr(centerline, "line", None)
         if line is None or line.is_empty:
@@ -3393,7 +3407,7 @@ def _bridge_is_road_carried(bridge, layout, to_meters):
                 return False
         except _GEOM_EXC:
             continue
-    # Secondary evidence: a pavement/service shape crossing or ending
+    # Tertiary evidence: a pavement/service shape crossing or ending
     # within the pin capture band of the footprint (the KBNA cut: the
     # pack severs taxiway-L pavement 9.6 m short of the abutments).
     for shape in layout.shapes:
@@ -3702,66 +3716,11 @@ def _emit_object_sourced_bridge_corridors(
             )
             continue
 
-        # Ruling R8 — hard-deck flush seating (stage 2b iteration 3):
-        # OUR pavement is CUT over a genuine ATTR_hard_deck span (the
-        # object carries the drivable surface between the abutments).
-        # This is also what lets the trench REACH THE MESH: the layout's
-        # own taxi/junction shapes span the deck box (auto_patch builds
-        # rects from centerlines, not from the source cut), and the
-        # deconflict pass seeds its running union with AIRSIDE pavement
-        # — an uncut deck box covered the 161.0 trench plate at ≥ 85 %
-        # and dropped it in BOTH gated KBNA builds, walk order
-        # notwithstanding.  A non-hard (cosmetic) deck gets NO cut —
-        # pavement wins (R8/R2) and the trench carves only outside it.
-        pavement_kept_union = None
-        if bridge.hard_deck:
-            n_cut = _cut_pavement_over_hard_deck(layout, footprint)
-            if n_cut:
-                UI.vprint(
-                    1,
-                    f"   [object-bridge] R8 flush seat: cut {n_cut} "
-                    "pavement shape(s) over the hard deck of "
-                    f"{bridge.object_resources}",
-                )
-        else:
-            crossing_polygons = [
-                shape.polygon for shape in layout.shapes
-                if shape.role in _BRIDGE_PIN_ROLES
-                and shape.polygon is not None
-                and not shape.polygon.is_empty
-                and shape.polygon.intersects(footprint)
-            ]
-            try:
-                pavement_kept_union = (
-                    unary_union(crossing_polygons)
-                    if crossing_polygons else None
-                )
-            except _GEOM_EXC:
-                pavement_kept_union = None
-
-        # Under-deck trench plate: the FULL deck footprint at the floor
-        # (the author-mesh treatment — the whole under-deck box is cut,
-        # stage 2b; a road-width-only plate left the rest of the box
-        # interpolating from the graded field).  Inset by 0.6 m
-        # (> SHARED_VERTEX_TOL_M) so its rim nodes can NEVER weld into
-        # the causeway-lip nodes at the abutment line — the deliberate
-        # node-split vertical wall of ruling R2.
-        try:
-            trench = footprint.buffer(-0.6)
-            if pavement_kept_union is not None:
-                # Cosmetic deck: pavement value wins at any contact —
-                # the trench carves only outside it (rulings R8/R2).
-                trench = trench.difference(pavement_kept_union)
-            if trench.geom_type == "MultiPolygon" and not trench.is_empty:
-                trench = max(trench.geoms, key=lambda g: g.area)
-            if trench.geom_type == "Polygon" and not trench.is_empty:
-                layout.shapes.append(BuiltShape(
-                    polygon=trench,
-                    role=ROLE_TUNNEL_RAMP,
-                    ref="object_bridge_corridor",
-                    altitude=round(floor_elevation, 1)))
-        except _GEOM_EXC:
-            pass
+        # The under-deck TRENCH and the R8 flush-seat cut moved to the
+        # PRE-solve layout builder (``build_bridge_layout_shapes``, user
+        # ruling R12) — this post-solve emitter now owns only the road
+        # APPROACHES outside the footprint (DEM-coupled ramps, the
+        # legacy-KDFW-proven block) and the suppression/refusal logs.
 
         # A10 point (iv): the depressed road runs >= 240 m per side
         # before rejoining grade; a caller may only widen that.
@@ -4274,68 +4233,206 @@ def insert_bridge_profile_pins(layout, dem, tile_lat, tile_lon) -> int:
     return total_pinned
 
 
-def emit_bridge_causeway_plates(layout, dem, tile_lat, tile_lon) -> int:
-    """Stage 2b: flat causeway plates behind DECK_CARRIED (and cosmetic)
-    bridge abutments — the terrain between the abutment lip and the
-    pavement the pack cut short of it (measured KBNA gaps: 9.6-9.7 m at
-    taxiway-L, 36.7-60.9 m at the Murfreesboro pair).
+def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
+    """User ruling R12 — bridge terrain as FIRST-CLASS layout shapes,
+    born pre-solve with law values, immutable thereafter (the one-solve
+    doctrine applied fully; replaces the post-solve trench emission and
+    the late causeway plates).
 
-    Amendment A10 point (iv): the causeway is FLAT at the deck-end
-    elevation (``grade_law.bridge_deck_end_pin_elevation_m`` — the SAME
-    law function as the pins and the validator, lockstep) all the way to
-    the abutment lip; no taxiway-side ramp.  The plate spans the deck
-    width, runs back along the outward approach axis to the first
-    pavement edge (+2 m weld overlap, then clipped BY the pavement union
-    — ruling R2, pavement wins at contact) and is capped at
-    ``config.BRIDGE_CAUSEWAY_MAX_LENGTH_M``.  Its lip edge sits ON the
-    abutment line while the under-deck trench plate is inset 0.6 m
-    (> the 0.5 m weld tolerance) — the coincident-but-unmergeable node
-    rows that make the near-vertical across-road wall (R2 node-split).
+    Per corridor (DECK_CARRIED / cosmetic, not road-carried) bridge:
 
-    LATE emission (pipeline tail, with the runway-end skirts, after
-    final projection and decimation): the values are law constants, and
-    arriving after decimation mints no T-vertices — the skirt precedent
-    (docs/runway_end_skirt_plan.md).  Gate off ⇒ no classification ⇒
-    returns 0 having touched nothing."""
+    * **Building-pad removal** (the never-stack rule): the Phase 1 DSF
+      building machinery footprint-extracts the bridge OBJECTS
+      themselves into flat building pads over the decks (KBNA:
+      ``building2`` covered the taxiway-L footprint 2959/2959 m² — the
+      measured coverer that ate the trench in every gated build).  A
+      building pad mostly inside ANY classified bridge footprint is a
+      stacking artifact and is removed, logged per pad.
+    * **Ruling R8 flush seat**: pavement cut over a genuine hard deck
+      (``_cut_pavement_over_hard_deck``); a cosmetic deck keeps its
+      pavement (R2 pavement wins) and the trench carves around it.
+    * **Trench** (:data:`layout.ROLE_BRIDGE_TRENCH`): the under-deck
+      footprint inset 0.6 m (> the 0.5 m weld tolerance — the R2
+      node-split wall against the causeway lip), densified to ~5 m
+      vertex spacing, per-vertex ``node_altitudes`` at the law floor
+      (``_bridge_corridor_floor_m``, amendment A10 geometry-driven).
+    * **Causeway** (:data:`layout.ROLE_BRIDGE_CAUSEWAY`): the flat plate
+      from each abutment lip back along the outward approach axis to
+      the first pavement edge (+2 m weld overlap, clipped by the
+      pavement union — R2), capped at
+      ``config.BRIDGE_CAUSEWAY_MAX_LENGTH_M``; per-vertex
+      ``node_altitudes`` at ``grade_law.bridge_deck_end_pin_elevation_m``
+      (the SAME law function as the pins and the validator).
+
+    Both roles are outside every mutation pass by construction: not
+    pavement (solver never reshapes them), not road features (deconflict
+    never walks them), no within-shape grade rule
+    (``config.ROLE_GRADE_LIMITS`` ``None``).  Returns
+    ``(trench_count, causeway_count, pads_removed)``; all zeros when the
+    gate is off (no classification cached)."""
     classification = _object_bridge_classification(layout)
     if classification is None:
-        return 0
+        return 0, 0, 0
     from .grade_law import bridge_deck_end_pin_elevation_m
-    from .layout import ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION
+    from .layout import (
+        ROLE_BRIDGE_CAUSEWAY,
+        ROLE_BRIDGE_TRENCH,
+        ROLE_BUILDING,
+        ROLE_SERVICE_JUNCTION,
+        ROLE_SERVICE_ROAD,
+    )
+    to_meters, _meters_to_lat_lon = _local_meter_projections(layout.anchor)
+
+    # ── Building-pad removal over EVERY classified bridge footprint ──
+    all_footprints = []
+    for bridge in classification.bridges:
+        footprint = _bridge_footprint_meters(bridge, to_meters)
+        if footprint is not None:
+            all_footprints.append((bridge, footprint))
+    pads_removed = 0
+    if all_footprints:
+        kept_shapes = []
+        for shape in layout.shapes:
+            if (shape.role != ROLE_BUILDING
+                    or shape.polygon is None or shape.polygon.is_empty):
+                kept_shapes.append(shape)
+                continue
+            removed = False
+            for bridge, footprint in all_footprints:
+                try:
+                    overlap = shape.polygon.intersection(footprint).area
+                except _GEOM_EXC:
+                    continue
+                # Either-side criterion (measured, KBNA): the taxiway-L
+                # pad is 100 % inside its footprint, but the Crossing /
+                # Murfreesboro pads are LARGER than their deck boxes
+                # (overlap 71 % / 98 % / 33 % of the FOOTPRINT while
+                # under half of the pad) — a pad covering a third of a
+                # deck box is still the bridge object's own pad.
+                if (overlap >= 0.5 * shape.polygon.area
+                        or overlap >= 0.3 * footprint.area):
+                    pads_removed += 1
+                    removed = True
+                    UI.vprint(
+                        1,
+                        "   [object-bridge] removed building pad "
+                        f"{shape.ref!r} over the deck of "
+                        f"{bridge.object_resources} (terrain-to-object "
+                        "corrections never stack)",
+                    )
+                    break
+            if not removed:
+                kept_shapes.append(shape)
+        if pads_removed:
+            layout.shapes = kept_shapes
+
     corridor_bridges, _suppress, _refused, _road_carried = (
         _partition_bridges_for_corridors(classification, layout)
     )
     if not corridor_bridges:
-        return 0
-    to_meters, _meters_to_lat_lon = _local_meter_projections(layout.anchor)
+        return 0, 0, pads_removed
+
     weld_roles = _BRIDGE_PIN_ROLES | {
         ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION,
     }
-    pavement_polygons = [
-        shape.polygon for shape in layout.shapes
-        if shape.role in weld_roles
-        and shape.polygon is not None and not shape.polygon.is_empty
-    ]
-    try:
-        pavement_union = (
-            unary_union(pavement_polygons) if pavement_polygons else None
-        )
-    except _GEOM_EXC:
-        pavement_union = None
+
+    def _pavement_union():
+        polygons = [
+            shape.polygon for shape in layout.shapes
+            if shape.role in weld_roles
+            and shape.polygon is not None and not shape.polygon.is_empty
+        ]
+        try:
+            return unary_union(polygons) if polygons else None
+        except _GEOM_EXC:
+            return None
+
+    def _born_flat(polygon, role, ref, elevation):
+        """Append a densified flat plate with per-vertex law values."""
+        try:
+            dense = polygon.segmentize(5.0)
+        except (AttributeError, _GEOM_EXC):
+            dense = polygon
+        ring = list(dense.exterior.coords)
+        vertex_count = len(ring) - 1 if ring[0] == ring[-1] else len(ring)
+        layout.shapes.append(BuiltShape(
+            polygon=dense,
+            role=role,
+            ref=ref,
+            node_altitudes=[round(float(elevation), 2)]
+            * (vertex_count + 1)))
+        return vertex_count
+
     maximum_length = float(_CFG.BRIDGE_CAUSEWAY_MAX_LENGTH_M)
-    n_emitted = 0
+    n_trench = 0
+    n_causeway = 0
     for bridge in corridor_bridges:
         datum = _bridge_datum_elevation_m(bridge, dem, tile_lat, tile_lon)
         if datum is None:
             UI.vprint(
                 1,
-                "   [object-bridge] no datum for causeway plates of "
+                "   [object-bridge] no datum for bridge layout shapes of "
                 f"{bridge.object_resources} — skipped",
             )
             continue
         footprint = _bridge_footprint_meters(bridge, to_meters)
         if footprint is None:
             continue
+        deck_elevation = _bridge_deck_elevation_m(
+            bridge, dem, tile_lat, tile_lon
+        )
+        floor_elevation = _bridge_corridor_floor_m(bridge, deck_elevation)
+
+        # Ruling R8 flush seat (hard decks) / pavement wins (cosmetic).
+        pavement_kept_union = None
+        if bridge.hard_deck:
+            n_cut = _cut_pavement_over_hard_deck(layout, footprint)
+            if n_cut:
+                UI.vprint(
+                    1,
+                    f"   [object-bridge] R8 flush seat: cut {n_cut} "
+                    "pavement shape(s) over the hard deck of "
+                    f"{bridge.object_resources}",
+                )
+        else:
+            crossing_polygons = [
+                shape.polygon for shape in layout.shapes
+                if shape.role in weld_roles
+                and shape.polygon is not None
+                and not shape.polygon.is_empty
+                and shape.polygon.intersects(footprint)
+            ]
+            try:
+                pavement_kept_union = (
+                    unary_union(crossing_polygons)
+                    if crossing_polygons else None
+                )
+            except _GEOM_EXC:
+                pavement_kept_union = None
+
+        # Trench (born flat at the law floor).
+        try:
+            trench = footprint.buffer(-0.6)
+            if pavement_kept_union is not None:
+                trench = trench.difference(pavement_kept_union)
+            if trench.geom_type == "MultiPolygon" and not trench.is_empty:
+                trench = max(trench.geoms, key=lambda g: g.area)
+            if trench.geom_type == "Polygon" and not trench.is_empty:
+                vertex_count = _born_flat(
+                    trench, ROLE_BRIDGE_TRENCH,
+                    "object_bridge_corridor", floor_elevation)
+                n_trench += 1
+                UI.vprint(
+                    1,
+                    "   [object-bridge] trench born at "
+                    f"{floor_elevation:.2f} m ({vertex_count} vertices) "
+                    f"under {bridge.object_resources}",
+                )
+        except _GEOM_EXC:
+            pass
+
+        # Causeway plates (born flat at the deck-end law value).
+        pavement_union = _pavement_union()
         centroid = footprint.centroid
         abutment_lines = _abutment_lines_layout_meters(
             bridge, layout, extension_fraction=0.0
@@ -4355,11 +4452,6 @@ def emit_bridge_causeway_plates(layout, dem, tile_lat, tile_lon) -> int:
                 continue
             outward_x /= outward_norm
             outward_y /= outward_norm
-            # Plate length: to the first pavement edge ON THE OUTWARD
-            # side (+2 m weld overlap, clipped back below), capped —
-            # measured against pavement inside the full-length outward
-            # rectangle only, so a truck strip ON the deck (the
-            # Murfreesboro fixture) can never shorten the causeway.
             (ax, ay), (bx, by) = list(line.coords)[0], list(line.coords)[-1]
 
             def _outward_rectangle(length_m):
@@ -4394,21 +4486,18 @@ def emit_bridge_causeway_plates(layout, dem, tile_lat, tile_lon) -> int:
                 if plate.geom_type != "Polygon" or plate.is_empty \
                         or plate.area < 1.0:
                     continue
-                layout.shapes.append(BuiltShape(
-                    polygon=plate,
-                    role=ROLE_TUNNEL_RAMP,
-                    ref="object_bridge_causeway",
-                    altitude=round(float(plate_elevation), 2)))
-                n_emitted += 1
+                _born_flat(plate, ROLE_BRIDGE_CAUSEWAY,
+                           "object_bridge_causeway", plate_elevation)
+                n_causeway += 1
                 UI.vprint(
                     1,
-                    "   [object-bridge] causeway plate at "
+                    "   [object-bridge] causeway born at "
                     f"{plate_elevation:.2f} m, {plate_length:.1f} m long "
                     f"(end {end_index}) for {bridge.object_resources}",
                 )
             except _GEOM_EXC:
                 continue
-    return n_emitted
+    return n_trench, n_causeway, pads_removed
 
 
 def _bridge_crossing_floor_for_bridge(

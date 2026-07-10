@@ -324,20 +324,13 @@ class TestObjectSourcedCorridors:
         assert count == 1
         assert not suppression
         assert len(covered) == 1
-        # A flat under-deck plate at the A10 geometry-driven floor
-        # (167.0 − 5.99 ≈ 161.0, the anchor-terrain datum) was emitted.
-        floor = round(167.0 - 5.99, 1)
-        plates = [
-            s for s in layout.shapes
-            if s.ref == "object_bridge_corridor"
-        ]
-        assert plates, "expected an under-deck corridor plate"
-        assert any(
-            getattr(s, "altitude", None) == floor for s in plates
-        ), f"expected a plate at {floor} m, got {[s.altitude for s in plates]}"
-        # Approach ramps stepping the floor up toward the DEM were emitted.
+        # R12: the corridor emitter owns only the road APPROACHES — the
+        # trench is born pre-solve by ``build_bridge_layout_shapes``.
         assert any(
             s.ref == "object_bridge_approach" for s in layout.shapes
+        )
+        assert not any(
+            s.ref == "object_bridge_corridor" for s in layout.shapes
         )
 
     def test_terrain_carried_suppresses_and_emits_no_corridor(self):
@@ -1034,13 +1027,18 @@ class TestCausewayPlates:
     def test_gap_plate_flat_at_deck_end_value(self, monkeypatch):
         layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
         layout.shapes.append(_kbna_gap_rect())
-        emitted = bridges.emit_bridge_causeway_plates(layout, None, 36, -87)
+        _trench, emitted, _pads = bridges.build_bridge_layout_shapes(
+            layout, None, 36, -87)
         assert emitted == 2  # one plate per end
+        from auto_patch.layout import ROLE_BRIDGE_CAUSEWAY
         plates = [s for s in layout.shapes
                   if s.ref == "object_bridge_causeway"]
         assert len(plates) == 2
         for plate in plates:
-            assert plate.altitude == pytest.approx(167.0, abs=0.01)
+            assert plate.role == ROLE_BRIDGE_CAUSEWAY
+            assert plate.node_altitudes is not None
+            assert all(a == pytest.approx(167.0, abs=0.01)
+                       for a in plate.node_altitudes)
         # The start-end plate spans the measured gap (9.6 m + 2 m weld
         # overlap) and the overlap is CLIPPED by the pavement (ruling
         # R2 — pavement wins at contact): zero residual intersection,
@@ -1067,14 +1065,16 @@ class TestCausewayPlates:
                              (40.0, 2.0)]),
             role=ROLE_SERVICE_ROAD, ref="TRUCK",
         ))
-        emitted = bridges.emit_bridge_causeway_plates(
+        _trench, emitted, _pads = bridges.build_bridge_layout_shapes(
             layout, _FakeDem(180.66), 36, -87)
         assert emitted == 2
         plates = [s for s in layout.shapes
                   if s.ref == "object_bridge_causeway"]
         expected = 180.66 + 7.76  # datum + deck end (flat deck fixture)
         for plate in plates:
-            assert plate.altitude == pytest.approx(expected, abs=0.01)
+            assert plate.node_altitudes is not None
+            assert all(a == pytest.approx(expected, abs=0.01)
+                       for a in plate.node_altitudes)
         start_plate = min(plates, key=lambda s: s.polygon.centroid.x)
         minimum_x = min(x for x, _y in start_plate.polygon.exterior.coords)
         assert minimum_x == pytest.approx(
@@ -1085,8 +1085,8 @@ class TestCausewayPlates:
         layout = _FakeLayout()
         setattr(layout, bridges._OBJECT_BRIDGE_CLASSIFICATION_ATTRIBUTE,
                 _Classification([_bridge()]))
-        assert bridges.emit_bridge_causeway_plates(
-            layout, None, 36, -87) == 0
+        assert bridges.build_bridge_layout_shapes(
+            layout, None, 36, -87) == (0, 0, 0)
         assert not layout.shapes
 
 
@@ -1106,8 +1106,8 @@ class TestRoadCarriedOverpass:
         layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
         assert bridges.insert_bridge_deck_end_pins(
             layout, None, 36, -87) == 0
-        assert bridges.emit_bridge_causeway_plates(
-            layout, None, 36, -87) == 0
+        assert bridges.build_bridge_layout_shapes(
+            layout, None, 36, -87) == (0, 0, 0)
         count, _sup, covered = bridges._emit_object_sourced_bridge_corridors(
             layout, _FakeDem(150.0), 36, -87,
             _Classification([_bridge()]),
@@ -1206,13 +1206,9 @@ class TestR8FlushSeat:
     def _emit(self, monkeypatch, bridge, spanning_shape):
         layout = _gate_on_layout_with_bridge(monkeypatch, bridge)
         layout.shapes.append(spanning_shape)
-        network = _draped_road_network_across_deck()
-        count, _sup, _cov = bridges._emit_object_sourced_bridge_corridors(
-            layout, _FakeDem(150.0), 36, -87,
-            _Classification([bridge]), [network],
-            road_width_m=22.0, ramp_step_m=20.0, approach_length_m=80.0,
-        )
-        return layout, count
+        n_trench, _n_causeway, _pads = bridges.build_bridge_layout_shapes(
+            layout, _FakeDem(150.0), 36, -87)
+        return layout, n_trench
 
     def test_hard_deck_cuts_spanning_pavement(self, monkeypatch):
         # A junction rect spanning the whole deck box (x -30..161 across
@@ -1240,10 +1236,15 @@ class TestR8FlushSeat:
             ).area < 1.0
             # Solved values survived the cut (resampled 167).
             assert piece.node_altitudes is not None
+        from auto_patch.layout import ROLE_BRIDGE_TRENCH
         trench = [s for s in layout.shapes
                   if s.ref == "object_bridge_corridor"]
         assert len(trench) == 1
-        assert trench[0].altitude == pytest.approx(161.0, abs=0.05)
+        assert trench[0].role == ROLE_BRIDGE_TRENCH
+        assert trench[0].node_altitudes is not None
+        assert len(trench[0].node_altitudes) > 50, "densified ring"
+        assert all(a == pytest.approx(161.01, abs=0.05)
+                   for a in trench[0].node_altitudes)
 
     def test_cosmetic_deck_keeps_pavement_and_carves_around(
         self, monkeypatch
@@ -1270,3 +1271,97 @@ class TestR8FlushSeat:
         # The trench carves AROUND the kept pavement (R2 pavement wins).
         assert trench[0].polygon.intersection(
             pieces[0].polygon).area < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# ruling R12 — building-pad removal + by-construction pass immunity
+# ---------------------------------------------------------------------------
+
+class TestBridgeObjectBuildingPads:
+    def test_pad_over_deck_removed_never_stack(self, monkeypatch):
+        # The measured KBNA defect: Phase 1 turned the bridge OBJECTS
+        # into building pads (building2 covered the taxiway-L footprint
+        # 2959/2959 m2) — a pad mostly inside a classified footprint is
+        # removed at layout time.
+        from auto_patch.layout import ROLE_BUILDING
+        layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
+        layout.shapes.append(_deck_route_shape())
+        pad = BuiltShape(
+            polygon=Polygon([(5.0, -25.0), (126.0, -25.0), (126.0, 25.0),
+                             (5.0, 25.0)]),
+            role=ROLE_BUILDING, ref="building2", altitude=167.0,
+        )
+        layout.shapes.append(pad)
+        _t, _c, pads_removed = bridges.build_bridge_layout_shapes(
+            layout, None, 36, -87)
+        assert pads_removed == 1
+        assert not any(s.ref == "building2" for s in layout.shapes)
+
+    def test_unrelated_building_kept(self, monkeypatch):
+        from auto_patch.layout import ROLE_BUILDING
+        layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
+        layout.shapes.append(_deck_route_shape())
+        far_pad = BuiltShape(
+            polygon=Polygon([(900.0, 900.0), (960.0, 900.0),
+                             (960.0, 960.0), (900.0, 960.0)]),
+            role=ROLE_BUILDING, ref="terminal9", altitude=170.0,
+        )
+        layout.shapes.append(far_pad)
+        _t, _c, pads_removed = bridges.build_bridge_layout_shapes(
+            layout, None, 36, -87)
+        assert pads_removed == 0
+        assert any(s.ref == "terminal9" for s in layout.shapes)
+
+
+class TestR12PassImmunityByConstruction:
+    def test_roles_absent_from_every_mutating_role_set(self):
+        from auto_patch.layout import (
+            ROLE_BRIDGE_TRENCH, ROLE_BRIDGE_CAUSEWAY,
+        )
+        new_roles = {ROLE_BRIDGE_TRENCH, ROLE_BRIDGE_CAUSEWAY}
+        # Solver: not pavement — the solve never reshapes them.
+        from auto_patch.elevation_per_surface.solver_primitives import (
+            PAVEMENT_ROLES,
+        )
+        assert not (new_roles & set(PAVEMENT_ROLES))
+        # Deconflict: not road features — never walked, never dropped.
+        from auto_patch.layout import (
+            ROLE_TUNNEL_RAMP, ROLE_RETAINING_WALL,
+        )
+        assert not (new_roles & {ROLE_TUNNEL_RAMP, ROLE_RETAINING_WALL})
+        # Seam machinery: not split at tile seams as pavement.
+        from auto_patch.seam_anchors import _SEAM_SPLIT_ROLES
+        assert not (new_roles & set(_SEAM_SPLIT_ROLES))
+        # Registered everywhere a first-class role must be.
+        from auto_patch.layout import AEROWAY_FOR_ROLE
+        from auto_patch.config import ROLE_GRADE_LIMITS
+        for role in new_roles:
+            assert role in AEROWAY_FOR_ROLE
+            assert role in ROLE_GRADE_LIMITS
+            assert ROLE_GRADE_LIMITS[role] is None  # flat by law
+
+    def test_deconflict_ignores_bridge_plates(self):
+        from auto_patch import finalize
+        from auto_patch.layout import (
+            ROLE_BRIDGE_TRENCH, ROLE_TUNNEL_RAMP, ROLE_JUNCTION,
+        )
+        area = Polygon([(0.0, 0.0), (30.0, 0.0), (30.0, 10.0), (0.0, 10.0)])
+        layout = _FakeLayout()
+        # Airside pavement covering the same area (the seed) + a trench
+        # plate: deconflict must not touch the trench (not a road
+        # feature), even though the seed fully covers it.
+        layout.shapes.append(BuiltShape(
+            polygon=Polygon(area.exterior.coords), role=ROLE_JUNCTION,
+            ref="J", altitude=167.0))
+        layout.shapes.append(BuiltShape(
+            polygon=Polygon(area.exterior.coords), role=ROLE_BRIDGE_TRENCH,
+            ref="object_bridge_corridor",
+            node_altitudes=[161.0] * 5))
+        # And a legacy portal piece that SHOULD be dropped (covered).
+        layout.shapes.append(BuiltShape(
+            polygon=Polygon(area.exterior.coords), role=ROLE_TUNNEL_RAMP,
+            ref="portal_ramp", altitude=163.0))
+        finalize.deconflict_road_features(layout, "TEST")
+        refs = {s.ref for s in layout.shapes}
+        assert "object_bridge_corridor" in refs
+        assert "portal_ramp" not in refs

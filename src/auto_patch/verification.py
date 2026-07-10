@@ -45,6 +45,12 @@ _NON_SOURCE_PAVEMENT_ROLES = frozenset({
     # earthwork beside the pavement edge — off the apt.dat/DSF source
     # by construction, exactly like the boundary/clearance features.
     "graded_strip",
+    # Object-bridge terrain plates (feature B, ruling R12): the trench
+    # sits where the pack CUT its pavement (under the deck) and the
+    # causeway spans the deliberate source gap behind the abutments —
+    # off-source by construction.
+    "bridge_trench",
+    "bridge_causeway",
 })
 
 def _ll(layout, x, y) -> str:
@@ -1407,9 +1413,18 @@ def check_bridge_deck_end_pins(layout, dem, tile_lat, tile_lon,
                         ) <= BRIDGE_ABUTMENT_PIN_CAPTURE_BAND_M
                     except Exception:
                         continue
-                    if not near_end or shape.altitude is None:
+                    if not near_end:
                         continue
-                    deviation = abs(float(shape.altitude) - law_value)
+                    # R12 causeway shapes are born with per-vertex
+                    # node_altitudes (flat by law); pre-R12 plates
+                    # carried a flat ``altitude`` tag — read either.
+                    if shape.altitude is not None:
+                        plate_value = float(shape.altitude)
+                    elif shape.node_altitudes:
+                        plate_value = float(shape.node_altitudes[0])
+                    else:
+                        continue
+                    deviation = abs(plate_value - law_value)
                     if deviation > tolerance_m:
                         centroid = shape.polygon.centroid
                         out.append((

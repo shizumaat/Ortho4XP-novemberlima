@@ -4027,8 +4027,26 @@ def build_airport_pavement(icao: str, xplane_root: str,
                     object_terrain_assembly.attach_bridge_classification(
                         layout, xplane_root))
                 from .bridges import (
+                    build_bridge_layout_shapes,
                     insert_bridge_deck_end_pins,
                     insert_bridge_profile_pins)
+                # User ruling R12: the trench and causeway are
+                # FIRST-CLASS layout shapes, born HERE with law values
+                # (plus the R8 flush-seat cut and the bridge-object
+                # building-pad removal) before the solve — the solver
+                # and every later mutation pass leave them alone by
+                # construction (roles outside every pass's role set).
+                (n_bridge_trench, n_bridge_causeway,
+                 n_bridge_pads_removed) = build_bridge_layout_shapes(
+                    layout, dem, tile_lat, tile_lon)
+                if (n_bridge_trench or n_bridge_causeway
+                        or n_bridge_pads_removed):
+                    UI.vprint(1,
+                        f"  [pav-builder] {icao}: object-bridge layout "
+                        f"shapes — {n_bridge_trench} trench, "
+                        f"{n_bridge_causeway} causeway, "
+                        f"{n_bridge_pads_removed} building pad(s) "
+                        f"removed.")
                 n_bridge_deck_pins = insert_bridge_deck_end_pins(
                     layout, dem, tile_lat, tile_lon)
                 n_bridge_profile_pins = insert_bridge_profile_pins(
@@ -5905,26 +5923,10 @@ def build_airport_pavement(icao: str, xplane_root: str,
             UI.vprint(1, f"  [pav-builder] {icao}: runway-end skirt "
                          f"emission FAILED: {exc!r}")
 
-        # Object-bridge CAUSEWAY plates (feature B stage 2b, gate
-        # O4_OBJECT_BRIDGE_TERRAIN via the cached classification): flat
-        # plates at the deck-end law elevation between each abutment lip
-        # and the pavement the pack cut short of it.  LATE like the
-        # skirts (values are law constants; post-decimation arrival
-        # mints no T-vertices) and BEFORE the adjacent-ground bands so
-        # the bands clip against the causeway like every other static
-        # feature.  Gate off ⇒ returns 0 having touched nothing.
-        try:
-            from .bridges import emit_bridge_causeway_plates
-            n_causeway = emit_bridge_causeway_plates(
-                layout, _projection_dem,
-                _projection_tile_lat, _projection_tile_lon)
-            if n_causeway:
-                UI.vprint(1,
-                    f"  [pav-builder] {icao}: emitted {n_causeway} "
-                    f"object-bridge causeway plate(s).")
-        except _GEOM_EXC as exc:
-            UI.vprint(1, f"  [pav-builder] {icao}: object-bridge causeway "
-                         f"emission FAILED: {exc!r}")
+        # (The object-bridge causeway plates moved to the PRE-solve
+        # layout builder — user ruling R12, ``build_bridge_layout_
+        # shapes``: first-class ROLE_BRIDGE_CAUSEWAY shapes born with
+        # law values; no late emission remains for feature B.)
 
         # ── Adjacent-ground LATERAL grade law (slice 3, gate
         # O4_ADJACENT_GROUND_LAW, default OFF) ──────────────────────────
