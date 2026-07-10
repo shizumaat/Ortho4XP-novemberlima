@@ -42,13 +42,17 @@
 # 7. LEGACY CHAIN DELETION: blocked ONLY on open-frontage corridor-
 #    band quality now (gap supersession already retires wholly-inside
 #    strips; measured legacy-off: tears 7 / crossings 40 / ways 759).
-# 8. HOUSEKEEPING: full-suite re-triage (known reds documented below;
-#    compare-target drift EXPECTED until Noah approves output and
-#    fixtures recut) · test_solver_and_validator_same_nodes
-#    attribution unverified · the 4 untracked DSF tools belong to the
-#    DSF-object arc (dsf_object_anchor_audit / mesh_elevation_sampler
-#    / obj8_geometry / reanchor_kclt_terminal_bakes) — commit with
-#    that arc, not this one.
+# 8. HOUSEKEEPING: FULL SUITE AT THE MILESTONE COMMIT = 13 failed /
+#    683 passed (improved from 14/672 pre-milestone):
+#    test_solver_and_validator_same_nodes now GREEN (healed by the
+#    node-rule work) · dsf flag-gating fixed by the other session's
+#    cc903ed · NEW red: test_runway_longitudinal_grade[SPLP] — the
+#    known at-cap marginal class (1.5x %), likely surfaced by the
+#    densified runway-edge stations; triage with the SPLP profile
+#    checker · remaining 12 = the documented pre-existing set +
+#    compare-target ×3 drift (EXPECTED until Noah approves output
+#    and fixtures recut) · the 4 untracked DSF tools belong to the
+#    DSF-object arc — commit with that arc, not this one.
 #
 # RULINGS LEDGER (all Noah, 2026-07-09, all implemented unless noted):
 # weld (strips share pavement chains) · skirt anchored at RUNWAY END
