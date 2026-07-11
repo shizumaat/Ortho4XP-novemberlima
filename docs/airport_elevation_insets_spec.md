@@ -60,21 +60,58 @@ Non-goals (this feature):
 
 ## 3. Architecture
 
-### 3.1 Provider framework — new module `src/O4_Airport_Elevation_Insets.py`
+### 3.1 Provider framework — declarative, following the imagery pattern
 
-A provider registry, ordered by preference, config
-`airport_elevation_providers` (default `"usgs3dep"`). Provider contract:
+Ortho4XP's imagery providers are DECLARATIVE: `Providers/<Region>/<CODE>.lay`
+flat `key=value` files parsed generically by
+`O4_Imagery_Utils.initialize_providers_dict` (`src/O4_Imagery_Utils.py:209`),
+with `Extents/` coverage polygons referenced by an `extent=` key and
+`Providers/O4_Custom_URL.py` as the code escape-hatch for providers whose
+requests need logic (session tokens, signing). Elevation sources today are
+the OPPOSITE — a hardcoded tuple + if/elif chain in `O4_DEM_Utils.py:21-32`.
+This feature follows the imagery pattern so future high-resolution sources
+are added by dropping in a definition file, not editing core code.
 
-```python
-class AirportElevationProvider:
-    name: str            # cache-key token, e.g. "usgs3dep"
-    def discover(self, bbox_wgs84) -> list[SourceTile] | None
-        # None = no coverage / not applicable (e.g. outside the US)
-    def fetch(self, bbox_wgs84, target_resolution_m, destination_path) -> InsetResult
-        # writes EPSG:4326 float32 GeoTIFF with nodata; returns metadata
+**Definition files** — `Providers/Elevation/<CODE>.elv`, same comment and
+`key=value` syntax as `.lay` (the `.lay` scanner filters by extension, so
+coexistence is safe). Parsed at startup by
+`initialize_elevation_providers_dict()` in the new module
+`src/O4_Airport_Elevation_Insets.py` into `elevation_providers_dict`
+keyed by file basename. Fields:
+
+```
+# Providers/Elevation/USGS3DEP.elv
+access_strategy=tnm_cog       # named fetch strategy implemented in code
+discovery_url_template=https://tnmaccess.nationalmap.gov/api/v1/products?datasets=Digital Elevation Model (DEM) 1 meter&bbox={west},{south},{east},{north}&outputFormat=JSON
+native_resolution_m=1
+extent=USA                    # optional Extents/ code OR coverage_bbox=W,S,E,N
+                              # — cheap pre-filter; discovery is authoritative
+vertical_datum=NAVD88
+license=Public Domain (U.S. Geological Survey)
+attribution=U.S. Geological Survey 3D Elevation Program
+priority=100                  # higher wins when several providers cover an airport
+enabled=True
 ```
 
-Provider 1 — `usgs3dep` (this feature):
+**Access strategies** (code, small closed set — the seam where variation
+is genuinely logic, mirroring `request_type` in `.lay`): a strategy takes
+the parsed definition plus `(bbox_wgs84, target_resolution_m,
+destination_path)` and produces the EPSG:4326 float32 GeoTIFF with nodata,
+plus discovery metadata. Phase A implements ONE strategy, `tnm_cog`
+(TNM Access API discovery → ranged Cloud-Optimized GeoTIFF `/vsicurl/`
+window read → `gdal.Warp`). The strategy registry is a plain dict so
+Phase C additions (`wcs`, `stac`, `tile_rest` — for the national lidar
+services in the research report) are one class + one dict entry each,
+with NO change to discovery/fetch orchestration, caching, or composite
+assembly. `Providers/O4_Custom_Elevation.py` (mirroring
+`O4_Custom_URL.py`) is the escape hatch for sources that defy the
+declarative fields; absent file = no-op.
+
+Provider selection: config `airport_elevation_providers` (default
+`"auto"` = every `enabled=True` definition, ranked by `priority`;
+or an explicit comma-separated list of codes for pinning/testing).
+
+Provider 1 — `USGS3DEP.elv` + `tnm_cog` strategy (this feature):
 - Discovery: TNM Access API,
   `https://tnmaccess.nationalmap.gov/api/v1/products?datasets=Digital Elevation Model (DEM) 1 meter&bbox=W,S,E,N&outputFormat=JSON`
   (no auth). Prefer the newest `publicationDate` project.
@@ -169,7 +206,7 @@ change the physical footprint.
 | variable | default | meaning |
 |---|---|---|
 | `airport_elevation_insets` | True | master gate (G4 fallback paths) |
-| `airport_elevation_providers` | "usgs3dep" | ordered provider tokens |
+| `airport_elevation_providers` | "auto" | "auto" = enabled `.elv` files by priority; or explicit comma list |
 | `airport_elevation_inset_resolution_m` | 3.0 | warp target resolution |
 | `airport_elevation_inset_margin_m` | 1000.0 | bbox margin beyond airport mask |
 | `airport_elevation_inset_feather_m` | 60.0 | inset→base blend band |
@@ -186,18 +223,23 @@ install guidance (brew/apt system lib + `pip install gdal`), same change
 
 ## 4. Phases
 
-- **Phase A (this branch, agent 1):** provider framework, usgs3dep,
-  cache + index + provenance, composite assembly in steps 1 and 2,
-  `.alt` bake with feathering + proof test, config vars, CLI tool
-  `tools/fetch_airport_elevation_insets.py` (docstring per fork rule),
-  unit tests (no network in pytest — fixtures/mocks).
+- **Phase A (this branch, agent 1):** declarative provider framework
+  (`.elv` parser + strategy registry + custom hook), `USGS3DEP.elv` with
+  the `tnm_cog` strategy, cache + index + provenance, composite assembly
+  in steps 1 and 2, `.alt` bake with feathering + proof test, config
+  vars, CLI tool `tools/fetch_airport_elevation_insets.py` (docstring
+  per fork rule), unit tests (no network in pytest — fixtures/mocks;
+  include a parser test over a temp `.elv` file and a strategy-registry
+  dispatch test proving a second strategy plugs in without orchestration
+  changes).
 - **Phase B (this branch, agent 2):** automatic smoothing radius (§3.4),
   KBNA acceptance (§5), byte-identity guard runs, ONBOARDING/installer
   updates, docs.
-- **Phase C (future, out of scope):** national providers (UK/France/
-  Netherlands/Switzerland/Canada per research report), densified working
-  grid over inset airports (Triangle4XP refinement floor = one working
-  pixel, `Triangle4XP.c:7297`), vertical datum transforms.
+- **Phase C (future, out of scope):** national providers as new `.elv`
+  files + strategies (`wcs`, `stac`, `tile_rest` — UK/France/Netherlands/
+  Switzerland/Canada per research report), densified working grid over
+  inset airports (Triangle4XP refinement floor = one working pixel,
+  `Triangle4XP.c:7297`), vertical datum transforms.
 
 ## 5. Acceptance (Phase B, KBNA tile +36-087)
 
