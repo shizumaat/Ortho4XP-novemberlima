@@ -11,11 +11,20 @@ The provider framework is DECLARATIVE, mirroring Ortho4XP's imagery
 providers: a source is described by a ``Providers/Elevation/<CODE>.elv``
 ``key=value`` file (parsed by :func:`initialize_elevation_providers_dict`),
 and the genuinely-logic part -- how bytes are fetched -- lives in a named
-ACCESS STRATEGY registered in :data:`ACCESS_STRATEGIES`.  Phase A ships one
-definition (``USGS3DEP.elv``) and one strategy (``tnm_cog``).  Adding a
+ACCESS STRATEGY registered in :data:`ACCESS_STRATEGIES`.  Phase A shipped one
+definition (``USGS3DEP.elv``) and one strategy (``tnm_cog``); Phase C2 added
+a second family (``HRDEM.elv`` + the ``stac`` strategy) as the extensibility
+proof -- one class + one definition, no orchestration change.  Adding a
 future provider is a new ``.elv`` file plus, only if its fetch differs, one
 new strategy class + one registry entry -- with zero changes to the
 discovery/cache/composite/bake orchestration below.
+
+Phase C1 additionally densifies the working grid over inset tiles (the
+``densify_tile_dem_for_insets`` / ``resolve_working_grid_factor`` section
+below): the ``.alt`` raster the mesher reads is built on a finer grid so the
+meter-class inset relief survives the Triangle4XP one-working-pixel
+refinement floor, chosen per tile by a cheap numpy ideal-bake check on the
+cached inset before any build.
 
 --------------------------------------------------------------------------
 G2 flow finding -- how a composite source reaches the ``.alt`` raster

@@ -57,6 +57,7 @@ def _strategy_for(definition):
 def test_shipped_definitions_parse(shipped_registry):
     assert set(shipped_registry) == {
         "USGS3DEP",
+        "HRDEM",
         "VIEWFINDER1",
         "VIEWFINDER3",
         "NED1",
@@ -67,6 +68,9 @@ def test_shipped_definitions_parse(shipped_registry):
     for code in ("VIEWFINDER1", "VIEWFINDER3", "NED1", "NED13", "SRTM", "ALOS"):
         assert shipped_registry[code]["role"] == INSETS.ROLE_BASE, code
     assert shipped_registry["USGS3DEP"]["role"] == INSETS.ROLE_AIRPORT_INSET
+    # Phase C2: the second inset provider family (Canada HRDEM via STAC).
+    assert shipped_registry["HRDEM"]["role"] == INSETS.ROLE_AIRPORT_INSET
+    assert shipped_registry["HRDEM"]["access_strategy"] == "stac"
     assert shipped_registry["SRTM"]["enabled"] is False
     assert shipped_registry["ALOS"]["enabled"] is False
     assert shipped_registry["VIEWFINDER1"]["priority"] == 60.0
