@@ -12,6 +12,9 @@ call venv\Scripts\activate.bat
 echo:
 
 echo Installing Python dependency: gdal
+REM gdal also powers the optional airport elevation insets (meter-class
+REM lidar over airports); if it is missing that feature logs one line and
+REM disables itself - builds still work.
 pip install Utils\win\gdal-3.11.1-cp313-cp313-win_amd64.whl
 echo:
 

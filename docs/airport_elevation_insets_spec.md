@@ -1,6 +1,6 @@
 # Airport elevation insets — specification
 
-Status: APPROVED for implementation (2026-07-11).
+Status: Phases A, A2, B implemented (2026-07-11); Phase C = future work.
 Branch: `feature/airport-elevation-insets` (from `dev`).
 Owner: auto_patch / core elevation.
 
