@@ -279,7 +279,7 @@ def _project_vectorized(elev, iter_edges, n, max_iters, tol,
 def feasibility_project(elev, shape_constraints, hard, *,
                         max_iters=4000, tol=1e-3, force_scalar=False,
                         flat_groups=None, broken_out=None, pre_broken=None,
-                        edge_couple_nodes=None):
+                        edge_couple_nodes=None, interval_yield_from=None):
     """Drive EVERY grade-graph edge to ``|Δelev| ≤ budget`` by iterative
     constraint projection (user 2026-06-25: nothing may violate a grade cap).
 
@@ -566,6 +566,24 @@ def feasibility_project(elev, shape_constraints, hard, *,
                                                    quant_margin)
         interval_edges.append((i, j, raw_low, raw_high,
                                sweep_low, sweep_high))
+        # ENVELOPE EXCLUSION FOR ZONE EDGES (Slice B stage B3 solve-side
+        # fix, gated by ``interval_yield_from``): a signed slab injects
+        # SIGNED (often NEGATIVE) directed weights into the reach-envelope
+        # adjacency, but ``_reach`` is a Dijkstra — non-negative weights
+        # only.  A zone node is an envelope LEAF (its host is authoritative;
+        # it never propagates a bound onward), so its 45k asymmetric slabs
+        # add nothing the envelope needs while triggering cascading
+        # re-expansion (KBNA gates-ON: the ``_reach`` setup alone runs for
+        # tens of minutes; gap-spine's ~1.6k drained fine, but 45k zone
+        # slabs blow it up — the lazy-Dijkstra re-expand class).  Skip the
+        # zone<->host slabs here; the host-authoritative sweep (kind fix
+        # below) positions the zone directly against its solved host, and
+        # gap-spine / sub-threshold slabs keep their envelope contribution.
+        _zone_slab = (interval_yield_from is not None
+                      and ((i >= interval_yield_from)
+                           != (j >= interval_yield_from)))
+        if _zone_slab:
+            continue
         if sweep_high is not None:
             ceil_radj.setdefault(j, []).append((i, sweep_high))
             floor_radj.setdefault(i, []).append((j, -sweep_high))
@@ -736,8 +754,33 @@ def feasibility_project(elev, shape_constraints, hard, *,
         hj = j in immovable
         if hi and hj:
             continue
+        kind = 1 if hi else (2 if hj else 0)
+        # HOST-AUTHORITATIVE ZONE EDGES (Slice B stage B3 solve-side fix,
+        # gated by ``interval_yield_from`` from the call site): an
+        # adjacent-ground zone node (canonical index >= the threshold) is
+        # graded TO its host pavement ring vertex — pavement value always
+        # wins at a pavement node, an IDENTITY.  Its ONE envelope interval
+        # edge to the host must therefore move ONLY the zone endpoint; the
+        # default kind=0 (split the excess) instead drags the host, and a
+        # host shared by k zones ping-pongs the whole cluster to the visit
+        # cap (KBNA gates-ON: 47k such edges livelock the sweep for tens of
+        # minutes; gates-OFF the same projection drains <1 s).  Fixing the
+        # host (kind that moves the ZONE endpoint) makes it a one-directional
+        # follow — the zone tracks the host, never the reverse — so the sweep
+        # drains in one neighbourhood pass.  Only zone<->host pairs (exactly
+        # one endpoint over the threshold, neither already immovable) are
+        # redirected; zone<->zone or sub-threshold (gap-spine) interval edges
+        # keep the split.  ``interval_yield_from=None`` restores kind=0 —
+        # byte-inert.
+        if interval_yield_from is not None and kind == 0:
+            i_zone = i >= interval_yield_from
+            j_zone = j >= interval_yield_from
+            if i_zone and not j_zone:
+                kind = 2                 # host j fixed, move zone i
+            elif j_zone and not i_zone:
+                kind = 1                 # host i fixed, move zone j
         interval_bounds_by_index[len(iter_edges)] = (sweep_low, sweep_high)
-        iter_edges.append((i, j, None, 1 if hi else (2 if hj else 0)))
+        iter_edges.append((i, j, None, kind))
 
     # ── lazy expansion plumbing for the projection loops ─────────────────
     # node → still-lazy entries, REPRESENTATIVE-keyed (a pad-group member's

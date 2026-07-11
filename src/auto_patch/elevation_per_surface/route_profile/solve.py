@@ -489,6 +489,20 @@ def solve_route_profile(layout, icao: str,
                       f"edge(s), collisions "
                       f"pavement={_zone_collisions[0]} "
                       f"cross={_zone_collisions[1]}")
+    # ZONE HOST-AUTHORITATIVE ENVELOPE (Slice B stage B3 solve-side fix,
+    # O4_ZONE_HOST_AUTHORITATIVE, default ON): adjacent-ground zone nodes
+    # (index >= first-zone) grade TO their host pavement vertex — pavement
+    # wins by identity.  Passing this threshold to ``feasibility_project``
+    # (a) excludes the 45k asymmetric zone slabs from the reach-envelope
+    # Dijkstra (which is non-negative-weight only — the slabs blow it up
+    # into tens of minutes at KBNA; gap-spine's ~1.6k drained fine) and
+    # (b) makes each zone slab move ONLY the zone endpoint in the sweep
+    # (the host never ping-pongs).  KBNA gates-ON: a zone-carrying
+    # projection drops from 8+ min to ~24 s.  Gate OFF → None → byte-inert.
+    _iyf = (getattr(layout, "_adjacent_ground_first_zone_index", None)
+            if (_os.environ.get("O4_ZONE_HOST_AUTHORITATIVE", "1") == "1"
+                and _zone_idx)
+            else None)
     coupling = _build_level_coupling(shape_constraints)
 
     # ── THE ONE GRAPH (user 2026-06-27) ──────────────────────────────────────
@@ -528,7 +542,18 @@ def solve_route_profile(layout, icao: str,
                                f"profiles stay frozen.")
     band, dem_fn, runway_pts, _G = reach_band_for(
         layout, elev, bucket_to_idx, dem, tile_lat, tile_lon, unified_graph=G)
-    node_band = node_bands(nodes, band)
+    # ZONE-NODE REACH-BAND SKIP (Slice B stage B3 performance lever,
+    # O4_ZONE_NODE_SKIP_REACH_BAND, default ON): the adjacent-ground zone
+    # nodes (index >= first-zone) are graded_strip terrain variables whose
+    # value is the per-vertex DEM envelope clamp to their host — they never
+    # consume a reach band, yet scanning one costs ~74 ms (the off-net
+    # skeleton fallback) × 45k at KBNA (~55 min).  Skip them; they take the
+    # honest off-net band (None).  Gate OFF restores the all-nodes scan.
+    _zone_skip = (
+        getattr(layout, "_adjacent_ground_first_zone_index", None)
+        if _os.environ.get("O4_ZONE_NODE_SKIP_REACH_BAND", "1") == "1"
+        else None)
+    node_band = node_bands(nodes, band, skip_from=_zone_skip)
     _psub(0.55, "Solving elevations — reach bands computed")
     building_seats = build_building_seats(
         layout, bucket_to_idx, band, dem_fn, runway_pts)
@@ -714,7 +739,8 @@ def solve_route_profile(layout, icao: str,
         hard = {i for i in range(n) if base_hard[i]}
         hard |= {i for i in runway_nodes if i < n}
         hard |= {i for i in building_seats if i < n}
-        rem, bh = feasibility_project(elev, shape_constraints, hard)
+        rem, bh = feasibility_project(elev, shape_constraints, hard,
+                                      interval_yield_from=_iyf)
         # Project on the UNIFIED graph's OWN edges too (the EXACT pairs/caps the
         # validator checks — rects/caps all-pair, which shape_constraints only
         # approximates with axial edges), so build and validate cannot leave a
@@ -762,7 +788,8 @@ def solve_route_profile(layout, icao: str,
                 # pinned on its rising <=cap profile; re-project so the apron BODY
                 # grades into the raised arm and nothing else exceeds its cap.
                 _ghard = hard | {i for i in runway_nodes if i < n} | _gs_hard
-                feasibility_project(elev, shape_constraints, _ghard)
+                feasibility_project(elev, shape_constraints, _ghard,
+                                    interval_yield_from=_iyf)
                 feasibility_project(elev, [{"edges": u_edges}], _ghard)
             # Service roads FOLLOW DEM at <=cap (a ground road climbs toward terrain,
             # anchored only at its airside/groundside welds) — SVC4 was held flat in
@@ -802,7 +829,8 @@ def solve_route_profile(layout, icao: str,
             # cap (the audit's POCS on the same polytope reaches ~0 in <100
             # sweeps).  Joint set: projecting the two graphs alternately
             # un-does one with the other.
-            rem, bh = feasibility_project(elev, shape_constraints, yield_hard)
+            rem, bh = feasibility_project(elev, shape_constraints, yield_hard,
+                                          interval_yield_from=_iyf)
             rem, bh = feasibility_project(elev, [{"edges": u_edges}],
                                           yield_hard)
             # MOVABLE FLAT PADS (user 2026-07-03): building pads leave the
@@ -912,6 +940,7 @@ def solve_route_profile(layout, icao: str,
             rem, bh = feasibility_project(elev, joint, yield_hard,
                                           force_scalar=True, max_iters=2400,
                                           flat_groups=pad_groups or None,
+                                          interval_yield_from=_iyf,
                                           broken_out=(_solve_broken_idx
                                                       if _scoped_gate
                                                       else None))
@@ -962,7 +991,8 @@ def solve_route_profile(layout, icao: str,
                     yield_hard = yield_hard - _freed
                     rem, bh = feasibility_project(
                         elev, joint, yield_hard, force_scalar=True,
-                        max_iters=1200, flat_groups=pad_groups or None)
+                        max_iters=1200, flat_groups=pad_groups or None,
+                        interval_yield_from=_iyf)
                     _n_adopted = adopt_projected_mouths(
                         layout, bucket_to_idx, elev, _freed, _gs_hard)
                     # A relaxed mouth is a solver-DECLARED authority-

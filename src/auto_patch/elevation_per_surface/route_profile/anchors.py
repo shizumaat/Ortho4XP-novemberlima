@@ -786,9 +786,28 @@ def build_apron_contact_floors(layout, bucket_to_idx, band, dem_fn, building_sea
     return floors
 
 
-def node_bands(nodes, band):
-    """Per-node ``(floor, ceiling)`` from the one reach band (``None`` off-net)."""
-    return [band(x, y) for (x, y) in nodes]
+def node_bands(nodes, band, skip_from=None):
+    """Per-node ``(floor, ceiling)`` from the one reach band (``None`` off-net).
+
+    ``skip_from`` (Slice B stage B3 performance lever, gated at the call
+    site): indices ``>= skip_from`` are the adjacent-ground ZONE nodes —
+    graded_strip terrain variables whose value law is a pure per-vertex DEM
+    envelope clamp to their host pavement edge (``ROLE_GRADE_LIMITS
+    ['graded_strip'] is None`` — no reach coupling), encoded as the zone
+    interval edge in ``_build_adjacent_ground_zone_constraints``.  Their reach
+    band is NEVER consumed by that law, yet computing it is the KBNA gate-ON
+    scaling wall: a zone node sits OFF the pavement net, so ``band()`` takes
+    the expensive skeleton-``_fallback`` path (~74 ms/node vs ~12 ms on-net),
+    and there are 45k of them (node_bands ≈ 60 min at KBNA, ~55 min of it the
+    zone tail).  Handing those nodes ``None`` (off-net, the honest value for a
+    terrain vertex) skips the scan.  ``skip_from=None`` restores the
+    all-nodes scan (the gate-OFF path, byte-inert)."""
+    if skip_from is None:
+        return [band(x, y) for (x, y) in nodes]
+    out = [None] * len(nodes)
+    for i in range(min(skip_from, len(nodes))):
+        out[i] = band(nodes[i][0], nodes[i][1])
+    return out
 
 
 def _spine_floor_per_node(layout, nodes, bucket_to_idx, building_seats,
