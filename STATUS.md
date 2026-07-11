@@ -123,10 +123,24 @@
 #    projection ≈ 65-75 s, well under the 120 s target.  The
 #    coverage gap (24 shapes / 1,285 fallback vertices) is
 #    RE-SCOPED as a QUALITY ledger item (values move to solved,
-#    in-sim-gated) — rides with order 3 or B4 prep.  ORDER 3 =
-#    wrap + tunnel-ramp standoff, next.  Round-7 in-sim additions:
-#    the -12 m law-true dip at 60.71804,-135.07291 (analytic had
-#    flattened genuine terrain) + the three big-gap spine sites.
+#    in-sim-gated).  ORDER 3 LANDED ed61dde — B3 STRUCTURALLY
+#    COMPLETE: wrap (O4_ADJACENT_GROUND_END_WRAP, OFF; taxiway-end
+#    halt was the terrain probe treating the SKIRT as obstruction,
+#    not the outward-normal test — taxiways have axis=None) +
+#    tunnel-ramp standoff (O4_ADJACENT_GROUND_TUNNEL_STANDOFF, OFF;
+#    PREMISE OVERTURNED 16th — the 2 SPJC tears do not reproduce,
+#    SPJC emits 0 tunnels in this tree, KDFW zero-bores class, both
+#    stay on the in-sim tunnel watch; standoff = synthetically
+#    proven guard).  ★THE COVERAGE-GAP QUALITY ITEM IS NOW
+#    LOAD-BEARING FOR B4: the wrap adds 0 bands in the solver-path
+#    build (DEM-seeded march sees no violation at the taxiway end;
+#    fires correctly in the legacy path) — acceptance criterion 4
+#    cannot be demonstrated until the pre-solve march covers
+#    solved-value violations.  Coverage order dispatched (principled
+#    margin candidate: march on the reach-band worst-case edge value
+#    instead of the seed — superset by construction, no magic
+#    number).  Round-7 in-sim additions: the -12 m law-true dip at
+#    60.71804,-135.07291 + the three big-gap spine sites.
 # 3. NOAH IN-SIM ROUND 7 before any default flips: the 3 big-gap
 #    spine sites (60.7210897,-135.0776149 first) + the B1/B2 gate-ON
 #    tile · then B4 charter + legacy deletion · B5 projection
