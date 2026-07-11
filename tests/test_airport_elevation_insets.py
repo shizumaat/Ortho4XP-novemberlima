@@ -757,3 +757,155 @@ def test_densify_tile_dem_noop_and_active(tmp_path, monkeypatch):
     assert tile.dem.alt_dem.shape == (tile.dem.nydem, tile.dem.nxdem)
     # The upsampled base still reads its flat 10 m value at the corners.
     assert tile.dem.alt_dem[0, 0] == pytest.approx(10.0)
+
+
+# =====================================================================
+# Phase C2: second provider family (STAC), no network
+# =====================================================================
+# A fixture STAC ItemCollection like the Natural Resources Canada HRDEM
+# datacube returns for a bbox search: two items, the first exposing both a
+# bare-earth DTM and a surface DSM, the second only a generically-named
+# GeoTIFF data asset.
+_STAC_ITEMCOLLECTION_FIXTURE = {
+    "type": "FeatureCollection",
+    "features": [
+        {
+            "id": "hrdem-lidar-item-a",
+            "properties": {"gsd": 1.0},
+            "assets": {
+                "dsm": {
+                    "href": "https://example.ca/tile_a_dsm.tif",
+                    "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+                    "roles": ["data", "dsm"],
+                },
+                "dtm": {
+                    "href": "https://example.ca/tile_a_dtm.tif",
+                    "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+                    "roles": ["data", "dtm"],
+                },
+            },
+        },
+        {
+            "id": "hrdem-lidar-item-b",
+            "properties": {"resolution": 2.0},
+            "assets": {
+                "data": {
+                    "href": "s3://hrdem-bucket/tile_b.tif",
+                    "type": "image/tiff; application=geotiff",
+                    "roles": ["data"],
+                }
+            },
+        },
+    ],
+}
+
+
+def test_stac_search_payload_parsing():
+    parse = INSETS.StacCloudOptimizedGeoTiffStrategy._parse_search_payload
+    items = parse(_STAC_ITEMCOLLECTION_FIXTURE)
+    assert [item["id"] for item in items] == [
+        "hrdem-lidar-item-a",
+        "hrdem-lidar-item-b",
+    ]
+    # An empty / malformed response yields no items (no coverage).
+    assert parse({"type": "FeatureCollection", "features": []}) is None
+    assert parse({}) is None
+    assert parse("not a dict") is None
+    # A server that keys the list "items" instead of "features" still parses.
+    assert (
+        parse({"items": _STAC_ITEMCOLLECTION_FIXTURE["features"]})[0]["id"]
+        == "hrdem-lidar-item-a"
+    )
+
+
+def test_stac_asset_selection_prefers_dtm():
+    items = _STAC_ITEMCOLLECTION_FIXTURE["features"]
+    selected = INSETS._select_stac_dtm_assets(items, ["dtm"])
+    # Item A: the DTM wins over the DSM by explicit preference.
+    assert selected[0][0] == "https://example.ca/tile_a_dtm.tif"
+    assert selected[0][1] == 1.0  # gsd carried through
+    # Item B: no dtm key -> falls back to the generic GeoTIFF data asset.
+    assert selected[1][0] == "s3://hrdem-bucket/tile_b.tif"
+    assert selected[1][1] == 2.0  # resolution property carried through
+    # With no preference given, a DTM-roled/keyed asset is still chosen.
+    fallback = INSETS._select_stac_dtm_assets(items, [])
+    assert fallback[0][0] == "https://example.ca/tile_a_dtm.tif"
+
+
+def test_stac_asset_href_to_vsicurl():
+    convert = INSETS._stac_asset_href_to_vsicurl
+    assert convert("https://x/y.tif") == "/vsicurl/https://x/y.tif"
+    assert convert("http://x/y.tif") == "/vsicurl/http://x/y.tif"
+    assert convert("s3://bucket/key.tif") == "/vsis3/bucket/key.tif"
+    assert convert("/vsicurl/https://x/y.tif") == "/vsicurl/https://x/y.tif"
+
+
+def test_stac_strategy_registered_and_dispatches(tmp_path, monkeypatch):
+    """The REAL second strategy is in the registry and is dispatched by the
+    orchestration's fetch_inset with zero orchestration change -- discovery
+    and the warp core are stubbed so no network / GDAL is touched."""
+    assert "stac" in INSETS.ACCESS_STRATEGIES
+
+    monkeypatch.setattr(
+        INSETS.StacCloudOptimizedGeoTiffStrategy,
+        "discover",
+        lambda self, definition, bbox: _STAC_ITEMCOLLECTION_FIXTURE[
+            "features"
+        ],
+    )
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+
+    warp_calls = {}
+
+    def _fake_warp(vsicurl_inputs, bbox, resolution_m, destination_path):
+        warp_calls["inputs"] = list(vsicurl_inputs)
+        with open(destination_path, "wb") as handle:
+            handle.write(b"stub-geotiff")
+        return True
+
+    monkeypatch.setattr(
+        INSETS, "warp_vsicurl_sources_to_geotiff", _fake_warp
+    )
+
+    definition = {
+        "code": "HRDEM",
+        "access_strategy": "stac",
+        "role": INSETS.ROLE_AIRPORT_INSET,
+        "enabled": True,
+        "priority": 90.0,
+        "collections": "hrdem-lidar",
+        "dtm_asset_keys": "dtm",
+        "license": "Open Government Licence - Canada",
+        "attribution": "Natural Resources Canada",
+        "vertical_datum": "CGVD2013",
+    }
+    destination = str(tmp_path / "CYVR_hrdem.tif")
+    provenance = INSETS.fetch_inset(
+        definition, (-123.20, 49.18, -123.16, 49.21), 3.0, destination
+    )
+    assert provenance is not None
+    assert provenance["provider"] == "HRDEM"
+    assert provenance["access_strategy"] == "stac"
+    assert provenance["attribution"] == "Natural Resources Canada"
+    assert provenance["vertical_datum"] == "CGVD2013"
+    assert provenance["native_resolution_m"] == 1.0  # finest selected asset
+    assert os.path.isfile(destination)
+    # The DTM (item A) and the fallback data asset (item B) were mosaicked,
+    # the DTM's vsicurl and the s3 vsis3 path both present.
+    assert "/vsicurl/https://example.ca/tile_a_dtm.tif" in warp_calls["inputs"]
+    assert "/vsis3/hrdem-bucket/tile_b.tif" in warp_calls["inputs"]
+
+
+def test_hrdem_definition_ships_and_is_selectable():
+    """The shipped HRDEM.elv parses with role=airport_inset + stac strategy
+    and is picked up by auto inset selection alongside USGS3DEP."""
+    INSETS.initialize_elevation_providers_dict()
+    assert "HRDEM" in INSETS.elevation_providers_dict
+    hrdem = INSETS.elevation_providers_dict["HRDEM"]
+    assert hrdem["access_strategy"] == "stac"
+    assert hrdem["role"] == INSETS.ROLE_AIRPORT_INSET
+    assert hrdem["collections"] == "hrdem-lidar"
+    codes = [d["code"] for d in INSETS.select_provider_definitions("auto")]
+    assert "HRDEM" in codes and "USGS3DEP" in codes
+    # USGS3DEP (100) outranks HRDEM (90) in the auto ordering.
+    assert codes.index("USGS3DEP") < codes.index("HRDEM")

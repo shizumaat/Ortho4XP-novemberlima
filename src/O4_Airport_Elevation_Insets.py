@@ -369,6 +369,56 @@ def discover_inset(definition, bounding_box_wgs84):
 
 
 # =====================================================================
+# Shared fetch helpers (strategy-agnostic; reused by tnm_cog and stac)
+# =====================================================================
+def warp_vsicurl_sources_to_geotiff(
+    vsicurl_inputs, bounding_box_wgs84, target_resolution_m, destination_path
+):
+    """Mosaic + warp remote rasters to an EPSG:4326 float32 GeoTIFF window.
+
+    The genuinely shared core of every Cloud-Optimized GeoTIFF strategy:
+    ``gdal.Warp`` reads only the requested window from each ``/vsicurl/``
+    source (the full source tiles, hundreds of megabytes each, are never
+    downloaded), mosaics them (later inputs win on overlap), reprojects to
+    EPSG:4326 and resamples to ``target_resolution_m`` at the bounding
+    box's centre latitude.  Returns ``True`` on success, ``False`` on any
+    GDAL failure (the caller records no-coverage).  A no-op returning
+    ``False`` when GDAL is unavailable.
+    """
+    if not has_gdal:
+        return False
+    (west, south, east, north) = bounding_box_wgs84
+    centre_latitude = (south + north) / 2.0
+    metres_per_degree_latitude = GEO.lat_to_m
+    metres_per_degree_longitude = GEO.lon_to_m(centre_latitude)
+    x_resolution_deg = target_resolution_m / metres_per_degree_longitude
+    y_resolution_deg = target_resolution_m / metres_per_degree_latitude
+    os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+    warp_options = gdal.WarpOptions(
+        format="GTiff",
+        outputType=gdal.GDT_Float32,
+        dstSRS="EPSG:4326",
+        outputBounds=(west, south, east, north),
+        xRes=x_resolution_deg,
+        yRes=y_resolution_deg,
+        resampleAlg="bilinear",
+        dstNodata=-32768.0,
+        creationOptions=["COMPRESS=DEFLATE", "PREDICTOR=3"],
+    )
+    try:
+        dataset = gdal.Warp(
+            destination_path, list(vsicurl_inputs), options=warp_options
+        )
+    except Exception as error:
+        UI.vprint(1, "   WARNING: elevation warp failed:", str(error))
+        return False
+    if dataset is None:
+        return False
+    dataset = None  # flush to disk
+    return True
+
+
+# =====================================================================
 # Strategy 1: tnm_cog (TNM Access API -> /vsicurl COG window -> warp)
 # =====================================================================
 @register_access_strategy("tnm_cog")
@@ -450,12 +500,6 @@ class TnmCloudOptimizedGeoTiffStrategy:
         sources = self.discover(definition, bounding_box_wgs84)
         if not sources:
             return None
-        (west, south, east, north) = bounding_box_wgs84
-        centre_latitude = (south + north) / 2.0
-        metres_per_degree_latitude = GEO.lat_to_m
-        metres_per_degree_longitude = GEO.lon_to_m(centre_latitude)
-        x_resolution_deg = target_resolution_m / metres_per_degree_longitude
-        y_resolution_deg = target_resolution_m / metres_per_degree_latitude
 
         # Mosaic the newest-project sources; gdal.Warp accepts several inputs
         # and honours their order (later inputs win on overlap).
@@ -469,30 +513,13 @@ class TnmCloudOptimizedGeoTiffStrategy:
             "/vsicurl/" + source["download_url"] for source in chosen
         ]
 
-        os.makedirs(os.path.dirname(destination_path), exist_ok=True)
-        warp_options = gdal.WarpOptions(
-            format="GTiff",
-            outputType=gdal.GDT_Float32,
-            dstSRS="EPSG:4326",
-            outputBounds=(west, south, east, north),
-            xRes=x_resolution_deg,
-            yRes=y_resolution_deg,
-            resampleAlg="bilinear",
-            dstNodata=-32768.0,
-            creationOptions=["COMPRESS=DEFLATE", "PREDICTOR=3"],
-        )
-        try:
-            dataset = gdal.Warp(
-                destination_path, vsicurl_inputs, options=warp_options
-            )
-        except Exception as error:
-            UI.vprint(
-                1, "   WARNING: TNM warp failed:", str(error)
-            )
+        if not warp_vsicurl_sources_to_geotiff(
+            vsicurl_inputs,
+            bounding_box_wgs84,
+            target_resolution_m,
+            destination_path,
+        ):
             return None
-        if dataset is None:
-            return None
-        dataset = None  # flush to disk
 
         return {
             "provider": definition.get("code"),
@@ -501,6 +528,241 @@ class TnmCloudOptimizedGeoTiffStrategy:
             "source_ids": [source["source_id"] for source in chosen],
             "project_titles": [source["title"] for source in chosen],
             "publication_date": newest_date,
+            "license": definition.get("license"),
+            "attribution": definition.get("attribution"),
+            "vertical_datum": definition.get("vertical_datum"),
+            "datum_note": (
+                "Elevations are in the source vertical datum; lidar is "
+                "treated as truth and is NOT shifted toward the base DEM."
+            ),
+            "fetch_date": datetime.date.today().isoformat(),
+            "bounding_box_wgs84": list(bounding_box_wgs84),
+            "resolution_m": target_resolution_m,
+        }
+
+
+# =====================================================================
+# Strategy 2: stac (SpatioTemporal Asset Catalog search -> COG -> warp)
+# =====================================================================
+# The extensibility proof (spec Phase C2): a whole new provider family --
+# a STAC API search endpoint serving Cloud-Optimized GeoTIFF assets --
+# plugs into the SAME orchestration (discovery loop, cache, index,
+# provenance, composite assembly, bake, and the Phase C1 grid decision)
+# with only this one class + one Providers/Elevation/*.elv definition,
+# reusing warp_vsicurl_sources_to_geotiff for the fetch core.  Shipped
+# with HRDEM.elv (Natural Resources Canada high-resolution lidar).
+def _select_stac_dtm_assets(items, prefer_asset_keys):
+    """Pick one Cloud-Optimized GeoTIFF DTM asset href from each STAC item.
+
+    STAC items expose named assets; elevation collections publish a Digital
+    Terrain Model (bare earth) and often a Digital Surface Model (canopy /
+    buildings) too.  We prefer the DTM: an asset whose key matches one of
+    ``prefer_asset_keys`` (in order) wins; otherwise the first asset whose
+    key or roles suggest a DTM; otherwise the first GeoTIFF-typed asset.
+    Returns a list of ``(href, native_resolution_m_or_None)`` for the
+    chosen assets, skipping items with no usable asset.
+    """
+    chosen = []
+    for item in items:
+        assets = item.get("assets") or {}
+        properties = item.get("properties") or {}
+        href = None
+        # 1. Explicit preference order (e.g. "dtm", "dtm-1m").
+        for key in prefer_asset_keys:
+            if key in assets and assets[key].get("href"):
+                href = assets[key]["href"]
+                break
+        # 2. Any asset that looks like a DTM by key or declared role.
+        if href is None:
+            for key, asset in assets.items():
+                roles = [str(role).lower() for role in asset.get("roles", [])]
+                if (
+                    "dtm" in key.lower()
+                    or "data" in roles
+                    and "dtm" in " ".join(roles)
+                ) and asset.get("href"):
+                    href = asset["href"]
+                    break
+        # 3. Fall back to the first GeoTIFF-typed asset.
+        if href is None:
+            for asset in assets.values():
+                media_type = str(asset.get("type", "")).lower()
+                if ("tiff" in media_type or "geotiff" in media_type) and asset.get(
+                    "href"
+                ):
+                    href = asset["href"]
+                    break
+        if href is None:
+            continue
+        resolution = (
+            properties.get("gsd")
+            or properties.get("resolution")
+            or None
+        )
+        chosen.append((href, resolution))
+    return chosen
+
+
+def _stac_asset_href_to_vsicurl(href):
+    """Turn a STAC asset href into a GDAL virtual path for a window read.
+
+    ``https://`` / ``http://`` hrefs become ``/vsicurl/<url>``; an ``s3://``
+    href becomes ``/vsis3/<bucket/key>``; an already-virtual path is left
+    untouched.  Only the requested window is read regardless.
+    """
+    if href.startswith("/vsi"):
+        return href
+    if href.startswith("s3://"):
+        return "/vsis3/" + href[len("s3://") :]
+    return "/vsicurl/" + href
+
+
+@register_access_strategy("stac")
+class StacCloudOptimizedGeoTiffStrategy:
+    """Fetch lidar elevation via a STAC API search + Cloud-Optimized GeoTIFF.
+
+    Discovery POSTs (falling back to GET) a bounding-box + collections
+    query to the STAC ``/search`` endpoint named by the definition's
+    ``discovery_url_template`` and returns the intersecting items.  Fetch
+    selects the highest-resolution Digital Terrain Model asset of each
+    item, mosaics their Cloud-Optimized GeoTIFFs through GDAL's virtual
+    file system (window reads only) and warps to EPSG:4326 at the target
+    resolution -- reusing warp_vsicurl_sources_to_geotiff, exactly like
+    tnm_cog, with zero change to the orchestration around it.
+    """
+
+    def _search_url_and_body(self, definition, bounding_box_wgs84):
+        (west, south, east, north) = bounding_box_wgs84
+        template = definition.get("discovery_url_template", "")
+        # The endpoint may be a bare .../search URL or one already carrying
+        # ?collections=...; keep any query the definition supplied.
+        url = template
+        collections = [
+            token.strip()
+            for token in str(definition.get("collections", "")).split(",")
+            if token.strip()
+        ]
+        body = {
+            "bbox": [west, south, east, north],
+            "limit": int(float(definition.get("search_limit", 50))),
+        }
+        if collections:
+            body["collections"] = collections
+        return (url, body, collections, (west, south, east, north))
+
+    def discover(self, definition, bounding_box_wgs84):
+        import requests
+
+        (url, body, collections, bbox) = self._search_url_and_body(
+            definition, bounding_box_wgs84
+        )
+        if not url:
+            return None
+        payload = None
+        try:
+            response = requests.post(url, json=body, timeout=30)
+            if response.status_code == 200:
+                payload = response.json()
+        except Exception as error:
+            UI.vprint(
+                1, "   WARNING: STAC POST search failed:", str(error)
+            )
+        if payload is None:
+            # Fall back to a GET query-string search (some STAC servers).
+            (west, south, east, north) = bbox
+            get_url = url + (
+                ("&" if "?" in url else "?")
+                + "bbox="
+                + ",".join(repr(value) for value in (west, south, east, north))
+            )
+            if collections:
+                get_url = get_url + "&collections=" + ",".join(collections)
+            try:
+                response = requests.get(get_url, timeout=30)
+                if response.status_code != 200:
+                    UI.vprint(
+                        1,
+                        "   WARNING: STAC GET search returned status",
+                        response.status_code,
+                    )
+                    return None
+                payload = response.json()
+            except Exception as error:
+                UI.vprint(
+                    1, "   WARNING: STAC GET search failed:", str(error)
+                )
+                return None
+        return self._parse_search_payload(payload)
+
+    @staticmethod
+    def _parse_search_payload(payload):
+        """Extract the item list from a STAC ItemCollection response."""
+        if not isinstance(payload, dict):
+            return None
+        features = payload.get("features")
+        if features is None and "items" in payload:
+            features = payload.get("items")
+        if not features:
+            return None
+        return list(features)
+
+    def fetch(
+        self,
+        definition,
+        bounding_box_wgs84,
+        target_resolution_m,
+        destination_path,
+    ):
+        if not has_gdal:
+            return None
+        items = self.discover(definition, bounding_box_wgs84)
+        if not items:
+            return None
+        prefer_asset_keys = [
+            token.strip()
+            for token in str(
+                definition.get("dtm_asset_keys", "dtm")
+            ).split(",")
+            if token.strip()
+        ]
+        selected = _select_stac_dtm_assets(items, prefer_asset_keys)
+        if not selected:
+            return None
+        # Highest resolution first so the finest asset WINS on overlap
+        # (gdal.Warp lets later inputs win, so sort coarsest-to-finest).
+        selected.sort(
+            key=lambda pair: (pair[1] is None, -(pair[1] or 0.0))
+        )
+        vsicurl_inputs = [
+            _stac_asset_href_to_vsicurl(href) for (href, _resolution) in selected
+        ]
+        if not warp_vsicurl_sources_to_geotiff(
+            vsicurl_inputs,
+            bounding_box_wgs84,
+            target_resolution_m,
+            destination_path,
+        ):
+            return None
+        native_resolutions = [
+            resolution for (_href, resolution) in selected if resolution
+        ]
+        return {
+            "provider": definition.get("code"),
+            "access_strategy": definition.get("access_strategy"),
+            "source_urls": [href for (href, _resolution) in selected],
+            "source_ids": [
+                item.get("id") for item in items if item.get("id")
+            ],
+            "collections": [
+                token.strip()
+                for token in str(definition.get("collections", "")).split(",")
+                if token.strip()
+            ],
+            "native_resolution_m": (
+                min(native_resolutions)
+                if native_resolutions
+                else definition.get("native_resolution_m")
+            ),
             "license": definition.get("license"),
             "attribution": definition.get("attribution"),
             "vertical_datum": definition.get("vertical_datum"),
