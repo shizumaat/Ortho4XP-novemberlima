@@ -2682,7 +2682,8 @@ def _finalize_tunnel_emission(
                 if _oring and _oring[0] == _oring[-1]:
                     _oring = _oring[:-1]
                 _res = _resample_node_altitudes_nn(
-                    _cutg, _oring, list(s9.node_altitudes))
+                    _cutg, _oring, list(s9.node_altitudes),
+                    interior_edge_project=True)
                 if _res is None:
                     _n_clip += 1
                     continue

@@ -97,7 +97,7 @@ from .layout import (
     SHARED_VERTEX_TOL_M,
     vertex_bucket,
 )
-from .elevation import _sample_dem
+from .elevation import _sample_dem, _resample_node_altitudes_nn
 from .pavement.junctions import _decompose_polygon_with_holes
 from .pavement.runways import _sample_runway_segment_elev
 
@@ -110,6 +110,12 @@ _TAXIWAY_ROLES = (
 )
 # Minimum emitted cut area; smaller residue is dropped as noise.
 _MIN_CUT_AREA_M2 = 25.0
+# Minimum area a trimmed groundside-pavement remnant must keep to survive
+# the skirt airside-precedence trim (Noah ruling 2026-07-10).  A groundside
+# shape reduced below this (or to nothing) by the skirt footprint is dropped
+# WHOLE — a sub-50 m² sliver welded onto the skirt chain is exactly the
+# near-parallel confetti the mesher Ruppert-explodes on.
+_GROUNDSIDE_TRIM_MIN_M2 = 50.0
 # Keep every emitted cut vertex this far OUTSIDE pavement so it never
 # lands on a sloping rect's edge (``check_vertex_on_sloping_edge`` /
 # ``test_no_vertex_on_sloping_rect_edge`` flag a non-rect vertex within
@@ -2514,6 +2520,87 @@ def _end_constraint_distance(p0, outward, max_distance_m,
     return nearest
 
 
+def _trim_groundside_pavement_around_skirts(
+        layout: PavementLayout, skirt_union) -> tuple[int, int]:
+    """Trim every ``groundside_pavement`` shape around the emitted
+    runway-end-skirt footprint union (skirt airside precedence, Noah
+    ruling 2026-07-10).
+
+    The runway-end skirt area is inherently AIRSIDE: the skirt keeps its
+    full footprint (it is NOT clipped against groundside — groundside was
+    excluded from the skirt clip block), and GROUNDSIDE yields, trimmed
+    exactly around the skirt.  For each groundside shape overlapping
+    ``skirt_union`` the new outline is ``polygon.difference(skirt_union)``
+    — shapely inserts the skirt's boundary coordinates VERBATIM into the
+    groundside ring (shared-edge guarantee), so the trimmed groundside
+    welds to the skirt chain with zero minted near-parallel geometry and
+    no unowned DEM sliver between them.  Per-vertex altitudes are
+    re-derived through ``_resample_node_altitudes_nn`` — the same
+    edge-interpolation resample every other groundside clip uses
+    (``tile_cut``, ``boundary``) — so the remnant keeps groundside's own
+    DEM-following field.  A remnant part below ``_GROUNDSIDE_TRIM_MIN_M2``
+    (or an emptied shape) is dropped WHOLE.
+
+    Mutates ``layout.shapes`` in place.  Returns
+    ``(n_shapes_trimmed, n_shapes_dropped)``.
+    """
+    import dataclasses
+    if skirt_union is None or skirt_union.is_empty:
+        return (0, 0)
+    groundside_shapes = [s for s in layout.shapes
+                         if s.role == "groundside_pavement"
+                         and s.polygon is not None
+                         and not s.polygon.is_empty]
+    if not groundside_shapes:
+        return (0, 0)
+    n_trimmed = 0
+    n_dropped = 0
+    removed_ids: set[int] = set()
+    new_shapes: list[BuiltShape] = []
+    for gs in groundside_shapes:
+        try:
+            if gs.polygon.intersection(skirt_union).area <= 1e-6:
+                continue
+            trimmed = gs.polygon.difference(skirt_union)
+        except _GEOM_EXC:
+            continue
+        removed_ids.add(id(gs))
+        old_coords = list(gs.polygon.exterior.coords)
+        old_open = (old_coords[:-1]
+                    if (old_coords and old_coords[0] == old_coords[-1])
+                    else old_coords)
+        if trimmed.is_empty:
+            n_dropped += 1
+            continue
+        if trimmed.geom_type == "Polygon":
+            parts = [trimmed]
+        elif trimmed.geom_type in ("MultiPolygon", "GeometryCollection"):
+            parts = [g for g in trimmed.geoms
+                     if g.geom_type == "Polygon" and not g.is_empty]
+        else:
+            parts = []
+        kept_any = False
+        for part in parts:
+            if part.area < _GROUNDSIDE_TRIM_MIN_M2:
+                continue   # sub-50 m² remnant → drop whole
+            new_alts = None
+            if gs.node_altitudes:
+                new_alts = _resample_node_altitudes_nn(
+                    part, old_open, gs.node_altitudes)
+            new_shapes.append(dataclasses.replace(
+                gs, polygon=part, node_altitudes=new_alts))
+            kept_any = True
+        if kept_any:
+            n_trimmed += 1
+        else:
+            n_dropped += 1
+    if removed_ids:
+        layout.shapes[:] = [s for s in layout.shapes
+                            if id(s) not in removed_ids]
+        layout.shapes.extend(new_shapes)
+    return (n_trimmed, n_dropped)
+
+
 def emit_runway_end_skirts(layout: PavementLayout, dem,
                            tile_lat: int, tile_lon: int,
                            source_runways=None) -> int:
@@ -2611,18 +2698,64 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
         if d2[j] <= step * step:
             return (float(_pav_vx[j, 0]), float(_pav_vx[j, 1]))
         return None
-    # Every existing shape (pavement, cuts, ribbon, groundside, …),
+    # Every existing shape (pavement, cuts, ribbon, buildings, tunnels, …),
     # clipped EXACTLY (weld ruling 2026-07-09): the skirt WELDS to the
     # pavement it fills off — the former 1 m standoff left a groove of
     # raw DEM that rendered as a knife-edge wall/trench at the runway
     # end (the worst CYXY cliffs, 11.9 m, were pavement↔skirt grooves).
+    #
+    # SKIRT AIRSIDE PRECEDENCE (Noah ruling 2026-07-10): the runway-end
+    # skirt area is inherently AIRSIDE — nothing there can legitimately be
+    # groundside.  The skirt must NEVER clip its footprint against
+    # groundside pavement; where the two approach, GROUNDSIDE is trimmed
+    # AROUND the skirt (exact footprint, shared chain verbatim, no buffer
+    # gap — see the groundside trim pass after emission).  So groundside
+    # pavement is EXCLUDED from the clip block here.  Buildings STAY in the
+    # block (they are value authorities; skirt-vs-building precedence is
+    # unchanged, per the ruling).
+    groundside_shapes = [s for s in layout.shapes
+                         if s.role == "groundside_pavement"
+                         and s.polygon is not None
+                         and not s.polygon.is_empty]
+    _gs_ids = {id(s) for s in groundside_shapes}
     static_block = None
     try:
         static_block = unary_union(
             [s.polygon for s in layout.shapes
-             if s.polygon is not None and not s.polygon.is_empty])
+             if s.polygon is not None and not s.polygon.is_empty
+             and id(s) not in _gs_ids])
     except _GEOM_EXC:
         static_block = None
+    # ATTACHMENT reference for the small-fragment keep test below.  It
+    # still counts groundside: a skirt corner-wedge resting ON groundside
+    # is a legitimate attached fragment (airside precedence), not the
+    # freestanding confetti the min-area gate rejects.  Keeping groundside
+    # here preserves the pre-ruling attachment behaviour verbatim.
+    attach_block = static_block
+    if groundside_shapes:
+        try:
+            _gs_union = unary_union([s.polygon for s in groundside_shapes])
+            attach_block = (_gs_union if static_block is None
+                            else unary_union([static_block, _gs_union]))
+        except _GEOM_EXC:
+            attach_block = static_block
+
+    # FRESH TRACE (O4_SKIRT_GS_TRACE=1, read-only): measure how much
+    # groundside pavement the CURRENT (backwards) clip removes from the
+    # skirt footprint, per raw strip and in total.  Pure reporting — does
+    # not touch geometry — so it is byte-inert.
+    _gs_trace = os.environ.get("O4_SKIRT_GS_TRACE") == "1"
+    _gs_union_trace = None
+    if _gs_trace:
+        try:
+            _gs_union_trace = unary_union(
+                [s.polygon for s in layout.shapes
+                 if s.role == "groundside_pavement"
+                 and s.polygon is not None and not s.polygon.is_empty])
+        except _GEOM_EXC:
+            _gs_union_trace = None
+    _gs_fire_area = 0.0
+    _gs_fire_strips = 0
 
     # Each collected strip carries its own analytic altitude function
     # (``alt_at(x, y)``), so clipping in the finalize below can
@@ -2930,6 +3063,15 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
             poly = Polygon(ring)
             if not poly.is_valid:
                 poly = poly.buffer(0)
+            if (_gs_trace and _gs_union_trace is not None
+                    and not _gs_union_trace.is_empty):
+                try:
+                    _ov = poly.intersection(_gs_union_trace).area
+                except _GEOM_EXC:
+                    _ov = 0.0
+                if _ov > 1e-6:
+                    _gs_fire_area += _ov
+                    _gs_fire_strips += 1
             stage_areas = [("raw", poly.area)]
             for name, block in (("static", static_block),
                                 ("road", road_block),
@@ -2971,9 +3113,9 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
                     # validator-visible notches).  Keep attached
                     # fragments; drop isolated ones.
                     attached = False
-                    if simple.area >= 1.0 and static_block is not None:
+                    if simple.area >= 1.0 and attach_block is not None:
                         try:
-                            attached = simple.distance(static_block) <= 1.0
+                            attached = simple.distance(attach_block) <= 1.0
                         except _GEOM_EXC:
                             attached = False
                     if not attached:
@@ -3009,6 +3151,52 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
                 except _GEOM_EXC:
                     pass
                 n += 1
+    # ── GROUNDSIDE TRIM (skirt airside precedence, Noah ruling
+    # 2026-07-10) ── The skirt no longer yields to groundside (it was
+    # excluded from the clip block above).  Now enforce the OTHER half of
+    # the ruling: every groundside pavement shape that a final skirt
+    # footprint overlaps is trimmed AROUND the skirt.  ``emitted_fill`` is
+    # already the union of every emitted skirt piece, so it is the exact
+    # subtrahend — differencing against it inserts the skirt's boundary
+    # coordinates VERBATIM into the groundside ring (shapely's shared-edge
+    # guarantee), so the trimmed groundside welds to the skirt chain with
+    # zero minted near-parallel geometry and no unowned DEM sliver.  The
+    # trimmed vertices' altitudes are re-derived through the same
+    # ``_resample_node_altitudes_nn`` edge-interpolation path every other
+    # groundside clip uses (tile_cut, boundary), so the remnant keeps
+    # groundside's own DEM-following field.
+    if (groundside_shapes and emitted_fill is not None
+            and not emitted_fill.is_empty):
+        _gs_trimmed, _gs_dropped = _trim_groundside_pavement_around_skirts(
+            layout, emitted_fill)
+        if _gs_trimmed or _gs_dropped:
+            UI.vprint(1,
+                f"  [pav-builder] runway-end skirt airside precedence: "
+                f"trimmed {_gs_trimmed} groundside pavement shape(s) around "
+                f"skirt footprints, dropped {_gs_dropped} to residue.")
+
+    # RULING ASSERTION (reporting, not gating — validator convention):
+    # after the trim, no groundside pavement shape may intersect a skirt
+    # footprint interior.  A non-zero count here is a trim miss, surfaced
+    # like every other skirt verification line.
+    if emitted_fill is not None and not emitted_fill.is_empty:
+        _skirt_union2 = emitted_fill
+        _viol = 0
+        for s in layout.shapes:
+            if (s.role != "groundside_pavement" or s.polygon is None
+                    or s.polygon.is_empty):
+                continue
+            try:
+                if s.polygon.intersection(_skirt_union2).area > 1e-3:
+                    _viol += 1
+            except _GEOM_EXC:
+                continue
+        if _viol:
+            UI.vprint(1,
+                f"  [pav-builder] WARN runway-end skirt airside precedence: "
+                f"{_viol} groundside pavement shape(s) still overlap a skirt "
+                f"footprint (trim miss).")
+
     if skirt_dump is not None:
         import json
         try:
@@ -3016,4 +3204,8 @@ def emit_runway_end_skirts(layout: PavementLayout, dem,
                 json.dump(skirt_dump, handle)
         except OSError:
             pass
+    if _gs_trace:
+        print(f"[skirt-gs-trace] raw skirt strips overlapping groundside: "
+              f"{_gs_fire_strips} strip(s); total groundside area under "
+              f"raw skirt footprint: {_gs_fire_area:.1f} m^2")
     return n

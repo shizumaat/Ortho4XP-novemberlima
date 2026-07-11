@@ -1,4 +1,207 @@
 # ══════════════════════════════════════════════════════════════════
+# PART 36 IN PROGRESS (20260710 PM session) — READ THIS FIRST
+# ══════════════════════════════════════════════════════════════════
+# SLICE B IS UNDERWAY.  Design doc (Noah-approved, criterion list
+# includes the sub-2-minute build target):
+# docs/slice_b_solver_absorption_design.md.  Five stages B0-B5;
+# ordering forced by parent relationships (skirts before gaps before
+# bands); reuses the object-bridge plate admission precedent.
+#
+# LANDED (all verified on the integrated tree, audit A/B per landing):
+# * 9f68a25 queue item 8 — full_airport_build check_grade subprocess
+#   uses sys.executable (worktree-safe).
+# * 72c722a queue item 6 — audit class 4 INTERIOR EDGE CROSSINGS +
+#   attribution: ALL 18 at CYXY are the crown-ridge crossing-continuity
+#   mechanism BY DESIGN (16 crown_spine~runway/runway_crossing internal
+#   seams + 2 ridge~ridge without a shared node, ledgered for slice-B
+#   exactification).  NOT band clip residues — 6th overturned
+#   diagnosis.  Watch class requiring attribution, not a violation
+#   inventory.
+# * 162aaca + ad7d8d7 — the slice B design doc + performance
+#   acceptance criterion 8 (Noah ruling: refinements must simplify;
+#   CYXY full build UNDER 120 s; measured split at baseline: 62.9%
+#   post-solve emit march / 34.7% solve / ~2.5% phase-1 — the march
+#   the absorption deletes IS the bottleneck).
+# * 1ada9ac queue item 5 — site-2 6 mm residual: GEOS clip minting an
+#   intersection vertex 5.17 mm off a sibling band's corner (shallow-
+#   angle band-vs-band difference()); construction-time value-gated
+#   band-corner weld (1 cm reach, VERTEX_ALT_MERGE_TOL_M gate).
+#   Residual report 1 T-junction + 4 crossings → 0 + 2 (survivors
+#   pre-existing/unrelated).  Harness: tools/adjacent_ground_replay.py.
+# * ac2b927 item-9 residual — tunnel graze-clip resample hazard REAL
+#   but latent (interior vertices snapped to ring corners; metre-scale
+#   only on shapes that take the safe sloped-rect path today; no
+#   airport triggers the branch — SPJC/KDFW counter-instrumented).
+#   Opt-in interior_edge_project on _resample_node_altitudes_nn;
+#   default OFF = all other callers byte-identical.  Permanent
+#   reproducer tests/test_tunnel_graze_resample.py.
+# * 34c286b SLICE B STAGE B0 — interval-edge primitive (symmetric
+#   3-tuple untouched; 4-tuple signed slab, None = unbounded; both
+#   projection paths; _margined_interval) + O4_ONE_SOLVE_TERRAIN
+#   master gate + per-role sub-gates (all OFF).  Byte-identity proven
+#   TWICE (same-path stash A/B, pinned hash seed).  DEFERRED: reach-
+#   envelope warm-start over signed slabs (no interval edges exist
+#   until B1-B3; POCS sweep converges regardless — documented in code).
+# * 0d58750 queue item 4 — skirt edge-grade: attribution REFUTED (7th
+#   overturn; not corner arbitration).  to_osm consensus averaged two
+#   SOFT claims (skirt 693.1 + strip 692.3 → 692.7 valley) because no
+#   authority claimed the node.  Fix: consensus priority law >
+#   authority > runway-end skirt > all-soft mean.  Skirt class 2 → 0.
+#   SECOND emit-consensus arbitration defect this part (with site-2):
+#   both classes unrepresentable under absorption — more slice-B
+#   delete-it evidence.  Harness: tools/skirt_value_replay.py.
+#
+# ALSO LANDED (later same session):
+# * 9f5e816 STAGE B1 — skirts absorbed as HARD PINS (36 at CYXY);
+#   gate-ON residual IMPROVED 0+2 → 0+1; consensus skirt-tier hits
+#   84→82 (identity retires skirt-vs-pavement; skirt-vs-strip waits
+#   for B3).  Byte-identical gate-OFF, twice-proven.
+# * 1710430 STAGE B2 — gap spines = FREE solver variables (446 nodes,
+#   798 envelope interval edges, fairing law, crown-frozen, open-way
+#   float KEPT — the endpoint-interning clause was a STALE docstring;
+#   8th-10th overturned diagnoses this arc).  ABSORPTION SIGNATURE
+#   measured: Solving +9.7 s / Emitting −9.4 s.  Spine values move off
+#   the analytic target BY DESIGN (median 0.24 m; worst 23.5 m in the
+#   3 largest open-floor gaps) — ★ROUND-7 IN-SIM looks there first.
+#   ★MEASURED NEGATIVE: bare POCS does NOT suffice for interval
+#   subgraphs (main yield call exhausts its visit budget; cheap, but
+#   the B0-deferred interval warm-start is now a HARD B3 PREREQUISITE
+#   before interval edges multiply ~30×).  1 of 17 faces = loud
+#   analytic fallback (non-verbatim skirt-residual boundary, B3).
+# * f366c2f SKIRT AIRSIDE PRECEDENCE SWAP (Noah ruling): the REAL
+#   backwards clip was emit_runway_end_skirts' static_block including
+#   groundside (the queued line numbers pointed at
+#   emit_surface_clearance_cuts, whose exclusion is the SEPARATE
+#   2026-07-09 ruling — untouched).  Groundside now trims around
+#   skirts, chain verbatim.  Firing census 0 at CYXY/KCLT/HECA —
+#   inert everywhere probed; synthetic contract tests carry it.
+#   Ribbons+DEM bridges CONFIRMED retired (vestigial code = slice-C
+#   deletion candidates, incl.
+#   _reconcile_boundary_bridges_with_skirts).
+#
+# NEXT (part-36 continuation order):
+# 1. INTERVAL WARM-START — LANDED 908dea4 (same session).  Diagnosis:
+#    4 disjoint-slab interval edges = 26.96M of 27.75M capped visits
+#    (two-parent slabs going disjoint as stations move; the B2 seed
+#    prune could not see it).  Fix: _reach propagates DIRECTED bounds
+#    over signed slabs; floor>ceiling break quarantines the
+#    infeasible; strict pop guards kept.  Main yield 27.75M capped →
+#    31,134 DRAINED; replay 7.3 s → 0.05 s; gate-ON build 150 s;
+#    EVERY check_grade class improved or held (within-shape
+#    1240→1108, plane 4→2); nodes 4,403; gates-OFF byte-identical.
+#    Harness: tools/interval_reach_replay.py (O4_DUMP_SOLVE_STATE
+#    snapshot → 0.05 s standalone projection replay).
+# 2. B3 BANDS — ORDER 1 LANDED 7efc1be (+ cdda083 LineString shadow
+#    fix): construction move behind DEVELOPMENT gate
+#    O4_ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT (default OFF) +
+#    (role, ref) admission split (collision closed).  Scout
+#    corrections: clip STAYS at emission (legacy clearance cuts are
+#    post-solve default-ON); emitter truly CONSUMES pre-built
+#    footprints.  ★DEFERRED ACCEPTANCE: construct-ON = 82 bands vs 67
+#    / nodes 4,535 vs 4,403 / +14.8 s — cause isolated to the
+#    pre-solve march seeing the UNDECIMATED pre-densification
+#    pavement ring; resolution = order 2's shared-variable rings; the
+#    construct gate must NOT flip default before order 2 closes it.
+#    ORDER 2 LANDED 94f462f (three scout refutations ratified first,
+#    design doc 79800ab — band law = PER-VERTEX two-sided DEM clamp,
+#    NO caps/fairing; seam-taper pin = footprint machinery, stays;
+#    two-phase store + emit re-derivation over the FINAL chain):
+#    82 bands COLLAPSED TO 67 ✓ · 7,121 interval edges all DRAINED
+#    (warm-start held at 10x) · byte gates pass · check_grade rows
+#    unchanged · MISSES RECORDED: nodes 4,415 (+12, decimation
+#    yield) · criterion-8 gate-ON Solving +36.8 s / NO Emitting
+#    shrink — the emit march survives until the SEED-VS-SOLVED
+#    COVERAGE GAP closes (24 shapes / 1,285 fallback vertices; the
+#    plan's conservative reach margin was never built).  ORDER 2.5:
+#    CANCELLED BY ITS OWN SCOUT (no code; the premise was false).
+#    MEASURED TRUTH: Emitting = 96% emit_surface_clearance_cuts
+#    (87.7 s legacy chain, hole_router-dominated = the B4 deletion
+#    target); the band emit is 0.39 s; the POCS solve itself is
+#    2.4 s — the "Solving" phase is ~40 s object-bridge
+#    classification (KBNA worktree carries a 53x fix + pack-sidecar
+#    cache; merge-time lever) + reach-band feasibility.  Post-B4
+#    projection ≈ 65-75 s, well under the 120 s target.  The
+#    coverage gap (24 shapes / 1,285 fallback vertices) is
+#    RE-SCOPED as a QUALITY ledger item (values move to solved,
+#    in-sim-gated).  ORDER 3 LANDED ed61dde — B3 STRUCTURALLY
+#    COMPLETE: wrap (O4_ADJACENT_GROUND_END_WRAP, OFF; taxiway-end
+#    halt was the terrain probe treating the SKIRT as obstruction,
+#    not the outward-normal test — taxiways have axis=None) +
+#    tunnel-ramp standoff (O4_ADJACENT_GROUND_TUNNEL_STANDOFF, OFF;
+#    PREMISE OVERTURNED 16th — the 2 SPJC tears do not reproduce,
+#    SPJC emits 0 tunnels in this tree, KDFW zero-bores class, both
+#    stay on the in-sim tunnel watch; standoff = synthetically
+#    proven guard).  ★THE COVERAGE-GAP QUALITY ITEM IS NOW
+#    LOAD-BEARING FOR B4: the wrap adds 0 bands in the solver-path
+#    build (DEM-seeded march sees no violation at the taxiway end;
+#    fires correctly in the legacy path) — acceptance criterion 4
+#    cannot be demonstrated until the pre-solve march covers
+#    solved-value violations.  COVERAGE CLOSURE LANDED e1ff071
+#    (direction INVERTED by the scout — 17th: CUT tests the band
+#    FLOOR, FILL the CEILING; superset proven): fallback 1,289→58 ·
+#    store-missing 25→3 · zero new tears · WITHIN 1108→1103 · the
+#    LAST post-weld crossing RESOLVED (0T+0X full-ON) · census 69
+#    unchanged · cost solve 51→95 s gate-ON (10 m step lever
+#    untouched).  ~1,231 vertices move analytic→solved = the
+#    round-7 quality class.  ★WRAP REFUTED AT THE RULING SITE
+#    (18th) — NOAH RULING NEEDED: the wrap fires 0 bands at
+#    60.6972471,-135.0608669 in EVERY path incl. legacy — (a) bands
+#    are VIOLATION-driven and the solved taxiway end sits
+#    in-corridor (nothing to wrap); (b) nearest skirt = 90.7 m,
+#    outside probe range — no taxiway-end-onto-skirt subject at the
+#    site geometry.  ★NOAH RULED (2026-07-11): RE-EXAMINE IN-SIM
+#    FIRST — criterion 4 folds into round 7 (look at the site and
+#    any taxiway end near a skirt with the B3 gates ON; decide
+#    whether current output already reads correctly or where the
+#    wrap form is actually wanted); NO wrap code until then; the
+#    built machinery stays gated off as a guard.
+# 3. NOAH IN-SIM ROUND 7 — gates everything downstream (B4 charter +
+#    legacy deletion, then B5 projection retirement).  BAKE CONFIG:
+#    all five one-solve terrain gates ON (O4_ONE_SOLVE_TERRAIN +
+#    RUNWAY_END_SKIRT + GAP_FILL_SPINE + GRADED_STRIP_CONSTRUCT +
+#    GRADED_STRIP) + O4_ADJACENT_GROUND_END_WRAP=1 (so the wrap can
+#    be judged) + O4_AUTO_PATCH_REBUILD=1.  THE LIST, in order:
+#    a. the three big-gap spine sites (60.7210897,-135.0776149
+#       first) — solved spines follow DEM where the floor is open
+#       (worst 23.5 m off the old analytic fill);
+#    b. the -12 m law-true dip at 60.71804,-135.07291 (analytic had
+#       flattened genuine terrain);
+#    c. the wrap question at 60.6972471,-135.0608669 (criterion 4);
+#    d. the ~1,231-vertex band solved-value class (spot-check
+#       terminal-area strips);
+#    e. the round-4/round-6 heal sites still standing (dips, hole
+#       27, hangar area, skirt faces).
+#
+# ★ TRUE CURRENT BASELINES (CYXY, this tree — the part-35 numbers
+# below predate the O4_OBJECT_BRIDGE_TERRAIN landing and are STALE):
+# patch nodes ~4,408 / ways 387 / T-vertices 5 / near-parallel 3
+# (legacy) / coincident 4 (4th = pre-existing graded_strip wall at
+# 60.7088723) / interior crossings 18 (all crown, by design).
+# check_grade: skirt edge-grade 0 · tears 0 except 1 LEDGERED
+# graded_strip tear #366 (site-3 far-side family) · 2+5 LEDGERED
+# building8/apron vertex-to-edge + mid-edge steps.  Residual
+# divergence: 0 T-junctions + 2 crossings (pre-existing).  Build
+# 155-170 s warm (target <120 s, criterion 8).
+#
+# ★ NEW USER RULINGS (20260710 PM, all in memory + design doc):
+# 1. Test cycle >5 minutes ⇒ STOP, use/build a fast harness in tools/
+#    (applies to agent work orders; three new replay harnesses landed
+#    this session).
+# 2. CYXY = first test airport for all iteration; big airports once at
+#    scale checkpoints (B3); feature exceptions SPJC/KDFW tunnels,
+#    SPLP seams.
+# 3. Performance is a standing lens; refinements must SIMPLIFY and
+#    reduce steps; CYXY full build target UNDER 2 MINUTES.  Phase
+#    timings: read ~/.ortho4xp/auto_patch_build_times/*.json, do not
+#    rerun builds for timing.
+# 4. Zero-tolerance clarified (item-6 discussion): the ban is on
+#    NEAR-coincidence (mm-cm lenses, T-vertices, near-parallel).  A
+#    transversal interior crossing resolves to ONE exact Steiner
+#    vertex at bake time and does not explode; the crown mechanism
+#    relies on it.  Grazing-angle / near-endpoint crossings ARE the
+#    banned classes and the audit routes them there.
+#
+# ══════════════════════════════════════════════════════════════════
 # HANDOVER QUEUE (part 35 END, 20260710) — START HERE
 # ══════════════════════════════════════════════════════════════════
 # ★ COMMITTED as the part-35 + round-6 milestone (one integrated

@@ -37,8 +37,9 @@ from auto_patch.config import (
     CORRIDOR_SPINE_CHAINS)
 from auto_patch.layout import (
     ROLE_APRON, ROLE_BOUNDARY, ROLE_BRIDGE_CAUSEWAY, ROLE_BRIDGE_TRENCH,
-    ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
-    ROLE_PRIMARY_PARALLEL, ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
+    ROLE_CROSS_CONNECTOR, ROLE_GRADED_STRIP, ROLE_JUNCTION,
+    ROLE_PRIMARY_PARALLEL, ROLE_RUNWAY, ROLE_RUNWAY_CLEARANCE,
+    ROLE_RUNWAY_CROSSING,
     ROLE_SECONDARY_PARALLEL, ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION,
     ROLE_STUB, ROLE_BUILDING, taxi_shape_code_letter,
 )
@@ -81,6 +82,103 @@ PAVEMENT_ROLES = {
     ROLE_BRIDGE_TRENCH,
     ROLE_BRIDGE_CAUSEWAY,
 }
+
+
+# ── Terrain-role admission scaffolding (Slice B Stage B0) ─────────
+# docs/slice_b_solver_absorption_design.md.  The absorption moves the three
+# post-solve terrain emitters PRE-SOLVE so their ring vertices become
+# first-class solver variables the way the object-bridge plate roles above
+# already are: admitted to the canonical node registry and the solver node
+# list, then (later stages) given constraint builders.  This is the
+# ADMISSION scaffolding ONLY — the per-role constraint builders are stages
+# B1-B3 and do NOT exist yet.
+#
+# The three absorption families, each a (layout role, provenance ref) pair:
+#   * runway-end skirt  → (ROLE_RUNWAY_CLEARANCE, "runway_end_skirt")     [B1]
+#   * gap-fill spine     → (ROLE_GRADED_STRIP,     "gap_fill_spine")      [B2]
+#   * graded strip band  → (ROLE_GRADED_STRIP,     "adjacent_ground")     [B3]
+# ROLE-ONLY ADMISSION IS AMBIGUOUS (Slice B stage B3 order 1 correction):
+# gap-fill faces/spines and adjacent-ground bands BOTH carry ROLE_GRADED_STRIP,
+# yet they are different families with different admission paths (gap-fill via
+# the dedicated pre-solve spine store; adjacent-ground via ring vertices) and
+# different sub-gates.  Flipping ROLE_GRADED_STRIP admission wholesale would
+# grab both.  Admission therefore keys on the (role, ref) PAIR, not the role.
+TERRAIN_GRAPH_REFS = frozenset({
+    (ROLE_RUNWAY_CLEARANCE, "runway_end_skirt"),
+    (ROLE_GRADED_STRIP, "gap_fill_spine"),
+    (ROLE_GRADED_STRIP, "adjacent_ground"),
+})
+# Back-compat ROLE projection (call sites that legitimately want role
+# granularity — the _writeback skip, the skirt-pin gate).  Disjoint from
+# PAVEMENT_ROLES (asserted in tests) so admitting a family never double-counts
+# today's pavement.
+TERRAIN_GRAPH_ROLES = frozenset(role for role, _ref in TERRAIN_GRAPH_REFS)
+
+
+def admitted_terrain_refs():
+    """The set of ``(role, ref)`` TERRAIN GRAPH FAMILIES whose vertices are
+    admitted to the canonical node registry and the solver node list this
+    build (Slice B stage B0 scaffolding, refined to (role, ref) granularity at
+    stage B3 order 1).
+
+    Gated by ``config.ONE_SOLVE_TERRAIN`` (master, default OFF) and the three
+    per-family sub-gates.  Returns a possibly-empty ``frozenset`` of
+    ``(role, ref)`` pairs.  EMPTY whenever the master gate is off (the default)
+    OR every sub-gate is off — and admission of an empty family set is a
+    structural no-op, so the node list, the constraint graph and the solve are
+    byte-identical to today.  Config is read at CALL TIME (tests toggle the
+    gates via env + module reload / monkeypatch).
+
+    NOTE (B3 order 1): the ``ONE_SOLVE_TERRAIN_GRADED_STRIP`` sub-gate below is
+    the B0 ADMISSION gate for the adjacent-ground band family (B3 order 2,
+    still OFF); it is deliberately SEPARATE from
+    ``ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT`` (the order-1 pre-solve
+    footprint construction gate), which admits NOTHING here — construction
+    moves pre-solve while values stay analytic post-solve."""
+    from auto_patch import config as _cfg
+    if not getattr(_cfg, "ONE_SOLVE_TERRAIN", False):
+        return frozenset()
+    admitted: set = set()
+    if getattr(_cfg, "ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT", False):
+        admitted.add((ROLE_RUNWAY_CLEARANCE, "runway_end_skirt"))
+    if getattr(_cfg, "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", False):
+        admitted.add((ROLE_GRADED_STRIP, "gap_fill_spine"))
+    if getattr(_cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP", False):
+        # HARD DEPENDENCY CHAIN (Slice B stage B3 order 2, coordinator
+        # ruling): band variable admission builds on (a) the pre-solve
+        # footprint construction (the zone-node grid lives on the
+        # construct store), (b) the B1 pre-solve skirts (band footprints
+        # probe the skirt rings in the pre-solve static block), and
+        # (c) the B2 gap-spine admission (the interval-aware reach
+        # envelope and the writeback split are shared machinery, and the
+        # acceptance is only defined on the full stack).  A partial gate
+        # set is a misconfiguration that would silently measure the
+        # wrong thing — fail LOUDLY instead.
+        _missing = [name for name, on in (
+            ("O4_ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT",
+             getattr(_cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT",
+                     False)),
+            ("O4_ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT",
+             getattr(_cfg, "ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT", False)),
+            ("O4_ONE_SOLVE_TERRAIN_GAP_FILL_SPINE",
+             getattr(_cfg, "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", False)),
+        ) if not on]
+        if _missing:
+            raise RuntimeError(
+                "O4_ONE_SOLVE_TERRAIN_GRADED_STRIP=1 (adjacent-ground "
+                "band variable admission, Slice B stage B3 order 2) "
+                "requires ALL of its dependency gates ON; missing: "
+                + ", ".join(_missing))
+        admitted.add((ROLE_GRADED_STRIP, "adjacent_ground"))
+    return frozenset(admitted)
+
+
+def admitted_terrain_roles():
+    """Back-compat ROLE projection of ``admitted_terrain_refs`` — the set of
+    layout roles with at least one admitted ``(role, ref)`` family this build.
+    Used by call sites that gate at role granularity and then filter by ref
+    themselves (the skirt-pin block, the ``_writeback`` skip)."""
+    return frozenset(role for role, _ref in admitted_terrain_refs())
 
 
 # ── Priority cascade (user 2026-05-22) ───────────────────────────
@@ -1244,8 +1342,25 @@ def _build_node_list(layout):
     """
     bucket_to_idx: dict[tuple[float, float], int] = {}
     nodes: list[tuple[float, float]] = []
+    # TERRAIN-ROLE ADMISSION (Slice B Stage B0, docs/slice_b_solver_absorption_
+    # design.md): gate ON, the admitted terrain graph roles join the registry
+    # and node list exactly the way the object-bridge plate roles do (they are
+    # already in PAVEMENT_ROLES).  The admitted set is EMPTY by default (and
+    # whenever the master gate is off), so ``node_roles is PAVEMENT_ROLES`` and
+    # the iteration — and every node index it assigns — is byte-identical to
+    # today.  (Until stages B1-B3 move construction pre-solve these shapes are
+    # not even present in ``layout.shapes`` at solve time, so admitting the
+    # roles is doubly inert; the hook is the structural seam those stages fill.)
+    # Admission is (role, ref)-keyed (B3 order 1): a shape enters the node
+    # list if it is a pavement role (always, as today) OR its (role, ref)
+    # family is admitted this build.  With an empty admitted family set the
+    # iteration — and every node index it assigns — is byte-identical to
+    # today.  Terrain roles are disjoint from PAVEMENT_ROLES, so the two
+    # clauses never overlap.
+    _admitted_refs = admitted_terrain_refs()
     for s in layout.shapes:
-        if s.role not in PAVEMENT_ROLES:
+        if s.role not in PAVEMENT_ROLES and (
+                s.role, getattr(s, "ref", None)) not in _admitted_refs:
             continue
         if s.polygon is None or s.polygon.is_empty:
             continue
@@ -1258,7 +1373,241 @@ def _build_node_list(layout):
             if k not in bucket_to_idx:
                 bucket_to_idx[k] = len(nodes)
                 nodes.append((float(x), float(y)))
+    # GAP-FILL SPINE ADMISSION (Slice B Stage B2, ratified mechanism
+    # 2026-07-10; docs/slice_b_solver_absorption_design.md §B2): the
+    # drainage-spine vertices are INTERIOR points of the gap faces —
+    # they lie on no shape ring (the OPEN-WAY design floats them >= 2 m
+    # off every boundary), so the ring iteration above can never admit
+    # them.  When the gap sub-gate admits ROLE_GRADED_STRIP, the
+    # pre-solve construction store (``layout.gap_fill_presolve``, built
+    # by ``gap_fill.construct_gap_fill_presolve`` before the solve)
+    # supplies them here as FREE solver variables.  They intern through
+    # the same canonical registry (0.5 m) — spine stations sit
+    # ``GAP_FILL_SPINE_STEP_M`` (15 m) apart and >= 2 m off every ring,
+    # so no spine node can merge with another node's bucket.  Gate OFF
+    # (or no store) this loop body never runs — byte-inert.
+    if (ROLE_GRADED_STRIP, "gap_fill_spine") in _admitted_refs:
+        for _gap_entry in (getattr(layout, "gap_fill_presolve", None)
+                           or ()):
+            for x, y in _gap_entry.get("spine", ()):
+                k = layout.canonical_points.get_or_add(float(x), float(y))
+                if k not in bucket_to_idx:
+                    bucket_to_idx[k] = len(nodes)
+                    nodes.append((float(x), float(y)))
+    # ADJACENT-GROUND ZONE-ROW ADMISSION (Slice B stage B3 order 2):
+    # the band zone-row vertices (every band row at lateral distance
+    # > 0 from the pavement ring — the lip row, the graded-width row,
+    # the daylight row) become FREE solver variables.  Their geometry
+    # was marched pre-solve by ``adjacent_ground.construct_adjacent_
+    # ground_presolve`` (the order-1 construct store, schema-split at
+    # order 2 to carry the ``zone_nodes`` grid).  They intern through
+    # the same canonical registry (0.5 m).  The FIRST zone index is
+    # stashed on the layout so the constraint builder can classify a
+    # zone node whose bucket was already claimed by a PAVEMENT or
+    # gap-spine node (identity adoption — no band edge may constrain a
+    # pavement variable; pavement value always wins as an identity).
+    # Gate OFF (or no store): the loop body never runs — byte-inert.
+    layout._adjacent_ground_first_zone_index = len(nodes)
+    if (ROLE_GRADED_STRIP, "adjacent_ground") in _admitted_refs:
+        for _band_entry in (getattr(layout, "adjacent_ground_presolve",
+                                    None) or ()):
+            for _zone_node in _band_entry.get("zone_nodes", ()):
+                x, y = _zone_node["xy"]
+                k = layout.canonical_points.get_or_add(float(x), float(y))
+                if k not in bucket_to_idx:
+                    bucket_to_idx[k] = len(nodes)
+                    nodes.append((float(x), float(y)))
     return nodes, bucket_to_idx
+
+
+def _build_gap_spine_constraints(layout, bucket_to_idx, seed_elev=None):
+    """Stage B2 constraint entries for the gap-fill drainage spines
+    (ratified mechanism 2026-07-10; the LAW trace: today's analytic
+    spine values obey exactly two invariants — each station inside its
+    per-parent ``adjacent_ground_envelope`` interval, and longitudinal
+    smoothness — and this builder encodes the FIRST as solver interval
+    edges; the second is the ``TAXIWAY_MAX_GRADE_CHANGE_PER_M``
+    second-difference fairing pass in ``route_profile.solve``, the
+    project's own spine-curvature law, because ``ROLE_GRADE_LIMITS``
+    holds NO first-difference cap for ``graded_strip`` and a
+    second-difference cap is not expressible as a pairwise slab).
+
+    Per spine node, per frozen parent spec (``gap_fill._freeze_spine_
+    parent_specs``): ONE interval 4-tuple ``(spine_index,
+    station_index, floor_offset, ceiling_offset)`` — the B0 signed slab
+    ``floor_offset <= z_spine − z_station <= ceiling_offset`` with
+    ``None`` sides preserved (the law's own open-side semantics).  The
+    station index is the FROZEN-NEAREST pavement chain station mapped
+    through the canonical registry.
+
+    EMPTY-INTERSECTION RESOLUTION (measured 2026-07-10, first gate-ON
+    CYXY build): two parents whose envelopes cannot be jointly
+    satisfied give the POCS sweep an empty intersection — the two
+    projections ping-pong the spine node (and, through the shared
+    corrections, the stations' whole neighbourhoods) until the sweep's
+    visit budget caps out (27.9 M worklist visits vs 30 k gate-OFF;
+    Solving phase +23 s).  The analytic valuation had this exact case
+    and RESOLVED it — ``gap_fill._spine_interval``: on an empty
+    combined interval, the NEARER parent's interval alone applies.
+    ``seed_elev`` (the ``_seed_elevations`` output) encodes that same
+    law rule at build time: when a node's two parent intervals are
+    already disjoint at the SEED station elevations (stations are
+    pavement nodes that move little from seed), only the nearer
+    (first — specs are ordered nearest-first) parent's edge is kept.
+    ``seed_elev=None`` keeps every edge (unit tests).
+
+    Returns ``(sc_entries, spine_index_set, chains)``; ``chains`` feeds
+    the fairing pass (per chain: node indices, coordinates, and the
+    resolved per-node interval specs for the envelope clamp — the
+    fairing keeps its own LIVE nearer-parent fallback for conflicts
+    that only appear as stations move)."""
+    entries = getattr(layout, "gap_fill_presolve", None) or []
+    cps = layout.canonical_points
+    sc_out: list[dict] = []
+    spine_idx: set[int] = set()
+    chains: list[dict] = []
+    n_pruned = 0
+    for entry in entries:
+        idx = [bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+               for (x, y) in entry["spine"]]
+        edges: list[tuple] = []
+        node_specs: list[list[tuple]] = []
+        for i, specs in zip(idx, entry["specs"]):
+            resolved: list[tuple] = []
+            if i is not None:
+                spine_idx.add(i)
+                for (sx, sy), floor_off, ceil_off in specs:
+                    j = bucket_to_idx.get(
+                        cps.get_or_add(float(sx), float(sy)))
+                    if j is None or j == i:
+                        continue
+                    resolved.append((j, floor_off, ceil_off))
+                if (seed_elev is not None and len(resolved) == 2):
+                    # Seed-time joint feasibility of the two parent
+                    # slabs: floor = max over parents of (z_station +
+                    # floor_offset), ceiling = min of (z_station +
+                    # ceiling_offset); disjoint -> nearer parent wins
+                    # (the analytic law's own empty-intersection rule).
+                    lo_bound = None
+                    hi_bound = None
+                    for j, f_off, c_off in resolved:
+                        if j >= len(seed_elev):
+                            continue
+                        zj = seed_elev[j]
+                        if f_off is not None:
+                            b = zj + f_off
+                            lo_bound = b if lo_bound is None \
+                                else max(lo_bound, b)
+                        if c_off is not None:
+                            b = zj + c_off
+                            hi_bound = b if hi_bound is None \
+                                else min(hi_bound, b)
+                    if (lo_bound is not None and hi_bound is not None
+                            and lo_bound > hi_bound):
+                        resolved = resolved[:1]
+                        n_pruned += 1
+                edges.extend((i, j, f_off, c_off)
+                             for j, f_off, c_off in resolved)
+            node_specs.append(resolved)
+        node_list = [i for i in idx if i is not None]
+        if not node_list:
+            continue
+        sc_out.append({"nodes": node_list, "edges": edges, "flat": False,
+                       "flat_pairs": (), "area": 0.0,
+                       "role": ROLE_GRADED_STRIP,
+                       "ref": "gap_fill_spine"})
+        chains.append({"idx": idx, "xy": list(entry["spine"]),
+                       "specs": node_specs})
+    if n_pruned and _os.environ.get("O4_STEP_DEBUG") == "1":
+        print(f"    [gap-spine] empty-intersection resolution: "
+              f"{n_pruned} node(s) kept the nearer parent's interval "
+              f"only (the analytic law's own fallback rule)")
+    return sc_out, spine_idx, chains
+
+
+def _build_adjacent_ground_zone_constraints(layout, bucket_to_idx):
+    """Stage B3 order 2 constraint entries for the adjacent-ground band
+    zone rows (ratified mechanism 2026-07-11; the LAW trace — the order-2
+    scout refutation, recorded in the corrected design doc: the analytic
+    band valuation is a PER-VERTEX two-sided envelope clamp of the DEM
+    against the host-edge-referenced corridor,
+
+        value = clamp(dem, edge + floor_offset(d), edge + ceiling_offset(d)),
+
+    with NO neighbour coupling of any kind — ``config.ROLE_GRADE_LIMITS
+    ['graded_strip'] is None``, and the only frontage coupling in the
+    band machinery is the daylight benching of FOOTPRINT DEPTHS, which
+    stays construction-side.  The encoding is therefore exactly ONE
+    two-sided envelope interval edge per zone node to its frozen-nearest
+    host pavement ring vertex (the B2 frozen-nearest pattern) plus the
+    DEM seed ``_seed_elevations`` already provides: no transverse cross
+    edges, no longitudinal edges, no fairing.  Projection of the DEM
+    seed onto the signed slab IS the analytic clamp).
+
+    IDENTITY-COLLISION RULE: a zone node whose canonical bucket resolves
+    to a PRE-EXISTING solver node (a pavement ring vertex, a gap-spine
+    node — index below ``layout._adjacent_ground_first_zone_index``)
+    gets NO edge: the band ADOPTS that variable's value by identity
+    (pavement value always wins at a pavement node — an identity, not
+    an arbitration; a band law edge must never constrain a pavement
+    variable).  A zone node whose bucket was already claimed by an
+    EARLIER zone node (cross-row or cross-shape interning inside the
+    0.5 m registry tolerance) also gets no second edge — the first
+    claimant's corridor governs; attaching both could hand the POCS
+    sweep two disjoint slabs on one variable (the measured B2
+    empty-intersection ping-pong).  Both collision classes are counted
+    and reported (the design doc's open-question-2 assertion).
+
+    Returns ``(sc_entries, zone_idx_set, collision_counts)`` where
+    ``collision_counts`` is ``(n_pavement_adopted, n_cross_claimed)``."""
+    entries = getattr(layout, "adjacent_ground_presolve", None) or []
+    first_zone = getattr(layout, "_adjacent_ground_first_zone_index", 0)
+    cps = layout.canonical_points
+    sc_out: list[dict] = []
+    zone_idx: set[int] = set()
+    claimed: set[int] = set()
+    n_pavement_adopted = 0
+    n_cross_claimed = 0
+    for entry in entries:
+        edges: list[tuple] = []
+        node_list: list[int] = []
+        for zone_node in entry.get("zone_nodes", ()):
+            x, y = zone_node["xy"]
+            i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+            if i is None:
+                continue
+            node_list.append(i)
+            zone_idx.add(i)
+            if i < first_zone:
+                n_pavement_adopted += 1
+                continue
+            if i in claimed:
+                n_cross_claimed += 1
+                continue
+            claimed.add(i)
+            hx, hy = zone_node["host"]
+            j = bucket_to_idx.get(cps.get_or_add(float(hx), float(hy)))
+            if j is None or j == i:
+                continue
+            floor_off = zone_node["floor_off"]
+            ceil_off = zone_node["ceil_off"]
+            if floor_off is None and ceil_off is None:
+                continue
+            edges.append((i, j, floor_off, ceil_off))
+        if not node_list:
+            continue
+        sc_out.append({"nodes": node_list, "edges": edges, "flat": False,
+                       "flat_pairs": (), "area": 0.0,
+                       "role": ROLE_GRADED_STRIP,
+                       "ref": "adjacent_ground"})
+    if _os.environ.get("O4_STEP_DEBUG") == "1" and (
+            n_pavement_adopted or n_cross_claimed):
+        print(f"    [adjacent-ground-zone] identity collisions: "
+              f"{n_pavement_adopted} zone node(s) adopted a pre-existing "
+              f"pavement/spine variable (no band edge), "
+              f"{n_cross_claimed} interned with an earlier zone node "
+              f"(first claimant's corridor governs)")
+    return sc_out, zone_idx, (n_pavement_adopted, n_cross_claimed)
 
 
 
@@ -1808,6 +2157,62 @@ def _seed_elevations(layout, nodes, bucket_to_idx,
             layout._seam_pin_idx = (  # type: ignore[attr-defined]
                 set(existing_pin_idx) if existing_pin_idx else set()
             ) | bridge_pinned_idx
+
+    # ── Runway-end-skirt HARD PINS (Slice B stage B1, gated) ─────────
+    # docs/slice_b_solver_absorption_design.md §B1.  The runway-end skirt
+    # is the first terrain feature absorbed into the one-solve graph.  Its
+    # rings are built PRE-SOLVE (pipeline, before the solve call) and every
+    # ring vertex carries a birth-computed profile value in the shape's
+    # ``node_altitudes`` (the inverse-RESA law floor, derived from the
+    # already-hard runway profile).  Here each such vertex becomes a HARD
+    # PIN at that value — the object-bridge deck-pin pattern (above),
+    # mirrored: the pin SOURCE is the shape's own per-vertex
+    # ``node_altitudes`` (the skirt carries its values ON the shape, unlike
+    # the plates whose values live in ``_object_bridge_pin_values``), so no
+    # parallel bucket dict is minted — but the APPLICATION (elev / is_hard /
+    # have_initial + the seam-pin protection set) is identical.  The solver
+    # grades the neighbouring pavement to MEET these pins and never reshapes
+    # them; ``_writeback`` skips ROLE_RUNWAY_CLEARANCE, so the immutable
+    # ring keeps its birth values.  Runs after the bridge block so a skirt
+    # vertex coinciding with a deck pin yields to the deck (pavement/deck
+    # value wins), and after the seam block for the same reason.  GATED:
+    # the roles are admitted to the node list only under
+    # ``admitted_terrain_roles()`` (master + sub-gate), so with the gate off
+    # ``idx`` is never found for a skirt vertex and the block is a no-op —
+    # and until B1 moves construction pre-solve no skirt shape is even
+    # present at solve time, so the block is doubly inert off-gate.
+    _admitted_terrain = admitted_terrain_roles()
+    if ROLE_RUNWAY_CLEARANCE in _admitted_terrain:
+        _skirt_cps = layout.canonical_points
+        skirt_pinned_idx: set = set()
+        for s in layout.shapes:
+            if (s.role != ROLE_RUNWAY_CLEARANCE
+                    or getattr(s, "ref", None) != "runway_end_skirt"):
+                continue
+            if s.polygon is None or s.polygon.is_empty:
+                continue
+            na = s.node_altitudes
+            if not na:
+                continue
+            coords = _open_ring(list(s.polygon.exterior.coords))
+            if len(coords) < 3:
+                continue
+            for (x, y), alt in zip(coords, na):
+                if alt is None:
+                    continue
+                idx = bucket_to_idx.get(
+                    _skirt_cps.get_or_add(float(x), float(y)))
+                if idx is None:
+                    continue
+                elev[idx] = float(alt)
+                is_hard[idx] = True
+                have_initial[idx] = True
+                skirt_pinned_idx.add(idx)
+        if skirt_pinned_idx:
+            existing_pin_idx = getattr(layout, "_seam_pin_idx", None)
+            layout._seam_pin_idx = (  # type: ignore[attr-defined]
+                set(existing_pin_idx) if existing_pin_idx else set()
+            ) | skirt_pinned_idx
 
     # Warm-start soft nodes.
     for s in layout.shapes:

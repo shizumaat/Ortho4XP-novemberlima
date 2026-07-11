@@ -64,7 +64,21 @@ def _apply_runway_flex_hook(layout, icao, nodes, bucket_to_idx, elev,
         adjacency.setdefault(j, []).append((i, budget))
 
     for _sc in shape_constraints:
-        for (i, j, budget) in _sc.get("edges", ()):
+        for _edge in _sc.get("edges", ()):
+            # INTERVAL EDGES (Stage B0) are the terrain-role signed-slab form
+            # (i, j, interval_low, interval_high).  This runway-flex value
+            # envelope models symmetric full-budget reach only; a one-sided or
+            # asymmetric interval has no symmetric budget, so an interval edge
+            # contributes its widest symmetric surrogate (both sides finite) or
+            # is skipped (one side open).  With every terrain gate off none are
+            # produced and this branch is never taken.
+            if len(_edge) >= 4:
+                _i, _j, _lo, _hi = _edge[0], _edge[1], _edge[2], _edge[3]
+                if _lo is None or _hi is None:
+                    continue
+                _add_edge(_i, _j, max(abs(_lo), abs(_hi)))
+                continue
+            i, j, budget = _edge
             _add_edge(i, j, budget)
     for (a, b, cap, _sp) in G.edges:
         if a in G.pos and b in G.pos:
@@ -418,6 +432,63 @@ def solve_route_profile(layout, icao: str,
         layout, bucket_to_idx, ctx=_gg_ctx, dem=dem,
         tile_lat=tile_lat, tile_lon=tile_lon,
         hard_nodes=_hard_for_certificate)
+    # ── GAP-FILL SPINE constraints (Slice B stage B2, gated) ─────────
+    # docs/slice_b_solver_absorption_design.md §B2.  The pre-solve store
+    # ``layout.gap_fill_presolve`` exists ONLY under the B2 gate (the
+    # pipeline builds it before this solve); its spine vertices were
+    # admitted to the node list by ``_build_node_list`` and now get their
+    # envelope INTERVAL edges (the B0 signed-slab primitive) to their
+    # frozen-nearest pavement chain stations.  Gate OFF: no store, empty
+    # sets, byte-inert.  The longitudinal law is the second-difference
+    # fairing pass further down (``_fair_gap_spine_chains``).
+    _gap_spine_idx: set = set()
+    _gap_spine_chains: list = []
+    if getattr(layout, "gap_fill_presolve", None):
+        from auto_patch.elevation_per_surface.solver_primitives import (
+            _build_gap_spine_constraints)
+        _gap_scs, _gap_spine_idx, _gap_spine_chains = (
+            _build_gap_spine_constraints(layout, bucket_to_idx,
+                                         seed_elev=elev))
+        shape_constraints.extend(_gap_scs)
+        if _os.environ.get("O4_STEP_DEBUG") == "1":
+            _n_int_edges = sum(len(_sc["edges"]) for _sc in _gap_scs)
+            print(f"    [gap-spine] {len(_gap_scs)} chain(s), "
+                  f"{len(_gap_spine_idx)} free spine node(s), "
+                  f"{_n_int_edges} envelope interval edge(s)")
+    # ── ADJACENT-GROUND ZONE-ROW constraints (Slice B stage B3 order 2,
+    # gated) ──────────────────────────────────────────────────────────
+    # The band zone-row vertices admitted by ``_build_node_list`` (from
+    # the schema-split construct store ``layout.adjacent_ground_
+    # presolve``) get exactly ONE two-sided envelope interval edge each,
+    # to their frozen-nearest host pavement ring vertex — the analytic
+    # band law verbatim (per-vertex DEM clamp into the corridor; the law
+    # has NO neighbour coupling, so there are no transverse edges, no
+    # longitudinal edges and no fairing — the order-2 scout refutation,
+    # ratified 2026-07-11).  The construct store exists under the
+    # order-1 CONSTRUCT gate alone, so the ADMISSION sub-gate is checked
+    # explicitly (``admitted_terrain_refs`` also hard-errors on a
+    # partial dependency chain).  Admission gate OFF: no zone node was
+    # admitted, no constraint is built — byte-inert.
+    _zone_idx: set = set()
+    if getattr(layout, "adjacent_ground_presolve", None):
+        from auto_patch.elevation_per_surface.solver_primitives import (
+            ROLE_GRADED_STRIP as _RGS_zone, admitted_terrain_refs
+            as _admitted_refs_fn,
+            _build_adjacent_ground_zone_constraints)
+        if (_RGS_zone, "adjacent_ground") in _admitted_refs_fn():
+            _zone_scs, _zone_idx, _zone_collisions = (
+                _build_adjacent_ground_zone_constraints(
+                    layout, bucket_to_idx))
+            shape_constraints.extend(_zone_scs)
+            if _os.environ.get("O4_STEP_DEBUG") == "1":
+                _n_zone_edges = sum(len(_sc["edges"])
+                                    for _sc in _zone_scs)
+                print(f"    [adjacent-ground-zone] {len(_zone_scs)} "
+                      f"shape entr(ies), {len(_zone_idx)} zone "
+                      f"node(s), {_n_zone_edges} envelope interval "
+                      f"edge(s), collisions "
+                      f"pavement={_zone_collisions[0]} "
+                      f"cross={_zone_collisions[1]}")
     coupling = _build_level_coupling(shape_constraints)
 
     # ── THE ONE GRAPH (user 2026-06-27) ──────────────────────────────────────
@@ -863,6 +934,9 @@ def solve_route_profile(layout, icao: str,
                 _conflicted: set = set()
                 for _sc in joint:
                     for _e in _sc["edges"]:
+                        if len(_e) >= 4:
+                            continue      # interval edge (Stage B0): not a
+                            #               symmetric-budget mouth weld
                         _a, _b, _bud = _e[0], _e[1], _e[2]
                         if (_a >= n or _b >= n
                                 or (_a not in _gs_hard
@@ -913,6 +987,8 @@ def solve_route_profile(layout, icao: str,
                 _n_weld_pocket = 0
                 for _sc in joint:
                     for _e in _sc["edges"]:
+                        if len(_e) >= 4:
+                            continue      # interval edge (Stage B0)
                         _a, _b, _bud = _e[0], _e[1], _e[2]
                         if (_a >= n or _b >= n
                                 or _a not in _gs_hard
@@ -952,6 +1028,27 @@ def solve_route_profile(layout, icao: str,
                 _fairing_moved_keys = {
                     key for key, i in bucket_to_idx.items()
                     if elev[i] != _pre_fairing_elev[i]}
+        # ── GAP-SPINE longitudinal fairing (Slice B stage B2, ratified
+        # 2026-07-10) ─────────────────────────────────────────────────
+        # The projection above drove every spine node into its envelope
+        # interval (a feasible point, not a smooth one — POCS finds ANY
+        # point of the intersection).  The longitudinal law is the
+        # project's own spine-curvature law, TAXIWAY_MAX_GRADE_CHANGE_
+        # PER_M as a second-difference cap (the ``_fair_spine_chains``
+        # form), applied per gap-spine chain with every move clamped
+        # back into the node's envelope interval read at the CURRENT
+        # (settled) station elevations — so smoothing never exits the
+        # law the interval edges enforce.  Spine nodes belong to no
+        # shape ring, so this pass cannot perturb the scoped-projection
+        # proof or any pavement value.  Gate OFF: no chains, no-op.
+        if _gap_spine_chains:
+            from auto_patch.config import (
+                TAXIWAY_MAX_GRADE_CHANGE_PER_M as _K_GAP_SPINE)
+            _n_gap_kink = _fair_gap_spine_chains(
+                elev, _gap_spine_chains, _K_GAP_SPINE)
+            if _os.environ.get("O4_STEP_DEBUG") == "1":
+                print(f"    [gap-spine] fairing residual "
+                      f"kinks={_n_gap_kink}")
         _psub(0.97, "Solving elevations — writing back")
         # ── SPINE CROWN v2 (user 2026-07-07, part 30) ────────────────────
         # The whole solve above ran in UNCROWNED space z′.  The crown is a
@@ -985,6 +1082,15 @@ def solve_route_profile(layout, icao: str,
                     {i for i in building_seats if i < n}
                     | {i for i in _gs_hard if i < n}
                     | {i for i in _seam_pin_idx if i < n}
+                    # Gap-fill drainage-spine nodes (Slice B stage B2)
+                    # are frozen at crown drop 0 like every other spine
+                    # breakline node ("spine nodes never crown") — the
+                    # emitted open way must carry the solved profile,
+                    # not a crowned copy the face disagrees with.
+                    | {i for i in _gap_spine_idx if i < n}
+                    # Adjacent-ground zone-row nodes (Slice B stage B3
+                    # order 2) are TERRAIN, not pavement — no crown.
+                    | {i for i in _zone_idx if i < n}
                     | {i for i, _cat in _hard_cat.items()
                        if _cat in ("seam_spine_anchor", "seat_on_spine",
                                    "gs_pin")})
@@ -1008,6 +1114,149 @@ def solve_route_profile(layout, icao: str,
             _elev_emit = elev
         n_terms, n_rects, n_juncs = _writeback(layout, _elev_emit,
                                                bucket_to_idx)
+        # ── GAP-SPINE writeback (Slice B stage B2, ratified 2026-07-10)
+        # WHO WRITES WHAT: the solve writes ONLY the spine nodes — their
+        # solved values go into the pre-solve store, which the post-solve
+        # emitter reads in place of the retired analytic valuation.  The
+        # gap-face RING vertices are shared pavement registry nodes:
+        # their values are written by their OWN pavement shapes through
+        # ``_writeback`` above (pavement identity — one node, one value,
+        # never a second writer).  ``_elev_emit`` is used for
+        # consistency with the writeback; spine nodes are crown-frozen
+        # (c = 0), so it equals ``elev`` at every spine index.
+        if _gap_spine_idx:
+            _cps_gap = layout.canonical_points
+            for _gap_entry in (getattr(layout, "gap_fill_presolve", None)
+                               or ()):
+                _gap_vals: list = []
+                for _gx, _gy in _gap_entry["spine"]:
+                    _gi = bucket_to_idx.get(
+                        _cps_gap.get_or_add(float(_gx), float(_gy)))
+                    _gap_vals.append(
+                        float(_elev_emit[_gi])
+                        if _gi is not None and _gi < n else None)
+                _gap_entry["values"] = _gap_vals
+        # ── ADJACENT-GROUND ZONE-ROW writeback (Slice B stage B3 order 2)
+        # WHO WRITES WHAT (the B2 template, extended): the solve writes
+        # ONLY the zone-row nodes — their solved values go into the
+        # construct store (``entry["zone_values"]``, keyed by the
+        # millimetre vertex key), which the post-solve emitter reads in
+        # place of the retired analytic corridor-clamp resampler.  The
+        # band INNER (weld) row vertices are pavement ring vertices:
+        # their values are written by their OWN pavement shapes through
+        # ``_writeback`` above (pavement identity — one node, one value,
+        # never a second writer).  Two refinements, both documented in
+        # the order-2 report:
+        #   * FOOT RE-REFERENCE (law frame + crown frame): the corridor
+        #     law is defined RELATIVE TO THE PAVEMENT-EDGE ELEVATION at
+        #     the zone node's FOOT (``grade_law.adjacent_ground_
+        #     envelope``), and the emitted corridor is referenced to the
+        #     EMITTED (crowned) edge.  The solver's interval edge uses
+        #     the frozen-nearest host VERTEX (the B2 coupling pattern —
+        #     the approximation that keeps the slab pairwise); on long
+        #     steep edges the vertex value can sit metres off the local
+        #     foot lerp (measured 12 m at the CYXY trench wall), so the
+        #     writeback re-evaluates the one-slab projection (a zone
+        #     node has exactly ONE constraint and a DEM seed, so its
+        #     converged value IS ``clamp(dem_seed, reference +
+        #     offsets)``) against the FOOT edge value linear-referenced
+        #     along the shape's now-written (solved, crowned) ring —
+        #     identical law, exact reference frame, solved values only
+        #     (the pavement ring values were written by ``_writeback``
+        #     just above).  Host-vertex reference is the fallback when
+        #     the ring read fails.
+        #   * SNAP-TO-BOUND: the analytic path's triangle-diet snap
+        #     (values within ``_CORRIDOR_SNAP_TOL_M`` of a corridor
+        #     bound emit the bound) is applied here, where the corridor
+        #     reference is at hand — quantization of the solved value,
+        #     not a valuation.
+        if _zone_idx:
+            from shapely.geometry import Point as _ZonePoint
+            from auto_patch.emit_decimate import _key as _mm_key
+            from auto_patch.adjacent_ground import (
+                _CORRIDOR_SNAP_TOL_M as _ZONE_SNAP,
+                _ring_edge_reference as _zone_ring_reference,
+                _shape_ring_alts as _zone_shape_ring_alts)
+            _cps_zone = layout.canonical_points
+            _first_zone = getattr(
+                layout, "_adjacent_ground_first_zone_index", 0)
+            # Claim tracking replays the constraint builder's iteration
+            # order EXACTLY, so "owns its envelope edge" is decided the
+            # same way in both places.  IDENTITY RULE: a zone node that
+            # adopted a pre-existing pavement/spine variable, or that
+            # interned with an earlier zone node's variable, takes that
+            # variable's solved value VERBATIM (one node, one value —
+            # re-evaluating this entry's clamp there would mint a second
+            # value for the same variable).  Only an edge-owning node
+            # gets the foot re-reference + snap-to-bound evaluation.
+            _zone_claimed: set = set()
+            for _zone_entry in (getattr(layout,
+                                        "adjacent_ground_presolve", None)
+                                or ()):
+                _zone_vals: dict = {}
+                _zone_shape = _zone_entry.get("shape")
+                _foot_line = _foot_alt_at = None
+                if (_zone_shape is not None
+                        and _zone_shape.polygon is not None
+                        and not _zone_shape.polygon.is_empty
+                        and _zone_shape.polygon.geom_type == "Polygon"):
+                    try:
+                        _ring_coords = list(
+                            _zone_shape.polygon.exterior.coords)
+                        _foot_line, _foot_alt_at = _zone_ring_reference(
+                            _ring_coords,
+                            _zone_shape_ring_alts(_zone_shape,
+                                                  _ring_coords))
+                    except _GEOM_EXC:
+                        _foot_line = _foot_alt_at = None
+                for _zn in _zone_entry.get("zone_nodes", ()):
+                    _zx, _zy = _zn["xy"]
+                    _zi = bucket_to_idx.get(
+                        _cps_zone.get_or_add(float(_zx), float(_zy)))
+                    if _zi is None or _zi >= n:
+                        continue
+                    _zv = float(_elev_emit[_zi])
+                    _owns_edge = (_zi >= _first_zone
+                                  and _zi not in _zone_claimed)
+                    if _zi >= _first_zone:
+                        _zone_claimed.add(_zi)
+                    if _owns_edge:
+                        # Corridor reference: FOOT edge value (the law
+                        # frame), host vertex as fallback.
+                        _ref = None
+                        if _foot_line is not None:
+                            try:
+                                _ref = _foot_alt_at(_foot_line.project(
+                                    _ZonePoint(float(_zx), float(_zy))))
+                            except _GEOM_EXC:
+                                _ref = None
+                        if _ref is None:
+                            _hx, _hy = _zn["host"]
+                            _hi = bucket_to_idx.get(
+                                _cps_zone.get_or_add(float(_hx),
+                                                     float(_hy)))
+                            if _hi is not None and _hi < n:
+                                _ref = float(_elev_emit[_hi])
+                        if _ref is not None:
+                            _ref = float(_ref)
+                            _dem_z = (dem_elev[_zi]
+                                      if _zi < len(dem_elev) else None)
+                            if _dem_z is not None:
+                                _zv = float(_dem_z)
+                            _f_off = _zn["floor_off"]
+                            _c_off = _zn["ceil_off"]
+                            if _f_off is not None:
+                                _fl = _ref + float(_f_off)
+                                if _zv <= _fl + _ZONE_SNAP:
+                                    _zv = _fl
+                                _zv = max(_zv, _fl)
+                            if _c_off is not None:
+                                _ce = _ref + float(_c_off)
+                                if _zv >= _ce - _ZONE_SNAP:
+                                    _zv = _ce
+                                _zv = min(_zv, _ce)
+                    _zone_vals[_mm_key(float(_zx), float(_zy))] = _zv
+                _zone_entry["zone_values"] = _zone_vals
         # Spine breaklines from the SOLVED route profiles (z′ ON the spine
         # equals z — spine nodes never crown) + the crowned runway pieces.
         if _CROWN_ON:
@@ -1783,6 +2032,8 @@ def final_grade_projection(layout, icao: str = "", dem=None,
     if _terrain_like:
         for _sc in joint:
             for _e in _sc["edges"]:
+                if len(_e) >= 4:
+                    continue              # interval edge (Stage B0)
                 _a, _b, _bud = _e[0], _e[1], _e[2]
                 if (_a >= n or _b >= n
                         or (_a not in _terrain_like
@@ -2244,6 +2495,118 @@ def _fair_spine_chains(elev, spine_adj, anchors, node_band, nodes_xy,
             g2 = (elev[c[t + 1]] - elev[c[t]]) / l2
             if abs(g2 - g1) - k_rate * 0.5 * (l1 + l2) > 1e-4:
                 n_over += 1
+    return n_over
+
+
+def _fair_gap_spine_chains(elev, chains, k_rate, *, max_sweeps=200,
+                           tol=1e-4):
+    """GAP-SPINE longitudinal fairing (Slice B stage B2, ratified
+    2026-07-10): the ``_fair_spine_chains`` second-difference law —
+    ``|g2 − g1| ≤ k_rate·(L1 + L2)/2`` (``TAXIWAY_MAX_GRADE_CHANGE_
+    PER_M``, the taxiway vertical-curve K-factor analog) — applied to
+    each gap-fill drainage-spine chain, with every centre-vertex move
+    clamped INTO the node's envelope interval so smoothing never exits
+    the law the interval edges enforce.  The interval is read at the
+    CURRENT station elevations: ``[max over parents of (z_station +
+    floor_offset), min over parents of (z_station + ceiling_offset)]``,
+    ``None`` sides open; an EMPTY intersection falls back to the nearer
+    (first) parent's own interval — the same composition rule the
+    retired analytic valuation used (``gap_fill._spine_interval``).
+    Spine ENDPOINTS never move (no triple centres them), matching the
+    analytic smoother's pinned ends.
+
+    ``chains``: ``solver_primitives._build_gap_spine_constraints``
+    output — per chain the node indices (``None`` = unmapped, splits
+    the chain into runs), coordinates, and resolved per-node specs
+    ``[(station_index, floor_offset, ceiling_offset), ...]``.
+
+    Mutates ``elev``; returns the number of triples still over the
+    rate (honest residual — a tight envelope can force a kink)."""
+    import math
+    n_elev = len(elev)
+
+    def _interval_at(spec):
+        lo = None
+        hi = None
+        for (j, floor_off, ceil_off) in spec:
+            if j is None or j >= n_elev:
+                continue
+            zj = elev[j]
+            plo = None if floor_off is None else zj + floor_off
+            phi = None if ceil_off is None else zj + ceil_off
+            if plo is not None:
+                lo = plo if lo is None else max(lo, plo)
+            if phi is not None:
+                hi = phi if hi is None else min(hi, phi)
+        if lo is not None and hi is not None and lo > hi and spec:
+            j, floor_off, ceil_off = spec[0]
+            if j is not None and j < n_elev:
+                zj = elev[j]
+                lo = None if floor_off is None else zj + floor_off
+                hi = None if ceil_off is None else zj + ceil_off
+        return lo, hi
+
+    n_over = 0
+    for chain in chains:
+        idx = chain["idx"]
+        xy = chain["xy"]
+        specs = chain["specs"]
+        # Contiguous runs of mapped indices (an unmapped node splits
+        # the chain — smoothness across a missing variable is unknown).
+        runs: list[list[int]] = []
+        cur: list[int] = []
+        for pos, i in enumerate(idx):
+            if i is None or i >= n_elev:
+                if len(cur) >= 3:
+                    runs.append(cur)
+                cur = []
+            else:
+                cur.append(pos)
+        if len(cur) >= 3:
+            runs.append(cur)
+        for run in runs:
+            lens = [math.hypot(xy[run[k + 1]][0] - xy[run[k]][0],
+                               xy[run[k + 1]][1] - xy[run[k]][1])
+                    for k in range(len(run) - 1)]
+            for _sweep in range(max_sweeps):
+                worst_move = 0.0
+                for t in range(1, len(run) - 1):
+                    l1 = lens[t - 1]
+                    l2 = lens[t]
+                    if l1 < 0.5 or l2 < 0.5:
+                        continue
+                    a = idx[run[t - 1]]
+                    b = idx[run[t]]
+                    d = idx[run[t + 1]]
+                    g1 = (elev[b] - elev[a]) / l1
+                    g2 = (elev[d] - elev[b]) / l2
+                    dg = g2 - g1
+                    lim = k_rate * 0.5 * (l1 + l2)
+                    ex = abs(dg) - lim
+                    if ex <= 1e-6:
+                        continue
+                    delta = math.copysign(ex, dg) / (1.0 / l1 + 1.0 / l2)
+                    nb = elev[b] + delta
+                    lo, hi = _interval_at(specs[run[t]])
+                    if lo is not None:
+                        nb = max(nb, lo)
+                    if hi is not None:
+                        nb = min(nb, hi)
+                    moved = abs(nb - elev[b])
+                    if moved:
+                        elev[b] = nb
+                        if moved > worst_move:
+                            worst_move = moved
+                if worst_move < tol:
+                    break
+            for t in range(1, len(run) - 1):
+                l1, l2 = lens[t - 1], lens[t]
+                if l1 < 0.5 or l2 < 0.5:
+                    continue
+                g1 = (elev[idx[run[t]]] - elev[idx[run[t - 1]]]) / l1
+                g2 = (elev[idx[run[t + 1]]] - elev[idx[run[t]]]) / l2
+                if abs(g2 - g1) - k_rate * 0.5 * (l1 + l2) > 1e-4:
+                    n_over += 1
     return n_over
 
 

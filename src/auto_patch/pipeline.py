@@ -5403,6 +5403,145 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 f"(−{_n_fw2} shape(s), final pre-solve).")
             _covp(layout, "post-full-width-corridor-2")
 
+        # ── Runway-end-skirt PRE-SOLVE construction (Slice B stage B1,
+        # gate O4_ONE_SOLVE_TERRAIN + O4_ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT,
+        # both default OFF; docs/slice_b_solver_absorption_design.md §B1) ─
+        # The runway-end skirt is the FIRST terrain feature absorbed into
+        # the one-solve graph.  Its footprint + ring geometry are built
+        # HERE, before ``per_surface_solve``, so the ring vertices join the
+        # canonical node registry and the solver node list (the object-
+        # bridge plate admission pattern, wired in stage B0's
+        # ``_build_node_list`` hook) and every vertex becomes a HARD PIN at
+        # its birth-computed profile value (``_seed_elevations`` skirt-pin
+        # block).  The solver then grades neighbouring pavement to MEET the
+        # pins and never reshapes them, exactly as it treats the object-
+        # bridge deck pins.  Dependency (design §B1, verified at CYXY 2026-
+        # 07-10): skirt values derive from the RUNWAY profile, which is
+        # already redistributed to hard CIFP anchors far above (line ~4020)
+        # — the taxi/apron/junction rects still carry None altitudes here,
+        # so ``_nearest_pav_alt`` reads None off an unsolved neighbour and
+        # the ref falls back to the runway value; the footprint is geometry-
+        # only and identical to the legacy post-solve build (no CYXY skirt
+        # abuts a post-solve-emitted feature — ribbon / groundside / tunnel
+        # / bridge / clearance-cut — so the static-block clip against those
+        # is a no-op at this airport).  With the gate OFF this block does
+        # not run and the legacy post-solve emitter below fires unchanged.
+        from .config import (ONE_SOLVE_TERRAIN,
+                             ONE_SOLVE_TERRAIN_GAP_FILL_SPINE,
+                             ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT)
+        # GATE DEPENDENCY (Slice B stage B2, ratified 2026-07-10): the
+        # gap sub-gate REQUIRES the skirt sub-gate — gap parents include
+        # the runway-end skirts, which exist pre-solve only under B1.
+        # HARD ERROR, not force-ON (fail-loudly doctrine): silently
+        # widening the operator's gate scope would corrupt any A/B and
+        # hide intent; the only supported configuration is both ON.
+        if (ONE_SOLVE_TERRAIN and ONE_SOLVE_TERRAIN_GAP_FILL_SPINE
+                and not ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT):
+            raise ValueError(
+                "O4_ONE_SOLVE_TERRAIN_GAP_FILL_SPINE requires "
+                "O4_ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT: gap-fill "
+                "pre-solve construction reads the runway-end skirts as "
+                "gap parents, which exist pre-solve only under the "
+                "skirt sub-gate (Slice B stage B2 dependency; "
+                "docs/slice_b_solver_absorption_design.md).")
+        _skirt_presolve = (ONE_SOLVE_TERRAIN
+                           and ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT
+                           and USE_PER_SURFACE_SOLVER
+                           and layout.anchor is not None)
+        _gap_presolve = (ONE_SOLVE_TERRAIN
+                         and ONE_SOLVE_TERRAIN_GAP_FILL_SPINE
+                         and USE_PER_SURFACE_SOLVER
+                         and layout.anchor is not None)
+        if _skirt_presolve:
+            try:
+                from .clearance import emit_runway_end_skirts as \
+                    _emit_skirts_presolve
+                _n_sk_pre = _emit_skirts_presolve(
+                    layout, dem, tile_lat, tile_lon,
+                    source_runways=apt.runways)
+                if _n_sk_pre:
+                    UI.vprint(1,
+                        f"  [pav-builder] {icao}: PRE-SOLVE emitted "
+                        f"{_n_sk_pre} runway-end skirt polygon(s) "
+                        f"(one-solve terrain absorption, stage B1).")
+                    # Cross-tile skirts are sliced like every other shape;
+                    # airside pavement was already cut pre-solve, so only the
+                    # new skirt pieces are cut (no-op single-tile).
+                    from .geom_guard import _AIRSIDE_ROLES as _skpre_skip
+                    from .tile_cut import cut_layout_at_tile_boundaries as \
+                        _skpre_tile_cut
+                    _skpre_tile_cut(
+                        layout,
+                        current_tile_lat=current_tile_lat,
+                        current_tile_lon=current_tile_lon,
+                        dem=dem,
+                        skip_roles=_skpre_skip,
+                    )
+            except _GEOM_EXC as _skpre_exc:
+                UI.vprint(1, f"  [pav-builder] {icao}: pre-solve runway-end "
+                             f"skirt emission FAILED: {_skpre_exc!r}")
+
+        # ── Gap-fill spine PRE-SOLVE construction (Slice B stage B2,
+        # gate O4_ONE_SOLVE_TERRAIN + O4_ONE_SOLVE_TERRAIN_GAP_FILL_
+        # SPINE, both default OFF; ratified mechanism 2026-07-10,
+        # docs/slice_b_solver_absorption_design.md §B2) ────────────────
+        # The gap-fill drainage spines are the FIRST FREE terrain
+        # variables in the one-solve graph.  Their GEOMETRY is built
+        # here — after the pre-solve skirts (gap parents) and before
+        # ``per_surface_solve`` — and staged on
+        # ``layout.gap_fill_presolve``; the solver admits every spine
+        # vertex (``_build_node_list``), constrains it with envelope
+        # INTERVAL edges to its frozen-nearest pavement stations plus a
+        # second-difference fairing, and writes the solved values back
+        # into the store.  Face EMISSION stays at the post-solve slot
+        # (blocker subjects only exist there); the emitter swaps its
+        # retired analytic valuation for the store's solved values.
+        # A construction failure degrades loudly to the analytic path
+        # (the emitter warns per unmatched gap).
+        if _gap_presolve:
+            try:
+                from .gap_fill import construct_gap_fill_presolve
+                construct_gap_fill_presolve(layout)
+            except _GEOM_EXC as _gappre_exc:
+                UI.vprint(1, f"  [pav-builder] {icao}: pre-solve gap-fill "
+                             f"spine construction FAILED: {_gappre_exc!r}")
+
+        # ── Adjacent-ground band PRE-SOLVE construction (Slice B stage B3
+        # ORDER 1, gate O4_ONE_SOLVE_TERRAIN +
+        # O4_ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT, both default OFF;
+        # docs/slice_b_solver_absorption_design.md §B3) ──────────────────
+        # The band FOOTPRINT march moves here — before ``per_surface_solve``,
+        # after the pre-solve skirts (their rings enter the terrain-facing
+        # probe union) — from a DEM-seeded pavement-edge estimate, and the
+        # raw band rings are staged on ``layout.adjacent_ground_presolve``.
+        # The post-solve emitter CONSUMES those frozen footprints instead of
+        # re-marching, but still clips them against the (post-solve) static
+        # block and VALUES every vertex off the solved altitudes — so this is
+        # a construction move only (values stay analytic; gate-ON is
+        # value-equivalent to gate-OFF up to the enumerated seed/late-feature
+        # footprint deltas).  It admits NO band vertex to the solver (that is
+        # order 2 under the separate admission gate).  Requires the
+        # adjacent-ground law itself (the emitter runs only under it).
+        from .config import (
+            ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT,
+            ADJACENT_GROUND_LAW_ENABLED as _AGL_ENABLED)
+        _band_construct = (ONE_SOLVE_TERRAIN
+                           and ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT
+                           and _AGL_ENABLED
+                           and USE_PER_SURFACE_SOLVER
+                           and layout.anchor is not None)
+        if _band_construct:
+            try:
+                from .adjacent_ground import \
+                    construct_adjacent_ground_presolve
+                construct_adjacent_ground_presolve(
+                    layout, dem, tile_lat, tile_lon,
+                    source_runways=apt.runways)
+            except _GEOM_EXC as _agpre_exc:
+                UI.vprint(1, f"  [pav-builder] {icao}: pre-solve "
+                             f"adjacent-ground band construction FAILED: "
+                             f"{_agpre_exc!r}")
+
         if USE_PER_SURFACE_SOLVER and layout.anchor is not None:
             # Runway CIFP thresholds are LOCKED — the solver never moves them.
             # The old runway-threshold-relief passes (step 3
@@ -5949,10 +6088,25 @@ def build_airport_pavement(icao: str, xplane_root: str,
         try:
             from .clearance import emit_runway_end_skirts
             _progress.substep(0.92, "Emitting runway-end skirts")
-            n_sk = emit_runway_end_skirts(
+            # Stage B1: when the one-solve terrain gate built the skirts
+            # PRE-SOLVE (above, as pinned solver-graph members), the legacy
+            # post-solve emitter must NOT run again — the shapes already
+            # exist.  The bridge↔skirt reconciliation below still runs so
+            # boundary→DEM bridges are trimmed to the (now pre-solve) skirt
+            # footprint regardless of which path emitted them.
+            n_sk = 0 if _skirt_presolve else emit_runway_end_skirts(
                 layout, _projection_dem,
                 _projection_tile_lat, _projection_tile_lon,
                 source_runways=apt.runways)
+            if _skirt_presolve:
+                # Reconcile pre-solve skirts with the post-solve boundary
+                # bridges (no-op where none overlap, e.g. CYXY).
+                try:
+                    from .boundary import \
+                        _reconcile_boundary_bridges_with_skirts as _rbbs_pre
+                    _rbbs_pre(layout)
+                except _GEOM_EXC:
+                    pass
             if n_sk:
                 UI.vprint(1,
                     f"  [pav-builder] {icao}: emitted {n_sk} "
