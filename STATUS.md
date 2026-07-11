@@ -193,11 +193,24 @@
 #    stands, per the invalid-DEM ruling).  Scout also checks
 #    (a) whether the node's frozen two-parent selection MISSED the
 #    nearest pavement (a bug on top of the structural gap), and
-#    (b) the B4 SEQUENCING claim: legacy clearance pieces currently
-#    hold band-law terrain INSIDE enclosed gaps as gap blockers, so
-#    THE RING MUST LAND BEFORE B4 legacy deletion or the hole gets
-#    exposed at every site clearance was propping up.  B4 IS HELD
-#    until the ring design is ratified and landed.
+#    (b) the B4 sequencing claim.  SCOUT RESULTS (2026-07-11):
+#    parent selection NOT a bug (the 15 m pavement IS a frozen
+#    parent; its band ends at 12.5 m; open floor lawful) — purely
+#    the structural triangulation defect Noah diagnosed (73% at the
+#    evidence site; 185% at gap #3; 7 of 8 big gaps flagged).  B4
+#    SEQUENCING REFUTED (19th overturn): legacy clearance is
+#    CUT-ONLY — no floor, emitted nothing in dipping gaps — the
+#    ring is orthogonal to B4; B4 unblocked from the ring (held
+#    only on the KBNA perf fix as flip hygiene).
+#    ★NOAH RATIFIED (2026-07-11): TWO-RING design IMPLEMENT,
+#    FLEET-WIDE violation-gated behind a default-OFF sub-gate —
+#    breaklines not polygon splits · lip ring 3 m + band-edge ring
+#    at parent width (TRUE runway code carried from axes, not
+#    cut-segment chord) · values floor-pinned (exterior fill-to-
+#    floor parity) · benched taper continuity (daylight law) ·
+#    spine re-couples to ring 2 ceiling · 4-rung narrow-gap
+#    collapse ladder · ~826 nodes at CYXY.  Implementation resumed
+#    on the scout agent.
 #    ★RING COUNT (Noah, same discussion): TWO rings, matching the
 #    law's zone breakpoints exactly as exterior bands split — ring 1
 #    at the lip edge (zone 1→2), ring 2 at the band edge (zone
