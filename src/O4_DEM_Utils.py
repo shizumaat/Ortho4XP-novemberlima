@@ -104,15 +104,21 @@ class DEM:
         )
 
     def load_data(self, source, info_only=False):
+        if ";" in source:
+            source, local_sources = source.split(";")[0], source.split(";")[1:]
+        else:
+            local_sources = None
+        # The default-base resolution runs AFTER the composite split so an
+        # empty BASE TOKEN (";inset1;...", which the airport-inset
+        # augmentation produces whenever custom_dem is unset) resolves the
+        # default exactly like an empty source does.  Before this reorder
+        # an empty first token fell through to read_elevation_from_file("")
+        # and silently produced an all-zero base raster.
         if not source:
             if os.path.exists(FNAMES.generic_tif(self.lat, self.lon)):
                 source = FNAMES.generic_tif(self.lat, self.lon)
             else:
                 source = resolve_default_base_source(self.lat, self.lon)
-        if ";" in source:
-            source, local_sources = source.split(";")[0], source.split(";")[1:]
-        else:
-            local_sources = None
         if source in available_sources[1::2]:
             short_source = available_sources[
                 available_sources.index(source) - 1

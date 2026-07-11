@@ -532,3 +532,40 @@ def test_coverage_threshold_behaviour(tmp_path, monkeypatch):
     )
     assert coverage == pytest.approx(0.9, abs=0.02)
     assert radius == 1
+
+
+# =====================================================================
+# Regression: empty base token in a composite resolves the default base
+# (caught by the KBNA acceptance run: custom_dem="" plus inset
+# augmentation produced ";inset1;..." whose empty first token fell
+# through to read_elevation_from_file("") and an ALL-ZERO base raster).
+# =====================================================================
+@requires_gdal
+def test_composite_with_empty_base_token_resolves_default_base(
+    tmp_path, monkeypatch
+):
+    import O4_DEM_Utils as DEM
+
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    # The default base resolves to a synthetic 42 m raster.
+    base_path = str(tmp_path / "base.tif")
+    _write_constant_geotiff(
+        base_path, 0.0, 0.0, 1.0, 1.0, 42.0, columns=60, rows=60
+    )
+    monkeypatch.setattr(
+        DEM, "resolve_default_base_source", lambda lat, lon: base_path
+    )
+    # One cached inset at 100 m.
+    inset_path = str(tmp_path / "inset.tif")
+    _write_constant_geotiff(
+        inset_path, 0.4, 0.4, 0.6, 0.6, 100.0, columns=40, rows=40
+    )
+
+    # The composite the step hooks assemble when custom_dem is "".
+    dem = DEM.DEM(0, 0, ";" + inset_path, fill_nodata=False)
+    # The BASE grid must be the resolved default, not zeros.
+    assert dem.alt_dem.max() == pytest.approx(42.0)
+    assert dem.alt_dem.min() == pytest.approx(42.0)
+    # And the composite query path overlays the inset.
+    assert dem.alt((0.5, 0.5)) == pytest.approx(100.0, abs=0.5)
+    assert dem.alt((0.1, 0.1)) == pytest.approx(42.0, abs=0.5)
