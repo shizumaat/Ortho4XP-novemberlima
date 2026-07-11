@@ -149,15 +149,28 @@
 #    are VIOLATION-driven and the solved taxiway end sits
 #    in-corridor (nothing to wrap); (b) nearest skirt = 90.7 m,
 #    outside probe range — no taxiway-end-onto-skirt subject at the
-#    site geometry.  Criterion 4 needs either an UNCONDITIONAL-
-#    coverage wrap form (coverage runs the whole taxiway regardless
-#    of violation) or a site re-examination in-sim.  Round-7 list:
-#    this + the -12 m law-true dip at 60.71804,-135.07291 + the
-#    three big-gap spine sites + the solved-value class.
-# 3. NOAH IN-SIM ROUND 7 before any default flips: the 3 big-gap
-#    spine sites (60.7210897,-135.0776149 first) + the B1/B2 gate-ON
-#    tile · then B4 charter + legacy deletion · B5 projection
-#    retirement.
+#    site geometry.  ★NOAH RULED (2026-07-11): RE-EXAMINE IN-SIM
+#    FIRST — criterion 4 folds into round 7 (look at the site and
+#    any taxiway end near a skirt with the B3 gates ON; decide
+#    whether current output already reads correctly or where the
+#    wrap form is actually wanted); NO wrap code until then; the
+#    built machinery stays gated off as a guard.
+# 3. NOAH IN-SIM ROUND 7 — gates everything downstream (B4 charter +
+#    legacy deletion, then B5 projection retirement).  BAKE CONFIG:
+#    all five one-solve terrain gates ON (O4_ONE_SOLVE_TERRAIN +
+#    RUNWAY_END_SKIRT + GAP_FILL_SPINE + GRADED_STRIP_CONSTRUCT +
+#    GRADED_STRIP) + O4_ADJACENT_GROUND_END_WRAP=1 (so the wrap can
+#    be judged) + O4_AUTO_PATCH_REBUILD=1.  THE LIST, in order:
+#    a. the three big-gap spine sites (60.7210897,-135.0776149
+#       first) — solved spines follow DEM where the floor is open
+#       (worst 23.5 m off the old analytic fill);
+#    b. the -12 m law-true dip at 60.71804,-135.07291 (analytic had
+#       flattened genuine terrain);
+#    c. the wrap question at 60.6972471,-135.0608669 (criterion 4);
+#    d. the ~1,231-vertex band solved-value class (spot-check
+#       terminal-area strips);
+#    e. the round-4/round-6 heal sites still standing (dips, hole
+#       27, hangar area, skirt faces).
 #
 # ★ TRUE CURRENT BASELINES (CYXY, this tree — the part-35 numbers
 # below predate the O4_OBJECT_BRIDGE_TERRAIN landing and are STALE):
