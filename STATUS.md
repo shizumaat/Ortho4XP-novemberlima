@@ -198,6 +198,20 @@
 #    THE RING MUST LAND BEFORE B4 legacy deletion or the hole gets
 #    exposed at every site clearance was propping up.  B4 IS HELD
 #    until the ring design is ratified and landed.
+#    ★RING COUNT (Noah, same discussion): TWO rings, matching the
+#    law's zone breakpoints exactly as exterior bands split — ring 1
+#    at the lip edge (zone 1→2), ring 2 at the band edge (zone
+#    2→open); annulus rows mirror the exterior band cross-section.
+#    ★★ KBNA PERF REGRESSION (2026-07-11, BLOCKING, fix order
+#    dispatched): round-7 defaults ON regress KBNA ~8 min → 24+ CPU-
+#    minutes UNFINISHED (first big-airport run — the design's B3
+#    scale checkpoint firing).  Stack sample: hot loop =
+#    GEOSPreparedContainsXY under numpy ufunc (885/2837 samples);
+#    SUSPECT = the e1ff071 worst-case coverage march (UNPROVEN at
+#    Python-frame level — diagnosis via coverage-replay snapshot +
+#    cProfile, not 20-min build loops).  INTERIM for any big-airport
+#    session: O4_ONE_SOLVE_TERRAIN=0 (whole bundle off, proven
+#    byte-identical) until the fix lands.
 #
 # ★ TRUE CURRENT BASELINES (CYXY, this tree — the part-35 numbers
 # below predate the O4_OBJECT_BRIDGE_TERRAIN landing and are STALE):
