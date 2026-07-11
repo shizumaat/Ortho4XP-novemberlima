@@ -923,6 +923,31 @@ def build_airport_array(tile, dico_airports):
 
 ################################################################################
 def smooth_raster_over_airports(tile, dico_airports, preserve_boundary=True):
+    """Blur the working raster over each airport, THEN bake elevation insets.
+
+    ORDER CONTRACT (spec section 7 / item O1 -- verified 2026-07-11):
+
+    1. The airport smoother runs FIRST (the per-airport blur loop below and
+       the ``preserve_boundary`` edge feather).  Its whole job is to hide
+       the pixel staircase of the coarse base source.
+
+    2. ``INSETS.bake_airport_insets_into_alt_dem`` runs LAST, immediately
+       before ``write_to_file`` (and, on the ``max_pix`` early-return path,
+       likewise before the write).  Lidar insets are therefore stamped into
+       ``tile.dem.alt_dem`` AFTER all blurring, so the high-resolution
+       surface is never smeared by the smoother -- exactly the defect the
+       inset feature exists to fix.
+
+    3. The AUTOMATIC per-airport radius (``resolve_airport_smoothing_radius``)
+       is decided from the cached insets' raster EXTENTS and pixel sizes on
+       disk (``inset_coverage_of_airport_mask`` -> ``gdal.Open`` geotransform),
+       NEVER from the pre-bake raster values.  So step 1 does not depend on
+       the bake in step 2, and there is no read-before-write ordering hazard
+       between the radius decision and the values it would blur.
+
+    A synthetic-inset value dropped inside an inset footprint must survive
+    this call unblurred (regression: ``tests/test_object_elevation_ordering``).
+    """
     max_pix = tile.apt_smoothing_pix
     for airport in dico_airports:
         if "smoothing_pix" in dico_airports[airport]:

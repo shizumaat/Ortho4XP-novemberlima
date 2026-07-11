@@ -20,10 +20,17 @@ be matched to a row and its cause:
                   supporter's offset; a wrong supporter shows here
 * ``skipped``   — never baked (multi-placement, animation, arithmetic)
 
+The ``--mesh`` you pass MUST be the SAME built ``Data<tile>.mesh`` the
+production pipeline seats objects against — i.e. one built from the
+inset-corrected ``.alt`` (airport elevation insets baked in).  This tool
+samples ONLY that mesh (``MeshElevationSampler``); it never re-samples a
+raw DEM/.hgt.  Point it at a mesh built WITHOUT insets and the residuals
+it reports will not match what production produces.
+
 Usage:
     venv/bin/python tools/object_seating_report.py \
-        --dsf <pack DSF> --mesh <Data<tile>.mesh> --pack-root <pack> \
-        [--threshold 0.5] [--limit 40]
+        --dsf <pack DSF> --mesh <inset-built Data<tile>.mesh> \
+        --pack-root <pack> [--threshold 0.5] [--limit 40]
 """
 import argparse
 import math
@@ -42,7 +49,11 @@ METRES_PER_DEGREE_LATITUDE = 111320.0
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dsf", required=True)
-    parser.add_argument("--mesh", required=True)
+    parser.add_argument(
+        "--mesh", required=True,
+        help="built Data<tile>.mesh to seat against — MUST be built from "
+             "the inset-corrected .alt so the report matches production; "
+             "this tool samples only this mesh, never a raw DEM")
     parser.add_argument("--pack-root", required=True)
     parser.add_argument("--xplane-root", default=None)
     parser.add_argument("--threshold", type=float, default=0.5,

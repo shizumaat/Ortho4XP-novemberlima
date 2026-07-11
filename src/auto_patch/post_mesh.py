@@ -85,6 +85,48 @@ def object_anchor_worklist_path(tile) -> str:
     )
 
 
+def _mesh_is_newer_than_alt(tile, mesh_path: str) -> bool:
+    """O3 ordering guard: is the built mesh at least as new as the tile's
+    ``.alt`` elevation raster?
+
+    The mesh is derived from the ``.alt`` written in step 1 (with airport
+    elevation insets baked in).  Returns ``True`` when the mesh is newer
+    than (or equal to) the newest ``.alt`` for this tile, so the object
+    y-bake is sampling the current elevation state.  Returns ``False`` only
+    when an ``.alt`` exists and is STRICTLY newer than the mesh (stale mesh
+    -- the caller must not sample it).  When no ``.alt`` is found on disk
+    (already cleaned up, or a standalone probe), returns ``True`` -- there
+    is nothing to be stale against and the mesh is authoritative.
+    """
+    import glob
+
+    import O4_File_Names as FNAMES
+
+    try:
+        mesh_mtime = os.path.getmtime(mesh_path)
+    except OSError:
+        return True
+    # All .alt variants for this tile (plain ``Data<tile>.alt`` plus any
+    # ``Data<tile>.<iterate>.alt`` from the densify path).
+    tile_stub = os.path.join(
+        tile.build_dir, "Data" + FNAMES.short_latlon(tile.lat, tile.lon)
+    )
+    alt_candidates = [tile_stub + ".alt"] + glob.glob(tile_stub + ".*.alt")
+    newest_alt_mtime = None
+    for alt_path in alt_candidates:
+        try:
+            alt_mtime = os.path.getmtime(alt_path)
+        except OSError:
+            continue
+        if newest_alt_mtime is None or alt_mtime > newest_alt_mtime:
+            newest_alt_mtime = alt_mtime
+    if newest_alt_mtime is None:
+        return True
+    # A one-second slack absorbs filesystem mtime granularity (some FSes
+    # store whole seconds); only a genuinely older mesh trips the guard.
+    return mesh_mtime >= newest_alt_mtime - 1.0
+
+
 def _is_protected_scenery_root(pack_root: str) -> bool:
     """True when ``pack_root`` lies inside the base simulator — any path
     with a ``Global Scenery`` or ``Resources`` component (amendment A15).
@@ -438,6 +480,25 @@ def rebake_dsf_objects(tile) -> dict:
                 1,
                 f"  [object-anchor] mesh not found at {mesh_path}; "
                 "DSF object re-anchor skipped",
+            )
+            return counts
+
+        # O3 ordering guard (spec section 7): the Phase 2 y-bake samples the
+        # BUILT mesh, which is derived from the ``.alt`` raster written in
+        # step 1 (with the airport elevation insets baked in).  If the mesh
+        # on disk is OLDER than the newest ``.alt`` for this tile, the mesh
+        # predates the current elevation state and sampling it would seat
+        # every object against a stale surface -- silently, and wrongly.
+        # Fail LOUD and skip rather than bake against a stale mesh.
+        if not _mesh_is_newer_than_alt(tile, mesh_path):
+            UI.vprint(
+                0,
+                "  [object-anchor] STALE MESH: "
+                f"{os.path.basename(mesh_path)} is older than the tile's "
+                ".alt (elevation raster) -- the mesh predates the current "
+                "insets/grading.  DSF object re-anchor SKIPPED to avoid "
+                "seating objects against a stale surface; rebuild the mesh "
+                "(step 2) after the .alt (step 1) and re-run.",
             )
             return counts
 
