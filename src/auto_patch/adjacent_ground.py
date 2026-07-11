@@ -934,6 +934,301 @@ def _nearest_alt(points, alts, x, y):
     return best_a
 
 
+def _band_family_closures(family, code_number, code_letter, width):
+    """The three family-parameterized corridor closures the march + value
+    passes share (``ceil_off``/``envelope_at`` unbounded on ``d``,
+    ``floor_depth`` clamped to the graded width so the fill floor stays
+    finite — see the inline docstrings the emitter carried).  Single-sourced
+    so the pre-solve construction and the post-solve emitter read the corridor
+    identically."""
+    def ceil_off(d):
+        return adjacent_ground_envelope(family, code_number, code_letter, d)[1]
+
+    def envelope_at(d):
+        return adjacent_ground_envelope(family, code_number, code_letter, d)
+
+    def floor_depth(d):
+        f = adjacent_ground_envelope(
+            family, code_number, code_letter, min(d, width))[0]
+        return None if f is None else -f
+
+    return ceil_off, envelope_at, floor_depth
+
+
+def _shape_ring_alts(s, coords, sample_dem=None, seed=False):
+    """Per-CLOSED-ring node altitudes aligned with ``coords`` (the
+    ``node_altitudes`` contract), else the shape's plane sampler.
+
+    ``seed=True`` (pre-solve construction): entries the shape does not yet
+    carry — the taxi/apron/junction rings are unsolved before
+    ``per_surface_solve`` — are filled from the smoothed DEM
+    (``sample_dem``) rather than left ``None``, so the pre-solve MARCH scans
+    the corridor off the DEM-seeded pavement-edge estimate (the design's
+    directive; runway rings are already CIFP-solved and keep their real
+    values).  ``seed=False`` reproduces the emitter's exact solved-value
+    read (byte-identical gate-OFF)."""
+    na = s.node_altitudes
+    if na:
+        nm = min(len(na), len(coords))
+        ring_alts = [None if na[i] is None else float(na[i])
+                     for i in range(nm)]
+        ring_alts += [None] * (len(coords) - nm)
+    elif s.altitude is not None:
+        ring_alts = [float(s.altitude)] * len(coords)
+    else:
+        ring_alts = [_sample_runway_segment_elev(s, x, y)
+                     for x, y in coords]
+    if seed and sample_dem is not None:
+        for i, (x, y) in enumerate(coords):
+            if ring_alts[i] is None:
+                dd = sample_dem(x, y)
+                if dd is not None:
+                    ring_alts[i] = float(dd)
+    return ring_alts
+
+
+def _derive_shape_stations_and_bands(coords, ccw, ring_alts, axis, width,
+                                     reach, trigger, floor_depth, ceil_off,
+                                     step, prep_static, seam_keys,
+                                     sample_dem):
+    """Frontage detection + corridor MARCH for one airside shape — the band
+    FOOTPRINT geometry (everything that decides WHERE the bands are, given the
+    edge-altitude references ``ring_alts``).  Returns
+    ``(fill_bands, cut_bands, stations, st_alts, outs)``; the two band lists
+    are the raw ``(ring_open, alts_open)`` pairs the emitter later clips and
+    values.  Extracted verbatim from the emitter's per-shape setup so the
+    pre-solve constructor and the post-solve emitter march identically (the
+    B2 shared-helper pattern — parity single-sourced, not duplicated)."""
+    def _station_reference(sx, sy, out, alt_value):
+        # The station's edge altitude, or None when it is skipped — the
+        # END-edge rule (skirt territory) + the terrain-facing probe,
+        # applied per station exactly as the validator does.
+        if alt_value is None:
+            return None
+        if (axis is not None
+                and abs(out[0] * axis[0] + out[1] * axis[1])
+                > _RING_END_NORMAL_DOT):
+            return None
+        if prep_static.contains(Point(sx + out[0] * _RING_PROBE_M,
+                                      sy + out[1] * _RING_PROBE_M)):
+            return None
+        return alt_value
+
+    stations, st_alts, outs = [], [], []
+    is_ring_vertex: list[bool] = []
+    at_seam: list[bool] = []
+    previous_out = None
+    for i in range(len(coords) - 1):
+        eax, eay = coords[i]
+        ebx, eby = coords[i + 1]
+        u = _unit(ebx - eax, eby - eay)
+        if u is None:
+            continue
+        out = (u[1], -u[0]) if ccw else (-u[1], u[0])
+        a0 = ring_alts[i]
+        a1 = ring_alts[i + 1]
+        # CORNER FAN (coverage): at a CONVEX ring corner insert stations AT
+        # the corner with normals interpolated across the turn so the band
+        # outer row follows the fan arc piecewise (see the emitter's inline
+        # docstring for the sagitta rationale).
+        if previous_out is not None:
+            cross = previous_out[0] * out[1] - previous_out[1] * out[0]
+            convex = (cross > 1e-9) if ccw else (cross < -1e-9)
+            # NO fan across a SKIPPED flank (runway END edge / covered
+            # probe): interpolated fan rays would sweep into skipped
+            # territory as blade spikes.
+            if convex and (
+                    _station_reference(eax, eay, previous_out,
+                                       a0) is None
+                    or _station_reference(eax, eay, out,
+                                          a0) is None):
+                convex = False
+            if convex:
+                angle_previous = math.atan2(previous_out[1],
+                                            previous_out[0])
+                delta = math.atan2(out[1], out[0]) - angle_previous
+                while delta > math.pi:
+                    delta -= 2.0 * math.pi
+                while delta < -math.pi:
+                    delta += 2.0 * math.pi
+                fan_steps = int(math.ceil(abs(delta)
+                                          / _FAN_MAX_STEP_RAD))
+                for f in range(1, fan_steps):
+                    fan_angle = (angle_previous
+                                 + delta * f / fan_steps)
+                    fan_out = (math.cos(fan_angle),
+                               math.sin(fan_angle))
+                    stations.append((eax, eay))
+                    st_alts.append(_station_reference(
+                        eax, eay, fan_out, a0))
+                    outs.append(fan_out)
+                    is_ring_vertex.append(True)
+                    at_seam.append(False)
+        previous_out = out
+        nseg = max(1, int(math.ceil(
+            math.hypot(ebx - eax, eby - eay) / step)))
+        edge_a_seam = _vertex_key(eax, eay) in seam_keys
+        edge_b_seam = _vertex_key(ebx, eby) in seam_keys
+        for k in range(nseg):    # next edge owns the far corner
+            t = k / nseg
+            sx = eax + (ebx - eax) * t
+            sy = eay + (eby - eay) * t
+            ref = None
+            if a0 is not None and a1 is not None:
+                ref = _station_reference(
+                    sx, sy, out, a0 + t * (a1 - a0))
+            stations.append((sx, sy))
+            st_alts.append(ref)
+            outs.append(out)
+            is_ring_vertex.append(k == 0)
+            at_seam.append((k == 0 and edge_a_seam)
+                           or (k == nseg - 1 and edge_b_seam))
+    if len(stations) < 2:
+        return [], [], stations, st_alts, outs
+    m = len(stations)
+
+    # FILL (DEM below floor, zones 1-2) then CUT (DEM above ceiling): the
+    # runway-end skirt fill/cut builders' lateral twins.
+    fill_bands = _build_fill_bands(
+        stations, st_alts, outs, [width] * m, floor_depth,
+        {ADJACENT_GROUND_LIP_WIDTH_M}, trigger, step, sample_dem,
+        is_ring_vertex, at_seam)
+    cut_bands = _build_cut_bands(
+        stations, st_alts, outs, [reach] * m, ceil_off,
+        {ADJACENT_GROUND_LIP_WIDTH_M, width}, trigger, step, sample_dem,
+        is_ring_vertex, at_seam)
+    return fill_bands, cut_bands, stations, st_alts, outs
+
+
+def construct_adjacent_ground_presolve(layout: PavementLayout, dem,
+                                       tile_lat: int, tile_lon: int,
+                                       source_runways=None) -> int:
+    """Slice B stage B3 ORDER 1 PRE-SOLVE construction (gate
+    ``ONE_SOLVE_TERRAIN`` + ``ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT``).
+
+    Moves the adjacent-ground band FOOTPRINT march
+    (``_derive_shape_stations_and_bands``) BEFORE ``per_surface_solve`` from a
+    DEM-seeded pavement-edge estimate (``_shape_ring_alts(seed=True)``), and
+    stages the raw band rings on ``layout.adjacent_ground_presolve`` for the
+    post-solve emitter to CONSUME instead of re-marching.  Values are NOT
+    computed here — the emitter values every stored footprint vertex through
+    the existing analytic resampler off the SOLVED pavement altitudes, and the
+    foreign-shape clip stays at emission (so gate-ON output is value-equivalent
+    to gate-OFF up to the enumerated seed/late-feature footprint deltas).
+
+    Stores ``layout.adjacent_ground_presolve = [{"shape": s, "fill": [...],
+    "cut": [...]}, ...]`` (the ``shape`` reference is preserved across the
+    layout pickle — same object as the ``layout.shapes`` element — so the
+    emitter rebuilds the resampler from the by-then-solved shape).  Returns the
+    number of shapes with at least one raw band."""
+    if dem is None:
+        return 0
+    if layout.anchor is None:
+        return 0
+    lat0, lon0 = layout.anchor
+    cos0 = math.cos(math.radians(lat0))
+    R = R_EARTH
+    step = CLEARANCE_STATION_STEP_M
+
+    def _ll_to_m(lat: float, lon: float) -> tuple[float, float]:
+        return (math.radians(lon - lon0) * R * cos0,
+                math.radians(lat - lat0) * R)
+
+    def sample_dem(x: float, y: float):
+        try:
+            lat = lat0 + math.degrees(y / R)
+            lon = lon0 + math.degrees(x / (R * cos0))
+            return _sample_dem(dem, tile_lat, tile_lon, lat, lon)
+        except _GEOM_EXC:
+            return None
+
+    in_scope = _RUNWAY_ROLES + _TAXIWAY_ROLES + _APRON_ROLES
+    scoped = [s for s in layout.shapes
+              if s.role in in_scope and s.polygon is not None
+              and not s.polygon.is_empty
+              and s.polygon.geom_type == "Polygon"]
+    if not scoped:
+        layout.adjacent_ground_presolve = []
+        return 0
+
+    # Terrain-facing probe reference: the union of the shapes PRESENT
+    # pre-solve (pavement + pre-solve skirts under B1), minus groundside —
+    # the same static block the emitter's ``_station_reference`` probe reads,
+    # here at its pre-solve state (post-solve features are absent; their clip
+    # is applied at emission, not here).
+    try:
+        static_union = unary_union(
+            [s.polygon for s in layout.shapes
+             if s.polygon is not None and not s.polygon.is_empty
+             and s.role != "groundside_pavement"])
+    except _GEOM_EXC:
+        static_union = None
+    if static_union is None or static_union.is_empty:
+        layout.adjacent_ground_presolve = []
+        return 0
+    try:
+        prep_static = prep(static_union)
+    except _GEOM_EXC:
+        layout.adjacent_ground_presolve = []
+        return 0
+
+    rw_axes: list[tuple] = []
+    if source_runways:
+        for r in source_runways:
+            try:
+                rax, ray = _ll_to_m(r.lat_a, r.lon_a)
+                rbx, rby = _ll_to_m(r.lat_b, r.lon_b)
+            except _GEOM_EXC:
+                continue
+            rlen = math.hypot(rbx - rax, rby - ray)
+            if rlen < 1.0:
+                continue
+            rw_axes.append((LineString([(rax, ray), (rbx, rby)]),
+                            ((rbx - rax) / rlen, (rby - ray) / rlen),
+                            rlen))
+
+    trigger_by_family = {
+        "runway": CLEARANCE_OBSTRUCTION_THRESHOLD_M["runway"],
+        "taxiway": CLEARANCE_OBSTRUCTION_THRESHOLD_M["taxiway"],
+        "apron": CLEARANCE_OBSTRUCTION_THRESHOLD_M["taxiway"],
+    }
+    seam_keys = (airside_seam_vertex_keys(layout)
+                 if _SEAM_TAPER_PIN else set())
+
+    entries: list[dict] = []
+    for s in scoped:
+        params = _family_params(layout, s, rw_axes)
+        if params is None:
+            continue
+        family, code_number, code_letter, reach, width, axis = params
+        trigger = trigger_by_family[family]
+        ceil_off, _envelope_at, floor_depth = _band_family_closures(
+            family, code_number, code_letter, width)
+        try:
+            coords = list(s.polygon.exterior.coords)
+            ccw = bool(s.polygon.exterior.is_ccw)
+        except _GEOM_EXC:
+            continue
+        if len(coords) < 4:
+            continue
+        ring_alts = _shape_ring_alts(s, coords, sample_dem, seed=True)
+        fill_bands, cut_bands, _st, _sa, _ou = \
+            _derive_shape_stations_and_bands(
+                coords, ccw, ring_alts, axis, width, reach, trigger,
+                floor_depth, ceil_off, step, prep_static, seam_keys,
+                sample_dem)
+        if not fill_bands and not cut_bands:
+            continue
+        entries.append({"shape": s, "fill": fill_bands, "cut": cut_bands})
+    layout.adjacent_ground_presolve = entries
+    if entries:
+        n_bands = sum(len(e["fill"]) + len(e["cut"]) for e in entries)
+        UI.vprint(1, f"  [adjacent-ground] PRE-SOLVE constructed raw bands "
+                     f"for {len(entries)} shape(s), {n_bands} raw band(s) "
+                     f"(one-solve terrain absorption, stage B3 order 1).")
+    return len(entries)
+
+
 def emit_adjacent_ground_bands(layout: PavementLayout, dem,
                                tile_lat: int, tile_lon: int,
                                source_runways=None) -> int:
@@ -1297,6 +1592,18 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
     # runs' terminal stations then agree on outer depth (no seam notch).
     seam_keys = airside_seam_vertex_keys(layout) if _SEAM_TAPER_PIN else set()
 
+    # PRE-BUILT FOOTPRINT store (Slice B stage B3 order 1): gate-ON the raw
+    # band rings were marched pre-solve; index them by source-shape identity so
+    # the loop consumes them instead of re-marching.  Gate-OFF (default, or no
+    # store) ``_presolve_bands`` stays None and the loop marches inline.
+    from .config import (ONE_SOLVE_TERRAIN as _OST,
+                         ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT as _OST_C)
+    _presolve_bands = None
+    if _OST and _OST_C:
+        _store = getattr(layout, "adjacent_ground_presolve", None)
+        if _store:
+            _presolve_bands = {id(e["shape"]): e for e in _store}
+
     for s in scoped:
         current_shape_union = None
         params = _family_params(layout, s, rw_axes)
@@ -1305,26 +1612,13 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
         family, code_number, code_letter, reach, width, axis = params
         trigger = trigger_by_family[family]
 
-        def ceil_off(d, _r=family, _cn=code_number, _cl=code_letter):
-            return adjacent_ground_envelope(_r, _cn, _cl, d)[1]
-
-        def envelope_at(d, _r=family, _cn=code_number, _cl=code_letter):
-            return adjacent_ground_envelope(_r, _cn, _cl, d)
-
-        def floor_depth(d, _r=family, _cn=code_number, _cl=code_letter,
-                        _w=width):
-            # Fill only inside zones 1-2 (bounded by the graded width _w);
-            # beyond it the floor is None (zone-3 cliff lawful — no fill).
-            # The skirt builder's longitudinal TAPER can query one step
-            # past the cap, and for aprons the 3 m shoulder is under one
-            # station step, so clamp the query to the graded width — the
-            # floor there is always finite and the fill geometry is still
-            # bounded by the ``band_caps`` passed to the builder.
-            f = adjacent_ground_envelope(_r, _cn, _cl, min(d, _w))[0]
-            return None if f is None else -f
+        ceil_off, envelope_at, floor_depth = _band_family_closures(
+            family, code_number, code_letter, width)
 
         # Per-CLOSED-ring node altitudes aligned with the ring coords (the
-        # node_altitudes contract), else the shape's plane sampler.
+        # node_altitudes contract), else the shape's plane sampler.  Read
+        # from the SOLVED shape (values are always analytic post-solve, both
+        # configurations).
         try:
             coords = list(s.polygon.exterior.coords)
             ccw = bool(s.polygon.exterior.is_ccw)
@@ -1332,147 +1626,28 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
             continue
         if len(coords) < 4:
             continue
-        na = s.node_altitudes
-        if na:
-            nm = min(len(na), len(coords))
-            ring_alts = [None if na[i] is None else float(na[i])
-                         for i in range(nm)]
-            ring_alts += [None] * (len(coords) - nm)
-        elif s.altitude is not None:
-            ring_alts = [float(s.altitude)] * len(coords)
+        ring_alts = _shape_ring_alts(s, coords)
+
+        # FOOTPRINT SOURCE.  Gate-ON (B3 order 1) the raw band rings were
+        # marched PRE-SOLVE from the DEM-seeded estimate
+        # (``construct_adjacent_ground_presolve``) and staged on
+        # ``layout.adjacent_ground_presolve``; consume them here instead of
+        # re-marching.  The emitter still CLIPS them against the (post-solve)
+        # static block and VALUES every vertex off the solved altitudes
+        # below, so gate-ON is value-equivalent to gate-OFF up to the
+        # enumerated seed/late-feature footprint deltas.  Gate-OFF the march
+        # runs inline exactly as today through the shared helper
+        # (byte-identical).
+        _pre = _presolve_bands.get(id(s)) if _presolve_bands else None
+        if _pre is not None:
+            fill_bands, cut_bands = _pre["fill"], _pre["cut"]
+            stations, st_alts, outs = [], [], []
         else:
-            ring_alts = [_sample_runway_segment_elev(s, x, y)
-                         for x, y in coords]
-
-        def _station_reference(sx, sy, out, alt_value):
-            """The station's edge altitude, or None when it is skipped —
-            the END-edge rule (skirt territory) + the terrain-facing
-            probe, applied per station exactly as the validator does."""
-            if alt_value is None:
-                return None
-            if (axis is not None
-                    and abs(out[0] * axis[0] + out[1] * axis[1])
-                    > _RING_END_NORMAL_DOT):
-                return None
-            if prep_static.contains(Point(sx + out[0] * _RING_PROBE_M,
-                                          sy + out[1] * _RING_PROBE_M)):
-                return None
-            return alt_value
-
-        stations, st_alts, outs = [], [], []
-        # A station is ON a ring vertex when it is an edge's k == 0 sample
-        # (exactly coords[i]) or a corner-fan station (all share the corner
-        # coordinate).  The d0 == 0 weld row keeps only these + run
-        # endpoints, so mid-edge stations stop minting T-vertices the
-        # conformance pass would have to insert into the pavement ring.
-        is_ring_vertex: list[bool] = []
-        # Per-station continuation-seam flag: True for the station adjacent to
-        # a corner shared with an abutting airside shape (its terrain-facing
-        # edge ends there, so its terminal run station must not bench in).
-        at_seam: list[bool] = []
-        previous_out = None
-        for i in range(len(coords) - 1):
-            eax, eay = coords[i]
-            ebx, eby = coords[i + 1]
-            u = _unit(ebx - eax, eby - eay)
-            if u is None:
-                continue
-            out = (u[1], -u[0]) if ccw else (-u[1], u[0])
-            a0 = ring_alts[i]
-            a1 = ring_alts[i + 1]
-            # CORNER FAN (round-2 addendum, coverage): at a CONVEX ring
-            # corner the two edges' band rectangles leave an uncovered
-            # circular-segment wedge between their outer rows (chord
-            # sagitta ≈ R·(1−cos(θ/2)) — 16 m of un-graded plateau at a
-            # CYXY 75 m runway band).  Insert stations AT the corner with
-            # normals interpolated across the turn, so the band outer row
-            # follows the fan arc piecewise.  Convex = the outward
-            # normals sweep across terrain (matches the winding).
-            if previous_out is not None:
-                cross = previous_out[0] * out[1] - previous_out[1] * out[0]
-                convex = (cross > 1e-9) if ccw else (cross < -1e-9)
-                # NO fan across a SKIPPED flank (user in-sim report
-                # 2026-07-09): when either adjacent edge's own normal
-                # is rejected by the station-reference test (runway
-                # END edge — the skirt governs that zone — or the
-                # probe lands on covered ground), interpolated fan
-                # rays sweep INTO the skipped territory and march the
-                # corridor cut up to the full reach there — rendered
-                # as 150-220 m blade/sector spikes at the runway-end
-                # corners (CYXY shapeIDs 447-449).  The abutting
-                # feature owns its own band; the fan only exists to
-                # cover terrain-facing corner wedges.
-                if convex and (
-                        _station_reference(eax, eay, previous_out,
-                                           a0) is None
-                        or _station_reference(eax, eay, out,
-                                              a0) is None):
-                    convex = False
-                if convex:
-                    angle_previous = math.atan2(previous_out[1],
-                                                previous_out[0])
-                    delta = math.atan2(out[1], out[0]) - angle_previous
-                    while delta > math.pi:
-                        delta -= 2.0 * math.pi
-                    while delta < -math.pi:
-                        delta += 2.0 * math.pi
-                    fan_steps = int(math.ceil(abs(delta)
-                                              / _FAN_MAX_STEP_RAD))
-                    for f in range(1, fan_steps):
-                        fan_angle = (angle_previous
-                                     + delta * f / fan_steps)
-                        fan_out = (math.cos(fan_angle),
-                                   math.sin(fan_angle))
-                        stations.append((eax, eay))
-                        st_alts.append(_station_reference(
-                            eax, eay, fan_out, a0))
-                        outs.append(fan_out)
-                        is_ring_vertex.append(True)
-                        # Fan rays share the corner coordinate (dist 0) and
-                        # never change a non-fan station's supported depth, so
-                        # leave them subject to normal suppression (the 417
-                        # fan-blade fix); the validator omits them entirely.
-                        at_seam.append(False)
-            previous_out = out
-            nseg = max(1, int(math.ceil(
-                math.hypot(ebx - eax, eby - eay) / step)))
-            edge_a_seam = _vertex_key(eax, eay) in seam_keys
-            edge_b_seam = _vertex_key(ebx, eby) in seam_keys
-            for k in range(nseg):    # next edge owns the far corner
-                t = k / nseg
-                sx = eax + (ebx - eax) * t
-                sy = eay + (eby - eay) * t
-                ref = None
-                if a0 is not None and a1 is not None:
-                    ref = _station_reference(
-                        sx, sy, out, a0 + t * (a1 - a0))
-                stations.append((sx, sy))
-                st_alts.append(ref)
-                outs.append(out)
-                is_ring_vertex.append(k == 0)
-                # The station adjacent to a continuation-seam corner: k == 0
-                # sits on ``coords[i]``; k == nseg-1 is the last station before
-                # ``coords[i+1]`` (its terrain-facing edge ends at the seam).
-                at_seam.append((k == 0 and edge_a_seam)
-                               or (k == nseg - 1 and edge_b_seam))
-        if len(stations) < 2:
-            continue
-        m = len(stations)
-
-        # FILL (DEM below floor, zones 1-2): the skirt fill builder's
-        # lateral twin (all-band run widening; see _build_fill_bands) —
-        # floor_depth = -floor_offset, cap = graded width, band split at
-        # the lip breakpoint.
-        fill_bands = _build_fill_bands(
-            stations, st_alts, outs, [width] * m, floor_depth,
-            {ADJACENT_GROUND_LIP_WIDTH_M}, trigger, step, sample_dem,
-            is_ring_vertex, at_seam)
-        # CUT (DEM above ceiling): the corridor's piecewise ceiling out to
-        # the family reach, split at the lip + graded-width kinks.
-        cut_bands = _build_cut_bands(
-            stations, st_alts, outs, [reach] * m, ceil_off,
-            {ADJACENT_GROUND_LIP_WIDTH_M, width}, trigger, step, sample_dem,
-            is_ring_vertex, at_seam)
+            (fill_bands, cut_bands,
+             stations, st_alts, outs) = _derive_shape_stations_and_bands(
+                coords, ccw, ring_alts, axis, width, reach, trigger,
+                floor_depth, ceil_off, step, prep_static, seam_keys,
+                sample_dem)
         if not fill_bands and not cut_bands:
             continue
 
@@ -1492,7 +1667,10 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
                          f"ref={s.ref} family={family}: "
                          f"{len(fill_bands)} fill / {len(cut_bands)} cut "
                          f"raw band(s)")
-        for qx, qy in _ADJACENT_DEBUG_POINTS:
+        for qx, qy in (_ADJACENT_DEBUG_POINTS if stations else ()):
+            # Lab forensics replay the marched stations; consumed pre-built
+            # footprints carry no station arrays, so this scan is skipped
+            # gate-ON (the pre-solve construct log covers that path).
             try:
                 dq = s.polygon.distance(Point(qx, qy))
             except _GEOM_EXC:

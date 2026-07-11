@@ -93,41 +93,67 @@ PAVEMENT_ROLES = {
 # ADMISSION scaffolding ONLY — the per-role constraint builders are stages
 # B1-B3 and do NOT exist yet.
 #
-# The three absorption roles and the layout role each carries today:
-#   * runway-end skirt  → ROLE_RUNWAY_CLEARANCE (ref "runway_end_skirt")  [B1]
-#   * gap-fill spine     → ROLE_GRADED_STRIP  (gap_fill provenance)       [B2]
-#   * graded strip band  → ROLE_GRADED_STRIP  (adjacent_ground bands)     [B3]
-# Gap-fill and graded-strip share ROLE_GRADED_STRIP; their per-role builders
-# (B2 vs B3) distinguish by provenance/ref, but node-list admission is by
-# ROLE membership, so both map to the same admitted role identity here.
-TERRAIN_GRAPH_ROLES = frozenset({ROLE_RUNWAY_CLEARANCE, ROLE_GRADED_STRIP})
+# The three absorption families, each a (layout role, provenance ref) pair:
+#   * runway-end skirt  → (ROLE_RUNWAY_CLEARANCE, "runway_end_skirt")     [B1]
+#   * gap-fill spine     → (ROLE_GRADED_STRIP,     "gap_fill_spine")      [B2]
+#   * graded strip band  → (ROLE_GRADED_STRIP,     "adjacent_ground")     [B3]
+# ROLE-ONLY ADMISSION IS AMBIGUOUS (Slice B stage B3 order 1 correction):
+# gap-fill faces/spines and adjacent-ground bands BOTH carry ROLE_GRADED_STRIP,
+# yet they are different families with different admission paths (gap-fill via
+# the dedicated pre-solve spine store; adjacent-ground via ring vertices) and
+# different sub-gates.  Flipping ROLE_GRADED_STRIP admission wholesale would
+# grab both.  Admission therefore keys on the (role, ref) PAIR, not the role.
+TERRAIN_GRAPH_REFS = frozenset({
+    (ROLE_RUNWAY_CLEARANCE, "runway_end_skirt"),
+    (ROLE_GRADED_STRIP, "gap_fill_spine"),
+    (ROLE_GRADED_STRIP, "adjacent_ground"),
+})
+# Back-compat ROLE projection (call sites that legitimately want role
+# granularity — the _writeback skip, the skirt-pin gate).  Disjoint from
+# PAVEMENT_ROLES (asserted in tests) so admitting a family never double-counts
+# today's pavement.
+TERRAIN_GRAPH_ROLES = frozenset(role for role, _ref in TERRAIN_GRAPH_REFS)
 
 
-def admitted_terrain_roles():
-    """The set of TERRAIN GRAPH ROLES whose ring vertices are admitted to the
-    canonical node registry and the solver node list this build (Slice B Stage
-    B0 scaffolding).
+def admitted_terrain_refs():
+    """The set of ``(role, ref)`` TERRAIN GRAPH FAMILIES whose vertices are
+    admitted to the canonical node registry and the solver node list this
+    build (Slice B stage B0 scaffolding, refined to (role, ref) granularity at
+    stage B3 order 1).
 
     Gated by ``config.ONE_SOLVE_TERRAIN`` (master, default OFF) and the three
-    per-role sub-gates.  Returns a possibly-empty ``frozenset`` of layout role
-    identities.  EMPTY whenever the master gate is off (the default) OR every
-    sub-gate is off — and admission of an empty role set is a structural no-op,
-    so the node list, the constraint graph and the solve are byte-identical to
-    today.  This is exactly Stage B0's landing condition: the primitive and the
-    scaffolding exist; nothing is admitted yet (the per-role constraint
-    builders are B1-B3).  Config is read at CALL TIME (tests toggle the gates
-    via env + module reload / monkeypatch)."""
+    per-family sub-gates.  Returns a possibly-empty ``frozenset`` of
+    ``(role, ref)`` pairs.  EMPTY whenever the master gate is off (the default)
+    OR every sub-gate is off — and admission of an empty family set is a
+    structural no-op, so the node list, the constraint graph and the solve are
+    byte-identical to today.  Config is read at CALL TIME (tests toggle the
+    gates via env + module reload / monkeypatch).
+
+    NOTE (B3 order 1): the ``ONE_SOLVE_TERRAIN_GRADED_STRIP`` sub-gate below is
+    the B0 ADMISSION gate for the adjacent-ground band family (B3 order 2,
+    still OFF); it is deliberately SEPARATE from
+    ``ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT`` (the order-1 pre-solve
+    footprint construction gate), which admits NOTHING here — construction
+    moves pre-solve while values stay analytic post-solve."""
     from auto_patch import config as _cfg
     if not getattr(_cfg, "ONE_SOLVE_TERRAIN", False):
         return frozenset()
     admitted: set = set()
     if getattr(_cfg, "ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT", False):
-        admitted.add(ROLE_RUNWAY_CLEARANCE)
+        admitted.add((ROLE_RUNWAY_CLEARANCE, "runway_end_skirt"))
     if getattr(_cfg, "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", False):
-        admitted.add(ROLE_GRADED_STRIP)
+        admitted.add((ROLE_GRADED_STRIP, "gap_fill_spine"))
     if getattr(_cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP", False):
-        admitted.add(ROLE_GRADED_STRIP)
+        admitted.add((ROLE_GRADED_STRIP, "adjacent_ground"))
     return frozenset(admitted)
+
+
+def admitted_terrain_roles():
+    """Back-compat ROLE projection of ``admitted_terrain_refs`` — the set of
+    layout roles with at least one admitted ``(role, ref)`` family this build.
+    Used by call sites that gate at role granularity and then filter by ref
+    themselves (the skirt-pin block, the ``_writeback`` skip)."""
+    return frozenset(role for role, _ref in admitted_terrain_refs())
 
 
 # ── Priority cascade (user 2026-05-22) ───────────────────────────
@@ -1300,11 +1326,16 @@ def _build_node_list(layout):
     # today.  (Until stages B1-B3 move construction pre-solve these shapes are
     # not even present in ``layout.shapes`` at solve time, so admitting the
     # roles is doubly inert; the hook is the structural seam those stages fill.)
-    _admitted_roles = admitted_terrain_roles()
-    node_roles = (PAVEMENT_ROLES if not _admitted_roles
-                  else PAVEMENT_ROLES | _admitted_roles)
+    # Admission is (role, ref)-keyed (B3 order 1): a shape enters the node
+    # list if it is a pavement role (always, as today) OR its (role, ref)
+    # family is admitted this build.  With an empty admitted family set the
+    # iteration — and every node index it assigns — is byte-identical to
+    # today.  Terrain roles are disjoint from PAVEMENT_ROLES, so the two
+    # clauses never overlap.
+    _admitted_refs = admitted_terrain_refs()
     for s in layout.shapes:
-        if s.role not in node_roles:
+        if s.role not in PAVEMENT_ROLES and (
+                s.role, getattr(s, "ref", None)) not in _admitted_refs:
             continue
         if s.polygon is None or s.polygon.is_empty:
             continue
@@ -1330,7 +1361,7 @@ def _build_node_list(layout):
     # ``GAP_FILL_SPINE_STEP_M`` (15 m) apart and >= 2 m off every ring,
     # so no spine node can merge with another node's bucket.  Gate OFF
     # (or no store) this loop body never runs — byte-inert.
-    if ROLE_GRADED_STRIP in _admitted_roles:
+    if (ROLE_GRADED_STRIP, "gap_fill_spine") in _admitted_refs:
         for _gap_entry in (getattr(layout, "gap_fill_presolve", None)
                            or ()):
             for x, y in _gap_entry.get("spine", ()):

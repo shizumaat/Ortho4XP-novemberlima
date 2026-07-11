@@ -146,6 +146,7 @@ __all__ = [
     "ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT",
     "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE",
     "ONE_SOLVE_TERRAIN_GRADED_STRIP",
+    "ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT",
     "APRON_SHOULDER_WIDTH_M",
     "APRON_SHOULDER_MIN_DOWN_SLOPE",
     "APRON_SHOULDER_MAX_DOWN_SLOPE",
@@ -2209,6 +2210,22 @@ ONE_SOLVE_TERRAIN_GAP_FILL_SPINE = (
     _os.environ.get("O4_ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", "0") == "1")
 ONE_SOLVE_TERRAIN_GRADED_STRIP = (
     _os.environ.get("O4_ONE_SOLVE_TERRAIN_GRADED_STRIP", "0") == "1")
+# Slice B stage B3 ORDER 1 (construction move) sub-gate, DEFAULT OFF and
+# deliberately SEPARATE from the B0 admission sub-gate ``ONE_SOLVE_TERRAIN_
+# GRADED_STRIP`` above (which stays OFF until B3 order 2, variable
+# admission).  This gate moves the adjacent-ground band FOOTPRINT
+# derivation (the frontage/march/zone-split/clip geometry) PRE-SOLVE onto
+# ``layout.adjacent_ground_presolve`` from a DEM-seeded pavement-edge
+# estimate; the post-solve emitter then CONSUMES those frozen footprints
+# instead of re-marching, but still VALUES every vertex analytically
+# through the existing resampler (so gate-ON output is value-equivalent to
+# gate-OFF up to the enumerated seed/late-feature footprint deltas).  It
+# does NOT admit any band vertex to the solver — that is order 2 under the
+# admission gate.  Requires the adjacent-ground law itself
+# (``ADJACENT_GROUND_LAW_ENABLED``) to be ON to have any effect.
+ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT = (
+    _os.environ.get("O4_ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT", "0")
+    == "1")
 
 # APRON edges.  NO code mandates grading beyond an apron edge (positive
 # research finding): the only governed band is the FAA-RECOMMENDED

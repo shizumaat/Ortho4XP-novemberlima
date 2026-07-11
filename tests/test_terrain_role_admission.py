@@ -21,9 +21,10 @@ from auto_patch.layout import (
 
 
 class _FakeShape:
-    def __init__(self, role, polygon):
+    def __init__(self, role, polygon, ref=None):
         self.role = role
         self.polygon = polygon
+        self.ref = ref
 
 
 class _FakeLayout:
@@ -82,11 +83,49 @@ def test_declared_terrain_roles_are_not_already_pavement_roles():
     assert not (SP.TERRAIN_GRAPH_ROLES & SP.PAVEMENT_ROLES)
 
 
+# ── admitted_terrain_refs (role, ref) granularity (B3 order 1) ────────────
+def test_admitted_refs_empty_with_master_gate_off():
+    assert not cfg.ONE_SOLVE_TERRAIN                    # default OFF
+    assert SP.admitted_terrain_refs() == frozenset()
+
+
+def test_each_subgate_admits_its_role_ref_pair(monkeypatch):
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN", True)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT", True)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", False)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP", False)
+    assert SP.admitted_terrain_refs() == frozenset(
+        {(ROLE_RUNWAY_CLEARANCE, "runway_end_skirt")})
+
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT", False)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", True)
+    assert SP.admitted_terrain_refs() == frozenset(
+        {(ROLE_GRADED_STRIP, "gap_fill_spine")})
+
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", False)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP", True)
+    # The band-admission gate maps to the adjacent_ground ref specifically —
+    # NOT the gap_fill_spine ref that shares ROLE_GRADED_STRIP.
+    assert SP.admitted_terrain_refs() == frozenset(
+        {(ROLE_GRADED_STRIP, "adjacent_ground")})
+
+
+def test_admitted_roles_is_the_ref_set_role_projection(monkeypatch):
+    # The back-compat role projection collapses both ROLE_GRADED_STRIP families
+    # to the single role.
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN", True)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT", True)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", True)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP", True)
+    assert SP.admitted_terrain_roles() == frozenset(
+        {ROLE_RUNWAY_CLEARANCE, ROLE_GRADED_STRIP})
+
+
 # ── _build_node_list admission hook ──────────────────────────────────────
-def _layout_with_terrain():
+def _layout_with_terrain(ref="adjacent_ground"):
     return _FakeLayout([
         _FakeShape(ROLE_APRON, _square(0.0, 0.0)),
-        _FakeShape(ROLE_GRADED_STRIP, _square(100.0, 100.0)),
+        _FakeShape(ROLE_GRADED_STRIP, _square(100.0, 100.0), ref=ref),
     ])
 
 
@@ -97,13 +136,37 @@ def test_node_list_excludes_terrain_role_with_gates_off():
     assert (100.0, 100.0) not in nodes
 
 
-def test_node_list_admits_terrain_role_when_gated_on(monkeypatch):
+def test_node_list_admits_band_ref_when_band_gate_on(monkeypatch):
     monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN", True)
     monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP", True)
     nodes, b2i = SP._build_node_list(_layout_with_terrain())
-    # Apron (4) + graded_strip band (4) now share the registry / node list.
+    # Apron (4) + adjacent_ground band (4) now share the registry / node list.
     assert len(nodes) == 8
     assert (100.0, 100.0) in nodes
+
+
+def test_gap_face_ref_not_admitted_by_band_gate(monkeypatch):
+    # The collision resolution: a ROLE_GRADED_STRIP shape whose ref is the
+    # GAP-FILL family is NOT admitted through the ring hook when only the BAND
+    # admission gate is on — the two families no longer collide.
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN", True)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP", True)
+    nodes, b2i = SP._build_node_list(_layout_with_terrain(ref="gap_fill"))
+    assert len(nodes) == 4                              # only the apron
+    assert (100.0, 100.0) not in nodes
+
+
+def test_band_ref_not_admitted_by_gap_gate(monkeypatch):
+    # The mirror: with only the GAP sub-gate on, an adjacent_ground BAND shape
+    # placed pre-solve (B3 order 1 construction) is NOT admitted as a solver
+    # variable — construction moves pre-solve but values stay analytic.
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN", True)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT", True)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", True)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP", False)
+    nodes, b2i = SP._build_node_list(_layout_with_terrain(ref="adjacent_ground"))
+    assert len(nodes) == 4                              # only the apron
+    assert (100.0, 100.0) not in nodes
 
 
 def test_node_list_identical_object_when_admitted_empty(monkeypatch):

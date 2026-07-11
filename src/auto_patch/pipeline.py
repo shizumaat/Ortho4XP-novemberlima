@@ -5506,6 +5506,42 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 UI.vprint(1, f"  [pav-builder] {icao}: pre-solve gap-fill "
                              f"spine construction FAILED: {_gappre_exc!r}")
 
+        # ── Adjacent-ground band PRE-SOLVE construction (Slice B stage B3
+        # ORDER 1, gate O4_ONE_SOLVE_TERRAIN +
+        # O4_ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT, both default OFF;
+        # docs/slice_b_solver_absorption_design.md §B3) ──────────────────
+        # The band FOOTPRINT march moves here — before ``per_surface_solve``,
+        # after the pre-solve skirts (their rings enter the terrain-facing
+        # probe union) — from a DEM-seeded pavement-edge estimate, and the
+        # raw band rings are staged on ``layout.adjacent_ground_presolve``.
+        # The post-solve emitter CONSUMES those frozen footprints instead of
+        # re-marching, but still clips them against the (post-solve) static
+        # block and VALUES every vertex off the solved altitudes — so this is
+        # a construction move only (values stay analytic; gate-ON is
+        # value-equivalent to gate-OFF up to the enumerated seed/late-feature
+        # footprint deltas).  It admits NO band vertex to the solver (that is
+        # order 2 under the separate admission gate).  Requires the
+        # adjacent-ground law itself (the emitter runs only under it).
+        from .config import (
+            ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT,
+            ADJACENT_GROUND_LAW_ENABLED as _AGL_ENABLED)
+        _band_construct = (ONE_SOLVE_TERRAIN
+                           and ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT
+                           and _AGL_ENABLED
+                           and USE_PER_SURFACE_SOLVER
+                           and layout.anchor is not None)
+        if _band_construct:
+            try:
+                from .adjacent_ground import \
+                    construct_adjacent_ground_presolve
+                construct_adjacent_ground_presolve(
+                    layout, dem, tile_lat, tile_lon,
+                    source_runways=apt.runways)
+            except _GEOM_EXC as _agpre_exc:
+                UI.vprint(1, f"  [pav-builder] {icao}: pre-solve "
+                             f"adjacent-ground band construction FAILED: "
+                             f"{_agpre_exc!r}")
+
         if USE_PER_SURFACE_SOLVER and layout.anchor is not None:
             # Runway CIFP thresholds are LOCKED — the solver never moves them.
             # The old runway-threshold-relief passes (step 3
