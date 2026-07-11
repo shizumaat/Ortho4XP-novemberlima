@@ -259,3 +259,106 @@ def test_pure_interval_graph_without_symmetric_edges():
     assert elev[0] == 0.0
     assert elev[1] == pytest.approx(2.0, abs=1e-3)
     assert elev[2] == pytest.approx(-2.0, abs=1e-3)
+
+
+# ── 8. interval-aware reach envelope + anchor-contradiction break (B3) ────
+# These exercise the DIRECTED reach-envelope propagation over signed slabs
+# (the deferred Stage-B0 concern the Stage-B3 fix delivers): a signed interval
+# ``low ≤ z_i − z_j ≤ high`` contributes ``ceil_i ≤ ceil_j + high`` /
+# ``floor_i ≥ floor_j + low`` (and the transpose) to the one-shot envelope, so
+# an interval-only free node gets bounds AND a contradiction between two parent
+# slabs is caught by the ``floor > ceil`` break detection instead of ping-
+# ponging the POCS sweep to the visit cap.
+
+
+def test_interval_reach_ceiling_clamps_in_one_shot():
+    # A free node reachable ONLY through a ceiling-only interval from a hard
+    # anchor is clamped by the envelope in a single pass — with max_iters=1
+    # (one worklist visit budget per edge) it still lands exactly on the
+    # ceiling, proving the clamp happened pre-sweep, not by iteration.
+    elev = [10.0, 500.0]
+    edges = [(1, 0, None, 3.0)]                     # z1 − z0 ≤ 3
+    rem, _bh = _project(elev, edges, hard={0}, max_iters=1)
+    assert rem == 0
+    assert elev[1] == pytest.approx(13.0, abs=1e-3)
+
+
+def test_interval_reach_floor_clamps_in_one_shot():
+    # Symmetric of the above for the FLOOR envelope over a floor-only interval.
+    elev = [10.0, -500.0]
+    edges = [(1, 0, 2.0, None)]                     # z1 − z0 ≥ 2
+    rem, _bh = _project(elev, edges, hard={0}, max_iters=1)
+    assert rem == 0
+    assert elev[1] == pytest.approx(12.0, abs=1e-3)
+
+
+def test_interval_two_parent_disjoint_slabs_break_not_livelock():
+    # THE B3 livelock class in miniature: one free spine node with two HARD
+    # parents whose narrow slabs cannot be jointly satisfied.  The envelope
+    # sees floor = max(z0+0, z1+0) = 2.0 > ceil = min(z0+0.5, z1+0.5) = 0.5,
+    # so the node is BROKEN (quarantined) and the violation REPORTED — and
+    # crucially the call returns under a TIGHT iteration budget instead of
+    # ping-ponging to the cap (pre-fix this oscillated 2^k times).
+    elev = [0.0, 2.0, 100.0]
+    edges = [(2, 0, 0.0, 0.5),          # 0.0 ≤ z2 − z0 ≤ 0.5  → z2 ∈ [0.0,0.5]
+             (2, 1, 0.0, 0.5)]          # 0.0 ≤ z2 − z1 ≤ 0.5  → z2 ∈ [2.0,2.5]
+    rem, bh = _project(elev, edges, hard={0, 1}, max_iters=5)
+    assert elev[0] == 0.0 and elev[1] == 2.0        # hard parents unmoved
+    assert rem >= 1                                  # contradiction reported
+    assert bh == 0                                   # neither edge is both-hard
+    # The quarantined node sits between the two disjoint slabs (the distance-
+    # weighted break blend), NOT flung outside them.
+    assert 0.5 - 1e-6 <= elev[2] <= 2.0 + 1e-6
+
+
+def test_interval_reach_broken_node_is_quarantined_via_broken_out():
+    # The broken set surfaced through ``broken_out`` must contain the
+    # contradiction node (so a caller can honestly quarantine it downstream).
+    elev = [0.0, 3.0, 50.0]
+    edges = [(2, 0, 0.0, 0.4), (2, 1, 0.0, 0.4)]    # disjoint by 3 m ≫ 0.4
+    broken: set = set()
+    OS.feasibility_project(elev, [{"edges": list(edges)}], {0, 1},
+                           force_scalar=True, max_iters=5, broken_out=broken)
+    assert 2 in broken
+
+
+def test_interval_reach_compatible_parents_do_not_false_break():
+    # Two parent slabs whose intersection is NON-empty must NOT break the node
+    # — the directed envelope has to be an intersection, not a spurious
+    # tightening.  z2 ∈ [z0+0, z0+1] ∩ [z1−1, z1+0]; with z0=0, z1=0.5 that is
+    # [0,1] ∩ [-0.5,0.5] = [0,0.5], non-empty.
+    elev = [0.0, 0.5, 9.0]
+    edges = [(2, 0, 0.0, 1.0),          # 0 ≤ z2 − z0 ≤ 1
+             (2, 1, -1.0, 0.0)]         # −1 ≤ z2 − z1 ≤ 0  → z2 ≤ z1
+    rem, bh = _project(elev, edges, hard={0, 1})
+    assert rem == 0 and bh == 0
+    assert 0.0 - 1e-3 <= elev[2] <= 0.5 + 1e-3
+
+
+def test_interval_reach_directed_bounds_through_a_free_relay():
+    # The directed propagation must chain THROUGH a free intermediate node:
+    # hard 0 = 0; interval 1←0 gives z1 ≥ z0 + 1; interval 2←1 gives
+    # z2 ≥ z1 + 1; so the FLOOR envelope must lift z2 to ≥ 2 even though node 2
+    # touches no anchor directly.
+    elev = [0.0, -100.0, -100.0]
+    edges = [(1, 0, 1.0, None),         # z1 − z0 ≥ 1
+             (2, 1, 1.0, None)]         # z2 − z1 ≥ 1
+    rem, _bh = _project(elev, edges, hard={0}, max_iters=1)
+    assert rem == 0
+    assert elev[1] == pytest.approx(1.0, abs=1e-3)
+    assert elev[2] == pytest.approx(2.0, abs=1e-3)
+
+
+def test_reach_strict_pop_guard_survives_equal_keys():
+    # DIAMOND with two EQUAL-budget symmetric paths to node 3: both reach it at
+    # the same envelope value, exercising the strict ``if k in best`` pop guard
+    # under equal keys (the memory-documented CYXY-2026-07-04 hang class — no
+    # epsilon tolerance).  Must terminate and give the exact reachable value.
+    elev = [0.0, 9.0, 9.0, 9.0]
+    edges = [(0, 1, 1.0), (0, 2, 1.0),  # two length-1 hops from the anchor
+             (1, 3, 1.0), (2, 3, 1.0)]  # rejoining at node 3 (two equal paths)
+    rem, _bh = _project(elev, edges, hard={0}, max_iters=1)
+    assert rem == 0
+    # ceil_3 = 0 + 1 + 1 = 2 by either path; the clamp pulls the seed 9 → 2.
+    assert elev[3] == pytest.approx(2.0, abs=1e-3)
+    assert elev[1] == pytest.approx(1.0, abs=1e-3)

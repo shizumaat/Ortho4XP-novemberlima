@@ -510,28 +510,68 @@ def feasibility_project(elev, shape_constraints, hard, *,
     quant_margin = _emit_quantization_margin()
     edges = []
     adj: dict = {}
+    # DIRECTED reach-envelope adjacencies (Stage B3, interval-aware envelope).
+    # ``ceil_radj[k]`` / ``floor_radj[k]`` = ``[(j, w), ...]`` where the reach
+    # relaxation is ``t_j := t_k + w`` (the sign is BAKED INTO the weight, so
+    # both envelopes share one relaxation form and interval edges — whose
+    # ceiling-forward and floor-forward weights are INDEPENDENT — embed
+    # directly).  For a SYMMETRIC budget the ceiling weight is ``+lim`` both
+    # ways and the floor weight ``−lim`` both ways, so with NO interval edge
+    # present these reproduce the old single-``adj`` ``t + sign·lim`` /
+    # ``dk + lim`` arithmetic BIT-FOR-BIT (``−1·lim`` and ``−lim`` are the
+    # identical IEEE negation; ``|−lim| = lim``) — the gates-off byte-identity
+    # gate.  ``adj`` (symmetric) is kept unchanged for ``_hard_neighbour_
+    # interval`` below, which models symmetric welded neighbours only.
+    ceil_radj: dict = {}
+    floor_radj: dict = {}
     for (i, j), lim in edge_lim.items():
         sweep_lim = _margined_budget(lim, quant_margin)
         edges.append((i, j, lim, sweep_lim))
         adj.setdefault(i, []).append((j, sweep_lim))
         adj.setdefault(j, []).append((i, sweep_lim))
+        ceil_radj.setdefault(i, []).append((j, sweep_lim))
+        ceil_radj.setdefault(j, []).append((i, sweep_lim))
+        floor_radj.setdefault(i, []).append((j, -sweep_lim))
+        floor_radj.setdefault(j, []).append((i, -sweep_lim))
     # INTERVAL EDGES (Stage B0): each carries the RAW interval (for the final
     # tally, measured against the true law) and the SWEEP interval (raw shrunk
     # inward by the emit-quantization margin — see ``_margined_interval``).
-    # They do NOT enter the symmetric reach-envelope adjacency ``adj``: the
-    # ``_reach`` Dijkstra and the anchor-contradiction break detection below
-    # model symmetric slabs only, and a directed longest/shortest-path envelope
-    # over signed intervals is a later-stage concern (no interval edges exist
-    # until B1-B3).  Interval-only free nodes are still driven to feasibility by
-    # the POCS sweep (slabs are convex, so convergence is unaffected); they
-    # simply forgo the one-shot envelope warm-start.  ``interval_edges`` items:
-    # ``(i, j, raw_low, raw_high, sweep_low, sweep_high)``.
+    # ``interval_edges`` items: ``(i, j, raw_low, raw_high, sweep_low,
+    # sweep_high)`` with ``i < j`` and the slab on ``z_i − z_j``.
+    #
+    # DIRECTED ENVELOPE PROPAGATION (Stage B3): a signed slab
+    # ``low ≤ z_i − z_j ≤ high`` is the directed generalisation of the
+    # symmetric budget and contributes to the envelope exactly as its two
+    # implied inequalities do (``None`` side ⇒ that direction imposes no
+    # bound, so the edge is skipped there):
+    #   ceiling:  z_i ≤ z_j + high  ⇒  ceil_i ≤ ceil_j + high   (j→i, +high)
+    #             z_j ≤ z_i − low   ⇒  ceil_j ≤ ceil_i − low    (i→j, −low)
+    #   floor:    z_i ≥ z_j + low   ⇒  floor_i ≥ floor_j + low   (j→i, +low)
+    #             z_j ≥ z_i − high  ⇒  floor_j ≥ floor_i − high  (i→j, −high)
+    # The symmetric case ``low=−lim, high=+lim`` yields exactly the ±lim
+    # both-way weights the loop above added, so this apparatus is byte-inert
+    # with no interval edges (the loop below does not execute).  Interval-only
+    # free nodes now GET the one-shot envelope warm-start AND, when their two
+    # (or more) parent slabs cannot be jointly satisfied by the hard-anchor-
+    # reachable station elevations, are caught by the ``floor > ceil`` break
+    # detection and QUARANTINED — the exact livelock the POCS sweep otherwise
+    # ping-pongs on (Stage B2 measured 27.7 M interval moves; the two-parent
+    # gap-spine disjoint-slab class — see docs/slice_b_solver_absorption_
+    # design.md and the ``_build_gap_spine_constraints`` empty-intersection
+    # note, whose SEED-time prune misses slabs that only go disjoint as
+    # stations move).
     interval_edges = []
     for (i, j), (raw_low, raw_high) in interval_lim.items():
         sweep_low, sweep_high = _margined_interval(raw_low, raw_high,
                                                    quant_margin)
         interval_edges.append((i, j, raw_low, raw_high,
                                sweep_low, sweep_high))
+        if sweep_high is not None:
+            ceil_radj.setdefault(j, []).append((i, sweep_high))
+            floor_radj.setdefault(i, []).append((j, -sweep_high))
+        if sweep_low is not None:
+            ceil_radj.setdefault(i, []).append((j, -sweep_low))
+            floor_radj.setdefault(j, []).append((i, sweep_low))
 
     # EXACT reachability envelope: ceil_i = min over hard anchors a of
     # (z_a + capdist(a→i)), floor_i = max of (z_a − capdist).  ``budget`` is the
@@ -547,7 +587,10 @@ def feasibility_project(elev, shape_constraints, hard, *,
     # recompute the envelope.
     INF = float("inf")
 
-    def _reach(sign):                       # sign +1 → ceil, −1 → floor
+    def _reach(sign, radj):                 # sign +1 → ceil, −1 → floor
+        # ``radj`` provides directed weights with the sign already baked in
+        # (``ceil_radj`` for +1, ``floor_radj`` for −1); the relaxation is
+        # ``nt = t + w`` and the budget-metric distance accumulates ``|w|``.
         best: dict = {}
         dist: dict = {}                     # budget-metric distance to the
         pq = [((elev[a] if sign > 0 else -elev[a]), 0.0, a)
@@ -561,12 +604,12 @@ def feasibility_project(elev, shape_constraints, hard, *,
                 continue
             best[k] = t
             dist[k] = dk
-            for (j, lim) in adj.get(k, ()):
-                nt = t + sign * lim
+            for (j, w) in radj.get(k, ()):
+                nt = t + w
                 pj = best.get(j)
                 if pj is None or (sign > 0 and nt < pj) or (sign < 0 and nt > pj):
                     heapq.heappush(pq, ((nt if sign > 0 else -nt),
-                                        dk + lim, j))
+                                        dk + (w if w >= 0.0 else -w), j))
         return best, dist
 
     from auto_patch.config import SVC_SPINE_EDGE_COUPLE as _EDGE_COUPLE
@@ -588,8 +631,8 @@ def feasibility_project(elev, shape_constraints, hard, *,
 
     broken: set = set()
     if hard:
-        ceil, ceil_dist = _reach(+1)
-        floor, floor_dist = _reach(-1)
+        ceil, ceil_dist = _reach(+1, ceil_radj)
+        floor, floor_dist = _reach(-1, floor_radj)
         for i in range(n):
             if i in hard:
                 continue
@@ -832,11 +875,27 @@ def feasibility_project(elev, shape_constraints, hard, *,
             in_pending[edge_index] = 1
         visits = 0
         visit_cap = max_iters * max(1, len(iter_edges))
+        # RE-ENTRY DIAGNOSTIC (O4_FP_REENTRY_DEBUG=1, off by default → zero
+        # cost and byte-identical): counts pops / no-op pops / moves keyed by
+        # edge kind (interval vs symmetric) plus per-edge pop tallies, so the
+        # livelock re-entry mechanism can be read off a single gate-ON build
+        # (Slice B stage B3 prerequisite trace).  ``force_scalar`` only.
+        _reentry_dbg = _os.environ.get("O4_FP_REENTRY_DEBUG") == "1"
+        if _reentry_dbg:
+            _pops_sym = _pops_int = 0
+            _noop_sym = _noop_int = 0
+            _edge_pops = [0] * len(iter_edges)
         while pending and visits < visit_cap:
             edge_index = pending.popleft()
             in_pending[edge_index] = 0
             visits += 1
             i, j, budget, kind = iter_edges[edge_index]
+            if _reentry_dbg:
+                _edge_pops[edge_index] += 1
+                if budget is None:
+                    _pops_int += 1
+                else:
+                    _pops_sym += 1
             if budget is None:
                 # INTERVAL EDGE (Stage B0): project the difference onto the
                 # signed slab ``[s_low, s_high]``.  ``se`` is the SIGNED excess
@@ -851,6 +910,8 @@ def feasibility_project(elev, shape_constraints, hard, *,
                 elif s_low is not None and d < s_low - tol:
                     se = d - s_low
                 else:
+                    if _reentry_dbg:
+                        _noop_int += 1
                     continue
                 if kind == 0:
                     elev[i] -= se * 0.5
@@ -869,6 +930,8 @@ def feasibility_project(elev, shape_constraints, hard, *,
                 d = elev[i] - elev[j]
                 ad = -d if d < 0.0 else d              # inline abs() (hot path)
                 if ad <= budget + tol:
+                    if _reentry_dbg:
+                        _noop_sym += 1
                     continue
                 ex = ad - budget
                 s = 1.0 if d > 0 else -1.0
@@ -923,6 +986,39 @@ def feasibility_project(elev, shape_constraints, hard, *,
                     else:
                         lazy_entries_by_node.pop(moved_node, None)
         _sweeps_run = visits
+        if _reentry_dbg:
+            _capped = visits >= visit_cap
+            _n_int = len(interval_bounds_by_index)
+            print(f"    [fp-reentry] visits={visits} cap={visit_cap} "
+                  f"capped={_capped} edges={len(iter_edges)} "
+                  f"interval_edges={_n_int}")
+            print(f"    [fp-reentry] pops sym={_pops_sym} int={_pops_int} | "
+                  f"no-op sym={_noop_sym} int={_noop_int} | "
+                  f"moves sym={_pops_sym - _noop_sym} "
+                  f"int={_pops_int - _noop_int}")
+            # Top re-entered edges (by pop count), split by kind, to name the
+            # ping-pong participants.
+            _ranked = sorted(range(len(iter_edges)),
+                             key=lambda e: _edge_pops[e], reverse=True)
+            print("    [fp-reentry] top-20 re-entered edges "
+                  "(idx kind i j budget pops):")
+            for _e in _ranked[:20]:
+                _ei, _ej, _eb, _ek = iter_edges[_e]
+                _kind_s = "INT" if _eb is None else "sym"
+                _bud_s = (repr(interval_bounds_by_index.get(_e))
+                          if _eb is None else repr(round(_eb, 3)))
+                print(f"        {_e} {_kind_s} i={_ei} j={_ej} "
+                      f"bounds={_bud_s} pops={_edge_pops[_e]}")
+            # How many INTERVAL edges were popped more than twice (the
+            # re-admission / ping-pong signature).
+            _int_reenter = sum(1 for _e in range(len(iter_edges))
+                               if iter_edges[_e][2] is None
+                               and _edge_pops[_e] > 2)
+            _sym_reenter = sum(1 for _e in range(len(iter_edges))
+                               if iter_edges[_e][2] is not None
+                               and _edge_pops[_e] > 2)
+            print(f"    [fp-reentry] edges popped >2x: "
+                  f"interval={_int_reenter} symmetric={_sym_reenter}")
     # broadcast each flat group's representative level back to its members.
     for rep, g in (groups_eff if flat_groups else ()):
         for m in g:
