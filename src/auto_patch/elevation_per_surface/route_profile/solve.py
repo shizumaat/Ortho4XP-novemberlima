@@ -64,7 +64,21 @@ def _apply_runway_flex_hook(layout, icao, nodes, bucket_to_idx, elev,
         adjacency.setdefault(j, []).append((i, budget))
 
     for _sc in shape_constraints:
-        for (i, j, budget) in _sc.get("edges", ()):
+        for _edge in _sc.get("edges", ()):
+            # INTERVAL EDGES (Stage B0) are the terrain-role signed-slab form
+            # (i, j, interval_low, interval_high).  This runway-flex value
+            # envelope models symmetric full-budget reach only; a one-sided or
+            # asymmetric interval has no symmetric budget, so an interval edge
+            # contributes its widest symmetric surrogate (both sides finite) or
+            # is skipped (one side open).  With every terrain gate off none are
+            # produced and this branch is never taken.
+            if len(_edge) >= 4:
+                _i, _j, _lo, _hi = _edge[0], _edge[1], _edge[2], _edge[3]
+                if _lo is None or _hi is None:
+                    continue
+                _add_edge(_i, _j, max(abs(_lo), abs(_hi)))
+                continue
+            i, j, budget = _edge
             _add_edge(i, j, budget)
     for (a, b, cap, _sp) in G.edges:
         if a in G.pos and b in G.pos:
@@ -863,6 +877,9 @@ def solve_route_profile(layout, icao: str,
                 _conflicted: set = set()
                 for _sc in joint:
                     for _e in _sc["edges"]:
+                        if len(_e) >= 4:
+                            continue      # interval edge (Stage B0): not a
+                            #               symmetric-budget mouth weld
                         _a, _b, _bud = _e[0], _e[1], _e[2]
                         if (_a >= n or _b >= n
                                 or (_a not in _gs_hard
@@ -913,6 +930,8 @@ def solve_route_profile(layout, icao: str,
                 _n_weld_pocket = 0
                 for _sc in joint:
                     for _e in _sc["edges"]:
+                        if len(_e) >= 4:
+                            continue      # interval edge (Stage B0)
                         _a, _b, _bud = _e[0], _e[1], _e[2]
                         if (_a >= n or _b >= n
                                 or _a not in _gs_hard
@@ -1783,6 +1802,8 @@ def final_grade_projection(layout, icao: str = "", dem=None,
     if _terrain_like:
         for _sc in joint:
             for _e in _sc["edges"]:
+                if len(_e) >= 4:
+                    continue              # interval edge (Stage B0)
                 _a, _b, _bud = _e[0], _e[1], _e[2]
                 if (_a >= n or _b >= n
                         or (_a not in _terrain_like

@@ -142,6 +142,10 @@ __all__ = [
     "GAP_FILL_MIN_AREA_M2",
     "OPEN_FRONTAGE_SPINE_ENABLED",
     "OPEN_FRONTAGE_CLOSE_M",
+    "ONE_SOLVE_TERRAIN",
+    "ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT",
+    "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE",
+    "ONE_SOLVE_TERRAIN_GRADED_STRIP",
     "APRON_SHOULDER_WIDTH_M",
     "APRON_SHOULDER_MIN_DOWN_SLOPE",
     "APRON_SHOULDER_MAX_DOWN_SLOPE",
@@ -2178,6 +2182,33 @@ OPEN_FRONTAGE_SPINE_ENABLED = (
 # GAP_FILL_MAX_WIDTH_M across is detected; wider regions are legitimately
 # ungoverned terrain and stay with the corridor-band / daylight law.
 OPEN_FRONTAGE_CLOSE_M = GAP_FILL_MAX_WIDTH_M / 2.0
+
+# ── SLICE B — solver absorption of terrain roles (staged) ──────────────
+# docs/slice_b_solver_absorption_design.md, Stage B0.  The absorption moves
+# the three post-solve terrain emitters (runway-end skirt, gap-fill spine,
+# adjacent-ground graded strip) PRE-SOLVE so their ring vertices become
+# first-class solver variables the way the object-bridge plate roles
+# already are (solver_primitives.PAVEMENT_ROLES).  These gates are the
+# ADMISSION scaffolding only: the per-role constraint builders are stages
+# B1-B3 and do NOT exist yet.
+#
+# ONE_SOLVE_TERRAIN is the MASTER gate; the three per-role sub-gates select
+# which terrain graph roles are admitted to the canonical node registry and
+# the solver node list (solver_primitives.admitted_terrain_roles).  With the
+# master gate off (the default) the admitted set is EMPTY, so the node list,
+# the constraint graph and the solve are byte-identical to today.  With the
+# master gate on but every sub-gate off (equally the default) the admitted
+# set is still empty — admission of an empty role set is a structural no-op
+# — which is exactly Stage B0's landing condition: the primitive and the
+# scaffolding exist, nothing is admitted yet.
+ONE_SOLVE_TERRAIN = (
+    _os.environ.get("O4_ONE_SOLVE_TERRAIN", "0") == "1")
+ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT = (
+    _os.environ.get("O4_ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT", "0") == "1")
+ONE_SOLVE_TERRAIN_GAP_FILL_SPINE = (
+    _os.environ.get("O4_ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", "0") == "1")
+ONE_SOLVE_TERRAIN_GRADED_STRIP = (
+    _os.environ.get("O4_ONE_SOLVE_TERRAIN_GRADED_STRIP", "0") == "1")
 
 # APRON edges.  NO code mandates grading beyond an apron edge (positive
 # research finding): the only governed band is the FAA-RECOMMENDED

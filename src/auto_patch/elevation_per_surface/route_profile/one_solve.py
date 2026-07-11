@@ -75,22 +75,117 @@ def _margined_budget(lim, margin):
     return reduced if reduced > _QUANT_MARGIN_FLOOR_M else _QUANT_MARGIN_FLOOR_M
 
 
+def _margined_interval(interval_low, interval_high, margin):
+    """SWEEP bounds for a SIGNED INTERVAL edge (Stage B0, docs/slice_b_solver_
+    absorption_design.md): ``interval_low ≤ (z_i − z_j) ≤ interval_high`` with
+    either side ``None`` (that side unbounded — a ``None`` ceiling permits any
+    rise, a ``None`` floor any drop; the adjacent-ground envelope law's own
+    semantics).
+
+    Emit-quantization margin rule (generalises ``_margined_budget``): shrink
+    each FINITE side INWARD by ``margin`` so the 0.01 m-rounded emitted
+    difference still fits the raw interval — the ceiling moves DOWN
+    (``high − margin``), the floor moves UP (``low + margin``), regardless of
+    the side's sign (a positive floor 2.0 is still narrowed inward to 2.1).
+    ``None`` sides are left untouched (an unbounded side cannot round out of
+    the law).  ``_QUANT_MARGIN_FLOOR_M`` floor semantics carry over from the
+    symmetric case:
+      * a finite side whose magnitude is at or below the floor is left alone
+        (mirrors ``_margined_budget`` passing a ≤-floor budget through — a
+        near-zero bound stays enforceable rather than being narrowed away);
+      * a two-sided interval is never narrowed tighter than the floor WIDTH
+        (``2·_QUANT_MARGIN_FLOOR_M``): if the two shrinks would meet or invert,
+        the interval collapses to ``[midpoint ∓ _QUANT_MARGIN_FLOOR_M]``
+        (mirrors ``_margined_budget`` never reducing a symmetric half-width
+        below the floor).
+    ``margin ≤ 0`` returns the bounds unchanged.  The symmetric slab
+    ``(−budget, +budget)`` fed through this yields ``(−(budget−margin),
+    +(budget−margin))`` — identical to ``_margined_budget`` on both sides — but
+    symmetric edges NEVER pass through here (they keep the untouched
+    ``_margined_budget`` fast path), so symmetric behaviour is byte-identical by
+    construction."""
+    if margin <= 0.0:
+        return interval_low, interval_high
+    # A two-sided interval already at or under the floor WIDTH is left entirely
+    # unchanged (mirrors ``_margined_budget`` passing a ≤-floor budget through):
+    # a genuinely tight slab stays enforceable rather than being narrowed away
+    # or widened.
+    if (interval_low is not None and interval_high is not None
+            and interval_high - interval_low <= 2.0 * _QUANT_MARGIN_FLOOR_M):
+        return interval_low, interval_high
+    new_high = interval_high
+    if interval_high is not None and abs(interval_high) > _QUANT_MARGIN_FLOOR_M:
+        new_high = interval_high - margin
+    new_low = interval_low
+    if interval_low is not None and abs(interval_low) > _QUANT_MARGIN_FLOOR_M:
+        new_low = interval_low + margin
+    # If the two inward shrinks meet or invert, collapse to the floor width
+    # about the midpoint (mirrors ``_margined_budget`` never reducing a
+    # half-width below ``_QUANT_MARGIN_FLOOR_M``).
+    if (new_low is not None and new_high is not None
+            and new_high - new_low < 2.0 * _QUANT_MARGIN_FLOOR_M):
+        midpoint = 0.5 * (interval_low + interval_high)
+        new_low = midpoint - _QUANT_MARGIN_FLOOR_M
+        new_high = midpoint + _QUANT_MARGIN_FLOOR_M
+    return new_low, new_high
+
+
 def _build_adjacency(shape_constraints, n):
     """``adj[i] = [(j, budget), ...]`` where ``budget = cap·length`` (the max
     |Δelev| the edge may carry).  ``budget`` may be 0 (a rect flat-cross edge →
     the two corners stay equal).  Unregulated edges (``None``/negative) are
-    skipped — they impose no cap and so do not bound the envelope."""
+    skipped — they impose no cap and so do not bound the envelope.
+
+    INTERVAL EDGES (Stage B0): a 4-tuple ``(i, j, interval_low, interval_high)``
+    carries a SIGNED interval instead of a symmetric budget.  This adjacency
+    feeds the neighbour-cap-slab heuristics in ``one_profile_solve`` /
+    ``_project_triangle_planes`` / the final-projection edge fairing, all of
+    which model an edge as a SYMMETRIC slab ``|z_i − z_j| ≤ budget`` and cannot
+    represent an asymmetric or one-sided interval.  A conservative symmetric
+    SURROGATE is used here: when both sides are finite, ``budget =
+    max(|interval_low|, |interval_high|)`` (the loosest symmetric slab that
+    still contains the interval — it never wrongly forbids a lawful level); a
+    one-sided interval (either side ``None``) imposes no symmetric bound and is
+    skipped, exactly like an unregulated edge.  The AUTHORITATIVE interval
+    enforcement is the projection sweep in ``feasibility_project``, not this
+    heuristic adjacency.  With every terrain gate off no interval edge is ever
+    produced, so this branch is never taken and the adjacency is byte-identical
+    to today."""
     adj: dict = {}
-    for sc in shape_constraints:
-        for (i, j, lim) in sc["edges"]:
-            if lim is None or lim < 0 or i >= n or j >= n or i == j:
+    for edge in shape_constraints_edges(shape_constraints):
+        if len(edge) >= 4:
+            i, j, interval_low, interval_high = (edge[0], edge[1],
+                                                 edge[2], edge[3])
+            if (interval_low is None or interval_high is None
+                    or i >= n or j >= n or i == j):
+                continue
+            lim = max(abs(interval_low), abs(interval_high))
+            if lim < 0:
                 continue
             adj.setdefault(i, []).append((j, lim))
             adj.setdefault(j, []).append((i, lim))
+            continue
+        i, j, lim = edge
+        if lim is None or lim < 0 or i >= n or j >= n or i == j:
+            continue
+        adj.setdefault(i, []).append((j, lim))
+        adj.setdefault(j, []).append((i, lim))
     return adj
 
 
-def _project_vectorized(elev, iter_edges, n, max_iters, tol):
+def shape_constraints_edges(shape_constraints):
+    """Flatten every ``sc["edges"]`` list into one iterator.  A trivial helper
+    that names the ``shape_constraints`` edge-tuple contract in one place:
+    each edge is either a SYMMETRIC 3-tuple ``(i, j, budget)`` (``|z_i − z_j| ≤
+    budget``; ``budget`` ``None``/negative = unregulated) or an INTERVAL
+    4-tuple ``(i, j, interval_low, interval_high)`` (Stage B0)."""
+    for sc in shape_constraints:
+        for edge in sc["edges"]:
+            yield edge
+
+
+def _project_vectorized(elev, iter_edges, n, max_iters, tol,
+                        interval_bounds_by_index=None):
     """Vectorised DEGREE-NORMALISED JACOBI variant of the feasibility projection
     (gated by ``_FP_VECTORIZE``).  Mutates ``elev`` (a list) in place.
 
@@ -100,22 +195,56 @@ def _project_vectorized(elev, iter_edges, n, max_iters, tol):
     correction is AVERAGED over its active edges (``acc / cnt``).  A hard
     endpoint's weight (``wi``/``wj``) is 0 on every edge it touches, so hard nodes
     never move — same invariant as the scalar path.  Converges to a DIFFERENT
-    (still ≤cap) feasible surface than Gauss-Seidel, hence not byte-identical."""
+    (still ≤cap) feasible surface than Gauss-Seidel, hence not byte-identical.
+
+    INTERVAL EDGES (Stage B0): entries with the ``None`` budget sentinel carry a
+    signed slab ``[s_low, s_high]`` in ``interval_bounds_by_index`` (keyed by
+    their position in ``iter_edges``).  They are partitioned out into a parallel
+    numpy block whose SIGNED-excess corrections scatter into the SAME per-node
+    ``acc``/``cnt`` accumulators in the same iteration, so symmetric and
+    interval edges relax simultaneously under one degree-normalised step.  With
+    no interval edges the symmetric arrays equal today's and the interval block
+    is skipped — behaviour is unchanged (the Jacobi path is not byte-identical
+    to the scalar path by design regardless)."""
     import numpy as np
-    m = len(iter_edges)
-    I = np.fromiter((e[0] for e in iter_edges), dtype=np.intp, count=m)
-    J = np.fromiter((e[1] for e in iter_edges), dtype=np.intp, count=m)
-    B = np.fromiter((e[2] for e in iter_edges), dtype=np.float64, count=m)
-    K = np.fromiter((e[3] for e in iter_edges), dtype=np.int8, count=m)
+    bounds = interval_bounds_by_index or {}
+    sym_edges = []
+    int_edges = []                    # (i, j, s_low, s_high, kind)
+    for edge_index, e in enumerate(iter_edges):
+        if e[2] is None:
+            s_low, s_high = bounds.get(edge_index, (None, None))
+            int_edges.append((e[0], e[1], s_low, s_high, e[3]))
+        else:
+            sym_edges.append(e)
+    m = len(sym_edges)
+    I = np.fromiter((e[0] for e in sym_edges), dtype=np.intp, count=m)
+    J = np.fromiter((e[1] for e in sym_edges), dtype=np.intp, count=m)
+    B = np.fromiter((e[2] for e in sym_edges), dtype=np.float64, count=m)
+    K = np.fromiter((e[3] for e in sym_edges), dtype=np.int8, count=m)
     wi = np.where(K == 0, 0.5, np.where(K == 2, 1.0, 0.0))   # i's share of the fix
     wj = np.where(K == 0, 0.5, np.where(K == 1, 1.0, 0.0))   # j's share
+    have_int = bool(int_edges)
+    if have_int:
+        mi = len(int_edges)
+        _POS_INF = float("inf")
+        _NEG_INF = float("-inf")
+        Ii = np.fromiter((e[0] for e in int_edges), dtype=np.intp, count=mi)
+        Ji = np.fromiter((e[1] for e in int_edges), dtype=np.intp, count=mi)
+        # ``None`` floor → −inf (never violated below); ``None`` ceiling →
+        # +inf (never violated above).
+        Lo = np.fromiter(((_NEG_INF if e[2] is None else e[2])
+                          for e in int_edges), dtype=np.float64, count=mi)
+        Hi = np.fromiter(((_POS_INF if e[3] is None else e[3])
+                          for e in int_edges), dtype=np.float64, count=mi)
+        Ki = np.fromiter((e[4] for e in int_edges), dtype=np.int8, count=mi)
+        wi_int = np.where(Ki == 0, 0.5, np.where(Ki == 2, 1.0, 0.0))
+        wj_int = np.where(Ki == 0, 0.5, np.where(Ki == 1, 1.0, 0.0))
     z = np.asarray(elev, dtype=np.float64)
     for _it in range(max_iters):
         d = z[I] - z[J]
         over = np.abs(d) - B
         active = over > tol
-        if not active.any():
-            break
+        any_active = bool(active.any())
         # signed excess per ACTIVE edge (0 elsewhere) — scatter-add to endpoints
         # via bincount (true C scatter, far faster than np.add.at).
         se = np.where(active, np.sign(d) * over, 0.0)
@@ -124,6 +253,24 @@ def _project_vectorized(elev, iter_edges, n, max_iters, tol):
         af = active.astype(np.float64)
         cnt = (np.bincount(I, weights=af, minlength=n)
                + np.bincount(J, weights=af, minlength=n))
+        if have_int:
+            di = z[Ii] - z[Ji]
+            above = di - Hi                       # >tol ⇒ over the ceiling
+            below = Lo - di                       # >tol ⇒ under the floor
+            active_hi = above > tol
+            active_lo = below > tol
+            active_int = active_hi | active_lo
+            any_active = any_active or bool(active_int.any())
+            # signed excess: +（di−Hi) when above, −（Lo−di）=di−Lo when below.
+            se_int = np.where(active_hi, above,
+                              np.where(active_lo, di - Lo, 0.0))
+            acc += (np.bincount(Ii, weights=-se_int * wi_int, minlength=n)
+                    + np.bincount(Ji, weights=se_int * wj_int, minlength=n))
+            afi = active_int.astype(np.float64)
+            cnt += (np.bincount(Ii, weights=afi, minlength=n)
+                    + np.bincount(Ji, weights=afi, minlength=n))
+        if not any_active:
+            break
         nz = cnt > 0.0
         z[nz] += acc[nz] / cnt[nz]                          # degree-normalised step
     elev[:] = z.tolist()
@@ -288,9 +435,60 @@ def feasibility_project(elev, shape_constraints, hard, *,
     # loose) budget while the validator checks each physical chord at its own
     # allowance (SPJC round 4: 138 of the 153 residual law-true violations
     # were exactly this; min-wins takes SPJC to 0).
+    # SIGNED INTERVAL EDGES (Stage B0, docs/slice_b_solver_absorption_
+    # design.md): an edge is either the SYMMETRIC 3-tuple ``(i, j, budget)``
+    # (``|z_i − z_j| ≤ budget``) — the existing fast path, its arithmetic left
+    # literally untouched below — or the INTERVAL 4-tuple ``(i, j,
+    # interval_low, interval_high)`` (``interval_low ≤ z_i − z_j ≤
+    # interval_high``, either side ``None`` = unbounded).  Interval edges are
+    # collected into ``interval_lim`` and enforced by a SEPARATE projection
+    # path; symmetric edges flow through ``edge_lim`` exactly as before.  With
+    # every terrain gate off no interval edge is produced, so ``interval_lim``
+    # stays empty and the whole interval apparatus below is inert — the
+    # symmetric solve is byte-identical to today.
     edge_lim: dict = {}
+    interval_lim: dict = {}          # canonical pair (a<b) -> (low, high)
     for sc in shape_constraints:
-        for (i, j, lim) in sc["edges"]:
+        for edge in sc["edges"]:
+            if len(edge) >= 4:
+                # INTERVAL EDGE — signed slab on ``z_i − z_j``.
+                i, j, raw_low, raw_high = (edge[0], edge[1],
+                                           edge[2], edge[3])
+                if raw_low is None and raw_high is None:
+                    continue         # unregulated (both sides open)
+                if i >= n or j >= n:
+                    continue
+                i, j = _r(i), _r(j)
+                if i == j:
+                    continue
+                if i < j:
+                    pair, low, high = (i, j), raw_low, raw_high
+                else:
+                    # flipping the pair negates the difference: for (j, i),
+                    # z_j − z_i ∈ [−raw_high, −raw_low] (a ``None`` bound maps
+                    # to the opposite open side).
+                    pair = (j, i)
+                    low = None if raw_high is None else -raw_high
+                    high = None if raw_low is None else -raw_low
+                previous = interval_lim.get(pair)
+                if previous is None:
+                    interval_lim[pair] = (low, high)
+                else:
+                    # TIGHTEST wins per side (min-budget-wins analogue for a
+                    # signed slab): intersect the intervals — the larger floor
+                    # and the smaller ceiling, treating ``None`` as ∓∞.
+                    prev_low, prev_high = previous
+                    new_low = (low if prev_low is None
+                               else low if (low is not None and low > prev_low)
+                               else prev_low)
+                    new_high = (high if prev_high is None
+                                else high if (high is not None
+                                              and high < prev_high)
+                                else prev_high)
+                    interval_lim[pair] = (new_low, new_high)
+                continue
+            # SYMMETRIC EDGE — existing tightest-budget-wins, untouched.
+            i, j, lim = edge
             if lim is None or lim < 0 or i >= n or j >= n:
                 continue
             i, j = _r(i), _r(j)
@@ -300,7 +498,7 @@ def feasibility_project(elev, shape_constraints, hard, *,
             prev = edge_lim.get(e)
             if prev is None or lim < prev:
                 edge_lim[e] = lim
-    if not edge_lim:
+    if not edge_lim and not interval_lim:
         return 0, 0
     # EMIT-QUANTIZATION MARGIN: the SWEEP (and the reach envelope + break
     # detection, so the enforced system stays self-consistent) runs on
@@ -317,6 +515,23 @@ def feasibility_project(elev, shape_constraints, hard, *,
         edges.append((i, j, lim, sweep_lim))
         adj.setdefault(i, []).append((j, sweep_lim))
         adj.setdefault(j, []).append((i, sweep_lim))
+    # INTERVAL EDGES (Stage B0): each carries the RAW interval (for the final
+    # tally, measured against the true law) and the SWEEP interval (raw shrunk
+    # inward by the emit-quantization margin — see ``_margined_interval``).
+    # They do NOT enter the symmetric reach-envelope adjacency ``adj``: the
+    # ``_reach`` Dijkstra and the anchor-contradiction break detection below
+    # model symmetric slabs only, and a directed longest/shortest-path envelope
+    # over signed intervals is a later-stage concern (no interval edges exist
+    # until B1-B3).  Interval-only free nodes are still driven to feasibility by
+    # the POCS sweep (slabs are convex, so convergence is unaffected); they
+    # simply forgo the one-shot envelope warm-start.  ``interval_edges`` items:
+    # ``(i, j, raw_low, raw_high, sweep_low, sweep_high)``.
+    interval_edges = []
+    for (i, j), (raw_low, raw_high) in interval_lim.items():
+        sweep_low, sweep_high = _margined_interval(raw_low, raw_high,
+                                                   quant_margin)
+        interval_edges.append((i, j, raw_low, raw_high,
+                               sweep_low, sweep_high))
 
     # EXACT reachability envelope: ceil_i = min over hard anchors a of
     # (z_a + capdist(a→i)), floor_i = max of (z_a − capdist).  ``budget`` is the
@@ -461,6 +676,25 @@ def feasibility_project(elev, shape_constraints, hard, *,
         if hi and hj:
             continue
         iter_edges.append((i, j, sweep_budget, 1 if hi else (2 if hj else 0)))
+    # INTERVAL EDGES (Stage B0) share the SAME worklist/Jacobi machinery as the
+    # symmetric edges so a node moved by one re-triggers the other in lockstep.
+    # They enter ``iter_edges`` with the SENTINEL ``budget=None`` in slot 2 and
+    # their signed sweep bounds in ``interval_bounds_by_index`` (keyed by the
+    # entry's ``iter_edges`` position).  Being real ``iter_edges`` entries, they
+    # get stable indices and ride the existing ``incident``/``in_pending``/
+    # ``pending`` bookkeeping and the mid-call lazy-append growth for free; the
+    # scalar inner loop and the vectorised path branch on the ``None`` sentinel.
+    # With gates off there are none, so slot 2 is never ``None`` and both sweep
+    # paths run their untouched symmetric arithmetic.  ``kind`` as above (0 both
+    # free, 1 i fixed, 2 j fixed); both-immovable pairs are tallied, never swept.
+    interval_bounds_by_index: dict = {}
+    for (i, j, _rl, _rh, sweep_low, sweep_high) in interval_edges:
+        hi = i in immovable
+        hj = j in immovable
+        if hi and hj:
+            continue
+        interval_bounds_by_index[len(iter_edges)] = (sweep_low, sweep_high)
+        iter_edges.append((i, j, None, 1 if hi else (2 if hj else 0)))
 
     # ── lazy expansion plumbing for the projection loops ─────────────────
     # node → still-lazy entries, REPRESENTATIVE-keyed (a pad-group member's
@@ -549,7 +783,8 @@ def feasibility_project(elev, shape_constraints, hard, *,
     _sweeps_run = 0
     _last_worst = 0.0
     if _vec and iter_edges:
-        _project_vectorized(elev, iter_edges, n, max_iters, tol)
+        _project_vectorized(elev, iter_edges, n, max_iters, tol,
+                            interval_bounds_by_index)
         # Lazy shapes under the vectorised Jacobi: only the FINAL state
         # matters for the certificate (a shape whose nodes END at their seed
         # has its body pairs satisfied at that seed, transient wiggles
@@ -572,7 +807,8 @@ def feasibility_project(elev, shape_constraints, hard, *,
             lazy_entries_pending = still_pending
             if not expanded_any:
                 break
-            _project_vectorized(elev, iter_edges, n, max_iters, tol)
+            _project_vectorized(elev, iter_edges, n, max_iters, tol,
+                                interval_bounds_by_index)
     else:
         # WORKLIST Gauss-Seidel (perf 2026-07-04): the cyclic sweep
         # re-examined EVERY edge up to ``max_iters`` times even when
@@ -601,24 +837,53 @@ def feasibility_project(elev, shape_constraints, hard, *,
             in_pending[edge_index] = 0
             visits += 1
             i, j, budget, kind = iter_edges[edge_index]
-            d = elev[i] - elev[j]
-            ad = -d if d < 0.0 else d                  # inline abs() (hot path)
-            if ad <= budget + tol:
-                continue
-            ex = ad - budget
-            s = 1.0 if d > 0 else -1.0
-            if kind == 0:
-                elev[i] -= s * ex * 0.5
-                elev[j] += s * ex * 0.5
-                moved = (i, j)
-            elif kind == 1:
-                elev[j] += s * ex                      # i fixed → move j up to i
-                moved = (j,)
+            if budget is None:
+                # INTERVAL EDGE (Stage B0): project the difference onto the
+                # signed slab ``[s_low, s_high]``.  ``se`` is the SIGNED excess
+                # (positive ⇒ z_i − z_j above the ceiling, reduce it; negative
+                # ⇒ below the floor, raise it), so the same endpoint-weight
+                # split as the symmetric case applies with ``se`` in place of
+                # ``s·ex``.  A ``None`` side imposes no bound on that direction.
+                s_low, s_high = interval_bounds_by_index[edge_index]
+                d = elev[i] - elev[j]
+                if s_high is not None and d > s_high + tol:
+                    se = d - s_high
+                elif s_low is not None and d < s_low - tol:
+                    se = d - s_low
+                else:
+                    continue
+                if kind == 0:
+                    elev[i] -= se * 0.5
+                    elev[j] += se * 0.5
+                    moved = (i, j)
+                elif kind == 1:
+                    elev[j] += se                      # i fixed → move j
+                    moved = (j,)
+                else:
+                    elev[i] -= se                      # j fixed → move i
+                    moved = (i,)
+                ex = -se if se < 0.0 else se
+                if ex > _last_worst:
+                    _last_worst = ex
             else:
-                elev[i] -= s * ex                      # j fixed → move i
-                moved = (i,)
-            if ex > _last_worst:
-                _last_worst = ex
+                d = elev[i] - elev[j]
+                ad = -d if d < 0.0 else d              # inline abs() (hot path)
+                if ad <= budget + tol:
+                    continue
+                ex = ad - budget
+                s = 1.0 if d > 0 else -1.0
+                if kind == 0:
+                    elev[i] -= s * ex * 0.5
+                    elev[j] += s * ex * 0.5
+                    moved = (i, j)
+                elif kind == 1:
+                    elev[j] += s * ex                  # i fixed → move j up to i
+                    moved = (j,)
+                else:
+                    elev[i] -= s * ex                  # j fixed → move i
+                    moved = (i,)
+                if ex > _last_worst:
+                    _last_worst = ex
             for moved_node in moved:
                 for neighbour_edge in incident.get(moved_node, ()):
                     if not in_pending[neighbour_edge]:
@@ -673,6 +938,21 @@ def feasibility_project(elev, shape_constraints, hard, *,
             worst_ex = max(worst_ex, ex)
             if i in hard and j in hard:
                 bh += 1
+    # INTERVAL EDGES (Stage B0) tally against their RAW signed bounds (the true
+    # law), each ``None`` side never violated.  ``ex`` is the signed slab excess
+    # (how far ``z_i − z_j`` sits outside ``[raw_low, raw_high]``).
+    for (i, j, raw_low, raw_high, _sl, _sh) in interval_edges:
+        d = elev[i] - elev[j]
+        if raw_high is not None and d - raw_high > tol:
+            ex = d - raw_high
+        elif raw_low is not None and raw_low - d > tol:
+            ex = raw_low - d
+        else:
+            continue
+        rem += 1
+        worst_ex = max(worst_ex, ex)
+        if i in hard and j in hard:
+            bh += 1
     if _os.environ.get("O4_STEP_DEBUG") == "1" and force_scalar:
         print(f"    [fp-scalar] sweeps={_sweeps_run} last_worst={_last_worst:.4f} "
               f"rem={rem} worst_ex={worst_ex:.3f} groups={len(groups_eff)} "

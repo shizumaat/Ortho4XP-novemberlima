@@ -37,8 +37,9 @@ from auto_patch.config import (
     CORRIDOR_SPINE_CHAINS)
 from auto_patch.layout import (
     ROLE_APRON, ROLE_BOUNDARY, ROLE_BRIDGE_CAUSEWAY, ROLE_BRIDGE_TRENCH,
-    ROLE_CROSS_CONNECTOR, ROLE_JUNCTION,
-    ROLE_PRIMARY_PARALLEL, ROLE_RUNWAY, ROLE_RUNWAY_CROSSING,
+    ROLE_CROSS_CONNECTOR, ROLE_GRADED_STRIP, ROLE_JUNCTION,
+    ROLE_PRIMARY_PARALLEL, ROLE_RUNWAY, ROLE_RUNWAY_CLEARANCE,
+    ROLE_RUNWAY_CROSSING,
     ROLE_SECONDARY_PARALLEL, ROLE_SERVICE_ROAD, ROLE_SERVICE_JUNCTION,
     ROLE_STUB, ROLE_BUILDING, taxi_shape_code_letter,
 )
@@ -81,6 +82,52 @@ PAVEMENT_ROLES = {
     ROLE_BRIDGE_TRENCH,
     ROLE_BRIDGE_CAUSEWAY,
 }
+
+
+# ── Terrain-role admission scaffolding (Slice B Stage B0) ─────────
+# docs/slice_b_solver_absorption_design.md.  The absorption moves the three
+# post-solve terrain emitters PRE-SOLVE so their ring vertices become
+# first-class solver variables the way the object-bridge plate roles above
+# already are: admitted to the canonical node registry and the solver node
+# list, then (later stages) given constraint builders.  This is the
+# ADMISSION scaffolding ONLY — the per-role constraint builders are stages
+# B1-B3 and do NOT exist yet.
+#
+# The three absorption roles and the layout role each carries today:
+#   * runway-end skirt  → ROLE_RUNWAY_CLEARANCE (ref "runway_end_skirt")  [B1]
+#   * gap-fill spine     → ROLE_GRADED_STRIP  (gap_fill provenance)       [B2]
+#   * graded strip band  → ROLE_GRADED_STRIP  (adjacent_ground bands)     [B3]
+# Gap-fill and graded-strip share ROLE_GRADED_STRIP; their per-role builders
+# (B2 vs B3) distinguish by provenance/ref, but node-list admission is by
+# ROLE membership, so both map to the same admitted role identity here.
+TERRAIN_GRAPH_ROLES = frozenset({ROLE_RUNWAY_CLEARANCE, ROLE_GRADED_STRIP})
+
+
+def admitted_terrain_roles():
+    """The set of TERRAIN GRAPH ROLES whose ring vertices are admitted to the
+    canonical node registry and the solver node list this build (Slice B Stage
+    B0 scaffolding).
+
+    Gated by ``config.ONE_SOLVE_TERRAIN`` (master, default OFF) and the three
+    per-role sub-gates.  Returns a possibly-empty ``frozenset`` of layout role
+    identities.  EMPTY whenever the master gate is off (the default) OR every
+    sub-gate is off — and admission of an empty role set is a structural no-op,
+    so the node list, the constraint graph and the solve are byte-identical to
+    today.  This is exactly Stage B0's landing condition: the primitive and the
+    scaffolding exist; nothing is admitted yet (the per-role constraint
+    builders are B1-B3).  Config is read at CALL TIME (tests toggle the gates
+    via env + module reload / monkeypatch)."""
+    from auto_patch import config as _cfg
+    if not getattr(_cfg, "ONE_SOLVE_TERRAIN", False):
+        return frozenset()
+    admitted: set = set()
+    if getattr(_cfg, "ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT", False):
+        admitted.add(ROLE_RUNWAY_CLEARANCE)
+    if getattr(_cfg, "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", False):
+        admitted.add(ROLE_GRADED_STRIP)
+    if getattr(_cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP", False):
+        admitted.add(ROLE_GRADED_STRIP)
+    return frozenset(admitted)
 
 
 # ── Priority cascade (user 2026-05-22) ───────────────────────────
@@ -1244,8 +1291,20 @@ def _build_node_list(layout):
     """
     bucket_to_idx: dict[tuple[float, float], int] = {}
     nodes: list[tuple[float, float]] = []
+    # TERRAIN-ROLE ADMISSION (Slice B Stage B0, docs/slice_b_solver_absorption_
+    # design.md): gate ON, the admitted terrain graph roles join the registry
+    # and node list exactly the way the object-bridge plate roles do (they are
+    # already in PAVEMENT_ROLES).  The admitted set is EMPTY by default (and
+    # whenever the master gate is off), so ``node_roles is PAVEMENT_ROLES`` and
+    # the iteration — and every node index it assigns — is byte-identical to
+    # today.  (Until stages B1-B3 move construction pre-solve these shapes are
+    # not even present in ``layout.shapes`` at solve time, so admitting the
+    # roles is doubly inert; the hook is the structural seam those stages fill.)
+    _admitted_roles = admitted_terrain_roles()
+    node_roles = (PAVEMENT_ROLES if not _admitted_roles
+                  else PAVEMENT_ROLES | _admitted_roles)
     for s in layout.shapes:
-        if s.role not in PAVEMENT_ROLES:
+        if s.role not in node_roles:
             continue
         if s.polygon is None or s.polygon.is_empty:
             continue
