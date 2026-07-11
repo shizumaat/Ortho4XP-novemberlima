@@ -161,12 +161,22 @@ anchors) — so skirt construction can move pre-solve without a value cycle.
 * Band FOOTPRINTS construct pre-solve from the DEM-seeded estimate with a
   conservative reach margin (the plan's directive); rings immutable; inner
   row = the pavement chain subsequence (slice-A law) — now shared VARIABLES.
-* Zone rows become free variables: envelope interval edges to their host
-  pavement edge stations, transverse caps as cross edges, longitudinal caps
-  along rows, daylight benching (`adjacent_ground_supported_depths`)
-  expressed at construction (station depths), seam-taper pin becomes
-  structural (partition-seam stations share variables with both runs —
-  nothing to pin).
+* Zone rows become free variables — CORRECTED BY FRESH TRACE (2026-07-11,
+  order-2 scout; the original "transverse/longitudinal caps become edges"
+  came from the plan doc and is WRONG for bands): the band value law is a
+  pure PER-VERTEX two-sided envelope clamp of the DEM
+  (`_make_edge_projection_resampler`; `ROLE_GRADE_LIMITS["graded_strip"]`
+  is None — no within-shape rule, no neighbour coupling, no fairing).  The
+  encoding is therefore ONE two-sided envelope interval edge per zone node
+  to its host pavement edge station plus the DEM seed, and NOTHING else —
+  projection of the DEM seed onto the slab reproduces the analytic clamp
+  exactly (parity by construction).  Daylight benching
+  (`adjacent_ground_supported_depths`) stays construction-side (it shapes
+  footprint depths, not values).  The seam-taper pin is ALSO footprint
+  machinery (terminal-station daylight depths) — identity does NOT retire
+  it; it keeps firing unchanged.  Identity retires 2 of 3: the value
+  adoption gate and the band-corner weld go to zero hits gate-ON; the
+  seam-taper pin stays.
 * Taxiway-end WRAP (acceptance 4): the band corridor continues around the
   taxiway end at clearance distance and lands on skirt ring vertices —
   construction geometry in this stage, values free variables like any band.
