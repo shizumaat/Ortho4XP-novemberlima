@@ -84,6 +84,7 @@ from .layout import (
     ROLE_RUNWAY_CROSSING,
     ROLE_SECONDARY_PARALLEL,
     ROLE_STUB,
+    ROLE_TUNNEL_RAMP,
     VERTEX_ALT_MERGE_TOL_M,
     taxi_shape_code_letter,
 )
@@ -136,6 +137,36 @@ _FAN_MAX_STEP_RAD = math.radians(15.0)
 # it (A/B lever); the validator reads the SAME env so the lockstep pair stays
 # aligned.
 _SEAM_TAPER_PIN = os.environ.get("O4_SEAM_TAPER_PIN", "1") != "0"
+# Slice B stage B3 order 3, SCOPE A — taxiway-end WRAP (Noah ruling
+# 2026-07-10, site 60.6972471,-135.0608669; O4_ADJACENT_GROUND_END_WRAP,
+# default OFF — new coverage = new terrain output, flips at B4).  The
+# terrain-facing probe in ``_station_reference`` skips any station whose
+# outward ray lands on an existing shape; at a taxiway end that abuts a
+# runway-END skirt that skip halts coverage before the taxiway end.  With
+# the wrap ON, a TAXIWAY station whose probe lands ONLY on a
+# ``runway_end_skirt`` is NOT skipped (the skirt is the JOIN target, not an
+# obstruction): the corridor marches around the taxiway end at the family's
+# clearance distance, then the exact ``difference(static_union)`` clip +
+# ``_snap_ring_to_static`` land the wrap ring ON the skirt chain verbatim
+# (shared vertices; the to_osm skirt-tier consensus supplies the value —
+# the same identity/adoption bands read pavement with today).  Runways keep
+# the END-edge skip (their skirt law owns them); aprons are unaffected.
+_END_WRAP = os.environ.get("O4_ADJACENT_GROUND_END_WRAP") == "1"
+# Slice B stage B3 order 3, SCOPE B — tunnel-ramp STANDOFF (acceptance
+# criterion 6; the ledgered SPJC strip-onto-mouth-ramp tears;
+# O4_ADJACENT_GROUND_TUNNEL_STANDOFF, default OFF).  Band construction
+# excludes a ``_PAVEMENT_GAP_M`` standoff around tunnel mouth pieces
+# (``tunnel_ramp`` sloped rects + the ``retaining_wall`` U-walls the tunnel
+# portal emits pre-band) — the building/groundside standoff pattern — so a
+# strip never welds onto the steep tunnel-mouth floor.  Object-bridge plates
+# (``bridge_trench`` / ``bridge_causeway``) are HARD graph members bands
+# treat as pavement and are deliberately NOT stood off.  The block is built
+# from ``layout.shapes`` at emit entry, before ``_emit_apron_walls`` appends
+# its own ``retaining_wall`` pieces, so apron-edge walls are naturally
+# excluded (only pre-existing tunnel walls are captured).  Independently
+# flippable from the wrap (they may gate differently at B4).
+_TUNNEL_STANDOFF = os.environ.get(
+    "O4_ADJACENT_GROUND_TUNNEL_STANDOFF") == "1"
 # Lab forensics: O4_ADJACENT_GROUND_DEBUG=1 logs per-shape band counts and
 # every dropped piece, for chasing validator coverage findings.
 _ADJACENT_DEBUG = os.environ.get("O4_ADJACENT_GROUND_DEBUG") == "1"
@@ -1119,6 +1150,44 @@ def _make_solved_band_resampler(entry, coords, ring_alts,
     return resample
 
 
+def _runway_end_skirt_prep(layout):
+    """Prepared union of the runway-END skirt polygons, or ``None`` — the
+    WRAP join target (scope A).  Skirts carry ref ``runway_end_skirt`` on
+    the ``runway_clearance`` role.  Prepared once per emission/construction
+    and passed to the taxiway march so the terrain-facing probe can tell a
+    skirt (join) from real pavement (skip)."""
+    polys = [s.polygon for s in layout.shapes
+             if getattr(s, "ref", None) == "runway_end_skirt"
+             and s.polygon is not None and not s.polygon.is_empty]
+    if not polys:
+        return None
+    try:
+        return prep(unary_union(polys))
+    except _GEOM_EXC:
+        return None
+
+
+def _tunnel_ramp_standoff_block(layout):
+    """1 m buffered union of the tunnel mouth pieces to stand strips off
+    (scope B), or ``None``.  The set is ``tunnel_ramp`` sloped rects + the
+    ``retaining_wall`` U-walls the tunnel portal emits BEFORE the band
+    stage; object-bridge plates (bridge_trench / bridge_causeway) are
+    excluded by construction (they are pavement-equivalent graph members).
+    Built from the current ``layout.shapes`` at emit entry, so the apron-edge
+    ``retaining_wall`` pieces ``_emit_apron_walls`` appends later are not yet
+    present and are naturally excluded."""
+    polys = [s.polygon for s in layout.shapes
+             if s.role in (ROLE_TUNNEL_RAMP, ROLE_RETAINING_WALL)
+             and s.polygon is not None and not s.polygon.is_empty]
+    if not polys:
+        return None
+    try:
+        block = unary_union(polys).buffer(_PAVEMENT_GAP_M)
+        return None if block.is_empty else block
+    except _GEOM_EXC:
+        return None
+
+
 def _family_params(layout, shape, rw_axes):
     """Resolve ``(family, code_number, code_letter, reach, width, axis)``
     for one airside ``shape``; ``None`` if the shape is out of scope.
@@ -1223,7 +1292,8 @@ def _shape_ring_alts(s, coords, sample_dem=None, seed=False):
 def _derive_shape_stations_and_bands(coords, ccw, ring_alts, axis, width,
                                      reach, trigger, floor_depth, ceil_off,
                                      step, prep_static, seam_keys,
-                                     sample_dem, zone_rows_out=None):
+                                     sample_dem, zone_rows_out=None,
+                                     wrap_skirt_prep=None):
     """Frontage detection + corridor MARCH for one airside shape — the band
     FOOTPRINT geometry (everything that decides WHERE the bands are, given the
     edge-altitude references ``ring_alts``).  Returns
@@ -1242,7 +1312,15 @@ def _derive_shape_stations_and_bands(coords, ccw, ring_alts, axis, width,
     frozen-nearest pattern: every ring vertex is a solver variable, so
     the envelope interval edge is mappable to a node index at
     constraint-build time).  ``None`` (every post-solve caller): no
-    collection, byte-identical."""
+    collection, byte-identical.
+
+    ``wrap_skirt_prep`` (Slice B stage B3 order 3, scope A — taxiway-end
+    wrap; passed only for TAXIWAY shapes with O4_ADJACENT_GROUND_END_WRAP
+    ON): a prepared runway-END skirt union.  A station whose terrain-facing
+    probe lands ONLY on a skirt is then kept (the skirt is the wrap's join
+    target, not an obstruction) so the corridor wraps the taxiway end onto
+    the skirt.  ``None`` (default; runways, aprons, gate OFF): the probe
+    skips every static hit exactly as before — byte-identical."""
     def _station_reference(sx, sy, out, alt_value):
         # The station's edge altitude, or None when it is skipped — the
         # END-edge rule (skirt territory) + the terrain-facing probe,
@@ -1253,9 +1331,18 @@ def _derive_shape_stations_and_bands(coords, ccw, ring_alts, axis, width,
                 and abs(out[0] * axis[0] + out[1] * axis[1])
                 > _RING_END_NORMAL_DOT):
             return None
-        if prep_static.contains(Point(sx + out[0] * _RING_PROBE_M,
-                                      sy + out[1] * _RING_PROBE_M)):
-            return None
+        probe = Point(sx + out[0] * _RING_PROBE_M,
+                      sy + out[1] * _RING_PROBE_M)
+        if prep_static.contains(probe):
+            # WRAP (scope A): a taxiway station whose outward probe lands
+            # ONLY on a runway-END skirt is the JOIN target, not an
+            # obstruction — keep it so the corridor wraps the taxiway end
+            # and lands on the skirt chain (the exact clip + snap-to-static
+            # weld the wrap ring onto the skirt verbatim).  Any other static
+            # hit (pavement, another junction) still skips.
+            if not (wrap_skirt_prep is not None
+                    and wrap_skirt_prep.contains(probe)):
+                return None
         return alt_value
 
     stations, st_alts, outs = [], [], []
@@ -1487,6 +1574,10 @@ def construct_adjacent_ground_presolve(layout: PavementLayout, dem,
     }
     seam_keys = (airside_seam_vertex_keys(layout)
                  if _SEAM_TAPER_PIN else set())
+    # Taxiway-end WRAP join target (scope A): built once, passed only for
+    # taxiway shapes with the gate ON (byte-inert otherwise).
+    wrap_skirt_prep = (_runway_end_skirt_prep(layout)
+                       if _END_WRAP else None)
 
     entries: list[dict] = []
     for s in scoped:
@@ -1510,7 +1601,9 @@ def construct_adjacent_ground_presolve(layout: PavementLayout, dem,
             _derive_shape_stations_and_bands(
                 coords, ccw, ring_alts, axis, width, reach, trigger,
                 floor_depth, ceil_off, step, prep_static, seam_keys,
-                sample_dem, zone_rows_out=zone_rows)
+                sample_dem, zone_rows_out=zone_rows,
+                wrap_skirt_prep=(wrap_skirt_prep
+                                 if family == "taxiway" else None))
         if not fill_bands and not cut_bands:
             continue
         # ZONE-NODE GRID (order 2, schema split): the free-variable
@@ -1624,6 +1717,14 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
             groundside_block = unary_union(_gs_polys).buffer(1.0)
         except _GEOM_EXC:
             groundside_block = None
+    # Tunnel-ramp STANDOFF block (scope B): 1 m around the tunnel mouth
+    # pieces, so a strip stands off the steep mouth-ramp floor exactly like
+    # a building.  Built here (before ``_emit_apron_walls`` adds its own
+    # retaining_wall pieces) and only with the gate ON.  Empty (None) at
+    # airports without a mapped tunnel — CYXY carries no tunnel_ramp or
+    # pre-band retaining_wall, so gate-ON is byte-identical there.
+    tunnel_ramp_block = (_tunnel_ramp_standoff_block(layout)
+                         if _TUNNEL_STANDOFF else None)
     static_union = None
     try:
         static_union = unary_union(
@@ -1639,6 +1740,13 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
     except _GEOM_EXC:
         return 0
     boundary = layout.airport_boundary
+    # Taxiway-end WRAP join target (scope A): built once, passed to the
+    # inline (legacy-path) march for taxiway shapes with the gate ON.  The
+    # gate-ON solver path consumes pre-built footprints
+    # (``construct_adjacent_ground_presolve`` already wrapped there), so this
+    # only feeds the inline re-march; byte-inert with the gate OFF.
+    wrap_skirt_prep = (_runway_end_skirt_prep(layout)
+                       if _END_WRAP else None)
 
     # CONFORM-TO-STATIC (chain identity, 2026-07-09): a band row that
     # runs just OUTSIDE a foreign shape's edge (10-15 cm — daylight
@@ -2006,7 +2114,9 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
              stations, st_alts, outs) = _derive_shape_stations_and_bands(
                 coords, ccw, ring_alts, axis, width, reach, trigger,
                 floor_depth, ceil_off, step, prep_static, seam_keys,
-                sample_dem)
+                sample_dem,
+                wrap_skirt_prep=(wrap_skirt_prep
+                                 if family == "taxiway" else None))
         if not fill_bands and not cut_bands:
             continue
 
@@ -2115,6 +2225,13 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
                         # Buffered, NOT exact: strips never abut
                         # groundside (user ruling 2026-07-09).
                         poly = poly.difference(groundside_block)
+                    if (tunnel_ramp_block is not None
+                            and not tunnel_ramp_block.is_empty):
+                        # Buffered standoff (scope B): a strip stands 1 m
+                        # off the tunnel mouth ramp/wall rather than welding
+                        # onto its steep floor — the building standoff
+                        # pattern.  A groove of raw DEM renders harmlessly.
+                        poly = poly.difference(tunnel_ramp_block)
                     if (previous_shapes_union is not None
                             and not previous_shapes_union.is_empty):
                         poly = poly.difference(previous_shapes_union)
