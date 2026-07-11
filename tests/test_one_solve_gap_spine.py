@@ -75,8 +75,18 @@ def _gate_on(monkeypatch):
     monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP", False)
 
 
+def _gate_off(monkeypatch):
+    # Explicit gate-OFF pinning (defaults flipped ON, dev fad621d): the
+    # master gate off keeps the whole admission path closed.
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN", False)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT", False)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", False)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP", False)
+
+
 # ── gate-OFF structural no-op ────────────────────────────────────────
-def test_gate_off_no_admission_no_store():
+def test_gate_off_no_admission_no_store(monkeypatch):
+    _gate_off(monkeypatch)
     layout = _annulus_layout()
     # No pipeline construction gate-OFF -> no store.
     assert getattr(layout, "gap_fill_presolve", None) is None

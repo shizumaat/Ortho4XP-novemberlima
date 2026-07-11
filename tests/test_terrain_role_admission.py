@@ -38,9 +38,21 @@ def _square(x0, y0, side=10.0):
                     (x0, y0 + side)])
 
 
+def _pin_all_gates_off(monkeypatch):
+    # Explicit gate-OFF pinning (defaults flipped ON, dev fad621d): the
+    # master gate off alone keeps every admission path closed, but we pin
+    # the whole stack so the state is unambiguous and env-independent.
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN", False)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT", False)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", False)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP", False)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT", False)
+
+
 # ── admitted_terrain_roles gate logic ────────────────────────────────────
-def test_admitted_empty_with_master_gate_off():
-    assert not cfg.ONE_SOLVE_TERRAIN                    # default OFF
+def test_admitted_empty_with_master_gate_off(monkeypatch):
+    _pin_all_gates_off(monkeypatch)
+    assert not cfg.ONE_SOLVE_TERRAIN                    # pinned OFF
     assert SP.admitted_terrain_roles() == frozenset()
 
 
@@ -90,8 +102,9 @@ def test_declared_terrain_roles_are_not_already_pavement_roles():
 
 
 # ── admitted_terrain_refs (role, ref) granularity (B3 order 1) ────────────
-def test_admitted_refs_empty_with_master_gate_off():
-    assert not cfg.ONE_SOLVE_TERRAIN                    # default OFF
+def test_admitted_refs_empty_with_master_gate_off(monkeypatch):
+    _pin_all_gates_off(monkeypatch)
+    assert not cfg.ONE_SOLVE_TERRAIN                    # pinned OFF
     assert SP.admitted_terrain_refs() == frozenset()
 
 
@@ -173,7 +186,8 @@ def _layout_with_terrain(ref="adjacent_ground"):
     ])
 
 
-def test_node_list_excludes_terrain_role_with_gates_off():
+def test_node_list_excludes_terrain_role_with_gates_off(monkeypatch):
+    _pin_all_gates_off(monkeypatch)
     nodes, b2i = SP._build_node_list(_layout_with_terrain())
     # Only the apron's 4 corners — the graded_strip is not admitted.
     assert len(nodes) == 4
@@ -226,8 +240,13 @@ def test_band_ref_not_admitted_by_gap_gate(monkeypatch):
 
 def test_node_list_identical_object_when_admitted_empty(monkeypatch):
     # Master ON but no sub-gate → admitted empty → the node list is exactly
-    # what the gates-off build produces (byte-identical membership).
+    # what the gates-off build produces (byte-identical membership).  Pin
+    # every sub-gate OFF explicitly (defaults flipped ON, dev fad621d).
     monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN", True)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT", False)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", False)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP", False)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT", False)
     layout_a = _layout_with_terrain()
     nodes_a, _ = SP._build_node_list(layout_a)
     assert len(nodes_a) == 4                            # graded_strip excluded

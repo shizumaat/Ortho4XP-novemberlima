@@ -124,7 +124,10 @@ def rings_on(monkeypatch):
     monkeypatch.setattr(GF, "GAP_FILL_INTERIOR_RINGS_ENABLED", True)
 
 
-def test_gate_off_emits_no_rings():
+def test_gate_off_emits_no_rings(monkeypatch):
+    # Explicit gate-OFF pinning (default flipped ON, dev 53da9c2): mirror
+    # the rings_on fixture's monkeypatch of the same module-level flag.
+    monkeypatch.setattr(GF, "GAP_FILL_INTERIOR_RINGS_ENABLED", False)
     layout = _frame_layout(30.0)
     n = emit_gap_fill_spines(layout, _LOW, 0, 0)
     assert n == 1
