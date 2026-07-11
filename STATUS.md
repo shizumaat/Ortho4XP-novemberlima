@@ -51,12 +51,50 @@
 #   both classes unrepresentable under absorption — more slice-B
 #   delete-it evidence.  Harness: tools/skirt_value_replay.py.
 #
-# IN FLIGHT: STAGE B1 (skirt absorption — construction pre-solve, ring
-# vertices join the registry as HARD PINS at birth-computed profile
-# values via the bridge-plate mechanism; gate
-# ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT, default OFF).  Then B2 gap
-# spines, B3 bands (three orders), B4 charter + legacy deletion, B5
-# projection retirement — per the design doc.
+# ALSO LANDED (later same session):
+# * 9f5e816 STAGE B1 — skirts absorbed as HARD PINS (36 at CYXY);
+#   gate-ON residual IMPROVED 0+2 → 0+1; consensus skirt-tier hits
+#   84→82 (identity retires skirt-vs-pavement; skirt-vs-strip waits
+#   for B3).  Byte-identical gate-OFF, twice-proven.
+# * 1710430 STAGE B2 — gap spines = FREE solver variables (446 nodes,
+#   798 envelope interval edges, fairing law, crown-frozen, open-way
+#   float KEPT — the endpoint-interning clause was a STALE docstring;
+#   8th-10th overturned diagnoses this arc).  ABSORPTION SIGNATURE
+#   measured: Solving +9.7 s / Emitting −9.4 s.  Spine values move off
+#   the analytic target BY DESIGN (median 0.24 m; worst 23.5 m in the
+#   3 largest open-floor gaps) — ★ROUND-7 IN-SIM looks there first.
+#   ★MEASURED NEGATIVE: bare POCS does NOT suffice for interval
+#   subgraphs (main yield call exhausts its visit budget; cheap, but
+#   the B0-deferred interval warm-start is now a HARD B3 PREREQUISITE
+#   before interval edges multiply ~30×).  1 of 17 faces = loud
+#   analytic fallback (non-verbatim skirt-residual boundary, B3).
+# * f366c2f SKIRT AIRSIDE PRECEDENCE SWAP (Noah ruling): the REAL
+#   backwards clip was emit_runway_end_skirts' static_block including
+#   groundside (the queued line numbers pointed at
+#   emit_surface_clearance_cuts, whose exclusion is the SEPARATE
+#   2026-07-09 ruling — untouched).  Groundside now trims around
+#   skirts, chain verbatim.  Firing census 0 at CYXY/KCLT/HECA —
+#   inert everywhere probed; synthetic contract tests carry it.
+#   Ribbons+DEM bridges CONFIRMED retired (vestigial code = slice-C
+#   deletion candidates, incl.
+#   _reconcile_boundary_bridges_with_skirts).
+#
+# NEXT (part-36 continuation order):
+# 1. INTERVAL WARM-START (B3 hard prerequisite, dispatched end of
+#    session — outcome recorded below when it reports): extend the
+#    _reach envelope / break detection over signed interval slabs;
+#    acceptance = the B2 capped call drains (visits ~30M → sane),
+#    Solving wall back toward the 60 s gate-OFF band, byte-identical
+#    with no interval edges present.
+# 2. B3 BANDS (three orders: construction move → variable admission →
+#    wrap + tunnel-ramp standoff), needs: warm-start landed ·
+#    role-vs-ref admission granularity (gap faces and bands both
+#    carry ROLE_GRADED_STRIP) · the B1 reverse-dependency
+#    generalization (groundside/tunnel clip for pre-solve bands).
+# 3. NOAH IN-SIM ROUND 7 before any default flips: the 3 big-gap
+#    spine sites (60.7210897,-135.0776149 first) + the B1/B2 gate-ON
+#    tile · then B4 charter + legacy deletion · B5 projection
+#    retirement.
 #
 # ★ TRUE CURRENT BASELINES (CYXY, this tree — the part-35 numbers
 # below predate the O4_OBJECT_BRIDGE_TERRAIN landing and are STALE):
