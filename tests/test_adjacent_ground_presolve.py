@@ -130,3 +130,49 @@ def test_gate_on_without_store_falls_back_to_inline(monkeypatch):
         layout, dem=object(), tile_lat=0, tile_lon=0, source_runways=_RUNWAYS)
     assert n == n_ref
     assert _emitted_footprints(layout) == _emitted_footprints(layout_ref)
+
+
+def _apron_unsolved(x0, y0, x1, y1):
+    # An apron whose edge altitudes are NOT yet solved (the pre-solve state of
+    # every taxi/apron/junction ring): node_altitudes all None.
+    poly = Polygon([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
+    coords = list(poly.exterior.coords)
+    return BuiltShape(polygon=poly, role=ROLE_APRON, ref="apron",
+                      node_altitudes=[None] * len(coords))
+
+
+def test_worst_case_coverage_catches_in_corridor_dem(monkeypatch):
+    """Slice B stage B3 ORDER 3 coverage closure: where the DEM sits IN the
+    corridor (so the DEM-seeded march sees no excursion and emits nothing) but
+    the SOLVED edge could depart from it, the reach-band worst-case march must
+    still lay a band — the mechanism that retires the analytic-fallback and
+    store-missing coverage gap."""
+    # Flat terrain exactly AT the (unsolved) pavement edge — the DEM-seed
+    # reference equals the DEM, so cut/fill both see zero excursion.
+    monkeypatch.setattr(AG, "_sample_dem",
+                        lambda dem, tl, tn, lat, lon: EDGE_ALT)
+
+    # ── DEM-seed (admission gate OFF): no band at all. ──
+    layout_seed = _FakeLayout([_apron_unsolved(0.0, 0.0, 200.0, 80.0)])
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP", False)
+    AG.construct_adjacent_ground_presolve(
+        layout_seed, dem=object(), tile_lat=0, tile_lon=0,
+        source_runways=_RUNWAYS)
+    assert not getattr(layout_seed, "adjacent_ground_presolve", None), \
+        "DEM in-corridor must produce no DEM-seeded bands"
+
+    # ── Worst-case (admission gate ON): a reach band whose floor sits 20 m
+    # BELOW and ceiling 20 m ABOVE the flat DEM makes both a cut (floor
+    # reference) and a fill (ceiling reference) fire. ──
+    band = lambda x, y: (EDGE_ALT - 20.0, EDGE_ALT + 20.0)
+    monkeypatch.setattr(AG, "_build_construct_reach_band", lambda layout: band)
+    layout_wc = _FakeLayout([_apron_unsolved(0.0, 0.0, 200.0, 80.0)])
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP", True)
+    AG.construct_adjacent_ground_presolve(
+        layout_wc, dem=object(), tile_lat=0, tile_lon=0,
+        source_runways=_RUNWAYS)
+    store = getattr(layout_wc, "adjacent_ground_presolve", None)
+    assert store, "worst-case band must lay a footprint the DEM seed missed"
+    assert store[0]["cut"], "floor reference must fire a CUT band"
+    assert store[0]["fill"], "ceiling reference must fire a FILL band"
+    assert store[0]["zone_nodes"], "coverage must admit zone-node variables"

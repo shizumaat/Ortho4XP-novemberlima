@@ -1289,11 +1289,99 @@ def _shape_ring_alts(s, coords, sample_dem=None, seed=False):
     return ring_alts
 
 
+def _build_construct_reach_band(layout):
+    """Slice B stage B3 ORDER 3 (coverage-gap closure): the pavement REACH
+    BAND, built at PRE-SOLVE construct time.
+
+    The band contract is ``band(x, y) -> (floor, ceiling) | None`` — the
+    interval every solved pavement/spine node's elevation is confined to by
+    the unified grade graph (``reach_band_unified``, the SAME band the solve
+    and the validator use).  It is a pure function of the pavement geometry,
+    the taxi centerlines and the CIFP runway anchors — none of which the
+    solve has yet moved at construct time (runway profiles carry real values
+    from birth; ``build_unified_graph`` derives its runway anchors from the
+    shapes, not from a solved ``elev`` vector) — so the band is computable
+    BEFORE ``per_surface_solve``.  Building it is cheap (~1 s at CYXY: the
+    graph build dominates; the Dijkstra reach fields and the closure are
+    sub-0.1 s).  Returns the closure, or ``None`` on any failure (the caller
+    then keeps the DEM-seeded march — a loud degrade, never a crash).
+
+    NOTE the double build: the solve builds the same band again inside
+    ``reach_band_for``.  The band is a pure geometry closure (index-
+    independent), so the two agree; sharing it across the pre-solve/solve
+    boundary would couple the construct to the runway-flex re-anchoring the
+    solve performs after this point, so the construct deliberately keeps its
+    own (pre-flex) band — a valid bound on the solved value regardless (flex
+    only tightens the reachable interval).
+    """
+    try:
+        from .elevation_per_surface.solver_primitives import _build_node_list
+        from . import grade_graph as _GG
+        from .elevation_per_surface.building_feasibility import (
+            reach_band_unified)
+        _nodes, bucket_to_idx = _build_node_list(layout)
+        ctx = _GG.build_context(layout, bucket_to_idx)
+        G = _GG.build_unified_graph(layout, bucket_to_idx, ctx=ctx)
+        return reach_band_unified(layout, G)
+    except Exception as _band_exc:                            # pragma: no cover
+        UI.vprint(1, f"  [adjacent-ground] WARN: construct reach-band build "
+                     f"FAILED ({_band_exc!r}) — DEM-seeded march kept "
+                     f"(coverage degrade).")
+        return None
+
+
+def _worst_case_ring_alts(s, coords, band, sample_dem):
+    """Slice B stage B3 ORDER 3 worst-case pavement-edge references for the
+    pre-solve construct march.
+
+    Returns ``(ring_alts_cut, ring_alts_fill)`` — two per-vertex edge-altitude
+    arrays that bound the SOLVED edge value from the two violating sides, so
+    the marched band FOOTPRINT is a SUPERSET of any solved outcome BY
+    CONSTRUCTION (no magic margin — the bound IS the reach band):
+
+      * ``ring_alts_cut`` uses the band FLOOR: a CUT fires where terrain rises
+        above ``edge + ceiling_offset``; the solved edge can drop no lower
+        than the floor, so the floor maximises the cut set — every solved
+        cut station is covered (``solved_edge >= floor`` ⇒
+        ``{terrain > solved+ceil} ⊆ {terrain > floor+ceil}``).
+      * ``ring_alts_fill`` uses the band CEILING: a FILL fires where terrain
+        falls below ``edge − floor_depth``; the solved edge can rise no higher
+        than the ceiling, so the ceiling maximises the fill set.
+
+    (SCOUT CORRECTION 2026-07-11: the work-order's parenthetical had these
+    swapped — "band CEILING for cut … band FLOOR for fill" — which yields the
+    SUBSET, not the superset.  Cut needs the LOWEST edge, fill the HIGHEST.
+    Derived above and confirmed against the marchers' detection tests
+    ``dd > ref + ceil`` / ``dd < ref − floor``.)
+
+    Only entries the shape does NOT yet carry a real value for (the unsolved
+    taxi/apron/junction rings, ``node_altitudes[i] is None``) are substituted;
+    runway rings keep their CIFP values in both arrays.  Where the band is
+    ``None`` (an unreachable vertex) the DEM seed is kept — the pre-order-3
+    behaviour, no regression."""
+    base = _shape_ring_alts(s, coords)     # no seed → None where unsolved
+    ring_alts_cut = list(base)
+    ring_alts_fill = list(base)
+    for i, (x, y) in enumerate(coords):
+        if base[i] is not None:
+            continue
+        bv = band(x, y) if band is not None else None
+        if bv is not None and bv[0] is not None and bv[1] is not None:
+            ring_alts_cut[i] = float(bv[0])       # floor  → cut coverage
+            ring_alts_fill[i] = float(bv[1])      # ceiling → fill coverage
+        else:
+            dd = sample_dem(x, y)
+            if dd is not None:
+                ring_alts_cut[i] = float(dd)
+                ring_alts_fill[i] = float(dd)
+    return ring_alts_cut, ring_alts_fill
+
+
 def _derive_shape_stations_and_bands(coords, ccw, ring_alts, axis, width,
                                      reach, trigger, floor_depth, ceil_off,
                                      step, prep_static, seam_keys,
                                      sample_dem, zone_rows_out=None,
-                                     wrap_skirt_prep=None):
+                                     wrap_skirt_prep=None, ring_alts_fill=None):
     """Frontage detection + corridor MARCH for one airside shape — the band
     FOOTPRINT geometry (everything that decides WHERE the bands are, given the
     edge-altitude references ``ring_alts``).  Returns
@@ -1320,7 +1408,17 @@ def _derive_shape_stations_and_bands(coords, ccw, ring_alts, axis, width,
     probe lands ONLY on a skirt is then kept (the skirt is the wrap's join
     target, not an obstruction) so the corridor wraps the taxiway end onto
     the skirt.  ``None`` (default; runways, aprons, gate OFF): the probe
-    skips every static hit exactly as before — byte-identical."""
+    skips every static hit exactly as before — byte-identical.
+
+    ``ring_alts_fill`` (Slice B stage B3 order 3, coverage closure; passed
+    only by the pre-solve construct march under band admission): a SECOND
+    per-vertex edge-altitude array — the reach-band CEILING — used for FILL
+    detection, while the positional ``ring_alts`` carries the reach-band
+    FLOOR used for CUT detection (see ``_worst_case_ring_alts``).  ``None``
+    (default; every post-solve/emit caller): both directions read the single
+    ``ring_alts`` — byte-identical to before order 3."""
+    if ring_alts_fill is None:
+        ring_alts_fill = ring_alts
     def _station_reference(sx, sy, out, alt_value):
         # The station's edge altitude, or None when it is skipped — the
         # END-edge rule (skirt territory) + the terrain-facing probe,
@@ -1346,6 +1444,11 @@ def _derive_shape_stations_and_bands(coords, ccw, ring_alts, axis, width,
         return alt_value
 
     stations, st_alts, outs = [], [], []
+    # FILL-direction reference per station (order 3 worst-case coverage).
+    # Identical object as ``st_alts`` when ``ring_alts_fill is ring_alts``
+    # (the default) so the fill/cut split is a structural no-op off order 3.
+    st_alts_fill: list = st_alts if ring_alts_fill is ring_alts else []
+    _split_refs = st_alts_fill is not st_alts
     is_ring_vertex: list[bool] = []
     at_seam: list[bool] = []
     # Frozen-nearest host pavement ring vertex per station (zone-row
@@ -1363,6 +1466,8 @@ def _derive_shape_stations_and_bands(coords, ccw, ring_alts, axis, width,
         out = (u[1], -u[0]) if ccw else (-u[1], u[0])
         a0 = ring_alts[i]
         a1 = ring_alts[i + 1]
+        a0f = ring_alts_fill[i]
+        a1f = ring_alts_fill[i + 1]
         # CORNER FAN (coverage): at a CONVEX ring corner insert stations AT
         # the corner with normals interpolated across the turn so the band
         # outer row follows the fan arc piecewise (see the emitter's inline
@@ -1397,6 +1502,9 @@ def _derive_shape_stations_and_bands(coords, ccw, ring_alts, axis, width,
                     stations.append((eax, eay))
                     st_alts.append(_station_reference(
                         eax, eay, fan_out, a0))
+                    if _split_refs:
+                        st_alts_fill.append(_station_reference(
+                            eax, eay, fan_out, a0f))
                     outs.append(fan_out)
                     is_ring_vertex.append(True)
                     at_seam.append(False)
@@ -1416,6 +1524,12 @@ def _derive_shape_stations_and_bands(coords, ccw, ring_alts, axis, width,
                     sx, sy, out, a0 + t * (a1 - a0))
             stations.append((sx, sy))
             st_alts.append(ref)
+            if _split_refs:
+                ref_f = None
+                if a0f is not None and a1f is not None:
+                    ref_f = _station_reference(
+                        sx, sy, out, a0f + t * (a1f - a0f))
+                st_alts_fill.append(ref_f)
             outs.append(out)
             is_ring_vertex.append(k == 0)
             at_seam.append((k == 0 and edge_a_seam)
@@ -1462,9 +1576,12 @@ def _derive_shape_stations_and_bands(coords, ccw, ring_alts, axis, width,
                     if zone_rows_out is not None else None)
 
     # FILL (DEM below floor, zones 1-2) then CUT (DEM above ceiling): the
-    # runway-end skirt fill/cut builders' lateral twins.
+    # runway-end skirt fill/cut builders' lateral twins.  ORDER 3 worst-case
+    # coverage: FILL detects against the reach-band CEILING (``st_alts_fill``),
+    # CUT against the reach-band FLOOR (``st_alts``); off order 3 the two
+    # arrays are the same object, so this is byte-identical.
     fill_bands = _build_fill_bands(
-        stations, st_alts, outs, [width] * m, floor_depth,
+        stations, st_alts_fill, outs, [width] * m, floor_depth,
         {ADJACENT_GROUND_LIP_WIDTH_M}, trigger, step, sample_dem,
         is_ring_vertex, at_seam, zone_collect=_collect_fill)
     cut_bands = _build_cut_bands(
@@ -1579,6 +1696,22 @@ def construct_adjacent_ground_presolve(layout: PavementLayout, dem,
     wrap_skirt_prep = (_runway_end_skirt_prep(layout)
                        if _END_WRAP else None)
 
+    # ── ORDER 3 WORST-CASE COVERAGE (coverage-gap closure) ──────────────
+    # The pre-solve march seeds unsolved pavement edges from the DEM, which
+    # tracks the in-corridor terrain and so emits NO band exactly where the
+    # SOLVED edge departs from the DEM (flattened taxiways, raised aprons,
+    # the taxiway end onto a skirt) — the 1,285 analytic-fallback vertices
+    # and 24 store-missing shapes.  Under band ADMISSION (the only path that
+    # solves the zone nodes and reads them back), march instead against the
+    # reach-band WORST CASE per edge (``_worst_case_ring_alts``): floor for
+    # cut, ceiling for fill.  The band bounds every solved edge, so the
+    # footprint is a SUPERSET of any solved outcome by construction and the
+    # emit-time resampler always finds a covering row.  Gate OFF (order-1
+    # construct-only, no admission): DEM seed kept, byte-identical.
+    from .config import ONE_SOLVE_TERRAIN_GRADED_STRIP as _ADMIT_COVERAGE
+    _reach_band = (_build_construct_reach_band(layout)
+                   if _ADMIT_COVERAGE else None)
+
     entries: list[dict] = []
     for s in scoped:
         params = _family_params(layout, s, rw_axes)
@@ -1595,7 +1728,14 @@ def construct_adjacent_ground_presolve(layout: PavementLayout, dem,
             continue
         if len(coords) < 4:
             continue
-        ring_alts = _shape_ring_alts(s, coords, sample_dem, seed=True)
+        if _reach_band is not None:
+            # Worst-case coverage: floor-referenced CUT ring + ceiling-
+            # referenced FILL ring (runway edges keep CIFP values in both).
+            ring_alts, ring_alts_fill = _worst_case_ring_alts(
+                s, coords, _reach_band, sample_dem)
+        else:
+            ring_alts = _shape_ring_alts(s, coords, sample_dem, seed=True)
+            ring_alts_fill = None
         zone_rows: list[dict] = []
         fill_bands, cut_bands, _st, _sa, _ou = \
             _derive_shape_stations_and_bands(
@@ -1603,7 +1743,8 @@ def construct_adjacent_ground_presolve(layout: PavementLayout, dem,
                 floor_depth, ceil_off, step, prep_static, seam_keys,
                 sample_dem, zone_rows_out=zone_rows,
                 wrap_skirt_prep=(wrap_skirt_prep
-                                 if family == "taxiway" else None))
+                                 if family == "taxiway" else None),
+                ring_alts_fill=ring_alts_fill)
         if not fill_bands and not cut_bands:
             continue
         # ZONE-NODE GRID (order 2, schema split): the free-variable
