@@ -203,16 +203,22 @@
 #    ring is orthogonal to B4; B4 unblocked from the ring (held
 #    only on the KBNA perf fix as flip hygiene).
 #    ★ROUND-8 FINDING (Noah in-sim, 2026-07-11): the violation-gated
-#    ARCS create sharp cliffs at every arc end (66 fragmented
-#    chains).  REVISION DISPATCHED per Noah's model: rings = ALWAYS
-#    complete unbroken closed loops; the gating moves into the
-#    VALUES (station value = clamp(terrain, floor, ceiling) — the
-#    exterior per-vertex law verbatim; lawful terrain = value no-op,
-#    ring invisible); per-GAP all-or-nothing economy skip; collapse
-#    ladder + hole-in-middle + central-spine rungs stay; the radial
-#    ring-2 edge into the open core stays (one clean continuous
-#    edge).  Deletes the trigger/taper/per-arc machinery — a net
-#    simplification.
+#    ARCS create sharp cliffs at every arc end.  ★REVISION LANDED
+#    05bf09f (Noah's model): complete unbroken closed loops (26
+#    ways / 24 closed / 2 documented single-cut opens / 1,770
+#    nodes); gating moved into the VALUES (clamp(terrain, floor,
+#    ceiling), floor at min(d, band_width) — killed the 174%/23 m
+#    corner-diagonal cliff class); two-sided 5% value bench;
+#    per-gap economy skip; spine trimmed to the ring-2 core (a
+#    full spine must cross closed loops); worst along-ring step
+#    10.7% bound-limited, zero pin-to-terrain jumps; sites hold
+#    4.0%/4.6%; audit zero new; ring-off byte-identical; zero
+#    solver growth.  ★ROUND-9 BAKE = plain defaults +
+#    O4_AUTO_PATCH_REBUILD=1 + restart Ortho4XP.  Look at: the
+#    ring collars (should read as continuous graded bands like a
+#    taxiway exterior) · the ring-2 edge into the open core
+#    (lawful) · the 2 open chains (one-line closure options if
+#    they read badly).
 #    ★★★ RINGS LANDED b3cd998 + round-8 default flip 53da9c2:
 #    evidence site 74%→4.0% (ring 2 rides the exact 5% band max) ·
 #    gap #3 185%→~1.5-5% · 66 chains / 709 nodes fleet-wide
