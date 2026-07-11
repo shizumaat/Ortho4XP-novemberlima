@@ -80,16 +80,21 @@
 #   _reconcile_boundary_bridges_with_skirts).
 #
 # NEXT (part-36 continuation order):
-# 1. INTERVAL WARM-START (B3 hard prerequisite, dispatched end of
-#    session — outcome recorded below when it reports): extend the
-#    _reach envelope / break detection over signed interval slabs;
-#    acceptance = the B2 capped call drains (visits ~30M → sane),
-#    Solving wall back toward the 60 s gate-OFF band, byte-identical
-#    with no interval edges present.
+# 1. INTERVAL WARM-START — LANDED 908dea4 (same session).  Diagnosis:
+#    4 disjoint-slab interval edges = 26.96M of 27.75M capped visits
+#    (two-parent slabs going disjoint as stations move; the B2 seed
+#    prune could not see it).  Fix: _reach propagates DIRECTED bounds
+#    over signed slabs; floor>ceiling break quarantines the
+#    infeasible; strict pop guards kept.  Main yield 27.75M capped →
+#    31,134 DRAINED; replay 7.3 s → 0.05 s; gate-ON build 150 s;
+#    EVERY check_grade class improved or held (within-shape
+#    1240→1108, plane 4→2); nodes 4,403; gates-OFF byte-identical.
+#    Harness: tools/interval_reach_replay.py (O4_DUMP_SOLVE_STATE
+#    snapshot → 0.05 s standalone projection replay).
 # 2. B3 BANDS (three orders: construction move → variable admission →
-#    wrap + tunnel-ramp standoff), needs: warm-start landed ·
-#    role-vs-ref admission granularity (gap faces and bands both
-#    carry ROLE_GRADED_STRIP) · the B1 reverse-dependency
+#    wrap + tunnel-ramp standoff) — UNBLOCKED on the warm-start;
+#    still needs: role-vs-ref admission granularity (gap faces and
+#    bands both carry ROLE_GRADED_STRIP) · the B1 reverse-dependency
 #    generalization (groundside/tunnel clip for pre-solve bands).
 # 3. NOAH IN-SIM ROUND 7 before any default flips: the 3 big-gap
 #    spine sites (60.7210897,-135.0776149 first) + the B1/B2 gate-ON
