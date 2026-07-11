@@ -102,11 +102,22 @@
 #    pre-solve march seeing the UNDECIMATED pre-densification
 #    pavement ring; resolution = order 2's shared-variable rings; the
 #    construct gate must NOT flip default before order 2 closes it.
-#    ORDER 2 (variable admission — zone rows as free variables,
-#    envelope interval edges, inner row = pavement chain identity,
-#    seam-taper structural, analytic valuation dies) dispatched;
-#    outcome recorded here when it reports.  ORDER 3 = wrap +
-#    tunnel-ramp standoff, after.
+#    ORDER 2 LANDED 94f462f (three scout refutations ratified first,
+#    design doc 79800ab — band law = PER-VERTEX two-sided DEM clamp,
+#    NO caps/fairing; seam-taper pin = footprint machinery, stays;
+#    two-phase store + emit re-derivation over the FINAL chain):
+#    82 bands COLLAPSED TO 67 ✓ · 7,121 interval edges all DRAINED
+#    (warm-start held at 10x) · byte gates pass · check_grade rows
+#    unchanged · MISSES RECORDED: nodes 4,415 (+12, decimation
+#    yield) · criterion-8 gate-ON Solving +36.8 s / NO Emitting
+#    shrink — the emit march survives until the SEED-VS-SOLVED
+#    COVERAGE GAP closes (24 shapes / 1,285 fallback vertices; the
+#    plan's conservative reach margin was never built).  ORDER 2.5
+#    dispatched = reach margin + frozen-depth consumption + emit
+#    DEM-march deletion (the perf payoff).  ORDER 3 = wrap +
+#    tunnel-ramp standoff, after.  Round-7 in-sim additions: the
+#    -12 m law-true dip at 60.71804,-135.07291 (analytic had
+#    flattened genuine terrain) + the three big-gap spine sites.
 # 3. NOAH IN-SIM ROUND 7 before any default flips: the 3 big-gap
 #    spine sites (60.7210897,-135.0776149 first) + the B1/B2 gate-ON
 #    tile · then B4 charter + legacy deletion · B5 projection
