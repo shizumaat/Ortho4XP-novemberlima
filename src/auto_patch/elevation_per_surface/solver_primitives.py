@@ -144,6 +144,31 @@ def admitted_terrain_refs():
     if getattr(_cfg, "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", False):
         admitted.add((ROLE_GRADED_STRIP, "gap_fill_spine"))
     if getattr(_cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP", False):
+        # HARD DEPENDENCY CHAIN (Slice B stage B3 order 2, coordinator
+        # ruling): band variable admission builds on (a) the pre-solve
+        # footprint construction (the zone-node grid lives on the
+        # construct store), (b) the B1 pre-solve skirts (band footprints
+        # probe the skirt rings in the pre-solve static block), and
+        # (c) the B2 gap-spine admission (the interval-aware reach
+        # envelope and the writeback split are shared machinery, and the
+        # acceptance is only defined on the full stack).  A partial gate
+        # set is a misconfiguration that would silently measure the
+        # wrong thing — fail LOUDLY instead.
+        _missing = [name for name, on in (
+            ("O4_ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT",
+             getattr(_cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT",
+                     False)),
+            ("O4_ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT",
+             getattr(_cfg, "ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT", False)),
+            ("O4_ONE_SOLVE_TERRAIN_GAP_FILL_SPINE",
+             getattr(_cfg, "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", False)),
+        ) if not on]
+        if _missing:
+            raise RuntimeError(
+                "O4_ONE_SOLVE_TERRAIN_GRADED_STRIP=1 (adjacent-ground "
+                "band variable admission, Slice B stage B3 order 2) "
+                "requires ALL of its dependency gates ON; missing: "
+                + ", ".join(_missing))
         admitted.add((ROLE_GRADED_STRIP, "adjacent_ground"))
     return frozenset(admitted)
 
@@ -1369,6 +1394,29 @@ def _build_node_list(layout):
                 if k not in bucket_to_idx:
                     bucket_to_idx[k] = len(nodes)
                     nodes.append((float(x), float(y)))
+    # ADJACENT-GROUND ZONE-ROW ADMISSION (Slice B stage B3 order 2):
+    # the band zone-row vertices (every band row at lateral distance
+    # > 0 from the pavement ring — the lip row, the graded-width row,
+    # the daylight row) become FREE solver variables.  Their geometry
+    # was marched pre-solve by ``adjacent_ground.construct_adjacent_
+    # ground_presolve`` (the order-1 construct store, schema-split at
+    # order 2 to carry the ``zone_nodes`` grid).  They intern through
+    # the same canonical registry (0.5 m).  The FIRST zone index is
+    # stashed on the layout so the constraint builder can classify a
+    # zone node whose bucket was already claimed by a PAVEMENT or
+    # gap-spine node (identity adoption — no band edge may constrain a
+    # pavement variable; pavement value always wins as an identity).
+    # Gate OFF (or no store): the loop body never runs — byte-inert.
+    layout._adjacent_ground_first_zone_index = len(nodes)
+    if (ROLE_GRADED_STRIP, "adjacent_ground") in _admitted_refs:
+        for _band_entry in (getattr(layout, "adjacent_ground_presolve",
+                                    None) or ()):
+            for _zone_node in _band_entry.get("zone_nodes", ()):
+                x, y = _zone_node["xy"]
+                k = layout.canonical_points.get_or_add(float(x), float(y))
+                if k not in bucket_to_idx:
+                    bucket_to_idx[k] = len(nodes)
+                    nodes.append((float(x), float(y)))
     return nodes, bucket_to_idx
 
 
@@ -1475,6 +1523,91 @@ def _build_gap_spine_constraints(layout, bucket_to_idx, seed_elev=None):
               f"{n_pruned} node(s) kept the nearer parent's interval "
               f"only (the analytic law's own fallback rule)")
     return sc_out, spine_idx, chains
+
+
+def _build_adjacent_ground_zone_constraints(layout, bucket_to_idx):
+    """Stage B3 order 2 constraint entries for the adjacent-ground band
+    zone rows (ratified mechanism 2026-07-11; the LAW trace — the order-2
+    scout refutation, recorded in the corrected design doc: the analytic
+    band valuation is a PER-VERTEX two-sided envelope clamp of the DEM
+    against the host-edge-referenced corridor,
+
+        value = clamp(dem, edge + floor_offset(d), edge + ceiling_offset(d)),
+
+    with NO neighbour coupling of any kind — ``config.ROLE_GRADE_LIMITS
+    ['graded_strip'] is None``, and the only frontage coupling in the
+    band machinery is the daylight benching of FOOTPRINT DEPTHS, which
+    stays construction-side.  The encoding is therefore exactly ONE
+    two-sided envelope interval edge per zone node to its frozen-nearest
+    host pavement ring vertex (the B2 frozen-nearest pattern) plus the
+    DEM seed ``_seed_elevations`` already provides: no transverse cross
+    edges, no longitudinal edges, no fairing.  Projection of the DEM
+    seed onto the signed slab IS the analytic clamp).
+
+    IDENTITY-COLLISION RULE: a zone node whose canonical bucket resolves
+    to a PRE-EXISTING solver node (a pavement ring vertex, a gap-spine
+    node — index below ``layout._adjacent_ground_first_zone_index``)
+    gets NO edge: the band ADOPTS that variable's value by identity
+    (pavement value always wins at a pavement node — an identity, not
+    an arbitration; a band law edge must never constrain a pavement
+    variable).  A zone node whose bucket was already claimed by an
+    EARLIER zone node (cross-row or cross-shape interning inside the
+    0.5 m registry tolerance) also gets no second edge — the first
+    claimant's corridor governs; attaching both could hand the POCS
+    sweep two disjoint slabs on one variable (the measured B2
+    empty-intersection ping-pong).  Both collision classes are counted
+    and reported (the design doc's open-question-2 assertion).
+
+    Returns ``(sc_entries, zone_idx_set, collision_counts)`` where
+    ``collision_counts`` is ``(n_pavement_adopted, n_cross_claimed)``."""
+    entries = getattr(layout, "adjacent_ground_presolve", None) or []
+    first_zone = getattr(layout, "_adjacent_ground_first_zone_index", 0)
+    cps = layout.canonical_points
+    sc_out: list[dict] = []
+    zone_idx: set[int] = set()
+    claimed: set[int] = set()
+    n_pavement_adopted = 0
+    n_cross_claimed = 0
+    for entry in entries:
+        edges: list[tuple] = []
+        node_list: list[int] = []
+        for zone_node in entry.get("zone_nodes", ()):
+            x, y = zone_node["xy"]
+            i = bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+            if i is None:
+                continue
+            node_list.append(i)
+            zone_idx.add(i)
+            if i < first_zone:
+                n_pavement_adopted += 1
+                continue
+            if i in claimed:
+                n_cross_claimed += 1
+                continue
+            claimed.add(i)
+            hx, hy = zone_node["host"]
+            j = bucket_to_idx.get(cps.get_or_add(float(hx), float(hy)))
+            if j is None or j == i:
+                continue
+            floor_off = zone_node["floor_off"]
+            ceil_off = zone_node["ceil_off"]
+            if floor_off is None and ceil_off is None:
+                continue
+            edges.append((i, j, floor_off, ceil_off))
+        if not node_list:
+            continue
+        sc_out.append({"nodes": node_list, "edges": edges, "flat": False,
+                       "flat_pairs": (), "area": 0.0,
+                       "role": ROLE_GRADED_STRIP,
+                       "ref": "adjacent_ground"})
+    if _os.environ.get("O4_STEP_DEBUG") == "1" and (
+            n_pavement_adopted or n_cross_claimed):
+        print(f"    [adjacent-ground-zone] identity collisions: "
+              f"{n_pavement_adopted} zone node(s) adopted a pre-existing "
+              f"pavement/spine variable (no band edge), "
+              f"{n_cross_claimed} interned with an earlier zone node "
+              f"(first claimant's corridor governs)")
+    return sc_out, zone_idx, (n_pavement_adopted, n_cross_claimed)
 
 
 

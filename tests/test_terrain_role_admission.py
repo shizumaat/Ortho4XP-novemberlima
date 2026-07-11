@@ -71,7 +71,13 @@ def test_each_subgate_admits_its_role(monkeypatch):
     monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", True)
     assert SP.admitted_terrain_roles() == frozenset({ROLE_GRADED_STRIP})
 
+    # The band-admission sub-gate is HARD-CHAINED (B3 order 2) onto the
+    # construct gate and the B1 + B2 sub-gates — the full stack admits
+    # both roles.
     monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT", True)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", True)
+    monkeypatch.setattr(
+        cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT", True)
     monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP", True)
     assert SP.admitted_terrain_roles() == frozenset(
         {ROLE_RUNWAY_CLEARANCE, ROLE_GRADED_STRIP})
@@ -102,12 +108,48 @@ def test_each_subgate_admits_its_role_ref_pair(monkeypatch):
     assert SP.admitted_terrain_refs() == frozenset(
         {(ROLE_GRADED_STRIP, "gap_fill_spine")})
 
-    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", False)
-    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP", True)
     # The band-admission gate maps to the adjacent_ground ref specifically —
-    # NOT the gap_fill_spine ref that shares ROLE_GRADED_STRIP.
+    # NOT the gap_fill_spine ref that shares ROLE_GRADED_STRIP.  Since B3
+    # order 2 it is HARD-CHAINED onto construct + B1 + B2, so the full
+    # stack is required and the admitted set is the full ref set.
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT", True)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", True)
+    monkeypatch.setattr(
+        cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT", True)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP", True)
     assert SP.admitted_terrain_refs() == frozenset(
-        {(ROLE_GRADED_STRIP, "adjacent_ground")})
+        {(ROLE_RUNWAY_CLEARANCE, "runway_end_skirt"),
+         (ROLE_GRADED_STRIP, "gap_fill_spine"),
+         (ROLE_GRADED_STRIP, "adjacent_ground")})
+
+
+def test_band_admission_gate_hard_errors_on_partial_chain(monkeypatch):
+    # B3 order 2 (coordinator ruling): the band-admission sub-gate
+    # HARD-ERRORS unless the construct gate and the B1 + B2 sub-gates
+    # are ALL on — a partial gate set would silently measure the wrong
+    # thing.
+    import pytest
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN", True)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT", True)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", True)
+    monkeypatch.setattr(
+        cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT", False)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP", True)
+    with pytest.raises(RuntimeError, match="GRADED_STRIP_CONSTRUCT"):
+        SP.admitted_terrain_refs()
+    monkeypatch.setattr(
+        cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT", True)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", False)
+    with pytest.raises(RuntimeError, match="GAP_FILL_SPINE"):
+        SP.admitted_terrain_refs()
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", True)
+    monkeypatch.setattr(
+        cfg, "ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT", False)
+    with pytest.raises(RuntimeError, match="RUNWAY_END_SKIRT"):
+        SP.admitted_terrain_refs()
+    # Master gate OFF keeps every sub-gate inert (no error, no admission).
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN", False)
+    assert SP.admitted_terrain_refs() == frozenset()
 
 
 def test_admitted_roles_is_the_ref_set_role_projection(monkeypatch):
@@ -116,6 +158,8 @@ def test_admitted_roles_is_the_ref_set_role_projection(monkeypatch):
     monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN", True)
     monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT", True)
     monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", True)
+    monkeypatch.setattr(
+        cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT", True)
     monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP", True)
     assert SP.admitted_terrain_roles() == frozenset(
         {ROLE_RUNWAY_CLEARANCE, ROLE_GRADED_STRIP})
@@ -136,9 +180,19 @@ def test_node_list_excludes_terrain_role_with_gates_off():
     assert (100.0, 100.0) not in nodes
 
 
-def test_node_list_admits_band_ref_when_band_gate_on(monkeypatch):
+def _enable_band_admission_chain(monkeypatch):
+    # The full hard-chained gate stack the band admission requires
+    # (B3 order 2).
     monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN", True)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT", True)
+    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", True)
+    monkeypatch.setattr(
+        cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT", True)
     monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP", True)
+
+
+def test_node_list_admits_band_ref_when_band_gate_on(monkeypatch):
+    _enable_band_admission_chain(monkeypatch)
     nodes, b2i = SP._build_node_list(_layout_with_terrain())
     # Apron (4) + adjacent_ground band (4) now share the registry / node list.
     assert len(nodes) == 8
@@ -147,10 +201,11 @@ def test_node_list_admits_band_ref_when_band_gate_on(monkeypatch):
 
 def test_gap_face_ref_not_admitted_by_band_gate(monkeypatch):
     # The collision resolution: a ROLE_GRADED_STRIP shape whose ref is the
-    # GAP-FILL family is NOT admitted through the ring hook when only the BAND
-    # admission gate is on — the two families no longer collide.
-    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN", True)
-    monkeypatch.setattr(cfg, "ONE_SOLVE_TERRAIN_GRADED_STRIP", True)
+    # GAP-FILL FACE family is NOT admitted through the ring hook by the band
+    # admission stack — admission is (role, ref)-keyed, and the gap FACE ref
+    # ("gap_fill") is not a terrain graph family at all (only the spine
+    # store admits gap variables).
+    _enable_band_admission_chain(monkeypatch)
     nodes, b2i = SP._build_node_list(_layout_with_terrain(ref="gap_fill"))
     assert len(nodes) == 4                              # only the apron
     assert (100.0, 100.0) not in nodes

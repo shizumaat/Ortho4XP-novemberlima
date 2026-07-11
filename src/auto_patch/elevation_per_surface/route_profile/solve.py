@@ -455,6 +455,40 @@ def solve_route_profile(layout, icao: str,
             print(f"    [gap-spine] {len(_gap_scs)} chain(s), "
                   f"{len(_gap_spine_idx)} free spine node(s), "
                   f"{_n_int_edges} envelope interval edge(s)")
+    # ── ADJACENT-GROUND ZONE-ROW constraints (Slice B stage B3 order 2,
+    # gated) ──────────────────────────────────────────────────────────
+    # The band zone-row vertices admitted by ``_build_node_list`` (from
+    # the schema-split construct store ``layout.adjacent_ground_
+    # presolve``) get exactly ONE two-sided envelope interval edge each,
+    # to their frozen-nearest host pavement ring vertex — the analytic
+    # band law verbatim (per-vertex DEM clamp into the corridor; the law
+    # has NO neighbour coupling, so there are no transverse edges, no
+    # longitudinal edges and no fairing — the order-2 scout refutation,
+    # ratified 2026-07-11).  The construct store exists under the
+    # order-1 CONSTRUCT gate alone, so the ADMISSION sub-gate is checked
+    # explicitly (``admitted_terrain_refs`` also hard-errors on a
+    # partial dependency chain).  Admission gate OFF: no zone node was
+    # admitted, no constraint is built — byte-inert.
+    _zone_idx: set = set()
+    if getattr(layout, "adjacent_ground_presolve", None):
+        from auto_patch.elevation_per_surface.solver_primitives import (
+            ROLE_GRADED_STRIP as _RGS_zone, admitted_terrain_refs
+            as _admitted_refs_fn,
+            _build_adjacent_ground_zone_constraints)
+        if (_RGS_zone, "adjacent_ground") in _admitted_refs_fn():
+            _zone_scs, _zone_idx, _zone_collisions = (
+                _build_adjacent_ground_zone_constraints(
+                    layout, bucket_to_idx))
+            shape_constraints.extend(_zone_scs)
+            if _os.environ.get("O4_STEP_DEBUG") == "1":
+                _n_zone_edges = sum(len(_sc["edges"])
+                                    for _sc in _zone_scs)
+                print(f"    [adjacent-ground-zone] {len(_zone_scs)} "
+                      f"shape entr(ies), {len(_zone_idx)} zone "
+                      f"node(s), {_n_zone_edges} envelope interval "
+                      f"edge(s), collisions "
+                      f"pavement={_zone_collisions[0]} "
+                      f"cross={_zone_collisions[1]}")
     coupling = _build_level_coupling(shape_constraints)
 
     # ── THE ONE GRAPH (user 2026-06-27) ──────────────────────────────────────
@@ -1054,6 +1088,9 @@ def solve_route_profile(layout, icao: str,
                     # emitted open way must carry the solved profile,
                     # not a crowned copy the face disagrees with.
                     | {i for i in _gap_spine_idx if i < n}
+                    # Adjacent-ground zone-row nodes (Slice B stage B3
+                    # order 2) are TERRAIN, not pavement — no crown.
+                    | {i for i in _zone_idx if i < n}
                     | {i for i, _cat in _hard_cat.items()
                        if _cat in ("seam_spine_anchor", "seat_on_spine",
                                    "gs_pin")})
@@ -1099,6 +1136,127 @@ def solve_route_profile(layout, icao: str,
                         float(_elev_emit[_gi])
                         if _gi is not None and _gi < n else None)
                 _gap_entry["values"] = _gap_vals
+        # ── ADJACENT-GROUND ZONE-ROW writeback (Slice B stage B3 order 2)
+        # WHO WRITES WHAT (the B2 template, extended): the solve writes
+        # ONLY the zone-row nodes — their solved values go into the
+        # construct store (``entry["zone_values"]``, keyed by the
+        # millimetre vertex key), which the post-solve emitter reads in
+        # place of the retired analytic corridor-clamp resampler.  The
+        # band INNER (weld) row vertices are pavement ring vertices:
+        # their values are written by their OWN pavement shapes through
+        # ``_writeback`` above (pavement identity — one node, one value,
+        # never a second writer).  Two refinements, both documented in
+        # the order-2 report:
+        #   * FOOT RE-REFERENCE (law frame + crown frame): the corridor
+        #     law is defined RELATIVE TO THE PAVEMENT-EDGE ELEVATION at
+        #     the zone node's FOOT (``grade_law.adjacent_ground_
+        #     envelope``), and the emitted corridor is referenced to the
+        #     EMITTED (crowned) edge.  The solver's interval edge uses
+        #     the frozen-nearest host VERTEX (the B2 coupling pattern —
+        #     the approximation that keeps the slab pairwise); on long
+        #     steep edges the vertex value can sit metres off the local
+        #     foot lerp (measured 12 m at the CYXY trench wall), so the
+        #     writeback re-evaluates the one-slab projection (a zone
+        #     node has exactly ONE constraint and a DEM seed, so its
+        #     converged value IS ``clamp(dem_seed, reference +
+        #     offsets)``) against the FOOT edge value linear-referenced
+        #     along the shape's now-written (solved, crowned) ring —
+        #     identical law, exact reference frame, solved values only
+        #     (the pavement ring values were written by ``_writeback``
+        #     just above).  Host-vertex reference is the fallback when
+        #     the ring read fails.
+        #   * SNAP-TO-BOUND: the analytic path's triangle-diet snap
+        #     (values within ``_CORRIDOR_SNAP_TOL_M`` of a corridor
+        #     bound emit the bound) is applied here, where the corridor
+        #     reference is at hand — quantization of the solved value,
+        #     not a valuation.
+        if _zone_idx:
+            from shapely.geometry import Point as _ZonePoint
+            from auto_patch.emit_decimate import _key as _mm_key
+            from auto_patch.adjacent_ground import (
+                _CORRIDOR_SNAP_TOL_M as _ZONE_SNAP,
+                _ring_edge_reference as _zone_ring_reference,
+                _shape_ring_alts as _zone_shape_ring_alts)
+            _cps_zone = layout.canonical_points
+            _first_zone = getattr(
+                layout, "_adjacent_ground_first_zone_index", 0)
+            # Claim tracking replays the constraint builder's iteration
+            # order EXACTLY, so "owns its envelope edge" is decided the
+            # same way in both places.  IDENTITY RULE: a zone node that
+            # adopted a pre-existing pavement/spine variable, or that
+            # interned with an earlier zone node's variable, takes that
+            # variable's solved value VERBATIM (one node, one value —
+            # re-evaluating this entry's clamp there would mint a second
+            # value for the same variable).  Only an edge-owning node
+            # gets the foot re-reference + snap-to-bound evaluation.
+            _zone_claimed: set = set()
+            for _zone_entry in (getattr(layout,
+                                        "adjacent_ground_presolve", None)
+                                or ()):
+                _zone_vals: dict = {}
+                _zone_shape = _zone_entry.get("shape")
+                _foot_line = _foot_alt_at = None
+                if (_zone_shape is not None
+                        and _zone_shape.polygon is not None
+                        and not _zone_shape.polygon.is_empty
+                        and _zone_shape.polygon.geom_type == "Polygon"):
+                    try:
+                        _ring_coords = list(
+                            _zone_shape.polygon.exterior.coords)
+                        _foot_line, _foot_alt_at = _zone_ring_reference(
+                            _ring_coords,
+                            _zone_shape_ring_alts(_zone_shape,
+                                                  _ring_coords))
+                    except _GEOM_EXC:
+                        _foot_line = _foot_alt_at = None
+                for _zn in _zone_entry.get("zone_nodes", ()):
+                    _zx, _zy = _zn["xy"]
+                    _zi = bucket_to_idx.get(
+                        _cps_zone.get_or_add(float(_zx), float(_zy)))
+                    if _zi is None or _zi >= n:
+                        continue
+                    _zv = float(_elev_emit[_zi])
+                    _owns_edge = (_zi >= _first_zone
+                                  and _zi not in _zone_claimed)
+                    if _zi >= _first_zone:
+                        _zone_claimed.add(_zi)
+                    if _owns_edge:
+                        # Corridor reference: FOOT edge value (the law
+                        # frame), host vertex as fallback.
+                        _ref = None
+                        if _foot_line is not None:
+                            try:
+                                _ref = _foot_alt_at(_foot_line.project(
+                                    _ZonePoint(float(_zx), float(_zy))))
+                            except _GEOM_EXC:
+                                _ref = None
+                        if _ref is None:
+                            _hx, _hy = _zn["host"]
+                            _hi = bucket_to_idx.get(
+                                _cps_zone.get_or_add(float(_hx),
+                                                     float(_hy)))
+                            if _hi is not None and _hi < n:
+                                _ref = float(_elev_emit[_hi])
+                        if _ref is not None:
+                            _ref = float(_ref)
+                            _dem_z = (dem_elev[_zi]
+                                      if _zi < len(dem_elev) else None)
+                            if _dem_z is not None:
+                                _zv = float(_dem_z)
+                            _f_off = _zn["floor_off"]
+                            _c_off = _zn["ceil_off"]
+                            if _f_off is not None:
+                                _fl = _ref + float(_f_off)
+                                if _zv <= _fl + _ZONE_SNAP:
+                                    _zv = _fl
+                                _zv = max(_zv, _fl)
+                            if _c_off is not None:
+                                _ce = _ref + float(_c_off)
+                                if _zv >= _ce - _ZONE_SNAP:
+                                    _zv = _ce
+                                _zv = min(_zv, _ce)
+                    _zone_vals[_mm_key(float(_zx), float(_zy))] = _zv
+                _zone_entry["zone_values"] = _zone_vals
         # Spine breaklines from the SOLVED route profiles (z′ ON the spine
         # equals z — spine nodes never crown) + the crowned runway pieces.
         if _CROWN_ON:

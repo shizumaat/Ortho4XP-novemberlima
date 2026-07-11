@@ -154,6 +154,30 @@ for _pair in (os.environ.get("O4_ADJACENT_GROUND_DEBUG_POINTS") or "") \
 
 __all__ = ["emit_adjacent_ground_bands"]
 
+# ── Apparatus hit counters (Slice B stage B3 order 2 instrumentation;
+# coordinator ruling 2026-07-11: measure the weld / adoption / seam-taper
+# apparatus OFF vs ON admission.  Registry identity is expected to retire
+# the two VALUE-AGREEMENT rows — value-changing adoptions and band-corner
+# weld snaps — to zero, while the seam-taper pin is FOOTPRINT machinery
+# (it pins daylight DEPTHS at pavement-partition seams, it never touches
+# a value) and must stay unchanged; if it moves at all, investigate.) ──
+_APPARATUS_KEYS = (
+    "value_changing_adoptions", "band_corner_weld_snaps",
+    "seam_taper_flagged_stations", "solved_exact_variable",
+    "solved_row_on", "solved_row_interpolated",
+    "solved_beyond_coverage", "solved_analytic_fallback",
+    "solved_store_missing_shape",
+)
+_APPARATUS_HITS: dict[str, int] = {}
+
+
+def _reset_apparatus_hits():
+    for _hit_key in _APPARATUS_KEYS:
+        _APPARATUS_HITS[_hit_key] = 0
+
+
+_reset_apparatus_hits()
+
 # The emitted role's OSM ref (a terrain-grading overlay, NOT pavement).
 _ADJACENT_REF = "adjacent_ground"
 _ADJACENT_WALL_REF = "adjacent_ground_wall"
@@ -293,7 +317,7 @@ def _repair_self_lenses(g):
 def _build_cut_bands(edge_stations, edge_alts, outwards, band_caps,
                      ceiling_offset, band_edges, trigger, step,
                      sample_dem, is_ring_vertex=None,
-                     at_continuation_seam=None):
+                     at_continuation_seam=None, zone_collect=None):
     """CUT-direction mirror of ``clearance._build_filled_skirts``.
 
     At each station a CEILING sits at ``edge_alt + ceiling_offset(d)``
@@ -424,6 +448,14 @@ def _build_cut_bands(edge_stations, edge_alts, outwards, band_caps,
             thin_inner = d0 == 0.0 and is_ring_vertex is not None
             inner_row: list[tuple[int, tuple, float, bool]] = []
             outer_pts, outer_alts = [], []
+            # Zone-row provenance (Slice B stage B3 order 2): (station
+            # index, lateral depth) aligned 1:1 with ``outer_pts`` (the
+            # loop below appends both in lockstep, and the outer-jump
+            # flush fires BEFORE appending) — the free-variable grid the
+            # pre-solve constructor admits to the solver.  ``zone_collect``
+            # None (the default, and every post-solve caller): dead lists,
+            # byte-identical geometry.
+            outer_prov: list[tuple[int, float]] = []
 
             def _ring_vertex_entry(from_i, direction):
                 """Nearest ring-vertex station outward of ``from_i``
@@ -447,6 +479,17 @@ def _build_cut_bands(edge_stations, edge_alts, outwards, band_caps,
             def _flush_segment():
                 if not inner_row:
                     return
+                if zone_collect is not None:
+                    # Collect BEFORE the thin-inner mutations below: the
+                    # d0 == 0 inner (weld) row is pavement, never a zone
+                    # row — the collector drops it; every d0 > 0 row and
+                    # every outer row is free-variable grid.
+                    zone_collect(
+                        d0,
+                        [(e[0], e[1][0], e[1][1]) for e in inner_row],
+                        [(pi, px, py, pd)
+                         for (px, py), (pi, pd)
+                         in zip(outer_pts, outer_prov)])
                 if thin_inner:
                     kept = [e for e in inner_row if e[3]]
                     if not kept or kept[0][0] != inner_row[0][0]:
@@ -481,6 +524,7 @@ def _build_cut_bands(edge_stations, edge_alts, outwards, band_caps,
                 inner_row.clear()
                 outer_pts.clear()
                 outer_alts.clear()
+                outer_prov.clear()
 
             for i in range(lo, hi + 1):
                 ref = edge_alts[i]
@@ -526,6 +570,7 @@ def _build_cut_bands(edge_stations, edge_alts, outwards, band_caps,
                     _flush_segment()
                 outer_pts.append((ox, oy))
                 outer_alts.append(round(float(ref + co1), 1))
+                outer_prov.append((i, float(off)))
                 keep = (not thin_inner) or bool(is_ring_vertex[i])
                 inner_row.append((i, (ix, iy),
                                   round(float(ref + co0), 1), keep))
@@ -535,7 +580,8 @@ def _build_cut_bands(edge_stations, edge_alts, outwards, band_caps,
 
 def _build_fill_bands(edge_stations, edge_alts, outwards, band_caps,
                       floor_depth, band_edges, trigger, step, sample_dem,
-                      is_ring_vertex=None, at_continuation_seam=None):
+                      is_ring_vertex=None, at_continuation_seam=None,
+                      zone_collect=None):
     """FILL-direction band geometry — clearance._build_filled_skirts,
     inline-duplicated MINIMALLY (flagged for the cleanup slice) with two
     lateral-law differences the shared skirt builder must not inherit:
@@ -626,6 +672,8 @@ def _build_fill_bands(edge_stations, edge_alts, outwards, band_caps,
             thin_inner = d0 == 0.0 and is_ring_vertex is not None
             inner_row: list[tuple[int, tuple[float, float], bool]] = []
             outer_pts: list[tuple[float, float]] = []
+            # Zone-row provenance — see ``_build_cut_bands``.
+            outer_prov: list[tuple[int, float]] = []
 
             def _ring_vertex_point(from_i, direction):
                 # Nearest ring-vertex station outward of ``from_i`` —
@@ -644,6 +692,16 @@ def _build_fill_bands(edge_stations, edge_alts, outwards, band_caps,
             def _flush_segment():
                 if not inner_row:
                     return
+                if zone_collect is not None:
+                    # See ``_build_cut_bands``: collect before the
+                    # thin-inner mutations; the collector drops the
+                    # d0 == 0 (pavement weld) inner row itself.
+                    zone_collect(
+                        d0,
+                        [(e[0], e[1][0], e[1][1]) for e in inner_row],
+                        [(pi, px, py, pd)
+                         for (px, py), (pi, pd)
+                         in zip(outer_pts, outer_prov)])
                 if thin_inner:
                     kept = [e for e in inner_row if e[2]]
                     if not kept or kept[0][0] != inner_row[0][0]:
@@ -673,6 +731,7 @@ def _build_fill_bands(edge_stations, edge_alts, outwards, band_caps,
                         out.append((ring, []))
                 inner_row.clear()
                 outer_pts.clear()
+                outer_prov.clear()
 
             for i in range(lo, hi + 1):
                 ref = edge_alts[i]
@@ -699,6 +758,7 @@ def _build_fill_bands(edge_stations, edge_alts, outwards, band_caps,
                         oy - outer_pts[-1][1]) > 4.0 * step:
                     _flush_segment()
                 outer_pts.append((ox, oy))
+                outer_prov.append((i, float(off)))
                 keep = (not thin_inner) or bool(is_ring_vertex[i])
                 inner_row.append((i, (sx + nx * d0, sy + ny * d0),
                                   keep))
@@ -747,47 +807,13 @@ def _declaw_short_needle_runs(piece_ring, alts, tol, max_run=2,
     return out
 
 
-def _make_edge_projection_resampler(coords, ring_alts, envelope_at,
-                                    graded_width_m, sample_dem):
-    """Return ``resample(x, y, kind) -> (alt, is_weld_row)`` for band
-    vertices of one shape: the DEM **CLAMPED INTO the corridor** at the
-    vertex's true lateral distance ``d`` to the pavement edge (shapely
-    projection); ``is_weld_row`` marks a vertex ON the ring (d ≤ 2 cm),
-    whose value is the pavement edge value verbatim (unrounded),
-
-        alt = min(max(dem, edge + floor(d)), edge + ceiling(d)).
-
-    This is the corridor law applied verbatim (round 2, coordinator
-    ruling): the adjacent-ground envelope bounds BOTH sides of the
-    emitted surface — unlike the runway-end skirt law, which is a FLOOR
-    only, the band may NOT ride a DEM bump above the ceiling (the round-1
-    "skirt lift" convention produced 100%+ internal band slopes; unlawful
-    here).  Where the DEM sits inside the corridor the clamp returns the
-    DEM itself, so the band meets lawful terrain with no step at
-    daylight.  Values within ``_CORRIDOR_SNAP_TOL_M`` of a bound emit the
-    bound (triangle diet; see the constant).
-
-    ``kind`` keeps the piece's value function CONTINUOUS across the
-    corridor's floor discontinuity at the graded width W (finite → None):
-
-      * ``"fill"`` pieces live in zones 1-2 by construction (their band
-        cap IS W), so ``d`` clamps to W — outer-row vertices whose
-        projection jitters past W stay on the shelf edge instead of
-        plunging to the DEM (the round-2 CYXY 25 m in-piece cliff).
-      * ``"cut"`` pieces are CEILING-only (floor unapplied): below-floor
-        terrain inside a cut piece belongs to the FILL machinery (the
-        fill bands emit first and own that footprint — the cut/fill split
-        of the flat-shadow convention), and the ceiling is continuous
-        over all three zones, so a cut piece spanning the W boundary has
-        no value step.
-
-    ``envelope_at(d) -> (floor_offset, ceiling_offset)`` is the family's
-    law corridor (``grade_law.adjacent_ground_envelope`` partial).  The
-    edge elevation is read by linear-referencing the query's foot along
-    the ring against the per-vertex ``ring_alts`` (``None`` entries —
-    pavement-facing / unsampled vertices — filled from their nearest
-    known neighbour so a foot landing there still resolves).
-    """
+def _ring_edge_reference(coords, ring_alts):
+    """The shared ring linear-reference (code motion out of
+    ``_make_edge_projection_resampler``, Slice B stage B3 order 2 — the
+    solved-surface resampler needs the identical weld-row detection and
+    pavement-edge read): returns ``(line, edge_alt_at)`` where ``line``
+    is the closed ring ``LineString`` and ``edge_alt_at(s)`` the
+    pavement edge altitude at arc length ``s``."""
     pts = list(coords)
     if pts and pts[0] == pts[-1]:
         pass  # keep closed for a continuous LineString
@@ -834,6 +860,52 @@ def _make_edge_projection_resampler(coords, ring_alts, envelope_at,
         if a0 is None or a1 is None:
             return a0 if a0 is not None else a1
         return a0 + t * (a1 - a0)
+
+    return line, _edge_alt_at
+
+
+def _make_edge_projection_resampler(coords, ring_alts, envelope_at,
+                                    graded_width_m, sample_dem):
+    """Return ``resample(x, y, kind) -> (alt, is_weld_row)`` for band
+    vertices of one shape: the DEM **CLAMPED INTO the corridor** at the
+    vertex's true lateral distance ``d`` to the pavement edge (shapely
+    projection); ``is_weld_row`` marks a vertex ON the ring (d ≤ 2 cm),
+    whose value is the pavement edge value verbatim (unrounded),
+
+        alt = min(max(dem, edge + floor(d)), edge + ceiling(d)).
+
+    This is the corridor law applied verbatim (round 2, coordinator
+    ruling): the adjacent-ground envelope bounds BOTH sides of the
+    emitted surface — unlike the runway-end skirt law, which is a FLOOR
+    only, the band may NOT ride a DEM bump above the ceiling (the round-1
+    "skirt lift" convention produced 100%+ internal band slopes; unlawful
+    here).  Where the DEM sits inside the corridor the clamp returns the
+    DEM itself, so the band meets lawful terrain with no step at
+    daylight.  Values within ``_CORRIDOR_SNAP_TOL_M`` of a bound emit the
+    bound (triangle diet; see the constant).
+
+    ``kind`` keeps the piece's value function CONTINUOUS across the
+    corridor's floor discontinuity at the graded width W (finite → None):
+
+      * ``"fill"`` pieces live in zones 1-2 by construction (their band
+        cap IS W), so ``d`` clamps to W — outer-row vertices whose
+        projection jitters past W stay on the shelf edge instead of
+        plunging to the DEM (the round-2 CYXY 25 m in-piece cliff).
+      * ``"cut"`` pieces are CEILING-only (floor unapplied): below-floor
+        terrain inside a cut piece belongs to the FILL machinery (the
+        fill bands emit first and own that footprint — the cut/fill split
+        of the flat-shadow convention), and the ceiling is continuous
+        over all three zones, so a cut piece spanning the W boundary has
+        no value step.
+
+    ``envelope_at(d) -> (floor_offset, ceiling_offset)`` is the family's
+    law corridor (``grade_law.adjacent_ground_envelope`` partial).  The
+    edge elevation is read by linear-referencing the query's foot along
+    the ring against the per-vertex ``ring_alts`` (``None`` entries —
+    pavement-facing / unsampled vertices — filled from their nearest
+    known neighbour so a foot landing there still resolves).
+    """
+    line, _edge_alt_at = _ring_edge_reference(coords, ring_alts)
 
     def resample(x, y, kind):
         p = Point(x, y)
@@ -882,6 +954,167 @@ def _make_edge_projection_resampler(coords, ring_alts, envelope_at,
                 value = ceiling
             value = min(value, ceiling)
         return (round(value, 1), False)
+
+    return resample
+
+
+def _make_solved_band_resampler(entry, coords, ring_alts,
+                                analytic_resample):
+    """Slice B stage B3 order 2 GATE-ON band valuation: every emitted
+    band vertex reads the SOLVED band surface instead of the analytic
+    corridor clamp (which runs only gate-OFF — the valuation dies
+    gate-ON).  ``entry`` is this shape's construct-store record
+    (``zone_rows`` + the writeback's ``zone_values``); ``coords`` /
+    ``ring_alts`` are the FINAL solved pavement ring the emit-time march
+    ran on.
+
+    Value rule, in precedence order (coordinator ruling 2026-07-11):
+      1. WELD ROW (lateral distance <= 2 cm): the pavement edge value
+         verbatim — pavement identity, unchanged from the analytic path.
+      2. EXACT VARIABLE: a vertex within the canonical-registry
+         tolerance (0.5 m) of a solved zone node takes that variable's
+         solved value — registry identity, the mechanism that retires
+         the adoption/weld apparatus.
+      3. ROW INTERPOLATION: otherwise the vertex takes LINEAR
+         INTERPOLATION ALONG THE SOLVED ROW it lands on (arc-length
+         weighted between the bracketing solver-valued stations —
+         the ruled clip-minted-vertex valuation), and where it sits
+         BETWEEN two rows, the depth-weighted blend of the two rows'
+         interpolants (the value the solved, piecewise-linear band
+         surface already implies at that point; the pavement edge
+         itself serves as the depth-0 row).  Sound BECAUSE the band law
+         has no neighbour coupling — every zone value is independent,
+         so regrouping independently-valued vertices onto the emit-time
+         footprint cannot violate anything (the order-2 scout
+         refutation, ratified).
+      4. NO SOLVED ROW in range (an emit-time run the pre-solve
+         estimate did not cover): the analytic resampler values the
+         vertex and the case is COUNTED loudly
+         (``solved_analytic_fallback`` — the B2 degrade convention).
+    """
+    line, _edge_alt_at = _ring_edge_reference(coords, ring_alts)
+    zone_values = entry.get("zone_values") or {}
+    # Exact-variable spatial hash at the canonical registry tolerance.
+    _EXACT_CELL_M = 0.5
+    exact_cells: dict[tuple[int, int],
+                      list[tuple[float, float, float]]] = {}
+    rows_prepared: list[dict] = []
+    for row in entry.get("zone_rows", ()):
+        pts = row.get("pts") or []
+        vals = [zone_values.get(_vertex_key(px, py)) for px, py in pts]
+        keep = [(p, v) for p, v in zip(pts, vals) if v is not None]
+        if not keep:
+            continue
+        for (px, py), v in keep:
+            cx = int(math.floor(px / _EXACT_CELL_M))
+            cy = int(math.floor(py / _EXACT_CELL_M))
+            exact_cells.setdefault((cx, cy), []).append((px, py, v))
+        if len(keep) < 2:
+            continue
+        row_pts = [p for p, _v in keep]
+        row_vals = [v for _p, v in keep]
+        cum = [0.0]
+        for i in range(len(row_pts) - 1):
+            cum.append(cum[-1] + math.hypot(
+                row_pts[i + 1][0] - row_pts[i][0],
+                row_pts[i + 1][1] - row_pts[i][1]))
+        try:
+            row_line = LineString(row_pts)
+        except _GEOM_EXC:
+            continue
+        depths = row.get("depths") or []
+        row_depths = [d for (_p, _v), d in zip(zip(pts, vals), depths)
+                      if _v is not None]
+        if len(row_depths) != len(row_pts):
+            row_depths = [row.get("d0", 0.0)] * len(row_pts)
+        rows_prepared.append({"kind": row["kind"], "line": row_line,
+                              "cum": cum, "vals": row_vals,
+                              "depths": row_depths})
+
+    def _lerp_along(cum, vals, s):
+        k = bisect.bisect_right(cum, s) - 1
+        k = max(0, min(k, len(cum) - 2))
+        seg = cum[k + 1] - cum[k]
+        t = 0.0 if seg <= 0 else (s - cum[k]) / seg
+        return vals[k] + t * (vals[k + 1] - vals[k])
+
+    # Beyond this lateral distance a row is not a plausible value source
+    # for the query (reach-scale sanity bound).
+    _ROW_RANGE_M = 30.0
+    # A projected row depth within this of the query's own lateral
+    # distance means the query sits ON that row (the on-edge lerp case).
+    _ON_ROW_TOL_M = 0.5
+
+    def resample(x, y, kind):
+        p = Point(x, y)
+        d = p.distance(line)
+        if d <= 0.02:
+            # Weld row: pavement edge value verbatim (identity).
+            edge_alt = _edge_alt_at(line.project(p))
+            if edge_alt is None:
+                return (0.0, False)
+            return (float(edge_alt), True)
+        # 1) exact variable adoption (registry-tolerance hash).
+        cx = int(math.floor(x / _EXACT_CELL_M))
+        cy = int(math.floor(y / _EXACT_CELL_M))
+        best_v = None
+        best_d = _EXACT_CELL_M
+        for ox in (cx - 1, cx, cx + 1):
+            for oy in (cy - 1, cy, cy + 1):
+                for px, py, v in exact_cells.get((ox, oy), ()):
+                    dd = math.hypot(x - px, y - py)
+                    if dd < best_d:
+                        best_d, best_v = dd, v
+        if best_v is not None:
+            _APPARATUS_HITS["solved_exact_variable"] += 1
+            return (round(float(best_v), 1), False)
+        # 2) row interpolation on the solved band surface.
+        candidates = []
+        for row in rows_prepared:
+            if row["kind"] != kind:
+                continue
+            try:
+                s = row["line"].project(p)
+                dist = row["line"].distance(p)
+            except _GEOM_EXC:
+                continue
+            if dist > _ROW_RANGE_M:
+                continue
+            candidates.append(
+                (dist, _lerp_along(row["cum"], row["depths"], s),
+                 _lerp_along(row["cum"], row["vals"], s)))
+        if not candidates:
+            _APPARATUS_HITS["solved_analytic_fallback"] += 1
+            return analytic_resample(x, y, kind)
+        candidates.sort(key=lambda c: c[0])
+        prim_dist, prim_depth, prim_val = candidates[0]
+        if abs(prim_depth - d) <= _ON_ROW_TOL_M:
+            _APPARATUS_HITS["solved_row_on"] += 1
+            return (round(float(prim_val), 1), False)
+        below = None      # deepest row not deeper than the query
+        above = None      # shallowest row not shallower than the query
+        for dist, depth, val in candidates:
+            if depth <= d and (below is None or dist < below[0]):
+                below = (dist, depth, val)
+            if depth >= d and (above is None or dist < above[0]):
+                above = (dist, depth, val)
+        if below is None:
+            # The pavement edge is the depth-0 row.
+            edge_alt = _edge_alt_at(line.project(p))
+            if edge_alt is None:
+                _APPARATUS_HITS["solved_analytic_fallback"] += 1
+                return analytic_resample(x, y, kind)
+            below = (0.0, 0.0, float(edge_alt))
+        if above is None:
+            # Outward of the deepest solved row: clamp to it (counted —
+            # the geometry is reported rather than a fallback invented).
+            _APPARATUS_HITS["solved_beyond_coverage"] += 1
+            return (round(float(below[2]), 1), False)
+        span = above[1] - below[1]
+        t = 0.0 if span <= 0 else (d - below[1]) / span
+        value = below[2] + t * (above[2] - below[2])
+        _APPARATUS_HITS["solved_row_interpolated"] += 1
+        return (round(float(value), 1), False)
 
     return resample
 
@@ -990,7 +1223,7 @@ def _shape_ring_alts(s, coords, sample_dem=None, seed=False):
 def _derive_shape_stations_and_bands(coords, ccw, ring_alts, axis, width,
                                      reach, trigger, floor_depth, ceil_off,
                                      step, prep_static, seam_keys,
-                                     sample_dem):
+                                     sample_dem, zone_rows_out=None):
     """Frontage detection + corridor MARCH for one airside shape — the band
     FOOTPRINT geometry (everything that decides WHERE the bands are, given the
     edge-altitude references ``ring_alts``).  Returns
@@ -998,7 +1231,18 @@ def _derive_shape_stations_and_bands(coords, ccw, ring_alts, axis, width,
     are the raw ``(ring_open, alts_open)`` pairs the emitter later clips and
     values.  Extracted verbatim from the emitter's per-shape setup so the
     pre-solve constructor and the post-solve emitter march identically (the
-    B2 shared-helper pattern — parity single-sourced, not duplicated)."""
+    B2 shared-helper pattern — parity single-sourced, not duplicated).
+
+    ``zone_rows_out`` (Slice B stage B3 order 2, pre-solve constructor
+    only): a list that receives one dict per band ZONE ROW —
+    ``{"kind", "d0", "pts", "depths", "hosts"}`` — where a zone row is
+    every band row at lateral depth > 0 (the d0 == 0 weld row is the
+    pavement chain itself, never a zone row) and ``hosts`` is the
+    frozen-nearest pavement RING VERTEX per station (the B2
+    frozen-nearest pattern: every ring vertex is a solver variable, so
+    the envelope interval edge is mappable to a node index at
+    constraint-build time).  ``None`` (every post-solve caller): no
+    collection, byte-identical."""
     def _station_reference(sx, sy, out, alt_value):
         # The station's edge altitude, or None when it is skipped — the
         # END-edge rule (skirt territory) + the terrain-facing probe,
@@ -1017,6 +1261,11 @@ def _derive_shape_stations_and_bands(coords, ccw, ring_alts, axis, width,
     stations, st_alts, outs = [], [], []
     is_ring_vertex: list[bool] = []
     at_seam: list[bool] = []
+    # Frozen-nearest host pavement ring vertex per station (zone-row
+    # admission; built unconditionally — cheap — consumed only through
+    # ``zone_rows_out``).  A fan station sits AT its corner (a ring
+    # vertex); an edge station takes the nearer edge endpoint.
+    hosts: list[tuple[float, float]] = []
     previous_out = None
     for i in range(len(coords) - 1):
         eax, eay = coords[i]
@@ -1064,6 +1313,7 @@ def _derive_shape_stations_and_bands(coords, ccw, ring_alts, axis, width,
                     outs.append(fan_out)
                     is_ring_vertex.append(True)
                     at_seam.append(False)
+                    hosts.append((eax, eay))
         previous_out = out
         nseg = max(1, int(math.ceil(
             math.hypot(ebx - eax, eby - eay) / step)))
@@ -1083,20 +1333,57 @@ def _derive_shape_stations_and_bands(coords, ccw, ring_alts, axis, width,
             is_ring_vertex.append(k == 0)
             at_seam.append((k == 0 and edge_a_seam)
                            or (k == nseg - 1 and edge_b_seam))
+            hosts.append((eax, eay) if t < 0.5 else (ebx, eby))
     if len(stations) < 2:
         return [], [], stations, st_alts, outs
     m = len(stations)
+    # Seam-taper pin instrumentation (order-2 confirmation row): the
+    # count of stations flagged AT a pavement-partition seam — the pin's
+    # input firing set (the pin itself acts on footprint depths inside
+    # ``grade_law.adjacent_ground_supported_depths``).  Expected
+    # UNCHANGED between admission OFF and ON.
+    _APPARATUS_HITS["seam_taper_flagged_stations"] += sum(
+        1 for _f in at_seam if _f)
+
+    # Zone-row collectors (order 2): translate the builders' per-run
+    # provenance into row dicts with frozen-nearest hosts.  The d0 == 0
+    # INNER row is the pavement weld chain — dropped here (pavement
+    # variables already exist; a band never mints one).
+    def _make_zone_collector(kind):
+        def _collect(d0, inner_entries, outer_entries):
+            if d0 > 0.0 and len(inner_entries) >= 1:
+                zone_rows_out.append({
+                    "kind": kind, "d0": float(d0),
+                    "pts": [(float(x), float(y))
+                            for _i, x, y in inner_entries],
+                    "depths": [float(d0)] * len(inner_entries),
+                    "hosts": [hosts[i] for i, _x, _y in inner_entries]})
+            if outer_entries:
+                zone_rows_out.append({
+                    "kind": kind, "d0": float(d0),
+                    "pts": [(float(x), float(y))
+                            for _i, x, y, _d in outer_entries],
+                    "depths": [float(dd)
+                               for _i, _x, _y, dd in outer_entries],
+                    "hosts": [hosts[i]
+                              for i, _x, _y, _d in outer_entries]})
+        return _collect
+
+    _collect_fill = (_make_zone_collector("fill")
+                     if zone_rows_out is not None else None)
+    _collect_cut = (_make_zone_collector("cut")
+                    if zone_rows_out is not None else None)
 
     # FILL (DEM below floor, zones 1-2) then CUT (DEM above ceiling): the
     # runway-end skirt fill/cut builders' lateral twins.
     fill_bands = _build_fill_bands(
         stations, st_alts, outs, [width] * m, floor_depth,
         {ADJACENT_GROUND_LIP_WIDTH_M}, trigger, step, sample_dem,
-        is_ring_vertex, at_seam)
+        is_ring_vertex, at_seam, zone_collect=_collect_fill)
     cut_bands = _build_cut_bands(
         stations, st_alts, outs, [reach] * m, ceil_off,
         {ADJACENT_GROUND_LIP_WIDTH_M, width}, trigger, step, sample_dem,
-        is_ring_vertex, at_seam)
+        is_ring_vertex, at_seam, zone_collect=_collect_cut)
     return fill_bands, cut_bands, stations, st_alts, outs
 
 
@@ -1117,9 +1404,15 @@ def construct_adjacent_ground_presolve(layout: PavementLayout, dem,
     to gate-OFF up to the enumerated seed/late-feature footprint deltas).
 
     Stores ``layout.adjacent_ground_presolve = [{"shape": s, "fill": [...],
-    "cut": [...]}, ...]`` (the ``shape`` reference is preserved across the
-    layout pickle — same object as the ``layout.shapes`` element — so the
-    emitter rebuilds the resampler from the by-then-solved shape).  Returns the
+    "cut": [...], "zone_rows": [...], "zone_nodes": [...],
+    "zone_values": None}, ...]`` (the ``shape`` reference is preserved across
+    the layout pickle — same object as the ``layout.shapes`` element — so the
+    emitter rebuilds the resampler from the by-then-solved shape).  The
+    ``zone_rows`` / ``zone_nodes`` fields are the ORDER-2 schema split: the
+    free-variable zone-row grid (row polylines with per-vertex depth +
+    frozen-nearest host), admitted to the solver under the ADMISSION sub-gate
+    ``ONE_SOLVE_TERRAIN_GRADED_STRIP``; ``zone_values`` is filled by the
+    solve's writeback ({millimetre key: solved value}).  Returns the
     number of shapes with at least one raw band."""
     if dem is None:
         return 0
@@ -1202,7 +1495,7 @@ def construct_adjacent_ground_presolve(layout: PavementLayout, dem,
             continue
         family, code_number, code_letter, reach, width, axis = params
         trigger = trigger_by_family[family]
-        ceil_off, _envelope_at, floor_depth = _band_family_closures(
+        ceil_off, envelope_at, floor_depth = _band_family_closures(
             family, code_number, code_letter, width)
         try:
             coords = list(s.polygon.exterior.coords)
@@ -1212,14 +1505,49 @@ def construct_adjacent_ground_presolve(layout: PavementLayout, dem,
         if len(coords) < 4:
             continue
         ring_alts = _shape_ring_alts(s, coords, sample_dem, seed=True)
+        zone_rows: list[dict] = []
         fill_bands, cut_bands, _st, _sa, _ou = \
             _derive_shape_stations_and_bands(
                 coords, ccw, ring_alts, axis, width, reach, trigger,
                 floor_depth, ceil_off, step, prep_static, seam_keys,
-                sample_dem)
+                sample_dem, zone_rows_out=zone_rows)
         if not fill_bands and not cut_bands:
             continue
-        entries.append({"shape": s, "fill": fill_bands, "cut": cut_bands})
+        # ZONE-NODE GRID (order 2, schema split): the free-variable
+        # admission list — one record per unique zone-row vertex
+        # (millimetre dedup; a row vertex shared between two abutting
+        # band slabs is ONE variable), each with its frozen-nearest
+        # host pavement ring vertex and the law's envelope offsets at
+        # the vertex's construction-time lateral depth:
+        #   * "cut" rows: ceiling only (fill bands own below-floor
+        #     terrain — the analytic resampler's own kind rule);
+        #   * "fill" rows: both bounds at depth clamped to the graded
+        #     width (zones 1-2 by construction — same rule).
+        zone_nodes: list[dict] = []
+        seen_zone_keys: set[tuple[int, int]] = set()
+        for row in zone_rows:
+            for (zx, zy), zd, zhost in zip(row["pts"], row["depths"],
+                                           row["hosts"]):
+                zkey = _vertex_key(zx, zy)
+                if zkey in seen_zone_keys:
+                    continue
+                seen_zone_keys.add(zkey)
+                if row["kind"] == "cut":
+                    zone_floor = None
+                    zone_ceil = envelope_at(zd)[1]
+                else:
+                    zone_floor, zone_ceil = envelope_at(min(zd, width))
+                zone_nodes.append({
+                    "xy": (float(zx), float(zy)),
+                    "host": (float(zhost[0]), float(zhost[1])),
+                    "floor_off": (None if zone_floor is None
+                                  else float(zone_floor)),
+                    "ceil_off": (None if zone_ceil is None
+                                 else float(zone_ceil))})
+        entries.append({"shape": s, "fill": fill_bands, "cut": cut_bands,
+                        "zone_rows": zone_rows,
+                        "zone_nodes": zone_nodes,
+                        "zone_values": None})
     layout.adjacent_ground_presolve = entries
     if entries:
         n_bands = sum(len(e["fill"]) + len(e["cut"]) for e in entries)
@@ -1244,6 +1572,10 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
     """
     if dem is None:
         return 0
+    # Order-2 apparatus instrumentation: emit-phase counters only (the
+    # pre-solve construct march also increments the seam counter — the
+    # reset here scopes the reported numbers to THIS emission).
+    _reset_apparatus_hits()
     lat0, lon0 = layout.anchor
     cos0 = math.cos(math.radians(lat0))
     R = R_EARTH
@@ -1534,6 +1866,7 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
             if best is not None and best != (vx, vy):
                 snapped.append(best)
                 moved = True
+                _APPARATUS_HITS["band_corner_weld_snaps"] += 1
             else:
                 snapped.append((vx, vy))
         if not moved:
@@ -1595,10 +1928,37 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
     # band rings were marched pre-solve; index them by source-shape identity so
     # the loop consumes them instead of re-marching.  Gate-OFF (default, or no
     # store) ``_presolve_bands`` stays None and the loop marches inline.
+    #
+    # ORDER 2 (variable ADMISSION, gate ``ONE_SOLVE_TERRAIN_GRADED_STRIP``
+    # — hard-error-chained onto construct + B1 + B2 in
+    # ``solver_primitives.admitted_terrain_refs``): the pre-built
+    # footprints are NOT consumed.  The loop marches inline over the
+    # FINAL solved, decimated, densified pavement ring — so the emitted
+    # band inner (weld) chain is BY CONSTRUCTION the final pavement
+    # chain (the order-1 82-band census inflation collapses back to the
+    # gate-OFF footprint), and the construct store's role narrows to the
+    # ZONE-NODE VARIABLE GRID plus its solved values.  Re-deriving the
+    # run/band segmentation over the final chain and re-mapping the
+    # solved values onto the re-derived rows is SOUND because the band
+    # law has no neighbour coupling — every zone value is independent
+    # (clamp of the DEM into its own host-referenced corridor), so
+    # regrouping independently-valued vertices cannot violate anything
+    # (order-2 scout refutation 1, ratified 2026-07-11).
     from .config import (ONE_SOLVE_TERRAIN as _OST,
+                         ONE_SOLVE_TERRAIN_GRADED_STRIP as _OST_ADMIT,
                          ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT as _OST_C)
     _presolve_bands = None
-    if _OST and _OST_C:
+    _solved_store = None
+    if _OST and _OST_ADMIT:
+        # Reuses the hard dependency chain: reading the admitted set
+        # raises loudly on a partial gate configuration.
+        from .elevation_per_surface.solver_primitives import (
+            admitted_terrain_refs as _admitted_refs_fn)
+        if (ROLE_GRADED_STRIP, _ADJACENT_REF) in _admitted_refs_fn():
+            _store = getattr(layout, "adjacent_ground_presolve", None)
+            if _store:
+                _solved_store = {id(e["shape"]): e for e in _store}
+    elif _OST and _OST_C:
         _store = getattr(layout, "adjacent_ground_presolve", None)
         if _store:
             _presolve_bands = {id(e["shape"]): e for e in _store}
@@ -1660,6 +2020,21 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
         # the corridor).
         resample_alt = _make_edge_projection_resampler(
             coords, ring_alts, envelope_at, width, sample_dem)
+        # ORDER-2 gate-ON valuation swap: the analytic corridor clamp
+        # above becomes the per-vertex FALLBACK only (counted); every
+        # reachable vertex reads the SOLVED band surface instead.
+        if _solved_store is not None:
+            _solved_entry = _solved_store.get(id(s))
+            if (_solved_entry is not None
+                    and _solved_entry.get("zone_values")):
+                resample_alt = _make_solved_band_resampler(
+                    _solved_entry, coords, ring_alts, resample_alt)
+            else:
+                _APPARATUS_HITS["solved_store_missing_shape"] += 1
+                UI.vprint(1, f"  [adjacent-ground] WARN: no solved "
+                             f"zone values for shape role={s.role} "
+                             f"ref={s.ref} — analytic valuation kept "
+                             f"for this shape (degrade, counted).")
 
         if _ADJACENT_DEBUG and (fill_bands or cut_bands):
             UI.vprint(1, f"  [adjacent-debug] shape role={s.role} "
@@ -1876,6 +2251,14 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
                                   or abs(vertex_value_registry[k] - o)
                                   <= VERTEX_ALT_MERGE_TOL_M))
                             for k, o in zip(keys, own)]
+                        # Order-2 retirement row: an adoption only
+                        # MATTERS when it changes the value (identity
+                        # makes own == registry, so gate-ON this count
+                        # is expected to fall to zero).
+                        _APPARATUS_HITS["value_changing_adoptions"] += \
+                            sum(1 for k, a, o in zip(keys, adopted, own)
+                                if a and abs(vertex_value_registry[k]
+                                             - o) > 1e-6)
                         alts = [vertex_value_registry[k] if a else o
                                 for k, a, o in zip(keys, adopted, own)]
                         # Clamp any residual single-vertex resample spike,
@@ -2011,6 +2394,11 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
                          f"{removed} 3D-collinear band vertex(es) "
                          f"(±{Z_TOL_BOUNDARY_M} m).")
 
+    # Order-2 apparatus hit report (always printed — the OFF-vs-ON
+    # retirement table reads these from both configurations).
+    UI.vprint(1, "  [adjacent-ground] apparatus hits: "
+                 + " ".join(f"{k}={_APPARATUS_HITS[k]}"
+                            for k in _APPARATUS_KEYS))
     return emitted
 
 
