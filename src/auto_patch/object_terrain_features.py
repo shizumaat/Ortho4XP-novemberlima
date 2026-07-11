@@ -74,9 +74,11 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from statistics import median
-from typing import Iterable, Sequence
+from typing import Iterable, NamedTuple, Sequence
 
 import numpy
+import shapely
+from shapely import affinity as shapely_affinity
 from shapely.geometry import Point, Polygon
 from shapely.ops import unary_union
 
@@ -213,6 +215,38 @@ GROUND_CONTACT_TOLERANCE_M = 0.5
 # Placements whose expanded world footprints overlap by this margin pool
 # into one structure (module docstring, "Grouping").
 STRUCTURE_GROUPING_EPSILON_M = 2.0
+
+# ---------------------------------------------------------------------------
+# Pool evidence pre-screen (performance round, 2026-07-10).  A pool is
+# projected into a structure frame only when it could possibly emit a
+# record; measured at KBNA, 3,108 of 4,653 pools are flat clutter that no
+# classification path can consume.  The limbs mirror the paths exactly:
+#
+# * hard triangles — tunnels (below-grade DRIVABLE deck), bridges
+#   (hard-face components) and interior cutouts all key on
+#   ``ATTR_hard`` / ``ATTR_hard_deck`` geometry;
+# * a below-grade ``OBJECT_AGL`` offset — the guarded AGL tunnel limb
+#   (the EGLL shells carry no hard triangles at all);
+# * solid vertices deep enough below effective grade to seat a bowl or
+#   trench interface level (feature C's non-flat classes);
+# * a "bridge" resource-name hint — the cosmetic bridge path
+#   (Murfreesboro class) works on structures with no hard geometry;
+# * enough effective vertical span for a wall column — without one,
+#   feature C cannot emit even a FLAT_CONFIRMED record (a wall column
+#   needs :data:`WALL_COLUMN_MIN_VERTICAL_EXTENT_M` of vertical extent,
+#   and no column can span more than its whole pool does).
+#
+# Together the limbs are output-preserving: a skipped pool provably
+# produces no tunnel, no bridge, no refusal, no exclusion and no ground
+# interface.
+# ---------------------------------------------------------------------------
+
+# The deepest solid vertex needed before any below-grade interface level
+# can exist: TRENCH_SPINE_MIN_DEPTH_M (2.5) is the shallowest non-flat
+# level threshold, levels cluster at INTERFACE_LEVEL_CLUSTER_M (0.5), so
+# a qualifying level needs wall-column bases at or below -2.25; -2.0
+# keeps a quarter-metre margin on top of that.
+POOL_EVIDENCE_BELOW_GRADE_VERTEX_MAX_Y_M = -2.0
 
 # ---------------------------------------------------------------------------
 # Round-5 mega-pool refinement (A9/A10 worklist).  discover_object_pools
@@ -667,22 +701,25 @@ class ClassificationResult:
 # Frame construction and small geometry helpers
 # ---------------------------------------------------------------------------
 
-@dataclass(frozen=True)
-class _FrameTriangle:
+class _FrameTriangle(NamedTuple):
     """One solid triangle projected into the structure metre frame.
 
-    ``corners`` are three ``(x, effective_y, z)`` points;
-    ``horizontal_polygon`` is the ``(x, z)`` projection; ``height_m`` is the
-    mean effective height (the stable per-face height used for binning);
-    ``hardness`` is the loader's per-triangle collision state (``""`` /
-    ``"hard"`` / ``"hard_deck"``)."""
+    ``corners`` are three ``(x, effective_y, z)`` points; ``height_m`` is
+    the mean effective height (the stable per-face height used for
+    binning); ``hardness`` is the loader's per-triangle collision state
+    (``""`` / ``"hard"`` / ``"hard_deck"``).  The ``(x, z)`` horizontal
+    projection polygon is no longer carried per triangle — footprint
+    unions build their shapely polygons in bulk from the corners
+    (performance round, 2026-07-10) — and the frame's vectorized twin of
+    this record lives in the :class:`_StructureFrame` triangle arrays.
+    A NamedTuple, not a dataclass: structures materialize millions of
+    these and tuple construction is several times cheaper."""
 
     corners: tuple[
         tuple[float, float, float],
         tuple[float, float, float],
         tuple[float, float, float],
     ]
-    horizontal_polygon: Polygon
     centroid_xz: tuple[float, float]
     height_m: float
     area_m2: float
@@ -697,7 +734,13 @@ class _FrameTriangle:
         return self.hardness in ("hard", "hard_deck")
 
 
-@dataclass(frozen=True)
+# Hardness is carried through the vectorized paths as small integer codes
+# (indexing this tuple decodes them); code order makes ``code > 0`` the
+# vectorized twin of :attr:`_FrameTriangle.is_hard`.
+_HARDNESS_BY_CODE = ("", "hard", "hard_deck")
+_CODE_BY_HARDNESS = {"": 0, "hard": 1, "hard_deck": 2}
+
+
 class _StructureFrame:
     """One pool's projected geometry: the usable frame triangles, the
     ground-contact evidence, and the frame origin.
@@ -715,47 +758,142 @@ class _StructureFrame:
     effective y, maximum effective y, contributing resource paths)``.
     Feature C's wall-column extraction reads facade bases from it — again
     from the raw vertex list, because facades ARE the vertical faces the
-    triangle list drops."""
+    triangle list drops.
 
-    origin_latitude: float
-    origin_longitude: float
-    triangles: list[_FrameTriangle]
-    minimum_effective_height_m: float
-    grounded_vertices_xz: list[tuple[float, float, str]]
-    vertex_columns: dict[
-        tuple[int, int], tuple[float, float, frozenset[str]]
-    ]
+    The kept triangles live primarily as parallel NUMPY ARRAYS (one row
+    per triangle, placement order preserved): corner coordinates,
+    centroid, mean height, area, horizontality, hardness code and an
+    index into ``triangle_resource_paths``.  The classifier's hot passes
+    (sector statistics, per-resource areas, footprint classes) read the
+    arrays; :attr:`triangles` materializes the equivalent
+    :class:`_FrameTriangle` list LAZILY for the record-building paths
+    that walk small frames (tunnel/bridge component frames) — a KBNA
+    mega-pool frame holds 6.2 million triangles and must never pay for
+    six million Python objects it will not read."""
 
+    __slots__ = (
+        "origin_latitude",
+        "origin_longitude",
+        "minimum_effective_height_m",
+        "grounded_vertices_xz",
+        "vertex_columns",
+        "triangle_count",
+        "triangle_corner_x_m",
+        "triangle_corner_y_m",
+        "triangle_corner_z_m",
+        "triangle_centroid_x_m",
+        "triangle_centroid_z_m",
+        "triangle_height_m",
+        "triangle_area_m2",
+        "triangle_horizontality",
+        "triangle_hardness_codes",
+        "triangle_resource_indices",
+        "triangle_resource_paths",
+        "_materialized_triangles",
+    )
 
-def _triangle_normal_and_area(
-    corner_a: tuple[float, float, float],
-    corner_b: tuple[float, float, float],
-    corner_c: tuple[float, float, float],
-) -> tuple[tuple[float, float, float], float]:
-    """Unit normal and area of a triangle in the ``(x, up, z)`` frame."""
-    u = (
-        corner_b[0] - corner_a[0],
-        corner_b[1] - corner_a[1],
-        corner_b[2] - corner_a[2],
-    )
-    v = (
-        corner_c[0] - corner_a[0],
-        corner_c[1] - corner_a[1],
-        corner_c[2] - corner_a[2],
-    )
-    normal = (
-        u[1] * v[2] - u[2] * v[1],
-        u[2] * v[0] - u[0] * v[2],
-        u[0] * v[1] - u[1] * v[0],
-    )
-    length = math.sqrt(normal[0] ** 2 + normal[1] ** 2 + normal[2] ** 2)
-    if length <= 0.0:
-        return (0.0, 0.0, 0.0), 0.0
-    return (
-        normal[0] / length,
-        normal[1] / length,
-        normal[2] / length,
-    ), 0.5 * length
+    def __init__(
+        self,
+        *,
+        origin_latitude: float,
+        origin_longitude: float,
+        minimum_effective_height_m: float,
+        grounded_vertices_xz: list[tuple[float, float, str]],
+        vertex_columns: dict[
+            tuple[int, int], tuple[float, float, frozenset[str]]
+        ],
+        triangle_corner_x_m,
+        triangle_corner_y_m,
+        triangle_corner_z_m,
+        triangle_centroid_x_m,
+        triangle_centroid_z_m,
+        triangle_height_m,
+        triangle_area_m2,
+        triangle_horizontality,
+        triangle_hardness_codes,
+        triangle_resource_indices,
+        triangle_resource_paths: list[str],
+    ) -> None:
+        self.origin_latitude = origin_latitude
+        self.origin_longitude = origin_longitude
+        self.minimum_effective_height_m = minimum_effective_height_m
+        self.grounded_vertices_xz = grounded_vertices_xz
+        self.vertex_columns = vertex_columns
+        self.triangle_corner_x_m = triangle_corner_x_m
+        self.triangle_corner_y_m = triangle_corner_y_m
+        self.triangle_corner_z_m = triangle_corner_z_m
+        self.triangle_centroid_x_m = triangle_centroid_x_m
+        self.triangle_centroid_z_m = triangle_centroid_z_m
+        self.triangle_height_m = triangle_height_m
+        self.triangle_area_m2 = triangle_area_m2
+        self.triangle_horizontality = triangle_horizontality
+        self.triangle_hardness_codes = triangle_hardness_codes
+        self.triangle_resource_indices = triangle_resource_indices
+        self.triangle_resource_paths = triangle_resource_paths
+        self.triangle_count = int(len(triangle_height_m))
+        self._materialized_triangles: list[_FrameTriangle] | None = None
+
+    @property
+    def triangles(self) -> list[_FrameTriangle]:
+        """The frame triangles as :class:`_FrameTriangle` records,
+        materialized on first access (see the class docstring)."""
+        if self._materialized_triangles is None:
+            corner_rows = numpy.stack(
+                [
+                    self.triangle_corner_x_m,
+                    self.triangle_corner_y_m,
+                    self.triangle_corner_z_m,
+                ],
+                axis=2,
+            ).tolist()
+            resource_paths = self.triangle_resource_paths
+            materialized = [
+                _FrameTriangle(
+                    corners=(
+                        tuple(corners[0]),
+                        tuple(corners[1]),
+                        tuple(corners[2]),
+                    ),
+                    centroid_xz=(centroid_x, centroid_z),
+                    height_m=height,
+                    area_m2=area,
+                    horizontality=horizontality,
+                    hardness=_HARDNESS_BY_CODE[hardness_code],
+                    resource_path=resource_paths[resource_index],
+                )
+                for (
+                    corners,
+                    centroid_x,
+                    centroid_z,
+                    height,
+                    area,
+                    horizontality,
+                    hardness_code,
+                    resource_index,
+                ) in zip(
+                    corner_rows,
+                    self.triangle_centroid_x_m.tolist(),
+                    self.triangle_centroid_z_m.tolist(),
+                    self.triangle_height_m.tolist(),
+                    self.triangle_area_m2.tolist(),
+                    self.triangle_horizontality.tolist(),
+                    self.triangle_hardness_codes.tolist(),
+                    self.triangle_resource_indices.tolist(),
+                )
+            ]
+            self._materialized_triangles = materialized
+        return self._materialized_triangles
+
+    def triangle_corner_coordinates_xz(self, selection=None):
+        """Corner ``(x, z)`` coordinates as an ``(n, 3, 2)`` array —
+        the bulk-polygon-creation input — optionally restricted to the
+        boolean mask or index array ``selection``."""
+        corner_x = self.triangle_corner_x_m
+        corner_z = self.triangle_corner_z_m
+        if selection is not None:
+            corner_x = corner_x[selection]
+            corner_z = corner_z[selection]
+        return numpy.stack([corner_x, corner_z], axis=2)
 
 
 def _placements_mean_origin(
@@ -770,9 +908,389 @@ def _placements_mean_origin(
     return origin_latitude, origin_longitude
 
 
+def _composed_placement_transform(
+    placement: ObjectPlacement,
+    origin_latitude: float,
+    origin_longitude: float,
+) -> tuple[float, float, float, float, float]:
+    """The placement-local → structure-frame map as six hoisted constants.
+
+    ``obj8_reader.local_offset_to_lonlat`` followed by
+    ``obj8_reader.lonlat_to_local_offset`` (heading 0 at the origin) is
+    the composition of two linear maps; substituting one into the other
+    (algebraically exact, nothing dropped) gives::
+
+        frame_x = base_x + ratio * (x * cosine - z * sine)
+        frame_z = base_z + (x * sine + z * cosine)
+
+    with ``base_x = (placement_longitude - origin_longitude) *
+    METRES_PER_DEGREE_LATITUDE * cos(origin_latitude)``, ``ratio =
+    cos(origin_latitude) / cos(placement_latitude)`` (the two
+    metres-per-degree-longitude scales), ``base_z = (origin_latitude -
+    placement_latitude) * METRES_PER_DEGREE_LATITUDE`` and sine/cosine of
+    the placement heading.  Returns ``(base_x, base_z, ratio, sine,
+    cosine)``."""
+    heading = math.radians(placement.heading_degrees)
+    heading_sine, heading_cosine = math.sin(heading), math.cos(heading)
+    metres_per_degree = obj8_reader.METRES_PER_DEGREE_LATITUDE
+    origin_latitude_cosine = math.cos(math.radians(origin_latitude))
+    base_x = (
+        (placement.longitude - origin_longitude)
+        * metres_per_degree
+        * origin_latitude_cosine
+    )
+    base_z = (origin_latitude - placement.latitude) * metres_per_degree
+    ratio = origin_latitude_cosine / math.cos(
+        math.radians(placement.latitude)
+    )
+    return base_x, base_z, ratio, heading_sine, heading_cosine
+
+
+def _affine_matrix_for_placement(
+    placement: ObjectPlacement,
+    origin_latitude: float,
+    origin_longitude: float,
+) -> list[float]:
+    """The :func:`_composed_placement_transform` map in
+    ``shapely.affinity.affine_transform`` order ``[a, b, d, e, xoff,
+    yoff]`` (``x' = a*x + b*y + xoff``; the shapely ``y`` axis carries
+    the frame ``z``)."""
+    base_x, base_z, ratio, heading_sine, heading_cosine = (
+        _composed_placement_transform(
+            placement, origin_latitude, origin_longitude
+        )
+    )
+    return [
+        ratio * heading_cosine,
+        -ratio * heading_sine,
+        heading_sine,
+        heading_cosine,
+        base_x,
+        base_z,
+    ]
+
+
+# Face classes for the per-resource local footprint-union cache (the
+# GEOS-union hoist: union once per resource in its own authored frame,
+# affine-transform per placement).  Heading rotation is about the
+# vertical axis and the longitude-scale ratio is within parts per
+# million of 1, so hardness, near-horizontality and the height classes
+# (shifted by the placement's above-ground offset) are all decidable in
+# the AUTHORED frame.
+_FACE_CLASS_ALL = "all"
+_FACE_CLASS_HARD_NEAR_HORIZONTAL = "hard_near_horizontal"
+_FACE_CLASS_BELOW_GRADE_HARD_NEAR_HORIZONTAL = (
+    "below_grade_hard_near_horizontal"
+)
+_FACE_CLASS_AT_GRADE = "at_grade"
+# Which classes shift with the placement's above-ground offset (their
+# cache key carries it; the others are placement-independent).
+_HEIGHT_DEPENDENT_FACE_CLASSES = frozenset(
+    {_FACE_CLASS_BELOW_GRADE_HARD_NEAR_HORIZONTAL, _FACE_CLASS_AT_GRADE}
+)
+
+
+class _ResourceTriangleBasis(NamedTuple):
+    """Resource-intrinsic geometry arrays (authored frame), built once
+    per resource per classification call."""
+
+    vertices: numpy.ndarray               # (vertex_count, 3) float64
+    triangle_vertex_indices: numpy.ndarray  # (triangle_count, 3)
+    hardness_codes: numpy.ndarray         # (triangle_count,) uint8
+    used_vertex_indices: numpy.ndarray    # unique solid vertices, ascending
+
+
+class _ResourceFaceTable(NamedTuple):
+    """Per-triangle face measurements in the AUTHORED frame, for the
+    local footprint-union classes (placement-independent up to the
+    above-ground height shift)."""
+
+    keep_mask: numpy.ndarray          # non-degenerate solid faces
+    hard_mask: numpy.ndarray
+    near_horizontal_mask: numpy.ndarray
+    mean_local_y: numpy.ndarray
+    corner_coordinates_xz: numpy.ndarray  # (triangle_count, 3, 2)
+
+
+class _ResourceGeometryCache:
+    """Per-classification-call cache of resource-intrinsic work.
+
+    Everything here depends only on an ``ObjectGeometry``, never on a
+    placement or a pool, so it is computed once per resource and reused
+    across every pool, component frame and evidence frame of the call:
+
+    * ``evidence`` — the pool pre-screen flags (pure Python, no arrays,
+      so skipped pools never pay for array construction);
+    * ``basis`` — vertex/triangle numpy arrays for the vectorized frame
+      build;
+    * ``local_class_union`` — the footprint union of a face class in the
+      resource's own authored frame (see the ``_FACE_CLASS_*``
+      constants), the fix that collapses the GEOS union count from one
+      union per placed triangle to one per resource."""
+
+    __slots__ = (
+        "geometry_by_resource",
+        "_evidence",
+        "_basis",
+        "_face_tables",
+        "_local_class_unions",
+    )
+
+    def __init__(
+        self, geometry_by_resource: dict[str, ObjectGeometry]
+    ) -> None:
+        self.geometry_by_resource = geometry_by_resource
+        self._evidence: dict[str, tuple[bool, bool, float, float]] = {}
+        self._basis: dict[str, _ResourceTriangleBasis | None] = {}
+        self._face_tables: dict[str, _ResourceFaceTable | None] = {}
+        self._local_class_unions: dict[tuple, object] = {}
+
+    def evidence(
+        self, resource_path: str
+    ) -> tuple[bool, bool, float, float]:
+        """``(has_hard_triangle, has_solid_geometry, minimum_vertex_y,
+        maximum_vertex_y)`` for the pool pre-screen.  The vertical bounds
+        cover ALL authored vertices (a superset of the solid ones), so
+        the pre-screen can only err towards classifying a pool."""
+        cached = self._evidence.get(resource_path)
+        if cached is not None:
+            return cached
+        geometry = self.geometry_by_resource.get(resource_path)
+        if geometry is None or not geometry.solid_triangles:
+            flags = (False, False, 0.0, 0.0)
+        else:
+            has_hard = any(geometry.solid_triangle_hardness)
+            if geometry.vertices:
+                minimum_y = min(vertex[1] for vertex in geometry.vertices)
+                maximum_y = max(vertex[1] for vertex in geometry.vertices)
+            else:
+                minimum_y = maximum_y = 0.0
+            flags = (has_hard, True, minimum_y, maximum_y)
+        self._evidence[resource_path] = flags
+        return flags
+
+    def basis(self, resource_path: str) -> _ResourceTriangleBasis | None:
+        cached = self._basis.get(resource_path, _CACHE_MISS)
+        if cached is not _CACHE_MISS:
+            return cached
+        geometry = self.geometry_by_resource.get(resource_path)
+        if geometry is None or not geometry.solid_triangles:
+            self._basis[resource_path] = None
+            return None
+        vertices = numpy.asarray(geometry.vertices, dtype=numpy.float64)
+        triangle_vertex_indices = numpy.asarray(
+            geometry.solid_triangles, dtype=numpy.intp
+        )
+        hardness_codes = numpy.zeros(
+            len(geometry.solid_triangles), dtype=numpy.uint8
+        )
+        for index, state in enumerate(geometry.solid_triangle_hardness):
+            if index >= hardness_codes.size:
+                break
+            hardness_codes[index] = _CODE_BY_HARDNESS.get(state, 0)
+        basis = _ResourceTriangleBasis(
+            vertices=vertices,
+            triangle_vertex_indices=triangle_vertex_indices,
+            hardness_codes=hardness_codes,
+            used_vertex_indices=numpy.unique(triangle_vertex_indices),
+        )
+        self._basis[resource_path] = basis
+        return basis
+
+    def face_table(self, resource_path: str) -> _ResourceFaceTable | None:
+        cached = self._face_tables.get(resource_path, _CACHE_MISS)
+        if cached is not _CACHE_MISS:
+            return cached
+        basis = self.basis(resource_path)
+        if basis is None:
+            self._face_tables[resource_path] = None
+            return None
+        corners = basis.vertices[basis.triangle_vertex_indices]
+        edge_one = corners[:, 1, :] - corners[:, 0, :]
+        edge_two = corners[:, 2, :] - corners[:, 0, :]
+        normal_x = (
+            edge_one[:, 1] * edge_two[:, 2]
+            - edge_one[:, 2] * edge_two[:, 1]
+        )
+        normal_y = (
+            edge_one[:, 2] * edge_two[:, 0]
+            - edge_one[:, 0] * edge_two[:, 2]
+        )
+        normal_z = (
+            edge_one[:, 0] * edge_two[:, 1]
+            - edge_one[:, 1] * edge_two[:, 0]
+        )
+        normal_length = numpy.sqrt(
+            normal_x * normal_x
+            + normal_y * normal_y
+            + normal_z * normal_z
+        )
+        # Degenerate faces: zero 3D area, or a vanishing horizontal
+        # projection (a perfectly vertical face — its footprint polygon
+        # would be empty; ``normal_y`` IS the horizontal cross product).
+        keep_mask = (normal_length > 0.0) & (normal_y != 0.0)
+        with numpy.errstate(invalid="ignore", divide="ignore"):
+            horizontality = numpy.where(
+                normal_length > 0.0,
+                numpy.abs(normal_y) / normal_length,
+                0.0,
+            )
+        table = _ResourceFaceTable(
+            keep_mask=keep_mask,
+            hard_mask=basis.hardness_codes > 0,
+            near_horizontal_mask=(
+                horizontality >= NEAR_HORIZONTAL_NORMAL_Y_MIN
+            ),
+            mean_local_y=(
+                corners[:, 0, 1] + corners[:, 1, 1] + corners[:, 2, 1]
+            )
+            / 3.0,
+            corner_coordinates_xz=corners[:, :, 0::2],
+        )
+        self._face_tables[resource_path] = table
+        return table
+
+    def local_class_union(
+        self,
+        resource_path: str,
+        face_class: str,
+        above_ground_level_metres: float,
+    ):
+        """Footprint union of the face class in the resource's authored
+        frame, or ``None`` when no face qualifies."""
+        height_offset = (
+            above_ground_level_metres
+            if face_class in _HEIGHT_DEPENDENT_FACE_CLASSES
+            else 0.0
+        )
+        key = (resource_path, face_class, height_offset)
+        cached = self._local_class_unions.get(key, _CACHE_MISS)
+        if cached is not _CACHE_MISS:
+            return cached
+        union = self._compute_local_class_union(
+            resource_path, face_class, height_offset
+        )
+        self._local_class_unions[key] = union
+        return union
+
+    def _compute_local_class_union(
+        self, resource_path: str, face_class: str, height_offset: float
+    ):
+        if face_class in (
+            _FACE_CLASS_HARD_NEAR_HORIZONTAL,
+            _FACE_CLASS_BELOW_GRADE_HARD_NEAR_HORIZONTAL,
+        ) and not self.evidence(resource_path)[0]:
+            return None  # no hard triangles — skip the array work
+        table = self.face_table(resource_path)
+        if table is None:
+            return None
+        if face_class == _FACE_CLASS_ALL:
+            mask = table.keep_mask
+        elif face_class == _FACE_CLASS_HARD_NEAR_HORIZONTAL:
+            mask = (
+                table.keep_mask
+                & table.hard_mask
+                & table.near_horizontal_mask
+            )
+        elif face_class == _FACE_CLASS_BELOW_GRADE_HARD_NEAR_HORIZONTAL:
+            mask = (
+                table.keep_mask
+                & table.hard_mask
+                & table.near_horizontal_mask
+                & (
+                    table.mean_local_y
+                    <= -TUNNEL_MIN_BODY_DEPTH_M - height_offset
+                )
+            )
+        elif face_class == _FACE_CLASS_AT_GRADE:
+            mask = table.keep_mask & (
+                table.mean_local_y
+                >= -TUNNEL_ROOF_TOP_TOLERANCE_M - height_offset
+            )
+        else:  # pragma: no cover - programming error, not data
+            raise ValueError(f"unknown face class {face_class!r}")
+        if not mask.any():
+            return None
+        try:
+            union = shapely.union_all(
+                shapely.polygons(table.corner_coordinates_xz[mask])
+            )
+            if not union.is_valid:
+                union = union.buffer(0)
+        except (ValueError, _GEOS_EXCEPTION):
+            return None
+        return None if union.is_empty else union
+
+
+# Distinguishes "cached None" from "not yet computed" in the cache maps.
+_CACHE_MISS = object()
+
+
+def _class_footprints_by_resource(
+    placements: Sequence[ObjectPlacement],
+    origin_latitude: float,
+    origin_longitude: float,
+    cache: _ResourceGeometryCache,
+    face_class: str,
+    *,
+    full_footprint_resources: frozenset | set = frozenset(),
+    restrict_resources: set | None = None,
+) -> dict[str, object]:
+    """Frame-space footprint union of a face class, per resource — the
+    cached replacement for unioning every placed triangle: each
+    resource's local class union is affine-transformed per placement and
+    the (few) per-placement polygons are unioned.  Resources with no
+    qualifying face are absent, exactly like the union-per-triangle
+    predecessor.  ``full_footprint_resources`` widens the class to ALL
+    faces for the named resources (the AGL tunnel seeds, whose whole
+    footprint seeds a component)."""
+    transformed_by_resource: dict[str, list] = {}
+    for placement in placements:
+        resource = placement.resource_path
+        if (
+            restrict_resources is not None
+            and resource not in restrict_resources
+        ):
+            continue
+        placement_face_class = (
+            _FACE_CLASS_ALL
+            if resource in full_footprint_resources
+            else face_class
+        )
+        local_union = cache.local_class_union(
+            resource,
+            placement_face_class,
+            placement.above_ground_level_metres,
+        )
+        if local_union is None:
+            continue
+        try:
+            transformed = shapely_affinity.affine_transform(
+                local_union,
+                _affine_matrix_for_placement(
+                    placement, origin_latitude, origin_longitude
+                ),
+            )
+        except (ValueError, _GEOS_EXCEPTION):
+            continue
+        transformed_by_resource.setdefault(resource, []).append(transformed)
+    footprints: dict[str, object] = {}
+    for resource, parts in transformed_by_resource.items():
+        try:
+            union = parts[0] if len(parts) == 1 else shapely.union_all(parts)
+            if not union.is_valid:
+                union = union.buffer(0)
+        except (ValueError, _GEOS_EXCEPTION):
+            continue
+        if not union.is_empty:
+            footprints[resource] = union
+    return footprints
+
+
 def _build_structure_frame(
     placements: Sequence[ObjectPlacement],
     geometry_by_resource: dict[str, ObjectGeometry],
+    cache: _ResourceGeometryCache | None = None,
 ) -> _StructureFrame:
     """Project every object's solid triangles into the shared structure
     frame, carrying effective height and per-triangle hardness (module
@@ -781,7 +1299,10 @@ def _build_structure_frame(
     Each vertex is placed through ITS OWN object's placement to
     longitude/latitude, then into the pool-mean-origin frame — the exact
     ``object_anchor`` pool-frame construction — with ``effective_y =
-    above_ground_level_metres + authored_y``.
+    above_ground_level_metres + authored_y``.  The two projections are
+    applied as their composition (:func:`_composed_placement_transform`,
+    algebraically identical, constants hoisted out of the vertex loop)
+    over whole per-resource vertex arrays at once.
 
     Ground-contact evidence (``minimum_effective_height_m`` and
     ``grounded_vertices_xz``) is collected from the raw solid vertex set,
@@ -789,130 +1310,236 @@ def _build_structure_frame(
     collapses to a zero-area horizontal footprint and is dropped from the
     triangle list, yet it is exactly the geometry the abutment tests must
     see (see :class:`_StructureFrame`)."""
+    if cache is None:
+        cache = _ResourceGeometryCache(geometry_by_resource)
     origin_latitude, origin_longitude = _placements_mean_origin(placements)
-    triangles: list[_FrameTriangle] = []
     grounded_vertices_xz: list[tuple[float, float, str]] = []
     column_accumulator: dict[tuple[int, int], list] = {}
     minimum_effective_height = math.inf
+    corner_x_parts: list[numpy.ndarray] = []
+    corner_y_parts: list[numpy.ndarray] = []
+    corner_z_parts: list[numpy.ndarray] = []
+    area_parts: list[numpy.ndarray] = []
+    horizontality_parts: list[numpy.ndarray] = []
+    hardness_parts: list[numpy.ndarray] = []
+    resource_index_parts: list[numpy.ndarray] = []
+    resource_paths: list[str] = []
+    resource_index_by_path: dict[str, int] = {}
     for placement in placements:
         geometry = geometry_by_resource.get(placement.resource_path)
         if geometry is None or not geometry.solid_triangles:
             continue
-        used_vertex_indices = {
-            vertex_index
-            for triangle in geometry.solid_triangles
-            for vertex_index in triangle
-        }
-        for vertex_index in used_vertex_indices:
-            local_x, local_y, local_z = geometry.vertices[vertex_index]
-            effective_y = placement.above_ground_level_metres + local_y
-            if effective_y < minimum_effective_height:
-                minimum_effective_height = effective_y
-            world_latitude, world_longitude = (
-                obj8_reader.local_offset_to_lonlat(
-                    placement.latitude,
-                    placement.longitude,
-                    placement.heading_degrees,
-                    local_x,
-                    local_z,
+        basis = cache.basis(placement.resource_path)
+        if basis is None:
+            continue
+        base_x, base_z, ratio, heading_sine, heading_cosine = (
+            _composed_placement_transform(
+                placement, origin_latitude, origin_longitude
+            )
+        )
+        vertex_x = basis.vertices[:, 0]
+        vertex_y = basis.vertices[:, 1]
+        vertex_z = basis.vertices[:, 2]
+        frame_x = base_x + ratio * (
+            vertex_x * heading_cosine - vertex_z * heading_sine
+        )
+        frame_z = base_z + (
+            vertex_x * heading_sine + vertex_z * heading_cosine
+        )
+        effective_y = placement.above_ground_level_metres + vertex_y
+
+        used = basis.used_vertex_indices
+        used_effective_y = effective_y[used]
+        placement_minimum = float(used_effective_y.min())
+        if placement_minimum < minimum_effective_height:
+            minimum_effective_height = placement_minimum
+        grounded = used[used_effective_y <= GROUND_CONTACT_TOLERANCE_M]
+        if grounded.size:
+            resource = placement.resource_path
+            grounded_vertices_xz.extend(
+                (x, z, resource)
+                for x, z in zip(
+                    frame_x[grounded].tolist(), frame_z[grounded].tolist()
                 )
             )
-            frame_x, frame_z = obj8_reader.lonlat_to_local_offset(
-                origin_latitude,
-                origin_longitude,
-                0.0,
-                world_latitude,
-                world_longitude,
+        column_grid_x = numpy.rint(
+            frame_x[used] / WALL_COLUMN_GRID_M
+        ).astype(numpy.int64)
+        column_grid_z = numpy.rint(
+            frame_z[used] / WALL_COLUMN_GRID_M
+        ).astype(numpy.int64)
+        packed_keys = column_grid_x * 4294967296 + column_grid_z
+        order = numpy.argsort(packed_keys, kind="stable")
+        sorted_keys = packed_keys[order]
+        group_starts = numpy.flatnonzero(
+            numpy.concatenate(
+                ([True], sorted_keys[1:] != sorted_keys[:-1])
             )
-            if effective_y <= GROUND_CONTACT_TOLERANCE_M:
-                grounded_vertices_xz.append(
-                    (frame_x, frame_z, placement.resource_path)
-                )
-            column_key = (
-                int(round(frame_x / WALL_COLUMN_GRID_M)),
-                int(round(frame_z / WALL_COLUMN_GRID_M)),
-            )
-            column = column_accumulator.get(column_key)
+        )
+        sorted_effective_y = used_effective_y[order]
+        group_minimum = numpy.minimum.reduceat(
+            sorted_effective_y, group_starts
+        )
+        group_maximum = numpy.maximum.reduceat(
+            sorted_effective_y, group_starts
+        )
+        representatives = order[group_starts]
+        for grid_x, grid_z, low, high in zip(
+            column_grid_x[representatives].tolist(),
+            column_grid_z[representatives].tolist(),
+            group_minimum.tolist(),
+            group_maximum.tolist(),
+        ):
+            column = column_accumulator.get((grid_x, grid_z))
             if column is None:
-                column_accumulator[column_key] = [
-                    effective_y,
-                    effective_y,
+                column_accumulator[(grid_x, grid_z)] = [
+                    low,
+                    high,
                     {placement.resource_path},
                 ]
             else:
-                if effective_y < column[0]:
-                    column[0] = effective_y
-                if effective_y > column[1]:
-                    column[1] = effective_y
+                if low < column[0]:
+                    column[0] = low
+                if high > column[1]:
+                    column[1] = high
                 column[2].add(placement.resource_path)
-        hardness_states = geometry.solid_triangle_hardness
-        for triangle_index, triangle in enumerate(geometry.solid_triangles):
-            corners: list[tuple[float, float, float]] = []
-            for vertex_index in triangle:
-                local_x, local_y, local_z = geometry.vertices[vertex_index]
-                world_latitude, world_longitude = (
-                    obj8_reader.local_offset_to_lonlat(
-                        placement.latitude,
-                        placement.longitude,
-                        placement.heading_degrees,
-                        local_x,
-                        local_z,
-                    )
-                )
-                frame_x, frame_z = obj8_reader.lonlat_to_local_offset(
-                    origin_latitude,
-                    origin_longitude,
-                    0.0,
-                    world_latitude,
-                    world_longitude,
-                )
-                effective_y = placement.above_ground_level_metres + local_y
-                corners.append((frame_x, effective_y, frame_z))
-            unit_normal, area = _triangle_normal_and_area(
-                corners[0], corners[1], corners[2]
-            )
-            if area <= 0.0:
-                continue
-            horizontal_polygon = Polygon(
-                [(corner[0], corner[2]) for corner in corners]
-            )
-            if not horizontal_polygon.is_valid:
-                horizontal_polygon = horizontal_polygon.buffer(0)
-            if horizontal_polygon.is_empty:
-                continue
-            centroid_x = sum(corner[0] for corner in corners) / 3.0
-            centroid_z = sum(corner[2] for corner in corners) / 3.0
-            height_m = sum(corner[1] for corner in corners) / 3.0
-            triangle_hardness = (
-                hardness_states[triangle_index]
-                if triangle_index < len(hardness_states)
-                else ""
-            )
-            triangles.append(
-                _FrameTriangle(
-                    corners=(corners[0], corners[1], corners[2]),
-                    horizontal_polygon=horizontal_polygon,
-                    centroid_xz=(centroid_x, centroid_z),
-                    height_m=height_m,
-                    area_m2=area,
-                    horizontality=abs(unit_normal[1]),
-                    hardness=triangle_hardness,
-                    resource_path=placement.resource_path,
-                )
-            )
+
+        triangle_vertex_indices = basis.triangle_vertex_indices
+        corner_x = frame_x[triangle_vertex_indices]
+        corner_y = effective_y[triangle_vertex_indices]
+        corner_z = frame_z[triangle_vertex_indices]
+        edge_one_x = corner_x[:, 1] - corner_x[:, 0]
+        edge_one_y = corner_y[:, 1] - corner_y[:, 0]
+        edge_one_z = corner_z[:, 1] - corner_z[:, 0]
+        edge_two_x = corner_x[:, 2] - corner_x[:, 0]
+        edge_two_y = corner_y[:, 2] - corner_y[:, 0]
+        edge_two_z = corner_z[:, 2] - corner_z[:, 0]
+        normal_x = edge_one_y * edge_two_z - edge_one_z * edge_two_y
+        normal_y = edge_one_z * edge_two_x - edge_one_x * edge_two_z
+        normal_z = edge_one_x * edge_two_y - edge_one_y * edge_two_x
+        normal_length = numpy.sqrt(
+            normal_x * normal_x
+            + normal_y * normal_y
+            + normal_z * normal_z
+        )
+        # Keep faces with 3D area AND a non-vanishing horizontal
+        # projection (``normal_y`` is exactly the horizontal cross
+        # product) — the same two drops the per-triangle Polygon path
+        # made through GEOS emptiness.
+        keep = (normal_length > 0.0) & (normal_y != 0.0)
+        if not keep.any():
+            continue
+        kept = numpy.flatnonzero(keep)
+        corner_x_parts.append(corner_x[kept])
+        corner_y_parts.append(corner_y[kept])
+        corner_z_parts.append(corner_z[kept])
+        area_parts.append(0.5 * normal_length[kept])
+        horizontality_parts.append(
+            numpy.abs(normal_y[kept]) / normal_length[kept]
+        )
+        hardness_parts.append(basis.hardness_codes[kept])
+        resource_index = resource_index_by_path.get(placement.resource_path)
+        if resource_index is None:
+            resource_index = len(resource_paths)
+            resource_index_by_path[placement.resource_path] = resource_index
+            resource_paths.append(placement.resource_path)
+        resource_index_parts.append(
+            numpy.full(kept.size, resource_index, dtype=numpy.int32)
+        )
     if minimum_effective_height is math.inf:
         minimum_effective_height = 0.0
+    if corner_x_parts:
+        corner_x_all = numpy.concatenate(corner_x_parts)
+        corner_y_all = numpy.concatenate(corner_y_parts)
+        corner_z_all = numpy.concatenate(corner_z_parts)
+        area_all = numpy.concatenate(area_parts)
+        horizontality_all = numpy.concatenate(horizontality_parts)
+        hardness_all = numpy.concatenate(hardness_parts)
+        resource_index_all = numpy.concatenate(resource_index_parts)
+    else:
+        corner_x_all = numpy.empty((0, 3))
+        corner_y_all = numpy.empty((0, 3))
+        corner_z_all = numpy.empty((0, 3))
+        area_all = numpy.empty(0)
+        horizontality_all = numpy.empty(0)
+        hardness_all = numpy.empty(0, dtype=numpy.uint8)
+        resource_index_all = numpy.empty(0, dtype=numpy.int32)
     return _StructureFrame(
         origin_latitude=origin_latitude,
         origin_longitude=origin_longitude,
-        triangles=triangles,
         minimum_effective_height_m=minimum_effective_height,
         grounded_vertices_xz=grounded_vertices_xz,
         vertex_columns={
             key: (values[0], values[1], frozenset(values[2]))
             for key, values in column_accumulator.items()
         },
+        triangle_corner_x_m=corner_x_all,
+        triangle_corner_y_m=corner_y_all,
+        triangle_corner_z_m=corner_z_all,
+        triangle_centroid_x_m=(
+            corner_x_all[:, 0] + corner_x_all[:, 1] + corner_x_all[:, 2]
+        )
+        / 3.0,
+        triangle_centroid_z_m=(
+            corner_z_all[:, 0] + corner_z_all[:, 1] + corner_z_all[:, 2]
+        )
+        / 3.0,
+        triangle_height_m=(
+            corner_y_all[:, 0] + corner_y_all[:, 1] + corner_y_all[:, 2]
+        )
+        / 3.0,
+        triangle_area_m2=area_all,
+        triangle_horizontality=horizontality_all,
+        triangle_hardness_codes=hardness_all,
+        triangle_resource_indices=resource_index_all,
+        triangle_resource_paths=resource_paths,
     )
+
+
+def _close_and_reduce_union(
+    union,
+    close_m: float,
+    keep_all_parts: bool,
+) -> Polygon | None:
+    """Shared tail of the footprint-union builders: morphological close,
+    validity repair, and the dominant-polygon reduction (see
+    :func:`_union_horizontal` for the ``keep_all_parts`` semantics)."""
+    try:
+        if close_m > 0.0:
+            union = union.buffer(close_m).buffer(-close_m)
+        if not union.is_valid:
+            union = union.buffer(0)
+    except (ValueError, _GEOS_EXCEPTION):
+        return None
+    if union.is_empty:
+        return None
+    if keep_all_parts:
+        return union if union.geom_type in ("Polygon", "MultiPolygon") else None
+    if union.geom_type == "MultiPolygon":
+        union = max(union.geoms, key=lambda geometry: geometry.area)
+    if union.geom_type != "Polygon":
+        return None
+    return Polygon(union.exterior)
+
+
+def _union_horizontal_coordinates(
+    corner_coordinates_xz: numpy.ndarray,
+    *,
+    close_m: float = FOOTPRINT_CLOSE_M,
+    keep_all_parts: bool = False,
+) -> Polygon | None:
+    """Footprint union from an ``(n, 3, 2)`` corner-coordinate array —
+    polygons created in bulk on the C side, never one Python ``Polygon``
+    per triangle."""
+    if len(corner_coordinates_xz) == 0:
+        return None
+    try:
+        union = shapely.union_all(
+            shapely.polygons(corner_coordinates_xz)
+        )
+    except (ValueError, _GEOS_EXCEPTION):
+        return None
+    return _close_and_reduce_union(union, close_m, keep_all_parts)
 
 
 def _union_horizontal(
@@ -930,30 +1557,23 @@ def _union_horizontal(
     deck built from several part objects — KBNA taxiway-L is six) keeps the
     whole union, so a segmented deck is measured across all its parts
     rather than collapsed to the largest single piece."""
-    polygons = [
-        triangle.horizontal_polygon
-        for triangle in triangles
-        if not triangle.horizontal_polygon.is_empty
-    ]
-    if not polygons:
+    triangle_list = (
+        triangles if isinstance(triangles, list) else list(triangles)
+    )
+    if not triangle_list:
         return None
-    try:
-        union = unary_union(polygons)
-        if close_m > 0.0:
-            union = union.buffer(close_m).buffer(-close_m)
-        if not union.is_valid:
-            union = union.buffer(0)
-    except (ValueError, _GEOS_EXCEPTION):
-        return None
-    if union.is_empty:
-        return None
-    if keep_all_parts:
-        return union if union.geom_type in ("Polygon", "MultiPolygon") else None
-    if union.geom_type == "MultiPolygon":
-        union = max(union.geoms, key=lambda geometry: geometry.area)
-    if union.geom_type != "Polygon":
-        return None
-    return Polygon(union.exterior)
+    corner_coordinates_xz = numpy.empty((len(triangle_list), 3, 2))
+    for index, triangle in enumerate(triangle_list):
+        first, second, third = triangle.corners
+        corner_coordinates_xz[index, 0, 0] = first[0]
+        corner_coordinates_xz[index, 0, 1] = first[2]
+        corner_coordinates_xz[index, 1, 0] = second[0]
+        corner_coordinates_xz[index, 1, 1] = second[2]
+        corner_coordinates_xz[index, 2, 0] = third[0]
+        corner_coordinates_xz[index, 2, 1] = third[2]
+    return _union_horizontal_coordinates(
+        corner_coordinates_xz, close_m=close_m, keep_all_parts=keep_all_parts
+    )
 
 
 def _split_polygons(geometry) -> list[Polygon]:
@@ -1034,7 +1654,7 @@ def frame_polygon_to_longitude_latitude(
 
 def _agl_tunnel_seed_resources(
     placements: Sequence[ObjectPlacement],
-    triangles: Sequence[_FrameTriangle],
+    frame: _StructureFrame,
 ) -> set[str]:
     """Resources whose below-grade ``OBJECT_AGL`` placement is a credible
     tunnel signal (the guarded AGL limb — see
@@ -1046,16 +1666,21 @@ def _agl_tunnel_seed_resources(
         placement_count[placement.resource_path] = (
             placement_count.get(placement.resource_path, 0) + 1
         )
-    below_grade_area: dict[str, float] = {}
-    for triangle in triangles:
-        if (
-            triangle.horizontality >= NEAR_HORIZONTAL_NORMAL_Y_MIN
-            and triangle.height_m <= -TUNNEL_ROOF_TOP_TOLERANCE_M
-        ):
-            below_grade_area[triangle.resource_path] = (
-                below_grade_area.get(triangle.resource_path, 0.0)
-                + triangle.area_m2
-            )
+    below_grade_mask = (
+        frame.triangle_horizontality >= NEAR_HORIZONTAL_NORMAL_Y_MIN
+    ) & (frame.triangle_height_m <= -TUNNEL_ROOF_TOP_TOLERANCE_M)
+    below_grade_area_by_index = numpy.bincount(
+        frame.triangle_resource_indices[below_grade_mask],
+        weights=frame.triangle_area_m2[below_grade_mask],
+        minlength=len(frame.triangle_resource_paths),
+    )
+    below_grade_area = {
+        resource: area
+        for resource, area in zip(
+            frame.triangle_resource_paths,
+            below_grade_area_by_index.tolist(),
+        )
+    }
     return {
         placement.resource_path
         for placement in placements
@@ -1069,7 +1694,7 @@ def _agl_tunnel_seed_resources(
 
 def _is_tunnel_signature(
     placements: Sequence[ObjectPlacement],
-    triangles: Sequence[_FrameTriangle],
+    frame: _StructureFrame,
 ) -> bool:
     """A structure is a tunnel when it has a substantial near-horizontal
     DRIVABLE deck below grade, or is placed below grade by its OBJECT_AGL
@@ -1090,18 +1715,19 @@ def _is_tunnel_signature(
        shells (6/7/10) carry no hard triangles, and their offset is the
        unambiguous below-grade signal.
     """
-    if not triangles:
+    if frame.triangle_count == 0:
         return False
-    below_grade_drivable_area = sum(
-        triangle.area_m2
-        for triangle in triangles
-        if triangle.is_hard
-        and triangle.horizontality >= NEAR_HORIZONTAL_NORMAL_Y_MIN
-        and triangle.height_m <= -TUNNEL_MIN_BODY_DEPTH_M
+    drivable_mask = (
+        (frame.triangle_hardness_codes > 0)
+        & (frame.triangle_horizontality >= NEAR_HORIZONTAL_NORMAL_Y_MIN)
+        & (frame.triangle_height_m <= -TUNNEL_MIN_BODY_DEPTH_M)
+    )
+    below_grade_drivable_area = float(
+        frame.triangle_area_m2[drivable_mask].sum()
     )
     if below_grade_drivable_area >= TUNNEL_MIN_BELOW_GRADE_DECK_AREA_M2:
         return True
-    return bool(_agl_tunnel_seed_resources(placements, triangles))
+    return bool(_agl_tunnel_seed_resources(placements, frame))
 
 
 def _classify_tunnel(
@@ -1260,6 +1886,13 @@ def _deck_axis(polygon: Polygon) -> _DeckAxis | None:
         (end[0] - start[0]) / length_m,
         (end[1] - start[1]) / length_m,
     )
+    # Canonicalize the axis direction (positive x, tie-broken on z) so
+    # the [start end, far end] ordering is a property of the deck's
+    # GEOMETRY, not of which corner GEOS happens to enumerate first on
+    # the rotated rectangle's ring.
+    if axis_unit[0] < 0.0 or (axis_unit[0] == 0.0 and axis_unit[1] < 0.0):
+        start, end = end, start
+        axis_unit = (-axis_unit[0], -axis_unit[1])
     # The two short edges are the deck ends; order them along the axis by
     # midpoint projection so [start end, far end] is well defined.
     ordered_by_length = sorted(range(4), key=lambda index: lengths[index])
@@ -1827,36 +2460,56 @@ def _below_grade_hard_enclosure(
     train halls; the decks are open at the mouths, the platforms are 100%
     enclosed).  The floor value is the HARD content's minimum corner y —
     never the deepest solid (the KDEN −19 m foundation-pile trap)."""
-    below_grade_hard_faces = [
-        triangle
-        for triangle in frame.triangles
-        if triangle.is_hard
-        and triangle.horizontality >= NEAR_HORIZONTAL_NORMAL_Y_MIN
-        and triangle.height_m <= -TUNNEL_MIN_BODY_DEPTH_M
-    ]
+    below_grade_hard_mask = (
+        (frame.triangle_hardness_codes > 0)
+        & (frame.triangle_horizontality >= NEAR_HORIZONTAL_NORMAL_Y_MIN)
+        & (frame.triangle_height_m <= -TUNNEL_MIN_BODY_DEPTH_M)
+    )
     if (
-        sum(face.area_m2 for face in below_grade_hard_faces)
+        float(frame.triangle_area_m2[below_grade_hard_mask].sum())
         < TUNNEL_MIN_BELOW_GRADE_DECK_AREA_M2
     ):
         return None
-    at_grade_faces = [
-        triangle
-        for triangle in frame.triangles
-        if triangle.height_m >= -TUNNEL_ROOF_TOP_TOLERANCE_M
-    ]
-    below_union = _union_horizontal(
-        below_grade_hard_faces, keep_all_parts=True
-    )
-    at_grade_footprint = _union_horizontal(
-        at_grade_faces, close_m=AT_GRADE_FOOTPRINT_CLOSE_M, keep_all_parts=True
+    below_union = _union_horizontal_coordinates(
+        frame.triangle_corner_coordinates_xz(below_grade_hard_mask),
+        keep_all_parts=True,
     )
     if below_union is None:
         return None
-    hard_content_minimum_y_m = min(
-        corner[1]
-        for face in below_grade_hard_faces
-        for corner in face.corners
+    hard_content_minimum_y_m = float(
+        frame.triangle_corner_y_m[below_grade_hard_mask].min()
     )
+    at_grade_mask = frame.triangle_height_m >= -TUNNEL_ROOF_TOP_TOLERANCE_M
+    if not at_grade_mask.any():
+        at_grade_footprint = None
+    else:
+        # Every consumer of the at-grade footprint intersects it with
+        # the below-grade union, so only at-grade faces near that union
+        # can influence any output.  The morphological close reads
+        # geometry within twice its radius of any point it shapes; a
+        # five-radius margin is a strict superset of that influence
+        # zone, so the restricted union is EXACT wherever it is
+        # evaluated.
+        margin = 5.0 * AT_GRADE_FOOTPRINT_CLOSE_M
+        minimum_x, minimum_z, maximum_x, maximum_z = below_union.bounds
+        near_mask = (
+            at_grade_mask
+            & (frame.triangle_corner_x_m.min(axis=1) <= maximum_x + margin)
+            & (frame.triangle_corner_x_m.max(axis=1) >= minimum_x - margin)
+            & (frame.triangle_corner_z_m.min(axis=1) <= maximum_z + margin)
+            & (frame.triangle_corner_z_m.max(axis=1) >= minimum_z - margin)
+        )
+        if near_mask.any():
+            at_grade_footprint = _union_horizontal_coordinates(
+                frame.triangle_corner_coordinates_xz(near_mask),
+                close_m=AT_GRADE_FOOTPRINT_CLOSE_M,
+                keep_all_parts=True,
+            )
+        else:
+            # At-grade faces exist but none near the below-grade union:
+            # a computed-and-disjoint footprint, never an "absent" one
+            # (absence would hand the record the WHOLE below union).
+            at_grade_footprint = Polygon()
     if at_grade_footprint is None:
         enclosure_fraction = 0.0
     else:
@@ -1927,6 +2580,7 @@ def _classify_structure_ground_interface(
     placements: Sequence[ObjectPlacement],
     frame: _StructureFrame,
     enclosure: _BelowGradeHardEnclosure | None,
+    cache: _ResourceGeometryCache | None = None,
 ) -> StructureGroundInterface | None:
     """Extract and classify one building structure's ground interface
     (spec section 3.4).  Returns ``None`` for structures with no wall
@@ -1967,13 +2621,13 @@ def _classify_structure_ground_interface(
             wall_columns
         )
     else:
-        total_area = sum(t.area_m2 for t in frame.triangles) or 1.0
-        centroid_x = (
-            sum(t.centroid_xz[0] * t.area_m2 for t in frame.triangles)
+        total_area = float(frame.triangle_area_m2.sum()) or 1.0
+        centroid_x = float(
+            (frame.triangle_centroid_x_m * frame.triangle_area_m2).sum()
             / total_area
         )
-        centroid_z = (
-            sum(t.centroid_xz[1] * t.area_m2 for t in frame.triangles)
+        centroid_z = float(
+            (frame.triangle_centroid_z_m * frame.triangle_area_m2).sum()
             / total_area
         )
 
@@ -1998,17 +2652,17 @@ def _classify_structure_ground_interface(
         )
 
     # Dominant-area resource (A7 exception key): by solid face area.
-    area_by_resource: dict[str, float] = {}
-    for triangle in frame.triangles:
-        area_by_resource[triangle.resource_path] = (
-            area_by_resource.get(triangle.resource_path, 0.0)
-            + triangle.area_m2
+    if frame.triangle_count:
+        area_by_resource_index = numpy.bincount(
+            frame.triangle_resource_indices,
+            weights=frame.triangle_area_m2,
+            minlength=len(frame.triangle_resource_paths),
         )
-    dominant_area_resource = (
-        max(area_by_resource, key=lambda key: area_by_resource[key])
-        if area_by_resource
-        else None
-    )
+        dominant_area_resource = frame.triangle_resource_paths[
+            int(area_by_resource_index.argmax())
+        ]
+    else:
+        dominant_area_resource = None
 
     wall_column_bases = [
         (base_y, resources)
@@ -2018,23 +2672,42 @@ def _classify_structure_ground_interface(
         sector_low_envelopes, wall_column_bases, dominant_area_resource
     )
 
-    # Ground-contact fractions (work order round 4), by face area.
-    total_face_area = sum(t.area_m2 for t in frame.triangles)
-    area_by_sector = [0.0] * PERIMETER_SECTOR_COUNT
-    contact_area_by_sector = [0.0] * PERIMETER_SECTOR_COUNT
-    contact_area_total = 0.0
-    for triangle in frame.triangles:
-        sector_index = _sector_of(*triangle.centroid_xz)
-        area_by_sector[sector_index] += triangle.area_m2
-        if abs(triangle.height_m) <= GROUND_CONTACT_BAND_HALF_WIDTH_M:
-            contact_area_by_sector[sector_index] += triangle.area_m2
-            contact_area_total += triangle.area_m2
+    # Ground-contact fractions (work order round 4), by face area —
+    # vectorized over the frame triangle arrays.
+    total_face_area = float(frame.triangle_area_m2.sum())
+    triangle_angles = numpy.arctan2(
+        frame.triangle_centroid_z_m - centroid_z,
+        frame.triangle_centroid_x_m - centroid_x,
+    )
+    triangle_sectors = (
+        (triangle_angles + numpy.pi)
+        / (2.0 * numpy.pi)
+        * PERIMETER_SECTOR_COUNT
+    ).astype(numpy.int64)
+    numpy.minimum(
+        triangle_sectors, PERIMETER_SECTOR_COUNT - 1, out=triangle_sectors
+    )
+    area_by_sector = numpy.bincount(
+        triangle_sectors,
+        weights=frame.triangle_area_m2,
+        minlength=PERIMETER_SECTOR_COUNT,
+    )
+    contact_mask = (
+        numpy.abs(frame.triangle_height_m)
+        <= GROUND_CONTACT_BAND_HALF_WIDTH_M
+    )
+    contact_area_by_sector = numpy.bincount(
+        triangle_sectors[contact_mask],
+        weights=frame.triangle_area_m2[contact_mask],
+        minlength=PERIMETER_SECTOR_COUNT,
+    )
+    contact_area_total = float(contact_area_by_sector.sum())
     ground_contact_fraction = (
         contact_area_total / total_face_area if total_face_area > 0 else 0.0
     )
     ground_contact_fraction_by_sector = [
         (
-            contact_area_by_sector[index] / area_by_sector[index]
+            float(contact_area_by_sector[index] / area_by_sector[index])
             if area_by_sector[index] > 0
             else 0.0
         )
@@ -2044,22 +2717,54 @@ def _classify_structure_ground_interface(
     # Elevated deck/road above the footprint: confirms a bowl (T1 helix),
     # is a decoy over a flat structure (ELLX roadway) — recorded, never
     # deciding (A7).
-    elevated_deck_area = sum(
-        triangle.area_m2
-        for triangle in frame.triangles
-        if triangle.horizontality >= NEAR_HORIZONTAL_NORMAL_Y_MIN
-        and triangle.height_m >= BRIDGE_DECK_CARRIED_MIN_HEIGHT_M
+    elevated_deck_mask = (
+        frame.triangle_horizontality >= NEAR_HORIZONTAL_NORMAL_Y_MIN
+    ) & (frame.triangle_height_m >= BRIDGE_DECK_CARRIED_MIN_HEIGHT_M)
+    elevated_deck_area = float(
+        frame.triangle_area_m2[elevated_deck_mask].sum()
     )
     elevated_deck_above = elevated_deck_area >= BRIDGE_MIN_DECK_AREA_M2
 
-    structure_footprint = _union_horizontal(
-        frame.triangles,
-        close_m=AT_GRADE_FOOTPRINT_CLOSE_M,
-        keep_all_parts=True,
-    )
-    structure_footprint_area = (
-        structure_footprint.area if structure_footprint is not None else 0.0
-    )
+    # The whole-structure footprint union is expensive on mega-pool
+    # frames and is consumed ONLY by the bowl and trench branches below
+    # (a FLAT record never carries it), so it is computed lazily.
+    structure_footprint_memo: list = []
+
+    def _structure_footprint():
+        if not structure_footprint_memo:
+            if cache is not None:
+                class_footprints = _class_footprints_by_resource(
+                    placements,
+                    frame.origin_latitude,
+                    frame.origin_longitude,
+                    cache,
+                    _FACE_CLASS_ALL,
+                )
+                if class_footprints:
+                    try:
+                        footprint = _close_and_reduce_union(
+                            shapely.union_all(
+                                list(class_footprints.values())
+                            ),
+                            AT_GRADE_FOOTPRINT_CLOSE_M,
+                            True,
+                        )
+                    except (ValueError, _GEOS_EXCEPTION):
+                        footprint = None
+                else:
+                    footprint = None
+            else:
+                footprint = _union_horizontal_coordinates(
+                    frame.triangle_corner_coordinates_xz(),
+                    close_m=AT_GRADE_FOOTPRINT_CLOSE_M,
+                    keep_all_parts=True,
+                )
+            structure_footprint_memo.append(footprint)
+        return structure_footprint_memo[0]
+
+    def _structure_footprint_area() -> float:
+        footprint = _structure_footprint()
+        return footprint.area if footprint is not None else 0.0
 
     # --- classification, in evidence order ---------------------------------
     interface_class = INTERFACE_FLAT_CONFIRMED
@@ -2112,12 +2817,10 @@ def _classify_structure_ground_interface(
             < TRENCH_SPINE_MIN_CONTRIBUTING_OBJECTS
         ):
             continue
-        candidate_footprint = _union_horizontal(
-            [
-                triangle
-                for triangle in frame.triangles
-                if triangle.height_m <= -TRENCH_SPINE_MIN_DEPTH_M
-            ],
+        candidate_footprint = _union_horizontal_coordinates(
+            frame.triangle_corner_coordinates_xz(
+                frame.triangle_height_m <= -TRENCH_SPINE_MIN_DEPTH_M
+            ),
             close_m=AT_GRADE_FOOTPRINT_CLOSE_M,
             keep_all_parts=True,
         )
@@ -2155,18 +2858,18 @@ def _classify_structure_ground_interface(
         ground_contact_fraction <= BOWL_MAX_GROUND_CONTACT_FRACTION
         and at_grade_wall_base_share <= BOWL_MAX_AT_GRADE_BASE_SHARE
         and bowl_floor_level is not None
-        and structure_footprint_area
+        and _structure_footprint_area()
         >= STRUCTURE_INTERFACE_MIN_FOOTPRINT_AREA_M2
     ):
         interface_class = INTERFACE_BOWL_UNDER_DECK
-        below_grade_footprint = structure_footprint
+        below_grade_footprint = _structure_footprint()
         # Objects under-specify bowl depth (A7: T1 shell base −3.4 m where
         # the reference hand patch cuts −8 m) — a BOUND, never a target.
         floor_y_m = bowl_floor_level[0]
         floor_is_bound_not_target = True
     elif (
         trench_level is not None
-        and structure_footprint_area
+        and _structure_footprint_area()
         >= STRUCTURE_INTERFACE_MIN_FOOTPRINT_AREA_M2
     ):
         interface_class = INTERFACE_TRENCH_SPINE
@@ -2213,29 +2916,30 @@ def _classify_structure_ground_interface(
 # Round-5 mega-pool component refinement
 # ---------------------------------------------------------------------------
 
-def _per_resource_face_footprints(
-    triangles: Sequence[_FrameTriangle],
-    face_predicate,
-) -> dict[str, object]:
-    """Union footprint of the faces passing ``face_predicate``, per
-    resource.  Resources with no passing face are absent."""
-    polygons_by_resource: dict[str, list] = {}
-    for triangle in triangles:
-        if face_predicate(triangle):
-            polygons_by_resource.setdefault(
-                triangle.resource_path, []
-            ).append(triangle.horizontal_polygon)
-    footprints: dict[str, object] = {}
-    for resource, polygons in polygons_by_resource.items():
-        try:
-            union = unary_union(polygons)
-            if not union.is_valid:
-                union = union.buffer(0)
-        except (ValueError, _GEOS_EXCEPTION):
-            continue
-        if not union.is_empty:
-            footprints[resource] = union
-    return footprints
+def _resources_with_triangles_near(
+    frame: _StructureFrame,
+    geometry,
+    margin_m: float = 0.0,
+) -> set[str]:
+    """Resources owning at least one frame triangle whose bounding box
+    overlaps ``geometry``'s bounding box (expanded by ``margin_m``) — the
+    cheap exact prefilter for footprint-overlap questions: a resource
+    with no triangle near the geometry cannot intersect it."""
+    if frame.triangle_count == 0:
+        return set()
+    minimum_x, minimum_z, maximum_x, maximum_z = geometry.bounds
+    near_mask = (
+        (frame.triangle_corner_x_m.min(axis=1) <= maximum_x + margin_m)
+        & (frame.triangle_corner_x_m.max(axis=1) >= minimum_x - margin_m)
+        & (frame.triangle_corner_z_m.min(axis=1) <= maximum_z + margin_m)
+        & (frame.triangle_corner_z_m.max(axis=1) >= minimum_z - margin_m)
+    )
+    return {
+        frame.triangle_resource_paths[index]
+        for index in numpy.unique(
+            frame.triangle_resource_indices[near_mask]
+        ).tolist()
+    }
 
 
 def _footprint_components(
@@ -2286,6 +2990,7 @@ def _footprint_components(
 def _below_grade_drivable_components(
     placements: Sequence[ObjectPlacement],
     frame: _StructureFrame,
+    cache: _ResourceGeometryCache,
 ) -> list[set[str]]:
     """Tunnel/interior-cutout candidate components inside one pool.
 
@@ -2298,16 +3003,15 @@ def _below_grade_drivable_components(
     lies over the component's seed footprint — the roof shell over its
     deck — so mouths (deck − roof) still compute per tunnel."""
     below_grade_agl_resources = _agl_tunnel_seed_resources(
-        placements, frame.triangles
+        placements, frame
     )
-    seed_footprints = _per_resource_face_footprints(
-        frame.triangles,
-        lambda triangle: (
-            triangle.is_hard
-            and triangle.horizontality >= NEAR_HORIZONTAL_NORMAL_Y_MIN
-            and triangle.height_m <= -TUNNEL_MIN_BODY_DEPTH_M
-        )
-        or triangle.resource_path in below_grade_agl_resources,
+    seed_footprints = _class_footprints_by_resource(
+        placements,
+        frame.origin_latitude,
+        frame.origin_longitude,
+        cache,
+        _FACE_CLASS_BELOW_GRADE_HARD_NEAR_HORIZONTAL,
+        full_footprint_resources=below_grade_agl_resources,
     )
     if not seed_footprints:
         return []
@@ -2315,10 +3019,10 @@ def _below_grade_drivable_components(
         seed_footprints, TUNNEL_COMPONENT_JOIN_BUFFER_M
     )
 
-    # Attach cover (roof shell) resources.
-    full_footprints = _per_resource_face_footprints(
-        frame.triangles, lambda triangle: True
-    )
+    # Attach cover (roof shell) resources.  Containment needs each
+    # candidate's FULL footprint union, so the bounding-box prefilter
+    # first drops every resource that cannot overlap the component at
+    # all (a resource with no triangle near it has containment zero).
     attached_components: list[set[str]] = []
     for component in components:
         try:
@@ -2329,7 +3033,19 @@ def _below_grade_drivable_components(
             attached_components.append(component)
             continue
         attached = set(component)
-        for resource, footprint in full_footprints.items():
+        candidate_resources = (
+            _resources_with_triangles_near(frame, component_footprint)
+            - attached
+        )
+        candidate_footprints = _class_footprints_by_resource(
+            placements,
+            frame.origin_latitude,
+            frame.origin_longitude,
+            cache,
+            _FACE_CLASS_ALL,
+            restrict_resources=candidate_resources,
+        )
+        for resource, footprint in candidate_footprints.items():
             if resource in attached or footprint.area <= 0.0:
                 continue
             try:
@@ -2345,16 +3061,20 @@ def _below_grade_drivable_components(
     return attached_components
 
 
-def _hard_face_components(frame: _StructureFrame) -> list[set[str]]:
+def _hard_face_components(
+    placements: Sequence[ObjectPlacement],
+    frame: _StructureFrame,
+    cache: _ResourceGeometryCache,
+) -> list[set[str]]:
     """Bridge candidate components: resources owning near-horizontal hard
     faces, grouped by footprint adjacency
     (:data:`BRIDGE_COMPONENT_JOIN_BUFFER_M`)."""
-    seed_footprints = _per_resource_face_footprints(
-        frame.triangles,
-        lambda triangle: (
-            triangle.is_hard
-            and triangle.horizontality >= NEAR_HORIZONTAL_NORMAL_Y_MIN
-        ),
+    seed_footprints = _class_footprints_by_resource(
+        placements,
+        frame.origin_latitude,
+        frame.origin_longitude,
+        cache,
+        _FACE_CLASS_HARD_NEAR_HORIZONTAL,
     )
     if not seed_footprints:
         return []
@@ -2365,19 +3085,26 @@ def _hard_face_components(frame: _StructureFrame) -> list[set[str]]:
 
 def _bridge_evidence_resources(
     component: set[str],
+    placements: Sequence[ObjectPlacement],
     frame: _StructureFrame,
+    cache: _ResourceGeometryCache,
 ) -> set[str]:
     """The component plus every pool resource whose footprint intersects
     the component's hard footprint buffered by the abutment search radius
     — the grounding cladding the per-end test must see (EDDF's Tunnel_N
-    trench walls belong to their Bridge_N deck)."""
-    component_hard = _per_resource_face_footprints(
-        frame.triangles,
-        lambda triangle: (
-            triangle.resource_path in component
-            and triangle.is_hard
-            and triangle.horizontality >= NEAR_HORIZONTAL_NORMAL_Y_MIN
-        ),
+    trench walls belong to their Bridge_N deck).
+
+    A resource's footprint union intersects the buffered hard footprint
+    exactly when SOME face of it does, so membership is decided by a
+    bulk per-triangle intersection test (bounding-box prefiltered) — no
+    per-resource footprint unions are ever built here."""
+    component_hard = _class_footprints_by_resource(
+        placements,
+        frame.origin_latitude,
+        frame.origin_longitude,
+        cache,
+        _FACE_CLASS_HARD_NEAR_HORIZONTAL,
+        restrict_resources=component,
     )
     if not component_hard:
         return set(component)
@@ -2388,17 +3115,50 @@ def _bridge_evidence_resources(
     except (ValueError, _GEOS_EXCEPTION):
         return set(component)
     evidence = set(component)
-    full_footprints = _per_resource_face_footprints(
-        frame.triangles, lambda triangle: True
+    resource_index_by_path = {
+        path: index
+        for index, path in enumerate(frame.triangle_resource_paths)
+    }
+    evidence_indices = [
+        resource_index_by_path[resource]
+        for resource in evidence
+        if resource in resource_index_by_path
+    ]
+    candidate_mask = ~numpy.isin(
+        frame.triangle_resource_indices,
+        numpy.asarray(evidence_indices, dtype=numpy.int32),
     )
-    for resource, footprint in full_footprints.items():
-        if resource in evidence:
-            continue
+    if candidate_mask.any():
+        minimum_x, minimum_z, maximum_x, maximum_z = buffered.bounds
+        candidate_mask &= (
+            (frame.triangle_corner_x_m.min(axis=1) <= maximum_x)
+            & (frame.triangle_corner_x_m.max(axis=1) >= minimum_x)
+            & (frame.triangle_corner_z_m.min(axis=1) <= maximum_z)
+            & (frame.triangle_corner_z_m.max(axis=1) >= minimum_z)
+        )
+    if candidate_mask.any():
+        candidate_resource_indices = frame.triangle_resource_indices[
+            candidate_mask
+        ]
         try:
-            if footprint.intersects(buffered):
-                evidence.add(resource)
+            shapely.prepare(buffered)
+            intersecting = shapely.intersects(
+                shapely.polygons(
+                    frame.triangle_corner_coordinates_xz(candidate_mask)
+                ),
+                buffered,
+            )
+            hit_indices = numpy.unique(
+                candidate_resource_indices[intersecting]
+            )
         except (ValueError, _GEOS_EXCEPTION):
-            evidence.add(resource)
+            # Doubt merges, never tears (I-20 spirit): on a bulk-test
+            # failure every bounding-box candidate joins the evidence.
+            hit_indices = numpy.unique(candidate_resource_indices)
+        evidence.update(
+            frame.triangle_resource_paths[index]
+            for index in hit_indices.tolist()
+        )
     return evidence
 
 
@@ -2461,6 +3221,46 @@ def _pavement_union_in_frame(
     return None if union.is_empty else union
 
 
+def _pool_has_classification_evidence(
+    placements: Sequence[ObjectPlacement],
+    cache: _ResourceGeometryCache,
+) -> bool:
+    """The evidence pre-screen (see the ``POOL_EVIDENCE_*`` constant
+    block): may a pool possibly emit a record?  ``False`` is PROVEN
+    silence — no tunnel, bridge, refusal, exclusion or ground interface
+    can come out of a pool with no hard triangle, no below-grade
+    ``OBJECT_AGL`` placement, no vertex deep enough to seat a below-grade
+    interface level, no cosmetic-bridge name hint, and too little
+    vertical span for a single wall column."""
+    pool_minimum_effective_y = math.inf
+    pool_maximum_effective_y = -math.inf
+    for placement in placements:
+        has_hard, has_solid, minimum_vertex_y, maximum_vertex_y = (
+            cache.evidence(placement.resource_path)
+        )
+        if not has_solid:
+            continue
+        if has_hard:
+            return True
+        if COSMETIC_BRIDGE_NAME_HINT in placement.resource_path.lower():
+            return True
+        offset = placement.above_ground_level_metres
+        if offset <= -TUNNEL_MIN_BELOW_GRADE_AGL_OFFSET_M:
+            return True
+        lowest = offset + minimum_vertex_y
+        if lowest <= POOL_EVIDENCE_BELOW_GRADE_VERTEX_MAX_Y_M:
+            return True
+        if lowest < pool_minimum_effective_y:
+            pool_minimum_effective_y = lowest
+        highest = offset + maximum_vertex_y
+        if highest > pool_maximum_effective_y:
+            pool_maximum_effective_y = highest
+    return (
+        pool_maximum_effective_y - pool_minimum_effective_y
+        >= WALL_COLUMN_MIN_VERTICAL_EXTENT_M
+    )
+
+
 def classify_object_terrain_features(
     placements: Sequence[ObjectPlacement],
     geometry_by_resource: dict[str, ObjectGeometry],
@@ -2504,9 +3304,17 @@ def classify_object_terrain_features(
     refusals: list[RefusedStructure] = []
     ground_interfaces: list[StructureGroundInterface] = []
 
+    cache = _ResourceGeometryCache(geometry_by_resource)
+    skipped_pool_count = 0
+
     for pool in pools:
-        frame = _build_structure_frame(pool.placements, geometry_by_resource)
-        if not frame.triangles:
+        if not _pool_has_classification_evidence(pool.placements, cache):
+            skipped_pool_count += 1
+            continue
+        frame = _build_structure_frame(
+            pool.placements, geometry_by_resource, cache
+        )
+        if frame.triangle_count == 0:
             continue
         consumed_resources: set[str] = set()
 
@@ -2517,7 +3325,7 @@ def classify_object_terrain_features(
         # Within a component, R10/A8 precedence holds: ENCLOSURE
         # discriminates the interior cutout from the tunnel.
         for component in _below_grade_drivable_components(
-            pool.placements, frame
+            pool.placements, frame, cache
         ):
             component_placements = [
                 placement
@@ -2527,9 +3335,9 @@ def classify_object_terrain_features(
             if not component_placements:
                 continue
             component_frame = _build_structure_frame(
-                component_placements, geometry_by_resource
+                component_placements, geometry_by_resource, cache
             )
-            if not component_frame.triangles:
+            if component_frame.triangle_count == 0:
                 continue
             component_enclosure = _below_grade_hard_enclosure(
                 component_frame
@@ -2543,6 +3351,7 @@ def classify_object_terrain_features(
                     component_placements,
                     component_frame,
                     component_enclosure,
+                    cache,
                 )
                 if ground_interface is not None:
                     ground_interfaces.append(ground_interface)
@@ -2551,7 +3360,7 @@ def classify_object_terrain_features(
                         exclusions.append((pack_root, resource))
                 continue
             if _is_tunnel_signature(
-                component_placements, component_frame.triangles
+                component_placements, component_frame
             ):
                 tunnel = _classify_tunnel(
                     component_placements,
@@ -2575,10 +3384,10 @@ def classify_object_terrain_features(
             frame
             if not consumed_resources
             else _build_structure_frame(
-                remaining_placements, geometry_by_resource
+                remaining_placements, geometry_by_resource, cache
             )
         )
-        if not remaining_frame.triangles:
+        if remaining_frame.triangle_count == 0:
             continue
 
         # --- stage 2: bridge components ----------------------------------
@@ -2593,10 +3402,12 @@ def classify_object_terrain_features(
             remaining_frame.origin_latitude,
             remaining_frame.origin_longitude,
         )
-        bridge_components = _hard_face_components(remaining_frame)
+        bridge_components = _hard_face_components(
+            remaining_placements, remaining_frame, cache
+        )
         for component in bridge_components:
             evidence_resources = _bridge_evidence_resources(
-                component, remaining_frame
+                component, remaining_placements, remaining_frame, cache
             )
             evidence_placements = [
                 placement
@@ -2606,9 +3417,9 @@ def classify_object_terrain_features(
             if not evidence_placements:
                 continue
             evidence_frame = _build_structure_frame(
-                evidence_placements, geometry_by_resource
+                evidence_placements, geometry_by_resource, cache
             )
-            if not evidence_frame.triangles:
+            if evidence_frame.triangle_count == 0:
                 continue
             if (
                 _wall_column_count(evidence_frame)
@@ -2639,8 +3450,32 @@ def classify_object_terrain_features(
 
         # Cosmetic bridges carry no hard faces at all (Murfreesboro):
         # when the remaining pool has no hard components and is not a
-        # building, the whole-pool cosmetic path still applies.
+        # building, the whole-pool cosmetic path still applies.  A
+        # structure can only come out of ``_classify_bridge`` through
+        # the hard-deck path (needs near-horizontal hard faces) or the
+        # cosmetic limb (needs the name hint on a hard-less structure);
+        # pools with neither provably classify to nothing and are
+        # pre-checked here so they never materialize their triangle
+        # lists.
+        remaining_has_hard = bool(
+            (remaining_frame.triangle_hardness_codes > 0).any()
+        )
+        remaining_cosmetic_possible = not remaining_has_hard and any(
+            COSMETIC_BRIDGE_NAME_HINT in placement.resource_path.lower()
+            for placement in remaining_placements
+        )
+        remaining_hard_deck_possible = remaining_has_hard and bool(
+            (
+                (remaining_frame.triangle_hardness_codes > 0)
+                & (
+                    remaining_frame.triangle_horizontality
+                    >= NEAR_HORIZONTAL_NORMAL_Y_MIN
+                )
+            ).any()
+        )
         if not bridge_components and (
+            remaining_cosmetic_possible or remaining_hard_deck_possible
+        ) and (
             _wall_column_count(remaining_frame)
             < BUILDING_MIN_WALL_COLUMN_COUNT
         ):
@@ -2684,15 +3519,16 @@ def classify_object_terrain_features(
             remaining_frame
             if len(building_placements) == len(remaining_placements)
             else _build_structure_frame(
-                building_placements, geometry_by_resource
+                building_placements, geometry_by_resource, cache
             )
         )
-        if not building_frame.triangles:
+        if building_frame.triangle_count == 0:
             continue
         ground_interface = _classify_structure_ground_interface(
             building_placements,
             building_frame,
             _below_grade_hard_enclosure(building_frame),
+            cache,
         )
         if ground_interface is not None:
             ground_interfaces.append(ground_interface)
@@ -2702,6 +3538,19 @@ def classify_object_terrain_features(
                 # FLAT_CONFIRMED adapts nothing and stays bakeable.
                 for resource in ground_interface.object_resources:
                     exclusions.append((pack_root, resource))
+
+    if skipped_pool_count:
+        try:
+            import O4_UI_Utils
+        except ImportError:
+            pass
+        else:
+            O4_UI_Utils.vprint(
+                2,
+                "   [object-terrain] evidence pre-screen skipped "
+                f"{skipped_pool_count} of {len(pools)} pool(s) with no "
+                "classifiable geometry",
+            )
 
     return ClassificationResult(
         tunnels=tunnels,

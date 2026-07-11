@@ -233,6 +233,91 @@ def _discover_sibling_road_networks(
     return networks
 
 
+# Bump when classifier logic or record shapes change — invalidates every
+# pack-sidecar classification cache (see attach_bridge_classification).
+# Version 3: classifier performance round 2026-07-10 (evidence
+# pre-screen, composed placement transform, bulk footprint unions) —
+# results are equivalent within float tolerance but must be rebuilt on
+# the new code path.
+_CLASSIFICATION_CACHE_VERSION = 3
+
+# Sidecar file name inside the airport package (pack-root level; the
+# in-pack precedent is the ``.anchor_bak`` object backups the Phase 2
+# y-bake writes next to each adjusted object).
+_CLASSIFICATION_SIDECAR_NAME = "o4_object_terrain_classification.cache"
+
+
+def _classification_sidecar(dsf_path, pack_root, pavement_polygons,
+                            apt_dat_path=None):
+    """Sidecar path + input fingerprint for the pack classification
+    cache.  The fingerprint covers everything the classification reads:
+
+    * the overlay DSF (path, size, mtime) — any airport layout change
+      necessarily rewrites it (user ruling 2026-07-10);
+    * the airport's ``apt.dat`` (size, mtime) when known — layout edits
+      usually rewrite it too, and the pavement evidence derives from it;
+    * every ``.obj`` under the pack root (relative path, size, mtime) —
+      needed BESIDE the DSF check because object-geometry edits (our own
+      Phase 2 y-bake rewrites included) change no DSF byte;
+      ``.anchor_bak`` backups are not ``.obj`` files and stay out of it;
+    * the pavement-coverage evidence (well-known-binary hash of the
+      rings — contract selection depends on it);
+    * :data:`_CLASSIFICATION_CACHE_VERSION`.
+
+    Returns ``(None, None)`` when no pack root is known (nowhere to put
+    a sidecar) or fingerprinting fails."""
+    if not pack_root or not os.path.isdir(pack_root):
+        return None, None
+    import hashlib
+    digest = hashlib.sha1()
+    try:
+        digest.update(str(_CLASSIFICATION_CACHE_VERSION).encode())
+        dsf_stat = os.stat(dsf_path)
+        digest.update(
+            f"{os.path.basename(dsf_path)}:{dsf_stat.st_size}"
+            f":{dsf_stat.st_mtime}".encode()
+        )
+        if apt_dat_path:
+            try:
+                apt_dat_stat = os.stat(apt_dat_path)
+                digest.update(
+                    f"apt:{apt_dat_stat.st_size}"
+                    f":{apt_dat_stat.st_mtime}".encode()
+                )
+            except OSError:
+                digest.update(b"apt:unreadable")
+        object_entries = []
+        for directory, _subdirectories, file_names in os.walk(pack_root):
+            for file_name in file_names:
+                if not file_name.lower().endswith(".obj"):
+                    continue
+                full_path = os.path.join(directory, file_name)
+                try:
+                    file_stat = os.stat(full_path)
+                except OSError:
+                    continue
+                object_entries.append(
+                    f"{os.path.relpath(full_path, pack_root)}"
+                    f":{file_stat.st_size}:{file_stat.st_mtime}"
+                )
+        for entry in sorted(object_entries):
+            digest.update(entry.encode())
+        if pavement_polygons:
+            for polygon in pavement_polygons:
+                try:
+                    digest.update(polygon.wkb)
+                except Exception:
+                    digest.update(b"?")
+        else:
+            digest.update(b"no-pavement-evidence")
+    except OSError:
+        return None, None
+    return (
+        os.path.join(pack_root, _CLASSIFICATION_SIDECAR_NAME),
+        digest.hexdigest(),
+    )
+
+
 def attach_bridge_classification(layout, xplane_root: str):
     """Classify the airport pack's bridge/tunnel objects and cache the
     result (plus sibling road networks) on ``layout``.
@@ -271,6 +356,48 @@ def attach_bridge_classification(layout, xplane_root: str):
         )
         return None
 
+    # ── Pack-sidecar classification cache (user directive 2026-07-10,
+    # default ON) ──  The read → load → classify chain is recomputed
+    # byte-identically on every build of an unchanged pack.  The
+    # FINISHED result (R4 family expansion included) is pickled as a
+    # sidecar INSIDE the airport package — the same in-pack convention
+    # as the ``.anchor_bak`` object backups — guarded by a fingerprint
+    # of everything the classification reads: the overlay DSF, every
+    # ``.obj`` in the pack (a Phase 2 y-bake rewrite invalidates
+    # automatically), the pavement-coverage evidence, and a code
+    # version salt.  ``O4_OBJECT_CLASSIFICATION_CACHE=0`` disables.
+    pavement_polygons = _pavement_polygons_longitude_latitude(layout)
+    pack_root_early = dsf_reader._pack_root_for_dsf(dsf_path)
+    sidecar_path = None
+    fingerprint = None
+    if os.environ.get("O4_OBJECT_CLASSIFICATION_CACHE", "1") == "1":
+        import pickle
+        sidecar_path, fingerprint = _classification_sidecar(
+            dsf_path, pack_root_early, pavement_polygons,
+            apt_dat_path=apt_dat_path,
+        )
+        if sidecar_path and fingerprint and os.path.isfile(sidecar_path):
+            try:
+                with open(sidecar_path, "rb") as sidecar_file:
+                    payload = pickle.load(sidecar_file)
+                if payload.get("fingerprint") == fingerprint:
+                    UI.vprint(
+                        1,
+                        "   [object-bridge] classification read from the "
+                        "pack sidecar cache (fingerprint match)",
+                    )
+                    return _attach_classification_tail(
+                        layout, payload["result"], xplane_root,
+                        anchor_latitude, anchor_longitude,
+                    )
+                UI.vprint(
+                    1,
+                    "   [object-bridge] pack sidecar cache STALE "
+                    "(pack edited since it was written) — reclassifying",
+                )
+            except Exception:
+                pass
+
     lines = dsf_reader._load_dsf_text(dsf_path)
     if not lines:
         UI.vprint(
@@ -305,7 +432,8 @@ def attach_bridge_classification(layout, xplane_root: str):
     if not geometry_by_resource:
         return None
 
-    pavement_polygons = _pavement_polygons_longitude_latitude(layout)
+    # (``pavement_polygons`` computed above, ahead of the sidecar
+    # fingerprint — contract selection depends on it.)
     if pavement_polygons is None:
         UI.vprint(
             2,
@@ -335,6 +463,32 @@ def attach_bridge_classification(layout, xplane_root: str):
             f"{[r.split('/')[-1] for r in family_added]}",
         )
 
+    if sidecar_path is not None and fingerprint is not None:
+        import pickle
+        try:
+            with open(sidecar_path, "wb") as sidecar_file:
+                pickle.dump(
+                    {"fingerprint": fingerprint, "result": result},
+                    sidecar_file,
+                )
+            UI.vprint(
+                1,
+                "   [object-bridge] classification written to the pack "
+                f"sidecar cache ({os.path.basename(sidecar_path)})",
+            )
+        except Exception:
+            pass
+
+    return _attach_classification_tail(
+        layout, result, xplane_root, anchor_latitude, anchor_longitude
+    )
+
+
+def _attach_classification_tail(layout, result, xplane_root,
+                                anchor_latitude, anchor_longitude):
+    """Common tail of :func:`attach_bridge_classification` for both the
+    fresh-classify and lab-cache paths: cache on the layout, discover
+    sibling road networks and route lines, log the summary."""
     setattr(layout, CLASSIFICATION_ATTRIBUTE, result)
 
     tile_lat = int(math.floor(anchor_latitude))

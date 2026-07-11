@@ -1925,3 +1925,89 @@ class TestTunnelPortalPairs:
             layout, dem, 36, -87, layout.m_to_ll,
             walk, 200.0, 174.5, 11.0, 20.0, refuse_inverted=True)
         assert emitted is True and layout.shapes
+
+
+class TestClassificationSidecar:
+    """Pack-sidecar classification cache (user directive 2026-07-10):
+    fingerprint covers the DSF, every .obj in the pack, the pavement
+    evidence, and the version salt — any pack edit invalidates."""
+
+    @staticmethod
+    def _pack(tmp_path):
+        pack = tmp_path / "US-TEST Airport"
+        (pack / "Objects").mkdir(parents=True)
+        dsf = pack / "overlay.dsf"
+        dsf.write_bytes(b"dsf-bytes")
+        (pack / "Objects" / "a.obj").write_text("VT 0 0 0\n")
+        (pack / "Objects" / "b.obj").write_text("VT 1 1 1\n")
+        return pack, dsf
+
+    def test_fingerprint_stable_and_path_in_pack(self, tmp_path):
+        pack, dsf = self._pack(tmp_path)
+        path_1, print_1 = assembly._classification_sidecar(
+            str(dsf), str(pack), None)
+        path_2, print_2 = assembly._classification_sidecar(
+            str(dsf), str(pack), None)
+        assert print_1 == print_2
+        assert path_1 == path_2
+        assert path_1.startswith(str(pack))
+
+    def test_object_edit_invalidates(self, tmp_path):
+        import os as _os
+        pack, dsf = self._pack(tmp_path)
+        _path, before = assembly._classification_sidecar(
+            str(dsf), str(pack), None)
+        target = pack / "Objects" / "a.obj"
+        _os.utime(target, (1e9, 1e9))
+        _path, after = assembly._classification_sidecar(
+            str(dsf), str(pack), None)
+        assert before != after
+
+    def test_backup_files_do_not_count(self, tmp_path):
+        pack, dsf = self._pack(tmp_path)
+        _path, before = assembly._classification_sidecar(
+            str(dsf), str(pack), None)
+        (pack / "Objects" / "a.obj.anchor_bak").write_text("backup")
+        _path, after = assembly._classification_sidecar(
+            str(dsf), str(pack), None)
+        assert before == after
+
+    def test_pavement_evidence_changes_fingerprint(self, tmp_path):
+        pack, dsf = self._pack(tmp_path)
+        ring = Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+        _path, without = assembly._classification_sidecar(
+            str(dsf), str(pack), None)
+        _path, with_ring = assembly._classification_sidecar(
+            str(dsf), str(pack), [ring])
+        assert without != with_ring
+
+    def test_no_pack_root_means_no_sidecar(self, tmp_path):
+        pack, dsf = self._pack(tmp_path)
+        assert assembly._classification_sidecar(
+            str(dsf), None, None) == (None, None)
+        assert assembly._classification_sidecar(
+            str(dsf), str(tmp_path / "missing"), None) == (None, None)
+
+    def test_apt_dat_edit_invalidates(self, tmp_path):
+        import os as _os
+        pack, dsf = self._pack(tmp_path)
+        apt_dat = pack / "Earth nav data"
+        apt_dat.mkdir()
+        apt_dat = apt_dat / "apt.dat"
+        apt_dat.write_text("1 599 KBNA\n")
+        _path, before = assembly._classification_sidecar(
+            str(dsf), str(pack), None, apt_dat_path=str(apt_dat))
+        _os.utime(apt_dat, (1e9, 1e9))
+        _path, after = assembly._classification_sidecar(
+            str(dsf), str(pack), None, apt_dat_path=str(apt_dat))
+        assert before != after
+
+    def test_dsf_edit_invalidates(self, tmp_path):
+        import os as _os
+        pack, dsf = self._pack(tmp_path)
+        _path, before = assembly._classification_sidecar(
+            str(dsf), str(pack), None)
+        _os.utime(dsf, (1e9, 1e9))
+        _path, after = assembly._classification_sidecar(
+            str(dsf), str(pack), None)
+        assert before != after
