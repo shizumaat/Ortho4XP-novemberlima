@@ -91,11 +91,22 @@
 #    1240→1108, plane 4→2); nodes 4,403; gates-OFF byte-identical.
 #    Harness: tools/interval_reach_replay.py (O4_DUMP_SOLVE_STATE
 #    snapshot → 0.05 s standalone projection replay).
-# 2. B3 BANDS (three orders: construction move → variable admission →
-#    wrap + tunnel-ramp standoff) — UNBLOCKED on the warm-start;
-#    still needs: role-vs-ref admission granularity (gap faces and
-#    bands both carry ROLE_GRADED_STRIP) · the B1 reverse-dependency
-#    generalization (groundside/tunnel clip for pre-solve bands).
+# 2. B3 BANDS — ORDER 1 LANDED 7efc1be (+ cdda083 LineString shadow
+#    fix): construction move behind DEVELOPMENT gate
+#    O4_ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT (default OFF) +
+#    (role, ref) admission split (collision closed).  Scout
+#    corrections: clip STAYS at emission (legacy clearance cuts are
+#    post-solve default-ON); emitter truly CONSUMES pre-built
+#    footprints.  ★DEFERRED ACCEPTANCE: construct-ON = 82 bands vs 67
+#    / nodes 4,535 vs 4,403 / +14.8 s — cause isolated to the
+#    pre-solve march seeing the UNDECIMATED pre-densification
+#    pavement ring; resolution = order 2's shared-variable rings; the
+#    construct gate must NOT flip default before order 2 closes it.
+#    ORDER 2 (variable admission — zone rows as free variables,
+#    envelope interval edges, inner row = pavement chain identity,
+#    seam-taper structural, analytic valuation dies) dispatched;
+#    outcome recorded here when it reports.  ORDER 3 = wrap +
+#    tunnel-ramp standoff, after.
 # 3. NOAH IN-SIM ROUND 7 before any default flips: the 3 big-gap
 #    spine sites (60.7210897,-135.0776149 first) + the B1/B2 gate-ON
 #    tile · then B4 charter + legacy deletion · B5 projection
