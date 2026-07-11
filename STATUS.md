@@ -301,14 +301,23 @@
 #    NOT heal under it.  ★THE PERF PRIZE IS CONFIRMED AND HUGE:
 #    legacy-off CYXY = 36.4 s TOTAL (emit 95.9→6.5 s) — crushes the
 #    120 s target; the prize and the regression are the same lever.
-#    ★PREREQ ORDER DISPATCHED: extend construct coverage to the
-#    clearance-free extent (own gate, default OFF; fallback→~0 =
-#    the retirement rows' precondition) + MEASURE the structural
-#    question — can pure-clamp bands hold terrain the clearance was
-#    CUTTING, or does the terminal frontage need the b3cd998
-#    two-ring grade-capped structure generalized (STOP for Noah if
-#    confirmed).  Charter extension to junction/RESA + retirement
-#    wiring = the order after.  ★FLIP-BROKEN
+#    ★COVERAGE GRID LANDED 3092689 (gated OFF, byte-identical
+#    default): fallback 3,527→0, store_missing→0 (mechanism was NOT
+#    clearance clipping — the emit re-marches on the SOLVED edge
+#    which grades below DEM and the degenerate route-reach floor;
+#    kind flips + >30 m depth gaps; 21st-23rd corrected premises).
+#    Zone nodes ×3.53 at CYXY — KBNA needs the station-step diet
+#    before B4.  Adoption/weld rows = GEOMETRIC clip artifacts (not
+#    coverage-coupled; emit-restructure scope with the 341 twins).
+#    ★★★ CLASSIFICATION ANSWERED: B4 config with coverage ON =
+#    fallback 0 AND STILL 14 TEARS — STRUCTURAL.  Pure-clamp bands
+#    lawfully span the cliffs the legacy clearance was CUTTING (no
+#    within-band grade law exists).  ★AWAITING NOAH DESIGN RULING:
+#    who governs steep terminal-frontage terrain post-clearance —
+#    candidate = the 05bf09f two-ring grade-capped structure
+#    generalized to exterior bands.  After the ruling: the
+#    structural fix · KBNA zone diet · charter extension to
+#    junction/RESA · retirement wiring · round 9.  ★FLIP-BROKEN
 #    default-assertion tests (8-12): cleanup order dispatched
 #    (env-pin, intent preserved).  ★PARALLEL-SESSION artifacts in
 #    main checkout: config.py GAP_FILL cleanup superseded by
