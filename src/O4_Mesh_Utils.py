@@ -7,6 +7,7 @@ import numpy
 import requests
 from math import sqrt, cos, pi
 import O4_DEM_Utils as DEM
+import O4_Airport_Elevation_Insets as INSETS
 import O4_UI_Utils as UI
 import O4_File_Names as FNAMES
 import O4_Geo_Utils as GEO
@@ -595,9 +596,17 @@ def build_mesh(tile):
             return 0
         try:
             fill_nodata = tile.fill_nodata or "to zero"
+            # Re-derive the same airport-inset composite as step 1 from the
+            # cache directory (disk-state-driven, idempotent) so both steps
+            # agree on the elevation source. The first token stays the base,
+            # so the raster dimension check below is unchanged; the baked
+            # insets already live in the .alt file written in step 1.
+            composite_dem = INSETS.assemble_inset_composite_source(
+                tile, tile.custom_dem
+            )
             source = (
-                (";" in tile.custom_dem) and tile.custom_dem.split(";")[0]
-            ) or tile.custom_dem
+                (";" in composite_dem) and composite_dem.split(";")[0]
+            ) or composite_dem
             tile.dem = DEM.DEM(
                 tile.lat, tile.lon, source, fill_nodata, info_only=True
             )

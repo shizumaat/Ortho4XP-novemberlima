@@ -134,6 +134,36 @@ cfg_tile_vars = {
         "default": 8,
         "hint": "How much gaussian blur is applied to the elevation raster for the look up of altitude over airports. Unit is the elevation raster pixel size.",
     },
+    "apt_smoothing_auto": {
+        "type": bool,
+        "default": True,
+        "hint": "When set, the airport smoothing radius (apt_smoothing_pix) is scaled per airport to the resolution of the finest elevation source actually covering that airport, never exceeding apt_smoothing_pix. Airports covered by coarse global data keep the full radius (identical to today); airports covered by high resolution elevation insets are blurred less or not at all. Unset restores the fixed radius for every airport.",
+    },
+    "airport_elevation_insets": {
+        "type": bool,
+        "default": True,
+        "hint": "Master gate for automatic per-airport high resolution elevation insets. When set, meter-class public elevation (for example the United States Geological Survey 3D Elevation Program) is fetched for the neighbourhood of every airport on the tile and overlaid on the base elevation raster before the mesh is built. Requires the GDAL python bindings and network access; when either is missing the feature disables itself and the build is byte-identical to unset.",
+    },
+    "airport_elevation_providers": {
+        "type": str,
+        "default": "auto",
+        "hint": 'Which elevation inset providers to consider, referring to the definition files in Providers/Elevation/<CODE>.elv. "auto" (default) uses every enabled provider ranked by its priority field. An explicit comma-separated list of provider codes (for example "USGS3DEP") pins or filters providers, which is useful for testing.',
+    },
+    "airport_elevation_inset_resolution_m": {
+        "type": float,
+        "default": 3.0,
+        "hint": "Target ground resolution in metres to which fetched elevation insets are warped. The working mesh grid is roughly 31 metres, so the default 3 metres keeps refinement headroom while storing about one tenth of the bytes of native 1 metre lidar.",
+    },
+    "airport_elevation_inset_margin_m": {
+        "type": float,
+        "default": 1000.0,
+        "hint": "How far beyond each airport's smoothing mask, in metres, the elevation inset bounding box is expanded. The clearance band and custom object neighbourhoods extend well past the boundary polygon, so a generous margin is deliberate.",
+    },
+    "airport_elevation_inset_feather_m": {
+        "type": float,
+        "default": 60.0,
+        "hint": "Width in metres of the blend band over which a baked elevation inset ramps from its own values to the underlying base elevation at the inset edge, avoiding a cliff at the seam.",
+    },
     "road_level": {
         "type": int,
         "default": 1,
@@ -399,6 +429,12 @@ gui_app_vars_long = list_app_vars[-4:]
 list_vector_vars = [
     "auto_patch",
     "apt_smoothing_pix",
+    "apt_smoothing_auto",
+    "airport_elevation_insets",
+    "airport_elevation_providers",
+    "airport_elevation_inset_resolution_m",
+    "airport_elevation_inset_margin_m",
+    "airport_elevation_inset_feather_m",
     "road_level",
     "road_banking_limit",
     "lane_width",

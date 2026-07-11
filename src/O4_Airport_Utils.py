@@ -8,6 +8,7 @@ import O4_UI_Utils as UI
 import O4_Vector_Utils as VECT
 import O4_Geo_Utils as GEO
 import O4_DEM_Utils as DEM
+import O4_Airport_Elevation_Insets as INSETS
 import O4_File_Names as FNAMES
 
 runway_chunks = 100  # how much chunks to split a runway longitudinally, ...
@@ -932,6 +933,9 @@ def smooth_raster_over_airports(tile, dico_airports, preserve_boundary=True):
             except:
                 pass
     if not max_pix:
+        # Bake airport elevation insets into the raster the mesher reads
+        # (see O4_Airport_Elevation_Insets G2 note); no-op when disabled.
+        INSETS.bake_airport_insets_into_alt_dem(tile)
         tile.dem.write_to_file(FNAMES.alt_file(tile))
         return
     if preserve_boundary:
@@ -1031,6 +1035,9 @@ def smooth_raster_over_airports(tile, dico_airports, preserve_boundary=True):
                 i / pix * tile.dem.alt_dem[:, -i - 1]
                 + (pix - i) / pix * right[:, -i - 1]
             )
+    # Bake airport elevation insets into the raster the mesher reads (see
+    # O4_Airport_Elevation_Insets G2 note); no-op when the feature is off.
+    INSETS.bake_airport_insets_into_alt_dem(tile)
     tile.dem.write_to_file(FNAMES.alt_file(tile))
     return
 

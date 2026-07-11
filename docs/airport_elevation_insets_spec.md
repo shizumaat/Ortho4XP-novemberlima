@@ -81,6 +81,7 @@ keyed by file basename. Fields:
 
 ```
 # Providers/Elevation/USGS3DEP.elv
+role=airport_inset            # detail tier, see section 3.6 (base | airport_inset)
 access_strategy=tnm_cog       # named fetch strategy implemented in code
 discovery_url_template=https://tnmaccess.nationalmap.gov/api/v1/products?datasets=Digital Elevation Model (DEM) 1 meter&bbox={west},{south},{east},{north}&outputFormat=JSON
 native_resolution_m=1
@@ -206,13 +207,77 @@ change the physical footprint.
 | variable | default | meaning |
 |---|---|---|
 | `airport_elevation_insets` | True | master gate (G4 fallback paths) |
+| `base_elevation_source` | "auto" | base-tier pick (§3.6): auto = best covering `role=base` ≤ 1″; legacy keywords still valid |
 | `airport_elevation_providers` | "auto" | "auto" = enabled `.elv` files by priority; or explicit comma list |
 | `airport_elevation_inset_resolution_m` | 3.0 | warp target resolution |
 | `airport_elevation_inset_margin_m` | 1000.0 | bbox margin beyond airport mask |
 | `airport_elevation_inset_feather_m` | 60.0 | inset→base blend band |
 | `apt_smoothing_auto` | True | per-airport radius rule (§3.4) |
 
-### 3.6 GDAL dependency policy
+### 3.6 Unified elevation provider model — legacy refactor + detail tiers
+
+The `.elv` registry is not only for airport insets: the LEGACY base
+sources (`available_sources` tuple + if/elif download chain,
+`O4_DEM_Utils.py:21-32,591-800`) are refactored onto the same registry so
+every elevation source — tile-wide or airport-local — is one definition
+file. Measured motivation: `ensure_elevation("View", ...)` picks the 1″
+de Ferranti archive only for a HARDCODED zone whitelist
+(`O4_DEM_Utils.py:606-645` — Alps/Scandinavia/New Zealand) and falls back
+to 3″/90 m everywhere else, including the whole US — while a working USGS
+NED 1″ downloader sits unused in the next branch of the same function.
+KBNA was built from 90 m data with two 30 m sources a keyword away.
+
+**Detail tiers** — each `.elv` declares `role=`:
+
+| role | scope | resolution class | examples |
+|---|---|---|---|
+| `base` | whole 1°×1° tile | capped at 1″ (~30 m) in auto mode | VIEWFINDER1, VIEWFINDER3, NED1 |
+| `airport_inset` | airport bbox + margin only | meter-class | USGS3DEP |
+
+The cap and the bbox confinement are the performance guardrails: the
+working mesh grid is 3601/° (1″), so tile-wide data finer than 1″ is
+wasted download and memory (NED 1/3″ is ~450 MB/tile vs ~50 MB for 1″);
+meter-class data is fetched ONLY inside airport bboxes where graded
+terrain and parked objects make it visible from the air.
+
+**Base definitions shipped** (all `role=base`):
+- `VIEWFINDER1.elv` — strategy `viewfinder_zip`, `resolution=1"`,
+  priority 60; the de Ferranti 1″ zone whitelist moves out of code into
+  a `dem1_zones=` field (comma list of letter+number archive codes) so
+  coverage updates are file edits. The Wellington (-42,174) missing-data
+  exception moves to an `exclude_tiles=` field.
+- `VIEWFINDER3.elv` — strategy `viewfinder_zip`, `resolution=3"`,
+  priority 10, global fallback.
+- `NED1.elv` — strategy `usgs_seamless` (the existing
+  `prd-tnm .../Elevation/1/TIFF/current/` URL scheme), `extent=USA`,
+  priority 70 (beats VIEWFINDER1 where both cover).
+- `NED13.elv` — same strategy, 1/3″, `enabled=True` but priority 0:
+  never auto-picked (exceeds the 1″ auto cap), selectable explicitly.
+- `SRTM.elv` / `ALOS.elv` — `enabled=False`, definitions kept for the
+  manual-download workflow the current code half-supports (downloads
+  dead upstream, `O4_DEM_Utils.py:709-720`).
+
+**Base selection**: new config `base_elevation_source` (default
+`"auto"`): rank enabled `role=base` definitions covering the tile by
+priority, capped at 1″ — for KBNA this yields NED1 (30 m) instead of
+today's 90 m, tile-wide. The legacy keywords (`View`, `SRTM`, `NED1`,
+`NED1/3`, `ALOS`) remain valid as ALIASES resolving into the registry
+(`View` → VIEWFINDER1-with-VIEWFINDER3-fallback, exactly today's
+behaviour), so existing configs and the GUI dropdown keep working.
+
+**Compatibility invariants:**
+- Cache paths unchanged: base downloads keep landing at
+  `FNAMES.elevation_data(...)` / `FNAMES.viewfinderpanorama(...)` names
+  (`N36W087.hgt`, `..._NED1.tif`, …) so existing `Elevation_data/`
+  caches are reused byte-for-byte.
+- With `base_elevation_source` explicitly set to a legacy keyword, the
+  chosen URL and written file must be IDENTICAL to the pre-refactor
+  code (unit-test the URL construction for a 1″-whitelist tile, a 3″
+  tile, and a NED1 tile against fixed expected strings).
+- The de Ferranti "don't overwrite a 1″ file with a 3″ neighbour"
+  zip-extraction guard (`O4_DEM_Utils.py:698-708`) must be preserved.
+
+### 3.7 GDAL dependency policy
 
 GDAL python bindings (`osgeo`) are already an optional core dependency
 (`has_gdal`). This feature requires them AND network access; absence of
@@ -232,9 +297,15 @@ install guidance (brew/apt system lib + `pip install gdal`), same change
   include a parser test over a temp `.elv` file and a strategy-registry
   dispatch test proving a second strategy plugs in without orchestration
   changes).
-- **Phase B (this branch, agent 2):** automatic smoothing radius (§3.4),
-  KBNA acceptance (§5), byte-identity guard runs, ONBOARDING/installer
-  updates, docs.
+- **Phase A2 (this branch, agent 2, after A lands):** legacy base-source
+  refactor onto the registry (§3.6): `role=` tiers, base `.elv`
+  definitions, `viewfinder_zip` + `usgs_seamless` strategies extracted
+  from `ensure_elevation`, `base_elevation_source=auto` selection with
+  the 1″ cap, legacy-keyword aliases, URL-compatibility unit tests,
+  cache-path invariants.
+- **Phase B (this branch, agent 3):** automatic smoothing radius (§3.4),
+  KBNA acceptance (§5) — now with NED1 as auto base — byte-identity
+  guard runs, ONBOARDING/installer updates, docs.
 - **Phase C (future, out of scope):** national providers as new `.elv`
   files + strategies (`wcs`, `stac`, `tile_rest` — UK/France/Netherlands/
   Switzerland/Canada per research report), densified working grid over
@@ -255,9 +326,16 @@ the written `.alt` and `Data+36-087.mesh`:
 | taxiway M plateau (36.13715, -86.67650) | 166.7 | `.alt` within ±1.5 m (no plateau melt) |
 | mesh transect (36.13715,-86.67650)→(36.13815,-86.67525) | staircase | shelf segment (45–100 m along) mean within ±2 m of 155.7; no monotone ramp |
 
+Base-tier check (Phase A2): with `base_elevation_source=auto` on
++36-087 the base becomes NED1 (1″, `USGS_1_n37w087.tif`-class file) —
+verify a probe well OUTSIDE the inset bbox (e.g. 36.20, -86.50) tracks
+the NED1 value, and that `base_elevation_source=View` still reproduces
+today's 90 m file byte-for-byte at its legacy cache path.
+
 Guardrails:
-- `airport_elevation_insets=False` ⇒ byte-identical `.alt` and `.mesh`
-  (same-path stash A/B, `PYTHONHASHSEED` pinned — fork verification rules).
+- `airport_elevation_insets=False` AND `base_elevation_source=View` ⇒
+  byte-identical `.alt` and `.mesh` (same-path stash A/B,
+  `PYTHONHASHSEED` pinned — fork verification rules).
 - Gate ON, tile with no US coverage ⇒ byte-identical.
 - Full test suite: no NEW failures (19 pre-existing failures are known;
   bisect before blaming — see project memory).
