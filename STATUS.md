@@ -266,12 +266,28 @@
 #    on the inflated shape set; RESIDUAL ORDER dispatched (solve
 #    profile split · zone-node diet: spurious-admission diagnosis,
 #    gated 10 m station step, output-neutral prefilters).  INTERIM
-#    STANDS for big airports.  ★CLEANUP NOTED: 7 admission-suite
-#    tests assert gate-off DEFAULTS and broke at the fad621d flip —
-#    need explicit env pinning.  ★PARALLEL-SESSION EDIT in main
-#    checkout: uncommitted config.py GAP_FILL duplicate cleanup
-#    (behavior-identical) — left unstaged for its author per the
-#    serialize-emission-edits rule.
+#    ★RESIDUAL SOLVED dc7ead7 — KBNA GATE-ON COMPLETES: 667 s full
+#    build (was never-completing).  Two default-ON levers, byte-
+#    inert off (twice-proven): O4_ZONE_NODE_SKIP_REACH_BAND (zone
+#    nodes never consume node_band; 3,575→236 s; zone values settle
+#    to the envelope without the spurious reach-floor lift — MORE
+#    law-faithful, CYXY delta 238 nodes all sub-0.5 m, classes
+#    identical) + O4_ZONE_HOST_AUTHORITATIVE (zone slabs out of the
+#    reach Dijkstra — negative weights broke it; slab moves ONLY the
+#    zone endpoint, host wins by identity = pavement-wins in the
+#    sweep; livelocked call 0.43 s).  CYXY gate-ON wall 187→131 s.
+#    ★INTERIM LIFTED — the bundle completes everywhere measured.
+#    Remaining KBNA split (+50% vs gates-off): node_bands 236 s
+#    (inherent) · emit +141 s (clearance/decimation inflation = B4
+#    target) · zone diet (10 m step) + spurious-admission census
+#    (45,824, 7× CYXY) ride with B4.  ★B4 DISPATCHED (charter +
+#    legacy retirement + the legacy-off gate table + the ~87 s
+#    Emitting prize; behind gates, round 9 judges).  ★FLIP-BROKEN
+#    default-assertion tests (8-12): cleanup order dispatched
+#    (env-pin, intent preserved).  ★PARALLEL-SESSION artifacts in
+#    main checkout: config.py GAP_FILL cleanup superseded by
+#    b3cd998 (preserved in labeled stash); untracked
+#    docs/airport_elevation_insets_spec.md left for its author.
 #
 # ★ TRUE CURRENT BASELINES (CYXY, this tree — the part-35 numbers
 # below predate the O4_OBJECT_BRIDGE_TERRAIN landing and are STALE):
