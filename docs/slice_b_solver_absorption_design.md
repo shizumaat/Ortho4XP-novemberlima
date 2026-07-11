@@ -198,6 +198,24 @@ anchors) — so skirt construction can move pre-solve without a value cycle.
 * Gate: byte-level A/B with projection off vs on (PYTHONHASHSEED pinned);
   in-sim review round 7 (Noah) before any fixture recut (standing ruling).
 
+## Post-B1 corrections (Noah rulings, 2026-07-10 evening)
+
+* The B1 "reverse ordering dependency" ledger item is NARROWER than the
+  agent reported: boundary ribbons and boundary→DEM bridges are RETIRED in
+  effect (`finalize.emit_terrain_transition_features` skips both under the
+  adjacent-ground law, default ON since 2026-07-08) — those clip targets are
+  empty sets by construction.  The vestigial ribbon code and
+  `_reconcile_boundary_bridges_with_skirts` are slice-C deletion candidates.
+  Real post-solve neighbours of a pre-solve skirt: groundside pavement,
+  tunnels, clearance cuts.
+* RULING — skirt airside precedence: the runway-end skirt area is
+  inherently AIRSIDE; nothing there can legitimately be groundside.  The
+  skirt NEVER clips against groundside (clearance.py historically did
+  `region.difference(groundside_block)` — backwards); GROUNDSIDE clips
+  around the skirt, exact footprint, shared chain verbatim, no buffer gap.
+  Inert at CYXY (zero overlap); a named acceptance criterion before any
+  default flip (B4).
+
 ## Work-order boundaries
 
 B0 and B1 are each ONE work order (B0 solver-internal, B1 first consumer;
