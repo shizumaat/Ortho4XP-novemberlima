@@ -180,6 +180,21 @@ def initialize_elevation_providers_dict(providers_directory=None):
             definition["coverage_bbox"] = _parse_bounding_box(
                 definition["coverage_bbox"]
             )
+        # Base-tier (role=base) fields, spec section 3.6.
+        if "resolution_arc_seconds" in definition:
+            definition["resolution_arc_seconds"] = _parse_float(
+                definition.get("resolution_arc_seconds"), default=None
+            )
+        if "dem1_zones" in definition:
+            definition["dem1_zones"] = frozenset(
+                token.strip()
+                for token in str(definition["dem1_zones"]).split(",")
+                if token.strip()
+            )
+        if "exclude_tiles" in definition:
+            definition["exclude_tiles"] = _parse_tile_list(
+                definition["exclude_tiles"]
+            )
         result[provider_code] = definition
     elevation_providers_dict = result
     return result
@@ -207,6 +222,20 @@ def _parse_bounding_box(value):
     except (TypeError, ValueError):
         pass
     return None
+
+
+def _parse_tile_list(value):
+    """Parse ``lat,lon;lat,lon;...`` into a tuple of integer tile corners."""
+    tiles = []
+    for pair in str(value).split(";"):
+        parts = pair.split(",")
+        if len(parts) != 2:
+            continue
+        try:
+            tiles.append((int(parts[0].strip()), int(parts[1].strip())))
+        except ValueError:
+            continue
+    return tuple(tiles)
 
 
 def select_provider_definitions(providers_config, role=ROLE_AIRPORT_INSET):
@@ -826,3 +855,366 @@ def _bake_one_inset(tile, inset_path, feather_m):
     base_dem.alt_dem[
         row_min : row_max + 1, column_min : column_max + 1
     ] = blended.astype(base_dem.alt_dem.dtype)
+
+
+# =====================================================================
+# Base-tier (role=base) sources -- legacy refactor (spec section 3.6)
+# =====================================================================
+# The tile-wide "base" elevation sources -- historically a hardcoded
+# tuple + if/elif download chain in O4_DEM_Utils.ensure_elevation -- are
+# described by the same Providers/Elevation/<CODE>.elv registry, with
+# role=base.  Unlike airport insets, base strategies download WHOLE-TILE
+# files to the LEGACY cache paths (FNAMES.viewfinderpanorama /
+# FNAMES.elevation_data), never to the airport_insets directory, so the
+# on-disk cache layout is byte-identical to the historic behaviour.
+#
+# O4_DEM_Utils.ensure_elevation is now a thin shim over
+# ensure_base_tile() below (its signature is unchanged -- the DEM loader,
+# the 3x3 combined-raster assembly and the GUI keep calling it with the
+# legacy short keywords).
+
+DEFERRANTI_ALPHABET = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+# Legacy short keywords (the O4_DEM_Utils.available_sources tokens and
+# hence every existing tile config) resolving onto registry codes.
+# "View" is special-cased in resolve_base_definition: it picks the
+# 1 arc-second archive where its zone list covers, else 3 arc-second --
+# exactly the choice the legacy code made inside ensure_elevation.
+LEGACY_BASE_KEYWORD_ALIASES = {
+    "SRTM": "SRTM",
+    "ALOS": "ALOS",
+    "NED1": "NED1",
+    "NED1/3": "NED13",
+}
+
+
+def deferranti_archive_code(lat, lon):
+    """The Viewfinderpanoramas letter+number archive code for a tile.
+
+    Exact transliteration of the legacy math (previously inline in
+    O4_DEM_Utils.ensure_elevation): column number ``31 + lon // 6``
+    zero-padded under 10, row letter from ``lat // 4`` (mirrored and
+    prefixed ``S`` south of the equator).
+    """
+    deferranti_number = 31 + lon // 6
+    if deferranti_number < 10:
+        deferranti_number = "0" + str(deferranti_number)
+    else:
+        deferranti_number = str(deferranti_number)
+    deferranti_letter = (
+        DEFERRANTI_ALPHABET[lat // 4]
+        if lat >= 0
+        else DEFERRANTI_ALPHABET[(-1 - lat) // 4]
+    )
+    if lat < 0:
+        deferranti_letter = "S" + deferranti_letter
+    return deferranti_letter + deferranti_number
+
+
+def usgs_seamless_tile_identifier(lat, lon):
+    """The USGS staged-products tile identifier, e.g. ``n37w087``.
+
+    Exact transliteration of the legacy construction, INCLUDING its
+    operator-precedence quirk on the third line: for ``lon >= 0`` the
+    conditional expression evaluates to just ``"e"``, discarding the
+    north/south prefix.  The USGS national elevation datasets live at
+    western longitudes so the quirk was never reachable in practice; it
+    is preserved verbatim because this refactor is behaviour-preserving
+    (the compatibility tests pin the western-hemisphere URLs).
+    """
+    tile_identifier = "n" if lat >= 0 else "s"
+    tile_identifier = tile_identifier + str(abs(lat + 1)).zfill(2)
+    tile_identifier = tile_identifier + "w" if lon < 0 else "e"
+    tile_identifier = tile_identifier + str(abs(lon)).zfill(3)
+    return tile_identifier
+
+
+def _tile_centre_in_coverage(definition, lat, lon):
+    """Does the tile CENTRE fall inside the definition's coverage_bbox?
+
+    Base sources are whole-tile files, so coverage is judged at the tile
+    centre (a tile straddling the coverage edge is not a safe automatic
+    pick -- the un-covered part would read as nodata/zero).
+    """
+    coverage = definition.get("coverage_bbox")
+    if not coverage:
+        return True
+    (west, south, east, north) = coverage
+    centre_longitude = lon + 0.5
+    centre_latitude = lat + 0.5
+    return (
+        west <= centre_longitude <= east
+        and south <= centre_latitude <= north
+    )
+
+
+def base_definition_covers_tile(definition, lat, lon):
+    """Full coverage test for a role=base definition at one tile."""
+    if not _tile_centre_in_coverage(definition, lat, lon):
+        return False
+    if (lat, lon) in definition.get("exclude_tiles", ()):
+        return False
+    zones = definition.get("dem1_zones")
+    if zones is not None and deferranti_archive_code(lat, lon) not in zones:
+        return False
+    return True
+
+
+@register_access_strategy("viewfinder_zip")
+class ViewfinderZipStrategy:
+    """Viewfinderpanoramas (J. de Ferranti) zip archives, whole tiles.
+
+    One archive covers several 1x1 degree tiles; download extracts every
+    ``.hgt`` member to its own legacy cache path with the historic size
+    guard (never overwrite a larger -- i.e. 1 arc-second -- file with a
+    smaller 3 arc-second neighbour from a nearby archive).
+    """
+
+    def covers(self, definition, lat, lon):
+        return base_definition_covers_tile(definition, lat, lon)
+
+    def download_url(self, definition, lat, lon):
+        return definition["download_url_template"].replace(
+            "{archive_code}", deferranti_archive_code(lat, lon)
+        )
+
+    def tile_cache_path(self, definition, lat, lon):
+        return FNAMES.viewfinderpanorama(lat, lon)
+
+    def ensure_tile(self, definition, lat, lon, verbose=True):
+        import io
+        import zipfile
+
+        cache_path = self.tile_cache_path(definition, lat, lon)
+        if os.path.exists(cache_path):
+            UI.vprint(2, "   Recycling ", cache_path)
+            return 1
+        UI.vprint(
+            1,
+            "    Downloading ",
+            cache_path,
+            "from Viewfinderpanoramas (J. de Ferranti).",
+        )
+        url = self.download_url(definition, lat, lon)
+        response = DEM.http_request(
+            url, definition.get("legacy_keyword", definition["code"]), verbose
+        )
+        if not response:
+            return 0
+        with zipfile.ZipFile(io.BytesIO(response.content), "r") as zip_ref:
+            for zipped_file in zip_ref.filelist:
+                file_name = os.path.basename(zipped_file.filename)
+                if not file_name:
+                    continue
+                try:
+                    lat0 = int(file_name[1:3])
+                    lon0 = int(file_name[4:7])
+                except (ValueError, IndexError):
+                    UI.vprint(
+                        2,
+                        "      Archive contains the unknown file name",
+                        file_name,
+                        "which is skipped.",
+                    )
+                    continue
+                if ("S" in file_name) or ("s" in file_name):
+                    lat0 *= -1
+                if ("W" in file_name) or ("w" in file_name):
+                    lon0 *= -1
+                out_file_name = FNAMES.viewfinderpanorama(lat0, lon0)
+                # we don't wish to overwrite a 1 arc-second version by
+                # downloading the whole archive of a nearby 3 arc-second one
+                if (
+                    not os.path.exists(out_file_name)
+                    or os.path.getsize(out_file_name) <= zipped_file.file_size
+                ):
+                    if not os.path.isdir(os.path.dirname(out_file_name)):
+                        os.makedirs(os.path.dirname(out_file_name))
+                    with open(out_file_name, "wb") as out:
+                        UI.vprint(2, "      Extracting", out_file_name)
+                        out.write(zip_ref.open(zipped_file, "r").read())
+        return 1
+
+
+@register_access_strategy("usgs_seamless")
+class UsgsSeamlessStrategy:
+    """USGS national elevation dataset staged GeoTIFF products.
+
+    The existing ``prd-tnm .../StagedProducts/Elevation/{1,13}/TIFF/
+    current/`` whole-tile URL scheme, downloading to the legacy
+    ``FNAMES.elevation_data`` cache path.
+    """
+
+    def covers(self, definition, lat, lon):
+        return base_definition_covers_tile(definition, lat, lon)
+
+    def download_url(self, definition, lat, lon):
+        return (
+            definition["download_url_template"]
+            .replace("{dataset}", str(definition.get("usgs_dataset", "1")))
+            .replace(
+                "{tile_identifier}", usgs_seamless_tile_identifier(lat, lon)
+            )
+        )
+
+    def tile_cache_path(self, definition, lat, lon):
+        return FNAMES.elevation_data(
+            definition["legacy_keyword"], lat, lon
+        )
+
+    def ensure_tile(self, definition, lat, lon, verbose=True):
+        cache_path = self.tile_cache_path(definition, lat, lon)
+        if os.path.exists(cache_path):
+            UI.vprint(2, "   Recycling ", cache_path)
+            return 1
+        UI.vprint(1, "    Downloading ", cache_path, "from USGS.")
+        url = self.download_url(definition, lat, lon)
+        response = DEM.http_request(
+            url, definition.get("legacy_keyword", definition["code"]), verbose
+        )
+        if not response:
+            return 0
+        if not os.path.isdir(os.path.dirname(cache_path)):
+            os.makedirs(os.path.dirname(cache_path))
+        with open(cache_path, "wb") as out:
+            try:
+                out.write(response.content)
+            except Exception:
+                return 0
+        return 1
+
+
+@register_access_strategy("manual_download")
+class ManualDownloadStrategy:
+    """Sources whose direct downloads are dead upstream (SRTM, ALOS).
+
+    The legacy code half-supports a manual workflow: a user places the
+    file at the legacy cache path by hand and the build recycles it;
+    otherwise one warning line and the source yields nothing.
+    """
+
+    def covers(self, definition, lat, lon):
+        return base_definition_covers_tile(definition, lat, lon)
+
+    def download_url(self, definition, lat, lon):
+        return None
+
+    def tile_cache_path(self, definition, lat, lon):
+        return FNAMES.elevation_data(
+            definition["legacy_keyword"], lat, lon
+        )
+
+    def ensure_tile(self, definition, lat, lon, verbose=True):
+        cache_path = self.tile_cache_path(definition, lat, lon)
+        if os.path.exists(cache_path):
+            UI.vprint(2, "   Recycling ", cache_path)
+            return 1
+        UI.vprint(
+            1,
+            "    WARNING : This elevation source has no longer direct downloads !"
+        )
+        return 0
+
+
+def select_base_definitions_auto(lat, lon):
+    """Rank the automatic base-source candidates for one tile.
+
+    Enabled ``role=base`` definitions COVERING the tile, ranked by
+    descending priority, CAPPED at 1 arc-second: the working mesh grid is
+    3601 per degree (1 arc-second), so tile-wide data finer than that
+    (e.g. the 1/3 arc-second national dataset) is wasted download and
+    memory and is never auto-picked -- it stays selectable explicitly.
+    A definition without a declared ``resolution_arc_seconds`` is
+    excluded from auto (conservative), still selectable explicitly.
+    """
+    if not elevation_providers_dict:
+        initialize_elevation_providers_dict()
+    candidates = []
+    for definition in elevation_providers_dict.values():
+        if definition.get("role") != ROLE_BASE:
+            continue
+        if not definition.get("enabled", True):
+            continue
+        resolution = definition.get("resolution_arc_seconds")
+        if resolution is None or resolution < 1.0:
+            continue
+        strategy_factory = ACCESS_STRATEGIES.get(
+            definition.get("access_strategy")
+        )
+        if strategy_factory is None:
+            continue
+        if not strategy_factory().covers(definition, lat, lon):
+            continue
+        candidates.append(definition)
+    candidates.sort(
+        key=lambda definition: (
+            -definition.get("priority", 0.0),
+            definition["code"],
+        )
+    )
+    return candidates
+
+
+def resolve_base_definition(lat, lon, selector="auto"):
+    """Resolve the base-source selector to one role=base definition.
+
+    ``selector`` is the ``base_elevation_source`` config value, a registry
+    CODE, or a legacy short keyword:
+
+    * ``"auto"`` -- best automatic candidate (see
+      :func:`select_base_definitions_auto`), or ``None`` when nothing
+      covers the tile.
+    * ``"View"`` -- the 1 arc-second Viewfinderpanoramas definition where
+      its zone list covers this tile, else the 3 arc-second one: exactly
+      the per-tile choice the legacy ensure_elevation made (including the
+      Wellington exclusion, now the ``exclude_tiles`` field).
+    * ``"SRTM"`` / ``"ALOS"`` / ``"NED1"`` / ``"NED1/3"`` -- direct legacy
+      aliases onto their registry codes.
+    * any registry CODE with ``role=base`` -- returned unconditionally
+      (explicit selection bypasses both the ``enabled`` flag and the
+      coverage test, matching the legacy behaviour where an explicit
+      keyword always attempted its download / cache read).
+
+    Returns ``None`` for an unknown selector.
+    """
+    if not elevation_providers_dict:
+        initialize_elevation_providers_dict()
+    selector = (selector or "auto").strip()
+    if selector.lower() == "auto":
+        candidates = select_base_definitions_auto(lat, lon)
+        return candidates[0] if candidates else None
+    if selector == "View":
+        one_arc_second = elevation_providers_dict.get("VIEWFINDER1")
+        three_arc_second = elevation_providers_dict.get("VIEWFINDER3")
+        if (
+            one_arc_second is not None
+            and one_arc_second.get("enabled", True)
+            and base_definition_covers_tile(one_arc_second, lat, lon)
+        ):
+            return one_arc_second
+        return three_arc_second
+    alias_code = LEGACY_BASE_KEYWORD_ALIASES.get(selector)
+    if alias_code is not None:
+        return elevation_providers_dict.get(alias_code)
+    definition = elevation_providers_dict.get(selector)
+    if definition is not None and definition.get("role") == ROLE_BASE:
+        return definition
+    return None
+
+
+def ensure_base_tile(source, lat, lon, verbose=True):
+    """Ensure the whole-tile base file for a legacy keyword or CODE.
+
+    The target of the ``O4_DEM_Utils.ensure_elevation`` shim: resolves
+    the selector, dispatches the strategy's ``ensure_tile``, and preserves
+    the legacy unknown-source error line and 0/1 return convention.
+    """
+    definition = resolve_base_definition(lat, lon, source)
+    if definition is None:
+        UI.vprint(1, "   ERROR: Unknown elevation source.")
+        return 0
+    strategy_factory = ACCESS_STRATEGIES.get(definition.get("access_strategy"))
+    if strategy_factory is None:
+        UI.vprint(1, "   ERROR: Unknown elevation source.")
+        return 0
+    return strategy_factory().ensure_tile(definition, lat, lon, verbose)

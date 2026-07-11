@@ -1,8 +1,6 @@
 import os
-import io
 import time
 import requests
-import zipfile
 import itertools
 from math import sqrt
 import array
@@ -32,6 +30,41 @@ available_sources = (
 )
 
 global_sources = ("View", "SRTM", "ALOS")
+
+# Which base (tile-wide) elevation source to use when no custom_dem is
+# set: "auto" ranks the enabled role=base definitions from
+# Providers/Elevation/<CODE>.elv covering the tile (capped at
+# 1 arc-second), or a provider CODE / legacy keyword pins one.  Declared
+# as a configuration variable in O4_Cfg_Vars.py with module "DEM", so the
+# configuration machinery overrides this module-level default in place.
+base_elevation_source = "auto"
+
+
+def resolve_default_base_source(lat, lon):
+    """Map the ``base_elevation_source`` configuration to a legacy long name.
+
+    Returns one of the ``available_sources`` long display names so
+    ``DEM.load_data``'s existing dispatch (combined raster for global
+    sources, single-file read otherwise) is reused untouched.  Falls back
+    to the historic default (Viewfinderpanoramas) when the registry
+    resolves nothing for this tile.
+    """
+    # Imported lazily: O4_Airport_Elevation_Insets imports this module at
+    # top level (for the raster helpers), so a top-level import here would
+    # be circular.
+    import O4_Airport_Elevation_Insets as ELEVATION_PROVIDERS
+
+    definition = ELEVATION_PROVIDERS.resolve_base_definition(
+        lat, lon, base_elevation_source
+    )
+    if definition is None:
+        return available_sources[1]
+    legacy_keyword = definition.get("legacy_keyword")
+    if legacy_keyword in available_sources:
+        return available_sources[
+            available_sources.index(legacy_keyword) + 1
+        ]
+    return available_sources[1]
 
 ################################################################################
 class DEM:
@@ -75,7 +108,7 @@ class DEM:
             if os.path.exists(FNAMES.generic_tif(self.lat, self.lon)):
                 source = FNAMES.generic_tif(self.lat, self.lon)
             else:
-                source = available_sources[1]
+                source = resolve_default_base_source(self.lat, self.lon)
         if ";" in source:
             source, local_sources = source.split(";")[0], source.split(";")[1:]
         else:
@@ -591,214 +624,30 @@ def read_elevation_from_file(
 
 ##############################################################################
 def ensure_elevation(source, lat, lon, verbose=True):
-    if source == "View":
-        # Viewfinderpanorama grouping of files and resolutions is a 
-        # bit complicated...
-        deferranti_nbr = 31 + lon // 6
-        if deferranti_nbr < 10:
-            deferranti_nbr = "0" + str(deferranti_nbr)
-        else:
-            deferranti_nbr = str(deferranti_nbr)
-        alphabet = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-        deferranti_letter = (
-            alphabet[lat // 4] if lat >= 0 else alphabet[(-1 - lat) // 4]
-        )
-        if lat < 0:
-            deferranti_letter = "S" + deferranti_letter
-        if deferranti_letter + deferranti_nbr in (
-                "L31",
-                "L32",
-                "L33",
-                "K32",
-                "O31",
-                "P31",
-                "N32",
-                "O32",
-                "P32",
-                "Q32",
-                "N33",
-                "O33",
-                "P33",
-                "Q33",
-                "R33",
-                "O34",
-                "P34",
-                "Q34",
-                "R34",
-                "O35",
-                "P35",
-                "Q35",
-                "R35",
-                "P36",
-                "Q36",
-                "R36",
-                # New Zealand
-                "SL58",
-                "SI59",
-                "SJ59",
-                "SK59",
-                "SL59",
-                "SI60",
-                "SJ60",
-                "SK60",
-                "SL60",
-            ):
-                resol = 1
-        else:
-            resol = 3
-        # Wellington Intl has missing elevation data in 1" resolution
-        if (lat, lon) == (-42, 174):
-            resol = 3
-        url = (
-            "http://viewfinderpanoramas.org/dem"
-            + str(resol)
-            + "/"
-            + deferranti_letter
-            + deferranti_nbr
-            + ".zip"
-        )
-        # if os.path.exists(FNAMES.viewfinderpanorama(lat, lon)) and (
-        #     resol == 3
-        #     or os.path.getsize(FNAMES.viewfinderpanorama(lat, lon)) >= 25934402
-        # ):
-        #  Removed check for resol and file size as this was causing issues with using custom_dems
-        if os.path.exists(FNAMES.viewfinderpanorama(lat, lon)):
-            UI.vprint(2, "   Recycling ", FNAMES.viewfinderpanorama(lat, lon))
-            return 1
-        UI.vprint(
-            1,
-            "    Downloading ",
-            FNAMES.viewfinderpanorama(lat, lon),
-            "from Viewfinderpanoramas (J. de Ferranti).",
-        )
-        r = http_request(url, source, verbose)
-        if not r:
-            return 0
-        with zipfile.ZipFile(io.BytesIO(r.content), "r") as zip_ref:
-            for f in zip_ref.filelist:
-                fname = os.path.basename(f.filename)
-                if not fname:
-                    continue
-                try:
-                    lat0 = int(fname[1:3])
-                    lon0 = int(fname[4:7])
-                except:
-                    UI.vprint(
-                        2,
-                        "      Archive contains the unknown file name",
-                        fname,
-                        "which is skipped.",
-                    )
-                    continue
-                if ("S" in fname) or ("s" in fname):
-                    lat0 *= -1
-                if ("W" in fname) or ("w" in fname):
-                    lon0 *= -1
-                out_filename = FNAMES.viewfinderpanorama(lat0, lon0)
-                # we don't wish to overwrite a 1" version by downloading 
-                # the whole archive of a nearby 3" one
-                if (
-                    not os.path.exists(out_filename)
-                    or os.path.getsize(out_filename) <= f.file_size
-                ):
-                    if not os.path.isdir(os.path.dirname(out_filename)):
-                        os.makedirs(os.path.dirname(out_filename))
-                    with open(out_filename, "wb") as out:
-                        UI.vprint(2, "      Extracting", out_filename)
-                        out.write(zip_ref.open(f, "r").read())
-    elif source in ("SRTM", "ALOS"):
-        if os.path.exists(FNAMES.elevation_data(source, lat, lon)):
-            UI.vprint(
-                2, "   Recycling ", FNAMES.elevation_data(source, lat, lon)
-            )
-            return 1
-        UI.vprint(
-            1,
-            "    WARNING : This elevation source has no longer direct downloads !"
-        )
-        return 0
-        # TODO : is there a way to get it back (worth it ?) 
-        url = "https://cloud.sdsc.edu/v1/AUTH_opentopography/Raster/"
-        if source == "SRTM":
-            url += "SRTM_GL1/SRTM_GL1_srtm/"
-            if lat < -60 or lat >= 60:
-                return 0
-            if lat < 0:
-                url += "South/"
-            elif lat <= 29:
-                url += "North/North_0_29/"
-            else:
-                url += "North/North_30_60/"
-            url += os.path.basename(FNAMES.viewfinderpanorama(lat, lon))
-        elif source == "ALOS":
-            url += "AW3D30/AW3D30_alos/"
-            if lat < 0:
-                url += "South/"
-            elif lat <= 45:
-                url += "North/North_0_45/"
-            else:
-                url += "North/North_46_90/"
-            tmp = os.path.basename(FNAMES.base_file_name(lat, lon))
-            tmp = tmp[0] + "0" + tmp[1:] + "_AVE_DSM.tif"
-            url += tmp
-        r = http_request(url, source, verbose)
-        if not r:
-            return 0
-        if not os.path.isdir(
-            os.path.dirname(FNAMES.elevation_data(source, lat, lon))
-        ):
-            os.makedirs(
-                os.path.dirname(FNAMES.elevation_data(source, lat, lon))
-            )
-        with open(FNAMES.elevation_data(source, lat, lon), "wb") as out:
-            try:
-                out.write(r.content)
-            except:
-                return 0
-    elif source in ("NED1", "NED1/3"):
-        if os.path.exists(FNAMES.elevation_data(source, lat, lon)):
-            UI.vprint(
-                2, "   Recycling ", FNAMES.elevation_data(source, lat, lon)
-            )
-            return 1
-        UI.vprint(
-            1,
-            "    Downloading ",
-            FNAMES.elevation_data(source, lat, lon),
-            "from USGS.",
-        )
-        nbr = "1" if source == "NED1" else "13"
-        url_base = (
-            "https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/"
-            + nbr + "/TIFF/current/"
-        )
-        tid = "n" if lat >= 0 else "s"
-        tid = tid + str(abs(lat + 1)).zfill(2)
-        tid = tid + "w" if lon < 0 else "e"
-        tid = tid + str(abs(lon)).zfill(3)
-        url_base = url_base + tid + "/"
-        usgs_name = (
-            "USGS_" + nbr + "_" + tid + ".tif"
-        )
-        url = url_base + usgs_name
-        r = http_request(url, source, verbose)
-        if not r:
-            return 0
-        if not os.path.isdir(
-            os.path.dirname(FNAMES.elevation_data(source, lat, lon))
-        ):
-            os.makedirs(
-                os.path.dirname(FNAMES.elevation_data(source, lat, lon))
-            )
-        with open(FNAMES.elevation_data(source, lat, lon), "wb") as out:
-            try:
-                out.write(r.content)
-            except:
-                return 0
-    else:
-        UI.vprint(1, "   ERROR: Unknown elevation source.")
-        return 0
-    return 1
+    """Ensure the whole-tile file for a base elevation source is cached.
+
+    Thin compatibility shim over the declarative provider registry in
+    O4_Airport_Elevation_Insets (spec section 3.6): the historic inline
+    if/elif chain (Viewfinderpanoramas archive math + zip extraction,
+    USGS staged-products downloads, the SRTM/ALOS dead-download warning)
+    now lives in the registry's viewfinder_zip / usgs_seamless /
+    manual_download access strategies, configured by the
+    Providers/Elevation/<CODE>.elv definition files.
+
+    The signature and the 0/1 return convention are unchanged -- the DEM
+    loader, the 3x3 combined-raster assembly and the GUI keep calling
+    this with the legacy short keywords ("View", "SRTM", "NED1",
+    "NED1/3", "ALOS"), which the registry resolves as aliases; registry
+    CODES (e.g. "VIEWFINDER1") are accepted too.  Downloads land at the
+    LEGACY cache paths (FNAMES.viewfinderpanorama / FNAMES.
+    elevation_data), byte-identical to the historic layout.
+    """
+    # Imported lazily: O4_Airport_Elevation_Insets imports this module at
+    # top level (for the raster helpers), so a top-level import here would
+    # be circular.
+    import O4_Airport_Elevation_Insets as ELEVATION_PROVIDERS
+
+    return ELEVATION_PROVIDERS.ensure_base_tile(source, lat, lon, verbose)
 
 ################################################################################
 def http_request(url, source, verbose=False):

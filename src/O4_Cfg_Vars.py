@@ -36,6 +36,12 @@ cfg_app_vars = {
         "values": overpass_server_values,
         "hint": "OSM Overpass server used to grab vector data. Servers are specified in overpass_servers.txt.",
     },
+    "base_elevation_source": {
+        "module": "DEM",
+        "type": str,
+        "default": "auto",
+        "hint": 'Which base (tile-wide) elevation source to use when no custom_dem is set. "auto" (default) ranks the enabled role=base definition files in Providers/Elevation/<CODE>.elv that cover the tile by priority, capped at 1 arc-second (for example the USGS national elevation dataset over the continental United States, Viewfinderpanoramas elsewhere). A provider code (for example "NED13") or a legacy keyword (View, SRTM, NED1, NED1/3, ALOS) pins one source explicitly.',
+    },
     "skip_downloads": {
         "module": "TILE",
         "type": bool,
@@ -406,6 +412,7 @@ list_app_vars = [
     "verbosity",
     "cleaning_level",
     "overpass_server_choice",
+    "base_elevation_source",
     "skip_downloads",
     "skip_converts",
     "max_download_slots",
