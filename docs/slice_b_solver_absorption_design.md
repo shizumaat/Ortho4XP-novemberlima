@@ -138,8 +138,20 @@ anchors) — so skirt construction can move pre-solve without a value cycle.
   bounding pavement chain stations (per bounding parent, per the module's
   existing per-parent envelope reads), longitudinal smoothness edges along
   the spine (`TAXIWAY_MAX_GRADE_CHANGE_PER_M`-family caps), DEM seed.
-* The sanctioned spine-endpoint T-vertex insertion is replaced by registry
-  membership (endpoints intern onto the ring chain).
+* CORRECTED BY FRESH TRACE (2026-07-10 evening, B2 scout): the
+  "sanctioned spine-endpoint T-vertex insertion" was a STALE docstring —
+  the live design is the part-34 OPEN-WAY float (the spine floats ≥2 m
+  off the ring; landing geometry was retired because it minted the
+  96-millimetre shallow-landing sliver class).  Spine ends KEEP floating;
+  conformance insertion count is 0 both ways by construction.  Spine
+  nodes are INTERIOR points, not ring vertices, so absorption needs a
+  dedicated spine-node admission path beside the B0 ring hook (a
+  pre-solve spine store on the layout, admitted under the gap sub-gate).
+  Longitudinal law: the analytic quarter-up-from-floor + clamped
+  Laplacian dies; the solver applies the project's existing spine
+  curvature law (TAXIWAY_MAX_GRADE_CHANGE_PER_M second-difference
+  fairing) under the envelope interval edges — spine VALUES move off the
+  analytic target (lawful within the corridor; in-sim review judges).
 * Deletes: gap analytic valuation; the gap share of the final weld.
 * Gate: B1 gate plus gap faces 17 reference (census unchanged), residual
   divergence report has no gap_fill entries, and the round-4/round-6 gap
