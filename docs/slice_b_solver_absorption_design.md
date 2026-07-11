@@ -29,6 +29,19 @@ IDENTITY, not an arbitration.
    gates are patches over its damage and retire with it).
 6. Strips stand off tunnel ramps like buildings (the 2 ledgered SPJC tears).
 7. SPJC `no_self_overlap` and within-shape `pavement_grade` reds burn down.
+8. PERFORMANCE (Noah ruling 2026-07-10): the absorption must SIMPLIFY and
+   REDUCE steps, never add complexity — and the full CYXY build returns
+   UNDER 2 MINUTES (120 s).  Measured baseline at dev 162aaca: 195.7 s
+   wall, per-phase (build_time_model store, newest record, total 203.1 s):
+   "Emitting terrain features & finalizing" 127.7 s (62.9%) — the
+   post-solve march this design deletes; "Solving elevations" 70.5 s
+   (34.7%); all phase-1 geometry ~5 s.  The target is therefore
+   structural, not aspirational: retiring the emit march funds it even
+   with solver node growth.  PER-STAGE GATE: no stage may regress full
+   CYXY build wall-time beyond noise (record the build_time_model phase
+   split in every stage report); if the solver becomes the new bottleneck
+   at B3, apply the levers section (interval bounds are O(1) projections;
+   convergence tolerance 0.05 m; zone-row station step 10 m).
 
 ## Architecture facts the design builds on (verified 2026-07-10 in this tree)
 
