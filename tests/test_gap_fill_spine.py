@@ -197,6 +197,11 @@ def test_wide_gap_emits_nothing():
 
 def test_gate_off_emits_nothing(monkeypatch):
     monkeypatch.setattr(GF, "GAP_FILL_SPINE_ENABLED", False)
+    # The interior-ring sub-gate (default ON since the round-8 flip,
+    # 2026-07-11) REQUIRES the spine gate — hard error otherwise
+    # (covered by test_gap_interior_rings) — so a plain gate-off run
+    # patches both.
+    monkeypatch.setattr(GF, "GAP_FILL_INTERIOR_RINGS_ENABLED", False)
     layout, _ = _frame_layout(gap_half_width_m=30.0)
     n = emit_gap_fill_spines(layout, None, 0, 0)
     assert n == 0

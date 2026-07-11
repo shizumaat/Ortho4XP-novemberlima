@@ -166,11 +166,6 @@ __all__ = [
     "BRIDGE_ABUTMENT_PIN_CAPTURE_BAND_M",
     "BRIDGE_CAUSEWAY_MAX_LENGTH_M",
     "BRIDGE_ROAD_CARRIED_PAVEMENT_PROXIMITY_M",
-    "TUNNEL_PORTAL_PAIR_MIN_SPACING_M",
-    "TUNNEL_PORTAL_PAIR_MAX_SPACING_M",
-    "TUNNEL_PORTAL_PAIR_HEADING_TOLERANCE_DEGREES",
-    "TUNNEL_PORTAL_PAIR_BURIED_MARGIN_M",
-    "TUNNEL_PORTAL_MOUTH_SAMPLE_RANGE_M",
     "PRECISION_APPROACH_LIGHT_CODES",
     "PRECISION_MARKINGS_CODES",
     "NON_PRECISION_MARKINGS_CODES",
@@ -1965,30 +1960,6 @@ BRIDGE_ABUTMENT_PIN_CAPTURE_BAND_M = 12.0
 # edge it meets (weld, ruling R2).
 BRIDGE_CAUSEWAY_MAX_LENGTH_M = 65.0
 
-# ── Tunnel portal pairs (the KBNA runway-02C class, user 2026-07-10) ──
-# Two classified structures on the SAME road corridor with terrain
-# rising above their tops between them are the two PORTALS of one
-# buried tunnel, not two bridges: nothing is emitted between them (the
-# hill keeps carrying the runway at grade), each mouth's terrain is
-# seated at the ROAD elevation so the portal object sits partly
-# submerged, and the road corridor climbs AWAY from each mouth.
-# Pairing requires: centroid spacing inside [MIN, MAX]; the connecting
-# segment aligned with both objects' headings within the tolerance
-# (parallel side-by-side decks fail this — their connecting segment is
-# PERPENDICULAR to their headings); and the digital elevation model
-# between the mouths reaching at least the lower portal's top plus the
-# buried margin (a bridge pair over open ground fails this).
-TUNNEL_PORTAL_PAIR_MIN_SPACING_M = 20.0
-TUNNEL_PORTAL_PAIR_MAX_SPACING_M = 600.0
-TUNNEL_PORTAL_PAIR_HEADING_TOLERANCE_DEGREES = 30.0
-TUNNEL_PORTAL_PAIR_BURIED_MARGIN_M = 1.0
-# Outward ray from each mouth sampled over this range for the mouth
-# floor (the MINIMUM wins — the descending road's grade at the face,
-# robust against the embankment skirt inflating near samples).  150 m
-# because the smoothed airport raster decays embankment flattening
-# slowly (measured KBNA 02C: still falling 0.09 m per 5 m at 60 m out).
-TUNNEL_PORTAL_MOUTH_SAMPLE_RANGE_M = 150.0
-
 # Audit-tool proxy for the road-carried-overpass discriminator (the
 # audit has no layout to read taxi/truck routes from): a bridge with no
 # draped-pavement polygon within this distance of its deck footprint
@@ -2175,26 +2146,31 @@ GAP_FILL_MAX_WIDTH_M = 175.0
 GAP_FILL_MIN_AREA_M2 = 100.0
 
 # GAP INTERIOR RINGS (ratified design 2026-07-11, STATUS commit
-# dde6d3c): a single mid-gap drainage spine cannot enforce the lawful
-# graded-band profile off pavement when the enclosed interior genuinely
-# drops — the mesh spans pavement edge to spine in one leg, so a low
-# spine puts the whole drop AT the pavement edge (CYXY evidence node
+# dde6d3c; REVISED per Noah's in-sim round-8 ruling): a single mid-gap
+# drainage spine cannot enforce the lawful graded-band profile off
+# pavement when the enclosed interior genuinely drops — the mesh spans
+# pavement edge to spine in one leg, so a low spine puts the whole
+# drop AT the pavement edge (CYXY evidence node
 # 60.7210897,-135.0776149: 73 % at the edge where the band law allows
-# 5 %).  Large violating gaps therefore additionally emit interior
-# offset RINGS as constrained breaklines inside the (still verbatim)
-# gap face, mirroring the exterior adjacent-ground band cross-section
-# bent around the gap: ring 1 at the drainage-lip breakpoint
+# 5 %).  Gaps therefore additionally emit interior offset RINGS as
+# constrained breaklines inside the (still verbatim) gap face,
+# mirroring the exterior adjacent-ground band cross-section bent
+# around the gap: ring 1 at the drainage-lip breakpoint
 # (ADJACENT_GROUND_LIP_WIDTH_M) and ring 2 at the parent's graded
 # band-edge breakpoint (runway strip half-width / taxiway OMGWS
-# half-width / apron shoulder), each node pinned AT the law floor
-# (exterior fill-band parity: fill exactly TO the floor).  Terrain
-# INSIDE ring 2 stays open-floor (large infields lawfully follow
-# terrain).  Violation-gated: rings emit only along boundary arcs
-# whose interior DEM at the band edge sits below the band floor.
-# ROUND-8 REVIEW DEFAULT ON (Noah, 2026-07-11 — the same review-build
-# convention as the fad621d slice-B bundle flip; env
-# O4_GAP_FILL_INTERIOR_RINGS=0 falls back to the byte-identical
-# ring-free state).  REQUIRES the gap-fill spine gate: rings are
+# half-width / apron shoulder).  ROUND-8 SEMANTICS: both rings are
+# ALWAYS complete, unbroken, concentric closed loops (per-arc
+# violation gating created ragged walls at every arc end in-sim); the
+# gating lives in the VALUES — each station carries
+# clamp(terrain, floor, ceiling) at its point-law distances, so the
+# ring rides lawful terrain invisibly and pins only where the law
+# demands, with along-ring continuity by construction.  A gap whose
+# every station of both rings is a value no-op skips its rings
+# entirely (all-or-nothing node economy).  Terrain INSIDE ring 2
+# stays open-floor (large infields lawfully follow terrain).
+# DEFAULT ON for Noah's in-sim review (the round-8 flip, commit
+# 53da9c2 at HEAD; env O4_GAP_FILL_INTERIOR_RINGS=0 restores the
+# ring-less gap fill).  REQUIRES the gap-fill spine gate: rings are
 # constructed by the gap emitter, so enabling them with
 # O4_GAP_FILL_SPINE=0 is a configuration error (hard error in
 # gap_fill.emit_gap_fill_spines, the fail-loudly doctrine).

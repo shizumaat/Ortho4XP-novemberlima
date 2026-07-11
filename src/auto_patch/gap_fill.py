@@ -120,22 +120,15 @@ _DRAIN_FROM_CEILING = 0.25
 # endpoints pinned to their boundary pavement values).
 _SMOOTH_SWEEPS = 20
 
-# ── GAP INTERIOR RING constants (ratified design 2026-07-11) ──────────
-# Violation trigger: a boundary station needs a ring when the interior
-# DEM at the band-edge offset sits below the band floor by more than
-# this tolerance (matches the band philosophy of emitting nothing where
-# terrain complies).
-_RING_TRIGGER_TOLERANCE_M = 0.05
-# Sub-runs of NON-violating stations up to this long inside a violating
-# run are bridged (ring kept continuous at max(floor, terrain)) so the
-# breakline does not flicker on/off across DEM noise — the notch class
-# ratified answer 3 forbids.
-_RING_BRIDGE_STATIONS = 2
-# Each violating run is extended by this many stations on each side,
-# valued AT terrain — a daylight landing that tapers the breakline onto
-# the ground it leaves (adjacent_ground_supported_depths semantics: a
-# run is ENTERED on a bench, never a jump).
-_RING_LANDING_STATIONS = 1
+# ── GAP INTERIOR RING constants (ratified 2026-07-11, REVISED per the
+# in-sim round-8 ruling: rings are ALWAYS complete closed loops; the
+# gating lives in the VALUES, not the geometry) ────────────────────────
+# A ring station whose clamped value sits within this of the terrain is
+# a VALUE NO-OP (the ring rides the terrain there — invisible in the
+# mesh).  A gap where EVERY station of BOTH rings is a no-op skips its
+# rings entirely (the per-gap economy gate — all-or-nothing, never
+# per-arc: arc ends read as ragged walls in the sim, round-8 verdict).
+_RING_VALUE_NOOP_TOLERANCE_M = 0.05
 # Minimum clearance a ring node keeps from the gap boundary, the spine
 # and every other ring chain — the near-parallel Ruppert guard (the
 # codebase's spine standoff is 2.0 m; rings reuse the same class of
@@ -150,6 +143,21 @@ _RING_MIN_NODE_SPACING_M = 2.0
 # offset shrinks, degenerates, and finally suppresses — each rung
 # reducing to today's behavior).
 _RING_CROSS_FRACTION = 0.45
+# Maximum radial change of the ring-2 offset per along-boundary meter
+# (cyclic min-relaxation, the daylight-law coupling applied to the
+# OFFSET): where the bounding family width switches (75 m runway band
+# beside a 12.5 m junction band) the loop transitions on a bench
+# instead of a radial seam no closed loop could span (round-8
+# complete-loop mandate).
+_RING_OFFSET_BENCH_RATE = 0.5
+# Maximum along-ring VALUE drop per meter (max-relaxation raising the
+# low side, capped at each node's point-law ceiling): the point-law
+# BOUNDS step where the governing parent switches family (a 75 m
+# runway band floor sits meters below a 12.5 m junction band floor),
+# and terrain alone cannot be asked to absorb that step between two
+# 15 m stations (round-8: no cliffs ALONG the ring).  5 % = the band
+# maximum down slope — the steepest lawful graded transition.
+_RING_ALONG_BENCH_SLOPE = 0.05
 # Ring 1 (lip) is suppressed when the effective ring-2 offset comes
 # within this of the lip offset — two near-coincident parallel
 # breaklines are exactly the lens class the zero-lens law forbids.
@@ -564,8 +572,9 @@ def _interp_along_spine(spine_line, cum, vals, px, py):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# GAP INTERIOR RINGS (ratified design 2026-07-11, gate
-# O4_GAP_FILL_INTERIOR_RINGS, default OFF, requires O4_GAP_FILL_SPINE)
+# GAP INTERIOR RINGS (ratified 2026-07-11, gate
+# O4_GAP_FILL_INTERIOR_RINGS, requires O4_GAP_FILL_SPINE; REVISED per
+# Noah's in-sim round-8 ruling — complete loops, value-gated)
 #
 # A single mid-gap spine cannot enforce the graded-band law when the
 # enclosed interior genuinely drops: the mesh spans pavement edge to
@@ -575,15 +584,28 @@ def _interp_along_spine(spine_line, cum, vals, px, py):
 # cross-section bent around the gap: the verbatim gap boundary is the
 # d=0 row (pavement values), ring 1 the drainage-lip breakpoint row,
 # ring 2 the graded band-edge row — the finite-to-open floor
-# transition locus.  Each ring node is PINNED AT THE LAW FLOOR
-# (ratified answer 2 — exterior fill bands fill exactly TO the floor):
-# value = solved pavement edge altitude at the station + the envelope
-# floor offset at the ring's frozen offset distance.  ENCODING
-# (ratified answer 2, chosen for robustness): a DERIVED EQUALITY read
-# from the post-solve pavement edge at emission — NOT new solver
+# transition locus.
+#
+# ROUND-8 REVISION (the first cut violation-gated the GEOMETRY into
+# per-arc runs; 66 fragmented chains read as ragged walls in the sim):
+# both rings are ALWAYS complete, unbroken, concentric closed loops —
+# no arcs, no taper, nothing to fall off.  The gating lives in the
+# VALUES: each station carries clamp(terrain, floor, ceiling) at its
+# point-law distances (the exterior per-vertex law verbatim — the
+# ``_make_edge_projection_resampler`` semantics applied at the ring
+# stations).  Where terrain is lawful the ring RIDES the terrain (a
+# value no-op, invisible in the mesh); where it violates, the clamp
+# pins to the floor (fill) or the ceiling (cut).  Terrain is
+# continuous and the clamp is continuous, so the ring has no cliffs
+# ALONG it anywhere, by construction.  A gap where EVERY station of
+# BOTH rings is a value no-op skips its rings entirely (per-gap node
+# economy — all-or-nothing, never per-arc).
+#
+# ENCODING (ratified answer 2, unchanged in round 8): a DERIVED value
+# read from the post-solve pavement edges at emission — NOT new solver
 # variables.  An equality-pinned solver variable adds zero information
 # to the solve while adding interval edges that can conflict inside
-# the machinery; deriving at emission guarantees exact floor equality
+# the machinery; deriving at emission guarantees exact clamp equality
 # with no float round-trip, keeps the solve byte-identical gate-ON vs
 # gate-OFF, and cannot regress solver feasibility.  Rings are emitted
 # as constrained BREAKLINE ways inside the (single, verbatim) gap face
@@ -648,34 +670,37 @@ def _ring_parent_band(layout, shape, rw_axes):
 
 def _build_gap_interior_rings(layout, airside, gap_poly, spine, values,
                               dem, tile_lat, tile_lon, rw_axes, step):
-    """Construct the violation-gated interior ring breaklines for ONE
-    emitted gap face.  Returns ``(chains, clamped_values, stats)``:
-    ``chains`` = list of ``(coords_m, alts)`` open polylines (a fully
-    wrapping ring repeats its first coordinate — closed), and
-    ``clamped_values`` = the spine values with the ring-2 CEILING
-    re-coupling applied (ratified: inside the ring the governing
-    reference is the ring, so a spine node whose nearest station holds
-    a violating ring may not rise above that ring's floor pin; where no
-    ring exists the spine keeps today's pavement coupling untouched).
+    """Construct the interior ring breaklines for ONE emitted gap face
+    (round-8 semantics: COMPLETE closed loops, value-gated).  Returns
+    ``(chains, clamped_values, stats)``: ``chains`` = list of
+    ``(coords_m, alts)`` polylines (a fully wrapping ring repeats its
+    first coordinate — closed), and ``clamped_values`` = the spine
+    values with the ring-2 CEILING re-coupling applied (inside the
+    ring-2 core a spine node may not rise above a FLOOR-ENGAGED ring-2
+    station's value; where the ring rides terrain the spine keeps
+    today's pavement coupling untouched).
 
     STATIONS march the gap exterior at ``step``; per station the
-    nearest bounding parent fixes the family band (``_ring_parent_band``)
-    and the solved pavement edge altitude (``_edge_interp_alt``).  The
-    COLLAPSE LADDER is geometric: the effective ring-2 offset is capped
-    at ``_RING_CROSS_FRACTION`` of the local cross width (opposite
-    rings/spine can never be reached), ring 1 drops when ring 2 shrinks
-    to within ``_RING_MIN_SEPARATION_M`` of the lip, and both drop when
-    even the lip does not fit — reducing to today's spine-only gap.
-    The VIOLATION TRIGGER (ratified answer as designed): interior DEM
-    at the outermost ring offset below that offset's band floor by more
-    than ``_RING_TRIGGER_TOLERANCE_M``.  Runs are BRIDGED across up to
-    ``_RING_BRIDGE_STATIONS`` compliant stations and land one station
-    past each end AT terrain (benched taper-in/out, ratified answer 3 —
-    ``adjacent_ground_supported_depths`` semantics: a run is entered on
-    a bench, and the breakline daylights onto the ground it leaves).
-    Node values: ``max(band floor, terrain)`` — exactly the floor at
-    violating stations (the pin), terrain at bridge/landing stations
-    (never cut: rings only hold ground UP)."""
+    nearest bounding parent fixes the family band (``_ring_parent_band``).
+    The COLLAPSE LADDER is geometric and unchanged: the effective
+    ring-2 offset is capped at ``_RING_CROSS_FRACTION`` of the local
+    cross width (opposite rings/spine can never be reached), ring 1
+    drops when ring 2 shrinks to within ``_RING_MIN_SEPARATION_M`` of
+    the lip, and both drop when even the lip does not fit — reducing
+    to today's spine-only gap.
+
+    VALUES (round-8 ruling): every station of every emitted ring gets
+    ``clamp(terrain, floor, ceiling)`` at its POINT-LAW interval — the
+    two nearest parents' envelopes at the point's TRUE distances,
+    combined ``[max(floors), min(ceilings)]`` with the
+    ``_spine_interval`` nearer-parent fallback on an empty
+    intersection.  Lawful terrain → the ring rides it (value no-op);
+    a drop below the floor → floor pin (fill); a rise above the
+    ceiling → ceiling pin (cut).  Continuity ALONG the ring is by
+    construction (terrain continuous, clamp continuous — no arc ends,
+    no cliffs).  A gap where EVERY station of BOTH rings is a value
+    no-op (within ``_RING_VALUE_NOOP_TOLERANCE_M``) skips its rings
+    entirely — the per-gap economy gate, all-or-nothing."""
     exterior = gap_poly.exterior
     length = exterior.length
     if length < 4.0 * step:
@@ -702,17 +727,19 @@ def _build_gap_interior_rings(layout, airside, gap_poly, spine, values,
             band_cache[key] = _ring_parent_band(layout, s, rw_axes)
         return band_cache[key]
 
-    def _point_floor(pt):
-        """The lawful band floor AT a ring point: the point's TRUE
-        distance to each of its two nearest bounding parents (the
-        ``_spine_interval`` two-nearest convention), that parent's
-        envelope floor offset at that distance on top of its
-        interpolated edge altitude — combined as ``max(floors)`` (fill
-        to the HIGHEST applicable floor).  Evaluating at the point
-        rather than along the station normal matters at corners: a
-        diagonal normal overstates the offset and would pin the ring
-        BELOW the floor the law demands at the point's true distance.
-        None = no finite floor governs the point (no pin exists)."""
+    def _point_interval(pt):
+        """The lawful ``(floor_abs, ceiling_abs)`` interval AT a ring
+        point: the point's TRUE distance to each of its two nearest
+        bounding parents (the ``_spine_interval`` two-nearest
+        convention), each parent's envelope at that distance on top of
+        its interpolated edge altitude — combined as
+        ``[max(floors), min(ceilings)]``; an empty intersection falls
+        back to the NEARER parent's own interval (the
+        ``_spine_interval`` rule).  Evaluating at the point rather than
+        along the station normal matters at corners: a diagonal normal
+        overstates the offset and would pin the ring BELOW the floor
+        the law demands at the point's true distance.  ``(None, None)``
+        = no law governs the point (the ring rides terrain there)."""
         p = Point(pt)
         cands = []
         for s in airside:
@@ -722,18 +749,29 @@ def _build_gap_interior_rings(layout, airside, gap_poly, spine, values,
                 continue
             cands.append((d, s))
         cands.sort(key=lambda t: t[0])
-        floors = []
+        per_parent = []
         for d, s in cands[:2]:
             pband = _band_of(s)
             if pband is None:
                 continue
-            prole, pcn, pcl, _pw = pband
+            prole, pcn, pcl, pw = pband
             try:
-                fo, _co = adjacent_ground_envelope(
+                # FLOOR at min(d, band width): the ring is the band-edge
+                # row, so it carries the band-edge floor even where a
+                # corner point drifts past the band (the exterior
+                # emitter's own pattern — adjacent_ground
+                # ``_band_family_closures.floor_depth`` clamps to the
+                # graded width "so the fill floor stays finite").
+                # Without the clamp the floor's finite→None transition
+                # at the band edge minted a 23 m pin-to-terrain cliff
+                # ALONG the ring (round-8 continuity mandate).
+                fo, _co_at_w = adjacent_ground_envelope(
+                    prole, pcn, pcl, max(0.0, min(d, pw)))
+                _fo_raw, co = adjacent_ground_envelope(
                     prole, pcn, pcl, max(0.0, d))
             except _GEOM_EXC:
                 continue
-            if fo is None:
+            if fo is None and co is None:
                 continue
             e = _edge_interp_alt(s, pt[0], pt[1])
             if e is None:
@@ -741,23 +779,62 @@ def _build_gap_interior_rings(layout, airside, gap_poly, spine, values,
                                      max_distance_m=1e9)
             if e is None:
                 continue
-            floors.append(float(e) + float(fo))
-        return max(floors) if floors else None
+            per_parent.append((
+                None if fo is None else float(e) + float(fo),
+                None if co is None else float(e) + float(co)))
+        floors = [q[0] for q in per_parent if q[0] is not None]
+        ceils = [q[1] for q in per_parent if q[1] is not None]
+        lo = max(floors) if floors else None
+        hi = min(ceils) if ceils else None
+        if lo is not None and hi is not None and lo > hi and per_parent:
+            lo, hi = per_parent[0]          # nearer parent's interval
+        return lo, hi
 
-    # ── Per-station survey ────────────────────────────────────────────
-    stations: list[dict | None] = []
+    def _level(pt):
+        """Per-level station record: VALUE = clamp(terrain, floor,
+        ceiling) at the point-law interval (round-8: the exterior
+        per-vertex law at the ring stations).  Lawful terrain → value
+        no-op (the ring rides the ground); drop below floor → floor
+        pin (fill); rise above ceiling → ceiling pin (cut).  With no
+        terrain sample the law bound stands alone; with neither, the
+        level is absent."""
+        if pt is None:
+            return None
+        terrain = _dem_at(*pt)
+        lo, hi = _point_interval(pt)
+        if terrain is None:
+            v = lo if lo is not None else hi
+            if v is None:
+                return None
+            return {"pt": pt, "v": float(v), "terrain": None,
+                    "lo": lo, "hi": hi, "noop": False,
+                    "floor_engaged": False}
+        v = float(terrain)
+        if lo is not None:
+            v = max(v, lo)
+        if hi is not None:
+            v = min(v, hi)
+        return {"pt": pt, "v": v, "terrain": float(terrain),
+                "lo": lo, "hi": hi,
+                "noop": abs(v - terrain) <= _RING_VALUE_NOOP_TOLERANCE_M,
+                "floor_engaged": (lo is not None and
+                                  v > terrain +
+                                  _RING_VALUE_NOOP_TOLERANCE_M)}
+
+    # ── Survey pass A: station geometry (position, inward normal,
+    # cross width, nearest-parent band width) ─────────────────────────
+    geo: list[dict | None] = []
     for k in range(n_st):
-        rec = None
         try:
             p0 = exterior.interpolate((k / n_st) * length)
             pa = exterior.interpolate(((k - 1) % n_st / n_st) * length)
             pb = exterior.interpolate(((k + 1) % n_st / n_st) * length)
         except _GEOM_EXC:
-            stations.append(None)
+            geo.append(None)
             continue
         t = _unit(pb.x - pa.x, pb.y - pa.y)
         if t is None:
-            stations.append(None)
+            geo.append(None)
             continue
         nx, ny = -t[1], t[0]                       # candidate inward normal
         probe = Point(p0.x + nx * 0.5, p0.y + ny * 0.5)
@@ -765,7 +842,7 @@ def _build_gap_interior_rings(layout, airside, gap_poly, spine, values,
             nx, ny = -nx, -ny
             probe = Point(p0.x + nx * 0.5, p0.y + ny * 0.5)
             if not gap_poly.contains(probe):
-                stations.append(None)              # degenerate corner
+                geo.append(None)                   # degenerate corner
                 continue
         # Nearest bounding parent + its family band.
         best = None
@@ -777,191 +854,340 @@ def _build_gap_interior_rings(layout, airside, gap_poly, spine, values,
             if best is None or d < best[0]:
                 best = (d, s)
         if best is None:
-            stations.append(None)
+            geo.append(None)
             continue
         band = _band_of(best[1])
         if band is None:
-            stations.append(None)
+            geo.append(None)
             continue
-        w_band = band[3]
         # Local cross width along the inward normal.
         hit = _boundary_intersection((p0.x, p0.y), (nx, ny), gap_poly,
                                      GAP_FILL_MAX_WIDTH_M + 50.0)
         cross = (math.hypot(hit[0] - p0.x, hit[1] - p0.y)
                  if hit is not None else GAP_FILL_MAX_WIDTH_M)
-        # Collapse ladder (each rung reduces to today's behavior or
-        # better): the effective ring-2 offset never reaches past
-        # _RING_CROSS_FRACTION of the local cross width.
-        w2 = min(w_band, _RING_CROSS_FRACTION * cross)
-        if w2 >= lip + 0.5:
-            # Rung 1/2: ring 2 stands (at the band edge, or shrunk
-            # toward mid-gap where opposite band edges overlap); ring 1
-            # additionally needs radial separation from ring 2.
-            has_ring1 = (w2 - lip) >= _RING_MIN_SEPARATION_M
-        elif _RING_CROSS_FRACTION * cross >= lip:
-            # Rung 3: only one ring fits — a single breakline at the
-            # (shrunk) offset, ring 1 suppressed (near-coincident
-            # parallel pair otherwise).
-            has_ring1 = False
-        else:
-            # Rung 4: not even the lip fits — the whole gap is lip
-            # zone; today's spine-only behavior (its envelope already
-            # carries finite floors at these distances).
-            stations.append(None)
+        # Raw ring-2 offset: the family band edge, capped by the
+        # cross-fraction AND by opposite-side separation (both sides'
+        # ring-2 lines keep >= 2 m between them in narrow stretches —
+        # 0.5·cross − 1.0).  A station where not even the lip fits is
+        # a deliberate pinch-neck ladder hole (the ratified
+        # intermediate rungs).  The mid-gap SPINE does NOT constrain
+        # the rings — the rings are first-class and the spine is
+        # TRIMMED to the ring-2 core after assembly (round-8: inside
+        # the ring the governing reference is the ring; a full-length
+        # spine would otherwise have to CROSS the closed loop at both
+        # gap ends).
+        w2_raw = min(band[3], _RING_CROSS_FRACTION * cross,
+                     0.5 * cross - 1.0)
+        if w2_raw < lip:
+            geo.append(None)                   # pinch neck — no rings
             continue
-        p2 = (p0.x + nx * w2, p0.y + ny * w2)
-        p1 = (p0.x + nx * lip, p0.y + ny * lip) if has_ring1 else None
-        dem2 = _dem_at(*p2)
-        # POINT-LAW floors (not station-normal floors): at a corner a
-        # diagonal normal overstates the offset — the pin must read
-        # the envelope at the point's TRUE parent distances.
-        floor2_abs = _point_floor(p2)
-        if floor2_abs is None:
-            stations.append(None)
-            continue
-        floor1_abs = _point_floor(p1) if p1 is not None else None
-        rec = {
-            "b": (p0.x, p0.y), "p1": p1, "p2": p2, "w2": w2,
-            "floor1": floor1_abs, "floor2": floor2_abs,
-            "dem2": dem2, "dem1": _dem_at(*p1) if p1 is not None else None,
-            "violates": (dem2 is not None
-                         and dem2 < floor2_abs - _RING_TRIGGER_TOLERANCE_M),
-        }
-        stations.append(rec)
+        geo.append({"b": (p0.x, p0.y), "n": (nx, ny), "cross": cross,
+                    "w_band": band[3], "w2_raw": w2_raw})
 
-    viol_idx = [k for k, r in enumerate(stations)
-                if r is not None and r["violates"]]
-    stats = {"stations": n_st, "violating": len(viol_idx),
-             "chains": 0, "nodes": 0}
-    if not viol_idx:
+    # ── Survey pass B: BENCHED ring-2 offset profile.  The raw offset
+    # min(w_band, fraction·cross) JUMPS radially where the bounding
+    # parent's family width switches (a 75 m runway band next to a
+    # 12.5 m junction band) — a 45-118 m radial seam that no closed
+    # loop can span without crossing the spine (measured at CYXY, the
+    # round-8 closure failure).  Rate-limit the offset along the
+    # boundary (the daylight-law coupling applied to the OFFSET, cyclic
+    # min-relaxation both directions) so the loop transitions between
+    # family widths on a bench and stays geometrically closable. ──────
+    spacing = length / n_st
+    w2_arr: list[float | None] = [
+        None if g is None else g["w2_raw"] for g in geo]
+    for _sweep in range(2):
+        for rng in (range(n_st * 2), range(n_st * 2 - 1, -1, -1)):
+            prev_val, prev_i = None, None
+            for i in rng:
+                k = i % n_st
+                if w2_arr[k] is None:
+                    continue
+                if prev_val is not None:
+                    gap_steps = abs(i - prev_i)
+                    w2_arr[k] = min(
+                        w2_arr[k],
+                        prev_val + _RING_OFFSET_BENCH_RATE
+                        * spacing * gap_steps)
+                prev_val, prev_i = w2_arr[k], i
+
+    # ── Survey pass C: ladder + per-level clamp values ────────────────
+    stations: list[dict | None] = []
+    for k in range(n_st):
+        g = geo[k]
+        if g is None:
+            stations.append(None)
+            continue
+        (bx, by), (nx, ny) = g["b"], g["n"]
+        w2 = w2_arr[k]
+        if w2 is None or w2 < lip:
+            stations.append(None)              # bench pulled below lip
+            continue
+        # Collapse ladder (each rung reduces to today's behavior or
+        # better): ring 1 needs radial separation from ring 2; when it
+        # fails, the single (shrunk) ring-2 breakline stands alone
+        # (rung 3); pass A already dropped stations where not even the
+        # lip fits (rung 4).
+        has_ring1 = (w2 - lip) >= _RING_MIN_SEPARATION_M
+        p1 = (bx + nx * lip, by + ny * lip) if has_ring1 else None
+        p2 = (bx + nx * w2, by + ny * w2)
+        lvl2 = _level(p2)
+        if lvl2 is None:
+            stations.append(None)              # no law and no terrain
+            continue
+        lvl1 = _level(p1)
+        stations.append({"b": (bx, by), "w2": w2,
+                         "p2": lvl2, "p1": lvl1})
+
+    eligible = [k for k, r in enumerate(stations) if r is not None]
+    stats = {"stations": n_st, "eligible": len(eligible),
+             "noop_stations": 0, "engaged_stations": 0,
+             "chains": 0, "nodes": 0, "skipped": False}
+    # Per-gap rung 4: a gap where rings fit at only a sliver of the
+    # boundary (a 6 m channel whose only "eligible" stations look down
+    # the LENGTH of the channel from its ends) gets no rings at all —
+    # a two-node micro-ring is exactly the fragment class round 8
+    # bans.  Today's spine-only behavior stands.
+    if len(eligible) < max(3, int(0.2 * n_st)):
         return [], list(values), stats
 
-    # ── Run states (cyclic): 2 violating, 1 bridge/landing, 0 none ────
-    state = [0] * n_st
-    for k in viol_idx:
-        state[k] = 2
-    if len(viol_idx) < n_st:
-        # Bridge short compliant sub-runs between violating stations.
-        for i, k in enumerate(viol_idx):
-            nxt = viol_idx[(i + 1) % len(viol_idx)]
-            gap_len = (nxt - k - 1) % n_st
-            if 0 < gap_len <= _RING_BRIDGE_STATIONS:
-                for j in range(1, gap_len + 1):
-                    state[(k + j) % n_st] = max(state[(k + j) % n_st], 1)
-        # Landing stations past each run end (benched taper, answer 3).
-        for k in range(n_st):
-            if state[k] != 0:
-                continue
-            for off in range(1, _RING_LANDING_STATIONS + 1):
-                if (state[(k - off) % n_st] == 2
-                        or state[(k + off) % n_st] == 2):
-                    state[k] = 1
-                    break
+    # ── Per-gap ring-1 rung (round-8: rungs are PER-GAP, not
+    # per-station — a per-station ring-1 hole minted exactly the
+    # mid-gap arc ENDS the ruling bans).  Ring 1 stands for the whole
+    # gap only where the radial separation held at EVERY eligible
+    # station; otherwise the single ring-2 loop stands alone
+    # (gap-wide rung 3). ───────────────────────────────────────────────
+    if any(stations[k]["p1"] is None for k in eligible):
+        for k in eligible:
+            stations[k]["p1"] = None
+
+    # ── Per-gap economy gate (round-8, all-or-nothing): a gap whose
+    # EVERY station of BOTH rings is a value no-op emits nothing — the
+    # rings would be invisible terrain-riders throughout. ──────────────
+    engaged = 0
+    for k in eligible:
+        rec = stations[k]
+        levels = [rec["p2"]] + ([rec["p1"]] if rec["p1"] else [])
+        if all(l["noop"] for l in levels):
+            stats["noop_stations"] += 1
+        else:
+            engaged += 1
+    stats["engaged_stations"] = engaged
+    if engaged == 0:
+        stats["skipped"] = True
+        return [], list(values), stats
 
     # ── Chain assembly per ring level (outermost first) ───────────────
     accepted_geoms: list = []
-    if spine_ls is not None:
-        accepted_geoms.append(spine_ls)
     chains: list[tuple[list, list]] = []
 
-    def _node_ok(pt, prev, cur_chain):
+    def _node_reject_reason(pt, prev):
+        """None when the node passes every zero-lens guard, else a
+        short reason string (surfaced through ``debug_reject``)."""
         p = Point(pt)
         try:
             if not gap_poly.contains(p):
-                return False
+                return "outside-gap"
             if boundary_ls.distance(p) < _RING_MIN_CLEARANCE_M:
-                return False
+                return "boundary-clearance"
             for g in accepted_geoms:
                 if g.distance(p) < _RING_MIN_CLEARANCE_M:
-                    return False
+                    return "chain-clearance"
         except _GEOM_EXC:
-            return False
+            return "geom-error"
         if prev is not None:
             if math.hypot(pt[0] - prev[0],
                           pt[1] - prev[1]) < _RING_MIN_NODE_SPACING_M:
-                return False
+                return "node-spacing"
             seg = LineString([prev, pt])
             try:
                 if not gap_poly.covers(seg):
-                    return False
+                    return "segment-outside"
                 for g in accepted_geoms:
                     if seg.distance(g) < _RING_MIN_CLEARANCE_M / 2.0:
-                        return False
+                        return "segment-clearance"
             except _GEOM_EXC:
-                return False
+                return "geom-error"
+        return None
+
+    debug_reject: list[tuple] = []
+
+    def _node_ok(pt, prev, cur_chain):
+        reason = _node_reject_reason(pt, prev)
+        if reason is not None:
+            debug_reject.append((pt, reason))
+            return False
         return True
 
-    def _flush(chain_pts, chain_alts):
+    def _bench_along(pts, alts, los, his, closed):
+        """Along-ring value bench (round-8 continuity), two-sided:
+
+          * FILL side — max-relaxation RAISING the low side of an
+            over-steep step at ``_RING_ALONG_BENCH_SLOPE``, capped at
+            each node's point-law CEILING (fill above the floor is
+            always lawful up to the ceiling; a floor pin is never
+            broken — floors are only ever approached from above);
+          * CUT side — min-relaxation LOWERING the high side, capped
+            at each node's point-law FLOOR (the
+            ``adjacent_ground_supported_depths`` semantics on the cut
+            side: a ceiling-pin cut wall is entered on a bench —
+            over-excavating the approach, physically how a cut is
+            built).
+
+        Needed because the point-law bounds themselves STEP where the
+        two-nearest parent set changes (a far runway's zone-3 ceiling
+        vs a near junction's) — terrain continuity alone does not give
+        value continuity.  A residual step survives only where the
+        floor and ceiling caps themselves demand it (clamp-limited).
+        Closed loops relax cyclically."""
+        n = len(alts)
+        if n < 3:
+            return alts
+        core = n - 1 if closed else n     # skip the closing repeat
+        v = list(alts)
+
+        def _pairs(direction):
+            rng = (range(core) if direction == 1
+                   else range(core - 1, -1, -1))
+            prev = None
+            for k in rng:
+                if prev is not None:
+                    yield (prev, k)
+                prev = k
+            if closed and core >= 2:
+                yield ((core - 1, 0) if direction == 1
+                       else (0, core - 1))
+
+        for _ in range(2):
+            for direction in (1, -1):
+                for a, k in _pairs(direction):
+                    pk, pp = pts[k], pts[a]
+                    dist = math.hypot(pk[0] - pp[0], pk[1] - pp[1])
+                    allow = _RING_ALONG_BENCH_SLOPE * dist
+                    cand = v[a] - allow      # FILL: raise the low side
+                    if cand > v[k]:
+                        cap = his[k]
+                        v[k] = cand if cap is None else min(cand, cap)
+                    cand = v[a] + allow      # CUT: lower the high side
+                    if cand < v[k]:
+                        cap = los[k]
+                        v[k] = cand if cap is None else max(cand, cap)
+        if closed:
+            v[-1] = v[0]
+        return [round(x, 2) for x in v]
+
+    def _flush(chain_pts, chain_alts, chain_los, chain_his):
         if len(chain_pts) >= 2:
             try:
                 accepted_geoms.append(LineString(chain_pts))
             except _GEOM_EXC:
                 return
-            chains.append((chain_pts, chain_alts))
+            closed = (len(chain_pts) >= 4
+                      and chain_pts[0] == chain_pts[-1])
+            benched = _bench_along(chain_pts, chain_alts, chain_los,
+                                   chain_his, closed)
+            chains.append((chain_pts, benched))
             stats["chains"] += 1
             stats["nodes"] += len(chain_pts)
 
+    # ── Chain assembly per ring level (outermost first).  ROUND-8:
+    # complete unbroken loops — a node failing a zero-lens guard is
+    # SKIPPED (the chain continues to the next accepted station over a
+    # longer, still fully-checked segment), never split; the chain
+    # only breaks where the collapse LADDER removes the level
+    # entirely (narrow necks — the ladder's own rungs).  The SPINE is
+    # deliberately NOT in the guard set: rings are first-class, and
+    # the spine is trimmed to the ring-2 core below. ───────────────────
     for level in ("p2", "p1"):
-        floor_key = "floor2" if level == "p2" else "floor1"
-        dem_key = "dem2" if level == "p2" else "dem1"
         emit_k = [k for k in range(n_st)
-                  if state[k] > 0 and stations[k] is not None
-                  and stations[k][level] is not None
-                  and stations[k][floor_key] is not None]
+                  if stations[k] is not None
+                  and stations[k][level] is not None]
         if not emit_k:
             continue
         emit_set = set(emit_k)
-        level_chains_before = len(chains)
-        # Walk cyclically from a non-emitting station so a wrapping run
-        # is one chain; fully-emitting level closes below.
-        start = 0
-        if len(emit_set) < n_st:
-            while start in emit_set:
-                start += 1
-        chain_pts: list[tuple[float, float]] = []
-        chain_alts: list[float] = []
-        for i in range(n_st):
-            k = (start + i) % n_st
-            if k not in emit_set:
-                _flush(chain_pts, chain_alts)
-                chain_pts, chain_alts = [], []
-                continue
-            rec = stations[k]
-            pt = rec[level]
-            terrain = rec[dem_key]
-            floor_abs = rec[floor_key]
-            # The pin: exactly the floor where violating; terrain at
-            # bridge/landing stations (never cut).
-            v = floor_abs if terrain is None else max(floor_abs, terrain)
-            if state[k] == 1 and terrain is not None:
-                v = max(terrain, floor_abs) if rec["violates"] else terrain
-            prev = chain_pts[-1] if chain_pts else None
-            if not _node_ok(pt, prev, chain_pts):
-                _flush(chain_pts, chain_alts)
-                chain_pts, chain_alts = [], []
-                continue
-            chain_pts.append(pt)
-            chain_alts.append(round(float(v), 2))
-        if chain_pts:
-            # A fully-wrapping level: close the ring when every station
-            # emitted into ONE unbroken chain and the closing segment is
-            # clean (first-node repeat encodes closure for to_osm).
-            if (len(emit_set) == n_st
-                    and len(chains) == level_chains_before
-                    and len(chain_pts) >= 3
-                    and _node_ok(chain_pts[0], chain_pts[-1], chain_pts)):
-                chain_pts.append(chain_pts[0])
-                chain_alts.append(chain_alts[0])
-            _flush(chain_pts, chain_alts)
+        # ROUND-8 walk: a station without this level is SKIPPED, never
+        # a split — the chain spans it on a longer, still fully
+        # checked segment (degenerate corners / missing samples are
+        # not rung holes).  The chain SPLITS only where a connecting
+        # SEGMENT genuinely cannot run (a covers failure at a true
+        # pinch neck, or a clearance conflict).  A first pass from an
+        # arbitrary start that hits such a blockage would cut the loop
+        # TWICE (once at the blockage, once at the walk seam) — the
+        # walk therefore RESTARTS at the first blockage so the loop is
+        # cut exactly where the geometry demands and nowhere else.
+        def _walk(start_k):
+            parts: list[tuple[list, list, list, list]] = []
+            c_pts: list[tuple[float, float]] = []
+            c_alts: list[float] = []
+            c_los: list[float | None] = []
+            c_his: list[float | None] = []
+            first_fail = None
 
-    # ── Spine re-coupling: ring 2 is the spine's CEILING where a
-    # violating ring stands AND the spine node sits INSIDE the ring-2
-    # core (ratified answer: inside the ring the governing reference
-    # becomes the ring; a spine node still within the band annulus —
-    # near the gap ends, where the spine climbs back toward pavement —
-    # keeps today's pavement coupling, else the clamp itself would
-    # mint a steep pavement-edge leg).  Values only ever move DOWN. ────
+            def _append(lvl):
+                c_pts.append(lvl["pt"])
+                c_alts.append(round(float(lvl["v"]), 2))
+                c_los.append(lvl["lo"])
+                c_his.append(lvl["hi"])
+
+            for i in range(n_st):
+                k = (start_k + i) % n_st
+                if k not in emit_set:
+                    continue                # span the missing station
+                lvl = stations[k][level]
+                prev = c_pts[-1] if c_pts else None
+                reason = _node_reject_reason(lvl["pt"], prev)
+                if reason is None:
+                    _append(lvl)
+                    continue
+                debug_reject.append((lvl["pt"], reason))
+                if reason.startswith("segment"):
+                    if first_fail is None:
+                        first_fail = k
+                    if len(c_pts) >= 2:
+                        parts.append((c_pts, c_alts, c_los, c_his))
+                    c_pts, c_alts, c_los, c_his = [], [], [], []
+                    if _node_reject_reason(lvl["pt"], None) is None:
+                        _append(lvl)
+                # node-level rejection: skip node, keep the chain
+            if c_pts:
+                parts.append((c_pts, c_alts, c_los, c_his))
+            return parts, first_fail
+
+        parts, first_fail = _walk(emit_k[0])
+        if first_fail is not None and len(parts) > 1:
+            parts, _ff = _walk(first_fail)
+        for c_pts, c_alts, c_los, c_his in parts:
+            # Close the loop when the level emitted as ONE unbroken
+            # chain and the closing segment is clean (the first-node
+            # repeat encodes closure for to_osm).  A closing chord
+            # blocked ONLY by node spacing (walk start and end landed
+            # on adjacent stations) drops the last node and closes.
+            if len(parts) == 1 and len(c_pts) >= 3:
+                _creason = _node_reject_reason(c_pts[0], c_pts[-1])
+                if _creason == "node-spacing" and len(c_pts) >= 4:
+                    c_pts.pop()
+                    c_alts.pop()
+                    c_los.pop()
+                    c_his.pop()
+                    _creason = _node_reject_reason(c_pts[0], c_pts[-1])
+                if _creason is None:
+                    c_pts.append(c_pts[0])
+                    c_alts.append(c_alts[0])
+                    c_los.append(c_los[0])
+                    c_his.append(c_his[0])
+                elif _creason is not None:
+                    debug_reject.append((c_pts[0], _creason))
+            _flush(c_pts, c_alts, c_los, c_his)
+
+    # ── Spine re-coupling (unchanged in round 8): ring 2 is the
+    # spine's CEILING where its station is FLOOR-ENGAGED (the clamp
+    # actually lifted the ring above terrain) AND the spine node sits
+    # INSIDE the ring-2 core; a spine node still within the band
+    # annulus keeps today's pavement coupling.  Values only ever move
+    # DOWN.  ALSO computed here: the nearest station per spine node,
+    # reused by the TRIM below. ────────────────────────────────────────
     clamped = list(values)
+    nearest_station: list[int | None] = [None] * len(spine)
     if chains:
         for j, (sx, sy) in enumerate(spine):
             best_k, best_d = None, None
@@ -974,11 +1200,79 @@ def _build_gap_interior_rings(layout, airside, gap_poly, spine, values,
                     best_d, best_k = d, k
             if best_k is None:
                 continue
+            nearest_station[j] = best_k
             rec = stations[best_k]
-            if (state[best_k] == 2 and rec["floor2"] is not None
-                    and best_d > rec["w2"]):
-                clamped[j] = min(clamped[j], round(rec["floor2"], 1))
-    return chains, clamped, stats
+            if (rec["p2"]["floor_engaged"] and best_d > rec["w2"]):
+                clamped[j] = min(clamped[j], round(rec["p2"]["v"], 1))
+
+    # ── SPINE TRIM to the ring-2 core (round-8): a closed ring-2 loop
+    # and a full-length spine would have to CROSS at both gap ends —
+    # the zero-lens guards rightly rejected exactly those crossings
+    # and cascaded half a loop away (the round-8 closure failure).
+    # Inside the ring the governing reference is the ring, so the
+    # spine — the OPEN-CORE drainage way — is cut back to the core:
+    # drop spine nodes within 2 m of any ring chain, or sitting in
+    # the band annulus (boundary distance not beyond the local ring-2
+    # offset), then split at any remaining segment that clips a ring.
+    # No rings emitted → the spine stays exactly today's. ──────────────
+    spine_chains: list[list[int]] | None = None
+    if chains:
+        ring_geoms = []
+        for _pts, _alts in chains:
+            try:
+                ring_geoms.append(LineString(_pts))
+            except _GEOM_EXC:
+                continue
+        keep = []
+        for j, (sx, sy) in enumerate(spine):
+            p = Point(sx, sy)
+            ok = True
+            k = nearest_station[j]
+            if k is not None and stations[k] is not None:
+                try:
+                    if boundary_ls.distance(p) <= stations[k]["w2"] + 0.5:
+                        ok = False          # band annulus — ring-owned
+                except _GEOM_EXC:
+                    ok = False
+            if ok:
+                for g in ring_geoms:
+                    try:
+                        if g.distance(p) < 2.0:
+                            ok = False
+                            break
+                    except _GEOM_EXC:
+                        ok = False
+                        break
+            keep.append(ok)
+        spine_chains = []
+        cur: list[int] = []
+        for j in range(len(spine)):
+            if not keep[j]:
+                if len(cur) >= 2:
+                    spine_chains.append(cur)
+                cur = []
+                continue
+            if cur:
+                seg = LineString([spine[cur[-1]], spine[j]])
+                clipped = False
+                try:
+                    for g in ring_geoms:
+                        if seg.distance(g) < _RING_MIN_CLEARANCE_M / 2.0:
+                            clipped = True
+                            break
+                except _GEOM_EXC:
+                    clipped = True
+                if clipped:
+                    if len(cur) >= 2:
+                        spine_chains.append(cur)
+                    cur = []
+            cur.append(j)
+        if len(cur) >= 2:
+            spine_chains.append(cur)
+        stats["spine_nodes_kept"] = sum(1 for x in keep if x)
+        stats["spine_nodes_total"] = len(spine)
+    stats["rejects"] = debug_reject
+    return chains, clamped, stats, spine_chains
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1878,20 +2172,25 @@ def _emit_one_gap(layout, airside, gap_poly, long_dir, long_len, step,
         values = _smooth_spine(targets, intervals, _SMOOTH_SWEEPS)
         values = [round(v, 1) for v in values]
 
-    # ── GAP INTERIOR RINGS (ratified 2026-07-11, gate
-    # O4_GAP_FILL_INTERIOR_RINGS, default OFF) — violation-gated
-    # band-breakpoint breaklines inside the face; the spine values may
-    # only move DOWN (ring-2 ceiling re-coupling).  Failure degrades
-    # loudly to the ring-less face (never blocks the gap emission). ────
+    # ── GAP INTERIOR RINGS (ratified 2026-07-11, round-8 revision:
+    # complete closed loops, value-gated) — band-breakpoint breaklines
+    # inside the face; the spine values may only move DOWN (ring-2
+    # ceiling re-coupling).  Failure degrades loudly to the ring-less
+    # face (never blocks the gap emission). ────────────────────────────
+    _spine_chains = None
     if GAP_FILL_INTERIOR_RINGS_ENABLED and dem is not None:
+        ring_stats = None
         try:
-            ring_chains, values, ring_stats = _build_gap_interior_rings(
+            (ring_chains, values, ring_stats,
+             _spine_chains) = _build_gap_interior_rings(
                 layout, airside, gap_poly, spine, values, dem,
                 tile_lat, tile_lon, rw_axes, step)
         except _GEOM_EXC as _ring_exc:
             ring_chains = []
+            _spine_chains = None
             UI.vprint(1, f"  [gap-fill] interior-ring construction "
                          f"FAILED (face kept ring-less): {_ring_exc!r}")
+        _c = gap_poly.centroid
         if ring_chains:
             if getattr(layout, "gap_interior_rings", None) is None:
                 layout.gap_interior_rings = []
@@ -1899,13 +2198,19 @@ def _emit_one_gap(layout, airside, gap_poly, long_dir, long_len, step,
                 layout.gap_interior_rings.append(
                     ([layout.m_to_ll(_rx, _ry) for _rx, _ry in _rc_pts],
                      list(_rc_alts)))
-            _c = gap_poly.centroid
             UI.vprint(1, f"  [gap-fill] interior rings: "
-                         f"{ring_stats['chains']} chain(s), "
+                         f"{ring_stats['chains']} loop(s)/chain(s), "
                          f"{ring_stats['nodes']} node(s), "
-                         f"{ring_stats['violating']}/"
-                         f"{ring_stats['stations']} station(s) violating "
+                         f"{ring_stats['engaged_stations']} engaged / "
+                         f"{ring_stats['noop_stations']} terrain-riding "
+                         f"of {ring_stats['stations']} station(s) "
                          f"(centroid=({_c.x:.0f},{_c.y:.0f})).")
+        elif ring_stats is not None and ring_stats.get("skipped"):
+            UI.vprint(1, f"  [gap-fill] interior rings SKIPPED (economy "
+                         f"gate: every station of both rings is a value "
+                         f"no-op — terrain lawful throughout; "
+                         f"{ring_stats['stations']} station(s), "
+                         f"centroid=({_c.x:.0f},{_c.y:.0f})).")
 
     # OPEN-WAY EMISSION (user design 2026-07-09, round 2): ONE face —
     # the gap polygon itself, ring verbatim — plus the spine as an
@@ -1966,27 +2271,38 @@ def _emit_one_gap(layout, airside, gap_poly, long_dir, long_len, step,
         node_altitudes=alts + [alts[0]]))
     if getattr(layout, "gap_spines", None) is None:
         layout.gap_spines = []
+    # Spine ways to emit: the full spine as today, or — when interior
+    # rings emitted (round-8) — the ring-core TRIMMED sub-chains from
+    # the builder (a full-length spine would cross the closed loops at
+    # the gap ends).  Gate-OFF ``_spine_chains`` is None and the path
+    # below is byte-identical to before.
+    base_chains: list[list[int]] = (
+        _spine_chains if _spine_chains is not None
+        else [list(range(len(spine)))])
     if list(gap_poly.interiors):
         # ANNULAR face (gap parent wholly inside): a straight segment
         # between two spine stations can cross the parent hole — that
         # open constrained way would transversally cross the parent's
-        # ring (a fresh lens mint).  Split the spine into sub-chains of
-        # consecutive stations whose connecting segments stay COVERED
-        # by the face; each sub-chain (>= 2 points) emits as its own
-        # open way.  Faces without interiors keep the single-way path
-        # byte-identical.
-        chains: list[list[int]] = [[0]]
-        for i in range(len(spine) - 1):
-            seg = LineString([spine[i], spine[i + 1]])
-            covered = False
-            try:
-                covered = gap_poly.covers(seg)
-            except _GEOM_EXC:
+        # ring (a fresh lens mint).  Split each spine sub-chain at any
+        # connecting segment not COVERED by the face; each surviving
+        # sub-chain (>= 2 points) emits as its own open way.  Faces
+        # without interiors keep the single-way path byte-identical.
+        chains: list[list[int]] = []
+        for bc in base_chains:
+            if not bc:
+                continue
+            chains.append([bc[0]])
+            for a, b in zip(bc, bc[1:]):
+                seg = LineString([spine[a], spine[b]])
                 covered = False
-            if covered:
-                chains[-1].append(i + 1)
-            else:
-                chains.append([i + 1])
+                try:
+                    covered = gap_poly.covers(seg)
+                except _GEOM_EXC:
+                    covered = False
+                if covered:
+                    chains[-1].append(b)
+                else:
+                    chains.append([b])
         emitted_ways = 0
         for chain in chains:
             if len(chain) < 2:
@@ -2006,6 +2322,10 @@ def _emit_one_gap(layout, airside, gap_poly, long_dir, long_len, step,
                          f"{emitted_ways} open ways around the parent "
                          f"ring.")
     else:
-        pts_ll = [layout.m_to_ll(px, py) for px, py in spine]
-        layout.gap_spines.append((pts_ll, list(values)))
+        for chain in base_chains:
+            if len(chain) < 2:
+                continue
+            pts_ll = [layout.m_to_ll(*spine[j]) for j in chain]
+            layout.gap_spines.append(
+                (pts_ll, [values[j] for j in chain]))
     return 1
