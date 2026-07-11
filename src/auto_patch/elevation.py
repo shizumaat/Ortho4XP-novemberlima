@@ -1330,6 +1330,7 @@ def _resample_node_altitudes_nn(
         new_poly: Polygon,
         old_open: list[tuple[float, float]],
         old_alts_closed: list[float] | None,
+        interior_edge_project: bool = False,
         ) -> list[float] | None:
     """Given a new polygon (post geometry edit) and the OLD ring's
     open-form coords + closed-form altitudes, return a fresh
@@ -1356,6 +1357,21 @@ def _resample_node_altitudes_nn(
     their nearest, fabricating a step that didn't exist in the
     pre-cut shape's smooth altitude field.  Edge interpolation
     preserves the original gradient.
+
+    ``interior_edge_project`` (default ``False``) upgrades the pass-2
+    fallback: instead of snapping a genuinely-interior new vertex to
+    the nearest old *vertex* altitude, it projects the vertex onto the
+    nearest old *edge* (perpendicular distance unbounded) and
+    interpolates along that edge's endpoint altitudes.  Pure vertex-NN
+    quantises an interior cut vertex to one ring corner, which on a
+    sloped piece can be off by ``gradient x (distance to nearest
+    corner)`` — metre-scale on a strongly-sloped, sparse-ring piece
+    (see the tunnel graze-clip reproducer).  Edge projection recovers
+    the boundary gradient value.  Off by default so every existing
+    caller (boundary ribbon, tile-cut, sliver merge, …) stays
+    byte-identical; only the tunnel graze-clip node_altitudes path
+    opts in, where the interior vertices are buffered-gate cut points
+    inside a possibly-sloped ramp/wall piece.
 
     Used wherever a polygon edit (boundary clip, buffer(0) repair,
     push-off, sliver merge, tile-cut, etc.) changes the vertex
@@ -1415,7 +1431,35 @@ def _resample_node_altitudes_nn(
             new_alts.append(round(float(best_edge_alt), 1))
             continue
 
-        # Pass 2: nearest-neighbour fallback (interior vertex / no
+        # Pass 2a: interior edge-projection fallback (opt-in).  Project
+        # onto the nearest old EDGE (perpendicular distance unbounded)
+        # and interpolate along it, so an interior cut vertex recovers
+        # the boundary gradient instead of snapping to one ring corner.
+        if interior_edge_project:
+            best_seg_d2 = float("inf")
+            best_seg_alt: float | None = None
+            for k in range(n_old):
+                sx, sy = old_open[k]
+                tx, ty = old_open[(k + 1) % n_old]
+                dx, dy = tx - sx, ty - sy
+                seg_len2 = dx * dx + dy * dy
+                if seg_len2 < 1e-9:
+                    continue
+                t = ((nx - sx) * dx + (ny - sy) * dy) / seg_len2
+                t = max(0.0, min(1.0, t))
+                px, py = sx + t * dx, sy + t * dy
+                d2 = (nx - px) ** 2 + (ny - py) ** 2
+                if d2 >= best_seg_d2:
+                    continue
+                a_s = src_alts_open[k]
+                a_t = src_alts_open[(k + 1) % n_old]
+                best_seg_d2 = d2
+                best_seg_alt = a_s + t * (a_t - a_s)
+            if best_seg_alt is not None:
+                new_alts.append(round(float(best_seg_alt), 1))
+                continue
+
+        # Pass 2b: nearest-neighbour fallback (interior vertex / no
         # containing edge).
         best_d2 = float("inf")
         best_a = src_alts_open[0]
