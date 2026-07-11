@@ -62,6 +62,7 @@ _TAXI_HALF_W_M = 7.5       # taxiway half-width corridor (perp split point)
 _TOUCH_TOL_M = 2.0         # building↔airside distance to count as "touching"
 _MULTI_ROUTE_M = 30.0      # junction-band: widen ceiling over routes within this
 _INF = float("inf")
+_UNSET = object()          # build-wide-cache sentinel (distinguishes None result)
 
 
 _VIS_BUFFER_M = 0.5        # bridge weld-seam slivers between abutting shapes
@@ -81,19 +82,35 @@ def _pavement_visibility(layout):
     pavement (the user's rule: never taxi across grass / a service road; a spine
     is a centerline, so apron pavement counts).  Building pads are included so a
     chord may start inside the building's own pad.  Buffered slightly to bridge
-    numerical weld-seam slivers between abutting shapes."""
+    numerical weld-seam slivers between abutting shapes.
+
+    PERF (build-wide cache): the prepared union is a pure function of the airside
+    pavement + building 2D geometry, which is FROZEN after phase-1 layout — the
+    solve moves only elevations and the emit only appends ``graded_strip`` pieces
+    (not in ``_AIRSIDE_ROLES``), so ``vis`` is byte-identical across the
+    construct / solve / emit ``reach_band_unified`` calls.  The union+buffer+prep
+    was rebuilt on every call (≥3×/build); cache it on the layout so it is built
+    once.  Same object each call ⇒ no output change."""
+    cached = getattr(layout, "_pav_vis_cache", _UNSET)
+    if cached is not _UNSET:
+        return cached
     from shapely.ops import unary_union
     from shapely.prepared import prep
     polys = [s.polygon for s in layout.shapes
              if (s.role in _AIRSIDE_ROLES or s.role == ROLE_BUILDING)
              and s.polygon is not None and not s.polygon.is_empty]
-    if not polys:
-        return None
+    vis = None
+    if polys:
+        try:
+            u = unary_union(polys).buffer(_VIS_BUFFER_M)
+            vis = prep(u)
+        except Exception:                                  # pragma: no cover
+            vis = None
     try:
-        u = unary_union(polys).buffer(_VIS_BUFFER_M)
-        return prep(u)
+        layout._pav_vis_cache = vis
     except Exception:                                      # pragma: no cover
-        return None
+        pass
+    return vis
 
 
 def _cl_by_distance(c, cls, tree=None, max_r=None):
@@ -178,30 +195,151 @@ def _paved_frac(chord, vis) -> float:
         return hit / n
 
 
-def _nearest_visible_centerline(c, cls, vis, tree=None):
+def _paved_fracs(chords, vis):
+    """Vectorised :func:`_paved_frac` over a LIST of chord LineStrings — the
+    seam-gap paved fraction for each, returned as a ``list[float]`` in input
+    order.  Every chord's sample points (the SAME ``(arange(n)+0.5)/n`` mid-cell
+    sampling, same ``n = min(96, max(8, int(L)))``) are concatenated into ONE
+    ``shapely.contains_xy`` call, then the per-chord mean is sliced back out —
+    bit-identical to calling :func:`_paved_frac` on each chord, but paying the
+    numpy/GEOS call overhead ONCE per batch instead of once per candidate (the
+    phantom reach-band tail ran this ~2 M times, one candidate at a time)."""
+    import numpy as _np
+    import shapely as _sh
+    geom = getattr(vis, "context", vis)
+    _sh.prepare(geom)
+    m = len(chords)
+    fracs = [1.0] * m
+    if m == 0:
+        return fracs
+    chords_arr = (chords if isinstance(chords, _np.ndarray)
+                  else _np.asarray(chords, dtype=object))
+    # Endpoints + lengths in ONE vectorised call each (each chord is a 2-point
+    # LineString ``[foot, c]``): coords rows are [foot0, c, foot1, c, ...].
+    cc = _sh.get_coordinates(chords_arr)
+    a = cc[0::2]                    # feet  (chord start)
+    b = cc[1::2]                    # c     (chord end)
+    Ls = _sh.length(chords_arr)
+    segs = []                      # (out_index, start, n)
+    xs_parts = []
+    ys_parts = []
+    total = 0
+    for idx in range(m):
+        L = float(Ls[idx])
+        if L < 1e-9:
+            continue               # frac stays 1.0 (matches _paved_frac)
+        n = min(96, max(8, int(L)))
+        t = (_np.arange(n) + 0.5) / n
+        ax, ay = a[idx, 0], a[idx, 1]
+        bx, by = b[idx, 0], b[idx, 1]
+        xs_parts.append(ax + (bx - ax) * t)
+        ys_parts.append(ay + (by - ay) * t)
+        segs.append((idx, total, n))
+        total += n
+    if total:
+        hits = _sh.contains_xy(geom, _np.concatenate(xs_parts),
+                               _np.concatenate(ys_parts))
+        for (idx, start, n) in segs:
+            fracs[idx] = float(hits[start:start + n].mean())
+    return fracs
+
+
+def _nearest_visible_centerline(c, cls, vis, tree=None, cache=None):
     """The nearest centerline to point ``c`` whose connecting chord stays within
     pavement (``vis``).  Falls back to the straight-line nearest if none is
     visible (e.g. a building wholly off pavement — the caller's touch test has
     already gated that out).  ``tree``: optional ``STRtree(cls)`` (see
-    :func:`_cl_by_distance`)."""
-    from shapely.geometry import LineString
-    from shapely.ops import nearest_points
+    :func:`_cl_by_distance`).
+
+    ``cache`` (build-wide reach-band memo, optional ``dict``): the result is a
+    pure function of ``(c, cls, vis)`` — the taxi-centerline set and the airside
+    pavement union, both FROZEN 2D geometry for the whole build — so the same
+    query point yields the same serving centerline in the construct, the solve,
+    and the emit.  Keyed on the exact float coordinates ⇒ identical result ⇒ no
+    output change.  The returned ``ln`` is one of the persistent ``cl.line``
+    objects (stable across the per-stage ``cls`` rebuilds), so downstream
+    ``id(ln)`` lookups stay valid.  Callers that do NOT pass a cache (e.g. the
+    gated building-frontage-spine anchor) are byte-identical to before.
+
+    PERF (vectorised candidate scan): this walk was ~77 % of a KBNA build
+    (cProfile) — the per-vertex reach-band query tests centerlines in distance
+    order until a ≥ ``_VIS_ON_PAV_FRAC`` visible chord is found, and the
+    "phantom" vertices (no visible centerline; isolated apron/pavement pieces)
+    march the WHOLE centerline set.  The old loop paid a full stack of Python
+    shapely wrappers PER candidate (``nearest_points`` → ``shortest_line``,
+    ``LineString`` construction, ``vis.contains``): ~35 M wrapped calls, ~100 s
+    of the 175 s CYXY replay were wrapper overhead alone.  Pull the
+    distance-ordered generator in GROWING chunks and evaluate each chunk with
+    ONE vectorised ``shapely.shortest_line`` + ONE prepared ``shapely.contains``
+    (``vis.contains(x)`` is exactly ``shapely.contains(vis.context, x)``), then
+    fall to the per-chord ``_paved_frac`` seam-gap test only for the chords that
+    fail the exact test — in the SAME distance order, returning the SAME first
+    acceptable centerline.  ``shapely.shortest_line(ln, c)`` returns the chord
+    ``[foot_on_ln, c]`` — the reverse of the old ``[c, foot]`` — but chord length,
+    prepared containment and ``_paved_frac`` (whose mid-point sample set is
+    symmetric about the chord centre) are all orientation-invariant, so the
+    accept/reject decision is bit-identical.  Growing the chunk keeps the common
+    median-1-candidate query cheap while the phantom tail is batched."""
+    import shapely as _sh
+    import numpy as _np
+    from itertools import islice as _islice
+    key = None
+    if cache is not None:
+        key = (c.x, c.y)
+        hit = cache.get(key, _UNSET)
+        if hit is not _UNSET:
+            return hit
+
+    def _cache_and_return(result):
+        if key is not None:
+            cache[key] = result
+        return result
+
+    vis_ctx = getattr(vis, "context", vis)
+    gen = _cl_by_distance(c, cls, tree)
     first = None
-    for ln in _cl_by_distance(c, cls, tree):
+    chunk_size = 4
+    while True:
+        chunk = list(_islice(gen, chunk_size))
+        if not chunk:
+            break
         if first is None:
-            first = ln
-        foot = nearest_points(ln, c)[0]
-        chord = LineString([(c.x, c.y), (foot.x, foot.y)])
-        if chord.length < 1e-6 or vis.contains(chord):
-            return ln
-        # tolerate tiny seam gaps: accept when ≥ _VIS_ON_PAV_FRAC is paved
-        try:
-            if _paved_frac(chord, vis) >= _VIS_ON_PAV_FRAC:
-                return ln
-        except Exception:                                  # pragma: no cover
-            pass
-    return first if first is not None else min(
-        cls, key=lambda L: L.distance(c))
+            first = chunk[0]
+        arr = _np.empty(len(chunk), dtype=object)
+        for _i, _ln in enumerate(chunk):
+            arr[_i] = _ln
+        chords = _sh.shortest_line(arr, c)          # [foot_on_ln, c] per candidate
+        lens = _sh.length(chords)
+        exact = _sh.contains(vis_ctx, chords)
+        # The accept is the FIRST candidate (distance order) that is exact-visible
+        # (coincident chord or contained) OR ≥ _VIS_ON_PAV_FRAC paved.  Only the
+        # prefix BEFORE the first exact hit can win via the paved-fraction test
+        # (an exact hit at je short-circuits everything after it), so batch the
+        # seam-gap ``_paved_frac`` over exactly that prefix — nothing wasted, and
+        # zero paved-frac work in the common early-exact case.
+        je = len(chunk)
+        for j in range(len(chunk)):
+            if lens[j] < 1e-6 or exact[j]:
+                je = j
+                break
+        pf = None
+        if je > 0:
+            try:
+                pf = _paved_fracs(chords[:je], vis)
+            except Exception:                              # pragma: no cover
+                pf = None
+        for j in range(len(chunk)):
+            if j < je:
+                if pf is not None and pf[j] >= _VIS_ON_PAV_FRAC:
+                    return _cache_and_return(chunk[j])
+            else:  # j == je: the exact hit (or je == len(chunk): no hit)
+                if je < len(chunk):
+                    return _cache_and_return(chunk[je])
+                break
+        chunk_size = min(chunk_size * 2, 512)
+    return _cache_and_return(
+        first if first is not None else min(
+            cls, key=lambda L: L.distance(c)))
 
 
 def _chord_on_pavement(c, foot, vis):
@@ -507,9 +645,15 @@ def reach_band_unified(layout, G):
             return None
         return (floor, ceil)
 
+    # Build-wide serving-centerline memo (see _nearest_visible_centerline): the
+    # scan is a pure function of the frozen 2D geometry, so the construct, the
+    # solve and the emit share ONE cache keyed by exact query point.
+    _nvc_cache = layout.__dict__.setdefault("_reach_nvc_cache", {})
+
     def band(x, y):
         c = Point(x, y)
-        ln = (_nearest_visible_centerline(c, cls, vis, tree=cl_tree)
+        ln = (_nearest_visible_centerline(c, cls, vis, tree=cl_tree,
+                                          cache=_nvc_cache)
               if vis is not None
               else next(_cl_by_distance(c, cls, cl_tree),
                         min(cls, key=lambda L: L.distance(c))))
