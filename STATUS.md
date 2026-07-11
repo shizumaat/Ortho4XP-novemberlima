@@ -1,4 +1,93 @@
 # ══════════════════════════════════════════════════════════════════
+# PART 36 IN PROGRESS (20260710 PM session) — READ THIS FIRST
+# ══════════════════════════════════════════════════════════════════
+# SLICE B IS UNDERWAY.  Design doc (Noah-approved, criterion list
+# includes the sub-2-minute build target):
+# docs/slice_b_solver_absorption_design.md.  Five stages B0-B5;
+# ordering forced by parent relationships (skirts before gaps before
+# bands); reuses the object-bridge plate admission precedent.
+#
+# LANDED (all verified on the integrated tree, audit A/B per landing):
+# * 9f68a25 queue item 8 — full_airport_build check_grade subprocess
+#   uses sys.executable (worktree-safe).
+# * 72c722a queue item 6 — audit class 4 INTERIOR EDGE CROSSINGS +
+#   attribution: ALL 18 at CYXY are the crown-ridge crossing-continuity
+#   mechanism BY DESIGN (16 crown_spine~runway/runway_crossing internal
+#   seams + 2 ridge~ridge without a shared node, ledgered for slice-B
+#   exactification).  NOT band clip residues — 6th overturned
+#   diagnosis.  Watch class requiring attribution, not a violation
+#   inventory.
+# * 162aaca + ad7d8d7 — the slice B design doc + performance
+#   acceptance criterion 8 (Noah ruling: refinements must simplify;
+#   CYXY full build UNDER 120 s; measured split at baseline: 62.9%
+#   post-solve emit march / 34.7% solve / ~2.5% phase-1 — the march
+#   the absorption deletes IS the bottleneck).
+# * 1ada9ac queue item 5 — site-2 6 mm residual: GEOS clip minting an
+#   intersection vertex 5.17 mm off a sibling band's corner (shallow-
+#   angle band-vs-band difference()); construction-time value-gated
+#   band-corner weld (1 cm reach, VERTEX_ALT_MERGE_TOL_M gate).
+#   Residual report 1 T-junction + 4 crossings → 0 + 2 (survivors
+#   pre-existing/unrelated).  Harness: tools/adjacent_ground_replay.py.
+# * ac2b927 item-9 residual — tunnel graze-clip resample hazard REAL
+#   but latent (interior vertices snapped to ring corners; metre-scale
+#   only on shapes that take the safe sloped-rect path today; no
+#   airport triggers the branch — SPJC/KDFW counter-instrumented).
+#   Opt-in interior_edge_project on _resample_node_altitudes_nn;
+#   default OFF = all other callers byte-identical.  Permanent
+#   reproducer tests/test_tunnel_graze_resample.py.
+# * 34c286b SLICE B STAGE B0 — interval-edge primitive (symmetric
+#   3-tuple untouched; 4-tuple signed slab, None = unbounded; both
+#   projection paths; _margined_interval) + O4_ONE_SOLVE_TERRAIN
+#   master gate + per-role sub-gates (all OFF).  Byte-identity proven
+#   TWICE (same-path stash A/B, pinned hash seed).  DEFERRED: reach-
+#   envelope warm-start over signed slabs (no interval edges exist
+#   until B1-B3; POCS sweep converges regardless — documented in code).
+# * 0d58750 queue item 4 — skirt edge-grade: attribution REFUTED (7th
+#   overturn; not corner arbitration).  to_osm consensus averaged two
+#   SOFT claims (skirt 693.1 + strip 692.3 → 692.7 valley) because no
+#   authority claimed the node.  Fix: consensus priority law >
+#   authority > runway-end skirt > all-soft mean.  Skirt class 2 → 0.
+#   SECOND emit-consensus arbitration defect this part (with site-2):
+#   both classes unrepresentable under absorption — more slice-B
+#   delete-it evidence.  Harness: tools/skirt_value_replay.py.
+#
+# IN FLIGHT: STAGE B1 (skirt absorption — construction pre-solve, ring
+# vertices join the registry as HARD PINS at birth-computed profile
+# values via the bridge-plate mechanism; gate
+# ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT, default OFF).  Then B2 gap
+# spines, B3 bands (three orders), B4 charter + legacy deletion, B5
+# projection retirement — per the design doc.
+#
+# ★ TRUE CURRENT BASELINES (CYXY, this tree — the part-35 numbers
+# below predate the O4_OBJECT_BRIDGE_TERRAIN landing and are STALE):
+# patch nodes ~4,408 / ways 387 / T-vertices 5 / near-parallel 3
+# (legacy) / coincident 4 (4th = pre-existing graded_strip wall at
+# 60.7088723) / interior crossings 18 (all crown, by design).
+# check_grade: skirt edge-grade 0 · tears 0 except 1 LEDGERED
+# graded_strip tear #366 (site-3 far-side family) · 2+5 LEDGERED
+# building8/apron vertex-to-edge + mid-edge steps.  Residual
+# divergence: 0 T-junctions + 2 crossings (pre-existing).  Build
+# 155-170 s warm (target <120 s, criterion 8).
+#
+# ★ NEW USER RULINGS (20260710 PM, all in memory + design doc):
+# 1. Test cycle >5 minutes ⇒ STOP, use/build a fast harness in tools/
+#    (applies to agent work orders; three new replay harnesses landed
+#    this session).
+# 2. CYXY = first test airport for all iteration; big airports once at
+#    scale checkpoints (B3); feature exceptions SPJC/KDFW tunnels,
+#    SPLP seams.
+# 3. Performance is a standing lens; refinements must SIMPLIFY and
+#    reduce steps; CYXY full build target UNDER 2 MINUTES.  Phase
+#    timings: read ~/.ortho4xp/auto_patch_build_times/*.json, do not
+#    rerun builds for timing.
+# 4. Zero-tolerance clarified (item-6 discussion): the ban is on
+#    NEAR-coincidence (mm-cm lenses, T-vertices, near-parallel).  A
+#    transversal interior crossing resolves to ONE exact Steiner
+#    vertex at bake time and does not explode; the crown mechanism
+#    relies on it.  Grazing-angle / near-endpoint crossings ARE the
+#    banned classes and the audit routes them there.
+#
+# ══════════════════════════════════════════════════════════════════
 # HANDOVER QUEUE (part 35 END, 20260710) — START HERE
 # ══════════════════════════════════════════════════════════════════
 # ★ COMMITTED as the part-35 + round-6 milestone (one integrated
