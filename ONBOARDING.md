@@ -45,6 +45,16 @@ X-Plane.**
   `install_mac.sh` / `install_windows.bat` both install from it); shapely is the
   core geometry library, scipy (Voronoi/splines) + networkx (skeleton graphs)
   serve the pavement-skeleton spine (`pavement/pav_skeleton.py`).
+- **GDAL (optional at runtime).** The GDAL python bindings (`osgeo`) power the
+  airport elevation insets (automatic meter-class lidar over airports, see
+  `docs/airport_elevation_insets_spec.md`) and GeoTIFF `custom_dem` reading.
+  Both installers set it up (macOS: `brew install proj gdal` then the pinned
+  `gdal` wheel from `requirements.txt`; Windows: the bundled wheel in
+  `Utils/win/`). If `osgeo` cannot be imported the build still works: the
+  inset feature logs one line and disables itself for that build, and
+  raster `custom_dem` files fall back to zero altitude with a warning.
+  Manual install on a bare system: `brew install gdal` / `apt install
+  libgdal-dev`, then `venv/bin/python -m pip install gdal`.
 
 ## Your first build
 Build one airport and write its patch. CYXY (Whitehorse) and SPLP are good small fixtures.

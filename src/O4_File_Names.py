@@ -319,6 +319,48 @@ def elevation_data(source, lat, lon):
 ##############################################################################
 
 ##############################################################################
+def airport_inset_directory(lat, lon):
+    """Directory holding the fetched airport elevation insets for a tile.
+
+    Lives under the same ``Elevation_data/<block>/`` tree as every other
+    cached elevation artefact, e.g.
+    ``Elevation_data/+30-090/N36W087_airport_insets/``.
+    """
+    return os.path.join(
+        Elevation_dir,
+        round_latlon(lat, lon),
+        hem_latlon(lat, lon) + "_airport_insets",
+    )
+
+
+def airport_inset_index(lat, lon):
+    """The per-tile discovery index (including negative results)."""
+    return os.path.join(airport_inset_directory(lat, lon), "index.json")
+
+
+def airport_inset_dem(lat, lon, icao, provider_code):
+    """The warped EPSG:4326 float32 GeoTIFF for one airport and provider.
+
+    ``provider_code`` is the lower-cased ``.elv`` definition code so cache
+    keys survive access-strategy refactors, e.g. ``KBNA_usgs3dep.tif``.
+    """
+    return os.path.join(
+        airport_inset_directory(lat, lon),
+        icao + "_" + provider_code.lower() + ".tif",
+    )
+
+
+def airport_inset_provenance(lat, lon, icao, provider_code):
+    """The provenance sidecar accompanying an airport inset GeoTIFF."""
+    return os.path.join(
+        airport_inset_directory(lat, lon),
+        icao + "_" + provider_code.lower() + ".json",
+    )
+
+
+##############################################################################
+
+##############################################################################
 def generic_tif(lat, lon):
     return base_file_name(lat, lon) + ".tif"
 

@@ -25,6 +25,9 @@ echo " "
 # any Python >= 3.11 works (numpy 2.4 sets the floor), never required
 # newer (user 2026-07-05: newer Python = a performance gain, not a
 # requirement).
+# proj + gdal also power the optional airport elevation insets
+# (meter-class lidar over airports); if the python bindings are missing
+# that feature logs one line and disables itself — builds still work.
 brew install python python-tk spatialindex p7zip proj gdal
 
 # Create a Python virtual environment

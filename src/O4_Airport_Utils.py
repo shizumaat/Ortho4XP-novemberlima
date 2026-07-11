@@ -8,6 +8,7 @@ import O4_UI_Utils as UI
 import O4_Vector_Utils as VECT
 import O4_Geo_Utils as GEO
 import O4_DEM_Utils as DEM
+import O4_Airport_Elevation_Insets as INSETS
 import O4_File_Names as FNAMES
 
 runway_chunks = 100  # how much chunks to split a runway longitudinally, ...
@@ -922,6 +923,31 @@ def build_airport_array(tile, dico_airports):
 
 ################################################################################
 def smooth_raster_over_airports(tile, dico_airports, preserve_boundary=True):
+    """Blur the working raster over each airport, THEN bake elevation insets.
+
+    ORDER CONTRACT (spec section 7 / item O1 -- verified 2026-07-11):
+
+    1. The airport smoother runs FIRST (the per-airport blur loop below and
+       the ``preserve_boundary`` edge feather).  Its whole job is to hide
+       the pixel staircase of the coarse base source.
+
+    2. ``INSETS.bake_airport_insets_into_alt_dem`` runs LAST, immediately
+       before ``write_to_file`` (and, on the ``max_pix`` early-return path,
+       likewise before the write).  Lidar insets are therefore stamped into
+       ``tile.dem.alt_dem`` AFTER all blurring, so the high-resolution
+       surface is never smeared by the smoother -- exactly the defect the
+       inset feature exists to fix.
+
+    3. The AUTOMATIC per-airport radius (``resolve_airport_smoothing_radius``)
+       is decided from the cached insets' raster EXTENTS and pixel sizes on
+       disk (``inset_coverage_of_airport_mask`` -> ``gdal.Open`` geotransform),
+       NEVER from the pre-bake raster values.  So step 1 does not depend on
+       the bake in step 2, and there is no read-before-write ordering hazard
+       between the radius decision and the values it would blur.
+
+    A synthetic-inset value dropped inside an inset footprint must survive
+    this call unblurred (regression: ``tests/test_object_elevation_ordering``).
+    """
     max_pix = tile.apt_smoothing_pix
     for airport in dico_airports:
         if "smoothing_pix" in dico_airports[airport]:
@@ -932,6 +958,9 @@ def smooth_raster_over_airports(tile, dico_airports, preserve_boundary=True):
             except:
                 pass
     if not max_pix:
+        # Bake airport elevation insets into the raster the mesher reads
+        # (see O4_Airport_Elevation_Insets G2 note); no-op when disabled.
+        INSETS.bake_airport_insets_into_alt_dem(tile)
         tile.dem.write_to_file(FNAMES.alt_file(tile))
         return
     if preserve_boundary:
@@ -948,15 +977,51 @@ def smooth_raster_over_airports(tile, dico_airports, preserve_boundary=True):
     upscale = max(
         ceil(ystep * GEO.lat_to_m / 10), 1
     )  # target 10m of pixel size at most to avoiding aliasing
+    working_pixel_m = ystep * GEO.lat_to_m
+    # On the Phase C1 densified grid the working pixel is finer than the
+    # 1 arc-second reference the historic apt_smoothing_pix was expressed
+    # in; pass that reference so the automatic radius preserves the
+    # PHYSICAL blur footprint instead of shrinking it with the grid.
+    working_grid_factor = getattr(tile, "working_grid_factor", 1)
+    reference_pixel_m = working_pixel_m * working_grid_factor
     for airport in dico_airports:
-        try:
-            pix = (
-                int(dico_airports[airport]["smoothing_pix"])
-                if "smoothing_pix" in dico_airports[airport]
-                else tile.apt_smoothing_pix
+        # The smoothing mask (also the coverage geometry for the automatic
+        # radius rule below).
+        full_area = VECT.ensure_MultiPolygon(
+            ops.unary_union(
+                [
+                    dico_airports[airport]["boundary"],
+                    dico_airports[airport]["runway"][0],
+                    dico_airports[airport]["hangar"],
+                    dico_airports[airport]["taxiway"][0],
+                    dico_airports[airport]["apron"][0],
+                ]
             )
-        except:
-            pix = tile.apt_smoothing_pix
+        )
+        # Per-airport radius: the explicit smoothing_pix override wins,
+        # then the automatic rule (spec section 3.4) scales the radius to
+        # the finest elevation source covering this airport, else the
+        # legacy fixed apt_smoothing_pix (see the resolver's docstring).
+        (
+            pix,
+            source_pixel_m,
+            coverage_fraction,
+        ) = INSETS.resolve_airport_smoothing_radius(
+            tile, dico_airports[airport], working_pixel_m, full_area,
+            reference_pixel_m=reference_pixel_m,
+        )
+        if source_pixel_m is not None:
+            UI.vprint(
+                1,
+                "   Airport",
+                airport,
+                ": smoothing radius",
+                pix,
+                "pixel(s) (source pixel",
+                round(source_pixel_m, 1),
+                "m, inset coverage",
+                str(round(coverage_fraction * 100)) + "%).",
+            )
         if not pix:
             continue
         (xmin, ymin, xmax, ymax) = dico_airports[airport]["boundary"].bounds
@@ -973,17 +1038,6 @@ def smooth_raster_over_airports(tile, dico_airports, preserve_boundary=True):
             (upscale * (colmax - colmin + 1), upscale * (rowmax - rowmin + 1)),
         )
         airport_draw = ImageDraw.Draw(airport_im)
-        full_area = VECT.ensure_MultiPolygon(
-            ops.unary_union(
-                [
-                    dico_airports[airport]["boundary"],
-                    dico_airports[airport]["runway"][0],
-                    dico_airports[airport]["hangar"],
-                    dico_airports[airport]["taxiway"][0],
-                    dico_airports[airport]["apron"][0],
-                ]
-            )
-        )
         for polygon in full_area.geoms:
             exterior_pol_pix = [
                 (
@@ -1031,6 +1085,9 @@ def smooth_raster_over_airports(tile, dico_airports, preserve_boundary=True):
                 i / pix * tile.dem.alt_dem[:, -i - 1]
                 + (pix - i) / pix * right[:, -i - 1]
             )
+    # Bake airport elevation insets into the raster the mesher reads (see
+    # O4_Airport_Elevation_Insets G2 note); no-op when the feature is off.
+    INSETS.bake_airport_insets_into_alt_dem(tile)
     tile.dem.write_to_file(FNAMES.alt_file(tile))
     return
 

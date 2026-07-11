@@ -14,6 +14,7 @@ import O4_Vector_Utils as VECT
 import O4_File_Names as FNAMES
 import O4_Geo_Utils as GEO
 import O4_Airport_Utils as APT
+import O4_Airport_Elevation_Insets as INSETS
 from auto_patch import driver as AUTOPATCH
 from auto_patch import osm_aeroway as OSMAERO
 import O4_Config_Utils as CFG
@@ -343,13 +344,26 @@ def include_airports(vector_map, tile):
     APT.update_airport_boundaries(tile, dico_airports)
     APT.list_airports_and_runways(dico_airports)
     UI.vprint(1, "   Loading elevation data and smoothing it over airports.")
+    # Airport elevation insets (spec section 3.3): fetch meter-class public
+    # elevation for each airport neighbourhood, then augment the DEM source
+    # in memory with the cached insets (base;inset1;inset2). No-op -- and a
+    # byte-identical build -- when the feature is gated off, no provider
+    # covers the tile, or GDAL is unavailable. The user's custom_dem config
+    # value is never rewritten.
+    INSETS.ensure_insets_for_tile(tile, dico_airports)
+    dem_source = INSETS.assemble_inset_composite_source(tile, tile.custom_dem)
     tile.dem = DEM.DEM(
         tile.lat,
         tile.lon,
-        tile.custom_dem,
+        dem_source,
         tile.fill_nodata or "to zero",
         info_only=False,
     )
+    # Densify the working grid over inset tiles (spec Phase C1) BEFORE
+    # smoothing and baking, so the finer posting carries the meter-class
+    # airport relief through to the mesh. No-op (byte-identical) when no
+    # inset covers the tile or the feature is gated off.
+    INSETS.densify_tile_dem_for_insets(tile)
     APT.smooth_raster_over_airports(tile, dico_airports)
     # Auto-generate runway, taxiway, and building patches from CIFP data +
     # OSM geometry (before loading patches so include_patches() picks them up)

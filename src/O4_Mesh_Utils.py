@@ -7,6 +7,7 @@ import numpy
 import requests
 from math import sqrt, cos, pi
 import O4_DEM_Utils as DEM
+import O4_Airport_Elevation_Insets as INSETS
 import O4_UI_Utils as UI
 import O4_File_Names as FNAMES
 import O4_Geo_Utils as GEO
@@ -595,12 +596,24 @@ def build_mesh(tile):
             return 0
         try:
             fill_nodata = tile.fill_nodata or "to zero"
+            # Re-derive the same airport-inset composite as step 1 from the
+            # cache directory (disk-state-driven, idempotent) so both steps
+            # agree on the elevation source. The first token stays the base,
+            # so the raster dimension check below is unchanged; the baked
+            # insets already live in the .alt file written in step 1.
+            composite_dem = INSETS.assemble_inset_composite_source(
+                tile, tile.custom_dem
+            )
             source = (
-                (";" in tile.custom_dem) and tile.custom_dem.split(";")[0]
-            ) or tile.custom_dem
+                (";" in composite_dem) and composite_dem.split(";")[0]
+            ) or composite_dem
             tile.dem = DEM.DEM(
                 tile.lat, tile.lon, source, fill_nodata, info_only=True
             )
+            # Re-derive the same Phase C1 densification as step 1 (disk
+            # state-driven), so nxdem/nydem match the .alt written densely
+            # in step 1 and are handed to Triangle4XP at the finer posting.
+            INSETS.densify_tile_dem_for_insets(tile)
             if (
                 not os.path.getsize(alt_file)
                 == 4 * tile.dem.nxdem * tile.dem.nydem
@@ -627,6 +640,8 @@ def build_mesh(tile):
             tile.dem = DEM.DEM(
                 tile.lat, tile.lon, source, fill_nodata=False, info_only=True
             )
+            # Match step 1's densified posting for the raster-size check.
+            INSETS.densify_tile_dem_for_insets(tile)
             if (
                 not os.path.isfile(alt_file)
                 or not os.path.getsize(alt_file)
@@ -639,6 +654,15 @@ def build_mesh(tile):
                     fill_nodata=False,
                     info_only=False,
                 )
+                # Iterative refinement rewrites the raster from the
+                # tile.iterate-th user sub-DEM; densify to the Phase C1
+                # working grid and re-bake the cached airport insets so the
+                # refined raster keeps the meter-class airport terrain at
+                # the finer posting (no-op when the feature is gated off --
+                # and the bake guards base nodata cells, which this
+                # fill_nodata=False load can contain).
+                INSETS.densify_tile_dem_for_insets(tile)
+                INSETS.bake_airport_insets_into_alt_dem(tile)
                 tile.dem.write_to_file(FNAMES.alt_file(tile))
         except Exception as e:
             print(e)

@@ -20,6 +20,13 @@ originals (ruling R1); geometry is always re-read from the backup, so
 re-running is byte-idempotent and cannot stack.  Corrected packs MUST
 NOT be redistributed.  X-Plane caches objects — restart it after a bake.
 
+The mesh this tool seats against (``--mesh``, or the tile-derived default)
+MUST be the inset-built ``Data<tile>.mesh`` — the one produced from the
+inset-corrected ``.alt`` (airport elevation insets baked in).  Discovery
+samples ONLY that mesh (``post_mesh.discover_and_rebake_airport`` ->
+``MeshElevationSampler``); it never re-samples a raw DEM/.hgt, so the tool
+moves objects against exactly the surface the pipeline moves them against.
+
 Two input modes:
 
 * ``--worklist PATH`` — the per-tile sidecar the auto_patch driver
@@ -174,7 +181,10 @@ def main(argument_list: list[str] | None = None) -> int:
     parser.add_argument(
         "--mesh",
         help="built Data<tile>.mesh (required in mode 2; optional "
-        "override of the tile-derived default in mode 1)",
+        "override of the tile-derived default in mode 1).  MUST be the "
+        "inset-built mesh (from the inset-corrected .alt) so the bake "
+        "seats objects against the same surface production uses; the "
+        "shared discovery pipeline samples only this mesh, never a raw DEM",
     )
     parser.add_argument("--pack-root", help="scenery-pack directory whose "
                         ".obj files are rewritten (mode 2)")
