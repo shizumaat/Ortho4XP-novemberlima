@@ -1179,6 +1179,84 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
     # second node 1.71 m below the junction's — an unmerged-node cliff
     # (CYXY 60.6971601,-135.0592654, junction #111).
     authority_value_keys: set[tuple[int, int]] = set()
+    # EMITTED-VERTEX POSITION weld (chain identity, site-2 fix 2026-07-10):
+    # a later band trimmed against an earlier band's union by the exact
+    # ``difference()`` clip is cut along the earlier band's EDGE, so GEOS
+    # mints an intersection vertex a few millimetres from the earlier
+    # band's CORNER rather than adopting the corner itself.  The two
+    # graded_strip writers then emit a 5-6 mm near-parallel / T-vertex
+    # pair (the site-2 residual: 60.7208676,-135.0790956).  The mm-keyed
+    # ``vertex_value_registry`` cannot unify them (P and its 6 mm twin Q
+    # hash to different millimetre keys) and ``_snap_ring_to_static`` does
+    # not either — it snaps only to the PRE-EXISTING pavement/junction
+    # shapes captured before the loop, never to a sibling band emitted
+    # during it.  So keep a coarse spatial hash of every emitted-band
+    # vertex and snap each freshly-clipped ring vertex onto a prior
+    # emitted-band vertex within a TIGHT distance (the epsilon-wedge
+    # class only).  GATED ON VALUE AGREEMENT: only weld when the two
+    # bands' altitudes match within ``VERTEX_ALT_MERGE_TOL_M`` — that is
+    # exactly the "should agree by construction" class the sub-centimetre
+    # seam represents.  Where the two bands' corridors genuinely step
+    # (>1 m, a lawful vertical wall between two taxiways' fills), leaving
+    # the vertices at their clip positions preserves the pre-existing
+    # ``to_osm`` distance-merge (one interned node); forcing them exactly
+    # coincident there would instead mint a two-node wall ``to_osm`` keeps
+    # (the ``VERTEX_ALT_MERGE_TOL_M`` split rule).  Insert-only in effect
+    # (≤1 cm move); the same identity convention the mm value registry
+    # uses.
+    _BAND_CORNER_WELD_TOL_M = 0.01
+    _WELD_CELL_M = 0.02
+    # cell -> list of (x, y, altitude) for prior emitted-band vertices.
+    emitted_vertex_cells: \
+        dict[tuple[int, int], list[tuple[float, float, float]]] = {}
+
+    def _weld_cell(vx, vy):
+        return (int(math.floor(vx / _WELD_CELL_M)),
+                int(math.floor(vy / _WELD_CELL_M)))
+
+    def _weld_ring_to_prior_bands(ring_coords, own_alts):
+        """Snap each ring vertex onto the nearest prior emitted-band
+        vertex within ``_BAND_CORNER_WELD_TOL_M`` whose altitude agrees
+        within ``VERTEX_ALT_MERGE_TOL_M``; return the snapped,
+        consecutive-deduplicated open ring (unchanged object identity
+        when nothing snaps)."""
+        if not emitted_vertex_cells:
+            return ring_coords
+        snapped = []
+        moved = False
+        for (vx, vy), ov in zip(ring_coords, own_alts):
+            cx, cy = _weld_cell(vx, vy)
+            best = None
+            best_d = _BAND_CORNER_WELD_TOL_M
+            for ox in (cx - 1, cx, cx + 1):
+                for oy in (cy - 1, cy, cy + 1):
+                    for px, py, pv in emitted_vertex_cells.get(
+                            (ox, oy), ()):
+                        d = math.hypot(vx - px, vy - py)
+                        if d < best_d and (
+                                ov is None or pv is None
+                                or abs(pv - ov) <= VERTEX_ALT_MERGE_TOL_M):
+                            best_d, best = d, (px, py)
+            if best is not None and best != (vx, vy):
+                snapped.append(best)
+                moved = True
+            else:
+                snapped.append((vx, vy))
+        if not moved:
+            return ring_coords
+        dedup: list[tuple[float, float]] = []
+        for p in snapped:
+            if not dedup or dedup[-1] != p:
+                dedup.append(p)
+        if len(dedup) >= 2 and dedup[0] == dedup[-1]:
+            dedup.pop()
+        return dedup
+
+    def _register_emitted_vertices(ring_coords, ring_alts):
+        for (vx, vy), va in zip(ring_coords, ring_alts):
+            emitted_vertex_cells.setdefault(
+                _weld_cell(vx, vy), []).append((vx, vy, va))
+
     # WELD-VALUE PRELOAD (user ruling 2026-07-09): every EXISTING shape's
     # ring vertices register their exact solved values first, so a band
     # vertex landing on a pavement / skirt / strip vertex ADOPTS that
@@ -1566,6 +1644,37 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
                         piece_ring = _open_coords(simple)
                         if len(piece_ring) < 3:
                             continue
+                        # BAND-CORNER WELD (site-2 fix): collapse any
+                        # clip-minted seam vertex onto a sibling band's
+                        # exact corner (within 1 cm, value-agreeing) so
+                        # abutting graded_strip bands share the vertex by
+                        # construction instead of emitting a 6 mm
+                        # near-parallel twin.  Rebuild ``simple`` from the
+                        # snapped ring so the emitted polygon and the
+                        # per-vertex value/key computation below agree.
+                        # (No prior emitted vertices ⇒ the weld is a
+                        # structural no-op; skip the per-vertex resample.)
+                        if emitted_vertex_cells:
+                            _pre_own = [resample_alt(vx, vy, kind)[0]
+                                        for vx, vy in piece_ring]
+                            welded_ring = _weld_ring_to_prior_bands(
+                                piece_ring, _pre_own)
+                        else:
+                            welded_ring = piece_ring
+                        if welded_ring is not piece_ring \
+                                and len(welded_ring) >= 3:
+                            try:
+                                welded_poly = Polygon(welded_ring)
+                                if not welded_poly.is_valid:
+                                    welded_poly = welded_poly.buffer(0)
+                                if (welded_poly.geom_type == "Polygon"
+                                        and not welded_poly.is_empty):
+                                    simple = welded_poly
+                                    piece_ring = _open_coords(simple)
+                                    if len(piece_ring) < 3:
+                                        continue
+                            except _GEOM_EXC:
+                                pass
                         keys = [_vertex_key(vx, vy)
                                 for vx, vy in piece_ring]
                         resampled = [resample_alt(vx, vy, kind)
@@ -1625,6 +1734,10 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
                         layout.shapes.append(shape)
                         emitted_shapes.append(shape)
                         emitted += 1
+                        # Register this band's final vertices + altitudes
+                        # so LATER bands weld their clip seams onto this
+                        # corner only where the values also agree.
+                        _register_emitted_vertices(piece_ring, alts)
                         try:
                             current_shape_union = (
                                 simple if current_shape_union is None
