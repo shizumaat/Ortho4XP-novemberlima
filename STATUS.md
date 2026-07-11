@@ -160,12 +160,27 @@
 #    all five one-solve terrain gates ON (O4_ONE_SOLVE_TERRAIN +
 #    RUNWAY_END_SKIRT + GAP_FILL_SPINE + GRADED_STRIP_CONSTRUCT +
 #    GRADED_STRIP) + O4_ADJACENT_GROUND_END_WRAP=1 (so the wrap can
-#    be judged) + O4_AUTO_PATCH_REBUILD=1.  THE LIST, in order:
+#    be judged) + O4_AUTO_PATCH_REBUILD=1.  ★ROUND-7 DEFAULTS ARE
+#    COMMITTED (fad621d): a plain build IS the full-on build now.
+#    ★★★ NOAH RULING 2026-07-11 (defect, fix IN FLIGHT — reaffirms
+#    part-34 ruling 3): NO big dip in ground ENCLOSED between
+#    pavements, EVER — zone-3 open-floor ("cliff lawful") applies
+#    ONLY at a TRUE outer edge; between pavements the ground blends
+#    smoothly for drainage; a bowl = ponding = drainage violation by
+#    definition.  The B2 encoding leaked zone-3 openness into
+#    enclosed gaps (both parents' floors None far from pavement) and
+#    the fairing CAP cannot forbid a smooth bowl (the analytic
+#    endpoint-pinned Laplacian WAS the blend law).  FIX ORDER
+#    dispatched: enclosed-gap drainage floor in grade_law (continued
+#    band down-slope, never None for gap faces) + blend objective
+#    restored in the solve + anti-ponding reporter + the -12 m band
+#    site audited for the same class.  HOLD THE IN-SIM BAKE until
+#    this lands — the big-gap sites currently show the known defect.
+#    THE LIST, in order:
 #    a. the three big-gap spine sites (60.7210897,-135.0776149
-#       first) — solved spines follow DEM where the floor is open
-#       (worst 23.5 m off the old analytic fill);
-#    b. the -12 m law-true dip at 60.71804,-135.07291 (analytic had
-#       flattened genuine terrain);
+#       first) — AFTER the fix: verify the blend reads correctly;
+#    b. the band dip at 60.71804,-135.07291 — verdict pending the
+#       same-class audit (enclosed vs true outer edge);
 #    c. the wrap question at 60.6972471,-135.0608669 (criterion 4);
 #    d. the ~1,231-vertex band solved-value class (spot-check
 #       terminal-area strips);
