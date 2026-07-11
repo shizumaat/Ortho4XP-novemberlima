@@ -1,0 +1,214 @@
+# Slice B — solver absorption: staged decomposition (Fable, 2026-07-10)
+
+Companion to `docs/chain_identity_one_solve_plan.md` §Slice B (the intent) and
+the STATUS.md part-35 handover (the acceptance criteria).  This document is the
+DESIGN PASS Noah's part-35 ruling ordered before orchestration: it decomposes
+the absorption into five stages, each independently gated, each small enough to
+be one work order with a fresh-trace mandate and numeric baselines.
+
+USER DOCTRINE (binding, from part 34): all rules and laws live in `grade_law`;
+the solver solves as many elevations as possible in ONE pass; post-solve
+geometry or elevation mutation is minimized or eliminated.  A shared vertex is
+ONE solver variable.  Pavement value always wins at pavement nodes — as an
+IDENTITY, not an arbitration.
+
+## Consolidated acceptance criteria (from the part-35 handover)
+
+1. Legacy-off gate table clears: `O4_LEGACY_SURFACE_CLEARANCE=0` with tears 0
+   (was 13), patch nodes BELOW 4,420 (legacy-off today INVERTS to 6,351),
+   coincident single digits (was 344, of which 341 band↔band clip-seam twins),
+   no new sub-100 millimetre T-vertex classes, no new near-parallel pairs.
+2. `O4_CLEARANCE_CHARTER` ON with ZERO new adjacent-ground tears (today it
+   trades blobs for tears, 0→10 at CYXY); taxiway_clearance area −60%.
+3. Hangar blob #210 and notch blob #236 heal.
+4. Taxiway-end wrap: adjacent-ground coverage runs the whole taxiway, wraps
+   the taxiway end maintaining clearance distance, joins the runway-end skirt
+   smoothly (Noah ruling 2, site 60.6972471,-135.0608669).
+5. `final_grade_projection` retires as an enforcement pass (it caused BOTH
+   round-6 solver-side defects; the pad-host relevel and spine-edge clamp
+   gates are patches over its damage and retire with it).
+6. Strips stand off tunnel ramps like buildings (the 2 ledgered SPJC tears).
+7. SPJC `no_self_overlap` and within-shape `pavement_grade` reds burn down.
+
+## Architecture facts the design builds on (verified 2026-07-10 in this tree)
+
+* `elevation_per_surface/route_profile/solve.py::solve_route_profile` is THE
+  only pass that sets pavement elevations.  Free nodes carry
+  `[floor, ceiling]` bands (`building_feasibility.reach_band_unified`) and
+  edge budgets (`cap · length`) enforced by a projected Gauss-Seidel sweep
+  (`one_solve.py`; a vectorised Jacobi variant exists behind
+  `O4_FP_VECTORIZE`).  Hard anchors: tile seams, runway profile nodes,
+  building seats, and — the precedent that matters — object-bridge plates.
+* THE ABSORPTION PRECEDENT: `ROLE_BRIDGE_TRENCH` / `ROLE_BRIDGE_CAUSEWAY` are
+  already first-class graph members (`solver_primitives.PAVEMENT_ROLES`):
+  ring vertices enter the canonical node registry and are HARD PINS at values
+  written at shape birth (`layout._object_bridge_pin_values`).  The solver
+  grades neighbouring pavement to meet them and never reshapes them.  Every
+  stage below reuses this admission pattern, varying only whether the new
+  nodes are pins (stage B1) or free variables with law bounds (B2, B3).
+* Vertex identity = `canonical_points.CanonicalPointRegistry` (0.5 metre
+  interning), seeded from apt.dat pavement vertices; `to_osm` re-interns and
+  runs the nid-level final weld (the slice-A keystone).
+* `grade_law.adjacent_ground_envelope(role, code_number, code_letter, d)`
+  returns `(floor_offset, ceiling_offset)` RELATIVE TO THE PAVEMENT-EDGE
+  ELEVATION at lateral distance `d`.  The edge elevation is itself a solver
+  variable — so the envelope is NOT a static per-node band; it is a COUPLED
+  constraint between a terrain node and its host pavement edge station.
+* The post-solve march in `pipeline.py` (approximate anchors in today's
+  tree): legacy clearance cuts ~5520 → conformance ~5619/5735 →
+  `final_grade_projection` ~5862 → `emit_runway_end_skirts` ~5950 →
+  `emit_gap_fill_spines` ~6010 → `emit_adjacent_ground_bands` ~6040 → final
+  conformance + emit consensus ~6096 → `to_osm`.  Each emitter VALUES its
+  nodes analytically (`_edge_interp_alt`, `_nearest_pav_alt`, envelope
+  reads), then the weld/adoption/consensus apparatus reconstructs agreement
+  that construction threw away.  That apparatus is what absorption deletes.
+
+## The one new solver primitive: interval edges
+
+Today's edge constraint is a symmetric slab `|z_i − z_j| ≤ budget`.  The
+envelope law needs a SIGNED interval: `lo ≤ z_i − z_j ≤ hi` with `lo`/`hi`
+independently optional (a `None` ceiling permits any rise, a `None` floor any
+drop — the law's own semantics).  Projection onto a signed slab is the same
+O(1) operation the Gauss-Seidel sweep already does (project the difference
+into `[lo, hi]`, split the correction by the endpoint hardness weights); slabs
+are convex, so POCS convergence is unaffected.  The symmetric case is
+`lo = −budget, hi = +budget` — the existing form embeds exactly, so the
+extension can be landed with a byte-identity guarantee for existing inputs.
+
+This primitive also expresses:
+* skirt/floor profiles: `z_node ≥ profile_value` = interval edge to a
+  constant (or a one-sided per-node bound where the value is birth-computable);
+* the lift-only DEM clamp as SEED semantics (seed at DEM, floor at DEM,
+  ceiling open) — per the plan;
+* transverse/longitudinal band caps as ordinary symmetric edges.
+
+## The stages
+
+Ordering is forced by parent relationships: bands clip against skirts, and
+gap faces take building pads AND runway-end skirts as gap parents — so skirt
+footprints must exist pre-solve before gaps construct pre-solve, and both
+before the band march is replaced.  Skirt values derive from the runway
+profile, which is solved BEFORE `solve_route_profile` (runways are hard
+anchors) — so skirt construction can move pre-solve without a value cycle.
+
+### Stage B0 — solver primitive + admission scaffolding
+* Interval-edge form in `shape_constraints` + both projection paths (scalar
+  Gauss-Seidel and the vectorised Jacobi variant), symmetric-embed
+  byte-identical (existing edges produce bit-identical solves; A/B gate).
+* Role-admission scaffolding: a declared set of TERRAIN GRAPH ROLES admitted
+  to the canonical registry and node list, per-role sub-gates under one
+  master gate `O4_ONE_SOLVE_TERRAIN` (default OFF until B4).
+* Synthetic unit tests: interval projection, one-sided bounds, hard-endpoint
+  weights, convergence on a mixed symmetric/interval graph.
+* Gate: full suite green-modulo-known-14; chain_divergence_audit A/B
+  byte-identical patch (gates off = inert).
+
+### Stage B1 — runway-end skirts absorbed (the pin pattern, smallest risk)
+* `emit_runway_end_skirts` construction (footprint + ring geometry) moves
+  pre-solve; rings immutable after construction; ring vertices join the
+  registry (shared boundary vertices with pavement now ARE pavement
+  variables — identity, not weld).
+* Skirt values are birth-computable from the already-solved runway profile
+  (inverse-RESA law): reuse the bridge-plate HARD PIN path verbatim.
+* The skirt-vs-band clip arbitration and skirt conformance welds die for
+  this role; gap parents read the same pre-solve shapes.
+* Numeric gate at CYXY: check_grade tears/cross-shape/vertex-to-edge/mid-edge
+  all 0 (unchanged) · skirt edge-grade counters ≤ part-36 item-4 outcome ·
+  audit zero new near-parallel/T-vertices · patch nodes ≤ 4,420 reference ·
+  forced re-bake (O4_AUTO_PATCH_REBUILD=1) airport triangles ≈ 15,037
+  reference, hotspot cells only the 3 known legacy sites.
+
+### Stage B2 — gap-fill spines absorbed (first FREE terrain variables)
+* Gap face construction moves pre-solve (pavement-union interior rings +
+  B1 skirt parents + pad parents; boundary verbatim as today).
+* Spine nodes become free solver variables: envelope INTERVAL edges to their
+  bounding pavement chain stations (per bounding parent, per the module's
+  existing per-parent envelope reads), longitudinal smoothness edges along
+  the spine (`TAXIWAY_MAX_GRADE_CHANGE_PER_M`-family caps), DEM seed.
+* The sanctioned spine-endpoint T-vertex insertion is replaced by registry
+  membership (endpoints intern onto the ring chain).
+* Deletes: gap analytic valuation; the gap share of the final weld.
+* Gate: B1 gate plus gap faces 17 reference (census unchanged), residual
+  divergence report has no gap_fill entries, and the round-4/round-6 gap
+  sites verified in the bake.
+
+### Stage B3 — adjacent-ground bands absorbed (the big one)
+* Band FOOTPRINTS construct pre-solve from the DEM-seeded estimate with a
+  conservative reach margin (the plan's directive); rings immutable; inner
+  row = the pavement chain subsequence (slice-A law) — now shared VARIABLES.
+* Zone rows become free variables: envelope interval edges to their host
+  pavement edge stations, transverse caps as cross edges, longitudinal caps
+  along rows, daylight benching (`adjacent_ground_supported_depths`)
+  expressed at construction (station depths), seam-taper pin becomes
+  structural (partition-seam stations share variables with both runs —
+  nothing to pin).
+* Taxiway-end WRAP (acceptance 4): the band corridor continues around the
+  taxiway end at clearance distance and lands on skirt ring vertices —
+  construction geometry in this stage, values free variables like any band.
+* Tunnel-ramp standoff (acceptance 6): band construction excludes a 1 metre
+  standoff around bridge/tunnel ramp shapes, the building-standoff pattern.
+* Deletes for graded_strip: analytic valuation, value adoption gate, emit
+  consensus arbitration, conformance T-vertex insertion, the band↔band
+  clip-seam classes (the 341-twin class becomes unrepresentable: one
+  variable cannot disagree with itself).
+* Expected solver growth: nodes roughly ×2, edges much less (band chains are
+  2–3-neighbour sparse); apply the performance levers if needed (zone-row
+  station step 5→10 metres has its own gate; convergence tolerance 0.05 m).
+* Gate: full legacy-ON regression first (bands absorbed, legacy still
+  present): audit floor unchanged, bake ≈ reference, check_grade zero-family
+  unchanged.  THEN the legacy-off gate table measured (expect most of
+  acceptance 1 to clear here).
+
+### Stage B4 — charter ON + legacy clearance deletion
+* Flip `O4_CLEARANCE_CHARTER` (wingtip clearance along taxiways/runways
+  only); the absorbed bands now hold the steep terminal terrain the charter
+  removes from clearance (the part-35 blocker in miniature — this is the
+  test that absorption actually grades what clearance was holding).
+* Retire the legacy `surface_clearance` chain for everything the charter
+  excludes (the old slice-5 deletion, the largest node diet), then
+  `O4_LEGACY_SURFACE_CLEARANCE=0` as default.
+* Gate: the FULL acceptance list — gate table (tears 0, nodes < 4,420,
+  coincident single digits), charter criteria (area −60%, zero new tears),
+  blobs #210/#236 healed in the bake, wrap form verified at the ruling-2
+  site, the 3 legacy near-parallel audit-floor sites GONE (they are legacy
+  classes), suite reds burn-down measured (acceptance 7).
+
+### Stage B5 — projection retirement + apparatus measurement
+* Measure `final_grade_projection` as a no-op on the absorbed tree (its
+  writes should be empty or sub-tolerance); retire it as an enforcement pass
+  (validators stay, pure reporters — the part-30 architecture ruling), and
+  retire `O4_PAD_HOST_PAVEMENT_LEVEL` / `O4_SVC_SPINE_EDGE_COUPLE` with it
+  (patches over its damage).
+* Inventory the now-dead weld/consensus/adoption/conformance code paths with
+  measured zero-hit counters across the test airports — the deletion itself
+  is SLICE C scope, but the evidence ships here.
+* Gate: byte-level A/B with projection off vs on (PYTHONHASHSEED pinned);
+  in-sim review round 7 (Noah) before any fixture recut (standing ruling).
+
+## Work-order boundaries
+
+B0 and B1 are each ONE work order (B0 solver-internal, B1 first consumer;
+B1 validates B0's design before anything larger builds on it).  B2 is one.
+B3 splits into three: construction move (footprints pre-solve, values still
+analytic — byte-comparable), variable admission (values from the solve), and
+wrap+standoff geometry.  B4 splits into charter flip and legacy deletion.
+Every order carries: fresh-trace mandate, the stage gate's numeric baselines,
+foreground-only, worktree HEAD verification, no commits (serial integration
+in the main checkout with audit A/B per landing — the part-35 protocol).
+
+## Open questions (resolve during B0/B1, none block starting)
+
+1. Envelope host-station mapping: a band node at distance `d` couples to
+   WHICH pavement edge station once stations are variables — nearest station
+   at construction time (frozen mapping, simplest, matches today's marcher)
+   versus the two bracketing stations with interpolation weights.  Start
+   frozen-nearest; revisit if benching artifacts appear.
+2. Registry tolerance (0.5 m) versus band station spacing (5 m, possibly
+   10 m): fine as-is, but B3 must assert no unintended cross-row interning.
+3. Whether skirt pins should be true hard pins (B1 proposal) or floor-only
+   bounds letting the solver lift skirts to meet pavement — STATUS records
+   skirts as NON-FLAT profile AUTHORITIES, so pins; revisit only if B1's
+   gate shows skirt-adjacent tears.
+4. KDFW/HECA scale check timing: CYXY is the gate airport throughout; run
+   the big-airport solver-performance check once at B3 (the node-growth
+   stage), not per-stage.
