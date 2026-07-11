@@ -202,6 +202,17 @@
 #    CUT-ONLY — no floor, emitted nothing in dipping gaps — the
 #    ring is orthogonal to B4; B4 unblocked from the ring (held
 #    only on the KBNA perf fix as flip hygiene).
+#    ★ROUND-8 FINDING (Noah in-sim, 2026-07-11): the violation-gated
+#    ARCS create sharp cliffs at every arc end (66 fragmented
+#    chains).  REVISION DISPATCHED per Noah's model: rings = ALWAYS
+#    complete unbroken closed loops; the gating moves into the
+#    VALUES (station value = clamp(terrain, floor, ceiling) — the
+#    exterior per-vertex law verbatim; lawful terrain = value no-op,
+#    ring invisible); per-GAP all-or-nothing economy skip; collapse
+#    ladder + hole-in-middle + central-spine rungs stay; the radial
+#    ring-2 edge into the open core stays (one clean continuous
+#    edge).  Deletes the trigger/taper/per-arc machinery — a net
+#    simplification.
 #    ★★★ RINGS LANDED b3cd998 + round-8 default flip 53da9c2:
 #    evidence site 74%→4.0% (ring 2 rides the exact 5% band max) ·
 #    gap #3 185%→~1.5-5% · 66 chains / 709 nodes fleet-wide
