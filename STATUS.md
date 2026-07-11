@@ -136,11 +136,24 @@
 #    build (DEM-seeded march sees no violation at the taxiway end;
 #    fires correctly in the legacy path) — acceptance criterion 4
 #    cannot be demonstrated until the pre-solve march covers
-#    solved-value violations.  Coverage order dispatched (principled
-#    margin candidate: march on the reach-band worst-case edge value
-#    instead of the seed — superset by construction, no magic
-#    number).  Round-7 in-sim additions: the -12 m law-true dip at
-#    60.71804,-135.07291 + the three big-gap spine sites.
+#    solved-value violations.  COVERAGE CLOSURE LANDED e1ff071
+#    (direction INVERTED by the scout — 17th: CUT tests the band
+#    FLOOR, FILL the CEILING; superset proven): fallback 1,289→58 ·
+#    store-missing 25→3 · zero new tears · WITHIN 1108→1103 · the
+#    LAST post-weld crossing RESOLVED (0T+0X full-ON) · census 69
+#    unchanged · cost solve 51→95 s gate-ON (10 m step lever
+#    untouched).  ~1,231 vertices move analytic→solved = the
+#    round-7 quality class.  ★WRAP REFUTED AT THE RULING SITE
+#    (18th) — NOAH RULING NEEDED: the wrap fires 0 bands at
+#    60.6972471,-135.0608669 in EVERY path incl. legacy — (a) bands
+#    are VIOLATION-driven and the solved taxiway end sits
+#    in-corridor (nothing to wrap); (b) nearest skirt = 90.7 m,
+#    outside probe range — no taxiway-end-onto-skirt subject at the
+#    site geometry.  Criterion 4 needs either an UNCONDITIONAL-
+#    coverage wrap form (coverage runs the whole taxiway regardless
+#    of violation) or a site re-examination in-sim.  Round-7 list:
+#    this + the -12 m law-true dip at 60.71804,-135.07291 + the
+#    three big-gap spine sites + the solved-value class.
 # 3. NOAH IN-SIM ROUND 7 before any default flips: the 3 big-gap
 #    spine sites (60.7210897,-135.0776149 first) + the B1/B2 gate-ON
 #    tile · then B4 charter + legacy deletion · B5 projection
