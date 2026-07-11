@@ -1421,7 +1421,6 @@ def emit_adjacent_ground_bands(layout: PavementLayout, dem,
     # code-number keying and END-edge skipping — as the ring-edge sweep.
     rw_axes: list[tuple] = []
     if source_runways:
-        from shapely.geometry import LineString
         for r in source_runways:
             try:
                 rax, ray = _ll_to_m(r.lat_a, r.lon_a)
