@@ -140,6 +140,7 @@ __all__ = [
     "GAP_FILL_SPINE_STEP_M",
     "GAP_FILL_MAX_WIDTH_M",
     "GAP_FILL_MIN_AREA_M2",
+    "GAP_FILL_INTERIOR_RINGS_ENABLED",
     "OPEN_FRONTAGE_SPINE_ENABLED",
     "OPEN_FRONTAGE_CLOSE_M",
     "ONE_SOLVE_TERRAIN",
@@ -1901,29 +1902,11 @@ RUNWAY_END_SKIRT_ENABLED = (
 ADJACENT_GROUND_LAW_ENABLED = (
     _os.environ.get("O4_ADJACENT_GROUND_LAW", "1") == "1")
 
-# Gap-fill + drainage spine (user design ruling 2026-07-09,
-# docs/chain_identity_one_solve_plan.md "GAP-FILL + DRAINAGE SPINE").
-# Ground ENCLOSED between pavements (an interior ring of the airside
-# pavement union — e.g. the hole bounded by a runway, a parallel taxiway
-# and two connector stubs) is graded as ONE unit: the boundary is the
-# pavement chains VERBATIM (zero new boundary geometry) and the interior
-# is a single drainage SPINE that splits the gap into two half-gap faces.
-# DEFAULT ON (env O4_GAP_FILL_SPINE); set 0 to leave enclosed gaps to the
-# corridor-band emitter.
-GAP_FILL_SPINE_ENABLED = (
-    _os.environ.get("O4_GAP_FILL_SPINE", "1") == "1")
-# Spine station step (m).  The spine is the ONLY new geometry the gap-fill
-# mints, so the step is deliberately coarse — node economy per the
-# 2026-07-09 performance ruling (one sub-µm near-parallel pair Ruppert-
-# explodes the tile, so every avoided node counts).
-GAP_FILL_SPINE_STEP_M = 15.0
-# Widest enclosed gap the drainage-spine emitter claims (m), measured as
-# the SHORT side of the gap's minimum rotated rectangle.  Wider gaps stay
-# with the corridor-band emitter (user design ruling 2026-07-09).
-GAP_FILL_MAX_WIDTH_M = 160.0
-# Smallest enclosed gap worth grading (m²); below this the ring is clip
-# residue, not a real hole (user design ruling 2026-07-09).
-GAP_FILL_MIN_AREA_M2 = 100.0
+# Gap-fill + drainage spine: the authoritative gate + constants live in
+# the "GAP-FILL + DRAINAGE SPINE" block further down (search
+# GAP_FILL_SPINE_ENABLED).  A duplicate definition block that lived here
+# (with a stale GAP_FILL_MAX_WIDTH_M = 160.0 the later block overrode at
+# 175.0) was removed 2026-07-11 — one definition only.
 
 # Object-derived BRIDGE terrain feature (feature B of
 # docs/object_terrain_features_spec.md).  DEFAULT OFF — the classifier
@@ -2190,6 +2173,31 @@ GAP_FILL_SPINE_STEP_M = 15.0
 # legitimately ungoverned terrain).
 GAP_FILL_MAX_WIDTH_M = 175.0
 GAP_FILL_MIN_AREA_M2 = 100.0
+
+# GAP INTERIOR RINGS (ratified design 2026-07-11, STATUS commit
+# dde6d3c): a single mid-gap drainage spine cannot enforce the lawful
+# graded-band profile off pavement when the enclosed interior genuinely
+# drops — the mesh spans pavement edge to spine in one leg, so a low
+# spine puts the whole drop AT the pavement edge (CYXY evidence node
+# 60.7210897,-135.0776149: 73 % at the edge where the band law allows
+# 5 %).  Large violating gaps therefore additionally emit interior
+# offset RINGS as constrained breaklines inside the (still verbatim)
+# gap face, mirroring the exterior adjacent-ground band cross-section
+# bent around the gap: ring 1 at the drainage-lip breakpoint
+# (ADJACENT_GROUND_LIP_WIDTH_M) and ring 2 at the parent's graded
+# band-edge breakpoint (runway strip half-width / taxiway OMGWS
+# half-width / apron shoulder), each node pinned AT the law floor
+# (exterior fill-band parity: fill exactly TO the floor).  Terrain
+# INSIDE ring 2 stays open-floor (large infields lawfully follow
+# terrain).  Violation-gated: rings emit only along boundary arcs
+# whose interior DEM at the band edge sits below the band floor.
+# DEFAULT OFF (env O4_GAP_FILL_INTERIOR_RINGS) — Noah reviews in-sim
+# before the default flips.  REQUIRES the gap-fill spine gate: rings
+# are constructed by the gap emitter, so enabling them with
+# O4_GAP_FILL_SPINE=0 is a configuration error (hard error in
+# gap_fill.emit_gap_fill_spines, the fail-loudly doctrine).
+GAP_FILL_INTERIOR_RINGS_ENABLED = (
+    _os.environ.get("O4_GAP_FILL_INTERIOR_RINGS", "0") == "1")
 
 # OPEN-FRONTAGE DRAINAGE SPINE (slice B pilot, user design ruling 3
 # 2026-07-09; docs/chain_identity_one_solve_plan.md §Slice B).  The

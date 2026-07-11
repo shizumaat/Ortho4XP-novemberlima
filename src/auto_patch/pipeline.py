@@ -6165,7 +6165,8 @@ def build_airport_pavement(icao: str, xplane_root: str,
             _progress.substep(0.94, "Emitting gap-fill drainage spines")
             n_gap = emit_gap_fill_spines(
                 layout, _projection_dem,
-                _projection_tile_lat, _projection_tile_lon)
+                _projection_tile_lat, _projection_tile_lon,
+                source_runways=apt.runways)
             if n_gap:
                 UI.vprint(1,
                     f"  [pav-builder] {icao}: emitted {n_gap} gap-fill "

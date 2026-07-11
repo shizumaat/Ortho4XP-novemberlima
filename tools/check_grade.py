@@ -148,8 +148,15 @@ def _parse_osm(path: Path) -> Tuple[Dict[str, Tuple[float, float]],
         # ways carrying the PRE-crown spine profile as per-node
         # ``alt_abs`` — mesh input only, not a pavement shape.  Grading
         # them as a '?'-role ring produced phantom 10 % pairs (the
-        # closing pseudo-edge spans the whole spine).
-        if tags.get("o4_feature") == "crown_spine":
+        # closing pseudo-edge spans the whole spine).  The gap-fill
+        # drainage spines (2026-07-09) and gap interior rings (ratified
+        # 2026-07-11) are the same class: open constrained breakline
+        # ways inside a gap face — their phantom closing pseudo-edge
+        # cuts across the gap and minted artifact vertex-to-edge steps
+        # against real interior nodes.
+        if tags.get("o4_feature") in ("crown_spine",
+                                      "gap_drainage_spine",
+                                      "gap_interior_ring"):
             continue
         elevs = _derive_per_vertex_elevations(nids, tags, node_alt)
         ways.append(Way(

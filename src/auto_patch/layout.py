@@ -1730,6 +1730,38 @@ class PavementLayout:
                          {"o4_feature": "gap_drainage_spine"}))
                     next_wid[0] -= 1
 
+        # Gap INTERIOR RING breaklines (ratified design 2026-07-11,
+        # gate O4_GAP_FILL_INTERIOR_RINGS — the list is absent/empty
+        # gate-OFF): band-breakpoint rings floating inside a gap face,
+        # same open-constrained-way mechanism as the spines above.  A
+        # chain whose first lat/lon repeats at the end is CLOSED: the
+        # repeat re-uses the FIRST node id (never a second coincident
+        # node — a zero-length constrained edge / coincident twin is
+        # exactly the Triangle4XP degenerate class).
+        _grings = getattr(self, "gap_interior_rings", None) or []
+        if _grings:
+            _next_gr_nid = (min(node_id_to_ll) - 1
+                            if node_id_to_ll else -1)
+            for _pts_ll, _alts in _grings:
+                _closed = (len(_pts_ll) >= 4
+                           and _pts_ll[0] == _pts_ll[-1])
+                _use_pts = _pts_ll[:-1] if _closed else _pts_ll
+                _use_alts = _alts[:-1] if _closed else _alts
+                _rnids: list[int] = []
+                for (_rla, _rlo), _ra in zip(_use_pts, _use_alts):
+                    node_id_to_ll[_next_gr_nid] = (_rla, _rlo)
+                    node_id_to_consensus[_next_gr_nid] = float(_ra)
+                    node_alt_abs_nids.add(_next_gr_nid)
+                    _rnids.append(_next_gr_nid)
+                    _next_gr_nid -= 1
+                if _closed and len(_rnids) >= 3:
+                    _rnids.append(_rnids[0])
+                if len(_rnids) >= 2:
+                    way_blocks.append(
+                        (next_wid[0], _rnids,
+                         {"o4_feature": "gap_interior_ring"}))
+                    next_wid[0] -= 1
+
         # Determine which interned nodes are actually referenced by
         # any emitted way (via ``way_blocks`` or ``rel_blocks``
         # member ways).  Per user 2026-04-29: discarded ring builds
