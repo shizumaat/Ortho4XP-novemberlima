@@ -264,6 +264,21 @@ def _classification_sidecar(dsf_path, pack_root, pavement_polygons,
       rings — contract selection depends on it);
     * :data:`_CLASSIFICATION_CACHE_VERSION`.
 
+    O3 verdict (spec section 7, verified 2026-07-11): the fingerprint
+    DELIBERATELY does NOT include the built mesh or the ``.alt`` elevation
+    raster, and that is CORRECT.  The classifier's output is a geometric
+    bridge/tunnel/draped classification (plus the DSF-fixture absolute deck
+    MSL) — it samples no terrain elevation (``object_terrain_features`` does
+    "no mesh sampling"), so a rebuilt mesh with unchanged pack files cannot
+    change the classification and reusing it is sound.  The elevation-
+    DEPENDENT artefact is the Phase 2 object y-bake, and that is recomputed
+    against the current mesh on EVERY mesh build (``post_mesh`` reruns
+    ``structure_deltas`` fresh and ``object_rebake.apply`` re-reads geometry
+    from the ``.anchor_bak`` backup; the reanchor provenance sidecar is a
+    diagnostic, not a rebuild-skip gate), so no stale delta is ever reused
+    across a mesh change — the ``O4_AUTO_PATCH_REBUILD=1`` gotcha class does
+    not apply here.
+
     Returns ``(None, None)`` when no pack root is known (nowhere to put
     a sidecar) or fingerprinting fails."""
     if not pack_root or not os.path.isdir(pack_root):

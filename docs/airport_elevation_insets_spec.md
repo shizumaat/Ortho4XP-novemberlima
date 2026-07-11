@@ -1,6 +1,6 @@
 # Airport elevation insets — specification
 
-Status: Phases A, A2, B implemented (2026-07-11); Phase C = future work.
+Status: APPROVED for implementation (2026-07-11).
 Branch: `feature/airport-elevation-insets` (from `dev`).
 Owner: auto_patch / core elevation.
 
@@ -306,11 +306,72 @@ install guidance (brew/apt system lib + `pip install gdal`), same change
 - **Phase B (this branch, agent 3):** automatic smoothing radius (§3.4),
   KBNA acceptance (§5) — now with NED1 as auto base — byte-identity
   guard runs, ONBOARDING/installer updates, docs.
-- **Phase C (future, out of scope):** national providers as new `.elv`
-  files + strategies (`wcs`, `stac`, `tile_rest` — UK/France/Netherlands/
-  Switzerland/Canada per research report), densified working grid over
-  inset airports (Triangle4XP refinement floor = one working pixel,
-  `Triangle4XP.c:7297`), vertical datum transforms.
+- **Phase C (approved 2026-07-11, same branch):**
+  - **C1 — densified working grid over inset tiles.** The Phase B
+    acceptance proved the last residual is the grid, not the bake: at the
+    KBNA SW-foot probe an IDEAL bake reads +1.62 m at 30.9 m posting
+    (25 m from a 10 m scarp); Triangle4XP cannot refine below one working
+    pixel (`Triangle4XP.c:7297`). Fix: when any airport inset is cached
+    for the tile, build the combined working raster (and `.alt`) on a
+    denser grid — base upsampled bilinearly, insets baked at the denser
+    posting. New config `working_grid_arc_seconds` default `"auto"`:
+    1″ when no insets (byte-path identical to today); otherwise the
+    COARSEST of {1/2″, 1/3″} whose IDEAL-bake error at the stored
+    acceptance probes passes ±1.0 m — measured empirically from the
+    cached inset BEFORE building (cheap numpy check), so we never pay
+    for more grid than the data needs. Guardrails: report `.alt` size,
+    Triangle4XP peak memory, triangle count, and step-2 wall time at
+    KBNA vs the 1″ baseline; step-2 time must stay under 3× baseline.
+    The `upsample()` 1201→3601 special case is superseded by a general
+    grid-target resample for this path only.
+  - **C2 — second provider family to prove extensibility.** One new
+    strategy + definition, chosen for test-airport relevance: `stac` +
+    `HRDEM.elv` (Canada NRCan HRDEM lidar, Open Government Licence,
+    STAC API `https://datacube.services.geo.ca/stac/api/search?collections=hrdem-lidar`,
+    Cloud-Optimized GeoTIFF assets). CYXY (Whitehorse) is the fork's
+    primary test airport — if HRDEM covers it, this directly attacks the
+    CYXY invalid-DEM dip; if not, demonstrate with a covered Canadian
+    airport and record the coverage result. Vertical datum CGVD2013:
+    keep the warn-don't-shift policy, log the feather-ring offset.
+  - **C3 (still future):** `wcs`/`tile_rest` strategies (UK/France/
+    Netherlands/Switzerland), vertical datum transforms via PROJ.
+
+## 7. Object placement ordering (approved 2026-07-11, companion stream)
+
+Objects are MOVED (Phase 2 y-bake: `object_anchor.structure_deltas` →
+`object_rebake.apply`) and terrain is SHAPED under them (Phase 1 pads,
+object terrain features) using sampled ground elevations. With insets
+landing in the `.alt`/mesh, every one of those samples must read the
+inset-corrected surface, and the pipeline order must guarantee the
+high-resolution elevations are set BEFORE any object delta is computed.
+Branch `feature/object-elevation-ordering` (from `bccf026`), merged into
+the feature branch when green.
+
+Audit + enforce (each with a file:line finding, a fix if wrong, and a
+regression test or assertion):
+- O1: step-1 order must be smooth THEN bake — the inset bake must not be
+  blurred by the airport smoother, and the smoother's auto radius must
+  not be computed from pre-bake data. Document the verified order in
+  `smooth_raster_over_airports`.
+- O2: auto_patch grading seeds and Phase 1 object pads
+  (`object_footprints` → layout) sample `override_dem = tile.dem` —
+  verify that DEM object carries the baked composite at sampling time
+  (not a pre-bake copy), at both entry points (production `override_dem`
+  and the standalone `_load_airport_dem` path).
+- O3: Phase 2 y-bake and the object-terrain-features classifier must
+  sample the FINAL built mesh / final `.alt`, and must run strictly
+  after the mesh carries the insets. Add an explicit ordering assertion
+  (fail loud, not silent stale sampling). Check the pack-sidecar
+  classification cache fingerprint (DSF+apt.dat+obj mtimes) does NOT
+  need to also key on the elevation state — if object deltas depend on
+  mesh elevations, a rebuilt mesh with unchanged pack files must NOT
+  reuse stale deltas (the `O4_AUTO_PATCH_REBUILD=1` gotcha class).
+- O4: `tools/object_seating_report.py` and `tools/reanchor_dsf_objects.py`
+  ground-truth paths — same audit, so the report tools measure the same
+  surface the pipeline moves objects against.
+- Acceptance: rerun the seating audit at KBNA against the inset mesh from
+  the feature branch and report the float distribution shift for the
+  water-treatment pool (pre: stairs invisible/floating 3.2–11.5 m).
 
 ## 5. Acceptance (Phase B, KBNA tile +36-087)
 

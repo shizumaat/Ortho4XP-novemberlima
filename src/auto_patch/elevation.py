@@ -299,6 +299,22 @@ def _load_airport_dem(lat0: float, lon0: float, override_dem=None):
     # that the production smoothed surface doesn't have.  ``override_dem``
     # (production) returns above and never reaches here, so there's no
     # double-smoothing.
+    #
+    # O2 (spec section 7): this standalone branch re-loads and re-smooths the
+    # RAW .hgt base tile.  It does NOT bake the airport elevation insets that
+    # ``O4_Airport_Utils.smooth_raster_over_airports`` stamps into the
+    # production ``tile.dem`` -- inset baking lives in the tile pipeline, not
+    # here.  A probe/tool that reaches this path therefore samples the coarse
+    # base surface, NOT the inset-corrected surface production grades against.
+    # Warn loudly so probe tools do not silently diverge from production.
+    UI.vprint(
+        1,
+        f"  [pav-builder] WARN: standalone DEM load for {fname} sees the RAW "
+        "base tile only -- airport elevation insets are baked in the tile "
+        "pipeline (override_dem path), so this surface may differ from "
+        "production near airports.  Pass the production tile.dem via "
+        "override_dem (or sample the built mesh) to match.",
+    )
     try:
         import numpy as _np  # noqa: F401
         from PIL import Image as _Image
