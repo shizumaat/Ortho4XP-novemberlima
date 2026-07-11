@@ -225,6 +225,25 @@
 #    cProfile, not 20-min build loops).  INTERIM for any big-airport
 #    session: O4_ONE_SOLVE_TERRAIN=0 (whole bundle off, proven
 #    byte-identical) until the fix lands.
+#    ★DIAGNOSIS ROUND 1 LANDED 6d8ca60 (byte-identical): hot site =
+#    _nearest_visible_centerline/_paved_frac (the reach-band
+#    serving-centerline scan) — 77% of the CYXY replay, feeding BOTH
+#    the e1ff071 construct march AND the PRE-EXISTING solve
+#    node_bands (82% of the solve; the QP was 19.6 s).  Vectorized
+#    chunked scan + batched paved-frac + cached visibility:
+#    contains_xy 2.19 M→104 k · CYXY build 221→192 s · KBNA
+#    construct 79→41 s · KBNA gates-off completes 444.9 s.  ★KBNA
+#    GATE-ON STILL INCOMPLETE — residual = the solve over KBNA's
+#    45,824 zone nodes (7× CYXY) + post-emit clearance/decimation
+#    on the inflated shape set; RESIDUAL ORDER dispatched (solve
+#    profile split · zone-node diet: spurious-admission diagnosis,
+#    gated 10 m station step, output-neutral prefilters).  INTERIM
+#    STANDS for big airports.  ★CLEANUP NOTED: 7 admission-suite
+#    tests assert gate-off DEFAULTS and broke at the fad621d flip —
+#    need explicit env pinning.  ★PARALLEL-SESSION EDIT in main
+#    checkout: uncommitted config.py GAP_FILL duplicate cleanup
+#    (behavior-identical) — left unstaged for its author per the
+#    serialize-emission-edits rule.
 #
 # ★ TRUE CURRENT BASELINES (CYXY, this tree — the part-35 numbers
 # below predate the O4_OBJECT_BRIDGE_TERRAIN landing and are STALE):
