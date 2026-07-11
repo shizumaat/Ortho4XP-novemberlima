@@ -280,9 +280,29 @@
 #    Remaining KBNA split (+50% vs gates-off): node_bands 236 s
 #    (inherent) · emit +141 s (clearance/decimation inflation = B4
 #    target) · zone diet (10 m step) + spurious-admission census
-#    (45,824, 7× CYXY) ride with B4.  ★B4 DISPATCHED (charter +
-#    legacy retirement + the legacy-off gate table + the ~87 s
-#    Emitting prize; behind gates, round 9 judges).  ★FLIP-BROKEN
+#    (45,824, 7× CYXY) ride with B4.
+#    ★★★ B4 SCOUT VERDICT (2026-07-11): BLOCKED — DO NOT FLIP (no
+#    code changed; 20th corrected premise).  MEASURED: the
+#    legacy-off gate table is ESSENTIALLY UNCHANGED from part-35
+#    (tears 14 / nodes +2,000 inverted / coincident 359 — the
+#    341-twin class is GEOMETRIC, minted by the emit march's
+#    band-vs-band clipping; the B3 "unrepresentable" claim held for
+#    VALUES only).  Tears = the same coverage gap: e1ff071's margin
+#    was calibrated to the clearance-CLIPPED extent; legacy-off
+#    expands bands 69→485 with 2,417 analytic fallbacks (KBNA +11
+#    tears, same signature).  Charter lever is PARTIAL (keeps
+#    junction/RESA): −38% area not −60%; blobs #209/#210/#236 do
+#    NOT heal under it.  ★THE PERF PRIZE IS CONFIRMED AND HUGE:
+#    legacy-off CYXY = 36.4 s TOTAL (emit 95.9→6.5 s) — crushes the
+#    120 s target; the prize and the regression are the same lever.
+#    ★PREREQ ORDER DISPATCHED: extend construct coverage to the
+#    clearance-free extent (own gate, default OFF; fallback→~0 =
+#    the retirement rows' precondition) + MEASURE the structural
+#    question — can pure-clamp bands hold terrain the clearance was
+#    CUTTING, or does the terminal frontage need the b3cd998
+#    two-ring grade-capped structure generalized (STOP for Noah if
+#    confirmed).  Charter extension to junction/RESA + retirement
+#    wiring = the order after.  ★FLIP-BROKEN
 #    default-assertion tests (8-12): cleanup order dispatched
 #    (env-pin, intent preserved).  ★PARALLEL-SESSION artifacts in
 #    main checkout: config.py GAP_FILL cleanup superseded by
