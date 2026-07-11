@@ -415,23 +415,26 @@ class TestObjectSourcedCorridors:
 # ---------------------------------------------------------------------------
 
 class TestGateOff:
-    def test_attach_is_noop_with_gate_off(self):
+    def test_attach_is_noop_with_gate_off(self, monkeypatch):
         # Default config gate is off; the assembler attaches nothing.
-        assert config.OBJECT_BRIDGE_TERRAIN is False
+        monkeypatch.setattr(config, "OBJECT_BRIDGE_TERRAIN", False)
         layout = _FakeLayout()
         layout.apt_dat_path = "/nonexistent/Earth nav data/apt.dat"
         result = assembly.attach_bridge_classification(layout, "/nonexistent")
         assert result is None
         assert not hasattr(layout, assembly.CLASSIFICATION_ATTRIBUTE)
 
-    def test_classification_reader_ignores_attribute_when_gate_off(self):
+    def test_classification_reader_ignores_attribute_when_gate_off(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(config, "OBJECT_BRIDGE_TERRAIN", False)
         layout = _FakeLayout()
         setattr(
             layout, bridges._OBJECT_BRIDGE_CLASSIFICATION_ATTRIBUTE,
             _Classification([_bridge()]),
         )
-        # Gate off (default): the reader returns None even though the
-        # attribute is present, so the emitters take the legacy path.
+        # Gate off: the reader returns None even though the attribute is
+        # present, so the emitters take the legacy path.
         assert bridges._object_bridge_classification(layout) is None
 
     def test_classification_reader_honours_attribute_when_gate_on(
@@ -586,7 +589,7 @@ class TestExclusionWiringR4:
     def test_exclusion_set_gate_off_reads_nothing(self, monkeypatch):
         from auto_patch import dsf_reader
 
-        assert config.OBJECT_BRIDGE_TERRAIN is False  # default gate
+        monkeypatch.setattr(config, "OBJECT_BRIDGE_TERRAIN", False)
 
         def _explode(_path):
             raise AssertionError("gate off must not read the DSF")
@@ -754,8 +757,8 @@ class TestDeckEndPins:
             a == pytest.approx(167.0, abs=0.01) for a in pinned_alts
         )
 
-    def test_gate_off_inserts_nothing(self):
-        assert config.OBJECT_BRIDGE_TERRAIN is False
+    def test_gate_off_inserts_nothing(self, monkeypatch):
+        monkeypatch.setattr(config, "OBJECT_BRIDGE_TERRAIN", False)
         layout = _FakeLayout()
         setattr(
             layout, bridges._OBJECT_BRIDGE_CLASSIFICATION_ATTRIBUTE,
@@ -937,9 +940,9 @@ class TestCrossingFloor:
             layout, _FakeDem(100.0), 36, -87
         ) == []
 
-    def test_validators_gate_off_return_empty(self):
+    def test_validators_gate_off_return_empty(self, monkeypatch):
         from auto_patch import verification
-        assert config.OBJECT_BRIDGE_TERRAIN is False
+        monkeypatch.setattr(config, "OBJECT_BRIDGE_TERRAIN", False)
         layout = _FakeLayout()
         assert verification.check_bridge_crossing_floor(
             layout, None, 36, -87
@@ -1083,8 +1086,8 @@ class TestCausewayPlates:
         assert minimum_x == pytest.approx(
             -config.BRIDGE_CAUSEWAY_MAX_LENGTH_M, abs=1.0)
 
-    def test_gate_off_emits_nothing(self):
-        assert config.OBJECT_BRIDGE_TERRAIN is False
+    def test_gate_off_emits_nothing(self, monkeypatch):
+        monkeypatch.setattr(config, "OBJECT_BRIDGE_TERRAIN", False)
         layout = _FakeLayout()
         setattr(layout, bridges._OBJECT_BRIDGE_CLASSIFICATION_ATTRIBUTE,
                 _Classification([_bridge()]))

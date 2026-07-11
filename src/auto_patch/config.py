@@ -1925,7 +1925,7 @@ GAP_FILL_MIN_AREA_M2 = 100.0
 # no classifier runs and every legacy bridge/underpass path is
 # byte-identical to today.
 OBJECT_BRIDGE_TERRAIN = (
-    _os.environ.get("O4_OBJECT_BRIDGE_TERRAIN", "0") == "1")
+    _os.environ.get("O4_OBJECT_BRIDGE_TERRAIN", "1") == "1")
 
 # Vertical clearance (m) the ``grade_law.bridge_crossing_floor`` law adds
 # above a road surface for a TERRAIN/PROFILE_CARRIED span that must RISE
