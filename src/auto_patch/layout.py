@@ -554,6 +554,26 @@ class PavementLayout:
         # (post-merge audit delta: lip nodes averaged to 166.66-166.93
         # against the 167.00 law).
         node_id_to_law_alts: dict[int, list[float]] = {}
+        # SKIRT-VALUE claims (runway-end skirt, 2026-07-10): the
+        # runway-end skirt carries its OWN edge law (grade_law
+        # .RUNWAY_END_SKIRT_MAX_DOWN_GRADE — the fill-only bounded
+        # down-grade off a runway end).  It is a soft receiver against
+        # pavement / solver AUTHORITIES (it adopts the pavement corner),
+        # but among purely-soft claims it must WIN: where a runway-end
+        # skirt shares a node with an adjacent-ground graded strip (both
+        # SOFT), the plain all-soft mean pulls the skirt's level band row
+        # off its floor toward the strip's lower terrain-follow value,
+        # minting a mid-row valley that violates the skirt edge law
+        # (CYXY skirt #271: skirt 693.1 + strip 692.3 averaged to 692.7,
+        # a 0.4 m drop over a 2 m edge = 20 %).  The documented ruling is
+        # that runway ENDS are out of scope for adjacent-ground — the
+        # skirt law owns them (adjacent_ground.py) — so the strip yields
+        # to the skirt at a shared node, exactly as soft claims yield to
+        # authorities and authorities yield to law claims.  The strip
+        # still welds (it references the same node, so it adopts the
+        # skirt value): no cross-shape tear, and the strip carries no
+        # edge law of its own to violate.
+        node_id_to_skirt_alts: dict[int, list[float]] = {}
         _LAW_VALUE_ROLES = frozenset({
             ROLE_BRIDGE_TRENCH, ROLE_BRIDGE_CAUSEWAY,
         })
@@ -561,6 +581,7 @@ class PavementLayout:
         current_shape_is_soft = [False]
         current_shape_is_strip = [False]
         current_shape_is_law = [False]
+        current_shape_is_skirt = [False]
         next_nid = [-1]
 
         def _record_claim(nid: int, alt: float) -> None:
@@ -570,6 +591,8 @@ class PavementLayout:
                     nid, []).append(alt)
             if current_shape_is_law[0]:
                 node_id_to_law_alts.setdefault(nid, []).append(alt)
+            if current_shape_is_skirt[0]:
+                node_id_to_skirt_alts.setdefault(nid, []).append(alt)
 
         def _intern(x: float, y: float,
                     alt: float | None = None) -> int:
@@ -621,6 +644,8 @@ class PavementLayout:
                     node_id_to_authority_alts[nid] = [alt]
                 if current_shape_is_law[0]:
                     node_id_to_law_alts[nid] = [alt]
+                if current_shape_is_skirt[0]:
+                    node_id_to_skirt_alts[nid] = [alt]
             return nid
 
         def _ring_to_nids(ring_coords, ring_elevs=None):
@@ -746,6 +771,12 @@ class PavementLayout:
                     and s.role in (ROLE_TAXIWAY_CLEARANCE,
                                    ROLE_RUNWAY_CLEARANCE)))
             current_shape_is_law[0] = s.role in _LAW_VALUE_ROLES
+            # A runway-end skirt owns its edge law; among purely-soft
+            # claims it wins over adjacent-ground strips (see
+            # node_id_to_skirt_alts above).
+            current_shape_is_skirt[0] = (
+                s.role == ROLE_RUNWAY_CLEARANCE
+                and s.ref == "runway_end_skirt")
             # Validate the polygon's geometry before emission.
             # Upstream pipeline stages (decomposition, seam-point
             # injection, shared-vertex enforcement) can occasionally
@@ -1154,6 +1185,9 @@ class PavementLayout:
                         if nid in node_id_to_authority_alts:
                             node_id_to_authority_alts[twin] = list(
                                 node_id_to_authority_alts[nid])
+                        if nid in node_id_to_skirt_alts:
+                            node_id_to_skirt_alts[twin] = list(
+                                node_id_to_skirt_alts[nid])
                         _nid_xy[twin] = _nid_xy[nid]
                         out.append(twin)
                         member.add(twin)
@@ -1183,7 +1217,16 @@ class PavementLayout:
         for nid, alts in node_id_to_alts.items():
             law = node_id_to_law_alts.get(nid)
             authority = node_id_to_authority_alts.get(nid)
-            chosen = law if law else (authority if authority else alts)
+            skirt = node_id_to_skirt_alts.get(nid)
+            # Priority: law > authority > runway-end skirt > all-soft
+            # mean.  The skirt tier only bites when NO authority claimed
+            # the node (a skirt-vs-strip weld among pure soft claims);
+            # where pavement/solver claimed it, the skirt still adopts
+            # the authority value as before.
+            chosen = (law if law
+                      else authority if authority
+                      else skirt if skirt
+                      else alts)
             if chosen:
                 node_id_to_consensus[nid] = (
                     sum(chosen) / float(len(chosen)))
