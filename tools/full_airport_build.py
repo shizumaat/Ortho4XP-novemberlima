@@ -48,7 +48,7 @@ print(f"BUILD {icao} {t1 - t0:.1f}s -> {out}{source_note}")
 
 import subprocess                                          # noqa: E402
 result = subprocess.run(
-    [os.path.join(ROOT, "venv/bin/python"),
+    [sys.executable,
      os.path.join(ROOT, "tools/check_grade.py"), out],
     capture_output=True, text=True)
 print(result.stdout)
