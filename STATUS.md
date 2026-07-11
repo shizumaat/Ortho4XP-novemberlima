@@ -1,4 +1,15 @@
 # ══════════════════════════════════════════════════════════════════
+# 20260711 MERGED TO DEV (59ddde4, ON BY DEFAULT): airport elevation
+# insets — declarative Providers/Elevation/*.elv registry (USGS3DEP +
+# HRDEM lidar insets, legacy base sources refactored, base auto=NED1
+# for US tiles), auto per-airport smoothing radius, densified working
+# grid (auto 1/2" when insets cached). BUILD IMPACT: US/Canada tiles
+# now fetch lidar around airports and may densify the .alt; gates:
+# airport_elevation_insets / base_elevation_source / apt_smoothing_auto
+# / working_grid_arc_seconds. Byte-identical with gates off (proven
+# +36-087). Spec: docs/airport_elevation_insets_spec.md. Session
+# 20260711-01; multi-foot object seating spun off separately.
+# ══════════════════════════════════════════════════════════════════
 # PART 36 IN PROGRESS (20260710 PM session) — READ THIS FIRST
 # ══════════════════════════════════════════════════════════════════
 # SLICE B IS UNDERWAY.  Design doc (Noah-approved, criterion list
