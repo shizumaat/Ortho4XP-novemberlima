@@ -87,6 +87,7 @@ from .config import (
 # ``_CFG.BRIDGE_ROAD_CLEARANCE_M`` (never a bound copy) so the gate and
 # the clearance constant honour env + monkeypatch at call time.
 _OBJECT_BRIDGE_CLASSIFICATION_ATTRIBUTE = "_object_bridge_classification"
+_TUNNEL_PORTAL_PAIRS_ATTRIBUTE = "_object_tunnel_portal_pairs"
 _OBJECT_BRIDGE_ROAD_NETWORKS_ATTRIBUTE = "_object_bridge_road_networks"
 _OBJECT_BRIDGE_ROUTE_LINES_ATTRIBUTE = "_object_bridge_route_lines"
 
@@ -2982,6 +2983,57 @@ def _emit_tunnel_portals(
         max_boundary_dist_m, arm_walk_max_m, carriageway_width_m,
         _airport_elevation_at, _m_to_ll, dem, tile_lat, tile_lon,
         tunnel_depth_m, plan_grade, ramp_min_length_m)
+    # Crossing OWNERSHIP (user 2026-07-10): where Feature B claims a
+    # crossing (classified deck bridge or tunnel-portal pair), this
+    # legacy machinery yields the WHOLE road — a portal whose tunnel
+    # way or surface walk touches an owned region is dropped before
+    # any dedup/cluster work.  Plan-space plate yield downstream is
+    # NOT enough: the surviving approach pieces outside the plates
+    # carried DEM values that dragged the mesh beside hard-pinned
+    # plates (measured KBNA, taxiway-L and the runway-02C portals).
+    _owned_union = _classifier_owned_crossing_union(layout)
+    if _owned_union is not None and portal_data:
+        _tunnel_way_lines: dict = {}
+        for _w_id, _w_refs, _w_tags in ways_r:
+            if _w_tags.get("tunnel") not in PORTAL_TUNNEL_VALUES:
+                continue
+            _way_points = [nodes_m[n] for n in _w_refs if n in nodes_m]
+            if len(_way_points) >= 2:
+                try:
+                    _tunnel_way_lines[_w_id] = LineString(_way_points)
+                except _GEOM_EXC:
+                    continue
+        _kept_portals = []
+        _n_owned = 0
+        for _portal_entry in portal_data:
+            _way_line = _tunnel_way_lines.get(_portal_entry[1])
+            _walk_line = None
+            try:
+                if len(_portal_entry[2]) >= 2:
+                    _walk_line = LineString(_portal_entry[2])
+            except _GEOM_EXC:
+                _walk_line = None
+            _owned_hit = False
+            for _geometry in (_way_line, _walk_line):
+                if _geometry is None:
+                    continue
+                try:
+                    if _geometry.intersects(_owned_union):
+                        _owned_hit = True
+                        break
+                except _GEOM_EXC:
+                    continue
+            if _owned_hit:
+                _n_owned += 1
+                continue
+            _kept_portals.append(_portal_entry)
+        if _n_owned:
+            UI.vprint(
+                1,
+                f"  [tunnel] {_n_owned} legacy portal(s) dropped — "
+                "Feature B owns the crossing (classified bridge / "
+                "tunnel-portal records)")
+            portal_data = _kept_portals
     # Flat low-connector corridors supersede any portal starting
     # inside them (cross-way facing portals the per-way gap merge
     # cannot see — user 2026-07-04, KDFW).
@@ -3603,6 +3655,222 @@ def _bridge_is_road_carried(bridge, layout, to_meters):
     return True
 
 
+def _detect_tunnel_portal_pairs(layout, dem, tile_lat, tile_lon):
+    """Pair classified structures that are the two PORTALS of one buried
+    tunnel (user ruling 2026-07-10, the KBNA runway-02C class) and cache
+    the result on the layout.
+
+    A pair is two would-be corridor records (deck-carried or cosmetic)
+    whose centroid spacing lies inside the configured window, whose
+    connecting segment aligns with BOTH objects' headings — side-by-side
+    parallel decks fail this test because their connecting segment runs
+    PERPENDICULAR to their headings — and whose connecting ground rises
+    to at least the lower portal's top plus the buried margin (the hill
+    that carries the runway over the bore).
+
+    Portals never receive bridge treatment: no deck-end pins, no trench,
+    no causeway plates, no cross-hill approaches.  Instead each mouth is
+    seated at the ROAD grade so the portal object sits partly submerged
+    with its bottom aligned to the road descending to it, the terrain on
+    the runway side stays the natural hill (level with the object top at
+    the face), and the road corridor climbs AWAY from the mouth.  For
+    that, each portal record precomputes:
+
+    * ``outward`` — unit vector away from the partner (out of the hill);
+    * ``mouth_floor_m`` — MINIMUM digital-elevation-model sample along
+      the outward ray (the descending road's grade at the face, robust
+      against the embankment skirt inflating near samples);
+    * ``footprint`` — the deck footprint in layout meters.
+
+    Returns the cached pair list (computed once per layout; empty when
+    the gate is off, the digital elevation model is unavailable, or no
+    pair qualifies)."""
+    cached = getattr(layout, _TUNNEL_PORTAL_PAIRS_ATTRIBUTE, None)
+    if cached is not None:
+        return cached
+    pairs: list[dict] = []
+    setattr(layout, _TUNNEL_PORTAL_PAIRS_ATTRIBUTE, pairs)
+    classification = _object_bridge_classification(layout)
+    if classification is None or dem is None:
+        return pairs
+    from .object_terrain_features import (
+        DECK_CARRIED, DECK_HARDNESS_COSMETIC,
+    )
+    to_meters, meters_to_lat_lon = _local_meter_projections(layout.anchor)
+    candidates = []
+    for bridge in classification.bridges:
+        is_cosmetic = bridge.deck_hardness == DECK_HARDNESS_COSMETIC
+        if not (is_cosmetic or bridge.contract == DECK_CARRIED):
+            continue
+        footprint = _bridge_footprint_meters(bridge, to_meters)
+        if footprint is None:
+            continue
+        candidates.append((bridge, footprint))
+    if len(candidates) < 2:
+        return pairs
+
+    def _dem_at_meters(x, y):
+        try:
+            lat, lon = meters_to_lat_lon(x, y)
+            return _sample_dem(dem, tile_lat, tile_lon, lat, lon)
+        except _GEOM_EXC:
+            return None
+
+    def _mouth_floor(footprint, outward_x, outward_y):
+        centroid = footprint.centroid
+        edge_distance = None
+        probe = 0.0
+        while probe <= 400.0:
+            point = Point(centroid.x + outward_x * probe,
+                          centroid.y + outward_y * probe)
+            if not footprint.covers(point):
+                edge_distance = probe
+                break
+            probe += 5.0
+        if edge_distance is None:
+            return None
+        samples = []
+        distance = 5.0
+        while distance <= float(_CFG.TUNNEL_PORTAL_MOUTH_SAMPLE_RANGE_M):
+            value = _dem_at_meters(
+                centroid.x + outward_x * (edge_distance + distance),
+                centroid.y + outward_y * (edge_distance + distance))
+            if value is not None:
+                samples.append(value)
+            distance += 5.0
+        return min(samples) if samples else None
+
+    used: set[int] = set()
+    for i, (bridge_i, footprint_i) in enumerate(candidates):
+        if id(bridge_i) in used:
+            continue
+        for bridge_j, footprint_j in candidates[i + 1:]:
+            if id(bridge_j) in used:
+                continue
+            centroid_i = footprint_i.centroid
+            centroid_j = footprint_j.centroid
+            east = centroid_j.x - centroid_i.x
+            north = centroid_j.y - centroid_i.y
+            spacing = math.hypot(east, north)
+            if not (float(_CFG.TUNNEL_PORTAL_PAIR_MIN_SPACING_M)
+                    <= spacing
+                    <= float(_CFG.TUNNEL_PORTAL_PAIR_MAX_SPACING_M)):
+                continue
+            segment_bearing = math.degrees(math.atan2(east, north)) % 180.0
+            tolerance = float(
+                _CFG.TUNNEL_PORTAL_PAIR_HEADING_TOLERANCE_DEGREES)
+            aligned = True
+            for bridge in (bridge_i, bridge_j):
+                heading = float(bridge.heading_degrees or 0.0) % 180.0
+                delta = abs(heading - segment_bearing)
+                if delta > 90.0:
+                    delta = 180.0 - delta
+                if delta > tolerance:
+                    aligned = False
+                    break
+            if not aligned:
+                continue
+            unit_x = east / spacing
+            unit_y = north / spacing
+            mouth_i = _mouth_floor(footprint_i, -unit_x, -unit_y)
+            mouth_j = _mouth_floor(footprint_j, unit_x, unit_y)
+            if mouth_i is None or mouth_j is None:
+                continue
+            top_i = mouth_i + float(bridge_i.deck_top_y_m or 0.0)
+            top_j = mouth_j + float(bridge_j.deck_top_y_m or 0.0)
+            # Buried test, two independent signals (either qualifies):
+            #
+            # (a) AIRSIDE PAVEMENT crosses the middle of the connecting
+            #     segment — a road running between two portal structures
+            #     UNDER a runway/taxiway is a tunnel by the same axiom
+            #     the implied-crossing machinery rests on (roads never
+            #     cross airside pavement at grade).  This signal is
+            #     immune to the smoothed digital elevation model, which
+            #     FLATTENS embankments near runways (measured KBNA 02C:
+            #     mid-line maximum 181.45 m against portal tops 187-188 —
+            #     the raster erased the hill the runway visibly sits on).
+            # (b) The connecting ground rises above the lower portal's
+            #     top (unsmoothed hills away from pavement).
+            buried = False
+            try:
+                middle = LineString([
+                    (centroid_i.x, centroid_i.y),
+                    (centroid_j.x, centroid_j.y),
+                ]).difference(
+                    footprint_i.buffer(20.0)
+                ).difference(footprint_j.buffer(20.0))
+            except _GEOM_EXC:
+                middle = None
+            if middle is not None and not middle.is_empty:
+                for shape in layout.shapes:
+                    if (shape.role not in _BRIDGE_PIN_ROLES
+                            or shape.polygon is None
+                            or shape.polygon.is_empty):
+                        continue
+                    try:
+                        if shape.polygon.intersects(middle):
+                            buried = True
+                            break
+                    except _GEOM_EXC:
+                        continue
+            mid_max = None
+            if not buried:
+                distance = 0.0
+                while distance <= spacing:
+                    value = _dem_at_meters(
+                        centroid_i.x + unit_x * distance,
+                        centroid_i.y + unit_y * distance)
+                    if value is not None and (mid_max is None
+                                              or value > mid_max):
+                        mid_max = value
+                    distance += 10.0
+                buried = mid_max is not None and mid_max >= (
+                    min(top_i, top_j)
+                    + float(_CFG.TUNNEL_PORTAL_PAIR_BURIED_MARGIN_M))
+            if not buried:
+                continue
+            pairs.append({
+                "portals": (
+                    {"bridge": bridge_i, "footprint": footprint_i,
+                     "outward": (-unit_x, -unit_y),
+                     "mouth_floor_m": mouth_i},
+                    {"bridge": bridge_j, "footprint": footprint_j,
+                     "outward": (unit_x, unit_y),
+                     "mouth_floor_m": mouth_j},
+                ),
+                "spacing_m": spacing,
+            })
+            used.add(id(bridge_i))
+            used.add(id(bridge_j))
+            buried_evidence = (
+                "airside pavement over the body" if mid_max is None
+                else f"hill to {mid_max:.1f} m")
+            UI.vprint(
+                1,
+                "   [object-tunnel] portal pair recognized "
+                f"({spacing:.0f} m apart, {buried_evidence}, "
+                f"mouth floors {mouth_i:.1f} / {mouth_j:.1f} m): "
+                f"{bridge_i.object_resources} + "
+                f"{bridge_j.object_resources} — bridge treatment "
+                "suppressed, mouths seated at road grade",
+            )
+            break
+    return pairs
+
+
+def _tunnel_portal_ids(layout) -> set[int]:
+    """Identity set of classifier records consumed as tunnel portals.
+    Empty when detection has not run yet — callers then see the plain
+    bridge partition (the pre-pairing behavior); the build always runs
+    detection first (``build_bridge_layout_shapes``)."""
+    pairs = getattr(layout, _TUNNEL_PORTAL_PAIRS_ATTRIBUTE, None) or []
+    ids: set[int] = set()
+    for pair in pairs:
+        for portal in pair["portals"]:
+            ids.add(id(portal["bridge"]))
+    return ids
+
+
 def _partition_bridges_for_corridors(classification, layout=None):
     """Split the classifier's bridge records into the corridor set, the
     suppression set, the refused (ambiguous) set and — with a layout to
@@ -3618,23 +3886,32 @@ def _partition_bridges_for_corridors(classification, layout=None):
     * road_carried — corridor-shaped spans with NO taxi/truck route
       crossing the deck footprint (``_bridge_is_road_carried``): a road
       overpass; excluded from pins, causeway and the object-sourced
-      corridor, logged, left to the existing road machinery."""
+      corridor, logged, left to the existing road machinery.
+    * tunnel_portals — records consumed as the paired portals of one
+      buried tunnel (``_detect_tunnel_portal_pairs``): no bridge
+      treatment; the mouth seating and outward corridor are emitted by
+      the portal branch instead."""
     from .object_terrain_features import (
         DECK_CARRIED, TERRAIN_CARRIED, PROFILE_CARRIED, AMBIGUOUS,
         DECK_HARDNESS_COSMETIC,
     )
     to_meters = None
+    portal_ids: set[int] = set()
     if layout is not None:
         to_meters, _meters_to_lat_lon = (
             _local_meter_projections(layout.anchor)
         )
+        portal_ids = _tunnel_portal_ids(layout)
     corridor: list = []
     suppress: list = []
     refused: list = []
     road_carried: list = []
+    tunnel_portals: list = []
     for bridge in classification.bridges:
         is_cosmetic = bridge.deck_hardness == DECK_HARDNESS_COSMETIC
-        if is_cosmetic or bridge.contract == DECK_CARRIED:
+        if id(bridge) in portal_ids:
+            tunnel_portals.append(bridge)
+        elif is_cosmetic or bridge.contract == DECK_CARRIED:
             if _bridge_is_road_carried(bridge, layout, to_meters):
                 road_carried.append(bridge)
                 UI.vprint(
@@ -3650,7 +3927,7 @@ def _partition_bridges_for_corridors(classification, layout=None):
             suppress.append(bridge)
         elif bridge.contract == AMBIGUOUS:
             refused.append(bridge)
-    return corridor, suppress, refused, road_carried
+    return corridor, suppress, refused, road_carried, tunnel_portals
 
 
 def _cut_pavement_over_hard_deck(layout, footprint) -> int:
@@ -3800,6 +4077,97 @@ def _draped_road_centerlines_meters(bridge, road_networks, to_meters):
     return lines
 
 
+def _dedup_parallel_road_lines(road_lines, half_width):
+    """Twin carriageways give two near-coincident centerlines through one
+    crossing — one full-width approach corridor each, overlapping in the
+    written patch (the tunnel path's ``_dedup_portal_walks`` guard,
+    applied at the road-line level).  Keep the longest line; drop any
+    later line whose buffered corridor overlaps a kept corridor by more
+    than half its own area."""
+    kept: list = []
+    kept_buffers: list = []
+    for line in sorted(road_lines, key=lambda item: -item.length):
+        try:
+            buffered = line.buffer(half_width)
+        except _GEOM_EXC:
+            continue
+        duplicate = False
+        for other in kept_buffers:
+            try:
+                if (buffered.intersection(other).area
+                        > 0.5 * buffered.area):
+                    duplicate = True
+                    break
+            except _GEOM_EXC:
+                continue
+        if duplicate:
+            continue
+        kept.append(line)
+        kept_buffers.append(buffered)
+    return kept
+
+
+def _portal_pair_owned_polygons(pairs):
+    """Plan-space region a tunnel portal pair OWNS: both portal
+    footprints plus the connecting band over the buried body.  Approach
+    rects must never land here (the hill carries the runway), and the
+    legacy portal machinery yields the whole crossing to the pair."""
+    polygons: list = []
+    for pair in pairs:
+        portal_a, portal_b = pair["portals"]
+        polygons.append(portal_a["footprint"])
+        polygons.append(portal_b["footprint"])
+        centroid_a = portal_a["footprint"].centroid
+        centroid_b = portal_b["footprint"].centroid
+        half_width = 10.0 + 0.5 * max(
+            math.sqrt(portal_a["footprint"].area),
+            math.sqrt(portal_b["footprint"].area),
+        )
+        try:
+            polygons.append(
+                LineString([(centroid_a.x, centroid_a.y),
+                            (centroid_b.x, centroid_b.y)]
+                           ).buffer(half_width)
+            )
+        except _GEOM_EXC:
+            continue
+    return polygons
+
+
+def _classifier_owned_crossing_union(layout):
+    """Union (layout meters) of every crossing Feature B owns — corridor
+    deck boxes plus tunnel-portal-pair regions (footprints and the band
+    over the buried body).  The legacy OSM / implied-crossing portal
+    machinery yields these crossings entirely (user 2026-07-10): its
+    DEM-referenced ramps otherwise land beside hard-pinned plates at
+    foreign values (measured KBNA: legacy ramps at 173.9-177.2 m over
+    the 167.0 m taxiway-L plates).  ``None`` when the gate is off or
+    nothing is classified.  Road-carried overpasses are deliberately
+    NOT owned — the road machinery keeps those (spec section 3.2)."""
+    classification = _object_bridge_classification(layout)
+    if classification is None:
+        return None
+    to_meters, _meters_to_lat_lon = _local_meter_projections(layout.anchor)
+    corridor_bridges, _suppress, _refused, _road_carried, _portals = (
+        _partition_bridges_for_corridors(classification, layout)
+    )
+    polygons: list = []
+    for bridge in corridor_bridges:
+        box = _bridge_deck_box_meters(bridge, layout)
+        if box is None:
+            box = _bridge_footprint_meters(bridge, to_meters)
+        if box is not None:
+            polygons.append(box)
+    pairs = getattr(layout, _TUNNEL_PORTAL_PAIRS_ATTRIBUTE, None) or []
+    polygons.extend(_portal_pair_owned_polygons(pairs))
+    if not polygons:
+        return None
+    try:
+        return unary_union(polygons)
+    except _GEOM_EXC:
+        return None
+
+
 def _emit_object_sourced_bridge_corridors(
         layout, dem, tile_lat, tile_lon, classification, road_networks,
         road_width_m, ramp_step_m, approach_length_m):
@@ -3817,7 +4185,8 @@ def _emit_object_sourced_bridge_corridors(
     the author-mesh measurement) per side — the caller's
     ``approach_length_m`` acts only as a wider override."""
     to_meters, meters_to_lat_lon = _local_meter_projections(layout.anchor)
-    corridor_bridges, suppress_bridges, refused_bridges, _road_carried = (
+    (corridor_bridges, suppress_bridges, refused_bridges, _road_carried,
+     _tunnel_portal_records) = (
         _partition_bridges_for_corridors(classification, layout)
     )
     suppression_polygons: list[Polygon] = []
@@ -3896,12 +4265,45 @@ def _emit_object_sourced_bridge_corridors(
             except _GEOM_EXC:
                 pass
         keep_out_zones.append(bridge_keep_out)
+    # Tunnel portal pairs own their footprints AND the connecting band
+    # over the buried body — no approach rect may land there (the hill
+    # carries the runway between the mouths).
+    portal_pairs = _detect_tunnel_portal_pairs(
+        layout, dem, tile_lat, tile_lon
+    )
+    keep_out_zones.extend(_portal_pair_owned_polygons(portal_pairs))
     try:
         approach_keep_out = (
             unary_union(keep_out_zones) if keep_out_zones else None
         )
     except _GEOM_EXC:
         approach_keep_out = None
+
+    # Cross-deck awareness (user 2026-07-10, the double-bridge overlap
+    # class): a road under TWO parallel decks must be split by BOTH
+    # footprints, or each deck walks its approach chain under the other
+    # deck and out the far side — two chains double-covering one road.
+    crossing_polygons: list = []
+    for bridge in corridor_bridges:
+        crossing = _bridge_deck_box_meters(bridge, layout)
+        if crossing is None:
+            crossing = _bridge_footprint_meters(bridge, to_meters)
+        if crossing is not None:
+            crossing_polygons.append(crossing)
+    for pair in portal_pairs:
+        for portal in pair["portals"]:
+            crossing_polygons.append(portal["footprint"])
+    try:
+        all_crossings_union = (
+            unary_union(crossing_polygons) if crossing_polygons else None
+        )
+    except _GEOM_EXC:
+        all_crossings_union = None
+
+    # Already-emitted approach rects (all decks, all portals in this
+    # pass): a later chain never overlaps an earlier one — the same
+    # earlier-emitter-wins order ``deconflict_road_features`` walks.
+    emitted_registry: list = []
 
     osm_road_lines: list[LineString] | None = None
     n_emitted = 0
@@ -3968,6 +4370,9 @@ def _emit_object_sourced_bridge_corridors(
                 f"{bridge.object_resources} — corridor skipped",
             )
             continue
+        road_lines = _dedup_parallel_road_lines(
+            road_lines, road_width_m / 2.0
+        )
 
         # The under-deck TRENCH and the R8 flush-seat cut moved to the
         # PRE-solve layout builder (``build_bridge_layout_shapes``, user
@@ -3986,6 +4391,8 @@ def _emit_object_sourced_bridge_corridors(
             footprint, floor_elevation, road_lines,
             road_width_m, ramp_step_m, depressed_length_m,
             keep_out=approach_keep_out,
+            crossing_union=all_crossings_union,
+            emitted_registry=emitted_registry,
         )
         n_emitted += 1
         UI.vprint(
@@ -3994,6 +4401,63 @@ def _emit_object_sourced_bridge_corridors(
             f"{floor_elevation:.1f} m under {bridge.object_resources} "
             f"(deck {deck_elevation:.1f} m, road source {road_source})",
         )
+
+    # ── Tunnel portal approaches (user ruling 2026-07-10): the road
+    # corridor CLIMBS AWAY from each mouth — floor at the mouth's road
+    # grade, rising to the digital elevation model outward.  Only
+    # outward road pieces are walked; the hill side is owned by the
+    # pair band in the keep-out.
+    for pair in portal_pairs:
+        for portal in pair["portals"]:
+            footprint = portal["footprint"]
+            mouth_floor = portal.get("mouth_floor_m")
+            if mouth_floor is None:
+                continue
+            covered_polygons.append(footprint)
+            road_lines = _draped_road_centerlines_meters(
+                portal["bridge"], road_networks, to_meters
+            )
+            road_source = "dsf-road-network"
+            if not road_lines:
+                if osm_road_lines is None:
+                    osm_road_lines = _load_underpass_osm_road_lines(
+                        layout, to_meters
+                    )
+                road_lines = [
+                    line for line in osm_road_lines
+                    if line.intersects(footprint)
+                ]
+                road_source = "openstreetmap"
+            if not road_lines:
+                UI.vprint(
+                    1,
+                    "   [object-tunnel] no road through the portal of "
+                    f"{portal['bridge'].object_resources} — outward "
+                    "corridor skipped",
+                )
+                continue
+            road_lines = _dedup_parallel_road_lines(
+                road_lines, road_width_m / 2.0
+            )
+            if _emit_corridor_for_footprint(
+                layout, dem, tile_lat, tile_lon, meters_to_lat_lon,
+                footprint, mouth_floor, road_lines,
+                road_width_m, ramp_step_m,
+                max(float(approach_length_m),
+                    float(_CFG.BRIDGE_CORRIDOR_DEPRESSED_LENGTH_M)),
+                keep_out=approach_keep_out,
+                crossing_union=all_crossings_union,
+                emitted_registry=emitted_registry,
+                outward=portal.get("outward"),
+            ):
+                n_emitted += 1
+                UI.vprint(
+                    1,
+                    "   [object-tunnel] outward corridor from mouth "
+                    f"floor {mouth_floor:.1f} m for "
+                    f"{portal['bridge'].object_resources} "
+                    f"(road source {road_source})",
+                )
     return n_emitted, suppression_polygons, covered_polygons
 
 
@@ -4039,7 +4503,8 @@ def _emit_corridor_for_footprint(
         layout, dem, tile_lat, tile_lon, meters_to_lat_lon,
         footprint, floor_elevation, road_lines,
         road_width_m, ramp_step_m, approach_length_m,
-        keep_out=None):
+        keep_out=None, crossing_union=None, emitted_registry=None,
+        outward=None):
     """Emit stepped approach ramps from ``floor_elevation`` up to the DEM
     for each road crossing a bridge footprint (the under-deck trench
     plate itself is emitted by the caller as the FULL footprint, stage
@@ -4049,12 +4514,25 @@ def _emit_corridor_for_footprint(
     ``ROLE_TUNNEL_RAMP`` rect per ``ramp_step_m`` interpolating floor→DEM),
     driven by the object footprint rather than a taxi rect.  Deconfliction
     against airport pavement is the shared downstream
-    ``deconflict_road_features`` pass, exactly as for the legacy shapes."""
+    ``deconflict_road_features`` pass, exactly as for the legacy shapes.
+
+    ``crossing_union`` — the union of EVERY classified crossing (all
+    deck boxes + portal footprints): the road is split by ALL of them,
+    not just this bridge's own footprint, so a walk never runs under a
+    sibling deck and out the far side (the double-bridge overlap class).
+    ``emitted_registry`` — shared list of already-emitted approach rects;
+    a later chain skips rects overlapping an earlier chain's.
+    ``outward`` — optional unit vector: walk only road pieces on that
+    side of the footprint (tunnel portals ramp AWAY from the hill)."""
     emitted = False
     half_width = road_width_m / 2.0
+    split_region = footprint
+    if crossing_union is not None:
+        split_region = crossing_union
+    centroid = footprint.centroid
     for road_line in road_lines:
         try:
-            outside = road_line.difference(footprint)
+            outside = road_line.difference(split_region)
         except _GEOM_EXC:
             outside = None
         if outside is None or outside.is_empty:
@@ -4068,6 +4546,18 @@ def _emit_corridor_for_footprint(
             coordinates = list(piece.coords)
             if len(coordinates) < 2:
                 continue
+            # Only pieces that BEGIN at this bridge's own footprint —
+            # with the full crossing union splitting the road, a sibling
+            # deck's pieces also appear here and belong to that deck's
+            # own emission turn.
+            if piece.distance(footprint) > 1.0:
+                continue
+            if outward is not None:
+                midpoint = piece.interpolate(0.5, normalized=True)
+                side = ((midpoint.x - centroid.x) * outward[0]
+                        + (midpoint.y - centroid.y) * outward[1])
+                if side <= 0.0:
+                    continue
             distance_start = footprint.distance(Point(coordinates[0]))
             distance_end = footprint.distance(Point(coordinates[-1]))
             if distance_start <= distance_end:
@@ -4079,6 +4569,8 @@ def _emit_corridor_for_footprint(
                 layout, dem, tile_lat, tile_lon, meters_to_lat_lon,
                 walk, walk_length, floor_elevation, half_width, ramp_step_m,
                 keep_out=keep_out,
+                emitted_registry=emitted_registry,
+                refuse_inverted=(outward is not None),
             ):
                 emitted = True
     return emitted
@@ -4087,11 +4579,39 @@ def _emit_corridor_for_footprint(
 def _emit_corridor_ramp_chain(
         layout, dem, tile_lat, tile_lon, meters_to_lat_lon,
         walk, walk_length, floor_elevation, half_width, ramp_step_m,
-        keep_out=None):
+        keep_out=None, emitted_registry=None, refuse_inverted=False):
     """Step ``walk`` from the bridge edge (``floor_elevation``) out to the
     DEM in ``ramp_step_m`` increments, emitting one sloped
     ``ROLE_TUNNEL_RAMP`` rect per step.  Returns True when any rect was
-    emitted."""
+    emitted.
+
+    ``refuse_inverted`` — the tunnel-portal inversion guard (user
+    2026-07-10, the runway-02C climb): the mouth floor must never sit
+    above the ground the chain welds to at its NEAR end — a floor above
+    the adjacent road means the datum was wrong (embankment top instead
+    of the road), producing a ramp climbing INTO the crossing and
+    poking above the descending terrain.  The FAR end is deliberately
+    not tested: terrain legitimately falls away from a mouth along the
+    road (measured KBNA 02C west: 180 m at the face down to 174 m at
+    240 m out).  Deck-carried BRIDGE corridors skip the guard entirely:
+    a causeway over low ground sends its road DOWN to the valley."""
+    if refuse_inverted:
+        try:
+            near_point = walk.interpolate(min(5.0, walk_length))
+            near_lat, near_lon = meters_to_lat_lon(
+                near_point.x, near_point.y)
+            near_grade = _sample_dem(
+                dem, tile_lat, tile_lon, near_lat, near_lon)
+        except _GEOM_EXC:
+            near_grade = None
+        if near_grade is not None and floor_elevation > near_grade + 2.0:
+            UI.vprint(
+                1,
+                "   [object-tunnel] refusing INVERTED portal approach: "
+                f"mouth floor {floor_elevation:.1f} m sits above the "
+                f"adjacent grade {near_grade:.1f} m",
+            )
+            return False
     emitted = False
     previous = 0.0
     while previous < walk_length - 1.0:
@@ -4135,6 +4655,23 @@ def _emit_corridor_ramp_chain(
                         continue
                 except _GEOM_EXC:
                     pass
+            # Approach-versus-approach exclusivity (user 2026-07-10):
+            # a rect overlapping an EARLIER chain's rect is skipped —
+            # sloped rects can never be clipped without breaking their
+            # two-corner altitude semantics, so overlap is prevented at
+            # birth, not cleaned downstream.
+            if emitted_registry is not None and not polygon.is_empty:
+                overlapping = False
+                for earlier in emitted_registry:
+                    try:
+                        if polygon.intersection(earlier).area > 0.5:
+                            overlapping = True
+                            break
+                    except _GEOM_EXC:
+                        continue
+                if overlapping:
+                    previous = current
+                    continue
             if polygon.geom_type == "Polygon" and not polygon.is_empty:
                 if abs(elevation0 - elevation1) >= 0.1:
                     layout.shapes.append(BuiltShape(
@@ -4149,6 +4686,8 @@ def _emit_corridor_ramp_chain(
                         role=ROLE_TUNNEL_RAMP,
                         ref="object_bridge_approach",
                         altitude=round(0.5 * (elevation0 + elevation1), 1)))
+                if emitted_registry is not None:
+                    emitted_registry.append(polygon)
                 emitted = True
         except _GEOM_EXC:
             pass
@@ -4386,7 +4925,7 @@ def insert_bridge_deck_end_pins(layout, dem, tile_lat, tile_lon) -> int:
     if classification is None:
         return 0
     from .grade_law import bridge_deck_end_pin_elevation_m
-    corridor_bridges, _suppress, _refused, _road_carried = (
+    corridor_bridges, _suppress, _refused, _road_carried, _portals = (
         _partition_bridges_for_corridors(classification, layout)
     )
     capture_band = float(_CFG.BRIDGE_ABUTMENT_PIN_CAPTURE_BAND_M)
@@ -4664,10 +5203,17 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
         if pads_removed:
             layout.shapes = kept_shapes
 
-    corridor_bridges, _suppress, _refused, _road_carried = (
+    # Portal-pair detection runs HERE — the first Feature B consumer in
+    # the pipeline — so every later partition call (pins, corridors,
+    # validators) sees the same diversion via the layout cache.
+    portal_pairs = _detect_tunnel_portal_pairs(
+        layout, dem, tile_lat, tile_lon
+    )
+    (corridor_bridges, _suppress, _refused, _road_carried,
+     _portal_records) = (
         _partition_bridges_for_corridors(classification, layout)
     )
-    if not corridor_bridges:
+    if not corridor_bridges and not portal_pairs:
         return 0, 0, pads_removed
 
     weld_roles = _BRIDGE_PIN_ROLES | {
@@ -4716,6 +5262,56 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
     maximum_length = float(_CFG.BRIDGE_CAUSEWAY_MAX_LENGTH_M)
     n_trench = 0
     n_causeway = 0
+
+    # ── Tunnel portal mouths (user ruling 2026-07-10, runway-02C class):
+    # a paired portal gets NO bridge treatment.  Its mouth is born as a
+    # flat plate at the ROAD grade over the portal footprint — the object
+    # drapes at terrain(anchor) = mouth floor, so it sits partly
+    # submerged with its bottom aligned to the road descending to it,
+    # and the plate's rim welds to the natural hill (level with the
+    # object top at the face, rising to the runway beyond).  The ground
+    # between the two portals is left UNTOUCHED — the hill carries the
+    # runway; the outward road corridor is emitted by the corridors
+    # stage (climbing away from the mouth by construction).
+    for pair in portal_pairs:
+        for portal in pair["portals"]:
+            mouth_floor = portal.get("mouth_floor_m")
+            footprint = portal.get("footprint")
+            if mouth_floor is None or footprint is None:
+                continue
+            # X-Plane drapes the portal object at terrain(anchor) — the
+            # plate must COVER the anchor point, or the object still
+            # seats on whatever the hill solves to beside the plate.
+            try:
+                anchor_longitude, anchor_latitude = (
+                    portal["bridge"].anchor_longitude_latitude
+                )
+                anchor_point = Point(
+                    to_meters(anchor_longitude, anchor_latitude)
+                )
+                if (not footprint.covers(anchor_point)
+                        and footprint.distance(anchor_point) <= 30.0):
+                    footprint = unary_union(
+                        [footprint, anchor_point.buffer(5.0)]
+                    )
+                    if footprint.geom_type != "Polygon":
+                        footprint = footprint.convex_hull
+            except (_GEOM_EXC, KeyError, TypeError):
+                pass
+            try:
+                vertex_count = _born_flat(
+                    footprint, ROLE_BRIDGE_TRENCH,
+                    "object_tunnel_portal_mouth", mouth_floor)
+            except _GEOM_EXC:
+                continue
+            n_trench += 1
+            UI.vprint(
+                1,
+                "   [object-tunnel] portal mouth seated at road grade "
+                f"{mouth_floor:.2f} m ({vertex_count} vertices) for "
+                f"{portal['bridge'].object_resources}",
+            )
+
     for bridge in corridor_bridges:
         datum = _bridge_datum_elevation_m(bridge, dem, tile_lat, tile_lon)
         if datum is None:

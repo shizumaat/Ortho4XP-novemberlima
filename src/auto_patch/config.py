@@ -160,6 +160,11 @@ __all__ = [
     "BRIDGE_ABUTMENT_PIN_CAPTURE_BAND_M",
     "BRIDGE_CAUSEWAY_MAX_LENGTH_M",
     "BRIDGE_ROAD_CARRIED_PAVEMENT_PROXIMITY_M",
+    "TUNNEL_PORTAL_PAIR_MIN_SPACING_M",
+    "TUNNEL_PORTAL_PAIR_MAX_SPACING_M",
+    "TUNNEL_PORTAL_PAIR_HEADING_TOLERANCE_DEGREES",
+    "TUNNEL_PORTAL_PAIR_BURIED_MARGIN_M",
+    "TUNNEL_PORTAL_MOUTH_SAMPLE_RANGE_M",
     "PRECISION_APPROACH_LIGHT_CODES",
     "PRECISION_MARKINGS_CODES",
     "NON_PRECISION_MARKINGS_CODES",
@@ -1971,6 +1976,30 @@ BRIDGE_ABUTMENT_PIN_CAPTURE_BAND_M = 12.0
 # covers every measured gap; the plate is clipped at the first pavement
 # edge it meets (weld, ruling R2).
 BRIDGE_CAUSEWAY_MAX_LENGTH_M = 65.0
+
+# ── Tunnel portal pairs (the KBNA runway-02C class, user 2026-07-10) ──
+# Two classified structures on the SAME road corridor with terrain
+# rising above their tops between them are the two PORTALS of one
+# buried tunnel, not two bridges: nothing is emitted between them (the
+# hill keeps carrying the runway at grade), each mouth's terrain is
+# seated at the ROAD elevation so the portal object sits partly
+# submerged, and the road corridor climbs AWAY from each mouth.
+# Pairing requires: centroid spacing inside [MIN, MAX]; the connecting
+# segment aligned with both objects' headings within the tolerance
+# (parallel side-by-side decks fail this — their connecting segment is
+# PERPENDICULAR to their headings); and the digital elevation model
+# between the mouths reaching at least the lower portal's top plus the
+# buried margin (a bridge pair over open ground fails this).
+TUNNEL_PORTAL_PAIR_MIN_SPACING_M = 20.0
+TUNNEL_PORTAL_PAIR_MAX_SPACING_M = 600.0
+TUNNEL_PORTAL_PAIR_HEADING_TOLERANCE_DEGREES = 30.0
+TUNNEL_PORTAL_PAIR_BURIED_MARGIN_M = 1.0
+# Outward ray from each mouth sampled over this range for the mouth
+# floor (the MINIMUM wins — the descending road's grade at the face,
+# robust against the embankment skirt inflating near samples).  150 m
+# because the smoothed airport raster decays embankment flattening
+# slowly (measured KBNA 02C: still falling 0.09 m per 5 m at 60 m out).
+TUNNEL_PORTAL_MOUTH_SAMPLE_RANGE_M = 150.0
 
 # Audit-tool proxy for the road-carried-overpass discriminator (the
 # audit has no layout to read taxi/truck routes from): a bridge with no

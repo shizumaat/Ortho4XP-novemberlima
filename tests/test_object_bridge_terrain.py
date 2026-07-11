@@ -257,7 +257,7 @@ class TestDeckElevation:
 
 class TestContractPartition:
     def test_deck_carried_is_a_corridor(self):
-        corridor, suppress, refused, _road_carried = bridges._partition_bridges_for_corridors(
+        corridor, suppress, refused, _road_carried, _portals = bridges._partition_bridges_for_corridors(
             _Classification([_bridge(contract=DECK_CARRIED)])
         )
         assert len(corridor) == 1 and not suppress and not refused
@@ -269,13 +269,13 @@ class TestContractPartition:
             _bridge(contract=PROFILE_CARRIED, deck_hardness=DECK_HARDNESS_HARD,
                     hard_deck=False),
         ])
-        corridor, suppress, refused, _road_carried = bridges._partition_bridges_for_corridors(
+        corridor, suppress, refused, _road_carried, _portals = bridges._partition_bridges_for_corridors(
             classification
         )
         assert not corridor and len(suppress) == 2 and not refused
 
     def test_ambiguous_is_refused(self):
-        corridor, suppress, refused, _road_carried = bridges._partition_bridges_for_corridors(
+        corridor, suppress, refused, _road_carried, _portals = bridges._partition_bridges_for_corridors(
             _Classification([_bridge(contract=AMBIGUOUS)])
         )
         assert not corridor and not suppress and len(refused) == 1
@@ -288,7 +288,7 @@ class TestContractPartition:
             _bridge(contract=TERRAIN_CARRIED,
                     deck_hardness=DECK_HARDNESS_COSMETIC, hard_deck=False),
         ])
-        corridor, suppress, refused, _road_carried = bridges._partition_bridges_for_corridors(
+        corridor, suppress, refused, _road_carried, _portals = bridges._partition_bridges_for_corridors(
             classification
         )
         assert len(corridor) == 1 and not suppress
@@ -1100,7 +1100,7 @@ class TestRoadCarriedOverpass:
     def test_no_route_on_deck_is_road_carried(self, monkeypatch):
         layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
         # No shape crosses the deck footprint at all.
-        corridor, _s, _r, road_carried = (
+        corridor, _s, _r, road_carried, _portals = (
             bridges._partition_bridges_for_corridors(
                 _Classification([_bridge()]), layout)
         )
@@ -1127,7 +1127,7 @@ class TestRoadCarriedOverpass:
     def test_route_on_deck_is_not_road_carried(self, monkeypatch):
         layout = _gate_on_layout_with_bridge(monkeypatch, _bridge())
         layout.shapes.append(_deck_route_shape())
-        corridor, _s, _r, road_carried = (
+        corridor, _s, _r, road_carried, _portals = (
             bridges._partition_bridges_for_corridors(
                 _Classification([_bridge()]), layout)
         )
@@ -1187,7 +1187,7 @@ class TestRoutingEvidenceDiscriminator:
             _FakeRouteCenterline(
                 _LineString([(-80.0, 0.0), (210.0, 0.0)]), is_service=True)
         ]
-        corridor, _s, _r, road_carried = (
+        corridor, _s, _r, road_carried, _portals = (
             bridges._partition_bridges_for_corridors(
                 _Classification([_bridge()]), layout)
         )
@@ -1201,7 +1201,7 @@ class TestRoutingEvidenceDiscriminator:
                 __import__("shapely.geometry", fromlist=["LineString"])
                 .LineString([(4000.0, 4000.0), (4200.0, 4000.0)]))
         ]
-        corridor, _s, _r, road_carried = (
+        corridor, _s, _r, road_carried, _portals = (
             bridges._partition_bridges_for_corridors(
                 _Classification([_bridge()]), layout)
         )
@@ -1790,3 +1790,138 @@ class TestLawValueEmissionExemptions:
             f"sweep removed {ring_count - emitted_nodes} plate node(s)"
         assert len(re.findall(r"k='alt_abs' v='161\.01'", text)) \
             == ring_count
+
+
+class TestTunnelPortalPairs:
+    """Portal-pair tunnels (user ruling 2026-07-10, the KBNA runway-02C
+    class): two aligned structures with airside pavement over the
+    connecting body are the two mouths of one buried tunnel — no bridge
+    treatment; mouth plates at road grade; approaches climb away."""
+
+    @staticmethod
+    def _portal(north_offset_m: float, east_offset_m: float = 0.0,
+                heading: float = 0.0, resource: str = "P.obj"):
+        origin_latitude, origin_longitude = local_offset_to_lonlat(
+            ANCHOR_LATITUDE, ANCHOR_LONGITUDE, 0.0,
+            north_offset_m, east_offset_m,
+        )
+        square = Polygon([(-10.0, -10.0), (10.0, -10.0),
+                          (10.0, 10.0), (-10.0, 10.0)])
+        return BridgeStructure(
+            object_resources=[resource],
+            anchor_longitude_latitude=(origin_longitude, origin_latitude),
+            frame_origin_longitude_latitude=(
+                origin_longitude, origin_latitude),
+            heading_degrees=heading,
+            deck_polygon=square,
+            deck_top_profile=[(0.0, 7.5), (20.0, 7.5)],
+            deck_top_y_m=7.5,
+            deck_end_elevations_y_m=(7.5, 7.5),
+            deck_length_m=20.0,
+            deck_width_m=20.0,
+            ceiling_y_m=6.0,
+            clearance_underside_y_m=6.0,
+            abutment_lines=[((-10.0, -10.0), (-10.0, 10.0)),
+                            ((10.0, -10.0), (10.0, 10.0))],
+            abutment_reaches_grade=(True, True),
+            contract=DECK_CARRIED,
+            absolute_deck_elevation_m=None,
+            hard_deck=False,
+            deck_hardness=DECK_HARDNESS_COSMETIC,
+        )
+
+    @staticmethod
+    def _runway_between(layout, north_m: float = 150.0):
+        from auto_patch.layout import BuiltShape, ROLE_RUNWAY
+        x0, y0 = layout.ll_to_m(*local_offset_to_lonlat(
+            ANCHOR_LATITUDE, ANCHOR_LONGITUDE, 0.0, north_m, 0.0))
+        layout.shapes.append(BuiltShape(
+            polygon=Polygon([(x0 - 500.0, y0 - 20.0),
+                             (x0 + 500.0, y0 - 20.0),
+                             (x0 + 500.0, y0 + 20.0),
+                             (x0 - 500.0, y0 + 20.0)]),
+            role=ROLE_RUNWAY, ref="02C", altitude=188.0))
+
+    def _paired_layout(self):
+        # ``local_offset_to_lonlat`` at heading 0 maps local_x → EAST,
+        # so the pair axis runs east-west: portal headings are 90.
+        layout = _FakeLayout()
+        classification = _Classification(
+            [self._portal(0.0, heading=90.0, resource="A.obj"),
+             self._portal(300.0, heading=90.0, resource="B.obj")])
+        setattr(layout, bridges._OBJECT_BRIDGE_CLASSIFICATION_ATTRIBUTE,
+                classification)
+        self._runway_between(layout)
+        return layout
+
+    def test_pavement_over_body_pairs_the_portals(self):
+        layout = self._paired_layout()
+        dem = _FakeDem(180.0)
+        pairs = bridges._detect_tunnel_portal_pairs(layout, dem, 36, -87)
+        assert len(pairs) == 1
+        for portal in pairs[0]["portals"]:
+            assert portal["mouth_floor_m"] == pytest.approx(180.0)
+
+    def test_partition_diverts_portals_from_bridge_treatment(self):
+        layout = self._paired_layout()
+        dem = _FakeDem(180.0)
+        bridges._detect_tunnel_portal_pairs(layout, dem, 36, -87)
+        classification = bridges._object_bridge_classification(layout)
+        corridor, _s, _r, _rc, portals = (
+            bridges._partition_bridges_for_corridors(classification, layout)
+        )
+        assert len(portals) == 2
+        assert not corridor
+
+    def test_mouth_plates_born_no_causeways(self):
+        from auto_patch.layout import ROLE_BRIDGE_CAUSEWAY, ROLE_BRIDGE_TRENCH
+        layout = self._paired_layout()
+        dem = _FakeDem(180.0)
+        n_trench, n_causeway, _pads = bridges.build_bridge_layout_shapes(
+            layout, dem, 36, -87)
+        assert n_causeway == 0
+        mouths = [shape for shape in layout.shapes
+                  if shape.role == ROLE_BRIDGE_TRENCH
+                  and shape.ref == "object_tunnel_portal_mouth"]
+        assert len(mouths) == 2 and n_trench == 2
+        for mouth in mouths:
+            assert set(mouth.node_altitudes) == {180.0}
+        assert not [shape for shape in layout.shapes
+                    if shape.role == ROLE_BRIDGE_CAUSEWAY]
+
+    def test_side_by_side_parallel_decks_do_not_pair(self):
+        layout = _FakeLayout()
+        # Separation along local_z (south) with headings 90 (east):
+        # the connecting segment is PERPENDICULAR to both headings —
+        # the side-by-side double-deck geometry that must never pair.
+        classification = _Classification(
+            [self._portal(0.0, heading=90.0, resource="A.obj"),
+             self._portal(0.0, east_offset_m=40.0, heading=90.0,
+                          resource="B.obj")])
+        setattr(layout, bridges._OBJECT_BRIDGE_CLASSIFICATION_ATTRIBUTE,
+                classification)
+        self._runway_between(layout, north_m=0.0)
+        dem = _FakeDem(180.0)
+        pairs = bridges._detect_tunnel_portal_pairs(layout, dem, 36, -87)
+        assert pairs == []
+
+    def test_open_ground_pair_does_not_pair(self):
+        layout = self._paired_layout()
+        layout.shapes = []  # no pavement over the body, flat ground
+        dem = _FakeDem(180.0)
+        pairs = bridges._detect_tunnel_portal_pairs(layout, dem, 36, -87)
+        assert pairs == []
+
+    def test_near_end_inversion_guard_refuses_raised_floor(self):
+        from shapely.geometry import LineString as _LineString
+        layout = _FakeLayout()
+        dem = _FakeDem(174.0)
+        walk = _LineString([(0.0, 0.0), (200.0, 0.0)])
+        refused = bridges._emit_corridor_ramp_chain(
+            layout, dem, 36, -87, layout.m_to_ll,
+            walk, 200.0, 181.6, 11.0, 20.0, refuse_inverted=True)
+        assert refused is False and not layout.shapes
+        emitted = bridges._emit_corridor_ramp_chain(
+            layout, dem, 36, -87, layout.m_to_ll,
+            walk, 200.0, 174.5, 11.0, 20.0, refuse_inverted=True)
+        assert emitted is True and layout.shapes

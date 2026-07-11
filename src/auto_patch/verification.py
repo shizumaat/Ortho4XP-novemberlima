@@ -1686,7 +1686,7 @@ def check_bridge_deck_end_pins(layout, dem, tile_lat, tile_lon,
     if classification is None:
         return []
     from .config import BRIDGE_ABUTMENT_PIN_CAPTURE_BAND_M
-    corridor_bridges, _suppress, _refused, _road_carried = (
+    corridor_bridges, _suppress, _refused, _road_carried, _portals = (
         _partition_bridges_for_corridors(classification, layout)
     )
     out = []
@@ -2796,6 +2796,26 @@ def verify_and_log(layout, icao: str, debug_log_path: str | None = None,
         except _shapely_domain_exceptions:         # pragma: no cover
             bridge_floor = []
 
+    # Feature B approach self-overlap gets its OWN named class (user
+    # 2026-07-10): two object_bridge_approach rects double-covering
+    # ground previously hid inside the generic overlap tally, and
+    # overlapping sloped rects can never be repaired downstream — the
+    # emitter must prevent them, so the class must be visible to gate
+    # on.  The findings stay in the generic list too (the debug lines
+    # show the pair detail there).
+    approach_overlaps = []
+    if OBJECT_BRIDGE_TERRAIN and overlaps:
+        for finding in overlaps:
+            _area, _index_a, _index_b, _loc = finding
+            try:
+                reference_a = getattr(layout.shapes[_index_a], "ref", "")
+                reference_b = getattr(layout.shapes[_index_b], "ref", "")
+            except Exception:                      # pragma: no cover
+                continue
+            if (reference_a == "object_bridge_approach"
+                    and reference_b == "object_bridge_approach"):
+                approach_overlaps.append(finding)
+
     counts = {"overlap": len(overlaps), "source": len(source),
               "terminal_flat": len(flat), "vertex_on_edge": len(edge_v),
               "vertex_on_flat_edge": len(flat_v),
@@ -2808,6 +2828,7 @@ def verify_and_log(layout, icao: str, debug_log_path: str | None = None,
     if OBJECT_BRIDGE_TERRAIN:
         counts["bridge_deck_pins"] = len(bridge_pins)
         counts["bridge_crossing_floor"] = len(bridge_floor)
+        counts["object_bridge_approach_overlap"] = len(approach_overlaps)
     if not sum(counts.values()):
         UI.vprint(1, f"  [verify] {icao}: OK — no patch issues.")
         return counts
