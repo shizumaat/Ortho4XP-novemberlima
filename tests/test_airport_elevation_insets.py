@@ -424,3 +424,111 @@ def test_alt_bake_is_noop_without_cached_insets(tmp_path, monkeypatch):
     # No inset files cached -> bake must leave the raster untouched.
     INSETS.bake_airport_insets_into_alt_dem(tile)
     assert numpy.array_equal(base_dem.alt_dem, before)
+
+
+# =====================================================================
+# Automatic per-airport smoothing radius (spec section 3.4)
+# =====================================================================
+def test_smoothing_radius_rule_arithmetic():
+    rule = INSETS.smoothing_radius_pixels_for_source
+    working = 30.9
+    # 30 m-class source (or the capped base path) -> unchanged.
+    assert rule(8, 30.9, working) == 8
+    assert rule(8, 30.0, working) == 8
+    # 10 m source -> 3 pixels of 8.
+    assert rule(8, 10.0, working) == 3
+    # 3 m inset -> 1 pixel.
+    assert rule(8, 3.0, working) == 1
+    # 1 m inset -> 0 pixels (no blur -- the case measured to be harmful).
+    assert rule(8, 1.0, working) == 0
+    # Never exceeds today's radius, whatever the source claims.
+    assert rule(8, 300.0, working) == 8
+    # Degenerate inputs stay sane.
+    assert rule(0, 3.0, working) == 0
+    assert rule(8, 3.0, 0.0) == 8
+
+
+class _RadiusTile(_FakeTile):
+    def __init__(self, lat, lon):
+        super().__init__(lat, lon)
+        self.apt_smoothing_pix = 8
+        self.apt_smoothing_auto = True
+
+
+def test_override_precedence_beats_auto(tmp_path, monkeypatch):
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+    tile = _RadiusTile(0, 0)
+    # The explicit per-airport override wins over the automatic rule...
+    (radius, source_pixel, coverage) = INSETS.resolve_airport_smoothing_radius(
+        tile, {"smoothing_pix": 13}, 30.9, None
+    )
+    assert (radius, source_pixel, coverage) == (13, None, None)
+    # ...including an override of zero (explicitly no smoothing).
+    assert INSETS.resolve_airport_smoothing_radius(
+        tile, {"smoothing_pix": 0}, 30.9, None
+    ) == (0, None, None)
+
+
+def test_auto_gate_off_gives_legacy_radius(tmp_path, monkeypatch):
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+    tile = _RadiusTile(0, 0)
+    tile.apt_smoothing_auto = False
+    assert INSETS.resolve_airport_smoothing_radius(
+        tile, {}, 30.9, None
+    ) == (8, None, None)
+    # Insets gated off -> also the legacy radius, even with auto on.
+    tile.apt_smoothing_auto = True
+    tile.airport_elevation_insets = False
+    assert INSETS.resolve_airport_smoothing_radius(
+        tile, {}, 30.9, None
+    ) == (8, None, None)
+
+
+@requires_gdal
+def test_coverage_threshold_behaviour(tmp_path, monkeypatch):
+    from shapely import geometry as shapely_geometry
+
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+    INSETS.initialize_elevation_providers_dict()
+    tile = _RadiusTile(0, 0)
+    working_pixel_m = 30.9
+
+    # A 3 m-pixel inset covering [0.40, 0.60]^2 (tile-relative degrees).
+    inset_directory = FNAMES.airport_inset_directory(0, 0)
+    os.makedirs(inset_directory, exist_ok=True)
+    inset_path = FNAMES.airport_inset_dem(0, 0, "COVR", "USGS3DEP")
+    three_metres_in_degrees = 3.0 / 111120.0
+    columns = int(round(0.2 / three_metres_in_degrees))
+    _write_constant_geotiff(
+        inset_path, 0.40, 0.40, 0.60, 0.60, 100.0,
+        columns=columns, rows=columns,
+    )
+
+    # Mask fully inside the inset -> coverage 100 % -> 3 m rule -> 1 pixel.
+    inner_mask = shapely_geometry.box(0.45, 0.45, 0.55, 0.55)
+    (radius, source_pixel, coverage) = INSETS.resolve_airport_smoothing_radius(
+        tile, {}, working_pixel_m, inner_mask
+    )
+    assert coverage == pytest.approx(1.0, abs=0.01)
+    assert source_pixel == pytest.approx(3.0, abs=0.2)
+    assert radius == 1
+
+    # Mask half inside (50 % < the 80 % threshold) -> base path -> 8.
+    straddling_mask = shapely_geometry.box(0.50, 0.45, 0.70, 0.55)
+    (radius, source_pixel, coverage) = INSETS.resolve_airport_smoothing_radius(
+        tile, {}, working_pixel_m, straddling_mask
+    )
+    assert coverage == pytest.approx(0.5, abs=0.02)
+    assert source_pixel == pytest.approx(working_pixel_m)
+    assert radius == 8
+
+    # Mask 90 % inside (>= threshold) -> the inset rule applies.
+    mostly_inside_mask = shapely_geometry.box(0.42, 0.45, 0.62, 0.55)
+    (radius, source_pixel, coverage) = INSETS.resolve_airport_smoothing_radius(
+        tile, {}, working_pixel_m, mostly_inside_mask
+    )
+    assert coverage == pytest.approx(0.9, abs=0.02)
+    assert radius == 1

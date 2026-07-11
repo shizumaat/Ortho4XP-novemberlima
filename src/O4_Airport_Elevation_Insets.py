@@ -56,7 +56,11 @@ grading seeds).  So this feature needs BOTH:
      cached inset into ``tile.dem.alt_dem`` over its footprint with a
      feathered blend band (``airport_elevation_inset_feather_m``, default
      60 m) so the inset->base seam is a ramp, not a cliff.  It runs in
-     step 1 just before ``write_to_file``, so both steps see one raster.
+     step 1 just before ``write_to_file``, so both steps see one raster,
+     and again on step 2's ITERATIVE-refinement branch, which rewrites the
+     ``.alt`` from the ``tile.iterate``-th user sub-DEM (that load keeps
+     nodata, so the bake takes the inset outright over base nodata cells
+     instead of blending against the sentinel).
 
 The synthetic-inset unit test in ``tests/test_airport_elevation_insets.py``
 proves the bake: a flat inset over a flat base appears at inset cells, ramps
@@ -836,8 +840,10 @@ def _bake_one_inset(tile, inset_path, feather_m):
     window = base_dem.alt_dem[
         row_min : row_max + 1, column_min : column_max + 1
     ]
-    # Datum sanity: median base-vs-inset offset across the feather ring.
-    ring = (weight > 0) & (weight < 1) & valid
+    base_nodata = window == base_dem.nodata
+    # Datum sanity: median base-vs-inset offset across the feather ring
+    # (base nodata cells carry the sentinel, not terrain -- exclude them).
+    ring = (weight > 0) & (weight < 1) & valid & ~base_nodata
     if numpy.any(ring):
         offset = float(
             numpy.median(inset_values[ring] - window[ring])
@@ -852,9 +858,169 @@ def _bake_one_inset(tile, inset_path, feather_m):
                 "m over the feather ring (>3 m; check vertical datum).",
             )
     blended = weight * inset_values + (1.0 - weight) * window
+    # Where the base holds its nodata sentinel (possible on the step-2
+    # iterative-refinement path, which loads with fill_nodata=False),
+    # blending against the sentinel would fabricate huge negative ramps:
+    # take the inset outright where it has data, keep the sentinel where
+    # neither has data.
+    if numpy.any(base_nodata):
+        blended = numpy.where(
+            base_nodata,
+            numpy.where(valid, inset_values, window),
+            blended,
+        )
     base_dem.alt_dem[
         row_min : row_max + 1, column_min : column_max + 1
     ] = blended.astype(base_dem.alt_dem.dtype)
+
+
+# =====================================================================
+# Automatic per-airport smoothing radius (spec section 3.4)
+# =====================================================================
+# The airport smoothing blur exists to hide the pixel staircase of the
+# elevation SOURCE, so its radius should scale with the source's pixel
+# size, not sit fixed at apt_smoothing_pix working-grid pixels (a fixed
+# 8-pixel tent blur is ~250 m and was measured to erase engineered
+# relief -- the KBNA taxiway M plateau dropped 9.5 m).  The rule, in
+# metres so the mask upscaling step never changes the physical footprint:
+#
+#   blur_radius_m    = apt_smoothing_pix * source_pixel_m,
+#                      capped at apt_smoothing_pix * working_pixel_m
+#   radius_pixels(a) = round(blur_radius_m / working_pixel_m)
+#                    = min(apt_smoothing_pix,
+#                          round(apt_smoothing_pix
+#                                * source_pixel_m / working_pixel_m))
+#
+# where source_pixel_m is the finest cached inset pixel when insets cover
+# at least INSET_COVERAGE_THRESHOLD of the airport's smoothing mask, else
+# the base source's TRUE pixel size capped at the working pixel.  The
+# base loader either reads a source at its native grid or UPSAMPLES
+# coarser data onto the working grid, so no base source is ever finer
+# than the working grid: the cap makes the base path's ratio exactly 1
+# and the radius exactly apt_smoothing_pix -- identical to today (goal
+# G3).  Consequences: 30 m-class base -> apt_smoothing_pix unchanged;
+# a 10 m source -> 3 pixels (of 8); 3 m inset -> 1; 1 m inset -> 0.
+
+INSET_COVERAGE_THRESHOLD = 0.8
+
+
+def smoothing_radius_pixels_for_source(
+    apt_smoothing_pix, source_pixel_m, working_pixel_m
+):
+    """The spec section 3.4 radius rule (pure arithmetic).
+
+    Half-up rounding (not banker's) so the boundary cases are
+    deterministic and monotone in ``source_pixel_m``; floored at 0 (no
+    blur) and capped at ``apt_smoothing_pix`` (never exceed today).
+    """
+    if apt_smoothing_pix <= 0 or working_pixel_m <= 0:
+        return max(int(apt_smoothing_pix), 0)
+    scaled = apt_smoothing_pix * source_pixel_m / working_pixel_m
+    return min(int(apt_smoothing_pix), int(scaled + 0.5))
+
+
+def inset_coverage_of_airport_mask(tile, mask_geometry):
+    """Coverage of an airport's smoothing mask by the cached insets.
+
+    Returns ``(coverage_fraction, finest_intersecting_inset_pixel_m)``.
+    Coverage is judged by the insets' raster EXTENTS (rectangles in
+    tile-relative degrees) -- interior nodata is not subtracted, which
+    matches how the bake applies them (nodata cells fall back to base).
+    ``(0.0, None)`` when no cached inset touches the mask.
+    """
+    if (
+        not has_gdal
+        or mask_geometry is None
+        or mask_geometry.is_empty
+        or mask_geometry.area == 0
+    ):
+        return (0.0, None)
+    from shapely import geometry as shapely_geometry
+    from shapely import ops as shapely_ops
+
+    provider_definitions = select_provider_definitions(
+        getattr(tile, "airport_elevation_providers", "auto")
+    )
+    codes = [definition["code"] for definition in provider_definitions]
+    inset_paths = list_cached_inset_dems(
+        tile.lat, tile.lon, provider_codes=codes or None
+    )
+    boxes = []
+    finest_pixel_m = None
+    for inset_path in inset_paths:
+        try:
+            dataset = gdal.Open(inset_path)
+            geotransform = dataset.GetGeoTransform()
+            columns = dataset.RasterXSize
+            rows = dataset.RasterYSize
+        except Exception:
+            continue
+        west = geotransform[0]
+        north = geotransform[3]
+        east = west + columns * geotransform[1]
+        south = north + rows * geotransform[5]
+        extent_box = shapely_geometry.box(
+            west - tile.lon, south - tile.lat, east - tile.lon, north - tile.lat
+        )
+        if not extent_box.intersects(mask_geometry):
+            continue
+        boxes.append(extent_box)
+        pixel_m = abs(geotransform[5]) * GEO.lat_to_m
+        finest_pixel_m = (
+            pixel_m
+            if finest_pixel_m is None
+            else min(finest_pixel_m, pixel_m)
+        )
+    if not boxes:
+        return (0.0, None)
+    covered_area = (
+        shapely_ops.unary_union(boxes).intersection(mask_geometry).area
+    )
+    return (covered_area / mask_geometry.area, finest_pixel_m)
+
+
+def resolve_airport_smoothing_radius(
+    tile, airport_record, working_pixel_m, mask_geometry=None
+):
+    """Resolve the smoothing radius (in working-grid pixels) for one airport.
+
+    Returns ``(radius_pixels, source_pixel_m, coverage_fraction)``; the
+    last two are ``None`` whenever the LEGACY fixed radius applies (so a
+    caller can log only the automatic decisions).  Precedence:
+
+    1. The per-airport ``smoothing_pix`` apt.dat/config override always
+       wins (unchanged from the historic behaviour).  An unparseable
+       override falls through to the rules below (historically it fell to
+       the tile default; with the automatic gate off that is still exactly
+       what happens).
+    2. ``apt_smoothing_auto`` off, insets gated off, or GDAL absent ->
+       the fixed ``tile.apt_smoothing_pix``.
+    3. Otherwise the section 3.4 rule above.
+    """
+    if "smoothing_pix" in airport_record:
+        try:
+            return (int(airport_record["smoothing_pix"]), None, None)
+        except (TypeError, ValueError):
+            pass
+    default_radius = tile.apt_smoothing_pix
+    if not getattr(tile, "apt_smoothing_auto", False):
+        return (default_radius, None, None)
+    if not getattr(tile, "airport_elevation_insets", False) or not has_gdal:
+        return (default_radius, None, None)
+    (coverage_fraction, finest_pixel_m) = inset_coverage_of_airport_mask(
+        tile, mask_geometry
+    )
+    if coverage_fraction >= INSET_COVERAGE_THRESHOLD and finest_pixel_m:
+        source_pixel_m = finest_pixel_m
+    else:
+        # Base source: TRUE pixel capped at the working pixel (see the
+        # section comment -- the cap makes this the working pixel, and
+        # the radius identical to today).
+        source_pixel_m = working_pixel_m
+    radius_pixels = smoothing_radius_pixels_for_source(
+        default_radius, source_pixel_m, working_pixel_m
+    )
+    return (radius_pixels, source_pixel_m, coverage_fraction)
 
 
 # =====================================================================

@@ -648,6 +648,13 @@ def build_mesh(tile):
                     fill_nodata=False,
                     info_only=False,
                 )
+                # Iterative refinement rewrites the raster from the
+                # tile.iterate-th user sub-DEM; re-bake the cached airport
+                # insets so the refined raster keeps the meter-class
+                # airport terrain (no-op when the feature is gated off --
+                # and the bake guards base nodata cells, which this
+                # fill_nodata=False load can contain).
+                INSETS.bake_airport_insets_into_alt_dem(tile)
                 tile.dem.write_to_file(FNAMES.alt_file(tile))
         except Exception as e:
             print(e)

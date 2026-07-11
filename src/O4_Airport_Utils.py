@@ -952,15 +952,44 @@ def smooth_raster_over_airports(tile, dico_airports, preserve_boundary=True):
     upscale = max(
         ceil(ystep * GEO.lat_to_m / 10), 1
     )  # target 10m of pixel size at most to avoiding aliasing
+    working_pixel_m = ystep * GEO.lat_to_m
     for airport in dico_airports:
-        try:
-            pix = (
-                int(dico_airports[airport]["smoothing_pix"])
-                if "smoothing_pix" in dico_airports[airport]
-                else tile.apt_smoothing_pix
+        # The smoothing mask (also the coverage geometry for the automatic
+        # radius rule below).
+        full_area = VECT.ensure_MultiPolygon(
+            ops.unary_union(
+                [
+                    dico_airports[airport]["boundary"],
+                    dico_airports[airport]["runway"][0],
+                    dico_airports[airport]["hangar"],
+                    dico_airports[airport]["taxiway"][0],
+                    dico_airports[airport]["apron"][0],
+                ]
             )
-        except:
-            pix = tile.apt_smoothing_pix
+        )
+        # Per-airport radius: the explicit smoothing_pix override wins,
+        # then the automatic rule (spec section 3.4) scales the radius to
+        # the finest elevation source covering this airport, else the
+        # legacy fixed apt_smoothing_pix (see the resolver's docstring).
+        (
+            pix,
+            source_pixel_m,
+            coverage_fraction,
+        ) = INSETS.resolve_airport_smoothing_radius(
+            tile, dico_airports[airport], working_pixel_m, full_area
+        )
+        if source_pixel_m is not None:
+            UI.vprint(
+                1,
+                "   Airport",
+                airport,
+                ": smoothing radius",
+                pix,
+                "pixel(s) (source pixel",
+                round(source_pixel_m, 1),
+                "m, inset coverage",
+                str(round(coverage_fraction * 100)) + "%).",
+            )
         if not pix:
             continue
         (xmin, ymin, xmax, ymax) = dico_airports[airport]["boundary"].bounds
@@ -977,17 +1006,6 @@ def smooth_raster_over_airports(tile, dico_airports, preserve_boundary=True):
             (upscale * (colmax - colmin + 1), upscale * (rowmax - rowmin + 1)),
         )
         airport_draw = ImageDraw.Draw(airport_im)
-        full_area = VECT.ensure_MultiPolygon(
-            ops.unary_union(
-                [
-                    dico_airports[airport]["boundary"],
-                    dico_airports[airport]["runway"][0],
-                    dico_airports[airport]["hangar"],
-                    dico_airports[airport]["taxiway"][0],
-                    dico_airports[airport]["apron"][0],
-                ]
-            )
-        )
         for polygon in full_area.geoms:
             exterior_pol_pix = [
                 (
