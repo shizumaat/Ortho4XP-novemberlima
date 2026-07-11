@@ -202,6 +202,23 @@
 #    CUT-ONLY — no floor, emitted nothing in dipping gaps — the
 #    ring is orthogonal to B4; B4 unblocked from the ring (held
 #    only on the KBNA perf fix as flip hygiene).
+#    ★★★ RINGS LANDED b3cd998 + round-8 default flip 53da9c2:
+#    evidence site 74%→4.0% (ring 2 rides the exact 5% band max) ·
+#    gap #3 185%→~1.5-5% · 66 chains / 709 nodes fleet-wide
+#    violation-gated · ZERO solver growth (floor-pin = derived
+#    equality at emission) · audit floor IMPROVED to T4/NP3/
+#    coincident 3/crossings 18, zero new · both byte pairs identical
+#    · check_grade lockstep parser fix (open-breakline refs skip the
+#    phantom closing edge, crown precedent) · GAP_FILL constants
+#    dedup INCLUDED (supersedes the parallel session's uncommitted
+#    edit — preserved in a labeled stash — and the spawned cleanup
+#    task, now redundant).  ★ROUND-8 BAKE = plain defaults +
+#    O4_AUTO_PATCH_REBUILD=1 + restart Ortho4XP.  Look at: the two
+#    dip sites (now law-profiled; INSIDE ring 2 the invalid-DEM drop
+#    renders steep BY DESIGN — the dial is DEM/trigger, not ring
+#    law) · ring transitions at gap #3 · the taper daylights.
+#    LEDGER: runway_crossing ring width keys the nearest axis —
+#    flag if crossings should take the larger intersecting code.
 #    ★NOAH RATIFIED (2026-07-11): TWO-RING design IMPLEMENT,
 #    FLEET-WIDE violation-gated behind a default-OFF sub-gate —
 #    breaklines not polygon splits · lip ring 3 m + band-edge ring
