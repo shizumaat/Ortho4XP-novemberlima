@@ -2202,14 +2202,18 @@ OPEN_FRONTAGE_CLOSE_M = GAP_FILL_MAX_WIDTH_M / 2.0
 # set is still empty — admission of an empty role set is a structural no-op
 # — which is exactly Stage B0's landing condition: the primitive and the
 # scaffolding exist, nothing is admitted yet.
+# ROUND-7 REVIEW DEFAULTS (Noah, 2026-07-11): the whole slice-B bundle is
+# ON BY DEFAULT for the in-sim ratification build.  Set any gate's env var
+# to 0 to fall back to the pre-absorption path (every stage was proven
+# byte-identical gates-off at its landing).
 ONE_SOLVE_TERRAIN = (
-    _os.environ.get("O4_ONE_SOLVE_TERRAIN", "0") == "1")
+    _os.environ.get("O4_ONE_SOLVE_TERRAIN", "1") == "1")
 ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT = (
-    _os.environ.get("O4_ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT", "0") == "1")
+    _os.environ.get("O4_ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT", "1") == "1")
 ONE_SOLVE_TERRAIN_GAP_FILL_SPINE = (
-    _os.environ.get("O4_ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", "0") == "1")
+    _os.environ.get("O4_ONE_SOLVE_TERRAIN_GAP_FILL_SPINE", "1") == "1")
 ONE_SOLVE_TERRAIN_GRADED_STRIP = (
-    _os.environ.get("O4_ONE_SOLVE_TERRAIN_GRADED_STRIP", "0") == "1")
+    _os.environ.get("O4_ONE_SOLVE_TERRAIN_GRADED_STRIP", "1") == "1")
 # Slice B stage B3 ORDER 1 (construction move) sub-gate, DEFAULT OFF and
 # deliberately SEPARATE from the B0 admission sub-gate ``ONE_SOLVE_TERRAIN_
 # GRADED_STRIP`` above (which stays OFF until B3 order 2, variable
@@ -2224,7 +2228,7 @@ ONE_SOLVE_TERRAIN_GRADED_STRIP = (
 # admission gate.  Requires the adjacent-ground law itself
 # (``ADJACENT_GROUND_LAW_ENABLED``) to be ON to have any effect.
 ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT = (
-    _os.environ.get("O4_ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT", "0")
+    _os.environ.get("O4_ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT", "1")
     == "1")
 
 # APRON edges.  NO code mandates grading beyond an apron edge (positive

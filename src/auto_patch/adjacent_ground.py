@@ -151,7 +151,9 @@ _SEAM_TAPER_PIN = os.environ.get("O4_SEAM_TAPER_PIN", "1") != "0"
 # (shared vertices; the to_osm skirt-tier consensus supplies the value —
 # the same identity/adoption bands read pavement with today).  Runways keep
 # the END-edge skip (their skirt law owns them); aprons are unaffected.
-_END_WRAP = os.environ.get("O4_ADJACENT_GROUND_END_WRAP") == "1"
+# (Round-7 review default ON, Noah 2026-07-11 — judged in-sim with the
+# slice-B bundle; env var 0 falls back.)
+_END_WRAP = os.environ.get("O4_ADJACENT_GROUND_END_WRAP", "1") == "1"
 # Slice B stage B3 order 3, SCOPE B — tunnel-ramp STANDOFF (acceptance
 # criterion 6; the ledgered SPJC strip-onto-mouth-ramp tears;
 # O4_ADJACENT_GROUND_TUNNEL_STANDOFF, default OFF).  Band construction
@@ -165,8 +167,10 @@ _END_WRAP = os.environ.get("O4_ADJACENT_GROUND_END_WRAP") == "1"
 # its own ``retaining_wall`` pieces, so apron-edge walls are naturally
 # excluded (only pre-existing tunnel walls are captured).  Independently
 # flippable from the wrap (they may gate differently at B4).
+# (Round-7 review default ON, Noah 2026-07-11 — inert everywhere probed;
+# fires only where tunnel ramps emit, e.g. the CYUL mapped-portal class.)
 _TUNNEL_STANDOFF = os.environ.get(
-    "O4_ADJACENT_GROUND_TUNNEL_STANDOFF") == "1"
+    "O4_ADJACENT_GROUND_TUNNEL_STANDOFF", "1") == "1"
 # Lab forensics: O4_ADJACENT_GROUND_DEBUG=1 logs per-shape band counts and
 # every dropped piece, for chasing validator coverage findings.
 _ADJACENT_DEBUG = os.environ.get("O4_ADJACENT_GROUND_DEBUG") == "1"
