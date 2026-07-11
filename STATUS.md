@@ -177,7 +177,27 @@
 #    essentially the SAME as before the absorption — which is the
 #    PASS condition for a foundational refactor (every stage's
 #    acceptance was no-visual-change).  The absorption is RATIFIED
-#    in-sim; the visible-improvement stage is B4.
+#    in-sim; the visible-improvement stage is B4.  CRITERION 4
+#    RESOLVED: taxiway-end sites acceptable as-is — the wrap stays a
+#    gated-off guard; B4 proceeds without it.
+#    ★★★ GAP INTERIOR RING (Noah design direction 2026-07-11,
+#    scout dispatched, DESIGN-ONLY — Noah ratifies before build):
+#    a single mid-gap spine cannot hold the graded-band law when the
+#    interior genuinely drops — the mesh spans pavement→spine in one
+#    leg, putting the steep slope AT the pavement edge (evidence:
+#    spine node 60.7210897,-135.0776149 is ~15 m from and ~10 m
+#    BELOW the pavement edge at 60.7212117,-135.0777251 = ~67%
+#    slope at pavement).  Design: interior RING at the graded-band-
+#    edge offset (finite envelope floors = grade cap enforced along
+#    pavement), steeper terrain allowed INSIDE the ring (open floor
+#    stands, per the invalid-DEM ruling).  Scout also checks
+#    (a) whether the node's frozen two-parent selection MISSED the
+#    nearest pavement (a bug on top of the structural gap), and
+#    (b) the B4 SEQUENCING claim: legacy clearance pieces currently
+#    hold band-law terrain INSIDE enclosed gaps as gap blockers, so
+#    THE RING MUST LAND BEFORE B4 legacy deletion or the hole gets
+#    exposed at every site clearance was propping up.  B4 IS HELD
+#    until the ring design is ratified and landed.
 #
 # ★ TRUE CURRENT BASELINES (CYXY, this tree — the part-35 numbers
 # below predate the O4_OBJECT_BRIDGE_TERRAIN landing and are STALE):
