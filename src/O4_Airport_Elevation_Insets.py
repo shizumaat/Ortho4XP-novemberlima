@@ -565,6 +565,7 @@ def ensure_airport_insets(
             destination = FNAMES.airport_inset_dem(lat, lon, icao, code)
             if os.path.isfile(destination) and not refresh:
                 airport_record[code] = airport_record.get(code) or "ok"
+                _store_acceptance_probes_in_record(airport_record, destination)
                 break
             if (
                 not refresh
@@ -596,10 +597,35 @@ def ensure_airport_insets(
                 json.dump(provenance, handle, indent=2, sort_keys=True)
             airport_record[code] = "ok"
             airport_record["checked"] = checked_stamp
+            _store_acceptance_probes_in_record(
+                airport_record, destination, refresh=refresh
+            )
             break
         index[icao] = airport_record
     _write_index(lat, lon, index)
     return index
+
+
+def _store_acceptance_probes_in_record(airport_record, inset_path, refresh=False):
+    """Record the Phase C1 acceptance probes for an inset in its index entry.
+
+    Stores ``[[latitude, longitude], ...]`` under ``"probes"`` so the
+    working-grid decision is transparent and inspectable per airport (spec
+    section 4, C1: "store the probe list with the tile's inset index").
+    Computed once and cached in the index; ``refresh`` recomputes.  A no-op
+    without GDAL or when the probes cannot be derived.
+    """
+    if "probes" in airport_record and not refresh:
+        return
+    try:
+        probes = acceptance_probes_for_inset(inset_path)
+    except Exception:
+        return
+    if probes:
+        airport_record["probes"] = [
+            [float(latitude), float(longitude)]
+            for (latitude, longitude) in probes
+        ]
 
 
 def list_cached_inset_dems(lat, lon, provider_codes=None):
@@ -905,18 +931,35 @@ INSET_COVERAGE_THRESHOLD = 0.8
 
 
 def smoothing_radius_pixels_for_source(
-    apt_smoothing_pix, source_pixel_m, working_pixel_m
+    apt_smoothing_pix, source_pixel_m, working_pixel_m, reference_pixel_m=None
 ):
     """The spec section 3.4 radius rule (pure arithmetic).
 
     Half-up rounding (not banker's) so the boundary cases are
     deterministic and monotone in ``source_pixel_m``; floored at 0 (no
-    blur) and capped at ``apt_smoothing_pix`` (never exceed today).
+    blur).
+
+    The radius expresses a PHYSICAL blur footprint of
+    ``apt_smoothing_pix * min(source_pixel_m, reference_pixel_m)`` metres,
+    divided by the working-grid pixel to yield a pixel count.
+    ``reference_pixel_m`` is the 1 arc-second (~30.9 m) pixel that the
+    historic ``apt_smoothing_pix`` was expressed in; it defaults to
+    ``working_pixel_m`` so the non-densified path is byte-identical to
+    before.  On the Phase C densified path the caller passes the true
+    1 arc-second pixel so that halving the grid does not silently halve
+    the physical smoothing footprint (the section 3.4 "radius in metres"
+    principle).  ``min(source_pixel_m, reference_pixel_m)`` also supplies
+    the historic "never exceed today" cap: no base source is finer than
+    the reference pixel, so a coarse source yields exactly
+    ``apt_smoothing_pix`` reference-pixels of blur.
     """
     if apt_smoothing_pix <= 0 or working_pixel_m <= 0:
         return max(int(apt_smoothing_pix), 0)
-    scaled = apt_smoothing_pix * source_pixel_m / working_pixel_m
-    return min(int(apt_smoothing_pix), int(scaled + 0.5))
+    if reference_pixel_m is None:
+        reference_pixel_m = working_pixel_m
+    effective_source_pixel_m = min(source_pixel_m, reference_pixel_m)
+    scaled = apt_smoothing_pix * effective_source_pixel_m / working_pixel_m
+    return int(scaled + 0.5)
 
 
 def inset_coverage_of_airport_mask(tile, mask_geometry):
@@ -980,7 +1023,8 @@ def inset_coverage_of_airport_mask(tile, mask_geometry):
 
 
 def resolve_airport_smoothing_radius(
-    tile, airport_record, working_pixel_m, mask_geometry=None
+    tile, airport_record, working_pixel_m, mask_geometry=None,
+    reference_pixel_m=None,
 ):
     """Resolve the smoothing radius (in working-grid pixels) for one airport.
 
@@ -996,6 +1040,16 @@ def resolve_airport_smoothing_radius(
     2. ``apt_smoothing_auto`` off, insets gated off, or GDAL absent ->
        the fixed ``tile.apt_smoothing_pix``.
     3. Otherwise the section 3.4 rule above.
+
+    ``reference_pixel_m`` is the physical size of one 1 arc-second working
+    pixel (~30.9 m).  On the Phase C densified path it differs from
+    ``working_pixel_m`` (the dense pixel) so the physical blur footprint
+    is preserved across densification; when omitted it defaults to
+    ``working_pixel_m`` and the behaviour is byte-identical to before.
+    Note the explicit ``smoothing_pix`` override stays a PIXEL count of the
+    working grid (its historic meaning), so densifying scales its physical
+    footprint -- an override is a deliberate manual value and is left
+    literal.
     """
     if "smoothing_pix" in airport_record:
         try:
@@ -1010,17 +1064,571 @@ def resolve_airport_smoothing_radius(
     (coverage_fraction, finest_pixel_m) = inset_coverage_of_airport_mask(
         tile, mask_geometry
     )
+    if reference_pixel_m is None:
+        reference_pixel_m = working_pixel_m
     if coverage_fraction >= INSET_COVERAGE_THRESHOLD and finest_pixel_m:
         source_pixel_m = finest_pixel_m
     else:
-        # Base source: TRUE pixel capped at the working pixel (see the
-        # section comment -- the cap makes this the working pixel, and
-        # the radius identical to today).
-        source_pixel_m = working_pixel_m
+        # Base source: TRUE pixel capped at the reference pixel (see the
+        # section comment -- the cap makes this the reference pixel, and
+        # the radius identical to today on the non-densified path).
+        source_pixel_m = reference_pixel_m
     radius_pixels = smoothing_radius_pixels_for_source(
-        default_radius, source_pixel_m, working_pixel_m
+        default_radius, source_pixel_m, working_pixel_m, reference_pixel_m
     )
     return (radius_pixels, source_pixel_m, coverage_fraction)
+
+
+# =====================================================================
+# Densified working grid over inset tiles (spec section 4, Phase C1)
+# =====================================================================
+# The Phase B acceptance proved the last KBNA residual is the GRID, not
+# the bake: Triangle4XP cannot refine a mesh below one working pixel
+# (Utils/src/Triangle4XP.c:7297), so a meter-class scarp captured in a
+# 3 m inset is still resolved to +/-1.6 m when the working grid posts at
+# ~30.9 m (1 arc-second).  When any airport inset is cached for the tile,
+# the combined working raster (and the .alt the mesher reads) is built on
+# a denser grid: the base is upsampled bilinearly to the target posting
+# and the insets are baked at that denser posting, so their relief
+# survives to the mesh.  No-inset tiles keep the 1 arc-second grid and are
+# byte-identical to before.
+#
+# The target spacing is chosen BEFORE any tile build with a cheap numpy
+# check on the cached inset GeoTIFF (no mesh, no Triangle4XP): for a small
+# set of acceptance PROBES, the "ideal bake" value the probe would read
+# from a working raster at a candidate grid is modelled and compared to
+# the inset's own bilinear value there.  We pick the COARSEST candidate of
+# {1/2, 1/3} arc-second whose worst-probe error stays within
+# WORKING_GRID_IDEAL_TOLERANCE_M, so we never pay for more grid (bytes,
+# memory, mesh time) than the data actually needs.
+
+# Candidate densification FACTORS relative to the 1 arc-second base grid
+# (factor f => spacing 1/f arc-second => (n-1)*f + 1 samples).  The
+# candidate set is the coarsest-first {1/2, 1/3} arc-second of the spec.
+WORKING_GRID_CANDIDATE_FACTORS = (2, 3)
+
+# Worst-probe ideal-bake tolerance for the automatic grid decision.
+# Deliberately tighter than the +/-1.5 m mesh acceptance so the modelled
+# .alt error leaves headroom for the mesh-floor gap the model omits.
+WORKING_GRID_IDEAL_TOLERANCE_M = 1.0
+
+# Number of steepest-gradient probes derived per inset for tiles/airports
+# without a hand-seeded probe list.
+DERIVED_PROBE_COUNT = 8
+
+# Hand-seeded acceptance probes keyed by ICAO (spec section 5 seed set).
+# Each probe is (latitude, longitude) in EPSG:4326 degrees.  Airports not
+# listed here derive probes generically from the steepest-gradient cells
+# of their inset footprint (see derive_acceptance_probes).
+SEED_ACCEPTANCE_PROBES = {
+    "KBNA": (
+        (36.1374844, -86.6760939),  # 45 m gantry south-west foot
+        (36.1376421, -86.6759065),  # gantry anchor
+        (36.1377853, -86.6757619),  # 45 m gantry north-east foot
+        (36.13715, -86.67650),      # taxiway M plateau
+    ),
+}
+
+
+def parse_working_grid_arc_seconds(value):
+    """Parse the ``working_grid_arc_seconds`` config into a decision.
+
+    Returns ``"auto"`` for the automatic rule, or an integer densification
+    FACTOR (1, 2 or 3) for an explicit pin.  Accepts ``"1"``, ``"1/2"``,
+    ``"0.5"``, ``"1/3"`` and friends; an unrecognised value falls back to
+    ``"auto"`` (conservative -- the automatic rule keeps 1 arc-second when
+    no inset covers the tile).
+    """
+    text = str(value or "auto").strip().lower()
+    if text == "auto":
+        return "auto"
+    if text in ("1", "1/1", "1.0", "1\"", "1''"):
+        return 1
+    if text in ("1/2", "0.5", ".5", "2"):
+        return 2
+    if text in ("1/3", "3"):
+        return 3
+    # A bare fraction "a/b" -> round(b/a) as the factor (1 arc-second / n).
+    if "/" in text:
+        try:
+            numerator, denominator = text.split("/", 1)
+            arc_seconds = float(numerator) / float(denominator)
+            if arc_seconds > 0:
+                return max(1, min(3, int(round(1.0 / arc_seconds))))
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+    return "auto"
+
+
+def _inset_icao_from_path(inset_path):
+    """The ICAO/airport key encoded in a cached inset file name.
+
+    Cache files are ``<airport>_<code>.tif`` (the code lower-cased); strip
+    the trailing ``_<code>`` to recover the airport key used for probe
+    seeding.  Returns the whole stem if there is no underscore.
+    """
+    stem = os.path.splitext(os.path.basename(inset_path))[0]
+    return stem.rsplit("_", 1)[0] if "_" in stem else stem
+
+
+def _open_inset_array(inset_path):
+    """Read a cached inset GeoTIFF into ``(array, geotransform, nodata)``.
+
+    Returns ``(None, None, None)`` when GDAL is unavailable or the file
+    cannot be read -- callers treat that inset as contributing no probes /
+    no error (the grid decision then rests on the other insets, or falls
+    back to the finest candidate).
+    """
+    if not has_gdal:
+        return (None, None, None)
+    try:
+        dataset = gdal.Open(inset_path)
+        band = dataset.GetRasterBand(1)
+        array = band.ReadAsArray().astype(numpy.float64)
+        geotransform = dataset.GetGeoTransform()
+        nodata = band.GetNoDataValue()
+    except Exception:
+        return (None, None, None)
+    return (array, geotransform, nodata)
+
+
+def _bilinear_sample_raster(array, geotransform, longitudes, latitudes):
+    """Bilinearly sample a north-up GeoTIFF at arrays of lon/lat points.
+
+    ``geotransform`` is the standard GDAL 6-tuple; pixel (0, 0) covers the
+    top-left corner and its CENTRE sits at ``(west + 0.5 dx, north + 0.5
+    dy)``.  Samples are clamped to the valid interior so edge points read
+    the nearest in-bounds bilinear cell rather than raising.
+    """
+    west = geotransform[0]
+    north = geotransform[3]
+    pixel_width = geotransform[1]
+    pixel_height = geotransform[5]  # negative for north-up
+    rows, columns = array.shape
+    fractional_x = (numpy.asarray(longitudes) - (west + 0.5 * pixel_width)) / pixel_width
+    fractional_y = (numpy.asarray(latitudes) - (north + 0.5 * pixel_height)) / pixel_height
+    column0 = numpy.clip(numpy.floor(fractional_x).astype(int), 0, columns - 2)
+    row0 = numpy.clip(numpy.floor(fractional_y).astype(int), 0, rows - 2)
+    tx = numpy.clip(fractional_x - column0, 0.0, 1.0)
+    ty = numpy.clip(fractional_y - row0, 0.0, 1.0)
+    top_left = array[row0, column0]
+    top_right = array[row0, column0 + 1]
+    bottom_left = array[row0 + 1, column0]
+    bottom_right = array[row0 + 1, column0 + 1]
+    return (
+        top_left * (1 - tx) * (1 - ty)
+        + top_right * tx * (1 - ty)
+        + bottom_left * (1 - tx) * ty
+        + bottom_right * tx * ty
+    )
+
+
+# The generic probe derivation targets TERRAIN-SCALE relief -- engineered
+# embankments, plateaus and shelves a few metres tall over tens of metres,
+# the class the KBNA seed probes represent -- NOT pixel-scale vertical
+# discontinuities (building walls, trees) that NO working grid can resolve
+# to +/-1 m and that would otherwise force every tile to the finest grid.
+# So the gradient is computed on the inset BLOCK-AVERAGED to roughly the
+# 1 arc-second working-pixel scale, where a resolvable embankment shows a
+# strong slope and a vertical wall averages out.
+PROBE_TERRAIN_SCALE_M = 30.0
+
+
+def derive_acceptance_probes(inset_path, count=DERIVED_PROBE_COUNT):
+    """Generic acceptance probes: the steepest TERRAIN-SCALE cells of an inset.
+
+    Airports without a hand-seeded probe list (every non-KBNA tile) still
+    need a sensible grid decision, so we probe where the inset's
+    terrain-scale relief is steepest -- exactly the engineered embankments
+    a coarse working grid smears worst, and the cells densifying actually
+    helps.  The inset is block-averaged to roughly the working-pixel scale
+    (:data:`PROBE_TERRAIN_SCALE_M`) before the gradient is taken, so
+    unresolvable pixel-scale walls do not dominate.  The ``count`` strongest
+    coarse cells, spread at least a tenth of the footprint apart, are
+    returned as ``(latitude, longitude)`` cell-centre pairs.
+    """
+    (array, geotransform, nodata) = _open_inset_array(inset_path)
+    if array is None:
+        return []
+    pixel_height_m = abs(geotransform[5]) * GEO.lat_to_m
+    block = max(1, int(round(PROBE_TERRAIN_SCALE_M / max(pixel_height_m, 1e-6))))
+    rows, columns = array.shape
+    valid = numpy.ones(array.shape, dtype=bool)
+    if nodata is not None:
+        valid &= array != nodata
+    # Block-mean the inset (ignoring nodata) to ~working-pixel posting.
+    coarse_rows = rows // block
+    coarse_columns = columns // block
+    if coarse_rows < 3 or coarse_columns < 3:
+        block = 1
+        coarse_rows, coarse_columns = rows, columns
+        coarse = numpy.where(valid, array, numpy.nan)
+    else:
+        trimmed = array[: coarse_rows * block, : coarse_columns * block]
+        trimmed_valid = valid[: coarse_rows * block, : coarse_columns * block]
+        blocks = trimmed.reshape(
+            coarse_rows, block, coarse_columns, block
+        )
+        blocks_valid = trimmed_valid.reshape(
+            coarse_rows, block, coarse_columns, block
+        )
+        with numpy.errstate(invalid="ignore"):
+            summed = numpy.where(blocks_valid, blocks, 0.0).sum(axis=(1, 3))
+            counted = blocks_valid.sum(axis=(1, 3))
+            coarse = numpy.where(counted > 0, summed / numpy.maximum(counted, 1), numpy.nan)
+    gradient_y, gradient_x = numpy.gradient(numpy.nan_to_num(coarse, nan=0.0))
+    magnitude = numpy.hypot(gradient_x, gradient_y)
+    magnitude[numpy.isnan(coarse)] = -1.0
+    minimum_separation = max(1, int(0.1 * min(coarse_rows, coarse_columns)))
+    order = numpy.argsort(magnitude, axis=None)[::-1]
+    west = geotransform[0]
+    north = geotransform[3]
+    pixel_width = geotransform[1]
+    pixel_height = geotransform[5]
+    chosen_cells = []
+    probes = []
+    for flat_index in order:
+        if len(probes) >= count:
+            break
+        coarse_row = int(flat_index // coarse_columns)
+        coarse_column = int(flat_index % coarse_columns)
+        if magnitude[coarse_row, coarse_column] < 0:
+            break
+        too_close = any(
+            abs(coarse_row - r) < minimum_separation
+            and abs(coarse_column - c) < minimum_separation
+            for (r, c) in chosen_cells
+        )
+        if too_close:
+            continue
+        chosen_cells.append((coarse_row, coarse_column))
+        # Cell centre of the coarse block, back in inset pixel coordinates.
+        column = (coarse_column + 0.5) * block
+        row = (coarse_row + 0.5) * block
+        longitude = west + column * pixel_width
+        latitude = north + row * pixel_height
+        probes.append((latitude, longitude))
+    return probes
+
+
+def acceptance_probes_with_source(inset_path):
+    """The acceptance probes for one inset plus whether they are seeded.
+
+    Returns ``(probes, is_seeded)``.  A hand-seeded ICAO probe set (spec
+    section 5) is used when the file's airport key matches AND the probes
+    fall inside the inset footprint (``is_seeded=True``); otherwise probes
+    are derived from the steepest terrain-scale cells (``is_seeded=False``).
+    Seeded probes are the airport's acceptance requirement and always drive
+    the grid decision; derived probes drive it only where densification can
+    actually bring them within tolerance (see resolve_working_grid_factor).
+    """
+    icao = _inset_icao_from_path(inset_path)
+    seeded = SEED_ACCEPTANCE_PROBES.get(icao)
+    if seeded:
+        (array, geotransform, nodata) = _open_inset_array(inset_path)
+        if array is not None:
+            rows, columns = array.shape
+            west = geotransform[0]
+            north = geotransform[3]
+            east = west + columns * geotransform[1]
+            south = north + rows * geotransform[5]
+            inside = [
+                (latitude, longitude)
+                for (latitude, longitude) in seeded
+                if west <= longitude <= east and south <= latitude <= north
+            ]
+            if inside:
+                return (inside, True)
+    return (derive_acceptance_probes(inset_path), False)
+
+
+def acceptance_probes_for_inset(inset_path):
+    """The acceptance probes for one cached inset (seeded or derived)."""
+    return acceptance_probes_with_source(inset_path)[0]
+
+
+def ideal_bake_errors_per_probe(inset_path, probes, factor, base_geometry):
+    """Modelled .alt error of an inset baked at a densified grid, per probe.
+
+    For each probe, ``truth`` is the inset's own bilinear value there.
+    ``built`` models the value the probe would read from a working raster
+    posting at ``factor`` x the base grid: each surrounding working-grid
+    NODE takes the inset's bilinear value, and the probe is interpolated
+    across the cell with the SAME two-triangle split the pipeline's
+    ``DEM.alt_nostrict`` (and hence the built mesh) uses -- so the number
+    is the grid-quantisation error the mesh will actually carry, not an
+    optimistic full-bilinear estimate.  Returns a list of ``|built -
+    truth|`` aligned with ``probes`` (empty when the inset is unreadable).
+
+    ``base_geometry`` is ``(x0, x1, y0, y1, nxdem, nydem)`` of the base
+    working grid in tile-relative degrees; the densified node spacing is
+    that grid refined by ``factor``.  Probes carry both tile-relative and
+    absolute coordinates (the geometry math and the inset sampling each get
+    the frame they need -- see resolve_working_grid_factor).
+    """
+    (array, geotransform, nodata) = _open_inset_array(inset_path)
+    if array is None or not probes:
+        return []
+    (x0, x1, y0, y1, nxdem, nydem) = base_geometry
+    dense_columns = (nxdem - 1) * factor + 1
+    dense_rows = (nydem - 1) * factor + 1
+    x_step = (x1 - x0) / (dense_columns - 1)
+    y_step = (y1 - y0) / (dense_rows - 1)
+
+    errors = []
+    for (relative_x, relative_y, longitude, latitude) in probes:
+        truth = float(
+            _bilinear_sample_raster(
+                array, geotransform, [longitude], [latitude]
+            )[0]
+        )
+        # Working-grid cell containing the probe (row grows southward).
+        column_index = (relative_x - x0) / x_step
+        row_index = (y1 - relative_y) / y_step
+        column0 = int(numpy.floor(column_index))
+        row0 = int(numpy.floor(row_index))
+        rx = column_index - column0
+        ry = row_index - row0
+
+        def node_value(column, row):
+            node_longitude = longitude + (
+                (x0 + column * x_step) - relative_x
+            )
+            node_latitude = latitude + (
+                (y1 - row * y_step) - relative_y
+            )
+            return float(
+                _bilinear_sample_raster(
+                    array, geotransform, [node_longitude], [node_latitude]
+                )[0]
+            )
+
+        top_left = node_value(column0, row0)
+        top_right = node_value(column0 + 1, row0)
+        bottom_left = node_value(column0, row0 + 1)
+        bottom_right = node_value(column0 + 1, row0 + 1)
+        # Two-triangle split identical to DEM.alt_nostrict (rx vs ry).
+        if rx >= ry:
+            built = (
+                (1 - rx) * top_left
+                + ry * bottom_right
+                + (rx - ry) * top_right
+            )
+        else:
+            built = (
+                (1 - ry) * top_left
+                + rx * bottom_right
+                + (ry - rx) * bottom_left
+            )
+        errors.append(abs(built - truth))
+    return errors
+
+
+def ideal_bake_error_at_probes(inset_path, probes, factor, base_geometry):
+    """Worst modelled .alt error over the probes (see per-probe variant)."""
+    errors = ideal_bake_errors_per_probe(
+        inset_path, probes, factor, base_geometry
+    )
+    return max(errors) if errors else 0.0
+
+
+def _base_geometry_of_dem(dem):
+    """Extract ``(x0, x1, y0, y1, nxdem, nydem)`` from a loaded base DEM."""
+    return (dem.x0, dem.x1, dem.y0, dem.y1, dem.nxdem, dem.nydem)
+
+
+def resolve_working_grid_factor(tile, base_dem):
+    """Choose the working-grid densification factor for a tile (1, 2 or 3).
+
+    The decision is deterministic and disk-state-driven (both build steps
+    call it on the same cached insets and the same base geometry), so
+    steps 1 and 2 always agree on the grid.  Returns ``1`` -- the
+    byte-identical 1 arc-second path -- whenever the feature is gated off,
+    GDAL is missing, no inset is cached, or the config pins ``"1"``.  An
+    explicit ``"1/2"`` / ``"1/3"`` pin is honoured outright.  In ``"auto"``
+    mode with insets present it evaluates the ideal-bake error over every
+    cached inset's acceptance probes and returns the COARSEST candidate
+    factor whose worst error is within WORKING_GRID_IDEAL_TOLERANCE_M,
+    falling back to the finest candidate if none qualifies.
+    """
+    if not insets_enabled_for_tile(tile):
+        return 1
+    configured = parse_working_grid_arc_seconds(
+        getattr(tile, "working_grid_arc_seconds", "auto")
+    )
+    provider_definitions = select_provider_definitions(
+        getattr(tile, "airport_elevation_providers", "auto")
+    )
+    codes = [definition["code"] for definition in provider_definitions]
+    inset_paths = list_cached_inset_dems(
+        tile.lat, tile.lon, provider_codes=codes or None
+    )
+    if not inset_paths:
+        return 1
+    if configured != "auto":
+        return configured
+    base_geometry = _base_geometry_of_dem(base_dem)
+    finest_factor = WORKING_GRID_CANDIDATE_FACTORS[-1]
+    tolerance = WORKING_GRID_IDEAL_TOLERANCE_M
+
+    # Assemble every probe once, carrying its tile-relative and absolute
+    # coordinates (the geometry math and the inset sampling each need one
+    # frame) plus whether it is a hand-seeded acceptance probe.
+    all_probes = []  # (inset_path, adjusted_probe, is_seeded)
+    for inset_path in inset_paths:
+        (probes, is_seeded) = acceptance_probes_with_source(inset_path)
+        for (latitude, longitude) in probes:
+            all_probes.append(
+                (
+                    inset_path,
+                    (
+                        longitude - tile.lon,
+                        latitude - tile.lat,
+                        longitude,
+                        latitude,
+                    ),
+                    is_seeded,
+                )
+            )
+    if not all_probes:
+        # Insets present but no probes derivable -> take the finest grid
+        # (the data is there; be safe rather than leave it on the floor).
+        return finest_factor
+
+    # A tile with a CURATED seed set (KBNA, spec section 5) is decided by
+    # those probes ALONE: the seed set is the acceptance requirement for
+    # the tile, and letting an arbitrary co-tile rural strip's steepest
+    # slope override it would ignore the curation.  DERIVED probes are the
+    # generic fallback for tiles nobody has seeded.
+    if any(is_seeded for (_, _, is_seeded) in all_probes):
+        all_probes = [
+            probe for probe in all_probes if probe[2]  # is_seeded
+        ]
+
+    # Per-probe error at every candidate factor.  A DERIVED probe that
+    # stays above tolerance even at the FINEST candidate models relief no
+    # working grid resolves to +/-1 m (a natural cliff, a data spike); it
+    # must NOT drive the grid finer, since no candidate would satisfy it,
+    # and letting it would force every steep tile to the max grid.  Seeded
+    # acceptance probes are the airport's requirement and always count.
+    errors_by_factor = {
+        factor: [
+            errs
+            for (inset_path, probes) in _group_probes_by_inset(all_probes)
+            for errs in ideal_bake_errors_per_probe(
+                inset_path, probes, factor, base_geometry
+            )
+        ]
+        for factor in WORKING_GRID_CANDIDATE_FACTORS
+    }
+    finest_errors = errors_by_factor[finest_factor]
+    seeded_flags = [is_seeded for (_, _, is_seeded) in all_probes]
+    actionable = [
+        seeded or (finest_error <= tolerance)
+        for (seeded, finest_error) in zip(seeded_flags, finest_errors)
+    ]
+    if not any(actionable):
+        return finest_factor
+    for factor in WORKING_GRID_CANDIDATE_FACTORS:  # coarsest first
+        worst = max(
+            error
+            for (error, keep) in zip(errors_by_factor[factor], actionable)
+            if keep
+        )
+        if worst <= tolerance:
+            UI.vprint(
+                1,
+                "   Airport elevation insets: working grid densified to 1/"
+                + str(factor)
+                + " arc-second (worst actionable ideal-bake error "
+                + str(round(worst, 3))
+                + " m).",
+            )
+            return factor
+    UI.vprint(
+        1,
+        "   Airport elevation insets: working grid densified to the finest "
+        "1/"
+        + str(finest_factor)
+        + " arc-second (no coarser candidate met the "
+        + str(tolerance)
+        + " m tolerance).",
+    )
+    return finest_factor
+
+
+def _group_probes_by_inset(all_probes):
+    """Group ``(inset_path, adjusted_probe, is_seeded)`` by inset path.
+
+    Preserves order so the flattened per-probe error lists stay aligned
+    with ``all_probes`` (both iterate insets then probes in the same
+    order).
+    """
+    grouped = []
+    for (inset_path, adjusted_probe, _is_seeded) in all_probes:
+        if grouped and grouped[-1][0] == inset_path:
+            grouped[-1][1].append(adjusted_probe)
+        else:
+            grouped.append((inset_path, [adjusted_probe]))
+    return [(path, probes) for (path, probes) in grouped]
+
+
+def resample_grid_by_factor(array, factor):
+    """Bilinearly resample a 2-D grid to ``factor`` x its resolution.
+
+    A new grid of ``(rows - 1) * factor + 1`` by ``(columns - 1) * factor
+    + 1`` samples over the SAME extent; the four corners and every original
+    node are preserved exactly (integer-factor, endpoint-anchored bilinear),
+    so the densified base carries no new invented relief -- the added
+    detail comes only from the insets baked at the finer posting.  Done as
+    two separable 1-D passes to keep the peak memory to one intermediate.
+    """
+    if factor == 1:
+        return array
+    array = numpy.ascontiguousarray(array, dtype=numpy.float32)
+
+    def _upsample_axis(source, axis):
+        length = source.shape[axis]
+        new_length = (length - 1) * factor + 1
+        target_indices = numpy.arange(new_length)
+        lower = numpy.minimum(target_indices // factor, length - 2)
+        fraction = (target_indices - lower * factor) / float(factor)
+        lower_slice = numpy.take(source, lower, axis=axis)
+        upper_slice = numpy.take(source, lower + 1, axis=axis)
+        shape = [1] * source.ndim
+        shape[axis] = new_length
+        fraction = fraction.reshape(shape).astype(numpy.float32)
+        return lower_slice * (1.0 - fraction) + upper_slice * fraction
+
+    densified = _upsample_axis(array, 1)
+    densified = _upsample_axis(densified, 0)
+    return densified.astype(numpy.float32)
+
+
+def densify_tile_dem_for_insets(tile):
+    """Densify ``tile.dem`` onto the Phase C1 working grid, in place.
+
+    Called immediately after the base DEM is loaded in BOTH build steps.
+    A no-op -- and a byte-identical build -- when the resolved factor is 1
+    (feature gated off, GDAL missing, no inset cached, or the grid pinned
+    to 1 arc-second).  With a factor of 2 or 3 it rewrites ``nxdem`` /
+    ``nydem`` (and, for a full load, resamples ``alt_dem``) so the extent
+    is unchanged but the posting is finer; the subsequent inset bake and
+    ``.alt`` write then land at that finer posting, and the info-only step
+    2 load sees matching dimensions for its raster-size check.  Returns the
+    factor applied.
+    """
+    if tile.dem is None:
+        return 1
+    factor = resolve_working_grid_factor(tile, tile.dem)
+    if factor == 1:
+        return 1
+    tile.dem.nxdem = (tile.dem.nxdem - 1) * factor + 1
+    tile.dem.nydem = (tile.dem.nydem - 1) * factor + 1
+    if tile.dem.alt_dem is not None:
+        tile.dem.alt_dem = resample_grid_by_factor(tile.dem.alt_dem, factor)
+    tile.working_grid_factor = factor
+    return factor
 
 
 # =====================================================================

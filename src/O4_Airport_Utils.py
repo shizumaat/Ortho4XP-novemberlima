@@ -953,6 +953,12 @@ def smooth_raster_over_airports(tile, dico_airports, preserve_boundary=True):
         ceil(ystep * GEO.lat_to_m / 10), 1
     )  # target 10m of pixel size at most to avoiding aliasing
     working_pixel_m = ystep * GEO.lat_to_m
+    # On the Phase C1 densified grid the working pixel is finer than the
+    # 1 arc-second reference the historic apt_smoothing_pix was expressed
+    # in; pass that reference so the automatic radius preserves the
+    # PHYSICAL blur footprint instead of shrinking it with the grid.
+    working_grid_factor = getattr(tile, "working_grid_factor", 1)
+    reference_pixel_m = working_pixel_m * working_grid_factor
     for airport in dico_airports:
         # The smoothing mask (also the coverage geometry for the automatic
         # radius rule below).
@@ -976,7 +982,8 @@ def smooth_raster_over_airports(tile, dico_airports, preserve_boundary=True):
             source_pixel_m,
             coverage_fraction,
         ) = INSETS.resolve_airport_smoothing_radius(
-            tile, dico_airports[airport], working_pixel_m, full_area
+            tile, dico_airports[airport], working_pixel_m, full_area,
+            reference_pixel_m=reference_pixel_m,
         )
         if source_pixel_m is not None:
             UI.vprint(

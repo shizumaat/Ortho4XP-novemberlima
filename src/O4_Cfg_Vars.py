@@ -170,6 +170,11 @@ cfg_tile_vars = {
         "default": 60.0,
         "hint": "Width in metres of the blend band over which a baked elevation inset ramps from its own values to the underlying base elevation at the inset edge, avoiding a cliff at the seam.",
     },
+    "working_grid_arc_seconds": {
+        "type": str,
+        "default": "auto",
+        "hint": 'Spacing of the working elevation grid (the .alt raster the mesher reads). "auto" (default) keeps the historic 1 arc-second grid when the tile has no cached airport elevation insets (byte-identical to before), and densifies to the coarsest of 1/2 or 1/3 arc-second whose ideal-bake error at the stored acceptance probes stays within 1 metre when insets are present, so meter-class airport relief is not lost to the grid floor. An explicit value ("1", "1/2", "1/3") pins the spacing.',
+    },
     "road_level": {
         "type": int,
         "default": 1,
@@ -442,6 +447,7 @@ list_vector_vars = [
     "airport_elevation_inset_resolution_m",
     "airport_elevation_inset_margin_m",
     "airport_elevation_inset_feather_m",
+    "working_grid_arc_seconds",
     "road_level",
     "road_banking_limit",
     "lane_width",

@@ -359,6 +359,11 @@ def include_airports(vector_map, tile):
         tile.fill_nodata or "to zero",
         info_only=False,
     )
+    # Densify the working grid over inset tiles (spec Phase C1) BEFORE
+    # smoothing and baking, so the finer posting carries the meter-class
+    # airport relief through to the mesh. No-op (byte-identical) when no
+    # inset covers the tile or the feature is gated off.
+    INSETS.densify_tile_dem_for_insets(tile)
     APT.smooth_raster_over_airports(tile, dico_airports)
     # Auto-generate runway, taxiway, and building patches from CIFP data +
     # OSM geometry (before loading patches so include_patches() picks them up)

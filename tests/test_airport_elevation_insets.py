@@ -274,6 +274,7 @@ class _FakeTile:
         self.airport_elevation_inset_resolution_m = 3.0
         self.airport_elevation_inset_margin_m = 1000.0
         self.airport_elevation_inset_feather_m = 60.0
+        self.working_grid_arc_seconds = "auto"
 
 
 def test_composite_assembly_is_deterministic_across_steps(
@@ -569,3 +570,190 @@ def test_composite_with_empty_base_token_resolves_default_base(
     # And the composite query path overlays the inset.
     assert dem.alt((0.5, 0.5)) == pytest.approx(100.0, abs=0.5)
     assert dem.alt((0.1, 0.1)) == pytest.approx(42.0, abs=0.5)
+
+
+# =====================================================================
+# Phase C1: densified working grid over inset tiles
+# =====================================================================
+def test_parse_working_grid_arc_seconds():
+    parse = INSETS.parse_working_grid_arc_seconds
+    assert parse("auto") == "auto"
+    assert parse("") == "auto"
+    assert parse("garbage") == "auto"
+    assert parse("1") == 1
+    assert parse("1/2") == 2
+    assert parse("0.5") == 2
+    assert parse("1/3") == 3
+    assert parse("3") == 3
+
+
+def test_resample_grid_by_factor_preserves_nodes_and_shape():
+    grid = numpy.array(
+        [[0.0, 3.0, 6.0], [9.0, 12.0, 15.0], [18.0, 21.0, 24.0]],
+        dtype=numpy.float32,
+    )
+    # factor 1 is an exact identity (byte-path safety).
+    assert numpy.array_equal(INSETS.resample_grid_by_factor(grid, 1), grid)
+    dense = INSETS.resample_grid_by_factor(grid, 2)
+    assert dense.shape == (5, 5)  # (n-1)*factor + 1
+    # Every original node survives at its densified position...
+    assert dense[0, 0] == 0.0 and dense[0, 4] == 6.0
+    assert dense[4, 0] == 18.0 and dense[4, 4] == 24.0
+    assert dense[2, 2] == pytest.approx(12.0)  # original centre node
+    # ...and interpolated points are the linear midpoints (no new relief).
+    assert dense[0, 1] == pytest.approx(1.5)
+    assert dense[1, 0] == pytest.approx(4.5)
+    dense3 = INSETS.resample_grid_by_factor(grid, 3)
+    assert dense3.shape == (7, 7)
+
+
+def test_smoothing_radius_preserves_physical_footprint_when_densified():
+    """The densified path keeps the physical blur footprint via the
+    reference pixel: a base-covered airport gets factor x apt_smoothing_pix
+    pixels at the finer grid (same metres), an inset airport is unchanged."""
+    rule = INSETS.smoothing_radius_pixels_for_source
+    reference = 30.9  # one 1 arc-second pixel
+    # Non-densified: reference defaults to working -> byte-identical.
+    assert rule(8, 30.9, 30.9) == 8
+    assert rule(8, 300.0, 30.9) == 8  # cap via min(source, reference)
+    # Densified 1/3 (working 10.3 m) base source: the resolver passes the
+    # reference pixel as the source for a base-covered airport, so the
+    # radius is 24 pixels == 8 * 30.9 m (same physical footprint).
+    working_dense = 30.9 / 3
+    assert rule(8, reference, working_dense, reference) == 24
+    # An inset source stays a small physical footprint at either grid.
+    assert rule(8, 3.0, 30.9, 30.9) == 1
+    assert rule(8, 3.0, working_dense, reference) == 2
+
+
+def _fake_inset_tile(lat, lon, tmp_path, monkeypatch):
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+    INSETS.initialize_elevation_providers_dict()
+    return _FakeTile(lat, lon)
+
+
+class _GeometryDem:
+    """Minimal stand-in for a loaded base DEM (geometry only)."""
+
+    def __init__(self, alt_dem=None, combined=True):
+        if combined:
+            self.x0 = self.y0 = -0.01
+            self.x1 = self.y1 = 1.01
+            self.nxdem = self.nydem = 3673
+        else:
+            self.x0 = self.y0 = 0.0
+            self.x1 = self.y1 = 1.0
+            self.nxdem = self.nydem = 3601
+        self.alt_dem = alt_dem
+
+
+def test_working_grid_factor_is_one_without_insets(tmp_path, monkeypatch):
+    """Byte-path posture: auto resolves to 1 arc-second with no insets."""
+    tile = _fake_inset_tile(0, 0, tmp_path, monkeypatch)
+    # No cached inset directory at all -> factor 1 (byte-identical path).
+    assert INSETS.resolve_working_grid_factor(tile, _GeometryDem()) == 1
+    # Gate off -> factor 1 even if a stray inset were present.
+    tile.airport_elevation_insets = False
+    assert INSETS.resolve_working_grid_factor(tile, _GeometryDem()) == 1
+
+
+@requires_gdal
+def test_working_grid_factor_auto_picks_coarsest_passing(tmp_path, monkeypatch):
+    """A seeded probe over a modelled scarp: auto picks the coarsest grid
+    whose ideal-bake error is within tolerance, and an explicit pin wins."""
+    tile = _fake_inset_tile(36, -87, tmp_path, monkeypatch)
+    inset_directory = FNAMES.airport_inset_directory(36, -87)
+    os.makedirs(inset_directory, exist_ok=True)
+    inset_path = FNAMES.airport_inset_dem(36, -87, "KBNA", "USGS3DEP")
+    # A step scarp inside the KBNA seed-probe footprint: west half low,
+    # east half high, so a coarse grid straddling it smears the probes.
+    driver = gdal.GetDriverByName("GTiff")
+    columns = rows = 400
+    west, south, east, north = -86.72, 36.10, -86.62, 36.16
+    dataset = driver.Create(inset_path, columns, rows, 1, gdal.GDT_Float32)
+    dataset.SetGeoTransform(
+        (west, (east - west) / columns, 0, north, 0, (south - north) / rows)
+    )
+    spatial_reference = osr.SpatialReference()
+    spatial_reference.ImportFromEPSG(4326)
+    dataset.SetProjection(spatial_reference.ExportToWkt())
+    band = dataset.GetRasterBand(1)
+    band.SetNoDataValue(-32768.0)
+    values = numpy.full((rows, columns), 150.0, dtype=numpy.float32)
+    scarp_column = int((-86.676 - west) / (east - west) * columns)
+    values[:, scarp_column:] = 167.0
+    band.WriteArray(values)
+    band.FlushCache()
+    dataset = None
+
+    factor = INSETS.resolve_working_grid_factor(tile, _GeometryDem())
+    assert factor in (2, 3)  # insets present -> always densified
+    # Explicit pins bypass the ideal check entirely.
+    tile.working_grid_arc_seconds = "1"
+    assert INSETS.resolve_working_grid_factor(tile, _GeometryDem()) == 1
+    tile.working_grid_arc_seconds = "1/3"
+    assert INSETS.resolve_working_grid_factor(tile, _GeometryDem()) == 3
+
+
+@requires_gdal
+def test_ideal_bake_error_decreases_with_finer_grid(tmp_path, monkeypatch):
+    """The modelled error is monotone in the grid: finer never worse."""
+    _fake_inset_tile(0, 0, tmp_path, monkeypatch)
+    inset_path = str(tmp_path / "scarp.tif")
+    driver = gdal.GetDriverByName("GTiff")
+    columns = rows = 300
+    _make = _write_constant_geotiff  # reuse extent conventions
+    _make(inset_path, 0.30, 0.30, 0.70, 0.70, 150.0, columns=columns, rows=rows)
+    dataset = gdal.Open(inset_path, gdal.GA_Update)
+    array = dataset.GetRasterBand(1).ReadAsArray()
+    array[:, columns // 2 :] = 170.0  # a 20 m scarp down the middle
+    dataset.GetRasterBand(1).WriteArray(array)
+    dataset.FlushCache()
+    dataset = None
+    probe_lat, probe_lon = 0.50, 0.5003  # a few metres east of the scarp
+    probes = [(probe_lon, probe_lat, probe_lon, probe_lat)]
+    geometry = (-0.01, 1.01, -0.01, 1.01, 3673, 3673)
+    error1 = INSETS.ideal_bake_error_at_probes(inset_path, probes, 1, geometry)
+    error2 = INSETS.ideal_bake_error_at_probes(inset_path, probes, 2, geometry)
+    error3 = INSETS.ideal_bake_error_at_probes(inset_path, probes, 3, geometry)
+    assert error1 >= error2 >= error3
+
+
+@requires_gdal
+def test_densify_tile_dem_noop_and_active(tmp_path, monkeypatch):
+    """densify_tile_dem_for_insets is a byte-identity no-op without insets
+    and resamples to the dense grid (updating nxdem/nydem) with one."""
+    import O4_DEM_Utils as DEM
+
+    tile = _fake_inset_tile(0, 0, tmp_path, monkeypatch)
+    base_path = str(tmp_path / "base.tif")
+    _write_constant_geotiff(
+        base_path, 0.0, 0.0, 1.0, 1.0, 10.0, columns=101, rows=101
+    )
+    # No inset -> factor 1, grid and array untouched (byte-path posture).
+    tile.dem = DEM.DEM(0, 0, base_path, fill_nodata=False)
+    original_columns = tile.dem.nxdem
+    original_rows = tile.dem.nydem
+    before = tile.dem.alt_dem.copy()
+    assert INSETS.densify_tile_dem_for_insets(tile) == 1
+    assert tile.dem.nxdem == original_columns
+    assert tile.dem.nydem == original_rows
+    assert numpy.array_equal(tile.dem.alt_dem, before)
+
+    # With a cached inset the grid is densified to the pinned factor.
+    inset_directory = FNAMES.airport_inset_directory(0, 0)
+    os.makedirs(inset_directory, exist_ok=True)
+    _write_constant_geotiff(
+        FNAMES.airport_inset_dem(0, 0, "TEST", "USGS3DEP"),
+        0.4, 0.4, 0.6, 0.6, 100.0, columns=60, rows=60,
+    )
+    tile.working_grid_arc_seconds = "1/2"
+    tile.dem = DEM.DEM(0, 0, base_path, fill_nodata=False)
+    factor = INSETS.densify_tile_dem_for_insets(tile)
+    assert factor == 2
+    assert tile.dem.nxdem == (original_columns - 1) * 2 + 1
+    assert tile.dem.nydem == (original_rows - 1) * 2 + 1
+    assert tile.dem.alt_dem.shape == (tile.dem.nydem, tile.dem.nxdem)
+    # The upsampled base still reads its flat 10 m value at the corners.
+    assert tile.dem.alt_dem[0, 0] == pytest.approx(10.0)
