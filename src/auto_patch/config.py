@@ -148,6 +148,8 @@ __all__ = [
     "ONE_SOLVE_TERRAIN_GAP_FILL_SPINE",
     "ONE_SOLVE_TERRAIN_GRADED_STRIP",
     "ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT",
+    "ADJACENT_GROUND_FULL_EXTENT_COVERAGE",
+    "ADJACENT_GROUND_COVERAGE_DEPTH_STEP_M",
     "APRON_SHOULDER_WIDTH_M",
     "APRON_SHOULDER_MIN_DOWN_SLOPE",
     "APRON_SHOULDER_MAX_DOWN_SLOPE",
@@ -2245,6 +2247,42 @@ ONE_SOLVE_TERRAIN_GRADED_STRIP = (
 ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT = (
     _os.environ.get("O4_ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT", "1")
     == "1")
+
+# Slice B stage B3 ORDER 3 FULL-EXTENT COVERAGE sub-gate, DEFAULT OFF (a
+# B4 prerequisite; docs/slice_b_solver_absorption_design.md §B3).  Closes
+# the analytic-fallback coverage gap that opens with legacy
+# surface_clearance OFF: the post-solve emitter RE-MARCHES each band on the
+# FINAL SOLVED pavement edge, but the pre-solve construct march references
+# the reach-band worst case, which for junction/apron edges the connecting
+# solve grades DOWN into terrain is BOTH a poor kind predictor (the band
+# floor is often ABOVE the eventual solved edge — a degenerate route-reach
+# interval) AND leaves the deep-cut zone rows spaced only at the band
+# breakpoints (a >``_ROW_RANGE_M`` depth gap the resampler cannot bridge).
+# With the gate ON the construct stages a FULL coverage GRID — every
+# non-skipped station's zone rows span the whole family reach in BOTH cut
+# and fill directions, densified to <= ``ADJACENT_GROUND_COVERAGE_DEPTH_
+# STEP_M`` in depth — so whatever kind/depth the emit re-march produces on
+# the solved edge, a solved zone row lies within range (over-coverage is
+# unused solved variables — the established e1ff071 worst-case pattern).
+# Only the ZONE-ROW GRID widens; the analytic band footprint the emitter
+# actually emits is unchanged (it re-marches on the solved edge, never on
+# this grid), so widening coverage cannot change a legacy-ON valuation.
+# Requires the ADMISSION sub-gate ``ONE_SOLVE_TERRAIN_GRADED_STRIP`` (the
+# only path that solves the zone nodes and reads them back); a no-op
+# without it.  DEFAULT OFF: the current defaults must stay byte-identical
+# because a widened grid changes the legacy-ON valuation lookups (the
+# fallback count would drop) — that output change rides with B4, not with
+# the construct move.
+ADJACENT_GROUND_FULL_EXTENT_COVERAGE = (
+    _os.environ.get("O4_ADJACENT_GROUND_FULL_EXTENT_COVERAGE", "0") == "1")
+# Depth-direction spacing (m) of the full-extent coverage grid's zone
+# rows.  Must be <= the resampler's ``_ROW_RANGE_M`` (30 m) so every
+# emit-time band vertex, at any lateral depth, finds a solved row of its
+# kind within range.  Also the design's node-budget DIET lever: a coarser
+# step trades coverage density for fewer solver variables at deep-reach
+# airports (KBNA).  Byte-inert unless the coverage gate is ON.
+ADJACENT_GROUND_COVERAGE_DEPTH_STEP_M = float(
+    _os.environ.get("O4_ADJACENT_GROUND_COVERAGE_DEPTH_STEP_M", "25.0"))
 
 # APRON edges.  NO code mandates grading beyond an apron edge (positive
 # research finding): the only governed band is the FAA-RECOMMENDED

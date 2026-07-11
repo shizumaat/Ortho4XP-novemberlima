@@ -352,7 +352,8 @@ def _repair_self_lenses(g):
 def _build_cut_bands(edge_stations, edge_alts, outwards, band_caps,
                      ceiling_offset, band_edges, trigger, step,
                      sample_dem, is_ring_vertex=None,
-                     at_continuation_seam=None, zone_collect=None):
+                     at_continuation_seam=None, zone_collect=None,
+                     force_full_reach=False):
     """CUT-direction mirror of ``clearance._build_filled_skirts``.
 
     At each station a CEILING sits at ``edge_alt + ceiling_offset(d)``
@@ -409,6 +410,13 @@ def _build_cut_bands(edge_stations, edge_alts, outwards, band_caps,
             dd = sample_dem(sx + nx * d, sy + ny * d)
             if dd is not None and dd > ceil + trigger:
                 last = d
+        if force_full_reach:
+            # Full-extent coverage grid (ADJACENT_GROUND_FULL_EXTENT_
+            # COVERAGE): obstruct every stationed edge to the whole family
+            # reach regardless of the worst-case terrain trigger, so the
+            # staged zone-row grid bounds any solved-edge cut the emit
+            # re-march produces (over-coverage = unused solved variables).
+            last = cap - 1e-3
         if last > 0.0:
             obstructed[i] = True
             outer[i] = min(cap - 1e-3, last + step)
@@ -616,7 +624,7 @@ def _build_cut_bands(edge_stations, edge_alts, outwards, band_caps,
 def _build_fill_bands(edge_stations, edge_alts, outwards, band_caps,
                       floor_depth, band_edges, trigger, step, sample_dem,
                       is_ring_vertex=None, at_continuation_seam=None,
-                      zone_collect=None):
+                      zone_collect=None, force_full_reach=False):
     """FILL-direction band geometry — clearance._build_filled_skirts,
     inline-duplicated MINIMALLY (flagged for the cleanup slice) with two
     lateral-law differences the shared skirt builder must not inherit:
@@ -657,6 +665,11 @@ def _build_fill_bands(edge_stations, edge_alts, outwards, band_caps,
             dd = sample_dem(sx + nx * d, sy + ny * d)
             if dd is not None and dd < floor - trigger:
                 last = d
+        if force_full_reach:
+            # Full-extent coverage grid (see _build_cut_bands): drop the
+            # whole reach so the fill zone-row grid bounds any solved-edge
+            # fill the emit re-march produces.
+            last = cap
         if last > 0.0:
             dropped[i] = True
             outer[i] = min(cap, last + step)
@@ -1381,11 +1394,27 @@ def _worst_case_ring_alts(s, coords, band, sample_dem):
     return ring_alts_cut, ring_alts_fill
 
 
+def _coverage_grid_edges(base_edges, cap):
+    """Densify a band-edge set with intermediate depths every
+    ``ADJACENT_GROUND_COVERAGE_DEPTH_STEP_M`` out to ``cap`` — the depth
+    grid the full-extent coverage grid stages so a solved zone row of each
+    kind sits within the resampler's ``_ROW_RANGE_M`` of every emit-time
+    band vertex.  Off the coverage gate this is never called."""
+    edges = set(base_edges)
+    from .config import ADJACENT_GROUND_COVERAGE_DEPTH_STEP_M as _dstep
+    d = _dstep
+    while d < cap:
+        edges.add(float(d))
+        d += _dstep
+    return edges
+
+
 def _derive_shape_stations_and_bands(coords, ccw, ring_alts, axis, width,
                                      reach, trigger, floor_depth, ceil_off,
                                      step, prep_static, seam_keys,
                                      sample_dem, zone_rows_out=None,
-                                     wrap_skirt_prep=None, ring_alts_fill=None):
+                                     wrap_skirt_prep=None, ring_alts_fill=None,
+                                     coverage_grid=False):
     """Frontage detection + corridor MARCH for one airside shape — the band
     FOOTPRINT geometry (everything that decides WHERE the bands are, given the
     edge-altitude references ``ring_alts``).  Returns
@@ -1584,14 +1613,21 @@ def _derive_shape_stations_and_bands(coords, ccw, ring_alts, axis, width,
     # coverage: FILL detects against the reach-band CEILING (``st_alts_fill``),
     # CUT against the reach-band FLOOR (``st_alts``); off order 3 the two
     # arrays are the same object, so this is byte-identical.
+    fill_edges = {ADJACENT_GROUND_LIP_WIDTH_M}
+    cut_edges = {ADJACENT_GROUND_LIP_WIDTH_M, width}
+    if coverage_grid:
+        fill_edges = _coverage_grid_edges(fill_edges, width)
+        cut_edges = _coverage_grid_edges(cut_edges, reach)
     fill_bands = _build_fill_bands(
         stations, st_alts_fill, outs, [width] * m, floor_depth,
-        {ADJACENT_GROUND_LIP_WIDTH_M}, trigger, step, sample_dem,
-        is_ring_vertex, at_seam, zone_collect=_collect_fill)
+        fill_edges, trigger, step, sample_dem,
+        is_ring_vertex, at_seam, zone_collect=_collect_fill,
+        force_full_reach=coverage_grid)
     cut_bands = _build_cut_bands(
         stations, st_alts, outs, [reach] * m, ceil_off,
-        {ADJACENT_GROUND_LIP_WIDTH_M, width}, trigger, step, sample_dem,
-        is_ring_vertex, at_seam, zone_collect=_collect_cut)
+        cut_edges, trigger, step, sample_dem,
+        is_ring_vertex, at_seam, zone_collect=_collect_cut,
+        force_full_reach=coverage_grid)
     return fill_bands, cut_bands, stations, st_alts, outs
 
 
@@ -1712,9 +1748,15 @@ def construct_adjacent_ground_presolve(layout: PavementLayout, dem,
     # footprint is a SUPERSET of any solved outcome by construction and the
     # emit-time resampler always finds a covering row.  Gate OFF (order-1
     # construct-only, no admission): DEM seed kept, byte-identical.
-    from .config import ONE_SOLVE_TERRAIN_GRADED_STRIP as _ADMIT_COVERAGE
+    from .config import (ONE_SOLVE_TERRAIN_GRADED_STRIP as _ADMIT_COVERAGE,
+                         ADJACENT_GROUND_FULL_EXTENT_COVERAGE
+                         as _FULL_EXTENT_COVERAGE)
     _reach_band = (_build_construct_reach_band(layout)
                    if _ADMIT_COVERAGE else None)
+    # Full-extent coverage grid (B4 prerequisite): only meaningful under
+    # band admission (the path that solves + reads back the zone nodes);
+    # a no-op otherwise, so the flag stays False without admission.
+    _coverage_grid = bool(_FULL_EXTENT_COVERAGE and _ADMIT_COVERAGE)
 
     entries: list[dict] = []
     for s in scoped:
@@ -1748,7 +1790,8 @@ def construct_adjacent_ground_presolve(layout: PavementLayout, dem,
                 sample_dem, zone_rows_out=zone_rows,
                 wrap_skirt_prep=(wrap_skirt_prep
                                  if family == "taxiway" else None),
-                ring_alts_fill=ring_alts_fill)
+                ring_alts_fill=ring_alts_fill,
+                coverage_grid=_coverage_grid)
         if not fill_bands and not cut_bands:
             continue
         # ZONE-NODE GRID (order 2, schema split): the free-variable
