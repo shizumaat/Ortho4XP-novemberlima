@@ -2191,13 +2191,15 @@ GAP_FILL_MIN_AREA_M2 = 100.0
 # INSIDE ring 2 stays open-floor (large infields lawfully follow
 # terrain).  Violation-gated: rings emit only along boundary arcs
 # whose interior DEM at the band edge sits below the band floor.
-# DEFAULT OFF (env O4_GAP_FILL_INTERIOR_RINGS) — Noah reviews in-sim
-# before the default flips.  REQUIRES the gap-fill spine gate: rings
-# are constructed by the gap emitter, so enabling them with
+# ROUND-8 REVIEW DEFAULT ON (Noah, 2026-07-11 — the same review-build
+# convention as the fad621d slice-B bundle flip; env
+# O4_GAP_FILL_INTERIOR_RINGS=0 falls back to the byte-identical
+# ring-free state).  REQUIRES the gap-fill spine gate: rings are
+# constructed by the gap emitter, so enabling them with
 # O4_GAP_FILL_SPINE=0 is a configuration error (hard error in
 # gap_fill.emit_gap_fill_spines, the fail-loudly doctrine).
 GAP_FILL_INTERIOR_RINGS_ENABLED = (
-    _os.environ.get("O4_GAP_FILL_INTERIOR_RINGS", "0") == "1")
+    _os.environ.get("O4_GAP_FILL_INTERIOR_RINGS", "1") == "1")
 
 # OPEN-FRONTAGE DRAINAGE SPINE (slice B pilot, user design ruling 3
 # 2026-07-09; docs/chain_identity_one_solve_plan.md §Slice B).  The
