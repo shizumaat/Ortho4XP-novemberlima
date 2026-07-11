@@ -162,30 +162,22 @@
 #    GRADED_STRIP) + O4_ADJACENT_GROUND_END_WRAP=1 (so the wrap can
 #    be judged) + O4_AUTO_PATCH_REBUILD=1.  ★ROUND-7 DEFAULTS ARE
 #    COMMITTED (fad621d): a plain build IS the full-on build now.
-#    ★★★ NOAH RULING 2026-07-11 (defect, fix IN FLIGHT — reaffirms
-#    part-34 ruling 3): NO big dip in ground ENCLOSED between
-#    pavements, EVER — zone-3 open-floor ("cliff lawful") applies
-#    ONLY at a TRUE outer edge; between pavements the ground blends
-#    smoothly for drainage; a bowl = ponding = drainage violation by
-#    definition.  The B2 encoding leaked zone-3 openness into
-#    enclosed gaps (both parents' floors None far from pavement) and
-#    the fairing CAP cannot forbid a smooth bowl (the analytic
-#    endpoint-pinned Laplacian WAS the blend law).  FIX ORDER
-#    dispatched: enclosed-gap drainage floor in grade_law (continued
-#    band down-slope, never None for gap faces) + blend objective
-#    restored in the solve + anti-ponding reporter + the -12 m band
-#    site audited for the same class.  HOLD THE IN-SIM BAKE until
-#    this lands — the big-gap sites currently show the known defect.
-#    THE LIST, in order:
-#    a. the three big-gap spine sites (60.7210897,-135.0776149
-#       first) — AFTER the fix: verify the blend reads correctly;
-#    b. the band dip at 60.71804,-135.07291 — verdict pending the
-#       same-class audit (enclosed vs true outer edge);
-#    c. the wrap question at 60.6972471,-135.0608669 (criterion 4);
-#    d. the ~1,231-vertex band solved-value class (spot-check
-#       terminal-area strips);
-#    e. the round-4/round-6 heal sites still standing (dips, hole
-#       27, hangar area, skirt faces).
+#    ★★★ NOAH RULING 2026-07-11 FINAL (REVERSES the same-day interim
+#    "no dips" reaction; the interim fix order was KILLED, nothing
+#    landed): LEAVE THE B2 GAP BEHAVIOR AS IS.  Real airports have
+#    large fully-surrounded infields with SUBSTANTIAL genuine drops;
+#    only the graded zone near pavement is actually graded — the
+#    deep interior lawfully follows terrain, so the open floor is
+#    CORRECT for large gaps.  The CYXY big-gap dip is INVALID DEM —
+#    a DATA problem; never bend grade law to paper over bad DEM
+#    (closed floors would break airports whose dips are real).  The
+#    -12 m band dip at 60.71804,-135.07291 is likely the same
+#    class (both DEM readers agree the terrain dips).
+#    ★ROUND-7 VERDICT (Noah, in-sim, 2026-07-11): the airport looks
+#    essentially the SAME as before the absorption — which is the
+#    PASS condition for a foundational refactor (every stage's
+#    acceptance was no-visual-change).  The absorption is RATIFIED
+#    in-sim; the visible-improvement stage is B4.
 #
 # ★ TRUE CURRENT BASELINES (CYXY, this tree — the part-35 numbers
 # below predate the O4_OBJECT_BRIDGE_TERRAIN landing and are STALE):
