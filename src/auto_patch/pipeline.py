@@ -5427,11 +5427,31 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # is a no-op at this airport).  With the gate OFF this block does
         # not run and the legacy post-solve emitter below fires unchanged.
         from .config import (ONE_SOLVE_TERRAIN,
+                             ONE_SOLVE_TERRAIN_GAP_FILL_SPINE,
                              ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT)
+        # GATE DEPENDENCY (Slice B stage B2, ratified 2026-07-10): the
+        # gap sub-gate REQUIRES the skirt sub-gate — gap parents include
+        # the runway-end skirts, which exist pre-solve only under B1.
+        # HARD ERROR, not force-ON (fail-loudly doctrine): silently
+        # widening the operator's gate scope would corrupt any A/B and
+        # hide intent; the only supported configuration is both ON.
+        if (ONE_SOLVE_TERRAIN and ONE_SOLVE_TERRAIN_GAP_FILL_SPINE
+                and not ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT):
+            raise ValueError(
+                "O4_ONE_SOLVE_TERRAIN_GAP_FILL_SPINE requires "
+                "O4_ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT: gap-fill "
+                "pre-solve construction reads the runway-end skirts as "
+                "gap parents, which exist pre-solve only under the "
+                "skirt sub-gate (Slice B stage B2 dependency; "
+                "docs/slice_b_solver_absorption_design.md).")
         _skirt_presolve = (ONE_SOLVE_TERRAIN
                            and ONE_SOLVE_TERRAIN_RUNWAY_END_SKIRT
                            and USE_PER_SURFACE_SOLVER
                            and layout.anchor is not None)
+        _gap_presolve = (ONE_SOLVE_TERRAIN
+                         and ONE_SOLVE_TERRAIN_GAP_FILL_SPINE
+                         and USE_PER_SURFACE_SOLVER
+                         and layout.anchor is not None)
         if _skirt_presolve:
             try:
                 from .clearance import emit_runway_end_skirts as \
@@ -5460,6 +5480,31 @@ def build_airport_pavement(icao: str, xplane_root: str,
             except _GEOM_EXC as _skpre_exc:
                 UI.vprint(1, f"  [pav-builder] {icao}: pre-solve runway-end "
                              f"skirt emission FAILED: {_skpre_exc!r}")
+
+        # ── Gap-fill spine PRE-SOLVE construction (Slice B stage B2,
+        # gate O4_ONE_SOLVE_TERRAIN + O4_ONE_SOLVE_TERRAIN_GAP_FILL_
+        # SPINE, both default OFF; ratified mechanism 2026-07-10,
+        # docs/slice_b_solver_absorption_design.md §B2) ────────────────
+        # The gap-fill drainage spines are the FIRST FREE terrain
+        # variables in the one-solve graph.  Their GEOMETRY is built
+        # here — after the pre-solve skirts (gap parents) and before
+        # ``per_surface_solve`` — and staged on
+        # ``layout.gap_fill_presolve``; the solver admits every spine
+        # vertex (``_build_node_list``), constrains it with envelope
+        # INTERVAL edges to its frozen-nearest pavement stations plus a
+        # second-difference fairing, and writes the solved values back
+        # into the store.  Face EMISSION stays at the post-solve slot
+        # (blocker subjects only exist there); the emitter swaps its
+        # retired analytic valuation for the store's solved values.
+        # A construction failure degrades loudly to the analytic path
+        # (the emitter warns per unmatched gap).
+        if _gap_presolve:
+            try:
+                from .gap_fill import construct_gap_fill_presolve
+                construct_gap_fill_presolve(layout)
+            except _GEOM_EXC as _gappre_exc:
+                UI.vprint(1, f"  [pav-builder] {icao}: pre-solve gap-fill "
+                             f"spine construction FAILED: {_gappre_exc!r}")
 
         if USE_PER_SURFACE_SOLVER and layout.anchor is not None:
             # Runway CIFP thresholds are LOCKED — the solver never moves them.

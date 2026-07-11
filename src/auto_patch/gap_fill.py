@@ -17,11 +17,29 @@ two connector stubs — is graded as ONE unit:
 DOCTRINE: all grade law comes from ``grade_law`` (the drainage solve
 reads ``adjacent_ground_envelope`` per bounding parent — no rule numbers
 here); the spine is the ONLY new geometry; the boundary is verbatim.  The
-spine endpoints land ON the gap ring as T-vertices the pipeline's final
-conformance weld inserts exactly — the ONE sanctioned insertion.
+spine is an OPEN WAY floating >= 2 m inside the gap (the 2026-07-09
+round-2 redesign): it never touches the ring, so there is no landing
+geometry, no T-vertex insertion, and no polygon split.
 
 Behind ``config.GAP_FILL_SPINE_ENABLED`` (env ``O4_GAP_FILL_SPINE``); the
 module checks the gate itself so the pipeline wiring stays one call.
+
+SLICE B STAGE B2 (one-solve terrain absorption, gate
+``O4_ONE_SOLVE_TERRAIN`` + ``O4_ONE_SOLVE_TERRAIN_GAP_FILL_SPINE``,
+docs/slice_b_solver_absorption_design.md §B2): gate-ON, the spine
+GEOMETRY is constructed PRE-SOLVE (``construct_gap_fill_presolve``) so
+every spine vertex becomes a FREE solver variable — envelope INTERVAL
+edges to its two frozen-nearest bounding pavement stations, a DEM seed,
+and a ``TAXIWAY_MAX_GRADE_CHANGE_PER_M`` second-difference fairing along
+the chain (the solver side lives in ``elevation_per_surface``).  The
+analytic valuation below (``_spine_interval`` / ``_drain_target`` /
+``_smooth_spine``) DIES gate-ON: the emitter reads the solve's writeback
+from ``layout.gap_fill_presolve`` instead.  Face EMISSION (census,
+blockers, legacy supersession, verbatim rings) stays at the post-solve
+slot in both modes — the blocker subjects (legacy surface_clearance
+strips, groundside, ribbons) only exist post-solve, and the emitted ring
+must be the pavement chain as it stands AT emission
+(conformance-densified) to stay verbatim.
 """
 from __future__ import annotations
 
@@ -70,7 +88,7 @@ from .clearance import (
 )
 from .emit_decimate import _key
 
-__all__ = ["emit_gap_fill_spines"]
+__all__ = ["emit_gap_fill_spines", "construct_gap_fill_presolve"]
 
 _GAP_FILL_REF = "gap_fill_spine"
 # Open-frontage corridor faces carry their OWN ref so they are
@@ -850,6 +868,239 @@ def _emit_open_frontage(layout, airside, comps, union, registry,
     return emitted
 
 
+# ══════════════════════════════════════════════════════════════════════
+# SLICE B STAGE B2 — PRE-SOLVE spine construction (one-solve absorption)
+# ══════════════════════════════════════════════════════════════════════
+
+
+def _airside_shapes(layout):
+    """The airside pavement shapes the gap detection runs on — ONE
+    definition shared by the pre-solve construction and the post-solve
+    emitter so both see the identical union (parity is load-bearing:
+    the emitter matches its spines against the pre-solve store by
+    coordinate)."""
+    return [s for s in layout.shapes
+            if s.role in _AIRSIDE_PAVEMENT_ROLES
+            and s.polygon is not None and not s.polygon.is_empty
+            and s.polygon.geom_type == "Polygon"]
+
+
+def _gap_parents(layout):
+    """The gap-parent shapes (building pads + runway-end skirts) per
+    their sub-gates — shared by construction and emission (same parity
+    argument as ``_airside_shapes``).  Gate-ON both exist PRE-solve:
+    pads are phase-1 shapes; skirts are pre-solve under the B1 sub-gate
+    (which the B2 gate REQUIRES — pipeline hard-error)."""
+    _pad_parents = os.environ.get("O4_GAP_FILL_PAD_PARENTS", "1") == "1"
+    _skirt_parents = os.environ.get(
+        "O4_GAP_FILL_SKIRT_PARENTS", "1") == "1"
+    pads = [s for s in layout.shapes
+            if s.role == ROLE_BUILDING and s.polygon is not None
+            and not s.polygon.is_empty
+            and s.polygon.geom_type in ("Polygon", "MultiPolygon")] \
+        if _pad_parents else []
+    skirts = [s for s in layout.shapes
+              if getattr(s, "ref", None) == "runway_end_skirt"
+              and s.polygon is not None and not s.polygon.is_empty
+              and s.polygon.geom_type == "Polygon"] \
+        if _skirt_parents else []
+    return pads, skirts
+
+
+def _freeze_spine_parent_specs(layout, airside, px, py):
+    """FROZEN-NEAREST station mapping (design open question 1, START
+    FROZEN-NEAREST — ratified 2026-07-10): for spine point ``(px, py)``,
+    the two nearest DISTINCT bounding pavement shapes (the same
+    parent selection as the analytic ``_spine_interval``), each frozen
+    to (a) its nearest ring VERTEX — the pavement chain station the
+    envelope interval edge couples to — and (b) the envelope offsets
+    ``adjacent_ground_envelope(role, code_number, code_letter, d)`` at
+    the CONSTRUCTION-TIME lateral distance ``d`` to that parent's edge.
+    The station identity and ``d`` never re-derive as the solve moves
+    elevations; the elevation coupling itself stays live through the
+    interval edge.  A parent whose envelope is fully open
+    ``(None, None)`` contributes no edge (mirrors the analytic path,
+    where such a parent contributes only its edge altitude).
+
+    Returns ``[(station_xy, floor_offset, ceiling_offset), ...]``
+    (0-2 entries)."""
+    p = Point(px, py)
+    cands = []
+    for s in airside:
+        try:
+            d = s.polygon.exterior.distance(p)
+        except _GEOM_EXC:
+            continue
+        cands.append((d, s))
+    cands.sort(key=lambda t: t[0])
+    specs = []
+    for d, s in cands[:2]:
+        role, cn, cl = _parent_family_code(layout, s)
+        try:
+            floor_off, ceil_off = adjacent_ground_envelope(
+                role, cn, cl, max(0.0, d))
+        except _GEOM_EXC:
+            continue
+        if floor_off is None and ceil_off is None:
+            continue
+        # Frozen station = the parent's nearest ring vertex (every
+        # pavement ring vertex is a solver node, so the station is
+        # mappable to a node index at constraint-build time).
+        try:
+            ring = _open_coords(s.polygon)
+        except _GEOM_EXC:
+            continue
+        if not ring:
+            continue
+        sx, sy = min(ring, key=lambda v: (v[0] - px) ** 2
+                                         + (v[1] - py) ** 2)
+        specs.append(((float(sx), float(sy)),
+                      None if floor_off is None else float(floor_off),
+                      None if ceil_off is None else float(ceil_off)))
+    return specs
+
+
+def construct_gap_fill_presolve(layout) -> int:
+    """Stage B2 PRE-SOLVE construction: detect the enclosed gaps and
+    build their drainage-spine GEOMETRY before ``per_surface_solve`` so
+    the spine vertices join the solver node list as FREE variables (the
+    B0 admission hook reads ``layout.gap_fill_presolve``).  Values are
+    NOT computed here — they come from the solve's writeback.
+
+    The detection mirrors ``emit_gap_fill_spines`` geometry-for-geometry
+    EXCEPT the blockers whose subjects do not exist yet pre-solve
+    (legacy surface_clearance strips and the other post-solve features):
+    those are evaluated at EMISSION, where they exist, exactly as today.
+    Construction is therefore a SUPERSET of emission — a spine built for
+    a gap that emission later blocks simply never emits (its solver
+    variables settle inside their lawful envelope and are dropped).
+
+    Stores ``layout.gap_fill_presolve = [{"spine": [(x, y), ...],
+    "specs": [per-node ``_freeze_spine_parent_specs`` list],
+    "values": None}, ...]`` and returns the entry count."""
+    if not GAP_FILL_SPINE_ENABLED:
+        return 0
+    airside = _airside_shapes(layout)
+    if len(airside) < 2:
+        return 0
+    try:
+        union = unary_union([s.polygon for s in airside])
+    except _GEOM_EXC:
+        return 0
+    if union.is_empty:
+        return 0
+    comps = ([union] if union.geom_type == "Polygon"
+             else [g for g in getattr(union, "geoms", [])
+                   if g.geom_type == "Polygon"])
+    pads, skirts = _gap_parents(layout)
+    parents = pads + skirts
+    # Geometry-only chain-key set (the ``_face_is_verbatim`` gate needs
+    # keys, not values): every airside + parent ring vertex.
+    chain_keys: set[tuple[int, int]] = set()
+    for s in airside:
+        try:
+            for vx, vy in s.polygon.exterior.coords:
+                chain_keys.add(_key(vx, vy))
+        except _GEOM_EXC:
+            continue
+    for p in parents:
+        geoms = ([p.polygon] if p.polygon.geom_type == "Polygon"
+                 else list(p.polygon.geoms))
+        for g in geoms:
+            try:
+                for vx, vy in g.exterior.coords:
+                    chain_keys.add(_key(vx, vy))
+            except _GEOM_EXC:
+                continue
+    airside_ids = {id(s) for s in airside}
+    parent_ids = {id(s) for s in parents}
+    # Foreign blockers PRESENT pre-solve (bridge plates, boundary…).
+    # Post-solve-only features are checked at emission instead.
+    other_polys = [(id(s), s.polygon) for s in layout.shapes
+                   if id(s) not in airside_ids
+                   and id(s) not in parent_ids
+                   and s.polygon is not None and not s.polygon.is_empty
+                   and s.polygon.geom_type in ("Polygon", "MultiPolygon")]
+    step = GAP_FILL_SPINE_STEP_M
+    entries: list[dict] = []
+    for comp in comps:
+        for interior in comp.interiors:
+            ring_coords = list(interior.coords)
+            try:
+                gap_poly = Polygon(ring_coords)
+            except _GEOM_EXC:
+                continue
+            if gap_poly.is_empty or not gap_poly.is_valid:
+                continue
+            if gap_poly.area < GAP_FILL_MIN_AREA_M2:
+                continue
+            overlapped = False
+            for _oid, op in other_polys:
+                try:
+                    if gap_poly.intersection(op).area > 1.0:
+                        overlapped = True
+                        break
+                except _GEOM_EXC:
+                    continue
+            if overlapped:
+                continue
+            faces = (_parent_residual_faces(gap_poly, parents, chain_keys)
+                     if parents else [gap_poly])
+            for face_poly in faces:
+                if face_poly.is_empty or not face_poly.is_valid:
+                    continue
+                if face_poly.area < GAP_FILL_MIN_AREA_M2:
+                    continue
+                try:
+                    axes = _mrr_axes(face_poly.minimum_rotated_rectangle)
+                except _GEOM_EXC:
+                    continue
+                if axes is None or axes[1] is None:
+                    continue
+                short_side, long_dir, long_len = axes
+                if short_side > GAP_FILL_MAX_WIDTH_M:
+                    continue
+                spine = _build_spine(face_poly, long_dir, long_len, step)
+                if spine is None:
+                    continue
+                specs = [_freeze_spine_parent_specs(layout, airside, px, py)
+                         for px, py in spine]
+                entries.append({"spine": [(float(px), float(py))
+                                          for px, py in spine],
+                                "specs": specs,
+                                "values": None})
+    layout.gap_fill_presolve = entries
+    if entries:
+        n_pts = sum(len(e["spine"]) for e in entries)
+        UI.vprint(1, f"  [gap-fill] PRE-SOLVE constructed {len(entries)} "
+                     f"drainage spine(s), {n_pts} solver node(s) "
+                     f"(one-solve terrain absorption, stage B2).")
+    return len(entries)
+
+
+def _solved_spine_values(layout, spine):
+    """Stage B2 gate-ON valuation: the solve-writeback values for
+    ``spine``, matched against ``layout.gap_fill_presolve`` by
+    coordinate (same station count, every point within 0.01 m — the
+    construction is deterministic from the gap geometry, so pre-solve
+    and emission-time spines coincide; the tolerance absorbs
+    float-level drift from conformance-densified rings).  Returns the
+    value list or None (no store / no match / unwritten entry)."""
+    entries = getattr(layout, "gap_fill_presolve", None)
+    if not entries:
+        return None
+    for entry in entries:
+        vals = entry.get("values")
+        if not vals or len(entry["spine"]) != len(spine):
+            continue
+        if any(v is None for v in vals):
+            continue
+        if all(math.hypot(ex - px, ey - py) <= 0.01
+               for (ex, ey), (px, py) in zip(entry["spine"], spine)):
+            return list(vals)
+    return None
+
+
 def emit_gap_fill_spines(layout, dem, tile_lat, tile_lon) -> int:
     """Grade every enclosed gap of the airside pavement union as one unit
     (gate ``GAP_FILL_SPINE_ENABLED``).  Mutates ``layout.shapes``; returns
@@ -862,10 +1113,7 @@ def emit_gap_fill_spines(layout, dem, tile_lat, tile_lon) -> int:
     """
     if not GAP_FILL_SPINE_ENABLED:
         return 0
-    airside = [s for s in layout.shapes
-               if s.role in _AIRSIDE_PAVEMENT_ROLES
-               and s.polygon is not None and not s.polygon.is_empty
-               and s.polygon.geom_type == "Polygon"]
+    airside = _airside_shapes(layout)
     if len(airside) < 2:
         return 0
     try:
@@ -919,19 +1167,7 @@ def emit_gap_fill_spines(layout, dem, tile_lat, tile_lon) -> int:
     # pavement (first-writer-wins keeps pavement winning at any shared
     # node: the pavement-value-wins ruling) — and the parent ring is a
     # VERBATIM boundary chain (zero new boundary vertices).
-    _pad_parents = os.environ.get("O4_GAP_FILL_PAD_PARENTS", "1") == "1"
-    _skirt_parents = os.environ.get(
-        "O4_GAP_FILL_SKIRT_PARENTS", "1") == "1"
-    pads = [s for s in layout.shapes
-            if s.role == ROLE_BUILDING and s.polygon is not None
-            and not s.polygon.is_empty
-            and s.polygon.geom_type in ("Polygon", "MultiPolygon")] \
-        if _pad_parents else []
-    skirts = [s for s in layout.shapes
-              if getattr(s, "ref", None) == "runway_end_skirt"
-              and s.polygon is not None and not s.polygon.is_empty
-              and s.polygon.geom_type == "Polygon"] \
-        if _skirt_parents else []
+    pads, skirts = _gap_parents(layout)
     parents = pads + skirts
     # Geometry-only key set for the verbatim gate: every pavement +
     # parent ring vertex.  A residual boundary vertex outside this set
@@ -1081,6 +1317,15 @@ def emit_gap_fill_spines(layout, dem, tile_lat, tile_lon) -> int:
         emitted += _emit_open_frontage(
             layout, airside, comps, union, registry, chain_keys,
             other_polys, parents, step)
+    # Stage B2 movement report: solved-vs-analytic spine value deltas
+    # accumulated per emitted gap (gate-ON only — the store is empty or
+    # absent gate-OFF).
+    _deltas = getattr(layout, "_gap_spine_value_deltas", None)
+    if _deltas:
+        _ds = sorted(_deltas)
+        UI.vprint(1, f"  [gap-fill] stage B2 solved-vs-analytic spine "
+                     f"values: n={len(_ds)} worst={_ds[-1]:.2f} m "
+                     f"median={_ds[len(_ds) // 2]:.2f} m.")
     return emitted
 
 
@@ -1094,6 +1339,13 @@ def _emit_one_gap(layout, airside, gap_poly, long_dir, long_len, step,
                      f"(area={gap_poly.area:.0f} m2) — skipped.")
         return 0
 
+    # STAGE B2 (one-solve absorption): gate-ON the spine values come
+    # from the solve writeback (``layout.gap_fill_presolve``); the
+    # analytic valuation below then serves ONLY the solved-vs-analytic
+    # movement report.  Gate-OFF there is no store, ``solved`` is None
+    # and the analytic path is byte-identical to before.
+    solved = _solved_spine_values(layout, spine)
+
     # Per-vertex drainage interval + target.
     intervals: list[tuple] = []
     targets: list[float] = []
@@ -1106,7 +1358,7 @@ def _emit_one_gap(layout, airside, gap_poly, long_dir, long_len, step,
             break
         intervals.append((lo, hi))
         targets.append(target)
-    if not ok:
+    if not ok and solved is None:
         UI.vprint(1, "  [gap-fill] no pavement value at spine — skipped.")
         return 0
 
@@ -1114,8 +1366,23 @@ def _emit_one_gap(layout, airside, gap_poly, long_dir, long_len, step,
     # inside the gap, so they take their own corridor target like
     # every station — the surface between spine end and boundary
     # lerps in the mesh; the pavement value lives on the ring itself.
-    values = _smooth_spine(targets, intervals, _SMOOTH_SWEEPS)
-    values = [round(v, 1) for v in values]
+    if solved is not None:
+        values = [round(v, 1) for v in solved]
+        if ok:
+            # Movement report (ratified 2026-07-10): how far the solve
+            # writeback sits from the retired analytic target.
+            analytic = _smooth_spine(targets, intervals, _SMOOTH_SWEEPS)
+            store = getattr(layout, "_gap_spine_value_deltas", None)
+            if store is None:
+                store = layout._gap_spine_value_deltas = []
+            store.extend(abs(v - a) for v, a in zip(solved, analytic))
+    else:
+        if getattr(layout, "gap_fill_presolve", None) is not None:
+            UI.vprint(1, "  [gap-fill] WARN: stage B2 gate is ON but no "
+                         "pre-solve spine matches this emitted gap — "
+                         "analytic valuation fallback.")
+        values = _smooth_spine(targets, intervals, _SMOOTH_SWEEPS)
+        values = [round(v, 1) for v in values]
 
     # OPEN-WAY EMISSION (user design 2026-07-09, round 2): ONE face —
     # the gap polygon itself, ring verbatim — plus the spine as an

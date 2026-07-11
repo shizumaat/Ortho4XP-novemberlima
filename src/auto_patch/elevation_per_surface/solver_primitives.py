@@ -1317,7 +1317,133 @@ def _build_node_list(layout):
             if k not in bucket_to_idx:
                 bucket_to_idx[k] = len(nodes)
                 nodes.append((float(x), float(y)))
+    # GAP-FILL SPINE ADMISSION (Slice B Stage B2, ratified mechanism
+    # 2026-07-10; docs/slice_b_solver_absorption_design.md §B2): the
+    # drainage-spine vertices are INTERIOR points of the gap faces —
+    # they lie on no shape ring (the OPEN-WAY design floats them >= 2 m
+    # off every boundary), so the ring iteration above can never admit
+    # them.  When the gap sub-gate admits ROLE_GRADED_STRIP, the
+    # pre-solve construction store (``layout.gap_fill_presolve``, built
+    # by ``gap_fill.construct_gap_fill_presolve`` before the solve)
+    # supplies them here as FREE solver variables.  They intern through
+    # the same canonical registry (0.5 m) — spine stations sit
+    # ``GAP_FILL_SPINE_STEP_M`` (15 m) apart and >= 2 m off every ring,
+    # so no spine node can merge with another node's bucket.  Gate OFF
+    # (or no store) this loop body never runs — byte-inert.
+    if ROLE_GRADED_STRIP in _admitted_roles:
+        for _gap_entry in (getattr(layout, "gap_fill_presolve", None)
+                           or ()):
+            for x, y in _gap_entry.get("spine", ()):
+                k = layout.canonical_points.get_or_add(float(x), float(y))
+                if k not in bucket_to_idx:
+                    bucket_to_idx[k] = len(nodes)
+                    nodes.append((float(x), float(y)))
     return nodes, bucket_to_idx
+
+
+def _build_gap_spine_constraints(layout, bucket_to_idx, seed_elev=None):
+    """Stage B2 constraint entries for the gap-fill drainage spines
+    (ratified mechanism 2026-07-10; the LAW trace: today's analytic
+    spine values obey exactly two invariants — each station inside its
+    per-parent ``adjacent_ground_envelope`` interval, and longitudinal
+    smoothness — and this builder encodes the FIRST as solver interval
+    edges; the second is the ``TAXIWAY_MAX_GRADE_CHANGE_PER_M``
+    second-difference fairing pass in ``route_profile.solve``, the
+    project's own spine-curvature law, because ``ROLE_GRADE_LIMITS``
+    holds NO first-difference cap for ``graded_strip`` and a
+    second-difference cap is not expressible as a pairwise slab).
+
+    Per spine node, per frozen parent spec (``gap_fill._freeze_spine_
+    parent_specs``): ONE interval 4-tuple ``(spine_index,
+    station_index, floor_offset, ceiling_offset)`` — the B0 signed slab
+    ``floor_offset <= z_spine − z_station <= ceiling_offset`` with
+    ``None`` sides preserved (the law's own open-side semantics).  The
+    station index is the FROZEN-NEAREST pavement chain station mapped
+    through the canonical registry.
+
+    EMPTY-INTERSECTION RESOLUTION (measured 2026-07-10, first gate-ON
+    CYXY build): two parents whose envelopes cannot be jointly
+    satisfied give the POCS sweep an empty intersection — the two
+    projections ping-pong the spine node (and, through the shared
+    corrections, the stations' whole neighbourhoods) until the sweep's
+    visit budget caps out (27.9 M worklist visits vs 30 k gate-OFF;
+    Solving phase +23 s).  The analytic valuation had this exact case
+    and RESOLVED it — ``gap_fill._spine_interval``: on an empty
+    combined interval, the NEARER parent's interval alone applies.
+    ``seed_elev`` (the ``_seed_elevations`` output) encodes that same
+    law rule at build time: when a node's two parent intervals are
+    already disjoint at the SEED station elevations (stations are
+    pavement nodes that move little from seed), only the nearer
+    (first — specs are ordered nearest-first) parent's edge is kept.
+    ``seed_elev=None`` keeps every edge (unit tests).
+
+    Returns ``(sc_entries, spine_index_set, chains)``; ``chains`` feeds
+    the fairing pass (per chain: node indices, coordinates, and the
+    resolved per-node interval specs for the envelope clamp — the
+    fairing keeps its own LIVE nearer-parent fallback for conflicts
+    that only appear as stations move)."""
+    entries = getattr(layout, "gap_fill_presolve", None) or []
+    cps = layout.canonical_points
+    sc_out: list[dict] = []
+    spine_idx: set[int] = set()
+    chains: list[dict] = []
+    n_pruned = 0
+    for entry in entries:
+        idx = [bucket_to_idx.get(cps.get_or_add(float(x), float(y)))
+               for (x, y) in entry["spine"]]
+        edges: list[tuple] = []
+        node_specs: list[list[tuple]] = []
+        for i, specs in zip(idx, entry["specs"]):
+            resolved: list[tuple] = []
+            if i is not None:
+                spine_idx.add(i)
+                for (sx, sy), floor_off, ceil_off in specs:
+                    j = bucket_to_idx.get(
+                        cps.get_or_add(float(sx), float(sy)))
+                    if j is None or j == i:
+                        continue
+                    resolved.append((j, floor_off, ceil_off))
+                if (seed_elev is not None and len(resolved) == 2):
+                    # Seed-time joint feasibility of the two parent
+                    # slabs: floor = max over parents of (z_station +
+                    # floor_offset), ceiling = min of (z_station +
+                    # ceiling_offset); disjoint -> nearer parent wins
+                    # (the analytic law's own empty-intersection rule).
+                    lo_bound = None
+                    hi_bound = None
+                    for j, f_off, c_off in resolved:
+                        if j >= len(seed_elev):
+                            continue
+                        zj = seed_elev[j]
+                        if f_off is not None:
+                            b = zj + f_off
+                            lo_bound = b if lo_bound is None \
+                                else max(lo_bound, b)
+                        if c_off is not None:
+                            b = zj + c_off
+                            hi_bound = b if hi_bound is None \
+                                else min(hi_bound, b)
+                    if (lo_bound is not None and hi_bound is not None
+                            and lo_bound > hi_bound):
+                        resolved = resolved[:1]
+                        n_pruned += 1
+                edges.extend((i, j, f_off, c_off)
+                             for j, f_off, c_off in resolved)
+            node_specs.append(resolved)
+        node_list = [i for i in idx if i is not None]
+        if not node_list:
+            continue
+        sc_out.append({"nodes": node_list, "edges": edges, "flat": False,
+                       "flat_pairs": (), "area": 0.0,
+                       "role": ROLE_GRADED_STRIP,
+                       "ref": "gap_fill_spine"})
+        chains.append({"idx": idx, "xy": list(entry["spine"]),
+                       "specs": node_specs})
+    if n_pruned and _os.environ.get("O4_STEP_DEBUG") == "1":
+        print(f"    [gap-spine] empty-intersection resolution: "
+              f"{n_pruned} node(s) kept the nearer parent's interval "
+              f"only (the analytic law's own fallback rule)")
+    return sc_out, spine_idx, chains
 
 
 

@@ -432,6 +432,29 @@ def solve_route_profile(layout, icao: str,
         layout, bucket_to_idx, ctx=_gg_ctx, dem=dem,
         tile_lat=tile_lat, tile_lon=tile_lon,
         hard_nodes=_hard_for_certificate)
+    # ── GAP-FILL SPINE constraints (Slice B stage B2, gated) ─────────
+    # docs/slice_b_solver_absorption_design.md §B2.  The pre-solve store
+    # ``layout.gap_fill_presolve`` exists ONLY under the B2 gate (the
+    # pipeline builds it before this solve); its spine vertices were
+    # admitted to the node list by ``_build_node_list`` and now get their
+    # envelope INTERVAL edges (the B0 signed-slab primitive) to their
+    # frozen-nearest pavement chain stations.  Gate OFF: no store, empty
+    # sets, byte-inert.  The longitudinal law is the second-difference
+    # fairing pass further down (``_fair_gap_spine_chains``).
+    _gap_spine_idx: set = set()
+    _gap_spine_chains: list = []
+    if getattr(layout, "gap_fill_presolve", None):
+        from auto_patch.elevation_per_surface.solver_primitives import (
+            _build_gap_spine_constraints)
+        _gap_scs, _gap_spine_idx, _gap_spine_chains = (
+            _build_gap_spine_constraints(layout, bucket_to_idx,
+                                         seed_elev=elev))
+        shape_constraints.extend(_gap_scs)
+        if _os.environ.get("O4_STEP_DEBUG") == "1":
+            _n_int_edges = sum(len(_sc["edges"]) for _sc in _gap_scs)
+            print(f"    [gap-spine] {len(_gap_scs)} chain(s), "
+                  f"{len(_gap_spine_idx)} free spine node(s), "
+                  f"{_n_int_edges} envelope interval edge(s)")
     coupling = _build_level_coupling(shape_constraints)
 
     # ── THE ONE GRAPH (user 2026-06-27) ──────────────────────────────────────
@@ -971,6 +994,27 @@ def solve_route_profile(layout, icao: str,
                 _fairing_moved_keys = {
                     key for key, i in bucket_to_idx.items()
                     if elev[i] != _pre_fairing_elev[i]}
+        # ── GAP-SPINE longitudinal fairing (Slice B stage B2, ratified
+        # 2026-07-10) ─────────────────────────────────────────────────
+        # The projection above drove every spine node into its envelope
+        # interval (a feasible point, not a smooth one — POCS finds ANY
+        # point of the intersection).  The longitudinal law is the
+        # project's own spine-curvature law, TAXIWAY_MAX_GRADE_CHANGE_
+        # PER_M as a second-difference cap (the ``_fair_spine_chains``
+        # form), applied per gap-spine chain with every move clamped
+        # back into the node's envelope interval read at the CURRENT
+        # (settled) station elevations — so smoothing never exits the
+        # law the interval edges enforce.  Spine nodes belong to no
+        # shape ring, so this pass cannot perturb the scoped-projection
+        # proof or any pavement value.  Gate OFF: no chains, no-op.
+        if _gap_spine_chains:
+            from auto_patch.config import (
+                TAXIWAY_MAX_GRADE_CHANGE_PER_M as _K_GAP_SPINE)
+            _n_gap_kink = _fair_gap_spine_chains(
+                elev, _gap_spine_chains, _K_GAP_SPINE)
+            if _os.environ.get("O4_STEP_DEBUG") == "1":
+                print(f"    [gap-spine] fairing residual "
+                      f"kinks={_n_gap_kink}")
         _psub(0.97, "Solving elevations — writing back")
         # ── SPINE CROWN v2 (user 2026-07-07, part 30) ────────────────────
         # The whole solve above ran in UNCROWNED space z′.  The crown is a
@@ -1004,6 +1048,12 @@ def solve_route_profile(layout, icao: str,
                     {i for i in building_seats if i < n}
                     | {i for i in _gs_hard if i < n}
                     | {i for i in _seam_pin_idx if i < n}
+                    # Gap-fill drainage-spine nodes (Slice B stage B2)
+                    # are frozen at crown drop 0 like every other spine
+                    # breakline node ("spine nodes never crown") — the
+                    # emitted open way must carry the solved profile,
+                    # not a crowned copy the face disagrees with.
+                    | {i for i in _gap_spine_idx if i < n}
                     | {i for i, _cat in _hard_cat.items()
                        if _cat in ("seam_spine_anchor", "seat_on_spine",
                                    "gs_pin")})
@@ -1027,6 +1077,28 @@ def solve_route_profile(layout, icao: str,
             _elev_emit = elev
         n_terms, n_rects, n_juncs = _writeback(layout, _elev_emit,
                                                bucket_to_idx)
+        # ── GAP-SPINE writeback (Slice B stage B2, ratified 2026-07-10)
+        # WHO WRITES WHAT: the solve writes ONLY the spine nodes — their
+        # solved values go into the pre-solve store, which the post-solve
+        # emitter reads in place of the retired analytic valuation.  The
+        # gap-face RING vertices are shared pavement registry nodes:
+        # their values are written by their OWN pavement shapes through
+        # ``_writeback`` above (pavement identity — one node, one value,
+        # never a second writer).  ``_elev_emit`` is used for
+        # consistency with the writeback; spine nodes are crown-frozen
+        # (c = 0), so it equals ``elev`` at every spine index.
+        if _gap_spine_idx:
+            _cps_gap = layout.canonical_points
+            for _gap_entry in (getattr(layout, "gap_fill_presolve", None)
+                               or ()):
+                _gap_vals: list = []
+                for _gx, _gy in _gap_entry["spine"]:
+                    _gi = bucket_to_idx.get(
+                        _cps_gap.get_or_add(float(_gx), float(_gy)))
+                    _gap_vals.append(
+                        float(_elev_emit[_gi])
+                        if _gi is not None and _gi < n else None)
+                _gap_entry["values"] = _gap_vals
         # Spine breaklines from the SOLVED route profiles (z′ ON the spine
         # equals z — spine nodes never crown) + the crowned runway pieces.
         if _CROWN_ON:
@@ -2265,6 +2337,118 @@ def _fair_spine_chains(elev, spine_adj, anchors, node_band, nodes_xy,
             g2 = (elev[c[t + 1]] - elev[c[t]]) / l2
             if abs(g2 - g1) - k_rate * 0.5 * (l1 + l2) > 1e-4:
                 n_over += 1
+    return n_over
+
+
+def _fair_gap_spine_chains(elev, chains, k_rate, *, max_sweeps=200,
+                           tol=1e-4):
+    """GAP-SPINE longitudinal fairing (Slice B stage B2, ratified
+    2026-07-10): the ``_fair_spine_chains`` second-difference law —
+    ``|g2 − g1| ≤ k_rate·(L1 + L2)/2`` (``TAXIWAY_MAX_GRADE_CHANGE_
+    PER_M``, the taxiway vertical-curve K-factor analog) — applied to
+    each gap-fill drainage-spine chain, with every centre-vertex move
+    clamped INTO the node's envelope interval so smoothing never exits
+    the law the interval edges enforce.  The interval is read at the
+    CURRENT station elevations: ``[max over parents of (z_station +
+    floor_offset), min over parents of (z_station + ceiling_offset)]``,
+    ``None`` sides open; an EMPTY intersection falls back to the nearer
+    (first) parent's own interval — the same composition rule the
+    retired analytic valuation used (``gap_fill._spine_interval``).
+    Spine ENDPOINTS never move (no triple centres them), matching the
+    analytic smoother's pinned ends.
+
+    ``chains``: ``solver_primitives._build_gap_spine_constraints``
+    output — per chain the node indices (``None`` = unmapped, splits
+    the chain into runs), coordinates, and resolved per-node specs
+    ``[(station_index, floor_offset, ceiling_offset), ...]``.
+
+    Mutates ``elev``; returns the number of triples still over the
+    rate (honest residual — a tight envelope can force a kink)."""
+    import math
+    n_elev = len(elev)
+
+    def _interval_at(spec):
+        lo = None
+        hi = None
+        for (j, floor_off, ceil_off) in spec:
+            if j is None or j >= n_elev:
+                continue
+            zj = elev[j]
+            plo = None if floor_off is None else zj + floor_off
+            phi = None if ceil_off is None else zj + ceil_off
+            if plo is not None:
+                lo = plo if lo is None else max(lo, plo)
+            if phi is not None:
+                hi = phi if hi is None else min(hi, phi)
+        if lo is not None and hi is not None and lo > hi and spec:
+            j, floor_off, ceil_off = spec[0]
+            if j is not None and j < n_elev:
+                zj = elev[j]
+                lo = None if floor_off is None else zj + floor_off
+                hi = None if ceil_off is None else zj + ceil_off
+        return lo, hi
+
+    n_over = 0
+    for chain in chains:
+        idx = chain["idx"]
+        xy = chain["xy"]
+        specs = chain["specs"]
+        # Contiguous runs of mapped indices (an unmapped node splits
+        # the chain — smoothness across a missing variable is unknown).
+        runs: list[list[int]] = []
+        cur: list[int] = []
+        for pos, i in enumerate(idx):
+            if i is None or i >= n_elev:
+                if len(cur) >= 3:
+                    runs.append(cur)
+                cur = []
+            else:
+                cur.append(pos)
+        if len(cur) >= 3:
+            runs.append(cur)
+        for run in runs:
+            lens = [math.hypot(xy[run[k + 1]][0] - xy[run[k]][0],
+                               xy[run[k + 1]][1] - xy[run[k]][1])
+                    for k in range(len(run) - 1)]
+            for _sweep in range(max_sweeps):
+                worst_move = 0.0
+                for t in range(1, len(run) - 1):
+                    l1 = lens[t - 1]
+                    l2 = lens[t]
+                    if l1 < 0.5 or l2 < 0.5:
+                        continue
+                    a = idx[run[t - 1]]
+                    b = idx[run[t]]
+                    d = idx[run[t + 1]]
+                    g1 = (elev[b] - elev[a]) / l1
+                    g2 = (elev[d] - elev[b]) / l2
+                    dg = g2 - g1
+                    lim = k_rate * 0.5 * (l1 + l2)
+                    ex = abs(dg) - lim
+                    if ex <= 1e-6:
+                        continue
+                    delta = math.copysign(ex, dg) / (1.0 / l1 + 1.0 / l2)
+                    nb = elev[b] + delta
+                    lo, hi = _interval_at(specs[run[t]])
+                    if lo is not None:
+                        nb = max(nb, lo)
+                    if hi is not None:
+                        nb = min(nb, hi)
+                    moved = abs(nb - elev[b])
+                    if moved:
+                        elev[b] = nb
+                        if moved > worst_move:
+                            worst_move = moved
+                if worst_move < tol:
+                    break
+            for t in range(1, len(run) - 1):
+                l1, l2 = lens[t - 1], lens[t]
+                if l1 < 0.5 or l2 < 0.5:
+                    continue
+                g1 = (elev[idx[run[t]]] - elev[idx[run[t - 1]]]) / l1
+                g2 = (elev[idx[run[t + 1]]] - elev[idx[run[t]]]) / l2
+                if abs(g2 - g1) - k_rate * 0.5 * (l1 + l2) > 1e-4:
+                    n_over += 1
     return n_over
 
 
