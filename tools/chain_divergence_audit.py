@@ -19,6 +19,19 @@ airport-region triangles on exactly these):
 3. COINCIDENT NODES: distinct node ids at the same coordinates
    (deliberate wall node-splits are lawful; a high count on non-wall
    role pairs is a dedup failure).
+4. INTERIOR EDGE CROSSING: two edges from DIFFERENT ways whose interiors
+   properly cross — a single intersection point that lies strictly
+   inside both edges (more than the endpoint tolerance away from every
+   endpoint), NOT an endpoint touch and NOT a shared-vertex join.  Every
+   such crossing forces Triangle4XP to insert a Steiner point at the
+   intersection and re-dice both constrained edges, so it is the same
+   refinement food as the T-vertex and near-parallel classes but arising
+   from transversal geometry rather than from parallel slivers.  Not
+   every crossing is a defect: at CYXY (2026-07-10 attribution) all 18
+   are the crown-ridge crossing-continuity mechanism BY DESIGN — the
+   crown_spine breakline crossing runway~runway_crossing internal seam
+   edges (16) plus two intersecting runway ridges crossing without a
+   shared node.  Attribute before treating a count as a violation.
 
 Usage:
     venv/bin/python tools/chain_divergence_audit.py PATCH.osm [PATCH2.osm ...]
@@ -169,6 +182,48 @@ def analyze(path, tol=0.15, top=12):
             mx, my = (s0[0] + s1[0]) / 2, (s0[1] + s1[1]) / 2
             np_worst.append((sep, key, my / mlat, mx / mlon))
 
+    # ── 4. interior edge crossings ───────────────────────────────────
+    # Two edges from DIFFERENT ways whose interiors transversally cross
+    # at a single point that sits strictly inside both edges.  Solved
+    # analytically (segment-segment) for speed and to apply the same
+    # endpoint tolerance the T-vertex class uses (1 mm): a crossing whose
+    # intersection lands within that distance of any endpoint is really an
+    # endpoint touch or a T-vertex and belongs to classes 1/3, not here.
+    ENDPOINT_TOLERANCE = 1e-3   # metres
+    xing_pairs = Counter()
+    xing_worst = []
+    for gi, g in enumerate(edge_geoms):
+        wi, a, b, ax, ay, bx, by = edges[gi]
+        rx, ry = bx - ax, by - ay
+        for gj in tree.query(g):
+            if gj <= gi:
+                continue
+            wj, c, d, cx, cy, ddx, ddy = edges[gj]
+            if wj == wi:
+                continue                     # same way: not a foreign cross
+            sx, sy = ddx - cx, ddy - cy
+            denom = rx * sy - ry * sx
+            if abs(denom) < 1e-12:
+                continue                     # parallel -> classes 1/2
+            qx, qy = cx - ax, cy - ay
+            t = (qx * sy - qy * sx) / denom  # param on edge gi
+            u = (qx * ry - qy * rx) / denom  # param on edge gj
+            if not (0.0 <= t <= 1.0 and 0.0 <= u <= 1.0):
+                continue                     # segments miss each other
+            len_r = math.hypot(rx, ry)
+            len_s = math.hypot(sx, sy)
+            # intersection must sit in the interior of BOTH edges by more
+            # than the endpoint tolerance, else it is an endpoint touch
+            depth = min(t * len_r, (1.0 - t) * len_r,
+                        u * len_s, (1.0 - u) * len_s)
+            if depth < ENDPOINT_TOLERANCE:
+                continue
+            ix, iy = ax + t * rx, ay + t * ry
+            key = tuple(sorted((ways[wi][1], ways[wj][1])))
+            xing_pairs[key] += 1
+            xing_worst.append((depth, key, iy / mlat, ix / mlon,
+                               ways[wi][0], ways[wj][0], len_r, len_s))
+
     # ── 3. coincident node ids ───────────────────────────────────────
     by_coord = defaultdict(list)
     for nid, (la, lo) in nodes.items():
@@ -195,6 +250,18 @@ def analyze(path, tol=0.15, top=12):
     for key, c in np_pairs.most_common(top):
         print(f"     {key[0]} ~ {key[1]}: {c}")
     print(f"   COINCIDENT-NODE coords (>=2 nids): {len(co)}")
+    print(f"   INTERIOR EDGE CROSSINGS (foreign edges properly cross, "
+          f"depth>={ENDPOINT_TOLERANCE * 1000:g}mm): "
+          f"{sum(xing_pairs.values())}")
+    for key, c in xing_pairs.most_common(top):
+        print(f"     {key[0]} ~ {key[1]}: {c}")
+    if xing_worst:
+        print("   crossings (deepest interior first):")
+        for depth, key, la, lo, wa, wb, lr, ls in sorted(
+                xing_worst, reverse=True)[:max(top, len(xing_worst))]:
+            print(f"     depth={depth * 1000:8.3f}mm {key[0]}~{key[1]} "
+                  f"@ {la:.7f},{lo:.7f} ways={wa}/{wb} "
+                  f"edgelen={lr:.2f}/{ls:.2f}m")
     if np_worst:
         print("   worst near-parallel pairs:")
         for sep, key, la, lo in sorted(np_worst, reverse=True)[:top]:
@@ -205,7 +272,7 @@ def analyze(path, tol=0.15, top=12):
         print(f"     perp={perp * 1000:8.3f}mm {key[0]}~{key[1]} "
               f"@ {la:.7f},{lo:.7f} nid={nid}")
     print()
-    return total_tv, sum(np_pairs.values())
+    return total_tv, sum(np_pairs.values()), sum(xing_pairs.values())
 
 
 if __name__ == "__main__":
