@@ -1868,6 +1868,62 @@ def _seed_elevations(layout, nodes, bucket_to_idx,
                 set(existing_pin_idx) if existing_pin_idx else set()
             ) | bridge_pinned_idx
 
+    # ── Runway-end-skirt HARD PINS (Slice B stage B1, gated) ─────────
+    # docs/slice_b_solver_absorption_design.md §B1.  The runway-end skirt
+    # is the first terrain feature absorbed into the one-solve graph.  Its
+    # rings are built PRE-SOLVE (pipeline, before the solve call) and every
+    # ring vertex carries a birth-computed profile value in the shape's
+    # ``node_altitudes`` (the inverse-RESA law floor, derived from the
+    # already-hard runway profile).  Here each such vertex becomes a HARD
+    # PIN at that value — the object-bridge deck-pin pattern (above),
+    # mirrored: the pin SOURCE is the shape's own per-vertex
+    # ``node_altitudes`` (the skirt carries its values ON the shape, unlike
+    # the plates whose values live in ``_object_bridge_pin_values``), so no
+    # parallel bucket dict is minted — but the APPLICATION (elev / is_hard /
+    # have_initial + the seam-pin protection set) is identical.  The solver
+    # grades the neighbouring pavement to MEET these pins and never reshapes
+    # them; ``_writeback`` skips ROLE_RUNWAY_CLEARANCE, so the immutable
+    # ring keeps its birth values.  Runs after the bridge block so a skirt
+    # vertex coinciding with a deck pin yields to the deck (pavement/deck
+    # value wins), and after the seam block for the same reason.  GATED:
+    # the roles are admitted to the node list only under
+    # ``admitted_terrain_roles()`` (master + sub-gate), so with the gate off
+    # ``idx`` is never found for a skirt vertex and the block is a no-op —
+    # and until B1 moves construction pre-solve no skirt shape is even
+    # present at solve time, so the block is doubly inert off-gate.
+    _admitted_terrain = admitted_terrain_roles()
+    if ROLE_RUNWAY_CLEARANCE in _admitted_terrain:
+        _skirt_cps = layout.canonical_points
+        skirt_pinned_idx: set = set()
+        for s in layout.shapes:
+            if (s.role != ROLE_RUNWAY_CLEARANCE
+                    or getattr(s, "ref", None) != "runway_end_skirt"):
+                continue
+            if s.polygon is None or s.polygon.is_empty:
+                continue
+            na = s.node_altitudes
+            if not na:
+                continue
+            coords = _open_ring(list(s.polygon.exterior.coords))
+            if len(coords) < 3:
+                continue
+            for (x, y), alt in zip(coords, na):
+                if alt is None:
+                    continue
+                idx = bucket_to_idx.get(
+                    _skirt_cps.get_or_add(float(x), float(y)))
+                if idx is None:
+                    continue
+                elev[idx] = float(alt)
+                is_hard[idx] = True
+                have_initial[idx] = True
+                skirt_pinned_idx.add(idx)
+        if skirt_pinned_idx:
+            existing_pin_idx = getattr(layout, "_seam_pin_idx", None)
+            layout._seam_pin_idx = (  # type: ignore[attr-defined]
+                set(existing_pin_idx) if existing_pin_idx else set()
+            ) | skirt_pinned_idx
+
     # Warm-start soft nodes.
     for s in layout.shapes:
         if s.role not in PAVEMENT_ROLES or s.role == ROLE_RUNWAY:

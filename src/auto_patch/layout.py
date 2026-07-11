@@ -1214,6 +1214,16 @@ class PavementLayout:
         # excluded from the mean, so a welded strip ADOPTS the pavement
         # corner value and never moves it.
         node_id_to_consensus: dict[int, float | None] = {}
+        # Instrumentation (Slice B stage B1): count the nodes where the
+        # runway-end-skirt precedence tier actually DECIDES the value — a
+        # node with a skirt claim, NO law and NO authority claim, that
+        # would otherwise take the all-soft mean (the #271 skirt-vs-strip
+        # class).  Under the B1 gate this count is expected to be unchanged
+        # from the legacy path for skirt-vs-STRIP nodes (the adjacent-ground
+        # strip is not absorbed until B3, so it is still a soft claimant);
+        # skirt-vs-PAVEMENT nodes never reach this tier (the pavement
+        # authority claims them).  Published on the layout for the report.
+        _skirt_tier_hits = 0
         for nid, alts in node_id_to_alts.items():
             law = node_id_to_law_alts.get(nid)
             authority = node_id_to_authority_alts.get(nid)
@@ -1223,6 +1233,12 @@ class PavementLayout:
             # the node (a skirt-vs-strip weld among pure soft claims);
             # where pavement/solver claimed it, the skirt still adopts
             # the authority value as before.
+            if not law and not authority and skirt and (
+                    len(skirt) != len(alts)):
+                # A skirt claim wins over OTHER soft claims present at the
+                # node (the tier bites only when the skirt is not the sole
+                # claimant — otherwise the mean equals the skirt value).
+                _skirt_tier_hits += 1
             chosen = (law if law
                       else authority if authority
                       else skirt if skirt
@@ -1230,6 +1246,8 @@ class PavementLayout:
             if chosen:
                 node_id_to_consensus[nid] = (
                     sum(chosen) / float(len(chosen)))
+        self._skirt_consensus_tier_hits = (  # type: ignore[attr-defined]
+            _skirt_tier_hits)
 
         def _corner_alt(nid: int) -> float | None:
             return node_id_to_consensus.get(nid)
