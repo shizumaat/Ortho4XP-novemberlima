@@ -220,6 +220,31 @@ anchors) — so skirt construction can move pre-solve without a value cycle.
 * Gate: byte-level A/B with projection off vs on (PYTHONHASHSEED pinned);
   in-sim review round 7 (Noah) before any fixture recut (standing ruling).
 
+## Criterion-8 attribution CORRECTED (order-2.5 scout, 2026-07-11)
+
+Measured decomposition of the gate-ON CYXY build (189.9 s total):
+* "Emitting terrain features & finalizing" 91.5 s = **96%
+  `emit_surface_clearance_cuts`** (the legacy surface_clearance chain,
+  87.7 s, dominated by `hole_router`).  The adjacent-ground band emit is
+  0.39 s; gap spines 0.31 s; `to_osm` 0.35 s.  The criterion-8 "retiring
+  the emit march funds the target" claim is TRUE but the march in
+  question is the LEGACY CLEARANCE march — deleted at stage B4 — not the
+  band march, which is already sub-second.  Post-B4 projection:
+  ~150 s − ~87 s ≈ 65-75 s, well under the 120 s target.
+* "Solving elevations" 95.2 s is NOT the solver: the POCS projection
+  solve is **2.4 s** even with 7,130 terrain variables.  The phase is
+  filled by `object_terrain_assembly.attach_bridge_classification`
+  (39.7 s, fires at pipeline phase 5; the KBNA feature worktree carries
+  a 53× classifier speedup + pack-sidecar cache — a merge-time lever
+  outside this slice) and the reach-band feasibility machinery
+  (`_nearest_visible_centerline` / `_paved_frac`).
+* Order-2's "DEM scans dominate the band emit" was also false: within
+  the 0.39 s emit, DEM sampling is ~8%; clip + polygon assembly ~50%.
+* The seed-vs-solved coverage gap (24 missed shapes / 1,285 analytic-
+  fallback vertices) is re-scoped as a QUALITY ledger item (values move
+  to solved, in-sim-gated), not a performance lever.  It can ride with
+  order 3 or B4 preparation.
+
 ## Post-B1 corrections (Noah rulings, 2026-07-10 evening)
 
 * The B1 "reverse ordering dependency" ledger item is NARROWER than the
