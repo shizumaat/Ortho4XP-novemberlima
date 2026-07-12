@@ -321,14 +321,28 @@
 #    before B4.  Adoption/weld rows = GEOMETRIC clip artifacts (not
 #    coverage-coupled; emit-restructure scope with the 341 twins).
 #    ★★★ CLASSIFICATION ANSWERED: B4 config with coverage ON =
-#    fallback 0 AND STILL 14 TEARS — STRUCTURAL.  Pure-clamp bands
-#    lawfully span the cliffs the legacy clearance was CUTTING (no
-#    within-band grade law exists).  ★AWAITING NOAH DESIGN RULING:
-#    who governs steep terminal-frontage terrain post-clearance —
-#    candidate = the 05bf09f two-ring grade-capped structure
-#    generalized to exterior bands.  After the ruling: the
-#    structural fix · KBNA zone diet · charter extension to
-#    junction/RESA · retirement wiring · round 9.  ★FLIP-BROKEN
+#    fallback 0 AND STILL 14 TEARS — STRUCTURAL.  ★SITE GEOMETRY
+#    OVERTURNED THE FRAMING (24th corrected premise, by Noah): ALL
+#    14 sites sit at the SERVICE/GROUNDSIDE/BUILDING interface
+#    (junction/service_road/building/groundside within metres of
+#    every site; ZERO at wingtip domain along taxiways/runways) —
+#    "steep terminal terrain" was WRONG.  The legacy blobs
+#    incidentally flattened that interface; bands marched in
+#    post-deletion and clamped to hosts at different levels (pad
+#    ~712 vs groundside DEM ~705) ⇒ sub-metre cliffs inside bands.
+#    ★★★ NOAH RULING (2026-07-11): BANDS MARCH AROUND AIRSIDE
+#    PAVEMENT ONLY, for now — the interface belongs to the adjacent
+#    features' own rules (pads/ramps/DEM-follow/service grade);
+#    revisit if needed.  Implementation order DISPATCHED with
+#    mandatory fresh baselines, because:
+#    ★★★ LIDAR MERGED TO DEV mid-flight (59ddde4, parallel session,
+#    ON BY DEFAULT — CYXY covered by HRDEM): ALL pre-a4e1567 CYXY
+#    baselines and byte references are STALE; the invalid-DEM gap
+#    dips may self-resolve on real lidar; ★gotcha composite never
+#    reaches .alt — bake required; verify provider lines in build
+#    logs.  After the band order: KBNA zone diet · charter
+#    extension to junction/RESA · retirement wiring · round 9 on
+#    the lidar DEM.  ★FLIP-BROKEN
 #    default-assertion tests (8-12): cleanup order dispatched
 #    (env-pin, intent preserved).  ★PARALLEL-SESSION artifacts in
 #    main checkout: config.py GAP_FILL cleanup superseded by
