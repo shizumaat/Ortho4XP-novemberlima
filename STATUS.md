@@ -332,9 +332,23 @@
 #    ~712 vs groundside DEM ~705) ⇒ sub-metre cliffs inside bands.
 #    ★★★ NOAH RULING (2026-07-11): BANDS MARCH AROUND AIRSIDE
 #    PAVEMENT ONLY, for now — the interface belongs to the adjacent
-#    features' own rules (pads/ramps/DEM-follow/service grade);
-#    revisit if needed.  Implementation order DISPATCHED with
-#    mandatory fresh baselines, because:
+#    features' own rules (pads/ramps/DEM-follow/service grade).
+#    ★SCOUT VERDICT (25th corrected premise): the ruling was
+#    ALREADY SATISFIED — bands have been airside-only since the
+#    module's first commit; the "service_road bands" premise
+#    conflated bands with LEGACY CLEARANCE strips (A3 sweep; the
+#    charter is the existing removal lever).  NO code change.
+#    ★LIDAR HEALS 12 OF 14 TEARS (B4 config on HRDEM: 14→2, both
+#    junction-sourced host transitions = the now-tiny bench
+#    question; upper bound — agent's override skipped the
+#    production airport blur).  TODAY'S DEFAULT on lidar = 0
+#    graded_strip tears at CYXY.  Charter flip measured on lidar:
+#    25→8 clearance polygons, bands 107→149, tears 0→2 — in-sim
+#    round-9 material.  B4 remaining: the ≤2-site bench question ·
+#    the GEOMETRIC clip classes (coincident/twins/adoption rows =
+#    emit-restructure scope) · charter extension to junction/RESA
+#    (blob healing, −60%) · KBNA zone diet.  Fresh-baseline note
+#    stands, because:
 #    ★★★ LIDAR MERGED TO DEV mid-flight (59ddde4, parallel session,
 #    ON BY DEFAULT — CYXY covered by HRDEM): ALL pre-a4e1567 CYXY
 #    baselines and byte references are STALE; the invalid-DEM gap
