@@ -116,6 +116,55 @@ def _triangle_union_footprint(
     return simplified
 
 
+def foot_pad_ring(
+    contact_points_lonlat: list[tuple[float, float]],
+    margin_metres: float,
+) -> list[tuple[float, float]] | None:
+    """Build a small terrain-pad ring around ONE foot cluster's contact
+    points (multi-ground-cluster re-anchor; the points come from
+    ``object_anchor.FootPadRequest.contact_points_lonlat``).
+
+    Same contract as :func:`structure_ring` — ``(longitude, latitude)``,
+    unclosed — but per FOOT, not per structure: the convex hull of the
+    contact points, dilated by ``margin_metres`` so the pad reaches past
+    the very edge of the foot.  Hull and dilation run in local metres at
+    the cluster's own latitude (the projection
+    ``obj8_reader.local_offset_to_lonlat`` inverts), then map back.
+    Returns ``None`` when the input degenerates.
+    """
+    if not contact_points_lonlat:
+        return None
+    centroid_latitude = sum(
+        latitude for _longitude, latitude in contact_points_lonlat
+    ) / len(contact_points_lonlat)
+    metres_per_degree_longitude = (
+        obj8_reader.METRES_PER_DEGREE_LATITUDE
+        * math.cos(math.radians(centroid_latitude)))
+    if metres_per_degree_longitude <= 0.0:
+        return None
+    centroid_longitude = sum(
+        longitude for longitude, _latitude in contact_points_lonlat
+    ) / len(contact_points_lonlat)
+    local_points = [
+        ((longitude - centroid_longitude) * metres_per_degree_longitude,
+         (latitude - centroid_latitude)
+         * obj8_reader.METRES_PER_DEGREE_LATITUDE)
+        for longitude, latitude in contact_points_lonlat]
+    try:
+        padded = MultiPoint(local_points).convex_hull.buffer(
+            margin_metres, quad_segs=2)
+    except (ValueError, _GEOS_EXCEPTION):
+        return None
+    if padded.is_empty or padded.geom_type != "Polygon":
+        return None
+    ring = [
+        (float(centroid_longitude + x / metres_per_degree_longitude),
+         float(centroid_latitude
+               + y / obj8_reader.METRES_PER_DEGREE_LATITUDE))
+        for x, y in padded.exterior.coords[:-1]]
+    return ring if len(ring) >= 3 else None
+
+
 def structure_ring(
     structure: Structure,
     geometry_by_resource: dict[str, ObjectGeometry],

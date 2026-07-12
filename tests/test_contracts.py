@@ -309,6 +309,12 @@ def test_rebake_decision_fields():
         # can record them on fresh bakes; defaults empty for
         # hand-constructed decisions.
         "anchor_by_resource",
+        # Multi-ground-cluster foot re-anchor
+        # (docs/multi_foot_object_reanchor.md): the per-structure foot
+        # audit trail and the per-foot terrain-pad requests; both
+        # default empty for hand-constructed decisions.
+        "foot_clusters_by_structure_index",
+        "foot_pad_requests",
     )
 
 

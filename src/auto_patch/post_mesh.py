@@ -60,6 +60,17 @@ from .mesh_sampler import MeshElevationSampler
 OBJECT_ANCHOR_WORKLIST_FILENAME = "o4_object_anchor_worklist.json"
 OBJECT_ANCHOR_WORKLIST_VERSION = 1
 
+# Per-tile record of the foot-pad REQUESTS the foot re-anchor raised
+# (multi-ground-cluster objects whose best rigid offset still leaves a
+# foot off the mesh past ``DSF_OBJECT_FOOT_PAD_RESIDUAL_M``).  Written
+# next to the worklist after every rebake — refreshed each run, removed
+# when no request remains — carrying, per foot, the pad ring
+# (``object_footprints.foot_pad_ring``) and the target ground
+# elevation.  A future terrain-shaping stream consumes it; until then
+# it is the durable audit trail for feet a rigid body cannot seat.
+OBJECT_FOOT_PAD_SIDECAR_FILENAME = "o4_object_foot_pads.json"
+OBJECT_FOOT_PAD_SIDECAR_VERSION = 1
+
 # The counts returned by rebake_dsf_objects, all starting at zero.
 _COUNT_KEYS = (
     "airports_processed",
@@ -69,6 +80,7 @@ _COUNT_KEYS = (
     "vertices_offset",
     "objects_skipped",
     "airports_failed",
+    "foot_pad_requests",
 )
 
 
@@ -243,7 +255,13 @@ def discover_and_rebake_airport(
     (``(ObjectPool, RebakeDecision)`` pairs, for detailed reporting).
     Pure data out — printing is the caller's business.
     """
-    from .config import DSF_OBJECT_CONTACT_EPSILON_M, DSF_OBJECT_MIN_REACH_M
+    from .config import (
+        DSF_OBJECT_CONTACT_EPSILON_M,
+        DSF_OBJECT_ELEVATED_BASE_M,
+        DSF_OBJECT_FOOT_ANCHOR,
+        DSF_OBJECT_FOOT_MIN_REACH_M,
+        DSF_OBJECT_MIN_REACH_M,
+    )
 
     if epsilon_metres is None:
         epsilon_metres = DSF_OBJECT_CONTACT_EPSILON_M
@@ -255,6 +273,8 @@ def discover_and_rebake_airport(
         "structures_needing_pad": 0,
         "skipped": [],
         "decisions": [],
+        # object_anchor.FootPadRequest instances, all pools merged.
+        "foot_pad_requests": [],
     }
 
     lines = dsf_reader._load_dsf_text(dsf_path)
@@ -360,7 +380,26 @@ def discover_and_rebake_airport(
         geometry = dsf_reader._load_object_geometry(geometry_source_path)
         if geometry is None or not geometry.has_solid_geometry:
             continue
-        if geometry.solid_reach_metres() < DSF_OBJECT_MIN_REACH_M:
+        # The reach floor keeps compact, correctly anchored objects out
+        # of Phase 2 — but an author-BAKED vertical offset breaks the
+        # metric's premise: X-Plane mis-places such an object no matter
+        # how compact it is (the KBNA stairs reach 24.3 m and 20.6 m,
+        # under the floor).  Baked-offset geometry — lowest solid vertex
+        # above the elevated threshold — is admitted at the reduced
+        # foot-re-anchor floor instead (config rationale at
+        # DSF_OBJECT_FOOT_MIN_REACH_M).
+        minimum_solid_y = min(
+            geometry.vertices[vertex_index][1]
+            for triangle in geometry.solid_triangles
+            for vertex_index in triangle
+        )
+        reach_floor_metres = (
+            DSF_OBJECT_FOOT_MIN_REACH_M
+            if DSF_OBJECT_FOOT_ANCHOR
+            and minimum_solid_y > DSF_OBJECT_ELEVATED_BASE_M
+            else DSF_OBJECT_MIN_REACH_M
+        )
+        if geometry.solid_reach_metres() < reach_floor_metres:
             continue
         # Invariant I-4, enforced at Phase 2 discovery (amendment A13):
         # a resource with several terrain-draped placements would need a
@@ -423,6 +462,7 @@ def discover_and_rebake_airport(
             pool, pool_geometry_by_resource, structures, sampler
         )
         result["decisions"].append((pool, decision))
+        result["foot_pad_requests"].extend(decision.foot_pad_requests)
         if write_changes:
             report = object_rebake.apply(decision, pack_root, mesh_path)
             result["objects_written"].extend(report.objects_written)
@@ -503,6 +543,7 @@ def rebake_dsf_objects(tile) -> dict:
             return counts
 
         corrected_pack_roots: set[str] = set()
+        foot_pad_airports: list[dict] = []
         for airport in worklist.get("airports", []):
             icao = airport.get("icao", "?")
             try:
@@ -563,6 +604,50 @@ def rebake_dsf_objects(tile) -> dict:
             ]
             counts["vertices_offset"] += airport_result["vertices_offset"]
             counts["objects_skipped"] += len(airport_result["skipped"])
+            counts["foot_pad_requests"] += len(
+                airport_result["foot_pad_requests"]
+            )
+            if airport_result["foot_pad_requests"]:
+                from . import object_footprints
+                from .config import DSF_OBJECT_FOOT_PAD_MARGIN_M
+
+                foot_pad_airports.append(
+                    {
+                        "icao": icao,
+                        "pack_root": pack_root,
+                        "requests": [
+                            {
+                                "resource_path": request.resource_path,
+                                "latitude": request.latitude,
+                                "longitude": request.longitude,
+                                "base_y": request.base_y,
+                                "residual_metres": request.residual_metres,
+                                "target_ground_metres": (
+                                    request.target_ground_metres
+                                ),
+                                "ring_lonlat": (
+                                    object_footprints.foot_pad_ring(
+                                        list(
+                                            request.contact_points_lonlat
+                                        ),
+                                        DSF_OBJECT_FOOT_PAD_MARGIN_M,
+                                    )
+                                ),
+                            }
+                            for request in airport_result[
+                                "foot_pad_requests"
+                            ]
+                        ],
+                    }
+                )
+                UI.vprint(
+                    1,
+                    f"  [object-anchor] {icao}: "
+                    f"{len(airport_result['foot_pad_requests'])} foot "
+                    "pad request(s) — a rigid offset could not seat "
+                    "every foot; recorded in "
+                    + OBJECT_FOOT_PAD_SIDECAR_FILENAME,
+                )
 
             for resource_path, reason in airport_result["skipped"]:
                 UI.vprint(
@@ -607,6 +692,26 @@ def rebake_dsf_objects(tile) -> dict:
                     "  [object-anchor] restart X-Plane (objects are "
                     f"cached): {os.path.basename(pack_root) or pack_root}",
                 )
+
+        # Refresh the foot-pad sidecar every run: write it when any
+        # request was raised, remove a stale one when none remains.
+        sidecar_path = os.path.join(
+            os.path.dirname(worklist_path),
+            OBJECT_FOOT_PAD_SIDECAR_FILENAME,
+        )
+        if foot_pad_airports:
+            with open(sidecar_path, "w") as handle:
+                json.dump(
+                    {
+                        "version": OBJECT_FOOT_PAD_SIDECAR_VERSION,
+                        "tile": worklist.get("tile"),
+                        "airports": foot_pad_airports,
+                    },
+                    handle,
+                    indent=1,
+                )
+        elif os.path.isfile(sidecar_path):
+            os.remove(sidecar_path)
     except Exception as exception:
         # Belt and braces: a reporter must never fail the tile.
         try:

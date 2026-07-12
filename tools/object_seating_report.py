@@ -19,6 +19,9 @@ be matched to a row and its cause:
 * ``inherited`` — the structure has no ground contact and borrowed its
                   supporter's offset; a wrong supporter shows here
 * ``skipped``   — never baked (multi-placement, animation, arithmetic)
+* ``feet:N``    — foot-anchored (author-baked vertical offset; N foot
+                  clusters); residuals come from the decision's per-foot
+                  fit, so baked-offset objects are no longer invisible
 
 The ``--mesh`` you pass MUST be the SAME built ``Data<tile>.mesh`` the
 production pipeline seats objects against — i.e. one built from the
@@ -95,6 +98,30 @@ def main() -> int:
         for structure_index, structure in enumerate(decision.structures):
             if structure.skip_reason:
                 rows.append((math.inf, 0.0, structure, "skipped", 0.0, 0.0))
+                continue
+            feet = decision.foot_clusters_by_structure_index.get(
+                structure_index)
+            if feet:
+                # Foot-anchored structure (author-baked vertical offset;
+                # every part sits above the absolute elevated threshold,
+                # so the per-part sweep below is blind to it).  The
+                # decision already carries per-foot residuals.
+                worst = 0.0
+                for foot in feet:
+                    if foot.residual_metres is not None and (
+                            abs(foot.residual_metres) > abs(worst)):
+                        worst = foot.residual_metres
+                latitudes = [foot.latitude for foot in feet]
+                longitudes = [foot.longitude for foot in feet]
+                diameter = math.hypot(
+                    (max(latitudes) - min(latitudes))
+                    * METRES_PER_DEGREE_LATITUDE,
+                    (max(longitudes) - min(longitudes))
+                    * METRES_PER_DEGREE_LATITUDE
+                    * math.cos(math.radians(latitudes[0])))
+                rows.append((abs(worst), worst, structure,
+                             f"feet:{len(feet)}", diameter,
+                             structure.ground_span_metres or 0.0))
                 continue
             worst = 0.0
             diameter_points = []

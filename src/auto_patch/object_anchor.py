@@ -121,6 +121,56 @@ class Structure:
 
 
 @dataclass(frozen=True)
+class FootCluster:
+    """One ground-contact FOOT of a structure: a cluster of solid
+    vertices at the structure's own lowest band (project memory
+    kbna-gantry-pond-multi-foot-objects).
+
+    Detected in the pool frame by :func:`detect_foot_clusters`;
+    ``structure_deltas`` fills the world/mesh fields
+    (``latitude``/``longitude``/``ground_metres``/``kept_for_fit``/
+    ``residual_metres``) via ``dataclasses.replace`` when the structure
+    is foot-anchored."""
+
+    centroid_x: float  # pool frame metres east
+    centroid_z: float  # pool frame metres south
+    base_y: float  # authored y of the cluster's lowest solid vertex
+    base_resource: str  # resource owning that lowest vertex
+    contact_points: tuple[tuple[float, float], ...]  # frame (x, z)
+    latitude: float | None = None
+    longitude: float | None = None
+    ground_metres: float | None = None
+    # False when the foot's seat target fell more than
+    # DSF_OBJECT_FOOT_CONTACT_TOLERANCE_M below the topmost target and
+    # was excluded from the rigid fit.
+    kept_for_fit: bool = True
+    # ``rendered base − ground`` after the fitted rigid offset
+    # (positive floats, negative sinks); None until fitted.
+    residual_metres: float | None = None
+
+
+@dataclass(frozen=True)
+class FootPadRequest:
+    """A per-foot terrain-pad request: after the best rigid offset this
+    foot still misses the mesh by more than
+    ``DSF_OBJECT_FOOT_PAD_RESIDUAL_M`` — a rigid body cannot seat it,
+    only terrain shaped to ``target_ground_metres`` under the foot can.
+    Recorded on the decision and written to the post-mesh sidecar; the
+    ring itself is built downstream by
+    ``object_footprints.foot_pad_ring`` from ``contact_points_lonlat``.
+    """
+
+    structure_index: int
+    resource_path: str
+    latitude: float
+    longitude: float
+    base_y: float
+    residual_metres: float
+    target_ground_metres: float
+    contact_points_lonlat: tuple[tuple[float, float], ...]  # (lon, lat)
+
+
+@dataclass(frozen=True)
 class RebakeDecision:
     """Everything ``object_rebake.apply`` needs, and nothing it must
     compute: per-resource, per-vertex y offsets plus the audit trail."""
@@ -134,6 +184,16 @@ class RebakeDecision:
     # bakes (workstream W5's escalation: ``apply`` has no placements).
     anchor_by_resource: dict[str, tuple[float, float, float]] = (
         dataclass_field(default_factory=dict))
+    # Foot re-anchor audit trail: every foot-anchored structure's
+    # detected feet (world/mesh fields filled), keyed by index into
+    # ``structures``.  Present even when the structure was later
+    # A3-skipped, so the seating audit is never blind to a
+    # baked-offset object again.
+    foot_clusters_by_structure_index: dict[int, tuple[FootCluster, ...]] = (
+        dataclass_field(default_factory=dict))
+    # Feet the rigid offset could not seat (see FootPadRequest).
+    foot_pad_requests: list[FootPadRequest] = (
+        dataclass_field(default_factory=list))
 
 
 @dataclass(frozen=True)
@@ -192,6 +252,150 @@ def _pool_frame_to_world_point(
     return obj8_reader.local_offset_to_lonlat(
         origin_latitude, origin_longitude, 0.0, frame_x, frame_z
     )
+
+
+def detect_foot_clusters(
+    points: list[tuple[float, float, float]],
+    resources: list[str],
+    *,
+    band_metres: float,
+    cluster_gap_metres: float,
+    maximum_base_spread_metres: float,
+) -> list[FootCluster]:
+    """Detect a structure's ground-contact FEET relative to its own
+    lowest band (never the absolute ``y <= DSF_OBJECT_ELEVATED_BASE_M``
+    test, which an author-baked vertical offset defeats).
+
+    ``points`` are the structure's solid vertices ``(x, y, z)`` in the
+    pool frame (``y`` = authored vertical); ``resources`` is parallel.
+    Three stages, each doing one job (constants documented in
+    ``config.py``):
+
+    1. CONTACT BAND — a vertex qualifies when it lies within
+       ``band_metres`` of the lowest vertex in its own horizontal
+       neighbourhood (radius ``cluster_gap_metres``).  A local band,
+       not a global one: the 45 m KBNA stair's feet sit 1.17 m apart
+       in authored y, and near each foot the band must exclude the
+       stair stringers right above it.
+    2. CLUSTERING — band vertices chain into one foot when within
+       ``cluster_gap_metres`` horizontally AND ``band_metres``
+       vertically per link.  The vertical constraint keeps a foot from
+       chaining up a staircase onto the deck underside.
+    3. FOOT GATE — a cluster is a foot only when its base lies within
+       ``maximum_base_spread_metres`` of the structure's overall lowest
+       vertex.  Mid-span deck-underside clusters (their own local
+       minima, stage 1 cannot see the feet from there) start ~1.9 m up
+       on the measured KBNA stairs and are dropped here.
+
+    Returns feet ordered by ``(centroid_x, centroid_z)`` for
+    determinism.  A single-foot result is normal (most objects); the
+    caller decides what to do with it.
+    """
+    if not points:
+        return []
+    minimum_y_overall = min(point[1] for point in points)
+
+    # Stage 1 — grid-bucketed local-minimum band.
+    cell_size = cluster_gap_metres if cluster_gap_metres > 0.0 else 1.0
+    indices_by_cell: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for point_index, (x, _y, z) in enumerate(points):
+        indices_by_cell[
+            (int(math.floor(x / cell_size)), int(math.floor(z / cell_size)))
+        ].append(point_index)
+
+    def _neighbour_indices(x: float, z: float):
+        cell_x = int(math.floor(x / cell_size))
+        cell_z = int(math.floor(z / cell_size))
+        for offset_x in (-1, 0, 1):
+            for offset_z in (-1, 0, 1):
+                yield from indices_by_cell.get(
+                    (cell_x + offset_x, cell_z + offset_z), ()
+                )
+
+    candidate_indices: list[int] = []
+    for point_index, (x, y, z) in enumerate(points):
+        local_minimum_y = y
+        for other_index in _neighbour_indices(x, z):
+            other_x, other_y, other_z = points[other_index]
+            if other_y < local_minimum_y and (
+                math.hypot(other_x - x, other_z - z) <= cluster_gap_metres
+            ):
+                local_minimum_y = other_y
+        if y <= local_minimum_y + band_metres:
+            candidate_indices.append(point_index)
+    if not candidate_indices:
+        return []
+
+    # Stage 2 — single-linkage union-find over the candidates.
+    position_in_candidates = {
+        point_index: candidate_position
+        for candidate_position, point_index in enumerate(candidate_indices)
+    }
+    parent = list(range(len(candidate_indices)))
+
+    def find(node: int) -> int:
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[left_root] = right_root
+
+    for candidate_position, point_index in enumerate(candidate_indices):
+        x, y, z = points[point_index]
+        for other_index in _neighbour_indices(x, z):
+            other_position = position_in_candidates.get(other_index)
+            if other_position is None or other_position <= candidate_position:
+                continue
+            other_x, other_y, other_z = points[other_index]
+            if (
+                abs(other_y - y) <= band_metres
+                and math.hypot(other_x - x, other_z - z)
+                <= cluster_gap_metres
+            ):
+                union(candidate_position, other_position)
+
+    members_by_root: dict[int, list[int]] = defaultdict(list)
+    for candidate_position, point_index in enumerate(candidate_indices):
+        members_by_root[find(candidate_position)].append(point_index)
+
+    # Stage 3 — the foot gate, then one FootCluster per surviving group.
+    feet: list[FootCluster] = []
+    for member_indices in members_by_root.values():
+        base_index = min(
+            member_indices, key=lambda point_index: points[point_index][1]
+        )
+        base_y = points[base_index][1]
+        if base_y > minimum_y_overall + maximum_base_spread_metres:
+            continue
+        contact_indices = [
+            point_index
+            for point_index in member_indices
+            if points[point_index][1] <= base_y + band_metres
+        ]
+        centroid_x = sum(
+            points[point_index][0] for point_index in contact_indices
+        ) / len(contact_indices)
+        centroid_z = sum(
+            points[point_index][2] for point_index in contact_indices
+        ) / len(contact_indices)
+        feet.append(
+            FootCluster(
+                centroid_x=centroid_x,
+                centroid_z=centroid_z,
+                base_y=base_y,
+                base_resource=resources[base_index],
+                contact_points=tuple(
+                    (points[point_index][0], points[point_index][2])
+                    for point_index in contact_indices
+                ),
+            )
+        )
+    feet.sort(key=lambda foot: (foot.centroid_x, foot.centroid_z))
+    return feet
 
 
 def _build_pool_frame(
@@ -560,11 +764,32 @@ def structure_deltas(
     worsen the seating and the structure is skipped with both numbers in
     ``skip_reason``.
 
+    Foot re-anchor (``DSF_OBJECT_FOOT_ANCHOR``, project memory
+    kbna-gantry-pond-multi-foot-objects): a structure the absolute
+    elevated test classifies as clutter, but whose lowest band IS its
+    own object's lowest band, carries an author-BAKED vertical offset.
+    Unless every detected foot sits over a ground-touching supporter
+    (genuine baked rooftop clutter — inheritance stands), the structure
+    is FOOT-ANCHORED: its ground records are its feet
+    (:func:`detect_foot_clusters`), and the seating elevation is the
+    midpoint of the kept per-foot seat targets ``ground(foot) −
+    base_y(foot)`` — the rigid offset minimising the worst foot
+    residual across feet whose authored bases differ.  Detected feet
+    land in ``RebakeDecision.foot_clusters_by_structure_index`` (the
+    audit trail); feet the rigid offset cannot seat raise
+    ``RebakeDecision.foot_pad_requests``.
+
     Positional commands and ``ANIM`` handling are workstream W5's
     concern, not this function's.
     """
     from .config import (
         DSF_OBJECT_ELEVATED_BASE_M,
+        DSF_OBJECT_FOOT_ANCHOR,
+        DSF_OBJECT_FOOT_BAND_M,
+        DSF_OBJECT_FOOT_CLUSTER_GAP_M,
+        DSF_OBJECT_FOOT_CONTACT_TOLERANCE_M,
+        DSF_OBJECT_FOOT_MAX_BASE_SPREAD_M,
+        DSF_OBJECT_FOOT_PAD_RESIDUAL_M,
         DSF_OBJECT_PAD_FLAG_SPAN_M,
     )
 
@@ -684,6 +909,69 @@ def structure_deltas(
             continue
         ground_by_index[structure_index] = centroid_ground
 
+    # Foot re-anchor pre-pass (project memory
+    # kbna-gantry-pond-multi-foot-objects): a structure classified as
+    # elevated whose lowest band IS its own object's lowest band carries
+    # an author-BAKED vertical offset — the KBNA 45 m stair's lowest
+    # solid vertex sits at authored y = +6.5 m.  Such a structure never
+    # rests on a sibling structure the way rooftop clutter does; its
+    # feet were authored for TERRAIN.  Detect the feet here; pass 2
+    # decides between inheritance (all feet over a supporter — genuine
+    # baked rooftop clutter) and foot-anchoring (pass 3 seats the best
+    # rigid offset across the feet).
+    foot_candidate_by_index: dict[int, list[FootCluster]] = {}
+    if DSF_OBJECT_FOOT_ANCHOR:
+        resource_minimum_solid_y: dict[str, float] = {}
+        for resource_path in frame.included_resources:
+            geometry = geometry_by_resource[resource_path]
+            resource_minimum_solid_y[resource_path] = min(
+                geometry.vertices[vertex_index][1]
+                for triangle in geometry.solid_triangles
+                for vertex_index in triangle
+            )
+        for structure_index, structure in enumerate(structures):
+            if (
+                structure_index in skip_reason_by_index
+                or structure.is_ground_touching
+            ):
+                continue
+            sits_at_own_lowest_band = any(
+                resource_path in resource_minimum_solid_y
+                and structure_minimum_base_y
+                <= resource_minimum_solid_y[resource_path]
+                + DSF_OBJECT_ELEVATED_BASE_M
+                for resource_path, structure_minimum_base_y in (
+                    structure.minimum_base_y_by_resource.items()
+                )
+            )
+            if not sits_at_own_lowest_band:
+                continue
+            structure_shared_triangles = shared_triangles_by_structure[
+                structure_index
+            ]
+            used_shared_indices = sorted({
+                shared_index
+                for triangle in structure_shared_triangles
+                for shared_index in triangle
+            })
+            feet = detect_foot_clusters(
+                [
+                    frame.shared_vertices[shared_index]
+                    for shared_index in used_shared_indices
+                ],
+                [
+                    frame.resource_of_shared_vertex[shared_index]
+                    for shared_index in used_shared_indices
+                ],
+                band_metres=DSF_OBJECT_FOOT_BAND_M,
+                cluster_gap_metres=DSF_OBJECT_FOOT_CLUSTER_GAP_M,
+                maximum_base_spread_metres=(
+                    DSF_OBJECT_FOOT_MAX_BASE_SPREAD_M
+                ),
+            )
+            if feet:
+                foot_candidate_by_index[structure_index] = feet
+
     # Pass 2 — inheritance for structures with no ground-touching part
     # (invariant I-8).  Supporters are ground-touching structures with a
     # valid ground sample; containment wins over distance, first
@@ -695,12 +983,37 @@ def structure_deltas(
         and structure_index in ground_by_index
     ]
     inherited_from_by_index: dict[int, int] = {}
+    foot_anchored_by_index: dict[int, list[FootCluster]] = {}
     for structure_index, structure in enumerate(structures):
         if (
             structure_index in skip_reason_by_index
             or structure.is_ground_touching
         ):
             continue
+        feet = foot_candidate_by_index.get(structure_index)
+        if feet:
+            # Baked rooftop clutter rests ON a sibling: every foot sits
+            # over one ground-touching supporter's box, and inheritance
+            # (below) remains the correct seating.  Feet over open
+            # terrain mean the author baked the offset against THEIR
+            # mesh — the structure is foot-anchored and pass 3 fits the
+            # rigid offset across its feet instead.
+            supported = any(
+                bounding_box_by_structure[candidate_index] is not None
+                and all(
+                    bounding_box_by_structure[candidate_index][0]
+                    <= foot.centroid_x
+                    <= bounding_box_by_structure[candidate_index][1]
+                    and bounding_box_by_structure[candidate_index][2]
+                    <= foot.centroid_z
+                    <= bounding_box_by_structure[candidate_index][3]
+                    for foot in feet
+                )
+                for candidate_index in supporter_indices
+            )
+            if not supported:
+                foot_anchored_by_index[structure_index] = feet
+                continue
         centroid_x, centroid_z = frame_centroid_by_structure[structure_index]
         supporter_index = None
         for candidate_index in supporter_indices:
@@ -738,6 +1051,8 @@ def structure_deltas(
     # per-(structure, object) deltas (spec section 2.4, invariant I-3).
     updated_structures: list[Structure] = []
     delta_by_resource_and_vertex: dict[str, dict[int, float]] = {}
+    foot_clusters_by_structure_index: dict[int, tuple[FootCluster, ...]] = {}
+    foot_pad_requests: list[FootPadRequest] = []
     for structure_index, structure in enumerate(structures):
         if structure_index in skip_reason_by_index:
             updated_structures.append(
@@ -749,6 +1064,50 @@ def structure_deltas(
             continue
         structure_ground = ground_by_index[structure_index]
 
+        anchored_feet = foot_anchored_by_index.get(structure_index)
+        if anchored_feet is not None:
+            # Foot-anchored: one record per FOOT, sampled under the
+            # foot's own contact centroid.  A foot centroid off the
+            # mesh borrows the structure centroid's ground — noted,
+            # not fatal, exactly like a part centroid below.
+            enriched_feet: list[FootCluster] = []
+            ground_part_records = []
+            for foot in anchored_feet:
+                foot_latitude, foot_longitude = _pool_frame_to_world_point(
+                    frame.origin_latitude,
+                    frame.origin_longitude,
+                    foot.centroid_x,
+                    foot.centroid_z,
+                )
+                foot_ground = sampler.elevation_at_or_none(
+                    foot_latitude, foot_longitude
+                )
+                if foot_ground is None:
+                    import O4_UI_Utils as UI
+
+                    UI.vprint(
+                        2,
+                        "  [object-anchor] foot centroid "
+                        f"({foot_latitude:.6f}, {foot_longitude:.6f}) "
+                        "lies outside the built mesh; using the "
+                        "structure centroid's ground for it",
+                    )
+                    foot_ground = structure_ground
+                enriched_feet.append(
+                    replace(
+                        foot,
+                        latitude=foot_latitude,
+                        longitude=foot_longitude,
+                        ground_metres=foot_ground,
+                    )
+                )
+                ground_part_records.append(
+                    (foot_ground, foot.base_y, foot.base_resource)
+                )
+        else:
+            enriched_feet = []
+            ground_part_records = []
+
         # Ground-touching parts, re-derived from the SAME welding the
         # partition used (welding is intra-part, so welding a structure's
         # own triangles reproduces exactly its parts).
@@ -759,10 +1118,9 @@ def structure_deltas(
             obj8_partition.weld_parts(
                 frame.shared_vertices, structure_shared_triangles
             )
-            if structure_shared_triangles
+            if structure_shared_triangles and anchored_feet is None
             else []
         )
-        ground_part_records: list[tuple[float, float, str]] = []
         for part_triangles in parts:
             used_shared_indices = {
                 shared_index
@@ -808,7 +1166,53 @@ def structure_deltas(
                 (part_ground, part_base_y, base_resource)
             )
 
-        if ground_part_records:
+        if anchored_feet is not None:
+            part_grounds = [record[0] for record in ground_part_records]
+            ground_span_metres = max(part_grounds) - min(part_grounds)
+            # Foot-anchored seating: each foot's SEAT TARGET is the
+            # world elevation of the object's y = 0 plane that lands
+            # that foot exactly on the mesh (its ground minus its
+            # authored base — feet with different authored bases are
+            # the whole point).  The rigid offset that minimises the
+            # WORST foot residual is the midpoint of the kept targets.
+            # A foot whose target fell more than the contact tolerance
+            # below the topmost target is excluded from the fit — the
+            # body rests on its highest contacts; a cluster hanging
+            # over a pond must never drag the true feet down.
+            seat_targets = [
+                foot_ground - foot_base_y
+                for foot_ground, foot_base_y, _resource in (
+                    ground_part_records
+                )
+            ]
+            topmost_target = max(seat_targets)
+            kept_targets = [
+                target
+                for target in seat_targets
+                if target
+                >= topmost_target - DSF_OBJECT_FOOT_CONTACT_TOLERANCE_M
+            ]
+            structure_ground = (
+                min(kept_targets) + max(kept_targets)
+            ) / 2.0
+            enriched_feet = [
+                replace(
+                    foot,
+                    kept_for_fit=(
+                        target
+                        >= topmost_target
+                        - DSF_OBJECT_FOOT_CONTACT_TOLERANCE_M
+                    ),
+                    residual_metres=(
+                        structure_ground + foot.base_y - foot.ground_metres
+                    ),
+                )
+                for foot, target in zip(enriched_feet, seat_targets)
+            ]
+            foot_clusters_by_structure_index[structure_index] = tuple(
+                enriched_feet
+            )
+        elif ground_part_records:
             part_grounds = [record[0] for record in ground_part_records]
             ground_span_metres = max(part_grounds) - min(part_grounds)
             # Amendment A19: the seating elevation of a structure with
@@ -891,6 +1295,43 @@ def structure_deltas(
             )
             continue
 
+        # A baked foot-anchored structure whose rigid offset still
+        # leaves a foot off the mesh past the residual threshold gets a
+        # per-foot terrain-pad REQUEST — the ground under that foot,
+        # not the object, is what needs to move (target recorded).
+        if anchored_feet is not None:
+            for foot in foot_clusters_by_structure_index[structure_index]:
+                if (
+                    foot.residual_metres is None
+                    or abs(foot.residual_metres)
+                    <= DSF_OBJECT_FOOT_PAD_RESIDUAL_M
+                ):
+                    continue
+                foot_pad_requests.append(
+                    FootPadRequest(
+                        structure_index=structure_index,
+                        resource_path=foot.base_resource,
+                        latitude=foot.latitude,
+                        longitude=foot.longitude,
+                        base_y=foot.base_y,
+                        residual_metres=foot.residual_metres,
+                        target_ground_metres=(
+                            structure_ground + foot.base_y
+                        ),
+                        contact_points_lonlat=tuple(
+                            _pool_frame_to_world_point(
+                                frame.origin_latitude,
+                                frame.origin_longitude,
+                                contact_x,
+                                contact_z,
+                            )[::-1]
+                            for contact_x, contact_z in (
+                                foot.contact_points
+                            )
+                        ),
+                    )
+                )
+
         # The deltas.  Invariant I-3: per (structure, object) — each
         # resource's offset is measured from ITS OWN anchor's ground.
         for resource_path, triangles in (
@@ -964,4 +1405,6 @@ def structure_deltas(
             for resource_path, placement in placement_by_resource.items()
             if resource_path in anchor_ground_by_resource
         },
+        foot_clusters_by_structure_index=foot_clusters_by_structure_index,
+        foot_pad_requests=foot_pad_requests,
     )
