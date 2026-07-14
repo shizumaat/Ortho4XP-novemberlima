@@ -151,6 +151,46 @@ SINGLE_PLACEMENT_DSF_BODY = "\n".join([
     f"OBJECT 0 {ANCHOR_LONGITUDE:.9f} {ANCHOR_LATITUDE:.9f} 0.000000",
 ]) + "\n"
 
+# A two-foot gantry with an author-BAKED vertical offset (multi-ground-
+# cluster re-anchor, project memory kbna-gantry-pond-multi-foot-objects):
+# two vertical foot quads (authored bases +6.5 and +7.7) joined by a
+# 40 m deck along the EAST axis — across the synthetic plane's slope,
+# so no rigid offset can seat both feet and the west foot must raise a
+# terrain-pad request.
+def _two_foot_gantry_object(span_metres: float) -> str:
+    east_far = span_metres
+    east_foot_b = span_metres - 2.0
+    return "\n".join([
+        "A",
+        "800",
+        "OBJ",
+        "",
+        "POINT_COUNTS 12 0 0 18",
+        "VT 0.000000 6.500000 0.000000 0.0 1.0 0.0 0.0 0.0",
+        "VT 2.000000 6.500000 0.000000 0.0 1.0 0.0 0.0 0.0",
+        "VT 2.000000 9.200000 0.000000 0.0 1.0 0.0 0.0 0.0",
+        "VT 0.000000 9.200000 0.000000 0.0 1.0 0.0 0.0 0.0",
+        "VT 0.000000 9.200000 0.000000 0.0 1.0 0.0 0.0 0.0",
+        f"VT {east_far:.6f} 9.200000 0.000000 0.0 1.0 0.0 0.0 0.0",
+        f"VT {east_far:.6f} 9.200000 2.000000 0.0 1.0 0.0 0.0 0.0",
+        "VT 0.000000 9.200000 2.000000 0.0 1.0 0.0 0.0 0.0",
+        f"VT {east_foot_b:.6f} 7.700000 0.000000 0.0 1.0 0.0 0.0 0.0",
+        f"VT {east_far:.6f} 7.700000 0.000000 0.0 1.0 0.0 0.0 0.0",
+        f"VT {east_far:.6f} 9.200000 0.000000 0.0 1.0 0.0 0.0 0.0",
+        f"VT {east_foot_b:.6f} 9.200000 0.000000 0.0 1.0 0.0 0.0 0.0",
+        "IDX10 0 1 2 0 2 3 4 5 6 4",
+        "IDX10 6 7 8 9 10 8 10 11",
+        "TRIS 0 18",
+    ]) + "\n"
+
+
+TWO_FOOT_GANTRY_OBJECT = _two_foot_gantry_object(40.0)
+
+TWO_FOOT_GANTRY_DSF_BODY = "\n".join([
+    "OBJECT_DEF objects/gantry.obj",
+    f"OBJECT 0 {ANCHOR_LONGITUDE:.9f} {ANCHOR_LATITUDE:.9f} 0.000000",
+]) + "\n"
+
 
 class Harness:
     pass
@@ -324,6 +364,114 @@ def test_idempotent_through_the_full_path(phase_two_harness):
     assert backup_after_first_run == backup_after_second_run
     assert first_counts["structures_baked"] == 1
     assert second_counts["structures_baked"] == 1
+
+
+# ── multi-ground-cluster foot pads (sidecar) ─────────────────────────
+
+
+def test_foot_pad_sidecar_written_and_removed(
+        phase_two_harness, monkeypatch):
+    """A baked-offset two-foot gantry across the plane's slope: the
+    rigid offset seats only the topmost-target foot, the other raises a
+    terrain-pad request, and ``rebake_dsf_objects`` records it in the
+    per-tile sidecar — refreshed on the next run (removed here, since
+    the gate turned off leaves no request)."""
+    harness = phase_two_harness
+    dsf_path, pack_root = _make_pack(
+        harness.tmp_path, "Gantry Pack", TWO_FOOT_GANTRY_DSF_BODY,
+        {"objects/gantry.obj": TWO_FOOT_GANTRY_OBJECT})
+    harness.write_worklist(
+        [harness.worklist_entry("KTST", dsf_path, pack_root)])
+
+    counts = post_mesh.rebake_dsf_objects(harness.tile)
+    assert counts["structures_baked"] == 1
+    assert counts["foot_pad_requests"] == 1
+
+    sidecar_path = harness.patches_directory / (
+        post_mesh.OBJECT_FOOT_PAD_SIDECAR_FILENAME)
+    payload = json.loads(sidecar_path.read_text())
+    assert payload["version"] == post_mesh.OBJECT_FOOT_PAD_SIDECAR_VERSION
+    (airport,) = payload["airports"]
+    assert airport["icao"] == "KTST"
+    assert airport["pack_root"] == pack_root
+    (request,) = airport["requests"]
+    assert request["resource_path"] == "objects/gantry.obj"
+    assert request["base_y"] == pytest.approx(6.5, abs=1e-9)
+    # The west foot floats by the slope between the feet minus the
+    # authored base difference (contact centroids 38 m apart east).
+    west_ground = _plane_elevation(obj8_reader.local_offset_to_lonlat(
+        ANCHOR_LATITUDE, ANCHOR_LONGITUDE, 0.0, 1.0, 0.0)[1])
+    east_ground = _plane_elevation(obj8_reader.local_offset_to_lonlat(
+        ANCHOR_LATITUDE, ANCHOR_LONGITUDE, 0.0, 39.0, 0.0)[1])
+    expected_residual = (east_ground - west_ground) - (7.7 - 6.5)
+    assert expected_residual > config.DSF_OBJECT_FOOT_PAD_RESIDUAL_M
+    assert request["residual_metres"] == pytest.approx(
+        expected_residual, abs=1e-2)
+    assert request["target_ground_metres"] == pytest.approx(
+        west_ground + expected_residual, abs=1e-2)
+    ring = request["ring_lonlat"]
+    assert ring is not None and len(ring) >= 3
+    assert all(len(point) == 2 for point in ring)
+
+    # Gate off, run again: no request remains, the stale sidecar goes.
+    monkeypatch.setattr(config, "DSF_OBJECT_FOOT_ANCHOR", False)
+    second_counts = post_mesh.rebake_dsf_objects(harness.tile)
+    assert second_counts["foot_pad_requests"] == 0
+    assert not sidecar_path.exists()
+
+
+REACH_FLOOR_DSF_BODY = "\n".join([
+    "OBJECT_DEF objects/short_gantry.obj",
+    "OBJECT_DEF objects/small_slab.obj",
+    f"OBJECT 0 {ANCHOR_LONGITUDE:.9f} {ANCHOR_LATITUDE:.9f} 0.000000",
+    f"OBJECT 1 {ANCHOR_LONGITUDE:.9f} {ANCHOR_LATITUDE + 0.001:.9f} "
+    "0.000000",
+]) + "\n"
+
+# A compact base-0 slab (reach ~21 m): correctly anchored, X-Plane's
+# business — must stay below the standard 25 m discovery floor.
+SMALL_SLAB_OBJECT = "\n".join([
+    "A",
+    "800",
+    "OBJ",
+    "",
+    "POINT_COUNTS 4 0 0 6",
+    "VT 5.000000 0.000000 5.000000 0.0 1.0 0.0 0.0 0.0",
+    "VT 15.000000 0.000000 5.000000 0.0 1.0 0.0 0.0 0.0",
+    "VT 15.000000 0.000000 15.000000 0.0 1.0 0.0 0.0 0.0",
+    "VT 5.000000 0.000000 15.000000 0.0 1.0 0.0 0.0 0.0",
+    "IDX10 0 1 2 0 2 3",
+    "TRIS 0 6",
+]) + "\n"
+
+
+def test_baked_offset_geometry_admitted_at_reduced_reach_floor(
+        phase_two_harness):
+    """The KBNA gap: the stairs reach 24.3 / 20.6 m — under the 25 m
+    discovery floor — so Phase 2 never saw them.  Baked-offset geometry
+    (lowest solid vertex above the elevated threshold) is admitted at
+    the reduced DSF_OBJECT_FOOT_MIN_REACH_M floor; compact base-0
+    geometry keeps the standard floor."""
+    harness = phase_two_harness
+    dsf_path, pack_root = _make_pack(
+        harness.tmp_path, "Short Gantry Pack", REACH_FLOOR_DSF_BODY,
+        {
+            # Reach ~20 m: over the 15 m foot floor, under the 25 m one.
+            "objects/short_gantry.obj": _two_foot_gantry_object(20.0),
+            "objects/small_slab.obj": SMALL_SLAB_OBJECT,
+        })
+
+    result = post_mesh.discover_and_rebake_airport(
+        dsf_path, harness.mesh_path, pack_root, None)
+
+    assert result["objects_written"] == ["objects/short_gantry.obj"]
+    assert result["structures_baked"] == 1
+    # Two feet, both kept: over 18 m the plane's slope (~2.1 m) less
+    # the 1.2 m base difference is within the contact tolerance.
+    ((_pool, decision),) = result["decisions"]
+    (feet,) = decision.foot_clusters_by_structure_index.values()
+    assert len(feet) == 2
+    assert all(foot.kept_for_fit for foot in feet)
 
 
 # ── invariant I-4 (enforced at Phase 2 discovery, amendment A13) ─────

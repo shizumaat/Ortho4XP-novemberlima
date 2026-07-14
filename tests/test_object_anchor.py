@@ -35,6 +35,7 @@ from auto_patch import obj8_reader
 from auto_patch.mesh_sampler import MeshElevationSampler
 from auto_patch.object_anchor import (
     ObjectPool,
+    detect_foot_clusters,
     discover_object_pools,
     partition_structures,
     structure_deltas,
@@ -920,6 +921,326 @@ class TestAmendmentA3:
         assert len(deltas) == 1
         assert abs(next(iter(deltas))) < 1.0
         assert decision.skipped == []
+
+
+# ── multi-ground-cluster (foot) re-anchor ─────────────────────────────
+#
+# Project memory kbna-gantry-pond-multi-foot-objects: the KBNA
+# water-treatment stairs carry author-BAKED vertical offsets (lowest
+# solid vertex at local y = +6.5 m) and TWO ground-contact feet whose
+# authored bases differ by 1.17 m.  The absolute elevated test called
+# them rooftop clutter and every seating path skipped them.
+
+
+def two_foot_gantry_geometry(
+    foot_a_base_y=6.5, foot_b_base_y=7.7, deck_y=9.2, span_axis="south"
+):
+    """Three welded quads: two vertical FEET 38..40 m apart joined by a
+    DECK, mimicking the KBNA stair shape.  ``span_axis`` 'south' puts
+    the feet at the same plane-mesh ground (the plane's elevation is
+    constant in latitude); 'east' puts them across the plane's slope."""
+
+    def point(along, y, across):
+        if span_axis == "south":
+            return (across, y, along)
+        return (along, y, across)
+
+    vertices = [
+        # foot A (quad in the vertical plane, along 0..2)
+        point(0.0, foot_a_base_y, 0.0),
+        point(2.0, foot_a_base_y, 0.0),
+        point(2.0, deck_y, 0.0),
+        point(0.0, deck_y, 0.0),
+        # deck (horizontal quad, along 0..40)
+        point(0.0, deck_y, 0.0),
+        point(40.0, deck_y, 0.0),
+        point(40.0, deck_y, 2.0),
+        point(0.0, deck_y, 2.0),
+        # foot B (vertical quad, along 38..40)
+        point(38.0, foot_b_base_y, 0.0),
+        point(40.0, foot_b_base_y, 0.0),
+        point(40.0, deck_y, 0.0),
+        point(38.0, deck_y, 0.0),
+    ]
+    triangles = [
+        (0, 1, 2), (0, 2, 3),
+        (4, 5, 6), (4, 6, 7),
+        (8, 9, 10), (8, 10, 11),
+    ]
+    return make_geometry(vertices, triangles)
+
+
+def _single_object_decision(geometry, plane_sampler, resource="gantry.obj"):
+    placement = make_placement(
+        resource, PLANE_ANCHOR_LATITUDE, PLANE_ANCHOR_LONGITUDE
+    )
+    geometry_by_resource = {resource: geometry}
+    pool = ObjectPool(
+        placements=[placement],
+        resolved_paths={resource: f"/nonexistent/{resource}"},
+    )
+    structures = partition_structures(
+        pool, geometry_by_resource, epsilon_metres=CONTACT_EPSILON_METRES
+    )
+    assert len(structures) == 1
+    decision = structure_deltas(
+        pool, geometry_by_resource, structures, plane_sampler
+    )
+    return structures, decision
+
+
+class TestFootReanchor:
+    def test_two_foot_baked_gantry_seats_across_both_feet(
+        self, plane_sampler
+    ):
+        # Feet along the SOUTH axis: same ground under both, so the
+        # seat-target spread equals the authored base difference
+        # (1.2 m, inside the contact tolerance) and BOTH feet stay in
+        # the fit.  The midpoint seat leaves each foot 0.6 m off — the
+        # best any rigid body can do.
+        structures, decision = _single_object_decision(
+            two_foot_gantry_geometry(span_axis="south"), plane_sampler
+        )
+        assert not structures[0].is_ground_touching
+        updated = decision.structures[0]
+        assert updated.skip_reason is None
+        assert updated.inherited_from_structure_index is None
+
+        feet = decision.foot_clusters_by_structure_index[0]
+        assert len(feet) == 2
+        assert sorted(foot.base_y for foot in feet) == pytest.approx(
+            [6.5, 7.7], abs=1e-9
+        )
+        assert all(foot.kept_for_fit for foot in feet)
+        assert sorted(foot.residual_metres for foot in feet) == (
+            pytest.approx([-0.6, +0.6], abs=1e-3)
+        )
+        assert decision.foot_pad_requests == []
+
+        # The rigid offset: seat = midpoint of the two per-foot targets
+        # ground − base = ground − 7.1, measured from the anchor ground.
+        anchor_ground = decision.anchor_ground_by_resource["gantry.obj"]
+        deltas = set(
+            decision.delta_by_resource_and_vertex["gantry.obj"].values()
+        )
+        assert len(deltas) == 1
+        ground_under_feet = plane_ground(PLANE_ANCHOR_LONGITUDE)
+        assert next(iter(deltas)) == pytest.approx(
+            ground_under_feet - 7.1 - anchor_ground, abs=1e-3
+        )
+
+    def test_slope_drops_low_target_foot_and_requests_a_pad(
+        self, plane_sampler
+    ):
+        # Feet along the EAST axis: ~10.6 m of plane slope between the
+        # feet dwarfs the 1.2 m authored base difference, so no rigid
+        # offset can seat both.  The body rests on the topmost target
+        # (the east foot); the west foot is EXCLUDED from the fit,
+        # floats by slope − base difference, and raises a terrain-pad
+        # request with the ground elevation that would seat it.
+        structures, decision = _single_object_decision(
+            two_foot_gantry_geometry(span_axis="east"), plane_sampler
+        )
+        updated = decision.structures[0]
+        assert updated.skip_reason is None
+
+        feet = decision.foot_clusters_by_structure_index[0]
+        assert len(feet) == 2
+        west_foot, east_foot = feet  # ordered by frame x
+        assert west_foot.base_y == pytest.approx(6.5, abs=1e-9)
+        assert east_foot.base_y == pytest.approx(7.7, abs=1e-9)
+        assert east_foot.kept_for_fit
+        assert not west_foot.kept_for_fit
+        # The kept foot seats exactly; the dropped foot floats above
+        # its ground (never sinks below the bearing foot).
+        assert east_foot.residual_metres == pytest.approx(0.0, abs=1e-3)
+        assert west_foot.residual_metres > 1.5
+
+        assert len(decision.foot_pad_requests) == 1
+        request = decision.foot_pad_requests[0]
+        assert request.structure_index == 0
+        assert request.resource_path == "gantry.obj"
+        assert request.base_y == pytest.approx(6.5, abs=1e-9)
+        assert request.residual_metres == pytest.approx(
+            west_foot.residual_metres, abs=1e-9
+        )
+        # Raising the ground under the foot to the recorded target
+        # would zero the residual.
+        assert request.target_ground_metres == pytest.approx(
+            west_foot.ground_metres + west_foot.residual_metres, abs=1e-6
+        )
+        assert len(request.contact_points_lonlat) == len(
+            west_foot.contact_points
+        )
+
+    def test_baked_rooftop_clutter_still_inherits(self, plane_sampler):
+        # A SEPARATE object file whose whole geometry is baked to sit
+        # on another object's roof: its feet lie over the building's
+        # bounding box, so inheritance — not foot-anchoring — remains
+        # the seating (the building's own delta carries the clutter).
+        building_geometry = compound_geometry(
+            (0.0, 10.0, 0.0, 20.0, 0.0, 10.0)
+        )
+        # Hovering just past the contact epsilon so the clutter stays
+        # its own structure (in contact it would simply weld into the
+        # building and share its delta anyway).
+        clutter_geometry = compound_geometry(
+            (2.0, 6.0, 20.5, 22.5, 2.0, 6.0)
+        )
+        placements = [
+            make_placement(
+                "building.obj", PLANE_ANCHOR_LATITUDE, PLANE_ANCHOR_LONGITUDE
+            ),
+            make_placement(
+                "clutter.obj",
+                PLANE_ANCHOR_LATITUDE,
+                PLANE_ANCHOR_LONGITUDE,
+                definition_index=1,
+            ),
+        ]
+        geometry_by_resource = {
+            "building.obj": building_geometry,
+            "clutter.obj": clutter_geometry,
+        }
+        pool = ObjectPool(
+            placements=placements,
+            resolved_paths={
+                resource: f"/nonexistent/{resource}"
+                for resource in geometry_by_resource
+            },
+        )
+        structures = partition_structures(
+            pool, geometry_by_resource, epsilon_metres=CONTACT_EPSILON_METRES
+        )
+        assert len(structures) == 2
+        building_index = next(
+            index
+            for index, structure in enumerate(structures)
+            if structure.is_ground_touching
+        )
+        clutter_index = 1 - building_index
+
+        decision = structure_deltas(
+            pool, geometry_by_resource, structures, plane_sampler
+        )
+        updated_clutter = decision.structures[clutter_index]
+        assert updated_clutter.skip_reason is None
+        assert (
+            updated_clutter.inherited_from_structure_index == building_index
+        )
+        assert decision.foot_clusters_by_structure_index == {}
+        assert decision.foot_pad_requests == []
+        building_delta = decision.delta_by_resource_and_vertex[
+            "building.obj"
+        ][0]
+        clutter_delta = decision.delta_by_resource_and_vertex[
+            "clutter.obj"
+        ][0]
+        assert clutter_delta == pytest.approx(building_delta, abs=1e-9)
+
+    def test_gate_off_restores_the_elevated_skip(
+        self, plane_sampler, monkeypatch
+    ):
+        from auto_patch import config
+
+        monkeypatch.setattr(config, "DSF_OBJECT_FOOT_ANCHOR", False)
+        structures, decision = _single_object_decision(
+            two_foot_gantry_geometry(span_axis="south"), plane_sampler
+        )
+        # Pre-change behaviour: no ground-touching part, no supporter —
+        # skipped, and no foot machinery ran.
+        assert decision.foot_clusters_by_structure_index == {}
+        assert decision.foot_pad_requests == []
+        assert decision.structures[0].skip_reason is not None
+        assert "no ground-touching part" in decision.structures[0].skip_reason
+
+
+class TestDetectFootClusters:
+    def test_stairs_and_deck_do_not_become_feet(self):
+        # Foot A at y 6.5, a staircase climbing towards the deck, the
+        # deck underside at 9.0 (its own local minimum mid-span, where
+        # the 5 m window cannot see either foot), and foot B at 7.6.
+        # Stage 1's LOCAL band cuts the staircase chain right above
+        # foot A; stage 3's base gate drops the deck cluster.
+        points = [
+            (0.0, 6.5, 0.0), (1.0, 6.5, 0.0),               # foot A
+            (1.5, 6.8, 0.0), (2.0, 7.1, 0.0),               # stair steps
+            (2.5, 7.4, 0.0), (3.0, 7.7, 0.0),
+            (39.0, 7.6, 0.0), (40.0, 7.6, 0.0),             # foot B
+        ] + [(float(x), 9.0, 0.0) for x in range(8, 35)]    # deck
+        resources = ["gantry.obj"] * len(points)
+        feet = detect_foot_clusters(
+            points,
+            resources,
+            band_metres=0.5,
+            cluster_gap_metres=5.0,
+            maximum_base_spread_metres=1.65,
+        )
+        assert [foot.base_y for foot in feet] == pytest.approx(
+            [6.5, 7.6], abs=1e-9
+        )
+        # Foot A's contact band reaches the first stair step (6.8 is
+        # within 0.5 of the cluster base) and no further.
+        assert len(feet[0].contact_points) == 3
+        assert len(feet[1].contact_points) == 2
+
+    def test_single_low_band_is_one_foot(self):
+        points = [
+            (0.0, 3.0, 0.0), (2.0, 3.0, 0.0),
+            (2.0, 3.0, 2.0), (0.0, 3.0, 2.0),
+            (1.0, 8.0, 1.0),
+        ]
+        feet = detect_foot_clusters(
+            points,
+            ["tower.obj"] * len(points),
+            band_metres=0.5,
+            cluster_gap_metres=5.0,
+            maximum_base_spread_metres=1.65,
+        )
+        assert len(feet) == 1
+        assert feet[0].base_y == pytest.approx(3.0, abs=1e-9)
+        assert feet[0].centroid_x == pytest.approx(1.0, abs=1e-9)
+        assert feet[0].centroid_z == pytest.approx(1.0, abs=1e-9)
+
+
+class TestFootPadRing:
+    def test_ring_covers_the_contact_points_with_margin(self):
+        from shapely.geometry import Point, Polygon
+
+        from auto_patch.object_footprints import foot_pad_ring
+
+        metres_per_degree = metres_per_degree_longitude_at(
+            PLANE_ANCHOR_LATITUDE
+        )
+        contact_points = [
+            (
+                PLANE_ANCHOR_LONGITUDE + east / metres_per_degree,
+                PLANE_ANCHOR_LATITUDE + north / METRES_PER_DEGREE_LATITUDE,
+            )
+            for east, north in [
+                (0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)
+            ]
+        ]
+        ring = foot_pad_ring(contact_points, margin_metres=2.0)
+        assert ring is not None and len(ring) >= 3
+        pad = Polygon(ring)
+        assert all(
+            pad.contains(Point(longitude, latitude))
+            for longitude, latitude in contact_points
+        )
+        # The dilation reaches roughly the margin past the hull: a
+        # point ~1.5 m outside the square is still covered, one ~3 m
+        # outside is not.
+        inside_probe = Point(
+            PLANE_ANCHOR_LONGITUDE + 2.5 / metres_per_degree,
+            PLANE_ANCHOR_LATITUDE + 0.5 / METRES_PER_DEGREE_LATITUDE,
+        )
+        outside_probe = Point(
+            PLANE_ANCHOR_LONGITUDE + 4.0 / metres_per_degree,
+            PLANE_ANCHOR_LATITUDE + 0.5 / METRES_PER_DEGREE_LATITUDE,
+        )
+        assert pad.contains(inside_probe)
+        assert not pad.contains(outside_probe)
 
 
 # ── integration smoke: the real KCLT eight-bake pool ──────────────────

@@ -27,6 +27,14 @@ __all__ = [
     "DSF_OBJECT_MAX_FOOTPRINT_AREA_M2",
     "DSF_OBJECT_MIN_BUILDING_HEIGHT_M",
     "DSF_OBJECT_PAD_FLAG_SPAN_M",
+    "DSF_OBJECT_FOOT_ANCHOR",
+    "DSF_OBJECT_FOOT_MIN_REACH_M",
+    "DSF_OBJECT_FOOT_BAND_M",
+    "DSF_OBJECT_FOOT_CLUSTER_GAP_M",
+    "DSF_OBJECT_FOOT_MAX_BASE_SPREAD_M",
+    "DSF_OBJECT_FOOT_CONTACT_TOLERANCE_M",
+    "DSF_OBJECT_FOOT_PAD_RESIDUAL_M",
+    "DSF_OBJECT_FOOT_PAD_MARGIN_M",
     "DSF_BUILDING_OSM_OVERLAP_FRAC",
     "DSF_CLUSTER_SIMPLIFY_TOL_M",
     "BUILDING_OUTLINE_FILL_R",
@@ -1498,6 +1506,73 @@ DSF_OBJECT_MAX_FOOTPRINT_AREA_M2 = float(
 # and a Phase-1 building pad is the actual fix (spec section 7.3).
 DSF_OBJECT_PAD_FLAG_SPAN_M = float(
     _os.environ.get("O4_DSF_OBJECT_PAD_FLAG_SPAN_M", "2"))
+
+# ── Multi-ground-cluster (foot) re-anchor ─────────────────────────────
+# An author-BAKED vertical offset (the KBNA water-treatment stairs carry
+# their lowest solid vertex at local y = +6.5 m) defeats the absolute
+# DSF_OBJECT_ELEVATED_BASE_M test: the structure is classified as
+# rooftop clutter, inherits a neighbour's offset, and every seating path
+# — including the audit — is blind to it.  The foot re-anchor detects
+# such a structure's ground-contact FEET relative to its own lowest
+# band and seats the best rigid offset across all of them (project
+# memory kbna-gantry-pond-multi-foot-objects).
+DSF_OBJECT_FOOT_ANCHOR = (
+    _os.environ.get("O4_DSF_OBJECT_FOOT_ANCHOR", "1") == "1")
+
+# Reduced Phase 2 discovery reach floor for BAKED-OFFSET geometry
+# (lowest solid vertex above DSF_OBJECT_ELEVATED_BASE_M).  The standard
+# DSF_OBJECT_MIN_REACH_M floor exists because a compact, correctly
+# anchored object is X-Plane's business — but a baked vertical offset
+# breaks that premise: X-Plane puts the object's y = 0 plane at the
+# terrain under its anchor, so the baked base floats or sinks by the
+# author-mesh/our-mesh difference no matter how compact the object is.
+# The KBNA stairs reach 24.3 m and 20.6 m — under the 25 m floor.
+DSF_OBJECT_FOOT_MIN_REACH_M = float(
+    _os.environ.get("O4_DSF_OBJECT_FOOT_MIN_REACH_M", "15"))
+
+# A vertex belongs to a foot's contact band when it lies within this of
+# the LOCAL minimum in its own horizontal neighbourhood (the
+# neighbourhood radius is DSF_OBJECT_FOOT_CLUSTER_GAP_M).  A global
+# band fails: the 45 m KBNA stair's two feet sit 1.17 m apart in
+# authored y, and the deck underside would flood a band wide enough to
+# hold both.
+DSF_OBJECT_FOOT_BAND_M = float(
+    _os.environ.get("O4_DSF_OBJECT_FOOT_BAND_M", "0.5"))
+
+# Contact-band vertices chain into one foot when within this horizontal
+# distance AND within DSF_OBJECT_FOOT_BAND_M vertically per link — the
+# vertical constraint keeps a foot from chaining up a stair stringer
+# onto the deck underside.
+DSF_OBJECT_FOOT_CLUSTER_GAP_M = float(
+    _os.environ.get("O4_DSF_OBJECT_FOOT_CLUSTER_GAP_M", "5"))
+
+# A cluster is a FOOT only when its base sits within this of the
+# structure's own lowest solid vertex.  Measured on the KBNA stairs:
+# genuine second feet at y_min + 1.17 (45 m) and y_min + 1.44 (42 m);
+# the lowest mid-span deck clusters begin at y_min + 1.88.  1.65 splits
+# the two populations.
+DSF_OBJECT_FOOT_MAX_BASE_SPREAD_M = float(
+    _os.environ.get("O4_DSF_OBJECT_FOOT_MAX_BASE_SPREAD_M", "1.65"))
+
+# The rigid offset is fitted only over feet whose seat target (ground
+# under the foot minus the foot's authored base) lies within this of
+# the topmost target — a foot the author meant for terrain the mesh
+# does not have (or a mis-detected cluster hanging over a pond) must
+# not drag the true feet down with it.
+DSF_OBJECT_FOOT_CONTACT_TOLERANCE_M = float(
+    _os.environ.get("O4_DSF_OBJECT_FOOT_CONTACT_TOLERANCE_M", "1.5"))
+
+# After the best rigid offset, a foot still off the mesh by more than
+# this raises a per-foot terrain-pad REQUEST (recorded in the decision
+# and the post-mesh sidecar; a rigid body cannot fix it alone).
+DSF_OBJECT_FOOT_PAD_RESIDUAL_M = float(
+    _os.environ.get("O4_DSF_OBJECT_FOOT_PAD_RESIDUAL_M", "0.75"))
+
+# A requested foot pad's ring is the convex hull of the foot's contact
+# points dilated by this, so the pad reaches past the very edge of the
+# foot (``object_footprints.foot_pad_ring``).
+DSF_OBJECT_FOOT_PAD_MARGIN_M = float(
+    _os.environ.get("O4_DSF_OBJECT_FOOT_PAD_MARGIN_M", "2"))
 
 # (s80) Extent-based runway shoulder widening — tuning constants and
 # rationale with the other RUNWAY_SHOULDER_EXTENT_* values near the
