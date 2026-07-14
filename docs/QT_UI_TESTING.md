@@ -27,6 +27,11 @@ they're empty.
   zoom (change Imagery in the toolbar and watch it re-render). Providers that
   can't be live-mapped (combined/WMS sources) fall back to OSM with a note in
   the status bar. Tiles cache under `Previews/livemap/`.
+  The map is merged with the build pipeline's own imagery cache: view tiles
+  covered by an assembled orthophoto in `Orthophotos/` are cropped from it
+  (areas you've built render instantly, offline), and raw tiles the map
+  downloads at ZL17+ are stored build-grade and reused by later builds, so
+  browsing an airport closely pre-seeds its build.
   Loading is progressive and never blocks the view, Google/Apple-Maps style:
   a low-res world base layer is always resident, coarse levels fill in first
   and sharpen to the actual zoom from the screen center outward, downloads

@@ -230,3 +230,58 @@ def test_cache_miss_falls_through(monkeypatch, tmp_path):
     }
     success, image = IMG.get_wmts_image(10, 1, 2, provider, None)
     assert success == 1 and calls, "miss must fall through to the fetch path"
+
+
+def test_map_prefers_build_imagery_cache(view, qapp, tmp_path, monkeypatch):
+    """A view tile covered by an assembled orthophoto in Orthophotos/ (the
+    build pipeline's cache) must be cropped from it — no network fetch."""
+    from PIL import Image
+    import O4_File_Names as FNAMES
+    import O4_Geo_Utils as GEO
+
+    monkeypatch.setitem(IMG.providers_dict[FAKE], "imagery_dir", "grouped")
+    monkeypatch.setattr(FNAMES, "Imagery_dir", str(tmp_path / "Orthophotos"))
+
+    # A texture over Brittany at ZL17: orthogrid-aligned origin.
+    z = 17
+    tx, ty = GEO.wgs84_to_orthogrid(48.5, -5.5, z)
+    latc, lonc = GEO.gtile_to_wgs84(tx + 8, ty + 8, z)
+    import math as m
+    fdir = FNAMES.jpeg_file_dir_from_attributes(
+        m.floor(latc), m.floor(lonc), z, IMG.providers_dict[FAKE]
+    )
+    os.makedirs(fdir, exist_ok=True)
+    # 1024px texture -> 64px per view tile; a red patch marks the sub-tile
+    # we request, proving the crop offset is right.
+    big = Image.new("RGB", (1024, 1024), (10, 10, 10))
+    red = Image.new("RGB", (64, 64), (200, 30, 30))
+    dx, dy = 5, 9  # the sub-tile we will request
+    big.paste(red, (dx * 64, dy * 64))
+    big.save(
+        os.path.join(
+            fdir,
+            FNAMES.jpeg_file_name_from_attributes(tx, ty, z, FAKE),
+        ),
+        "JPEG",
+        quality=95,
+    )
+
+    def network_forbidden(*args, **kwargs):
+        raise AssertionError("covered tile must not hit the network")
+
+    monkeypatch.setattr(IMG, "get_wmts_image", network_forbidden)
+
+    key = (FAKE, z, tx + dx, ty + dy)
+    with view._fetch_lock:
+        view._wanted = {key}
+    view._fetch_tile(*key)
+    for _ in range(20):
+        qapp.processEvents()
+        if key in view._tiles:
+            break
+    assert key in view._tiles, "cropped tile must land in the scene"
+    crop = Image.open(view._cache_path(*key))
+    r, g, b = crop.resize((1, 1)).getpixel((0, 0))
+    assert r > 150 and g < 90 and b < 90, (
+        "crop must come from the correct sub-region (got %s)" % ((r, g, b),)
+    )

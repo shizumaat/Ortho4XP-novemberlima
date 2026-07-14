@@ -19,6 +19,7 @@ import time
 from collections import deque
 
 import requests
+from PIL import Image as PILImage
 from PySide6.QtCore import (
     QObject,
     QPointF,
@@ -501,8 +502,51 @@ class MapView(QGraphicsView):
         with self._fetch_lock:
             return key in self._wanted
 
+    def _orthophotos_crop(self, code, z, x, y):
+        """Serve a view tile from the build pipeline's own imagery cache.
+
+        Builds store assembled 16x16-tile orthophotos under Orthophotos/
+        (FNAMES.Imagery_dir) and reuse them across runs; the map prefers
+        that cache, so imagery downloaded for a build renders on the map
+        with no re-download — and stays available offline.
+        """
+        provider = IMG.providers_dict.get(code)
+        if not provider:
+            return None
+        try:
+            til_x_left, til_y_top = x - x % 16, y - y % 16
+            latc, lonc = GEO.gtile_to_wgs84(til_x_left + 8, til_y_top + 8, z)
+            path = os.path.join(
+                FNAMES.jpeg_file_dir_from_attributes(
+                    math.floor(latc), math.floor(lonc), z, provider
+                ),
+                FNAMES.jpeg_file_name_from_attributes(
+                    til_x_left, til_y_top, z, code
+                ),
+            )
+            if not os.path.isfile(path):
+                return None
+            big = PILImage.open(path)
+            w, h = big.size
+            dx, dy = x - til_x_left, y - til_y_top
+            sub = big.crop(
+                (
+                    dx * w // 16,
+                    dy * h // 16,
+                    (dx + 1) * w // 16,
+                    (dy + 1) * h // 16,
+                )
+            )
+            if sub.size != (256, 256):
+                sub = sub.resize((256, 256), PILImage.Resampling.BICUBIC)
+            return sub.convert("RGB")
+        except Exception:
+            return None
+
     def _fetch_tile(self, code, z, x, y):
-        """Worker thread: disk cache first, then the provider."""
+        """Worker thread. Source priority: the map's own display cache,
+        then the build pipeline's Orthophotos cache (cropped), then the
+        provider over the network."""
         key = (code, z, x, y)
         path = self._cache_path(code, z, x, y)
         generation = self._generation
@@ -510,17 +554,25 @@ class MapView(QGraphicsView):
             if not os.path.isfile(path):
                 if not self._still_wanted(key):
                     return  # cancelled while queued
-                provider = IMG.providers_dict[code]
-                success, image = IMG.get_wmts_image(
-                    z, x, y, provider, self._session
-                )
-                if not success or generation != self._generation:
-                    return
+                image = self._orthophotos_crop(code, z, x, y)
+                from_build_cache = image is not None
+                if image is None:
+                    provider = IMG.providers_dict[code]
+                    success, image = IMG.get_wmts_image(
+                        z, x, y, provider, self._session
+                    )
+                    if not success or generation != self._generation:
+                        return
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 tmp = path + ".tmp%s" % threading.get_ident()
                 # Build-grade quality for close-in zoom levels: these tiles
-                # are reused verbatim by future tile builds.
-                quality = 95 if z >= BUILD_GRADE_ZL else 85
+                # are reused verbatim by future tile builds. Crops from the
+                # build cache are display-only, keep them light.
+                quality = (
+                    85
+                    if from_build_cache or z < BUILD_GRADE_ZL
+                    else 95
+                )
                 image.convert("RGB").save(tmp, "JPEG", quality=quality)
                 os.replace(tmp, path)
             if self._still_wanted(key) or z <= BASE_ZL:
