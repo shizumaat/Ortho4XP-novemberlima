@@ -61,6 +61,10 @@ ZL_COLORS = {
 }
 
 
+BUILD_GRADE_ZL = 17  # tiles at or above this ZL are saved at high quality
+                     # so later builds can reuse them via the shared cache
+
+
 def livemap_cache_dir():
     return os.path.join(FNAMES.Preview_dir, "livemap")
 
@@ -487,6 +491,8 @@ class MapView(QGraphicsView):
                     self._inflight.discard(key)
 
     def _cache_path(self, code, z, x, y):
+        # Same layout as IMG's shared tile cache so builds can reuse what
+        # the map has already downloaded (IMG.shared_tile_cache_path).
         return os.path.join(
             livemap_cache_dir(), code, str(z), "%s_%s.jpg" % (x, y)
         )
@@ -512,7 +518,10 @@ class MapView(QGraphicsView):
                     return
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 tmp = path + ".tmp%s" % threading.get_ident()
-                image.convert("RGB").save(tmp, "JPEG", quality=85)
+                # Build-grade quality for close-in zoom levels: these tiles
+                # are reused verbatim by future tile builds.
+                quality = 95 if z >= BUILD_GRADE_ZL else 85
+                image.convert("RGB").save(tmp, "JPEG", quality=quality)
                 os.replace(tmp, path)
             if self._still_wanted(key) or z <= BASE_ZL:
                 self._bridge.tile_ready.emit(code, z, x, y, path)

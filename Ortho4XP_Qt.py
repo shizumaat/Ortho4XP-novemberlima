@@ -72,6 +72,8 @@ def main():
     IMG.initialize_color_filters_dict()
     IMG.initialize_providers_dict()
     IMG.initialize_combined_providers_dict()
+    # Let tile builds reuse imagery already fetched by the live map.
+    IMG.shared_tile_cache_dir = os.path.join(FNAMES.Preview_dir, "livemap")
 
     app = QApplication(sys.argv)
     app.setApplicationName("Ortho4XP")

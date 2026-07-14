@@ -161,3 +161,72 @@ def test_base_layer_survives_pruning(view):
     view._prune_tiles()
     assert base_key not in removed, "base world tiles must never be pruned"
     assert len(view._tiles) <= QTMAP.MAX_ITEMS + 1
+
+
+# ----------------------------------------------------------------------
+# Shared tile cache: builds reuse what the map downloaded
+# ----------------------------------------------------------------------
+
+def test_build_fetch_reuses_map_cache(view, tmp_path, monkeypatch):
+    """get_wmts_image (the build pipeline's tile fetcher) must serve a tile
+    the map already cached, without touching the network."""
+    from PIL import Image
+
+    monkeypatch.setattr(
+        IMG, "shared_tile_cache_dir", str(tmp_path / "livemap")
+    )
+    path = IMG.shared_tile_cache_path(FAKE, 18, 130000, 90000)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    Image.new("RGB", (256, 256), (1, 2, 3)).save(path, "JPEG")
+
+    def network_forbidden(*args, **kwargs):
+        raise AssertionError("cache hit must not reach the network")
+
+    monkeypatch.setattr(IMG, "http_request_to_image", network_forbidden)
+    success, image = IMG.get_wmts_image(
+        18, 130000, 90000, IMG.providers_dict[FAKE], None
+    )
+    assert success == 1
+    assert image.size == (256, 256)
+
+
+def test_map_and_build_cache_layouts_agree(view, monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        QTMAP, "livemap_cache_dir", lambda: str(tmp_path / "livemap")
+    )
+    monkeypatch.setattr(
+        IMG, "shared_tile_cache_dir", str(tmp_path / "livemap")
+    )
+    assert view._cache_path(FAKE, 18, 12, 34) == IMG.shared_tile_cache_path(
+        FAKE, 18, 12, 34
+    )
+
+
+def test_cache_miss_falls_through(monkeypatch, tmp_path):
+    """With the shared cache enabled but empty, get_wmts_image proceeds to
+    the normal fetch path."""
+    from PIL import Image
+
+    monkeypatch.setattr(
+        IMG, "shared_tile_cache_dir", str(tmp_path / "empty")
+    )
+    calls = []
+
+    def fake_http(width, height, url, headers, session):
+        calls.append(url)
+        return 1, Image.new("RGB", (256, 256), (9, 9, 9))
+
+    monkeypatch.setattr(IMG, "http_request_to_image", fake_http)
+    provider = {
+        "code": "MISS",
+        "grid_type": "webmercator",
+        "request_type": "tms",
+        "max_zl": 18,
+        "url_template": "http://invalid.test/{zoom}/{x}/{y}",
+        "tile_size": 256,
+        # get_wmts_image evaluates these replacement args unconditionally
+        "resolutions": {10: 1.0},
+        "top_left_corner": {10: [0.0, 0.0]},
+    }
+    success, image = IMG.get_wmts_image(10, 1, 2, provider, None)
+    assert success == 1 and calls, "miss must fall through to the fetch path"

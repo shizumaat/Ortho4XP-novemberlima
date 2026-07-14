@@ -1151,7 +1151,43 @@ def get_wms_image(bbox, width, height, provider, http_session):
 ################################################################################
 
 ################################################################################
+# Shared per-tile disk cache. When a front end sets shared_tile_cache_dir
+# (the Qt UI points it at Previews/livemap), get_wmts_image() serves tiles
+# already fetched for map browsing instead of re-downloading them — so
+# imagery viewed at high zoom on the map is reused by later tile builds.
+# Builds never WRITE to this cache (that would create millions of small
+# files); only the map view populates it.
+shared_tile_cache_dir = None
+
+
+def shared_tile_cache_path(provider_code, zoomlevel, til_x, til_y):
+    return os.path.join(
+        shared_tile_cache_dir,
+        provider_code,
+        str(zoomlevel),
+        "%s_%s.jpg" % (til_x, til_y),
+    )
+
+
+def _shared_tile_cache_get(provider_code, zoomlevel, til_x, til_y):
+    if not shared_tile_cache_dir:
+        return None
+    try:
+        path = shared_tile_cache_path(provider_code, zoomlevel, til_x, til_y)
+        if os.path.isfile(path):
+            return Image.open(path).convert("RGB")
+    except Exception:
+        pass
+    return None
+
+
+################################################################################
 def get_wmts_image(tilematrix, til_x, til_y, provider, http_session):
+    cached = _shared_tile_cache_get(
+        provider.get("code", ""), tilematrix, til_x, til_y
+    )
+    if cached is not None:
+        return (1, cached)
     til_x_orig, til_y_orig = til_x, til_y
     down_sample = 0
     while True:
