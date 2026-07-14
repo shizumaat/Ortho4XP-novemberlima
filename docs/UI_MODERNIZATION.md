@@ -447,7 +447,8 @@ hidden until "Show advanced" is toggled:
 
 1. **General & Paths** — `custom_scenery_dir`, base/build folder (promoted from
    main window duplication), `custom_overlay_src`, `custom_overlay_src_alternate`,
-   `verbosity`, `cleaning_level` *(A)*
+   `cifp_data_path` (dev branch; defaults to X-Plane `Custom Data/CIFP/`, so
+   onboarding's X-Plane detection covers it), `verbosity`, `cleaning_level` *(A)*
 2. **Network & Downloads** — `max_download_slots`, `max_convert_slots`,
    `overpass_server_choice`, `http_timeout` *(A)*, `max_connect_retries` *(A)*,
    `max_baddata_retries` *(A)*, `check_tms_response` *(A)*, `skip_downloads` *(A)*,
@@ -456,8 +457,11 @@ hidden until "Show advanced" is toggled:
    window), `cover_airports_with_highres`, `cover_zl`, `cover_extent`,
    `sea_texture_blur` *(A)*, custom ZL zones summary (count + "Edit on map…" link)
 4. **Mesh & Elevation** — `custom_dem` (list editor), `fill_nodata`,
-   `curvature_tol`, `apt_curv_tol`/`apt_curv_ext`, `coast_curv_tol`/`coast_curv_ext`,
-   `limit_tris`, `min_angle` *(A)*, `iterate` *(A)*, `mesh_zl` *(A)*
+   `auto_patch` (dev branch: None/ICAO/All runway slope patches from CIFP —
+   registered under vector vars in code, but users will look for it next to
+   elevation), `curvature_tol`, `apt_curv_tol`/`apt_curv_ext`,
+   `coast_curv_tol`/`coast_curv_ext`, `limit_tris`, `min_angle` *(A)*,
+   `iterate` *(A)*, `mesh_zl` *(A)*
 5. **Roads & Vector Data** — `road_level`, `road_banking_limit` *(A)*,
    `lane_width` *(A)*, `max_levelled_segs` *(A)*, `apt_smoothing_pix` *(A)*,
    `clean_bad_geometries` *(A)*, `water_simplification` *(A)*, `min_area`/`max_area` *(A)*
@@ -581,7 +585,23 @@ here; mockups in `docs/mockups/trackb-ui-mockups.html` (rev 2).
   application-wide; Mesh, Masks, Imagery, Roads, Water, Rendering keep the
   Tile ↔ Global switch.
 
-### 10.4 Impact on the roadmap
+### 10.4 Rebase onto `dev`
+
+This branch was originally cut from `master`; after review round 2 it was
+rebased onto `origin/dev`, which carries the auto-patch subsystem
+(`src/auto_patch/`, runway slope patches from CIFP/AIRAC data). UI-relevant
+deltas absorbed into this plan:
+
+- New settings `auto_patch` (tile-scoped, None/ICAO/All) and `cifp_data_path`
+  (app-scoped path) — slotted into §7.3 categories 4 and 1 respectively.
+  `cifp_data_path` defaults to the X-Plane install, which the onboarding
+  wizard already captures.
+- `O4_UI_Utils` gained `total_elapsed`/`total_bottom_line` (per-tile total
+  build time) — feeds the activity panel's per-tile timing directly.
+- The GUI contact surface (three channels, two Tkinter files) is unchanged on
+  `dev`, so the Track B port plan is unaffected.
+
+### 10.5 Impact on the roadmap
 
 The P0–P2 Tkinter-track items in §8 are unchanged. Within Track B, the port
 order shifts: the QGraphicsView live-tile map engine moves from "P3 polish" to
