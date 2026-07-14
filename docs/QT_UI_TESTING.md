@@ -27,6 +27,13 @@ they're empty.
   zoom (change Imagery in the toolbar and watch it re-render). Providers that
   can't be live-mapped (combined/WMS sources) fall back to OSM with a note in
   the status bar. Tiles cache under `Previews/livemap/`.
+  Loading is progressive and never blocks the view, Google/Apple-Maps style:
+  a low-res world base layer is always resident, coarse levels fill in first
+  and sharpen to the actual zoom from the screen center outward, downloads
+  start only after the view settles for ~¼ s (flinging through zoom levels
+  costs nothing), and anything that pans or zooms out of view is cancelled
+  immediately. Six download workers max; already-seen areas come straight
+  from the disk cache.
 - **Gestures** — pinch or two-finger scroll to zoom, two-finger click
   (right/middle button) drag to pan; click selects a tile, ⇧-click selects a
   contiguous block, ⌘/Ctrl-click toggles tiles in and out.

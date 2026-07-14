@@ -16,6 +16,7 @@ import math
 import os
 import threading
 import time
+from collections import deque
 
 import requests
 from PySide6.QtCore import (
@@ -47,7 +48,11 @@ import O4_Imagery_Utils as IMG
 SCENE_ZL = 19  # scene units = webmercator pixels at this zoom level
 WORLD = 2 ** SCENE_ZL * 256
 MIN_ZOOM = 2.0
-MAX_ITEMS = 700  # loaded tile pixmaps kept in the scene
+MAX_ITEMS = 900        # loaded tile pixmaps kept in the scene
+BASE_ZL = 3            # world base layer, always resident (max 64 tiles)
+FETCH_DEBOUNCE_MS = 250  # settle time before network fetches start
+FETCH_WORKERS = 6      # concurrent tile downloads
+LEVEL_TILE_CAP = 420   # skip a pyramid level if it needs more tiles than this
 
 # Zoom-level colors, matching the legacy UI's zone color language.
 ZL_COLORS = {
@@ -110,11 +115,20 @@ class MapView(QGraphicsView):
         self._tiles = {}             # (code, z, x, y) -> QGraphicsPixmapItem
         self._tile_age = {}          # same key -> monotonic counter
         self._age_counter = 0
-        self._pending = set()
         self._session = requests.Session()
         self._bridge = _FetchBridge()
         self._bridge.tile_ready.connect(self._on_tile_ready)
         self._generation = 0         # bumped on provider change
+        # Download machinery: a bounded worker pool drains a queue that is
+        # rebuilt (coarse-to-fine) on every view settle; anything not in the
+        # current "wanted" set is dropped at dequeue time, which is what
+        # cancels downloads for tiles that scrolled or zoomed out of view.
+        self._fetch_lock = threading.Lock()
+        self._fetch_queue = deque()
+        self._wanted = set()
+        self._inflight = set()
+        self._fetch_wakeup = threading.Event()
+        self._workers_started = False
 
         # Overlay state
         self._built = {}             # (lat, lon) -> TileInfo
@@ -131,7 +145,7 @@ class MapView(QGraphicsView):
 
         self._update_timer = QTimer(self)
         self._update_timer.setSingleShot(True)
-        self._update_timer.setInterval(60)
+        self._update_timer.setInterval(FETCH_DEBOUNCE_MS)
         self._update_timer.timeout.connect(self._refresh_tiles)
 
         self._apply_zoom()
@@ -153,6 +167,9 @@ class MapView(QGraphicsView):
             note = " (no live map source available)"
         self._provider_code = code
         self._generation += 1
+        with self._fetch_lock:
+            self._fetch_queue.clear()
+            self._wanted = set()
         for key in list(self._tiles):
             self._drop_tile(key)
         self.status_message.emit(
@@ -367,63 +384,143 @@ class MapView(QGraphicsView):
         z = int(round(self._zoom))
         return max(2, min(z, self._provider_max_zl, 19))
 
-    def _refresh_tiles(self):
-        code = self._display_code
-        if not provider_is_mappable(code):
-            return
-        z = self._fetch_zoom()
+    def _visible_range(self, z):
+        """Visible tile index range at zoom z, with a one-tile margin."""
         view_rect = self.mapToScene(self.viewport().rect()).boundingRect()
         span = 256 * 2 ** (SCENE_ZL - z)
         x0 = max(0, int(view_rect.left() // span) - 1)
         x1 = min(2 ** z - 1, int(view_rect.right() // span) + 1)
         y0 = max(0, int(view_rect.top() // span) - 1)
         y1 = min(2 ** z - 1, int(view_rect.bottom() // span) + 1)
-        generation = self._generation
-        for x in range(x0, x1 + 1):
-            for y in range(y0, y1 + 1):
+        return x0, x1, y0, y1
+
+    def _pyramid_levels(self):
+        """Zoom levels to keep covered, coarse to fine — the low-res-first
+        fill: the base world layer, two intermediate steps, and the level
+        matching the actual view zoom."""
+        zf = self._fetch_zoom()
+        levels = {BASE_ZL, zf}
+        if zf - 2 > BASE_ZL:
+            levels.add(zf - 2)
+        if zf - 4 > BASE_ZL:
+            levels.add(zf - 4)
+        return sorted(levels)
+
+    def _refresh_tiles(self):
+        """Rebuild the download queue for the settled view.
+
+        Coarse levels are queued before fine ones so something renders
+        quickly everywhere; replacing the queue wholesale is what cancels
+        every queued download that is no longer relevant. Runs on the GUI
+        thread; does no I/O itself.
+        """
+        code = self._display_code
+        if not provider_is_mappable(code):
+            return
+        wanted = set()
+        order = []
+        for z in self._pyramid_levels():
+            if z == BASE_ZL:
+                x0, x1, y0, y1 = 0, 2 ** z - 1, 0, 2 ** z - 1
+            else:
+                x0, x1, y0, y1 = self._visible_range(z)
+            if (x1 - x0 + 1) * (y1 - y0 + 1) > LEVEL_TILE_CAP:
+                continue
+            # Spiral-ish: order by distance from range center so the middle
+            # of the screen sharpens first.
+            cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+            coords = sorted(
+                (
+                    (x, y)
+                    for x in range(x0, x1 + 1)
+                    for y in range(y0, y1 + 1)
+                ),
+                key=lambda t: abs(t[0] - cx) + abs(t[1] - cy),
+            )
+            for x, y in coords:
                 key = (code, z, x, y)
+                wanted.add(key)
                 if key in self._tiles:
                     self._age_counter += 1
                     self._tile_age[key] = self._age_counter
-                    continue
-                if key in self._pending:
-                    continue
-                self._pending.add(key)
-                threading.Thread(
-                    target=self._fetch_tile,
-                    args=(code, z, x, y, generation),
-                    daemon=True,
-                ).start()
+                else:
+                    order.append(key)
+        with self._fetch_lock:
+            self._wanted = wanted
+            self._fetch_queue.clear()
+            self._fetch_queue.extend(
+                k for k in order if k not in self._inflight
+            )
+        self._fetch_wakeup.set()
+        self._start_workers()
         self._prune_tiles()
+
+    def _start_workers(self):
+        if self._workers_started:
+            return
+        self._workers_started = True
+        for _ in range(FETCH_WORKERS):
+            threading.Thread(target=self._worker_loop, daemon=True).start()
+
+    def _worker_loop(self):
+        """Download worker: pulls from the queue, re-checking at every stage
+        that the tile is still wanted so out-of-view work is abandoned."""
+        while True:
+            with self._fetch_lock:
+                key = (
+                    self._fetch_queue.popleft()
+                    if self._fetch_queue
+                    else None
+                )
+                if key is not None:
+                    if key not in self._wanted or key in self._tiles:
+                        continue
+                    self._inflight.add(key)
+            if key is None:
+                self._fetch_wakeup.wait(timeout=0.25)
+                self._fetch_wakeup.clear()
+                continue
+            try:
+                self._fetch_tile(*key)
+            finally:
+                with self._fetch_lock:
+                    self._inflight.discard(key)
 
     def _cache_path(self, code, z, x, y):
         return os.path.join(
             livemap_cache_dir(), code, str(z), "%s_%s.jpg" % (x, y)
         )
 
-    def _fetch_tile(self, code, z, x, y, generation):
+    def _still_wanted(self, key):
+        with self._fetch_lock:
+            return key in self._wanted
+
+    def _fetch_tile(self, code, z, x, y):
         """Worker thread: disk cache first, then the provider."""
+        key = (code, z, x, y)
         path = self._cache_path(code, z, x, y)
+        generation = self._generation
         try:
             if not os.path.isfile(path):
+                if not self._still_wanted(key):
+                    return  # cancelled while queued
                 provider = IMG.providers_dict[code]
                 success, image = IMG.get_wmts_image(
                     z, x, y, provider, self._session
                 )
                 if not success or generation != self._generation:
-                    self._pending.discard((code, z, x, y))
                     return
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 tmp = path + ".tmp%s" % threading.get_ident()
                 image.convert("RGB").save(tmp, "JPEG", quality=85)
                 os.replace(tmp, path)
-            self._bridge.tile_ready.emit(code, z, x, y, path)
+            if self._still_wanted(key) or z <= BASE_ZL:
+                self._bridge.tile_ready.emit(code, z, x, y, path)
         except Exception:
-            self._pending.discard((code, z, x, y))
+            pass
 
     def _on_tile_ready(self, code, z, x, y, path):
         key = (code, z, x, y)
-        self._pending.discard(key)
         if code != self._display_code or key in self._tiles:
             return
         pixmap = QPixmap(path)
@@ -449,7 +546,13 @@ class MapView(QGraphicsView):
     def _prune_tiles(self):
         if len(self._tiles) <= MAX_ITEMS:
             return
-        by_age = sorted(self._tile_age, key=self._tile_age.get)
+        # The base world layer is never pruned — it is the instant fallback
+        # whenever the user flings the view somewhere new.
+        by_age = [
+            key
+            for key in sorted(self._tile_age, key=self._tile_age.get)
+            if key[1] > BASE_ZL
+        ]
         for key in by_age[: len(self._tiles) - MAX_ITEMS]:
             self._drop_tile(key)
 
