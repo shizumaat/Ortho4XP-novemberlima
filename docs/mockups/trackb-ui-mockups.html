@@ -21,7 +21,6 @@ body{margin:0;background:var(--paper);color:var(--ink);
 h1,h2,h3,.sans{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;}
 h1{font-size:19px;font-weight:650;margin:0;letter-spacing:-.01em}
 h2{font-size:22px;font-weight:650;letter-spacing:-.015em;margin:0 0 6px;text-wrap:balance}
-h3{font-size:15px;font-weight:600;margin:0 0 4px}
 p{margin:.4em 0}
 a{color:var(--accent)}
 code,.mono{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-size:.85em}
@@ -43,21 +42,24 @@ code,.mono{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-size
 
 /* ============ layout ============ */
 main{max-width:1080px;margin:0 auto;padding:26px 22px 90px}
-.intro{max-width:66ch}
+.intro{max-width:70ch}
 .intro ul{padding-left:1.2em;margin:.4em 0}
+.covtable{border-collapse:collapse;font-family:system-ui,sans-serif;font-size:13px;margin:14px 0 4px;width:100%}
+.covtable th{text-align:left;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);
+  font-weight:650;padding:4px 12px 4px 0;border-bottom:1px solid var(--line)}
+.covtable td{padding:6px 12px 6px 0;border-bottom:1px solid var(--line);vertical-align:top}
+.covtable td:last-child{white-space:nowrap}
 section.view{margin-top:58px;border-top:1px solid var(--line);padding-top:30px}
 .viewhead{max-width:70ch;margin-bottom:18px}
 .viewhead .eyebrow{font-family:ui-monospace,Menlo,monospace;font-size:11px;letter-spacing:.14em;
   text-transform:uppercase;color:var(--accent);display:block;margin-bottom:6px}
 .viewhead p{color:var(--muted);font-size:15px}
 
-/* stage + desk backdrop */
 .stage{overflow-x:auto;border:1px solid var(--line);border-radius:12px}
 .desk{min-width:fit-content;padding:34px 38px 42px;background:var(--desk);position:relative}
 #frames[data-os="mac"] .desk{padding-top:0}
 .stagecap{font-family:system-ui,sans-serif;font-size:12px;color:var(--muted);margin:8px 2px 0}
 
-/* annotation notes */
 .notes{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px 26px;margin-top:18px}
 .note{display:flex;gap:10px;font-size:14px;line-height:1.5}
 .nid{flex:none;font-family:ui-monospace,Menlo,monospace;font-size:10.5px;font-weight:700;
@@ -65,7 +67,6 @@ section.view{margin-top:58px;border-top:1px solid var(--line);padding-top:30px}
   width:26px;height:18px;display:inline-flex;align-items:center;justify-content:center;margin-top:3px}
 .note em.q{display:block;color:var(--muted);font-style:italic;margin-top:2px}
 
-/* annotation pins inside mockups */
 .ph{position:relative}
 .pin{position:absolute;top:-8px;right:-8px;z-index:30;width:17px;height:17px;border-radius:999px;
   background:var(--accent);color:var(--accent-ink);border:2px solid var(--pinbd);
@@ -73,11 +74,9 @@ section.view{margin-top:58px;border-top:1px solid var(--line);padding-top:30px}
 .pin.tl{right:auto;left:-8px}
 
 /* ============================================================
-   MOCKUP TOKENS — per OS, per mode (scoped to #frames)
+   MOCKUP TOKENS — per OS, per mode
    ============================================================ */
 #frames{--rwin:10px;--rctl:6px;--rmenu:8px}
-
-/* ---- macOS light ---- */
 #frames[data-os="mac"][data-mode="light"]{
   --desk:linear-gradient(160deg,#8FA8CC,#C5CFE4 60%,#D9D3DC);
   --osfont:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;
@@ -88,9 +87,8 @@ section.view{margin-top:58px;border-top:1px solid var(--line);padding-top:30px}
   --nav:#E8E7EA; --nav-on:#007AFF; --nav-onfg:#fff;
   --menu:#F6F5F7; --menu-bd:#CFCED2; --mi-hov:#007AFF; --mi-hovfg:#fff;
   --log:#FFFFFF; --logfg:#333; --stat:#EDECEE; --sep:#DCDBDE;
-  --danger:#E5372B; --danger-fg:#fff; --rwin:11px; --rctl:6px;
+  --danger:#E5372B; --danger-fg:#fff; --ok:#2E9E5B; --rwin:11px; --rctl:6px;
 }
-/* ---- macOS dark ---- */
 #frames[data-os="mac"][data-mode="dark"]{
   --desk:linear-gradient(160deg,#20263B,#33304A 60%,#3A2E3C);
   --osfont:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;
@@ -101,9 +99,8 @@ section.view{margin-top:58px;border-top:1px solid var(--line);padding-top:30px}
   --nav:#232325; --nav-on:#0A84FF; --nav-onfg:#fff;
   --menu:#323236; --menu-bd:#48484C; --mi-hov:#0A84FF; --mi-hovfg:#fff;
   --log:#1B1B1D; --logfg:#C9C9CE; --stat:#242426; --sep:#3D3D41;
-  --danger:#FF453A; --danger-fg:#fff; --rwin:11px; --rctl:6px;
+  --danger:#FF453A; --danger-fg:#fff; --ok:#30D158; --rwin:11px; --rctl:6px;
 }
-/* ---- Windows 11 light ---- */
 #frames[data-os="win"][data-mode="light"]{
   --desk:radial-gradient(120% 130% at 30% 20%,#4C8DD8,#1D4E8F 75%);
   --osfont:"Segoe UI Variable Text","Segoe UI",Tahoma,sans-serif;
@@ -114,9 +111,8 @@ section.view{margin-top:58px;border-top:1px solid var(--line);padding-top:30px}
   --nav:#EBEBEB; --nav-on:#DFDFDF; --nav-onfg:#1B1B1B;
   --menu:#F9F9F9; --menu-bd:#DADADA; --mi-hov:#EAEAEA; --mi-hovfg:#1B1B1B;
   --log:#FFFFFF; --logfg:#333; --stat:#EDEDED; --sep:#E2E2E2;
-  --danger:#C42B1C; --danger-fg:#fff; --rwin:8px; --rctl:4px;
+  --danger:#C42B1C; --danger-fg:#fff; --ok:#107C41; --rwin:8px; --rctl:4px;
 }
-/* ---- Windows 11 dark ---- */
 #frames[data-os="win"][data-mode="dark"]{
   --desk:radial-gradient(120% 130% at 30% 20%,#1E3A5F,#101823 75%);
   --osfont:"Segoe UI Variable Text","Segoe UI",Tahoma,sans-serif;
@@ -127,9 +123,8 @@ section.view{margin-top:58px;border-top:1px solid var(--line);padding-top:30px}
   --nav:#1B1B1B; --nav-on:#333333; --nav-onfg:#F2F2F2;
   --menu:#2C2C2C; --menu-bd:#3B3B3B; --mi-hov:#383838; --mi-hovfg:#F2F2F2;
   --log:#1B1B1B; --logfg:#C8C8C8; --stat:#252525; --sep:#333;
-  --danger:#FF6B5E; --danger-fg:#301513; --rwin:8px; --rctl:4px;
+  --danger:#FF6B5E; --danger-fg:#301513; --ok:#6CCB5F; --rwin:8px; --rctl:4px;
 }
-/* ---- Linux / GNOME light ---- */
 #frames[data-os="lin"][data-mode="light"]{
   --desk:linear-gradient(150deg,#5E7C9B,#8AA2B8 70%,#A9B8C6);
   --osfont:Cantarell,Ubuntu,"DejaVu Sans","Liberation Sans",sans-serif;
@@ -140,9 +135,8 @@ section.view{margin-top:58px;border-top:1px solid var(--line);padding-top:30px}
   --nav:#F0EFEE; --nav-on:#D7D3D0; --nav-onfg:#241F31;
   --menu:#FFFFFF; --menu-bd:#D5D0CC; --mi-hov:#3584E4; --mi-hovfg:#fff;
   --log:#FFFFFF; --logfg:#38343E; --stat:#EFEEED; --sep:#DDD9D5;
-  --danger:#C01C28; --danger-fg:#fff; --rwin:12px; --rctl:7px;
+  --danger:#C01C28; --danger-fg:#fff; --ok:#26A269; --rwin:12px; --rctl:7px;
 }
-/* ---- Linux / GNOME dark ---- */
 #frames[data-os="lin"][data-mode="dark"]{
   --desk:linear-gradient(150deg,#1F2530,#2B3240 70%,#343241);
   --osfont:Cantarell,Ubuntu,"DejaVu Sans","Liberation Sans",sans-serif;
@@ -153,10 +147,10 @@ section.view{margin-top:58px;border-top:1px solid var(--line);padding-top:30px}
   --nav:#2A2A2A; --nav-on:#454545; --nav-onfg:#F0EEF2;
   --menu:#333333; --menu-bd:#1E1E1E; --mi-hov:#3584E4; --mi-hovfg:#fff;
   --log:#1C1C1C; --logfg:#CFCDD4; --stat:#2B2B2B; --sep:#3C3C3C;
-  --danger:#F66151; --danger-fg:#2B0F0C; --rwin:12px; --rctl:7px;
+  --danger:#F66151; --danger-fg:#2B0F0C; --ok:#57E389; --rwin:12px; --rctl:7px;
 }
 
-/* ============ generic window construction ============ */
+/* ============ window construction ============ */
 .win{font-family:var(--osfont);font-size:13px;color:var(--fg);background:var(--w);
   border-radius:var(--rwin);box-shadow:0 22px 55px rgba(0,0,0,.42),0 3px 12px rgba(0,0,0,.25);
   overflow:visible;position:relative;margin:0 auto}
@@ -166,7 +160,6 @@ section.view{margin-top:58px;border-top:1px solid var(--line);padding-top:30px}
   background:var(--w2);color:var(--tbfg);font-weight:600;font-size:13px;position:relative;
   border-bottom:1px solid var(--sep)}
 .tbar .ttl{flex:1;text-align:center;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-/* traffic lights (mac only) */
 .tl3{display:none;gap:8px}
 .tl3 i{width:12px;height:12px;border-radius:50%;display:block}
 #frames[data-os="mac"] .tl3{display:flex}
@@ -174,23 +167,18 @@ section.view{margin-top:58px;border-top:1px solid var(--line);padding-top:30px}
 #frames[data-os="mac"] .tl3 i:nth-child(2){background:#FEBC2E}
 #frames[data-os="mac"] .tl3 i:nth-child(3){background:#28C840}
 #frames[data-os="mac"] .tbar .ttl{position:absolute;left:70px;right:70px}
-/* windows caption buttons */
 .caps{display:none;margin-right:-12px;align-self:stretch}
 #frames[data-os="win"] .caps{display:flex}
 .caps span{width:44px;display:flex;align-items:center;justify-content:center;
   font-size:10px;color:var(--tbfg);font-weight:400}
-.caps span:last-child{border-top-right-radius:var(--rwin)}
 #frames[data-os="win"] .tbar .ttl{text-align:left;font-weight:400;font-size:12px}
 #frames[data-os="win"] .tbar{height:34px}
 .appdot{display:none;width:14px;height:14px;border-radius:3px;background:var(--acc);flex:none}
 #frames[data-os="win"] .appdot{display:block}
-/* gnome close pill */
 .gclose{display:none;width:22px;height:22px;border-radius:50%;background:var(--ctl);
   align-items:center;justify-content:center;font-size:11px;color:var(--fg);flex:none}
 #frames[data-os="lin"] .gclose{display:flex}
 #frames[data-os="lin"] .tbar{height:42px;font-weight:700}
-
-/* macOS system menu bar strip */
 .sysbar{display:none;font-family:var(--osfont);align-items:center;gap:16px;
   margin:0 -38px 26px;padding:5px 16px;font-size:12.5px;
   background:color-mix(in srgb,var(--w) 72%,transparent);backdrop-filter:blur(6px);
@@ -200,11 +188,9 @@ section.view{margin-top:58px;border-top:1px solid var(--line);padding-top:30px}
 .sysbar b{font-weight:700}
 .sysbar .sp{flex:1}
 .sysbar .st{color:var(--fgmut);font-size:11.5px}
-/* in-window menubar (win + linux) */
 .menubar{display:flex;gap:2px;padding:2px 8px;background:var(--w);border-bottom:1px solid var(--sep);
   font-size:12.5px;color:var(--fg)}
 .menubar span{padding:3px 9px;border-radius:4px}
-.menubar span.hov{background:var(--accsoft)}
 #frames[data-os="mac"] .menubar{display:none}
 
 /* ============ controls ============ */
@@ -221,9 +207,6 @@ section.view{margin-top:58px;border-top:1px solid var(--line);padding-top:30px}
 .btn.danger{background:var(--danger);color:var(--danger-fg);border-color:transparent;font-weight:600}
 .btn.dis{opacity:.45}
 .btn.icon{padding:4px 8px}
-.split{display:inline-flex;position:relative}
-.split .btn:first-child{border-top-right-radius:0;border-bottom-right-radius:0}
-.split .arr{border-top-left-radius:0;border-bottom-left-radius:0;border-left-width:0;padding:4px 7px}
 .field{background:var(--field);border:1px solid var(--field-bd);border-radius:var(--rctl);
   padding:4px 9px;font-size:12.5px;color:var(--fg);display:inline-flex;align-items:center;gap:6px}
 .field .ph-txt{color:var(--fgmut)}
@@ -231,12 +214,6 @@ section.view{margin-top:58px;border-top:1px solid var(--line);padding-top:30px}
   padding:4px 8px 4px 10px;font-size:12.5px;display:inline-flex;align-items:center;gap:8px;color:var(--fg)}
 .combo:after{content:"";width:7px;height:7px;border-right:1.6px solid var(--fgmut);
   border-bottom:1.6px solid var(--fgmut);transform:rotate(45deg) translateY(-2px)}
-.spin{display:inline-flex;align-items:stretch;background:var(--field);border:1px solid var(--field-bd);
-  border-radius:var(--rctl);overflow:hidden}
-.spin b{padding:4px 10px;font-weight:500;font-size:12.5px;font-variant-numeric:tabular-nums}
-.spin .ud{display:flex;flex-direction:column;border-left:1px solid var(--field-bd)}
-.spin .ud i{font-style:normal;font-size:7px;line-height:1;padding:2px 5px;color:var(--fgmut)}
-.spin .ud i:first-child{border-bottom:1px solid var(--field-bd)}
 .chk{display:inline-flex;align-items:center;gap:7px;font-size:12.5px}
 .chk i{width:14px;height:14px;border-radius:4px;border:1px solid var(--ctl-bd);
   background:var(--field);font-style:normal;display:flex;align-items:center;justify-content:center;
@@ -251,36 +228,94 @@ section.view{margin-top:58px;border-top:1px solid var(--line);padding-top:30px}
 .sw.on:after{left:auto;right:2px}
 .prog{height:5px;border-radius:999px;background:var(--track);flex:1;overflow:hidden}
 .prog i{display:block;height:100%;background:var(--acc);border-radius:999px}
+.prog i.ind{width:32%;animation:slide 1.4s ease-in-out infinite alternate}
+@keyframes slide{from{margin-left:0}to{margin-left:68%}}
 .pct{font-variant-numeric:tabular-nums;font-size:11.5px;color:var(--fgmut);width:38px;text-align:right}
-.hr{height:1px;background:var(--sep);margin:13px -16px}
 .statbar{display:flex;gap:18px;align-items:center;padding:5px 14px;background:var(--stat);
   border-top:1px solid var(--sep);font-size:11.5px;color:var(--fgmut)}
-/* dropdown / context menus */
 .menu{position:absolute;z-index:20;min-width:200px;background:var(--menu);
   border:1px solid var(--menu-bd);border-radius:var(--rmenu);padding:4px;
   box-shadow:0 10px 28px rgba(0,0,0,.3);font-size:12.5px;color:var(--fg)}
 .menu .mi{padding:4px 10px;border-radius:5px;display:flex;gap:8px;align-items:center}
 .menu .mi .k{margin-left:auto;color:var(--fgmut);font-size:11px}
 .menu .mi.hov{background:var(--mi-hov);color:var(--mi-hovfg)}
-.menu .mi.hov .k{color:inherit;opacity:.75}
 .menu .msep{height:1px;background:var(--sep);margin:4px 6px}
 .menu .mhead{padding:3px 10px;font-size:10.5px;font-weight:700;letter-spacing:.05em;
   text-transform:uppercase;color:var(--fgmut)}
 .menu .mnote{padding:3px 10px 2px;font-size:10px;color:var(--fgmut);font-style:italic}
-/* toolbar + toggle tools */
 .toolrow{display:flex;align-items:center;gap:6px;padding:8px 12px;background:var(--w2);
   border-bottom:1px solid var(--sep)}
 .tool{font-size:12px;padding:4px 10px;border-radius:var(--rctl);border:1px solid transparent;
   color:var(--fg);display:inline-flex;gap:6px;align-items:center;background:transparent}
-.tool.on{background:var(--accsoft);border-color:color-mix(in srgb,var(--acc) 45%,transparent);color:var(--fg)}
+.tool.on{background:var(--accsoft);border-color:color-mix(in srgb,var(--acc) 45%,transparent)}
 .vsep{width:1px;align-self:stretch;background:var(--sep);margin:0 4px}
-/* log console */
 .log{background:var(--log);color:var(--logfg);font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
-  font-size:11px;line-height:1.55;padding:8px 12px;height:118px;overflow:hidden;border-top:1px solid var(--sep)}
-.log .lv1{opacity:.95} .log .dim{opacity:.6}
-.log .ok{color:#2E9E5B} .log .wa{color:#C7861B}
-/* settings specifics */
-.setwrap{display:flex;min-height:430px}
+  font-size:11px;line-height:1.55;padding:8px 12px;overflow:hidden;border-top:1px solid var(--sep)}
+.log .dim{opacity:.6} .log .ok2{color:#2E9E5B} .log .wa{color:#C7861B}
+/* search dropdown */
+.drop{position:absolute;top:30px;left:0;z-index:25;width:280px;background:var(--menu);
+  border:1px solid var(--menu-bd);border-radius:var(--rmenu);box-shadow:0 12px 30px rgba(0,0,0,.32);
+  padding:4px;font-size:12px;color:var(--fg)}
+.drop .dr{display:flex;gap:8px;align-items:baseline;padding:5px 9px;border-radius:5px}
+.drop .dr.hov{background:var(--mi-hov);color:var(--mi-hovfg)}
+.drop .dr .typ{margin-left:auto;font-size:9.5px;letter-spacing:.05em;text-transform:uppercase;opacity:.65}
+.drop .dr b{font-weight:650}
+/* map + panel */
+.mapwrap{display:flex}
+.mapcv{position:relative;flex:1;min-width:0;background:#31506B}
+.mapcv svg{display:block}
+.sidep{width:250px;flex:none;background:var(--w);border-left:1px solid var(--sep);
+  padding:12px 14px;display:flex;flex-direction:column;gap:8px;font-size:12px}
+.sidep h5{margin:0;font-size:12.5px;font-weight:700}
+.sidep .kv{display:flex;justify-content:space-between;gap:10px;color:var(--fgmut);font-size:11.5px}
+.sidep .kv b{color:var(--fg);font-weight:600;font-variant-numeric:tabular-nums;text-align:right}
+.sidep .hr2{height:1px;background:var(--sep);margin:5px -14px}
+.infopane{background:var(--w2);border:1px solid var(--sep);border-radius:8px;padding:9px 11px;
+  display:flex;flex-direction:column;gap:5px}
+.infopane h6{margin:0 0 1px;font-size:12px;font-weight:700;display:flex;gap:6px;align-items:center}
+.badge{font-size:9px;font-weight:700;letter-spacing:.06em;padding:1.5px 6px;border-radius:99px;
+  background:var(--ok);color:#fff}
+.attrib{position:absolute;right:10px;bottom:10px;z-index:10;font-family:var(--osfont);font-size:10px;
+  background:color-mix(in srgb,var(--menu) 88%,transparent);border:1px solid var(--menu-bd);
+  color:var(--fg);border-radius:6px;padding:3px 8px;display:flex;gap:8px;align-items:center}
+.lockchip{position:absolute;left:50%;top:12px;transform:translateX(-50%);z-index:12;
+  font-family:var(--osfont);font-size:11px;font-weight:600;color:var(--fg);
+  background:color-mix(in srgb,var(--menu) 92%,transparent);border:1px solid var(--menu-bd);
+  border-radius:99px;padding:4px 14px;display:flex;gap:8px;align-items:center}
+.zlchip{width:30px;height:22px;border-radius:5px;display:inline-flex;align-items:center;justify-content:center;
+  font-size:10px;font-weight:700;color:#1F2937;border:1px solid rgba(0,0,0,.2)}
+.zlchip.on{outline:2px solid var(--fg);outline-offset:1px}
+/* activity rows */
+.act{display:flex;flex-direction:column;gap:3px;padding:7px 9px;border:1px solid var(--sep);
+  border-radius:7px;background:var(--w2)}
+.act .a1{display:flex;gap:8px;align-items:baseline;font-size:12px}
+.act .a1 b{font-weight:650}
+.act .a1 .st2{color:var(--fgmut);font-size:11px}
+.act .a1 .pc2{margin-left:auto;font-variant-numeric:tabular-nums;font-size:11px;color:var(--fgmut)}
+/* wizard */
+.wiz{display:flex;min-height:330px}
+.wizrail{width:170px;flex:none;background:var(--nav);border-right:1px solid var(--sep);
+  padding:16px 12px;display:flex;flex-direction:column;gap:12px;font-size:12px}
+.wizrail .ws{display:flex;gap:9px;align-items:center;color:var(--fgmut)}
+.wizrail .ws i{font-style:normal;width:19px;height:19px;border-radius:50%;flex:none;
+  border:1.5px solid var(--fgmut);display:flex;align-items:center;justify-content:center;font-size:10px}
+.wizrail .ws.done{color:var(--fg)}
+.wizrail .ws.done i{background:var(--ok);border-color:var(--ok);color:#fff}
+.wizrail .ws.cur{color:var(--fg);font-weight:650}
+.wizrail .ws.cur i{background:var(--acc);border-color:var(--acc);color:var(--acc-fg)}
+.wizbody{flex:1;padding:20px 24px;display:flex;flex-direction:column;gap:10px}
+.wizbody h4{margin:0;font-size:15px}
+.wizbody .sub{color:var(--fgmut);font-size:12px;line-height:1.5;margin:0}
+.tag2{font-size:9px;font-weight:700;letter-spacing:.05em;padding:1.5px 6px;border-radius:4px;
+  border:1px solid var(--sep);color:var(--fgmut)}
+.tag2.okt{border-color:var(--ok);color:var(--ok)}
+.unlock{display:flex;flex-direction:column;gap:6px;font-size:12px;background:var(--w2);
+  border:1px solid var(--sep);border-radius:8px;padding:10px 12px}
+.unlock .ur{display:flex;gap:8px;align-items:baseline}
+.unlock .ur i{font-style:normal;color:var(--ok)}
+.unlock .ur small{color:var(--fgmut)}
+/* settings */
+.setwrap{display:flex;min-height:400px}
 .setnav{width:212px;flex:none;background:var(--nav);border-right:1px solid var(--sep);
   padding:10px 8px;display:flex;flex-direction:column;gap:2px}
 .setnav .ni{padding:5px 10px;border-radius:6px;font-size:12.5px;color:var(--fg);position:relative}
@@ -297,32 +332,6 @@ section.view{margin-top:58px;border-top:1px solid var(--line);padding-top:30px}
 .srow .sl{flex:1;min-width:0}
 .srow .sl b{font-weight:600;font-size:12.5px;display:flex;align-items:center;gap:6px}
 .srow .sl small{display:block;color:var(--fgmut);font-size:11px;line-height:1.45;margin-top:1px}
-.moddot{width:7px;height:7px;border-radius:50%;background:var(--acc);flex:none;display:inline-block}
-.inherit{font-size:10.5px;color:var(--fgmut);font-style:italic;white-space:nowrap}
-.demlist{border:1px solid var(--field-bd);border-radius:var(--rctl);background:var(--field);
-  min-width:320px;font-size:12px;overflow:hidden}
-.demlist .dr{display:flex;gap:8px;padding:5px 10px;align-items:center}
-.demlist .dr+.dr{border-top:1px solid var(--sep)}
-.demlist .dr.sel{background:var(--accsoft)}
-.demlist .tag{font-size:9.5px;font-weight:700;letter-spacing:.04em;color:var(--fgmut);
-  border:1px solid var(--sep);padding:1px 5px;border-radius:4px}
-/* map specifics */
-.mapwrap{display:flex}
-.mapcv{position:relative;flex:1;min-width:0;background:#9DBBD4}
-.mapcv svg{display:block}
-.sidep{width:238px;flex:none;background:var(--w);border-left:1px solid var(--sep);
-  padding:12px 14px;display:flex;flex-direction:column;gap:8px;font-size:12px}
-.sidep h5{margin:0;font-size:12.5px;font-weight:700}
-.sidep .kv{display:flex;justify-content:space-between;color:var(--fgmut);font-size:11.5px}
-.sidep .kv b{color:var(--fg);font-weight:600;font-variant-numeric:tabular-nums}
-.legend{position:absolute;left:12px;bottom:12px;z-index:10;background:color-mix(in srgb,var(--menu) 92%,transparent);
-  border:1px solid var(--menu-bd);border-radius:8px;padding:8px 11px;font-size:10.5px;color:var(--fg);
-  display:grid;grid-template-columns:auto auto;gap:3px 14px;font-family:var(--osfont)}
-.legend .li{display:flex;gap:6px;align-items:center}
-.legend .sw2{width:13px;height:10px;border-radius:2px;flex:none;border:1px solid rgba(0,0,0,.25)}
-.zlchip{width:30px;height:22px;border-radius:5px;display:inline-flex;align-items:center;justify-content:center;
-  font-size:10px;font-weight:700;color:#1F2937;border:1px solid rgba(0,0,0,.2)}
-.zlchip.on{outline:2px solid var(--fg);outline-offset:1px}
 /* dialog */
 .dlg{width:400px}
 .dlg .dbody{padding:18px 20px 6px;display:flex;gap:14px}
@@ -331,7 +340,6 @@ section.view{margin-top:58px;border-top:1px solid var(--line);padding-top:30px}
 .dlg h4{margin:0 0 6px;font-size:13.5px}
 .dlg p{margin:.35em 0;font-size:12px;color:var(--fgmut);line-height:1.5}
 .dlg ul{margin:.4em 0;padding-left:1.1em;font-size:12px;color:var(--fg)}
-.dlg ul b{font-variant-numeric:tabular-nums}
 .dlg-actions{display:flex;justify-content:flex-end;gap:8px;padding:14px 20px 16px}
 #frames[data-os="win"] .dlg-actions{flex-direction:row-reverse;justify-content:flex-start}
 #frames[data-os="mac"] .dlg .dbody{flex-direction:column;align-items:center;text-align:center;padding-top:22px}
@@ -343,8 +351,8 @@ section.view{margin-top:58px;border-top:1px solid var(--line);padding-top:30px}
 
 <header class="topbar">
   <div>
-    <span class="eyebrow">Ortho4XP · Track B review</span>
-    <h1>PySide6 UI mockups — all three platforms</h1>
+    <span class="eyebrow">Ortho4XP · Track B review · rev 2</span>
+    <h1>Map-first UI mockups — all three platforms</h1>
   </div>
   <span class="sp" style="flex:1"></span>
   <span class="seglabel sans">Platform</span>
@@ -362,347 +370,387 @@ section.view{margin-top:58px;border-top:1px solid var(--line);padding-top:30px}
 
 <main>
 <div class="intro">
-  <p>These are the five views proposed in <code>docs/UI_MODERNIZATION.md</code>, drawn as they would
-  appear after the PySide6 port. The toggles above restyle every mockup with the platform's widget
-  language — chrome, fonts, control shapes, accent color, button order — and switch light/dark,
-  since following the system theme is one of the headline benefits of Track B.</p>
-  <ul>
-    <li><strong>How to comment:</strong> every design decision carries a numbered pin
-      (<span class="nid" style="vertical-align:1px">M2</span> etc.). Reference pin IDs in your
-      feedback — e.g. <em>“S1: keep the scope switch, but default to Global.”</em></li>
-    <li>These are HTML approximations of Qt platform styles, not pixel-perfect renders; fonts
-      fall back to your system's nearest equivalent when viewing cross-platform.</li>
-    <li>All data shown (tile +48-006, providers, sizes, log lines) is realistic sample content
-      taken from the current app's behavior.</li>
-  </ul>
+  <p><strong>Revision 2</strong> — reworked around your checklist: the map is now the application.
+  One window; search, selection, building, zones, and tile info all happen on or beside the map.
+  The form-based main window from rev 1 is gone. Every checklist item maps to a pinned decision:</p>
+  <table class="covtable">
+    <tr><th>Your item</th><th>Where</th></tr>
+    <tr><td>Map view primary</td><td>View 02 — whole window</td></tr>
+    <tr><td>Live imagery source preview, zoomable (Google-Maps-like)</td><td>View 02 · <b>M2</b>, <b>M6</b></td></tr>
+    <tr><td>Search airport / city / country</td><td>View 02 · <b>M1</b></td></tr>
+    <tr><td>All functionality in one view (GeoTIFF etc.)</td><td>View 02 · <b>M7</b>, View 04 · <b>Z3</b></td></tr>
+    <tr><td>Build progress in tiles, zoom-to-selection, locked map, activity + console</td><td>View 03 · <b>B1–B4</b></td></tr>
+    <tr><td>Output folder → app config; first-launch onboarding; apt.dat search index</td><td>View 01 · <b>O1–O4</b>, View 05 · <b>S2</b></td></tr>
+    <tr><td>Pinch/scroll zoom, two-finger pan, click / shift / ⌘-click selection</td><td>View 02 · <b>M3</b></td></tr>
+    <tr><td>Info pane for built tile (source, ZL, dates, size)</td><td>View 02 · <b>M4</b></td></tr>
+  </table>
+  <p>Comment with pin IDs as before. Feasibility notes for the live map and the search index are in
+  the notes under View 02.</p>
 </div>
 
 <div id="frames" data-os="mac" data-mode="light">
 
-<!-- ================= 1. MAIN WINDOW ================= -->
-<section class="view" id="v-main">
+<!-- ================= VIEW 01 — ONBOARDING ================= -->
+<section class="view" id="v-onboard">
   <div class="viewhead">
-    <span class="eyebrow">View 01 — Main window</span>
-    <h2>Build pipeline, made legible</h2>
-    <p>The form→actions→feedback flow from §6.1: numbered steps teach the pipeline order, hidden
-    modifier-clicks become split-button menus, progress bars get names, and the console becomes a
-    real log panel.</p>
+    <span class="eyebrow">View 01 — First launch</span>
+    <h2>Onboarding: ready to build in four steps</h2>
+    <p>Shown once on first launch (re-runnable from Help). Getting the X-Plane folder early unlocks
+    the Custom Scenery link target, the overlay source, and the Global Airports search index.</p>
   </div>
   <div class="stage"><div class="desk">
     <div class="sysbar"><span class="apple"></span><b>Ortho4XP</b><span>File</span><span>Edit</span><span>View</span><span>Tools</span><span>Help</span><span class="sp"></span><span class="st">Mon 14 Jul  09:41</span></div>
-    <div class="win" style="width:830px">
+    <div class="win" style="width:640px">
       <div class="winclip">
-      <div class="tbar"><div class="tl3"><i></i><i></i><i></i></div><span class="appdot"></span><span class="ttl">Ortho4XP — Tile +48-006</span><div class="caps"><span>—</span><span>▢</span><span>✕</span></div><div class="gclose">✕</div></div>
-      <div class="menubar"><span>File</span><span>Edit</span><span>View</span><span class="hov">Tools</span><span>Help</span></div>
-      <div class="body">
-        <div class="row">
-          <span class="lab">Tile</span>
-          <span class="spin"><b>48</b><span class="ud"><i>▲</i><i>▼</i></span></span>
-          <span class="spin"><b>−6</b><span class="ud"><i>▲</i><i>▼</i></span></span>
-          <span class="btn ph">🌍 Pick on map…<i class="pin">M1</i></span>
-          <span class="sp"></span>
-          <span class="lab">Imagery</span>
-          <span class="combo">Bing (BI)</span>
-          <span class="lab">Zoom</span>
-          <span class="combo">16</span>
+      <div class="tbar"><div class="tl3"><i></i><i></i><i></i></div><span class="appdot"></span><span class="ttl">Welcome to Ortho4XP</span><div class="caps"><span>✕</span></div><div class="gclose">✕</div></div>
+      <div class="wiz">
+        <div class="wizrail">
+          <span class="ws done"><i>✓</i>Welcome</span>
+          <span class="ws cur"><i>2</i>X-Plane</span>
+          <span class="ws"><i>3</i>Folders</span>
+          <span class="ws"><i>4</i>Imagery</span>
+          <span class="sp" style="flex:1"></span>
+          <span class="ws ph" style="font-size:11px"><i style="border:none">↷</i>Skip setup<i class="pin" style="position:absolute;right:-4px;top:-6px">O4</i></span>
         </div>
-        <div class="row">
-          <span class="lab">Output folder</span>
-          <span class="field" style="flex:1"><span class="ph-txt">/Volumes/Scenery/Ortho4XP/Tiles</span></span>
-          <span class="btn">Browse…</span>
-        </div>
-        <div class="hr"></div>
-        <div class="row ph"><i class="pin tl">M3</i>
-          <span class="btn">1 · Vector data</span>
-          <span class="split ph"><span class="btn">2 · Mesh</span><span class="btn arr">▾</span><i class="pin">M2</i>
-            <div class="menu" style="top:32px;left:0">
-              <div class="mi hov">Triangulate 3D mesh<span class="k">⌘2</span></div>
-              <div class="mi">Sort mesh (existing tile)</div>
-              <div class="mi">Download community mesh…</div>
-              <div class="msep"></div><div class="mnote">menu shown open — was Shift/Ctrl-click</div>
-            </div>
-          </span>
-          <span class="split"><span class="btn">3 · Water masks</span><span class="btn arr">▾</span></span>
-          <span class="btn">4 · Imagery &amp; DSF</span>
-          <span class="sp"></span>
-          <span class="btn primary">▶ Build all</span>
-          <span class="btn dis ph">■ Stop<i class="pin">M6</i></span>
-        </div>
-        <div class="hr"></div>
-        <div class="row ph" style="gap:12px"><i class="pin tl">M4</i>
-          <span class="lab mut" style="width:118px">Vector &amp; DSF</span><span class="prog"><i style="width:52%"></i></span><span class="pct">52 %</span>
-        </div>
-        <div class="row" style="gap:12px">
-          <span class="lab mut" style="width:118px">Imagery download</span><span class="prog"><i style="width:17%"></i></span><span class="pct">17 %</span>
-        </div>
-        <div class="row" style="gap:12px">
-          <span class="lab mut" style="width:118px">DDS conversion</span><span class="prog"><i style="width:0%"></i></span><span class="pct">0 %</span>
-        </div>
-      </div>
-      <div class="toolrow ph"><i class="pin tl">M5</i>
-        <span class="lab" style="font-weight:600">Log</span>
-        <span class="combo">Normal</span>
-        <span class="field" style="width:170px"><span class="ph-txt">Filter…</span></span>
-        <span class="sp"></span><span class="btn icon">Copy</span><span class="btn icon">Save…</span>
-      </div>
-      <div class="log">
-<span class="dim">09:27:14 │ Step 1 · Assembling vector data for +48-006</span><br>
-<span class="lv1">09:27:31 │ OSM road network: 48,112 ways (level 1) via overpass.kumi.systems</span><br>
-<span class="ok">09:31:02 │ Step 1 finished in 3 m 48 s</span><br>
-<span class="lv1">09:31:03 │ Step 2 · Triangulating mesh — curvature tol 2.0, limit 3.0 M tris</span><br>
-<span class="wa">09:33:47 │ Warning: 2 self-intersecting OSM polygons repaired</span><br>
-<span class="lv1">09:35:12 │ Step 4 · Downloading BI ZL16 — 424 / 2,506 textures</span>
-      </div>
-      <div class="statbar"><span>Building tile +48-006</span><span>Elapsed 14 m 32 s</span><span class="sp" style="flex:1"></span><span>2 steps queued</span></div>
-      </div>
-    </div>
-  </div></div>
-  <p class="stagecap">Main window · toggle platform and appearance above — note the global menu bar on macOS vs. the in-window menu on Windows/Linux.</p>
-  <div class="notes">
-    <div class="note"><span class="nid">M1</span><div><strong>“Pick on map” is the primary path</strong> to choosing a tile; lat/lon become validated spinboxes (−85…84 / −180…179) instead of free-text fields checked only at build time. <em class="q">Q: keep manual entry this prominent, or tuck it behind the map picker entirely?</em></div></div>
-    <div class="note"><span class="nid">M2</span><div><strong>Split-button menus replace hidden modifier-clicks.</strong> Shift-click = Sort mesh and Ctrl-click = Community mesh become visible menu items (shortcuts kept as accelerators). Same pattern on step 3 for “masks for imagery.” <em class="q">Q: any other hidden gestures you want surfaced here?</em></div></div>
-    <div class="note"><span class="nid">M3</span><div><strong>Numbered steps</strong> teach the 1→4 pipeline order; “All in one” becomes an accented <em>Build all</em> default button. <em class="q">Q: are the shortened step names acceptable?</em></div></div>
-    <div class="note"><span class="nid">M4</span><div><strong>Labeled progress bars with percentages</strong>, mapped to the three existing bar roles; overall progress mirrored in the Dock/taskbar icon. <em class="q">Q: keep three bars, or one overall bar + detail on hover?</em></div></div>
-    <div class="note"><span class="nid">M5</span><div><strong>Log panel</strong> with level selector (maps to <code>verbosity</code>), filter, copy and save; timestamps and colored warnings. Replaces raw stdout capture visually — the queue mechanism underneath is unchanged.</div></div>
-    <div class="note"><span class="nid">M6</span><div><strong>Stop is two-state:</strong> disabled when idle, and shows “Stopping after current step…” once pressed, since <code>red_flag</code> is polled. <em class="q">Q: should Stop also offer a hard-cancel after a timeout?</em></div></div>
-  </div>
-</section>
-
-<!-- ================= 2. SETTINGS ================= -->
-<section class="view" id="v-settings">
-  <div class="viewhead">
-    <span class="eyebrow">View 02 — Settings</span>
-    <h2>One window, two scopes, sixty settings you can actually find</h2>
-    <p>Replaces the three-tab config window. Categories in a sidebar, search across names and hint
-    text, an explicit Tile/Global scope switch, modified-value indicators, and inline descriptions
-    instead of the “Hint!” popup. Shown here: Mesh &amp; Elevation.</p>
-  </div>
-  <div class="stage"><div class="desk">
-    <div class="sysbar"><span class="apple"></span><b>Ortho4XP</b><span>File</span><span>Edit</span><span>View</span><span>Tools</span><span>Help</span><span class="sp"></span><span class="st">Mon 14 Jul  09:41</span></div>
-    <div class="win" style="width:860px">
-      <div class="winclip">
-      <div class="tbar"><div class="tl3"><i></i><i></i><i></i></div><span class="appdot"></span><span class="ttl">Settings</span><div class="caps"><span>—</span><span>▢</span><span>✕</span></div><div class="gclose">✕</div></div>
-      <div class="toolrow">
-        <span class="field ph" style="width:220px"><span class="ph-txt">🔍 Search settings…</span><i class="pin">S2</i></span>
-        <span class="sp"></span>
-        <span class="lab mut">Scope</span>
-        <span class="seg ph" style="border-color:var(--ctl-bd);background:var(--ctl)"><i class="pin">S1</i>
-          <button style="font-family:var(--osfont);background:var(--acc);color:var(--acc-fg);border:none;padding:4px 12px;font-size:12px">This tile · +48-006</button>
-          <button style="font-family:var(--osfont);background:transparent;color:var(--fg);border:none;padding:4px 12px;font-size:12px">Global defaults</button>
-        </span>
-      </div>
-      <div class="setwrap">
-        <div class="setnav ph"><i class="pin">S3</i>
-          <div class="ni">General &amp; Paths</div>
-          <div class="ni">Network &amp; Downloads</div>
-          <div class="ni">Imagery &amp; Zoom Levels</div>
-          <div class="ni on">Mesh &amp; Elevation</div>
-          <div class="ni">Roads &amp; Vector Data</div>
-          <div class="ni">Water &amp; Masks</div>
-          <div class="ni">Rendering &amp; Overlays</div>
-          <div class="nspace"></div>
-          <div class="ni" style="display:flex;gap:8px;align-items:center"><span class="sw"></span> Show advanced</div>
-        </div>
-        <div class="setbody">
-          <div class="sgroup">
-            <h4>Elevation source</h4>
-            <div class="srow">
-              <div class="sl"><b>Elevation data (DEM)</b>
-                <small>Files are layered top-to-bottom; areas not covered fall back to the next source.</small></div>
-              <div class="demlist ph"><i class="pin">S6</i>
-                <div class="dr"><span>Viewfinderpanoramas (auto)</span><span class="sp"></span><span class="tag">DEFAULT</span></div>
-                <div class="dr sel"><span>/Data/LIDAR/N48W006_5m.tif</span><span class="sp"></span><span class="tag">GDAL</span></div>
-              </div>
-              <span class="btn icon">＋</span><span class="btn icon">−</span>
-            </div>
-            <div class="srow">
-              <div class="sl"><b>Fill missing elevation data</b>
-                <small>Fills no-data raster values from the nearest neighbour instead of sea level.</small></div>
-              <span class="sw on"></span>
-            </div>
+        <div class="wizbody">
+          <h4>Where is X-Plane installed?</h4>
+          <p class="sub">Ortho4XP uses your X-Plane folder to install finished tiles and to read
+          data it already ships with. You can change this later in Settings.</p>
+          <div class="row ph">
+            <span class="field" style="flex:1">/Volumes/Sim/X-Plane 12</span>
+            <span class="tag2 okt">DETECTED</span>
+            <span class="btn">Change…</span>
+            <i class="pin">O1</i>
           </div>
-          <div class="sgroup">
-            <h4>Mesh density</h4>
-            <div class="srow ph">
-              <div class="sl"><b>Curvature tolerance <span class="moddot"></span></b>
-                <small class="ph">Higher values produce fewer triangles. This drives overall mesh density.<i class="pin" style="right:auto;left:130px;top:-4px">S5</i></small></div>
-              <span class="field" style="width:64px">2.0</span>
-              <i class="pin">S4</i>
-              <div class="menu" style="top:34px;right:-6px;min-width:190px">
-                <div class="mhead">Curvature tolerance</div>
-                <div class="mi hov">Reset to global (1.5)</div>
-                <div class="mi">Reset to default (2.0)</div>
-                <div class="mi">Copy value to global</div>
-                <div class="msep"></div><div class="mnote">right-click menu shown open</div>
-              </div>
-            </div>
-            <div class="srow">
-              <div class="sl"><b>Airport curvature tolerance</b>
-                <small>Overrides curvature tolerance near airports when smaller.</small></div>
-              <span class="inherit">from global</span>
-              <span class="field" style="width:64px;color:var(--fgmut)">0.5</span>
-            </div>
-            <div class="srow">
-              <div class="sl"><b>Maximum triangles</b>
-                <small>Upper bound on final mesh size. 0 applies the 5 M safety limit.</small></div>
-              <span class="field" style="width:64px">3.0</span><span class="lab mut">million</span>
-            </div>
-            <div class="srow">
-              <div class="sl"><small style="font-style:italic">6 advanced settings hidden — enable “Show advanced” to edit min. angle, smoothing passes, iterate, mesh ZL…</small></div>
-            </div>
+          <div class="unlock ph"><i class="pin">O2</i>
+            <div class="ur"><i>✓</i><span><b>Custom Scenery</b> — <small>finished tiles get installed here automatically</small></span></div>
+            <div class="ur"><i>✓</i><span><b>Global Airports</b> — <small>35,000 airports indexed for map search (ICAO, name, city, country)</small></span></div>
+            <div class="ur"><i>✓</i><span><b>Global Scenery</b> — <small>overlay source for roads, forests and buildings</small></span></div>
+          </div>
+          <div class="row" style="margin-top:auto">
+            <span class="btn">Back</span>
+            <span class="sp"></span>
+            <span class="btn primary">Continue</span>
           </div>
         </div>
       </div>
-      <div class="statbar"><span class="btn icon">Reset category…</span><span class="sp" style="flex:1"></span><span class="btn">Cancel</span><span class="btn primary">Save</span></div>
       </div>
     </div>
   </div></div>
-  <p class="stagecap">Settings window · Mesh &amp; Elevation category, Tile scope active.</p>
+  <p class="stagecap">Onboarding step 2 of 4. Step 3 (“Folders”) asks for the output/build folder and cache location — the output folder no longer lives in the main window (pin O3 discussed under View 05).</p>
   <div class="notes">
-    <div class="note"><span class="nid">S1</span><div><strong>Explicit scope switch</strong> replaces the duplicated Tile/Global tabs. When the tile has no config yet, tile scope shows inherited values greyed with an “Override for this tile” button. <em class="q">Q: is two visible scopes (tile/global) the right model, or do you want the app-level settings as a third segment rather than folded into categories?</em></div></div>
-    <div class="note"><span class="nid">S2</span><div><strong>Search</strong> filters across labels, config keys, and hint text — the old <code>cfg_vars</code> names still work as search terms (<code>apt_curv_tol</code> finds “Airport curvature tolerance”).</div></div>
-    <div class="note"><span class="nid">S3</span><div><strong>Seven task-based categories</strong> with basic/advanced split (§7.3); the counts of hidden advanced items stay visible so nothing feels removed. <em class="q">Q: happy with the category names and what landed in “advanced”?</em></div></div>
-    <div class="note"><span class="nid">S4</span><div><strong>Modified indicator + right-click reset.</strong> The dot marks values overriding the inherited layer; context menu offers Reset to global / default / Copy to global (VS Code pattern).</div></div>
-    <div class="note"><span class="nid">S5</span><div><strong>Hints become inline descriptions</strong> — the good hint texts in <code>O4_Cfg_Vars.py</code> move under each field (short form) with full text on hover. The “Hint!” popup window is retired.</div></div>
-    <div class="note"><span class="nid">S6</span><div><strong>DEM list editor</strong> replaces the hidden Shift-click-to-append behavior on the folder icon; ordering is explicit and each source shows how it will be read.</div></div>
+    <div class="note"><span class="nid">O1</span><div><strong>X-Plane auto-detection</strong> checks the standard install locations and <code>x-plane_install_12.txt</code>; manual pick as fallback. Everything derived from it is shown, not hidden.</div></div>
+    <div class="note"><span class="nid">O2</span><div><strong>The unlock list makes consequences visible:</strong> Custom Scenery target, overlay source (<code>custom_overlay_src</code>), and the airport search index parsed from Global Airports <code>apt.dat</code> on first run (cached, re-indexed when X-Plane updates).</div></div>
+    <div class="note"><span class="nid">O3</span><div><strong>Step 3 sets the output folder once</strong> — agreed, it's app config, not a per-session decision. It remains editable in Settings → General &amp; Paths.</div></div>
+    <div class="note"><span class="nid">O4</span><div><strong>Skippable, never blocking.</strong> Skipping falls back to sensible defaults (<code>Ortho4XP/Tiles</code> output, no X-Plane integration until set). <em class="q">Q: should “Build” be disabled until an output folder exists, or silently use the default?</em></div></div>
   </div>
 </section>
 
-<!-- ================= 3. MAP — TILES ================= -->
+<!-- ================= VIEW 02 — MAIN WINDOW (MAP-FIRST) ================= -->
 <section class="view" id="v-map">
   <div class="viewhead">
-    <span class="eyebrow">View 03 — Map · Tiles layer</span>
-    <h2>Tile management without the folklore</h2>
-    <p>The Tiles Collection window becomes a map with a visible mode toolbar (no more Shift/Ctrl
-    chords), a legend for the tile color code, a right-click context menu per tile, and a batch
-    panel that states exactly what will happen before it happens.</p>
+    <span class="eyebrow">View 02 — Main window</span>
+    <h2>The map is the application</h2>
+    <p>One window: search on the left, live imagery in the middle, context on the right. The map
+    renders the <em>selected imagery source</em> at the resolution of the current zoom — the
+    Google-Maps behavior you asked about — so what you see is what you'll download.</p>
   </div>
   <div class="stage"><div class="desk">
     <div class="sysbar"><span class="apple"></span><b>Ortho4XP</b><span>File</span><span>Edit</span><span>View</span><span>Tools</span><span>Help</span><span class="sp"></span><span class="st">Mon 14 Jul  09:41</span></div>
-    <div class="win" style="width:900px">
+    <div class="win" style="width:940px">
       <div class="winclip">
-      <div class="tbar"><div class="tl3"><i></i><i></i><i></i></div><span class="appdot"></span><span class="ttl">Map — Tiles</span><div class="caps"><span>—</span><span>▢</span><span>✕</span></div><div class="gclose">✕</div></div>
-      <div class="toolrow ph"><i class="pin tl">T1</i>
-        <span class="tool">✋ Pan</span>
-        <span class="tool">▣ Select tile</span>
-        <span class="tool on">⬚ Multi-select</span>
+      <div class="tbar"><div class="tl3"><i></i><i></i><i></i></div><span class="appdot"></span><span class="ttl">Ortho4XP</span><div class="caps"><span>—</span><span>▢</span><span>✕</span></div><div class="gclose">✕</div></div>
+      <div class="menubar"><span>File</span><span>Edit</span><span>View</span><span>Tools</span><span>Help</span></div>
+      <div class="toolrow">
+        <span class="field ph" style="width:250px">🔍 bre<span class="ph-txt">|</span><i class="pin">M1</i>
+          <span class="drop">
+            <span class="dr hov"><b>LFRB</b> Brest Bretagne<span class="typ">airport</span></span>
+            <span class="dr"><b>Brest</b>, France<span class="typ">city</span></span>
+            <span class="dr"><b>LFRQ</b> Quimper–Cornouaille<span class="typ">airport</span></span>
+            <span class="dr"><b>EBBR</b> Brussels<span class="typ">airport</span></span>
+          </span>
+        </span>
         <span class="vsep"></span>
-        <span class="lab mut">Layer</span><span class="combo">Tiles</span>
+        <span class="lab mut">Imagery</span><span class="combo ph">Bing (BI)<i class="pin">M6</i></span>
+        <span class="lab mut">Build ZL</span><span class="combo">16</span>
+        <span class="vsep"></span>
+        <span class="tool">✏ Zones</span>
         <span class="sp"></span>
-        <span class="btn icon">⟳ Refresh</span>
+        <span class="btn icon">⚙</span>
       </div>
       <div class="mapwrap">
         <div class="mapcv">
-          <svg viewBox="0 0 646 372" width="646" height="372" role="img" aria-label="Stylized map of Brittany and the Channel with tile grid">
-            <rect width="646" height="372" fill="#8FB0CB"/>
-            <path d="M120,0 L240,0 L262,28 L238,64 L196,74 L170,58 L128,66 L96,40 L104,14 Z" fill="#B9C6A8" stroke="#8FA283" stroke-width="1"/>
-            <path d="M646,120 L560,128 L512,150 L468,148 L430,170 L402,166 L378,188 L398,214 L446,222 L470,244 L530,250 L590,238 L646,252 Z" fill="#C2CBAA" stroke="#93A182" stroke-width="1"/>
-            <path d="M378,188 L340,196 L318,214 L336,226 L368,220 L398,214 Z" fill="#C2CBAA" stroke="#93A182" stroke-width="1"/>
-            <g stroke="#41546533" stroke-width="1">
-              <line x1="0" y1="62" x2="646" y2="62"/><line x1="0" y1="124" x2="646" y2="124"/>
-              <line x1="0" y1="186" x2="646" y2="186"/><line x1="0" y1="248" x2="646" y2="248"/>
-              <line x1="0" y1="310" x2="646" y2="310"/>
-              <line x1="62" y1="0" x2="62" y2="372"/><line x1="124" y1="0" x2="124" y2="372"/>
-              <line x1="186" y1="0" x2="186" y2="372"/><line x1="248" y1="0" x2="248" y2="372"/>
-              <line x1="310" y1="0" x2="310" y2="372"/><line x1="372" y1="0" x2="372" y2="372"/>
-              <line x1="434" y1="0" x2="434" y2="372"/><line x1="496" y1="0" x2="496" y2="372"/>
-              <line x1="558" y1="0" x2="558" y2="372"/><line x1="620" y1="0" x2="620" y2="372"/>
-            </g>
+          <svg viewBox="0 0 690 396" width="690" height="396" role="img" aria-label="Live Bing imagery of the Brittany coast with tile grid and selection">
             <defs>
-              <pattern id="hatch" width="6" height="6" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
-                <line x1="0" y1="0" x2="0" y2="6" stroke="#1F2937" stroke-width="1.6" opacity=".38"/>
+              <linearGradient id="sea2" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stop-color="#2E4E68"/><stop offset="1" stop-color="#3A6180"/>
+              </linearGradient>
+              <pattern id="hatch2" width="6" height="6" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+                <line x1="0" y1="0" x2="0" y2="6" stroke="#0F1720" stroke-width="1.5" opacity=".3"/>
               </pattern>
             </defs>
+            <rect width="690" height="396" fill="url(#sea2)"/>
+            <path d="M690,120 L600,132 L548,156 L500,152 L458,178 L426,172 L398,196 L420,224 L472,232 L498,256 L562,262 L628,248 L690,264 Z" fill="#4E6A4A"/>
+            <path d="M398,196 L356,206 L330,226 L350,240 L386,232 L420,224 Z" fill="#54704E"/>
+            <path d="M690,120 L620,128 L588,144 L620,158 L668,150 L690,142 Z" fill="#5B7752" opacity=".8"/>
+            <g opacity=".5">
+              <rect x="500" y="170" width="60" height="42" fill="#61795A"/><rect x="560" y="200" width="70" height="46" fill="#57704F"/>
+              <rect x="450" y="196" width="46" height="34" fill="#6B8261"/><rect x="608" y="150" width="52" height="40" fill="#4A6647"/>
+            </g>
+            <g fill="#C9CDB9" opacity=".55">
+              <rect x="522" y="186" width="14" height="10"/><rect x="470" y="210" width="10" height="8"/><rect x="600" y="228" width="12" height="9"/>
+            </g>
+            <g stroke="#FFFFFF44" stroke-width="1">
+              <line x1="0" y1="66" x2="690" y2="66"/><line x1="0" y1="132" x2="690" y2="132"/>
+              <line x1="0" y1="198" x2="690" y2="198"/><line x1="0" y1="264" x2="690" y2="264"/>
+              <line x1="0" y1="330" x2="690" y2="330"/>
+              <line x1="66" y1="0" x2="66" y2="396"/><line x1="132" y1="0" x2="132" y2="396"/>
+              <line x1="198" y1="0" x2="198" y2="396"/><line x1="264" y1="0" x2="264" y2="396"/>
+              <line x1="330" y1="0" x2="330" y2="396"/><line x1="396" y1="0" x2="396" y2="396"/>
+              <line x1="462" y1="0" x2="462" y2="396"/><line x1="528" y1="0" x2="528" y2="396"/>
+              <line x1="594" y1="0" x2="594" y2="396"/><line x1="660" y1="0" x2="660" y2="396"/>
+            </g>
             <!-- built tiles -->
-            <g font-family="system-ui,sans-serif" font-size="9" text-anchor="middle" fill="#1F2937">
-              <rect x="434" y="124" width="62" height="62" fill="#4CAF6E" opacity=".5"/><rect x="434" y="124" width="62" height="62" fill="url(#hatch)"/><text x="465" y="152">BI 16</text><text x="465" y="164" font-size="7.5" opacity=".7">linked</text>
-              <rect x="496" y="124" width="62" height="62" fill="#4CAF6E" opacity=".5"/><text x="527" y="158">BI 16</text>
-              <rect x="558" y="124" width="62" height="62" fill="#E8C33C" opacity=".55"/><text x="589" y="152">GO2 17*</text><text x="589" y="164" font-size="7.5" opacity=".7">zones</text>
-              <rect x="496" y="186" width="62" height="62" fill="#5B8DD9" opacity=".5"/><text x="527" y="220">SEA 12</text>
+            <g font-family="system-ui,sans-serif" font-size="9" text-anchor="middle">
+              <rect x="462" y="132" width="66" height="66" fill="#4CAF6E" opacity=".38"/><rect x="462" y="132" width="66" height="66" fill="url(#hatch2)"/>
+              <text x="495" y="162" fill="#EAF5EC">BI 16</text><text x="495" y="174" font-size="7.5" fill="#EAF5EC" opacity=".8">installed</text>
+              <rect x="528" y="132" width="66" height="66" fill="#4CAF6E" opacity=".38"/><text x="561" y="168" fill="#EAF5EC">BI 16</text>
+              <rect x="594" y="132" width="66" height="66" fill="#E8C33C" opacity=".4"/><text x="627" y="168" fill="#FBF6E2">GO2 17*</text>
             </g>
-            <!-- selected batch -->
-            <g>
-              <rect x="248" y="124" width="186" height="124" fill="#D9482B" opacity=".18"/>
-              <rect x="248.8" y="124.8" width="184.4" height="122.4" fill="none" stroke="#D9482B" stroke-width="1.6" stroke-dasharray="5 3"/>
-              <line x1="310" y1="124" x2="310" y2="248" stroke="#D9482B" stroke-width=".7" opacity=".5"/>
-              <line x1="372" y1="124" x2="372" y2="248" stroke="#D9482B" stroke-width=".7" opacity=".5"/>
-              <line x1="248" y1="186" x2="434" y2="186" stroke="#D9482B" stroke-width=".7" opacity=".5"/>
+            <!-- selection: contiguous pair + one non-contiguous -->
+            <g class="ph">
+              <rect x="462" y="132" width="66" height="66" fill="none" stroke="#FFD60A" stroke-width="3"/>
+              <rect x="462" y="198" width="66" height="66" fill="#FFD60A" opacity=".14"/>
+              <rect x="463" y="199" width="64" height="64" fill="none" stroke="#FFD60A" stroke-width="2" stroke-dasharray="6 4"/>
+              <rect x="264" y="198" width="66" height="66" fill="#FFD60A" opacity=".14"/>
+              <rect x="265" y="199" width="64" height="64" fill="none" stroke="#FFD60A" stroke-width="2" stroke-dasharray="6 4"/>
             </g>
-            <!-- active tile -->
-            <rect x="434" y="124" width="62" height="62" fill="none" stroke="#F5C518" stroke-width="3"/>
-            <g font-family="system-ui,sans-serif" font-size="8.5" fill="#3E5266">
-              <text x="6" y="120">49°N</text><text x="6" y="182">48°N</text><text x="6" y="244">47°N</text>
-              <text x="428" y="368" text-anchor="middle">−6°</text><text x="490" y="368" text-anchor="middle">−5°</text><text x="552" y="368" text-anchor="middle">−4°</text>
+            <g font-family="system-ui,sans-serif" font-size="8.5" fill="#D7E2EC">
+              <text x="6" y="128">49°N</text><text x="6" y="194">48°N</text><text x="6" y="260">47°N</text>
+              <text x="460" y="392" text-anchor="middle">−6°</text><text x="526" y="392" text-anchor="middle">−5°</text><text x="592" y="392" text-anchor="middle">−4°</text>
             </g>
           </svg>
-          <div class="legend ph"><i class="pin">T2</i>
-            <span class="li"><span class="sw2" style="background:#4CAF6E"></span>built · ZL16</span>
-            <span class="li"><span class="sw2" style="background:#E8C33C"></span>built · ZL17 (* = custom zones)</span>
-            <span class="li"><span class="sw2" style="background:#5B8DD9"></span>built · ZL≤14</span>
-            <span class="li"><span class="sw2" style="background:url(#h);background-image:repeating-linear-gradient(45deg,#1F2937 0 1px,transparent 1px 4px)"></span>linked in Custom Scenery</span>
-            <span class="li"><span class="sw2" style="border:2px solid #F5C518;background:transparent"></span>active tile</span>
-            <span class="li"><span class="sw2" style="border:1.6px dashed #D9482B;background:rgba(217,72,43,.2)"></span>selected for batch</span>
-          </div>
-          <div class="menu ph" style="top:64px;left:300px;min-width:210px"><i class="pin">T5</i>
-            <div class="mhead">Tile +48-005</div>
-            <div class="mi hov">Set as active tile</div>
-            <div class="mi">Link into Custom Scenery<span class="k">✓</span></div>
-            <div class="mi">Build…</div>
-            <div class="msep"></div>
-            <div class="mi">Delete cached data…</div>
-            <div class="msep"></div><div class="mnote">right-click menu shown open</div>
-          </div>
+          <div class="attrib ph"><i class="pin tl">M2</i><span><b>Bing (BI)</b> · live · z9 → z16 on zoom</span><span style="opacity:.6">cache 1.2 GB</span></div>
+          <div class="lockchip ph" style="top:auto;bottom:44px;left:16px;transform:none;font-weight:400;font-size:10.5px"><i class="pin">M3</i>click select · ⇧click contiguous · ⌘click add · pinch/scroll zoom · two-finger drag pan</div>
         </div>
         <div class="sidep">
-          <h5 class="ph">Selection — 12 tiles<i class="pin">T3</i></h5>
-          <span class="kv"><span>Steps</span><b>1 – 4</b></span>
-          <span class="kv"><span>Est. download</span><b>≈ 34 GB</b></span>
-          <span class="kv"><span>Est. disk after build</span><b>≈ 51 GB</b></span>
-          <div class="hr" style="margin:6px -14px"></div>
-          <span class="chk on"><i></i>Assemble vector data</span>
-          <span class="chk on"><i></i>Triangulate 3D mesh</span>
-          <span class="chk on"><i></i>Draw water masks</span>
-          <span class="chk on"><i></i>Build imagery / DSF</span>
+          <div class="infopane ph"><i class="pin">M4</i>
+            <h6>Tile +48-006 <span class="badge">BUILT</span></h6>
+            <span class="kv"><span>Imagery</span><b>Bing (BI)</b></span>
+            <span class="kv"><span>Zoom level</span><b>ZL16 + 2 zones</b></span>
+            <span class="kv"><span>Mesh built</span><b>12 Jun 2026</b></span>
+            <span class="kv"><span>Imagery updated</span><b>3 Jul 2026</b></span>
+            <span class="kv"><span>Size on disk</span><b>14.8 GB</b></span>
+            <span class="kv" style="align-items:center"><span>Installed in X-Plane</span><span class="sw on"></span></span>
+          </div>
+          <div class="hr2"></div>
+          <h5>Build — 3 tiles selected</h5>
+          <span class="kv"><span>Est. download</span><b>≈ 8.6 GB</b></span>
+          <span class="chk on"><i></i>Vector · mesh · masks</span>
+          <span class="chk on"><i></i>Imagery &amp; DSF</span>
           <span class="chk"><i></i>Extract overlays</span>
-          <span class="chk"><i></i>Override tile configs</span>
-          <div class="hr" style="margin:6px -14px"></div>
-          <span class="btn primary" style="justify-content:center">Build 12 tiles…</span>
-          <span class="btn" style="justify-content:center">Delete cached data…</span>
+          <span class="chk"><i></i>Rebuild existing (1 tile)</span>
+          <span class="btn primary ph" style="justify-content:center">▶ Build 3 tiles<i class="pin">M5</i></span>
+          <div class="hr2"></div>
+          <span class="btn ph" style="justify-content:center">Actions ▾<i class="pin">M7</i></span>
+          <div class="menu" style="position:relative;top:0;right:0;min-width:0;margin-top:2px">
+            <div class="mi hov">Draw ZL zones on this tile</div>
+            <div class="mi">Create GeoTIFFs from selection…</div>
+            <div class="mi">Extract mesh as OBJ…</div>
+            <div class="mi">Download community mesh</div>
+            <div class="msep"></div>
+            <div class="mi">Open tile folder</div>
+            <div class="mi">Delete cached data…</div>
+            <div class="msep"></div><div class="mnote">menu shown open</div>
+          </div>
         </div>
       </div>
-      <div class="statbar ph"><i class="pin tl">T4</i><span>48.42° N, 5.73° W</span><span>Zoom 6</span><span class="sp" style="flex:1"></span><span>12 selected · 4 built · active +48-006</span></div>
+      <div class="statbar"><span>48.37° N, 5.41° W</span><span>z9 · Bing (BI)</span><span class="sp" style="flex:1"></span><span>3 selected · 3 built · Console ▴</span></div>
       </div>
     </div>
   </div></div>
-  <p class="stagecap">Map window, Tiles layer · a 3 × 4 batch selection off the Brittany coast, active tile +48-006 outlined.</p>
+  <p class="stagecap">Main window · searching “bre”, three tiles selected (solid = active +48-006 with info pane, dashed = ⇧/⌘-click additions). The Zones tool switches the same window into View 04.</p>
   <div class="notes">
-    <div class="note"><span class="nid">T1</span><div><strong>Mode toolbar replaces modifier chords.</strong> Pan / Select / Multi-select are explicit modes with cursor changes; old shortcuts stay as accelerators. Also fixes the macOS button-2/3 remapping problem for trackpads. <em class="q">Q: should double-click-to-set-active survive in every mode?</em></div></div>
-    <div class="note"><span class="nid">T2</span><div><strong>A legend, finally.</strong> ZL→color mapping, the asterisk for custom zones, hatching for “linked into Custom Scenery,” yellow for active, red for batch selection. <em class="q">Q: keep the existing color scheme (shown) or redesign it?</em></div></div>
-    <div class="note"><span class="nid">T3</span><div><strong>Batch panel states consequences up front</strong> — tile count, steps, estimated download and disk — before you commit. “Build 12 tiles…” opens a summary confirmation.</div></div>
-    <div class="note"><span class="nid">T4</span><div><strong>Live status bar</strong>: cursor coordinates, zoom, selection and build counts. The map itself gains wheel/pinch zoom (QGraphicsView), replacing the fixed ZL-6 image pan.</div></div>
-    <div class="note"><span class="nid">T5</span><div><strong>Per-tile context menu</strong> replaces Ctrl-click (symlink toggle) and the <code>o</code> key (overlays link moves to Tools menu). <em class="q">Q: anything else that belongs on this menu — e.g. “Open tile folder”?</em></div></div>
+    <div class="note"><span class="nid">M1</span><div><strong>Search is feasible offline.</strong> Airports: parsed from X-Plane's Global Airports <code>apt.dat</code> (ICAO, name, city, country → lat/lon) into a local index at onboarding. Cities/countries beyond that come from a small bundled gazetteer (~5 MB, GeoNames extract). Selecting a result zooms the map and selects the containing tile.</div></div>
+    <div class="note"><span class="nid">M2</span><div><strong>The live zoomable map is a yes.</strong> Ortho4XP already knows how to fetch any provider's tiles (<code>O4_Imagery_Utils</code> URL templates + request code). A QGraphicsView tile layer requests the visible tiles at the current zoom from the <em>selected source</em>, async, into the existing disk cache — no web engine needed, works offline from cache. Low zooms use the provider's own low-ZL tiles, so coverage gaps show up honestly before you build.</div></div>
+    <div class="note"><span class="nid">M3</span><div><strong>Selection gestures exactly as specified:</strong> click = select, ⇧click = contiguous rectangle, ⌘/Ctrl-click = toggle non-contiguous; pinch and scroll zoom, two-finger/secondary drag pans. The hint chip fades after first use. <em class="q">Q: should plain left-drag rubber-band-select, or stay reserved (pan on drag) to avoid accidental selections?</em></div></div>
+    <div class="note"><span class="nid">M4</span><div><strong>Info pane for a built tile</strong>, exactly your field list: imagery source, ZL (+zone count), mesh date, imagery date, size on disk — all read from the tile folder (cfg + file mtimes; dir size scanned once and cached). Plus the install toggle, replacing Ctrl-click symlinking.</div></div>
+    <div class="note"><span class="nid">M5</span><div><strong>Build zooms to the selection and locks the map</strong> (View 03). Steps are collapsed to three meaningful checkboxes; “Rebuild existing” guards against accidental re-downloads of built tiles in the selection. <em class="q">Q: is collapsing steps 1–3 into “Vector · mesh · masks” acceptable, or do you still want the four-step split visible here?</em></div></div>
+    <div class="note"><span class="nid">M6</span><div><strong>Changing Imagery or ZL re-renders the map live</strong> from the new source, so provider comparison is a two-click A/B. Build ZL is annotated on the grid at high zooms (texture-block boundaries).</div></div>
+    <div class="note"><span class="nid">M7</span><div><strong>Everything else lives in Actions</strong> (and the menu bar): zones, GeoTIFF export, mesh extraction (both were buried in the old zone editor), community mesh, cache cleanup, open folder. Overlay linking and batch cache cleanup live under Tools. <em class="q">Q: anything you'd promote from this menu to a top-level button?</em></div></div>
   </div>
 </section>
 
-<!-- ================= 4. ZONE EDITOR ================= -->
+<!-- ================= VIEW 03 — BUILDING ================= -->
+<section class="view" id="v-build">
+  <div class="viewhead">
+    <span class="eyebrow">View 03 — Building</span>
+    <h2>Progress lives in the tiles</h2>
+    <p>Clicking Build zooms to the selection and locks map editing. Each tile carries its own
+    progress: indeterminate while queued for its first step, determinate once its build starts.
+    The right panel becomes the activity list; the console is a drawer below the map.</p>
+  </div>
+  <div class="stage"><div class="desk">
+    <div class="sysbar"><span class="apple"></span><b>Ortho4XP</b><span>File</span><span>Edit</span><span>View</span><span>Tools</span><span>Help</span><span class="sp"></span><span class="st">Mon 14 Jul  10:03</span></div>
+    <div class="win" style="width:940px">
+      <div class="winclip">
+      <div class="tbar"><div class="tl3"><i></i><i></i><i></i></div><span class="appdot"></span><span class="ttl">Ortho4XP — Building 12 tiles (25 %)</span><div class="caps"><span>—</span><span>▢</span><span>✕</span></div><div class="gclose">✕</div></div>
+      <div class="menubar"><span>File</span><span>Edit</span><span>View</span><span>Tools</span><span>Help</span></div>
+      <div class="toolrow" style="opacity:.55">
+        <span class="field" style="width:250px"><span class="ph-txt">🔍 Search airport, city, country…</span></span>
+        <span class="vsep"></span>
+        <span class="lab mut">Imagery</span><span class="combo">Bing (BI)</span>
+        <span class="lab mut">Build ZL</span><span class="combo">16</span>
+        <span class="vsep"></span>
+        <span class="tool">✏ Zones</span>
+        <span class="sp"></span>
+        <span class="btn icon">⚙</span>
+      </div>
+      <div class="mapwrap">
+        <div class="mapcv">
+          <div class="lockchip ph"><i class="pin">B1</i>🔒 Building — map locked · view only</div>
+          <svg viewBox="0 0 690 330" width="690" height="330" role="img" aria-label="Map zoomed to twelve tiles under construction with per-tile progress">
+            <rect width="690" height="330" fill="#3A5B77"/>
+            <g opacity=".55">
+              <path d="M690,90 L560,104 L470,130 L380,126 L300,158 L340,196 L450,204 L520,238 L640,230 L690,244 Z" fill="#50694C"/>
+              <rect x="420" y="140" width="80" height="52" fill="#5D7656"/><rect x="240" y="170" width="70" height="44" fill="#647C5C"/>
+            </g>
+            <g stroke="#FFFFFF3E" stroke-width="1">
+              <line x1="0" y1="110" x2="690" y2="110"/><line x1="0" y1="220" x2="690" y2="220"/>
+              <line x1="172" y1="0" x2="172" y2="330"/><line x1="345" y1="0" x2="345" y2="330"/><line x1="517" y1="0" x2="517" y2="330"/>
+            </g>
+            <rect width="690" height="330" fill="#0B1420" opacity=".28"/>
+            <g font-family="system-ui,sans-serif" text-anchor="middle">
+              <!-- row 1: three done, one active 64% -->
+              <g>
+                <circle cx="86" cy="50" r="13" fill="#2E9E5B"/><path d="M80,50 l4,4 l8,-8" stroke="#fff" stroke-width="2.4" fill="none"/>
+                <text x="86" y="80" font-size="9" fill="#CFE3D4">+49-007 · done</text>
+              </g>
+              <g>
+                <circle cx="258" cy="50" r="13" fill="#2E9E5B"/><path d="M252,50 l4,4 l8,-8" stroke="#fff" stroke-width="2.4" fill="none"/>
+                <text x="258" y="80" font-size="9" fill="#CFE3D4">+49-006 · done</text>
+              </g>
+              <g>
+                <circle cx="431" cy="50" r="13" fill="#2E9E5B"/><path d="M425,50 l4,4 l8,-8" stroke="#fff" stroke-width="2.4" fill="none"/>
+                <text x="431" y="80" font-size="9" fill="#CFE3D4">+49-005 · done</text>
+              </g>
+              <g class="ph">
+                <circle cx="603" cy="50" r="16" fill="none" stroke="#FFFFFF55" stroke-width="4"/>
+                <circle cx="603" cy="50" r="16" fill="none" stroke="#FFD60A" stroke-width="4"
+                  stroke-dasharray="64.3 100.5" stroke-linecap="round" transform="rotate(-90 603 50)"/>
+                <text x="603" y="54" font-size="10" font-weight="700" fill="#FFF">64</text>
+                <text x="603" y="80" font-size="9" fill="#F4E9C8">+49-004 · imagery</text>
+              </g>
+              <!-- row 2: 31%, indeterminate, queued x2 -->
+              <g>
+                <circle cx="86" cy="160" r="16" fill="none" stroke="#FFFFFF55" stroke-width="4"/>
+                <circle cx="86" cy="160" r="16" fill="none" stroke="#FFD60A" stroke-width="4"
+                  stroke-dasharray="31.2 100.5" stroke-linecap="round" transform="rotate(-90 86 160)"/>
+                <text x="86" y="164" font-size="10" font-weight="700" fill="#FFF">31</text>
+                <text x="86" y="190" font-size="9" fill="#F4E9C8">+48-007 · masks</text>
+              </g>
+              <g class="ph">
+                <circle cx="258" cy="160" r="16" fill="none" stroke="#FFFFFF55" stroke-width="4"/>
+                <circle cx="258" cy="160" r="16" fill="none" stroke="#9AD1FF" stroke-width="4"
+                  stroke-dasharray="28 72.5" stroke-linecap="round" transform="rotate(40 258 160)"/>
+                <text x="258" y="190" font-size="9" fill="#D3E5F2">+48-006 · mesh…</text>
+                <i></i>
+              </g>
+              <g opacity=".6">
+                <circle cx="431" cy="160" r="13" fill="none" stroke="#FFFFFF66" stroke-width="2" stroke-dasharray="3 4"/>
+                <text x="431" y="190" font-size="9" fill="#C4D2DD">+48-005 · queued</text>
+              </g>
+              <g opacity=".6">
+                <circle cx="603" cy="160" r="13" fill="none" stroke="#FFFFFF66" stroke-width="2" stroke-dasharray="3 4"/>
+                <text x="603" y="190" font-size="9" fill="#C4D2DD">+48-004 · queued</text>
+              </g>
+              <!-- row 3: queued x4 -->
+              <g opacity=".6">
+                <circle cx="86" cy="270" r="13" fill="none" stroke="#FFFFFF66" stroke-width="2" stroke-dasharray="3 4"/>
+                <text x="86" y="300" font-size="9" fill="#C4D2DD">+47-007 · queued</text>
+              </g>
+              <g opacity=".6">
+                <circle cx="258" cy="270" r="13" fill="none" stroke="#FFFFFF66" stroke-width="2" stroke-dasharray="3 4"/>
+                <text x="258" y="300" font-size="9" fill="#C4D2DD">+47-006 · queued</text>
+              </g>
+              <g opacity=".6">
+                <circle cx="431" cy="270" r="13" fill="none" stroke="#FFFFFF66" stroke-width="2" stroke-dasharray="3 4"/>
+                <text x="431" y="300" font-size="9" fill="#C4D2DD">+47-005 · queued</text>
+              </g>
+              <g opacity=".6">
+                <circle cx="603" cy="270" r="13" fill="none" stroke="#FFFFFF66" stroke-width="2" stroke-dasharray="3 4"/>
+                <text x="603" y="300" font-size="9" fill="#C4D2DD">+47-004 · queued</text>
+              </g>
+            </g>
+            <text x="258" y="140" font-size="0">B2 anchor</text>
+          </svg>
+          <div class="attrib"><span><b>Bing (BI)</b> · live · z8</span></div>
+        </div>
+        <div class="sidep ph"><i class="pin">B3</i>
+          <h5>Activity — 3 of 12 tiles done</h5>
+          <div class="row" style="gap:8px"><span class="prog"><i style="width:25%"></i></span><span class="pct">25 %</span></div>
+          <span class="kv"><span>Elapsed 22 m · est. remaining</span><b>≈ 1 h 10 m</b></span>
+          <div class="act">
+            <div class="a1"><b>+49-004</b><span class="st2">Step 4 · imagery</span><span class="pc2">64 %</span></div>
+            <div class="prog"><i style="width:64%"></i></div>
+            <span class="kv"><span>16 download threads · 4 convert</span><b>38 MB/s</b></span>
+          </div>
+          <div class="act ph"><i class="pin">B2</i>
+            <div class="a1"><b>+48-006</b><span class="st2">Step 2 · triangulating</span><span class="pc2">—</span></div>
+            <div class="prog"><i class="ind"></i></div>
+            <span class="kv"><span>Triangle4XP running</span><b>2.1 M tris</b></span>
+          </div>
+          <div class="act">
+            <div class="a1"><b>+48-007</b><span class="st2">Step 3 · masks</span><span class="pc2">31 %</span></div>
+            <div class="prog"><i style="width:31%"></i></div>
+          </div>
+          <span class="kv"><span>Queued</span><b>6 tiles</b></span>
+          <div class="hr2"></div>
+          <span class="btn danger" style="justify-content:center">■ Stop after current steps</span>
+        </div>
+      </div>
+      <div class="toolrow ph" style="border-top:1px solid var(--sep);border-bottom:none"><i class="pin tl">B4</i>
+        <span class="lab" style="font-weight:600">Console</span>
+        <span class="combo">Normal</span>
+        <span class="field" style="width:150px"><span class="ph-txt">Filter…</span></span>
+        <span class="sp"></span><span class="btn icon">Copy</span><span class="btn icon">Save…</span><span class="btn icon">▾</span>
+      </div>
+      <div class="log" style="height:74px">
+<span class="dim">10:02:48 │ [+49-004] 424 / 2,506 textures · 16 threads · 38 MB/s</span><br>
+<span class="wa">10:03:02 │ [+48-007] Warning: 2 self-intersecting OSM polygons repaired</span><br>
+<span class="ok2">10:03:15 │ [+49-005] Tile finished in 41 m 12 s · 4.2 GB</span><br>
+<span>10:03:19 │ [+48-006] Triangulating — curvature tol 2.0, limit 3.0 M</span>
+      </div>
+      <div class="statbar"><span>Building — 3 active · 6 queued</span><span class="sp" style="flex:1"></span><span>Console ▾ open</span></div>
+      </div>
+    </div>
+  </div></div>
+  <p class="stagecap">Building state · map zoomed to the 12-tile batch. Done = green check, active = determinate ring with %, first-step/mesh = indeterminate spinner, queued = dashed.</p>
+  <div class="notes">
+    <div class="note"><span class="nid">B1</span><div><strong>Map locks on build</strong> — selection and zone editing disabled; pan/zoom stays enabled for watching (view-only). Title bar mirrors overall % for the Dock/taskbar. <em class="q">Q: you said “disabled” — should even pan/zoom lock, or is view-only right?</em></div></div>
+    <div class="note"><span class="nid">B2</span><div><strong>Indeterminate → determinate per tile,</strong> as specified. Mesh triangulation stays indeterminate (Triangle4XP gives no % — shown as a spinner + live triangle count); download/convert/DSF phases are determinate. <strong>Honesty note on concurrency:</strong> today the pipeline builds tiles sequentially with parallelism <em>inside</em> a tile. True parallel tile builds are a backend change (RAM + Triangle4XP contention); the realistic v1 is pipeline overlap — tile N downloads imagery while tile N+1 triangulates — which is what's mocked (3 active). <em class="q">Q: is overlap acceptable for v1, with full parallel builds as a later option?</em></div></div>
+    <div class="note"><span class="nid">B3</span><div><strong>Activity panel</strong> replaces the right panel during builds: overall bar + ETA, one card per active tile with step, %, thread counts, throughput. It's a panel, not a floating window, so nothing gets lost behind the map — but it can pop out via drag if you want it on another monitor. <em class="q">Q: panel or separate window as the default?</em></div></div>
+    <div class="note"><span class="nid">B4</span><div><strong>Console is a collapsible drawer</strong> under the map (toggle in the status bar), with level/filter/copy/save; lines are prefixed with their tile so interleaved multi-tile output stays readable.</div></div>
+  </div>
+</section>
+
+<!-- ================= VIEW 04 — ZONES MODE ================= -->
 <section class="view" id="v-zones">
   <div class="viewhead">
-    <span class="eyebrow">View 04 — Map · Zones layer</span>
-    <h2>Drawing custom zoom-level zones</h2>
-    <p>The Preview/Custom ZL window becomes the Zones layer of the same map. Zoom-level choice is a
-    row of color chips (same colors as today's <code>dico_color</code>), polygon drawing is a mode
-    — not a Shift-chord — and the size estimate updates live in the toolbar.</p>
+    <span class="eyebrow">View 04 — Zones mode</span>
+    <h2>Zone drawing is a mode, not a window</h2>
+    <p>Toggling ✏ Zones switches the same map into zone editing for the active tile — on the live
+    imagery you're actually buying, at real resolution. GeoTIFF export and mesh extraction move
+    here and into the Actions menu.</p>
   </div>
   <div class="stage"><div class="desk">
     <div class="sysbar"><span class="apple"></span><b>Ortho4XP</b><span>File</span><span>Edit</span><span>View</span><span>Tools</span><span>Help</span><span class="sp"></span><span class="st">Mon 14 Jul  09:41</span></div>
-    <div class="win" style="width:900px">
+    <div class="win" style="width:940px">
       <div class="winclip">
-      <div class="tbar"><div class="tl3"><i></i><i></i><i></i></div><span class="appdot"></span><span class="ttl">Map — Zones · Tile +48-006</span><div class="caps"><span>—</span><span>▢</span><span>✕</span></div><div class="gclose">✕</div></div>
+      <div class="tbar"><div class="tl3"><i></i><i></i><i></i></div><span class="appdot"></span><span class="ttl">Ortho4XP — Zones · +48-006</span><div class="caps"><span>—</span><span>▢</span><span>✕</span></div><div class="gclose">✕</div></div>
+      <div class="menubar"><span>File</span><span>Edit</span><span>View</span><span>Tools</span><span>Help</span></div>
       <div class="toolrow">
-        <span class="tool">✋ Pan</span>
-        <span class="tool on">✏ Draw polygon</span>
-        <span class="tool">▭ Texture block</span>
-        <span class="tool">⌫ Delete zone</span>
+        <span class="tool on">✏ Zones</span>
         <span class="vsep"></span>
         <span class="lab mut ph">Zone ZL<i class="pin tl" style="left:-14px">Z1</i></span>
         <span class="zlchip" style="background:#67D6E2">15</span>
@@ -711,70 +759,158 @@ section.view{margin-top:58px;border-top:1px solid var(--line);padding-top:30px}
         <span class="zlchip" style="background:#F2A85C">18</span>
         <span class="zlchip" style="background:#EF7B6D">19</span>
         <span class="lab mut">Imagery</span><span class="combo">BI</span>
+        <span class="chk on"><i></i>Snap to ZL grid</span>
         <span class="sp"></span>
-        <span class="chk on ph"><i></i>Snap to ZL grid<i class="pin">Z3</i></span>
+        <span class="btn">Done</span>
       </div>
       <div class="mapwrap">
         <div class="mapcv">
-          <svg viewBox="0 0 646 348" width="646" height="348" role="img" aria-label="Orthophoto preview with zoom-level zones drawn">
-            <rect width="646" height="348" fill="#5E7A5A"/>
+          <svg viewBox="0 0 690 348" width="690" height="348" role="img" aria-label="Zone polygons drawn over live imagery">
+            <rect width="690" height="348" fill="#5E7A5A"/>
             <g opacity=".85">
-              <rect x="0" y="0" width="240" height="140" fill="#6B8A5F"/><rect x="240" y="0" width="230" height="120" fill="#7A9468"/>
-              <rect x="470" y="0" width="176" height="150" fill="#63805C"/><rect x="0" y="140" width="180" height="120" fill="#8AA06E"/>
-              <rect x="180" y="120" width="200" height="140" fill="#75906B"/><rect x="380" y="120" width="160" height="130" fill="#6D8862"/>
-              <rect x="0" y="260" width="280" height="88" fill="#5C7857"/><rect x="280" y="250" width="366" height="98" fill="#43617E"/>
-              <rect x="330" y="70" width="90" height="60" fill="#9FA98A"/><rect x="90" y="180" width="60" height="46" fill="#A8AD8F"/>
+              <rect x="0" y="0" width="260" height="150" fill="#6B8A5F"/><rect x="260" y="0" width="240" height="128" fill="#7A9468"/>
+              <rect x="500" y="0" width="190" height="160" fill="#63805C"/><rect x="0" y="150" width="190" height="128" fill="#8AA06E"/>
+              <rect x="190" y="128" width="215" height="150" fill="#75906B"/><rect x="405" y="128" width="170" height="140" fill="#6D8862"/>
+              <rect x="0" y="278" width="300" height="70" fill="#5C7857"/><rect x="300" y="268" width="390" height="80" fill="#43617E"/>
+              <rect x="352" y="76" width="96" height="64" fill="#9FA98A"/><rect x="96" y="192" width="64" height="49" fill="#A8AD8F"/>
             </g>
             <g stroke="#FFFFFF22" stroke-width="1">
-              <line x1="161" y1="0" x2="161" y2="348"/><line x1="323" y1="0" x2="323" y2="348"/><line x1="484" y1="0" x2="484" y2="348"/>
-              <line x1="0" y1="116" x2="646" y2="116"/><line x1="0" y1="232" x2="646" y2="232"/>
+              <line x1="172" y1="0" x2="172" y2="348"/><line x1="345" y1="0" x2="345" y2="348"/><line x1="517" y1="0" x2="517" y2="348"/>
+              <line x1="0" y1="116" x2="690" y2="116"/><line x1="0" y1="232" x2="690" y2="232"/>
             </g>
-            <rect x="20" y="14" width="606" height="320" fill="none" stroke="#141414" stroke-width="2"/>
-            <polygon points="330,70 420,70 420,130 380,130 380,110 330,110" fill="rgba(127,217,138,.22)" stroke="#4CAF6E" stroke-width="2.5"/>
-            <text x="376" y="96" font-family="system-ui,sans-serif" font-size="10" font-weight="700" fill="#E9F5EA" text-anchor="middle">ZL16 · BI</text>
+            <rect x="22" y="14" width="646" height="320" fill="none" stroke="#141414" stroke-width="2"/>
+            <polygon points="352,76 448,76 448,140 405,140 405,118 352,118" fill="rgba(127,217,138,.22)" stroke="#4CAF6E" stroke-width="2.5"/>
+            <text x="400" y="102" font-family="system-ui,sans-serif" font-size="10" font-weight="700" fill="#E9F5EA" text-anchor="middle">ZL16 · BI</text>
             <g>
-              <polygon points="120,170 250,160 268,226 210,252 118,236" fill="rgba(242,222,106,.22)" stroke="#E8C33C" stroke-width="2.5" stroke-dasharray="7 4"/>
+              <polygon points="128,182 268,171 288,242 226,270 126,252" fill="rgba(242,222,106,.22)" stroke="#E8C33C" stroke-width="2.5" stroke-dasharray="7 4"/>
               <g fill="#FFF" stroke="#B98F12" stroke-width="1.6">
-                <circle cx="120" cy="170" r="4"/><circle cx="250" cy="160" r="4"/><circle cx="268" cy="226" r="4"/>
-                <circle cx="210" cy="252" r="4"/><circle cx="118" cy="236" r="4"/>
+                <circle cx="128" cy="182" r="4"/><circle cx="268" cy="171" r="4"/><circle cx="288" cy="242" r="4"/>
+                <circle cx="226" cy="270" r="4"/><circle cx="126" cy="252" r="4"/>
               </g>
-              <text x="193" y="212" font-family="system-ui,sans-serif" font-size="10" font-weight="700" fill="#FFF8DC" text-anchor="middle">ZL17 · drawing…</text>
+              <text x="206" y="226" font-family="system-ui,sans-serif" font-size="10" font-weight="700" fill="#FFF8DC" text-anchor="middle">ZL17 · drawing…</text>
             </g>
           </svg>
+          <div class="attrib"><span><b>Bing (BI)</b> · live · z13</span></div>
         </div>
         <div class="sidep">
-          <h5>Zones on this tile</h5>
+          <h5>Zones on +48-006</h5>
           <span class="kv"><span>ZL16 · BI · 6 pts</span><b>1.1 GB</b></span>
           <span class="kv"><span>ZL17 · BI · drawing</span><b>≈ 2.3 GB</b></span>
-          <div class="hr" style="margin:6px -14px"></div>
+          <div class="hr2"></div>
           <span class="kv ph"><span>Total added size</span><b>≈ 3.4 GB</b><i class="pin">Z2</i></span>
           <span class="kv"><span>Tile base (ZL16)</span><b>14.8 GB</b></span>
-          <div class="hr" style="margin:6px -14px"></div>
+          <div class="hr2"></div>
           <span class="btn primary" style="justify-content:center">Apply zones</span>
-          <span class="btn" style="justify-content:center">Make GeoTIFFs…</span>
+          <span class="btn ph" style="justify-content:center">Create GeoTIFFs…<i class="pin">Z3</i></span>
+          <span class="btn" style="justify-content:center">Extract mesh (OBJ)…</span>
           <span class="btn" style="justify-content:center">Reset all</span>
         </div>
       </div>
-      <div class="statbar"><span>48.61° N, 5.42° W</span><span>Preview: OSM · ZL11</span><span class="sp" style="flex:1"></span><span>5 vertices · Enter to close polygon · ⌫ removes last point</span></div>
+      <div class="statbar"><span>48.61° N, 5.42° W</span><span>z13 · BI live</span><span class="sp" style="flex:1"></span><span>5 vertices · Enter closes · ⌫ removes last point</span></div>
       </div>
     </div>
   </div></div>
-  <p class="stagecap">Zones layer · one saved ZL16 zone, one ZL17 polygon in progress with visible vertices.</p>
+  <p class="stagecap">Zones mode · same window, same live-imagery engine — no separate preview download step needed.</p>
   <div class="notes">
-    <div class="note"><span class="nid">Z1</span><div><strong>ZL chips keep today's color language</strong> (cyan 15 → red 19) so existing users' mental model transfers; the selected chip drives new polygons. <em class="q">Q: keep these exact colors for continuity, or move to a colorblind-safe ramp with the ZL number as primary signal?</em></div></div>
-    <div class="note"><span class="nid">Z2</span><div><strong>Size estimate is always visible</strong> and split per zone — replacing the editable “Approx. Add. Size” text field, which looked like an input but was output.</div></div>
-    <div class="note"><span class="nid">Z3</span><div><strong>Snap to ZL grid is a visible toggle</strong>, replacing Ctrl+Shift-click for grid-aligned points; texture-block stamping (old Ctrl-click) becomes the “Texture block” tool. Vertex handles are draggable and ⌫ removes the last point, as the status bar teaches.</div></div>
+    <div class="note"><span class="nid">Z1</span><div><strong>ZL chips keep today's color language</strong> (cyan 15 → red 19). Because the base map is now live provider imagery, the old “download a preview first” workflow disappears entirely. <em class="q">Q: keep these exact colors, or move to a colorblind-safe ramp?</em></div></div>
+    <div class="note"><span class="nid">Z2</span><div><strong>Per-zone and total size estimates always visible</strong>, and rolled up into the build panel's download estimate.</div></div>
+    <div class="note"><span class="nid">Z3</span><div><strong>GeoTIFF creation and mesh extraction relocate here</strong> (and to Actions in select mode) — they operate on zones/selection, so they live next to what they operate on. Both run through the same activity/console reporting as builds.</div></div>
   </div>
 </section>
 
-<!-- ================= 5. DIALOG ================= -->
+<!-- ================= VIEW 05 — SETTINGS ================= -->
+<section class="view" id="v-settings">
+  <div class="viewhead">
+    <span class="eyebrow">View 05 — Settings</span>
+    <h2>Settings, with paths where they belong</h2>
+    <p>Unchanged structurally from rev 1 (sidebar categories, search, scope switch, modified dots) —
+    shown here on General &amp; Paths, which now owns the output folder and everything the
+    onboarding wizard captured.</p>
+  </div>
+  <div class="stage"><div class="desk">
+    <div class="sysbar"><span class="apple"></span><b>Ortho4XP</b><span>File</span><span>Edit</span><span>View</span><span>Tools</span><span>Help</span><span class="sp"></span><span class="st">Mon 14 Jul  09:41</span></div>
+    <div class="win" style="width:860px">
+      <div class="winclip">
+      <div class="tbar"><div class="tl3"><i></i><i></i><i></i></div><span class="appdot"></span><span class="ttl">Settings</span><div class="caps"><span>—</span><span>▢</span><span>✕</span></div><div class="gclose">✕</div></div>
+      <div class="toolrow">
+        <span class="field" style="width:220px"><span class="ph-txt">🔍 Search settings…</span></span>
+        <span class="sp"></span>
+        <span class="lab mut ph">Application-wide<i class="pin">S1</i></span>
+      </div>
+      <div class="setwrap">
+        <div class="setnav">
+          <div class="ni on">General &amp; Paths</div>
+          <div class="ni">Network &amp; Downloads</div>
+          <div class="ni">Imagery &amp; Zoom Levels</div>
+          <div class="ni">Mesh &amp; Elevation</div>
+          <div class="ni">Roads &amp; Vector Data</div>
+          <div class="ni">Water &amp; Masks</div>
+          <div class="ni">Rendering &amp; Overlays</div>
+          <div class="nspace"></div>
+          <div class="ni" style="display:flex;gap:8px;align-items:center"><span class="sw"></span> Show advanced</div>
+        </div>
+        <div class="setbody">
+          <div class="sgroup">
+            <h4>X-Plane</h4>
+            <div class="srow">
+              <div class="sl"><b>X-Plane installation</b>
+                <small>Sets the Custom Scenery target, overlay source and the airport search index.</small></div>
+              <span class="field" style="width:220px">/Volumes/Sim/X-Plane 12</span><span class="btn">Change…</span>
+            </div>
+            <div class="srow">
+              <div class="sl"><b>Install finished tiles automatically</b>
+                <small>Links each finished tile into Custom Scenery as soon as it builds.</small></div>
+              <span class="sw on"></span>
+            </div>
+          </div>
+          <div class="sgroup">
+            <h4>Storage</h4>
+            <div class="srow ph">
+              <div class="sl"><b>Output folder</b>
+                <small>Where finished tiles are stored. Moved here from the main window — set once during onboarding.</small></div>
+              <span class="field" style="width:220px">/Volumes/Scenery/Ortho4XP</span><span class="btn">Change…</span>
+              <i class="pin">S2</i>
+            </div>
+            <div class="srow">
+              <div class="sl"><b>Imagery cache</b>
+                <small>Map preview and downloaded orthophotos. 1.2 GB in use.</small></div>
+              <span class="field" style="width:220px">~/Library/Caches/Ortho4XP</span><span class="btn">Clear…</span>
+            </div>
+          </div>
+          <div class="sgroup">
+            <h4>Feedback</h4>
+            <div class="srow">
+              <div class="sl"><b>Console verbosity</b>
+                <small>How much detail the console drawer shows during builds.</small></div>
+              <span class="combo">Normal</span>
+            </div>
+            <div class="srow">
+              <div class="sl"><b>Notify when builds finish</b>
+                <small>System notification with a per-tile success summary.</small></div>
+              <span class="sw on"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="statbar"><span class="btn icon">Reset category…</span><span class="sp" style="flex:1"></span><span class="btn">Cancel</span><span class="btn primary">Save</span></div>
+      </div>
+    </div>
+  </div></div>
+  <p class="stagecap">Settings · General &amp; Paths. Tile-scoped categories (Mesh, Masks, …) still carry the Tile / Global scope switch from rev 1.</p>
+  <div class="notes">
+    <div class="note"><span class="nid">S1</span><div><strong>Scope is per-category:</strong> General &amp; Paths and Network are application-wide (no scope switch shown); Mesh, Masks, Imagery, Roads, Water, Rendering keep the Tile ↔ Global switch from rev 1. This resolves the old App-tab-vs-Global-tab confusion.</div></div>
+    <div class="note"><span class="nid">S2</span><div><strong>Output folder relocated here</strong> per your note — main window no longer shows it. Changing it prompts to re-scan for existing tiles.</div></div>
+    <div class="note"><span class="nid">S3</span><div><strong>Everything else from rev 1 stands:</strong> search over labels/keys/hints, modified-value dots with right-click reset, inline descriptions, advanced toggle.</div></div>
+  </div>
+</section>
+
+<!-- ================= VIEW 06 — DIALOG ================= -->
 <section class="view" id="v-dialog">
   <div class="viewhead">
-    <span class="eyebrow">View 05 — Destructive-action confirmation</span>
+    <span class="eyebrow">View 06 — Destructive-action confirmation</span>
     <h2>Batch delete, with a receipt</h2>
-    <p>Today “Batch Delete” calls <code>shutil.rmtree</code> with no confirmation. The P0 fix shows
-    exactly what will be removed, for which tiles, and how much disk that is — in each platform's
-    native alert layout.</p>
+    <p>Unchanged from rev 1: consequence summary with real sizes, destructive styling, native
+    button order per platform.</p>
   </div>
   <div class="stage"><div class="desk" style="padding-top:56px;padding-bottom:56px">
     <div class="sysbar" style="margin-top:-56px;margin-bottom:40px"><span class="apple"></span><b>Ortho4XP</b><span>File</span><span>Edit</span><span>View</span><span>Tools</span><span>Help</span><span class="sp"></span><span class="st">Mon 14 Jul  09:41</span></div>
@@ -801,10 +937,9 @@ section.view{margin-top:58px;border-top:1px solid var(--line);padding-top:30px}
       </div>
     </div>
   </div></div>
-  <p class="stagecap">Confirmation dialog · note the platform differences: layout is vertical on macOS, and Windows reverses the button order per its conventions.</p>
   <div class="notes">
-    <div class="note"><span class="nid">D1</span><div><strong>Consequence summary with real sizes</strong> — categories come from the user's checkbox selection; sizes are computed before the dialog opens so “Delete” doubles as a receipt.</div></div>
-    <div class="note"><span class="nid">D2</span><div><strong>Destructive styling and native button order.</strong> Red destructive action, Cancel adjacent, order flipped per platform convention (Cancel-left on macOS/GNOME, primary-first on Windows). The button label states the outcome, not “OK.” <em class="q">Q: require typing nothing extra, or add a “don't ask again for OSM-only deletions” escape hatch?</em></div></div>
+    <div class="note"><span class="nid">D1</span><div><strong>Consequence summary with real sizes</strong>, computed before the dialog opens.</div></div>
+    <div class="note"><span class="nid">D2</span><div><strong>Destructive styling, native button order</strong> (Cancel-left on macOS/GNOME, primary-first on Windows); label states the outcome.</div></div>
   </div>
 </section>
 
@@ -812,18 +947,19 @@ section.view{margin-top:58px;border-top:1px solid var(--line);padding-top:30px}
 
 <section class="view">
   <div class="viewhead">
-    <span class="eyebrow">Next step</span>
-    <h2>What feedback is most useful now</h2>
+    <span class="eyebrow">Open questions</span>
+    <h2>Decisions that shape implementation</h2>
   </div>
   <div class="intro">
-    <p>Highest-leverage decisions before implementation starts, in order:</p>
     <ul>
-      <li><strong>S1 / S3</strong> — settings scope model and category names (drives the settings-model refactor, which is first on the roadmap).</li>
-      <li><strong>M4</strong> — one progress bar or three (affects the <code>UI.progress_bar</code> adapter contract).</li>
-      <li><strong>T1 / T5</strong> — map interaction model (mode toolbar + context menu contents).</li>
-      <li><strong>Z1</strong> — keep or replace the ZL color code (continuity vs. accessibility).</li>
+      <li><strong>B2</strong> — concurrency: pipeline overlap for v1 (mocked) vs. full parallel tile builds (backend rework).</li>
+      <li><strong>B1</strong> — locked map: view-only pan/zoom, or fully frozen?</li>
+      <li><strong>M5</strong> — build steps collapsed to three checkboxes, or keep the four-step split?</li>
+      <li><strong>M3</strong> — left-drag: rubber-band select or reserved?</li>
+      <li><strong>B3</strong> — activity as in-window panel (default) or floating window?</li>
+      <li><strong>Z1</strong> — keep legacy ZL colors or switch to a colorblind-safe ramp?</li>
     </ul>
-    <p>Reply with pin IDs and comments; the mockups will be revised in place before any Qt code is written.</p>
+    <p>Reply with pin IDs; mockups update in place.</p>
   </div>
 </section>
 </main>

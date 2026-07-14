@@ -517,3 +517,74 @@ structure, and the three-channel UI adapter carry over unchanged.
   Keep all existing keyboard/mouse shortcuts working as accelerators alongside
   the new visible controls, and document them under Help → Keyboard & Mouse
   Reference.
+
+---
+
+## 10. Design Revision (Review Round 2): Map-First, Single Window
+
+Review feedback on the first mockups pivoted the Track B design from
+"form window + map windows" to **one map-first window**. Decisions recorded
+here; mockups in `docs/mockups/trackb-ui-mockups.html` (rev 2).
+
+### 10.1 Shell
+
+- **The map is the main window.** Search field, imagery/ZL selectors and a
+  Zones mode toggle in the toolbar; context-sensitive right panel; collapsible
+  console drawer below the map; status bar with cursor lat/lon, zoom, source,
+  selection counts. The separate "Custom ZL" and "Earth preview" windows are
+  retired — zone editing is a mode of the same map.
+- **Live provider imagery, Google-Maps style.** The map renders the currently
+  selected imagery source at the resolution of the current zoom. Feasible by
+  reusing `O4_Imagery_Utils` provider definitions and request code behind an
+  async QGraphicsView tile layer with the existing disk cache; no web engine
+  required, works offline from cache, and makes provider coverage/quality
+  visible before building. Changing Imagery or Build ZL re-renders live.
+- **Search** over airports (indexed from X-Plane Global Airports `apt.dat` at
+  onboarding: ICAO, name, city, country) plus a small bundled gazetteer for
+  cities/countries. Selecting a result zooms and selects the containing tile.
+- **Gestures:** pinch/scroll to zoom, two-finger (secondary) drag to pan;
+  click = select tile, Shift-click = contiguous range,
+  Cmd/Ctrl-click = non-contiguous toggle.
+- **Tile info pane** (right panel, when a built tile is selected): imagery
+  source, ZL (+zone count), mesh build date, imagery update date, size on disk
+  (scanned once, cached), and an "Installed in X-Plane" toggle replacing
+  Ctrl-click symlinking.
+- **Everything else** (GeoTIFF creation, mesh extraction, community mesh,
+  cache deletion, open tile folder) lives in an Actions menu on the selection
+  and in the Zones-mode side panel; overlay linking under Tools.
+
+### 10.2 Build experience
+
+- Clicking Build zooms the map to the selection and locks editing (view-only
+  pan/zoom — open question whether to freeze entirely).
+- **Per-tile progress on the map:** indeterminate spinner while a tile waits or
+  runs non-measurable steps (Triangle4XP reports no %), switching to a
+  determinate ring with percentage for download/convert/DSF phases; green check
+  when done, dashed outline while queued.
+- **Activity panel** replaces the right panel during builds: overall progress +
+  ETA, one card per active tile (step, %, thread counts, throughput), Stop.
+- **Console drawer** shows tile-prefixed stdout with level/filter/copy/save.
+- **Concurrency honesty:** today tiles build sequentially with parallelism
+  inside a tile. v1 target is pipeline overlap (tile N downloads while tile
+  N+1 triangulates); fully parallel tile builds are a larger backend change
+  (RAM/Triangle4XP contention) and staged for later.
+
+### 10.3 Configuration
+
+- **Output folder moves to app config** (Settings → General & Paths); removed
+  from the main window.
+- **First-launch onboarding** (4 steps, skippable, re-runnable from Help):
+  welcome → locate X-Plane install (auto-detected; unlocks Custom Scenery
+  target, overlay source, airports search index) → output folder + cache
+  location → default imagery provider and ZL.
+- Settings scope is now **per-category**: General & Paths and Network are
+  application-wide; Mesh, Masks, Imagery, Roads, Water, Rendering keep the
+  Tile ↔ Global switch.
+
+### 10.4 Impact on the roadmap
+
+The P0–P2 Tkinter-track items in §8 are unchanged. Within Track B, the port
+order shifts: the QGraphicsView live-tile map engine moves from "P3 polish" to
+the core deliverable, and the onboarding wizard is added as a P3 item. The
+apt.dat airport index and the tile-info scanner are new, UI-independent modules
+that can be built and unit-tested before any Qt code.
