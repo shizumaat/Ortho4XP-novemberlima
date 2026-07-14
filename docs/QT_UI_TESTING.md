@@ -14,10 +14,12 @@ pip install PySide6
 python3 Ortho4XP_Qt.py
 ```
 
-On first launch a small settings dialog asks for your **X-Plane folder** and
-**output folder** (both optional — skip and it uses the classic
-`Ortho4XP/Tiles`). Setting the X-Plane folder unlocks the airport search and
-the "Installed in X-Plane" switch.
+On first launch a four-step **setup assistant** runs (Welcome → X-Plane →
+Folders → Imagery). It auto-detects X-Plane installs, shows what setting the
+folder unlocks (one-click install, airport search, overlay source), and is
+skippable — rerun it anytime from Help → "Run setup assistant…". Finishing
+seeds `custom_scenery_dir`/`custom_overlay_src` in your global config when
+they're empty.
 
 ## What's implemented in this preview
 
@@ -43,14 +45,23 @@ the "Installed in X-Plane" switch.
   the legacy batch build — pipeline overlap comes later).
 - **Console drawer** — toggle from the status bar; verbosity set in Settings.
 - **Tools → Link overlays folder** — the old `o`-key overlay link.
+- **Full settings window** (⚙ or Cmd/Ctrl+,) — the categorized window from
+  the mockups: sidebar categories, search over names/keys/hint text,
+  **Global defaults ↔ This tile** scope switch (tile scope creates the tile
+  config on Save if it doesn't exist yet), amber modified-value dots with
+  right-click *Reset to default / Reset to global / Copy to global*, inline
+  descriptions (full hint on hover), and a Show-advanced toggle. Values are
+  written to the same `Ortho4XP.cfg` / per-tile cfg files the legacy UI
+  uses — the two UIs stay interchangeable.
+- **Airport index freshness** — the search index is cached
+  (`.airport_index.tsv`) with the source `apt.dat` modification times and
+  sizes recorded; every launch compares them and rebuilds only when
+  X-Plane's airport data actually changed (e.g. after an X-Plane update).
 
 ## Known gaps (deliberate, this round)
 
 - **Zones mode** is stubbed (button disabled) — draw custom ZL zones in the
   legacy UI for now; both UIs read the same configs.
-- Settings dialog is minimal (paths + defaults); the full categorized
-  settings window comes with the settings-model refactor.
-- No onboarding wizard yet — first-run shows the settings dialog instead.
 - Download-size estimate on the build panel is a rough order-of-magnitude.
 - macOS: if pinch feels off or panning fights scrolling, say so — gesture
   tuning needs real trackpad feedback, which the dev container can't provide.

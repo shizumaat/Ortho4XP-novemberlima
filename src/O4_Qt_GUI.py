@@ -24,8 +24,6 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
-    QDialogButtonBox,
-    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -52,6 +50,8 @@ import O4_Airport_Index as APT
 import O4_Scenery_Links as LINKS
 import O4_Tile_Info as TINFO
 import O4_Qt_Map as QTMAP
+import O4_Qt_Settings as QTSET
+import O4_Qt_Wizard as QTWIZ
 
 PREFS_FILE = FNAMES.resource_path(".qt_prefs.json")
 AIRPORT_CACHE = FNAMES.resource_path(".airport_index.tsv")
@@ -123,76 +123,6 @@ class _BuildSignals(QObject):
     finished = Signal(int, int)  # done_count, error_count
 
 
-class SettingsDialog(QDialog):
-    """Minimal v1 settings: paths + defaults (full categories come later)."""
-
-    def __init__(self, prefs, parent=None, first_run=False):
-        super().__init__(parent)
-        self.setWindowTitle("Ortho4XP Settings")
-        self.prefs = dict(prefs)
-        form = QFormLayout(self)
-        if first_run:
-            intro = QLabel(
-                "Welcome! Set your X-Plane folder and where finished\n"
-                "tiles should be stored. You can change these anytime."
-            )
-            form.addRow(intro)
-
-        self.xplane_edit = QLineEdit(self.prefs.get("xplane_dir", ""))
-        form.addRow("X-Plane folder:", self._with_browse(self.xplane_edit))
-        self.output_edit = QLineEdit(self.prefs.get("output_dir", ""))
-        self.output_edit.setPlaceholderText(FNAMES.Tile_dir)
-        form.addRow("Output folder:", self._with_browse(self.output_edit))
-
-        self.imagery_combo = QComboBox()
-        self.imagery_combo.addItems(gui_provider_codes())
-        self.imagery_combo.setCurrentText(self.prefs.get("imagery", "BI"))
-        form.addRow("Default imagery:", self.imagery_combo)
-
-        self.zl_combo = QComboBox()
-        self.zl_combo.addItems([str(z) for z in range(12, 19)])
-        self.zl_combo.setCurrentText(str(self.prefs.get("zl", 16)))
-        form.addRow("Default zoom level:", self.zl_combo)
-
-        self.verbosity_combo = QComboBox()
-        self.verbosity_combo.addItems(["0", "1", "2", "3"])
-        self.verbosity_combo.setCurrentText(
-            str(self.prefs.get("verbosity", 1))
-        )
-        form.addRow("Console verbosity:", self.verbosity_combo)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.Save | QDialogButtonBox.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        form.addRow(buttons)
-
-    def _with_browse(self, edit):
-        box = QWidget()
-        lay = QHBoxLayout(box)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(edit, 1)
-        btn = QPushButton("Browse…")
-
-        def pick():
-            path = QFileDialog.getExistingDirectory(self, "Choose folder")
-            if path:
-                edit.setText(path)
-
-        btn.clicked.connect(pick)
-        lay.addWidget(btn)
-        return box
-
-    def result_prefs(self):
-        self.prefs["xplane_dir"] = self.xplane_edit.text().strip()
-        self.prefs["output_dir"] = self.output_edit.text().strip()
-        self.prefs["imagery"] = self.imagery_combo.currentText()
-        self.prefs["zl"] = int(self.zl_combo.currentText())
-        self.prefs["verbosity"] = int(self.verbosity_combo.currentText())
-        return self.prefs
-
-
 def gui_provider_codes():
     codes = sorted(
         code
@@ -241,7 +171,7 @@ class MainWindow(QMainWindow):
         self._apply_prefs(initial=True)
 
         if self._first_run:
-            QTimer.singleShot(200, self._first_run_settings)
+            QTimer.singleShot(200, self.run_wizard)
         QTimer.singleShot(300, self.refresh_tiles)
         QTimer.singleShot(400, self._load_airports_async)
 
@@ -418,6 +348,9 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(overlay_action)
 
         help_menu = self.menuBar().addMenu("&Help")
+        wizard_action = QAction("Run setup assistant…", self)
+        wizard_action.triggered.connect(self.run_wizard)
+        help_menu.addAction(wizard_action)
         about_action = QAction("About Ortho4XP", self)
         about_action.triggered.connect(
             lambda: QMessageBox.about(
@@ -442,7 +375,6 @@ class MainWindow(QMainWindow):
         ]:
             self.imagery_combo.setCurrentText(imagery)
         self.zl_combo.setCurrentText(str(self.prefs.get("zl", 16)))
-        UI.verbosity = int(self.prefs.get("verbosity", 1))
         xplane = self.prefs.get("xplane_dir", "")
         if xplane and not CFG.custom_scenery_dir:
             candidate = os.path.join(xplane, "Custom Scenery")
@@ -450,25 +382,58 @@ class MainWindow(QMainWindow):
                 CFG.custom_scenery_dir = candidate
         self.map.set_provider(self.imagery_combo.currentText())
 
-    def _first_run_settings(self):
-        self.open_settings(first_run=True)
+    def run_wizard(self):
+        wizard = QTWIZ.OnboardingWizard(
+            self.prefs, gui_provider_codes(), self
+        )
+        wizard.exec()
+        self.prefs = dict(wizard.prefs)
+        save_prefs(self.prefs)
+        self._seed_paths_from_xplane()
+        self._apply_prefs()
+        self._load_airports_async()
+        self.refresh_tiles()
 
-    def open_settings(self, first_run=False):
-        dialog = SettingsDialog(self.prefs, self, first_run=first_run)
+    def _seed_paths_from_xplane(self):
+        """Fill empty scenery/overlay paths from the X-Plane folder."""
+        import O4_Settings_Model as SM
+
+        xplane = self.prefs.get("xplane_dir", "")
+        if not xplane:
+            return
+        seed = {}
+        current = SM.read_global_raw()
+        scenery = os.path.join(xplane, "Custom Scenery")
+        if not current.get("custom_scenery_dir") and os.path.isdir(scenery):
+            seed["custom_scenery_dir"] = scenery
+        overlays = os.path.join(xplane, "Global Scenery")
+        if not current.get("custom_overlay_src") and os.path.isdir(overlays):
+            seed["custom_overlay_src"] = overlays
+        if seed:
+            try:
+                SM.write_global(seed)
+                SM.apply_runtime(seed)
+                for key, value in seed.items():
+                    print("Derived %s from X-Plane folder: %s" % (key, value))
+            except OSError as exc:
+                print("Could not save derived paths:", exc)
+
+    def open_settings(self):
+        dialog = QTSET.SettingsWindow(
+            self.prefs,
+            self.map.active_tile(),
+            self.output_dir(),
+            self,
+        )
         if dialog.exec() == QDialog.Accepted:
             old_xplane = self.prefs.get("xplane_dir", "")
             self.prefs = dialog.result_prefs()
             save_prefs(self.prefs)
             self._apply_prefs()
             if self.prefs.get("xplane_dir", "") != old_xplane:
-                try:
-                    os.remove(AIRPORT_CACHE)
-                except OSError:
-                    pass
+                self._seed_paths_from_xplane()
                 self._load_airports_async()
             self.refresh_tiles()
-        elif first_run:
-            save_prefs(self.prefs)  # record that first run happened
 
     def output_dir(self):
         """Custom build dir semantics: '' = default Tiles dir; a path with a
@@ -486,21 +451,27 @@ class MainWindow(QMainWindow):
     # Airport search
     # ------------------------------------------------------------------
     def _load_airports_async(self):
+        """Load the airport search index, rebuilding it when the X-Plane
+        apt.dat sources changed since the cache was written (mtime/size)."""
         xplane = self.prefs.get("xplane_dir", "")
 
         def work():
             try:
+                paths = APT.find_apt_dats(xplane) if xplane else []
+                if paths and APT.index_is_stale(paths, AIRPORT_CACHE):
+                    if os.path.isfile(AIRPORT_CACHE):
+                        print(
+                            "X-Plane airport data changed — refreshing the "
+                            "search index…"
+                        )
+                    else:
+                        print("Building the airport search index…")
+                    count = APT.build_index(paths, AIRPORT_CACHE)
+                    print(
+                        "Airport search index ready: %d airports." % count
+                    )
                 if os.path.isfile(AIRPORT_CACHE):
                     self._airports = APT.load_index(AIRPORT_CACHE)
-                    return
-                if not xplane:
-                    return
-                paths = APT.find_apt_dats(xplane)
-                if not paths:
-                    return
-                count = APT.build_index(paths, AIRPORT_CACHE)
-                self._airports = APT.load_index(AIRPORT_CACHE)
-                print("Airport search index built: %d airports." % count)
             except Exception as exc:
                 print("Airport index unavailable:", exc)
 

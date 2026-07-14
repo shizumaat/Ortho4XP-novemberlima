@@ -11,11 +11,27 @@ no network access, no printing):
 * :func:`find_apt_dats` -- locate the Global Airports ``apt.dat`` file(s).
 * :func:`build_index`   -- stream-parse ``apt.dat`` into a compact cache.
 * :func:`load_index`    -- fast reload from that cache.
+* :func:`index_is_stale` -- decide whether the cache needs rebuilding.
 * :func:`search`        -- rank airports for a free-text query.
 * :func:`parse_coordinate_query` -- interpret a query as tile coordinates.
 
 The cache is a compact TSV file (see :func:`build_index`) so reloads are
 cheap and the on-disk format is easy to inspect.
+
+Cache format v2 and the freshness contract
+-------------------------------------------
+The cache header is ``O4AIRPORTIDX 2 <count>``.  Immediately after the
+header, :func:`build_index` writes one ``#SRC <mtime_ns> <size_bytes>
+<path>`` line for every source ``apt.dat`` it actually read (the path is
+written last because it may contain spaces; ``mtime_ns`` comes from
+:func:`os.stat`'s ``st_mtime_ns`` for full precision, and the byte size is
+recorded as a second freshness signal).  The tab-separated data rows are
+unchanged from v1.  :func:`load_index` transparently loads both v1 (no
+``#SRC`` lines) and v2 caches, skipping any ``#SRC`` lines.
+:func:`index_is_stale` reads only the header and ``#SRC`` lines to report
+whether the recorded sources still match the requested ones (same set of
+paths, and identical ``st_mtime_ns`` and size for each), so callers can
+rebuild only when something has actually changed on disk.
 """
 
 import os
@@ -28,14 +44,22 @@ __all__ = [
     "find_apt_dats",
     "build_index",
     "load_index",
+    "index_is_stale",
     "search",
     "parse_coordinate_query",
 ]
 
 # Magic header written as the first line of the cache file.  The integer
 # is a format version so a future change can invalidate old caches.
+#
+# Version 2 adds ``#SRC <mtime_ns> <size_bytes> <path>`` lines right after
+# the header, recording every source file used to build the index so
+# :func:`index_is_stale` can tell when a rebuild is needed.
 _CACHE_MAGIC = "O4AIRPORTIDX"
-_CACHE_VERSION = 1
+_CACHE_VERSION = 2
+
+# Prefix marking a source-file provenance line in a v2 cache.
+_SRC_PREFIX = "#SRC"
 
 
 @dataclass
@@ -254,11 +278,12 @@ def build_index(apt_dat_paths: Iterable[str], cache_file: str) -> int:
 
     The cache is a UTF-8 TSV file whose first line is::
 
-        O4AIRPORTIDX 1 <count>
+        O4AIRPORTIDX 2 <count>
 
-    followed by one tab-separated ``code<TAB>name<TAB>city<TAB>country<TAB>
-    lat<TAB>lon`` row per airport.  The file is written atomically (to a
-    temporary file then :func:`os.replace`).
+    followed by one ``#SRC <mtime_ns> <size_bytes> <path>`` line per source
+    file actually read, then one tab-separated ``code<TAB>name<TAB>city<TAB>
+    country<TAB>lat<TAB>lon`` row per airport.  The file is written
+    atomically (to a temporary file then :func:`os.replace`).
 
     Args:
         apt_dat_paths: Ordered iterable of ``apt.dat`` paths to index.
@@ -269,9 +294,14 @@ def build_index(apt_dat_paths: Iterable[str], cache_file: str) -> int:
     """
     seen: set = set()
     rows: List[AirportEntry] = []
+    # (path, mtime_ns, size_bytes) for every source we actually read, in the
+    # order read, so v2 caches can record their freshness signals.
+    sources: List[Tuple[str, int, int]] = []
     for path in apt_dat_paths:
         if not path or not os.path.isfile(path):
             continue
+        stat = os.stat(path)
+        sources.append((path, stat.st_mtime_ns, stat.st_size))
         for entry in _iter_airports(path):
             if entry.code in seen:
                 continue
@@ -286,6 +316,11 @@ def build_index(apt_dat_paths: Iterable[str], cache_file: str) -> int:
     with open(tmp_file, "w", encoding="utf-8", newline="\n") as handle:
         handle.write("{} {} {}\n".format(
             _CACHE_MAGIC, _CACHE_VERSION, len(rows)))
+        for path, mtime_ns, size in sources:
+            # Path is written last (and verbatim) because it may contain
+            # spaces; tabs/newlines are stripped so the line stays parseable.
+            handle.write("{} {} {} {}\n".format(
+                _SRC_PREFIX, mtime_ns, size, _sanitize(path)))
         for e in rows:
             handle.write("\t".join((
                 _sanitize(e.code),
@@ -303,8 +338,9 @@ def load_index(cache_file: str) -> List[AirportEntry]:
     """Load airports from a cache written by :func:`build_index`.
 
     The cache is streamed line-by-line.  A missing file or a file without
-    the expected magic header yields an empty list.  Malformed data rows
-    are skipped rather than raising.
+    the expected magic header yields an empty list.  Both v1 (no ``#SRC``
+    lines) and v2 caches are accepted; ``#SRC`` provenance lines are
+    skipped.  Malformed data rows are skipped rather than raising.
 
     Args:
         cache_file: Path to a cache produced by :func:`build_index`.
@@ -323,6 +359,9 @@ def load_index(cache_file: str) -> List[AirportEntry]:
             line = line.rstrip("\n")
             if not line:
                 continue
+            if line.startswith(_SRC_PREFIX):
+                # v2 source-provenance line -- not an airport entry.
+                continue
             parts = line.split("\t")
             if len(parts) != 6:
                 continue
@@ -334,6 +373,88 @@ def load_index(cache_file: str) -> List[AirportEntry]:
                 code=parts[0], name=parts[1], city=parts[2],
                 country=parts[3], lat=lat, lon=lon))
     return entries
+
+
+def index_is_stale(apt_dat_paths: List[str], cache_file: str) -> bool:
+    """Return ``True`` when ``cache_file`` needs rebuilding from the sources.
+
+    Only the header and the ``#SRC`` provenance lines of the cache are read
+    (never the airport rows), so this is cheap to call on every run.  The
+    cache is considered stale -- i.e. this returns ``True`` -- when ANY of
+    the following hold:
+
+    * the cache file is missing or unreadable;
+    * the header is malformed (missing/incorrect magic or version);
+    * the header version is < 2 (v1 caches carry no source info);
+    * the set of recorded source paths differs from ``apt_dat_paths``
+      (compared order-insensitively after :func:`os.path.abspath`);
+    * a recorded source no longer exists on disk;
+    * a source's current ``st_mtime_ns`` or byte size differs from the
+      recorded value (compared with ``!=`` so a restored/downgraded file
+      also triggers a rebuild).
+
+    It returns ``False`` only when every recorded source still matches.  An
+    empty ``apt_dat_paths`` against a v2 cache that itself recorded zero
+    sources is *fresh* (there is nothing to compare); empty paths with no
+    cache is stale.
+
+    Args:
+        apt_dat_paths: The source ``apt.dat`` paths the cache should cover.
+        cache_file: Path to a cache produced by :func:`build_index`.
+
+    Returns:
+        ``True`` if a rebuild is warranted, ``False`` otherwise.
+    """
+    desired = {os.path.abspath(p) for p in apt_dat_paths if p}
+
+    if not os.path.isfile(cache_file):
+        return True
+
+    recorded: dict = {}
+    try:
+        with open(cache_file, "r", encoding="utf-8",
+                  errors="replace") as handle:
+            first = handle.readline()
+            tokens = first.split()
+            if len(tokens) < 2 or tokens[0] != _CACHE_MAGIC:
+                return True
+            try:
+                version = int(tokens[1])
+            except ValueError:
+                return True
+            if version < 2:
+                return True
+            # Read only the leading #SRC provenance lines.
+            for line in handle:
+                line = line.rstrip("\n")
+                if not line.startswith(_SRC_PREFIX):
+                    break
+                parts = line.split(None, 3)
+                if len(parts) != 4:
+                    return True
+                try:
+                    mtime_ns = int(parts[1])
+                    size = int(parts[2])
+                except ValueError:
+                    return True
+                recorded[os.path.abspath(parts[3])] = (mtime_ns, size)
+    except OSError:
+        return True
+
+    if set(recorded) != desired:
+        return True
+
+    for abs_path, (mtime_ns, size) in recorded.items():
+        if not os.path.exists(abs_path):
+            return True
+        try:
+            stat = os.stat(abs_path)
+        except OSError:
+            return True
+        if stat.st_mtime_ns != mtime_ns or stat.st_size != size:
+            return True
+
+    return False
 
 
 # ---------------------------------------------------------------------------

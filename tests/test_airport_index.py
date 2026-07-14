@@ -131,7 +131,8 @@ def test_cache_header_line(apt1, tmp_path):
     AI.build_index([apt1], cache)
     with open(cache, encoding="utf-8") as fh:
         header = fh.readline().strip()
-    assert header == "O4AIRPORTIDX 1 3"
+    # Cache format v2: the version integer is now 2.
+    assert header == "O4AIRPORTIDX 2 3"
 
 
 def test_field_integrity_roundtrip(apt1, tmp_path):
@@ -307,3 +308,184 @@ def test_end_to_end(tmp_path):
     entries = AI.load_index(cache)
     hit = AI.search(entries, "AAAA")
     assert hit and hit[0].code == "AAAA"
+
+
+# ---------------------------------------------------------------------------
+# Cache v2 format: #SRC provenance lines
+# ---------------------------------------------------------------------------
+def _read_lines(path):
+    with open(path, encoding="utf-8") as fh:
+        return fh.read().splitlines()
+
+
+def test_v2_header_and_src_lines_written(apt1, tmp_path):
+    cache = str(tmp_path / "index.tsv")
+    AI.build_index([apt1], cache)
+    lines = _read_lines(cache)
+    assert lines[0] == "O4AIRPORTIDX 2 3"
+    # Exactly one source was read -> exactly one #SRC line, right after the
+    # header and before the first data row.
+    src_lines = [ln for ln in lines if ln.startswith("#SRC")]
+    assert len(src_lines) == 1
+    assert lines[1].startswith("#SRC")
+    parts = src_lines[0].split(None, 3)
+    assert parts[0] == "#SRC"
+    stat = os.stat(apt1)
+    assert int(parts[1]) == stat.st_mtime_ns
+    assert int(parts[2]) == stat.st_size
+    assert parts[3] == apt1
+
+
+def test_v2_src_line_path_with_spaces(tmp_path):
+    # A source path containing spaces must round-trip: the path is written
+    # last so split(None, 3) recovers it intact.
+    spaced_dir = tmp_path / "path with spaces"
+    os.makedirs(spaced_dir)
+    apt = _write(spaced_dir / "apt.dat", _APT_DAT_1)
+    cache = str(tmp_path / "index.tsv")
+    AI.build_index([apt], cache)
+    src_lines = [ln for ln in _read_lines(cache) if ln.startswith("#SRC")]
+    assert len(src_lines) == 1
+    parts = src_lines[0].split(None, 3)
+    assert parts[3] == apt
+    assert " " in parts[3]
+    # And it is not stale when checked with the very same path.
+    assert AI.index_is_stale([apt], cache) is False
+
+
+def test_v2_src_line_per_source(apt1, apt2, tmp_path):
+    cache = str(tmp_path / "index.tsv")
+    AI.build_index([apt1, apt2], cache)
+    src_lines = [ln for ln in _read_lines(cache) if ln.startswith("#SRC")]
+    assert len(src_lines) == 2
+    recorded_paths = [ln.split(None, 3)[3] for ln in src_lines]
+    assert recorded_paths == [apt1, apt2]
+
+
+# ---------------------------------------------------------------------------
+# load_index: v2 and hand-written v1 caches
+# ---------------------------------------------------------------------------
+def test_load_index_reads_v2(apt1, tmp_path):
+    cache = str(tmp_path / "index.tsv")
+    AI.build_index([apt1], cache)
+    codes = {e.code for e in AI.load_index(cache)}
+    assert codes == {"AAAA", "BBBB", "HHHH"}
+
+
+def test_load_index_reads_handwritten_v1(tmp_path):
+    # A v1 cache has no #SRC lines; load_index must still read it.
+    cache = str(tmp_path / "v1.tsv")
+    with open(cache, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("O4AIRPORTIDX 1 2\n")
+        fh.write("\t".join(("AAAA", "Alpha", "Aville", "Aland",
+                            repr(48.5), repr(-6.25))) + "\n")
+        fh.write("\t".join(("BBBB", "Bravo", "", "",
+                            repr(12.5), repr(77.7))) + "\n")
+    by_code = {e.code: e for e in AI.load_index(cache)}
+    assert set(by_code) == {"AAAA", "BBBB"}
+    assert by_code["AAAA"].city == "Aville"
+    assert by_code["AAAA"].lat == pytest.approx(48.5)
+    assert by_code["BBBB"].lon == pytest.approx(77.7)
+
+
+# ---------------------------------------------------------------------------
+# index_is_stale matrix
+# ---------------------------------------------------------------------------
+def test_stale_fresh_cache_is_false(apt1, tmp_path):
+    cache = str(tmp_path / "index.tsv")
+    AI.build_index([apt1], cache)
+    assert AI.index_is_stale([apt1], cache) is False
+
+
+def test_stale_missing_cache_is_true(apt1, tmp_path):
+    cache = str(tmp_path / "nope.tsv")
+    assert AI.index_is_stale([apt1], cache) is True
+
+
+def test_stale_v1_cache_is_true(apt1, tmp_path):
+    # Hand-written v1 cache carries no source info -> always stale.
+    cache = str(tmp_path / "v1.tsv")
+    with open(cache, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("O4AIRPORTIDX 1 1\n")
+        fh.write("\t".join(("AAAA", "Alpha", "", "",
+                            repr(48.5), repr(-6.25))) + "\n")
+    assert AI.index_is_stale([apt1], cache) is True
+
+
+def test_stale_malformed_header_is_true(apt1, tmp_path):
+    cache = str(tmp_path / "bad.tsv")
+    _write(tmp_path / "bad.tsv", "NOT A HEADER\ngarbage\n")
+    assert AI.index_is_stale([apt1], cache) is True
+
+
+def test_stale_touched_source_mtime_is_true(apt1, tmp_path):
+    cache = str(tmp_path / "index.tsv")
+    AI.build_index([apt1], cache)
+    stat = os.stat(apt1)
+    # Move mtime forward by 10 s (unambiguous change in st_mtime_ns).
+    new_time = stat.st_mtime + 10
+    os.utime(apt1, (new_time, new_time))
+    assert AI.index_is_stale([apt1], cache) is True
+
+
+def test_stale_size_change_with_restored_mtime_is_true(apt1, tmp_path):
+    cache = str(tmp_path / "index.tsv")
+    AI.build_index([apt1], cache)
+    recorded = os.stat(apt1)
+    # Append a byte (size grows), then restore the recorded mtime so only
+    # the size differs -- size alone must still trigger a rebuild.
+    with open(apt1, "a", encoding="utf-8") as fh:
+        fh.write("X")
+    os.utime(apt1, ns=(recorded.st_atime_ns, recorded.st_mtime_ns))
+    now = os.stat(apt1)
+    assert now.st_mtime_ns == recorded.st_mtime_ns
+    assert now.st_size != recorded.st_size
+    assert AI.index_is_stale([apt1], cache) is True
+
+
+def test_stale_source_added_is_true(apt1, apt2, tmp_path):
+    cache = str(tmp_path / "index.tsv")
+    AI.build_index([apt1], cache)
+    # Cache recorded only apt1; asking about apt1+apt2 is a set mismatch.
+    assert AI.index_is_stale([apt1, apt2], cache) is True
+
+
+def test_stale_source_removed_is_true(apt1, apt2, tmp_path):
+    cache = str(tmp_path / "index.tsv")
+    AI.build_index([apt1, apt2], cache)
+    # Cache recorded apt1+apt2; asking about only apt1 is a set mismatch.
+    assert AI.index_is_stale([apt1], cache) is True
+
+
+def test_stale_recorded_source_deleted_is_true(apt1, tmp_path):
+    cache = str(tmp_path / "index.tsv")
+    AI.build_index([apt1], cache)
+    os.remove(apt1)
+    assert AI.index_is_stale([apt1], cache) is True
+
+
+def test_stale_abspath_vs_relative_equivalent_is_false(apt1, tmp_path):
+    cache = str(tmp_path / "index.tsv")
+    AI.build_index([apt1], cache)
+    # Build recorded the absolute apt1 path; a relative path to the same
+    # file must normalize equal -> not stale.
+    rel = os.path.relpath(apt1)
+    assert os.path.abspath(rel) == os.path.abspath(apt1)
+    assert AI.index_is_stale([rel], cache) is False
+
+
+def test_stale_empty_paths_no_cache_is_true(tmp_path):
+    cache = str(tmp_path / "nope.tsv")
+    assert AI.index_is_stale([], cache) is True
+
+
+def test_stale_empty_paths_v2_empty_sources_is_false(tmp_path):
+    # A v2 cache built from an empty source list records zero #SRC lines;
+    # comparing an empty request against it is fresh.
+    cache = str(tmp_path / "index.tsv")
+    count = AI.build_index([], cache)
+    assert count == 0
+    lines = _read_lines(cache)
+    assert lines[0] == "O4AIRPORTIDX 2 0"
+    assert not any(ln.startswith("#SRC") for ln in lines)
+    assert AI.index_is_stale([], cache) is False
