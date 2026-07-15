@@ -357,17 +357,23 @@
 #    logs.  After the band order: KBNA zone diet · charter
 #    extension to junction/RESA · retirement wiring · round 9 on
 #    the lidar DEM.
-#    ★★ INSET FETCH GAP (Noah defect report 2026-07-14, TRACED):
-#    ensure_airport_insets (the STAC fetch orchestrator) has ZERO
-#    build-path callers — only the pre-warm tool; the build only
-#    BAKES cached insets and the empty-cache case is a SILENT no-op
-#    with the feature default ON ⇒ any un-pre-warmed airport
-#    silently grades on raw base DEM (CYXY 683.20 vs lidar 693.92;
-#    the raw phantom dips drove heavy ring emission = the "looping
-#    overlapping spines" sighting).  NOT a race — nothing ever
-#    downloaded.  FIX ORDER in flight: wire ensure_airport_insets
-#    synchronously into Step 1 (gated, index-respecting, timeouts),
-#    LOUD per-airport degrade, strict-abort config option.
+#    ★★ INSET FETCH ABORT (Noah defect report 2026-07-14, TRACED —
+#    CORRECTED twice, 26th premise): the build DOES fetch (the
+#    ensure_insets_for_tile step-1 hook shipped with 59ddde4; the
+#    earlier "zero callers" claim grepped the inner name and missed
+#    the wrapper).  The REAL cause: dico_airports mixes string keys
+#    with repr_node TUPLE keys (unnamed strips); sorted() raised
+#    "'<' not supported between str and tuple" and the G4 catch
+#    aborted ALL of the tile's fetches ("continuing without
+#    insets" — the warning Noah saw).  FIXED af2e65d: non-string
+#    keys skipped with a loud INFO count + key=str sort hardening;
+#    reproduced against the exact crash shape; insets suite 26/26;
+#    flagged for the insets-owner session's review.  The redundant
+#    wire-the-fetch order was killed (premise obsolete).  CYXY
+#    683.20-vs-693.92 raw-DEM patch story unchanged — the fetch
+#    crashed before ever downloading.  Remaining feature gap from
+#    the cancelled order worth a future pass: per-airport loud
+#    degrade lines + strict-abort option + fetch timeouts.
 #    PROVENANCE STAMPS order also in flight (git sha + gates + DEM
 #    provenance in patch tags + one log line per airport +
 #    tools/patch_provenance.py reader).  CYXY inset cache is
