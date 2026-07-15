@@ -356,7 +356,24 @@
 #    reaches .alt — bake required; verify provider lines in build
 #    logs.  After the band order: KBNA zone diet · charter
 #    extension to junction/RESA · retirement wiring · round 9 on
-#    the lidar DEM.  ★FLIP-BROKEN
+#    the lidar DEM.
+#    ★★ INSET FETCH GAP (Noah defect report 2026-07-14, TRACED):
+#    ensure_airport_insets (the STAC fetch orchestrator) has ZERO
+#    build-path callers — only the pre-warm tool; the build only
+#    BAKES cached insets and the empty-cache case is a SILENT no-op
+#    with the feature default ON ⇒ any un-pre-warmed airport
+#    silently grades on raw base DEM (CYXY 683.20 vs lidar 693.92;
+#    the raw phantom dips drove heavy ring emission = the "looping
+#    overlapping spines" sighting).  NOT a race — nothing ever
+#    downloaded.  FIX ORDER in flight: wire ensure_airport_insets
+#    synchronously into Step 1 (gated, index-respecting, timeouts),
+#    LOUD per-airport degrade, strict-abort config option.
+#    PROVENANCE STAMPS order also in flight (git sha + gates + DEM
+#    provenance in patch tags + one log line per airport +
+#    tools/patch_provenance.py reader).  CYXY inset cache is
+#    pre-warmed NOW; Noah's rebake needs only
+#    O4_AUTO_PATCH_REBUILD=1 (the 16:44 raw-DEM patch is stamped
+#    fresh and will be silently reused otherwise).  ★FLIP-BROKEN
 #    default-assertion tests (8-12): cleanup order dispatched
 #    (env-pin, intent preserved).  ★PARALLEL-SESSION artifacts in
 #    main checkout: config.py GAP_FILL cleanup superseded by
