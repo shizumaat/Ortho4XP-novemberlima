@@ -427,6 +427,25 @@
 # tile scanner (sorted listdir = deterministic first-wins).  Launch:
 # venv/bin/python Ortho4XP_Qt.py (legacy Ortho4XP.py unchanged).
 #
+# ★★★ B4 ASSEMBLY LANDED a9a0260 — ROUND 10 IS READY.  The flip
+# gate measured GREEN on Noah's amended criteria (CYXY lidar):
+# tears 0 · T-vertices 0 (improved from 1) · near-parallel 0 ·
+# crossings 18 = pre-existing crown class · re-bake hotspot CLEAN ·
+# emit 98→6 s · TOTAL ~32-42 s.  Charter extension: blob gate
+# (>=3,000 m2 AND aspect <2) drops the junction/RESA sweeps
+# (-60.2% area; kept strips aspect >=2.8) — NOTE inert under full
+# legacy-off (scopes coexistence only).  KBNA full B4 completes
+# 751 s (59,314 nodes / solve 474 s / fallback 0); coverage
+# depth-step diet lever untouched pending Noah.  Hygiene ledger:
+# coincident 7→11, adoption 61, weld 6 → slice-C emit restructure.
+# ★ROUND-10 BAKE: launch with O4_B4_FLIP=1 (+ the usual
+# O4_AUTO_PATCH_REBUILD=1, restart GUI; defaults stay OFF until
+# Noah ratifies).  LOOK AT: terminal areas (blobs GONE, absorbed
+# bands holding) · the smooth ring collars incl. single-collar
+# narrow arms · the 36.8% law-vs-law wall at 60.70261,-135.06389 ·
+# build time itself.  RATIFY ⇒ flip the three constituent defaults
+# permanently and the 36-second builds are the new normal.
+#
 # ★ROUND-9 RINGS LANDED b908d15: polygon inward offsets — loops =
 # polygon boundaries, SIMPLE BY CONSTRUCTION (self-crossing class
 # structurally dead; -540 lines of walk machinery); 10 m minimum-
