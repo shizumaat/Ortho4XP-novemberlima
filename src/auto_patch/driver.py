@@ -303,6 +303,18 @@ def _build_write_verify_one(task: dict) -> dict:
         return {"icao": icao, "ok": False, "stage": "write", "error": str(_e),
                 "auto_patch_file": task["auto_patch_file"],
                 "traceback": _tb.format_exc()}
+    # Render the one-line provenance summary from the record to_osm stamped, so
+    # the main process can log it race-free in task order (workers must not
+    # write the shared console/log directly).  None when provenance is gated
+    # off or no record was produced.
+    provenance_log = None
+    try:
+        _record = getattr(layout, "_provenance_record", None)
+        if _record is not None:
+            from . import provenance as _prov
+            provenance_log = _prov.format_log_line(_record)
+    except Exception:
+        provenance_log = None
     counts = _Counter(s.role for s in layout.shapes)
     summary = " + ".join("{} {}".format(n, r) for r, n in
                          sorted(counts.items(), key=lambda x: -x[1]))
@@ -325,7 +337,8 @@ def _build_write_verify_one(task: dict) -> dict:
         verify_err = str(_ve)
     return {"icao": icao, "ok": True, "summary": summary, "build_s": build_s,
             "verify_s": _time.time() - t_v, "verify_err": verify_err,
-            "verify_log_path": task["verify_log_path"]}
+            "verify_log_path": task["verify_log_path"],
+            "provenance_log": provenance_log}
 
 
 def _run_build_tasks(tasks: list, tile, auto_patched: list,
@@ -480,6 +493,12 @@ def _run_build_tasks(tasks: list, tile, auto_patched: list,
             continue
         UI.vprint(1, "   Auto-patch: Generated", icao,
                   "(" + r["summary"] + ")")
+        # Provenance summary at default verbosity — one line per airport at
+        # patch completion (sha, active gate count + drift, DEM inset origin;
+        # the raw-base-DEM case reads as a warning).
+        _plog = r.get("provenance_log")
+        if _plog:
+            UI.lvprint(0, _plog)
         auto_patched.append(icao)
         if r.get("verify_err"):
             UI.lvprint(0, "   Auto-patch: verification error for", icao,

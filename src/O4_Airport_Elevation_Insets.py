@@ -1072,6 +1072,13 @@ def bake_airport_insets_into_alt_dem(tile):
     inset_paths = list_cached_inset_dems(
         tile.lat, tile.lon, provider_codes=codes or None
     )
+    # Record which insets actually bake into this DEM so the auto_patch
+    # provenance stamp can report the true elevation source per airport (see
+    # auto_patch.provenance).  An EMPTY list means the bake step ran but found
+    # no cached inset -- the silent-raw-DEM case the provenance exists to make
+    # loud.  Absence of the attribute (never set) means the bake never ran.
+    baked_provenance = []
+    tile.dem.airport_inset_provenance = baked_provenance
     if not inset_paths:
         return
     feather_m = getattr(tile, "airport_elevation_inset_feather_m", 60.0)
@@ -1086,6 +1093,35 @@ def bake_airport_insets_into_alt_dem(tile):
                 ":",
                 str(error),
             )
+            continue
+        baked_provenance.append(_inset_bake_provenance_entry(inset_path))
+
+
+def _inset_bake_provenance_entry(inset_path):
+    """One baked-inset provenance record for the DEM stamp.
+
+    Reads the provenance sidecar (``<icao>_<code>.json``) the fetch wrote —
+    provider, source_ids, fetch_date — and derives the airport ICAO from the
+    cache file name so ``auto_patch`` can attribute the inset to its airport.
+    Always returns a dict; missing/unreadable sidecars degrade to just the
+    parsed name fields.
+    """
+    basename = os.path.basename(inset_path)
+    stem = basename[:-4] if basename.endswith(".tif") else basename
+    icao = stem.rsplit("_", 1)[0] if "_" in stem else stem
+    entry = {"icao": icao, "path": inset_path}
+    sidecar = inset_path[:-4] + ".json" if inset_path.endswith(".tif") else None
+    if sidecar and os.path.isfile(sidecar):
+        try:
+            with open(sidecar, "r") as handle:
+                meta = json.load(handle)
+            entry["provider"] = meta.get("provider")
+            entry["source_ids"] = meta.get("source_ids") or []
+            entry["fetch_date"] = meta.get("fetch_date")
+            entry["native_resolution_m"] = meta.get("native_resolution_m")
+        except Exception:
+            pass
+    return entry
 
 
 def _bake_one_inset(tile, inset_path, feather_m):

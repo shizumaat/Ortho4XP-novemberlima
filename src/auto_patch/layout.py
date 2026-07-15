@@ -460,6 +460,19 @@ class PavementLayout:
     # the rect-builder seeding in ``pipeline.py``.
     canonical_points: CanonicalPointRegistry | None = None
 
+    # Elevation-inset provenance read off the DEM the elevation solve graded
+    # against (``provenance.dem_provenance_from_dem`` result: which airport-
+    # elevation insets baked into that surface, or the loud RAW marker).  Set
+    # by ``pipeline`` at solve time; consumed by ``to_osm`` to stamp the patch
+    # and by the driver to log one provenance line per airport.  None when no
+    # elevation solve ran (the patch then reports RAW — graded on base DEM).
+    dem_inset_provenance: dict | None = None
+
+    # The provenance record ``to_osm`` assembled for this build, cached so the
+    # driver logs its one-line summary from the same truth it stamped.  None
+    # until ``to_osm`` runs with provenance enabled.
+    _provenance_record: dict | None = None
+
     # ---- coordinate helpers ------------------------------------------
     # COORDINATE-ORDER CONVENTION (read before editing geometry code):
     #   * "xy"  = local METRES from ``anchor``, order (x=east, y=north).
@@ -1800,6 +1813,20 @@ class PavementLayout:
                              + "'")
             except OSError:
                 pass
+        # Provenance block (git sha + dirty flag, active gate configuration,
+        # baked-inset DEM provenance, build timestamp + ICAO) — stamped as
+        # further ``<osm>`` root attributes so it perturbs no geometry, mesh
+        # consumption, or the chain-divergence audit (all read only node/way
+        # elements).  ON by default; ``O4_PATCH_PROVENANCE=0`` suppresses it.
+        # The assembled record is cached on the layout so the driver's log line
+        # renders from the SAME truth without recomputing.
+        from . import provenance as _prov
+        if _prov.provenance_enabled():
+            record = _prov.assemble_provenance(
+                self.icao, self.dem_inset_provenance)
+            self._provenance_record = record
+            for _k, _v in _prov.provenance_tags(record).items():
+                osm_open += f" {_k}='{_v}'"
         osm_open += ">"
         lines = [
             "<?xml version='1.0' encoding='UTF-8'?>",

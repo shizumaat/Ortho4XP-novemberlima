@@ -3994,6 +3994,16 @@ def build_airport_pavement(icao: str, xplane_root: str,
                 tile_lat = int(math.floor(layout.anchor[0]))
                 tile_lon = int(math.floor(layout.anchor[1]))
 
+            # Capture elevation provenance off the ACTUAL DEM this solve grades
+            # against: which airport-elevation insets baked into it (stamped on
+            # the DEM object by bake_airport_insets_into_alt_dem) or the loud
+            # RAW marker when none did.  The standalone raw-load path never
+            # bakes, so this correctly reports RAW even with an inset cached.
+            from . import provenance as _provenance
+            layout.dem_inset_provenance = (
+                _provenance.dem_provenance_from_dem(dem, icao=layout.icao)
+                if dem is not None else None)
+
             # ── Seam-anchor pipeline (user 2026-05-13) ────────────
             # 1) Insert ring vertices at integer lat/lon line crossings
             #    and convert sloped rects to node_altitudes.
