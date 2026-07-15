@@ -417,6 +417,20 @@
 #    relies on it.  Grazing-angle / near-endpoint crossings ARE the
 #    banned classes and the audit routes them there.
 #
+# ★★★ NOAH RULING 2026-07-14 (design doc 1c41ec7): B4 FLIP GATE =
+# explosion-relevant rows ONLY (tears 0 · zero new near-parallel/T ·
+# clean re-bake hotspot check · in-sim); HYGIENE rows (coincident
+# twins / node diet / adoption+weld counters) MEASURED AND LEDGERED
+# to the slice-C emit restructure — not flip blockers (exact twins
+# collapse at bake; part-34 exoneration).  ★B4 ASSEMBLY ORDER IN
+# FLIGHT: charter extension to junction/RESA large-area (blobs
+# #209/#210/#236 out, wingtip strips stay, −60% target) · B4 config
+# staged behind one review switch (defaults still OFF; round 10
+# flips) · CYXY flip-gate measurement incl. the ONE budgeted bake +
+# hotspot check · KBNA + coverage grid measurement with the 10 m
+# station-step diet as the ready lever · hygiene ledger rows.
+# PRIZE (measured): legacy-off CYXY 36.4 s total, emit 6.5 s.
+#
 # ★ROUND-9 VERDICT (Noah in-sim, 2026-07-14): CYXY ON LIDAR LOOKS
 # AMAZING.  Remaining finding: enclosed-area rings — 9 of 27 are
 # SELF-INTERSECTING loops (auto ring self-crosses at
