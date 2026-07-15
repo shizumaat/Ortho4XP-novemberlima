@@ -417,6 +417,16 @@
 #    relies on it.  Grazing-angle / near-endpoint crossings ARE the
 #    banned classes and the audit routes them there.
 #
+# ★QT UI MERGED (fca6bef + c8cd6f0): Noah's cloud-session branch
+# origin/claude/ortho4xp-ui-modernization-wjjfq4 folded into dev —
+# Ortho4XP_Qt.py launcher, live map sharing the build imagery cache,
+# settings window, onboarding wizard, airport index; tkinter now
+# OPTIONAL in O4_Config_Utils (headless builds unaffected); PySide6
+# pinned in requirements (installers consume it; ONBOARDING noted);
+# 114 UI tests green after fixing a filesystem-order flake in the
+# tile scanner (sorted listdir = deterministic first-wins).  Launch:
+# venv/bin/python Ortho4XP_Qt.py (legacy Ortho4XP.py unchanged).
+#
 # ★★★ NOAH RULING 2026-07-14 (design doc 1c41ec7): B4 FLIP GATE =
 # explosion-relevant rows ONLY (tears 0 · zero new near-parallel/T ·
 # clean re-bake hotspot check · in-sim); HYGIENE rows (coincident
