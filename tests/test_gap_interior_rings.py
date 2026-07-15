@@ -148,18 +148,26 @@ def test_ring_gate_requires_spine_gate(monkeypatch):
         emit_gap_fill_spines(layout, _LOW, 0, 0)
 
 
-def test_rings_are_complete_closed_loops(rings_on):
-    """Round-8 mandate: both rings, complete unbroken closed loops —
-    the first coordinate repeats at the end, no mid-gap chain ends."""
-    layout = _frame_layout(30.0)
+def test_rings_are_complete_closed_simple_loops(rings_on):
+    """Round-8 mandate: complete unbroken closed loops (first node
+    repeats at the end, no mid-gap chain ends) — and the ROUND-9 hard
+    invariant: every loop is SIMPLE (the polygon-offset construction
+    cannot self-cross; a violation is a bug, not a repair case).
+    The 174 m frame keeps a 24 m core strip between the two 75 m
+    runway bands (wider than twice the minimum-feature radius), so
+    ring 2 exists alongside ring 1."""
+    from shapely.geometry import LinearRing
+    layout = _frame_layout(87.0)
     n = emit_gap_fill_spines(layout, _LOW, 0, 0)
     assert n == 1
     chains = _ring_chains_m(layout)
-    assert len(chains) == 2, "ring 1 + ring 2, one loop each"
+    assert len(chains) >= 2, "ring 1 + ring 2 loops expected"
     for pts, alts in chains:
-        assert len(pts) >= 20
+        assert len(pts) >= 9
         assert pts[0] == pts[-1], "every ring chain must be CLOSED"
         assert alts[0] == alts[-1]
+        assert LinearRing(pts[:-1]).is_simple, (
+            "round-9 invariant: emitted loop must be SIMPLE")
 
 
 def test_deep_dip_pins_at_the_floor(rings_on):
@@ -168,7 +176,7 @@ def test_deep_dip_pins_at_the_floor(rings_on):
     edge + floor_offset at min(true distance, band width)); most nodes
     sit EXACTLY on it (the along-ring bench may lift seam nodes, never
     lower them)."""
-    layout = _frame_layout(30.0)
+    layout = _frame_layout(87.0)
     emit_gap_fill_spines(layout, _LOW, 0, 0)
     from auto_patch.layout import taxi_shape_code_letter
     from auto_patch.config import taxiway_strip_graded_half_width_for_letter
@@ -186,18 +194,27 @@ def test_deep_dip_pins_at_the_floor(rings_on):
         for (x, y), v in zip(open_pts, alts):
             dists = sorted((ext.distance(Point(x, y)), key, w)
                            for ext, key, w in pav)
-            floors = []
+            per_parent = []
             for d, (role, cn, cl), w in dists[:2]:
                 lo, _hi = adjacent_ground_envelope(role, cn, cl, min(d, w))
-                if lo is not None:
-                    floors.append(EDGE_ALT + lo)
+                _lo, hi = adjacent_ground_envelope(role, cn, cl, d)
+                per_parent.append(
+                    (None if lo is None else EDGE_ALT + lo,
+                     None if hi is None else EDGE_ALT + hi))
+            floors = [q[0] for q in per_parent if q[0] is not None]
+            ceils = [q[1] for q in per_parent if q[1] is not None]
             assert floors
-            expected = max(floors)
-            assert v >= expected - 0.05, (
+            lo_abs = max(floors)
+            hi_abs = min(ceils) if ceils else None
+            if hi_abs is not None and lo_abs > hi_abs:
+                # empty intersection: the NEARER parent's corridor
+                # governs (the _spine_interval fallback).
+                lo_abs = per_parent[0][0]
+            assert lo_abs is None or v >= lo_abs - 0.05, (
                 f"node at ({x:.0f},{y:.0f}) value {v} BELOW its floor "
-                f"{expected:.2f}")
+                f"{lo_abs:.2f}")
             checked += 1
-            if abs(v - expected) <= 0.05:
+            if lo_abs is not None and abs(v - lo_abs) <= 0.05:
                 exact += 1
     assert checked >= 40
     assert exact >= checked * 0.6, "most nodes must sit exactly on floor"
@@ -267,7 +284,7 @@ def test_runway_axes_key_the_ring_width(rings_on):
     # neither the cross-fraction cap (76.5) nor the opposite-side cap
     # (84) binds, so the deepest ring-2 offset reads the code source.
     length = 900.0
-    layout = _frame_layout(85.0, length=length)
+    layout = _frame_layout(87.0, length=length)
     axis = _FakeRunway(-600.0, 15.0, 1400.0, 15.0)   # 2000 m axis
     emit_gap_fill_spines(layout, _LOW, 0, 0, source_runways=[axis])
     bottom_edge = LineString([(0.0, 30.0), (length, 30.0)])
@@ -277,7 +294,7 @@ def test_runway_axes_key_the_ring_width(rings_on):
     assert offs, "expected ring nodes off the bottom runway edge"
     assert 70.0 <= max(offs) <= 76.5, (
         f"axis code 4 must place ring 2 near 75 m, got {max(offs):.1f}")
-    layout2 = _frame_layout(85.0, length=length)
+    layout2 = _frame_layout(87.0, length=length)
     emit_gap_fill_spines(layout2, _LOW, 0, 0)
     offs2 = [bottom_edge.distance(Point(x, y))
              for pts, alts in _ring_chains_m(layout2)
@@ -312,52 +329,128 @@ def test_ring_zero_lens_guards(rings_on):
 
 
 def test_spine_trimmed_to_ring_core(rings_on):
-    """Round-8: the spine is cut back to the ring-2 core — no emitted
-    spine node may remain in the band annulus (a full-length spine
-    would cross the closed loops at the gap ends)."""
-    layout = _frame_layout(30.0)
+    """Round-9: the spine is cut back to the innermost region — the
+    core when ring 2 exists (a full-length spine would cross the
+    closed loops at the gap ends); every surviving node keeps 2 m off
+    every loop."""
+    layout = _frame_layout(87.0)
     emit_gap_fill_spines(layout, _LOW, 0, 0)
     assert _rings(layout)
-    gap_boundary = Polygon([(30.0, 30.0), (FRAME_LENGTH - 30.0, 30.0),
-                            (FRAME_LENGTH - 30.0, 90.0),
-                            (30.0, 90.0)]).exterior
-    # Ring-2 offsets in this frame: 27 m off the runway long sides
-    # (min(75, 0.45*60, 0.5*60-1)) and 22 m off the stub ends (the
-    # letter-F taxiway band) — every surviving spine node clears the
-    # SMALLER of the two and keeps 2 m off every ring chain.
+    # Gap spans y in [30, 204]; the core strip (between the 75 m
+    # runway bands) is y in [105, 129] — every surviving spine node
+    # sits inside it, 2 m clear of every loop.
     ring_chains = [LineString(pts) for pts, _a in _ring_chains_m(layout)]
+    kept = 0
     for pts_ll, vals in layout.gap_spines:
         for lat, lon in pts_ll:
             x, y = lon * 111320.0, lat * 111320.0
-            assert gap_boundary.distance(Point(x, y)) > 21.4, (
-                "spine node left in the band annulus after the trim")
+            assert 104.0 < y < 130.0, (
+                "spine node left the core strip after the trim")
             for rc in ring_chains:
                 assert rc.distance(Point(x, y)) >= 1.9
+            kept += 1
+    assert kept >= 3
+
+
+def test_core_empty_keeps_spine_inside_ring_one(rings_on):
+    """Zones-fully-overlap rung: the 60 m frame gap sits entirely
+    inside the 75 m runway bands — no core, ring 1 alone — and the
+    drainage crest spine survives INSIDE the ring-1 loop (trimmed to
+    the lip region, clear of the loop) instead of dying or crossing."""
+    layout = _frame_layout(30.0)
+    emit_gap_fill_spines(layout, _LOW, 0, 0)
+    chains = _ring_chains_m(layout)
+    assert len(chains) == 1, "band-covered gap: single ring-1 loop"
+    assert getattr(layout, "gap_spines", None), "crest spine must survive"
+    ring_ls = LineString(chains[0][0])
+    for pts_ll, vals in layout.gap_spines:
+        for lat, lon in pts_ll:
+            x, y = lon * 111320.0, lat * 111320.0
+            assert ring_ls.distance(Point(x, y)) >= 1.9
 
 
 def test_spine_recouples_to_ring_two_ceiling(rings_on):
-    # With the deep dip every ring-2 station is floor-ENGAGED; the
-    # surviving (trimmed) spine nodes must not exceed their governing
-    # ring-2 value.  Mid-frame (away from the stub-end corners, whose
-    # point-law floors are runway-governed and higher) the pin is the
-    # runway floor at 27 m exactly.
-    layout = _frame_layout(30.0)
+    # With the deep dip every ring-2 node is floor-ENGAGED; the
+    # surviving (trimmed) spine nodes must not exceed the highest
+    # emitted ring-2 value (ring 2 is the spine ceiling in the core).
+    layout = _frame_layout(87.0)
     emit_gap_fill_spines(layout, _LOW, 0, 0)
-    assert _rings(layout)
-    lo, _hi = adjacent_ground_envelope("runway", 3, None, 27.0)
-    ring2_floor = EDGE_ALT + lo
-    _lo_ceiling = EDGE_ALT + adjacent_ground_envelope(
-        "runway", 3, None, 27.0)[1]        # zone-2 ceiling at the edge
+    chains = _ring_chains_m(layout)
+    assert chains
+    ring_max = max(a for _pts, alts in chains for a in alts)
     checked = 0
     for pts_ll, vals in layout.gap_spines:
-        for (lat, lon), v in zip(pts_ll, vals):
-            x = lon * 111320.0
-            # Everywhere: never above the band-edge CEILING.
-            assert v <= _lo_ceiling + 0.15, (
-                f"spine node above the band-edge ceiling: {v}")
-            if 300.0 < x < 1000.0:
-                checked += 1
-                assert v <= ring2_floor + 0.15, (
-                    f"mid-frame spine node above the ring-2 floor pin: "
-                    f"{v} > {ring2_floor:.2f}")
-    assert checked >= 5
+        for v in vals:
+            checked += 1
+            assert v <= ring_max + 0.15, (
+                f"spine node above the ring ceiling: {v} > {ring_max}")
+    assert checked >= 3
+
+
+def test_polygon_offset_multi_component(rings_on):
+    """Round-9: a dumbbell gap — two wide lobes joined by a neck too
+    narrow for a core — splits its ring-2 core into components, each
+    getting its own SIMPLE closed collar loop (the hole-in-the-middle
+    rung falling out of the region geometry)."""
+    from shapely.geometry import LinearRing
+    # Frame with a mid-frame PLUG narrowing the gap: two 174 m lobes
+    # joined by a 40 m-wide neck (well under twice the runway band).
+    length = FRAME_LENGTH
+    y_gap0, y_gap1 = 30.0, 204.0
+    shapes = [
+        _rect(0.0, 0.0, length, 30.0, ROLE_RUNWAY),
+        _rect(0.0, y_gap1, length, y_gap1 + 30.0, ROLE_RUNWAY),
+        _rect(0.0, y_gap0, 30.0, y_gap1, ROLE_STUB),
+        _rect(length - 30.0, y_gap0, length, y_gap1, ROLE_STUB),
+        # the plug: pavement tooth from the bottom leaving a 40 m neck
+        _rect(600.0, y_gap0, 700.0, y_gap1 - 40.0, ROLE_STUB),
+    ]
+    layout = _FakeLayout(shapes)
+    n = emit_gap_fill_spines(layout, _LOW, 0, 0)
+    assert n == 1
+    chains = _ring_chains_m(layout)
+    # ring-2 collars: the core splits into (at least) the two lobes.
+    core_loops = 0
+    for pts, alts in chains:
+        assert pts[0] == pts[-1]
+        assert LinearRing(pts[:-1]).is_simple
+        xs = [p[0] for p in pts]
+        if max(xs) - min(xs) < 560.0:      # a lobe collar, not ring 1
+            core_loops += 1
+    assert core_loops >= 2, (
+        f"dumbbell core must split into per-lobe collars, chains="
+        f"{[(len(p), max(px[0] for px in p) - min(px[0] for px in p)) for p, _a in chains]}")
+
+
+def test_smoothing_does_not_trace_boundary_notches(rings_on):
+    """Round-9 (Noah's reference loop class — smooth, no notch
+    tracing): a small pavement jag in the gap boundary must not
+    densify or wiggle the loop (no tracing), the loop must stay
+    SIMPLE, and no chord may cut into pavement (no foreign-crossing
+    mint at the concave detail)."""
+    from shapely.geometry import LinearRing
+    from auto_patch.gap_fill import GAP_FILL_SPINE_STEP_M as _step
+    length = FRAME_LENGTH
+    y_gap0, y_gap1 = 30.0, 204.0
+    tooth = _rect(647.0, 30.0, 653.0, 34.0, ROLE_STUB)  # 6 m x 4 m jag
+    shapes = [
+        _rect(0.0, 0.0, length, 30.0, ROLE_RUNWAY),
+        _rect(0.0, y_gap1, length, y_gap1 + 30.0, ROLE_RUNWAY),
+        _rect(0.0, y_gap0, 30.0, y_gap1, ROLE_STUB),
+        _rect(length - 30.0, y_gap0, length, y_gap1, ROLE_STUB),
+        tooth,
+    ]
+    layout = _FakeLayout(shapes)
+    emit_gap_fill_spines(layout, _LOW, 0, 0)
+    chains = _ring_chains_m(layout)
+    assert chains
+    for pts, alts in chains:
+        ring = LinearRing(pts[:-1])
+        assert ring.is_simple
+        # No tracing densification: node economy stays at the step
+        # (a traced notch adds a cluster of short segments).
+        assert len(pts) - 1 <= ring.length / _step + 6
+        # No chord cuts into the jag pavement.
+        loop_ls = LineString(pts)
+        assert not loop_ls.crosses(tooth.polygon), (
+            "ring chord cut into the boundary jag")

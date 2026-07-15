@@ -47,7 +47,14 @@ import sys
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
 
-sys.path[:0] = ["/Users/noah/Ortho4XP-novemberlima/src"]
+# Repo-RELATIVE and APPENDED (round-9 fix): the previous hardcoded
+# main-checkout path at sys.path[0] hijacked ``auto_patch`` imports in
+# any process that also runs worktree code (the known worktree
+# isolation trap — importing this tool made test sessions resolve
+# auto_patch from the MAIN repo).
+import os as _os
+sys.path.append(_os.path.join(_os.path.dirname(_os.path.dirname(
+    _os.path.abspath(__file__))), "src"))
 from shapely import STRtree
 from shapely.geometry import LineString, Point
 
@@ -224,6 +231,46 @@ def analyze(path, tol=0.15, top=12):
             xing_worst.append((depth, key, iy / mlat, ix / mlon,
                                ways[wi][0], ways[wj][0], len_r, len_s))
 
+    # ── 4b. SAME-WAY SELF-CROSSINGS (round-9 order, 2026-07-14) ──────
+    # A way's own edges properly crossing — a self-intersecting loop.
+    # The class-4 detector deliberately skips same-way pairs (foreign
+    # crossings only), which let 9 self-crossing gap interior rings
+    # through at CYXY.  Same analytic segment-segment test, same 1 mm
+    # endpoint tolerance; ADJACENT edges (sharing a node id, including
+    # a closed ring's first/last) are a shared endpoint, not a cross.
+    self_x = Counter()
+    self_x_worst = []
+    for gi, g in enumerate(edge_geoms):
+        wi, a, b, ax, ay, bx, by = edges[gi]
+        rx, ry = bx - ax, by - ay
+        for gj in tree.query(g):
+            if gj <= gi:
+                continue
+            wj, c, d, cx, cy, ddx, ddy = edges[gj]
+            if wj != wi:
+                continue                     # foreign cross: class 4
+            if len({a, b} & {c, d}):
+                continue                     # adjacent edges share a node
+            sx, sy = ddx - cx, ddy - cy
+            denom = rx * sy - ry * sx
+            if abs(denom) < 1e-12:
+                continue
+            qx, qy = cx - ax, cy - ay
+            t = (qx * sy - qy * sx) / denom
+            u = (qx * ry - qy * rx) / denom
+            if not (0.0 <= t <= 1.0 and 0.0 <= u <= 1.0):
+                continue
+            len_r = math.hypot(rx, ry)
+            len_s = math.hypot(sx, sy)
+            depth = min(t * len_r, (1.0 - t) * len_r,
+                        u * len_s, (1.0 - u) * len_s)
+            if depth < ENDPOINT_TOLERANCE:
+                continue
+            ix, iy = ax + t * rx, ay + t * ry
+            self_x[ways[wi][1]] += 1
+            self_x_worst.append((depth, ways[wi][1], iy / mlat,
+                                 ix / mlon, ways[wi][0]))
+
     # ── 3. coincident node ids ───────────────────────────────────────
     by_coord = defaultdict(list)
     for nid, (la, lo) in nodes.items():
@@ -262,6 +309,17 @@ def analyze(path, tol=0.15, top=12):
             print(f"     depth={depth * 1000:8.3f}mm {key[0]}~{key[1]} "
                   f"@ {la:.7f},{lo:.7f} ways={wa}/{wb} "
                   f"edgelen={lr:.2f}/{ls:.2f}m")
+    print(f"   SAME-WAY SELF-CROSSINGS (a way's own edges properly "
+          f"cross, depth>={ENDPOINT_TOLERANCE * 1000:g}mm): "
+          f"{sum(self_x.values())}")
+    for key, c in self_x.most_common(top):
+        print(f"     {key}: {c}")
+    if self_x_worst:
+        print("   self-crossings (deepest interior first):")
+        for depth, key, la, lo, wa in sorted(
+                self_x_worst, reverse=True)[:max(top, len(self_x_worst))]:
+            print(f"     depth={depth * 1000:8.3f}mm {key} "
+                  f"@ {la:.7f},{lo:.7f} way={wa}")
     if np_worst:
         print("   worst near-parallel pairs:")
         for sep, key, la, lo in sorted(np_worst, reverse=True)[:top]:
@@ -272,7 +330,8 @@ def analyze(path, tol=0.15, top=12):
         print(f"     perp={perp * 1000:8.3f}mm {key[0]}~{key[1]} "
               f"@ {la:.7f},{lo:.7f} nid={nid}")
     print()
-    return total_tv, sum(np_pairs.values()), sum(xing_pairs.values())
+    return (total_tv, sum(np_pairs.values()), sum(xing_pairs.values()),
+            sum(self_x.values()))
 
 
 if __name__ == "__main__":

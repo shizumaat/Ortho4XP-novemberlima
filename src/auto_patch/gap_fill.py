@@ -137,19 +137,19 @@ _RING_MIN_CLEARANCE_M = 1.5
 # Minimum spacing between consecutive accepted ring nodes (corner fans
 # converge inward offsets; closer nodes are dropped).
 _RING_MIN_NODE_SPACING_M = 2.0
-# A ring never reaches past this fraction of the local cross width, so
-# opposite-parent rings can never cross each other or the mid-gap spine
-# (the collapse-ladder geometry: as the gap narrows the effective ring
-# offset shrinks, degenerates, and finally suppresses — each rung
-# reducing to today's behavior).
-_RING_CROSS_FRACTION = 0.45
-# Maximum radial change of the ring-2 offset per along-boundary meter
-# (cyclic min-relaxation, the daylight-law coupling applied to the
-# OFFSET): where the bounding family width switches (75 m runway band
-# beside a 12.5 m junction band) the loop transitions on a bench
-# instead of a radial seam no closed loop could span (round-8
-# complete-loop mandate).
-_RING_OFFSET_BENCH_RATE = 0.5
+# ROUND-9 (Noah 2026-07-14): the rings are boundaries of TRUE POLYGON
+# INWARD OFFSETS (the round-8 per-station offset walk self-crossed at
+# boundary concavities and parent-width transitions — 9 of 27 CYXY
+# loops).  Region smoothing = morphological opening + closing at this
+# minimum-feature radius: fingers/spikes thinner than it are dropped,
+# boundary notches narrower than it are NOT traced (calibrated against
+# Noah's hand-edited reference loop, CYXY_auto_MOD way -68615 — the
+# reference expresses GEOMETRY only).
+_RING_MIN_FEATURE_RADIUS_M = 10.0
+# Hard clearance collar against the gap boundary: every smoothed ring
+# region is clipped to gap.buffer(-this), so no notch-fill can push a
+# loop into the zero-lens danger zone at the pavement chain.
+_RING_BOUNDARY_CLEARANCE_M = 1.6
 # Maximum along-ring VALUE drop per meter (max-relaxation raising the
 # low side, capped at each node's point-law ceiling): the point-law
 # BOUNDS step where the governing parent switches family (a 75 m
@@ -671,42 +671,39 @@ def _ring_parent_band(layout, shape, rw_axes):
 def _build_gap_interior_rings(layout, airside, gap_poly, spine, values,
                               dem, tile_lat, tile_lon, rw_axes, step):
     """Construct the interior ring breaklines for ONE emitted gap face
-    (round-8 semantics: COMPLETE closed loops, value-gated).  Returns
-    ``(chains, clamped_values, stats)``: ``chains`` = list of
-    ``(coords_m, alts)`` polylines (a fully wrapping ring repeats its
-    first coordinate — closed), and ``clamped_values`` = the spine
-    values with the ring-2 CEILING re-coupling applied (inside the
-    ring-2 core a spine node may not rise above a FLOOR-ENGAGED ring-2
-    station's value; where the ring rides terrain the spine keeps
-    today's pavement coupling untouched).
+    (round-9 rebuild: TRUE POLYGON INWARD OFFSETS — the per-station
+    offset walk of round 8 self-crossed at boundary concavities and
+    parent-width transitions, 9 self-intersecting loops at CYXY).
 
-    STATIONS march the gap exterior at ``step``; per station the
-    nearest bounding parent fixes the family band (``_ring_parent_band``).
-    The COLLAPSE LADDER is geometric and unchanged: the effective
-    ring-2 offset is capped at ``_RING_CROSS_FRACTION`` of the local
-    cross width (opposite rings/spine can never be reached), ring 1
-    drops when ring 2 shrinks to within ``_RING_MIN_SEPARATION_M`` of
-    the lip, and both drop when even the lip does not fit — reducing
-    to today's spine-only gap.
+    REGIONS, not stations:
 
-    VALUES (round-8 ruling): every station of every emitted ring gets
-    ``clamp(terrain, floor, ceiling)`` at its POINT-LAW interval — the
-    two nearest parents' envelopes at the point's TRUE distances,
-    combined ``[max(floors), min(ceilings)]`` with the
-    ``_spine_interval`` nearer-parent fallback on an empty
-    intersection.  Lawful terrain → the ring rides it (value no-op);
-    a drop below the floor → floor pin (fill); a rise above the
-    ceiling → ceiling pin (cut).  Continuity ALONG the ring is by
-    construction (terrain continuous, clamp continuous — no arc ends,
-    no cliffs).  A gap where EVERY station of BOTH rings is a value
-    no-op (within ``_RING_VALUE_NOOP_TOLERANCE_M``) skips its rings
-    entirely — the per-gap economy gate, all-or-nothing."""
-    exterior = gap_poly.exterior
-    length = exterior.length
-    if length < 4.0 * step:
-        n_st = max(8, int(round(length / max(step / 2.0, 1.0))))
-    else:
-        n_st = max(8, int(round(length / step)))
+      * ring-2 CORE  = gap minus the union of every bounding parent's
+        polygon buffered by ITS band width (per-parent widths, true
+        runway codes) — the exact distance-law band annulus;
+      * ring-1 region = gap shrunk by the drainage lip
+        (``gap.buffer(-ADJACENT_GROUND_LIP_WIDTH_M)``).
+
+    Both regions are SMOOTHED by a morphological opening + closing at
+    ``_RING_MIN_FEATURE_RADIUS_M`` (drops fingers/spikes, fills
+    boundary-notch tracing — calibrated against Noah's hand-edited
+    reference loop, CYXY_auto_MOD way -68615) and clipped to
+    ``gap.buffer(-_RING_BOUNDARY_CLEARANCE_M)`` (the zero-lens
+    boundary floor).  Shapely polygon boundaries are SIMPLE BY
+    CONSTRUCTION; simplicity is a HARD INVARIANT re-asserted on every
+    resampled loop (a non-simple product raises — a bug, never a
+    repair case).  A concave gap naturally splitting into several
+    core components is CORRECT — each sub-area gets its collar; the
+    hole-in-the-middle rung falls out of the geometry.
+
+    Kept from round 8: closed loops; per-node values
+    ``clamp(terrain, floor, ceiling)`` at TRUE two-nearest-parent
+    distances (``_point_interval`` — the smoothed loop's varying
+    offset is handled by true-distance evaluation); the two-sided
+    along-ring value bench; the per-gap economy skip; ring 1
+    all-or-nothing per gap (dropped when any ring-1 loop crowds a
+    ring-2 loop); the spine trimmed to the core; the ring-2 ceiling
+    re-coupling.  Returns ``(chains, clamped_values, stats,
+    spine_chains)`` exactly as before."""
     lip = ADJACENT_GROUND_LIP_WIDTH_M
     boundary_ls = gap_poly.boundary
     spine_ls = LineString(spine) if len(spine) >= 2 else None
@@ -734,12 +731,11 @@ def _build_gap_interior_rings(layout, airside, gap_poly, spine, values,
         convention), each parent's envelope at that distance on top of
         its interpolated edge altitude — combined as
         ``[max(floors), min(ceilings)]``; an empty intersection falls
-        back to the NEARER parent's own interval (the
-        ``_spine_interval`` rule).  Evaluating at the point rather than
-        along the station normal matters at corners: a diagonal normal
-        overstates the offset and would pin the ring BELOW the floor
-        the law demands at the point's true distance.  ``(None, None)``
-        = no law governs the point (the ring rides terrain there)."""
+        back to the NEARER parent's own interval.  The FLOOR is
+        evaluated at ``min(d, band width)`` (the exterior emitter's
+        ``floor_depth`` clamp — the band-edge floor never opens where
+        the smoothed loop swings past the band edge).  ``(None,
+        None)`` = no law governs the point."""
         p = Point(pt)
         cands = []
         for s in airside:
@@ -756,15 +752,6 @@ def _build_gap_interior_rings(layout, airside, gap_poly, spine, values,
                 continue
             prole, pcn, pcl, pw = pband
             try:
-                # FLOOR at min(d, band width): the ring is the band-edge
-                # row, so it carries the band-edge floor even where a
-                # corner point drifts past the band (the exterior
-                # emitter's own pattern — adjacent_ground
-                # ``_band_family_closures.floor_depth`` clamps to the
-                # graded width "so the fill floor stays finite").
-                # Without the clamp the floor's finite→None transition
-                # at the band edge minted a 23 m pin-to-terrain cliff
-                # ALONG the ring (round-8 continuity mandate).
                 fo, _co_at_w = adjacent_ground_envelope(
                     prole, pcn, pcl, max(0.0, min(d, pw)))
                 _fo_raw, co = adjacent_ground_envelope(
@@ -791,13 +778,11 @@ def _build_gap_interior_rings(layout, airside, gap_poly, spine, values,
         return lo, hi
 
     def _level(pt):
-        """Per-level station record: VALUE = clamp(terrain, floor,
-        ceiling) at the point-law interval (round-8: the exterior
-        per-vertex law at the ring stations).  Lawful terrain → value
-        no-op (the ring rides the ground); drop below floor → floor
-        pin (fill); rise above ceiling → ceiling pin (cut).  With no
-        terrain sample the law bound stands alone; with neither, the
-        level is absent."""
+        """Per-node record: VALUE = clamp(terrain, floor, ceiling) at
+        the point-law interval (round-8 value semantics, unchanged in
+        round 9).  Lawful terrain → value no-op (the ring rides the
+        ground); drop below floor → floor pin (fill); rise above
+        ceiling → ceiling pin (cut)."""
         if pt is None:
             return None
         terrain = _dem_at(*pt)
@@ -821,457 +806,308 @@ def _build_gap_interior_rings(layout, airside, gap_poly, spine, values,
                                   v > terrain +
                                   _RING_VALUE_NOOP_TOLERANCE_M)}
 
-    # ── Survey pass A: station geometry (position, inward normal,
-    # cross width, nearest-parent band width) ─────────────────────────
-    geo: list[dict | None] = []
-    for k in range(n_st):
+    stats = {"stations": 0, "eligible": 0, "noop_stations": 0,
+             "engaged_stations": 0, "chains": 0, "nodes": 0,
+             "skipped": False}
+
+    # ── REGIONS (round-9): polygon inward offsets ─────────────────────
+    zones = []
+    for s in airside:
+        pband = _band_of(s)
+        if pband is None:
+            continue
+        w = pband[3]
         try:
-            p0 = exterior.interpolate((k / n_st) * length)
-            pa = exterior.interpolate(((k - 1) % n_st / n_st) * length)
-            pb = exterior.interpolate(((k + 1) % n_st / n_st) * length)
+            if s.polygon.distance(gap_poly) > w:
+                continue
+            zones.append(s.polygon.buffer(w, quad_segs=4))
         except _GEOM_EXC:
-            geo.append(None)
             continue
-        t = _unit(pb.x - pa.x, pb.y - pa.y)
-        if t is None:
-            geo.append(None)
-            continue
-        nx, ny = -t[1], t[0]                       # candidate inward normal
-        probe = Point(p0.x + nx * 0.5, p0.y + ny * 0.5)
-        if not gap_poly.contains(probe):
-            nx, ny = -nx, -ny
-            probe = Point(p0.x + nx * 0.5, p0.y + ny * 0.5)
-            if not gap_poly.contains(probe):
-                geo.append(None)                   # degenerate corner
-                continue
-        # Nearest bounding parent + its family band.
-        best = None
-        for s in airside:
-            try:
-                d = s.polygon.exterior.distance(p0)
-            except _GEOM_EXC:
-                continue
-            if best is None or d < best[0]:
-                best = (d, s)
-        if best is None:
-            geo.append(None)
-            continue
-        band = _band_of(best[1])
-        if band is None:
-            geo.append(None)
-            continue
-        # Local cross width along the inward normal.
-        hit = _boundary_intersection((p0.x, p0.y), (nx, ny), gap_poly,
-                                     GAP_FILL_MAX_WIDTH_M + 50.0)
-        cross = (math.hypot(hit[0] - p0.x, hit[1] - p0.y)
-                 if hit is not None else GAP_FILL_MAX_WIDTH_M)
-        # Raw ring-2 offset: the family band edge, capped by the
-        # cross-fraction AND by opposite-side separation (both sides'
-        # ring-2 lines keep >= 2 m between them in narrow stretches —
-        # 0.5·cross − 1.0).  A station where not even the lip fits is
-        # a deliberate pinch-neck ladder hole (the ratified
-        # intermediate rungs).  The mid-gap SPINE does NOT constrain
-        # the rings — the rings are first-class and the spine is
-        # TRIMMED to the ring-2 core after assembly (round-8: inside
-        # the ring the governing reference is the ring; a full-length
-        # spine would otherwise have to CROSS the closed loop at both
-        # gap ends).
-        w2_raw = min(band[3], _RING_CROSS_FRACTION * cross,
-                     0.5 * cross - 1.0)
-        if w2_raw < lip:
-            geo.append(None)                   # pinch neck — no rings
-            continue
-        geo.append({"b": (p0.x, p0.y), "n": (nx, ny), "cross": cross,
-                    "w_band": band[3], "w2_raw": w2_raw})
+    try:
+        core = (gap_poly.difference(unary_union(zones)) if zones
+                else None)
+        lip_region = gap_poly.buffer(-lip, quad_segs=4)
+    except _GEOM_EXC:
+        return [], list(values), stats, None
 
-    # ── Survey pass B: BENCHED ring-2 offset profile.  The raw offset
-    # min(w_band, fraction·cross) JUMPS radially where the bounding
-    # parent's family width switches (a 75 m runway band next to a
-    # 12.5 m junction band) — a 45-118 m radial seam that no closed
-    # loop can span without crossing the spine (measured at CYXY, the
-    # round-8 closure failure).  Rate-limit the offset along the
-    # boundary (the daylight-law coupling applied to the OFFSET, cyclic
-    # min-relaxation both directions) so the loop transitions between
-    # family widths on a bench and stays geometrically closable. ──────
-    spacing = length / n_st
-    w2_arr: list[float | None] = [
-        None if g is None else g["w2_raw"] for g in geo]
-    for _sweep in range(2):
-        for rng in (range(n_st * 2), range(n_st * 2 - 1, -1, -1)):
-            prev_val, prev_i = None, None
-            for i in rng:
-                k = i % n_st
-                if w2_arr[k] is None:
+    def _smooth_region(region):
+        """Morphological opening (drop fingers/spikes thinner than the
+        minimum-feature radius) then closing (fill notch tracing),
+        clipped to the hard boundary-clearance collar; returns the
+        polygon parts above the noise floor."""
+        if region is None or region.is_empty:
+            return []
+        r = _RING_MIN_FEATURE_RADIUS_M
+        try:
+            region = region.buffer(-r, quad_segs=4).buffer(r, quad_segs=4)
+            region = region.buffer(r, quad_segs=4).buffer(-r, quad_segs=4)
+            region = region.intersection(
+                gap_poly.buffer(-_RING_BOUNDARY_CLEARANCE_M, quad_segs=4))
+        except _GEOM_EXC:
+            return []
+        return [g for g in _poly_parts(region)
+                if g.area >= GAP_FILL_MIN_AREA_M2]
+
+    core_parts = _smooth_region(core)
+    lip_parts = _smooth_region(lip_region)
+
+    def _region_loops(parts):
+        loops = []
+        for pg in parts:
+            for ring in [pg.exterior] + list(pg.interiors):
+                try:
+                    if ring.length >= 6.0 * _RING_MIN_NODE_SPACING_M:
+                        loops.append(ring)
+                except _GEOM_EXC:
                     continue
-                if prev_val is not None:
-                    gap_steps = abs(i - prev_i)
-                    w2_arr[k] = min(
-                        w2_arr[k],
-                        prev_val + _RING_OFFSET_BENCH_RATE
-                        * spacing * gap_steps)
-                prev_val, prev_i = w2_arr[k], i
+        return loops
 
-    # ── Survey pass C: ladder + per-level clamp values ────────────────
-    stations: list[dict | None] = []
-    for k in range(n_st):
-        g = geo[k]
-        if g is None:
-            stations.append(None)
-            continue
-        (bx, by), (nx, ny) = g["b"], g["n"]
-        w2 = w2_arr[k]
-        if w2 is None or w2 < lip:
-            stations.append(None)              # bench pulled below lip
-            continue
-        # Collapse ladder (each rung reduces to today's behavior or
-        # better): ring 1 needs radial separation from ring 2; when it
-        # fails, the single (shrunk) ring-2 breakline stands alone
-        # (rung 3); pass A already dropped stations where not even the
-        # lip fits (rung 4).
-        has_ring1 = (w2 - lip) >= _RING_MIN_SEPARATION_M
-        p1 = (bx + nx * lip, by + ny * lip) if has_ring1 else None
-        p2 = (bx + nx * w2, by + ny * w2)
-        lvl2 = _level(p2)
-        if lvl2 is None:
-            stations.append(None)              # no law and no terrain
-            continue
-        lvl1 = _level(p1)
-        stations.append({"b": (bx, by), "w2": w2,
-                         "p2": lvl2, "p1": lvl1})
+    ring2_loops = _region_loops(core_parts)
+    ring1_loops = _region_loops(lip_parts)
+    # Ring 1 all-or-nothing per gap (round-8 rung 3): drop it whole
+    # when any ring-1 loop crowds a ring-2 loop.
+    if ring1_loops and ring2_loops:
+        try:
+            if any(l1.distance(l2) < _RING_MIN_SEPARATION_M
+                   for l1 in ring1_loops for l2 in ring2_loops):
+                ring1_loops = []
+        except _GEOM_EXC:
+            ring1_loops = []
+    if not ring2_loops and not ring1_loops:
+        return [], list(values), stats, None
 
-    eligible = [k for k, r in enumerate(stations) if r is not None]
-    stats = {"stations": n_st, "eligible": len(eligible),
-             "noop_stations": 0, "engaged_stations": 0,
-             "chains": 0, "nodes": 0, "skipped": False}
-    # Per-gap rung 4: a gap where rings fit at only a sliver of the
-    # boundary (a 6 m channel whose only "eligible" stations look down
-    # the LENGTH of the channel from its ends) gets no rings at all —
-    # a two-node micro-ring is exactly the fragment class round 8
-    # bans.  Today's spine-only behavior stands.
-    if len(eligible) < max(3, int(0.2 * n_st)):
-        return [], list(values), stats
+    # ── Resample each loop at the station step + point-law values ────
+    sampled = []                # (level_tag, pts, recs)
+    inner_cover = None
+    try:
+        inner_cover = gap_poly.buffer(-0.8, quad_segs=4)
+    except _GEOM_EXC:
+        inner_cover = None
+    for tag, loops in (("ring2", ring2_loops), ("ring1", ring1_loops)):
+        for loop in loops:
+            perim = loop.length
+            n = max(8, int(round(perim / step)))
+            if perim / n < _RING_MIN_NODE_SPACING_M:
+                n = max(3, int(perim // _RING_MIN_NODE_SPACING_M))
+            if n < 3:
+                continue
+            pts = None
+            # Chords of a coarse resample can cut inside pavement at a
+            # concave boundary detail (a foreign-crossing mint).
+            # Densify until the closed polyline stays covered by the
+            # gap; final fallback = the smoothed loop's own vertices,
+            # topology-preserving-simplified (simple by construction).
+            for n_try in (n, 2 * n, 4 * n):
+                cand = []
+                for i in range(n_try):
+                    q = loop.interpolate((i / n_try) * perim)
+                    cand.append((float(q.x), float(q.y)))
+                try:
+                    ok = (inner_cover is None or inner_cover.covers(
+                        LineString(cand + [cand[0]])))
+                except _GEOM_EXC:
+                    ok = False
+                if ok:
+                    pts = cand
+                    break
+            if pts is None:
+                try:
+                    simp = loop.simplify(0.75, preserve_topology=True)
+                    pts = [(float(x), float(y))
+                           for x, y in list(simp.coords)[:-1]]
+                except _GEOM_EXC:
+                    continue
+                if len(pts) < 3:
+                    continue
+            # SIMPLICITY — the round-9 hard invariant.  The source is
+            # a shapely polygon boundary (simple by construction); the
+            # resampled chord polygon must stay simple too (the
+            # minimum-feature radius bounds curvature well above the
+            # station step).  A violation is a BUG, never a repair
+            # case.
+            try:
+                if not Polygon(pts).is_valid:
+                    raise ValueError(
+                        "gap interior ring loop resampled NON-SIMPLE "
+                        f"(gap centroid {gap_poly.centroid.wkt}) — "
+                        "round-9 invariant violated")
+            except _GEOM_EXC:
+                raise
+            recs = [_level(pt) for pt in pts]
+            if any(r is None for r in recs):
+                continue                    # no law + no terrain: drop
+            sampled.append((tag, pts, recs))
 
-    # ── Per-gap ring-1 rung (round-8: rungs are PER-GAP, not
-    # per-station — a per-station ring-1 hole minted exactly the
-    # mid-gap arc ENDS the ruling bans).  Ring 1 stands for the whole
-    # gap only where the radial separation held at EVERY eligible
-    # station; otherwise the single ring-2 loop stands alone
-    # (gap-wide rung 3). ───────────────────────────────────────────────
-    if any(stations[k]["p1"] is None for k in eligible):
-        for k in eligible:
-            stations[k]["p1"] = None
+    if not sampled:
+        return [], list(values), stats, None
 
-    # ── Per-gap economy gate (round-8, all-or-nothing): a gap whose
-    # EVERY station of BOTH rings is a value no-op emits nothing — the
-    # rings would be invisible terrain-riders throughout. ──────────────
-    engaged = 0
-    for k in eligible:
-        rec = stations[k]
-        levels = [rec["p2"]] + ([rec["p1"]] if rec["p1"] else [])
-        if all(l["noop"] for l in levels):
-            stats["noop_stations"] += 1
-        else:
-            engaged += 1
+    # ── Per-gap economy gate (round-8, all-or-nothing) ────────────────
+    engaged = noop = 0
+    for _tag, _pts, recs in sampled:
+        for r in recs:
+            if r["noop"]:
+                noop += 1
+            else:
+                engaged += 1
+    stats["stations"] = stats["eligible"] = engaged + noop
+    stats["noop_stations"] = noop
     stats["engaged_stations"] = engaged
     if engaged == 0:
         stats["skipped"] = True
-        return [], list(values), stats
+        return [], list(values), stats, None
 
-    # ── Chain assembly per ring level (outermost first) ───────────────
-    accepted_geoms: list = []
-    chains: list[tuple[list, list]] = []
-
-    def _node_reject_reason(pt, prev):
-        """None when the node passes every zero-lens guard, else a
-        short reason string (surfaced through ``debug_reject``)."""
-        p = Point(pt)
-        try:
-            if not gap_poly.contains(p):
-                return "outside-gap"
-            if boundary_ls.distance(p) < _RING_MIN_CLEARANCE_M:
-                return "boundary-clearance"
-            for g in accepted_geoms:
-                if g.distance(p) < _RING_MIN_CLEARANCE_M:
-                    return "chain-clearance"
-        except _GEOM_EXC:
-            return "geom-error"
-        if prev is not None:
-            if math.hypot(pt[0] - prev[0],
-                          pt[1] - prev[1]) < _RING_MIN_NODE_SPACING_M:
-                return "node-spacing"
-            seg = LineString([prev, pt])
-            try:
-                if not gap_poly.covers(seg):
-                    return "segment-outside"
-                for g in accepted_geoms:
-                    if seg.distance(g) < _RING_MIN_CLEARANCE_M / 2.0:
-                        return "segment-clearance"
-            except _GEOM_EXC:
-                return "geom-error"
-        return None
-
-    debug_reject: list[tuple] = []
-
-    def _node_ok(pt, prev, cur_chain):
-        reason = _node_reject_reason(pt, prev)
-        if reason is not None:
-            debug_reject.append((pt, reason))
-            return False
-        return True
-
-    def _bench_along(pts, alts, los, his, closed):
-        """Along-ring value bench (round-8 continuity), two-sided:
-
-          * FILL side — max-relaxation RAISING the low side of an
-            over-steep step at ``_RING_ALONG_BENCH_SLOPE``, capped at
-            each node's point-law CEILING (fill above the floor is
-            always lawful up to the ceiling; a floor pin is never
-            broken — floors are only ever approached from above);
-          * CUT side — min-relaxation LOWERING the high side, capped
-            at each node's point-law FLOOR (the
-            ``adjacent_ground_supported_depths`` semantics on the cut
-            side: a ceiling-pin cut wall is entered on a bench —
-            over-excavating the approach, physically how a cut is
-            built).
-
-        Needed because the point-law bounds themselves STEP where the
-        two-nearest parent set changes (a far runway's zone-3 ceiling
-        vs a near junction's) — terrain continuity alone does not give
-        value continuity.  A residual step survives only where the
-        floor and ceiling caps themselves demand it (clamp-limited).
-        Closed loops relax cyclically."""
+    def _bench_along(pts, alts, los, his):
+        """Two-sided along-ring value bench (round-8 continuity law,
+        unchanged): FILL side raises the low neighbor (ceiling-capped),
+        CUT side lowers the high neighbor (floor-capped) at
+        ``_RING_ALONG_BENCH_SLOPE``; every loop is closed, so the
+        relaxation is cyclic.  A residual step survives only where the
+        caps themselves demand it (clamp-limited)."""
         n = len(alts)
         if n < 3:
-            return alts
-        core = n - 1 if closed else n     # skip the closing repeat
+            return [round(x, 2) for x in alts]
         v = list(alts)
-
-        def _pairs(direction):
-            rng = (range(core) if direction == 1
-                   else range(core - 1, -1, -1))
-            prev = None
-            for k in rng:
-                if prev is not None:
-                    yield (prev, k)
-                prev = k
-            if closed and core >= 2:
-                yield ((core - 1, 0) if direction == 1
-                       else (0, core - 1))
-
+        order = list(range(n))
         for _ in range(2):
-            for direction in (1, -1):
-                for a, k in _pairs(direction):
-                    pk, pp = pts[k], pts[a]
+            for rng in (order, order[::-1]):
+                prev = rng[-1]              # cyclic
+                for k in rng:
+                    pk, pp = pts[k], pts[prev]
                     dist = math.hypot(pk[0] - pp[0], pk[1] - pp[1])
                     allow = _RING_ALONG_BENCH_SLOPE * dist
-                    cand = v[a] - allow      # FILL: raise the low side
+                    cand = v[prev] - allow   # FILL: raise the low side
                     if cand > v[k]:
                         cap = his[k]
                         v[k] = cand if cap is None else min(cand, cap)
-                    cand = v[a] + allow      # CUT: lower the high side
+                    cand = v[prev] + allow   # CUT: lower the high side
                     if cand < v[k]:
                         cap = los[k]
                         v[k] = cand if cap is None else max(cand, cap)
-        if closed:
-            v[-1] = v[0]
+                    prev = k
         return [round(x, 2) for x in v]
 
-    def _flush(chain_pts, chain_alts, chain_los, chain_his):
-        if len(chain_pts) >= 2:
-            try:
-                accepted_geoms.append(LineString(chain_pts))
-            except _GEOM_EXC:
-                return
-            closed = (len(chain_pts) >= 4
-                      and chain_pts[0] == chain_pts[-1])
-            benched = _bench_along(chain_pts, chain_alts, chain_los,
-                                   chain_his, closed)
-            chains.append((chain_pts, benched))
-            stats["chains"] += 1
-            stats["nodes"] += len(chain_pts)
-
-    # ── Chain assembly per ring level (outermost first).  ROUND-8:
-    # complete unbroken loops — a node failing a zero-lens guard is
-    # SKIPPED (the chain continues to the next accepted station over a
-    # longer, still fully-checked segment), never split; the chain
-    # only breaks where the collapse LADDER removes the level
-    # entirely (narrow necks — the ladder's own rungs).  The SPINE is
-    # deliberately NOT in the guard set: rings are first-class, and
-    # the spine is trimmed to the ring-2 core below. ───────────────────
-    for level in ("p2", "p1"):
-        emit_k = [k for k in range(n_st)
-                  if stations[k] is not None
-                  and stations[k][level] is not None]
-        if not emit_k:
+    chains: list[tuple[list, list]] = []
+    ring2_recs: list[dict] = []
+    emitted_loop_lines: list = []
+    for tag, pts, recs in sampled:
+        # Cross-loop zero-lens guard: a loop hugging an already
+        # accepted loop below the clearance floor is dropped whole
+        # (loops are region boundaries — they never cross, but two
+        # components can crowd a thin sliver).
+        try:
+            cand_ls = LineString(pts + [pts[0]])
+        except _GEOM_EXC:
             continue
-        emit_set = set(emit_k)
-        # ROUND-8 walk: a station without this level is SKIPPED, never
-        # a split — the chain spans it on a longer, still fully
-        # checked segment (degenerate corners / missing samples are
-        # not rung holes).  The chain SPLITS only where a connecting
-        # SEGMENT genuinely cannot run (a covers failure at a true
-        # pinch neck, or a clearance conflict).  A first pass from an
-        # arbitrary start that hits such a blockage would cut the loop
-        # TWICE (once at the blockage, once at the walk seam) — the
-        # walk therefore RESTARTS at the first blockage so the loop is
-        # cut exactly where the geometry demands and nowhere else.
-        def _walk(start_k):
-            parts: list[tuple[list, list, list, list]] = []
-            c_pts: list[tuple[float, float]] = []
-            c_alts: list[float] = []
-            c_los: list[float | None] = []
-            c_his: list[float | None] = []
-            first_fail = None
-
-            def _append(lvl):
-                c_pts.append(lvl["pt"])
-                c_alts.append(round(float(lvl["v"]), 2))
-                c_los.append(lvl["lo"])
-                c_his.append(lvl["hi"])
-
-            for i in range(n_st):
-                k = (start_k + i) % n_st
-                if k not in emit_set:
-                    continue                # span the missing station
-                lvl = stations[k][level]
-                prev = c_pts[-1] if c_pts else None
-                reason = _node_reject_reason(lvl["pt"], prev)
-                if reason is None:
-                    _append(lvl)
-                    continue
-                debug_reject.append((lvl["pt"], reason))
-                if reason.startswith("segment"):
-                    if first_fail is None:
-                        first_fail = k
-                    if len(c_pts) >= 2:
-                        parts.append((c_pts, c_alts, c_los, c_his))
-                    c_pts, c_alts, c_los, c_his = [], [], [], []
-                    if _node_reject_reason(lvl["pt"], None) is None:
-                        _append(lvl)
-                # node-level rejection: skip node, keep the chain
-            if c_pts:
-                parts.append((c_pts, c_alts, c_los, c_his))
-            return parts, first_fail
-
-        parts, first_fail = _walk(emit_k[0])
-        if first_fail is not None and len(parts) > 1:
-            parts, _ff = _walk(first_fail)
-        for c_pts, c_alts, c_los, c_his in parts:
-            # Close the loop when the level emitted as ONE unbroken
-            # chain and the closing segment is clean (the first-node
-            # repeat encodes closure for to_osm).  A closing chord
-            # blocked ONLY by node spacing (walk start and end landed
-            # on adjacent stations) drops the last node and closes.
-            if len(parts) == 1 and len(c_pts) >= 3:
-                _creason = _node_reject_reason(c_pts[0], c_pts[-1])
-                if _creason == "node-spacing" and len(c_pts) >= 4:
-                    c_pts.pop()
-                    c_alts.pop()
-                    c_los.pop()
-                    c_his.pop()
-                    _creason = _node_reject_reason(c_pts[0], c_pts[-1])
-                if _creason is None:
-                    c_pts.append(c_pts[0])
-                    c_alts.append(c_alts[0])
-                    c_los.append(c_los[0])
-                    c_his.append(c_his[0])
-                elif _creason is not None:
-                    debug_reject.append((c_pts[0], _creason))
-            _flush(c_pts, c_alts, c_los, c_his)
-
-    # ── Spine re-coupling (unchanged in round 8): ring 2 is the
-    # spine's CEILING where its station is FLOOR-ENGAGED (the clamp
-    # actually lifted the ring above terrain) AND the spine node sits
-    # INSIDE the ring-2 core; a spine node still within the band
-    # annulus keeps today's pavement coupling.  Values only ever move
-    # DOWN.  ALSO computed here: the nearest station per spine node,
-    # reused by the TRIM below. ────────────────────────────────────────
-    clamped = list(values)
-    nearest_station: list[int | None] = [None] * len(spine)
-    if chains:
-        for j, (sx, sy) in enumerate(spine):
-            best_k, best_d = None, None
-            for k in range(n_st):
-                rec = stations[k]
-                if rec is None:
-                    continue
-                d = math.hypot(rec["b"][0] - sx, rec["b"][1] - sy)
-                if best_d is None or d < best_d:
-                    best_d, best_k = d, k
-            if best_k is None:
-                continue
-            nearest_station[j] = best_k
-            rec = stations[best_k]
-            if (rec["p2"]["floor_engaged"] and best_d > rec["w2"]):
-                clamped[j] = min(clamped[j], round(rec["p2"]["v"], 1))
-
-    # ── SPINE TRIM to the ring-2 core (round-8): a closed ring-2 loop
-    # and a full-length spine would have to CROSS at both gap ends —
-    # the zero-lens guards rightly rejected exactly those crossings
-    # and cascaded half a loop away (the round-8 closure failure).
-    # Inside the ring the governing reference is the ring, so the
-    # spine — the OPEN-CORE drainage way — is cut back to the core:
-    # drop spine nodes within 2 m of any ring chain, or sitting in
-    # the band annulus (boundary distance not beyond the local ring-2
-    # offset), then split at any remaining segment that clips a ring.
-    # No rings emitted → the spine stays exactly today's. ──────────────
-    spine_chains: list[list[int]] | None = None
-    if chains:
-        ring_geoms = []
-        for _pts, _alts in chains:
+        too_close = False
+        for other in emitted_loop_lines:
             try:
-                ring_geoms.append(LineString(_pts))
+                if cand_ls.distance(other) < _RING_MIN_CLEARANCE_M:
+                    too_close = True
+                    break
             except _GEOM_EXC:
-                continue
-        keep = []
-        for j, (sx, sy) in enumerate(spine):
+                too_close = True
+                break
+        if too_close:
+            continue
+        alts = _bench_along(pts, [r["v"] for r in recs],
+                            [r["lo"] for r in recs],
+                            [r["hi"] for r in recs])
+        out_pts = pts + [pts[0]]
+        out_alts = alts + [alts[0]]
+        chains.append((out_pts, out_alts))
+        emitted_loop_lines.append(cand_ls)
+        stats["chains"] += 1
+        stats["nodes"] += len(pts)
+        if tag == "ring2":
+            for r, a in zip(recs, alts):
+                r["benched"] = a
+                ring2_recs.append(r)
+
+    if not chains:
+        return [], list(values), stats, None
+
+    # ── Spine re-coupling (unchanged law): ring 2 is the spine's
+    # CEILING where the nearest ring-2 node is FLOOR-ENGAGED and the
+    # spine node sits INSIDE the core.  Values only ever move DOWN. ────
+    clamped = list(values)
+    core_union = unary_union(core_parts) if core_parts else None
+    # The spine's TRIM REGION is the innermost emitted region: the
+    # core when ring-2 loops exist; the lip region when the bands
+    # cover the whole gap (core empty, ring 1 alone) — the drainage
+    # crest survives inside the lip ring instead of dying with the
+    # core (the zones-fully-overlap rung keeps its central spine).
+    if ring2_loops and core_union is not None:
+        trim_region = core_union
+    else:
+        try:
+            trim_region = unary_union(lip_parts) if lip_parts else None
+        except _GEOM_EXC:
+            trim_region = None
+    in_core: list[bool] = []
+    for j, (sx, sy) in enumerate(spine):
+        p = Point(sx, sy)
+        inside = False
+        try:
+            inside = (trim_region is not None
+                      and trim_region.covers(p))
+        except _GEOM_EXC:
+            inside = False
+        in_core.append(inside)
+        if not inside or not ring2_recs:
+            continue
+        best = None
+        for r in ring2_recs:
+            d = math.hypot(r["pt"][0] - sx, r["pt"][1] - sy)
+            if best is None or d < best[0]:
+                best = (d, r)
+        if best is not None and best[1]["floor_engaged"]:
+            clamped[j] = min(clamped[j], round(best[1]["benched"], 1))
+
+    # ── SPINE TRIM to the core (round-8, unchanged rationale): a
+    # full-length spine would cross the closed loops at the gap ends.
+    # Keep spine nodes inside the (smoothed) core with 2 m of loop
+    # clearance; split at any remaining segment that clips a loop. ─────
+    spine_chains: list[list[int]] | None = []
+    keep = []
+    for j, (sx, sy) in enumerate(spine):
+        ok = in_core[j]
+        if ok:
             p = Point(sx, sy)
-            ok = True
-            k = nearest_station[j]
-            if k is not None and stations[k] is not None:
+            for g in emitted_loop_lines:
                 try:
-                    if boundary_ls.distance(p) <= stations[k]["w2"] + 0.5:
-                        ok = False          # band annulus — ring-owned
-                except _GEOM_EXC:
-                    ok = False
-            if ok:
-                for g in ring_geoms:
-                    try:
-                        if g.distance(p) < 2.0:
-                            ok = False
-                            break
-                    except _GEOM_EXC:
+                    if g.distance(p) < 2.0:
                         ok = False
                         break
-            keep.append(ok)
-        spine_chains = []
-        cur: list[int] = []
-        for j in range(len(spine)):
-            if not keep[j]:
+                except _GEOM_EXC:
+                    ok = False
+                    break
+        keep.append(ok)
+    cur: list[int] = []
+    for j in range(len(spine)):
+        if not keep[j]:
+            if len(cur) >= 2:
+                spine_chains.append(cur)
+            cur = []
+            continue
+        if cur:
+            seg = LineString([spine[cur[-1]], spine[j]])
+            clipped = False
+            try:
+                for g in emitted_loop_lines:
+                    if seg.distance(g) < _RING_MIN_CLEARANCE_M / 2.0:
+                        clipped = True
+                        break
+            except _GEOM_EXC:
+                clipped = True
+            if clipped:
                 if len(cur) >= 2:
                     spine_chains.append(cur)
                 cur = []
-                continue
-            if cur:
-                seg = LineString([spine[cur[-1]], spine[j]])
-                clipped = False
-                try:
-                    for g in ring_geoms:
-                        if seg.distance(g) < _RING_MIN_CLEARANCE_M / 2.0:
-                            clipped = True
-                            break
-                except _GEOM_EXC:
-                    clipped = True
-                if clipped:
-                    if len(cur) >= 2:
-                        spine_chains.append(cur)
-                    cur = []
-            cur.append(j)
-        if len(cur) >= 2:
-            spine_chains.append(cur)
-        stats["spine_nodes_kept"] = sum(1 for x in keep if x)
-        stats["spine_nodes_total"] = len(spine)
-    stats["rejects"] = debug_reject
+        cur.append(j)
+    if len(cur) >= 2:
+        spine_chains.append(cur)
+    stats["spine_nodes_kept"] = sum(1 for x in keep if x)
+    stats["spine_nodes_total"] = len(spine)
     return chains, clamped, stats, spine_chains
 
 
