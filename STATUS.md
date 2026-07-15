@@ -374,9 +374,11 @@
 #    crashed before ever downloading.  Remaining feature gap from
 #    the cancelled order worth a future pass: per-airport loud
 #    degrade lines + strict-abort option + fetch timeouts.
-#    PROVENANCE STAMPS order also in flight (git sha + gates + DEM
-#    provenance in patch tags + one log line per airport +
-#    tools/patch_provenance.py reader).  CYXY inset cache is
+#    ★PROVENANCE STAMPS LANDED eb853e8 (default ON): o4_provenance_*
+#    root tags (sha+dirty, 90-gate live introspection, per-airport
+#    DEM lineage from bake-time sidecars — RAW is loud) + one log
+#    line per airport + tools/patch_provenance.py (exit 1 unstamped/
+#    dirty, --strict-raw; verified exit 1 on the raw-DEM patch).  CYXY inset cache is
 #    pre-warmed NOW; Noah's rebake needs only
 #    O4_AUTO_PATCH_REBUILD=1 (the 16:44 raw-DEM patch is stamped
 #    fresh and will be silently reused otherwise).  ★FLIP-BROKEN
