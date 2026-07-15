@@ -167,12 +167,42 @@ _POCKET_CLEARANCE = os.environ.get("O4_POCKET_CLEARANCE", "1") == "1"
 # The gate exists so slice-B can A/B against the charter target.  It is
 # scope FILTERING at source-edge collection — no code path is deleted;
 # O4_CLEARANCE_CHARTER=1 enables the (currently regressing) filter.
+# The ONE B4 review switch (config.B4_FLIP_DEFAULTS) flips this default ON
+# under the flip bundle; an explicit O4_CLEARANCE_CHARTER always wins.
+# Applied as a post-assignment override so the gate keeps a plain "0"
+# literal (see config.ADJACENT_GROUND_FULL_EXTENT_COVERAGE for the rationale).
+from .config import B4_FLIP_DEFAULTS as _B4_FLIP_DEFAULTS
 _CLEARANCE_CHARTER = os.environ.get("O4_CLEARANCE_CHARTER", "0") == "1"
+if _B4_FLIP_DEFAULTS and "O4_CLEARANCE_CHARTER" not in os.environ:
+    _CLEARANCE_CHARTER = True
 # Only build lateral strips for shapes that are genuinely elongated
 # (a taxiway / runway).  Chunky absorbed pieces (aspect < this) are
 # blob-like — "edge clearance" is ill-defined and they'd otherwise
 # infer a huge code letter from their large short edge.
 _MIN_LATERAL_ASPECT = 2.0
+# CHARTER EXTENSION (Slice B stage B4, Noah ruling 2026-07-10 verbatim:
+# "surface_clearance = WINGTIP clearance along taxiways and runways ONLY
+# — never aprons, never LARGE-AREA PIECES, never near groundside").  The
+# partial charter above scopes out apron/service SOURCES.  This extension
+# scopes out the remaining terminal/parking BLOBS: a JUNCTION/RESA ring
+# sweep mints a clearance PIECE that is both LARGE (area >= this floor)
+# AND CHUNKY (minimum-rotated-rectangle aspect < _MIN_LATERAL_ASPECT).  A
+# genuine wingtip strip is ELONGATED by construction (the Pass-A
+# centerline trace raycasts perpendicular to a taxiway/runway edge), so
+# the aspect gate never touches one; only the chunky junction/RESA blobs
+# Noah ruled out of scope (the CYXY 20,628 m² aspect-1.15 taxiway sweep
+# and the ~18,400 m² aspect-1.30 runway/RESA sweep) leave.  Threshold
+# trace: at CYXY the clearance-piece area/aspect distribution has a clean
+# gap — chunky blobs run 5,017–20,628 m² at aspect 1.09–1.30 while the
+# elongated strips that STAY are aspect >= 2.8 (the largest, 31,571 m²,
+# is aspect 4.04); small chunky corner sweeps sit <= 1,615 m² and are
+# below the area floor, so they too stay.  Byte-inert unless the charter
+# gate is ON.
+_CHARTER_BLOB_MIN_AREA_M2 = float(
+    os.environ.get("O4_CHARTER_BLOB_MIN_AREA_M2", "3000.0"))
+# Forensics: log every clearance piece the charter blob filter drops (and
+# the large-chunky pieces it keeps), for the threshold trace.
+_CHARTER_BLOB_DEBUG = os.environ.get("O4_CLEARANCE_CHARTER_DEBUG") == "1"
 # Cap the pavement width used to infer the code letter, so a
 # mis-shaped wide piece can't push the band beyond code F.
 _MAX_TAXIWAY_WIDTH_M = 45.0
@@ -655,6 +685,29 @@ def _rect_long_short_edges(coords: list[tuple[float, float]]):
     long_edges = [(edges[2][1], edges[2][2]), (edges[3][1], edges[3][2])]
     long_len = 0.5 * (edges[2][0] + edges[3][0])
     return long_edges, short_len, long_len
+
+
+def _min_rect_aspect(poly) -> float | None:
+    """Elongation of an arbitrary polygon = long/short side of its
+    minimum-rotated (bounding) rectangle.  A wingtip strip is elongated
+    (>> 1); a terminal/parking blob is chunky (~1).  Returns ``None`` when
+    the aspect cannot be measured (degenerate ring) — the blob filter reads
+    ``None`` as "unmeasurable, keep it" (never drop on a bad measurement)."""
+    try:
+        mrr = poly.minimum_rotated_rectangle
+        xs, ys = mrr.exterior.coords.xy
+    except Exception:
+        return None
+    sides = [math.hypot(xs[i + 1] - xs[i], ys[i + 1] - ys[i])
+             for i in range(len(xs) - 1)]
+    sides = [s for s in sides if s > 1e-6]
+    if not sides:
+        return None
+    short, lng = min(sides), max(sides)
+    if short <= 0.0:
+        return None
+    asp = lng / short
+    return asp if math.isfinite(asp) else None
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -1723,6 +1776,22 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
                         and opened.geom_type == "Polygon"
                         and opened.area >= _MIN_CUT_AREA_M2):
                     simple = opened
+                # CHARTER EXTENSION: drop the LARGE-AREA CHUNKY blob
+                # pieces (junction/RESA terminal sweeps) — a wingtip strip
+                # is elongated, so the aspect gate spares it.  Scope
+                # filtering only; byte-inert unless the charter is ON.
+                if _CLEARANCE_CHARTER and simple.area >= _CHARTER_BLOB_MIN_AREA_M2:
+                    _asp = _min_rect_aspect(simple)
+                    if _asp is not None and _asp < _MIN_LATERAL_ASPECT:
+                        if _CHARTER_BLOB_DEBUG:
+                            _c = simple.centroid
+                            print("  [clearance-charter] DROP blob piece "
+                                  f"area={simple.area:.0f} aspect={_asp:.2f} "
+                                  f"@local({_c.x:.0f},{_c.y:.0f})")
+                        continue
+                    if _CHARTER_BLOB_DEBUG:
+                        print("  [clearance-charter] KEEP large strip "
+                              f"area={simple.area:.0f} aspect={_asp}")
                 ring = _open_coords(simple)
                 if len(ring) < 3:
                     continue

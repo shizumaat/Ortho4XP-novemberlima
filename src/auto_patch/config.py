@@ -2382,8 +2382,31 @@ ONE_SOLVE_TERRAIN_GRADED_STRIP_CONSTRUCT = (
 # because a widened grid changes the legacy-ON valuation lookups (the
 # fallback count would drop) — that output change rides with B4, not with
 # the construct move.
+# ── SLICE B STAGE B4 — the flip bundle (Noah, round-10 ratification) ──
+# ONE review switch that stages the B4 configuration as flip-ready
+# DEFAULTS, following the fad621d / 53da9c2 review-defaults convention
+# (Noah edits ONE line to flip; every constituent env var still overrides
+# so a single gate can be pinned OFF under the bundle).  The B4 bundle is:
+#   * legacy surface_clearance OFF  (O4_LEGACY_SURFACE_CLEARANCE)
+#   * extended clearance charter ON (O4_CLEARANCE_CHARTER — wingtip strips
+#     only; junction/RESA large-area blobs excluded)
+#   * full-extent coverage grid ON  (O4_ADJACENT_GROUND_FULL_EXTENT_COVERAGE)
+# on top of the round-7 slice-B bundle (already ON).  DEFAULT OFF in this
+# delivery — the flip itself lands at round-10 ratification, when Noah
+# sets O4_B4_FLIP=1 here (or flips the three constituent defaults).  With
+# the switch OFF every constituent keeps its pre-B4 default, so the
+# delivery is byte-identical to the pre-switch tree.
+B4_FLIP_DEFAULTS = (_os.environ.get("O4_B4_FLIP", "0") == "1")
 ADJACENT_GROUND_FULL_EXTENT_COVERAGE = (
     _os.environ.get("O4_ADJACENT_GROUND_FULL_EXTENT_COVERAGE", "0") == "1")
+# B4 review switch flips this default ON under the bundle.  Applied as a
+# post-assignment override (not an inline conditional default) so the
+# gate keeps a plain "0" literal — the provenance source-parser reads
+# that literal, so the delivery stamp stays accurate — while an explicit
+# O4_ADJACENT_GROUND_FULL_EXTENT_COVERAGE always wins over the switch.
+if (B4_FLIP_DEFAULTS
+        and "O4_ADJACENT_GROUND_FULL_EXTENT_COVERAGE" not in _os.environ):
+    ADJACENT_GROUND_FULL_EXTENT_COVERAGE = True
 # Depth-direction spacing (m) of the full-extent coverage grid's zone
 # rows.  Must be <= the resampler's ``_ROW_RANGE_M`` (30 m) so every
 # emit-time band vertex, at any lateral depth, finds a solved row of its

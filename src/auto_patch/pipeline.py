@@ -5665,9 +5665,16 @@ def build_airport_pavement(icao: str, xplane_root: str,
         # every neighbour vertex the final weld inserts) is now the
         # dominant patch-density cost (CYXY shape 261).  Default ON
         # until the cross-airport coverage verification signs off;
-        # O4_LEGACY_SURFACE_CLEARANCE=0 builds without the chain.
+        # O4_LEGACY_SURFACE_CLEARANCE=0 builds without the chain.  The ONE
+        # B4 review switch (config.B4_FLIP_DEFAULTS) flips this default OFF
+        # under the flip bundle; the explicit env var always wins.  Applied
+        # as a post-assignment override so the gate keeps a plain "1"
+        # literal (see config for the provenance-accuracy rationale).
+        from .config import B4_FLIP_DEFAULTS as _b4_flip
         _legacy_clearance = os.environ.get(
             "O4_LEGACY_SURFACE_CLEARANCE", "1") == "1"
+        if _b4_flip and "O4_LEGACY_SURFACE_CLEARANCE" not in os.environ:
+            _legacy_clearance = False
         try:
             from .clearance import emit_surface_clearance_cuts
             _cl_tl = (current_tile_lat if current_tile_lat is not None

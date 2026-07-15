@@ -215,39 +215,49 @@ def test_merge_coincident_ring_vertices_noop_on_clean_ring():
 # plateau that drops away outside its footprint (so the Pass-A3 ring-edge
 # sweep sees terrain and cuts).  The charter gate scopes WHICH source
 # roles feed that sweep: OFF = historical (apron/service included), ON =
-# runway/taxiway-family only.
+# runway/taxiway-family only.  The B4 EXTENSION additionally drops the
+# LARGE CHUNKY blob pieces (junction/RESA terminal sweeps, aspect < 2 and
+# area >= _CHARTER_BLOB_MIN_AREA_M2) — "never large-area pieces" — while
+# keeping the ELONGATED wingtip strips.
 class _ChartHarness:
     _ALT = 700.0
     _L = 200.0          # square side, metres
     _RAISE = 15.0       # terrain lift OUTSIDE the footprint (obstruction)
 
-    def _layout(self, role):
+    def _layout(self, role, poly=None):
         from auto_patch.layout import BuiltShape, PavementLayout
         L = self._L
-        sq = Polygon([(0.0, 0.0), (L, 0.0), (L, L), (0.0, L)])
+        sq = poly if poly is not None else Polygon(
+            [(0.0, 0.0), (L, 0.0), (L, L), (0.0, L)])
         layout = PavementLayout(icao="ZZZZ", anchor=(0.0, 0.0))
         layout.shapes.append(BuiltShape(
             polygon=sq, role=role, ref="X",
             node_altitudes=[self._ALT] * len(sq.exterior.coords)))
         return layout
 
-    def _fake_dem(self):
-        import math as _mm
+    def _fake_dem(self, footprint=None):
         from auto_patch.layout import R_EARTH
+        if footprint is None:
+            minx = miny = 0.0
+            maxx = maxy = self._L
+        else:
+            minx, miny, maxx, maxy = footprint.bounds
 
         def _s(dem, tile_lat, tile_lon, lat, lon):
             x = math.radians(lon) * R_EARTH
             y = math.radians(lat) * R_EARTH
-            inside = (-0.01 <= x <= self._L + 0.01
-                      and -0.01 <= y <= self._L + 0.01)
+            inside = (minx - 0.01 <= x <= maxx + 0.01
+                      and miny - 0.01 <= y <= maxy + 0.01)
             return self._ALT if inside else self._ALT + self._RAISE
         return _s
 
-    def _emit(self, monkeypatch, role, charter):
+    def _emit(self, monkeypatch, role, charter, poly=None):
         from auto_patch import clearance
-        monkeypatch.setattr(clearance, "_sample_dem", self._fake_dem())
+        layout = self._layout(role, poly=poly)
+        footprint = layout.shapes[0].polygon
+        monkeypatch.setattr(clearance, "_sample_dem",
+                            self._fake_dem(footprint))
         monkeypatch.setattr(clearance, "_CLEARANCE_CHARTER", charter)
-        layout = self._layout(role)
         clearance.emit_surface_clearance_cuts(
             layout, dem=object(), tile_lat=0, tile_lon=0)
         return [s for s in layout.shapes
@@ -277,11 +287,28 @@ class TestClearanceCharter(_ChartHarness):
         assert self._emit(monkeypatch, "service_road", charter=False)
 
     def test_taxiway_family_keeps_wingtip_under_charter(self, monkeypatch):
-        """CHARTER ON: a junction (taxiway-family) KEEPS its wingtip
-        clearance — the charter scopes out aprons/service, not taxiways."""
-        cuts = self._emit(monkeypatch, "junction", charter=True)
-        assert cuts, "charter ON: taxiway-family junction lost its clearance"
+        """CHARTER ON: an ELONGATED junction (taxiway-family) KEEPS its
+        wingtip clearance — the charter scopes out aprons/service and the
+        chunky terminal blobs, not the genuine wingtip strips."""
+        from shapely.geometry import Polygon as _P
+        # A long, thin junction (aspect ~13) — a real taxiway-family strip.
+        strip = _P([(0.0, 0.0), (400.0, 0.0), (400.0, 30.0), (0.0, 30.0)])
+        cuts = self._emit(monkeypatch, "junction", charter=True, poly=strip)
+        assert cuts, "charter ON: elongated junction lost its wingtip clearance"
         assert all(s.role == "taxiway_clearance" for s in cuts)
+
+    def test_junction_blob_dropped_under_charter(self, monkeypatch):
+        """CHARTER EXTENSION (Slice B B4): a LARGE CHUNKY junction (a
+        terminal/parking blob, aspect ~1) sources NO clearance under the
+        charter — Noah's ruling "never large-area pieces".  Without the
+        charter the historical sweep still cuts (proves the ON result is the
+        gate, not the geometry failing to trigger)."""
+        # The default harness square is 200x200 m (aspect 1.0, 40,000 m2) —
+        # exactly a large-area chunky blob.
+        assert self._emit(monkeypatch, "junction", charter=True) == [], (
+            "charter ON: large chunky junction blob should source no clearance")
+        assert self._emit(monkeypatch, "junction", charter=False), (
+            "charter OFF: the same junction should source the historical sweep")
 
     def test_gate_default_is_off(self):
         """The gate ships DEFAULT OFF (turning it ON currently regresses
