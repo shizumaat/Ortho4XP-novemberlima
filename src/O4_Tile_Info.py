@@ -170,7 +170,11 @@ def _scan_per_tile(working_dir: str) -> dict[tuple[int, int], TileInfo]:
     """Scan a parent directory of per-tile ``*XP_*`` build directories."""
     tiles: dict[tuple[int, int], TileInfo] = {}
     try:
-        names = os.listdir(working_dir)
+        # sorted: "first wins" for duplicate lat/lon must be deterministic
+        # across filesystems (raw listdir order is creation-dependent on
+        # APFS and arbitrary elsewhere; the duplicate-latlon test pins the
+        # sorted-first winner).
+        names = sorted(os.listdir(working_dir))
     except OSError:
         return tiles
     for dir_name in names:
