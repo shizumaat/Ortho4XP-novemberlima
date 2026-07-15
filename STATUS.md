@@ -417,6 +417,21 @@
 #    relies on it.  Grazing-angle / near-endpoint crossings ARE the
 #    banned classes and the audit routes them there.
 #
+# ★ROUND-9 VERDICT (Noah in-sim, 2026-07-14): CYXY ON LIDAR LOOKS
+# AMAZING.  Remaining finding: enclosed-area rings — 9 of 27 are
+# SELF-INTERSECTING loops (auto ring self-crosses at
+# 60.7140893,-135.0679273; audit class 4 skips same-way pairs = the
+# lens blind spot; the per-station variable-width offset walk crosses
+# at concavities).  ★NOAH HAND-EDITED THE REFERENCE SPEC:
+# Patches/+60-140/+60-136/CYXY_auto_MOD.patch.osm way -68615 = the
+# envisioned smooth simple loop (LAYOUT ONLY — elevations in the MOD
+# are NOT intentional; values stay with the point law).  RING REBUILD
+# ORDER IN FLIGHT (ring-lineage agent): audit class 4b (same-way
+# self-cross) + ring construction on POLYGON INWARD OFFSETS (simple
+# by construction; concave gaps naturally multi-loop) + smoothing/
+# minimum-feature vs the reference geometry + simplicity as a HARD
+# INVARIANT; values unchanged (true-distance clamp).
+#
 # ══════════════════════════════════════════════════════════════════
 # HANDOVER QUEUE (part 35 END, 20260710) — START HERE
 # ══════════════════════════════════════════════════════════════════
