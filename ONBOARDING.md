@@ -45,6 +45,11 @@ X-Plane.**
   `install_mac.sh` / `install_windows.bat` both install from it); shapely is the
   core geometry library, scipy (Voronoi/splines) + networkx (skeleton graphs)
   serve the pavement-skeleton spine (`pavement/pav_skeleton.py`).
+- **PySide6 (Qt UI only).** `Ortho4XP_Qt.py` launches the modernized Qt
+  interface (live map, settings window, onboarding wizard — see
+  `docs/UI_MODERNIZATION.md`); it needs `PySide6` from `requirements.txt`.
+  The legacy Tk interface (`Ortho4XP.py`) does not, and headless builds
+  import neither (tkinter is optional in `O4_Config_Utils`).
 - **GDAL (optional at runtime).** The GDAL python bindings (`osgeo`) power the
   airport elevation insets (automatic meter-class lidar over airports, see
   `docs/airport_elevation_insets_spec.md`) and GeoTIFF `custom_dem` reading.
