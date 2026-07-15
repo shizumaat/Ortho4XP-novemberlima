@@ -1898,6 +1898,36 @@ class TestTunnelPortalPairs:
         assert not [shape for shape in layout.shapes
                     if shape.role == ROLE_BRIDGE_CAUSEWAY]
 
+    def test_owned_crossing_masks_adjacent_ground_and_clearance(
+            self, monkeypatch):
+        """User ruling 2026-07-14 (``BRIDGE_CROSSING_MASK``): the owned
+        crossing region — here the portal pair's footprints and the
+        band over the buried body — joins the adjacent-ground standoff
+        block, so bands and clearance strips are differenced out of the
+        crossing instead of fighting the object cut."""
+        from shapely.geometry import Point
+
+        from auto_patch import adjacent_ground, config
+
+        layout = self._paired_layout()
+        dem = _FakeDem(180.0)
+        pairs = bridges._detect_tunnel_portal_pairs(layout, dem, 36, -87)
+        assert pairs  # sanity: the pair is recognized
+        block = adjacent_ground._tunnel_ramp_standoff_block(layout)
+        assert block is not None and not block.is_empty
+        # The block covers the mid-point of the connecting band (in
+        # layout meters, halfway between the portal centroids).
+        centroid_a = pairs[0]["portals"][0]["footprint"].centroid
+        centroid_b = pairs[0]["portals"][1]["footprint"].centroid
+        middle = Point((centroid_a.x + centroid_b.x) / 2.0,
+                       (centroid_a.y + centroid_b.y) / 2.0)
+        assert block.covers(middle)
+
+        # Gate off: with no tunnel_ramp / retaining_wall shapes in this
+        # layout, the block collapses to None.
+        monkeypatch.setattr(config, "BRIDGE_CROSSING_MASK", False)
+        assert adjacent_ground._tunnel_ramp_standoff_block(layout) is None
+
     def test_portal_crown_gate_off_restores_single_plate(self, monkeypatch):
         from auto_patch import config
         from auto_patch.layout import ROLE_BRIDGE_TRENCH
