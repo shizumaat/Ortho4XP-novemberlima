@@ -909,3 +909,148 @@ def test_hrdem_definition_ships_and_is_selectable():
     assert "HRDEM" in codes and "USGS3DEP" in codes
     # USGS3DEP (100) outranks HRDEM (90) in the auto ordering.
     assert codes.index("USGS3DEP") < codes.index("HRDEM")
+
+
+# =====================================================================
+# Inset-derived water supplement (hydro-flat basins)
+# =====================================================================
+
+
+def _write_terrain_geotiff(path, west, south, east, north, values):
+    """Write an arbitrary float32 terrain array as an EPSG:4326 GeoTIFF."""
+    rows, columns = values.shape
+    driver = gdal.GetDriverByName("GTiff")
+    dataset = driver.Create(path, columns, rows, 1, gdal.GDT_Float32)
+    dataset.SetGeoTransform((
+        west, (east - west) / columns, 0,
+        north, 0, (south - north) / rows,
+    ))
+    spatial_reference = osr.SpatialReference()
+    spatial_reference.ImportFromEPSG(4326)
+    dataset.SetProjection(spatial_reference.ExportToWkt())
+    band = dataset.GetRasterBand(1)
+    band.SetNoDataValue(-32768.0)
+    band.WriteArray(values.astype(numpy.float32))
+    band.FlushCache()
+    dataset = None
+    return path
+
+
+def _basin_terrain(pond_value=95.0, ground_value=100.0, noise_amplitude=0.0):
+    """200x200 cell terrain at ``ground_value`` with a 60x60 basin whose
+    floor sits at ``pond_value`` (optionally with deterministic noise),
+    plus a same-size flat PAD at ground level in the opposite corner
+    (level with its surroundings — must never become water)."""
+    values = numpy.full((200, 200), ground_value, dtype=numpy.float64)
+    values[40:100, 40:100] = pond_value
+    if noise_amplitude:
+        rng = numpy.random.default_rng(20260714)
+        values[40:100, 40:100] += rng.uniform(
+            -noise_amplitude, noise_amplitude, (60, 60))
+    values[140:190, 140:190] = ground_value  # the pad (a no-op by value)
+    return values
+
+
+@requires_gdal
+def test_strict_tier_detects_basin_and_ignores_level_pad(tmp_path):
+    # ~1.1 m cells: 200 cells over 0.002 degrees.
+    path = str(tmp_path / "airport_provider.tif")
+    _write_terrain_geotiff(
+        path, -87.001, 36.099, -86.999, 36.101, _basin_terrain())
+    rings = INSETS.detect_hydro_flat_water_rings(path)
+    assert len(rings) == 1
+    ring, water_elevation = rings[0]
+    assert water_elevation == pytest.approx(95.0, abs=0.01)
+    longitudes = [point[0] for point in ring]
+    latitudes = [point[1] for point in ring]
+    # The ring sits inside the basin (drawn one cell inside the shore).
+    assert min(longitudes) >= -87.001 + 40 * 1e-5 - 1e-6
+    assert max(longitudes) <= -87.001 + 100 * 1e-5 + 1e-6
+    assert min(latitudes) >= 36.101 - 100 * 1e-5 - 1e-6
+    assert max(latitudes) <= 36.101 - 40 * 1e-5 + 1e-6
+
+
+@requires_gdal
+def test_noisy_basin_needs_the_facility_scope(tmp_path):
+    from shapely.geometry import box as shapely_box
+
+    path = str(tmp_path / "airport_provider.tif")
+    _write_terrain_geotiff(
+        path, -87.001, 36.099, -86.999, 36.101,
+        _basin_terrain(noise_amplitude=0.2))
+    # The noisy working pond fails the strict tier...
+    assert INSETS.detect_hydro_flat_water_rings(path) == []
+    # ...and is traced by the facility-scoped tier inside its outline.
+    loaded = INSETS._load_inset_raster(path)
+    values, valid, geotransform = loaded
+    facility = shapely_box(-87.0008, 36.0997, -86.9993, 36.1008)
+    mask = INSETS._facility_restrict_mask(
+        [facility], values.shape, geotransform)
+    assert mask is not None and mask.any()
+    rings = INSETS._detect_water_components(
+        values, valid, geotransform,
+        minimum_area_m2=INSETS.INSET_WATER_FACILITY_MINIMUM_AREA_M2,
+        local_flatness_m=INSETS.INSET_WATER_FACILITY_LOCAL_FLATNESS_M,
+        component_range_m=INSETS.INSET_WATER_FACILITY_COMPONENT_RANGE_M,
+        rim_rise_m=INSETS.INSET_WATER_FACILITY_RIM_RISE_M,
+        plausibility_band_m=INSETS.INSET_WATER_PLAUSIBILITY_BAND_M,
+        restrict_mask=mask)
+    assert len(rings) == 1
+    assert rings[0][1] == pytest.approx(95.0, abs=0.3)
+
+
+@requires_gdal
+def test_void_fill_plateau_is_rejected(tmp_path):
+    # An exact-flat plateau 60 m below everything (the KBNA 40 m void
+    # artefact class) must never become water.
+    path = str(tmp_path / "airport_provider.tif")
+    _write_terrain_geotiff(
+        path, -87.001, 36.099, -86.999, 36.101,
+        _basin_terrain(pond_value=40.0))
+    assert INSETS.detect_hydro_flat_water_rings(path) == []
+
+
+@requires_gdal
+def test_supplement_written_and_cached(tmp_path, monkeypatch):
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    # No network in tests: the facility fetch is stubbed empty.
+    monkeypatch.setattr(
+        INSETS, "_facility_outline_polygons", lambda lat, lon: [])
+    directory = FNAMES.airport_inset_directory(36, -87)
+    os.makedirs(directory)
+    _write_terrain_geotiff(
+        os.path.join(directory, "KTST_provider.tif"),
+        -87.001, 36.099, -86.999, 36.101, _basin_terrain())
+    supplement = INSETS.ensure_inset_water_supplement(36, -87)
+    assert supplement and os.path.isfile(supplement)
+    import bz2
+
+    content = bz2.open(supplement, "rt").read()
+    assert content.count("<way") == 1
+    assert 'k="natural" v="water"' in content
+    # Cached: a second call reuses the file (same mtime).
+    first_mtime = os.path.getmtime(supplement)
+    assert INSETS.ensure_inset_water_supplement(36, -87) == supplement
+    assert os.path.getmtime(supplement) == first_mtime
+
+
+@requires_gdal
+def test_supplement_removed_when_nothing_qualifies(tmp_path, monkeypatch):
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    monkeypatch.setattr(
+        INSETS, "_facility_outline_polygons", lambda lat, lon: [])
+    directory = FNAMES.airport_inset_directory(36, -87)
+    os.makedirs(directory)
+    tif_path = os.path.join(directory, "KTST_provider.tif")
+    _write_terrain_geotiff(
+        tif_path, -87.001, 36.099, -86.999, 36.101, _basin_terrain())
+    supplement = INSETS.ensure_inset_water_supplement(36, -87)
+    assert supplement is not None
+    # Flatten the basin away and touch the raster: the stale supplement
+    # is regenerated to nothing and removed.
+    _write_terrain_geotiff(
+        tif_path, -87.001, 36.099, -86.999, 36.101,
+        numpy.full((200, 200), 100.0))
+    os.utime(tif_path, None)
+    assert INSETS.ensure_inset_water_supplement(36, -87) is None
+    assert not os.path.isfile(FNAMES.inset_water(36, -87))

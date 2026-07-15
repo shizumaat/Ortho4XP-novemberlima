@@ -1188,14 +1188,28 @@ def _tunnel_ramp_standoff_block(layout):
     """1 m buffered union of the tunnel mouth pieces to stand strips off
     (scope B), or ``None``.  The set is ``tunnel_ramp`` sloped rects + the
     ``retaining_wall`` U-walls the tunnel portal emits BEFORE the band
-    stage; object-bridge plates (bridge_trench / bridge_causeway) are
+    stage; object-bridge PLATES (bridge_trench / bridge_causeway) are
     excluded by construction (they are pavement-equivalent graph members).
     Built from the current ``layout.shapes`` at emit entry, so the apron-edge
     ``retaining_wall`` pieces ``_emit_apron_walls`` appends later are not yet
-    present and are naturally excluded."""
+    present and are naturally excluded.
+
+    The OWNED CROSSING REGIONS join the block (user ruling 2026-07-14,
+    ``BRIDGE_CROSSING_MASK``): corridor deck boxes and tunnel-portal-pair
+    regions belong to the object story, and bands marching off the plate
+    edges INTO the crossing fought the object cut at the KBNA Donelson
+    Pike bridges.  The plates themselves remain graph members bands weld
+    TO from outside; only the crossing interior is masked."""
     polys = [s.polygon for s in layout.shapes
              if s.role in (ROLE_TUNNEL_RAMP, ROLE_RETAINING_WALL)
              and s.polygon is not None and not s.polygon.is_empty]
+    crossing_union = None
+    from .config import BRIDGE_CROSSING_MASK
+    if BRIDGE_CROSSING_MASK:
+        from . import bridges as _BRIDGES
+        crossing_union = _BRIDGES._classifier_owned_crossing_union(layout)
+    if crossing_union is not None and not crossing_union.is_empty:
+        polys.append(crossing_union)
     if not polys:
         return None
     try:

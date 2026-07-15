@@ -1883,11 +1883,38 @@ class TestTunnelPortalPairs:
         mouths = [shape for shape in layout.shapes
                   if shape.role == ROLE_BRIDGE_TRENCH
                   and shape.ref == "object_tunnel_portal_mouth"]
-        assert len(mouths) == 2 and n_trench == 2
+        # Crown split (user ruling 2026-07-14): each portal is TWO
+        # plates — the open-mouth half at road grade, and the buried
+        # half at the object top (mouth floor + deck top, 180 + 7.5),
+        # so the runway-side rim rides the tunnel roof.
+        crowns = [shape for shape in layout.shapes
+                  if shape.role == ROLE_BRIDGE_TRENCH
+                  and shape.ref == "object_tunnel_portal_crown"]
+        assert len(mouths) == 2 and len(crowns) == 2 and n_trench == 4
         for mouth in mouths:
             assert set(mouth.node_altitudes) == {180.0}
+        for crown in crowns:
+            assert set(crown.node_altitudes) == {187.5}
         assert not [shape for shape in layout.shapes
                     if shape.role == ROLE_BRIDGE_CAUSEWAY]
+
+    def test_portal_crown_gate_off_restores_single_plate(self, monkeypatch):
+        from auto_patch import config
+        from auto_patch.layout import ROLE_BRIDGE_TRENCH
+
+        monkeypatch.setattr(config, "TUNNEL_PORTAL_CROWN", False)
+        layout = self._paired_layout()
+        dem = _FakeDem(180.0)
+        n_trench, _n_causeway, _pads = bridges.build_bridge_layout_shapes(
+            layout, dem, 36, -87)
+        mouths = [shape for shape in layout.shapes
+                  if shape.role == ROLE_BRIDGE_TRENCH
+                  and shape.ref == "object_tunnel_portal_mouth"]
+        crowns = [shape for shape in layout.shapes
+                  if shape.ref == "object_tunnel_portal_crown"]
+        assert len(mouths) == 2 and n_trench == 2 and crowns == []
+        for mouth in mouths:
+            assert set(mouth.node_altitudes) == {180.0}
 
     def test_side_by_side_parallel_decks_do_not_pair(self):
         layout = _FakeLayout()

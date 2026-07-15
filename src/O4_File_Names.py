@@ -358,6 +358,19 @@ def airport_inset_provenance(lat, lon, icao, provider_code):
     )
 
 
+def inset_water(lat, lon):
+    """The per-tile airport-inset water supplement: hydro-flat basins
+    detected in the lidar insets, written as an OSM fragment and merged
+    ADDITIVELY into the water layer by ``include_water`` (it never
+    replaces the Overpass/custom water — unlike ``custom_water``).
+    Lives beside the inset GeoTIFFs it is derived from, so cache
+    invalidation follows the rasters."""
+    return os.path.join(
+        airport_inset_directory(lat, lon),
+        short_latlon(lat, lon) + "_inset_water.osm.bz2",
+    )
+
+
 ##############################################################################
 
 ##############################################################################

@@ -150,6 +150,11 @@ cfg_tile_vars = {
         "default": True,
         "hint": "Master gate for automatic per-airport high resolution elevation insets. When set, meter-class public elevation (for example the United States Geological Survey 3D Elevation Program) is fetched for the neighbourhood of every airport on the tile and overlaid on the base elevation raster before the mesh is built. Requires the GDAL python bindings and network access; when either is missing the feature disables itself and the build is byte-identical to unset.",
     },
+    "airport_inset_water": {
+        "type": bool,
+        "default": True,
+        "hint": "When set (and airport elevation insets are enabled), hydro-flat basins detected in the lidar insets — large dead-flat plateaus sitting below their rims, the signature of standing water — are added to the tile's water layer so the mesh renders them flat. Fills the common OpenStreetMap gap where airport retention/treatment ponds carry no water polygon. Additive only: the normal water layer is never replaced.",
+    },
     "airport_elevation_providers": {
         "type": str,
         "default": "auto",
