@@ -205,7 +205,17 @@ def structure_ring(
     placement_by_resource = {
         placement.resource_path: placement for placement in placements}
     minimum_base_y = min(structure.minimum_base_y_by_resource.values())
-    base_ceiling_y = minimum_base_y + DSF_OBJECT_FOOTPRINT_HEIGHT_M
+    # The footprint band reaches from the lowest solid vertex up to
+    # GRADE plus the band height — never just ``minimum + height``.  A
+    # below-grade pocket (KBNA terminal: a basement piece at authored
+    # y = -2.85, a garage level at -23) would otherwise pull the whole
+    # band under grade, and the "footprint" of a 780,000 m² terminal
+    # complex collapses to the 2 m hull of its deepest basement
+    # (found 2026-07-14).  For structures based at or above grade
+    # (including baked-offset feet at +6.5) this is exactly the old
+    # ``minimum + height`` band.
+    base_ceiling_y = (
+        max(minimum_base_y, 0.0) + DSF_OBJECT_FOOTPRINT_HEIGHT_M)
 
     base_points: list[tuple[float, float]] = []
     all_points: list[tuple[float, float]] = []
