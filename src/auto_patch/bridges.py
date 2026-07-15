@@ -3035,6 +3035,31 @@ def _emit_tunnel_portals(
                 "Feature B owns the crossing (classified bridge / "
                 "tunnel-portal records)")
             portal_data = _kept_portals
+    # A low-connector gap inside an OWNED crossing stays COVERED (user
+    # 2026-07-14): the classified portal pair says the road is a deep
+    # bore there — digging the gap open leaves holes with no objects
+    # over them (measured KBNA: two dug-open gaps exactly on the line
+    # between the runway-02C portal mouths).
+    if _owned_union is not None and low_connector_gaps:
+        _kept_gaps = []
+        _n_covered = 0
+        for (_gap_line, _corridor_width_m) in low_connector_gaps:
+            _inside_owned = False
+            try:
+                _inside_owned = _gap_line.intersects(_owned_union)
+            except _GEOM_EXC:
+                _inside_owned = False
+            if _inside_owned:
+                _n_covered += 1
+                continue
+            _kept_gaps.append((_gap_line, _corridor_width_m))
+        if _n_covered:
+            UI.vprint(
+                1,
+                f"  [tunnel] {_n_covered} low-connector gap(s) kept "
+                "COVERED — Feature B owns the crossing (tunnel-portal "
+                "pair / classified bridge)")
+            low_connector_gaps = _kept_gaps
     # Flat low-connector corridors supersede any portal starting
     # inside them (cross-way facing portals the per-way gap merge
     # cannot see — user 2026-07-04, KDFW).
@@ -4110,11 +4135,12 @@ def _dedup_parallel_road_lines(road_lines, half_width):
 
 def _split_portal_footprint(footprint, outward):
     """Split a paired portal's footprint at its centroid, perpendicular
-    to the mouth (``outward``) direction: ``(mouth_half, buried_half)``.
-    The mouth half faces the open road; the buried half faces the tunnel
-    body under the runway.  Either half may be ``None`` when the split
-    degenerates (the caller then falls back to the whole footprint at
-    road grade)."""
+    to the mouth (``outward``) direction: ``(mouth_half, buried_half,
+    mouth_half_plane)``.  The mouth half faces the open road; the buried
+    half faces the tunnel body under the runway; the half-plane is
+    returned so the crown COLLAR can be clipped to the buried side.
+    Halves may be ``None`` when the split degenerates (the caller then
+    falls back to the whole footprint at road grade)."""
     try:
         centroid = footprint.centroid
         outward_x, outward_y = outward
@@ -4135,7 +4161,7 @@ def _split_portal_footprint(footprint, outward):
         mouth_half = footprint.intersection(mouth_half_plane)
         buried_half = footprint.difference(mouth_half_plane)
     except _GEOM_EXC:
-        return None, None
+        return None, None, None
 
     def _largest_polygon(geometry):
         if geometry is None or geometry.is_empty:
@@ -4147,7 +4173,8 @@ def _split_portal_footprint(footprint, outward):
         return max(polygons, key=lambda part: part.area) if polygons \
             else None
 
-    return _largest_polygon(mouth_half), _largest_polygon(buried_half)
+    return (_largest_polygon(mouth_half), _largest_polygon(buried_half),
+            mouth_half_plane)
 
 
 def _portal_pair_owned_polygons(pairs):
@@ -5303,6 +5330,7 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
         return vertex_count
 
     maximum_length = float(_CFG.BRIDGE_CAUSEWAY_MAX_LENGTH_M)
+    capture_band = float(_CFG.BRIDGE_ABUTMENT_PIN_CAPTURE_BAND_M)
     n_trench = 0
     n_causeway = 0
 
@@ -5332,10 +5360,11 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                 portal["bridge"].deck_top_y_m or 0.0)
             mouth_geometry = footprint
             crown_geometry = None
+            mouth_half_plane = None
             if (_CFG.TUNNEL_PORTAL_CROWN and deck_top_metres > 0.5
                     and portal.get("outward") is not None):
-                mouth_half, buried_half = _split_portal_footprint(
-                    footprint, portal["outward"])
+                mouth_half, buried_half, mouth_half_plane = (
+                    _split_portal_footprint(footprint, portal["outward"]))
                 if (mouth_half is not None and buried_half is not None
                         and buried_half.area >= 4.0):
                     mouth_geometry = mouth_half
@@ -5404,6 +5433,48 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                 f"{crown_elevation:.2f} m ({crown_vertex_count} "
                 "vertices) — the runway-side rim rides the tunnel "
                 "roof",
+            )
+            # COLLAR (user ruling 2026-07-14): a band around the BACK
+            # and sides of the buried half, held at the crown
+            # elevation, so the ground behind the portal keeps the
+            # deck/roof height while the road grades down into the
+            # mouth on the other side.  Clipped to the buried side of
+            # the split, so it never reaches the road.
+            if mouth_half_plane is None:
+                continue
+            try:
+                collar_geometry = (
+                    crown_geometry
+                    .buffer(float(_CFG.TUNNEL_PORTAL_CROWN_COLLAR_M))
+                    .difference(mouth_half_plane)
+                    .difference(footprint)
+                    .difference(mouth_geometry)
+                )
+            except _GEOM_EXC:
+                continue
+            if collar_geometry.geom_type != "Polygon":
+                collar_parts = [
+                    part for part in getattr(collar_geometry, "geoms", [])
+                    if part.geom_type == "Polygon" and part.area >= 4.0
+                ]
+                collar_geometry = max(
+                    collar_parts, key=lambda part: part.area,
+                    default=None)
+            if collar_geometry is None or collar_geometry.is_empty \
+                    or collar_geometry.area < 4.0:
+                continue
+            try:
+                collar_vertex_count = _born_flat(
+                    collar_geometry, ROLE_BRIDGE_TRENCH,
+                    "object_tunnel_portal_collar", crown_elevation)
+            except _GEOM_EXC:
+                continue
+            n_trench += 1
+            UI.vprint(
+                1,
+                "   [object-tunnel] portal collar holds "
+                f"{crown_elevation:.2f} m around the portal back "
+                f"({collar_vertex_count} vertices)",
             )
 
     for bridge in corridor_bridges:
@@ -5569,6 +5640,53 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                     emitted_parts += 1
                 if not emitted_parts:
                     continue
+                # User ruling 2026-07-14b: the pavement the approach
+                # RESUMES on around the plate is anchored AT the deck
+                # height, so both sides of the crossing grade smoothly
+                # to the same value.  The abutment-line pins alone miss
+                # it — the resumed pavement across the road-exit cut
+                # measures 13.3-13.6 m from the plate exterior at KBNA
+                # (its approach solved 6.3 m above the 167.0 deck, a
+                # quarantined wall at the lip).  Taxi/runway/apron
+                # rings only — service roads descend through the
+                # road-exit cut and must never pin to the deck.
+                weld_pinned = 0
+                weld_band = float(
+                    _CFG.BRIDGE_CAUSEWAY_WELD_PIN_BAND_M)
+                for part in parts:
+                    if (part.geom_type != "Polygon" or part.is_empty
+                            or part.area < 25.0):
+                        continue
+                    try:
+                        weld_line = LineString(
+                            list(part.exterior.coords))
+                    except _GEOM_EXC:
+                        continue
+                    for shape_index, shape in enumerate(
+                            list(layout.shapes)):
+                        if shape.role not in _BRIDGE_PIN_ROLES:
+                            continue
+                        if shape.polygon is None \
+                                or shape.polygon.is_empty:
+                            continue
+                        try:
+                            if shape.polygon.exterior.distance(
+                                    weld_line) > weld_band:
+                                continue
+                        except _GEOM_EXC:
+                            continue
+                        weld_pinned += _pin_shape_vertices_on_line(
+                            layout, shape_index, weld_line,
+                            plate_elevation,
+                            capture_band_m=weld_band,
+                        )
+                if weld_pinned:
+                    UI.vprint(
+                        1,
+                        f"   [object-bridge] {weld_pinned} approach "
+                        "weld pin(s) around the causeway plates "
+                        f"({plate_elevation:.2f} m, end {end_index})",
+                    )
                 n_causeway += emitted_parts
                 UI.vprint(
                     1,

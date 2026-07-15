@@ -1883,18 +1883,24 @@ class TestTunnelPortalPairs:
         mouths = [shape for shape in layout.shapes
                   if shape.role == ROLE_BRIDGE_TRENCH
                   and shape.ref == "object_tunnel_portal_mouth"]
-        # Crown split (user ruling 2026-07-14): each portal is TWO
-        # plates — the open-mouth half at road grade, and the buried
-        # half at the object top (mouth floor + deck top, 180 + 7.5),
-        # so the runway-side rim rides the tunnel roof.
+        # Crown split (user ruling 2026-07-14): each portal is THREE
+        # plates — the open-mouth half at road grade, the buried half
+        # at the object top (mouth floor + deck top, 180 + 7.5), and a
+        # COLLAR band around the buried half's back holding the same
+        # top elevation (ruling 2026-07-14b), so the runway-side rim
+        # and the ground behind the portal ride the tunnel roof.
         crowns = [shape for shape in layout.shapes
                   if shape.role == ROLE_BRIDGE_TRENCH
                   and shape.ref == "object_tunnel_portal_crown"]
-        assert len(mouths) == 2 and len(crowns) == 2 and n_trench == 4
+        collars = [shape for shape in layout.shapes
+                   if shape.role == ROLE_BRIDGE_TRENCH
+                   and shape.ref == "object_tunnel_portal_collar"]
+        assert (len(mouths), len(crowns), len(collars)) == (2, 2, 2)
+        assert n_trench == 6
         for mouth in mouths:
             assert set(mouth.node_altitudes) == {180.0}
-        for crown in crowns:
-            assert set(crown.node_altitudes) == {187.5}
+        for plate in crowns + collars:
+            assert set(plate.node_altitudes) == {187.5}
         assert not [shape for shape in layout.shapes
                     if shape.role == ROLE_BRIDGE_CAUSEWAY]
 

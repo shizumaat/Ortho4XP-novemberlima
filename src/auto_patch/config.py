@@ -182,6 +182,8 @@ __all__ = [
     "TUNNEL_PORTAL_PAIR_BURIED_MARGIN_M",
     "TUNNEL_PORTAL_MOUTH_SAMPLE_RANGE_M",
     "TUNNEL_PORTAL_CROWN",
+    "TUNNEL_PORTAL_CROWN_COLLAR_M",
+    "BRIDGE_CAUSEWAY_WELD_PIN_BAND_M",
     "BRIDGE_CROSSING_MASK",
     "PRECISION_APPROACH_LIGHT_CODES",
     "PRECISION_MARKINGS_CODES",
@@ -2084,6 +2086,21 @@ TUNNEL_PORTAL_PAIR_BURIED_MARGIN_M = 1.0
 # because the smoothed airport raster decays embankment flattening
 # slowly (measured KBNA 02C: still falling 0.09 m per 5 m at 60 m out).
 TUNNEL_PORTAL_MOUTH_SAMPLE_RANGE_M = 150.0
+
+# (user ruling 2026-07-14b) Pavement rings within this band of a
+# causeway plate's boundary are hard-pinned at the deck-end elevation:
+# the approaches on BOTH sides of an object bridge anchor at the deck
+# height and grade smoothly away from it.  Wider than the abutment
+# capture band — the resumed pavement across the KBNA Donelson Pike
+# road-exit cut measures 13.3-13.6 m from the plate exterior (the
+# unpinned side solved 6.3 m above the deck before this).
+BRIDGE_CAUSEWAY_WELD_PIN_BAND_M = 16.0
+
+# (user ruling 2026-07-14b) Width of the flat COLLAR band emitted
+# around the back and sides of a paired portal's buried half, held at
+# the crown (object top) elevation: the ground behind the portal keeps
+# the deck/roof height while the road grades down into the mouth.
+TUNNEL_PORTAL_CROWN_COLLAR_M = 10.0
 
 # (user ruling 2026-07-14) A paired portal's footprint is SPLIT at its
 # centroid perpendicular to the mouth direction: the open-mouth half is
