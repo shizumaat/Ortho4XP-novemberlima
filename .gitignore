@@ -24,3 +24,8 @@ Patches/
 mnt/
 .claude/worktrees/
 +60-140/
+
+# Qt UI runtime artifacts
+.qt_prefs.json
+.airport_index.tsv
+Previews/livemap/

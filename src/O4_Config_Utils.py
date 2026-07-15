@@ -1,13 +1,25 @@
 """Ortho4XP configuration window."""
 
+from __future__ import annotations
+
 import ast
 import logging
 import os
 from math import ceil
 
-import tkinter as tk
-import tkinter.ttk as ttk
-from tkinter import E, N, S, W, filedialog, messagebox
+# tkinter is only needed by the legacy config window (Ortho4XP_Config).
+# The Qt UI imports this module for the Tile class and config loading, so
+# keep it importable when tkinter is absent.
+try:
+    import tkinter as tk
+    import tkinter.ttk as ttk
+    from tkinter import E, N, S, W, filedialog, messagebox
+
+    _CONFIG_WINDOW_BASE = tk.Toplevel
+except ImportError:
+
+    class _CONFIG_WINDOW_BASE:  # headless stand-in, never instantiated
+        pass
 
 import O4_Cfg_Vars as CFG
 import O4_DEM_Utils as DEM
@@ -302,8 +314,8 @@ class Tile:
 ################################################################################
 
 ################################################################################
-class Ortho4XP_Config(tk.Toplevel):
-    """Ortho4XP configuration window."""
+class Ortho4XP_Config(_CONFIG_WINDOW_BASE):
+    """Ortho4XP configuration window (legacy Tk; requires tkinter)."""
     def __init__(self, parent):
 
         tk.Toplevel.__init__(self)

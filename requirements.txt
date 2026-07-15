@@ -1,4 +1,5 @@
 numpy==2.4.4
+PySide6==6.11.1  # new Qt UI (Ortho4XP_Qt.py); legacy Tk UI does not need it
 pillow==12.2.0
 pyproj==3.7.2
 requests==2.33.1
