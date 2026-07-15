@@ -181,6 +181,8 @@ __all__ = [
     "TUNNEL_PORTAL_PAIR_HEADING_TOLERANCE_DEGREES",
     "TUNNEL_PORTAL_PAIR_BURIED_MARGIN_M",
     "TUNNEL_PORTAL_MOUTH_SAMPLE_RANGE_M",
+    "TUNNEL_PORTAL_CROWN",
+    "BRIDGE_CROSSING_MASK",
     "PRECISION_APPROACH_LIGHT_CODES",
     "PRECISION_MARKINGS_CODES",
     "NON_PRECISION_MARKINGS_CODES",
@@ -2082,6 +2084,26 @@ TUNNEL_PORTAL_PAIR_BURIED_MARGIN_M = 1.0
 # because the smoothed airport raster decays embankment flattening
 # slowly (measured KBNA 02C: still falling 0.09 m per 5 m at 60 m out).
 TUNNEL_PORTAL_MOUTH_SAMPLE_RANGE_M = 150.0
+
+# (user ruling 2026-07-14) A paired portal's footprint is SPLIT at its
+# centroid perpendicular to the mouth direction: the open-mouth half is
+# born at the road grade (as before), and the BURIED half — the side
+# facing the runway over the tunnel body — is born as a CROWN plate at
+# the object's top elevation (mouth floor + deck top).  Before this,
+# the whole footprint sat at road grade and the terrain runway-side of
+# each portal dipped to the road instead of riding over the tunnel
+# roof.  O4_TUNNEL_PORTAL_CROWN=0 restores the single road-grade plate.
+TUNNEL_PORTAL_CROWN = (
+    _os.environ.get("O4_TUNNEL_PORTAL_CROWN", "1") == "1")
+
+# (user ruling 2026-07-14) Adjacent-ground bands and surface-clearance
+# cuts are masked OUT of every crossing Feature B owns (corridor deck
+# boxes and tunnel-portal-pair regions): the objects provide the
+# terrain story there, and bands/cuts marching into the crossing fight
+# the object cut (measured KBNA Donelson Pike).
+# O4_BRIDGE_CROSSING_MASK=0 restores the unmasked march.
+BRIDGE_CROSSING_MASK = (
+    _os.environ.get("O4_BRIDGE_CROSSING_MASK", "1") == "1")
 
 # Safety cap (m) on how far a clearance band reaches outward from the
 # pavement edge, bounding earthwork.  Must be >= the largest band we

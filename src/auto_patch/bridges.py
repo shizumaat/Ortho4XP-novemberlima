@@ -4108,6 +4108,48 @@ def _dedup_parallel_road_lines(road_lines, half_width):
     return kept
 
 
+def _split_portal_footprint(footprint, outward):
+    """Split a paired portal's footprint at its centroid, perpendicular
+    to the mouth (``outward``) direction: ``(mouth_half, buried_half)``.
+    The mouth half faces the open road; the buried half faces the tunnel
+    body under the runway.  Either half may be ``None`` when the split
+    degenerates (the caller then falls back to the whole footprint at
+    road grade)."""
+    try:
+        centroid = footprint.centroid
+        outward_x, outward_y = outward
+        perpendicular_x, perpendicular_y = -outward_y, outward_x
+        reach = 1000.0
+        edge_a = (centroid.x + perpendicular_x * reach,
+                  centroid.y + perpendicular_y * reach)
+        edge_b = (centroid.x - perpendicular_x * reach,
+                  centroid.y - perpendicular_y * reach)
+        mouth_half_plane = Polygon([
+            edge_a,
+            edge_b,
+            (edge_b[0] + outward_x * 2.0 * reach,
+             edge_b[1] + outward_y * 2.0 * reach),
+            (edge_a[0] + outward_x * 2.0 * reach,
+             edge_a[1] + outward_y * 2.0 * reach),
+        ])
+        mouth_half = footprint.intersection(mouth_half_plane)
+        buried_half = footprint.difference(mouth_half_plane)
+    except _GEOM_EXC:
+        return None, None
+
+    def _largest_polygon(geometry):
+        if geometry is None or geometry.is_empty:
+            return None
+        if geometry.geom_type == "Polygon":
+            return geometry
+        polygons = [part for part in getattr(geometry, "geoms", [])
+                    if part.geom_type == "Polygon" and not part.is_empty]
+        return max(polygons, key=lambda part: part.area) if polygons \
+            else None
+
+    return _largest_polygon(mouth_half), _largest_polygon(buried_half)
+
+
 def _portal_pair_owned_polygons(pairs):
     """Plan-space region a tunnel portal pair OWNS: both portal
     footprints plus the connecting band over the buried body.  Approach
@@ -5280,9 +5322,28 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
             footprint = portal.get("footprint")
             if mouth_floor is None or footprint is None:
                 continue
+            # Crown split (user ruling 2026-07-14): the buried half of
+            # the footprint — the side facing the runway over the
+            # tunnel body — is seated at the OBJECT TOP (mouth floor +
+            # deck top), so the terrain runway-side of the portal rides
+            # over the tunnel roof instead of dipping to road grade.
+            # Only the open-mouth half stays at the road.
+            deck_top_metres = float(
+                portal["bridge"].deck_top_y_m or 0.0)
+            mouth_geometry = footprint
+            crown_geometry = None
+            if (_CFG.TUNNEL_PORTAL_CROWN and deck_top_metres > 0.5
+                    and portal.get("outward") is not None):
+                mouth_half, buried_half = _split_portal_footprint(
+                    footprint, portal["outward"])
+                if (mouth_half is not None and buried_half is not None
+                        and buried_half.area >= 4.0):
+                    mouth_geometry = mouth_half
+                    crown_geometry = buried_half
             # X-Plane drapes the portal object at terrain(anchor) — the
-            # plate must COVER the anchor point, or the object still
-            # seats on whatever the hill solves to beside the plate.
+            # ROAD-GRADE plate must COVER the anchor point, or the
+            # object seats on whatever solves beside it (a crown plate
+            # under the anchor would LIFT the object by the deck top).
             try:
                 anchor_longitude, anchor_latitude = (
                     portal["bridge"].anchor_longitude_latitude
@@ -5290,18 +5351,33 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                 anchor_point = Point(
                     to_meters(anchor_longitude, anchor_latitude)
                 )
-                if (not footprint.covers(anchor_point)
+                if (not mouth_geometry.covers(anchor_point)
                         and footprint.distance(anchor_point) <= 30.0):
-                    footprint = unary_union(
-                        [footprint, anchor_point.buffer(5.0)]
+                    anchor_disk = anchor_point.buffer(5.0)
+                    mouth_geometry = unary_union(
+                        [mouth_geometry, anchor_disk]
                     )
-                    if footprint.geom_type != "Polygon":
-                        footprint = footprint.convex_hull
+                    if mouth_geometry.geom_type != "Polygon":
+                        mouth_geometry = mouth_geometry.convex_hull
+                    if crown_geometry is not None:
+                        crown_geometry = crown_geometry.difference(
+                            anchor_disk)
+                        if crown_geometry.geom_type != "Polygon":
+                            crown_geometry = max(
+                                (part for part in getattr(
+                                    crown_geometry, "geoms", [])
+                                 if part.geom_type == "Polygon"),
+                                key=lambda part: part.area,
+                                default=None)
+                        if (crown_geometry is not None
+                                and (crown_geometry.is_empty
+                                     or crown_geometry.area < 4.0)):
+                            crown_geometry = None
             except (_GEOM_EXC, KeyError, TypeError):
                 pass
             try:
                 vertex_count = _born_flat(
-                    footprint, ROLE_BRIDGE_TRENCH,
+                    mouth_geometry, ROLE_BRIDGE_TRENCH,
                     "object_tunnel_portal_mouth", mouth_floor)
             except _GEOM_EXC:
                 continue
@@ -5311,6 +5387,23 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                 "   [object-tunnel] portal mouth seated at road grade "
                 f"{mouth_floor:.2f} m ({vertex_count} vertices) for "
                 f"{portal['bridge'].object_resources}",
+            )
+            if crown_geometry is None:
+                continue
+            crown_elevation = mouth_floor + deck_top_metres
+            try:
+                crown_vertex_count = _born_flat(
+                    crown_geometry, ROLE_BRIDGE_TRENCH,
+                    "object_tunnel_portal_crown", crown_elevation)
+            except _GEOM_EXC:
+                continue
+            n_trench += 1
+            UI.vprint(
+                1,
+                "   [object-tunnel] portal crown seated at object top "
+                f"{crown_elevation:.2f} m ({crown_vertex_count} "
+                "vertices) — the runway-side rim rides the tunnel "
+                "roof",
             )
 
     for bridge in corridor_bridges:

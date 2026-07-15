@@ -1555,6 +1555,20 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
             groundside_block = unary_union(_gs).buffer(1.0)
         except _GEOM_EXC:
             groundside_block = None
+    # OWNED CROSSING EXCLUSION (user ruling 2026-07-14,
+    # ``BRIDGE_CROSSING_MASK``): clearance strips never land inside a
+    # crossing Feature B owns (corridor deck boxes, tunnel-portal-pair
+    # regions) — the objects provide the terrain story there, and a law
+    # strip marching into the crossing fought the object cut at the
+    # KBNA Donelson Pike bridges.  Same difference treatment as the
+    # groundside block.
+    crossing_block = None
+    from .config import BRIDGE_CROSSING_MASK as _CROSSING_MASK
+    if _CROSSING_MASK:
+        from . import bridges as _BRIDGES
+        crossing_block = _BRIDGES._classifier_owned_crossing_union(layout)
+        if crossing_block is not None and crossing_block.is_empty:
+            crossing_block = None
     static_union = None
     if static_polys:
         try:
@@ -1710,6 +1724,8 @@ def emit_surface_clearance_cuts(layout: PavementLayout, dem,
             if (groundside_block is not None
                     and not groundside_block.is_empty):
                 region = region.difference(groundside_block)
+            if crossing_block is not None:
+                region = region.difference(crossing_block)
         except _GEOM_EXC:
             return 0
         if region.is_empty:

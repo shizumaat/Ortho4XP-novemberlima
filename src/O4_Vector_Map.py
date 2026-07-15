@@ -751,6 +751,27 @@ def include_water(vector_map, tile):
             cached_suffix="water",
         ):
             return 0
+    # Airport-inset water supplement (additive, never a replacement):
+    # hydro-flat basins detected in the lidar insets — standing water
+    # OpenStreetMap does not carry (the KBNA wastewater ponds).  The
+    # supplement joins whichever base layer loaded above (custom or
+    # Overpass) and flows through the normal WATER seed + smoothing.
+    if getattr(tile, "airport_inset_water", True):
+        import O4_Airport_Elevation_Insets as INSETS
+
+        if INSETS.insets_enabled_for_tile(tile):
+            inset_water_path = INSETS.ensure_inset_water_supplement(
+                tile.lat, tile.lon
+            )
+            if inset_water_path:
+                UI.vprint(
+                    1,
+                    "    * Airport-inset water supplement merged "
+                    "(hydro-flat basins from the elevation insets).",
+                )
+                water_layer.update_dicosm(
+                    inset_water_path, input_tags=None, target_tags=None
+                )
     UI.vprint(1, "    * Building water multipolygon.")
     (water_area, sea_equiv_area) = OSM.OSM_to_MultiPolygon(
         water_layer, tile.lat, tile.lon, filter_large_lakes

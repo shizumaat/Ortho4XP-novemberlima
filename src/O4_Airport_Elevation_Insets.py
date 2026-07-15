@@ -921,6 +921,448 @@ def list_cached_inset_dems(lat, lon, provider_codes=None):
 
 
 # =====================================================================
+# Inset-derived water supplement (hydro-flat basins)
+# =====================================================================
+# Lidar reads water surfaces as (near-)constant elevation, so real
+# basins appear in the inset rasters as large flat plateaus sitting
+# BELOW their rims — the KBNA wastewater ponds measure a 0.02 m
+# internal range against rims 10+ m higher.  Such basins are usually
+# absent from OpenStreetMap (no ``natural=water`` way exists over the
+# KBNA ponds), so the mesh keeps raw noisy terrain there instead of the
+# flat water the ``WATER`` seed + ``water_smoothing`` pipeline would
+# produce.  These functions derive the missing polygons from the inset
+# rasters themselves and write a per-tile OSM fragment which
+# ``include_water`` merges ADDITIVELY into the water layer.
+
+# Detection is TWO-TIER (measured on the real KBNA 3DEP inset,
+# 2026-07-14):
+#
+# * STRICT, whole raster — exact hydro-flat plateaus (providers
+#   hydro-flatten sizeable water bodies; KBNA's south-east lake is a
+#   16,000 m2 plateau with 0.000 m internal range).  At the strict
+#   thresholds exactly one basin qualifies at KBNA and every apron,
+#   pavement plateau and void-fill artefact is rejected.
+# * FACILITY-SCOPED, loose — INSIDE OpenStreetMap water-facility
+#   outlines only (man_made=wastewater_plant, landuse=basin/reservoir).
+#   Working ponds are NOT hydro-flat (the KBNA aeration ponds carry
+#   0.3-0.5 m of lidar surface texture), so the loose thresholds would
+#   over-detect hollows tile-wide (109 candidates measured) — but
+#   inside a mapped water facility the outline itself authorises the
+#   looser read; the lidar only traces the geometry.
+#
+# Strict tier:
+INSET_WATER_LOCAL_FLATNESS_M = 0.05
+INSET_WATER_COMPONENT_RANGE_M = 0.15
+# The surrounding rim (75th percentile over an ~8-cell collar) must
+# rise at least this above the water — flat PAVEMENT sits level with
+# its surroundings and must never become water.
+INSET_WATER_RIM_RISE_M = 0.3
+# Plateaus further than this from the raster's median elevation are
+# void-fill artefacts (a 40 m plateau inside the 150-180 m KBNA
+# raster), never water.
+INSET_WATER_PLAUSIBILITY_BAND_M = 30.0
+INSET_WATER_MINIMUM_AREA_M2 = 500.0
+# Facility-scoped tier (loose).  A WORKING pond's lidar surface is
+# rough: the KBNA aeration ponds measure 0.25-0.55 m of 3-by-3 relief
+# and a 1.8 m whole-pond range (foam, aerators, shore transition
+# cells) — the mapped outline is the authorisation; these thresholds
+# only trace the geometry within it.
+INSET_WATER_FACILITY_LOCAL_FLATNESS_M = 0.6
+INSET_WATER_FACILITY_COMPONENT_RANGE_M = 2.5
+INSET_WATER_FACILITY_RIM_RISE_M = 0.3
+INSET_WATER_FACILITY_MINIMUM_AREA_M2 = 300.0
+# The OpenStreetMap outlines that authorise the loose tier.
+INSET_WATER_FACILITY_QUERIES = (
+    'way["man_made"="wastewater_plant"]',
+    'way["landuse"="basin"]',
+    'way["landuse"="reservoir"]',
+)
+
+
+def detect_hydro_flat_water_rings(
+    inset_tif_path,
+    *,
+    minimum_area_m2=None,
+    local_flatness_m=None,
+    component_range_m=None,
+    rim_rise_m=None,
+    plausibility_band_m=None,
+):
+    """Detect hydro-flat basins in one inset GeoTIFF.
+
+    Returns a list of ``(ring, water_elevation_m)`` where ``ring`` is an
+    unclosed ``[(longitude, latitude), ...]`` exterior; empty list when
+    nothing qualifies (or GDAL/scipy are unavailable).  Pure read — no
+    files written.
+    """
+    if minimum_area_m2 is None:
+        minimum_area_m2 = INSET_WATER_MINIMUM_AREA_M2
+    if local_flatness_m is None:
+        local_flatness_m = INSET_WATER_LOCAL_FLATNESS_M
+    if component_range_m is None:
+        component_range_m = INSET_WATER_COMPONENT_RANGE_M
+    if rim_rise_m is None:
+        rim_rise_m = INSET_WATER_RIM_RISE_M
+    if plausibility_band_m is None:
+        plausibility_band_m = INSET_WATER_PLAUSIBILITY_BAND_M
+    loaded = _load_inset_raster(inset_tif_path)
+    if loaded is None:
+        return []
+    values, valid, geotransform = loaded
+    return _detect_water_components(
+        values, valid, geotransform,
+        minimum_area_m2=minimum_area_m2,
+        local_flatness_m=local_flatness_m,
+        component_range_m=component_range_m,
+        rim_rise_m=rim_rise_m,
+        plausibility_band_m=plausibility_band_m,
+    )
+
+
+def _load_inset_raster(inset_tif_path):
+    """``(median_filtered_values, valid_mask, geotransform)`` or ``None``
+    (GDAL or scipy unavailable, unreadable file).  The 3-by-3 median
+    pre-filter repairs isolated lidar dropouts (11 m pits inside the
+    KBNA ponds) that would otherwise fragment flat components."""
+    if not has_gdal:
+        return None
+    try:
+        from scipy import ndimage
+    except ImportError:
+        UI.vprint(
+            1,
+            "   INFO: scipy is unavailable - inset water detection "
+            "skipped.",
+        )
+        return None
+    dataset = gdal.Open(inset_tif_path)
+    if dataset is None:
+        return None
+    geotransform = dataset.GetGeoTransform()
+    band = dataset.GetRasterBand(1)
+    raw = band.ReadAsArray().astype(numpy.float64)
+    nodata = band.GetNoDataValue()
+    valid = numpy.isfinite(raw)
+    if nodata is not None:
+        valid &= raw != nodata
+    values = ndimage.median_filter(raw, size=3)
+    return values, valid, geotransform
+
+
+def _detect_water_components(
+    values,
+    valid,
+    geotransform,
+    *,
+    minimum_area_m2,
+    local_flatness_m,
+    component_range_m,
+    rim_rise_m,
+    plausibility_band_m,
+    restrict_mask=None,
+):
+    """The shared component scan behind both detection tiers.
+
+    ``restrict_mask`` (boolean, raster-shaped) limits candidate cells —
+    the facility-scoped tier passes the rasterized OpenStreetMap
+    water-facility outlines.  Returns ``[(ring, water_elevation_m)]``.
+    """
+    from scipy import ndimage
+    from shapely.errors import GEOSException
+    from shapely.geometry import box as shapely_box
+    from shapely.ops import unary_union
+
+    # Metric cell size at the raster's own latitude.
+    centre_latitude = geotransform[3] + (
+        geotransform[5] * values.shape[0] / 2.0
+    )
+    metres_per_degree_longitude = GEO.lat_to_m * numpy.cos(
+        numpy.radians(centre_latitude)
+    )
+    cell_area_m2 = abs(
+        geotransform[1] * metres_per_degree_longitude
+        * geotransform[5] * GEO.lat_to_m
+    )
+    if cell_area_m2 <= 0.0:
+        return []
+    minimum_cells = max(9, int(minimum_area_m2 / cell_area_m2))
+
+    # 3-by-3 local relief (max minus min over the neighbourhood).
+    local_maximum = ndimage.maximum_filter(values, size=3)
+    local_minimum = ndimage.minimum_filter(values, size=3)
+    flat = (local_maximum - local_minimum) <= local_flatness_m
+    flat &= valid
+    if restrict_mask is not None:
+        flat &= restrict_mask
+    flat[0, :] = flat[-1, :] = False
+    flat[:, 0] = flat[:, -1] = False
+
+    labels, label_count = ndimage.label(flat)
+    if label_count == 0:
+        return []
+    sizes = numpy.bincount(labels.ravel())
+    overall_median = float(numpy.median(values[valid])) if valid.any() \
+        else 0.0
+
+    rings = []
+    for label_index in range(1, label_count + 1):
+        if sizes[label_index] < minimum_cells:
+            continue
+        component = labels == label_index
+        component_values = values[component]
+        if (float(component_values.max())
+                - float(component_values.min())) > component_range_m:
+            continue
+        water_elevation = float(numpy.median(component_values))
+        if abs(water_elevation - overall_median) > plausibility_band_m:
+            continue
+        # The rim must RISE above the water (a flat apron sits level
+        # with its surroundings and must never become water).  75th
+        # percentile over an 8-cell collar: shores shelve gently, so a
+        # thin median under-reads real rims (measured KBNA lake:
+        # 3-cell median rim +0.12 m, 8-cell 75th percentile +5.7 m).
+        dilated = ndimage.binary_dilation(component, iterations=8)
+        rim = dilated & ~component & valid
+        if not rim.any():
+            continue
+        if float(numpy.percentile(values[rim], 75)) < (
+                water_elevation + rim_rise_m):
+            continue
+        # Draw the polygon one cell INSIDE the shore so every enclosed
+        # mesh triangle converges cleanly under water smoothing.
+        eroded = ndimage.binary_erosion(component)
+        if not eroded.any():
+            eroded = component
+        # Row-run rectangles -> union -> simplify (runs, not cells,
+        # keep the union cheap).
+        boxes = []
+        for row_index in numpy.flatnonzero(eroded.any(axis=1)):
+            row = eroded[row_index]
+            occupied_columns = numpy.flatnonzero(row)
+            runs = numpy.split(
+                occupied_columns, numpy.flatnonzero(
+                    numpy.diff(occupied_columns) > 1) + 1)
+            for run in runs:
+                if run.size == 0:
+                    continue
+                column_start, column_end = int(run[0]), int(run[-1])
+                longitude_west = geotransform[0] + (
+                    column_start * geotransform[1])
+                longitude_east = geotransform[0] + (
+                    (column_end + 1) * geotransform[1])
+                latitude_north = geotransform[3] + (
+                    row_index * geotransform[5])
+                latitude_south = geotransform[3] + (
+                    (row_index + 1) * geotransform[5])
+                boxes.append(shapely_box(
+                    min(longitude_west, longitude_east),
+                    min(latitude_north, latitude_south),
+                    max(longitude_west, longitude_east),
+                    max(latitude_north, latitude_south),
+                ))
+        if not boxes:
+            continue
+        try:
+            union = unary_union(boxes)
+        except (ValueError, GEOSException):
+            continue
+        polygons = ([union] if union.geom_type == "Polygon"
+                    else [geometry for geometry in getattr(
+                        union, "geoms", [])
+                        if geometry.geom_type == "Polygon"])
+        for polygon in polygons:
+            # Metric area floor PER POLYGON: a 55-cell component that is
+            # a 2-cell-wide creek thread erodes to slivers — a linear
+            # water body is OpenStreetMap's business, not a basin.
+            polygon_area_m2 = (polygon.area * GEO.lat_to_m
+                               * metres_per_degree_longitude)
+            if polygon_area_m2 < minimum_area_m2:
+                continue
+            simplified = polygon.simplify(
+                abs(geotransform[1]) * 2.0, preserve_topology=True)
+            if simplified.is_empty \
+                    or simplified.geom_type != "Polygon":
+                simplified = polygon
+            ring = [(float(x), float(y))
+                    for x, y in simplified.exterior.coords[:-1]]
+            if len(ring) >= 3:
+                rings.append((ring, water_elevation))
+    return rings
+
+
+def _facility_outline_polygons(lat, lon):
+    """Closed OpenStreetMap water-facility outlines for the tile
+    (absolute longitude/latitude shapely polygons), fetched through the
+    normal cached Overpass machinery (``cached_suffix="water_basins"``).
+    Empty list when the fetch fails or nothing is mapped."""
+    import O4_OSM_Utils as OSM
+    from shapely.geometry import Polygon as ShapelyPolygon
+
+    facility_layer = OSM.OSM_layer()
+    if not OSM.OSM_queries_to_OSM_layer(
+        list(INSET_WATER_FACILITY_QUERIES),
+        facility_layer,
+        lat,
+        lon,
+        tags_of_interest=["man_made", "landuse"],
+        cached_suffix="water_basins",
+    ):
+        return []
+    polygons = []
+    for way_identifier in (facility_layer.dicosmfirst["w"]
+                           or facility_layer.dicosmw):
+        node_references = facility_layer.dicosmw.get(way_identifier, [])
+        if len(node_references) < 4 \
+                or node_references[0] != node_references[-1]:
+            continue
+        ring = [facility_layer.dicosmn[reference]
+                for reference in node_references[:-1]]
+        try:
+            polygon = ShapelyPolygon(ring)
+            if not polygon.is_valid:
+                polygon = polygon.buffer(0)
+            if not polygon.is_empty and polygon.area > 0.0:
+                polygons.append(polygon)
+        except ValueError:
+            continue
+    return polygons
+
+
+def _facility_restrict_mask(polygons, values_shape, geotransform):
+    """Boolean raster mask of the cells whose centres fall inside any
+    facility polygon, or ``None`` when no polygon overlaps the raster."""
+    import shapely
+
+    if not polygons:
+        return None
+    rows, columns = values_shape
+    mask = numpy.zeros(values_shape, dtype=bool)
+    for polygon in polygons:
+        minimum_x, minimum_y, maximum_x, maximum_y = polygon.bounds
+        column_start = int((minimum_x - geotransform[0])
+                           / geotransform[1]) - 1
+        column_end = int((maximum_x - geotransform[0])
+                         / geotransform[1]) + 2
+        row_start = int((maximum_y - geotransform[3])
+                        / geotransform[5]) - 1
+        row_end = int((minimum_y - geotransform[3])
+                      / geotransform[5]) + 2
+        column_start = max(0, column_start)
+        column_end = min(columns, column_end)
+        row_start = max(0, row_start)
+        row_end = min(rows, row_end)
+        if column_start >= column_end or row_start >= row_end:
+            continue
+        window_rows = numpy.arange(row_start, row_end)
+        window_columns = numpy.arange(column_start, column_end)
+        latitudes = geotransform[3] + (
+            (window_rows + 0.5) * geotransform[5])
+        longitudes = geotransform[0] + (
+            (window_columns + 0.5) * geotransform[1])
+        longitude_grid, latitude_grid = numpy.meshgrid(
+            longitudes, latitudes)
+        inside = shapely.contains_xy(
+            polygon, longitude_grid.ravel(), latitude_grid.ravel()
+        ).reshape(longitude_grid.shape)
+        mask[row_start:row_end, column_start:column_end] |= inside
+    return mask if mask.any() else None
+
+
+def ensure_inset_water_supplement(lat, lon):
+    """Write (or refresh) the per-tile inset-water OSM supplement and
+    return its path, or ``None`` when no basin qualifies.
+
+    Derived from every cached inset GeoTIFF for the tile
+    (``list_cached_inset_dems``); regenerated when missing or older
+    than any raster, removed when stale rasters leave nothing behind.
+    The fragment is standard OSM XML (closed ``natural=water`` ways
+    with negative identifiers), consumed additively by
+    ``include_water``.
+    """
+    import bz2
+
+    supplement_path = FNAMES.inset_water(lat, lon)
+    inset_paths = list_cached_inset_dems(lat, lon)
+    if not inset_paths:
+        if os.path.isfile(supplement_path):
+            os.remove(supplement_path)
+        return None
+    newest_raster = max(os.path.getmtime(path) for path in inset_paths)
+    if (os.path.isfile(supplement_path)
+            and os.path.getmtime(supplement_path) >= newest_raster):
+        return supplement_path
+
+    facility_polygons = _facility_outline_polygons(lat, lon)
+    all_rings = []
+    for inset_path in inset_paths:
+        loaded = _load_inset_raster(inset_path)
+        if loaded is None:
+            continue
+        values, valid, geotransform = loaded
+        # Strict tier: exact hydro-flat plateaus, whole raster.
+        for ring, water_elevation in _detect_water_components(
+                values, valid, geotransform,
+                minimum_area_m2=INSET_WATER_MINIMUM_AREA_M2,
+                local_flatness_m=INSET_WATER_LOCAL_FLATNESS_M,
+                component_range_m=INSET_WATER_COMPONENT_RANGE_M,
+                rim_rise_m=INSET_WATER_RIM_RISE_M,
+                plausibility_band_m=INSET_WATER_PLAUSIBILITY_BAND_M):
+            all_rings.append((ring, water_elevation, inset_path))
+        # Facility-scoped tier: loose thresholds, only inside mapped
+        # water-facility outlines (working ponds carry real surface
+        # texture and are never exactly flat).
+        restrict_mask = _facility_restrict_mask(
+            facility_polygons, values.shape, geotransform)
+        if restrict_mask is not None:
+            for ring, water_elevation in _detect_water_components(
+                    values, valid, geotransform,
+                    minimum_area_m2=INSET_WATER_FACILITY_MINIMUM_AREA_M2,
+                    local_flatness_m=INSET_WATER_FACILITY_LOCAL_FLATNESS_M,
+                    component_range_m=(
+                        INSET_WATER_FACILITY_COMPONENT_RANGE_M),
+                    rim_rise_m=INSET_WATER_FACILITY_RIM_RISE_M,
+                    plausibility_band_m=INSET_WATER_PLAUSIBILITY_BAND_M,
+                    restrict_mask=restrict_mask):
+                all_rings.append((ring, water_elevation, inset_path))
+    if not all_rings:
+        if os.path.isfile(supplement_path):
+            os.remove(supplement_path)
+        return None
+
+    lines = ['<?xml version="1.0" encoding="UTF-8"?>',
+             '<osm version="0.6" generator="O4_Airport_Elevation_Insets">']
+    node_identifier = -1
+    way_identifier = -1
+    for ring, water_elevation, inset_path in all_rings:
+        node_identifiers = []
+        for longitude, latitude in ring:
+            lines.append(
+                f'  <node id="{node_identifier}" lat="{latitude:.8f}" '
+                f'lon="{longitude:.8f}" version="1"/>')
+            node_identifiers.append(node_identifier)
+            node_identifier -= 1
+        lines.append(f'  <way id="{way_identifier}" version="1">')
+        for reference in node_identifiers + [node_identifiers[0]]:
+            lines.append(f'    <nd ref="{reference}"/>')
+        lines.append('    <tag k="natural" v="water"/>')
+        lines.append(
+            '    <tag k="source" v="airport elevation inset '
+            'hydro-flat detection"/>')
+        lines.append(f'  </way>')
+        way_identifier -= 1
+        UI.vprint(
+            1,
+            "   Inset water basin detected at "
+            f"{water_elevation:.2f} m "
+            f"({os.path.basename(inset_path)}).",
+        )
+    lines.append("</osm>")
+    with bz2.open(supplement_path, "wt", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+    return supplement_path
+
+
+# =====================================================================
 # Tile-aware wrappers (read tile config attributes)
 # =====================================================================
 def insets_enabled_for_tile(tile):
