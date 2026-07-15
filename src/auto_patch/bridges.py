@@ -4326,8 +4326,14 @@ def _emit_object_sourced_bridge_corridors(
         )
         if exit_corridor is not None:
             try:
+                # The lane opens WIDER than the draped-carriageway
+                # corridor itself (user ruling 2026-07-14c): the
+                # approach ramps now run at the TRENCH width (~53 m at
+                # KBNA Donelson against a 34-38 m carriageway
+                # corridor), and a lane only as wide as the corridor
+                # starves every rect of the wide chain.
                 bridge_keep_out = bridge_keep_out.difference(
-                    exit_corridor.buffer(0.1)
+                    exit_corridor.buffer(12.0)
                 )
                 trench_zone = footprint.buffer(-_TRENCH_INSET_M)
                 if not trench_zone.is_empty:
@@ -4341,7 +4347,63 @@ def _emit_object_sourced_bridge_corridors(
     portal_pairs = _detect_tunnel_portal_pairs(
         layout, dem, tile_lat, tile_lon
     )
-    keep_out_zones.extend(_portal_pair_owned_polygons(portal_pairs))
+    portal_owned_polygons = _portal_pair_owned_polygons(portal_pairs)
+    # User ruling 2026-07-14c: the road LANE out of each MOUTH stays
+    # open (mirrors the round-10 road-exit lane for deck bridges) — the
+    # first approach rect must reach the mouth plate instead of being
+    # skipped for grazing the owned footprint, which left the ramps
+    # stopping short of the portal.  Only the outward half opens; the
+    # buried band stays fully excluded.
+    mouth_lane_polygons: list = []
+    for pair in portal_pairs:
+        for portal in pair["portals"]:
+            outward_vector = portal.get("outward")
+            if outward_vector is None:
+                continue
+            lane_lines = _draped_road_centerlines_meters(
+                portal["bridge"], road_networks, to_meters
+            )
+            if not lane_lines:
+                continue
+            centroid_point = portal["footprint"].centroid
+            reach = 1000.0
+            perpendicular = (-outward_vector[1], outward_vector[0])
+            outward_half_plane = Polygon([
+                (centroid_point.x + perpendicular[0] * reach,
+                 centroid_point.y + perpendicular[1] * reach),
+                (centroid_point.x - perpendicular[0] * reach,
+                 centroid_point.y - perpendicular[1] * reach),
+                (centroid_point.x - perpendicular[0] * reach
+                 + outward_vector[0] * 2.0 * reach,
+                 centroid_point.y - perpendicular[1] * reach
+                 + outward_vector[1] * 2.0 * reach),
+                (centroid_point.x + perpendicular[0] * reach
+                 + outward_vector[0] * 2.0 * reach,
+                 centroid_point.y + perpendicular[1] * reach
+                 + outward_vector[1] * 2.0 * reach),
+            ])
+            lane_half_width = 0.5 * max(
+                road_width_m,
+                math.sqrt(portal["footprint"].area),
+            )
+            for lane_line in lane_lines:
+                try:
+                    mouth_lane_polygons.append(
+                        lane_line.buffer(lane_half_width)
+                        .intersection(outward_half_plane)
+                    )
+                except _GEOM_EXC:
+                    continue
+    if mouth_lane_polygons:
+        try:
+            mouth_lane_union = unary_union(mouth_lane_polygons)
+            portal_owned_polygons = [
+                polygon.difference(mouth_lane_union)
+                for polygon in portal_owned_polygons
+            ]
+        except _GEOM_EXC:
+            pass
+    keep_out_zones.extend(portal_owned_polygons)
     try:
         approach_keep_out = (
             unary_union(keep_out_zones) if keep_out_zones else None
@@ -4440,8 +4502,37 @@ def _emit_object_sourced_bridge_corridors(
                 f"{bridge.object_resources} — corridor skipped",
             )
             continue
+        # User ruling 2026-07-14c: the approach ramps match the WIDTH
+        # of the bridge TRENCH they emerge from (the deck box minus the
+        # trench inset — ~53 m at KBNA Donelson Pike), not one
+        # carriageway each.  Deduping at that half-width merges the
+        # parallel carriageway lines into one wide walk; genuinely
+        # diverging branches (the Donelson Y) stay separate chains
+        # whose full-width rects overlap through the fork.
+        trench_width_m = None
+        try:
+            deck_box = _bridge_deck_box_meters(bridge, layout)
+            if deck_box is not None and not deck_box.is_empty:
+                rotated_rectangle = deck_box.minimum_rotated_rectangle
+                corners = list(rotated_rectangle.exterior.coords)
+                if len(corners) >= 3:
+                    edge_a = math.hypot(
+                        corners[1][0] - corners[0][0],
+                        corners[1][1] - corners[0][1],
+                    )
+                    edge_b = math.hypot(
+                        corners[2][0] - corners[1][0],
+                        corners[2][1] - corners[1][1],
+                    )
+                    trench_width_m = (
+                        min(edge_a, edge_b) - 2.0 * _TRENCH_INSET_M
+                    )
+                    if trench_width_m < road_width_m:
+                        trench_width_m = None
+        except _GEOM_EXC:
+            trench_width_m = None
         road_lines = _dedup_parallel_road_lines(
-            road_lines, road_width_m / 2.0
+            road_lines, (trench_width_m or road_width_m) / 2.0
         )
 
         # The under-deck TRENCH and the R8 flush-seat cut moved to the
@@ -4463,6 +4554,7 @@ def _emit_object_sourced_bridge_corridors(
             keep_out=approach_keep_out,
             crossing_union=all_crossings_union,
             emitted_registry=emitted_registry,
+            width_override_m=trench_width_m,
         )
         n_emitted += 1
         UI.vprint(
@@ -4506,8 +4598,31 @@ def _emit_object_sourced_bridge_corridors(
                     "corridor skipped",
                 )
                 continue
+            # User ruling 2026-07-14c: the outward ramp is as wide as
+            # the MOUTH FACE it emerges from (the footprint's extent
+            # perpendicular to the outward direction), not one
+            # carriageway — and one merged walk carries it.
+            mouth_face_width_m = None
+            outward_vector = portal.get("outward")
+            if outward_vector is not None:
+                centroid_point = footprint.centroid
+                minimum_p = maximum_p = 0.0
+                try:
+                    for vertex_x, vertex_y in footprint.exterior.coords:
+                        projection = (
+                            (vertex_x - centroid_point.x)
+                            * -outward_vector[1]
+                            + (vertex_y - centroid_point.y)
+                            * outward_vector[0]
+                        )
+                        minimum_p = min(minimum_p, projection)
+                        maximum_p = max(maximum_p, projection)
+                    mouth_face_width_m = maximum_p - minimum_p
+                except _GEOM_EXC:
+                    mouth_face_width_m = None
             road_lines = _dedup_parallel_road_lines(
-                road_lines, road_width_m / 2.0
+                road_lines,
+                (mouth_face_width_m or road_width_m) / 2.0,
             )
             if _emit_corridor_for_footprint(
                 layout, dem, tile_lat, tile_lon, meters_to_lat_lon,
@@ -4518,7 +4633,8 @@ def _emit_object_sourced_bridge_corridors(
                 keep_out=approach_keep_out,
                 crossing_union=all_crossings_union,
                 emitted_registry=emitted_registry,
-                outward=portal.get("outward"),
+                outward=outward_vector,
+                width_override_m=mouth_face_width_m,
             ):
                 n_emitted += 1
                 UI.vprint(
@@ -4574,7 +4690,7 @@ def _emit_corridor_for_footprint(
         footprint, floor_elevation, road_lines,
         road_width_m, ramp_step_m, approach_length_m,
         keep_out=None, crossing_union=None, emitted_registry=None,
-        outward=None):
+        outward=None, width_override_m=None):
     """Emit stepped approach ramps from ``floor_elevation`` up to the DEM
     for each road crossing a bridge footprint (the under-deck trench
     plate itself is emitted by the caller as the FULL footprint, stage
@@ -4593,9 +4709,15 @@ def _emit_corridor_for_footprint(
     ``emitted_registry`` — shared list of already-emitted approach rects;
     a later chain skips rects overlapping an earlier chain's.
     ``outward`` — optional unit vector: walk only road pieces on that
-    side of the footprint (tunnel portals ramp AWAY from the hill)."""
+    side of the footprint (tunnel portals ramp AWAY from the hill).
+    ``width_override_m`` — full corridor width for the ramp rects when
+    the caller matches the crossing opening (the trench road-exit
+    width, the portal mouth face) instead of one carriageway (user
+    ruling 2026-07-14c: ramps as wide as the opening they emerge
+    from)."""
     emitted = False
-    half_width = road_width_m / 2.0
+    half_width = (width_override_m if width_override_m else
+                  road_width_m) / 2.0
     split_region = footprint
     if crossing_union is not None:
         split_region = crossing_union
@@ -4719,8 +4841,15 @@ def _emit_corridor_ramp_chain(
             if not polygon.is_valid:
                 polygon = polygon.buffer(0)
             if keep_out is not None and not polygon.is_empty:
+                # FRACTIONAL skip (user ruling 2026-07-14c): a rect
+                # merely GRAZING a keep-out boundary is emitted — the
+                # absolute 0.5 m2 test dropped every leading rect at
+                # the KBNA portal mouths (ramps stopped one step short
+                # of the plate) and starved the wide Donelson chains.
+                # A rect genuinely landing on owned ground still skips.
                 try:
-                    if polygon.intersection(keep_out).area > 0.5:
+                    if (polygon.intersection(keep_out).area
+                            > 0.25 * polygon.area):
                         previous = current
                         continue
                 except _GEOM_EXC:
@@ -5419,7 +5548,43 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
             )
             if crown_geometry is None:
                 continue
+            # User correction 2026-07-14c: the object top includes a
+            # parapet/safety wall, so ``mouth + deck_top`` overshoots
+            # the ground (KBNA: structure tops 185.0/185.3 against real
+            # ground 174/177).  The crown/collar hold the TERRAIN's own
+            # height where it meets the portal back: sample the digital
+            # elevation model just beyond the footprint's buried edge,
+            # clamped to a sane band around the mouth.
             crown_elevation = mouth_floor + deck_top_metres
+            burial_x = -portal["outward"][0]
+            burial_y = -portal["outward"][1]
+            centroid_point = footprint.centroid
+            buried_extent = 0.0
+            try:
+                for vertex_x, vertex_y in footprint.exterior.coords:
+                    projection = (
+                        (vertex_x - centroid_point.x) * burial_x
+                        + (vertex_y - centroid_point.y) * burial_y
+                    )
+                    if projection > buried_extent:
+                        buried_extent = projection
+            except _GEOM_EXC:
+                buried_extent = 0.0
+            try:
+                sample_lat, sample_lon = _meters_to_lat_lon(
+                    centroid_point.x + burial_x * (buried_extent + 4.0),
+                    centroid_point.y + burial_y * (buried_extent + 4.0),
+                )
+                ground_behind = _sample_dem(
+                    dem, tile_lat, tile_lon, sample_lat, sample_lon
+                )
+            except _GEOM_EXC:
+                ground_behind = None
+            if ground_behind is not None:
+                crown_elevation = min(
+                    max(float(ground_behind), mouth_floor - 8.0),
+                    mouth_floor + deck_top_metres,
+                )
             try:
                 crown_vertex_count = _born_flat(
                     crown_geometry, ROLE_BRIDGE_TRENCH,
@@ -5500,9 +5665,31 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
         floor_elevation = _bridge_corridor_floor_m(bridge, deck_elevation)
         # Round 10: the road-exit corridor — where a draped road leaves
         # the span through an abutment end, the causeway must yield.
+        # User ruling 2026-07-14c: the exit opening matches the TRENCH
+        # width (the approach ramps now run at trench width), so the
+        # carriageway-width corridor is dilated up to the trench's
+        # cross-section before it cuts the causeway plates.
         road_exit_corridor = _road_exit_corridor_meters(
             bridge, layout, to_meters
         )
+        if road_exit_corridor is not None:
+            try:
+                rotated_rectangle = deck_box.minimum_rotated_rectangle
+                corners = list(rotated_rectangle.exterior.coords)
+                short_side = min(
+                    math.hypot(corners[1][0] - corners[0][0],
+                               corners[1][1] - corners[0][1]),
+                    math.hypot(corners[2][0] - corners[1][0],
+                               corners[2][1] - corners[1][1]),
+                )
+                trench_width_m = short_side - 2.0 * _TRENCH_INSET_M
+                dilation = (trench_width_m / 2.0
+                            - _ROAD_EXIT_CUT_HALF_WIDTH_M)
+                if dilation > 0.0:
+                    road_exit_corridor = road_exit_corridor.buffer(
+                        dilation)
+            except _GEOM_EXC:
+                pass
 
         # Ruling R8 flush seat (hard decks) / pavement wins (cosmetic).
         pavement_kept_union = None
@@ -5638,30 +5825,30 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                     _born_flat(part, ROLE_BRIDGE_CAUSEWAY,
                                "object_bridge_causeway", plate_elevation)
                     emitted_parts += 1
-                if not emitted_parts:
-                    continue
                 # User ruling 2026-07-14b: the pavement the approach
-                # RESUMES on around the plate is anchored AT the deck
-                # height, so both sides of the crossing grade smoothly
-                # to the same value.  The abutment-line pins alone miss
-                # it — the resumed pavement across the road-exit cut
-                # measures 13.3-13.6 m from the plate exterior at KBNA
-                # (its approach solved 6.3 m above the 167.0 deck, a
-                # quarantined wall at the lip).  Taxi/runway/apron
-                # rings only — service roads descend through the
-                # road-exit cut and must never pin to the deck.
+                # RESUMES on around the plate zone is anchored AT the
+                # deck height, so both sides of the crossing grade
+                # smoothly to the same value.  The abutment-line pins
+                # alone miss it — the resumed pavement across the
+                # road-exit cut measures 13.3-13.6 m from the plate at
+                # KBNA (its approach solved 6.3 m above the 167.0
+                # deck, a quarantined wall at the lip).  Pinned around
+                # the FULL outward plate rectangle, not the surviving
+                # flank parts — with trench-width exit cuts (ruling
+                # 2026-07-14c) the flanks can vanish entirely while the
+                # anchoring must stay.  Taxi/runway/apron rings only —
+                # service roads descend through the road-exit cut and
+                # must never pin to the deck.
                 weld_pinned = 0
                 weld_band = float(
                     _CFG.BRIDGE_CAUSEWAY_WELD_PIN_BAND_M)
-                for part in parts:
-                    if (part.geom_type != "Polygon" or part.is_empty
-                            or part.area < 25.0):
-                        continue
-                    try:
-                        weld_line = LineString(
-                            list(part.exterior.coords))
-                    except _GEOM_EXC:
-                        continue
+                try:
+                    weld_line = LineString(list(
+                        _outward_rectangle(plate_length)
+                        .exterior.coords))
+                except _GEOM_EXC:
+                    weld_line = None
+                if weld_line is not None:
                     for shape_index, shape in enumerate(
                             list(layout.shapes)):
                         if shape.role not in _BRIDGE_PIN_ROLES:
@@ -5684,9 +5871,11 @@ def build_bridge_layout_shapes(layout, dem, tile_lat, tile_lon):
                     UI.vprint(
                         1,
                         f"   [object-bridge] {weld_pinned} approach "
-                        "weld pin(s) around the causeway plates "
+                        "weld pin(s) around the causeway zone "
                         f"({plate_elevation:.2f} m, end {end_index})",
                     )
+                if not emitted_parts:
+                    continue
                 n_causeway += emitted_parts
                 UI.vprint(
                     1,

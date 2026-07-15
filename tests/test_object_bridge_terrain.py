@@ -1883,12 +1883,14 @@ class TestTunnelPortalPairs:
         mouths = [shape for shape in layout.shapes
                   if shape.role == ROLE_BRIDGE_TRENCH
                   and shape.ref == "object_tunnel_portal_mouth"]
-        # Crown split (user ruling 2026-07-14): each portal is THREE
-        # plates — the open-mouth half at road grade, the buried half
-        # at the object top (mouth floor + deck top, 180 + 7.5), and a
-        # COLLAR band around the buried half's back holding the same
-        # top elevation (ruling 2026-07-14b), so the runway-side rim
-        # and the ground behind the portal ride the tunnel roof.
+        # Crown split (user rulings 2026-07-14/b/c): each portal is
+        # THREE plates — the open-mouth half at road grade, the buried
+        # half as a CROWN, and a COLLAR band around the buried half's
+        # back.  Crown and collar hold the TERRAIN's height behind the
+        # portal (the digital elevation model sampled beyond the buried
+        # edge — the object top includes a parapet and overshoots), so
+        # on this flat 180 m terrain they sit at 180.0, not
+        # 180 + deck_top.
         crowns = [shape for shape in layout.shapes
                   if shape.role == ROLE_BRIDGE_TRENCH
                   and shape.ref == "object_tunnel_portal_crown"]
@@ -1900,7 +1902,7 @@ class TestTunnelPortalPairs:
         for mouth in mouths:
             assert set(mouth.node_altitudes) == {180.0}
         for plate in crowns + collars:
-            assert set(plate.node_altitudes) == {187.5}
+            assert set(plate.node_altitudes) == {180.0}
         assert not [shape for shape in layout.shapes
                     if shape.role == ROLE_BRIDGE_CAUSEWAY]
 
