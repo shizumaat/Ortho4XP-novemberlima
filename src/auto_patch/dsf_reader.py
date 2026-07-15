@@ -875,7 +875,21 @@ def read_dsf_object_buildings(
             resource_path, pack_root, xplane_root)
         if physical_path is None:
             continue
-        geometry = _load_object_geometry(physical_path)
+        # Ruling R1 (same choice as Phase 2 discovery in
+        # ``post_mesh.discover_and_rebake_airport``): geometry is ALWAYS
+        # read from the ``.anchor_bak`` original when one exists.  After
+        # a Phase 2 y-bake the LIVE file carries per-vertex offsets, so
+        # its base y is no longer ~0 and every rebaked structure would
+        # read as elevated — on a rebaked pack this loop then produces
+        # ZERO building rings (found at KBNA 2026-07-14: the whole
+        # terminal complex vanished from the building pool after the
+        # first rebake).
+        from .object_rebake import BACKUP_SUFFIX
+
+        backup_path = physical_path + BACKUP_SUFFIX
+        geometry_source_path = (
+            backup_path if os.path.isfile(backup_path) else physical_path)
+        geometry = _load_object_geometry(geometry_source_path)
         if geometry is None or not geometry.has_solid_geometry:
             continue
         if geometry.solid_reach_metres() < DSF_OBJECT_MIN_REACH_M:
