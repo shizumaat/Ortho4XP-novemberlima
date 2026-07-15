@@ -828,7 +828,10 @@ def ensure_airport_insets(
     """
     index = _read_index(lat, lon)
     checked_stamp = datetime.date.today().isoformat()
-    for icao in sorted(airport_bounding_boxes):
+    # key=str: callers pass string airport codes, but a mixed-type dict must
+    # never abort the whole tile's fetches with an unorderable-keys
+    # TypeError (defense in depth behind _airport_bounding_boxes' filter).
+    for icao in sorted(airport_bounding_boxes, key=str):
         bounding_box = airport_bounding_boxes[icao]
         airport_record = index.get(icao, {})
         for definition in provider_definitions:
@@ -952,7 +955,18 @@ def _airport_bounding_boxes(tile, dico_airports):
     margin_lon = margin_m / metres_per_degree_longitude
     margin_lat = margin_m / metres_per_degree_latitude
     boxes = {}
+    skipped_without_code = 0
     for airport in dico_airports:
+        # dico_airports keys are ICAO/IATA/local_ref/name STRINGS for real
+        # airports but REPRESENTATIVE-NODE TUPLES for unnamed strips
+        # (O4_Airport_Utils key_type "repr_node").  Tuple keys cannot name a
+        # cache file (FNAMES.airport_inset_dem concatenates the key) and made
+        # ensure_airport_insets' sorted() raise "'<' not supported between
+        # instances of 'str' and 'tuple'" — the 2026-07-14 CYXY fetch abort.
+        # Unnamed strips do not get elevation insets; skip them loudly.
+        if not isinstance(airport, str):
+            skipped_without_code += 1
+            continue
         record = dico_airports[airport]
         boundary = record.get("boundary")
         if boundary is None or boundary.is_empty:
@@ -963,6 +977,13 @@ def _airport_bounding_boxes(tile, dico_airports):
             tile.lat + ymin - margin_lat,
             tile.lon + xmax + margin_lon,
             tile.lat + ymax + margin_lat,
+        )
+    if skipped_without_code:
+        UI.vprint(
+            1,
+            "   INFO: airport elevation insets skipped",
+            skipped_without_code,
+            "unnamed airport(s) (no code to cache under).",
         )
     return boxes
 
