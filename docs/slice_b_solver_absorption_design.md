@@ -29,6 +29,15 @@ IDENTITY, not an arbitration.
    gates are patches over its damage and retire with it).
 6. Strips stand off tunnel ramps like buildings (the 2 ledgered SPJC tears).
 7. SPJC `no_self_overlap` and within-shape `pavement_grade` reds burn down.
+AMENDED (Noah ruling 2026-07-14): the B4 FLIP GATE is the
+   explosion-relevant subset — tears 0, zero new near-parallel and
+   T-vertices, clean forced-re-bake triangle check, in-sim pass.  The
+   HYGIENE rows (coincident twins, node diet, adoption/weld zero-hit
+   counters) are MEASURED AND LEDGERED to the slice-C emit
+   restructure (bands emitted from the solver grid), not flip
+   blockers: exact-coordinate twins collapse to one node at bake
+   (the part-34 mesh exoneration) and holding the ~36 s builds
+   behind the restructure serves nothing.
 8. PERFORMANCE (Noah ruling 2026-07-10): the absorption must SIMPLIFY and
    REDUCE steps, never add complexity — and the full CYXY build returns
    UNDER 2 MINUTES (120 s).  Measured baseline at dev 162aaca: 195.7 s
