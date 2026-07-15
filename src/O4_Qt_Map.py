@@ -153,7 +153,44 @@ class MapView(QGraphicsView):
         self._update_timer.setInterval(FETCH_DEBOUNCE_MS)
         self._update_timer.timeout.connect(self._refresh_tiles)
 
+        self._make_legend()
         self._apply_zoom()
+
+    def _make_legend(self):
+        from PySide6.QtWidgets import QLabel
+
+        chips = "".join(
+            "<span style='background:%s;color:%s'>&nbsp;%d&nbsp;</span>"
+            % (ZL_COLORS[z], "#1F2937", z)
+            for z in (15, 16, 17, 18, 19)
+        )
+        self.legend = QLabel(self.viewport())
+        self.legend.setTextFormat(Qt.RichText)
+        self.legend.setText(
+            "<div style='font-size:10px'>"
+            "built · color = ZL &nbsp;"
+            "<span style='background:%s;color:#1F2937'>&nbsp;≤14&nbsp;</span>"
+            "%s<br>"
+            "<span style='color:#FFD60A'>▣</span> selected · "
+            "double border = installed · * = custom zones"
+            "</div>" % (ZL_COLORS[14], chips)
+        )
+        self.legend.setStyleSheet(
+            "background: rgba(17,24,32,190); color: #E8EAED;"
+            "padding: 5px 8px; border-radius: 6px;"
+        )
+        self.legend.adjustSize()
+        self.legend.move(10, 10)
+        self.legend.show()
+
+    def set_legend_visible(self, visible):
+        self.legend.setVisible(bool(visible))
+
+    def _place_legend(self):
+        self.legend.adjustSize()
+        self.legend.move(
+            10, self.viewport().height() - self.legend.height() - 10
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -375,6 +412,7 @@ class MapView(QGraphicsView):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._place_legend()
         self._schedule_refresh()
 
     # ------------------------------------------------------------------
@@ -681,11 +719,17 @@ class MapView(QGraphicsView):
         px = r.width() * scale  # tile size on screen
 
         if built is not None:
-            color = QColor(ZL_COLORS.get(built.zl or 0, "#9AA5B1"))
-            color.setAlpha(80)
-            painter.fillRect(r, color)
+            base = QColor(ZL_COLORS.get(built.zl or 0, "#9AA5B1"))
+            fill = QColor(base)
+            fill.setAlpha(70)
+            painter.fillRect(r, fill)
+            border = QPen(base.darker(140))
+            border.setCosmetic(True)
+            border.setWidth(2)
+            painter.setPen(border)
+            painter.drawRect(r)
             if tile in self._installed:
-                pen = QPen(QColor(20, 28, 36, 200))
+                pen = QPen(QColor(20, 28, 36, 210))
                 pen.setCosmetic(True)
                 pen.setWidth(3)
                 painter.setPen(pen)
@@ -694,13 +738,19 @@ class MapView(QGraphicsView):
                     -r.width() * 0.03, -r.height() * 0.03,
                 )
                 painter.drawRect(inset)
-            if px > 60 and built.provider:
-                painter.setPen(QPen(QColor(15, 23, 32, 220)))
+            if px > 44 and built.provider:
                 label = "%s %s%s" % (
                     built.provider[:4],
                     built.zl if built.zl else "?",
                     "*" if built.has_zones else "",
                 )
+                painter.setPen(QPen(QColor(255, 255, 255, 235)))
+                painter.drawText(
+                    r.translated(r.width() * 0.008, r.height() * 0.008),
+                    Qt.AlignCenter,
+                    label,
+                )
+                painter.setPen(QPen(QColor(15, 23, 32, 235)))
                 painter.drawText(r, Qt.AlignCenter, label)
 
         if selected:

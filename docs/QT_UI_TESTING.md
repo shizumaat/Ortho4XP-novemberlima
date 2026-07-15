@@ -47,14 +47,29 @@ they're empty.
   the console), or a tile like `+48-006` / `48 -6`. Enter jumps to the top
   result.
 - **Tile info pane** — select a built tile: imagery source, ZL (+zones),
-  mesh date, imagery date, size on disk, and the **Installed in X-Plane**
-  switch (creates/removes the `zOrtho4XP_*` link in Custom Scenery; links
-  only, per the spec — never touches your tile data).
+  mesh and imagery dates (with time), size on disk, and the **Installed in
+  X-Plane** switch (creates/removes the `zOrtho4XP_*` link in Custom
+  Scenery; links only, per the spec — never touches your tile data).
+- **Built-tile overlays + legend** — built tiles show a colored fill and
+  border (color = ZL, per the legacy color code), the provider + ZL label
+  from moderate zoom in, a doubled border when installed in X-Plane, and
+  `*` for custom zones. The legend (bottom-left) explains all of it;
+  toggle it via View → Show map legend. Tiles are detected in the output
+  folder from Settings — if yours live elsewhere, point the output folder
+  there and View → Refresh tiles.
 - **Building** — select tiles, choose steps, Build. The map zooms to the
-  selection and locks; each tile shows queued → spinner → progress → ✓/!
-  badges; the console drawer opens with the familiar pipeline output; Stop
-  requests a halt after the current step. Tiles build sequentially (same as
-  the legacy batch build — pipeline overlap comes later).
+  selection and locks; each tile's ring shows **whole-tile completion**
+  (steps own weighted slices of 0-100 %, so the ring climbs once and never
+  restarts; it holds steady with a spinner during mesh triangulation, which
+  reports no percentage). The Build box morphs into a live progress list —
+  one bar per tile with its current step, elapsed time, estimated time
+  remaining, and Stop at the bottom — and reverts a few seconds after the
+  build ends. Tiles build sequentially (pipeline overlap comes later).
+- **macOS app bundle** — `./build_mac_app.sh` produces a double-clickable
+  `dist/Ortho4XP.app` with a real "Ortho4XP" menu bar (PyInstaller,
+  windowed). Untested from the dev container — please report how the first
+  build goes. When running from source, the menu bar will still say
+  "Python"; that's a macOS bundle-name rule only an .app can fix.
 - **Console drawer** — toggle from the status bar; verbosity set in Settings.
 - **Tools → Link overlays folder** — the old `o`-key overlay link.
 - **Full settings window** (⚙ or Cmd/Ctrl+,) — the categorized window from

@@ -34,8 +34,11 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
+    QScrollArea,
     QSplitter,
+    QStackedWidget,
     QStatusBar,
     QToolBar,
     QVBoxLayout,
@@ -57,7 +60,58 @@ PREFS_FILE = FNAMES.resource_path(".qt_prefs.json")
 AIRPORT_CACHE = FNAMES.resource_path(".airport_index.tsv")
 MAX_CONSOLE_LINES = 5000
 
-STEP_BAR = {"Vector": 1, "Mesh": 1, "Masks": 1, "Imagery/DSF": 2}
+# ---------------------------------------------------------------------------
+# Whole-tile progress model: each pipeline step owns a weighted slice of the
+# tile's 0-100%, so the per-tile ring/bar climbs once and never restarts.
+# ---------------------------------------------------------------------------
+STEP_WEIGHTS = {
+    "vector": 0.10,
+    "mesh": 0.15,
+    "masks": 0.10,
+    "imagery": 0.60,
+    "overlays": 0.05,
+}
+STEP_LABELS = {
+    "vector": "vector data",
+    "mesh": "triangulating",
+    "masks": "water masks",
+    "imagery": "imagery & DSF",
+    "overlays": "overlays",
+}
+
+
+def plan_steps(do_vector, do_imagery, do_overlays):
+    """Ordered (key, base_fraction, slice_fraction) plan for the selected
+    steps, with slices normalized so a full tile is exactly 1.0."""
+    keys = []
+    if do_vector:
+        keys += ["vector", "mesh", "masks"]
+    if do_imagery:
+        keys.append("imagery")
+    if do_overlays:
+        keys.append("overlays")
+    total = sum(STEP_WEIGHTS[k] for k in keys)
+    plan, base = [], 0.0
+    for k in keys:
+        weight = STEP_WEIGHTS[k] / total
+        plan.append((k, base, weight))
+        base += weight
+    return plan
+
+
+def step_progress(step_key, bars):
+    """Progress (0-100) inside one step from the three legacy progress
+    bars, or None when the step reports no usable percentage (mesh
+    triangulation, overlay extraction)."""
+    if step_key in ("vector", "masks"):
+        return bars.get(1, 0)
+    if step_key == "imagery":
+        return (
+            0.55 * bars.get(2, 0)
+            + 0.25 * bars.get(3, 0)
+            + 0.20 * bars.get(1, 0)
+        )
+    return None
 
 
 def load_prefs():
@@ -120,6 +174,7 @@ class _UiAdapter(QObject):
 
 class _BuildSignals(QObject):
     tile_state = Signal(int, int, str, str, int)  # lat, lon, state, label, pct
+    step_started = Signal(int, int, str, float, float)  # lat, lon, key, base, slice
     finished = Signal(int, int)  # done_count, error_count
 
 
@@ -161,10 +216,14 @@ class MainWindow(QMainWindow):
         self._console_timer.start()
         self._build_signals = _BuildSignals()
         self._build_signals.tile_state.connect(self._on_tile_state)
+        self._build_signals.step_started.connect(self._on_step_started)
         self._build_signals.finished.connect(self._on_build_finished)
         self._bar_values = {1: 0, 2: 0, 3: 0}
-        self._current_step_label = ""
-        self._current_tile = None
+        self._cur_step = None  # (tile, key, base, slice) while building
+        self._build_t0 = None
+        self._done_count = 0
+        self._ntiles = 0
+        self._tile_frac = 0.0
 
         self._make_widgets()
         self._make_menus()
@@ -258,7 +317,14 @@ class MainWindow(QMainWindow):
         pv.addWidget(self.info_group)
 
         build_group = QGroupBox("Build")
-        bg = QVBoxLayout(build_group)
+        bgl = QVBoxLayout(build_group)
+        self.build_stack = QStackedWidget()
+        bgl.addWidget(self.build_stack)
+
+        # Page 0 — build options
+        options_page = QWidget()
+        bg = QVBoxLayout(options_page)
+        bg.setContentsMargins(0, 0, 0, 0)
         self.build_summary = QLabel("No tiles selected")
         bg.addWidget(self.build_summary)
         self.chk_vector = QCheckBox("Vector, mesh && masks")
@@ -278,12 +344,37 @@ class MainWindow(QMainWindow):
         self.build_btn = QPushButton("▶ Build")
         self.build_btn.clicked.connect(self.start_build)
         bg.addWidget(self.build_btn)
+        self.build_stack.addWidget(options_page)
+
+        # Page 1 — live per-tile progress (shown while building)
+        progress_page = QWidget()
+        pg = QVBoxLayout(progress_page)
+        pg.setContentsMargins(0, 0, 0, 0)
+        self.progress_title = QLabel("")
+        pg.addWidget(self.progress_title)
+        rows_scroll = QScrollArea()
+        rows_scroll.setWidgetResizable(True)
+        rows_host = QWidget()
+        self._rows_layout = QVBoxLayout(rows_host)
+        self._rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._rows_layout.setSpacing(4)
+        self._rows_layout.addStretch(1)
+        rows_scroll.setWidget(rows_host)
+        pg.addWidget(rows_scroll, 1)
+        self.elapsed_label = QLabel("Elapsed —")
+        pg.addWidget(self.elapsed_label)
+        self.eta_label = QLabel("Remaining —")
+        pg.addWidget(self.eta_label)
         self.stop_btn = QPushButton("■ Stop")
-        self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self.request_stop)
-        bg.addWidget(self.stop_btn)
-        pv.addWidget(build_group)
-        pv.addStretch(1)
+        pg.addWidget(self.stop_btn)
+        self.build_stack.addWidget(progress_page)
+
+        pv.addWidget(build_group, 1)
+        self._tile_rows = {}
+        self._elapsed_timer = QTimer(self)
+        self._elapsed_timer.setInterval(1000)
+        self._elapsed_timer.timeout.connect(self._update_build_clock)
 
         center = QWidget()
         ch = QHBoxLayout(center)
@@ -341,6 +432,17 @@ class MainWindow(QMainWindow):
         console_action = QAction("Toggle console", self)
         console_action.triggered.connect(self.toggle_console)
         view_menu.addAction(console_action)
+        legend_action = QAction("Show map legend", self)
+        legend_action.setCheckable(True)
+        legend_action.setChecked(bool(self.prefs.get("legend", True)))
+        self.map.set_legend_visible(legend_action.isChecked())
+
+        def toggle_legend(checked):
+            self.map.set_legend_visible(checked)
+            self.prefs["legend"] = bool(checked)
+
+        legend_action.toggled.connect(toggle_legend)
+        view_menu.addAction(legend_action)
 
         tools_menu = self.menuBar().addMenu("&Tools")
         overlay_action = QAction("Link overlays folder in X-Plane", self)
@@ -728,7 +830,6 @@ class MainWindow(QMainWindow):
         self._building = True
         self._stop_requested = False
         UI.red_flag = False
-        self.build_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.stop_btn.setText("■ Stop")
         self.install_check.setEnabled(False)
@@ -738,23 +839,61 @@ class MainWindow(QMainWindow):
             t: ("queued", "queued", 0) for t in todo
         }
         self.map.set_progress(self._progress_states)
+        self._setup_progress_page(todo)
         if not self.console.isVisible():
             self.toggle_console()
 
         provider = self.imagery_combo.currentText()
         zl = int(self.zl_combo.currentText())
         custom_build_dir = self.output_dir()
+        plan = plan_steps(do_vector, do_imagery, do_overlays)
         threading.Thread(
             target=self._build_worker,
-            args=(todo, provider, zl, custom_build_dir,
-                  do_vector, do_imagery, do_overlays),
+            args=(todo, provider, zl, custom_build_dir, plan),
             daemon=True,
         ).start()
 
-    def _build_worker(
-        self, todo, provider, zl, custom_build_dir,
-        do_vector, do_imagery, do_overlays,
-    ):
+    def _setup_progress_page(self, todo):
+        """Morph the Build box into the per-tile progress list."""
+        for bar, status, row in self._tile_rows.values():
+            row.deleteLater()
+        self._tile_rows = {}
+        for tile in todo:
+            row = QWidget()
+            rl = QVBoxLayout(row)
+            rl.setContentsMargins(0, 0, 0, 0)
+            rl.setSpacing(1)
+            head = QHBoxLayout()
+            head.addWidget(QLabel(FNAMES.short_latlon(*tile)))
+            head.addStretch(1)
+            status = QLabel("queued")
+            status.setStyleSheet("color: gray; font-size: 11px;")
+            head.addWidget(status)
+            rl.addLayout(head)
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setValue(0)
+            bar.setTextVisible(False)
+            bar.setFixedHeight(6)
+            rl.addWidget(bar)
+            self._rows_layout.insertWidget(
+                self._rows_layout.count() - 1, row
+            )
+            self._tile_rows[tile] = (bar, status, row)
+        self._done_count = 0
+        self._ntiles = len(todo)
+        self._tile_frac = 0.0
+        self._build_t0 = __import__("time").time()
+        self.progress_title.setText(
+            "<b>Building %d tile%s</b>"
+            % (len(todo), "s" if len(todo) > 1 else "")
+        )
+        self.elapsed_label.setText("Elapsed 0 s")
+        self.eta_label.setText("Remaining —")
+        self._elapsed_timer.start()
+        self.build_stack.setCurrentIndex(1)
+
+    def _build_worker(self, todo, provider, zl, custom_build_dir, plan):
         # Heavy pipeline imports stay off the GUI startup path.
         import O4_Config_Utils as CFG
         import O4_Vector_Map as VMAP
@@ -763,8 +902,16 @@ class MainWindow(QMainWindow):
         import O4_Tile_Utils as TILE
         import O4_Overlay_Utils as OVL
 
+        step_fn = {
+            "vector": VMAP.build_poly_file,
+            "mesh": MESH.build_mesh,
+            "masks": MASK.build_masks,
+            "imagery": TILE.build_tile,
+            "overlays": lambda t: OVL.build_overlay(t.lat, t.lon),
+        }
         done = errors = 0
-        emit = self._build_signals.tile_state.emit
+        emit_state = self._build_signals.tile_state.emit
+        emit_step = self._build_signals.step_started.emit
         for (lat, lon) in todo:
             if UI.red_flag:
                 break
@@ -774,81 +921,121 @@ class MainWindow(QMainWindow):
                     tile.default_website = provider
                     tile.default_zl = zl
                 UI.reset_total_elapsed()
-                steps = []
-                if do_vector:
-                    steps += [
-                        ("Vector", VMAP.build_poly_file),
-                        ("Mesh", MESH.build_mesh),
-                        ("Masks", MASK.build_masks),
-                    ]
-                if do_imagery:
-                    steps.append(("Imagery/DSF", TILE.build_tile))
-                if do_overlays:
-                    steps.append(("Overlays", lambda t: OVL.build_overlay(
-                        t.lat, t.lon
-                    )))
-                if do_vector or do_imagery:
+                if any(k != "overlays" for k, _, _ in plan):
                     tile.make_dirs()
                 failed = False
-                for label, fn in steps:
+                for key, base, width in plan:
                     if UI.red_flag:
                         break
-                    self._current_step_label = label
-                    emit(lat, lon, "indeterminate", label.lower(), 0)
-                    result = fn(tile)
+                    emit_step(lat, lon, key, base, width)
+                    result = step_fn[key](tile)
                     if result == 0 and UI.red_flag:
                         break
                     if result == 0:
                         failed = True
                 if UI.red_flag:
-                    emit(lat, lon, "queued", "stopped", 0)
+                    emit_state(lat, lon, "queued", "stopped", 0)
                     break
                 if failed:
                     errors += 1
-                    emit(lat, lon, "error", "failed", 0)
+                    emit_state(lat, lon, "error", "failed", 0)
                 else:
                     done += 1
-                    emit(lat, lon, "done", "", 100)
+                    emit_state(lat, lon, "done", "", 100)
             except Exception:
                 traceback.print_exc()
                 errors += 1
-                emit(lat, lon, "error", "failed", 0)
+                emit_state(lat, lon, "error", "failed", 0)
         self._build_signals.finished.emit(done, errors)
 
-    def _on_tile_state(self, lat, lon, state, label, pct):
-        self._current_tile = (lat, lon) if state not in ("done", "error") \
-            else None
-        self._progress_states[(lat, lon)] = (state, label, pct)
+    def _on_step_started(self, lat, lon, key, base, width):
+        tile = (lat, lon)
+        self._cur_step = (tile, key, base, width)
+        self._bar_values = {1: 0, 2: 0, 3: 0}
+        label = STEP_LABELS.get(key, key)
+        pct = base * 100
+        self._tile_frac = base
+        # Steps without a usable percentage show a spinner on the map but
+        # hold the whole-tile value already earned.
+        state = (
+            "indeterminate" if step_progress(key, {}) is None else "active"
+        )
+        self._progress_states[tile] = (state, label, pct)
         self.map.set_progress(self._progress_states)
+        self._update_tile_row(tile, pct, label)
+
+    def _on_tile_state(self, lat, lon, state, label, pct):
+        tile = (lat, lon)
+        if state in ("done", "error"):
+            self._cur_step = None
+            self._tile_frac = 0.0
+            if state == "done":
+                self._done_count += 1
+        self._progress_states[tile] = (state, label, pct)
+        self.map.set_progress(self._progress_states)
+        if tile in self._tile_rows:
+            bar, status, _ = self._tile_rows[tile]
+            if state == "done":
+                bar.setValue(100)
+                status.setText("done ✓")
+                status.setStyleSheet("color: green; font-size: 11px;")
+            elif state == "error":
+                status.setText("failed")
+                status.setStyleSheet("color: red; font-size: 11px;")
+            elif label == "stopped":
+                status.setText("stopped")
         if state == "done":
             self.refresh_tiles()
 
     def _on_progress_bar(self, nbr, value):
         self._bar_values[nbr] = value
-        tile = self._current_tile
-        if tile is None or not self._building:
+        if self._cur_step is None or not self._building:
             return
-        label = self._current_step_label.lower()
-        wanted = STEP_BAR.get(self._current_step_label, 2)
-        if value > 0:
-            self._progress_states[tile] = ("active", label, value) \
-                if nbr == wanted else self._progress_states.get(
-                    tile, ("active", label, 0)
-                )
-            self.map.set_progress(self._progress_states)
-        pct_bits = " · ".join(
-            "%d%%" % self._bar_values[n] for n in (1, 2, 3)
-            if self._bar_values[n]
-        )
+        tile, key, base, width = self._cur_step
+        sp = step_progress(key, self._bar_values)
+        if sp is None:
+            return
+        pct = min(100.0, (base + width * min(sp, 100) / 100.0) * 100)
+        self._tile_frac = pct / 100.0
+        label = STEP_LABELS.get(key, key)
+        self._progress_states[tile] = ("active", label, pct)
+        self.map.set_progress(self._progress_states)
+        self._update_tile_row(tile, pct, label)
         self.setWindowTitle(
-            "Ortho4XP — building %s (%s)"
-            % (FNAMES.short_latlon(*tile), pct_bits or "…")
+            "Ortho4XP — building %s · %s · %d%%"
+            % (FNAMES.short_latlon(*tile), label, pct)
         )
+
+    def _update_tile_row(self, tile, pct, label):
+        if tile in self._tile_rows:
+            bar, status, _ = self._tile_rows[tile]
+            bar.setValue(int(pct))
+            status.setText("%s · %d%%" % (label, pct))
+
+    def _update_build_clock(self):
+        import time as _time
+
+        if self._build_t0 is None:
+            return
+        elapsed = _time.time() - self._build_t0
+        self.elapsed_label.setText("Elapsed %s" % _fmt_duration(elapsed))
+        frac = (
+            (self._done_count + self._tile_frac) / self._ntiles
+            if self._ntiles
+            else 0
+        )
+        if frac > 0.02:
+            remaining = elapsed * (1 - frac) / frac
+            self.eta_label.setText(
+                "Remaining ≈ %s" % _fmt_duration(remaining)
+            )
+        else:
+            self.eta_label.setText("Remaining —")
 
     def _on_build_finished(self, done, errors):
         self._building = False
-        self._current_tile = None
-        self.build_btn.setEnabled(True)
+        self._cur_step = None
+        self._elapsed_timer.stop()
         self.stop_btn.setEnabled(False)
         self.stop_btn.setText("■ Stop")
         self.map.set_locked(False)
@@ -858,8 +1045,15 @@ class MainWindow(QMainWindow):
             summary = "Build stopped: %d done, %d failed." % (done, errors)
         print(summary)
         self._status(summary)
+        self.progress_title.setText("<b>%s</b>" % summary)
         UI.is_working = False
-        QTimer.singleShot(4000, lambda: self.map.set_progress({}))
+
+        def revert():
+            self.map.set_progress({})
+            self.build_stack.setCurrentIndex(0)
+            self._selection_changed()
+
+        QTimer.singleShot(5000, revert)
         self.refresh_tiles()
         QApplication.beep()
 
@@ -927,7 +1121,16 @@ def _fmt_date(mtime):
         return "—"
     import datetime
 
-    return datetime.datetime.fromtimestamp(mtime).strftime("%d %b %Y")
+    return datetime.datetime.fromtimestamp(mtime).strftime("%d %b %Y %H:%M")
+
+
+def _fmt_duration(seconds):
+    seconds = int(seconds)
+    if seconds < 60:
+        return "%d s" % seconds
+    if seconds < 3600:
+        return "%d m %02d s" % (seconds // 60, seconds % 60)
+    return "%d h %02d m" % (seconds // 3600, (seconds % 3600) // 60)
 
 
 def _fmt_size(nbytes):
