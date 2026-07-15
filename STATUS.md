@@ -427,6 +427,17 @@
 # tile scanner (sorted listdir = deterministic first-wins).  Launch:
 # venv/bin/python Ortho4XP_Qt.py (legacy Ortho4XP.py unchanged).
 #
+# ★ROUND-9 RINGS LANDED b908d15: polygon inward offsets — loops =
+# polygon boundaries, SIMPLE BY CONSTRUCTION (self-crossing class
+# structurally dead; -540 lines of walk machinery); 10 m minimum-
+# feature smoothing vs Noah's MOD reference (geometry only, per his
+# scope note; hausdorff 104 m = the lawful code-4 band edge vs his
+# freehand); audit class 4b added (validated 10 events on the old
+# patch, 0 after; also fixed the tool's worktree sys.path trap);
+# 14/14 loops simple; sites hold; byte pairs body-identical.
+# ROUND-10 GLANCE: narrow arms now lawfully run a SINGLE collar
+# (ring 1 only) where width < 2xband+20 m.
+#
 # ★★★ NOAH RULING 2026-07-14 (design doc 1c41ec7): B4 FLIP GATE =
 # explosion-relevant rows ONLY (tears 0 · zero new near-parallel/T ·
 # clean re-bake hotspot check · in-sim); HYGIENE rows (coincident
