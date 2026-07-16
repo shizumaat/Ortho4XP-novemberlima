@@ -49,6 +49,10 @@ means the endpoint answered an anonymous request on 2026-07-15.
 | `SCOTLAND50CM` | Scotland lidar campaigns incl. Edinburgh + Glasgow (srsp-open-data S3, OS-grid-named tiles, finest campaign wins) | 0.5-1 m | `os_grid_bucket` |
 | `ZAGREB1M` | Zagreb city (the airport lies outside the data mask) | 1 m | `arcgis_lerc_tiles` |
 | `NORTHERNIRELAND1M` | Northern Ireland — DISABLED: cache serves empty stubs at every NI airport (licence is fine per the no-redistribution ruling; the DATA failed) | n/a | `arcgis_lerc_tiles` |
+| `FLANDERS1M` | Flanders, Belgium (covers Brussels airport) | 1 m | `wcs` |
+| `IRELAND1M` | Republic of Ireland (campaign lidar; covers Dublin) | 1 m | `arcgis_feature_tiles` (DATA_URL catalogs → zip/7z; per-member fill declaration defeats wrong nodata metadata) |
+| `WALLONIA1M` | Wallonia, Belgium (province GeoTIFF zips → drop folder, members indexed in place) | 1 m | `xyz_archive_drop` |
+| `PORTUGAL2M` | Portugal (free-registration DGT downloads → drop folder) | 0.5-2 m | `xyz_archive_drop` |
 | `SONNY1` (base tier, not inset) | Europe | 1 arc-second | `hgt_archive_drop` |
 
 ## Verified, not yet integrated — ranked by ease of integration
@@ -218,6 +222,21 @@ place: Latvia national (EPSG:3059 pyramid), Galicia 1 m (EPSG:25829
 pyramid).  Empty: Republic of Ireland (hillshade services only),
 Belgium (rendered view services only), Turkey/Middle East, Greece,
 Slovakia, Hungary, Slovenia, Portugal national, Africa.
+
+## Non-ArcGIS channels (round 7, 2026-07-16)
+
+Shipped: Flanders (anonymous WCS), Ireland (feature catalogs carrying
+DATA_URL archives — one campaign declares nodata 0.0 while filling
+with -99, driving per-member fill-sniffing VRTs), Wallonia and
+Portugal as drop folders.  Confirmed closed: Greece (cadastre 5 m is
+licensed, application-only), Turkey (Istanbul's open-data portal has
+no elevation; national mapping is request/commercial), Hungary
+(DDM5 sold through geoshop.hu).  Needs an EU-IP re-probe: Slovakia
+(free 1 m country-wide with a 400 km² GeoTIFF bbox export — the
+probe host was geoblocked) and Slovenia (free 1 km tiles but the old
+deterministic URL scheme is dead; capture the Atlas okolja download
+call).  Latvia's national pyramid proved mechanically readable but
+tops out at ~76 m near Riga — not worth wiring.
 
 ## Unresolved after four rounds
 

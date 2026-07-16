@@ -110,6 +110,10 @@ def test_shipped_definitions_parse(shipped_registry):
         "SCOTLAND30M",
         "NORTHERNIRELAND1M",
         "SCOTLAND50CM",
+        "FLANDERS1M",
+        "IRELAND1M",
+        "WALLONIA1M",
+        "PORTUGAL2M",
     }
     for code in (
         "VIEWFINDER1",
@@ -188,6 +192,16 @@ def test_shipped_definitions_parse(shipped_registry):
     # Northern Ireland ships DISABLED: its tile cache serves empty
     # stubs at every NI airport (data verification failed).
     assert shipped_registry["NORTHERNIRELAND1M"]["enabled"] is False
+    # The non-ArcGIS-channels wave (2026-07-16).
+    assert shipped_registry["FLANDERS1M"]["access_strategy"] == "wcs"
+    assert (
+        shipped_registry["IRELAND1M"]["access_strategy"]
+        == "arcgis_feature_tiles"
+    )
+    for code in ("WALLONIA1M", "PORTUGAL2M"):
+        assert (
+            shipped_registry[code]["access_strategy"] == "xyz_archive_drop"
+        )
     # Scotland's campaign lidar bucket (finest-wins overlap ordering).
     assert (
         shipped_registry["SCOTLAND50CM"]["access_strategy"]

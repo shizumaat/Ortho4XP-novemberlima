@@ -2067,3 +2067,157 @@ def test_ordnance_survey_square_extents():
     # Garbage returns None.
     assert INSETS._ordnance_survey_square_extent("1234") is None
     assert INSETS._ordnance_survey_square_extent("NSXY") is None
+
+
+# =====================================================================
+# The arcgis_feature_tiles strategy (Ireland's DATA_URL catalogs)
+# =====================================================================
+@requires_gdal
+def test_arcgis_feature_tiles_catalog_and_fills(tmp_path, monkeypatch):
+    import io
+    import types
+    import zipfile
+    import requests
+
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+    # Archive payload: one DTM GeoTIFF whose fill is -99 but whose
+    # band DECLARES nodata 0.0 (the broken Irish campaign shape).
+    import numpy as numpy_module
+
+    tif_path = str(tmp_path / "TII_TEST_DTM.tif")
+    driver = gdal.GetDriverByName("GTiff")
+    dataset = driver.Create(tif_path, 40, 40, 1, gdal.GDT_Float32)
+    dataset.SetGeoTransform((-6.262, 0.0005, 0, 53.429, 0, -0.0004))
+    reference = osr.SpatialReference()
+    reference.ImportFromEPSG(4326)
+    dataset.SetProjection(reference.ExportToWkt())
+    values = numpy_module.full((40, 40), 62.0, dtype=numpy_module.float32)
+    values[:8, :] = -99.0
+    band = dataset.GetRasterBand(1)
+    band.SetNoDataValue(0.0)
+    band.WriteArray(values)
+    dataset = None
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.write(tif_path, "TII_TEST/TII_TEST_DTM.tif")
+    archive_bytes = buffer.getvalue()
+
+    def _fake_get(url, timeout=None):
+        if url.endswith("/Lidar?f=json"):
+            payload = {
+                "services": [
+                    {"name": "Lidar/IE_Coverage_TEST", "type": "MapServer"}
+                ]
+            }
+        elif url.endswith("/MapServer?f=json"):
+            payload = {"layers": [{"id": 4}]}
+        elif url.endswith("/MapServer/4?f=json"):
+            payload = {"fields": [{"name": "DATA_URL"}]}
+        elif "/query?" in url:
+            payload = {
+                "features": [
+                    {"attributes": {"DATA_URL": "https://dl.test/a.zip"}}
+                ]
+            }
+        elif url.endswith(".zip"):
+            return types.SimpleNamespace(
+                status_code=200, content=archive_bytes
+            )
+        else:
+            return types.SimpleNamespace(status_code=404, content=b"")
+        return types.SimpleNamespace(
+            status_code=200, json=lambda: payload, content=b""
+        )
+
+    monkeypatch.setattr(
+        requests,
+        "Session",
+        lambda: types.SimpleNamespace(get=_fake_get),
+    )
+    monkeypatch.setattr(requests, "get", _fake_get)
+    definition = {
+        "code": "TESTIE",
+        "access_strategy": "arcgis_feature_tiles",
+        "catalog_folder_url": "https://gsi.test/server/rest/services/Lidar",
+        "url_field": "DATA_URL",
+        "member_filter": "dtm",
+        "source_nodata": "-99",
+    }
+    destination = str(tmp_path / "EIDW_testie.tif")
+    provenance = INSETS.fetch_inset(
+        definition, (-6.260, 53.418, -6.245, 53.428), 100.0, destination
+    )
+    assert provenance is not None
+    result_dataset = gdal.Open(destination)
+    values_out = result_dataset.GetRasterBand(1).ReadAsArray()
+    valid = values_out[values_out > -32768]
+    # The -99 fill was excluded BEFORE interpolation despite the wrong
+    # declared nodata; real values survive untouched.
+    assert valid.size and float(valid.min()) > 0
+    assert abs(float(valid.max()) - 62.0) < 0.5
+    # The layer catalog was cached.
+    strategy = INSETS.ACCESS_STRATEGIES["arcgis_feature_tiles"]()
+    assert os.path.isfile(strategy.index_path(definition))
+
+
+# =====================================================================
+# xyz_archive_drop: in-place indexing of GeoTIFF members (Wallonia)
+# =====================================================================
+@requires_gdal
+def test_xyz_archive_drop_indexes_geotiffs_in_place(tmp_path, monkeypatch):
+    import zipfile
+    import numpy as numpy_module
+
+    monkeypatch.setattr(FNAMES, "Elevation_dir", str(tmp_path))
+    monkeypatch.setattr(INSETS, "has_gdal", True)
+    definition = {
+        "code": "TESTWAL",
+        "access_strategy": "xyz_archive_drop",
+        "drop_directory_name": "Wallonia_test_drop",
+        "source_epsg": "3812",
+        "native_resolution_m": "1",
+    }
+    strategy = INSETS.ACCESS_STRATEGIES["xyz_archive_drop"]()
+    # A georeferenced GeoTIFF member (carries its own CRS): must be
+    # indexed THROUGH the zip, without an extracted converted copy.
+    bbox = (4.44, 50.455, 4.46, 50.468)
+    (x_min, y_min, x_max, y_max) = strategy._bounding_box_in_source_crs(
+        definition, bbox
+    )
+    tif_path = str(tmp_path / "province_sheet.tif")
+    driver = gdal.GetDriverByName("GTiff")
+    dataset = driver.Create(tif_path, 50, 50, 1, gdal.GDT_Float32)
+    span_x = (x_max - x_min) * 1.5
+    span_y = (y_max - y_min) * 1.5
+    dataset.SetGeoTransform(
+        (x_min - span_x * 0.2, span_x / 50, 0,
+         y_max + span_y * 0.2, 0, -span_y / 50)
+    )
+    reference = osr.SpatialReference()
+    reference.ImportFromEPSG(3812)
+    dataset.SetProjection(reference.ExportToWkt())
+    dataset.GetRasterBand(1).WriteArray(
+        numpy_module.full((50, 50), 185.0, dtype=numpy_module.float32)
+    )
+    dataset = None
+    drop_directory = strategy.drop_directory(definition)
+    os.makedirs(drop_directory)
+    with zipfile.ZipFile(
+        os.path.join(drop_directory, "PROVINCE.zip"), "w"
+    ) as archive:
+        archive.write(tif_path, "MNT/province_sheet.tif")
+    destination = str(tmp_path / "EBCI_testwal.tif")
+    provenance = INSETS.fetch_inset(definition, bbox, 5.0, destination)
+    assert provenance is not None
+    assert provenance["source_urls"][0].startswith("/vsizip/")
+    result_dataset = gdal.Open(destination)
+    result = result_dataset.GetRasterBand(1).ReadAsArray()
+    valid = result[result > -32768]
+    assert valid.size and abs(float(valid.mean()) - 185.0) < 0.01
+    # No extracted per-sheet copy was created.
+    converted = os.path.join(drop_directory, "converted")
+    copies = [
+        name for name in os.listdir(converted) if name.endswith(".tif")
+    ]
+    assert copies == []

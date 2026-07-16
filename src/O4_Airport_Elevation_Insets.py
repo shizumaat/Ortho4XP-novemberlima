@@ -386,6 +386,7 @@ def warp_vsicurl_sources_to_geotiff(
     target_resolution_m,
     destination_path,
     source_srs=None,
+    source_nodata=None,
 ):
     """Mosaic + warp remote rasters to an EPSG:4326 float32 GeoTIFF window.
 
@@ -412,6 +413,8 @@ def warp_vsicurl_sources_to_geotiff(
         outputType=gdal.GDT_Float32,
         # Some sources (plain XYZ grids) carry no CRS of their own.
         srcSRS=source_srs,
+        # ... and some carry an UNDECLARED fill value (Ireland's -99).
+        srcNodata=source_nodata,
         dstSRS="EPSG:4326",
         outputBounds=(west, south, east, north),
         xRes=x_resolution_deg,
@@ -432,18 +435,22 @@ def warp_vsicurl_sources_to_geotiff(
     dataset = None  # flush to disk before reopening
     # Sentinel sanitization: sources with UNDECLARED nodata leak their
     # fill values straight through the warp as "valid elevation" (the
-    # Dutch national service fills with float-max).  Terrestrial
-    # elevations live within roughly -430..+8850 m; anything beyond
-    # +/-12000 m, or not finite, is garbage and becomes nodata here so
-    # it can never reach a bake.  Done on a fresh update handle
+    # Dutch national service fills with float-max, some Irish campaign
+    # tiles with -9999).  Terrestrial elevations live within
+    # -430..+8850 m; anything outside -600..+12000, or not finite, is
+    # garbage and becomes nodata here so it can never reach a bake.
+    # (Small negative fills like Ireland's -99 are PLAUSIBLE land
+    # heights and need the per-provider source_nodata key instead.)  Done on a fresh update handle
     # after the warp result is flushed.
     try:
         dataset = gdal.Open(destination_path, gdal.GA_Update)
         band = dataset.GetRasterBand(1)
         values = band.ReadAsArray()
         if values is not None:
-            garbage = ~numpy.isfinite(values) | (
-                numpy.abs(values) > 12000.0
+            garbage = (
+                ~numpy.isfinite(values)
+                | (values > 12000.0)
+                | (values < -600.0)
             )
             if garbage.any():
                 values[garbage] = -32768.0
@@ -2556,6 +2563,271 @@ class GeojsonTileIndexStrategy:
 
 
 # =====================================================================
+# Strategy 14: arcgis_feature_tiles (feature catalogs with DATA_URL)
+# =====================================================================
+@register_access_strategy("arcgis_feature_tiles")
+class ArcgisFeatureTileStrategy:
+    """ArcGIS feature layers whose attributes carry archive URLs.
+
+    Ireland's national lidar is published this way: a folder of
+    "Coverage" map services whose polygon layers hold a ``DATA_URL``
+    field pointing at zip/7z archives of GeoTIFF tiles.  Discovery
+    enumerates the folder ONCE (cached: every layer carrying the URL
+    field becomes a query endpoint), then each fetch spatially queries
+    those layers for the airport box, downloads the referenced
+    archives and warps their terrain-model members through GDAL's
+    ``/vsizip`` / ``/vsi7z`` handlers.
+    """
+
+    MAXIMUM_ARCHIVES_PER_FETCH = 8
+
+    def index_path(self, definition):
+        return os.path.join(
+            FNAMES.Elevation_dir,
+            definition["code"].lower() + "_feature_layers.json",
+        )
+
+    def _query_endpoints(self, definition):
+        import requests
+
+        try:
+            with open(self.index_path(definition), "r") as handle:
+                return json.load(handle)
+        except (OSError, ValueError):
+            pass
+        folder_url = definition["catalog_folder_url"].rstrip("/")
+        url_field = definition.get("url_field", "DATA_URL")
+        session = requests.Session()
+        try:
+            folder = session.get(folder_url + "?f=json", timeout=60).json()
+        except Exception as error:
+            UI.vprint(
+                1, "   WARNING: catalog folder query failed:", str(error)
+            )
+            return None
+        service_names = sorted(
+            {
+                service.get("name")
+                for service in folder.get("services", [])
+                if service.get("name")
+                and "coverage" in service.get("name", "").lower()
+            }
+        )
+        UI.vprint(
+            1,
+            "    Indexing",
+            len(service_names),
+            "lidar coverage catalogs (once per install).",
+        )
+        root = folder_url.rsplit("/", 1)[0]
+        endpoints = []
+        for name in service_names:
+            service_url = root + "/" + name + "/MapServer"
+            try:
+                service = session.get(
+                    service_url + "?f=json", timeout=60
+                ).json()
+            except Exception:
+                continue
+            for layer in service.get("layers", []):
+                layer_url = service_url + "/" + str(layer.get("id"))
+                try:
+                    layer_meta = session.get(
+                        layer_url + "?f=json", timeout=60
+                    ).json()
+                except Exception:
+                    continue
+                fields = [
+                    field.get("name", "")
+                    for field in layer_meta.get("fields", []) or []
+                ]
+                if url_field in fields:
+                    endpoints.append(layer_url)
+        if not endpoints:
+            return None
+        os.makedirs(
+            os.path.dirname(self.index_path(definition)), exist_ok=True
+        )
+        with open(self.index_path(definition), "w") as handle:
+            json.dump(endpoints, handle)
+        return endpoints
+
+    def discover(self, definition, bounding_box_wgs84):
+        import requests
+
+        if not _coverage_bbox_intersects(definition, bounding_box_wgs84):
+            return None
+        endpoints = self._query_endpoints(definition)
+        if not endpoints:
+            return None
+        url_field = definition.get("url_field", "DATA_URL")
+        (west, south, east, north) = bounding_box_wgs84
+        session = requests.Session()
+        archives = []
+        seen = set()
+        for layer_url in endpoints:
+            query = (
+                layer_url
+                + "/query?geometry=%s,%s,%s,%s" % (west, south, east, north)
+                + "&geometryType=esriGeometryEnvelope&inSR=4326"
+                + "&spatialRel=esriSpatialRelIntersects&outFields="
+                + url_field
+                + "&returnGeometry=false&f=json"
+            )
+            try:
+                payload = session.get(query, timeout=60).json()
+            except Exception:
+                continue
+            for feature in payload.get("features", []) or []:
+                archive_url = (feature.get("attributes") or {}).get(
+                    url_field
+                )
+                if archive_url and archive_url not in seen:
+                    seen.add(archive_url)
+                    archives.append({"url": archive_url})
+        return archives[: self.MAXIMUM_ARCHIVES_PER_FETCH] or None
+
+    def fetch(
+        self,
+        definition,
+        bounding_box_wgs84,
+        target_resolution_m,
+        destination_path,
+    ):
+        import requests
+
+        if not has_gdal:
+            return None
+        sources = self.discover(definition, bounding_box_wgs84)
+        if not sources:
+            return None
+        os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+        scratch_paths = []
+        warp_inputs = []
+        member_filter = str(
+            definition.get("member_filter", "dtm")
+        ).lower()
+        for (number, entry) in enumerate(sources):
+            suffix = os.path.splitext(entry["url"].split("?")[0])[1] or ".zip"
+            scratch_path = destination_path + ".arch%d%s" % (number, suffix)
+            try:
+                response = requests.get(entry["url"], timeout=600)
+                if response.status_code != 200:
+                    continue
+                with open(scratch_path, "wb") as handle:
+                    handle.write(response.content)
+            except Exception as error:
+                UI.vprint(
+                    1,
+                    "   WARNING: could not download lidar archive",
+                    entry["url"][:90],
+                    ":",
+                    str(error),
+                )
+                continue
+            scratch_paths.append(scratch_path)
+            handler = "/vsi7z/" if suffix.lower() == ".7z" else "/vsizip/"
+
+            def _tif_members(root, depth=0):
+                for member in gdal.ReadDir(root) or []:
+                    entry_path = root + "/" + member
+                    if member.lower().endswith((".tif", ".tiff")):
+                        yield entry_path
+                    elif depth < 2 and "." not in member:
+                        yield from _tif_members(entry_path, depth + 1)
+
+            members = list(_tif_members(handler + scratch_path))
+            preferred = [
+                member
+                for member in members
+                if member_filter in os.path.basename(member).lower()
+            ]
+            # Members with UNDECLARED fill values would contaminate the
+            # warp's interpolation: sniff each member and declare the
+            # fill on a VRT wrapper so resampling never blends across
+            # it.  A minimum below any real land elevation is a fill;
+            # otherwise the definition's source_nodata (Ireland: -99)
+            # is declared when the band carries none of its own.
+            fallback_nodata = _parse_float(
+                definition.get("source_nodata")
+            )
+            for member in preferred or members:
+                declared_input = member
+                try:
+                    member_dataset = gdal.Open(member)
+                    band = member_dataset.GetRasterBand(1)
+                    declared = band.GetNoDataValue()
+                    (minimum, _maximum) = band.ComputeRasterMinMax(True)
+                    fill = None
+                    if minimum < -430.0:
+                        # Below any land on Earth: the minimum IS the fill.
+                        fill = minimum
+                    elif (
+                        fallback_nodata is not None
+                        and abs(minimum - fallback_nodata) < 0.5
+                    ):
+                        # The definition's known fill is present -- even
+                        # when the band DECLARES something else (one
+                        # Irish campaign declares 0.0 while filling with
+                        # -99, which would also void real sea-level
+                        # pixels).
+                        fill = fallback_nodata
+                    if fill is not None and (
+                        declared is None or abs(declared - fill) > 0.5
+                    ):
+                        vrt_path = destination_path + ".m%d.vrt" % len(
+                            scratch_paths
+                        )
+                        gdal.Translate(
+                            vrt_path,
+                            member_dataset,
+                            format="VRT",
+                            noData=fill,
+                        )
+                        scratch_paths.append(vrt_path)
+                        declared_input = vrt_path
+                    member_dataset = None
+                except Exception:
+                    pass
+                warp_inputs.append(declared_input)
+        warped = bool(warp_inputs) and warp_vsicurl_sources_to_geotiff(
+            warp_inputs,
+            bounding_box_wgs84,
+            target_resolution_m,
+            destination_path,
+        )
+        for scratch_path in scratch_paths:
+            try:
+                os.remove(scratch_path)
+            except OSError:
+                pass
+        if not warped:
+            return None
+        if not _geotiff_has_valid_data(destination_path):
+            try:
+                os.remove(destination_path)
+            except OSError:
+                pass
+            return None
+        return {
+            "provider": definition.get("code"),
+            "access_strategy": definition.get("access_strategy"),
+            "source_urls": [entry["url"] for entry in sources],
+            "native_resolution_m": definition.get("native_resolution_m"),
+            "license": definition.get("license"),
+            "attribution": definition.get("attribution"),
+            "vertical_datum": definition.get("vertical_datum"),
+            "datum_note": (
+                "Elevations are in the source vertical datum; lidar is "
+                "treated as truth and is NOT shifted toward the base DEM."
+            ),
+            "fetch_date": datetime.date.today().isoformat(),
+            "bounding_box_wgs84": list(bounding_box_wgs84),
+            "resolution_m": target_resolution_m,
+        }
+
+
+# =====================================================================
 # Strategy 13: os_grid_bucket (S3 buckets of OS-grid-named GeoTIFFs)
 # =====================================================================
 _OS_GRID_LETTERS = "ABCDEFGHJKLMNOPQRSTUVWXYZ"  # no I, the OS way
@@ -3056,6 +3328,31 @@ class XyzArchiveDropStrategy:
                         (".hdr", ".xml", ".pdf", ".doc")
                     ):
                         continue
+                    # GeoTIFF members carrying their own CRS (Wallonia's
+                    # multi-gigabyte province zips) are indexed IN PLACE
+                    # through /vsizip -- no extraction, no conversion.
+                    if member_name.lower().endswith((".tif", ".tiff")):
+                        vsizip_path = (
+                            "/vsizip/" + archive_path + "/" + member.filename
+                        )
+                        try:
+                            in_place = gdal.Open(vsizip_path)
+                        except Exception:
+                            in_place = None
+                        if in_place is not None and in_place.GetProjection():
+                            geotransform = in_place.GetGeoTransform()
+                            x0 = geotransform[0]
+                            y0 = geotransform[3]
+                            x1 = x0 + geotransform[1] * in_place.RasterXSize
+                            y1 = y0 + geotransform[5] * in_place.RasterYSize
+                            sheets[vsizip_path] = [
+                                min(x0, x1),
+                                min(y0, y1),
+                                max(x0, x1),
+                                max(y0, y1),
+                            ]
+                            in_place = None
+                            continue
                     scratch_path = os.path.join(
                         converted_directory, member_name + ".scratch"
                     )
@@ -3149,7 +3446,7 @@ class XyzArchiveDropStrategy:
             path
             for (path, extent) in sheets.items()
             if _bounding_boxes_intersect(extent, source_box)
-            and os.path.isfile(path)
+            and (path.startswith("/vsi") or os.path.isfile(path))
         ]
         return [{"path": path} for path in sorted(hits)] or None
 
