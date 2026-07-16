@@ -1814,6 +1814,46 @@ def test_warp_sanitizes_undeclared_sentinel_values(tmp_path):
 
 
 # =====================================================================
+# Warp vertical-datum passthrough (compound-CRS source, Sweden case)
+# =====================================================================
+@requires_gdal
+def test_warp_keeps_compound_crs_heights_unshifted(tmp_path):
+    """A source declaring a compound CRS must NOT get a geoid shift.
+
+    Lantmateriet's Cloud-Optimized GeoTIFFs declare EPSG:5845 (SWEREF99
+    TM + RH2000 height); without -novshift GDAL converted their
+    orthometric heights to ellipsoidal during the warp, lifting every
+    Swedish airport by the 23-36 m geoid separation.  The provenance
+    datum_note promises heights pass through in the source vertical
+    datum, so a constant-10 raster must still read 10 after the warp.
+    """
+    import numpy as numpy_module
+
+    source_path = str(tmp_path / "compound_crs_source.tif")
+    driver = gdal.GetDriverByName("GTiff")
+    dataset = driver.Create(source_path, 100, 100, 1, gdal.GDT_Float32)
+    # The real m658_66 national-grid tile window (SWEREF99 TM metres,
+    # Stockholm area) at 100 m pixels.
+    dataset.SetGeoTransform((660000.0, 100.0, 0, 6590000.0, 0, -100.0))
+    reference = osr.SpatialReference()
+    reference.ImportFromEPSG(5845)  # SWEREF99 TM + RH2000 height
+    dataset.SetProjection(reference.ExportToWkt())
+    dataset.GetRasterBand(1).WriteArray(
+        numpy_module.full((100, 100), 10.0, dtype=numpy_module.float32)
+    )
+    dataset = None
+    destination = str(tmp_path / "unshifted.tif")
+    assert INSETS.warp_vsicurl_sources_to_geotiff(
+        [source_path], (17.93, 59.35, 17.95, 59.36), 100.0, destination
+    )
+    dataset = gdal.Open(destination)
+    result = dataset.GetRasterBand(1).ReadAsArray()
+    valid = result[result > -32768]
+    # ~33.2 here would mean the RH2000 -> ellipsoid shift was applied.
+    assert valid.size and abs(float(valid.mean()) - 10.0) < 0.01
+
+
+# =====================================================================
 # The geojson_tile_index strategy (Uruguay's national catalog)
 # =====================================================================
 @requires_gdal
