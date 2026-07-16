@@ -194,6 +194,11 @@ def build_tile(tile):
     convert_launched = False
     download_workers = max_download_slots
 
+    # Default X-Plane texture mode uses no orthophotos: build_dsf queues
+    # nothing, so the imagery download/convert stage is a clean no-op for this
+    # tile (see docs/specs/texture-mode-spec.md, work package 2).
+    imagery_needed = getattr(tile, "texture_mode", "full_ortho") != "default_xplane"
+
     build_dsf_thread = threading.Thread(
         target=DSF.build_dsf, args=[tile, download_queue]
     )
@@ -210,7 +215,7 @@ def build_tile(tile):
         ],
     )
     build_dsf_thread.start()
-    if not skip_downloads:
+    if not skip_downloads and imagery_needed:
         download_thread.start()
         download_launched = True
         if not skip_converts:
