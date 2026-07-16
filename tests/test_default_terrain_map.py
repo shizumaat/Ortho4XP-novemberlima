@@ -98,6 +98,9 @@ def synthetic_map(tmp_path, monkeypatch):
     os.utime(str(dsf), (now - 100, now - 100))
     # A binary need not exist; the tool-present check just must pass.
     monkeypatch.setattr(D, "_dsftool_path", lambda: "/bin/true")
+    # from_dsf now caches dumps under Default_dsf_cache_dir; point it at the
+    # directory where this harness pre-seeded the .dsf.text sidecar.
+    monkeypatch.setattr(DTM.FNAMES, "Default_dsf_cache_dir", str(end))
     # Clear any in-process line cache from other tests.
     D._DSF_LINES_CACHE.clear()
     return DefaultTerrainMap.from_dsf(str(dsf))
@@ -182,6 +185,9 @@ def test_is_projected_reads_pack_relative_ter(tmp_path, monkeypatch):
     now = os.path.getmtime(text)
     os.utime(str(dsf), (now - 100, now - 100))
     monkeypatch.setattr(D, "_dsftool_path", lambda: "/bin/true")
+    # from_dsf now caches dumps under Default_dsf_cache_dir; point it at the
+    # directory where this harness pre-seeded the .dsf.text sidecar.
+    monkeypatch.setattr(DTM.FNAMES, "Default_dsf_cache_dir", str(end))
     D._DSF_LINES_CACHE.clear()
 
     # Lay down pack-relative .ter resources matching the terrain paths.
@@ -234,6 +240,9 @@ def test_parse_work_package_0_excerpt(tmp_path, monkeypatch):
     now = os.path.getmtime(text)
     os.utime(str(dsf), (now - 100, now - 100))
     monkeypatch.setattr(D, "_dsftool_path", lambda: "/bin/true")
+    # from_dsf now caches dumps under Default_dsf_cache_dir; point it at the
+    # directory where this harness pre-seeded the .dsf.text sidecar.
+    monkeypatch.setattr(DTM.FNAMES, "Default_dsf_cache_dir", str(end))
     D._DSF_LINES_CACHE.clear()
 
     terrain_map = DefaultTerrainMap.from_dsf(str(dsf))

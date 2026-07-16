@@ -286,6 +286,12 @@ def build_tile(tile):
             os.remove(FNAMES.input_poly_file(tile))
         except:
             pass
+        # The previous DSF generation (renamed to .bak by build_dsf before
+        # the rewrite) is a rollback copy only; X-Plane never reads it.
+        try:
+            os.remove(dsf_file_name + ".bak")
+        except OSError:
+            pass
     if UI.cleaning_level > 2:
         try:
             os.remove(FNAMES.mesh_file(tile.build_dir, tile.lat, tile.lon))
@@ -297,6 +303,8 @@ def build_tile(tile):
             pass
     if UI.cleaning_level > 1 and not tile.grouped:
         remove_unwanted_textures(tile)
+    if UI.cleaning_level >= 1:
+        remove_dsftool_dump_leftovers(tile)
     UI.timings_and_bottom_line(timer)
     UI.logprint(
         "Step 3 for tile lat=", tile.lat, ", lon=", tile.lon, ": normal exit."
@@ -431,25 +439,55 @@ def build_tile_list(
 
 ################################################################################
 def remove_unwanted_textures(tile):
+    """Delete .dds textures no longer referenced by any terrain file.
+
+    Terrain file names encode their texture: ``<tex>.ter``,
+    ``<tex>_sea.ter``, ``<tex>_water.ter``, and (with or without those)
+    an ``_overlay`` suffix — all reference ``<tex>.dds``.  Fade-mask and
+    transition ``.png`` files are never touched.
+    """
+    terrain_dir = os.path.join(tile.build_dir, "terrain")
+    textures_dir = os.path.join(tile.build_dir, "textures")
+    if not os.path.isdir(terrain_dir) or not os.path.isdir(textures_dir):
+        return
     texture_list = []
-    for f in os.listdir(os.path.join(tile.build_dir, "terrain")):
+    for f in os.listdir(terrain_dir):
         if f[-4:] != ".ter":
             continue
-        if f[-5] == "y":  # water overlay
-            texture_list.append("_".join(f[:-4].split("_")[:-2]) + ".dds")
-        if f[-5] == "a":  # sea
-            texture_list.append("_".join(f[:-4].split("_")[:-1]) + ".dds")
-        else:
-            texture_list.append(f.replace(".ter", ".dds"))
-    for f in os.listdir(os.path.join(tile.build_dir, "textures")):
+        stem = f[:-4]
+        for suffix in ("_overlay", "_sea", "_water"):
+            if stem.endswith(suffix):
+                stem = stem[: -len(suffix)]
+        texture_list.append(stem + ".dds")
+    for f in os.listdir(textures_dir):
         if f[-4:] != ".dds":
             continue
         if f not in texture_list:
             print("Removing obsolete texture", f)
             try:
-                os.remove(os.path.join(tile.build_dir, "textures", f))
+                os.remove(os.path.join(textures_dir, f))
             except:
                 pass
+
+
+def remove_dsftool_dump_leftovers(tile):
+    """Remove DSFTool decompile artifacts from the pack's Earth nav data.
+
+    ``DSFTool --dsf2text`` writes a ``<dsf>.text`` dump (hundreds of
+    megabytes) plus ``.raw`` raster sidecars next to its input; none of
+    them is ever read by X-Plane.  Current code caches dumps under
+    ``FNAMES.Default_dsf_cache_dir`` instead, so anything matching these
+    patterns inside the pack is a leftover from an earlier run.
+    """
+    nav_data_dir = os.path.join(tile.build_dir, "Earth nav data")
+    for dirpath, _, filenames in os.walk(nav_data_dir):
+        for f in filenames:
+            if ".dsf.text" in f:
+                try:
+                    os.remove(os.path.join(dirpath, f))
+                    UI.vprint(2, "   Removed DSFTool dump leftover", f)
+                except OSError:
+                    pass
 
 def delete_incomplete_imgs(tile):
     """Delete orthophoto jpegs and dds that have white squares."""

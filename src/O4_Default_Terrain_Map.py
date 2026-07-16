@@ -55,6 +55,18 @@ _Triangle = "tuple[tuple[float, float], tuple[float, float], tuple[float, float]
 _PHYSICAL_FLAG_BIT = 1
 
 
+def _dump_cache_dir() -> str:
+    """Directory for DSFTool text dumps of default Global Scenery DSFs.
+
+    Dumps run to hundreds of megabytes and the source DSF lives inside the
+    X-Plane install, so they are cached under the Ortho4XP root
+    (``FNAMES.Default_dsf_cache_dir``) — never next to the source DSF and
+    never inside a scenery pack.
+    """
+    os.makedirs(FNAMES.Default_dsf_cache_dir, exist_ok=True)
+    return FNAMES.Default_dsf_cache_dir
+
+
 class DefaultTerrainMap:
     """Terrain-type lookup built from a default Global Scenery base-mesh DSF."""
 
@@ -98,8 +110,12 @@ class DefaultTerrainMap:
         Raises ``FileNotFoundError`` if the DSF (or its DSFTool text dump)
         cannot be produced; callers wanting a soft failure use
         :meth:`from_tile`, which returns ``None`` instead.
+
+        The text dump is cached under ``FNAMES.Default_dsf_cache_dir`` —
+        never next to the source DSF, which may live inside the X-Plane
+        install.
         """
-        text_path = ensure_dsf_text_path(dsf_path)
+        text_path = ensure_dsf_text_path(dsf_path, cache_dir=_dump_cache_dir())
         if text_path is None:
             raise FileNotFoundError(
                 f"Could not produce a DSFTool text dump for {dsf_path!r} "
@@ -140,7 +156,7 @@ class DefaultTerrainMap:
                 " Scenery directory in the config window first.")
             return None
 
-        text_path = ensure_dsf_text_path(dsf_path)
+        text_path = ensure_dsf_text_path(dsf_path, cache_dir=_dump_cache_dir())
         if text_path is None:
             UI.lvprint(
                 1,

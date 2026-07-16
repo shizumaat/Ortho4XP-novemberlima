@@ -38,6 +38,7 @@ _SRC = os.path.normpath(os.path.join(_HERE, "..", "src"))
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
+import O4_File_Names as FNAMES
 from auto_patch.dsf_reader import _dsftool_path, ensure_dsf_text_path
 
 
@@ -164,9 +165,13 @@ def decode_dsf(dsf_path: str) -> DsfTerrainDump:
     """Run DSFTool on ``dsf_path`` and decode its terrain table + patches.
 
     Raises ``FileNotFoundError`` if DSFTool is unavailable or the DSF cannot
-    be converted to text.
+    be converted to text.  The text dump (and DSFTool's ``.raw`` raster
+    sidecars) go to ``FNAMES.Default_dsf_cache_dir`` — never next to the
+    DSF, which may live inside a scenery pack that ships to X-Plane.
     """
-    text_path = ensure_dsf_text_path(dsf_path)
+    os.makedirs(FNAMES.Default_dsf_cache_dir, exist_ok=True)
+    text_path = ensure_dsf_text_path(
+        dsf_path, cache_dir=FNAMES.Default_dsf_cache_dir)
     if text_path is None:
         raise FileNotFoundError(
             f"Could not produce a DSFTool text dump for {dsf_path!r} "

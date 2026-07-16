@@ -30,6 +30,10 @@ Utils_dir = resource_path("Utils")
 Tile_dir = resource_path("Tiles")
 Tmp_dir = resource_path("tmp")
 Overlay_dir = resource_path("yOrtho4XP_Overlays")
+# DSFTool text dumps of default Global Scenery DSFs (used by the
+# default-landclass texture modes).  Kept under the Ortho4XP root so we
+# never write cache files into the X-Plane install or a scenery pack.
+Default_dsf_cache_dir = resource_path("Default_DSF_cache")
 
 ##############################################################################
 def short_latlon(lat, lon):
