@@ -521,6 +521,7 @@ list_vector_vars = [
     "airport_elevation_inset_resolution_m",
     "airport_elevation_inset_margin_m",
     "airport_elevation_inset_feather_m",
+    "airport_inset_water",
     "working_grid_arc_seconds",
     "road_level",
     "road_banking_limit",
