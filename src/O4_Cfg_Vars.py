@@ -323,6 +323,17 @@ cfg_tile_vars = {
         "hint": 'Yet another tentative to draw masks with maximizing the use of the good imagery part. Requires to draw (JOSM) the "good imagery" threshold first, but it could be one order of magnitude faster to do compared to hand tweaking the masks and the imageries one by one.',
     },
     # DSF/Imagery
+    "texture_mode": {
+        "type": str,
+        "default": "full_ortho",
+        "values": ("full_ortho", "airport_ortho", "default_xplane"),
+        "hint": "What the base mesh is textured with. Full Ortho: orthophotos everywhere (classic). Airport Ortho: orthophotos on and around airports only, fading into X-Plane default terrain. Default X-Plane: no orthophotos; the custom mesh uses X-Plane default landclass terrain read from the installed Global Scenery.",
+    },
+    "airport_ortho_fade_width": {
+        "type": float,
+        "default": 1000.0,
+        "hint": "Airport Ortho mode: width in meters of the band beyond the airport boundary over which orthophoto fades into default terrain.",
+    },
     "default_website": {"type": str, "default": "", "hint": ""},
     "default_zl": {"type": int, "default": 16, "hint": ""},
     "zone_list": {"type": list, "default": [], "hint": ""},
@@ -489,6 +500,8 @@ list_mask_vars = [
 ]
 
 list_dsf_vars = [
+    "texture_mode",
+    "airport_ortho_fade_width",
     "cover_airports_with_highres",
     "cover_extent",
     "cover_zl",
