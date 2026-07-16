@@ -27,5 +27,14 @@ mnt/
 
 # Qt UI runtime artifacts
 .qt_prefs.json
+.qt_prefs.json.bak-*
 .airport_index.tsv
 Previews/livemap/
+
+# Authenticated-provider session store: cookie jars, account sidecars,
+# and any stored secrets. MUST stay out of version control.
+Sessions/
+
+# Local build/scan caches
+Airport_mod_cache/
+Default_DSF_cache/

@@ -1,29 +1,35 @@
-# Direcao-Geral do Territorio (Portugal) national lidar terrain
-# model, 0.5-2 metre.
+# Direcao-Geral do Territorio national lidar terrain model, 2 metre
+# (MDT-2m), mainland Portugal.
 #
-# Bare-earth tiles from the 2024-2025 national lidar programme
-# (~90% coverage), CC BY 4.0 -- downloads require a FREE registered
-# account at the DGT data centre, so this is a drop-folder source:
-# create the account, download the terrain-model tiles for your area
-# from the page below (about 200 square kilometres per session),
-# drop the zips or GeoTIFFs into Elevation_data/Portugal_DGT/, and
-# builds index them automatically.
+# ACCOUNT REQUIRED: same free DGT account and shared "dgterritorio"
+# session as PORTUGAL50CM -- sign in once and both providers work.
+# Formerly a manual drop-folder source (Elevation_data/Portugal_DGT);
+# superseded 2026-07-16 by automatic download through the
+# authenticated token search, same protocol as the 50 cm collection.
+# The 2 m collection is the coarser product of the same 2024-2025
+# national lidar campaign and ranks one notch below PORTUGAL50CM.
 
 role=airport_inset
-access_strategy=xyz_archive_drop
+access_strategy=authenticated_token_search
 
-download_page=https://cdd.dgterritorio.gov.pt/
+search_url=https://cdd.dgterritorio.gov.pt/dgt-be/v1/search
+collections=MDT-2m
 
-drop_directory_name=Portugal_DGT
-source_epsg=3763
+session_name=dgterritorio
+login_flow=keycloak_password
+login_url=https://cdd.dgterritorio.gov.pt/auth/login
+registration_url=https://cdd.dgterritorio.gov.pt/auth/login
+session_probe_url=https://cdd.dgterritorio.gov.pt/dgt-be/v1/?f=json
 
 native_resolution_m=2
 # Portugal mainland.
-coverage_bbox=-9.6,36.9,-6.2,42.2
+coverage_bbox=-9.6,36.9,-6.1,42.2
 
-vertical_datum=Cascais 1938
-license=Creative Commons Attribution 4.0 (CC BY 4.0; free registration to download)
-attribution=Direcao-Geral do Territorio, Portugal
+source_nodata=-999
 
-priority=85
+vertical_datum=Cascais (mainland Portugal orthometric)
+license=CC BY 4.0 (registration required)
+attribution=Direcao-Geral do Territorio
+
+priority=84
 enabled=True

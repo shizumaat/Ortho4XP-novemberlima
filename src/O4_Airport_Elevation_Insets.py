@@ -93,6 +93,7 @@ except Exception:
 
 import O4_UI_Utils as UI
 import O4_File_Names as FNAMES
+import O4_File_Lock as O4_File_Lock
 import O4_Geo_Utils as GEO
 import O4_DEM_Utils as DEM
 
@@ -105,6 +106,13 @@ NO_COVERAGE = "no-coverage"
 # (the Phase A2 legacy refactor) and are ignored by the inset path here.
 ROLE_AIRPORT_INSET = "airport_inset"
 ROLE_BASE = "base"
+# Coastal bathymetry (spec section 2.1).  Bathymetry providers deliver
+# measured seabed depth on a LOCAL TIDAL vertical datum and are NEVER
+# eligible for terrain grading (airport insets, base sources, the
+# elevation_level wide-area overlay); :func:`select_bathymetry_definition`
+# is their only entry point.  Every terrain-selection path filters this
+# role out explicitly.
+ROLE_BATHYMETRY = "bathymetry"
 
 # Populated lazily by initialize_elevation_providers_dict(); keyed by the
 # .elv file basename (the provider CODE, e.g. "USGS3DEP").
@@ -305,6 +313,70 @@ def select_provider_definitions(providers_config, role=ROLE_AIRPORT_INSET):
     return ordered
 
 
+def select_bathymetry_definition(lat, lon):
+    """Return the bathymetry provider serving a tile, or ``None``.
+
+    The single entry point for coastal bathymetry (spec section 2.1): the
+    highest-``priority`` ENABLED definition whose ``role`` is
+    :data:`ROLE_BATHYMETRY` and whose ``coverage_bbox`` intersects the
+    one-degree tile ``(lon, lat, lon + 1, lat + 1)``, or ``None`` when no
+    bathymetry provider covers the tile.  Ties on priority break on the
+    provider CODE so the choice is deterministic.
+
+    Bathymetry providers are deliberately invisible to every terrain path
+    (their vertical datum is local tidal); this function is the only place
+    that returns them.  ``O4_Bathymetry.ensure_bathymetry_band`` calls it.
+    """
+    if not elevation_providers_dict:
+        initialize_elevation_providers_dict()
+    tile_bounding_box = (lon, lat, lon + 1, lat + 1)
+    candidates = [
+        definition
+        for definition in elevation_providers_dict.values()
+        if definition.get("enabled", True)
+        and definition.get("role") == ROLE_BATHYMETRY
+        and _coverage_bbox_intersects(definition, tile_bounding_box)
+    ]
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda definition: (
+            -definition.get("priority", 0.0),
+            definition["code"],
+        )
+    )
+    return candidates[0]
+
+
+def select_bathymetry_definitions(lat, lon):
+    """Every bathymetry provider covering a tile, priority-sorted.
+
+    Like :func:`select_bathymetry_definition` but returning the full
+    ordered candidate list: a provider whose coverage claim is broader
+    than its actual data (the Allen Coral Atlas local library covers the
+    whole reef belt on paper but only holds what the user downloaded)
+    must not starve the ones behind it — the band fetch walks this list
+    and falls through when a provider yields nothing.
+    """
+    if not elevation_providers_dict:
+        initialize_elevation_providers_dict()
+    tile_bounding_box = (lon, lat, lon + 1, lat + 1)
+    candidates = [
+        definition
+        for definition in elevation_providers_dict.values()
+        if definition.get("enabled", True)
+        and definition.get("role") == ROLE_BATHYMETRY
+        and _coverage_bbox_intersects(definition, tile_bounding_box)
+    ]
+    candidates.sort(
+        key=lambda definition: (
+            -definition.get("priority", 0.0),
+            definition["code"],
+        )
+    )
+    return candidates
+
+
 def _coverage_bbox_intersects(definition, bounding_box_wgs84):
     """Cheap pre-filter: does the provider's optional coverage overlap?"""
     coverage = definition.get("coverage_bbox")
@@ -387,6 +459,8 @@ def warp_vsicurl_sources_to_geotiff(
     destination_path,
     source_srs=None,
     source_nodata=None,
+    value_floor_m=-600.0,
+    gdal_configuration_options=None,
 ):
     """Mosaic + warp remote rasters to an EPSG:4326 float32 GeoTIFF window.
 
@@ -398,6 +472,16 @@ def warp_vsicurl_sources_to_geotiff(
     box's centre latitude.  Returns ``True`` on success, ``False`` on any
     GDAL failure (the caller records no-coverage).  A no-op returning
     ``False`` when GDAL is unavailable.
+
+    ``value_floor_m`` is the lowest value the post-warp sanitizer treats as
+    genuine data (spec section 2.3): terrestrial elevation providers keep
+    the default -600 m, while a bathymetry provider passes its own
+    ``value_floor_m`` (CUDEM Hawaii uses -11100 m) so measured seabed
+    depths are not mistaken for leaked fill values and discarded.
+
+    ``gdal_configuration_options`` are applied around the warp only (via
+    ``gdal.config_options``): credential-gated sources use it to pass
+    e.g. ``GDAL_HTTP_USERPWD`` without leaking it into global state.
     """
     if not has_gdal:
         return False
@@ -416,6 +500,13 @@ def warp_vsicurl_sources_to_geotiff(
         # ... and some carry an UNDECLARED fill value (Ireland's -99).
         srcNodata=source_nodata,
         dstSRS="EPSG:4326",
+        # Heights must pass through UNCHANGED in the source vertical
+        # datum (the provenance datum_note promises exactly that).
+        # Without -novshift, GDAL applies a geoid shift whenever a
+        # source declares a compound CRS -- Lantmateriet's COGs
+        # (EPSG:5845, SWEREF99 TM + RH2000 height) came out 23-36 m
+        # too high that way, ellipsoidal instead of orthometric.
+        options=["-novshift"],
         outputBounds=(west, south, east, north),
         xRes=x_resolution_deg,
         yRes=y_resolution_deg,
@@ -424,9 +515,17 @@ def warp_vsicurl_sources_to_geotiff(
         creationOptions=["COMPRESS=DEFLATE", "PREDICTOR=3"],
     )
     try:
-        dataset = gdal.Warp(
-            destination_path, list(vsicurl_inputs), options=warp_options
-        )
+        if gdal_configuration_options:
+            with gdal.config_options(gdal_configuration_options):
+                dataset = gdal.Warp(
+                    destination_path,
+                    list(vsicurl_inputs),
+                    options=warp_options,
+                )
+        else:
+            dataset = gdal.Warp(
+                destination_path, list(vsicurl_inputs), options=warp_options
+            )
     except Exception as error:
         UI.vprint(1, "   WARNING: elevation warp failed:", str(error))
         return False
@@ -437,11 +536,14 @@ def warp_vsicurl_sources_to_geotiff(
     # fill values straight through the warp as "valid elevation" (the
     # Dutch national service fills with float-max, some Irish campaign
     # tiles with -9999).  Terrestrial elevations live within
-    # -430..+8850 m; anything outside -600..+12000, or not finite, is
-    # garbage and becomes nodata here so it can never reach a bake.
-    # (Small negative fills like Ireland's -99 are PLAUSIBLE land
-    # heights and need the per-provider source_nodata key instead.)  Done on a fresh update handle
-    # after the warp result is flushed.
+    # -430..+8850 m; anything above +12000 or below ``value_floor_m``, or
+    # not finite, is garbage and becomes nodata here so it can never reach
+    # a bake.  The floor is per-call: terrestrial providers keep the -600 m
+    # default (small negative fills like Ireland's -99 are PLAUSIBLE land
+    # heights and need the per-provider source_nodata key instead), while
+    # bathymetry providers lower it (CUDEM Hawaii to -11100 m) so real
+    # seabed depths survive.  Done on a fresh update handle after the warp
+    # result is flushed.
     try:
         dataset = gdal.Open(destination_path, gdal.GA_Update)
         band = dataset.GetRasterBand(1)
@@ -450,7 +552,7 @@ def warp_vsicurl_sources_to_geotiff(
             garbage = (
                 ~numpy.isfinite(values)
                 | (values > 12000.0)
-                | (values < -600.0)
+                | (values < value_floor_m)
             )
             if garbage.any():
                 values[garbage] = -32768.0
@@ -478,6 +580,10 @@ class TnmCloudOptimizedGeoTiffStrategy:
     the requested resolution -- the full source tile (hundreds of megabytes)
     is never downloaded.
     """
+
+    # Windowed /vsicurl reader: gates whole-tile elevation-level overlay use
+    # (a whole tile costs only a decimated overview read, not a full campaign).
+    supports_wide_area = True
 
     def discover(self, definition, bounding_box_wgs84):
         import requests
@@ -564,6 +670,7 @@ class TnmCloudOptimizedGeoTiffStrategy:
             bounding_box_wgs84,
             target_resolution_m,
             destination_path,
+            value_floor_m=float(definition.get("value_floor_m", -600.0)),
         ):
             return None
 
@@ -719,6 +826,9 @@ class StacCloudOptimizedGeoTiffStrategy:
     tnm_cog, with zero change to the orchestration around it.
     """
 
+    # Windowed /vsicurl reader: eligible for whole-tile overlay fetches.
+    supports_wide_area = True
+
     def _search_url_and_body(self, definition, bounding_box_wgs84):
         (west, south, east, north) = bounding_box_wgs84
         template = definition.get("discovery_url_template", "")
@@ -801,8 +911,28 @@ class StacCloudOptimizedGeoTiffStrategy:
         target_resolution_m,
         destination_path,
     ):
+        import O4_Authenticated_Sessions as SESSIONS
+
         if not has_gdal:
             return None
+        # Credential-gated pixels (Sweden's Geotorget: the STAC search
+        # is anonymous but every Cloud-Optimized GeoTIFF read needs the
+        # account as HTTP Basic authentication, carried to GDAL through
+        # a warp-scoped configuration option).
+        gdal_configuration_options = None
+        if (
+            SESSIONS.credential_kind(definition)
+            == SESSIONS.CREDENTIAL_KIND_HTTP_BASIC
+            and definition.get("session_name")
+        ):
+            try:
+                session = SESSIONS.ensure_session(definition)
+            except SESSIONS.LoginError as error:
+                _warn_sign_in_needed_once(definition, error)
+                return None
+            gdal_configuration_options = {
+                "GDAL_HTTP_USERPWD": "%s:%s" % tuple(session.auth)
+            }
         items = self.discover(definition, bounding_box_wgs84)
         if not items:
             return None
@@ -829,6 +959,8 @@ class StacCloudOptimizedGeoTiffStrategy:
             bounding_box_wgs84,
             target_resolution_m,
             destination_path,
+            value_floor_m=float(definition.get("value_floor_m", -600.0)),
+            gdal_configuration_options=gdal_configuration_options,
         ):
             return None
         native_resolutions = [
@@ -851,6 +983,230 @@ class StacCloudOptimizedGeoTiffStrategy:
                 if native_resolutions
                 else definition.get("native_resolution_m")
             ),
+            "license": definition.get("license"),
+            "attribution": definition.get("attribution"),
+            "vertical_datum": definition.get("vertical_datum"),
+            "datum_note": (
+                "Elevations are in the source vertical datum; lidar is "
+                "treated as truth and is NOT shifted toward the base DEM."
+            ),
+            "fetch_date": datetime.date.today().isoformat(),
+            "bounding_box_wgs84": list(bounding_box_wgs84),
+            "resolution_m": target_resolution_m,
+        }
+
+
+# =====================================================================
+# Strategy: authenticated_token_search (signed-in token redemption)
+# =====================================================================
+# Providers whose ensure-session failed already this run: warn ONCE per
+# provider, not once per airport.
+_SIGN_IN_WARNED_PROVIDERS = set()
+
+
+def _warn_sign_in_needed_once(definition, error):
+    """Surface a LoginError loudly, once per provider per run."""
+    provider_code = definition.get("code")
+    if provider_code not in _SIGN_IN_WARNED_PROVIDERS:
+        _SIGN_IN_WARNED_PROVIDERS.add(provider_code)
+        UI.vprint(0, "   WARNING:", str(error))
+
+
+@register_access_strategy("authenticated_token_search")
+class AuthenticatedTokenSearchStrategy:
+    """OGC/STAC search whose asset downloads need a signed-in session.
+
+    The pattern (first seen at Portugal's Direcao-Geral do Territorio
+    download centre, live-verified 2026-07-16): the ``search_url``
+    endpoint is PUBLIC and its items' asset hrefs are short-lived
+    tokenized download URLs -- but redeeming one requires the account
+    session cookie, and answers an HTTP redirect to a presigned object-
+    storage URL.  The presigned URL itself is public and range-capable,
+    so the fetch ends in the same windowed ``/vsicurl`` warp as every
+    other Cloud-Optimized GeoTIFF strategy; whole source tiles are never
+    downloaded.
+
+    Sessions, cookies, and stored accounts are owned by
+    O4_Authenticated_Sessions (definition keys ``session_name``,
+    ``login_flow``, ``login_url``, ``session_probe_url``).  Without a
+    working sign-in the provider degrades to no-coverage with ONE loud
+    instruction, never a silent skip and never a failed build.
+
+    Tokens are minted fresh by the search and redeemed immediately --
+    tokens observed at the pilot service expire quickly and may be
+    single-use, so nothing tokenized is ever cached or reused.
+    """
+
+    # NOT wide-area eligible: a whole 1-degree tile over the pilot
+    # service would mean thousands of token redemptions per fetch (and
+    # the search limit would truncate the item list).  Airport insets
+    # need a few dozen items at most.
+    supports_wide_area = False
+
+    def discover(self, definition, bounding_box_wgs84):
+        import requests
+
+        if not _coverage_bbox_intersects(definition, bounding_box_wgs84):
+            return None
+        search_url = definition.get("search_url", "")
+        if not search_url:
+            return None
+        (west, south, east, north) = bounding_box_wgs84
+        body = {
+            "bbox": [west, south, east, north],
+            "limit": int(float(definition.get("search_limit", 200))),
+        }
+        collections = [
+            token.strip()
+            for token in str(definition.get("collections", "")).split(",")
+            if token.strip()
+        ]
+        if collections:
+            body["collections"] = collections
+        try:
+            response = requests.post(search_url, json=body, timeout=30)
+            if response.status_code != 200:
+                UI.vprint(
+                    1,
+                    "   WARNING: token search returned status",
+                    response.status_code,
+                    "for provider",
+                    definition.get("code"),
+                )
+                return None
+            payload = response.json()
+        except Exception as error:
+            UI.vprint(1, "   WARNING: token search failed:", str(error))
+            return None
+        items = StacCloudOptimizedGeoTiffStrategy._parse_search_payload(
+            payload
+        )
+        if items is not None and len(items) >= body["limit"]:
+            # No silent caps: a full page means the search may have
+            # truncated the item list for this window.
+            UI.vprint(
+                1,
+                "   WARNING: token search returned the full page of",
+                body["limit"],
+                "items for provider",
+                definition.get("code"),
+                "- coverage of this window may be incomplete.",
+            )
+        return items
+
+    @staticmethod
+    def _item_download_hrefs(items):
+        """Tokenized download hrefs of the items' data assets."""
+        hrefs = []
+        for item in items:
+            assets = item.get("assets")
+            if not isinstance(assets, dict):
+                continue
+            for asset in assets.values():
+                if not isinstance(asset, dict):
+                    continue
+                href = asset.get("href")
+                roles = asset.get("roles") or []
+                # A declared data role wins; the fallback (services that
+                # do not declare roles at all) must not grab a lone
+                # thumbnail or metadata asset by accident.
+                if href and (
+                    "data" in roles or (not roles and len(assets) == 1)
+                ):
+                    hrefs.append(href)
+                    break
+        return hrefs
+
+    @staticmethod
+    def _redeem_download_href(session, href):
+        """Turn one tokenized download URL into its presigned target.
+
+        The signed-in GET answers a redirect whose Location is the
+        presigned object-storage URL.  Anything else (200 would mean the
+        service streamed the file itself; an error status means the
+        token aged out) returns None and the item is skipped with a
+        warning by the caller.
+        """
+        try:
+            response = session.get(href, timeout=30, allow_redirects=False)
+        except Exception:
+            return None
+        if response.status_code not in (301, 302, 303, 307, 308):
+            return None
+        location = response.headers.get("Location", "")
+        if not location.lower().startswith(("http://", "https://")):
+            return None
+        return location
+
+    def fetch(
+        self,
+        definition,
+        bounding_box_wgs84,
+        target_resolution_m,
+        destination_path,
+    ):
+        import O4_Authenticated_Sessions as SESSIONS
+
+        if not has_gdal:
+            return None
+        items = self.discover(definition, bounding_box_wgs84)
+        if not items:
+            return None
+        try:
+            session = SESSIONS.ensure_session(definition)
+        except SESSIONS.LoginError as error:
+            _warn_sign_in_needed_once(definition, error)
+            return None
+        hrefs = self._item_download_hrefs(items)
+        presigned_urls = []
+        for href in hrefs:
+            presigned = self._redeem_download_href(session, href)
+            if presigned is None:
+                UI.vprint(
+                    1,
+                    "   WARNING: could not redeem a download token for",
+                    definition.get("code"),
+                    "- skipping one source tile.",
+                )
+                continue
+            presigned_urls.append(presigned)
+        if not presigned_urls:
+            return None
+        vsicurl_inputs = [
+            _stac_asset_href_to_vsicurl(url) for url in presigned_urls
+        ]
+        source_nodata = definition.get("source_nodata")
+        if not warp_vsicurl_sources_to_geotiff(
+            vsicurl_inputs,
+            bounding_box_wgs84,
+            target_resolution_m,
+            destination_path,
+            source_nodata=(
+                float(source_nodata) if source_nodata is not None else None
+            ),
+            value_floor_m=float(definition.get("value_floor_m", -600.0)),
+        ):
+            return None
+        if not _geotiff_has_valid_data(destination_path):
+            try:
+                os.remove(destination_path)
+            except OSError:
+                pass
+            return None
+        return {
+            "provider": definition.get("code"),
+            "access_strategy": definition.get("access_strategy"),
+            # Provenance records the item ids, NOT the redeemed URLs:
+            # presigned URLs carry signature query parameters and expire.
+            "source_ids": [
+                item.get("id") for item in items if item.get("id")
+            ],
+            "collections": [
+                token.strip()
+                for token in str(definition.get("collections", "")).split(",")
+                if token.strip()
+            ],
+            "native_resolution_m": definition.get("native_resolution_m"),
             "license": definition.get("license"),
             "attribution": definition.get("attribution"),
             "vertical_datum": definition.get("vertical_datum"),
@@ -893,6 +1249,45 @@ def _geotiff_has_valid_data(geotiff_path):
     return bool((values != nodata).any())
 
 
+def geotiff_is_constant_value(geotiff_path):
+    """Are ALL valid samples in the raster one single constant value?
+
+    A plausibility probe for coastline band cells.  Some national Web
+    Coverage Services answer requests beyond their true data extent with
+    a constant FILL instead of nodata (the Spanish PNOA endpoint serves
+    0.0 across the border over Portugal), so the raster passes both the
+    post-warp sentinel sanitizer (0.0 is a plausible height) and
+    :func:`_geotiff_has_valid_data` (nothing equals the nodata marker)
+    and would bake a sea-level plateau over foreign land.  Genuine warped
+    lidar is never bit-for-bit constant across a whole 0.1 degree cell,
+    while an all-water cell that IS legitimately constant loses nothing
+    by falling back to the base elevation source (which models the sea
+    anyway) -- so callers may safely treat a constant cell as
+    no-coverage.  Note the check is deliberately NOT "mostly zero":
+    genuine coastal cells hold large exactly-0.0 sea areas next to varied
+    land, so any zero-share threshold would reject real data.  Returns
+    False when the raster cannot be read or holds no valid sample (those
+    cases belong to :func:`_geotiff_has_valid_data`).
+    """
+    if not has_gdal:
+        return False
+    try:
+        dataset = gdal.Open(geotiff_path)
+        band = dataset.GetRasterBand(1)
+        nodata = band.GetNoDataValue()
+        values = band.ReadAsArray()
+    except Exception:
+        return False
+    if values is None:
+        return False
+    values = values.ravel()
+    if nodata is not None:
+        values = values[values != nodata]
+    if values.size == 0:
+        return False
+    return bool((values == values[0]).all())
+
+
 @register_access_strategy("wcs")
 class WcsStrategy:
     """National lidar terrain models served over OGC Web Coverage Service.
@@ -913,9 +1308,21 @@ class WcsStrategy:
     no-coverage negatives.
     """
 
-    def dataset_name(self, definition):
-        """The GDAL WCS driver dataset name for the definition."""
+    # Windowed GetCoverage reader: eligible for whole-tile overlay fetches.
+    supports_wide_area = True
+
+    def dataset_name(self, definition, api_key=None):
+        """The GDAL WCS driver dataset name for the definition.
+
+        A ``{api_key}`` placeholder in the service URL (credential-gated
+        services like Denmark's Datafordeler) is substituted when a key
+        is supplied and left literal otherwise -- discovery results and
+        provenance records use the literal form so the secret never
+        lands in a log or a sidecar file.
+        """
         service_url = definition["wcs_service_url"]
+        if api_key is not None:
+            service_url = service_url.replace("{api_key}", api_key)
         separator = "&" if "?" in service_url else "?"
         return (
             "WCS:"
@@ -939,14 +1346,24 @@ class WcsStrategy:
         target_resolution_m,
         destination_path,
     ):
+        import O4_Authenticated_Sessions as SESSIONS
+
         if not has_gdal:
             return None
-        dataset_name = self.dataset_name(definition)
+        api_key = None
+        if "{api_key}" in str(definition.get("wcs_service_url", "")):
+            try:
+                api_key = SESSIONS.ensure_api_key(definition)
+            except SESSIONS.LoginError as error:
+                _warn_sign_in_needed_once(definition, error)
+                return None
+        dataset_name = self.dataset_name(definition, api_key)
         if not warp_vsicurl_sources_to_geotiff(
             [dataset_name],
             bounding_box_wgs84,
             target_resolution_m,
             destination_path,
+            value_floor_m=float(definition.get("value_floor_m", -600.0)),
         ):
             return None
         if not _geotiff_has_valid_data(destination_path):
@@ -958,7 +1375,10 @@ class WcsStrategy:
         return {
             "provider": definition.get("code"),
             "access_strategy": definition.get("access_strategy"),
-            "source_urls": [dataset_name],
+            # The literal form: any {api_key} placeholder stays a
+            # placeholder so the secret never reaches the provenance
+            # sidecar.
+            "source_urls": [self.dataset_name(definition)],
             "wcs_coverage": definition.get("wcs_coverage"),
             "native_resolution_m": definition.get("native_resolution_m"),
             "license": definition.get("license"),
@@ -1048,7 +1468,19 @@ class StaticStacCatalogStrategy:
         ]
 
     def _ensure_collections(self, definition, index, session):
-        """Fill index["collections"] = {url: {bbox, items}} once."""
+        """Fill index["collections"] = {url: {bbox, items}} once.
+
+        Two catalog shapes are handled.  The New Zealand shape is a tree:
+        the root links ~200 survey COLLECTIONS (``rel="child"``), each of
+        which carries its own spatial extent and a list of item links.
+        The NOAA NCEI CUDEM shape (spec section 2.3) has NO child links --
+        its tiles hang directly off the root as ``rel="item"`` links -- so
+        when the catalog has zero child links but at least one item link we
+        synthesize a single pseudo-collection keyed by the catalog URL,
+        whose bounding box is the provider's ``coverage_bbox`` (there is no
+        per-collection extent to read) and whose items are the root item
+        hrefs.  The tree path below is left byte-identical.
+        """
         import urllib.parse
 
         if index.get("collections") is not None:
@@ -1062,6 +1494,36 @@ class StaticStacCatalogStrategy:
             for link in catalog.get("links", [])
             if link.get("rel") == "child" and link.get("href")
         ]
+        if not children:
+            root_item_hrefs = [
+                link["href"]
+                for link in catalog.get("links", [])
+                if link.get("rel") == "item" and link.get("href")
+            ]
+            if root_item_hrefs:
+                # Reuse the coverage_bbox parser -- a definition parsed from
+                # a .elv file already holds a (west, south, east, north)
+                # tuple, but one assembled by hand in a test may still be a
+                # raw "W,S,E,N" string.
+                coverage = definition.get("coverage_bbox")
+                if not isinstance(coverage, (list, tuple)):
+                    coverage = _parse_bounding_box(coverage)
+                if coverage:
+                    UI.vprint(
+                        1,
+                        "    Indexing the",
+                        definition["code"],
+                        "elevation catalog (root-item catalog,",
+                        len(root_item_hrefs),
+                        "tiles, once per install).",
+                    )
+                    index["collections"] = {
+                        catalog_url: {
+                            "bbox": list(coverage),
+                            "items": root_item_hrefs,
+                        }
+                    }
+                    return
         must_contain = str(definition.get("collection_filter", ""))
         if must_contain:
             children = [
@@ -1307,6 +1769,7 @@ class StaticStacCatalogStrategy:
             bounding_box_wgs84,
             target_resolution_m,
             destination_path,
+            value_floor_m=float(definition.get("value_floor_m", -600.0)),
         )
         for temporary_path in temporary_paths:
             try:
@@ -1341,6 +1804,310 @@ class StaticStacCatalogStrategy:
             "datum_note": (
                 "Elevations are in the source vertical datum; lidar is "
                 "treated as truth and is NOT shifted toward the base DEM."
+            ),
+            "fetch_date": datetime.date.today().isoformat(),
+            "bounding_box_wgs84": list(bounding_box_wgs84),
+            "resolution_m": target_resolution_m,
+        }
+
+
+# =====================================================================
+# Strategy: coordinate_named_url_list (plain URL list, filename = location)
+# =====================================================================
+import re as _re
+
+# The NOAA NCEI CUDEM filename tile-locator token.  Grammar (spec / this
+# file's docstring): a filename contains one pair
+# ``_<lat><sep><lon>_`` where the LATITUDE token is
+# ``[ns]DDxQQ`` and the LONGITUDE token is ``[ew]DDDxQQ`` -- two-digit
+# whole degrees of latitude, three-digit whole degrees of longitude, a
+# decimal separator, and a two-digit hundredths part in {00,25,50,75}.
+# The separator is written both lowercase ``x`` (n39x00) AND uppercase
+# ``X`` (n25X75, the 2018 Florida campaign): the live CONUS list mixes
+# both, so the pattern accepts either (a spec-reality note recorded in the
+# strategy docstring).
+_CUDEM_TILE_TOKEN = _re.compile(
+    r"_([ns])(\d{2})[xX](\d{2})_([ew])(\d{3})[xX](\d{2})_"
+)
+
+
+@register_access_strategy("coral_atlas_library")
+class CoralAtlasLibraryStrategy:
+    """Locally downloaded Allen Coral Atlas packages as a provider.
+
+    The Atlas's 10 m reef bathymetry is account-gated (free), so it is
+    served from the user-populated library under
+    ``Elevation_data/AllenCoralAtlas/`` instead of a live URL — see
+    ``O4_Coral_Atlas`` for the library, the unit conversion (positive
+    centimetres -> negative metres) and the guided in-app fetch.
+    Discovery consults only the local index: a tile has coverage exactly
+    when the user has downloaded a package that overlaps it.
+    """
+
+    supports_wide_area = True
+
+    def discover(self, definition, bounding_box_wgs84):
+        if not _coverage_bbox_intersects(definition, bounding_box_wgs84):
+            return None
+        import O4_Coral_Atlas as CORAL
+
+        return CORAL.entries_intersecting(bounding_box_wgs84) or None
+
+    def fetch(
+        self,
+        definition,
+        bounding_box_wgs84,
+        target_resolution_m,
+        destination_path,
+    ):
+        if not has_gdal:
+            return None
+        sources = self.discover(definition, bounding_box_wgs84)
+        if not sources:
+            return None
+        import O4_Coral_Atlas as CORAL
+
+        if not CORAL.fetch_window_to_geotiff(
+            sources,
+            bounding_box_wgs84,
+            target_resolution_m,
+            destination_path,
+        ):
+            return None
+        return {
+            "provider": definition.get("code"),
+            "access_strategy": definition.get("access_strategy"),
+            "source_urls": sources,
+            "source_ids": [os.path.basename(s) for s in sources],
+            "project_titles": ["Allen Coral Atlas bathymetry"],
+            "publication_date": "",
+            "license": definition.get("license"),
+            "attribution": definition.get("attribution"),
+            "vertical_datum": definition.get("vertical_datum"),
+            "datum_note": (
+                "Satellite-derived depths below the sea surface;"
+                " converted from positive centimetres to negative metres."
+            ),
+            "fetch_date": datetime.date.today().isoformat(),
+            "bounding_box_wgs84": list(bounding_box_wgs84),
+            "resolution_m": target_resolution_m,
+        }
+
+
+@register_access_strategy("coordinate_named_url_list")
+class CoordinateNamedUrlListStrategy:
+    """Cloud-Optimized GeoTIFFs indexed by a plain-text list of URLs.
+
+    NOAA NCEI publishes several CUDEM regions (CONUS coasts, Guam) NOT as a
+    STAC catalog but as a single ``urllist<id>.txt`` file: one Cloud-
+    Optimized GeoTIFF URL per line, the tile's location encoded in the
+    filename.  There is no per-tile JSON to walk (unlike ``static_stac``),
+    so discovery fetches that ONE text file once, parses every filename's
+    coordinate token into a bounding box, and memoises the result in a
+    per-provider index under ``Elevation_data/`` -- the first airport in a
+    region pays the single small download, every later airport and every
+    rebuild reads the index.  Fetch is the shared windowed ``/vsicurl``
+    warp core (only the requested window of each remote tile is read).
+
+    Filename grammar and its coordinate semantics (validated 2026-07-16
+    against the NCEI STAC oracles -- do NOT change without re-validating):
+
+      * The token pair is ``_[ns]DDxQQ_[ew]DDDxQQ_`` where ``x`` (or its
+        uppercase ``X`` variant, both live in the CONUS list) is the
+        decimal separator and ``QQ`` is hundredths of a degree in
+        {00,25,50,75}.
+      * The LATITUDE token gives the tile's NORTH edge: ``n`` = positive
+        latitude, ``s`` = negative.  Verified against Hawaii item
+        ``ncei19_n22x00_w159x50`` (bbox north 22.0002) and, for the
+        southern hemisphere, American Samoa items
+        ``ncei19_s14x25_w169x75`` (bbox north -14.2498) and
+        ``ncei19_s14x00_w169x50`` (bbox north -13.9998): ``s14x25`` is the
+        NORTH edge at -14.25, not the south edge.
+      * The LONGITUDE token gives the tile's WEST edge: ``w`` = negative
+        longitude, ``e`` = positive (Guam ``ncei19_n13x25_e144x50`` ->
+        west 144.50).
+      * Every tile is 0.25 deg x 0.25 deg, so ``east = west + 0.25`` and
+        ``south = north - 0.25``.
+
+    Lines whose filename carries no such token (the list also holds
+    shapefile sidecars, metadata ``.xml``/``.json``, ``.zip`` archives and
+    the list file itself) are skipped, reported once as a summary count --
+    never one warning per line.
+    """
+
+    # Windowed /vsicurl reader: eligible for whole-tile overlay fetches.
+    supports_wide_area = True
+
+    # 0.25 deg tile edge, and the padding applied to every stored bbox so a
+    # query that grazes a tile boundary still matches (mirrors the oracle
+    # bboxes' own ~0.0002 deg overlap).
+    TILE_DEGREES = 0.25
+    BBOX_PADDING_DEGREES = 0.001
+
+    @staticmethod
+    def parse_filename_bbox(filename):
+        """Parse a CUDEM tile filename into ``[west, south, east, north]``.
+
+        Returns the UNPADDED tile bounding box, or ``None`` when the
+        filename carries no ``_[ns]DDxQQ_[ew]DDDxQQ_`` locator token.  See
+        the class docstring for the validated north-edge / west-edge
+        coordinate convention.
+        """
+        match = _CUDEM_TILE_TOKEN.search(filename)
+        if match is None:
+            return None
+        (
+            latitude_hemisphere,
+            latitude_degrees,
+            latitude_hundredths,
+            longitude_hemisphere,
+            longitude_degrees,
+            longitude_hundredths,
+        ) = match.groups()
+        latitude = int(latitude_degrees) + int(latitude_hundredths) / 100.0
+        longitude = int(longitude_degrees) + int(longitude_hundredths) / 100.0
+        north = latitude if latitude_hemisphere == "n" else -latitude
+        west = longitude if longitude_hemisphere == "e" else -longitude
+        tile = CoordinateNamedUrlListStrategy.TILE_DEGREES
+        return [west, north - tile, west + tile, north]
+
+    def index_path(self, definition):
+        return os.path.join(
+            FNAMES.Elevation_dir,
+            definition["code"].lower() + "_url_list_index.json",
+        )
+
+    def _load_index(self, definition):
+        try:
+            with open(self.index_path(definition), "r") as handle:
+                return json.load(handle)
+        except (OSError, ValueError):
+            return {}
+
+    def _save_index(self, definition, index):
+        index_file = self.index_path(definition)
+        os.makedirs(os.path.dirname(index_file), exist_ok=True)
+        with open(index_file, "w") as handle:
+            json.dump(index, handle)
+
+    def _ensure_entries(self, definition, index):
+        """Fill ``index["entries"]`` from the URL list once (memoised).
+
+        ``entries`` is a list of ``{"href": url, "bbox": padded box}``.
+        The single text-file download happens only when the index has no
+        ``entries`` key yet; a later call (this run or a rebuild) reads the
+        saved index and performs ZERO HTTP.
+        """
+        import requests
+
+        if index.get("entries") is not None:
+            return
+        url_list_url = definition.get("url_list_url")
+        if not url_list_url:
+            return
+        try:
+            response = requests.get(url_list_url, timeout=60)
+        except Exception as error:
+            UI.vprint(
+                1, "   WARNING: URL-list request failed:", str(error)
+            )
+            return
+        if response.status_code != 200:
+            UI.vprint(
+                1,
+                "   WARNING: URL-list request returned status",
+                response.status_code,
+            )
+            return
+        entries = []
+        skipped = 0
+        padding = self.BBOX_PADDING_DEGREES
+        for line in response.text.splitlines():
+            url = line.strip()
+            if not url:
+                continue
+            filename = url.rsplit("/", 1)[-1]
+            box = self.parse_filename_bbox(filename)
+            if box is None:
+                skipped += 1
+                continue
+            entries.append(
+                {
+                    "href": url,
+                    "bbox": [
+                        box[0] - padding,
+                        box[1] - padding,
+                        box[2] + padding,
+                        box[3] + padding,
+                    ],
+                }
+            )
+        UI.vprint(
+            1,
+            "    Indexing the",
+            definition.get("code"),
+            "elevation URL list (",
+            len(entries),
+            "coordinate-named tiles,",
+            skipped,
+            "non-tile lines skipped, once per install).",
+        )
+        index["entries"] = entries
+
+    def discover(self, definition, bounding_box_wgs84):
+        if not _coverage_bbox_intersects(definition, bounding_box_wgs84):
+            return None
+        index = self._load_index(definition)
+        self._ensure_entries(definition, index)
+        entries = index.get("entries")
+        if not entries:
+            return None
+        self._save_index(definition, index)
+        matched = [
+            entry
+            for entry in entries
+            if _bounding_boxes_intersect(entry["bbox"], bounding_box_wgs84)
+        ]
+        return matched or None
+
+    def fetch(
+        self,
+        definition,
+        bounding_box_wgs84,
+        target_resolution_m,
+        destination_path,
+    ):
+        if not has_gdal:
+            return None
+        sources = self.discover(definition, bounding_box_wgs84)
+        if not sources:
+            return None
+        vsicurl_inputs = ["/vsicurl/" + entry["href"] for entry in sources]
+        if not warp_vsicurl_sources_to_geotiff(
+            vsicurl_inputs,
+            bounding_box_wgs84,
+            target_resolution_m,
+            destination_path,
+            value_floor_m=float(definition.get("value_floor_m", -600.0)),
+        ):
+            return None
+        tile_stems = [
+            entry["href"].rsplit("/", 1)[-1].rsplit(".", 1)[0]
+            for entry in sources
+        ]
+        return {
+            "provider": definition.get("code"),
+            "access_strategy": definition.get("access_strategy"),
+            "source_urls": [entry["href"] for entry in sources],
+            "source_ids": tile_stems,
+            "project_titles": tile_stems,
+            "license": definition.get("license"),
+            "attribution": definition.get("attribution"),
+            "vertical_datum": definition.get("vertical_datum"),
+            "datum_note": (
+                "Depths are in the source local tidal datum; a bathymetry "
+                "source is used only for water rendering, never for terrain "
+                "grading."
             ),
             "fetch_date": datetime.date.today().isoformat(),
             "bounding_box_wgs84": list(bounding_box_wgs84),
@@ -1539,6 +2306,7 @@ class XyzTextTileStrategy:
             bounding_box_wgs84,
             target_resolution_m,
             destination_path,
+            value_floor_m=float(definition.get("value_floor_m", -600.0)),
         )
         for path in (primary_path, fallback_path):
             if path:
@@ -1805,6 +2573,7 @@ class ArcgisLercTileStrategy:
             bounding_box_wgs84,
             target_resolution_m,
             destination_path,
+            value_floor_m=float(definition.get("value_floor_m", -600.0)),
         )
         try:
             os.remove(mosaic_path)
@@ -1853,6 +2622,9 @@ class DirectCogStrategy:
     airports into cached no-coverage negatives.
     """
 
+    # Windowed /vsicurl reader: eligible for whole-tile overlay fetches.
+    supports_wide_area = True
+
     def _vsicurl_inputs(self, definition):
         return [
             _stac_asset_href_to_vsicurl(url.strip())
@@ -1883,6 +2655,7 @@ class DirectCogStrategy:
             bounding_box_wgs84,
             target_resolution_m,
             destination_path,
+            value_floor_m=float(definition.get("value_floor_m", -600.0)),
         ):
             return None
         if not _geotiff_has_valid_data(destination_path):
@@ -1992,6 +2765,7 @@ class WcsKvpStrategy:
             bounding_box_wgs84,
             target_resolution_m,
             destination_path,
+            value_floor_m=float(definition.get("value_floor_m", -600.0)),
         )
         try:
             os.remove(scratch_path)
@@ -2384,6 +3158,7 @@ class TileGridHttpStrategy:
             bounding_box_wgs84,
             target_resolution_m,
             destination_path,
+            value_floor_m=float(definition.get("value_floor_m", -600.0)),
             source_srs=(
                 "EPSG:" + str(int(float(source_srs))) if source_srs else None
             ),
@@ -2463,6 +3238,10 @@ class GeojsonTileIndexStrategy:
     ranged reads).
     """
 
+    # Windowed /vsicurl reader (inherited by os_grid_bucket): eligible for
+    # whole-tile overlay fetches.
+    supports_wide_area = True
+
     def index_path(self, definition):
         return os.path.join(
             FNAMES.Elevation_dir,
@@ -2536,6 +3315,7 @@ class GeojsonTileIndexStrategy:
             bounding_box_wgs84,
             target_resolution_m,
             destination_path,
+            value_floor_m=float(definition.get("value_floor_m", -600.0)),
         ):
             return None
         if not _geotiff_has_valid_data(destination_path):
@@ -2795,6 +3575,7 @@ class ArcgisFeatureTileStrategy:
             bounding_box_wgs84,
             target_resolution_m,
             destination_path,
+            value_floor_m=float(definition.get("value_floor_m", -600.0)),
         )
         for scratch_path in scratch_paths:
             try:
@@ -3101,6 +3882,7 @@ class WfsTileIndexStrategy:
             bounding_box_wgs84,
             target_resolution_m,
             destination_path,
+            value_floor_m=float(definition.get("value_floor_m", -600.0)),
         )
         for temporary_path in temporary_paths:
             try:
@@ -3465,6 +4247,7 @@ class XyzArchiveDropStrategy:
             bounding_box_wgs84,
             target_resolution_m,
             destination_path,
+            value_floor_m=float(definition.get("value_floor_m", -600.0)),
         ):
             return None
         if not _geotiff_has_valid_data(destination_path):
@@ -4610,8 +5393,10 @@ def parse_working_grid_arc_seconds(value):
     """Parse the ``working_grid_arc_seconds`` config into a decision.
 
     Returns ``"auto"`` for the automatic rule, or an integer densification
-    FACTOR (1, 2 or 3) for an explicit pin.  Accepts ``"1"``, ``"1/2"``,
-    ``"0.5"``, ``"1/3"`` and friends; an unrecognised value falls back to
+    FACTOR (1, 2, 3, 6 or 9) for an explicit pin.  Accepts ``"1"``, ``"1/2"``,
+    ``"0.5"``, ``"1/3"``, the finer ``"1/6"``/``"6"`` and ``"1/9"``/``"9"``
+    pins (reachable only through an explicit pin or a numeric
+    ``elevation_level``), and friends; an unrecognised value falls back to
     ``"auto"`` (conservative -- the automatic rule keeps 1 arc-second when
     no inset covers the tile).
     """
@@ -4624,13 +5409,21 @@ def parse_working_grid_arc_seconds(value):
         return 2
     if text in ("1/3", "3"):
         return 3
-    # A bare fraction "a/b" -> round(b/a) as the factor (1 arc-second / n).
+    if text in ("1/6", "6"):
+        return 6
+    if text in ("1/9", "9"):
+        return 9
+    # A bare fraction "a/b" -> snap b/a to the nearest allowed factor.
     if "/" in text:
         try:
             numerator, denominator = text.split("/", 1)
             arc_seconds = float(numerator) / float(denominator)
             if arc_seconds > 0:
-                return max(1, min(3, int(round(1.0 / arc_seconds))))
+                factor = 1.0 / arc_seconds
+                return min(
+                    (1, 2, 3, 6, 9),
+                    key=lambda candidate: (abs(candidate - factor), candidate),
+                )
         except (TypeError, ValueError, ZeroDivisionError):
             pass
     return "auto"
@@ -4914,7 +5707,56 @@ def _base_geometry_of_dem(dem):
 
 
 def resolve_working_grid_factor(tile, base_dem):
-    """Choose the working-grid densification factor for a tile (1, 2 or 3).
+    """Choose the working-grid densification factor for a tile.
+
+    Returns the historic airport-inset decision (1, 2 or 3) RAISED, never
+    lowered, by any numeric ``elevation_level`` override:
+    ``max(historic_factor, level_factor)`` (spec section 3.2).  An explicit
+    non-auto ``working_grid_arc_seconds`` pin still wins outright, and when
+    ``elevation_level`` is auto/invalid the return is behaviourally
+    IDENTICAL to the historic decision (the byte-inert auto path).
+    """
+    historic = _historic_working_grid_factor(tile, base_dem)
+    configured = parse_working_grid_arc_seconds(
+        getattr(tile, "working_grid_arc_seconds", "auto")
+    )
+    if configured != "auto":
+        # An explicit working-grid pin governs the grid outright; the
+        # elevation-level override never overrules a user pin.
+        return historic
+    # Lazy import keeps both directions of the O4_Elevation_Level <-> this
+    # module dependency lazy (that module lazily imports this one too).
+    import O4_Elevation_Level as ELEVATION_LEVEL
+
+    raw_level_value = getattr(tile, "elevation_level", "auto")
+    if ELEVATION_LEVEL.is_coastline_mode(raw_level_value):
+        # "Auto + coastline": the factor comes from the band stamp written
+        # by ensure_coastline_band (disk-state-driven, so both build steps
+        # agree; 1 while no band has been fetched -> historic unchanged).
+        if not ELEVATION_LEVEL.has_gdal:
+            return historic
+        return max(historic, ELEVATION_LEVEL.coastline_grid_factor(tile))
+    level = ELEVATION_LEVEL.parse_elevation_level(raw_level_value)
+    if level is None or not ELEVATION_LEVEL.has_gdal:
+        return historic
+    if getattr(tile, "custom_dem", ""):
+        # The user's pinned raster is trusted to carry the finer detail, so
+        # the grid is densified to the full level factor, uncapped.
+        level_factor = ELEVATION_LEVEL.LEVEL_GRID_FACTORS[level]
+    else:
+        level_factor = ELEVATION_LEVEL.grid_factor_for_level(
+            level,
+            ELEVATION_LEVEL.finest_wide_area_resolution_m(
+                tile.lat,
+                tile.lon,
+                getattr(tile, "airport_elevation_providers", "auto"),
+            ),
+        )
+    return max(historic, level_factor)
+
+
+def _historic_working_grid_factor(tile, base_dem):
+    """The pre-elevation-level working-grid decision (1, 2 or 3).
 
     The decision is deterministic and disk-state-driven (both build steps
     call it on the same cached insets and the same base geometry), so
@@ -5634,7 +6476,25 @@ def ensure_base_tile(source, lat, lon, verbose=True):
     if strategy_factory is None:
         UI.vprint(1, "   ERROR: Unknown elevation source.")
         return 0
-    return strategy_factory().ensure_tile(definition, lat, lon, verbose)
+    # Serialise the download-if-missing critical section across concurrent
+    # tile-build processes: adjacent tiles fetch an overlapping three-by-three
+    # neighbourhood and would otherwise race to download the SAME base file
+    # into this shared cache (docs/specs/parallel-tile-builds.md section 3.5).
+    # The lock is keyed per (base definition code, latitude, longitude) inside
+    # the tile's Elevation_data block directory; only the ``.lock`` sibling is
+    # created, so the lock target file itself need not exist.
+    lock_target = os.path.join(
+        FNAMES.Elevation_dir,
+        FNAMES.round_latlon(lat, lon),
+        ".lock_" + definition["code"] + "_" + FNAMES.hem_latlon(lat, lon),
+    )
+    os.makedirs(os.path.dirname(lock_target), exist_ok=True)
+    # The double-checked-locking re-check is inherent: every strategy's
+    # ensure_tile is a no-op that recycles the cached tile when it is already
+    # present, so a waiter that blocked until the first downloader finished
+    # simply finds the file cached and returns without re-downloading.
+    with O4_File_Lock.hold_file_lock(lock_target):
+        return strategy_factory().ensure_tile(definition, lat, lon, verbose)
 
 
 # =====================================================================
@@ -5739,6 +6599,11 @@ def _finest_automatic_resolution_m(lat, lon):
     finest = None
     for definition in elevation_providers_dict.values():
         if not definition.get("enabled", True):
+            continue
+        # Bathymetry providers are not terrain sources (spec section 2.1);
+        # their resolution must never inform the "better elevation is
+        # available" comparison.
+        if definition.get("role") == ROLE_BATHYMETRY:
             continue
         strategy_factory = ACCESS_STRATEGIES.get(
             definition.get("access_strategy")

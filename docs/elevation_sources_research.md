@@ -192,8 +192,15 @@ Shipped: Uruguay (national), Espirito Santo, Curitiba, Pernambuco
 (drop).  Confirmed but not integrable anonymously: Mexico INEGI 5 m /
 1.5 m lidar (JavaScript-driven downloads — headless-browser only),
 Argentina IGN 5 m (form-bound, migration outage through late 2025,
-partial coverage), Ecuador SIGTIERRAS 3-5 m (login-gated, host down),
-Bogota 0.5 m (token-gated AND non-commercial licensed), Costa Rica
+partial coverage), Ecuador SIGTIERRAS 3-5 m MDT (2026-07-16 UPDATE:
+the sigtierras.gob.ec host is now an info-only shell; the actual data
+moved to the MAG geoportal.agricultura.gob.ec "Gestor de Descarga de
+Informacion" -- an interactive login-gated download manager, ~88%
+national coverage, cantonal-mosaic/grid downloads, NOT a per-airport
+API or STAC.  Registration requires an Ecuadorian national ID number,
+so no anonymous or foreigner account path -- would be a manual
+drop-folder source at best), Bogota 0.5 m (token-gated AND
+non-commercial licensed), Costa Rica
 SNIT (JS-injected endpoints, server 502 at probe time — worth a
 browser follow-up), Brasilia (1 m contour vectors only).  Nothing
 open: Chile (12.5 m radar DSM only), Peru, Panama, Guatemala,

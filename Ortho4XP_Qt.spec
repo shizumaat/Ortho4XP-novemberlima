@@ -51,6 +51,11 @@ def get_system_proj_db():
 system_proj_dir = get_system_proj_db()
 proj_dest = os.path.join("pyproj", "proj_dir", "share", "proj")
 
+# Single source of truth for the app version: src/O4_Version.py
+# (parsed textually — spec files should not import project modules).
+with open(os.path.join("src", "O4_Version.py"), encoding="utf-8") as f:
+    o4_version = f.read().split("=", 1)[1].strip().strip("'\"")
+
 a = Analysis(
     ['Ortho4XP_Qt.py'],
     pathex=['src'],
@@ -67,7 +72,17 @@ a = Analysis(
         ('overpass_servers.txt',  './Ortho4XP_Data/'),
         (os.path.join(system_proj_dir, "proj.db"), proj_dest),
     ],
-    hiddenimports=collect_submodules('PIL'),
+    hiddenimports=collect_submodules('PIL') + [
+        # keyring picks its backend through entry points, which PyInstaller
+        # does not follow — name every platform backend explicitly so the
+        # frozen app can reach the secret store (O4_Authenticated_Sessions).
+        'keyring.backends.macOS',
+        'keyring.backends.Windows',
+        'keyring.backends.SecretService',
+        'keyring.backends.kwallet',
+        'keyring.backends.chainer',
+        'keyring.backends.fail',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -87,9 +102,16 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    [],
+    # hash_seed=0: the bootloader starts the embedded interpreter with a
+    # pinned string-hash seed (same effect as PYTHONHASHSEED=0, which the
+    # Finder-launched .app never receives from a shell).  Deterministic
+    # builds are primarily guaranteed by source-level ordering pins in
+    # auto_patch; this is defense in depth for the packaged application.
+    [('hash_seed=0', None, 'OPTION')],
     exclude_binaries=True,
     name='Ortho4XP_Qt',
+    icon=os.path.join('Utils', 'icons', 'Ortho4XP.ico')
+    if os.name == 'nt' else None,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -115,12 +137,13 @@ if sys.platform == 'darwin':
     app = BUNDLE(
         coll,
         name='Ortho4XP.app',
-        icon=None,
+        icon=os.path.join('Utils', 'icons', 'Ortho4XP.icns'),
         bundle_identifier='org.ortho4xp.qt',
         info_plist={
             'CFBundleName': 'Ortho4XP',
             'CFBundleDisplayName': 'Ortho4XP',
-            'CFBundleShortVersionString': '1.40',
+            'CFBundleShortVersionString': o4_version,
+            'CFBundleVersion': o4_version,
             'NSHighResolutionCapable': True,
             'NSRequiresAquaSystemAppearance': False,  # follow dark mode
         },

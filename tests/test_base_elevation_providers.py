@@ -114,6 +114,27 @@ def test_shipped_definitions_parse(shipped_registry):
         "IRELAND1M",
         "WALLONIA1M",
         "PORTUGAL2M",
+        "PORTUGAL50CM",
+        "DENMARK40CM",
+        "SWEDEN1M",
+        "CUDEMHAWAII",
+        "CUDEMPUERTORICO",
+        "CUDEMUSVI",
+        "CUDEMCNMI",
+        "CUDEMAMERICANSAMOA",
+        "CUDEMCONUS",
+        "CUDEMCONUSTHIRD",
+        "CUDEMGUAM",
+        "EMODNETBATHYMETRY",
+        "GEBCO2024",
+        "CORALATLAS",
+        "SCOTLANDTIDAL",
+        "LOWERSAXONYTIDAL",
+        "SCHLESWIGHOLSTEINTIDAL",
+        "HRDEMTIDAL",
+        "NEWZEALANDTIDAL",
+        "FRANCETIDAL",
+        "PORTUGALTIDAL",
     }
     for code in (
         "VIEWFINDER1",
@@ -198,10 +219,29 @@ def test_shipped_definitions_parse(shipped_registry):
         shipped_registry["IRELAND1M"]["access_strategy"]
         == "arcgis_feature_tiles"
     )
-    for code in ("WALLONIA1M", "PORTUGAL2M"):
+    assert (
+        shipped_registry["WALLONIA1M"]["access_strategy"]
+        == "xyz_archive_drop"
+    )
+    # The account-session wave (2026-07-16): Portugal's DGT collections
+    # download automatically over the shared signed-in session (the 2 m
+    # provider's drop folder is superseded), Denmark's national height
+    # model needs a Datafordeler API key, Sweden's Lantmateriet pixels
+    # need a Geotorget account as HTTP Basic authentication.
+    for code in ("PORTUGAL50CM", "PORTUGAL2M"):
         assert (
-            shipped_registry[code]["access_strategy"] == "xyz_archive_drop"
+            shipped_registry[code]["access_strategy"]
+            == "authenticated_token_search"
         )
+        assert shipped_registry[code]["session_name"] == "dgterritorio"
+        assert shipped_registry[code]["registration_url"]
+    assert shipped_registry["DENMARK40CM"]["access_strategy"] == "wcs"
+    assert shipped_registry["DENMARK40CM"]["credential_kind"] == "api_key"
+    assert "{api_key}" in shipped_registry["DENMARK40CM"]["wcs_service_url"]
+    assert shipped_registry["DENMARK40CM"]["registration_url"]
+    assert shipped_registry["SWEDEN1M"]["access_strategy"] == "stac"
+    assert shipped_registry["SWEDEN1M"]["credential_kind"] == "http_basic"
+    assert shipped_registry["SWEDEN1M"]["registration_url"]
     # Scotland's campaign lidar bucket (finest-wins overlap ordering).
     assert (
         shipped_registry["SCOTLAND50CM"]["access_strategy"]
